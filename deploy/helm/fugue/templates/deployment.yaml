@@ -41,6 +41,14 @@ spec:
               value: ":8080"
             - name: FUGUE_STORE_PATH
               value: /var/lib/fugue/store.json
+            - name: FUGUE_APP_BASE_DOMAIN
+              value: {{ .Values.api.appBaseDomain | quote }}
+            - name: FUGUE_API_PUBLIC_DOMAIN
+              value: {{ .Values.api.apiPublicDomain | quote }}
+            - name: FUGUE_REGISTRY_PUSH_BASE
+              value: {{ .Values.api.registryPushBase | quote }}
+            - name: FUGUE_IMPORT_WORK_DIR
+              value: {{ .Values.api.importWorkDir | quote }}
             - name: FUGUE_BOOTSTRAP_ADMIN_KEY
               valueFrom:
                 secretKeyRef:

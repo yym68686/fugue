@@ -1,0 +1,339 @@
+package sourceimport
+
+import (
+	"archive/tar"
+	"context"
+	"fmt"
+	"io"
+	"io/fs"
+	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"fugue/internal/model"
+
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/tarball"
+)
+
+const staticSiteBaseImage = "index.docker.io/library/caddy:2.10.2-alpine"
+
+type Importer struct {
+	WorkDir string
+	Logger  *log.Logger
+}
+
+type GitHubImportRequest struct {
+	RepoURL          string
+	Branch           string
+	SourceDir        string
+	RegistryPushBase string
+	ImageRepository  string
+}
+
+type GitHubImportResult struct {
+	RepoOwner      string
+	RepoName       string
+	Branch         string
+	CommitSHA      string
+	SourceDir      string
+	BuildStrategy  string
+	ImageRef       string
+	DefaultAppName string
+}
+
+func NewImporter(workDir string, logger *log.Logger) *Importer {
+	if logger == nil {
+		logger = log.Default()
+	}
+	if strings.TrimSpace(workDir) == "" {
+		workDir = "./data/import"
+	}
+	return &Importer{
+		WorkDir: workDir,
+		Logger:  logger,
+	}
+}
+
+func (i *Importer) ImportPublicGitHubStaticSite(ctx context.Context, req GitHubImportRequest) (GitHubImportResult, error) {
+	owner, repo, err := parseGitHubRepoURL(req.RepoURL)
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
+	if strings.TrimSpace(req.RegistryPushBase) == "" {
+		return GitHubImportResult{}, fmt.Errorf("registry push base is empty")
+	}
+
+	if err := os.MkdirAll(i.WorkDir, 0o755); err != nil {
+		return GitHubImportResult{}, fmt.Errorf("create import work dir: %w", err)
+	}
+
+	repoDir, err := os.MkdirTemp(i.WorkDir, "github-import-*")
+	if err != nil {
+		return GitHubImportResult{}, fmt.Errorf("create import temp dir: %w", err)
+	}
+	defer os.RemoveAll(repoDir)
+
+	args := gitCloneArgs(req.RepoURL, repoDir, req.Branch)
+	if output, err := exec.CommandContext(ctx, "git", args...).CombinedOutput(); err != nil {
+		return GitHubImportResult{}, fmt.Errorf("git clone: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+
+	branch, err := gitOutput(ctx, repoDir, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
+	commitSHA, err := gitOutput(ctx, repoDir, "rev-parse", "HEAD")
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
+
+	sourceDir, err := detectStaticSiteDir(repoDir, req.SourceDir)
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
+
+	imageRepository := strings.Trim(strings.TrimSpace(req.ImageRepository), "/")
+	if imageRepository == "" {
+		imageRepository = "fugue-apps"
+	}
+	repoPath := model.Slugify(owner) + "-" + model.Slugify(repo)
+	imageRef := fmt.Sprintf("%s/%s/%s:git-%s", strings.TrimSpace(req.RegistryPushBase), imageRepository, repoPath, shortCommit(commitSHA))
+	if err := buildAndPushStaticSiteImage(sourceDir, imageRef); err != nil {
+		return GitHubImportResult{}, err
+	}
+
+	return GitHubImportResult{
+		RepoOwner:      owner,
+		RepoName:       repo,
+		Branch:         branch,
+		CommitSHA:      commitSHA,
+		SourceDir:      strings.TrimPrefix(strings.TrimPrefix(sourceDir, repoDir), string(filepath.Separator)),
+		BuildStrategy:  model.AppBuildStrategyStaticSite,
+		ImageRef:       imageRef,
+		DefaultAppName: model.Slugify(repo),
+	}, nil
+}
+
+func gitOutput(ctx context.Context, repoDir string, args ...string) (string, error) {
+	cmdArgs := append([]string{"-C", repoDir}, args...)
+	output, err := exec.CommandContext(ctx, "git", cmdArgs...).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func gitCloneArgs(repoURL, repoDir, branch string) []string {
+	args := []string{
+		"clone",
+		"--depth", "1",
+		"--recurse-submodules",
+		"--shallow-submodules",
+	}
+	if branch = strings.TrimSpace(branch); branch != "" {
+		args = append(args, "--branch", branch)
+	}
+	args = append(args, repoURL, repoDir)
+	return args
+}
+
+func parseGitHubRepoURL(raw string) (string, string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", fmt.Errorf("repo_url is required")
+	}
+	const prefix = "https://github.com/"
+	if !strings.HasPrefix(raw, prefix) {
+		return "", "", fmt.Errorf("only https://github.com/<owner>/<repo> is supported in this MVP")
+	}
+	path := strings.TrimPrefix(raw, prefix)
+	path = strings.TrimSuffix(path, ".git")
+	path = strings.Trim(path, "/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return "", "", fmt.Errorf("invalid GitHub repository URL")
+	}
+	return model.Slugify(parts[0]), model.Slugify(parts[1]), nil
+}
+
+func detectStaticSiteDir(repoDir, requested string) (string, error) {
+	candidates := []string{}
+	if strings.TrimSpace(requested) != "" {
+		candidates = append(candidates, strings.TrimSpace(requested))
+	} else {
+		candidates = append(candidates, ".", "dist", "build", "public", "site")
+	}
+
+	for _, candidate := range candidates {
+		fullPath := repoDir
+		if candidate != "." {
+			fullPath = filepath.Join(repoDir, candidate)
+		}
+		info, err := os.Stat(fullPath)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(fullPath, "index.html")); err == nil {
+			return fullPath, nil
+		}
+	}
+
+	if strings.TrimSpace(requested) != "" {
+		return "", fmt.Errorf("source_dir %q does not contain index.html", requested)
+	}
+	return "", fmt.Errorf("no static-site entrypoint found; this MVP currently requires index.html in root, dist/, build/, public/, or site/")
+}
+
+func buildAndPushStaticSiteImage(sourceDir, imageRef string) error {
+	baseRef, err := name.ParseReference(staticSiteBaseImage)
+	if err != nil {
+		return fmt.Errorf("parse base image reference: %w", err)
+	}
+	baseImage, err := remote.Image(baseRef)
+	if err != nil {
+		return fmt.Errorf("pull static-site base image: %w", err)
+	}
+
+	layer, err := tarball.LayerFromOpener(func() (io.ReadCloser, error) {
+		reader, writer := io.Pipe()
+		go func() {
+			writerErr := writeStaticSiteLayer(writer, sourceDir)
+			_ = writer.CloseWithError(writerErr)
+		}()
+		return reader, nil
+	})
+	if err != nil {
+		return fmt.Errorf("create static-site layer: %w", err)
+	}
+
+	image, err := mutate.Append(baseImage, mutate.Addendum{Layer: layer})
+	if err != nil {
+		return fmt.Errorf("append static-site layer: %w", err)
+	}
+
+	tag, err := name.NewTag(imageRef, name.Insecure)
+	if err != nil {
+		return fmt.Errorf("parse destination image reference: %w", err)
+	}
+	if err := remote.Write(tag, image); err != nil {
+		return fmt.Errorf("push image to internal registry: %w", err)
+	}
+	return nil
+}
+
+func writeStaticSiteLayer(w io.Writer, sourceDir string) error {
+	tw := tar.NewWriter(w)
+	defer tw.Close()
+
+	entries, err := collectStaticSiteEntries(sourceDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := writeStaticSiteTarEntry(tw, sourceDir, entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func collectStaticSiteEntries(sourceDir string) ([]string, error) {
+	entries := []string{}
+	err := filepath.WalkDir(sourceDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(sourceDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		entries = append(entries, rel)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("walk static-site source: %w", err)
+	}
+	sort.Strings(entries)
+	return entries, nil
+}
+
+func writeStaticSiteTarEntry(tw *tar.Writer, sourceDir, rel string) error {
+	fullPath := filepath.Join(sourceDir, rel)
+	info, err := os.Lstat(fullPath)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", rel, err)
+	}
+
+	name := filepath.ToSlash(filepath.Join("usr/share/caddy", rel))
+	header, err := tar.FileInfoHeader(info, "")
+	if err != nil {
+		return fmt.Errorf("create tar header for %s: %w", rel, err)
+	}
+	header.Name = name
+	header.ModTime = time.Unix(0, 0)
+	header.AccessTime = time.Unix(0, 0)
+	header.ChangeTime = time.Unix(0, 0)
+
+	if info.IsDir() {
+		if !strings.HasSuffix(header.Name, "/") {
+			header.Name += "/"
+		}
+		if err := tw.WriteHeader(header); err != nil {
+			return fmt.Errorf("write dir header for %s: %w", rel, err)
+		}
+		return nil
+	}
+
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(fullPath)
+		if err != nil {
+			return fmt.Errorf("read symlink %s: %w", rel, err)
+		}
+		header.Linkname = target
+		if err := tw.WriteHeader(header); err != nil {
+			return fmt.Errorf("write symlink header for %s: %w", rel, err)
+		}
+		return nil
+	}
+
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+
+	if err := tw.WriteHeader(header); err != nil {
+		return fmt.Errorf("write file header for %s: %w", rel, err)
+	}
+	file, err := os.Open(fullPath)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", rel, err)
+	}
+	defer file.Close()
+	if _, err := io.Copy(tw, file); err != nil {
+		return fmt.Errorf("copy file %s into image layer: %w", rel, err)
+	}
+	return nil
+}
+
+func shortCommit(sha string) string {
+	sha = strings.TrimSpace(sha)
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
+}

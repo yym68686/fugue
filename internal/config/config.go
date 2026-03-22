@@ -11,6 +11,10 @@ type APIConfig struct {
 	BindAddr          string
 	StorePath         string
 	BootstrapAdminKey string
+	AppBaseDomain     string
+	APIPublicDomain   string
+	RegistryPushBase  string
+	ImportWorkDir     string
 }
 
 type ControllerConfig struct {
@@ -24,6 +28,7 @@ type ControllerConfig struct {
 
 type AgentConfig struct {
 	ServerURL        string
+	NodeKey          string
 	EnrollToken      string
 	RuntimeKey       string
 	RuntimeID        string
@@ -41,6 +46,10 @@ func APIFromEnv() APIConfig {
 		BindAddr:          getenv("FUGUE_BIND_ADDR", ":8080"),
 		StorePath:         getenv("FUGUE_STORE_PATH", "./data/store.json"),
 		BootstrapAdminKey: getenv("FUGUE_BOOTSTRAP_ADMIN_KEY", "fugue_bootstrap_admin_change_me"),
+		AppBaseDomain:     getenv("FUGUE_APP_BASE_DOMAIN", "fugue.pro"),
+		APIPublicDomain:   getenv("FUGUE_API_PUBLIC_DOMAIN", "api.fugue.pro"),
+		RegistryPushBase:  getenv("FUGUE_REGISTRY_PUSH_BASE", "127.0.0.1:30500"),
+		ImportWorkDir:     getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
 	}
 }
 
@@ -58,6 +67,7 @@ func ControllerFromEnv() ControllerConfig {
 func AgentFromEnv() AgentConfig {
 	return AgentConfig{
 		ServerURL:        getenv("FUGUE_AGENT_SERVER", "http://127.0.0.1:8080"),
+		NodeKey:          os.Getenv("FUGUE_AGENT_NODE_KEY"),
 		EnrollToken:      os.Getenv("FUGUE_AGENT_ENROLL_TOKEN"),
 		RuntimeKey:       os.Getenv("FUGUE_AGENT_RUNTIME_KEY"),
 		RuntimeID:        os.Getenv("FUGUE_AGENT_RUNTIME_ID"),

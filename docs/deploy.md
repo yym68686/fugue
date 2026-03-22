@@ -18,6 +18,7 @@ Assumptions:
 - the three VPS use a `systemd`-based distro
 
 This mode installs all three machines as `k3s server` nodes and then runs the current single-replica Fugue Pod on `gcp1` with a `hostPath` data directory. That tradeoff is intentional for the current file-backed MVP.
+The same script also provisions an internal registry on the primary node and can configure a wildcard HTTPS edge for app hostnames.
 
 ## 1. Topology
 
@@ -39,19 +40,16 @@ make test
 make build
 ```
 
-Build and push images:
+Build core images:
 
 ```bash
-export REGISTRY=registry.example.com/your-org
 export VERSION=0.1.0
 
-docker build -f Dockerfile.api -t ${REGISTRY}/fugue-api:${VERSION} .
-docker build -f Dockerfile.controller -t ${REGISTRY}/fugue-controller:${VERSION} .
-docker build -f Dockerfile.agent -t ${REGISTRY}/fugue-agent:${VERSION} .
+docker build -f Dockerfile.api -t fugue-api:${VERSION} .
+docker build -f Dockerfile.controller -t fugue-controller:${VERSION} .
+docker build -f Dockerfile.agent -t fugue-agent:${VERSION} .
 
-docker push ${REGISTRY}/fugue-api:${VERSION}
-docker push ${REGISTRY}/fugue-controller:${VERSION}
-docker push ${REGISTRY}/fugue-agent:${VERSION}
+For the current GitHub-import MVP, Fugue does not require an external registry. Imported apps are built into images and pushed to the internal registry exposed by the control plane.
 ```
 
 ## 3. Install k3s HA control plane
@@ -131,17 +129,19 @@ kubectl create namespace fugue-system
 Install the chart:
 
 ```bash
-export REGISTRY=registry.example.com/your-org
 export VERSION=0.1.0
 export FUGUE_BOOTSTRAP_KEY='replace-with-a-long-random-secret'
 
 helm upgrade --install fugue ./deploy/helm/fugue \
   -n fugue-system \
   --set bootstrapAdminKey="${FUGUE_BOOTSTRAP_KEY}" \
-  --set api.image.repository="${REGISTRY}/fugue-api" \
+  --set api.image.repository="fugue-api" \
   --set api.image.tag="${VERSION}" \
-  --set controller.image.repository="${REGISTRY}/fugue-controller" \
+  --set controller.image.repository="fugue-controller" \
   --set controller.image.tag="${VERSION}" \
+  --set api.appBaseDomain="app.example.com" \
+  --set api.registryPushBase="<primary-private-ip>:30500" \
+  --set registry.service.nodePort=30500 \
   --set nodeSelector.nodepool=system
 ```
 
@@ -243,7 +243,9 @@ The current controller creates one namespace per tenant with the pattern `fg-<te
 - one `Deployment`
 - one `Service`
 
-## 7. Attach a user-owned VPS runtime
+Imported GitHub static sites are exposed through the Fugue API edge proxy using the generated hostname under your configured app base domain.
+
+## 7. Attach a user-owned VPS node
 
 ### Option A: recommended
 
@@ -260,13 +262,13 @@ curl -sfL https://get.k3s.io | \
     --write-kubeconfig-mode 644" sh -
 ```
 
-Create an enroll token from Fugue:
+Create a reusable node key from Fugue:
 
 ```bash
-curl -sS http://127.0.0.1:8080/v1/runtimes/enroll-tokens \
+curl -sS http://127.0.0.1:8080/v1/node-keys \
   -H "Authorization: Bearer <tenant-api-key>" \
   -H 'Content-Type: application/json' \
-  -d '{"label":"tenant-vps-1","ttl_seconds":3600}'
+  -d '{"label":"default-node-key"}'
 ```
 
 Run the agent on the VPS host:
@@ -275,7 +277,7 @@ Run the agent on the VPS host:
 sudo env \
   KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
   FUGUE_AGENT_SERVER=https://fugue-api.example.com \
-  FUGUE_AGENT_ENROLL_TOKEN='<secret-from-enroll-token-response>' \
+  FUGUE_AGENT_NODE_KEY='<secret-from-node-key-response>' \
   FUGUE_AGENT_RUNTIME_NAME='tenant-vps-1' \
   FUGUE_AGENT_RUNTIME_ENDPOINT='https://tenant-vps-1.example.com' \
   FUGUE_AGENT_WORK_DIR=/var/lib/fugue-agent \
@@ -290,7 +292,7 @@ sudo env \
 docker run -d --name fugue-agent --restart unless-stopped \
   -e KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
   -e FUGUE_AGENT_SERVER=https://fugue-api.example.com \
-  -e FUGUE_AGENT_ENROLL_TOKEN='<secret-from-enroll-token-response>' \
+  -e FUGUE_AGENT_NODE_KEY='<secret-from-node-key-response>' \
   -e FUGUE_AGENT_RUNTIME_NAME='tenant-vps-1' \
   -e FUGUE_AGENT_RUNTIME_ENDPOINT='https://tenant-vps-1.example.com' \
   -e FUGUE_AGENT_WORK_DIR=/var/lib/fugue-agent \
@@ -301,12 +303,14 @@ docker run -d --name fugue-agent --restart unless-stopped \
   ${REGISTRY}/fugue-agent:${VERSION}
 ```
 
-## 8. Migrate an app from managed runtime to attached runtime
+Legacy compatibility: one-time enroll tokens are still available at `/v1/runtimes/enroll-tokens`, but the recommended path is the reusable `node-key` flow above.
 
-List runtimes and find the attached runtime ID:
+## 8. Migrate an app from managed runtime to attached node
+
+List nodes and find the attached node ID:
 
 ```bash
-curl -sS http://127.0.0.1:8080/v1/runtimes \
+curl -sS http://127.0.0.1:8080/v1/nodes \
   -H "Authorization: Bearer <tenant-api-key>"
 ```
 

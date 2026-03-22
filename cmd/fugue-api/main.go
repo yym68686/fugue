@@ -18,7 +18,12 @@ func main() {
 		logger.Fatalf("init store: %v", err)
 	}
 
-	server := api.NewServer(store, auth.New(store, cfg.BootstrapAdminKey), logger)
+	server := api.NewServer(store, auth.New(store, cfg.BootstrapAdminKey), logger, api.ServerConfig{
+		AppBaseDomain:    cfg.AppBaseDomain,
+		APIPublicDomain:  cfg.APIPublicDomain,
+		RegistryPushBase: cfg.RegistryPushBase,
+		ImportWorkDir:    cfg.ImportWorkDir,
+	})
 	logger.Printf("fugue-api listening on %s", cfg.BindAddr)
 	if err := http.ListenAndServe(cfg.BindAddr, server.Handler()); err != nil {
 		logger.Fatalf("listen and serve: %v", err)

@@ -1,0 +1,22 @@
+{{- if .Values.registry.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fugue.fullname" . }}-registry
+  labels:
+    {{- include "fugue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+spec:
+  type: {{ .Values.registry.service.type }}
+  selector:
+    {{- include "fugue.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+  ports:
+    - name: registry
+      port: {{ .Values.registry.service.port }}
+      targetPort: {{ .Values.registry.service.targetPort }}
+      protocol: TCP
+      {{- if and (eq .Values.registry.service.type "NodePort") .Values.registry.service.nodePort }}
+      nodePort: {{ .Values.registry.service.nodePort }}
+      {{- end }}
+{{- end }}

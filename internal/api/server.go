@@ -11,23 +11,32 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
+	"fugue/internal/sourceimport"
 	"fugue/internal/store"
 )
 
 type Server struct {
-	store *store.Store
-	auth  *auth.Authenticator
-	log   *log.Logger
+	store            *store.Store
+	auth             *auth.Authenticator
+	log              *log.Logger
+	appBaseDomain    string
+	apiPublicDomain  string
+	registryPushBase string
+	importer         *sourceimport.Importer
 }
 
-func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger) *Server {
+func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger, cfg ServerConfig) *Server {
 	if logger == nil {
 		logger = log.Default()
 	}
 	return &Server{
-		store: store,
-		auth:  authn,
-		log:   logger,
+		store:            store,
+		auth:             authn,
+		log:              logger,
+		appBaseDomain:    strings.TrimSpace(strings.ToLower(cfg.AppBaseDomain)),
+		apiPublicDomain:  strings.TrimSpace(strings.ToLower(cfg.APIPublicDomain)),
+		registryPushBase: strings.TrimSpace(cfg.RegistryPushBase),
+		importer:         sourceimport.NewImporter(cfg.ImportWorkDir, logger),
 	}
 }
 
@@ -45,6 +54,13 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/api-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleListAPIKeys)))
 	mux.Handle("POST /v1/api-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateAPIKey)))
 
+	mux.Handle("GET /v1/node-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleListNodeKeys)))
+	mux.Handle("POST /v1/node-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateNodeKey)))
+	mux.Handle("POST /v1/node-keys/{id}/revoke", s.auth.RequireAPI(http.HandlerFunc(s.handleRevokeNodeKey)))
+
+	mux.Handle("GET /v1/nodes", s.auth.RequireAPI(http.HandlerFunc(s.handleListNodes)))
+	mux.Handle("GET /v1/nodes/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetNode)))
+
 	mux.Handle("GET /v1/runtimes", s.auth.RequireAPI(http.HandlerFunc(s.handleListRuntimes)))
 	mux.Handle("POST /v1/runtimes", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateRuntime)))
 	mux.Handle("GET /v1/runtimes/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetRuntime)))
@@ -53,7 +69,9 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("GET /v1/apps", s.auth.RequireAPI(http.HandlerFunc(s.handleListApps)))
 	mux.Handle("POST /v1/apps", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateApp)))
+	mux.Handle("POST /v1/apps/import-github", s.auth.RequireAPI(http.HandlerFunc(s.handleImportGitHubApp)))
 	mux.Handle("GET /v1/apps/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetApp)))
+	mux.Handle("POST /v1/apps/{id}/rebuild", s.auth.RequireAPI(http.HandlerFunc(s.handleRebuildApp)))
 	mux.Handle("POST /v1/apps/{id}/deploy", s.auth.RequireAPI(http.HandlerFunc(s.handleDeployApp)))
 	mux.Handle("POST /v1/apps/{id}/scale", s.auth.RequireAPI(http.HandlerFunc(s.handleScaleApp)))
 	mux.Handle("POST /v1/apps/{id}/migrate", s.auth.RequireAPI(http.HandlerFunc(s.handleMigrateApp)))
@@ -64,11 +82,17 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/audit-events", s.auth.RequireAPI(http.HandlerFunc(s.handleListAuditEvents)))
 
 	mux.HandleFunc("POST /v1/agent/enroll", s.handleAgentEnroll)
+	mux.HandleFunc("POST /v1/nodes/bootstrap", s.handleBootstrapNode)
 	mux.Handle("POST /v1/agent/heartbeat", s.auth.RequireRuntime(http.HandlerFunc(s.handleAgentHeartbeat)))
 	mux.Handle("GET /v1/agent/operations", s.auth.RequireRuntime(http.HandlerFunc(s.handleAgentOperations)))
 	mux.Handle("POST /v1/agent/operations/{id}/complete", s.auth.RequireRuntime(http.HandlerFunc(s.handleAgentCompleteOperation)))
 
-	return loggingMiddleware(s.log, mux)
+	return loggingMiddleware(s.log, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.maybeHandleAppProxy(w, r) {
+			return
+		}
+		mux.ServeHTTP(w, r)
+	}))
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -210,6 +234,68 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"api_key": key, "secret": secret})
 }
 
+func (s *Server) handleListNodeKeys(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	keys, err := s.store.ListNodeKeys(principal.TenantID, principal.IsPlatformAdmin())
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"node_keys": keys})
+}
+
+func (s *Server) handleCreateNodeKey(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("runtime.attach") {
+		httpx.WriteError(w, http.StatusForbidden, "missing runtime.attach scope")
+		return
+	}
+	var req struct {
+		TenantID string `json:"tenant_id"`
+		Label    string `json:"label"`
+	}
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	tenantID, ok := s.resolveTenantID(principal, req.TenantID)
+	if !ok {
+		httpx.WriteError(w, http.StatusForbidden, "cannot create node key for another tenant")
+		return
+	}
+	key, secret, err := s.store.CreateNodeKey(tenantID, req.Label)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.appendAudit(principal, "node_key.create", "node_key", key.ID, tenantID, map[string]string{"label": key.Label})
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"node_key": key, "secret": secret})
+}
+
+func (s *Server) handleRevokeNodeKey(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("runtime.attach") {
+		httpx.WriteError(w, http.StatusForbidden, "missing runtime.attach scope")
+		return
+	}
+	key, err := s.store.GetNodeKey(r.PathValue("id"))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if !principal.IsPlatformAdmin() && key.TenantID != principal.TenantID {
+		httpx.WriteError(w, http.StatusForbidden, "node key is not visible to this tenant")
+		return
+	}
+	key, err = s.store.RevokeNodeKey(key.ID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.appendAudit(principal, "node_key.revoke", "node_key", key.ID, key.TenantID, map[string]string{"label": key.Label})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"node_key": key})
+}
+
 func (s *Server) handleListEnrollmentTokens(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	tenantID, ok := s.resolveTenantID(principal, strings.TrimSpace(r.URL.Query().Get("tenant_id")))
@@ -255,6 +341,34 @@ func (s *Server) handleCreateEnrollmentToken(w http.ResponseWriter, r *http.Requ
 	}
 	s.appendAudit(principal, "runtime.enroll_token.create", "enrollment_token", token.ID, tenantID, map[string]string{"label": token.Label})
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"enrollment_token": token, "secret": secret})
+}
+
+func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	nodes, err := s.store.ListNodes(principal.TenantID, principal.IsPlatformAdmin())
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"nodes": nodes})
+}
+
+func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	node, err := s.store.GetRuntime(r.PathValue("id"))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if node.Type != model.RuntimeTypeExternalOwned {
+		httpx.WriteError(w, http.StatusNotFound, "resource not found")
+		return
+	}
+	if !principal.IsPlatformAdmin() && node.TenantID != principal.TenantID {
+		httpx.WriteError(w, http.StatusForbidden, "node is not visible to this tenant")
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"node": node})
 }
 
 func (s *Server) handleListRuntimes(w http.ResponseWriter, r *http.Request) {
@@ -513,6 +627,37 @@ func (s *Server) handleListAuditEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"audit_events": events})
+}
+
+func (s *Server) handleBootstrapNode(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		NodeKey     string            `json:"node_key"`
+		NodeName    string            `json:"node_name"`
+		RuntimeName string            `json:"runtime_name"`
+		Endpoint    string            `json:"endpoint"`
+		Labels      map[string]string `json:"labels"`
+	}
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	nodeName := strings.TrimSpace(req.NodeName)
+	if nodeName == "" {
+		nodeName = strings.TrimSpace(req.RuntimeName)
+	}
+
+	key, node, runtimeKey, err := s.store.BootstrapNode(req.NodeKey, nodeName, req.Endpoint, req.Labels)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	actor := model.Principal{
+		ActorType: model.ActorTypeNodeKey,
+		ActorID:   key.ID,
+		TenantID:  key.TenantID,
+	}
+	s.appendAudit(actor, "node.bootstrap", "node", node.ID, key.TenantID, map[string]string{"name": node.Name, "node_key_id": key.ID})
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"node": node, "runtime_key": runtimeKey})
 }
 
 func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {

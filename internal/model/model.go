@@ -6,9 +6,16 @@ const (
 	RuntimeTypeManagedShared = "managed-shared"
 	RuntimeTypeExternalOwned = "external-owned"
 
+	AppSourceTypeGitHubPublic = "github-public"
+
+	AppBuildStrategyStaticSite = "static-site"
+
 	RuntimeStatusPending = "pending"
 	RuntimeStatusActive  = "active"
 	RuntimeStatusOffline = "offline"
+
+	NodeKeyStatusActive  = "active"
+	NodeKeyStatusRevoked = "revoked"
 
 	OperationTypeDeploy  = "deploy"
 	OperationTypeScale   = "scale"
@@ -25,6 +32,7 @@ const (
 
 	ActorTypeBootstrap = "bootstrap"
 	ActorTypeAPIKey    = "api-key"
+	ActorTypeNodeKey   = "node-key"
 	ActorTypeRuntime   = "runtime"
 )
 
@@ -70,6 +78,19 @@ type EnrollmentToken struct {
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 }
 
+type NodeKey struct {
+	ID         string     `json:"id"`
+	TenantID   string     `json:"tenant_id"`
+	Label      string     `json:"label"`
+	Prefix     string     `json:"prefix"`
+	Hash       string     `json:"hash"`
+	Status     string     `json:"status"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+}
+
 type Runtime struct {
 	ID              string            `json:"id"`
 	TenantID        string            `json:"tenant_id,omitempty"`
@@ -78,11 +99,28 @@ type Runtime struct {
 	Status          string            `json:"status"`
 	Endpoint        string            `json:"endpoint,omitempty"`
 	Labels          map[string]string `json:"labels,omitempty"`
+	NodeKeyID       string            `json:"node_key_id,omitempty"`
 	AgentKeyPrefix  string            `json:"agent_key_prefix,omitempty"`
 	AgentKeyHash    string            `json:"agent_key_hash,omitempty"`
 	LastHeartbeatAt *time.Time        `json:"last_heartbeat_at,omitempty"`
 	CreatedAt       time.Time         `json:"created_at"`
 	UpdatedAt       time.Time         `json:"updated_at"`
+}
+
+type AppSource struct {
+	Type          string `json:"type"`
+	RepoURL       string `json:"repo_url,omitempty"`
+	RepoBranch    string `json:"repo_branch,omitempty"`
+	SourceDir     string `json:"source_dir,omitempty"`
+	BuildStrategy string `json:"build_strategy,omitempty"`
+	CommitSHA     string `json:"commit_sha,omitempty"`
+}
+
+type AppRoute struct {
+	Hostname    string `json:"hostname,omitempty"`
+	BaseDomain  string `json:"base_domain,omitempty"`
+	PublicURL   string `json:"public_url,omitempty"`
+	ServicePort int    `json:"service_port,omitempty"`
 }
 
 type AppSpec struct {
@@ -105,15 +143,17 @@ type AppStatus struct {
 }
 
 type App struct {
-	ID          string    `json:"id"`
-	TenantID    string    `json:"tenant_id"`
-	ProjectID   string    `json:"project_id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Spec        AppSpec   `json:"spec"`
-	Status      AppStatus `json:"status"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          string     `json:"id"`
+	TenantID    string     `json:"tenant_id"`
+	ProjectID   string     `json:"project_id"`
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	Source      *AppSource `json:"source,omitempty"`
+	Route       *AppRoute  `json:"route,omitempty"`
+	Spec        AppSpec    `json:"spec"`
+	Status      AppStatus  `json:"status"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 type Operation struct {
@@ -129,6 +169,7 @@ type Operation struct {
 	TargetRuntimeID   string     `json:"target_runtime_id,omitempty"`
 	DesiredReplicas   *int       `json:"desired_replicas,omitempty"`
 	DesiredSpec       *AppSpec   `json:"desired_spec,omitempty"`
+	DesiredSource     *AppSource `json:"desired_source,omitempty"`
 	ResultMessage     string     `json:"result_message,omitempty"`
 	ManifestPath      string     `json:"manifest_path,omitempty"`
 	AssignedRuntimeID string     `json:"assigned_runtime_id,omitempty"`
@@ -179,6 +220,7 @@ type State struct {
 	Projects         []Project         `json:"projects"`
 	APIKeys          []APIKey          `json:"api_keys"`
 	EnrollmentTokens []EnrollmentToken `json:"enrollment_tokens"`
+	NodeKeys         []NodeKey         `json:"node_keys"`
 	Runtimes         []Runtime         `json:"runtimes"`
 	Apps             []App             `json:"apps"`
 	Operations       []Operation       `json:"operations"`

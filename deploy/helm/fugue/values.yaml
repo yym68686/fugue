@@ -7,6 +7,10 @@ api:
     repository: fugue-api
     tag: latest
     pullPolicy: IfNotPresent
+  appBaseDomain: fugue.pro
+  apiPublicDomain: api.fugue.pro
+  registryPushBase: 127.0.0.1:30500
+  importWorkDir: /var/lib/fugue/import
   resources: {}
   extraEnv: []
 
@@ -26,6 +30,21 @@ service:
   port: 80
   targetPort: 8080
   nodePort: null
+
+registry:
+  enabled: true
+  image:
+    repository: registry
+    tag: "2.8.3"
+    pullPolicy: IfNotPresent
+  service:
+    type: NodePort
+    port: 5000
+    targetPort: 5000
+    nodePort: 30500
+  persistence:
+    hostPath: /var/lib/fugue/registry
+  resources: {}
 
 persistence:
   mode: pvc

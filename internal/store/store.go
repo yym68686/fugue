@@ -266,6 +266,145 @@ func (s *Store) CreateEnrollmentToken(tenantID, label string, ttl time.Duration)
 	return redactEnrollmentToken(token), secret, nil
 }
 
+func (s *Store) ListNodeKeys(tenantID string, platformAdmin bool) ([]model.NodeKey, error) {
+	var keys []model.NodeKey
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, key := range state.NodeKeys {
+			if platformAdmin || key.TenantID == tenantID {
+				keys = append(keys, redactNodeKey(key))
+			}
+		}
+		sort.Slice(keys, func(i, j int) bool {
+			return keys[i].CreatedAt.Before(keys[j].CreatedAt)
+		})
+		return nil
+	})
+	return keys, err
+}
+
+func (s *Store) GetNodeKey(id string) (model.NodeKey, error) {
+	var key model.NodeKey
+	err := s.withLockedState(false, func(state *model.State) error {
+		index := findNodeKey(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		key = state.NodeKeys[index]
+		return nil
+	})
+	return key, err
+}
+
+func (s *Store) CreateNodeKey(tenantID, label string) (model.NodeKey, string, error) {
+	label = strings.TrimSpace(label)
+	if tenantID == "" || label == "" {
+		return model.NodeKey{}, "", ErrInvalidInput
+	}
+
+	secret := model.NewSecret("fugue_nk")
+	now := time.Now().UTC()
+	key := model.NodeKey{
+		ID:        model.NewID("nodekey"),
+		TenantID:  tenantID,
+		Label:     label,
+		Prefix:    model.SecretPrefix(secret),
+		Hash:      model.HashSecret(secret),
+		Status:    model.NodeKeyStatusActive,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	err := s.withLockedState(true, func(state *model.State) error {
+		if findTenant(state, tenantID) < 0 {
+			return ErrNotFound
+		}
+		state.NodeKeys = append(state.NodeKeys, key)
+		return nil
+	})
+	if err != nil {
+		return model.NodeKey{}, "", err
+	}
+
+	return redactNodeKey(key), secret, nil
+}
+
+func (s *Store) RevokeNodeKey(id string) (model.NodeKey, error) {
+	var key model.NodeKey
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findNodeKey(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		now := time.Now().UTC()
+		if state.NodeKeys[index].RevokedAt == nil {
+			state.NodeKeys[index].Status = model.NodeKeyStatusRevoked
+			state.NodeKeys[index].RevokedAt = &now
+			state.NodeKeys[index].UpdatedAt = now
+		}
+		key = state.NodeKeys[index]
+		return nil
+	})
+	return redactNodeKey(key), err
+}
+
+func (s *Store) BootstrapNode(secret, runtimeName, endpoint string, labels map[string]string) (model.NodeKey, model.Runtime, string, error) {
+	secret = strings.TrimSpace(secret)
+	runtimeName = strings.TrimSpace(runtimeName)
+	if secret == "" || runtimeName == "" {
+		return model.NodeKey{}, model.Runtime{}, "", ErrInvalidInput
+	}
+
+	var key model.NodeKey
+	var runtime model.Runtime
+	var runtimeSecret string
+	err := s.withLockedState(true, func(state *model.State) error {
+		hash := model.HashSecret(secret)
+		now := time.Now().UTC()
+		keyIndex := -1
+		for idx := range state.NodeKeys {
+			if state.NodeKeys[idx].Hash != hash {
+				continue
+			}
+			keyIndex = idx
+			break
+		}
+		if keyIndex < 0 {
+			return ErrNotFound
+		}
+		if state.NodeKeys[keyIndex].RevokedAt != nil || state.NodeKeys[keyIndex].Status == model.NodeKeyStatusRevoked {
+			return ErrConflict
+		}
+
+		state.NodeKeys[keyIndex].LastUsedAt = &now
+		state.NodeKeys[keyIndex].UpdatedAt = now
+		key = state.NodeKeys[keyIndex]
+
+		runtimeSecret = model.NewSecret("fugue_rt")
+		runtime = model.Runtime{
+			ID:              model.NewID("runtime"),
+			TenantID:        key.TenantID,
+			Name:            nextAvailableRuntimeName(state, key.TenantID, runtimeName),
+			Type:            model.RuntimeTypeExternalOwned,
+			Status:          model.RuntimeStatusActive,
+			Endpoint:        strings.TrimSpace(endpoint),
+			Labels:          cloneMap(labels),
+			NodeKeyID:       key.ID,
+			AgentKeyPrefix:  model.SecretPrefix(runtimeSecret),
+			AgentKeyHash:    model.HashSecret(runtimeSecret),
+			LastHeartbeatAt: &now,
+			CreatedAt:       now,
+			UpdatedAt:       now,
+		}
+		state.Runtimes = append(state.Runtimes, runtime)
+		return nil
+	})
+	if err != nil {
+		return model.NodeKey{}, model.Runtime{}, "", err
+	}
+
+	return redactNodeKey(key), runtime, runtimeSecret, nil
+}
+
 func (s *Store) CreateRuntime(tenantID, name, runtimeType, endpoint string, labels map[string]string) (model.Runtime, string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -454,6 +593,25 @@ func (s *Store) MarkRuntimeOfflineStale(after time.Duration) (int, error) {
 	return count, err
 }
 
+func (s *Store) ListNodes(tenantID string, platformAdmin bool) ([]model.Runtime, error) {
+	var nodes []model.Runtime
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, runtime := range state.Runtimes {
+			if runtime.Type != model.RuntimeTypeExternalOwned {
+				continue
+			}
+			if platformAdmin || runtime.TenantID == tenantID {
+				nodes = append(nodes, runtime)
+			}
+		}
+		sort.Slice(nodes, func(i, j int) bool {
+			return nodes[i].CreatedAt.Before(nodes[j].CreatedAt)
+		})
+		return nil
+	})
+	return nodes, err
+}
+
 func (s *Store) ListRuntimes(tenantID string, platformAdmin bool) ([]model.Runtime, error) {
 	var runtimes []model.Runtime
 	err := s.withLockedState(false, func(state *model.State) error {
@@ -512,7 +670,33 @@ func (s *Store) GetApp(id string) (model.App, error) {
 	return app, err
 }
 
+func (s *Store) GetAppByHostname(hostname string) (model.App, error) {
+	hostname = strings.TrimSpace(strings.ToLower(hostname))
+	var app model.App
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, candidate := range state.Apps {
+			if candidate.Route == nil {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(candidate.Route.Hostname), hostname) {
+				app = candidate
+				return nil
+			}
+		}
+		return ErrNotFound
+	})
+	return app, err
+}
+
 func (s *Store) CreateApp(tenantID, projectID, name, description string, spec model.AppSpec) (model.App, error) {
+	return s.createApp(tenantID, projectID, name, description, spec, nil, nil)
+}
+
+func (s *Store) CreateImportedApp(tenantID, projectID, name, description string, spec model.AppSpec, source model.AppSource, route model.AppRoute) (model.App, error) {
+	return s.createApp(tenantID, projectID, name, description, spec, &source, &route)
+}
+
+func (s *Store) createApp(tenantID, projectID, name, description string, spec model.AppSpec, source *model.AppSource, route *model.AppRoute) (model.App, error) {
 	name = strings.TrimSpace(name)
 	if tenantID == "" || projectID == "" || name == "" || spec.Image == "" || spec.Replicas < 1 {
 		return model.App{}, ErrInvalidInput
@@ -536,6 +720,9 @@ func (s *Store) CreateApp(tenantID, projectID, name, description string, spec mo
 			if existing.TenantID == tenantID && existing.ProjectID == projectID && strings.EqualFold(existing.Name, name) {
 				return ErrConflict
 			}
+			if route != nil && route.Hostname != "" && existing.Route != nil && strings.EqualFold(existing.Route.Hostname, route.Hostname) {
+				return ErrConflict
+			}
 		}
 		now := time.Now().UTC()
 		app = model.App{
@@ -544,6 +731,8 @@ func (s *Store) CreateApp(tenantID, projectID, name, description string, spec mo
 			ProjectID:   projectID,
 			Name:        name,
 			Description: strings.TrimSpace(description),
+			Source:      cloneAppSource(source),
+			Route:       cloneAppRoute(route),
 			Spec:        spec,
 			Status: model.AppStatus{
 				Phase:           "created",
@@ -598,6 +787,8 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 		}
 
 		now := time.Now().UTC()
+		op.DesiredSpec = cloneAppSpec(op.DesiredSpec)
+		op.DesiredSource = cloneAppSource(op.DesiredSource)
 		op.ID = model.NewID("op")
 		op.Status = model.OperationStatusPending
 		op.ExecutionMode = model.ExecutionModeManaged
@@ -875,6 +1066,9 @@ func ensureDefaults(state *model.State) {
 	if state.EnrollmentTokens == nil {
 		state.EnrollmentTokens = []model.EnrollmentToken{}
 	}
+	if state.NodeKeys == nil {
+		state.NodeKeys = []model.NodeKey{}
+	}
 	if state.Runtimes == nil {
 		state.Runtimes = []model.Runtime{}
 	}
@@ -912,6 +1106,11 @@ func redactEnrollmentToken(token model.EnrollmentToken) model.EnrollmentToken {
 	return token
 }
 
+func redactNodeKey(key model.NodeKey) model.NodeKey {
+	key.Hash = ""
+	return key
+}
+
 func cloneMap(in map[string]string) map[string]string {
 	if len(in) == 0 {
 		return nil
@@ -921,6 +1120,40 @@ func cloneMap(in map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+func cloneAppSource(in *model.AppSource) *model.AppSource {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func cloneAppSpec(in *model.AppSpec) *model.AppSpec {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if len(in.Command) > 0 {
+		out.Command = append([]string(nil), in.Command...)
+	}
+	if len(in.Args) > 0 {
+		out.Args = append([]string(nil), in.Args...)
+	}
+	if len(in.Ports) > 0 {
+		out.Ports = append([]int(nil), in.Ports...)
+	}
+	out.Env = cloneMap(in.Env)
+	return &out
+}
+
+func cloneAppRoute(in *model.AppRoute) *model.AppRoute {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }
 
 func applyOperationToApp(state *model.State, op *model.Operation) error {
@@ -936,6 +1169,9 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 			return ErrInvalidInput
 		}
 		app.Spec = *op.DesiredSpec
+		if op.DesiredSource != nil {
+			app.Source = cloneAppSource(op.DesiredSource)
+		}
 		app.Status.Phase = "deployed"
 		app.Status.CurrentRuntimeID = app.Spec.RuntimeID
 		app.Status.CurrentReplicas = app.Spec.Replicas
@@ -983,6 +1219,15 @@ func findRuntime(state *model.State, id string) int {
 	return -1
 }
 
+func findNodeKey(state *model.State, id string) int {
+	for idx, key := range state.NodeKeys {
+		if key.ID == id {
+			return idx
+		}
+	}
+	return -1
+}
+
 func findApp(state *model.State, id string) int {
 	for idx, app := range state.Apps {
 		if app.ID == id {
@@ -1017,4 +1262,27 @@ func runtimeVisibleToTenant(state *model.State, runtimeID, tenantID string) bool
 	}
 	runtime := state.Runtimes[index]
 	return runtime.Type == model.RuntimeTypeManagedShared || runtime.TenantID == tenantID
+}
+
+func nextAvailableRuntimeName(state *model.State, tenantID, requested string) string {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		requested = "node"
+	}
+	name := requested
+	suffix := 2
+	for runtimeNameExists(state, tenantID, name) {
+		name = fmt.Sprintf("%s-%d", requested, suffix)
+		suffix++
+	}
+	return name
+}
+
+func runtimeNameExists(state *model.State, tenantID, name string) bool {
+	for _, runtime := range state.Runtimes {
+		if runtime.TenantID == tenantID && strings.EqualFold(runtime.Name, name) {
+			return true
+		}
+	}
+	return false
 }

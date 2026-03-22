@@ -63,7 +63,7 @@ func (s *AgentService) Run(ctx context.Context) error {
 	}
 
 	if s.Config.RuntimeKey == "" {
-		if err := s.enroll(); err != nil {
+		if err := s.bootstrapOrEnroll(); err != nil {
 			return err
 		}
 	}
@@ -98,9 +98,44 @@ func (s *AgentService) Run(ctx context.Context) error {
 	}
 }
 
+func (s *AgentService) bootstrapOrEnroll() error {
+	if s.Config.NodeKey != "" {
+		return s.bootstrapNode()
+	}
+	return s.enroll()
+}
+
+func (s *AgentService) bootstrapNode() error {
+	reqBody := map[string]any{
+		"node_key":  s.Config.NodeKey,
+		"node_name": s.Config.RuntimeName,
+		"endpoint":  s.Config.RuntimeEndpoint,
+	}
+	payload, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("marshal node bootstrap request: %w", err)
+	}
+
+	respBody, err := s.doJSONRequest(context.Background(), http.MethodPost, "/v1/nodes/bootstrap", "", payload)
+	if err != nil {
+		return err
+	}
+
+	var response struct {
+		Node       model.Runtime `json:"node"`
+		RuntimeKey string        `json:"runtime_key"`
+	}
+	if err := json.Unmarshal(respBody, &response); err != nil {
+		return fmt.Errorf("decode node bootstrap response: %w", err)
+	}
+	s.Config.RuntimeID = response.Node.ID
+	s.Config.RuntimeKey = response.RuntimeKey
+	return s.persistState()
+}
+
 func (s *AgentService) enroll() error {
 	if s.Config.EnrollToken == "" {
-		return fmt.Errorf("runtime key is empty and no enroll token was provided")
+		return fmt.Errorf("runtime key is empty and neither node key nor enroll token was provided")
 	}
 
 	reqBody := map[string]any{
