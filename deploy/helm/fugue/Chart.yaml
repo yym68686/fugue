@@ -1,0 +1,6 @@
+apiVersion: v2
+name: fugue
+description: Fugue control plane MVP for multi-tenant deployment and runtime orchestration on k3s
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

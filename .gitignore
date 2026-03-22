@@ -1,0 +1,5 @@
+.gocache/
+.dist/
+bin/
+data/
+*.log

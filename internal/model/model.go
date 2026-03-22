@@ -1,0 +1,186 @@
+package model
+
+import "time"
+
+const (
+	RuntimeTypeManagedShared = "managed-shared"
+	RuntimeTypeExternalOwned = "external-owned"
+
+	RuntimeStatusPending = "pending"
+	RuntimeStatusActive  = "active"
+	RuntimeStatusOffline = "offline"
+
+	OperationTypeDeploy  = "deploy"
+	OperationTypeScale   = "scale"
+	OperationTypeMigrate = "migrate"
+
+	OperationStatusPending      = "pending"
+	OperationStatusRunning      = "running"
+	OperationStatusWaitingAgent = "waiting-agent"
+	OperationStatusCompleted    = "completed"
+	OperationStatusFailed       = "failed"
+
+	ExecutionModeManaged = "managed"
+	ExecutionModeAgent   = "agent"
+
+	ActorTypeBootstrap = "bootstrap"
+	ActorTypeAPIKey    = "api-key"
+	ActorTypeRuntime   = "runtime"
+)
+
+type Tenant struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Slug      string    `json:"slug"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type Project struct {
+	ID          string    `json:"id"`
+	TenantID    string    `json:"tenant_id"`
+	Name        string    `json:"name"`
+	Slug        string    `json:"slug"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type APIKey struct {
+	ID         string     `json:"id"`
+	TenantID   string     `json:"tenant_id"`
+	Label      string     `json:"label"`
+	Prefix     string     `json:"prefix"`
+	Hash       string     `json:"hash"`
+	Scopes     []string   `json:"scopes"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+}
+
+type EnrollmentToken struct {
+	ID         string     `json:"id"`
+	TenantID   string     `json:"tenant_id"`
+	Label      string     `json:"label"`
+	Prefix     string     `json:"prefix"`
+	Hash       string     `json:"hash"`
+	ExpiresAt  time.Time  `json:"expires_at"`
+	UsedAt     *time.Time `json:"used_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+}
+
+type Runtime struct {
+	ID              string            `json:"id"`
+	TenantID        string            `json:"tenant_id,omitempty"`
+	Name            string            `json:"name"`
+	Type            string            `json:"type"`
+	Status          string            `json:"status"`
+	Endpoint        string            `json:"endpoint,omitempty"`
+	Labels          map[string]string `json:"labels,omitempty"`
+	AgentKeyPrefix  string            `json:"agent_key_prefix,omitempty"`
+	AgentKeyHash    string            `json:"agent_key_hash,omitempty"`
+	LastHeartbeatAt *time.Time        `json:"last_heartbeat_at,omitempty"`
+	CreatedAt       time.Time         `json:"created_at"`
+	UpdatedAt       time.Time         `json:"updated_at"`
+}
+
+type AppSpec struct {
+	Image     string            `json:"image"`
+	Command   []string          `json:"command,omitempty"`
+	Args      []string          `json:"args,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	Ports     []int             `json:"ports,omitempty"`
+	Replicas  int               `json:"replicas"`
+	RuntimeID string            `json:"runtime_id"`
+}
+
+type AppStatus struct {
+	Phase            string    `json:"phase"`
+	CurrentRuntimeID string    `json:"current_runtime_id,omitempty"`
+	CurrentReplicas  int       `json:"current_replicas"`
+	LastOperationID  string    `json:"last_operation_id,omitempty"`
+	LastMessage      string    `json:"last_message,omitempty"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+type App struct {
+	ID          string    `json:"id"`
+	TenantID    string    `json:"tenant_id"`
+	ProjectID   string    `json:"project_id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	Spec        AppSpec   `json:"spec"`
+	Status      AppStatus `json:"status"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type Operation struct {
+	ID                string     `json:"id"`
+	TenantID          string     `json:"tenant_id"`
+	Type              string     `json:"type"`
+	Status            string     `json:"status"`
+	ExecutionMode     string     `json:"execution_mode"`
+	RequestedByType   string     `json:"requested_by_type"`
+	RequestedByID     string     `json:"requested_by_id"`
+	AppID             string     `json:"app_id"`
+	SourceRuntimeID   string     `json:"source_runtime_id,omitempty"`
+	TargetRuntimeID   string     `json:"target_runtime_id,omitempty"`
+	DesiredReplicas   *int       `json:"desired_replicas,omitempty"`
+	DesiredSpec       *AppSpec   `json:"desired_spec,omitempty"`
+	ResultMessage     string     `json:"result_message,omitempty"`
+	ManifestPath      string     `json:"manifest_path,omitempty"`
+	AssignedRuntimeID string     `json:"assigned_runtime_id,omitempty"`
+	ErrorMessage      string     `json:"error_message,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	StartedAt         *time.Time `json:"started_at,omitempty"`
+	CompletedAt       *time.Time `json:"completed_at,omitempty"`
+}
+
+type AuditEvent struct {
+	ID         string            `json:"id"`
+	TenantID   string            `json:"tenant_id,omitempty"`
+	ActorType  string            `json:"actor_type"`
+	ActorID    string            `json:"actor_id"`
+	Action     string            `json:"action"`
+	TargetType string            `json:"target_type"`
+	TargetID   string            `json:"target_id,omitempty"`
+	Metadata   map[string]string `json:"metadata,omitempty"`
+	CreatedAt  time.Time         `json:"created_at"`
+}
+
+type Principal struct {
+	ActorType string
+	ActorID   string
+	TenantID  string
+	Scopes    map[string]struct{}
+}
+
+func (p Principal) HasScope(scope string) bool {
+	if _, ok := p.Scopes["platform.admin"]; ok {
+		return true
+	}
+	if _, ok := p.Scopes["*"]; ok {
+		return true
+	}
+	_, ok := p.Scopes[scope]
+	return ok
+}
+
+func (p Principal) IsPlatformAdmin() bool {
+	return p.HasScope("platform.admin")
+}
+
+type State struct {
+	Version          string            `json:"version"`
+	Tenants          []Tenant          `json:"tenants"`
+	Projects         []Project         `json:"projects"`
+	APIKeys          []APIKey          `json:"api_keys"`
+	EnrollmentTokens []EnrollmentToken `json:"enrollment_tokens"`
+	Runtimes         []Runtime         `json:"runtimes"`
+	Apps             []App             `json:"apps"`
+	Operations       []Operation       `json:"operations"`
+	AuditEvents      []AuditEvent      `json:"audit_events"`
+}

@@ -1,0 +1,56 @@
+replicaCount: 1
+
+bootstrapAdminKey: "fugue_bootstrap_admin_change_me"
+
+api:
+  image:
+    repository: fugue-api
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources: {}
+  extraEnv: []
+
+controller:
+  image:
+    repository: fugue-controller
+    tag: latest
+    pullPolicy: IfNotPresent
+  pollInterval: 5s
+  runtimeOfflineAfter: 90s
+  kubectlApply: true
+  resources: {}
+  extraEnv: []
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+  nodePort: null
+
+persistence:
+  mode: pvc
+  accessMode: ReadWriteOnce
+  size: 1Gi
+  storageClassName: ""
+  hostPath: /var/lib/fugue
+
+rbac:
+  create: true
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: fugue.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+imagePullSecrets: []
