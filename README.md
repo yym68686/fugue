@@ -1,5 +1,7 @@
 # Fugue
 
+[中文 README](README.zh-CN.md)
+
 Fugue is a multi-tenant k3s control plane MVP for:
 
 - tenant and project isolation
@@ -9,6 +11,10 @@ Fugue is a multi-tenant k3s control plane MVP for:
 - async deploy, scale, and migrate operations
 - GitHub public repo import for static sites with automatic default hostname
 - audit events for control-plane actions
+
+> Fugue 的本意是古典乐中严密、精巧的“赋格”曲，词根代表着“转移与遁走”。
+> 我的系统 `fugue.pro` 就像是在服务器集群上演奏赋格：当流量来袭，它能像增加交响乐声部一样自动扩容；当节点宕机，它能像音符游走一样实现毫秒级的自动转移。
+> 它把混乱、复杂的底层服务器运维，变成了一场严密、全自动、永不停歇的优雅编排。
 
 ## What is implemented in this repository
 
@@ -627,7 +633,7 @@ curl -sS "${FUGUE_BASE_URL}/v1/apps/<app-id>/rebuild" \
 
 ## Deployment
 
-See [docs/deploy.md](/Users/yanyuming/Downloads/GitHub/fugue/docs/deploy.md).
+See [docs/deploy.md](docs/deploy.md).
 
 ## One-command install for 3 VPS
 
