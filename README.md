@@ -492,62 +492,135 @@ make run-api
 make run-controller
 ```
 
-## Quick bootstrap
+## End-to-end quickstart
 
-For local development, use `http://127.0.0.1:8080`. For the deployed environment, replace that base URL with your own HTTPS API domain.
+These examples use `jq`.
 
-Create a tenant:
+For local development:
 
 ```bash
-curl -sS http://127.0.0.1:8080/v1/tenants \
-  -H 'Authorization: Bearer fugue_bootstrap_admin_local' \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"demo-tenant"}'
+export FUGUE_BASE_URL="http://127.0.0.1:8080"
+export FUGUE_BOOTSTRAP_KEY="fugue_bootstrap_admin_local"
 ```
 
-Create a project:
+For a deployed control plane:
 
 ```bash
-curl -sS http://127.0.0.1:8080/v1/projects \
-  -H 'Authorization: Bearer fugue_bootstrap_admin_local' \
-  -H 'Content-Type: application/json' \
-  -d '{"tenant_id":"<tenant-id>","name":"demo-project","description":"default project"}'
+export FUGUE_BASE_URL="https://<your-fugue-api-domain>"
+export FUGUE_BOOTSTRAP_KEY="<your-bootstrap-admin-key>"
 ```
 
-Create an app:
+Create a tenant, mint a tenant admin key, create a project, import the first GitHub app, and wait for deployment:
 
 ```bash
-curl -sS http://127.0.0.1:8080/v1/apps \
-  -H 'Authorization: Bearer fugue_bootstrap_admin_local' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "tenant_id":"<tenant-id>",
-    "project_id":"<project-id>",
-    "name":"nginx-demo",
-    "description":"demo",
-    "spec":{
-      "image":"nginx:1.27",
-      "ports":[80],
-      "replicas":1,
-      "runtime_id":"runtime_managed_shared"
-    }
-  }'
+set -euo pipefail
+
+TENANT_NAME="demo-tenant"
+TENANT_ADMIN_LABEL="demo-tenant-admin"
+PROJECT_NAME="default"
+PROJECT_DESC="default project"
+
+REPO_URL="https://github.com/yym68686/Cerebr"
+BRANCH="main"
+SOURCE_DIR=""
+APP_NAME="cerebr"
+
+TENANT_JSON=$(
+  curl -fsS "${FUGUE_BASE_URL}/v1/tenants" \
+    -H "Authorization: Bearer ${FUGUE_BOOTSTRAP_KEY}" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -nc --arg name "${TENANT_NAME}" '{name:$name}')"
+)
+TENANT_ID=$(echo "${TENANT_JSON}" | jq -r '.tenant.id')
+
+TENANT_KEY_JSON=$(
+  curl -fsS "${FUGUE_BASE_URL}/v1/api-keys" \
+    -H "Authorization: Bearer ${FUGUE_BOOTSTRAP_KEY}" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -nc \
+      --arg tenant_id "${TENANT_ID}" \
+      --arg label "${TENANT_ADMIN_LABEL}" \
+      '{
+        tenant_id:$tenant_id,
+        label:$label,
+        scopes:[
+          "project.write",
+          "apikey.write",
+          "runtime.attach",
+          "runtime.write",
+          "app.write",
+          "app.deploy",
+          "app.scale",
+          "app.migrate"
+        ]
+      }')"
+)
+FUGUE_TENANT_TOKEN=$(echo "${TENANT_KEY_JSON}" | jq -r '.secret')
+
+PROJECT_JSON=$(
+  curl -fsS "${FUGUE_BASE_URL}/v1/projects" \
+    -H "Authorization: Bearer ${FUGUE_TENANT_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -nc \
+      --arg name "${PROJECT_NAME}" \
+      --arg description "${PROJECT_DESC}" \
+      '{name:$name,description:$description}')"
+)
+PROJECT_ID=$(echo "${PROJECT_JSON}" | jq -r '.project.id')
+
+IMPORT_JSON=$(
+  curl -fsS "${FUGUE_BASE_URL}/v1/apps/import-github" \
+    -H "Authorization: Bearer ${FUGUE_TENANT_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -nc \
+      --arg project_id "${PROJECT_ID}" \
+      --arg repo_url "${REPO_URL}" \
+      --arg branch "${BRANCH}" \
+      --arg source_dir "${SOURCE_DIR}" \
+      --arg name "${APP_NAME}" \
+      '{
+        project_id:$project_id,
+        repo_url:$repo_url,
+        branch:$branch,
+        source_dir:$source_dir,
+        name:$name,
+        runtime_id:"runtime_managed_shared",
+        replicas:1
+      }')"
+)
+
+APP_ID=$(echo "${IMPORT_JSON}" | jq -r '.app.id')
+OP_ID=$(echo "${IMPORT_JSON}" | jq -r '.operation.id')
+APP_URL=$(echo "${IMPORT_JSON}" | jq -r '.app.route.public_url')
+
+while true; do
+  OP_JSON=$(
+    curl -fsS "${FUGUE_BASE_URL}/v1/operations/${OP_ID}" \
+      -H "Authorization: Bearer ${FUGUE_TENANT_TOKEN}"
+  )
+  STATUS=$(echo "${OP_JSON}" | jq -r '.operation.status')
+  echo "operation_status=${STATUS}"
+  if [ "${STATUS}" = "completed" ]; then
+    break
+  fi
+  if [ "${STATUS}" = "failed" ]; then
+    echo "${OP_JSON}" | jq .
+    exit 1
+  fi
+  sleep 2
+done
+
+echo "TENANT_ID=${TENANT_ID}"
+echo "PROJECT_ID=${PROJECT_ID}"
+echo "APP_ID=${APP_ID}"
+echo "APP_URL=${APP_URL}"
 ```
 
-Deploy the app:
+Rebuild an imported GitHub app from the latest code and redeploy it in place:
 
 ```bash
-curl -sS http://127.0.0.1:8080/v1/apps/<app-id>/deploy \
-  -H 'Authorization: Bearer fugue_bootstrap_admin_local' \
-  -H 'Content-Type: application/json' \
-  -d '{}'
-```
-
-Rebuild an imported GitHub app from the latest code:
-
-```bash
-curl -sS http://127.0.0.1:8080/v1/apps/<app-id>/rebuild \
-  -H 'Authorization: Bearer fugue_bootstrap_admin_local' \
+curl -sS "${FUGUE_BASE_URL}/v1/apps/<app-id>/rebuild" \
+  -H "Authorization: Bearer ${FUGUE_TENANT_TOKEN}" \
   -H 'Content-Type: application/json' \
   -d '{}'
 ```
