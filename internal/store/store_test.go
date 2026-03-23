@@ -367,6 +367,65 @@ func TestListMachinesByNodeKey(t *testing.T) {
 	}
 }
 
+func TestEnsureMachineRecordsReusesLegacyMachineOnRuntimeRotation(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	tenantID := "tenant_legacy"
+	runtimeOld := model.Runtime{
+		ID:              "runtime_old",
+		TenantID:        tenantID,
+		Name:            "worker-old",
+		Type:            model.RuntimeTypeExternalOwned,
+		Status:          model.RuntimeStatusActive,
+		Endpoint:        "https://worker.example.com",
+		NodeKeyID:       "nk_1",
+		LastHeartbeatAt: &now,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+
+	state := model.State{
+		Runtimes: []model.Runtime{runtimeOld},
+	}
+	ensureMachineRecords(&state)
+	if len(state.Machines) != 1 {
+		t.Fatalf("expected 1 machine after initial backfill, got %d", len(state.Machines))
+	}
+
+	originalMachineID := state.Machines[0].ID
+	later := now.Add(time.Minute)
+	state.Runtimes = []model.Runtime{
+		{
+			ID:              "runtime_new",
+			TenantID:        tenantID,
+			Name:            "worker-new",
+			Type:            model.RuntimeTypeExternalOwned,
+			Status:          model.RuntimeStatusActive,
+			Endpoint:        "https://worker.example.com",
+			NodeKeyID:       "nk_1",
+			LastHeartbeatAt: &later,
+			CreatedAt:       later,
+			UpdatedAt:       later,
+		},
+	}
+
+	ensureMachineRecords(&state)
+
+	if len(state.Machines) != 1 {
+		t.Fatalf("expected legacy machine reuse without duplicates, got %d machines", len(state.Machines))
+	}
+	if state.Machines[0].ID != originalMachineID {
+		t.Fatalf("expected machine %s to be reused, got %s", originalMachineID, state.Machines[0].ID)
+	}
+	if state.Machines[0].RuntimeID != "runtime_new" {
+		t.Fatalf("expected machine runtime to rotate to runtime_new, got %s", state.Machines[0].RuntimeID)
+	}
+	if state.Machines[0].RuntimeName != "worker-new" {
+		t.Fatalf("expected runtime name to update, got %s", state.Machines[0].RuntimeName)
+	}
+}
+
 func TestDeleteTenantRemovesTenantOwnedResources(t *testing.T) {
 	t.Parallel()
 

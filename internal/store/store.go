@@ -1764,13 +1764,21 @@ func ensureMachineRecords(state *model.State) {
 	}
 
 	existingByRuntimeID := make(map[string]struct{}, len(state.Machines))
+	legacyGroups := make(map[string]int, len(state.Machines))
 	for _, machine := range state.Machines {
 		if machine.RuntimeID != "" {
 			existingByRuntimeID[machine.RuntimeID] = struct{}{}
 		}
 	}
 
-	legacyGroups := make(map[string]int)
+	for index := range state.Machines {
+		machine := state.Machines[index]
+		if strings.TrimSpace(machine.FingerprintHash) == "" {
+			continue
+		}
+		legacyGroups[machine.FingerprintHash] = index
+	}
+
 	for _, runtime := range state.Runtimes {
 		mode := runtimeConnectionMode(runtime.Type)
 		if mode == "" {
@@ -1781,26 +1789,13 @@ func ensureMachineRecords(state *model.State) {
 		}
 
 		groupKey := legacyMachineIdentityKey(runtime)
-		if index, ok := legacyGroups[groupKey]; ok {
-			if state.Machines[index].UpdatedAt.Before(runtime.UpdatedAt) {
-				state.Machines[index].Name = runtime.Name
-				state.Machines[index].Status = runtime.Status
-				state.Machines[index].Endpoint = runtime.Endpoint
-				state.Machines[index].Labels = cloneMap(runtime.Labels)
-				state.Machines[index].NodeKeyID = runtime.NodeKeyID
-				state.Machines[index].RuntimeID = runtime.ID
-				state.Machines[index].RuntimeName = runtime.Name
-				state.Machines[index].LastSeenAt = runtime.LastHeartbeatAt
-				state.Machines[index].UpdatedAt = runtime.UpdatedAt
-				if runtime.Type == model.RuntimeTypeManagedOwned {
-					state.Machines[index].ClusterNodeName = runtime.Name
-				}
-			}
+		groupHash := model.HashSecret(groupKey)
+		if index, ok := legacyGroups[groupHash]; ok {
+			backfillMachineFromRuntime(&state.Machines[index], runtime, mode)
 			existingByRuntimeID[runtime.ID] = struct{}{}
 			continue
 		}
 
-		fingerprint := groupKey
 		machine := model.Machine{
 			ID:                model.NewID("machine"),
 			TenantID:          runtime.TenantID,
@@ -1812,8 +1807,8 @@ func ensureMachineRecords(state *model.State) {
 			NodeKeyID:         runtime.NodeKeyID,
 			RuntimeID:         runtime.ID,
 			RuntimeName:       runtime.Name,
-			FingerprintPrefix: model.SecretPrefix(fingerprint),
-			FingerprintHash:   model.HashSecret(fingerprint),
+			FingerprintPrefix: model.SecretPrefix(groupKey),
+			FingerprintHash:   groupHash,
 			LastSeenAt:        runtime.LastHeartbeatAt,
 			CreatedAt:         runtime.CreatedAt,
 			UpdatedAt:         runtime.UpdatedAt,
@@ -1822,8 +1817,42 @@ func ensureMachineRecords(state *model.State) {
 			machine.ClusterNodeName = runtime.Name
 		}
 		state.Machines = append(state.Machines, machine)
-		legacyGroups[groupKey] = len(state.Machines) - 1
+		legacyGroups[groupHash] = len(state.Machines) - 1
 		existingByRuntimeID[runtime.ID] = struct{}{}
+	}
+}
+
+func backfillMachineFromRuntime(machine *model.Machine, runtime model.Runtime, mode string) {
+	if machine == nil {
+		return
+	}
+	if machine.Name == "" || machine.UpdatedAt.Before(runtime.UpdatedAt) {
+		machine.Name = runtime.Name
+		machine.Status = runtime.Status
+		machine.Endpoint = runtime.Endpoint
+		machine.Labels = cloneMap(runtime.Labels)
+		machine.NodeKeyID = runtime.NodeKeyID
+		machine.RuntimeID = runtime.ID
+		machine.RuntimeName = runtime.Name
+		machine.LastSeenAt = runtime.LastHeartbeatAt
+		machine.UpdatedAt = runtime.UpdatedAt
+	}
+	if machine.TenantID == "" {
+		machine.TenantID = runtime.TenantID
+	}
+	if machine.ConnectionMode == "" {
+		machine.ConnectionMode = mode
+	}
+	if machine.RuntimeID == "" {
+		machine.RuntimeID = runtime.ID
+	}
+	if machine.RuntimeName == "" {
+		machine.RuntimeName = runtime.Name
+	}
+	if runtime.Type == model.RuntimeTypeManagedOwned {
+		machine.ClusterNodeName = runtime.Name
+	} else {
+		machine.ClusterNodeName = ""
 	}
 }
 
