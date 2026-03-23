@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
 )
@@ -199,10 +200,8 @@ func buildAndPushDockerfileImage(ctx context.Context, req dockerfileBuildRequest
 	if err := kubectlRun(ctx, jobObject, "-n", namespace, "apply", "-f", "-"); err != nil {
 		return fmt.Errorf("apply kaniko job: %w", err)
 	}
-	if err := kubectlRun(ctx, nil, "-n", namespace, "wait", "--for=condition=complete", "--timeout=25m", "job/"+jobName); err != nil {
-		logs, _ := kubectlOutput(ctx, nil, "-n", namespace, "logs", "job/"+jobName, "--all-containers=true", "--tail=-1")
-		describe, _ := kubectlOutput(ctx, nil, "-n", namespace, "describe", "job/"+jobName)
-		return fmt.Errorf("wait for kaniko job %s: %w\nlogs:\n%s\ndescribe:\n%s", jobName, err, strings.TrimSpace(string(logs)), strings.TrimSpace(string(describe)))
+	if err := waitForBuilderJob(ctx, namespace, jobName, 25*time.Minute); err != nil {
+		return fmt.Errorf("kaniko job %s: %w", jobName, err)
 	}
 	return nil
 }

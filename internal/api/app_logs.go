@@ -25,12 +25,29 @@ import (
 const serviceAccountNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 
 type kubeJobList struct {
-	Items []struct {
-		Metadata struct {
-			Name              string    `json:"name"`
-			CreationTimestamp time.Time `json:"creationTimestamp"`
-		} `json:"metadata"`
-	} `json:"items"`
+	Items []kubeJobInfo `json:"items"`
+}
+
+type kubeJobInfo struct {
+	Metadata struct {
+		Name              string    `json:"name"`
+		CreationTimestamp time.Time `json:"creationTimestamp"`
+	} `json:"metadata"`
+	Status kubeJobStatus `json:"status"`
+}
+
+type kubeJobStatus struct {
+	Active     int                `json:"active,omitempty"`
+	Succeeded  int                `json:"succeeded,omitempty"`
+	Failed     int                `json:"failed,omitempty"`
+	Conditions []kubeJobCondition `json:"conditions,omitempty"`
+}
+
+type kubeJobCondition struct {
+	Type    string `json:"type"`
+	Status  string `json:"status"`
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 type kubePodList struct {
@@ -43,6 +60,7 @@ type kubePodInfo struct {
 		CreationTimestamp time.Time `json:"creationTimestamp"`
 	} `json:"metadata"`
 	Spec struct {
+		NodeName       string `json:"nodeName,omitempty"`
 		InitContainers []struct {
 			Name string `json:"name"`
 		} `json:"initContainers"`
@@ -51,8 +69,29 @@ type kubePodInfo struct {
 		} `json:"containers"`
 	} `json:"spec"`
 	Status struct {
-		Phase string `json:"phase"`
+		Phase                 string                `json:"phase"`
+		Reason                string                `json:"reason,omitempty"`
+		Message               string                `json:"message,omitempty"`
+		InitContainerStatuses []kubeContainerStatus `json:"initContainerStatuses,omitempty"`
+		ContainerStatuses     []kubeContainerStatus `json:"containerStatuses,omitempty"`
 	} `json:"status"`
+}
+
+type kubeContainerStatus struct {
+	Name      string           `json:"name"`
+	State     kubeRuntimeState `json:"state,omitempty"`
+	LastState kubeRuntimeState `json:"lastState,omitempty"`
+}
+
+type kubeRuntimeState struct {
+	Waiting    *kubeStateDetail `json:"waiting,omitempty"`
+	Terminated *kubeStateDetail `json:"terminated,omitempty"`
+}
+
+type kubeStateDetail struct {
+	Reason   string `json:"reason,omitempty"`
+	Message  string `json:"message,omitempty"`
+	ExitCode int    `json:"exitCode,omitempty"`
 }
 
 type kubeLogsClient struct {
@@ -66,12 +105,6 @@ type kubeLogOptions struct {
 	Container string
 	TailLines int
 	Previous  bool
-}
-
-type runtimeLogSection struct {
-	Pod       string
-	Container string
-	Logs      string
 }
 
 type kubeStatusError struct {
@@ -134,12 +167,7 @@ func (c *kubeLogsClient) effectiveNamespace(namespace string) string {
 	return c.namespace
 }
 
-func (c *kubeLogsClient) listJobsBySelector(ctx context.Context, namespace, selector string) ([]struct {
-	Metadata struct {
-		Name              string    `json:"name"`
-		CreationTimestamp time.Time `json:"creationTimestamp"`
-	} `json:"metadata"`
-}, error) {
+func (c *kubeLogsClient) listJobsBySelector(ctx context.Context, namespace, selector string) ([]kubeJobInfo, error) {
 	query := url.Values{}
 	if strings.TrimSpace(selector) != "" {
 		query.Set("labelSelector", selector)
@@ -154,6 +182,15 @@ func (c *kubeLogsClient) listJobsBySelector(ctx context.Context, namespace, sele
 		return nil, err
 	}
 	return jobs.Items, nil
+}
+
+func (c *kubeLogsClient) getJob(ctx context.Context, namespace, jobName string) (kubeJobInfo, error) {
+	var job kubeJobInfo
+	apiPath := "/apis/batch/v1/namespaces/" + c.effectiveNamespace(namespace) + "/jobs/" + url.PathEscape(strings.TrimSpace(jobName))
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, &job); err != nil {
+		return kubeJobInfo{}, err
+	}
+	return job, nil
 }
 
 func (c *kubeLogsClient) listPodsBySelector(ctx context.Context, namespace, selector string) ([]kubePodInfo, error) {
@@ -253,6 +290,23 @@ func podContainerNames(pod kubePodInfo, includeInit bool) []string {
 	}
 	for _, container := range pod.Spec.Containers {
 		if name := strings.TrimSpace(container.Name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func podStatusContainerNames(pod kubePodInfo, includeInit bool) []string {
+	names := make([]string, 0, len(pod.Status.ContainerStatuses)+len(pod.Status.InitContainerStatuses))
+	if includeInit {
+		for _, status := range pod.Status.InitContainerStatuses {
+			if name := strings.TrimSpace(status.Name); name != "" {
+				names = append(names, name)
+			}
+		}
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if name := strings.TrimSpace(status.Name); name != "" {
 			names = append(names, name)
 		}
 	}
@@ -369,6 +423,122 @@ func latestBuilderJobName(ctx context.Context, client *kubeLogsClient, namespace
 	return jobs[len(jobs)-1].Metadata.Name, nil
 }
 
+func kubeJobCompleted(status kubeJobStatus) bool {
+	for _, condition := range status.Conditions {
+		if strings.EqualFold(strings.TrimSpace(condition.Type), "Complete") && strings.EqualFold(strings.TrimSpace(condition.Status), "True") {
+			return true
+		}
+	}
+	return status.Succeeded > 0
+}
+
+func kubeJobFailed(status kubeJobStatus) bool {
+	for _, condition := range status.Conditions {
+		if strings.EqualFold(strings.TrimSpace(condition.Type), "Failed") && strings.EqualFold(strings.TrimSpace(condition.Status), "True") {
+			return true
+		}
+	}
+	return status.Failed > 0 && status.Active == 0 && status.Succeeded == 0
+}
+
+func summarizeKubeFailureLine(subject, reason, message string) string {
+	subject = strings.TrimSpace(subject)
+	reason = strings.TrimSpace(reason)
+	message = strings.TrimSpace(message)
+	switch {
+	case reason != "" && message != "":
+		return fmt.Sprintf("%s failed: %s: %s", subject, reason, message)
+	case reason != "":
+		return fmt.Sprintf("%s failed: %s", subject, reason)
+	case message != "":
+		return fmt.Sprintf("%s failed: %s", subject, message)
+	default:
+		return fmt.Sprintf("%s failed", subject)
+	}
+}
+
+func summarizeKubeContainerFailure(prefix, containerName, state string, detail kubeStateDetail) string {
+	subject := prefix
+	if strings.TrimSpace(containerName) != "" {
+		subject += " container " + strings.TrimSpace(containerName)
+	}
+	reason := strings.TrimSpace(detail.Reason)
+	message := strings.TrimSpace(detail.Message)
+	if detail.ExitCode != 0 {
+		if message == "" {
+			message = fmt.Sprintf("exit_code=%d", detail.ExitCode)
+		} else {
+			message = fmt.Sprintf("%s (exit_code=%d)", message, detail.ExitCode)
+		}
+	}
+	if reason == "" {
+		reason = state
+	}
+	return summarizeKubeFailureLine(subject, reason, message)
+}
+
+func summarizeKubePodFailure(pod kubePodInfo) string {
+	prefix := "pod " + strings.TrimSpace(pod.Metadata.Name)
+	if node := strings.TrimSpace(pod.Spec.NodeName); node != "" {
+		prefix += " on node " + node
+	}
+	if reason := strings.TrimSpace(pod.Status.Reason); reason != "" {
+		return summarizeKubeFailureLine(prefix, reason, strings.TrimSpace(pod.Status.Message))
+	}
+	statuses := append([]kubeContainerStatus(nil), pod.Status.InitContainerStatuses...)
+	statuses = append(statuses, pod.Status.ContainerStatuses...)
+	for _, status := range statuses {
+		if status.State.Terminated != nil {
+			return summarizeKubeContainerFailure(prefix, status.Name, "terminated", *status.State.Terminated)
+		}
+		if status.LastState.Terminated != nil {
+			return summarizeKubeContainerFailure(prefix, status.Name, "terminated", *status.LastState.Terminated)
+		}
+		if status.State.Waiting != nil {
+			return summarizeKubeContainerFailure(prefix, status.Name, "waiting", *status.State.Waiting)
+		}
+		if status.LastState.Waiting != nil {
+			return summarizeKubeContainerFailure(prefix, status.Name, "waiting", *status.LastState.Waiting)
+		}
+	}
+	phase := strings.TrimSpace(pod.Status.Phase)
+	if phase != "" && !strings.EqualFold(phase, "Running") && !strings.EqualFold(phase, "Succeeded") {
+		return fmt.Sprintf("%s failed with phase %s", prefix, phase)
+	}
+	return ""
+}
+
+func summarizeBuilderJobFailure(ctx context.Context, client *kubeLogsClient, namespace, jobName string) (string, error) {
+	job, err := client.getJob(ctx, namespace, jobName)
+	if err != nil {
+		return "", err
+	}
+
+	pods, err := client.listPodsBySelector(ctx, namespace, "job-name="+jobName)
+	if err != nil {
+		return "", err
+	}
+	sortPodsByCreation(pods)
+
+	lines := make([]string, 0, len(pods)+1)
+	for _, pod := range pods {
+		if summary := summarizeKubePodFailure(pod); summary != "" {
+			lines = append(lines, summary)
+		}
+	}
+	if len(lines) > 0 {
+		return strings.Join(lines, "\n"), nil
+	}
+	if kubeJobFailed(job.Status) {
+		for _, condition := range job.Status.Conditions {
+			if strings.EqualFold(strings.TrimSpace(condition.Type), "Failed") && strings.EqualFold(strings.TrimSpace(condition.Status), "True") {
+				return summarizeKubeFailureLine("job "+jobName, condition.Reason, condition.Message), nil
+			}
+		}
+	}
+	return "", nil
+}
+
 func readBuildLogs(ctx context.Context, op model.Operation, tailLines int) (logs, source, jobName string, available bool, err error) {
 	namespace, err := kubeNamespace()
 	if err != nil {
@@ -384,6 +554,10 @@ func readBuildLogs(ctx context.Context, op model.Operation, tailLines int) (logs
 		logs, err = readJobLogs(ctx, client, namespace, jobName, tailLines)
 		if err == nil && strings.TrimSpace(logs) != "" {
 			return logs, "kubernetes.job", jobName, true, nil
+		}
+		summary, summaryErr := summarizeBuilderJobFailure(ctx, client, namespace, jobName)
+		if summaryErr == nil && strings.TrimSpace(summary) != "" {
+			return summary, "kubernetes.job_summary", jobName, true, nil
 		}
 	}
 

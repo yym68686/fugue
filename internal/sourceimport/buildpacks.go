@@ -6,6 +6,7 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
 )
@@ -113,10 +114,8 @@ func buildAndPushBuildpacksImage(ctx context.Context, req buildpacksBuildRequest
 	if err := kubectlRun(ctx, jobObject, "-n", namespace, "apply", "-f", "-"); err != nil {
 		return fmt.Errorf("apply buildpacks job: %w", err)
 	}
-	if err := kubectlRun(ctx, nil, "-n", namespace, "wait", "--for=condition=complete", "--timeout=30m", "job/"+jobName); err != nil {
-		logs, _ := kubectlOutput(ctx, nil, "-n", namespace, "logs", "job/"+jobName, "--all-containers=true", "--tail=-1")
-		describe, _ := kubectlOutput(ctx, nil, "-n", namespace, "describe", "job/"+jobName)
-		return fmt.Errorf("wait for buildpacks job %s: %w\nlogs:\n%s\ndescribe:\n%s", jobName, err, strings.TrimSpace(string(logs)), strings.TrimSpace(string(describe)))
+	if err := waitForBuilderJob(ctx, namespace, jobName, 30*time.Minute); err != nil {
+		return fmt.Errorf("buildpacks job %s: %w", jobName, err)
 	}
 	return nil
 }

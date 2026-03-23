@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
 )
@@ -279,10 +280,8 @@ func buildAndPushNixpacksImage(ctx context.Context, req nixpacksBuildRequest) er
 	if err := kubectlRun(ctx, jobObject, "-n", namespace, "apply", "-f", "-"); err != nil {
 		return fmt.Errorf("apply nixpacks job: %w", err)
 	}
-	if err := kubectlRun(ctx, nil, "-n", namespace, "wait", "--for=condition=complete", "--timeout=30m", "job/"+jobName); err != nil {
-		logs, _ := kubectlOutput(ctx, nil, "-n", namespace, "logs", "job/"+jobName, "--all-containers=true", "--tail=-1")
-		describe, _ := kubectlOutput(ctx, nil, "-n", namespace, "describe", "job/"+jobName)
-		return fmt.Errorf("wait for nixpacks job %s: %w\nlogs:\n%s\ndescribe:\n%s", jobName, err, strings.TrimSpace(string(logs)), strings.TrimSpace(string(describe)))
+	if err := waitForBuilderJob(ctx, namespace, jobName, 30*time.Minute); err != nil {
+		return fmt.Errorf("nixpacks job %s: %w", jobName, err)
 	}
 	return nil
 }
