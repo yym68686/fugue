@@ -42,17 +42,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		TenantID    string `json:"tenant_id"`
-		ProjectID   string `json:"project_id"`
-		RepoURL     string `json:"repo_url"`
-		Branch      string `json:"branch"`
-		SourceDir   string `json:"source_dir"`
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		RuntimeID   string `json:"runtime_id"`
-		Replicas    int    `json:"replicas"`
-	}
+	var req importGitHubRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
@@ -72,17 +62,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "app base domain is not configured")
 		return
 	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
-	defer cancel()
-
-	importResult, err := s.importer.ImportPublicGitHubStaticSite(ctx, sourceimport.GitHubImportRequest{
-		RepoURL:          req.RepoURL,
-		Branch:           req.Branch,
-		SourceDir:        req.SourceDir,
-		RegistryPushBase: s.registryPushBase,
-		ImageRepository:  "fugue-apps",
-	})
+	idempotencyKey, err := resolveIdempotencyKey(r, req.IdempotencyKey)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
@@ -97,13 +77,66 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		runtimeID = "runtime_managed_shared"
 	}
 
-	source := model.AppSource{
-		Type:          model.AppSourceTypeGitHubPublic,
-		RepoURL:       strings.TrimSpace(req.RepoURL),
-		RepoBranch:    importResult.Branch,
-		SourceDir:     importResult.SourceDir,
-		BuildStrategy: importResult.BuildStrategy,
-		CommitSHA:     importResult.CommitSHA,
+	profile := resolveImportProfile(req.Profile, req.RepoURL, strings.TrimSpace(req.ConfigContent) != "" || len(req.Files) > 0 || req.Postgres != nil || strings.TrimSpace(req.DockerfilePath) != "")
+	var releaseIdempotency bool
+	if idempotencyKey != "" {
+		requestHash, err := hashImportGitHubRequest(tenantID, req, runtimeID, replicas, profile)
+		if err != nil {
+			httpx.WriteError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		record, fresh, err := s.store.ReserveIdempotencyRecord(model.IdempotencyScopeAppImportGitHub, tenantID, idempotencyKey, requestHash)
+		if err != nil {
+			if errors.Is(err, store.ErrIdempotencyMismatch) {
+				httpx.WriteError(w, http.StatusConflict, "idempotency key has already been used with a different import request")
+				return
+			}
+			s.writeStoreError(w, err)
+			return
+		}
+		if !fresh {
+			if record.AppID != "" && record.OperationID != "" {
+				app, appErr := s.store.GetApp(record.AppID)
+				op, opErr := s.store.GetOperation(record.OperationID)
+				if appErr == nil && opErr == nil {
+					httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
+						"app":       app,
+						"operation": op,
+						"idempotency": map[string]any{
+							"key":      idempotencyKey,
+							"status":   record.Status,
+							"replayed": true,
+						},
+					})
+					return
+				}
+				httpx.WriteError(w, http.StatusConflict, "idempotency key points to an import result that is no longer available")
+				return
+			}
+			httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
+				"idempotency": map[string]any{
+					"key":      idempotencyKey,
+					"status":   record.Status,
+					"replayed": true,
+				},
+				"request_in_progress": true,
+			})
+			return
+		}
+		releaseIdempotency = true
+		defer func() {
+			if !releaseIdempotency {
+				return
+			}
+			if err := s.store.ReleaseIdempotencyRecord(model.IdempotencyScopeAppImportGitHub, tenantID, idempotencyKey); err != nil {
+				s.log.Printf("release idempotency record failed for tenant=%s key=%s: %v", tenantID, idempotencyKey, err)
+			}
+		}()
+	}
+	importResult, source, err := s.importGitHubSource(r.Context(), req.RepoURL, req.Branch, req.SourceDir, req.DockerfilePath, req.BuildContextDir, profile)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	description := strings.TrimSpace(req.Description)
@@ -123,17 +156,18 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		if s.isReservedAppHostname(candidateHost) {
 			continue
 		}
+
+		spec, err := s.buildImportedAppSpec(profile, candidateName, importResult.ImageRef, runtimeID, replicas, req.ConfigContent, req.Files, req.Postgres)
+		if err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
 		route := model.AppRoute{
 			Hostname:    candidateHost,
 			BaseDomain:  s.appBaseDomain,
 			PublicURL:   "https://" + candidateHost,
-			ServicePort: 80,
-		}
-		spec := model.AppSpec{
-			Image:     importResult.ImageRef,
-			Ports:     []int{80},
-			Replicas:  replicas,
-			RuntimeID: runtimeID,
+			ServicePort: firstServicePort(spec),
 		}
 		app, err = s.store.CreateImportedApp(tenantID, req.ProjectID, candidateName, description, spec, source, route)
 		if err == nil {
@@ -162,16 +196,84 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	if idempotencyKey != "" {
+		releaseIdempotency = false
+		if _, err := s.store.CompleteIdempotencyRecord(model.IdempotencyScopeAppImportGitHub, tenantID, idempotencyKey, app.ID, op.ID); err != nil {
+			s.log.Printf("complete idempotency record failed for tenant=%s key=%s app=%s op=%s: %v", tenantID, idempotencyKey, app.ID, op.ID, err)
+		}
+	}
 
 	s.appendAudit(principal, "app.import_github", "app", app.ID, app.TenantID, map[string]string{
 		"repo_url":  source.RepoURL,
 		"hostname":  app.Route.Hostname,
 		"image_ref": app.Spec.Image,
 	})
-	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
+	response := map[string]any{
 		"app":       app,
 		"operation": op,
-	})
+	}
+	if idempotencyKey != "" {
+		response["idempotency"] = map[string]any{
+			"key":    idempotencyKey,
+			"status": model.IdempotencyStatusCompleted,
+		}
+	}
+	httpx.WriteJSON(w, http.StatusAccepted, response)
+}
+
+func (s *Server) importGitHubSource(parent context.Context, repoURL, branch, sourceDir, dockerfilePath, buildContextDir, profile string) (sourceimport.GitHubImportResult, model.AppSource, error) {
+	timeout := 10 * time.Minute
+	if profile == model.AppImportProfileUniAPI {
+		timeout = 25 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+
+	switch profile {
+	case "":
+		importResult, err := s.importer.ImportPublicGitHubStaticSite(ctx, sourceimport.GitHubImportRequest{
+			RepoURL:          repoURL,
+			Branch:           branch,
+			SourceDir:        sourceDir,
+			RegistryPushBase: s.registryPushBase,
+			ImageRepository:  "fugue-apps",
+		})
+		if err != nil {
+			return sourceimport.GitHubImportResult{}, model.AppSource{}, err
+		}
+		return importResult, model.AppSource{
+			Type:          model.AppSourceTypeGitHubPublic,
+			RepoURL:       strings.TrimSpace(repoURL),
+			RepoBranch:    importResult.Branch,
+			SourceDir:     importResult.SourceDir,
+			BuildStrategy: importResult.BuildStrategy,
+			CommitSHA:     importResult.CommitSHA,
+		}, nil
+	case model.AppImportProfileUniAPI:
+		importResult, err := s.importer.ImportPublicGitHubDockerfileImage(ctx, sourceimport.GitHubDockerImportRequest{
+			RepoURL:          repoURL,
+			Branch:           branch,
+			DockerfilePath:   dockerfilePath,
+			BuildContextDir:  buildContextDir,
+			RegistryPushBase: s.registryPushBase,
+			ImageRepository:  "fugue-apps",
+		})
+		if err != nil {
+			return sourceimport.GitHubImportResult{}, model.AppSource{}, err
+		}
+		return importResult, model.AppSource{
+			Type:            model.AppSourceTypeGitHubPublic,
+			RepoURL:         strings.TrimSpace(repoURL),
+			RepoBranch:      importResult.Branch,
+			BuildStrategy:   importResult.BuildStrategy,
+			CommitSHA:       importResult.CommitSHA,
+			DockerfilePath:  importResult.DockerfilePath,
+			BuildContextDir: importResult.BuildContextDir,
+			ImportProfile:   profile,
+		}, nil
+	default:
+		return sourceimport.GitHubImportResult{}, model.AppSource{}, fmt.Errorf("unsupported import profile %q", profile)
+	}
 }
 
 func buildImportIdentity(baseName, baseDomain string, attempt int) (string, string) {

@@ -88,7 +88,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/apps/{id}/rebuild", s.auth.RequireAPI(http.HandlerFunc(s.handleRebuildApp)))
 	mux.Handle("POST /v1/apps/{id}/deploy", s.auth.RequireAPI(http.HandlerFunc(s.handleDeployApp)))
 	mux.Handle("POST /v1/apps/{id}/scale", s.auth.RequireAPI(http.HandlerFunc(s.handleScaleApp)))
+	mux.Handle("POST /v1/apps/{id}/disable", s.auth.RequireAPI(http.HandlerFunc(s.handleDisableApp)))
 	mux.Handle("POST /v1/apps/{id}/migrate", s.auth.RequireAPI(http.HandlerFunc(s.handleMigrateApp)))
+	mux.Handle("DELETE /v1/apps/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteApp)))
 
 	mux.Handle("GET /v1/operations", s.auth.RequireAPI(http.HandlerFunc(s.handleListOperations)))
 	mux.Handle("GET /v1/operations/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetOperation)))
@@ -599,6 +601,40 @@ func (s *Server) handleScaleApp(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": op})
 }
 
+func (s *Server) handleDisableApp(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("app.scale") && !principal.HasScope("app.disable") {
+		httpx.WriteError(w, http.StatusForbidden, "missing app.scale or app.disable scope")
+		return
+	}
+	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	if !allowed {
+		return
+	}
+	if app.Spec.Replicas == 0 && app.Status.CurrentReplicas == 0 {
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{
+			"app":              app,
+			"already_disabled": true,
+		})
+		return
+	}
+	replicas := 0
+	op, err := s.store.CreateOperation(model.Operation{
+		TenantID:        app.TenantID,
+		Type:            model.OperationTypeScale,
+		RequestedByType: principal.ActorType,
+		RequestedByID:   principal.ActorID,
+		AppID:           app.ID,
+		DesiredReplicas: &replicas,
+	})
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.appendAudit(principal, "app.disable", "operation", op.ID, app.TenantID, map[string]string{"app_id": app.ID})
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": op})
+}
+
 func (s *Server) handleMigrateApp(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	if !principal.IsPlatformAdmin() && !principal.HasScope("app.migrate") {
@@ -607,6 +643,10 @@ func (s *Server) handleMigrateApp(w http.ResponseWriter, r *http.Request) {
 	}
 	app, allowed := s.loadAuthorizedApp(w, r, principal)
 	if !allowed {
+		return
+	}
+	if app.Spec.Postgres != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "stateful apps with postgres are not migratable yet")
 		return
 	}
 	var req struct {
@@ -629,6 +669,31 @@ func (s *Server) handleMigrateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.appendAudit(principal, "app.migrate", "operation", op.ID, app.TenantID, map[string]string{"app_id": app.ID, "target_runtime_id": req.TargetRuntimeID})
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": op})
+}
+
+func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("app.write") && !principal.HasScope("app.delete") {
+		httpx.WriteError(w, http.StatusForbidden, "missing app.write or app.delete scope")
+		return
+	}
+	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	if !allowed {
+		return
+	}
+	op, err := s.store.CreateOperation(model.Operation{
+		TenantID:        app.TenantID,
+		Type:            model.OperationTypeDelete,
+		RequestedByType: principal.ActorType,
+		RequestedByID:   principal.ActorID,
+		AppID:           app.ID,
+	})
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.appendAudit(principal, "app.delete", "operation", op.ID, app.TenantID, map[string]string{"app_id": app.ID})
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": op})
 }
 
@@ -811,6 +876,8 @@ func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
 		httpx.WriteError(w, http.StatusConflict, "resource conflict")
 	case errors.Is(err, store.ErrInvalidInput):
 		httpx.WriteError(w, http.StatusBadRequest, "invalid input")
+	case errors.Is(err, store.ErrIdempotencyMismatch):
+		httpx.WriteError(w, http.StatusConflict, "idempotency key does not match the original request")
 	default:
 		httpx.WriteError(w, http.StatusInternalServerError, err.Error())
 	}

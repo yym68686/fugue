@@ -973,6 +973,9 @@ FROM fugue_apps
 		if err != nil {
 			return nil, err
 		}
+		if isDeletedApp(app) {
+			continue
+		}
 		apps = append(apps, app)
 	}
 	if err := rows.Err(); err != nil {
@@ -992,6 +995,9 @@ WHERE id = $1
 `, id))
 	if err != nil {
 		return model.App{}, mapDBErr(err)
+	}
+	if isDeletedApp(app) {
+		return model.App{}, ErrNotFound
 	}
 	return app, nil
 }
@@ -1089,6 +1095,95 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	return app, nil
 }
 
+func (s *Store) pgReserveIdempotencyRecord(scope, tenantID, key, requestHash string) (model.IdempotencyRecord, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.IdempotencyRecord{}, false, fmt.Errorf("begin reserve idempotency transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC()
+	record := model.IdempotencyRecord{
+		Scope:       scope,
+		TenantID:    tenantID,
+		Key:         key,
+		RequestHash: requestHash,
+		Status:      model.IdempotencyStatusPending,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	result, err := tx.ExecContext(ctx, `
+INSERT INTO fugue_idempotency_keys (scope, tenant_id, key, request_hash, status, app_id, operation_id, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, '', '', $6, $7)
+ON CONFLICT DO NOTHING
+`, record.Scope, record.TenantID, record.Key, record.RequestHash, record.Status, record.CreatedAt, record.UpdatedAt)
+	if err != nil {
+		return model.IdempotencyRecord{}, false, mapDBErr(err)
+	}
+
+	if rowsAffected, _ := result.RowsAffected(); rowsAffected == 1 {
+		if err := tx.Commit(); err != nil {
+			return model.IdempotencyRecord{}, false, fmt.Errorf("commit reserve idempotency transaction: %w", err)
+		}
+		return record, true, nil
+	}
+
+	record, err = s.pgGetIdempotencyRecordTx(ctx, tx, scope, tenantID, key, true)
+	if err != nil {
+		return model.IdempotencyRecord{}, false, mapDBErr(err)
+	}
+	if record.RequestHash != requestHash {
+		return model.IdempotencyRecord{}, false, ErrIdempotencyMismatch
+	}
+	if err := tx.Commit(); err != nil {
+		return model.IdempotencyRecord{}, false, fmt.Errorf("commit read idempotency transaction: %w", err)
+	}
+	return record, false, nil
+}
+
+func (s *Store) pgCompleteIdempotencyRecord(scope, tenantID, key, appID, operationID string) (model.IdempotencyRecord, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	now := time.Now().UTC()
+	record, err := scanIdempotencyRecord(s.db.QueryRowContext(ctx, `
+UPDATE fugue_idempotency_keys
+SET status = $4,
+	app_id = $5,
+	operation_id = $6,
+	updated_at = $7
+WHERE scope = $1
+  AND tenant_id = $2
+  AND key = $3
+RETURNING scope, tenant_id, key, request_hash, status, app_id, operation_id, created_at, updated_at
+`, scope, tenantID, key, model.IdempotencyStatusCompleted, appID, operationID, now))
+	if err != nil {
+		return model.IdempotencyRecord{}, mapDBErr(err)
+	}
+	return record, nil
+}
+
+func (s *Store) pgReleaseIdempotencyRecord(scope, tenantID, key string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := s.db.ExecContext(ctx, `
+DELETE FROM fugue_idempotency_keys
+WHERE scope = $1
+  AND tenant_id = $2
+  AND key = $3
+  AND status = $4
+`, scope, tenantID, key, model.IdempotencyStatusPending)
+	if err != nil {
+		return fmt.Errorf("release idempotency record: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -1121,9 +1216,15 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 		}
 		op.TargetRuntimeID = op.DesiredSpec.RuntimeID
 	case model.OperationTypeScale:
-		if op.DesiredReplicas == nil || *op.DesiredReplicas < 1 {
+		if op.DesiredReplicas == nil || *op.DesiredReplicas < 0 {
 			return model.Operation{}, ErrInvalidInput
 		}
+		op.TargetRuntimeID = app.Spec.RuntimeID
+	case model.OperationTypeDelete:
+		if strings.TrimSpace(app.Spec.RuntimeID) == "" {
+			return model.Operation{}, ErrInvalidInput
+		}
+		op.SourceRuntimeID = app.Spec.RuntimeID
 		op.TargetRuntimeID = app.Spec.RuntimeID
 	case model.OperationTypeMigrate:
 		if op.TargetRuntimeID == "" {
@@ -1569,6 +1670,24 @@ WHERE id = $1
 	return app, nil
 }
 
+func (s *Store) pgGetIdempotencyRecordTx(ctx context.Context, tx *sql.Tx, scope, tenantID, key string, forUpdate bool) (model.IdempotencyRecord, error) {
+	query := `
+SELECT scope, tenant_id, key, request_hash, status, app_id, operation_id, created_at, updated_at
+FROM fugue_idempotency_keys
+WHERE scope = $1
+  AND tenant_id = $2
+  AND key = $3
+`
+	if forUpdate {
+		query += ` FOR UPDATE`
+	}
+	record, err := scanIdempotencyRecord(tx.QueryRowContext(ctx, query, scope, tenantID, key))
+	if err != nil {
+		return model.IdempotencyRecord{}, err
+	}
+	return record, nil
+}
+
 func (s *Store) pgGetOperationTx(ctx context.Context, tx *sql.Tx, id string, forUpdate bool) (model.Operation, error) {
 	query := `
 SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
@@ -1793,6 +1912,24 @@ func scanApp(scanner sqlScanner) (model.App, error) {
 	return app, nil
 }
 
+func scanIdempotencyRecord(scanner sqlScanner) (model.IdempotencyRecord, error) {
+	var record model.IdempotencyRecord
+	if err := scanner.Scan(
+		&record.Scope,
+		&record.TenantID,
+		&record.Key,
+		&record.RequestHash,
+		&record.Status,
+		&record.AppID,
+		&record.OperationID,
+		&record.CreatedAt,
+		&record.UpdatedAt,
+	); err != nil {
+		return model.IdempotencyRecord{}, err
+	}
+	return record, nil
+}
+
 func scanOperation(scanner sqlScanner) (model.Operation, error) {
 	var op model.Operation
 	var desiredReplicas sql.NullInt64
@@ -1861,9 +1998,20 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 			return ErrInvalidInput
 		}
 		app.Spec.Replicas = *op.DesiredReplicas
-		app.Status.Phase = "scaled"
+		if *op.DesiredReplicas == 0 {
+			app.Status.Phase = "disabled"
+		} else {
+			app.Status.Phase = "scaled"
+		}
 		app.Status.CurrentRuntimeID = app.Spec.RuntimeID
 		app.Status.CurrentReplicas = *op.DesiredReplicas
+	case model.OperationTypeDelete:
+		app.Name = deletedAppName(app.Name, op.ID)
+		app.Route = nil
+		app.Spec.Replicas = 0
+		app.Status.Phase = "deleted"
+		app.Status.CurrentRuntimeID = ""
+		app.Status.CurrentReplicas = 0
 	case model.OperationTypeMigrate:
 		if op.TargetRuntimeID == "" {
 			return ErrInvalidInput

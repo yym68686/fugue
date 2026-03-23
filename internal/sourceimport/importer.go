@@ -39,14 +39,16 @@ type GitHubImportRequest struct {
 }
 
 type GitHubImportResult struct {
-	RepoOwner      string
-	RepoName       string
-	Branch         string
-	CommitSHA      string
-	SourceDir      string
-	BuildStrategy  string
-	ImageRef       string
-	DefaultAppName string
+	RepoOwner       string
+	RepoName        string
+	Branch          string
+	CommitSHA       string
+	SourceDir       string
+	BuildStrategy   string
+	DockerfilePath  string
+	BuildContextDir string
+	ImageRef        string
+	DefaultAppName  string
 }
 
 func NewImporter(workDir string, logger *log.Logger) *Importer {

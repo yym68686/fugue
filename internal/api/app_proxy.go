@@ -33,6 +33,10 @@ func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) boo
 		http.Error(w, "app lookup failed", http.StatusInternalServerError)
 		return true
 	}
+	if app.Spec.Replicas == 0 || app.Status.CurrentReplicas == 0 {
+		http.Error(w, "app is disabled", http.StatusServiceUnavailable)
+		return true
+	}
 
 	target, err := url.Parse(serviceURLForApp(app))
 	if err != nil {

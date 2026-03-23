@@ -5,6 +5,7 @@ go 1.25.7
 require (
 	github.com/google/go-containerregistry v0.21.3
 	github.com/jackc/pgx/v5 v5.9.1
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

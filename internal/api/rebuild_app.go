@@ -1,10 +1,8 @@
 package api
 
 import (
-	"context"
 	"net/http"
 	"strings"
-	"time"
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
@@ -30,20 +28,16 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "only github-public apps can be rebuilt")
 		return
 	}
-
-	buildStrategy := strings.TrimSpace(app.Source.BuildStrategy)
-	if buildStrategy != "" && buildStrategy != model.AppBuildStrategyStaticSite {
-		httpx.WriteError(w, http.StatusBadRequest, "only static-site github imports can be rebuilt in this MVP")
-		return
-	}
 	if strings.TrimSpace(app.Source.RepoURL) == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "app source repo_url is missing")
 		return
 	}
 
 	var req struct {
-		Branch    *string `json:"branch"`
-		SourceDir *string `json:"source_dir"`
+		Branch          *string `json:"branch"`
+		SourceDir       *string `json:"source_dir"`
+		DockerfilePath  *string `json:"dockerfile_path"`
+		BuildContextDir *string `json:"build_context_dir"`
 	}
 	if r.ContentLength != 0 {
 		if err := httpx.DecodeJSON(r, &req); err != nil {
@@ -56,34 +50,55 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 	if req.Branch != nil {
 		branch = strings.TrimSpace(*req.Branch)
 	}
-	sourceDir := strings.TrimSpace(app.Source.SourceDir)
-	if req.SourceDir != nil {
-		sourceDir = strings.TrimSpace(*req.SourceDir)
+
+	buildStrategy := strings.TrimSpace(app.Source.BuildStrategy)
+	if buildStrategy == "" {
+		buildStrategy = model.AppBuildStrategyStaticSite
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
-	defer cancel()
+	var (
+		importResult sourceimport.GitHubImportResult
+		err          error
+		source       model.AppSource
+	)
 
-	importResult, err := s.importer.ImportPublicGitHubStaticSite(ctx, sourceimport.GitHubImportRequest{
-		RepoURL:          app.Source.RepoURL,
-		Branch:           branch,
-		SourceDir:        sourceDir,
-		RegistryPushBase: s.registryPushBase,
-		ImageRepository:  "fugue-apps",
-	})
+	switch buildStrategy {
+	case model.AppBuildStrategyStaticSite:
+		sourceDir := strings.TrimSpace(app.Source.SourceDir)
+		if req.SourceDir != nil {
+			sourceDir = strings.TrimSpace(*req.SourceDir)
+		}
+		importResult, source, err = s.importGitHubSource(r.Context(), app.Source.RepoURL, branch, sourceDir, "", "", "")
+	case model.AppBuildStrategyDockerfile:
+		dockerfilePath := strings.TrimSpace(app.Source.DockerfilePath)
+		if req.DockerfilePath != nil {
+			dockerfilePath = strings.TrimSpace(*req.DockerfilePath)
+		}
+		buildContextDir := strings.TrimSpace(app.Source.BuildContextDir)
+		if req.BuildContextDir != nil {
+			buildContextDir = strings.TrimSpace(*req.BuildContextDir)
+		}
+		importResult, source, err = s.importGitHubSource(r.Context(), app.Source.RepoURL, branch, "", dockerfilePath, buildContextDir, strings.TrimSpace(app.Source.ImportProfile))
+	default:
+		httpx.WriteError(w, http.StatusBadRequest, "unsupported build strategy")
+		return
+	}
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	source := model.AppSource{
-		Type:          model.AppSourceTypeGitHubPublic,
-		RepoURL:       strings.TrimSpace(app.Source.RepoURL),
-		RepoBranch:    importResult.Branch,
-		SourceDir:     importResult.SourceDir,
-		BuildStrategy: importResult.BuildStrategy,
-		CommitSHA:     importResult.CommitSHA,
+	if buildStrategy == model.AppBuildStrategyStaticSite {
+		source = model.AppSource{
+			Type:          model.AppSourceTypeGitHubPublic,
+			RepoURL:       strings.TrimSpace(app.Source.RepoURL),
+			RepoBranch:    importResult.Branch,
+			SourceDir:     importResult.SourceDir,
+			BuildStrategy: importResult.BuildStrategy,
+			CommitSHA:     importResult.CommitSHA,
+		}
 	}
+
 	spec := app.Spec
 	spec.Image = importResult.ImageRef
 	if spec.Replicas < 1 {
@@ -116,10 +131,12 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
 		"operation": op,
 		"build": map[string]any{
-			"branch":     source.RepoBranch,
-			"source_dir": source.SourceDir,
-			"commit_sha": source.CommitSHA,
-			"image_ref":  spec.Image,
+			"branch":            source.RepoBranch,
+			"source_dir":        source.SourceDir,
+			"dockerfile_path":   source.DockerfilePath,
+			"build_context_dir": source.BuildContextDir,
+			"commit_sha":        source.CommitSHA,
+			"image_ref":         spec.Image,
 		},
 	})
 }

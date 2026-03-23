@@ -10,6 +10,9 @@ const (
 	AppSourceTypeGitHubPublic = "github-public"
 
 	AppBuildStrategyStaticSite = "static-site"
+	AppBuildStrategyDockerfile = "dockerfile"
+
+	AppImportProfileUniAPI = "uni-api"
 
 	RuntimeStatusPending = "pending"
 	RuntimeStatusActive  = "active"
@@ -21,12 +24,18 @@ const (
 	OperationTypeDeploy  = "deploy"
 	OperationTypeScale   = "scale"
 	OperationTypeMigrate = "migrate"
+	OperationTypeDelete  = "delete"
 
 	OperationStatusPending      = "pending"
 	OperationStatusRunning      = "running"
 	OperationStatusWaitingAgent = "waiting-agent"
 	OperationStatusCompleted    = "completed"
 	OperationStatusFailed       = "failed"
+
+	IdempotencyScopeAppImportGitHub = "app.import_github"
+
+	IdempotencyStatusPending   = "pending"
+	IdempotencyStatusCompleted = "completed"
 
 	ExecutionModeManaged = "managed"
 	ExecutionModeAgent   = "agent"
@@ -109,12 +118,15 @@ type Runtime struct {
 }
 
 type AppSource struct {
-	Type          string `json:"type"`
-	RepoURL       string `json:"repo_url,omitempty"`
-	RepoBranch    string `json:"repo_branch,omitempty"`
-	SourceDir     string `json:"source_dir,omitempty"`
-	BuildStrategy string `json:"build_strategy,omitempty"`
-	CommitSHA     string `json:"commit_sha,omitempty"`
+	Type            string `json:"type"`
+	RepoURL         string `json:"repo_url,omitempty"`
+	RepoBranch      string `json:"repo_branch,omitempty"`
+	SourceDir       string `json:"source_dir,omitempty"`
+	BuildStrategy   string `json:"build_strategy,omitempty"`
+	CommitSHA       string `json:"commit_sha,omitempty"`
+	DockerfilePath  string `json:"dockerfile_path,omitempty"`
+	BuildContextDir string `json:"build_context_dir,omitempty"`
+	ImportProfile   string `json:"import_profile,omitempty"`
 }
 
 type AppRoute struct {
@@ -132,6 +144,24 @@ type AppSpec struct {
 	Ports     []int             `json:"ports,omitempty"`
 	Replicas  int               `json:"replicas"`
 	RuntimeID string            `json:"runtime_id"`
+	Files     []AppFile         `json:"files,omitempty"`
+	Postgres  *AppPostgresSpec  `json:"postgres,omitempty"`
+}
+
+type AppFile struct {
+	Path    string `json:"path"`
+	Content string `json:"content,omitempty"`
+	Secret  bool   `json:"secret,omitempty"`
+	Mode    int32  `json:"mode,omitempty"`
+}
+
+type AppPostgresSpec struct {
+	Image       string `json:"image,omitempty"`
+	Database    string `json:"database,omitempty"`
+	User        string `json:"user,omitempty"`
+	Password    string `json:"password,omitempty"`
+	ServiceName string `json:"service_name,omitempty"`
+	StoragePath string `json:"storage_path,omitempty"`
 }
 
 type AppStatus struct {
@@ -155,6 +185,18 @@ type App struct {
 	Status      AppStatus  `json:"status"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+type IdempotencyRecord struct {
+	Scope       string    `json:"scope"`
+	TenantID    string    `json:"tenant_id"`
+	Key         string    `json:"key"`
+	RequestHash string    `json:"request_hash"`
+	Status      string    `json:"status"`
+	AppID       string    `json:"app_id,omitempty"`
+	OperationID string    `json:"operation_id,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type Operation struct {
@@ -216,14 +258,15 @@ func (p Principal) IsPlatformAdmin() bool {
 }
 
 type State struct {
-	Version          string            `json:"version"`
-	Tenants          []Tenant          `json:"tenants"`
-	Projects         []Project         `json:"projects"`
-	APIKeys          []APIKey          `json:"api_keys"`
-	EnrollmentTokens []EnrollmentToken `json:"enrollment_tokens"`
-	NodeKeys         []NodeKey         `json:"node_keys"`
-	Runtimes         []Runtime         `json:"runtimes"`
-	Apps             []App             `json:"apps"`
-	Operations       []Operation       `json:"operations"`
-	AuditEvents      []AuditEvent      `json:"audit_events"`
+	Version          string              `json:"version"`
+	Tenants          []Tenant            `json:"tenants"`
+	Projects         []Project           `json:"projects"`
+	APIKeys          []APIKey            `json:"api_keys"`
+	EnrollmentTokens []EnrollmentToken   `json:"enrollment_tokens"`
+	NodeKeys         []NodeKey           `json:"node_keys"`
+	Runtimes         []Runtime           `json:"runtimes"`
+	Apps             []App               `json:"apps"`
+	Operations       []Operation         `json:"operations"`
+	AuditEvents      []AuditEvent        `json:"audit_events"`
+	Idempotency      []IdempotencyRecord `json:"idempotency"`
 }

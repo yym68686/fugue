@@ -607,3 +607,206 @@ func TestDeployOperationUpdatesImportedAppSource(t *testing.T) {
 		t.Fatalf("expected source dir %s, got %s", source.SourceDir, app.Source.SourceDir)
 	}
 }
+
+func TestScaleOperationAllowsZeroAndDisablesApp(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Disable App")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "nginx:1.27",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	replicas := 0
+	op, err := s.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeScale,
+		AppID:           app.ID,
+		DesiredReplicas: &replicas,
+	})
+	if err != nil {
+		t.Fatalf("create scale operation: %v", err)
+	}
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim operation: %v", err)
+	} else if !found {
+		t.Fatal("expected pending operation")
+	}
+	if _, err := s.CompleteManagedOperation(op.ID, "/tmp/demo-disabled.yaml", "disabled"); err != nil {
+		t.Fatalf("complete operation: %v", err)
+	}
+
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.Spec.Replicas != 0 || app.Status.CurrentReplicas != 0 {
+		t.Fatalf("expected replicas=0 after disable, got spec=%d status=%d", app.Spec.Replicas, app.Status.CurrentReplicas)
+	}
+	if app.Status.Phase != "disabled" {
+		t.Fatalf("expected phase disabled, got %s", app.Status.Phase)
+	}
+}
+
+func TestDeleteOperationTombstonesAppAndFreesNameAndHostname(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Delete App")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	spec := model.AppSpec{
+		Image:     "registry.example.com/demo:latest",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}
+	source := model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyStaticSite,
+	}
+	route := model.AppRoute{
+		Hostname:    "demo.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://demo.example.com",
+		ServicePort: 80,
+	}
+
+	app, err := s.CreateImportedApp(tenant.ID, project.ID, "demo", "", spec, source, route)
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	op, err := s.CreateOperation(model.Operation{
+		TenantID: tenant.ID,
+		Type:     model.OperationTypeDelete,
+		AppID:    app.ID,
+	})
+	if err != nil {
+		t.Fatalf("create delete operation: %v", err)
+	}
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim delete operation: %v", err)
+	} else if !found {
+		t.Fatal("expected pending delete operation")
+	}
+	if _, err := s.CompleteManagedOperation(op.ID, "/tmp/demo-delete.yaml", "deleted"); err != nil {
+		t.Fatalf("complete delete operation: %v", err)
+	}
+
+	if _, err := s.GetApp(app.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected deleted app to be hidden, got %v", err)
+	}
+	if _, err := s.GetAppByHostname(route.Hostname); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected deleted app hostname to be released, got %v", err)
+	}
+
+	apps, err := s.ListApps(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list apps: %v", err)
+	}
+	if len(apps) != 0 {
+		t.Fatalf("expected no visible apps after delete, got %+v", apps)
+	}
+
+	recreated, err := s.CreateImportedApp(tenant.ID, project.ID, "demo", "", spec, source, route)
+	if err != nil {
+		t.Fatalf("recreate imported app after delete: %v", err)
+	}
+	if recreated.ID == app.ID {
+		t.Fatalf("expected recreated app to have a new id, got %s", recreated.ID)
+	}
+}
+
+func TestIdempotencyRecordLifecycle(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Idempotency")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+
+	record, fresh, err := s.ReserveIdempotencyRecord(model.IdempotencyScopeAppImportGitHub, tenant.ID, "key-1", "hash-a")
+	if err != nil {
+		t.Fatalf("reserve idempotency record: %v", err)
+	}
+	if !fresh || record.Status != model.IdempotencyStatusPending {
+		t.Fatalf("expected fresh pending reservation, got fresh=%v record=%+v", fresh, record)
+	}
+
+	record, fresh, err = s.ReserveIdempotencyRecord(model.IdempotencyScopeAppImportGitHub, tenant.ID, "key-1", "hash-a")
+	if err != nil {
+		t.Fatalf("reserve same idempotency record: %v", err)
+	}
+	if fresh {
+		t.Fatalf("expected existing reservation, got fresh=%v", fresh)
+	}
+
+	if _, _, err := s.ReserveIdempotencyRecord(model.IdempotencyScopeAppImportGitHub, tenant.ID, "key-1", "hash-b"); !errors.Is(err, ErrIdempotencyMismatch) {
+		t.Fatalf("expected ErrIdempotencyMismatch, got %v", err)
+	}
+
+	record, err = s.CompleteIdempotencyRecord(model.IdempotencyScopeAppImportGitHub, tenant.ID, "key-1", "app_demo", "op_demo")
+	if err != nil {
+		t.Fatalf("complete idempotency record: %v", err)
+	}
+	if record.Status != model.IdempotencyStatusCompleted || record.AppID != "app_demo" || record.OperationID != "op_demo" {
+		t.Fatalf("unexpected completed idempotency record: %+v", record)
+	}
+
+	record, fresh, err = s.ReserveIdempotencyRecord(model.IdempotencyScopeAppImportGitHub, tenant.ID, "key-1", "hash-a")
+	if err != nil {
+		t.Fatalf("reserve completed idempotency record: %v", err)
+	}
+	if fresh || record.Status != model.IdempotencyStatusCompleted {
+		t.Fatalf("expected completed record replay, got fresh=%v record=%+v", fresh, record)
+	}
+
+	if _, fresh, err := s.ReserveIdempotencyRecord(model.IdempotencyScopeAppImportGitHub, tenant.ID, "key-2", "hash-z"); err != nil {
+		t.Fatalf("reserve second key: %v", err)
+	} else if !fresh {
+		t.Fatal("expected fresh second key")
+	}
+	if err := s.ReleaseIdempotencyRecord(model.IdempotencyScopeAppImportGitHub, tenant.ID, "key-2"); err != nil {
+		t.Fatalf("release idempotency record: %v", err)
+	}
+	if _, fresh, err := s.ReserveIdempotencyRecord(model.IdempotencyScopeAppImportGitHub, tenant.ID, "key-2", "hash-z"); err != nil {
+		t.Fatalf("reserve released idempotency record: %v", err)
+	} else if !fresh {
+		t.Fatal("expected released key to be reservable again")
+	}
+}

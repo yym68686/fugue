@@ -6,12 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
-	"text/template"
 
 	"fugue/internal/model"
+
+	"gopkg.in/yaml.v3"
 )
 
 type Renderer struct {
@@ -44,31 +43,19 @@ func (r Renderer) RenderAppBundle(app model.App, constraints ...SchedulingConstr
 		scheduling = constraints[0]
 	}
 
-	data := renderData{
-		Namespace:    namespace,
-		AppName:      sanitizeName(app.Name),
-		Image:        app.Spec.Image,
-		Command:      app.Spec.Command,
-		Args:         app.Spec.Args,
-		Replicas:     app.Spec.Replicas,
-		Ports:        app.Spec.Ports,
-		Env:          sortedEnv(app.Spec.Env),
-		NodeSelector: sortedEnv(scheduling.NodeSelector),
-		Tolerations:  scheduling.Tolerations,
-	}
-
-	var buf bytes.Buffer
-	if err := appManifestTemplate.Execute(&buf, data); err != nil {
+	objects := buildAppObjects(app, scheduling)
+	manifest, err := marshalObjectsToManifest(objects)
+	if err != nil {
 		return Bundle{}, fmt.Errorf("render manifest: %w", err)
 	}
-	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(path, manifest, 0o644); err != nil {
 		return Bundle{}, fmt.Errorf("write manifest: %w", err)
 	}
 
 	return Bundle{
 		TenantNamespace: namespace,
 		ManifestPath:    path,
-		Manifest:        buf.Bytes(),
+		Manifest:        manifest,
 	}, nil
 }
 
@@ -81,132 +68,26 @@ func ApplyKubectl(manifestPath string) error {
 	return nil
 }
 
-type renderData struct {
-	Namespace    string
-	AppName      string
-	Image        string
-	Command      []string
-	Args         []string
-	Replicas     int
-	Ports        []int
-	Env          [][2]string
-	NodeSelector [][2]string
-	Tolerations  []Toleration
+func DeleteKubectl(manifestPath string) error {
+	cmd := exec.Command("kubectl", "delete", "--ignore-not-found=true", "-f", manifestPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("kubectl delete: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
-var appManifestTemplate = template.Must(template.New("app-manifest").Funcs(template.FuncMap{
-	"quote": strconv.Quote,
-}).Parse(`apiVersion: v1
-kind: Namespace
-metadata:
-  name: {{ .Namespace }}
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: {{ .AppName }}
-  namespace: {{ .Namespace }}
-  labels:
-    app.kubernetes.io/name: {{ .AppName }}
-    app.kubernetes.io/managed-by: fugue
-spec:
-  replicas: {{ .Replicas }}
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: {{ .AppName }}
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: {{ .AppName }}
-        app.kubernetes.io/managed-by: fugue
-    spec:
-      containers:
-      - name: {{ .AppName }}
-        image: {{ .Image }}
-{{- if .Command }}
-        command:
-{{- range .Command }}
-        - {{ quote . }}
-{{- end }}
-{{- end }}
-{{- if .Args }}
-        args:
-{{- range .Args }}
-        - {{ quote . }}
-{{- end }}
-{{- end }}
-{{- if .Ports }}
-        ports:
-{{- range .Ports }}
-        - containerPort: {{ . }}
-{{- end }}
-{{- end }}
-{{- if .Env }}
-        env:
-{{- range .Env }}
-        - name: {{ index . 0 }}
-          value: {{ quote (index . 1) }}
-{{- end }}
-{{- end }}
-{{- if .NodeSelector }}
-      nodeSelector:
-{{- range .NodeSelector }}
-        {{ index . 0 }}: {{ quote (index . 1) }}
-{{- end }}
-{{- end }}
-{{- if .Tolerations }}
-      tolerations:
-{{- range .Tolerations }}
-      - key: {{ quote .Key }}
-        operator: {{ quote .Operator }}
-        value: {{ quote .Value }}
-        effect: {{ quote .Effect }}
-{{- end }}
-{{- end }}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ .AppName }}
-  namespace: {{ .Namespace }}
-spec:
-  selector:
-    app.kubernetes.io/name: {{ .AppName }}
-{{- if .Ports }}
-  ports:
-{{- range .Ports }}
-  - name: tcp-{{ . }}
-    port: {{ . }}
-    targetPort: {{ . }}
-{{- end }}
-{{- else }}
-  ports:
-  - name: tcp-80
-    port: 80
-    targetPort: 80
-{{- end }}
-`))
-
-func sanitizeName(name string) string {
-	name = model.Slugify(name)
-	if len(name) > 50 {
-		return name[:50]
+func marshalObjectsToManifest(objects []map[string]any) ([]byte, error) {
+	var buf bytes.Buffer
+	for index, obj := range objects {
+		doc, err := yaml.Marshal(obj)
+		if err != nil {
+			return nil, fmt.Errorf("marshal object %d: %w", index, err)
+		}
+		if index > 0 {
+			buf.WriteString("---\n")
+		}
+		buf.Write(doc)
 	}
-	return name
-}
-
-func sortedEnv(env map[string]string) [][2]string {
-	if len(env) == 0 {
-		return nil
-	}
-	keys := make([]string, 0, len(env))
-	for key := range env {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	pairs := make([][2]string, 0, len(keys))
-	for _, key := range keys {
-		pairs = append(pairs, [2]string{key, env[key]})
-	}
-	return pairs
+	return buf.Bytes(), nil
 }

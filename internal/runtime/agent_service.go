@@ -210,6 +210,7 @@ func (s *AgentService) processTask(ctx context.Context, task AgentTask) error {
 			return fmt.Errorf("scale task missing desired replicas")
 		}
 		app.Spec.Replicas = *task.Operation.DesiredReplicas
+	case model.OperationTypeDelete:
 	case model.OperationTypeMigrate:
 		if task.Operation.TargetRuntimeID == "" {
 			return fmt.Errorf("migrate task missing target runtime")
@@ -224,14 +225,25 @@ func (s *AgentService) processTask(ctx context.Context, task AgentTask) error {
 		return fmt.Errorf("render bundle: %w", err)
 	}
 	if s.Config.ApplyWithKubectl {
-		if err := ApplyKubectl(bundle.ManifestPath); err != nil {
-			return fmt.Errorf("kubectl apply: %w", err)
+		switch task.Operation.Type {
+		case model.OperationTypeDelete:
+			if err := DeleteKubectl(bundle.ManifestPath); err != nil {
+				return fmt.Errorf("kubectl delete: %w", err)
+			}
+		default:
+			if err := ApplyKubectl(bundle.ManifestPath); err != nil {
+				return fmt.Errorf("kubectl apply: %w", err)
+			}
 		}
 	}
 
+	message := fmt.Sprintf("external runtime applied in namespace %s", bundle.TenantNamespace)
+	if task.Operation.Type == model.OperationTypeDelete {
+		message = fmt.Sprintf("external runtime deleted app resources in namespace %s", bundle.TenantNamespace)
+	}
 	reqBody := map[string]any{
 		"manifest_path": bundle.ManifestPath,
-		"message":       fmt.Sprintf("external runtime applied in namespace %s", bundle.TenantNamespace),
+		"message":       message,
 	}
 	payload, err := json.Marshal(reqBody)
 	if err != nil {

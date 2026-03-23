@@ -63,15 +63,15 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 - 可复用的租户级 node key，用于一条命令接管 VPS
 - 一个内置共享托管运行时：`runtime_managed_shared`
 - 通过 node bootstrap + `fugue-agent` 接入外部节点
-- 异步 app 部署、扩容、迁移
-- `POST /v1/apps/import-github`：导入 GitHub 公共静态站点
+- 异步 app 部署、扩容、迁移、停用、删除
+- `POST /v1/apps/import-github`：导入 GitHub 公共仓库，并支持幂等键
 - `POST /v1/apps/{id}/rebuild`：对已导入的 GitHub 项目拉取最新代码后重新构建并重部署
 - runtime-agent 拉模式：enroll、heartbeat、拉任务、回传任务完成状态
 - 控制面审计日志
 
 尚未实现：
 
-- 资源 update / delete API
+- 资源 update API
 - 任意 Dockerfile / buildpack 自动识别
 - HPA / VPA 等自动扩缩容策略
 - 调度策略、租户配额、计费或付费逻辑
@@ -110,8 +110,9 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 | `runtime.write` | 直接创建 runtime |
 | `app.write` | 创建 app |
 | `app.deploy` | 创建 deploy 操作 |
-| `app.scale` | 创建 scale 操作 |
+| `app.scale` | 创建 scale / disable 操作 |
 | `app.migrate` | 创建 migrate 操作 |
+| `app.delete` | 在不授予广义 `app.write` 的情况下删除 app |
 | `platform.admin` | 平台管理员行为 |
 
 说明：
@@ -183,12 +184,14 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 | `POST` | `/v1/runtimes/enroll-tokens` | `runtime.attach` | 创建一次性 enroll token |
 | `GET` | `/v1/apps` | 任意 API 凭证 | 列出可见 app |
 | `POST` | `/v1/apps` | `app.write` | 创建 app 元数据与期望 spec |
-| `POST` | `/v1/apps/import-github` | `app.write` + `app.deploy` | 导入 GitHub 公共静态站点，分配默认域名，并排入部署 |
+| `POST` | `/v1/apps/import-github` | `app.write` + `app.deploy` | 导入 GitHub 公共仓库，分配默认域名，排入部署，并支持 `Idempotency-Key` |
 | `GET` | `/v1/apps/{id}` | 任意 API 凭证 | 查看 app 详情 |
 | `POST` | `/v1/apps/{id}/rebuild` | `app.deploy` | 重新拉取 `github-public` app 的最新代码，重建并排入部署 |
 | `POST` | `/v1/apps/{id}/deploy` | `app.deploy` | 创建异步 deploy 操作 |
-| `POST` | `/v1/apps/{id}/scale` | `app.scale` | 创建异步 scale 操作 |
+| `POST` | `/v1/apps/{id}/scale` | `app.scale` | 创建异步 scale 操作；`replicas` 可以是 `0` |
+| `POST` | `/v1/apps/{id}/disable` | `app.scale` | 创建异步 disable 操作，把 app 缩到 `0` |
 | `POST` | `/v1/apps/{id}/migrate` | `app.migrate` | 创建异步 migrate 操作 |
+| `DELETE` | `/v1/apps/{id}` | `app.write` 或 `app.delete` | 创建异步 delete 操作，并把 app 从可见列表中移除 |
 | `GET` | `/v1/operations` | 任意 API 凭证 | 查看当前租户可见的操作列表 |
 | `GET` | `/v1/operations/{id}` | 任意 API 凭证 | 查看操作详情 |
 | `GET` | `/v1/audit-events` | 任意 API 凭证 | 按时间倒序返回审计事件 |
@@ -291,6 +294,12 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 
 `POST /v1/apps/import-github`
 
+请求头可选：
+
+```bash
+Idempotency-Key: import-<unique-key>
+```
+
 ```json
 {
   "tenant_id": "tenant_xxx",
@@ -312,6 +321,8 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 - Git submodule 默认会递归拉取
 - Fugue 会把静态目录打包成基于 Caddy 的镜像，推送到内置 registry，创建 app，并自动排入 deploy 操作
 - 返回的 app 会带一个在配置好的 app base domain 下生成的默认公网域名
+- 如果同一个 `Idempotency-Key` 配合同一份请求体被重复提交，Fugue 会返回原来的 app + operation，而不会再创建一个重复 app
+- 如果同一个 `Idempotency-Key` 被用于不同的请求体，Fugue 会返回 `409 Conflict`
 
 `POST /v1/apps/{id}/rebuild`
 
@@ -363,6 +374,12 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 }
 ```
 
+`POST /v1/apps/{id}/disable`
+
+```json
+{}
+```
+
 `POST /v1/apps/{id}/migrate`
 
 ```json
@@ -370,6 +387,10 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
   "target_runtime_id": "runtime_xxx"
 }
 ```
+
+`DELETE /v1/apps/{id}`
+
+无需请求体。
 
 ### Runtime-agent 端点
 

@@ -17,9 +17,10 @@ import (
 )
 
 var (
-	ErrNotFound     = errors.New("not found")
-	ErrConflict     = errors.New("conflict")
-	ErrInvalidInput = errors.New("invalid input")
+	ErrNotFound            = errors.New("not found")
+	ErrConflict            = errors.New("conflict")
+	ErrInvalidInput        = errors.New("invalid input")
+	ErrIdempotencyMismatch = errors.New("idempotency key mismatch")
 )
 
 type Store struct {
@@ -186,6 +187,7 @@ func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
 		state.Apps = deleteAppsByTenant(state.Apps, id)
 		state.Operations = deleteOperationsByTenant(state.Operations, id)
 		state.AuditEvents = deleteAuditEventsByTenant(state.AuditEvents, id)
+		state.Idempotency = deleteIdempotencyRecordsByTenant(state.Idempotency, id)
 		return nil
 	})
 	return tenant, err
@@ -874,6 +876,9 @@ func (s *Store) ListApps(tenantID string, platformAdmin bool) ([]model.App, erro
 	var apps []model.App
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, app := range state.Apps {
+			if isDeletedApp(app) {
+				continue
+			}
 			if platformAdmin || app.TenantID == tenantID {
 				apps = append(apps, app)
 			}
@@ -897,6 +902,9 @@ func (s *Store) GetApp(id string) (model.App, error) {
 			return ErrNotFound
 		}
 		app = state.Apps[index]
+		if isDeletedApp(app) {
+			return ErrNotFound
+		}
 		return nil
 	})
 	return app, err
@@ -910,6 +918,9 @@ func (s *Store) GetAppByHostname(hostname string) (model.App, error) {
 	var app model.App
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, candidate := range state.Apps {
+			if isDeletedApp(candidate) {
+				continue
+			}
 			if candidate.Route == nil {
 				continue
 			}
@@ -1018,9 +1029,15 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			}
 			op.TargetRuntimeID = op.DesiredSpec.RuntimeID
 		case model.OperationTypeScale:
-			if op.DesiredReplicas == nil || *op.DesiredReplicas < 1 {
+			if op.DesiredReplicas == nil || *op.DesiredReplicas < 0 {
 				return ErrInvalidInput
 			}
+			op.TargetRuntimeID = app.Spec.RuntimeID
+		case model.OperationTypeDelete:
+			if strings.TrimSpace(app.Spec.RuntimeID) == "" {
+				return ErrInvalidInput
+			}
+			op.SourceRuntimeID = app.Spec.RuntimeID
 			op.TargetRuntimeID = app.Spec.RuntimeID
 		case model.OperationTypeMigrate:
 			if op.TargetRuntimeID == "" || !runtimeVisibleToTenant(state, op.TargetRuntimeID, op.TenantID) {
@@ -1320,6 +1337,9 @@ func ensureDefaults(state *model.State) {
 	if state.AuditEvents == nil {
 		state.AuditEvents = []model.AuditEvent{}
 	}
+	if state.Idempotency == nil {
+		state.Idempotency = []model.IdempotencyRecord{}
+	}
 	if findRuntime(state, "runtime_managed_shared") < 0 {
 		now := time.Now().UTC()
 		state.Runtimes = append(state.Runtimes, model.Runtime{
@@ -1392,6 +1412,13 @@ func cloneAppSpec(in *model.AppSpec) *model.AppSpec {
 		out.Ports = append([]int(nil), in.Ports...)
 	}
 	out.Env = cloneMap(in.Env)
+	if len(in.Files) > 0 {
+		out.Files = append([]model.AppFile(nil), in.Files...)
+	}
+	if in.Postgres != nil {
+		pg := *in.Postgres
+		out.Postgres = &pg
+	}
 	return &out
 }
 
@@ -1427,9 +1454,20 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 			return ErrInvalidInput
 		}
 		app.Spec.Replicas = *op.DesiredReplicas
-		app.Status.Phase = "scaled"
+		if *op.DesiredReplicas == 0 {
+			app.Status.Phase = "disabled"
+		} else {
+			app.Status.Phase = "scaled"
+		}
 		app.Status.CurrentRuntimeID = app.Spec.RuntimeID
 		app.Status.CurrentReplicas = *op.DesiredReplicas
+	case model.OperationTypeDelete:
+		app.Name = deletedAppName(app.Name, op.ID)
+		app.Route = nil
+		app.Spec.Replicas = 0
+		app.Status.Phase = "deleted"
+		app.Status.CurrentRuntimeID = ""
+		app.Status.CurrentReplicas = 0
 	case model.OperationTypeMigrate:
 		if op.TargetRuntimeID == "" {
 			return ErrInvalidInput

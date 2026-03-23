@@ -10,8 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"sort"
-	"strconv"
 	"strings"
 
 	"fugue/internal/model"
@@ -48,32 +46,20 @@ func ApplyManagedApp(app model.App, constraints ...SchedulingConstraints) error 
 		},
 	}
 	baseURL := "https://" + host + ":" + port
-	namespace := NamespaceForTenant(app.TenantID)
-	labels := map[string]string{
-		"app.kubernetes.io/name":       sanitizeName(app.Name),
-		"app.kubernetes.io/managed-by": "fugue",
-	}
-
-	if err := applyObject(client, baseURL, string(token), "/api/v1/namespaces/"+namespace, map[string]any{
-		"apiVersion": "v1",
-		"kind":       "Namespace",
-		"metadata": map[string]any{
-			"name": namespace,
-		},
-	}); err != nil {
-		return fmt.Errorf("apply namespace: %w", err)
-	}
 
 	var scheduling SchedulingConstraints
 	if len(constraints) > 0 {
 		scheduling = constraints[0]
 	}
 
-	if err := applyObject(client, baseURL, string(token), "/apis/apps/v1/namespaces/"+namespace+"/deployments/"+sanitizeName(app.Name), buildDeploymentObject(namespace, app, labels, scheduling)); err != nil {
-		return fmt.Errorf("apply deployment: %w", err)
-	}
-	if err := applyObject(client, baseURL, string(token), "/api/v1/namespaces/"+namespace+"/services/"+sanitizeName(app.Name), buildServiceObject(namespace, app, labels)); err != nil {
-		return fmt.Errorf("apply service: %w", err)
+	for _, obj := range buildAppObjects(app, scheduling) {
+		apiPath, err := objectAPIPath(NamespaceForTenant(app.TenantID), obj)
+		if err != nil {
+			return err
+		}
+		if err := applyObject(client, baseURL, string(token), apiPath, obj); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -114,119 +100,26 @@ func applyObject(client *http.Client, baseURL, bearerToken, apiPath string, obj 
 	return nil
 }
 
-func buildDeploymentObject(namespace string, app model.App, labels map[string]string, scheduling SchedulingConstraints) map[string]any {
-	container := map[string]any{
-		"name":  sanitizeName(app.Name),
-		"image": app.Spec.Image,
-	}
-	if len(app.Spec.Command) > 0 {
-		container["command"] = app.Spec.Command
-	}
-	if len(app.Spec.Args) > 0 {
-		container["args"] = app.Spec.Args
-	}
-	if len(app.Spec.Ports) > 0 {
-		ports := make([]map[string]any, 0, len(app.Spec.Ports))
-		for _, port := range app.Spec.Ports {
-			ports = append(ports, map[string]any{
-				"containerPort": port,
-				"protocol":      "TCP",
-			})
-		}
-		container["ports"] = ports
-	}
-	if len(app.Spec.Env) > 0 {
-		envKeys := make([]string, 0, len(app.Spec.Env))
-		for key := range app.Spec.Env {
-			envKeys = append(envKeys, key)
-		}
-		sort.Strings(envKeys)
-		env := make([]map[string]string, 0, len(envKeys))
-		for _, key := range envKeys {
-			env = append(env, map[string]string{
-				"name":  key,
-				"value": app.Spec.Env[key],
-			})
-		}
-		container["env"] = env
+func objectAPIPath(defaultNamespace string, obj map[string]any) (string, error) {
+	apiVersion, _ := obj["apiVersion"].(string)
+	kind, _ := obj["kind"].(string)
+	metadata, _ := obj["metadata"].(map[string]any)
+	name, _ := metadata["name"].(string)
+	namespace, _ := metadata["namespace"].(string)
+	if namespace == "" {
+		namespace = defaultNamespace
 	}
 
-	podSpec := map[string]any{
-		"containers": []map[string]any{container},
-	}
-	if len(scheduling.NodeSelector) > 0 {
-		nodeSelector := make(map[string]string, len(scheduling.NodeSelector))
-		for key, value := range scheduling.NodeSelector {
-			nodeSelector[key] = value
-		}
-		podSpec["nodeSelector"] = nodeSelector
-	}
-	if len(scheduling.Tolerations) > 0 {
-		tolerations := make([]map[string]any, 0, len(scheduling.Tolerations))
-		for _, toleration := range scheduling.Tolerations {
-			tolerations = append(tolerations, map[string]any{
-				"key":      toleration.Key,
-				"operator": toleration.Operator,
-				"value":    toleration.Value,
-				"effect":   toleration.Effect,
-			})
-		}
-		podSpec["tolerations"] = tolerations
-	}
-
-	return map[string]any{
-		"apiVersion": "apps/v1",
-		"kind":       "Deployment",
-		"metadata": map[string]any{
-			"name":      sanitizeName(app.Name),
-			"namespace": namespace,
-			"labels":    labels,
-		},
-		"spec": map[string]any{
-			"replicas": app.Spec.Replicas,
-			"selector": map[string]any{
-				"matchLabels": labels,
-			},
-			"template": map[string]any{
-				"metadata": map[string]any{
-					"labels": labels,
-				},
-				"spec": podSpec,
-			},
-		},
-	}
-}
-
-func buildServiceObject(namespace string, app model.App, labels map[string]string) map[string]any {
-	servicePorts := make([]map[string]any, 0, len(app.Spec.Ports))
-	for _, port := range app.Spec.Ports {
-		servicePorts = append(servicePorts, map[string]any{
-			"name":       "tcp-" + strconv.Itoa(port),
-			"port":       port,
-			"targetPort": port,
-			"protocol":   "TCP",
-		})
-	}
-	if len(servicePorts) == 0 {
-		servicePorts = append(servicePorts, map[string]any{
-			"name":       "tcp-80",
-			"port":       80,
-			"targetPort": 80,
-			"protocol":   "TCP",
-		})
-	}
-
-	return map[string]any{
-		"apiVersion": "v1",
-		"kind":       "Service",
-		"metadata": map[string]any{
-			"name":      sanitizeName(app.Name),
-			"namespace": namespace,
-			"labels":    labels,
-		},
-		"spec": map[string]any{
-			"selector": labels,
-			"ports":    servicePorts,
-		},
+	switch {
+	case apiVersion == "v1" && kind == "Namespace":
+		return "/api/v1/namespaces/" + name, nil
+	case apiVersion == "v1" && kind == "Secret":
+		return "/api/v1/namespaces/" + namespace + "/secrets/" + name, nil
+	case apiVersion == "v1" && kind == "Service":
+		return "/api/v1/namespaces/" + namespace + "/services/" + name, nil
+	case apiVersion == "apps/v1" && kind == "Deployment":
+		return "/apis/apps/v1/namespaces/" + namespace + "/deployments/" + name, nil
+	default:
+		return "", fmt.Errorf("unsupported object %s %s", apiVersion, kind)
 	}
 }

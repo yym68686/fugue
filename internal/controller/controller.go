@@ -158,6 +158,7 @@ func (s *Service) executeManagedOperation(op model.Operation) error {
 			return fmt.Errorf("scale operation %s missing desired replicas", op.ID)
 		}
 		app.Spec.Replicas = *op.DesiredReplicas
+	case model.OperationTypeDelete:
 	case model.OperationTypeMigrate:
 		if op.TargetRuntimeID == "" {
 			return fmt.Errorf("migrate operation %s missing target runtime", op.ID)
@@ -178,12 +179,23 @@ func (s *Service) executeManagedOperation(op model.Operation) error {
 	}
 
 	if s.Config.KubectlApply {
-		if err := runtime.ApplyManagedApp(app, scheduling); err != nil {
-			return fmt.Errorf("apply managed app %s: %w", app.ID, err)
+		switch op.Type {
+		case model.OperationTypeDelete:
+			if err := runtime.DeleteManagedApp(app, scheduling); err != nil {
+				return fmt.Errorf("delete managed app %s: %w", app.ID, err)
+			}
+		default:
+			if err := runtime.ApplyManagedApp(app, scheduling); err != nil {
+				return fmt.Errorf("apply managed app %s: %w", app.ID, err)
+			}
 		}
 	}
 
-	_, err = s.Store.CompleteManagedOperation(op.ID, bundle.ManifestPath, fmt.Sprintf("managed runtime applied in namespace %s", bundle.TenantNamespace))
+	message := fmt.Sprintf("managed runtime applied in namespace %s", bundle.TenantNamespace)
+	if op.Type == model.OperationTypeDelete {
+		message = fmt.Sprintf("managed runtime deleted app resources in namespace %s", bundle.TenantNamespace)
+	}
+	_, err = s.Store.CompleteManagedOperation(op.ID, bundle.ManifestPath, message)
 	if err != nil {
 		return fmt.Errorf("complete operation %s: %w", op.ID, err)
 	}

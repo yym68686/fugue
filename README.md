@@ -63,15 +63,15 @@ What is already usable on the deployed control plane:
 - reusable tenant-scoped node keys for one-command VPS onboarding
 - one built-in managed shared runtime: `runtime_managed_shared`
 - external node attachment through node bootstrap plus `fugue-agent`
-- asynchronous app deploy, scale, and migrate operations
-- `POST /v1/apps/import-github` for public GitHub static sites
+- asynchronous app deploy, scale, migrate, disable, and delete operations
+- `POST /v1/apps/import-github` for public GitHub repositories, with optional idempotency key support
 - `POST /v1/apps/{id}/rebuild` to rebuild an imported GitHub app from the latest repo state and redeploy it
 - runtime-agent pull model: enroll, heartbeat, fetch tasks, mark task complete
 - audit trail for control-plane actions
 
 What is not implemented yet:
 
-- resource update and delete APIs
+- resource update APIs
 - arbitrary Dockerfile or buildpack detection for imported repositories
 - autoscaling policies such as HPA/VPA
 - scheduling policies, quotas, billing, or paywall logic
@@ -110,8 +110,9 @@ Tenant API keys can be minted with these scopes:
 | `runtime.write` | create runtimes directly |
 | `app.write` | create apps |
 | `app.deploy` | create deploy operations |
-| `app.scale` | create scale operations |
+| `app.scale` | create scale or disable operations |
 | `app.migrate` | create migrate operations |
+| `app.delete` | delete apps without broad `app.write` scope |
 | `platform.admin` | full platform admin behavior |
 
 Notes:
@@ -183,12 +184,14 @@ Legacy compatibility: `POST /v1/agent/enroll` still accepts one-time enroll toke
 | `POST` | `/v1/runtimes/enroll-tokens` | `runtime.attach` | creates one-time enroll token |
 | `GET` | `/v1/apps` | any API credential | lists visible apps |
 | `POST` | `/v1/apps` | `app.write` | creates app metadata and desired spec |
-| `POST` | `/v1/apps/import-github` | `app.write` + `app.deploy` | imports a public GitHub static site, allocates a default hostname, and queues deployment |
+| `POST` | `/v1/apps/import-github` | `app.write` + `app.deploy` | imports a public GitHub repository, allocates a default hostname, queues deployment, and honors `Idempotency-Key` |
 | `GET` | `/v1/apps/{id}` | any API credential | fetch app detail |
 | `POST` | `/v1/apps/{id}/rebuild` | `app.deploy` | rebuilds a `github-public` app from the latest GitHub code and queues deployment |
 | `POST` | `/v1/apps/{id}/deploy` | `app.deploy` | creates async deploy operation |
-| `POST` | `/v1/apps/{id}/scale` | `app.scale` | creates async scale operation |
+| `POST` | `/v1/apps/{id}/scale` | `app.scale` | creates async scale operation; `replicas` may be `0` |
+| `POST` | `/v1/apps/{id}/disable` | `app.scale` | creates async disable operation and scales the app to `0` |
 | `POST` | `/v1/apps/{id}/migrate` | `app.migrate` | creates async migrate operation |
+| `DELETE` | `/v1/apps/{id}` | `app.write` or `app.delete` | creates async delete operation and removes the app route from the visible app list |
 | `GET` | `/v1/operations` | any API credential | lists operations for visible tenant |
 | `GET` | `/v1/operations/{id}` | any API credential | fetch operation detail |
 | `GET` | `/v1/audit-events` | any API credential | newest first |
@@ -291,6 +294,12 @@ For a tenant-scoped API key, the request body itself is optional; an empty `POST
 
 `POST /v1/apps/import-github`
 
+Request headers:
+
+```bash
+Idempotency-Key: import-<unique-key>
+```
+
 ```json
 {
   "tenant_id": "tenant_xxx",
@@ -312,6 +321,8 @@ Import behavior in the current MVP:
 - Git submodules are cloned recursively by default
 - Fugue packages that directory into a Caddy-based image, pushes it into the internal registry, creates the app, and queues a deploy operation
 - the returned app includes a generated public hostname under your configured app base domain
+- if the same `Idempotency-Key` is replayed with the same request body, Fugue returns the original app + operation instead of creating a duplicate app
+- if the same `Idempotency-Key` is reused with a different request body, Fugue returns `409 Conflict`
 
 `POST /v1/apps/{id}/rebuild`
 
@@ -363,6 +374,12 @@ Or override the app spec during deployment:
 }
 ```
 
+`POST /v1/apps/{id}/disable`
+
+```json
+{}
+```
+
 `POST /v1/apps/{id}/migrate`
 
 ```json
@@ -370,6 +387,10 @@ Or override the app spec during deployment:
   "target_runtime_id": "runtime_xxx"
 }
 ```
+
+`DELETE /v1/apps/{id}`
+
+No request body.
 
 ### Runtime-agent endpoints
 

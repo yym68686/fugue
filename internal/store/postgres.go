@@ -110,6 +110,18 @@ var postgresSchemaStatements = []string{
 	)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_apps_tenant_project_name_ci ON fugue_apps (tenant_id, project_id, lower(name))`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_apps_route_hostname_ci ON fugue_apps (lower((route_json->>'hostname'))) WHERE route_json IS NOT NULL AND COALESCE(route_json->>'hostname', '') <> ''`,
+	`CREATE TABLE IF NOT EXISTS fugue_idempotency_keys (
+		scope TEXT NOT NULL,
+		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
+		key TEXT NOT NULL,
+		request_hash TEXT NOT NULL,
+		status TEXT NOT NULL,
+		app_id TEXT NOT NULL DEFAULT '',
+		operation_id TEXT NOT NULL DEFAULT '',
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (scope, tenant_id, key)
+	)`,
 	`CREATE TABLE IF NOT EXISTS fugue_operations (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
