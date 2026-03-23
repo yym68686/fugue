@@ -39,10 +39,28 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.Config.FallbackPollInterval <= 0 {
 		s.Config.FallbackPollInterval = 30 * time.Second
 	}
+	if s.Config.LeaderElectionRetryPeriod <= 0 {
+		s.Config.LeaderElectionRetryPeriod = 2 * time.Second
+	}
+	if s.Config.LeaderElectionLeaseDuration <= 0 {
+		s.Config.LeaderElectionLeaseDuration = 15 * time.Second
+	}
+	if s.Config.LeaderElectionRenewDeadline <= 0 {
+		s.Config.LeaderElectionRenewDeadline = 10 * time.Second
+	}
+	if s.Config.LegacyControllerCheckInterval <= 0 {
+		s.Config.LegacyControllerCheckInterval = 2 * time.Second
+	}
+	if s.Config.LeaderElectionEnabled {
+		return s.runWithLeaderElection(ctx)
+	}
+	return s.runActiveLoop(ctx)
+}
 
+func (s *Service) runActiveLoop(ctx context.Context) error {
 	eventDriven := strings.TrimSpace(s.Config.DatabaseURL) != ""
 	s.Logger.Printf(
-		"controller started; event_driven=%v poll_interval=%s fallback_poll_interval=%s render_dir=%s kubectl_apply=%v",
+		"controller active loop started; event_driven=%v poll_interval=%s fallback_poll_interval=%s render_dir=%s kubectl_apply=%v",
 		eventDriven,
 		s.Config.PollInterval,
 		s.Config.FallbackPollInterval,

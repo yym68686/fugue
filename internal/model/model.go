@@ -137,15 +137,16 @@ type AppRoute struct {
 }
 
 type AppSpec struct {
-	Image     string            `json:"image"`
-	Command   []string          `json:"command,omitempty"`
-	Args      []string          `json:"args,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
-	Ports     []int             `json:"ports,omitempty"`
-	Replicas  int               `json:"replicas"`
-	RuntimeID string            `json:"runtime_id"`
-	Files     []AppFile         `json:"files,omitempty"`
-	Postgres  *AppPostgresSpec  `json:"postgres,omitempty"`
+	Image        string            `json:"image"`
+	Command      []string          `json:"command,omitempty"`
+	Args         []string          `json:"args,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
+	Ports        []int             `json:"ports,omitempty"`
+	Replicas     int               `json:"replicas"`
+	RuntimeID    string            `json:"runtime_id"`
+	Files        []AppFile         `json:"files,omitempty"`
+	Postgres     *AppPostgresSpec  `json:"postgres,omitempty"`
+	RestartToken string            `json:"restart_token,omitempty"`
 }
 
 type AppFile struct {

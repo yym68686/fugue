@@ -4,13 +4,11 @@ kind: Service
 metadata:
   name: {{ include "fugue.fullname" . }}-registry
   labels:
-    {{- include "fugue.labels" . | nindent 4 }}
-    app.kubernetes.io/component: registry
+    {{- include "fugue.componentLabels" (dict "root" . "component" "registry") | nindent 4 }}
 spec:
   type: {{ .Values.registry.service.type }}
   selector:
-    {{- include "fugue.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: registry
+    {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "registry") | nindent 4 }}
   ports:
     - name: registry
       port: {{ .Values.registry.service.port }}

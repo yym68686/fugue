@@ -1,22 +1,28 @@
+{{- $apiNodeSelector := default .Values.nodeSelector .Values.api.nodeSelector -}}
+{{- $apiTolerations := default .Values.tolerations .Values.api.tolerations -}}
+{{- $apiAffinity := default .Values.affinity .Values.api.affinity -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "fugue.fullname" . }}
+  name: {{ include "fugue.apiDeploymentName" . }}
   labels:
-    {{- include "fugue.labels" . | nindent 4 }}
-    app.kubernetes.io/component: api
+    {{- include "fugue.componentLabels" (dict "root" . "component" "api") | nindent 4 }}
 spec:
+  replicas: {{ .Values.api.replicaCount }}
+  minReadySeconds: {{ .Values.api.minReadySeconds }}
+  revisionHistoryLimit: 3
   strategy:
-    type: Recreate
-  replicas: {{ .Values.replicaCount }}
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
-      {{- include "fugue.selectorLabels" . | nindent 6 }}
+      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "api") | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "fugue.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: api
+        {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "api") | nindent 8 }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -27,6 +33,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
+      terminationGracePeriodSeconds: {{ .Values.api.terminationGracePeriodSeconds }}
       hostNetwork: {{ .Values.api.hostNetwork }}
       {{- if .Values.api.hostNetwork }}
       dnsPolicy: ClusterFirstWithHostNet
@@ -89,6 +96,10 @@ spec:
               value: {{ .Values.api.registryPushBase | quote }}
             - name: FUGUE_IMPORT_WORK_DIR
               value: {{ .Values.api.importWorkDir | quote }}
+            - name: FUGUE_API_SHUTDOWN_DRAIN_DELAY
+              value: {{ .Values.api.shutdownDrainDelay | quote }}
+            - name: FUGUE_API_SHUTDOWN_TIMEOUT
+              value: {{ .Values.api.shutdownTimeout | quote }}
             - name: FUGUE_BOOTSTRAP_ADMIN_KEY
               valueFrom:
                 secretKeyRef:
@@ -100,68 +111,54 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/fugue
-          readinessProbe:
+          startupProbe:
             httpGet:
               path: /healthz
               port: http
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 3
+            failureThreshold: 1
           livenessProbe:
             httpGet:
               path: /healthz
               port: http
-            initialDelaySeconds: 15
-            periodSeconds: 20
+            periodSeconds: 10
           resources:
             {{- toYaml .Values.api.resources | nindent 12 }}
-        - name: controller
-          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
-          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
-          env:
-            - name: FUGUE_STORE_PATH
-              value: /var/lib/fugue/store.json
-            - name: FUGUE_DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "fugue.configSecretName" . }}
-                  key: FUGUE_DATABASE_URL
-            - name: FUGUE_RENDER_DIR
-              value: /var/lib/fugue/rendered
-            - name: FUGUE_CONTROLLER_POLL_INTERVAL
-              value: {{ .Values.controller.pollInterval | quote }}
-            - name: FUGUE_RUNTIME_OFFLINE_AFTER
-              value: {{ .Values.controller.runtimeOfflineAfter | quote }}
-            - name: FUGUE_CONTROLLER_KUBECTL_APPLY
-              value: {{ .Values.controller.kubectlApply | quote }}
-            {{- with .Values.controller.extraEnv }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
-          volumeMounts:
-            - name: data
-              mountPath: /var/lib/fugue
-          resources:
-            {{- toYaml .Values.controller.resources | nindent 12 }}
       volumes:
         - name: data
-          {{- if eq .Values.persistence.mode "pvc" }}
-          persistentVolumeClaim:
-            claimName: {{ include "fugue.fullname" . }}-data
-          {{- else if eq .Values.persistence.mode "hostPath" }}
-          hostPath:
-            path: {{ .Values.persistence.hostPath | quote }}
-            type: DirectoryOrCreate
-          {{- else }}
           emptyDir: {}
-          {{- end }}
-      {{- with .Values.nodeSelector }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "api") | nindent 14 }}
+      {{- with $apiNodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.affinity }}
+      {{- if $apiAffinity }}
       affinity:
-        {{- toYaml . | nindent 8 }}
+        {{- toYaml $apiAffinity | nindent 8 }}
+      {{- else }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "api") | nindent 20 }}
       {{- end }}
-      {{- with .Values.tolerations }}
+      {{- with $apiTolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}

@@ -4,19 +4,16 @@ kind: Deployment
 metadata:
   name: {{ include "fugue.fullname" . }}-registry
   labels:
-    {{- include "fugue.labels" . | nindent 4 }}
-    app.kubernetes.io/component: registry
+    {{- include "fugue.componentLabels" (dict "root" . "component" "registry") | nindent 4 }}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      {{- include "fugue.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: registry
+      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "registry") | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "fugue.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: registry
+        {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "registry") | nindent 8 }}
     spec:
       containers:
         - name: registry
@@ -51,7 +48,7 @@ spec:
           hostPath:
             path: {{ .Values.registry.persistence.hostPath | quote }}
             type: DirectoryOrCreate
-      {{- with .Values.nodeSelector }}
+      {{- with (default .Values.nodeSelector .Values.registry.nodeSelector) }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}

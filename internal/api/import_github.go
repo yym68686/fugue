@@ -100,8 +100,8 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 				op, opErr := s.store.GetOperation(record.OperationID)
 				if appErr == nil && opErr == nil {
 					httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
-						"app":       app,
-						"operation": op,
+						"app":       sanitizeAppForAPI(app),
+						"operation": sanitizeOperationForAPI(op),
 						"idempotency": map[string]any{
 							"key":      idempotencyKey,
 							"status":   record.Status,
@@ -209,8 +209,8 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		"image_ref": app.Spec.Image,
 	})
 	response := map[string]any{
-		"app":       app,
-		"operation": op,
+		"app":       sanitizeAppForAPI(app),
+		"operation": sanitizeOperationForAPI(op),
 	}
 	if idempotencyKey != "" {
 		response["idempotency"] = map[string]any{

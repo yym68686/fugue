@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"fugue/internal/auth"
@@ -30,13 +31,14 @@ type Server struct {
 	clusterJoinMeshLoginServer string
 	clusterJoinMeshAuthKey     string
 	importer                   *sourceimport.Importer
+	ready                      atomic.Bool
 }
 
 func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger, cfg ServerConfig) *Server {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Server{
+	server := &Server{
 		store:                      store,
 		auth:                       authn,
 		log:                        logger,
@@ -51,12 +53,15 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		clusterJoinMeshAuthKey:     strings.TrimSpace(cfg.ClusterJoinMeshAuthKey),
 		importer:                   sourceimport.NewImporter(cfg.ImportWorkDir, logger),
 	}
+	server.ready.Store(true)
+	return server
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
 
 	mux.Handle("GET /v1/tenants", s.auth.RequireAPI(http.HandlerFunc(s.handleListTenants)))
 	mux.Handle("POST /v1/tenants", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateTenant)))
@@ -85,8 +90,14 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/apps", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateApp)))
 	mux.Handle("POST /v1/apps/import-github", s.auth.RequireAPI(http.HandlerFunc(s.handleImportGitHubApp)))
 	mux.Handle("GET /v1/apps/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetApp)))
+	mux.Handle("GET /v1/apps/{id}/env", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppEnv)))
+	mux.Handle("PATCH /v1/apps/{id}/env", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchAppEnv)))
+	mux.Handle("GET /v1/apps/{id}/files", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppFiles)))
+	mux.Handle("PUT /v1/apps/{id}/files", s.auth.RequireAPI(http.HandlerFunc(s.handleUpsertAppFiles)))
+	mux.Handle("DELETE /v1/apps/{id}/files", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteAppFiles)))
 	mux.Handle("POST /v1/apps/{id}/rebuild", s.auth.RequireAPI(http.HandlerFunc(s.handleRebuildApp)))
 	mux.Handle("POST /v1/apps/{id}/deploy", s.auth.RequireAPI(http.HandlerFunc(s.handleDeployApp)))
+	mux.Handle("POST /v1/apps/{id}/restart", s.auth.RequireAPI(http.HandlerFunc(s.handleRestartApp)))
 	mux.Handle("POST /v1/apps/{id}/scale", s.auth.RequireAPI(http.HandlerFunc(s.handleScaleApp)))
 	mux.Handle("POST /v1/apps/{id}/disable", s.auth.RequireAPI(http.HandlerFunc(s.handleDisableApp)))
 	mux.Handle("POST /v1/apps/{id}/migrate", s.auth.RequireAPI(http.HandlerFunc(s.handleMigrateApp)))
@@ -116,6 +127,18 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	if !s.ready.Load() {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "shutting down")
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) SetReady(ready bool) {
+	s.ready.Store(ready)
 }
 
 func (s *Server) handleListTenants(w http.ResponseWriter, r *http.Request) {
@@ -474,7 +497,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"apps": apps})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"apps": sanitizeAppsForAPI(apps)})
 }
 
 func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
@@ -488,7 +511,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "app is not visible to this tenant")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"app": app})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"app": sanitizeAppForAPI(app)})
 }
 
 func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
@@ -528,7 +551,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.appendAudit(principal, "app.create", "app", app.ID, tenantID, map[string]string{"name": app.Name})
-	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"app": app})
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"app": sanitizeAppForAPI(app)})
 }
 
 func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
@@ -565,7 +588,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.appendAudit(principal, "app.deploy", "operation", op.ID, app.TenantID, map[string]string{"app_id": app.ID})
-	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": op})
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": sanitizeOperationForAPI(op)})
 }
 
 func (s *Server) handleScaleApp(w http.ResponseWriter, r *http.Request) {
@@ -598,7 +621,7 @@ func (s *Server) handleScaleApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.appendAudit(principal, "app.scale", "operation", op.ID, app.TenantID, map[string]string{"app_id": app.ID})
-	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": op})
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": sanitizeOperationForAPI(op)})
 }
 
 func (s *Server) handleDisableApp(w http.ResponseWriter, r *http.Request) {
@@ -613,7 +636,7 @@ func (s *Server) handleDisableApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if app.Spec.Replicas == 0 && app.Status.CurrentReplicas == 0 {
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{
-			"app":              app,
+			"app":              sanitizeAppForAPI(app),
 			"already_disabled": true,
 		})
 		return
@@ -632,7 +655,7 @@ func (s *Server) handleDisableApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.appendAudit(principal, "app.disable", "operation", op.ID, app.TenantID, map[string]string{"app_id": app.ID})
-	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": op})
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": sanitizeOperationForAPI(op)})
 }
 
 func (s *Server) handleMigrateApp(w http.ResponseWriter, r *http.Request) {
@@ -669,7 +692,7 @@ func (s *Server) handleMigrateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.appendAudit(principal, "app.migrate", "operation", op.ID, app.TenantID, map[string]string{"app_id": app.ID, "target_runtime_id": req.TargetRuntimeID})
-	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": op})
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": sanitizeOperationForAPI(op)})
 }
 
 func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
@@ -694,7 +717,7 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.appendAudit(principal, "app.delete", "operation", op.ID, app.TenantID, map[string]string{"app_id": app.ID})
-	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": op})
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": sanitizeOperationForAPI(op)})
 }
 
 func (s *Server) handleListOperations(w http.ResponseWriter, r *http.Request) {
@@ -704,7 +727,7 @@ func (s *Server) handleListOperations(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"operations": ops})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"operations": sanitizeOperationsForAPI(ops)})
 }
 
 func (s *Server) handleGetOperation(w http.ResponseWriter, r *http.Request) {
@@ -718,7 +741,7 @@ func (s *Server) handleGetOperation(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "operation is not visible to this tenant")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"operation": op})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"operation": sanitizeOperationForAPI(op)})
 }
 
 func (s *Server) handleListAuditEvents(w http.ResponseWriter, r *http.Request) {

@@ -21,17 +21,29 @@ type APIConfig struct {
 	ClusterJoinMeshLoginServer string
 	ClusterJoinMeshAuthKey     string
 	ImportWorkDir              string
+	ShutdownDrainDelay         time.Duration
+	ShutdownTimeout            time.Duration
 }
 
 type ControllerConfig struct {
-	StorePath            string
-	DatabaseURL          string
-	PollInterval         time.Duration
-	FallbackPollInterval time.Duration
-	RuntimeOfflineAfter  time.Duration
-	RenderDir            string
-	KubectlApply         bool
-	KubectlNamespace     string
+	StorePath                     string
+	DatabaseURL                   string
+	PollInterval                  time.Duration
+	FallbackPollInterval          time.Duration
+	RuntimeOfflineAfter           time.Duration
+	RenderDir                     string
+	KubectlApply                  bool
+	KubectlNamespace              string
+	LeaderElectionEnabled         bool
+	LeaderElectionLeaseName       string
+	LeaderElectionLeaseNamespace  string
+	LeaderElectionLeaseDuration   time.Duration
+	LeaderElectionRenewDeadline   time.Duration
+	LeaderElectionRetryPeriod     time.Duration
+	LeaderElectionIdentity        string
+	LegacyControllerLabelSelector string
+	LegacyControllerContainerName string
+	LegacyControllerCheckInterval time.Duration
 }
 
 type AgentConfig struct {
@@ -64,19 +76,31 @@ func APIFromEnv() APIConfig {
 		ClusterJoinMeshLoginServer: getenv("FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER", ""),
 		ClusterJoinMeshAuthKey:     getenv("FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY", ""),
 		ImportWorkDir:              getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
+		ShutdownDrainDelay:         getenvDuration("FUGUE_API_SHUTDOWN_DRAIN_DELAY", 5*time.Second),
+		ShutdownTimeout:            getenvDuration("FUGUE_API_SHUTDOWN_TIMEOUT", 25*time.Second),
 	}
 }
 
 func ControllerFromEnv() ControllerConfig {
 	return ControllerConfig{
-		StorePath:            getenv("FUGUE_STORE_PATH", "./data/store.json"),
-		DatabaseURL:          getenv("FUGUE_DATABASE_URL", ""),
-		PollInterval:         getenvDuration("FUGUE_CONTROLLER_POLL_INTERVAL", 5*time.Second),
-		FallbackPollInterval: getenvDuration("FUGUE_CONTROLLER_FALLBACK_POLL_INTERVAL", 30*time.Second),
-		RuntimeOfflineAfter:  getenvDuration("FUGUE_RUNTIME_OFFLINE_AFTER", 90*time.Second),
-		RenderDir:            getenv("FUGUE_RENDER_DIR", "./data/rendered"),
-		KubectlApply:         getenvBool("FUGUE_CONTROLLER_KUBECTL_APPLY", false),
-		KubectlNamespace:     getenv("FUGUE_CONTROLLER_KUBECTL_NAMESPACE", "default"),
+		StorePath:                     getenv("FUGUE_STORE_PATH", "./data/store.json"),
+		DatabaseURL:                   getenv("FUGUE_DATABASE_URL", ""),
+		PollInterval:                  getenvDuration("FUGUE_CONTROLLER_POLL_INTERVAL", 5*time.Second),
+		FallbackPollInterval:          getenvDuration("FUGUE_CONTROLLER_FALLBACK_POLL_INTERVAL", 30*time.Second),
+		RuntimeOfflineAfter:           getenvDuration("FUGUE_RUNTIME_OFFLINE_AFTER", 90*time.Second),
+		RenderDir:                     getenv("FUGUE_RENDER_DIR", "./data/rendered"),
+		KubectlApply:                  getenvBool("FUGUE_CONTROLLER_KUBECTL_APPLY", false),
+		KubectlNamespace:              os.Getenv("FUGUE_CONTROLLER_KUBECTL_NAMESPACE"),
+		LeaderElectionEnabled:         getenvBool("FUGUE_CONTROLLER_LEADER_ELECTION_ENABLED", false),
+		LeaderElectionLeaseName:       getenv("FUGUE_CONTROLLER_LEADER_ELECTION_LEASE_NAME", "fugue-controller"),
+		LeaderElectionLeaseNamespace:  os.Getenv("FUGUE_CONTROLLER_LEADER_ELECTION_LEASE_NAMESPACE"),
+		LeaderElectionLeaseDuration:   getenvDuration("FUGUE_CONTROLLER_LEADER_ELECTION_LEASE_DURATION", 15*time.Second),
+		LeaderElectionRenewDeadline:   getenvDuration("FUGUE_CONTROLLER_LEADER_ELECTION_RENEW_DEADLINE", 10*time.Second),
+		LeaderElectionRetryPeriod:     getenvDuration("FUGUE_CONTROLLER_LEADER_ELECTION_RETRY_PERIOD", 2*time.Second),
+		LeaderElectionIdentity:        getenv("FUGUE_CONTROLLER_LEADER_ELECTION_IDENTITY", hostnameFallback()),
+		LegacyControllerLabelSelector: getenv("FUGUE_CONTROLLER_LEGACY_CONTROLLER_LABEL_SELECTOR", ""),
+		LegacyControllerContainerName: getenv("FUGUE_CONTROLLER_LEGACY_CONTROLLER_CONTAINER_NAME", "controller"),
+		LegacyControllerCheckInterval: getenvDuration("FUGUE_CONTROLLER_LEGACY_CONTROLLER_CHECK_INTERVAL", 2*time.Second),
 	}
 }
 

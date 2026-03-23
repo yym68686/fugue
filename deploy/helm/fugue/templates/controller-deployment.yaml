@@ -1,0 +1,129 @@
+{{- $controllerNodeSelector := default .Values.nodeSelector .Values.controller.nodeSelector -}}
+{{- $controllerTolerations := default .Values.tolerations .Values.controller.tolerations -}}
+{{- $controllerAffinity := default .Values.affinity .Values.controller.affinity -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fugue.controllerDeploymentName" . }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "controller") | nindent 4 }}
+spec:
+  replicas: {{ .Values.controller.replicaCount }}
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "controller") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "controller") | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config-secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.controller.terminationGracePeriodSeconds }}
+      {{- if .Values.rbac.create }}
+      serviceAccountName: {{ include "fugue.serviceAccountName" . }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: controller
+          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          env:
+            - name: FUGUE_STORE_PATH
+              value: /var/lib/fugue/store.json
+            - name: FUGUE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: FUGUE_DATABASE_URL
+            - name: FUGUE_RENDER_DIR
+              value: /var/lib/fugue/rendered
+            - name: FUGUE_CONTROLLER_POLL_INTERVAL
+              value: {{ .Values.controller.pollInterval | quote }}
+            - name: FUGUE_CONTROLLER_FALLBACK_POLL_INTERVAL
+              value: {{ .Values.controller.fallbackPollInterval | quote }}
+            - name: FUGUE_RUNTIME_OFFLINE_AFTER
+              value: {{ .Values.controller.runtimeOfflineAfter | quote }}
+            - name: FUGUE_CONTROLLER_KUBECTL_APPLY
+              value: {{ .Values.controller.kubectlApply | quote }}
+            - name: FUGUE_CONTROLLER_KUBECTL_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: FUGUE_CONTROLLER_LEADER_ELECTION_ENABLED
+              value: {{ .Values.controller.leaderElection.enabled | quote }}
+            - name: FUGUE_CONTROLLER_LEADER_ELECTION_LEASE_NAME
+              value: {{ default (include "fugue.controllerDeploymentName" .) .Values.controller.leaderElection.leaseName | quote }}
+            - name: FUGUE_CONTROLLER_LEADER_ELECTION_LEASE_NAMESPACE
+              value: {{ default .Release.Namespace .Values.controller.leaderElection.leaseNamespace | quote }}
+            - name: FUGUE_CONTROLLER_LEADER_ELECTION_LEASE_DURATION
+              value: {{ .Values.controller.leaderElection.leaseDuration | quote }}
+            - name: FUGUE_CONTROLLER_LEADER_ELECTION_RENEW_DEADLINE
+              value: {{ .Values.controller.leaderElection.renewDeadline | quote }}
+            - name: FUGUE_CONTROLLER_LEADER_ELECTION_RETRY_PERIOD
+              value: {{ .Values.controller.leaderElection.retryPeriod | quote }}
+            - name: FUGUE_CONTROLLER_LEADER_ELECTION_IDENTITY
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: FUGUE_CONTROLLER_LEGACY_CONTROLLER_LABEL_SELECTOR
+              value: 'app.kubernetes.io/name={{ include "fugue.name" . }},app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=api'
+            - name: FUGUE_CONTROLLER_LEGACY_CONTROLLER_CONTAINER_NAME
+              value: {{ .Values.controller.migrationGuard.legacyControllerContainerName | quote }}
+            - name: FUGUE_CONTROLLER_LEGACY_CONTROLLER_CHECK_INTERVAL
+              value: {{ .Values.controller.migrationGuard.checkInterval | quote }}
+            {{- with .Values.controller.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/fugue
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "controller") | nindent 14 }}
+      {{- with $controllerNodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $controllerAffinity }}
+      affinity:
+        {{- toYaml $controllerAffinity | nindent 8 }}
+      {{- else }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "controller") | nindent 20 }}
+      {{- end }}
+      {{- with $controllerTolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

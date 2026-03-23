@@ -12,6 +12,8 @@ ALL_ALIASES=("${PRIMARY_ALIAS}" "${SECONDARY_ALIASES[@]}")
 RELEASE_NAME="${FUGUE_RELEASE_NAME:-fugue}"
 NAMESPACE="${FUGUE_NAMESPACE:-fugue-system}"
 RELEASE_FULLNAME="${FUGUE_RELEASE_FULLNAME:-${RELEASE_NAME}-fugue}"
+API_DEPLOYMENT_NAME="${FUGUE_API_DEPLOYMENT_NAME:-${RELEASE_FULLNAME}}"
+CONTROLLER_DEPLOYMENT_NAME="${FUGUE_CONTROLLER_DEPLOYMENT_NAME:-${RELEASE_FULLNAME}-controller}"
 CONFIG_SECRET_NAME="${FUGUE_CONFIG_SECRET_NAME:-${RELEASE_FULLNAME}-config}"
 POSTGRES_DEPLOYMENT_NAME="${FUGUE_POSTGRES_DEPLOYMENT_NAME:-${RELEASE_FULLNAME}-postgres}"
 REGISTRY_DEPLOYMENT_NAME="${FUGUE_REGISTRY_DEPLOYMENT_NAME:-${RELEASE_FULLNAME}-registry}"
@@ -947,6 +949,7 @@ write_values_override() {
 bootstrapAdminKey: "${BOOTSTRAP_KEY}"
 
 api:
+  replicaCount: 2
   image:
     repository: fugue-api
     tag: "${IMAGE_TAG}"
@@ -960,7 +963,11 @@ api:
   clusterJoinMeshLoginServer: "${cluster_join_mesh_login_server}"
   clusterJoinMeshAuthKey: "${cluster_join_mesh_auth_key}"
   importWorkDir: "/var/lib/fugue/import"
-  hostNetwork: true
+  hostNetwork: false
+  minReadySeconds: 5
+  terminationGracePeriodSeconds: 40
+  shutdownDrainDelay: "5s"
+  shutdownTimeout: "25s"
   resources:
     requests:
       cpu: 100m
@@ -970,11 +977,24 @@ api:
       memory: 512Mi
 
 controller:
+  replicaCount: 2
   image:
     repository: fugue-controller
     tag: "${IMAGE_TAG}"
     pullPolicy: IfNotPresent
+  fallbackPollInterval: "30s"
   kubectlApply: true
+  terminationGracePeriodSeconds: 30
+  leaderElection:
+    enabled: true
+    leaseName: "${CONTROLLER_DEPLOYMENT_NAME}"
+    leaseNamespace: "${NAMESPACE}"
+    leaseDuration: "15s"
+    renewDeadline: "10s"
+    retryPeriod: "2s"
+  migrationGuard:
+    legacyControllerContainerName: "controller"
+    checkInterval: "2s"
   resources:
     requests:
       cpu: 100m
@@ -998,6 +1018,8 @@ registry:
     nodePort: ${REGISTRY_NODEPORT}
   persistence:
     hostPath: "${HOSTPATH_DATA_DIR}/registry"
+  nodeSelector:
+    "fugue.install/role": primary
   resources:
     requests:
       cpu: 50m
@@ -1016,6 +1038,8 @@ headscale:
     nodePort: ${HEADSCALE_NODEPORT}
   persistence:
     hostPath: "${HOSTPATH_DATA_DIR}/headscale"
+  nodeSelector:
+    "fugue.install/role": primary
   resources:
     requests:
       cpu: 50m
@@ -1032,6 +1056,8 @@ postgres:
     port: 5432
   persistence:
     hostPath: "${HOSTPATH_DATA_DIR}/postgres"
+  nodeSelector:
+    "fugue.install/role": primary
   resources:
     requests:
       cpu: 100m
@@ -1043,9 +1069,6 @@ postgres:
 persistence:
   mode: hostPath
   hostPath: "${HOSTPATH_DATA_DIR}"
-
-nodeSelector:
-  "fugue.install/role": primary
 EOF
 }
 
@@ -1071,7 +1094,8 @@ KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm upgrade --install "${RELEASE_NAME}" "$
   --timeout 300s \
   -f "${REMOTE_TMP_BASE}/values-override.yaml"
 KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n "${NAMESPACE}" rollout status deploy/"${POSTGRES_DEPLOYMENT_NAME}" --timeout=180s
-KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n "${NAMESPACE}" rollout status deploy/"${RELEASE_FULLNAME}" --timeout=180s
+KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n "${NAMESPACE}" rollout status deploy/"${API_DEPLOYMENT_NAME}" --timeout=180s
+KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n "${NAMESPACE}" rollout status deploy/"${CONTROLLER_DEPLOYMENT_NAME}" --timeout=180s
 KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n "${NAMESPACE}" rollout status deploy/"${REGISTRY_DEPLOYMENT_NAME}" --timeout=180s
 if [ "$(printf '%s' "${FUGUE_MESH_ENABLED}")" = "true" ]; then
   KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n "${NAMESPACE}" rollout status deploy/"${HEADSCALE_DEPLOYMENT_NAME}" --timeout=180s

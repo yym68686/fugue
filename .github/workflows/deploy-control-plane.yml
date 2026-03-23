@@ -1,0 +1,152 @@
+name: deploy-control-plane
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/deploy-control-plane.yml'
+      - 'cmd/fugue-api/**'
+      - 'cmd/fugue-controller/**'
+      - 'internal/**'
+      - 'deploy/helm/fugue/Chart.yaml'
+      - 'deploy/helm/fugue/values.yaml'
+      - 'deploy/helm/fugue/templates/_helpers.tpl'
+      - 'deploy/helm/fugue/templates/controller-deployment.yaml'
+      - 'deploy/helm/fugue/templates/deployment.yaml'
+      - 'deploy/helm/fugue/templates/ingress.yaml'
+      - 'deploy/helm/fugue/templates/poddisruptionbudgets.yaml'
+      - 'deploy/helm/fugue/templates/rbac.yaml'
+      - 'deploy/helm/fugue/templates/secret.yaml'
+      - 'deploy/helm/fugue/templates/service.yaml'
+      - 'deploy/helm/fugue/templates/serviceaccount.yaml'
+      - 'Dockerfile.api'
+      - 'Dockerfile.controller'
+      - 'go.mod'
+      - 'go.sum'
+      - 'scripts/upgrade_fugue_control_plane.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: fugue-control-plane-production
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      api_image_repository: ${{ steps.meta.outputs.api_image_repository }}
+      controller_image_repository: ${{ steps.meta.outputs.controller_image_repository }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Compute image metadata
+        id: meta
+        run: |
+          owner_lc="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "image_tag=${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "api_image_repository=ghcr.io/${owner_lc}/fugue-api" >> "${GITHUB_OUTPUT}"
+          echo "controller_image_repository=ghcr.io/${owner_lc}/fugue-controller" >> "${GITHUB_OUTPUT}"
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push fugue-api
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.api
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.api_image_repository }}:${{ steps.meta.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push fugue-controller
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.controller
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.controller_image_repository }}:${{ steps.meta.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - fugue
+      - control-plane
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Guard stateful component files
+        if: github.event_name == 'push'
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          if [[ -z "${BEFORE_SHA}" || "${BEFORE_SHA}" == "0000000000000000000000000000000000000000" ]]; then
+            echo "skip stateful-file guard on initial push"
+            exit 0
+          fi
+          changed_files="$(git diff --name-only "${BEFORE_SHA}" "${AFTER_SHA}")"
+          forbidden_pattern='^deploy/helm/fugue/templates/(postgres-(deployment|service)|registry-(deployment|service)|headscale-(deployment|service)|headscale-config)\.yaml$'
+          if printf '%s\n' "${changed_files}" | grep -E "${forbidden_pattern}" >/dev/null; then
+            echo "stateful component manifests changed in this push:"
+            printf '%s\n' "${changed_files}" | grep -E "${forbidden_pattern}" || true
+            echo "control-plane auto deploy refuses postgres/registry/headscale changes; ship those with a manual release"
+            exit 1
+          fi
+
+      - name: Verify local deploy prerequisites
+        run: |
+          command -v helm
+          command -v curl
+          if command -v kubectl >/dev/null 2>&1; then
+            kubectl version --client
+          else
+            k3s kubectl version --client
+          fi
+
+      - name: Upgrade Fugue control plane
+        env:
+          FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME }}
+          FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE }}
+          FUGUE_RELEASE_FULLNAME: ${{ vars.FUGUE_RELEASE_FULLNAME }}
+          FUGUE_API_PUBLIC_DOMAIN: ${{ vars.FUGUE_API_PUBLIC_DOMAIN }}
+          FUGUE_SMOKE_URL: ${{ vars.FUGUE_SMOKE_URL }}
+          FUGUE_API_IMAGE_REPOSITORY: ${{ needs.build.outputs.api_image_repository }}
+          FUGUE_API_IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+          FUGUE_CONTROLLER_IMAGE_REPOSITORY: ${{ needs.build.outputs.controller_image_repository }}
+          FUGUE_CONTROLLER_IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+        run: ./scripts/upgrade_fugue_control_plane.sh

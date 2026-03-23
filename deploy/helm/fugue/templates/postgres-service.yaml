@@ -4,13 +4,11 @@ kind: Service
 metadata:
   name: {{ include "fugue.postgresServiceName" . }}
   labels:
-    {{- include "fugue.labels" . | nindent 4 }}
-    app.kubernetes.io/component: postgres
+    {{- include "fugue.componentLabels" (dict "root" . "component" "postgres") | nindent 4 }}
 spec:
   type: ClusterIP
   selector:
-    {{- include "fugue.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: postgres
+    {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 4 }}
   ports:
     - name: postgres
       port: {{ .Values.postgres.service.port }}

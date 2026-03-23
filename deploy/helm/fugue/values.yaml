@@ -1,8 +1,7 @@
-replicaCount: 1
-
 bootstrapAdminKey: "fugue_bootstrap_admin_change_me"
 
 api:
+  replicaCount: 2
   image:
     repository: fugue-api
     tag: latest
@@ -18,17 +17,46 @@ api:
   clusterJoinMeshAuthKey: ""
   importWorkDir: /var/lib/fugue/import
   hostNetwork: false
+  minReadySeconds: 5
+  terminationGracePeriodSeconds: 40
+  shutdownDrainDelay: 5s
+  shutdownTimeout: 25s
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
   resources: {}
   extraEnv: []
 
 controller:
+  replicaCount: 2
   image:
     repository: fugue-controller
     tag: latest
     pullPolicy: IfNotPresent
   pollInterval: 5s
+  fallbackPollInterval: 30s
   runtimeOfflineAfter: 90s
   kubectlApply: true
+  terminationGracePeriodSeconds: 30
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  leaderElection:
+    enabled: true
+    leaseName: ""
+    leaseNamespace: ""
+    leaseDuration: 15s
+    renewDeadline: 10s
+    retryPeriod: 2s
+  migrationGuard:
+    legacyControllerContainerName: controller
+    checkInterval: 2s
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
   resources: {}
   extraEnv: []
 
@@ -51,6 +79,7 @@ registry:
     nodePort: 30500
   persistence:
     hostPath: /var/lib/fugue/registry
+  nodeSelector: {}
   resources: {}
 
 headscale:
@@ -67,6 +96,7 @@ headscale:
     nodePort: 30443
   persistence:
     hostPath: /var/lib/fugue/headscale
+  nodeSelector: {}
   resources: {}
 
 postgres:
@@ -82,10 +112,11 @@ postgres:
     port: 5432
   persistence:
     hostPath: /var/lib/fugue/postgres
+  nodeSelector: {}
   resources: {}
 
 persistence:
-  mode: pvc
+  mode: emptyDir
   accessMode: ReadWriteOnce
   size: 1Gi
   storageClassName: ""

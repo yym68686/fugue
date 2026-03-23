@@ -3,12 +3,11 @@ kind: Service
 metadata:
   name: {{ include "fugue.fullname" . }}
   labels:
-    {{- include "fugue.labels" . | nindent 4 }}
+    {{- include "fugue.componentLabels" (dict "root" . "component" "api") | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
   selector:
-    {{- include "fugue.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: api
+    {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "api") | nindent 4 }}
   ports:
     - name: http
       port: {{ .Values.service.port }}

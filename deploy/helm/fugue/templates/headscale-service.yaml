@@ -4,13 +4,11 @@ kind: Service
 metadata:
   name: {{ include "fugue.headscaleServiceName" . }}
   labels:
-    {{- include "fugue.labels" . | nindent 4 }}
-    app.kubernetes.io/component: headscale
+    {{- include "fugue.componentLabels" (dict "root" . "component" "headscale") | nindent 4 }}
 spec:
   type: {{ .Values.headscale.service.type }}
   selector:
-    {{- include "fugue.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: headscale
+    {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "headscale") | nindent 4 }}
   ports:
     - name: http
       port: {{ .Values.headscale.service.port }}

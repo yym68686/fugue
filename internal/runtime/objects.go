@@ -1,6 +1,9 @@
 package runtime
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"path"
 	"sort"
 	"strconv"
@@ -314,6 +317,13 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 	}
 	applyScheduling(&podSpec, scheduling)
 
+	templateMetadata := map[string]any{
+		"labels": labels,
+	}
+	if annotations := buildAppTemplateAnnotations(app.Spec); len(annotations) > 0 {
+		templateMetadata["annotations"] = annotations
+	}
+
 	return map[string]any{
 		"apiVersion": "apps/v1",
 		"kind":       "Deployment",
@@ -328,10 +338,8 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 				"matchLabels": labels,
 			},
 			"template": map[string]any{
-				"metadata": map[string]any{
-					"labels": labels,
-				},
-				"spec": podSpec,
+				"metadata": templateMetadata,
+				"spec":     podSpec,
 			},
 		},
 	}
@@ -389,6 +397,32 @@ func buildEnvObjects(env map[string]string) []map[string]any {
 		})
 	}
 	return objects
+}
+
+func buildAppTemplateAnnotations(spec model.AppSpec) map[string]string {
+	annotations := map[string]string{}
+	if checksum := appFilesChecksum(spec.Files); checksum != "" {
+		annotations["fugue.pro/files-checksum"] = checksum
+	}
+	if token := strings.TrimSpace(spec.RestartToken); token != "" {
+		annotations["fugue.pro/restart-token"] = token
+	}
+	if len(annotations) == 0 {
+		return nil
+	}
+	return annotations
+}
+
+func appFilesChecksum(files []model.AppFile) string {
+	if len(files) == 0 {
+		return ""
+	}
+	payload, err := json.Marshal(files)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
 }
 
 func applyScheduling(podSpec *map[string]any, scheduling SchedulingConstraints) {

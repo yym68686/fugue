@@ -4,19 +4,16 @@ kind: Deployment
 metadata:
   name: {{ include "fugue.headscaleServiceName" . }}
   labels:
-    {{- include "fugue.labels" . | nindent 4 }}
-    app.kubernetes.io/component: headscale
+    {{- include "fugue.componentLabels" (dict "root" . "component" "headscale") | nindent 4 }}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      {{- include "fugue.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: headscale
+      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "headscale") | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "fugue.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: headscale
+        {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "headscale") | nindent 8 }}
       annotations:
         checksum/headscale-config: {{ include (print $.Template.BasePath "/headscale-config.yaml") . | sha256sum }}
     spec:
@@ -51,8 +48,10 @@ spec:
               mountPath: /var/lib/headscale
             - name: headscale-run
               mountPath: /var/run/headscale
+      {{- with (default .Values.nodeSelector .Values.headscale.nodeSelector) }}
       nodeSelector:
-        fugue.install/role: primary
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       volumes:
         - name: headscale-config
           configMap:

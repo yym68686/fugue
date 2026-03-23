@@ -72,3 +72,46 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 		t.Fatalf("unexpected mount path: %#v", volumeMounts[0]["mountPath"])
 	}
 }
+
+func TestBuildAppDeploymentTemplateAnnotationsTrackFilesAndRestart(t *testing.T) {
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Files: []model.AppFile{
+				{
+					Path:    "/home/api.yaml",
+					Content: "providers: []",
+					Secret:  true,
+					Mode:    0o600,
+				},
+			},
+			RestartToken: "restart_1",
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	deployment := objects[2]
+	template := deployment["spec"].(map[string]any)["template"].(map[string]any)
+	annotations := template["metadata"].(map[string]any)["annotations"].(map[string]string)
+	initialChecksum := annotations["fugue.pro/files-checksum"]
+	if initialChecksum == "" {
+		t.Fatal("expected file checksum annotation")
+	}
+	if annotations["fugue.pro/restart-token"] != "restart_1" {
+		t.Fatalf("unexpected restart token annotation: %#v", annotations["fugue.pro/restart-token"])
+	}
+
+	app.Spec.Files[0].Content = "providers:\n  - gemini"
+	updatedObjects := buildAppObjects(app, SchedulingConstraints{})
+	updatedDeployment := updatedObjects[2]
+	updatedTemplate := updatedDeployment["spec"].(map[string]any)["template"].(map[string]any)
+	updatedAnnotations := updatedTemplate["metadata"].(map[string]any)["annotations"].(map[string]string)
+	if updatedAnnotations["fugue.pro/files-checksum"] == initialChecksum {
+		t.Fatal("expected file checksum annotation to change when file content changes")
+	}
+}

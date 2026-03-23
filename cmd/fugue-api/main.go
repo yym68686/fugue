@@ -1,8 +1,13 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log"
 	"net/http"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"fugue/internal/api"
 	"fugue/internal/auth"
@@ -29,8 +34,29 @@ func main() {
 		ClusterJoinMeshAuthKey:     cfg.ClusterJoinMeshAuthKey,
 		ImportWorkDir:              cfg.ImportWorkDir,
 	})
+	httpServer := &http.Server{
+		Addr:              cfg.BindAddr,
+		Handler:           server.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		server.SetReady(false)
+		if cfg.ShutdownDrainDelay > 0 {
+			time.Sleep(cfg.ShutdownDrainDelay)
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		if err := httpServer.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Printf("shutdown error: %v", err)
+		}
+	}()
+
 	logger.Printf("fugue-api listening on %s", cfg.BindAddr)
-	if err := http.ListenAndServe(cfg.BindAddr, server.Handler()); err != nil {
+	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Fatalf("listen and serve: %v", err)
 	}
 }

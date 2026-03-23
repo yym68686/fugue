@@ -1,0 +1,27 @@
+{{- if and .Values.api.podDisruptionBudget.enabled (gt (int .Values.api.replicaCount) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "fugue.apiDeploymentName" . }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "api") | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.api.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "api") | nindent 6 }}
+{{- end }}
+{{- if and .Values.controller.podDisruptionBudget.enabled (gt (int .Values.controller.replicaCount) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "fugue.controllerDeploymentName" . }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "controller") | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.controller.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "controller") | nindent 6 }}
+{{- end }}

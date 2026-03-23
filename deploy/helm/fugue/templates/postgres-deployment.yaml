@@ -4,19 +4,16 @@ kind: Deployment
 metadata:
   name: {{ include "fugue.postgresServiceName" . }}
   labels:
-    {{- include "fugue.labels" . | nindent 4 }}
-    app.kubernetes.io/component: postgres
+    {{- include "fugue.componentLabels" (dict "root" . "component" "postgres") | nindent 4 }}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      {{- include "fugue.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: postgres
+      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "fugue.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: postgres
+        {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "postgres") | nindent 8 }}
     spec:
       containers:
         - name: postgres
@@ -64,7 +61,7 @@ spec:
           hostPath:
             path: {{ .Values.postgres.persistence.hostPath | quote }}
             type: DirectoryOrCreate
-      {{- with .Values.nodeSelector }}
+      {{- with (default .Values.nodeSelector .Values.postgres.nodeSelector) }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}

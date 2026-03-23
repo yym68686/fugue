@@ -22,8 +22,27 @@ app.kubernetes.io/name: {{ include "fugue.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{- define "fugue.componentLabels" -}}
+{{- include "fugue.labels" .root }}
+app.kubernetes.io/component: {{ .component }}
+{{- end -}}
+
+{{- define "fugue.componentSelectorLabels" -}}
+app.kubernetes.io/name: {{ include "fugue.name" .root }}
+app.kubernetes.io/instance: {{ .root.Release.Name }}
+app.kubernetes.io/component: {{ .component }}
+{{- end -}}
+
 {{- define "fugue.serviceAccountName" -}}
 {{- printf "%s-sa" (include "fugue.fullname" .) -}}
+{{- end -}}
+
+{{- define "fugue.apiDeploymentName" -}}
+{{- include "fugue.fullname" . -}}
+{{- end -}}
+
+{{- define "fugue.controllerDeploymentName" -}}
+{{- printf "%s-controller" (include "fugue.fullname" .) -}}
 {{- end -}}
 
 {{- define "fugue.configSecretName" -}}

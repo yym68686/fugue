@@ -129,7 +129,7 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 		"image_ref":  spec.Image,
 	})
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
-		"operation": op,
+		"operation": sanitizeOperationForAPI(op),
 		"build": map[string]any{
 			"branch":            source.RepoBranch,
 			"source_dir":        source.SourceDir,
