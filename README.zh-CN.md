@@ -317,7 +317,6 @@ Idempotency-Key: import-<unique-key>
 ```json
 {
   "tenant_id": "tenant_xxx",
-  "project_id": "project_xxx",
   "repo_url": "https://github.com/example/static-site",
   "branch": "main",
   "source_dir": "dist",
@@ -331,6 +330,7 @@ Idempotency-Key: import-<unique-key>
 当前 GitHub 导入行为：
 
 - 仅支持 GitHub 公共仓库
+- `project_id` 可省略；如果不传，Fugue 会复用当前租户的 `default` 项目，不存在就自动创建
 - 仓库中必须已经存在 `index.html`，位置可以在根目录、`dist/`、`build/`、`public/` 或 `site/`
 - Git submodule 默认会递归拉取
 - Fugue 会把静态目录打包成基于 Caddy 的镜像，推送到内置 registry，创建 app，并自动排入 deploy 操作

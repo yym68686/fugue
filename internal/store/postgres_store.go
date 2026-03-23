@@ -190,6 +190,41 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)
 	return project, nil
 }
 
+func (s *Store) pgEnsureDefaultProject(tenantID string) (model.Project, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Project{}, fmt.Errorf("begin ensure default project transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	exists, err := s.pgTenantExistsTx(ctx, tx, tenantID)
+	if err != nil {
+		return model.Project{}, err
+	}
+	if !exists {
+		return model.Project{}, ErrNotFound
+	}
+
+	now := time.Now().UTC()
+	project, err := scanProject(tx.QueryRowContext(ctx, `
+INSERT INTO fugue_projects (id, tenant_id, name, slug, description, created_at, updated_at)
+VALUES ($1, $2, 'default', 'default', 'default project', $3, $4)
+ON CONFLICT (tenant_id, slug) DO UPDATE
+SET updated_at = fugue_projects.updated_at
+RETURNING id, tenant_id, name, slug, description, created_at, updated_at
+`, model.NewID("project"), tenantID, now, now))
+	if err != nil {
+		return model.Project{}, mapDBErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Project{}, fmt.Errorf("commit ensure default project transaction: %w", err)
+	}
+	return project, nil
+}
+
 func (s *Store) pgListAPIKeys(tenantID string, platformAdmin bool) ([]model.APIKey, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -249,6 +249,42 @@ func (s *Store) CreateProject(tenantID, name, description string) (model.Project
 	return project, err
 }
 
+func (s *Store) EnsureDefaultProject(tenantID string) (model.Project, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return model.Project{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgEnsureDefaultProject(tenantID)
+	}
+
+	var project model.Project
+	err := s.withLockedState(true, func(state *model.State) error {
+		if findTenant(state, tenantID) < 0 {
+			return ErrNotFound
+		}
+		for _, existing := range state.Projects {
+			if existing.TenantID == tenantID && existing.Slug == "default" {
+				project = existing
+				return nil
+			}
+		}
+		now := time.Now().UTC()
+		project = model.Project{
+			ID:          model.NewID("project"),
+			TenantID:    tenantID,
+			Name:        "default",
+			Slug:        "default",
+			Description: "default project",
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}
+		state.Projects = append(state.Projects, project)
+		return nil
+	})
+	return project, err
+}
+
 func (s *Store) ListAPIKeys(tenantID string, platformAdmin bool) ([]model.APIKey, error) {
 	if s.usingDatabase() {
 		return s.pgListAPIKeys(tenantID, platformAdmin)

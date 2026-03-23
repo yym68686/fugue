@@ -278,6 +278,47 @@ func TestNodeAndKeyDefaultsWhenNamesAreOmitted(t *testing.T) {
 	}
 }
 
+func TestEnsureDefaultProjectReusesExistingProject(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Default Project Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+
+	projectA, err := s.EnsureDefaultProject(tenant.ID)
+	if err != nil {
+		t.Fatalf("ensure default project first call: %v", err)
+	}
+	if projectA.Name != "default" {
+		t.Fatalf("expected default project name, got %q", projectA.Name)
+	}
+	if projectA.Description != "default project" {
+		t.Fatalf("expected default project description, got %q", projectA.Description)
+	}
+
+	projectB, err := s.EnsureDefaultProject(tenant.ID)
+	if err != nil {
+		t.Fatalf("ensure default project second call: %v", err)
+	}
+	if projectA.ID != projectB.ID {
+		t.Fatalf("expected same default project id, got %s and %s", projectA.ID, projectB.ID)
+	}
+
+	projects, err := s.ListProjects(tenant.ID)
+	if err != nil {
+		t.Fatalf("list projects: %v", err)
+	}
+	if len(projects) != 1 {
+		t.Fatalf("expected 1 project after ensure default project, got %d", len(projects))
+	}
+}
+
 func TestBootstrapNodeReusesRuntimeByFingerprint(t *testing.T) {
 	t.Parallel()
 

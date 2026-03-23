@@ -53,6 +53,14 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "cannot create app for another tenant")
 		return
 	}
+	if strings.TrimSpace(req.ProjectID) == "" {
+		project, err := s.store.EnsureDefaultProject(tenantID)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		req.ProjectID = project.ID
+	}
 
 	if strings.TrimSpace(s.registryPushBase) == "" {
 		httpx.WriteError(w, http.StatusInternalServerError, "internal registry is not configured")

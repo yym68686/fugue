@@ -317,7 +317,6 @@ Idempotency-Key: import-<unique-key>
 ```json
 {
   "tenant_id": "tenant_xxx",
-  "project_id": "project_xxx",
   "repo_url": "https://github.com/example/static-site",
   "branch": "main",
   "source_dir": "dist",
@@ -331,6 +330,7 @@ Idempotency-Key: import-<unique-key>
 Import behavior in the current MVP:
 
 - only public GitHub repositories are supported
+- `project_id` is optional; if omitted, Fugue reuses the tenant's `default` project or creates it automatically
 - the repository must already contain `index.html` in the root, `dist/`, `build/`, `public/`, or `site/`
 - Git submodules are cloned recursively by default
 - Fugue packages that directory into a Caddy-based image, pushes it into the internal registry, creates the app, and queues a deploy operation
