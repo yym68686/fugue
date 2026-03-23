@@ -64,12 +64,19 @@ rollout_status() {
   ${KUBECTL} -n "${FUGUE_NAMESPACE}" rollout status "deploy/${deployment_name}" --timeout="${FUGUE_ROLLOUT_TIMEOUT}"
 }
 
+deployment_exists() {
+  local deployment_name="$1"
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "deploy/${deployment_name}" >/dev/null 2>&1
+}
+
 smoke_test() {
   require_env FUGUE_SMOKE_URL
   curl -fsS --max-time 10 "${FUGUE_SMOKE_URL}" >/dev/null
 }
 
 rollback_release() {
+  local rollback_api_deployment="${FUGUE_API_DEPLOYMENT_NAME}"
+
   if [[ -z "${PREVIOUS_REVISION:-}" ]]; then
     log "skip rollback because no previous revision was captured"
     return 1
@@ -81,8 +88,16 @@ rollback_release() {
     --wait \
     --timeout "${FUGUE_HELM_TIMEOUT}"
 
-  rollout_status "${FUGUE_API_DEPLOYMENT_NAME}"
-  rollout_status "${FUGUE_CONTROLLER_DEPLOYMENT_NAME}"
+  if ! deployment_exists "${rollback_api_deployment}" && deployment_exists "${FUGUE_LEGACY_API_DEPLOYMENT_NAME}"; then
+    rollback_api_deployment="${FUGUE_LEGACY_API_DEPLOYMENT_NAME}"
+  fi
+
+  rollout_status "${rollback_api_deployment}"
+  if deployment_exists "${FUGUE_CONTROLLER_DEPLOYMENT_NAME}"; then
+    rollout_status "${FUGUE_CONTROLLER_DEPLOYMENT_NAME}"
+  else
+    log "rollback target does not include ${FUGUE_CONTROLLER_DEPLOYMENT_NAME}; skipping controller rollout check"
+  fi
   retry "${FUGUE_SMOKE_RETRIES}" "${FUGUE_SMOKE_DELAY_SECONDS}" smoke_test
 }
 
@@ -100,7 +115,8 @@ main() {
   FUGUE_NAMESPACE="${FUGUE_NAMESPACE:-fugue-system}"
   FUGUE_HELM_CHART_PATH="${FUGUE_HELM_CHART_PATH:-deploy/helm/fugue}"
   FUGUE_RELEASE_FULLNAME="${FUGUE_RELEASE_FULLNAME:-${FUGUE_RELEASE_NAME}-fugue}"
-  FUGUE_API_DEPLOYMENT_NAME="${FUGUE_API_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}}"
+  FUGUE_API_DEPLOYMENT_NAME="${FUGUE_API_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}-api}"
+  FUGUE_LEGACY_API_DEPLOYMENT_NAME="${FUGUE_LEGACY_API_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}}"
   FUGUE_CONTROLLER_DEPLOYMENT_NAME="${FUGUE_CONTROLLER_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}-controller}"
   FUGUE_HELM_TIMEOUT="${FUGUE_HELM_TIMEOUT:-10m0s}"
   FUGUE_ROLLOUT_TIMEOUT="${FUGUE_ROLLOUT_TIMEOUT:-300s}"
@@ -140,11 +156,15 @@ main() {
     --set api.hostNetwork=false \
     --set api.minReadySeconds=5 \
     --set api.terminationGracePeriodSeconds=40 \
+    --set api.podDisruptionBudget.enabled=true \
+    --set api.podDisruptionBudget.minAvailable=1 \
     --set-string api.shutdownDrainDelay=5s \
     --set-string api.shutdownTimeout=25s \
     --set controller.replicaCount="${FUGUE_CONTROLLER_REPLICA_COUNT}" \
     --set-string controller.fallbackPollInterval=30s \
     --set controller.terminationGracePeriodSeconds=30 \
+    --set controller.podDisruptionBudget.enabled=true \
+    --set controller.podDisruptionBudget.minAvailable=1 \
     --set controller.leaderElection.enabled=true \
     --set-string controller.leaderElection.leaseName="${FUGUE_CONTROLLER_DEPLOYMENT_NAME}" \
     --set-string controller.leaderElection.leaseNamespace="${FUGUE_NAMESPACE}" \

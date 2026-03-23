@@ -38,7 +38,7 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
 {{- define "fugue.apiDeploymentName" -}}
-{{- include "fugue.fullname" . -}}
+{{- printf "%s-api" (include "fugue.fullname" .) -}}
 {{- end -}}
 
 {{- define "fugue.controllerDeploymentName" -}}

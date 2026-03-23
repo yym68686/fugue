@@ -18,7 +18,7 @@ spec:
       maxSurge: 1
   selector:
     matchLabels:
-      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "api") | nindent 6 }}
+      {{- include "fugue.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:

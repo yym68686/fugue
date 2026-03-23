@@ -1,4 +1,6 @@
-{{- if and .Values.api.podDisruptionBudget.enabled (gt (int .Values.api.replicaCount) 1) }}
+{{- $apiPDB := default (dict) .Values.api.podDisruptionBudget -}}
+{{- $controllerPDB := default (dict) .Values.controller.podDisruptionBudget -}}
+{{- if and (default false (get $apiPDB "enabled")) (gt (int .Values.api.replicaCount) 1) }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -6,12 +8,12 @@ metadata:
   labels:
     {{- include "fugue.componentLabels" (dict "root" . "component" "api") | nindent 4 }}
 spec:
-  minAvailable: {{ .Values.api.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ default 1 (get $apiPDB "minAvailable") }}
   selector:
     matchLabels:
       {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "api") | nindent 6 }}
 {{- end }}
-{{- if and .Values.controller.podDisruptionBudget.enabled (gt (int .Values.controller.replicaCount) 1) }}
+{{- if and (default false (get $controllerPDB "enabled")) (gt (int .Values.controller.replicaCount) 1) }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -20,7 +22,7 @@ metadata:
   labels:
     {{- include "fugue.componentLabels" (dict "root" . "component" "controller") | nindent 4 }}
 spec:
-  minAvailable: {{ .Values.controller.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ default 1 (get $controllerPDB "minAvailable") }}
   selector:
     matchLabels:
       {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "controller") | nindent 6 }}
