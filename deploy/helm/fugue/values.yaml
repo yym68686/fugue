@@ -10,7 +10,9 @@ api:
   databaseURL: ""
   appBaseDomain: fugue.pro
   apiPublicDomain: api.fugue.pro
-  registryPushBase: 127.0.0.1:30500
+  registryPushBase: registry.fugue.pro
+  clusterJoinServer: ""
+  clusterJoinToken: ""
   importWorkDir: /var/lib/fugue/import
   resources: {}
   extraEnv: []

@@ -167,13 +167,18 @@ func (s *Service) executeManagedOperation(op model.Operation) error {
 		return fmt.Errorf("unsupported operation type %s", op.Type)
 	}
 
-	bundle, err := s.Renderer.RenderAppBundle(app)
+	scheduling, err := s.managedSchedulingConstraints(app.Spec.RuntimeID)
+	if err != nil {
+		return err
+	}
+
+	bundle, err := s.Renderer.RenderAppBundle(app, scheduling)
 	if err != nil {
 		return fmt.Errorf("render manifest for app %s: %w", app.ID, err)
 	}
 
 	if s.Config.KubectlApply {
-		if err := runtime.ApplyManagedApp(app); err != nil {
+		if err := runtime.ApplyManagedApp(app, scheduling); err != nil {
 			return fmt.Errorf("apply managed app %s: %w", app.ID, err)
 		}
 	}
@@ -184,4 +189,15 @@ func (s *Service) executeManagedOperation(op model.Operation) error {
 	}
 	s.Logger.Printf("operation %s completed on managed runtime; manifest=%s", op.ID, bundle.ManifestPath)
 	return nil
+}
+
+func (s *Service) managedSchedulingConstraints(runtimeID string) (runtime.SchedulingConstraints, error) {
+	if strings.TrimSpace(runtimeID) == "" {
+		return runtime.SchedulingConstraints{}, nil
+	}
+	runtimeObj, err := s.Store.GetRuntime(runtimeID)
+	if err != nil {
+		return runtime.SchedulingConstraints{}, fmt.Errorf("load runtime %s: %w", runtimeID, err)
+	}
+	return runtime.SchedulingForRuntime(runtimeObj), nil
 }

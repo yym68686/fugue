@@ -15,6 +15,8 @@ type APIConfig struct {
 	AppBaseDomain     string
 	APIPublicDomain   string
 	RegistryPushBase  string
+	ClusterJoinServer string
+	ClusterJoinToken  string
 	ImportWorkDir     string
 }
 
@@ -53,6 +55,8 @@ func APIFromEnv() APIConfig {
 		AppBaseDomain:     getenv("FUGUE_APP_BASE_DOMAIN", "fugue.pro"),
 		APIPublicDomain:   getenv("FUGUE_API_PUBLIC_DOMAIN", "api.fugue.pro"),
 		RegistryPushBase:  getenv("FUGUE_REGISTRY_PUSH_BASE", "127.0.0.1:30500"),
+		ClusterJoinServer: getenv("FUGUE_CLUSTER_JOIN_SERVER", ""),
+		ClusterJoinToken:  getenv("FUGUE_CLUSTER_JOIN_TOKEN", ""),
 		ImportWorkDir:     getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
 	}
 }

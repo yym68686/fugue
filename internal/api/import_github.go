@@ -120,7 +120,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 	var app model.App
 	for attempt := 0; attempt < 8; attempt++ {
 		candidateName, candidateHost := buildImportIdentity(baseName, s.appBaseDomain, attempt)
-		if strings.EqualFold(strings.TrimSpace(candidateHost), strings.TrimSpace(s.apiPublicDomain)) {
+		if s.isReservedAppHostname(candidateHost) {
 			continue
 		}
 		route := model.AppRoute{

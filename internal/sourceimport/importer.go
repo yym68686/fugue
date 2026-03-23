@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -218,12 +219,29 @@ func buildAndPushStaticSiteImage(sourceDir, imageRef string) error {
 		return fmt.Errorf("append static-site layer: %w", err)
 	}
 
-	tag, err := name.NewTag(imageRef, name.Insecure)
+	tag, err := name.NewTag(imageRef, destinationTagOptions(imageRef)...)
 	if err != nil {
 		return fmt.Errorf("parse destination image reference: %w", err)
 	}
 	if err := remote.Write(tag, image); err != nil {
 		return fmt.Errorf("push image to internal registry: %w", err)
+	}
+	return nil
+}
+
+func destinationTagOptions(imageRef string) []name.Option {
+	host := imageRef
+	if idx := strings.Index(host, "/"); idx >= 0 {
+		host = host[:idx]
+	}
+	host = strings.TrimSpace(host)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+
+	if strings.EqualFold(host, "localhost") || net.ParseIP(host) != nil {
+		return []name.Option{name.Insecure}
 	}
 	return nil
 }

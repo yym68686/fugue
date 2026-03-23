@@ -212,6 +212,189 @@ func TestSharedNodeKeyBootstrapsMultipleNodesAndCanBeRevoked(t *testing.T) {
 	}
 }
 
+func TestDeleteTenantRemovesTenantOwnedResources(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Delete Me")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	otherTenant, err := s.CreateTenant("Keep Me")
+	if err != nil {
+		t.Fatalf("create other tenant: %v", err)
+	}
+
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, _, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"project.write"}); err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	token, enrollSecret, err := s.CreateEnrollmentToken(tenant.ID, "external", time.Hour)
+	if err != nil {
+		t.Fatalf("create enrollment token: %v", err)
+	}
+	if token.ID == "" || enrollSecret == "" {
+		t.Fatal("expected enrollment token secret")
+	}
+	if _, runtimeKey, err := s.ConsumeEnrollmentToken(enrollSecret, "external-1", "https://node2.example.com", map[string]string{"zone": "b"}); err != nil {
+		t.Fatalf("consume enrollment token: %v", err)
+	} else if runtimeKey == "" {
+		t.Fatal("expected runtime key")
+	}
+
+	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "cluster")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	_, managedRuntime, err := s.BootstrapClusterNode(nodeSecret, "worker-1", "https://node1.example.com", map[string]string{"zone": "a"})
+	if err != nil {
+		t.Fatalf("bootstrap cluster node: %v", err)
+	}
+
+	app, err := s.CreateAppWithRoute(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "nginx:1.27",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppRoute{
+		Hostname:    "demo.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://demo.example.com",
+		ServicePort: 80,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	desiredSpec := app.Spec
+	if _, err := s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &desiredSpec,
+	}); err != nil {
+		t.Fatalf("create operation: %v", err)
+	}
+	if err := s.AppendAuditEvent(model.AuditEvent{
+		TenantID:   tenant.ID,
+		ActorType:  model.ActorTypeBootstrap,
+		ActorID:    "bootstrap",
+		Action:     "tenant.test",
+		TargetType: "tenant",
+		TargetID:   tenant.ID,
+	}); err != nil {
+		t.Fatalf("append audit event: %v", err)
+	}
+
+	deletedTenant, err := s.DeleteTenant(tenant.ID)
+	if err != nil {
+		t.Fatalf("delete tenant: %v", err)
+	}
+	if deletedTenant.ID != tenant.ID {
+		t.Fatalf("expected deleted tenant id %s, got %s", tenant.ID, deletedTenant.ID)
+	}
+
+	if _, err := s.GetTenant(tenant.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for deleted tenant, got %v", err)
+	}
+
+	tenants, err := s.ListTenants()
+	if err != nil {
+		t.Fatalf("list tenants: %v", err)
+	}
+	if len(tenants) != 1 || tenants[0].ID != otherTenant.ID {
+		t.Fatalf("expected only other tenant to remain, got %+v", tenants)
+	}
+
+	projects, err := s.ListProjects(tenant.ID)
+	if err != nil {
+		t.Fatalf("list projects: %v", err)
+	}
+	if len(projects) != 0 {
+		t.Fatalf("expected no projects for deleted tenant, got %+v", projects)
+	}
+
+	keys, err := s.ListAPIKeys(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list api keys: %v", err)
+	}
+	if len(keys) != 0 {
+		t.Fatalf("expected no api keys for deleted tenant, got %+v", keys)
+	}
+
+	tokens, err := s.ListEnrollmentTokens(tenant.ID)
+	if err != nil {
+		t.Fatalf("list enrollment tokens: %v", err)
+	}
+	if len(tokens) != 0 {
+		t.Fatalf("expected no enrollment tokens for deleted tenant, got %+v", tokens)
+	}
+
+	nodeKeys, err := s.ListNodeKeys(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list node keys: %v", err)
+	}
+	if len(nodeKeys) != 0 {
+		t.Fatalf("expected no node keys for deleted tenant, got %+v", nodeKeys)
+	}
+
+	nodes, err := s.ListNodes(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list nodes: %v", err)
+	}
+	if len(nodes) != 0 {
+		t.Fatalf("expected no nodes for deleted tenant, got %+v", nodes)
+	}
+
+	apps, err := s.ListApps(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list apps: %v", err)
+	}
+	if len(apps) != 0 {
+		t.Fatalf("expected no apps for deleted tenant, got %+v", apps)
+	}
+
+	ops, err := s.ListOperations(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(ops) != 0 {
+		t.Fatalf("expected no operations for deleted tenant, got %+v", ops)
+	}
+
+	events, err := s.ListAuditEvents("", true)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected tenant audit events to be deleted, got %+v", events)
+	}
+
+	runtimes, err := s.ListRuntimes("", true)
+	if err != nil {
+		t.Fatalf("list runtimes: %v", err)
+	}
+	foundShared := false
+	for _, runtime := range runtimes {
+		if runtime.ID == "runtime_managed_shared" {
+			foundShared = true
+		}
+		if runtime.ID == managedRuntime.ID {
+			t.Fatalf("expected tenant managed runtime %s to be deleted", managedRuntime.ID)
+		}
+	}
+	if !foundShared {
+		t.Fatal("expected runtime_managed_shared to remain after deleting tenant")
+	}
+}
+
 func TestCreateImportedAppRejectsDuplicateHostname(t *testing.T) {
 	t.Parallel()
 

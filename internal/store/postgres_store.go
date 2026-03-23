@@ -82,6 +82,46 @@ VALUES ($1, $2, $3, $4, $5, $6)
 	return tenant, nil
 }
 
+func (s *Store) pgDeleteTenant(id string) (model.Tenant, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Tenant{}, fmt.Errorf("begin delete tenant transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	tenant, err := scanTenant(tx.QueryRowContext(ctx, `
+SELECT id, name, slug, status, created_at, updated_at
+FROM fugue_tenants
+WHERE id = $1
+FOR UPDATE
+`, id))
+	if err != nil {
+		return model.Tenant{}, mapDBErr(err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM fugue_audit_events
+WHERE tenant_id = $1
+`, id); err != nil {
+		return model.Tenant{}, fmt.Errorf("delete tenant audit events: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM fugue_tenants
+WHERE id = $1
+`, id); err != nil {
+		return model.Tenant{}, fmt.Errorf("delete tenant: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return model.Tenant{}, fmt.Errorf("commit delete tenant transaction: %w", err)
+	}
+	return tenant, nil
+}
+
 func (s *Store) pgListProjects(tenantID string) ([]model.Project, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -531,6 +571,105 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 	return redactNodeKey(key), runtime, runtimeSecret, nil
 }
 
+func (s *Store) pgBootstrapClusterNode(secret, runtimeName, endpoint string, labels map[string]string) (model.NodeKey, model.Runtime, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.NodeKey{}, model.Runtime{}, fmt.Errorf("begin bootstrap cluster node transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	key, err := scanNodeKey(tx.QueryRowContext(ctx, `
+SELECT id, tenant_id, label, prefix, hash, status, created_at, updated_at, last_used_at, revoked_at
+FROM fugue_node_keys
+WHERE hash = $1
+FOR UPDATE
+`, model.HashSecret(secret)))
+	if err != nil {
+		return model.NodeKey{}, model.Runtime{}, mapDBErr(err)
+	}
+	if key.RevokedAt != nil || key.Status == model.NodeKeyStatusRevoked {
+		return model.NodeKey{}, model.Runtime{}, ErrConflict
+	}
+
+	now := time.Now().UTC()
+	key.LastUsedAt = &now
+	key.UpdatedAt = now
+	if _, err := tx.ExecContext(ctx, `
+UPDATE fugue_node_keys
+SET last_used_at = $2, updated_at = $3
+WHERE id = $1
+`, key.ID, key.LastUsedAt, key.UpdatedAt); err != nil {
+		return model.NodeKey{}, model.Runtime{}, fmt.Errorf("update node key last_used_at: %w", err)
+	}
+
+	runtime, found, err := s.pgFindManagedOwnedRuntimeTx(ctx, tx, key.ID, runtimeName)
+	if err != nil {
+		return model.NodeKey{}, model.Runtime{}, err
+	}
+	if found {
+		runtime.Status = model.RuntimeStatusActive
+		runtime.Endpoint = strings.TrimSpace(endpoint)
+		runtime.Labels = cloneMap(labels)
+		runtime.LastHeartbeatAt = &now
+		runtime.UpdatedAt = now
+		labelsJSON, err := marshalNullableJSON(runtime.Labels)
+		if err != nil {
+			return model.NodeKey{}, model.Runtime{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE fugue_runtimes
+SET status = $2,
+	endpoint = $3,
+	labels_json = $4,
+	last_heartbeat_at = $5,
+	updated_at = $6
+WHERE id = $1
+`, runtime.ID, runtime.Status, nullIfEmpty(runtime.Endpoint), labelsJSON, runtime.LastHeartbeatAt, runtime.UpdatedAt); err != nil {
+			return model.NodeKey{}, model.Runtime{}, fmt.Errorf("update managed-owned runtime %s: %w", runtime.ID, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return model.NodeKey{}, model.Runtime{}, fmt.Errorf("commit bootstrap cluster node transaction: %w", err)
+		}
+		return redactNodeKey(key), runtime, nil
+	}
+
+	name, err := s.pgNextAvailableRuntimeNameTx(ctx, tx, key.TenantID, runtimeName)
+	if err != nil {
+		return model.NodeKey{}, model.Runtime{}, err
+	}
+	runtime = model.Runtime{
+		ID:              model.NewID("runtime"),
+		TenantID:        key.TenantID,
+		Name:            name,
+		Type:            model.RuntimeTypeManagedOwned,
+		Status:          model.RuntimeStatusActive,
+		Endpoint:        strings.TrimSpace(endpoint),
+		Labels:          cloneMap(labels),
+		NodeKeyID:       key.ID,
+		LastHeartbeatAt: &now,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	labelsJSON, err := marshalNullableJSON(runtime.Labels)
+	if err != nil {
+		return model.NodeKey{}, model.Runtime{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO fugue_runtimes (id, tenant_id, name, type, status, endpoint, labels_json, node_key_id, agent_key_prefix, agent_key_hash, last_heartbeat_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '', '', $9, $10, $11)
+`, runtime.ID, nullIfEmpty(runtime.TenantID), runtime.Name, runtime.Type, runtime.Status, nullIfEmpty(runtime.Endpoint), labelsJSON, nullIfEmpty(runtime.NodeKeyID), runtime.LastHeartbeatAt, runtime.CreatedAt, runtime.UpdatedAt); err != nil {
+		return model.NodeKey{}, model.Runtime{}, mapDBErr(err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return model.NodeKey{}, model.Runtime{}, fmt.Errorf("commit bootstrap cluster node transaction: %w", err)
+	}
+	return redactNodeKey(key), runtime, nil
+}
+
 func (s *Store) pgCreateRuntime(tenantID, name, runtimeType, endpoint string, labels map[string]string) (model.Runtime, string, error) {
 	secret := model.NewSecret("fugue_rt")
 	now := time.Now().UTC()
@@ -547,7 +686,7 @@ func (s *Store) pgCreateRuntime(tenantID, name, runtimeType, endpoint string, la
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
-	if runtimeType == model.RuntimeTypeManagedShared {
+	if runtimeType == model.RuntimeTypeManagedShared || runtimeType == model.RuntimeTypeManagedOwned {
 		runtime.Status = model.RuntimeStatusActive
 	}
 	labelsJSON, err := marshalNullableJSON(runtime.Labels)
@@ -708,9 +847,10 @@ func (s *Store) pgMarkRuntimeOfflineStale(after time.Duration) (int, error) {
 UPDATE fugue_runtimes
 SET status = $2, updated_at = NOW()
 WHERE type <> $1
+  AND type <> $4
   AND status <> $2
   AND (last_heartbeat_at IS NULL OR last_heartbeat_at < $3)
-`, model.RuntimeTypeManagedShared, model.RuntimeStatusOffline, time.Now().UTC().Add(-after))
+`, model.RuntimeTypeManagedShared, model.RuntimeStatusOffline, time.Now().UTC().Add(-after), model.RuntimeTypeManagedOwned)
 	if err != nil {
 		return 0, fmt.Errorf("mark runtimes offline stale: %w", err)
 	}
@@ -740,8 +880,8 @@ FROM fugue_runtimes
 	args := make([]any, 0, 3)
 	clauses := make([]string, 0, 2)
 	if nodesOnly {
-		clauses = append(clauses, fmt.Sprintf("type = $%d", len(args)+1))
-		args = append(args, model.RuntimeTypeExternalOwned)
+		clauses = append(clauses, fmt.Sprintf("type IN ($%d, $%d)", len(args)+1, len(args)+2))
+		args = append(args, model.RuntimeTypeExternalOwned, model.RuntimeTypeManagedOwned)
 	}
 	if !platformAdmin {
 		clauses = append(clauses, fmt.Sprintf("(tenant_id = $%d OR type = $%d)", len(args)+1, len(args)+2))
@@ -785,6 +925,24 @@ WHERE id = $1
 		return model.Runtime{}, mapDBErr(err)
 	}
 	return runtime, nil
+}
+
+func (s *Store) pgFindManagedOwnedRuntimeTx(ctx context.Context, tx *sql.Tx, nodeKeyID, runtimeName string) (model.Runtime, bool, error) {
+	runtime, err := scanRuntime(tx.QueryRowContext(ctx, `
+SELECT id, tenant_id, name, type, status, endpoint, labels_json, node_key_id, agent_key_prefix, agent_key_hash, last_heartbeat_at, created_at, updated_at
+FROM fugue_runtimes
+WHERE type = $1
+  AND node_key_id = $2
+  AND lower(name) = lower($3)
+FOR UPDATE
+`, model.RuntimeTypeManagedOwned, nodeKeyID, strings.TrimSpace(runtimeName)))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.Runtime{}, false, nil
+		}
+		return model.Runtime{}, false, fmt.Errorf("find managed-owned runtime by node key %s and name %s: %w", nodeKeyID, runtimeName, err)
+	}
+	return runtime, true, nil
 }
 
 func (s *Store) pgListApps(tenantID string, platformAdmin bool) ([]model.App, error) {

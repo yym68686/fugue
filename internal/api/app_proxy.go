@@ -54,7 +54,7 @@ func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) boo
 }
 
 func (s *Server) isAppHostname(host string) bool {
-	if host == strings.TrimSpace(strings.ToLower(s.apiPublicDomain)) {
+	if s.isReservedAppHostname(host) {
 		return false
 	}
 	base := strings.TrimSpace(strings.ToLower(s.appBaseDomain))

@@ -158,6 +158,39 @@ func (s *Store) CreateTenant(name string) (model.Tenant, error) {
 	return tenant, err
 }
 
+func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.Tenant{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgDeleteTenant(id)
+	}
+
+	var tenant model.Tenant
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findTenant(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		tenant = state.Tenants[index]
+		state.Tenants = append(state.Tenants[:index], state.Tenants[index+1:]...)
+
+		state.Projects = deleteProjectsByTenant(state.Projects, id)
+		state.APIKeys = deleteAPIKeysByTenant(state.APIKeys, id)
+		state.EnrollmentTokens = deleteEnrollmentTokensByTenant(state.EnrollmentTokens, id)
+
+		deletedNodeKeyIDs := make(map[string]struct{})
+		state.NodeKeys = deleteNodeKeysByTenant(state.NodeKeys, id, deletedNodeKeyIDs)
+		state.Runtimes = deleteRuntimesByTenant(state.Runtimes, id, deletedNodeKeyIDs)
+		state.Apps = deleteAppsByTenant(state.Apps, id)
+		state.Operations = deleteOperationsByTenant(state.Operations, id)
+		state.AuditEvents = deleteAuditEventsByTenant(state.AuditEvents, id)
+		return nil
+	})
+	return tenant, err
+}
+
 func (s *Store) ListProjects(tenantID string) ([]model.Project, error) {
 	if s.usingDatabase() {
 		return s.pgListProjects(tenantID)
@@ -510,6 +543,74 @@ func (s *Store) BootstrapNode(secret, runtimeName, endpoint string, labels map[s
 	return redactNodeKey(key), runtime, runtimeSecret, nil
 }
 
+func (s *Store) BootstrapClusterNode(secret, runtimeName, endpoint string, labels map[string]string) (model.NodeKey, model.Runtime, error) {
+	secret = strings.TrimSpace(secret)
+	runtimeName = strings.TrimSpace(runtimeName)
+	if secret == "" || runtimeName == "" {
+		return model.NodeKey{}, model.Runtime{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgBootstrapClusterNode(secret, runtimeName, endpoint, labels)
+	}
+
+	var key model.NodeKey
+	var runtime model.Runtime
+	err := s.withLockedState(true, func(state *model.State) error {
+		hash := model.HashSecret(secret)
+		now := time.Now().UTC()
+		keyIndex := -1
+		for idx := range state.NodeKeys {
+			if state.NodeKeys[idx].Hash != hash {
+				continue
+			}
+			keyIndex = idx
+			break
+		}
+		if keyIndex < 0 {
+			return ErrNotFound
+		}
+		if state.NodeKeys[keyIndex].RevokedAt != nil || state.NodeKeys[keyIndex].Status == model.NodeKeyStatusRevoked {
+			return ErrConflict
+		}
+
+		state.NodeKeys[keyIndex].LastUsedAt = &now
+		state.NodeKeys[keyIndex].UpdatedAt = now
+		key = state.NodeKeys[keyIndex]
+
+		existingIndex := findManagedOwnedRuntimeByNodeKeyAndName(state, key.ID, runtimeName)
+		if existingIndex >= 0 {
+			state.Runtimes[existingIndex].Status = model.RuntimeStatusActive
+			state.Runtimes[existingIndex].Endpoint = strings.TrimSpace(endpoint)
+			state.Runtimes[existingIndex].Labels = cloneMap(labels)
+			state.Runtimes[existingIndex].UpdatedAt = now
+			state.Runtimes[existingIndex].LastHeartbeatAt = &now
+			runtime = state.Runtimes[existingIndex]
+			return nil
+		}
+
+		runtime = model.Runtime{
+			ID:              model.NewID("runtime"),
+			TenantID:        key.TenantID,
+			Name:            nextAvailableRuntimeName(state, key.TenantID, runtimeName),
+			Type:            model.RuntimeTypeManagedOwned,
+			Status:          model.RuntimeStatusActive,
+			Endpoint:        strings.TrimSpace(endpoint),
+			Labels:          cloneMap(labels),
+			NodeKeyID:       key.ID,
+			LastHeartbeatAt: &now,
+			CreatedAt:       now,
+			UpdatedAt:       now,
+		}
+		state.Runtimes = append(state.Runtimes, runtime)
+		return nil
+	})
+	if err != nil {
+		return model.NodeKey{}, model.Runtime{}, err
+	}
+
+	return redactNodeKey(key), runtime, nil
+}
+
 func (s *Store) CreateRuntime(tenantID, name, runtimeType, endpoint string, labels map[string]string) (model.Runtime, string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -518,7 +619,7 @@ func (s *Store) CreateRuntime(tenantID, name, runtimeType, endpoint string, labe
 	if runtimeType == "" {
 		runtimeType = model.RuntimeTypeExternalOwned
 	}
-	if runtimeType != model.RuntimeTypeManagedShared && runtimeType != model.RuntimeTypeExternalOwned {
+	if runtimeType != model.RuntimeTypeManagedShared && runtimeType != model.RuntimeTypeManagedOwned && runtimeType != model.RuntimeTypeExternalOwned {
 		return model.Runtime{}, "", ErrInvalidInput
 	}
 	if s.usingDatabase() {
@@ -540,7 +641,7 @@ func (s *Store) CreateRuntime(tenantID, name, runtimeType, endpoint string, labe
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
-	if runtimeType == model.RuntimeTypeManagedShared {
+	if runtimeType == model.RuntimeTypeManagedShared || runtimeType == model.RuntimeTypeManagedOwned {
 		runtime.Status = model.RuntimeStatusActive
 	}
 
@@ -697,7 +798,7 @@ func (s *Store) MarkRuntimeOfflineStale(after time.Duration) (int, error) {
 		threshold := time.Now().UTC().Add(-after)
 		for idx := range state.Runtimes {
 			runtime := &state.Runtimes[idx]
-			if runtime.Type == model.RuntimeTypeManagedShared {
+			if runtime.Type == model.RuntimeTypeManagedShared || runtime.Type == model.RuntimeTypeManagedOwned {
 				continue
 			}
 			if runtime.LastHeartbeatAt == nil || runtime.LastHeartbeatAt.Before(threshold) {
@@ -720,7 +821,7 @@ func (s *Store) ListNodes(tenantID string, platformAdmin bool) ([]model.Runtime,
 	var nodes []model.Runtime
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, runtime := range state.Runtimes {
-			if runtime.Type != model.RuntimeTypeExternalOwned {
+			if runtime.Type != model.RuntimeTypeExternalOwned && runtime.Type != model.RuntimeTypeManagedOwned {
 				continue
 			}
 			if platformAdmin || runtime.TenantID == tenantID {
@@ -828,6 +929,10 @@ func (s *Store) GetAppByHostname(hostname string) (model.App, error) {
 
 func (s *Store) CreateApp(tenantID, projectID, name, description string, spec model.AppSpec) (model.App, error) {
 	return s.createApp(tenantID, projectID, name, description, spec, nil, nil)
+}
+
+func (s *Store) CreateAppWithRoute(tenantID, projectID, name, description string, spec model.AppSpec, route model.AppRoute) (model.App, error) {
+	return s.createApp(tenantID, projectID, name, description, spec, nil, &route)
 }
 
 func (s *Store) CreateImportedApp(tenantID, projectID, name, description string, spec model.AppSpec, source model.AppSource, route model.AppRoute) (model.App, error) {
@@ -1339,6 +1444,98 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 	return nil
 }
 
+func deleteProjectsByTenant(projects []model.Project, tenantID string) []model.Project {
+	filtered := projects[:0]
+	for _, project := range projects {
+		if project.TenantID == tenantID {
+			continue
+		}
+		filtered = append(filtered, project)
+	}
+	return filtered
+}
+
+func deleteAPIKeysByTenant(keys []model.APIKey, tenantID string) []model.APIKey {
+	filtered := keys[:0]
+	for _, key := range keys {
+		if key.TenantID == tenantID {
+			continue
+		}
+		filtered = append(filtered, key)
+	}
+	return filtered
+}
+
+func deleteEnrollmentTokensByTenant(tokens []model.EnrollmentToken, tenantID string) []model.EnrollmentToken {
+	filtered := tokens[:0]
+	for _, token := range tokens {
+		if token.TenantID == tenantID {
+			continue
+		}
+		filtered = append(filtered, token)
+	}
+	return filtered
+}
+
+func deleteNodeKeysByTenant(keys []model.NodeKey, tenantID string, deletedIDs map[string]struct{}) []model.NodeKey {
+	filtered := keys[:0]
+	for _, key := range keys {
+		if key.TenantID == tenantID {
+			deletedIDs[key.ID] = struct{}{}
+			continue
+		}
+		filtered = append(filtered, key)
+	}
+	return filtered
+}
+
+func deleteRuntimesByTenant(runtimes []model.Runtime, tenantID string, deletedNodeKeyIDs map[string]struct{}) []model.Runtime {
+	filtered := runtimes[:0]
+	for _, runtime := range runtimes {
+		if runtime.TenantID == tenantID {
+			continue
+		}
+		if _, ok := deletedNodeKeyIDs[runtime.NodeKeyID]; ok {
+			runtime.NodeKeyID = ""
+		}
+		filtered = append(filtered, runtime)
+	}
+	return filtered
+}
+
+func deleteAppsByTenant(apps []model.App, tenantID string) []model.App {
+	filtered := apps[:0]
+	for _, app := range apps {
+		if app.TenantID == tenantID {
+			continue
+		}
+		filtered = append(filtered, app)
+	}
+	return filtered
+}
+
+func deleteOperationsByTenant(ops []model.Operation, tenantID string) []model.Operation {
+	filtered := ops[:0]
+	for _, op := range ops {
+		if op.TenantID == tenantID {
+			continue
+		}
+		filtered = append(filtered, op)
+	}
+	return filtered
+}
+
+func deleteAuditEventsByTenant(events []model.AuditEvent, tenantID string) []model.AuditEvent {
+	filtered := events[:0]
+	for _, event := range events {
+		if event.TenantID == tenantID {
+			continue
+		}
+		filtered = append(filtered, event)
+	}
+	return filtered
+}
+
 func findTenant(state *model.State, id string) int {
 	for idx, tenant := range state.Tenants {
 		if tenant.ID == id {
@@ -1400,6 +1597,19 @@ func runtimeVisibleToTenant(state *model.State, runtimeID, tenantID string) bool
 	}
 	runtime := state.Runtimes[index]
 	return runtime.Type == model.RuntimeTypeManagedShared || runtime.TenantID == tenantID
+}
+
+func findManagedOwnedRuntimeByNodeKeyAndName(state *model.State, nodeKeyID, runtimeName string) int {
+	for idx := range state.Runtimes {
+		runtime := state.Runtimes[idx]
+		if runtime.Type != model.RuntimeTypeManagedOwned {
+			continue
+		}
+		if runtime.NodeKeyID == nodeKeyID && strings.EqualFold(runtime.Name, strings.TrimSpace(runtimeName)) {
+			return idx
+		}
+	}
+	return -1
 }
 
 func nextAvailableRuntimeName(state *model.State, tenantID, requested string) string {

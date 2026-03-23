@@ -4,6 +4,7 @@ import "time"
 
 const (
 	RuntimeTypeManagedShared = "managed-shared"
+	RuntimeTypeManagedOwned  = "managed-owned"
 	RuntimeTypeExternalOwned = "external-owned"
 
 	AppSourceTypeGitHubPublic = "github-public"

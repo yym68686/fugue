@@ -22,7 +22,7 @@ const (
 	serviceAccountCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 )
 
-func ApplyManagedApp(app model.App) error {
+func ApplyManagedApp(app model.App, constraints ...SchedulingConstraints) error {
 	host := os.Getenv("KUBERNETES_SERVICE_HOST")
 	port := os.Getenv("KUBERNETES_SERVICE_PORT")
 	if host == "" || port == "" {
@@ -64,7 +64,12 @@ func ApplyManagedApp(app model.App) error {
 		return fmt.Errorf("apply namespace: %w", err)
 	}
 
-	if err := applyObject(client, baseURL, string(token), "/apis/apps/v1/namespaces/"+namespace+"/deployments/"+sanitizeName(app.Name), buildDeploymentObject(namespace, app, labels)); err != nil {
+	var scheduling SchedulingConstraints
+	if len(constraints) > 0 {
+		scheduling = constraints[0]
+	}
+
+	if err := applyObject(client, baseURL, string(token), "/apis/apps/v1/namespaces/"+namespace+"/deployments/"+sanitizeName(app.Name), buildDeploymentObject(namespace, app, labels, scheduling)); err != nil {
 		return fmt.Errorf("apply deployment: %w", err)
 	}
 	if err := applyObject(client, baseURL, string(token), "/api/v1/namespaces/"+namespace+"/services/"+sanitizeName(app.Name), buildServiceObject(namespace, app, labels)); err != nil {
@@ -109,7 +114,7 @@ func applyObject(client *http.Client, baseURL, bearerToken, apiPath string, obj 
 	return nil
 }
 
-func buildDeploymentObject(namespace string, app model.App, labels map[string]string) map[string]any {
+func buildDeploymentObject(namespace string, app model.App, labels map[string]string, scheduling SchedulingConstraints) map[string]any {
 	container := map[string]any{
 		"name":  sanitizeName(app.Name),
 		"image": app.Spec.Image,
@@ -146,6 +151,29 @@ func buildDeploymentObject(namespace string, app model.App, labels map[string]st
 		container["env"] = env
 	}
 
+	podSpec := map[string]any{
+		"containers": []map[string]any{container},
+	}
+	if len(scheduling.NodeSelector) > 0 {
+		nodeSelector := make(map[string]string, len(scheduling.NodeSelector))
+		for key, value := range scheduling.NodeSelector {
+			nodeSelector[key] = value
+		}
+		podSpec["nodeSelector"] = nodeSelector
+	}
+	if len(scheduling.Tolerations) > 0 {
+		tolerations := make([]map[string]any, 0, len(scheduling.Tolerations))
+		for _, toleration := range scheduling.Tolerations {
+			tolerations = append(tolerations, map[string]any{
+				"key":      toleration.Key,
+				"operator": toleration.Operator,
+				"value":    toleration.Value,
+				"effect":   toleration.Effect,
+			})
+		}
+		podSpec["tolerations"] = tolerations
+	}
+
 	return map[string]any{
 		"apiVersion": "apps/v1",
 		"kind":       "Deployment",
@@ -163,9 +191,7 @@ func buildDeploymentObject(namespace string, app model.App, labels map[string]st
 				"metadata": map[string]any{
 					"labels": labels,
 				},
-				"spec": map[string]any{
-					"containers": []map[string]any{container},
-				},
+				"spec": podSpec,
 			},
 		},
 	}

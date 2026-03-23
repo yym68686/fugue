@@ -16,13 +16,16 @@ import (
 )
 
 type Server struct {
-	store            *store.Store
-	auth             *auth.Authenticator
-	log              *log.Logger
-	appBaseDomain    string
-	apiPublicDomain  string
-	registryPushBase string
-	importer         *sourceimport.Importer
+	store             *store.Store
+	auth              *auth.Authenticator
+	log               *log.Logger
+	appBaseDomain     string
+	apiPublicDomain   string
+	registryPushBase  string
+	registryHost      string
+	clusterJoinServer string
+	clusterJoinToken  string
+	importer          *sourceimport.Importer
 }
 
 func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger, cfg ServerConfig) *Server {
@@ -30,13 +33,16 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		logger = log.Default()
 	}
 	return &Server{
-		store:            store,
-		auth:             authn,
-		log:              logger,
-		appBaseDomain:    strings.TrimSpace(strings.ToLower(cfg.AppBaseDomain)),
-		apiPublicDomain:  strings.TrimSpace(strings.ToLower(cfg.APIPublicDomain)),
-		registryPushBase: strings.TrimSpace(cfg.RegistryPushBase),
-		importer:         sourceimport.NewImporter(cfg.ImportWorkDir, logger),
+		store:             store,
+		auth:              authn,
+		log:               logger,
+		appBaseDomain:     strings.TrimSpace(strings.ToLower(cfg.AppBaseDomain)),
+		apiPublicDomain:   strings.TrimSpace(strings.ToLower(cfg.APIPublicDomain)),
+		registryPushBase:  strings.TrimSpace(cfg.RegistryPushBase),
+		registryHost:      registryHostFromPushBase(cfg.RegistryPushBase),
+		clusterJoinServer: strings.TrimSpace(cfg.ClusterJoinServer),
+		clusterJoinToken:  strings.TrimSpace(cfg.ClusterJoinToken),
+		importer:          sourceimport.NewImporter(cfg.ImportWorkDir, logger),
 	}
 }
 
@@ -47,6 +53,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("GET /v1/tenants", s.auth.RequireAPI(http.HandlerFunc(s.handleListTenants)))
 	mux.Handle("POST /v1/tenants", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateTenant)))
+	mux.Handle("DELETE /v1/tenants/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteTenant)))
 
 	mux.Handle("GET /v1/projects", s.auth.RequireAPI(http.HandlerFunc(s.handleListProjects)))
 	mux.Handle("POST /v1/projects", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateProject)))
@@ -81,8 +88,11 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("GET /v1/audit-events", s.auth.RequireAPI(http.HandlerFunc(s.handleListAuditEvents)))
 
+	mux.HandleFunc("GET /install/join-cluster.sh", s.handleJoinClusterInstallScript)
 	mux.HandleFunc("POST /v1/agent/enroll", s.handleAgentEnroll)
 	mux.HandleFunc("POST /v1/nodes/bootstrap", s.handleBootstrapNode)
+	mux.HandleFunc("POST /v1/nodes/join-cluster", s.handleJoinClusterNode)
+	mux.HandleFunc("POST /v1/nodes/join-cluster/env", s.handleJoinClusterNodeEnv)
 	mux.Handle("POST /v1/agent/heartbeat", s.auth.RequireRuntime(http.HandlerFunc(s.handleAgentHeartbeat)))
 	mux.Handle("GET /v1/agent/operations", s.auth.RequireRuntime(http.HandlerFunc(s.handleAgentOperations)))
 	mux.Handle("POST /v1/agent/operations/{id}/complete", s.auth.RequireRuntime(http.HandlerFunc(s.handleAgentCompleteOperation)))
@@ -360,7 +370,7 @@ func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	if node.Type != model.RuntimeTypeExternalOwned {
+	if node.Type != model.RuntimeTypeExternalOwned && node.Type != model.RuntimeTypeManagedOwned {
 		httpx.WriteError(w, http.StatusNotFound, "resource not found")
 		return
 	}
@@ -423,6 +433,10 @@ func (s *Server) handleCreateRuntime(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.Type == model.RuntimeTypeManagedOwned {
+		httpx.WriteError(w, http.StatusBadRequest, "managed-owned runtime must be created through the node join flow")
+		return
+	}
 	tenantID, ok := s.resolveTenantID(principal, req.TenantID)
 	if !ok {
 		httpx.WriteError(w, http.StatusForbidden, "cannot create runtime for another tenant")
@@ -483,7 +497,16 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "cannot create app for another tenant")
 		return
 	}
-	app, err := s.store.CreateApp(tenantID, req.ProjectID, req.Name, req.Description, req.Spec)
+
+	var (
+		app model.App
+		err error
+	)
+	if strings.TrimSpace(s.appBaseDomain) != "" {
+		app, err = s.createAppWithAutoRoute(tenantID, req.ProjectID, req.Name, req.Description, req.Spec)
+	} else {
+		app, err = s.store.CreateApp(tenantID, req.ProjectID, req.Name, req.Description, req.Spec)
+	}
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

@@ -32,22 +32,29 @@ func NamespaceForTenant(tenantID string) string {
 	return "fg-" + tenantID
 }
 
-func (r Renderer) RenderAppBundle(app model.App) (Bundle, error) {
+func (r Renderer) RenderAppBundle(app model.App, constraints ...SchedulingConstraints) (Bundle, error) {
 	namespace := NamespaceForTenant(app.TenantID)
 	path := filepath.Join(r.BaseDir, namespace, fmt.Sprintf("%s.yaml", model.Slugify(app.Name)))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return Bundle{}, fmt.Errorf("create render directory: %w", err)
 	}
 
+	var scheduling SchedulingConstraints
+	if len(constraints) > 0 {
+		scheduling = constraints[0]
+	}
+
 	data := renderData{
-		Namespace: namespace,
-		AppName:   sanitizeName(app.Name),
-		Image:     app.Spec.Image,
-		Command:   app.Spec.Command,
-		Args:      app.Spec.Args,
-		Replicas:  app.Spec.Replicas,
-		Ports:     app.Spec.Ports,
-		Env:       sortedEnv(app.Spec.Env),
+		Namespace:    namespace,
+		AppName:      sanitizeName(app.Name),
+		Image:        app.Spec.Image,
+		Command:      app.Spec.Command,
+		Args:         app.Spec.Args,
+		Replicas:     app.Spec.Replicas,
+		Ports:        app.Spec.Ports,
+		Env:          sortedEnv(app.Spec.Env),
+		NodeSelector: sortedEnv(scheduling.NodeSelector),
+		Tolerations:  scheduling.Tolerations,
 	}
 
 	var buf bytes.Buffer
@@ -75,14 +82,16 @@ func ApplyKubectl(manifestPath string) error {
 }
 
 type renderData struct {
-	Namespace string
-	AppName   string
-	Image     string
-	Command   []string
-	Args      []string
-	Replicas  int
-	Ports     []int
-	Env       [][2]string
+	Namespace    string
+	AppName      string
+	Image        string
+	Command      []string
+	Args         []string
+	Replicas     int
+	Ports        []int
+	Env          [][2]string
+	NodeSelector [][2]string
+	Tolerations  []Toleration
 }
 
 var appManifestTemplate = template.Must(template.New("app-manifest").Funcs(template.FuncMap{
@@ -137,6 +146,21 @@ spec:
 {{- range .Env }}
         - name: {{ index . 0 }}
           value: {{ quote (index . 1) }}
+{{- end }}
+{{- end }}
+{{- if .NodeSelector }}
+      nodeSelector:
+{{- range .NodeSelector }}
+        {{ index . 0 }}: {{ quote (index . 1) }}
+{{- end }}
+{{- end }}
+{{- if .Tolerations }}
+      tolerations:
+{{- range .Tolerations }}
+      - key: {{ quote .Key }}
+        operator: {{ quote .Operator }}
+        value: {{ quote .Value }}
+        effect: {{ quote .Effect }}
 {{- end }}
 {{- end }}
 ---

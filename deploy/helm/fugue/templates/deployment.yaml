@@ -4,6 +4,7 @@ metadata:
   name: {{ include "fugue.fullname" . }}
   labels:
     {{- include "fugue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
 spec:
   strategy:
     type: Recreate
@@ -15,6 +16,7 @@ spec:
     metadata:
       labels:
         {{- include "fugue.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -48,6 +50,16 @@ spec:
                 secretKeyRef:
                   name: {{ include "fugue.configSecretName" . }}
                   key: FUGUE_DATABASE_URL
+            - name: FUGUE_CLUSTER_JOIN_SERVER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: FUGUE_CLUSTER_JOIN_SERVER
+            - name: FUGUE_CLUSTER_JOIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: FUGUE_CLUSTER_JOIN_TOKEN
             - name: FUGUE_APP_BASE_DOMAIN
               value: {{ .Values.api.appBaseDomain | quote }}
             - name: FUGUE_API_PUBLIC_DOMAIN

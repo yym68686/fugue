@@ -27,8 +27,10 @@ K3S_API_IP="${FUGUE_K3S_API_IP:-}"
 PUBLIC_ENDPOINT_HOST="${FUGUE_PUBLIC_ENDPOINT_HOST:-}"
 FUGUE_DOMAIN="${FUGUE_DOMAIN:-}"
 FUGUE_APP_BASE_DOMAIN="${FUGUE_APP_BASE_DOMAIN:-fugue.pro}"
+FUGUE_REGISTRY_DOMAIN="${FUGUE_REGISTRY_DOMAIN:-registry.${FUGUE_APP_BASE_DOMAIN}}"
 FUGUE_APP_TLS_CERT_FILE="${FUGUE_APP_TLS_CERT_FILE:-${REPO_ROOT}/secrets/cloudflare-apps-origin.crt}"
 FUGUE_APP_TLS_KEY_FILE="${FUGUE_APP_TLS_KEY_FILE:-${REPO_ROOT}/secrets/cloudflare-apps-origin.key}"
+RECONCILE_K3S_CLUSTER="${FUGUE_RECONCILE_K3S_CLUSTER:-false}"
 IMAGE_PLATFORM="${FUGUE_IMAGE_PLATFORM:-}"
 CONTAINER_TOOL="${FUGUE_CONTAINER_TOOL:-}"
 SSH_CONNECT_TIMEOUT="${FUGUE_SSH_CONNECT_TIMEOUT:-15}"
@@ -42,6 +44,7 @@ PUBLIC_API_REACHABLE="unknown"
 EDGE_LOCAL_HEALTH="unknown"
 EDGE_UPSTREAM=""
 EDGE_UPSTREAM_MODE=""
+REGISTRY_EDGE_UPSTREAM=""
 
 IMAGES_TAR="${DIST_DIR}/fugue-images-${IMAGE_TAG}.tar"
 CHART_TAR="${DIST_DIR}/fugue-chart-${IMAGE_TAG}.tar"
@@ -357,8 +360,13 @@ detect_public_endpoint_host() {
     return
   fi
 
-  PUBLIC_ENDPOINT_HOST="$(ssh -G "${PRIMARY_ALIAS}" | awk '/^hostname / {print $2; exit}')"
+  PUBLIC_ENDPOINT_HOST="$(public_host_for_alias "${PRIMARY_ALIAS}")"
   [[ -n "${PUBLIC_ENDPOINT_HOST}" ]] || fail "failed to detect public endpoint host for ${PRIMARY_ALIAS}; set FUGUE_PUBLIC_ENDPOINT_HOST manually"
+}
+
+public_host_for_alias() {
+  local host="$1"
+  ssh -G "${host}" | awk '/^hostname / {print $2; exit}'
 }
 
 render_tls_sans() {
@@ -409,9 +417,19 @@ EOF
 
 build_images() {
   log "building local images with ${CONTAINER_TOOL} for ${IMAGE_PLATFORM}"
+  prefetch_build_bases
   run_with_retry 3 5 "build fugue-api image" build_image "${REPO_ROOT}/Dockerfile.api" "fugue-api:${IMAGE_TAG}"
   run_with_retry 3 5 "build fugue-controller image" build_image "${REPO_ROOT}/Dockerfile.controller" "fugue-controller:${IMAGE_TAG}"
   run_with_retry 3 5 "save built images" "${CONTAINER_TOOL}" save -o "${IMAGES_TAR}" "fugue-api:${IMAGE_TAG}" "fugue-controller:${IMAGE_TAG}"
+}
+
+prefetch_build_bases() {
+  local platform_args=()
+  if [[ -n "${IMAGE_PLATFORM}" ]]; then
+    platform_args=(--platform "${IMAGE_PLATFORM}")
+  fi
+
+  run_with_retry 5 5 "pull golang build base image" "${CONTAINER_TOOL}" pull "${platform_args[@]}" golang:1.25-alpine
 }
 
 build_image() {
@@ -419,11 +437,11 @@ build_image() {
   local tag="$2"
 
   if [[ "${CONTAINER_TOOL}" == "docker" ]]; then
-    BUILDKIT_PROGRESS=plain "${CONTAINER_TOOL}" build --platform "${IMAGE_PLATFORM}" -f "${dockerfile}" -t "${tag}" "${REPO_ROOT}"
+    BUILDKIT_PROGRESS=plain "${CONTAINER_TOOL}" build --pull=false --platform "${IMAGE_PLATFORM}" -f "${dockerfile}" -t "${tag}" "${REPO_ROOT}"
     return
   fi
 
-  "${CONTAINER_TOOL}" build --platform "${IMAGE_PLATFORM}" -f "${dockerfile}" -t "${tag}" "${REPO_ROOT}"
+  "${CONTAINER_TOOL}" build --pull=false --platform "${IMAGE_PLATFORM}" -f "${dockerfile}" -t "${tag}" "${REPO_ROOT}"
 }
 
 build_chart_archive() {
@@ -436,6 +454,7 @@ install_edge_proxy_on_primary() {
   fi
 
   determine_edge_upstream
+  determine_registry_upstream
 
   local app_tls_directive="tls internal"
   if [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && app_tls_cert_matches_domain; then
@@ -448,7 +467,7 @@ install_edge_proxy_on_primary() {
     log "wildcard app TLS cert does not match ${FUGUE_APP_BASE_DOMAIN}; using tls internal for app hosts"
   fi
 
-  log "installing Route A edge proxy on ${PRIMARY_ALIAS} for ${FUGUE_DOMAIN} and *.${FUGUE_APP_BASE_DOMAIN}"
+  log "installing Route A edge proxy on ${PRIMARY_ALIAS} for ${FUGUE_DOMAIN}, ${FUGUE_REGISTRY_DOMAIN}, and *.${FUGUE_APP_BASE_DOMAIN}"
   ssh_root "${PRIMARY_ALIAS}" <<EOF
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -472,6 +491,12 @@ https://${FUGUE_DOMAIN} {
   tls internal
   encode gzip zstd
   reverse_proxy ${EDGE_UPSTREAM}
+}
+
+https://${FUGUE_REGISTRY_DOMAIN} {
+  tls internal
+  encode gzip zstd
+  reverse_proxy ${REGISTRY_EDGE_UPSTREAM}
 }
 
 https://*.${FUGUE_APP_BASE_DOMAIN} {
@@ -511,6 +536,28 @@ determine_edge_upstream() {
   log "warning: neither ClusterIP nor NodePort health checks succeeded from ${PRIMARY_ALIAS}; keeping NodePort upstream ${EDGE_UPSTREAM}"
 }
 
+determine_registry_upstream() {
+  REGISTRY_EDGE_UPSTREAM="${K3S_API_IP}:${REGISTRY_NODEPORT}"
+
+  local cluster_ip=""
+  cluster_ip="$(ssh_root_run "${PRIMARY_ALIAS}" "KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n $(printf '%q' "${NAMESPACE}") get svc $(printf '%q' "${REGISTRY_DEPLOYMENT_NAME}") -o jsonpath='{.spec.clusterIP}'" | tr -d '\r' || true)"
+  if [[ -n "${cluster_ip}" && "${cluster_ip}" != "<none>" ]]; then
+    if ssh_root_run "${PRIMARY_ALIAS}" "curl -fsS --max-time 10 http://$(printf '%q' "${cluster_ip}"):5000/v2/ >/dev/null"; then
+      REGISTRY_EDGE_UPSTREAM="${cluster_ip}:5000"
+      log "selected registry upstream via ClusterIP: ${REGISTRY_EDGE_UPSTREAM}"
+      return
+    fi
+    log "warning: registry ClusterIP ${cluster_ip}:5000 exists but is not reachable from ${PRIMARY_ALIAS}; falling back to NodePort"
+  fi
+
+  if ssh_root_run "${PRIMARY_ALIAS}" "curl -fsS --max-time 10 http://$(printf '%q' "${K3S_API_IP}"):$(printf '%q' "${REGISTRY_NODEPORT}")/v2/ >/dev/null"; then
+    log "selected registry upstream via NodePort: ${REGISTRY_EDGE_UPSTREAM}"
+    return
+  fi
+
+  log "warning: neither registry ClusterIP nor NodePort health checks succeeded from ${PRIMARY_ALIAS}; keeping NodePort upstream ${REGISTRY_EDGE_UPSTREAM}"
+}
+
 check_edge_origin_health() {
   if [[ -z "${FUGUE_DOMAIN}" ]]; then
     EDGE_LOCAL_HEALTH="unknown"
@@ -531,12 +578,16 @@ check_edge_origin_health() {
 }
 
 write_primary_config() {
+  local primary_public_host
+  primary_public_host="$(public_host_for_alias "${PRIMARY_ALIAS}")"
   ssh_root "${PRIMARY_ALIAS}" <<EOF
 set -euo pipefail
 mkdir -p /etc/rancher/k3s
 cat >/etc/rancher/k3s/config.yaml <<'CFG'
 cluster-init: true
 write-kubeconfig-mode: "644"
+node-external-ip: "${primary_public_host}"
+flannel-external-ip: true
 $(render_tls_sans)
 disable:
   - traefik
@@ -580,10 +631,26 @@ wait_for_primary_token() {
   fail "timed out waiting for primary k3s token"
 }
 
+wait_for_primary_node_token() {
+  local tries token
+  for tries in $(seq 1 60); do
+    token="$(ssh_root_run "${PRIMARY_ALIAS}" "if [ -f /var/lib/rancher/k3s/server/node-token ]; then cat /var/lib/rancher/k3s/server/node-token; elif [ -f /var/lib/rancher/k3s/server/token ]; then cat /var/lib/rancher/k3s/server/token; fi")"
+    if [[ -n "${token}" ]]; then
+      printf '%s' "${token}"
+      return 0
+    fi
+    sleep 2
+  done
+  dump_remote_k3s_debug "${PRIMARY_ALIAS}"
+  fail "timed out waiting for primary k3s node token"
+}
+
 write_secondary_config() {
   local host="$1"
   local role="$2"
   local token="$3"
+  local public_host
+  public_host="$(public_host_for_alias "${host}")"
   ssh_root "${host}" <<EOF
 set -euo pipefail
 mkdir -p /etc/rancher/k3s
@@ -591,6 +658,8 @@ cat >/etc/rancher/k3s/config.yaml <<'CFG'
 server: "https://${K3S_API_IP}:6443"
 token: "${token}"
 write-kubeconfig-mode: "644"
+node-external-ip: "${public_host}"
+flannel-external-ip: true
 $(render_tls_sans)
 disable:
   - traefik
@@ -736,6 +805,10 @@ EOF
 }
 
 write_values_override() {
+  local cluster_join_server="https://${PUBLIC_ENDPOINT_HOST}:6443"
+  local cluster_join_token
+  cluster_join_token="$(wait_for_primary_node_token)"
+
   cat >"${VALUES_FILE}" <<EOF
 bootstrapAdminKey: "${BOOTSTRAP_KEY}"
 
@@ -746,7 +819,9 @@ api:
     pullPolicy: IfNotPresent
   appBaseDomain: "${FUGUE_APP_BASE_DOMAIN}"
   apiPublicDomain: "${FUGUE_DOMAIN}"
-  registryPushBase: "${K3S_API_IP}:${REGISTRY_NODEPORT}"
+  registryPushBase: "${FUGUE_REGISTRY_DOMAIN}"
+  clusterJoinServer: "${cluster_join_server}"
+  clusterJoinToken: "${cluster_join_token}"
   importWorkDir: "/var/lib/fugue/import"
   resources:
     requests:
@@ -860,10 +935,12 @@ FUGUE_PUBLIC_API_REACHABLE=${PUBLIC_API_REACHABLE}
 FUGUE_CLUSTER_INTERNAL_IP=${K3S_API_IP}
 FUGUE_DOMAIN=${FUGUE_DOMAIN}
 FUGUE_APP_BASE_DOMAIN=${FUGUE_APP_BASE_DOMAIN}
+FUGUE_REGISTRY_DOMAIN=${FUGUE_REGISTRY_DOMAIN}
 FUGUE_STATE_BACKEND=postgresql-relational
 FUGUE_EDGE_LOCAL_HEALTH=${EDGE_LOCAL_HEALTH}
 FUGUE_EDGE_UPSTREAM=${EDGE_UPSTREAM}
 FUGUE_EDGE_UPSTREAM_MODE=${EDGE_UPSTREAM_MODE}
+FUGUE_REGISTRY_EDGE_UPSTREAM=${REGISTRY_EDGE_UPSTREAM}
 KUBECONFIG=${KUBECONFIG_OUT}
 PRIMARY_ALIAS=${PRIMARY_ALIAS}
 SECONDARY_ALIASES=${SECONDARY_ALIASES[*]}
@@ -901,6 +978,7 @@ write_route_a_file() {
   cat >"${ROUTE_A_FILE}" <<EOF
 Route A is configured on ${PRIMARY_ALIAS} with Caddy:
   https://${FUGUE_DOMAIN} -> https origin on ${PRIMARY_ALIAS}:443 -> upstream ${EDGE_UPSTREAM} (${EDGE_UPSTREAM_MODE})
+  https://${FUGUE_REGISTRY_DOMAIN} -> https origin on ${PRIMARY_ALIAS}:443 -> upstream ${REGISTRY_EDGE_UPSTREAM}
   https://*.${FUGUE_APP_BASE_DOMAIN} -> https origin on ${PRIMARY_ALIAS}:443 -> upstream ${EDGE_UPSTREAM} (${EDGE_UPSTREAM_MODE})
 
 Server-side status:
@@ -927,6 +1005,7 @@ Cloudflare IP list references:
 Tests:
   curl -I https://${FUGUE_DOMAIN}
   curl https://${FUGUE_DOMAIN}/healthz
+  curl -I https://${FUGUE_REGISTRY_DOMAIN}/v2/
   KUBECONFIG='${KUBECONFIG_OUT}' kubectl get nodes
 EOF
 }
@@ -958,6 +1037,9 @@ EOF
 
 Route A notes file:
   ${ROUTE_A_FILE}
+
+Registry endpoint:
+  https://${FUGUE_REGISTRY_DOMAIN}/v2/
 EOF
   fi
   if [[ "${PUBLIC_API_REACHABLE}" == "false" ]]; then
@@ -1006,6 +1088,11 @@ main() {
   build_images
   if cluster_is_ready; then
     log "existing k3s cluster is healthy; skipping cluster bootstrap"
+    if [[ "${RECONCILE_K3S_CLUSTER}" == "true" ]]; then
+      log "reconciling k3s server configuration for public worker joins"
+      install_k3s_cluster
+      wait_for_cluster_ready
+    fi
   else
     install_k3s_cluster
     wait_for_cluster_ready
