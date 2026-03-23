@@ -27,71 +27,16 @@ type GitHubDockerImportRequest struct {
 }
 
 func (i *Importer) ImportPublicGitHubDockerfileImage(ctx context.Context, req GitHubDockerImportRequest) (GitHubImportResult, error) {
-	owner, repo, err := parseGitHubRepoURL(req.RepoURL)
-	if err != nil {
-		return GitHubImportResult{}, err
-	}
 	if strings.TrimSpace(req.RegistryPushBase) == "" {
 		return GitHubImportResult{}, fmt.Errorf("registry push base is empty")
 	}
-
-	if err := os.MkdirAll(i.WorkDir, 0o755); err != nil {
-		return GitHubImportResult{}, fmt.Errorf("create import work dir: %w", err)
-	}
-
-	repoDir, err := os.MkdirTemp(i.WorkDir, "github-docker-import-*")
-	if err != nil {
-		return GitHubImportResult{}, fmt.Errorf("create import temp dir: %w", err)
-	}
-	defer os.RemoveAll(repoDir)
-
-	args := gitCloneArgs(req.RepoURL, repoDir, req.Branch)
-	if output, err := exec.CommandContext(ctx, "git", args...).CombinedOutput(); err != nil {
-		return GitHubImportResult{}, fmt.Errorf("git clone: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-
-	branch, err := gitOutput(ctx, repoDir, "rev-parse", "--abbrev-ref", "HEAD")
+	repo, err := i.clonePublicGitHubRepo(ctx, req.RepoURL, req.Branch, "github-docker-import-*")
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
-	commitSHA, err := gitOutput(ctx, repoDir, "rev-parse", "HEAD")
-	if err != nil {
-		return GitHubImportResult{}, err
-	}
+	defer releaseClonedRepo(repo)
 
-	dockerfilePath, buildContextDir, err := detectDockerBuildInputs(repoDir, req.DockerfilePath, req.BuildContextDir)
-	if err != nil {
-		return GitHubImportResult{}, err
-	}
-
-	imageRepository := strings.Trim(strings.TrimSpace(req.ImageRepository), "/")
-	if imageRepository == "" {
-		imageRepository = "fugue-apps"
-	}
-	repoPath := model.Slugify(owner) + "-" + model.Slugify(repo)
-	imageRef := fmt.Sprintf("%s/%s/%s:git-%s", strings.TrimSpace(req.RegistryPushBase), imageRepository, repoPath, shortCommit(commitSHA))
-	if err := buildAndPushDockerfileImage(ctx, dockerfileBuildRequest{
-		RepoURL:         req.RepoURL,
-		Branch:          branch,
-		CommitSHA:       commitSHA,
-		DockerfilePath:  dockerfilePath,
-		BuildContextDir: buildContextDir,
-		ImageRef:        imageRef,
-	}); err != nil {
-		return GitHubImportResult{}, err
-	}
-
-	return GitHubImportResult{
-		RepoOwner:       owner,
-		RepoName:        repo,
-		Branch:          branch,
-		CommitSHA:       commitSHA,
-		BuildStrategy:   model.AppBuildStrategyDockerfile,
-		DockerfilePath:  dockerfilePath,
-		BuildContextDir: buildContextDir,
-		ImageRef:        imageRef,
-		DefaultAppName:  model.Slugify(repo),
-	}, nil
+	return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, req.DockerfilePath, req.BuildContextDir, req.RegistryPushBase, req.ImageRepository)
 }
 
 type dockerfileBuildRequest struct {
@@ -143,6 +88,39 @@ func detectDockerBuildInputs(repoDir, dockerfilePath, buildContextDir string) (s
 		relContext = "."
 	}
 	return relDockerfile, relContext, nil
+}
+
+func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, dockerfilePath, buildContextDir, registryPushBase, imageRepository string) (GitHubImportResult, error) {
+	dockerfilePath, buildContextDir, err := detectDockerBuildInputs(repo.RepoDir, dockerfilePath, buildContextDir)
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
+
+	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo)
+	if err := buildAndPushDockerfileImage(ctx, dockerfileBuildRequest{
+		RepoURL:         repoURL,
+		Branch:          repo.Branch,
+		CommitSHA:       repo.CommitSHA,
+		DockerfilePath:  dockerfilePath,
+		BuildContextDir: buildContextDir,
+		ImageRef:        imageRef,
+	}); err != nil {
+		return GitHubImportResult{}, err
+	}
+
+	return GitHubImportResult{
+		RepoOwner:        repo.RepoOwner,
+		RepoName:         repo.RepoName,
+		Branch:           repo.Branch,
+		CommitSHA:        repo.CommitSHA,
+		BuildStrategy:    model.AppBuildStrategyDockerfile,
+		DockerfilePath:   dockerfilePath,
+		BuildContextDir:  buildContextDir,
+		ImageRef:         imageRef,
+		DefaultAppName:   repo.DefaultAppName,
+		DetectedPort:     80,
+		DetectedProvider: model.AppBuildStrategyDockerfile,
+	}, nil
 }
 
 func secureRepoJoin(repoDir, rel string) (string, error) {

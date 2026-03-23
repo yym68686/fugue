@@ -1,0 +1,322 @@
+package sourceimport
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	"fugue/internal/model"
+)
+
+const (
+	defaultNixpacksImage = "ghcr.io/railwayapp/nixpacks:latest"
+	defaultGitCloneImage = "alpine/git:latest"
+)
+
+type GitHubAutoImportRequest struct {
+	RepoURL          string
+	Branch           string
+	SourceDir        string
+	DockerfilePath   string
+	BuildContextDir  string
+	RegistryPushBase string
+	ImageRepository  string
+}
+
+type GitHubNixpacksImportRequest struct {
+	RepoURL          string
+	Branch           string
+	SourceDir        string
+	RegistryPushBase string
+	ImageRepository  string
+}
+
+type nixpacksBuildRequest struct {
+	RepoURL   string
+	Branch    string
+	CommitSHA string
+	SourceDir string
+	ImageRef  string
+}
+
+func (i *Importer) ImportPublicGitHubAuto(ctx context.Context, req GitHubAutoImportRequest) (GitHubImportResult, error) {
+	if strings.TrimSpace(req.RegistryPushBase) == "" {
+		return GitHubImportResult{}, fmt.Errorf("registry push base is empty")
+	}
+	repo, err := i.clonePublicGitHubRepo(ctx, req.RepoURL, req.Branch, "github-auto-import-*")
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
+	defer releaseClonedRepo(repo)
+
+	buildStrategy, sourceDir, dockerfilePath, buildContextDir, err := detectAutoImportInputs(repo.RepoDir, req.SourceDir, req.DockerfilePath, req.BuildContextDir)
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
+
+	switch buildStrategy {
+	case model.AppBuildStrategyDockerfile:
+		return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, dockerfilePath, buildContextDir, req.RegistryPushBase, req.ImageRepository)
+	case model.AppBuildStrategyStaticSite:
+		return importStaticSiteFromClonedRepo(repo, sourceDir, req.RegistryPushBase, req.ImageRepository)
+	case model.AppBuildStrategyNixpacks:
+		return importNixpacksFromClonedRepo(ctx, repo, req.RepoURL, sourceDir, req.RegistryPushBase, req.ImageRepository)
+	default:
+		return GitHubImportResult{}, fmt.Errorf("unsupported auto-detected build strategy %q", buildStrategy)
+	}
+}
+
+func (i *Importer) ImportPublicGitHubNixpacks(ctx context.Context, req GitHubNixpacksImportRequest) (GitHubImportResult, error) {
+	if strings.TrimSpace(req.RegistryPushBase) == "" {
+		return GitHubImportResult{}, fmt.Errorf("registry push base is empty")
+	}
+	repo, err := i.clonePublicGitHubRepo(ctx, req.RepoURL, req.Branch, "github-nixpacks-import-*")
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
+	defer releaseClonedRepo(repo)
+
+	return importNixpacksFromClonedRepo(ctx, repo, req.RepoURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository)
+}
+
+func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, sourceDir, registryPushBase, imageRepository string) (GitHubImportResult, error) {
+	normalizedSourceDir, err := normalizeRepoSourceDir(repo.RepoDir, sourceDir)
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
+	provider, port := detectNixpacksProviderAndPort(repo.RepoDir, normalizedSourceDir)
+
+	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo)
+	if err := buildAndPushNixpacksImage(ctx, nixpacksBuildRequest{
+		RepoURL:   repoURL,
+		Branch:    repo.Branch,
+		CommitSHA: repo.CommitSHA,
+		SourceDir: normalizedSourceDir,
+		ImageRef:  imageRef,
+	}); err != nil {
+		return GitHubImportResult{}, err
+	}
+
+	return GitHubImportResult{
+		RepoOwner:        repo.RepoOwner,
+		RepoName:         repo.RepoName,
+		Branch:           repo.Branch,
+		CommitSHA:        repo.CommitSHA,
+		SourceDir:        normalizeImportedSourceDirValue(normalizedSourceDir),
+		BuildStrategy:    model.AppBuildStrategyNixpacks,
+		ImageRef:         imageRef,
+		DefaultAppName:   repo.DefaultAppName,
+		DetectedPort:     port,
+		DetectedProvider: provider,
+		SuggestedEnv:     suggestedNixpacksEnv(port),
+	}, nil
+}
+
+func detectAutoImportInputs(repoDir, requestedSourceDir, requestedDockerfilePath, requestedBuildContextDir string) (string, string, string, string, error) {
+	if strings.TrimSpace(requestedDockerfilePath) != "" || strings.TrimSpace(requestedBuildContextDir) != "" {
+		dockerfilePath, buildContextDir, err := detectDockerBuildInputs(repoDir, requestedDockerfilePath, requestedBuildContextDir)
+		if err != nil {
+			return "", "", "", "", err
+		}
+		return model.AppBuildStrategyDockerfile, "", dockerfilePath, buildContextDir, nil
+	}
+
+	requestedSourceDir = strings.TrimSpace(requestedSourceDir)
+	if requestedSourceDir != "" {
+		defaultDockerfileInSourceDir := filepath.ToSlash(filepath.Join(requestedSourceDir, "Dockerfile"))
+		if _, _, err := detectDockerBuildInputs(repoDir, defaultDockerfileInSourceDir, requestedSourceDir); err == nil {
+			return model.AppBuildStrategyDockerfile, "", defaultDockerfileInSourceDir, filepath.ToSlash(requestedSourceDir), nil
+		}
+		if staticDir, err := detectStaticSiteDir(repoDir, requestedSourceDir); err == nil {
+			return model.AppBuildStrategyStaticSite, relativeImportedSourceDir(repoDir, staticDir), "", "", nil
+		}
+		normalizedSourceDir, err := normalizeRepoSourceDir(repoDir, requestedSourceDir)
+		if err != nil {
+			return "", "", "", "", err
+		}
+		return model.AppBuildStrategyNixpacks, normalizedSourceDir, "", "", nil
+	}
+
+	if _, err := os.Stat(filepath.Join(repoDir, "Dockerfile")); err == nil {
+		dockerfilePath, buildContextDir, err := detectDockerBuildInputs(repoDir, "", "")
+		if err != nil {
+			return "", "", "", "", err
+		}
+		return model.AppBuildStrategyDockerfile, "", dockerfilePath, buildContextDir, nil
+	}
+
+	if staticDir, err := detectAutoStaticSiteDir(repoDir); err == nil {
+		return model.AppBuildStrategyStaticSite, relativeImportedSourceDir(repoDir, staticDir), "", "", nil
+	}
+
+	return model.AppBuildStrategyNixpacks, ".", "", "", nil
+}
+
+func detectAutoStaticSiteDir(repoDir string) (string, error) {
+	candidates := []string{".", "dist", "build", "site"}
+	for _, candidate := range candidates {
+		fullPath := repoDir
+		if candidate != "." {
+			fullPath = filepath.Join(repoDir, candidate)
+		}
+		info, err := os.Stat(fullPath)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(fullPath, "index.html")); err == nil {
+			return fullPath, nil
+		}
+	}
+	return "", fmt.Errorf("no ready static-site entrypoint found")
+}
+
+func detectNixpacksProviderAndPort(repoDir, sourceDir string) (string, int) {
+	appDir := repoDir
+	if strings.TrimSpace(sourceDir) != "" && strings.TrimSpace(sourceDir) != "." {
+		appDir = filepath.Join(repoDir, filepath.FromSlash(sourceDir))
+	}
+
+	switch {
+	case pathExists(filepath.Join(appDir, "package.json")):
+		return "nodejs", 3000
+	case pathExists(filepath.Join(appDir, "pyproject.toml")) ||
+		pathExists(filepath.Join(appDir, "requirements.txt")) ||
+		pathExists(filepath.Join(appDir, "Pipfile")) ||
+		pathExists(filepath.Join(appDir, "manage.py")):
+		return "python", 8000
+	case pathExists(filepath.Join(appDir, "go.mod")):
+		return "go", 8080
+	case pathExists(filepath.Join(appDir, "Cargo.toml")):
+		return "rust", 3000
+	default:
+		return "generic", 3000
+	}
+}
+
+func suggestedNixpacksEnv(port int) map[string]string {
+	if port <= 0 {
+		return nil
+	}
+	return map[string]string{
+		"PORT": strconv.Itoa(port),
+	}
+}
+
+func normalizeImportedSourceDirValue(sourceDir string) string {
+	sourceDir = strings.TrimSpace(sourceDir)
+	if sourceDir == "." {
+		return ""
+	}
+	return sourceDir
+}
+
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func buildAndPushNixpacksImage(ctx context.Context, req nixpacksBuildRequest) error {
+	namespace, err := currentNamespace()
+	if err != nil {
+		return err
+	}
+
+	jobName := buildJobName(dockerfileBuildRequest{
+		RepoURL:   req.RepoURL,
+		CommitSHA: req.CommitSHA,
+	})
+	_ = kubectlRun(ctx, nil, "-n", namespace, "delete", "job", jobName, "--ignore-not-found=true", "--wait=false")
+
+	jobObject, err := buildNixpacksJobObject(namespace, jobName, req)
+	if err != nil {
+		return err
+	}
+	defer kubectlRun(context.Background(), nil, "-n", namespace, "delete", "job", jobName, "--ignore-not-found=true", "--wait=false")
+
+	if err := kubectlRun(ctx, jobObject, "-n", namespace, "apply", "-f", "-"); err != nil {
+		return fmt.Errorf("apply nixpacks job: %w", err)
+	}
+	if err := kubectlRun(ctx, nil, "-n", namespace, "wait", "--for=condition=complete", "--timeout=30m", "job/"+jobName); err != nil {
+		logs, _ := kubectlOutput(ctx, nil, "-n", namespace, "logs", "job/"+jobName, "--all-containers=true", "--tail=-1")
+		describe, _ := kubectlOutput(ctx, nil, "-n", namespace, "describe", "job/"+jobName)
+		return fmt.Errorf("wait for nixpacks job %s: %w\nlogs:\n%s\ndescribe:\n%s", jobName, err, strings.TrimSpace(string(logs)), strings.TrimSpace(string(describe)))
+	}
+	return nil
+}
+
+func buildNixpacksJobObject(namespace, jobName string, req nixpacksBuildRequest) (map[string]any, error) {
+	cloneArgs := gitCloneArgs(req.RepoURL, "/workspace/repo", req.Branch)
+	workingDir := "/workspace/repo"
+	if strings.TrimSpace(req.SourceDir) != "" && strings.TrimSpace(req.SourceDir) != "." {
+		workingDir += "/" + filepath.ToSlash(strings.TrimSpace(req.SourceDir))
+	}
+
+	return map[string]any{
+		"apiVersion": "batch/v1",
+		"kind":       "Job",
+		"metadata": map[string]any{
+			"name":      jobName,
+			"namespace": namespace,
+			"labels": map[string]string{
+				"app.kubernetes.io/managed-by": "fugue",
+				"app.kubernetes.io/component":  "builder",
+			},
+		},
+		"spec": map[string]any{
+			"backoffLimit":            0,
+			"ttlSecondsAfterFinished": 300,
+			"template": map[string]any{
+				"spec": map[string]any{
+					"restartPolicy": "Never",
+					"volumes": []map[string]any{
+						{
+							"name":     "workspace",
+							"emptyDir": map[string]any{},
+						},
+					},
+					"initContainers": []map[string]any{
+						{
+							"name":         "git-clone",
+							"image":        defaultGitCloneImage,
+							"command":      append([]string{"git"}, cloneArgs...),
+							"volumeMounts": []map[string]any{{"name": "workspace", "mountPath": "/workspace"}},
+						},
+						{
+							"name":         "git-checkout",
+							"image":        defaultGitCloneImage,
+							"command":      []string{"git", "-C", "/workspace/repo", "checkout", strings.TrimSpace(req.CommitSHA)},
+							"volumeMounts": []map[string]any{{"name": "workspace", "mountPath": "/workspace"}},
+						},
+						{
+							"name":       "nixpacks",
+							"image":      defaultNixpacksImage,
+							"command":    []string{"sh", "-lc", "set -euo pipefail\nmkdir -p /workspace/generated\nnixpacks plan . --format json > /workspace/generated/nixpacks-plan.json\nnixpacks build . --out /workspace/generated\ntest -f /workspace/generated/Dockerfile\n"},
+							"workingDir": workingDir,
+							"volumeMounts": []map[string]any{
+								{"name": "workspace", "mountPath": "/workspace"},
+							},
+						},
+					},
+					"containers": []map[string]any{
+						{
+							"name":  "kaniko",
+							"image": defaultKanikoImage,
+							"args": []string{
+								"--context=dir:///workspace/generated",
+								"--dockerfile=/workspace/generated/Dockerfile",
+								"--destination=" + req.ImageRef,
+								"--cleanup",
+							},
+							"volumeMounts": []map[string]any{
+								{"name": "workspace", "mountPath": "/workspace"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}, nil
+}

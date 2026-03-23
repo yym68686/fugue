@@ -39,16 +39,19 @@ type GitHubImportRequest struct {
 }
 
 type GitHubImportResult struct {
-	RepoOwner       string
-	RepoName        string
-	Branch          string
-	CommitSHA       string
-	SourceDir       string
-	BuildStrategy   string
-	DockerfilePath  string
-	BuildContextDir string
-	ImageRef        string
-	DefaultAppName  string
+	RepoOwner        string
+	RepoName         string
+	Branch           string
+	CommitSHA        string
+	SourceDir        string
+	BuildStrategy    string
+	DockerfilePath   string
+	BuildContextDir  string
+	ImageRef         string
+	DefaultAppName   string
+	DetectedPort     int
+	DetectedProvider string
+	SuggestedEnv     map[string]string
 }
 
 func NewImporter(workDir string, logger *log.Logger) *Importer {
@@ -65,68 +68,21 @@ func NewImporter(workDir string, logger *log.Logger) *Importer {
 }
 
 func (i *Importer) ImportPublicGitHubStaticSite(ctx context.Context, req GitHubImportRequest) (GitHubImportResult, error) {
-	owner, repo, err := parseGitHubRepoURL(req.RepoURL)
-	if err != nil {
-		return GitHubImportResult{}, err
-	}
 	if strings.TrimSpace(req.RegistryPushBase) == "" {
 		return GitHubImportResult{}, fmt.Errorf("registry push base is empty")
 	}
-
-	if err := os.MkdirAll(i.WorkDir, 0o755); err != nil {
-		return GitHubImportResult{}, fmt.Errorf("create import work dir: %w", err)
-	}
-
-	repoDir, err := os.MkdirTemp(i.WorkDir, "github-import-*")
-	if err != nil {
-		return GitHubImportResult{}, fmt.Errorf("create import temp dir: %w", err)
-	}
-	defer os.RemoveAll(repoDir)
-
-	args := gitCloneArgs(req.RepoURL, repoDir, req.Branch)
-	if output, err := exec.CommandContext(ctx, "git", args...).CombinedOutput(); err != nil {
-		return GitHubImportResult{}, fmt.Errorf("git clone: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-
-	branch, err := gitOutput(ctx, repoDir, "rev-parse", "--abbrev-ref", "HEAD")
+	repo, err := i.clonePublicGitHubRepo(ctx, req.RepoURL, req.Branch, "github-import-*")
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
-	commitSHA, err := gitOutput(ctx, repoDir, "rev-parse", "HEAD")
-	if err != nil {
-		return GitHubImportResult{}, err
-	}
+	defer releaseClonedRepo(repo)
 
-	sourceDir, err := detectStaticSiteDir(repoDir, req.SourceDir)
-	if err != nil {
-		return GitHubImportResult{}, err
-	}
-
-	imageRepository := strings.Trim(strings.TrimSpace(req.ImageRepository), "/")
-	if imageRepository == "" {
-		imageRepository = "fugue-apps"
-	}
-	repoPath := model.Slugify(owner) + "-" + model.Slugify(repo)
-	imageRef := fmt.Sprintf("%s/%s/%s:git-%s", strings.TrimSpace(req.RegistryPushBase), imageRepository, repoPath, shortCommit(commitSHA))
-	if err := buildAndPushStaticSiteImage(sourceDir, imageRef); err != nil {
-		return GitHubImportResult{}, err
-	}
-
-	return GitHubImportResult{
-		RepoOwner:      owner,
-		RepoName:       repo,
-		Branch:         branch,
-		CommitSHA:      commitSHA,
-		SourceDir:      strings.TrimPrefix(strings.TrimPrefix(sourceDir, repoDir), string(filepath.Separator)),
-		BuildStrategy:  model.AppBuildStrategyStaticSite,
-		ImageRef:       imageRef,
-		DefaultAppName: model.Slugify(repo),
-	}, nil
+	return importStaticSiteFromClonedRepo(repo, req.SourceDir, req.RegistryPushBase, req.ImageRepository)
 }
 
 func gitOutput(ctx context.Context, repoDir string, args ...string) (string, error) {
 	cmdArgs := append([]string{"-C", repoDir}, args...)
-	output, err := exec.CommandContext(ctx, "git", cmdArgs...).CombinedOutput()
+	output, err := runCombinedOutput(ctx, "", "git", cmdArgs...)
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 	}
@@ -164,6 +120,30 @@ func parseGitHubRepoURL(raw string) (string, string, error) {
 		return "", "", fmt.Errorf("invalid GitHub repository URL")
 	}
 	return model.Slugify(parts[0]), model.Slugify(parts[1]), nil
+}
+
+func importStaticSiteFromClonedRepo(repo clonedGitHubRepo, requestedSourceDir, registryPushBase, imageRepository string) (GitHubImportResult, error) {
+	sourceDir, err := detectStaticSiteDir(repo.RepoDir, requestedSourceDir)
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
+
+	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo)
+	if err := buildAndPushStaticSiteImage(sourceDir, imageRef); err != nil {
+		return GitHubImportResult{}, err
+	}
+
+	return GitHubImportResult{
+		RepoOwner:      repo.RepoOwner,
+		RepoName:       repo.RepoName,
+		Branch:         repo.Branch,
+		CommitSHA:      repo.CommitSHA,
+		SourceDir:      relativeImportedSourceDir(repo.RepoDir, sourceDir),
+		BuildStrategy:  model.AppBuildStrategyStaticSite,
+		ImageRef:       imageRef,
+		DefaultAppName: repo.DefaultAppName,
+		DetectedPort:   80,
+	}, nil
 }
 
 func detectStaticSiteDir(repoDir, requested string) (string, error) {
@@ -356,4 +336,12 @@ func shortCommit(sha string) string {
 		return sha[:12]
 	}
 	return sha
+}
+
+func runCombinedOutput(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	if strings.TrimSpace(dir) != "" {
+		cmd.Dir = dir
+	}
+	return cmd.CombinedOutput()
 }

@@ -65,7 +65,7 @@ What is already usable on the deployed control plane:
 - one built-in managed shared runtime: `runtime_managed_shared`
 - external node attachment through node bootstrap plus `fugue-agent`
 - asynchronous app deploy, scale, migrate, disable, and delete operations
-- `POST /v1/apps/import-github` for public GitHub repositories, with optional idempotency key support
+- `POST /v1/apps/import-github` for public GitHub repositories, with optional idempotency key support and `auto / static-site / dockerfile / nixpacks` build strategies
 - `POST /v1/apps/{id}/rebuild` to rebuild an imported GitHub app from the latest repo state and redeploy it
 - runtime-agent pull model: enroll, heartbeat, fetch tasks, mark task complete
 - audit trail for control-plane actions
@@ -73,7 +73,7 @@ What is already usable on the deployed control plane:
 What is not implemented yet:
 
 - resource update APIs
-- arbitrary Dockerfile or buildpack detection for imported repositories
+- Cloud Native Buildpacks / Paketo support
 - autoscaling policies such as HPA/VPA
 - scheduling policies, quotas, billing, or paywall logic
 - leader election and horizontally scalable control plane components
@@ -319,11 +319,13 @@ Idempotency-Key: import-<unique-key>
   "tenant_id": "tenant_xxx",
   "repo_url": "https://github.com/example/static-site",
   "branch": "main",
+  "build_strategy": "auto",
   "source_dir": "dist",
   "name": "marketing-site",
   "description": "imported from github",
   "runtime_id": "runtime_managed_shared",
-  "replicas": 1
+  "replicas": 1,
+  "service_port": 3000
 }
 ```
 
@@ -331,9 +333,13 @@ Import behavior in the current MVP:
 
 - only public GitHub repositories are supported
 - `project_id` is optional; if omitted, Fugue reuses the tenant's `default` project or creates it automatically
-- the repository must already contain `index.html` in the root, `dist/`, `build/`, `public/`, or `site/`
+- `build_strategy` is optional; default is `auto`
+- `auto` currently resolves in this order: `Dockerfile` -> ready static site -> `nixpacks`
+- `static-site` expects `index.html` in the root, `dist/`, `build/`, `public/`, or `site/`
+- `nixpacks` is the current zero-config app builder for common Node.js, Python, Go, and similar repositories
+- `service_port` is optional; if omitted, Fugue uses the detected or strategy default port
 - Git submodules are cloned recursively by default
-- Fugue packages that directory into a Caddy-based image, pushes it into the internal registry, creates the app, and queues a deploy operation
+- Fugue either packages static files into a Caddy image, builds from Dockerfile, or runs Nixpacks to generate a build context and then pushes the image into the internal registry
 - the returned app includes a generated public hostname under your configured app base domain
 - if the same `Idempotency-Key` is replayed with the same request body, Fugue returns the original app + operation instead of creating a duplicate app
 - if the same `Idempotency-Key` is reused with a different request body, Fugue returns `409 Conflict`
@@ -349,7 +355,8 @@ Optional override:
 ```json
 {
   "branch": "main",
-  "source_dir": "dist"
+  "source_dir": "apps/web",
+  "dockerfile_path": "deploy/Dockerfile"
 }
 ```
 
@@ -358,7 +365,7 @@ Rebuild behavior:
 - only works for apps originally created from `github-public` source
 - pulls the latest code from the saved repository URL and branch
 - clones Git submodules recursively
-- rebuilds and pushes a new image into the internal registry
+- rebuilds with the saved build strategy (`static-site`, `dockerfile`, or `nixpacks`) and pushes a new image into the internal registry
 - keeps the same app id, project, and public hostname, then queues a deploy operation with the new image
 
 `POST /v1/apps/{id}/deploy`

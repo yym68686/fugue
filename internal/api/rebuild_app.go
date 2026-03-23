@@ -63,12 +63,14 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 	)
 
 	switch buildStrategy {
+	case model.AppBuildStrategyAuto:
+		importResult, source, err = s.importGitHubSource(r.Context(), app.Source.RepoURL, branch, strings.TrimSpace(app.Source.SourceDir), "", "", model.AppBuildStrategyAuto, strings.TrimSpace(app.Source.ImportProfile))
 	case model.AppBuildStrategyStaticSite:
 		sourceDir := strings.TrimSpace(app.Source.SourceDir)
 		if req.SourceDir != nil {
 			sourceDir = strings.TrimSpace(*req.SourceDir)
 		}
-		importResult, source, err = s.importGitHubSource(r.Context(), app.Source.RepoURL, branch, sourceDir, "", "", "")
+		importResult, source, err = s.importGitHubSource(r.Context(), app.Source.RepoURL, branch, sourceDir, "", "", model.AppBuildStrategyStaticSite, "")
 	case model.AppBuildStrategyDockerfile:
 		dockerfilePath := strings.TrimSpace(app.Source.DockerfilePath)
 		if req.DockerfilePath != nil {
@@ -78,7 +80,13 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 		if req.BuildContextDir != nil {
 			buildContextDir = strings.TrimSpace(*req.BuildContextDir)
 		}
-		importResult, source, err = s.importGitHubSource(r.Context(), app.Source.RepoURL, branch, "", dockerfilePath, buildContextDir, strings.TrimSpace(app.Source.ImportProfile))
+		importResult, source, err = s.importGitHubSource(r.Context(), app.Source.RepoURL, branch, "", dockerfilePath, buildContextDir, model.AppBuildStrategyDockerfile, strings.TrimSpace(app.Source.ImportProfile))
+	case model.AppBuildStrategyNixpacks:
+		sourceDir := strings.TrimSpace(app.Source.SourceDir)
+		if req.SourceDir != nil {
+			sourceDir = strings.TrimSpace(*req.SourceDir)
+		}
+		importResult, source, err = s.importGitHubSource(r.Context(), app.Source.RepoURL, branch, sourceDir, "", "", model.AppBuildStrategyNixpacks, strings.TrimSpace(app.Source.ImportProfile))
 	default:
 		httpx.WriteError(w, http.StatusBadRequest, "unsupported build strategy")
 		return

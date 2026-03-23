@@ -80,10 +80,12 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 	if replicas <= 0 {
 		replicas = 1
 	}
+	servicePort := req.ServicePort
 	runtimeID := strings.TrimSpace(req.RuntimeID)
 	if runtimeID == "" {
 		runtimeID = "runtime_managed_shared"
 	}
+	buildStrategy := normalizeBuildStrategy(req.BuildStrategy)
 
 	profile := resolveImportProfile(req.Profile, req.RepoURL, strings.TrimSpace(req.ConfigContent) != "" || len(req.Files) > 0 || req.Postgres != nil || strings.TrimSpace(req.DockerfilePath) != "")
 	var releaseIdempotency bool
@@ -141,7 +143,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 	}
-	importResult, source, err := s.importGitHubSource(r.Context(), req.RepoURL, req.Branch, req.SourceDir, req.DockerfilePath, req.BuildContextDir, profile)
+	importResult, source, err := s.importGitHubSource(r.Context(), req.RepoURL, req.Branch, req.SourceDir, req.DockerfilePath, req.BuildContextDir, buildStrategy, profile)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
@@ -165,7 +167,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		spec, err := s.buildImportedAppSpec(profile, candidateName, importResult.ImageRef, runtimeID, replicas, req.ConfigContent, req.Files, req.Postgres)
+		spec, err := s.buildImportedAppSpec(profile, importResult.BuildStrategy, candidateName, importResult.ImageRef, runtimeID, replicas, effectiveImportServicePort(servicePort, importResult.DetectedPort), req.ConfigContent, req.Files, req.Postgres, importResult.SuggestedEnv)
 		if err != nil {
 			httpx.WriteError(w, http.StatusBadRequest, err.Error())
 			return
@@ -229,7 +231,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusAccepted, response)
 }
 
-func (s *Server) importGitHubSource(parent context.Context, repoURL, branch, sourceDir, dockerfilePath, buildContextDir, profile string) (sourceimport.GitHubImportResult, model.AppSource, error) {
+func (s *Server) importGitHubSource(parent context.Context, repoURL, branch, sourceDir, dockerfilePath, buildContextDir, buildStrategy, profile string) (sourceimport.GitHubImportResult, model.AppSource, error) {
 	timeout := 10 * time.Minute
 	if profile == model.AppImportProfileUniAPI {
 		timeout = 25 * time.Minute
@@ -237,8 +239,45 @@ func (s *Server) importGitHubSource(parent context.Context, repoURL, branch, sou
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
-	switch profile {
-	case "":
+	buildStrategy = normalizeBuildStrategy(buildStrategy)
+	if buildStrategy == "" {
+		buildStrategy = model.AppBuildStrategyAuto
+	}
+	if profile == model.AppImportProfileUniAPI {
+		switch buildStrategy {
+		case model.AppBuildStrategyAuto, model.AppBuildStrategyDockerfile:
+			buildStrategy = model.AppBuildStrategyDockerfile
+		default:
+			return sourceimport.GitHubImportResult{}, model.AppSource{}, fmt.Errorf("profile %q currently requires dockerfile build strategy", profile)
+		}
+	}
+
+	switch buildStrategy {
+	case model.AppBuildStrategyAuto:
+		importResult, err := s.importer.ImportPublicGitHubAuto(ctx, sourceimport.GitHubAutoImportRequest{
+			RepoURL:          repoURL,
+			Branch:           branch,
+			SourceDir:        sourceDir,
+			DockerfilePath:   dockerfilePath,
+			BuildContextDir:  buildContextDir,
+			RegistryPushBase: s.registryPushBase,
+			ImageRepository:  "fugue-apps",
+		})
+		if err != nil {
+			return sourceimport.GitHubImportResult{}, model.AppSource{}, err
+		}
+		return importResult, model.AppSource{
+			Type:            model.AppSourceTypeGitHubPublic,
+			RepoURL:         strings.TrimSpace(repoURL),
+			RepoBranch:      importResult.Branch,
+			SourceDir:       importResult.SourceDir,
+			BuildStrategy:   importResult.BuildStrategy,
+			CommitSHA:       importResult.CommitSHA,
+			DockerfilePath:  importResult.DockerfilePath,
+			BuildContextDir: importResult.BuildContextDir,
+			ImportProfile:   profile,
+		}, nil
+	case model.AppBuildStrategyStaticSite:
 		importResult, err := s.importer.ImportPublicGitHubStaticSite(ctx, sourceimport.GitHubImportRequest{
 			RepoURL:          repoURL,
 			Branch:           branch,
@@ -256,8 +295,9 @@ func (s *Server) importGitHubSource(parent context.Context, repoURL, branch, sou
 			SourceDir:     importResult.SourceDir,
 			BuildStrategy: importResult.BuildStrategy,
 			CommitSHA:     importResult.CommitSHA,
+			ImportProfile: profile,
 		}, nil
-	case model.AppImportProfileUniAPI:
+	case model.AppBuildStrategyDockerfile:
 		importResult, err := s.importer.ImportPublicGitHubDockerfileImage(ctx, sourceimport.GitHubDockerImportRequest{
 			RepoURL:          repoURL,
 			Branch:           branch,
@@ -279,9 +319,39 @@ func (s *Server) importGitHubSource(parent context.Context, repoURL, branch, sou
 			BuildContextDir: importResult.BuildContextDir,
 			ImportProfile:   profile,
 		}, nil
+	case model.AppBuildStrategyNixpacks:
+		importResult, err := s.importer.ImportPublicGitHubNixpacks(ctx, sourceimport.GitHubNixpacksImportRequest{
+			RepoURL:          repoURL,
+			Branch:           branch,
+			SourceDir:        sourceDir,
+			RegistryPushBase: s.registryPushBase,
+			ImageRepository:  "fugue-apps",
+		})
+		if err != nil {
+			return sourceimport.GitHubImportResult{}, model.AppSource{}, err
+		}
+		return importResult, model.AppSource{
+			Type:          model.AppSourceTypeGitHubPublic,
+			RepoURL:       strings.TrimSpace(repoURL),
+			RepoBranch:    importResult.Branch,
+			SourceDir:     importResult.SourceDir,
+			BuildStrategy: importResult.BuildStrategy,
+			CommitSHA:     importResult.CommitSHA,
+			ImportProfile: profile,
+		}, nil
 	default:
-		return sourceimport.GitHubImportResult{}, model.AppSource{}, fmt.Errorf("unsupported import profile %q", profile)
+		return sourceimport.GitHubImportResult{}, model.AppSource{}, fmt.Errorf("unsupported build strategy %q", buildStrategy)
 	}
+}
+
+func effectiveImportServicePort(requested, detected int) int {
+	if requested > 0 {
+		return requested
+	}
+	if detected > 0 {
+		return detected
+	}
+	return 0
 }
 
 func buildImportIdentity(baseName, baseDomain string, attempt int) (string, string) {

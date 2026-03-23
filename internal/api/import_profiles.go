@@ -20,6 +20,21 @@ func resolveImportProfile(rawProfile, repoURL string, hasStatefulInputs bool) st
 	return ""
 }
 
+func normalizeBuildStrategy(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "", model.AppBuildStrategyAuto:
+		return model.AppBuildStrategyAuto
+	case model.AppBuildStrategyStaticSite:
+		return model.AppBuildStrategyStaticSite
+	case model.AppBuildStrategyDockerfile:
+		return model.AppBuildStrategyDockerfile
+	case model.AppBuildStrategyNixpacks:
+		return model.AppBuildStrategyNixpacks
+	default:
+		return strings.TrimSpace(strings.ToLower(raw))
+	}
+}
+
 func repoNameFromGitHubURL(repoURL string) string {
 	repoURL = strings.TrimSpace(strings.TrimSuffix(repoURL, ".git"))
 	parts := strings.Split(strings.Trim(repoURL, "/"), "/")
@@ -29,16 +44,34 @@ func repoNameFromGitHubURL(repoURL string) string {
 	return parts[len(parts)-1]
 }
 
-func (s *Server) buildImportedAppSpec(profile, appName, imageRef, runtimeID string, replicas int, configContent string, files []model.AppFile, postgres *model.AppPostgresSpec) (model.AppSpec, error) {
+func (s *Server) buildImportedAppSpec(profile, buildStrategy, appName, imageRef, runtimeID string, replicas, servicePort int, configContent string, files []model.AppFile, postgres *model.AppPostgresSpec, suggestedEnv map[string]string) (model.AppSpec, error) {
 	if replicas <= 0 {
 		replicas = 1
+	}
+	if servicePort <= 0 {
+		switch normalizeBuildStrategy(buildStrategy) {
+		case model.AppBuildStrategyStaticSite:
+			servicePort = 80
+		case model.AppBuildStrategyNixpacks:
+			servicePort = 3000
+		default:
+			servicePort = 80
+		}
 	}
 
 	switch profile {
 	case "":
+		env := make(map[string]string, len(suggestedEnv))
+		for key, value := range suggestedEnv {
+			env[key] = value
+		}
+		if len(env) == 0 {
+			env = nil
+		}
 		return model.AppSpec{
 			Image:     imageRef,
-			Ports:     []int{80},
+			Env:       env,
+			Ports:     []int{servicePort},
 			Replicas:  replicas,
 			RuntimeID: runtimeID,
 		}, nil

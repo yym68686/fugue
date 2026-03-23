@@ -21,8 +21,10 @@ type importGitHubRequest struct {
 	SourceDir       string                 `json:"source_dir"`
 	Name            string                 `json:"name"`
 	Description     string                 `json:"description"`
+	BuildStrategy   string                 `json:"build_strategy"`
 	RuntimeID       string                 `json:"runtime_id"`
 	Replicas        int                    `json:"replicas"`
+	ServicePort     int                    `json:"service_port"`
 	Profile         string                 `json:"profile"`
 	DockerfilePath  string                 `json:"dockerfile_path"`
 	BuildContextDir string                 `json:"build_context_dir"`
@@ -57,8 +59,10 @@ func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID
 		SourceDir       string                 `json:"source_dir"`
 		Name            string                 `json:"name"`
 		Description     string                 `json:"description"`
+		BuildStrategy   string                 `json:"build_strategy"`
 		RuntimeID       string                 `json:"runtime_id"`
 		Replicas        int                    `json:"replicas"`
+		ServicePort     int                    `json:"service_port"`
 		Profile         string                 `json:"profile"`
 		DockerfilePath  string                 `json:"dockerfile_path"`
 		BuildContextDir string                 `json:"build_context_dir"`
@@ -73,8 +77,10 @@ func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID
 		SourceDir:       strings.TrimSpace(req.SourceDir),
 		Name:            strings.TrimSpace(req.Name),
 		Description:     strings.TrimSpace(req.Description),
+		BuildStrategy:   normalizeBuildStrategy(req.BuildStrategy),
 		RuntimeID:       strings.TrimSpace(runtimeID),
 		Replicas:        replicas,
+		ServicePort:     req.ServicePort,
 		Profile:         strings.TrimSpace(profile),
 		DockerfilePath:  strings.TrimSpace(req.DockerfilePath),
 		BuildContextDir: strings.TrimSpace(req.BuildContextDir),
