@@ -2,12 +2,15 @@ package api
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
-	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,16 +24,448 @@ import (
 
 const serviceAccountNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 
-type kubeObjectList struct {
+type kubeJobList struct {
 	Items []struct {
 		Metadata struct {
 			Name              string    `json:"name"`
 			CreationTimestamp time.Time `json:"creationTimestamp"`
 		} `json:"metadata"`
-		Status struct {
-			Phase string `json:"phase"`
-		} `json:"status"`
 	} `json:"items"`
+}
+
+type kubePodList struct {
+	Items []kubePodInfo `json:"items"`
+}
+
+type kubePodInfo struct {
+	Metadata struct {
+		Name              string    `json:"name"`
+		CreationTimestamp time.Time `json:"creationTimestamp"`
+	} `json:"metadata"`
+	Spec struct {
+		InitContainers []struct {
+			Name string `json:"name"`
+		} `json:"initContainers"`
+		Containers []struct {
+			Name string `json:"name"`
+		} `json:"containers"`
+	} `json:"spec"`
+	Status struct {
+		Phase string `json:"phase"`
+	} `json:"status"`
+}
+
+type kubeLogsClient struct {
+	client      *http.Client
+	baseURL     string
+	bearerToken string
+	namespace   string
+}
+
+type kubeLogOptions struct {
+	Container string
+	TailLines int
+	Previous  bool
+}
+
+type runtimeLogSection struct {
+	Pod       string
+	Container string
+	Logs      string
+}
+
+type kubeStatusError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *kubeStatusError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Message
+}
+
+func newKubeLogsClient(namespace string) (*kubeLogsClient, error) {
+	host := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST"))
+	port := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_PORT"))
+	if host == "" || port == "" {
+		return nil, fmt.Errorf("kubernetes service host/port is not available in the environment")
+	}
+
+	token, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+	if err != nil {
+		return nil, fmt.Errorf("read service account token: %w", err)
+	}
+	caData, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
+	if err != nil {
+		return nil, fmt.Errorf("read service account CA: %w", err)
+	}
+	rootCAs := x509.NewCertPool()
+	if !rootCAs.AppendCertsFromPEM(caData) {
+		return nil, fmt.Errorf("load service account CA")
+	}
+
+	if strings.TrimSpace(namespace) == "" {
+		namespace, err = kubeNamespace()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &kubeLogsClient{
+		client: &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{RootCAs: rootCAs},
+			},
+			Timeout: 20 * time.Second,
+		},
+		baseURL:     "https://" + host + ":" + port,
+		bearerToken: strings.TrimSpace(string(token)),
+		namespace:   strings.TrimSpace(namespace),
+	}, nil
+}
+
+func (c *kubeLogsClient) effectiveNamespace(namespace string) string {
+	namespace = strings.TrimSpace(namespace)
+	if namespace != "" {
+		return namespace
+	}
+	return c.namespace
+}
+
+func (c *kubeLogsClient) listJobsBySelector(ctx context.Context, namespace, selector string) ([]struct {
+	Metadata struct {
+		Name              string    `json:"name"`
+		CreationTimestamp time.Time `json:"creationTimestamp"`
+	} `json:"metadata"`
+}, error) {
+	query := url.Values{}
+	if strings.TrimSpace(selector) != "" {
+		query.Set("labelSelector", selector)
+	}
+
+	var jobs kubeJobList
+	apiPath := "/apis/batch/v1/namespaces/" + c.effectiveNamespace(namespace) + "/jobs"
+	if encoded := query.Encode(); encoded != "" {
+		apiPath += "?" + encoded
+	}
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, &jobs); err != nil {
+		return nil, err
+	}
+	return jobs.Items, nil
+}
+
+func (c *kubeLogsClient) listPodsBySelector(ctx context.Context, namespace, selector string) ([]kubePodInfo, error) {
+	query := url.Values{}
+	if strings.TrimSpace(selector) != "" {
+		query.Set("labelSelector", selector)
+	}
+
+	var pods kubePodList
+	apiPath := "/api/v1/namespaces/" + c.effectiveNamespace(namespace) + "/pods"
+	if encoded := query.Encode(); encoded != "" {
+		apiPath += "?" + encoded
+	}
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, &pods); err != nil {
+		return nil, err
+	}
+	return pods.Items, nil
+}
+
+func (c *kubeLogsClient) readPodLogs(ctx context.Context, namespace, podName string, opts kubeLogOptions) (string, error) {
+	query := url.Values{}
+	if strings.TrimSpace(opts.Container) != "" {
+		query.Set("container", strings.TrimSpace(opts.Container))
+	}
+	if opts.TailLines > 0 {
+		query.Set("tailLines", strconv.Itoa(opts.TailLines))
+	}
+	if opts.Previous {
+		query.Set("previous", "true")
+	}
+
+	apiPath := "/api/v1/namespaces/" + c.effectiveNamespace(namespace) + "/pods/" + url.PathEscape(strings.TrimSpace(podName)) + "/log"
+	if encoded := query.Encode(); encoded != "" {
+		apiPath += "?" + encoded
+	}
+	return c.doText(ctx, http.MethodGet, apiPath)
+}
+
+func (c *kubeLogsClient) doJSON(ctx context.Context, method, apiPath string, out any) error {
+	body, err := c.doRequest(ctx, method, apiPath)
+	if err != nil {
+		return err
+	}
+	if out != nil && len(body) > 0 {
+		if err := json.Unmarshal(body, out); err != nil {
+			return fmt.Errorf("decode kubernetes response: %w", err)
+		}
+	}
+	return nil
+}
+
+func (c *kubeLogsClient) doText(ctx context.Context, method, apiPath string) (string, error) {
+	body, err := c.doRequest(ctx, method, apiPath)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+func (c *kubeLogsClient) doRequest(ctx context.Context, method, apiPath string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+apiPath, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create kubernetes request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.bearerToken)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("kubernetes request %s %s: %w", method, apiPath, err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, &kubeStatusError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("kubernetes request %s %s failed: status=%d body=%s", method, apiPath, resp.StatusCode, strings.TrimSpace(string(body))),
+		}
+	}
+	return body, nil
+}
+
+func isKubeNotFound(err error) bool {
+	var statusErr *kubeStatusError
+	return errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound
+}
+
+func podContainerNames(pod kubePodInfo, includeInit bool) []string {
+	names := make([]string, 0, len(pod.Spec.Containers)+len(pod.Spec.InitContainers))
+	if includeInit {
+		for _, container := range pod.Spec.InitContainers {
+			if name := strings.TrimSpace(container.Name); name != "" {
+				names = append(names, name)
+			}
+		}
+	}
+	for _, container := range pod.Spec.Containers {
+		if name := strings.TrimSpace(container.Name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func readJobLogs(ctx context.Context, client *kubeLogsClient, namespace, jobName string, tailLines int) (string, error) {
+	pods, err := client.listPodsBySelector(ctx, namespace, "job-name="+jobName)
+	if err != nil {
+		return "", err
+	}
+	if len(pods) == 0 {
+		return "", nil
+	}
+	sort.Slice(pods, func(i, j int) bool {
+		return pods[i].Metadata.CreationTimestamp.Before(pods[j].Metadata.CreationTimestamp)
+	})
+
+	sections := make([]string, 0, len(pods))
+	for _, pod := range pods {
+		containerSections := make([]string, 0)
+		for _, containerName := range podContainerNames(pod, true) {
+			logs, err := client.readPodLogs(ctx, namespace, pod.Metadata.Name, kubeLogOptions{
+				Container: containerName,
+				TailLines: tailLines,
+			})
+			if err != nil {
+				if isKubeNotFound(err) {
+					continue
+				}
+				return "", err
+			}
+			logs = strings.TrimSpace(logs)
+			if logs == "" {
+				continue
+			}
+			containerSections = append(containerSections, fmt.Sprintf("==> %s/%s <==\n%s", pod.Metadata.Name, containerName, logs))
+		}
+		if len(containerSections) > 0 {
+			sections = append(sections, strings.Join(containerSections, "\n\n"))
+		}
+	}
+	return strings.TrimSpace(strings.Join(sections, "\n\n")), nil
+}
+
+func collectRuntimeLogs(ctx context.Context, client *kubeLogsClient, namespace string, pods []kubePodInfo, containerName string, tailLines int, previous bool) (string, []string) {
+	sections := make([]string, 0, len(pods))
+	warnings := make([]string, 0)
+	for _, pod := range pods {
+		out, err := client.readPodLogs(ctx, namespace, pod.Metadata.Name, kubeLogOptions{
+			Container: containerName,
+			TailLines: tailLines,
+			Previous:  previous,
+		})
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s: %v", pod.Metadata.Name, err))
+			continue
+		}
+		sections = append(sections, fmt.Sprintf("==> %s <==\n%s", pod.Metadata.Name, strings.TrimSpace(out)))
+	}
+	return strings.TrimSpace(strings.Join(sections, "\n\n")), warnings
+}
+
+func filterPodsByName(pods []kubePodInfo, requestedPod string) []kubePodInfo {
+	if strings.TrimSpace(requestedPod) == "" {
+		return pods
+	}
+	filtered := pods[:0]
+	for _, pod := range pods {
+		if pod.Metadata.Name == requestedPod {
+			filtered = append(filtered, pod)
+		}
+	}
+	return filtered
+}
+
+func podNames(pods []kubePodInfo) []string {
+	names := make([]string, 0, len(pods))
+	for _, pod := range pods {
+		names = append(names, pod.Metadata.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func sortPodsByCreation(pods []kubePodInfo) {
+	sort.Slice(pods, func(i, j int) bool {
+		if !pods[i].Metadata.CreationTimestamp.Equal(pods[j].Metadata.CreationTimestamp) {
+			return pods[i].Metadata.CreationTimestamp.Before(pods[j].Metadata.CreationTimestamp)
+		}
+		return pods[i].Metadata.Name < pods[j].Metadata.Name
+	})
+}
+
+func buildLogPodNames(pods []kubePodInfo) []string {
+	return podNames(pods)
+}
+
+func runtimeLogPodNames(pods []kubePodInfo) []string {
+	return podNames(pods)
+}
+
+func latestBuilderJobName(ctx context.Context, client *kubeLogsClient, namespace, operationID string) (string, error) {
+	jobs, err := client.listJobsBySelector(ctx, namespace, "fugue.pro/operation-id="+operationID)
+	if err != nil {
+		return "", err
+	}
+	if len(jobs) == 0 {
+		return "", nil
+	}
+	sort.Slice(jobs, func(i, j int) bool {
+		return jobs[i].Metadata.CreationTimestamp.Before(jobs[j].Metadata.CreationTimestamp)
+	})
+	return jobs[len(jobs)-1].Metadata.Name, nil
+}
+
+func readBuildLogs(ctx context.Context, op model.Operation, tailLines int) (logs, source, jobName string, available bool, err error) {
+	namespace, err := kubeNamespace()
+	if err != nil {
+		return "", "", "", false, err
+	}
+	client, err := newKubeLogsClient(namespace)
+	if err != nil {
+		return "", "", "", false, err
+	}
+
+	jobName, err = latestBuilderJobName(ctx, client, namespace, op.ID)
+	if err == nil && jobName != "" {
+		logs, err = readJobLogs(ctx, client, namespace, jobName, tailLines)
+		if err == nil && strings.TrimSpace(logs) != "" {
+			return logs, "kubernetes.job", jobName, true, nil
+		}
+	}
+
+	if strings.TrimSpace(op.ErrorMessage) != "" {
+		return op.ErrorMessage, "operation.error_message", jobName, true, nil
+	}
+	if strings.TrimSpace(op.ResultMessage) != "" {
+		return op.ResultMessage, "operation.result_message", jobName, true, nil
+	}
+	return "", "unavailable", jobName, false, nil
+}
+
+func kubeNamespace() (string, error) {
+	if value := strings.TrimSpace(os.Getenv("POD_NAMESPACE")); value != "" {
+		return value, nil
+	}
+	data, err := os.ReadFile(serviceAccountNamespacePath)
+	if err != nil {
+		return "", fmt.Errorf("read service account namespace: %w", err)
+	}
+	namespace := strings.TrimSpace(string(data))
+	if namespace == "" {
+		return "", fmt.Errorf("service account namespace is empty")
+	}
+	return namespace, nil
+}
+
+func parseTailLines(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 200, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("tail_lines must be an integer")
+	}
+	if value < 1 || value > 5000 {
+		return 0, fmt.Errorf("tail_lines must be between 1 and 5000")
+	}
+	return value, nil
+}
+
+func parseBoolQuery(raw string) (bool, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("invalid boolean value %q", raw)
+	}
+	return value, nil
+}
+
+func runtimeLogTarget(app model.App, component string) (string, string, error) {
+	appName := runtimeResourceName(app.Name)
+	switch component {
+	case "app":
+		return "app.kubernetes.io/name=" + appName + ",app.kubernetes.io/managed-by=fugue", appName, nil
+	case "postgres":
+		if app.Spec.Postgres == nil {
+			return "", "", fmt.Errorf("app does not declare postgres")
+		}
+		return "app.kubernetes.io/name=" + appName + "-postgres,app.kubernetes.io/component=postgres,app.kubernetes.io/managed-by=fugue", "postgres", nil
+	default:
+		return "", "", fmt.Errorf("unsupported component %q", component)
+	}
+}
+
+func runtimeResourceName(name string) string {
+	name = model.Slugify(name)
+	if len(name) > 50 {
+		return name[:50]
+	}
+	return name
+}
+
+func buildStrategyFromOperation(op model.Operation) string {
+	if op.DesiredSource == nil {
+		return ""
+	}
+	return strings.TrimSpace(op.DesiredSource.BuildStrategy)
 }
 
 func (s *Server) handleGetAppBuildLogs(w http.ResponseWriter, r *http.Request) {
@@ -114,39 +549,38 @@ func (s *Server) handleGetAppRuntimeLogs(w http.ResponseWriter, r *http.Request)
 	requestedPod := strings.TrimSpace(r.URL.Query().Get("pod"))
 
 	namespace := runtime.NamespaceForTenant(app.TenantID)
+	client, err := newKubeLogsClient(namespace)
+	if err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+
 	selector, containerName, err := runtimeLogTarget(app, component)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	pods, err := kubectlListPodsBySelector(r.Context(), namespace, selector)
+	pods, err := client.listPodsBySelector(r.Context(), namespace, selector)
 	if err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if requestedPod != "" {
-		filtered := pods[:0]
-		for _, pod := range pods {
-			if pod == requestedPod {
-				filtered = append(filtered, pod)
-			}
-		}
-		pods = filtered
-	}
+	sortPodsByCreation(pods)
+	pods = filterPodsByName(pods, requestedPod)
 	if len(pods) == 0 {
 		httpx.WriteError(w, http.StatusNotFound, "no matching pods found")
 		return
 	}
 
-	logs, warnings := collectRuntimeLogs(r.Context(), namespace, pods, containerName, tailLines, previous)
+	logs, warnings := collectRuntimeLogs(r.Context(), client, namespace, pods, containerName, tailLines, previous)
 	s.appendAudit(principal, "app.runtime_logs.read", "app", app.ID, app.TenantID, map[string]string{"component": component})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"component": component,
 		"namespace": namespace,
 		"selector":  selector,
 		"container": containerName,
-		"pods":      pods,
+		"pods":      runtimeLogPodNames(pods),
 		"logs":      logs,
 		"warnings":  warnings,
 	})
@@ -183,173 +617,4 @@ func (s *Server) resolveBuildOperation(app model.App, requestedOperationID strin
 		return model.Operation{}, store.ErrNotFound
 	}
 	return latest, nil
-}
-
-func readBuildLogs(ctx context.Context, op model.Operation, tailLines int) (logs, source, jobName string, available bool, err error) {
-	namespace, err := kubeNamespace()
-	if err != nil {
-		return "", "", "", false, err
-	}
-
-	jobName, err = latestBuilderJobName(ctx, namespace, op.ID)
-	if err == nil && jobName != "" {
-		logs, err = kubectlOutputWithTimeout(ctx, 20*time.Second, "-n", namespace, "logs", "job/"+jobName, "--all-containers=true", "--tail", strconv.Itoa(tailLines))
-		if err == nil {
-			return logs, "kubernetes.job", jobName, true, nil
-		}
-	}
-
-	if strings.TrimSpace(op.ErrorMessage) != "" {
-		return op.ErrorMessage, "operation.error_message", jobName, true, nil
-	}
-	if strings.TrimSpace(op.ResultMessage) != "" {
-		return op.ResultMessage, "operation.result_message", jobName, true, nil
-	}
-	return "", "unavailable", jobName, false, nil
-}
-
-func latestBuilderJobName(ctx context.Context, namespace, operationID string) (string, error) {
-	var jobs kubeObjectList
-	if err := kubectlJSONWithTimeout(ctx, 15*time.Second, &jobs, "-n", namespace, "get", "jobs", "-l", "fugue.pro/operation-id="+operationID, "-o", "json"); err != nil {
-		return "", err
-	}
-	if len(jobs.Items) == 0 {
-		return "", nil
-	}
-	sort.Slice(jobs.Items, func(i, j int) bool {
-		return jobs.Items[i].Metadata.CreationTimestamp.Before(jobs.Items[j].Metadata.CreationTimestamp)
-	})
-	return jobs.Items[len(jobs.Items)-1].Metadata.Name, nil
-}
-
-func kubectlListPodsBySelector(ctx context.Context, namespace, selector string) ([]string, error) {
-	var podList kubeObjectList
-	if err := kubectlJSONWithTimeout(ctx, 15*time.Second, &podList, "-n", namespace, "get", "pods", "-l", selector, "-o", "json"); err != nil {
-		return nil, err
-	}
-	names := make([]string, 0, len(podList.Items))
-	for _, item := range podList.Items {
-		names = append(names, item.Metadata.Name)
-	}
-	sort.Strings(names)
-	return names, nil
-}
-
-func collectRuntimeLogs(ctx context.Context, namespace string, pods []string, containerName string, tailLines int, previous bool) (string, []string) {
-	sections := make([]string, 0, len(pods))
-	warnings := make([]string, 0)
-	for _, podName := range pods {
-		args := []string{"-n", namespace, "logs", "pod/" + podName, "-c", containerName, "--tail", strconv.Itoa(tailLines)}
-		if previous {
-			args = append(args, "--previous=true")
-		}
-		out, err := kubectlOutputWithTimeout(ctx, 20*time.Second, args...)
-		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("%s: %v", podName, err))
-			continue
-		}
-		sections = append(sections, fmt.Sprintf("==> %s <==\n%s", podName, out))
-	}
-	return strings.TrimSpace(strings.Join(sections, "\n\n")), warnings
-}
-
-func runtimeLogTarget(app model.App, component string) (string, string, error) {
-	appName := runtimeResourceName(app.Name)
-	switch component {
-	case "app":
-		return "app.kubernetes.io/name=" + appName + ",app.kubernetes.io/managed-by=fugue", appName, nil
-	case "postgres":
-		if app.Spec.Postgres == nil {
-			return "", "", fmt.Errorf("app does not declare postgres")
-		}
-		return "app.kubernetes.io/name=" + appName + "-postgres,app.kubernetes.io/component=postgres,app.kubernetes.io/managed-by=fugue", "postgres", nil
-	default:
-		return "", "", fmt.Errorf("unsupported component %q", component)
-	}
-}
-
-func runtimeResourceName(name string) string {
-	name = model.Slugify(name)
-	if len(name) > 50 {
-		return name[:50]
-	}
-	return name
-}
-
-func buildStrategyFromOperation(op model.Operation) string {
-	if op.DesiredSource == nil {
-		return ""
-	}
-	return strings.TrimSpace(op.DesiredSource.BuildStrategy)
-}
-
-func parseTailLines(raw string) (int, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return 200, nil
-	}
-	value, err := strconv.Atoi(raw)
-	if err != nil {
-		return 0, fmt.Errorf("tail_lines must be an integer")
-	}
-	if value < 1 || value > 5000 {
-		return 0, fmt.Errorf("tail_lines must be between 1 and 5000")
-	}
-	return value, nil
-}
-
-func parseBoolQuery(raw string) (bool, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return false, nil
-	}
-	value, err := strconv.ParseBool(raw)
-	if err != nil {
-		return false, fmt.Errorf("invalid boolean value %q", raw)
-	}
-	return value, nil
-}
-
-func kubeNamespace() (string, error) {
-	if value := strings.TrimSpace(os.Getenv("POD_NAMESPACE")); value != "" {
-		return value, nil
-	}
-	data, err := os.ReadFile(serviceAccountNamespacePath)
-	if err != nil {
-		return "", fmt.Errorf("read service account namespace: %w", err)
-	}
-	namespace := strings.TrimSpace(string(data))
-	if namespace == "" {
-		return "", fmt.Errorf("service account namespace is empty")
-	}
-	return namespace, nil
-}
-
-func kubectlJSONWithTimeout(ctx context.Context, timeout time.Duration, dst any, args ...string) error {
-	output, err := kubectlOutputWithTimeout(ctx, timeout, args...)
-	if err != nil {
-		return err
-	}
-	if err := json.Unmarshal([]byte(output), dst); err != nil {
-		return fmt.Errorf("decode kubectl json: %w", err)
-	}
-	return nil
-}
-
-func kubectlOutputWithTimeout(parent context.Context, timeout time.Duration, args ...string) (string, error) {
-	ctx := parent
-	var cancel context.CancelFunc
-	if timeout > 0 {
-		ctx, cancel = context.WithTimeout(parent, timeout)
-		defer cancel()
-	}
-	cmd := exec.CommandContext(ctx, "kubectl", args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		if errors.Is(err, exec.ErrNotFound) {
-			return "", fmt.Errorf("kubectl is not available in fugue-api image")
-		}
-		return "", fmt.Errorf("kubectl %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
-	}
-	return string(output), nil
 }
