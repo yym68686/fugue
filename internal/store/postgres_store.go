@@ -1370,6 +1370,11 @@ func (s *Store) pgCreateApp(tenantID, projectID, name, description string, spec 
 	}
 
 	now := time.Now().UTC()
+	allowPendingImport := source != nil && strings.TrimSpace(source.Type) == model.AppSourceTypeGitHubPublic && strings.TrimSpace(spec.Image) == ""
+	phase := "created"
+	if allowPendingImport {
+		phase = "importing"
+	}
 	app := model.App{
 		ID:          model.NewID("app"),
 		TenantID:    tenantID,
@@ -1380,7 +1385,7 @@ func (s *Store) pgCreateApp(tenantID, projectID, name, description string, spec 
 		Route:       cloneAppRoute(route),
 		Spec:        spec,
 		Status: model.AppStatus{
-			Phase:           "created",
+			Phase:           phase,
 			CurrentReplicas: 0,
 			UpdatedAt:       now,
 		},
@@ -1523,6 +1528,21 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 	}
 
 	switch op.Type {
+	case model.OperationTypeImport:
+		if op.DesiredSpec == nil || op.DesiredSource == nil {
+			return model.Operation{}, ErrInvalidInput
+		}
+		if strings.TrimSpace(op.DesiredSource.Type) != model.AppSourceTypeGitHubPublic {
+			return model.Operation{}, ErrInvalidInput
+		}
+		visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, op.DesiredSpec.RuntimeID, op.TenantID)
+		if err != nil {
+			return model.Operation{}, err
+		}
+		if !visible {
+			return model.Operation{}, ErrNotFound
+		}
+		op.TargetRuntimeID = op.DesiredSpec.RuntimeID
 	case model.OperationTypeDeploy:
 		if op.DesiredSpec == nil {
 			return model.Operation{}, ErrInvalidInput
@@ -1675,19 +1695,25 @@ JOIN next_op n ON n.id = o.id
 	}
 
 	now := time.Now().UTC()
-	runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.TargetRuntimeID)
-	if err != nil {
-		return model.Operation{}, false, err
-	}
-	if runtimeType == model.RuntimeTypeExternalOwned {
-		op.Status = model.OperationStatusWaitingAgent
-		op.ExecutionMode = model.ExecutionModeAgent
-		op.AssignedRuntimeID = op.TargetRuntimeID
-		op.ResultMessage = "task dispatched to external runtime agent"
-	} else {
+	if op.Type == model.OperationTypeImport {
 		op.Status = model.OperationStatusRunning
 		op.ExecutionMode = model.ExecutionModeManaged
 		op.StartedAt = &now
+	} else {
+		runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.TargetRuntimeID)
+		if err != nil {
+			return model.Operation{}, false, err
+		}
+		if runtimeType == model.RuntimeTypeExternalOwned {
+			op.Status = model.OperationStatusWaitingAgent
+			op.ExecutionMode = model.ExecutionModeAgent
+			op.AssignedRuntimeID = op.TargetRuntimeID
+			op.ResultMessage = "task dispatched to external runtime agent"
+		} else {
+			op.Status = model.OperationStatusRunning
+			op.ExecutionMode = model.ExecutionModeManaged
+			op.StartedAt = &now
+		}
 	}
 	op.UpdatedAt = now
 
@@ -1731,7 +1757,7 @@ RETURNING id, tenant_id, type, status, execution_mode, requested_by_type, reques
 	return op, nil
 }
 
-func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string) (model.Operation, error) {
+func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string, desiredSpec *model.AppSpec, desiredSource *model.AppSource) (model.Operation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -1747,6 +1773,12 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string)
 	}
 	if runtimeID != "" && op.AssignedRuntimeID != runtimeID {
 		return model.Operation{}, ErrNotFound
+	}
+	if desiredSpec != nil {
+		op.DesiredSpec = cloneAppSpec(desiredSpec)
+	}
+	if desiredSource != nil {
+		op.DesiredSource = cloneAppSource(desiredSource)
 	}
 
 	now := time.Now().UTC()
@@ -2336,11 +2368,16 @@ func scanAuditEvent(scanner sqlScanner) (model.AuditEvent, error) {
 func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 	now := time.Now().UTC()
 	switch op.Type {
+	case model.OperationTypeImport:
+		// Import only prepares a build artifact; the deploy operation applies it.
 	case model.OperationTypeDeploy:
 		if op.DesiredSpec == nil {
 			return ErrInvalidInput
 		}
 		app.Spec = *op.DesiredSpec
+		if app.Route != nil {
+			app.Route.ServicePort = firstPositiveSpecPort(app.Spec.Ports)
+		}
 		if op.DesiredSource != nil {
 			app.Source = cloneAppSource(op.DesiredSource)
 		}

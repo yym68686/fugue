@@ -29,6 +29,8 @@ type APIConfig struct {
 type ControllerConfig struct {
 	StorePath                     string
 	DatabaseURL                   string
+	RegistryPushBase              string
+	ImportWorkDir                 string
 	PollInterval                  time.Duration
 	FallbackPollInterval          time.Duration
 	RuntimeOfflineAfter           time.Duration
@@ -88,6 +90,8 @@ func ControllerFromEnv() ControllerConfig {
 	return ControllerConfig{
 		StorePath:                     getenv("FUGUE_STORE_PATH", "./data/store.json"),
 		DatabaseURL:                   getenv("FUGUE_DATABASE_URL", ""),
+		RegistryPushBase:              getenv("FUGUE_REGISTRY_PUSH_BASE", "127.0.0.1:30500"),
+		ImportWorkDir:                 getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
 		PollInterval:                  getenvDuration("FUGUE_CONTROLLER_POLL_INTERVAL", 5*time.Second),
 		FallbackPollInterval:          getenvDuration("FUGUE_CONTROLLER_FALLBACK_POLL_INTERVAL", 30*time.Second),
 		RuntimeOfflineAfter:           getenvDuration("FUGUE_RUNTIME_OFFLINE_AFTER", 90*time.Second),

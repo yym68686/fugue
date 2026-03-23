@@ -1,18 +1,15 @@
 package api
 
 import (
-	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
 	"strings"
-	"time"
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
-	"fugue/internal/sourceimport"
 	"fugue/internal/store"
 )
 
@@ -143,11 +140,6 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 	}
-	importResult, source, err := s.importGitHubSource(r.Context(), req.RepoURL, req.Branch, req.SourceDir, req.DockerfilePath, req.BuildContextDir, buildStrategy, profile)
-	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
-		return
-	}
 
 	description := strings.TrimSpace(req.Description)
 	if description == "" {
@@ -156,9 +148,18 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 
 	baseName := strings.TrimSpace(req.Name)
 	if baseName == "" {
-		baseName = importResult.DefaultAppName
+		baseName = repoNameFromGitHubURL(req.RepoURL)
 	}
 	baseName = normalizeImportBaseName(baseName)
+	if baseName == "" {
+		baseName = "app"
+	}
+
+	source, err := buildQueuedGitHubSource(req.RepoURL, req.Branch, req.SourceDir, req.DockerfilePath, req.BuildContextDir, buildStrategy, profile)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	var app model.App
 	for attempt := 0; attempt < 8; attempt++ {
@@ -167,7 +168,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		spec, err := s.buildImportedAppSpec(profile, importResult.BuildStrategy, candidateName, importResult.ImageRef, runtimeID, replicas, effectiveImportServicePort(servicePort, importResult.DetectedPort), req.ConfigContent, req.Files, req.Postgres, importResult.SuggestedEnv)
+		spec, err := s.buildImportedAppSpec(profile, source.BuildStrategy, candidateName, "", runtimeID, replicas, effectiveImportServicePort(servicePort, 0), req.ConfigContent, req.Files, req.Postgres, nil)
 		if err != nil {
 			httpx.WriteError(w, http.StatusBadRequest, err.Error())
 			return
@@ -193,14 +194,16 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	spec := app.Spec
+	spec := cloneAppSpec(app.Spec)
+	desiredSource := source
 	op, err := s.store.CreateOperation(model.Operation{
 		TenantID:        app.TenantID,
-		Type:            model.OperationTypeDeploy,
+		Type:            model.OperationTypeImport,
 		RequestedByType: principal.ActorType,
 		RequestedByID:   principal.ActorID,
 		AppID:           app.ID,
 		DesiredSpec:     &spec,
+		DesiredSource:   &desiredSource,
 	})
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -214,9 +217,9 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.appendAudit(principal, "app.import_github", "app", app.ID, app.TenantID, map[string]string{
-		"repo_url":  source.RepoURL,
-		"hostname":  app.Route.Hostname,
-		"image_ref": app.Spec.Image,
+		"repo_url":       source.RepoURL,
+		"hostname":       app.Route.Hostname,
+		"build_strategy": source.BuildStrategy,
 	})
 	response := map[string]any{
 		"app":       sanitizeAppForAPI(app),
@@ -231,117 +234,43 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusAccepted, response)
 }
 
-func (s *Server) importGitHubSource(parent context.Context, repoURL, branch, sourceDir, dockerfilePath, buildContextDir, buildStrategy, profile string) (sourceimport.GitHubImportResult, model.AppSource, error) {
-	timeout := 10 * time.Minute
-	if profile == model.AppImportProfileUniAPI {
-		timeout = 25 * time.Minute
-	}
-	ctx, cancel := context.WithTimeout(parent, timeout)
-	defer cancel()
-
+func buildQueuedGitHubSource(repoURL, branch, sourceDir, dockerfilePath, buildContextDir, buildStrategy, profile string) (model.AppSource, error) {
 	buildStrategy = normalizeBuildStrategy(buildStrategy)
-	if buildStrategy == "" {
-		buildStrategy = model.AppBuildStrategyAuto
+	switch buildStrategy {
+	case model.AppBuildStrategyAuto, model.AppBuildStrategyStaticSite, model.AppBuildStrategyDockerfile, model.AppBuildStrategyNixpacks:
+	default:
+		return model.AppSource{}, fmt.Errorf("unsupported build strategy %q", buildStrategy)
 	}
-	if profile == model.AppImportProfileUniAPI {
+	if strings.TrimSpace(profile) == model.AppImportProfileUniAPI {
 		switch buildStrategy {
 		case model.AppBuildStrategyAuto, model.AppBuildStrategyDockerfile:
-			buildStrategy = model.AppBuildStrategyDockerfile
 		default:
-			return sourceimport.GitHubImportResult{}, model.AppSource{}, fmt.Errorf("profile %q currently requires dockerfile build strategy", profile)
+			return model.AppSource{}, fmt.Errorf("profile %q currently requires dockerfile build strategy", profile)
 		}
+	}
+	repoURL = strings.TrimSpace(repoURL)
+	if repoURL == "" {
+		return model.AppSource{}, fmt.Errorf("repo_url is required")
 	}
 
-	switch buildStrategy {
-	case model.AppBuildStrategyAuto:
-		importResult, err := s.importer.ImportPublicGitHubAuto(ctx, sourceimport.GitHubAutoImportRequest{
-			RepoURL:          repoURL,
-			Branch:           branch,
-			SourceDir:        sourceDir,
-			DockerfilePath:   dockerfilePath,
-			BuildContextDir:  buildContextDir,
-			RegistryPushBase: s.registryPushBase,
-			ImageRepository:  "fugue-apps",
-		})
-		if err != nil {
-			return sourceimport.GitHubImportResult{}, model.AppSource{}, err
-		}
-		return importResult, model.AppSource{
-			Type:            model.AppSourceTypeGitHubPublic,
-			RepoURL:         strings.TrimSpace(repoURL),
-			RepoBranch:      importResult.Branch,
-			SourceDir:       importResult.SourceDir,
-			BuildStrategy:   importResult.BuildStrategy,
-			CommitSHA:       importResult.CommitSHA,
-			DockerfilePath:  importResult.DockerfilePath,
-			BuildContextDir: importResult.BuildContextDir,
-			ImportProfile:   profile,
-		}, nil
-	case model.AppBuildStrategyStaticSite:
-		importResult, err := s.importer.ImportPublicGitHubStaticSite(ctx, sourceimport.GitHubImportRequest{
-			RepoURL:          repoURL,
-			Branch:           branch,
-			SourceDir:        sourceDir,
-			RegistryPushBase: s.registryPushBase,
-			ImageRepository:  "fugue-apps",
-		})
-		if err != nil {
-			return sourceimport.GitHubImportResult{}, model.AppSource{}, err
-		}
-		return importResult, model.AppSource{
-			Type:          model.AppSourceTypeGitHubPublic,
-			RepoURL:       strings.TrimSpace(repoURL),
-			RepoBranch:    importResult.Branch,
-			SourceDir:     importResult.SourceDir,
-			BuildStrategy: importResult.BuildStrategy,
-			CommitSHA:     importResult.CommitSHA,
-			ImportProfile: profile,
-		}, nil
-	case model.AppBuildStrategyDockerfile:
-		importResult, err := s.importer.ImportPublicGitHubDockerfileImage(ctx, sourceimport.GitHubDockerImportRequest{
-			RepoURL:          repoURL,
-			Branch:           branch,
-			DockerfilePath:   dockerfilePath,
-			BuildContextDir:  buildContextDir,
-			RegistryPushBase: s.registryPushBase,
-			ImageRepository:  "fugue-apps",
-		})
-		if err != nil {
-			return sourceimport.GitHubImportResult{}, model.AppSource{}, err
-		}
-		return importResult, model.AppSource{
-			Type:            model.AppSourceTypeGitHubPublic,
-			RepoURL:         strings.TrimSpace(repoURL),
-			RepoBranch:      importResult.Branch,
-			BuildStrategy:   importResult.BuildStrategy,
-			CommitSHA:       importResult.CommitSHA,
-			DockerfilePath:  importResult.DockerfilePath,
-			BuildContextDir: importResult.BuildContextDir,
-			ImportProfile:   profile,
-		}, nil
-	case model.AppBuildStrategyNixpacks:
-		importResult, err := s.importer.ImportPublicGitHubNixpacks(ctx, sourceimport.GitHubNixpacksImportRequest{
-			RepoURL:          repoURL,
-			Branch:           branch,
-			SourceDir:        sourceDir,
-			RegistryPushBase: s.registryPushBase,
-			ImageRepository:  "fugue-apps",
-		})
-		if err != nil {
-			return sourceimport.GitHubImportResult{}, model.AppSource{}, err
-		}
-		return importResult, model.AppSource{
-			Type:          model.AppSourceTypeGitHubPublic,
-			RepoURL:       strings.TrimSpace(repoURL),
-			RepoBranch:    importResult.Branch,
-			SourceDir:     importResult.SourceDir,
-			BuildStrategy: importResult.BuildStrategy,
-			CommitSHA:     importResult.CommitSHA,
-			ImportProfile: profile,
-		}, nil
-	default:
-		return sourceimport.GitHubImportResult{}, model.AppSource{}, fmt.Errorf("unsupported build strategy %q", buildStrategy)
+	source := model.AppSource{
+		Type:            model.AppSourceTypeGitHubPublic,
+		RepoURL:         repoURL,
+		RepoBranch:      strings.TrimSpace(branch),
+		SourceDir:       strings.TrimSpace(sourceDir),
+		BuildStrategy:   buildStrategy,
+		DockerfilePath:  strings.TrimSpace(dockerfilePath),
+		BuildContextDir: strings.TrimSpace(buildContextDir),
+		ImportProfile:   strings.TrimSpace(profile),
 	}
+	switch buildStrategy {
+	case model.AppBuildStrategyStaticSite, model.AppBuildStrategyNixpacks:
+		source.DockerfilePath = ""
+		source.BuildContextDir = ""
+	case model.AppBuildStrategyDockerfile:
+		source.SourceDir = ""
+	}
+	return source, nil
 }
 
 func effectiveImportServicePort(requested, detected int) int {

@@ -51,6 +51,10 @@ spec:
                 secretKeyRef:
                   name: {{ include "fugue.configSecretName" . }}
                   key: FUGUE_DATABASE_URL
+            - name: FUGUE_REGISTRY_PUSH_BASE
+              value: {{ .Values.api.registryPushBase | quote }}
+            - name: FUGUE_IMPORT_WORK_DIR
+              value: {{ .Values.api.importWorkDir | quote }}
             - name: FUGUE_RENDER_DIR
               value: /var/lib/fugue/rendered
             - name: FUGUE_CONTROLLER_POLL_INTERVAL

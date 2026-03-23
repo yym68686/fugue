@@ -1095,7 +1095,8 @@ func (s *Store) CreateImportedApp(tenantID, projectID, name, description string,
 
 func (s *Store) createApp(tenantID, projectID, name, description string, spec model.AppSpec, source *model.AppSource, route *model.AppRoute) (model.App, error) {
 	name = strings.TrimSpace(name)
-	if tenantID == "" || projectID == "" || name == "" || spec.Image == "" || spec.Replicas < 1 {
+	allowPendingImport := source != nil && strings.TrimSpace(source.Type) == model.AppSourceTypeGitHubPublic && strings.TrimSpace(spec.Image) == ""
+	if tenantID == "" || projectID == "" || name == "" || (!allowPendingImport && spec.Image == "") || spec.Replicas < 1 {
 		return model.App{}, ErrInvalidInput
 	}
 	if spec.RuntimeID == "" {
@@ -1125,6 +1126,10 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 			}
 		}
 		now := time.Now().UTC()
+		phase := "created"
+		if allowPendingImport {
+			phase = "importing"
+		}
 		app = model.App{
 			ID:          model.NewID("app"),
 			TenantID:    tenantID,
@@ -1135,7 +1140,7 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 			Route:       cloneAppRoute(route),
 			Spec:        spec,
 			Status: model.AppStatus{
-				Phase:           "created",
+				Phase:           phase,
 				CurrentReplicas: 0,
 				UpdatedAt:       now,
 			},
@@ -1167,6 +1172,17 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 		}
 
 		switch op.Type {
+		case model.OperationTypeImport:
+			if op.DesiredSpec == nil || op.DesiredSource == nil {
+				return ErrInvalidInput
+			}
+			if strings.TrimSpace(op.DesiredSource.Type) != model.AppSourceTypeGitHubPublic {
+				return ErrInvalidInput
+			}
+			if !runtimeVisibleToTenant(state, op.DesiredSpec.RuntimeID, op.TenantID) {
+				return ErrNotFound
+			}
+			op.TargetRuntimeID = op.DesiredSpec.RuntimeID
 		case model.OperationTypeDeploy:
 			if op.DesiredSpec == nil {
 				return ErrInvalidInput
@@ -1265,16 +1281,22 @@ func (s *Store) ClaimNextPendingOperation() (model.Operation, bool, error) {
 		})
 		index := pending[0]
 		now := time.Now().UTC()
-		runtimeIndex := findRuntime(state, state.Operations[index].TargetRuntimeID)
-		if runtimeIndex >= 0 && state.Runtimes[runtimeIndex].Type == model.RuntimeTypeExternalOwned {
-			state.Operations[index].Status = model.OperationStatusWaitingAgent
-			state.Operations[index].ExecutionMode = model.ExecutionModeAgent
-			state.Operations[index].AssignedRuntimeID = state.Operations[index].TargetRuntimeID
-			state.Operations[index].ResultMessage = "task dispatched to external runtime agent"
-		} else {
+		if state.Operations[index].Type == model.OperationTypeImport {
 			state.Operations[index].Status = model.OperationStatusRunning
 			state.Operations[index].ExecutionMode = model.ExecutionModeManaged
 			state.Operations[index].StartedAt = &now
+		} else {
+			runtimeIndex := findRuntime(state, state.Operations[index].TargetRuntimeID)
+			if runtimeIndex >= 0 && state.Runtimes[runtimeIndex].Type == model.RuntimeTypeExternalOwned {
+				state.Operations[index].Status = model.OperationStatusWaitingAgent
+				state.Operations[index].ExecutionMode = model.ExecutionModeAgent
+				state.Operations[index].AssignedRuntimeID = state.Operations[index].TargetRuntimeID
+				state.Operations[index].ResultMessage = "task dispatched to external runtime agent"
+			} else {
+				state.Operations[index].Status = model.OperationStatusRunning
+				state.Operations[index].ExecutionMode = model.ExecutionModeManaged
+				state.Operations[index].StartedAt = &now
+			}
 		}
 		state.Operations[index].UpdatedAt = now
 		op = state.Operations[index]
@@ -1284,6 +1306,54 @@ func (s *Store) ClaimNextPendingOperation() (model.Operation, bool, error) {
 	return op, found, err
 }
 
+func (s *Store) CompleteManagedOperationWithResult(id, manifestPath, message string, desiredSpec *model.AppSpec, desiredSource *model.AppSource) (model.Operation, error) {
+	return s.completeOperation(id, "", manifestPath, message, desiredSpec, desiredSource)
+}
+
+func (s *Store) CompleteManagedOperation(id, manifestPath, message string) (model.Operation, error) {
+	return s.completeOperation(id, "", manifestPath, message, nil, nil)
+}
+
+func (s *Store) CompleteAgentOperation(id, runtimeID, manifestPath, message string) (model.Operation, error) {
+	return s.completeOperation(id, runtimeID, manifestPath, message, nil, nil)
+}
+
+func (s *Store) completeOperation(id, runtimeID, manifestPath, message string, desiredSpec *model.AppSpec, desiredSource *model.AppSource) (model.Operation, error) {
+	if s.usingDatabase() {
+		return s.pgCompleteOperation(id, runtimeID, manifestPath, message, desiredSpec, desiredSource)
+	}
+	var op model.Operation
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findOperation(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		if runtimeID != "" && state.Operations[index].AssignedRuntimeID != runtimeID {
+			return ErrNotFound
+		}
+		if desiredSpec != nil {
+			state.Operations[index].DesiredSpec = cloneAppSpec(desiredSpec)
+		}
+		if desiredSource != nil {
+			state.Operations[index].DesiredSource = cloneAppSource(desiredSource)
+		}
+		now := time.Now().UTC()
+		state.Operations[index].Status = model.OperationStatusCompleted
+		state.Operations[index].UpdatedAt = now
+		state.Operations[index].CompletedAt = &now
+		state.Operations[index].ManifestPath = manifestPath
+		state.Operations[index].ResultMessage = strings.TrimSpace(message)
+		if state.Operations[index].StartedAt == nil {
+			state.Operations[index].StartedAt = &now
+		}
+		if err := applyOperationToApp(state, &state.Operations[index]); err != nil {
+			return err
+		}
+		op = state.Operations[index]
+		return nil
+	})
+	return op, err
+}
 func (s *Store) DispatchOperationToRuntime(id, runtimeID string) (model.Operation, error) {
 	if s.usingDatabase() {
 		return s.pgDispatchOperationToRuntime(id, runtimeID)
@@ -1300,45 +1370,6 @@ func (s *Store) DispatchOperationToRuntime(id, runtimeID string) (model.Operatio
 		state.Operations[index].AssignedRuntimeID = runtimeID
 		state.Operations[index].UpdatedAt = now
 		state.Operations[index].ResultMessage = "task dispatched to external runtime agent"
-		op = state.Operations[index]
-		return nil
-	})
-	return op, err
-}
-
-func (s *Store) CompleteManagedOperation(id, manifestPath, message string) (model.Operation, error) {
-	return s.completeOperation(id, "", manifestPath, message)
-}
-
-func (s *Store) CompleteAgentOperation(id, runtimeID, manifestPath, message string) (model.Operation, error) {
-	return s.completeOperation(id, runtimeID, manifestPath, message)
-}
-
-func (s *Store) completeOperation(id, runtimeID, manifestPath, message string) (model.Operation, error) {
-	if s.usingDatabase() {
-		return s.pgCompleteOperation(id, runtimeID, manifestPath, message)
-	}
-	var op model.Operation
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findOperation(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if runtimeID != "" && state.Operations[index].AssignedRuntimeID != runtimeID {
-			return ErrNotFound
-		}
-		now := time.Now().UTC()
-		state.Operations[index].Status = model.OperationStatusCompleted
-		state.Operations[index].UpdatedAt = now
-		state.Operations[index].CompletedAt = &now
-		state.Operations[index].ManifestPath = manifestPath
-		state.Operations[index].ResultMessage = strings.TrimSpace(message)
-		if state.Operations[index].StartedAt == nil {
-			state.Operations[index].StartedAt = &now
-		}
-		if err := applyOperationToApp(state, &state.Operations[index]); err != nil {
-			return err
-		}
 		op = state.Operations[index]
 		return nil
 	})
@@ -1784,11 +1815,16 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 	now := time.Now().UTC()
 	app := &state.Apps[appIndex]
 	switch op.Type {
+	case model.OperationTypeImport:
+		// Import only prepares the build artifact and queues a follow-up deploy.
 	case model.OperationTypeDeploy:
 		if op.DesiredSpec == nil {
 			return ErrInvalidInput
 		}
 		app.Spec = *op.DesiredSpec
+		if app.Route != nil {
+			app.Route.ServicePort = firstPositiveSpecPort(app.Spec.Ports)
+		}
 		if op.DesiredSource != nil {
 			app.Source = cloneAppSource(op.DesiredSource)
 		}
@@ -1830,6 +1866,15 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 	app.Status.UpdatedAt = now
 	app.UpdatedAt = now
 	return nil
+}
+
+func firstPositiveSpecPort(ports []int) int {
+	for _, port := range ports {
+		if port > 0 {
+			return port
+		}
+	}
+	return 0
 }
 
 func deleteProjectsByTenant(projects []model.Project, tenantID string) []model.Project {

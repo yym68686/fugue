@@ -710,6 +710,50 @@ func TestCreateImportedAppRejectsDuplicateHostname(t *testing.T) {
 	}
 }
 
+func TestCreateImportedAppAllowsPendingImportPlaceholder(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Pending Import")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	app, err := s.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyAuto,
+	}, model.AppRoute{
+		Hostname:    "demo.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://demo.example.com",
+		ServicePort: 80,
+	})
+	if err != nil {
+		t.Fatalf("create placeholder imported app: %v", err)
+	}
+	if app.Status.Phase != "importing" {
+		t.Fatalf("expected importing phase, got %q", app.Status.Phase)
+	}
+	if app.Spec.Image != "" {
+		t.Fatalf("expected empty image placeholder, got %q", app.Spec.Image)
+	}
+}
+
 func TestDeployOperationUpdatesImportedAppSource(t *testing.T) {
 	t.Parallel()
 
@@ -796,6 +840,154 @@ func TestDeployOperationUpdatesImportedAppSource(t *testing.T) {
 	}
 	if app.Source.SourceDir != source.SourceDir {
 		t.Fatalf("expected source dir %s, got %s", source.SourceDir, app.Source.SourceDir)
+	}
+}
+
+func TestImportOperationClaimsAsManagedEvenForExternalRuntime(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("External Import")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	token, secret, err := s.CreateEnrollmentToken(tenant.ID, "worker", time.Hour)
+	if err != nil {
+		t.Fatalf("create enrollment token: %v", err)
+	}
+	if token.ID == "" {
+		t.Fatal("expected enrollment token id")
+	}
+	externalRuntime, _, err := s.ConsumeEnrollmentToken(secret, "tenant-vps-1", "https://vps.example.com", nil, "", "")
+	if err != nil {
+		t.Fatalf("consume enrollment token: %v", err)
+	}
+
+	app, err := s.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "",
+		Ports:     []int{3000},
+		Replicas:  1,
+		RuntimeID: externalRuntime.ID,
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyDockerfile,
+	}, model.AppRoute{
+		Hostname:    "demo.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://demo.example.com",
+		ServicePort: 3000,
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	spec := app.Spec
+	source := *app.Source
+	op, err := s.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		Type:          model.OperationTypeImport,
+		AppID:         app.ID,
+		DesiredSpec:   &spec,
+		DesiredSource: &source,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+
+	claimed, found, err := s.ClaimNextPendingOperation()
+	if err != nil {
+		t.Fatalf("claim import operation: %v", err)
+	}
+	if !found {
+		t.Fatal("expected claimed import operation")
+	}
+	if claimed.ID != op.ID {
+		t.Fatalf("expected claimed id %s, got %s", op.ID, claimed.ID)
+	}
+	if claimed.ExecutionMode != model.ExecutionModeManaged || claimed.Status != model.OperationStatusRunning {
+		t.Fatalf("expected managed running import, got mode=%s status=%s", claimed.ExecutionMode, claimed.Status)
+	}
+	if claimed.AssignedRuntimeID != "" {
+		t.Fatalf("expected import to stay unassigned, got %q", claimed.AssignedRuntimeID)
+	}
+}
+
+func TestDeployOperationUpdatesRouteServicePort(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Route Port")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.example.com/demo:old",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyDockerfile,
+	}, model.AppRoute{
+		Hostname:    "demo.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://demo.example.com",
+		ServicePort: 80,
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	spec := app.Spec
+	spec.Image = "registry.example.com/demo:new"
+	spec.Ports = []int{3000}
+	op, err := s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &spec,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim deploy operation: %v", err)
+	} else if !found {
+		t.Fatal("expected deploy operation")
+	}
+	if _, err := s.CompleteManagedOperation(op.ID, "/tmp/demo.yaml", "deployed"); err != nil {
+		t.Fatalf("complete deploy operation: %v", err)
+	}
+
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.Route == nil {
+		t.Fatal("expected route to remain present")
+	}
+	if app.Route.ServicePort != 3000 {
+		t.Fatalf("expected route service port 3000, got %d", app.Route.ServicePort)
 	}
 }
 

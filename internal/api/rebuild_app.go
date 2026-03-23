@@ -6,7 +6,6 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
-	"fugue/internal/sourceimport"
 )
 
 func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
@@ -56,59 +55,48 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 		buildStrategy = model.AppBuildStrategyStaticSite
 	}
 
-	var (
-		importResult sourceimport.GitHubImportResult
-		err          error
-		source       model.AppSource
-	)
-
+	sourceDir := strings.TrimSpace(app.Source.SourceDir)
+	dockerfilePath := strings.TrimSpace(app.Source.DockerfilePath)
+	buildContextDir := strings.TrimSpace(app.Source.BuildContextDir)
 	switch buildStrategy {
-	case model.AppBuildStrategyAuto:
-		importResult, source, err = s.importGitHubSource(r.Context(), app.Source.RepoURL, branch, strings.TrimSpace(app.Source.SourceDir), "", "", model.AppBuildStrategyAuto, strings.TrimSpace(app.Source.ImportProfile))
-	case model.AppBuildStrategyStaticSite:
-		sourceDir := strings.TrimSpace(app.Source.SourceDir)
+	case model.AppBuildStrategyStaticSite, model.AppBuildStrategyNixpacks:
 		if req.SourceDir != nil {
 			sourceDir = strings.TrimSpace(*req.SourceDir)
 		}
-		importResult, source, err = s.importGitHubSource(r.Context(), app.Source.RepoURL, branch, sourceDir, "", "", model.AppBuildStrategyStaticSite, "")
 	case model.AppBuildStrategyDockerfile:
-		dockerfilePath := strings.TrimSpace(app.Source.DockerfilePath)
 		if req.DockerfilePath != nil {
 			dockerfilePath = strings.TrimSpace(*req.DockerfilePath)
 		}
-		buildContextDir := strings.TrimSpace(app.Source.BuildContextDir)
 		if req.BuildContextDir != nil {
 			buildContextDir = strings.TrimSpace(*req.BuildContextDir)
 		}
-		importResult, source, err = s.importGitHubSource(r.Context(), app.Source.RepoURL, branch, "", dockerfilePath, buildContextDir, model.AppBuildStrategyDockerfile, strings.TrimSpace(app.Source.ImportProfile))
-	case model.AppBuildStrategyNixpacks:
-		sourceDir := strings.TrimSpace(app.Source.SourceDir)
+	default:
 		if req.SourceDir != nil {
 			sourceDir = strings.TrimSpace(*req.SourceDir)
 		}
-		importResult, source, err = s.importGitHubSource(r.Context(), app.Source.RepoURL, branch, sourceDir, "", "", model.AppBuildStrategyNixpacks, strings.TrimSpace(app.Source.ImportProfile))
-	default:
-		httpx.WriteError(w, http.StatusBadRequest, "unsupported build strategy")
-		return
+		if req.DockerfilePath != nil {
+			dockerfilePath = strings.TrimSpace(*req.DockerfilePath)
+		}
+		if req.BuildContextDir != nil {
+			buildContextDir = strings.TrimSpace(*req.BuildContextDir)
+		}
 	}
+
+	source, err := buildQueuedGitHubSource(
+		app.Source.RepoURL,
+		branch,
+		sourceDir,
+		dockerfilePath,
+		buildContextDir,
+		buildStrategy,
+		strings.TrimSpace(app.Source.ImportProfile),
+	)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	if buildStrategy == model.AppBuildStrategyStaticSite {
-		source = model.AppSource{
-			Type:          model.AppSourceTypeGitHubPublic,
-			RepoURL:       strings.TrimSpace(app.Source.RepoURL),
-			RepoBranch:    importResult.Branch,
-			SourceDir:     importResult.SourceDir,
-			BuildStrategy: importResult.BuildStrategy,
-			CommitSHA:     importResult.CommitSHA,
-		}
-	}
-
-	spec := app.Spec
-	spec.Image = importResult.ImageRef
+	spec := cloneAppSpec(app.Spec)
 	if spec.Replicas < 1 {
 		spec.Replicas = 1
 	}
@@ -118,7 +106,7 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 
 	op, err := s.store.CreateOperation(model.Operation{
 		TenantID:        app.TenantID,
-		Type:            model.OperationTypeDeploy,
+		Type:            model.OperationTypeImport,
 		RequestedByType: principal.ActorType,
 		RequestedByID:   principal.ActorID,
 		AppID:           app.ID,
@@ -131,10 +119,10 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.appendAudit(principal, "app.rebuild", "operation", op.ID, app.TenantID, map[string]string{
-		"app_id":     app.ID,
-		"repo_url":   source.RepoURL,
-		"commit_sha": source.CommitSHA,
-		"image_ref":  spec.Image,
+		"app_id":         app.ID,
+		"repo_url":       source.RepoURL,
+		"repo_branch":    source.RepoBranch,
+		"build_strategy": source.BuildStrategy,
 	})
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
 		"operation": sanitizeOperationForAPI(op),
@@ -143,8 +131,7 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 			"source_dir":        source.SourceDir,
 			"dockerfile_path":   source.DockerfilePath,
 			"build_context_dir": source.BuildContextDir,
-			"commit_sha":        source.CommitSHA,
-			"image_ref":         spec.Image,
+			"build_strategy":    source.BuildStrategy,
 		},
 	})
 }

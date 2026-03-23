@@ -26,6 +26,7 @@ const (
 	NodeKeyStatusActive  = "active"
 	NodeKeyStatusRevoked = "revoked"
 
+	OperationTypeImport  = "import"
 	OperationTypeDeploy  = "deploy"
 	OperationTypeScale   = "scale"
 	OperationTypeMigrate = "migrate"

@@ -10,22 +10,27 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
+	"fugue/internal/sourceimport"
 	"fugue/internal/store"
 )
 
 type Service struct {
-	Store    *store.Store
-	Config   config.ControllerConfig
-	Renderer runtime.Renderer
-	Logger   *log.Logger
+	Store            *store.Store
+	Config           config.ControllerConfig
+	Renderer         runtime.Renderer
+	Logger           *log.Logger
+	importer         *sourceimport.Importer
+	registryPushBase string
 }
 
 func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *Service {
 	return &Service{
-		Store:    store,
-		Config:   cfg,
-		Renderer: runtime.Renderer{BaseDir: cfg.RenderDir},
-		Logger:   logger,
+		Store:            store,
+		Config:           cfg,
+		Renderer:         runtime.Renderer{BaseDir: cfg.RenderDir},
+		Logger:           logger,
+		importer:         sourceimport.NewImporter(cfg.ImportWorkDir, logger),
+		registryPushBase: strings.TrimSpace(cfg.RegistryPushBase),
 	}
 }
 
@@ -166,6 +171,8 @@ func (s *Service) executeManagedOperation(op model.Operation) error {
 	}
 
 	switch op.Type {
+	case model.OperationTypeImport:
+		return s.executeManagedImportOperation(op, app)
 	case model.OperationTypeDeploy:
 		if op.DesiredSpec == nil {
 			return fmt.Errorf("deploy operation %s missing desired spec", op.ID)

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"fugue/internal/model"
@@ -95,6 +96,10 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
+	detectedPort, err := detectDockerfilePort(repo.RepoDir, dockerfilePath)
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo)
 	if err := buildAndPushDockerfileImage(ctx, dockerfileBuildRequest{
@@ -118,9 +123,49 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		BuildContextDir:  buildContextDir,
 		ImageRef:         imageRef,
 		DefaultAppName:   repo.DefaultAppName,
-		DetectedPort:     80,
+		DetectedPort:     detectedPort,
 		DetectedProvider: model.AppBuildStrategyDockerfile,
 	}, nil
+}
+
+func detectDockerfilePort(repoDir, dockerfilePath string) (int, error) {
+	fullPath, err := secureRepoJoin(repoDir, dockerfilePath)
+	if err != nil {
+		return 0, err
+	}
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		return 0, fmt.Errorf("read dockerfile %q: %w", dockerfilePath, err)
+	}
+
+	detected := 0
+	for _, rawLine := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		upper := strings.ToUpper(line)
+		if !strings.HasPrefix(upper, "EXPOSE ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		for _, field := range fields[1:] {
+			value := strings.TrimSpace(field)
+			if idx := strings.Index(value, "/"); idx >= 0 {
+				value = value[:idx]
+			}
+			port, err := strconv.Atoi(value)
+			if err != nil || port <= 0 {
+				continue
+			}
+			detected = port
+			break
+		}
+	}
+	if detected > 0 {
+		return detected, nil
+	}
+	return 80, nil
 }
 
 func secureRepoJoin(repoDir, rel string) (string, error) {
