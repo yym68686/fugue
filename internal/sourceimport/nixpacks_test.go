@@ -56,10 +56,34 @@ func TestDetectAutoImportInputsUsesReadyStaticSite(t *testing.T) {
 	}
 }
 
-func TestDetectAutoImportInputsFallsBackToNixpacks(t *testing.T) {
+func TestDetectAutoImportInputsPrefersBuildpacksForSupportedApps(t *testing.T) {
 	repoDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(repoDir, "package.json"), []byte(`{"name":"demo"}`), 0o644); err != nil {
 		t.Fatalf("write package.json: %v", err)
+	}
+
+	buildStrategy, sourceDir, dockerfilePath, buildContextDir, err := detectAutoImportInputs(repoDir, "", "", "")
+	if err != nil {
+		t.Fatalf("detect auto inputs: %v", err)
+	}
+	if buildStrategy != model.AppBuildStrategyBuildpacks {
+		t.Fatalf("expected buildpacks strategy, got %q", buildStrategy)
+	}
+	if sourceDir != "." {
+		t.Fatalf("expected source dir ., got %q", sourceDir)
+	}
+	if dockerfilePath != "" || buildContextDir != "" {
+		t.Fatalf("expected no dockerfile inputs, got dockerfile=%q context=%q", dockerfilePath, buildContextDir)
+	}
+}
+
+func TestDetectAutoImportInputsFallsBackToNixpacksForUnsupportedBuildpacksProvider(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "Cargo.toml"), []byte(`[package]
+name = "demo"
+version = "0.1.0"
+`), 0o644); err != nil {
+		t.Fatalf("write Cargo.toml: %v", err)
 	}
 
 	buildStrategy, sourceDir, dockerfilePath, buildContextDir, err := detectAutoImportInputs(repoDir, "", "", "")

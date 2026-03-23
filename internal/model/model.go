@@ -15,6 +15,7 @@ const (
 	AppBuildStrategyAuto       = "auto"
 	AppBuildStrategyStaticSite = "static-site"
 	AppBuildStrategyDockerfile = "dockerfile"
+	AppBuildStrategyBuildpacks = "buildpacks"
 	AppBuildStrategyNixpacks   = "nixpacks"
 
 	AppImportProfileUniAPI = "uni-api"

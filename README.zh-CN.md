@@ -65,7 +65,7 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 - 一个内置共享托管运行时：`runtime_managed_shared`
 - 通过 node bootstrap + `fugue-agent` 接入外部节点
 - 异步 app 部署、扩容、迁移、停用、删除
-- `POST /v1/apps/import-github`：导入 GitHub 公共仓库，支持幂等键，以及 `auto / static-site / dockerfile / nixpacks` 构建策略
+- `POST /v1/apps/import-github`：导入 GitHub 公共仓库，支持幂等键，以及 `auto / static-site / dockerfile / buildpacks / nixpacks` 构建策略
 - `POST /v1/apps/{id}/rebuild`：对已导入的 GitHub 项目拉取最新代码后重新构建并重部署
 - runtime-agent 拉模式：enroll、heartbeat、拉任务、回传任务完成状态
 - 控制面审计日志
@@ -73,7 +73,7 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 尚未实现：
 
 - 资源 update API
-- Cloud Native Buildpacks / Paketo 支持
+- 类似 kpack 的 buildpacks operator 集成
 - HPA / VPA 等自动扩缩容策略
 - 调度策略、租户配额、计费或付费逻辑
 - 带 leader election 的控制面横向扩展能力
@@ -334,12 +334,13 @@ Idempotency-Key: import-<unique-key>
 - 仅支持 GitHub 公共仓库
 - `project_id` 可省略；如果不传，Fugue 会复用当前租户的 `default` 项目，不存在就自动创建
 - `build_strategy` 可省略，默认是 `auto`
-- `auto` 当前按这个顺序判断：`Dockerfile` -> 已准备好的静态站 -> `nixpacks`
+- `auto` 当前按这个顺序判断：`Dockerfile` -> 已准备好的静态站 -> 对受支持项目优先 `buildpacks` -> `nixpacks`
 - `static-site` 要求仓库里已经存在 `index.html`，位置可以在根目录、`dist/`、`build/`、`public/` 或 `site/`
+- `buildpacks` 使用 Paketo builders，适合常见的 Node.js / Python / Go / Java / Ruby / PHP / .NET 仓库
 - `nixpacks` 是当前的免配置应用构建器，主要覆盖常见的 Node.js、Python、Go 等项目
 - `service_port` 可省略；如果不传，Fugue 会使用检测到的端口或该构建策略的默认端口
 - Git submodule 默认会递归拉取
-- Fugue 会按项目类型选择：静态目录打包成 Caddy 镜像、直接使用 Dockerfile，或用 Nixpacks 生成构建上下文，再推送到内置 registry
+- Fugue 会按项目类型选择：静态目录打包成 Caddy 镜像、直接使用 Dockerfile、走 Buildpacks/Paketo，或用 Nixpacks 生成构建上下文，再推送到内置 registry
 - 返回的 app 会带一个在配置好的 app base domain 下生成的默认公网域名
 - 如果同一个 `Idempotency-Key` 配合同一份请求体被重复提交，Fugue 会返回原来的 app + operation，而不会再创建一个重复 app
 - 如果同一个 `Idempotency-Key` 被用于不同的请求体，Fugue 会返回 `409 Conflict`
@@ -365,7 +366,7 @@ Idempotency-Key: import-<unique-key>
 - 仅适用于最初由 `github-public` 来源创建的 app
 - 从保存的仓库 URL 与分支拉取最新代码
 - 递归拉取 Git submodule
-- 按保存下来的构建策略（`static-site`、`dockerfile` 或 `nixpacks`）重新构建镜像并推送到内置 registry
+- 按保存下来的构建策略（`static-site`、`dockerfile`、`buildpacks` 或 `nixpacks`）重新构建镜像并推送到内置 registry
 - 保持原有 app id、project 与公网域名不变，只更新镜像与 source 元数据，然后排入 deploy 操作
 
 `POST /v1/apps/{id}/deploy`

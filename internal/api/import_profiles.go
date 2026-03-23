@@ -28,6 +28,8 @@ func normalizeBuildStrategy(raw string) string {
 		return model.AppBuildStrategyStaticSite
 	case model.AppBuildStrategyDockerfile:
 		return model.AppBuildStrategyDockerfile
+	case model.AppBuildStrategyBuildpacks:
+		return model.AppBuildStrategyBuildpacks
 	case model.AppBuildStrategyNixpacks:
 		return model.AppBuildStrategyNixpacks
 	default:
@@ -49,13 +51,19 @@ func (s *Server) buildImportedAppSpec(profile, buildStrategy, appName, imageRef,
 		replicas = 1
 	}
 	if servicePort <= 0 {
-		switch normalizeBuildStrategy(buildStrategy) {
-		case model.AppBuildStrategyStaticSite:
-			servicePort = 80
-		case model.AppBuildStrategyNixpacks:
-			servicePort = 3000
-		default:
-			servicePort = 80
+		if strings.TrimSpace(imageRef) == "" && profile == "" {
+			servicePort = 0
+		} else {
+			switch normalizeBuildStrategy(buildStrategy) {
+			case model.AppBuildStrategyStaticSite:
+				servicePort = 80
+			case model.AppBuildStrategyBuildpacks:
+				servicePort = 8080
+			case model.AppBuildStrategyNixpacks:
+				servicePort = 3000
+			default:
+				servicePort = 80
+			}
 		}
 	}
 
@@ -68,10 +76,14 @@ func (s *Server) buildImportedAppSpec(profile, buildStrategy, appName, imageRef,
 		if len(env) == 0 {
 			env = nil
 		}
+		var ports []int
+		if servicePort > 0 {
+			ports = []int{servicePort}
+		}
 		return model.AppSpec{
 			Image:     imageRef,
 			Env:       env,
-			Ports:     []int{servicePort},
+			Ports:     ports,
 			Replicas:  replicas,
 			RuntimeID: runtimeID,
 		}, nil

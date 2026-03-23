@@ -62,6 +62,8 @@ func (i *Importer) ImportPublicGitHubAuto(ctx context.Context, req GitHubAutoImp
 		return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, dockerfilePath, buildContextDir, req.RegistryPushBase, req.ImageRepository)
 	case model.AppBuildStrategyStaticSite:
 		return importStaticSiteFromClonedRepo(repo, sourceDir, req.RegistryPushBase, req.ImageRepository)
+	case model.AppBuildStrategyBuildpacks:
+		return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, sourceDir, req.RegistryPushBase, req.ImageRepository)
 	case model.AppBuildStrategyNixpacks:
 		return importNixpacksFromClonedRepo(ctx, repo, req.RepoURL, sourceDir, req.RegistryPushBase, req.ImageRepository)
 	default:
@@ -137,6 +139,9 @@ func detectAutoImportInputs(repoDir, requestedSourceDir, requestedDockerfilePath
 		if err != nil {
 			return "", "", "", "", err
 		}
+		if buildpacksSupported(repoDir, normalizedSourceDir) {
+			return model.AppBuildStrategyBuildpacks, normalizedSourceDir, "", "", nil
+		}
 		return model.AppBuildStrategyNixpacks, normalizedSourceDir, "", "", nil
 	}
 
@@ -150,6 +155,10 @@ func detectAutoImportInputs(repoDir, requestedSourceDir, requestedDockerfilePath
 
 	if staticDir, err := detectAutoStaticSiteDir(repoDir); err == nil {
 		return model.AppBuildStrategyStaticSite, relativeImportedSourceDir(repoDir, staticDir), "", "", nil
+	}
+
+	if buildpacksSupported(repoDir, ".") {
+		return model.AppBuildStrategyBuildpacks, ".", "", "", nil
 	}
 
 	return model.AppBuildStrategyNixpacks, ".", "", "", nil
@@ -174,6 +183,10 @@ func detectAutoStaticSiteDir(repoDir string) (string, error) {
 }
 
 func detectNixpacksProviderAndPort(repoDir, sourceDir string) (string, int) {
+	return detectZeroConfigProviderAndPort(repoDir, sourceDir)
+}
+
+func detectZeroConfigProviderAndPort(repoDir, sourceDir string) (string, int) {
 	appDir := repoDir
 	if strings.TrimSpace(sourceDir) != "" && strings.TrimSpace(sourceDir) != "." {
 		appDir = filepath.Join(repoDir, filepath.FromSlash(sourceDir))
@@ -189,10 +202,30 @@ func detectNixpacksProviderAndPort(repoDir, sourceDir string) (string, int) {
 		return "python", 8000
 	case pathExists(filepath.Join(appDir, "go.mod")):
 		return "go", 8080
+	case pathExists(filepath.Join(appDir, "pom.xml")) ||
+		pathExists(filepath.Join(appDir, "build.gradle")) ||
+		pathExists(filepath.Join(appDir, "build.gradle.kts")):
+		return "java", 8080
+	case pathExists(filepath.Join(appDir, "Gemfile")):
+		return "ruby", 3000
+	case pathExists(filepath.Join(appDir, "composer.json")):
+		return "php", 8080
+	case hasGlob(filepath.Join(appDir, "*.csproj")):
+		return "dotnet", 8080
 	case pathExists(filepath.Join(appDir, "Cargo.toml")):
 		return "rust", 3000
 	default:
 		return "generic", 3000
+	}
+}
+
+func buildpacksSupported(repoDir, sourceDir string) bool {
+	provider, _ := detectZeroConfigProviderAndPort(repoDir, sourceDir)
+	switch provider {
+	case "nodejs", "python", "go", "java", "ruby", "php", "dotnet":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -216,6 +249,11 @@ func normalizeImportedSourceDirValue(sourceDir string) string {
 func pathExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func hasGlob(pattern string) bool {
+	matches, err := filepath.Glob(pattern)
+	return err == nil && len(matches) > 0
 }
 
 func buildAndPushNixpacksImage(ctx context.Context, req nixpacksBuildRequest) error {

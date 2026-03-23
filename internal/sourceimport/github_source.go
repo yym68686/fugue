@@ -115,6 +115,29 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 				ImportProfile:   strings.TrimSpace(req.ImportProfile),
 			},
 		}, nil
+	case model.AppBuildStrategyBuildpacks:
+		importResult, err := i.ImportPublicGitHubBuildpacks(ctx, GitHubBuildpacksImportRequest{
+			RepoURL:          req.RepoURL,
+			Branch:           req.Branch,
+			SourceDir:        req.SourceDir,
+			RegistryPushBase: req.RegistryPushBase,
+			ImageRepository:  req.ImageRepository,
+		})
+		if err != nil {
+			return GitHubSourceImportOutput{}, err
+		}
+		return GitHubSourceImportOutput{
+			ImportResult: importResult,
+			Source: model.AppSource{
+				Type:          model.AppSourceTypeGitHubPublic,
+				RepoURL:       strings.TrimSpace(req.RepoURL),
+				RepoBranch:    importResult.Branch,
+				SourceDir:     importResult.SourceDir,
+				BuildStrategy: importResult.BuildStrategy,
+				CommitSHA:     importResult.CommitSHA,
+				ImportProfile: strings.TrimSpace(req.ImportProfile),
+			},
+		}, nil
 	case model.AppBuildStrategyNixpacks:
 		importResult, err := i.ImportPublicGitHubNixpacks(ctx, GitHubNixpacksImportRequest{
 			RepoURL:          req.RepoURL,
@@ -151,6 +174,8 @@ func normalizeGitHubBuildStrategy(raw string) string {
 		return model.AppBuildStrategyStaticSite
 	case model.AppBuildStrategyDockerfile:
 		return model.AppBuildStrategyDockerfile
+	case model.AppBuildStrategyBuildpacks:
+		return model.AppBuildStrategyBuildpacks
 	case model.AppBuildStrategyNixpacks:
 		return model.AppBuildStrategyNixpacks
 	default:

@@ -237,7 +237,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 func buildQueuedGitHubSource(repoURL, branch, sourceDir, dockerfilePath, buildContextDir, buildStrategy, profile string) (model.AppSource, error) {
 	buildStrategy = normalizeBuildStrategy(buildStrategy)
 	switch buildStrategy {
-	case model.AppBuildStrategyAuto, model.AppBuildStrategyStaticSite, model.AppBuildStrategyDockerfile, model.AppBuildStrategyNixpacks:
+	case model.AppBuildStrategyAuto, model.AppBuildStrategyStaticSite, model.AppBuildStrategyDockerfile, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks:
 	default:
 		return model.AppSource{}, fmt.Errorf("unsupported build strategy %q", buildStrategy)
 	}
@@ -264,7 +264,7 @@ func buildQueuedGitHubSource(repoURL, branch, sourceDir, dockerfilePath, buildCo
 		ImportProfile:   strings.TrimSpace(profile),
 	}
 	switch buildStrategy {
-	case model.AppBuildStrategyStaticSite, model.AppBuildStrategyNixpacks:
+	case model.AppBuildStrategyStaticSite, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks:
 		source.DockerfilePath = ""
 		source.BuildContextDir = ""
 	case model.AppBuildStrategyDockerfile:
