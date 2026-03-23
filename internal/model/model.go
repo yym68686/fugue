@@ -108,13 +108,19 @@ type Runtime struct {
 	ID              string            `json:"id"`
 	TenantID        string            `json:"tenant_id,omitempty"`
 	Name            string            `json:"name"`
+	MachineName     string            `json:"machine_name,omitempty"`
 	Type            string            `json:"type"`
+	ConnectionMode  string            `json:"connection_mode,omitempty"`
 	Status          string            `json:"status"`
 	Endpoint        string            `json:"endpoint,omitempty"`
 	Labels          map[string]string `json:"labels,omitempty"`
 	NodeKeyID       string            `json:"node_key_id,omitempty"`
+	ClusterNodeName string            `json:"cluster_node_name,omitempty"`
+	FingerprintPrefix string          `json:"fingerprint_prefix,omitempty"`
+	FingerprintHash string            `json:"fingerprint_hash,omitempty"`
 	AgentKeyPrefix  string            `json:"agent_key_prefix,omitempty"`
 	AgentKeyHash    string            `json:"agent_key_hash,omitempty"`
+	LastSeenAt      *time.Time        `json:"last_seen_at,omitempty"`
 	LastHeartbeatAt *time.Time        `json:"last_heartbeat_at,omitempty"`
 	CreatedAt       time.Time         `json:"created_at"`
 	UpdatedAt       time.Time         `json:"updated_at"`
@@ -149,7 +155,6 @@ type ClusterNode struct {
 	OSImage          string     `json:"os_image,omitempty"`
 	KernelVersion    string     `json:"kernel_version,omitempty"`
 	ContainerRuntime string     `json:"container_runtime,omitempty"`
-	MachineID        string     `json:"machine_id,omitempty"`
 	RuntimeID        string     `json:"runtime_id,omitempty"`
 	TenantID         string     `json:"tenant_id,omitempty"`
 	CreatedAt        *time.Time `json:"created_at,omitempty"`

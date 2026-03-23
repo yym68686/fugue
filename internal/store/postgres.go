@@ -103,19 +103,32 @@ var postgresSchemaStatements = []string{
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
 		name TEXT NOT NULL,
+		machine_name TEXT NOT NULL DEFAULT '',
 		type TEXT NOT NULL,
+		connection_mode TEXT NOT NULL DEFAULT '',
 		status TEXT NOT NULL,
 		endpoint TEXT NOT NULL DEFAULT '',
 		labels_json JSONB NULL,
 		node_key_id TEXT NULL REFERENCES fugue_node_keys(id) ON DELETE SET NULL,
+		cluster_node_name TEXT NOT NULL DEFAULT '',
+		fingerprint_prefix TEXT NOT NULL DEFAULT '',
+		fingerprint_hash TEXT NOT NULL DEFAULT '',
 		agent_key_prefix TEXT NOT NULL DEFAULT '',
 		agent_key_hash TEXT NOT NULL DEFAULT '',
+		last_seen_at TIMESTAMPTZ NULL,
 		last_heartbeat_at TIMESTAMPTZ NULL,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL
 	)`,
+	`ALTER TABLE fugue_runtimes ADD COLUMN IF NOT EXISTS machine_name TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_runtimes ADD COLUMN IF NOT EXISTS connection_mode TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_runtimes ADD COLUMN IF NOT EXISTS cluster_node_name TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_runtimes ADD COLUMN IF NOT EXISTS fingerprint_prefix TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_runtimes ADD COLUMN IF NOT EXISTS fingerprint_hash TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_runtimes ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NULL`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_runtimes_tenant_name_ci ON fugue_runtimes ((COALESCE(tenant_id, '')), lower(name))`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_runtimes_agent_key_hash ON fugue_runtimes (agent_key_hash) WHERE agent_key_hash <> ''`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_runtimes_tenant_fingerprint_hash ON fugue_runtimes ((COALESCE(tenant_id, '')), fingerprint_hash) WHERE fingerprint_hash <> ''`,
 	`CREATE TABLE IF NOT EXISTS fugue_apps (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
@@ -255,7 +268,7 @@ func (s *Store) bootstrapDatabase(ctx context.Context) error {
 	if err := s.ensureManagedRuntimeTx(ctx, tx); err != nil {
 		return err
 	}
-	if err := s.ensureMachinesTx(ctx, tx); err != nil {
+	if err := s.ensureRuntimeMetadataTx(ctx, tx); err != nil {
 		return err
 	}
 
@@ -422,11 +435,12 @@ ON CONFLICT (id) DO NOTHING
 		if err != nil {
 			return err
 		}
+		backfillRuntimeMetadata(&runtime, model.Machine{})
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_runtimes (id, tenant_id, name, type, status, endpoint, labels_json, node_key_id, agent_key_prefix, agent_key_hash, last_heartbeat_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+INSERT INTO fugue_runtimes (id, tenant_id, name, machine_name, type, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
 ON CONFLICT (id) DO NOTHING
-`, runtime.ID, nullIfEmpty(runtime.TenantID), runtime.Name, runtime.Type, runtime.Status, runtime.Endpoint, labelsJSON, nullIfEmpty(runtime.NodeKeyID), runtime.AgentKeyPrefix, runtime.AgentKeyHash, runtime.LastHeartbeatAt, runtime.CreatedAt, runtime.UpdatedAt); err != nil {
+`, runtime.ID, nullIfEmpty(runtime.TenantID), runtime.Name, runtime.MachineName, runtime.Type, runtime.ConnectionMode, runtime.Status, runtime.Endpoint, labelsJSON, nullIfEmpty(runtime.NodeKeyID), runtime.ClusterNodeName, runtime.FingerprintPrefix, runtime.FingerprintHash, runtime.AgentKeyPrefix, runtime.AgentKeyHash, runtime.LastSeenAt, runtime.LastHeartbeatAt, runtime.CreatedAt, runtime.UpdatedAt); err != nil {
 			return fmt.Errorf("import runtime %s: %w", runtime.ID, err)
 		}
 	}
@@ -495,10 +509,11 @@ func (s *Store) ensureManagedRuntimeTx(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `
-INSERT INTO fugue_runtimes (id, tenant_id, name, type, status, endpoint, labels_json, node_key_id, agent_key_prefix, agent_key_hash, last_heartbeat_at, created_at, updated_at)
-VALUES ($1, NULL, $2, $3, $4, $5, $6, NULL, '', '', NULL, $7, $8)
+INSERT INTO fugue_runtimes (id, tenant_id, name, machine_name, type, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at)
+VALUES ($1, NULL, $2, $2, $3, '', $4, $5, $6, NULL, '', '', '', '', '', NULL, NULL, $7, $8)
 ON CONFLICT (id) DO UPDATE SET
 	name = EXCLUDED.name,
+	machine_name = EXCLUDED.machine_name,
 	type = EXCLUDED.type,
 	status = EXCLUDED.status,
 	endpoint = EXCLUDED.endpoint,
@@ -511,70 +526,40 @@ ON CONFLICT (id) DO UPDATE SET
 	return nil
 }
 
-func (s *Store) ensureMachinesTx(ctx context.Context, tx *sql.Tx) error {
-	state := model.State{}
-
-	rows, err := tx.QueryContext(ctx, `
-SELECT id, tenant_id, name, type, status, endpoint, labels_json, node_key_id, agent_key_prefix, agent_key_hash, last_heartbeat_at, created_at, updated_at
-FROM fugue_runtimes
-WHERE type IN ($1, $2)
-ORDER BY updated_at ASC, created_at ASC
-`, model.RuntimeTypeManagedOwned, model.RuntimeTypeExternalOwned)
-	if err != nil {
-		return fmt.Errorf("load runtimes for machine backfill: %w", err)
+func (s *Store) ensureRuntimeMetadataTx(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `
+UPDATE fugue_runtimes AS r
+SET machine_name = CASE WHEN r.machine_name = '' THEN m.name ELSE r.machine_name END,
+	connection_mode = CASE WHEN r.connection_mode = '' THEN m.connection_mode ELSE r.connection_mode END,
+	endpoint = CASE WHEN r.endpoint = '' THEN m.endpoint ELSE r.endpoint END,
+	labels_json = CASE WHEN r.labels_json IS NULL THEN m.labels_json ELSE r.labels_json END,
+	node_key_id = COALESCE(r.node_key_id, m.node_key_id),
+	cluster_node_name = CASE WHEN r.cluster_node_name = '' THEN m.cluster_node_name ELSE r.cluster_node_name END,
+	fingerprint_prefix = CASE WHEN r.fingerprint_prefix = '' THEN m.fingerprint_prefix ELSE r.fingerprint_prefix END,
+	fingerprint_hash = CASE WHEN r.fingerprint_hash = '' THEN m.fingerprint_hash ELSE r.fingerprint_hash END,
+	last_seen_at = COALESCE(r.last_seen_at, m.last_seen_at),
+	last_heartbeat_at = COALESCE(r.last_heartbeat_at, m.last_seen_at)
+FROM fugue_machines AS m
+WHERE m.runtime_id <> ''
+  AND r.id = m.runtime_id
+`); err != nil {
+		return fmt.Errorf("backfill runtime metadata from legacy machines: %w", err)
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		runtime, err := scanRuntime(rows)
-		if err != nil {
-			return err
-		}
-		state.Runtimes = append(state.Runtimes, runtime)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate runtimes for machine backfill: %w", err)
-	}
-
-	machineRows, err := tx.QueryContext(ctx, `
-SELECT id, tenant_id, name, connection_mode, status, endpoint, labels_json, node_key_id, runtime_id, runtime_name, cluster_node_name, fingerprint_prefix, fingerprint_hash, last_seen_at, created_at, updated_at
-FROM fugue_machines
-ORDER BY created_at ASC
-`)
-	if err != nil {
-		return fmt.Errorf("load existing machines: %w", err)
-	}
-	defer machineRows.Close()
-
-	for machineRows.Next() {
-		machine, err := scanMachine(machineRows)
-		if err != nil {
-			return err
-		}
-		state.Machines = append(state.Machines, machine)
-	}
-	if err := machineRows.Err(); err != nil {
-		return fmt.Errorf("iterate existing machines: %w", err)
-	}
-
-	beforeCount := len(state.Machines)
-	ensureMachineRecords(&state)
-	if len(state.Machines) == beforeCount {
-		return nil
-	}
-
-	for _, machine := range state.Machines[beforeCount:] {
-		labelsJSON, err := marshalNullableJSON(machine.Labels)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_machines (id, tenant_id, name, connection_mode, status, endpoint, labels_json, node_key_id, runtime_id, runtime_name, cluster_node_name, fingerprint_prefix, fingerprint_hash, last_seen_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-ON CONFLICT DO NOTHING
-`, machine.ID, nullIfEmpty(machine.TenantID), machine.Name, machine.ConnectionMode, machine.Status, machine.Endpoint, labelsJSON, nullIfEmpty(machine.NodeKeyID), machine.RuntimeID, machine.RuntimeName, machine.ClusterNodeName, machine.FingerprintPrefix, machine.FingerprintHash, machine.LastSeenAt, machine.CreatedAt, machine.UpdatedAt); err != nil {
-			return fmt.Errorf("backfill machine %s: %w", machine.ID, err)
-		}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE fugue_runtimes
+SET machine_name = CASE WHEN machine_name = '' THEN name ELSE machine_name END,
+	connection_mode = CASE
+		WHEN connection_mode = '' AND type = $1 THEN 'cluster'
+		WHEN connection_mode = '' AND type = $2 THEN 'agent'
+		ELSE connection_mode
+	END,
+	cluster_node_name = CASE
+		WHEN cluster_node_name = '' AND type = $1 THEN name
+		ELSE cluster_node_name
+	END,
+	last_seen_at = COALESCE(last_seen_at, last_heartbeat_at)
+`, model.RuntimeTypeManagedOwned, model.RuntimeTypeExternalOwned); err != nil {
+		return fmt.Errorf("normalize runtime metadata defaults: %w", err)
 	}
 	return nil
 }

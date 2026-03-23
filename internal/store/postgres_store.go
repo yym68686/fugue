@@ -501,13 +501,13 @@ WHERE id = $1
 	return redactNodeKey(key), nil
 }
 
-func (s *Store) pgBootstrapNode(secret, runtimeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.NodeKey, model.Runtime, string, model.Machine, error) {
+func (s *Store) pgBootstrapNode(secret, runtimeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.NodeKey, model.Runtime, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, fmt.Errorf("begin bootstrap node transaction: %w", err)
+		return model.NodeKey{}, model.Runtime{}, "", fmt.Errorf("begin bootstrap node transaction: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -518,10 +518,10 @@ WHERE hash = $1
 FOR UPDATE
 `, model.HashSecret(secret)))
 	if err != nil {
-		return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, mapDBErr(err)
+		return model.NodeKey{}, model.Runtime{}, "", mapDBErr(err)
 	}
 	if key.RevokedAt != nil || key.Status == model.NodeKeyStatusRevoked {
-		return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, ErrConflict
+		return model.NodeKey{}, model.Runtime{}, "", ErrConflict
 	}
 
 	now := time.Now().UTC()
@@ -532,7 +532,7 @@ UPDATE fugue_node_keys
 SET last_used_at = $2, updated_at = $3
 WHERE id = $1
 `, key.ID, key.LastUsedAt, key.UpdatedAt); err != nil {
-		return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, fmt.Errorf("update node key last_used_at: %w", err)
+		return model.NodeKey{}, model.Runtime{}, "", fmt.Errorf("update node key last_used_at: %w", err)
 	}
 
 	endpoint = strings.TrimSpace(endpoint)
@@ -541,113 +541,45 @@ WHERE id = $1
 	machineFingerprint = normalizedMachineFingerprint(machineFingerprint, machineName, runtimeName, endpoint)
 	fingerprintHash := model.HashSecret(machineFingerprint)
 
-	machine, found, err := s.pgFindMachineByFingerprintTx(ctx, tx, key.TenantID, fingerprintHash, true)
+	runtime, found, err := s.pgFindRuntimeByFingerprintTx(ctx, tx, key.TenantID, fingerprintHash, true)
 	if err != nil {
-		return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, err
+		return model.NodeKey{}, model.Runtime{}, "", err
 	}
 	if !found && explicitFingerprint {
-		machine, found, err = s.pgFindMachineCandidateTx(ctx, tx, key.TenantID, key.ID, model.MachineConnectionModeAgent, machineName, runtimeName, endpoint)
+		runtime, found, err = s.pgFindRuntimeCandidateTx(ctx, tx, key.TenantID, key.ID, model.RuntimeTypeExternalOwned, machineName, runtimeName, endpoint)
 		if err != nil {
-			return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, err
+			return model.NodeKey{}, model.Runtime{}, "", err
 		}
 	}
 
 	runtimeSecret := model.NewSecret("fugue_rt")
 
 	if found {
-		machine.Name = machineName
-		machine.ConnectionMode = model.MachineConnectionModeAgent
-		machine.Status = model.RuntimeStatusActive
-		machine.Endpoint = endpoint
-		machine.Labels = cloneMap(labels)
-		machine.NodeKeyID = key.ID
-		machine.FingerprintPrefix = model.SecretPrefix(machineFingerprint)
-		machine.FingerprintHash = fingerprintHash
-		machine.LastSeenAt = &now
-		machine.UpdatedAt = now
-
-		runtime, err := s.pgGetRuntimeTx(ctx, tx, machine.RuntimeID, true)
-		if err != nil && !errors.Is(err, ErrNotFound) {
-			return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, err
-		}
-		if errors.Is(err, ErrNotFound) {
-			name, err := s.pgNextAvailableRuntimeNameTx(ctx, tx, key.TenantID, runtimeName)
-			if err != nil {
-				return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, err
-			}
-			runtime = model.Runtime{
-				ID:              model.NewID("runtime"),
-				TenantID:        key.TenantID,
-				Name:            name,
-				Type:            model.RuntimeTypeExternalOwned,
-				Status:          model.RuntimeStatusActive,
-				Endpoint:        endpoint,
-				Labels:          cloneMap(labels),
-				NodeKeyID:       key.ID,
-				AgentKeyPrefix:  model.SecretPrefix(runtimeSecret),
-				AgentKeyHash:    model.HashSecret(runtimeSecret),
-				LastHeartbeatAt: &now,
-				CreatedAt:       now,
-				UpdatedAt:       now,
-			}
-			labelsJSON, err := marshalNullableJSON(runtime.Labels)
-			if err != nil {
-				return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, err
-			}
-			if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_runtimes (id, tenant_id, name, type, status, endpoint, labels_json, node_key_id, agent_key_prefix, agent_key_hash, last_heartbeat_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-`, runtime.ID, nullIfEmpty(runtime.TenantID), runtime.Name, runtime.Type, runtime.Status, runtime.Endpoint, labelsJSON, nullIfEmpty(runtime.NodeKeyID), runtime.AgentKeyPrefix, runtime.AgentKeyHash, runtime.LastHeartbeatAt, runtime.CreatedAt, runtime.UpdatedAt); err != nil {
-				return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, mapDBErr(err)
-			}
-		} else {
-			runtime.Type = model.RuntimeTypeExternalOwned
-			runtime.Status = model.RuntimeStatusActive
-			runtime.Endpoint = endpoint
-			runtime.Labels = cloneMap(labels)
-			runtime.NodeKeyID = key.ID
-			runtime.AgentKeyPrefix = model.SecretPrefix(runtimeSecret)
-			runtime.AgentKeyHash = model.HashSecret(runtimeSecret)
-			runtime.LastHeartbeatAt = &now
-			runtime.UpdatedAt = now
-			labelsJSON, err := marshalNullableJSON(runtime.Labels)
-			if err != nil {
-				return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, err
-			}
-			if _, err := tx.ExecContext(ctx, `
-UPDATE fugue_runtimes
-SET type = $2,
-	status = $3,
-	endpoint = $4,
-	labels_json = $5,
-	node_key_id = $6,
-	agent_key_prefix = $7,
-	agent_key_hash = $8,
-	last_heartbeat_at = $9,
-	updated_at = $10
-WHERE id = $1
-`, runtime.ID, runtime.Type, runtime.Status, runtime.Endpoint, labelsJSON, nullIfEmpty(runtime.NodeKeyID), runtime.AgentKeyPrefix, runtime.AgentKeyHash, runtime.LastHeartbeatAt, runtime.UpdatedAt); err != nil {
-				return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, fmt.Errorf("update external-owned runtime %s: %w", runtime.ID, err)
-			}
-		}
-
-		machine.RuntimeID = runtime.ID
-		machine.RuntimeName = runtime.Name
-		machine.ClusterNodeName = ""
-		if err := s.pgUpdateMachineTx(ctx, tx, machine); err != nil {
-			return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, err
+		runtime.Type = model.RuntimeTypeExternalOwned
+		runtime.Status = model.RuntimeStatusActive
+		runtime.Endpoint = endpoint
+		runtime.Labels = cloneMap(labels)
+		runtime.NodeKeyID = key.ID
+		runtime.AgentKeyPrefix = model.SecretPrefix(runtimeSecret)
+		runtime.AgentKeyHash = model.HashSecret(runtimeSecret)
+		runtime.LastSeenAt = &now
+		runtime.LastHeartbeatAt = &now
+		runtime.UpdatedAt = now
+		applyRuntimeIdentity(&runtime, machineName, machineFingerprint, model.RuntimeTypeExternalOwned, endpoint, labels, key.ID, now)
+		if err := s.pgUpdateRuntimeTx(ctx, tx, runtime); err != nil {
+			return model.NodeKey{}, model.Runtime{}, "", err
 		}
 		if err := tx.Commit(); err != nil {
-			return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, fmt.Errorf("commit bootstrap node transaction: %w", err)
+			return model.NodeKey{}, model.Runtime{}, "", fmt.Errorf("commit bootstrap node transaction: %w", err)
 		}
-		return redactNodeKey(key), runtime, runtimeSecret, redactMachine(machine), nil
+		return redactNodeKey(key), runtime, runtimeSecret, nil
 	}
 
 	name, err := s.pgNextAvailableRuntimeNameTx(ctx, tx, key.TenantID, runtimeName)
 	if err != nil {
-		return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, err
+		return model.NodeKey{}, model.Runtime{}, "", err
 	}
-	runtime := model.Runtime{
+	runtime = model.Runtime{
 		ID:              model.NewID("runtime"),
 		TenantID:        key.TenantID,
 		Name:            name,
@@ -658,55 +590,29 @@ WHERE id = $1
 		NodeKeyID:       key.ID,
 		AgentKeyPrefix:  model.SecretPrefix(runtimeSecret),
 		AgentKeyHash:    model.HashSecret(runtimeSecret),
+		LastSeenAt:      &now,
 		LastHeartbeatAt: &now,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
-	labelsJSON, err := marshalNullableJSON(runtime.Labels)
-	if err != nil {
-		return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, err
-	}
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_runtimes (id, tenant_id, name, type, status, endpoint, labels_json, node_key_id, agent_key_prefix, agent_key_hash, last_heartbeat_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-`, runtime.ID, nullIfEmpty(runtime.TenantID), runtime.Name, runtime.Type, runtime.Status, runtime.Endpoint, labelsJSON, nullIfEmpty(runtime.NodeKeyID), runtime.AgentKeyPrefix, runtime.AgentKeyHash, runtime.LastHeartbeatAt, runtime.CreatedAt, runtime.UpdatedAt); err != nil {
-		return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, mapDBErr(err)
-	}
-
-	machine = model.Machine{
-		ID:                model.NewID("machine"),
-		TenantID:          key.TenantID,
-		Name:              machineName,
-		ConnectionMode:    model.MachineConnectionModeAgent,
-		Status:            model.RuntimeStatusActive,
-		Endpoint:          endpoint,
-		Labels:            cloneMap(labels),
-		NodeKeyID:         key.ID,
-		RuntimeID:         runtime.ID,
-		RuntimeName:       runtime.Name,
-		FingerprintPrefix: model.SecretPrefix(machineFingerprint),
-		FingerprintHash:   fingerprintHash,
-		LastSeenAt:        &now,
-		CreatedAt:         now,
-		UpdatedAt:         now,
-	}
-	if err := s.pgInsertMachineTx(ctx, tx, machine); err != nil {
-		return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, err
+	applyRuntimeIdentity(&runtime, machineName, machineFingerprint, model.RuntimeTypeExternalOwned, endpoint, labels, key.ID, now)
+	if err := s.pgInsertRuntimeTx(ctx, tx, runtime); err != nil {
+		return model.NodeKey{}, model.Runtime{}, "", err
 	}
 
 	if err := tx.Commit(); err != nil {
-		return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, fmt.Errorf("commit bootstrap node transaction: %w", err)
+		return model.NodeKey{}, model.Runtime{}, "", fmt.Errorf("commit bootstrap node transaction: %w", err)
 	}
-	return redactNodeKey(key), runtime, runtimeSecret, redactMachine(machine), nil
+	return redactNodeKey(key), runtime, runtimeSecret, nil
 }
 
-func (s *Store) pgBootstrapClusterNode(secret, runtimeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.NodeKey, model.Runtime, model.Machine, error) {
+func (s *Store) pgBootstrapClusterNode(secret, runtimeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.NodeKey, model.Runtime, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return model.NodeKey{}, model.Runtime{}, model.Machine{}, fmt.Errorf("begin bootstrap cluster node transaction: %w", err)
+		return model.NodeKey{}, model.Runtime{}, fmt.Errorf("begin bootstrap cluster node transaction: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -717,10 +623,10 @@ WHERE hash = $1
 FOR UPDATE
 `, model.HashSecret(secret)))
 	if err != nil {
-		return model.NodeKey{}, model.Runtime{}, model.Machine{}, mapDBErr(err)
+		return model.NodeKey{}, model.Runtime{}, mapDBErr(err)
 	}
 	if key.RevokedAt != nil || key.Status == model.NodeKeyStatusRevoked {
-		return model.NodeKey{}, model.Runtime{}, model.Machine{}, ErrConflict
+		return model.NodeKey{}, model.Runtime{}, ErrConflict
 	}
 
 	now := time.Now().UTC()
@@ -731,7 +637,7 @@ UPDATE fugue_node_keys
 SET last_used_at = $2, updated_at = $3
 WHERE id = $1
 `, key.ID, key.LastUsedAt, key.UpdatedAt); err != nil {
-		return model.NodeKey{}, model.Runtime{}, model.Machine{}, fmt.Errorf("update node key last_used_at: %w", err)
+		return model.NodeKey{}, model.Runtime{}, fmt.Errorf("update node key last_used_at: %w", err)
 	}
 
 	endpoint = strings.TrimSpace(endpoint)
@@ -740,109 +646,43 @@ WHERE id = $1
 	machineFingerprint = normalizedMachineFingerprint(machineFingerprint, machineName, runtimeName, endpoint)
 	fingerprintHash := model.HashSecret(machineFingerprint)
 
-	machine, found, err := s.pgFindMachineByFingerprintTx(ctx, tx, key.TenantID, fingerprintHash, true)
+	runtime, found, err := s.pgFindRuntimeByFingerprintTx(ctx, tx, key.TenantID, fingerprintHash, true)
 	if err != nil {
-		return model.NodeKey{}, model.Runtime{}, model.Machine{}, err
+		return model.NodeKey{}, model.Runtime{}, err
 	}
 	if !found && explicitFingerprint {
-		machine, found, err = s.pgFindMachineCandidateTx(ctx, tx, key.TenantID, key.ID, model.MachineConnectionModeCluster, machineName, runtimeName, endpoint)
+		runtime, found, err = s.pgFindRuntimeCandidateTx(ctx, tx, key.TenantID, key.ID, model.RuntimeTypeManagedOwned, machineName, runtimeName, endpoint)
 		if err != nil {
-			return model.NodeKey{}, model.Runtime{}, model.Machine{}, err
+			return model.NodeKey{}, model.Runtime{}, err
 		}
 	}
 
 	if found {
-		machine.Name = machineName
-		machine.ConnectionMode = model.MachineConnectionModeCluster
-		machine.Status = model.RuntimeStatusActive
-		machine.Endpoint = endpoint
-		machine.Labels = cloneMap(labels)
-		machine.NodeKeyID = key.ID
-		machine.FingerprintPrefix = model.SecretPrefix(machineFingerprint)
-		machine.FingerprintHash = fingerprintHash
-		machine.LastSeenAt = &now
-		machine.UpdatedAt = now
-
-		runtime, err := s.pgGetRuntimeTx(ctx, tx, machine.RuntimeID, true)
-		if err != nil && !errors.Is(err, ErrNotFound) {
-			return model.NodeKey{}, model.Runtime{}, model.Machine{}, err
-		}
-		if errors.Is(err, ErrNotFound) {
-			name, err := s.pgNextAvailableRuntimeNameTx(ctx, tx, key.TenantID, runtimeName)
-			if err != nil {
-				return model.NodeKey{}, model.Runtime{}, model.Machine{}, err
-			}
-			runtime = model.Runtime{
-				ID:              model.NewID("runtime"),
-				TenantID:        key.TenantID,
-				Name:            name,
-				Type:            model.RuntimeTypeManagedOwned,
-				Status:          model.RuntimeStatusActive,
-				Endpoint:        endpoint,
-				Labels:          cloneMap(labels),
-				NodeKeyID:       key.ID,
-				LastHeartbeatAt: &now,
-				CreatedAt:       now,
-				UpdatedAt:       now,
-			}
-			labelsJSON, err := marshalNullableJSON(runtime.Labels)
-			if err != nil {
-				return model.NodeKey{}, model.Runtime{}, model.Machine{}, err
-			}
-			if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_runtimes (id, tenant_id, name, type, status, endpoint, labels_json, node_key_id, agent_key_prefix, agent_key_hash, last_heartbeat_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '', '', $9, $10, $11)
-`, runtime.ID, nullIfEmpty(runtime.TenantID), runtime.Name, runtime.Type, runtime.Status, runtime.Endpoint, labelsJSON, nullIfEmpty(runtime.NodeKeyID), runtime.LastHeartbeatAt, runtime.CreatedAt, runtime.UpdatedAt); err != nil {
-				return model.NodeKey{}, model.Runtime{}, model.Machine{}, mapDBErr(err)
-			}
-		} else {
-			runtime.Type = model.RuntimeTypeManagedOwned
-			runtime.Status = model.RuntimeStatusActive
-			runtime.Endpoint = endpoint
-			runtime.Labels = cloneMap(labels)
-			runtime.NodeKeyID = key.ID
-			runtime.AgentKeyPrefix = ""
-			runtime.AgentKeyHash = ""
-			runtime.LastHeartbeatAt = &now
-			runtime.UpdatedAt = now
-			labelsJSON, err := marshalNullableJSON(runtime.Labels)
-			if err != nil {
-				return model.NodeKey{}, model.Runtime{}, model.Machine{}, err
-			}
-			if _, err := tx.ExecContext(ctx, `
-UPDATE fugue_runtimes
-SET type = $2,
-	status = $3,
-	endpoint = $4,
-	labels_json = $5,
-	node_key_id = $6,
-	agent_key_prefix = '',
-	agent_key_hash = '',
-	last_heartbeat_at = $7,
-	updated_at = $8
-WHERE id = $1
-`, runtime.ID, runtime.Type, runtime.Status, runtime.Endpoint, labelsJSON, nullIfEmpty(runtime.NodeKeyID), runtime.LastHeartbeatAt, runtime.UpdatedAt); err != nil {
-				return model.NodeKey{}, model.Runtime{}, model.Machine{}, fmt.Errorf("update managed-owned runtime %s: %w", runtime.ID, err)
-			}
-		}
-
-		machine.RuntimeID = runtime.ID
-		machine.RuntimeName = runtime.Name
-		machine.ClusterNodeName = runtime.Name
-		if err := s.pgUpdateMachineTx(ctx, tx, machine); err != nil {
-			return model.NodeKey{}, model.Runtime{}, model.Machine{}, err
+		runtime.Type = model.RuntimeTypeManagedOwned
+		runtime.Status = model.RuntimeStatusActive
+		runtime.Endpoint = endpoint
+		runtime.Labels = cloneMap(labels)
+		runtime.NodeKeyID = key.ID
+		runtime.AgentKeyPrefix = ""
+		runtime.AgentKeyHash = ""
+		runtime.LastSeenAt = &now
+		runtime.LastHeartbeatAt = &now
+		runtime.UpdatedAt = now
+		applyRuntimeIdentity(&runtime, machineName, machineFingerprint, model.RuntimeTypeManagedOwned, endpoint, labels, key.ID, now)
+		if err := s.pgUpdateRuntimeTx(ctx, tx, runtime); err != nil {
+			return model.NodeKey{}, model.Runtime{}, err
 		}
 		if err := tx.Commit(); err != nil {
-			return model.NodeKey{}, model.Runtime{}, model.Machine{}, fmt.Errorf("commit bootstrap cluster node transaction: %w", err)
+			return model.NodeKey{}, model.Runtime{}, fmt.Errorf("commit bootstrap cluster node transaction: %w", err)
 		}
-		return redactNodeKey(key), runtime, redactMachine(machine), nil
+		return redactNodeKey(key), runtime, nil
 	}
 
 	name, err := s.pgNextAvailableRuntimeNameTx(ctx, tx, key.TenantID, runtimeName)
 	if err != nil {
-		return model.NodeKey{}, model.Runtime{}, model.Machine{}, err
+		return model.NodeKey{}, model.Runtime{}, err
 	}
-	runtime := model.Runtime{
+	runtime = model.Runtime{
 		ID:              model.NewID("runtime"),
 		TenantID:        key.TenantID,
 		Name:            name,
@@ -851,47 +691,20 @@ WHERE id = $1
 		Endpoint:        endpoint,
 		Labels:          cloneMap(labels),
 		NodeKeyID:       key.ID,
+		LastSeenAt:      &now,
 		LastHeartbeatAt: &now,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
-	labelsJSON, err := marshalNullableJSON(runtime.Labels)
-	if err != nil {
-		return model.NodeKey{}, model.Runtime{}, model.Machine{}, err
-	}
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_runtimes (id, tenant_id, name, type, status, endpoint, labels_json, node_key_id, agent_key_prefix, agent_key_hash, last_heartbeat_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '', '', $9, $10, $11)
-`, runtime.ID, nullIfEmpty(runtime.TenantID), runtime.Name, runtime.Type, runtime.Status, runtime.Endpoint, labelsJSON, nullIfEmpty(runtime.NodeKeyID), runtime.LastHeartbeatAt, runtime.CreatedAt, runtime.UpdatedAt); err != nil {
-		return model.NodeKey{}, model.Runtime{}, model.Machine{}, mapDBErr(err)
-	}
-
-	machine = model.Machine{
-		ID:                model.NewID("machine"),
-		TenantID:          key.TenantID,
-		Name:              machineName,
-		ConnectionMode:    model.MachineConnectionModeCluster,
-		Status:            model.RuntimeStatusActive,
-		Endpoint:          endpoint,
-		Labels:            cloneMap(labels),
-		NodeKeyID:         key.ID,
-		RuntimeID:         runtime.ID,
-		RuntimeName:       runtime.Name,
-		ClusterNodeName:   runtime.Name,
-		FingerprintPrefix: model.SecretPrefix(machineFingerprint),
-		FingerprintHash:   fingerprintHash,
-		LastSeenAt:        &now,
-		CreatedAt:         now,
-		UpdatedAt:         now,
-	}
-	if err := s.pgInsertMachineTx(ctx, tx, machine); err != nil {
-		return model.NodeKey{}, model.Runtime{}, model.Machine{}, err
+	applyRuntimeIdentity(&runtime, machineName, machineFingerprint, model.RuntimeTypeManagedOwned, endpoint, labels, key.ID, now)
+	if err := s.pgInsertRuntimeTx(ctx, tx, runtime); err != nil {
+		return model.NodeKey{}, model.Runtime{}, err
 	}
 
 	if err := tx.Commit(); err != nil {
-		return model.NodeKey{}, model.Runtime{}, model.Machine{}, fmt.Errorf("commit bootstrap cluster node transaction: %w", err)
+		return model.NodeKey{}, model.Runtime{}, fmt.Errorf("commit bootstrap cluster node transaction: %w", err)
 	}
-	return redactNodeKey(key), runtime, redactMachine(machine), nil
+	return redactNodeKey(key), runtime, nil
 }
 
 func (s *Store) pgCreateRuntime(tenantID, name, runtimeType, endpoint string, labels map[string]string) (model.Runtime, string, error) {
@@ -913,10 +726,7 @@ func (s *Store) pgCreateRuntime(tenantID, name, runtimeType, endpoint string, la
 	if runtimeType == model.RuntimeTypeManagedShared || runtimeType == model.RuntimeTypeManagedOwned {
 		runtime.Status = model.RuntimeStatusActive
 	}
-	labelsJSON, err := marshalNullableJSON(runtime.Labels)
-	if err != nil {
-		return model.Runtime{}, "", err
-	}
+	backfillRuntimeMetadata(&runtime, model.Machine{})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -936,11 +746,8 @@ func (s *Store) pgCreateRuntime(tenantID, name, runtimeType, endpoint string, la
 			return model.Runtime{}, "", ErrNotFound
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_runtimes (id, tenant_id, name, type, status, endpoint, labels_json, node_key_id, agent_key_prefix, agent_key_hash, last_heartbeat_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11)
-`, runtime.ID, nullIfEmpty(runtime.TenantID), runtime.Name, runtime.Type, runtime.Status, runtime.Endpoint, labelsJSON, runtime.AgentKeyPrefix, runtime.AgentKeyHash, runtime.CreatedAt, runtime.UpdatedAt); err != nil {
-		return model.Runtime{}, "", mapDBErr(err)
+	if err := s.pgInsertRuntimeTx(ctx, tx, runtime); err != nil {
+		return model.Runtime{}, "", err
 	}
 	if err := tx.Commit(); err != nil {
 		return model.Runtime{}, "", fmt.Errorf("commit create runtime transaction: %w", err)
@@ -948,13 +755,13 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11)
 	return runtime, secret, nil
 }
 
-func (s *Store) pgConsumeEnrollmentToken(secret, runtimeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.Runtime, string, model.Machine, error) {
+func (s *Store) pgConsumeEnrollmentToken(secret, runtimeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.Runtime, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return model.Runtime{}, "", model.Machine{}, fmt.Errorf("begin consume enrollment token transaction: %w", err)
+		return model.Runtime{}, "", fmt.Errorf("begin consume enrollment token transaction: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -965,11 +772,11 @@ WHERE hash = $1
 FOR UPDATE
 `, model.HashSecret(secret)))
 	if err != nil {
-		return model.Runtime{}, "", model.Machine{}, mapDBErr(err)
+		return model.Runtime{}, "", mapDBErr(err)
 	}
 	now := time.Now().UTC()
 	if token.UsedAt != nil || token.ExpiresAt.Before(now) {
-		return model.Runtime{}, "", model.Machine{}, ErrConflict
+		return model.Runtime{}, "", ErrConflict
 	}
 	token.UsedAt = &now
 	token.LastUsedAt = &now
@@ -978,7 +785,7 @@ UPDATE fugue_enrollment_tokens
 SET used_at = $2, last_used_at = $3
 WHERE id = $1
 `, token.ID, token.UsedAt, token.LastUsedAt); err != nil {
-		return model.Runtime{}, "", model.Machine{}, fmt.Errorf("update enrollment token usage: %w", err)
+		return model.Runtime{}, "", fmt.Errorf("update enrollment token usage: %w", err)
 	}
 
 	endpoint = strings.TrimSpace(endpoint)
@@ -987,109 +794,44 @@ WHERE id = $1
 	machineFingerprint = normalizedMachineFingerprint(machineFingerprint, machineName, runtimeName, endpoint)
 	fingerprintHash := model.HashSecret(machineFingerprint)
 
-	machine, found, err := s.pgFindMachineByFingerprintTx(ctx, tx, token.TenantID, fingerprintHash, true)
+	runtime, found, err := s.pgFindRuntimeByFingerprintTx(ctx, tx, token.TenantID, fingerprintHash, true)
 	if err != nil {
-		return model.Runtime{}, "", model.Machine{}, err
+		return model.Runtime{}, "", err
 	}
 	if !found && explicitFingerprint {
-		machine, found, err = s.pgFindMachineCandidateTx(ctx, tx, token.TenantID, "", model.MachineConnectionModeAgent, machineName, runtimeName, endpoint)
+		runtime, found, err = s.pgFindRuntimeCandidateTx(ctx, tx, token.TenantID, "", model.RuntimeTypeExternalOwned, machineName, runtimeName, endpoint)
 		if err != nil {
-			return model.Runtime{}, "", model.Machine{}, err
+			return model.Runtime{}, "", err
 		}
 	}
 
 	runtimeSecret := model.NewSecret("fugue_rt")
 
 	if found {
-		machine.Name = machineName
-		machine.ConnectionMode = model.MachineConnectionModeAgent
-		machine.Status = model.RuntimeStatusActive
-		machine.Endpoint = endpoint
-		machine.Labels = cloneMap(labels)
-		machine.FingerprintPrefix = model.SecretPrefix(machineFingerprint)
-		machine.FingerprintHash = fingerprintHash
-		machine.LastSeenAt = &now
-		machine.UpdatedAt = now
-
-		runtime, err := s.pgGetRuntimeTx(ctx, tx, machine.RuntimeID, true)
-		if err != nil && !errors.Is(err, ErrNotFound) {
-			return model.Runtime{}, "", model.Machine{}, err
-		}
-		if errors.Is(err, ErrNotFound) {
-			name, err := s.pgNextAvailableRuntimeNameTx(ctx, tx, token.TenantID, runtimeName)
-			if err != nil {
-				return model.Runtime{}, "", model.Machine{}, err
-			}
-			runtime = model.Runtime{
-				ID:              model.NewID("runtime"),
-				TenantID:        token.TenantID,
-				Name:            name,
-				Type:            model.RuntimeTypeExternalOwned,
-				Status:          model.RuntimeStatusActive,
-				Endpoint:        endpoint,
-				Labels:          cloneMap(labels),
-				AgentKeyPrefix:  model.SecretPrefix(runtimeSecret),
-				AgentKeyHash:    model.HashSecret(runtimeSecret),
-				LastHeartbeatAt: &now,
-				CreatedAt:       now,
-				UpdatedAt:       now,
-			}
-			labelsJSON, err := marshalNullableJSON(runtime.Labels)
-			if err != nil {
-				return model.Runtime{}, "", model.Machine{}, err
-			}
-			if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_runtimes (id, tenant_id, name, type, status, endpoint, labels_json, node_key_id, agent_key_prefix, agent_key_hash, last_heartbeat_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, $10, $11, $12)
-`, runtime.ID, nullIfEmpty(runtime.TenantID), runtime.Name, runtime.Type, runtime.Status, runtime.Endpoint, labelsJSON, runtime.AgentKeyPrefix, runtime.AgentKeyHash, runtime.LastHeartbeatAt, runtime.CreatedAt, runtime.UpdatedAt); err != nil {
-				return model.Runtime{}, "", model.Machine{}, mapDBErr(err)
-			}
-		} else {
-			runtime.Type = model.RuntimeTypeExternalOwned
-			runtime.Status = model.RuntimeStatusActive
-			runtime.Endpoint = endpoint
-			runtime.Labels = cloneMap(labels)
-			runtime.AgentKeyPrefix = model.SecretPrefix(runtimeSecret)
-			runtime.AgentKeyHash = model.HashSecret(runtimeSecret)
-			runtime.LastHeartbeatAt = &now
-			runtime.UpdatedAt = now
-			labelsJSON, err := marshalNullableJSON(runtime.Labels)
-			if err != nil {
-				return model.Runtime{}, "", model.Machine{}, err
-			}
-			if _, err := tx.ExecContext(ctx, `
-UPDATE fugue_runtimes
-SET type = $2,
-	status = $3,
-	endpoint = $4,
-	labels_json = $5,
-	agent_key_prefix = $6,
-	agent_key_hash = $7,
-	last_heartbeat_at = $8,
-	updated_at = $9
-WHERE id = $1
-`, runtime.ID, runtime.Type, runtime.Status, runtime.Endpoint, labelsJSON, runtime.AgentKeyPrefix, runtime.AgentKeyHash, runtime.LastHeartbeatAt, runtime.UpdatedAt); err != nil {
-				return model.Runtime{}, "", model.Machine{}, fmt.Errorf("update enrolled runtime %s: %w", runtime.ID, err)
-			}
-		}
-
-		machine.RuntimeID = runtime.ID
-		machine.RuntimeName = runtime.Name
-		machine.ClusterNodeName = ""
-		if err := s.pgUpdateMachineTx(ctx, tx, machine); err != nil {
-			return model.Runtime{}, "", model.Machine{}, err
+		runtime.Type = model.RuntimeTypeExternalOwned
+		runtime.Status = model.RuntimeStatusActive
+		runtime.Endpoint = endpoint
+		runtime.Labels = cloneMap(labels)
+		runtime.AgentKeyPrefix = model.SecretPrefix(runtimeSecret)
+		runtime.AgentKeyHash = model.HashSecret(runtimeSecret)
+		runtime.LastSeenAt = &now
+		runtime.LastHeartbeatAt = &now
+		runtime.UpdatedAt = now
+		applyRuntimeIdentity(&runtime, machineName, machineFingerprint, model.RuntimeTypeExternalOwned, endpoint, labels, runtime.NodeKeyID, now)
+		if err := s.pgUpdateRuntimeTx(ctx, tx, runtime); err != nil {
+			return model.Runtime{}, "", err
 		}
 		if err := tx.Commit(); err != nil {
-			return model.Runtime{}, "", model.Machine{}, fmt.Errorf("commit consume enrollment token transaction: %w", err)
+			return model.Runtime{}, "", fmt.Errorf("commit consume enrollment token transaction: %w", err)
 		}
-		return runtime, runtimeSecret, redactMachine(machine), nil
+		return runtime, runtimeSecret, nil
 	}
 
 	name, err := s.pgNextAvailableRuntimeNameTx(ctx, tx, token.TenantID, runtimeName)
 	if err != nil {
-		return model.Runtime{}, "", model.Machine{}, err
+		return model.Runtime{}, "", err
 	}
-	runtime := model.Runtime{
+	runtime = model.Runtime{
 		ID:              model.NewID("runtime"),
 		TenantID:        token.TenantID,
 		Name:            name,
@@ -1099,45 +841,20 @@ WHERE id = $1
 		Labels:          cloneMap(labels),
 		AgentKeyPrefix:  model.SecretPrefix(runtimeSecret),
 		AgentKeyHash:    model.HashSecret(runtimeSecret),
+		LastSeenAt:      &now,
 		LastHeartbeatAt: &now,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
-	labelsJSON, err := marshalNullableJSON(runtime.Labels)
-	if err != nil {
-		return model.Runtime{}, "", model.Machine{}, err
-	}
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_runtimes (id, tenant_id, name, type, status, endpoint, labels_json, node_key_id, agent_key_prefix, agent_key_hash, last_heartbeat_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, $10, $11, $12)
-`, runtime.ID, nullIfEmpty(runtime.TenantID), runtime.Name, runtime.Type, runtime.Status, runtime.Endpoint, labelsJSON, runtime.AgentKeyPrefix, runtime.AgentKeyHash, runtime.LastHeartbeatAt, runtime.CreatedAt, runtime.UpdatedAt); err != nil {
-		return model.Runtime{}, "", model.Machine{}, mapDBErr(err)
-	}
-
-	machine = model.Machine{
-		ID:                model.NewID("machine"),
-		TenantID:          token.TenantID,
-		Name:              machineName,
-		ConnectionMode:    model.MachineConnectionModeAgent,
-		Status:            model.RuntimeStatusActive,
-		Endpoint:          endpoint,
-		Labels:            cloneMap(labels),
-		RuntimeID:         runtime.ID,
-		RuntimeName:       runtime.Name,
-		FingerprintPrefix: model.SecretPrefix(machineFingerprint),
-		FingerprintHash:   fingerprintHash,
-		LastSeenAt:        &now,
-		CreatedAt:         now,
-		UpdatedAt:         now,
-	}
-	if err := s.pgInsertMachineTx(ctx, tx, machine); err != nil {
-		return model.Runtime{}, "", model.Machine{}, err
+	applyRuntimeIdentity(&runtime, machineName, machineFingerprint, model.RuntimeTypeExternalOwned, endpoint, labels, "", now)
+	if err := s.pgInsertRuntimeTx(ctx, tx, runtime); err != nil {
+		return model.Runtime{}, "", err
 	}
 
 	if err := tx.Commit(); err != nil {
-		return model.Runtime{}, "", model.Machine{}, fmt.Errorf("commit consume enrollment token transaction: %w", err)
+		return model.Runtime{}, "", fmt.Errorf("commit consume enrollment token transaction: %w", err)
 	}
-	return runtime, runtimeSecret, redactMachine(machine), nil
+	return runtime, runtimeSecret, nil
 }
 
 func (s *Store) pgAuthenticateRuntimeKey(secret string) (model.Runtime, model.Principal, error) {
@@ -1152,22 +869,15 @@ func (s *Store) pgAuthenticateRuntimeKey(secret string) (model.Runtime, model.Pr
 
 	runtime, err := scanRuntime(tx.QueryRowContext(ctx, `
 UPDATE fugue_runtimes
-SET last_heartbeat_at = NOW(), status = $2, updated_at = NOW()
+SET last_seen_at = NOW(),
+	last_heartbeat_at = NOW(),
+	status = $2,
+	updated_at = NOW()
 WHERE agent_key_hash = $1
-RETURNING id, tenant_id, name, type, status, endpoint, labels_json, node_key_id, agent_key_prefix, agent_key_hash, last_heartbeat_at, created_at, updated_at
+RETURNING id, tenant_id, name, machine_name, type, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 `, model.HashSecret(secret), model.RuntimeStatusActive))
 	if err != nil {
 		return model.Runtime{}, model.Principal{}, mapDBErr(err)
-	}
-	if _, err := tx.ExecContext(ctx, `
-UPDATE fugue_machines
-SET status = $2,
-	last_seen_at = NOW(),
-	updated_at = NOW(),
-	endpoint = CASE WHEN $3 <> '' THEN $3 ELSE endpoint END
-WHERE runtime_id = $1
-`, runtime.ID, model.RuntimeStatusActive, runtime.Endpoint); err != nil {
-		return model.Runtime{}, model.Principal{}, fmt.Errorf("update machine heartbeat for runtime %s: %w", runtime.ID, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return model.Runtime{}, model.Principal{}, fmt.Errorf("commit authenticate runtime transaction: %w", err)
@@ -1195,24 +905,15 @@ func (s *Store) pgUpdateRuntimeHeartbeat(runtimeID, endpoint string) (model.Runt
 	runtime, err := scanRuntime(tx.QueryRowContext(ctx, `
 UPDATE fugue_runtimes
 SET last_heartbeat_at = NOW(),
+	last_seen_at = NOW(),
 	status = $2,
 	updated_at = NOW(),
 	endpoint = CASE WHEN $3 <> '' THEN $3 ELSE endpoint END
 WHERE id = $1
-RETURNING id, tenant_id, name, type, status, endpoint, labels_json, node_key_id, agent_key_prefix, agent_key_hash, last_heartbeat_at, created_at, updated_at
+RETURNING id, tenant_id, name, machine_name, type, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 `, runtimeID, model.RuntimeStatusActive, endpoint))
 	if err != nil {
 		return model.Runtime{}, mapDBErr(err)
-	}
-	if _, err := tx.ExecContext(ctx, `
-UPDATE fugue_machines
-SET status = $2,
-	last_seen_at = NOW(),
-	updated_at = NOW(),
-	endpoint = CASE WHEN $3 <> '' THEN $3 ELSE endpoint END
-WHERE runtime_id = $1
-`, runtime.ID, model.RuntimeStatusActive, runtime.Endpoint); err != nil {
-		return model.Runtime{}, fmt.Errorf("update machine heartbeat for runtime %s: %w", runtime.ID, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return model.Runtime{}, fmt.Errorf("commit update heartbeat transaction: %w", err)
@@ -1266,13 +967,6 @@ WHERE id = $1
 `, runtimeID, model.RuntimeStatusOffline); err != nil {
 			return 0, fmt.Errorf("mark runtime %s offline stale: %w", runtimeID, err)
 		}
-		if _, err := tx.ExecContext(ctx, `
-UPDATE fugue_machines
-SET status = $2, updated_at = NOW()
-WHERE runtime_id = $1
-`, runtimeID, model.RuntimeStatusOffline); err != nil {
-			return 0, fmt.Errorf("mark machine for runtime %s offline stale: %w", runtimeID, err)
-		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit mark stale runtimes transaction: %w", err)
@@ -1284,48 +978,17 @@ func (s *Store) pgListNodes(tenantID string, platformAdmin bool) ([]model.Runtim
 	return s.pgListRuntimesByFilter(tenantID, platformAdmin, true)
 }
 
-func (s *Store) pgListMachines(tenantID string, platformAdmin bool) ([]model.Machine, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	query := `
-SELECT id, tenant_id, name, connection_mode, status, endpoint, labels_json, node_key_id, runtime_id, runtime_name, cluster_node_name, fingerprint_prefix, fingerprint_hash, last_seen_at, created_at, updated_at
-FROM fugue_machines
-`
-	args := make([]any, 0, 1)
-	if !platformAdmin {
-		query += ` WHERE tenant_id = $1`
-		args = append(args, tenantID)
-	}
-	query += ` ORDER BY created_at ASC`
-
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list machines: %w", err)
-	}
-	defer rows.Close()
-
-	machines := make([]model.Machine, 0)
-	for rows.Next() {
-		machine, err := scanMachine(rows)
-		if err != nil {
-			return nil, err
-		}
-		machines = append(machines, redactMachine(machine))
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate machines: %w", err)
-	}
-	return machines, nil
+func (s *Store) pgListRuntimes(tenantID string, platformAdmin bool) ([]model.Runtime, error) {
+	return s.pgListRuntimesByFilter(tenantID, platformAdmin, false)
 }
 
-func (s *Store) pgListMachinesByNodeKey(nodeKeyID, tenantID string, platformAdmin bool) ([]model.Machine, error) {
+func (s *Store) pgListRuntimesByNodeKey(nodeKeyID, tenantID string, platformAdmin bool) ([]model.Runtime, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	query := `
-SELECT id, tenant_id, name, connection_mode, status, endpoint, labels_json, node_key_id, runtime_id, runtime_name, cluster_node_name, fingerprint_prefix, fingerprint_hash, last_seen_at, created_at, updated_at
-FROM fugue_machines
+SELECT id, tenant_id, name, machine_name, type, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+FROM fugue_runtimes
 WHERE node_key_id = $1
 `
 	args := []any{nodeKeyID}
@@ -1337,26 +1000,22 @@ WHERE node_key_id = $1
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list machines by node key: %w", err)
+		return nil, fmt.Errorf("list runtimes by node key: %w", err)
 	}
 	defer rows.Close()
 
-	machines := make([]model.Machine, 0)
+	runtimes := make([]model.Runtime, 0)
 	for rows.Next() {
-		machine, err := scanMachine(rows)
+		runtime, err := scanRuntime(rows)
 		if err != nil {
 			return nil, err
 		}
-		machines = append(machines, redactMachine(machine))
+		runtimes = append(runtimes, runtime)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate machines by node key: %w", err)
+		return nil, fmt.Errorf("iterate runtimes by node key: %w", err)
 	}
-	return machines, nil
-}
-
-func (s *Store) pgListRuntimes(tenantID string, platformAdmin bool) ([]model.Runtime, error) {
-	return s.pgListRuntimesByFilter(tenantID, platformAdmin, false)
+	return runtimes, nil
 }
 
 func (s *Store) pgListRuntimesByFilter(tenantID string, platformAdmin bool, nodesOnly bool) ([]model.Runtime, error) {
@@ -1364,7 +1023,7 @@ func (s *Store) pgListRuntimesByFilter(tenantID string, platformAdmin bool, node
 	defer cancel()
 
 	query := `
-SELECT id, tenant_id, name, type, status, endpoint, labels_json, node_key_id, agent_key_prefix, agent_key_hash, last_heartbeat_at, created_at, updated_at
+SELECT id, tenant_id, name, machine_name, type, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_runtimes
 `
 	args := make([]any, 0, 3)
@@ -1407,7 +1066,7 @@ func (s *Store) pgGetRuntime(id string) (model.Runtime, error) {
 	defer cancel()
 
 	runtime, err := scanRuntime(s.db.QueryRowContext(ctx, `
-SELECT id, tenant_id, name, type, status, endpoint, labels_json, node_key_id, agent_key_prefix, agent_key_hash, last_heartbeat_at, created_at, updated_at
+SELECT id, tenant_id, name, machine_name, type, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_runtimes
 WHERE id = $1
 `, id))
@@ -1419,7 +1078,7 @@ WHERE id = $1
 
 func (s *Store) pgFindManagedOwnedRuntimeTx(ctx context.Context, tx *sql.Tx, nodeKeyID, runtimeName string) (model.Runtime, bool, error) {
 	runtime, err := scanRuntime(tx.QueryRowContext(ctx, `
-SELECT id, tenant_id, name, type, status, endpoint, labels_json, node_key_id, agent_key_prefix, agent_key_hash, last_heartbeat_at, created_at, updated_at
+SELECT id, tenant_id, name, machine_name, type, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_runtimes
 WHERE type = $1
   AND node_key_id = $2
@@ -1437,7 +1096,7 @@ FOR UPDATE
 
 func (s *Store) pgGetRuntimeTx(ctx context.Context, tx *sql.Tx, id string, forUpdate bool) (model.Runtime, error) {
 	query := `
-SELECT id, tenant_id, name, type, status, endpoint, labels_json, node_key_id, agent_key_prefix, agent_key_hash, last_heartbeat_at, created_at, updated_at
+SELECT id, tenant_id, name, machine_name, type, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_runtimes
 WHERE id = $1
 `
@@ -1451,37 +1110,37 @@ WHERE id = $1
 	return runtime, nil
 }
 
-func (s *Store) pgFindMachineByFingerprintTx(ctx context.Context, tx *sql.Tx, tenantID, fingerprintHash string, forUpdate bool) (model.Machine, bool, error) {
+func (s *Store) pgFindRuntimeByFingerprintTx(ctx context.Context, tx *sql.Tx, tenantID, fingerprintHash string, forUpdate bool) (model.Runtime, bool, error) {
 	if strings.TrimSpace(fingerprintHash) == "" {
-		return model.Machine{}, false, nil
+		return model.Runtime{}, false, nil
 	}
 	query := `
-SELECT id, tenant_id, name, connection_mode, status, endpoint, labels_json, node_key_id, runtime_id, runtime_name, cluster_node_name, fingerprint_prefix, fingerprint_hash, last_seen_at, created_at, updated_at
-FROM fugue_machines
+SELECT id, tenant_id, name, machine_name, type, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+FROM fugue_runtimes
 WHERE tenant_id = $1
   AND fingerprint_hash = $2
 `
 	if forUpdate {
 		query += ` FOR UPDATE`
 	}
-	machine, err := scanMachine(tx.QueryRowContext(ctx, query, tenantID, fingerprintHash))
+	runtime, err := scanRuntime(tx.QueryRowContext(ctx, query, tenantID, fingerprintHash))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return model.Machine{}, false, nil
+			return model.Runtime{}, false, nil
 		}
-		return model.Machine{}, false, err
+		return model.Runtime{}, false, err
 	}
-	return machine, true, nil
+	return runtime, true, nil
 }
 
-func (s *Store) pgFindMachineCandidateTx(ctx context.Context, tx *sql.Tx, tenantID, nodeKeyID, connectionMode, machineName, runtimeName, endpoint string) (model.Machine, bool, error) {
+func (s *Store) pgFindRuntimeCandidateTx(ctx context.Context, tx *sql.Tx, tenantID, nodeKeyID, runtimeType, machineName, runtimeName, endpoint string) (model.Runtime, bool, error) {
 	query := `
-SELECT id, tenant_id, name, connection_mode, status, endpoint, labels_json, node_key_id, runtime_id, runtime_name, cluster_node_name, fingerprint_prefix, fingerprint_hash, last_seen_at, created_at, updated_at
-FROM fugue_machines
+SELECT id, tenant_id, name, machine_name, type, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+FROM fugue_runtimes
 WHERE tenant_id = $1
-  AND connection_mode = $2
+  AND type = $2
 `
-	args := []any{tenantID, connectionMode}
+	args := []any{tenantID, runtimeType}
 	if strings.TrimSpace(nodeKeyID) != "" {
 		query += ` AND node_key_id = $3`
 		args = append(args, nodeKeyID)
@@ -1490,81 +1149,84 @@ WHERE tenant_id = $1
 
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
-		return model.Machine{}, false, fmt.Errorf("query machine candidates: %w", err)
+		return model.Runtime{}, false, fmt.Errorf("query runtime candidates: %w", err)
 	}
 	defer rows.Close()
 
 	bestScore := 0
-	var best model.Machine
+	var best model.Runtime
 	for rows.Next() {
-		machine, err := scanMachine(rows)
+		runtime, err := scanRuntime(rows)
 		if err != nil {
-			return model.Machine{}, false, err
+			return model.Runtime{}, false, err
 		}
 		score := 0
-		if endpoint != "" && strings.EqualFold(strings.TrimSpace(machine.Endpoint), strings.TrimSpace(endpoint)) {
+		if endpoint != "" && strings.EqualFold(strings.TrimSpace(runtime.Endpoint), strings.TrimSpace(endpoint)) {
 			score++
 		}
-		if runtimeName != "" && strings.EqualFold(machine.RuntimeName, strings.TrimSpace(runtimeName)) {
+		if runtimeName != "" && strings.EqualFold(runtime.Name, strings.TrimSpace(runtimeName)) {
 			score += 4
 		}
-		if runtimeName != "" && strings.EqualFold(machine.ClusterNodeName, strings.TrimSpace(runtimeName)) {
+		if runtimeName != "" && strings.EqualFold(runtime.ClusterNodeName, strings.TrimSpace(runtimeName)) {
 			score += 4
 		}
-		if machineName != "" && strings.EqualFold(machine.Name, strings.TrimSpace(machineName)) {
+		if machineName != "" && strings.EqualFold(runtime.MachineName, strings.TrimSpace(machineName)) {
 			score += 2
 		}
 		if score > bestScore {
 			bestScore = score
-			best = machine
+			best = runtime
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return model.Machine{}, false, fmt.Errorf("iterate machine candidates: %w", err)
+		return model.Runtime{}, false, fmt.Errorf("iterate runtime candidates: %w", err)
 	}
 	if bestScore == 0 {
-		return model.Machine{}, false, nil
+		return model.Runtime{}, false, nil
 	}
 	return best, true, nil
 }
 
-func (s *Store) pgInsertMachineTx(ctx context.Context, tx *sql.Tx, machine model.Machine) error {
-	labelsJSON, err := marshalNullableJSON(machine.Labels)
+func (s *Store) pgInsertRuntimeTx(ctx context.Context, tx *sql.Tx, runtime model.Runtime) error {
+	labelsJSON, err := marshalNullableJSON(runtime.Labels)
 	if err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_machines (id, tenant_id, name, connection_mode, status, endpoint, labels_json, node_key_id, runtime_id, runtime_name, cluster_node_name, fingerprint_prefix, fingerprint_hash, last_seen_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-`, machine.ID, nullIfEmpty(machine.TenantID), machine.Name, machine.ConnectionMode, machine.Status, machine.Endpoint, labelsJSON, nullIfEmpty(machine.NodeKeyID), machine.RuntimeID, machine.RuntimeName, machine.ClusterNodeName, machine.FingerprintPrefix, machine.FingerprintHash, machine.LastSeenAt, machine.CreatedAt, machine.UpdatedAt); err != nil {
+INSERT INTO fugue_runtimes (id, tenant_id, name, machine_name, type, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+`, runtime.ID, nullIfEmpty(runtime.TenantID), runtime.Name, runtime.MachineName, runtime.Type, runtime.ConnectionMode, runtime.Status, runtime.Endpoint, labelsJSON, nullIfEmpty(runtime.NodeKeyID), runtime.ClusterNodeName, runtime.FingerprintPrefix, runtime.FingerprintHash, runtime.AgentKeyPrefix, runtime.AgentKeyHash, runtime.LastSeenAt, runtime.LastHeartbeatAt, runtime.CreatedAt, runtime.UpdatedAt); err != nil {
 		return mapDBErr(err)
 	}
 	return nil
 }
 
-func (s *Store) pgUpdateMachineTx(ctx context.Context, tx *sql.Tx, machine model.Machine) error {
-	labelsJSON, err := marshalNullableJSON(machine.Labels)
+func (s *Store) pgUpdateRuntimeTx(ctx context.Context, tx *sql.Tx, runtime model.Runtime) error {
+	labelsJSON, err := marshalNullableJSON(runtime.Labels)
 	if err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
-UPDATE fugue_machines
+UPDATE fugue_runtimes
 SET name = $2,
-	connection_mode = $3,
-	status = $4,
-	endpoint = $5,
-	labels_json = $6,
-	node_key_id = $7,
-	runtime_id = $8,
-	runtime_name = $9,
+	machine_name = $3,
+	type = $4,
+	connection_mode = $5,
+	status = $6,
+	endpoint = $7,
+	labels_json = $8,
+	node_key_id = $9,
 	cluster_node_name = $10,
 	fingerprint_prefix = $11,
 	fingerprint_hash = $12,
-	last_seen_at = $13,
-	updated_at = $14
+	agent_key_prefix = $13,
+	agent_key_hash = $14,
+	last_seen_at = $15,
+	last_heartbeat_at = $16,
+	updated_at = $17
 WHERE id = $1
-`, machine.ID, machine.Name, machine.ConnectionMode, machine.Status, machine.Endpoint, labelsJSON, nullIfEmpty(machine.NodeKeyID), machine.RuntimeID, machine.RuntimeName, machine.ClusterNodeName, machine.FingerprintPrefix, machine.FingerprintHash, machine.LastSeenAt, machine.UpdatedAt); err != nil {
-		return fmt.Errorf("update machine %s: %w", machine.ID, err)
+`, runtime.ID, runtime.Name, runtime.MachineName, runtime.Type, runtime.ConnectionMode, runtime.Status, runtime.Endpoint, labelsJSON, nullIfEmpty(runtime.NodeKeyID), runtime.ClusterNodeName, runtime.FingerprintPrefix, runtime.FingerprintHash, runtime.AgentKeyPrefix, runtime.AgentKeyHash, runtime.LastSeenAt, runtime.LastHeartbeatAt, runtime.UpdatedAt); err != nil {
+		return fmt.Errorf("update runtime %s: %w", runtime.ID, err)
 	}
 	return nil
 }
@@ -2478,18 +2140,49 @@ func scanNodeKey(scanner sqlScanner) (model.NodeKey, error) {
 func scanRuntime(scanner sqlScanner) (model.Runtime, error) {
 	var runtime model.Runtime
 	var tenantID sql.NullString
+	var machineName sql.NullString
+	var connectionMode sql.NullString
 	var endpoint sql.NullString
 	var labelsRaw []byte
 	var nodeKeyID sql.NullString
+	var clusterNodeName sql.NullString
+	var fingerprintPrefix sql.NullString
+	var fingerprintHash sql.NullString
 	var agentKeyPrefix sql.NullString
 	var agentKeyHash sql.NullString
+	var lastSeenAt sql.NullTime
 	var lastHeartbeatAt sql.NullTime
-	if err := scanner.Scan(&runtime.ID, &tenantID, &runtime.Name, &runtime.Type, &runtime.Status, &endpoint, &labelsRaw, &nodeKeyID, &agentKeyPrefix, &agentKeyHash, &lastHeartbeatAt, &runtime.CreatedAt, &runtime.UpdatedAt); err != nil {
+	if err := scanner.Scan(
+		&runtime.ID,
+		&tenantID,
+		&runtime.Name,
+		&machineName,
+		&runtime.Type,
+		&connectionMode,
+		&runtime.Status,
+		&endpoint,
+		&labelsRaw,
+		&nodeKeyID,
+		&clusterNodeName,
+		&fingerprintPrefix,
+		&fingerprintHash,
+		&agentKeyPrefix,
+		&agentKeyHash,
+		&lastSeenAt,
+		&lastHeartbeatAt,
+		&runtime.CreatedAt,
+		&runtime.UpdatedAt,
+	); err != nil {
 		return model.Runtime{}, err
 	}
 	runtime.TenantID = tenantID.String
+	runtime.MachineName = machineName.String
+	runtime.ConnectionMode = connectionMode.String
 	runtime.Endpoint = endpoint.String
 	runtime.NodeKeyID = nodeKeyID.String
+	runtime.ClusterNodeName = clusterNodeName.String
+	runtime.FingerprintPrefix = fingerprintPrefix.String
+	runtime.FingerprintHash = fingerprintHash.String
 	runtime.AgentKeyPrefix = agentKeyPrefix.String
 	runtime.AgentKeyHash = agentKeyHash.String
 	labels, err := decodeJSONValue[map[string]string](labelsRaw)
@@ -2497,44 +2190,13 @@ func scanRuntime(scanner sqlScanner) (model.Runtime, error) {
 		return model.Runtime{}, err
 	}
 	runtime.Labels = labels
+	if lastSeenAt.Valid {
+		runtime.LastSeenAt = &lastSeenAt.Time
+	}
 	if lastHeartbeatAt.Valid {
 		runtime.LastHeartbeatAt = &lastHeartbeatAt.Time
 	}
 	return runtime, nil
-}
-
-func scanMachine(scanner sqlScanner) (model.Machine, error) {
-	var machine model.Machine
-	var tenantID sql.NullString
-	var endpoint sql.NullString
-	var labelsRaw []byte
-	var nodeKeyID sql.NullString
-	var runtimeID sql.NullString
-	var runtimeName sql.NullString
-	var clusterNodeName sql.NullString
-	var fingerprintPrefix sql.NullString
-	var fingerprintHash sql.NullString
-	var lastSeenAt sql.NullTime
-	if err := scanner.Scan(&machine.ID, &tenantID, &machine.Name, &machine.ConnectionMode, &machine.Status, &endpoint, &labelsRaw, &nodeKeyID, &runtimeID, &runtimeName, &clusterNodeName, &fingerprintPrefix, &fingerprintHash, &lastSeenAt, &machine.CreatedAt, &machine.UpdatedAt); err != nil {
-		return model.Machine{}, err
-	}
-	machine.TenantID = tenantID.String
-	machine.Endpoint = endpoint.String
-	machine.NodeKeyID = nodeKeyID.String
-	machine.RuntimeID = runtimeID.String
-	machine.RuntimeName = runtimeName.String
-	machine.ClusterNodeName = clusterNodeName.String
-	machine.FingerprintPrefix = fingerprintPrefix.String
-	machine.FingerprintHash = fingerprintHash.String
-	labels, err := decodeJSONValue[map[string]string](labelsRaw)
-	if err != nil {
-		return model.Machine{}, err
-	}
-	machine.Labels = labels
-	if lastSeenAt.Valid {
-		machine.LastSeenAt = &lastSeenAt.Time
-	}
-	return machine, nil
 }
 
 func scanApp(scanner sqlScanner) (model.App, error) {

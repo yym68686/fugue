@@ -65,34 +65,33 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	machines, err := s.store.ListMachines(principal.TenantID, principal.IsPlatformAdmin())
+	runtimes, err := s.store.ListNodes(principal.TenantID, principal.IsPlatformAdmin())
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
 
-	machineByClusterNode := make(map[string]model.Machine, len(machines))
-	for _, machine := range machines {
-		name := strings.TrimSpace(machine.ClusterNodeName)
+	runtimeByClusterNode := make(map[string]model.Runtime, len(runtimes))
+	for _, runtime := range runtimes {
+		name := strings.TrimSpace(runtime.ClusterNodeName)
 		if name == "" {
 			continue
 		}
-		if existing, ok := machineByClusterNode[name]; ok && existing.UpdatedAt.After(machine.UpdatedAt) {
+		if existing, ok := runtimeByClusterNode[name]; ok && existing.UpdatedAt.After(runtime.UpdatedAt) {
 			continue
 		}
-		machineByClusterNode[name] = machine
+		runtimeByClusterNode[name] = runtime
 	}
 
 	filtered := make([]model.ClusterNode, 0, len(nodes))
 	for _, node := range nodes {
-		machine, ok := machineByClusterNode[node.Name]
+		runtime, ok := runtimeByClusterNode[node.Name]
 		if !principal.IsPlatformAdmin() && !ok {
 			continue
 		}
 		if ok {
-			node.MachineID = machine.ID
-			node.RuntimeID = machine.RuntimeID
-			node.TenantID = machine.TenantID
+			node.RuntimeID = runtime.ID
+			node.TenantID = runtime.TenantID
 		}
 		filtered = append(filtered, node)
 	}

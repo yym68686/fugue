@@ -44,7 +44,7 @@ func (s *Server) handleJoinClusterNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key, node, machine, join, err := s.bootstrapJoinClusterNode(
+	key, node, join, err := s.bootstrapJoinClusterNode(
 		req.NodeKey,
 		coalesceNodeName(req.NodeName, req.RuntimeName),
 		req.Endpoint,
@@ -66,9 +66,8 @@ func (s *Server) handleJoinClusterNode(w http.ResponseWriter, r *http.Request) {
 		"runtime_id":  node.ID,
 	})
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
-		"node":    node,
-		"machine": machine,
-		"join":    join,
+		"node": node,
+		"join": join,
 	})
 }
 
@@ -83,7 +82,7 @@ func (s *Server) handleJoinClusterNodeEnv(w http.ResponseWriter, r *http.Request
 	}
 
 	labels := parseCSVLabels(r.Form.Get("labels"))
-	key, node, machine, join, err := s.bootstrapJoinClusterNode(
+	key, node, join, err := s.bootstrapJoinClusterNode(
 		r.Form.Get("node_key"),
 		coalesceNodeName(r.Form.Get("node_name"), r.Form.Get("runtime_name")),
 		r.Form.Get("endpoint"),
@@ -113,7 +112,6 @@ func (s *Server) handleJoinClusterNodeEnv(w http.ResponseWriter, r *http.Request
 	fmt.Fprintf(w, "FUGUE_JOIN_NODE_LABELS=%s\n", shellQuote(strings.Join(join.NodeLabels, ",")))
 	fmt.Fprintf(w, "FUGUE_JOIN_NODE_TAINTS=%s\n", shellQuote(strings.Join(join.NodeTaints, ",")))
 	fmt.Fprintf(w, "FUGUE_JOIN_RUNTIME_ID=%s\n", shellQuote(join.RuntimeID))
-	fmt.Fprintf(w, "FUGUE_JOIN_MACHINE_ID=%s\n", shellQuote(machine.ID))
 	fmt.Fprintf(w, "FUGUE_JOIN_MESH_PROVIDER=%s\n", shellQuote(join.MeshProvider))
 	fmt.Fprintf(w, "FUGUE_JOIN_MESH_LOGIN_SERVER=%s\n", shellQuote(join.MeshLoginServer))
 	fmt.Fprintf(w, "FUGUE_JOIN_MESH_AUTH_KEY=%s\n", shellQuote(join.MeshAuthKey))
@@ -128,16 +126,16 @@ func (s *Server) handleJoinClusterInstallScript(w http.ResponseWriter, r *http.R
 	_, _ = fmt.Fprint(w, s.joinClusterInstallScript(publicBaseURL(r)))
 }
 
-func (s *Server) bootstrapJoinClusterNode(nodeKey, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.NodeKey, model.Runtime, model.Machine, joinClusterPlan, error) {
+func (s *Server) bootstrapJoinClusterNode(nodeKey, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.NodeKey, model.Runtime, joinClusterPlan, error) {
 	nodeKey = strings.TrimSpace(nodeKey)
 	nodeName = strings.TrimSpace(nodeName)
 	if nodeKey == "" {
-		return model.NodeKey{}, model.Runtime{}, model.Machine{}, joinClusterPlan{}, store.ErrInvalidInput
+		return model.NodeKey{}, model.Runtime{}, joinClusterPlan{}, store.ErrInvalidInput
 	}
 
-	key, runtimeObj, machine, err := s.store.BootstrapClusterNode(nodeKey, nodeName, strings.TrimSpace(endpoint), labels, machineName, machineFingerprint)
+	key, runtimeObj, err := s.store.BootstrapClusterNode(nodeKey, nodeName, strings.TrimSpace(endpoint), labels, machineName, machineFingerprint)
 	if err != nil {
-		return model.NodeKey{}, model.Runtime{}, model.Machine{}, joinClusterPlan{}, err
+		return model.NodeKey{}, model.Runtime{}, joinClusterPlan{}, err
 	}
 	join := joinClusterPlan{
 		ServerURL:       s.clusterJoinServer,
@@ -150,7 +148,7 @@ func (s *Server) bootstrapJoinClusterNode(nodeKey, nodeName, endpoint string, la
 		MeshLoginServer: s.clusterJoinMeshLoginServer,
 		MeshAuthKey:     s.clusterJoinMeshAuthKey,
 	}
-	return key, runtimeObj, machine, join, nil
+	return key, runtimeObj, join, nil
 }
 
 func (s *Server) clusterJoinConfigured() bool {

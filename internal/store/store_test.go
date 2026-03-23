@@ -76,7 +76,7 @@ func TestManagedAndExternalOperationFlow(t *testing.T) {
 	if token.ID == "" || secret == "" {
 		t.Fatal("expected enrollment token secret")
 	}
-	externalRuntime, runtimeKey, _, err := s.ConsumeEnrollmentToken(secret, "tenant-vps-1", "https://vps.example.com", nil, "", "")
+	externalRuntime, runtimeKey, err := s.ConsumeEnrollmentToken(secret, "tenant-vps-1", "https://vps.example.com", nil, "", "")
 	if err != nil {
 		t.Fatalf("consume enrollment token: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestSharedNodeKeyBootstrapsMultipleNodesAndCanBeRevoked(t *testing.T) {
 		t.Fatal("expected redacted node key hash")
 	}
 
-	issuedKey, nodeA, runtimeKeyA, _, err := s.BootstrapNode(secret, "worker", "https://a.example.com", map[string]string{"zone": "a"}, "", "")
+	issuedKey, nodeA, runtimeKeyA, err := s.BootstrapNode(secret, "worker", "https://a.example.com", map[string]string{"zone": "a"}, "", "")
 	if err != nil {
 		t.Fatalf("bootstrap first node: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestSharedNodeKeyBootstrapsMultipleNodesAndCanBeRevoked(t *testing.T) {
 		t.Fatalf("expected first node name worker, got %s", nodeA.Name)
 	}
 
-	_, nodeB, runtimeKeyB, _, err := s.BootstrapNode(secret, "worker", "https://b.example.com", map[string]string{"zone": "b"}, "", "")
+	_, nodeB, runtimeKeyB, err := s.BootstrapNode(secret, "worker", "https://b.example.com", map[string]string{"zone": "b"}, "", "")
 	if err != nil {
 		t.Fatalf("bootstrap second node: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestSharedNodeKeyBootstrapsMultipleNodesAndCanBeRevoked(t *testing.T) {
 		t.Fatalf("expected revoked node key, got %+v", revoked)
 	}
 
-	_, _, _, _, err = s.BootstrapNode(secret, "worker", "https://c.example.com", nil, "", "")
+	_, _, _, err = s.BootstrapNode(secret, "worker", "https://c.example.com", nil, "", "")
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected ErrConflict after revoke, got %v", err)
 	}
@@ -231,7 +231,7 @@ func TestNodeAndKeyDefaultsWhenNamesAreOmitted(t *testing.T) {
 	if clusterKey.Label != "default" {
 		t.Fatalf("expected default node key label, got %q", clusterKey.Label)
 	}
-	_, clusterRuntime, _, err := s.BootstrapClusterNode(clusterSecret, "", "https://cluster.example.com", nil, "", "")
+	_, clusterRuntime, err := s.BootstrapClusterNode(clusterSecret, "", "https://cluster.example.com", nil, "", "")
 	if err != nil {
 		t.Fatalf("bootstrap cluster node without name: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestNodeAndKeyDefaultsWhenNamesAreOmitted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create external node key: %v", err)
 	}
-	_, externalRuntime, runtimeKey, _, err := s.BootstrapNode(externalSecret, "", "https://external.example.com", nil, "", "")
+	_, externalRuntime, runtimeKey, err := s.BootstrapNode(externalSecret, "", "https://external.example.com", nil, "", "")
 	if err != nil {
 		t.Fatalf("bootstrap external node without name: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestNodeAndKeyDefaultsWhenNamesAreOmitted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create enrollment token: %v", err)
 	}
-	enrolledRuntime, enrolledKey, _, err := s.ConsumeEnrollmentToken(enrollSecret, "", "https://enroll.example.com", nil, "", "")
+	enrolledRuntime, enrolledKey, err := s.ConsumeEnrollmentToken(enrollSecret, "", "https://enroll.example.com", nil, "", "")
 	if err != nil {
 		t.Fatalf("consume enrollment token without name: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestNodeAndKeyDefaultsWhenNamesAreOmitted(t *testing.T) {
 	}
 }
 
-func TestBootstrapNodeReusesMachineByFingerprint(t *testing.T) {
+func TestBootstrapNodeReusesRuntimeByFingerprint(t *testing.T) {
 	t.Parallel()
 
 	s := New(filepath.Join(t.TempDir(), "store.json"))
@@ -295,11 +295,11 @@ func TestBootstrapNodeReusesMachineByFingerprint(t *testing.T) {
 		t.Fatalf("create node key: %v", err)
 	}
 
-	_, runtimeA, runtimeKeyA, machineA, err := s.BootstrapNode(nodeSecret, "worker", "https://a.example.com", map[string]string{"zone": "a"}, "alicehk2", "fingerprint-1")
+	_, runtimeA, runtimeKeyA, err := s.BootstrapNode(nodeSecret, "worker", "https://a.example.com", map[string]string{"zone": "a"}, "alicehk2", "fingerprint-1")
 	if err != nil {
 		t.Fatalf("bootstrap first machine: %v", err)
 	}
-	_, runtimeB, runtimeKeyB, machineB, err := s.BootstrapNode(nodeSecret, "worker", "https://b.example.com", map[string]string{"zone": "b"}, "alicehk2-renamed", "fingerprint-1")
+	_, runtimeB, runtimeKeyB, err := s.BootstrapNode(nodeSecret, "worker", "https://b.example.com", map[string]string{"zone": "b"}, "alicehk2-renamed", "fingerprint-1")
 	if err != nil {
 		t.Fatalf("bootstrap same machine again: %v", err)
 	}
@@ -310,11 +310,17 @@ func TestBootstrapNodeReusesMachineByFingerprint(t *testing.T) {
 	if runtimeKeyA == runtimeKeyB {
 		t.Fatal("expected runtime key rotation on machine re-bootstrap")
 	}
-	if machineA.ID != machineB.ID {
-		t.Fatalf("expected same machine id, got %s and %s", machineA.ID, machineB.ID)
+	if runtimeB.Endpoint != "https://b.example.com" {
+		t.Fatalf("expected updated runtime endpoint, got %q", runtimeB.Endpoint)
 	}
-	if machineB.Endpoint != "https://b.example.com" {
-		t.Fatalf("expected updated machine endpoint, got %q", machineB.Endpoint)
+	if runtimeB.MachineName != "alicehk2-renamed" {
+		t.Fatalf("expected updated machine_name, got %q", runtimeB.MachineName)
+	}
+	if runtimeB.ConnectionMode != model.MachineConnectionModeAgent {
+		t.Fatalf("expected agent connection mode, got %q", runtimeB.ConnectionMode)
+	}
+	if runtimeB.FingerprintPrefix == "" || runtimeB.FingerprintHash == "" {
+		t.Fatal("expected fingerprint metadata on reused runtime")
 	}
 
 	nodes, err := s.ListNodes(tenant.ID, false)
@@ -324,17 +330,9 @@ func TestBootstrapNodeReusesMachineByFingerprint(t *testing.T) {
 	if len(nodes) != 1 {
 		t.Fatalf("expected 1 compatibility node runtime, got %d", len(nodes))
 	}
-
-	machines, err := s.ListMachines(tenant.ID, false)
-	if err != nil {
-		t.Fatalf("list machines: %v", err)
-	}
-	if len(machines) != 1 {
-		t.Fatalf("expected 1 machine, got %d", len(machines))
-	}
 }
 
-func TestListMachinesByNodeKey(t *testing.T) {
+func TestListRuntimesByNodeKey(t *testing.T) {
 	t.Parallel()
 
 	s := New(filepath.Join(t.TempDir(), "store.json"))
@@ -351,78 +349,82 @@ func TestListMachinesByNodeKey(t *testing.T) {
 		t.Fatalf("create node key: %v", err)
 	}
 
-	if _, _, _, _, err := s.BootstrapNode(nodeSecret, "worker-a", "https://a.example.com", nil, "worker-a", "fingerprint-a"); err != nil {
+	if _, _, _, err := s.BootstrapNode(nodeSecret, "worker-a", "https://a.example.com", nil, "worker-a", "fingerprint-a"); err != nil {
 		t.Fatalf("bootstrap machine a: %v", err)
 	}
-	if _, _, _, _, err := s.BootstrapNode(nodeSecret, "worker-b", "https://b.example.com", nil, "worker-b", "fingerprint-b"); err != nil {
+	if _, _, _, err := s.BootstrapNode(nodeSecret, "worker-b", "https://b.example.com", nil, "worker-b", "fingerprint-b"); err != nil {
 		t.Fatalf("bootstrap machine b: %v", err)
 	}
 
-	machines, err := s.ListMachinesByNodeKey(key.ID, tenant.ID, false)
+	runtimes, err := s.ListRuntimesByNodeKey(key.ID, tenant.ID, false)
 	if err != nil {
-		t.Fatalf("list machines by node key: %v", err)
+		t.Fatalf("list runtimes by node key: %v", err)
 	}
-	if len(machines) != 2 {
-		t.Fatalf("expected 2 machines for node key, got %d", len(machines))
+	if len(runtimes) != 2 {
+		t.Fatalf("expected 2 runtimes for node key, got %d", len(runtimes))
 	}
 }
 
-func TestEnsureMachineRecordsReusesLegacyMachineOnRuntimeRotation(t *testing.T) {
+func TestEnsureRuntimeMetadataBackfillsLegacyMachineState(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
 	tenantID := "tenant_legacy"
-	runtimeOld := model.Runtime{
-		ID:              "runtime_old",
-		TenantID:        tenantID,
-		Name:            "worker-old",
-		Type:            model.RuntimeTypeExternalOwned,
-		Status:          model.RuntimeStatusActive,
-		Endpoint:        "https://worker.example.com",
-		NodeKeyID:       "nk_1",
-		LastHeartbeatAt: &now,
-		CreatedAt:       now,
-		UpdatedAt:       now,
-	}
-
 	state := model.State{
-		Runtimes: []model.Runtime{runtimeOld},
-	}
-	ensureMachineRecords(&state)
-	if len(state.Machines) != 1 {
-		t.Fatalf("expected 1 machine after initial backfill, got %d", len(state.Machines))
-	}
-
-	originalMachineID := state.Machines[0].ID
-	later := now.Add(time.Minute)
-	state.Runtimes = []model.Runtime{
-		{
-			ID:              "runtime_new",
-			TenantID:        tenantID,
-			Name:            "worker-new",
-			Type:            model.RuntimeTypeExternalOwned,
-			Status:          model.RuntimeStatusActive,
-			Endpoint:        "https://worker.example.com",
-			NodeKeyID:       "nk_1",
-			LastHeartbeatAt: &later,
-			CreatedAt:       later,
-			UpdatedAt:       later,
+		Machines: []model.Machine{
+			{
+				ID:                "machine_old",
+				TenantID:          tenantID,
+				Name:              "alicehk2",
+				ConnectionMode:    model.MachineConnectionModeAgent,
+				Status:            model.RuntimeStatusActive,
+				Endpoint:          "https://worker.example.com",
+				NodeKeyID:         "nk_1",
+				RuntimeID:         "runtime_old",
+				RuntimeName:       "worker-old",
+				FingerprintPrefix: model.SecretPrefix("fingerprint-1"),
+				FingerprintHash:   model.HashSecret("fingerprint-1"),
+				LastSeenAt:        &now,
+				CreatedAt:         now,
+				UpdatedAt:         now,
+			},
+		},
+		Runtimes: []model.Runtime{
+			{
+				ID:        "runtime_old",
+				TenantID:  tenantID,
+				Name:      "worker-old",
+				Type:      model.RuntimeTypeExternalOwned,
+				Status:    model.RuntimeStatusActive,
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
 		},
 	}
 
-	ensureMachineRecords(&state)
+	ensureRuntimeMetadata(&state)
 
-	if len(state.Machines) != 1 {
-		t.Fatalf("expected legacy machine reuse without duplicates, got %d machines", len(state.Machines))
+	if len(state.Runtimes) != 1 {
+		t.Fatalf("expected 1 runtime after metadata backfill, got %d", len(state.Runtimes))
 	}
-	if state.Machines[0].ID != originalMachineID {
-		t.Fatalf("expected machine %s to be reused, got %s", originalMachineID, state.Machines[0].ID)
+	runtime := state.Runtimes[0]
+	if runtime.MachineName != "alicehk2" {
+		t.Fatalf("expected machine_name alicehk2, got %q", runtime.MachineName)
 	}
-	if state.Machines[0].RuntimeID != "runtime_new" {
-		t.Fatalf("expected machine runtime to rotate to runtime_new, got %s", state.Machines[0].RuntimeID)
+	if runtime.ConnectionMode != model.MachineConnectionModeAgent {
+		t.Fatalf("expected connection mode agent, got %q", runtime.ConnectionMode)
 	}
-	if state.Machines[0].RuntimeName != "worker-new" {
-		t.Fatalf("expected runtime name to update, got %s", state.Machines[0].RuntimeName)
+	if runtime.Endpoint != "https://worker.example.com" {
+		t.Fatalf("expected endpoint from legacy machine, got %q", runtime.Endpoint)
+	}
+	if runtime.NodeKeyID != "nk_1" {
+		t.Fatalf("expected node key nk_1, got %q", runtime.NodeKeyID)
+	}
+	if runtime.FingerprintPrefix == "" || runtime.FingerprintHash == "" {
+		t.Fatal("expected fingerprint metadata from legacy machine")
+	}
+	if runtime.LastSeenAt == nil {
+		t.Fatal("expected last_seen_at from legacy machine")
 	}
 }
 
@@ -457,7 +459,7 @@ func TestDeleteTenantRemovesTenantOwnedResources(t *testing.T) {
 	if token.ID == "" || enrollSecret == "" {
 		t.Fatal("expected enrollment token secret")
 	}
-	if _, runtimeKey, _, err := s.ConsumeEnrollmentToken(enrollSecret, "external-1", "https://node2.example.com", map[string]string{"zone": "b"}, "", ""); err != nil {
+	if _, runtimeKey, err := s.ConsumeEnrollmentToken(enrollSecret, "external-1", "https://node2.example.com", map[string]string{"zone": "b"}, "", ""); err != nil {
 		t.Fatalf("consume enrollment token: %v", err)
 	} else if runtimeKey == "" {
 		t.Fatal("expected runtime key")
@@ -467,7 +469,7 @@ func TestDeleteTenantRemovesTenantOwnedResources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create node key: %v", err)
 	}
-	_, managedRuntime, _, err := s.BootstrapClusterNode(nodeSecret, "worker-1", "https://node1.example.com", map[string]string{"zone": "a"}, "", "")
+	_, managedRuntime, err := s.BootstrapClusterNode(nodeSecret, "worker-1", "https://node1.example.com", map[string]string{"zone": "a"}, "", "")
 	if err != nil {
 		t.Fatalf("bootstrap cluster node: %v", err)
 	}
