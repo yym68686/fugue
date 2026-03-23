@@ -1813,21 +1813,43 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string,
 }
 
 func (s *Store) pgFailOperation(id, message string) (model.Operation, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	now := time.Now().UTC()
-	op, err := scanOperation(s.db.QueryRowContext(ctx, `
-UPDATE fugue_operations
-SET status = $2,
-	updated_at = $3,
-	completed_at = $4,
-	error_message = $5
-WHERE id = $1
-RETURNING id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
-`, id, model.OperationStatusFailed, now, now, strings.TrimSpace(message)))
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Operation{}, fmt.Errorf("begin fail operation transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	op, err := s.pgGetOperationTx(ctx, tx, id, true)
 	if err != nil {
 		return model.Operation{}, mapDBErr(err)
+	}
+
+	now := time.Now().UTC()
+	op.Status = model.OperationStatusFailed
+	op.UpdatedAt = now
+	op.CompletedAt = &now
+	op.ErrorMessage = strings.TrimSpace(message)
+	if op.StartedAt == nil {
+		op.StartedAt = &now
+	}
+
+	app, err := s.pgGetAppTx(ctx, tx, op.AppID, true)
+	if err != nil {
+		return model.Operation{}, mapDBErr(err)
+	}
+	applyFailedOperationToAppModel(&app, &op)
+
+	if err := s.pgUpdateOperationTx(ctx, tx, op); err != nil {
+		return model.Operation{}, err
+	}
+	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+		return model.Operation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Operation{}, fmt.Errorf("commit fail operation transaction: %w", err)
 	}
 	return op, nil
 }
@@ -2419,6 +2441,15 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 	app.Status.UpdatedAt = now
 	app.UpdatedAt = now
 	return nil
+}
+
+func applyFailedOperationToAppModel(app *model.App, op *model.Operation) {
+	now := time.Now().UTC()
+	app.Status.Phase = "failed"
+	app.Status.LastOperationID = op.ID
+	app.Status.LastMessage = strings.TrimSpace(op.ErrorMessage)
+	app.Status.UpdatedAt = now
+	app.UpdatedAt = now
 }
 
 func sortOperationsByCreatedAt(ops []model.Operation) {

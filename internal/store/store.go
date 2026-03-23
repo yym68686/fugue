@@ -1391,6 +1391,7 @@ func (s *Store) FailOperation(id, message string) (model.Operation, error) {
 		state.Operations[index].UpdatedAt = now
 		state.Operations[index].CompletedAt = &now
 		state.Operations[index].ErrorMessage = strings.TrimSpace(message)
+		applyFailedOperationToApp(state, &state.Operations[index])
 		op = state.Operations[index]
 		return nil
 	})
@@ -1875,6 +1876,20 @@ func firstPositiveSpecPort(ports []int) int {
 		}
 	}
 	return 0
+}
+
+func applyFailedOperationToApp(state *model.State, op *model.Operation) {
+	appIndex := findApp(state, op.AppID)
+	if appIndex < 0 {
+		return
+	}
+	now := time.Now().UTC()
+	app := &state.Apps[appIndex]
+	app.Status.Phase = "failed"
+	app.Status.LastOperationID = op.ID
+	app.Status.LastMessage = strings.TrimSpace(op.ErrorMessage)
+	app.Status.UpdatedAt = now
+	app.UpdatedAt = now
 }
 
 func deleteProjectsByTenant(projects []model.Project, tenantID string) []model.Project {

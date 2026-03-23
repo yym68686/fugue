@@ -228,6 +228,25 @@ func destinationTagOptions(imageRef string) []name.Option {
 	return nil
 }
 
+func mergeBuilderLabels(base map[string]string, extra map[string]string) map[string]string {
+	if len(base) == 0 && len(extra) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(base)+len(extra))
+	for key, value := range base {
+		out[key] = value
+	}
+	for key, value := range extra {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
 func writeStaticSiteLayer(w io.Writer, sourceDir string) error {
 	tw := tar.NewWriter(w)
 	defer tw.Close()

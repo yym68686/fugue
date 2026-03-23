@@ -22,6 +22,7 @@ type GitHubBuildpacksImportRequest struct {
 	SourceDir        string
 	RegistryPushBase string
 	ImageRepository  string
+	JobLabels        map[string]string
 }
 
 type buildpacksBuildRequest struct {
@@ -30,6 +31,7 @@ type buildpacksBuildRequest struct {
 	CommitSHA string
 	SourceDir string
 	ImageRef  string
+	JobLabels map[string]string
 }
 
 func (i *Importer) ImportPublicGitHubBuildpacks(ctx context.Context, req GitHubBuildpacksImportRequest) (GitHubImportResult, error) {
@@ -42,10 +44,10 @@ func (i *Importer) ImportPublicGitHubBuildpacks(ctx context.Context, req GitHubB
 	}
 	defer releaseClonedRepo(repo)
 
-	return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository)
+	return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.JobLabels)
 }
 
-func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, sourceDir, registryPushBase, imageRepository string) (GitHubImportResult, error) {
+func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, sourceDir, registryPushBase, imageRepository string, jobLabels map[string]string) (GitHubImportResult, error) {
 	normalizedSourceDir, err := normalizeRepoSourceDir(repo.RepoDir, sourceDir)
 	if err != nil {
 		return GitHubImportResult{}, err
@@ -59,6 +61,7 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		CommitSHA: repo.CommitSHA,
 		SourceDir: normalizedSourceDir,
 		ImageRef:  imageRef,
+		JobLabels: jobLabels,
 	}); err != nil {
 		return GitHubImportResult{}, err
 	}
@@ -107,8 +110,6 @@ func buildAndPushBuildpacksImage(ctx context.Context, req buildpacksBuildRequest
 	if err != nil {
 		return err
 	}
-	defer kubectlRun(context.Background(), nil, "-n", namespace, "delete", "job", jobName, "--ignore-not-found=true", "--wait=false")
-
 	if err := kubectlRun(ctx, jobObject, "-n", namespace, "apply", "-f", "-"); err != nil {
 		return fmt.Errorf("apply buildpacks job: %w", err)
 	}
@@ -128,7 +129,7 @@ func buildBuildpacksJobObject(namespace, jobName string, req buildpacksBuildRequ
 	}
 
 	script := buildpacksJobScript(workingDir, req.ImageRef)
-	return map[string]any{
+	jobObject := map[string]any{
 		"apiVersion": "batch/v1",
 		"kind":       "Job",
 		"metadata": map[string]any{
@@ -141,7 +142,7 @@ func buildBuildpacksJobObject(namespace, jobName string, req buildpacksBuildRequ
 		},
 		"spec": map[string]any{
 			"backoffLimit":            0,
-			"ttlSecondsAfterFinished": 300,
+			"ttlSecondsAfterFinished": 3600,
 			"template": map[string]any{
 				"spec": map[string]any{
 					"restartPolicy": "Never",
@@ -186,7 +187,10 @@ func buildBuildpacksJobObject(namespace, jobName string, req buildpacksBuildRequ
 				},
 			},
 		},
-	}, nil
+	}
+	metadata := jobObject["metadata"].(map[string]any)
+	metadata["labels"] = mergeBuilderLabels(metadata["labels"].(map[string]string), req.JobLabels)
+	return jobObject, nil
 }
 
 func buildpacksJobScript(workingDir, imageRef string) string {

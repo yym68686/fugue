@@ -92,6 +92,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/apps", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateApp)))
 	mux.Handle("POST /v1/apps/import-github", s.auth.RequireAPI(http.HandlerFunc(s.handleImportGitHubApp)))
 	mux.Handle("GET /v1/apps/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetApp)))
+	mux.Handle("GET /v1/apps/{id}/build-logs", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppBuildLogs)))
+	mux.Handle("GET /v1/apps/{id}/runtime-logs", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppRuntimeLogs)))
 	mux.Handle("GET /v1/apps/{id}/env", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppEnv)))
 	mux.Handle("PATCH /v1/apps/{id}/env", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchAppEnv)))
 	mux.Handle("GET /v1/apps/{id}/files", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppFiles)))

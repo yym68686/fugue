@@ -991,6 +991,78 @@ func TestDeployOperationUpdatesRouteServicePort(t *testing.T) {
 	}
 }
 
+func TestFailedOperationMarksAppFailed(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Failed Operation")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "",
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyAuto,
+	}, model.AppRoute{
+		Hostname:   "demo.example.com",
+		BaseDomain: "example.com",
+		PublicURL:  "https://demo.example.com",
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	spec := app.Spec
+	source := *app.Source
+	op, err := s.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		Type:          model.OperationTypeImport,
+		AppID:         app.ID,
+		DesiredSpec:   &spec,
+		DesiredSource: &source,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim operation: %v", err)
+	} else if !found {
+		t.Fatal("expected operation to be claimed")
+	}
+
+	if _, err := s.FailOperation(op.ID, "git clone failed"); err != nil {
+		t.Fatalf("fail operation: %v", err)
+	}
+
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.Status.Phase != "failed" {
+		t.Fatalf("expected app phase failed, got %q", app.Status.Phase)
+	}
+	if app.Status.LastOperationID != op.ID {
+		t.Fatalf("expected last operation %s, got %s", op.ID, app.Status.LastOperationID)
+	}
+	if app.Status.LastMessage != "git clone failed" {
+		t.Fatalf("expected last message to be propagated, got %q", app.Status.LastMessage)
+	}
+}
+
 func TestScaleOperationAllowsZeroAndDisablesApp(t *testing.T) {
 	t.Parallel()
 

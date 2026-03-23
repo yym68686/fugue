@@ -193,6 +193,8 @@ Legacy compatibility: `POST /v1/agent/enroll` still accepts one-time enroll toke
 | `POST` | `/v1/apps` | `app.write` | creates app metadata and desired spec |
 | `POST` | `/v1/apps/import-github` | `app.write` + `app.deploy` | imports a public GitHub repository, allocates a default hostname, queues deployment, and honors `Idempotency-Key` |
 | `GET` | `/v1/apps/{id}` | any API credential | fetch app detail |
+| `GET` | `/v1/apps/{id}/build-logs` | any API credential | returns latest import/build logs, or accepts `operation_id` |
+| `GET` | `/v1/apps/{id}/runtime-logs` | any API credential | returns Kubernetes pod logs for `app` or `postgres` |
 | `POST` | `/v1/apps/{id}/rebuild` | `app.deploy` | rebuilds a `github-public` app from the latest GitHub code and queues deployment |
 | `POST` | `/v1/apps/{id}/deploy` | `app.deploy` | creates async deploy operation |
 | `POST` | `/v1/apps/{id}/scale` | `app.scale` | creates async scale operation; `replicas` may be `0` |
@@ -368,6 +370,32 @@ Rebuild behavior:
 - clones Git submodules recursively
 - rebuilds with the saved build strategy (`static-site`, `dockerfile`, `buildpacks`, or `nixpacks`) and pushes a new image into the internal registry
 - keeps the same app id, project, and public hostname, then queues a deploy operation with the new image
+
+`GET /v1/apps/{id}/build-logs`
+
+Query parameters:
+
+- `operation_id` optional; defaults to the latest `import` operation of the app
+- `tail_lines` optional; default `200`, max `5000`
+
+Behavior:
+
+- tries recent Kubernetes builder Job logs first
+- falls back to stored operation error/result text if the Job is already gone
+
+`GET /v1/apps/{id}/runtime-logs`
+
+Query parameters:
+
+- `component` optional; `app` by default, or `postgres`
+- `pod` optional; restrict logs to one pod name
+- `tail_lines` optional; default `200`, max `5000`
+- `previous` optional; when `true`, returns previous container logs
+
+Behavior:
+
+- only works for managed runtimes
+- reads logs directly from tenant namespace pods
 
 `POST /v1/apps/{id}/deploy`
 

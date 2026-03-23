@@ -271,9 +271,37 @@ func (s *Store) bootstrapDatabase(ctx context.Context) error {
 	if err := s.ensureRuntimeMetadataTx(ctx, tx); err != nil {
 		return err
 	}
+	if err := s.ensureFailedImportAppStatusTx(ctx, tx); err != nil {
+		return err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit bootstrap transaction: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ensureFailedImportAppStatusTx(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `
+UPDATE fugue_apps AS a
+SET status_json = jsonb_set(
+		jsonb_set(
+			jsonb_set(COALESCE(a.status_json, '{}'::jsonb), '{phase}', to_jsonb($1::text), true),
+			'{last_operation_id}', to_jsonb(o.id::text), true
+		),
+		'{last_message}', to_jsonb(COALESCE(NULLIF(BTRIM(o.error_message), ''), $2)::text), true
+	),
+	updated_at = GREATEST(a.updated_at, o.updated_at)
+FROM (
+	SELECT DISTINCT ON (app_id) app_id, id, error_message, updated_at
+	FROM fugue_operations
+	WHERE type = $3 AND status = $4
+	ORDER BY app_id, updated_at DESC, created_at DESC
+) AS o
+WHERE a.id = o.app_id
+  AND COALESCE(a.status_json->>'phase', '') = $5
+`, "failed", "operation failed", model.OperationTypeImport, model.OperationStatusFailed, "importing"); err != nil {
+		return fmt.Errorf("repair stale importing apps from failed imports: %w", err)
 	}
 	return nil
 }

@@ -25,6 +25,7 @@ type GitHubDockerImportRequest struct {
 	BuildContextDir  string
 	RegistryPushBase string
 	ImageRepository  string
+	JobLabels        map[string]string
 }
 
 func (i *Importer) ImportPublicGitHubDockerfileImage(ctx context.Context, req GitHubDockerImportRequest) (GitHubImportResult, error) {
@@ -37,7 +38,7 @@ func (i *Importer) ImportPublicGitHubDockerfileImage(ctx context.Context, req Gi
 	}
 	defer releaseClonedRepo(repo)
 
-	return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, req.DockerfilePath, req.BuildContextDir, req.RegistryPushBase, req.ImageRepository)
+	return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, req.DockerfilePath, req.BuildContextDir, req.RegistryPushBase, req.ImageRepository, req.JobLabels)
 }
 
 type dockerfileBuildRequest struct {
@@ -47,6 +48,7 @@ type dockerfileBuildRequest struct {
 	DockerfilePath  string
 	BuildContextDir string
 	ImageRef        string
+	JobLabels       map[string]string
 }
 
 func detectDockerBuildInputs(repoDir, dockerfilePath, buildContextDir string) (string, string, error) {
@@ -91,7 +93,7 @@ func detectDockerBuildInputs(repoDir, dockerfilePath, buildContextDir string) (s
 	return relDockerfile, relContext, nil
 }
 
-func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, dockerfilePath, buildContextDir, registryPushBase, imageRepository string) (GitHubImportResult, error) {
+func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, dockerfilePath, buildContextDir, registryPushBase, imageRepository string, jobLabels map[string]string) (GitHubImportResult, error) {
 	dockerfilePath, buildContextDir, err := detectDockerBuildInputs(repo.RepoDir, dockerfilePath, buildContextDir)
 	if err != nil {
 		return GitHubImportResult{}, err
@@ -109,6 +111,7 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		DockerfilePath:  dockerfilePath,
 		BuildContextDir: buildContextDir,
 		ImageRef:        imageRef,
+		JobLabels:       jobLabels,
 	}); err != nil {
 		return GitHubImportResult{}, err
 	}
@@ -193,8 +196,6 @@ func buildAndPushDockerfileImage(ctx context.Context, req dockerfileBuildRequest
 	if err != nil {
 		return err
 	}
-	defer kubectlRun(context.Background(), nil, "-n", namespace, "delete", "job", jobName, "--ignore-not-found=true", "--wait=false")
-
 	if err := kubectlRun(ctx, jobObject, "-n", namespace, "apply", "-f", "-"); err != nil {
 		return fmt.Errorf("apply kaniko job: %w", err)
 	}
@@ -252,7 +253,7 @@ func buildKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest)
 		args = append(args, "--context-sub-path="+req.BuildContextDir)
 	}
 
-	return map[string]any{
+	jobObject := map[string]any{
 		"apiVersion": "batch/v1",
 		"kind":       "Job",
 		"metadata": map[string]any{
@@ -265,7 +266,7 @@ func buildKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest)
 		},
 		"spec": map[string]any{
 			"backoffLimit":            0,
-			"ttlSecondsAfterFinished": 300,
+			"ttlSecondsAfterFinished": 3600,
 			"template": map[string]any{
 				"spec": map[string]any{
 					"restartPolicy": "Never",
@@ -279,7 +280,10 @@ func buildKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest)
 				},
 			},
 		},
-	}, nil
+	}
+	metadata := jobObject["metadata"].(map[string]any)
+	metadata["labels"] = mergeBuilderLabels(metadata["labels"].(map[string]string), req.JobLabels)
+	return jobObject, nil
 }
 
 func buildGitContextURL(repoURL, branch, commitSHA string) (string, error) {

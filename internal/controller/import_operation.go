@@ -40,6 +40,11 @@ func (s *Service) executeManagedImportOperation(op model.Operation, app model.Ap
 		ImportProfile:    strings.TrimSpace(op.DesiredSource.ImportProfile),
 		RegistryPushBase: s.registryPushBase,
 		ImageRepository:  "fugue-apps",
+		JobLabels: map[string]string{
+			"fugue.pro/operation-id": op.ID,
+			"fugue.pro/app-id":       app.ID,
+			"fugue.pro/tenant-id":    app.TenantID,
+		},
 	})
 	if err != nil {
 		return err

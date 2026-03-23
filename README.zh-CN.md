@@ -193,6 +193,8 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 | `POST` | `/v1/apps` | `app.write` | 创建 app 元数据与期望 spec |
 | `POST` | `/v1/apps/import-github` | `app.write` + `app.deploy` | 导入 GitHub 公共仓库，分配默认域名，排入部署，并支持 `Idempotency-Key` |
 | `GET` | `/v1/apps/{id}` | 任意 API 凭证 | 查看 app 详情 |
+| `GET` | `/v1/apps/{id}/build-logs` | 任意 API 凭证 | 查看最近一次导入/构建日志，也支持指定 `operation_id` |
+| `GET` | `/v1/apps/{id}/runtime-logs` | 任意 API 凭证 | 查看 `app` 或 `postgres` 的 Kubernetes Pod 日志 |
 | `POST` | `/v1/apps/{id}/rebuild` | `app.deploy` | 重新拉取 `github-public` app 的最新代码，重建并排入部署 |
 | `POST` | `/v1/apps/{id}/deploy` | `app.deploy` | 创建异步 deploy 操作 |
 | `POST` | `/v1/apps/{id}/scale` | `app.scale` | 创建异步 scale 操作；`replicas` 可以是 `0` |
@@ -368,6 +370,32 @@ Idempotency-Key: import-<unique-key>
 - 递归拉取 Git submodule
 - 按保存下来的构建策略（`static-site`、`dockerfile`、`buildpacks` 或 `nixpacks`）重新构建镜像并推送到内置 registry
 - 保持原有 app id、project 与公网域名不变，只更新镜像与 source 元数据，然后排入 deploy 操作
+
+`GET /v1/apps/{id}/build-logs`
+
+查询参数：
+
+- `operation_id` 可选；默认读取这个 app 最新一次 `import` 操作
+- `tail_lines` 可选；默认 `200`，最大 `5000`
+
+行为说明：
+
+- 优先读取最近的 Kubernetes builder Job 日志
+- 如果 Job 已被清理，则回退到保存下来的 operation 错误/结果文本
+
+`GET /v1/apps/{id}/runtime-logs`
+
+查询参数：
+
+- `component` 可选；默认是 `app`，也可以传 `postgres`
+- `pod` 可选；限制到某一个 pod 名称
+- `tail_lines` 可选；默认 `200`，最大 `5000`
+- `previous` 可选；传 `true` 时读取容器上一次重启前的日志
+
+行为说明：
+
+- 仅适用于 managed runtime
+- 直接读取租户 namespace 里的 Pod 日志
 
 `POST /v1/apps/{id}/deploy`
 

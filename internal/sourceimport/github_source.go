@@ -18,6 +18,7 @@ type GitHubSourceImportRequest struct {
 	ImportProfile    string
 	RegistryPushBase string
 	ImageRepository  string
+	JobLabels        map[string]string
 }
 
 type GitHubSourceImportOutput struct {
@@ -49,6 +50,7 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 			BuildContextDir:  req.BuildContextDir,
 			RegistryPushBase: req.RegistryPushBase,
 			ImageRepository:  req.ImageRepository,
+			JobLabels:        req.JobLabels,
 		})
 		if err != nil {
 			return GitHubSourceImportOutput{}, err
@@ -98,6 +100,7 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 			BuildContextDir:  req.BuildContextDir,
 			RegistryPushBase: req.RegistryPushBase,
 			ImageRepository:  req.ImageRepository,
+			JobLabels:        req.JobLabels,
 		})
 		if err != nil {
 			return GitHubSourceImportOutput{}, err
@@ -122,6 +125,7 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 			SourceDir:        req.SourceDir,
 			RegistryPushBase: req.RegistryPushBase,
 			ImageRepository:  req.ImageRepository,
+			JobLabels:        req.JobLabels,
 		})
 		if err != nil {
 			return GitHubSourceImportOutput{}, err
@@ -145,6 +149,7 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 			SourceDir:        req.SourceDir,
 			RegistryPushBase: req.RegistryPushBase,
 			ImageRepository:  req.ImageRepository,
+			JobLabels:        req.JobLabels,
 		})
 		if err != nil {
 			return GitHubSourceImportOutput{}, err

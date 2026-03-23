@@ -24,6 +24,7 @@ type GitHubAutoImportRequest struct {
 	BuildContextDir  string
 	RegistryPushBase string
 	ImageRepository  string
+	JobLabels        map[string]string
 }
 
 type GitHubNixpacksImportRequest struct {
@@ -32,6 +33,7 @@ type GitHubNixpacksImportRequest struct {
 	SourceDir        string
 	RegistryPushBase string
 	ImageRepository  string
+	JobLabels        map[string]string
 }
 
 type nixpacksBuildRequest struct {
@@ -40,6 +42,7 @@ type nixpacksBuildRequest struct {
 	CommitSHA string
 	SourceDir string
 	ImageRef  string
+	JobLabels map[string]string
 }
 
 func (i *Importer) ImportPublicGitHubAuto(ctx context.Context, req GitHubAutoImportRequest) (GitHubImportResult, error) {
@@ -59,13 +62,13 @@ func (i *Importer) ImportPublicGitHubAuto(ctx context.Context, req GitHubAutoImp
 
 	switch buildStrategy {
 	case model.AppBuildStrategyDockerfile:
-		return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, dockerfilePath, buildContextDir, req.RegistryPushBase, req.ImageRepository)
+		return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, dockerfilePath, buildContextDir, req.RegistryPushBase, req.ImageRepository, req.JobLabels)
 	case model.AppBuildStrategyStaticSite:
 		return importStaticSiteFromClonedRepo(repo, sourceDir, req.RegistryPushBase, req.ImageRepository)
 	case model.AppBuildStrategyBuildpacks:
-		return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, sourceDir, req.RegistryPushBase, req.ImageRepository)
+		return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, sourceDir, req.RegistryPushBase, req.ImageRepository, req.JobLabels)
 	case model.AppBuildStrategyNixpacks:
-		return importNixpacksFromClonedRepo(ctx, repo, req.RepoURL, sourceDir, req.RegistryPushBase, req.ImageRepository)
+		return importNixpacksFromClonedRepo(ctx, repo, req.RepoURL, sourceDir, req.RegistryPushBase, req.ImageRepository, req.JobLabels)
 	default:
 		return GitHubImportResult{}, fmt.Errorf("unsupported auto-detected build strategy %q", buildStrategy)
 	}
@@ -81,10 +84,10 @@ func (i *Importer) ImportPublicGitHubNixpacks(ctx context.Context, req GitHubNix
 	}
 	defer releaseClonedRepo(repo)
 
-	return importNixpacksFromClonedRepo(ctx, repo, req.RepoURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository)
+	return importNixpacksFromClonedRepo(ctx, repo, req.RepoURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.JobLabels)
 }
 
-func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, sourceDir, registryPushBase, imageRepository string) (GitHubImportResult, error) {
+func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, sourceDir, registryPushBase, imageRepository string, jobLabels map[string]string) (GitHubImportResult, error) {
 	normalizedSourceDir, err := normalizeRepoSourceDir(repo.RepoDir, sourceDir)
 	if err != nil {
 		return GitHubImportResult{}, err
@@ -98,6 +101,7 @@ func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, re
 		CommitSHA: repo.CommitSHA,
 		SourceDir: normalizedSourceDir,
 		ImageRef:  imageRef,
+		JobLabels: jobLabels,
 	}); err != nil {
 		return GitHubImportResult{}, err
 	}
@@ -272,8 +276,6 @@ func buildAndPushNixpacksImage(ctx context.Context, req nixpacksBuildRequest) er
 	if err != nil {
 		return err
 	}
-	defer kubectlRun(context.Background(), nil, "-n", namespace, "delete", "job", jobName, "--ignore-not-found=true", "--wait=false")
-
 	if err := kubectlRun(ctx, jobObject, "-n", namespace, "apply", "-f", "-"); err != nil {
 		return fmt.Errorf("apply nixpacks job: %w", err)
 	}
@@ -292,7 +294,7 @@ func buildNixpacksJobObject(namespace, jobName string, req nixpacksBuildRequest)
 		workingDir += "/" + filepath.ToSlash(strings.TrimSpace(req.SourceDir))
 	}
 
-	return map[string]any{
+	jobObject := map[string]any{
 		"apiVersion": "batch/v1",
 		"kind":       "Job",
 		"metadata": map[string]any{
@@ -305,7 +307,7 @@ func buildNixpacksJobObject(namespace, jobName string, req nixpacksBuildRequest)
 		},
 		"spec": map[string]any{
 			"backoffLimit":            0,
-			"ttlSecondsAfterFinished": 300,
+			"ttlSecondsAfterFinished": 3600,
 			"template": map[string]any{
 				"spec": map[string]any{
 					"restartPolicy": "Never",
@@ -356,5 +358,8 @@ func buildNixpacksJobObject(namespace, jobName string, req nixpacksBuildRequest)
 				},
 			},
 		},
-	}, nil
+	}
+	metadata := jobObject["metadata"].(map[string]any)
+	metadata["labels"] = mergeBuilderLabels(metadata["labels"].(map[string]string), req.JobLabels)
+	return jobObject, nil
 }
