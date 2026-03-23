@@ -231,5 +231,5 @@ func formatKubeTimestamp(value time.Time) string {
 	if value.IsZero() {
 		return ""
 	}
-	return value.UTC().Format(time.RFC3339Nano)
+	return value.UTC().Format("2006-01-02T15:04:05.000000Z07:00")
 }
