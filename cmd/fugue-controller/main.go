@@ -15,7 +15,10 @@ import (
 func main() {
 	cfg := config.ControllerFromEnv()
 	logger := log.Default()
-	store := store.New(cfg.StorePath)
+	store := store.New(cfg.StorePath, cfg.DatabaseURL)
+	if err := store.Init(); err != nil {
+		logger.Fatalf("init store: %v", err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

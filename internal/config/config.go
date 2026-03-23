@@ -10,6 +10,7 @@ import (
 type APIConfig struct {
 	BindAddr          string
 	StorePath         string
+	DatabaseURL       string
 	BootstrapAdminKey string
 	AppBaseDomain     string
 	APIPublicDomain   string
@@ -19,6 +20,7 @@ type APIConfig struct {
 
 type ControllerConfig struct {
 	StorePath           string
+	DatabaseURL         string
 	PollInterval        time.Duration
 	RuntimeOfflineAfter time.Duration
 	RenderDir           string
@@ -45,6 +47,7 @@ func APIFromEnv() APIConfig {
 	return APIConfig{
 		BindAddr:          getenv("FUGUE_BIND_ADDR", ":8080"),
 		StorePath:         getenv("FUGUE_STORE_PATH", "./data/store.json"),
+		DatabaseURL:       getenv("FUGUE_DATABASE_URL", ""),
 		BootstrapAdminKey: getenv("FUGUE_BOOTSTRAP_ADMIN_KEY", "fugue_bootstrap_admin_change_me"),
 		AppBaseDomain:     getenv("FUGUE_APP_BASE_DOMAIN", "fugue.pro"),
 		APIPublicDomain:   getenv("FUGUE_API_PUBLIC_DOMAIN", "api.fugue.pro"),
@@ -56,6 +59,7 @@ func APIFromEnv() APIConfig {
 func ControllerFromEnv() ControllerConfig {
 	return ControllerConfig{
 		StorePath:           getenv("FUGUE_STORE_PATH", "./data/store.json"),
+		DatabaseURL:         getenv("FUGUE_DATABASE_URL", ""),
 		PollInterval:        getenvDuration("FUGUE_CONTROLLER_POLL_INTERVAL", 5*time.Second),
 		RuntimeOfflineAfter: getenvDuration("FUGUE_RUNTIME_OFFLINE_AFTER", 90*time.Second),
 		RenderDir:           getenv("FUGUE_RENDER_DIR", "./data/rendered"),

@@ -7,6 +7,7 @@ api:
     repository: fugue-api
     tag: latest
     pullPolicy: IfNotPresent
+  databaseURL: ""
   appBaseDomain: fugue.pro
   apiPublicDomain: api.fugue.pro
   registryPushBase: 127.0.0.1:30500
@@ -44,6 +45,21 @@ registry:
     nodePort: 30500
   persistence:
     hostPath: /var/lib/fugue/registry
+  resources: {}
+
+postgres:
+  enabled: true
+  image:
+    repository: postgres
+    tag: "16-alpine"
+    pullPolicy: IfNotPresent
+  database: fugue
+  username: fugue
+  password: ""
+  service:
+    port: 5432
+  persistence:
+    hostPath: /var/lib/fugue/postgres
   resources: {}
 
 persistence:

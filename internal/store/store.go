@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,18 +23,79 @@ var (
 )
 
 type Store struct {
-	path string
+	path        string
+	databaseURL string
+	db          *sql.DB
+	dbInitMu    sync.Mutex
+	dbReady     bool
 }
 
-func New(path string) *Store {
-	return &Store{path: path}
+func New(path string, databaseURL ...string) *Store {
+	var dsn string
+	if len(databaseURL) > 0 {
+		dsn = strings.TrimSpace(databaseURL[0])
+	}
+	return &Store{
+		path:        path,
+		databaseURL: dsn,
+	}
 }
 
 func (s *Store) Init() error {
-	return s.withLockedState(true, func(state *model.State) error {
+	if s.usingDatabase() {
+		return s.ensureDatabaseReady()
+	}
+	return s.withFileLockedState(true, func(state *model.State) error {
 		ensureDefaults(state)
 		return nil
 	})
+}
+
+func (s *Store) usingDatabase() bool {
+	return strings.TrimSpace(s.databaseURL) != ""
+}
+
+func (s *Store) withLockedState(write bool, fn func(*model.State) error) error {
+	if s.usingDatabase() {
+		if err := s.ensureDatabaseReady(); err != nil {
+			return err
+		}
+		return s.withDatabaseState(write, fn)
+	}
+	return s.withFileLockedState(write, fn)
+}
+
+func (s *Store) withFileLockedState(write bool, fn func(*model.State) error) error {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+		return fmt.Errorf("create store directory: %w", err)
+	}
+
+	lockPath := s.path + ".lock"
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open lock file: %w", err)
+	}
+	defer lockFile.Close()
+
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock store file: %w", err)
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
+	state, err := s.readState()
+	if err != nil {
+		return err
+	}
+	ensureDefaults(&state)
+
+	if err := fn(&state); err != nil {
+		return err
+	}
+
+	if !write {
+		return nil
+	}
+	return s.writeState(state)
 }
 
 func (s *Store) ListTenants() ([]model.Tenant, error) {
@@ -982,39 +1045,6 @@ func (s *Store) ListAuditEvents(tenantID string, platformAdmin bool) ([]model.Au
 		return nil
 	})
 	return events, err
-}
-
-func (s *Store) withLockedState(write bool, fn func(*model.State) error) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return fmt.Errorf("create store directory: %w", err)
-	}
-
-	lockPath := s.path + ".lock"
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return fmt.Errorf("open lock file: %w", err)
-	}
-	defer lockFile.Close()
-
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("lock store file: %w", err)
-	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-
-	state, err := s.readState()
-	if err != nil {
-		return err
-	}
-	ensureDefaults(&state)
-
-	if err := fn(&state); err != nil {
-		return err
-	}
-
-	if !write {
-		return nil
-	}
-	return s.writeState(state)
 }
 
 func (s *Store) readState() (model.State, error) {

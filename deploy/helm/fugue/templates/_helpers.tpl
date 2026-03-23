@@ -25,3 +25,11 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "fugue.serviceAccountName" -}}
 {{- printf "%s-sa" (include "fugue.fullname" .) -}}
 {{- end -}}
+
+{{- define "fugue.configSecretName" -}}
+{{- printf "%s-config" (include "fugue.fullname" .) -}}
+{{- end -}}
+
+{{- define "fugue.postgresServiceName" -}}
+{{- printf "%s-postgres" (include "fugue.fullname" .) -}}
+{{- end -}}

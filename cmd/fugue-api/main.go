@@ -13,7 +13,7 @@ import (
 func main() {
 	cfg := config.APIFromEnv()
 	logger := log.Default()
-	store := store.New(cfg.StorePath)
+	store := store.New(cfg.StorePath, cfg.DatabaseURL)
 	if err := store.Init(); err != nil {
 		logger.Fatalf("init store: %v", err)
 	}

@@ -2,13 +2,19 @@ module fugue
 
 go 1.25.7
 
-require github.com/google/go-containerregistry v0.21.3
+require (
+	github.com/google/go-containerregistry v0.21.3
+	github.com/jackc/pgx/v5 v5.9.1
+)
 
 require (
 	github.com/containerd/stargz-snapshotter/estargz v0.18.2 // indirect
 	github.com/docker/cli v29.3.0+incompatible // indirect
 	github.com/docker/distribution v2.8.3+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.9.3 // indirect
+	github.com/jackc/pgpassfile v1.0.0 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
+	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/klauspost/compress v1.18.4 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
@@ -17,5 +23,6 @@ require (
 	github.com/vbatts/tar-split v0.12.2 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/text v0.29.0 // indirect
 	gotest.tools/v3 v3.5.2 // indirect
 )

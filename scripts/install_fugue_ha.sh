@@ -11,6 +11,10 @@ ALL_ALIASES=("${PRIMARY_ALIAS}" "${SECONDARY_ALIASES[@]}")
 
 RELEASE_NAME="${FUGUE_RELEASE_NAME:-fugue}"
 NAMESPACE="${FUGUE_NAMESPACE:-fugue-system}"
+RELEASE_FULLNAME="${FUGUE_RELEASE_FULLNAME:-${RELEASE_NAME}-fugue}"
+CONFIG_SECRET_NAME="${FUGUE_CONFIG_SECRET_NAME:-${RELEASE_FULLNAME}-config}"
+POSTGRES_DEPLOYMENT_NAME="${FUGUE_POSTGRES_DEPLOYMENT_NAME:-${RELEASE_FULLNAME}-postgres}"
+REGISTRY_DEPLOYMENT_NAME="${FUGUE_REGISTRY_DEPLOYMENT_NAME:-${RELEASE_FULLNAME}-registry}"
 REMOTE_TMP_BASE="${FUGUE_REMOTE_TMP_BASE:-/tmp/fugue-install}"
 HOSTPATH_DATA_DIR="${FUGUE_HOSTPATH_DATA_DIR:-/var/lib/fugue}"
 K3S_CHANNEL="${FUGUE_K3S_CHANNEL:-stable}"
@@ -118,6 +122,31 @@ detect_container_tool() {
 
 generate_secret() {
   openssl rand -hex 24
+}
+
+maybe_reuse_existing_bootstrap_key() {
+  if [[ -n "${BOOTSTRAP_KEY}" ]]; then
+    return
+  fi
+
+  local existing_key=""
+  existing_key="$(ssh_root_run "${PRIMARY_ALIAS}" "KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n $(printf '%q' "${NAMESPACE}") get secret $(printf '%q' "${CONFIG_SECRET_NAME}") -o jsonpath='{.data.FUGUE_BOOTSTRAP_ADMIN_KEY}' 2>/dev/null | base64 -d 2>/dev/null || true")"
+  if [[ -n "${existing_key}" ]]; then
+    BOOTSTRAP_KEY="${existing_key}"
+    log "reusing existing bootstrap admin key from ${NAMESPACE}/${CONFIG_SECRET_NAME}"
+  fi
+}
+
+backup_legacy_store_on_primary() {
+  log "backing up legacy store.json on ${PRIMARY_ALIAS}"
+  ssh_root "${PRIMARY_ALIAS}" <<'EOF'
+set -euo pipefail
+if [ -f /var/lib/fugue/store.json ]; then
+  backup="/var/lib/fugue/store.json.bak-pg-$(date +%Y%m%d%H%M%S)"
+  cp -a /var/lib/fugue/store.json "${backup}"
+  echo "${backup}"
+fi
+EOF
 }
 
 has_app_tls_material() {
@@ -362,14 +391,21 @@ EOF
 
 build_images() {
   log "building local images with ${CONTAINER_TOOL} for ${IMAGE_PLATFORM}"
+  run_with_retry 3 5 "build fugue-api image" build_image "${REPO_ROOT}/Dockerfile.api" "fugue-api:${IMAGE_TAG}"
+  run_with_retry 3 5 "build fugue-controller image" build_image "${REPO_ROOT}/Dockerfile.controller" "fugue-controller:${IMAGE_TAG}"
+  run_with_retry 3 5 "save built images" "${CONTAINER_TOOL}" save -o "${IMAGES_TAR}" "fugue-api:${IMAGE_TAG}" "fugue-controller:${IMAGE_TAG}"
+}
+
+build_image() {
+  local dockerfile="$1"
+  local tag="$2"
+
   if [[ "${CONTAINER_TOOL}" == "docker" ]]; then
-    BUILDKIT_PROGRESS=plain "${CONTAINER_TOOL}" build --platform "${IMAGE_PLATFORM}" -f "${REPO_ROOT}/Dockerfile.api" -t "fugue-api:${IMAGE_TAG}" "${REPO_ROOT}"
-    BUILDKIT_PROGRESS=plain "${CONTAINER_TOOL}" build --platform "${IMAGE_PLATFORM}" -f "${REPO_ROOT}/Dockerfile.controller" -t "fugue-controller:${IMAGE_TAG}" "${REPO_ROOT}"
-  else
-    "${CONTAINER_TOOL}" build --platform "${IMAGE_PLATFORM}" -f "${REPO_ROOT}/Dockerfile.api" -t "fugue-api:${IMAGE_TAG}" "${REPO_ROOT}"
-    "${CONTAINER_TOOL}" build --platform "${IMAGE_PLATFORM}" -f "${REPO_ROOT}/Dockerfile.controller" -t "fugue-controller:${IMAGE_TAG}" "${REPO_ROOT}"
+    BUILDKIT_PROGRESS=plain "${CONTAINER_TOOL}" build --platform "${IMAGE_PLATFORM}" -f "${dockerfile}" -t "${tag}" "${REPO_ROOT}"
+    return
   fi
-  "${CONTAINER_TOOL}" save -o "${IMAGES_TAR}" "fugue-api:${IMAGE_TAG}" "fugue-controller:${IMAGE_TAG}"
+
+  "${CONTAINER_TOOL}" build --platform "${IMAGE_PLATFORM}" -f "${dockerfile}" -t "${tag}" "${REPO_ROOT}"
 }
 
 build_chart_archive() {
@@ -582,6 +618,16 @@ EOF
   fail "cluster did not become ready in time"
 }
 
+cluster_is_ready() {
+  ssh_root "${PRIMARY_ALIAS}" <<'EOF'
+set -euo pipefail
+command -v k3s >/dev/null 2>&1
+ready_count="$(k3s kubectl get nodes --no-headers 2>/dev/null | awk '$2 == "Ready" {count++} END {print count+0}')"
+total_count="$(k3s kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+[ "${ready_count}" -ge 3 ] && [ "${total_count}" -ge 3 ]
+EOF
+}
+
 label_primary_node() {
   log "labeling primary node for pinned fugue control-plane scheduling"
   local primary_node
@@ -695,6 +741,29 @@ registry:
     nodePort: ${REGISTRY_NODEPORT}
   persistence:
     hostPath: "${HOSTPATH_DATA_DIR}/registry"
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+postgres:
+  enabled: true
+  database: "fugue"
+  username: "fugue"
+  service:
+    port: 5432
+  persistence:
+    hostPath: "${HOSTPATH_DATA_DIR}/postgres"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
 
 persistence:
   mode: hostPath
@@ -723,8 +792,12 @@ mkdir -p "${HOSTPATH_DATA_DIR}"
 KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm upgrade --install "${RELEASE_NAME}" "${REMOTE_TMP_BASE}/fugue" \
   --namespace "${NAMESPACE}" \
   --create-namespace \
+  --wait \
+  --timeout 300s \
   -f "${REMOTE_TMP_BASE}/values-override.yaml"
-KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n "${NAMESPACE}" rollout status deploy/"${RELEASE_NAME}"-fugue --timeout=180s
+KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n "${NAMESPACE}" rollout status deploy/"${POSTGRES_DEPLOYMENT_NAME}" --timeout=180s
+KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n "${NAMESPACE}" rollout status deploy/"${RELEASE_FULLNAME}" --timeout=180s
+KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n "${NAMESPACE}" rollout status deploy/"${REGISTRY_DEPLOYMENT_NAME}" --timeout=180s
 EOF
 }
 
@@ -743,6 +816,7 @@ FUGUE_PUBLIC_API_REACHABLE=${PUBLIC_API_REACHABLE}
 FUGUE_CLUSTER_INTERNAL_IP=${K3S_API_IP}
 FUGUE_DOMAIN=${FUGUE_DOMAIN}
 FUGUE_APP_BASE_DOMAIN=${FUGUE_APP_BASE_DOMAIN}
+FUGUE_STATE_BACKEND=postgresql-jsonb
 FUGUE_EDGE_LOCAL_HEALTH=${EDGE_LOCAL_HEALTH}
 KUBECONFIG=${KUBECONFIG_OUT}
 PRIMARY_ALIAS=${PRIMARY_ALIAS}
@@ -873,9 +947,6 @@ main() {
   detect_remote_platform
   detect_api_ip
   detect_public_endpoint_host
-  if [[ -z "${BOOTSTRAP_KEY}" ]]; then
-    BOOTSTRAP_KEY="$(generate_secret)"
-  fi
 
   log "primary alias: ${PRIMARY_ALIAS}"
   log "secondary aliases: ${SECONDARY_ALIASES[*]}"
@@ -887,14 +958,23 @@ main() {
   log "image platform: ${IMAGE_PLATFORM}"
 
   build_images
-  install_k3s_cluster
-  wait_for_cluster_ready
+  if cluster_is_ready; then
+    log "existing k3s cluster is healthy; skipping cluster bootstrap"
+  else
+    install_k3s_cluster
+    wait_for_cluster_ready
+  fi
   cleanup_disabled_addons
   label_primary_node
   push_and_import_images "${PRIMARY_ALIAS}"
   push_and_import_images "${SECONDARY_ALIASES[0]}"
   push_and_import_images "${SECONDARY_ALIASES[1]}"
   install_helm_on_primary
+  maybe_reuse_existing_bootstrap_key
+  if [[ -z "${BOOTSTRAP_KEY}" ]]; then
+    BOOTSTRAP_KEY="$(generate_secret)"
+  fi
+  backup_legacy_store_on_primary
   write_values_override
   copy_chart_and_values
   install_fugue_chart

@@ -17,7 +17,8 @@ Assumptions:
 - the remote SSH user is `root`, or can run `sudo -n`
 - the three VPS use a `systemd`-based distro
 
-This mode installs all three machines as `k3s server` nodes and then runs the current single-replica Fugue Pod on `gcp1` with a `hostPath` data directory. That tradeoff is intentional for the current file-backed MVP.
+This mode installs all three machines as `k3s server` nodes and then runs the current single-replica Fugue control plane on `gcp1` with a `hostPath` data directory plus an in-cluster PostgreSQL instance.
+On the first PostgreSQL-backed startup, Fugue automatically imports legacy state from `/var/lib/fugue/store.json` if that file exists.
 The same script also provisions an internal registry on the primary node and can configure a wildcard HTTPS edge for app hostnames.
 
 ## 1. Topology
@@ -48,9 +49,9 @@ export VERSION=0.1.0
 docker build -f Dockerfile.api -t fugue-api:${VERSION} .
 docker build -f Dockerfile.controller -t fugue-controller:${VERSION} .
 docker build -f Dockerfile.agent -t fugue-agent:${VERSION} .
+```
 
 For the current GitHub-import MVP, Fugue does not require an external registry. Imported apps are built into images and pushed to the internal registry exposed by the control plane.
-```
 
 ## 3. Install k3s HA control plane
 
@@ -144,6 +145,8 @@ helm upgrade --install fugue ./deploy/helm/fugue \
   --set registry.service.nodePort=30500 \
   --set nodeSelector.nodepool=system
 ```
+
+The chart enables an internal PostgreSQL instance by default. If you are upgrading from the legacy file store, keep `/var/lib/fugue/store.json` on disk for the first PostgreSQL-backed boot so Fugue can import it automatically.
 
 Watch rollout:
 
