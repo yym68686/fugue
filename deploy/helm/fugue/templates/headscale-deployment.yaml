@@ -1,0 +1,66 @@
+{{- if .Values.headscale.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fugue.headscaleServiceName" . }}
+  labels:
+    {{- include "fugue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: headscale
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fugue.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: headscale
+  template:
+    metadata:
+      labels:
+        {{- include "fugue.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: headscale
+      annotations:
+        checksum/headscale-config: {{ include (print $.Template.BasePath "/headscale-config.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: headscale
+          image: "{{ .Values.headscale.image.repository }}:{{ .Values.headscale.image.tag }}"
+          imagePullPolicy: {{ .Values.headscale.image.pullPolicy }}
+          args:
+            - serve
+            - --config
+            - /etc/headscale/config.yaml
+          ports:
+            - name: http
+              containerPort: {{ .Values.headscale.service.targetPort }}
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.headscale.resources | nindent 12 }}
+          volumeMounts:
+            - name: headscale-config
+              mountPath: /etc/headscale
+            - name: headscale-data
+              mountPath: /var/lib/headscale
+            - name: headscale-run
+              mountPath: /var/run/headscale
+      nodeSelector:
+        fugue.install/role: primary
+      volumes:
+        - name: headscale-config
+          configMap:
+            name: {{ include "fugue.headscaleConfigName" . }}
+        - name: headscale-data
+          hostPath:
+            path: {{ .Values.headscale.persistence.hostPath | quote }}
+            type: DirectoryOrCreate
+        - name: headscale-run
+          emptyDir: {}
+{{- end }}

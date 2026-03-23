@@ -13,12 +13,15 @@ import (
 )
 
 type joinClusterPlan struct {
-	ServerURL  string   `json:"server_url"`
-	Token      string   `json:"token"`
-	NodeName   string   `json:"node_name"`
-	NodeLabels []string `json:"node_labels"`
-	NodeTaints []string `json:"node_taints"`
-	RuntimeID  string   `json:"runtime_id"`
+	ServerURL       string   `json:"server_url"`
+	Token           string   `json:"token"`
+	NodeName        string   `json:"node_name"`
+	NodeLabels      []string `json:"node_labels"`
+	NodeTaints      []string `json:"node_taints"`
+	RuntimeID       string   `json:"runtime_id"`
+	MeshProvider    string   `json:"mesh_provider,omitempty"`
+	MeshLoginServer string   `json:"mesh_login_server,omitempty"`
+	MeshAuthKey     string   `json:"mesh_auth_key,omitempty"`
 }
 
 func (s *Server) handleJoinClusterNode(w http.ResponseWriter, r *http.Request) {
@@ -98,6 +101,9 @@ func (s *Server) handleJoinClusterNodeEnv(w http.ResponseWriter, r *http.Request
 	fmt.Fprintf(w, "FUGUE_JOIN_NODE_LABELS=%s\n", shellQuote(strings.Join(join.NodeLabels, ",")))
 	fmt.Fprintf(w, "FUGUE_JOIN_NODE_TAINTS=%s\n", shellQuote(strings.Join(join.NodeTaints, ",")))
 	fmt.Fprintf(w, "FUGUE_JOIN_RUNTIME_ID=%s\n", shellQuote(join.RuntimeID))
+	fmt.Fprintf(w, "FUGUE_JOIN_MESH_PROVIDER=%s\n", shellQuote(join.MeshProvider))
+	fmt.Fprintf(w, "FUGUE_JOIN_MESH_LOGIN_SERVER=%s\n", shellQuote(join.MeshLoginServer))
+	fmt.Fprintf(w, "FUGUE_JOIN_MESH_AUTH_KEY=%s\n", shellQuote(join.MeshAuthKey))
 }
 
 func (s *Server) handleJoinClusterInstallScript(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +118,7 @@ func (s *Server) handleJoinClusterInstallScript(w http.ResponseWriter, r *http.R
 func (s *Server) bootstrapJoinClusterNode(nodeKey, nodeName, endpoint string, labels map[string]string) (model.NodeKey, model.Runtime, joinClusterPlan, error) {
 	nodeKey = strings.TrimSpace(nodeKey)
 	nodeName = strings.TrimSpace(nodeName)
-	if nodeKey == "" || nodeName == "" {
+	if nodeKey == "" {
 		return model.NodeKey{}, model.Runtime{}, joinClusterPlan{}, store.ErrInvalidInput
 	}
 
@@ -121,18 +127,27 @@ func (s *Server) bootstrapJoinClusterNode(nodeKey, nodeName, endpoint string, la
 		return model.NodeKey{}, model.Runtime{}, joinClusterPlan{}, err
 	}
 	join := joinClusterPlan{
-		ServerURL:  s.clusterJoinServer,
-		Token:      s.clusterJoinToken,
-		NodeName:   runtimeObj.Name,
-		NodeLabels: runtime.JoinNodeLabels(runtimeObj),
-		NodeTaints: runtime.JoinNodeTaints(runtimeObj),
-		RuntimeID:  runtimeObj.ID,
+		ServerURL:       s.clusterJoinServer,
+		Token:           s.clusterJoinToken,
+		NodeName:        runtimeObj.Name,
+		NodeLabels:      runtime.JoinNodeLabels(runtimeObj),
+		NodeTaints:      runtime.JoinNodeTaints(runtimeObj),
+		RuntimeID:       runtimeObj.ID,
+		MeshProvider:    s.clusterJoinMeshProvider,
+		MeshLoginServer: s.clusterJoinMeshLoginServer,
+		MeshAuthKey:     s.clusterJoinMeshAuthKey,
 	}
 	return key, runtimeObj, join, nil
 }
 
 func (s *Server) clusterJoinConfigured() bool {
-	return strings.TrimSpace(s.clusterJoinServer) != "" && strings.TrimSpace(s.clusterJoinToken) != ""
+	if strings.TrimSpace(s.clusterJoinServer) == "" || strings.TrimSpace(s.clusterJoinToken) == "" {
+		return false
+	}
+	if s.clusterJoinMeshProvider == "" {
+		return true
+	}
+	return strings.TrimSpace(s.clusterJoinMeshLoginServer) != "" && strings.TrimSpace(s.clusterJoinMeshAuthKey) != ""
 }
 
 func coalesceNodeName(values ...string) string {
@@ -210,7 +225,7 @@ detect_default_node_name() {
   hostname -s 2>/dev/null || hostname
 }
 
-detect_public_ip() {
+detect_node_ip() {
   if [ -n "${FUGUE_NODE_EXTERNAL_IP:-}" ]; then
     printf '%%s' "${FUGUE_NODE_EXTERNAL_IP}"
     return 0
@@ -230,6 +245,55 @@ detect_public_ip() {
     return 0
   fi
   return 1
+}
+
+install_tailscale() {
+  if command -v tailscale >/dev/null 2>&1; then
+    return 0
+  fi
+  curl -fsSL https://tailscale.com/install.sh | sh 1>&2
+}
+
+wait_for_tailscale_ipv4() {
+  local ip=""
+  for _ in $(seq 1 30); do
+    ip="$(tailscale ip -4 2>/dev/null | awk 'NR == 1 {print; exit}')"
+    if [ -n "${ip}" ]; then
+      printf '%%s' "${ip}"
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+connect_mesh() {
+  local provider="$1"
+  local hostname="$2"
+  case "${provider}" in
+    '')
+      return 1
+      ;;
+    tailscale)
+      : "${FUGUE_JOIN_MESH_LOGIN_SERVER:?FUGUE_JOIN_MESH_LOGIN_SERVER is required for tailscale joins}"
+      : "${FUGUE_JOIN_MESH_AUTH_KEY:?FUGUE_JOIN_MESH_AUTH_KEY is required for tailscale joins}"
+      install_tailscale
+      systemctl enable tailscaled
+      systemctl restart tailscaled
+      systemctl is-active --quiet tailscaled
+      tailscale up \
+        --login-server "${FUGUE_JOIN_MESH_LOGIN_SERVER}" \
+        --authkey "${FUGUE_JOIN_MESH_AUTH_KEY}" \
+        --hostname "${hostname}" \
+        --accept-dns=false \
+        --reset
+      wait_for_tailscale_ipv4
+      ;;
+    *)
+      echo "unsupported mesh provider: ${provider}" >&2
+      exit 1
+      ;;
+  esac
 }
 
 csv_to_yaml_list() {
@@ -266,7 +330,7 @@ fi
 
 node_name="${FUGUE_NODE_NAME:-$(detect_default_node_name)}"
 node_endpoint="${FUGUE_NODE_ENDPOINT:-${node_name}}"
-node_external_ip="$(detect_public_ip || true)"
+node_external_ip="$(detect_node_ip || true)"
 if [ -n "${node_external_ip}" ] && [ "${node_endpoint}" = "${node_name}" ]; then
   node_endpoint="${node_external_ip}"
 fi
@@ -288,15 +352,23 @@ curl -fsSL --retry 3 --retry-delay 2 -X POST "${FUGUE_API_BASE}/v1/nodes/join-cl
 # shellcheck disable=SC1090
 . "${join_env}"
 
+mesh_provider="${FUGUE_JOIN_MESH_PROVIDER:-}"
+flannel_iface=""
+if [ -n "${mesh_provider}" ]; then
+  node_external_ip="$(connect_mesh "${mesh_provider}" "${FUGUE_JOIN_NODE_NAME}")"
+  flannel_iface="tailscale0"
+fi
+
 mkdir -p /etc/rancher/k3s
 {
   printf 'server: "%%s"\n' "${FUGUE_JOIN_SERVER}"
   printf 'token: "%%s"\n' "${FUGUE_JOIN_TOKEN}"
   printf 'node-name: "%%s"\n' "${FUGUE_JOIN_NODE_NAME}"
-  printf 'write-kubeconfig-mode: "644"\n'
   if [ -n "${node_external_ip}" ]; then
     printf 'node-external-ip: "%%s"\n' "${node_external_ip}"
-    printf 'flannel-external-ip: true\n'
+  fi
+  if [ -n "${flannel_iface}" ]; then
+    printf 'flannel-iface: "%%s"\n' "${flannel_iface}"
   fi
   csv_to_yaml_list node-label "${FUGUE_JOIN_NODE_LABELS:-}"
   csv_to_yaml_list node-taint "${FUGUE_JOIN_NODE_TAINTS:-}"

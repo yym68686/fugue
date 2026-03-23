@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -16,16 +17,19 @@ import (
 )
 
 type Server struct {
-	store             *store.Store
-	auth              *auth.Authenticator
-	log               *log.Logger
-	appBaseDomain     string
-	apiPublicDomain   string
-	registryPushBase  string
-	registryHost      string
-	clusterJoinServer string
-	clusterJoinToken  string
-	importer          *sourceimport.Importer
+	store                      *store.Store
+	auth                       *auth.Authenticator
+	log                        *log.Logger
+	appBaseDomain              string
+	apiPublicDomain            string
+	registryPushBase           string
+	registryHost               string
+	clusterJoinServer          string
+	clusterJoinToken           string
+	clusterJoinMeshProvider    string
+	clusterJoinMeshLoginServer string
+	clusterJoinMeshAuthKey     string
+	importer                   *sourceimport.Importer
 }
 
 func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger, cfg ServerConfig) *Server {
@@ -33,16 +37,19 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		logger = log.Default()
 	}
 	return &Server{
-		store:             store,
-		auth:              authn,
-		log:               logger,
-		appBaseDomain:     strings.TrimSpace(strings.ToLower(cfg.AppBaseDomain)),
-		apiPublicDomain:   strings.TrimSpace(strings.ToLower(cfg.APIPublicDomain)),
-		registryPushBase:  strings.TrimSpace(cfg.RegistryPushBase),
-		registryHost:      registryHostFromPushBase(cfg.RegistryPushBase),
-		clusterJoinServer: strings.TrimSpace(cfg.ClusterJoinServer),
-		clusterJoinToken:  strings.TrimSpace(cfg.ClusterJoinToken),
-		importer:          sourceimport.NewImporter(cfg.ImportWorkDir, logger),
+		store:                      store,
+		auth:                       authn,
+		log:                        logger,
+		appBaseDomain:              strings.TrimSpace(strings.ToLower(cfg.AppBaseDomain)),
+		apiPublicDomain:            strings.TrimSpace(strings.ToLower(cfg.APIPublicDomain)),
+		registryPushBase:           strings.TrimSpace(cfg.RegistryPushBase),
+		registryHost:               registryHostFromPushBase(cfg.RegistryPushBase),
+		clusterJoinServer:          strings.TrimSpace(cfg.ClusterJoinServer),
+		clusterJoinToken:           strings.TrimSpace(cfg.ClusterJoinToken),
+		clusterJoinMeshProvider:    strings.TrimSpace(strings.ToLower(cfg.ClusterJoinMeshProvider)),
+		clusterJoinMeshLoginServer: strings.TrimSpace(cfg.ClusterJoinMeshLoginServer),
+		clusterJoinMeshAuthKey:     strings.TrimSpace(cfg.ClusterJoinMeshAuthKey),
+		importer:                   sourceimport.NewImporter(cfg.ImportWorkDir, logger),
 	}
 }
 
@@ -265,8 +272,15 @@ func (s *Server) handleCreateNodeKey(w http.ResponseWriter, r *http.Request) {
 		Label    string `json:"label"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
-		return
+		if errors.Is(err, io.EOF) {
+			req = struct {
+				TenantID string `json:"tenant_id"`
+				Label    string `json:"label"`
+			}{}
+		} else {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	tenantID, ok := s.resolveTenantID(principal, req.TenantID)
 	if !ok {

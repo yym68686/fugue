@@ -212,6 +212,72 @@ func TestSharedNodeKeyBootstrapsMultipleNodesAndCanBeRevoked(t *testing.T) {
 	}
 }
 
+func TestNodeAndKeyDefaultsWhenNamesAreOmitted(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	clusterTenant, err := s.CreateTenant("Cluster Tenant")
+	if err != nil {
+		t.Fatalf("create cluster tenant: %v", err)
+	}
+	clusterKey, clusterSecret, err := s.CreateNodeKey(clusterTenant.ID, "")
+	if err != nil {
+		t.Fatalf("create cluster node key: %v", err)
+	}
+	if clusterKey.Label != "default" {
+		t.Fatalf("expected default node key label, got %q", clusterKey.Label)
+	}
+	_, clusterRuntime, err := s.BootstrapClusterNode(clusterSecret, "", "https://cluster.example.com", nil)
+	if err != nil {
+		t.Fatalf("bootstrap cluster node without name: %v", err)
+	}
+	if clusterRuntime.Name != "node" {
+		t.Fatalf("expected default cluster runtime name node, got %q", clusterRuntime.Name)
+	}
+
+	externalTenant, err := s.CreateTenant("External Tenant")
+	if err != nil {
+		t.Fatalf("create external tenant: %v", err)
+	}
+	_, externalSecret, err := s.CreateNodeKey(externalTenant.ID, "")
+	if err != nil {
+		t.Fatalf("create external node key: %v", err)
+	}
+	_, externalRuntime, runtimeKey, err := s.BootstrapNode(externalSecret, "", "https://external.example.com", nil)
+	if err != nil {
+		t.Fatalf("bootstrap external node without name: %v", err)
+	}
+	if runtimeKey == "" {
+		t.Fatal("expected runtime key from bootstrap node")
+	}
+	if externalRuntime.Name != "node" {
+		t.Fatalf("expected default external runtime name node, got %q", externalRuntime.Name)
+	}
+
+	enrollTenant, err := s.CreateTenant("Enroll Tenant")
+	if err != nil {
+		t.Fatalf("create enroll tenant: %v", err)
+	}
+	_, enrollSecret, err := s.CreateEnrollmentToken(enrollTenant.ID, "worker", time.Hour)
+	if err != nil {
+		t.Fatalf("create enrollment token: %v", err)
+	}
+	enrolledRuntime, enrolledKey, err := s.ConsumeEnrollmentToken(enrollSecret, "", "https://enroll.example.com", nil)
+	if err != nil {
+		t.Fatalf("consume enrollment token without name: %v", err)
+	}
+	if enrolledKey == "" {
+		t.Fatal("expected runtime key from enrollment")
+	}
+	if enrolledRuntime.Name != "node" {
+		t.Fatalf("expected default enrolled runtime name node, got %q", enrolledRuntime.Name)
+	}
+}
+
 func TestDeleteTenantRemovesTenantOwnedResources(t *testing.T) {
 	t.Parallel()
 

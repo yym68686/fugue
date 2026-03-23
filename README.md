@@ -134,7 +134,6 @@ Notes:
 ```json
 {
   "node_key": "<fugue_nk_...>",
-  "node_name": "tenant-vps-1",
   "endpoint": "https://tenant-vps-1.example.com",
   "labels": {
     "region": "ap-east-1",
@@ -142,6 +141,8 @@ Notes:
   }
 }
 ```
+
+`node_name` is optional. If you use Fugue's one-line join script and do not pass `FUGUE_NODE_NAME`, the script defaults to the VPS hostname. If you call the API directly without a name, Fugue will allocate `node`, `node-2`, and so on.
 
 Legacy compatibility: `POST /v1/agent/enroll` still accepts one-time enroll tokens.
 
@@ -150,7 +151,6 @@ Legacy compatibility: `POST /v1/agent/enroll` still accepts one-time enroll toke
 ```json
 {
   "enroll_token": "<fugue_enroll_...>",
-  "runtime_name": "tenant-vps-1",
   "endpoint": "https://tenant-vps-1.example.com",
   "labels": {
     "region": "ap-east-1",
@@ -158,6 +158,8 @@ Legacy compatibility: `POST /v1/agent/enroll` still accepts one-time enroll toke
   }
 }
 ```
+
+`runtime_name` is optional. If omitted, Fugue will allocate `node`, `node-2`, and so on.
 
 ### Platform and tenant endpoints
 
@@ -234,10 +236,12 @@ Important request payloads:
 
 ```json
 {
-  "tenant_id": "tenant_xxx",
-  "label": "default-node-key"
+  "tenant_id": "tenant_xxx"
 }
 ```
+
+`label` is optional and defaults to `default`.
+For a tenant-scoped API key, the request body itself is optional; an empty `POST` creates a default reusable node key for the current tenant.
 
 `POST /v1/runtimes`
 
@@ -455,7 +459,7 @@ Create a reusable node key:
 curl -sS "${FUGUE_BASE_URL}/v1/node-keys" \
   -H "Authorization: Bearer ${FUGUE_TENANT_TOKEN}" \
   -H 'Content-Type: application/json' \
-  -d '{"label":"default-node-key"}'
+  -d '{}'
 ```
 
 Use the returned `secret` as the bootstrap credential on any user VPS:

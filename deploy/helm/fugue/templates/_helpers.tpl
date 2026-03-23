@@ -33,3 +33,11 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "fugue.postgresServiceName" -}}
 {{- printf "%s-postgres" (include "fugue.fullname" .) -}}
 {{- end -}}
+
+{{- define "fugue.headscaleServiceName" -}}
+{{- printf "%s-headscale" (include "fugue.fullname" .) -}}
+{{- end -}}
+
+{{- define "fugue.headscaleConfigName" -}}
+{{- printf "%s-headscale-config" (include "fugue.fullname" .) -}}
+{{- end -}}

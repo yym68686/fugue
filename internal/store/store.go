@@ -425,8 +425,8 @@ func (s *Store) GetNodeKey(id string) (model.NodeKey, error) {
 }
 
 func (s *Store) CreateNodeKey(tenantID, label string) (model.NodeKey, string, error) {
-	label = strings.TrimSpace(label)
-	if tenantID == "" || label == "" {
+	label = defaultNodeKeyLabel(label)
+	if tenantID == "" {
 		return model.NodeKey{}, "", ErrInvalidInput
 	}
 	if s.usingDatabase() {
@@ -485,7 +485,7 @@ func (s *Store) RevokeNodeKey(id string) (model.NodeKey, error) {
 func (s *Store) BootstrapNode(secret, runtimeName, endpoint string, labels map[string]string) (model.NodeKey, model.Runtime, string, error) {
 	secret = strings.TrimSpace(secret)
 	runtimeName = strings.TrimSpace(runtimeName)
-	if secret == "" || runtimeName == "" {
+	if secret == "" {
 		return model.NodeKey{}, model.Runtime{}, "", ErrInvalidInput
 	}
 	if s.usingDatabase() {
@@ -546,7 +546,7 @@ func (s *Store) BootstrapNode(secret, runtimeName, endpoint string, labels map[s
 func (s *Store) BootstrapClusterNode(secret, runtimeName, endpoint string, labels map[string]string) (model.NodeKey, model.Runtime, error) {
 	secret = strings.TrimSpace(secret)
 	runtimeName = strings.TrimSpace(runtimeName)
-	if secret == "" || runtimeName == "" {
+	if secret == "" {
 		return model.NodeKey{}, model.Runtime{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {
@@ -667,7 +667,7 @@ func (s *Store) CreateRuntime(tenantID, name, runtimeType, endpoint string, labe
 func (s *Store) ConsumeEnrollmentToken(secret, runtimeName, endpoint string, labels map[string]string) (model.Runtime, string, error) {
 	secret = strings.TrimSpace(secret)
 	runtimeName = strings.TrimSpace(runtimeName)
-	if secret == "" || runtimeName == "" {
+	if secret == "" {
 		return model.Runtime{}, "", ErrInvalidInput
 	}
 	if s.usingDatabase() {
@@ -697,11 +697,12 @@ func (s *Store) ConsumeEnrollmentToken(secret, runtimeName, endpoint string, lab
 		token.UsedAt = &now
 		token.LastUsedAt = &now
 
+		name := nextAvailableRuntimeName(state, token.TenantID, runtimeName)
 		runtimeSecret = model.NewSecret("fugue_rt")
 		runtime = model.Runtime{
 			ID:              model.NewID("runtime"),
 			TenantID:        token.TenantID,
-			Name:            runtimeName,
+			Name:            name,
 			Type:            model.RuntimeTypeExternalOwned,
 			Status:          model.RuntimeStatusActive,
 			Endpoint:        strings.TrimSpace(endpoint),
@@ -711,11 +712,6 @@ func (s *Store) ConsumeEnrollmentToken(secret, runtimeName, endpoint string, lab
 			LastHeartbeatAt: &now,
 			CreatedAt:       now,
 			UpdatedAt:       now,
-		}
-		for _, existing := range state.Runtimes {
-			if existing.TenantID == token.TenantID && strings.EqualFold(existing.Name, runtimeName) {
-				return ErrConflict
-			}
 		}
 		state.Runtimes = append(state.Runtimes, runtime)
 		return nil
@@ -1352,6 +1348,14 @@ func redactEnrollmentToken(token model.EnrollmentToken) model.EnrollmentToken {
 func redactNodeKey(key model.NodeKey) model.NodeKey {
 	key.Hash = ""
 	return key
+}
+
+func defaultNodeKeyLabel(label string) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return "default"
+	}
+	return label
 }
 
 func cloneMap(in map[string]string) map[string]string {

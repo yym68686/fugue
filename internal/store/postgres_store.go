@@ -419,6 +419,7 @@ WHERE id = $1
 }
 
 func (s *Store) pgCreateNodeKey(tenantID, label string) (model.NodeKey, string, error) {
+	label = defaultNodeKeyLabel(label)
 	secret := model.NewSecret("fugue_nk")
 	now := time.Now().UTC()
 	key := model.NodeKey{
@@ -627,7 +628,7 @@ SET status = $2,
 	last_heartbeat_at = $5,
 	updated_at = $6
 WHERE id = $1
-`, runtime.ID, runtime.Status, nullIfEmpty(runtime.Endpoint), labelsJSON, runtime.LastHeartbeatAt, runtime.UpdatedAt); err != nil {
+`, runtime.ID, runtime.Status, runtime.Endpoint, labelsJSON, runtime.LastHeartbeatAt, runtime.UpdatedAt); err != nil {
 			return model.NodeKey{}, model.Runtime{}, fmt.Errorf("update managed-owned runtime %s: %w", runtime.ID, err)
 		}
 		if err := tx.Commit(); err != nil {
@@ -660,7 +661,7 @@ WHERE id = $1
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO fugue_runtimes (id, tenant_id, name, type, status, endpoint, labels_json, node_key_id, agent_key_prefix, agent_key_hash, last_heartbeat_at, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '', '', $9, $10, $11)
-`, runtime.ID, nullIfEmpty(runtime.TenantID), runtime.Name, runtime.Type, runtime.Status, nullIfEmpty(runtime.Endpoint), labelsJSON, nullIfEmpty(runtime.NodeKeyID), runtime.LastHeartbeatAt, runtime.CreatedAt, runtime.UpdatedAt); err != nil {
+`, runtime.ID, nullIfEmpty(runtime.TenantID), runtime.Name, runtime.Type, runtime.Status, runtime.Endpoint, labelsJSON, nullIfEmpty(runtime.NodeKeyID), runtime.LastHeartbeatAt, runtime.CreatedAt, runtime.UpdatedAt); err != nil {
 		return model.NodeKey{}, model.Runtime{}, mapDBErr(err)
 	}
 

@@ -13,7 +13,11 @@ api:
   registryPushBase: registry.fugue.pro
   clusterJoinServer: ""
   clusterJoinToken: ""
+  clusterJoinMeshProvider: ""
+  clusterJoinMeshLoginServer: ""
+  clusterJoinMeshAuthKey: ""
   importWorkDir: /var/lib/fugue/import
+  hostNetwork: false
   resources: {}
   extraEnv: []
 
@@ -47,6 +51,22 @@ registry:
     nodePort: 30500
   persistence:
     hostPath: /var/lib/fugue/registry
+  resources: {}
+
+headscale:
+  enabled: false
+  image:
+    repository: headscale/headscale
+    tag: "0.26.1"
+    pullPolicy: IfNotPresent
+  domain: mesh.fugue.pro
+  service:
+    type: NodePort
+    port: 8080
+    targetPort: 8080
+    nodePort: 30443
+  persistence:
+    hostPath: /var/lib/fugue/headscale
   resources: {}
 
 postgres:

@@ -8,16 +8,19 @@ import (
 )
 
 type APIConfig struct {
-	BindAddr          string
-	StorePath         string
-	DatabaseURL       string
-	BootstrapAdminKey string
-	AppBaseDomain     string
-	APIPublicDomain   string
-	RegistryPushBase  string
-	ClusterJoinServer string
-	ClusterJoinToken  string
-	ImportWorkDir     string
+	BindAddr                   string
+	StorePath                  string
+	DatabaseURL                string
+	BootstrapAdminKey          string
+	AppBaseDomain              string
+	APIPublicDomain            string
+	RegistryPushBase           string
+	ClusterJoinServer          string
+	ClusterJoinToken           string
+	ClusterJoinMeshProvider    string
+	ClusterJoinMeshLoginServer string
+	ClusterJoinMeshAuthKey     string
+	ImportWorkDir              string
 }
 
 type ControllerConfig struct {
@@ -48,16 +51,19 @@ type AgentConfig struct {
 
 func APIFromEnv() APIConfig {
 	return APIConfig{
-		BindAddr:          getenv("FUGUE_BIND_ADDR", ":8080"),
-		StorePath:         getenv("FUGUE_STORE_PATH", "./data/store.json"),
-		DatabaseURL:       getenv("FUGUE_DATABASE_URL", ""),
-		BootstrapAdminKey: getenv("FUGUE_BOOTSTRAP_ADMIN_KEY", "fugue_bootstrap_admin_change_me"),
-		AppBaseDomain:     getenv("FUGUE_APP_BASE_DOMAIN", "fugue.pro"),
-		APIPublicDomain:   getenv("FUGUE_API_PUBLIC_DOMAIN", "api.fugue.pro"),
-		RegistryPushBase:  getenv("FUGUE_REGISTRY_PUSH_BASE", "127.0.0.1:30500"),
-		ClusterJoinServer: getenv("FUGUE_CLUSTER_JOIN_SERVER", ""),
-		ClusterJoinToken:  getenv("FUGUE_CLUSTER_JOIN_TOKEN", ""),
-		ImportWorkDir:     getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
+		BindAddr:                   getenv("FUGUE_BIND_ADDR", ":8080"),
+		StorePath:                  getenv("FUGUE_STORE_PATH", "./data/store.json"),
+		DatabaseURL:                getenv("FUGUE_DATABASE_URL", ""),
+		BootstrapAdminKey:          getenv("FUGUE_BOOTSTRAP_ADMIN_KEY", "fugue_bootstrap_admin_change_me"),
+		AppBaseDomain:              getenv("FUGUE_APP_BASE_DOMAIN", "fugue.pro"),
+		APIPublicDomain:            getenv("FUGUE_API_PUBLIC_DOMAIN", "api.fugue.pro"),
+		RegistryPushBase:           getenv("FUGUE_REGISTRY_PUSH_BASE", "127.0.0.1:30500"),
+		ClusterJoinServer:          getenv("FUGUE_CLUSTER_JOIN_SERVER", ""),
+		ClusterJoinToken:           getenv("FUGUE_CLUSTER_JOIN_TOKEN", ""),
+		ClusterJoinMeshProvider:    getenv("FUGUE_CLUSTER_JOIN_MESH_PROVIDER", ""),
+		ClusterJoinMeshLoginServer: getenv("FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER", ""),
+		ClusterJoinMeshAuthKey:     getenv("FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY", ""),
+		ImportWorkDir:              getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
 	}
 }
 

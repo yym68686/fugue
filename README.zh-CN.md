@@ -134,7 +134,6 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 ```json
 {
   "node_key": "<fugue_nk_...>",
-  "node_name": "tenant-vps-1",
   "endpoint": "https://tenant-vps-1.example.com",
   "labels": {
     "region": "ap-east-1",
@@ -142,6 +141,8 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
   }
 }
 ```
+
+`node_name` 可省略。如果你使用 Fugue 的一键接入脚本且不传 `FUGUE_NODE_NAME`，脚本会默认取 VPS 主机名；如果你直接调 API 且不传名字，Fugue 会自动分配 `node`、`node-2` 这类名称。
 
 兼容说明：`POST /v1/agent/enroll` 仍支持一次性 enroll token。
 
@@ -150,7 +151,6 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 ```json
 {
   "enroll_token": "<fugue_enroll_...>",
-  "runtime_name": "tenant-vps-1",
   "endpoint": "https://tenant-vps-1.example.com",
   "labels": {
     "region": "ap-east-1",
@@ -158,6 +158,8 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
   }
 }
 ```
+
+`runtime_name` 可省略；省略时 Fugue 会自动分配 `node`、`node-2` 这类名称。
 
 ### 平台与租户端点
 
@@ -234,10 +236,12 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 
 ```json
 {
-  "tenant_id": "tenant_xxx",
-  "label": "default-node-key"
+  "tenant_id": "tenant_xxx"
 }
 ```
+
+`label` 可省略，默认值为 `default`。
+如果你用的是租户 API key，那么请求体本身也可以省略；直接发一个空的 `POST` 就会为当前租户创建默认的可复用 node key。
 
 `POST /v1/runtimes`
 
@@ -455,7 +459,7 @@ export FUGUE_TENANT_TOKEN="<tenant-api-key-secret>"
 curl -sS "${FUGUE_BASE_URL}/v1/node-keys" \
   -H "Authorization: Bearer ${FUGUE_TENANT_TOKEN}" \
   -H 'Content-Type: application/json' \
-  -d '{"label":"default-node-key"}'
+  -d '{}'
 ```
 
 把返回里的 `secret` 作为用户 VPS 上的接管凭证：

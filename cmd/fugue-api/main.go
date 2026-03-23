@@ -19,12 +19,15 @@ func main() {
 	}
 
 	server := api.NewServer(store, auth.New(store, cfg.BootstrapAdminKey), logger, api.ServerConfig{
-		AppBaseDomain:     cfg.AppBaseDomain,
-		APIPublicDomain:   cfg.APIPublicDomain,
-		RegistryPushBase:  cfg.RegistryPushBase,
-		ClusterJoinServer: cfg.ClusterJoinServer,
-		ClusterJoinToken:  cfg.ClusterJoinToken,
-		ImportWorkDir:     cfg.ImportWorkDir,
+		AppBaseDomain:              cfg.AppBaseDomain,
+		APIPublicDomain:            cfg.APIPublicDomain,
+		RegistryPushBase:           cfg.RegistryPushBase,
+		ClusterJoinServer:          cfg.ClusterJoinServer,
+		ClusterJoinToken:           cfg.ClusterJoinToken,
+		ClusterJoinMeshProvider:    cfg.ClusterJoinMeshProvider,
+		ClusterJoinMeshLoginServer: cfg.ClusterJoinMeshLoginServer,
+		ClusterJoinMeshAuthKey:     cfg.ClusterJoinMeshAuthKey,
+		ImportWorkDir:              cfg.ImportWorkDir,
 	})
 	logger.Printf("fugue-api listening on %s", cfg.BindAddr)
 	if err := http.ListenAndServe(cfg.BindAddr, server.Handler()); err != nil {

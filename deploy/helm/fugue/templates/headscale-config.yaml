@@ -1,0 +1,59 @@
+{{- if .Values.headscale.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "fugue.headscaleConfigName" . }}
+  labels:
+    {{- include "fugue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: headscale
+data:
+  config.yaml: |
+    server_url: https://{{ .Values.headscale.domain }}
+    listen_addr: 0.0.0.0:{{ .Values.headscale.service.targetPort }}
+    metrics_listen_addr: 127.0.0.1:9090
+    grpc_listen_addr: 127.0.0.1:50443
+    grpc_allow_insecure: false
+    noise:
+      private_key_path: /var/lib/headscale/noise_private.key
+    prefixes:
+      v4: 100.64.0.0/10
+      v6: fd7a:115c:a1e0::/48
+      allocation: sequential
+    derp:
+      server:
+        enabled: false
+      urls:
+        - https://controlplane.tailscale.com/derpmap/default
+      paths: []
+      auto_update_enabled: true
+      update_frequency: 3h
+    disable_check_updates: true
+    ephemeral_node_inactivity_timeout: 720h
+    database:
+      type: sqlite
+      sqlite:
+        path: /var/lib/headscale/db.sqlite
+        write_ahead_log: true
+        wal_autocheckpoint: 1000
+    log:
+      level: info
+      format: text
+    policy:
+      mode: file
+      path: ""
+    dns:
+      magic_dns: false
+      base_domain: internal.{{ .Values.headscale.domain }}
+      override_local_dns: false
+      nameservers:
+        global: []
+      search_domains: []
+      extra_records: []
+    unix_socket: /var/run/headscale/headscale.sock
+    unix_socket_permission: "0770"
+    logtail:
+      enabled: false
+    randomize_client_port: false
+    taildrop:
+      enabled: false
+{{- end }}

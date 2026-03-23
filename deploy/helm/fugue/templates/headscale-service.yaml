@@ -1,0 +1,22 @@
+{{- if .Values.headscale.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fugue.headscaleServiceName" . }}
+  labels:
+    {{- include "fugue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: headscale
+spec:
+  type: {{ .Values.headscale.service.type }}
+  selector:
+    {{- include "fugue.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: headscale
+  ports:
+    - name: http
+      port: {{ .Values.headscale.service.port }}
+      targetPort: {{ .Values.headscale.service.targetPort }}
+      protocol: TCP
+      {{- if and (eq .Values.headscale.service.type "NodePort") .Values.headscale.service.nodePort }}
+      nodePort: {{ .Values.headscale.service.nodePort }}
+      {{- end }}
+{{- end }}

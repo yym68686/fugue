@@ -15,11 +15,13 @@ RELEASE_FULLNAME="${FUGUE_RELEASE_FULLNAME:-${RELEASE_NAME}-fugue}"
 CONFIG_SECRET_NAME="${FUGUE_CONFIG_SECRET_NAME:-${RELEASE_FULLNAME}-config}"
 POSTGRES_DEPLOYMENT_NAME="${FUGUE_POSTGRES_DEPLOYMENT_NAME:-${RELEASE_FULLNAME}-postgres}"
 REGISTRY_DEPLOYMENT_NAME="${FUGUE_REGISTRY_DEPLOYMENT_NAME:-${RELEASE_FULLNAME}-registry}"
+HEADSCALE_DEPLOYMENT_NAME="${FUGUE_HEADSCALE_DEPLOYMENT_NAME:-${RELEASE_FULLNAME}-headscale}"
 REMOTE_TMP_BASE="${FUGUE_REMOTE_TMP_BASE:-/tmp/fugue-install}"
 HOSTPATH_DATA_DIR="${FUGUE_HOSTPATH_DATA_DIR:-/var/lib/fugue}"
 K3S_CHANNEL="${FUGUE_K3S_CHANNEL:-stable}"
 API_NODEPORT="${FUGUE_API_NODEPORT:-30080}"
 REGISTRY_NODEPORT="${FUGUE_REGISTRY_NODEPORT:-30500}"
+HEADSCALE_NODEPORT="${FUGUE_HEADSCALE_NODEPORT:-30443}"
 IMAGE_TAG="${FUGUE_IMAGE_TAG:-local-$(date +%Y%m%d%H%M%S)}"
 DIST_DIR="${FUGUE_DIST_DIR:-${REPO_ROOT}/.dist/fugue-install}"
 BOOTSTRAP_KEY="${FUGUE_BOOTSTRAP_KEY:-}"
@@ -28,6 +30,10 @@ PUBLIC_ENDPOINT_HOST="${FUGUE_PUBLIC_ENDPOINT_HOST:-}"
 FUGUE_DOMAIN="${FUGUE_DOMAIN:-}"
 FUGUE_APP_BASE_DOMAIN="${FUGUE_APP_BASE_DOMAIN:-fugue.pro}"
 FUGUE_REGISTRY_DOMAIN="${FUGUE_REGISTRY_DOMAIN:-registry.${FUGUE_APP_BASE_DOMAIN}}"
+FUGUE_MESH_ENABLED="${FUGUE_MESH_ENABLED:-false}"
+FUGUE_MESH_PROVIDER="${FUGUE_MESH_PROVIDER:-tailscale}"
+FUGUE_MESH_DOMAIN="${FUGUE_MESH_DOMAIN:-mesh.${FUGUE_APP_BASE_DOMAIN}}"
+FUGUE_MESH_AUTH_KEY="${FUGUE_MESH_AUTH_KEY:-}"
 FUGUE_APP_TLS_CERT_FILE="${FUGUE_APP_TLS_CERT_FILE:-${REPO_ROOT}/secrets/cloudflare-apps-origin.crt}"
 FUGUE_APP_TLS_KEY_FILE="${FUGUE_APP_TLS_KEY_FILE:-${REPO_ROOT}/secrets/cloudflare-apps-origin.key}"
 RECONCILE_K3S_CLUSTER="${FUGUE_RECONCILE_K3S_CLUSTER:-false}"
@@ -45,6 +51,7 @@ EDGE_LOCAL_HEALTH="unknown"
 EDGE_UPSTREAM=""
 EDGE_UPSTREAM_MODE=""
 REGISTRY_EDGE_UPSTREAM=""
+HEADSCALE_EDGE_UPSTREAM=""
 
 IMAGES_TAR="${DIST_DIR}/fugue-images-${IMAGE_TAG}.tar"
 CHART_TAR="${DIST_DIR}/fugue-chart-${IMAGE_TAG}.tar"
@@ -79,6 +86,26 @@ api_public_base_url() {
 
 api_public_health_url() {
   printf '%s/healthz' "$(api_public_base_url)"
+}
+
+mesh_enabled() {
+  [[ "${FUGUE_MESH_ENABLED}" == "true" ]]
+}
+
+mesh_login_server() {
+  printf 'https://%s' "${FUGUE_MESH_DOMAIN}"
+}
+
+cluster_join_server_value() {
+  local join_host="${PUBLIC_ENDPOINT_HOST}"
+  if mesh_enabled; then
+    local primary_mesh_ip=""
+    primary_mesh_ip="$(mesh_ip_for_alias "${PRIMARY_ALIAS}")"
+    if [[ -n "${primary_mesh_ip}" ]]; then
+      join_host="${primary_mesh_ip}"
+    fi
+  fi
+  printf 'https://%s:6443' "${join_host}"
 }
 
 run_with_retry() {
@@ -142,6 +169,19 @@ maybe_reuse_existing_bootstrap_key() {
   fi
 }
 
+maybe_reuse_existing_mesh_auth_key() {
+  if ! mesh_enabled || [[ -n "${FUGUE_MESH_AUTH_KEY}" ]]; then
+    return
+  fi
+
+  local existing_key=""
+  existing_key="$(ssh_root_run "${PRIMARY_ALIAS}" "KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n $(printf '%q' "${NAMESPACE}") get secret $(printf '%q' "${CONFIG_SECRET_NAME}") -o jsonpath='{.data.FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY}' 2>/dev/null | base64 -d 2>/dev/null || true")"
+  if [[ -n "${existing_key}" ]]; then
+    FUGUE_MESH_AUTH_KEY="${existing_key}"
+    log "reusing existing mesh auth key from ${NAMESPACE}/${CONFIG_SECRET_NAME}"
+  fi
+}
+
 backup_legacy_store_on_primary() {
   log "backing up legacy store.json on ${PRIMARY_ALIAS}"
   ssh_root "${PRIMARY_ALIAS}" <<'EOF'
@@ -156,6 +196,10 @@ EOF
 
 has_app_tls_material() {
   [[ -f "${FUGUE_APP_TLS_CERT_FILE}" && -f "${FUGUE_APP_TLS_KEY_FILE}" ]]
+}
+
+remote_has_app_tls_material() {
+  ssh_root_run "${PRIMARY_ALIAS}" "test -f /etc/caddy/tls/cloudflare-apps-origin.crt && test -f /etc/caddy/tls/cloudflare-apps-origin.key"
 }
 
 app_tls_cert_matches_domain() {
@@ -369,7 +413,63 @@ public_host_for_alias() {
   ssh -G "${host}" | awk '/^hostname / {print $2; exit}'
 }
 
-render_tls_sans() {
+mesh_ip_for_alias() {
+  local host="$1"
+  ssh_root_run "${host}" "if command -v tailscale >/dev/null 2>&1; then tailscale ip -4 2>/dev/null | awk 'NR == 1 {print; exit}'; fi" | tr -d '\r'
+}
+
+node_internal_ip_for_alias() {
+  local host="$1"
+  local default_iface=""
+  default_iface="$(ssh_root_run "${host}" "ip -4 route show default 2>/dev/null | awk 'NR == 1 {print \$5; exit}'" | tr -d '\r')"
+  if [[ -n "${default_iface}" ]]; then
+    ssh_root_run "${host}" "ip -o -4 addr show dev $(printf '%q' "${default_iface}") scope global 2>/dev/null | awk 'NR == 1 {split(\$4,a,\"/\"); print a[1]; exit}'" | tr -d '\r'
+    return 0
+  fi
+
+  ssh_root_run "${host}" "ip -o -4 addr show scope global 2>/dev/null | awk '\$2 !~ /^(tailscale0|cni0|flannel\\.1|docker0|lo)\$/ {split(\$4,a,\"/\"); print a[1]; exit}'" | tr -d '\r'
+}
+
+node_external_ip_for_alias() {
+  local host="$1"
+  local mesh_ip=""
+  if mesh_enabled; then
+    mesh_ip="$(mesh_ip_for_alias "${host}")"
+    if [[ -n "${mesh_ip}" ]]; then
+      printf '%s' "${mesh_ip}"
+      return 0
+    fi
+  fi
+  public_host_for_alias "${host}"
+}
+
+render_server_network_config() {
+  local host="$1"
+  local node_ip
+  local node_external_ip
+
+  node_ip="$(node_internal_ip_for_alias "${host}")"
+  [[ -n "${node_ip}" ]] || fail "failed to detect private node IP for ${host}"
+  node_external_ip="$(node_external_ip_for_alias "${host}")"
+  [[ -n "${node_external_ip}" ]] || fail "failed to detect external node IP for ${host}"
+
+  cat <<EOF
+node-ip: "${node_ip}"
+node-external-ip: "${node_external_ip}"
+flannel-external-ip: true
+EOF
+
+  if mesh_enabled; then
+    cat <<'EOF'
+flannel-iface: "tailscale0"
+EOF
+  fi
+}
+
+render_tls_sans_for_host() {
+  local host="$1"
+  local node_external_ip
+  node_external_ip="$(node_external_ip_for_alias "${host}")"
   cat <<EOF
 tls-san:
   - "${K3S_API_IP}"
@@ -377,6 +477,11 @@ EOF
   if [[ -n "${PUBLIC_ENDPOINT_HOST}" && "${PUBLIC_ENDPOINT_HOST}" != "${K3S_API_IP}" ]]; then
     cat <<EOF
   - "${PUBLIC_ENDPOINT_HOST}"
+EOF
+  fi
+  if [[ -n "${node_external_ip}" && "${node_external_ip}" != "${K3S_API_IP}" && "${node_external_ip}" != "${PUBLIC_ENDPOINT_HOST}" ]]; then
+    cat <<EOF
+  - "${node_external_ip}"
 EOF
   fi
 }
@@ -455,6 +560,7 @@ install_edge_proxy_on_primary() {
 
   determine_edge_upstream
   determine_registry_upstream
+  determine_headscale_upstream
 
   local app_tls_directive="tls internal"
   if [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && app_tls_cert_matches_domain; then
@@ -463,8 +569,23 @@ install_edge_proxy_on_primary() {
     scp_to "${FUGUE_APP_TLS_CERT_FILE}" "${PRIMARY_ALIAS}" "${REMOTE_TMP_BASE}/cloudflare-apps-origin.crt"
     scp_to "${FUGUE_APP_TLS_KEY_FILE}" "${PRIMARY_ALIAS}" "${REMOTE_TMP_BASE}/cloudflare-apps-origin.key"
     app_tls_directive="tls /etc/caddy/tls/cloudflare-apps-origin.crt /etc/caddy/tls/cloudflare-apps-origin.key"
+  elif [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && remote_has_app_tls_material; then
+    log "reusing existing wildcard app TLS material already installed on ${PRIMARY_ALIAS}"
+    app_tls_directive="tls /etc/caddy/tls/cloudflare-apps-origin.crt /etc/caddy/tls/cloudflare-apps-origin.key"
   elif [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && has_app_tls_material; then
     log "wildcard app TLS cert does not match ${FUGUE_APP_BASE_DOMAIN}; using tls internal for app hosts"
+  fi
+
+  local mesh_site_block=""
+  if mesh_enabled; then
+    mesh_site_block="$(cat <<EOF
+https://${FUGUE_MESH_DOMAIN} {
+  ${app_tls_directive}
+  encode gzip zstd
+  reverse_proxy ${HEADSCALE_EDGE_UPSTREAM}
+}
+EOF
+)"
   fi
 
   log "installing Route A edge proxy on ${PRIMARY_ALIAS} for ${FUGUE_DOMAIN}, ${FUGUE_REGISTRY_DOMAIN}, and *.${FUGUE_APP_BASE_DOMAIN}"
@@ -498,6 +619,8 @@ https://${FUGUE_REGISTRY_DOMAIN} {
   encode gzip zstd
   reverse_proxy ${REGISTRY_EDGE_UPSTREAM}
 }
+
+${mesh_site_block}
 
 https://*.${FUGUE_APP_BASE_DOMAIN} {
   ${app_tls_directive}
@@ -558,6 +681,14 @@ determine_registry_upstream() {
   log "warning: neither registry ClusterIP nor NodePort health checks succeeded from ${PRIMARY_ALIAS}; keeping NodePort upstream ${REGISTRY_EDGE_UPSTREAM}"
 }
 
+determine_headscale_upstream() {
+  if ! mesh_enabled; then
+    HEADSCALE_EDGE_UPSTREAM=""
+    return
+  fi
+  HEADSCALE_EDGE_UPSTREAM="${K3S_API_IP}:${HEADSCALE_NODEPORT}"
+}
+
 check_edge_origin_health() {
   if [[ -z "${FUGUE_DOMAIN}" ]]; then
     EDGE_LOCAL_HEALTH="unknown"
@@ -578,17 +709,14 @@ check_edge_origin_health() {
 }
 
 write_primary_config() {
-  local primary_public_host
-  primary_public_host="$(public_host_for_alias "${PRIMARY_ALIAS}")"
   ssh_root "${PRIMARY_ALIAS}" <<EOF
 set -euo pipefail
 mkdir -p /etc/rancher/k3s
 cat >/etc/rancher/k3s/config.yaml <<'CFG'
 cluster-init: true
 write-kubeconfig-mode: "644"
-node-external-ip: "${primary_public_host}"
-flannel-external-ip: true
-$(render_tls_sans)
+$(render_server_network_config "${PRIMARY_ALIAS}")
+$(render_tls_sans_for_host "${PRIMARY_ALIAS}")
 disable:
   - traefik
   - servicelb
@@ -649,8 +777,6 @@ write_secondary_config() {
   local host="$1"
   local role="$2"
   local token="$3"
-  local public_host
-  public_host="$(public_host_for_alias "${host}")"
   ssh_root "${host}" <<EOF
 set -euo pipefail
 mkdir -p /etc/rancher/k3s
@@ -658,9 +784,8 @@ cat >/etc/rancher/k3s/config.yaml <<'CFG'
 server: "https://${K3S_API_IP}:6443"
 token: "${token}"
 write-kubeconfig-mode: "644"
-node-external-ip: "${public_host}"
-flannel-external-ip: true
-$(render_tls_sans)
+$(render_server_network_config "${host}")
+$(render_tls_sans_for_host "${host}")
 disable:
   - traefik
   - servicelb
@@ -805,9 +930,18 @@ EOF
 }
 
 write_values_override() {
-  local cluster_join_server="https://${PUBLIC_ENDPOINT_HOST}:6443"
+  local cluster_join_server
+  cluster_join_server="$(cluster_join_server_value)"
   local cluster_join_token
   cluster_join_token="$(wait_for_primary_node_token)"
+  local cluster_join_mesh_provider=""
+  local cluster_join_mesh_login_server=""
+  local cluster_join_mesh_auth_key=""
+  if mesh_enabled && [[ -n "${FUGUE_MESH_AUTH_KEY}" ]]; then
+    cluster_join_mesh_provider="${FUGUE_MESH_PROVIDER}"
+    cluster_join_mesh_login_server="$(mesh_login_server)"
+    cluster_join_mesh_auth_key="${FUGUE_MESH_AUTH_KEY}"
+  fi
 
   cat >"${VALUES_FILE}" <<EOF
 bootstrapAdminKey: "${BOOTSTRAP_KEY}"
@@ -822,7 +956,11 @@ api:
   registryPushBase: "${FUGUE_REGISTRY_DOMAIN}"
   clusterJoinServer: "${cluster_join_server}"
   clusterJoinToken: "${cluster_join_token}"
+  clusterJoinMeshProvider: "${cluster_join_mesh_provider}"
+  clusterJoinMeshLoginServer: "${cluster_join_mesh_login_server}"
+  clusterJoinMeshAuthKey: "${cluster_join_mesh_auth_key}"
   importWorkDir: "/var/lib/fugue/import"
+  hostNetwork: true
   resources:
     requests:
       cpu: 100m
@@ -860,6 +998,24 @@ registry:
     nodePort: ${REGISTRY_NODEPORT}
   persistence:
     hostPath: "${HOSTPATH_DATA_DIR}/registry"
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+headscale:
+  enabled: $(if mesh_enabled; then printf 'true'; else printf 'false'; fi)
+  domain: "${FUGUE_MESH_DOMAIN}"
+  service:
+    type: NodePort
+    port: 8080
+    targetPort: 8080
+    nodePort: ${HEADSCALE_NODEPORT}
+  persistence:
+    hostPath: "${HOSTPATH_DATA_DIR}/headscale"
   resources:
     requests:
       cpu: 50m
@@ -917,7 +1073,107 @@ KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm upgrade --install "${RELEASE_NAME}" "$
 KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n "${NAMESPACE}" rollout status deploy/"${POSTGRES_DEPLOYMENT_NAME}" --timeout=180s
 KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n "${NAMESPACE}" rollout status deploy/"${RELEASE_FULLNAME}" --timeout=180s
 KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n "${NAMESPACE}" rollout status deploy/"${REGISTRY_DEPLOYMENT_NAME}" --timeout=180s
+if [ "$(printf '%s' "${FUGUE_MESH_ENABLED}")" = "true" ]; then
+  KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n "${NAMESPACE}" rollout status deploy/"${HEADSCALE_DEPLOYMENT_NAME}" --timeout=180s
+fi
 EOF
+}
+
+mesh_hostname_for_alias() {
+  local host="$1"
+  printf 'fugue-%s' "${host}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-'
+}
+
+ensure_headscale_auth_key() {
+  if ! mesh_enabled; then
+    return
+  fi
+
+  maybe_reuse_existing_mesh_auth_key
+  if [[ -n "${FUGUE_MESH_AUTH_KEY}" ]]; then
+    return
+  fi
+
+  local user_id=""
+  log "creating reusable mesh auth key from ${HEADSCALE_DEPLOYMENT_NAME}"
+  ssh_root_run "${PRIMARY_ALIAS}" "KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n $(printf '%q' "${NAMESPACE}") exec deploy/$(printf '%q' "${HEADSCALE_DEPLOYMENT_NAME}") -- headscale users create fugue >/dev/null 2>&1 || true" >/dev/null
+  user_id="$(ssh_root_run "${PRIMARY_ALIAS}" "KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n $(printf '%q' "${NAMESPACE}") exec deploy/$(printf '%q' "${HEADSCALE_DEPLOYMENT_NAME}") -- headscale users list -o json-line" | tr -d '\r' | grep -o '\"id\":[0-9][0-9]*' | head -n 1 | cut -d: -f2)"
+  [[ -n "${user_id}" ]] || fail "failed to resolve headscale user id"
+  FUGUE_MESH_AUTH_KEY="$(ssh_root_run "${PRIMARY_ALIAS}" "KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n $(printf '%q' "${NAMESPACE}") exec deploy/$(printf '%q' "${HEADSCALE_DEPLOYMENT_NAME}") -- headscale preauthkeys create -u $(printf '%q' "${user_id}") --reusable --expiration 8760h -o json-line" | tr -d '\r' | grep -o '\"key\":\"[^\"]*\"' | head -n 1 | cut -d: -f2 | tr -d '\"')"
+  [[ -n "${FUGUE_MESH_AUTH_KEY}" ]] || fail "failed to create headscale preauth key"
+}
+
+install_tailscale_on_host() {
+  local host="$1"
+  local mesh_hostname
+  mesh_hostname="$(mesh_hostname_for_alias "${host}")"
+  log "installing tailscale mesh client on ${host} as ${mesh_hostname}"
+  ssh_root "${host}" <<EOF
+set -euo pipefail
+if ! command -v tailscale >/dev/null 2>&1; then
+  curl -fsSL https://tailscale.com/install.sh | sh
+fi
+systemctl enable tailscaled
+systemctl restart tailscaled
+systemctl is-active --quiet tailscaled
+tailscale up \
+  --login-server "$(mesh_login_server)" \
+  --authkey "${FUGUE_MESH_AUTH_KEY}" \
+  --hostname "${mesh_hostname}" \
+  --accept-dns=false \
+  --reset
+for _ in \$(seq 1 30); do
+  ip="\$(tailscale ip -4 2>/dev/null | awk 'NR == 1 {print; exit}')"
+  if [ -n "\${ip}" ]; then
+    echo "\${ip}"
+    exit 0
+  fi
+  sleep 2
+done
+echo "tailscale IPv4 was not assigned on ${host}" >&2
+exit 1
+EOF
+}
+
+control_plane_mesh_ready() {
+  if ! mesh_enabled; then
+    return 1
+  fi
+
+  local host configured_external_ip configured_node_ip configured_flannel_iface mesh_ip node_ip
+  for host in "${ALL_ALIASES[@]}"; do
+    mesh_ip="$(mesh_ip_for_alias "${host}")"
+    [[ -n "${mesh_ip}" ]] || return 1
+    node_ip="$(node_internal_ip_for_alias "${host}")"
+    [[ -n "${node_ip}" ]] || return 1
+    configured_external_ip="$(ssh_root_run "${host}" "awk -F'\"' '/^node-external-ip:/ {print \$2; exit}' /etc/rancher/k3s/config.yaml 2>/dev/null || true" | tr -d '\r')"
+    configured_node_ip="$(ssh_root_run "${host}" "awk -F'\"' '/^node-ip:/ {print \$2; exit}' /etc/rancher/k3s/config.yaml 2>/dev/null || true" | tr -d '\r')"
+    configured_flannel_iface="$(ssh_root_run "${host}" "awk -F'\"' '/^flannel-iface:/ {print \$2; exit}' /etc/rancher/k3s/config.yaml 2>/dev/null || true" | tr -d '\r')"
+    [[ "${configured_external_ip}" == "${mesh_ip}" ]] || return 1
+    [[ "${configured_node_ip}" == "${node_ip}" ]] || return 1
+    [[ "${configured_flannel_iface}" == "tailscale0" ]] || return 1
+  done
+  return 0
+}
+
+configure_control_plane_mesh() {
+  if ! mesh_enabled; then
+    return
+  fi
+
+  ensure_headscale_auth_key
+  if control_plane_mesh_ready; then
+    log "control plane already configured for mesh joins; skipping k3s server reconfigure"
+    return
+  fi
+
+  for host in "${ALL_ALIASES[@]}"; do
+    install_tailscale_on_host "${host}" >/dev/null
+  done
+
+  log "reconfiguring k3s servers to advertise mesh IPs"
+  install_k3s_cluster
+  wait_for_cluster_ready
 }
 
 fetch_kubeconfig() {
@@ -941,6 +1197,10 @@ FUGUE_EDGE_LOCAL_HEALTH=${EDGE_LOCAL_HEALTH}
 FUGUE_EDGE_UPSTREAM=${EDGE_UPSTREAM}
 FUGUE_EDGE_UPSTREAM_MODE=${EDGE_UPSTREAM_MODE}
 FUGUE_REGISTRY_EDGE_UPSTREAM=${REGISTRY_EDGE_UPSTREAM}
+FUGUE_MESH_ENABLED=${FUGUE_MESH_ENABLED}
+FUGUE_MESH_PROVIDER=${FUGUE_MESH_PROVIDER}
+FUGUE_MESH_DOMAIN=${FUGUE_MESH_DOMAIN}
+FUGUE_MESH_LOGIN_SERVER=$(if mesh_enabled; then mesh_login_server; fi)
 KUBECONFIG=${KUBECONFIG_OUT}
 PRIMARY_ALIAS=${PRIMARY_ALIAS}
 SECONDARY_ALIASES=${SECONDARY_ALIASES[*]}
@@ -979,6 +1239,7 @@ write_route_a_file() {
 Route A is configured on ${PRIMARY_ALIAS} with Caddy:
   https://${FUGUE_DOMAIN} -> https origin on ${PRIMARY_ALIAS}:443 -> upstream ${EDGE_UPSTREAM} (${EDGE_UPSTREAM_MODE})
   https://${FUGUE_REGISTRY_DOMAIN} -> https origin on ${PRIMARY_ALIAS}:443 -> upstream ${REGISTRY_EDGE_UPSTREAM}
+$(if mesh_enabled; then printf '  https://%s -> https origin on %s:443 -> upstream %s\n' "${FUGUE_MESH_DOMAIN}" "${PRIMARY_ALIAS}" "${HEADSCALE_EDGE_UPSTREAM}"; fi)
   https://*.${FUGUE_APP_BASE_DOMAIN} -> https origin on ${PRIMARY_ALIAS}:443 -> upstream ${EDGE_UPSTREAM} (${EDGE_UPSTREAM_MODE})
 
 Server-side status:
@@ -1112,6 +1373,13 @@ main() {
   copy_chart_and_values
   install_fugue_chart
   install_edge_proxy_on_primary
+  if mesh_enabled; then
+    configure_control_plane_mesh
+    write_values_override
+    copy_chart_and_values
+    install_fugue_chart
+    install_edge_proxy_on_primary
+  fi
   fetch_kubeconfig
   check_edge_origin_health
   check_public_api_reachability

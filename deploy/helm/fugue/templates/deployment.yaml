@@ -20,11 +20,17 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .Values.podAnnotations }}
       annotations:
+        checksum/config-secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        checksum/headscale-config: {{ include (print $.Template.BasePath "/headscale-config.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
     spec:
+      hostNetwork: {{ .Values.api.hostNetwork }}
+      {{- if .Values.api.hostNetwork }}
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
       {{- if .Values.rbac.create }}
       serviceAccountName: {{ include "fugue.serviceAccountName" . }}
       {{- end }}
@@ -60,6 +66,21 @@ spec:
                 secretKeyRef:
                   name: {{ include "fugue.configSecretName" . }}
                   key: FUGUE_CLUSTER_JOIN_TOKEN
+            - name: FUGUE_CLUSTER_JOIN_MESH_PROVIDER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: FUGUE_CLUSTER_JOIN_MESH_PROVIDER
+            - name: FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER
+            - name: FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY
             - name: FUGUE_APP_BASE_DOMAIN
               value: {{ .Values.api.appBaseDomain | quote }}
             - name: FUGUE_API_PUBLIC_DOMAIN
