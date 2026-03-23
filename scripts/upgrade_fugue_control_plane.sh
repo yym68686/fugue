@@ -26,11 +26,43 @@ detect_primary_private_ip() {
   ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}'
 }
 
+detect_existing_registry_pull_base() {
+  if [[ ! -r /etc/rancher/k3s/registries.yaml ]]; then
+    return 1
+  fi
+  awk '
+    $1 == "mirrors:" { in_mirrors = 1; next }
+    in_mirrors && /^[[:space:]]*"/ {
+      value = $1
+      gsub(/"/, "", value)
+      sub(/:$/, "", value)
+      print value
+      exit
+    }
+  ' /etc/rancher/k3s/registries.yaml
+}
+
 detect_primary_mesh_ip() {
   if ! command_exists tailscale; then
     return 1
   fi
   tailscale ip -4 2>/dev/null | awk 'NR == 1 {print; exit}'
+}
+
+detect_cluster_join_server() {
+  local secret_name="${FUGUE_RELEASE_FULLNAME}-config"
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get secret "${secret_name}" -o jsonpath='{.data.FUGUE_CLUSTER_JOIN_SERVER}' 2>/dev/null | base64 --decode 2>/dev/null || true
+}
+
+registry_endpoint_from_join_server() {
+  local join_server="$1"
+  local host=""
+  join_server="${join_server#*://}"
+  join_server="${join_server%%/*}"
+  host="${join_server%%:*}"
+  if [[ -n "${host}" ]]; then
+    printf '%s:%s' "${host}" "${FUGUE_REGISTRY_NODEPORT}"
+  fi
 }
 
 detect_kubectl() {
@@ -141,12 +173,19 @@ main() {
   if [[ -z "${FUGUE_REGISTRY_PUSH_BASE:-}" ]]; then
     FUGUE_REGISTRY_PUSH_BASE="${FUGUE_RELEASE_FULLNAME}-registry.${FUGUE_NAMESPACE}.svc.cluster.local:${FUGUE_REGISTRY_SERVICE_PORT}"
   fi
-  if [[ -z "${FUGUE_CLUSTER_INTERNAL_IP:-}" ]]; then
-    FUGUE_CLUSTER_INTERNAL_IP="$(detect_primary_private_ip)"
+  if [[ -z "${FUGUE_REGISTRY_PULL_BASE:-}" ]]; then
+    FUGUE_REGISTRY_PULL_BASE="$(detect_existing_registry_pull_base || true)"
   fi
   if [[ -z "${FUGUE_REGISTRY_PULL_BASE:-}" ]]; then
+    if [[ -z "${FUGUE_CLUSTER_INTERNAL_IP:-}" ]]; then
+      FUGUE_CLUSTER_INTERNAL_IP="$(detect_primary_private_ip)"
+    fi
     [[ -n "${FUGUE_CLUSTER_INTERNAL_IP}" ]] || fail "failed to detect cluster internal IP for registry pull base"
     FUGUE_REGISTRY_PULL_BASE="${FUGUE_CLUSTER_INTERNAL_IP}:${FUGUE_REGISTRY_NODEPORT}"
+  fi
+  if [[ -z "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT:-}" ]]; then
+    cluster_join_server="$(detect_cluster_join_server)"
+    FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT="$(registry_endpoint_from_join_server "${cluster_join_server}")"
   fi
   if [[ -z "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT:-}" ]]; then
     mesh_ip="$(detect_primary_mesh_ip || true)"
