@@ -78,6 +78,27 @@ var postgresSchemaStatements = []string{
 		last_used_at TIMESTAMPTZ NULL,
 		revoked_at TIMESTAMPTZ NULL
 	)`,
+	`CREATE TABLE IF NOT EXISTS fugue_machines (
+		id TEXT PRIMARY KEY,
+		tenant_id TEXT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
+		name TEXT NOT NULL,
+		connection_mode TEXT NOT NULL,
+		status TEXT NOT NULL,
+		endpoint TEXT NOT NULL DEFAULT '',
+		labels_json JSONB NULL,
+		node_key_id TEXT NULL REFERENCES fugue_node_keys(id) ON DELETE SET NULL,
+		runtime_id TEXT NOT NULL DEFAULT '',
+		runtime_name TEXT NOT NULL DEFAULT '',
+		cluster_node_name TEXT NOT NULL DEFAULT '',
+		fingerprint_prefix TEXT NOT NULL DEFAULT '',
+		fingerprint_hash TEXT NOT NULL DEFAULT '',
+		last_seen_at TIMESTAMPTZ NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL
+	)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_machines_tenant_fingerprint_hash ON fugue_machines ((COALESCE(tenant_id, '')), fingerprint_hash) WHERE fingerprint_hash <> ''`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_machines_runtime_id ON fugue_machines (runtime_id) WHERE runtime_id <> ''`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_machines_node_key_id ON fugue_machines (node_key_id) WHERE node_key_id IS NOT NULL`,
 	`CREATE TABLE IF NOT EXISTS fugue_runtimes (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
@@ -234,6 +255,9 @@ func (s *Store) bootstrapDatabase(ctx context.Context) error {
 	if err := s.ensureManagedRuntimeTx(ctx, tx); err != nil {
 		return err
 	}
+	if err := s.ensureMachinesTx(ctx, tx); err != nil {
+		return err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit bootstrap transaction: %w", err)
@@ -380,6 +404,19 @@ ON CONFLICT (id) DO NOTHING
 			return fmt.Errorf("import node key %s: %w", key.ID, err)
 		}
 	}
+	for _, machine := range state.Machines {
+		labelsJSON, err := marshalNullableJSON(machine.Labels)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO fugue_machines (id, tenant_id, name, connection_mode, status, endpoint, labels_json, node_key_id, runtime_id, runtime_name, cluster_node_name, fingerprint_prefix, fingerprint_hash, last_seen_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+ON CONFLICT (id) DO NOTHING
+`, machine.ID, nullIfEmpty(machine.TenantID), machine.Name, machine.ConnectionMode, machine.Status, machine.Endpoint, labelsJSON, nullIfEmpty(machine.NodeKeyID), machine.RuntimeID, machine.RuntimeName, machine.ClusterNodeName, machine.FingerprintPrefix, machine.FingerprintHash, machine.LastSeenAt, machine.CreatedAt, machine.UpdatedAt); err != nil {
+			return fmt.Errorf("import machine %s: %w", machine.ID, err)
+		}
+	}
 	for _, runtime := range state.Runtimes {
 		labelsJSON, err := marshalNullableJSON(runtime.Labels)
 		if err != nil {
@@ -470,6 +507,74 @@ ON CONFLICT (id) DO UPDATE SET
 `, "runtime_managed_shared", "managed-shared", model.RuntimeTypeManagedShared, model.RuntimeStatusActive, "in-cluster", labelsJSON, now, now)
 	if err != nil {
 		return fmt.Errorf("ensure managed shared runtime: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ensureMachinesTx(ctx context.Context, tx *sql.Tx) error {
+	state := model.State{}
+
+	rows, err := tx.QueryContext(ctx, `
+SELECT id, tenant_id, name, type, status, endpoint, labels_json, node_key_id, agent_key_prefix, agent_key_hash, last_heartbeat_at, created_at, updated_at
+FROM fugue_runtimes
+WHERE type IN ($1, $2)
+ORDER BY updated_at ASC, created_at ASC
+`, model.RuntimeTypeManagedOwned, model.RuntimeTypeExternalOwned)
+	if err != nil {
+		return fmt.Errorf("load runtimes for machine backfill: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		runtime, err := scanRuntime(rows)
+		if err != nil {
+			return err
+		}
+		state.Runtimes = append(state.Runtimes, runtime)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate runtimes for machine backfill: %w", err)
+	}
+
+	machineRows, err := tx.QueryContext(ctx, `
+SELECT id, tenant_id, name, connection_mode, status, endpoint, labels_json, node_key_id, runtime_id, runtime_name, cluster_node_name, fingerprint_prefix, fingerprint_hash, last_seen_at, created_at, updated_at
+FROM fugue_machines
+ORDER BY created_at ASC
+`)
+	if err != nil {
+		return fmt.Errorf("load existing machines: %w", err)
+	}
+	defer machineRows.Close()
+
+	for machineRows.Next() {
+		machine, err := scanMachine(machineRows)
+		if err != nil {
+			return err
+		}
+		state.Machines = append(state.Machines, machine)
+	}
+	if err := machineRows.Err(); err != nil {
+		return fmt.Errorf("iterate existing machines: %w", err)
+	}
+
+	beforeCount := len(state.Machines)
+	ensureMachineRecords(&state)
+	if len(state.Machines) == beforeCount {
+		return nil
+	}
+
+	for _, machine := range state.Machines[beforeCount:] {
+		labelsJSON, err := marshalNullableJSON(machine.Labels)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO fugue_machines (id, tenant_id, name, connection_mode, status, endpoint, labels_json, node_key_id, runtime_id, runtime_name, cluster_node_name, fingerprint_prefix, fingerprint_hash, last_seen_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+ON CONFLICT (id) DO NOTHING
+`, machine.ID, nullIfEmpty(machine.TenantID), machine.Name, machine.ConnectionMode, machine.Status, machine.Endpoint, labelsJSON, nullIfEmpty(machine.NodeKeyID), machine.RuntimeID, machine.RuntimeName, machine.ClusterNodeName, machine.FingerprintPrefix, machine.FingerprintHash, machine.LastSeenAt, machine.CreatedAt, machine.UpdatedAt); err != nil {
+			return fmt.Errorf("backfill machine %s: %w", machine.ID, err)
+		}
 	}
 	return nil
 }

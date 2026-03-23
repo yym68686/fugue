@@ -7,6 +7,9 @@ const (
 	RuntimeTypeManagedOwned  = "managed-owned"
 	RuntimeTypeExternalOwned = "external-owned"
 
+	MachineConnectionModeAgent   = "agent"
+	MachineConnectionModeCluster = "cluster"
+
 	AppSourceTypeGitHubPublic = "github-public"
 
 	AppBuildStrategyStaticSite = "static-site"
@@ -115,6 +118,41 @@ type Runtime struct {
 	LastHeartbeatAt *time.Time        `json:"last_heartbeat_at,omitempty"`
 	CreatedAt       time.Time         `json:"created_at"`
 	UpdatedAt       time.Time         `json:"updated_at"`
+}
+
+type Machine struct {
+	ID                string            `json:"id"`
+	TenantID          string            `json:"tenant_id,omitempty"`
+	Name              string            `json:"name"`
+	ConnectionMode    string            `json:"connection_mode"`
+	Status            string            `json:"status"`
+	Endpoint          string            `json:"endpoint,omitempty"`
+	Labels            map[string]string `json:"labels,omitempty"`
+	NodeKeyID         string            `json:"node_key_id,omitempty"`
+	RuntimeID         string            `json:"runtime_id,omitempty"`
+	RuntimeName       string            `json:"runtime_name,omitempty"`
+	ClusterNodeName   string            `json:"cluster_node_name,omitempty"`
+	FingerprintPrefix string            `json:"fingerprint_prefix,omitempty"`
+	FingerprintHash   string            `json:"fingerprint_hash,omitempty"`
+	LastSeenAt        *time.Time        `json:"last_seen_at,omitempty"`
+	CreatedAt         time.Time         `json:"created_at"`
+	UpdatedAt         time.Time         `json:"updated_at"`
+}
+
+type ClusterNode struct {
+	Name             string     `json:"name"`
+	Status           string     `json:"status"`
+	Roles            []string   `json:"roles,omitempty"`
+	InternalIP       string     `json:"internal_ip,omitempty"`
+	ExternalIP       string     `json:"external_ip,omitempty"`
+	KubeletVersion   string     `json:"kubelet_version,omitempty"`
+	OSImage          string     `json:"os_image,omitempty"`
+	KernelVersion    string     `json:"kernel_version,omitempty"`
+	ContainerRuntime string     `json:"container_runtime,omitempty"`
+	MachineID        string     `json:"machine_id,omitempty"`
+	RuntimeID        string     `json:"runtime_id,omitempty"`
+	TenantID         string     `json:"tenant_id,omitempty"`
+	CreatedAt        *time.Time `json:"created_at,omitempty"`
 }
 
 type AppSource struct {
@@ -265,6 +303,7 @@ type State struct {
 	APIKeys          []APIKey            `json:"api_keys"`
 	EnrollmentTokens []EnrollmentToken   `json:"enrollment_tokens"`
 	NodeKeys         []NodeKey           `json:"node_keys"`
+	Machines         []Machine           `json:"machines"`
 	Runtimes         []Runtime           `json:"runtimes"`
 	Apps             []App               `json:"apps"`
 	Operations       []Operation         `json:"operations"`

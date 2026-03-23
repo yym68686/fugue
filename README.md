@@ -61,6 +61,7 @@ What is already usable on the deployed control plane:
 - bootstrap admin flow for platform-wide management
 - tenant-scoped API keys with per-scope authorization
 - reusable tenant-scoped node keys for one-command VPS onboarding
+- separate inventory views for machines, real cluster nodes, and compatibility runtimes
 - one built-in managed shared runtime: `runtime_managed_shared`
 - external node attachment through node bootstrap plus `fugue-agent`
 - asynchronous app deploy, scale, migrate, disable, and delete operations
@@ -135,6 +136,8 @@ Notes:
 ```json
 {
   "node_key": "<fugue_nk_...>",
+  "machine_name": "alicehk2",
+  "machine_fingerprint": "6d6e7b1d9c...",
   "endpoint": "https://tenant-vps-1.example.com",
   "labels": {
     "region": "ap-east-1",
@@ -143,7 +146,7 @@ Notes:
 }
 ```
 
-`node_name` is optional. If you use Fugue's one-line join script and do not pass `FUGUE_NODE_NAME`, the script defaults to the VPS hostname. If you call the API directly without a name, Fugue will allocate `node`, `node-2`, and so on.
+`node_name` and `machine_name` are optional. If you use Fugue's one-line join script and do not pass `FUGUE_NODE_NAME`, the script defaults to the VPS hostname. `machine_fingerprint` is also optional, but in production it should be stable per machine so repeated joins upsert the same machine record instead of creating duplicates.
 
 Legacy compatibility: `POST /v1/agent/enroll` still accepts one-time enroll tokens.
 
@@ -152,6 +155,8 @@ Legacy compatibility: `POST /v1/agent/enroll` still accepts one-time enroll toke
 ```json
 {
   "enroll_token": "<fugue_enroll_...>",
+  "machine_name": "tenant-vps-1",
+  "machine_fingerprint": "6d6e7b1d9c...",
   "endpoint": "https://tenant-vps-1.example.com",
   "labels": {
     "region": "ap-east-1",
@@ -160,7 +165,7 @@ Legacy compatibility: `POST /v1/agent/enroll` still accepts one-time enroll toke
 }
 ```
 
-`runtime_name` is optional. If omitted, Fugue will allocate `node`, `node-2`, and so on.
+`runtime_name` and `machine_name` are optional. `machine_fingerprint` should stay stable per machine if you want repeated enroll/bootstrap flows to reuse the same machine record.
 
 ### Platform and tenant endpoints
 
@@ -174,9 +179,12 @@ Legacy compatibility: `POST /v1/agent/enroll` still accepts one-time enroll toke
 | `POST` | `/v1/api-keys` | `apikey.write` | non-admin key cannot mint scopes it does not already hold |
 | `GET` | `/v1/node-keys` | any API credential | lists visible node keys, secrets are redacted |
 | `POST` | `/v1/node-keys` | `runtime.attach` | creates a reusable tenant node key |
+| `GET` | `/v1/node-keys/{id}/usages` | any API credential | shows which machines have used a node key |
 | `POST` | `/v1/node-keys/{id}/revoke` | `runtime.attach` | revokes a node key so it cannot register more machines |
-| `GET` | `/v1/nodes` | any API credential | lists attached external-owned nodes |
-| `GET` | `/v1/nodes/{id}` | any API credential | fetch attached node detail |
+| `GET` | `/v1/machines` | any API credential | lists real Fugue machine records for the visible tenant |
+| `GET` | `/v1/cluster/nodes` | any API credential | lists real Kubernetes cluster nodes; tenant keys only see their own attached cluster nodes |
+| `GET` | `/v1/nodes` | any API credential | deprecated compatibility view that exposes runtime records, not physical machines |
+| `GET` | `/v1/nodes/{id}` | any API credential | deprecated compatibility detail view for runtime records |
 | `GET` | `/v1/runtimes` | any API credential | includes managed shared runtime plus visible external runtimes |
 | `POST` | `/v1/runtimes` | `runtime.write` | manual runtime creation; `managed-shared` is platform-admin only |
 | `GET` | `/v1/runtimes/{id}` | any API credential | tenant key can only see shared or same-tenant runtime |
@@ -197,6 +205,13 @@ Legacy compatibility: `POST /v1/agent/enroll` still accepts one-time enroll toke
 | `GET` | `/v1/audit-events` | any API credential | newest first |
 
 Important request payloads:
+
+Inventory semantics:
+
+- `/v1/machines`: the user-facing machine inventory. One VPS should converge to one machine record when it rejoins with the same stable fingerprint.
+- `/v1/cluster/nodes`: the real Kubernetes node inventory from the cluster API.
+- `/v1/node-keys/{id}/usages`: the mapping from one reusable node key to the machines that actually used it.
+- `/v1/nodes`: deprecated compatibility runtime view kept for older clients.
 
 `POST /v1/tenants`
 

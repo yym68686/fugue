@@ -99,3 +99,88 @@ func TestJoinClusterEnvIncludesMeshConfig(t *testing.T) {
 		t.Fatalf("expected mesh auth key in response body, got %s", body)
 	}
 }
+
+func TestNodesEndpointIsDeprecatedCompatibilityView(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Nodes Compatibility Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	if _, _, _, _, err := s.BootstrapNode(nodeSecret, "worker", "https://a.example.com", nil, "worker", "fingerprint-a"); err != nil {
+		t.Fatalf("bootstrap node: %v", err)
+	}
+	_, apiSecret, err := s.CreateAPIKey(tenant.ID, "viewer", []string{"project.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	req := httptest.NewRequest(http.MethodGet, "/v1/nodes", nil)
+	req.Header.Set("Authorization", "Bearer "+apiSecret)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	if recorder.Header().Get("Deprecation") != "true" {
+		t.Fatalf("expected deprecation header, got %q", recorder.Header().Get("Deprecation"))
+	}
+	if !strings.Contains(recorder.Header().Get("Warning"), "/v1/nodes is a compatibility runtime view") {
+		t.Fatalf("expected warning header, got %q", recorder.Header().Get("Warning"))
+	}
+}
+
+func TestNodeKeyUsagesEndpointReturnsMachines(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Node Key Usages Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	key, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	if _, _, _, _, err := s.BootstrapNode(nodeSecret, "worker", "https://a.example.com", nil, "worker", "fingerprint-a"); err != nil {
+		t.Fatalf("bootstrap node: %v", err)
+	}
+	_, apiSecret, err := s.CreateAPIKey(tenant.ID, "viewer", []string{"project.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	req := httptest.NewRequest(http.MethodGet, "/v1/node-keys/"+key.ID+"/usages", nil)
+	req.Header.Set("Authorization", "Bearer "+apiSecret)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"usage_count":1`) {
+		t.Fatalf("expected usage_count in response body, got %s", body)
+	}
+	if !strings.Contains(body, `"machines":[`) {
+		t.Fatalf("expected machines list in response body, got %s", body)
+	}
+}

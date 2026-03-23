@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -47,18 +48,20 @@ type ControllerConfig struct {
 }
 
 type AgentConfig struct {
-	ServerURL        string
-	NodeKey          string
-	EnrollToken      string
-	RuntimeKey       string
-	RuntimeID        string
-	RuntimeName      string
-	RuntimeEndpoint  string
-	WorkDir          string
-	PollInterval     time.Duration
-	HeartbeatEvery   time.Duration
-	StateFile        string
-	ApplyWithKubectl bool
+	ServerURL          string
+	NodeKey            string
+	EnrollToken        string
+	RuntimeKey         string
+	RuntimeID          string
+	RuntimeName        string
+	MachineName        string
+	MachineFingerprint string
+	RuntimeEndpoint    string
+	WorkDir            string
+	PollInterval       time.Duration
+	HeartbeatEvery     time.Duration
+	StateFile          string
+	ApplyWithKubectl   bool
 }
 
 func APIFromEnv() APIConfig {
@@ -106,18 +109,20 @@ func ControllerFromEnv() ControllerConfig {
 
 func AgentFromEnv() AgentConfig {
 	return AgentConfig{
-		ServerURL:        getenv("FUGUE_AGENT_SERVER", "http://127.0.0.1:8080"),
-		NodeKey:          os.Getenv("FUGUE_AGENT_NODE_KEY"),
-		EnrollToken:      os.Getenv("FUGUE_AGENT_ENROLL_TOKEN"),
-		RuntimeKey:       os.Getenv("FUGUE_AGENT_RUNTIME_KEY"),
-		RuntimeID:        os.Getenv("FUGUE_AGENT_RUNTIME_ID"),
-		RuntimeName:      getenv("FUGUE_AGENT_RUNTIME_NAME", hostnameFallback()),
-		RuntimeEndpoint:  getenv("FUGUE_AGENT_RUNTIME_ENDPOINT", ""),
-		WorkDir:          getenv("FUGUE_AGENT_WORK_DIR", "./data/agent"),
-		PollInterval:     getenvDuration("FUGUE_AGENT_POLL_INTERVAL", 10*time.Second),
-		HeartbeatEvery:   getenvDuration("FUGUE_AGENT_HEARTBEAT_EVERY", 15*time.Second),
-		StateFile:        getenv("FUGUE_AGENT_STATE_FILE", "./data/agent/state.json"),
-		ApplyWithKubectl: getenvBool("FUGUE_AGENT_APPLY_WITH_KUBECTL", false),
+		ServerURL:          getenv("FUGUE_AGENT_SERVER", "http://127.0.0.1:8080"),
+		NodeKey:            os.Getenv("FUGUE_AGENT_NODE_KEY"),
+		EnrollToken:        os.Getenv("FUGUE_AGENT_ENROLL_TOKEN"),
+		RuntimeKey:         os.Getenv("FUGUE_AGENT_RUNTIME_KEY"),
+		RuntimeID:          os.Getenv("FUGUE_AGENT_RUNTIME_ID"),
+		RuntimeName:        getenv("FUGUE_AGENT_RUNTIME_NAME", hostnameFallback()),
+		MachineName:        getenv("FUGUE_AGENT_MACHINE_NAME", hostnameFallback()),
+		MachineFingerprint: getenv("FUGUE_AGENT_MACHINE_FINGERPRINT", machineFingerprintFallback()),
+		RuntimeEndpoint:    getenv("FUGUE_AGENT_RUNTIME_ENDPOINT", ""),
+		WorkDir:            getenv("FUGUE_AGENT_WORK_DIR", "./data/agent"),
+		PollInterval:       getenvDuration("FUGUE_AGENT_POLL_INTERVAL", 10*time.Second),
+		HeartbeatEvery:     getenvDuration("FUGUE_AGENT_HEARTBEAT_EVERY", 15*time.Second),
+		StateFile:          getenv("FUGUE_AGENT_STATE_FILE", "./data/agent/state.json"),
+		ApplyWithKubectl:   getenvBool("FUGUE_AGENT_APPLY_WITH_KUBECTL", false),
 	}
 }
 
@@ -160,4 +165,27 @@ func hostnameFallback() string {
 		return "fugue-runtime"
 	}
 	return host
+}
+
+func machineFingerprintFallback() string {
+	candidates := []string{
+		"/etc/machine-id",
+		"/var/lib/dbus/machine-id",
+		"/sys/class/dmi/id/product_uuid",
+	}
+	for _, path := range candidates {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		value := string(data)
+		if trimmed := getenvTrimmed(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return hostnameFallback()
+}
+
+func getenvTrimmed(value string) string {
+	return strings.TrimSpace(value)
 }

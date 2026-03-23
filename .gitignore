@@ -1,4 +1,5 @@
 .gocache/
+.gomodcache/
 .tmp/
 .dist/
 bin/

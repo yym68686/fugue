@@ -107,9 +107,11 @@ func (s *AgentService) bootstrapOrEnroll() error {
 
 func (s *AgentService) bootstrapNode() error {
 	reqBody := map[string]any{
-		"node_key":  s.Config.NodeKey,
-		"node_name": s.Config.RuntimeName,
-		"endpoint":  s.Config.RuntimeEndpoint,
+		"node_key":            s.Config.NodeKey,
+		"node_name":           s.Config.RuntimeName,
+		"machine_name":        s.Config.MachineName,
+		"machine_fingerprint": s.Config.MachineFingerprint,
+		"endpoint":            s.Config.RuntimeEndpoint,
 	}
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
@@ -139,9 +141,11 @@ func (s *AgentService) enroll() error {
 	}
 
 	reqBody := map[string]any{
-		"enroll_token": s.Config.EnrollToken,
-		"runtime_name": s.Config.RuntimeName,
-		"endpoint":     s.Config.RuntimeEndpoint,
+		"enroll_token":        s.Config.EnrollToken,
+		"runtime_name":        s.Config.RuntimeName,
+		"machine_name":        s.Config.MachineName,
+		"machine_fingerprint": s.Config.MachineFingerprint,
+		"endpoint":            s.Config.RuntimeEndpoint,
 	}
 	payload, err := json.Marshal(reqBody)
 	if err != nil {

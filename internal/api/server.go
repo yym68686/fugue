@@ -75,8 +75,11 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("GET /v1/node-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleListNodeKeys)))
 	mux.Handle("POST /v1/node-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateNodeKey)))
+	mux.Handle("GET /v1/node-keys/{id}/usages", s.auth.RequireAPI(http.HandlerFunc(s.handleGetNodeKeyUsages)))
 	mux.Handle("POST /v1/node-keys/{id}/revoke", s.auth.RequireAPI(http.HandlerFunc(s.handleRevokeNodeKey)))
 
+	mux.Handle("GET /v1/machines", s.auth.RequireAPI(http.HandlerFunc(s.handleListMachines)))
+	mux.Handle("GET /v1/cluster/nodes", s.auth.RequireAPI(http.HandlerFunc(s.handleListClusterNodes)))
 	mux.Handle("GET /v1/nodes", s.auth.RequireAPI(http.HandlerFunc(s.handleListNodes)))
 	mux.Handle("GET /v1/nodes/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetNode)))
 
@@ -394,6 +397,7 @@ func (s *Server) handleCreateEnrollmentToken(w http.ResponseWriter, r *http.Requ
 
 func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
+	markDeprecatedNodesView(w)
 	nodes, err := s.store.ListNodes(principal.TenantID, principal.IsPlatformAdmin())
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -404,6 +408,7 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
+	markDeprecatedNodesView(w)
 	node, err := s.store.GetRuntime(r.PathValue("id"))
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -418,6 +423,41 @@ func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"node": node})
+}
+
+func (s *Server) handleListMachines(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	machines, err := s.store.ListMachines(principal.TenantID, principal.IsPlatformAdmin())
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"machines": machines})
+}
+
+func (s *Server) handleGetNodeKeyUsages(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	nodeKey, err := s.store.GetNodeKey(r.PathValue("id"))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if !principal.IsPlatformAdmin() && nodeKey.TenantID != principal.TenantID {
+		httpx.WriteError(w, http.StatusForbidden, "node key is not visible to this tenant")
+		return
+	}
+	nodeKey.Hash = ""
+
+	machines, err := s.store.ListMachinesByNodeKey(nodeKey.ID, principal.TenantID, principal.IsPlatformAdmin())
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"node_key":    nodeKey,
+		"usage_count": len(machines),
+		"machines":    machines,
+	})
 }
 
 func (s *Server) handleListRuntimes(w http.ResponseWriter, r *http.Request) {
@@ -756,11 +796,13 @@ func (s *Server) handleListAuditEvents(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBootstrapNode(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		NodeKey     string            `json:"node_key"`
-		NodeName    string            `json:"node_name"`
-		RuntimeName string            `json:"runtime_name"`
-		Endpoint    string            `json:"endpoint"`
-		Labels      map[string]string `json:"labels"`
+		NodeKey            string            `json:"node_key"`
+		NodeName           string            `json:"node_name"`
+		RuntimeName        string            `json:"runtime_name"`
+		MachineName        string            `json:"machine_name"`
+		MachineFingerprint string            `json:"machine_fingerprint"`
+		Endpoint           string            `json:"endpoint"`
+		Labels             map[string]string `json:"labels"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -771,7 +813,7 @@ func (s *Server) handleBootstrapNode(w http.ResponseWriter, r *http.Request) {
 		nodeName = strings.TrimSpace(req.RuntimeName)
 	}
 
-	key, node, runtimeKey, err := s.store.BootstrapNode(req.NodeKey, nodeName, req.Endpoint, req.Labels)
+	key, node, runtimeKey, machine, err := s.store.BootstrapNode(req.NodeKey, nodeName, req.Endpoint, req.Labels, req.MachineName, req.MachineFingerprint)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -782,21 +824,23 @@ func (s *Server) handleBootstrapNode(w http.ResponseWriter, r *http.Request) {
 		TenantID:  key.TenantID,
 	}
 	s.appendAudit(actor, "node.bootstrap", "node", node.ID, key.TenantID, map[string]string{"name": node.Name, "node_key_id": key.ID})
-	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"node": node, "runtime_key": runtimeKey})
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"node": node, "machine": machine, "runtime_key": runtimeKey})
 }
 
 func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		EnrollToken string            `json:"enroll_token"`
-		RuntimeName string            `json:"runtime_name"`
-		Endpoint    string            `json:"endpoint"`
-		Labels      map[string]string `json:"labels"`
+		EnrollToken        string            `json:"enroll_token"`
+		RuntimeName        string            `json:"runtime_name"`
+		MachineName        string            `json:"machine_name"`
+		MachineFingerprint string            `json:"machine_fingerprint"`
+		Endpoint           string            `json:"endpoint"`
+		Labels             map[string]string `json:"labels"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	runtimeObj, runtimeKey, err := s.store.ConsumeEnrollmentToken(req.EnrollToken, req.RuntimeName, req.Endpoint, req.Labels)
+	runtimeObj, runtimeKey, machine, err := s.store.ConsumeEnrollmentToken(req.EnrollToken, req.RuntimeName, req.Endpoint, req.Labels, req.MachineName, req.MachineFingerprint)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -807,7 +851,7 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 		TenantID:  runtimeObj.TenantID,
 	}
 	s.appendAudit(actor, "runtime.enroll", "runtime", runtimeObj.ID, runtimeObj.TenantID, map[string]string{"name": runtimeObj.Name})
-	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"runtime": runtimeObj, "runtime_key": runtimeKey})
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"runtime": runtimeObj, "machine": machine, "runtime_key": runtimeKey})
 }
 
 func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -904,6 +948,12 @@ func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
 	default:
 		httpx.WriteError(w, http.StatusInternalServerError, err.Error())
 	}
+}
+
+func markDeprecatedNodesView(w http.ResponseWriter) {
+	w.Header().Set("Deprecation", "true")
+	w.Header().Set("Link", "</v1/machines>; rel=\"successor-version\"")
+	w.Header().Add("Warning", `299 - "/v1/nodes is a compatibility runtime view; use /v1/machines and /v1/cluster/nodes"`)
 }
 
 func (s *Server) appendAudit(principal model.Principal, action, targetType, targetID, tenantID string, metadata map[string]string) {

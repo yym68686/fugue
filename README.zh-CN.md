@@ -61,6 +61,7 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 - bootstrap admin 全平台管理流
 - 带 scope 的租户级 API key
 - 可复用的租户级 node key，用于一条命令接管 VPS
+- machines、真实 cluster nodes、兼容 runtimes 三套分离的资源视图
 - 一个内置共享托管运行时：`runtime_managed_shared`
 - 通过 node bootstrap + `fugue-agent` 接入外部节点
 - 异步 app 部署、扩容、迁移、停用、删除
@@ -135,6 +136,8 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 ```json
 {
   "node_key": "<fugue_nk_...>",
+  "machine_name": "alicehk2",
+  "machine_fingerprint": "6d6e7b1d9c...",
   "endpoint": "https://tenant-vps-1.example.com",
   "labels": {
     "region": "ap-east-1",
@@ -143,7 +146,7 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 }
 ```
 
-`node_name` 可省略。如果你使用 Fugue 的一键接入脚本且不传 `FUGUE_NODE_NAME`，脚本会默认取 VPS 主机名；如果你直接调 API 且不传名字，Fugue 会自动分配 `node`、`node-2` 这类名称。
+`node_name` 和 `machine_name` 都可省略。如果你使用 Fugue 的一键接入脚本且不传 `FUGUE_NODE_NAME`，脚本会默认取 VPS 主机名。`machine_fingerprint` 也可省略，但生产环境里应该保证它对同一台机器稳定不变，这样机器重复接入时会 upsert 同一条 machine 记录，而不是制造重复记录。
 
 兼容说明：`POST /v1/agent/enroll` 仍支持一次性 enroll token。
 
@@ -152,6 +155,8 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 ```json
 {
   "enroll_token": "<fugue_enroll_...>",
+  "machine_name": "tenant-vps-1",
+  "machine_fingerprint": "6d6e7b1d9c...",
   "endpoint": "https://tenant-vps-1.example.com",
   "labels": {
     "region": "ap-east-1",
@@ -160,7 +165,7 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 }
 ```
 
-`runtime_name` 可省略；省略时 Fugue 会自动分配 `node`、`node-2` 这类名称。
+`runtime_name` 和 `machine_name` 都可省略；如果你希望机器反复 enroll / bootstrap 时能复用同一条 machine 记录，应保持 `machine_fingerprint` 稳定。
 
 ### 平台与租户端点
 
@@ -174,9 +179,12 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 | `POST` | `/v1/api-keys` | `apikey.write` | 非管理员 key 不能签发自己没有的 scope |
 | `GET` | `/v1/node-keys` | 任意 API 凭证 | 列出可见 node key，密钥部分会脱敏 |
 | `POST` | `/v1/node-keys` | `runtime.attach` | 创建可复用 tenant node key |
+| `GET` | `/v1/node-keys/{id}/usages` | 任意 API 凭证 | 查看某把 node key 实际被哪些机器使用 |
 | `POST` | `/v1/node-keys/{id}/revoke` | `runtime.attach` | 撤销 node key，之后不能再注册新机器 |
-| `GET` | `/v1/nodes` | 任意 API 凭证 | 列出租户附加的 external-owned 节点 |
-| `GET` | `/v1/nodes/{id}` | 任意 API 凭证 | 查看节点详情 |
+| `GET` | `/v1/machines` | 任意 API 凭证 | 列出当前租户可见的 Fugue machine 记录 |
+| `GET` | `/v1/cluster/nodes` | 任意 API 凭证 | 列出真实 Kubernetes 节点；租户只会看到属于自己的 cluster 节点 |
+| `GET` | `/v1/nodes` | 任意 API 凭证 | 已废弃的兼容视图，返回的是 runtime 记录，不是真实物理机器 |
+| `GET` | `/v1/nodes/{id}` | 任意 API 凭证 | 已废弃的兼容详情视图，返回的是 runtime 记录 |
 | `GET` | `/v1/runtimes` | 任意 API 凭证 | 包含 managed shared runtime 与可见的 external runtimes |
 | `POST` | `/v1/runtimes` | `runtime.write` | 手动创建 runtime；`managed-shared` 仅限平台管理员 |
 | `GET` | `/v1/runtimes/{id}` | 任意 API 凭证 | 租户 key 只能看到 shared 或自己租户的 runtime |
@@ -197,6 +205,13 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 | `GET` | `/v1/audit-events` | 任意 API 凭证 | 按时间倒序返回审计事件 |
 
 关键请求体示例：
+
+资源视图语义：
+
+- `/v1/machines`：面向用户的机器清单。同一台 VPS 以稳定 fingerprint 重复接入时，应该收敛为同一条 machine 记录。
+- `/v1/cluster/nodes`：直接来自 Kubernetes API 的真实集群节点清单。
+- `/v1/node-keys/{id}/usages`：一把可复用 node key 到实际 machine 使用记录的映射。
+- `/v1/nodes`：仅为旧客户端保留的兼容 runtime 视图。
 
 `POST /v1/tenants`
 

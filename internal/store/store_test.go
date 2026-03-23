@@ -76,7 +76,7 @@ func TestManagedAndExternalOperationFlow(t *testing.T) {
 	if token.ID == "" || secret == "" {
 		t.Fatal("expected enrollment token secret")
 	}
-	externalRuntime, runtimeKey, err := s.ConsumeEnrollmentToken(secret, "tenant-vps-1", "https://vps.example.com", nil)
+	externalRuntime, runtimeKey, _, err := s.ConsumeEnrollmentToken(secret, "tenant-vps-1", "https://vps.example.com", nil, "", "")
 	if err != nil {
 		t.Fatalf("consume enrollment token: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestSharedNodeKeyBootstrapsMultipleNodesAndCanBeRevoked(t *testing.T) {
 		t.Fatal("expected redacted node key hash")
 	}
 
-	issuedKey, nodeA, runtimeKeyA, err := s.BootstrapNode(secret, "worker", "https://a.example.com", map[string]string{"zone": "a"})
+	issuedKey, nodeA, runtimeKeyA, _, err := s.BootstrapNode(secret, "worker", "https://a.example.com", map[string]string{"zone": "a"}, "", "")
 	if err != nil {
 		t.Fatalf("bootstrap first node: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestSharedNodeKeyBootstrapsMultipleNodesAndCanBeRevoked(t *testing.T) {
 		t.Fatalf("expected first node name worker, got %s", nodeA.Name)
 	}
 
-	_, nodeB, runtimeKeyB, err := s.BootstrapNode(secret, "worker", "https://b.example.com", map[string]string{"zone": "b"})
+	_, nodeB, runtimeKeyB, _, err := s.BootstrapNode(secret, "worker", "https://b.example.com", map[string]string{"zone": "b"}, "", "")
 	if err != nil {
 		t.Fatalf("bootstrap second node: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestSharedNodeKeyBootstrapsMultipleNodesAndCanBeRevoked(t *testing.T) {
 		t.Fatalf("expected revoked node key, got %+v", revoked)
 	}
 
-	_, _, _, err = s.BootstrapNode(secret, "worker", "https://c.example.com", nil)
+	_, _, _, _, err = s.BootstrapNode(secret, "worker", "https://c.example.com", nil, "", "")
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected ErrConflict after revoke, got %v", err)
 	}
@@ -231,7 +231,7 @@ func TestNodeAndKeyDefaultsWhenNamesAreOmitted(t *testing.T) {
 	if clusterKey.Label != "default" {
 		t.Fatalf("expected default node key label, got %q", clusterKey.Label)
 	}
-	_, clusterRuntime, err := s.BootstrapClusterNode(clusterSecret, "", "https://cluster.example.com", nil)
+	_, clusterRuntime, _, err := s.BootstrapClusterNode(clusterSecret, "", "https://cluster.example.com", nil, "", "")
 	if err != nil {
 		t.Fatalf("bootstrap cluster node without name: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestNodeAndKeyDefaultsWhenNamesAreOmitted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create external node key: %v", err)
 	}
-	_, externalRuntime, runtimeKey, err := s.BootstrapNode(externalSecret, "", "https://external.example.com", nil)
+	_, externalRuntime, runtimeKey, _, err := s.BootstrapNode(externalSecret, "", "https://external.example.com", nil, "", "")
 	if err != nil {
 		t.Fatalf("bootstrap external node without name: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestNodeAndKeyDefaultsWhenNamesAreOmitted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create enrollment token: %v", err)
 	}
-	enrolledRuntime, enrolledKey, err := s.ConsumeEnrollmentToken(enrollSecret, "", "https://enroll.example.com", nil)
+	enrolledRuntime, enrolledKey, _, err := s.ConsumeEnrollmentToken(enrollSecret, "", "https://enroll.example.com", nil, "", "")
 	if err != nil {
 		t.Fatalf("consume enrollment token without name: %v", err)
 	}
@@ -275,6 +275,95 @@ func TestNodeAndKeyDefaultsWhenNamesAreOmitted(t *testing.T) {
 	}
 	if enrolledRuntime.Name != "node" {
 		t.Fatalf("expected default enrolled runtime name node, got %q", enrolledRuntime.Name)
+	}
+}
+
+func TestBootstrapNodeReusesMachineByFingerprint(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Machine Reuse")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+
+	_, runtimeA, runtimeKeyA, machineA, err := s.BootstrapNode(nodeSecret, "worker", "https://a.example.com", map[string]string{"zone": "a"}, "alicehk2", "fingerprint-1")
+	if err != nil {
+		t.Fatalf("bootstrap first machine: %v", err)
+	}
+	_, runtimeB, runtimeKeyB, machineB, err := s.BootstrapNode(nodeSecret, "worker", "https://b.example.com", map[string]string{"zone": "b"}, "alicehk2-renamed", "fingerprint-1")
+	if err != nil {
+		t.Fatalf("bootstrap same machine again: %v", err)
+	}
+
+	if runtimeA.ID != runtimeB.ID {
+		t.Fatalf("expected same runtime id, got %s and %s", runtimeA.ID, runtimeB.ID)
+	}
+	if runtimeKeyA == runtimeKeyB {
+		t.Fatal("expected runtime key rotation on machine re-bootstrap")
+	}
+	if machineA.ID != machineB.ID {
+		t.Fatalf("expected same machine id, got %s and %s", machineA.ID, machineB.ID)
+	}
+	if machineB.Endpoint != "https://b.example.com" {
+		t.Fatalf("expected updated machine endpoint, got %q", machineB.Endpoint)
+	}
+
+	nodes, err := s.ListNodes(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list nodes: %v", err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 compatibility node runtime, got %d", len(nodes))
+	}
+
+	machines, err := s.ListMachines(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list machines: %v", err)
+	}
+	if len(machines) != 1 {
+		t.Fatalf("expected 1 machine, got %d", len(machines))
+	}
+}
+
+func TestListMachinesByNodeKey(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Node Key Usage")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	key, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+
+	if _, _, _, _, err := s.BootstrapNode(nodeSecret, "worker-a", "https://a.example.com", nil, "worker-a", "fingerprint-a"); err != nil {
+		t.Fatalf("bootstrap machine a: %v", err)
+	}
+	if _, _, _, _, err := s.BootstrapNode(nodeSecret, "worker-b", "https://b.example.com", nil, "worker-b", "fingerprint-b"); err != nil {
+		t.Fatalf("bootstrap machine b: %v", err)
+	}
+
+	machines, err := s.ListMachinesByNodeKey(key.ID, tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list machines by node key: %v", err)
+	}
+	if len(machines) != 2 {
+		t.Fatalf("expected 2 machines for node key, got %d", len(machines))
 	}
 }
 
@@ -309,7 +398,7 @@ func TestDeleteTenantRemovesTenantOwnedResources(t *testing.T) {
 	if token.ID == "" || enrollSecret == "" {
 		t.Fatal("expected enrollment token secret")
 	}
-	if _, runtimeKey, err := s.ConsumeEnrollmentToken(enrollSecret, "external-1", "https://node2.example.com", map[string]string{"zone": "b"}); err != nil {
+	if _, runtimeKey, _, err := s.ConsumeEnrollmentToken(enrollSecret, "external-1", "https://node2.example.com", map[string]string{"zone": "b"}, "", ""); err != nil {
 		t.Fatalf("consume enrollment token: %v", err)
 	} else if runtimeKey == "" {
 		t.Fatal("expected runtime key")
@@ -319,7 +408,7 @@ func TestDeleteTenantRemovesTenantOwnedResources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create node key: %v", err)
 	}
-	_, managedRuntime, err := s.BootstrapClusterNode(nodeSecret, "worker-1", "https://node1.example.com", map[string]string{"zone": "a"})
+	_, managedRuntime, _, err := s.BootstrapClusterNode(nodeSecret, "worker-1", "https://node1.example.com", map[string]string{"zone": "a"}, "", "")
 	if err != nil {
 		t.Fatalf("bootstrap cluster node: %v", err)
 	}

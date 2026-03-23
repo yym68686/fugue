@@ -183,6 +183,7 @@ func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
 
 		deletedNodeKeyIDs := make(map[string]struct{})
 		state.NodeKeys = deleteNodeKeysByTenant(state.NodeKeys, id, deletedNodeKeyIDs)
+		state.Machines = deleteMachinesByTenant(state.Machines, id, deletedNodeKeyIDs)
 		state.Runtimes = deleteRuntimesByTenant(state.Runtimes, id, deletedNodeKeyIDs)
 		state.Apps = deleteAppsByTenant(state.Apps, id)
 		state.Operations = deleteOperationsByTenant(state.Operations, id)
@@ -484,20 +485,23 @@ func (s *Store) RevokeNodeKey(id string) (model.NodeKey, error) {
 	return redactNodeKey(key), err
 }
 
-func (s *Store) BootstrapNode(secret, runtimeName, endpoint string, labels map[string]string) (model.NodeKey, model.Runtime, string, error) {
+func (s *Store) BootstrapNode(secret, runtimeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.NodeKey, model.Runtime, string, model.Machine, error) {
 	secret = strings.TrimSpace(secret)
 	runtimeName = strings.TrimSpace(runtimeName)
 	if secret == "" {
-		return model.NodeKey{}, model.Runtime{}, "", ErrInvalidInput
+		return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgBootstrapNode(secret, runtimeName, endpoint, labels)
+		return s.pgBootstrapNode(secret, runtimeName, endpoint, labels, machineName, machineFingerprint)
 	}
 
 	var key model.NodeKey
 	var runtime model.Runtime
 	var runtimeSecret string
+	var machine model.Machine
 	err := s.withLockedState(true, func(state *model.State) error {
+		ensureMachineRecords(state)
+
 		hash := model.HashSecret(secret)
 		now := time.Now().UTC()
 		keyIndex := -1
@@ -519,7 +523,68 @@ func (s *Store) BootstrapNode(secret, runtimeName, endpoint string, labels map[s
 		state.NodeKeys[keyIndex].UpdatedAt = now
 		key = state.NodeKeys[keyIndex]
 
+		explicitFingerprint := strings.TrimSpace(machineFingerprint) != ""
+		machineName = normalizedMachineName(machineName, runtimeName, endpoint)
+		machineFingerprint = normalizedMachineFingerprint(machineFingerprint, machineName, runtimeName, endpoint)
+		fingerprintHash := model.HashSecret(machineFingerprint)
+
+		machineIndex := findMachineByFingerprintHash(state, key.TenantID, fingerprintHash)
+		if machineIndex < 0 && explicitFingerprint {
+			machineIndex = findMachineCandidate(state, key.TenantID, key.ID, model.MachineConnectionModeAgent, machineName, runtimeName, endpoint)
+		}
+
 		runtimeSecret = model.NewSecret("fugue_rt")
+		if machineIndex >= 0 {
+			machine = state.Machines[machineIndex]
+			machine.Name = machineName
+			machine.ConnectionMode = model.MachineConnectionModeAgent
+			machine.Status = model.RuntimeStatusActive
+			machine.Endpoint = strings.TrimSpace(endpoint)
+			machine.Labels = cloneMap(labels)
+			machine.NodeKeyID = key.ID
+			machine.FingerprintPrefix = model.SecretPrefix(machineFingerprint)
+			machine.FingerprintHash = fingerprintHash
+			machine.LastSeenAt = &now
+			machine.UpdatedAt = now
+
+			runtimeIndex := findRuntime(state, machine.RuntimeID)
+			if runtimeIndex >= 0 {
+				state.Runtimes[runtimeIndex].Type = model.RuntimeTypeExternalOwned
+				state.Runtimes[runtimeIndex].Status = model.RuntimeStatusActive
+				state.Runtimes[runtimeIndex].Endpoint = strings.TrimSpace(endpoint)
+				state.Runtimes[runtimeIndex].Labels = cloneMap(labels)
+				state.Runtimes[runtimeIndex].NodeKeyID = key.ID
+				state.Runtimes[runtimeIndex].AgentKeyPrefix = model.SecretPrefix(runtimeSecret)
+				state.Runtimes[runtimeIndex].AgentKeyHash = model.HashSecret(runtimeSecret)
+				state.Runtimes[runtimeIndex].LastHeartbeatAt = &now
+				state.Runtimes[runtimeIndex].UpdatedAt = now
+				runtime = state.Runtimes[runtimeIndex]
+			} else {
+				runtime = model.Runtime{
+					ID:              model.NewID("runtime"),
+					TenantID:        key.TenantID,
+					Name:            nextAvailableRuntimeName(state, key.TenantID, runtimeName),
+					Type:            model.RuntimeTypeExternalOwned,
+					Status:          model.RuntimeStatusActive,
+					Endpoint:        strings.TrimSpace(endpoint),
+					Labels:          cloneMap(labels),
+					NodeKeyID:       key.ID,
+					AgentKeyPrefix:  model.SecretPrefix(runtimeSecret),
+					AgentKeyHash:    model.HashSecret(runtimeSecret),
+					LastHeartbeatAt: &now,
+					CreatedAt:       now,
+					UpdatedAt:       now,
+				}
+				state.Runtimes = append(state.Runtimes, runtime)
+			}
+
+			machine.RuntimeID = runtime.ID
+			machine.RuntimeName = runtime.Name
+			machine.ClusterNodeName = ""
+			state.Machines[machineIndex] = machine
+			return nil
+		}
+
 		runtime = model.Runtime{
 			ID:              model.NewID("runtime"),
 			TenantID:        key.TenantID,
@@ -536,28 +601,50 @@ func (s *Store) BootstrapNode(secret, runtimeName, endpoint string, labels map[s
 			UpdatedAt:       now,
 		}
 		state.Runtimes = append(state.Runtimes, runtime)
+
+		machine = model.Machine{
+			ID:                model.NewID("machine"),
+			TenantID:          key.TenantID,
+			Name:              machineName,
+			ConnectionMode:    model.MachineConnectionModeAgent,
+			Status:            model.RuntimeStatusActive,
+			Endpoint:          strings.TrimSpace(endpoint),
+			Labels:            cloneMap(labels),
+			NodeKeyID:         key.ID,
+			RuntimeID:         runtime.ID,
+			RuntimeName:       runtime.Name,
+			FingerprintPrefix: model.SecretPrefix(machineFingerprint),
+			FingerprintHash:   fingerprintHash,
+			LastSeenAt:        &now,
+			CreatedAt:         now,
+			UpdatedAt:         now,
+		}
+		state.Machines = append(state.Machines, machine)
 		return nil
 	})
 	if err != nil {
-		return model.NodeKey{}, model.Runtime{}, "", err
+		return model.NodeKey{}, model.Runtime{}, "", model.Machine{}, err
 	}
 
-	return redactNodeKey(key), runtime, runtimeSecret, nil
+	return redactNodeKey(key), runtime, runtimeSecret, redactMachine(machine), nil
 }
 
-func (s *Store) BootstrapClusterNode(secret, runtimeName, endpoint string, labels map[string]string) (model.NodeKey, model.Runtime, error) {
+func (s *Store) BootstrapClusterNode(secret, runtimeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.NodeKey, model.Runtime, model.Machine, error) {
 	secret = strings.TrimSpace(secret)
 	runtimeName = strings.TrimSpace(runtimeName)
 	if secret == "" {
-		return model.NodeKey{}, model.Runtime{}, ErrInvalidInput
+		return model.NodeKey{}, model.Runtime{}, model.Machine{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgBootstrapClusterNode(secret, runtimeName, endpoint, labels)
+		return s.pgBootstrapClusterNode(secret, runtimeName, endpoint, labels, machineName, machineFingerprint)
 	}
 
 	var key model.NodeKey
 	var runtime model.Runtime
+	var machine model.Machine
 	err := s.withLockedState(true, func(state *model.State) error {
+		ensureMachineRecords(state)
+
 		hash := model.HashSecret(secret)
 		now := time.Now().UTC()
 		keyIndex := -1
@@ -579,14 +666,62 @@ func (s *Store) BootstrapClusterNode(secret, runtimeName, endpoint string, label
 		state.NodeKeys[keyIndex].UpdatedAt = now
 		key = state.NodeKeys[keyIndex]
 
-		existingIndex := findManagedOwnedRuntimeByNodeKeyAndName(state, key.ID, runtimeName)
-		if existingIndex >= 0 {
-			state.Runtimes[existingIndex].Status = model.RuntimeStatusActive
-			state.Runtimes[existingIndex].Endpoint = strings.TrimSpace(endpoint)
-			state.Runtimes[existingIndex].Labels = cloneMap(labels)
-			state.Runtimes[existingIndex].UpdatedAt = now
-			state.Runtimes[existingIndex].LastHeartbeatAt = &now
-			runtime = state.Runtimes[existingIndex]
+		explicitFingerprint := strings.TrimSpace(machineFingerprint) != ""
+		machineName = normalizedMachineName(machineName, runtimeName, endpoint)
+		machineFingerprint = normalizedMachineFingerprint(machineFingerprint, machineName, runtimeName, endpoint)
+		fingerprintHash := model.HashSecret(machineFingerprint)
+
+		machineIndex := findMachineByFingerprintHash(state, key.TenantID, fingerprintHash)
+		if machineIndex < 0 && explicitFingerprint {
+			machineIndex = findMachineCandidate(state, key.TenantID, key.ID, model.MachineConnectionModeCluster, machineName, runtimeName, endpoint)
+		}
+
+		if machineIndex >= 0 {
+			machine = state.Machines[machineIndex]
+			machine.Name = machineName
+			machine.ConnectionMode = model.MachineConnectionModeCluster
+			machine.Status = model.RuntimeStatusActive
+			machine.Endpoint = strings.TrimSpace(endpoint)
+			machine.Labels = cloneMap(labels)
+			machine.NodeKeyID = key.ID
+			machine.FingerprintPrefix = model.SecretPrefix(machineFingerprint)
+			machine.FingerprintHash = fingerprintHash
+			machine.LastSeenAt = &now
+			machine.UpdatedAt = now
+
+			runtimeIndex := findRuntime(state, machine.RuntimeID)
+			if runtimeIndex >= 0 {
+				state.Runtimes[runtimeIndex].Type = model.RuntimeTypeManagedOwned
+				state.Runtimes[runtimeIndex].Status = model.RuntimeStatusActive
+				state.Runtimes[runtimeIndex].Endpoint = strings.TrimSpace(endpoint)
+				state.Runtimes[runtimeIndex].Labels = cloneMap(labels)
+				state.Runtimes[runtimeIndex].NodeKeyID = key.ID
+				state.Runtimes[runtimeIndex].AgentKeyPrefix = ""
+				state.Runtimes[runtimeIndex].AgentKeyHash = ""
+				state.Runtimes[runtimeIndex].UpdatedAt = now
+				state.Runtimes[runtimeIndex].LastHeartbeatAt = &now
+				runtime = state.Runtimes[runtimeIndex]
+			} else {
+				runtime = model.Runtime{
+					ID:              model.NewID("runtime"),
+					TenantID:        key.TenantID,
+					Name:            nextAvailableRuntimeName(state, key.TenantID, runtimeName),
+					Type:            model.RuntimeTypeManagedOwned,
+					Status:          model.RuntimeStatusActive,
+					Endpoint:        strings.TrimSpace(endpoint),
+					Labels:          cloneMap(labels),
+					NodeKeyID:       key.ID,
+					LastHeartbeatAt: &now,
+					CreatedAt:       now,
+					UpdatedAt:       now,
+				}
+				state.Runtimes = append(state.Runtimes, runtime)
+			}
+
+			machine.RuntimeID = runtime.ID
+			machine.RuntimeName = runtime.Name
+			machine.ClusterNodeName = runtime.Name
+			state.Machines[machineIndex] = machine
 			return nil
 		}
 
@@ -604,13 +739,33 @@ func (s *Store) BootstrapClusterNode(secret, runtimeName, endpoint string, label
 			UpdatedAt:       now,
 		}
 		state.Runtimes = append(state.Runtimes, runtime)
+
+		machine = model.Machine{
+			ID:                model.NewID("machine"),
+			TenantID:          key.TenantID,
+			Name:              machineName,
+			ConnectionMode:    model.MachineConnectionModeCluster,
+			Status:            model.RuntimeStatusActive,
+			Endpoint:          strings.TrimSpace(endpoint),
+			Labels:            cloneMap(labels),
+			NodeKeyID:         key.ID,
+			RuntimeID:         runtime.ID,
+			RuntimeName:       runtime.Name,
+			ClusterNodeName:   runtime.Name,
+			FingerprintPrefix: model.SecretPrefix(machineFingerprint),
+			FingerprintHash:   fingerprintHash,
+			LastSeenAt:        &now,
+			CreatedAt:         now,
+			UpdatedAt:         now,
+		}
+		state.Machines = append(state.Machines, machine)
 		return nil
 	})
 	if err != nil {
-		return model.NodeKey{}, model.Runtime{}, err
+		return model.NodeKey{}, model.Runtime{}, model.Machine{}, err
 	}
 
-	return redactNodeKey(key), runtime, nil
+	return redactNodeKey(key), runtime, redactMachine(machine), nil
 }
 
 func (s *Store) CreateRuntime(tenantID, name, runtimeType, endpoint string, labels map[string]string) (model.Runtime, string, error) {
@@ -666,19 +821,22 @@ func (s *Store) CreateRuntime(tenantID, name, runtimeType, endpoint string, labe
 	return runtime, secret, nil
 }
 
-func (s *Store) ConsumeEnrollmentToken(secret, runtimeName, endpoint string, labels map[string]string) (model.Runtime, string, error) {
+func (s *Store) ConsumeEnrollmentToken(secret, runtimeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.Runtime, string, model.Machine, error) {
 	secret = strings.TrimSpace(secret)
 	runtimeName = strings.TrimSpace(runtimeName)
 	if secret == "" {
-		return model.Runtime{}, "", ErrInvalidInput
+		return model.Runtime{}, "", model.Machine{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgConsumeEnrollmentToken(secret, runtimeName, endpoint, labels)
+		return s.pgConsumeEnrollmentToken(secret, runtimeName, endpoint, labels, machineName, machineFingerprint)
 	}
 
 	var runtime model.Runtime
 	var runtimeSecret string
+	var machine model.Machine
 	err := s.withLockedState(true, func(state *model.State) error {
+		ensureMachineRecords(state)
+
 		hash := model.HashSecret(secret)
 		now := time.Now().UTC()
 		tokenIndex := -1
@@ -699,12 +857,69 @@ func (s *Store) ConsumeEnrollmentToken(secret, runtimeName, endpoint string, lab
 		token.UsedAt = &now
 		token.LastUsedAt = &now
 
-		name := nextAvailableRuntimeName(state, token.TenantID, runtimeName)
+		explicitFingerprint := strings.TrimSpace(machineFingerprint) != ""
+		machineName = normalizedMachineName(machineName, runtimeName, endpoint)
+		machineFingerprint = normalizedMachineFingerprint(machineFingerprint, machineName, runtimeName, endpoint)
+		fingerprintHash := model.HashSecret(machineFingerprint)
+
+		machineIndex := findMachineByFingerprintHash(state, token.TenantID, fingerprintHash)
+		if machineIndex < 0 && explicitFingerprint {
+			machineIndex = findMachineCandidate(state, token.TenantID, "", model.MachineConnectionModeAgent, machineName, runtimeName, endpoint)
+		}
+
 		runtimeSecret = model.NewSecret("fugue_rt")
+		if machineIndex >= 0 {
+			machine = state.Machines[machineIndex]
+			machine.Name = machineName
+			machine.ConnectionMode = model.MachineConnectionModeAgent
+			machine.Status = model.RuntimeStatusActive
+			machine.Endpoint = strings.TrimSpace(endpoint)
+			machine.Labels = cloneMap(labels)
+			machine.FingerprintPrefix = model.SecretPrefix(machineFingerprint)
+			machine.FingerprintHash = fingerprintHash
+			machine.LastSeenAt = &now
+			machine.UpdatedAt = now
+
+			runtimeIndex := findRuntime(state, machine.RuntimeID)
+			if runtimeIndex >= 0 {
+				state.Runtimes[runtimeIndex].Type = model.RuntimeTypeExternalOwned
+				state.Runtimes[runtimeIndex].Status = model.RuntimeStatusActive
+				state.Runtimes[runtimeIndex].Endpoint = strings.TrimSpace(endpoint)
+				state.Runtimes[runtimeIndex].Labels = cloneMap(labels)
+				state.Runtimes[runtimeIndex].AgentKeyPrefix = model.SecretPrefix(runtimeSecret)
+				state.Runtimes[runtimeIndex].AgentKeyHash = model.HashSecret(runtimeSecret)
+				state.Runtimes[runtimeIndex].LastHeartbeatAt = &now
+				state.Runtimes[runtimeIndex].UpdatedAt = now
+				runtime = state.Runtimes[runtimeIndex]
+			} else {
+				runtime = model.Runtime{
+					ID:              model.NewID("runtime"),
+					TenantID:        token.TenantID,
+					Name:            nextAvailableRuntimeName(state, token.TenantID, runtimeName),
+					Type:            model.RuntimeTypeExternalOwned,
+					Status:          model.RuntimeStatusActive,
+					Endpoint:        strings.TrimSpace(endpoint),
+					Labels:          cloneMap(labels),
+					AgentKeyPrefix:  model.SecretPrefix(runtimeSecret),
+					AgentKeyHash:    model.HashSecret(runtimeSecret),
+					LastHeartbeatAt: &now,
+					CreatedAt:       now,
+					UpdatedAt:       now,
+				}
+				state.Runtimes = append(state.Runtimes, runtime)
+			}
+
+			machine.RuntimeID = runtime.ID
+			machine.RuntimeName = runtime.Name
+			machine.ClusterNodeName = ""
+			state.Machines[machineIndex] = machine
+			return nil
+		}
+
 		runtime = model.Runtime{
 			ID:              model.NewID("runtime"),
 			TenantID:        token.TenantID,
-			Name:            name,
+			Name:            nextAvailableRuntimeName(state, token.TenantID, runtimeName),
 			Type:            model.RuntimeTypeExternalOwned,
 			Status:          model.RuntimeStatusActive,
 			Endpoint:        strings.TrimSpace(endpoint),
@@ -716,13 +931,31 @@ func (s *Store) ConsumeEnrollmentToken(secret, runtimeName, endpoint string, lab
 			UpdatedAt:       now,
 		}
 		state.Runtimes = append(state.Runtimes, runtime)
+
+		machine = model.Machine{
+			ID:                model.NewID("machine"),
+			TenantID:          token.TenantID,
+			Name:              machineName,
+			ConnectionMode:    model.MachineConnectionModeAgent,
+			Status:            model.RuntimeStatusActive,
+			Endpoint:          strings.TrimSpace(endpoint),
+			Labels:            cloneMap(labels),
+			RuntimeID:         runtime.ID,
+			RuntimeName:       runtime.Name,
+			FingerprintPrefix: model.SecretPrefix(machineFingerprint),
+			FingerprintHash:   fingerprintHash,
+			LastSeenAt:        &now,
+			CreatedAt:         now,
+			UpdatedAt:         now,
+		}
+		state.Machines = append(state.Machines, machine)
 		return nil
 	})
 	if err != nil {
-		return model.Runtime{}, "", err
+		return model.Runtime{}, "", model.Machine{}, err
 	}
 
-	return runtime, runtimeSecret, nil
+	return runtime, runtimeSecret, redactMachine(machine), nil
 }
 
 func (s *Store) AuthenticateRuntimeKey(secret string) (model.Runtime, model.Principal, error) {
@@ -736,6 +969,8 @@ func (s *Store) AuthenticateRuntimeKey(secret string) (model.Runtime, model.Prin
 	var runtime model.Runtime
 	var principal model.Principal
 	err := s.withLockedState(true, func(state *model.State) error {
+		ensureMachineRecords(state)
+
 		hash := model.HashSecret(secret)
 		now := time.Now().UTC()
 		for idx := range state.Runtimes {
@@ -746,6 +981,11 @@ func (s *Store) AuthenticateRuntimeKey(secret string) (model.Runtime, model.Prin
 			state.Runtimes[idx].Status = model.RuntimeStatusActive
 			state.Runtimes[idx].UpdatedAt = now
 			runtime = state.Runtimes[idx]
+			if machineIndex := findMachineByRuntimeID(state, runtime.ID); machineIndex >= 0 {
+				state.Machines[machineIndex].Status = model.RuntimeStatusActive
+				state.Machines[machineIndex].LastSeenAt = &now
+				state.Machines[machineIndex].UpdatedAt = now
+			}
 			principal = model.Principal{
 				ActorType: model.ActorTypeRuntime,
 				ActorID:   runtime.ID,
@@ -767,6 +1007,8 @@ func (s *Store) UpdateRuntimeHeartbeat(runtimeID, endpoint string) (model.Runtim
 	}
 	var runtime model.Runtime
 	err := s.withLockedState(true, func(state *model.State) error {
+		ensureMachineRecords(state)
+
 		index := findRuntime(state, runtimeID)
 		if index < 0 {
 			return ErrNotFound
@@ -779,6 +1021,14 @@ func (s *Store) UpdateRuntimeHeartbeat(runtimeID, endpoint string) (model.Runtim
 			state.Runtimes[index].Endpoint = strings.TrimSpace(endpoint)
 		}
 		runtime = state.Runtimes[index]
+		if machineIndex := findMachineByRuntimeID(state, runtime.ID); machineIndex >= 0 {
+			state.Machines[machineIndex].Status = model.RuntimeStatusActive
+			state.Machines[machineIndex].LastSeenAt = &now
+			state.Machines[machineIndex].UpdatedAt = now
+			if strings.TrimSpace(endpoint) != "" {
+				state.Machines[machineIndex].Endpoint = strings.TrimSpace(endpoint)
+			}
+		}
 		return nil
 	})
 	return runtime, err
@@ -790,6 +1040,8 @@ func (s *Store) MarkRuntimeOfflineStale(after time.Duration) (int, error) {
 	}
 	var count int
 	err := s.withLockedState(true, func(state *model.State) error {
+		ensureMachineRecords(state)
+
 		if after <= 0 {
 			return nil
 		}
@@ -803,6 +1055,10 @@ func (s *Store) MarkRuntimeOfflineStale(after time.Duration) (int, error) {
 				if runtime.Status != model.RuntimeStatusOffline {
 					runtime.Status = model.RuntimeStatusOffline
 					runtime.UpdatedAt = time.Now().UTC()
+					if machineIndex := findMachineByRuntimeID(state, runtime.ID); machineIndex >= 0 {
+						state.Machines[machineIndex].Status = model.RuntimeStatusOffline
+						state.Machines[machineIndex].UpdatedAt = runtime.UpdatedAt
+					}
 					count++
 				}
 			}
@@ -832,6 +1088,54 @@ func (s *Store) ListNodes(tenantID string, platformAdmin bool) ([]model.Runtime,
 		return nil
 	})
 	return nodes, err
+}
+
+func (s *Store) ListMachines(tenantID string, platformAdmin bool) ([]model.Machine, error) {
+	if s.usingDatabase() {
+		return s.pgListMachines(tenantID, platformAdmin)
+	}
+	var machines []model.Machine
+	err := s.withLockedState(false, func(state *model.State) error {
+		ensureMachineRecords(state)
+		for _, machine := range state.Machines {
+			if platformAdmin || machine.TenantID == tenantID {
+				machines = append(machines, redactMachine(machine))
+			}
+		}
+		sort.Slice(machines, func(i, j int) bool {
+			return machines[i].CreatedAt.Before(machines[j].CreatedAt)
+		})
+		return nil
+	})
+	return machines, err
+}
+
+func (s *Store) ListMachinesByNodeKey(nodeKeyID, tenantID string, platformAdmin bool) ([]model.Machine, error) {
+	nodeKeyID = strings.TrimSpace(nodeKeyID)
+	if nodeKeyID == "" {
+		return nil, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgListMachinesByNodeKey(nodeKeyID, tenantID, platformAdmin)
+	}
+
+	var machines []model.Machine
+	err := s.withLockedState(false, func(state *model.State) error {
+		ensureMachineRecords(state)
+		for _, machine := range state.Machines {
+			if machine.NodeKeyID != nodeKeyID {
+				continue
+			}
+			if platformAdmin || machine.TenantID == tenantID {
+				machines = append(machines, redactMachine(machine))
+			}
+		}
+		sort.Slice(machines, func(i, j int) bool {
+			return machines[i].CreatedAt.Before(machines[j].CreatedAt)
+		})
+		return nil
+	})
+	return machines, err
 }
 
 func (s *Store) ListRuntimes(tenantID string, platformAdmin bool) ([]model.Runtime, error) {
@@ -1325,6 +1629,9 @@ func ensureDefaults(state *model.State) {
 	if state.NodeKeys == nil {
 		state.NodeKeys = []model.NodeKey{}
 	}
+	if state.Machines == nil {
+		state.Machines = []model.Machine{}
+	}
 	if state.Runtimes == nil {
 		state.Runtimes = []model.Runtime{}
 	}
@@ -1353,6 +1660,7 @@ func ensureDefaults(state *model.State) {
 			UpdatedAt: now,
 		})
 	}
+	ensureMachineRecords(state)
 }
 
 func redactAPIKey(key model.APIKey) model.APIKey {
@@ -1368,6 +1676,11 @@ func redactEnrollmentToken(token model.EnrollmentToken) model.EnrollmentToken {
 func redactNodeKey(key model.NodeKey) model.NodeKey {
 	key.Hash = ""
 	return key
+}
+
+func redactMachine(machine model.Machine) model.Machine {
+	machine.FingerprintHash = ""
+	return machine
 }
 
 func defaultNodeKeyLabel(label string) string {
@@ -1387,6 +1700,131 @@ func cloneMap(in map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+func normalizedMachineName(machineName, runtimeName, endpoint string) string {
+	machineName = strings.TrimSpace(machineName)
+	if machineName != "" {
+		return machineName
+	}
+	runtimeName = strings.TrimSpace(runtimeName)
+	if runtimeName != "" {
+		return runtimeName
+	}
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint != "" {
+		return endpoint
+	}
+	return "node"
+}
+
+func normalizedMachineFingerprint(machineFingerprint, machineName, runtimeName, endpoint string) string {
+	machineFingerprint = strings.TrimSpace(machineFingerprint)
+	if machineFingerprint != "" {
+		return machineFingerprint
+	}
+	fallback := strings.TrimSpace(endpoint)
+	if fallback == "" {
+		fallback = strings.TrimSpace(machineName)
+	}
+	if fallback == "" {
+		fallback = strings.TrimSpace(runtimeName)
+	}
+	if fallback == "" {
+		fallback = "node"
+	}
+	return "legacy:" + strings.ToLower(fallback)
+}
+
+func legacyMachineIdentityKey(runtime model.Runtime) string {
+	endpoint := strings.ToLower(strings.TrimSpace(runtime.Endpoint))
+	if endpoint != "" {
+		return strings.Join([]string{runtime.TenantID, runtime.Type, runtime.NodeKeyID, endpoint}, "|")
+	}
+	return strings.Join([]string{runtime.TenantID, runtime.Type, runtime.NodeKeyID, strings.ToLower(strings.TrimSpace(runtime.Name))}, "|")
+}
+
+func runtimeConnectionMode(runtimeType string) string {
+	switch runtimeType {
+	case model.RuntimeTypeManagedOwned:
+		return model.MachineConnectionModeCluster
+	case model.RuntimeTypeExternalOwned:
+		return model.MachineConnectionModeAgent
+	default:
+		return ""
+	}
+}
+
+func ensureMachineRecords(state *model.State) {
+	if state.Machines == nil {
+		state.Machines = []model.Machine{}
+	}
+	if len(state.Runtimes) == 0 {
+		return
+	}
+
+	existingByRuntimeID := make(map[string]struct{}, len(state.Machines))
+	for _, machine := range state.Machines {
+		if machine.RuntimeID != "" {
+			existingByRuntimeID[machine.RuntimeID] = struct{}{}
+		}
+	}
+
+	legacyGroups := make(map[string]int)
+	for _, runtime := range state.Runtimes {
+		mode := runtimeConnectionMode(runtime.Type)
+		if mode == "" {
+			continue
+		}
+		if _, ok := existingByRuntimeID[runtime.ID]; ok {
+			continue
+		}
+
+		groupKey := legacyMachineIdentityKey(runtime)
+		if index, ok := legacyGroups[groupKey]; ok {
+			if state.Machines[index].UpdatedAt.Before(runtime.UpdatedAt) {
+				state.Machines[index].Name = runtime.Name
+				state.Machines[index].Status = runtime.Status
+				state.Machines[index].Endpoint = runtime.Endpoint
+				state.Machines[index].Labels = cloneMap(runtime.Labels)
+				state.Machines[index].NodeKeyID = runtime.NodeKeyID
+				state.Machines[index].RuntimeID = runtime.ID
+				state.Machines[index].RuntimeName = runtime.Name
+				state.Machines[index].LastSeenAt = runtime.LastHeartbeatAt
+				state.Machines[index].UpdatedAt = runtime.UpdatedAt
+				if runtime.Type == model.RuntimeTypeManagedOwned {
+					state.Machines[index].ClusterNodeName = runtime.Name
+				}
+			}
+			existingByRuntimeID[runtime.ID] = struct{}{}
+			continue
+		}
+
+		fingerprint := groupKey
+		machine := model.Machine{
+			ID:                model.NewID("machine"),
+			TenantID:          runtime.TenantID,
+			Name:              runtime.Name,
+			ConnectionMode:    mode,
+			Status:            runtime.Status,
+			Endpoint:          runtime.Endpoint,
+			Labels:            cloneMap(runtime.Labels),
+			NodeKeyID:         runtime.NodeKeyID,
+			RuntimeID:         runtime.ID,
+			RuntimeName:       runtime.Name,
+			FingerprintPrefix: model.SecretPrefix(fingerprint),
+			FingerprintHash:   model.HashSecret(fingerprint),
+			LastSeenAt:        runtime.LastHeartbeatAt,
+			CreatedAt:         runtime.CreatedAt,
+			UpdatedAt:         runtime.UpdatedAt,
+		}
+		if runtime.Type == model.RuntimeTypeManagedOwned {
+			machine.ClusterNodeName = runtime.Name
+		}
+		state.Machines = append(state.Machines, machine)
+		legacyGroups[groupKey] = len(state.Machines) - 1
+		existingByRuntimeID[runtime.ID] = struct{}{}
+	}
 }
 
 func cloneAppSource(in *model.AppSource) *model.AppSource {
@@ -1531,6 +1969,20 @@ func deleteNodeKeysByTenant(keys []model.NodeKey, tenantID string, deletedIDs ma
 	return filtered
 }
 
+func deleteMachinesByTenant(machines []model.Machine, tenantID string, deletedNodeKeyIDs map[string]struct{}) []model.Machine {
+	filtered := machines[:0]
+	for _, machine := range machines {
+		if machine.TenantID == tenantID {
+			continue
+		}
+		if _, ok := deletedNodeKeyIDs[machine.NodeKeyID]; ok {
+			machine.NodeKeyID = ""
+		}
+		filtered = append(filtered, machine)
+	}
+	return filtered
+}
+
 func deleteRuntimesByTenant(runtimes []model.Runtime, tenantID string, deletedNodeKeyIDs map[string]struct{}) []model.Runtime {
 	filtered := runtimes[:0]
 	for _, runtime := range runtimes {
@@ -1603,6 +2055,67 @@ func findNodeKey(state *model.State, id string) int {
 		}
 	}
 	return -1
+}
+
+func findMachine(state *model.State, id string) int {
+	for idx, machine := range state.Machines {
+		if machine.ID == id {
+			return idx
+		}
+	}
+	return -1
+}
+
+func findMachineByRuntimeID(state *model.State, runtimeID string) int {
+	for idx, machine := range state.Machines {
+		if machine.RuntimeID == runtimeID {
+			return idx
+		}
+	}
+	return -1
+}
+
+func findMachineByFingerprintHash(state *model.State, tenantID, fingerprintHash string) int {
+	for idx, machine := range state.Machines {
+		if machine.TenantID != tenantID {
+			continue
+		}
+		if machine.FingerprintHash == fingerprintHash {
+			return idx
+		}
+	}
+	return -1
+}
+
+func findMachineCandidate(state *model.State, tenantID, nodeKeyID, connectionMode, machineName, runtimeName, endpoint string) int {
+	bestIndex := -1
+	bestScore := 0
+	for idx, machine := range state.Machines {
+		if machine.TenantID != tenantID || machine.NodeKeyID != nodeKeyID || machine.ConnectionMode != connectionMode {
+			continue
+		}
+		score := 0
+		if endpoint != "" && strings.EqualFold(strings.TrimSpace(machine.Endpoint), strings.TrimSpace(endpoint)) {
+			score += 1
+		}
+		if runtimeName != "" && strings.EqualFold(machine.RuntimeName, strings.TrimSpace(runtimeName)) {
+			score += 4
+		}
+		if runtimeName != "" && strings.EqualFold(machine.ClusterNodeName, strings.TrimSpace(runtimeName)) {
+			score += 4
+		}
+		if machineName != "" && strings.EqualFold(machine.Name, strings.TrimSpace(machineName)) {
+			score += 2
+		}
+		if score > bestScore {
+			bestScore = score
+			bestIndex = idx
+		}
+	}
+	if bestScore == 0 {
+		return -1
+	}
+	return bestIndex
 }
 
 func findApp(state *model.State, id string) int {
