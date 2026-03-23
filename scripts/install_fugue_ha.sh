@@ -110,6 +110,26 @@ cluster_join_server_value() {
   printf 'https://%s:6443' "${join_host}"
 }
 
+registry_push_base_value() {
+  printf '%s.%s.svc.cluster.local:5000' "${REGISTRY_DEPLOYMENT_NAME}" "${NAMESPACE}"
+}
+
+registry_pull_base_value() {
+  printf '%s:%s' "${K3S_API_IP}" "${REGISTRY_NODEPORT}"
+}
+
+cluster_join_registry_endpoint_value() {
+  local join_host="${K3S_API_IP}"
+  if mesh_enabled; then
+    local primary_mesh_ip=""
+    primary_mesh_ip="$(mesh_ip_for_alias "${PRIMARY_ALIAS}")"
+    if [[ -n "${primary_mesh_ip}" ]]; then
+      join_host="${primary_mesh_ip}"
+    fi
+  fi
+  printf '%s:%s' "${join_host}" "${REGISTRY_NODEPORT}"
+}
+
 run_with_retry() {
   local attempts="$1"
   local delay="$2"
@@ -934,6 +954,12 @@ EOF
 write_values_override() {
   local cluster_join_server
   cluster_join_server="$(cluster_join_server_value)"
+  local registry_push_base
+  registry_push_base="$(registry_push_base_value)"
+  local registry_pull_base
+  registry_pull_base="$(registry_pull_base_value)"
+  local cluster_join_registry_endpoint
+  cluster_join_registry_endpoint="$(cluster_join_registry_endpoint_value)"
   local cluster_join_token
   cluster_join_token="$(wait_for_primary_node_token)"
   local cluster_join_mesh_provider=""
@@ -956,7 +982,9 @@ api:
     pullPolicy: IfNotPresent
   appBaseDomain: "${FUGUE_APP_BASE_DOMAIN}"
   apiPublicDomain: "${FUGUE_DOMAIN}"
-  registryPushBase: "${FUGUE_REGISTRY_DOMAIN}"
+  registryPushBase: "${registry_push_base}"
+  registryPullBase: "${registry_pull_base}"
+  clusterJoinRegistryEndpoint: "${cluster_join_registry_endpoint}"
   clusterJoinServer: "${cluster_join_server}"
   clusterJoinToken: "${cluster_join_token}"
   clusterJoinMeshProvider: "${cluster_join_mesh_provider}"

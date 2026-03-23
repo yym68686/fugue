@@ -92,8 +92,8 @@ func (s *Server) isReservedAppHostname(host string) bool {
 	if host == "" {
 		return false
 	}
-	return host == strings.TrimSpace(strings.ToLower(s.apiPublicDomain)) ||
-		host == strings.TrimSpace(strings.ToLower(s.registryHost))
+	_, exists := s.reservedAppHosts[host]
+	return exists
 }
 
 func registryHostFromPushBase(raw string) string {
@@ -115,4 +115,16 @@ func registryHostFromPushBase(raw string) string {
 		host = parsedHost
 	}
 	return strings.Trim(strings.TrimSpace(strings.ToLower(host)), "[]")
+}
+
+func reservedAppHosts(hosts ...string) map[string]struct{} {
+	out := make(map[string]struct{}, len(hosts))
+	for _, host := range hosts {
+		host = registryHostFromPushBase(host)
+		if host == "" {
+			continue
+		}
+		out[host] = struct{}{}
+	}
+	return out
 }

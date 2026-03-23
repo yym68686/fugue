@@ -52,7 +52,11 @@ func (s *Service) executeManagedImportOperation(op model.Operation, app model.Ap
 
 	finalSpec := cloneImportSpec(*op.DesiredSpec)
 	finalSource := output.Source
-	finalSpec.Image = strings.TrimSpace(output.ImportResult.ImageRef)
+	runtimeImageRef, err := rewriteImportedImageRef(strings.TrimSpace(output.ImportResult.ImageRef), s.registryPushBase, s.registryPullBase)
+	if err != nil {
+		return err
+	}
+	finalSpec.Image = runtimeImageRef
 	if finalSpec.Replicas <= 0 {
 		finalSpec.Replicas = 1
 	}
@@ -84,7 +88,7 @@ func (s *Service) executeManagedImportOperation(op model.Operation, app model.Ap
 		return fmt.Errorf("complete import operation %s: %w", op.ID, err)
 	}
 
-	s.Logger.Printf("operation %s completed import build; image=%s deploy=%s", op.ID, finalSpec.Image, deployOp.ID)
+	s.Logger.Printf("operation %s completed import build; pushed_image=%s runtime_image=%s deploy=%s", op.ID, output.ImportResult.ImageRef, finalSpec.Image, deployOp.ID)
 	return nil
 }
 
@@ -165,4 +169,24 @@ func cloneImportSpec(spec model.AppSpec) model.AppSpec {
 		out.Postgres = &postgres
 	}
 	return out
+}
+
+func rewriteImportedImageRef(imageRef, pushBase, pullBase string) (string, error) {
+	imageRef = strings.TrimSpace(imageRef)
+	pushBase = strings.Trim(strings.TrimSpace(pushBase), "/")
+	pullBase = strings.Trim(strings.TrimSpace(pullBase), "/")
+	if imageRef == "" {
+		return "", fmt.Errorf("imported image reference is empty")
+	}
+	if pullBase == "" || pullBase == pushBase {
+		return imageRef, nil
+	}
+	if pushBase == "" {
+		return imageRef, nil
+	}
+	prefix := pushBase + "/"
+	if !strings.HasPrefix(imageRef, prefix) {
+		return "", fmt.Errorf("imported image %q does not match configured registry push base %q", imageRef, pushBase)
+	}
+	return pullBase + "/" + strings.TrimPrefix(imageRef, prefix), nil
 }

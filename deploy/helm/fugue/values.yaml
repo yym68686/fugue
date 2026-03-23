@@ -10,6 +10,8 @@ api:
   appBaseDomain: fugue.pro
   apiPublicDomain: api.fugue.pro
   registryPushBase: registry.fugue.pro
+  registryPullBase: ""
+  clusterJoinRegistryEndpoint: ""
   clusterJoinServer: ""
   clusterJoinToken: ""
   clusterJoinMeshProvider: ""

@@ -343,12 +343,7 @@ func buildNixpacksJobObject(namespace, jobName string, req nixpacksBuildRequest)
 						{
 							"name":  "kaniko",
 							"image": defaultKanikoImage,
-							"args": []string{
-								"--context=dir:///workspace/generated",
-								"--dockerfile=/workspace/generated/Dockerfile",
-								"--destination=" + req.ImageRef,
-								"--cleanup",
-							},
+							"args":  kanikoDestinationArgs(req.ImageRef, "--context=dir:///workspace/generated", "--dockerfile=/workspace/generated/Dockerfile"),
 							"volumeMounts": []map[string]any{
 								{"name": "workspace", "mountPath": "/workspace"},
 							},

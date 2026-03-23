@@ -22,6 +22,17 @@ command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
+detect_primary_private_ip() {
+  ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}'
+}
+
+detect_primary_mesh_ip() {
+  if ! command_exists tailscale; then
+    return 1
+  fi
+  tailscale ip -4 2>/dev/null | awk 'NR == 1 {print; exit}'
+}
+
 detect_kubectl() {
   if [[ -n "${KUBECTL_BIN:-}" ]]; then
     printf '%s' "${KUBECTL_BIN}"
@@ -124,6 +135,27 @@ main() {
   FUGUE_SMOKE_DELAY_SECONDS="${FUGUE_SMOKE_DELAY_SECONDS:-5}"
   FUGUE_API_REPLICA_COUNT="${FUGUE_API_REPLICA_COUNT:-2}"
   FUGUE_CONTROLLER_REPLICA_COUNT="${FUGUE_CONTROLLER_REPLICA_COUNT:-2}"
+  FUGUE_REGISTRY_NODEPORT="${FUGUE_REGISTRY_NODEPORT:-30500}"
+  FUGUE_REGISTRY_SERVICE_PORT="${FUGUE_REGISTRY_SERVICE_PORT:-5000}"
+
+  if [[ -z "${FUGUE_REGISTRY_PUSH_BASE:-}" ]]; then
+    FUGUE_REGISTRY_PUSH_BASE="${FUGUE_RELEASE_FULLNAME}-registry.${FUGUE_NAMESPACE}.svc.cluster.local:${FUGUE_REGISTRY_SERVICE_PORT}"
+  fi
+  if [[ -z "${FUGUE_CLUSTER_INTERNAL_IP:-}" ]]; then
+    FUGUE_CLUSTER_INTERNAL_IP="$(detect_primary_private_ip)"
+  fi
+  if [[ -z "${FUGUE_REGISTRY_PULL_BASE:-}" ]]; then
+    [[ -n "${FUGUE_CLUSTER_INTERNAL_IP}" ]] || fail "failed to detect cluster internal IP for registry pull base"
+    FUGUE_REGISTRY_PULL_BASE="${FUGUE_CLUSTER_INTERNAL_IP}:${FUGUE_REGISTRY_NODEPORT}"
+  fi
+  if [[ -z "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT:-}" ]]; then
+    mesh_ip="$(detect_primary_mesh_ip || true)"
+    if [[ -n "${mesh_ip}" ]]; then
+      FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT="${mesh_ip}:${FUGUE_REGISTRY_NODEPORT}"
+    else
+      FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT="${FUGUE_REGISTRY_PULL_BASE}"
+    fi
+  fi
 
   if [[ -z "${FUGUE_SMOKE_URL:-}" && -n "${FUGUE_API_PUBLIC_DOMAIN:-}" ]]; then
     FUGUE_SMOKE_URL="https://${FUGUE_API_PUBLIC_DOMAIN}/healthz"
@@ -141,6 +173,9 @@ main() {
   log "api image: ${FUGUE_API_IMAGE_REPOSITORY}:${FUGUE_API_IMAGE_TAG}"
   log "controller image: ${FUGUE_CONTROLLER_IMAGE_REPOSITORY}:${FUGUE_CONTROLLER_IMAGE_TAG}"
   log "previous Helm revision: ${PREVIOUS_REVISION}"
+  log "registry push base: ${FUGUE_REGISTRY_PUSH_BASE}"
+  log "registry pull base: ${FUGUE_REGISTRY_PULL_BASE}"
+  log "cluster join registry endpoint: ${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}"
 
   if ! helm upgrade "${FUGUE_RELEASE_NAME}" "${FUGUE_HELM_CHART_PATH}" \
     -n "${FUGUE_NAMESPACE}" \
@@ -152,6 +187,9 @@ main() {
     --set-string api.image.tag="${FUGUE_API_IMAGE_TAG}" \
     --set-string controller.image.repository="${FUGUE_CONTROLLER_IMAGE_REPOSITORY}" \
     --set-string controller.image.tag="${FUGUE_CONTROLLER_IMAGE_TAG}" \
+    --set-string api.registryPushBase="${FUGUE_REGISTRY_PUSH_BASE}" \
+    --set-string api.registryPullBase="${FUGUE_REGISTRY_PULL_BASE}" \
+    --set-string api.clusterJoinRegistryEndpoint="${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}" \
     --set api.replicaCount="${FUGUE_API_REPLICA_COUNT}" \
     --set api.hostNetwork=false \
     --set api.minReadySeconds=5 \

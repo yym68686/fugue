@@ -66,11 +66,13 @@ func TestJoinClusterEnvIncludesMeshConfig(t *testing.T) {
 	}
 
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
-		ClusterJoinServer:          "https://100.64.0.1:6443",
-		ClusterJoinToken:           "cluster-token",
-		ClusterJoinMeshProvider:    "tailscale",
-		ClusterJoinMeshLoginServer: "https://mesh.fugue.pro",
-		ClusterJoinMeshAuthKey:     "tskey-example",
+		ClusterJoinServer:           "https://100.64.0.1:6443",
+		ClusterJoinToken:            "cluster-token",
+		RegistryPullBase:            "10.128.0.2:30500",
+		ClusterJoinRegistryEndpoint: "100.64.0.1:30500",
+		ClusterJoinMeshProvider:     "tailscale",
+		ClusterJoinMeshLoginServer:  "https://mesh.fugue.pro",
+		ClusterJoinMeshAuthKey:      "tskey-example",
 	})
 
 	form := url.Values{}
@@ -91,6 +93,12 @@ func TestJoinClusterEnvIncludesMeshConfig(t *testing.T) {
 	}
 	if !strings.Contains(body, "FUGUE_JOIN_MESH_PROVIDER='tailscale'") {
 		t.Fatalf("expected mesh provider in response body, got %s", body)
+	}
+	if !strings.Contains(body, "FUGUE_JOIN_REGISTRY_BASE='10.128.0.2:30500'") {
+		t.Fatalf("expected registry base in response body, got %s", body)
+	}
+	if !strings.Contains(body, "FUGUE_JOIN_REGISTRY_ENDPOINT='100.64.0.1:30500'") {
+		t.Fatalf("expected registry endpoint in response body, got %s", body)
 	}
 	if !strings.Contains(body, "FUGUE_JOIN_MESH_LOGIN_SERVER='https://mesh.fugue.pro'") {
 		t.Fatalf("expected mesh login server in response body, got %s", body)

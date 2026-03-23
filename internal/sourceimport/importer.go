@@ -7,7 +7,6 @@ import (
 	"io"
 	"io/fs"
 	"log"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -212,17 +211,7 @@ func buildAndPushStaticSiteImage(sourceDir, imageRef string) error {
 }
 
 func destinationTagOptions(imageRef string) []name.Option {
-	host := imageRef
-	if idx := strings.Index(host, "/"); idx >= 0 {
-		host = host[:idx]
-	}
-	host = strings.TrimSpace(host)
-	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
-		host = parsedHost
-	}
-	host = strings.Trim(host, "[]")
-
-	if strings.EqualFold(host, "localhost") || net.ParseIP(host) != nil {
+	if isInsecureRegistryHost(registryHostFromImageRef(imageRef)) {
 		return []name.Option{name.Insecure}
 	}
 	return nil

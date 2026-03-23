@@ -24,15 +24,17 @@ func main() {
 	}
 
 	server := api.NewServer(store, auth.New(store, cfg.BootstrapAdminKey), logger, api.ServerConfig{
-		AppBaseDomain:              cfg.AppBaseDomain,
-		APIPublicDomain:            cfg.APIPublicDomain,
-		RegistryPushBase:           cfg.RegistryPushBase,
-		ClusterJoinServer:          cfg.ClusterJoinServer,
-		ClusterJoinToken:           cfg.ClusterJoinToken,
-		ClusterJoinMeshProvider:    cfg.ClusterJoinMeshProvider,
-		ClusterJoinMeshLoginServer: cfg.ClusterJoinMeshLoginServer,
-		ClusterJoinMeshAuthKey:     cfg.ClusterJoinMeshAuthKey,
-		ImportWorkDir:              cfg.ImportWorkDir,
+		AppBaseDomain:               cfg.AppBaseDomain,
+		APIPublicDomain:             cfg.APIPublicDomain,
+		RegistryPushBase:            cfg.RegistryPushBase,
+		RegistryPullBase:            cfg.RegistryPullBase,
+		ClusterJoinRegistryEndpoint: cfg.ClusterJoinRegistryEndpoint,
+		ClusterJoinServer:           cfg.ClusterJoinServer,
+		ClusterJoinToken:            cfg.ClusterJoinToken,
+		ClusterJoinMeshProvider:     cfg.ClusterJoinMeshProvider,
+		ClusterJoinMeshLoginServer:  cfg.ClusterJoinMeshLoginServer,
+		ClusterJoinMeshAuthKey:      cfg.ClusterJoinMeshAuthKey,
+		ImportWorkDir:               cfg.ImportWorkDir,
 	})
 	httpServer := &http.Server{
 		Addr:              cfg.BindAddr,

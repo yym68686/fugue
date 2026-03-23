@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -67,5 +68,30 @@ func TestBuildGitContextURL(t *testing.T) {
 	want := "git://github.com/yym68686/uni-api.git#refs/heads/main#abcdef1234567890"
 	if got != want {
 		t.Fatalf("unexpected git context url:\nwant: %s\ngot:  %s", want, got)
+	}
+}
+
+func TestIsInsecureRegistryHostTreatsClusterServiceAsInsecure(t *testing.T) {
+	t.Parallel()
+
+	if !isInsecureRegistryHost("fugue-fugue-registry.fugue-system.svc.cluster.local") {
+		t.Fatalf("expected cluster-local registry host to be treated as insecure")
+	}
+}
+
+func TestKanikoDestinationArgsIncludeInsecureFlagsForClusterService(t *testing.T) {
+	t.Parallel()
+
+	args := kanikoDestinationArgs(
+		"fugue-fugue-registry.fugue-system.svc.cluster.local:5000/fugue-apps/demo:git-abc123",
+		"--context=dir:///workspace/generated",
+		"--dockerfile=/workspace/generated/Dockerfile",
+	)
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--insecure") {
+		t.Fatalf("expected --insecure in args: %v", args)
+	}
+	if !strings.Contains(joined, "--insecure-registry=fugue-fugue-registry.fugue-system.svc.cluster.local") {
+		t.Fatalf("expected --insecure-registry in args: %v", args)
 	}
 }

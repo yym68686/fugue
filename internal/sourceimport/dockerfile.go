@@ -248,6 +248,12 @@ func buildKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest)
 		"--git=single-branch=true",
 		"--git=recurse-submodules=true",
 	}
+	if registryHost := registryHostFromImageRef(req.ImageRef); isInsecureRegistryHost(registryHost) {
+		args = append(args,
+			"--insecure",
+			"--insecure-registry="+registryHost,
+		)
+	}
 	if strings.TrimSpace(req.BuildContextDir) != "" && strings.TrimSpace(req.BuildContextDir) != "." {
 		args = append(args, "--context-sub-path="+req.BuildContextDir)
 	}

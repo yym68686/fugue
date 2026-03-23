@@ -9,27 +9,30 @@ import (
 )
 
 type APIConfig struct {
-	BindAddr                   string
-	StorePath                  string
-	DatabaseURL                string
-	BootstrapAdminKey          string
-	AppBaseDomain              string
-	APIPublicDomain            string
-	RegistryPushBase           string
-	ClusterJoinServer          string
-	ClusterJoinToken           string
-	ClusterJoinMeshProvider    string
-	ClusterJoinMeshLoginServer string
-	ClusterJoinMeshAuthKey     string
-	ImportWorkDir              string
-	ShutdownDrainDelay         time.Duration
-	ShutdownTimeout            time.Duration
+	BindAddr                    string
+	StorePath                   string
+	DatabaseURL                 string
+	BootstrapAdminKey           string
+	AppBaseDomain               string
+	APIPublicDomain             string
+	RegistryPushBase            string
+	RegistryPullBase            string
+	ClusterJoinRegistryEndpoint string
+	ClusterJoinServer           string
+	ClusterJoinToken            string
+	ClusterJoinMeshProvider     string
+	ClusterJoinMeshLoginServer  string
+	ClusterJoinMeshAuthKey      string
+	ImportWorkDir               string
+	ShutdownDrainDelay          time.Duration
+	ShutdownTimeout             time.Duration
 }
 
 type ControllerConfig struct {
 	StorePath                     string
 	DatabaseURL                   string
 	RegistryPushBase              string
+	RegistryPullBase              string
 	ImportWorkDir                 string
 	PollInterval                  time.Duration
 	FallbackPollInterval          time.Duration
@@ -67,30 +70,40 @@ type AgentConfig struct {
 }
 
 func APIFromEnv() APIConfig {
-	return APIConfig{
-		BindAddr:                   getenv("FUGUE_BIND_ADDR", ":8080"),
-		StorePath:                  getenv("FUGUE_STORE_PATH", "./data/store.json"),
-		DatabaseURL:                getenv("FUGUE_DATABASE_URL", ""),
-		BootstrapAdminKey:          getenv("FUGUE_BOOTSTRAP_ADMIN_KEY", "fugue_bootstrap_admin_change_me"),
-		AppBaseDomain:              getenv("FUGUE_APP_BASE_DOMAIN", "fugue.pro"),
-		APIPublicDomain:            getenv("FUGUE_API_PUBLIC_DOMAIN", "api.fugue.pro"),
-		RegistryPushBase:           getenv("FUGUE_REGISTRY_PUSH_BASE", "127.0.0.1:30500"),
-		ClusterJoinServer:          getenv("FUGUE_CLUSTER_JOIN_SERVER", ""),
-		ClusterJoinToken:           getenv("FUGUE_CLUSTER_JOIN_TOKEN", ""),
-		ClusterJoinMeshProvider:    getenv("FUGUE_CLUSTER_JOIN_MESH_PROVIDER", ""),
-		ClusterJoinMeshLoginServer: getenv("FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER", ""),
-		ClusterJoinMeshAuthKey:     getenv("FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY", ""),
-		ImportWorkDir:              getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
-		ShutdownDrainDelay:         getenvDuration("FUGUE_API_SHUTDOWN_DRAIN_DELAY", 5*time.Second),
-		ShutdownTimeout:            getenvDuration("FUGUE_API_SHUTDOWN_TIMEOUT", 25*time.Second),
+	cfg := APIConfig{
+		BindAddr:                    getenv("FUGUE_BIND_ADDR", ":8080"),
+		StorePath:                   getenv("FUGUE_STORE_PATH", "./data/store.json"),
+		DatabaseURL:                 getenv("FUGUE_DATABASE_URL", ""),
+		BootstrapAdminKey:           getenv("FUGUE_BOOTSTRAP_ADMIN_KEY", "fugue_bootstrap_admin_change_me"),
+		AppBaseDomain:               getenv("FUGUE_APP_BASE_DOMAIN", "fugue.pro"),
+		APIPublicDomain:             getenv("FUGUE_API_PUBLIC_DOMAIN", "api.fugue.pro"),
+		RegistryPushBase:            getenv("FUGUE_REGISTRY_PUSH_BASE", "127.0.0.1:30500"),
+		RegistryPullBase:            strings.TrimSpace(os.Getenv("FUGUE_REGISTRY_PULL_BASE")),
+		ClusterJoinRegistryEndpoint: strings.TrimSpace(os.Getenv("FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT")),
+		ClusterJoinServer:           getenv("FUGUE_CLUSTER_JOIN_SERVER", ""),
+		ClusterJoinToken:            getenv("FUGUE_CLUSTER_JOIN_TOKEN", ""),
+		ClusterJoinMeshProvider:     getenv("FUGUE_CLUSTER_JOIN_MESH_PROVIDER", ""),
+		ClusterJoinMeshLoginServer:  getenv("FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER", ""),
+		ClusterJoinMeshAuthKey:      getenv("FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY", ""),
+		ImportWorkDir:               getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
+		ShutdownDrainDelay:          getenvDuration("FUGUE_API_SHUTDOWN_DRAIN_DELAY", 5*time.Second),
+		ShutdownTimeout:             getenvDuration("FUGUE_API_SHUTDOWN_TIMEOUT", 25*time.Second),
 	}
+	if cfg.RegistryPullBase == "" {
+		cfg.RegistryPullBase = cfg.RegistryPushBase
+	}
+	if cfg.ClusterJoinRegistryEndpoint == "" {
+		cfg.ClusterJoinRegistryEndpoint = cfg.RegistryPullBase
+	}
+	return cfg
 }
 
 func ControllerFromEnv() ControllerConfig {
-	return ControllerConfig{
+	cfg := ControllerConfig{
 		StorePath:                     getenv("FUGUE_STORE_PATH", "./data/store.json"),
 		DatabaseURL:                   getenv("FUGUE_DATABASE_URL", ""),
 		RegistryPushBase:              getenv("FUGUE_REGISTRY_PUSH_BASE", "127.0.0.1:30500"),
+		RegistryPullBase:              strings.TrimSpace(os.Getenv("FUGUE_REGISTRY_PULL_BASE")),
 		ImportWorkDir:                 getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
 		PollInterval:                  getenvDuration("FUGUE_CONTROLLER_POLL_INTERVAL", 5*time.Second),
 		FallbackPollInterval:          getenvDuration("FUGUE_CONTROLLER_FALLBACK_POLL_INTERVAL", 30*time.Second),
@@ -109,6 +122,10 @@ func ControllerFromEnv() ControllerConfig {
 		LegacyControllerContainerName: getenv("FUGUE_CONTROLLER_LEGACY_CONTROLLER_CONTAINER_NAME", "controller"),
 		LegacyControllerCheckInterval: getenvDuration("FUGUE_CONTROLLER_LEGACY_CONTROLLER_CHECK_INTERVAL", 2*time.Second),
 	}
+	if cfg.RegistryPullBase == "" {
+		cfg.RegistryPullBase = cfg.RegistryPushBase
+	}
+	return cfg
 }
 
 func AgentFromEnv() AgentConfig {

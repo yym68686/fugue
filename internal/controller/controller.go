@@ -21,6 +21,7 @@ type Service struct {
 	Logger           *log.Logger
 	importer         *sourceimport.Importer
 	registryPushBase string
+	registryPullBase string
 }
 
 func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *Service {
@@ -31,6 +32,7 @@ func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *S
 		Logger:           logger,
 		importer:         sourceimport.NewImporter(cfg.ImportWorkDir, logger),
 		registryPushBase: strings.TrimSpace(cfg.RegistryPushBase),
+		registryPullBase: strings.TrimSpace(cfg.RegistryPullBase),
 	}
 }
 

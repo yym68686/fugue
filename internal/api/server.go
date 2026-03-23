@@ -18,20 +18,22 @@ import (
 )
 
 type Server struct {
-	store                      *store.Store
-	auth                       *auth.Authenticator
-	log                        *log.Logger
-	appBaseDomain              string
-	apiPublicDomain            string
-	registryPushBase           string
-	registryHost               string
-	clusterJoinServer          string
-	clusterJoinToken           string
-	clusterJoinMeshProvider    string
-	clusterJoinMeshLoginServer string
-	clusterJoinMeshAuthKey     string
-	importer                   *sourceimport.Importer
-	ready                      atomic.Bool
+	store                       *store.Store
+	auth                        *auth.Authenticator
+	log                         *log.Logger
+	appBaseDomain               string
+	apiPublicDomain             string
+	registryPushBase            string
+	registryPullBase            string
+	clusterJoinRegistryEndpoint string
+	reservedAppHosts            map[string]struct{}
+	clusterJoinServer           string
+	clusterJoinToken            string
+	clusterJoinMeshProvider     string
+	clusterJoinMeshLoginServer  string
+	clusterJoinMeshAuthKey      string
+	importer                    *sourceimport.Importer
+	ready                       atomic.Bool
 }
 
 func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger, cfg ServerConfig) *Server {
@@ -39,20 +41,28 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		logger = log.Default()
 	}
 	server := &Server{
-		store:                      store,
-		auth:                       authn,
-		log:                        logger,
-		appBaseDomain:              strings.TrimSpace(strings.ToLower(cfg.AppBaseDomain)),
-		apiPublicDomain:            strings.TrimSpace(strings.ToLower(cfg.APIPublicDomain)),
-		registryPushBase:           strings.TrimSpace(cfg.RegistryPushBase),
-		registryHost:               registryHostFromPushBase(cfg.RegistryPushBase),
-		clusterJoinServer:          strings.TrimSpace(cfg.ClusterJoinServer),
-		clusterJoinToken:           strings.TrimSpace(cfg.ClusterJoinToken),
-		clusterJoinMeshProvider:    strings.TrimSpace(strings.ToLower(cfg.ClusterJoinMeshProvider)),
-		clusterJoinMeshLoginServer: strings.TrimSpace(cfg.ClusterJoinMeshLoginServer),
-		clusterJoinMeshAuthKey:     strings.TrimSpace(cfg.ClusterJoinMeshAuthKey),
-		importer:                   sourceimport.NewImporter(cfg.ImportWorkDir, logger),
+		store:                       store,
+		auth:                        authn,
+		log:                         logger,
+		appBaseDomain:               strings.TrimSpace(strings.ToLower(cfg.AppBaseDomain)),
+		apiPublicDomain:             strings.TrimSpace(strings.ToLower(cfg.APIPublicDomain)),
+		registryPushBase:            strings.TrimSpace(cfg.RegistryPushBase),
+		registryPullBase:            strings.TrimSpace(cfg.RegistryPullBase),
+		clusterJoinRegistryEndpoint: strings.TrimSpace(cfg.ClusterJoinRegistryEndpoint),
+		clusterJoinServer:           strings.TrimSpace(cfg.ClusterJoinServer),
+		clusterJoinToken:            strings.TrimSpace(cfg.ClusterJoinToken),
+		clusterJoinMeshProvider:     strings.TrimSpace(strings.ToLower(cfg.ClusterJoinMeshProvider)),
+		clusterJoinMeshLoginServer:  strings.TrimSpace(cfg.ClusterJoinMeshLoginServer),
+		clusterJoinMeshAuthKey:      strings.TrimSpace(cfg.ClusterJoinMeshAuthKey),
+		importer:                    sourceimport.NewImporter(cfg.ImportWorkDir, logger),
 	}
+	if server.registryPullBase == "" {
+		server.registryPullBase = server.registryPushBase
+	}
+	if server.clusterJoinRegistryEndpoint == "" {
+		server.clusterJoinRegistryEndpoint = server.registryPullBase
+	}
+	server.reservedAppHosts = reservedAppHosts(server.apiPublicDomain, server.registryPushBase, server.registryPullBase)
 	server.ready.Store(true)
 	return server
 }

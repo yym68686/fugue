@@ -13,15 +13,17 @@ import (
 )
 
 type joinClusterPlan struct {
-	ServerURL       string   `json:"server_url"`
-	Token           string   `json:"token"`
-	NodeName        string   `json:"node_name"`
-	NodeLabels      []string `json:"node_labels"`
-	NodeTaints      []string `json:"node_taints"`
-	RuntimeID       string   `json:"runtime_id"`
-	MeshProvider    string   `json:"mesh_provider,omitempty"`
-	MeshLoginServer string   `json:"mesh_login_server,omitempty"`
-	MeshAuthKey     string   `json:"mesh_auth_key,omitempty"`
+	ServerURL        string   `json:"server_url"`
+	Token            string   `json:"token"`
+	NodeName         string   `json:"node_name"`
+	NodeLabels       []string `json:"node_labels"`
+	NodeTaints       []string `json:"node_taints"`
+	RuntimeID        string   `json:"runtime_id"`
+	RegistryBase     string   `json:"registry_base,omitempty"`
+	RegistryEndpoint string   `json:"registry_endpoint,omitempty"`
+	MeshProvider     string   `json:"mesh_provider,omitempty"`
+	MeshLoginServer  string   `json:"mesh_login_server,omitempty"`
+	MeshAuthKey      string   `json:"mesh_auth_key,omitempty"`
 }
 
 func (s *Server) handleJoinClusterNode(w http.ResponseWriter, r *http.Request) {
@@ -112,6 +114,8 @@ func (s *Server) handleJoinClusterNodeEnv(w http.ResponseWriter, r *http.Request
 	fmt.Fprintf(w, "FUGUE_JOIN_NODE_LABELS=%s\n", shellQuote(strings.Join(join.NodeLabels, ",")))
 	fmt.Fprintf(w, "FUGUE_JOIN_NODE_TAINTS=%s\n", shellQuote(strings.Join(join.NodeTaints, ",")))
 	fmt.Fprintf(w, "FUGUE_JOIN_RUNTIME_ID=%s\n", shellQuote(join.RuntimeID))
+	fmt.Fprintf(w, "FUGUE_JOIN_REGISTRY_BASE=%s\n", shellQuote(join.RegistryBase))
+	fmt.Fprintf(w, "FUGUE_JOIN_REGISTRY_ENDPOINT=%s\n", shellQuote(join.RegistryEndpoint))
 	fmt.Fprintf(w, "FUGUE_JOIN_MESH_PROVIDER=%s\n", shellQuote(join.MeshProvider))
 	fmt.Fprintf(w, "FUGUE_JOIN_MESH_LOGIN_SERVER=%s\n", shellQuote(join.MeshLoginServer))
 	fmt.Fprintf(w, "FUGUE_JOIN_MESH_AUTH_KEY=%s\n", shellQuote(join.MeshAuthKey))
@@ -138,21 +142,26 @@ func (s *Server) bootstrapJoinClusterNode(nodeKey, nodeName, endpoint string, la
 		return model.NodeKey{}, model.Runtime{}, joinClusterPlan{}, err
 	}
 	join := joinClusterPlan{
-		ServerURL:       s.clusterJoinServer,
-		Token:           s.clusterJoinToken,
-		NodeName:        runtimeObj.Name,
-		NodeLabels:      runtime.JoinNodeLabels(runtimeObj),
-		NodeTaints:      runtime.JoinNodeTaints(runtimeObj),
-		RuntimeID:       runtimeObj.ID,
-		MeshProvider:    s.clusterJoinMeshProvider,
-		MeshLoginServer: s.clusterJoinMeshLoginServer,
-		MeshAuthKey:     s.clusterJoinMeshAuthKey,
+		ServerURL:        s.clusterJoinServer,
+		Token:            s.clusterJoinToken,
+		NodeName:         runtimeObj.Name,
+		NodeLabels:       runtime.JoinNodeLabels(runtimeObj),
+		NodeTaints:       runtime.JoinNodeTaints(runtimeObj),
+		RuntimeID:        runtimeObj.ID,
+		RegistryBase:     s.registryPullBase,
+		RegistryEndpoint: s.clusterJoinRegistryEndpoint,
+		MeshProvider:     s.clusterJoinMeshProvider,
+		MeshLoginServer:  s.clusterJoinMeshLoginServer,
+		MeshAuthKey:      s.clusterJoinMeshAuthKey,
 	}
 	return key, runtimeObj, join, nil
 }
 
 func (s *Server) clusterJoinConfigured() bool {
 	if strings.TrimSpace(s.clusterJoinServer) == "" || strings.TrimSpace(s.clusterJoinToken) == "" {
+		return false
+	}
+	if strings.TrimSpace(s.registryPullBase) == "" || strings.TrimSpace(s.clusterJoinRegistryEndpoint) == "" {
 		return false
 	}
 	if s.clusterJoinMeshProvider == "" {
@@ -403,6 +412,19 @@ mkdir -p /etc/rancher/k3s
   csv_to_yaml_list node-taint "${FUGUE_JOIN_NODE_TAINTS:-}"
 } >/etc/rancher/k3s/config.yaml
 
+if [ -n "${FUGUE_JOIN_REGISTRY_BASE:-}" ] && [ -n "${FUGUE_JOIN_REGISTRY_ENDPOINT:-}" ]; then
+  cat >/etc/rancher/k3s/registries.yaml <<EOF_REG
+mirrors:
+  "${FUGUE_JOIN_REGISTRY_BASE}":
+    endpoint:
+      - "http://${FUGUE_JOIN_REGISTRY_ENDPOINT}"
+configs:
+  "${FUGUE_JOIN_REGISTRY_BASE}":
+    tls:
+      insecure_skip_verify: true
+EOF_REG
+fi
+
 if ! command -v k3s >/dev/null 2>&1; then
   curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL="${FUGUE_K3S_CHANNEL}" INSTALL_K3S_EXEC="agent" sh -
 else
@@ -419,6 +441,8 @@ Fugue node joined.
 runtime_id=${FUGUE_JOIN_RUNTIME_ID}
 node_name=${FUGUE_JOIN_NODE_NAME}
 server=${FUGUE_JOIN_SERVER}
+registry_base=${FUGUE_JOIN_REGISTRY_BASE:-}
+registry_endpoint=${FUGUE_JOIN_REGISTRY_ENDPOINT:-}
 labels=${FUGUE_JOIN_NODE_LABELS}
 taints=${FUGUE_JOIN_NODE_TAINTS}
 EOF
