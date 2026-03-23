@@ -573,6 +573,9 @@ INSERT INTO fugue_machines (id, tenant_id, name, connection_mode, status, endpoi
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 ON CONFLICT (id) DO NOTHING
 `, machine.ID, nullIfEmpty(machine.TenantID), machine.Name, machine.ConnectionMode, machine.Status, machine.Endpoint, labelsJSON, nullIfEmpty(machine.NodeKeyID), machine.RuntimeID, machine.RuntimeName, machine.ClusterNodeName, machine.FingerprintPrefix, machine.FingerprintHash, machine.LastSeenAt, machine.CreatedAt, machine.UpdatedAt); err != nil {
+			if isUniqueViolation(err) {
+				continue
+			}
 			return fmt.Errorf("backfill machine %s: %w", machine.ID, err)
 		}
 	}
