@@ -18,7 +18,7 @@ Assumptions:
 - the three VPS use a `systemd`-based distro
 
 This mode installs all three machines as `k3s server` nodes and then runs the current single-replica Fugue control plane on `gcp1` with a `hostPath` data directory plus an in-cluster PostgreSQL instance.
-On the first PostgreSQL-backed startup, Fugue automatically imports legacy state from `/var/lib/fugue/store.json` if that file exists.
+On the first relational PostgreSQL-backed startup, Fugue automatically imports legacy state from the old `fugue_state` row or `/var/lib/fugue/store.json` if either exists.
 The same script also provisions an internal registry on the primary node and can configure a wildcard HTTPS edge for app hostnames.
 
 ## 1. Topology
@@ -146,7 +146,7 @@ helm upgrade --install fugue ./deploy/helm/fugue \
   --set nodeSelector.nodepool=system
 ```
 
-The chart enables an internal PostgreSQL instance by default. If you are upgrading from the legacy file store, keep `/var/lib/fugue/store.json` on disk for the first PostgreSQL-backed boot so Fugue can import it automatically.
+The chart enables an internal PostgreSQL instance by default. If you are upgrading from the legacy file store or the earlier single-row `fugue_state` backend, keep the old data in place for the first PostgreSQL relational boot so Fugue can import it automatically.
 
 Watch rollout:
 

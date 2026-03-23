@@ -19,13 +19,14 @@ type APIConfig struct {
 }
 
 type ControllerConfig struct {
-	StorePath           string
-	DatabaseURL         string
-	PollInterval        time.Duration
-	RuntimeOfflineAfter time.Duration
-	RenderDir           string
-	KubectlApply        bool
-	KubectlNamespace    string
+	StorePath            string
+	DatabaseURL          string
+	PollInterval         time.Duration
+	FallbackPollInterval time.Duration
+	RuntimeOfflineAfter  time.Duration
+	RenderDir            string
+	KubectlApply         bool
+	KubectlNamespace     string
 }
 
 type AgentConfig struct {
@@ -58,13 +59,14 @@ func APIFromEnv() APIConfig {
 
 func ControllerFromEnv() ControllerConfig {
 	return ControllerConfig{
-		StorePath:           getenv("FUGUE_STORE_PATH", "./data/store.json"),
-		DatabaseURL:         getenv("FUGUE_DATABASE_URL", ""),
-		PollInterval:        getenvDuration("FUGUE_CONTROLLER_POLL_INTERVAL", 5*time.Second),
-		RuntimeOfflineAfter: getenvDuration("FUGUE_RUNTIME_OFFLINE_AFTER", 90*time.Second),
-		RenderDir:           getenv("FUGUE_RENDER_DIR", "./data/rendered"),
-		KubectlApply:        getenvBool("FUGUE_CONTROLLER_KUBECTL_APPLY", false),
-		KubectlNamespace:    getenv("FUGUE_CONTROLLER_KUBECTL_NAMESPACE", "default"),
+		StorePath:            getenv("FUGUE_STORE_PATH", "./data/store.json"),
+		DatabaseURL:          getenv("FUGUE_DATABASE_URL", ""),
+		PollInterval:         getenvDuration("FUGUE_CONTROLLER_POLL_INTERVAL", 5*time.Second),
+		FallbackPollInterval: getenvDuration("FUGUE_CONTROLLER_FALLBACK_POLL_INTERVAL", 30*time.Second),
+		RuntimeOfflineAfter:  getenvDuration("FUGUE_RUNTIME_OFFLINE_AFTER", 90*time.Second),
+		RenderDir:            getenv("FUGUE_RENDER_DIR", "./data/rendered"),
+		KubectlApply:         getenvBool("FUGUE_CONTROLLER_KUBECTL_APPLY", false),
+		KubectlNamespace:     getenv("FUGUE_CONTROLLER_KUBECTL_NAMESPACE", "default"),
 	}
 }
 

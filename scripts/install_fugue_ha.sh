@@ -40,6 +40,8 @@ REMOTE_CMD_RETRIES="${FUGUE_REMOTE_CMD_RETRIES:-3}"
 REMOTE_CMD_RETRY_DELAY="${FUGUE_REMOTE_CMD_RETRY_DELAY:-2}"
 PUBLIC_API_REACHABLE="unknown"
 EDGE_LOCAL_HEALTH="unknown"
+EDGE_UPSTREAM=""
+EDGE_UPSTREAM_MODE=""
 
 IMAGES_TAR="${DIST_DIR}/fugue-images-${IMAGE_TAG}.tar"
 CHART_TAR="${DIST_DIR}/fugue-chart-${IMAGE_TAG}.tar"
@@ -90,7 +92,7 @@ run_with_retry() {
       exit_code=$?
     fi
     if [[ "${try}" -lt "${attempts}" ]]; then
-      log "${description} failed on attempt ${try}/${attempts} (exit ${exit_code}); retrying in ${delay}s"
+      printf '[fugue-install] %s\n' "${description} failed on attempt ${try}/${attempts} (exit ${exit_code}); retrying in ${delay}s" >&2
       sleep "${delay}"
     fi
   done
@@ -294,6 +296,22 @@ scp_to() {
     fi
   done
 
+  log "scp upload failed for ${host}:${dst}; falling back to streamed ssh upload"
+  for attempt in $(seq 1 "${UPLOAD_RETRIES}"); do
+    if ssh "${SSH_OPTS[@]}" "${host}" "cat > ${remote_quoted}" < "${src}"; then
+      remote_size="$(run_with_retry "${REMOTE_CMD_RETRIES}" "${REMOTE_CMD_RETRY_DELAY}" "verify streamed upload on ${host}" \
+        ssh_run "${host}" "stat -c %s ${remote_quoted}" | tr -d '[:space:]' || true)"
+      if [[ -n "${remote_size}" && "${remote_size}" == "${local_size}" ]]; then
+        return 0
+      fi
+      log "streamed upload size mismatch for ${host}:${dst}; local=${local_size} remote=${remote_size:-missing}"
+    fi
+    if [[ "${attempt}" -lt "${UPLOAD_RETRIES}" ]]; then
+      log "retrying streamed upload to ${host}:${dst} in ${UPLOAD_RETRY_DELAY}s"
+      sleep "${UPLOAD_RETRY_DELAY}"
+    fi
+  done
+
   fail "failed to upload ${src} to ${host}:${dst}"
 }
 
@@ -417,6 +435,8 @@ install_edge_proxy_on_primary() {
     return
   fi
 
+  determine_edge_upstream
+
   local app_tls_directive="tls internal"
   if [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && app_tls_cert_matches_domain; then
     log "uploading wildcard app TLS material to ${PRIMARY_ALIAS}"
@@ -451,13 +471,13 @@ cat >/etc/caddy/Caddyfile <<'CADDY'
 https://${FUGUE_DOMAIN} {
   tls internal
   encode gzip zstd
-  reverse_proxy ${K3S_API_IP}:${API_NODEPORT}
+  reverse_proxy ${EDGE_UPSTREAM}
 }
 
 https://*.${FUGUE_APP_BASE_DOMAIN} {
   ${app_tls_directive}
   encode gzip zstd
-  reverse_proxy ${K3S_API_IP}:${API_NODEPORT}
+  reverse_proxy ${EDGE_UPSTREAM}
 }
 CADDY
 caddy validate --config /etc/caddy/Caddyfile
@@ -465,6 +485,30 @@ systemctl enable caddy
 systemctl restart caddy
 systemctl is-active --quiet caddy
 EOF
+}
+
+determine_edge_upstream() {
+  EDGE_UPSTREAM="${K3S_API_IP}:${API_NODEPORT}"
+  EDGE_UPSTREAM_MODE="nodeport"
+
+  local cluster_ip=""
+  cluster_ip="$(ssh_root_run "${PRIMARY_ALIAS}" "KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n $(printf '%q' "${NAMESPACE}") get svc $(printf '%q' "${RELEASE_FULLNAME}") -o jsonpath='{.spec.clusterIP}'" | tr -d '\r' || true)"
+  if [[ -n "${cluster_ip}" && "${cluster_ip}" != "<none>" ]]; then
+    if ssh_root_run "${PRIMARY_ALIAS}" "curl -fsS --max-time 10 http://$(printf '%q' "${cluster_ip}"):80/healthz >/dev/null"; then
+      EDGE_UPSTREAM="${cluster_ip}:80"
+      EDGE_UPSTREAM_MODE="service-clusterip"
+      log "selected edge upstream via ClusterIP: ${EDGE_UPSTREAM}"
+      return
+    fi
+    log "warning: ClusterIP ${cluster_ip}:80 exists but is not reachable from ${PRIMARY_ALIAS}; falling back to NodePort"
+  fi
+
+  if ssh_root_run "${PRIMARY_ALIAS}" "curl -fsS --max-time 10 http://$(printf '%q' "${K3S_API_IP}"):$(printf '%q' "${API_NODEPORT}")/healthz >/dev/null"; then
+    log "selected edge upstream via NodePort: ${EDGE_UPSTREAM}"
+    return
+  fi
+
+  log "warning: neither ClusterIP nor NodePort health checks succeeded from ${PRIMARY_ALIAS}; keeping NodePort upstream ${EDGE_UPSTREAM}"
 }
 
 check_edge_origin_health() {
@@ -816,8 +860,10 @@ FUGUE_PUBLIC_API_REACHABLE=${PUBLIC_API_REACHABLE}
 FUGUE_CLUSTER_INTERNAL_IP=${K3S_API_IP}
 FUGUE_DOMAIN=${FUGUE_DOMAIN}
 FUGUE_APP_BASE_DOMAIN=${FUGUE_APP_BASE_DOMAIN}
-FUGUE_STATE_BACKEND=postgresql-jsonb
+FUGUE_STATE_BACKEND=postgresql-relational
 FUGUE_EDGE_LOCAL_HEALTH=${EDGE_LOCAL_HEALTH}
+FUGUE_EDGE_UPSTREAM=${EDGE_UPSTREAM}
+FUGUE_EDGE_UPSTREAM_MODE=${EDGE_UPSTREAM_MODE}
 KUBECONFIG=${KUBECONFIG_OUT}
 PRIMARY_ALIAS=${PRIMARY_ALIAS}
 SECONDARY_ALIASES=${SECONDARY_ALIASES[*]}
@@ -854,8 +900,8 @@ write_route_a_file() {
 
   cat >"${ROUTE_A_FILE}" <<EOF
 Route A is configured on ${PRIMARY_ALIAS} with Caddy:
-  https://${FUGUE_DOMAIN} -> https origin on ${PRIMARY_ALIAS}:443 -> NodePort ${K3S_API_IP}:${API_NODEPORT}
-  https://*.${FUGUE_APP_BASE_DOMAIN} -> https origin on ${PRIMARY_ALIAS}:443 -> NodePort ${K3S_API_IP}:${API_NODEPORT}
+  https://${FUGUE_DOMAIN} -> https origin on ${PRIMARY_ALIAS}:443 -> upstream ${EDGE_UPSTREAM} (${EDGE_UPSTREAM_MODE})
+  https://*.${FUGUE_APP_BASE_DOMAIN} -> https origin on ${PRIMARY_ALIAS}:443 -> upstream ${EDGE_UPSTREAM} (${EDGE_UPSTREAM_MODE})
 
 Server-side status:
   EDGE_LOCAL_HEALTH=${EDGE_LOCAL_HEALTH}

@@ -57,10 +57,7 @@ func (s *Store) usingDatabase() bool {
 
 func (s *Store) withLockedState(write bool, fn func(*model.State) error) error {
 	if s.usingDatabase() {
-		if err := s.ensureDatabaseReady(); err != nil {
-			return err
-		}
-		return s.withDatabaseState(write, fn)
+		return fmt.Errorf("internal error: database mode requires SQL store methods")
 	}
 	return s.withFileLockedState(write, fn)
 }
@@ -99,6 +96,9 @@ func (s *Store) withFileLockedState(write bool, fn func(*model.State) error) err
 }
 
 func (s *Store) ListTenants() ([]model.Tenant, error) {
+	if s.usingDatabase() {
+		return s.pgListTenants()
+	}
 	var tenants []model.Tenant
 	err := s.withLockedState(false, func(state *model.State) error {
 		tenants = append(tenants, state.Tenants...)
@@ -111,6 +111,9 @@ func (s *Store) ListTenants() ([]model.Tenant, error) {
 }
 
 func (s *Store) GetTenant(id string) (model.Tenant, error) {
+	if s.usingDatabase() {
+		return s.pgGetTenant(id)
+	}
 	var tenant model.Tenant
 	err := s.withLockedState(false, func(state *model.State) error {
 		index := findTenant(state, id)
@@ -127,6 +130,9 @@ func (s *Store) CreateTenant(name string) (model.Tenant, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return model.Tenant{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgCreateTenant(name)
 	}
 
 	var tenant model.Tenant
@@ -153,6 +159,9 @@ func (s *Store) CreateTenant(name string) (model.Tenant, error) {
 }
 
 func (s *Store) ListProjects(tenantID string) ([]model.Project, error) {
+	if s.usingDatabase() {
+		return s.pgListProjects(tenantID)
+	}
 	var projects []model.Project
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, project := range state.Projects {
@@ -172,6 +181,9 @@ func (s *Store) CreateProject(tenantID, name, description string) (model.Project
 	name = strings.TrimSpace(name)
 	if tenantID == "" || name == "" {
 		return model.Project{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgCreateProject(tenantID, name, description)
 	}
 
 	var project model.Project
@@ -202,6 +214,9 @@ func (s *Store) CreateProject(tenantID, name, description string) (model.Project
 }
 
 func (s *Store) ListAPIKeys(tenantID string, platformAdmin bool) ([]model.APIKey, error) {
+	if s.usingDatabase() {
+		return s.pgListAPIKeys(tenantID, platformAdmin)
+	}
 	var keys []model.APIKey
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, key := range state.APIKeys {
@@ -224,6 +239,9 @@ func (s *Store) CreateAPIKey(tenantID, label string, scopes []string) (model.API
 	}
 	if len(scopes) == 0 {
 		return model.APIKey{}, "", ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgCreateAPIKey(tenantID, label, scopes)
 	}
 
 	secret := model.NewSecret("fugue_pk")
@@ -255,6 +273,9 @@ func (s *Store) AuthenticateAPIKey(secret string) (model.Principal, error) {
 	if strings.TrimSpace(secret) == "" {
 		return model.Principal{}, ErrInvalidInput
 	}
+	if s.usingDatabase() {
+		return s.pgAuthenticateAPIKey(secret)
+	}
 
 	var principal model.Principal
 	err := s.withLockedState(true, func(state *model.State) error {
@@ -283,6 +304,9 @@ func (s *Store) AuthenticateAPIKey(secret string) (model.Principal, error) {
 }
 
 func (s *Store) ListEnrollmentTokens(tenantID string) ([]model.EnrollmentToken, error) {
+	if s.usingDatabase() {
+		return s.pgListEnrollmentTokens(tenantID)
+	}
 	var tokens []model.EnrollmentToken
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, token := range state.EnrollmentTokens {
@@ -302,6 +326,9 @@ func (s *Store) CreateEnrollmentToken(tenantID, label string, ttl time.Duration)
 	label = strings.TrimSpace(label)
 	if tenantID == "" || label == "" || ttl <= 0 {
 		return model.EnrollmentToken{}, "", ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgCreateEnrollmentToken(tenantID, label, ttl)
 	}
 
 	secret := model.NewSecret("fugue_enroll")
@@ -330,6 +357,9 @@ func (s *Store) CreateEnrollmentToken(tenantID, label string, ttl time.Duration)
 }
 
 func (s *Store) ListNodeKeys(tenantID string, platformAdmin bool) ([]model.NodeKey, error) {
+	if s.usingDatabase() {
+		return s.pgListNodeKeys(tenantID, platformAdmin)
+	}
 	var keys []model.NodeKey
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, key := range state.NodeKeys {
@@ -346,6 +376,9 @@ func (s *Store) ListNodeKeys(tenantID string, platformAdmin bool) ([]model.NodeK
 }
 
 func (s *Store) GetNodeKey(id string) (model.NodeKey, error) {
+	if s.usingDatabase() {
+		return s.pgGetNodeKey(id)
+	}
 	var key model.NodeKey
 	err := s.withLockedState(false, func(state *model.State) error {
 		index := findNodeKey(state, id)
@@ -362,6 +395,9 @@ func (s *Store) CreateNodeKey(tenantID, label string) (model.NodeKey, string, er
 	label = strings.TrimSpace(label)
 	if tenantID == "" || label == "" {
 		return model.NodeKey{}, "", ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgCreateNodeKey(tenantID, label)
 	}
 
 	secret := model.NewSecret("fugue_nk")
@@ -392,6 +428,9 @@ func (s *Store) CreateNodeKey(tenantID, label string) (model.NodeKey, string, er
 }
 
 func (s *Store) RevokeNodeKey(id string) (model.NodeKey, error) {
+	if s.usingDatabase() {
+		return s.pgRevokeNodeKey(id)
+	}
 	var key model.NodeKey
 	err := s.withLockedState(true, func(state *model.State) error {
 		index := findNodeKey(state, id)
@@ -415,6 +454,9 @@ func (s *Store) BootstrapNode(secret, runtimeName, endpoint string, labels map[s
 	runtimeName = strings.TrimSpace(runtimeName)
 	if secret == "" || runtimeName == "" {
 		return model.NodeKey{}, model.Runtime{}, "", ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgBootstrapNode(secret, runtimeName, endpoint, labels)
 	}
 
 	var key model.NodeKey
@@ -479,6 +521,9 @@ func (s *Store) CreateRuntime(tenantID, name, runtimeType, endpoint string, labe
 	if runtimeType != model.RuntimeTypeManagedShared && runtimeType != model.RuntimeTypeExternalOwned {
 		return model.Runtime{}, "", ErrInvalidInput
 	}
+	if s.usingDatabase() {
+		return s.pgCreateRuntime(tenantID, name, runtimeType, endpoint, labels)
+	}
 
 	secret := model.NewSecret("fugue_rt")
 	now := time.Now().UTC()
@@ -523,6 +568,9 @@ func (s *Store) ConsumeEnrollmentToken(secret, runtimeName, endpoint string, lab
 	runtimeName = strings.TrimSpace(runtimeName)
 	if secret == "" || runtimeName == "" {
 		return model.Runtime{}, "", ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgConsumeEnrollmentToken(secret, runtimeName, endpoint, labels)
 	}
 
 	var runtime model.Runtime
@@ -582,6 +630,9 @@ func (s *Store) AuthenticateRuntimeKey(secret string) (model.Runtime, model.Prin
 	if strings.TrimSpace(secret) == "" {
 		return model.Runtime{}, model.Principal{}, ErrInvalidInput
 	}
+	if s.usingDatabase() {
+		return s.pgAuthenticateRuntimeKey(secret)
+	}
 
 	var runtime model.Runtime
 	var principal model.Principal
@@ -612,6 +663,9 @@ func (s *Store) AuthenticateRuntimeKey(secret string) (model.Runtime, model.Prin
 }
 
 func (s *Store) UpdateRuntimeHeartbeat(runtimeID, endpoint string) (model.Runtime, error) {
+	if s.usingDatabase() {
+		return s.pgUpdateRuntimeHeartbeat(runtimeID, endpoint)
+	}
 	var runtime model.Runtime
 	err := s.withLockedState(true, func(state *model.State) error {
 		index := findRuntime(state, runtimeID)
@@ -632,6 +686,9 @@ func (s *Store) UpdateRuntimeHeartbeat(runtimeID, endpoint string) (model.Runtim
 }
 
 func (s *Store) MarkRuntimeOfflineStale(after time.Duration) (int, error) {
+	if s.usingDatabase() {
+		return s.pgMarkRuntimeOfflineStale(after)
+	}
 	var count int
 	err := s.withLockedState(true, func(state *model.State) error {
 		if after <= 0 {
@@ -657,6 +714,9 @@ func (s *Store) MarkRuntimeOfflineStale(after time.Duration) (int, error) {
 }
 
 func (s *Store) ListNodes(tenantID string, platformAdmin bool) ([]model.Runtime, error) {
+	if s.usingDatabase() {
+		return s.pgListNodes(tenantID, platformAdmin)
+	}
 	var nodes []model.Runtime
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, runtime := range state.Runtimes {
@@ -676,6 +736,9 @@ func (s *Store) ListNodes(tenantID string, platformAdmin bool) ([]model.Runtime,
 }
 
 func (s *Store) ListRuntimes(tenantID string, platformAdmin bool) ([]model.Runtime, error) {
+	if s.usingDatabase() {
+		return s.pgListRuntimes(tenantID, platformAdmin)
+	}
 	var runtimes []model.Runtime
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, runtime := range state.Runtimes {
@@ -692,6 +755,9 @@ func (s *Store) ListRuntimes(tenantID string, platformAdmin bool) ([]model.Runti
 }
 
 func (s *Store) GetRuntime(id string) (model.Runtime, error) {
+	if s.usingDatabase() {
+		return s.pgGetRuntime(id)
+	}
 	var runtime model.Runtime
 	err := s.withLockedState(false, func(state *model.State) error {
 		index := findRuntime(state, id)
@@ -705,6 +771,9 @@ func (s *Store) GetRuntime(id string) (model.Runtime, error) {
 }
 
 func (s *Store) ListApps(tenantID string, platformAdmin bool) ([]model.App, error) {
+	if s.usingDatabase() {
+		return s.pgListApps(tenantID, platformAdmin)
+	}
 	var apps []model.App
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, app := range state.Apps {
@@ -721,6 +790,9 @@ func (s *Store) ListApps(tenantID string, platformAdmin bool) ([]model.App, erro
 }
 
 func (s *Store) GetApp(id string) (model.App, error) {
+	if s.usingDatabase() {
+		return s.pgGetApp(id)
+	}
 	var app model.App
 	err := s.withLockedState(false, func(state *model.State) error {
 		index := findApp(state, id)
@@ -735,6 +807,9 @@ func (s *Store) GetApp(id string) (model.App, error) {
 
 func (s *Store) GetAppByHostname(hostname string) (model.App, error) {
 	hostname = strings.TrimSpace(strings.ToLower(hostname))
+	if s.usingDatabase() {
+		return s.pgGetAppByHostname(hostname)
+	}
 	var app model.App
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, candidate := range state.Apps {
@@ -766,6 +841,9 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 	}
 	if spec.RuntimeID == "" {
 		spec.RuntimeID = "runtime_managed_shared"
+	}
+	if s.usingDatabase() {
+		return s.pgCreateApp(tenantID, projectID, name, description, spec, source, route)
 	}
 
 	var app model.App
@@ -814,6 +892,9 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 	if op.TenantID == "" || op.Type == "" || op.AppID == "" {
 		return model.Operation{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgCreateOperation(op)
 	}
 
 	err := s.withLockedState(true, func(state *model.State) error {
@@ -864,6 +945,9 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 }
 
 func (s *Store) ListOperations(tenantID string, platformAdmin bool) ([]model.Operation, error) {
+	if s.usingDatabase() {
+		return s.pgListOperations(tenantID, platformAdmin)
+	}
 	var ops []model.Operation
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, op := range state.Operations {
@@ -880,6 +964,9 @@ func (s *Store) ListOperations(tenantID string, platformAdmin bool) ([]model.Ope
 }
 
 func (s *Store) GetOperation(id string) (model.Operation, error) {
+	if s.usingDatabase() {
+		return s.pgGetOperation(id)
+	}
 	var op model.Operation
 	err := s.withLockedState(false, func(state *model.State) error {
 		index := findOperation(state, id)
@@ -893,6 +980,9 @@ func (s *Store) GetOperation(id string) (model.Operation, error) {
 }
 
 func (s *Store) ClaimNextPendingOperation() (model.Operation, bool, error) {
+	if s.usingDatabase() {
+		return s.pgClaimNextPendingOperation()
+	}
 	var op model.Operation
 	var found bool
 	err := s.withLockedState(true, func(state *model.State) error {
@@ -930,6 +1020,9 @@ func (s *Store) ClaimNextPendingOperation() (model.Operation, bool, error) {
 }
 
 func (s *Store) DispatchOperationToRuntime(id, runtimeID string) (model.Operation, error) {
+	if s.usingDatabase() {
+		return s.pgDispatchOperationToRuntime(id, runtimeID)
+	}
 	var op model.Operation
 	err := s.withLockedState(true, func(state *model.State) error {
 		index := findOperation(state, id)
@@ -957,6 +1050,9 @@ func (s *Store) CompleteAgentOperation(id, runtimeID, manifestPath, message stri
 }
 
 func (s *Store) completeOperation(id, runtimeID, manifestPath, message string) (model.Operation, error) {
+	if s.usingDatabase() {
+		return s.pgCompleteOperation(id, runtimeID, manifestPath, message)
+	}
 	var op model.Operation
 	err := s.withLockedState(true, func(state *model.State) error {
 		index := findOperation(state, id)
@@ -985,6 +1081,9 @@ func (s *Store) completeOperation(id, runtimeID, manifestPath, message string) (
 }
 
 func (s *Store) FailOperation(id, message string) (model.Operation, error) {
+	if s.usingDatabase() {
+		return s.pgFailOperation(id, message)
+	}
 	var op model.Operation
 	err := s.withLockedState(true, func(state *model.State) error {
 		index := findOperation(state, id)
@@ -1003,6 +1102,9 @@ func (s *Store) FailOperation(id, message string) (model.Operation, error) {
 }
 
 func (s *Store) ListAssignedOperations(runtimeID string) ([]model.Operation, error) {
+	if s.usingDatabase() {
+		return s.pgListAssignedOperations(runtimeID)
+	}
 	var ops []model.Operation
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, op := range state.Operations {
@@ -1025,6 +1127,9 @@ func (s *Store) AppendAuditEvent(event model.AuditEvent) error {
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now().UTC()
 	}
+	if s.usingDatabase() {
+		return s.pgAppendAuditEvent(event)
+	}
 	return s.withLockedState(true, func(state *model.State) error {
 		state.AuditEvents = append(state.AuditEvents, event)
 		return nil
@@ -1032,6 +1137,9 @@ func (s *Store) AppendAuditEvent(event model.AuditEvent) error {
 }
 
 func (s *Store) ListAuditEvents(tenantID string, platformAdmin bool) ([]model.AuditEvent, error) {
+	if s.usingDatabase() {
+		return s.pgListAuditEvents(tenantID, platformAdmin)
+	}
 	var events []model.AuditEvent
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, event := range state.AuditEvents {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"fugue/internal/config"
@@ -35,29 +36,86 @@ func (s *Service) Run(ctx context.Context) error {
 	if err := s.Store.Init(); err != nil {
 		return err
 	}
+	if s.Config.FallbackPollInterval <= 0 {
+		s.Config.FallbackPollInterval = 30 * time.Second
+	}
 
-	s.Logger.Printf("controller started; poll_interval=%s render_dir=%s kubectl_apply=%v", s.Config.PollInterval, s.Config.RenderDir, s.Config.KubectlApply)
-	ticker := time.NewTicker(s.Config.PollInterval)
-	defer ticker.Stop()
+	eventDriven := strings.TrimSpace(s.Config.DatabaseURL) != ""
+	s.Logger.Printf(
+		"controller started; event_driven=%v poll_interval=%s fallback_poll_interval=%s render_dir=%s kubectl_apply=%v",
+		eventDriven,
+		s.Config.PollInterval,
+		s.Config.FallbackPollInterval,
+		s.Config.RenderDir,
+		s.Config.KubectlApply,
+	)
+
+	if !eventDriven {
+		ticker := time.NewTicker(s.Config.PollInterval)
+		defer ticker.Stop()
+
+		for {
+			if err := s.reconcileOnce(); err != nil {
+				s.Logger.Printf("reconcile error: %v", err)
+			}
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-ticker.C:
+			}
+		}
+	}
+
+	if err := s.reconcileOnce(); err != nil {
+		s.Logger.Printf("reconcile error: %v", err)
+	}
+
+	staleTicker := time.NewTicker(s.Config.PollInterval)
+	defer staleTicker.Stop()
+	fallbackTicker := time.NewTicker(s.Config.FallbackPollInterval)
+	defer fallbackTicker.Stop()
+	operationEvents := listenForOperationEvents(ctx, s.Logger, s.Config.DatabaseURL)
 
 	for {
-		if err := s.reconcileOnce(); err != nil {
-			s.Logger.Printf("reconcile error: %v", err)
-		}
-
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
+		case _, ok := <-operationEvents:
+			if !ok {
+				operationEvents = nil
+				continue
+			}
+			if err := s.drainPendingOperations(); err != nil {
+				s.Logger.Printf("drain pending operations error: %v", err)
+			}
+		case <-fallbackTicker.C:
+			if err := s.drainPendingOperations(); err != nil {
+				s.Logger.Printf("fallback drain pending operations error: %v", err)
+			}
+		case <-staleTicker.C:
+			if err := s.markRuntimeOfflineStale(); err != nil {
+				s.Logger.Printf("runtime stale sweep error: %v", err)
+			}
 		}
 	}
 }
 
 func (s *Service) reconcileOnce() error {
+	if err := s.markRuntimeOfflineStale(); err != nil {
+		return err
+	}
+	return s.drainPendingOperations()
+}
+
+func (s *Service) markRuntimeOfflineStale() error {
 	if _, err := s.Store.MarkRuntimeOfflineStale(s.Config.RuntimeOfflineAfter); err != nil {
 		return fmt.Errorf("mark runtime offline: %w", err)
 	}
+	return nil
+}
 
+func (s *Service) drainPendingOperations() error {
 	for {
 		op, found, err := s.Store.ClaimNextPendingOperation()
 		if err != nil {
