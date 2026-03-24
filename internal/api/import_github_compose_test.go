@@ -98,3 +98,40 @@ func TestPickPrimaryComposeServicePrefersPublishedWeb(t *testing.T) {
 		t.Fatalf("expected web to be selected as primary, got %q", primary.Name)
 	}
 }
+
+func TestResolveTopologyPrimaryServiceUsesPreferredService(t *testing.T) {
+	primary, err := resolveTopologyPrimaryService([]sourceimport.ComposeService{
+		{Name: "api", Kind: sourceimport.ComposeServiceKindApp, InternalPort: 8000},
+		{Name: "web", Kind: sourceimport.ComposeServiceKindApp, InternalPort: 3000},
+	}, "api")
+	if err != nil {
+		t.Fatalf("resolve topology primary service: %v", err)
+	}
+	if primary.Name != "api" {
+		t.Fatalf("expected api to be selected, got %q", primary.Name)
+	}
+}
+
+func TestComposePostgresSpecKeepsExplicitServiceName(t *testing.T) {
+	spec, err := composePostgresSpec(sourceimport.ComposeService{
+		Name:  "db",
+		Kind:  sourceimport.ComposeServiceKindPostgres,
+		Image: "postgres:17.6-alpine",
+		Postgres: &model.AppPostgresSpec{
+			ServiceName: "custom-db",
+			StoragePath: "/data/custom-db",
+			Database:    "demo",
+			User:        "demo",
+			Password:    "secret",
+		},
+	}, "demo-api")
+	if err != nil {
+		t.Fatalf("compose postgres spec: %v", err)
+	}
+	if spec.ServiceName != "custom-db" {
+		t.Fatalf("expected explicit service name to be preserved, got %q", spec.ServiceName)
+	}
+	if spec.StoragePath != "/data/custom-db" {
+		t.Fatalf("expected explicit storage path to be preserved, got %q", spec.StoragePath)
+	}
+}

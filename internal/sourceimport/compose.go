@@ -57,6 +57,7 @@ type ComposeService struct {
 	Published       bool
 	Environment     map[string]string
 	DependsOn       []string
+	Postgres        *model.AppPostgresSpec
 }
 
 type composeFile struct {

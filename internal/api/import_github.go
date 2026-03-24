@@ -156,6 +156,44 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		baseName = "app"
 	}
 
+	if shouldInspectFugueManifestImport(req, buildStrategy, profile) {
+		manifest, inspectErr := s.importer.InspectPublicGitHubFugueManifest(r.Context(), sourceimport.GitHubFugueManifestInspectRequest{
+			RepoURL: strings.TrimSpace(req.RepoURL),
+			Branch:  strings.TrimSpace(req.Branch),
+		})
+		switch {
+		case inspectErr == nil:
+			response, primaryApp, primaryOp, err := s.importFugueManifestGitHubStack(principal, tenantID, req, runtimeID, replicas, description, baseName, manifest)
+			if err != nil {
+				if errors.Is(err, store.ErrConflict) {
+					httpx.WriteError(w, http.StatusConflict, err.Error())
+					return
+				}
+				if errors.Is(err, errInvalidComposeImport) {
+					httpx.WriteError(w, http.StatusBadRequest, err.Error())
+					return
+				}
+				s.writeStoreError(w, err)
+				return
+			}
+			if idempotencyKey != "" {
+				releaseIdempotency = false
+				if _, err := s.store.CompleteIdempotencyRecord(model.IdempotencyScopeAppImportGitHub, tenantID, idempotencyKey, primaryApp.ID, primaryOp.ID); err != nil {
+					s.log.Printf("complete idempotency record failed for tenant=%s key=%s app=%s op=%s: %v", tenantID, idempotencyKey, primaryApp.ID, primaryOp.ID, err)
+				}
+				response["idempotency"] = map[string]any{
+					"key":    idempotencyKey,
+					"status": model.IdempotencyStatusCompleted,
+				}
+			}
+			httpx.WriteJSON(w, http.StatusAccepted, response)
+			return
+		case inspectErr != nil && !errors.Is(inspectErr, sourceimport.ErrFugueManifestNotFound):
+			httpx.WriteError(w, http.StatusBadRequest, inspectErr.Error())
+			return
+		}
+	}
+
 	if shouldInspectComposeImport(req, buildStrategy, profile) {
 		stack, inspectErr := s.importer.InspectPublicGitHubCompose(r.Context(), sourceimport.GitHubComposeInspectRequest{
 			RepoURL: strings.TrimSpace(req.RepoURL),

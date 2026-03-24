@@ -51,189 +51,22 @@ func shouldInspectComposeImport(req importGitHubRequest, buildStrategy, profile 
 }
 
 func (s *Server) importComposeGitHubStack(principal model.Principal, tenantID string, req importGitHubRequest, runtimeID string, replicas int, description string, baseName string, stack sourceimport.GitHubComposeStack) (map[string]any, model.App, model.Operation, error) {
-	appServices, postgresServices := splitComposeServices(stack.Services)
-	if len(appServices) == 0 {
-		return nil, model.App{}, model.Operation{}, invalidComposeImportf("compose file %q does not define any buildable application services", stack.ComposePath)
-	}
-	if err := validateComposeDependencies(appServices, postgresServices); err != nil {
-		return nil, model.App{}, model.Operation{}, invalidComposeImport(err)
-	}
-
-	primaryService := pickPrimaryComposeService(appServices)
-	appNames, primaryHost, err := s.allocateComposeAppNames(tenantID, req.ProjectID, baseName, appServices, primaryService.Name)
+	result, err := s.importResolvedGitHubTopology(principal, tenantID, req, runtimeID, replicas, description, baseName, stack.Services, "", stack.Warnings)
 	if err != nil {
 		return nil, model.App{}, model.Operation{}, err
 	}
-
-	postgresByOwner, postgresHosts, postgresWarnings, err := buildComposePostgresPlan(appServices, postgresServices, appNames)
-	if err != nil {
-		return nil, model.App{}, model.Operation{}, invalidComposeImport(err)
-	}
-
-	serviceHosts := make(map[string]string, len(appNames)+len(postgresHosts))
-	for serviceName, appName := range appNames {
-		serviceHosts[serviceName] = appName
-	}
-	for serviceName, host := range postgresHosts {
-		serviceHosts[serviceName] = host
-	}
-
-	plans := make([]composeAppPlan, 0, len(appServices))
-	sortedServices := orderComposeServicesForCreation(appServices, primaryService.Name)
-	for _, service := range sortedServices {
-		suggestedEnv := rewriteComposeEnvironment(service.Environment, serviceHosts)
-		var route *model.AppRoute
-		requestedPort := 0
-		if service.Name == primaryService.Name {
-			requestedPort = req.ServicePort
-			route = &model.AppRoute{
-				Hostname:    primaryHost,
-				BaseDomain:  s.appBaseDomain,
-				PublicURL:   "https://" + primaryHost,
-				ServicePort: effectiveImportServicePort(requestedPort, service.InternalPort),
-			}
-		}
-
-		source, err := buildQueuedGitHubSource(
-			req.RepoURL,
-			req.Branch,
-			service.SourceDir,
-			service.DockerfilePath,
-			service.BuildContextDir,
-			service.BuildStrategy,
-			"",
-			service.Name,
-			service.Name,
-		)
-		if err != nil {
-			return nil, model.App{}, model.Operation{}, invalidComposeImport(err)
-		}
-
-		var postgres *model.AppPostgresSpec
-		if spec, ok := postgresByOwner[service.Name]; ok {
-			specCopy := spec
-			postgres = &specCopy
-		}
-
-		spec, err := s.buildImportedAppSpec(
-			"",
-			service.BuildStrategy,
-			appNames[service.Name],
-			"",
-			runtimeID,
-			replicas,
-			effectiveImportServicePort(requestedPort, service.InternalPort),
-			"",
-			nil,
-			postgres,
-			suggestedEnv,
-		)
-		if err != nil {
-			return nil, model.App{}, model.Operation{}, invalidComposeImport(err)
-		}
-		if route != nil {
-			route.ServicePort = firstServicePort(spec)
-		}
-
-		plans = append(plans, composeAppPlan{
-			Service: service,
-			AppName: appNames[service.Name],
-			Route:   route,
-			Source:  source,
-			Spec:    spec,
-		})
-	}
-
-	apps := make([]model.App, 0, len(plans))
-	ops := make([]model.Operation, 0, len(plans))
-	appsByService := make(map[string]model.App, len(plans))
-	opsByService := make(map[string]model.Operation, len(plans))
-	for _, plan := range plans {
-		appDescription := description
-		if len(plans) > 1 {
-			appDescription = fmt.Sprintf("%s (compose service %s)", description, plan.Service.Name)
-		}
-
-		route := model.AppRoute{}
-		if plan.Route != nil {
-			route = *plan.Route
-		}
-		app, err := s.store.CreateImportedApp(tenantID, req.ProjectID, plan.AppName, appDescription, plan.Spec, plan.Source, route)
-		if err != nil {
-			if err == store.ErrConflict {
-				return nil, model.App{}, model.Operation{}, fmt.Errorf("compose import naming conflict for service %q: %w", plan.Service.Name, store.ErrConflict)
-			}
-			return nil, model.App{}, model.Operation{}, err
-		}
-
-		specCopy := cloneAppSpec(app.Spec)
-		sourceCopy := plan.Source
-		op, err := s.store.CreateOperation(model.Operation{
-			TenantID:        app.TenantID,
-			Type:            model.OperationTypeImport,
-			RequestedByType: principal.ActorType,
-			RequestedByID:   principal.ActorID,
-			AppID:           app.ID,
-			DesiredSpec:     &specCopy,
-			DesiredSource:   &sourceCopy,
-		})
-		if err != nil {
-			return nil, model.App{}, model.Operation{}, err
-		}
-
-		s.appendAudit(principal, "app.import_github", "app", app.ID, app.TenantID, map[string]string{
-			"repo_url":        sourceCopy.RepoURL,
-			"build_strategy":  sourceCopy.BuildStrategy,
-			"compose_service": sourceCopy.ComposeService,
-			"hostname":        route.Hostname,
-		})
-
-		apps = append(apps, app)
-		ops = append(ops, op)
-		appsByService[plan.Service.Name] = app
-		opsByService[plan.Service.Name] = op
-	}
-
-	primaryApp := appsByService[primaryService.Name]
-	primaryOp := opsByService[primaryService.Name]
-
-	composeServices := make([]map[string]any, 0, len(plans))
-	for _, plan := range plans {
-		app := appsByService[plan.Service.Name]
-		op := opsByService[plan.Service.Name]
-		serviceInfo := map[string]any{
-			"compose_service": plan.Service.Name,
-			"kind":            plan.Service.Kind,
-			"app_id":          app.ID,
-			"app_name":        app.Name,
-			"operation_id":    op.ID,
-			"build_strategy":  plan.Service.BuildStrategy,
-			"internal_port":   firstServicePort(app.Spec),
-		}
-		if app.Route != nil && strings.TrimSpace(app.Route.PublicURL) != "" {
-			serviceInfo["public_url"] = app.Route.PublicURL
-		}
-		if _, ok := postgresByOwner[plan.Service.Name]; ok {
-			serviceInfo["owns_postgres"] = true
-		}
-		composeServices = append(composeServices, serviceInfo)
-	}
-
-	warnings := append([]string(nil), stack.Warnings...)
-	warnings = append(warnings, postgresWarnings...)
-
 	return map[string]any{
-		"app":        sanitizeAppForAPI(primaryApp),
-		"operation":  sanitizeOperationForAPI(primaryOp),
-		"apps":       sanitizeAppsForAPI(apps),
-		"operations": sanitizeOperationsForAPI(ops),
+		"app":        sanitizeAppForAPI(result.PrimaryApp),
+		"operation":  sanitizeOperationForAPI(result.PrimaryOp),
+		"apps":       sanitizeAppsForAPI(result.Apps),
+		"operations": sanitizeOperationsForAPI(result.Operations),
 		"compose_stack": map[string]any{
 			"compose_path":    stack.ComposePath,
-			"primary_service": primaryService.Name,
-			"services":        composeServices,
-			"warnings":        warnings,
+			"primary_service": result.PrimaryService,
+			"services":        result.ServiceDetails,
+			"warnings":        result.Warnings,
 		},
-	}, primaryApp, primaryOp, nil
+	}, result.PrimaryApp, result.PrimaryOp, nil
 }
 
 func splitComposeServices(services []sourceimport.ComposeService) ([]sourceimport.ComposeService, []sourceimport.ComposeService) {
@@ -483,12 +316,24 @@ func composePostgresOwnerScore(service sourceimport.ComposeService) int {
 }
 
 func composePostgresSpec(service sourceimport.ComposeService, ownerAppName string) (model.AppPostgresSpec, error) {
-	spec := model.AppPostgresSpec{
-		Image:       strings.TrimSpace(service.Image),
-		Database:    firstNonEmptyComposeValue(service.Environment, "POSTGRES_DB", "POSTGRES_DATABASE", "DB_NAME"),
-		User:        firstNonEmptyComposeValue(service.Environment, "POSTGRES_USER", "DB_USER"),
-		Password:    firstNonEmptyComposeValue(service.Environment, "POSTGRES_PASSWORD", "DB_PASSWORD"),
-		ServiceName: model.Slugify(ownerAppName + "-" + service.Name + "-postgres"),
+	spec := model.AppPostgresSpec{}
+	if service.Postgres != nil {
+		spec = *service.Postgres
+	}
+	if strings.TrimSpace(spec.Image) == "" {
+		spec.Image = strings.TrimSpace(service.Image)
+	}
+	if strings.TrimSpace(spec.Database) == "" {
+		spec.Database = firstNonEmptyComposeValue(service.Environment, "POSTGRES_DB", "POSTGRES_DATABASE", "DB_NAME")
+	}
+	if strings.TrimSpace(spec.User) == "" {
+		spec.User = firstNonEmptyComposeValue(service.Environment, "POSTGRES_USER", "DB_USER")
+	}
+	if strings.TrimSpace(spec.Password) == "" {
+		spec.Password = firstNonEmptyComposeValue(service.Environment, "POSTGRES_PASSWORD", "DB_PASSWORD")
+	}
+	if strings.TrimSpace(spec.ServiceName) == "" {
+		spec.ServiceName = model.Slugify(ownerAppName + "-" + service.Name + "-postgres")
 	}
 	if spec.Image == "" {
 		spec.Image = "postgres:17.6-alpine"
@@ -499,15 +344,15 @@ func composePostgresSpec(service sourceimport.ComposeService, ownerAppName strin
 	if spec.User == "" {
 		spec.User = "postgres"
 	}
-	if spec.ServiceName == "" {
-		spec.ServiceName = model.Slugify(ownerAppName + "-postgres")
-	}
 	if spec.Password == "" {
 		password, err := randomHex(24)
 		if err != nil {
 			return model.AppPostgresSpec{}, fmt.Errorf("generate postgres password for compose service %q: %w", service.Name, err)
 		}
 		spec.Password = password
+	}
+	if spec.ServiceName == "" {
+		spec.ServiceName = model.Slugify(ownerAppName + "-postgres")
 	}
 	return spec, nil
 }
