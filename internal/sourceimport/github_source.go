@@ -18,6 +18,8 @@ type GitHubSourceImportRequest struct {
 	ImportProfile    string
 	RegistryPushBase string
 	ImageRepository  string
+	ImageNameSuffix  string
+	ComposeService   string
 	JobLabels        map[string]string
 }
 
@@ -50,6 +52,7 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 			BuildContextDir:  req.BuildContextDir,
 			RegistryPushBase: req.RegistryPushBase,
 			ImageRepository:  req.ImageRepository,
+			ImageNameSuffix:  req.ImageNameSuffix,
 			JobLabels:        req.JobLabels,
 		})
 		if err != nil {
@@ -67,6 +70,8 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 				DockerfilePath:  importResult.DockerfilePath,
 				BuildContextDir: importResult.BuildContextDir,
 				ImportProfile:   strings.TrimSpace(req.ImportProfile),
+				ImageNameSuffix: strings.TrimSpace(req.ImageNameSuffix),
+				ComposeService:  strings.TrimSpace(req.ComposeService),
 			},
 		}, nil
 	case model.AppBuildStrategyStaticSite:
@@ -76,6 +81,7 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 			SourceDir:        req.SourceDir,
 			RegistryPushBase: req.RegistryPushBase,
 			ImageRepository:  req.ImageRepository,
+			ImageNameSuffix:  req.ImageNameSuffix,
 		})
 		if err != nil {
 			return GitHubSourceImportOutput{}, err
@@ -83,13 +89,15 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 		return GitHubSourceImportOutput{
 			ImportResult: importResult,
 			Source: model.AppSource{
-				Type:          model.AppSourceTypeGitHubPublic,
-				RepoURL:       strings.TrimSpace(req.RepoURL),
-				RepoBranch:    importResult.Branch,
-				SourceDir:     importResult.SourceDir,
-				BuildStrategy: importResult.BuildStrategy,
-				CommitSHA:     importResult.CommitSHA,
-				ImportProfile: strings.TrimSpace(req.ImportProfile),
+				Type:            model.AppSourceTypeGitHubPublic,
+				RepoURL:         strings.TrimSpace(req.RepoURL),
+				RepoBranch:      importResult.Branch,
+				SourceDir:       importResult.SourceDir,
+				BuildStrategy:   importResult.BuildStrategy,
+				CommitSHA:       importResult.CommitSHA,
+				ImportProfile:   strings.TrimSpace(req.ImportProfile),
+				ImageNameSuffix: strings.TrimSpace(req.ImageNameSuffix),
+				ComposeService:  strings.TrimSpace(req.ComposeService),
 			},
 		}, nil
 	case model.AppBuildStrategyDockerfile:
@@ -100,6 +108,7 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 			BuildContextDir:  req.BuildContextDir,
 			RegistryPushBase: req.RegistryPushBase,
 			ImageRepository:  req.ImageRepository,
+			ImageNameSuffix:  req.ImageNameSuffix,
 			JobLabels:        req.JobLabels,
 		})
 		if err != nil {
@@ -116,6 +125,8 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 				DockerfilePath:  importResult.DockerfilePath,
 				BuildContextDir: importResult.BuildContextDir,
 				ImportProfile:   strings.TrimSpace(req.ImportProfile),
+				ImageNameSuffix: strings.TrimSpace(req.ImageNameSuffix),
+				ComposeService:  strings.TrimSpace(req.ComposeService),
 			},
 		}, nil
 	case model.AppBuildStrategyBuildpacks:
@@ -125,6 +136,7 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 			SourceDir:        req.SourceDir,
 			RegistryPushBase: req.RegistryPushBase,
 			ImageRepository:  req.ImageRepository,
+			ImageNameSuffix:  req.ImageNameSuffix,
 			JobLabels:        req.JobLabels,
 		})
 		if err != nil {
@@ -133,13 +145,15 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 		return GitHubSourceImportOutput{
 			ImportResult: importResult,
 			Source: model.AppSource{
-				Type:          model.AppSourceTypeGitHubPublic,
-				RepoURL:       strings.TrimSpace(req.RepoURL),
-				RepoBranch:    importResult.Branch,
-				SourceDir:     importResult.SourceDir,
-				BuildStrategy: importResult.BuildStrategy,
-				CommitSHA:     importResult.CommitSHA,
-				ImportProfile: strings.TrimSpace(req.ImportProfile),
+				Type:            model.AppSourceTypeGitHubPublic,
+				RepoURL:         strings.TrimSpace(req.RepoURL),
+				RepoBranch:      importResult.Branch,
+				SourceDir:       importResult.SourceDir,
+				BuildStrategy:   importResult.BuildStrategy,
+				CommitSHA:       importResult.CommitSHA,
+				ImportProfile:   strings.TrimSpace(req.ImportProfile),
+				ImageNameSuffix: strings.TrimSpace(req.ImageNameSuffix),
+				ComposeService:  strings.TrimSpace(req.ComposeService),
 			},
 		}, nil
 	case model.AppBuildStrategyNixpacks:
@@ -149,6 +163,7 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 			SourceDir:        req.SourceDir,
 			RegistryPushBase: req.RegistryPushBase,
 			ImageRepository:  req.ImageRepository,
+			ImageNameSuffix:  req.ImageNameSuffix,
 			JobLabels:        req.JobLabels,
 		})
 		if err != nil {
@@ -157,13 +172,15 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 		return GitHubSourceImportOutput{
 			ImportResult: importResult,
 			Source: model.AppSource{
-				Type:          model.AppSourceTypeGitHubPublic,
-				RepoURL:       strings.TrimSpace(req.RepoURL),
-				RepoBranch:    importResult.Branch,
-				SourceDir:     importResult.SourceDir,
-				BuildStrategy: importResult.BuildStrategy,
-				CommitSHA:     importResult.CommitSHA,
-				ImportProfile: strings.TrimSpace(req.ImportProfile),
+				Type:            model.AppSourceTypeGitHubPublic,
+				RepoURL:         strings.TrimSpace(req.RepoURL),
+				RepoBranch:      importResult.Branch,
+				SourceDir:       importResult.SourceDir,
+				BuildStrategy:   importResult.BuildStrategy,
+				CommitSHA:       importResult.CommitSHA,
+				ImportProfile:   strings.TrimSpace(req.ImportProfile),
+				ImageNameSuffix: strings.TrimSpace(req.ImageNameSuffix),
+				ComposeService:  strings.TrimSpace(req.ComposeService),
 			},
 		}, nil
 	default:

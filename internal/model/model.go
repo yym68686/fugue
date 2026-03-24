@@ -22,7 +22,7 @@ const (
 
 	BackingServiceTypePostgres = "postgres"
 
-	BackingServiceProvisionerManaged = "managed"
+	BackingServiceProvisionerManaged  = "managed"
 	BackingServiceProvisionerExternal = "external"
 
 	BackingServiceStatusActive  = "active"
@@ -182,6 +182,8 @@ type AppSource struct {
 	DockerfilePath  string `json:"dockerfile_path,omitempty"`
 	BuildContextDir string `json:"build_context_dir,omitempty"`
 	ImportProfile   string `json:"import_profile,omitempty"`
+	ImageNameSuffix string `json:"image_name_suffix,omitempty"`
+	ComposeService  string `json:"compose_service,omitempty"`
 }
 
 type AppRoute struct {

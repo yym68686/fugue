@@ -80,12 +80,21 @@ func (s *Server) buildImportedAppSpec(profile, buildStrategy, appName, imageRef,
 		if servicePort > 0 {
 			ports = []int{servicePort}
 		}
+		var normalizedPostgres *model.AppPostgresSpec
+		if postgres != nil {
+			pgSpec, err := normalizeGenericPostgresSpec(appName, postgres)
+			if err != nil {
+				return model.AppSpec{}, err
+			}
+			normalizedPostgres = &pgSpec
+		}
 		return model.AppSpec{
 			Image:     imageRef,
 			Env:       env,
 			Ports:     ports,
 			Replicas:  replicas,
 			RuntimeID: runtimeID,
+			Postgres:  normalizedPostgres,
 		}, nil
 	case model.AppImportProfileUniAPI:
 		if err := s.validateStatefulRuntime(runtimeID); err != nil {
@@ -183,6 +192,43 @@ func normalizeUniAPIPostgresSpec(appName string, override *model.AppPostgresSpec
 		Image:       "postgres:17.6-alpine",
 		Database:    "uniapi",
 		User:        "root",
+		ServiceName: appName + "-postgres",
+	}
+	if override != nil {
+		if strings.TrimSpace(override.Image) != "" {
+			spec.Image = strings.TrimSpace(override.Image)
+		}
+		if strings.TrimSpace(override.Database) != "" {
+			spec.Database = strings.TrimSpace(override.Database)
+		}
+		if strings.TrimSpace(override.User) != "" {
+			spec.User = strings.TrimSpace(override.User)
+		}
+		if strings.TrimSpace(override.Password) != "" {
+			spec.Password = strings.TrimSpace(override.Password)
+		}
+		if strings.TrimSpace(override.ServiceName) != "" {
+			spec.ServiceName = strings.TrimSpace(override.ServiceName)
+		}
+		if strings.TrimSpace(override.StoragePath) != "" {
+			spec.StoragePath = strings.TrimSpace(override.StoragePath)
+		}
+	}
+	if spec.Password == "" {
+		password, err := randomHex(24)
+		if err != nil {
+			return model.AppPostgresSpec{}, fmt.Errorf("generate postgres password: %w", err)
+		}
+		spec.Password = password
+	}
+	return spec, nil
+}
+
+func normalizeGenericPostgresSpec(appName string, override *model.AppPostgresSpec) (model.AppPostgresSpec, error) {
+	spec := model.AppPostgresSpec{
+		Image:       "postgres:17.6-alpine",
+		Database:    appName,
+		User:        "postgres",
 		ServiceName: appName + "-postgres",
 	}
 	if override != nil {

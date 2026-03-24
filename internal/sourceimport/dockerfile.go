@@ -26,6 +26,7 @@ type GitHubDockerImportRequest struct {
 	BuildContextDir  string
 	RegistryPushBase string
 	ImageRepository  string
+	ImageNameSuffix  string
 	JobLabels        map[string]string
 }
 
@@ -39,7 +40,7 @@ func (i *Importer) ImportPublicGitHubDockerfileImage(ctx context.Context, req Gi
 	}
 	defer releaseClonedRepo(repo)
 
-	return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, req.DockerfilePath, req.BuildContextDir, req.RegistryPushBase, req.ImageRepository, req.JobLabels)
+	return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, req.DockerfilePath, req.BuildContextDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels)
 }
 
 type dockerfileBuildRequest struct {
@@ -94,7 +95,7 @@ func detectDockerBuildInputs(repoDir, dockerfilePath, buildContextDir string) (s
 	return relDockerfile, relContext, nil
 }
 
-func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, dockerfilePath, buildContextDir, registryPushBase, imageRepository string, jobLabels map[string]string) (GitHubImportResult, error) {
+func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, dockerfilePath, buildContextDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels map[string]string) (GitHubImportResult, error) {
 	dockerfilePath, buildContextDir, err := detectDockerBuildInputs(repo.RepoDir, dockerfilePath, buildContextDir)
 	if err != nil {
 		return GitHubImportResult{}, err
@@ -104,7 +105,7 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		return GitHubImportResult{}, err
 	}
 
-	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo)
+	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
 	if err := buildAndPushDockerfileImage(ctx, dockerfileBuildRequest{
 		RepoURL:         repoURL,
 		Branch:          repo.Branch,

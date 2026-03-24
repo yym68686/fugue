@@ -90,6 +90,8 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 		buildContextDir,
 		buildStrategy,
 		strings.TrimSpace(app.Source.ImportProfile),
+		strings.TrimSpace(app.Source.ImageNameSuffix),
+		strings.TrimSpace(app.Source.ComposeService),
 	)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -132,6 +134,7 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 			"dockerfile_path":   source.DockerfilePath,
 			"build_context_dir": source.BuildContextDir,
 			"build_strategy":    source.BuildStrategy,
+			"compose_service":   source.ComposeService,
 		},
 	})
 }

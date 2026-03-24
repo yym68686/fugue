@@ -22,6 +22,7 @@ type GitHubBuildpacksImportRequest struct {
 	SourceDir        string
 	RegistryPushBase string
 	ImageRepository  string
+	ImageNameSuffix  string
 	JobLabels        map[string]string
 }
 
@@ -44,17 +45,17 @@ func (i *Importer) ImportPublicGitHubBuildpacks(ctx context.Context, req GitHubB
 	}
 	defer releaseClonedRepo(repo)
 
-	return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.JobLabels)
+	return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels)
 }
 
-func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, sourceDir, registryPushBase, imageRepository string, jobLabels map[string]string) (GitHubImportResult, error) {
+func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, sourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels map[string]string) (GitHubImportResult, error) {
 	normalizedSourceDir, err := normalizeRepoSourceDir(repo.RepoDir, sourceDir)
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
 	provider, port := detectBuildpacksProviderAndPort(repo.RepoDir, normalizedSourceDir)
 
-	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo)
+	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
 	if err := buildAndPushBuildpacksImage(ctx, buildpacksBuildRequest{
 		RepoURL:   repoURL,
 		Branch:    repo.Branch,

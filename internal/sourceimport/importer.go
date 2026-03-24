@@ -35,6 +35,7 @@ type GitHubImportRequest struct {
 	SourceDir        string
 	RegistryPushBase string
 	ImageRepository  string
+	ImageNameSuffix  string
 }
 
 type GitHubImportResult struct {
@@ -76,7 +77,7 @@ func (i *Importer) ImportPublicGitHubStaticSite(ctx context.Context, req GitHubI
 	}
 	defer releaseClonedRepo(repo)
 
-	return importStaticSiteFromClonedRepo(repo, req.SourceDir, req.RegistryPushBase, req.ImageRepository)
+	return importStaticSiteFromClonedRepo(repo, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix)
 }
 
 func gitOutput(ctx context.Context, repoDir string, args ...string) (string, error) {
@@ -121,13 +122,13 @@ func parseGitHubRepoURL(raw string) (string, string, error) {
 	return model.Slugify(parts[0]), model.Slugify(parts[1]), nil
 }
 
-func importStaticSiteFromClonedRepo(repo clonedGitHubRepo, requestedSourceDir, registryPushBase, imageRepository string) (GitHubImportResult, error) {
+func importStaticSiteFromClonedRepo(repo clonedGitHubRepo, requestedSourceDir, registryPushBase, imageRepository, imageNameSuffix string) (GitHubImportResult, error) {
 	sourceDir, err := detectStaticSiteDir(repo.RepoDir, requestedSourceDir)
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
 
-	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo)
+	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
 	if err := buildAndPushStaticSiteImage(sourceDir, imageRef); err != nil {
 		return GitHubImportResult{}, err
 	}

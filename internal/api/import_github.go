@@ -10,6 +10,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/sourceimport"
 	"fugue/internal/store"
 )
 
@@ -155,7 +156,45 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		baseName = "app"
 	}
 
-	source, err := buildQueuedGitHubSource(req.RepoURL, req.Branch, req.SourceDir, req.DockerfilePath, req.BuildContextDir, buildStrategy, profile)
+	if shouldInspectComposeImport(req, buildStrategy, profile) {
+		stack, inspectErr := s.importer.InspectPublicGitHubCompose(r.Context(), sourceimport.GitHubComposeInspectRequest{
+			RepoURL: strings.TrimSpace(req.RepoURL),
+			Branch:  strings.TrimSpace(req.Branch),
+		})
+		switch {
+		case inspectErr == nil:
+			response, primaryApp, primaryOp, err := s.importComposeGitHubStack(principal, tenantID, req, runtimeID, replicas, description, baseName, stack)
+			if err != nil {
+				if errors.Is(err, store.ErrConflict) {
+					httpx.WriteError(w, http.StatusConflict, err.Error())
+					return
+				}
+				if errors.Is(err, errInvalidComposeImport) {
+					httpx.WriteError(w, http.StatusBadRequest, err.Error())
+					return
+				}
+				s.writeStoreError(w, err)
+				return
+			}
+			if idempotencyKey != "" {
+				releaseIdempotency = false
+				if _, err := s.store.CompleteIdempotencyRecord(model.IdempotencyScopeAppImportGitHub, tenantID, idempotencyKey, primaryApp.ID, primaryOp.ID); err != nil {
+					s.log.Printf("complete idempotency record failed for tenant=%s key=%s app=%s op=%s: %v", tenantID, idempotencyKey, primaryApp.ID, primaryOp.ID, err)
+				}
+				response["idempotency"] = map[string]any{
+					"key":    idempotencyKey,
+					"status": model.IdempotencyStatusCompleted,
+				}
+			}
+			httpx.WriteJSON(w, http.StatusAccepted, response)
+			return
+		case inspectErr != nil && !errors.Is(inspectErr, sourceimport.ErrComposeNotFound):
+			httpx.WriteError(w, http.StatusBadRequest, inspectErr.Error())
+			return
+		}
+	}
+
+	source, err := buildQueuedGitHubSource(req.RepoURL, req.Branch, req.SourceDir, req.DockerfilePath, req.BuildContextDir, buildStrategy, profile, "", "")
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
@@ -234,7 +273,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusAccepted, response)
 }
 
-func buildQueuedGitHubSource(repoURL, branch, sourceDir, dockerfilePath, buildContextDir, buildStrategy, profile string) (model.AppSource, error) {
+func buildQueuedGitHubSource(repoURL, branch, sourceDir, dockerfilePath, buildContextDir, buildStrategy, profile, imageNameSuffix, composeService string) (model.AppSource, error) {
 	buildStrategy = normalizeBuildStrategy(buildStrategy)
 	switch buildStrategy {
 	case model.AppBuildStrategyAuto, model.AppBuildStrategyStaticSite, model.AppBuildStrategyDockerfile, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks:
@@ -262,6 +301,8 @@ func buildQueuedGitHubSource(repoURL, branch, sourceDir, dockerfilePath, buildCo
 		DockerfilePath:  strings.TrimSpace(dockerfilePath),
 		BuildContextDir: strings.TrimSpace(buildContextDir),
 		ImportProfile:   strings.TrimSpace(profile),
+		ImageNameSuffix: strings.TrimSpace(imageNameSuffix),
+		ComposeService:  strings.TrimSpace(composeService),
 	}
 	switch buildStrategy {
 	case model.AppBuildStrategyStaticSite, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks:

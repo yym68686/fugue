@@ -40,6 +40,8 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		ImportProfile:    strings.TrimSpace(op.DesiredSource.ImportProfile),
 		RegistryPushBase: s.registryPushBase,
 		ImageRepository:  "fugue-apps",
+		ImageNameSuffix:  strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
+		ComposeService:   strings.TrimSpace(op.DesiredSource.ComposeService),
 		JobLabels: map[string]string{
 			"fugue.pro/operation-id": op.ID,
 			"fugue.pro/app-id":       app.ID,

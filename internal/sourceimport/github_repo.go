@@ -71,12 +71,15 @@ func releaseClonedRepo(repo clonedGitHubRepo) {
 	_ = os.RemoveAll(repo.RepoDir)
 }
 
-func defaultImportedImageRef(registryPushBase, imageRepository string, repo clonedGitHubRepo) string {
+func defaultImportedImageRef(registryPushBase, imageRepository string, repo clonedGitHubRepo, imageNameSuffix string) string {
 	imageRepository = strings.Trim(strings.TrimSpace(imageRepository), "/")
 	if imageRepository == "" {
 		imageRepository = "fugue-apps"
 	}
 	repoPath := model.Slugify(repo.RepoOwner) + "-" + model.Slugify(repo.RepoName)
+	if suffix := model.Slugify(imageNameSuffix); suffix != "" {
+		repoPath += "-" + suffix
+	}
 	return fmt.Sprintf("%s/%s/%s:git-%s", strings.TrimSpace(registryPushBase), imageRepository, repoPath, shortCommit(repo.CommitSHA))
 }
 
