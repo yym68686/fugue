@@ -203,10 +203,11 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 }
 
 func resolveTopologyPrimaryService(services []sourceimport.ComposeService, preferred string) (sourceimport.ComposeService, error) {
-	preferred = model.Slugify(strings.TrimSpace(preferred))
+	preferred = strings.TrimSpace(preferred)
 	if preferred == "" {
 		return pickPrimaryComposeService(services), nil
 	}
+	preferred = model.Slugify(preferred)
 	for _, service := range services {
 		if service.Name == preferred {
 			return service, nil

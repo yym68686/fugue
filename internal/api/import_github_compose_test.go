@@ -146,6 +146,19 @@ func TestResolveTopologyPrimaryServiceUsesPreferredService(t *testing.T) {
 	}
 }
 
+func TestResolveTopologyPrimaryServiceFallsBackWhenPreferredIsEmpty(t *testing.T) {
+	primary, err := resolveTopologyPrimaryService([]sourceimport.ComposeService{
+		{Name: "api", Kind: sourceimport.ComposeServiceKindApp, Published: true, InternalPort: 8000},
+		{Name: "web", Kind: sourceimport.ComposeServiceKindApp, Published: true, InternalPort: 3000},
+	}, "")
+	if err != nil {
+		t.Fatalf("resolve topology primary service: %v", err)
+	}
+	if primary.Name != "web" {
+		t.Fatalf("expected auto-selected web, got %q", primary.Name)
+	}
+}
+
 func TestComposePostgresSpecKeepsExplicitServiceName(t *testing.T) {
 	spec, err := composePostgresSpec(sourceimport.ComposeService{
 		Name:  "db",

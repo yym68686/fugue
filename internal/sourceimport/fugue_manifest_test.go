@@ -140,3 +140,40 @@ services:
 		t.Fatal("expected multiple public services to be rejected")
 	}
 }
+
+func TestInspectFugueManifestAllowsSinglePublicServiceWithoutPrimary(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte("FROM scratch\nEXPOSE 3000\n"), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	manifest := `version: 1
+services:
+  web:
+    public: true
+    build:
+      context: .
+      dockerfile: Dockerfile
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "fugue.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write fugue manifest: %v", err)
+	}
+
+	parsed, err := inspectFugueManifestFromRepo(clonedGitHubRepo{
+		RepoOwner:      "example",
+		RepoName:       "demo",
+		RepoDir:        repoDir,
+		Branch:         "main",
+		CommitSHA:      "abcdef123456",
+		DefaultAppName: "demo",
+	})
+	if err != nil {
+		t.Fatalf("inspect fugue manifest: %v", err)
+	}
+	if parsed.PrimaryService != "web" {
+		t.Fatalf("expected inferred primary service web, got %q", parsed.PrimaryService)
+	}
+}

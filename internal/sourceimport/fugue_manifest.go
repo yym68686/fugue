@@ -397,7 +397,9 @@ func mergeFugueManifestEnvironment(primary, secondary any, vars map[string]strin
 }
 
 func resolveFugueManifestPrimaryService(rawPrimary string, services []ComposeService) (string, error) {
-	if primary := model.Slugify(strings.TrimSpace(rawPrimary)); primary != "" {
+	rawPrimary = strings.TrimSpace(rawPrimary)
+	if rawPrimary != "" {
+		primary := model.Slugify(rawPrimary)
 		for _, service := range services {
 			if service.Name != primary {
 				continue
