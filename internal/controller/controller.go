@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -74,13 +75,20 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		s.Config.RenderDir,
 		s.Config.KubectlApply,
 	)
+	requeued, err := s.Store.RequeueInFlightManagedOperations("operation requeued after controller restart")
+	if err != nil {
+		return fmt.Errorf("requeue in-flight managed operations: %w", err)
+	}
+	if requeued > 0 {
+		s.Logger.Printf("requeued %d in-flight managed operations after controller start", requeued)
+	}
 
 	if !eventDriven {
 		ticker := time.NewTicker(s.Config.PollInterval)
 		defer ticker.Stop()
 
 		for {
-			if err := s.reconcileOnce(); err != nil {
+			if err := s.reconcileOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				s.Logger.Printf("reconcile error: %v", err)
 			}
 
@@ -92,7 +100,7 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		}
 	}
 
-	if err := s.reconcileOnce(); err != nil {
+	if err := s.reconcileOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		s.Logger.Printf("reconcile error: %v", err)
 	}
 
@@ -111,11 +119,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 				operationEvents = nil
 				continue
 			}
-			if err := s.drainPendingOperations(); err != nil {
+			if err := s.drainPendingOperations(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				s.Logger.Printf("drain pending operations error: %v", err)
 			}
 		case <-fallbackTicker.C:
-			if err := s.drainPendingOperations(); err != nil {
+			if err := s.drainPendingOperations(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				s.Logger.Printf("fallback drain pending operations error: %v", err)
 			}
 		case <-staleTicker.C:
@@ -126,11 +134,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	}
 }
 
-func (s *Service) reconcileOnce() error {
+func (s *Service) reconcileOnce(ctx context.Context) error {
 	if err := s.markRuntimeOfflineStale(); err != nil {
 		return err
 	}
-	return s.drainPendingOperations()
+	return s.drainPendingOperations(ctx)
 }
 
 func (s *Service) markRuntimeOfflineStale() error {
@@ -140,7 +148,7 @@ func (s *Service) markRuntimeOfflineStale() error {
 	return nil
 }
 
-func (s *Service) drainPendingOperations() error {
+func (s *Service) drainPendingOperations(ctx context.Context) error {
 	for {
 		op, found, err := s.Store.ClaimNextPendingOperation()
 		if err != nil {
@@ -152,7 +160,13 @@ func (s *Service) drainPendingOperations() error {
 
 		switch op.ExecutionMode {
 		case model.ExecutionModeManaged:
-			if err := s.executeManagedOperation(op); err != nil {
+			if err := s.executeManagedOperation(ctx, op); err != nil {
+				if errors.Is(err, context.Canceled) {
+					if _, requeueErr := s.Store.RequeueManagedOperation(op.ID, "operation requeued after controller interruption"); requeueErr != nil && !errors.Is(requeueErr, store.ErrConflict) {
+						s.Logger.Printf("operation %s requeue after interruption failed: %v", op.ID, requeueErr)
+					}
+					return err
+				}
 				s.Logger.Printf("operation %s failed: %v", op.ID, err)
 				if _, failErr := s.Store.FailOperation(op.ID, err.Error()); failErr != nil {
 					s.Logger.Printf("operation %s fail update error: %v", op.ID, failErr)
@@ -166,7 +180,7 @@ func (s *Service) drainPendingOperations() error {
 	}
 }
 
-func (s *Service) executeManagedOperation(op model.Operation) error {
+func (s *Service) executeManagedOperation(ctx context.Context, op model.Operation) error {
 	app, err := s.Store.GetApp(op.AppID)
 	if err != nil {
 		return fmt.Errorf("load app %s: %w", op.AppID, err)
@@ -174,7 +188,7 @@ func (s *Service) executeManagedOperation(op model.Operation) error {
 
 	switch op.Type {
 	case model.OperationTypeImport:
-		return s.executeManagedImportOperation(op, app)
+		return s.executeManagedImportOperation(ctx, op, app)
 	case model.OperationTypeDeploy:
 		if op.DesiredSpec == nil {
 			return fmt.Errorf("deploy operation %s missing desired spec", op.ID)

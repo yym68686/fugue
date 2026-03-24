@@ -1588,6 +1588,7 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 	op.ID = model.NewID("op")
 	op.Status = model.OperationStatusPending
 	op.ExecutionMode = model.ExecutionModeManaged
+	op.ResultMessage = defaultInFlightOperationMessage(op)
 	op.CreatedAt = now
 	op.UpdatedAt = now
 
@@ -1601,9 +1602,15 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO fugue_operations (id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, '', '', '', '', $14, $15, NULL, NULL)
-`, op.ID, op.TenantID, op.Type, op.Status, op.ExecutionMode, op.RequestedByType, op.RequestedByID, op.AppID, op.SourceRuntimeID, op.TargetRuntimeID, intPointerValue(op.DesiredReplicas), desiredSpecJSON, desiredSourceJSON, op.CreatedAt, op.UpdatedAt); err != nil {
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, '', '', '', $15, $16, NULL, NULL)
+`, op.ID, op.TenantID, op.Type, op.Status, op.ExecutionMode, op.RequestedByType, op.RequestedByID, op.AppID, op.SourceRuntimeID, op.TargetRuntimeID, intPointerValue(op.DesiredReplicas), desiredSpecJSON, desiredSourceJSON, op.ResultMessage, op.CreatedAt, op.UpdatedAt); err != nil {
 		return model.Operation{}, mapDBErr(err)
+	}
+	if err := applyInFlightOperationToAppModel(&app, &op); err != nil {
+		return model.Operation{}, err
+	}
+	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+		return model.Operation{}, err
 	}
 	if err := s.notifyOperationTx(ctx, tx, op.ID); err != nil {
 		return model.Operation{}, err
@@ -1699,6 +1706,7 @@ JOIN next_op n ON n.id = o.id
 		op.Status = model.OperationStatusRunning
 		op.ExecutionMode = model.ExecutionModeManaged
 		op.StartedAt = &now
+		op.ResultMessage = defaultInFlightOperationMessage(op)
 	} else {
 		runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.TargetRuntimeID)
 		if err != nil {
@@ -1717,6 +1725,14 @@ JOIN next_op n ON n.id = o.id
 	}
 	op.UpdatedAt = now
 
+	app, err := s.pgGetAppTx(ctx, tx, op.AppID, true)
+	if err != nil {
+		return model.Operation{}, false, mapDBErr(err)
+	}
+	if err := applyInFlightOperationToAppModel(&app, &op); err != nil {
+		return model.Operation{}, false, err
+	}
+
 	if _, err := tx.ExecContext(ctx, `
 UPDATE fugue_operations
 SET status = $2,
@@ -1729,6 +1745,9 @@ WHERE id = $1
 `, op.ID, op.Status, op.ExecutionMode, op.AssignedRuntimeID, op.ResultMessage, op.StartedAt, op.UpdatedAt); err != nil {
 		return model.Operation{}, false, fmt.Errorf("update claimed operation %s: %w", op.ID, err)
 	}
+	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+		return model.Operation{}, false, err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return model.Operation{}, false, fmt.Errorf("commit claim operation transaction: %w", err)
@@ -1740,19 +1759,38 @@ func (s *Store) pgDispatchOperationToRuntime(id, runtimeID string) (model.Operat
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	now := time.Now().UTC()
-	op, err := scanOperation(s.db.QueryRowContext(ctx, `
-UPDATE fugue_operations
-SET status = $2,
-	execution_mode = $3,
-	assigned_runtime_id = $4,
-	result_message = $5,
-	updated_at = $6
-WHERE id = $1
-RETURNING id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
-`, id, model.OperationStatusWaitingAgent, model.ExecutionModeAgent, runtimeID, "task dispatched to external runtime agent", now))
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Operation{}, fmt.Errorf("begin dispatch operation transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	op, err := s.pgGetOperationTx(ctx, tx, id, true)
 	if err != nil {
 		return model.Operation{}, mapDBErr(err)
+	}
+	now := time.Now().UTC()
+	op.Status = model.OperationStatusWaitingAgent
+	op.ExecutionMode = model.ExecutionModeAgent
+	op.AssignedRuntimeID = runtimeID
+	op.ResultMessage = "task dispatched to external runtime agent"
+	op.UpdatedAt = now
+
+	app, err := s.pgGetAppTx(ctx, tx, op.AppID, true)
+	if err != nil {
+		return model.Operation{}, mapDBErr(err)
+	}
+	if err := applyInFlightOperationToAppModel(&app, &op); err != nil {
+		return model.Operation{}, err
+	}
+	if err := s.pgUpdateOperationTx(ctx, tx, op); err != nil {
+		return model.Operation{}, err
+	}
+	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+		return model.Operation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Operation{}, fmt.Errorf("commit dispatch operation transaction: %w", err)
 	}
 	return op, nil
 }
@@ -1882,6 +1920,117 @@ ORDER BY created_at ASC
 		return nil, fmt.Errorf("iterate assigned operations: %w", err)
 	}
 	return ops, nil
+}
+
+func (s *Store) pgRequeueManagedOperation(id, message string) (model.Operation, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Operation{}, fmt.Errorf("begin requeue operation transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	op, err := s.pgGetOperationTx(ctx, tx, id, true)
+	if err != nil {
+		return model.Operation{}, mapDBErr(err)
+	}
+	if !isRequeueableManagedOperation(op) {
+		return model.Operation{}, ErrConflict
+	}
+
+	app, err := s.pgGetAppTx(ctx, tx, op.AppID, true)
+	if err != nil {
+		return model.Operation{}, mapDBErr(err)
+	}
+
+	requeueManagedOperationState(&op, message)
+	if err := applyInFlightOperationToAppModel(&app, &op); err != nil {
+		return model.Operation{}, err
+	}
+	if err := s.pgUpdateOperationTx(ctx, tx, op); err != nil {
+		return model.Operation{}, err
+	}
+	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+		return model.Operation{}, err
+	}
+	if err := s.notifyOperationTx(ctx, tx, op.ID); err != nil {
+		return model.Operation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Operation{}, fmt.Errorf("commit requeue operation transaction: %w", err)
+	}
+	return op, nil
+}
+
+func (s *Store) pgRequeueInFlightManagedOperations(message string) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin bulk requeue transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+SELECT id
+FROM fugue_operations
+WHERE status = $1
+  AND execution_mode = $2
+ORDER BY created_at ASC
+FOR UPDATE
+`, model.OperationStatusRunning, model.ExecutionModeManaged)
+	if err != nil {
+		return 0, fmt.Errorf("list in-flight managed operations: %w", err)
+	}
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan in-flight managed operation id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, fmt.Errorf("iterate in-flight managed operations: %w", err)
+	}
+	rows.Close()
+
+	for _, id := range ids {
+		op, err := s.pgGetOperationTx(ctx, tx, id, true)
+		if err != nil {
+			return 0, mapDBErr(err)
+		}
+		if !isRequeueableManagedOperation(op) {
+			continue
+		}
+		app, err := s.pgGetAppTx(ctx, tx, op.AppID, true)
+		if err != nil {
+			return 0, mapDBErr(err)
+		}
+		requeueManagedOperationState(&op, message)
+		if err := applyInFlightOperationToAppModel(&app, &op); err != nil {
+			return 0, err
+		}
+		if err := s.pgUpdateOperationTx(ctx, tx, op); err != nil {
+			return 0, err
+		}
+		if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+			return 0, err
+		}
+		if err := s.notifyOperationTx(ctx, tx, op.ID); err != nil {
+			return 0, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit bulk requeue transaction: %w", err)
+	}
+	return len(ids), nil
 }
 
 func (s *Store) pgAppendAuditEvent(event model.AuditEvent) error {
@@ -2438,6 +2587,20 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 	}
 	app.Status.LastOperationID = op.ID
 	app.Status.LastMessage = op.ResultMessage
+	app.Status.UpdatedAt = now
+	app.UpdatedAt = now
+	return nil
+}
+
+func applyInFlightOperationToAppModel(app *model.App, op *model.Operation) error {
+	phase, err := inFlightOperationPhase(*op)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	app.Status.Phase = phase
+	app.Status.LastOperationID = op.ID
+	app.Status.LastMessage = effectiveInFlightOperationMessage(*op)
 	app.Status.UpdatedAt = now
 	app.UpdatedAt = now
 	return nil

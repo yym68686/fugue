@@ -1217,9 +1217,14 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 		op.ID = model.NewID("op")
 		op.Status = model.OperationStatusPending
 		op.ExecutionMode = model.ExecutionModeManaged
+		op.ResultMessage = defaultInFlightOperationMessage(op)
 		op.CreatedAt = now
 		op.UpdatedAt = now
 		state.Operations = append(state.Operations, op)
+		if err := applyInFlightOperationToApp(state, &state.Operations[len(state.Operations)-1]); err != nil {
+			return err
+		}
+		op = state.Operations[len(state.Operations)-1]
 		return nil
 	})
 	return op, err
@@ -1285,6 +1290,7 @@ func (s *Store) ClaimNextPendingOperation() (model.Operation, bool, error) {
 			state.Operations[index].Status = model.OperationStatusRunning
 			state.Operations[index].ExecutionMode = model.ExecutionModeManaged
 			state.Operations[index].StartedAt = &now
+			state.Operations[index].ResultMessage = defaultInFlightOperationMessage(state.Operations[index])
 		} else {
 			runtimeIndex := findRuntime(state, state.Operations[index].TargetRuntimeID)
 			if runtimeIndex >= 0 && state.Runtimes[runtimeIndex].Type == model.RuntimeTypeExternalOwned {
@@ -1296,9 +1302,13 @@ func (s *Store) ClaimNextPendingOperation() (model.Operation, bool, error) {
 				state.Operations[index].Status = model.OperationStatusRunning
 				state.Operations[index].ExecutionMode = model.ExecutionModeManaged
 				state.Operations[index].StartedAt = &now
+				state.Operations[index].ResultMessage = defaultInFlightOperationMessage(state.Operations[index])
 			}
 		}
 		state.Operations[index].UpdatedAt = now
+		if err := applyInFlightOperationToApp(state, &state.Operations[index]); err != nil {
+			return err
+		}
 		op = state.Operations[index]
 		found = true
 		return nil
@@ -1370,10 +1380,57 @@ func (s *Store) DispatchOperationToRuntime(id, runtimeID string) (model.Operatio
 		state.Operations[index].AssignedRuntimeID = runtimeID
 		state.Operations[index].UpdatedAt = now
 		state.Operations[index].ResultMessage = "task dispatched to external runtime agent"
+		if err := applyInFlightOperationToApp(state, &state.Operations[index]); err != nil {
+			return err
+		}
 		op = state.Operations[index]
 		return nil
 	})
 	return op, err
+}
+
+func (s *Store) RequeueManagedOperation(id, message string) (model.Operation, error) {
+	if s.usingDatabase() {
+		return s.pgRequeueManagedOperation(id, message)
+	}
+	var op model.Operation
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findOperation(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		if !isRequeueableManagedOperation(state.Operations[index]) {
+			return ErrConflict
+		}
+		requeueManagedOperationState(&state.Operations[index], message)
+		if err := applyInFlightOperationToApp(state, &state.Operations[index]); err != nil {
+			return err
+		}
+		op = state.Operations[index]
+		return nil
+	})
+	return op, err
+}
+
+func (s *Store) RequeueInFlightManagedOperations(message string) (int, error) {
+	if s.usingDatabase() {
+		return s.pgRequeueInFlightManagedOperations(message)
+	}
+	count := 0
+	err := s.withLockedState(true, func(state *model.State) error {
+		for index := range state.Operations {
+			if !isRequeueableManagedOperation(state.Operations[index]) {
+				continue
+			}
+			requeueManagedOperationState(&state.Operations[index], message)
+			if err := applyInFlightOperationToApp(state, &state.Operations[index]); err != nil {
+				return err
+			}
+			count++
+		}
+		return nil
+	})
+	return count, err
 }
 
 func (s *Store) FailOperation(id, message string) (model.Operation, error) {
@@ -1867,6 +1924,107 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 	app.Status.UpdatedAt = now
 	app.UpdatedAt = now
 	return nil
+}
+
+func applyInFlightOperationToApp(state *model.State, op *model.Operation) error {
+	appIndex := findApp(state, op.AppID)
+	if appIndex < 0 {
+		return ErrNotFound
+	}
+	phase, err := inFlightOperationPhase(*op)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	app := &state.Apps[appIndex]
+	app.Status.Phase = phase
+	app.Status.LastOperationID = op.ID
+	app.Status.LastMessage = effectiveInFlightOperationMessage(*op)
+	app.Status.UpdatedAt = now
+	app.UpdatedAt = now
+	return nil
+}
+
+func isRequeueableManagedOperation(op model.Operation) bool {
+	return op.Status == model.OperationStatusRunning && op.ExecutionMode == model.ExecutionModeManaged
+}
+
+func requeueManagedOperationState(op *model.Operation, message string) {
+	now := time.Now().UTC()
+	op.Status = model.OperationStatusPending
+	op.ExecutionMode = model.ExecutionModeManaged
+	op.AssignedRuntimeID = ""
+	op.ManifestPath = ""
+	op.ErrorMessage = ""
+	op.StartedAt = nil
+	op.CompletedAt = nil
+	op.UpdatedAt = now
+	if strings.TrimSpace(message) != "" {
+		op.ResultMessage = strings.TrimSpace(message)
+		return
+	}
+	op.ResultMessage = defaultInFlightOperationMessage(*op)
+}
+
+func inFlightOperationPhase(op model.Operation) (string, error) {
+	switch op.Type {
+	case model.OperationTypeImport:
+		return "importing", nil
+	case model.OperationTypeDeploy:
+		return "deploying", nil
+	case model.OperationTypeScale:
+		if op.DesiredReplicas != nil && *op.DesiredReplicas == 0 {
+			return "disabling", nil
+		}
+		return "scaling", nil
+	case model.OperationTypeDelete:
+		return "deleting", nil
+	case model.OperationTypeMigrate:
+		return "migrating", nil
+	default:
+		return "", ErrInvalidInput
+	}
+}
+
+func effectiveInFlightOperationMessage(op model.Operation) string {
+	message := strings.TrimSpace(op.ResultMessage)
+	if message != "" {
+		return message
+	}
+	return defaultInFlightOperationMessage(op)
+}
+
+func defaultInFlightOperationMessage(op model.Operation) string {
+	switch op.Status {
+	case model.OperationStatusPending:
+		return operationActionLabel(op) + " queued"
+	case model.OperationStatusRunning:
+		return operationActionLabel(op) + " in progress"
+	case model.OperationStatusWaitingAgent:
+		return "task dispatched to external runtime agent"
+	default:
+		return ""
+	}
+}
+
+func operationActionLabel(op model.Operation) string {
+	switch op.Type {
+	case model.OperationTypeImport:
+		return "import"
+	case model.OperationTypeDeploy:
+		return "deploy"
+	case model.OperationTypeScale:
+		if op.DesiredReplicas != nil && *op.DesiredReplicas == 0 {
+			return "disable"
+		}
+		return "scale"
+	case model.OperationTypeDelete:
+		return "delete"
+	case model.OperationTypeMigrate:
+		return "migrate"
+	default:
+		return "operation"
+	}
 }
 
 func firstPositiveSpecPort(ports []int) int {

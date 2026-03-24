@@ -10,7 +10,7 @@ import (
 	"fugue/internal/sourceimport"
 )
 
-func (s *Service) executeManagedImportOperation(op model.Operation, app model.App) error {
+func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Operation, app model.App) error {
 	if op.DesiredSpec == nil {
 		return fmt.Errorf("import operation %s missing desired spec", op.ID)
 	}
@@ -27,7 +27,7 @@ func (s *Service) executeManagedImportOperation(op model.Operation, app model.Ap
 		return fmt.Errorf("controller registry push base is not configured")
 	}
 
-	importCtx, cancel := context.WithTimeout(context.Background(), importSourceTimeout(strings.TrimSpace(op.DesiredSource.ImportProfile)))
+	importCtx, cancel := context.WithTimeout(ctx, importSourceTimeout(strings.TrimSpace(op.DesiredSource.ImportProfile)))
 	defer cancel()
 
 	output, err := s.importer.ImportPublicGitHubSource(importCtx, sourceimport.GitHubSourceImportRequest{

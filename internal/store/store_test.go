@@ -1063,6 +1063,180 @@ func TestFailedOperationMarksAppFailed(t *testing.T) {
 	}
 }
 
+func TestCreateOperationImmediatelyRefreshesFailedAppStatus(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Immediate Refresh")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.example.com/demo:old",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyStaticSite,
+	}, model.AppRoute{
+		Hostname:    "demo.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://demo.example.com",
+		ServicePort: 80,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	importSpec := app.Spec
+	importSource := *app.Source
+	failedOp, err := s.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		Type:          model.OperationTypeImport,
+		AppID:         app.ID,
+		DesiredSpec:   &importSpec,
+		DesiredSource: &importSource,
+	})
+	if err != nil {
+		t.Fatalf("create failed import operation: %v", err)
+	}
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim failed import operation: %v", err)
+	} else if !found {
+		t.Fatal("expected failed import operation")
+	}
+	if _, err := s.FailOperation(failedOp.ID, "old build failed"); err != nil {
+		t.Fatalf("fail old operation: %v", err)
+	}
+
+	deploySpec := app.Spec
+	deploySpec.Image = "registry.example.com/demo:new"
+	deployOp, err := s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &deploySpec,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.Status.Phase != "deploying" {
+		t.Fatalf("expected phase deploying after create, got %q", app.Status.Phase)
+	}
+	if app.Status.LastOperationID != deployOp.ID {
+		t.Fatalf("expected last operation %s, got %s", deployOp.ID, app.Status.LastOperationID)
+	}
+	if app.Status.LastMessage != "deploy queued" {
+		t.Fatalf("expected deploy queued message, got %q", app.Status.LastMessage)
+	}
+}
+
+func TestClaimAndRequeueManagedOperationRefreshAppStatus(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Claim Refresh")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "nginx:1.27",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	replicas := 2
+	op, err := s.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeScale,
+		AppID:           app.ID,
+		DesiredReplicas: &replicas,
+	})
+	if err != nil {
+		t.Fatalf("create scale operation: %v", err)
+	}
+
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app after create: %v", err)
+	}
+	if app.Status.Phase != "scaling" || app.Status.LastMessage != "scale queued" {
+		t.Fatalf("expected scaling/scale queued after create, got phase=%q message=%q", app.Status.Phase, app.Status.LastMessage)
+	}
+
+	claimed, found, err := s.ClaimNextPendingOperation()
+	if err != nil {
+		t.Fatalf("claim scale operation: %v", err)
+	}
+	if !found {
+		t.Fatal("expected claimed scale operation")
+	}
+	if claimed.ID != op.ID {
+		t.Fatalf("expected claimed id %s, got %s", op.ID, claimed.ID)
+	}
+
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app after claim: %v", err)
+	}
+	if app.Status.Phase != "scaling" || app.Status.LastMessage != "scale in progress" {
+		t.Fatalf("expected scaling/scale in progress after claim, got phase=%q message=%q", app.Status.Phase, app.Status.LastMessage)
+	}
+
+	requeued, err := s.RequeueManagedOperation(op.ID, "operation requeued after controller restart")
+	if err != nil {
+		t.Fatalf("requeue managed operation: %v", err)
+	}
+	if requeued.Status != model.OperationStatusPending {
+		t.Fatalf("expected requeued status pending, got %q", requeued.Status)
+	}
+	if requeued.StartedAt != nil || requeued.CompletedAt != nil {
+		t.Fatalf("expected cleared timestamps after requeue, got started=%v completed=%v", requeued.StartedAt, requeued.CompletedAt)
+	}
+
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app after requeue: %v", err)
+	}
+	if app.Status.Phase != "scaling" {
+		t.Fatalf("expected phase scaling after requeue, got %q", app.Status.Phase)
+	}
+	if app.Status.LastOperationID != op.ID {
+		t.Fatalf("expected last operation %s after requeue, got %s", op.ID, app.Status.LastOperationID)
+	}
+	if app.Status.LastMessage != "operation requeued after controller restart" {
+		t.Fatalf("expected requeue message, got %q", app.Status.LastMessage)
+	}
+}
+
 func TestScaleOperationAllowsZeroAndDisablesApp(t *testing.T) {
 	t.Parallel()
 
