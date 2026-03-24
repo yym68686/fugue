@@ -541,7 +541,14 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"apps": sanitizeAppsForAPI(apps)})
+	visibleApps := make([]model.App, 0, len(apps))
+	for _, app := range apps {
+		if strings.EqualFold(strings.TrimSpace(app.Status.Phase), "deleting") {
+			continue
+		}
+		visibleApps = append(visibleApps, app)
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"apps": sanitizeAppsForAPI(visibleApps)})
 }
 
 func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
@@ -747,6 +754,25 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	}
 	app, allowed := s.loadAuthorizedApp(w, r, principal)
 	if !allowed {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(app.Status.Phase), "deleting") {
+		response := map[string]any{
+			"already_deleting": true,
+		}
+		if operationID := strings.TrimSpace(app.Status.LastOperationID); operationID != "" {
+			op, err := s.store.GetOperation(operationID)
+			if err == nil && op.Type == model.OperationTypeDelete {
+				response["operation"] = sanitizeOperationForAPI(op)
+				httpx.WriteJSON(w, http.StatusAccepted, response)
+				return
+			}
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				s.writeStoreError(w, err)
+				return
+			}
+		}
+		httpx.WriteJSON(w, http.StatusAccepted, response)
 		return
 	}
 	op, err := s.store.CreateOperation(model.Operation{

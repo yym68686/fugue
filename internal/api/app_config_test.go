@@ -311,6 +311,65 @@ func TestUpsertAndDeleteAppFilesCreateDeployOperations(t *testing.T) {
 	}
 }
 
+func TestDeleteAppIsIdempotentAndHiddenFromAppListWhileDeleting(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+
+	recorder := performJSONRequest(t, server, http.MethodDelete, "/v1/apps/"+app.ID, apiKey, nil)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+	var firstDelete struct {
+		Operation model.Operation `json:"operation"`
+	}
+	mustDecodeJSON(t, recorder, &firstDelete)
+	if firstDelete.Operation.ID == "" {
+		t.Fatal("expected delete operation id")
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/apps", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var listResponse struct {
+		Apps []model.App `json:"apps"`
+	}
+	mustDecodeJSON(t, recorder, &listResponse)
+	if len(listResponse.Apps) != 0 {
+		t.Fatalf("expected deleting app to be hidden from app list, got %+v", listResponse.Apps)
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodDelete, "/v1/apps/"+app.ID, apiKey, nil)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+	var secondDelete struct {
+		AlreadyDeleting bool            `json:"already_deleting"`
+		Operation       model.Operation `json:"operation"`
+	}
+	mustDecodeJSON(t, recorder, &secondDelete)
+	if !secondDelete.AlreadyDeleting {
+		t.Fatal("expected already_deleting=true")
+	}
+	if secondDelete.Operation.ID != firstDelete.Operation.ID {
+		t.Fatalf("expected repeated delete to return same operation %q, got %q", firstDelete.Operation.ID, secondDelete.Operation.ID)
+	}
+
+	ops, err := s.ListOperations("", true)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected exactly one delete operation, got %d", len(ops))
+	}
+}
+
 func setupAppConfigTestServer(t *testing.T, spec model.AppSpec) (*store.Store, *Server, string, model.App) {
 	t.Helper()
 
