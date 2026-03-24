@@ -239,22 +239,18 @@ func buildKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest)
 	if err != nil {
 		return nil, err
 	}
+	kanikoDockerfilePath, err := kanikoDockerfilePath(req.DockerfilePath, req.BuildContextDir)
+	if err != nil {
+		return nil, err
+	}
 
-	args := []string{
-		"--context=" + contextURL,
-		"--dockerfile=" + req.DockerfilePath,
-		"--destination=" + req.ImageRef,
-		"--cleanup",
-		"--git=branch=" + req.Branch,
+	args := kanikoDestinationArgs(req.ImageRef,
+		"--context="+contextURL,
+		"--dockerfile="+kanikoDockerfilePath,
+		"--git=branch="+req.Branch,
 		"--git=single-branch=true",
 		"--git=recurse-submodules=true",
-	}
-	if registryHost := registryHostFromImageRef(req.ImageRef); isInsecureRegistryHost(registryHost) {
-		args = append(args,
-			"--insecure",
-			"--insecure-registry="+registryHost,
-		)
-	}
+	)
 	if strings.TrimSpace(req.BuildContextDir) != "" && strings.TrimSpace(req.BuildContextDir) != "." {
 		args = append(args, "--context-sub-path="+req.BuildContextDir)
 	}
@@ -290,6 +286,30 @@ func buildKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest)
 	metadata := jobObject["metadata"].(map[string]any)
 	metadata["labels"] = mergeBuilderLabels(metadata["labels"].(map[string]string), req.JobLabels)
 	return jobObject, nil
+}
+
+func kanikoDockerfilePath(dockerfilePath, buildContextDir string) (string, error) {
+	dockerfilePath = filepath.ToSlash(strings.TrimSpace(dockerfilePath))
+	if dockerfilePath == "" {
+		return "", fmt.Errorf("dockerfile path is empty")
+	}
+	buildContextDir = filepath.ToSlash(strings.TrimSpace(buildContextDir))
+	if buildContextDir == "" || buildContextDir == "." {
+		return dockerfilePath, nil
+	}
+
+	relPath, err := filepath.Rel(filepath.FromSlash(buildContextDir), filepath.FromSlash(dockerfilePath))
+	if err != nil {
+		return "", fmt.Errorf("rel dockerfile path from build context: %w", err)
+	}
+	relPath = filepath.ToSlash(relPath)
+	if relPath == "." || relPath == "" {
+		return filepath.Base(dockerfilePath), nil
+	}
+	if strings.HasPrefix(relPath, "../") || relPath == ".." {
+		return "", fmt.Errorf("dockerfile_path %q must be inside build_context_dir %q for kaniko git builds", dockerfilePath, buildContextDir)
+	}
+	return relPath, nil
 }
 
 func buildGitContextURL(repoURL, branch, commitSHA string) (string, error) {
