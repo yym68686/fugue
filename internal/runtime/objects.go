@@ -20,6 +20,7 @@ const (
 func buildAppObjects(app model.App, scheduling SchedulingConstraints) []map[string]any {
 	namespace := NamespaceForTenant(app.TenantID)
 	appName := sanitizeName(app.Name)
+	postgresResources := managedPostgresResources(namespace, app)
 	objects := []map[string]any{
 		buildNamespaceObject(namespace),
 	}
@@ -28,17 +29,17 @@ func buildAppObjects(app model.App, scheduling SchedulingConstraints) []map[stri
 		objects = append(objects, buildAppFilesSecretObject(namespace, appName, app.Spec.Files))
 	}
 
-	if postgres := normalizedPostgresSpec(namespace, app); postgres != nil {
+	for _, postgres := range postgresResources {
 		objects = append(objects,
-			buildPostgresSecretObject(namespace, appName, *postgres),
-			buildPostgresServiceObject(namespace, appName, *postgres),
-			buildPostgresDeploymentObject(namespace, appName, *postgres, scheduling),
+			buildPostgresSecretObject(namespace, postgres.secretName, postgres.resourceName, postgres.spec),
+			buildPostgresServiceObject(namespace, postgres.resourceName, postgres.spec),
+			buildPostgresDeploymentObject(namespace, postgres.secretName, postgres.resourceName, postgres.spec, scheduling),
 		)
 	}
 
 	labels := appLabels(appName)
 	objects = append(objects,
-		buildAppDeploymentObject(namespace, app, labels, scheduling),
+		buildAppDeploymentObject(namespace, app, labels, scheduling, postgresResources),
 		buildAppServiceObject(namespace, app, labels),
 	)
 	return objects
@@ -61,9 +62,9 @@ func appLabels(appName string) map[string]string {
 	}
 }
 
-func postgresLabels(appName string) map[string]string {
+func postgresLabels(resourceName string) map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/name":       postgresResourceName(appName),
+		"app.kubernetes.io/name":       resourceName,
 		"app.kubernetes.io/component":  "postgres",
 		"app.kubernetes.io/managed-by": "fugue",
 	}
@@ -87,14 +88,14 @@ func buildAppFilesSecretObject(namespace, appName string, files []model.AppFile)
 	}
 }
 
-func buildPostgresSecretObject(namespace, appName string, spec model.AppPostgresSpec) map[string]any {
+func buildPostgresSecretObject(namespace, secretName, resourceName string, spec model.AppPostgresSpec) map[string]any {
 	return map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Secret",
 		"metadata": map[string]any{
-			"name":      postgresSecretName(appName),
+			"name":      secretName,
 			"namespace": namespace,
-			"labels":    postgresLabels(appName),
+			"labels":    postgresLabels(resourceName),
 		},
 		"type": "Opaque",
 		"stringData": map[string]string{
@@ -105,17 +106,18 @@ func buildPostgresSecretObject(namespace, appName string, spec model.AppPostgres
 	}
 }
 
-func buildPostgresServiceObject(namespace, appName string, spec model.AppPostgresSpec) map[string]any {
+func buildPostgresServiceObject(namespace, resourceName string, spec model.AppPostgresSpec) map[string]any {
+	labels := postgresLabels(resourceName)
 	return map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Service",
 		"metadata": map[string]any{
-			"name":      spec.ServiceName,
+			"name":      resourceName,
 			"namespace": namespace,
-			"labels":    postgresLabels(appName),
+			"labels":    labels,
 		},
 		"spec": map[string]any{
-			"selector": postgresLabels(appName),
+			"selector": labels,
 			"ports": []map[string]any{
 				{
 					"name":       "tcp-5432",
@@ -128,8 +130,8 @@ func buildPostgresServiceObject(namespace, appName string, spec model.AppPostgre
 	}
 }
 
-func buildPostgresDeploymentObject(namespace, appName string, spec model.AppPostgresSpec, scheduling SchedulingConstraints) map[string]any {
-	labels := postgresLabels(appName)
+func buildPostgresDeploymentObject(namespace, secretName, resourceName string, spec model.AppPostgresSpec, scheduling SchedulingConstraints) map[string]any {
+	labels := postgresLabels(resourceName)
 	podSpec := map[string]any{
 		"initContainers": []map[string]any{
 			{
@@ -160,7 +162,7 @@ func buildPostgresDeploymentObject(namespace, appName string, spec model.AppPost
 						"name": "POSTGRES_DB",
 						"valueFrom": map[string]any{
 							"secretKeyRef": map[string]any{
-								"name": postgresSecretName(appName),
+								"name": secretName,
 								"key":  "POSTGRES_DB",
 							},
 						},
@@ -169,7 +171,7 @@ func buildPostgresDeploymentObject(namespace, appName string, spec model.AppPost
 						"name": "POSTGRES_USER",
 						"valueFrom": map[string]any{
 							"secretKeyRef": map[string]any{
-								"name": postgresSecretName(appName),
+								"name": secretName,
 								"key":  "POSTGRES_USER",
 							},
 						},
@@ -178,7 +180,7 @@ func buildPostgresDeploymentObject(namespace, appName string, spec model.AppPost
 						"name": "POSTGRES_PASSWORD",
 						"valueFrom": map[string]any{
 							"secretKeyRef": map[string]any{
-								"name": postgresSecretName(appName),
+								"name": secretName,
 								"key":  "POSTGRES_PASSWORD",
 							},
 						},
@@ -214,7 +216,7 @@ func buildPostgresDeploymentObject(namespace, appName string, spec model.AppPost
 		"apiVersion": "apps/v1",
 		"kind":       "Deployment",
 		"metadata": map[string]any{
-			"name":      postgresResourceName(appName),
+			"name":      resourceName,
 			"namespace": namespace,
 			"labels":    labels,
 		},
@@ -236,7 +238,7 @@ func buildPostgresDeploymentObject(namespace, appName string, spec model.AppPost
 	}
 }
 
-func buildAppDeploymentObject(namespace string, app model.App, labels map[string]string, scheduling SchedulingConstraints) map[string]any {
+func buildAppDeploymentObject(namespace string, app model.App, labels map[string]string, scheduling SchedulingConstraints, postgresResources []postgresRuntimeResource) map[string]any {
 	container := map[string]any{
 		"name":  sanitizeName(app.Name),
 		"image": app.Spec.Image,
@@ -257,8 +259,8 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		}
 		container["ports"] = ports
 	}
-	if len(app.Spec.Env) > 0 {
-		container["env"] = buildEnvObjects(app.Spec.Env)
+	if env := mergedRuntimeEnv(app); len(env) > 0 {
+		container["env"] = buildEnvObjects(env)
 	}
 
 	volumeMounts := []map[string]any{}
@@ -302,18 +304,24 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		podSpec["volumes"] = volumes
 	}
 
-	if postgres := normalizedPostgresSpec(namespace, app); postgres != nil {
-		podSpec["initContainers"] = []map[string]any{
-			{
-				"name":  "wait-postgres",
+	if len(postgresResources) > 0 {
+		initContainers := make([]map[string]any, 0, len(postgresResources))
+		for index, postgres := range postgresResources {
+			name := "wait-postgres"
+			if index > 0 {
+				name = "wait-postgres-" + strconv.Itoa(index+1)
+			}
+			initContainers = append(initContainers, map[string]any{
+				"name":  name,
 				"image": defaultWaitImage,
 				"command": []string{
 					"sh",
 					"-c",
-					"until nc -z " + postgres.ServiceName + " 5432; do sleep 2; done",
+					"until nc -z " + postgres.spec.ServiceName + " 5432; do sleep 2; done",
 				},
-			},
+			})
 		}
+		podSpec["initContainers"] = initContainers
 	}
 	applyScheduling(&podSpec, scheduling)
 
@@ -343,6 +351,95 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 			},
 		},
 	}
+}
+
+type postgresRuntimeResource struct {
+	baseName     string
+	resourceName string
+	secretName   string
+	spec         model.AppPostgresSpec
+}
+
+func managedPostgresResources(namespace string, app model.App) []postgresRuntimeResource {
+	servicesByID := make(map[string]model.BackingService, len(app.BackingServices))
+	for _, service := range app.BackingServices {
+		servicesByID[service.ID] = service
+	}
+
+	resources := make([]postgresRuntimeResource, 0)
+	for _, binding := range app.Bindings {
+		service, ok := servicesByID[binding.ServiceID]
+		if !ok {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(service.Type), model.BackingServiceTypePostgres) {
+			continue
+		}
+		if !isManagedRuntimeBackingService(service) || service.Spec.Postgres == nil {
+			continue
+		}
+		baseName := runtimeBackingServiceBaseName(service.Name, app.Name)
+		spec := normalizeRuntimePostgresSpec(namespace, baseName, *service.Spec.Postgres)
+		resources = append(resources, postgresRuntimeResource{
+			baseName:     baseName,
+			resourceName: spec.ServiceName,
+			secretName:   postgresSecretName(baseName),
+			spec:         spec,
+		})
+	}
+
+	if len(resources) == 0 && app.Spec.Postgres != nil {
+		baseName := runtimeBackingServiceBaseName("", app.Name)
+		spec := normalizeRuntimePostgresSpec(namespace, baseName, *app.Spec.Postgres)
+		resources = append(resources, postgresRuntimeResource{
+			baseName:     baseName,
+			resourceName: spec.ServiceName,
+			secretName:   postgresSecretName(baseName),
+			spec:         spec,
+		})
+	}
+
+	return resources
+}
+
+func mergedRuntimeEnv(app model.App) map[string]string {
+	merged := make(map[string]string)
+	hasManagedPostgresBinding := false
+	servicesByID := make(map[string]model.BackingService, len(app.BackingServices))
+	for _, service := range app.BackingServices {
+		servicesByID[service.ID] = service
+	}
+
+	for _, binding := range app.Bindings {
+		for key, value := range binding.Env {
+			merged[key] = value
+		}
+		service, ok := servicesByID[binding.ServiceID]
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(service.Type), model.BackingServiceTypePostgres) {
+			hasManagedPostgresBinding = true
+		}
+	}
+
+	if !hasManagedPostgresBinding && app.Spec.Postgres != nil {
+		baseName := runtimeBackingServiceBaseName("", app.Name)
+		for key, value := range defaultRuntimePostgresEnv(normalizeRuntimePostgresSpec(NamespaceForTenant(app.TenantID), baseName, *app.Spec.Postgres)) {
+			if _, exists := merged[key]; !exists {
+				merged[key] = value
+			}
+		}
+	}
+
+	for key, value := range app.Spec.Env {
+		merged[key] = value
+	}
+
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
 }
 
 func buildAppServiceObject(namespace string, app model.App, labels map[string]string) map[string]any {
@@ -447,27 +544,21 @@ func applyScheduling(podSpec *map[string]any, scheduling SchedulingConstraints) 
 	}
 }
 
-func normalizedPostgresSpec(namespace string, app model.App) *model.AppPostgresSpec {
-	if app.Spec.Postgres == nil {
-		return nil
-	}
-	spec := *app.Spec.Postgres
+func normalizeRuntimePostgresSpec(namespace, baseName string, spec model.AppPostgresSpec) model.AppPostgresSpec {
 	if strings.TrimSpace(spec.Image) == "" {
 		spec.Image = defaultPostgresImage
 	}
 	if strings.TrimSpace(spec.Database) == "" {
-		spec.Database = sanitizeName(app.Name)
+		spec.Database = baseName
 	}
 	if strings.TrimSpace(spec.User) == "" {
 		spec.User = "postgres"
 	}
-	if strings.TrimSpace(spec.ServiceName) == "" {
-		spec.ServiceName = postgresResourceName(sanitizeName(app.Name))
-	}
+	spec.ServiceName = normalizePostgresResourceName(spec.ServiceName, baseName)
 	if strings.TrimSpace(spec.StoragePath) == "" {
-		spec.StoragePath = path.Join("/var/lib/fugue/tenant-data", namespace, sanitizeName(app.Name), "postgres")
+		spec.StoragePath = path.Join("/var/lib/fugue/tenant-data", namespace, baseName, "postgres")
 	}
-	return &spec
+	return spec
 }
 
 func appFilesSecretName(appName string) string {
@@ -480,6 +571,46 @@ func postgresResourceName(appName string) string {
 
 func postgresSecretName(appName string) string {
 	return appName + "-pgsec"
+}
+
+func normalizePostgresResourceName(name, baseName string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = postgresResourceName(baseName)
+	}
+	name = model.Slugify(name)
+	if len(name) > 63 {
+		return name[:63]
+	}
+	return name
+}
+
+func runtimeBackingServiceBaseName(serviceName, fallback string) string {
+	name := strings.TrimSpace(serviceName)
+	if name == "" {
+		name = fallback
+	}
+	name = sanitizeName(name)
+	if name == "" {
+		return "service"
+	}
+	return name
+}
+
+func defaultRuntimePostgresEnv(spec model.AppPostgresSpec) map[string]string {
+	return map[string]string{
+		"DB_TYPE":     "postgres",
+		"DB_HOST":     spec.ServiceName,
+		"DB_PORT":     "5432",
+		"DB_USER":     spec.User,
+		"DB_PASSWORD": spec.Password,
+		"DB_NAME":     spec.Database,
+	}
+}
+
+func isManagedRuntimeBackingService(service model.BackingService) bool {
+	provisioner := strings.TrimSpace(service.Provisioner)
+	return provisioner == "" || strings.EqualFold(provisioner, model.BackingServiceProvisionerManaged)
 }
 
 func fileKey(index int) string {

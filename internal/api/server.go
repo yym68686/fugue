@@ -97,11 +97,14 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/runtimes/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetRuntime)))
 	mux.Handle("GET /v1/runtimes/enroll-tokens", s.auth.RequireAPI(http.HandlerFunc(s.handleListEnrollmentTokens)))
 	mux.Handle("POST /v1/runtimes/enroll-tokens", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateEnrollmentToken)))
+	mux.Handle("GET /v1/backing-services", s.auth.RequireAPI(http.HandlerFunc(s.handleListBackingServices)))
+	mux.Handle("GET /v1/backing-services/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetBackingService)))
 
 	mux.Handle("GET /v1/apps", s.auth.RequireAPI(http.HandlerFunc(s.handleListApps)))
 	mux.Handle("POST /v1/apps", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateApp)))
 	mux.Handle("POST /v1/apps/import-github", s.auth.RequireAPI(http.HandlerFunc(s.handleImportGitHubApp)))
 	mux.Handle("GET /v1/apps/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetApp)))
+	mux.Handle("GET /v1/apps/{id}/bindings", s.auth.RequireAPI(http.HandlerFunc(s.handleListAppBindings)))
 	mux.Handle("GET /v1/apps/{id}/build-logs", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppBuildLogs)))
 	mux.Handle("GET /v1/apps/{id}/runtime-logs", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppRuntimeLogs)))
 	mux.Handle("GET /v1/apps/{id}/env", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppEnv)))
@@ -709,8 +712,8 @@ func (s *Server) handleMigrateApp(w http.ResponseWriter, r *http.Request) {
 	if !allowed {
 		return
 	}
-	if app.Spec.Postgres != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "stateful apps with postgres are not migratable yet")
+	if hasManagedStatefulBinding(app) {
+		httpx.WriteError(w, http.StatusBadRequest, "stateful apps with managed backing services are not migratable yet")
 		return
 	}
 	var req struct {

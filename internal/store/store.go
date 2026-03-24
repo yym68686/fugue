@@ -47,10 +47,16 @@ func (s *Store) Init() error {
 		if err := s.ensureDatabaseReady(); err != nil {
 			return err
 		}
-		return s.pgRepairAppStatuses()
+		if err := s.pgRepairAppStatuses(); err != nil {
+			return err
+		}
+		return s.pgMigrateLegacyAppBackingServices()
 	}
 	return s.withFileLockedState(true, func(state *model.State) error {
 		ensureDefaults(state)
+		if err := migrateLegacyAppBackingServicesState(state); err != nil {
+			return err
+		}
 		repairAllAppStatuses(state)
 		return nil
 	})
@@ -190,6 +196,8 @@ func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
 		state.Machines = deleteLegacyMachinesByTenant(state.Machines, id, deletedNodeKeyIDs)
 		state.Runtimes = deleteRuntimesByTenant(state.Runtimes, id, deletedNodeKeyIDs)
 		state.Apps = deleteAppsByTenant(state.Apps, id)
+		state.BackingServices = deleteBackingServicesByTenant(state.BackingServices, id)
+		state.ServiceBindings = deleteServiceBindingsByTenant(state.ServiceBindings, id)
 		state.Operations = deleteOperationsByTenant(state.Operations, id)
 		state.AuditEvents = deleteAuditEventsByTenant(state.AuditEvents, id)
 		state.Idempotency = deleteIdempotencyRecordsByTenant(state.Idempotency, id)
@@ -1031,6 +1039,7 @@ func (s *Store) ListApps(tenantID string, platformAdmin bool) ([]model.App, erro
 				continue
 			}
 			normalizeAppStatusForRead(&app)
+			hydrateAppBackingServices(state, &app)
 			if platformAdmin || app.TenantID == tenantID {
 				apps = append(apps, app)
 			}
@@ -1055,6 +1064,7 @@ func (s *Store) GetApp(id string) (model.App, error) {
 		}
 		app = state.Apps[index]
 		normalizeAppStatusForRead(&app)
+		hydrateAppBackingServices(state, &app)
 		if isDeletedApp(app) {
 			return ErrNotFound
 		}
@@ -1080,6 +1090,7 @@ func (s *Store) GetAppByHostname(hostname string) (model.App, error) {
 			if strings.EqualFold(strings.TrimSpace(candidate.Route.Hostname), hostname) {
 				app = candidate
 				normalizeAppStatusForRead(&app)
+				hydrateAppBackingServices(state, &app)
 				return nil
 			}
 		}
@@ -1154,6 +1165,14 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
+		if app.Spec.Postgres != nil {
+			service, binding := ownedLegacyPostgresResources(app)
+			service.Name = nextAvailableBackingServiceName(state, tenantID, projectID, service.Name)
+			state.BackingServices = append(state.BackingServices, service)
+			state.ServiceBindings = append(state.ServiceBindings, binding)
+			app.Spec.Postgres = nil
+		}
+		hydrateAppBackingServices(state, &app)
 		state.Apps = append(state.Apps, app)
 		return nil
 	})
@@ -1577,6 +1596,12 @@ func ensureDefaults(state *model.State) {
 	if state.Apps == nil {
 		state.Apps = []model.App{}
 	}
+	if state.BackingServices == nil {
+		state.BackingServices = []model.BackingService{}
+	}
+	if state.ServiceBindings == nil {
+		state.ServiceBindings = []model.ServiceBinding{}
+	}
 	if state.Operations == nil {
 		state.Operations = []model.Operation{}
 	}
@@ -1886,6 +1911,9 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 		if op.DesiredSpec == nil {
 			return ErrInvalidInput
 		}
+		if err := applyDesiredSpecBackingServicesState(state, app, op.DesiredSpec); err != nil {
+			return err
+		}
 		app.Spec = *op.DesiredSpec
 		if app.Route != nil {
 			app.Route.ServicePort = firstPositiveSpecPort(app.Spec.Ports)
@@ -1915,6 +1943,8 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 		app.Status.Phase = "deleted"
 		app.Status.CurrentRuntimeID = ""
 		app.Status.CurrentReplicas = 0
+		state.ServiceBindings = deleteServiceBindingsByApp(state.ServiceBindings, app.ID)
+		state.BackingServices = deleteOwnedBackingServicesByApp(state.BackingServices, app.ID)
 	case model.OperationTypeMigrate:
 		if op.TargetRuntimeID == "" {
 			return ErrInvalidInput

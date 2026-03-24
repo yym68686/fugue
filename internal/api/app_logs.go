@@ -618,10 +618,19 @@ func runtimeLogTarget(app model.App, component string) (string, string, error) {
 	case "app":
 		return "app.kubernetes.io/name=" + appName + ",app.kubernetes.io/managed-by=fugue", appName, nil
 	case "postgres":
-		if app.Spec.Postgres == nil {
-			return "", "", fmt.Errorf("app does not declare postgres")
+		bound, ok := firstManagedPostgresBinding(app)
+		if !ok || bound.Service.Spec.Postgres == nil {
+			return "", "", fmt.Errorf("app does not declare managed postgres")
 		}
-		return "app.kubernetes.io/name=" + appName + "-postgres,app.kubernetes.io/component=postgres,app.kubernetes.io/managed-by=fugue", "postgres", nil
+		serviceName := strings.TrimSpace(bound.Service.Spec.Postgres.ServiceName)
+		if serviceName == "" {
+			serviceName = runtimeResourceName(bound.Service.Name)
+			if serviceName == "" {
+				serviceName = appName
+			}
+			serviceName += "-postgres"
+		}
+		return "app.kubernetes.io/name=" + serviceName + ",app.kubernetes.io/component=postgres,app.kubernetes.io/managed-by=fugue", "postgres", nil
 	default:
 		return "", "", fmt.Errorf("unsupported component %q", component)
 	}

@@ -20,6 +20,14 @@ const (
 
 	AppImportProfileUniAPI = "uni-api"
 
+	BackingServiceTypePostgres = "postgres"
+
+	BackingServiceProvisionerManaged = "managed"
+	BackingServiceProvisionerExternal = "external"
+
+	BackingServiceStatusActive  = "active"
+	BackingServiceStatusDeleted = "deleted"
+
 	RuntimeStatusPending = "pending"
 	RuntimeStatusActive  = "active"
 	RuntimeStatusOffline = "offline"
@@ -212,6 +220,36 @@ type AppPostgresSpec struct {
 	StoragePath string `json:"storage_path,omitempty"`
 }
 
+type BackingServiceSpec struct {
+	Postgres *AppPostgresSpec `json:"postgres,omitempty"`
+}
+
+type BackingService struct {
+	ID          string             `json:"id"`
+	TenantID    string             `json:"tenant_id"`
+	ProjectID   string             `json:"project_id"`
+	OwnerAppID  string             `json:"owner_app_id,omitempty"`
+	Name        string             `json:"name"`
+	Description string             `json:"description,omitempty"`
+	Type        string             `json:"type"`
+	Provisioner string             `json:"provisioner"`
+	Status      string             `json:"status"`
+	Spec        BackingServiceSpec `json:"spec"`
+	CreatedAt   time.Time          `json:"created_at"`
+	UpdatedAt   time.Time          `json:"updated_at"`
+}
+
+type ServiceBinding struct {
+	ID        string            `json:"id"`
+	TenantID  string            `json:"tenant_id"`
+	AppID     string            `json:"app_id"`
+	ServiceID string            `json:"service_id"`
+	Alias     string            `json:"alias,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	CreatedAt time.Time         `json:"created_at"`
+	UpdatedAt time.Time         `json:"updated_at"`
+}
+
 type AppStatus struct {
 	Phase            string    `json:"phase"`
 	CurrentRuntimeID string    `json:"current_runtime_id,omitempty"`
@@ -222,17 +260,19 @@ type AppStatus struct {
 }
 
 type App struct {
-	ID          string     `json:"id"`
-	TenantID    string     `json:"tenant_id"`
-	ProjectID   string     `json:"project_id"`
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
-	Source      *AppSource `json:"source,omitempty"`
-	Route       *AppRoute  `json:"route,omitempty"`
-	Spec        AppSpec    `json:"spec"`
-	Status      AppStatus  `json:"status"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID              string           `json:"id"`
+	TenantID        string           `json:"tenant_id"`
+	ProjectID       string           `json:"project_id"`
+	Name            string           `json:"name"`
+	Description     string           `json:"description"`
+	Source          *AppSource       `json:"source,omitempty"`
+	Route           *AppRoute        `json:"route,omitempty"`
+	Spec            AppSpec          `json:"spec"`
+	Status          AppStatus        `json:"status"`
+	Bindings        []ServiceBinding `json:"bindings,omitempty"`
+	BackingServices []BackingService `json:"backing_services,omitempty"`
+	CreatedAt       time.Time        `json:"created_at"`
+	UpdatedAt       time.Time        `json:"updated_at"`
 }
 
 type IdempotencyRecord struct {
@@ -315,6 +355,8 @@ type State struct {
 	Machines         []Machine           `json:"machines"`
 	Runtimes         []Runtime           `json:"runtimes"`
 	Apps             []App               `json:"apps"`
+	BackingServices  []BackingService    `json:"backing_services"`
+	ServiceBindings  []ServiceBinding    `json:"service_bindings"`
 	Operations       []Operation         `json:"operations"`
 	AuditEvents      []AuditEvent        `json:"audit_events"`
 	Idempotency      []IdempotencyRecord `json:"idempotency"`

@@ -99,21 +99,21 @@ func (s *Server) buildImportedAppSpec(profile, buildStrategy, appName, imageRef,
 		if err != nil {
 			return model.AppSpec{}, err
 		}
+		env := make(map[string]string, len(suggestedEnv))
+		for key, value := range suggestedEnv {
+			env[key] = value
+		}
+		if len(env) == 0 {
+			env = nil
+		}
 		return model.AppSpec{
 			Image:     imageRef,
 			Ports:     []int{8000},
 			Replicas:  replicas,
 			RuntimeID: runtimeID,
-			Env: map[string]string{
-				"DB_TYPE":     "postgres",
-				"DB_HOST":     pgSpec.ServiceName,
-				"DB_PORT":     "5432",
-				"DB_USER":     pgSpec.User,
-				"DB_PASSWORD": pgSpec.Password,
-				"DB_NAME":     pgSpec.Database,
-			},
-			Files:    appFiles,
-			Postgres: &pgSpec,
+			Env:       env,
+			Files:     appFiles,
+			Postgres:  &pgSpec,
 		}, nil
 	default:
 		return model.AppSpec{}, fmt.Errorf("unsupported import profile %q", profile)

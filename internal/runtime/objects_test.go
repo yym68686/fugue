@@ -115,3 +115,108 @@ func TestBuildAppDeploymentTemplateAnnotationsTrackFilesAndRestart(t *testing.T)
 		t.Fatal("expected file checksum annotation to change when file content changes")
 	}
 }
+
+func TestBuildAppObjectsUsesBackingServicesWithoutDuplicatingLegacyInlinePostgres(t *testing.T) {
+	app := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "uni-api-demo",
+		Spec: model.AppSpec{
+			Image:     "registry.fugue.pro/fugue-apps/uni-api:git-abc123",
+			Ports:     []int{8000},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Env: map[string]string{
+				"DB_HOST": "override-db.internal",
+				"APP_ENV": "prod",
+			},
+			Files: []model.AppFile{
+				{
+					Path:    "/home/api.yaml",
+					Content: "providers: []",
+					Secret:  true,
+					Mode:    0o600,
+				},
+			},
+			Postgres: &model.AppPostgresSpec{
+				Database:    "legacy",
+				User:        "legacy",
+				Password:    "legacy-secret",
+				ServiceName: "legacy-postgres",
+			},
+		},
+		BackingServices: []model.BackingService{
+			{
+				ID:          "service_demo",
+				TenantID:    "tenant_demo",
+				ProjectID:   "project_demo",
+				OwnerAppID:  "app_demo",
+				Name:        "uni-api-demo",
+				Type:        model.BackingServiceTypePostgres,
+				Provisioner: model.BackingServiceProvisionerManaged,
+				Status:      model.BackingServiceStatusActive,
+				Spec: model.BackingServiceSpec{
+					Postgres: &model.AppPostgresSpec{
+						Database:    "uniapi",
+						User:        "root",
+						Password:    "secret",
+						ServiceName: "uni-api-demo-postgres",
+					},
+				},
+			},
+		},
+		Bindings: []model.ServiceBinding{
+			{
+				ID:        "binding_demo",
+				TenantID:  "tenant_demo",
+				AppID:     "app_demo",
+				ServiceID: "service_demo",
+				Alias:     "postgres",
+				Env: map[string]string{
+					"DB_TYPE":     "postgres",
+					"DB_HOST":     "uni-api-demo-postgres",
+					"DB_PORT":     "5432",
+					"DB_USER":     "root",
+					"DB_PASSWORD": "secret",
+					"DB_NAME":     "uniapi",
+				},
+			},
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	if len(objects) != 7 {
+		t.Fatalf("expected 7 objects, got %d", len(objects))
+	}
+
+	appDeployment := objects[5]
+	appTemplate := appDeployment["spec"].(map[string]any)["template"].(map[string]any)
+	appPodSpec := appTemplate["spec"].(map[string]any)
+	envObjects := appPodSpec["containers"].([]map[string]any)[0]["env"].([]map[string]any)
+	if got := envValue(envObjects, "DB_HOST"); got != "override-db.internal" {
+		t.Fatalf("expected DB_HOST override from app env, got %q", got)
+	}
+	if got := envValue(envObjects, "DB_USER"); got != "root" {
+		t.Fatalf("expected DB_USER from binding env, got %q", got)
+	}
+	if got := envValue(envObjects, "APP_ENV"); got != "prod" {
+		t.Fatalf("expected APP_ENV=prod, got %q", got)
+	}
+
+	postgresService := objects[3]
+	if got := postgresService["metadata"].(map[string]any)["name"]; got != "uni-api-demo-postgres" {
+		t.Fatalf("expected managed backing service resource name, got %#v", got)
+	}
+}
+
+func envValue(envObjects []map[string]any, name string) string {
+	for _, entry := range envObjects {
+		if entry["name"] == name {
+			if value, ok := entry["value"].(string); ok {
+				return value
+			}
+		}
+	}
+	return ""
+}

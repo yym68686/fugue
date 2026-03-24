@@ -144,6 +144,34 @@ var postgresSchemaStatements = []string{
 	)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_apps_tenant_project_name_ci ON fugue_apps (tenant_id, project_id, lower(name))`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_apps_route_hostname_ci ON fugue_apps (lower((route_json->>'hostname'))) WHERE route_json IS NOT NULL AND COALESCE(route_json->>'hostname', '') <> ''`,
+	`CREATE TABLE IF NOT EXISTS fugue_backing_services (
+		id TEXT PRIMARY KEY,
+		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
+		project_id TEXT NOT NULL REFERENCES fugue_projects(id) ON DELETE CASCADE,
+		owner_app_id TEXT NULL REFERENCES fugue_apps(id) ON DELETE SET NULL,
+		name TEXT NOT NULL,
+		description TEXT NOT NULL DEFAULT '',
+		type TEXT NOT NULL,
+		provisioner TEXT NOT NULL,
+		status TEXT NOT NULL,
+		spec_json JSONB NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL
+	)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_backing_services_tenant_project_name_ci ON fugue_backing_services (tenant_id, project_id, lower(name))`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_backing_services_owner_app_id ON fugue_backing_services (owner_app_id) WHERE owner_app_id IS NOT NULL`,
+	`CREATE TABLE IF NOT EXISTS fugue_service_bindings (
+		id TEXT PRIMARY KEY,
+		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
+		app_id TEXT NOT NULL REFERENCES fugue_apps(id) ON DELETE CASCADE,
+		service_id TEXT NOT NULL REFERENCES fugue_backing_services(id) ON DELETE CASCADE,
+		alias TEXT NOT NULL DEFAULT '',
+		env_json JSONB NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL
+	)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_service_bindings_app_service ON fugue_service_bindings (app_id, service_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_service_bindings_service_id ON fugue_service_bindings (service_id)`,
 	`CREATE TABLE IF NOT EXISTS fugue_idempotency_keys (
 		scope TEXT NOT NULL,
 		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
@@ -495,6 +523,32 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 ON CONFLICT (id) DO NOTHING
 `, app.ID, app.TenantID, app.ProjectID, app.Name, app.Description, sourceJSON, routeJSON, specJSON, statusJSON, app.CreatedAt, app.UpdatedAt); err != nil {
 			return fmt.Errorf("import app %s: %w", app.ID, err)
+		}
+	}
+	for _, service := range state.BackingServices {
+		specJSON, err := marshalJSON(service.Spec)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO fugue_backing_services (id, tenant_id, project_id, owner_app_id, name, description, type, provisioner, status, spec_json, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+ON CONFLICT (id) DO NOTHING
+`, service.ID, nullIfEmpty(service.TenantID), service.ProjectID, nullIfEmpty(service.OwnerAppID), service.Name, service.Description, service.Type, service.Provisioner, service.Status, specJSON, service.CreatedAt, service.UpdatedAt); err != nil {
+			return fmt.Errorf("import backing service %s: %w", service.ID, err)
+		}
+	}
+	for _, binding := range state.ServiceBindings {
+		envJSON, err := marshalNullableJSON(binding.Env)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO fugue_service_bindings (id, tenant_id, app_id, service_id, alias, env_json, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT (id) DO NOTHING
+`, binding.ID, nullIfEmpty(binding.TenantID), binding.AppID, binding.ServiceID, binding.Alias, envJSON, binding.CreatedAt, binding.UpdatedAt); err != nil {
+			return fmt.Errorf("import service binding %s: %w", binding.ID, err)
 		}
 	}
 	for _, op := range state.Operations {

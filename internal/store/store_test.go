@@ -319,6 +319,154 @@ func TestEnsureDefaultProjectReusesExistingProject(t *testing.T) {
 	}
 }
 
+func TestCreateAppConvertsInlinePostgresToBackingService(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Stateful Create")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8000},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Postgres: &model.AppPostgresSpec{
+			Database: "demo",
+			User:     "root",
+			Password: "secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	if app.Spec.Postgres != nil {
+		t.Fatal("expected inline postgres to be removed from app spec")
+	}
+	if len(app.BackingServices) != 1 {
+		t.Fatalf("expected 1 backing service, got %d", len(app.BackingServices))
+	}
+	if len(app.Bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(app.Bindings))
+	}
+	service := app.BackingServices[0]
+	if service.OwnerAppID != app.ID {
+		t.Fatalf("expected owner_app_id=%s, got %s", app.ID, service.OwnerAppID)
+	}
+	if service.Spec.Postgres == nil {
+		t.Fatal("expected postgres backing service spec")
+	}
+	if got := service.Spec.Postgres.Database; got != "demo" {
+		t.Fatalf("expected database demo, got %q", got)
+	}
+	if got := app.Bindings[0].Env["DB_HOST"]; got != service.Spec.Postgres.ServiceName {
+		t.Fatalf("expected binding DB_HOST=%q, got %q", service.Spec.Postgres.ServiceName, got)
+	}
+
+	persisted, err := s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if persisted.Spec.Postgres != nil {
+		t.Fatal("expected persisted app spec without inline postgres")
+	}
+	if len(persisted.BackingServices) != 1 || len(persisted.Bindings) != 1 {
+		t.Fatalf("expected persisted backing resources, got services=%d bindings=%d", len(persisted.BackingServices), len(persisted.Bindings))
+	}
+}
+
+func TestDeployOperationConvertsInlinePostgresToBackingServiceOnComplete(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Stateful Deploy")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8000},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	desiredSpec := app.Spec
+	desiredSpec.Postgres = &model.AppPostgresSpec{
+		Database: "demo",
+		User:     "root",
+		Password: "secret",
+	}
+
+	op, err := s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &desiredSpec,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim deploy operation: %v", err)
+	} else if !found {
+		t.Fatal("expected deploy operation")
+	}
+
+	completed, err := s.CompleteManagedOperation(op.ID, "/tmp/demo.yaml", "deployed")
+	if err != nil {
+		t.Fatalf("complete managed operation: %v", err)
+	}
+	if completed.DesiredSpec == nil {
+		t.Fatal("expected desired spec on completed operation")
+	}
+	if completed.DesiredSpec.Postgres != nil {
+		t.Fatal("expected completed operation desired spec without inline postgres")
+	}
+
+	persisted, err := s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if persisted.Spec.Postgres != nil {
+		t.Fatal("expected persisted app spec without inline postgres after deploy")
+	}
+	if len(persisted.BackingServices) != 1 {
+		t.Fatalf("expected 1 backing service after deploy, got %d", len(persisted.BackingServices))
+	}
+	if len(persisted.Bindings) != 1 {
+		t.Fatalf("expected 1 binding after deploy, got %d", len(persisted.Bindings))
+	}
+	if persisted.BackingServices[0].Spec.Postgres == nil {
+		t.Fatal("expected postgres backing service spec after deploy")
+	}
+	if got := persisted.BackingServices[0].Spec.Postgres.Database; got != "demo" {
+		t.Fatalf("expected database demo after deploy, got %q", got)
+	}
+}
+
 func TestBootstrapNodeReusesRuntimeByFingerprint(t *testing.T) {
 	t.Parallel()
 

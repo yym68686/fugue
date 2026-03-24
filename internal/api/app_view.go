@@ -68,6 +68,8 @@ func cloneApp(app model.App) model.App {
 		out.Route = &route
 	}
 	out.Spec = cloneAppSpec(app.Spec)
+	out.Bindings = cloneServiceBindings(app.Bindings)
+	out.BackingServices = cloneBackingServices(app.BackingServices)
 	return out
 }
 
@@ -108,5 +110,48 @@ func cloneAppFiles(files []model.AppFile) []model.AppFile {
 	}
 	out := make([]model.AppFile, len(files))
 	copy(out, files)
+	return out
+}
+
+func cloneBackingServices(services []model.BackingService) []model.BackingService {
+	if len(services) == 0 {
+		return nil
+	}
+	out := make([]model.BackingService, len(services))
+	for index, service := range services {
+		out[index] = cloneBackingService(service)
+	}
+	return out
+}
+
+func cloneBackingService(service model.BackingService) model.BackingService {
+	out := service
+	out.Spec = cloneBackingServiceSpec(service.Spec)
+	return out
+}
+
+func cloneBackingServiceSpec(spec model.BackingServiceSpec) model.BackingServiceSpec {
+	out := spec
+	if spec.Postgres != nil {
+		postgres := *spec.Postgres
+		out.Postgres = &postgres
+	}
+	return out
+}
+
+func cloneServiceBindings(bindings []model.ServiceBinding) []model.ServiceBinding {
+	if len(bindings) == 0 {
+		return nil
+	}
+	out := make([]model.ServiceBinding, len(bindings))
+	for index, binding := range bindings {
+		out[index] = cloneServiceBinding(binding)
+	}
+	return out
+}
+
+func cloneServiceBinding(binding model.ServiceBinding) model.ServiceBinding {
+	out := binding
+	out.Env = cloneStringMap(binding.Env)
 	return out
 }

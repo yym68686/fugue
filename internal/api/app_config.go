@@ -19,7 +19,7 @@ func (s *Server) handleGetAppEnv(w http.ResponseWriter, r *http.Request) {
 	}
 	s.appendAudit(principal, "app.env.read", "app", app.ID, app.TenantID, nil)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"env": defaultStringMap(cloneStringMap(app.Spec.Env)),
+		"env": defaultStringMap(mergedAppEnv(app)),
 	})
 }
 
@@ -52,7 +52,7 @@ func (s *Server) handlePatchAppEnv(w http.ResponseWriter, r *http.Request) {
 	spec.Env = env
 	if !changed {
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{
-			"env":             defaultStringMap(cloneStringMap(spec.Env)),
+			"env":             defaultStringMap(mergedAppEnvWithSpec(app, spec)),
 			"already_current": true,
 		})
 		return
@@ -73,7 +73,7 @@ func (s *Server) handlePatchAppEnv(w http.ResponseWriter, r *http.Request) {
 
 	s.appendAudit(principal, "app.env.patch", "operation", op.ID, app.TenantID, map[string]string{"app_id": app.ID})
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
-		"env":       defaultStringMap(cloneStringMap(spec.Env)),
+		"env":       defaultStringMap(mergedAppEnvWithSpec(app, spec)),
 		"operation": sanitizeOperationForAPI(op),
 	})
 }

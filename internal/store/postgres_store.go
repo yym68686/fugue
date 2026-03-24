@@ -1294,6 +1294,9 @@ FROM fugue_apps
 			return nil, err
 		}
 		normalizeAppStatusForRead(&app)
+		if err := s.pgHydrateAppBackingServices(ctx, &app); err != nil {
+			return nil, err
+		}
 		if isDeletedApp(app) {
 			continue
 		}
@@ -1318,6 +1321,9 @@ WHERE id = $1
 		return model.App{}, mapDBErr(err)
 	}
 	normalizeAppStatusForRead(&app)
+	if err := s.pgHydrateAppBackingServices(ctx, &app); err != nil {
+		return model.App{}, err
+	}
 	if isDeletedApp(app) {
 		return model.App{}, ErrNotFound
 	}
@@ -1337,6 +1343,9 @@ WHERE lower(route_json->>'hostname') = lower($1)
 		return model.App{}, mapDBErr(err)
 	}
 	normalizeAppStatusForRead(&app)
+	if err := s.pgHydrateAppBackingServices(ctx, &app); err != nil {
+		return model.App{}, err
+	}
 	return app, nil
 }
 
@@ -1395,6 +1404,15 @@ func (s *Store) pgCreateApp(tenantID, projectID, name, description string, spec 
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+	var ownedService *model.BackingService
+	var binding *model.ServiceBinding
+	if app.Spec.Postgres != nil {
+		service, appBinding := ownedLegacyPostgresResources(app)
+		service.Name = s.pgNextAvailableBackingServiceNameTx(ctx, tx, tenantID, projectID, service.Name)
+		ownedService = &service
+		binding = &appBinding
+		app.Spec.Postgres = nil
+	}
 	sourceJSON, err := marshalNullableJSON(app.Source)
 	if err != nil {
 		return model.App{}, err
@@ -1416,6 +1434,16 @@ INSERT INTO fugue_apps (id, tenant_id, project_id, name, description, source_jso
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 `, app.ID, app.TenantID, app.ProjectID, app.Name, app.Description, sourceJSON, routeJSON, specJSON, statusJSON, app.CreatedAt, app.UpdatedAt); err != nil {
 		return model.App{}, mapDBErr(err)
+	}
+	if ownedService != nil {
+		if err := s.pgInsertBackingServiceTx(ctx, tx, *ownedService); err != nil {
+			return model.App{}, err
+		}
+		if err := s.pgInsertServiceBindingTx(ctx, tx, *binding); err != nil {
+			return model.App{}, err
+		}
+		app.BackingServices = []model.BackingService{cloneBackingService(*ownedService)}
+		app.Bindings = []model.ServiceBinding{cloneServiceBinding(*binding)}
 	}
 	if err := tx.Commit(); err != nil {
 		return model.App{}, fmt.Errorf("commit create app transaction: %w", err)
@@ -1884,6 +1912,11 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string,
 	if err != nil {
 		return model.Operation{}, mapDBErr(err)
 	}
+	if op.Type == model.OperationTypeDeploy {
+		if err := s.pgApplyDesiredSpecBackingServicesTx(ctx, tx, &app, op.DesiredSpec); err != nil {
+			return model.Operation{}, err
+		}
+	}
 	if err := applyOperationToAppModel(&app, &op); err != nil {
 		return model.Operation{}, err
 	}
@@ -1893,6 +1926,14 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string,
 	}
 	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
 		return model.Operation{}, err
+	}
+	if op.Type == model.OperationTypeDelete {
+		if err := s.pgDeleteServiceBindingsByAppTx(ctx, tx, app.ID); err != nil {
+			return model.Operation{}, err
+		}
+		if err := s.pgDeleteOwnedBackingServicesByAppTx(ctx, tx, app.ID); err != nil {
+			return model.Operation{}, err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
