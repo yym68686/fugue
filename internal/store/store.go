@@ -44,10 +44,14 @@ func New(path string, databaseURL ...string) *Store {
 
 func (s *Store) Init() error {
 	if s.usingDatabase() {
-		return s.ensureDatabaseReady()
+		if err := s.ensureDatabaseReady(); err != nil {
+			return err
+		}
+		return s.pgRepairAppStatuses()
 	}
 	return s.withFileLockedState(true, func(state *model.State) error {
 		ensureDefaults(state)
+		repairAllAppStatuses(state)
 		return nil
 	})
 }
@@ -1026,6 +1030,7 @@ func (s *Store) ListApps(tenantID string, platformAdmin bool) ([]model.App, erro
 			if isDeletedApp(app) {
 				continue
 			}
+			normalizeAppStatusForRead(&app)
 			if platformAdmin || app.TenantID == tenantID {
 				apps = append(apps, app)
 			}
@@ -1049,6 +1054,7 @@ func (s *Store) GetApp(id string) (model.App, error) {
 			return ErrNotFound
 		}
 		app = state.Apps[index]
+		normalizeAppStatusForRead(&app)
 		if isDeletedApp(app) {
 			return ErrNotFound
 		}
@@ -1073,6 +1079,7 @@ func (s *Store) GetAppByHostname(hostname string) (model.App, error) {
 			}
 			if strings.EqualFold(strings.TrimSpace(candidate.Route.Hostname), hostname) {
 				app = candidate
+				normalizeAppStatusForRead(&app)
 				return nil
 			}
 		}
@@ -2043,7 +2050,7 @@ func applyFailedOperationToApp(state *model.State, op *model.Operation) {
 	}
 	now := time.Now().UTC()
 	app := &state.Apps[appIndex]
-	app.Status.Phase = "failed"
+	app.Status.Phase = failedPhaseForApp(*app)
 	app.Status.LastOperationID = op.ID
 	app.Status.LastMessage = strings.TrimSpace(op.ErrorMessage)
 	app.Status.UpdatedAt = now

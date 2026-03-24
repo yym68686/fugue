@@ -1063,6 +1063,178 @@ func TestFailedOperationMarksAppFailed(t *testing.T) {
 	}
 }
 
+func TestFailedRebuildKeepsDeployedPhaseWhenLiveVersionExists(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Failed Rebuild")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.example.com/demo:old",
+		Ports:     []int{3000},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyDockerfile,
+	}, model.AppRoute{
+		Hostname:    "demo.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://demo.example.com",
+		ServicePort: 3000,
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	deploySpec := app.Spec
+	deploySource := *app.Source
+	deployOp, err := s.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		Type:          model.OperationTypeDeploy,
+		AppID:         app.ID,
+		DesiredSpec:   &deploySpec,
+		DesiredSource: &deploySource,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim deploy operation: %v", err)
+	} else if !found {
+		t.Fatal("expected deploy operation")
+	}
+	if _, err := s.CompleteManagedOperation(deployOp.ID, "/tmp/demo.yaml", "deployed"); err != nil {
+		t.Fatalf("complete deploy operation: %v", err)
+	}
+
+	rebuildSpec := app.Spec
+	rebuildSource := *app.Source
+	rebuildOp, err := s.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		Type:          model.OperationTypeImport,
+		AppID:         app.ID,
+		DesiredSpec:   &rebuildSpec,
+		DesiredSource: &rebuildSource,
+	})
+	if err != nil {
+		t.Fatalf("create rebuild import operation: %v", err)
+	}
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim rebuild import operation: %v", err)
+	} else if !found {
+		t.Fatal("expected rebuild import operation")
+	}
+	if _, err := s.FailOperation(rebuildOp.ID, "kaniko failed"); err != nil {
+		t.Fatalf("fail rebuild import operation: %v", err)
+	}
+
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.Status.Phase != "deployed" {
+		t.Fatalf("expected deployed phase to be preserved, got %q", app.Status.Phase)
+	}
+	if app.Status.LastOperationID != rebuildOp.ID {
+		t.Fatalf("expected last operation %s, got %s", rebuildOp.ID, app.Status.LastOperationID)
+	}
+	if app.Status.LastMessage != "kaniko failed" {
+		t.Fatalf("expected last message to contain rebuild failure, got %q", app.Status.LastMessage)
+	}
+	if app.Status.CurrentRuntimeID != "runtime_managed_shared" {
+		t.Fatalf("expected current runtime to stay managed-shared, got %q", app.Status.CurrentRuntimeID)
+	}
+	if app.Status.CurrentReplicas != 1 {
+		t.Fatalf("expected current replicas to stay 1, got %d", app.Status.CurrentReplicas)
+	}
+}
+
+func TestInitRepairsFailedPhaseForLiveApp(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Repair Failed Phase")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "nginx:1.27",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	deploySpec := app.Spec
+	deployOp, err := s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &deploySpec,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim deploy operation: %v", err)
+	} else if !found {
+		t.Fatal("expected deploy operation")
+	}
+	if _, err := s.CompleteManagedOperation(deployOp.ID, "/tmp/demo.yaml", "deployed"); err != nil {
+		t.Fatalf("complete deploy operation: %v", err)
+	}
+
+	if err := s.withLockedState(true, func(state *model.State) error {
+		index := findApp(state, app.ID)
+		if index < 0 {
+			t.Fatalf("app %s not found in state", app.ID)
+		}
+		state.Apps[index].Status.Phase = "failed"
+		state.Apps[index].Status.LastMessage = "stale failure"
+		return nil
+	}); err != nil {
+		t.Fatalf("corrupt app status: %v", err)
+	}
+
+	if err := s.Init(); err != nil {
+		t.Fatalf("re-init store: %v", err)
+	}
+
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app after repair: %v", err)
+	}
+	if app.Status.Phase != "deployed" {
+		t.Fatalf("expected failed phase to be repaired to deployed, got %q", app.Status.Phase)
+	}
+	if app.Status.LastMessage != "stale failure" {
+		t.Fatalf("expected last message to stay unchanged, got %q", app.Status.LastMessage)
+	}
+}
+
 func TestCreateOperationImmediatelyRefreshesFailedAppStatus(t *testing.T) {
 	t.Parallel()
 

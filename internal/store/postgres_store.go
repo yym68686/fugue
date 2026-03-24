@@ -1293,6 +1293,7 @@ FROM fugue_apps
 		if err != nil {
 			return nil, err
 		}
+		normalizeAppStatusForRead(&app)
 		if isDeletedApp(app) {
 			continue
 		}
@@ -1316,6 +1317,7 @@ WHERE id = $1
 	if err != nil {
 		return model.App{}, mapDBErr(err)
 	}
+	normalizeAppStatusForRead(&app)
 	if isDeletedApp(app) {
 		return model.App{}, ErrNotFound
 	}
@@ -1334,6 +1336,7 @@ WHERE lower(route_json->>'hostname') = lower($1)
 	if err != nil {
 		return model.App{}, mapDBErr(err)
 	}
+	normalizeAppStatusForRead(&app)
 	return app, nil
 }
 
@@ -1490,6 +1493,54 @@ RETURNING scope, tenant_id, key, request_hash, status, app_id, operation_id, cre
 		return model.IdempotencyRecord{}, mapDBErr(err)
 	}
 	return record, nil
+}
+
+func (s *Store) pgRepairAppStatuses() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin repair app statuses transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+SELECT id, tenant_id, project_id, name, description, source_json, route_json, spec_json, status_json, created_at, updated_at
+FROM fugue_apps
+FOR UPDATE
+`)
+	if err != nil {
+		return fmt.Errorf("list apps for status repair: %w", err)
+	}
+	apps := make([]model.App, 0)
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			rows.Close()
+			return err
+		}
+		apps = append(apps, app)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate apps for status repair: %w", err)
+	}
+	rows.Close()
+
+	for _, app := range apps {
+		if !repairFailedAppPhase(&app) {
+			continue
+		}
+		if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit repair app statuses transaction: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) pgReleaseIdempotencyRecord(scope, tenantID, key string) error {
@@ -2608,7 +2659,7 @@ func applyInFlightOperationToAppModel(app *model.App, op *model.Operation) error
 
 func applyFailedOperationToAppModel(app *model.App, op *model.Operation) {
 	now := time.Now().UTC()
-	app.Status.Phase = "failed"
+	app.Status.Phase = failedPhaseForApp(*app)
 	app.Status.LastOperationID = op.ID
 	app.Status.LastMessage = strings.TrimSpace(op.ErrorMessage)
 	app.Status.UpdatedAt = now
