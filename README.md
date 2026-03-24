@@ -31,7 +31,8 @@ Fugue is a multi-tenant k3s control plane MVP for:
 
 - The core control plane now stores state in PostgreSQL tables and uses `LISTEN/NOTIFY` to wake the controller when new operations arrive.
 - On the first relational PostgreSQL startup, Fugue automatically imports the legacy `fugue_state` row or `/var/lib/fugue/store.json` if either exists.
-- The current chart still runs `fugue-api` and `fugue-controller` in the same Pod and keeps `replicaCount=1`, so leader election and independently scalable API/controller Deployments are still missing.
+- The Helm chart now deploys `fugue-api` and `fugue-controller` as separate Deployments, defaults both to `replicaCount=2`, and enables controller leader election so API and controller can scale independently.
+- The bundled install path still keeps PostgreSQL, the internal registry, and other stateful pieces inside the cluster with `hostPath` storage, so it is still an opinionated MVP deployment rather than a fully externalized production topology.
 
 ## Hosted API
 
@@ -67,16 +68,20 @@ What is already usable on the deployed control plane:
 - asynchronous app deploy, scale, migrate, disable, and delete operations
 - `POST /v1/apps/import-github` for public GitHub repositories, with optional idempotency key support and `auto / static-site / dockerfile / buildpacks / nixpacks` build strategies
 - `POST /v1/apps/{id}/rebuild` to rebuild an imported GitHub app from the latest repo state and redeploy it
+- `GET/PATCH /v1/apps/{id}/env`, `GET/PUT/DELETE /v1/apps/{id}/files`, and `POST /v1/apps/{id}/restart` to inspect and change app config by queuing deploy operations
+- `GET /v1/backing-services`, `GET /v1/backing-services/{id}`, and `GET /v1/apps/{id}/bindings` to inspect attached service inventory and binding env
+- `DELETE /v1/tenants/{id}` for platform-admin tenant removal with best-effort namespace cleanup reporting
+- `GET /install/join-cluster.sh`, `POST /v1/nodes/join-cluster`, and `POST /v1/nodes/join-cluster/env` for one-command cluster-join onboarding when cluster join is configured
 - runtime-agent pull model: enroll, heartbeat, fetch tasks, mark task complete
 - audit trail for control-plane actions
 
 What is not implemented yet:
 
-- resource update APIs
+- general project/runtime/app metadata update APIs outside the deploy-oriented app env/files endpoints
+- public APIs for creating/deleting backing services or binding/unbinding them manually
 - kpack-style buildpacks operator integration
 - autoscaling policies such as HPA/VPA
 - scheduling policies, quotas, billing, or paywall logic
-- leader election and horizontally scalable control plane components
 
 ## Auth model
 
@@ -128,7 +133,11 @@ Notes:
 | Method | Path | Auth | Notes |
 | --- | --- | --- | --- |
 | `GET` | `/healthz` | none | control-plane health check |
+| `GET` | `/readyz` | none | returns `200` while the API is accepting work, `503` during shutdown drain |
+| `GET` | `/install/join-cluster.sh` | none | serves the helper shell script for one-command cluster join when cluster join is configured |
 | `POST` | `/v1/nodes/bootstrap` | none | exchanges a reusable node key for one machine-specific runtime key |
+| `POST` | `/v1/nodes/join-cluster` | none | exchanges a reusable node key for a runtime record plus a k3s join plan |
+| `POST` | `/v1/nodes/join-cluster/env` | none | form-encoded variant that returns shell-quoted `FUGUE_JOIN_*` values |
 | `POST` | `/v1/agent/enroll` | none | exchanges an enroll token for a runtime record plus runtime key |
 
 `POST /v1/nodes/bootstrap` request body:
@@ -147,6 +156,12 @@ Notes:
 ```
 
 `node_name` and `machine_name` are optional. If you use Fugue's one-line join script and do not pass `FUGUE_NODE_NAME`, the script defaults to the VPS hostname. `machine_fingerprint` is also optional, but in production it should stay stable per machine so repeated joins update the same runtime record instead of creating duplicates.
+
+`POST /v1/nodes/join-cluster` accepts the same JSON body as `POST /v1/nodes/bootstrap`, but returns the created `node` plus a `join` plan containing the k3s server URL, token, labels, taints, runtime id, registry endpoint, and optional mesh settings needed by the install helper.
+
+`POST /v1/nodes/join-cluster/env` accepts equivalent `application/x-www-form-urlencoded` fields (`node_key`, `node_name`, `runtime_name`, `machine_name`, `machine_fingerprint`, `endpoint`, `labels`) and returns shell-quoted `FUGUE_JOIN_*` lines for custom installers.
+
+`GET /install/join-cluster.sh` serves the helper shell script used for one-command node onboarding. The script calls `/v1/nodes/join-cluster/env`, writes the k3s agent config, and applies optional registry / mesh settings when cluster join is enabled.
 
 Legacy compatibility: `POST /v1/agent/enroll` still accepts one-time enroll tokens.
 
@@ -173,6 +188,7 @@ Legacy compatibility: `POST /v1/agent/enroll` still accepts one-time enroll toke
 | --- | --- | --- | --- |
 | `GET` | `/v1/tenants` | any API credential | platform admin sees all; tenant key only sees its own tenant |
 | `POST` | `/v1/tenants` | `platform.admin` | create tenant |
+| `DELETE` | `/v1/tenants/{id}` | `platform.admin` | deletes the tenant and returns best-effort cleanup details for namespace / nodes |
 | `GET` | `/v1/projects` | any API credential | platform admin should pass `tenant_id` query param |
 | `POST` | `/v1/projects` | `project.write` | `tenant_id` optional for tenant key |
 | `GET` | `/v1/api-keys` | any API credential | lists visible API keys, secrets are redacted |
@@ -189,14 +205,23 @@ Legacy compatibility: `POST /v1/agent/enroll` still accepts one-time enroll toke
 | `GET` | `/v1/runtimes/{id}` | any API credential | tenant key can only see shared or same-tenant runtime |
 | `GET` | `/v1/runtimes/enroll-tokens` | any API credential | platform admin should pass `tenant_id` |
 | `POST` | `/v1/runtimes/enroll-tokens` | `runtime.attach` | creates one-time enroll token |
+| `GET` | `/v1/backing-services` | any API credential | lists visible backing services |
+| `GET` | `/v1/backing-services/{id}` | any API credential | fetch backing service detail if visible to the tenant |
 | `GET` | `/v1/apps` | any API credential | lists visible apps |
 | `POST` | `/v1/apps` | `app.write` | creates app metadata and desired spec |
 | `POST` | `/v1/apps/import-github` | `app.write` + `app.deploy` | imports a public GitHub repository, allocates a default hostname, queues deployment, and honors `Idempotency-Key` |
 | `GET` | `/v1/apps/{id}` | any API credential | fetch app detail |
+| `GET` | `/v1/apps/{id}/bindings` | any API credential | returns app-to-service bindings plus the referenced backing services |
 | `GET` | `/v1/apps/{id}/build-logs` | any API credential | returns latest import/build logs, or accepts `operation_id` |
 | `GET` | `/v1/apps/{id}/runtime-logs` | any API credential | returns Kubernetes pod logs for `app` or `postgres` |
+| `GET` | `/v1/apps/{id}/env` | any API credential | returns merged runtime env, including binding-provided variables |
+| `PATCH` | `/v1/apps/{id}/env` | `app.write` or `app.deploy` | queues a deploy operation when env values change |
+| `GET` | `/v1/apps/{id}/files` | any API credential | returns desired app files from `spec.files` |
+| `PUT` | `/v1/apps/{id}/files` | `app.write` or `app.deploy` | upserts desired files and queues a deploy operation on change |
+| `DELETE` | `/v1/apps/{id}/files` | `app.write` or `app.deploy` | deletes files named by repeated `path` query params and queues a deploy operation |
 | `POST` | `/v1/apps/{id}/rebuild` | `app.deploy` | rebuilds a `github-public` app from the latest GitHub code and queues deployment |
 | `POST` | `/v1/apps/{id}/deploy` | `app.deploy` | creates async deploy operation |
+| `POST` | `/v1/apps/{id}/restart` | `app.deploy` | queues a deploy operation with a fresh restart token; disabled apps cannot be restarted |
 | `POST` | `/v1/apps/{id}/scale` | `app.scale` | creates async scale operation; `replicas` may be `0` |
 | `POST` | `/v1/apps/{id}/disable` | `app.scale` | creates async disable operation and scales the app to `0` |
 | `POST` | `/v1/apps/{id}/migrate` | `app.migrate` | creates async migrate operation |
@@ -397,6 +422,83 @@ Behavior:
 - only works for managed runtimes
 - reads logs directly from tenant namespace pods
 
+`DELETE /v1/tenants/{id}`
+
+No request body.
+
+Behavior:
+
+- requires platform-admin credentials
+- deletes the tenant from Fugue state and returns a `cleanup` object with the namespace name, whether namespace deletion was requested, owned-node counts, and any warnings
+- namespace removal is best-effort; managed-owned nodes may still need manual k3s agent uninstall on the tenant VPS
+
+`GET /v1/backing-services` and `GET /v1/apps/{id}/bindings`
+
+Behavior:
+
+- backing services are currently exposed as read APIs; managed Postgres created from app specs is reflected here
+- `GET /v1/apps/{id}/bindings` returns both the binding records and the referenced backing-service objects
+
+`GET /v1/apps/{id}/env`
+
+Behavior:
+
+- returns the merged environment that the app sees after combining binding-provided env with `spec.env`
+
+`PATCH /v1/apps/{id}/env`
+
+```json
+{
+  "set": {
+    "LOG_LEVEL": "debug"
+  },
+  "delete": [
+    "OLD_FLAG"
+  ]
+}
+```
+
+Behavior:
+
+- requires `app.write` or `app.deploy` unless you are platform admin
+- queues a `deploy` operation when the effective env changes
+- returns `already_current: true` without creating an operation when the requested env already matches the stored desired spec
+
+`GET /v1/apps/{id}/files`
+
+Behavior:
+
+- returns the desired file set currently stored in `spec.files`
+
+`PUT /v1/apps/{id}/files`
+
+```json
+{
+  "files": [
+    {
+      "path": "/etc/caddy/Caddyfile",
+      "content": ":8080\nrespond \"hello\"",
+      "mode": 420
+    }
+  ]
+}
+```
+
+Behavior:
+
+- upserts files by `path`
+- requires `app.write` or `app.deploy` unless you are platform admin
+- queues a `deploy` operation when file contents change
+
+`DELETE /v1/apps/{id}/files`
+
+No request body. Use repeated `path` query parameters, for example `/v1/apps/<app-id>/files?path=/etc/caddy/Caddyfile&path=/app/.env`.
+
+Behavior:
+
+- requires `app.write` or `app.deploy` unless you are platform admin
+- queues a `deploy` operation when at least one file is removed
+
 `POST /v1/apps/{id}/deploy`
 
 ```json
@@ -415,6 +517,16 @@ Or override the app spec during deployment:
   }
 }
 ```
+
+`POST /v1/apps/{id}/restart`
+
+No request body.
+
+Behavior:
+
+- requires `app.deploy`
+- only works when the app currently has `replicas > 0`
+- queues a `deploy` operation with a fresh `restart_token`
 
 `POST /v1/apps/{id}/scale`
 
@@ -723,9 +835,9 @@ This installer:
 - builds `fugue-api` and `fugue-controller` images locally
 - creates a 3-node k3s HA cluster on `gcp1/gcp2/gcp3`
 - imports the images into each node's `containerd`
-- installs the Helm chart on the cluster
-- pins the single Fugue control-plane Pod to `gcp1`
-- exposes the Fugue API through an internal `NodePort`
-- optionally configures Caddy on `gcp1` so your HTTPS API domain proxies to that internal NodePort
+- installs the Helm chart with separate `fugue-api` and `fugue-controller` Deployments
+- defaults both API and controller to 2 replicas, with controller leader election enabled
+- exposes the Fugue API through a cluster `NodePort` Service
+- optionally configures Caddy on `gcp1` as the HTTPS edge that proxies to that `NodePort`
 
 The generated kubeconfig and bootstrap key are written into `.dist/fugue-install/`.

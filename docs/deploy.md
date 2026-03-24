@@ -10,6 +10,8 @@ If you want the current MVP on exactly three VPS and you already have SSH aliase
 ./scripts/install_fugue_ha.sh
 ```
 
+If you also want the installer to configure the HTTPS API edge, set `FUGUE_DOMAIN=<your-fugue-api-domain>`. You can additionally set `FUGUE_APP_BASE_DOMAIN=<your-app-base-domain>` for generated app hostnames.
+
 Assumptions:
 
 - the local machine has `ssh`, `scp`, `openssl`, and `docker` or `podman`
@@ -17,20 +19,24 @@ Assumptions:
 - the remote SSH user is `root`, or can run `sudo -n`
 - the three VPS use a `systemd`-based distro
 
-This mode installs all three machines as `k3s server` nodes and then runs the current single-replica Fugue control plane on `gcp1` with a `hostPath` data directory plus an in-cluster PostgreSQL instance.
+This mode installs all three machines as `k3s server` nodes and deploys Fugue as separate `fugue-api` and `fugue-controller` Deployments.
+The chart defaults both Deployments to `replicaCount=2`, keeps authoritative state in PostgreSQL, and enables controller leader election.
 On the first relational PostgreSQL-backed startup, Fugue automatically imports legacy state from the old `fugue_state` row or `/var/lib/fugue/store.json` if either exists.
-The same script also provisions an internal registry on the primary node and can configure a wildcard HTTPS edge for app hostnames.
+The same script also provisions an in-cluster internal registry and can optionally configure a wildcard HTTPS edge for app hostnames.
 
 ## 1. Topology
 
-Recommended minimum topology for this repository:
+Quick 3-VPS topology used by `install_fugue_ha.sh`:
 
-- `3 x k3s server` nodes: dedicated control plane only
-- `2 x worker` nodes: one can host `fugue-system`, one can host tenant workloads
-- `1 x Fugue core Pod`: runs `fugue-api` + `fugue-controller`
-- `N x fugue-agent`: optional, one per attached user-owned runtime
+- `3 x k3s server` nodes: combined cluster-control-plane and Fugue system nodes
+- `1 x fugue-api Deployment`: defaults to 2 replicas
+- `1 x fugue-controller Deployment`: defaults to 2 replicas with leader election
+- `1 x PostgreSQL Deployment`: relational state backend
+- `1 x internal registry Deployment`
+- `N x fugue-agent`: optional, for `external-owned` runtimes
+- `N x managed-owned` tenant nodes: optional, joined through `/install/join-cluster.sh`
 
-The three control-plane nodes should not host tenant applications. Taint them and keep Fugue workloads on worker nodes.
+If you have dedicated worker nodes, taint the k3s server nodes and use labels, node selectors, and tolerations to keep Fugue system pods and tenant workloads on the pools you want. The bundled 3-VPS installer does not require separate worker nodes.
 
 ## 2. Build artifacts
 
@@ -140,18 +146,32 @@ helm upgrade --install fugue ./deploy/helm/fugue \
   --set api.image.tag="${VERSION}" \
   --set controller.image.repository="fugue-controller" \
   --set controller.image.tag="${VERSION}" \
-  --set api.appBaseDomain="app.example.com" \
-  --set api.registryPushBase="<primary-private-ip>:30500" \
+  --set api.apiPublicDomain="api.example.com" \
+  --set api.appBaseDomain="apps.example.com" \
+  --set api.registryPushBase="fugue-fugue-registry.fugue-system.svc.cluster.local:5000" \
+  --set api.registryPullBase="<node-reachable-ip>:30500" \
+  --set api.clusterJoinRegistryEndpoint="<node-reachable-ip>:30500" \
   --set registry.service.nodePort=30500 \
   --set nodeSelector.nodepool=system
 ```
 
 The chart enables an internal PostgreSQL instance by default. If you are upgrading from the legacy file store or the earlier single-row `fugue_state` backend, keep the old data in place for the first PostgreSQL relational boot so Fugue can import it automatically.
+The chart also enables controller leader election by default.
+
+Registry and cluster-join notes:
+
+- `api.registryPushBase` should be the in-cluster address builders use to push imported images.
+- `api.registryPullBase` should be reachable from runtime nodes that need to pull those images.
+- `api.clusterJoinRegistryEndpoint` should be reachable from VPS nodes joined through `/install/join-cluster.sh`.
+- If you want Fugue to expose `/install/join-cluster.sh`, also set `api.clusterJoinServer="https://k3s-api.example.com:6443"` and `api.clusterJoinToken="<k3s-server-token>"`. Optional mesh settings are `api.clusterJoinMeshProvider`, `api.clusterJoinMeshLoginServer`, and `api.clusterJoinMeshAuthKey`.
 
 Watch rollout:
 
 ```bash
-kubectl -n fugue-system rollout status deploy/fugue-fugue
+kubectl -n fugue-system rollout status deploy/fugue-fugue-postgres
+kubectl -n fugue-system rollout status deploy/fugue-fugue-api
+kubectl -n fugue-system rollout status deploy/fugue-fugue-controller
+kubectl -n fugue-system rollout status deploy/fugue-fugue-registry
 kubectl -n fugue-system get pods -o wide
 ```
 
@@ -242,17 +262,52 @@ curl -sS http://127.0.0.1:8080/v1/operations \
 
 The current controller creates one namespace per tenant with the pattern `fg-<tenant-id-normalized>` and applies:
 
-- one `Namespace`
-- one `Deployment`
-- one `Service`
+- one tenant `Namespace`
+- one app `Deployment` and one app `Service` for each deployed app
+- optional managed Postgres `Secret`, `Service`, and `Deployment` when the app spec or managed backing-service bindings require PostgreSQL
 
 Imported GitHub static sites are exposed through the Fugue API edge proxy using the generated hostname under your configured app base domain.
 
 ## 7. Attach a user-owned VPS node
 
-### Option A: recommended
+Fugue now supports two distinct attachment paths:
 
-Install single-node k3s on the user VPS and run `fugue-agent` on that host.
+- `managed-owned`: the VPS joins the center k3s cluster as an agent node through `/install/join-cluster.sh`; Fugue schedules workloads onto it through the in-cluster controller
+- `external-owned`: the VPS runs its own k3s and `fugue-agent`; Fugue hands operations to the agent over the runtime API
+
+### Option A: join the center cluster (`managed-owned`)
+
+Prerequisite: set `api.clusterJoinServer`, `api.clusterJoinToken`, `api.registryPullBase`, and `api.clusterJoinRegistryEndpoint` in your Helm values so the join endpoints are enabled.
+
+Create a reusable node key from Fugue:
+
+```bash
+curl -sS http://127.0.0.1:8080/v1/node-keys \
+  -H "Authorization: Bearer <tenant-api-key>" \
+  -H 'Content-Type: application/json' \
+  -d '{"label":"cluster-node-key"}'
+```
+
+Join a VPS to the center cluster:
+
+```bash
+curl -fsSL https://fugue-api.example.com/install/join-cluster.sh | \
+  sudo FUGUE_NODE_KEY='<secret-from-node-key-response>' \
+  FUGUE_NODE_NAME='tenant-node-1' \
+  FUGUE_RUNTIME_LABELS='region=ap-east-1,provider=gcp' \
+  bash
+```
+
+Useful optional environment variables for the join script:
+
+- `FUGUE_MACHINE_NAME`: override the stored machine name
+- `FUGUE_MACHINE_FINGERPRINT`: override the stable machine identity used for deduplication
+- `FUGUE_NODE_EXTERNAL_IP`: force the published node external IP
+- `FUGUE_K3S_CHANNEL`: choose the k3s release channel
+
+This path creates a `managed-owned` runtime with `connection_mode=cluster`. Fugue labels the joined node with `fugue.io/runtime-id`, `fugue.io/tenant-id`, and `fugue.io/node-mode=managed-owned`, and taints it with `fugue.io/tenant=<tenant-id>:NoSchedule`.
+
+### Option B: run `fugue-agent` against a tenant-owned k3s host (`external-owned`)
 
 Install k3s:
 
@@ -289,7 +344,9 @@ sudo env \
   ./bin/fugue-agent
 ```
 
-### Option B: run the agent in Docker on the VPS
+This path creates an `external-owned` runtime with `connection_mode=agent`.
+
+### Option C: run the agent in Docker on the VPS
 
 ```bash
 docker run -d --name fugue-agent --restart unless-stopped \
@@ -303,17 +360,19 @@ docker run -d --name fugue-agent --restart unless-stopped \
   -e FUGUE_AGENT_APPLY_WITH_KUBECTL=true \
   -v /etc/rancher/k3s/k3s.yaml:/etc/rancher/k3s/k3s.yaml:ro \
   -v /var/lib/fugue-agent:/var/lib/fugue-agent \
-  ${REGISTRY}/fugue-agent:${VERSION}
+  <your-registry>/fugue-agent:${VERSION}
 ```
+
+Replace `<your-registry>/fugue-agent:${VERSION}` with an image reference your VPS can pull.
 
 Legacy compatibility: one-time enroll tokens are still available at `/v1/runtimes/enroll-tokens`, but the recommended path is the reusable `node-key` flow above.
 
 ## 8. Migrate an app from managed runtime to attached node
 
-List nodes and find the attached node ID:
+List runtimes and find the target runtime ID:
 
 ```bash
-curl -sS http://127.0.0.1:8080/v1/nodes \
+curl -sS http://127.0.0.1:8080/v1/runtimes \
   -H "Authorization: Bearer <tenant-api-key>"
 ```
 
@@ -329,12 +388,14 @@ curl -sS http://127.0.0.1:8080/v1/apps/<app-id>/migrate \
 Flow:
 
 1. The API writes an async `operation`.
-2. The controller dispatches the operation to the attached runtime.
-3. The agent polls the operation, renders the manifest, optionally applies it with local `kubectl`, and reports completion.
+2. If the target runtime is `external-owned`, the controller dispatches the operation to `fugue-agent`.
+3. If the target runtime is `managed-owned`, the controller renders and applies manifests through the center cluster Kubernetes API using the runtime's node labels and tenant taints.
 4. Fugue updates the app status and audit log.
 
 ## 9. Operational notes
 
-- `fugue-api` and `fugue-controller` currently share a local file store inside one Pod. Keep the Helm release at one replica.
-- If the controller cannot reach the in-cluster Kubernetes API, managed-runtime deploys will stop at the manifest rendering stage.
-- For production, replace the file store with PostgreSQL, split the API and controller into independent Deployments, and add a real queue or workflow engine.
+- `fugue-api` and `fugue-controller` now run as separate Deployments. The chart defaults both to 2 replicas and enables controller leader election.
+- Authoritative control-plane state now lives in PostgreSQL. The API and controller still keep local scratch data under `/var/lib/fugue` for import / render work.
+- The bundled chart keeps PostgreSQL, the internal registry, and optional `headscale` in-cluster with `hostPath` storage. For production, externalize or harden those stateful dependencies and their placement.
+- `api.registryPushBase` must be reachable from builder jobs inside the cluster. `api.registryPullBase` and `api.clusterJoinRegistryEndpoint` must be reachable from the runtime nodes that pull images.
+- If the controller cannot reach the in-cluster Kubernetes API, `managed-shared` and `managed-owned` deploys will stop at the render/apply stage.
