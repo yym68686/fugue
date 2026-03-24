@@ -84,11 +84,9 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		runtimeID = "runtime_managed_shared"
 	}
 	buildStrategy := normalizeBuildStrategy(req.BuildStrategy)
-
-	profile := resolveImportProfile(req.Profile, req.RepoURL, strings.TrimSpace(req.ConfigContent) != "" || len(req.Files) > 0 || req.Postgres != nil || strings.TrimSpace(req.DockerfilePath) != "")
 	var releaseIdempotency bool
 	if idempotencyKey != "" {
-		requestHash, err := hashImportGitHubRequest(tenantID, req, runtimeID, replicas, profile)
+		requestHash, err := hashImportGitHubRequest(tenantID, req, runtimeID, replicas)
 		if err != nil {
 			httpx.WriteError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -156,7 +154,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		baseName = "app"
 	}
 
-	if shouldInspectFugueManifestImport(req, buildStrategy, profile) {
+	if shouldInspectFugueManifestImport(req, buildStrategy) {
 		manifest, inspectErr := s.importer.InspectPublicGitHubFugueManifest(r.Context(), sourceimport.GitHubFugueManifestInspectRequest{
 			RepoURL: strings.TrimSpace(req.RepoURL),
 			Branch:  strings.TrimSpace(req.Branch),
@@ -194,7 +192,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if shouldInspectComposeImport(req, buildStrategy, profile) {
+	if shouldInspectComposeImport(req, buildStrategy) {
 		stack, inspectErr := s.importer.InspectPublicGitHubCompose(r.Context(), sourceimport.GitHubComposeInspectRequest{
 			RepoURL: strings.TrimSpace(req.RepoURL),
 			Branch:  strings.TrimSpace(req.Branch),
@@ -232,7 +230,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	source, err := buildQueuedGitHubSource(req.RepoURL, req.Branch, req.SourceDir, req.DockerfilePath, req.BuildContextDir, buildStrategy, profile, "", "")
+	source, err := buildQueuedGitHubSource(req.RepoURL, req.Branch, req.SourceDir, req.DockerfilePath, req.BuildContextDir, buildStrategy, "", "")
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
@@ -245,7 +243,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		spec, err := s.buildImportedAppSpec(profile, source.BuildStrategy, candidateName, "", runtimeID, replicas, effectiveImportServicePort(servicePort, 0), req.ConfigContent, req.Files, req.Postgres, nil)
+		spec, err := s.buildImportedAppSpec(source.BuildStrategy, candidateName, "", runtimeID, replicas, effectiveImportServicePort(servicePort, 0), req.ConfigContent, req.Files, req.Postgres, nil)
 		if err != nil {
 			httpx.WriteError(w, http.StatusBadRequest, err.Error())
 			return
@@ -311,19 +309,12 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusAccepted, response)
 }
 
-func buildQueuedGitHubSource(repoURL, branch, sourceDir, dockerfilePath, buildContextDir, buildStrategy, profile, imageNameSuffix, composeService string) (model.AppSource, error) {
+func buildQueuedGitHubSource(repoURL, branch, sourceDir, dockerfilePath, buildContextDir, buildStrategy, imageNameSuffix, composeService string) (model.AppSource, error) {
 	buildStrategy = normalizeBuildStrategy(buildStrategy)
 	switch buildStrategy {
 	case model.AppBuildStrategyAuto, model.AppBuildStrategyStaticSite, model.AppBuildStrategyDockerfile, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks:
 	default:
 		return model.AppSource{}, fmt.Errorf("unsupported build strategy %q", buildStrategy)
-	}
-	if strings.TrimSpace(profile) == model.AppImportProfileUniAPI {
-		switch buildStrategy {
-		case model.AppBuildStrategyAuto, model.AppBuildStrategyDockerfile:
-		default:
-			return model.AppSource{}, fmt.Errorf("profile %q currently requires dockerfile build strategy", profile)
-		}
 	}
 	repoURL = strings.TrimSpace(repoURL)
 	if repoURL == "" {
@@ -338,7 +329,6 @@ func buildQueuedGitHubSource(repoURL, branch, sourceDir, dockerfilePath, buildCo
 		BuildStrategy:   buildStrategy,
 		DockerfilePath:  strings.TrimSpace(dockerfilePath),
 		BuildContextDir: strings.TrimSpace(buildContextDir),
-		ImportProfile:   strings.TrimSpace(profile),
 		ImageNameSuffix: strings.TrimSpace(imageNameSuffix),
 		ComposeService:  strings.TrimSpace(composeService),
 	}

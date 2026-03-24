@@ -89,7 +89,6 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 		dockerfilePath,
 		buildContextDir,
 		buildStrategy,
-		strings.TrimSpace(app.Source.ImportProfile),
 		strings.TrimSpace(app.Source.ImageNameSuffix),
 		strings.TrimSpace(app.Source.ComposeService),
 	)

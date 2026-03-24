@@ -72,7 +72,6 @@ func TestBuildQueuedGitHubSourcePreservesComposeMetadata(t *testing.T) {
 		"apps/api/Dockerfile",
 		"apps/api",
 		model.AppBuildStrategyDockerfile,
-		"",
 		"api",
 		"api",
 	)
@@ -87,18 +86,21 @@ func TestBuildQueuedGitHubSourcePreservesComposeMetadata(t *testing.T) {
 	}
 }
 
-func TestBuildImportedAppSpecAllowsGenericPostgres(t *testing.T) {
+func TestBuildImportedAppSpecAllowsGenericStatefulInputs(t *testing.T) {
 	server := &Server{}
 	spec, err := server.buildImportedAppSpec(
-		"",
 		model.AppBuildStrategyDockerfile,
 		"demo-api",
 		"",
 		"runtime_managed_shared",
 		1,
 		8000,
-		"",
-		nil,
+		"providers: []\n",
+		[]model.AppFile{{
+			Path:    "/etc/demo.env",
+			Content: "DEMO=true\n",
+			Secret:  true,
+		}},
 		&model.AppPostgresSpec{
 			Image:    "postgres:17.6-alpine",
 			Database: "demo",
@@ -120,6 +122,18 @@ func TestBuildImportedAppSpecAllowsGenericPostgres(t *testing.T) {
 	}
 	if spec.Env["DATABASE_URL"] == "" {
 		t.Fatalf("expected env to be preserved, got %v", spec.Env)
+	}
+	if len(spec.Files) != 2 {
+		t.Fatalf("expected 2 files, got %d", len(spec.Files))
+	}
+	if spec.Files[0].Path != defaultImportedConfigPath {
+		t.Fatalf("unexpected config file path: %q", spec.Files[0].Path)
+	}
+	if spec.Files[1].Path != "/etc/demo.env" {
+		t.Fatalf("unexpected extra file path: %q", spec.Files[1].Path)
+	}
+	if len(spec.Ports) != 1 || spec.Ports[0] != 8000 {
+		t.Fatalf("unexpected ports: %#v", spec.Ports)
 	}
 }
 

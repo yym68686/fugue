@@ -74,7 +74,6 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 			service.DockerfilePath,
 			service.BuildContextDir,
 			service.BuildStrategy,
-			"",
 			service.Name,
 			service.Name,
 		)
@@ -90,7 +89,6 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 		}
 
 		spec, err := s.buildImportedAppSpec(
-			"",
 			service.BuildStrategy,
 			appNames[service.Name],
 			"",

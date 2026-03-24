@@ -27,7 +27,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		return fmt.Errorf("controller registry push base is not configured")
 	}
 
-	importCtx, cancel := context.WithTimeout(ctx, importSourceTimeout(strings.TrimSpace(op.DesiredSource.ImportProfile)))
+	importCtx, cancel := context.WithTimeout(ctx, importSourceTimeout())
 	defer cancel()
 
 	output, err := s.importer.ImportPublicGitHubSource(importCtx, sourceimport.GitHubSourceImportRequest{
@@ -37,7 +37,6 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		DockerfilePath:   strings.TrimSpace(op.DesiredSource.DockerfilePath),
 		BuildContextDir:  strings.TrimSpace(op.DesiredSource.BuildContextDir),
 		BuildStrategy:    strings.TrimSpace(op.DesiredSource.BuildStrategy),
-		ImportProfile:    strings.TrimSpace(op.DesiredSource.ImportProfile),
 		RegistryPushBase: s.registryPushBase,
 		ImageRepository:  "fugue-apps",
 		ImageNameSuffix:  strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
@@ -94,10 +93,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	return nil
 }
 
-func importSourceTimeout(profile string) time.Duration {
-	if strings.TrimSpace(profile) == model.AppImportProfileUniAPI {
-		return 25 * time.Minute
-	}
+func importSourceTimeout() time.Duration {
 	return 25 * time.Minute
 }
 

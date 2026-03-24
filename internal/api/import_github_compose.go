@@ -34,11 +34,8 @@ func invalidComposeImport(err error) error {
 	return fmt.Errorf("%w: %v", errInvalidComposeImport, err)
 }
 
-func shouldInspectComposeImport(req importGitHubRequest, buildStrategy, profile string) bool {
+func shouldInspectComposeImport(req importGitHubRequest, buildStrategy string) bool {
 	if normalizeBuildStrategy(buildStrategy) != model.AppBuildStrategyAuto {
-		return false
-	}
-	if strings.TrimSpace(profile) != "" {
 		return false
 	}
 	if strings.TrimSpace(req.SourceDir) != "" || strings.TrimSpace(req.DockerfilePath) != "" || strings.TrimSpace(req.BuildContextDir) != "" {

@@ -15,7 +15,6 @@ type GitHubSourceImportRequest struct {
 	DockerfilePath   string
 	BuildContextDir  string
 	BuildStrategy    string
-	ImportProfile    string
 	RegistryPushBase string
 	ImageRepository  string
 	ImageNameSuffix  string
@@ -32,14 +31,6 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 	buildStrategy := normalizeGitHubBuildStrategy(req.BuildStrategy)
 	if buildStrategy == "" {
 		buildStrategy = model.AppBuildStrategyAuto
-	}
-	if strings.TrimSpace(req.ImportProfile) == model.AppImportProfileUniAPI {
-		switch buildStrategy {
-		case model.AppBuildStrategyAuto, model.AppBuildStrategyDockerfile:
-			buildStrategy = model.AppBuildStrategyDockerfile
-		default:
-			return GitHubSourceImportOutput{}, fmt.Errorf("profile %q currently requires dockerfile build strategy", req.ImportProfile)
-		}
 	}
 
 	switch buildStrategy {
@@ -69,7 +60,6 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 				CommitSHA:       importResult.CommitSHA,
 				DockerfilePath:  importResult.DockerfilePath,
 				BuildContextDir: importResult.BuildContextDir,
-				ImportProfile:   strings.TrimSpace(req.ImportProfile),
 				ImageNameSuffix: strings.TrimSpace(req.ImageNameSuffix),
 				ComposeService:  strings.TrimSpace(req.ComposeService),
 			},
@@ -95,7 +85,6 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 				SourceDir:       importResult.SourceDir,
 				BuildStrategy:   importResult.BuildStrategy,
 				CommitSHA:       importResult.CommitSHA,
-				ImportProfile:   strings.TrimSpace(req.ImportProfile),
 				ImageNameSuffix: strings.TrimSpace(req.ImageNameSuffix),
 				ComposeService:  strings.TrimSpace(req.ComposeService),
 			},
@@ -124,7 +113,6 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 				CommitSHA:       importResult.CommitSHA,
 				DockerfilePath:  importResult.DockerfilePath,
 				BuildContextDir: importResult.BuildContextDir,
-				ImportProfile:   strings.TrimSpace(req.ImportProfile),
 				ImageNameSuffix: strings.TrimSpace(req.ImageNameSuffix),
 				ComposeService:  strings.TrimSpace(req.ComposeService),
 			},
@@ -151,7 +139,6 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 				SourceDir:       importResult.SourceDir,
 				BuildStrategy:   importResult.BuildStrategy,
 				CommitSHA:       importResult.CommitSHA,
-				ImportProfile:   strings.TrimSpace(req.ImportProfile),
 				ImageNameSuffix: strings.TrimSpace(req.ImageNameSuffix),
 				ComposeService:  strings.TrimSpace(req.ComposeService),
 			},
@@ -178,7 +165,6 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 				SourceDir:       importResult.SourceDir,
 				BuildStrategy:   importResult.BuildStrategy,
 				CommitSHA:       importResult.CommitSHA,
-				ImportProfile:   strings.TrimSpace(req.ImportProfile),
 				ImageNameSuffix: strings.TrimSpace(req.ImageNameSuffix),
 				ComposeService:  strings.TrimSpace(req.ComposeService),
 			},

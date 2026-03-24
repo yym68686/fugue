@@ -18,8 +18,6 @@ const (
 	AppBuildStrategyBuildpacks = "buildpacks"
 	AppBuildStrategyNixpacks   = "nixpacks"
 
-	AppImportProfileUniAPI = "uni-api"
-
 	BackingServiceTypePostgres = "postgres"
 
 	BackingServiceProvisionerManaged  = "managed"
@@ -181,7 +179,6 @@ type AppSource struct {
 	CommitSHA       string `json:"commit_sha,omitempty"`
 	DockerfilePath  string `json:"dockerfile_path,omitempty"`
 	BuildContextDir string `json:"build_context_dir,omitempty"`
-	ImportProfile   string `json:"import_profile,omitempty"`
 	ImageNameSuffix string `json:"image_name_suffix,omitempty"`
 	ComposeService  string `json:"compose_service,omitempty"`
 }

@@ -25,7 +25,6 @@ type importGitHubRequest struct {
 	RuntimeID       string                 `json:"runtime_id"`
 	Replicas        int                    `json:"replicas"`
 	ServicePort     int                    `json:"service_port"`
-	Profile         string                 `json:"profile"`
 	DockerfilePath  string                 `json:"dockerfile_path"`
 	BuildContextDir string                 `json:"build_context_dir"`
 	ConfigContent   string                 `json:"config_content"`
@@ -50,7 +49,7 @@ func resolveIdempotencyKey(r *http.Request, bodyKey string) (string, error) {
 	return key, nil
 }
 
-func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID string, replicas int, profile string) (string, error) {
+func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID string, replicas int) (string, error) {
 	payload := struct {
 		TenantID        string                 `json:"tenant_id"`
 		ProjectID       string                 `json:"project_id"`
@@ -63,7 +62,6 @@ func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID
 		RuntimeID       string                 `json:"runtime_id"`
 		Replicas        int                    `json:"replicas"`
 		ServicePort     int                    `json:"service_port"`
-		Profile         string                 `json:"profile"`
 		DockerfilePath  string                 `json:"dockerfile_path"`
 		BuildContextDir string                 `json:"build_context_dir"`
 		ConfigContent   string                 `json:"config_content"`
@@ -81,7 +79,6 @@ func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID
 		RuntimeID:       strings.TrimSpace(runtimeID),
 		Replicas:        replicas,
 		ServicePort:     req.ServicePort,
-		Profile:         strings.TrimSpace(profile),
 		DockerfilePath:  strings.TrimSpace(req.DockerfilePath),
 		BuildContextDir: strings.TrimSpace(req.BuildContextDir),
 		ConfigContent:   strings.TrimSpace(req.ConfigContent),

@@ -34,13 +34,13 @@ func TestHashImportGitHubRequestChangesWhenRequestChanges(t *testing.T) {
 		Branch:    "main",
 		Name:      "demo",
 	}
-	hashA, err := hashImportGitHubRequest("tenant_1", req, "runtime_managed_shared", 1, "")
+	hashA, err := hashImportGitHubRequest("tenant_1", req, "runtime_managed_shared", 1)
 	if err != nil {
 		t.Fatalf("hash request a: %v", err)
 	}
 
 	req.Name = "demo-2"
-	hashB, err := hashImportGitHubRequest("tenant_1", req, "runtime_managed_shared", 1, "")
+	hashB, err := hashImportGitHubRequest("tenant_1", req, "runtime_managed_shared", 1)
 	if err != nil {
 		t.Fatalf("hash request b: %v", err)
 	}
