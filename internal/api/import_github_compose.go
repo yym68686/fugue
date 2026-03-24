@@ -395,6 +395,66 @@ func rewriteComposeEnvironment(env map[string]string, hosts map[string]string) m
 	return out
 }
 
+func applyManagedPostgresEnvironment(env map[string]string, spec model.AppPostgresSpec) map[string]string {
+	if len(env) == 0 {
+		return nil
+	}
+
+	out := cloneStringMap(env)
+	overrideManagedPostgresEnvIfPresent(out, "DB_HOST", spec.ServiceName)
+	overrideManagedPostgresEnvIfPresent(out, "POSTGRES_HOST", spec.ServiceName)
+	overrideManagedPostgresEnvIfPresent(out, "DB_PORT", "5432")
+	overrideManagedPostgresEnvIfPresent(out, "POSTGRES_PORT", "5432")
+	overrideManagedPostgresEnvIfPresent(out, "DB_NAME", spec.Database)
+	overrideManagedPostgresEnvIfPresent(out, "POSTGRES_DB", spec.Database)
+	overrideManagedPostgresEnvIfPresent(out, "POSTGRES_DATABASE", spec.Database)
+	overrideManagedPostgresEnvIfPresent(out, "DB_USER", spec.User)
+	overrideManagedPostgresEnvIfPresent(out, "POSTGRES_USER", spec.User)
+	overrideManagedPostgresEnvIfPresent(out, "DB_PASSWORD", spec.Password)
+	overrideManagedPostgresEnvIfPresent(out, "POSTGRES_PASSWORD", spec.Password)
+
+	for key, value := range out {
+		if rewritten, ok := rewriteManagedPostgresURL(value, spec); ok {
+			out[key] = rewritten
+		}
+	}
+	return out
+}
+
+func overrideManagedPostgresEnvIfPresent(env map[string]string, key, value string) {
+	if _, ok := env[key]; ok {
+		env[key] = value
+	}
+}
+
+func rewriteManagedPostgresURL(value string, spec model.AppPostgresSpec) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return value, false
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Hostname() == "" {
+		return value, false
+	}
+	if !strings.Contains(strings.ToLower(parsed.Scheme), "postgres") {
+		return value, false
+	}
+	if !strings.EqualFold(parsed.Hostname(), strings.TrimSpace(spec.ServiceName)) {
+		return value, false
+	}
+
+	port := parsed.Port()
+	if port == "" {
+		port = "5432"
+	}
+	parsed.Host = net.JoinHostPort(spec.ServiceName, port)
+	parsed.User = url.UserPassword(spec.User, spec.Password)
+	if db := strings.TrimSpace(spec.Database); db != "" {
+		parsed.Path = "/" + strings.TrimPrefix(db, "/")
+	}
+	return parsed.String(), true
+}
+
 func rewriteComposeEnvValue(value string, hosts map[string]string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {

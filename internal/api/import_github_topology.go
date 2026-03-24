@@ -86,6 +86,7 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 		if spec, ok := postgresByOwner[service.Name]; ok {
 			specCopy := spec
 			postgres = &specCopy
+			suggestedEnv = applyManagedPostgresEnvironment(suggestedEnv, specCopy)
 		}
 
 		spec, err := s.buildImportedAppSpec(

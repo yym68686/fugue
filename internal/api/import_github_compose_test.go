@@ -30,6 +30,40 @@ func TestRewriteComposeEnvironmentRewritesInternalServiceHosts(t *testing.T) {
 	}
 }
 
+func TestApplyManagedPostgresEnvironmentRewritesGeneratedDatabaseURL(t *testing.T) {
+	env := map[string]string{
+		"DATABASE_URL": "postgresql+asyncpg://uniapi:@uni-api-web-api-db-postgres:5432/uniapi",
+	}
+
+	got := applyManagedPostgresEnvironment(env, model.AppPostgresSpec{
+		ServiceName: "uni-api-web-api-db-postgres",
+		Database:    "uniapi",
+		User:        "uniapi",
+		Password:    "secret-pass",
+	})
+
+	if got["DATABASE_URL"] != "postgresql+asyncpg://uniapi:secret-pass@uni-api-web-api-db-postgres:5432/uniapi" {
+		t.Fatalf("unexpected DATABASE_URL rewrite: %q", got["DATABASE_URL"])
+	}
+}
+
+func TestApplyManagedPostgresEnvironmentKeepsExternalDatabaseURL(t *testing.T) {
+	env := map[string]string{
+		"DATABASE_URL": "postgresql+asyncpg://uniapi:secret@db.example.com:5432/uniapi",
+	}
+
+	got := applyManagedPostgresEnvironment(env, model.AppPostgresSpec{
+		ServiceName: "uni-api-web-api-db-postgres",
+		Database:    "uniapi",
+		User:        "uniapi",
+		Password:    "new-secret",
+	})
+
+	if got["DATABASE_URL"] != env["DATABASE_URL"] {
+		t.Fatalf("expected external DATABASE_URL to be preserved, got %q", got["DATABASE_URL"])
+	}
+}
+
 func TestBuildQueuedGitHubSourcePreservesComposeMetadata(t *testing.T) {
 	source, err := buildQueuedGitHubSource(
 		"https://github.com/example/demo",
