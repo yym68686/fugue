@@ -1115,6 +1115,10 @@ install_fugue_chart() {
   ssh_root "${PRIMARY_ALIAS}" <<EOF
 set -euo pipefail
 mkdir -p "${HOSTPATH_DATA_DIR}"
+if [[ -d "${REMOTE_TMP_BASE}/fugue/crds" ]] && find "${REMOTE_TMP_BASE}/fugue/crds" -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \) | grep -q .; then
+  KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl apply -f "${REMOTE_TMP_BASE}/fugue/crds"
+  KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl wait --for=condition=Established --timeout=60s -f "${REMOTE_TMP_BASE}/fugue/crds"
+fi
 KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm upgrade --install "${RELEASE_NAME}" "${REMOTE_TMP_BASE}/fugue" \
   --namespace "${NAMESPACE}" \
   --create-namespace \

@@ -9,6 +9,7 @@ on:
       - 'cmd/fugue-api/**'
       - 'cmd/fugue-controller/**'
       - 'internal/**'
+      - 'deploy/helm/fugue/crds/**'
       - 'deploy/helm/fugue/Chart.yaml'
       - 'deploy/helm/fugue/values.yaml'
       - 'deploy/helm/fugue/templates/_helpers.tpl'

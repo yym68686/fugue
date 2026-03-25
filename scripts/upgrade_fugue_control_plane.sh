@@ -107,6 +107,24 @@ rollout_status() {
   ${KUBECTL} -n "${FUGUE_NAMESPACE}" rollout status "deploy/${deployment_name}" --timeout="${FUGUE_ROLLOUT_TIMEOUT}"
 }
 
+apply_chart_crds() {
+  local crd_dir="${FUGUE_HELM_CHART_PATH}/crds"
+
+  if [[ ! -d "${crd_dir}" ]]; then
+    log "skip CRD apply because ${crd_dir} does not exist"
+    return 0
+  fi
+
+  if ! find "${crd_dir}" -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \) | grep -q .; then
+    log "skip CRD apply because ${crd_dir} has no manifest files"
+    return 0
+  fi
+
+  log "applying Helm CRDs from ${crd_dir}"
+  ${KUBECTL} apply -f "${crd_dir}"
+  ${KUBECTL} wait --for=condition=Established --timeout=60s -f "${crd_dir}"
+}
+
 deployment_exists() {
   local deployment_name="$1"
   ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "deploy/${deployment_name}" >/dev/null 2>&1
@@ -215,6 +233,8 @@ main() {
   log "registry push base: ${FUGUE_REGISTRY_PUSH_BASE}"
   log "registry pull base: ${FUGUE_REGISTRY_PULL_BASE}"
   log "cluster join registry endpoint: ${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}"
+
+  apply_chart_crds
 
   if ! helm upgrade "${FUGUE_RELEASE_NAME}" "${FUGUE_HELM_CHART_PATH}" \
     -n "${FUGUE_NAMESPACE}" \
