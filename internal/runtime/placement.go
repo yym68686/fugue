@@ -10,15 +10,15 @@ const (
 )
 
 type Toleration struct {
-	Key      string
-	Operator string
-	Value    string
-	Effect   string
+	Key      string `json:"key,omitempty"`
+	Operator string `json:"operator,omitempty"`
+	Value    string `json:"value,omitempty"`
+	Effect   string `json:"effect,omitempty"`
 }
 
 type SchedulingConstraints struct {
-	NodeSelector map[string]string
-	Tolerations  []Toleration
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	Tolerations  []Toleration      `json:"tolerations,omitempty"`
 }
 
 func JoinNodeLabels(runtimeObj model.Runtime) []string {

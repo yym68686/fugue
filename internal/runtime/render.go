@@ -59,6 +59,34 @@ func (r Renderer) RenderAppBundle(app model.App, constraints ...SchedulingConstr
 	}, nil
 }
 
+func (r Renderer) RenderManagedAppBundle(app model.App, constraints ...SchedulingConstraints) (Bundle, error) {
+	namespace := NamespaceForTenant(app.TenantID)
+	path := filepath.Join(r.BaseDir, namespace, fmt.Sprintf("%s-managedapp.yaml", ManagedAppResourceName(app)))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return Bundle{}, fmt.Errorf("create render directory: %w", err)
+	}
+
+	var scheduling SchedulingConstraints
+	if len(constraints) > 0 {
+		scheduling = constraints[0]
+	}
+
+	objects := BuildManagedAppStateObjects(app, scheduling)
+	manifest, err := marshalObjectsToManifest(objects)
+	if err != nil {
+		return Bundle{}, fmt.Errorf("render managed app manifest: %w", err)
+	}
+	if err := os.WriteFile(path, manifest, 0o644); err != nil {
+		return Bundle{}, fmt.Errorf("write manifest: %w", err)
+	}
+
+	return Bundle{
+		TenantNamespace: namespace,
+		ManifestPath:    path,
+		Manifest:        manifest,
+	}, nil
+}
+
 func ApplyKubectl(manifestPath string) error {
 	cmd := exec.Command("kubectl", "apply", "-f", manifestPath)
 	output, err := cmd.CombinedOutput()

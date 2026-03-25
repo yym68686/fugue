@@ -21,6 +21,10 @@ const (
 )
 
 func buildAppObjects(app model.App, scheduling SchedulingConstraints) []map[string]any {
+	return buildAppObjectsWithOwner(app, scheduling, nil)
+}
+
+func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, ownerRef *OwnerReference) []map[string]any {
 	namespace := NamespaceForTenant(app.TenantID)
 	appName := sanitizeName(app.Name)
 	postgresResources := managedPostgresResources(namespace, app)
@@ -46,6 +50,7 @@ func buildAppObjects(app model.App, scheduling SchedulingConstraints) []map[stri
 		buildAppDeploymentObject(namespace, app, labels, scheduling, postgresResources),
 		buildAppServiceObject(namespace, app, labels),
 	)
+	attachOwnerReference(objects, ownerRef)
 	return objects
 }
 
@@ -66,6 +71,7 @@ func appLabels(app model.App) map[string]string {
 	}
 	if id := strings.TrimSpace(app.ID); id != "" {
 		labels[FugueLabelAppID] = id
+		labels[FugueLabelOwnerAppID] = id
 	}
 	if tenantID := strings.TrimSpace(app.TenantID); tenantID != "" {
 		labels[FugueLabelTenantID] = tenantID

@@ -24,6 +24,7 @@ type Service struct {
 	importer         *sourceimport.Importer
 	registryPushBase string
 	registryPullBase string
+	newKubeClient    func(namespace string) (*kubeClient, error)
 }
 
 func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *Service {
@@ -35,6 +36,7 @@ func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *S
 		importer:         sourceimport.NewImporter(cfg.ImportWorkDir, logger, builderPodPolicyFromConfig(cfg.BuilderSchedulingJSON, logger)),
 		registryPushBase: strings.TrimSpace(cfg.RegistryPushBase),
 		registryPullBase: strings.TrimSpace(cfg.RegistryPullBase),
+		newKubeClient:    newKubeClient,
 	}
 }
 
@@ -125,6 +127,8 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	defer staleTicker.Stop()
 	fallbackTicker := time.NewTicker(s.Config.FallbackPollInterval)
 	defer fallbackTicker.Stop()
+	managedAppTicker := time.NewTicker(s.Config.PollInterval)
+	defer managedAppTicker.Stop()
 	operationEvents := listenForOperationEvents(ctx, s.Logger, s.Config.DatabaseURL)
 
 	for {
@@ -139,9 +143,25 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			if err := s.drainPendingOperations(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				s.Logger.Printf("drain pending operations error: %v", err)
 			}
+			if s.Config.KubectlApply {
+				if err := s.reconcileManagedApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
+					s.Logger.Printf("managed app reconcile error: %v", err)
+				}
+			}
 		case <-fallbackTicker.C:
 			if err := s.drainPendingOperations(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				s.Logger.Printf("fallback drain pending operations error: %v", err)
+			}
+			if s.Config.KubectlApply {
+				if err := s.reconcileManagedApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
+					s.Logger.Printf("fallback managed app reconcile error: %v", err)
+				}
+			}
+		case <-managedAppTicker.C:
+			if s.Config.KubectlApply {
+				if err := s.reconcileManagedApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
+					s.Logger.Printf("periodic managed app reconcile error: %v", err)
+				}
 			}
 		case <-staleTicker.C:
 			if err := s.markRuntimeOfflineStale(); err != nil {
@@ -155,7 +175,13 @@ func (s *Service) reconcileOnce(ctx context.Context) error {
 	if err := s.markRuntimeOfflineStale(); err != nil {
 		return err
 	}
-	return s.drainPendingOperations(ctx)
+	if err := s.drainPendingOperations(ctx); err != nil {
+		return err
+	}
+	if s.Config.KubectlApply {
+		return s.reconcileManagedApps(ctx)
+	}
+	return nil
 }
 
 func (s *Service) markRuntimeOfflineStale() error {
@@ -239,19 +265,23 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	if s.Config.KubectlApply {
 		switch op.Type {
 		case model.OperationTypeDelete:
-			if err := runtime.DeleteManagedApp(app, scheduling); err != nil {
-				return fmt.Errorf("delete managed app %s: %w", app.ID, err)
+			if err := s.deleteManagedAppDesiredState(ctx, app); err != nil {
+				return fmt.Errorf("delete managed app desired state %s: %w", app.ID, err)
 			}
 		default:
-			if err := runtime.ApplyManagedApp(app, scheduling); err != nil {
-				return fmt.Errorf("apply managed app %s: %w", app.ID, err)
+			bundle, err = s.Renderer.RenderManagedAppBundle(app, scheduling)
+			if err != nil {
+				return fmt.Errorf("render managed app manifest for app %s: %w", app.ID, err)
+			}
+			if err := s.applyManagedAppDesiredState(ctx, app, scheduling); err != nil {
+				return fmt.Errorf("apply managed app desired state %s: %w", app.ID, err)
 			}
 		}
 	}
 
-	message := fmt.Sprintf("managed runtime applied in namespace %s", bundle.TenantNamespace)
+	message := fmt.Sprintf("managed app reconciled in namespace %s", bundle.TenantNamespace)
 	if op.Type == model.OperationTypeDelete {
-		message = fmt.Sprintf("managed runtime deleted app resources in namespace %s", bundle.TenantNamespace)
+		message = fmt.Sprintf("managed app deleted from namespace %s", bundle.TenantNamespace)
 	}
 	_, err = s.Store.CompleteManagedOperation(op.ID, bundle.ManifestPath, message)
 	if err != nil {
@@ -270,4 +300,12 @@ func (s *Service) managedSchedulingConstraints(runtimeID string) (runtime.Schedu
 		return runtime.SchedulingConstraints{}, fmt.Errorf("load runtime %s: %w", runtimeID, err)
 	}
 	return runtime.SchedulingForRuntime(runtimeObj), nil
+}
+
+func (s *Service) kubeClient() (*kubeClient, error) {
+	factory := s.newKubeClient
+	if factory == nil {
+		factory = newKubeClient
+	}
+	return factory(s.Config.KubectlNamespace)
 }

@@ -50,7 +50,7 @@ func DeleteManagedApp(app model.App, constraints ...SchedulingConstraints) error
 		if kind, _ := obj["kind"].(string); kind == "Namespace" {
 			continue
 		}
-		apiPath, err := objectAPIPath(NamespaceForTenant(app.TenantID), obj)
+		apiPath, err := ObjectAPIPath(NamespaceForTenant(app.TenantID), obj)
 		if err != nil {
 			return err
 		}

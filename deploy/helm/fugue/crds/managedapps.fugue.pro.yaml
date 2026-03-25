@@ -1,0 +1,118 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: managedapps.fugue.pro
+spec:
+  group: fugue.pro
+  scope: Namespaced
+  names:
+    plural: managedapps
+    singular: managedapp
+    kind: ManagedApp
+    shortNames:
+      - mapp
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: App
+          type: string
+          jsonPath: .spec.name
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Ready
+          type: integer
+          jsonPath: .status.readyReplicas
+        - name: Desired
+          type: integer
+          jsonPath: .status.desiredReplicas
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - appID
+                - tenantID
+                - name
+                - appSpec
+              properties:
+                appID:
+                  type: string
+                tenantID:
+                  type: string
+                projectID:
+                  type: string
+                name:
+                  type: string
+                appSpec:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                bindings:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                backingServices:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                scheduling:
+                  type: object
+                  properties:
+                    nodeSelector:
+                      type: object
+                      additionalProperties:
+                        type: string
+                    tolerations:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          key:
+                            type: string
+                          operator:
+                            type: string
+                          value:
+                            type: string
+                          effect:
+                            type: string
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                message:
+                  type: string
+                readyReplicas:
+                  type: integer
+                desiredReplicas:
+                  type: integer
+                observedGeneration:
+                  type: integer
+                  format: int64
+                lastAppliedSpecHash:
+                  type: string
+                lastAppliedTime:
+                  type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string

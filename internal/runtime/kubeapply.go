@@ -53,7 +53,7 @@ func ApplyManagedApp(app model.App, constraints ...SchedulingConstraints) error 
 	}
 
 	for _, obj := range buildAppObjects(app, scheduling) {
-		apiPath, err := objectAPIPath(NamespaceForTenant(app.TenantID), obj)
+		apiPath, err := ObjectAPIPath(NamespaceForTenant(app.TenantID), obj)
 		if err != nil {
 			return err
 		}
@@ -100,7 +100,7 @@ func applyObject(client *http.Client, baseURL, bearerToken, apiPath string, obj 
 	return nil
 }
 
-func objectAPIPath(defaultNamespace string, obj map[string]any) (string, error) {
+func ObjectAPIPath(defaultNamespace string, obj map[string]any) (string, error) {
 	apiVersion, _ := obj["apiVersion"].(string)
 	kind, _ := obj["kind"].(string)
 	metadata, _ := obj["metadata"].(map[string]any)
@@ -119,7 +119,13 @@ func objectAPIPath(defaultNamespace string, obj map[string]any) (string, error) 
 		return "/api/v1/namespaces/" + namespace + "/services/" + name, nil
 	case apiVersion == "apps/v1" && kind == "Deployment":
 		return "/apis/apps/v1/namespaces/" + namespace + "/deployments/" + name, nil
+	case apiVersion == ManagedAppAPIVersion && kind == ManagedAppKind:
+		return "/apis/" + ManagedAppAPIGroup + "/v1alpha1/namespaces/" + namespace + "/" + ManagedAppPlural + "/" + name, nil
 	default:
 		return "", fmt.Errorf("unsupported object %s %s", apiVersion, kind)
 	}
+}
+
+func objectAPIPath(defaultNamespace string, obj map[string]any) (string, error) {
+	return ObjectAPIPath(defaultNamespace, obj)
 }

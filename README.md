@@ -22,8 +22,8 @@ Fugue is a multi-tenant k3s control plane MVP for:
 - `fugue-controller`: async operation reconciler for the managed runtime
 - `fugue-agent`: attached runtime agent for user-owned VPS
 - PostgreSQL-backed relational state store with automatic import from legacy `fugue_state` / `store.json`
-- manifest rendering for Deployments and Services
-- in-cluster apply for the managed runtime via Kubernetes API
+- `ManagedApp` CRD plus operator-style reconcile for managed apps, with Deployments, Services, and Secrets derived from Kubernetes custom resources
+- managed app observed state written back to `ManagedApp.status`, with API reads preferring Kubernetes-observed runtime state over optimistic database status
 - internal registry flow for imported app images
 - Helm chart for installing the core control plane on k3s
 

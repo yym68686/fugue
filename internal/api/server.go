@@ -34,6 +34,7 @@ type Server struct {
 	clusterJoinMeshAuthKey      string
 	importer                    *sourceimport.Importer
 	newClusterNodeClient        func() (*clusterNodeClient, error)
+	newManagedAppStatusClient   func() (*managedAppStatusClient, error)
 	newWorkspacePodLister       func(namespace string) (workspacePodLister, error)
 	workspaceExecRunner         workspacePodExecRunner
 	ready                       atomic.Bool
@@ -59,6 +60,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		clusterJoinMeshAuthKey:      strings.TrimSpace(cfg.ClusterJoinMeshAuthKey),
 		importer:                    sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
 		newClusterNodeClient:        newClusterNodeClient,
+		newManagedAppStatusClient:   newManagedAppStatusClient,
 		newWorkspacePodLister: func(namespace string) (workspacePodLister, error) {
 			return newKubeLogsClient(namespace)
 		},
@@ -768,6 +770,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		}
 		visibleApps = append(visibleApps, app)
 	}
+	visibleApps = s.overlayManagedAppStatuses(r.Context(), visibleApps)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"apps": sanitizeAppsForAPI(visibleApps)})
 }
 
@@ -782,6 +785,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "app is not visible to this tenant")
 		return
 	}
+	app = s.overlayManagedAppStatus(r.Context(), app)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"app": sanitizeAppForAPI(app)})
 }
 
