@@ -127,17 +127,18 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 	}
 
 	return GitHubImportResult{
-		RepoOwner:        repo.RepoOwner,
-		RepoName:         repo.RepoName,
-		Branch:           repo.Branch,
-		CommitSHA:        repo.CommitSHA,
-		BuildStrategy:    model.AppBuildStrategyDockerfile,
-		DockerfilePath:   dockerfilePath,
-		BuildContextDir:  buildContextDir,
-		ImageRef:         imageRef,
-		DefaultAppName:   repo.DefaultAppName,
-		DetectedPort:     detectedPort,
-		DetectedProvider: model.AppBuildStrategyDockerfile,
+		RepoOwner:         repo.RepoOwner,
+		RepoName:          repo.RepoName,
+		Branch:            repo.Branch,
+		CommitSHA:         repo.CommitSHA,
+		CommitCommittedAt: repo.CommitCommittedAt,
+		BuildStrategy:     model.AppBuildStrategyDockerfile,
+		DockerfilePath:    dockerfilePath,
+		BuildContextDir:   buildContextDir,
+		ImageRef:          imageRef,
+		DefaultAppName:    repo.DefaultAppName,
+		DetectedPort:      detectedPort,
+		DetectedProvider:  model.AppBuildStrategyDockerfile,
 	}, nil
 }
 

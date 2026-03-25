@@ -122,17 +122,18 @@ func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, re
 	}
 
 	return GitHubImportResult{
-		RepoOwner:        repo.RepoOwner,
-		RepoName:         repo.RepoName,
-		Branch:           repo.Branch,
-		CommitSHA:        repo.CommitSHA,
-		SourceDir:        normalizeImportedSourceDirValue(normalizedSourceDir),
-		BuildStrategy:    model.AppBuildStrategyNixpacks,
-		ImageRef:         imageRef,
-		DefaultAppName:   repo.DefaultAppName,
-		DetectedPort:     port,
-		DetectedProvider: provider,
-		SuggestedEnv:     suggestedNixpacksEnv(port),
+		RepoOwner:         repo.RepoOwner,
+		RepoName:          repo.RepoName,
+		Branch:            repo.Branch,
+		CommitSHA:         repo.CommitSHA,
+		CommitCommittedAt: repo.CommitCommittedAt,
+		SourceDir:         normalizeImportedSourceDirValue(normalizedSourceDir),
+		BuildStrategy:     model.AppBuildStrategyNixpacks,
+		ImageRef:          imageRef,
+		DefaultAppName:    repo.DefaultAppName,
+		DetectedPort:      port,
+		DetectedProvider:  provider,
+		SuggestedEnv:      suggestedNixpacksEnv(port),
 	}, nil
 }
 

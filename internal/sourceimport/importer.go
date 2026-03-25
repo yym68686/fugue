@@ -40,19 +40,20 @@ type GitHubImportRequest struct {
 }
 
 type GitHubImportResult struct {
-	RepoOwner        string
-	RepoName         string
-	Branch           string
-	CommitSHA        string
-	SourceDir        string
-	BuildStrategy    string
-	DockerfilePath   string
-	BuildContextDir  string
-	ImageRef         string
-	DefaultAppName   string
-	DetectedPort     int
-	DetectedProvider string
-	SuggestedEnv     map[string]string
+	RepoOwner         string
+	RepoName          string
+	Branch            string
+	CommitSHA         string
+	CommitCommittedAt string
+	SourceDir         string
+	BuildStrategy     string
+	DockerfilePath    string
+	BuildContextDir   string
+	ImageRef          string
+	DefaultAppName    string
+	DetectedPort      int
+	DetectedProvider  string
+	SuggestedEnv      map[string]string
 }
 
 func NewImporter(workDir string, logger *log.Logger, builderPolicy BuilderPodPolicy) *Importer {
@@ -136,15 +137,16 @@ func importStaticSiteFromClonedRepo(repo clonedGitHubRepo, requestedSourceDir, r
 	}
 
 	return GitHubImportResult{
-		RepoOwner:      repo.RepoOwner,
-		RepoName:       repo.RepoName,
-		Branch:         repo.Branch,
-		CommitSHA:      repo.CommitSHA,
-		SourceDir:      relativeImportedSourceDir(repo.RepoDir, sourceDir),
-		BuildStrategy:  model.AppBuildStrategyStaticSite,
-		ImageRef:       imageRef,
-		DefaultAppName: repo.DefaultAppName,
-		DetectedPort:   80,
+		RepoOwner:         repo.RepoOwner,
+		RepoName:          repo.RepoName,
+		Branch:            repo.Branch,
+		CommitSHA:         repo.CommitSHA,
+		CommitCommittedAt: repo.CommitCommittedAt,
+		SourceDir:         relativeImportedSourceDir(repo.RepoDir, sourceDir),
+		BuildStrategy:     model.AppBuildStrategyStaticSite,
+		ImageRef:          imageRef,
+		DefaultAppName:    repo.DefaultAppName,
+		DetectedPort:      80,
 	}, nil
 }
 

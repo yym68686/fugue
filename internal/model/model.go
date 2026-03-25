@@ -237,21 +237,22 @@ type ClusterNode struct {
 }
 
 type AppSource struct {
-	Type             string `json:"type"`
-	RepoURL          string `json:"repo_url,omitempty"`
-	RepoBranch       string `json:"repo_branch,omitempty"`
-	UploadID         string `json:"upload_id,omitempty"`
-	UploadFilename   string `json:"upload_filename,omitempty"`
-	ArchiveSHA256    string `json:"archive_sha256,omitempty"`
-	ArchiveSizeBytes int64  `json:"archive_size_bytes,omitempty"`
-	SourceDir        string `json:"source_dir,omitempty"`
-	BuildStrategy    string `json:"build_strategy,omitempty"`
-	CommitSHA        string `json:"commit_sha,omitempty"`
-	DockerfilePath   string `json:"dockerfile_path,omitempty"`
-	BuildContextDir  string `json:"build_context_dir,omitempty"`
-	ImageNameSuffix  string `json:"image_name_suffix,omitempty"`
-	ComposeService   string `json:"compose_service,omitempty"`
-	DetectedProvider string `json:"detected_provider,omitempty"`
+	Type              string `json:"type"`
+	RepoURL           string `json:"repo_url,omitempty"`
+	RepoBranch        string `json:"repo_branch,omitempty"`
+	UploadID          string `json:"upload_id,omitempty"`
+	UploadFilename    string `json:"upload_filename,omitempty"`
+	ArchiveSHA256     string `json:"archive_sha256,omitempty"`
+	ArchiveSizeBytes  int64  `json:"archive_size_bytes,omitempty"`
+	SourceDir         string `json:"source_dir,omitempty"`
+	BuildStrategy     string `json:"build_strategy,omitempty"`
+	CommitSHA         string `json:"commit_sha,omitempty"`
+	CommitCommittedAt string `json:"commit_committed_at,omitempty"`
+	DockerfilePath    string `json:"dockerfile_path,omitempty"`
+	BuildContextDir   string `json:"build_context_dir,omitempty"`
+	ImageNameSuffix   string `json:"image_name_suffix,omitempty"`
+	ComposeService    string `json:"compose_service,omitempty"`
+	DetectedProvider  string `json:"detected_provider,omitempty"`
 }
 
 type AppTechnology struct {

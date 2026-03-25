@@ -11,12 +11,13 @@ import (
 )
 
 type clonedGitHubRepo struct {
-	RepoOwner      string
-	RepoName       string
-	RepoDir        string
-	Branch         string
-	CommitSHA      string
-	DefaultAppName string
+	RepoOwner         string
+	RepoName          string
+	RepoDir           string
+	Branch            string
+	CommitSHA         string
+	CommitCommittedAt string
+	DefaultAppName    string
 }
 
 func (i *Importer) clonePublicGitHubRepo(ctx context.Context, repoURL, branch, tempPrefix string) (clonedGitHubRepo, error) {
@@ -53,14 +54,19 @@ func (i *Importer) clonePublicGitHubRepo(ctx context.Context, repoURL, branch, t
 		_ = os.RemoveAll(repoDir)
 		return clonedGitHubRepo{}, err
 	}
+	commitCommittedAt, err := gitOutput(ctx, repoDir, "show", "-s", "--format=%cI", "HEAD")
+	if err != nil {
+		commitCommittedAt = ""
+	}
 
 	return clonedGitHubRepo{
-		RepoOwner:      owner,
-		RepoName:       repo,
-		RepoDir:        repoDir,
-		Branch:         checkedOutBranch,
-		CommitSHA:      commitSHA,
-		DefaultAppName: model.Slugify(repo),
+		RepoOwner:         owner,
+		RepoName:          repo,
+		RepoDir:           repoDir,
+		Branch:            checkedOutBranch,
+		CommitSHA:         commitSHA,
+		CommitCommittedAt: commitCommittedAt,
+		DefaultAppName:    model.Slugify(repo),
 	}, nil
 }
 

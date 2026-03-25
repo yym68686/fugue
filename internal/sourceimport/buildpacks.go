@@ -79,17 +79,18 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 	}
 
 	return GitHubImportResult{
-		RepoOwner:        repo.RepoOwner,
-		RepoName:         repo.RepoName,
-		Branch:           repo.Branch,
-		CommitSHA:        repo.CommitSHA,
-		SourceDir:        normalizeImportedSourceDirValue(normalizedSourceDir),
-		BuildStrategy:    model.AppBuildStrategyBuildpacks,
-		ImageRef:         imageRef,
-		DefaultAppName:   repo.DefaultAppName,
-		DetectedPort:     port,
-		DetectedProvider: provider,
-		SuggestedEnv:     suggestedBuildpacksEnv(port),
+		RepoOwner:         repo.RepoOwner,
+		RepoName:          repo.RepoName,
+		Branch:            repo.Branch,
+		CommitSHA:         repo.CommitSHA,
+		CommitCommittedAt: repo.CommitCommittedAt,
+		SourceDir:         normalizeImportedSourceDirValue(normalizedSourceDir),
+		BuildStrategy:     model.AppBuildStrategyBuildpacks,
+		ImageRef:          imageRef,
+		DefaultAppName:    repo.DefaultAppName,
+		DetectedPort:      port,
+		DetectedProvider:  provider,
+		SuggestedEnv:      suggestedBuildpacksEnv(port),
 	}, nil
 }
 
