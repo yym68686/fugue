@@ -59,6 +59,8 @@ spec:
               value: {{ printf "http://%s:%v" (include "fugue.fullname" .) .Values.service.port | quote }}
             - name: FUGUE_IMPORT_WORK_DIR
               value: {{ .Values.api.importWorkDir | quote }}
+            - name: FUGUE_CONTROLLER_BUILDER_SCHEDULING_JSON
+              value: {{ .Values.controller.builderScheduling | toJson | quote }}
             - name: FUGUE_RENDER_DIR
               value: /var/lib/fugue/rendered
             - name: FUGUE_CONTROLLER_POLL_INTERVAL

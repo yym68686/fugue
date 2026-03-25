@@ -28,6 +28,7 @@ type GitHubDockerImportRequest struct {
 	ImageRepository  string
 	ImageNameSuffix  string
 	JobLabels        map[string]string
+	Stateful         bool
 }
 
 func (i *Importer) ImportPublicGitHubDockerfileImage(ctx context.Context, req GitHubDockerImportRequest) (GitHubImportResult, error) {
@@ -40,7 +41,7 @@ func (i *Importer) ImportPublicGitHubDockerfileImage(ctx context.Context, req Gi
 	}
 	defer releaseClonedRepo(repo)
 
-	return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, req.DockerfilePath, req.BuildContextDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels)
+	return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, req.DockerfilePath, req.BuildContextDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, i.BuilderPolicy, req.Stateful)
 }
 
 type dockerfileBuildRequest struct {
@@ -53,6 +54,9 @@ type dockerfileBuildRequest struct {
 	BuildContextDir    string
 	ImageRef           string
 	JobLabels          map[string]string
+	PodPolicy          BuilderPodPolicy
+	WorkloadProfile    builderWorkloadProfile
+	Placement          builderJobPlacement
 }
 
 func detectDockerBuildInputs(repoDir, dockerfilePath, buildContextDir string) (string, string, error) {
@@ -97,7 +101,7 @@ func detectDockerBuildInputs(repoDir, dockerfilePath, buildContextDir string) (s
 	return relDockerfile, relContext, nil
 }
 
-func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, dockerfilePath, buildContextDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels map[string]string) (GitHubImportResult, error) {
+func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, dockerfilePath, buildContextDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
 	dockerfilePath, buildContextDir, err := detectDockerBuildInputs(repo.RepoDir, dockerfilePath, buildContextDir)
 	if err != nil {
 		return GitHubImportResult{}, err
@@ -116,6 +120,8 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		BuildContextDir: buildContextDir,
 		ImageRef:        imageRef,
 		JobLabels:       jobLabels,
+		PodPolicy:       builderPolicy,
+		WorkloadProfile: builderWorkloadProfileFor(model.AppBuildStrategyDockerfile, stateful),
 	}); err != nil {
 		return GitHubImportResult{}, err
 	}
@@ -195,6 +201,12 @@ func buildAndPushDockerfileImage(ctx context.Context, req dockerfileBuildRequest
 
 	jobName := buildJobName(req)
 	_ = kubectlRun(ctx, nil, "-n", namespace, "delete", "job", jobName, "--ignore-not-found=true", "--wait=false")
+	placement, releasePlacement, err := acquireBuilderPlacement(ctx, namespace, jobName, req.PodPolicy, req.WorkloadProfile)
+	if err != nil {
+		return fmt.Errorf("select builder placement: %w", err)
+	}
+	defer releasePlacement()
+	req.Placement = placement
 
 	jobObject, err := buildKanikoJobObject(namespace, jobName, req)
 	if err != nil {
@@ -297,6 +309,9 @@ func buildKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest)
 	}
 	metadata := jobObject["metadata"].(map[string]any)
 	metadata["labels"] = mergeBuilderLabels(metadata["labels"].(map[string]string), req.JobLabels)
+	podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	applyBuilderPodPolicy(podSpec, req.PodPolicy, req.WorkloadProfile)
+	applyBuilderPlacement(podSpec, req.Placement)
 	return jobObject, nil
 }
 
@@ -350,6 +365,9 @@ func buildArchiveKanikoJobObject(namespace, jobName string, req dockerfileBuildR
 	}
 	metadata := jobObject["metadata"].(map[string]any)
 	metadata["labels"] = mergeBuilderLabels(metadata["labels"].(map[string]string), req.JobLabels)
+	podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	applyBuilderPodPolicy(podSpec, req.PodPolicy, req.WorkloadProfile)
+	applyBuilderPlacement(podSpec, req.Placement)
 	return jobObject, nil
 }
 

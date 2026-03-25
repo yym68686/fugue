@@ -24,6 +24,7 @@ type GitHubBuildpacksImportRequest struct {
 	ImageRepository  string
 	ImageNameSuffix  string
 	JobLabels        map[string]string
+	Stateful         bool
 }
 
 type buildpacksBuildRequest struct {
@@ -35,6 +36,9 @@ type buildpacksBuildRequest struct {
 	SourceDir          string
 	ImageRef           string
 	JobLabels          map[string]string
+	PodPolicy          BuilderPodPolicy
+	WorkloadProfile    builderWorkloadProfile
+	Placement          builderJobPlacement
 }
 
 func (i *Importer) ImportPublicGitHubBuildpacks(ctx context.Context, req GitHubBuildpacksImportRequest) (GitHubImportResult, error) {
@@ -47,10 +51,10 @@ func (i *Importer) ImportPublicGitHubBuildpacks(ctx context.Context, req GitHubB
 	}
 	defer releaseClonedRepo(repo)
 
-	return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels)
+	return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, i.BuilderPolicy, req.Stateful)
 }
 
-func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, sourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels map[string]string) (GitHubImportResult, error) {
+func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, sourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
 	normalizedSourceDir, err := normalizeRepoSourceDir(repo.RepoDir, sourceDir)
 	if err != nil {
 		return GitHubImportResult{}, err
@@ -65,6 +69,11 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		SourceDir: normalizedSourceDir,
 		ImageRef:  imageRef,
 		JobLabels: jobLabels,
+		PodPolicy: builderPolicy,
+		WorkloadProfile: builderWorkloadProfileFor(
+			model.AppBuildStrategyBuildpacks,
+			stateful,
+		),
 	}); err != nil {
 		return GitHubImportResult{}, err
 	}
@@ -109,6 +118,12 @@ func buildAndPushBuildpacksImage(ctx context.Context, req buildpacksBuildRequest
 		SourceLabel: req.SourceLabel,
 	})
 	_ = kubectlRun(ctx, nil, "-n", namespace, "delete", "job", jobName, "--ignore-not-found=true", "--wait=false")
+	placement, releasePlacement, err := acquireBuilderPlacement(ctx, namespace, jobName, req.PodPolicy, req.WorkloadProfile)
+	if err != nil {
+		return fmt.Errorf("select builder placement: %w", err)
+	}
+	defer releasePlacement()
+	req.Placement = placement
 
 	jobObject, err := buildBuildpacksJobObject(namespace, jobName, req)
 	if err != nil {
@@ -198,6 +213,9 @@ func buildBuildpacksJobObject(namespace, jobName string, req buildpacksBuildRequ
 	}
 	metadata := jobObject["metadata"].(map[string]any)
 	metadata["labels"] = mergeBuilderLabels(metadata["labels"].(map[string]string), req.JobLabels)
+	podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	applyBuilderPodPolicy(podSpec, req.PodPolicy, req.WorkloadProfile)
+	applyBuilderPlacement(podSpec, req.Placement)
 	return jobObject, nil
 }
 

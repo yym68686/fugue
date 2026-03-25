@@ -57,7 +57,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		clusterJoinMeshProvider:     strings.TrimSpace(strings.ToLower(cfg.ClusterJoinMeshProvider)),
 		clusterJoinMeshLoginServer:  strings.TrimSpace(cfg.ClusterJoinMeshLoginServer),
 		clusterJoinMeshAuthKey:      strings.TrimSpace(cfg.ClusterJoinMeshAuthKey),
-		importer:                    sourceimport.NewImporter(cfg.ImportWorkDir, logger),
+		importer:                    sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
 		newClusterNodeClient:        newClusterNodeClient,
 		newWorkspacePodLister: func(namespace string) (workspacePodLister, error) {
 			return newKubeLogsClient(namespace)

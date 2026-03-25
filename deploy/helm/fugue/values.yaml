@@ -56,6 +56,41 @@ controller:
   migrationGuard:
     legacyControllerContainerName: controller
     checkInterval: 2s
+  builderScheduling:
+    buildNodeLabelKey: fugue.io/build
+    buildNodeLabelValue: "true"
+    largeNodeLabelKey: fugue.io/build-tier
+    largeNodeLabelValue: large
+    mediumNodeLabelValue: medium
+    smallNodeLabelValue: small
+    candidateCount: 3
+    selectionTimeoutSeconds: 120
+    retryIntervalSeconds: 5
+    reservationLeaseDurationSeconds: 120
+    light:
+      resources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+          ephemeral-storage: 1Gi
+        limits:
+          cpu: "1"
+          memory: 2Gi
+          ephemeral-storage: 3Gi
+      workspaceSizeLimit: 2Gi
+      dockerDataSizeLimit: 4Gi
+    heavy:
+      resources:
+        requests:
+          cpu: 750m
+          memory: 1Gi
+          ephemeral-storage: 3Gi
+        limits:
+          cpu: "4"
+          memory: 6Gi
+          ephemeral-storage: 8Gi
+      workspaceSizeLimit: 4Gi
+      dockerDataSizeLimit: 8Gi
   podDisruptionBudget:
     enabled: true
     minAvailable: 1

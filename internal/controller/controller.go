@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -31,10 +32,26 @@ func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *S
 		Config:           cfg,
 		Renderer:         runtime.Renderer{BaseDir: cfg.RenderDir},
 		Logger:           logger,
-		importer:         sourceimport.NewImporter(cfg.ImportWorkDir, logger),
+		importer:         sourceimport.NewImporter(cfg.ImportWorkDir, logger, builderPodPolicyFromConfig(cfg.BuilderSchedulingJSON, logger)),
 		registryPushBase: strings.TrimSpace(cfg.RegistryPushBase),
 		registryPullBase: strings.TrimSpace(cfg.RegistryPullBase),
 	}
+}
+
+func builderPodPolicyFromConfig(raw string, logger *log.Logger) sourceimport.BuilderPodPolicy {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return sourceimport.BuilderPodPolicy{}
+	}
+	var policy sourceimport.BuilderPodPolicy
+	if err := json.Unmarshal([]byte(raw), &policy); err != nil {
+		if logger == nil {
+			logger = log.Default()
+		}
+		logger.Printf("invalid controller builder scheduling config: %v", err)
+		return sourceimport.BuilderPodPolicy{}
+	}
+	return policy
 }
 
 func (s *Service) Run(ctx context.Context) error {

@@ -20,6 +20,7 @@ type GitHubSourceImportRequest struct {
 	ImageNameSuffix  string
 	ComposeService   string
 	JobLabels        map[string]string
+	Stateful         bool
 }
 
 type GitHubSourceImportOutput struct {
@@ -45,6 +46,7 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 			ImageRepository:  req.ImageRepository,
 			ImageNameSuffix:  req.ImageNameSuffix,
 			JobLabels:        req.JobLabels,
+			Stateful:         req.Stateful,
 		})
 		if err != nil {
 			return GitHubSourceImportOutput{}, err
@@ -101,6 +103,7 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 			ImageRepository:  req.ImageRepository,
 			ImageNameSuffix:  req.ImageNameSuffix,
 			JobLabels:        req.JobLabels,
+			Stateful:         req.Stateful,
 		})
 		if err != nil {
 			return GitHubSourceImportOutput{}, err
@@ -129,6 +132,7 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 			ImageRepository:  req.ImageRepository,
 			ImageNameSuffix:  req.ImageNameSuffix,
 			JobLabels:        req.JobLabels,
+			Stateful:         req.Stateful,
 		})
 		if err != nil {
 			return GitHubSourceImportOutput{}, err
@@ -156,6 +160,7 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 			ImageRepository:  req.ImageRepository,
 			ImageNameSuffix:  req.ImageNameSuffix,
 			JobLabels:        req.JobLabels,
+			Stateful:         req.Stateful,
 		})
 		if err != nil {
 			return GitHubSourceImportOutput{}, err

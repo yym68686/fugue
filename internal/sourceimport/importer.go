@@ -25,8 +25,9 @@ import (
 const staticSiteBaseImage = "index.docker.io/library/caddy:2.10.2-alpine"
 
 type Importer struct {
-	WorkDir string
-	Logger  *log.Logger
+	WorkDir       string
+	Logger        *log.Logger
+	BuilderPolicy BuilderPodPolicy
 }
 
 type GitHubImportRequest struct {
@@ -54,7 +55,7 @@ type GitHubImportResult struct {
 	SuggestedEnv     map[string]string
 }
 
-func NewImporter(workDir string, logger *log.Logger) *Importer {
+func NewImporter(workDir string, logger *log.Logger, builderPolicy BuilderPodPolicy) *Importer {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -62,8 +63,9 @@ func NewImporter(workDir string, logger *log.Logger) *Importer {
 		workDir = "./data/import"
 	}
 	return &Importer{
-		WorkDir: workDir,
-		Logger:  logger,
+		WorkDir:       workDir,
+		Logger:        logger,
+		BuilderPolicy: builderPolicy,
 	}
 }
 

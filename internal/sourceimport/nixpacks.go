@@ -27,6 +27,7 @@ type GitHubAutoImportRequest struct {
 	ImageRepository  string
 	ImageNameSuffix  string
 	JobLabels        map[string]string
+	Stateful         bool
 }
 
 type GitHubNixpacksImportRequest struct {
@@ -37,6 +38,7 @@ type GitHubNixpacksImportRequest struct {
 	ImageRepository  string
 	ImageNameSuffix  string
 	JobLabels        map[string]string
+	Stateful         bool
 }
 
 type nixpacksBuildRequest struct {
@@ -48,6 +50,9 @@ type nixpacksBuildRequest struct {
 	SourceDir          string
 	ImageRef           string
 	JobLabels          map[string]string
+	PodPolicy          BuilderPodPolicy
+	WorkloadProfile    builderWorkloadProfile
+	Placement          builderJobPlacement
 }
 
 func (i *Importer) ImportPublicGitHubAuto(ctx context.Context, req GitHubAutoImportRequest) (GitHubImportResult, error) {
@@ -67,13 +72,13 @@ func (i *Importer) ImportPublicGitHubAuto(ctx context.Context, req GitHubAutoImp
 
 	switch buildStrategy {
 	case model.AppBuildStrategyDockerfile:
-		return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, dockerfilePath, buildContextDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels)
+		return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, dockerfilePath, buildContextDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, i.BuilderPolicy, req.Stateful)
 	case model.AppBuildStrategyStaticSite:
 		return importStaticSiteFromClonedRepo(repo, sourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix)
 	case model.AppBuildStrategyBuildpacks:
-		return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, sourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels)
+		return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, sourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, i.BuilderPolicy, req.Stateful)
 	case model.AppBuildStrategyNixpacks:
-		return importNixpacksFromClonedRepo(ctx, repo, req.RepoURL, sourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels)
+		return importNixpacksFromClonedRepo(ctx, repo, req.RepoURL, sourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, i.BuilderPolicy, req.Stateful)
 	default:
 		return GitHubImportResult{}, fmt.Errorf("unsupported auto-detected build strategy %q", buildStrategy)
 	}
@@ -89,10 +94,10 @@ func (i *Importer) ImportPublicGitHubNixpacks(ctx context.Context, req GitHubNix
 	}
 	defer releaseClonedRepo(repo)
 
-	return importNixpacksFromClonedRepo(ctx, repo, req.RepoURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels)
+	return importNixpacksFromClonedRepo(ctx, repo, req.RepoURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, i.BuilderPolicy, req.Stateful)
 }
 
-func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, sourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels map[string]string) (GitHubImportResult, error) {
+func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, sourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
 	normalizedSourceDir, err := normalizeRepoSourceDir(repo.RepoDir, sourceDir)
 	if err != nil {
 		return GitHubImportResult{}, err
@@ -107,6 +112,11 @@ func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, re
 		SourceDir: normalizedSourceDir,
 		ImageRef:  imageRef,
 		JobLabels: jobLabels,
+		PodPolicy: builderPolicy,
+		WorkloadProfile: builderWorkloadProfileFor(
+			model.AppBuildStrategyNixpacks,
+			stateful,
+		),
 	}); err != nil {
 		return GitHubImportResult{}, err
 	}
@@ -277,6 +287,12 @@ func buildAndPushNixpacksImage(ctx context.Context, req nixpacksBuildRequest) er
 		SourceLabel: req.SourceLabel,
 	})
 	_ = kubectlRun(ctx, nil, "-n", namespace, "delete", "job", jobName, "--ignore-not-found=true", "--wait=false")
+	placement, releasePlacement, err := acquireBuilderPlacement(ctx, namespace, jobName, req.PodPolicy, req.WorkloadProfile)
+	if err != nil {
+		return fmt.Errorf("select builder placement: %w", err)
+	}
+	defer releasePlacement()
+	req.Placement = placement
 
 	jobObject, err := buildNixpacksJobObject(namespace, jobName, req)
 	if err != nil {
@@ -365,5 +381,8 @@ func buildNixpacksJobObject(namespace, jobName string, req nixpacksBuildRequest)
 	}
 	metadata := jobObject["metadata"].(map[string]any)
 	metadata["labels"] = mergeBuilderLabels(metadata["labels"].(map[string]string), req.JobLabels)
+	podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	applyBuilderPodPolicy(podSpec, req.PodPolicy, req.WorkloadProfile)
+	applyBuilderPlacement(podSpec, req.Placement)
 	return jobObject, nil
 }

@@ -30,6 +30,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		"fugue.pro/app-id":       app.ID,
 		"fugue.pro/tenant-id":    app.TenantID,
 	}
+	stateful := op.DesiredSpec.Workspace != nil || op.DesiredSpec.Postgres != nil
 
 	var output sourceimport.GitHubSourceImportOutput
 	var err error
@@ -50,6 +51,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 			ImageNameSuffix:  strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
 			ComposeService:   strings.TrimSpace(op.DesiredSource.ComposeService),
 			JobLabels:        jobLabels,
+			Stateful:         stateful,
 		})
 	case model.AppSourceTypeUpload:
 		if strings.TrimSpace(op.DesiredSource.UploadID) == "" {
@@ -83,6 +85,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 			ImageNameSuffix:    strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
 			ComposeService:     strings.TrimSpace(op.DesiredSource.ComposeService),
 			JobLabels:          jobLabels,
+			Stateful:           stateful,
 		})
 	default:
 		return fmt.Errorf("import operation %s only supports github-public or upload source", op.ID)
