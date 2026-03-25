@@ -169,6 +169,9 @@ func (s *Store) BindBackingService(tenantID, appID, serviceID, alias string, env
 		if findServiceBindingByAppAndService(state, appID, serviceID) >= 0 {
 			return ErrConflict
 		}
+		if requiresExclusiveBinding(service) && hasBindingsOnOtherApps(state.ServiceBindings, serviceID, appID) {
+			return ErrConflict
+		}
 		now := time.Now().UTC()
 		binding = model.ServiceBinding{
 			ID:        model.NewID("binding"),
@@ -658,6 +661,17 @@ func deleteBackingServicesByTenant(services []model.BackingService, tenantID str
 	return filtered
 }
 
+func deleteBackingServicesByProject(services []model.BackingService, projectID string) []model.BackingService {
+	filtered := services[:0]
+	for _, service := range services {
+		if service.ProjectID == projectID {
+			continue
+		}
+		filtered = append(filtered, service)
+	}
+	return filtered
+}
+
 func deleteServiceBindingsByTenant(bindings []model.ServiceBinding, tenantID string) []model.ServiceBinding {
 	filtered := bindings[:0]
 	for _, binding := range bindings {
@@ -673,6 +687,27 @@ func deleteServiceBindingsByApp(bindings []model.ServiceBinding, appID string) [
 	filtered := bindings[:0]
 	for _, binding := range bindings {
 		if binding.AppID == appID {
+			continue
+		}
+		filtered = append(filtered, binding)
+	}
+	return filtered
+}
+
+func deleteServiceBindingsByAppIDs(bindings []model.ServiceBinding, appIDs []string) []model.ServiceBinding {
+	if len(appIDs) == 0 {
+		return bindings
+	}
+	remove := make(map[string]struct{}, len(appIDs))
+	for _, appID := range appIDs {
+		if strings.TrimSpace(appID) == "" {
+			continue
+		}
+		remove[appID] = struct{}{}
+	}
+	filtered := bindings[:0]
+	for _, binding := range bindings {
+		if _, ok := remove[binding.AppID]; ok {
 			continue
 		}
 		filtered = append(filtered, binding)
@@ -731,4 +766,21 @@ func findServiceBindingByAppAndService(state *model.State, appID, serviceID stri
 		}
 	}
 	return -1
+}
+
+func hasBindingsOnOtherApps(bindings []model.ServiceBinding, serviceID, appID string) bool {
+	for _, binding := range bindings {
+		if binding.ServiceID == serviceID && binding.AppID != appID {
+			return true
+		}
+	}
+	return false
+}
+
+func requiresExclusiveBinding(service model.BackingService) bool {
+	if !strings.EqualFold(strings.TrimSpace(service.Type), model.BackingServiceTypePostgres) {
+		return false
+	}
+	provisioner := strings.TrimSpace(strings.ToLower(service.Provisioner))
+	return provisioner == "" || provisioner == model.BackingServiceProvisionerManaged
 }

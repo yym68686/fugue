@@ -225,6 +225,78 @@ func (s *Store) ListProjects(tenantID string) ([]model.Project, error) {
 	return projects, err
 }
 
+func (s *Store) GetProject(id string) (model.Project, error) {
+	if s.usingDatabase() {
+		return s.pgGetProject(id)
+	}
+	var project model.Project
+	err := s.withLockedState(false, func(state *model.State) error {
+		index := findProject(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		project = state.Projects[index]
+		return nil
+	})
+	return project, err
+}
+
+func (s *Store) UpdateProject(id string, name, description *string) (model.Project, error) {
+	id = strings.TrimSpace(id)
+	if id == "" || (name == nil && description == nil) {
+		return model.Project{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgUpdateProject(id, name, description)
+	}
+
+	var project model.Project
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findProject(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		project = state.Projects[index]
+		changed := false
+
+		if name != nil {
+			trimmedName := strings.TrimSpace(*name)
+			if trimmedName == "" {
+				return ErrInvalidInput
+			}
+			slug := model.Slugify(trimmedName)
+			for _, existing := range state.Projects {
+				if existing.ID == project.ID {
+					continue
+				}
+				if existing.TenantID == project.TenantID && existing.Slug == slug {
+					return ErrConflict
+				}
+			}
+			if project.Name != trimmedName || project.Slug != slug {
+				project.Name = trimmedName
+				project.Slug = slug
+				changed = true
+			}
+		}
+
+		if description != nil {
+			trimmedDescription := strings.TrimSpace(*description)
+			if project.Description != trimmedDescription {
+				project.Description = trimmedDescription
+				changed = true
+			}
+		}
+
+		if changed {
+			project.UpdatedAt = time.Now().UTC()
+			state.Projects[index] = project
+		}
+		return nil
+	})
+	return project, err
+}
+
 func (s *Store) CreateProject(tenantID, name, description string) (model.Project, error) {
 	name = strings.TrimSpace(name)
 	if tenantID == "" || name == "" {
@@ -261,16 +333,53 @@ func (s *Store) CreateProject(tenantID, name, description string) (model.Project
 	return project, err
 }
 
+func (s *Store) DeleteProject(id string) (model.Project, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.Project{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgDeleteProject(id)
+	}
+
+	var project model.Project
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findProject(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		if projectHasLiveResources(state, id) {
+			return ErrConflict
+		}
+
+		project = state.Projects[index]
+		appIDs := appIDsForProject(state.Apps, id)
+		state.Projects = append(state.Projects[:index], state.Projects[index+1:]...)
+		state.Apps = deleteAppsByProject(state.Apps, id)
+		state.ServiceBindings = deleteServiceBindingsByAppIDs(state.ServiceBindings, appIDs)
+		state.BackingServices = deleteBackingServicesByProject(state.BackingServices, id)
+		state.Operations = deleteOperationsByAppIDs(state.Operations, appIDs)
+		return nil
+	})
+	return project, err
+}
+
 func (s *Store) EnsureDefaultProject(tenantID string) (model.Project, error) {
+	project, _, err := s.EnsureDefaultProjectWithStatus(tenantID)
+	return project, err
+}
+
+func (s *Store) EnsureDefaultProjectWithStatus(tenantID string) (model.Project, bool, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	if tenantID == "" {
-		return model.Project{}, ErrInvalidInput
+		return model.Project{}, false, ErrInvalidInput
 	}
 	if s.usingDatabase() {
 		return s.pgEnsureDefaultProject(tenantID)
 	}
 
 	var project model.Project
+	var created bool
 	err := s.withLockedState(true, func(state *model.State) error {
 		if findTenant(state, tenantID) < 0 {
 			return ErrNotFound
@@ -292,9 +401,10 @@ func (s *Store) EnsureDefaultProject(tenantID string) (model.Project, error) {
 			UpdatedAt:   now,
 		}
 		state.Projects = append(state.Projects, project)
+		created = true
 		return nil
 	})
-	return project, err
+	return project, created, err
 }
 
 func (s *Store) ListAPIKeys(tenantID string, platformAdmin bool) ([]model.APIKey, error) {
@@ -314,6 +424,22 @@ func (s *Store) ListAPIKeys(tenantID string, platformAdmin bool) ([]model.APIKey
 		return nil
 	})
 	return keys, err
+}
+
+func (s *Store) GetAPIKey(id string) (model.APIKey, error) {
+	if s.usingDatabase() {
+		return s.pgGetAPIKey(id)
+	}
+	var key model.APIKey
+	err := s.withLockedState(false, func(state *model.State) error {
+		index := findAPIKey(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		key = state.APIKeys[index]
+		return nil
+	})
+	return key, err
 }
 
 func (s *Store) CreateAPIKey(tenantID, label string, scopes []string) (model.APIKey, string, error) {
@@ -350,6 +476,67 @@ func (s *Store) CreateAPIKey(tenantID, label string, scopes []string) (model.API
 		return model.APIKey{}, "", err
 	}
 
+	return redactAPIKey(key), secret, nil
+}
+
+func (s *Store) UpdateAPIKey(id string, label *string, scopes *[]string) (model.APIKey, error) {
+	id = strings.TrimSpace(id)
+	if id == "" || (label == nil && scopes == nil) {
+		return model.APIKey{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgUpdateAPIKey(id, label, scopes)
+	}
+
+	var key model.APIKey
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findAPIKey(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		updated, err := applyAPIKeyUpdates(state.APIKeys[index], label, scopes)
+		if err != nil {
+			return err
+		}
+		state.APIKeys[index] = updated
+		key = updated
+		return nil
+	})
+	if err != nil {
+		return model.APIKey{}, err
+	}
+	return redactAPIKey(key), nil
+}
+
+func (s *Store) RotateAPIKey(id string, label *string, scopes *[]string) (model.APIKey, string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.APIKey{}, "", ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgRotateAPIKey(id, label, scopes)
+	}
+
+	secret := model.NewSecret("fugue_pk")
+	var key model.APIKey
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findAPIKey(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		updated, err := applyAPIKeyUpdates(state.APIKeys[index], label, scopes)
+		if err != nil {
+			return err
+		}
+		updated.Prefix = model.SecretPrefix(secret)
+		updated.Hash = model.HashSecret(secret)
+		state.APIKeys[index] = updated
+		key = updated
+		return nil
+	})
+	if err != nil {
+		return model.APIKey{}, "", err
+	}
 	return redactAPIKey(key), secret, nil
 }
 
@@ -1111,6 +1298,43 @@ func (s *Store) CreateImportedApp(tenantID, projectID, name, description string,
 	return s.createApp(tenantID, projectID, name, description, spec, &source, &route)
 }
 
+func (s *Store) PurgeApp(id string) (model.App, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.App{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgPurgeApp(id)
+	}
+
+	var app model.App
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findApp(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+
+		app = state.Apps[index]
+		normalizeAppStatusForRead(&app)
+		if app.Status.CurrentReplicas > 0 || strings.TrimSpace(app.Status.CurrentRuntimeID) != "" {
+			return ErrConflict
+		}
+		if !isDeletedApp(app) {
+			phase := strings.TrimSpace(strings.ToLower(app.Status.Phase))
+			if strings.TrimSpace(app.Spec.Image) != "" || (phase != "importing" && phase != "failed") {
+				return ErrConflict
+			}
+		}
+
+		state.Apps = append(state.Apps[:index], state.Apps[index+1:]...)
+		state.ServiceBindings = deleteServiceBindingsByApp(state.ServiceBindings, id)
+		state.BackingServices = deleteOwnedBackingServicesByApp(state.BackingServices, id)
+		state.Operations = deleteOperationsByApp(state.Operations, id)
+		return nil
+	})
+	return app, err
+}
+
 func (s *Store) createApp(tenantID, projectID, name, description string, spec model.AppSpec, source *model.AppSource, route *model.AppRoute) (model.App, error) {
 	name = strings.TrimSpace(name)
 	allowPendingImport := source != nil && strings.TrimSpace(source.Type) == model.AppSourceTypeGitHubPublic && strings.TrimSpace(spec.Image) == ""
@@ -1661,6 +1885,25 @@ func cloneMap(in map[string]string) map[string]string {
 	return out
 }
 
+func applyAPIKeyUpdates(key model.APIKey, label *string, scopes *[]string) (model.APIKey, error) {
+	updated := key
+	if label != nil {
+		trimmed := strings.TrimSpace(*label)
+		if trimmed == "" {
+			return model.APIKey{}, ErrInvalidInput
+		}
+		updated.Label = trimmed
+	}
+	if scopes != nil {
+		normalized := model.NormalizeScopes(*scopes)
+		if len(normalized) == 0 {
+			return model.APIKey{}, ErrInvalidInput
+		}
+		updated.Scopes = normalized
+	}
+	return updated, nil
+}
+
 func normalizedMachineName(machineName, runtimeName, endpoint string) string {
 	machineName = strings.TrimSpace(machineName)
 	if machineName != "" {
@@ -2098,6 +2341,17 @@ func deleteProjectsByTenant(projects []model.Project, tenantID string) []model.P
 	return filtered
 }
 
+func deleteAppsByProject(apps []model.App, projectID string) []model.App {
+	filtered := apps[:0]
+	for _, app := range apps {
+		if app.ProjectID == projectID {
+			continue
+		}
+		filtered = append(filtered, app)
+	}
+	return filtered
+}
+
 func deleteAPIKeysByTenant(keys []model.APIKey, tenantID string) []model.APIKey {
 	filtered := keys[:0]
 	for _, key := range keys {
@@ -2171,6 +2425,31 @@ func deleteAppsByTenant(apps []model.App, tenantID string) []model.App {
 	return filtered
 }
 
+func deleteOperationsByApp(ops []model.Operation, appID string) []model.Operation {
+	return deleteOperationsByAppIDs(ops, []string{appID})
+}
+
+func deleteOperationsByAppIDs(ops []model.Operation, appIDs []string) []model.Operation {
+	if len(appIDs) == 0 {
+		return ops
+	}
+	remove := make(map[string]struct{}, len(appIDs))
+	for _, appID := range appIDs {
+		if strings.TrimSpace(appID) == "" {
+			continue
+		}
+		remove[appID] = struct{}{}
+	}
+	filtered := ops[:0]
+	for _, op := range ops {
+		if _, ok := remove[op.AppID]; ok {
+			continue
+		}
+		filtered = append(filtered, op)
+	}
+	return filtered
+}
+
 func deleteOperationsByTenant(ops []model.Operation, tenantID string) []model.Operation {
 	filtered := ops[:0]
 	for _, op := range ops {
@@ -2196,6 +2475,24 @@ func deleteAuditEventsByTenant(events []model.AuditEvent, tenantID string) []mod
 func findTenant(state *model.State, id string) int {
 	for idx, tenant := range state.Tenants {
 		if tenant.ID == id {
+			return idx
+		}
+	}
+	return -1
+}
+
+func findProject(state *model.State, id string) int {
+	for idx, project := range state.Projects {
+		if project.ID == id {
+			return idx
+		}
+	}
+	return -1
+}
+
+func findAPIKey(state *model.State, id string) int {
+	for idx, key := range state.APIKeys {
+		if key.ID == id {
 			return idx
 		}
 	}
@@ -2288,6 +2585,30 @@ func projectBelongsToTenant(state *model.State, projectID, tenantID string) bool
 		}
 	}
 	return false
+}
+
+func projectHasLiveResources(state *model.State, projectID string) bool {
+	for _, app := range state.Apps {
+		if app.ProjectID == projectID && !isDeletedApp(app) {
+			return true
+		}
+	}
+	for _, service := range state.BackingServices {
+		if service.ProjectID == projectID && !isDeletedBackingService(service) {
+			return true
+		}
+	}
+	return false
+}
+
+func appIDsForProject(apps []model.App, projectID string) []string {
+	out := make([]string, 0)
+	for _, app := range apps {
+		if app.ProjectID == projectID {
+			out = append(out, app.ID)
+		}
+	}
+	return out
 }
 
 func runtimeVisibleToTenant(state *model.State, runtimeID, tenantID string) bool {

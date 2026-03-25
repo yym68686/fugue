@@ -1759,3 +1759,203 @@ func TestIdempotencyRecordLifecycle(t *testing.T) {
 		t.Fatal("expected released key to be reservable again")
 	}
 }
+
+func TestDeleteProjectConflictsUntilAppDeleted(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Project Delete Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	if _, err := s.DeleteProject(project.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict while app exists, got %v", err)
+	}
+
+	deleteOp, err := s.CreateOperation(model.Operation{
+		TenantID: tenant.ID,
+		Type:     model.OperationTypeDelete,
+		AppID:    app.ID,
+	})
+	if err != nil {
+		t.Fatalf("create delete operation: %v", err)
+	}
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim delete operation: %v", err)
+	} else if !found {
+		t.Fatal("expected pending delete operation")
+	}
+	if _, err := s.CompleteManagedOperation(deleteOp.ID, "/tmp/demo-delete.yaml", "deleted"); err != nil {
+		t.Fatalf("complete delete operation: %v", err)
+	}
+
+	deletedProject, err := s.DeleteProject(project.ID)
+	if err != nil {
+		t.Fatalf("delete project: %v", err)
+	}
+	if deletedProject.ID != project.ID {
+		t.Fatalf("expected deleted project id %s, got %s", project.ID, deletedProject.ID)
+	}
+
+	projects, err := s.ListProjects(tenant.ID)
+	if err != nil {
+		t.Fatalf("list projects: %v", err)
+	}
+	if len(projects) != 0 {
+		t.Fatalf("expected project to be removed, got %+v", projects)
+	}
+}
+
+func TestPurgeAppRemovesImportedPlaceholderResources(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Purge Import Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "imports", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Postgres: &model.AppPostgresSpec{
+			Database: "demo",
+			User:     "demo",
+			Password: "secret",
+		},
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		BuildStrategy: model.AppBuildStrategyBuildpacks,
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+	specCopy := cloneAppSpec(&app.Spec)
+	sourceCopy := cloneAppSource(app.Source)
+	if _, err := s.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		Type:          model.OperationTypeImport,
+		AppID:         app.ID,
+		DesiredSpec:   specCopy,
+		DesiredSource: sourceCopy,
+	}); err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+
+	purgedApp, err := s.PurgeApp(app.ID)
+	if err != nil {
+		t.Fatalf("purge app: %v", err)
+	}
+	if purgedApp.ID != app.ID {
+		t.Fatalf("expected purged app id %s, got %s", app.ID, purgedApp.ID)
+	}
+
+	if _, err := s.GetApp(app.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected app to be removed, got %v", err)
+	}
+	services, err := s.ListBackingServices(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list backing services: %v", err)
+	}
+	if len(services) != 0 {
+		t.Fatalf("expected owned backing services to be removed, got %+v", services)
+	}
+	ops, err := s.ListOperations(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(ops) != 0 {
+		t.Fatalf("expected operations to be removed with purged app, got %+v", ops)
+	}
+}
+
+func TestManagedPostgresBindingIsExclusivePerService(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Binding Exclusivity Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	appA, err := s.CreateApp(tenant.ID, project.ID, "demo-a", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo-a:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app a: %v", err)
+	}
+	appB, err := s.CreateApp(tenant.ID, project.ID, "demo-b", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo-b:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app b: %v", err)
+	}
+	service, err := s.CreateBackingService(tenant.ID, project.ID, "shared-db", "", model.BackingServiceSpec{
+		Postgres: &model.AppPostgresSpec{
+			Database: "demo",
+			User:     "demo",
+			Password: "secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create backing service: %v", err)
+	}
+
+	bindingA, err := s.BindBackingService(tenant.ID, appA.ID, service.ID, "", nil)
+	if err != nil {
+		t.Fatalf("bind service to app a: %v", err)
+	}
+	if _, err := s.BindBackingService(tenant.ID, appB.ID, service.ID, "", nil); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict for second managed postgres binding, got %v", err)
+	}
+
+	if _, err := s.UnbindBackingService(bindingA.ID); err != nil {
+		t.Fatalf("unbind service from app a: %v", err)
+	}
+	bindingB, err := s.BindBackingService(tenant.ID, appB.ID, service.ID, "", nil)
+	if err != nil {
+		t.Fatalf("bind service to app b after unbind: %v", err)
+	}
+	if bindingB.AppID != appB.ID {
+		t.Fatalf("expected binding to app b, got %s", bindingB.AppID)
+	}
+}

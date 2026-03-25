@@ -218,6 +218,15 @@ func (s *Store) pgBindBackingService(tenantID, appID, serviceID, alias string, e
 	} else if exists {
 		return model.ServiceBinding{}, ErrConflict
 	}
+	if requiresExclusiveBinding(service) {
+		bindingCount, err := s.pgCountBindingsForServiceTx(ctx, tx, serviceID)
+		if err != nil {
+			return model.ServiceBinding{}, err
+		}
+		if bindingCount > 0 {
+			return model.ServiceBinding{}, ErrConflict
+		}
+	}
 
 	now := time.Now().UTC()
 	binding := model.ServiceBinding{

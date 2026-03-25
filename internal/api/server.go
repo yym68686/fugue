@@ -79,9 +79,13 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("GET /v1/projects", s.auth.RequireAPI(http.HandlerFunc(s.handleListProjects)))
 	mux.Handle("POST /v1/projects", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateProject)))
+	mux.Handle("PATCH /v1/projects/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchProject)))
+	mux.Handle("DELETE /v1/projects/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteProject)))
 
 	mux.Handle("GET /v1/api-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleListAPIKeys)))
 	mux.Handle("POST /v1/api-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateAPIKey)))
+	mux.Handle("PATCH /v1/api-keys/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchAPIKey)))
+	mux.Handle("POST /v1/api-keys/{id}/rotate", s.auth.RequireAPI(http.HandlerFunc(s.handleRotateAPIKey)))
 
 	mux.Handle("GET /v1/node-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleListNodeKeys)))
 	mux.Handle("POST /v1/node-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateNodeKey)))
@@ -98,13 +102,17 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/runtimes/enroll-tokens", s.auth.RequireAPI(http.HandlerFunc(s.handleListEnrollmentTokens)))
 	mux.Handle("POST /v1/runtimes/enroll-tokens", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateEnrollmentToken)))
 	mux.Handle("GET /v1/backing-services", s.auth.RequireAPI(http.HandlerFunc(s.handleListBackingServices)))
+	mux.Handle("POST /v1/backing-services", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateBackingService)))
 	mux.Handle("GET /v1/backing-services/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetBackingService)))
+	mux.Handle("DELETE /v1/backing-services/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteBackingService)))
 
 	mux.Handle("GET /v1/apps", s.auth.RequireAPI(http.HandlerFunc(s.handleListApps)))
 	mux.Handle("POST /v1/apps", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateApp)))
 	mux.Handle("POST /v1/apps/import-github", s.auth.RequireAPI(http.HandlerFunc(s.handleImportGitHubApp)))
 	mux.Handle("GET /v1/apps/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetApp)))
 	mux.Handle("GET /v1/apps/{id}/bindings", s.auth.RequireAPI(http.HandlerFunc(s.handleListAppBindings)))
+	mux.Handle("POST /v1/apps/{id}/bindings", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateAppBinding)))
+	mux.Handle("DELETE /v1/apps/{id}/bindings/{binding_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteAppBinding)))
 	mux.Handle("GET /v1/apps/{id}/build-logs", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppBuildLogs)))
 	mux.Handle("GET /v1/apps/{id}/runtime-logs", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppRuntimeLogs)))
 	mux.Handle("GET /v1/apps/{id}/env", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppEnv)))
@@ -250,6 +258,52 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"project": project})
 }
 
+func (s *Server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("project.write") {
+		httpx.WriteError(w, http.StatusForbidden, "missing project.write scope")
+		return
+	}
+	project, allowed := s.loadAuthorizedProject(w, r, principal)
+	if !allowed {
+		return
+	}
+	var req struct {
+		Name        *string `json:"name"`
+		Description *string `json:"description"`
+	}
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	project, err := s.store.UpdateProject(project.ID, req.Name, req.Description)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.appendAudit(principal, "project.update", "project", project.ID, project.TenantID, map[string]string{"name": project.Name})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"project": project})
+}
+
+func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("project.write") {
+		httpx.WriteError(w, http.StatusForbidden, "missing project.write scope")
+		return
+	}
+	project, allowed := s.loadAuthorizedProject(w, r, principal)
+	if !allowed {
+		return
+	}
+	project, err := s.store.DeleteProject(project.ID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.appendAudit(principal, "project.delete", "project", project.ID, project.TenantID, map[string]string{"name": project.Name})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"project": project})
+}
+
 func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	keys, err := s.store.ListAPIKeys(principal.TenantID, principal.IsPlatformAdmin())
@@ -291,6 +345,91 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 	s.appendAudit(principal, "apikey.create", "api_key", key.ID, tenantID, map[string]string{"label": key.Label})
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"api_key": key, "secret": secret})
+}
+
+func (s *Server) handlePatchAPIKey(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("apikey.write") {
+		httpx.WriteError(w, http.StatusForbidden, "missing apikey.write scope")
+		return
+	}
+	key, allowed := s.loadAuthorizedAPIKey(w, r, principal)
+	if !allowed {
+		return
+	}
+
+	var req struct {
+		Label  *string   `json:"label"`
+		Scopes *[]string `json:"scopes"`
+	}
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Scopes != nil {
+		normalized := model.NormalizeScopes(*req.Scopes)
+		req.Scopes = &normalized
+	}
+	if !principal.IsPlatformAdmin() && req.Scopes != nil && !scopesSubset(*req.Scopes, principal) {
+		httpx.WriteError(w, http.StatusForbidden, "cannot mint scopes you do not hold")
+		return
+	}
+
+	key, err := s.store.UpdateAPIKey(key.ID, req.Label, req.Scopes)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.appendAudit(principal, "apikey.update", "api_key", key.ID, key.TenantID, map[string]string{"label": key.Label})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"api_key": key})
+}
+
+func (s *Server) handleRotateAPIKey(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("apikey.write") {
+		httpx.WriteError(w, http.StatusForbidden, "missing apikey.write scope")
+		return
+	}
+	key, allowed := s.loadAuthorizedAPIKey(w, r, principal)
+	if !allowed {
+		return
+	}
+
+	var req struct {
+		Label  *string   `json:"label"`
+		Scopes *[]string `json:"scopes"`
+	}
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		if !errors.Is(err, io.EOF) {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		req = struct {
+			Label  *string   `json:"label"`
+			Scopes *[]string `json:"scopes"`
+		}{}
+	}
+	if req.Scopes != nil {
+		normalized := model.NormalizeScopes(*req.Scopes)
+		req.Scopes = &normalized
+	}
+
+	finalScopes := key.Scopes
+	if req.Scopes != nil {
+		finalScopes = *req.Scopes
+	}
+	if !principal.IsPlatformAdmin() && !scopesSubset(finalScopes, principal) {
+		httpx.WriteError(w, http.StatusForbidden, "cannot mint scopes you do not hold")
+		return
+	}
+
+	key, secret, err := s.store.RotateAPIKey(key.ID, req.Label, req.Scopes)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.appendAudit(principal, "apikey.rotate", "api_key", key.ID, key.TenantID, map[string]string{"label": key.Label})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"api_key": key, "secret": secret})
 }
 
 func (s *Server) handleListNodeKeys(w http.ResponseWriter, r *http.Request) {
@@ -952,6 +1091,32 @@ func (s *Server) loadAuthorizedApp(w http.ResponseWriter, r *http.Request, princ
 		return model.App{}, false
 	}
 	return app, true
+}
+
+func (s *Server) loadAuthorizedProject(w http.ResponseWriter, r *http.Request, principal model.Principal) (model.Project, bool) {
+	project, err := s.store.GetProject(r.PathValue("id"))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return model.Project{}, false
+	}
+	if !principal.IsPlatformAdmin() && project.TenantID != principal.TenantID {
+		httpx.WriteError(w, http.StatusForbidden, "project is not visible to this tenant")
+		return model.Project{}, false
+	}
+	return project, true
+}
+
+func (s *Server) loadAuthorizedAPIKey(w http.ResponseWriter, r *http.Request, principal model.Principal) (model.APIKey, bool) {
+	key, err := s.store.GetAPIKey(r.PathValue("id"))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return model.APIKey{}, false
+	}
+	if !principal.IsPlatformAdmin() && key.TenantID != principal.TenantID {
+		httpx.WriteError(w, http.StatusForbidden, "api key is not visible to this tenant")
+		return model.APIKey{}, false
+	}
+	return key, true
 }
 
 func (s *Server) resolveTenantID(principal model.Principal, requested string) (string, bool) {

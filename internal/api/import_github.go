@@ -45,19 +45,15 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if strings.TrimSpace(req.ProjectID) != "" && req.Project != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "project_id and project are mutually exclusive")
+		return
+	}
 
 	tenantID, ok := s.resolveTenantID(principal, req.TenantID)
 	if !ok {
 		httpx.WriteError(w, http.StatusForbidden, "cannot create app for another tenant")
 		return
-	}
-	if strings.TrimSpace(req.ProjectID) == "" {
-		project, err := s.store.EnsureDefaultProject(tenantID)
-		if err != nil {
-			s.writeStoreError(w, err)
-			return
-		}
-		req.ProjectID = project.ID
 	}
 
 	if strings.TrimSpace(s.registryPushBase) == "" {
@@ -154,6 +150,40 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		baseName = "app"
 	}
 
+	var cleanupProject *model.Project
+	cleanupApps := make([]model.App, 0, 1)
+	cleanupEnabled := true
+	defer func() {
+		if !cleanupEnabled {
+			return
+		}
+		if err := s.cleanupImportArtifacts(cleanupProject, cleanupApps); err != nil {
+			s.log.Printf("cleanup failed after github import error for tenant=%s repo=%s: %v", tenantID, strings.TrimSpace(req.RepoURL), err)
+		}
+	}()
+
+	var resolvedProject model.Project
+	var projectResolved bool
+	ensureImportProject := func() (model.Project, error) {
+		if projectResolved {
+			return resolvedProject, nil
+		}
+
+		project, created, err := s.resolveImportProject(tenantID, req)
+		if err != nil {
+			return model.Project{}, err
+		}
+		resolvedProject = project
+		req.ProjectID = project.ID
+		projectResolved = true
+		if created {
+			projectCopy := project
+			cleanupProject = &projectCopy
+			s.appendAudit(principal, "project.create", "project", project.ID, project.TenantID, map[string]string{"name": project.Name})
+		}
+		return resolvedProject, nil
+	}
+
 	if shouldInspectFugueManifestImport(req, buildStrategy) {
 		manifest, inspectErr := s.importer.InspectPublicGitHubFugueManifest(r.Context(), sourceimport.GitHubFugueManifestInspectRequest{
 			RepoURL: strings.TrimSpace(req.RepoURL),
@@ -161,6 +191,10 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		})
 		switch {
 		case inspectErr == nil:
+			if _, err := ensureImportProject(); err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
 			response, primaryApp, primaryOp, err := s.importFugueManifestGitHubStack(principal, tenantID, req, runtimeID, replicas, description, baseName, manifest)
 			if err != nil {
 				if errors.Is(err, store.ErrConflict) {
@@ -184,6 +218,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 					"status": model.IdempotencyStatusCompleted,
 				}
 			}
+			cleanupEnabled = false
 			httpx.WriteJSON(w, http.StatusAccepted, response)
 			return
 		case inspectErr != nil && !errors.Is(inspectErr, sourceimport.ErrFugueManifestNotFound):
@@ -199,6 +234,10 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		})
 		switch {
 		case inspectErr == nil:
+			if _, err := ensureImportProject(); err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
 			response, primaryApp, primaryOp, err := s.importComposeGitHubStack(principal, tenantID, req, runtimeID, replicas, description, baseName, stack)
 			if err != nil {
 				if errors.Is(err, store.ErrConflict) {
@@ -222,6 +261,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 					"status": model.IdempotencyStatusCompleted,
 				}
 			}
+			cleanupEnabled = false
 			httpx.WriteJSON(w, http.StatusAccepted, response)
 			return
 		case inspectErr != nil && !errors.Is(inspectErr, sourceimport.ErrComposeNotFound):
@@ -233,6 +273,10 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 	source, err := buildQueuedGitHubSource(req.RepoURL, req.Branch, req.SourceDir, req.DockerfilePath, req.BuildContextDir, buildStrategy, "", "")
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := ensureImportProject(); err != nil {
+		s.writeStoreError(w, err)
 		return
 	}
 
@@ -257,6 +301,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		}
 		app, err = s.store.CreateImportedApp(tenantID, req.ProjectID, candidateName, description, spec, source, route)
 		if err == nil {
+			cleanupApps = append(cleanupApps, app)
 			break
 		}
 		if !errors.Is(err, store.ErrConflict) {
@@ -306,7 +351,60 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 			"status": model.IdempotencyStatusCompleted,
 		}
 	}
+	cleanupEnabled = false
 	httpx.WriteJSON(w, http.StatusAccepted, response)
+}
+
+func (s *Server) resolveImportProject(tenantID string, req importGitHubRequest) (model.Project, bool, error) {
+	projectID := strings.TrimSpace(req.ProjectID)
+	switch {
+	case projectID != "":
+		project, err := s.store.GetProject(projectID)
+		if err != nil {
+			return model.Project{}, false, err
+		}
+		if project.TenantID != tenantID {
+			return model.Project{}, false, store.ErrNotFound
+		}
+		return project, false, nil
+	case req.Project != nil:
+		project, err := s.store.CreateProject(tenantID, req.Project.Name, req.Project.Description)
+		return project, err == nil, err
+	default:
+		return s.store.EnsureDefaultProjectWithStatus(tenantID)
+	}
+}
+
+func (s *Server) cleanupImportArtifacts(project *model.Project, apps []model.App) error {
+	var errs []error
+	if err := s.rollbackImportedApps(apps); err != nil {
+		errs = append(errs, err)
+	}
+	if project != nil {
+		if _, err := s.store.DeleteProject(project.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("delete project %s: %w", project.ID, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (s *Server) rollbackImportedApps(apps []model.App) error {
+	var errs []error
+	seen := make(map[string]struct{}, len(apps))
+	for index := len(apps) - 1; index >= 0; index-- {
+		appID := strings.TrimSpace(apps[index].ID)
+		if appID == "" {
+			continue
+		}
+		if _, ok := seen[appID]; ok {
+			continue
+		}
+		seen[appID] = struct{}{}
+		if _, err := s.store.PurgeApp(appID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("purge app %s: %w", appID, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func buildQueuedGitHubSource(repoURL, branch, sourceDir, dockerfilePath, buildContextDir, buildStrategy, imageNameSuffix, composeService string) (model.AppSource, error) {

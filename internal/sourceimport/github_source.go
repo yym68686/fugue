@@ -52,16 +52,17 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 		return GitHubSourceImportOutput{
 			ImportResult: importResult,
 			Source: model.AppSource{
-				Type:            model.AppSourceTypeGitHubPublic,
-				RepoURL:         strings.TrimSpace(req.RepoURL),
-				RepoBranch:      importResult.Branch,
-				SourceDir:       importResult.SourceDir,
-				BuildStrategy:   importResult.BuildStrategy,
-				CommitSHA:       importResult.CommitSHA,
-				DockerfilePath:  importResult.DockerfilePath,
-				BuildContextDir: importResult.BuildContextDir,
-				ImageNameSuffix: strings.TrimSpace(req.ImageNameSuffix),
-				ComposeService:  strings.TrimSpace(req.ComposeService),
+				Type:             model.AppSourceTypeGitHubPublic,
+				RepoURL:          strings.TrimSpace(req.RepoURL),
+				RepoBranch:       importResult.Branch,
+				SourceDir:        importResult.SourceDir,
+				BuildStrategy:    importResult.BuildStrategy,
+				CommitSHA:        importResult.CommitSHA,
+				DockerfilePath:   importResult.DockerfilePath,
+				BuildContextDir:  importResult.BuildContextDir,
+				ImageNameSuffix:  strings.TrimSpace(req.ImageNameSuffix),
+				ComposeService:   strings.TrimSpace(req.ComposeService),
+				DetectedProvider: strings.TrimSpace(importResult.DetectedProvider),
 			},
 		}, nil
 	case model.AppBuildStrategyStaticSite:
@@ -79,14 +80,15 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 		return GitHubSourceImportOutput{
 			ImportResult: importResult,
 			Source: model.AppSource{
-				Type:            model.AppSourceTypeGitHubPublic,
-				RepoURL:         strings.TrimSpace(req.RepoURL),
-				RepoBranch:      importResult.Branch,
-				SourceDir:       importResult.SourceDir,
-				BuildStrategy:   importResult.BuildStrategy,
-				CommitSHA:       importResult.CommitSHA,
-				ImageNameSuffix: strings.TrimSpace(req.ImageNameSuffix),
-				ComposeService:  strings.TrimSpace(req.ComposeService),
+				Type:             model.AppSourceTypeGitHubPublic,
+				RepoURL:          strings.TrimSpace(req.RepoURL),
+				RepoBranch:       importResult.Branch,
+				SourceDir:        importResult.SourceDir,
+				BuildStrategy:    importResult.BuildStrategy,
+				CommitSHA:        importResult.CommitSHA,
+				ImageNameSuffix:  strings.TrimSpace(req.ImageNameSuffix),
+				ComposeService:   strings.TrimSpace(req.ComposeService),
+				DetectedProvider: strings.TrimSpace(importResult.DetectedProvider),
 			},
 		}, nil
 	case model.AppBuildStrategyDockerfile:
@@ -106,15 +108,16 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 		return GitHubSourceImportOutput{
 			ImportResult: importResult,
 			Source: model.AppSource{
-				Type:            model.AppSourceTypeGitHubPublic,
-				RepoURL:         strings.TrimSpace(req.RepoURL),
-				RepoBranch:      importResult.Branch,
-				BuildStrategy:   importResult.BuildStrategy,
-				CommitSHA:       importResult.CommitSHA,
-				DockerfilePath:  importResult.DockerfilePath,
-				BuildContextDir: importResult.BuildContextDir,
-				ImageNameSuffix: strings.TrimSpace(req.ImageNameSuffix),
-				ComposeService:  strings.TrimSpace(req.ComposeService),
+				Type:             model.AppSourceTypeGitHubPublic,
+				RepoURL:          strings.TrimSpace(req.RepoURL),
+				RepoBranch:       importResult.Branch,
+				BuildStrategy:    importResult.BuildStrategy,
+				CommitSHA:        importResult.CommitSHA,
+				DockerfilePath:   importResult.DockerfilePath,
+				BuildContextDir:  importResult.BuildContextDir,
+				ImageNameSuffix:  strings.TrimSpace(req.ImageNameSuffix),
+				ComposeService:   strings.TrimSpace(req.ComposeService),
+				DetectedProvider: strings.TrimSpace(importResult.DetectedProvider),
 			},
 		}, nil
 	case model.AppBuildStrategyBuildpacks:
@@ -133,14 +136,15 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 		return GitHubSourceImportOutput{
 			ImportResult: importResult,
 			Source: model.AppSource{
-				Type:            model.AppSourceTypeGitHubPublic,
-				RepoURL:         strings.TrimSpace(req.RepoURL),
-				RepoBranch:      importResult.Branch,
-				SourceDir:       importResult.SourceDir,
-				BuildStrategy:   importResult.BuildStrategy,
-				CommitSHA:       importResult.CommitSHA,
-				ImageNameSuffix: strings.TrimSpace(req.ImageNameSuffix),
-				ComposeService:  strings.TrimSpace(req.ComposeService),
+				Type:             model.AppSourceTypeGitHubPublic,
+				RepoURL:          strings.TrimSpace(req.RepoURL),
+				RepoBranch:       importResult.Branch,
+				SourceDir:        importResult.SourceDir,
+				BuildStrategy:    importResult.BuildStrategy,
+				CommitSHA:        importResult.CommitSHA,
+				ImageNameSuffix:  strings.TrimSpace(req.ImageNameSuffix),
+				ComposeService:   strings.TrimSpace(req.ComposeService),
+				DetectedProvider: strings.TrimSpace(importResult.DetectedProvider),
 			},
 		}, nil
 	case model.AppBuildStrategyNixpacks:
@@ -159,14 +163,15 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 		return GitHubSourceImportOutput{
 			ImportResult: importResult,
 			Source: model.AppSource{
-				Type:            model.AppSourceTypeGitHubPublic,
-				RepoURL:         strings.TrimSpace(req.RepoURL),
-				RepoBranch:      importResult.Branch,
-				SourceDir:       importResult.SourceDir,
-				BuildStrategy:   importResult.BuildStrategy,
-				CommitSHA:       importResult.CommitSHA,
-				ImageNameSuffix: strings.TrimSpace(req.ImageNameSuffix),
-				ComposeService:  strings.TrimSpace(req.ComposeService),
+				Type:             model.AppSourceTypeGitHubPublic,
+				RepoURL:          strings.TrimSpace(req.RepoURL),
+				RepoBranch:       importResult.Branch,
+				SourceDir:        importResult.SourceDir,
+				BuildStrategy:    importResult.BuildStrategy,
+				CommitSHA:        importResult.CommitSHA,
+				ImageNameSuffix:  strings.TrimSpace(req.ImageNameSuffix),
+				ComposeService:   strings.TrimSpace(req.ComposeService),
+				DetectedProvider: strings.TrimSpace(importResult.DetectedProvider),
 			},
 		}, nil
 	default:

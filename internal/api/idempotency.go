@@ -13,9 +13,15 @@ import (
 
 const maxIdempotencyKeyLength = 200
 
+type importProjectRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
 type importGitHubRequest struct {
 	TenantID        string                 `json:"tenant_id"`
 	ProjectID       string                 `json:"project_id"`
+	Project         *importProjectRequest  `json:"project,omitempty"`
 	RepoURL         string                 `json:"repo_url"`
 	Branch          string                 `json:"branch"`
 	SourceDir       string                 `json:"source_dir"`
@@ -53,6 +59,7 @@ func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID
 	payload := struct {
 		TenantID        string                 `json:"tenant_id"`
 		ProjectID       string                 `json:"project_id"`
+		Project         *importProjectRequest  `json:"project,omitempty"`
 		RepoURL         string                 `json:"repo_url"`
 		Branch          string                 `json:"branch"`
 		SourceDir       string                 `json:"source_dir"`
@@ -70,6 +77,7 @@ func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID
 	}{
 		TenantID:        strings.TrimSpace(tenantID),
 		ProjectID:       strings.TrimSpace(req.ProjectID),
+		Project:         normalizedImportProjectRequest(req.Project),
 		RepoURL:         strings.TrimSpace(req.RepoURL),
 		Branch:          strings.TrimSpace(req.Branch),
 		SourceDir:       strings.TrimSpace(req.SourceDir),
@@ -91,4 +99,14 @@ func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+func normalizedImportProjectRequest(project *importProjectRequest) *importProjectRequest {
+	if project == nil {
+		return nil
+	}
+	return &importProjectRequest{
+		Name:        strings.TrimSpace(project.Name),
+		Description: strings.TrimSpace(project.Description),
+	}
 }

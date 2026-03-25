@@ -151,6 +151,21 @@ ORDER BY created_at ASC
 	return projects, nil
 }
 
+func (s *Store) pgGetProject(id string) (model.Project, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	project, err := scanProject(s.db.QueryRowContext(ctx, `
+SELECT id, tenant_id, name, slug, description, created_at, updated_at
+FROM fugue_projects
+WHERE id = $1
+`, id))
+	if err != nil {
+		return model.Project{}, mapDBErr(err)
+	}
+	return project, nil
+}
+
 func (s *Store) pgCreateProject(tenantID, name, description string) (model.Project, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -190,39 +205,167 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)
 	return project, nil
 }
 
-func (s *Store) pgEnsureDefaultProject(tenantID string) (model.Project, error) {
+func (s *Store) pgUpdateProject(id string, name, description *string) (model.Project, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return model.Project{}, fmt.Errorf("begin ensure default project transaction: %w", err)
+		return model.Project{}, fmt.Errorf("begin update project transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	project, err := scanProject(tx.QueryRowContext(ctx, `
+SELECT id, tenant_id, name, slug, description, created_at, updated_at
+FROM fugue_projects
+WHERE id = $1
+FOR UPDATE
+`, id))
+	if err != nil {
+		return model.Project{}, mapDBErr(err)
+	}
+
+	changed := false
+	if name != nil {
+		trimmedName := strings.TrimSpace(*name)
+		if trimmedName == "" {
+			return model.Project{}, ErrInvalidInput
+		}
+		slug := model.Slugify(trimmedName)
+		var exists bool
+		if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+	SELECT 1
+	FROM fugue_projects
+	WHERE tenant_id = $1
+	  AND lower(slug) = lower($2)
+	  AND id <> $3
+)
+`, project.TenantID, slug, project.ID).Scan(&exists); err != nil {
+			return model.Project{}, fmt.Errorf("check project slug conflict: %w", err)
+		}
+		if exists {
+			return model.Project{}, ErrConflict
+		}
+		if project.Name != trimmedName || project.Slug != slug {
+			project.Name = trimmedName
+			project.Slug = slug
+			changed = true
+		}
+	}
+
+	if description != nil {
+		trimmedDescription := strings.TrimSpace(*description)
+		if project.Description != trimmedDescription {
+			project.Description = trimmedDescription
+			changed = true
+		}
+	}
+
+	if changed {
+		project.UpdatedAt = time.Now().UTC()
+		if _, err := tx.ExecContext(ctx, `
+UPDATE fugue_projects
+SET tenant_id = $2,
+	name = $3,
+	slug = $4,
+	description = $5,
+	created_at = $6,
+	updated_at = $7
+WHERE id = $1
+`, project.ID, project.TenantID, project.Name, project.Slug, project.Description, project.CreatedAt, project.UpdatedAt); err != nil {
+			return model.Project{}, mapDBErr(err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return model.Project{}, fmt.Errorf("commit update project transaction: %w", err)
+	}
+	return project, nil
+}
+
+func (s *Store) pgDeleteProject(id string) (model.Project, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Project{}, fmt.Errorf("begin delete project transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	project, err := scanProject(tx.QueryRowContext(ctx, `
+SELECT id, tenant_id, name, slug, description, created_at, updated_at
+FROM fugue_projects
+WHERE id = $1
+FOR UPDATE
+`, id))
+	if err != nil {
+		return model.Project{}, mapDBErr(err)
+	}
+
+	if live, err := s.pgProjectHasLiveResourcesTx(ctx, tx, project.ID); err != nil {
+		return model.Project{}, err
+	} else if live {
+		return model.Project{}, ErrConflict
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_projects WHERE id = $1`, project.ID); err != nil {
+		return model.Project{}, fmt.Errorf("delete project %s: %w", project.ID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Project{}, fmt.Errorf("commit delete project transaction: %w", err)
+	}
+	return project, nil
+}
+
+func (s *Store) pgEnsureDefaultProject(tenantID string) (model.Project, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Project{}, false, fmt.Errorf("begin ensure default project transaction: %w", err)
 	}
 	defer tx.Rollback()
 
 	exists, err := s.pgTenantExistsTx(ctx, tx, tenantID)
 	if err != nil {
-		return model.Project{}, err
+		return model.Project{}, false, err
 	}
 	if !exists {
-		return model.Project{}, ErrNotFound
+		return model.Project{}, false, ErrNotFound
+	}
+
+	project, err := scanProject(tx.QueryRowContext(ctx, `
+SELECT id, tenant_id, name, slug, description, created_at, updated_at
+FROM fugue_projects
+WHERE tenant_id = $1
+  AND slug = 'default'
+`, tenantID))
+	if err == nil {
+		if err := tx.Commit(); err != nil {
+			return model.Project{}, false, fmt.Errorf("commit ensure default project transaction: %w", err)
+		}
+		return project, false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return model.Project{}, false, mapDBErr(err)
 	}
 
 	now := time.Now().UTC()
-	project, err := scanProject(tx.QueryRowContext(ctx, `
+	project, err = scanProject(tx.QueryRowContext(ctx, `
 INSERT INTO fugue_projects (id, tenant_id, name, slug, description, created_at, updated_at)
 VALUES ($1, $2, 'default', 'default', 'default project', $3, $4)
-ON CONFLICT (tenant_id, slug) DO UPDATE
-SET updated_at = fugue_projects.updated_at
 RETURNING id, tenant_id, name, slug, description, created_at, updated_at
 `, model.NewID("project"), tenantID, now, now))
 	if err != nil {
-		return model.Project{}, mapDBErr(err)
+		return model.Project{}, false, mapDBErr(err)
 	}
 	if err := tx.Commit(); err != nil {
-		return model.Project{}, fmt.Errorf("commit ensure default project transaction: %w", err)
+		return model.Project{}, false, fmt.Errorf("commit ensure default project transaction: %w", err)
 	}
-	return project, nil
+	return project, true, nil
 }
 
 func (s *Store) pgListAPIKeys(tenantID string, platformAdmin bool) ([]model.APIKey, error) {
@@ -258,6 +401,21 @@ FROM fugue_api_keys
 		return nil, fmt.Errorf("iterate api keys: %w", err)
 	}
 	return keys, nil
+}
+
+func (s *Store) pgGetAPIKey(id string) (model.APIKey, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	key, err := scanAPIKey(s.db.QueryRowContext(ctx, `
+SELECT id, tenant_id, label, prefix, hash, scopes_json, created_at, last_used_at
+FROM fugue_api_keys
+WHERE id = $1
+`, id))
+	if err != nil {
+		return model.APIKey{}, mapDBErr(err)
+	}
+	return key, nil
 }
 
 func (s *Store) pgCreateAPIKey(tenantID, label string, scopes []string) (model.APIKey, string, error) {
@@ -305,6 +463,100 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)
 		return model.APIKey{}, "", fmt.Errorf("commit create api key transaction: %w", err)
 	}
 
+	return redactAPIKey(key), secret, nil
+}
+
+func (s *Store) pgUpdateAPIKey(id string, label *string, scopes *[]string) (model.APIKey, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.APIKey{}, fmt.Errorf("begin update api key transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	current, err := scanAPIKey(tx.QueryRowContext(ctx, `
+SELECT id, tenant_id, label, prefix, hash, scopes_json, created_at, last_used_at
+FROM fugue_api_keys
+WHERE id = $1
+FOR UPDATE
+`, id))
+	if err != nil {
+		return model.APIKey{}, mapDBErr(err)
+	}
+	updated, err := applyAPIKeyUpdates(current, label, scopes)
+	if err != nil {
+		return model.APIKey{}, err
+	}
+	scopesJSON, err := marshalJSON(updated.Scopes)
+	if err != nil {
+		return model.APIKey{}, err
+	}
+
+	key, err := scanAPIKey(tx.QueryRowContext(ctx, `
+UPDATE fugue_api_keys
+SET label = $2,
+	scopes_json = $3
+WHERE id = $1
+RETURNING id, tenant_id, label, prefix, hash, scopes_json, created_at, last_used_at
+`, id, updated.Label, scopesJSON))
+	if err != nil {
+		return model.APIKey{}, mapDBErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return model.APIKey{}, fmt.Errorf("commit update api key transaction: %w", err)
+	}
+	return redactAPIKey(key), nil
+}
+
+func (s *Store) pgRotateAPIKey(id string, label *string, scopes *[]string) (model.APIKey, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.APIKey{}, "", fmt.Errorf("begin rotate api key transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	current, err := scanAPIKey(tx.QueryRowContext(ctx, `
+SELECT id, tenant_id, label, prefix, hash, scopes_json, created_at, last_used_at
+FROM fugue_api_keys
+WHERE id = $1
+FOR UPDATE
+`, id))
+	if err != nil {
+		return model.APIKey{}, "", mapDBErr(err)
+	}
+	updated, err := applyAPIKeyUpdates(current, label, scopes)
+	if err != nil {
+		return model.APIKey{}, "", err
+	}
+
+	secret := model.NewSecret("fugue_pk")
+	updated.Prefix = model.SecretPrefix(secret)
+	updated.Hash = model.HashSecret(secret)
+
+	scopesJSON, err := marshalJSON(updated.Scopes)
+	if err != nil {
+		return model.APIKey{}, "", err
+	}
+	key, err := scanAPIKey(tx.QueryRowContext(ctx, `
+UPDATE fugue_api_keys
+SET label = $2,
+	prefix = $3,
+	hash = $4,
+	scopes_json = $5
+WHERE id = $1
+RETURNING id, tenant_id, label, prefix, hash, scopes_json, created_at, last_used_at
+`, id, updated.Label, updated.Prefix, updated.Hash, scopesJSON))
+	if err != nil {
+		return model.APIKey{}, "", mapDBErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return model.APIKey{}, "", fmt.Errorf("commit rotate api key transaction: %w", err)
+	}
 	return redactAPIKey(key), secret, nil
 }
 
@@ -1451,6 +1703,46 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	return app, nil
 }
 
+func (s *Store) pgPurgeApp(id string) (model.App, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.App{}, fmt.Errorf("begin purge app transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	app, err := s.pgGetAppTx(ctx, tx, id, true)
+	if err != nil {
+		return model.App{}, mapDBErr(err)
+	}
+	normalizeAppStatusForRead(&app)
+	if app.Status.CurrentReplicas > 0 || strings.TrimSpace(app.Status.CurrentRuntimeID) != "" {
+		return model.App{}, ErrConflict
+	}
+	if !isDeletedApp(app) {
+		phase := strings.TrimSpace(strings.ToLower(app.Status.Phase))
+		if strings.TrimSpace(app.Spec.Image) != "" || (phase != "importing" && phase != "failed") {
+			return model.App{}, ErrConflict
+		}
+	}
+
+	if err := s.pgDeleteServiceBindingsByAppTx(ctx, tx, app.ID); err != nil {
+		return model.App{}, err
+	}
+	if err := s.pgDeleteOwnedBackingServicesByAppTx(ctx, tx, app.ID); err != nil {
+		return model.App{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_apps WHERE id = $1`, app.ID); err != nil {
+		return model.App{}, fmt.Errorf("delete app %s: %w", app.ID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return model.App{}, fmt.Errorf("commit purge app transaction: %w", err)
+	}
+	return app, nil
+}
+
 func (s *Store) pgReserveIdempotencyRecord(scope, tenantID, key, requestHash string) (model.IdempotencyRecord, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -2204,6 +2496,35 @@ SELECT EXISTS (
 		return false, fmt.Errorf("check project %s belongs to tenant %s: %w", projectID, tenantID, err)
 	}
 	return exists, nil
+}
+
+func (s *Store) pgProjectHasLiveResourcesTx(ctx context.Context, tx *sql.Tx, projectID string) (bool, error) {
+	var hasApps bool
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+	SELECT 1
+	FROM fugue_apps
+	WHERE project_id = $1
+	  AND lower(COALESCE(status_json->>'phase', '')) <> 'deleted'
+)
+`, projectID).Scan(&hasApps); err != nil {
+		return false, fmt.Errorf("check live apps for project %s: %w", projectID, err)
+	}
+	if hasApps {
+		return true, nil
+	}
+
+	var hasServices bool
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+	SELECT 1
+	FROM fugue_backing_services
+	WHERE project_id = $1
+)
+`, projectID).Scan(&hasServices); err != nil {
+		return false, fmt.Errorf("check backing services for project %s: %w", projectID, err)
+	}
+	return hasServices, nil
 }
 
 func (s *Store) pgRuntimeVisibleToTenantTx(ctx context.Context, tx *sql.Tx, runtimeID, tenantID string) (bool, error) {

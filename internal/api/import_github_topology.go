@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -120,6 +121,12 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 	ops := make([]model.Operation, 0, len(plans))
 	appsByService := make(map[string]model.App, len(plans))
 	opsByService := make(map[string]model.Operation, len(plans))
+	rollback := func(baseErr error) error {
+		if rollbackErr := s.rollbackImportedApps(apps); rollbackErr != nil {
+			return errors.Join(baseErr, rollbackErr)
+		}
+		return baseErr
+	}
 	for _, plan := range plans {
 		appDescription := description
 		if len(plans) > 1 {
@@ -133,10 +140,11 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 		app, err := s.store.CreateImportedApp(tenantID, req.ProjectID, plan.AppName, appDescription, plan.Spec, plan.Source, route)
 		if err != nil {
 			if err == store.ErrConflict {
-				return importedGitHubTopology{}, fmt.Errorf("topology import naming conflict for service %q: %w", plan.Service.Name, store.ErrConflict)
+				return importedGitHubTopology{}, rollback(fmt.Errorf("topology import naming conflict for service %q: %w", plan.Service.Name, store.ErrConflict))
 			}
-			return importedGitHubTopology{}, err
+			return importedGitHubTopology{}, rollback(err)
 		}
+		apps = append(apps, app)
 
 		specCopy := cloneAppSpec(app.Spec)
 		sourceCopy := plan.Source
@@ -150,7 +158,7 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 			DesiredSource:   &sourceCopy,
 		})
 		if err != nil {
-			return importedGitHubTopology{}, err
+			return importedGitHubTopology{}, rollback(err)
 		}
 
 		s.appendAudit(principal, "app.import_github", "app", app.ID, app.TenantID, map[string]string{
@@ -160,7 +168,6 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 			"hostname":        route.Hostname,
 		})
 
-		apps = append(apps, app)
 		ops = append(ops, op)
 		appsByService[plan.Service.Name] = app
 		opsByService[plan.Service.Name] = op

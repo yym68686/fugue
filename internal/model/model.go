@@ -171,16 +171,24 @@ type ClusterNode struct {
 }
 
 type AppSource struct {
-	Type            string `json:"type"`
-	RepoURL         string `json:"repo_url,omitempty"`
-	RepoBranch      string `json:"repo_branch,omitempty"`
-	SourceDir       string `json:"source_dir,omitempty"`
-	BuildStrategy   string `json:"build_strategy,omitempty"`
-	CommitSHA       string `json:"commit_sha,omitempty"`
-	DockerfilePath  string `json:"dockerfile_path,omitempty"`
-	BuildContextDir string `json:"build_context_dir,omitempty"`
-	ImageNameSuffix string `json:"image_name_suffix,omitempty"`
-	ComposeService  string `json:"compose_service,omitempty"`
+	Type             string `json:"type"`
+	RepoURL          string `json:"repo_url,omitempty"`
+	RepoBranch       string `json:"repo_branch,omitempty"`
+	SourceDir        string `json:"source_dir,omitempty"`
+	BuildStrategy    string `json:"build_strategy,omitempty"`
+	CommitSHA        string `json:"commit_sha,omitempty"`
+	DockerfilePath   string `json:"dockerfile_path,omitempty"`
+	BuildContextDir  string `json:"build_context_dir,omitempty"`
+	ImageNameSuffix  string `json:"image_name_suffix,omitempty"`
+	ComposeService   string `json:"compose_service,omitempty"`
+	DetectedProvider string `json:"detected_provider,omitempty"`
+}
+
+type AppTechnology struct {
+	Kind   string `json:"kind"`
+	Slug   string `json:"slug"`
+	Name   string `json:"name"`
+	Source string `json:"source,omitempty"`
 }
 
 type AppRoute struct {
@@ -270,6 +278,7 @@ type App struct {
 	Status          AppStatus        `json:"status"`
 	Bindings        []ServiceBinding `json:"bindings,omitempty"`
 	BackingServices []BackingService `json:"backing_services,omitempty"`
+	TechStack       []AppTechnology  `json:"tech_stack,omitempty"`
 	CreatedAt       time.Time        `json:"created_at"`
 	UpdatedAt       time.Time        `json:"updated_at"`
 }
