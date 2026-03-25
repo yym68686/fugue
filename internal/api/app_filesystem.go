@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os/exec"
+	"net/url"
 	"path"
 	"sort"
 	"strconv"
@@ -19,6 +19,12 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/httpstream"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
 )
 
 const (
@@ -38,7 +44,7 @@ type workspacePodExecRunner interface {
 	Run(ctx context.Context, namespace, podName, containerName string, stdin []byte, command ...string) ([]byte, error)
 }
 
-type kubectlWorkspaceExecRunner struct{}
+type kubeWorkspaceExecRunner struct{}
 
 type filesystemAPIError struct {
 	StatusCode int
@@ -64,6 +70,8 @@ type appFilesystemEntry struct {
 	HasChildren bool      `json:"has_children"`
 }
 
+var errKubeWorkspaceExecUnavailable = errors.New("kubernetes workspace exec is unavailable")
+
 func (e *filesystemAPIError) Error() string {
 	if e == nil {
 		return ""
@@ -74,27 +82,95 @@ func (e *filesystemAPIError) Error() string {
 	return e.Message
 }
 
-func (r kubectlWorkspaceExecRunner) Run(ctx context.Context, namespace, podName, containerName string, stdin []byte, command ...string) ([]byte, error) {
-	args := []string{"-n", namespace, "exec", strings.TrimSpace(podName)}
-	if name := strings.TrimSpace(containerName); name != "" {
-		args = append(args, "-c", name)
-	}
-	args = append(args, "--")
-	args = append(args, command...)
-
-	cmd := exec.CommandContext(ctx, "kubectl", args...)
-	if len(stdin) > 0 {
-		cmd.Stdin = bytes.NewReader(stdin)
-	}
-	output, err := cmd.CombinedOutput()
+func (r kubeWorkspaceExecRunner) Run(ctx context.Context, namespace, podName, containerName string, stdin []byte, command ...string) ([]byte, error) {
+	config, client, err := newKubeWorkspaceExecRESTClient()
 	if err != nil {
-		trimmed := strings.TrimSpace(string(output))
-		if trimmed == "" {
-			trimmed = err.Error()
-		}
-		return nil, fmt.Errorf("kubectl exec pod %s container %s failed: %s", podName, containerName, trimmed)
+		return nil, err
 	}
-	return output, nil
+	useStdin := stdin != nil
+
+	request := client.Post().
+		Namespace(strings.TrimSpace(namespace)).
+		Resource("pods").
+		Name(strings.TrimSpace(podName)).
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: strings.TrimSpace(containerName),
+			Command:   append([]string(nil), command...),
+			Stdin:     useStdin,
+			Stdout:    true,
+			Stderr:    true,
+			TTY:       false,
+		}, clientgoscheme.ParameterCodec)
+
+	executor, err := newKubeWorkspaceExecExecutor(config, request.URL())
+	if err != nil {
+		return nil, fmt.Errorf("create kubernetes exec stream for pod %s container %s: %w", podName, containerName, err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	streamOptions := remotecommand.StreamOptions{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Tty:    false,
+	}
+	if useStdin {
+		streamOptions.Stdin = bytes.NewReader(stdin)
+	}
+
+	if err := executor.StreamWithContext(ctx, streamOptions); err != nil {
+		parts := make([]string, 0, 2)
+		if text := strings.TrimSpace(stdout.String()); text != "" {
+			parts = append(parts, text)
+		}
+		if text := strings.TrimSpace(stderr.String()); text != "" {
+			parts = append(parts, text)
+		}
+		combined := strings.TrimSpace(strings.Join(parts, "\n"))
+		if combined == "" {
+			combined = err.Error()
+		}
+		return nil, fmt.Errorf("kubernetes exec pod %s container %s failed: %s", podName, containerName, combined)
+	}
+
+	return append([]byte(nil), stdout.Bytes()...), nil
+}
+
+func newKubeWorkspaceExecExecutor(config *rest.Config, requestURL *url.URL) (remotecommand.Executor, error) {
+	websocketExecutor, err := remotecommand.NewWebSocketExecutor(config, http.MethodPost, requestURL.String())
+	if err != nil {
+		return nil, fmt.Errorf("create websocket executor: %w", err)
+	}
+
+	spdyExecutor, err := remotecommand.NewSPDYExecutor(config, http.MethodPost, requestURL)
+	if err != nil {
+		return nil, fmt.Errorf("create spdy executor: %w", err)
+	}
+
+	return remotecommand.NewFallbackExecutor(websocketExecutor, spdyExecutor, func(err error) bool {
+		return httpstream.IsUpgradeFailure(err) || httpstream.IsHTTPSProxyError(err)
+	})
+}
+
+func newKubeWorkspaceExecRESTClient() (*rest.Config, rest.Interface, error) {
+	baseConfig, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: load in-cluster kubernetes config: %w", errKubeWorkspaceExecUnavailable, err)
+	}
+
+	clientConfig := rest.CopyConfig(baseConfig)
+	clientConfig.APIPath = "/api"
+	groupVersion := corev1.SchemeGroupVersion
+	clientConfig.GroupVersion = &groupVersion
+	clientConfig.NegotiatedSerializer = clientgoscheme.Codecs.WithoutConversion()
+	clientConfig.UserAgent = "fugue-api-workspace-exec"
+
+	client, err := rest.RESTClientFor(clientConfig)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: create kubernetes exec client: %w", errKubeWorkspaceExecUnavailable, err)
+	}
+	return baseConfig, client, nil
 }
 
 func (s *Server) handleGetAppFilesystemTree(w http.ResponseWriter, r *http.Request) {
@@ -485,7 +561,7 @@ func chooseFilesystemPod(pods []kubePodInfo) kubePodInfo {
 func (s *Server) runAppFilesystemCommand(ctx context.Context, target appFilesystemTarget, stdin []byte, command ...string) ([]byte, error) {
 	runner := s.workspaceExecRunner
 	if runner == nil {
-		runner = kubectlWorkspaceExecRunner{}
+		runner = kubeWorkspaceExecRunner{}
 	}
 
 	commandCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -503,8 +579,8 @@ func writeFilesystemError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.As(err, &apiErr):
 		httpx.WriteError(w, apiErr.StatusCode, apiErr.Message)
-	case errors.Is(err, exec.ErrNotFound):
-		httpx.WriteError(w, http.StatusServiceUnavailable, "kubectl is not available in the api runtime")
+	case errors.Is(err, errKubeWorkspaceExecUnavailable):
+		httpx.WriteError(w, http.StatusServiceUnavailable, "workspace access is not available in the api runtime")
 	case errors.Is(err, store.ErrNotFound):
 		httpx.WriteError(w, http.StatusNotFound, "resource not found")
 	default:

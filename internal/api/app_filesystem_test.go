@@ -258,6 +258,37 @@ func TestAppFilesystemRejectsPathsOutsideWorkspace(t *testing.T) {
 	}
 }
 
+func TestAppFilesystemExecUnavailableReturnsServiceUnavailable(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app := setupAppFilesystemTestServer(t)
+
+	pod := kubePodInfo{}
+	pod.Metadata.Name = "demo-pod"
+	pod.Metadata.CreationTimestamp = time.Now().UTC()
+	pod.Status.Phase = "Running"
+
+	server.newWorkspacePodLister = func(string) (workspacePodLister, error) {
+		return fakeWorkspacePodLister{pods: []kubePodInfo{pod}}, nil
+	}
+	server.workspaceExecRunner = &fakeWorkspaceExecRunner{
+		errs: []error{errKubeWorkspaceExecUnavailable},
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/filesystem/file?path=/workspace/file.txt", apiKey, nil)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Error string `json:"error"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Error != "workspace access is not available in the api runtime" {
+		t.Fatalf("unexpected error message %q", response.Error)
+	}
+}
+
 func setupAppFilesystemTestServer(t *testing.T) (*store.Store, *Server, string, model.App) {
 	t.Helper()
 

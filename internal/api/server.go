@@ -62,7 +62,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		newWorkspacePodLister: func(namespace string) (workspacePodLister, error) {
 			return newKubeLogsClient(namespace)
 		},
-		workspaceExecRunner: kubectlWorkspaceExecRunner{},
+		workspaceExecRunner: kubeWorkspaceExecRunner{},
 	}
 	if server.registryPullBase == "" {
 		server.registryPullBase = server.registryPushBase
