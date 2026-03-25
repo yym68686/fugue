@@ -67,7 +67,7 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 - 通过 node bootstrap + `fugue-agent` 接入外部节点
 - 异步 app 部署、扩容、迁移、停用、删除
 - `POST /v1/apps/import-github`：导入 GitHub 公共仓库，支持幂等键，以及 `auto / static-site / dockerfile / buildpacks / nixpacks` 构建策略
-- `POST /v1/apps/{id}/rebuild`：对已导入的 GitHub 项目拉取最新代码后重新构建并重部署
+- `POST /v1/apps/{id}/rebuild`：对已导入的 `github-public` app 拉取最新代码后重建，或对已导入的 `upload` app 复用已保存归档重建，并重新部署
 - `GET/PATCH /v1/apps/{id}/env`、`GET/PUT/DELETE /v1/apps/{id}/files`、`POST /v1/apps/{id}/restart`：通过排入 deploy operation 来查看和修改 app 配置
 - `GET /v1/backing-services`、`GET /v1/backing-services/{id}`、`GET /v1/apps/{id}/bindings`：查看关联服务清单与 binding env
 - `DELETE /v1/tenants/{id}`：平台管理员删除 tenant，并返回尽力清理 namespace 的结果
@@ -219,7 +219,7 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 | `GET` | `/v1/apps/{id}/files` | 任意 API 凭证 | 返回 `spec.files` 里的期望文件集合 |
 | `PUT` | `/v1/apps/{id}/files` | `app.write` 或 `app.deploy` | upsert 期望文件，并在变化时排入 deploy operation |
 | `DELETE` | `/v1/apps/{id}/files` | `app.write` 或 `app.deploy` | 通过重复 `path` 查询参数删除文件，并排入 deploy operation |
-| `POST` | `/v1/apps/{id}/rebuild` | `app.deploy` | 重新拉取 `github-public` app 的最新代码，重建并排入部署 |
+| `POST` | `/v1/apps/{id}/rebuild` | `app.deploy` | 重新拉取 `github-public` app 的最新代码，或复用 `upload` app 已保存的归档，重建并排入部署 |
 | `POST` | `/v1/apps/{id}/deploy` | `app.deploy` | 创建异步 deploy 操作 |
 | `POST` | `/v1/apps/{id}/restart` | `app.deploy` | 生成新的 restart token 并排入 deploy operation；disabled app 不能 restart |
 | `POST` | `/v1/apps/{id}/scale` | `app.scale` | 创建异步 scale 操作；`replicas` 可以是 `0` |
@@ -390,9 +390,10 @@ Idempotency-Key: import-<unique-key>
 
 当前 rebuild 行为：
 
-- 仅适用于最初由 `github-public` 来源创建的 app
-- 从保存的仓库 URL 与分支拉取最新代码
-- 递归拉取 Git submodule
+- 适用于最初由 `github-public` 或 `upload` 来源创建的 app
+- 对 `github-public`，从保存的仓库 URL 与分支拉取最新代码；可选的 `branch` 覆盖仅对这一类来源生效
+- 对 `upload`，复用保存下来的 `upload_id` 归档，并带着原有构建元数据重新排入 import
+- 对 GitHub 导入会递归拉取 Git submodule
 - 按保存下来的构建策略（`static-site`、`dockerfile`、`buildpacks` 或 `nixpacks`）重新构建镜像并推送到内置 registry
 - 保持原有 app id、project 与公网域名不变，只更新镜像与 source 元数据，然后排入 deploy 操作
 

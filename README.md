@@ -67,7 +67,7 @@ What is already usable on the deployed control plane:
 - external node attachment through node bootstrap plus `fugue-agent`
 - asynchronous app deploy, scale, migrate, disable, and delete operations
 - `POST /v1/apps/import-github` for public GitHub repositories, with optional idempotency key support and `auto / static-site / dockerfile / buildpacks / nixpacks` build strategies
-- `POST /v1/apps/{id}/rebuild` to rebuild an imported GitHub app from the latest repo state and redeploy it
+- `POST /v1/apps/{id}/rebuild` to rebuild an imported `github-public` app from the latest repo state, or an imported `upload` app from its saved archive, and redeploy it
 - `GET/PATCH /v1/apps/{id}/env`, `GET/PUT/DELETE /v1/apps/{id}/files`, and `POST /v1/apps/{id}/restart` to inspect and change app config by queuing deploy operations
 - `GET /v1/backing-services`, `GET /v1/backing-services/{id}`, and `GET /v1/apps/{id}/bindings` to inspect attached service inventory and binding env
 - `DELETE /v1/tenants/{id}` for platform-admin tenant removal with best-effort namespace cleanup reporting
@@ -219,7 +219,7 @@ Legacy compatibility: `POST /v1/agent/enroll` still accepts one-time enroll toke
 | `GET` | `/v1/apps/{id}/files` | any API credential | returns desired app files from `spec.files` |
 | `PUT` | `/v1/apps/{id}/files` | `app.write` or `app.deploy` | upserts desired files and queues a deploy operation on change |
 | `DELETE` | `/v1/apps/{id}/files` | `app.write` or `app.deploy` | deletes files named by repeated `path` query params and queues a deploy operation |
-| `POST` | `/v1/apps/{id}/rebuild` | `app.deploy` | rebuilds a `github-public` app from the latest GitHub code and queues deployment |
+| `POST` | `/v1/apps/{id}/rebuild` | `app.deploy` | rebuilds a `github-public` app from the latest GitHub code or an `upload` app from its saved archive, then queues deployment |
 | `POST` | `/v1/apps/{id}/deploy` | `app.deploy` | creates async deploy operation |
 | `POST` | `/v1/apps/{id}/restart` | `app.deploy` | queues a deploy operation with a fresh restart token; disabled apps cannot be restarted |
 | `POST` | `/v1/apps/{id}/scale` | `app.scale` | creates async scale operation; `replicas` may be `0` |
@@ -390,9 +390,10 @@ Optional override:
 
 Rebuild behavior:
 
-- only works for apps originally created from `github-public` source
-- pulls the latest code from the saved repository URL and branch
-- clones Git submodules recursively
+- works for apps originally created from `github-public` or `upload` source
+- for `github-public`, pulls the latest code from the saved repository URL and branch; the optional `branch` override only applies to this source type
+- for `upload`, reuses the saved `upload_id` archive and re-queues import with the saved build metadata
+- clones Git submodules recursively for GitHub imports
 - rebuilds with the saved build strategy (`static-site`, `dockerfile`, `buildpacks`, or `nixpacks`) and pushes a new image into the internal registry
 - keeps the same app id, project, and public hostname, then queues a deploy operation with the new image
 

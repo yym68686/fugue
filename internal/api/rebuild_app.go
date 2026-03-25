@@ -8,6 +8,13 @@ import (
 	"fugue/internal/model"
 )
 
+type rebuildAppRequest struct {
+	Branch          *string `json:"branch"`
+	SourceDir       *string `json:"source_dir"`
+	DockerfilePath  *string `json:"dockerfile_path"`
+	BuildContextDir *string `json:"build_context_dir"`
+}
+
 func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	if !principal.IsPlatformAdmin() && !principal.HasScope("app.deploy") {
@@ -23,21 +30,8 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "app does not have an import source")
 		return
 	}
-	if app.Source.Type != model.AppSourceTypeGitHubPublic {
-		httpx.WriteError(w, http.StatusBadRequest, "only github-public apps can be rebuilt")
-		return
-	}
-	if strings.TrimSpace(app.Source.RepoURL) == "" {
-		httpx.WriteError(w, http.StatusBadRequest, "app source repo_url is missing")
-		return
-	}
 
-	var req struct {
-		Branch          *string `json:"branch"`
-		SourceDir       *string `json:"source_dir"`
-		DockerfilePath  *string `json:"dockerfile_path"`
-		BuildContextDir *string `json:"build_context_dir"`
-	}
+	var req rebuildAppRequest
 	if r.ContentLength != 0 {
 		if err := httpx.DecodeJSON(r, &req); err != nil {
 			httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -82,18 +76,60 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	source, err := buildQueuedGitHubSource(
-		app.Source.RepoURL,
-		branch,
-		sourceDir,
-		dockerfilePath,
-		buildContextDir,
-		buildStrategy,
-		strings.TrimSpace(app.Source.ImageNameSuffix),
-		strings.TrimSpace(app.Source.ComposeService),
+	var (
+		source model.AppSource
+		err    error
 	)
-	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+	switch strings.TrimSpace(app.Source.Type) {
+	case model.AppSourceTypeGitHubPublic:
+		if strings.TrimSpace(app.Source.RepoURL) == "" {
+			httpx.WriteError(w, http.StatusBadRequest, "app source repo_url is missing")
+			return
+		}
+		source, err = buildQueuedGitHubSource(
+			app.Source.RepoURL,
+			branch,
+			sourceDir,
+			dockerfilePath,
+			buildContextDir,
+			buildStrategy,
+			strings.TrimSpace(app.Source.ImageNameSuffix),
+			strings.TrimSpace(app.Source.ComposeService),
+		)
+		if err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	case model.AppSourceTypeUpload:
+		uploadID := strings.TrimSpace(app.Source.UploadID)
+		if uploadID == "" {
+			httpx.WriteError(w, http.StatusBadRequest, "app source upload_id is missing")
+			return
+		}
+		upload, err := s.store.GetSourceUpload(uploadID)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		if upload.TenantID != app.TenantID {
+			httpx.WriteError(w, http.StatusBadRequest, "app source upload is not visible to this tenant")
+			return
+		}
+		source, err = buildQueuedUploadSource(
+			upload,
+			sourceDir,
+			dockerfilePath,
+			buildContextDir,
+			buildStrategy,
+			strings.TrimSpace(app.Source.ImageNameSuffix),
+			strings.TrimSpace(app.Source.ComposeService),
+		)
+		if err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	default:
+		httpx.WriteError(w, http.StatusBadRequest, "only github-public or upload apps can be rebuilt")
 		return
 	}
 
@@ -119,16 +155,27 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.appendAudit(principal, "app.rebuild", "operation", op.ID, app.TenantID, map[string]string{
+	auditMetadata := map[string]string{
 		"app_id":         app.ID,
-		"repo_url":       source.RepoURL,
-		"repo_branch":    source.RepoBranch,
+		"source_type":    source.Type,
 		"build_strategy": source.BuildStrategy,
-	})
+	}
+	if strings.TrimSpace(source.RepoURL) != "" {
+		auditMetadata["repo_url"] = source.RepoURL
+	}
+	if strings.TrimSpace(source.RepoBranch) != "" {
+		auditMetadata["repo_branch"] = source.RepoBranch
+	}
+	if strings.TrimSpace(source.UploadID) != "" {
+		auditMetadata["upload_id"] = source.UploadID
+	}
+	s.appendAudit(principal, "app.rebuild", "operation", op.ID, app.TenantID, auditMetadata)
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
 		"operation": sanitizeOperationForAPI(op),
 		"build": map[string]any{
+			"source_type":       source.Type,
 			"branch":            source.RepoBranch,
+			"upload_id":         source.UploadID,
 			"source_dir":        source.SourceDir,
 			"dockerfile_path":   source.DockerfilePath,
 			"build_context_dir": source.BuildContextDir,
