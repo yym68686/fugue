@@ -49,3 +49,29 @@ func TestHashImportGitHubRequestChangesWhenRequestChanges(t *testing.T) {
 		t.Fatal("expected different hashes for different requests")
 	}
 }
+
+func TestHashImportGitHubRequestChangesWhenEnvChanges(t *testing.T) {
+	req := importGitHubRequest{
+		ProjectID: "project_1",
+		RepoURL:   "https://github.com/example/demo",
+		Branch:    "main",
+		Name:      "demo",
+		Env: map[string]string{
+			"OPENAI_API_KEY": "sk-demo",
+		},
+	}
+	hashA, err := hashImportGitHubRequest("tenant_1", req, "runtime_managed_shared", 1)
+	if err != nil {
+		t.Fatalf("hash request a: %v", err)
+	}
+
+	req.Env["OPENAI_API_KEY"] = "sk-updated"
+	hashB, err := hashImportGitHubRequest("tenant_1", req, "runtime_managed_shared", 1)
+	if err != nil {
+		t.Fatalf("hash request b: %v", err)
+	}
+
+	if hashA == hashB {
+		t.Fatal("expected different hashes when env changes")
+	}
+}

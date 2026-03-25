@@ -29,6 +29,9 @@ type DeployOptions struct {
 	ProjectName     string
 	Description     string
 	BuildStrategy   string
+	RepoURL         string
+	Branch          string
+	EnvFile         string
 	SourceDir       string
 	DockerfilePath  string
 	BuildContextDir string
@@ -57,6 +60,10 @@ func Run(args []string) error {
 }
 
 func runDeploy(args []string) error {
+	return runDeployWithStreams(args, os.Stdout, os.Stderr)
+}
+
+func runDeployWithStreams(args []string, stdout, stderr io.Writer) error {
 	workingDir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get working directory: %w", err)
@@ -75,7 +82,7 @@ func runDeploy(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("deploy", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
+	fs.SetOutput(stderr)
 	fs.Usage = func() {
 		printDeployUsage(fs.Output())
 	}
@@ -90,6 +97,9 @@ func runDeploy(args []string) error {
 	fs.StringVar(&opts.ProjectName, "project", opts.ProjectName, "target project name")
 	fs.StringVar(&opts.Description, "description", "", "app description when creating a new app")
 	fs.StringVar(&opts.BuildStrategy, "build-strategy", opts.BuildStrategy, "build strategy: auto, static-site, dockerfile, buildpacks, nixpacks")
+	fs.StringVar(&opts.RepoURL, "repo-url", "", "public GitHub repository URL to import instead of uploading local source")
+	fs.StringVar(&opts.Branch, "branch", "", "Git branch for --repo-url imports")
+	fs.StringVar(&opts.EnvFile, "env-file", "", "local .env file to inject as app env")
 	fs.StringVar(&opts.SourceDir, "source-dir", "", "source directory relative to project root")
 	fs.StringVar(&opts.DockerfilePath, "dockerfile-path", "", "Dockerfile path relative to project root")
 	fs.StringVar(&opts.BuildContextDir, "build-context-dir", "", "build context directory relative to project root")
@@ -105,7 +115,7 @@ func runDeploy(args []string) error {
 	}
 
 	if opts.AppName == "" {
-		opts.AppName = model.Slugify(filepath.Base(strings.TrimSpace(opts.WorkingDir)))
+		opts.AppName = defaultDeployAppName(opts.WorkingDir, opts.RepoURL)
 	}
 	if opts.AppName == "" {
 		opts.AppName = "app"
@@ -114,6 +124,10 @@ func runDeploy(args []string) error {
 	client, err := NewClient(opts.BaseURL, opts.Token)
 	if err != nil {
 		return err
+	}
+
+	if strings.TrimSpace(opts.RepoURL) != "" && strings.TrimSpace(opts.AppID) != "" {
+		return fmt.Errorf("--app-id cannot be used with --repo-url")
 	}
 
 	resolvedTenantID := ""
@@ -131,46 +145,87 @@ func runDeploy(args []string) error {
 		}
 	}
 
-	resolvedAppID, err := resolveAppSelection(client, opts.AppID, opts.AppName, resolvedProjectID, resolvedTenantID)
+	envVars, envPath, err := loadDeploymentEnv(opts.WorkingDir, opts.EnvFile, strings.TrimSpace(opts.RepoURL) != "")
 	if err != nil {
 		return err
 	}
-
-	archiveBytes, archiveName, err := createSourceArchive(opts.WorkingDir, opts.AppName)
-	if err != nil {
-		return err
+	if envPath != "" {
+		fmt.Fprintf(stderr, "Loaded %d env vars from %s\n", len(envVars), envPath)
 	}
 
-	request := importUploadRequest{
-		AppID:           resolvedAppID,
-		TenantID:        resolvedTenantID,
-		SourceDir:       strings.TrimSpace(opts.SourceDir),
-		Name:            opts.AppName,
-		Description:     strings.TrimSpace(opts.Description),
-		BuildStrategy:   strings.TrimSpace(opts.BuildStrategy),
-		RuntimeID:       strings.TrimSpace(opts.RuntimeID),
-		Replicas:        opts.Replicas,
-		ServicePort:     opts.ServicePort,
-		DockerfilePath:  strings.TrimSpace(opts.DockerfilePath),
-		BuildContextDir: strings.TrimSpace(opts.BuildContextDir),
-	}
-	if resolvedAppID == "" {
+	var (
+		app model.App
+		op  model.Operation
+	)
+	if strings.TrimSpace(opts.RepoURL) != "" {
+		request := importGitHubRequest{
+			TenantID:        resolvedTenantID,
+			SourceDir:       strings.TrimSpace(opts.SourceDir),
+			RepoURL:         strings.TrimSpace(opts.RepoURL),
+			Branch:          strings.TrimSpace(opts.Branch),
+			Name:            opts.AppName,
+			Description:     strings.TrimSpace(opts.Description),
+			BuildStrategy:   strings.TrimSpace(opts.BuildStrategy),
+			RuntimeID:       strings.TrimSpace(opts.RuntimeID),
+			Replicas:        opts.Replicas,
+			ServicePort:     opts.ServicePort,
+			DockerfilePath:  strings.TrimSpace(opts.DockerfilePath),
+			BuildContextDir: strings.TrimSpace(opts.BuildContextDir),
+			Env:             envVars,
+		}
 		if resolvedProjectID != "" {
 			request.ProjectID = resolvedProjectID
 		} else if createProjectRequest != nil {
 			request.Project = createProjectRequest
 		}
-	}
+		fmt.Fprintf(stderr, "Importing %s\n", request.RepoURL)
+		app, op, err = client.ImportGitHub(request)
+		if err != nil {
+			return err
+		}
+	} else {
+		resolvedAppID, err := resolveAppSelection(client, opts.AppID, opts.AppName, resolvedProjectID, resolvedTenantID)
+		if err != nil {
+			return err
+		}
 
-	fmt.Fprintf(os.Stderr, "Uploading %s (%d bytes)\n", archiveName, len(archiveBytes))
-	app, op, err := client.ImportUpload(request, archiveName, archiveBytes)
-	if err != nil {
-		return err
+		archiveBytes, archiveName, err := createSourceArchive(opts.WorkingDir, opts.AppName)
+		if err != nil {
+			return err
+		}
+
+		request := importUploadRequest{
+			AppID:           resolvedAppID,
+			TenantID:        resolvedTenantID,
+			SourceDir:       strings.TrimSpace(opts.SourceDir),
+			Name:            opts.AppName,
+			Description:     strings.TrimSpace(opts.Description),
+			BuildStrategy:   strings.TrimSpace(opts.BuildStrategy),
+			RuntimeID:       strings.TrimSpace(opts.RuntimeID),
+			Replicas:        opts.Replicas,
+			ServicePort:     opts.ServicePort,
+			DockerfilePath:  strings.TrimSpace(opts.DockerfilePath),
+			BuildContextDir: strings.TrimSpace(opts.BuildContextDir),
+			Env:             envVars,
+		}
+		if resolvedAppID == "" {
+			if resolvedProjectID != "" {
+				request.ProjectID = resolvedProjectID
+			} else if createProjectRequest != nil {
+				request.Project = createProjectRequest
+			}
+		}
+
+		fmt.Fprintf(stderr, "Uploading %s (%d bytes)\n", archiveName, len(archiveBytes))
+		app, op, err = client.ImportUpload(request, archiveName, archiveBytes)
+		if err != nil {
+			return err
+		}
 	}
-	fmt.Fprintf(os.Stderr, "Queued operation %s for app %s\n", op.ID, app.ID)
+	fmt.Fprintf(stderr, "Queued operation %s for app %s\n", op.ID, app.ID)
 
 	if !opts.Wait {
-		fmt.Printf("app_id=%s\noperation_id=%s\n", app.ID, op.ID)
+		fmt.Fprintf(stdout, "app_id=%s\noperation_id=%s\n", app.ID, op.ID)
 		return nil
 	}
 
@@ -182,7 +237,7 @@ func runDeploy(args []string) error {
 		}
 		status := strings.TrimSpace(currentOp.Status)
 		if status != lastStatus {
-			fmt.Fprintf(os.Stderr, "operation_status=%s\n", status)
+			fmt.Fprintf(stderr, "operation_status=%s\n", status)
 			lastStatus = status
 		}
 		switch status {
@@ -192,9 +247,9 @@ func runDeploy(args []string) error {
 				return err
 			}
 			if finalApp.Route != nil && strings.TrimSpace(finalApp.Route.PublicURL) != "" {
-				fmt.Printf("app_id=%s\nurl=%s\n", finalApp.ID, finalApp.Route.PublicURL)
+				fmt.Fprintf(stdout, "app_id=%s\nurl=%s\n", finalApp.ID, finalApp.Route.PublicURL)
 			} else {
-				fmt.Printf("app_id=%s\n", finalApp.ID)
+				fmt.Fprintf(stdout, "app_id=%s\n", finalApp.ID)
 			}
 			return nil
 		case model.OperationStatusFailed:
@@ -415,6 +470,25 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func defaultDeployAppName(workingDir, repoURL string) string {
+	if repoName := repoURLAppName(repoURL); repoName != "" {
+		return repoName
+	}
+	return model.Slugify(filepath.Base(strings.TrimSpace(workingDir)))
+}
+
+func repoURLAppName(repoURL string) string {
+	repoURL = strings.TrimSpace(strings.TrimSuffix(repoURL, ".git"))
+	if repoURL == "" {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(repoURL, "/"), "/")
+	if len(parts) == 0 {
+		return ""
+	}
+	return model.Slugify(parts[len(parts)-1])
+}
+
 func printTopLevelUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "Usage: fugue deploy [flags]")
 }
@@ -428,6 +502,7 @@ func printDeployUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Common examples:")
 	_, _ = fmt.Fprintln(w, "  fugue deploy --name cerebr")
+	_, _ = fmt.Fprintln(w, "  fugue deploy --repo-url https://github.com/example/cerebr --branch main")
 	_, _ = fmt.Fprintln(w, "  fugue deploy --tenant my-tenant --project default --name cerebr")
 	_, _ = fmt.Fprintln(w, "  fugue deploy --app-id <app-id>")
 	_, _ = fmt.Fprintln(w)
@@ -435,7 +510,7 @@ func printDeployUsage(w io.Writer) {
 	fs := []string{
 		"  --base-url string           Fugue API base URL",
 		"  --token string              Fugue API token",
-		"  --dir string                project directory to deploy",
+		"  --dir string                project directory to upload or use as the env-file base directory",
 		"  --tenant-id string          target tenant ID",
 		"  --tenant string             target tenant name or slug",
 		"  --project-id string         target project ID",
@@ -443,6 +518,9 @@ func printDeployUsage(w io.Writer) {
 		"  --app-id string             existing app ID to redeploy",
 		"  --name string               app name",
 		"  --build-strategy string     auto, static-site, dockerfile, buildpacks, nixpacks",
+		"  --repo-url string           public GitHub repository URL to import",
+		"  --branch string             Git branch for --repo-url imports",
+		"  --env-file string           local .env file to inject as app env (defaults to <dir>/.env for --repo-url)",
 		"  --source-dir string         source directory relative to project root",
 		"  --dockerfile-path string    Dockerfile path relative to project root",
 		"  --build-context-dir string  build context directory relative to project root",

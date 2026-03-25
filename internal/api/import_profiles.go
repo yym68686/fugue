@@ -58,12 +58,9 @@ func (s *Server) buildImportedAppSpec(buildStrategy, appName, imageRef, runtimeI
 		}
 	}
 
-	env := make(map[string]string, len(suggestedEnv))
-	for key, value := range suggestedEnv {
-		env[key] = value
-	}
-	if len(env) == 0 {
-		env = nil
+	env, err := normalizeImportedEnv(suggestedEnv)
+	if err != nil {
+		return model.AppSpec{}, err
 	}
 	var ports []int
 	if servicePort > 0 {
@@ -90,6 +87,41 @@ func (s *Server) buildImportedAppSpec(buildStrategy, appName, imageRef, runtimeI
 		Files:     appFiles,
 		Postgres:  normalizedPostgres,
 	}, nil
+}
+
+func normalizeImportedEnv(in map[string]string) (map[string]string, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(in))
+	for rawKey, value := range in {
+		key := strings.TrimSpace(rawKey)
+		if key == "" {
+			return nil, fmt.Errorf("env contains empty key")
+		}
+		if _, exists := out[key]; exists {
+			return nil, fmt.Errorf("duplicate env key %s", key)
+		}
+		out[key] = value
+	}
+	return out, nil
+}
+
+func mergeImportedEnv(base, override map[string]string) map[string]string {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+	out := cloneStringMap(base)
+	if out == nil {
+		out = map[string]string{}
+	}
+	for key, value := range override {
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func normalizeAppFiles(configContent string, files []model.AppFile) ([]model.AppFile, error) {

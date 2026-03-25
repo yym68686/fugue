@@ -33,6 +33,7 @@ type importGitHubRequest struct {
 	ServicePort     int                    `json:"service_port"`
 	DockerfilePath  string                 `json:"dockerfile_path"`
 	BuildContextDir string                 `json:"build_context_dir"`
+	Env             map[string]string      `json:"env"`
 	ConfigContent   string                 `json:"config_content"`
 	Files           []model.AppFile        `json:"files"`
 	Postgres        *model.AppPostgresSpec `json:"postgres"`
@@ -71,6 +72,7 @@ func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID
 		ServicePort     int                    `json:"service_port"`
 		DockerfilePath  string                 `json:"dockerfile_path"`
 		BuildContextDir string                 `json:"build_context_dir"`
+		Env             map[string]string      `json:"env"`
 		ConfigContent   string                 `json:"config_content"`
 		Files           []model.AppFile        `json:"files"`
 		Postgres        *model.AppPostgresSpec `json:"postgres"`
@@ -89,6 +91,7 @@ func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID
 		ServicePort:     req.ServicePort,
 		DockerfilePath:  strings.TrimSpace(req.DockerfilePath),
 		BuildContextDir: strings.TrimSpace(req.BuildContextDir),
+		Env:             req.Env,
 		ConfigContent:   strings.TrimSpace(req.ConfigContent),
 		Files:           req.Files,
 		Postgres:        req.Postgres,

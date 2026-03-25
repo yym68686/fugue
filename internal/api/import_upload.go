@@ -35,6 +35,7 @@ type importUploadRequest struct {
 	ServicePort     int                    `json:"service_port"`
 	DockerfilePath  string                 `json:"dockerfile_path"`
 	BuildContextDir string                 `json:"build_context_dir"`
+	Env             map[string]string      `json:"env"`
 	ConfigContent   string                 `json:"config_content"`
 	Files           []model.AppFile        `json:"files"`
 	Postgres        *model.AppPostgresSpec `json:"postgres"`
@@ -106,6 +107,14 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.ServicePort > 0 {
 			spec.Ports = []int{req.ServicePort}
+		}
+		if req.Env != nil {
+			env, err := normalizeImportedEnv(req.Env)
+			if err != nil {
+				httpx.WriteError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			spec.Env = env
 		}
 
 		op, err := s.store.CreateOperation(model.Operation{
@@ -189,7 +198,7 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 		if runtimeID == "" {
 			runtimeID = "runtime_managed_shared"
 		}
-		spec, err := s.buildImportedAppSpec(source.BuildStrategy, candidateName, "", runtimeID, req.Replicas, effectiveImportServicePort(req.ServicePort, 0), req.ConfigContent, req.Files, req.Postgres, nil)
+		spec, err := s.buildImportedAppSpec(source.BuildStrategy, candidateName, "", runtimeID, req.Replicas, effectiveImportServicePort(req.ServicePort, 0), req.ConfigContent, req.Files, req.Postgres, req.Env)
 		if err != nil {
 			httpx.WriteError(w, http.StatusBadRequest, err.Error())
 			return

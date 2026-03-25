@@ -40,6 +40,25 @@ type importUploadRequest struct {
 	ServicePort     int                         `json:"service_port,omitempty"`
 	DockerfilePath  string                      `json:"dockerfile_path,omitempty"`
 	BuildContextDir string                      `json:"build_context_dir,omitempty"`
+	Env             map[string]string           `json:"env,omitempty"`
+}
+
+type importGitHubRequest struct {
+	TenantID        string                      `json:"tenant_id,omitempty"`
+	ProjectID       string                      `json:"project_id,omitempty"`
+	Project         *importUploadProjectRequest `json:"project,omitempty"`
+	RepoURL         string                      `json:"repo_url,omitempty"`
+	Branch          string                      `json:"branch,omitempty"`
+	SourceDir       string                      `json:"source_dir,omitempty"`
+	Name            string                      `json:"name,omitempty"`
+	Description     string                      `json:"description,omitempty"`
+	BuildStrategy   string                      `json:"build_strategy,omitempty"`
+	RuntimeID       string                      `json:"runtime_id,omitempty"`
+	Replicas        int                         `json:"replicas,omitempty"`
+	ServicePort     int                         `json:"service_port,omitempty"`
+	DockerfilePath  string                      `json:"dockerfile_path,omitempty"`
+	BuildContextDir string                      `json:"build_context_dir,omitempty"`
+	Env             map[string]string           `json:"env,omitempty"`
 }
 
 type apiError struct {
@@ -140,6 +159,17 @@ func (c *Client) ImportUpload(req importUploadRequest, archiveName string, archi
 	}
 	if err := json.Unmarshal(payload, &response); err != nil {
 		return model.App{}, model.Operation{}, fmt.Errorf("decode import upload response: %w", err)
+	}
+	return response.App, response.Operation, nil
+}
+
+func (c *Client) ImportGitHub(req importGitHubRequest) (model.App, model.Operation, error) {
+	var response struct {
+		App       model.App       `json:"app"`
+		Operation model.Operation `json:"operation"`
+	}
+	if err := c.doJSON(http.MethodPost, "/v1/apps/import-github", req, &response); err != nil {
+		return model.App{}, model.Operation{}, err
 	}
 	return response.App, response.Operation, nil
 }

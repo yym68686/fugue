@@ -88,6 +88,7 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 			postgres = &specCopy
 			suggestedEnv = applyManagedPostgresEnvironment(suggestedEnv, specCopy)
 		}
+		suggestedEnv = mergeImportedEnv(suggestedEnv, req.Env)
 
 		spec, err := s.buildImportedAppSpec(
 			service.BuildStrategy,
