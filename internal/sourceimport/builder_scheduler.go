@@ -410,8 +410,8 @@ func (s *builderScheduler) tryAcquireNodeLock(ctx context.Context, nodeName, hol
 	}
 	lock.Spec.HolderIdentity = holder
 	lock.Spec.LeaseDurationSeconds = int(builderNodeLockLeaseDuration.Seconds())
-	lock.Spec.AcquireTime = now.UTC().Format(time.RFC3339Nano)
-	lock.Spec.RenewTime = now.UTC().Format(time.RFC3339Nano)
+	lock.Spec.AcquireTime = formatKubeTimestamp(now)
+	lock.Spec.RenewTime = formatKubeTimestamp(now)
 	if lock.Metadata.Labels == nil {
 		lock.Metadata.Labels = map[string]string{}
 	}
@@ -452,8 +452,8 @@ func (s *builderScheduler) upsertReservation(ctx context.Context, reservationNam
 	}
 	lease.Spec.HolderIdentity = reservationName
 	lease.Spec.LeaseDurationSeconds = int(s.reservationLeaseDuration.Seconds())
-	lease.Spec.AcquireTime = now.UTC().Format(time.RFC3339Nano)
-	lease.Spec.RenewTime = now.UTC().Format(time.RFC3339Nano)
+	lease.Spec.AcquireTime = formatKubeTimestamp(now)
+	lease.Spec.RenewTime = formatKubeTimestamp(now)
 	if lease.Metadata.Labels == nil {
 		lease.Metadata.Labels = map[string]string{}
 	}
@@ -792,8 +792,8 @@ func newBuilderLease(name, component, holder string, duration time.Duration, ann
 	}
 	lease.Spec.HolderIdentity = holder
 	lease.Spec.LeaseDurationSeconds = int(duration.Seconds())
-	lease.Spec.AcquireTime = now.UTC().Format(time.RFC3339Nano)
-	lease.Spec.RenewTime = now.UTC().Format(time.RFC3339Nano)
+	lease.Spec.AcquireTime = formatKubeTimestamp(now)
+	lease.Spec.RenewTime = formatKubeTimestamp(now)
 	return lease
 }
 
@@ -813,14 +813,30 @@ func builderLeaseExpiry(lease builderKubeLease, now time.Time) (time.Time, bool)
 	if renewedAt == "" || lease.Spec.LeaseDurationSeconds <= 0 {
 		return time.Time{}, false
 	}
-	parsed, err := time.Parse(time.RFC3339Nano, renewedAt)
-	if err != nil {
-		parsed, err = time.Parse(time.RFC3339, renewedAt)
-		if err != nil {
-			return time.Time{}, false
-		}
+	parsed := parseKubeTimestamp(renewedAt)
+	if parsed.IsZero() {
+		return time.Time{}, false
 	}
 	return parsed.Add(time.Duration(lease.Spec.LeaseDurationSeconds) * time.Second), true
+}
+
+func parseKubeTimestamp(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed.UTC()
+}
+
+func formatKubeTimestamp(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format("2006-01-02T15:04:05.000000Z07:00")
 }
 
 func builderIsConflictError(err error) bool {
