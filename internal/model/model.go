@@ -11,6 +11,7 @@ const (
 	MachineConnectionModeCluster = "cluster"
 
 	AppSourceTypeGitHubPublic = "github-public"
+	AppSourceTypeUpload       = "upload"
 
 	AppBuildStrategyAuto       = "auto"
 	AppBuildStrategyStaticSite = "static-site"
@@ -174,6 +175,10 @@ type AppSource struct {
 	Type             string `json:"type"`
 	RepoURL          string `json:"repo_url,omitempty"`
 	RepoBranch       string `json:"repo_branch,omitempty"`
+	UploadID         string `json:"upload_id,omitempty"`
+	UploadFilename   string `json:"upload_filename,omitempty"`
+	ArchiveSHA256    string `json:"archive_sha256,omitempty"`
+	ArchiveSizeBytes int64  `json:"archive_size_bytes,omitempty"`
 	SourceDir        string `json:"source_dir,omitempty"`
 	BuildStrategy    string `json:"build_strategy,omitempty"`
 	CommitSHA        string `json:"commit_sha,omitempty"`
@@ -293,6 +298,18 @@ type IdempotencyRecord struct {
 	OperationID string    `json:"operation_id,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type SourceUpload struct {
+	ID            string    `json:"id"`
+	TenantID      string    `json:"tenant_id"`
+	Filename      string    `json:"filename,omitempty"`
+	ContentType   string    `json:"content_type,omitempty"`
+	SHA256        string    `json:"sha256"`
+	SizeBytes     int64     `json:"size_bytes"`
+	DownloadToken string    `json:"-"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 type Operation struct {

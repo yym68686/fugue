@@ -356,7 +356,11 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) resolveImportProject(tenantID string, req importGitHubRequest) (model.Project, bool, error) {
-	projectID := strings.TrimSpace(req.ProjectID)
+	return s.resolveImportProjectFields(tenantID, req.ProjectID, req.Project)
+}
+
+func (s *Server) resolveImportProjectFields(tenantID, projectID string, project *importProjectRequest) (model.Project, bool, error) {
+	projectID = strings.TrimSpace(projectID)
 	switch {
 	case projectID != "":
 		project, err := s.store.GetProject(projectID)
@@ -367,8 +371,8 @@ func (s *Server) resolveImportProject(tenantID string, req importGitHubRequest) 
 			return model.Project{}, false, store.ErrNotFound
 		}
 		return project, false, nil
-	case req.Project != nil:
-		project, err := s.store.CreateProject(tenantID, req.Project.Name, req.Project.Description)
+	case project != nil:
+		project, err := s.store.CreateProject(tenantID, project.Name, project.Description)
 		return project, err == nil, err
 	default:
 		return s.store.EnsureDefaultProjectWithStatus(tenantID)

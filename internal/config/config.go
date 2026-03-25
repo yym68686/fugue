@@ -33,6 +33,7 @@ type ControllerConfig struct {
 	DatabaseURL                   string
 	RegistryPushBase              string
 	RegistryPullBase              string
+	SourceUploadBaseURL           string
 	ImportWorkDir                 string
 	PollInterval                  time.Duration
 	FallbackPollInterval          time.Duration
@@ -104,6 +105,7 @@ func ControllerFromEnv() ControllerConfig {
 		DatabaseURL:                   getenv("FUGUE_DATABASE_URL", ""),
 		RegistryPushBase:              getenv("FUGUE_REGISTRY_PUSH_BASE", "127.0.0.1:30500"),
 		RegistryPullBase:              strings.TrimSpace(os.Getenv("FUGUE_REGISTRY_PULL_BASE")),
+		SourceUploadBaseURL:           getenv("FUGUE_SOURCE_UPLOAD_BASE_URL", "http://127.0.0.1:8080"),
 		ImportWorkDir:                 getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
 		PollInterval:                  getenvDuration("FUGUE_CONTROLLER_POLL_INTERVAL", 5*time.Second),
 		FallbackPollInterval:          getenvDuration("FUGUE_CONTROLLER_FALLBACK_POLL_INTERVAL", 30*time.Second),

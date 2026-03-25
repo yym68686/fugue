@@ -109,6 +109,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/apps", s.auth.RequireAPI(http.HandlerFunc(s.handleListApps)))
 	mux.Handle("POST /v1/apps", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateApp)))
 	mux.Handle("POST /v1/apps/import-github", s.auth.RequireAPI(http.HandlerFunc(s.handleImportGitHubApp)))
+	mux.Handle("POST /v1/apps/import-upload", s.auth.RequireAPI(http.HandlerFunc(s.handleImportUploadApp)))
 	mux.Handle("GET /v1/apps/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetApp)))
 	mux.Handle("GET /v1/apps/{id}/bindings", s.auth.RequireAPI(http.HandlerFunc(s.handleListAppBindings)))
 	mux.Handle("POST /v1/apps/{id}/bindings", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateAppBinding)))
@@ -134,6 +135,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/audit-events", s.auth.RequireAPI(http.HandlerFunc(s.handleListAuditEvents)))
 
 	mux.HandleFunc("GET /install/join-cluster.sh", s.handleJoinClusterInstallScript)
+	mux.HandleFunc("GET /v1/source-uploads/{id}/archive", s.handleGetSourceUploadArchive)
 	mux.HandleFunc("POST /v1/agent/enroll", s.handleAgentEnroll)
 	mux.HandleFunc("POST /v1/nodes/bootstrap", s.handleBootstrapNode)
 	mux.HandleFunc("POST /v1/nodes/join-cluster", s.handleJoinClusterNode)

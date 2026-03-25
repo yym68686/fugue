@@ -654,6 +654,7 @@ export FUGUE_NODE_KEY="<node-key-secret>"
 ## Repository layout
 
 ```text
+cmd/fugue
 cmd/fugue-api
 cmd/fugue-controller
 cmd/fugue-agent
@@ -673,6 +674,15 @@ docs/deploy.md
 make test
 make build
 ```
+
+Build only the CLI:
+
+```bash
+make build-cli
+./bin/fugue deploy --help
+```
+
+The `build-cli` GitHub Actions workflow now compiles `fugue` binaries for Linux and macOS whenever matching changes are pushed to `main`.
 
 Run the API and controller in separate terminals:
 
@@ -702,6 +712,16 @@ For a deployed control plane:
 export FUGUE_BASE_URL="https://<your-fugue-api-domain>"
 export FUGUE_BOOTSTRAP_KEY="<your-bootstrap-admin-key>"
 ```
+
+Deploy the current directory with the CLI:
+
+```bash
+export FUGUE_BASE_URL="https://<your-fugue-api-domain>"
+export FUGUE_TOKEN="<tenant-api-key-or-bootstrap-key>"
+./bin/fugue deploy --name cerebr --project default
+```
+
+If you use the bootstrap admin key and multiple tenants are visible, also pass `--tenant` or `--tenant-id`.
 
 Create a tenant, mint a tenant admin key, create a project, import the first GitHub app, and wait for deployment:
 

@@ -192,6 +192,8 @@ func buildAppTechStack(app model.App) []model.AppTechnology {
 		switch strings.TrimSpace(strings.ToLower(app.Source.Type)) {
 		case model.AppSourceTypeGitHubPublic:
 			add("source", "github", "GitHub", "declared")
+		case model.AppSourceTypeUpload:
+			add("source", "upload", "Upload", "declared")
 		}
 
 		switch strings.TrimSpace(strings.ToLower(app.Source.BuildStrategy)) {

@@ -1634,7 +1634,7 @@ func (s *Store) pgCreateApp(tenantID, projectID, name, description string, spec 
 	}
 
 	now := time.Now().UTC()
-	allowPendingImport := source != nil && strings.TrimSpace(source.Type) == model.AppSourceTypeGitHubPublic && strings.TrimSpace(spec.Image) == ""
+	allowPendingImport := source != nil && isQueuedImportSourceType(source.Type) && strings.TrimSpace(spec.Image) == ""
 	phase := "created"
 	if allowPendingImport {
 		phase = "importing"
@@ -1903,7 +1903,7 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 		if op.DesiredSpec == nil || op.DesiredSource == nil {
 			return model.Operation{}, ErrInvalidInput
 		}
-		if strings.TrimSpace(op.DesiredSource.Type) != model.AppSourceTypeGitHubPublic {
+		if !isQueuedImportSourceType(op.DesiredSource.Type) {
 			return model.Operation{}, ErrInvalidInput
 		}
 		visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, op.DesiredSpec.RuntimeID, op.TenantID)

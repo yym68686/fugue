@@ -654,6 +654,7 @@ export FUGUE_NODE_KEY="<node-key-secret>"
 ## 仓库结构
 
 ```text
+cmd/fugue
 cmd/fugue-api
 cmd/fugue-controller
 cmd/fugue-agent
@@ -673,6 +674,15 @@ docs/deploy.md
 make test
 make build
 ```
+
+只编译 CLI：
+
+```bash
+make build-cli
+./bin/fugue deploy --help
+```
+
+现在 push 到 `main` 后，`build-cli` GitHub Actions workflow 也会自动编译 Linux 和 macOS 的 `fugue` CLI 二进制 artifact。
 
 分别在两个终端启动 API 与 controller：
 
@@ -702,6 +712,16 @@ export FUGUE_BOOTSTRAP_KEY="fugue_bootstrap_admin_local"
 export FUGUE_BASE_URL="https://<your-fugue-api-domain>"
 export FUGUE_BOOTSTRAP_KEY="<your-bootstrap-admin-key>"
 ```
+
+用 CLI 直接部署当前目录：
+
+```bash
+export FUGUE_BASE_URL="https://<your-fugue-api-domain>"
+export FUGUE_TOKEN="<tenant-api-key-or-bootstrap-key>"
+./bin/fugue deploy --name cerebr --project default
+```
+
+如果你使用的是 bootstrap admin key，而且当前可见多个 tenant，还需要额外传 `--tenant` 或 `--tenant-id`。
 
 完整流程：
 

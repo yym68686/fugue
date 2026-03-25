@@ -1337,7 +1337,7 @@ func (s *Store) PurgeApp(id string) (model.App, error) {
 
 func (s *Store) createApp(tenantID, projectID, name, description string, spec model.AppSpec, source *model.AppSource, route *model.AppRoute) (model.App, error) {
 	name = strings.TrimSpace(name)
-	allowPendingImport := source != nil && strings.TrimSpace(source.Type) == model.AppSourceTypeGitHubPublic && strings.TrimSpace(spec.Image) == ""
+	allowPendingImport := source != nil && isQueuedImportSourceType(source.Type) && strings.TrimSpace(spec.Image) == ""
 	if tenantID == "" || projectID == "" || name == "" || (!allowPendingImport && spec.Image == "") || spec.Replicas < 1 {
 		return model.App{}, ErrInvalidInput
 	}
@@ -1426,7 +1426,7 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			if op.DesiredSpec == nil || op.DesiredSource == nil {
 				return ErrInvalidInput
 			}
-			if strings.TrimSpace(op.DesiredSource.Type) != model.AppSourceTypeGitHubPublic {
+			if !isQueuedImportSourceType(op.DesiredSource.Type) {
 				return ErrInvalidInput
 			}
 			if !runtimeVisibleToTenant(state, op.DesiredSpec.RuntimeID, op.TenantID) {

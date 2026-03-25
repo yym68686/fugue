@@ -1,0 +1,55 @@
+name: build-cli
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build-cli.yml'
+      - 'cmd/fugue/**'
+      - 'internal/cli/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Makefile'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build fugue CLI
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags="-s -w" -o "dist/fugue-${GOOS}-${GOARCH}" ./cmd/fugue
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fugue-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/fugue-${{ matrix.goos }}-${{ matrix.goarch }}
+          if-no-files-found: error

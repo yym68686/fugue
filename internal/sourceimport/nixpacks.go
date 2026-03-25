@@ -40,12 +40,14 @@ type GitHubNixpacksImportRequest struct {
 }
 
 type nixpacksBuildRequest struct {
-	RepoURL   string
-	Branch    string
-	CommitSHA string
-	SourceDir string
-	ImageRef  string
-	JobLabels map[string]string
+	RepoURL            string
+	Branch             string
+	CommitSHA          string
+	SourceLabel        string
+	ArchiveDownloadURL string
+	SourceDir          string
+	ImageRef           string
+	JobLabels          map[string]string
 }
 
 func (i *Importer) ImportPublicGitHubAuto(ctx context.Context, req GitHubAutoImportRequest) (GitHubImportResult, error) {
@@ -270,8 +272,9 @@ func buildAndPushNixpacksImage(ctx context.Context, req nixpacksBuildRequest) er
 	}
 
 	jobName := buildJobName(dockerfileBuildRequest{
-		RepoURL:   req.RepoURL,
-		CommitSHA: req.CommitSHA,
+		RepoURL:     req.RepoURL,
+		CommitSHA:   req.CommitSHA,
+		SourceLabel: req.SourceLabel,
 	})
 	_ = kubectlRun(ctx, nil, "-n", namespace, "delete", "job", jobName, "--ignore-not-found=true", "--wait=false")
 
@@ -289,10 +292,29 @@ func buildAndPushNixpacksImage(ctx context.Context, req nixpacksBuildRequest) er
 }
 
 func buildNixpacksJobObject(namespace, jobName string, req nixpacksBuildRequest) (map[string]any, error) {
-	cloneArgs := gitCloneArgs(req.RepoURL, "/workspace/repo", req.Branch)
 	workingDir := "/workspace/repo"
 	if strings.TrimSpace(req.SourceDir) != "" && strings.TrimSpace(req.SourceDir) != "." {
 		workingDir += "/" + filepath.ToSlash(strings.TrimSpace(req.SourceDir))
+	}
+	initContainers := []map[string]any{}
+	if strings.TrimSpace(req.ArchiveDownloadURL) != "" {
+		initContainers = buildArchiveDownloadInitContainers(req.ArchiveDownloadURL)
+	} else {
+		cloneArgs := gitCloneArgs(req.RepoURL, "/workspace/repo", req.Branch)
+		initContainers = []map[string]any{
+			{
+				"name":         "git-clone",
+				"image":        defaultGitCloneImage,
+				"command":      append([]string{"git"}, cloneArgs...),
+				"volumeMounts": []map[string]any{{"name": "workspace", "mountPath": "/workspace"}},
+			},
+			{
+				"name":         "git-checkout",
+				"image":        defaultGitCloneImage,
+				"command":      []string{"git", "-C", "/workspace/repo", "checkout", strings.TrimSpace(req.CommitSHA)},
+				"volumeMounts": []map[string]any{{"name": "workspace", "mountPath": "/workspace"}},
+			},
+		}
 	}
 
 	jobObject := map[string]any{
@@ -318,29 +340,15 @@ func buildNixpacksJobObject(namespace, jobName string, req nixpacksBuildRequest)
 							"emptyDir": map[string]any{},
 						},
 					},
-					"initContainers": []map[string]any{
-						{
-							"name":         "git-clone",
-							"image":        defaultGitCloneImage,
-							"command":      append([]string{"git"}, cloneArgs...),
-							"volumeMounts": []map[string]any{{"name": "workspace", "mountPath": "/workspace"}},
+					"initContainers": append(initContainers, map[string]any{
+						"name":       "nixpacks",
+						"image":      defaultNixpacksImage,
+						"command":    []string{"sh", "-lc", "set -euo pipefail\nmkdir -p /workspace/generated\nnixpacks plan . --format json > /workspace/generated/nixpacks-plan.json\nnixpacks build . --out /workspace/generated\ntest -f /workspace/generated/Dockerfile\n"},
+						"workingDir": workingDir,
+						"volumeMounts": []map[string]any{
+							{"name": "workspace", "mountPath": "/workspace"},
 						},
-						{
-							"name":         "git-checkout",
-							"image":        defaultGitCloneImage,
-							"command":      []string{"git", "-C", "/workspace/repo", "checkout", strings.TrimSpace(req.CommitSHA)},
-							"volumeMounts": []map[string]any{{"name": "workspace", "mountPath": "/workspace"}},
-						},
-						{
-							"name":       "nixpacks",
-							"image":      defaultNixpacksImage,
-							"command":    []string{"sh", "-lc", "set -euo pipefail\nmkdir -p /workspace/generated\nnixpacks plan . --format json > /workspace/generated/nixpacks-plan.json\nnixpacks build . --out /workspace/generated\ntest -f /workspace/generated/Dockerfile\n"},
-							"workingDir": workingDir,
-							"volumeMounts": []map[string]any{
-								{"name": "workspace", "mountPath": "/workspace"},
-							},
-						},
-					},
+					}),
 					"containers": []map[string]any{
 						{
 							"name":  "kaniko",

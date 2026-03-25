@@ -184,6 +184,19 @@ var postgresSchemaStatements = []string{
 		updated_at TIMESTAMPTZ NOT NULL,
 		PRIMARY KEY (scope, tenant_id, key)
 	)`,
+	`CREATE TABLE IF NOT EXISTS fugue_source_uploads (
+		id TEXT PRIMARY KEY,
+		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
+		filename TEXT NOT NULL DEFAULT '',
+		content_type TEXT NOT NULL DEFAULT '',
+		sha256 TEXT NOT NULL,
+		size_bytes BIGINT NOT NULL,
+		download_token TEXT NOT NULL,
+		archive_bytes BYTEA NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_source_uploads_tenant_created_at ON fugue_source_uploads (tenant_id, created_at DESC)`,
 	`CREATE TABLE IF NOT EXISTS fugue_operations (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,

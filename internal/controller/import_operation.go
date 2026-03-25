@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -17,12 +18,6 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	if op.DesiredSource == nil {
 		return fmt.Errorf("import operation %s missing desired source", op.ID)
 	}
-	if strings.TrimSpace(op.DesiredSource.Type) != model.AppSourceTypeGitHubPublic {
-		return fmt.Errorf("import operation %s only supports github-public source", op.ID)
-	}
-	if strings.TrimSpace(op.DesiredSource.RepoURL) == "" {
-		return fmt.Errorf("import operation %s missing repo_url", op.ID)
-	}
 	if strings.TrimSpace(s.registryPushBase) == "" {
 		return fmt.Errorf("controller registry push base is not configured")
 	}
@@ -30,23 +25,68 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	importCtx, cancel := context.WithTimeout(ctx, importSourceTimeout())
 	defer cancel()
 
-	output, err := s.importer.ImportPublicGitHubSource(importCtx, sourceimport.GitHubSourceImportRequest{
-		RepoURL:          strings.TrimSpace(op.DesiredSource.RepoURL),
-		Branch:           strings.TrimSpace(op.DesiredSource.RepoBranch),
-		SourceDir:        strings.TrimSpace(op.DesiredSource.SourceDir),
-		DockerfilePath:   strings.TrimSpace(op.DesiredSource.DockerfilePath),
-		BuildContextDir:  strings.TrimSpace(op.DesiredSource.BuildContextDir),
-		BuildStrategy:    strings.TrimSpace(op.DesiredSource.BuildStrategy),
-		RegistryPushBase: s.registryPushBase,
-		ImageRepository:  "fugue-apps",
-		ImageNameSuffix:  strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
-		ComposeService:   strings.TrimSpace(op.DesiredSource.ComposeService),
-		JobLabels: map[string]string{
-			"fugue.pro/operation-id": op.ID,
-			"fugue.pro/app-id":       app.ID,
-			"fugue.pro/tenant-id":    app.TenantID,
-		},
-	})
+	jobLabels := map[string]string{
+		"fugue.pro/operation-id": op.ID,
+		"fugue.pro/app-id":       app.ID,
+		"fugue.pro/tenant-id":    app.TenantID,
+	}
+
+	var output sourceimport.GitHubSourceImportOutput
+	var err error
+	switch strings.TrimSpace(op.DesiredSource.Type) {
+	case model.AppSourceTypeGitHubPublic:
+		if strings.TrimSpace(op.DesiredSource.RepoURL) == "" {
+			return fmt.Errorf("import operation %s missing repo_url", op.ID)
+		}
+		output, err = s.importer.ImportPublicGitHubSource(importCtx, sourceimport.GitHubSourceImportRequest{
+			RepoURL:          strings.TrimSpace(op.DesiredSource.RepoURL),
+			Branch:           strings.TrimSpace(op.DesiredSource.RepoBranch),
+			SourceDir:        strings.TrimSpace(op.DesiredSource.SourceDir),
+			DockerfilePath:   strings.TrimSpace(op.DesiredSource.DockerfilePath),
+			BuildContextDir:  strings.TrimSpace(op.DesiredSource.BuildContextDir),
+			BuildStrategy:    strings.TrimSpace(op.DesiredSource.BuildStrategy),
+			RegistryPushBase: s.registryPushBase,
+			ImageRepository:  "fugue-apps",
+			ImageNameSuffix:  strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
+			ComposeService:   strings.TrimSpace(op.DesiredSource.ComposeService),
+			JobLabels:        jobLabels,
+		})
+	case model.AppSourceTypeUpload:
+		if strings.TrimSpace(op.DesiredSource.UploadID) == "" {
+			return fmt.Errorf("import operation %s missing upload_id", op.ID)
+		}
+		upload, archiveBytes, err := s.Store.GetSourceUploadArchive(strings.TrimSpace(op.DesiredSource.UploadID))
+		if err != nil {
+			return fmt.Errorf("load source upload %s: %w", op.DesiredSource.UploadID, err)
+		}
+		if upload.TenantID != app.TenantID {
+			return fmt.Errorf("source upload %s is not visible to tenant %s", upload.ID, app.TenantID)
+		}
+		archiveURL, err := sourceUploadDownloadURL(s.Config.SourceUploadBaseURL, upload.ID, upload.DownloadToken)
+		if err != nil {
+			return err
+		}
+		output, err = s.importer.ImportUploadedArchiveSource(importCtx, sourceimport.UploadSourceImportRequest{
+			UploadID:           upload.ID,
+			ArchiveFilename:    upload.Filename,
+			ArchiveSHA256:      upload.SHA256,
+			ArchiveSizeBytes:   upload.SizeBytes,
+			ArchiveData:        archiveBytes,
+			ArchiveDownloadURL: archiveURL,
+			AppName:            app.Name,
+			SourceDir:          strings.TrimSpace(op.DesiredSource.SourceDir),
+			DockerfilePath:     strings.TrimSpace(op.DesiredSource.DockerfilePath),
+			BuildContextDir:    strings.TrimSpace(op.DesiredSource.BuildContextDir),
+			BuildStrategy:      strings.TrimSpace(op.DesiredSource.BuildStrategy),
+			RegistryPushBase:   s.registryPushBase,
+			ImageRepository:    "fugue-apps",
+			ImageNameSuffix:    strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
+			ComposeService:     strings.TrimSpace(op.DesiredSource.ComposeService),
+			JobLabels:          jobLabels,
+		})
+	default:
+		return fmt.Errorf("import operation %s only supports github-public or upload source", op.ID)
+	}
 	if err != nil {
 		return err
 	}
@@ -95,6 +135,22 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 
 func importSourceTimeout() time.Duration {
 	return 25 * time.Minute
+}
+
+func sourceUploadDownloadURL(baseURL, uploadID, token string) (string, error) {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return "", fmt.Errorf("source upload base url is empty")
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("parse source upload base url: %w", err)
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/v1/source-uploads/" + strings.TrimSpace(uploadID) + "/archive"
+	query := parsed.Query()
+	query.Set("download_token", strings.TrimSpace(token))
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
 }
 
 func effectiveImportPort(detected int, buildStrategy string) int {

@@ -27,12 +27,14 @@ type GitHubBuildpacksImportRequest struct {
 }
 
 type buildpacksBuildRequest struct {
-	RepoURL   string
-	Branch    string
-	CommitSHA string
-	SourceDir string
-	ImageRef  string
-	JobLabels map[string]string
+	RepoURL            string
+	Branch             string
+	CommitSHA          string
+	SourceLabel        string
+	ArchiveDownloadURL string
+	SourceDir          string
+	ImageRef           string
+	JobLabels          map[string]string
 }
 
 func (i *Importer) ImportPublicGitHubBuildpacks(ctx context.Context, req GitHubBuildpacksImportRequest) (GitHubImportResult, error) {
@@ -102,8 +104,9 @@ func buildAndPushBuildpacksImage(ctx context.Context, req buildpacksBuildRequest
 	}
 
 	jobName := buildJobName(dockerfileBuildRequest{
-		RepoURL:   req.RepoURL,
-		CommitSHA: req.CommitSHA,
+		RepoURL:     req.RepoURL,
+		CommitSHA:   req.CommitSHA,
+		SourceLabel: req.SourceLabel,
 	})
 	_ = kubectlRun(ctx, nil, "-n", namespace, "delete", "job", jobName, "--ignore-not-found=true", "--wait=false")
 
@@ -121,13 +124,32 @@ func buildAndPushBuildpacksImage(ctx context.Context, req buildpacksBuildRequest
 }
 
 func buildBuildpacksJobObject(namespace, jobName string, req buildpacksBuildRequest) (map[string]any, error) {
-	cloneArgs := gitCloneArgs(req.RepoURL, "/workspace/repo", req.Branch)
 	workingDir := "/workspace/repo"
 	if strings.TrimSpace(req.SourceDir) != "" && strings.TrimSpace(req.SourceDir) != "." {
 		workingDir += "/" + filepath.ToSlash(strings.TrimSpace(req.SourceDir))
 	}
 
 	script := buildpacksJobScript(workingDir, req.ImageRef)
+	initContainers := []map[string]any{}
+	if strings.TrimSpace(req.ArchiveDownloadURL) != "" {
+		initContainers = buildArchiveDownloadInitContainers(req.ArchiveDownloadURL)
+	} else {
+		cloneArgs := gitCloneArgs(req.RepoURL, "/workspace/repo", req.Branch)
+		initContainers = []map[string]any{
+			{
+				"name":         "git-clone",
+				"image":        defaultGitCloneImage,
+				"command":      append([]string{"git"}, cloneArgs...),
+				"volumeMounts": []map[string]any{{"name": "workspace", "mountPath": "/workspace"}},
+			},
+			{
+				"name":         "git-checkout",
+				"image":        defaultGitCloneImage,
+				"command":      []string{"git", "-C", "/workspace/repo", "checkout", strings.TrimSpace(req.CommitSHA)},
+				"volumeMounts": []map[string]any{{"name": "workspace", "mountPath": "/workspace"}},
+			},
+		}
+	}
 	jobObject := map[string]any{
 		"apiVersion": "batch/v1",
 		"kind":       "Job",
@@ -155,20 +177,7 @@ func buildBuildpacksJobObject(namespace, jobName string, req buildpacksBuildRequ
 							"emptyDir": map[string]any{},
 						},
 					},
-					"initContainers": []map[string]any{
-						{
-							"name":         "git-clone",
-							"image":        defaultGitCloneImage,
-							"command":      append([]string{"git"}, cloneArgs...),
-							"volumeMounts": []map[string]any{{"name": "workspace", "mountPath": "/workspace"}},
-						},
-						{
-							"name":         "git-checkout",
-							"image":        defaultGitCloneImage,
-							"command":      []string{"git", "-C", "/workspace/repo", "checkout", strings.TrimSpace(req.CommitSHA)},
-							"volumeMounts": []map[string]any{{"name": "workspace", "mountPath": "/workspace"}},
-						},
-					},
+					"initContainers": initContainers,
 					"containers": []map[string]any{
 						{
 							"name":    "buildpacks",

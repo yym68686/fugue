@@ -44,13 +44,15 @@ func (i *Importer) ImportPublicGitHubDockerfileImage(ctx context.Context, req Gi
 }
 
 type dockerfileBuildRequest struct {
-	RepoURL         string
-	Branch          string
-	CommitSHA       string
-	DockerfilePath  string
-	BuildContextDir string
-	ImageRef        string
-	JobLabels       map[string]string
+	RepoURL            string
+	Branch             string
+	CommitSHA          string
+	SourceLabel        string
+	ArchiveDownloadURL string
+	DockerfilePath     string
+	BuildContextDir    string
+	ImageRef           string
+	JobLabels          map[string]string
 }
 
 func detectDockerBuildInputs(repoDir, dockerfilePath, buildContextDir string) (string, string, error) {
@@ -225,9 +227,16 @@ func currentNamespace() (string, error) {
 func buildJobName(req dockerfileBuildRequest) string {
 	base := model.Slugify(strings.TrimSuffix(filepath.Base(req.RepoURL), ".git"))
 	if base == "" {
+		base = model.Slugify(req.SourceLabel)
+	}
+	if base == "" {
 		base = "build"
 	}
-	name := "fugue-build-" + base + "-" + shortCommit(req.CommitSHA)
+	suffix := shortCommit(req.CommitSHA)
+	if suffix == "" {
+		suffix = "source"
+	}
+	name := "fugue-build-" + base + "-" + suffix
 	if len(name) > 63 {
 		name = name[:63]
 	}
@@ -235,6 +244,9 @@ func buildJobName(req dockerfileBuildRequest) string {
 }
 
 func buildKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest) (map[string]any, error) {
+	if strings.TrimSpace(req.ArchiveDownloadURL) != "" {
+		return buildArchiveKanikoJobObject(namespace, jobName, req)
+	}
 	contextURL, err := buildGitContextURL(req.RepoURL, req.Branch, req.CommitSHA)
 	if err != nil {
 		return nil, err
@@ -277,6 +289,59 @@ func buildKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest)
 							"name":  "kaniko",
 							"image": defaultKanikoImage,
 							"args":  args,
+						},
+					},
+				},
+			},
+		},
+	}
+	metadata := jobObject["metadata"].(map[string]any)
+	metadata["labels"] = mergeBuilderLabels(metadata["labels"].(map[string]string), req.JobLabels)
+	return jobObject, nil
+}
+
+func buildArchiveKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest) (map[string]any, error) {
+	args := kanikoDestinationArgs(
+		req.ImageRef,
+		"--context=dir:///workspace/repo",
+		"--dockerfile=/workspace/repo/"+filepath.ToSlash(strings.TrimSpace(req.DockerfilePath)),
+	)
+	if strings.TrimSpace(req.BuildContextDir) != "" && strings.TrimSpace(req.BuildContextDir) != "." {
+		args = append(args, "--context-sub-path="+filepath.ToSlash(strings.TrimSpace(req.BuildContextDir)))
+	}
+
+	jobObject := map[string]any{
+		"apiVersion": "batch/v1",
+		"kind":       "Job",
+		"metadata": map[string]any{
+			"name":      jobName,
+			"namespace": namespace,
+			"labels": map[string]string{
+				"app.kubernetes.io/managed-by": "fugue",
+				"app.kubernetes.io/component":  "builder",
+			},
+		},
+		"spec": map[string]any{
+			"backoffLimit":            0,
+			"ttlSecondsAfterFinished": 3600,
+			"template": map[string]any{
+				"spec": map[string]any{
+					"restartPolicy": "Never",
+					"volumes": []map[string]any{
+						{
+							"name":     "workspace",
+							"emptyDir": map[string]any{},
+						},
+					},
+					"initContainers": buildArchiveDownloadInitContainers(req.ArchiveDownloadURL),
+					"containers": []map[string]any{
+						{
+							"name":  "kaniko",
+							"image": defaultKanikoImage,
+							"args":  args,
+							"volumeMounts": []map[string]any{
+								{"name": "workspace", "mountPath": "/workspace"},
+							},
 						},
 					},
 				},
