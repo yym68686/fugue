@@ -6,6 +6,44 @@ import (
 	"fugue/internal/model"
 )
 
+func normalizeAPIKeyStatus(status string) string {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case "", model.APIKeyStatusActive:
+		return model.APIKeyStatusActive
+	case model.APIKeyStatusDisabled:
+		return model.APIKeyStatusDisabled
+	default:
+		return model.APIKeyStatusActive
+	}
+}
+
+func normalizeAPIKeyForRead(key *model.APIKey) {
+	if key == nil {
+		return
+	}
+	key.Status = normalizeAPIKeyStatus(key.Status)
+	if key.Status != model.APIKeyStatusDisabled {
+		key.DisabledAt = nil
+	}
+}
+
+func repairAllAPIKeyStatuses(state *model.State) bool {
+	changed := false
+	for index := range state.APIKeys {
+		originalStatus := state.APIKeys[index].Status
+		normalizedStatus := normalizeAPIKeyStatus(originalStatus)
+		if normalizedStatus != originalStatus {
+			state.APIKeys[index].Status = normalizedStatus
+			changed = true
+		}
+		if normalizedStatus != model.APIKeyStatusDisabled && state.APIKeys[index].DisabledAt != nil {
+			state.APIKeys[index].DisabledAt = nil
+			changed = true
+		}
+	}
+	return changed
+}
+
 func isDeletedPhase(phase string) bool {
 	return strings.EqualFold(strings.TrimSpace(phase), "deleted")
 }

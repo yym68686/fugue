@@ -57,6 +57,7 @@ func (s *Store) Init() error {
 		if err := migrateLegacyAppBackingServicesState(state); err != nil {
 			return err
 		}
+		repairAllAPIKeyStatuses(state)
 		repairAllAppStatuses(state)
 		return nil
 	})
@@ -414,6 +415,7 @@ func (s *Store) ListAPIKeys(tenantID string, platformAdmin bool) ([]model.APIKey
 	var keys []model.APIKey
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, key := range state.APIKeys {
+			normalizeAPIKeyForRead(&key)
 			if platformAdmin || key.TenantID == tenantID {
 				keys = append(keys, redactAPIKey(key))
 			}
@@ -437,6 +439,7 @@ func (s *Store) GetAPIKey(id string) (model.APIKey, error) {
 			return ErrNotFound
 		}
 		key = state.APIKeys[index]
+		normalizeAPIKeyForRead(&key)
 		return nil
 	})
 	return key, err
@@ -461,6 +464,7 @@ func (s *Store) CreateAPIKey(tenantID, label string, scopes []string) (model.API
 		Label:     label,
 		Prefix:    model.SecretPrefix(secret),
 		Hash:      model.HashSecret(secret),
+		Status:    model.APIKeyStatusActive,
 		Scopes:    model.NormalizeScopes(scopes),
 		CreatedAt: time.Now().UTC(),
 	}
@@ -540,6 +544,86 @@ func (s *Store) RotateAPIKey(id string, label *string, scopes *[]string) (model.
 	return redactAPIKey(key), secret, nil
 }
 
+func (s *Store) DisableAPIKey(id string) (model.APIKey, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.APIKey{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgDisableAPIKey(id)
+	}
+
+	var key model.APIKey
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findAPIKey(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		if normalizeAPIKeyStatus(state.APIKeys[index].Status) != model.APIKeyStatusDisabled || state.APIKeys[index].DisabledAt == nil {
+			now := time.Now().UTC()
+			state.APIKeys[index].Status = model.APIKeyStatusDisabled
+			state.APIKeys[index].DisabledAt = &now
+		}
+		key = state.APIKeys[index]
+		return nil
+	})
+	if err != nil {
+		return model.APIKey{}, err
+	}
+	return redactAPIKey(key), nil
+}
+
+func (s *Store) EnableAPIKey(id string) (model.APIKey, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.APIKey{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgEnableAPIKey(id)
+	}
+
+	var key model.APIKey
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findAPIKey(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		state.APIKeys[index].Status = model.APIKeyStatusActive
+		state.APIKeys[index].DisabledAt = nil
+		key = state.APIKeys[index]
+		return nil
+	})
+	if err != nil {
+		return model.APIKey{}, err
+	}
+	return redactAPIKey(key), nil
+}
+
+func (s *Store) DeleteAPIKey(id string) (model.APIKey, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.APIKey{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgDeleteAPIKey(id)
+	}
+
+	var key model.APIKey
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findAPIKey(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		key = state.APIKeys[index]
+		state.APIKeys = append(state.APIKeys[:index], state.APIKeys[index+1:]...)
+		return nil
+	})
+	if err != nil {
+		return model.APIKey{}, err
+	}
+	return redactAPIKey(key), nil
+}
+
 func (s *Store) AuthenticateAPIKey(secret string) (model.Principal, error) {
 	if strings.TrimSpace(secret) == "" {
 		return model.Principal{}, ErrInvalidInput
@@ -555,6 +639,9 @@ func (s *Store) AuthenticateAPIKey(secret string) (model.Principal, error) {
 		for idx := range state.APIKeys {
 			if state.APIKeys[idx].Hash != hash {
 				continue
+			}
+			if normalizeAPIKeyStatus(state.APIKeys[idx].Status) != model.APIKeyStatusActive {
+				return ErrNotFound
 			}
 			state.APIKeys[idx].LastUsedAt = &now
 			scopes := make(map[string]struct{}, len(state.APIKeys[idx].Scopes))
@@ -1805,6 +1892,7 @@ func ensureDefaults(state *model.State) {
 	if state.APIKeys == nil {
 		state.APIKeys = []model.APIKey{}
 	}
+	repairAllAPIKeyStatuses(state)
 	if state.EnrollmentTokens == nil {
 		state.EnrollmentTokens = []model.EnrollmentToken{}
 	}
@@ -1852,6 +1940,7 @@ func ensureDefaults(state *model.State) {
 }
 
 func redactAPIKey(key model.APIKey) model.APIKey {
+	normalizeAPIKeyForRead(&key)
 	key.Hash = ""
 	return key
 }

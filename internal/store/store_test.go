@@ -278,6 +278,73 @@ func TestNodeAndKeyDefaultsWhenNamesAreOmitted(t *testing.T) {
 	}
 }
 
+func TestDisableEnableAndDeleteAPIKey(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("API Key Lifecycle")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	key, secret, err := s.CreateAPIKey(tenant.ID, "preview", []string{"app.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	if key.Status != model.APIKeyStatusActive {
+		t.Fatalf("expected active status on create, got %q", key.Status)
+	}
+
+	if _, err := s.AuthenticateAPIKey(secret); err != nil {
+		t.Fatalf("authenticate api key before disable: %v", err)
+	}
+
+	disabled, err := s.DisableAPIKey(key.ID)
+	if err != nil {
+		t.Fatalf("disable api key: %v", err)
+	}
+	if disabled.Status != model.APIKeyStatusDisabled {
+		t.Fatalf("expected disabled status, got %q", disabled.Status)
+	}
+	if disabled.DisabledAt == nil {
+		t.Fatal("expected disabled_at to be set")
+	}
+	if _, err := s.AuthenticateAPIKey(secret); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for disabled key auth, got %v", err)
+	}
+
+	enabled, err := s.EnableAPIKey(key.ID)
+	if err != nil {
+		t.Fatalf("enable api key: %v", err)
+	}
+	if enabled.Status != model.APIKeyStatusActive {
+		t.Fatalf("expected active status after enable, got %q", enabled.Status)
+	}
+	if enabled.DisabledAt != nil {
+		t.Fatalf("expected disabled_at to be cleared, got %v", enabled.DisabledAt)
+	}
+	if _, err := s.AuthenticateAPIKey(secret); err != nil {
+		t.Fatalf("authenticate api key after enable: %v", err)
+	}
+
+	deleted, err := s.DeleteAPIKey(key.ID)
+	if err != nil {
+		t.Fatalf("delete api key: %v", err)
+	}
+	if deleted.ID != key.ID {
+		t.Fatalf("expected deleted key id %q, got %q", key.ID, deleted.ID)
+	}
+	if _, err := s.AuthenticateAPIKey(secret); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for deleted key auth, got %v", err)
+	}
+	if _, err := s.GetAPIKey(key.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for deleted key lookup, got %v", err)
+	}
+}
+
 func TestEnsureDefaultProjectReusesExistingProject(t *testing.T) {
 	t.Parallel()
 

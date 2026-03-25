@@ -121,6 +121,100 @@ func TestRotateAPIKeyAllowsEmptyBodyAndKeepsCurrentSettings(t *testing.T) {
 	}
 }
 
+func TestDisableAndEnableAPIKeyTogglesAuthentication(t *testing.T) {
+	t.Parallel()
+
+	s, server, adminSecret, targetSecret, _, _ := setupAPIKeyTestServer(t)
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps", targetSecret, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d before disable, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	targetKey := firstNonAdminAPIKey(t, s)
+	recorder = performJSONRequest(t, server, http.MethodPost, "/v1/api-keys/"+targetKey.ID+"/disable", adminSecret, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var disableResponse struct {
+		APIKey model.APIKey `json:"api_key"`
+	}
+	mustDecodeJSON(t, recorder, &disableResponse)
+	if disableResponse.APIKey.Status != model.APIKeyStatusDisabled {
+		t.Fatalf("expected disabled status, got %q", disableResponse.APIKey.Status)
+	}
+	if disableResponse.APIKey.DisabledAt == nil {
+		t.Fatal("expected disabled_at to be populated")
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/apps", targetSecret, nil)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status %d for disabled key, got %d body=%s", http.StatusUnauthorized, recorder.Code, recorder.Body.String())
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodPost, "/v1/api-keys/"+targetKey.ID+"/enable", adminSecret, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var enableResponse struct {
+		APIKey model.APIKey `json:"api_key"`
+	}
+	mustDecodeJSON(t, recorder, &enableResponse)
+	if enableResponse.APIKey.Status != model.APIKeyStatusActive {
+		t.Fatalf("expected active status after enable, got %q", enableResponse.APIKey.Status)
+	}
+	if enableResponse.APIKey.DisabledAt != nil {
+		t.Fatalf("expected disabled_at to be cleared, got %v", enableResponse.APIKey.DisabledAt)
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/apps", targetSecret, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d after enable, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestDeleteAPIKeyRevokesSecretAndRemovesItFromList(t *testing.T) {
+	t.Parallel()
+
+	s, server, adminSecret, targetSecret, _, _ := setupAPIKeyTestServer(t)
+
+	targetKey := firstNonAdminAPIKey(t, s)
+	recorder := performJSONRequest(t, server, http.MethodDelete, "/v1/api-keys/"+targetKey.ID, adminSecret, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var deleteResponse struct {
+		Deleted bool         `json:"deleted"`
+		APIKey  model.APIKey `json:"api_key"`
+	}
+	mustDecodeJSON(t, recorder, &deleteResponse)
+	if !deleteResponse.Deleted {
+		t.Fatal("expected deleted=true in response")
+	}
+	if deleteResponse.APIKey.ID != targetKey.ID {
+		t.Fatalf("expected deleted key id %q, got %q", targetKey.ID, deleteResponse.APIKey.ID)
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/apps", targetSecret, nil)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status %d for deleted key, got %d body=%s", http.StatusUnauthorized, recorder.Code, recorder.Body.String())
+	}
+
+	keys, err := s.ListAPIKeys("", true)
+	if err != nil {
+		t.Fatalf("list api keys after delete: %v", err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("expected 1 api key after delete, got %d", len(keys))
+	}
+	if keys[0].ID == targetKey.ID {
+		t.Fatalf("expected deleted key %q to be absent", targetKey.ID)
+	}
+}
+
 func setupAPIKeyTestServer(t *testing.T) (*store.Store, *Server, string, string, model.APIKey, model.App) {
 	t.Helper()
 

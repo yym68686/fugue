@@ -51,10 +51,14 @@ var postgresSchemaStatements = []string{
 		label TEXT NOT NULL,
 		prefix TEXT NOT NULL,
 		hash TEXT NOT NULL UNIQUE,
+		status TEXT NOT NULL DEFAULT 'active',
 		scopes_json JSONB NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL,
-		last_used_at TIMESTAMPTZ NULL
+		last_used_at TIMESTAMPTZ NULL,
+		disabled_at TIMESTAMPTZ NULL
 	)`,
+	`ALTER TABLE fugue_api_keys ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'`,
+	`ALTER TABLE fugue_api_keys ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ NULL`,
 	`CREATE TABLE IF NOT EXISTS fugue_enrollment_tokens (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,

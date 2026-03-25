@@ -31,6 +31,9 @@ const (
 	RuntimeStatusActive  = "active"
 	RuntimeStatusOffline = "offline"
 
+	APIKeyStatusActive   = "active"
+	APIKeyStatusDisabled = "disabled"
+
 	NodeKeyStatusActive  = "active"
 	NodeKeyStatusRevoked = "revoked"
 
@@ -85,9 +88,11 @@ type APIKey struct {
 	Label      string     `json:"label"`
 	Prefix     string     `json:"prefix"`
 	Hash       string     `json:"hash"`
+	Status     string     `json:"status"`
 	Scopes     []string   `json:"scopes"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	DisabledAt *time.Time `json:"disabled_at,omitempty"`
 }
 
 type EnrollmentToken struct {

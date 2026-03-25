@@ -86,6 +86,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/api-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateAPIKey)))
 	mux.Handle("PATCH /v1/api-keys/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchAPIKey)))
 	mux.Handle("POST /v1/api-keys/{id}/rotate", s.auth.RequireAPI(http.HandlerFunc(s.handleRotateAPIKey)))
+	mux.Handle("POST /v1/api-keys/{id}/disable", s.auth.RequireAPI(http.HandlerFunc(s.handleDisableAPIKey)))
+	mux.Handle("POST /v1/api-keys/{id}/enable", s.auth.RequireAPI(http.HandlerFunc(s.handleEnableAPIKey)))
+	mux.Handle("DELETE /v1/api-keys/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteAPIKey)))
 
 	mux.Handle("GET /v1/node-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleListNodeKeys)))
 	mux.Handle("POST /v1/node-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateNodeKey)))
@@ -432,6 +435,69 @@ func (s *Server) handleRotateAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 	s.appendAudit(principal, "apikey.rotate", "api_key", key.ID, key.TenantID, map[string]string{"label": key.Label})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"api_key": key, "secret": secret})
+}
+
+func (s *Server) handleDisableAPIKey(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("apikey.write") {
+		httpx.WriteError(w, http.StatusForbidden, "missing apikey.write scope")
+		return
+	}
+	key, allowed := s.loadAuthorizedAPIKey(w, r, principal)
+	if !allowed {
+		return
+	}
+
+	key, err := s.store.DisableAPIKey(key.ID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.appendAudit(principal, "apikey.disable", "api_key", key.ID, key.TenantID, map[string]string{"label": key.Label})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"api_key": key})
+}
+
+func (s *Server) handleEnableAPIKey(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("apikey.write") {
+		httpx.WriteError(w, http.StatusForbidden, "missing apikey.write scope")
+		return
+	}
+	key, allowed := s.loadAuthorizedAPIKey(w, r, principal)
+	if !allowed {
+		return
+	}
+
+	key, err := s.store.EnableAPIKey(key.ID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.appendAudit(principal, "apikey.enable", "api_key", key.ID, key.TenantID, map[string]string{"label": key.Label})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"api_key": key})
+}
+
+func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("apikey.write") {
+		httpx.WriteError(w, http.StatusForbidden, "missing apikey.write scope")
+		return
+	}
+	key, allowed := s.loadAuthorizedAPIKey(w, r, principal)
+	if !allowed {
+		return
+	}
+
+	deleted, err := s.store.DeleteAPIKey(key.ID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.appendAudit(principal, "apikey.delete", "api_key", deleted.ID, deleted.TenantID, map[string]string{"label": deleted.Label})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"deleted": true,
+		"api_key": deleted,
+	})
 }
 
 func (s *Server) handleListNodeKeys(w http.ResponseWriter, r *http.Request) {

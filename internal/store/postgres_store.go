@@ -373,7 +373,7 @@ func (s *Store) pgListAPIKeys(tenantID string, platformAdmin bool) ([]model.APIK
 	defer cancel()
 
 	query := `
-SELECT id, tenant_id, label, prefix, hash, scopes_json, created_at, last_used_at
+SELECT id, tenant_id, label, prefix, hash, status, scopes_json, created_at, last_used_at, disabled_at
 FROM fugue_api_keys
 `
 	args := make([]any, 0, 1)
@@ -408,7 +408,7 @@ func (s *Store) pgGetAPIKey(id string) (model.APIKey, error) {
 	defer cancel()
 
 	key, err := scanAPIKey(s.db.QueryRowContext(ctx, `
-SELECT id, tenant_id, label, prefix, hash, scopes_json, created_at, last_used_at
+SELECT id, tenant_id, label, prefix, hash, status, scopes_json, created_at, last_used_at, disabled_at
 FROM fugue_api_keys
 WHERE id = $1
 `, id))
@@ -426,6 +426,7 @@ func (s *Store) pgCreateAPIKey(tenantID, label string, scopes []string) (model.A
 		Label:     label,
 		Prefix:    model.SecretPrefix(secret),
 		Hash:      model.HashSecret(secret),
+		Status:    model.APIKeyStatusActive,
 		Scopes:    model.NormalizeScopes(scopes),
 		CreatedAt: time.Now().UTC(),
 	}
@@ -454,9 +455,9 @@ func (s *Store) pgCreateAPIKey(tenantID, label string, scopes []string) (model.A
 	}
 
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_api_keys (id, tenant_id, label, prefix, hash, scopes_json, created_at, last_used_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)
-`, key.ID, nullIfEmpty(key.TenantID), key.Label, key.Prefix, key.Hash, scopesJSON, key.CreatedAt); err != nil {
+INSERT INTO fugue_api_keys (id, tenant_id, label, prefix, hash, status, scopes_json, created_at, last_used_at, disabled_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL)
+`, key.ID, nullIfEmpty(key.TenantID), key.Label, key.Prefix, key.Hash, key.Status, scopesJSON, key.CreatedAt); err != nil {
 		return model.APIKey{}, "", mapDBErr(err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -477,7 +478,7 @@ func (s *Store) pgUpdateAPIKey(id string, label *string, scopes *[]string) (mode
 	defer tx.Rollback()
 
 	current, err := scanAPIKey(tx.QueryRowContext(ctx, `
-SELECT id, tenant_id, label, prefix, hash, scopes_json, created_at, last_used_at
+SELECT id, tenant_id, label, prefix, hash, status, scopes_json, created_at, last_used_at, disabled_at
 FROM fugue_api_keys
 WHERE id = $1
 FOR UPDATE
@@ -499,7 +500,7 @@ UPDATE fugue_api_keys
 SET label = $2,
 	scopes_json = $3
 WHERE id = $1
-RETURNING id, tenant_id, label, prefix, hash, scopes_json, created_at, last_used_at
+RETURNING id, tenant_id, label, prefix, hash, status, scopes_json, created_at, last_used_at, disabled_at
 `, id, updated.Label, scopesJSON))
 	if err != nil {
 		return model.APIKey{}, mapDBErr(err)
@@ -521,7 +522,7 @@ func (s *Store) pgRotateAPIKey(id string, label *string, scopes *[]string) (mode
 	defer tx.Rollback()
 
 	current, err := scanAPIKey(tx.QueryRowContext(ctx, `
-SELECT id, tenant_id, label, prefix, hash, scopes_json, created_at, last_used_at
+SELECT id, tenant_id, label, prefix, hash, status, scopes_json, created_at, last_used_at, disabled_at
 FROM fugue_api_keys
 WHERE id = $1
 FOR UPDATE
@@ -549,7 +550,7 @@ SET label = $2,
 	hash = $4,
 	scopes_json = $5
 WHERE id = $1
-RETURNING id, tenant_id, label, prefix, hash, scopes_json, created_at, last_used_at
+RETURNING id, tenant_id, label, prefix, hash, status, scopes_json, created_at, last_used_at, disabled_at
 `, id, updated.Label, updated.Prefix, updated.Hash, scopesJSON))
 	if err != nil {
 		return model.APIKey{}, "", mapDBErr(err)
@@ -560,6 +561,56 @@ RETURNING id, tenant_id, label, prefix, hash, scopes_json, created_at, last_used
 	return redactAPIKey(key), secret, nil
 }
 
+func (s *Store) pgDisableAPIKey(id string) (model.APIKey, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	now := time.Now().UTC()
+	key, err := scanAPIKey(s.db.QueryRowContext(ctx, `
+UPDATE fugue_api_keys
+SET status = $2,
+	disabled_at = COALESCE(disabled_at, $3)
+WHERE id = $1
+RETURNING id, tenant_id, label, prefix, hash, status, scopes_json, created_at, last_used_at, disabled_at
+`, id, model.APIKeyStatusDisabled, now))
+	if err != nil {
+		return model.APIKey{}, mapDBErr(err)
+	}
+	return redactAPIKey(key), nil
+}
+
+func (s *Store) pgEnableAPIKey(id string) (model.APIKey, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	key, err := scanAPIKey(s.db.QueryRowContext(ctx, `
+UPDATE fugue_api_keys
+SET status = $2,
+	disabled_at = NULL
+WHERE id = $1
+RETURNING id, tenant_id, label, prefix, hash, status, scopes_json, created_at, last_used_at, disabled_at
+`, id, model.APIKeyStatusActive))
+	if err != nil {
+		return model.APIKey{}, mapDBErr(err)
+	}
+	return redactAPIKey(key), nil
+}
+
+func (s *Store) pgDeleteAPIKey(id string) (model.APIKey, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	key, err := scanAPIKey(s.db.QueryRowContext(ctx, `
+DELETE FROM fugue_api_keys
+WHERE id = $1
+RETURNING id, tenant_id, label, prefix, hash, status, scopes_json, created_at, last_used_at, disabled_at
+`, id))
+	if err != nil {
+		return model.APIKey{}, mapDBErr(err)
+	}
+	return redactAPIKey(key), nil
+}
+
 func (s *Store) pgAuthenticateAPIKey(secret string) (model.Principal, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -568,8 +619,9 @@ func (s *Store) pgAuthenticateAPIKey(secret string) (model.Principal, error) {
 UPDATE fugue_api_keys
 SET last_used_at = NOW()
 WHERE hash = $1
-RETURNING id, tenant_id, label, prefix, hash, scopes_json, created_at, last_used_at
-`, model.HashSecret(secret)))
+  AND status = $2
+RETURNING id, tenant_id, label, prefix, hash, status, scopes_json, created_at, last_used_at, disabled_at
+`, model.HashSecret(secret), model.APIKeyStatusActive))
 	if err != nil {
 		return model.Principal{}, mapDBErr(err)
 	}
@@ -2735,12 +2787,15 @@ func scanProject(scanner sqlScanner) (model.Project, error) {
 func scanAPIKey(scanner sqlScanner) (model.APIKey, error) {
 	var key model.APIKey
 	var tenantID sql.NullString
+	var status sql.NullString
 	var scopesRaw []byte
 	var lastUsedAt sql.NullTime
-	if err := scanner.Scan(&key.ID, &tenantID, &key.Label, &key.Prefix, &key.Hash, &scopesRaw, &key.CreatedAt, &lastUsedAt); err != nil {
+	var disabledAt sql.NullTime
+	if err := scanner.Scan(&key.ID, &tenantID, &key.Label, &key.Prefix, &key.Hash, &status, &scopesRaw, &key.CreatedAt, &lastUsedAt, &disabledAt); err != nil {
 		return model.APIKey{}, err
 	}
 	key.TenantID = tenantID.String
+	key.Status = normalizeAPIKeyStatus(status.String)
 	scopes, err := decodeJSONValue[[]string](scopesRaw)
 	if err != nil {
 		return model.APIKey{}, err
@@ -2749,6 +2804,10 @@ func scanAPIKey(scanner sqlScanner) (model.APIKey, error) {
 	if lastUsedAt.Valid {
 		key.LastUsedAt = &lastUsedAt.Time
 	}
+	if disabledAt.Valid {
+		key.DisabledAt = &disabledAt.Time
+	}
+	normalizeAPIKeyForRead(&key)
 	return key, nil
 }
 
