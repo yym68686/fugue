@@ -158,6 +158,12 @@ helm upgrade --install fugue ./deploy/helm/fugue \
 The chart enables an internal PostgreSQL instance by default. If you are upgrading from the legacy file store or the earlier single-row `fugue_state` backend, keep the old data in place for the first PostgreSQL relational boot so Fugue can import it automatically.
 The chart also enables controller leader election by default.
 
+Controller GitHub sync knobs:
+
+- `FUGUE_CONTROLLER_GITHUB_SYNC_INTERVAL`: how often the controller checks imported GitHub apps for a newer branch commit. Set `0` to disable the automatic rebuild loop.
+- `FUGUE_CONTROLLER_GITHUB_SYNC_TIMEOUT`: timeout for each upstream GitHub check.
+- `FUGUE_CONTROLLER_MANAGED_APP_ROLLOUT_TIMEOUT`: maximum time a managed deploy operation waits for the Kubernetes rollout to finish before it is marked failed.
+
 Registry and cluster-join notes:
 
 - `api.registryPushBase` should be the in-cluster address builders use to push imported images.

@@ -25,6 +25,7 @@ Fugue is a multi-tenant k3s control plane MVP for:
 - `ManagedApp` CRD plus operator-style reconcile for managed apps, with Deployments, Services, and Secrets derived from Kubernetes custom resources
 - managed app observed state written back to `ManagedApp.status`, with API reads preferring Kubernetes-observed runtime state over optimistic database status
 - internal registry flow for imported app images
+- background commit polling for imported GitHub apps, with automatic rebuild/redeploy and rollout completion only after the new revision is ready
 - Helm chart for installing the core control plane on k3s
 
 ## Current MVP constraints
@@ -68,6 +69,7 @@ What is already usable on the deployed control plane:
 - asynchronous app deploy, scale, migrate, disable, and delete operations
 - `POST /v1/apps/import-github` for public GitHub repositories, with optional idempotency key support and `auto / static-site / dockerfile / buildpacks / nixpacks` build strategies
 - `POST /v1/apps/{id}/rebuild` to rebuild an imported `github-public` app from the latest repo state, or an imported `upload` app from its saved archive, and redeploy it
+- automatic background updates for imported GitHub apps: the controller polls the upstream branch, queues rebuilds when the commit changes, and waits for a zero-unavailable rollout before the old replica set is removed
 - `GET/PATCH /v1/apps/{id}/env`, `GET/PUT/DELETE /v1/apps/{id}/files`, and `POST /v1/apps/{id}/restart` to inspect and change app config by queuing deploy operations
 - `GET /v1/backing-services`, `GET /v1/backing-services/{id}`, and `GET /v1/apps/{id}/bindings` to inspect attached service inventory and binding env
 - `DELETE /v1/tenants/{id}` for platform-admin tenant removal with best-effort namespace cleanup reporting

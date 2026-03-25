@@ -292,6 +292,7 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 			})
 		}
 		container["ports"] = ports
+		container["readinessProbe"] = buildAppTCPReadinessProbe(app.Spec.Ports[0])
 	}
 	if env := mergedRuntimeEnv(app); len(env) > 0 {
 		container["env"] = buildEnvObjects(env)
@@ -399,6 +400,13 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		},
 		"spec": map[string]any{
 			"replicas": app.Spec.Replicas,
+			"strategy": map[string]any{
+				"type": "RollingUpdate",
+				"rollingUpdate": map[string]any{
+					"maxUnavailable": 0,
+					"maxSurge":       1,
+				},
+			},
 			"selector": map[string]any{
 				"matchLabels": labels,
 			},
@@ -407,6 +415,18 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 				"spec":     podSpec,
 			},
 		},
+	}
+}
+
+func buildAppTCPReadinessProbe(port int) map[string]any {
+	return map[string]any{
+		"tcpSocket": map[string]any{
+			"port": port,
+		},
+		"initialDelaySeconds": 1,
+		"periodSeconds":       2,
+		"timeoutSeconds":      1,
+		"failureThreshold":    15,
 	}
 }
 

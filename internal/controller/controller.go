@@ -17,26 +17,28 @@ import (
 )
 
 type Service struct {
-	Store            *store.Store
-	Config           config.ControllerConfig
-	Renderer         runtime.Renderer
-	Logger           *log.Logger
-	importer         *sourceimport.Importer
-	registryPushBase string
-	registryPullBase string
-	newKubeClient    func(namespace string) (*kubeClient, error)
+	Store              *store.Store
+	Config             config.ControllerConfig
+	Renderer           runtime.Renderer
+	Logger             *log.Logger
+	importer           *sourceimport.Importer
+	registryPushBase   string
+	registryPullBase   string
+	latestGitHubCommit func(ctx context.Context, repoURL, branch string) (string, string, error)
+	newKubeClient      func(namespace string) (*kubeClient, error)
 }
 
 func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *Service {
 	return &Service{
-		Store:            store,
-		Config:           cfg,
-		Renderer:         runtime.Renderer{BaseDir: cfg.RenderDir},
-		Logger:           logger,
-		importer:         sourceimport.NewImporter(cfg.ImportWorkDir, logger, builderPodPolicyFromConfig(cfg.BuilderSchedulingJSON, logger)),
-		registryPushBase: strings.TrimSpace(cfg.RegistryPushBase),
-		registryPullBase: strings.TrimSpace(cfg.RegistryPullBase),
-		newKubeClient:    newKubeClient,
+		Store:              store,
+		Config:             cfg,
+		Renderer:           runtime.Renderer{BaseDir: cfg.RenderDir},
+		Logger:             logger,
+		importer:           sourceimport.NewImporter(cfg.ImportWorkDir, logger, builderPodPolicyFromConfig(cfg.BuilderSchedulingJSON, logger)),
+		registryPushBase:   strings.TrimSpace(cfg.RegistryPushBase),
+		registryPullBase:   strings.TrimSpace(cfg.RegistryPullBase),
+		latestGitHubCommit: sourceimport.LatestPublicGitHubCommit,
+		newKubeClient:      newKubeClient,
 	}
 }
 
@@ -69,6 +71,12 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.Config.LeaderElectionRetryPeriod <= 0 {
 		s.Config.LeaderElectionRetryPeriod = 2 * time.Second
 	}
+	if s.Config.GitHubSyncTimeout <= 0 {
+		s.Config.GitHubSyncTimeout = 20 * time.Second
+	}
+	if s.Config.ManagedAppRolloutTimeout <= 0 {
+		s.Config.ManagedAppRolloutTimeout = 10 * time.Minute
+	}
 	if s.Config.LeaderElectionLeaseDuration <= 0 {
 		s.Config.LeaderElectionLeaseDuration = 15 * time.Second
 	}
@@ -87,10 +95,11 @@ func (s *Service) Run(ctx context.Context) error {
 func (s *Service) runActiveLoop(ctx context.Context) error {
 	eventDriven := strings.TrimSpace(s.Config.DatabaseURL) != ""
 	s.Logger.Printf(
-		"controller active loop started; event_driven=%v poll_interval=%s fallback_poll_interval=%s render_dir=%s kubectl_apply=%v",
+		"controller active loop started; event_driven=%v poll_interval=%s fallback_poll_interval=%s github_sync_interval=%s render_dir=%s kubectl_apply=%v",
 		eventDriven,
 		s.Config.PollInterval,
 		s.Config.FallbackPollInterval,
+		s.Config.GitHubSyncInterval,
 		s.Config.RenderDir,
 		s.Config.KubectlApply,
 	)
@@ -105,6 +114,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	if !eventDriven {
 		ticker := time.NewTicker(s.Config.PollInterval)
 		defer ticker.Stop()
+		var githubTicker *time.Ticker
+		if s.Config.GitHubSyncInterval > 0 {
+			githubTicker = time.NewTicker(s.Config.GitHubSyncInterval)
+			defer githubTicker.Stop()
+		}
 
 		for {
 			if err := s.reconcileOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -114,6 +128,10 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
+			case <-githubTickerChan(githubTicker):
+				if err := s.syncGitHubApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
+					s.Logger.Printf("github sync error: %v", err)
+				}
 			case <-ticker.C:
 			}
 		}
@@ -122,6 +140,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	if err := s.reconcileOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		s.Logger.Printf("reconcile error: %v", err)
 	}
+	if s.Config.GitHubSyncInterval > 0 {
+		if err := s.syncGitHubApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			s.Logger.Printf("initial github sync error: %v", err)
+		}
+	}
 
 	staleTicker := time.NewTicker(s.Config.PollInterval)
 	defer staleTicker.Stop()
@@ -129,6 +152,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	defer fallbackTicker.Stop()
 	managedAppTicker := time.NewTicker(s.Config.PollInterval)
 	defer managedAppTicker.Stop()
+	var githubTicker *time.Ticker
+	if s.Config.GitHubSyncInterval > 0 {
+		githubTicker = time.NewTicker(s.Config.GitHubSyncInterval)
+		defer githubTicker.Stop()
+	}
 	operationEvents := listenForOperationEvents(ctx, s.Logger, s.Config.DatabaseURL)
 
 	for {
@@ -162,6 +190,10 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 				if err := s.reconcileManagedApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
 					s.Logger.Printf("periodic managed app reconcile error: %v", err)
 				}
+			}
+		case <-githubTickerChan(githubTicker):
+			if err := s.syncGitHubApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				s.Logger.Printf("github sync error: %v", err)
 			}
 		case <-staleTicker.C:
 			if err := s.markRuntimeOfflineStale(); err != nil {
@@ -276,6 +308,9 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			if err := s.applyManagedAppDesiredState(ctx, app, scheduling); err != nil {
 				return fmt.Errorf("apply managed app desired state %s: %w", app.ID, err)
 			}
+			if err := s.waitForManagedAppRollout(ctx, app); err != nil {
+				return fmt.Errorf("wait for managed app rollout %s: %w", app.ID, err)
+			}
 		}
 	}
 
@@ -308,4 +343,11 @@ func (s *Service) kubeClient() (*kubeClient, error) {
 		factory = newKubeClient
 	}
 	return factory(s.Config.KubectlNamespace)
+}
+
+func githubTickerChan(ticker *time.Ticker) <-chan time.Time {
+	if ticker == nil {
+		return nil
+	}
+	return ticker.C
 }

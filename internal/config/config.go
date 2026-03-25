@@ -36,6 +36,9 @@ type ControllerConfig struct {
 	SourceUploadBaseURL           string
 	ImportWorkDir                 string
 	BuilderSchedulingJSON         string
+	GitHubSyncInterval            time.Duration
+	GitHubSyncTimeout             time.Duration
+	ManagedAppRolloutTimeout      time.Duration
 	PollInterval                  time.Duration
 	FallbackPollInterval          time.Duration
 	RuntimeOfflineAfter           time.Duration
@@ -109,6 +112,9 @@ func ControllerFromEnv() ControllerConfig {
 		SourceUploadBaseURL:           getenv("FUGUE_SOURCE_UPLOAD_BASE_URL", "http://127.0.0.1:8080"),
 		ImportWorkDir:                 getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
 		BuilderSchedulingJSON:         os.Getenv("FUGUE_CONTROLLER_BUILDER_SCHEDULING_JSON"),
+		GitHubSyncInterval:            getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_INTERVAL", time.Minute),
+		GitHubSyncTimeout:             getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_TIMEOUT", 20*time.Second),
+		ManagedAppRolloutTimeout:      getenvDuration("FUGUE_CONTROLLER_MANAGED_APP_ROLLOUT_TIMEOUT", 10*time.Minute),
 		PollInterval:                  getenvDuration("FUGUE_CONTROLLER_POLL_INTERVAL", 5*time.Second),
 		FallbackPollInterval:          getenvDuration("FUGUE_CONTROLLER_FALLBACK_POLL_INTERVAL", 30*time.Second),
 		RuntimeOfflineAfter:           getenvDuration("FUGUE_RUNTIME_OFFLINE_AFTER", 90*time.Second),

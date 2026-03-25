@@ -116,6 +116,43 @@ func TestBuildAppDeploymentTemplateAnnotationsTrackFilesAndRestart(t *testing.T)
 	}
 }
 
+func TestBuildAppDeploymentUsesRollingUpdateAndReadinessProbe(t *testing.T) {
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	deployment := objects[1]
+	spec := deployment["spec"].(map[string]any)
+	strategy := spec["strategy"].(map[string]any)
+	if strategy["type"] != "RollingUpdate" {
+		t.Fatalf("expected RollingUpdate strategy, got %#v", strategy["type"])
+	}
+	rollingUpdate := strategy["rollingUpdate"].(map[string]any)
+	if rollingUpdate["maxUnavailable"] != 0 {
+		t.Fatalf("expected maxUnavailable=0, got %#v", rollingUpdate["maxUnavailable"])
+	}
+	if rollingUpdate["maxSurge"] != 1 {
+		t.Fatalf("expected maxSurge=1, got %#v", rollingUpdate["maxSurge"])
+	}
+
+	template := spec["template"].(map[string]any)
+	podSpec := template["spec"].(map[string]any)
+	containers := podSpec["containers"].([]map[string]any)
+	readinessProbe := containers[0]["readinessProbe"].(map[string]any)
+	tcpSocket := readinessProbe["tcpSocket"].(map[string]any)
+	if tcpSocket["port"] != 8080 {
+		t.Fatalf("expected readiness probe port 8080, got %#v", tcpSocket["port"])
+	}
+}
+
 func TestBuildAppObjectsIncludesPersistentWorkspaceSidecar(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",

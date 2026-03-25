@@ -26,11 +26,13 @@ type kubeDeployment struct {
 		Replicas *int `json:"replicas,omitempty"`
 	} `json:"spec"`
 	Status struct {
-		ObservedGeneration int64                         `json:"observedGeneration,omitempty"`
-		Replicas           int                           `json:"replicas,omitempty"`
-		ReadyReplicas      int                           `json:"readyReplicas,omitempty"`
-		AvailableReplicas  int                           `json:"availableReplicas,omitempty"`
-		Conditions         []runtime.ManagedAppCondition `json:"conditions,omitempty"`
+		ObservedGeneration  int64                         `json:"observedGeneration,omitempty"`
+		Replicas            int                           `json:"replicas,omitempty"`
+		UpdatedReplicas     int                           `json:"updatedReplicas,omitempty"`
+		ReadyReplicas       int                           `json:"readyReplicas,omitempty"`
+		AvailableReplicas   int                           `json:"availableReplicas,omitempty"`
+		UnavailableReplicas int                           `json:"unavailableReplicas,omitempty"`
+		Conditions          []runtime.ManagedAppCondition `json:"conditions,omitempty"`
 	} `json:"status"`
 }
 
