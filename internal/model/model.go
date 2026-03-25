@@ -62,6 +62,9 @@ const (
 	ActorTypeNodeKey   = "node-key"
 	ActorTypeRuntime   = "runtime"
 
+	ClusterNodeWorkloadKindApp            = "app"
+	ClusterNodeWorkloadKindBackingService = "backing_service"
+
 	DefaultAppWorkspaceMountPath = "/workspace"
 	AppWorkspaceInternalDirName  = ".fugue-workspace-state"
 )
@@ -164,19 +167,73 @@ type Machine struct {
 	UpdatedAt         time.Time         `json:"updated_at"`
 }
 
-type ClusterNode struct {
-	Name             string     `json:"name"`
+type ClusterNodeCondition struct {
 	Status           string     `json:"status"`
-	Roles            []string   `json:"roles,omitempty"`
-	InternalIP       string     `json:"internal_ip,omitempty"`
-	ExternalIP       string     `json:"external_ip,omitempty"`
-	KubeletVersion   string     `json:"kubelet_version,omitempty"`
-	OSImage          string     `json:"os_image,omitempty"`
-	KernelVersion    string     `json:"kernel_version,omitempty"`
-	ContainerRuntime string     `json:"container_runtime,omitempty"`
-	RuntimeID        string     `json:"runtime_id,omitempty"`
-	TenantID         string     `json:"tenant_id,omitempty"`
-	CreatedAt        *time.Time `json:"created_at,omitempty"`
+	Reason           string     `json:"reason,omitempty"`
+	Message          string     `json:"message,omitempty"`
+	LastTransitionAt *time.Time `json:"last_transition_at,omitempty"`
+}
+
+type ClusterNodeCPUStats struct {
+	CapacityMilliCores    *int64   `json:"capacity_millicores,omitempty"`
+	AllocatableMilliCores *int64   `json:"allocatable_millicores,omitempty"`
+	UsedMilliCores        *int64   `json:"used_millicores,omitempty"`
+	UsagePercent          *float64 `json:"usage_percent,omitempty"`
+}
+
+type ClusterNodeMemoryStats struct {
+	CapacityBytes    *int64   `json:"capacity_bytes,omitempty"`
+	AllocatableBytes *int64   `json:"allocatable_bytes,omitempty"`
+	UsedBytes        *int64   `json:"used_bytes,omitempty"`
+	UsagePercent     *float64 `json:"usage_percent,omitempty"`
+}
+
+type ClusterNodeStorageStats struct {
+	CapacityBytes    *int64   `json:"capacity_bytes,omitempty"`
+	AllocatableBytes *int64   `json:"allocatable_bytes,omitempty"`
+	UsedBytes        *int64   `json:"used_bytes,omitempty"`
+	UsagePercent     *float64 `json:"usage_percent,omitempty"`
+}
+
+type ClusterNodeWorkloadPod struct {
+	Name  string `json:"name"`
+	Phase string `json:"phase,omitempty"`
+}
+
+type ClusterNodeWorkload struct {
+	Kind        string                   `json:"kind"`
+	ID          string                   `json:"id"`
+	Name        string                   `json:"name"`
+	TenantID    string                   `json:"tenant_id,omitempty"`
+	ProjectID   string                   `json:"project_id,omitempty"`
+	RuntimeID   string                   `json:"runtime_id,omitempty"`
+	ServiceType string                   `json:"service_type,omitempty"`
+	OwnerAppID  string                   `json:"owner_app_id,omitempty"`
+	Namespace   string                   `json:"namespace,omitempty"`
+	Pods        []ClusterNodeWorkloadPod `json:"pods,omitempty"`
+	PodCount    int                      `json:"pod_count"`
+}
+
+type ClusterNode struct {
+	Name             string                          `json:"name"`
+	Status           string                          `json:"status"`
+	Roles            []string                        `json:"roles,omitempty"`
+	InternalIP       string                          `json:"internal_ip,omitempty"`
+	ExternalIP       string                          `json:"external_ip,omitempty"`
+	Region           string                          `json:"region,omitempty"`
+	Zone             string                          `json:"zone,omitempty"`
+	KubeletVersion   string                          `json:"kubelet_version,omitempty"`
+	OSImage          string                          `json:"os_image,omitempty"`
+	KernelVersion    string                          `json:"kernel_version,omitempty"`
+	ContainerRuntime string                          `json:"container_runtime,omitempty"`
+	Conditions       map[string]ClusterNodeCondition `json:"conditions,omitempty"`
+	CPU              *ClusterNodeCPUStats            `json:"cpu,omitempty"`
+	Memory           *ClusterNodeMemoryStats         `json:"memory,omitempty"`
+	EphemeralStorage *ClusterNodeStorageStats        `json:"ephemeral_storage,omitempty"`
+	RuntimeID        string                          `json:"runtime_id,omitempty"`
+	TenantID         string                          `json:"tenant_id,omitempty"`
+	Workloads        []ClusterNodeWorkload           `json:"workloads,omitempty"`
+	CreatedAt        *time.Time                      `json:"created_at,omitempty"`
 }
 
 type AppSource struct {

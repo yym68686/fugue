@@ -243,6 +243,16 @@ func TestBuildAppObjectsUsesBackingServicesWithoutDuplicatingLegacyInlinePostgre
 	}
 
 	appDeployment := objects[5]
+	appLabels := appDeployment["metadata"].(map[string]any)["labels"].(map[string]string)
+	if appLabels[FugueLabelAppID] != "app_demo" {
+		t.Fatalf("expected app id label %q, got %#v", "app_demo", appLabels[FugueLabelAppID])
+	}
+	if appLabels[FugueLabelTenantID] != "tenant_demo" {
+		t.Fatalf("expected tenant id label %q, got %#v", "tenant_demo", appLabels[FugueLabelTenantID])
+	}
+	if appLabels[FugueLabelProjectID] != "project_demo" {
+		t.Fatalf("expected project id label %q, got %#v", "project_demo", appLabels[FugueLabelProjectID])
+	}
 	appTemplate := appDeployment["spec"].(map[string]any)["template"].(map[string]any)
 	appPodSpec := appTemplate["spec"].(map[string]any)
 	envObjects := appPodSpec["containers"].([]map[string]any)[0]["env"].([]map[string]any)
@@ -259,6 +269,16 @@ func TestBuildAppObjectsUsesBackingServicesWithoutDuplicatingLegacyInlinePostgre
 	postgresService := objects[3]
 	if got := postgresService["metadata"].(map[string]any)["name"]; got != "uni-api-demo-postgres" {
 		t.Fatalf("expected managed backing service resource name, got %#v", got)
+	}
+	postgresLabels := postgresService["metadata"].(map[string]any)["labels"].(map[string]string)
+	if postgresLabels[FugueLabelBackingServiceID] != "service_demo" {
+		t.Fatalf("expected backing service id label %q, got %#v", "service_demo", postgresLabels[FugueLabelBackingServiceID])
+	}
+	if postgresLabels[FugueLabelOwnerAppID] != "app_demo" {
+		t.Fatalf("expected owner app id label %q, got %#v", "app_demo", postgresLabels[FugueLabelOwnerAppID])
+	}
+	if postgresLabels[FugueLabelBackingServiceType] != model.BackingServiceTypePostgres {
+		t.Fatalf("expected backing service type label %q, got %#v", model.BackingServiceTypePostgres, postgresLabels[FugueLabelBackingServiceType])
 	}
 }
 

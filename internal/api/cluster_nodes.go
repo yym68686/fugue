@@ -7,20 +7,53 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"net/url"
 	"os"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/runtime"
 )
+
+const (
+	clusterNodePodLabelSelector  = "app.kubernetes.io/managed-by=fugue,app.kubernetes.io/name"
+	clusterNodeStatsConcurrency  = 4
+	clusterNodeConditionReady    = "Ready"
+	clusterNodeConditionMemory   = "MemoryPressure"
+	clusterNodeConditionDisk     = "DiskPressure"
+	clusterNodeConditionPID      = "PIDPressure"
+	clusterNodeLabelRegion       = "topology.kubernetes.io/region"
+	clusterNodeLabelLegacyRegion = "failure-domain.beta.kubernetes.io/region"
+	clusterNodeLabelZone         = "topology.kubernetes.io/zone"
+	clusterNodeLabelLegacyZone   = "failure-domain.beta.kubernetes.io/zone"
+)
+
+var kubeQuantityPattern = regexp.MustCompile(`^([+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)([a-zA-Z]{0,2})$`)
 
 type clusterNodeClient struct {
 	client      *http.Client
 	baseURL     string
 	bearerToken string
+}
+
+type clusterNodeSnapshot struct {
+	node model.ClusterNode
+	pods []clusterNodePod
+}
+
+type clusterWorkloadResolver struct {
+	appsByID                map[string]model.App
+	servicesByID            map[string]model.BackingService
+	appsByNamespacedName    map[string]model.App
+	servicesByNamespacedApp map[string]model.BackingService
 }
 
 type kubeNodeList struct {
@@ -38,11 +71,10 @@ type kubeNode struct {
 			Type    string `json:"type"`
 			Address string `json:"address"`
 		} `json:"addresses"`
-		Conditions []struct {
-			Type   string `json:"type"`
-			Status string `json:"status"`
-		} `json:"conditions"`
-		NodeInfo struct {
+		Conditions  []kubeNodeCondition `json:"conditions"`
+		Capacity    map[string]string   `json:"capacity"`
+		Allocatable map[string]string   `json:"allocatable"`
+		NodeInfo    struct {
 			KubeletVersion   string `json:"kubeletVersion"`
 			OSImage          string `json:"osImage"`
 			KernelVersion    string `json:"kernelVersion"`
@@ -51,15 +83,73 @@ type kubeNode struct {
 	} `json:"status"`
 }
 
+type kubeNodeCondition struct {
+	Type               string `json:"type"`
+	Status             string `json:"status"`
+	Reason             string `json:"reason,omitempty"`
+	Message            string `json:"message,omitempty"`
+	LastTransitionTime string `json:"lastTransitionTime,omitempty"`
+}
+
+type clusterNodePodList struct {
+	Items []clusterNodePod `json:"items"`
+}
+
+type clusterNodePod struct {
+	Metadata struct {
+		Name      string            `json:"name"`
+		Namespace string            `json:"namespace"`
+		Labels    map[string]string `json:"labels"`
+	} `json:"metadata"`
+	Spec struct {
+		NodeName string `json:"nodeName,omitempty"`
+	} `json:"spec"`
+	Status struct {
+		Phase string `json:"phase,omitempty"`
+	} `json:"status"`
+}
+
+type kubeNodeSummary struct {
+	Node kubeNodeSummaryNode `json:"node"`
+}
+
+type kubeNodeSummaryNode struct {
+	NodeName string             `json:"nodeName,omitempty"`
+	CPU      kubeNodeSummaryCPU `json:"cpu,omitempty"`
+	Memory   kubeNodeSummaryMem `json:"memory,omitempty"`
+	FS       kubeNodeSummaryFS  `json:"fs,omitempty"`
+}
+
+type kubeNodeSummaryCPU struct {
+	UsageNanoCores *uint64 `json:"usageNanoCores,omitempty"`
+}
+
+type kubeNodeSummaryMem struct {
+	AvailableBytes  *uint64 `json:"availableBytes,omitempty"`
+	UsageBytes      *uint64 `json:"usageBytes,omitempty"`
+	WorkingSetBytes *uint64 `json:"workingSetBytes,omitempty"`
+}
+
+type kubeNodeSummaryFS struct {
+	AvailableBytes *uint64 `json:"availableBytes,omitempty"`
+	CapacityBytes  *uint64 `json:"capacityBytes,omitempty"`
+	UsedBytes      *uint64 `json:"usedBytes,omitempty"`
+}
+
 func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 
-	client, err := newClusterNodeClient()
+	clientFactory := s.newClusterNodeClient
+	if clientFactory == nil {
+		clientFactory = newClusterNodeClient
+	}
+	client, err := clientFactory()
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	nodes, err := client.listClusterNodes(r.Context())
+
+	snapshots, err := client.listClusterNodeInventory(r.Context())
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -70,29 +160,43 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 		s.writeStoreError(w, err)
 		return
 	}
+	apps, err := s.store.ListApps(principal.TenantID, principal.IsPlatformAdmin())
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	services, err := s.store.ListBackingServices(principal.TenantID, principal.IsPlatformAdmin())
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
 
 	runtimeByClusterNode := make(map[string]model.Runtime, len(runtimes))
-	for _, runtime := range runtimes {
-		name := strings.TrimSpace(runtime.ClusterNodeName)
+	for _, runtimeObj := range runtimes {
+		name := strings.TrimSpace(runtimeObj.ClusterNodeName)
 		if name == "" {
 			continue
 		}
-		if existing, ok := runtimeByClusterNode[name]; ok && existing.UpdatedAt.After(runtime.UpdatedAt) {
+		if existing, ok := runtimeByClusterNode[name]; ok && existing.UpdatedAt.After(runtimeObj.UpdatedAt) {
 			continue
 		}
-		runtimeByClusterNode[name] = runtime
+		runtimeByClusterNode[name] = runtimeObj
 	}
 
-	filtered := make([]model.ClusterNode, 0, len(nodes))
-	for _, node := range nodes {
-		runtime, ok := runtimeByClusterNode[node.Name]
+	workloadResolver := newClusterWorkloadResolver(apps, services)
+
+	filtered := make([]model.ClusterNode, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		node := snapshot.node
+		runtimeObj, ok := runtimeByClusterNode[node.Name]
 		if !principal.IsPlatformAdmin() && !ok {
 			continue
 		}
 		if ok {
-			node.RuntimeID = runtime.ID
-			node.TenantID = runtime.TenantID
+			node.RuntimeID = runtimeObj.ID
+			node.TenantID = runtimeObj.TenantID
 		}
+		node.Workloads = workloadResolver.resolve(snapshot.pods)
 		filtered = append(filtered, node)
 	}
 
@@ -138,31 +242,279 @@ func newClusterNodeClient() (*clusterNodeClient, error) {
 	}, nil
 }
 
-func (c *clusterNodeClient) listClusterNodes(ctx context.Context) ([]model.ClusterNode, error) {
+func (c *clusterNodeClient) listClusterNodeInventory(ctx context.Context) ([]clusterNodeSnapshot, error) {
 	var nodeList kubeNodeList
 	if err := c.doJSON(ctx, http.MethodGet, "/api/v1/nodes", &nodeList); err != nil {
 		return nil, err
 	}
 
-	nodes := make([]model.ClusterNode, 0, len(nodeList.Items))
-	for _, item := range nodeList.Items {
-		node := model.ClusterNode{
-			Name:             strings.TrimSpace(item.Metadata.Name),
-			Status:           kubeNodeReadyStatus(item),
-			Roles:            kubeNodeRoles(item.Metadata.Labels),
-			InternalIP:       kubeNodeAddress(item, "InternalIP"),
-			ExternalIP:       kubeNodeAddress(item, "ExternalIP"),
-			KubeletVersion:   strings.TrimSpace(item.Status.NodeInfo.KubeletVersion),
-			OSImage:          strings.TrimSpace(item.Status.NodeInfo.OSImage),
-			KernelVersion:    strings.TrimSpace(item.Status.NodeInfo.KernelVersion),
-			ContainerRuntime: strings.TrimSpace(item.Status.NodeInfo.ContainerRuntime),
-		}
-		if createdAt := parseClusterNodeTimestamp(item.Metadata.CreationTimestamp); createdAt != nil {
-			node.CreatedAt = createdAt
-		}
-		nodes = append(nodes, node)
+	podsByNode, err := c.listFuguePodsByNode(ctx)
+	if err != nil {
+		return nil, err
 	}
-	return nodes, nil
+
+	summariesByNode, err := c.listNodeSummaries(ctx, nodeList.Items)
+	if err != nil {
+		return nil, err
+	}
+
+	snapshots := make([]clusterNodeSnapshot, 0, len(nodeList.Items))
+	for _, item := range nodeList.Items {
+		name := strings.TrimSpace(item.Metadata.Name)
+		snapshots = append(snapshots, clusterNodeSnapshot{
+			node: buildClusterNode(item, summariesByNode[name]),
+			pods: podsByNode[name],
+		})
+	}
+	return snapshots, nil
+}
+
+func (c *clusterNodeClient) listFuguePodsByNode(ctx context.Context) (map[string][]clusterNodePod, error) {
+	query := url.Values{}
+	query.Set("labelSelector", clusterNodePodLabelSelector)
+
+	var podList clusterNodePodList
+	if err := c.doJSON(ctx, http.MethodGet, "/api/v1/pods?"+query.Encode(), &podList); err != nil {
+		return nil, err
+	}
+
+	podsByNode := make(map[string][]clusterNodePod)
+	for _, pod := range podList.Items {
+		nodeName := strings.TrimSpace(pod.Spec.NodeName)
+		if nodeName == "" {
+			continue
+		}
+		phase := strings.TrimSpace(pod.Status.Phase)
+		if strings.EqualFold(phase, "Succeeded") || strings.EqualFold(phase, "Failed") {
+			continue
+		}
+		podsByNode[nodeName] = append(podsByNode[nodeName], pod)
+	}
+	return podsByNode, nil
+}
+
+func (c *clusterNodeClient) listNodeSummaries(ctx context.Context, nodes []kubeNode) (map[string]*kubeNodeSummary, error) {
+	nodeNames := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		name := strings.TrimSpace(node.Metadata.Name)
+		if name == "" {
+			continue
+		}
+		nodeNames = append(nodeNames, name)
+	}
+	if len(nodeNames) == 0 {
+		return map[string]*kubeNodeSummary{}, nil
+	}
+
+	summaries := make(map[string]*kubeNodeSummary, len(nodeNames))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(nodeNames))
+	sem := make(chan struct{}, clusterNodeStatsConcurrency)
+
+	for _, nodeName := range nodeNames {
+		nodeName := nodeName
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			}
+			defer func() { <-sem }()
+
+			summary, err := c.getNodeSummary(ctx, nodeName)
+			if err != nil {
+				errCh <- fmt.Errorf("read stats summary for node %s: %w", nodeName, err)
+				return
+			}
+
+			mu.Lock()
+			summaries[nodeName] = summary
+			mu.Unlock()
+		}()
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	var firstErr error
+	for err := range errCh {
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if len(summaries) == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+	return summaries, nil
+}
+
+func (c *clusterNodeClient) getNodeSummary(ctx context.Context, nodeName string) (*kubeNodeSummary, error) {
+	var summary kubeNodeSummary
+	apiPath := "/api/v1/nodes/" + url.PathEscape(strings.TrimSpace(nodeName)) + "/proxy/stats/summary"
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, &summary); err != nil {
+		return nil, err
+	}
+	return &summary, nil
+}
+
+func buildClusterNode(node kubeNode, summary *kubeNodeSummary) model.ClusterNode {
+	out := model.ClusterNode{
+		Name:             strings.TrimSpace(node.Metadata.Name),
+		Status:           kubeNodeReadyStatus(node),
+		Roles:            kubeNodeRoles(node.Metadata.Labels),
+		InternalIP:       kubeNodeAddress(node, "InternalIP"),
+		ExternalIP:       kubeNodeAddress(node, "ExternalIP"),
+		Region:           kubeNodeRegion(node.Metadata.Labels),
+		Zone:             kubeNodeZone(node.Metadata.Labels),
+		KubeletVersion:   strings.TrimSpace(node.Status.NodeInfo.KubeletVersion),
+		OSImage:          strings.TrimSpace(node.Status.NodeInfo.OSImage),
+		KernelVersion:    strings.TrimSpace(node.Status.NodeInfo.KernelVersion),
+		ContainerRuntime: strings.TrimSpace(node.Status.NodeInfo.ContainerRuntime),
+		Conditions:       buildClusterNodeConditions(node.Status.Conditions),
+		CPU:              buildClusterNodeCPUStats(node, summary),
+		Memory:           buildClusterNodeMemoryStats(node, summary),
+		EphemeralStorage: buildClusterNodeStorageStats(node, summary),
+	}
+	if createdAt := parseClusterNodeTimestamp(node.Metadata.CreationTimestamp); createdAt != nil {
+		out.CreatedAt = createdAt
+	}
+	return out
+}
+
+func buildClusterNodeConditions(conditions []kubeNodeCondition) map[string]model.ClusterNodeCondition {
+	if len(conditions) == 0 {
+		return nil
+	}
+
+	out := make(map[string]model.ClusterNodeCondition, len(conditions))
+	for _, condition := range conditions {
+		conditionType := strings.TrimSpace(condition.Type)
+		if conditionType == "" {
+			continue
+		}
+		item := model.ClusterNodeCondition{
+			Status:  normalizeKubeConditionStatus(condition.Status),
+			Reason:  strings.TrimSpace(condition.Reason),
+			Message: strings.TrimSpace(condition.Message),
+		}
+		if transitionedAt := parseClusterNodeTimestamp(condition.LastTransitionTime); transitionedAt != nil {
+			item.LastTransitionAt = transitionedAt
+		}
+		out[conditionType] = item
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func buildClusterNodeCPUStats(node kubeNode, summary *kubeNodeSummary) *model.ClusterNodeCPUStats {
+	capacity := int64PointerFromQuantity(node.Status.Capacity["cpu"], parseCPUQuantityMilli)
+	allocatable := int64PointerFromQuantity(node.Status.Allocatable["cpu"], parseCPUQuantityMilli)
+	used := clusterNodeCPUMilliUsage(summary)
+
+	stats := &model.ClusterNodeCPUStats{
+		CapacityMilliCores:    capacity,
+		AllocatableMilliCores: allocatable,
+		UsedMilliCores:        used,
+		UsagePercent:          usagePercent(used, allocatable, capacity),
+	}
+	if isEmptyClusterNodeCPUStats(stats) {
+		return nil
+	}
+	return stats
+}
+
+func buildClusterNodeMemoryStats(node kubeNode, summary *kubeNodeSummary) *model.ClusterNodeMemoryStats {
+	capacity := int64PointerFromQuantity(node.Status.Capacity["memory"], parseBytesQuantity)
+	allocatable := int64PointerFromQuantity(node.Status.Allocatable["memory"], parseBytesQuantity)
+	used := clusterNodeMemoryUsage(summary, capacity)
+
+	stats := &model.ClusterNodeMemoryStats{
+		CapacityBytes:    capacity,
+		AllocatableBytes: allocatable,
+		UsedBytes:        used,
+		UsagePercent:     usagePercent(used, allocatable, capacity),
+	}
+	if isEmptyClusterNodeMemoryStats(stats) {
+		return nil
+	}
+	return stats
+}
+
+func buildClusterNodeStorageStats(node kubeNode, summary *kubeNodeSummary) *model.ClusterNodeStorageStats {
+	capacity := int64PointerFromQuantity(node.Status.Capacity["ephemeral-storage"], parseBytesQuantity)
+	allocatable := int64PointerFromQuantity(node.Status.Allocatable["ephemeral-storage"], parseBytesQuantity)
+	used, summaryCapacity := clusterNodeStorageUsage(summary)
+	if capacity == nil && summaryCapacity != nil {
+		capacity = summaryCapacity
+	}
+
+	stats := &model.ClusterNodeStorageStats{
+		CapacityBytes:    capacity,
+		AllocatableBytes: allocatable,
+		UsedBytes:        used,
+		UsagePercent:     usagePercent(used, summaryCapacity, allocatable, capacity),
+	}
+	if isEmptyClusterNodeStorageStats(stats) {
+		return nil
+	}
+	return stats
+}
+
+func clusterNodeCPUMilliUsage(summary *kubeNodeSummary) *int64 {
+	if summary == nil || summary.Node.CPU.UsageNanoCores == nil {
+		return nil
+	}
+	value := int64(math.Round(float64(*summary.Node.CPU.UsageNanoCores) / 1_000_000))
+	return &value
+}
+
+func clusterNodeMemoryUsage(summary *kubeNodeSummary, capacity *int64) *int64 {
+	if summary == nil {
+		return nil
+	}
+	if summary.Node.Memory.WorkingSetBytes != nil {
+		return uint64PointerToInt64(summary.Node.Memory.WorkingSetBytes)
+	}
+	if summary.Node.Memory.UsageBytes != nil {
+		return uint64PointerToInt64(summary.Node.Memory.UsageBytes)
+	}
+	if summary.Node.Memory.AvailableBytes == nil || capacity == nil {
+		return nil
+	}
+	if *summary.Node.Memory.AvailableBytes > uint64(*capacity) {
+		return nil
+	}
+	value := *capacity - int64(*summary.Node.Memory.AvailableBytes)
+	return &value
+}
+
+func clusterNodeStorageUsage(summary *kubeNodeSummary) (*int64, *int64) {
+	if summary == nil {
+		return nil, nil
+	}
+
+	var capacity *int64
+	if summary.Node.FS.CapacityBytes != nil {
+		capacity = uint64PointerToInt64(summary.Node.FS.CapacityBytes)
+	}
+	if summary.Node.FS.UsedBytes != nil {
+		return uint64PointerToInt64(summary.Node.FS.UsedBytes), capacity
+	}
+	if summary.Node.FS.AvailableBytes == nil || summary.Node.FS.CapacityBytes == nil {
+		return nil, capacity
+	}
+	if *summary.Node.FS.AvailableBytes > *summary.Node.FS.CapacityBytes {
+		return nil, capacity
+	}
+	value := int64(*summary.Node.FS.CapacityBytes - *summary.Node.FS.AvailableBytes)
+	return &value, capacity
 }
 
 func (c *clusterNodeClient) doJSON(ctx context.Context, method, apiPath string, out any) error {
@@ -191,9 +543,228 @@ func (c *clusterNodeClient) doJSON(ctx context.Context, method, apiPath string, 
 	return nil
 }
 
+func newClusterWorkloadResolver(apps []model.App, services []model.BackingService) clusterWorkloadResolver {
+	resolver := clusterWorkloadResolver{
+		appsByID:                make(map[string]model.App, len(apps)),
+		servicesByID:            make(map[string]model.BackingService, len(services)),
+		appsByNamespacedName:    make(map[string]model.App, len(apps)),
+		servicesByNamespacedApp: make(map[string]model.BackingService, len(services)),
+	}
+
+	appConflicts := make(map[string]struct{})
+	for _, app := range apps {
+		if id := strings.TrimSpace(app.ID); id != "" {
+			resolver.appsByID[id] = app
+		}
+		key := clusterNamespacedResourceKey(runtime.NamespaceForTenant(app.TenantID), runtimeResourceName(app.Name))
+		if key == "" {
+			continue
+		}
+		if existing, ok := resolver.appsByNamespacedName[key]; ok && existing.ID != app.ID {
+			appConflicts[key] = struct{}{}
+			continue
+		}
+		if _, conflicted := appConflicts[key]; conflicted {
+			continue
+		}
+		resolver.appsByNamespacedName[key] = app
+	}
+	for key := range appConflicts {
+		delete(resolver.appsByNamespacedName, key)
+	}
+
+	serviceConflicts := make(map[string]struct{})
+	for _, service := range services {
+		if id := strings.TrimSpace(service.ID); id != "" {
+			resolver.servicesByID[id] = service
+		}
+		key := clusterNamespacedResourceKey(runtime.NamespaceForTenant(service.TenantID), clusterBackingServiceResourceName(service))
+		if key == "" {
+			continue
+		}
+		if existing, ok := resolver.servicesByNamespacedApp[key]; ok && existing.ID != service.ID {
+			serviceConflicts[key] = struct{}{}
+			continue
+		}
+		if _, conflicted := serviceConflicts[key]; conflicted {
+			continue
+		}
+		resolver.servicesByNamespacedApp[key] = service
+	}
+	for key := range serviceConflicts {
+		delete(resolver.servicesByNamespacedApp, key)
+	}
+
+	return resolver
+}
+
+func (r clusterWorkloadResolver) resolve(pods []clusterNodePod) []model.ClusterNodeWorkload {
+	if len(pods) == 0 {
+		return nil
+	}
+
+	workloads := make(map[string]*model.ClusterNodeWorkload)
+	for _, pod := range pods {
+		workload, ok := r.resolvePod(pod)
+		if !ok {
+			continue
+		}
+		workloadKey := workload.Kind + "\x00" + workload.ID
+		if workloadKey == "\x00" {
+			continue
+		}
+		entry, exists := workloads[workloadKey]
+		if !exists {
+			copied := workload
+			entry = &copied
+			workloads[workloadKey] = entry
+		}
+		entry.Pods = append(entry.Pods, model.ClusterNodeWorkloadPod{
+			Name:  strings.TrimSpace(pod.Metadata.Name),
+			Phase: strings.TrimSpace(pod.Status.Phase),
+		})
+		entry.PodCount = len(entry.Pods)
+	}
+
+	if len(workloads) == 0 {
+		return nil
+	}
+
+	out := make([]model.ClusterNodeWorkload, 0, len(workloads))
+	for _, workload := range workloads {
+		sort.Slice(workload.Pods, func(i, j int) bool {
+			if workload.Pods[i].Name == workload.Pods[j].Name {
+				return workload.Pods[i].Phase < workload.Pods[j].Phase
+			}
+			return workload.Pods[i].Name < workload.Pods[j].Name
+		})
+		workload.PodCount = len(workload.Pods)
+		out = append(out, *workload)
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Kind == out[j].Kind {
+			if out[i].Name == out[j].Name {
+				return out[i].ID < out[j].ID
+			}
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Kind < out[j].Kind
+	})
+
+	return out
+}
+
+func (r clusterWorkloadResolver) resolvePod(pod clusterNodePod) (model.ClusterNodeWorkload, bool) {
+	labels := pod.Metadata.Labels
+	if len(labels) == 0 {
+		return model.ClusterNodeWorkload{}, false
+	}
+
+	if appID := strings.TrimSpace(labels[runtime.FugueLabelAppID]); appID != "" {
+		if app, ok := r.appsByID[appID]; ok {
+			return clusterNodeWorkloadForApp(app, pod.Metadata.Namespace), true
+		}
+	}
+	if serviceID := strings.TrimSpace(labels[runtime.FugueLabelBackingServiceID]); serviceID != "" {
+		if service, ok := r.servicesByID[serviceID]; ok {
+			return clusterNodeWorkloadForService(service, pod.Metadata.Namespace), true
+		}
+	}
+
+	if !strings.EqualFold(strings.TrimSpace(labels[runtime.FugueLabelManagedBy]), runtime.FugueLabelManagedByValue) {
+		return model.ClusterNodeWorkload{}, false
+	}
+	resourceName := strings.TrimSpace(labels[runtime.FugueLabelName])
+	if resourceName == "" {
+		return model.ClusterNodeWorkload{}, false
+	}
+	key := clusterNamespacedResourceKey(strings.TrimSpace(pod.Metadata.Namespace), resourceName)
+	if key == "" {
+		return model.ClusterNodeWorkload{}, false
+	}
+
+	if strings.EqualFold(strings.TrimSpace(labels[runtime.FugueLabelComponent]), "postgres") {
+		service, ok := r.servicesByNamespacedApp[key]
+		if !ok {
+			return model.ClusterNodeWorkload{}, false
+		}
+		return clusterNodeWorkloadForService(service, pod.Metadata.Namespace), true
+	}
+
+	app, ok := r.appsByNamespacedName[key]
+	if !ok {
+		return model.ClusterNodeWorkload{}, false
+	}
+	return clusterNodeWorkloadForApp(app, pod.Metadata.Namespace), true
+}
+
+func clusterNodeWorkloadForApp(app model.App, namespace string) model.ClusterNodeWorkload {
+	runtimeID := strings.TrimSpace(app.Status.CurrentRuntimeID)
+	if runtimeID == "" {
+		runtimeID = strings.TrimSpace(app.Spec.RuntimeID)
+	}
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		namespace = runtime.NamespaceForTenant(app.TenantID)
+	}
+	return model.ClusterNodeWorkload{
+		Kind:      model.ClusterNodeWorkloadKindApp,
+		ID:        app.ID,
+		Name:      app.Name,
+		TenantID:  app.TenantID,
+		ProjectID: app.ProjectID,
+		RuntimeID: runtimeID,
+		Namespace: namespace,
+	}
+}
+
+func clusterNodeWorkloadForService(service model.BackingService, namespace string) model.ClusterNodeWorkload {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		namespace = runtime.NamespaceForTenant(service.TenantID)
+	}
+	return model.ClusterNodeWorkload{
+		Kind:        model.ClusterNodeWorkloadKindBackingService,
+		ID:          service.ID,
+		Name:        service.Name,
+		TenantID:    service.TenantID,
+		ProjectID:   service.ProjectID,
+		ServiceType: service.Type,
+		OwnerAppID:  service.OwnerAppID,
+		Namespace:   namespace,
+	}
+}
+
+func clusterBackingServiceResourceName(service model.BackingService) string {
+	if service.Spec.Postgres != nil {
+		if serviceName := strings.TrimSpace(service.Spec.Postgres.ServiceName); serviceName != "" {
+			return serviceName
+		}
+	}
+
+	name := runtimeResourceName(service.Name)
+	if name == "" {
+		return ""
+	}
+	if strings.EqualFold(strings.TrimSpace(service.Type), model.BackingServiceTypePostgres) && !strings.HasSuffix(name, "-postgres") {
+		return name + "-postgres"
+	}
+	return name
+}
+
+func clusterNamespacedResourceKey(namespace, resourceName string) string {
+	namespace = strings.TrimSpace(namespace)
+	resourceName = strings.TrimSpace(resourceName)
+	if namespace == "" || resourceName == "" {
+		return ""
+	}
+	return namespace + "\x00" + resourceName
+}
+
 func kubeNodeReadyStatus(node kubeNode) string {
 	for _, condition := range node.Status.Conditions {
-		if strings.EqualFold(strings.TrimSpace(condition.Type), "Ready") {
+		if strings.EqualFold(strings.TrimSpace(condition.Type), clusterNodeConditionReady) {
 			switch strings.ToLower(strings.TrimSpace(condition.Status)) {
 			case "true":
 				return "ready"
@@ -247,12 +818,186 @@ func kubeNodeAddress(node kubeNode, addressType string) string {
 	return ""
 }
 
+func kubeNodeRegion(labels map[string]string) string {
+	return firstNodeLabel(labels, clusterNodeLabelRegion, clusterNodeLabelLegacyRegion, "region")
+}
+
+func kubeNodeZone(labels map[string]string) string {
+	return firstNodeLabel(labels, clusterNodeLabelZone, clusterNodeLabelLegacyZone, "zone")
+}
+
+func firstNodeLabel(labels map[string]string, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(labels[key]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func normalizeKubeConditionStatus(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true":
+		return "true"
+	case "false":
+		return "false"
+	default:
+		return "unknown"
+	}
+}
+
+func int64PointerFromQuantity(value string, parse func(string) (int64, bool)) *int64 {
+	parsed, ok := parse(value)
+	if !ok {
+		return nil
+	}
+	return &parsed
+}
+
+func uint64PointerToInt64(value *uint64) *int64 {
+	if value == nil || *value > uint64(^uint64(0)>>1) {
+		return nil
+	}
+	parsed := int64(*value)
+	return &parsed
+}
+
+func usagePercent(used *int64, totals ...*int64) *float64 {
+	if used == nil || *used < 0 {
+		return nil
+	}
+	for _, total := range totals {
+		if total == nil || *total <= 0 {
+			continue
+		}
+		value := math.Round((float64(*used)/float64(*total))*1000) / 10
+		return &value
+	}
+	return nil
+}
+
+func isEmptyClusterNodeCPUStats(stats *model.ClusterNodeCPUStats) bool {
+	return stats == nil ||
+		(stats.CapacityMilliCores == nil &&
+			stats.AllocatableMilliCores == nil &&
+			stats.UsedMilliCores == nil &&
+			stats.UsagePercent == nil)
+}
+
+func isEmptyClusterNodeMemoryStats(stats *model.ClusterNodeMemoryStats) bool {
+	return stats == nil ||
+		(stats.CapacityBytes == nil &&
+			stats.AllocatableBytes == nil &&
+			stats.UsedBytes == nil &&
+			stats.UsagePercent == nil)
+}
+
+func isEmptyClusterNodeStorageStats(stats *model.ClusterNodeStorageStats) bool {
+	return stats == nil ||
+		(stats.CapacityBytes == nil &&
+			stats.AllocatableBytes == nil &&
+			stats.UsedBytes == nil &&
+			stats.UsagePercent == nil)
+}
+
+func parseCPUQuantityMilli(value string) (int64, bool) {
+	number, suffix, ok := splitKubeQuantity(value)
+	if !ok {
+		return 0, false
+	}
+
+	multiplier := 0.0
+	switch suffix {
+	case "n":
+		multiplier = 1.0 / 1_000_000
+	case "u":
+		multiplier = 1.0 / 1_000
+	case "m":
+		multiplier = 1
+	case "":
+		multiplier = 1_000
+	case "k", "K":
+		multiplier = 1_000_000
+	case "M":
+		multiplier = 1_000_000_000
+	case "G":
+		multiplier = 1_000_000_000_000
+	case "T":
+		multiplier = 1_000_000_000_000_000
+	default:
+		return 0, false
+	}
+
+	parsed, err := strconv.ParseFloat(number, 64)
+	if err != nil {
+		return 0, false
+	}
+	return int64(math.Round(parsed * multiplier)), true
+}
+
+func parseBytesQuantity(value string) (int64, bool) {
+	number, suffix, ok := splitKubeQuantity(value)
+	if !ok {
+		return 0, false
+	}
+
+	multiplier := 0.0
+	switch suffix {
+	case "":
+		multiplier = 1
+	case "K":
+		multiplier = 1_000
+	case "M":
+		multiplier = 1_000_000
+	case "G":
+		multiplier = 1_000_000_000
+	case "T":
+		multiplier = 1_000_000_000_000
+	case "P":
+		multiplier = 1_000_000_000_000_000
+	case "E":
+		multiplier = 1_000_000_000_000_000_000
+	case "Ki":
+		multiplier = 1 << 10
+	case "Mi":
+		multiplier = 1 << 20
+	case "Gi":
+		multiplier = 1 << 30
+	case "Ti":
+		multiplier = 1 << 40
+	case "Pi":
+		multiplier = 1 << 50
+	case "Ei":
+		multiplier = 1 << 60
+	default:
+		return 0, false
+	}
+
+	parsed, err := strconv.ParseFloat(number, 64)
+	if err != nil {
+		return 0, false
+	}
+	return int64(math.Round(parsed * multiplier)), true
+}
+
+func splitKubeQuantity(value string) (string, string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", "", false
+	}
+	matches := kubeQuantityPattern.FindStringSubmatch(value)
+	if len(matches) != 3 {
+		return "", "", false
+	}
+	return matches[1], matches[2], true
+}
+
 func parseClusterNodeTimestamp(value string) *time.Time {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return nil
 	}
-	parsed, err := time.Parse(time.RFC3339, value)
+	parsed, err := time.Parse(time.RFC3339Nano, value)
 	if err != nil {
 		return nil
 	}

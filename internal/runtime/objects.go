@@ -24,23 +24,24 @@ func buildAppObjects(app model.App, scheduling SchedulingConstraints) []map[stri
 	namespace := NamespaceForTenant(app.TenantID)
 	appName := sanitizeName(app.Name)
 	postgresResources := managedPostgresResources(namespace, app)
+	labels := appLabels(app)
 	objects := []map[string]any{
 		buildNamespaceObject(namespace),
 	}
 
 	if len(app.Spec.Files) > 0 {
-		objects = append(objects, buildAppFilesSecretObject(namespace, appName, app.Spec.Files))
+		objects = append(objects, buildAppFilesSecretObject(namespace, appName, app.Spec.Files, labels))
 	}
 
 	for _, postgres := range postgresResources {
+		postgresLabels := postgresLabels(postgres)
 		objects = append(objects,
-			buildPostgresSecretObject(namespace, postgres.secretName, postgres.resourceName, postgres.spec),
-			buildPostgresServiceObject(namespace, postgres.resourceName, postgres.spec),
-			buildPostgresDeploymentObject(namespace, postgres.secretName, postgres.resourceName, postgres.spec, scheduling),
+			buildPostgresSecretObject(namespace, postgres.secretName, postgresLabels, postgres.spec),
+			buildPostgresServiceObject(namespace, postgres.resourceName, postgresLabels, postgres.spec),
+			buildPostgresDeploymentObject(namespace, postgres.secretName, postgres.resourceName, postgresLabels, postgres.spec, scheduling),
 		)
 	}
 
-	labels := appLabels(appName)
 	objects = append(objects,
 		buildAppDeploymentObject(namespace, app, labels, scheduling, postgresResources),
 		buildAppServiceObject(namespace, app, labels),
@@ -58,22 +59,48 @@ func buildNamespaceObject(namespace string) map[string]any {
 	}
 }
 
-func appLabels(appName string) map[string]string {
-	return map[string]string{
-		"app.kubernetes.io/name":       appName,
-		"app.kubernetes.io/managed-by": "fugue",
+func appLabels(app model.App) map[string]string {
+	labels := map[string]string{
+		FugueLabelName:      sanitizeName(app.Name),
+		FugueLabelManagedBy: FugueLabelManagedByValue,
 	}
+	if id := strings.TrimSpace(app.ID); id != "" {
+		labels[FugueLabelAppID] = id
+	}
+	if tenantID := strings.TrimSpace(app.TenantID); tenantID != "" {
+		labels[FugueLabelTenantID] = tenantID
+	}
+	if projectID := strings.TrimSpace(app.ProjectID); projectID != "" {
+		labels[FugueLabelProjectID] = projectID
+	}
+	return labels
 }
 
-func postgresLabels(resourceName string) map[string]string {
-	return map[string]string{
-		"app.kubernetes.io/name":       resourceName,
-		"app.kubernetes.io/component":  "postgres",
-		"app.kubernetes.io/managed-by": "fugue",
+func postgresLabels(resource postgresRuntimeResource) map[string]string {
+	labels := map[string]string{
+		FugueLabelName:      resource.resourceName,
+		FugueLabelComponent: "postgres",
+		FugueLabelManagedBy: FugueLabelManagedByValue,
 	}
+	if tenantID := strings.TrimSpace(resource.tenantID); tenantID != "" {
+		labels[FugueLabelTenantID] = tenantID
+	}
+	if projectID := strings.TrimSpace(resource.projectID); projectID != "" {
+		labels[FugueLabelProjectID] = projectID
+	}
+	if serviceID := strings.TrimSpace(resource.serviceID); serviceID != "" {
+		labels[FugueLabelBackingServiceID] = serviceID
+	}
+	if serviceType := strings.TrimSpace(resource.serviceType); serviceType != "" {
+		labels[FugueLabelBackingServiceType] = serviceType
+	}
+	if ownerAppID := strings.TrimSpace(resource.ownerAppID); ownerAppID != "" {
+		labels[FugueLabelOwnerAppID] = ownerAppID
+	}
+	return labels
 }
 
-func buildAppFilesSecretObject(namespace, appName string, files []model.AppFile) map[string]any {
+func buildAppFilesSecretObject(namespace, appName string, files []model.AppFile, labels map[string]string) map[string]any {
 	stringData := make(map[string]string, len(files))
 	for index, file := range files {
 		stringData[fileKey(index)] = file.Content
@@ -84,21 +111,21 @@ func buildAppFilesSecretObject(namespace, appName string, files []model.AppFile)
 		"metadata": map[string]any{
 			"name":      appFilesSecretName(appName),
 			"namespace": namespace,
-			"labels":    appLabels(appName),
+			"labels":    labels,
 		},
 		"type":       "Opaque",
 		"stringData": stringData,
 	}
 }
 
-func buildPostgresSecretObject(namespace, secretName, resourceName string, spec model.AppPostgresSpec) map[string]any {
+func buildPostgresSecretObject(namespace, secretName string, labels map[string]string, spec model.AppPostgresSpec) map[string]any {
 	return map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Secret",
 		"metadata": map[string]any{
 			"name":      secretName,
 			"namespace": namespace,
-			"labels":    postgresLabels(resourceName),
+			"labels":    labels,
 		},
 		"type": "Opaque",
 		"stringData": map[string]string{
@@ -109,8 +136,7 @@ func buildPostgresSecretObject(namespace, secretName, resourceName string, spec 
 	}
 }
 
-func buildPostgresServiceObject(namespace, resourceName string, spec model.AppPostgresSpec) map[string]any {
-	labels := postgresLabels(resourceName)
+func buildPostgresServiceObject(namespace, resourceName string, labels map[string]string, spec model.AppPostgresSpec) map[string]any {
 	return map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Service",
@@ -133,8 +159,7 @@ func buildPostgresServiceObject(namespace, resourceName string, spec model.AppPo
 	}
 }
 
-func buildPostgresDeploymentObject(namespace, secretName, resourceName string, spec model.AppPostgresSpec, scheduling SchedulingConstraints) map[string]any {
-	labels := postgresLabels(resourceName)
+func buildPostgresDeploymentObject(namespace, secretName, resourceName string, labels map[string]string, spec model.AppPostgresSpec, scheduling SchedulingConstraints) map[string]any {
 	podSpec := map[string]any{
 		"initContainers": []map[string]any{
 			{
@@ -384,6 +409,11 @@ type postgresRuntimeResource struct {
 	resourceName string
 	secretName   string
 	spec         model.AppPostgresSpec
+	serviceID    string
+	serviceType  string
+	ownerAppID   string
+	tenantID     string
+	projectID    string
 }
 
 func managedPostgresResources(namespace string, app model.App) []postgresRuntimeResource {
@@ -411,6 +441,11 @@ func managedPostgresResources(namespace string, app model.App) []postgresRuntime
 			resourceName: spec.ServiceName,
 			secretName:   postgresSecretName(baseName),
 			spec:         spec,
+			serviceID:    service.ID,
+			serviceType:  service.Type,
+			ownerAppID:   service.OwnerAppID,
+			tenantID:     service.TenantID,
+			projectID:    service.ProjectID,
 		})
 	}
 
@@ -422,6 +457,10 @@ func managedPostgresResources(namespace string, app model.App) []postgresRuntime
 			resourceName: spec.ServiceName,
 			secretName:   postgresSecretName(baseName),
 			spec:         spec,
+			serviceType:  model.BackingServiceTypePostgres,
+			ownerAppID:   app.ID,
+			tenantID:     app.TenantID,
+			projectID:    app.ProjectID,
 		})
 	}
 

@@ -1,0 +1,301 @@
+package api
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"testing"
+
+	"fugue/internal/auth"
+	"fugue/internal/model"
+	"fugue/internal/runtime"
+	"fugue/internal/store"
+)
+
+func TestListClusterNodesIncludesMetricsConditionsAndWorkloads(t *testing.T) {
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Cluster Nodes Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "cluster-node")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	_, runtimeObj, err := s.BootstrapClusterNode(nodeSecret, "worker-1", "https://worker-1.example.com", map[string]string{"zone": "test-a"}, "", "")
+	if err != nil {
+		t.Fatalf("bootstrap cluster node: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "viewer", []string{"project.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: runtimeObj.ID,
+		Postgres: &model.AppPostgresSpec{
+			Database: "demo",
+			User:     "demo",
+			Password: "secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if len(app.BackingServices) != 1 {
+		t.Fatalf("expected one backing service, got %d", len(app.BackingServices))
+	}
+	service := app.BackingServices[0]
+	namespace := runtime.NamespaceForTenant(tenant.ID)
+
+	kubeServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/api/v1/nodes":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{
+							"name":              "worker-1",
+							"creationTimestamp": "2026-03-25T00:00:00Z",
+							"labels": map[string]string{
+								"node-role.kubernetes.io/worker": "",
+								"topology.kubernetes.io/region":  "ap-southeast-1",
+								"topology.kubernetes.io/zone":    "ap-southeast-1a",
+							},
+						},
+						"status": map[string]any{
+							"addresses": []map[string]string{
+								{"type": "InternalIP", "address": "10.0.0.10"},
+								{"type": "ExternalIP", "address": "203.0.113.10"},
+							},
+							"conditions": []map[string]string{
+								{
+									"type":               "Ready",
+									"status":             "True",
+									"reason":             "KubeletReady",
+									"message":            "kubelet is posting ready status",
+									"lastTransitionTime": "2026-03-25T00:01:00Z",
+								},
+								{
+									"type":               "MemoryPressure",
+									"status":             "False",
+									"reason":             "KubeletHasSufficientMemory",
+									"message":            "kubelet has sufficient memory available",
+									"lastTransitionTime": "2026-03-25T00:01:00Z",
+								},
+								{
+									"type":               "DiskPressure",
+									"status":             "False",
+									"reason":             "KubeletHasNoDiskPressure",
+									"message":            "kubelet has no disk pressure",
+									"lastTransitionTime": "2026-03-25T00:01:00Z",
+								},
+								{
+									"type":               "PIDPressure",
+									"status":             "True",
+									"reason":             "KubeletHasInsufficientPID",
+									"message":            "kubelet has insufficient PID available",
+									"lastTransitionTime": "2026-03-25T00:01:00Z",
+								},
+							},
+							"capacity": map[string]string{
+								"cpu":               "4",
+								"memory":            "16Gi",
+								"ephemeral-storage": "200Gi",
+							},
+							"allocatable": map[string]string{
+								"cpu":               "3900m",
+								"memory":            "15Gi",
+								"ephemeral-storage": "180Gi",
+							},
+							"nodeInfo": map[string]string{
+								"kubeletVersion":          "v1.32.2",
+								"osImage":                 "Ubuntu 24.04.1 LTS",
+								"kernelVersion":           "6.8.0",
+								"containerRuntimeVersion": "containerd://2.0.0",
+							},
+						},
+					},
+				},
+			})
+		case "/api/v1/pods":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{
+							"name":      "demo-7b95d6b54f-z2f4g",
+							"namespace": namespace,
+							"labels": map[string]string{
+								"app.kubernetes.io/name":       "demo",
+								"app.kubernetes.io/managed-by": "fugue",
+							},
+						},
+						"spec": map[string]any{
+							"nodeName": "worker-1",
+						},
+						"status": map[string]any{
+							"phase": "Running",
+						},
+					},
+					{
+						"metadata": map[string]any{
+							"name":      "demo-postgres-65b74ff98f-9hf6x",
+							"namespace": namespace,
+							"labels": map[string]string{
+								"app.kubernetes.io/name":       service.Spec.Postgres.ServiceName,
+								"app.kubernetes.io/managed-by": "fugue",
+								"app.kubernetes.io/component":  "postgres",
+							},
+						},
+						"spec": map[string]any{
+							"nodeName": "worker-1",
+						},
+						"status": map[string]any{
+							"phase": "Running",
+						},
+					},
+				},
+			})
+		case "/api/v1/nodes/worker-1/proxy/stats/summary":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"node": map[string]any{
+					"nodeName": "worker-1",
+					"cpu": map[string]any{
+						"usageNanoCores": 1_750_000_000,
+					},
+					"memory": map[string]any{
+						"workingSetBytes": 8 * 1024 * 1024 * 1024,
+					},
+					"fs": map[string]any{
+						"capacityBytes": 200 * 1024 * 1024 * 1024,
+						"usedBytes":     50 * 1024 * 1024 * 1024,
+					},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/cluster/nodes", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		ClusterNodes []model.ClusterNode `json:"cluster_nodes"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+
+	if len(response.ClusterNodes) != 1 {
+		t.Fatalf("expected one cluster node, got %d", len(response.ClusterNodes))
+	}
+	node := response.ClusterNodes[0]
+
+	if node.Name != "worker-1" {
+		t.Fatalf("expected worker-1, got %q", node.Name)
+	}
+	if node.Status != "ready" {
+		t.Fatalf("expected ready status, got %q", node.Status)
+	}
+	if node.Region != "ap-southeast-1" {
+		t.Fatalf("expected region ap-southeast-1, got %q", node.Region)
+	}
+	if node.Zone != "ap-southeast-1a" {
+		t.Fatalf("expected zone ap-southeast-1a, got %q", node.Zone)
+	}
+	if node.RuntimeID != runtimeObj.ID {
+		t.Fatalf("expected runtime id %q, got %q", runtimeObj.ID, node.RuntimeID)
+	}
+	if node.TenantID != tenant.ID {
+		t.Fatalf("expected tenant id %q, got %q", tenant.ID, node.TenantID)
+	}
+
+	if got := node.Conditions["MemoryPressure"].Status; got != "false" {
+		t.Fatalf("expected MemoryPressure=false, got %q", got)
+	}
+	if got := node.Conditions["PIDPressure"].Status; got != "true" {
+		t.Fatalf("expected PIDPressure=true, got %q", got)
+	}
+
+	if node.CPU == nil || node.CPU.CapacityMilliCores == nil || *node.CPU.CapacityMilliCores != 4000 {
+		t.Fatalf("expected cpu capacity 4000m, got %#v", node.CPU)
+	}
+	if node.CPU.AllocatableMilliCores == nil || *node.CPU.AllocatableMilliCores != 3900 {
+		t.Fatalf("expected cpu allocatable 3900m, got %#v", node.CPU)
+	}
+	if node.CPU.UsedMilliCores == nil || *node.CPU.UsedMilliCores != 1750 {
+		t.Fatalf("expected cpu used 1750m, got %#v", node.CPU)
+	}
+
+	memoryCapacity := int64(16 * 1024 * 1024 * 1024)
+	memoryUsed := int64(8 * 1024 * 1024 * 1024)
+	if node.Memory == nil || node.Memory.CapacityBytes == nil || *node.Memory.CapacityBytes != memoryCapacity {
+		t.Fatalf("expected memory capacity %d, got %#v", memoryCapacity, node.Memory)
+	}
+	if node.Memory.UsedBytes == nil || *node.Memory.UsedBytes != memoryUsed {
+		t.Fatalf("expected memory used %d, got %#v", memoryUsed, node.Memory)
+	}
+
+	storageCapacity := int64(200 * 1024 * 1024 * 1024)
+	storageUsed := int64(50 * 1024 * 1024 * 1024)
+	if node.EphemeralStorage == nil || node.EphemeralStorage.CapacityBytes == nil || *node.EphemeralStorage.CapacityBytes != storageCapacity {
+		t.Fatalf("expected storage capacity %d, got %#v", storageCapacity, node.EphemeralStorage)
+	}
+	if node.EphemeralStorage.UsedBytes == nil || *node.EphemeralStorage.UsedBytes != storageUsed {
+		t.Fatalf("expected storage used %d, got %#v", storageUsed, node.EphemeralStorage)
+	}
+
+	if len(node.Workloads) != 2 {
+		t.Fatalf("expected two workloads, got %#v", node.Workloads)
+	}
+
+	appWorkload := node.Workloads[0]
+	if appWorkload.Kind != model.ClusterNodeWorkloadKindApp {
+		t.Fatalf("expected first workload kind app, got %#v", appWorkload)
+	}
+	if appWorkload.ID != app.ID {
+		t.Fatalf("expected app workload id %q, got %q", app.ID, appWorkload.ID)
+	}
+	if appWorkload.PodCount != 1 || len(appWorkload.Pods) != 1 {
+		t.Fatalf("expected one app pod, got %#v", appWorkload)
+	}
+
+	serviceWorkload := node.Workloads[1]
+	if serviceWorkload.Kind != model.ClusterNodeWorkloadKindBackingService {
+		t.Fatalf("expected second workload kind backing_service, got %#v", serviceWorkload)
+	}
+	if serviceWorkload.ID != service.ID {
+		t.Fatalf("expected service workload id %q, got %q", service.ID, serviceWorkload.ID)
+	}
+	if serviceWorkload.PodCount != 1 || len(serviceWorkload.Pods) != 1 {
+		t.Fatalf("expected one backing service pod, got %#v", serviceWorkload)
+	}
+}

@@ -33,6 +33,7 @@ type Server struct {
 	clusterJoinMeshLoginServer  string
 	clusterJoinMeshAuthKey      string
 	importer                    *sourceimport.Importer
+	newClusterNodeClient        func() (*clusterNodeClient, error)
 	newWorkspacePodLister       func(namespace string) (workspacePodLister, error)
 	workspaceExecRunner         workspacePodExecRunner
 	ready                       atomic.Bool
@@ -57,6 +58,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		clusterJoinMeshLoginServer:  strings.TrimSpace(cfg.ClusterJoinMeshLoginServer),
 		clusterJoinMeshAuthKey:      strings.TrimSpace(cfg.ClusterJoinMeshAuthKey),
 		importer:                    sourceimport.NewImporter(cfg.ImportWorkDir, logger),
+		newClusterNodeClient:        newClusterNodeClient,
 		newWorkspacePodLister: func(namespace string) (workspacePodLister, error) {
 			return newKubeLogsClient(namespace)
 		},
