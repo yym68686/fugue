@@ -299,3 +299,49 @@ func TestListClusterNodesIncludesMetricsConditionsAndWorkloads(t *testing.T) {
 		t.Fatalf("expected one backing service pod, got %#v", serviceWorkload)
 	}
 }
+
+func TestBuildClusterNodeStorageStatsReconcilesStaleNodeCapacity(t *testing.T) {
+	summaryCapacity := uint64(31_461_457_920)
+	summaryUsed := uint64(11_341_619_200)
+
+	node := kubeNode{}
+	node.Status.Capacity = map[string]string{
+		"ephemeral-storage": "10088732Ki",
+	}
+	node.Status.Allocatable = map[string]string{
+		"ephemeral-storage": "9814318482",
+	}
+
+	stats := buildClusterNodeStorageStats(node, &kubeNodeSummary{
+		Node: kubeNodeSummaryNode{
+			FS: kubeNodeSummaryFS{
+				CapacityBytes: &summaryCapacity,
+				UsedBytes:     &summaryUsed,
+			},
+		},
+	})
+	if stats == nil {
+		t.Fatal("expected storage stats")
+	}
+
+	const wantCapacity = int64(31_461_457_920)
+	const wantAllocatable = int64(29_888_385_001)
+	const wantUsed = int64(11_341_619_200)
+	const wantPercent = 37.9
+
+	if stats.CapacityBytes == nil || *stats.CapacityBytes != wantCapacity {
+		t.Fatalf("expected reconciled storage capacity %d, got %#v", wantCapacity, stats)
+	}
+	if stats.AllocatableBytes == nil || *stats.AllocatableBytes != wantAllocatable {
+		t.Fatalf("expected reconciled storage allocatable %d, got %#v", wantAllocatable, stats)
+	}
+	if stats.UsedBytes == nil || *stats.UsedBytes != wantUsed {
+		t.Fatalf("expected storage used %d, got %#v", wantUsed, stats)
+	}
+	if stats.UsagePercent == nil || *stats.UsagePercent != wantPercent {
+		t.Fatalf("expected storage usage percent %.1f, got %#v", wantPercent, stats)
+	}
+	if *stats.UsedBytes > *stats.CapacityBytes {
+		t.Fatalf("expected used bytes <= capacity after reconciliation, got %#v", stats)
+	}
+}

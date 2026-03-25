@@ -448,23 +448,78 @@ func buildClusterNodeMemoryStats(node kubeNode, summary *kubeNodeSummary) *model
 }
 
 func buildClusterNodeStorageStats(node kubeNode, summary *kubeNodeSummary) *model.ClusterNodeStorageStats {
-	capacity := int64PointerFromQuantity(node.Status.Capacity["ephemeral-storage"], parseBytesQuantity)
-	allocatable := int64PointerFromQuantity(node.Status.Allocatable["ephemeral-storage"], parseBytesQuantity)
+	reportedCapacity := int64PointerFromQuantity(node.Status.Capacity["ephemeral-storage"], parseBytesQuantity)
+	reportedAllocatable := int64PointerFromQuantity(node.Status.Allocatable["ephemeral-storage"], parseBytesQuantity)
 	used, summaryCapacity := clusterNodeStorageUsage(summary)
-	if capacity == nil && summaryCapacity != nil {
-		capacity = summaryCapacity
-	}
+	capacity, allocatable := reconcileClusterNodeStorageTotals(
+		reportedCapacity,
+		reportedAllocatable,
+		summaryCapacity,
+	)
 
 	stats := &model.ClusterNodeStorageStats{
 		CapacityBytes:    capacity,
 		AllocatableBytes: allocatable,
 		UsedBytes:        used,
-		UsagePercent:     usagePercent(used, summaryCapacity, allocatable, capacity),
+		UsagePercent:     usagePercent(used, allocatable, capacity),
 	}
 	if isEmptyClusterNodeStorageStats(stats) {
 		return nil
 	}
 	return stats
+}
+
+// Kubelet can leave node.status.ephemeral-storage stale after a root disk resize
+// while stats/summary already reflects the new filesystem size. Use the summary
+// capacity as the displayed total so used bytes, percent, and capacity stay in
+// the same unit of account, and preserve the reported allocatable ratio when
+// the scheduler reservation is available.
+func reconcileClusterNodeStorageTotals(reportedCapacity, reportedAllocatable, summaryCapacity *int64) (*int64, *int64) {
+	capacity := reportedCapacity
+	allocatable := reportedAllocatable
+
+	if summaryCapacity != nil && *summaryCapacity > 0 {
+		capacity = summaryCapacity
+		if scaled := scaleClusterNodeStorageAllocatable(reportedAllocatable, reportedCapacity, summaryCapacity); scaled != nil {
+			allocatable = scaled
+		}
+	}
+
+	if capacity != nil && allocatable != nil && *allocatable > *capacity {
+		adjusted := *capacity
+		allocatable = &adjusted
+	}
+
+	return capacity, allocatable
+}
+
+func scaleClusterNodeStorageAllocatable(reportedAllocatable, reportedCapacity, targetCapacity *int64) *int64 {
+	if reportedAllocatable == nil {
+		return nil
+	}
+	if targetCapacity == nil || *targetCapacity <= 0 {
+		return reportedAllocatable
+	}
+	if reportedCapacity == nil || *reportedCapacity <= 0 {
+		return nil
+	}
+
+	ratio := float64(*reportedAllocatable) / float64(*reportedCapacity)
+	if ratio <= 0 {
+		return nil
+	}
+	if ratio > 1 {
+		ratio = 1
+	}
+
+	scaled := int64(math.Round(float64(*targetCapacity) * ratio))
+	if scaled < 0 {
+		return nil
+	}
+	if scaled > *targetCapacity {
+		scaled = *targetCapacity
+	}
+	return &scaled
 }
 
 func clusterNodeCPUMilliUsage(summary *kubeNodeSummary) *int64 {
