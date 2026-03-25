@@ -1684,6 +1684,13 @@ func (s *Store) pgCreateApp(tenantID, projectID, name, description string, spec 
 	if !visible {
 		return model.App{}, ErrNotFound
 	}
+	runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, spec.RuntimeID)
+	if err != nil {
+		return model.App{}, err
+	}
+	if err := validateWorkspaceSpecForRuntime(spec, runtimeType); err != nil {
+		return model.App{}, err
+	}
 
 	now := time.Now().UTC()
 	allowPendingImport := source != nil && isQueuedImportSourceType(source.Type) && strings.TrimSpace(spec.Image) == ""
@@ -1965,6 +1972,13 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 		if !visible {
 			return model.Operation{}, ErrNotFound
 		}
+		runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.DesiredSpec.RuntimeID)
+		if err != nil {
+			return model.Operation{}, err
+		}
+		if err := validateWorkspaceSpecForRuntime(*op.DesiredSpec, runtimeType); err != nil {
+			return model.Operation{}, err
+		}
 		op.TargetRuntimeID = op.DesiredSpec.RuntimeID
 	case model.OperationTypeDeploy:
 		if op.DesiredSpec == nil {
@@ -1976,6 +1990,13 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 		}
 		if !visible {
 			return model.Operation{}, ErrNotFound
+		}
+		runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.DesiredSpec.RuntimeID)
+		if err != nil {
+			return model.Operation{}, err
+		}
+		if err := validateWorkspaceSpecForRuntime(*op.DesiredSpec, runtimeType); err != nil {
+			return model.Operation{}, err
 		}
 		op.TargetRuntimeID = op.DesiredSpec.RuntimeID
 	case model.OperationTypeScale:
@@ -1999,6 +2020,9 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 		}
 		if !visible {
 			return model.Operation{}, ErrNotFound
+		}
+		if hasPersistentWorkspace(app) {
+			return model.Operation{}, ErrInvalidInput
 		}
 		op.SourceRuntimeID = app.Spec.RuntimeID
 	default:

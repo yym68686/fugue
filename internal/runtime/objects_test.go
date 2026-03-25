@@ -116,6 +116,58 @@ func TestBuildAppDeploymentTemplateAnnotationsTrackFilesAndRestart(t *testing.T)
 	}
 }
 
+func TestBuildAppObjectsIncludesPersistentWorkspaceSidecar(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Workspace: &model.AppWorkspaceSpec{
+				ResetToken: "workspace-reset-1",
+			},
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	deployment := objects[1]
+	template := deployment["spec"].(map[string]any)["template"].(map[string]any)
+	podSpec := template["spec"].(map[string]any)
+
+	volumes := podSpec["volumes"].([]map[string]any)
+	if len(volumes) != 1 {
+		t.Fatalf("expected one workspace volume, got %d", len(volumes))
+	}
+	hostPath := volumes[0]["hostPath"].(map[string]any)
+	if hostPath["path"] != "/var/lib/fugue/tenant-data/fg-tenant-demo/apps/app_demo/workspace" {
+		t.Fatalf("unexpected workspace host path: %s", hostPath["path"])
+	}
+
+	containers := podSpec["containers"].([]map[string]any)
+	if len(containers) != 2 {
+		t.Fatalf("expected app container and workspace sidecar, got %d containers", len(containers))
+	}
+	if containers[1]["name"] != AppWorkspaceContainerName {
+		t.Fatalf("expected workspace sidecar %q, got %#v", AppWorkspaceContainerName, containers[1]["name"])
+	}
+	workspaceMounts := containers[0]["volumeMounts"].([]map[string]any)
+	if workspaceMounts[0]["mountPath"] != "/workspace" {
+		t.Fatalf("unexpected workspace mount path: %#v", workspaceMounts[0]["mountPath"])
+	}
+
+	initContainers := podSpec["initContainers"].([]map[string]any)
+	if len(initContainers) != 1 {
+		t.Fatalf("expected one workspace init container, got %d", len(initContainers))
+	}
+	command := initContainers[0]["command"].([]string)
+	if got := command[len(command)-1]; got != "workspace-reset-1" {
+		t.Fatalf("expected workspace reset token in init container command, got %q", got)
+	}
+}
+
 func TestBuildAppObjectsUsesBackingServicesWithoutDuplicatingLegacyInlinePostgres(t *testing.T) {
 	app := model.App{
 		ID:        "app_demo",

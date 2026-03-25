@@ -33,6 +33,8 @@ type Server struct {
 	clusterJoinMeshLoginServer  string
 	clusterJoinMeshAuthKey      string
 	importer                    *sourceimport.Importer
+	newWorkspacePodLister       func(namespace string) (workspacePodLister, error)
+	workspaceExecRunner         workspacePodExecRunner
 	ready                       atomic.Bool
 }
 
@@ -55,6 +57,10 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		clusterJoinMeshLoginServer:  strings.TrimSpace(cfg.ClusterJoinMeshLoginServer),
 		clusterJoinMeshAuthKey:      strings.TrimSpace(cfg.ClusterJoinMeshAuthKey),
 		importer:                    sourceimport.NewImporter(cfg.ImportWorkDir, logger),
+		newWorkspacePodLister: func(namespace string) (workspacePodLister, error) {
+			return newKubeLogsClient(namespace)
+		},
+		workspaceExecRunner: kubectlWorkspaceExecRunner{},
 	}
 	if server.registryPullBase == "" {
 		server.registryPullBase = server.registryPushBase
@@ -124,6 +130,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/apps/{id}/files", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppFiles)))
 	mux.Handle("PUT /v1/apps/{id}/files", s.auth.RequireAPI(http.HandlerFunc(s.handleUpsertAppFiles)))
 	mux.Handle("DELETE /v1/apps/{id}/files", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteAppFiles)))
+	mux.Handle("GET /v1/apps/{id}/filesystem/tree", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppFilesystemTree)))
+	mux.Handle("GET /v1/apps/{id}/filesystem/file", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppFilesystemFile)))
+	mux.Handle("PUT /v1/apps/{id}/filesystem/file", s.auth.RequireAPI(http.HandlerFunc(s.handlePutAppFilesystemFile)))
+	mux.Handle("POST /v1/apps/{id}/filesystem/directory", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateAppFilesystemDirectory)))
+	mux.Handle("DELETE /v1/apps/{id}/filesystem", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteAppFilesystemPath)))
 	mux.Handle("POST /v1/apps/{id}/rebuild", s.auth.RequireAPI(http.HandlerFunc(s.handleRebuildApp)))
 	mux.Handle("POST /v1/apps/{id}/deploy", s.auth.RequireAPI(http.HandlerFunc(s.handleDeployApp)))
 	mux.Handle("POST /v1/apps/{id}/restart", s.auth.RequireAPI(http.HandlerFunc(s.handleRestartApp)))
@@ -926,8 +937,8 @@ func (s *Server) handleMigrateApp(w http.ResponseWriter, r *http.Request) {
 	if !allowed {
 		return
 	}
-	if hasManagedStatefulBinding(app) {
-		httpx.WriteError(w, http.StatusBadRequest, "stateful apps with managed backing services are not migratable yet")
+	if hasManagedStatefulBinding(app) || app.Spec.Workspace != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "stateful apps with managed backing services or persistent workspaces are not migratable yet")
 		return
 	}
 	var req struct {

@@ -185,6 +185,58 @@ func TestRebuildAppReturnsNotFoundWhenUploadArchiveMetadataIsMissing(t *testing.
 	}
 }
 
+func TestRebuildAppRefreshesWorkspaceResetToken(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, tenant, project := setupRebuildAppTestServer(t)
+	runtimeObj, _, err := s.CreateRuntime(tenant.ID, "worker-1", model.RuntimeTypeManagedOwned, "https://runtime.example.com", nil)
+	if err != nil {
+		t.Fatalf("create runtime: %v", err)
+	}
+
+	app, err := s.CreateImportedApp(tenant.ID, project.ID, "demo-workspace", "", model.AppSpec{
+		Image:     "registry.example.com/demo-workspace:current",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: runtimeObj.ID,
+		Workspace: &model.AppWorkspaceSpec{
+			ResetToken: "workspace-reset-old",
+		},
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyStaticSite,
+	}, model.AppRoute{
+		Hostname:    "demo-workspace.apps.example.com",
+		BaseDomain:  "apps.example.com",
+		PublicURL:   "https://demo-workspace.apps.example.com",
+		ServicePort: 80,
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/rebuild", apiKey, nil)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Operation model.Operation `json:"operation"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Operation.DesiredSpec == nil || response.Operation.DesiredSpec.Workspace == nil {
+		t.Fatal("expected desired spec workspace on rebuild operation")
+	}
+	if response.Operation.DesiredSpec.Workspace.ResetToken == "" {
+		t.Fatal("expected workspace reset token to be refreshed")
+	}
+	if response.Operation.DesiredSpec.Workspace.ResetToken == "workspace-reset-old" {
+		t.Fatal("expected rebuild to generate a fresh workspace reset token")
+	}
+}
+
 func setupRebuildAppTestServer(t *testing.T) (*store.Store, *Server, string, model.Tenant, model.Project) {
 	t.Helper()
 

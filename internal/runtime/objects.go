@@ -13,8 +13,11 @@ import (
 )
 
 const (
-	defaultPostgresImage = "postgres:17.6-alpine"
-	defaultWaitImage     = "busybox:1.36"
+	defaultPostgresImage      = "postgres:17.6-alpine"
+	defaultWaitImage          = "busybox:1.36"
+	AppWorkspaceContainerName = "fugue-workspace"
+	workspaceVolumeName       = "app-workspace"
+	workspaceSidecarName      = AppWorkspaceContainerName
 )
 
 func buildAppObjects(app model.App, scheduling SchedulingConstraints) []map[string]any {
@@ -265,6 +268,8 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 
 	volumeMounts := []map[string]any{}
 	volumes := []map[string]any{}
+	sidecars := []map[string]any{}
+	initContainers := []map[string]any{}
 	if len(app.Spec.Files) > 0 {
 		items := make([]map[string]any, 0, len(app.Spec.Files))
 		for index, file := range app.Spec.Files {
@@ -293,6 +298,21 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 			},
 		})
 	}
+	if workspaceSpec := normalizeRuntimeAppWorkspaceSpec(app); workspaceSpec != nil {
+		volumeMounts = append(volumeMounts, map[string]any{
+			"name":      workspaceVolumeName,
+			"mountPath": workspaceSpec.MountPath,
+		})
+		volumes = append(volumes, map[string]any{
+			"name": workspaceVolumeName,
+			"hostPath": map[string]any{
+				"path": workspaceSpec.StoragePath,
+				"type": "DirectoryOrCreate",
+			},
+		})
+		initContainers = append(initContainers, buildAppWorkspaceInitContainer(*workspaceSpec))
+		sidecars = append(sidecars, buildAppWorkspaceSidecar(*workspaceSpec))
+	}
 	if len(volumeMounts) > 0 {
 		container["volumeMounts"] = volumeMounts
 	}
@@ -300,18 +320,21 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 	podSpec := map[string]any{
 		"containers": []map[string]any{container},
 	}
+	if len(sidecars) > 0 {
+		podSpec["containers"] = append(podSpec["containers"].([]map[string]any), sidecars...)
+	}
 	if len(volumes) > 0 {
 		podSpec["volumes"] = volumes
 	}
 
 	if len(postgresResources) > 0 {
-		initContainers := make([]map[string]any, 0, len(postgresResources))
+		postgresInitContainers := make([]map[string]any, 0, len(postgresResources))
 		for index, postgres := range postgresResources {
 			name := "wait-postgres"
 			if index > 0 {
 				name = "wait-postgres-" + strconv.Itoa(index+1)
 			}
-			initContainers = append(initContainers, map[string]any{
+			postgresInitContainers = append(postgresInitContainers, map[string]any{
 				"name":  name,
 				"image": defaultWaitImage,
 				"command": []string{
@@ -321,6 +344,9 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 				},
 			})
 		}
+		initContainers = append(initContainers, postgresInitContainers...)
+	}
+	if len(initContainers) > 0 {
 		podSpec["initContainers"] = initContainers
 	}
 	applyScheduling(&podSpec, scheduling)
@@ -559,6 +585,102 @@ func normalizeRuntimePostgresSpec(namespace, baseName string, spec model.AppPost
 		spec.StoragePath = path.Join("/var/lib/fugue/tenant-data", namespace, baseName, "postgres")
 	}
 	return spec
+}
+
+func normalizeRuntimeAppWorkspaceSpec(app model.App) *model.AppWorkspaceSpec {
+	if app.Spec.Workspace == nil {
+		return nil
+	}
+	spec := *app.Spec.Workspace
+	mountPath, err := model.NormalizeAppWorkspaceMountPath(spec.MountPath)
+	if err != nil {
+		return nil
+	}
+	spec.MountPath = mountPath
+
+	storagePath, err := model.NormalizeAppWorkspaceStoragePath(spec.StoragePath)
+	if err != nil {
+		return nil
+	}
+	if storagePath == "" {
+		namespace := NamespaceForTenant(app.TenantID)
+		storagePath = path.Join("/var/lib/fugue/tenant-data", namespace, "apps", workspaceStorageBaseName(app), "workspace")
+	}
+	spec.StoragePath = storagePath
+	return &spec
+}
+
+func workspaceStorageBaseName(app model.App) string {
+	if id := strings.TrimSpace(app.ID); id != "" {
+		return id
+	}
+	name := sanitizeName(app.Name)
+	if name == "" {
+		return "app"
+	}
+	return name
+}
+
+func buildAppWorkspaceInitContainer(spec model.AppWorkspaceSpec) map[string]any {
+	return map[string]any{
+		"name":  "init-workspace",
+		"image": defaultWaitImage,
+		"command": []string{
+			"sh",
+			"-lc",
+			workspaceInitScript(),
+			"sh",
+			spec.MountPath,
+			strings.TrimSpace(spec.ResetToken),
+		},
+		"securityContext": map[string]any{
+			"runAsUser": 0,
+		},
+		"volumeMounts": []map[string]any{
+			{
+				"name":      workspaceVolumeName,
+				"mountPath": spec.MountPath,
+			},
+		},
+	}
+}
+
+func buildAppWorkspaceSidecar(spec model.AppWorkspaceSpec) map[string]any {
+	return map[string]any{
+		"name":  workspaceSidecarName,
+		"image": defaultWaitImage,
+		"command": []string{
+			"sh",
+			"-lc",
+			"trap 'exit 0' TERM INT; while :; do sleep 3600; done",
+		},
+		"volumeMounts": []map[string]any{
+			{
+				"name":      workspaceVolumeName,
+				"mountPath": spec.MountPath,
+			},
+		},
+	}
+}
+
+func workspaceInitScript() string {
+	return `workspace="$1"
+token="$2"
+state_dir="$workspace/` + model.AppWorkspaceInternalDirName + `"
+marker="$state_dir/reset-token"
+mkdir -p "$workspace"
+chmod 0777 "$workspace"
+if [ -n "$token" ]; then
+  current=""
+  if [ -f "$marker" ]; then
+    current="$(cat "$marker" 2>/dev/null || true)"
+  fi
+  if [ "$current" != "$token" ]; then
+    rm -rf "$workspace"/..?* "$workspace"/.[!.]* "$workspace"/* 2>/dev/null || true
+    mkdir -p "$state_dir"
+    printf '%s' "$token" > "$marker"
+  fi
+fi`
 }
 
 func appFilesSecretName(appName string) string {

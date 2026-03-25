@@ -61,6 +61,9 @@ const (
 	ActorTypeAPIKey    = "api-key"
 	ActorTypeNodeKey   = "node-key"
 	ActorTypeRuntime   = "runtime"
+
+	DefaultAppWorkspaceMountPath = "/workspace"
+	AppWorkspaceInternalDirName  = ".fugue-workspace-state"
 )
 
 type Tenant struct {
@@ -217,6 +220,7 @@ type AppSpec struct {
 	Replicas     int               `json:"replicas"`
 	RuntimeID    string            `json:"runtime_id"`
 	Files        []AppFile         `json:"files,omitempty"`
+	Workspace    *AppWorkspaceSpec `json:"workspace,omitempty"`
 	Postgres     *AppPostgresSpec  `json:"postgres,omitempty"`
 	RestartToken string            `json:"restart_token,omitempty"`
 }
@@ -226,6 +230,12 @@ type AppFile struct {
 	Content string `json:"content,omitempty"`
 	Secret  bool   `json:"secret,omitempty"`
 	Mode    int32  `json:"mode,omitempty"`
+}
+
+type AppWorkspaceSpec struct {
+	MountPath   string `json:"mount_path,omitempty"`
+	StoragePath string `json:"storage_path,omitempty"`
+	ResetToken  string `json:"reset_token,omitempty"`
 }
 
 type AppPostgresSpec struct {

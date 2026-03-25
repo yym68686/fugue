@@ -140,6 +140,9 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(spec.RuntimeID) == "" {
 		spec.RuntimeID = "runtime_managed_shared"
 	}
+	if spec.Workspace != nil {
+		spec.Workspace.ResetToken = model.NewID("workspace-reset")
+	}
 
 	op, err := s.store.CreateOperation(model.Operation{
 		TenantID:        app.TenantID,

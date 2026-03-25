@@ -219,9 +219,14 @@ Legacy compatibility: `POST /v1/agent/enroll` still accepts one-time enroll toke
 | `GET` | `/v1/apps/{id}/files` | any API credential | returns desired app files from `spec.files` |
 | `PUT` | `/v1/apps/{id}/files` | `app.write` or `app.deploy` | upserts desired files and queues a deploy operation on change |
 | `DELETE` | `/v1/apps/{id}/files` | `app.write` or `app.deploy` | deletes files named by repeated `path` query params and queues a deploy operation |
-| `POST` | `/v1/apps/{id}/rebuild` | `app.deploy` | rebuilds a `github-public` app from the latest GitHub code or an `upload` app from its saved archive, then queues deployment |
+| `GET` | `/v1/apps/{id}/filesystem/tree` | any API credential | lists live entries from the app workspace volume, defaulting to `/workspace` |
+| `GET` | `/v1/apps/{id}/filesystem/file` | any API credential | reads one live file from the app workspace volume |
+| `PUT` | `/v1/apps/{id}/filesystem/file` | `app.write` or `app.deploy` | creates or overwrites one live file inside the app workspace volume |
+| `POST` | `/v1/apps/{id}/filesystem/directory` | `app.write` or `app.deploy` | creates one live directory inside the app workspace volume |
+| `DELETE` | `/v1/apps/{id}/filesystem` | `app.write` or `app.deploy` | deletes a live file or directory inside the app workspace volume |
+| `POST` | `/v1/apps/{id}/rebuild` | `app.deploy` | rebuilds a `github-public` app from the latest GitHub code or an `upload` app from its saved archive, refreshes the workspace reset token when configured, then queues deployment |
 | `POST` | `/v1/apps/{id}/deploy` | `app.deploy` | creates async deploy operation |
-| `POST` | `/v1/apps/{id}/restart` | `app.deploy` | queues a deploy operation with a fresh restart token; disabled apps cannot be restarted |
+| `POST` | `/v1/apps/{id}/restart` | `app.deploy` | queues a deploy operation with a fresh restart token; disabled apps cannot be restarted, and persistent workspaces are preserved |
 | `POST` | `/v1/apps/{id}/scale` | `app.scale` | creates async scale operation; `replicas` may be `0` |
 | `POST` | `/v1/apps/{id}/disable` | `app.scale` | creates async disable operation and scales the app to `0` |
 | `POST` | `/v1/apps/{id}/migrate` | `app.migrate` | creates async migrate operation |
@@ -328,10 +333,15 @@ For a tenant-scoped API key, the request body itself is optional; an empty `POST
     },
     "ports": [80],
     "replicas": 1,
-    "runtime_id": "runtime_managed_shared"
+    "runtime_id": "runtime_managed_shared",
+    "workspace": {
+      "mount_path": "/workspace"
+    }
   }
 }
 ```
+
+`spec.workspace` is optional. When present, Fugue mounts a persistent writable workspace volume (default mount path `/workspace`) and enables the live `/filesystem/*` endpoints for that app. This currently requires a `managed-owned` runtime because the workspace is backed by node-local `hostPath` storage.
 
 `POST /v1/apps/import-github`
 
@@ -500,6 +510,76 @@ Behavior:
 - requires `app.write` or `app.deploy` unless you are platform admin
 - queues a `deploy` operation when at least one file is removed
 
+`GET /v1/apps/{id}/filesystem/tree`
+
+Query params:
+
+- `path` defaults to the workspace root
+- `component` currently only accepts `app`
+- `depth` currently only accepts `1`
+
+Behavior:
+
+- lists the live contents of the persistent app workspace, not `spec.files`
+- only paths inside the configured workspace root are allowed
+- the workspace metadata directory used for rebuild resets is hidden from API responses
+
+`GET /v1/apps/{id}/filesystem/file`
+
+Query params:
+
+- `path` is required and must stay inside the app workspace root
+- `max_bytes` defaults to `262144`
+- `component` currently only accepts `app`
+
+Behavior:
+
+- reads one live file from the persistent app workspace
+- returns `encoding: "utf-8"` for valid UTF-8 content, otherwise `encoding: "base64"`
+- returns `truncated: true` when the file is larger than `max_bytes`
+
+`PUT /v1/apps/{id}/filesystem/file`
+
+```json
+{
+  "path": "/workspace/notes/hello.txt",
+  "content": "hello",
+  "encoding": "utf-8",
+  "mode": 420,
+  "mkdir_parents": true
+}
+```
+
+Behavior:
+
+- writes to the live persistent workspace without creating a deploy operation
+- only paths inside the configured workspace root are allowed
+- `encoding` accepts `utf-8` (default) or `base64`
+
+`POST /v1/apps/{id}/filesystem/directory`
+
+```json
+{
+  "path": "/workspace/assets",
+  "mode": 493,
+  "parents": true
+}
+```
+
+Behavior:
+
+- creates a live directory inside the persistent app workspace
+- only paths inside the configured workspace root are allowed
+
+`DELETE /v1/apps/{id}/filesystem`
+
+No request body. Use `path=/workspace/...` and optional `recursive=true`.
+
+Behavior:
+
+- deletes one live file or directory from the persistent app workspace
+- the workspace root itself cannot be deleted through this endpoint
+
 `POST /v1/apps/{id}/deploy`
 
 ```json
@@ -528,6 +608,15 @@ Behavior:
 - requires `app.deploy`
 - only works when the app currently has `replicas > 0`
 - queues a `deploy` operation with a fresh `restart_token`
+- preserves the persistent workspace volume when `spec.workspace` is configured
+
+`POST /v1/apps/{id}/rebuild`
+
+Behavior:
+
+- requires `app.deploy`
+- rebuilds from the app's saved source definition
+- refreshes `spec.workspace.reset_token` when a persistent workspace is configured, so the next rollout recreates the workspace contents once
 
 `POST /v1/apps/{id}/scale`
 

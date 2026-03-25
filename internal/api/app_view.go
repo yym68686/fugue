@@ -94,6 +94,10 @@ func cloneAppSpec(spec model.AppSpec) model.AppSpec {
 	}
 	out.Env = cloneStringMap(spec.Env)
 	out.Files = cloneAppFiles(spec.Files)
+	if spec.Workspace != nil {
+		workspace := *spec.Workspace
+		out.Workspace = &workspace
+	}
 	if spec.Postgres != nil {
 		postgres := *spec.Postgres
 		out.Postgres = &postgres

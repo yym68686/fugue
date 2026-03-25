@@ -218,6 +218,10 @@ func cloneImportSpec(spec model.AppSpec) model.AppSpec {
 	if len(spec.Files) > 0 {
 		out.Files = append([]model.AppFile(nil), spec.Files...)
 	}
+	if spec.Workspace != nil {
+		workspace := *spec.Workspace
+		out.Workspace = &workspace
+	}
 	if spec.Postgres != nil {
 		postgres := *spec.Postgres
 		out.Postgres = &postgres

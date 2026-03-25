@@ -1446,6 +1446,9 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 		if !runtimeVisibleToTenant(state, spec.RuntimeID, tenantID) {
 			return ErrNotFound
 		}
+		if err := validateWorkspaceRuntimeState(state, spec.RuntimeID, spec); err != nil {
+			return err
+		}
 		for _, existing := range state.Apps {
 			if existing.TenantID == tenantID && existing.ProjectID == projectID && strings.EqualFold(existing.Name, name) {
 				return ErrConflict
@@ -1519,6 +1522,9 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			if !runtimeVisibleToTenant(state, op.DesiredSpec.RuntimeID, op.TenantID) {
 				return ErrNotFound
 			}
+			if err := validateWorkspaceRuntimeState(state, op.DesiredSpec.RuntimeID, *op.DesiredSpec); err != nil {
+				return err
+			}
 			op.TargetRuntimeID = op.DesiredSpec.RuntimeID
 		case model.OperationTypeDeploy:
 			if op.DesiredSpec == nil {
@@ -1526,6 +1532,9 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			}
 			if !runtimeVisibleToTenant(state, op.DesiredSpec.RuntimeID, op.TenantID) {
 				return ErrNotFound
+			}
+			if err := validateWorkspaceRuntimeState(state, op.DesiredSpec.RuntimeID, *op.DesiredSpec); err != nil {
+				return err
 			}
 			op.TargetRuntimeID = op.DesiredSpec.RuntimeID
 		case model.OperationTypeScale:
@@ -1542,6 +1551,9 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 		case model.OperationTypeMigrate:
 			if op.TargetRuntimeID == "" || !runtimeVisibleToTenant(state, op.TargetRuntimeID, op.TenantID) {
 				return ErrNotFound
+			}
+			if hasPersistentWorkspace(app) {
+				return ErrInvalidInput
 			}
 			op.SourceRuntimeID = app.Spec.RuntimeID
 		default:
@@ -2213,6 +2225,10 @@ func cloneAppSpec(in *model.AppSpec) *model.AppSpec {
 	out.Env = cloneMap(in.Env)
 	if len(in.Files) > 0 {
 		out.Files = append([]model.AppFile(nil), in.Files...)
+	}
+	if in.Workspace != nil {
+		workspace := *in.Workspace
+		out.Workspace = &workspace
 	}
 	if in.Postgres != nil {
 		pg := *in.Postgres

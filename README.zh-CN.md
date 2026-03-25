@@ -219,9 +219,14 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 | `GET` | `/v1/apps/{id}/files` | 任意 API 凭证 | 返回 `spec.files` 里的期望文件集合 |
 | `PUT` | `/v1/apps/{id}/files` | `app.write` 或 `app.deploy` | upsert 期望文件，并在变化时排入 deploy operation |
 | `DELETE` | `/v1/apps/{id}/files` | `app.write` 或 `app.deploy` | 通过重复 `path` 查询参数删除文件，并排入 deploy operation |
-| `POST` | `/v1/apps/{id}/rebuild` | `app.deploy` | 重新拉取 `github-public` app 的最新代码，或复用 `upload` app 已保存的归档，重建并排入部署 |
+| `GET` | `/v1/apps/{id}/filesystem/tree` | 任意 API 凭证 | 列出 app 持久 workspace volume 里的 live 目录项，默认根目录是 `/workspace` |
+| `GET` | `/v1/apps/{id}/filesystem/file` | 任意 API 凭证 | 读取 app 持久 workspace volume 里的一个 live 文件 |
+| `PUT` | `/v1/apps/{id}/filesystem/file` | `app.write` 或 `app.deploy` | 在 app 持久 workspace volume 内创建或覆盖一个 live 文件 |
+| `POST` | `/v1/apps/{id}/filesystem/directory` | `app.write` 或 `app.deploy` | 在 app 持久 workspace volume 内创建一个 live 目录 |
+| `DELETE` | `/v1/apps/{id}/filesystem` | `app.write` 或 `app.deploy` | 在 app 持久 workspace volume 内删除 live 文件或目录 |
+| `POST` | `/v1/apps/{id}/rebuild` | `app.deploy` | 重新拉取 `github-public` app 的最新代码，或复用 `upload` app 已保存的归档，若配置了 workspace 则刷新 reset token，然后重建并排入部署 |
 | `POST` | `/v1/apps/{id}/deploy` | `app.deploy` | 创建异步 deploy 操作 |
-| `POST` | `/v1/apps/{id}/restart` | `app.deploy` | 生成新的 restart token 并排入 deploy operation；disabled app 不能 restart |
+| `POST` | `/v1/apps/{id}/restart` | `app.deploy` | 生成新的 restart token 并排入 deploy operation；disabled app 不能 restart，且持久 workspace 会被保留 |
 | `POST` | `/v1/apps/{id}/scale` | `app.scale` | 创建异步 scale 操作；`replicas` 可以是 `0` |
 | `POST` | `/v1/apps/{id}/disable` | `app.scale` | 创建异步 disable 操作，把 app 缩到 `0` |
 | `POST` | `/v1/apps/{id}/migrate` | `app.migrate` | 创建异步 migrate 操作 |
@@ -328,10 +333,15 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
     },
     "ports": [80],
     "replicas": 1,
-    "runtime_id": "runtime_managed_shared"
+    "runtime_id": "runtime_managed_shared",
+    "workspace": {
+      "mount_path": "/workspace"
+    }
   }
 }
 ```
+
+`spec.workspace` 是可选项。配置后，Fugue 会为 app 挂一个可写的持久 workspace volume，默认挂载到 `/workspace`，并为该 app 开启 live `/filesystem/*` 接口。当前这项能力只支持 `managed-owned` runtime，因为底层使用的是节点本地 `hostPath` 存储。
 
 `POST /v1/apps/import-github`
 
@@ -500,6 +510,76 @@ Idempotency-Key: import-<unique-key>
 - 除平台管理员外，需要 `app.write` 或 `app.deploy`
 - 只要至少删除了一个文件，就会排入一个 `deploy` operation
 
+`GET /v1/apps/{id}/filesystem/tree`
+
+查询参数：
+
+- `path` 默认为 workspace 根目录
+- `component` 当前只支持 `app`
+- `depth` 当前只支持 `1`
+
+行为说明：
+
+- 返回的是持久 app workspace 里的 live 内容，不是 `spec.files`
+- 只允许访问配置好的 workspace 根目录之内的路径
+- rebuild reset 使用的 workspace 元数据目录不会出现在 API 返回里
+
+`GET /v1/apps/{id}/filesystem/file`
+
+查询参数：
+
+- `path` 必填，且必须位于 app workspace 根目录内
+- `max_bytes` 默认是 `262144`
+- `component` 当前只支持 `app`
+
+行为说明：
+
+- 读取持久 app workspace 里的一个 live 文件
+- 对合法 UTF-8 内容返回 `encoding: "utf-8"`；其他内容返回 `encoding: "base64"`
+- 如果文件大于 `max_bytes`，会返回 `truncated: true`
+
+`PUT /v1/apps/{id}/filesystem/file`
+
+```json
+{
+  "path": "/workspace/notes/hello.txt",
+  "content": "hello",
+  "encoding": "utf-8",
+  "mode": 420,
+  "mkdir_parents": true
+}
+```
+
+行为说明：
+
+- 直接写入 live 持久 workspace，不会创建 deploy operation
+- 只允许操作配置好的 workspace 根目录内的路径
+- `encoding` 支持 `utf-8`（默认）或 `base64`
+
+`POST /v1/apps/{id}/filesystem/directory`
+
+```json
+{
+  "path": "/workspace/assets",
+  "mode": 493,
+  "parents": true
+}
+```
+
+行为说明：
+
+- 在持久 app workspace 里创建一个 live 目录
+- 只允许操作配置好的 workspace 根目录内的路径
+
+`DELETE /v1/apps/{id}/filesystem`
+
+无需请求体。通过 `path=/workspace/...` 指定路径，也可以传 `recursive=true`。
+
+行为说明：
+
+- 从持久 app workspace 里删除一个 live 文件或目录
+- 这个接口不允许删除 workspace 根目录本身
+
 `POST /v1/apps/{id}/deploy`
 
 ```json
@@ -528,6 +608,15 @@ Idempotency-Key: import-<unique-key>
 - 需要 `app.deploy`
 - 只有当 app 当前 `replicas > 0` 时才能执行
 - 会生成一个新的 `restart_token`，并排入 `deploy` operation
+- 如果配置了 `spec.workspace`，重启会保留这个持久 workspace volume
+
+`POST /v1/apps/{id}/rebuild`
+
+行为说明：
+
+- 需要 `app.deploy`
+- 按 app 当前保存的 source 定义重新构建
+- 如果配置了持久 workspace，会刷新 `spec.workspace.reset_token`，让下一次 rollout 只在这一次重建时清空并重建 workspace 内容
 
 `POST /v1/apps/{id}/scale`
 
