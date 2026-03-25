@@ -38,6 +38,13 @@ type BuilderWorkloadPolicy struct {
 	DockerDataSizeLimit string                      `json:"dockerDataSizeLimit,omitempty"`
 }
 
+type BuilderToleration struct {
+	Key      string `json:"key,omitempty"`
+	Operator string `json:"operator,omitempty"`
+	Value    string `json:"value,omitempty"`
+	Effect   string `json:"effect,omitempty"`
+}
+
 type BuilderPodPolicy struct {
 	BuildNodeLabelKey            string                `json:"buildNodeLabelKey,omitempty"`
 	BuildNodeLabelValue          string                `json:"buildNodeLabelValue,omitempty"`
@@ -49,6 +56,7 @@ type BuilderPodPolicy struct {
 	SelectionTimeoutSeconds      int                   `json:"selectionTimeoutSeconds,omitempty"`
 	RetryIntervalSeconds         int                   `json:"retryIntervalSeconds,omitempty"`
 	ReservationLeaseDurationSecs int                   `json:"reservationLeaseDurationSeconds,omitempty"`
+	Tolerations                  []BuilderToleration   `json:"tolerations,omitempty"`
 	Light                        BuilderWorkloadPolicy `json:"light,omitempty"`
 	Heavy                        BuilderWorkloadPolicy `json:"heavy,omitempty"`
 }
@@ -132,9 +140,36 @@ func normalizeBuilderPodPolicy(policy BuilderPodPolicy) BuilderPodPolicy {
 	if policy.ReservationLeaseDurationSecs <= 0 {
 		policy.ReservationLeaseDurationSecs = defaults.ReservationLeaseDurationSecs
 	}
+	policy.Tolerations = normalizeBuilderTolerations(policy.Tolerations)
 	policy.Light = normalizeBuilderWorkloadPolicy(policy.Light, defaults.Light)
 	policy.Heavy = normalizeBuilderWorkloadPolicy(policy.Heavy, defaults.Heavy)
 	return policy
+}
+
+func normalizeBuilderTolerations(tolerations []BuilderToleration) []BuilderToleration {
+	if len(tolerations) == 0 {
+		return nil
+	}
+	normalized := make([]BuilderToleration, 0, len(tolerations))
+	for _, toleration := range tolerations {
+		normalizedToleration := BuilderToleration{
+			Key:      strings.TrimSpace(toleration.Key),
+			Operator: strings.TrimSpace(toleration.Operator),
+			Value:    strings.TrimSpace(toleration.Value),
+			Effect:   strings.TrimSpace(toleration.Effect),
+		}
+		if normalizedToleration.Key == "" &&
+			normalizedToleration.Operator == "" &&
+			normalizedToleration.Value == "" &&
+			normalizedToleration.Effect == "" {
+			continue
+		}
+		normalized = append(normalized, normalizedToleration)
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
 }
 
 func normalizeBuilderWorkloadPolicy(policy, defaults BuilderWorkloadPolicy) BuilderWorkloadPolicy {
@@ -193,6 +228,7 @@ func applyBuilderPodPolicy(podSpec map[string]any, policy BuilderPodPolicy, prof
 	}
 	applyBuilderResources(podSpec, workloadPolicy.Resources)
 	applyBuilderVolumeSizeLimits(podSpec, workloadPolicy)
+	applyBuilderTolerations(podSpec, policy.Tolerations)
 	if profile == builderWorkloadProfileHeavy {
 		applyBuilderPreferredLargeNodeAffinity(podSpec, policy)
 	}
@@ -287,6 +323,37 @@ func applyBuilderPreferredLargeNodeAffinity(podSpec map[string]any, policy Build
 			},
 		},
 	}
+}
+
+func applyBuilderTolerations(podSpec map[string]any, tolerations []BuilderToleration) {
+	tolerations = normalizeBuilderTolerations(tolerations)
+	if len(tolerations) == 0 {
+		return
+	}
+	values := make([]map[string]any, 0, len(tolerations))
+	for _, toleration := range tolerations {
+		value := map[string]any{}
+		if toleration.Key != "" {
+			value["key"] = toleration.Key
+		}
+		if toleration.Operator != "" {
+			value["operator"] = toleration.Operator
+		}
+		if toleration.Value != "" {
+			value["value"] = toleration.Value
+		}
+		if toleration.Effect != "" {
+			value["effect"] = toleration.Effect
+		}
+		if len(value) == 0 {
+			continue
+		}
+		values = append(values, value)
+	}
+	if len(values) == 0 {
+		return
+	}
+	podSpec["tolerations"] = values
 }
 
 func applyBuilderPlacement(podSpec map[string]any, placement builderJobPlacement) {

@@ -20,6 +20,9 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/model"
+	"fugue/internal/runtime"
+
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -63,13 +66,15 @@ type builderCandidate struct {
 }
 
 type builderNodeSnapshot struct {
-	Name         string
-	Hostname     string
-	Labels       map[string]string
-	Ready        bool
-	DiskPressure bool
-	Allocatable  builderResourceDemand
-	Used         builderResourceDemand
+	Name                     string
+	Hostname                 string
+	Labels                   map[string]string
+	Taints                   []builderKubeNodeTaint
+	Ready                    bool
+	DiskPressure             bool
+	Allocatable              builderResourceDemand
+	Used                     builderResourceDemand
+	FilesystemAvailableBytes int64
 }
 
 type builderReservation struct {
@@ -107,10 +112,19 @@ type builderKubeNode struct {
 		Name   string            `json:"name"`
 		Labels map[string]string `json:"labels"`
 	} `json:"metadata"`
+	Spec struct {
+		Taints []builderKubeNodeTaint `json:"taints"`
+	} `json:"spec"`
 	Status struct {
 		Conditions  []builderKubeNodeCondition `json:"conditions"`
 		Allocatable map[string]string          `json:"allocatable"`
 	} `json:"status"`
+}
+
+type builderKubeNodeTaint struct {
+	Key    string `json:"key"`
+	Value  string `json:"value,omitempty"`
+	Effect string `json:"effect,omitempty"`
 }
 
 type builderKubeNodeCondition struct {
@@ -119,7 +133,8 @@ type builderKubeNodeCondition struct {
 }
 
 type builderKubeNodeSummary struct {
-	Node builderKubeSummaryNode `json:"node"`
+	Node builderKubeSummaryNode  `json:"node"`
+	Pods []builderKubeSummaryPod `json:"pods,omitempty"`
 }
 
 type builderKubeSummaryNode struct {
@@ -142,6 +157,16 @@ type builderKubeSummaryFS struct {
 	AvailableBytes *uint64 `json:"availableBytes,omitempty"`
 	CapacityBytes  *uint64 `json:"capacityBytes,omitempty"`
 	UsedBytes      *uint64 `json:"usedBytes,omitempty"`
+}
+
+type builderKubeSummaryPod struct {
+	PodRef           builderKubeSummaryPodRef `json:"podRef"`
+	EphemeralStorage builderKubeSummaryFS     `json:"ephemeral-storage,omitempty"`
+}
+
+type builderKubeSummaryPodRef struct {
+	Name      string `json:"name,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
 }
 
 type builderKubeLeaseList struct {
@@ -336,6 +361,7 @@ func (s *builderScheduler) loadNodeSnapshots(ctx context.Context) ([]builderNode
 			Name:         strings.TrimSpace(node.Metadata.Name),
 			Hostname:     strings.TrimSpace(node.Metadata.Labels[builderHostnameLabelKey]),
 			Labels:       node.Metadata.Labels,
+			Taints:       node.Spec.Taints,
 			Ready:        builderNodeConditionStatus(node.Status.Conditions, "Ready"),
 			DiskPressure: builderNodeConditionStatus(node.Status.Conditions, "DiskPressure"),
 			Allocatable: builderResourceDemand{
@@ -349,7 +375,8 @@ func (s *builderScheduler) loadNodeSnapshots(ctx context.Context) ([]builderNode
 			snapshot.Hostname = snapshot.Name
 		}
 		if summary := summaries[snapshot.Name]; summary != nil {
-			snapshot.Used = builderUsedResources(summary, snapshot.Allocatable.MemoryBytes, snapshot.Allocatable.EphemeralBytes)
+			snapshot.Used = builderUsedResources(summary, snapshot.Allocatable.MemoryBytes)
+			snapshot.FilesystemAvailableBytes = builderNodeFilesystemAvailableBytes(summary)
 		}
 		snapshots = append(snapshots, snapshot)
 	}
@@ -484,6 +511,9 @@ func selectBuilderCandidates(policy BuilderPodPolicy, profile builderWorkloadPro
 		if !snapshot.Ready || snapshot.DiskPressure || snapshot.Hostname == "" {
 			continue
 		}
+		if !builderNodeEligibleForBuilders(policy, snapshot) {
+			continue
+		}
 		if requireBuildLabel && !builderMatchesBuildPool(policy, snapshot) {
 			continue
 		}
@@ -491,9 +521,8 @@ func selectBuilderCandidates(policy BuilderPodPolicy, profile builderWorkloadPro
 		if profile == builderWorkloadProfileHeavy && sizeClass == policy.SmallNodeLabelValue {
 			continue
 		}
-		available := builderSubtractDemand(
-			snapshot.Allocatable,
-			snapshot.Used,
+		available := builderAvailableResources(
+			snapshot,
 			reservedByNode[snapshot.Name],
 			builderSafetyBuffer(snapshot.Allocatable, profile),
 		)
@@ -647,11 +676,80 @@ func builderRatioScore(remaining, total int64) float64 {
 
 func builderAnyNodeMatchesBuildLabel(policy BuilderPodPolicy, snapshots []builderNodeSnapshot) bool {
 	for _, snapshot := range snapshots {
+		if !builderNodeEligibleForBuilders(policy, snapshot) {
+			continue
+		}
 		if builderMatchesBuildPool(policy, snapshot) {
 			return true
 		}
 	}
 	return false
+}
+
+func builderNodeEligibleForBuilders(policy BuilderPodPolicy, snapshot builderNodeSnapshot) bool {
+	if !builderNodeIsSharedBuilderCandidate(snapshot) {
+		return false
+	}
+	return builderNodeTaintsTolerated(policy.Tolerations, snapshot.Taints)
+}
+
+func builderNodeIsSharedBuilderCandidate(snapshot builderNodeSnapshot) bool {
+	if strings.TrimSpace(snapshot.Labels[runtime.TenantIDLabelKey]) != "" {
+		return false
+	}
+	switch strings.TrimSpace(snapshot.Labels[runtime.NodeModeLabelKey]) {
+	case "", model.RuntimeTypeManagedShared:
+		return true
+	default:
+		return false
+	}
+}
+
+func builderNodeTaintsTolerated(tolerations []BuilderToleration, taints []builderKubeNodeTaint) bool {
+	tolerations = normalizeBuilderTolerations(tolerations)
+	for _, taint := range taints {
+		if !builderIsHardNodeTaintEffect(taint.Effect) {
+			continue
+		}
+		if !builderToleratesNodeTaint(tolerations, taint) {
+			return false
+		}
+	}
+	return true
+}
+
+func builderIsHardNodeTaintEffect(effect string) bool {
+	return strings.EqualFold(strings.TrimSpace(effect), "NoSchedule") ||
+		strings.EqualFold(strings.TrimSpace(effect), "NoExecute")
+}
+
+func builderToleratesNodeTaint(tolerations []BuilderToleration, taint builderKubeNodeTaint) bool {
+	for _, toleration := range tolerations {
+		if builderTolerationMatchesNodeTaint(toleration, taint) {
+			return true
+		}
+	}
+	return false
+}
+
+func builderTolerationMatchesNodeTaint(toleration BuilderToleration, taint builderKubeNodeTaint) bool {
+	effect := strings.TrimSpace(toleration.Effect)
+	if effect != "" && !strings.EqualFold(effect, strings.TrimSpace(taint.Effect)) {
+		return false
+	}
+
+	operator := strings.TrimSpace(toleration.Operator)
+	if operator == "" {
+		operator = "Equal"
+	}
+	switch {
+	case strings.EqualFold(operator, "Exists"):
+		key := strings.TrimSpace(toleration.Key)
+		return key == "" || strings.EqualFold(key, strings.TrimSpace(taint.Key))
+	default:
+		return strings.EqualFold(strings.TrimSpace(toleration.Key), strings.TrimSpace(taint.Key)) &&
+			strings.EqualFold(strings.TrimSpace(toleration.Value), strings.TrimSpace(taint.Value))
+	}
 }
 
 func builderMatchesBuildPool(policy BuilderPodPolicy, snapshot builderNodeSnapshot) bool {
@@ -684,6 +782,15 @@ func builderDemandFits(available, demand builderResourceDemand) bool {
 		available.EphemeralBytes >= demand.EphemeralBytes
 }
 
+func builderAvailableResources(snapshot builderNodeSnapshot, reserved, buffer builderResourceDemand) builderResourceDemand {
+	available := builderSubtractDemand(snapshot.Allocatable, snapshot.Used, reserved, buffer)
+	if snapshot.FilesystemAvailableBytes > 0 {
+		filesystemAvailable := snapshot.FilesystemAvailableBytes - reserved.EphemeralBytes - buffer.EphemeralBytes
+		available.EphemeralBytes = minInt64(available.EphemeralBytes, filesystemAvailable)
+	}
+	return available
+}
+
 func builderSubtractDemand(parts ...builderResourceDemand) builderResourceDemand {
 	if len(parts) == 0 {
 		return builderResourceDemand{}
@@ -697,7 +804,7 @@ func builderSubtractDemand(parts ...builderResourceDemand) builderResourceDemand
 	return out
 }
 
-func builderUsedResources(summary *builderKubeNodeSummary, memoryCapacity, storageCapacity int64) builderResourceDemand {
+func builderUsedResources(summary *builderKubeNodeSummary, memoryCapacity int64) builderResourceDemand {
 	used := builderResourceDemand{}
 	if summary == nil {
 		return used
@@ -713,15 +820,39 @@ func builderUsedResources(summary *builderKubeNodeSummary, memoryCapacity, stora
 	case summary.Node.Memory.AvailableBytes != nil && memoryCapacity > 0 && *summary.Node.Memory.AvailableBytes <= uint64(memoryCapacity):
 		used.MemoryBytes = memoryCapacity - int64(*summary.Node.Memory.AvailableBytes)
 	}
-	switch {
-	case summary.Node.FS.UsedBytes != nil:
-		used.EphemeralBytes = int64(*summary.Node.FS.UsedBytes)
-	case summary.Node.FS.AvailableBytes != nil && summary.Node.FS.CapacityBytes != nil && *summary.Node.FS.AvailableBytes <= *summary.Node.FS.CapacityBytes:
-		used.EphemeralBytes = int64(*summary.Node.FS.CapacityBytes - *summary.Node.FS.AvailableBytes)
-	case summary.Node.FS.AvailableBytes != nil && storageCapacity > 0 && *summary.Node.FS.AvailableBytes <= uint64(storageCapacity):
-		used.EphemeralBytes = storageCapacity - int64(*summary.Node.FS.AvailableBytes)
-	}
+	used.EphemeralBytes = builderPodEphemeralUsageBytes(summary)
 	return used
+}
+
+func builderPodEphemeralUsageBytes(summary *builderKubeNodeSummary) int64 {
+	if summary == nil || len(summary.Pods) == 0 {
+		return 0
+	}
+	var total int64
+	for _, pod := range summary.Pods {
+		if pod.EphemeralStorage.UsedBytes == nil {
+			continue
+		}
+		total += int64(*pod.EphemeralStorage.UsedBytes)
+	}
+	return total
+}
+
+func builderNodeFilesystemAvailableBytes(summary *builderKubeNodeSummary) int64 {
+	if summary == nil {
+		return 0
+	}
+	switch {
+	case summary.Node.FS.AvailableBytes != nil:
+		if summary.Node.FS.CapacityBytes != nil && *summary.Node.FS.AvailableBytes > *summary.Node.FS.CapacityBytes {
+			return 0
+		}
+		return int64(*summary.Node.FS.AvailableBytes)
+	case summary.Node.FS.CapacityBytes != nil && summary.Node.FS.UsedBytes != nil && *summary.Node.FS.UsedBytes <= *summary.Node.FS.CapacityBytes:
+		return int64(*summary.Node.FS.CapacityBytes - *summary.Node.FS.UsedBytes)
+	default:
+		return 0
+	}
 }
 
 func builderNodeConditionStatus(conditions []builderKubeNodeCondition, conditionType string) bool {
@@ -1005,6 +1136,13 @@ func (c *builderKubeClient) doJSONStatus(ctx context.Context, method, apiPath st
 
 func maxInt64(a, b int64) int64 {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
 		return a
 	}
 	return b

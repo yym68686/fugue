@@ -1,6 +1,9 @@
 package sourceimport
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestBuilderWorkloadProfileForStatefulDockerfileIsHeavy(t *testing.T) {
 	t.Parallel()
@@ -93,6 +96,48 @@ func TestBuildBuildpacksJobObjectAppliesHeavyBuilderPolicy(t *testing.T) {
 	limits := builderResourceValues(t, initContainer, "limits")
 	if got := limits["ephemeral-storage"]; got != "8Gi" {
 		t.Fatalf("expected heavy init ephemeral-storage limit 8Gi, got %q", got)
+	}
+}
+
+func TestBuildArchiveKanikoJobObjectAppliesBuilderTolerations(t *testing.T) {
+	t.Parallel()
+
+	jobObject, err := buildArchiveKanikoJobObject("fugue-system", "build-demo", dockerfileBuildRequest{
+		ArchiveDownloadURL: "https://example.com/archive.tar.gz",
+		DockerfilePath:     "Dockerfile",
+		BuildContextDir:    ".",
+		ImageRef:           "10.128.0.2:30500/fugue-apps/demo:git-abc123",
+		PodPolicy: BuilderPodPolicy{
+			Tolerations: []BuilderToleration{
+				{
+					Key:      "dedicated",
+					Operator: "Equal",
+					Value:    "builders",
+					Effect:   "NoSchedule",
+				},
+			},
+		},
+		WorkloadProfile: builderWorkloadProfileLight,
+	})
+	if err != nil {
+		t.Fatalf("build archive kaniko job object: %v", err)
+	}
+
+	podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	tolerations, ok := podSpec["tolerations"].([]map[string]any)
+	if !ok {
+		t.Fatalf("expected pod tolerations to be present")
+	}
+	expected := []map[string]any{
+		{
+			"key":      "dedicated",
+			"operator": "Equal",
+			"value":    "builders",
+			"effect":   "NoSchedule",
+		},
+	}
+	if !reflect.DeepEqual(tolerations, expected) {
+		t.Fatalf("expected tolerations %v, got %v", expected, tolerations)
 	}
 }
 

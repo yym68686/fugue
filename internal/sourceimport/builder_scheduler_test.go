@@ -11,6 +11,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"fugue/internal/model"
+	"fugue/internal/runtime"
 )
 
 var kubeTimestampPattern = regexp.MustCompile(`\.\d{6}Z$`)
@@ -170,6 +173,160 @@ func TestSelectBuilderCandidatesFallsBackWhenNoBuildPoolLabelsExist(t *testing.T
 	candidates := selectBuilderCandidates(policy, builderWorkloadProfileLight, demand, snapshots, nil)
 	if len(candidates) != 2 {
 		t.Fatalf("expected unlabeled healthy nodes to remain eligible, got %d", len(candidates))
+	}
+}
+
+func TestSelectBuilderCandidatesFallbackExcludesTenantScopedNodes(t *testing.T) {
+	t.Parallel()
+
+	policy := defaultBuilderPodPolicy()
+	demand, err := builderDemandForProfile(policy, builderWorkloadProfileLight)
+	if err != nil {
+		t.Fatalf("builder demand: %v", err)
+	}
+
+	snapshots := []builderNodeSnapshot{
+		builderTestNodeWithFS("shared-a", "shared-a", policy, policy.MediumNodeLabelValue, "2000m", "8Gi", "10Gi", "18Gi", "0", "0", "0"),
+		{
+			Name:     "alicehk2",
+			Hostname: "alicehk2",
+			Labels: map[string]string{
+				policy.LargeNodeLabelKey:  policy.LargeNodeLabelValue,
+				runtime.NodeModeLabelKey:  model.RuntimeTypeManagedOwned,
+				runtime.TenantIDLabelKey:  "tenant_demo",
+				runtime.RuntimeIDLabelKey: "runtime_demo",
+			},
+			Taints: []builderKubeNodeTaint{
+				{Key: runtime.TenantTaintKey, Value: "tenant_demo", Effect: "NoSchedule"},
+			},
+			Ready: true,
+			Allocatable: builderResourceDemand{
+				CPUMilli:       parseBuilderCPUMilli("4000m"),
+				MemoryBytes:    parseBuilderBytes("16Gi"),
+				EphemeralBytes: parseBuilderBytes("30Gi"),
+			},
+			FilesystemAvailableBytes: parseBuilderBytes("28Gi"),
+		},
+	}
+
+	candidates := selectBuilderCandidates(policy, builderWorkloadProfileLight, demand, snapshots, nil)
+	if len(candidates) != 1 {
+		t.Fatalf("expected tenant-scoped node to be excluded, got %d candidates", len(candidates))
+	}
+	if got := candidates[0].Node.Name; got != "shared-a" {
+		t.Fatalf("expected shared node to remain eligible, got %q", got)
+	}
+}
+
+func TestSelectBuilderCandidatesExcludesUntoleratedNoScheduleTaints(t *testing.T) {
+	t.Parallel()
+
+	policy := defaultBuilderPodPolicy()
+	demand, err := builderDemandForProfile(policy, builderWorkloadProfileLight)
+	if err != nil {
+		t.Fatalf("builder demand: %v", err)
+	}
+
+	node := builderTestNode("builder-a", "builder-a", policy, policy.MediumNodeLabelValue, "2000m", "8Gi", "10Gi", "0", "0", "0")
+	node.Taints = []builderKubeNodeTaint{
+		{Key: "dedicated", Value: "builders", Effect: "NoSchedule"},
+	}
+
+	candidates := selectBuilderCandidates(policy, builderWorkloadProfileLight, demand, []builderNodeSnapshot{node}, nil)
+	if len(candidates) != 0 {
+		t.Fatalf("expected untolerated tainted node to be excluded, got %d candidates", len(candidates))
+	}
+}
+
+func TestSelectBuilderCandidatesAllowsConfiguredTolerations(t *testing.T) {
+	t.Parallel()
+
+	policy := defaultBuilderPodPolicy()
+	policy.Tolerations = []BuilderToleration{
+		{
+			Key:      "dedicated",
+			Operator: "Equal",
+			Value:    "builders",
+			Effect:   "NoSchedule",
+		},
+	}
+	demand, err := builderDemandForProfile(policy, builderWorkloadProfileLight)
+	if err != nil {
+		t.Fatalf("builder demand: %v", err)
+	}
+
+	node := builderTestNode("builder-a", "builder-a", policy, policy.MediumNodeLabelValue, "2000m", "8Gi", "10Gi", "0", "0", "0")
+	node.Taints = []builderKubeNodeTaint{
+		{Key: "dedicated", Value: "builders", Effect: "NoSchedule"},
+	}
+
+	candidates := selectBuilderCandidates(policy, builderWorkloadProfileLight, demand, []builderNodeSnapshot{node}, nil)
+	if len(candidates) != 1 {
+		t.Fatalf("expected configured toleration to keep node eligible, got %d candidates", len(candidates))
+	}
+}
+
+func TestSelectBuilderCandidatesUsesFilesystemAvailabilityForEphemeralHeadroom(t *testing.T) {
+	t.Parallel()
+
+	policy := defaultBuilderPodPolicy()
+	demand, err := builderDemandForProfile(policy, builderWorkloadProfileLight)
+	if err != nil {
+		t.Fatalf("builder demand: %v", err)
+	}
+
+	candidates := selectBuilderCandidates(policy, builderWorkloadProfileLight, demand, []builderNodeSnapshot{
+		builderTestNodeWithFS("gcp1", "gcp1", policy, policy.MediumNodeLabelValue, "2000m", "4Gi", "9140Mi", "18Gi", "484m", "1500Mi", "20Mi"),
+		builderTestNodeWithFS("gcp3", "gcp3", policy, policy.MediumNodeLabelValue, "2000m", "4Gi", "9140Mi", "2500Mi", "103m", "1200Mi", "56Ki"),
+	}, nil)
+
+	if len(candidates) != 1 {
+		t.Fatalf("expected filesystem headroom to reject low-disk node, got %d candidates", len(candidates))
+	}
+	if got := candidates[0].Node.Name; got != "gcp1" {
+		t.Fatalf("expected gcp1-like node to remain eligible, got %q", got)
+	}
+}
+
+func TestBuilderUsedResourcesUsesPodEphemeralUsage(t *testing.T) {
+	t.Parallel()
+
+	used := builderUsedResources(&builderKubeNodeSummary{
+		Node: builderKubeSummaryNode{
+			Memory: builderKubeSummaryMem{
+				WorkingSetBytes: builderUint64Ptr(uint64(parseBuilderBytes("1536Mi"))),
+			},
+			FS: builderKubeSummaryFS{
+				CapacityBytes:  builderUint64Ptr(uint64(parseBuilderBytes("30Gi"))),
+				AvailableBytes: builderUint64Ptr(uint64(parseBuilderBytes("18Gi"))),
+				UsedBytes:      builderUint64Ptr(uint64(parseBuilderBytes("11Gi"))),
+			},
+		},
+		Pods: []builderKubeSummaryPod{
+			{EphemeralStorage: builderKubeSummaryFS{UsedBytes: builderUint64Ptr(uint64(parseBuilderBytes("18Mi")))}},
+			{EphemeralStorage: builderKubeSummaryFS{UsedBytes: builderUint64Ptr(uint64(parseBuilderBytes("2Mi")))}},
+		},
+	}, parseBuilderBytes("4Gi"))
+
+	if got := used.EphemeralBytes; got != parseBuilderBytes("20Mi") {
+		t.Fatalf("expected pod ephemeral usage 20Mi, got %d", got)
+	}
+}
+
+func TestBuilderNodeFilesystemAvailableBytesUsesNodeSummaryAvailability(t *testing.T) {
+	t.Parallel()
+
+	available := builderNodeFilesystemAvailableBytes(&builderKubeNodeSummary{
+		Node: builderKubeSummaryNode{
+			FS: builderKubeSummaryFS{
+				CapacityBytes:  builderUint64Ptr(uint64(parseBuilderBytes("30Gi"))),
+				AvailableBytes: builderUint64Ptr(uint64(parseBuilderBytes("18Gi"))),
+				UsedBytes:      builderUint64Ptr(uint64(parseBuilderBytes("11Gi"))),
+			},
+		},
+	})
+	if available != parseBuilderBytes("18Gi") {
+		t.Fatalf("expected filesystem available bytes for 18Gi, got %d", available)
 	}
 }
 
@@ -333,6 +490,10 @@ func TestUpsertReservationUpdateUsesMicrosecondPrecision(t *testing.T) {
 }
 
 func builderTestNode(name, hostname string, policy BuilderPodPolicy, sizeClass, cpu, memory, ephemeral, usedCPU, usedMemory, usedEphemeral string) builderNodeSnapshot {
+	return builderTestNodeWithFS(name, hostname, policy, sizeClass, cpu, memory, ephemeral, ephemeral, usedCPU, usedMemory, usedEphemeral)
+}
+
+func builderTestNodeWithFS(name, hostname string, policy BuilderPodPolicy, sizeClass, cpu, memory, ephemeral, filesystemAvailable, usedCPU, usedMemory, usedEphemeral string) builderNodeSnapshot {
 	return builderNodeSnapshot{
 		Name:     name,
 		Hostname: hostname,
@@ -351,6 +512,7 @@ func builderTestNode(name, hostname string, policy BuilderPodPolicy, sizeClass, 
 			MemoryBytes:    parseBuilderBytes(usedMemory),
 			EphemeralBytes: parseBuilderBytes(usedEphemeral),
 		},
+		FilesystemAvailableBytes: parseBuilderBytes(filesystemAvailable),
 	}
 }
 
@@ -370,4 +532,8 @@ func assertMicrosecondKubeTimestamp(t *testing.T, value string) {
 	if _, err := time.Parse("2006-01-02T15:04:05.000000Z07:00", value); err != nil {
 		t.Fatalf("parse kube timestamp %q: %v", value, err)
 	}
+}
+
+func builderUint64Ptr(value uint64) *uint64 {
+	return &value
 }
