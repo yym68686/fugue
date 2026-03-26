@@ -812,6 +812,244 @@ func TestRuntimePlatformSharedVisibleToAllTenants(t *testing.T) {
 	}
 }
 
+func TestBootstrapNodeTransfersOwnershipAcrossTenants(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	ownerA, err := s.CreateTenant("Owner A")
+	if err != nil {
+		t.Fatalf("create owner A tenant: %v", err)
+	}
+	ownerB, err := s.CreateTenant("Owner B")
+	if err != nil {
+		t.Fatalf("create owner B tenant: %v", err)
+	}
+	viewer, err := s.CreateTenant("Viewer")
+	if err != nil {
+		t.Fatalf("create viewer tenant: %v", err)
+	}
+	keyA, secretA, err := s.CreateNodeKey(ownerA.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key A: %v", err)
+	}
+	keyB, secretB, err := s.CreateNodeKey(ownerB.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key B: %v", err)
+	}
+
+	_, runtimeA, runtimeKeyA, err := s.BootstrapNode(secretA, "worker", "https://owner-a.example.com", map[string]string{"zone": "a"}, "worker-a", "transfer-fingerprint")
+	if err != nil {
+		t.Fatalf("bootstrap node for owner A: %v", err)
+	}
+	if runtimeKeyA == "" {
+		t.Fatal("expected runtime key for owner A bootstrap")
+	}
+	if _, err := s.GrantRuntimeAccess(runtimeA.ID, ownerA.ID, viewer.ID); err != nil {
+		t.Fatalf("grant runtime access before transfer: %v", err)
+	}
+
+	visible, err := s.RuntimeVisibleToTenant(runtimeA.ID, viewer.ID, false)
+	if err != nil {
+		t.Fatalf("check viewer visibility before transfer: %v", err)
+	}
+	if !visible {
+		t.Fatal("expected viewer to see granted runtime before transfer")
+	}
+
+	_, runtimeB, runtimeKeyB, err := s.BootstrapNode(secretB, "worker", "https://owner-b.example.com", map[string]string{"zone": "b"}, "worker-b", "transfer-fingerprint")
+	if err != nil {
+		t.Fatalf("bootstrap node for owner B: %v", err)
+	}
+	if runtimeKeyB == "" {
+		t.Fatal("expected runtime key for owner B bootstrap")
+	}
+	if runtimeB.ID == runtimeA.ID {
+		t.Fatalf("expected ownership transfer to create or reuse owner B runtime, got same runtime id %s", runtimeB.ID)
+	}
+	if runtimeB.TenantID != ownerB.ID {
+		t.Fatalf("expected runtime tenant %s, got %s", ownerB.ID, runtimeB.TenantID)
+	}
+	if runtimeB.NodeKeyID != keyB.ID {
+		t.Fatalf("expected runtime node key %s, got %s", keyB.ID, runtimeB.NodeKeyID)
+	}
+	if runtimeB.AccessMode != model.RuntimeAccessModePrivate {
+		t.Fatalf("expected transferred runtime to default to private, got %q", runtimeB.AccessMode)
+	}
+
+	oldRuntime, err := s.GetRuntime(runtimeA.ID)
+	if err != nil {
+		t.Fatalf("get old runtime after transfer: %v", err)
+	}
+	if oldRuntime.TenantID != ownerA.ID {
+		t.Fatalf("expected old runtime to remain attached to owner A history, got tenant %s", oldRuntime.TenantID)
+	}
+	if oldRuntime.Status != model.RuntimeStatusOffline {
+		t.Fatalf("expected old runtime to be offline, got %q", oldRuntime.Status)
+	}
+	if oldRuntime.NodeKeyID != "" {
+		t.Fatalf("expected old runtime node key to be cleared, got %q", oldRuntime.NodeKeyID)
+	}
+	if oldRuntime.FingerprintHash != "" || oldRuntime.FingerprintPrefix != "" {
+		t.Fatalf("expected old runtime fingerprint to be cleared, got prefix=%q hash=%q", oldRuntime.FingerprintPrefix, oldRuntime.FingerprintHash)
+	}
+	if oldRuntime.AgentKeyHash != "" || oldRuntime.AgentKeyPrefix != "" {
+		t.Fatalf("expected old runtime agent key to be cleared, got prefix=%q hash=%q", oldRuntime.AgentKeyPrefix, oldRuntime.AgentKeyHash)
+	}
+	if oldRuntime.AccessMode != model.RuntimeAccessModePrivate {
+		t.Fatalf("expected old runtime access mode to reset to private, got %q", oldRuntime.AccessMode)
+	}
+
+	visible, err = s.RuntimeVisibleToTenant(runtimeA.ID, viewer.ID, false)
+	if err != nil {
+		t.Fatalf("check viewer visibility after transfer: %v", err)
+	}
+	if visible {
+		t.Fatal("expected viewer access to old runtime to be revoked by transfer")
+	}
+	visible, err = s.RuntimeVisibleToTenant(runtimeB.ID, viewer.ID, false)
+	if err != nil {
+		t.Fatalf("check viewer visibility for new owner runtime: %v", err)
+	}
+	if visible {
+		t.Fatal("expected transferred runtime to be private by default")
+	}
+
+	usagesA, err := s.ListRuntimesByNodeKey(keyA.ID, ownerA.ID, false)
+	if err != nil {
+		t.Fatalf("list node key A usages: %v", err)
+	}
+	if len(usagesA) != 0 {
+		t.Fatalf("expected old node key to have no runtime usages after transfer, got %+v", usagesA)
+	}
+	usagesB, err := s.ListRuntimesByNodeKey(keyB.ID, ownerB.ID, false)
+	if err != nil {
+		t.Fatalf("list node key B usages: %v", err)
+	}
+	if len(usagesB) != 1 || usagesB[0].ID != runtimeB.ID {
+		t.Fatalf("expected new node key to own transferred runtime, got %+v", usagesB)
+	}
+}
+
+func TestBootstrapClusterNodeTransfersOwnershipAcrossTenants(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	ownerA, err := s.CreateTenant("Cluster Owner A")
+	if err != nil {
+		t.Fatalf("create owner A tenant: %v", err)
+	}
+	ownerB, err := s.CreateTenant("Cluster Owner B")
+	if err != nil {
+		t.Fatalf("create owner B tenant: %v", err)
+	}
+	viewer, err := s.CreateTenant("Cluster Viewer")
+	if err != nil {
+		t.Fatalf("create viewer tenant: %v", err)
+	}
+	_, secretA, err := s.CreateNodeKey(ownerA.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key A: %v", err)
+	}
+	keyB, secretB, err := s.CreateNodeKey(ownerB.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key B: %v", err)
+	}
+
+	_, runtimeA, err := s.BootstrapClusterNode(secretA, "worker", "https://cluster-a.example.com", map[string]string{"zone": "a"}, "worker-a", "cluster-transfer-fingerprint")
+	if err != nil {
+		t.Fatalf("bootstrap cluster node for owner A: %v", err)
+	}
+	if _, err := s.GrantRuntimeAccess(runtimeA.ID, ownerA.ID, viewer.ID); err != nil {
+		t.Fatalf("grant cluster runtime access before transfer: %v", err)
+	}
+	if _, err := s.SetRuntimeAccessMode(runtimeA.ID, ownerA.ID, model.RuntimeAccessModePlatformShared); err != nil {
+		t.Fatalf("set cluster runtime platform-shared before transfer: %v", err)
+	}
+
+	visible, err := s.RuntimeVisibleToTenant(runtimeA.ID, viewer.ID, false)
+	if err != nil {
+		t.Fatalf("check viewer visibility before cluster transfer: %v", err)
+	}
+	if !visible {
+		t.Fatal("expected viewer to see cluster runtime before transfer")
+	}
+
+	_, runtimeB, err := s.BootstrapClusterNode(secretB, "worker", "https://cluster-b.example.com", map[string]string{"zone": "b"}, "worker-b", "cluster-transfer-fingerprint")
+	if err != nil {
+		t.Fatalf("bootstrap cluster node for owner B: %v", err)
+	}
+	if runtimeB.ID == runtimeA.ID {
+		t.Fatalf("expected ownership transfer to allocate owner B runtime, got same runtime id %s", runtimeB.ID)
+	}
+	if runtimeB.NodeKeyID != keyB.ID {
+		t.Fatalf("expected transferred cluster runtime node key %s, got %s", keyB.ID, runtimeB.NodeKeyID)
+	}
+	if runtimeB.AccessMode != model.RuntimeAccessModePrivate {
+		t.Fatalf("expected transferred cluster runtime to reset to private, got %q", runtimeB.AccessMode)
+	}
+	if runtimeB.ClusterNodeName == "" {
+		t.Fatal("expected transferred cluster runtime to keep a cluster node name")
+	}
+
+	oldRuntime, err := s.GetRuntime(runtimeA.ID)
+	if err != nil {
+		t.Fatalf("get old cluster runtime after transfer: %v", err)
+	}
+	if oldRuntime.Status != model.RuntimeStatusOffline {
+		t.Fatalf("expected old cluster runtime to be offline, got %q", oldRuntime.Status)
+	}
+	if oldRuntime.NodeKeyID != "" {
+		t.Fatalf("expected old cluster runtime node key to be cleared, got %q", oldRuntime.NodeKeyID)
+	}
+	if oldRuntime.ClusterNodeName != "" {
+		t.Fatalf("expected old cluster runtime cluster node name to be cleared, got %q", oldRuntime.ClusterNodeName)
+	}
+	if oldRuntime.FingerprintHash != "" || oldRuntime.FingerprintPrefix != "" {
+		t.Fatalf("expected old cluster runtime fingerprint to be cleared, got prefix=%q hash=%q", oldRuntime.FingerprintPrefix, oldRuntime.FingerprintHash)
+	}
+	if oldRuntime.AccessMode != model.RuntimeAccessModePrivate {
+		t.Fatalf("expected old cluster runtime access mode to reset to private, got %q", oldRuntime.AccessMode)
+	}
+
+	visible, err = s.RuntimeVisibleToTenant(runtimeA.ID, viewer.ID, false)
+	if err != nil {
+		t.Fatalf("check old cluster runtime visibility after transfer: %v", err)
+	}
+	if visible {
+		t.Fatal("expected old cluster runtime visibility to be revoked after transfer")
+	}
+	visible, err = s.RuntimeVisibleToTenant(runtimeB.ID, viewer.ID, false)
+	if err != nil {
+		t.Fatalf("check new cluster runtime visibility after transfer: %v", err)
+	}
+	if visible {
+		t.Fatal("expected new cluster runtime to default to private after transfer")
+	}
+
+	nodesB, err := s.ListNodes(ownerB.ID, false)
+	if err != nil {
+		t.Fatalf("list owner B nodes: %v", err)
+	}
+	found := false
+	for _, node := range nodesB {
+		if node.ID == runtimeB.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected owner B to see transferred cluster runtime %s", runtimeB.ID)
+	}
+}
+
 func TestEnsureRuntimeMetadataBackfillsLegacyMachineState(t *testing.T) {
 	t.Parallel()
 

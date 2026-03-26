@@ -135,6 +135,7 @@ var postgresSchemaStatements = []string{
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_runtimes_tenant_name_ci ON fugue_runtimes ((COALESCE(tenant_id, '')), lower(name))`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_runtimes_agent_key_hash ON fugue_runtimes (agent_key_hash) WHERE agent_key_hash <> ''`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_runtimes_tenant_fingerprint_hash ON fugue_runtimes ((COALESCE(tenant_id, '')), fingerprint_hash) WHERE fingerprint_hash <> ''`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_runtimes_fingerprint_hash ON fugue_runtimes (fingerprint_hash) WHERE fingerprint_hash <> ''`,
 	`CREATE TABLE IF NOT EXISTS fugue_runtime_access_grants (
 		runtime_id TEXT NOT NULL REFERENCES fugue_runtimes(id) ON DELETE CASCADE,
 		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
@@ -678,11 +679,11 @@ SET machine_name = CASE WHEN machine_name = '' THEN name ELSE machine_name END,
 		ELSE connection_mode
 	END,
 	cluster_node_name = CASE
-		WHEN cluster_node_name = '' AND type = $1 THEN name
+		WHEN cluster_node_name = '' AND type = $1 AND (node_key_id IS NOT NULL OR fingerprint_hash <> '' OR status = $3) THEN name
 		ELSE cluster_node_name
 	END,
 	last_seen_at = COALESCE(last_seen_at, last_heartbeat_at)
-`, model.RuntimeTypeManagedOwned, model.RuntimeTypeExternalOwned); err != nil {
+`, model.RuntimeTypeManagedOwned, model.RuntimeTypeExternalOwned, model.RuntimeStatusActive); err != nil {
 		return fmt.Errorf("normalize runtime metadata defaults: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `

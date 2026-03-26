@@ -884,18 +884,47 @@ WHERE id = $1
 	if err != nil {
 		return model.NodeKey{}, model.Runtime{}, "", err
 	}
+	var matchingRuntimes []model.Runtime
+	if explicitFingerprint {
+		matchingRuntimes, err = s.pgListRuntimesByFingerprintTx(ctx, tx, fingerprintHash, true)
+		if err != nil {
+			return model.NodeKey{}, model.Runtime{}, "", err
+		}
+	}
 	if !found && explicitFingerprint {
 		runtime, found, err = s.pgFindRuntimeCandidateTx(ctx, tx, key.TenantID, key.ID, model.RuntimeTypeExternalOwned, machineName, runtimeName, endpoint)
 		if err != nil {
 			return model.NodeKey{}, model.Runtime{}, "", err
 		}
 	}
+	transferByFingerprint := explicitFingerprint && len(matchingRuntimes) > 0 && (runtime.ID == "" || runtime.FingerprintHash != fingerprintHash || runtime.TenantID != key.TenantID)
+	if explicitFingerprint {
+		keepRuntimeID := ""
+		if runtime.FingerprintHash == fingerprintHash && runtime.TenantID == key.TenantID {
+			keepRuntimeID = runtime.ID
+		}
+		for _, conflict := range matchingRuntimes {
+			if conflict.ID == keepRuntimeID {
+				continue
+			}
+			if err := s.pgDetachRuntimeOwnershipTx(ctx, tx, &conflict, now); err != nil {
+				return model.NodeKey{}, model.Runtime{}, "", err
+			}
+		}
+	}
 
 	runtimeSecret := model.NewSecret("fugue_rt")
 
 	if found {
+		if transferByFingerprint {
+			if err := s.pgDeleteRuntimeAccessGrantsTx(ctx, tx, runtime.ID); err != nil {
+				return model.NodeKey{}, model.Runtime{}, "", err
+			}
+			runtime.AccessMode = model.RuntimeAccessModePrivate
+		}
 		runtime.Type = model.RuntimeTypeExternalOwned
 		runtime.Status = model.RuntimeStatusActive
+		runtime.TenantID = key.TenantID
 		runtime.Endpoint = endpoint
 		runtime.Labels = cloneMap(labels)
 		runtime.NodeKeyID = key.ID
@@ -990,16 +1019,45 @@ WHERE id = $1
 	if err != nil {
 		return model.NodeKey{}, model.Runtime{}, err
 	}
+	var matchingRuntimes []model.Runtime
+	if explicitFingerprint {
+		matchingRuntimes, err = s.pgListRuntimesByFingerprintTx(ctx, tx, fingerprintHash, true)
+		if err != nil {
+			return model.NodeKey{}, model.Runtime{}, err
+		}
+	}
 	if !found && explicitFingerprint {
 		runtime, found, err = s.pgFindRuntimeCandidateTx(ctx, tx, key.TenantID, key.ID, model.RuntimeTypeManagedOwned, machineName, runtimeName, endpoint)
 		if err != nil {
 			return model.NodeKey{}, model.Runtime{}, err
 		}
 	}
+	transferByFingerprint := explicitFingerprint && len(matchingRuntimes) > 0 && (runtime.ID == "" || runtime.FingerprintHash != fingerprintHash || runtime.TenantID != key.TenantID)
+	if explicitFingerprint {
+		keepRuntimeID := ""
+		if runtime.FingerprintHash == fingerprintHash && runtime.TenantID == key.TenantID {
+			keepRuntimeID = runtime.ID
+		}
+		for _, conflict := range matchingRuntimes {
+			if conflict.ID == keepRuntimeID {
+				continue
+			}
+			if err := s.pgDetachRuntimeOwnershipTx(ctx, tx, &conflict, now); err != nil {
+				return model.NodeKey{}, model.Runtime{}, err
+			}
+		}
+	}
 
 	if found {
+		if transferByFingerprint {
+			if err := s.pgDeleteRuntimeAccessGrantsTx(ctx, tx, runtime.ID); err != nil {
+				return model.NodeKey{}, model.Runtime{}, err
+			}
+			runtime.AccessMode = model.RuntimeAccessModePrivate
+		}
 		runtime.Type = model.RuntimeTypeManagedOwned
 		runtime.Status = model.RuntimeStatusActive
+		runtime.TenantID = key.TenantID
 		runtime.Endpoint = endpoint
 		runtime.Labels = cloneMap(labels)
 		runtime.NodeKeyID = key.ID
@@ -1465,6 +1523,8 @@ SELECT id, tenant_id, name, machine_name, type, access_mode, connection_mode, st
 FROM fugue_runtimes
 WHERE tenant_id = $1
   AND fingerprint_hash = $2
+ORDER BY updated_at DESC, created_at DESC
+LIMIT 1
 `
 	if forUpdate {
 		query += ` FOR UPDATE`
@@ -1477,6 +1537,71 @@ WHERE tenant_id = $1
 		return model.Runtime{}, false, err
 	}
 	return runtime, true, nil
+}
+
+func (s *Store) pgListRuntimesByFingerprintTx(ctx context.Context, tx *sql.Tx, fingerprintHash string, forUpdate bool) ([]model.Runtime, error) {
+	if strings.TrimSpace(fingerprintHash) == "" {
+		return nil, nil
+	}
+	query := `
+SELECT id, tenant_id, name, machine_name, type, access_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+FROM fugue_runtimes
+WHERE fingerprint_hash = $1
+ORDER BY updated_at DESC, created_at DESC
+`
+	if forUpdate {
+		query += ` FOR UPDATE`
+	}
+	rows, err := tx.QueryContext(ctx, query, fingerprintHash)
+	if err != nil {
+		return nil, fmt.Errorf("query runtimes by fingerprint: %w", err)
+	}
+	defer rows.Close()
+
+	runtimes := make([]model.Runtime, 0)
+	for rows.Next() {
+		runtime, err := scanRuntime(rows)
+		if err != nil {
+			return nil, err
+		}
+		runtimes = append(runtimes, runtime)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate runtimes by fingerprint: %w", err)
+	}
+	return runtimes, nil
+}
+
+func (s *Store) pgDeleteRuntimeAccessGrantsTx(ctx context.Context, tx *sql.Tx, runtimeID string) error {
+	if strings.TrimSpace(runtimeID) == "" {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM fugue_runtime_access_grants
+WHERE runtime_id = $1
+`, runtimeID); err != nil {
+		return fmt.Errorf("delete runtime access grants for %s: %w", runtimeID, err)
+	}
+	return nil
+}
+
+func (s *Store) pgDetachRuntimeOwnershipTx(ctx context.Context, tx *sql.Tx, runtime *model.Runtime, now time.Time) error {
+	if runtime == nil {
+		return nil
+	}
+	if err := s.pgDeleteRuntimeAccessGrantsTx(ctx, tx, runtime.ID); err != nil {
+		return err
+	}
+	runtime.AccessMode = model.RuntimeAccessModePrivate
+	runtime.Status = model.RuntimeStatusOffline
+	runtime.NodeKeyID = ""
+	runtime.ClusterNodeName = ""
+	runtime.FingerprintPrefix = ""
+	runtime.FingerprintHash = ""
+	runtime.AgentKeyPrefix = ""
+	runtime.AgentKeyHash = ""
+	runtime.UpdatedAt = now
+	return s.pgUpdateRuntimeTx(ctx, tx, *runtime)
 }
 
 func (s *Store) pgFindRuntimeCandidateTx(ctx context.Context, tx *sql.Tx, tenantID, nodeKeyID, runtimeType, machineName, runtimeName, endpoint string) (model.Runtime, bool, error) {

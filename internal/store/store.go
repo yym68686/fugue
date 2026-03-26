@@ -851,15 +851,35 @@ func (s *Store) BootstrapNode(secret, runtimeName, endpoint string, labels map[s
 		machineFingerprint = normalizedMachineFingerprint(machineFingerprint, machineName, runtimeName, endpoint)
 		fingerprintHash := model.HashSecret(machineFingerprint)
 
-		runtimeIndex := findRuntimeByFingerprintHash(state, key.TenantID, fingerprintHash)
+		sameTenantFingerprintIndex := findRuntimeByFingerprintHash(state, key.TenantID, fingerprintHash)
+		runtimeIndex := sameTenantFingerprintIndex
 		if runtimeIndex < 0 && explicitFingerprint {
 			runtimeIndex = findRuntimeCandidate(state, key.TenantID, key.ID, model.RuntimeTypeExternalOwned, machineName, runtimeName, endpoint)
+		}
+		transferByFingerprint := false
+		if explicitFingerprint {
+			matchingIndexes := findRuntimeIndexesByFingerprintHash(state, fingerprintHash)
+			keepFingerprintIndex := sameTenantFingerprintIndex
+			if sameTenantFingerprintIndex < 0 && len(matchingIndexes) > 0 {
+				transferByFingerprint = true
+			}
+			for _, matchIndex := range matchingIndexes {
+				if matchIndex == keepFingerprintIndex {
+					continue
+				}
+				detachRuntimeOwnership(state, matchIndex, now)
+			}
 		}
 
 		runtimeSecret = model.NewSecret("fugue_rt")
 		if runtimeIndex >= 0 {
+			if transferByFingerprint {
+				resetRuntimeSharing(state, state.Runtimes[runtimeIndex].ID)
+				state.Runtimes[runtimeIndex].AccessMode = model.RuntimeAccessModePrivate
+			}
 			state.Runtimes[runtimeIndex].Type = model.RuntimeTypeExternalOwned
 			state.Runtimes[runtimeIndex].Status = model.RuntimeStatusActive
+			state.Runtimes[runtimeIndex].TenantID = key.TenantID
 			state.Runtimes[runtimeIndex].Endpoint = strings.TrimSpace(endpoint)
 			state.Runtimes[runtimeIndex].Labels = cloneMap(labels)
 			state.Runtimes[runtimeIndex].NodeKeyID = key.ID
@@ -940,14 +960,34 @@ func (s *Store) BootstrapClusterNode(secret, runtimeName, endpoint string, label
 		machineFingerprint = normalizedMachineFingerprint(machineFingerprint, machineName, runtimeName, endpoint)
 		fingerprintHash := model.HashSecret(machineFingerprint)
 
-		runtimeIndex := findRuntimeByFingerprintHash(state, key.TenantID, fingerprintHash)
+		sameTenantFingerprintIndex := findRuntimeByFingerprintHash(state, key.TenantID, fingerprintHash)
+		runtimeIndex := sameTenantFingerprintIndex
 		if runtimeIndex < 0 && explicitFingerprint {
 			runtimeIndex = findRuntimeCandidate(state, key.TenantID, key.ID, model.RuntimeTypeManagedOwned, machineName, runtimeName, endpoint)
 		}
+		transferByFingerprint := false
+		if explicitFingerprint {
+			matchingIndexes := findRuntimeIndexesByFingerprintHash(state, fingerprintHash)
+			keepFingerprintIndex := sameTenantFingerprintIndex
+			if sameTenantFingerprintIndex < 0 && len(matchingIndexes) > 0 {
+				transferByFingerprint = true
+			}
+			for _, matchIndex := range matchingIndexes {
+				if matchIndex == keepFingerprintIndex {
+					continue
+				}
+				detachRuntimeOwnership(state, matchIndex, now)
+			}
+		}
 
 		if runtimeIndex >= 0 {
+			if transferByFingerprint {
+				resetRuntimeSharing(state, state.Runtimes[runtimeIndex].ID)
+				state.Runtimes[runtimeIndex].AccessMode = model.RuntimeAccessModePrivate
+			}
 			state.Runtimes[runtimeIndex].Type = model.RuntimeTypeManagedOwned
 			state.Runtimes[runtimeIndex].Status = model.RuntimeStatusActive
+			state.Runtimes[runtimeIndex].TenantID = key.TenantID
 			state.Runtimes[runtimeIndex].Endpoint = strings.TrimSpace(endpoint)
 			state.Runtimes[runtimeIndex].Labels = cloneMap(labels)
 			state.Runtimes[runtimeIndex].NodeKeyID = key.ID
@@ -2341,7 +2381,7 @@ func backfillRuntimeMetadata(runtime *model.Runtime, machine model.Machine) {
 		switch {
 		case strings.TrimSpace(machine.ClusterNodeName) != "":
 			runtime.ClusterNodeName = machine.ClusterNodeName
-		case runtime.Type == model.RuntimeTypeManagedOwned:
+		case runtime.Type == model.RuntimeTypeManagedOwned && (runtime.NodeKeyID != "" || runtime.FingerprintHash != "" || runtime.Status == model.RuntimeStatusActive):
 			runtime.ClusterNodeName = runtime.Name
 		}
 	}
@@ -2736,6 +2776,17 @@ func deleteRuntimeAccessGrants(grants []model.RuntimeAccessGrant, tenantID strin
 	return filtered
 }
 
+func deleteRuntimeAccessGrantsByRuntime(grants []model.RuntimeAccessGrant, runtimeID string) []model.RuntimeAccessGrant {
+	filtered := grants[:0]
+	for _, grant := range grants {
+		if grant.RuntimeID == runtimeID {
+			continue
+		}
+		filtered = append(filtered, grant)
+	}
+	return filtered
+}
+
 func deleteAppsByTenant(apps []model.App, tenantID string) []model.App {
 	filtered := apps[:0]
 	for _, app := range apps {
@@ -2840,15 +2891,21 @@ func findNodeKey(state *model.State, id string) int {
 }
 
 func findRuntimeByFingerprintHash(state *model.State, tenantID, fingerprintHash string) int {
+	bestIndex := -1
 	for idx, runtime := range state.Runtimes {
-		if runtime.TenantID != tenantID {
+		if runtime.TenantID != tenantID || runtime.FingerprintHash != fingerprintHash {
 			continue
 		}
-		if runtime.FingerprintHash == fingerprintHash {
-			return idx
+		if bestIndex < 0 {
+			bestIndex = idx
+			continue
+		}
+		best := state.Runtimes[bestIndex]
+		if runtime.UpdatedAt.After(best.UpdatedAt) || (runtime.UpdatedAt.Equal(best.UpdatedAt) && runtime.CreatedAt.After(best.CreatedAt)) {
+			bestIndex = idx
 		}
 	}
-	return -1
+	return bestIndex
 }
 
 func findRuntimeCandidate(state *model.State, tenantID, nodeKeyID, runtimeType, machineName, runtimeName, endpoint string) int {
@@ -2987,6 +3044,30 @@ func runtimeNameExists(state *model.State, tenantID, name string) bool {
 	return false
 }
 
+func resetRuntimeSharing(state *model.State, runtimeID string) {
+	if state == nil {
+		return
+	}
+	state.RuntimeGrants = deleteRuntimeAccessGrantsByRuntime(state.RuntimeGrants, runtimeID)
+}
+
+func detachRuntimeOwnership(state *model.State, runtimeIndex int, now time.Time) {
+	if state == nil || runtimeIndex < 0 || runtimeIndex >= len(state.Runtimes) {
+		return
+	}
+	runtime := &state.Runtimes[runtimeIndex]
+	resetRuntimeSharing(state, runtime.ID)
+	runtime.AccessMode = model.RuntimeAccessModePrivate
+	runtime.Status = model.RuntimeStatusOffline
+	runtime.NodeKeyID = ""
+	runtime.ClusterNodeName = ""
+	runtime.FingerprintPrefix = ""
+	runtime.FingerprintHash = ""
+	runtime.AgentKeyPrefix = ""
+	runtime.AgentKeyHash = ""
+	runtime.UpdatedAt = now
+}
+
 func normalizeRuntimeAccessMode(runtimeType, accessMode string) string {
 	switch strings.TrimSpace(accessMode) {
 	case model.RuntimeAccessModePlatformShared:
@@ -3014,4 +3095,26 @@ func findRuntimeAccessGrant(state *model.State, runtimeID, tenantID string) int 
 		}
 	}
 	return -1
+}
+
+func findRuntimeIndexesByFingerprintHash(state *model.State, fingerprintHash string) []int {
+	if state == nil || strings.TrimSpace(fingerprintHash) == "" {
+		return nil
+	}
+	indexes := make([]int, 0, 1)
+	for idx, runtime := range state.Runtimes {
+		if runtime.FingerprintHash != fingerprintHash {
+			continue
+		}
+		indexes = append(indexes, idx)
+	}
+	sort.Slice(indexes, func(i, j int) bool {
+		left := state.Runtimes[indexes[i]]
+		right := state.Runtimes[indexes[j]]
+		if !left.UpdatedAt.Equal(right.UpdatedAt) {
+			return left.UpdatedAt.After(right.UpdatedAt)
+		}
+		return left.CreatedAt.After(right.CreatedAt)
+	})
+	return indexes
 }
