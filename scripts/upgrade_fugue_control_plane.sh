@@ -146,7 +146,6 @@ rollback_release() {
   log "rolling back release ${FUGUE_RELEASE_NAME} to revision ${PREVIOUS_REVISION}"
   helm rollback "${FUGUE_RELEASE_NAME}" "${PREVIOUS_REVISION}" \
     -n "${FUGUE_NAMESPACE}" \
-    --wait \
     --timeout "${FUGUE_HELM_TIMEOUT}"
 
   if ! deployment_exists "${rollback_api_deployment}" && deployment_exists "${FUGUE_LEGACY_API_DEPLOYMENT_NAME}"; then
@@ -236,11 +235,15 @@ main() {
 
   apply_chart_crds
 
+  # Do not use Helm's release-wide --wait here. It waits on every resource in
+  # the chart, including DaemonSets scheduled onto stale/NotReady nodes. That
+  # can deadlock control-plane upgrades exactly when the new API needs to clean
+  # up those stale nodes. We gate success on targeted API/controller rollout
+  # checks plus the smoke test below instead.
   if ! helm upgrade "${FUGUE_RELEASE_NAME}" "${FUGUE_HELM_CHART_PATH}" \
     -n "${FUGUE_NAMESPACE}" \
     --reset-then-reuse-values \
     --history-max 20 \
-    --wait \
     --timeout "${FUGUE_HELM_TIMEOUT}" \
     --set-string api.image.repository="${FUGUE_API_IMAGE_REPOSITORY}" \
     --set-string api.image.tag="${FUGUE_API_IMAGE_TAG}" \
