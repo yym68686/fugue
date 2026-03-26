@@ -7,6 +7,9 @@ const (
 	RuntimeTypeManagedOwned  = "managed-owned"
 	RuntimeTypeExternalOwned = "external-owned"
 
+	RuntimeAccessModePrivate        = "private"
+	RuntimeAccessModePlatformShared = "platform-shared"
+
 	MachineConnectionModeAgent   = "agent"
 	MachineConnectionModeCluster = "cluster"
 
@@ -132,6 +135,7 @@ type Runtime struct {
 	Name              string            `json:"name"`
 	MachineName       string            `json:"machine_name,omitempty"`
 	Type              string            `json:"type"`
+	AccessMode        string            `json:"access_mode,omitempty"`
 	ConnectionMode    string            `json:"connection_mode,omitempty"`
 	Status            string            `json:"status"`
 	Endpoint          string            `json:"endpoint,omitempty"`
@@ -165,6 +169,13 @@ type Machine struct {
 	LastSeenAt        *time.Time        `json:"last_seen_at,omitempty"`
 	CreatedAt         time.Time         `json:"created_at"`
 	UpdatedAt         time.Time         `json:"updated_at"`
+}
+
+type RuntimeAccessGrant struct {
+	RuntimeID string    `json:"runtime_id"`
+	TenantID  string    `json:"tenant_id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type ClusterNodeCondition struct {
@@ -450,18 +461,19 @@ func (p Principal) IsPlatformAdmin() bool {
 }
 
 type State struct {
-	Version          string              `json:"version"`
-	Tenants          []Tenant            `json:"tenants"`
-	Projects         []Project           `json:"projects"`
-	APIKeys          []APIKey            `json:"api_keys"`
-	EnrollmentTokens []EnrollmentToken   `json:"enrollment_tokens"`
-	NodeKeys         []NodeKey           `json:"node_keys"`
-	Machines         []Machine           `json:"machines"`
-	Runtimes         []Runtime           `json:"runtimes"`
-	Apps             []App               `json:"apps"`
-	BackingServices  []BackingService    `json:"backing_services"`
-	ServiceBindings  []ServiceBinding    `json:"service_bindings"`
-	Operations       []Operation         `json:"operations"`
-	AuditEvents      []AuditEvent        `json:"audit_events"`
-	Idempotency      []IdempotencyRecord `json:"idempotency"`
+	Version          string               `json:"version"`
+	Tenants          []Tenant             `json:"tenants"`
+	Projects         []Project            `json:"projects"`
+	APIKeys          []APIKey             `json:"api_keys"`
+	EnrollmentTokens []EnrollmentToken    `json:"enrollment_tokens"`
+	NodeKeys         []NodeKey            `json:"node_keys"`
+	Machines         []Machine            `json:"machines"`
+	Runtimes         []Runtime            `json:"runtimes"`
+	RuntimeGrants    []RuntimeAccessGrant `json:"runtime_grants"`
+	Apps             []App                `json:"apps"`
+	BackingServices  []BackingService     `json:"backing_services"`
+	ServiceBindings  []ServiceBinding     `json:"service_bindings"`
+	Operations       []Operation          `json:"operations"`
+	AuditEvents      []AuditEvent         `json:"audit_events"`
+	Idempotency      []IdempotencyRecord  `json:"idempotency"`
 }

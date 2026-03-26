@@ -238,6 +238,9 @@ func TestNodeAndKeyDefaultsWhenNamesAreOmitted(t *testing.T) {
 	if clusterRuntime.Name != "node" {
 		t.Fatalf("expected default cluster runtime name node, got %q", clusterRuntime.Name)
 	}
+	if clusterRuntime.AccessMode != model.RuntimeAccessModePrivate {
+		t.Fatalf("expected private access mode for joined cluster runtime, got %q", clusterRuntime.AccessMode)
+	}
 
 	externalTenant, err := s.CreateTenant("External Tenant")
 	if err != nil {
@@ -257,6 +260,9 @@ func TestNodeAndKeyDefaultsWhenNamesAreOmitted(t *testing.T) {
 	if externalRuntime.Name != "node" {
 		t.Fatalf("expected default external runtime name node, got %q", externalRuntime.Name)
 	}
+	if externalRuntime.AccessMode != model.RuntimeAccessModePrivate {
+		t.Fatalf("expected private access mode for joined external runtime, got %q", externalRuntime.AccessMode)
+	}
 
 	enrollTenant, err := s.CreateTenant("Enroll Tenant")
 	if err != nil {
@@ -275,6 +281,9 @@ func TestNodeAndKeyDefaultsWhenNamesAreOmitted(t *testing.T) {
 	}
 	if enrolledRuntime.Name != "node" {
 		t.Fatalf("expected default enrolled runtime name node, got %q", enrolledRuntime.Name)
+	}
+	if enrolledRuntime.AccessMode != model.RuntimeAccessModePrivate {
+		t.Fatalf("expected private access mode for enrolled runtime, got %q", enrolledRuntime.AccessMode)
 	}
 }
 
@@ -618,6 +627,188 @@ func TestListRuntimesByNodeKey(t *testing.T) {
 	}
 	if len(runtimes) != 2 {
 		t.Fatalf("expected 2 runtimes for node key, got %d", len(runtimes))
+	}
+}
+
+func TestRuntimeSharingGrantControlsVisibilityAndUsage(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	owner, err := s.CreateTenant("Runtime Owner")
+	if err != nil {
+		t.Fatalf("create owner tenant: %v", err)
+	}
+	grantee, err := s.CreateTenant("Runtime Grantee")
+	if err != nil {
+		t.Fatalf("create grantee tenant: %v", err)
+	}
+	project, err := s.CreateProject(grantee.ID, "shared-apps", "")
+	if err != nil {
+		t.Fatalf("create grantee project: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(owner.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	_, runtimeObj, err := s.BootstrapClusterNode(nodeSecret, "shared-worker", "https://shared-worker.example.com", nil, "", "")
+	if err != nil {
+		t.Fatalf("bootstrap cluster node: %v", err)
+	}
+
+	visible, err := s.RuntimeVisibleToTenant(runtimeObj.ID, grantee.ID, false)
+	if err != nil {
+		t.Fatalf("check pre-grant visibility: %v", err)
+	}
+	if visible {
+		t.Fatal("expected runtime to be hidden before grant")
+	}
+	if _, err := s.CreateApp(grantee.ID, project.ID, "before-share", "", model.AppSpec{
+		Image:     "nginx:1.27",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: runtimeObj.ID,
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound before grant, got %v", err)
+	}
+
+	grant, err := s.GrantRuntimeAccess(runtimeObj.ID, owner.ID, grantee.ID)
+	if err != nil {
+		t.Fatalf("grant runtime access: %v", err)
+	}
+	if grant.RuntimeID != runtimeObj.ID || grant.TenantID != grantee.ID {
+		t.Fatalf("unexpected runtime grant: %+v", grant)
+	}
+
+	visible, err = s.RuntimeVisibleToTenant(runtimeObj.ID, grantee.ID, false)
+	if err != nil {
+		t.Fatalf("check granted visibility: %v", err)
+	}
+	if !visible {
+		t.Fatal("expected runtime to be visible after grant")
+	}
+	nodes, err := s.ListNodes(grantee.ID, false)
+	if err != nil {
+		t.Fatalf("list grantee nodes: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].ID != runtimeObj.ID {
+		t.Fatalf("expected granted tenant to see shared node, got %+v", nodes)
+	}
+	if _, err := s.CreateApp(grantee.ID, project.ID, "after-share", "", model.AppSpec{
+		Image:     "nginx:1.27",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: runtimeObj.ID,
+	}); err != nil {
+		t.Fatalf("create app on granted runtime: %v", err)
+	}
+
+	removed, err := s.RevokeRuntimeAccess(runtimeObj.ID, owner.ID, grantee.ID)
+	if err != nil {
+		t.Fatalf("revoke runtime access: %v", err)
+	}
+	if !removed {
+		t.Fatal("expected runtime grant to be removed")
+	}
+	visible, err = s.RuntimeVisibleToTenant(runtimeObj.ID, grantee.ID, false)
+	if err != nil {
+		t.Fatalf("check post-revoke visibility: %v", err)
+	}
+	if visible {
+		t.Fatal("expected runtime to be hidden after revoke")
+	}
+	nodes, err = s.ListNodes(grantee.ID, false)
+	if err != nil {
+		t.Fatalf("list grantee nodes after revoke: %v", err)
+	}
+	if len(nodes) != 0 {
+		t.Fatalf("expected no shared nodes after revoke, got %+v", nodes)
+	}
+	if _, err := s.CreateApp(grantee.ID, project.ID, "after-revoke", "", model.AppSpec{
+		Image:     "nginx:1.27",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: runtimeObj.ID,
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound after revoke, got %v", err)
+	}
+}
+
+func TestRuntimePlatformSharedVisibleToAllTenants(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	owner, err := s.CreateTenant("Platform Shared Owner")
+	if err != nil {
+		t.Fatalf("create owner tenant: %v", err)
+	}
+	consumer, err := s.CreateTenant("Platform Shared Consumer")
+	if err != nil {
+		t.Fatalf("create consumer tenant: %v", err)
+	}
+	project, err := s.CreateProject(consumer.ID, "shared-project", "")
+	if err != nil {
+		t.Fatalf("create consumer project: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(owner.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	_, runtimeObj, err := s.BootstrapClusterNode(nodeSecret, "cluster-public", "https://cluster-public.example.com", nil, "", "")
+	if err != nil {
+		t.Fatalf("bootstrap cluster node: %v", err)
+	}
+
+	runtimeObj, err = s.SetRuntimeAccessMode(runtimeObj.ID, owner.ID, model.RuntimeAccessModePlatformShared)
+	if err != nil {
+		t.Fatalf("set runtime access mode: %v", err)
+	}
+	if runtimeObj.AccessMode != model.RuntimeAccessModePlatformShared {
+		t.Fatalf("expected platform-shared access mode, got %q", runtimeObj.AccessMode)
+	}
+
+	visible, err := s.RuntimeVisibleToTenant(runtimeObj.ID, consumer.ID, false)
+	if err != nil {
+		t.Fatalf("check platform-shared visibility: %v", err)
+	}
+	if !visible {
+		t.Fatal("expected platform-shared runtime to be visible")
+	}
+	runtimes, err := s.ListRuntimes(consumer.ID, false)
+	if err != nil {
+		t.Fatalf("list visible runtimes: %v", err)
+	}
+	found := false
+	for _, candidate := range runtimes {
+		if candidate.ID == runtimeObj.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected platform-shared runtime %s in visible runtime list", runtimeObj.ID)
+	}
+	nodes, err := s.ListNodes(consumer.ID, false)
+	if err != nil {
+		t.Fatalf("list visible nodes: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].ID != runtimeObj.ID {
+		t.Fatalf("expected platform-shared node in visible node list, got %+v", nodes)
+	}
+	if _, err := s.CreateApp(consumer.ID, project.ID, "platform-shared-app", "", model.AppSpec{
+		Image:     "nginx:1.27",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: runtimeObj.ID,
+	}); err != nil {
+		t.Fatalf("create app on platform-shared runtime: %v", err)
 	}
 }
 

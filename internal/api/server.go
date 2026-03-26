@@ -118,6 +118,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/runtimes", s.auth.RequireAPI(http.HandlerFunc(s.handleListRuntimes)))
 	mux.Handle("POST /v1/runtimes", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateRuntime)))
 	mux.Handle("GET /v1/runtimes/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetRuntime)))
+	mux.Handle("GET /v1/runtimes/{id}/sharing", s.auth.RequireAPI(http.HandlerFunc(s.handleGetRuntimeSharing)))
+	mux.Handle("POST /v1/runtimes/{id}/sharing/grants", s.auth.RequireAPI(http.HandlerFunc(s.handleGrantRuntimeAccess)))
+	mux.Handle("DELETE /v1/runtimes/{id}/sharing/grants/{tenant_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleRevokeRuntimeAccess)))
+	mux.Handle("POST /v1/runtimes/{id}/sharing/mode", s.auth.RequireAPI(http.HandlerFunc(s.handleSetRuntimeAccessMode)))
 	mux.Handle("GET /v1/runtimes/enroll-tokens", s.auth.RequireAPI(http.HandlerFunc(s.handleListEnrollmentTokens)))
 	mux.Handle("POST /v1/runtimes/enroll-tokens", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateEnrollmentToken)))
 	mux.Handle("GET /v1/backing-services", s.auth.RequireAPI(http.HandlerFunc(s.handleListBackingServices)))
@@ -653,7 +657,8 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	markDeprecatedNodesView(w)
-	node, err := s.store.GetRuntime(r.PathValue("id"))
+	runtimeID := r.PathValue("id")
+	node, err := s.store.GetRuntime(runtimeID)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -662,7 +667,12 @@ func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusNotFound, "resource not found")
 		return
 	}
-	if !principal.IsPlatformAdmin() && node.TenantID != principal.TenantID {
+	visible, err := s.store.RuntimeVisibleToTenant(runtimeID, principal.TenantID, principal.IsPlatformAdmin())
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if !visible {
 		httpx.WriteError(w, http.StatusForbidden, "node is not visible to this tenant")
 		return
 	}
@@ -712,7 +722,12 @@ func (s *Server) handleGetRuntime(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	if !principal.IsPlatformAdmin() && runtimeObj.Type != model.RuntimeTypeManagedShared && runtimeObj.TenantID != principal.TenantID {
+	visible, err := s.store.RuntimeVisibleToTenant(runtimeID, principal.TenantID, principal.IsPlatformAdmin())
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if !visible {
 		httpx.WriteError(w, http.StatusForbidden, "runtime is not visible to this tenant")
 		return
 	}

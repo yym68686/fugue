@@ -109,6 +109,7 @@ var postgresSchemaStatements = []string{
 		name TEXT NOT NULL,
 		machine_name TEXT NOT NULL DEFAULT '',
 		type TEXT NOT NULL,
+		access_mode TEXT NOT NULL DEFAULT 'private',
 		connection_mode TEXT NOT NULL DEFAULT '',
 		status TEXT NOT NULL,
 		endpoint TEXT NOT NULL DEFAULT '',
@@ -125,6 +126,7 @@ var postgresSchemaStatements = []string{
 		updated_at TIMESTAMPTZ NOT NULL
 	)`,
 	`ALTER TABLE fugue_runtimes ADD COLUMN IF NOT EXISTS machine_name TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_runtimes ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'private'`,
 	`ALTER TABLE fugue_runtimes ADD COLUMN IF NOT EXISTS connection_mode TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE fugue_runtimes ADD COLUMN IF NOT EXISTS cluster_node_name TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE fugue_runtimes ADD COLUMN IF NOT EXISTS fingerprint_prefix TEXT NOT NULL DEFAULT ''`,
@@ -133,6 +135,14 @@ var postgresSchemaStatements = []string{
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_runtimes_tenant_name_ci ON fugue_runtimes ((COALESCE(tenant_id, '')), lower(name))`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_runtimes_agent_key_hash ON fugue_runtimes (agent_key_hash) WHERE agent_key_hash <> ''`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_runtimes_tenant_fingerprint_hash ON fugue_runtimes ((COALESCE(tenant_id, '')), fingerprint_hash) WHERE fingerprint_hash <> ''`,
+	`CREATE TABLE IF NOT EXISTS fugue_runtime_access_grants (
+		runtime_id TEXT NOT NULL REFERENCES fugue_runtimes(id) ON DELETE CASCADE,
+		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (runtime_id, tenant_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_runtime_access_grants_tenant_id ON fugue_runtime_access_grants (tenant_id, created_at ASC)`,
 	`CREATE TABLE IF NOT EXISTS fugue_apps (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
@@ -513,12 +523,22 @@ ON CONFLICT (id) DO NOTHING
 			return err
 		}
 		backfillRuntimeMetadata(&runtime, model.Machine{})
+		runtime.AccessMode = normalizeRuntimeAccessMode(runtime.Type, runtime.AccessMode)
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_runtimes (id, tenant_id, name, machine_name, type, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+INSERT INTO fugue_runtimes (id, tenant_id, name, machine_name, type, access_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 ON CONFLICT (id) DO NOTHING
-`, runtime.ID, nullIfEmpty(runtime.TenantID), runtime.Name, runtime.MachineName, runtime.Type, runtime.ConnectionMode, runtime.Status, runtime.Endpoint, labelsJSON, nullIfEmpty(runtime.NodeKeyID), runtime.ClusterNodeName, runtime.FingerprintPrefix, runtime.FingerprintHash, runtime.AgentKeyPrefix, runtime.AgentKeyHash, runtime.LastSeenAt, runtime.LastHeartbeatAt, runtime.CreatedAt, runtime.UpdatedAt); err != nil {
+`, runtime.ID, nullIfEmpty(runtime.TenantID), runtime.Name, runtime.MachineName, runtime.Type, runtime.AccessMode, runtime.ConnectionMode, runtime.Status, runtime.Endpoint, labelsJSON, nullIfEmpty(runtime.NodeKeyID), runtime.ClusterNodeName, runtime.FingerprintPrefix, runtime.FingerprintHash, runtime.AgentKeyPrefix, runtime.AgentKeyHash, runtime.LastSeenAt, runtime.LastHeartbeatAt, runtime.CreatedAt, runtime.UpdatedAt); err != nil {
 			return fmt.Errorf("import runtime %s: %w", runtime.ID, err)
+		}
+	}
+	for _, grant := range state.RuntimeGrants {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO fugue_runtime_access_grants (runtime_id, tenant_id, created_at, updated_at)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (runtime_id, tenant_id) DO NOTHING
+`, grant.RuntimeID, grant.TenantID, grant.CreatedAt, grant.UpdatedAt); err != nil {
+			return fmt.Errorf("import runtime access grant %s/%s: %w", grant.RuntimeID, grant.TenantID, err)
 		}
 	}
 	for _, app := range state.Apps {
@@ -612,17 +632,18 @@ func (s *Store) ensureManagedRuntimeTx(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `
-INSERT INTO fugue_runtimes (id, tenant_id, name, machine_name, type, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at)
-VALUES ($1, NULL, $2, $2, $3, '', $4, $5, $6, NULL, '', '', '', '', '', NULL, NULL, $7, $8)
+INSERT INTO fugue_runtimes (id, tenant_id, name, machine_name, type, access_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at)
+VALUES ($1, NULL, $2, $2, $3, $4, '', $5, $6, $7, NULL, '', '', '', '', '', NULL, NULL, $8, $9)
 ON CONFLICT (id) DO UPDATE SET
 	name = EXCLUDED.name,
 	machine_name = EXCLUDED.machine_name,
 	type = EXCLUDED.type,
+	access_mode = EXCLUDED.access_mode,
 	status = EXCLUDED.status,
 	endpoint = EXCLUDED.endpoint,
 	labels_json = EXCLUDED.labels_json,
 	updated_at = EXCLUDED.updated_at
-`, "runtime_managed_shared", "managed-shared", model.RuntimeTypeManagedShared, model.RuntimeStatusActive, "in-cluster", labelsJSON, now, now)
+`, "runtime_managed_shared", "managed-shared", model.RuntimeTypeManagedShared, model.RuntimeAccessModePlatformShared, model.RuntimeStatusActive, "in-cluster", labelsJSON, now, now)
 	if err != nil {
 		return fmt.Errorf("ensure managed shared runtime: %w", err)
 	}
@@ -663,6 +684,17 @@ SET machine_name = CASE WHEN machine_name = '' THEN name ELSE machine_name END,
 	last_seen_at = COALESCE(last_seen_at, last_heartbeat_at)
 `, model.RuntimeTypeManagedOwned, model.RuntimeTypeExternalOwned); err != nil {
 		return fmt.Errorf("normalize runtime metadata defaults: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE fugue_runtimes
+SET access_mode = CASE
+	WHEN type = $1 THEN $2
+	WHEN access_mode = $2 THEN $2
+	WHEN access_mode = $3 THEN $3
+	ELSE $3
+END
+`, model.RuntimeTypeManagedShared, model.RuntimeAccessModePlatformShared, model.RuntimeAccessModePrivate); err != nil {
+		return fmt.Errorf("normalize runtime access mode defaults: %w", err)
 	}
 	return nil
 }

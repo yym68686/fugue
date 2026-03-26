@@ -193,9 +193,11 @@ func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
 		state.EnrollmentTokens = deleteEnrollmentTokensByTenant(state.EnrollmentTokens, id)
 
 		deletedNodeKeyIDs := make(map[string]struct{})
+		deletedRuntimeIDs := make(map[string]struct{})
 		state.NodeKeys = deleteNodeKeysByTenant(state.NodeKeys, id, deletedNodeKeyIDs)
 		state.Machines = deleteLegacyMachinesByTenant(state.Machines, id, deletedNodeKeyIDs)
-		state.Runtimes = deleteRuntimesByTenant(state.Runtimes, id, deletedNodeKeyIDs)
+		state.Runtimes = deleteRuntimesByTenant(state.Runtimes, id, deletedNodeKeyIDs, deletedRuntimeIDs)
+		state.RuntimeGrants = deleteRuntimeAccessGrants(state.RuntimeGrants, id, deletedRuntimeIDs)
 		state.Apps = deleteAppsByTenant(state.Apps, id)
 		state.BackingServices = deleteBackingServicesByTenant(state.BackingServices, id)
 		state.ServiceBindings = deleteServiceBindingsByTenant(state.ServiceBindings, id)
@@ -875,6 +877,7 @@ func (s *Store) BootstrapNode(secret, runtimeName, endpoint string, labels map[s
 			TenantID:        key.TenantID,
 			Name:            nextAvailableRuntimeName(state, key.TenantID, runtimeName),
 			Type:            model.RuntimeTypeExternalOwned,
+			AccessMode:      model.RuntimeAccessModePrivate,
 			Status:          model.RuntimeStatusActive,
 			Endpoint:        strings.TrimSpace(endpoint),
 			Labels:          cloneMap(labels),
@@ -962,6 +965,7 @@ func (s *Store) BootstrapClusterNode(secret, runtimeName, endpoint string, label
 			TenantID:        key.TenantID,
 			Name:            nextAvailableRuntimeName(state, key.TenantID, runtimeName),
 			Type:            model.RuntimeTypeManagedOwned,
+			AccessMode:      model.RuntimeAccessModePrivate,
 			Status:          model.RuntimeStatusActive,
 			Endpoint:        strings.TrimSpace(endpoint),
 			Labels:          cloneMap(labels),
@@ -1003,6 +1007,7 @@ func (s *Store) CreateRuntime(tenantID, name, runtimeType, endpoint string, labe
 		TenantID:       tenantID,
 		Name:           name,
 		Type:           runtimeType,
+		AccessMode:     normalizeRuntimeAccessMode(runtimeType, ""),
 		Status:         model.RuntimeStatusPending,
 		Endpoint:       strings.TrimSpace(endpoint),
 		Labels:         cloneMap(labels),
@@ -1099,6 +1104,7 @@ func (s *Store) ConsumeEnrollmentToken(secret, runtimeName, endpoint string, lab
 			TenantID:        token.TenantID,
 			Name:            nextAvailableRuntimeName(state, token.TenantID, runtimeName),
 			Type:            model.RuntimeTypeExternalOwned,
+			AccessMode:      model.RuntimeAccessModePrivate,
 			Status:          model.RuntimeStatusActive,
 			Endpoint:        strings.TrimSpace(endpoint),
 			Labels:          cloneMap(labels),
@@ -1225,7 +1231,7 @@ func (s *Store) ListNodes(tenantID string, platformAdmin bool) ([]model.Runtime,
 			if runtime.Type != model.RuntimeTypeExternalOwned && runtime.Type != model.RuntimeTypeManagedOwned {
 				continue
 			}
-			if platformAdmin || runtime.TenantID == tenantID {
+			if platformAdmin || runtimeVisibleToTenant(state, runtime.ID, tenantID) {
 				nodes = append(nodes, runtime)
 			}
 		}
@@ -1273,7 +1279,7 @@ func (s *Store) ListRuntimes(tenantID string, platformAdmin bool) ([]model.Runti
 	err := s.withLockedState(false, func(state *model.State) error {
 		ensureRuntimeMetadata(state)
 		for _, runtime := range state.Runtimes {
-			if platformAdmin || runtime.TenantID == tenantID || runtime.Type == model.RuntimeTypeManagedShared {
+			if platformAdmin || runtimeVisibleToTenant(state, runtime.ID, tenantID) {
 				runtimes = append(runtimes, runtime)
 			}
 		}
@@ -1296,6 +1302,179 @@ func (s *Store) GetRuntime(id string) (model.Runtime, error) {
 		if index < 0 {
 			return ErrNotFound
 		}
+		runtime = state.Runtimes[index]
+		return nil
+	})
+	return runtime, err
+}
+
+func (s *Store) RuntimeVisibleToTenant(runtimeID, tenantID string, platformAdmin bool) (bool, error) {
+	runtimeID = strings.TrimSpace(runtimeID)
+	if runtimeID == "" {
+		return false, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgRuntimeVisibleToTenant(runtimeID, tenantID, platformAdmin)
+	}
+
+	var visible bool
+	err := s.withLockedState(false, func(state *model.State) error {
+		ensureRuntimeMetadata(state)
+		if platformAdmin {
+			visible = findRuntime(state, runtimeID) >= 0
+			return nil
+		}
+		visible = runtimeVisibleToTenant(state, runtimeID, tenantID)
+		return nil
+	})
+	return visible, err
+}
+
+func (s *Store) ListRuntimeAccessGrants(runtimeID string) ([]model.RuntimeAccessGrant, error) {
+	runtimeID = strings.TrimSpace(runtimeID)
+	if runtimeID == "" {
+		return nil, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgListRuntimeAccessGrants(runtimeID)
+	}
+
+	var grants []model.RuntimeAccessGrant
+	err := s.withLockedState(false, func(state *model.State) error {
+		ensureRuntimeMetadata(state)
+		if findRuntime(state, runtimeID) < 0 {
+			return ErrNotFound
+		}
+		for _, grant := range state.RuntimeGrants {
+			if grant.RuntimeID != runtimeID {
+				continue
+			}
+			grants = append(grants, grant)
+		}
+		sort.Slice(grants, func(i, j int) bool {
+			return grants[i].CreatedAt.Before(grants[j].CreatedAt)
+		})
+		return nil
+	})
+	return grants, err
+}
+
+func (s *Store) GrantRuntimeAccess(runtimeID, ownerTenantID, granteeTenantID string) (model.RuntimeAccessGrant, error) {
+	runtimeID = strings.TrimSpace(runtimeID)
+	ownerTenantID = strings.TrimSpace(ownerTenantID)
+	granteeTenantID = strings.TrimSpace(granteeTenantID)
+	if runtimeID == "" || ownerTenantID == "" || granteeTenantID == "" {
+		return model.RuntimeAccessGrant{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgGrantRuntimeAccess(runtimeID, ownerTenantID, granteeTenantID)
+	}
+
+	var grant model.RuntimeAccessGrant
+	err := s.withLockedState(true, func(state *model.State) error {
+		ensureRuntimeMetadata(state)
+
+		runtimeIndex := findRuntime(state, runtimeID)
+		if runtimeIndex < 0 {
+			return ErrNotFound
+		}
+		runtime := state.Runtimes[runtimeIndex]
+		if runtime.TenantID != ownerTenantID || runtime.TenantID == "" {
+			return ErrNotFound
+		}
+		if runtime.Type == model.RuntimeTypeManagedShared {
+			return ErrInvalidInput
+		}
+		if granteeTenantID == runtime.TenantID {
+			return ErrInvalidInput
+		}
+		if findTenant(state, granteeTenantID) < 0 {
+			return ErrNotFound
+		}
+		if index := findRuntimeAccessGrant(state, runtimeID, granteeTenantID); index >= 0 {
+			state.RuntimeGrants[index].UpdatedAt = time.Now().UTC()
+			grant = state.RuntimeGrants[index]
+			return nil
+		}
+		now := time.Now().UTC()
+		grant = model.RuntimeAccessGrant{
+			RuntimeID: runtimeID,
+			TenantID:  granteeTenantID,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		state.RuntimeGrants = append(state.RuntimeGrants, grant)
+		return nil
+	})
+	return grant, err
+}
+
+func (s *Store) RevokeRuntimeAccess(runtimeID, ownerTenantID, granteeTenantID string) (bool, error) {
+	runtimeID = strings.TrimSpace(runtimeID)
+	ownerTenantID = strings.TrimSpace(ownerTenantID)
+	granteeTenantID = strings.TrimSpace(granteeTenantID)
+	if runtimeID == "" || ownerTenantID == "" || granteeTenantID == "" {
+		return false, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgRevokeRuntimeAccess(runtimeID, ownerTenantID, granteeTenantID)
+	}
+
+	var removed bool
+	err := s.withLockedState(true, func(state *model.State) error {
+		ensureRuntimeMetadata(state)
+
+		runtimeIndex := findRuntime(state, runtimeID)
+		if runtimeIndex < 0 {
+			return ErrNotFound
+		}
+		runtime := state.Runtimes[runtimeIndex]
+		if runtime.TenantID != ownerTenantID || runtime.TenantID == "" {
+			return ErrNotFound
+		}
+		index := findRuntimeAccessGrant(state, runtimeID, granteeTenantID)
+		if index < 0 {
+			return nil
+		}
+		state.RuntimeGrants = append(state.RuntimeGrants[:index], state.RuntimeGrants[index+1:]...)
+		removed = true
+		return nil
+	})
+	return removed, err
+}
+
+func (s *Store) SetRuntimeAccessMode(runtimeID, ownerTenantID, accessMode string) (model.Runtime, error) {
+	runtimeID = strings.TrimSpace(runtimeID)
+	ownerTenantID = strings.TrimSpace(ownerTenantID)
+	accessMode = strings.TrimSpace(accessMode)
+	if runtimeID == "" || ownerTenantID == "" {
+		return model.Runtime{}, ErrInvalidInput
+	}
+	switch accessMode {
+	case model.RuntimeAccessModePrivate, model.RuntimeAccessModePlatformShared:
+	default:
+		return model.Runtime{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgSetRuntimeAccessMode(runtimeID, ownerTenantID, accessMode)
+	}
+
+	var runtime model.Runtime
+	err := s.withLockedState(true, func(state *model.State) error {
+		ensureRuntimeMetadata(state)
+
+		index := findRuntime(state, runtimeID)
+		if index < 0 {
+			return ErrNotFound
+		}
+		if state.Runtimes[index].TenantID != ownerTenantID || state.Runtimes[index].TenantID == "" {
+			return ErrNotFound
+		}
+		if state.Runtimes[index].Type == model.RuntimeTypeManagedShared {
+			return ErrInvalidInput
+		}
+		state.Runtimes[index].AccessMode = normalizeRuntimeAccessMode(state.Runtimes[index].Type, accessMode)
+		state.Runtimes[index].UpdatedAt = time.Now().UTC()
 		runtime = state.Runtimes[index]
 		return nil
 	})
@@ -1917,6 +2096,9 @@ func ensureDefaults(state *model.State) {
 	if state.Runtimes == nil {
 		state.Runtimes = []model.Runtime{}
 	}
+	if state.RuntimeGrants == nil {
+		state.RuntimeGrants = []model.RuntimeAccessGrant{}
+	}
 	if state.Apps == nil {
 		state.Apps = []model.App{}
 	}
@@ -1938,14 +2120,15 @@ func ensureDefaults(state *model.State) {
 	if findRuntime(state, "runtime_managed_shared") < 0 {
 		now := time.Now().UTC()
 		state.Runtimes = append(state.Runtimes, model.Runtime{
-			ID:        "runtime_managed_shared",
-			Name:      "managed-shared",
-			Type:      model.RuntimeTypeManagedShared,
-			Status:    model.RuntimeStatusActive,
-			Endpoint:  "in-cluster",
-			Labels:    map[string]string{"managed": "true"},
-			CreatedAt: now,
-			UpdatedAt: now,
+			ID:         "runtime_managed_shared",
+			Name:       "managed-shared",
+			Type:       model.RuntimeTypeManagedShared,
+			AccessMode: model.RuntimeAccessModePlatformShared,
+			Status:     model.RuntimeStatusActive,
+			Endpoint:   "in-cluster",
+			Labels:     map[string]string{"managed": "true"},
+			CreatedAt:  now,
+			UpdatedAt:  now,
 		})
 	}
 	ensureRuntimeMetadata(state)
@@ -2105,6 +2288,7 @@ func ensureRuntimeMetadata(state *model.State) {
 			Name:              runtimeName,
 			MachineName:       machine.Name,
 			Type:              runtimeType,
+			AccessMode:        normalizeRuntimeAccessMode(runtimeType, ""),
 			ConnectionMode:    machine.ConnectionMode,
 			Status:            machine.Status,
 			Endpoint:          machine.Endpoint,
@@ -2129,6 +2313,7 @@ func backfillRuntimeMetadata(runtime *model.Runtime, machine model.Machine) {
 	if runtime == nil {
 		return
 	}
+	runtime.AccessMode = normalizeRuntimeAccessMode(runtime.Type, runtime.AccessMode)
 	if runtime.MachineName == "" {
 		if strings.TrimSpace(machine.Name) != "" {
 			runtime.MachineName = machine.Name
@@ -2179,6 +2364,7 @@ func applyRuntimeIdentity(runtime *model.Runtime, machineName, machineFingerprin
 	if runtime == nil {
 		return
 	}
+	runtime.AccessMode = normalizeRuntimeAccessMode(runtimeType, runtime.AccessMode)
 	runtime.MachineName = normalizedMachineName(machineName, runtime.Name, endpoint)
 	runtime.ConnectionMode = runtimeConnectionMode(runtimeType)
 	runtime.FingerprintPrefix = model.SecretPrefix(machineFingerprint)
@@ -2519,16 +2705,33 @@ func deleteLegacyMachinesByTenant(machines []model.Machine, tenantID string, del
 	return filtered
 }
 
-func deleteRuntimesByTenant(runtimes []model.Runtime, tenantID string, deletedNodeKeyIDs map[string]struct{}) []model.Runtime {
+func deleteRuntimesByTenant(runtimes []model.Runtime, tenantID string, deletedNodeKeyIDs, deletedRuntimeIDs map[string]struct{}) []model.Runtime {
 	filtered := runtimes[:0]
 	for _, runtime := range runtimes {
 		if runtime.TenantID == tenantID {
+			if deletedRuntimeIDs != nil {
+				deletedRuntimeIDs[runtime.ID] = struct{}{}
+			}
 			continue
 		}
 		if _, ok := deletedNodeKeyIDs[runtime.NodeKeyID]; ok {
 			runtime.NodeKeyID = ""
 		}
 		filtered = append(filtered, runtime)
+	}
+	return filtered
+}
+
+func deleteRuntimeAccessGrants(grants []model.RuntimeAccessGrant, tenantID string, deletedRuntimeIDs map[string]struct{}) []model.RuntimeAccessGrant {
+	filtered := grants[:0]
+	for _, grant := range grants {
+		if grant.TenantID == tenantID {
+			continue
+		}
+		if _, ok := deletedRuntimeIDs[grant.RuntimeID]; ok {
+			continue
+		}
+		filtered = append(filtered, grant)
 	}
 	return filtered
 }
@@ -2736,7 +2939,16 @@ func runtimeVisibleToTenant(state *model.State, runtimeID, tenantID string) bool
 		return false
 	}
 	runtime := state.Runtimes[index]
-	return runtime.Type == model.RuntimeTypeManagedShared || runtime.TenantID == tenantID
+	if runtime.TenantID != "" && runtime.TenantID == tenantID {
+		return true
+	}
+	if runtime.Type == model.RuntimeTypeManagedShared {
+		return true
+	}
+	if normalizeRuntimeAccessMode(runtime.Type, runtime.AccessMode) == model.RuntimeAccessModePlatformShared {
+		return true
+	}
+	return findRuntimeAccessGrant(state, runtime.ID, tenantID) >= 0
 }
 
 func findManagedOwnedRuntimeByNodeKeyAndName(state *model.State, nodeKeyID, runtimeName string) int {
@@ -2773,4 +2985,33 @@ func runtimeNameExists(state *model.State, tenantID, name string) bool {
 		}
 	}
 	return false
+}
+
+func normalizeRuntimeAccessMode(runtimeType, accessMode string) string {
+	switch strings.TrimSpace(accessMode) {
+	case model.RuntimeAccessModePlatformShared:
+		return model.RuntimeAccessModePlatformShared
+	case model.RuntimeAccessModePrivate:
+		if runtimeType == model.RuntimeTypeManagedShared {
+			return model.RuntimeAccessModePlatformShared
+		}
+		return model.RuntimeAccessModePrivate
+	default:
+		if runtimeType == model.RuntimeTypeManagedShared {
+			return model.RuntimeAccessModePlatformShared
+		}
+		return model.RuntimeAccessModePrivate
+	}
+}
+
+func findRuntimeAccessGrant(state *model.State, runtimeID, tenantID string) int {
+	if state == nil {
+		return -1
+	}
+	for idx, grant := range state.RuntimeGrants {
+		if grant.RuntimeID == runtimeID && grant.TenantID == tenantID {
+			return idx
+		}
+	}
+	return -1
 }
