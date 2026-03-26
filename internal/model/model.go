@@ -220,6 +220,7 @@ type ClusterNode struct {
 	Roles            []string                        `json:"roles,omitempty"`
 	InternalIP       string                          `json:"internal_ip,omitempty"`
 	ExternalIP       string                          `json:"external_ip,omitempty"`
+	PublicIP         string                          `json:"public_ip,omitempty"`
 	Region           string                          `json:"region,omitempty"`
 	Zone             string                          `json:"zone,omitempty"`
 	KubeletVersion   string                          `json:"kubelet_version,omitempty"`

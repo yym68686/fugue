@@ -231,6 +231,9 @@ func TestListClusterNodesIncludesMetricsConditionsAndWorkloads(t *testing.T) {
 	if node.Zone != "ap-southeast-1a" {
 		t.Fatalf("expected zone ap-southeast-1a, got %q", node.Zone)
 	}
+	if node.PublicIP != "203.0.113.10" {
+		t.Fatalf("expected public ip 203.0.113.10, got %q", node.PublicIP)
+	}
 	if node.RuntimeID != runtimeObj.ID {
 		t.Fatalf("expected runtime id %q, got %q", runtimeObj.ID, node.RuntimeID)
 	}
@@ -297,6 +300,42 @@ func TestListClusterNodesIncludesMetricsConditionsAndWorkloads(t *testing.T) {
 	}
 	if serviceWorkload.PodCount != 1 || len(serviceWorkload.Pods) != 1 {
 		t.Fatalf("expected one backing service pod, got %#v", serviceWorkload)
+	}
+}
+
+func TestResolveClusterNodePublicIPFallsBackToRuntimeEndpoint(t *testing.T) {
+	t.Parallel()
+
+	node := model.ClusterNode{
+		Name:       "worker-1",
+		InternalIP: "10.0.0.10",
+		ExternalIP: "100.64.0.10",
+	}
+	runtimeObj := model.Runtime{
+		Endpoint: "https://203.0.113.20",
+	}
+
+	if got := resolveClusterNodePublicIP(node, &runtimeObj); got != "203.0.113.20" {
+		t.Fatalf("expected runtime endpoint public ip, got %q", got)
+	}
+}
+
+func TestKubeNodePublicIPPrefersExplicitLabel(t *testing.T) {
+	t.Parallel()
+
+	node := kubeNode{}
+	node.Metadata.Labels = map[string]string{
+		clusterNodeLabelPublicIP: "198.51.100.12",
+	}
+	node.Status.Addresses = []struct {
+		Type    string `json:"type"`
+		Address string `json:"address"`
+	}{
+		{Type: "ExternalIP", Address: "100.64.0.10"},
+	}
+
+	if got := kubeNodePublicIP(node); got != "198.51.100.12" {
+		t.Fatalf("expected labeled public ip, got %q", got)
 	}
 }
 

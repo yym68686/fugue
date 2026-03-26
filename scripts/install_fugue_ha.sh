@@ -452,6 +452,29 @@ node_internal_ip_for_alias() {
   ssh_root_run "${host}" "ip -o -4 addr show scope global 2>/dev/null | awk '\$2 !~ /^(tailscale0|cni0|flannel\\.1|docker0|lo)\$/ {split(\$4,a,\"/\"); print a[1]; exit}'" | tr -d '\r'
 }
 
+node_public_ip_for_alias() {
+  local host="$1"
+  local public_ip=""
+  public_ip="$(topology_override_for_alias "${host}" "PUBLIC_IP")"
+  if [[ -n "${public_ip}" ]]; then
+    printf '%s' "${public_ip}"
+    return 0
+  fi
+
+  public_ip="$(ssh_root_run "${host}" "if command -v curl >/dev/null 2>&1; then curl -fsS --max-time 10 https://api.ipify.org 2>/dev/null || true; fi" | tr -d '\r')"
+  if [[ -n "${public_ip}" ]]; then
+    printf '%s' "${public_ip}"
+    return 0
+  fi
+
+  public_ip="$(public_host_for_alias "${host}")"
+  if [[ "${public_ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    printf '%s' "${public_ip}"
+    return 0
+  fi
+  return 1
+}
+
 node_external_ip_for_alias() {
   local host="$1"
   local mesh_ip=""
@@ -597,10 +620,12 @@ render_server_node_labels() {
   local host="$1"
   local role="$2"
   local country_code=""
+  local public_ip=""
   local zone=""
   local region=""
 
   country_code="$(node_country_code_for_alias "${host}" || true)"
+  public_ip="$(node_public_ip_for_alias "${host}" || true)"
   zone="$(node_zone_for_alias "${host}" || true)"
   region="$(node_region_for_alias "${host}" || true)"
 
@@ -612,6 +637,11 @@ EOF
   if [[ -n "${country_code}" ]]; then
     cat <<EOF
   - "fugue.io/location-country-code=${country_code}"
+EOF
+  fi
+  if [[ -n "${public_ip}" ]]; then
+    cat <<EOF
+  - "fugue.io/public-ip=${public_ip}"
 EOF
   fi
   if [[ -n "${region}" ]]; then
@@ -1007,18 +1037,23 @@ label_control_plane_node() {
   local role="$2"
   local node_name=""
   local country_code=""
+  local public_ip=""
   local zone=""
   local region=""
 
   node_name="$(ssh_run "${host}" "hostname" | tr -d '\r')"
   [[ -n "${node_name}" ]] || fail "failed to detect Kubernetes node name for ${host}"
   country_code="$(node_country_code_for_alias "${host}" || true)"
+  public_ip="$(node_public_ip_for_alias "${host}" || true)"
   zone="$(node_zone_for_alias "${host}" || true)"
   region="$(node_region_for_alias "${host}" || true)"
 
   ssh_root_run "${PRIMARY_ALIAS}" "k3s kubectl label node $(printf '%q' "${node_name}") $(printf '%q' "fugue.install/profile=combined") $(printf '%q' "fugue.install/role=${role}") --overwrite"
   if [[ -n "${country_code}" ]]; then
     ssh_root_run "${PRIMARY_ALIAS}" "k3s kubectl label node $(printf '%q' "${node_name}") $(printf '%q' "fugue.io/location-country-code=${country_code}") --overwrite"
+  fi
+  if [[ -n "${public_ip}" ]]; then
+    ssh_root_run "${PRIMARY_ALIAS}" "k3s kubectl label node $(printf '%q' "${node_name}") $(printf '%q' "fugue.io/public-ip=${public_ip}") --overwrite"
   fi
   if [[ -n "${region}" ]]; then
     ssh_root_run "${PRIMARY_ALIAS}" "k3s kubectl label node $(printf '%q' "${node_name}") $(printf '%q' "topology.kubernetes.io/region=${region}") --overwrite"

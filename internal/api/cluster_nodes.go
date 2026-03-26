@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -35,10 +36,14 @@ const (
 	clusterNodeLabelZone         = "topology.kubernetes.io/zone"
 	clusterNodeLabelLegacyZone   = "failure-domain.beta.kubernetes.io/zone"
 	clusterNodeLabelCountryCode  = "fugue.io/location-country-code"
+	clusterNodeLabelPublicIP     = "fugue.io/public-ip"
 	clusterNodeAnnotationCountry = "fugue.io/location-country"
 )
 
-var kubeQuantityPattern = regexp.MustCompile(`^([+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)([a-zA-Z]{0,2})$`)
+var (
+	kubeQuantityPattern  = regexp.MustCompile(`^([+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)([a-zA-Z]{0,2})$`)
+	clusterNodeCGNATCIDR = mustParseCIDR("100.64.0.0/10")
+)
 
 type clusterNodeClient struct {
 	client      *http.Client
@@ -192,6 +197,11 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 	for _, snapshot := range snapshots {
 		node := snapshot.node
 		runtimeObj, ok := runtimeByClusterNode[node.Name]
+		var runtimeForNode *model.Runtime
+		if ok {
+			runtimeForNode = &runtimeObj
+		}
+		node.PublicIP = resolveClusterNodePublicIP(node, runtimeForNode)
 		if !principal.IsPlatformAdmin() && !ok {
 			continue
 		}
@@ -372,6 +382,7 @@ func buildClusterNode(node kubeNode, summary *kubeNodeSummary) model.ClusterNode
 		Roles:            kubeNodeRoles(node.Metadata.Labels),
 		InternalIP:       kubeNodeAddress(node, "InternalIP"),
 		ExternalIP:       kubeNodeAddress(node, "ExternalIP"),
+		PublicIP:         kubeNodePublicIP(node),
 		Region:           kubeNodeRegion(node.Metadata.Labels, node.Metadata.Annotations),
 		Zone:             kubeNodeZone(node.Metadata.Labels),
 		KubeletVersion:   strings.TrimSpace(node.Status.NodeInfo.KubeletVersion),
@@ -874,6 +885,67 @@ func kubeNodeAddress(node kubeNode, addressType string) string {
 		}
 	}
 	return ""
+}
+
+func kubeNodePublicIP(node kubeNode) string {
+	if value := publicIPLiteral(firstNodeLabel(node.Metadata.Labels, clusterNodeLabelPublicIP)); value != "" {
+		return value
+	}
+	return publicIPLiteral(kubeNodeAddress(node, "ExternalIP"))
+}
+
+func resolveClusterNodePublicIP(node model.ClusterNode, runtimeObj *model.Runtime) string {
+	if value := publicIPLiteral(node.PublicIP); value != "" {
+		return value
+	}
+	if runtimeObj == nil {
+		return ""
+	}
+	return publicIPFromEndpoint(runtimeObj.Endpoint)
+}
+
+func publicIPFromEndpoint(endpoint string) string {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return ""
+	}
+	if value := publicIPLiteral(endpoint); value != "" {
+		return value
+	}
+	if parsed, err := url.Parse(endpoint); err == nil && parsed.Host != "" {
+		return publicIPLiteral(parsed.Hostname())
+	}
+	host, _, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return ""
+	}
+	return publicIPLiteral(host)
+}
+
+func publicIPLiteral(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	ip := net.ParseIP(value)
+	if ip == nil {
+		return ""
+	}
+	if ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() {
+		return ""
+	}
+	if clusterNodeCGNATCIDR.Contains(ip) {
+		return ""
+	}
+	return value
+}
+
+func mustParseCIDR(value string) *net.IPNet {
+	_, network, err := net.ParseCIDR(value)
+	if err != nil {
+		panic(err)
+	}
+	return network
 }
 
 func kubeNodeRegion(labels, annotations map[string]string) string {

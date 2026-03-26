@@ -259,9 +259,9 @@ detect_machine_fingerprint() {
   detect_default_node_name
 }
 
-detect_node_ip() {
-  if [ -n "${FUGUE_NODE_EXTERNAL_IP:-}" ]; then
-    printf '%%s' "${FUGUE_NODE_EXTERNAL_IP}"
+detect_public_ip() {
+  if [ -n "${FUGUE_NODE_PUBLIC_IP:-}" ]; then
+    printf '%%s' "${FUGUE_NODE_PUBLIC_IP}"
     return 0
   fi
   if command -v curl >/dev/null 2>&1; then
@@ -366,12 +366,15 @@ append_location_node_labels() {
   local zone=""
   local region=""
   local country_code=""
+  local public_ip=""
   zone="$(detect_node_zone || true)"
   region="$(detect_node_region || true)"
   country_code="$(detect_node_country_code || true)"
+  public_ip="${node_public_ip:-}"
   labels="$(csv_append_label "${labels}" "topology.kubernetes.io/region" "${region}")"
   labels="$(csv_append_label "${labels}" "topology.kubernetes.io/zone" "${zone}")"
   labels="$(csv_append_label "${labels}" "fugue.io/location-country-code" "${country_code}")"
+  labels="$(csv_append_label "${labels}" "fugue.io/public-ip" "${public_ip}")"
   printf '%%s' "${labels}"
 }
 
@@ -460,9 +463,10 @@ node_name="${FUGUE_NODE_NAME:-$(detect_default_node_name)}"
 machine_name="${FUGUE_MACHINE_NAME:-${node_name}}"
 machine_fingerprint="${FUGUE_MACHINE_FINGERPRINT:-$(detect_machine_fingerprint)}"
 node_endpoint="${FUGUE_NODE_ENDPOINT:-${node_name}}"
-node_external_ip="$(detect_node_ip || true)"
-if [ -n "${node_external_ip}" ] && [ "${node_endpoint}" = "${node_name}" ]; then
-  node_endpoint="${node_external_ip}"
+node_public_ip="$(detect_public_ip || true)"
+node_external_ip="${FUGUE_NODE_EXTERNAL_IP:-${node_public_ip}}"
+if [ -n "${node_public_ip}" ] && [ "${node_endpoint}" = "${node_name}" ]; then
+  node_endpoint="${node_public_ip}"
 fi
 
 join_env="$(mktemp)"

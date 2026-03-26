@@ -115,10 +115,12 @@ func TestJoinClusterInstallScriptAddsTopologyLabels(t *testing.T) {
 	script := server.joinClusterInstallScript("https://api.fugue.pro")
 
 	for _, want := range []string{
+		`FUGUE_NODE_PUBLIC_IP`,
 		`FUGUE_NODE_REGION`,
 		`FUGUE_NODE_ZONE`,
 		`FUGUE_NODE_COUNTRY_CODE`,
 		`https://ipapi.co/json/`,
+		`fugue.io/public-ip`,
 		`fugue.io/location-country-code`,
 		`topology.kubernetes.io/region`,
 		`topology.kubernetes.io/zone`,
