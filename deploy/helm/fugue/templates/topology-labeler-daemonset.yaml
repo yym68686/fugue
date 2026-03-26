@@ -1,4 +1,29 @@
-{{- if .Values.topologyLabeler.enabled }}
+{{- $topologyLabeler := (get .Values "topologyLabeler" | default (dict)) -}}
+{{- $topologyLabelerEnabled := true -}}
+{{- if hasKey $topologyLabeler "enabled" -}}
+{{- $topologyLabelerEnabled = (get $topologyLabeler "enabled") -}}
+{{- end -}}
+{{- $topologyLabelerIntervalSeconds := 900 -}}
+{{- if hasKey $topologyLabeler "intervalSeconds" -}}
+{{- $topologyLabelerIntervalSeconds = (get $topologyLabeler "intervalSeconds") -}}
+{{- end -}}
+{{- $topologyLabelerGeolocationURL := "https://ipapi.co/json/" -}}
+{{- if hasKey $topologyLabeler "geolocationURL" -}}
+{{- $topologyLabelerGeolocationURL = (get $topologyLabeler "geolocationURL") -}}
+{{- end -}}
+{{- $topologyLabelerResources := dict -}}
+{{- if hasKey $topologyLabeler "resources" -}}
+{{- $topologyLabelerResources = (get $topologyLabeler "resources" | default (dict)) -}}
+{{- end -}}
+{{- $topologyLabelerNodeSelector := dict -}}
+{{- if hasKey $topologyLabeler "nodeSelector" -}}
+{{- $topologyLabelerNodeSelector = (get $topologyLabeler "nodeSelector" | default (dict)) -}}
+{{- end -}}
+{{- $topologyLabelerTolerations := list (dict "operator" "Exists") -}}
+{{- if hasKey $topologyLabeler "tolerations" -}}
+{{- $topologyLabelerTolerations = (get $topologyLabeler "tolerations") -}}
+{{- end -}}
+{{- if $topologyLabelerEnabled }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -42,8 +67,8 @@ spec:
               node_api_base="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT_HTTPS:-443}"
               token_file="/var/run/secrets/kubernetes.io/serviceaccount/token"
               ca_file="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-              interval_seconds="{{ .Values.topologyLabeler.intervalSeconds }}"
-              geolocation_url="{{ .Values.topologyLabeler.geolocationURL }}"
+              interval_seconds="{{ $topologyLabelerIntervalSeconds }}"
+              geolocation_url="{{ $topologyLabelerGeolocationURL }}"
 
               extract_json_field() {
                 local json="$1"
@@ -108,12 +133,12 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
           resources:
-            {{- toYaml .Values.topologyLabeler.resources | nindent 12 }}
-      {{- with .Values.topologyLabeler.nodeSelector }}
+            {{- toYaml $topologyLabelerResources | nindent 12 }}
+      {{- with $topologyLabelerNodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.topologyLabeler.tolerations }}
+      {{- with $topologyLabelerTolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}

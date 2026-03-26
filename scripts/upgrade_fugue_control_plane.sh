@@ -238,7 +238,7 @@ main() {
 
   if ! helm upgrade "${FUGUE_RELEASE_NAME}" "${FUGUE_HELM_CHART_PATH}" \
     -n "${FUGUE_NAMESPACE}" \
-    --reuse-values \
+    --reset-then-reuse-values \
     --history-max 20 \
     --wait \
     --timeout "${FUGUE_HELM_TIMEOUT}" \
