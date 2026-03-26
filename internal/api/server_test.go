@@ -140,6 +140,43 @@ func TestJoinClusterInstallScriptAddsTopologyLabels(t *testing.T) {
 	}
 }
 
+func TestJoinClusterInstallScriptAvoidsRedundantRestarts(t *testing.T) {
+	t.Parallel()
+
+	var server Server
+	script := server.joinClusterInstallScript("https://api.fugue.pro")
+
+	if got := strings.Count(script, `run_systemd_action_and_wait restart k3s-agent 900`); got != 1 {
+		t.Fatalf("expected exactly one k3s-agent restart request in install script, got %d", got)
+	}
+	if strings.Contains(script, `systemctl restart tailscaled`) {
+		t.Fatalf("expected tailscaled to avoid unconditional restarts")
+	}
+
+	for _, want := range []string{
+		`log_step() {`,
+		`wait_for_systemd_unit_active() {`,
+		`run_systemd_action_and_wait() {`,
+		`write_file_if_changed`,
+		`remove_file_if_present`,
+		`cmp -s`,
+		`restart_k3s_agent_if_needed "${k3s_config_changed}"`,
+		`run_systemd_action_and_wait start k3s-agent 900`,
+		`run_systemd_action_and_wait start tailscaled 60`,
+		`Waiting for ${unit} to become active`,
+		`Requesting join parameters from control plane...`,
+		`Cluster node join finished.`,
+		`case "${http_code}" in`,
+		`000|409|429|5??)`,
+		`--max-time 5`,
+		`INSTALL_K3S_SKIP_START="true"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected join-cluster install script to contain %q", want)
+		}
+	}
+}
+
 func TestJoinClusterCleanupRemovesStaleSameMachineNode(t *testing.T) {
 	t.Parallel()
 

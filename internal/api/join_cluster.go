@@ -339,6 +339,63 @@ require_cmd() {
   }
 }
 
+log_step() {
+  printf '[fugue] %%s\n' "$*" >&2
+}
+
+wait_for_systemd_unit_active() {
+  local unit="$1"
+  local timeout_seconds="${2:-600}"
+  local interval_seconds="${3:-10}"
+  local elapsed=0
+  local state=""
+  local substate=""
+  while [ "${elapsed}" -lt "${timeout_seconds}" ]; do
+    if systemctl is-active --quiet "${unit}"; then
+      log_step "${unit} is active."
+      return 0
+    fi
+    state="$(systemctl is-active "${unit}" 2>/dev/null || true)"
+    substate="$(systemctl show "${unit}" --property=SubState --value 2>/dev/null || true)"
+    log_step "Waiting for ${unit} to become active (state=${state:-unknown}, substate=${substate:-unknown}, elapsed=${elapsed}s)..."
+    sleep "${interval_seconds}"
+    elapsed=$((elapsed + interval_seconds))
+  done
+  log_step "${unit} did not become active within ${timeout_seconds}s."
+  systemctl status "${unit}" --no-pager || true
+  return 1
+}
+
+run_systemd_action_and_wait() {
+  local action="$1"
+  local unit="$2"
+  local timeout_seconds="${3:-600}"
+  log_step "Requesting ${action} for ${unit}..."
+  systemctl "${action}" --no-block "${unit}"
+  wait_for_systemd_unit_active "${unit}" "${timeout_seconds}"
+}
+
+write_file_if_changed() {
+  local source_path="$1"
+  local target_path="$2"
+  if [ -f "${target_path}" ] && cmp -s "${source_path}" "${target_path}"; then
+    rm -f "${source_path}"
+    return 1
+  fi
+  cp "${source_path}" "${target_path}"
+  rm -f "${source_path}"
+  return 0
+}
+
+remove_file_if_present() {
+  local target_path="$1"
+  if [ -f "${target_path}" ]; then
+    rm -f "${target_path}"
+    return 0
+  fi
+  return 1
+}
+
 detect_default_node_name() {
   hostname -s 2>/dev/null || hostname
 }
@@ -485,11 +542,16 @@ install_tailscale() {
 
 wait_for_tailscale_ipv4() {
   local ip=""
-  for _ in $(seq 1 30); do
+  local attempt=""
+  for attempt in $(seq 1 30); do
     ip="$(tailscale ip -4 2>/dev/null | awk 'NR == 1 {print; exit}')"
     if [ -n "${ip}" ]; then
+      log_step "tailscale assigned IPv4 ${ip}."
       printf '%%s' "${ip}"
       return 0
+    fi
+    if [ "${attempt}" -eq 1 ] || [ $((attempt %% 5)) -eq 0 ]; then
+      log_step "Waiting for tailscale IPv4 address (${attempt}/30)..."
     fi
     sleep 2
   done
@@ -506,10 +568,15 @@ connect_mesh() {
     tailscale)
       : "${FUGUE_JOIN_MESH_LOGIN_SERVER:?FUGUE_JOIN_MESH_LOGIN_SERVER is required for tailscale joins}"
       : "${FUGUE_JOIN_MESH_AUTH_KEY:?FUGUE_JOIN_MESH_AUTH_KEY is required for tailscale joins}"
+      log_step "Connecting node to the tailscale mesh..."
       install_tailscale
       systemctl enable tailscaled
-      systemctl restart tailscaled
-      systemctl is-active --quiet tailscaled
+      if ! systemctl is-active --quiet tailscaled; then
+        run_systemd_action_and_wait start tailscaled 60
+      else
+        log_step "tailscaled is already active."
+      fi
+      log_step "Running tailscale up for ${hostname}..."
       tailscale up \
         --login-server "${FUGUE_JOIN_MESH_LOGIN_SERVER}" \
         --authkey "${FUGUE_JOIN_MESH_AUTH_KEY}" \
@@ -543,18 +610,58 @@ csv_to_yaml_list() {
 
 cleanup_stale_cluster_nodes() {
   local attempt=""
-  for attempt in $(seq 1 30); do
-    if curl -fsSL --retry 1 --retry-delay 1 -X POST "${FUGUE_API_BASE}/v1/nodes/join-cluster/cleanup" \
+  local http_code=""
+  local response_file=""
+  response_file="$(mktemp)"
+  log_step "Cleaning up stale cluster-node records..."
+  for attempt in $(seq 1 10); do
+    http_code="$(
+      curl -sS -o "${response_file}" -w '%%{http_code}' --max-time 5 -X POST "${FUGUE_API_BASE}/v1/nodes/join-cluster/cleanup" \
       -H "Content-Type: application/x-www-form-urlencoded" \
       --data-urlencode "node_key=${FUGUE_NODE_KEY}" \
       --data-urlencode "machine_fingerprint=${machine_fingerprint}" \
       --data-urlencode "current_node_name=${FUGUE_JOIN_NODE_NAME}" \
-      >/dev/null; then
-      return 0
-    fi
-    sleep 2
+      2>/dev/null || printf '000'
+    )"
+    case "${http_code}" in
+      200|204)
+        log_step "Cluster-node cleanup completed."
+        rm -f "${response_file}"
+        return 0
+        ;;
+      000|409|429|5??)
+        log_step "Cluster-node cleanup got HTTP ${http_code}; retrying (${attempt}/10)..."
+        sleep 2
+        ;;
+      *)
+        log_step "Cluster-node cleanup returned HTTP ${http_code}; skipping retries."
+        rm -f "${response_file}"
+        return 0
+        ;;
+    esac
   done
+  log_step "Cluster-node cleanup timed out after repeated transient errors; continuing."
+  rm -f "${response_file}"
   return 0
+}
+
+restart_k3s_agent_if_needed() {
+  local config_changed="$1"
+  systemctl enable k3s-agent
+  if ! systemctl is-active --quiet k3s-agent; then
+    if [ "${config_changed}" -eq 1 ]; then
+      log_step "k3s-agent is not active; starting it with the updated configuration."
+    else
+      log_step "k3s-agent is not active; starting it."
+    fi
+    run_systemd_action_and_wait start k3s-agent 900
+  elif [ "${config_changed}" -eq 1 ]; then
+    log_step "k3s agent configuration changed; restarting k3s-agent."
+    run_systemd_action_and_wait restart k3s-agent 900
+  else
+    log_step "k3s-agent configuration unchanged; service already active, skipping restart."
+  fi
+  systemctl is-active --quiet k3s-agent
 }
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -565,6 +672,7 @@ fi
 require_cmd curl
 require_cmd systemctl
 require_cmd ip
+require_cmd cmp
 
 if [ -f /etc/systemd/system/k3s.service ] || systemctl list-unit-files 2>/dev/null | grep -q '^k3s\.service'; then
   echo "this VPS already runs k3s server; join-cluster.sh only supports agent nodes" >&2
@@ -589,6 +697,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
+log_step "Requesting join parameters from control plane..."
 curl -fsSL --retry 3 --retry-delay 2 -X POST "${FUGUE_API_BASE}/v1/nodes/join-cluster/env" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   --data-urlencode "node_key=${FUGUE_NODE_KEY}" \
@@ -602,6 +711,7 @@ curl -fsSL --retry 3 --retry-delay 2 -X POST "${FUGUE_API_BASE}/v1/nodes/join-cl
 # shellcheck disable=SC1090
 . "${join_env}"
 FUGUE_JOIN_NODE_LABELS="$(append_location_node_labels)"
+log_step "Join parameters received for node ${FUGUE_JOIN_NODE_NAME}."
 
 mesh_provider="${FUGUE_JOIN_MESH_PROVIDER:-}"
 flannel_iface=""
@@ -610,7 +720,9 @@ if [ -n "${mesh_provider}" ]; then
   flannel_iface="tailscale0"
 fi
 
+log_step "Preparing k3s agent configuration..."
 mkdir -p /etc/rancher/k3s
+k3s_config_tmp="$(mktemp)"
 {
   printf 'server: "%%s"\n' "${FUGUE_JOIN_SERVER}"
   printf 'token: "%%s"\n' "${FUGUE_JOIN_TOKEN}"
@@ -623,10 +735,19 @@ mkdir -p /etc/rancher/k3s
   fi
   csv_to_yaml_list node-label "${FUGUE_JOIN_NODE_LABELS:-}"
   csv_to_yaml_list node-taint "${FUGUE_JOIN_NODE_TAINTS:-}"
-} >/etc/rancher/k3s/config.yaml
+} >"${k3s_config_tmp}"
+
+k3s_config_changed=0
+if write_file_if_changed "${k3s_config_tmp}" /etc/rancher/k3s/config.yaml; then
+  log_step "Updated /etc/rancher/k3s/config.yaml."
+  k3s_config_changed=1
+else
+  log_step "/etc/rancher/k3s/config.yaml is unchanged."
+fi
 
 if [ -n "${FUGUE_JOIN_REGISTRY_BASE:-}" ] && [ -n "${FUGUE_JOIN_REGISTRY_ENDPOINT:-}" ]; then
-  cat >/etc/rancher/k3s/registries.yaml <<EOF_REG
+  k3s_registry_tmp="$(mktemp)"
+  cat >"${k3s_registry_tmp}" <<EOF_REG
 mirrors:
   "${FUGUE_JOIN_REGISTRY_BASE}":
     endpoint:
@@ -636,19 +757,29 @@ configs:
     tls:
       insecure_skip_verify: true
 EOF_REG
+  if write_file_if_changed "${k3s_registry_tmp}" /etc/rancher/k3s/registries.yaml; then
+    log_step "Updated /etc/rancher/k3s/registries.yaml."
+    k3s_config_changed=1
+  else
+    log_step "/etc/rancher/k3s/registries.yaml is unchanged."
+  fi
+elif remove_file_if_present /etc/rancher/k3s/registries.yaml; then
+  log_step "Removed /etc/rancher/k3s/registries.yaml."
+  k3s_config_changed=1
 fi
 
 if ! command -v k3s >/dev/null 2>&1; then
-  curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL="${FUGUE_K3S_CHANNEL}" INSTALL_K3S_EXEC="agent" sh -
+  log_step "k3s agent is not installed; downloading and installing binaries..."
+  curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL="${FUGUE_K3S_CHANNEL}" INSTALL_K3S_EXEC="agent" INSTALL_K3S_SKIP_START="true" sh -
+  log_step "k3s agent install completed; starting service."
+  restart_k3s_agent_if_needed 1
 else
-  systemctl enable k3s-agent
-  systemctl restart k3s-agent
+  restart_k3s_agent_if_needed "${k3s_config_changed}"
 fi
 
-systemctl enable k3s-agent
-systemctl restart k3s-agent
 systemctl is-active --quiet k3s-agent
 cleanup_stale_cluster_nodes
+log_step "Cluster node join finished."
 
 cat <<EOF
 Fugue node joined.
