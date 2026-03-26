@@ -442,6 +442,36 @@ type postgresRuntimeResource struct {
 	projectID    string
 }
 
+type ManagedBackingServiceDeployment struct {
+	ServiceID    string
+	ResourceName string
+	RuntimeKey   string
+}
+
+func ManagedAppReleaseKey(app model.App, scheduling SchedulingConstraints) string {
+	namespace := NamespaceForTenant(app.TenantID)
+	object := buildAppDeploymentObject(namespace, app, appLabels(app), scheduling, managedPostgresResources(namespace, app))
+	return managedDeploymentRuntimeKey(object)
+}
+
+func ManagedBackingServiceDeployments(app model.App, scheduling SchedulingConstraints) []ManagedBackingServiceDeployment {
+	namespace := NamespaceForTenant(app.TenantID)
+	resources := managedPostgresResources(namespace, app)
+	deployments := make([]ManagedBackingServiceDeployment, 0, len(resources))
+	for _, resource := range resources {
+		if strings.TrimSpace(resource.serviceID) == "" {
+			continue
+		}
+		object := buildPostgresDeploymentObject(namespace, resource.secretName, resource.resourceName, postgresLabels(resource), resource.spec, scheduling)
+		deployments = append(deployments, ManagedBackingServiceDeployment{
+			ServiceID:    resource.serviceID,
+			ResourceName: resource.resourceName,
+			RuntimeKey:   managedDeploymentRuntimeKey(object),
+		})
+	}
+	return deployments
+}
+
 func managedPostgresResources(namespace string, app model.App) []postgresRuntimeResource {
 	servicesByID := make(map[string]model.BackingService, len(app.BackingServices))
 	for _, service := range app.BackingServices {
@@ -491,6 +521,28 @@ func managedPostgresResources(namespace string, app model.App) []postgresRuntime
 	}
 
 	return resources
+}
+
+func managedDeploymentRuntimeKey(obj map[string]any) string {
+	metadata, _ := obj["metadata"].(map[string]any)
+	spec, _ := obj["spec"].(map[string]any)
+	payload := map[string]any{
+		"apiVersion": obj["apiVersion"],
+		"kind":       obj["kind"],
+		"metadata": map[string]any{
+			"name":      metadata["name"],
+			"namespace": metadata["namespace"],
+		},
+		"spec": map[string]any{
+			"template": spec["template"],
+		},
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func mergedRuntimeEnv(app model.App) map[string]string {

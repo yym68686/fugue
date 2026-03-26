@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"testing"
+	"time"
 
 	"fugue/internal/model"
 )
@@ -152,5 +153,58 @@ func TestOverlayAppStatusFromManagedAppUsesObservedReadyReplicas(t *testing.T) {
 	}
 	if updated.Status.LastMessage != "rollout in progress" {
 		t.Fatalf("unexpected last message: %q", updated.Status.LastMessage)
+	}
+}
+
+func TestOverlayAppStatusFromManagedAppOverlaysRuntimeTimestamps(t *testing.T) {
+	releaseStartedAt := time.Date(2026, time.March, 26, 10, 0, 0, 0, time.UTC)
+	releaseReadyAt := releaseStartedAt.Add(2 * time.Minute)
+	serviceStartedAt := releaseStartedAt.Add(30 * time.Second)
+	serviceReadyAt := releaseReadyAt
+
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			RuntimeID: "runtime_demo",
+			Replicas:  1,
+		},
+		Status: model.AppStatus{
+			Phase:            "deployed",
+			CurrentRuntimeID: "runtime_demo",
+			CurrentReplicas:  1,
+		},
+		BackingServices: []model.BackingService{
+			{ID: "service_demo"},
+		},
+	}
+
+	updated := OverlayAppStatusFromManagedApp(app, ManagedAppObject{
+		Status: ManagedAppStatus{
+			Phase:                   ManagedAppPhaseReady,
+			ReadyReplicas:           1,
+			CurrentReleaseStartedAt: releaseStartedAt.Format(time.RFC3339Nano),
+			CurrentReleaseReadyAt:   releaseReadyAt.Format(time.RFC3339Nano),
+			BackingServices: []ManagedBackingServiceStatus{
+				{
+					ServiceID:               "service_demo",
+					CurrentRuntimeStartedAt: serviceStartedAt.Format(time.RFC3339Nano),
+					CurrentRuntimeReadyAt:   serviceReadyAt.Format(time.RFC3339Nano),
+				},
+			},
+		},
+	})
+
+	if updated.Status.CurrentReleaseStartedAt == nil || !updated.Status.CurrentReleaseStartedAt.Equal(releaseStartedAt) {
+		t.Fatalf("expected release started at %s, got %#v", releaseStartedAt.Format(time.RFC3339Nano), updated.Status.CurrentReleaseStartedAt)
+	}
+	if updated.Status.CurrentReleaseReadyAt == nil || !updated.Status.CurrentReleaseReadyAt.Equal(releaseReadyAt) {
+		t.Fatalf("expected release ready at %s, got %#v", releaseReadyAt.Format(time.RFC3339Nano), updated.Status.CurrentReleaseReadyAt)
+	}
+	if updated.BackingServices[0].CurrentRuntimeStartedAt == nil || !updated.BackingServices[0].CurrentRuntimeStartedAt.Equal(serviceStartedAt) {
+		t.Fatalf("expected service started at %s, got %#v", serviceStartedAt.Format(time.RFC3339Nano), updated.BackingServices[0].CurrentRuntimeStartedAt)
+	}
+	if updated.BackingServices[0].CurrentRuntimeReadyAt == nil || !updated.BackingServices[0].CurrentRuntimeReadyAt.Equal(serviceReadyAt) {
+		t.Fatalf("expected service ready at %s, got %#v", serviceReadyAt.Format(time.RFC3339Nano), updated.BackingServices[0].CurrentRuntimeReadyAt)
 	}
 }

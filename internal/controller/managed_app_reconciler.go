@@ -9,6 +9,7 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
+	"fugue/internal/store"
 )
 
 func (s *Service) applyManagedAppDesiredState(ctx context.Context, app model.App, scheduling runtime.SchedulingConstraints) error {
@@ -104,9 +105,21 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read deployment status: %w", err))
 	}
 
-	status := buildManagedAppStatus(managed, app, deployment, found)
+	backingServiceStatuses := make([]runtime.ManagedBackingServiceStatus, 0)
+	for _, serviceDeployment := range runtime.ManagedBackingServiceDeployments(app, managed.Spec.Scheduling) {
+		serviceDeploymentStatus, deploymentFound, err := client.getDeployment(ctx, namespace, serviceDeployment.ResourceName)
+		if err != nil {
+			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read backing service deployment %s status: %w", serviceDeployment.ResourceName, err))
+		}
+		backingServiceStatuses = append(backingServiceStatuses, buildManagedBackingServiceStatus(managed.Status, serviceDeployment, serviceDeploymentStatus, deploymentFound))
+	}
+
+	status := buildManagedAppStatus(managed, app, deployment, found, backingServiceStatuses)
 	if err := client.patchManagedAppStatus(ctx, namespace, managed.Metadata.Name, status); err != nil {
 		return fmt.Errorf("patch managed app status for %s/%s: %w", namespace, managed.Metadata.Name, err)
+	}
+	if err := s.Store.SyncManagedAppRuntimeStatus(app.ID, managedStatusTimePointer(status.CurrentReleaseStartedAt), managedStatusTimePointer(status.CurrentReleaseReadyAt), backingServiceRuntimeStatuses(status.BackingServices)); err != nil {
+		return fmt.Errorf("sync managed app runtime status for %s: %w", app.ID, err)
 	}
 	return nil
 }
@@ -115,18 +128,25 @@ func patchManagedAppErrorStatus(ctx context.Context, client *kubeClient, namespa
 	status := managedAppBaseStatus(managed, app)
 	status.Phase = runtime.ManagedAppPhaseError
 	status.Message = strings.TrimSpace(cause.Error())
+	status.CurrentReleaseKey = strings.TrimSpace(managed.Status.CurrentReleaseKey)
+	status.CurrentReleaseStartedAt = strings.TrimSpace(managed.Status.CurrentReleaseStartedAt)
+	status.CurrentReleaseReadyAt = strings.TrimSpace(managed.Status.CurrentReleaseReadyAt)
+	status.PendingReleaseKey = strings.TrimSpace(managed.Status.PendingReleaseKey)
+	status.PendingReleaseStartedAt = strings.TrimSpace(managed.Status.PendingReleaseStartedAt)
+	status.BackingServices = append([]runtime.ManagedBackingServiceStatus(nil), managed.Status.BackingServices...)
 	if err := client.patchManagedAppStatus(ctx, namespace, managed.Metadata.Name, status); err != nil {
 		return fmt.Errorf("%w (also failed to patch managed app status: %v)", cause, err)
 	}
 	return cause
 }
 
-func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, deployment kubeDeployment, found bool) runtime.ManagedAppStatus {
+func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, deployment kubeDeployment, found bool, backingServiceStatuses []runtime.ManagedBackingServiceStatus) runtime.ManagedAppStatus {
 	status := managedAppBaseStatus(managed, app)
 	if found {
 		status.ReadyReplicas = maxInt(deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas)
 		status.Conditions = append([]runtime.ManagedAppCondition(nil), deployment.Status.Conditions...)
 	}
+	status.BackingServices = append([]runtime.ManagedBackingServiceStatus(nil), backingServiceStatuses...)
 
 	switch {
 	case app.Spec.Replicas <= 0:
@@ -148,6 +168,7 @@ func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, depl
 		status.Phase = runtime.ManagedAppPhaseProgressing
 		status.Message = fmt.Sprintf("deployment progressing (%d/%d ready replicas)", status.ReadyReplicas, app.Spec.Replicas)
 	}
+	applyManagedAppReleaseStatus(&status, managed.Status, app, managed.Spec.Scheduling)
 	return status
 }
 
@@ -205,6 +226,176 @@ func managedAppConditionMessage(condition runtime.ManagedAppCondition, fallback 
 	default:
 		return fallback
 	}
+}
+
+func applyManagedAppReleaseStatus(status *runtime.ManagedAppStatus, previous runtime.ManagedAppStatus, app model.App, scheduling runtime.SchedulingConstraints) {
+	if status == nil {
+		return
+	}
+	if app.Spec.Replicas <= 0 || strings.EqualFold(strings.TrimSpace(status.Phase), runtime.ManagedAppPhaseDisabled) || strings.EqualFold(strings.TrimSpace(status.Phase), runtime.ManagedAppPhaseDeleting) {
+		status.CurrentReleaseKey = ""
+		status.CurrentReleaseStartedAt = ""
+		status.CurrentReleaseReadyAt = ""
+		status.PendingReleaseKey = ""
+		status.PendingReleaseStartedAt = ""
+		return
+	}
+
+	releaseKey := strings.TrimSpace(runtime.ManagedAppReleaseKey(app, scheduling))
+	currentKey := strings.TrimSpace(previous.CurrentReleaseKey)
+	currentStartedAt := strings.TrimSpace(previous.CurrentReleaseStartedAt)
+	currentReadyAt := strings.TrimSpace(previous.CurrentReleaseReadyAt)
+	pendingKey := strings.TrimSpace(previous.PendingReleaseKey)
+	pendingStartedAt := strings.TrimSpace(previous.PendingReleaseStartedAt)
+	now := formatKubeTimestamp(time.Now().UTC())
+	ready := strings.EqualFold(strings.TrimSpace(status.Phase), runtime.ManagedAppPhaseReady) && status.ReadyReplicas >= app.Spec.Replicas && app.Spec.Replicas > 0
+
+	if releaseKey == "" {
+		status.CurrentReleaseKey = currentKey
+		status.CurrentReleaseStartedAt = currentStartedAt
+		status.CurrentReleaseReadyAt = currentReadyAt
+		status.PendingReleaseKey = pendingKey
+		status.PendingReleaseStartedAt = pendingStartedAt
+		return
+	}
+
+	if ready {
+		if currentKey == releaseKey {
+			status.CurrentReleaseKey = currentKey
+			status.CurrentReleaseStartedAt = currentStartedAt
+			if status.CurrentReleaseStartedAt == "" && pendingKey == releaseKey {
+				status.CurrentReleaseStartedAt = pendingStartedAt
+			}
+			if status.CurrentReleaseStartedAt == "" {
+				status.CurrentReleaseStartedAt = now
+			}
+			status.CurrentReleaseReadyAt = currentReadyAt
+			if status.CurrentReleaseReadyAt == "" {
+				status.CurrentReleaseReadyAt = now
+			}
+		} else {
+			status.CurrentReleaseKey = releaseKey
+			status.CurrentReleaseStartedAt = pendingStartedAt
+			if pendingKey != releaseKey || status.CurrentReleaseStartedAt == "" {
+				status.CurrentReleaseStartedAt = now
+			}
+			status.CurrentReleaseReadyAt = now
+		}
+		status.PendingReleaseKey = ""
+		status.PendingReleaseStartedAt = ""
+		return
+	}
+
+	status.CurrentReleaseKey = currentKey
+	status.CurrentReleaseStartedAt = currentStartedAt
+	status.CurrentReleaseReadyAt = currentReadyAt
+	if currentKey == releaseKey {
+		status.PendingReleaseKey = ""
+		status.PendingReleaseStartedAt = ""
+		if currentKey == "" {
+			status.PendingReleaseKey = releaseKey
+			status.PendingReleaseStartedAt = firstNonEmptyString(pendingStartedAt, now)
+		}
+		return
+	}
+
+	status.PendingReleaseKey = releaseKey
+	if pendingKey == releaseKey && pendingStartedAt != "" {
+		status.PendingReleaseStartedAt = pendingStartedAt
+	} else {
+		status.PendingReleaseStartedAt = now
+	}
+}
+
+func buildManagedBackingServiceStatus(previous runtime.ManagedAppStatus, deployment runtime.ManagedBackingServiceDeployment, status kubeDeployment, found bool) runtime.ManagedBackingServiceStatus {
+	out := runtime.ManagedBackingServiceStatus{
+		ServiceID:  deployment.ServiceID,
+		RuntimeKey: deployment.RuntimeKey,
+	}
+	if !found {
+		return out
+	}
+
+	prev := managedBackingServiceStatusByID(previous.BackingServices, deployment.ServiceID)
+	if strings.TrimSpace(prev.RuntimeKey) == strings.TrimSpace(deployment.RuntimeKey) {
+		out.CurrentRuntimeStartedAt = strings.TrimSpace(prev.CurrentRuntimeStartedAt)
+		out.CurrentRuntimeReadyAt = strings.TrimSpace(prev.CurrentRuntimeReadyAt)
+	}
+	if out.CurrentRuntimeStartedAt == "" {
+		out.CurrentRuntimeStartedAt = formatKubeTimestamp(time.Now().UTC())
+	}
+	if managedBackingServiceReady(status, found) {
+		if out.CurrentRuntimeReadyAt == "" {
+			out.CurrentRuntimeReadyAt = formatKubeTimestamp(time.Now().UTC())
+		}
+	} else {
+		out.CurrentRuntimeReadyAt = ""
+	}
+	return out
+}
+
+func managedBackingServiceStatusByID(statuses []runtime.ManagedBackingServiceStatus, serviceID string) runtime.ManagedBackingServiceStatus {
+	serviceID = strings.TrimSpace(serviceID)
+	for _, status := range statuses {
+		if strings.TrimSpace(status.ServiceID) == serviceID {
+			return status
+		}
+	}
+	return runtime.ManagedBackingServiceStatus{}
+}
+
+func managedBackingServiceReady(deployment kubeDeployment, found bool) bool {
+	if !found {
+		return false
+	}
+	if hasDeploymentFailureCondition(deployment.Status.Conditions) {
+		return false
+	}
+	if deployment.Status.ObservedGeneration < deployment.Metadata.Generation {
+		return false
+	}
+	if deployment.Status.UpdatedReplicas < 1 {
+		return false
+	}
+	if maxInt(deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas) < 1 {
+		return false
+	}
+	if deployment.Status.UnavailableReplicas > 0 {
+		return false
+	}
+	return true
+}
+
+func managedStatusTimePointer(value string) *time.Time {
+	parsed := parseKubeTimestamp(value)
+	if parsed.IsZero() {
+		return nil
+	}
+	return &parsed
+}
+
+func backingServiceRuntimeStatuses(statuses []runtime.ManagedBackingServiceStatus) []store.ManagedBackingServiceRuntimeStatus {
+	if len(statuses) == 0 {
+		return nil
+	}
+	out := make([]store.ManagedBackingServiceRuntimeStatus, 0, len(statuses))
+	for _, status := range statuses {
+		out = append(out, store.ManagedBackingServiceRuntimeStatus{
+			ServiceID:               strings.TrimSpace(status.ServiceID),
+			CurrentRuntimeStartedAt: managedStatusTimePointer(status.CurrentRuntimeStartedAt),
+			CurrentRuntimeReadyAt:   managedStatusTimePointer(status.CurrentRuntimeReadyAt),
+		})
+	}
+	return out
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (s *Service) pruneManagedAppStaleObjects(ctx context.Context, client *kubeClient, namespace string, app model.App, desiredObjects []map[string]any) error {

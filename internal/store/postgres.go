@@ -159,9 +159,13 @@ var postgresSchemaStatements = []string{
 		provisioner TEXT NOT NULL,
 		status TEXT NOT NULL,
 		spec_json JSONB NOT NULL,
+		current_runtime_started_at TIMESTAMPTZ NULL,
+		current_runtime_ready_at TIMESTAMPTZ NULL,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL
 	)`,
+	`ALTER TABLE fugue_backing_services ADD COLUMN IF NOT EXISTS current_runtime_started_at TIMESTAMPTZ NULL`,
+	`ALTER TABLE fugue_backing_services ADD COLUMN IF NOT EXISTS current_runtime_ready_at TIMESTAMPTZ NULL`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_backing_services_tenant_project_name_ci ON fugue_backing_services (tenant_id, project_id, lower(name))`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_backing_services_owner_app_id ON fugue_backing_services (owner_app_id) WHERE owner_app_id IS NOT NULL`,
 	`CREATE TABLE IF NOT EXISTS fugue_service_bindings (
@@ -548,10 +552,10 @@ ON CONFLICT (id) DO NOTHING
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_backing_services (id, tenant_id, project_id, owner_app_id, name, description, type, provisioner, status, spec_json, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+INSERT INTO fugue_backing_services (id, tenant_id, project_id, owner_app_id, name, description, type, provisioner, status, spec_json, current_runtime_started_at, current_runtime_ready_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 ON CONFLICT (id) DO NOTHING
-`, service.ID, nullIfEmpty(service.TenantID), service.ProjectID, nullIfEmpty(service.OwnerAppID), service.Name, service.Description, service.Type, service.Provisioner, service.Status, specJSON, service.CreatedAt, service.UpdatedAt); err != nil {
+`, service.ID, nullIfEmpty(service.TenantID), service.ProjectID, nullIfEmpty(service.OwnerAppID), service.Name, service.Description, service.Type, service.Provisioner, service.Status, specJSON, service.CurrentRuntimeStartedAt, service.CurrentRuntimeReadyAt, service.CreatedAt, service.UpdatedAt); err != nil {
 			return fmt.Errorf("import backing service %s: %w", service.ID, err)
 		}
 	}

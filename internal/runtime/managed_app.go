@@ -64,14 +64,27 @@ type ManagedAppSpec struct {
 }
 
 type ManagedAppStatus struct {
-	Phase               string                `json:"phase,omitempty"`
-	Message             string                `json:"message,omitempty"`
-	ReadyReplicas       int                   `json:"readyReplicas,omitempty"`
-	DesiredReplicas     int                   `json:"desiredReplicas,omitempty"`
-	ObservedGeneration  int64                 `json:"observedGeneration,omitempty"`
-	LastAppliedSpecHash string                `json:"lastAppliedSpecHash,omitempty"`
-	LastAppliedTime     string                `json:"lastAppliedTime,omitempty"`
-	Conditions          []ManagedAppCondition `json:"conditions,omitempty"`
+	Phase                   string                        `json:"phase,omitempty"`
+	Message                 string                        `json:"message,omitempty"`
+	ReadyReplicas           int                           `json:"readyReplicas,omitempty"`
+	DesiredReplicas         int                           `json:"desiredReplicas,omitempty"`
+	ObservedGeneration      int64                         `json:"observedGeneration,omitempty"`
+	LastAppliedSpecHash     string                        `json:"lastAppliedSpecHash,omitempty"`
+	LastAppliedTime         string                        `json:"lastAppliedTime,omitempty"`
+	CurrentReleaseKey       string                        `json:"currentReleaseKey,omitempty"`
+	CurrentReleaseStartedAt string                        `json:"currentReleaseStartedAt,omitempty"`
+	CurrentReleaseReadyAt   string                        `json:"currentReleaseReadyAt,omitempty"`
+	PendingReleaseKey       string                        `json:"pendingReleaseKey,omitempty"`
+	PendingReleaseStartedAt string                        `json:"pendingReleaseStartedAt,omitempty"`
+	BackingServices         []ManagedBackingServiceStatus `json:"backingServices,omitempty"`
+	Conditions              []ManagedAppCondition         `json:"conditions,omitempty"`
+}
+
+type ManagedBackingServiceStatus struct {
+	ServiceID               string `json:"serviceID,omitempty"`
+	RuntimeKey              string `json:"runtimeKey,omitempty"`
+	CurrentRuntimeStartedAt string `json:"currentRuntimeStartedAt,omitempty"`
+	CurrentRuntimeReadyAt   string `json:"currentRuntimeReadyAt,omitempty"`
 }
 
 type ManagedAppCondition struct {
@@ -185,7 +198,12 @@ func AppFromManagedApp(managed ManagedAppObject) model.App {
 func OverlayAppStatusFromManagedApp(app model.App, managed ManagedAppObject) model.App {
 	out := app
 	status := managed.Status
-	if strings.TrimSpace(status.Phase) == "" && status.ReadyReplicas == 0 && strings.TrimSpace(status.Message) == "" {
+	if strings.TrimSpace(status.Phase) == "" &&
+		status.ReadyReplicas == 0 &&
+		strings.TrimSpace(status.Message) == "" &&
+		strings.TrimSpace(status.CurrentReleaseStartedAt) == "" &&
+		strings.TrimSpace(status.CurrentReleaseReadyAt) == "" &&
+		len(status.BackingServices) == 0 {
 		return out
 	}
 
@@ -204,12 +222,23 @@ func OverlayAppStatusFromManagedApp(app model.App, managed ManagedAppObject) mod
 
 	out.Status.CurrentRuntimeID = out.Spec.RuntimeID
 	out.Status.CurrentReplicas = status.ReadyReplicas
+	if startedAt, ok := parseManagedAppStatusTime(status.CurrentReleaseStartedAt); ok {
+		out.Status.CurrentReleaseStartedAt = &startedAt
+	} else if strings.TrimSpace(status.CurrentReleaseStartedAt) == "" {
+		out.Status.CurrentReleaseStartedAt = nil
+	}
+	if readyAt, ok := parseManagedAppStatusTime(status.CurrentReleaseReadyAt); ok {
+		out.Status.CurrentReleaseReadyAt = &readyAt
+	} else if strings.TrimSpace(status.CurrentReleaseReadyAt) == "" {
+		out.Status.CurrentReleaseReadyAt = nil
+	}
 	if strings.TrimSpace(status.Message) != "" {
 		out.Status.LastMessage = strings.TrimSpace(status.Message)
 	}
 	if updatedAt, ok := parseManagedAppStatusTime(status.LastAppliedTime); ok {
 		out.Status.UpdatedAt = updatedAt
 	}
+	overlayManagedBackingServiceStatus(&out, status.BackingServices)
 	return out
 }
 
@@ -278,6 +307,8 @@ func cloneManagedBackingServices(services []model.BackingService) []model.Backin
 	out := make([]model.BackingService, len(services))
 	for index, service := range services {
 		out[index] = service
+		out[index].CurrentRuntimeStartedAt = nil
+		out[index].CurrentRuntimeReadyAt = nil
 		if service.Spec.Postgres == nil {
 			continue
 		}
@@ -299,6 +330,34 @@ func cloneSchedulingConstraints(in SchedulingConstraints) SchedulingConstraints 
 		out.Tolerations = append([]Toleration(nil), in.Tolerations...)
 	}
 	return out
+}
+
+func overlayManagedBackingServiceStatus(app *model.App, statuses []ManagedBackingServiceStatus) {
+	if app == nil || len(app.BackingServices) == 0 || len(statuses) == 0 {
+		return
+	}
+	statusByID := make(map[string]ManagedBackingServiceStatus, len(statuses))
+	for _, status := range statuses {
+		if id := strings.TrimSpace(status.ServiceID); id != "" {
+			statusByID[id] = status
+		}
+	}
+	for index := range app.BackingServices {
+		status, ok := statusByID[strings.TrimSpace(app.BackingServices[index].ID)]
+		if !ok {
+			continue
+		}
+		if startedAt, ok := parseManagedAppStatusTime(status.CurrentRuntimeStartedAt); ok {
+			app.BackingServices[index].CurrentRuntimeStartedAt = &startedAt
+		} else if strings.TrimSpace(status.CurrentRuntimeStartedAt) == "" {
+			app.BackingServices[index].CurrentRuntimeStartedAt = nil
+		}
+		if readyAt, ok := parseManagedAppStatusTime(status.CurrentRuntimeReadyAt); ok {
+			app.BackingServices[index].CurrentRuntimeReadyAt = &readyAt
+		} else if strings.TrimSpace(status.CurrentRuntimeReadyAt) == "" {
+			app.BackingServices[index].CurrentRuntimeReadyAt = nil
+		}
+	}
 }
 
 func parseManagedAppStatusTime(value string) (time.Time, bool) {

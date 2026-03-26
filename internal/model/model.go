@@ -310,18 +310,20 @@ type BackingServiceSpec struct {
 }
 
 type BackingService struct {
-	ID          string             `json:"id"`
-	TenantID    string             `json:"tenant_id"`
-	ProjectID   string             `json:"project_id"`
-	OwnerAppID  string             `json:"owner_app_id,omitempty"`
-	Name        string             `json:"name"`
-	Description string             `json:"description,omitempty"`
-	Type        string             `json:"type"`
-	Provisioner string             `json:"provisioner"`
-	Status      string             `json:"status"`
-	Spec        BackingServiceSpec `json:"spec"`
-	CreatedAt   time.Time          `json:"created_at"`
-	UpdatedAt   time.Time          `json:"updated_at"`
+	ID                      string             `json:"id"`
+	TenantID                string             `json:"tenant_id"`
+	ProjectID               string             `json:"project_id"`
+	OwnerAppID              string             `json:"owner_app_id,omitempty"`
+	Name                    string             `json:"name"`
+	Description             string             `json:"description,omitempty"`
+	Type                    string             `json:"type"`
+	Provisioner             string             `json:"provisioner"`
+	Status                  string             `json:"status"`
+	Spec                    BackingServiceSpec `json:"spec"`
+	CurrentRuntimeStartedAt *time.Time         `json:"current_runtime_started_at,omitempty"`
+	CurrentRuntimeReadyAt   *time.Time         `json:"current_runtime_ready_at,omitempty"`
+	CreatedAt               time.Time          `json:"created_at"`
+	UpdatedAt               time.Time          `json:"updated_at"`
 }
 
 type ServiceBinding struct {
@@ -336,12 +338,14 @@ type ServiceBinding struct {
 }
 
 type AppStatus struct {
-	Phase            string    `json:"phase"`
-	CurrentRuntimeID string    `json:"current_runtime_id,omitempty"`
-	CurrentReplicas  int       `json:"current_replicas"`
-	LastOperationID  string    `json:"last_operation_id,omitempty"`
-	LastMessage      string    `json:"last_message,omitempty"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	Phase                   string     `json:"phase"`
+	CurrentRuntimeID        string     `json:"current_runtime_id,omitempty"`
+	CurrentReplicas         int        `json:"current_replicas"`
+	CurrentReleaseStartedAt *time.Time `json:"current_release_started_at,omitempty"`
+	CurrentReleaseReadyAt   *time.Time `json:"current_release_ready_at,omitempty"`
+	LastOperationID         string     `json:"last_operation_id,omitempty"`
+	LastMessage             string     `json:"last_message,omitempty"`
+	UpdatedAt               time.Time  `json:"updated_at"`
 }
 
 type App struct {

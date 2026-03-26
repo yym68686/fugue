@@ -21,7 +21,7 @@ func (s *Store) pgListBackingServices(tenantID string, platformAdmin bool) ([]mo
 	defer cancel()
 
 	query := `
-SELECT id, tenant_id, project_id, owner_app_id, name, description, type, provisioner, status, spec_json, created_at, updated_at
+SELECT id, tenant_id, project_id, owner_app_id, name, description, type, provisioner, status, spec_json, current_runtime_started_at, current_runtime_ready_at, created_at, updated_at
 FROM fugue_backing_services
 `
 	args := make([]any, 0, 1)
@@ -59,7 +59,7 @@ func (s *Store) pgGetBackingService(id string) (model.BackingService, error) {
 	defer cancel()
 
 	service, err := scanBackingService(s.db.QueryRowContext(ctx, `
-SELECT id, tenant_id, project_id, owner_app_id, name, description, type, provisioner, status, spec_json, created_at, updated_at
+SELECT id, tenant_id, project_id, owner_app_id, name, description, type, provisioner, status, spec_json, current_runtime_started_at, current_runtime_ready_at, created_at, updated_at
 FROM fugue_backing_services
 WHERE id = $1
 `, id))
@@ -281,7 +281,7 @@ func (s *Store) pgHydrateAppBackingServices(ctx context.Context, app *model.App)
 	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT b.id, b.tenant_id, b.app_id, b.service_id, b.alias, b.env_json, b.created_at, b.updated_at,
-       s.id, s.tenant_id, s.project_id, s.owner_app_id, s.name, s.description, s.type, s.provisioner, s.status, s.spec_json, s.created_at, s.updated_at
+       s.id, s.tenant_id, s.project_id, s.owner_app_id, s.name, s.description, s.type, s.provisioner, s.status, s.spec_json, s.current_runtime_started_at, s.current_runtime_ready_at, s.created_at, s.updated_at
 FROM fugue_service_bindings AS b
 JOIN fugue_backing_services AS s ON s.id = b.service_id
 WHERE b.app_id = $1
@@ -459,9 +459,9 @@ func (s *Store) pgInsertBackingServiceTx(ctx context.Context, tx *sql.Tx, servic
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_backing_services (id, tenant_id, project_id, owner_app_id, name, description, type, provisioner, status, spec_json, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-`, service.ID, nullIfEmpty(service.TenantID), service.ProjectID, nullIfEmpty(service.OwnerAppID), service.Name, service.Description, service.Type, service.Provisioner, service.Status, specJSON, service.CreatedAt, service.UpdatedAt); err != nil {
+INSERT INTO fugue_backing_services (id, tenant_id, project_id, owner_app_id, name, description, type, provisioner, status, spec_json, current_runtime_started_at, current_runtime_ready_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+`, service.ID, nullIfEmpty(service.TenantID), service.ProjectID, nullIfEmpty(service.OwnerAppID), service.Name, service.Description, service.Type, service.Provisioner, service.Status, specJSON, service.CurrentRuntimeStartedAt, service.CurrentRuntimeReadyAt, service.CreatedAt, service.UpdatedAt); err != nil {
 		return mapDBErr(err)
 	}
 	return nil
@@ -497,10 +497,12 @@ SET tenant_id = $2,
 	provisioner = $8,
 	status = $9,
 	spec_json = $10,
-	created_at = $11,
-	updated_at = $12
+	current_runtime_started_at = $11,
+	current_runtime_ready_at = $12,
+	created_at = $13,
+	updated_at = $14
 WHERE id = $1
-`, service.ID, nullIfEmpty(service.TenantID), service.ProjectID, nullIfEmpty(service.OwnerAppID), service.Name, service.Description, service.Type, service.Provisioner, service.Status, specJSON, service.CreatedAt, service.UpdatedAt); err != nil {
+`, service.ID, nullIfEmpty(service.TenantID), service.ProjectID, nullIfEmpty(service.OwnerAppID), service.Name, service.Description, service.Type, service.Provisioner, service.Status, specJSON, service.CurrentRuntimeStartedAt, service.CurrentRuntimeReadyAt, service.CreatedAt, service.UpdatedAt); err != nil {
 		return mapDBErr(err)
 	}
 	return nil
@@ -529,7 +531,7 @@ WHERE id = $1
 
 func (s *Store) pgGetBackingServiceTx(ctx context.Context, tx *sql.Tx, id string, forUpdate bool) (model.BackingService, error) {
 	query := `
-SELECT id, tenant_id, project_id, owner_app_id, name, description, type, provisioner, status, spec_json, created_at, updated_at
+SELECT id, tenant_id, project_id, owner_app_id, name, description, type, provisioner, status, spec_json, current_runtime_started_at, current_runtime_ready_at, created_at, updated_at
 FROM fugue_backing_services
 WHERE id = $1
 `
@@ -578,7 +580,7 @@ FOR UPDATE
 
 func (s *Store) pgGetOwnedBackingServiceByAppAndTypeTx(ctx context.Context, tx *sql.Tx, appID, serviceType string, forUpdate bool) (model.BackingService, bool, error) {
 	query := `
-SELECT id, tenant_id, project_id, owner_app_id, name, description, type, provisioner, status, spec_json, created_at, updated_at
+SELECT id, tenant_id, project_id, owner_app_id, name, description, type, provisioner, status, spec_json, current_runtime_started_at, current_runtime_ready_at, created_at, updated_at
 FROM fugue_backing_services
 WHERE owner_app_id = $1
   AND type = $2
@@ -708,7 +710,7 @@ func scanBackingService(scanner sqlScanner) (model.BackingService, error) {
 	var tenantID sql.NullString
 	var ownerAppID sql.NullString
 	var specRaw []byte
-	if err := scanner.Scan(&service.ID, &tenantID, &service.ProjectID, &ownerAppID, &service.Name, &service.Description, &service.Type, &service.Provisioner, &service.Status, &specRaw, &service.CreatedAt, &service.UpdatedAt); err != nil {
+	if err := scanner.Scan(&service.ID, &tenantID, &service.ProjectID, &ownerAppID, &service.Name, &service.Description, &service.Type, &service.Provisioner, &service.Status, &specRaw, &service.CurrentRuntimeStartedAt, &service.CurrentRuntimeReadyAt, &service.CreatedAt, &service.UpdatedAt); err != nil {
 		return model.BackingService{}, err
 	}
 	service.TenantID = tenantID.String
@@ -764,6 +766,8 @@ func scanBoundBackingService(scanner sqlScanner) (model.ServiceBinding, model.Ba
 		&service.Provisioner,
 		&service.Status,
 		&specRaw,
+		&service.CurrentRuntimeStartedAt,
+		&service.CurrentRuntimeReadyAt,
 		&service.CreatedAt,
 		&service.UpdatedAt,
 	); err != nil {

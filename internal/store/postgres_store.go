@@ -3051,6 +3051,10 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 		app.Status.Phase = "deployed"
 		app.Status.CurrentRuntimeID = app.Spec.RuntimeID
 		app.Status.CurrentReplicas = app.Spec.Replicas
+		if op.ExecutionMode != model.ExecutionModeManaged {
+			app.Status.CurrentReleaseStartedAt = nil
+			app.Status.CurrentReleaseReadyAt = nil
+		}
 	case model.OperationTypeScale:
 		if op.DesiredReplicas == nil {
 			return ErrInvalidInput
@@ -3063,6 +3067,10 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 		}
 		app.Status.CurrentRuntimeID = app.Spec.RuntimeID
 		app.Status.CurrentReplicas = *op.DesiredReplicas
+		if *op.DesiredReplicas == 0 || op.ExecutionMode != model.ExecutionModeManaged {
+			app.Status.CurrentReleaseStartedAt = nil
+			app.Status.CurrentReleaseReadyAt = nil
+		}
 	case model.OperationTypeDelete:
 		app.Name = deletedAppName(app.Name, op.ID)
 		app.Route = nil
@@ -3070,6 +3078,8 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 		app.Status.Phase = "deleted"
 		app.Status.CurrentRuntimeID = ""
 		app.Status.CurrentReplicas = 0
+		app.Status.CurrentReleaseStartedAt = nil
+		app.Status.CurrentReleaseReadyAt = nil
 	case model.OperationTypeMigrate:
 		if op.TargetRuntimeID == "" {
 			return ErrInvalidInput
@@ -3078,6 +3088,10 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 		app.Status.Phase = "migrated"
 		app.Status.CurrentRuntimeID = op.TargetRuntimeID
 		app.Status.CurrentReplicas = app.Spec.Replicas
+		if op.ExecutionMode != model.ExecutionModeManaged {
+			app.Status.CurrentReleaseStartedAt = nil
+			app.Status.CurrentReleaseReadyAt = nil
+		}
 	default:
 		return ErrInvalidInput
 	}
