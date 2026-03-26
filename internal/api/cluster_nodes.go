@@ -196,20 +196,21 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 	filtered := make([]model.ClusterNode, 0, len(snapshots))
 	for _, snapshot := range snapshots {
 		node := snapshot.node
+		workloads := workloadResolver.resolve(snapshot.pods)
 		runtimeObj, ok := runtimeByClusterNode[node.Name]
 		var runtimeForNode *model.Runtime
 		if ok {
 			runtimeForNode = &runtimeObj
 		}
 		node.PublicIP = resolveClusterNodePublicIP(node, runtimeForNode)
-		if !principal.IsPlatformAdmin() && !ok {
+		if !principal.IsPlatformAdmin() && !ok && len(workloads) == 0 {
 			continue
 		}
 		if ok {
 			node.RuntimeID = runtimeObj.ID
 			node.TenantID = runtimeObj.TenantID
 		}
-		node.Workloads = workloadResolver.resolve(snapshot.pods)
+		node.Workloads = workloads
 		filtered = append(filtered, node)
 	}
 

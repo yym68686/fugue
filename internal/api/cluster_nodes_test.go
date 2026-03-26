@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"fugue/internal/auth"
@@ -300,6 +301,250 @@ func TestListClusterNodesIncludesMetricsConditionsAndWorkloads(t *testing.T) {
 	}
 	if serviceWorkload.PodCount != 1 || len(serviceWorkload.Pods) != 1 {
 		t.Fatalf("expected one backing service pod, got %#v", serviceWorkload)
+	}
+}
+
+func TestListClusterNodesIncludesSharedNodesHostingTenantWorkloads(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Shared Cluster Nodes Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	otherTenant, err := s.CreateTenant("Other Shared Cluster Nodes Tenant")
+	if err != nil {
+		t.Fatalf("create other tenant: %v", err)
+	}
+
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	otherProject, err := s.CreateProject(otherTenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create other project: %v", err)
+	}
+
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "viewer", []string{"project.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Postgres: &model.AppPostgresSpec{
+			Database: "demo",
+			User:     "demo",
+			Password: "secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if len(app.BackingServices) != 1 {
+		t.Fatalf("expected one backing service, got %d", len(app.BackingServices))
+	}
+	service := app.BackingServices[0]
+
+	otherApp, err := s.CreateApp(otherTenant.ID, otherProject.ID, "other-demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/other-demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create other app: %v", err)
+	}
+
+	namespace := runtime.NamespaceForTenant(tenant.ID)
+	otherNamespace := runtime.NamespaceForTenant(otherTenant.ID)
+
+	kubeServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/api/v1/nodes":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{
+							"name":              "shared-tenant-node",
+							"creationTimestamp": "2026-03-25T00:00:00Z",
+							"labels": map[string]string{
+								clusterNodeLabelCountryCode: "jp",
+							},
+							"annotations": map[string]string{
+								clusterNodeAnnotationCountry: "Japan",
+							},
+						},
+						"status": map[string]any{
+							"conditions": []map[string]string{
+								{
+									"type":   "Ready",
+									"status": "True",
+								},
+							},
+						},
+					},
+					{
+						"metadata": map[string]any{
+							"name":              "shared-other-node",
+							"creationTimestamp": "2026-03-25T00:00:01Z",
+							"labels":            map[string]string{},
+						},
+						"status": map[string]any{
+							"conditions": []map[string]string{
+								{
+									"type":   "Ready",
+									"status": "True",
+								},
+							},
+						},
+					},
+					{
+						"metadata": map[string]any{
+							"name":              "empty-node",
+							"creationTimestamp": "2026-03-25T00:00:02Z",
+							"labels":            map[string]string{},
+						},
+						"status": map[string]any{
+							"conditions": []map[string]string{
+								{
+									"type":   "Ready",
+									"status": "True",
+								},
+							},
+						},
+					},
+				},
+			})
+		case "/api/v1/pods":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{
+							"name":      "demo-7b95d6b54f-z2f4g",
+							"namespace": namespace,
+							"labels": map[string]string{
+								runtime.FugueLabelName:      "demo",
+								runtime.FugueLabelManagedBy: runtime.FugueLabelManagedByValue,
+								runtime.FugueLabelAppID:     app.ID,
+							},
+						},
+						"spec": map[string]any{
+							"nodeName": "shared-tenant-node",
+						},
+						"status": map[string]any{
+							"phase": "Running",
+						},
+					},
+					{
+						"metadata": map[string]any{
+							"name":      "demo-postgres-65b74ff98f-9hf6x",
+							"namespace": namespace,
+							"labels": map[string]string{
+								runtime.FugueLabelName:             service.Spec.Postgres.ServiceName,
+								runtime.FugueLabelManagedBy:        runtime.FugueLabelManagedByValue,
+								runtime.FugueLabelComponent:        "postgres",
+								runtime.FugueLabelBackingServiceID: service.ID,
+							},
+						},
+						"spec": map[string]any{
+							"nodeName": "shared-tenant-node",
+						},
+						"status": map[string]any{
+							"phase": "Running",
+						},
+					},
+					{
+						"metadata": map[string]any{
+							"name":      "other-demo-7b95d6b54f-z2f4g",
+							"namespace": otherNamespace,
+							"labels": map[string]string{
+								runtime.FugueLabelName:      "other-demo",
+								runtime.FugueLabelManagedBy: runtime.FugueLabelManagedByValue,
+								runtime.FugueLabelAppID:     otherApp.ID,
+							},
+						},
+						"spec": map[string]any{
+							"nodeName": "shared-other-node",
+						},
+						"status": map[string]any{
+							"phase": "Running",
+						},
+					},
+				},
+			})
+		default:
+			if strings.HasPrefix(r.URL.Path, "/api/v1/nodes/") && strings.HasSuffix(r.URL.Path, "/proxy/stats/summary") {
+				_ = json.NewEncoder(w).Encode(map[string]any{})
+				return
+			}
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/cluster/nodes", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		ClusterNodes []model.ClusterNode `json:"cluster_nodes"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+
+	if len(response.ClusterNodes) != 1 {
+		t.Fatalf("expected one visible shared cluster node, got %#v", response.ClusterNodes)
+	}
+
+	node := response.ClusterNodes[0]
+	if node.Name != "shared-tenant-node" {
+		t.Fatalf("expected shared-tenant-node, got %q", node.Name)
+	}
+	if node.Region != "Japan" {
+		t.Fatalf("expected country-backed region label Japan, got %q", node.Region)
+	}
+	if node.RuntimeID != "" {
+		t.Fatalf("expected shared node runtime id to stay empty, got %q", node.RuntimeID)
+	}
+	if node.TenantID != "" {
+		t.Fatalf("expected shared node tenant id to stay empty, got %q", node.TenantID)
+	}
+	if len(node.Workloads) != 2 {
+		t.Fatalf("expected two visible workloads on shared node, got %#v", node.Workloads)
+	}
+
+	if node.Workloads[0].Kind != model.ClusterNodeWorkloadKindApp || node.Workloads[0].ID != app.ID {
+		t.Fatalf("expected first workload to be tenant app, got %#v", node.Workloads[0])
+	}
+	if node.Workloads[0].RuntimeID != "runtime_managed_shared" {
+		t.Fatalf("expected app workload runtime id runtime_managed_shared, got %q", node.Workloads[0].RuntimeID)
+	}
+	if node.Workloads[1].Kind != model.ClusterNodeWorkloadKindBackingService || node.Workloads[1].ID != service.ID {
+		t.Fatalf("expected second workload to be tenant backing service, got %#v", node.Workloads[1])
 	}
 }
 
