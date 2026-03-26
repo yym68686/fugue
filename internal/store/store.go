@@ -751,6 +751,45 @@ func (s *Store) GetNodeKey(id string) (model.NodeKey, error) {
 	return key, err
 }
 
+func (s *Store) AuthenticateNodeKey(secret string) (model.NodeKey, error) {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return model.NodeKey{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgAuthenticateNodeKey(secret)
+	}
+
+	var key model.NodeKey
+	err := s.withLockedState(true, func(state *model.State) error {
+		hash := model.HashSecret(secret)
+		now := time.Now().UTC()
+		keyIndex := -1
+		for idx := range state.NodeKeys {
+			if state.NodeKeys[idx].Hash != hash {
+				continue
+			}
+			keyIndex = idx
+			break
+		}
+		if keyIndex < 0 {
+			return ErrNotFound
+		}
+		if state.NodeKeys[keyIndex].RevokedAt != nil || state.NodeKeys[keyIndex].Status == model.NodeKeyStatusRevoked {
+			return ErrConflict
+		}
+
+		state.NodeKeys[keyIndex].LastUsedAt = &now
+		state.NodeKeys[keyIndex].UpdatedAt = now
+		key = state.NodeKeys[keyIndex]
+		return nil
+	})
+	if err != nil {
+		return model.NodeKey{}, err
+	}
+	return redactNodeKey(key), nil
+}
+
 func (s *Store) CreateNodeKey(tenantID, label string) (model.NodeKey, string, error) {
 	label = defaultNodeKeyLabel(label)
 	if tenantID == "" {
@@ -1342,6 +1381,29 @@ func (s *Store) GetRuntime(id string) (model.Runtime, error) {
 		if index < 0 {
 			return ErrNotFound
 		}
+		runtime = state.Runtimes[index]
+		return nil
+	})
+	return runtime, err
+}
+
+func (s *Store) DetachRuntimeOwnership(runtimeID string) (model.Runtime, error) {
+	runtimeID = strings.TrimSpace(runtimeID)
+	if runtimeID == "" {
+		return model.Runtime{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgDetachRuntimeOwnership(runtimeID)
+	}
+
+	var runtime model.Runtime
+	err := s.withLockedState(true, func(state *model.State) error {
+		ensureRuntimeMetadata(state)
+		index := findRuntime(state, runtimeID)
+		if index < 0 {
+			return ErrNotFound
+		}
+		detachRuntimeOwnership(state, index, time.Now().UTC())
 		runtime = state.Runtimes[index]
 		return nil
 	})

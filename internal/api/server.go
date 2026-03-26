@@ -170,6 +170,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/nodes/bootstrap", s.handleBootstrapNode)
 	mux.HandleFunc("POST /v1/nodes/join-cluster", s.handleJoinClusterNode)
 	mux.HandleFunc("POST /v1/nodes/join-cluster/env", s.handleJoinClusterNodeEnv)
+	mux.HandleFunc("POST /v1/nodes/join-cluster/cleanup", s.handleJoinClusterCleanup)
 	mux.Handle("POST /v1/agent/heartbeat", s.auth.RequireRuntime(http.HandlerFunc(s.handleAgentHeartbeat)))
 	mux.Handle("GET /v1/agent/operations", s.auth.RequireRuntime(http.HandlerFunc(s.handleAgentOperations)))
 	mux.Handle("POST /v1/agent/operations/{id}/complete", s.auth.RequireRuntime(http.HandlerFunc(s.handleAgentCompleteOperation)))

@@ -548,6 +548,124 @@ func TestListClusterNodesIncludesSharedNodesHostingTenantWorkloads(t *testing.T)
 	}
 }
 
+func TestListClusterNodesCollapsesDuplicateManagedOwnedNodesForSameMachine(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Duplicate Cluster Nodes Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "cluster-node")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	_, staleRuntime, err := s.BootstrapClusterNode(nodeSecret, "alicehk2", "https://alicehk2.example.com", nil, "alicehk2", "stale-store-fingerprint")
+	if err != nil {
+		t.Fatalf("bootstrap stale cluster node: %v", err)
+	}
+	_, currentRuntime, err := s.BootstrapClusterNode(nodeSecret, "fortedrape8", "https://fortedrape8.example.com", nil, "fortedrape8", "machine-123")
+	if err != nil {
+		t.Fatalf("bootstrap current cluster node: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "viewer", []string{"project.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	kubeServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/api/v1/nodes":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{
+							"name":              "alicehk2",
+							"creationTimestamp": "2026-03-25T00:00:00Z",
+							"labels": map[string]string{
+								runtime.NodeModeLabelKey:  model.RuntimeTypeManagedOwned,
+								runtime.RuntimeIDLabelKey: staleRuntime.ID,
+							},
+						},
+						"status": map[string]any{
+							"conditions": []map[string]string{
+								{"type": "Ready", "status": "False"},
+							},
+							"nodeInfo": map[string]string{
+								"machineID": "machine-123",
+							},
+						},
+					},
+					{
+						"metadata": map[string]any{
+							"name":              "fortedrape8",
+							"creationTimestamp": "2026-03-25T00:02:00Z",
+							"labels": map[string]string{
+								runtime.NodeModeLabelKey:  model.RuntimeTypeManagedOwned,
+								runtime.RuntimeIDLabelKey: currentRuntime.ID,
+							},
+						},
+						"status": map[string]any{
+							"conditions": []map[string]string{
+								{"type": "Ready", "status": "True"},
+							},
+							"nodeInfo": map[string]string{
+								"machineID": "machine-123",
+							},
+						},
+					},
+				},
+			})
+		case "/api/v1/pods":
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
+		case "/api/v1/nodes/alicehk2/proxy/stats/summary", "/api/v1/nodes/fortedrape8/proxy/stats/summary":
+			_ = json.NewEncoder(w).Encode(map[string]any{"node": map[string]any{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/cluster/nodes", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		ClusterNodes []model.ClusterNode `json:"cluster_nodes"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+
+	if len(response.ClusterNodes) != 1 {
+		t.Fatalf("expected one deduped cluster node, got %d body=%s", len(response.ClusterNodes), recorder.Body.String())
+	}
+	node := response.ClusterNodes[0]
+	if node.Name != "fortedrape8" {
+		t.Fatalf("expected current node fortedrape8, got %q", node.Name)
+	}
+	if node.Status != "ready" {
+		t.Fatalf("expected current node ready, got %q", node.Status)
+	}
+	if node.RuntimeID != currentRuntime.ID {
+		t.Fatalf("expected current runtime id %q, got %q", currentRuntime.ID, node.RuntimeID)
+	}
+}
+
 func TestResolveClusterNodePublicIPFallsBackToRuntimeEndpoint(t *testing.T) {
 	t.Parallel()
 

@@ -757,6 +757,46 @@ WHERE id = $1
 	return key, nil
 }
 
+func (s *Store) pgAuthenticateNodeKey(secret string) (model.NodeKey, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.NodeKey{}, fmt.Errorf("begin authenticate node key transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	key, err := scanNodeKey(tx.QueryRowContext(ctx, `
+SELECT id, tenant_id, label, prefix, hash, status, created_at, updated_at, last_used_at, revoked_at
+FROM fugue_node_keys
+WHERE hash = $1
+FOR UPDATE
+`, model.HashSecret(secret)))
+	if err != nil {
+		return model.NodeKey{}, mapDBErr(err)
+	}
+	if key.RevokedAt != nil || key.Status == model.NodeKeyStatusRevoked {
+		return model.NodeKey{}, ErrConflict
+	}
+
+	now := time.Now().UTC()
+	key.LastUsedAt = &now
+	key.UpdatedAt = now
+	if _, err := tx.ExecContext(ctx, `
+UPDATE fugue_node_keys
+SET last_used_at = $2, updated_at = $3
+WHERE id = $1
+`, key.ID, key.LastUsedAt, key.UpdatedAt); err != nil {
+		return model.NodeKey{}, fmt.Errorf("update node key last_used_at: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return model.NodeKey{}, fmt.Errorf("commit authenticate node key transaction: %w", err)
+	}
+	return redactNodeKey(key), nil
+}
+
 func (s *Store) pgCreateNodeKey(tenantID, label string) (model.NodeKey, string, error) {
 	label = defaultNodeKeyLabel(label)
 	secret := model.NewSecret("fugue_nk")
@@ -1476,6 +1516,29 @@ WHERE id = $1
 `, id))
 	if err != nil {
 		return model.Runtime{}, mapDBErr(err)
+	}
+	return runtime, nil
+}
+
+func (s *Store) pgDetachRuntimeOwnership(runtimeID string) (model.Runtime, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Runtime{}, fmt.Errorf("begin detach runtime ownership transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	runtime, err := s.pgGetRuntimeTx(ctx, tx, runtimeID, true)
+	if err != nil {
+		return model.Runtime{}, err
+	}
+	if err := s.pgDetachRuntimeOwnershipTx(ctx, tx, &runtime, time.Now().UTC()); err != nil {
+		return model.Runtime{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Runtime{}, fmt.Errorf("commit detach runtime ownership transaction: %w", err)
 	}
 	return runtime, nil
 }

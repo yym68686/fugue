@@ -38,6 +38,7 @@ const (
 	clusterNodeLabelCountryCode  = "fugue.io/location-country-code"
 	clusterNodeLabelPublicIP     = "fugue.io/public-ip"
 	clusterNodeAnnotationCountry = "fugue.io/location-country"
+	clusterNodeAnnotationK3sHost = "k3s.io/hostname"
 )
 
 var (
@@ -52,8 +53,22 @@ type clusterNodeClient struct {
 }
 
 type clusterNodeSnapshot struct {
-	node model.ClusterNode
-	pods []clusterNodePod
+	node         model.ClusterNode
+	identity     clusterNodeIdentity
+	managedOwned bool
+	runtimeID    string
+	pods         []clusterNodePod
+}
+
+type resolvedClusterNodeSnapshot struct {
+	snapshot  clusterNodeSnapshot
+	workloads []model.ClusterNodeWorkload
+}
+
+type clusterNodeIdentity struct {
+	machineID  string
+	systemUUID string
+	hostname   string
 }
 
 type clusterWorkloadResolver struct {
@@ -87,6 +102,8 @@ type kubeNode struct {
 			OSImage          string `json:"osImage"`
 			KernelVersion    string `json:"kernelVersion"`
 			ContainerRuntime string `json:"containerRuntimeVersion"`
+			MachineID        string `json:"machineID"`
+			SystemUUID       string `json:"systemUUID"`
 		} `json:"nodeInfo"`
 	} `json:"status"`
 }
@@ -192,11 +209,20 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 	}
 
 	workloadResolver := newClusterWorkloadResolver(apps, services)
-
-	filtered := make([]model.ClusterNode, 0, len(snapshots))
+	resolvedSnapshots := make([]resolvedClusterNodeSnapshot, 0, len(snapshots))
 	for _, snapshot := range snapshots {
+		resolvedSnapshots = append(resolvedSnapshots, resolvedClusterNodeSnapshot{
+			snapshot:  snapshot,
+			workloads: workloadResolver.resolve(snapshot.pods),
+		})
+	}
+	resolvedSnapshots = collapseClusterNodeSnapshots(resolvedSnapshots, runtimeByClusterNode)
+
+	filtered := make([]model.ClusterNode, 0, len(resolvedSnapshots))
+	for _, resolved := range resolvedSnapshots {
+		snapshot := resolved.snapshot
 		node := snapshot.node
-		workloads := workloadResolver.resolve(snapshot.pods)
+		workloads := resolved.workloads
 		runtimeObj, ok := runtimeByClusterNode[node.Name]
 		var runtimeForNode *model.Runtime
 		if ok {
@@ -276,8 +302,11 @@ func (c *clusterNodeClient) listClusterNodeInventory(ctx context.Context) ([]clu
 	for _, item := range nodeList.Items {
 		name := strings.TrimSpace(item.Metadata.Name)
 		snapshots = append(snapshots, clusterNodeSnapshot{
-			node: buildClusterNode(item, summariesByNode[name]),
-			pods: podsByNode[name],
+			node:         buildClusterNode(item, summariesByNode[name]),
+			identity:     buildClusterNodeIdentity(item),
+			managedOwned: strings.EqualFold(firstNodeLabel(item.Metadata.Labels, runtime.NodeModeLabelKey), model.RuntimeTypeManagedOwned),
+			runtimeID:    firstNodeLabel(item.Metadata.Labels, runtime.RuntimeIDLabelKey),
+			pods:         podsByNode[name],
 		})
 	}
 	return snapshots, nil
@@ -376,6 +405,11 @@ func (c *clusterNodeClient) getNodeSummary(ctx context.Context, nodeName string)
 	return &summary, nil
 }
 
+func (c *clusterNodeClient) deleteNode(ctx context.Context, nodeName string) error {
+	apiPath := "/api/v1/nodes/" + url.PathEscape(strings.TrimSpace(nodeName))
+	return c.doJSON(ctx, http.MethodDelete, apiPath, nil)
+}
+
 func buildClusterNode(node kubeNode, summary *kubeNodeSummary) model.ClusterNode {
 	out := model.ClusterNode{
 		Name:             strings.TrimSpace(node.Metadata.Name),
@@ -399,6 +433,141 @@ func buildClusterNode(node kubeNode, summary *kubeNodeSummary) model.ClusterNode
 		out.CreatedAt = createdAt
 	}
 	return out
+}
+
+func buildClusterNodeIdentity(node kubeNode) clusterNodeIdentity {
+	hostname := kubeNodeAddress(node, "Hostname")
+	if hostname == "" {
+		hostname = firstNodeAnnotation(node.Metadata.Annotations, clusterNodeAnnotationK3sHost)
+	}
+	return clusterNodeIdentity{
+		machineID:  strings.TrimSpace(node.Status.NodeInfo.MachineID),
+		systemUUID: strings.TrimSpace(node.Status.NodeInfo.SystemUUID),
+		hostname:   strings.TrimSpace(hostname),
+	}
+}
+
+func clusterNodeSnapshotMatchesFingerprint(snapshot clusterNodeSnapshot, machineFingerprint string) bool {
+	machineFingerprint = strings.TrimSpace(machineFingerprint)
+	if machineFingerprint == "" {
+		return false
+	}
+	return strings.EqualFold(snapshot.identity.machineID, machineFingerprint) ||
+		strings.EqualFold(snapshot.identity.systemUUID, machineFingerprint)
+}
+
+func clusterNodeSnapshotIdentityKey(snapshot clusterNodeSnapshot) string {
+	if !snapshot.managedOwned {
+		return ""
+	}
+	if value := strings.ToLower(strings.TrimSpace(snapshot.identity.machineID)); value != "" {
+		return "machine:" + value
+	}
+	if value := strings.ToLower(strings.TrimSpace(snapshot.identity.systemUUID)); value != "" {
+		return "uuid:" + value
+	}
+	if value := strings.ToLower(strings.TrimSpace(snapshot.identity.hostname)); value != "" {
+		return "host:" + value
+	}
+	return ""
+}
+
+func collapseClusterNodeSnapshots(snapshots []resolvedClusterNodeSnapshot, runtimeByClusterNode map[string]model.Runtime) []resolvedClusterNodeSnapshot {
+	if len(snapshots) < 2 {
+		return snapshots
+	}
+
+	collapsed := make([]resolvedClusterNodeSnapshot, 0, len(snapshots))
+	grouped := make(map[string][]resolvedClusterNodeSnapshot)
+	for _, snapshot := range snapshots {
+		key := clusterNodeSnapshotIdentityKey(snapshot.snapshot)
+		if key == "" {
+			collapsed = append(collapsed, snapshot)
+			continue
+		}
+		grouped[key] = append(grouped[key], snapshot)
+	}
+
+	for _, group := range grouped {
+		if len(group) < 2 {
+			collapsed = append(collapsed, group[0])
+			continue
+		}
+
+		preferredIndex := 0
+		for idx := 1; idx < len(group); idx++ {
+			if preferClusterNodeSnapshot(group[idx], group[preferredIndex], runtimeByClusterNode) {
+				preferredIndex = idx
+			}
+		}
+
+		canCollapse := true
+		for idx, snapshot := range group {
+			if idx == preferredIndex {
+				continue
+			}
+			if len(snapshot.workloads) > 0 {
+				canCollapse = false
+				break
+			}
+		}
+		if canCollapse {
+			collapsed = append(collapsed, group[preferredIndex])
+			continue
+		}
+		collapsed = append(collapsed, group...)
+	}
+
+	return collapsed
+}
+
+func preferClusterNodeSnapshot(left, right resolvedClusterNodeSnapshot, runtimeByClusterNode map[string]model.Runtime) bool {
+	leftStatusRank := clusterNodeStatusRank(left.snapshot.node.Status)
+	rightStatusRank := clusterNodeStatusRank(right.snapshot.node.Status)
+	if leftStatusRank != rightStatusRank {
+		return leftStatusRank > rightStatusRank
+	}
+
+	leftUpdatedAt := clusterNodeSnapshotUpdatedAt(left.snapshot, runtimeByClusterNode)
+	rightUpdatedAt := clusterNodeSnapshotUpdatedAt(right.snapshot, runtimeByClusterNode)
+	if !leftUpdatedAt.Equal(rightUpdatedAt) {
+		return leftUpdatedAt.After(rightUpdatedAt)
+	}
+
+	leftCreatedAt := clusterNodeSnapshotCreatedAt(left.snapshot)
+	rightCreatedAt := clusterNodeSnapshotCreatedAt(right.snapshot)
+	if !leftCreatedAt.Equal(rightCreatedAt) {
+		return leftCreatedAt.After(rightCreatedAt)
+	}
+
+	return left.snapshot.node.Name > right.snapshot.node.Name
+}
+
+func clusterNodeSnapshotUpdatedAt(snapshot clusterNodeSnapshot, runtimeByClusterNode map[string]model.Runtime) time.Time {
+	if runtimeObj, ok := runtimeByClusterNode[snapshot.node.Name]; ok {
+		return runtimeObj.UpdatedAt
+	}
+	return clusterNodeSnapshotCreatedAt(snapshot)
+}
+
+func clusterNodeSnapshotCreatedAt(snapshot clusterNodeSnapshot) time.Time {
+	if snapshot.node.CreatedAt != nil {
+		return *snapshot.node.CreatedAt
+	}
+	return time.Time{}
+}
+
+func clusterNodeStatusRank(status string) int {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "ready":
+		return 3
+	case "not-ready":
+		return 2
+	case "unknown":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func buildClusterNodeConditions(conditions []kubeNodeCondition) map[string]model.ClusterNodeCondition {

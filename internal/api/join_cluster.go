@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -119,6 +120,103 @@ func (s *Server) handleJoinClusterNodeEnv(w http.ResponseWriter, r *http.Request
 	fmt.Fprintf(w, "FUGUE_JOIN_MESH_PROVIDER=%s\n", shellQuote(join.MeshProvider))
 	fmt.Fprintf(w, "FUGUE_JOIN_MESH_LOGIN_SERVER=%s\n", shellQuote(join.MeshLoginServer))
 	fmt.Fprintf(w, "FUGUE_JOIN_MESH_AUTH_KEY=%s\n", shellQuote(join.MeshAuthKey))
+}
+
+func (s *Server) handleJoinClusterCleanup(w http.ResponseWriter, r *http.Request) {
+	if !s.clusterJoinConfigured() {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "cluster join is not configured")
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid form body")
+		return
+	}
+
+	nodeKey := strings.TrimSpace(r.Form.Get("node_key"))
+	machineFingerprint := strings.TrimSpace(r.Form.Get("machine_fingerprint"))
+	currentNodeName := strings.TrimSpace(r.Form.Get("current_node_name"))
+	if nodeKey == "" || machineFingerprint == "" || currentNodeName == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "node_key, machine_fingerprint, and current_node_name are required")
+		return
+	}
+
+	key, err := s.store.AuthenticateNodeKey(nodeKey)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+
+	clientFactory := s.newClusterNodeClient
+	if clientFactory == nil {
+		clientFactory = newClusterNodeClient
+	}
+	client, err := clientFactory()
+	if err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+
+	snapshots, err := client.listClusterNodeInventory(r.Context())
+	if err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+
+	currentNodeSeen := false
+	staleSnapshots := make([]clusterNodeSnapshot, 0)
+	for _, snapshot := range snapshots {
+		if !snapshot.managedOwned || !clusterNodeSnapshotMatchesFingerprint(snapshot, machineFingerprint) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(snapshot.node.Name), currentNodeName) {
+			currentNodeSeen = true
+			continue
+		}
+		staleSnapshots = append(staleSnapshots, snapshot)
+	}
+	if !currentNodeSeen {
+		httpx.WriteError(w, http.StatusConflict, "current node is not registered yet")
+		return
+	}
+
+	principal := model.Principal{
+		ActorType: model.ActorTypeNodeKey,
+		ActorID:   key.ID,
+		TenantID:  key.TenantID,
+	}
+	removedNodes := make([]string, 0, len(staleSnapshots))
+	removedRuntimeIDs := make([]string, 0, len(staleSnapshots))
+	for _, snapshot := range staleSnapshots {
+		if err := client.deleteNode(r.Context(), snapshot.node.Name); err != nil && !strings.Contains(err.Error(), "status=404") {
+			httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
+		removedNodes = append(removedNodes, snapshot.node.Name)
+
+		runtimeID := strings.TrimSpace(snapshot.runtimeID)
+		if runtimeID == "" {
+			continue
+		}
+		detached, err := s.store.DetachRuntimeOwnership(runtimeID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			s.writeStoreError(w, err)
+			return
+		}
+		removedRuntimeIDs = append(removedRuntimeIDs, detached.ID)
+		s.appendAudit(principal, "node.cleanup_stale_cluster_node", "node", detached.ID, detached.TenantID, map[string]string{
+			"name":              detached.Name,
+			"cluster_node_name": snapshot.node.Name,
+			"node_key_id":       key.ID,
+		})
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprintf(w, "FUGUE_JOIN_CLEANUP_NODE_COUNT=%s\n", shellQuote(strconv.Itoa(len(removedNodes))))
+	fmt.Fprintf(w, "FUGUE_JOIN_CLEANUP_NODES=%s\n", shellQuote(strings.Join(removedNodes, ",")))
+	fmt.Fprintf(w, "FUGUE_JOIN_CLEANUP_RUNTIME_IDS=%s\n", shellQuote(strings.Join(removedRuntimeIDs, ",")))
 }
 
 func (s *Server) handleJoinClusterInstallScript(w http.ResponseWriter, r *http.Request) {
@@ -443,6 +541,22 @@ csv_to_yaml_list() {
   IFS="${old_ifs}"
 }
 
+cleanup_stale_cluster_nodes() {
+  local attempt=""
+  for attempt in $(seq 1 30); do
+    if curl -fsSL --retry 1 --retry-delay 1 -X POST "${FUGUE_API_BASE}/v1/nodes/join-cluster/cleanup" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      --data-urlencode "node_key=${FUGUE_NODE_KEY}" \
+      --data-urlencode "machine_fingerprint=${machine_fingerprint}" \
+      --data-urlencode "current_node_name=${FUGUE_JOIN_NODE_NAME}" \
+      >/dev/null; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 0
+}
+
 if [ "$(id -u)" -ne 0 ]; then
   echo "run with sudo, for example: curl -fsSL ${FUGUE_API_BASE}/install/join-cluster.sh | sudo FUGUE_NODE_KEY=... bash" >&2
   exit 1
@@ -534,6 +648,7 @@ fi
 systemctl enable k3s-agent
 systemctl restart k3s-agent
 systemctl is-active --quiet k3s-agent
+cleanup_stale_cluster_nodes
 
 cat <<EOF
 Fugue node joined.
