@@ -281,6 +281,86 @@ detect_node_ip() {
   return 1
 }
 
+detect_gcp_zone() {
+  if ! command -v curl >/dev/null 2>&1; then
+    return 1
+  fi
+  local zone=""
+  zone="$(curl -fsS --max-time 2 -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/zone 2>/dev/null || true)"
+  zone="${zone##*/}"
+  [ -n "${zone}" ] || return 1
+  printf '%%s' "${zone}"
+}
+
+detect_node_zone() {
+  if [ -n "${FUGUE_NODE_ZONE:-}" ]; then
+    printf '%%s' "${FUGUE_NODE_ZONE}"
+    return 0
+  fi
+  detect_gcp_zone
+}
+
+detect_node_region() {
+  if [ -n "${FUGUE_NODE_REGION:-}" ]; then
+    printf '%%s' "${FUGUE_NODE_REGION}"
+    return 0
+  fi
+  local zone="${1:-}"
+  if [ -z "${zone}" ]; then
+    zone="$(detect_node_zone || true)"
+  fi
+  if [ -n "${zone}" ] && [ "${zone%%-*}" != "${zone}" ]; then
+    printf '%%s' "${zone%%-*}"
+  fi
+}
+
+csv_has_label_key() {
+  local csv="$1"
+  local key="$2"
+  local old_ifs="${IFS}"
+  local item=""
+  local item_key=""
+  IFS=','
+  for item in ${csv}; do
+    item="${item#"${item%%%%[![:space:]]*}"}"
+    item="${item%%"${item##*[![:space:]]}"}"
+    [ -n "${item}" ] || continue
+    item_key="${item%%%%=*}"
+    if [ "${item_key}" = "${key}" ]; then
+      IFS="${old_ifs}"
+      return 0
+    fi
+  done
+  IFS="${old_ifs}"
+  return 1
+}
+
+csv_append_label() {
+  local csv="$1"
+  local key="$2"
+  local value="$3"
+  if [ -z "${value}" ] || csv_has_label_key "${csv}" "${key}"; then
+    printf '%%s' "${csv}"
+    return 0
+  fi
+  if [ -n "${csv}" ]; then
+    printf '%%s,%%s=%%s' "${csv}" "${key}" "${value}"
+    return 0
+  fi
+  printf '%%s=%%s' "${key}" "${value}"
+}
+
+append_topology_node_labels() {
+  local labels="${FUGUE_JOIN_NODE_LABELS:-}"
+  local zone=""
+  local region=""
+  zone="$(detect_node_zone || true)"
+  region="$(detect_node_region "${zone}" || true)"
+  labels="$(csv_append_label "${labels}" "topology.kubernetes.io/region" "${region}")"
+  labels="$(csv_append_label "${labels}" "topology.kubernetes.io/zone" "${zone}")"
+  printf '%%s' "${labels}"
+}
+
 install_tailscale() {
   if command -v tailscale >/dev/null 2>&1; then
     return 0
@@ -389,6 +469,7 @@ curl -fsSL --retry 3 --retry-delay 2 -X POST "${FUGUE_API_BASE}/v1/nodes/join-cl
 
 # shellcheck disable=SC1090
 . "${join_env}"
+FUGUE_JOIN_NODE_LABELS="$(append_topology_node_labels)"
 
 mesh_provider="${FUGUE_JOIN_MESH_PROVIDER:-}"
 flannel_iface=""

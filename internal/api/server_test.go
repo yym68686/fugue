@@ -108,6 +108,26 @@ func TestJoinClusterEnvIncludesMeshConfig(t *testing.T) {
 	}
 }
 
+func TestJoinClusterInstallScriptAddsTopologyLabels(t *testing.T) {
+	t.Parallel()
+
+	var server Server
+	script := server.joinClusterInstallScript("https://api.fugue.pro")
+
+	for _, want := range []string{
+		`FUGUE_NODE_REGION`,
+		`FUGUE_NODE_ZONE`,
+		`metadata.google.internal/computeMetadata/v1/instance/zone`,
+		`topology.kubernetes.io/region`,
+		`topology.kubernetes.io/zone`,
+		`FUGUE_JOIN_NODE_LABELS="$(append_topology_node_labels)"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected join-cluster install script to contain %q", want)
+		}
+	}
+}
+
 func TestNodesEndpointIsDeprecatedCompatibilityView(t *testing.T) {
 	t.Parallel()
 

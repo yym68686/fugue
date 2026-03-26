@@ -465,6 +465,74 @@ node_external_ip_for_alias() {
   public_host_for_alias "${host}"
 }
 
+host_slot_for_alias() {
+  local host="$1"
+  if [[ "${host}" == "${PRIMARY_ALIAS}" ]]; then
+    printf '1'
+    return 0
+  fi
+  if [[ "${host}" == "${SECONDARY_ALIASES[0]}" ]]; then
+    printf '2'
+    return 0
+  fi
+  if [[ "${host}" == "${SECONDARY_ALIASES[1]}" ]]; then
+    printf '3'
+    return 0
+  fi
+}
+
+topology_override_for_alias() {
+  local host="$1"
+  local kind="$2"
+  local slot=""
+  local var_name=""
+  local value=""
+
+  slot="$(host_slot_for_alias "${host}")"
+  if [[ -n "${slot}" ]]; then
+    var_name="FUGUE_NODE${slot}_${kind}"
+    value="${!var_name-}"
+  fi
+  if [[ -z "${value}" ]]; then
+    var_name="FUGUE_NODE_${kind}"
+    value="${!var_name-}"
+  fi
+  printf '%s' "${value}"
+}
+
+detect_remote_gcp_zone() {
+  local host="$1"
+  ssh_root_run "${host}" "if command -v curl >/dev/null 2>&1; then zone=\$(curl -fsS --max-time 2 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/zone 2>/dev/null || true); zone=\${zone##*/}; if [ -n \"\${zone}\" ]; then printf '%s' \"\${zone}\"; fi; fi" | tr -d '\r'
+}
+
+node_zone_for_alias() {
+  local host="$1"
+  local zone=""
+  zone="$(topology_override_for_alias "${host}" "ZONE")"
+  if [[ -n "${zone}" ]]; then
+    printf '%s' "${zone}"
+    return 0
+  fi
+  detect_remote_gcp_zone "${host}"
+}
+
+node_region_for_alias() {
+  local host="$1"
+  local zone="${2:-}"
+  local region=""
+  region="$(topology_override_for_alias "${host}" "REGION")"
+  if [[ -n "${region}" ]]; then
+    printf '%s' "${region}"
+    return 0
+  fi
+  if [[ -z "${zone}" ]]; then
+    zone="$(node_zone_for_alias "${host}")"
+  fi
+  if [[ -n "${zone}" && "${zone}" == *-* ]]; then
+    printf '%s' "${zone%-*}"
+  fi
+}
+
 render_server_network_config() {
   local host="$1"
   local node_ip
@@ -504,6 +572,32 @@ EOF
   if [[ -n "${node_external_ip}" && "${node_external_ip}" != "${K3S_API_IP}" && "${node_external_ip}" != "${PUBLIC_ENDPOINT_HOST}" ]]; then
     cat <<EOF
   - "${node_external_ip}"
+EOF
+  fi
+}
+
+render_server_node_labels() {
+  local host="$1"
+  local role="$2"
+  local zone=""
+  local region=""
+
+  zone="$(node_zone_for_alias "${host}")"
+  region="$(node_region_for_alias "${host}" "${zone}")"
+
+  cat <<EOF
+node-label:
+  - "fugue.install/profile=combined"
+  - "fugue.install/role=${role}"
+EOF
+  if [[ -n "${region}" ]]; then
+    cat <<EOF
+  - "topology.kubernetes.io/region=${region}"
+EOF
+  fi
+  if [[ -n "${zone}" ]]; then
+    cat <<EOF
+  - "topology.kubernetes.io/zone=${zone}"
 EOF
   fi
 }
@@ -743,9 +837,7 @@ disable:
   - traefik
   - servicelb
   - local-storage
-node-label:
-  - "fugue.install/profile=combined"
-  - "fugue.install/role=primary"
+$(render_server_node_labels "${PRIMARY_ALIAS}" "primary")
 CFG
 cat >/etc/rancher/k3s/registries.yaml <<'REG'
 mirrors:
@@ -812,9 +904,7 @@ disable:
   - traefik
   - servicelb
   - local-storage
-node-label:
-  - "fugue.install/profile=combined"
-  - "fugue.install/role=${role}"
+$(render_server_node_labels "${host}" "${role}")
 CFG
 cat >/etc/rancher/k3s/registries.yaml <<'REG'
 mirrors:
@@ -888,15 +978,32 @@ total_count="$(k3s kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' 
 EOF
 }
 
-label_primary_node() {
-  log "labeling primary node for pinned fugue control-plane scheduling"
-  local primary_node
-  primary_node="$(ssh_run "${PRIMARY_ALIAS}" "hostname")"
-  ssh_root "${PRIMARY_ALIAS}" <<EOF
-set -euo pipefail
-k3s kubectl label node "${primary_node}" fugue.install/role=primary --overwrite
-k3s kubectl label node "${primary_node}" fugue.install/profile=combined --overwrite
-EOF
+label_control_plane_node() {
+  local host="$1"
+  local role="$2"
+  local node_name=""
+  local zone=""
+  local region=""
+
+  node_name="$(ssh_run "${host}" "hostname" | tr -d '\r')"
+  [[ -n "${node_name}" ]] || fail "failed to detect Kubernetes node name for ${host}"
+  zone="$(node_zone_for_alias "${host}")"
+  region="$(node_region_for_alias "${host}" "${zone}")"
+
+  ssh_root_run "${PRIMARY_ALIAS}" "k3s kubectl label node $(printf '%q' "${node_name}") $(printf '%q' "fugue.install/profile=combined") $(printf '%q' "fugue.install/role=${role}") --overwrite"
+  if [[ -n "${region}" ]]; then
+    ssh_root_run "${PRIMARY_ALIAS}" "k3s kubectl label node $(printf '%q' "${node_name}") $(printf '%q' "topology.kubernetes.io/region=${region}") --overwrite"
+  fi
+  if [[ -n "${zone}" ]]; then
+    ssh_root_run "${PRIMARY_ALIAS}" "k3s kubectl label node $(printf '%q' "${node_name}") $(printf '%q' "topology.kubernetes.io/zone=${zone}") --overwrite"
+  fi
+}
+
+label_control_plane_nodes() {
+  log "labeling control-plane nodes for pinned scheduling and topology"
+  label_control_plane_node "${PRIMARY_ALIAS}" "primary"
+  label_control_plane_node "${SECONDARY_ALIASES[0]}" "secondary-1"
+  label_control_plane_node "${SECONDARY_ALIASES[1]}" "secondary-2"
 }
 
 cleanup_disabled_addons() {
@@ -1415,7 +1522,7 @@ main() {
     wait_for_cluster_ready
   fi
   cleanup_disabled_addons
-  label_primary_node
+  label_control_plane_nodes
   push_and_import_images "${PRIMARY_ALIAS}"
   push_and_import_images "${SECONDARY_ALIASES[0]}"
   push_and_import_images "${SECONDARY_ALIASES[1]}"
