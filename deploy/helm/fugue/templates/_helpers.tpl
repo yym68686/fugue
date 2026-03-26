@@ -45,6 +45,10 @@ app.kubernetes.io/component: {{ .component }}
 {{- printf "%s-controller" (include "fugue.fullname" .) -}}
 {{- end -}}
 
+{{- define "fugue.topologyLabelerName" -}}
+{{- printf "%s-topology-labeler" (include "fugue.fullname" .) -}}
+{{- end -}}
+
 {{- define "fugue.configSecretName" -}}
 {{- printf "%s-config" (include "fugue.fullname" .) -}}
 {{- end -}}

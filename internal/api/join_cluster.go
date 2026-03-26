@@ -281,15 +281,17 @@ detect_node_ip() {
   return 1
 }
 
-detect_gcp_zone() {
+detect_public_country_json() {
   if ! command -v curl >/dev/null 2>&1; then
     return 1
   fi
-  local zone=""
-  zone="$(curl -fsS --max-time 2 -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/zone 2>/dev/null || true)"
-  zone="${zone##*/}"
-  [ -n "${zone}" ] || return 1
-  printf '%%s' "${zone}"
+  curl -fsS --max-time 5 "${FUGUE_NODE_GEO_URL:-https://ipapi.co/json/}" 2>/dev/null || true
+}
+
+extract_json_string() {
+  local json="$1"
+  local key="$2"
+  printf '%%s' "${json}" | sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p"
 }
 
 detect_node_zone() {
@@ -297,7 +299,7 @@ detect_node_zone() {
     printf '%%s' "${FUGUE_NODE_ZONE}"
     return 0
   fi
-  detect_gcp_zone
+  return 1
 }
 
 detect_node_region() {
@@ -305,13 +307,22 @@ detect_node_region() {
     printf '%%s' "${FUGUE_NODE_REGION}"
     return 0
   fi
-  local zone="${1:-}"
-  if [ -z "${zone}" ]; then
-    zone="$(detect_node_zone || true)"
+  return 1
+}
+
+detect_node_country_code() {
+  if [ -n "${FUGUE_NODE_COUNTRY_CODE:-}" ]; then
+    printf '%%s' "${FUGUE_NODE_COUNTRY_CODE}" | tr '[:upper:]' '[:lower:]'
+    return 0
   fi
-  if [ -n "${zone}" ] && [ "${zone%%-*}" != "${zone}" ]; then
-    printf '%%s' "${zone%%-*}"
-  fi
+  local json=""
+  local country_code=""
+  json="$(detect_public_country_json)"
+  json="$(printf '%%s' "${json}" | tr -d '\r\n')"
+  [ -n "${json}" ] || return 1
+  country_code="$(extract_json_string "${json}" "country_code")"
+  [ -n "${country_code}" ] || return 1
+  printf '%%s' "${country_code}" | tr '[:upper:]' '[:lower:]'
 }
 
 csv_has_label_key() {
@@ -350,14 +361,17 @@ csv_append_label() {
   printf '%%s=%%s' "${key}" "${value}"
 }
 
-append_topology_node_labels() {
+append_location_node_labels() {
   local labels="${FUGUE_JOIN_NODE_LABELS:-}"
   local zone=""
   local region=""
+  local country_code=""
   zone="$(detect_node_zone || true)"
-  region="$(detect_node_region "${zone}" || true)"
+  region="$(detect_node_region || true)"
+  country_code="$(detect_node_country_code || true)"
   labels="$(csv_append_label "${labels}" "topology.kubernetes.io/region" "${region}")"
   labels="$(csv_append_label "${labels}" "topology.kubernetes.io/zone" "${zone}")"
+  labels="$(csv_append_label "${labels}" "fugue.io/location-country-code" "${country_code}")"
   printf '%%s' "${labels}"
 }
 
@@ -469,7 +483,7 @@ curl -fsSL --retry 3 --retry-delay 2 -X POST "${FUGUE_API_BASE}/v1/nodes/join-cl
 
 # shellcheck disable=SC1090
 . "${join_env}"
-FUGUE_JOIN_NODE_LABELS="$(append_topology_node_labels)"
+FUGUE_JOIN_NODE_LABELS="$(append_location_node_labels)"
 
 mesh_provider="${FUGUE_JOIN_MESH_PROVIDER:-}"
 flannel_iface=""

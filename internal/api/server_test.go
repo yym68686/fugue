@@ -117,10 +117,12 @@ func TestJoinClusterInstallScriptAddsTopologyLabels(t *testing.T) {
 	for _, want := range []string{
 		`FUGUE_NODE_REGION`,
 		`FUGUE_NODE_ZONE`,
-		`metadata.google.internal/computeMetadata/v1/instance/zone`,
+		`FUGUE_NODE_COUNTRY_CODE`,
+		`https://ipapi.co/json/`,
+		`fugue.io/location-country-code`,
 		`topology.kubernetes.io/region`,
 		`topology.kubernetes.io/zone`,
-		`FUGUE_JOIN_NODE_LABELS="$(append_topology_node_labels)"`,
+		`FUGUE_JOIN_NODE_LABELS="$(append_location_node_labels)"`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected join-cluster install script to contain %q", want)

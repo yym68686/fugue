@@ -300,6 +300,31 @@ func TestListClusterNodesIncludesMetricsConditionsAndWorkloads(t *testing.T) {
 	}
 }
 
+func TestKubeNodeRegionFallbacksToGeolocatedCountry(t *testing.T) {
+	t.Parallel()
+
+	if got := kubeNodeRegion(
+		map[string]string{clusterNodeLabelCountryCode: "us"},
+		map[string]string{clusterNodeAnnotationCountry: "United States"},
+	); got != "United States" {
+		t.Fatalf("expected annotation-backed country name, got %q", got)
+	}
+
+	if got := kubeNodeRegion(
+		map[string]string{clusterNodeLabelRegion: "us-central1"},
+		map[string]string{clusterNodeAnnotationCountry: "United States"},
+	); got != "us-central1" {
+		t.Fatalf("expected explicit topology region to win, got %q", got)
+	}
+
+	if got := kubeNodeRegion(
+		map[string]string{clusterNodeLabelCountryCode: "de"},
+		nil,
+	); got != "DE" {
+		t.Fatalf("expected country code fallback, got %q", got)
+	}
+}
+
 func TestBuildClusterNodeStorageStatsReconcilesStaleNodeCapacity(t *testing.T) {
 	summaryCapacity := uint64(31_461_457_920)
 	summaryUsed := uint64(11_341_619_200)

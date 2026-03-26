@@ -97,6 +97,15 @@ controller:
   resources: {}
   extraEnv: []
 
+topologyLabeler:
+  enabled: true
+  intervalSeconds: 900
+  geolocationURL: https://ipapi.co/json/
+  nodeSelector: {}
+  tolerations:
+    - operator: Exists
+  resources: {}
+
 service:
   type: ClusterIP
   port: 80

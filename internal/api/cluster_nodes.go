@@ -34,6 +34,8 @@ const (
 	clusterNodeLabelLegacyRegion = "failure-domain.beta.kubernetes.io/region"
 	clusterNodeLabelZone         = "topology.kubernetes.io/zone"
 	clusterNodeLabelLegacyZone   = "failure-domain.beta.kubernetes.io/zone"
+	clusterNodeLabelCountryCode  = "fugue.io/location-country-code"
+	clusterNodeAnnotationCountry = "fugue.io/location-country"
 )
 
 var kubeQuantityPattern = regexp.MustCompile(`^([+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)([a-zA-Z]{0,2})$`)
@@ -65,6 +67,7 @@ type kubeNode struct {
 		Name              string            `json:"name"`
 		CreationTimestamp string            `json:"creationTimestamp"`
 		Labels            map[string]string `json:"labels"`
+		Annotations       map[string]string `json:"annotations"`
 	} `json:"metadata"`
 	Status struct {
 		Addresses []struct {
@@ -369,7 +372,7 @@ func buildClusterNode(node kubeNode, summary *kubeNodeSummary) model.ClusterNode
 		Roles:            kubeNodeRoles(node.Metadata.Labels),
 		InternalIP:       kubeNodeAddress(node, "InternalIP"),
 		ExternalIP:       kubeNodeAddress(node, "ExternalIP"),
-		Region:           kubeNodeRegion(node.Metadata.Labels),
+		Region:           kubeNodeRegion(node.Metadata.Labels, node.Metadata.Annotations),
 		Zone:             kubeNodeZone(node.Metadata.Labels),
 		KubeletVersion:   strings.TrimSpace(node.Status.NodeInfo.KubeletVersion),
 		OSImage:          strings.TrimSpace(node.Status.NodeInfo.OSImage),
@@ -873,8 +876,17 @@ func kubeNodeAddress(node kubeNode, addressType string) string {
 	return ""
 }
 
-func kubeNodeRegion(labels map[string]string) string {
-	return firstNodeLabel(labels, clusterNodeLabelRegion, clusterNodeLabelLegacyRegion, "region")
+func kubeNodeRegion(labels, annotations map[string]string) string {
+	if value := firstNodeLabel(labels, clusterNodeLabelRegion, clusterNodeLabelLegacyRegion, "region"); value != "" {
+		return value
+	}
+	if value := firstNodeAnnotation(annotations, clusterNodeAnnotationCountry); value != "" {
+		return value
+	}
+	if value := firstNodeLabel(labels, clusterNodeLabelCountryCode); value != "" {
+		return strings.ToUpper(value)
+	}
+	return ""
 }
 
 func kubeNodeZone(labels map[string]string) string {
@@ -884,6 +896,15 @@ func kubeNodeZone(labels map[string]string) string {
 func firstNodeLabel(labels map[string]string, keys ...string) string {
 	for _, key := range keys {
 		if value := strings.TrimSpace(labels[key]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstNodeAnnotation(annotations map[string]string, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(annotations[key]); value != "" {
 			return value
 		}
 	}

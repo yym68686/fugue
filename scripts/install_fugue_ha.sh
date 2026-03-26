@@ -500,9 +500,32 @@ topology_override_for_alias() {
   printf '%s' "${value}"
 }
 
-detect_remote_gcp_zone() {
+detect_remote_public_country_json() {
   local host="$1"
-  ssh_root_run "${host}" "if command -v curl >/dev/null 2>&1; then zone=\$(curl -fsS --max-time 2 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/zone 2>/dev/null || true); zone=\${zone##*/}; if [ -n \"\${zone}\" ]; then printf '%s' \"\${zone}\"; fi; fi" | tr -d '\r'
+  local geolocation_url="${FUGUE_NODE_GEO_URL:-https://ipapi.co/json/}"
+  ssh_root_run "${host}" "if command -v curl >/dev/null 2>&1; then curl -fsS --max-time 5 $(printf '%q' "${geolocation_url}") 2>/dev/null || true; fi" | tr -d '\r\n'
+}
+
+extract_json_string() {
+  local json="$1"
+  local key="$2"
+  printf '%s' "${json}" | sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p"
+}
+
+node_country_code_for_alias() {
+  local host="$1"
+  local country_code=""
+  local json=""
+  country_code="$(topology_override_for_alias "${host}" "COUNTRY_CODE")"
+  if [[ -n "${country_code}" ]]; then
+    printf '%s' "${country_code}" | tr '[:upper:]' '[:lower:]'
+    return 0
+  fi
+  json="$(detect_remote_public_country_json "${host}")"
+  [[ -n "${json}" ]] || return 1
+  country_code="$(extract_json_string "${json}" "country_code")"
+  [[ -n "${country_code}" ]] || return 1
+  printf '%s' "${country_code}" | tr '[:upper:]' '[:lower:]'
 }
 
 node_zone_for_alias() {
@@ -513,24 +536,18 @@ node_zone_for_alias() {
     printf '%s' "${zone}"
     return 0
   fi
-  detect_remote_gcp_zone "${host}"
+  return 1
 }
 
 node_region_for_alias() {
   local host="$1"
-  local zone="${2:-}"
   local region=""
   region="$(topology_override_for_alias "${host}" "REGION")"
   if [[ -n "${region}" ]]; then
     printf '%s' "${region}"
     return 0
   fi
-  if [[ -z "${zone}" ]]; then
-    zone="$(node_zone_for_alias "${host}")"
-  fi
-  if [[ -n "${zone}" && "${zone}" == *-* ]]; then
-    printf '%s' "${zone%-*}"
-  fi
+  return 1
 }
 
 render_server_network_config() {
@@ -579,17 +596,24 @@ EOF
 render_server_node_labels() {
   local host="$1"
   local role="$2"
+  local country_code=""
   local zone=""
   local region=""
 
-  zone="$(node_zone_for_alias "${host}")"
-  region="$(node_region_for_alias "${host}" "${zone}")"
+  country_code="$(node_country_code_for_alias "${host}" || true)"
+  zone="$(node_zone_for_alias "${host}" || true)"
+  region="$(node_region_for_alias "${host}" || true)"
 
   cat <<EOF
 node-label:
   - "fugue.install/profile=combined"
   - "fugue.install/role=${role}"
 EOF
+  if [[ -n "${country_code}" ]]; then
+    cat <<EOF
+  - "fugue.io/location-country-code=${country_code}"
+EOF
+  fi
   if [[ -n "${region}" ]]; then
     cat <<EOF
   - "topology.kubernetes.io/region=${region}"
@@ -982,15 +1006,20 @@ label_control_plane_node() {
   local host="$1"
   local role="$2"
   local node_name=""
+  local country_code=""
   local zone=""
   local region=""
 
   node_name="$(ssh_run "${host}" "hostname" | tr -d '\r')"
   [[ -n "${node_name}" ]] || fail "failed to detect Kubernetes node name for ${host}"
-  zone="$(node_zone_for_alias "${host}")"
-  region="$(node_region_for_alias "${host}" "${zone}")"
+  country_code="$(node_country_code_for_alias "${host}" || true)"
+  zone="$(node_zone_for_alias "${host}" || true)"
+  region="$(node_region_for_alias "${host}" || true)"
 
   ssh_root_run "${PRIMARY_ALIAS}" "k3s kubectl label node $(printf '%q' "${node_name}") $(printf '%q' "fugue.install/profile=combined") $(printf '%q' "fugue.install/role=${role}") --overwrite"
+  if [[ -n "${country_code}" ]]; then
+    ssh_root_run "${PRIMARY_ALIAS}" "k3s kubectl label node $(printf '%q' "${node_name}") $(printf '%q' "fugue.io/location-country-code=${country_code}") --overwrite"
+  fi
   if [[ -n "${region}" ]]; then
     ssh_root_run "${PRIMARY_ALIAS}" "k3s kubectl label node $(printf '%q' "${node_name}") $(printf '%q' "topology.kubernetes.io/region=${region}") --overwrite"
   fi
