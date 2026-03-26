@@ -95,16 +95,28 @@ type kubeStateDetail struct {
 }
 
 type kubeLogsClient struct {
-	client      *http.Client
-	baseURL     string
-	bearerToken string
-	namespace   string
+	client       *http.Client
+	streamClient *http.Client
+	baseURL      string
+	bearerToken  string
+	namespace    string
+}
+
+type appLogsClient interface {
+	listJobsBySelector(ctx context.Context, namespace, selector string) ([]kubeJobInfo, error)
+	getJob(ctx context.Context, namespace, jobName string) (kubeJobInfo, error)
+	listPodsBySelector(ctx context.Context, namespace, selector string) ([]kubePodInfo, error)
+	readPodLogs(ctx context.Context, namespace, podName string, opts kubeLogOptions) (string, error)
+	streamPodLogs(ctx context.Context, namespace, podName string, opts kubeLogOptions) (io.ReadCloser, error)
 }
 
 type kubeLogOptions struct {
-	Container string
-	TailLines int
-	Previous  bool
+	Container  string
+	TailLines  int
+	Previous   bool
+	Follow     bool
+	SinceTime  *time.Time
+	Timestamps bool
 }
 
 type kubeStatusError struct {
@@ -145,13 +157,17 @@ func newKubeLogsClient(namespace string) (*kubeLogsClient, error) {
 			return nil, err
 		}
 	}
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: rootCAs},
+	}
 
 	return &kubeLogsClient{
 		client: &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{RootCAs: rootCAs},
-			},
-			Timeout: 20 * time.Second,
+			Transport: transport,
+			Timeout:   20 * time.Second,
+		},
+		streamClient: &http.Client{
+			Transport: transport,
 		},
 		baseURL:     "https://" + host + ":" + port,
 		bearerToken: strings.TrimSpace(string(token)),
@@ -211,6 +227,34 @@ func (c *kubeLogsClient) listPodsBySelector(ctx context.Context, namespace, sele
 }
 
 func (c *kubeLogsClient) readPodLogs(ctx context.Context, namespace, podName string, opts kubeLogOptions) (string, error) {
+	apiPath := c.podLogsAPIPath(namespace, podName, opts)
+	return c.doText(ctx, http.MethodGet, apiPath)
+}
+
+func (c *kubeLogsClient) streamPodLogs(ctx context.Context, namespace, podName string, opts kubeLogOptions) (io.ReadCloser, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+c.podLogsAPIPath(namespace, podName, opts), nil)
+	if err != nil {
+		return nil, fmt.Errorf("create kubernetes log stream request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.bearerToken)
+	req.Header.Set("Accept", "*/*")
+
+	resp, err := c.streamClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("kubernetes log stream %s: %w", req.URL.Path, err)
+	}
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, &kubeStatusError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("kubernetes log stream %s failed: status=%d body=%s", req.URL.Path, resp.StatusCode, strings.TrimSpace(string(body))),
+		}
+	}
+	return resp.Body, nil
+}
+
+func (c *kubeLogsClient) podLogsAPIPath(namespace, podName string, opts kubeLogOptions) string {
 	query := url.Values{}
 	if strings.TrimSpace(opts.Container) != "" {
 		query.Set("container", strings.TrimSpace(opts.Container))
@@ -221,12 +265,21 @@ func (c *kubeLogsClient) readPodLogs(ctx context.Context, namespace, podName str
 	if opts.Previous {
 		query.Set("previous", "true")
 	}
+	if opts.Follow {
+		query.Set("follow", "true")
+	}
+	if opts.Timestamps {
+		query.Set("timestamps", "true")
+	}
+	if opts.SinceTime != nil && !opts.SinceTime.IsZero() {
+		query.Set("sinceTime", opts.SinceTime.UTC().Format(time.RFC3339Nano))
+	}
 
 	apiPath := "/api/v1/namespaces/" + c.effectiveNamespace(namespace) + "/pods/" + url.PathEscape(strings.TrimSpace(podName)) + "/log"
 	if encoded := query.Encode(); encoded != "" {
 		apiPath += "?" + encoded
 	}
-	return c.doText(ctx, http.MethodGet, apiPath)
+	return apiPath
 }
 
 func (c *kubeLogsClient) doJSON(ctx context.Context, method, apiPath string, out any) error {
@@ -313,7 +366,7 @@ func podStatusContainerNames(pod kubePodInfo, includeInit bool) []string {
 	return names
 }
 
-func readJobLogs(ctx context.Context, client *kubeLogsClient, namespace, jobName string, tailLines int) (string, error) {
+func readJobLogs(ctx context.Context, client appLogsClient, namespace, jobName string, tailLines int) (string, error) {
 	pods, err := client.listPodsBySelector(ctx, namespace, "job-name="+jobName)
 	if err != nil {
 		return "", err
@@ -352,7 +405,7 @@ func readJobLogs(ctx context.Context, client *kubeLogsClient, namespace, jobName
 	return strings.TrimSpace(strings.Join(sections, "\n\n")), nil
 }
 
-func collectRuntimeLogs(ctx context.Context, client *kubeLogsClient, namespace string, pods []kubePodInfo, containerName string, tailLines int, previous bool) (string, []string) {
+func collectRuntimeLogs(ctx context.Context, client appLogsClient, namespace string, pods []kubePodInfo, containerName string, tailLines int, previous bool) (string, []string) {
 	sections := make([]string, 0, len(pods))
 	warnings := make([]string, 0)
 	for _, pod := range pods {
@@ -409,7 +462,7 @@ func runtimeLogPodNames(pods []kubePodInfo) []string {
 	return podNames(pods)
 }
 
-func latestBuilderJobName(ctx context.Context, client *kubeLogsClient, namespace, operationID string) (string, error) {
+func latestBuilderJobName(ctx context.Context, client appLogsClient, namespace, operationID string) (string, error) {
 	jobs, err := client.listJobsBySelector(ctx, namespace, "fugue.pro/operation-id="+operationID)
 	if err != nil {
 		return "", err
@@ -508,7 +561,7 @@ func summarizeKubePodFailure(pod kubePodInfo) string {
 	return ""
 }
 
-func summarizeBuilderJobFailure(ctx context.Context, client *kubeLogsClient, namespace, jobName string) (string, error) {
+func summarizeBuilderJobFailure(ctx context.Context, client appLogsClient, namespace, jobName string) (string, error) {
 	job, err := client.getJob(ctx, namespace, jobName)
 	if err != nil {
 		return "", err
@@ -539,16 +592,7 @@ func summarizeBuilderJobFailure(ctx context.Context, client *kubeLogsClient, nam
 	return "", nil
 }
 
-func readBuildLogs(ctx context.Context, op model.Operation, tailLines int) (logs, source, jobName string, available bool, err error) {
-	namespace, err := kubeNamespace()
-	if err != nil {
-		return "", "", "", false, err
-	}
-	client, err := newKubeLogsClient(namespace)
-	if err != nil {
-		return "", "", "", false, err
-	}
-
+func readBuildLogsWithClient(ctx context.Context, client appLogsClient, namespace string, op model.Operation, tailLines int) (logs, source, jobName string, available bool, err error) {
 	jobName, err = latestBuilderJobName(ctx, client, namespace, op.ID)
 	if err == nil && jobName != "" {
 		logs, err = readJobLogs(ctx, client, namespace, jobName, tailLines)
@@ -568,6 +612,14 @@ func readBuildLogs(ctx context.Context, op model.Operation, tailLines int) (logs
 		return op.ResultMessage, "operation.result_message", jobName, true, nil
 	}
 	return "", "unavailable", jobName, false, nil
+}
+
+func readBuildLogs(ctx context.Context, op model.Operation, tailLines int) (logs, source, jobName string, available bool, err error) {
+	client, err := newKubeLogsClient("")
+	if err != nil {
+		return "", "", "", false, err
+	}
+	return readBuildLogsWithClient(ctx, client, "", op, tailLines)
 }
 
 func kubeNamespace() (string, error) {

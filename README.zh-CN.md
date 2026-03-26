@@ -215,7 +215,9 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 | `GET` | `/v1/apps/{id}` | 任意 API 凭证 | 查看 app 详情 |
 | `GET` | `/v1/apps/{id}/bindings` | 任意 API 凭证 | 返回 app 到 service 的 binding，以及对应的 backing service |
 | `GET` | `/v1/apps/{id}/build-logs` | 任意 API 凭证 | 查看最近一次导入/构建日志，也支持指定 `operation_id` |
+| `GET` | `/v1/apps/{id}/build-logs/stream` | 任意 API 凭证 | 以 Server-Sent Events 流式返回构建日志和 operation 状态 |
 | `GET` | `/v1/apps/{id}/runtime-logs` | 任意 API 凭证 | 查看 `app` 或 `postgres` 的 Kubernetes Pod 日志 |
+| `GET` | `/v1/apps/{id}/runtime-logs/stream` | 任意 API 凭证 | 以 Server-Sent Events 流式返回运行日志，并支持断线续传 cursor |
 | `GET` | `/v1/apps/{id}/env` | 任意 API 凭证 | 返回合并后的运行时环境变量，包括 binding 注入的变量 |
 | `PATCH` | `/v1/apps/{id}/env` | `app.write` 或 `app.deploy` | 当环境变量变化时排入 deploy operation |
 | `GET` | `/v1/apps/{id}/files` | 任意 API 凭证 | 返回 `spec.files` 里的期望文件集合 |
@@ -434,6 +436,42 @@ Idempotency-Key: import-<unique-key>
 
 - 仅适用于 managed runtime
 - 直接读取租户 namespace 里的 Pod 日志
+
+`GET /v1/apps/{id}/build-logs/stream`
+
+查询参数：
+
+- `operation_id` 可选；默认读取这个 app 最新一次 `import` 操作
+- `tail_lines` 可选；默认 `200`，最大 `5000`，仅在没有 cursor 时用于首屏回放
+- `follow` 可选；默认 `true`
+- `cursor` 可选；不透明重连 cursor，也可以通过 `Last-Event-ID` 头传入
+
+行为说明：
+
+- 返回 `text/event-stream`
+- 会发送 `ready`、`status`、`log`、`heartbeat`、`warning`、`end` 事件
+- `status` 会带上 `operation_status`、`job_name`、`build_strategy` 和最终 result/error 文本
+- `log` 事件按 pod/container 单行输出，每个事件 id 都可作为重连 cursor
+- 非 follow 快照完成，或构建 operation 进入终态时，会发送 `end`
+
+`GET /v1/apps/{id}/runtime-logs/stream`
+
+查询参数：
+
+- `component` 可选；默认是 `app`，也可以传 `postgres`
+- `pod` 可选；限制到某一个 pod 名称
+- `tail_lines` 可选；默认 `200`，最大 `5000`，仅在没有 cursor 时用于首屏回放
+- `previous` 可选；传 `true` 时流式返回 previous container logs，且该流是有限快照
+- `follow` 可选；默认 `true`，但 `previous=true` 时默认变为 `false`
+- `cursor` 可选；不透明重连 cursor，也可以通过 `Last-Event-ID` 头传入
+
+行为说明：
+
+- 返回 `text/event-stream`
+- 会发送 `ready`、`state`、`log`、`heartbeat`、`warning`、`end` 事件
+- `state` 表示当前已接入的 pod 集合
+- `log` 事件按 pod/container 单行输出，每个事件 id 都可作为重连 cursor
+- `follow=false` 时，回放完当前快照后会以 `end.reason = "snapshot_complete"` 结束
 
 `DELETE /v1/tenants/{id}`
 

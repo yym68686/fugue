@@ -215,7 +215,9 @@ Legacy compatibility: `POST /v1/agent/enroll` still accepts one-time enroll toke
 | `GET` | `/v1/apps/{id}` | any API credential | fetch app detail |
 | `GET` | `/v1/apps/{id}/bindings` | any API credential | returns app-to-service bindings plus the referenced backing services |
 | `GET` | `/v1/apps/{id}/build-logs` | any API credential | returns latest import/build logs, or accepts `operation_id` |
+| `GET` | `/v1/apps/{id}/build-logs/stream` | any API credential | streams build logs and operation status as Server-Sent Events |
 | `GET` | `/v1/apps/{id}/runtime-logs` | any API credential | returns Kubernetes pod logs for `app` or `postgres` |
+| `GET` | `/v1/apps/{id}/runtime-logs/stream` | any API credential | streams runtime logs as Server-Sent Events with reconnect cursor support |
 | `GET` | `/v1/apps/{id}/env` | any API credential | returns merged runtime env, including binding-provided variables |
 | `PATCH` | `/v1/apps/{id}/env` | `app.write` or `app.deploy` | queues a deploy operation when env values change |
 | `GET` | `/v1/apps/{id}/files` | any API credential | returns desired app files from `spec.files` |
@@ -434,6 +436,42 @@ Behavior:
 
 - only works for managed runtimes
 - reads logs directly from tenant namespace pods
+
+`GET /v1/apps/{id}/build-logs/stream`
+
+Query parameters:
+
+- `operation_id` optional; defaults to the latest `import` operation of the app
+- `tail_lines` optional; default `200`, max `5000`, used for the initial replay when no cursor is supplied
+- `follow` optional; `true` by default
+- `cursor` optional; opaque reconnect cursor, or send the same value in `Last-Event-ID`
+
+Behavior:
+
+- returns `text/event-stream`
+- emits `ready`, `status`, `log`, `heartbeat`, `warning`, and `end` events
+- `status` includes `operation_status`, `job_name`, `build_strategy`, and final result/error text
+- `log` events are emitted per pod/container line and each event id is a reconnect cursor
+- `end` is emitted when a non-follow snapshot completes or the build operation reaches a terminal state
+
+`GET /v1/apps/{id}/runtime-logs/stream`
+
+Query parameters:
+
+- `component` optional; `app` by default, or `postgres`
+- `pod` optional; restrict logs to one pod name
+- `tail_lines` optional; default `200`, max `5000`, used for the initial replay when no cursor is supplied
+- `previous` optional; when `true`, streams previous container logs as a finite snapshot
+- `follow` optional; defaults to `true`, except `previous=true` defaults it to `false`
+- `cursor` optional; opaque reconnect cursor, or send the same value in `Last-Event-ID`
+
+Behavior:
+
+- returns `text/event-stream`
+- emits `ready`, `state`, `log`, `heartbeat`, `warning`, and `end` events
+- `state` reports the currently attached pod set for the selected component
+- `log` events are emitted per pod/container line and each event id is a reconnect cursor
+- when `follow=false`, the stream closes with `end.reason = "snapshot_complete"` after replaying the current snapshot
 
 `DELETE /v1/tenants/{id}`
 

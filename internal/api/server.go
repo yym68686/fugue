@@ -35,8 +35,10 @@ type Server struct {
 	importer                    *sourceimport.Importer
 	newClusterNodeClient        func() (*clusterNodeClient, error)
 	newManagedAppStatusClient   func() (*managedAppStatusClient, error)
+	newLogsClient               func(namespace string) (appLogsClient, error)
 	newWorkspacePodLister       func(namespace string) (workspacePodLister, error)
 	workspaceExecRunner         workspacePodExecRunner
+	logStreamTuning             logStreamTuning
 	ready                       atomic.Bool
 }
 
@@ -61,10 +63,14 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		importer:                    sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
 		newClusterNodeClient:        newClusterNodeClient,
 		newManagedAppStatusClient:   newManagedAppStatusClient,
+		newLogsClient: func(namespace string) (appLogsClient, error) {
+			return newKubeLogsClient(namespace)
+		},
 		newWorkspacePodLister: func(namespace string) (workspacePodLister, error) {
 			return newKubeLogsClient(namespace)
 		},
 		workspaceExecRunner: kubeWorkspaceExecRunner{},
+		logStreamTuning:     defaultLogStreamTuning(),
 	}
 	if server.registryPullBase == "" {
 		server.registryPullBase = server.registryPushBase
@@ -128,7 +134,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/apps/{id}/bindings", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateAppBinding)))
 	mux.Handle("DELETE /v1/apps/{id}/bindings/{binding_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteAppBinding)))
 	mux.Handle("GET /v1/apps/{id}/build-logs", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppBuildLogs)))
+	mux.Handle("GET /v1/apps/{id}/build-logs/stream", s.auth.RequireAPI(http.HandlerFunc(s.handleStreamAppBuildLogs)))
 	mux.Handle("GET /v1/apps/{id}/runtime-logs", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppRuntimeLogs)))
+	mux.Handle("GET /v1/apps/{id}/runtime-logs/stream", s.auth.RequireAPI(http.HandlerFunc(s.handleStreamAppRuntimeLogs)))
 	mux.Handle("GET /v1/apps/{id}/env", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppEnv)))
 	mux.Handle("PATCH /v1/apps/{id}/env", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchAppEnv)))
 	mux.Handle("GET /v1/apps/{id}/files", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppFiles)))
@@ -1284,4 +1292,12 @@ type statusRecorder struct {
 func (r *statusRecorder) WriteHeader(status int) {
 	r.status = status
 	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *statusRecorder) Flush() {
+	flusher, ok := r.ResponseWriter.(http.Flusher)
+	if !ok {
+		return
+	}
+	flusher.Flush()
 }
