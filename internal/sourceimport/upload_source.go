@@ -92,6 +92,7 @@ func (i *Importer) ImportUploadedArchiveSource(ctx context.Context, req UploadSo
 				ImageNameSuffix:  strings.TrimSpace(req.ImageNameSuffix),
 				ComposeService:   strings.TrimSpace(req.ComposeService),
 				DetectedProvider: strings.TrimSpace(result.DetectedProvider),
+				DetectedStack:    strings.TrimSpace(result.DetectedStack),
 			},
 		}, nil
 	case model.AppBuildStrategyDockerfile:
@@ -114,6 +115,7 @@ func (i *Importer) ImportUploadedArchiveSource(ctx context.Context, req UploadSo
 				ImageNameSuffix:  strings.TrimSpace(req.ImageNameSuffix),
 				ComposeService:   strings.TrimSpace(req.ComposeService),
 				DetectedProvider: strings.TrimSpace(result.DetectedProvider),
+				DetectedStack:    strings.TrimSpace(result.DetectedStack),
 			},
 		}, nil
 	case model.AppBuildStrategyBuildpacks:
@@ -135,6 +137,7 @@ func (i *Importer) ImportUploadedArchiveSource(ctx context.Context, req UploadSo
 				ImageNameSuffix:  strings.TrimSpace(req.ImageNameSuffix),
 				ComposeService:   strings.TrimSpace(req.ComposeService),
 				DetectedProvider: strings.TrimSpace(result.DetectedProvider),
+				DetectedStack:    strings.TrimSpace(result.DetectedStack),
 			},
 		}, nil
 	case model.AppBuildStrategyNixpacks:
@@ -156,6 +159,7 @@ func (i *Importer) ImportUploadedArchiveSource(ctx context.Context, req UploadSo
 				ImageNameSuffix:  strings.TrimSpace(req.ImageNameSuffix),
 				ComposeService:   strings.TrimSpace(req.ComposeService),
 				DetectedProvider: strings.TrimSpace(result.DetectedProvider),
+				DetectedStack:    strings.TrimSpace(result.DetectedStack),
 			},
 		}, nil
 	default:
@@ -261,6 +265,7 @@ func importStaticSiteFromExtractedUpload(src extractedUploadSource, requestedSou
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
+	detectedStack := detectPrimaryTechStack(src.RootDir, relativeImportedSourceDir(src.RootDir, sourceDir))
 
 	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix)
 	if err := buildAndPushStaticSiteImage(sourceDir, imageRef); err != nil {
@@ -274,6 +279,7 @@ func importStaticSiteFromExtractedUpload(src extractedUploadSource, requestedSou
 		ImageRef:       imageRef,
 		DefaultAppName: src.DefaultAppName,
 		DetectedPort:   80,
+		DetectedStack:  detectedStack,
 	}, nil
 }
 
@@ -289,6 +295,7 @@ func importDockerfileFromExtractedUpload(ctx context.Context, src extractedUploa
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
+	detectedStack := detectPrimaryTechStack(src.RootDir, buildContextDir)
 	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix)
 	if err := buildAndPushDockerfileImage(ctx, dockerfileBuildRequest{
 		CommitSHA:          src.ArchiveSHA256,
@@ -312,6 +319,7 @@ func importDockerfileFromExtractedUpload(ctx context.Context, src extractedUploa
 		DefaultAppName:   src.DefaultAppName,
 		DetectedPort:     detectedPort,
 		DetectedProvider: model.AppBuildStrategyDockerfile,
+		DetectedStack:    detectedStack,
 	}, nil
 }
 
@@ -324,6 +332,7 @@ func importBuildpacksFromExtractedUpload(ctx context.Context, src extractedUploa
 		return GitHubImportResult{}, err
 	}
 	provider, port := detectBuildpacksProviderAndPort(src.RootDir, normalizedSourceDir)
+	detectedStack := detectPrimaryTechStack(src.RootDir, normalizedSourceDir)
 	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix)
 	if err := buildAndPushBuildpacksImage(ctx, buildpacksBuildRequest{
 		CommitSHA:          src.ArchiveSHA256,
@@ -345,6 +354,7 @@ func importBuildpacksFromExtractedUpload(ctx context.Context, src extractedUploa
 		DefaultAppName:   src.DefaultAppName,
 		DetectedPort:     port,
 		DetectedProvider: provider,
+		DetectedStack:    detectedStack,
 		SuggestedEnv:     suggestedBuildpacksEnv(port),
 	}, nil
 }
@@ -358,6 +368,7 @@ func importNixpacksFromExtractedUpload(ctx context.Context, src extractedUploadS
 		return GitHubImportResult{}, err
 	}
 	provider, port := detectNixpacksProviderAndPort(src.RootDir, normalizedSourceDir)
+	detectedStack := detectPrimaryTechStack(src.RootDir, normalizedSourceDir)
 	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix)
 	if err := buildAndPushNixpacksImage(ctx, nixpacksBuildRequest{
 		CommitSHA:          src.ArchiveSHA256,
@@ -379,6 +390,7 @@ func importNixpacksFromExtractedUpload(ctx context.Context, src extractedUploadS
 		DefaultAppName:   src.DefaultAppName,
 		DetectedPort:     port,
 		DetectedProvider: provider,
+		DetectedStack:    detectedStack,
 		SuggestedEnv:     suggestedNixpacksEnv(port),
 	}, nil
 }

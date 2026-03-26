@@ -60,6 +60,7 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		return GitHubImportResult{}, err
 	}
 	provider, port := detectBuildpacksProviderAndPort(repo.RepoDir, normalizedSourceDir)
+	detectedStack := detectPrimaryTechStack(repo.RepoDir, normalizedSourceDir)
 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
 	if err := buildAndPushBuildpacksImage(ctx, buildpacksBuildRequest{
@@ -90,6 +91,7 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		DefaultAppName:    repo.DefaultAppName,
 		DetectedPort:      port,
 		DetectedProvider:  provider,
+		DetectedStack:     detectedStack,
 		SuggestedEnv:      suggestedBuildpacksEnv(port),
 	}, nil
 }

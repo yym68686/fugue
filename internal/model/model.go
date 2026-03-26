@@ -253,6 +253,7 @@ type AppSource struct {
 	ImageNameSuffix   string `json:"image_name_suffix,omitempty"`
 	ComposeService    string `json:"compose_service,omitempty"`
 	DetectedProvider  string `json:"detected_provider,omitempty"`
+	DetectedStack     string `json:"detected_stack,omitempty"`
 }
 
 type AppTechnology struct {

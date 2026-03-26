@@ -103,6 +103,7 @@ func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, re
 		return GitHubImportResult{}, err
 	}
 	provider, port := detectNixpacksProviderAndPort(repo.RepoDir, normalizedSourceDir)
+	detectedStack := detectPrimaryTechStack(repo.RepoDir, normalizedSourceDir)
 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
 	if err := buildAndPushNixpacksImage(ctx, nixpacksBuildRequest{
@@ -133,6 +134,7 @@ func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, re
 		DefaultAppName:    repo.DefaultAppName,
 		DetectedPort:      port,
 		DetectedProvider:  provider,
+		DetectedStack:     detectedStack,
 		SuggestedEnv:      suggestedNixpacksEnv(port),
 	}, nil
 }

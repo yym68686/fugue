@@ -53,6 +53,7 @@ type GitHubImportResult struct {
 	DefaultAppName    string
 	DetectedPort      int
 	DetectedProvider  string
+	DetectedStack     string
 	SuggestedEnv      map[string]string
 }
 
@@ -130,6 +131,7 @@ func importStaticSiteFromClonedRepo(repo clonedGitHubRepo, requestedSourceDir, r
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
+	detectedStack := detectPrimaryTechStack(repo.RepoDir, relativeImportedSourceDir(repo.RepoDir, sourceDir))
 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
 	if err := buildAndPushStaticSiteImage(sourceDir, imageRef); err != nil {
@@ -147,6 +149,7 @@ func importStaticSiteFromClonedRepo(repo clonedGitHubRepo, requestedSourceDir, r
 		ImageRef:          imageRef,
 		DefaultAppName:    repo.DefaultAppName,
 		DetectedPort:      80,
+		DetectedStack:     detectedStack,
 	}, nil
 }
 

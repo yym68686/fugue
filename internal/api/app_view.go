@@ -169,85 +169,59 @@ func cloneServiceBinding(binding model.ServiceBinding) model.ServiceBinding {
 }
 
 func buildAppTechStack(app model.App) []model.AppTechnology {
-	stack := make([]model.AppTechnology, 0, 4)
-	seen := make(map[string]struct{})
-	add := func(kind, slug, name, source string) {
-		kind = strings.TrimSpace(strings.ToLower(kind))
-		slug = strings.TrimSpace(strings.ToLower(slug))
-		name = strings.TrimSpace(name)
-		source = strings.TrimSpace(strings.ToLower(source))
-		if kind == "" || slug == "" || name == "" {
-			return
-		}
-		key := kind + ":" + slug
-		if _, ok := seen[key]; ok {
-			return
-		}
-		seen[key] = struct{}{}
-		stack = append(stack, model.AppTechnology{
-			Kind:   kind,
-			Slug:   slug,
-			Name:   name,
-			Source: source,
-		})
-	}
-
-	if app.Source != nil {
-		switch strings.TrimSpace(strings.ToLower(app.Source.Type)) {
-		case model.AppSourceTypeGitHubPublic:
-			add("source", "github", "GitHub", "declared")
-		case model.AppSourceTypeUpload:
-			add("source", "upload", "Upload", "declared")
-		}
-
-		switch strings.TrimSpace(strings.ToLower(app.Source.BuildStrategy)) {
-		case model.AppBuildStrategyDockerfile:
-			add("build", model.AppBuildStrategyDockerfile, "Dockerfile", "declared")
-		case model.AppBuildStrategyBuildpacks:
-			add("build", model.AppBuildStrategyBuildpacks, "Buildpacks", "declared")
-		case model.AppBuildStrategyNixpacks:
-			add("build", model.AppBuildStrategyNixpacks, "Nixpacks", "declared")
-		case model.AppBuildStrategyStaticSite:
-			add("build", model.AppBuildStrategyStaticSite, "Static Site", "declared")
-		}
-
-		if providerName, ok := appTechnologyName(strings.TrimSpace(app.Source.DetectedProvider)); ok {
-			add("language", app.Source.DetectedProvider, providerName, "detected")
-		}
-	}
-
-	for _, service := range app.BackingServices {
-		switch strings.TrimSpace(strings.ToLower(service.Type)) {
-		case model.BackingServiceTypePostgres:
-			add("service", model.BackingServiceTypePostgres, "Postgres", "binding")
-		}
-	}
-
-	if len(stack) == 0 {
+	slug, name, ok := appPrimaryTechStack(app.Source)
+	if !ok {
 		return nil
 	}
-	return stack
+
+	return []model.AppTechnology{{
+		Kind:   "stack",
+		Slug:   slug,
+		Name:   name,
+		Source: "detected",
+	}}
 }
 
-func appTechnologyName(slug string) (string, bool) {
-	switch strings.TrimSpace(strings.ToLower(slug)) {
-	case "node", "nodejs":
-		return "Node.js", true
-	case "python":
-		return "Python", true
-	case "go":
-		return "Go", true
-	case "java":
-		return "Java", true
-	case "ruby":
-		return "Ruby", true
-	case "php":
-		return "PHP", true
-	case "dotnet":
-		return ".NET", true
-	case "rust":
-		return "Rust", true
+func appPrimaryTechStack(source *model.AppSource) (string, string, bool) {
+	if source == nil {
+		return "", "", false
+	}
+
+	if slug, name, ok := normalizeAppTechStack(source.DetectedStack); ok {
+		return slug, name, true
+	}
+
+	switch strings.TrimSpace(strings.ToLower(source.DetectedProvider)) {
+	case "", "generic", model.AppBuildStrategyDockerfile:
+		return "", "", false
 	default:
-		return "", false
+		return normalizeAppTechStack(source.DetectedProvider)
+	}
+}
+
+func normalizeAppTechStack(slug string) (string, string, bool) {
+	switch strings.TrimSpace(strings.ToLower(slug)) {
+	case "next", "nextjs":
+		return "nextjs", "Next.js", true
+	case "react":
+		return "react", "React", true
+	case "node", "nodejs":
+		return "nodejs", "Node.js", true
+	case "python":
+		return "python", "Python", true
+	case "go":
+		return "go", "Go", true
+	case "java":
+		return "java", "Java", true
+	case "ruby":
+		return "ruby", "Ruby", true
+	case "php":
+		return "php", "PHP", true
+	case "dotnet":
+		return "dotnet", ".NET", true
+	case "rust":
+		return "rust", "Rust", true
+	default:
+		return "", "", false
 	}
 }

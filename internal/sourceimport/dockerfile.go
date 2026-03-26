@@ -110,6 +110,7 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
+	detectedStack := detectPrimaryTechStack(repo.RepoDir, buildContextDir)
 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
 	if err := buildAndPushDockerfileImage(ctx, dockerfileBuildRequest{
@@ -139,6 +140,7 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		DefaultAppName:    repo.DefaultAppName,
 		DetectedPort:      detectedPort,
 		DetectedProvider:  model.AppBuildStrategyDockerfile,
+		DetectedStack:     detectedStack,
 	}, nil
 }
 

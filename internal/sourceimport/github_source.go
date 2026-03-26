@@ -66,6 +66,7 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 				ImageNameSuffix:   strings.TrimSpace(req.ImageNameSuffix),
 				ComposeService:    strings.TrimSpace(req.ComposeService),
 				DetectedProvider:  strings.TrimSpace(importResult.DetectedProvider),
+				DetectedStack:     strings.TrimSpace(importResult.DetectedStack),
 			},
 		}, nil
 	case model.AppBuildStrategyStaticSite:
@@ -93,6 +94,7 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 				ImageNameSuffix:   strings.TrimSpace(req.ImageNameSuffix),
 				ComposeService:    strings.TrimSpace(req.ComposeService),
 				DetectedProvider:  strings.TrimSpace(importResult.DetectedProvider),
+				DetectedStack:     strings.TrimSpace(importResult.DetectedStack),
 			},
 		}, nil
 	case model.AppBuildStrategyDockerfile:
@@ -124,6 +126,7 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 				ImageNameSuffix:   strings.TrimSpace(req.ImageNameSuffix),
 				ComposeService:    strings.TrimSpace(req.ComposeService),
 				DetectedProvider:  strings.TrimSpace(importResult.DetectedProvider),
+				DetectedStack:     strings.TrimSpace(importResult.DetectedStack),
 			},
 		}, nil
 	case model.AppBuildStrategyBuildpacks:
@@ -153,6 +156,7 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 				ImageNameSuffix:   strings.TrimSpace(req.ImageNameSuffix),
 				ComposeService:    strings.TrimSpace(req.ComposeService),
 				DetectedProvider:  strings.TrimSpace(importResult.DetectedProvider),
+				DetectedStack:     strings.TrimSpace(importResult.DetectedStack),
 			},
 		}, nil
 	case model.AppBuildStrategyNixpacks:
@@ -182,6 +186,7 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 				ImageNameSuffix:   strings.TrimSpace(req.ImageNameSuffix),
 				ComposeService:    strings.TrimSpace(req.ComposeService),
 				DetectedProvider:  strings.TrimSpace(importResult.DetectedProvider),
+				DetectedStack:     strings.TrimSpace(importResult.DetectedStack),
 			},
 		}, nil
 	default:

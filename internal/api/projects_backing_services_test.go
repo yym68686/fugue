@@ -209,8 +209,9 @@ func TestGetAppIncludesStructuredTechStack(t *testing.T) {
 	}, model.AppSource{
 		Type:             model.AppSourceTypeGitHubPublic,
 		RepoURL:          "https://github.com/example/demo",
-		BuildStrategy:    model.AppBuildStrategyBuildpacks,
-		DetectedProvider: "python",
+		BuildStrategy:    model.AppBuildStrategyDockerfile,
+		DetectedProvider: model.AppBuildStrategyDockerfile,
+		DetectedStack:    "nextjs",
 	}, model.AppRoute{})
 	if err != nil {
 		t.Fatalf("create imported app: %v", err)
@@ -226,17 +227,14 @@ func TestGetAppIncludesStructuredTechStack(t *testing.T) {
 		App model.App `json:"app"`
 	}
 	mustDecodeJSON(t, recorder, &response)
-	stack := make(map[string]model.AppTechnology, len(response.App.TechStack))
-	for _, tech := range response.App.TechStack {
-		stack[tech.Kind+":"+tech.Slug] = tech
+	if len(response.App.TechStack) != 1 {
+		t.Fatalf("expected one tech_stack entry, got %+v", response.App.TechStack)
 	}
-	for _, key := range []string{"source:github", "build:buildpacks", "language:python", "service:postgres"} {
-		if _, ok := stack[key]; !ok {
-			t.Fatalf("expected tech_stack entry %q, got %+v", key, response.App.TechStack)
-		}
+	if tech := response.App.TechStack[0]; tech.Kind != "stack" || tech.Slug != "nextjs" || tech.Name != "Next.js" {
+		t.Fatalf("expected nextjs tech stack entry, got %+v", tech)
 	}
-	if stack["language:python"].Source != "detected" {
-		t.Fatalf("expected python source=detected, got %q", stack["language:python"].Source)
+	if response.App.TechStack[0].Source != "detected" {
+		t.Fatalf("expected nextjs source=detected, got %q", response.App.TechStack[0].Source)
 	}
 }
 
