@@ -15,23 +15,24 @@ import (
 )
 
 type UploadSourceImportRequest struct {
-	UploadID           string
-	ArchiveFilename    string
-	ArchiveSHA256      string
-	ArchiveSizeBytes   int64
-	ArchiveData        []byte
-	ArchiveDownloadURL string
-	AppName            string
-	SourceDir          string
-	DockerfilePath     string
-	BuildContextDir    string
-	BuildStrategy      string
-	RegistryPushBase   string
-	ImageRepository    string
-	ImageNameSuffix    string
-	ComposeService     string
-	JobLabels          map[string]string
-	Stateful           bool
+	UploadID              string
+	ArchiveFilename       string
+	ArchiveSHA256         string
+	ArchiveSizeBytes      int64
+	ArchiveData           []byte
+	ArchiveDownloadURL    string
+	AppName               string
+	SourceDir             string
+	DockerfilePath        string
+	BuildContextDir       string
+	BuildStrategy         string
+	RegistryPushBase      string
+	ImageRepository       string
+	ImageNameSuffix       string
+	ComposeService        string
+	JobLabels             map[string]string
+	PlacementNodeSelector map[string]string
+	Stateful              bool
 }
 
 type extractedUploadSource struct {
@@ -96,7 +97,7 @@ func (i *Importer) ImportUploadedArchiveSource(ctx context.Context, req UploadSo
 			},
 		}, nil
 	case model.AppBuildStrategyDockerfile:
-		result, err := importDockerfileFromExtractedUpload(ctx, src, req.ArchiveDownloadURL, req.DockerfilePath, req.BuildContextDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, i.BuilderPolicy, req.Stateful)
+		result, err := importDockerfileFromExtractedUpload(ctx, src, req.ArchiveDownloadURL, req.DockerfilePath, req.BuildContextDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
 		if err != nil {
 			return GitHubSourceImportOutput{}, err
 		}
@@ -119,7 +120,7 @@ func (i *Importer) ImportUploadedArchiveSource(ctx context.Context, req UploadSo
 			},
 		}, nil
 	case model.AppBuildStrategyBuildpacks:
-		result, err := importBuildpacksFromExtractedUpload(ctx, src, req.ArchiveDownloadURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, i.BuilderPolicy, req.Stateful)
+		result, err := importBuildpacksFromExtractedUpload(ctx, src, req.ArchiveDownloadURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
 		if err != nil {
 			return GitHubSourceImportOutput{}, err
 		}
@@ -141,7 +142,7 @@ func (i *Importer) ImportUploadedArchiveSource(ctx context.Context, req UploadSo
 			},
 		}, nil
 	case model.AppBuildStrategyNixpacks:
-		result, err := importNixpacksFromExtractedUpload(ctx, src, req.ArchiveDownloadURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, i.BuilderPolicy, req.Stateful)
+		result, err := importNixpacksFromExtractedUpload(ctx, src, req.ArchiveDownloadURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
 		if err != nil {
 			return GitHubSourceImportOutput{}, err
 		}
@@ -283,7 +284,7 @@ func importStaticSiteFromExtractedUpload(src extractedUploadSource, requestedSou
 	}, nil
 }
 
-func importDockerfileFromExtractedUpload(ctx context.Context, src extractedUploadSource, archiveDownloadURL, dockerfilePath, buildContextDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
+func importDockerfileFromExtractedUpload(ctx context.Context, src extractedUploadSource, archiveDownloadURL, dockerfilePath, buildContextDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
 	if strings.TrimSpace(archiveDownloadURL) == "" {
 		return GitHubImportResult{}, fmt.Errorf("archive download url is required for dockerfile builds")
 	}
@@ -298,15 +299,16 @@ func importDockerfileFromExtractedUpload(ctx context.Context, src extractedUploa
 	detectedStack := detectPrimaryTechStack(src.RootDir, buildContextDir)
 	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix)
 	if err := buildAndPushDockerfileImage(ctx, dockerfileBuildRequest{
-		CommitSHA:          src.ArchiveSHA256,
-		SourceLabel:        src.DefaultAppName,
-		ArchiveDownloadURL: strings.TrimSpace(archiveDownloadURL),
-		DockerfilePath:     dockerfilePath,
-		BuildContextDir:    buildContextDir,
-		ImageRef:           imageRef,
-		JobLabels:          jobLabels,
-		PodPolicy:          builderPolicy,
-		WorkloadProfile:    builderWorkloadProfileFor(model.AppBuildStrategyDockerfile, stateful),
+		CommitSHA:             src.ArchiveSHA256,
+		SourceLabel:           src.DefaultAppName,
+		ArchiveDownloadURL:    strings.TrimSpace(archiveDownloadURL),
+		DockerfilePath:        dockerfilePath,
+		BuildContextDir:       buildContextDir,
+		ImageRef:              imageRef,
+		JobLabels:             jobLabels,
+		PlacementNodeSelector: placementNodeSelector,
+		PodPolicy:             builderPolicy,
+		WorkloadProfile:       builderWorkloadProfileFor(model.AppBuildStrategyDockerfile, stateful),
 	}); err != nil {
 		return GitHubImportResult{}, err
 	}
@@ -323,7 +325,7 @@ func importDockerfileFromExtractedUpload(ctx context.Context, src extractedUploa
 	}, nil
 }
 
-func importBuildpacksFromExtractedUpload(ctx context.Context, src extractedUploadSource, archiveDownloadURL, sourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
+func importBuildpacksFromExtractedUpload(ctx context.Context, src extractedUploadSource, archiveDownloadURL, sourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
 	if strings.TrimSpace(archiveDownloadURL) == "" {
 		return GitHubImportResult{}, fmt.Errorf("archive download url is required for buildpacks builds")
 	}
@@ -335,14 +337,15 @@ func importBuildpacksFromExtractedUpload(ctx context.Context, src extractedUploa
 	detectedStack := detectPrimaryTechStack(src.RootDir, normalizedSourceDir)
 	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix)
 	if err := buildAndPushBuildpacksImage(ctx, buildpacksBuildRequest{
-		CommitSHA:          src.ArchiveSHA256,
-		SourceLabel:        src.DefaultAppName,
-		ArchiveDownloadURL: strings.TrimSpace(archiveDownloadURL),
-		SourceDir:          normalizedSourceDir,
-		ImageRef:           imageRef,
-		JobLabels:          jobLabels,
-		PodPolicy:          builderPolicy,
-		WorkloadProfile:    builderWorkloadProfileFor(model.AppBuildStrategyBuildpacks, stateful),
+		CommitSHA:             src.ArchiveSHA256,
+		SourceLabel:           src.DefaultAppName,
+		ArchiveDownloadURL:    strings.TrimSpace(archiveDownloadURL),
+		SourceDir:             normalizedSourceDir,
+		ImageRef:              imageRef,
+		JobLabels:             jobLabels,
+		PlacementNodeSelector: placementNodeSelector,
+		PodPolicy:             builderPolicy,
+		WorkloadProfile:       builderWorkloadProfileFor(model.AppBuildStrategyBuildpacks, stateful),
 	}); err != nil {
 		return GitHubImportResult{}, err
 	}
@@ -359,7 +362,7 @@ func importBuildpacksFromExtractedUpload(ctx context.Context, src extractedUploa
 	}, nil
 }
 
-func importNixpacksFromExtractedUpload(ctx context.Context, src extractedUploadSource, archiveDownloadURL, sourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
+func importNixpacksFromExtractedUpload(ctx context.Context, src extractedUploadSource, archiveDownloadURL, sourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
 	if strings.TrimSpace(archiveDownloadURL) == "" {
 		return GitHubImportResult{}, fmt.Errorf("archive download url is required for nixpacks builds")
 	}
@@ -371,14 +374,15 @@ func importNixpacksFromExtractedUpload(ctx context.Context, src extractedUploadS
 	detectedStack := detectPrimaryTechStack(src.RootDir, normalizedSourceDir)
 	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix)
 	if err := buildAndPushNixpacksImage(ctx, nixpacksBuildRequest{
-		CommitSHA:          src.ArchiveSHA256,
-		SourceLabel:        src.DefaultAppName,
-		ArchiveDownloadURL: strings.TrimSpace(archiveDownloadURL),
-		SourceDir:          normalizedSourceDir,
-		ImageRef:           imageRef,
-		JobLabels:          jobLabels,
-		PodPolicy:          builderPolicy,
-		WorkloadProfile:    builderWorkloadProfileFor(model.AppBuildStrategyNixpacks, stateful),
+		CommitSHA:             src.ArchiveSHA256,
+		SourceLabel:           src.DefaultAppName,
+		ArchiveDownloadURL:    strings.TrimSpace(archiveDownloadURL),
+		SourceDir:             normalizedSourceDir,
+		ImageRef:              imageRef,
+		JobLabels:             jobLabels,
+		PlacementNodeSelector: placementNodeSelector,
+		PodPolicy:             builderPolicy,
+		WorkloadProfile:       builderWorkloadProfileFor(model.AppBuildStrategyNixpacks, stateful),
 	}); err != nil {
 		return GitHubImportResult{}, err
 	}

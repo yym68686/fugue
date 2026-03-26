@@ -17,28 +17,30 @@ const (
 )
 
 type GitHubBuildpacksImportRequest struct {
-	RepoURL          string
-	Branch           string
-	SourceDir        string
-	RegistryPushBase string
-	ImageRepository  string
-	ImageNameSuffix  string
-	JobLabels        map[string]string
-	Stateful         bool
+	RepoURL               string
+	Branch                string
+	SourceDir             string
+	RegistryPushBase      string
+	ImageRepository       string
+	ImageNameSuffix       string
+	JobLabels             map[string]string
+	PlacementNodeSelector map[string]string
+	Stateful              bool
 }
 
 type buildpacksBuildRequest struct {
-	RepoURL            string
-	Branch             string
-	CommitSHA          string
-	SourceLabel        string
-	ArchiveDownloadURL string
-	SourceDir          string
-	ImageRef           string
-	JobLabels          map[string]string
-	PodPolicy          BuilderPodPolicy
-	WorkloadProfile    builderWorkloadProfile
-	Placement          builderJobPlacement
+	RepoURL               string
+	Branch                string
+	CommitSHA             string
+	SourceLabel           string
+	ArchiveDownloadURL    string
+	SourceDir             string
+	ImageRef              string
+	JobLabels             map[string]string
+	PlacementNodeSelector map[string]string
+	PodPolicy             BuilderPodPolicy
+	WorkloadProfile       builderWorkloadProfile
+	Placement             builderJobPlacement
 }
 
 func (i *Importer) ImportPublicGitHubBuildpacks(ctx context.Context, req GitHubBuildpacksImportRequest) (GitHubImportResult, error) {
@@ -51,10 +53,10 @@ func (i *Importer) ImportPublicGitHubBuildpacks(ctx context.Context, req GitHubB
 	}
 	defer releaseClonedRepo(repo)
 
-	return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, i.BuilderPolicy, req.Stateful)
+	return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
 }
 
-func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, sourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
+func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, sourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
 	normalizedSourceDir, err := normalizeRepoSourceDir(repo.RepoDir, sourceDir)
 	if err != nil {
 		return GitHubImportResult{}, err
@@ -64,13 +66,14 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
 	if err := buildAndPushBuildpacksImage(ctx, buildpacksBuildRequest{
-		RepoURL:   repoURL,
-		Branch:    repo.Branch,
-		CommitSHA: repo.CommitSHA,
-		SourceDir: normalizedSourceDir,
-		ImageRef:  imageRef,
-		JobLabels: jobLabels,
-		PodPolicy: builderPolicy,
+		RepoURL:               repoURL,
+		Branch:                repo.Branch,
+		CommitSHA:             repo.CommitSHA,
+		SourceDir:             normalizedSourceDir,
+		ImageRef:              imageRef,
+		JobLabels:             jobLabels,
+		PlacementNodeSelector: placementNodeSelector,
+		PodPolicy:             builderPolicy,
 		WorkloadProfile: builderWorkloadProfileFor(
 			model.AppBuildStrategyBuildpacks,
 			stateful,
@@ -121,7 +124,7 @@ func buildAndPushBuildpacksImage(ctx context.Context, req buildpacksBuildRequest
 		SourceLabel: req.SourceLabel,
 	})
 	_ = kubectlRun(ctx, nil, "-n", namespace, "delete", "job", jobName, "--ignore-not-found=true", "--wait=false")
-	placement, releasePlacement, err := acquireBuilderPlacement(ctx, namespace, jobName, req.PodPolicy, req.WorkloadProfile)
+	placement, releasePlacement, err := acquireBuilderPlacement(ctx, namespace, jobName, req.PodPolicy, req.WorkloadProfile, req.PlacementNodeSelector)
 	if err != nil {
 		return fmt.Errorf("select builder placement: %w", err)
 	}

@@ -20,15 +20,16 @@ const (
 )
 
 type GitHubDockerImportRequest struct {
-	RepoURL          string
-	Branch           string
-	DockerfilePath   string
-	BuildContextDir  string
-	RegistryPushBase string
-	ImageRepository  string
-	ImageNameSuffix  string
-	JobLabels        map[string]string
-	Stateful         bool
+	RepoURL               string
+	Branch                string
+	DockerfilePath        string
+	BuildContextDir       string
+	RegistryPushBase      string
+	ImageRepository       string
+	ImageNameSuffix       string
+	JobLabels             map[string]string
+	PlacementNodeSelector map[string]string
+	Stateful              bool
 }
 
 func (i *Importer) ImportPublicGitHubDockerfileImage(ctx context.Context, req GitHubDockerImportRequest) (GitHubImportResult, error) {
@@ -41,22 +42,23 @@ func (i *Importer) ImportPublicGitHubDockerfileImage(ctx context.Context, req Gi
 	}
 	defer releaseClonedRepo(repo)
 
-	return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, req.DockerfilePath, req.BuildContextDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, i.BuilderPolicy, req.Stateful)
+	return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, req.DockerfilePath, req.BuildContextDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
 }
 
 type dockerfileBuildRequest struct {
-	RepoURL            string
-	Branch             string
-	CommitSHA          string
-	SourceLabel        string
-	ArchiveDownloadURL string
-	DockerfilePath     string
-	BuildContextDir    string
-	ImageRef           string
-	JobLabels          map[string]string
-	PodPolicy          BuilderPodPolicy
-	WorkloadProfile    builderWorkloadProfile
-	Placement          builderJobPlacement
+	RepoURL               string
+	Branch                string
+	CommitSHA             string
+	SourceLabel           string
+	ArchiveDownloadURL    string
+	DockerfilePath        string
+	BuildContextDir       string
+	ImageRef              string
+	JobLabels             map[string]string
+	PlacementNodeSelector map[string]string
+	PodPolicy             BuilderPodPolicy
+	WorkloadProfile       builderWorkloadProfile
+	Placement             builderJobPlacement
 }
 
 func detectDockerBuildInputs(repoDir, dockerfilePath, buildContextDir string) (string, string, error) {
@@ -101,7 +103,7 @@ func detectDockerBuildInputs(repoDir, dockerfilePath, buildContextDir string) (s
 	return relDockerfile, relContext, nil
 }
 
-func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, dockerfilePath, buildContextDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
+func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, dockerfilePath, buildContextDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
 	dockerfilePath, buildContextDir, err := detectDockerBuildInputs(repo.RepoDir, dockerfilePath, buildContextDir)
 	if err != nil {
 		return GitHubImportResult{}, err
@@ -114,15 +116,16 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
 	if err := buildAndPushDockerfileImage(ctx, dockerfileBuildRequest{
-		RepoURL:         repoURL,
-		Branch:          repo.Branch,
-		CommitSHA:       repo.CommitSHA,
-		DockerfilePath:  dockerfilePath,
-		BuildContextDir: buildContextDir,
-		ImageRef:        imageRef,
-		JobLabels:       jobLabels,
-		PodPolicy:       builderPolicy,
-		WorkloadProfile: builderWorkloadProfileFor(model.AppBuildStrategyDockerfile, stateful),
+		RepoURL:               repoURL,
+		Branch:                repo.Branch,
+		CommitSHA:             repo.CommitSHA,
+		DockerfilePath:        dockerfilePath,
+		BuildContextDir:       buildContextDir,
+		ImageRef:              imageRef,
+		JobLabels:             jobLabels,
+		PlacementNodeSelector: placementNodeSelector,
+		PodPolicy:             builderPolicy,
+		WorkloadProfile:       builderWorkloadProfileFor(model.AppBuildStrategyDockerfile, stateful),
 	}); err != nil {
 		return GitHubImportResult{}, err
 	}
@@ -204,7 +207,7 @@ func buildAndPushDockerfileImage(ctx context.Context, req dockerfileBuildRequest
 
 	jobName := buildJobName(req)
 	_ = kubectlRun(ctx, nil, "-n", namespace, "delete", "job", jobName, "--ignore-not-found=true", "--wait=false")
-	placement, releasePlacement, err := acquireBuilderPlacement(ctx, namespace, jobName, req.PodPolicy, req.WorkloadProfile)
+	placement, releasePlacement, err := acquireBuilderPlacement(ctx, namespace, jobName, req.PodPolicy, req.WorkloadProfile, req.PlacementNodeSelector)
 	if err != nil {
 		return fmt.Errorf("select builder placement: %w", err)
 	}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/runtime"
 	"fugue/internal/sourceimport"
 )
 
@@ -31,27 +32,31 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		"fugue.pro/tenant-id":    app.TenantID,
 	}
 	stateful := op.DesiredSpec.Workspace != nil || op.DesiredSpec.Postgres != nil
+	buildPlacementNodeSelector, err := s.importBuildPlacementNodeSelector(op.DesiredSpec.RuntimeID)
+	if err != nil {
+		return err
+	}
 
 	var output sourceimport.GitHubSourceImportOutput
-	var err error
 	switch strings.TrimSpace(op.DesiredSource.Type) {
 	case model.AppSourceTypeGitHubPublic:
 		if strings.TrimSpace(op.DesiredSource.RepoURL) == "" {
 			return fmt.Errorf("import operation %s missing repo_url", op.ID)
 		}
 		output, err = s.importer.ImportPublicGitHubSource(importCtx, sourceimport.GitHubSourceImportRequest{
-			RepoURL:          strings.TrimSpace(op.DesiredSource.RepoURL),
-			Branch:           strings.TrimSpace(op.DesiredSource.RepoBranch),
-			SourceDir:        strings.TrimSpace(op.DesiredSource.SourceDir),
-			DockerfilePath:   strings.TrimSpace(op.DesiredSource.DockerfilePath),
-			BuildContextDir:  strings.TrimSpace(op.DesiredSource.BuildContextDir),
-			BuildStrategy:    strings.TrimSpace(op.DesiredSource.BuildStrategy),
-			RegistryPushBase: s.registryPushBase,
-			ImageRepository:  "fugue-apps",
-			ImageNameSuffix:  strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
-			ComposeService:   strings.TrimSpace(op.DesiredSource.ComposeService),
-			JobLabels:        jobLabels,
-			Stateful:         stateful,
+			RepoURL:               strings.TrimSpace(op.DesiredSource.RepoURL),
+			Branch:                strings.TrimSpace(op.DesiredSource.RepoBranch),
+			SourceDir:             strings.TrimSpace(op.DesiredSource.SourceDir),
+			DockerfilePath:        strings.TrimSpace(op.DesiredSource.DockerfilePath),
+			BuildContextDir:       strings.TrimSpace(op.DesiredSource.BuildContextDir),
+			BuildStrategy:         strings.TrimSpace(op.DesiredSource.BuildStrategy),
+			RegistryPushBase:      s.registryPushBase,
+			ImageRepository:       "fugue-apps",
+			ImageNameSuffix:       strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
+			ComposeService:        strings.TrimSpace(op.DesiredSource.ComposeService),
+			JobLabels:             jobLabels,
+			PlacementNodeSelector: buildPlacementNodeSelector,
+			Stateful:              stateful,
 		})
 	case model.AppSourceTypeUpload:
 		if strings.TrimSpace(op.DesiredSource.UploadID) == "" {
@@ -69,23 +74,24 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 			return err
 		}
 		output, err = s.importer.ImportUploadedArchiveSource(importCtx, sourceimport.UploadSourceImportRequest{
-			UploadID:           upload.ID,
-			ArchiveFilename:    upload.Filename,
-			ArchiveSHA256:      upload.SHA256,
-			ArchiveSizeBytes:   upload.SizeBytes,
-			ArchiveData:        archiveBytes,
-			ArchiveDownloadURL: archiveURL,
-			AppName:            app.Name,
-			SourceDir:          strings.TrimSpace(op.DesiredSource.SourceDir),
-			DockerfilePath:     strings.TrimSpace(op.DesiredSource.DockerfilePath),
-			BuildContextDir:    strings.TrimSpace(op.DesiredSource.BuildContextDir),
-			BuildStrategy:      strings.TrimSpace(op.DesiredSource.BuildStrategy),
-			RegistryPushBase:   s.registryPushBase,
-			ImageRepository:    "fugue-apps",
-			ImageNameSuffix:    strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
-			ComposeService:     strings.TrimSpace(op.DesiredSource.ComposeService),
-			JobLabels:          jobLabels,
-			Stateful:           stateful,
+			UploadID:              upload.ID,
+			ArchiveFilename:       upload.Filename,
+			ArchiveSHA256:         upload.SHA256,
+			ArchiveSizeBytes:      upload.SizeBytes,
+			ArchiveData:           archiveBytes,
+			ArchiveDownloadURL:    archiveURL,
+			AppName:               app.Name,
+			SourceDir:             strings.TrimSpace(op.DesiredSource.SourceDir),
+			DockerfilePath:        strings.TrimSpace(op.DesiredSource.DockerfilePath),
+			BuildContextDir:       strings.TrimSpace(op.DesiredSource.BuildContextDir),
+			BuildStrategy:         strings.TrimSpace(op.DesiredSource.BuildStrategy),
+			RegistryPushBase:      s.registryPushBase,
+			ImageRepository:       "fugue-apps",
+			ImageNameSuffix:       strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
+			ComposeService:        strings.TrimSpace(op.DesiredSource.ComposeService),
+			JobLabels:             jobLabels,
+			PlacementNodeSelector: buildPlacementNodeSelector,
+			Stateful:              stateful,
 		})
 	default:
 		return fmt.Errorf("import operation %s only supports github-public or upload source", op.ID)
@@ -134,6 +140,22 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 
 	s.Logger.Printf("operation %s completed import build; pushed_image=%s runtime_image=%s deploy=%s", op.ID, output.ImportResult.ImageRef, finalSpec.Image, deployOp.ID)
 	return nil
+}
+
+func (s *Service) importBuildPlacementNodeSelector(runtimeID string) (map[string]string, error) {
+	runtimeID = strings.TrimSpace(runtimeID)
+	if runtimeID == "" {
+		return nil, nil
+	}
+
+	runtimeObj, err := s.Store.GetRuntime(runtimeID)
+	if err != nil {
+		return nil, fmt.Errorf("load runtime %s for import placement: %w", runtimeID, err)
+	}
+	if runtimeObj.Type != model.RuntimeTypeManagedShared {
+		return nil, nil
+	}
+	return runtime.PlacementNodeSelector(runtimeObj), nil
 }
 
 func importSourceTimeout() time.Duration {

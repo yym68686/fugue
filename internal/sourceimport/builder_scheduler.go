@@ -90,6 +90,7 @@ type builderScheduler struct {
 	policy                   BuilderPodPolicy
 	profile                  builderWorkloadProfile
 	demand                   builderResourceDemand
+	requiredNodeLabels       map[string]string
 	candidateCount           int
 	selectionTimeout         time.Duration
 	retryInterval            time.Duration
@@ -210,8 +211,8 @@ func (e *builderKubeStatusError) Error() string {
 	)
 }
 
-func acquireBuilderPlacement(ctx context.Context, namespace, jobName string, policy BuilderPodPolicy, profile builderWorkloadProfile) (builderJobPlacement, func(), error) {
-	scheduler, err := newBuilderScheduler(namespace, policy, profile)
+func acquireBuilderPlacement(ctx context.Context, namespace, jobName string, policy BuilderPodPolicy, profile builderWorkloadProfile, requiredNodeLabels map[string]string) (builderJobPlacement, func(), error) {
+	scheduler, err := newBuilderScheduler(namespace, policy, profile, requiredNodeLabels)
 	if err != nil {
 		return builderJobPlacement{}, nil, err
 	}
@@ -226,7 +227,7 @@ func acquireBuilderPlacement(ctx context.Context, namespace, jobName string, pol
 	}, nil
 }
 
-func newBuilderScheduler(namespace string, policy BuilderPodPolicy, profile builderWorkloadProfile) (*builderScheduler, error) {
+func newBuilderScheduler(namespace string, policy BuilderPodPolicy, profile builderWorkloadProfile, requiredNodeLabels map[string]string) (*builderScheduler, error) {
 	client, err := newBuilderKubeClient(namespace)
 	if err != nil {
 		return nil, err
@@ -242,6 +243,7 @@ func newBuilderScheduler(namespace string, policy BuilderPodPolicy, profile buil
 		policy:                   policy,
 		profile:                  profile,
 		demand:                   demand,
+		requiredNodeLabels:       cloneBuilderStringMap(requiredNodeLabels),
 		candidateCount:           policy.CandidateCount,
 		selectionTimeout:         time.Duration(policy.SelectionTimeoutSeconds) * time.Second,
 		retryInterval:            time.Duration(policy.RetryIntervalSeconds) * time.Second,
@@ -284,7 +286,7 @@ func (s *builderScheduler) tryReservePlacement(ctx context.Context, jobName stri
 	if err != nil {
 		return builderJobPlacement{}, "", err
 	}
-	candidates := selectBuilderCandidates(s.policy, s.profile, s.demand, snapshots, reservations)
+	candidates := selectBuilderCandidates(s.policy, s.profile, s.demand, snapshots, reservations, s.requiredNodeLabels)
 	if len(candidates) == 0 {
 		return builderJobPlacement{}, "", fmt.Errorf("%w for profile %s", errNoBuilderPlacement, s.profile)
 	}
@@ -319,7 +321,7 @@ func (s *builderScheduler) tryReservePlacement(ctx context.Context, jobName stri
 			releaseLock()
 			return builderJobPlacement{}, "", err
 		}
-		refreshedCandidates := selectBuilderCandidates(s.policy, s.profile, s.demand, refreshedSnapshots, refreshedReservations)
+		refreshedCandidates := selectBuilderCandidates(s.policy, s.profile, s.demand, refreshedSnapshots, refreshedReservations, s.requiredNodeLabels)
 		if !builderCandidatesContainNode(refreshedCandidates, candidate.Node.Name) {
 			releaseLock()
 			continue
@@ -494,7 +496,7 @@ func (s *builderScheduler) releaseReservation(ctx context.Context, reservationNa
 	return s.client.deleteLease(ctx, reservationName)
 }
 
-func selectBuilderCandidates(policy BuilderPodPolicy, profile builderWorkloadProfile, demand builderResourceDemand, snapshots []builderNodeSnapshot, reservations []builderReservation) []builderCandidate {
+func selectBuilderCandidates(policy BuilderPodPolicy, profile builderWorkloadProfile, demand builderResourceDemand, snapshots []builderNodeSnapshot, reservations []builderReservation, requiredNodeLabels map[string]string) []builderCandidate {
 	policy = normalizeBuilderPodPolicy(policy)
 	reservedByNode := make(map[string]builderResourceDemand)
 	for _, reservation := range reservations {
@@ -512,6 +514,9 @@ func selectBuilderCandidates(policy BuilderPodPolicy, profile builderWorkloadPro
 			continue
 		}
 		if !builderNodeEligibleForBuilders(policy, snapshot) {
+			continue
+		}
+		if !builderNodeMatchesRequiredLabels(snapshot, requiredNodeLabels) {
 			continue
 		}
 		if requireBuildLabel && !builderMatchesBuildPool(policy, snapshot) {
@@ -592,6 +597,20 @@ func buildBuilderPlacement(candidates []builderCandidate, selectedNodeName strin
 		CandidateHostnames: ordered,
 		PreferredHostname:  preferred,
 	}
+}
+
+func builderNodeMatchesRequiredLabels(snapshot builderNodeSnapshot, requiredNodeLabels map[string]string) bool {
+	for key, expected := range requiredNodeLabels {
+		key = strings.TrimSpace(key)
+		expected = strings.TrimSpace(expected)
+		if key == "" || expected == "" {
+			continue
+		}
+		if actual := strings.TrimSpace(snapshot.Labels[key]); actual != expected {
+			return false
+		}
+	}
+	return true
 }
 
 func builderCandidatesContainNode(candidates []builderCandidate, nodeName string) bool {

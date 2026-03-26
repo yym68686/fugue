@@ -21,11 +21,16 @@ type Service struct {
 	Config             config.ControllerConfig
 	Renderer           runtime.Renderer
 	Logger             *log.Logger
-	importer           *sourceimport.Importer
+	importer           sourceImporter
 	registryPushBase   string
 	registryPullBase   string
 	latestGitHubCommit func(ctx context.Context, repoURL, branch string) (string, string, error)
 	newKubeClient      func(namespace string) (*kubeClient, error)
+}
+
+type sourceImporter interface {
+	ImportPublicGitHubSource(context.Context, sourceimport.GitHubSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error)
+	ImportUploadedArchiveSource(context.Context, sourceimport.UploadSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error)
 }
 
 func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *Service {

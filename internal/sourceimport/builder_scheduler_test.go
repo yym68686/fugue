@@ -64,7 +64,7 @@ func TestSelectBuilderCandidatesLightPrefersSmallNodes(t *testing.T) {
 	candidates := selectBuilderCandidates(policy, builderWorkloadProfileLight, demand, []builderNodeSnapshot{
 		builderTestNode("large-a", "large-a", policy, policy.LargeNodeLabelValue, "4000m", "16Gi", "32Gi", "2500m", "9Gi", "24Gi"),
 		builderTestNode("small-a", "small-a", policy, policy.SmallNodeLabelValue, "2000m", "8Gi", "8Gi", "200m", "1Gi", "1Gi"),
-	}, nil)
+	}, nil, nil)
 
 	if len(candidates) != 2 {
 		t.Fatalf("expected 2 candidates, got %d", len(candidates))
@@ -87,7 +87,7 @@ func TestSelectBuilderCandidatesHeavyPrefersLargeAndSkipsSmall(t *testing.T) {
 		builderTestNode("small-a", "small-a", policy, policy.SmallNodeLabelValue, "4000m", "16Gi", "16Gi", "250m", "1Gi", "1Gi"),
 		builderTestNode("medium-a", "medium-a", policy, policy.MediumNodeLabelValue, "4000m", "16Gi", "20Gi", "500m", "1Gi", "3Gi"),
 		builderTestNode("large-a", "large-a", policy, policy.LargeNodeLabelValue, "4000m", "16Gi", "30Gi", "500m", "1Gi", "3Gi"),
-	}, nil)
+	}, nil, nil)
 
 	if len(candidates) != 2 {
 		t.Fatalf("expected 2 heavy candidates, got %d", len(candidates))
@@ -122,7 +122,7 @@ func TestSelectBuilderCandidatesReservationsReduceHeadroom(t *testing.T) {
 				EphemeralBytes: parseBuilderBytes("6Gi"),
 			},
 		},
-	})
+	}, nil)
 
 	if len(candidates) != 1 {
 		t.Fatalf("expected reservation to disqualify one node, got %d candidates", len(candidates))
@@ -170,7 +170,7 @@ func TestSelectBuilderCandidatesFallsBackWhenNoBuildPoolLabelsExist(t *testing.T
 		},
 	}
 
-	candidates := selectBuilderCandidates(policy, builderWorkloadProfileLight, demand, snapshots, nil)
+	candidates := selectBuilderCandidates(policy, builderWorkloadProfileLight, demand, snapshots, nil, nil)
 	if len(candidates) != 2 {
 		t.Fatalf("expected unlabeled healthy nodes to remain eligible, got %d", len(candidates))
 	}
@@ -209,12 +209,43 @@ func TestSelectBuilderCandidatesFallbackExcludesTenantScopedNodes(t *testing.T) 
 		},
 	}
 
-	candidates := selectBuilderCandidates(policy, builderWorkloadProfileLight, demand, snapshots, nil)
+	candidates := selectBuilderCandidates(policy, builderWorkloadProfileLight, demand, snapshots, nil, nil)
 	if len(candidates) != 1 {
 		t.Fatalf("expected tenant-scoped node to be excluded, got %d candidates", len(candidates))
 	}
 	if got := candidates[0].Node.Name; got != "shared-a" {
 		t.Fatalf("expected shared node to remain eligible, got %q", got)
+	}
+}
+
+func TestSelectBuilderCandidatesFiltersByRequiredNodeLabels(t *testing.T) {
+	t.Parallel()
+
+	policy := defaultBuilderPodPolicy()
+	demand, err := builderDemandForProfile(policy, builderWorkloadProfileLight)
+	if err != nil {
+		t.Fatalf("builder demand: %v", err)
+	}
+
+	tokyo := builderTestNode("tokyo-a", "tokyo-a", policy, policy.MediumNodeLabelValue, "2000m", "8Gi", "10Gi", "0", "0", "0")
+	tokyo.Labels[runtime.RegionLabelKey] = "ap-northeast-1"
+	hk := builderTestNode("hongkong-a", "hongkong-a", policy, policy.MediumNodeLabelValue, "2000m", "8Gi", "10Gi", "0", "0", "0")
+	hk.Labels[runtime.RegionLabelKey] = "ap-east-1"
+
+	candidates := selectBuilderCandidates(
+		policy,
+		builderWorkloadProfileLight,
+		demand,
+		[]builderNodeSnapshot{tokyo, hk},
+		nil,
+		map[string]string{runtime.RegionLabelKey: "ap-east-1"},
+	)
+
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 region-matched candidate, got %d", len(candidates))
+	}
+	if got := candidates[0].Node.Name; got != "hongkong-a" {
+		t.Fatalf("expected hongkong-a to match required region, got %q", got)
 	}
 }
 
@@ -232,7 +263,7 @@ func TestSelectBuilderCandidatesExcludesUntoleratedNoScheduleTaints(t *testing.T
 		{Key: "dedicated", Value: "builders", Effect: "NoSchedule"},
 	}
 
-	candidates := selectBuilderCandidates(policy, builderWorkloadProfileLight, demand, []builderNodeSnapshot{node}, nil)
+	candidates := selectBuilderCandidates(policy, builderWorkloadProfileLight, demand, []builderNodeSnapshot{node}, nil, nil)
 	if len(candidates) != 0 {
 		t.Fatalf("expected untolerated tainted node to be excluded, got %d candidates", len(candidates))
 	}
@@ -260,7 +291,7 @@ func TestSelectBuilderCandidatesAllowsConfiguredTolerations(t *testing.T) {
 		{Key: "dedicated", Value: "builders", Effect: "NoSchedule"},
 	}
 
-	candidates := selectBuilderCandidates(policy, builderWorkloadProfileLight, demand, []builderNodeSnapshot{node}, nil)
+	candidates := selectBuilderCandidates(policy, builderWorkloadProfileLight, demand, []builderNodeSnapshot{node}, nil, nil)
 	if len(candidates) != 1 {
 		t.Fatalf("expected configured toleration to keep node eligible, got %d candidates", len(candidates))
 	}
@@ -278,7 +309,7 @@ func TestSelectBuilderCandidatesUsesFilesystemAvailabilityForEphemeralHeadroom(t
 	candidates := selectBuilderCandidates(policy, builderWorkloadProfileLight, demand, []builderNodeSnapshot{
 		builderTestNodeWithFS("gcp1", "gcp1", policy, policy.MediumNodeLabelValue, "2000m", "4Gi", "9140Mi", "18Gi", "484m", "1500Mi", "20Mi"),
 		builderTestNodeWithFS("gcp3", "gcp3", policy, policy.MediumNodeLabelValue, "2000m", "4Gi", "9140Mi", "2500Mi", "103m", "1200Mi", "56Ki"),
-	}, nil)
+	}, nil, nil)
 
 	if len(candidates) != 1 {
 		t.Fatalf("expected filesystem headroom to reject low-disk node, got %d candidates", len(candidates))
