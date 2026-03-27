@@ -39,6 +39,9 @@ const (
 	clusterNodeLabelPublicIP     = "fugue.io/public-ip"
 	clusterNodeAnnotationCountry = "fugue.io/location-country"
 	clusterNodeAnnotationK3sHost = "k3s.io/hostname"
+	tenantSharedClusterNodeName  = "internal-cluster"
+	tenantSharedClusterRegion    = "Multiple countries"
+	tenantSharedRuntimeID        = "runtime_managed_shared"
 )
 
 var (
@@ -219,6 +222,7 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 	resolvedSnapshots = collapseClusterNodeSnapshots(resolvedSnapshots, runtimeByClusterNode)
 
 	filtered := make([]model.ClusterNode, 0, len(resolvedSnapshots))
+	sharedSnapshots := make([]resolvedClusterNodeSnapshot, 0, len(resolvedSnapshots))
 	for _, resolved := range resolvedSnapshots {
 		snapshot := resolved.snapshot
 		node := snapshot.node
@@ -229,15 +233,28 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 			runtimeForNode = &runtimeObj
 		}
 		node.PublicIP = resolveClusterNodePublicIP(node, runtimeForNode)
-		if !principal.IsPlatformAdmin() && !ok && len(workloads) == 0 {
-			continue
-		}
 		if ok {
 			node.RuntimeID = runtimeObj.ID
 			node.TenantID = runtimeObj.TenantID
 		}
 		node.Workloads = workloads
-		filtered = append(filtered, node)
+		if principal.IsPlatformAdmin() || ok {
+			filtered = append(filtered, node)
+			continue
+		}
+		if snapshot.runtimeID != "" && !strings.EqualFold(snapshot.runtimeID, tenantSharedRuntimeID) {
+			continue
+		}
+		sharedSnapshots = append(sharedSnapshots, resolvedClusterNodeSnapshot{
+			snapshot:  resolved.snapshot,
+			workloads: workloads,
+		})
+	}
+
+	if !principal.IsPlatformAdmin() {
+		if sharedNode, ok := buildTenantSharedClusterNode(sharedSnapshots); ok {
+			filtered = append(filtered, sharedNode)
+		}
 	}
 
 	sort.Slice(filtered, func(i, j int) bool {
@@ -248,6 +265,71 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 	})
 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"cluster_nodes": filtered})
+}
+
+// Tenant responses collapse the shared pool into one synthetic node so the
+// control plane does not leak internal server count or per-node locations.
+func buildTenantSharedClusterNode(snapshots []resolvedClusterNodeSnapshot) (model.ClusterNode, bool) {
+	if len(snapshots) == 0 {
+		return model.ClusterNode{}, false
+	}
+
+	mergedWorkloads := make([]model.ClusterNodeWorkload, 0)
+	workloadIndexes := make(map[string]int)
+	status := "unknown"
+	bestStatusRank := -1
+	var createdAt *time.Time
+
+	for _, snapshot := range snapshots {
+		rank := clusterNodeStatusRank(snapshot.snapshot.node.Status)
+		if rank > bestStatusRank {
+			bestStatusRank = rank
+			status = snapshot.snapshot.node.Status
+		}
+
+		if snapshot.snapshot.node.CreatedAt != nil {
+			if createdAt == nil || snapshot.snapshot.node.CreatedAt.Before(*createdAt) {
+				next := *snapshot.snapshot.node.CreatedAt
+				createdAt = &next
+			}
+		}
+
+		for _, workload := range snapshot.workloads {
+			key := workload.Kind + "\x00" + workload.ID
+			if index, ok := workloadIndexes[key]; ok {
+				mergedWorkloads[index].PodCount += workload.PodCount
+				mergedWorkloads[index].Pods = append(mergedWorkloads[index].Pods, workload.Pods...)
+				continue
+			}
+
+			workloadIndexes[key] = len(mergedWorkloads)
+			mergedWorkloads = append(mergedWorkloads, workload)
+		}
+	}
+
+	sort.Slice(mergedWorkloads, func(i, j int) bool {
+		if mergedWorkloads[i].Kind != mergedWorkloads[j].Kind {
+			return mergedWorkloads[i].Kind < mergedWorkloads[j].Kind
+		}
+		if mergedWorkloads[i].Name != mergedWorkloads[j].Name {
+			return mergedWorkloads[i].Name < mergedWorkloads[j].Name
+		}
+		return mergedWorkloads[i].ID < mergedWorkloads[j].ID
+	})
+	for index := range mergedWorkloads {
+		sort.Slice(mergedWorkloads[index].Pods, func(i, j int) bool {
+			return mergedWorkloads[index].Pods[i].Name < mergedWorkloads[index].Pods[j].Name
+		})
+	}
+
+	return model.ClusterNode{
+		Name:      tenantSharedClusterNodeName,
+		Status:    status,
+		Region:    tenantSharedClusterRegion,
+		RuntimeID: tenantSharedRuntimeID,
+		Workloads: mergedWorkloads,
+		CreatedAt: createdAt,
+	}, true
 }
 
 func newClusterNodeClient() (*clusterNodeClient, error) {

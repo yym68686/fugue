@@ -470,6 +470,23 @@ func TestListClusterNodesIncludesSharedNodesHostingTenantWorkloads(t *testing.T)
 					},
 					{
 						"metadata": map[string]any{
+							"name":      "demo-7b95d6b54f-9x8w7",
+							"namespace": namespace,
+							"labels": map[string]string{
+								runtime.FugueLabelName:      "demo",
+								runtime.FugueLabelManagedBy: runtime.FugueLabelManagedByValue,
+								runtime.FugueLabelAppID:     app.ID,
+							},
+						},
+						"spec": map[string]any{
+							"nodeName": "empty-node",
+						},
+						"status": map[string]any{
+							"phase": "Running",
+						},
+					},
+					{
+						"metadata": map[string]any{
 							"name":      "other-demo-7b95d6b54f-z2f4g",
 							"namespace": otherNamespace,
 							"labels": map[string]string{
@@ -521,14 +538,14 @@ func TestListClusterNodesIncludesSharedNodesHostingTenantWorkloads(t *testing.T)
 	}
 
 	node := response.ClusterNodes[0]
-	if node.Name != "shared-tenant-node" {
-		t.Fatalf("expected shared-tenant-node, got %q", node.Name)
+	if node.Name != tenantSharedClusterNodeName {
+		t.Fatalf("expected %q, got %q", tenantSharedClusterNodeName, node.Name)
 	}
-	if node.Region != "Japan" {
-		t.Fatalf("expected country-backed region label Japan, got %q", node.Region)
+	if node.Region != tenantSharedClusterRegion {
+		t.Fatalf("expected aggregated region label %q, got %q", tenantSharedClusterRegion, node.Region)
 	}
-	if node.RuntimeID != "" {
-		t.Fatalf("expected shared node runtime id to stay empty, got %q", node.RuntimeID)
+	if node.RuntimeID != tenantSharedRuntimeID {
+		t.Fatalf("expected shared node runtime id %q, got %q", tenantSharedRuntimeID, node.RuntimeID)
 	}
 	if node.TenantID != "" {
 		t.Fatalf("expected shared node tenant id to stay empty, got %q", node.TenantID)
@@ -543,8 +560,223 @@ func TestListClusterNodesIncludesSharedNodesHostingTenantWorkloads(t *testing.T)
 	if node.Workloads[0].RuntimeID != "runtime_managed_shared" {
 		t.Fatalf("expected app workload runtime id runtime_managed_shared, got %q", node.Workloads[0].RuntimeID)
 	}
+	if node.Workloads[0].PodCount != 2 || len(node.Workloads[0].Pods) != 2 {
+		t.Fatalf("expected tenant app workload to merge both shared-cluster pods, got %#v", node.Workloads[0])
+	}
 	if node.Workloads[1].Kind != model.ClusterNodeWorkloadKindBackingService || node.Workloads[1].ID != service.ID {
 		t.Fatalf("expected second workload to be tenant backing service, got %#v", node.Workloads[1])
+	}
+}
+
+func TestListClusterNodesIncludesAggregatedSharedClusterWithoutVisibleTenantWorkloads(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Shared Cluster Inventory Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "viewer", []string{"project.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	kubeServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/api/v1/nodes":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{
+							"name":              "shared-a",
+							"creationTimestamp": "2026-03-25T00:00:00Z",
+							"labels": map[string]string{
+								clusterNodeLabelCountryCode: "jp",
+							},
+							"annotations": map[string]string{
+								clusterNodeAnnotationCountry: "Japan",
+							},
+						},
+						"status": map[string]any{
+							"conditions": []map[string]string{
+								{
+									"type":   "Ready",
+									"status": "True",
+								},
+							},
+						},
+					},
+					{
+						"metadata": map[string]any{
+							"name":              "shared-b",
+							"creationTimestamp": "2026-03-25T00:00:01Z",
+							"labels": map[string]string{
+								clusterNodeLabelCountryCode: "us",
+							},
+							"annotations": map[string]string{
+								clusterNodeAnnotationCountry: "United States",
+							},
+						},
+						"status": map[string]any{
+							"conditions": []map[string]string{
+								{
+									"type":   "Ready",
+									"status": "True",
+								},
+							},
+						},
+					},
+				},
+			})
+		case "/api/v1/pods":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{},
+			})
+		default:
+			if strings.HasPrefix(r.URL.Path, "/api/v1/nodes/") && strings.HasSuffix(r.URL.Path, "/proxy/stats/summary") {
+				_ = json.NewEncoder(w).Encode(map[string]any{})
+				return
+			}
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/cluster/nodes", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		ClusterNodes []model.ClusterNode `json:"cluster_nodes"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+
+	if len(response.ClusterNodes) != 1 {
+		t.Fatalf("expected one aggregated shared cluster node, got %#v", response.ClusterNodes)
+	}
+
+	node := response.ClusterNodes[0]
+	if node.Name != tenantSharedClusterNodeName {
+		t.Fatalf("expected %q, got %q", tenantSharedClusterNodeName, node.Name)
+	}
+	if node.Region != tenantSharedClusterRegion {
+		t.Fatalf("expected aggregated region label %q, got %q", tenantSharedClusterRegion, node.Region)
+	}
+	if node.RuntimeID != tenantSharedRuntimeID {
+		t.Fatalf("expected shared node runtime id %q, got %q", tenantSharedRuntimeID, node.RuntimeID)
+	}
+	if len(node.Workloads) != 0 {
+		t.Fatalf("expected no visible workloads on aggregated shared cluster node, got %#v", node.Workloads)
+	}
+}
+
+func TestListClusterNodesDoesNotAggregateForeignDedicatedNodesIntoSharedCluster(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Viewer Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	otherTenant, err := s.CreateTenant("Dedicated Node Tenant")
+	if err != nil {
+		t.Fatalf("create other tenant: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "viewer", []string{"project.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	_, otherNodeSecret, err := s.CreateNodeKey(otherTenant.ID, "worker")
+	if err != nil {
+		t.Fatalf("create other tenant node key: %v", err)
+	}
+	_, otherRuntime, err := s.BootstrapClusterNode(otherNodeSecret, "other-worker", "https://other-worker.example.com", nil, "other-worker", "machine-foreign")
+	if err != nil {
+		t.Fatalf("bootstrap other tenant cluster node: %v", err)
+	}
+
+	kubeServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/api/v1/nodes":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{
+							"name":              "other-worker",
+							"creationTimestamp": "2026-03-25T00:00:00Z",
+							"labels": map[string]string{
+								runtime.NodeModeLabelKey:  model.RuntimeTypeManagedOwned,
+								runtime.RuntimeIDLabelKey: otherRuntime.ID,
+							},
+						},
+						"status": map[string]any{
+							"conditions": []map[string]string{
+								{
+									"type":   "Ready",
+									"status": "True",
+								},
+							},
+						},
+					},
+				},
+			})
+		case "/api/v1/pods":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{},
+			})
+		default:
+			if strings.HasPrefix(r.URL.Path, "/api/v1/nodes/") && strings.HasSuffix(r.URL.Path, "/proxy/stats/summary") {
+				_ = json.NewEncoder(w).Encode(map[string]any{})
+				return
+			}
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/cluster/nodes", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		ClusterNodes []model.ClusterNode `json:"cluster_nodes"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+
+	if len(response.ClusterNodes) != 0 {
+		t.Fatalf("expected foreign dedicated node to stay hidden, got %#v", response.ClusterNodes)
 	}
 }
 
