@@ -1958,6 +1958,63 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	return app, nil
 }
 
+func (s *Store) pgUpdateAppRoute(id string, route model.AppRoute) (model.App, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.App{}, fmt.Errorf("begin update app route transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	app, err := s.pgGetAppTx(ctx, tx, id, true)
+	if err != nil {
+		return model.App{}, mapDBErr(err)
+	}
+	if isDeletedApp(app) {
+		return model.App{}, ErrNotFound
+	}
+
+	route.Hostname = strings.TrimSpace(strings.ToLower(route.Hostname))
+	route.BaseDomain = strings.TrimSpace(strings.ToLower(route.BaseDomain))
+	route.PublicURL = strings.TrimSpace(route.PublicURL)
+	if route.Hostname == "" {
+		return model.App{}, ErrInvalidInput
+	}
+	if route.BaseDomain == "" && app.Route != nil {
+		route.BaseDomain = strings.TrimSpace(strings.ToLower(app.Route.BaseDomain))
+	}
+	if route.PublicURL == "" {
+		route.PublicURL = "https://" + route.Hostname
+	}
+	if route.ServicePort <= 0 {
+		if app.Route != nil && app.Route.ServicePort > 0 {
+			route.ServicePort = app.Route.ServicePort
+		}
+		if route.ServicePort <= 0 {
+			route.ServicePort = firstPositiveSpecPort(app.Spec.Ports)
+		}
+		if route.ServicePort <= 0 {
+			route.ServicePort = 80
+		}
+	}
+
+	app.Route = cloneAppRoute(&route)
+	app.UpdatedAt = time.Now().UTC()
+	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+		return model.App{}, mapDBErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return model.App{}, fmt.Errorf("commit update app route transaction: %w", err)
+	}
+	normalizeAppStatusForRead(&app)
+	if err := s.pgHydrateAppBackingServices(context.Background(), &app); err != nil {
+		return model.App{}, err
+	}
+	return app, nil
+}
+
 func (s *Store) pgPurgeApp(id string) (model.App, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

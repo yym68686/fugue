@@ -1666,6 +1666,63 @@ func (s *Store) CreateImportedApp(tenantID, projectID, name, description string,
 	return s.createApp(tenantID, projectID, name, description, spec, &source, &route)
 }
 
+func (s *Store) UpdateAppRoute(id string, route model.AppRoute) (model.App, error) {
+	id = strings.TrimSpace(id)
+	route.Hostname = strings.TrimSpace(strings.ToLower(route.Hostname))
+	route.BaseDomain = strings.TrimSpace(strings.ToLower(route.BaseDomain))
+	route.PublicURL = strings.TrimSpace(route.PublicURL)
+	if id == "" || route.Hostname == "" {
+		return model.App{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgUpdateAppRoute(id, route)
+	}
+
+	var app model.App
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findApp(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		app = state.Apps[index]
+		if isDeletedApp(app) {
+			return ErrNotFound
+		}
+		for _, existing := range state.Apps {
+			if existing.ID == app.ID || isDeletedApp(existing) || existing.Route == nil {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(existing.Route.Hostname), route.Hostname) {
+				return ErrConflict
+			}
+		}
+		if route.BaseDomain == "" && app.Route != nil {
+			route.BaseDomain = strings.TrimSpace(strings.ToLower(app.Route.BaseDomain))
+		}
+		if route.PublicURL == "" {
+			route.PublicURL = "https://" + route.Hostname
+		}
+		if route.ServicePort <= 0 {
+			if app.Route != nil && app.Route.ServicePort > 0 {
+				route.ServicePort = app.Route.ServicePort
+			}
+			if route.ServicePort <= 0 {
+				route.ServicePort = firstPositiveSpecPort(app.Spec.Ports)
+			}
+			if route.ServicePort <= 0 {
+				route.ServicePort = 80
+			}
+		}
+		app.Route = cloneAppRoute(&route)
+		app.UpdatedAt = time.Now().UTC()
+		state.Apps[index] = app
+		normalizeAppStatusForRead(&app)
+		hydrateAppBackingServices(state, &app)
+		return nil
+	})
+	return app, err
+}
+
 func (s *Store) PurgeApp(id string) (model.App, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {

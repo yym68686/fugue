@@ -1354,6 +1354,117 @@ func TestCreateImportedAppRejectsDuplicateHostname(t *testing.T) {
 	}
 }
 
+func TestUpdateAppRouteReleasesPreviousHostname(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Route Updates")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	app, err := s.CreateAppWithRoute(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "127.0.0.1:30500/fugue-apps/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppRoute{
+		Hostname:    "demo.apps.example.com",
+		BaseDomain:  "apps.example.com",
+		PublicURL:   "https://demo.apps.example.com",
+		ServicePort: 8080,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	updated, err := s.UpdateAppRoute(app.ID, model.AppRoute{
+		Hostname:   "fresh.apps.example.com",
+		BaseDomain: "apps.example.com",
+		PublicURL:  "https://fresh.apps.example.com",
+	})
+	if err != nil {
+		t.Fatalf("update app route: %v", err)
+	}
+	if updated.Route == nil || updated.Route.Hostname != "fresh.apps.example.com" {
+		t.Fatalf("expected updated hostname fresh.apps.example.com, got %+v", updated.Route)
+	}
+	if updated.Route.ServicePort != 8080 {
+		t.Fatalf("expected service port 8080 to be preserved, got %d", updated.Route.ServicePort)
+	}
+
+	found, err := s.GetAppByHostname("fresh.apps.example.com")
+	if err != nil {
+		t.Fatalf("lookup updated hostname: %v", err)
+	}
+	if found.ID != app.ID {
+		t.Fatalf("expected updated hostname to resolve to app %s, got %s", app.ID, found.ID)
+	}
+	if _, err := s.GetAppByHostname("demo.apps.example.com"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected old hostname to be released, got %v", err)
+	}
+}
+
+func TestUpdateAppRouteRejectsDuplicateHostname(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Route Conflicts")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	spec := model.AppSpec{
+		Image:     "127.0.0.1:30500/fugue-apps/demo:latest",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}
+	app, err := s.CreateAppWithRoute(tenant.ID, project.ID, "demo", "", spec, model.AppRoute{
+		Hostname:    "demo.apps.example.com",
+		BaseDomain:  "apps.example.com",
+		PublicURL:   "https://demo.apps.example.com",
+		ServicePort: 80,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	_, err = s.CreateAppWithRoute(tenant.ID, project.ID, "taken", "", spec, model.AppRoute{
+		Hostname:    "taken.apps.example.com",
+		BaseDomain:  "apps.example.com",
+		PublicURL:   "https://taken.apps.example.com",
+		ServicePort: 80,
+	})
+	if err != nil {
+		t.Fatalf("create taken app: %v", err)
+	}
+
+	_, err = s.UpdateAppRoute(app.ID, model.AppRoute{
+		Hostname:   "taken.apps.example.com",
+		BaseDomain: "apps.example.com",
+		PublicURL:  "https://taken.apps.example.com",
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict for duplicate hostname update, got %v", err)
+	}
+}
+
 func TestCreateImportedAppAllowsPendingImportPlaceholder(t *testing.T) {
 	t.Parallel()
 
