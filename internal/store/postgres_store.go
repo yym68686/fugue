@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	runtimepkg "fugue/internal/runtime"
 )
 
 type sqlScanner interface {
@@ -1764,6 +1765,47 @@ WHERE id = $1
 		return fmt.Errorf("update runtime %s: %w", runtime.ID, err)
 	}
 	return nil
+}
+
+func (s *Store) pgEnsureManagedSharedLocationLabels(labels map[string]string) (model.Runtime, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Runtime{}, false, fmt.Errorf("begin ensure managed shared location transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	runtimeObj, err := scanRuntime(tx.QueryRowContext(ctx, `
+SELECT id, tenant_id, name, machine_name, type, access_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+FROM fugue_runtimes
+WHERE id = $1
+FOR UPDATE
+`, "runtime_managed_shared"))
+	if err != nil {
+		return model.Runtime{}, false, mapDBErr(err)
+	}
+	if len(labels) == 0 || len(runtimepkg.PlacementNodeSelector(runtimeObj)) > 0 {
+		return runtimeObj, false, nil
+	}
+
+	runtimeLabels := cloneMap(runtimeObj.Labels)
+	if runtimeLabels == nil {
+		runtimeLabels = map[string]string{}
+	}
+	for key, value := range labels {
+		runtimeLabels[key] = value
+	}
+	runtimeObj.Labels = runtimeLabels
+	runtimeObj.UpdatedAt = time.Now().UTC()
+	if err := s.pgUpdateRuntimeTx(ctx, tx, runtimeObj); err != nil {
+		return model.Runtime{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Runtime{}, false, fmt.Errorf("commit ensure managed shared location transaction: %w", err)
+	}
+	return runtimeObj, true, nil
 }
 
 func (s *Store) pgListApps(tenantID string, platformAdmin bool) ([]model.App, error) {

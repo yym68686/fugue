@@ -541,8 +541,8 @@ func TestListClusterNodesIncludesSharedNodesHostingTenantWorkloads(t *testing.T)
 	if node.Name != tenantSharedClusterNodeName {
 		t.Fatalf("expected %q, got %q", tenantSharedClusterNodeName, node.Name)
 	}
-	if node.Region != tenantSharedClusterRegion {
-		t.Fatalf("expected aggregated region label %q, got %q", tenantSharedClusterRegion, node.Region)
+	if node.Region != "Japan" {
+		t.Fatalf("expected aggregated region label %q, got %q", "Japan", node.Region)
 	}
 	if node.RuntimeID != tenantSharedRuntimeID {
 		t.Fatalf("expected shared node runtime id %q, got %q", tenantSharedRuntimeID, node.RuntimeID)
@@ -675,14 +675,22 @@ func TestListClusterNodesIncludesAggregatedSharedClusterWithoutVisibleTenantWork
 	if node.Name != tenantSharedClusterNodeName {
 		t.Fatalf("expected %q, got %q", tenantSharedClusterNodeName, node.Name)
 	}
-	if node.Region != tenantSharedClusterRegion {
-		t.Fatalf("expected aggregated region label %q, got %q", tenantSharedClusterRegion, node.Region)
+	if node.Region != "Japan" {
+		t.Fatalf("expected aggregated region label %q, got %q", "Japan", node.Region)
 	}
 	if node.RuntimeID != tenantSharedRuntimeID {
 		t.Fatalf("expected shared node runtime id %q, got %q", tenantSharedRuntimeID, node.RuntimeID)
 	}
 	if len(node.Workloads) != 0 {
 		t.Fatalf("expected no visible workloads on aggregated shared cluster node, got %#v", node.Workloads)
+	}
+
+	runtimeObj, err := s.GetRuntime(tenantSharedRuntimeID)
+	if err != nil {
+		t.Fatalf("get managed shared runtime: %v", err)
+	}
+	if got := runtimeObj.Labels[runtime.LocationCountryCodeLabelKey]; got != "jp" {
+		t.Fatalf("expected managed shared runtime country code %q, got %q", "jp", got)
 	}
 }
 

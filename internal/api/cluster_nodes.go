@@ -59,6 +59,7 @@ type clusterNodeSnapshot struct {
 	node         model.ClusterNode
 	identity     clusterNodeIdentity
 	managedOwned bool
+	countryCode  string
 	runtimeID    string
 	pods         []clusterNodePod
 }
@@ -182,6 +183,11 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+	managedSharedRuntime, defaultSharedDisplayRegion, err := s.ensureManagedSharedRuntimeLocationFromSnapshots(snapshots)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
 
 	runtimes, err := s.store.ListNodes(principal.TenantID, principal.IsPlatformAdmin())
 	if err != nil {
@@ -252,7 +258,7 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if !principal.IsPlatformAdmin() {
-		if sharedNode, ok := buildTenantSharedClusterNode(sharedSnapshots); ok {
+		if sharedNode, ok := buildTenantSharedClusterNode(sharedSnapshots, managedSharedRuntime, defaultSharedDisplayRegion); ok {
 			filtered = append(filtered, sharedNode)
 		}
 	}
@@ -269,7 +275,7 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 
 // Tenant responses collapse the shared pool into one synthetic node so the
 // control plane does not leak internal server count or per-node locations.
-func buildTenantSharedClusterNode(snapshots []resolvedClusterNodeSnapshot) (model.ClusterNode, bool) {
+func buildTenantSharedClusterNode(snapshots []resolvedClusterNodeSnapshot, runtimeObj model.Runtime, defaultDisplayRegion string) (model.ClusterNode, bool) {
 	if len(snapshots) == 0 {
 		return model.ClusterNode{}, false
 	}
@@ -321,15 +327,174 @@ func buildTenantSharedClusterNode(snapshots []resolvedClusterNodeSnapshot) (mode
 			return mergedWorkloads[index].Pods[i].Name < mergedWorkloads[index].Pods[j].Name
 		})
 	}
+	displayRegion := strings.TrimSpace(defaultDisplayRegion)
+	if region, ok := uniqueSharedWorkloadDisplayRegion(snapshots); ok {
+		displayRegion = region
+	} else if runtimeRegion := managedSharedRuntimeDisplayRegion(runtimeObj, snapshots); runtimeRegion != "" {
+		displayRegion = runtimeRegion
+	}
+	if displayRegion == "" {
+		displayRegion = tenantSharedClusterRegion
+	}
 
 	return model.ClusterNode{
 		Name:      tenantSharedClusterNodeName,
 		Status:    status,
-		Region:    tenantSharedClusterRegion,
+		Region:    displayRegion,
 		RuntimeID: tenantSharedRuntimeID,
 		Workloads: mergedWorkloads,
 		CreatedAt: createdAt,
 	}, true
+}
+
+func (s *Server) ensureManagedSharedRuntimeLocationFromSnapshots(snapshots []clusterNodeSnapshot) (model.Runtime, string, error) {
+	runtimeObj, err := s.store.GetRuntime(tenantSharedRuntimeID)
+	if err != nil {
+		return model.Runtime{}, "", err
+	}
+
+	labels, displayRegion, ok := selectDefaultManagedSharedLocation(snapshots)
+	if !ok || len(labels) == 0 {
+		return runtimeObj, displayRegion, nil
+	}
+
+	updatedRuntime, _, err := s.store.EnsureManagedSharedLocationLabels(labels)
+	if err != nil {
+		return model.Runtime{}, "", err
+	}
+	return updatedRuntime, displayRegion, nil
+}
+
+func selectDefaultManagedSharedLocation(snapshots []clusterNodeSnapshot) (map[string]string, string, bool) {
+	choose := func(requirePods bool) (clusterNodeSnapshot, bool) {
+		var best clusterNodeSnapshot
+		found := false
+		for _, snapshot := range snapshots {
+			if !sharedClusterSnapshotCandidate(snapshot) || !clusterNodeSnapshotHasLocation(snapshot) {
+				continue
+			}
+			if requirePods && len(snapshot.pods) == 0 {
+				continue
+			}
+			if !found || preferSharedLocationSnapshot(snapshot, best) {
+				best = snapshot
+				found = true
+			}
+		}
+		return best, found
+	}
+
+	best, ok := choose(true)
+	if !ok {
+		best, ok = choose(false)
+	}
+	if !ok {
+		return nil, "", false
+	}
+
+	return sharedLocationLabels(best), strings.TrimSpace(best.node.Region), true
+}
+
+func sharedClusterSnapshotCandidate(snapshot clusterNodeSnapshot) bool {
+	if snapshot.runtimeID == "" {
+		return true
+	}
+	return strings.EqualFold(snapshot.runtimeID, tenantSharedRuntimeID)
+}
+
+func clusterNodeSnapshotHasLocation(snapshot clusterNodeSnapshot) bool {
+	return snapshot.countryCode != "" || strings.TrimSpace(snapshot.node.Region) != ""
+}
+
+func sharedLocationLabels(snapshot clusterNodeSnapshot) map[string]string {
+	if snapshot.countryCode != "" {
+		return map[string]string{
+			runtime.LocationCountryCodeLabelKey: snapshot.countryCode,
+		}
+	}
+	if region := strings.TrimSpace(snapshot.node.Region); region != "" {
+		return map[string]string{
+			runtime.RegionLabelKey: region,
+		}
+	}
+	return nil
+}
+
+func preferSharedLocationSnapshot(left, right clusterNodeSnapshot) bool {
+	leftHasCountry := left.countryCode != ""
+	rightHasCountry := right.countryCode != ""
+	if leftHasCountry != rightHasCountry {
+		return leftHasCountry
+	}
+
+	leftStatusRank := clusterNodeStatusRank(left.node.Status)
+	rightStatusRank := clusterNodeStatusRank(right.node.Status)
+	if leftStatusRank != rightStatusRank {
+		return leftStatusRank > rightStatusRank
+	}
+
+	leftCreatedAt := clusterNodeSnapshotCreatedAt(left)
+	rightCreatedAt := clusterNodeSnapshotCreatedAt(right)
+	if !leftCreatedAt.Equal(rightCreatedAt) {
+		return leftCreatedAt.Before(rightCreatedAt)
+	}
+
+	return left.node.Name < right.node.Name
+}
+
+func uniqueSharedWorkloadDisplayRegion(snapshots []resolvedClusterNodeSnapshot) (string, bool) {
+	found := false
+	var locationKey string
+	var region string
+
+	for _, snapshot := range snapshots {
+		if len(snapshot.workloads) == 0 || !clusterNodeSnapshotHasLocation(snapshot.snapshot) {
+			continue
+		}
+
+		nextKey := sharedLocationKey(snapshot.snapshot)
+		nextRegion := strings.TrimSpace(snapshot.snapshot.node.Region)
+		if !found {
+			found = true
+			locationKey = nextKey
+			region = nextRegion
+			continue
+		}
+		if locationKey != nextKey {
+			return "", false
+		}
+	}
+
+	if !found {
+		return "", false
+	}
+	return region, true
+}
+
+func managedSharedRuntimeDisplayRegion(runtimeObj model.Runtime, snapshots []resolvedClusterNodeSnapshot) string {
+	if runtimeObj.ID == "" {
+		return ""
+	}
+	if countryCode := strings.TrimSpace(runtimeObj.Labels[runtime.LocationCountryCodeLabelKey]); countryCode != "" {
+		countryCode = strings.ToLower(countryCode)
+		for _, snapshot := range snapshots {
+			if snapshot.snapshot.countryCode == countryCode && strings.TrimSpace(snapshot.snapshot.node.Region) != "" {
+				return strings.TrimSpace(snapshot.snapshot.node.Region)
+			}
+		}
+		return countryCode
+	}
+	if region := strings.TrimSpace(runtimeObj.Labels[runtime.RegionLabelKey]); region != "" {
+		return region
+	}
+	return ""
+}
+
+func sharedLocationKey(snapshot clusterNodeSnapshot) string {
+	if snapshot.countryCode != "" {
+		return "country:" + snapshot.countryCode
+	}
+	return "region:" + strings.ToLower(strings.TrimSpace(snapshot.node.Region))
 }
 
 func newClusterNodeClient() (*clusterNodeClient, error) {
@@ -387,6 +552,7 @@ func (c *clusterNodeClient) listClusterNodeInventory(ctx context.Context) ([]clu
 			node:         buildClusterNode(item, summariesByNode[name]),
 			identity:     buildClusterNodeIdentity(item),
 			managedOwned: strings.EqualFold(firstNodeLabel(item.Metadata.Labels, runtime.NodeModeLabelKey), model.RuntimeTypeManagedOwned),
+			countryCode:  kubeNodeCountryCode(item.Metadata.Labels),
 			runtimeID:    firstNodeLabel(item.Metadata.Labels, runtime.RuntimeIDLabelKey),
 			pods:         podsByNode[name],
 		})
@@ -1209,6 +1375,13 @@ func kubeNodeRegion(labels, annotations map[string]string) string {
 	}
 	if value := firstNodeLabel(labels, clusterNodeLabelCountryCode); value != "" {
 		return strings.ToUpper(value)
+	}
+	return ""
+}
+
+func kubeNodeCountryCode(labels map[string]string) string {
+	if value := firstNodeLabel(labels, clusterNodeLabelCountryCode); value != "" {
+		return strings.ToLower(value)
 	}
 	return ""
 }

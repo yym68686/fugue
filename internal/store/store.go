@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	runtimepkg "fugue/internal/runtime"
 )
 
 var (
@@ -1581,6 +1582,56 @@ func (s *Store) SetRuntimeAccessMode(runtimeID, ownerTenantID, accessMode string
 		return nil
 	})
 	return runtime, err
+}
+
+func (s *Store) EnsureManagedSharedLocationLabels(labels map[string]string) (model.Runtime, bool, error) {
+	labels = normalizeManagedSharedLocationLabels(labels)
+	if s.usingDatabase() {
+		return s.pgEnsureManagedSharedLocationLabels(labels)
+	}
+
+	var runtimeObj model.Runtime
+	var changed bool
+	err := s.withLockedState(true, func(state *model.State) error {
+		ensureRuntimeMetadata(state)
+
+		index := findRuntime(state, "runtime_managed_shared")
+		if index < 0 {
+			return ErrNotFound
+		}
+		runtimeObj = state.Runtimes[index]
+		if len(labels) == 0 || len(runtimepkg.PlacementNodeSelector(runtimeObj)) > 0 {
+			return nil
+		}
+
+		runtimeLabels := cloneMap(runtimeObj.Labels)
+		if runtimeLabels == nil {
+			runtimeLabels = map[string]string{}
+		}
+		for key, value := range labels {
+			runtimeLabels[key] = value
+		}
+		state.Runtimes[index].Labels = runtimeLabels
+		state.Runtimes[index].UpdatedAt = time.Now().UTC()
+		runtimeObj = state.Runtimes[index]
+		changed = true
+		return nil
+	})
+	return runtimeObj, changed, err
+}
+
+func normalizeManagedSharedLocationLabels(labels map[string]string) map[string]string {
+	if value := strings.TrimSpace(labels[runtimepkg.LocationCountryCodeLabelKey]); value != "" {
+		return map[string]string{
+			runtimepkg.LocationCountryCodeLabelKey: strings.ToLower(value),
+		}
+	}
+	if value := strings.TrimSpace(labels[runtimepkg.RegionLabelKey]); value != "" {
+		return map[string]string{
+			runtimepkg.RegionLabelKey: value,
+		}
+	}
+	return nil
 }
 
 func (s *Store) ListApps(tenantID string, platformAdmin bool) ([]model.App, error) {
