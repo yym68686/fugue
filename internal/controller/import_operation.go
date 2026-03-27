@@ -155,7 +155,7 @@ func (s *Service) importBuildPlacementNodeSelector(runtimeID string) (map[string
 	if runtimeObj.Type != model.RuntimeTypeManagedShared {
 		return nil, nil
 	}
-	return runtime.PlacementNodeSelector(runtimeObj), nil
+	return runtime.ManagedSharedNodeSelector(runtimeObj), nil
 }
 
 func importSourceTimeout() time.Duration {

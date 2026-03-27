@@ -938,6 +938,7 @@ func (s *Store) BootstrapNode(secret, runtimeName, endpoint string, labels map[s
 			Name:            nextAvailableRuntimeName(state, key.TenantID, runtimeName),
 			Type:            model.RuntimeTypeExternalOwned,
 			AccessMode:      model.RuntimeAccessModePrivate,
+			PoolMode:        model.RuntimePoolModeDedicated,
 			Status:          model.RuntimeStatusActive,
 			Endpoint:        strings.TrimSpace(endpoint),
 			Labels:          cloneMap(labels),
@@ -1046,6 +1047,7 @@ func (s *Store) BootstrapClusterNode(secret, runtimeName, endpoint string, label
 			Name:            nextAvailableRuntimeName(state, key.TenantID, runtimeName),
 			Type:            model.RuntimeTypeManagedOwned,
 			AccessMode:      model.RuntimeAccessModePrivate,
+			PoolMode:        model.RuntimePoolModeDedicated,
 			Status:          model.RuntimeStatusActive,
 			Endpoint:        strings.TrimSpace(endpoint),
 			Labels:          cloneMap(labels),
@@ -1088,6 +1090,7 @@ func (s *Store) CreateRuntime(tenantID, name, runtimeType, endpoint string, labe
 		Name:           name,
 		Type:           runtimeType,
 		AccessMode:     normalizeRuntimeAccessMode(runtimeType, ""),
+		PoolMode:       model.NormalizeRuntimePoolMode(runtimeType, ""),
 		Status:         model.RuntimeStatusPending,
 		Endpoint:       strings.TrimSpace(endpoint),
 		Labels:         cloneMap(labels),
@@ -1185,6 +1188,7 @@ func (s *Store) ConsumeEnrollmentToken(secret, runtimeName, endpoint string, lab
 			Name:            nextAvailableRuntimeName(state, token.TenantID, runtimeName),
 			Type:            model.RuntimeTypeExternalOwned,
 			AccessMode:      model.RuntimeAccessModePrivate,
+			PoolMode:        model.RuntimePoolModeDedicated,
 			Status:          model.RuntimeStatusActive,
 			Endpoint:        strings.TrimSpace(endpoint),
 			Labels:          cloneMap(labels),
@@ -1577,6 +1581,39 @@ func (s *Store) SetRuntimeAccessMode(runtimeID, ownerTenantID, accessMode string
 			return ErrInvalidInput
 		}
 		state.Runtimes[index].AccessMode = normalizeRuntimeAccessMode(state.Runtimes[index].Type, accessMode)
+		state.Runtimes[index].UpdatedAt = time.Now().UTC()
+		runtime = state.Runtimes[index]
+		return nil
+	})
+	return runtime, err
+}
+
+func (s *Store) SetRuntimePoolMode(runtimeID, poolMode string) (model.Runtime, error) {
+	runtimeID = strings.TrimSpace(runtimeID)
+	if runtimeID == "" {
+		return model.Runtime{}, ErrInvalidInput
+	}
+	switch strings.TrimSpace(poolMode) {
+	case model.RuntimePoolModeDedicated, model.RuntimePoolModeInternalShared:
+	default:
+		return model.Runtime{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgSetRuntimePoolMode(runtimeID, poolMode)
+	}
+
+	var runtime model.Runtime
+	err := s.withLockedState(true, func(state *model.State) error {
+		ensureRuntimeMetadata(state)
+
+		index := findRuntime(state, runtimeID)
+		if index < 0 {
+			return ErrNotFound
+		}
+		if state.Runtimes[index].Type != model.RuntimeTypeManagedOwned || state.Runtimes[index].TenantID == "" {
+			return ErrInvalidInput
+		}
+		state.Runtimes[index].PoolMode = model.NormalizeRuntimePoolMode(state.Runtimes[index].Type, poolMode)
 		state.Runtimes[index].UpdatedAt = time.Now().UTC()
 		runtime = state.Runtimes[index]
 		return nil
@@ -2334,6 +2371,7 @@ func ensureDefaults(state *model.State) {
 			Name:       "managed-shared",
 			Type:       model.RuntimeTypeManagedShared,
 			AccessMode: model.RuntimeAccessModePlatformShared,
+			PoolMode:   model.RuntimePoolModeDedicated,
 			Status:     model.RuntimeStatusActive,
 			Endpoint:   "in-cluster",
 			Labels:     map[string]string{"managed": "true"},
@@ -2499,6 +2537,7 @@ func ensureRuntimeMetadata(state *model.State) {
 			MachineName:       machine.Name,
 			Type:              runtimeType,
 			AccessMode:        normalizeRuntimeAccessMode(runtimeType, ""),
+			PoolMode:          model.NormalizeRuntimePoolMode(runtimeType, ""),
 			ConnectionMode:    machine.ConnectionMode,
 			Status:            machine.Status,
 			Endpoint:          machine.Endpoint,
@@ -2524,6 +2563,7 @@ func backfillRuntimeMetadata(runtime *model.Runtime, machine model.Machine) {
 		return
 	}
 	runtime.AccessMode = normalizeRuntimeAccessMode(runtime.Type, runtime.AccessMode)
+	runtime.PoolMode = model.NormalizeRuntimePoolMode(runtime.Type, runtime.PoolMode)
 	if runtime.MachineName == "" {
 		if strings.TrimSpace(machine.Name) != "" {
 			runtime.MachineName = machine.Name
@@ -2575,6 +2615,7 @@ func applyRuntimeIdentity(runtime *model.Runtime, machineName, machineFingerprin
 		return
 	}
 	runtime.AccessMode = normalizeRuntimeAccessMode(runtimeType, runtime.AccessMode)
+	runtime.PoolMode = model.NormalizeRuntimePoolMode(runtimeType, runtime.PoolMode)
 	runtime.MachineName = normalizedMachineName(machineName, runtime.Name, endpoint)
 	runtime.ConnectionMode = runtimeConnectionMode(runtimeType)
 	runtime.FingerprintPrefix = model.SecretPrefix(machineFingerprint)
@@ -3228,6 +3269,7 @@ func detachRuntimeOwnership(state *model.State, runtimeIndex int, now time.Time)
 	runtime := &state.Runtimes[runtimeIndex]
 	resetRuntimeSharing(state, runtime.ID)
 	runtime.AccessMode = model.RuntimeAccessModePrivate
+	runtime.PoolMode = model.RuntimePoolModeDedicated
 	runtime.Status = model.RuntimeStatusOffline
 	runtime.NodeKeyID = ""
 	runtime.ClusterNodeName = ""

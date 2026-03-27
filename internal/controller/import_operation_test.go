@@ -116,6 +116,7 @@ func TestExecuteManagedImportOperationPassesManagedSharedPlacementToImporter(t *
 	}
 
 	wantPlacement := map[string]string{
+		runtime.SharedPoolLabelKey:          runtime.SharedPoolLabelValue,
 		runtime.RegionLabelKey:              "ap-northeast-1",
 		runtime.LocationCountryCodeLabelKey: "jp",
 	}

@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 const (
 	RuntimeTypeManagedShared = "managed-shared"
@@ -9,6 +12,9 @@ const (
 
 	RuntimeAccessModePrivate        = "private"
 	RuntimeAccessModePlatformShared = "platform-shared"
+
+	RuntimePoolModeDedicated      = "dedicated"
+	RuntimePoolModeInternalShared = "internal-shared"
 
 	MachineConnectionModeAgent   = "agent"
 	MachineConnectionModeCluster = "cluster"
@@ -136,6 +142,7 @@ type Runtime struct {
 	MachineName       string            `json:"machine_name,omitempty"`
 	Type              string            `json:"type"`
 	AccessMode        string            `json:"access_mode,omitempty"`
+	PoolMode          string            `json:"pool_mode,omitempty"`
 	ConnectionMode    string            `json:"connection_mode,omitempty"`
 	Status            string            `json:"status"`
 	Endpoint          string            `json:"endpoint,omitempty"`
@@ -458,6 +465,20 @@ func (p Principal) HasScope(scope string) bool {
 
 func (p Principal) IsPlatformAdmin() bool {
 	return p.HasScope("platform.admin")
+}
+
+func NormalizeRuntimePoolMode(runtimeType, poolMode string) string {
+	switch strings.TrimSpace(poolMode) {
+	case RuntimePoolModeInternalShared:
+		if runtimeType == RuntimeTypeManagedOwned {
+			return RuntimePoolModeInternalShared
+		}
+		return RuntimePoolModeDedicated
+	case RuntimePoolModeDedicated:
+		return RuntimePoolModeDedicated
+	default:
+		return RuntimePoolModeDedicated
+	}
 }
 
 type State struct {

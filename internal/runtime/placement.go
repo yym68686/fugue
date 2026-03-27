@@ -11,6 +11,8 @@ const (
 	TenantIDLabelKey            = "fugue.io/tenant-id"
 	RuntimeIDLabelKey           = "fugue.io/runtime-id"
 	NodeModeLabelKey            = "fugue.io/node-mode"
+	SharedPoolLabelKey          = "fugue.io/shared-pool"
+	SharedPoolLabelValue        = "internal"
 	RegionLabelKey              = "topology.kubernetes.io/region"
 	LegacyRegionLabelKey        = "failure-domain.beta.kubernetes.io/region"
 	ZoneLabelKey                = "topology.kubernetes.io/zone"
@@ -31,15 +33,31 @@ type SchedulingConstraints struct {
 }
 
 func JoinNodeLabels(runtimeObj model.Runtime) []string {
-	return []string{
+	labels := []string{
 		RuntimeIDLabelKey + "=" + runtimeObj.ID,
 		TenantIDLabelKey + "=" + runtimeObj.TenantID,
 		NodeModeLabelKey + "=" + runtimeObj.Type,
 	}
+	if runtimeUsesInternalSharedPool(runtimeObj) {
+		labels = append(labels, SharedPoolLabelKey+"="+SharedPoolLabelValue)
+	}
+	return labels
+}
+
+func JoinNodeLabelMap(runtimeObj model.Runtime) map[string]string {
+	labels := map[string]string{
+		RuntimeIDLabelKey: runtimeObj.ID,
+		TenantIDLabelKey:  runtimeObj.TenantID,
+		NodeModeLabelKey:  runtimeObj.Type,
+	}
+	if runtimeUsesInternalSharedPool(runtimeObj) {
+		labels[SharedPoolLabelKey] = SharedPoolLabelValue
+	}
+	return labels
 }
 
 func JoinNodeTaints(runtimeObj model.Runtime) []string {
-	if runtimeObj.TenantID == "" {
+	if runtimeObj.TenantID == "" || runtimeUsesInternalSharedPool(runtimeObj) {
 		return nil
 	}
 	return []string{
@@ -50,29 +68,38 @@ func JoinNodeTaints(runtimeObj model.Runtime) []string {
 func SchedulingForRuntime(runtimeObj model.Runtime) SchedulingConstraints {
 	switch runtimeObj.Type {
 	case model.RuntimeTypeManagedOwned:
-		return SchedulingConstraints{
+		constraints := SchedulingConstraints{
 			NodeSelector: map[string]string{
 				RuntimeIDLabelKey: runtimeObj.ID,
 				TenantIDLabelKey:  runtimeObj.TenantID,
 			},
-			Tolerations: []Toleration{
+		}
+		if runtimeObj.TenantID != "" && !runtimeUsesInternalSharedPool(runtimeObj) {
+			constraints.Tolerations = []Toleration{
 				{
 					Key:      TenantTaintKey,
 					Operator: "Equal",
 					Value:    runtimeObj.TenantID,
 					Effect:   "NoSchedule",
 				},
-			},
+			}
 		}
+		return constraints
 	case model.RuntimeTypeManagedShared:
-		selector := PlacementNodeSelector(runtimeObj)
-		if len(selector) == 0 {
-			return SchedulingConstraints{}
-		}
-		return SchedulingConstraints{NodeSelector: selector}
+		return SchedulingConstraints{NodeSelector: ManagedSharedNodeSelector(runtimeObj)}
 	default:
 		return SchedulingConstraints{}
 	}
+}
+
+func ManagedSharedNodeSelector(runtimeObj model.Runtime) map[string]string {
+	selector := map[string]string{
+		SharedPoolLabelKey: SharedPoolLabelValue,
+	}
+	for key, value := range PlacementNodeSelector(runtimeObj) {
+		selector[key] = value
+	}
+	return selector
 }
 
 func PlacementNodeSelector(runtimeObj model.Runtime) map[string]string {
@@ -107,4 +134,8 @@ func firstPlacementLabelValue(labels map[string]string, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func runtimeUsesInternalSharedPool(runtimeObj model.Runtime) bool {
+	return model.NormalizeRuntimePoolMode(runtimeObj.Type, runtimeObj.PoolMode) == model.RuntimePoolModeInternalShared
 }

@@ -122,6 +122,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/runtimes/{id}/sharing/grants", s.auth.RequireAPI(http.HandlerFunc(s.handleGrantRuntimeAccess)))
 	mux.Handle("DELETE /v1/runtimes/{id}/sharing/grants/{tenant_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleRevokeRuntimeAccess)))
 	mux.Handle("POST /v1/runtimes/{id}/sharing/mode", s.auth.RequireAPI(http.HandlerFunc(s.handleSetRuntimeAccessMode)))
+	mux.Handle("POST /v1/runtimes/{id}/pool-mode", s.auth.RequireAPI(http.HandlerFunc(s.handleSetRuntimePoolMode)))
 	mux.Handle("GET /v1/runtimes/enroll-tokens", s.auth.RequireAPI(http.HandlerFunc(s.handleListEnrollmentTokens)))
 	mux.Handle("POST /v1/runtimes/enroll-tokens", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateEnrollmentToken)))
 	mux.Handle("GET /v1/backing-services", s.auth.RequireAPI(http.HandlerFunc(s.handleListBackingServices)))

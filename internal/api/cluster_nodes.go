@@ -59,6 +59,7 @@ type clusterNodeSnapshot struct {
 	node         model.ClusterNode
 	identity     clusterNodeIdentity
 	managedOwned bool
+	sharedPool   bool
 	countryCode  string
 	runtimeID    string
 	pods         []clusterNodePod
@@ -93,6 +94,9 @@ type kubeNode struct {
 		Labels            map[string]string `json:"labels"`
 		Annotations       map[string]string `json:"annotations"`
 	} `json:"metadata"`
+	Spec struct {
+		Taints []kubeNodeTaint `json:"taints"`
+	} `json:"spec"`
 	Status struct {
 		Addresses []struct {
 			Type    string `json:"type"`
@@ -110,6 +114,12 @@ type kubeNode struct {
 			SystemUUID       string `json:"systemUUID"`
 		} `json:"nodeInfo"`
 	} `json:"status"`
+}
+
+type kubeNodeTaint struct {
+	Key    string `json:"key,omitempty"`
+	Value  string `json:"value,omitempty"`
+	Effect string `json:"effect,omitempty"`
 }
 
 type kubeNodeCondition struct {
@@ -248,7 +258,7 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 			filtered = append(filtered, node)
 			continue
 		}
-		if snapshot.runtimeID != "" && !strings.EqualFold(snapshot.runtimeID, tenantSharedRuntimeID) {
+		if !snapshot.sharedPool && snapshot.runtimeID != "" && !strings.EqualFold(snapshot.runtimeID, tenantSharedRuntimeID) {
 			continue
 		}
 		sharedSnapshots = append(sharedSnapshots, resolvedClusterNodeSnapshot{
@@ -396,6 +406,9 @@ func selectDefaultManagedSharedLocation(snapshots []clusterNodeSnapshot) (map[st
 }
 
 func sharedClusterSnapshotCandidate(snapshot clusterNodeSnapshot) bool {
+	if snapshot.sharedPool {
+		return true
+	}
 	if snapshot.runtimeID == "" {
 		return true
 	}
@@ -552,6 +565,7 @@ func (c *clusterNodeClient) listClusterNodeInventory(ctx context.Context) ([]clu
 			node:         buildClusterNode(item, summariesByNode[name]),
 			identity:     buildClusterNodeIdentity(item),
 			managedOwned: strings.EqualFold(firstNodeLabel(item.Metadata.Labels, runtime.NodeModeLabelKey), model.RuntimeTypeManagedOwned),
+			sharedPool:   strings.EqualFold(firstNodeLabel(item.Metadata.Labels, runtime.SharedPoolLabelKey), runtime.SharedPoolLabelValue),
 			countryCode:  kubeNodeCountryCode(item.Metadata.Labels),
 			runtimeID:    firstNodeLabel(item.Metadata.Labels, runtime.RuntimeIDLabelKey),
 			pods:         podsByNode[name],

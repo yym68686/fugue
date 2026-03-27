@@ -21,6 +21,7 @@ on:
       - 'deploy/helm/fugue/templates/secret.yaml'
       - 'deploy/helm/fugue/templates/service.yaml'
       - 'deploy/helm/fugue/templates/serviceaccount.yaml'
+      - 'deploy/helm/fugue/templates/topology-labeler-daemonset.yaml'
       - 'Dockerfile.api'
       - 'Dockerfile.controller'
       - 'go.mod'

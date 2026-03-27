@@ -97,15 +97,23 @@ spec:
                 printf '%s\n%s' "${country_name}" "${country_code}"
               }
 
-              patch_node_location() {
-                local country_name="$1"
-                local country_code="$2"
+              patch_node_metadata() {
+                local country_name="${1:-}"
+                local country_code="${2:-}"
                 local token=""
                 local patch=""
                 local code_label=""
+                local country_code_fragment=""
+                local annotation_fragment=""
                 token="$(cat "${token_file}")"
-                code_label="$(printf '%s' "${country_code}" | tr '[:upper:]' '[:lower:]')"
-                patch="$(printf '{"metadata":{"annotations":{"fugue.io/location-country":"%s"},"labels":{"fugue.io/location-country-code":"%s"}}}' "$(json_escape "${country_name}")" "$(json_escape "${code_label}")")"
+                if [ -n "${country_code}" ]; then
+                  code_label="$(printf '%s' "${country_code}" | tr '[:upper:]' '[:lower:]')"
+                  country_code_fragment="$(printf ',\"fugue.io/location-country-code\":\"%s\"' "$(json_escape "${code_label}")")"
+                fi
+                if [ -n "${country_name}" ]; then
+                  annotation_fragment="$(printf ',\"annotations\":{\"fugue.io/location-country\":\"%s\"}' "$(json_escape "${country_name}")")"
+                fi
+                patch="$(printf '{"metadata":{"labels":{"fugue.io/shared-pool":"internal"%s}%s}}' "${country_code_fragment}" "${annotation_fragment}")"
                 curl -fsS --cacert "${ca_file}" -X PATCH \
                   -H "Authorization: Bearer ${token}" \
                   -H "Content-Type: application/merge-patch+json" \
@@ -118,12 +126,10 @@ spec:
                 country_data="$(detect_public_country || true)"
                 country_name="$(printf '%s\n' "${country_data}" | sed -n '1p')"
                 country_code="$(printf '%s\n' "${country_data}" | sed -n '2p')"
-                if [ -n "${country_name}" ] && [ -n "${country_code}" ]; then
-                  if ! patch_node_location "${country_name}" "${country_code}"; then
-                    echo "topology label patch failed for ${NODE_NAME}" >&2
-                    sleep 30
-                    continue
-                  fi
+                if ! patch_node_metadata "${country_name}" "${country_code}"; then
+                  echo "topology label patch failed for ${NODE_NAME}" >&2
+                  sleep 30
+                  continue
                 fi
                 sleep "${interval_seconds}"
               done

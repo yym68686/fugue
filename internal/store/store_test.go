@@ -973,6 +973,9 @@ func TestBootstrapClusterNodeTransfersOwnershipAcrossTenants(t *testing.T) {
 	if _, err := s.SetRuntimeAccessMode(runtimeA.ID, ownerA.ID, model.RuntimeAccessModePlatformShared); err != nil {
 		t.Fatalf("set cluster runtime platform-shared before transfer: %v", err)
 	}
+	if _, err := s.SetRuntimePoolMode(runtimeA.ID, model.RuntimePoolModeInternalShared); err != nil {
+		t.Fatalf("set cluster runtime shared-pool mode before transfer: %v", err)
+	}
 
 	visible, err := s.RuntimeVisibleToTenant(runtimeA.ID, viewer.ID, false)
 	if err != nil {
@@ -994,6 +997,9 @@ func TestBootstrapClusterNodeTransfersOwnershipAcrossTenants(t *testing.T) {
 	}
 	if runtimeB.AccessMode != model.RuntimeAccessModePrivate {
 		t.Fatalf("expected transferred cluster runtime to reset to private, got %q", runtimeB.AccessMode)
+	}
+	if runtimeB.PoolMode != model.RuntimePoolModeDedicated {
+		t.Fatalf("expected transferred cluster runtime to default to dedicated pool mode, got %q", runtimeB.PoolMode)
 	}
 	if runtimeB.ClusterNodeName == "" {
 		t.Fatal("expected transferred cluster runtime to keep a cluster node name")
@@ -1017,6 +1023,9 @@ func TestBootstrapClusterNodeTransfersOwnershipAcrossTenants(t *testing.T) {
 	}
 	if oldRuntime.AccessMode != model.RuntimeAccessModePrivate {
 		t.Fatalf("expected old cluster runtime access mode to reset to private, got %q", oldRuntime.AccessMode)
+	}
+	if oldRuntime.PoolMode != model.RuntimePoolModeDedicated {
+		t.Fatalf("expected old cluster runtime pool mode to reset to dedicated, got %q", oldRuntime.PoolMode)
 	}
 
 	visible, err = s.RuntimeVisibleToTenant(runtimeA.ID, viewer.ID, false)
@@ -1047,6 +1056,51 @@ func TestBootstrapClusterNodeTransfersOwnershipAcrossTenants(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected owner B to see transferred cluster runtime %s", runtimeB.ID)
+	}
+}
+
+func TestSetRuntimePoolModeOnlyAllowsManagedOwnedRuntimes(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Pool Mode Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, clusterSecret, err := s.CreateNodeKey(tenant.ID, "cluster")
+	if err != nil {
+		t.Fatalf("create cluster node key: %v", err)
+	}
+	_, managedRuntime, err := s.BootstrapClusterNode(clusterSecret, "worker", "https://worker.example.com", nil, "", "")
+	if err != nil {
+		t.Fatalf("bootstrap cluster node: %v", err)
+	}
+
+	updatedRuntime, err := s.SetRuntimePoolMode(managedRuntime.ID, model.RuntimePoolModeInternalShared)
+	if err != nil {
+		t.Fatalf("set managed runtime pool mode: %v", err)
+	}
+	if updatedRuntime.PoolMode != model.RuntimePoolModeInternalShared {
+		t.Fatalf("expected managed runtime pool mode %q, got %q", model.RuntimePoolModeInternalShared, updatedRuntime.PoolMode)
+	}
+
+	_, externalSecret, err := s.CreateNodeKey(tenant.ID, "external")
+	if err != nil {
+		t.Fatalf("create external node key: %v", err)
+	}
+	_, externalRuntime, _, err := s.BootstrapNode(externalSecret, "agent", "https://agent.example.com", nil, "", "")
+	if err != nil {
+		t.Fatalf("bootstrap external node: %v", err)
+	}
+	if _, err := s.SetRuntimePoolMode(externalRuntime.ID, model.RuntimePoolModeInternalShared); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for external runtime pool mode, got %v", err)
+	}
+	if _, err := s.SetRuntimePoolMode("runtime_managed_shared", model.RuntimePoolModeInternalShared); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for built-in shared runtime pool mode, got %v", err)
 	}
 }
 
