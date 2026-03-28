@@ -161,6 +161,22 @@ var postgresSchemaStatements = []string{
 	)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_apps_tenant_project_name_ci ON fugue_apps (tenant_id, project_id, lower(name))`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_apps_route_hostname_ci ON fugue_apps (lower((route_json->>'hostname'))) WHERE route_json IS NOT NULL AND COALESCE(route_json->>'hostname', '') <> ''`,
+	`CREATE TABLE IF NOT EXISTS fugue_app_domains (
+		hostname TEXT PRIMARY KEY,
+		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
+		app_id TEXT NOT NULL REFERENCES fugue_apps(id) ON DELETE CASCADE,
+		status TEXT NOT NULL,
+		verification_txt_name TEXT NOT NULL DEFAULT '',
+		verification_txt_value TEXT NOT NULL DEFAULT '',
+		route_target TEXT NOT NULL DEFAULT '',
+		last_message TEXT NOT NULL DEFAULT '',
+		last_checked_at TIMESTAMPTZ NULL,
+		verified_at TIMESTAMPTZ NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL
+	)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_app_domains_hostname_ci ON fugue_app_domains (lower(hostname))`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_app_domains_app_id ON fugue_app_domains (app_id, created_at ASC)`,
 	`CREATE TABLE IF NOT EXISTS fugue_backing_services (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,

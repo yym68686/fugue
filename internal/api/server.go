@@ -23,6 +23,7 @@ type Server struct {
 	log                         *log.Logger
 	appBaseDomain               string
 	apiPublicDomain             string
+	edgeTLSAskToken             string
 	registryPushBase            string
 	registryPullBase            string
 	clusterJoinRegistryEndpoint string
@@ -38,6 +39,7 @@ type Server struct {
 	newLogsClient               func(namespace string) (appLogsClient, error)
 	newWorkspacePodLister       func(namespace string) (workspacePodLister, error)
 	workspaceExecRunner         workspacePodExecRunner
+	dnsResolver                 appDomainDNSResolver
 	logStreamTuning             logStreamTuning
 	ready                       atomic.Bool
 }
@@ -52,6 +54,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		log:                         logger,
 		appBaseDomain:               strings.TrimSpace(strings.ToLower(cfg.AppBaseDomain)),
 		apiPublicDomain:             strings.TrimSpace(strings.ToLower(cfg.APIPublicDomain)),
+		edgeTLSAskToken:             strings.TrimSpace(cfg.EdgeTLSAskToken),
 		registryPushBase:            strings.TrimSpace(cfg.RegistryPushBase),
 		registryPullBase:            strings.TrimSpace(cfg.RegistryPullBase),
 		clusterJoinRegistryEndpoint: strings.TrimSpace(cfg.ClusterJoinRegistryEndpoint),
@@ -70,6 +73,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 			return newKubeLogsClient(namespace)
 		},
 		workspaceExecRunner: kubeWorkspaceExecRunner{},
+		dnsResolver:         netAppDomainResolver{},
 		logStreamTuning:     defaultLogStreamTuning(),
 	}
 	if server.registryPullBase == "" {
@@ -88,6 +92,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
+	mux.HandleFunc("GET /v1/edge/tls/ask", s.handleEdgeTLSAsk)
 
 	mux.Handle("GET /v1/tenants", s.auth.RequireAPI(http.HandlerFunc(s.handleListTenants)))
 	mux.Handle("POST /v1/tenants", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateTenant)))
@@ -135,6 +140,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/apps/import-github", s.auth.RequireAPI(http.HandlerFunc(s.handleImportGitHubApp)))
 	mux.Handle("POST /v1/apps/import-upload", s.auth.RequireAPI(http.HandlerFunc(s.handleImportUploadApp)))
 	mux.Handle("GET /v1/apps/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetApp)))
+	mux.Handle("GET /v1/apps/{id}/domains", s.auth.RequireAPI(http.HandlerFunc(s.handleListAppDomains)))
+	mux.Handle("GET /v1/apps/{id}/domains/availability", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppDomainAvailability)))
+	mux.Handle("POST /v1/apps/{id}/domains", s.auth.RequireAPI(http.HandlerFunc(s.handlePutAppDomain)))
+	mux.Handle("POST /v1/apps/{id}/domains/verify", s.auth.RequireAPI(http.HandlerFunc(s.handleVerifyAppDomain)))
+	mux.Handle("DELETE /v1/apps/{id}/domains", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteAppDomain)))
 	mux.Handle("GET /v1/apps/{id}/route/availability", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppRouteAvailability)))
 	mux.Handle("PATCH /v1/apps/{id}/route", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchAppRoute)))
 	mux.Handle("GET /v1/apps/{id}/bindings", s.auth.RequireAPI(http.HandlerFunc(s.handleListAppBindings)))

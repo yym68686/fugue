@@ -1888,7 +1888,13 @@ FROM fugue_apps
 WHERE lower(route_json->>'hostname') = lower($1)
 `, hostname))
 	if err != nil {
-		return model.App{}, mapDBErr(err)
+		if !errors.Is(mapDBErr(err), ErrNotFound) {
+			return model.App{}, mapDBErr(err)
+		}
+		app, err = s.pgGetVerifiedAppByCustomDomainHostname(ctx, hostname)
+		if err != nil {
+			return model.App{}, err
+		}
 	}
 	normalizeAppStatusForRead(&app)
 	if err := s.pgHydrateAppBackingServices(ctx, &app); err != nil {
@@ -2096,6 +2102,9 @@ func (s *Store) pgPurgeApp(id string) (model.App, error) {
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_apps WHERE id = $1`, app.ID); err != nil {
 		return model.App{}, fmt.Errorf("delete app %s: %w", app.ID, err)
+	}
+	if err := s.pgDeleteAppDomainsByAppTx(ctx, tx, app.ID); err != nil {
+		return model.App{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return model.App{}, fmt.Errorf("commit purge app transaction: %w", err)
@@ -2597,6 +2606,9 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string,
 		return model.Operation{}, err
 	}
 	if op.Type == model.OperationTypeDelete {
+		if err := s.pgDeleteAppDomainsByAppTx(ctx, tx, app.ID); err != nil {
+			return model.Operation{}, err
+		}
 		if err := s.pgDeleteServiceBindingsByAppTx(ctx, tx, app.ID); err != nil {
 			return model.Operation{}, err
 		}

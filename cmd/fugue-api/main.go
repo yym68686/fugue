@@ -26,6 +26,7 @@ func main() {
 	server := api.NewServer(store, auth.New(store, cfg.BootstrapAdminKey), logger, api.ServerConfig{
 		AppBaseDomain:               cfg.AppBaseDomain,
 		APIPublicDomain:             cfg.APIPublicDomain,
+		EdgeTLSAskToken:             cfg.EdgeTLSAskToken,
 		RegistryPushBase:            cfg.RegistryPushBase,
 		RegistryPullBase:            cfg.RegistryPullBase,
 		ClusterJoinRegistryEndpoint: cfg.ClusterJoinRegistryEndpoint,

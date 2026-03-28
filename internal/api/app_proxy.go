@@ -20,15 +20,18 @@ func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) boo
 	if idx := strings.Index(host, ":"); idx >= 0 {
 		host = host[:idx]
 	}
-	if !s.isAppHostname(host) {
+	if s.isReservedAppHostname(host) {
 		return false
 	}
 
 	app, err := s.store.GetAppByHostname(host)
 	if err != nil {
 		if err == store.ErrNotFound {
-			http.NotFound(w, r)
-			return true
+			if s.isAppHostname(host) {
+				http.NotFound(w, r)
+				return true
+			}
+			return false
 		}
 		http.Error(w, "app lookup failed", http.StatusInternalServerError)
 		return true

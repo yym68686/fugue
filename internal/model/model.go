@@ -289,6 +289,26 @@ type AppRoute struct {
 	ServicePort int    `json:"service_port,omitempty"`
 }
 
+const (
+	AppDomainStatusPending  = "pending"
+	AppDomainStatusVerified = "verified"
+)
+
+type AppDomain struct {
+	Hostname             string     `json:"hostname"`
+	AppID                string     `json:"app_id,omitempty"`
+	TenantID             string     `json:"tenant_id,omitempty"`
+	Status               string     `json:"status"`
+	VerificationTXTName  string     `json:"verification_txt_name,omitempty"`
+	VerificationTXTValue string     `json:"verification_txt_value,omitempty"`
+	RouteTarget          string     `json:"route_target,omitempty"`
+	LastMessage          string     `json:"last_message,omitempty"`
+	LastCheckedAt        *time.Time `json:"last_checked_at,omitempty"`
+	VerifiedAt           *time.Time `json:"verified_at,omitempty"`
+	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
+}
+
 type AppSpec struct {
 	Image        string            `json:"image"`
 	Command      []string          `json:"command,omitempty"`
@@ -492,6 +512,7 @@ type State struct {
 	Runtimes         []Runtime            `json:"runtimes"`
 	RuntimeGrants    []RuntimeAccessGrant `json:"runtime_grants"`
 	Apps             []App                `json:"apps"`
+	AppDomains       []AppDomain          `json:"app_domains"`
 	BackingServices  []BackingService     `json:"backing_services"`
 	ServiceBindings  []ServiceBinding     `json:"service_bindings"`
 	Operations       []Operation          `json:"operations"`

@@ -92,6 +92,11 @@ spec:
               value: {{ .Values.api.appBaseDomain | quote }}
             - name: FUGUE_API_PUBLIC_DOMAIN
               value: {{ .Values.api.apiPublicDomain | quote }}
+            - name: FUGUE_EDGE_TLS_ASK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: FUGUE_EDGE_TLS_ASK_TOKEN
             - name: FUGUE_REGISTRY_PUSH_BASE
               value: {{ .Values.api.registryPushBase | quote }}
             - name: FUGUE_REGISTRY_PULL_BASE

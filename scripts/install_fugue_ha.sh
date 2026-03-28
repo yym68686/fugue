@@ -32,6 +32,7 @@ PUBLIC_ENDPOINT_HOST="${FUGUE_PUBLIC_ENDPOINT_HOST:-}"
 FUGUE_DOMAIN="${FUGUE_DOMAIN:-}"
 FUGUE_APP_BASE_DOMAIN="${FUGUE_APP_BASE_DOMAIN:-fugue.pro}"
 FUGUE_REGISTRY_DOMAIN="${FUGUE_REGISTRY_DOMAIN:-registry.${FUGUE_APP_BASE_DOMAIN}}"
+FUGUE_EDGE_TLS_ASK_TOKEN="${FUGUE_EDGE_TLS_ASK_TOKEN:-}"
 FUGUE_MESH_ENABLED="${FUGUE_MESH_ENABLED:-false}"
 FUGUE_MESH_PROVIDER="${FUGUE_MESH_PROVIDER:-tailscale}"
 FUGUE_MESH_DOMAIN="${FUGUE_MESH_DOMAIN:-mesh.${FUGUE_APP_BASE_DOMAIN}}"
@@ -201,6 +202,19 @@ maybe_reuse_existing_mesh_auth_key() {
   if [[ -n "${existing_key}" ]]; then
     FUGUE_MESH_AUTH_KEY="${existing_key}"
     log "reusing existing mesh auth key from ${NAMESPACE}/${CONFIG_SECRET_NAME}"
+  fi
+}
+
+maybe_reuse_existing_edge_tls_ask_token() {
+  if [[ -n "${FUGUE_EDGE_TLS_ASK_TOKEN}" ]]; then
+    return
+  fi
+
+  local existing_key=""
+  existing_key="$(ssh_root_run "${PRIMARY_ALIAS}" "KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n $(printf '%q' "${NAMESPACE}") get secret $(printf '%q' "${CONFIG_SECRET_NAME}") -o jsonpath='{.data.FUGUE_EDGE_TLS_ASK_TOKEN}' 2>/dev/null | base64 -d 2>/dev/null || true")"
+  if [[ -n "${existing_key}" ]]; then
+    FUGUE_EDGE_TLS_ASK_TOKEN="${existing_key}"
+    log "reusing existing edge TLS ask token from ${NAMESPACE}/${CONFIG_SECRET_NAME}"
   fi
 }
 
@@ -758,7 +772,7 @@ EOF
 )"
   fi
 
-  log "installing Route A edge proxy on ${PRIMARY_ALIAS} for ${FUGUE_DOMAIN}, ${FUGUE_REGISTRY_DOMAIN}, and *.${FUGUE_APP_BASE_DOMAIN}"
+  log "installing Route A edge proxy on ${PRIMARY_ALIAS} for ${FUGUE_DOMAIN}, ${FUGUE_REGISTRY_DOMAIN}, *.${FUGUE_APP_BASE_DOMAIN}, and verified custom app domains"
   ssh_root "${PRIMARY_ALIAS}" <<EOF
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -776,6 +790,9 @@ fi
 cat >/etc/caddy/Caddyfile <<'CADDY'
 {
   admin off
+  on_demand_tls {
+    ask http://${EDGE_UPSTREAM}/v1/edge/tls/ask?token=${FUGUE_EDGE_TLS_ASK_TOKEN}
+  }
 }
 
 https://${FUGUE_DOMAIN} {
@@ -794,6 +811,14 @@ ${mesh_site_block}
 
 https://*.${FUGUE_APP_BASE_DOMAIN} {
   ${app_tls_directive}
+  encode gzip zstd
+  reverse_proxy ${EDGE_UPSTREAM}
+}
+
+https:// {
+  tls {
+    on_demand
+  }
   encode gzip zstd
   reverse_proxy ${EDGE_UPSTREAM}
 }
@@ -1153,6 +1178,7 @@ api:
     pullPolicy: IfNotPresent
   appBaseDomain: "${FUGUE_APP_BASE_DOMAIN}"
   apiPublicDomain: "${FUGUE_DOMAIN}"
+  edgeTLSAskToken: "${FUGUE_EDGE_TLS_ASK_TOKEN}"
   registryPushBase: "${registry_push_base}"
   registryPullBase: "${registry_pull_base}"
   clusterJoinRegistryEndpoint: "${cluster_join_registry_endpoint}"
@@ -1592,8 +1618,12 @@ main() {
   push_and_import_images "${SECONDARY_ALIASES[1]}"
   install_helm_on_primary
   maybe_reuse_existing_bootstrap_key
+  maybe_reuse_existing_edge_tls_ask_token
   if [[ -z "${BOOTSTRAP_KEY}" ]]; then
     BOOTSTRAP_KEY="$(generate_secret)"
+  fi
+  if [[ -z "${FUGUE_EDGE_TLS_ASK_TOKEN}" ]]; then
+    FUGUE_EDGE_TLS_ASK_TOKEN="$(generate_secret)"
   fi
   backup_legacy_store_on_primary
   write_values_override

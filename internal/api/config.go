@@ -3,6 +3,7 @@ package api
 type ServerConfig struct {
 	AppBaseDomain               string
 	APIPublicDomain             string
+	EdgeTLSAskToken             string
 	RegistryPushBase            string
 	RegistryPullBase            string
 	ClusterJoinRegistryEndpoint string

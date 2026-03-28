@@ -15,6 +15,7 @@ type APIConfig struct {
 	BootstrapAdminKey           string
 	AppBaseDomain               string
 	APIPublicDomain             string
+	EdgeTLSAskToken             string
 	RegistryPushBase            string
 	RegistryPullBase            string
 	ClusterJoinRegistryEndpoint string
@@ -82,6 +83,7 @@ func APIFromEnv() APIConfig {
 		BootstrapAdminKey:           getenv("FUGUE_BOOTSTRAP_ADMIN_KEY", "fugue_bootstrap_admin_change_me"),
 		AppBaseDomain:               getenv("FUGUE_APP_BASE_DOMAIN", "fugue.pro"),
 		APIPublicDomain:             getenv("FUGUE_API_PUBLIC_DOMAIN", "api.fugue.pro"),
+		EdgeTLSAskToken:             strings.TrimSpace(os.Getenv("FUGUE_EDGE_TLS_ASK_TOKEN")),
 		RegistryPushBase:            getenv("FUGUE_REGISTRY_PUSH_BASE", "127.0.0.1:30500"),
 		RegistryPullBase:            strings.TrimSpace(os.Getenv("FUGUE_REGISTRY_PULL_BASE")),
 		ClusterJoinRegistryEndpoint: strings.TrimSpace(os.Getenv("FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT")),

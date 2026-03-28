@@ -1717,7 +1717,7 @@ func (s *Store) GetApp(id string) (model.App, error) {
 }
 
 func (s *Store) GetAppByHostname(hostname string) (model.App, error) {
-	hostname = strings.TrimSpace(strings.ToLower(hostname))
+	hostname = normalizeAppDomainHostname(hostname)
 	if s.usingDatabase() {
 		return s.pgGetAppByHostname(hostname)
 	}
@@ -1735,6 +1735,17 @@ func (s *Store) GetAppByHostname(hostname string) (model.App, error) {
 				normalizeAppStatusForRead(&app)
 				hydrateAppBackingServices(state, &app)
 				return nil
+			}
+		}
+		if domain, found := activeAppDomainByHostname(state, hostname); found {
+			index := findApp(state, domain.AppID)
+			if index >= 0 {
+				app = state.Apps[index]
+				normalizeAppStatusForRead(&app)
+				hydrateAppBackingServices(state, &app)
+				if !isDeletedApp(app) {
+					return nil
+				}
 			}
 		}
 		return ErrNotFound
@@ -1840,6 +1851,7 @@ func (s *Store) PurgeApp(id string) (model.App, error) {
 		}
 
 		state.Apps = append(state.Apps[:index], state.Apps[index+1:]...)
+		deleteAppDomainsByApp(state, id)
 		state.ServiceBindings = deleteServiceBindingsByApp(state.ServiceBindings, id)
 		state.BackingServices = deleteOwnedBackingServicesByApp(state.BackingServices, id)
 		state.Operations = deleteOperationsByApp(state.Operations, id)
@@ -2134,6 +2146,9 @@ func (s *Store) completeOperation(id, runtimeID, manifestPath, message string, d
 		if err := applyOperationToApp(state, &state.Operations[index]); err != nil {
 			return err
 		}
+		if state.Operations[index].Type == model.OperationTypeDelete {
+			deleteAppDomainsByApp(state, state.Operations[index].AppID)
+		}
 		op = state.Operations[index]
 		return nil
 	})
@@ -2348,6 +2363,9 @@ func ensureDefaults(state *model.State) {
 	}
 	if state.Apps == nil {
 		state.Apps = []model.App{}
+	}
+	if state.AppDomains == nil {
+		state.AppDomains = []model.AppDomain{}
 	}
 	if state.BackingServices == nil {
 		state.BackingServices = []model.BackingService{}

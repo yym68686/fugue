@@ -9,6 +9,7 @@ api:
   databaseURL: ""
   appBaseDomain: fugue.pro
   apiPublicDomain: api.fugue.pro
+  edgeTLSAskToken: ""
   registryPushBase: registry.fugue.pro
   registryPullBase: ""
   clusterJoinRegistryEndpoint: ""
