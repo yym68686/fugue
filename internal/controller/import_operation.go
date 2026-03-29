@@ -100,6 +100,12 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		return err
 	}
 
+	composeSuggestedEnv, composeEnvErr := s.suggestComposeServiceEnv(importCtx, app, *op.DesiredSource)
+	if composeEnvErr != nil && s.Logger != nil {
+		s.Logger.Printf("skip compose env refresh for app %s source=%s compose_service=%s: %v", app.ID, op.DesiredSource.Type, op.DesiredSource.ComposeService, composeEnvErr)
+	}
+	output.ImportResult.SuggestedEnv = mergeSuggestedImportEnv(output.ImportResult.SuggestedEnv, composeSuggestedEnv)
+
 	finalSpec := cloneImportSpec(*op.DesiredSpec)
 	finalSource := output.Source
 	runtimeImageRef, err := rewriteImportedImageRef(strings.TrimSpace(output.ImportResult.ImageRef), s.registryPushBase, s.registryPullBase)
@@ -221,6 +227,111 @@ func mergeImportEnv(current, suggested map[string]string) map[string]string {
 		return nil
 	}
 	return merged
+}
+
+func mergeSuggestedImportEnv(base, override map[string]string) map[string]string {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+	merged := make(map[string]string, len(base)+len(override))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range override {
+		merged[key] = value
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
+}
+
+func (s *Service) suggestComposeServiceEnv(ctx context.Context, app model.App, source model.AppSource) (map[string]string, error) {
+	composeService := strings.TrimSpace(source.ComposeService)
+	if composeService == "" {
+		return nil, nil
+	}
+
+	appHosts, managedPostgresByOwner, err := s.projectComposeServiceState(app)
+	if err != nil {
+		return nil, err
+	}
+
+	switch strings.TrimSpace(source.Type) {
+	case model.AppSourceTypeGitHubPublic:
+		return s.importer.SuggestPublicGitHubComposeServiceEnv(ctx, sourceimport.GitHubComposeServiceEnvRequest{
+			RepoURL:                strings.TrimSpace(source.RepoURL),
+			Branch:                 strings.TrimSpace(source.RepoBranch),
+			ComposeService:         composeService,
+			AppHosts:               appHosts,
+			ManagedPostgresByOwner: managedPostgresByOwner,
+		})
+	case model.AppSourceTypeUpload:
+		if strings.TrimSpace(source.UploadID) == "" {
+			return nil, nil
+		}
+		upload, archiveBytes, err := s.Store.GetSourceUploadArchive(strings.TrimSpace(source.UploadID))
+		if err != nil {
+			return nil, fmt.Errorf("load source upload %s for compose env refresh: %w", source.UploadID, err)
+		}
+		return s.importer.SuggestUploadedComposeServiceEnv(ctx, sourceimport.UploadComposeServiceEnvRequest{
+			ArchiveFilename:        upload.Filename,
+			ArchiveSHA256:          upload.SHA256,
+			ArchiveSizeBytes:       upload.SizeBytes,
+			ArchiveData:            archiveBytes,
+			AppName:                app.Name,
+			ComposeService:         composeService,
+			AppHosts:               appHosts,
+			ManagedPostgresByOwner: managedPostgresByOwner,
+		})
+	default:
+		return nil, nil
+	}
+}
+
+func (s *Service) projectComposeServiceState(app model.App) (map[string]string, map[string]model.AppPostgresSpec, error) {
+	apps, err := s.Store.ListApps(app.TenantID, false)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list project apps for compose env refresh: %w", err)
+	}
+
+	appHosts := make(map[string]string)
+	managedPostgresByOwner := make(map[string]model.AppPostgresSpec)
+	for _, candidate := range apps {
+		if candidate.ProjectID != app.ProjectID || candidate.Source == nil {
+			continue
+		}
+		composeService := strings.TrimSpace(candidate.Source.ComposeService)
+		if composeService == "" {
+			continue
+		}
+		appHosts[composeService] = strings.TrimSpace(candidate.Name)
+		if postgres := appOwnedPostgresSpec(candidate); postgres != nil {
+			managedPostgresByOwner[composeService] = *postgres
+		}
+	}
+	if len(appHosts) == 0 {
+		return nil, nil, nil
+	}
+	if len(managedPostgresByOwner) == 0 {
+		managedPostgresByOwner = nil
+	}
+	return appHosts, managedPostgresByOwner, nil
+}
+
+func appOwnedPostgresSpec(app model.App) *model.AppPostgresSpec {
+	if app.Spec.Postgres != nil {
+		specCopy := *app.Spec.Postgres
+		return &specCopy
+	}
+	for _, service := range app.BackingServices {
+		if service.Type != model.BackingServiceTypePostgres || service.Spec.Postgres == nil {
+			continue
+		}
+		specCopy := *service.Spec.Postgres
+		return &specCopy
+	}
+	return nil
 }
 
 func cloneImportSpec(spec model.AppSpec) model.AppSpec {

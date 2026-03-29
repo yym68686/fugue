@@ -31,6 +31,8 @@ type Service struct {
 type sourceImporter interface {
 	ImportPublicGitHubSource(context.Context, sourceimport.GitHubSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error)
 	ImportUploadedArchiveSource(context.Context, sourceimport.UploadSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error)
+	SuggestPublicGitHubComposeServiceEnv(context.Context, sourceimport.GitHubComposeServiceEnvRequest) (map[string]string, error)
+	SuggestUploadedComposeServiceEnv(context.Context, sourceimport.UploadComposeServiceEnvRequest) (map[string]string, error)
 }
 
 func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *Service {
