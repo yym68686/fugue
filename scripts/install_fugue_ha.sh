@@ -1101,27 +1101,30 @@ install_edge_proxy_on_primary() {
   determine_registry_upstream
   determine_headscale_upstream
 
-  local app_tls_directive="tls internal"
+  local app_host_tls_directive="tls internal"
+  local app_root_tls_directive=$'tls {\n    on_demand\n  }'
   local app_root_site_block=""
   if [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && app_tls_cert_matches_domain; then
     log "uploading wildcard app TLS material to ${PRIMARY_ALIAS}"
     prepare_remote_tmp "${PRIMARY_ALIAS}"
     scp_to "${FUGUE_APP_TLS_CERT_FILE}" "${PRIMARY_ALIAS}" "${REMOTE_TMP_BASE}/cloudflare-apps-origin.crt"
     scp_to "${FUGUE_APP_TLS_KEY_FILE}" "${PRIMARY_ALIAS}" "${REMOTE_TMP_BASE}/cloudflare-apps-origin.key"
-    app_tls_directive="tls /etc/caddy/tls/cloudflare-apps-origin.crt /etc/caddy/tls/cloudflare-apps-origin.key"
+    app_host_tls_directive="tls /etc/caddy/tls/cloudflare-apps-origin.crt /etc/caddy/tls/cloudflare-apps-origin.key"
+    app_root_tls_directive="${app_host_tls_directive}"
   elif [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && remote_app_tls_cert_matches_domain; then
     log "reusing existing wildcard app TLS material already installed on ${PRIMARY_ALIAS}"
-    app_tls_directive="tls /etc/caddy/tls/cloudflare-apps-origin.crt /etc/caddy/tls/cloudflare-apps-origin.key"
+    app_host_tls_directive="tls /etc/caddy/tls/cloudflare-apps-origin.crt /etc/caddy/tls/cloudflare-apps-origin.key"
+    app_root_tls_directive="${app_host_tls_directive}"
   elif [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && remote_has_app_tls_material; then
-    fail "existing app TLS material on ${PRIMARY_ALIAS} does not match ${FUGUE_APP_BASE_DOMAIN}; upload a matching certificate or remove the stale files"
+    log "existing app TLS material on ${PRIMARY_ALIAS} does not match ${FUGUE_APP_BASE_DOMAIN}; ignoring it and using on-demand TLS for ${FUGUE_APP_BASE_DOMAIN}"
   elif [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && has_app_tls_material; then
-    log "wildcard app TLS cert does not match ${FUGUE_APP_BASE_DOMAIN}; using tls internal for app hosts"
+    log "wildcard app TLS cert does not match ${FUGUE_APP_BASE_DOMAIN}; using on-demand TLS for ${FUGUE_APP_BASE_DOMAIN} and tls internal for app hosts"
   fi
 
   if app_base_domain_needs_explicit_edge_site; then
     app_root_site_block="$(cat <<EOF
 https://${FUGUE_APP_BASE_DOMAIN} {
-  ${app_tls_directive}
+  ${app_root_tls_directive}
   encode gzip zstd
   reverse_proxy ${EDGE_UPSTREAM}
 }
@@ -1133,7 +1136,7 @@ EOF
   if mesh_enabled; then
     mesh_site_block="$(cat <<EOF
 https://${FUGUE_MESH_DOMAIN} {
-  ${app_tls_directive}
+  ${app_host_tls_directive}
   encode gzip zstd
   reverse_proxy ${HEADSCALE_EDGE_UPSTREAM}
 }
@@ -1181,7 +1184,7 @@ ${mesh_site_block}
 ${app_root_site_block}
 
 https://*.${FUGUE_APP_BASE_DOMAIN} {
-  ${app_tls_directive}
+  ${app_host_tls_directive}
   encode gzip zstd
   reverse_proxy ${EDGE_UPSTREAM}
 }
