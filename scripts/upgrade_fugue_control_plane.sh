@@ -22,6 +22,8 @@ command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
+CONTROL_PLANE_AUTOMATION_TMP_DIR=""
+
 detect_primary_private_ip() {
   ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}'
 }
@@ -135,6 +137,74 @@ smoke_test() {
   curl -fsS --max-time 10 "${FUGUE_SMOKE_URL}" >/dev/null
 }
 
+cleanup_control_plane_automation_tmp() {
+  if [[ -n "${CONTROL_PLANE_AUTOMATION_TMP_DIR}" && -d "${CONTROL_PLANE_AUTOMATION_TMP_DIR}" ]]; then
+    rm -rf "${CONTROL_PLANE_AUTOMATION_TMP_DIR}"
+  fi
+}
+
+control_plane_automation_secret_field() {
+  local field="$1"
+  local template="{{index .data \"${field}\"}}"
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get secret "${FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME}" -o go-template="${template}" 2>/dev/null || true
+}
+
+prepare_control_plane_automation_ssh() {
+  local private_key_b64=""
+  local known_hosts_b64=""
+  local hosts_env_b64=""
+
+  if [[ -n "${FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE:-}" && -r "${FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE}" ]] && \
+     [[ -n "${FUGUE_CONTROL_PLANE_SSH_KEY_FILE:-}" && -r "${FUGUE_CONTROL_PLANE_SSH_KEY_FILE}" ]] && \
+     [[ -n "${FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE:-}" && -r "${FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE}" ]]; then
+    export FUGUE_USE_CONTROL_PLANE_AUTOMATION_SSH=true
+    return
+  fi
+
+  private_key_b64="$(control_plane_automation_secret_field "ssh-private-key" | tr -d '\r\n')"
+  known_hosts_b64="$(control_plane_automation_secret_field "ssh-known-hosts" | tr -d '\r\n')"
+  hosts_env_b64="$(control_plane_automation_secret_field "hosts.env" | tr -d '\r\n')"
+
+  if [[ -z "${private_key_b64}" || -z "${known_hosts_b64}" || -z "${hosts_env_b64}" ]]; then
+    fail "missing control-plane automation SSH bundle in ${FUGUE_NAMESPACE}/${FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME}; run the install/update script once to publish it"
+  fi
+
+  if [[ -z "${CONTROL_PLANE_AUTOMATION_TMP_DIR}" ]]; then
+    CONTROL_PLANE_AUTOMATION_TMP_DIR="$(mktemp -d)"
+    trap cleanup_control_plane_automation_tmp EXIT
+  fi
+
+  FUGUE_CONTROL_PLANE_SSH_KEY_FILE="${CONTROL_PLANE_AUTOMATION_TMP_DIR}/control-plane-id_ed25519"
+  FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE="${CONTROL_PLANE_AUTOMATION_TMP_DIR}/control-plane-known_hosts"
+  FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE="${CONTROL_PLANE_AUTOMATION_TMP_DIR}/control-plane-hosts.env"
+
+  printf '%s' "${private_key_b64}" | base64 --decode >"${FUGUE_CONTROL_PLANE_SSH_KEY_FILE}"
+  chmod 0600 "${FUGUE_CONTROL_PLANE_SSH_KEY_FILE}"
+  printf '%s' "${known_hosts_b64}" | base64 --decode >"${FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE}"
+  chmod 0644 "${FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE}"
+  printf '%s' "${hosts_env_b64}" | base64 --decode >"${FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE}"
+  chmod 0644 "${FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE}"
+  export FUGUE_CONTROL_PLANE_SSH_KEY_FILE
+  export FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE
+  export FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE
+  export FUGUE_USE_CONTROL_PLANE_AUTOMATION_SSH=true
+}
+
+sync_route_a_edge_proxy() {
+  if [[ "${FUGUE_SYNC_EDGE_PROXY:-true}" != "true" ]]; then
+    log "skip Route A edge proxy sync because FUGUE_SYNC_EDGE_PROXY=${FUGUE_SYNC_EDGE_PROXY}"
+    return
+  fi
+  if [[ -z "${FUGUE_API_PUBLIC_DOMAIN:-}" ]]; then
+    return
+  fi
+
+  prepare_control_plane_automation_ssh
+  export FUGUE_DOMAIN="${FUGUE_API_PUBLIC_DOMAIN}"
+  log "syncing Route A edge proxy through scripts/sync_fugue_edge_proxy.sh"
+  bash ./scripts/sync_fugue_edge_proxy.sh
+}
+
 rollback_release() {
   local rollback_api_deployment="${FUGUE_API_DEPLOYMENT_NAME}"
 
@@ -186,6 +256,10 @@ main() {
   FUGUE_CONTROLLER_REPLICA_COUNT="${FUGUE_CONTROLLER_REPLICA_COUNT:-2}"
   FUGUE_REGISTRY_NODEPORT="${FUGUE_REGISTRY_NODEPORT:-30500}"
   FUGUE_REGISTRY_SERVICE_PORT="${FUGUE_REGISTRY_SERVICE_PORT:-5000}"
+  FUGUE_API_PUBLIC_DOMAIN="${FUGUE_API_PUBLIC_DOMAIN:-}"
+  FUGUE_APP_BASE_DOMAIN="${FUGUE_APP_BASE_DOMAIN:-fugue.pro}"
+  FUGUE_CUSTOM_DOMAIN_BASE_DOMAIN="${FUGUE_CUSTOM_DOMAIN_BASE_DOMAIN:-}"
+  FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME="${FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME:-${FUGUE_RELEASE_FULLNAME}-control-plane-automation}"
 
   if [[ -z "${FUGUE_REGISTRY_PUSH_BASE:-}" ]]; then
     FUGUE_REGISTRY_PUSH_BASE="${FUGUE_RELEASE_FULLNAME}-registry.${FUGUE_NAMESPACE}.svc.cluster.local:${FUGUE_REGISTRY_SERVICE_PORT}"
@@ -232,6 +306,8 @@ main() {
   log "registry push base: ${FUGUE_REGISTRY_PUSH_BASE}"
   log "registry pull base: ${FUGUE_REGISTRY_PULL_BASE}"
   log "cluster join registry endpoint: ${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}"
+  log "app base domain: ${FUGUE_APP_BASE_DOMAIN}"
+  log "custom domain base domain: ${FUGUE_CUSTOM_DOMAIN_BASE_DOMAIN:-<unset>}"
 
   apply_chart_crds
 
@@ -249,6 +325,9 @@ main() {
     --set-string api.image.tag="${FUGUE_API_IMAGE_TAG}" \
     --set-string controller.image.repository="${FUGUE_CONTROLLER_IMAGE_REPOSITORY}" \
     --set-string controller.image.tag="${FUGUE_CONTROLLER_IMAGE_TAG}" \
+    --set-string api.appBaseDomain="${FUGUE_APP_BASE_DOMAIN}" \
+    --set-string api.customDomainBaseDomain="${FUGUE_CUSTOM_DOMAIN_BASE_DOMAIN}" \
+    --set-string api.apiPublicDomain="${FUGUE_API_PUBLIC_DOMAIN}" \
     --set-string api.registryPushBase="${FUGUE_REGISTRY_PUSH_BASE}" \
     --set-string api.registryPullBase="${FUGUE_REGISTRY_PULL_BASE}" \
     --set-string api.clusterJoinRegistryEndpoint="${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}" \
@@ -289,6 +368,8 @@ main() {
     rollback_release || true
     fail "controller rollout failed"
   fi
+
+  sync_route_a_edge_proxy
 
   if ! retry "${FUGUE_SMOKE_RETRIES}" "${FUGUE_SMOKE_DELAY_SECONDS}" smoke_test; then
     log "smoke test failed; attempting rollback"

@@ -148,19 +148,13 @@ jobs:
           FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
           FUGUE_RELEASE_FULLNAME: ${{ vars.FUGUE_RELEASE_FULLNAME || 'fugue-fugue' }}
           FUGUE_API_PUBLIC_DOMAIN: ${{ vars.FUGUE_API_PUBLIC_DOMAIN || 'api.fugue.pro' }}
+          FUGUE_APP_BASE_DOMAIN: ${{ vars.FUGUE_APP_BASE_DOMAIN || 'fugue.pro' }}
+          FUGUE_CUSTOM_DOMAIN_BASE_DOMAIN: ${{ vars.FUGUE_CUSTOM_DOMAIN_BASE_DOMAIN || '' }}
+          FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME: ${{ vars.FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME || '' }}
+          FUGUE_SYNC_EDGE_PROXY: 'true'
           FUGUE_SMOKE_URL: ${{ vars.FUGUE_SMOKE_URL || '' }}
           FUGUE_API_IMAGE_REPOSITORY: ${{ needs.build.outputs.api_image_repository }}
           FUGUE_API_IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
           FUGUE_CONTROLLER_IMAGE_REPOSITORY: ${{ needs.build.outputs.controller_image_repository }}
           FUGUE_CONTROLLER_IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
         run: ./scripts/upgrade_fugue_control_plane.sh
-
-      - name: Sync Route A edge proxy
-        env:
-          FUGUE_NODE1: ${{ vars.FUGUE_NODE1 || 'gcp1' }}
-          FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
-          FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
-          FUGUE_RELEASE_FULLNAME: ${{ vars.FUGUE_RELEASE_FULLNAME || 'fugue-fugue' }}
-          FUGUE_DOMAIN: ${{ vars.FUGUE_API_PUBLIC_DOMAIN || 'api.fugue.pro' }}
-          FUGUE_APP_BASE_DOMAIN: ${{ vars.FUGUE_APP_BASE_DOMAIN || 'fugue.pro' }}
-        run: bash ./scripts/sync_fugue_edge_proxy.sh

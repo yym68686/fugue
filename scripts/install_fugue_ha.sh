@@ -12,6 +12,7 @@ ALL_ALIASES=("${PRIMARY_ALIAS}" "${SECONDARY_ALIASES[@]}")
 RELEASE_NAME="${FUGUE_RELEASE_NAME:-fugue}"
 NAMESPACE="${FUGUE_NAMESPACE:-fugue-system}"
 RELEASE_FULLNAME="${FUGUE_RELEASE_FULLNAME:-${RELEASE_NAME}-fugue}"
+CONTROL_PLANE_AUTOMATION_SECRET_NAME="${FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME:-${RELEASE_FULLNAME}-control-plane-automation}"
 API_DEPLOYMENT_NAME="${FUGUE_API_DEPLOYMENT_NAME:-${RELEASE_FULLNAME}-api}"
 CONTROLLER_DEPLOYMENT_NAME="${FUGUE_CONTROLLER_DEPLOYMENT_NAME:-${RELEASE_FULLNAME}-controller}"
 CONFIG_SECRET_NAME="${FUGUE_CONFIG_SECRET_NAME:-${RELEASE_FULLNAME}-config}"
@@ -26,6 +27,11 @@ REGISTRY_NODEPORT="${FUGUE_REGISTRY_NODEPORT:-30500}"
 HEADSCALE_NODEPORT="${FUGUE_HEADSCALE_NODEPORT:-30443}"
 IMAGE_TAG="${FUGUE_IMAGE_TAG:-local-$(date +%Y%m%d%H%M%S)}"
 DIST_DIR="${FUGUE_DIST_DIR:-${REPO_ROOT}/.dist/fugue-install}"
+CONTROL_PLANE_HOSTS_ENV_FILE="${FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE:-${DIST_DIR}/control-plane-hosts.env}"
+CONTROL_PLANE_SSH_KEY_FILE="${FUGUE_CONTROL_PLANE_SSH_KEY_FILE:-${DIST_DIR}/control-plane-id_ed25519}"
+CONTROL_PLANE_SSH_PUBLIC_KEY_FILE="${FUGUE_CONTROL_PLANE_SSH_PUBLIC_KEY_FILE:-${CONTROL_PLANE_SSH_KEY_FILE}.pub}"
+CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE="${FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE:-${DIST_DIR}/control-plane-known_hosts}"
+USE_CONTROL_PLANE_AUTOMATION_SSH="${FUGUE_USE_CONTROL_PLANE_AUTOMATION_SSH:-false}"
 BOOTSTRAP_KEY="${FUGUE_BOOTSTRAP_KEY:-}"
 K3S_API_IP="${FUGUE_K3S_API_IP:-}"
 PUBLIC_ENDPOINT_HOST="${FUGUE_PUBLIC_ENDPOINT_HOST:-}"
@@ -69,6 +75,12 @@ SSH_OPTS=(
   -o "ServerAliveInterval=${SSH_SERVER_ALIVE_INTERVAL}"
   -o "ServerAliveCountMax=${SSH_SERVER_ALIVE_COUNT_MAX}"
 )
+
+CONTROL_PLANE_HOSTS_ENV_LOADED="false"
+RESOLVED_SSH_HOST=""
+RESOLVED_SSH_USER=""
+RESOLVED_SSH_PORT=""
+RESOLVED_SSH_OPTS=()
 
 log() {
   printf '[fugue-install] %s\n' "$*"
@@ -263,10 +275,139 @@ app_base_domain_needs_explicit_edge_site() {
   return 0
 }
 
+control_plane_bundle_files_present() {
+  [[ -r "${CONTROL_PLANE_HOSTS_ENV_FILE}" && -r "${CONTROL_PLANE_SSH_KEY_FILE}" && -r "${CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE}" ]]
+}
+
+control_plane_bundle_available() {
+  [[ "${USE_CONTROL_PLANE_AUTOMATION_SSH}" == "true" ]] || return 1
+  control_plane_bundle_files_present
+}
+
+load_control_plane_hosts_env() {
+  if [[ "${CONTROL_PLANE_HOSTS_ENV_LOADED}" == "true" ]]; then
+    return
+  fi
+  CONTROL_PLANE_HOSTS_ENV_LOADED="true"
+  if [[ -r "${CONTROL_PLANE_HOSTS_ENV_FILE}" ]]; then
+    # shellcheck disable=SC1090
+    source "${CONTROL_PLANE_HOSTS_ENV_FILE}"
+  fi
+}
+
+control_plane_slot_for_host() {
+  local host="$1"
+  local slot alias_var host_var
+
+  load_control_plane_hosts_env
+
+  for slot in 1 2 3; do
+    alias_var="FUGUE_NODE${slot}_ALIAS"
+    host_var="FUGUE_NODE${slot}_HOST"
+    if [[ "${host}" == "${!alias_var-}" || "${host}" == "${!host_var-}" ]]; then
+      printf '%s' "${slot}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_ssh_target() {
+  local host="$1"
+  local slot host_var user_var port_var
+
+  RESOLVED_SSH_HOST="${host}"
+  RESOLVED_SSH_USER=""
+  RESOLVED_SSH_PORT=""
+
+  if ! control_plane_bundle_available; then
+    return 0
+  fi
+
+  slot="$(control_plane_slot_for_host "${host}" || true)"
+  if [[ -z "${slot}" ]]; then
+    return 0
+  fi
+
+  host_var="FUGUE_NODE${slot}_HOST"
+  user_var="FUGUE_NODE${slot}_USER"
+  port_var="FUGUE_NODE${slot}_PORT"
+  if [[ -n "${!host_var-}" ]]; then
+    RESOLVED_SSH_HOST="${!host_var}"
+  fi
+  RESOLVED_SSH_USER="${!user_var-}"
+  RESOLVED_SSH_PORT="${!port_var-}"
+}
+
+ssh_target_login() {
+  if [[ -n "${RESOLVED_SSH_USER}" ]]; then
+    printf '%s@%s' "${RESOLVED_SSH_USER}" "${RESOLVED_SSH_HOST}"
+    return
+  fi
+  printf '%s' "${RESOLVED_SSH_HOST}"
+}
+
+ssh_opts_for_target() {
+  RESOLVED_SSH_OPTS=("${SSH_OPTS[@]}")
+  if control_plane_bundle_available; then
+    RESOLVED_SSH_OPTS+=(
+      -o "IdentitiesOnly=yes"
+      -i "${CONTROL_PLANE_SSH_KEY_FILE}"
+      -o "StrictHostKeyChecking=yes"
+      -o "UserKnownHostsFile=${CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE}"
+    )
+  fi
+  if [[ -n "${RESOLVED_SSH_PORT}" ]]; then
+    RESOLVED_SSH_OPTS+=(-p "${RESOLVED_SSH_PORT}")
+  fi
+}
+
+ssh_config_value_for_alias() {
+  local host="$1"
+  local key="$2"
+  ssh -G "${host}" | awk -v key="${key}" '$1 == key { print $2; exit }'
+}
+
+ssh_host_for_alias() {
+  local host="$1"
+  local slot host_var
+
+  if control_plane_bundle_available; then
+    slot="$(control_plane_slot_for_host "${host}" || true)"
+    if [[ -n "${slot}" ]]; then
+      host_var="FUGUE_NODE${slot}_HOST"
+      if [[ -n "${!host_var-}" ]]; then
+        printf '%s' "${!host_var}"
+        return 0
+      fi
+    fi
+  fi
+
+  ssh_config_value_for_alias "${host}" hostname
+}
+
+ssh_user_for_alias() {
+  local host="$1"
+  ssh_config_value_for_alias "${host}" user
+}
+
+ssh_port_for_alias() {
+  local host="$1"
+  local port=""
+  port="$(ssh_config_value_for_alias "${host}" port)"
+  if [[ -n "${port}" ]]; then
+    printf '%s' "${port}"
+    return 0
+  fi
+  printf '22'
+}
+
 ssh_run_raw() {
   local host="$1"
   shift
-  ssh -n "${SSH_OPTS[@]}" "${host}" "$@"
+  resolve_ssh_target "${host}"
+  ssh_opts_for_target
+  ssh -n "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "$@"
 }
 
 ssh_run() {
@@ -278,7 +419,9 @@ ssh_run() {
 
 detect_remote_mode_raw() {
   local host="$1"
-  ssh -n "${SSH_OPTS[@]}" "${host}" 'if [ "$(id -u)" -eq 0 ]; then echo root; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then echo sudo; else echo none; fi'
+  resolve_ssh_target "${host}"
+  ssh_opts_for_target
+  ssh -n "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" 'if [ "$(id -u)" -eq 0 ]; then echo root; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then echo sudo; else echo none; fi'
 }
 
 remote_mode_cache_var() {
@@ -320,12 +463,14 @@ ssh_root_raw() {
   local host="$1"
   local mode="$2"
   local script="$3"
+  resolve_ssh_target "${host}"
+  ssh_opts_for_target
   case "${mode}" in
     root)
-      printf '%s\n' "${script}" | ssh "${SSH_OPTS[@]}" "${host}" "bash -s"
+      printf '%s\n' "${script}" | ssh "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "bash -s"
       ;;
     sudo)
-      printf '%s\n' "${script}" | ssh "${SSH_OPTS[@]}" "${host}" "sudo bash -s"
+      printf '%s\n' "${script}" | ssh "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "sudo bash -s"
       ;;
     *)
       fail "${host} needs either a root SSH login or passwordless sudo"
@@ -348,12 +493,14 @@ ssh_root_run_raw() {
   local host="$1"
   local mode="$2"
   local cmd="$3"
+  resolve_ssh_target "${host}"
+  ssh_opts_for_target
   case "${mode}" in
     root)
-      ssh -n "${SSH_OPTS[@]}" "${host}" "bash -lc $(printf '%q' "${cmd}")"
+      ssh -n "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "bash -lc $(printf '%q' "${cmd}")"
       ;;
     sudo)
-      ssh -n "${SSH_OPTS[@]}" "${host}" "sudo bash -lc $(printf '%q' "${cmd}")"
+      ssh -n "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "sudo bash -lc $(printf '%q' "${cmd}")"
       ;;
     *)
       fail "${host} needs either a root SSH login or passwordless sudo"
@@ -380,9 +527,11 @@ scp_to() {
   local local_size remote_size remote_quoted
   local_size="$(local_file_size "${src}")"
   printf -v remote_quoted '%q' "${dst}"
+  resolve_ssh_target "${host}"
+  ssh_opts_for_target
 
   for attempt in $(seq 1 "${UPLOAD_RETRIES}"); do
-    if scp -q "${SSH_OPTS[@]}" "${src}" "${host}:${dst}"; then
+    if scp -q "${RESOLVED_SSH_OPTS[@]}" "${src}" "$(ssh_target_login):${dst}"; then
       remote_size="$(run_with_retry "${REMOTE_CMD_RETRIES}" "${REMOTE_CMD_RETRY_DELAY}" "verify uploaded file on ${host}" \
         ssh_run "${host}" "stat -c %s ${remote_quoted}" | tr -d '[:space:]' || true)"
       if [[ -n "${remote_size}" && "${remote_size}" == "${local_size}" ]]; then
@@ -398,7 +547,7 @@ scp_to() {
 
   log "scp upload failed for ${host}:${dst}; falling back to streamed ssh upload"
   for attempt in $(seq 1 "${UPLOAD_RETRIES}"); do
-    if ssh "${SSH_OPTS[@]}" "${host}" "cat > ${remote_quoted}" < "${src}"; then
+    if ssh "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "cat > ${remote_quoted}" < "${src}"; then
       remote_size="$(run_with_retry "${REMOTE_CMD_RETRIES}" "${REMOTE_CMD_RETRY_DELAY}" "verify streamed upload on ${host}" \
         ssh_run "${host}" "stat -c %s ${remote_quoted}" | tr -d '[:space:]' || true)"
       if [[ -n "${remote_size}" && "${remote_size}" == "${local_size}" ]]; then
@@ -463,12 +612,25 @@ detect_public_endpoint_host() {
 
 public_host_for_alias() {
   local host="$1"
-  ssh -G "${host}" | awk '/^hostname / {print $2; exit}'
+  ssh_host_for_alias "${host}"
 }
 
 mesh_ip_for_alias() {
   local host="$1"
   ssh_root_run "${host}" "if command -v tailscale >/dev/null 2>&1; then tailscale ip -4 2>/dev/null | awk 'NR == 1 {print; exit}'; fi" | tr -d '\r'
+}
+
+control_plane_automation_host_for_alias() {
+  local host="$1"
+  local mesh_ip=""
+  if mesh_enabled; then
+    mesh_ip="$(mesh_ip_for_alias "${host}" || true)"
+    if [[ -n "${mesh_ip}" ]]; then
+      printf '%s' "${mesh_ip}"
+      return 0
+    fi
+  fi
+  ssh_host_for_alias "${host}"
 }
 
 node_internal_ip_for_alias() {
@@ -700,6 +862,137 @@ EOF
 
 prepare_dist() {
   mkdir -p "${DIST_DIR}"
+}
+
+fetch_control_plane_automation_secret_field() {
+  local field="$1"
+  local template="{{index .data \"${field}\"}}"
+  ssh_root_run "${PRIMARY_ALIAS}" "KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n $(printf '%q' "${NAMESPACE}") get secret $(printf '%q' "${CONTROL_PLANE_AUTOMATION_SECRET_NAME}") -o go-template=$(printf '%q' "${template}") 2>/dev/null || true"
+}
+
+maybe_reuse_existing_control_plane_automation_bundle() {
+  local private_key_b64=""
+  local known_hosts_b64=""
+  local hosts_env_b64=""
+
+  mkdir -p "$(dirname "${CONTROL_PLANE_SSH_KEY_FILE}")"
+
+  private_key_b64="$(fetch_control_plane_automation_secret_field "ssh-private-key" | tr -d '\r\n')"
+  known_hosts_b64="$(fetch_control_plane_automation_secret_field "ssh-known-hosts" | tr -d '\r\n')"
+  hosts_env_b64="$(fetch_control_plane_automation_secret_field "hosts.env" | tr -d '\r\n')"
+
+  if [[ -z "${private_key_b64}" || -z "${known_hosts_b64}" || -z "${hosts_env_b64}" ]]; then
+    return
+  fi
+
+  printf '%s' "${private_key_b64}" | base64 --decode >"${CONTROL_PLANE_SSH_KEY_FILE}"
+  chmod 0600 "${CONTROL_PLANE_SSH_KEY_FILE}"
+  printf '%s' "${known_hosts_b64}" | base64 --decode >"${CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE}"
+  chmod 0644 "${CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE}"
+  printf '%s' "${hosts_env_b64}" | base64 --decode >"${CONTROL_PLANE_HOSTS_ENV_FILE}"
+  chmod 0644 "${CONTROL_PLANE_HOSTS_ENV_FILE}"
+  ssh-keygen -y -f "${CONTROL_PLANE_SSH_KEY_FILE}" >"${CONTROL_PLANE_SSH_PUBLIC_KEY_FILE}"
+  chmod 0644 "${CONTROL_PLANE_SSH_PUBLIC_KEY_FILE}"
+  CONTROL_PLANE_HOSTS_ENV_LOADED="false"
+  log "reusing control-plane automation SSH bundle from ${NAMESPACE}/${CONTROL_PLANE_AUTOMATION_SECRET_NAME}"
+}
+
+generate_control_plane_automation_keypair() {
+  mkdir -p "$(dirname "${CONTROL_PLANE_SSH_KEY_FILE}")"
+  if [[ -r "${CONTROL_PLANE_SSH_KEY_FILE}" && -r "${CONTROL_PLANE_SSH_PUBLIC_KEY_FILE}" ]]; then
+    return
+  fi
+  rm -f "${CONTROL_PLANE_SSH_KEY_FILE}" "${CONTROL_PLANE_SSH_PUBLIC_KEY_FILE}"
+  ssh-keygen -q -t ed25519 -N "" -C "fugue-control-plane-automation" -f "${CONTROL_PLANE_SSH_KEY_FILE}" >/dev/null
+}
+
+write_control_plane_hosts_env() {
+  local aliases=("${PRIMARY_ALIAS}" "${SECONDARY_ALIASES[0]}" "${SECONDARY_ALIASES[1]}")
+  local slot alias host user port
+
+  mkdir -p "$(dirname "${CONTROL_PLANE_HOSTS_ENV_FILE}")"
+  : >"${CONTROL_PLANE_HOSTS_ENV_FILE}"
+
+  for slot in 1 2 3; do
+    alias="${aliases[$((slot-1))]}"
+    host="$(control_plane_automation_host_for_alias "${alias}")"
+    user="$(ssh_user_for_alias "${alias}")"
+    port="$(ssh_port_for_alias "${alias}")"
+    [[ -n "${host}" ]] || fail "failed to resolve SSH hostname for ${alias}"
+    [[ -n "${user}" ]] || fail "failed to resolve SSH user for ${alias}"
+    [[ -n "${port}" ]] || fail "failed to resolve SSH port for ${alias}"
+    cat >>"${CONTROL_PLANE_HOSTS_ENV_FILE}" <<EOF
+FUGUE_NODE${slot}_ALIAS=$(printf '%q' "${alias}")
+FUGUE_NODE${slot}_HOST=$(printf '%q' "${host}")
+FUGUE_NODE${slot}_USER=$(printf '%q' "${user}")
+FUGUE_NODE${slot}_PORT=$(printf '%q' "${port}")
+EOF
+  done
+
+  chmod 0644 "${CONTROL_PLANE_HOSTS_ENV_FILE}"
+  CONTROL_PLANE_HOSTS_ENV_LOADED="false"
+}
+
+build_control_plane_known_hosts() {
+  local aliases=("${PRIMARY_ALIAS}" "${SECONDARY_ALIASES[0]}" "${SECONDARY_ALIASES[1]}")
+  local tmp_file alias host port
+
+  tmp_file="${CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE}.tmp"
+  : >"${tmp_file}"
+  for alias in "${aliases[@]}"; do
+    host="$(control_plane_automation_host_for_alias "${alias}")"
+    port="$(ssh_port_for_alias "${alias}")"
+    [[ -n "${host}" ]] || fail "failed to resolve SSH hostname for ${alias}"
+    ssh-keyscan -p "${port}" -H "${host}" >>"${tmp_file}" 2>/dev/null || fail "failed to scan SSH host key for ${alias} (${host}:${port})"
+  done
+  sort -u "${tmp_file}" >"${CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE}"
+  rm -f "${tmp_file}"
+  chmod 0644 "${CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE}"
+}
+
+install_control_plane_automation_authorized_key_on_host() {
+  local host="$1"
+  local pub_remote="${REMOTE_TMP_BASE}/control-plane-automation.pub"
+
+  prepare_remote_tmp "${host}"
+  scp_to "${CONTROL_PLANE_SSH_PUBLIC_KEY_FILE}" "${host}" "${pub_remote}"
+  ssh_run "${host}" "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; grep -Fqx -f $(printf '%q' "${pub_remote}") ~/.ssh/authorized_keys || cat $(printf '%q' "${pub_remote}") >> ~/.ssh/authorized_keys"
+}
+
+install_control_plane_automation_authorized_keys() {
+  local host
+  for host in "${ALL_ALIASES[@]}"; do
+    log "installing control-plane automation SSH key on ${host}"
+    install_control_plane_automation_authorized_key_on_host "${host}"
+  done
+}
+
+publish_control_plane_automation_secret() {
+  log "publishing control-plane automation SSH bundle to ${NAMESPACE}/${CONTROL_PLANE_AUTOMATION_SECRET_NAME}"
+  prepare_remote_tmp "${PRIMARY_ALIAS}"
+  scp_to "${CONTROL_PLANE_HOSTS_ENV_FILE}" "${PRIMARY_ALIAS}" "${REMOTE_TMP_BASE}/control-plane-hosts.env"
+  scp_to "${CONTROL_PLANE_SSH_KEY_FILE}" "${PRIMARY_ALIAS}" "${REMOTE_TMP_BASE}/control-plane-id_ed25519"
+  scp_to "${CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE}" "${PRIMARY_ALIAS}" "${REMOTE_TMP_BASE}/control-plane-known_hosts"
+  ssh_root "${PRIMARY_ALIAS}" <<EOF
+set -euo pipefail
+chmod 0600 "${REMOTE_TMP_BASE}/control-plane-id_ed25519"
+KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n "${NAMESPACE}" create secret generic "${CONTROL_PLANE_AUTOMATION_SECRET_NAME}" \
+  --from-file=hosts.env="${REMOTE_TMP_BASE}/control-plane-hosts.env" \
+  --from-file=ssh-private-key="${REMOTE_TMP_BASE}/control-plane-id_ed25519" \
+  --from-file=ssh-known-hosts="${REMOTE_TMP_BASE}/control-plane-known_hosts" \
+  --dry-run=client -o yaml | KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl apply -f -
+EOF
+}
+
+setup_control_plane_automation() {
+  maybe_reuse_existing_control_plane_automation_bundle
+  if ! control_plane_bundle_files_present; then
+    generate_control_plane_automation_keypair
+    write_control_plane_hosts_env
+    build_control_plane_known_hosts
+  fi
+  install_control_plane_automation_authorized_keys
+  publish_control_plane_automation_secret
 }
 
 dump_remote_k3s_debug() {
@@ -1637,6 +1930,8 @@ EOF
 main() {
   require_cmd ssh
   require_cmd scp
+  require_cmd ssh-keygen
+  require_cmd ssh-keyscan
   require_cmd tar
   require_cmd perl
   require_cmd openssl
@@ -1696,6 +1991,7 @@ main() {
     install_edge_proxy_on_primary
     verify_edge_proxy_config_on_primary
   fi
+  setup_control_plane_automation
   fetch_kubeconfig
   check_edge_origin_health
   check_public_api_reachability
