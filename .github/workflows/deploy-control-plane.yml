@@ -26,6 +26,8 @@ on:
       - 'Dockerfile.controller'
       - 'go.mod'
       - 'go.sum'
+      - 'scripts/install_fugue_ha.sh'
+      - 'scripts/sync_fugue_edge_proxy.sh'
       - 'scripts/upgrade_fugue_control_plane.sh'
   workflow_dispatch:
 
@@ -152,3 +154,13 @@ jobs:
           FUGUE_CONTROLLER_IMAGE_REPOSITORY: ${{ needs.build.outputs.controller_image_repository }}
           FUGUE_CONTROLLER_IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
         run: ./scripts/upgrade_fugue_control_plane.sh
+
+      - name: Sync Route A edge proxy
+        env:
+          FUGUE_NODE1: ${{ vars.FUGUE_NODE1 || 'gcp1' }}
+          FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
+          FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
+          FUGUE_RELEASE_FULLNAME: ${{ vars.FUGUE_RELEASE_FULLNAME || 'fugue-fugue' }}
+          FUGUE_DOMAIN: ${{ vars.FUGUE_API_PUBLIC_DOMAIN || 'api.fugue.pro' }}
+          FUGUE_APP_BASE_DOMAIN: ${{ vars.FUGUE_APP_BASE_DOMAIN || 'fugue.pro' }}
+        run: bash ./scripts/sync_fugue_edge_proxy.sh

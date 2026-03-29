@@ -246,6 +246,23 @@ app_tls_cert_matches_domain() {
     openssl x509 -in "${FUGUE_APP_TLS_CERT_FILE}" -noout -ext subjectAltName 2>/dev/null | grep -F "${apex}" >/dev/null 2>&1
 }
 
+remote_app_tls_cert_matches_domain() {
+  remote_has_app_tls_material || return 1
+  local wildcard="DNS:*.${FUGUE_APP_BASE_DOMAIN}"
+  local apex="DNS:${FUGUE_APP_BASE_DOMAIN}"
+  ssh_root_run "${PRIMARY_ALIAS}" "openssl x509 -in /etc/caddy/tls/cloudflare-apps-origin.crt -noout -ext subjectAltName 2>/dev/null | grep -F $(printf '%q' "${wildcard}") >/dev/null 2>&1 || openssl x509 -in /etc/caddy/tls/cloudflare-apps-origin.crt -noout -ext subjectAltName 2>/dev/null | grep -F $(printf '%q' "${apex}") >/dev/null 2>&1"
+}
+
+app_base_domain_needs_explicit_edge_site() {
+  [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] || return 1
+  [[ "${FUGUE_APP_BASE_DOMAIN}" != "${FUGUE_DOMAIN}" ]] || return 1
+  [[ "${FUGUE_APP_BASE_DOMAIN}" != "${FUGUE_REGISTRY_DOMAIN}" ]] || return 1
+  if mesh_enabled && [[ "${FUGUE_APP_BASE_DOMAIN}" == "${FUGUE_MESH_DOMAIN}" ]]; then
+    return 1
+  fi
+  return 0
+}
+
 ssh_run_raw() {
   local host="$1"
   shift
@@ -747,17 +764,31 @@ install_edge_proxy_on_primary() {
   determine_headscale_upstream
 
   local app_tls_directive="tls internal"
+  local app_root_site_block=""
   if [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && app_tls_cert_matches_domain; then
     log "uploading wildcard app TLS material to ${PRIMARY_ALIAS}"
     prepare_remote_tmp "${PRIMARY_ALIAS}"
     scp_to "${FUGUE_APP_TLS_CERT_FILE}" "${PRIMARY_ALIAS}" "${REMOTE_TMP_BASE}/cloudflare-apps-origin.crt"
     scp_to "${FUGUE_APP_TLS_KEY_FILE}" "${PRIMARY_ALIAS}" "${REMOTE_TMP_BASE}/cloudflare-apps-origin.key"
     app_tls_directive="tls /etc/caddy/tls/cloudflare-apps-origin.crt /etc/caddy/tls/cloudflare-apps-origin.key"
-  elif [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && remote_has_app_tls_material; then
+  elif [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && remote_app_tls_cert_matches_domain; then
     log "reusing existing wildcard app TLS material already installed on ${PRIMARY_ALIAS}"
     app_tls_directive="tls /etc/caddy/tls/cloudflare-apps-origin.crt /etc/caddy/tls/cloudflare-apps-origin.key"
+  elif [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && remote_has_app_tls_material; then
+    fail "existing app TLS material on ${PRIMARY_ALIAS} does not match ${FUGUE_APP_BASE_DOMAIN}; upload a matching certificate or remove the stale files"
   elif [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && has_app_tls_material; then
     log "wildcard app TLS cert does not match ${FUGUE_APP_BASE_DOMAIN}; using tls internal for app hosts"
+  fi
+
+  if app_base_domain_needs_explicit_edge_site; then
+    app_root_site_block="$(cat <<EOF
+https://${FUGUE_APP_BASE_DOMAIN} {
+  ${app_tls_directive}
+  encode gzip zstd
+  reverse_proxy ${EDGE_UPSTREAM}
+}
+EOF
+)"
   fi
 
   local mesh_site_block=""
@@ -809,6 +840,8 @@ https://${FUGUE_REGISTRY_DOMAIN} {
 
 ${mesh_site_block}
 
+${app_root_site_block}
+
 https://*.${FUGUE_APP_BASE_DOMAIN} {
   ${app_tls_directive}
   encode gzip zstd
@@ -828,6 +861,28 @@ systemctl enable caddy
 systemctl restart caddy
 systemctl is-active --quiet caddy
 EOF
+}
+
+verify_edge_proxy_config_on_primary() {
+  if [[ -z "${FUGUE_DOMAIN}" ]]; then
+    return
+  fi
+
+  local expected_sites=(
+    "on_demand_tls {"
+    "https:// {"
+    "https://*.${FUGUE_APP_BASE_DOMAIN} {"
+  )
+  if app_base_domain_needs_explicit_edge_site; then
+    expected_sites+=("https://${FUGUE_APP_BASE_DOMAIN} {")
+  fi
+
+  local site_pattern=""
+  for site_pattern in "${expected_sites[@]}"; do
+    if ! ssh_root_run "${PRIMARY_ALIAS}" "grep -F $(printf '%q' "${site_pattern}") /etc/caddy/Caddyfile >/dev/null"; then
+      fail "Route A edge config on ${PRIMARY_ALIAS} is missing expected entry: ${site_pattern}"
+    fi
+  done
 }
 
 determine_edge_upstream() {
@@ -1494,6 +1549,7 @@ Route A is configured on ${PRIMARY_ALIAS} with Caddy:
   https://${FUGUE_DOMAIN} -> https origin on ${PRIMARY_ALIAS}:443 -> upstream ${EDGE_UPSTREAM} (${EDGE_UPSTREAM_MODE})
   https://${FUGUE_REGISTRY_DOMAIN} -> https origin on ${PRIMARY_ALIAS}:443 -> upstream ${REGISTRY_EDGE_UPSTREAM}
 $(if mesh_enabled; then printf '  https://%s -> https origin on %s:443 -> upstream %s\n' "${FUGUE_MESH_DOMAIN}" "${PRIMARY_ALIAS}" "${HEADSCALE_EDGE_UPSTREAM}"; fi)
+$(if app_base_domain_needs_explicit_edge_site; then printf '  https://%s -> https origin on %s:443 -> upstream %s (%s)\n' "${FUGUE_APP_BASE_DOMAIN}" "${PRIMARY_ALIAS}" "${EDGE_UPSTREAM}" "${EDGE_UPSTREAM_MODE}"; fi)
   https://*.${FUGUE_APP_BASE_DOMAIN} -> https origin on ${PRIMARY_ALIAS}:443 -> upstream ${EDGE_UPSTREAM} (${EDGE_UPSTREAM_MODE})
 
 Server-side status:
@@ -1631,12 +1687,14 @@ main() {
   copy_chart_and_values
   install_fugue_chart
   install_edge_proxy_on_primary
+  verify_edge_proxy_config_on_primary
   if mesh_enabled; then
     configure_control_plane_mesh
     write_values_override
     copy_chart_and_values
     install_fugue_chart
     install_edge_proxy_on_primary
+    verify_edge_proxy_config_on_primary
   fi
   fetch_kubeconfig
   check_edge_origin_health
@@ -1646,4 +1704,6 @@ main() {
   print_next_steps
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
