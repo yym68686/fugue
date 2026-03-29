@@ -325,6 +325,11 @@ resolve_ssh_target() {
     return 0
   fi
 
+  # Load hosts.env in the current shell before the command substitution below.
+  # Otherwise the sourced FUGUE_NODE*_HOST/USER/PORT variables only exist in the
+  # subshell spawned for control_plane_slot_for_host and indirect expansion
+  # falls back to the unresolved alias (for example "gcp1").
+  load_control_plane_hosts_env
   slot="$(control_plane_slot_for_host "${host}" || true)"
   if [[ -z "${slot}" ]]; then
     return 0
@@ -374,6 +379,7 @@ ssh_host_for_alias() {
   local slot host_var
 
   if control_plane_bundle_available; then
+    load_control_plane_hosts_env
     slot="$(control_plane_slot_for_host "${host}" || true)"
     if [[ -n "${slot}" ]]; then
       host_var="FUGUE_NODE${slot}_HOST"
