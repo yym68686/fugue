@@ -319,6 +319,97 @@ func TestBuildAppObjectsUsesBackingServicesWithoutDuplicatingLegacyInlinePostgre
 	}
 }
 
+func TestBuildManagedPostgresObjectsUseStableSelectors(t *testing.T) {
+	app := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "uni-api-demo",
+		Spec: model.AppSpec{
+			Image:     "registry.fugue.pro/fugue-apps/uni-api:git-abc123",
+			Ports:     []int{8000},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+		BackingServices: []model.BackingService{
+			{
+				ID:          "service_demo",
+				TenantID:    "tenant_demo",
+				ProjectID:   "project_demo",
+				OwnerAppID:  "app_demo",
+				Name:        "uni-api-demo",
+				Type:        model.BackingServiceTypePostgres,
+				Provisioner: model.BackingServiceProvisionerManaged,
+				Status:      model.BackingServiceStatusActive,
+				Spec: model.BackingServiceSpec{
+					Postgres: &model.AppPostgresSpec{
+						Database:    "uniapi",
+						User:        "root",
+						Password:    "secret",
+						ServiceName: "uni-api-demo-postgres",
+					},
+				},
+			},
+		},
+		Bindings: []model.ServiceBinding{
+			{
+				ID:        "binding_demo",
+				TenantID:  "tenant_demo",
+				AppID:     "app_demo",
+				ServiceID: "service_demo",
+			},
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	postgresService := objects[2]
+	serviceSelector := postgresService["spec"].(map[string]any)["selector"].(map[string]string)
+	expectedSelector := map[string]string{
+		FugueLabelName:      "uni-api-demo-postgres",
+		FugueLabelComponent: "postgres",
+		FugueLabelManagedBy: FugueLabelManagedByValue,
+	}
+	if len(serviceSelector) != len(expectedSelector) {
+		t.Fatalf("expected postgres service selector %v, got %v", expectedSelector, serviceSelector)
+	}
+	for key, value := range expectedSelector {
+		if got := serviceSelector[key]; got != value {
+			t.Fatalf("expected postgres service selector %s=%q, got %#v", key, value, got)
+		}
+	}
+	if _, exists := serviceSelector[FugueLabelBackingServiceID]; exists {
+		t.Fatalf("expected postgres service selector to omit %s, got %v", FugueLabelBackingServiceID, serviceSelector)
+	}
+	if _, exists := serviceSelector[FugueLabelOwnerAppID]; exists {
+		t.Fatalf("expected postgres service selector to omit %s, got %v", FugueLabelOwnerAppID, serviceSelector)
+	}
+
+	postgresDeployment := objects[3]
+	deploymentSelector := postgresDeployment["spec"].(map[string]any)["selector"].(map[string]any)["matchLabels"].(map[string]string)
+	if len(deploymentSelector) != len(expectedSelector) {
+		t.Fatalf("expected postgres deployment selector %v, got %v", expectedSelector, deploymentSelector)
+	}
+	for key, value := range expectedSelector {
+		if got := deploymentSelector[key]; got != value {
+			t.Fatalf("expected postgres deployment selector %s=%q, got %#v", key, value, got)
+		}
+	}
+	if _, exists := deploymentSelector[FugueLabelBackingServiceID]; exists {
+		t.Fatalf("expected postgres deployment selector to omit %s, got %v", FugueLabelBackingServiceID, deploymentSelector)
+	}
+	if _, exists := deploymentSelector[FugueLabelOwnerAppID]; exists {
+		t.Fatalf("expected postgres deployment selector to omit %s, got %v", FugueLabelOwnerAppID, deploymentSelector)
+	}
+
+	metadataLabels := postgresDeployment["metadata"].(map[string]any)["labels"].(map[string]string)
+	if got := metadataLabels[FugueLabelBackingServiceID]; got != "service_demo" {
+		t.Fatalf("expected postgres metadata label %s=%q, got %#v", FugueLabelBackingServiceID, "service_demo", got)
+	}
+	if got := metadataLabels[FugueLabelOwnerAppID]; got != "app_demo" {
+		t.Fatalf("expected postgres metadata label %s=%q, got %#v", FugueLabelOwnerAppID, "app_demo", got)
+	}
+}
+
 func envValue(envObjects []map[string]any, name string) string {
 	for _, entry := range envObjects {
 		if entry["name"] == name {

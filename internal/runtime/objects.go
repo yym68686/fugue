@@ -106,6 +106,24 @@ func postgresLabels(resource postgresRuntimeResource) map[string]string {
 	return labels
 }
 
+func postgresSelectorLabels(labels map[string]string) map[string]string {
+	return labelSubset(labels,
+		FugueLabelName,
+		FugueLabelComponent,
+		FugueLabelManagedBy,
+	)
+}
+
+func labelSubset(labels map[string]string, keys ...string) map[string]string {
+	subset := make(map[string]string, len(keys))
+	for _, key := range keys {
+		if value := strings.TrimSpace(labels[key]); value != "" {
+			subset[key] = value
+		}
+	}
+	return subset
+}
+
 func buildAppFilesSecretObject(namespace, appName string, files []model.AppFile, labels map[string]string) map[string]any {
 	stringData := make(map[string]string, len(files))
 	for index, file := range files {
@@ -143,6 +161,7 @@ func buildPostgresSecretObject(namespace, secretName string, labels map[string]s
 }
 
 func buildPostgresServiceObject(namespace, resourceName string, labels map[string]string, spec model.AppPostgresSpec) map[string]any {
+	selectorLabels := postgresSelectorLabels(labels)
 	return map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Service",
@@ -152,7 +171,7 @@ func buildPostgresServiceObject(namespace, resourceName string, labels map[strin
 			"labels":    labels,
 		},
 		"spec": map[string]any{
-			"selector": labels,
+			"selector": selectorLabels,
 			"ports": []map[string]any{
 				{
 					"name":       "tcp-5432",
@@ -166,6 +185,7 @@ func buildPostgresServiceObject(namespace, resourceName string, labels map[strin
 }
 
 func buildPostgresDeploymentObject(namespace, secretName, resourceName string, labels map[string]string, spec model.AppPostgresSpec, scheduling SchedulingConstraints) map[string]any {
+	selectorLabels := postgresSelectorLabels(labels)
 	podSpec := map[string]any{
 		"initContainers": []map[string]any{
 			{
@@ -260,7 +280,7 @@ func buildPostgresDeploymentObject(namespace, secretName, resourceName string, l
 				"type": "Recreate",
 			},
 			"selector": map[string]any{
-				"matchLabels": labels,
+				"matchLabels": selectorLabels,
 			},
 			"template": map[string]any{
 				"metadata": map[string]any{

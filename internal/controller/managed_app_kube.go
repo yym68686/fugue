@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"fugue/internal/runtime"
 )
@@ -41,14 +42,51 @@ func (c *kubeClient) applyObject(ctx context.Context, obj map[string]any, out an
 	if err != nil {
 		return err
 	}
+	if err := c.applyObjectAtPath(ctx, apiPath, obj, out); err == nil {
+		return nil
+	} else if !shouldRecreateDeploymentAfterImmutableSelector(obj, err) {
+		return err
+	} else {
+		name, namespace := objectNameAndNamespace(c.namespace, obj)
+		if err := c.deleteDeployment(ctx, namespace, name); err != nil {
+			return fmt.Errorf("delete deployment %s/%s after immutable selector apply failure: %w", namespace, name, err)
+		}
+		if err := c.waitForDeploymentDeleted(ctx, namespace, name); err != nil {
+			return fmt.Errorf("wait for deployment %s/%s deletion after immutable selector apply failure: %w", namespace, name, err)
+		}
+		return c.applyObjectAtPath(ctx, apiPath, obj, out)
+	}
+}
+
+func (c *kubeClient) applyObjectAtPath(ctx context.Context, apiPath string, obj map[string]any, out any) error {
 	query := url.Values{}
 	query.Set("fieldManager", runtime.FugueLabelManagedByValue)
 	query.Set("force", "true")
 	if encoded := query.Encode(); encoded != "" {
 		apiPath += "?" + encoded
 	}
-	_, err = c.doRequest(ctx, http.MethodPatch, apiPath, "application/apply-patch+yaml", obj, out)
+	_, err := c.doRequest(ctx, http.MethodPatch, apiPath, "application/apply-patch+yaml", obj, out)
 	return err
+}
+
+func (c *kubeClient) waitForDeploymentDeleted(ctx context.Context, namespace, name string) error {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		_, found, err := c.getDeployment(ctx, namespace, name)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (c *kubeClient) applyObjects(ctx context.Context, objects []map[string]any) error {
@@ -237,4 +275,28 @@ func normalizeDeleteNotFound(err error) error {
 		return nil
 	}
 	return err
+}
+
+func shouldRecreateDeploymentAfterImmutableSelector(obj map[string]any, err error) bool {
+	if err == nil {
+		return false
+	}
+	apiVersion, _ := obj["apiVersion"].(string)
+	kind, _ := obj["kind"].(string)
+	if apiVersion != "apps/v1" || kind != "Deployment" {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "spec.selector") && strings.Contains(message, "immutable")
+}
+
+func objectNameAndNamespace(defaultNamespace string, obj map[string]any) (string, string) {
+	metadata, _ := obj["metadata"].(map[string]any)
+	name, _ := metadata["name"].(string)
+	namespace, _ := metadata["namespace"].(string)
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		namespace = strings.TrimSpace(defaultNamespace)
+	}
+	return strings.TrimSpace(name), namespace
 }
