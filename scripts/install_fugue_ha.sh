@@ -31,6 +31,7 @@ CONTROL_PLANE_HOSTS_ENV_FILE="${FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE:-${DIST_DIR}/
 CONTROL_PLANE_SSH_KEY_FILE="${FUGUE_CONTROL_PLANE_SSH_KEY_FILE:-${DIST_DIR}/control-plane-id_ed25519}"
 CONTROL_PLANE_SSH_PUBLIC_KEY_FILE="${FUGUE_CONTROL_PLANE_SSH_PUBLIC_KEY_FILE:-${CONTROL_PLANE_SSH_KEY_FILE}.pub}"
 CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE="${FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE:-${DIST_DIR}/control-plane-known_hosts}"
+CONTROL_PLANE_AUTOMATION_ROOT_DIR="${FUGUE_CONTROL_PLANE_AUTOMATION_ROOT_DIR:-/root/.config/fugue/control-plane-automation}"
 USE_CONTROL_PLANE_AUTOMATION_SSH="${FUGUE_USE_CONTROL_PLANE_AUTOMATION_SSH:-false}"
 BOOTSTRAP_KEY="${FUGUE_BOOTSTRAP_KEY:-}"
 K3S_API_IP="${FUGUE_K3S_API_IP:-}"
@@ -984,6 +985,43 @@ KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n "${NAMESPACE}" create secret
 EOF
 }
 
+install_control_plane_automation_local_bundle_on_host() {
+  local host="$1"
+  local runner_home=""
+
+  runner_home="$(ssh_root_run "${host}" "getent passwd github-runner 2>/dev/null | cut -d: -f6 || true" | tr -d '\r')"
+  prepare_remote_tmp "${host}"
+  scp_to "${CONTROL_PLANE_HOSTS_ENV_FILE}" "${host}" "${REMOTE_TMP_BASE}/control-plane-hosts.env"
+  scp_to "${CONTROL_PLANE_SSH_KEY_FILE}" "${host}" "${REMOTE_TMP_BASE}/control-plane-id_ed25519"
+  scp_to "${CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE}" "${host}" "${REMOTE_TMP_BASE}/control-plane-known_hosts"
+  ssh_root "${host}" <<EOF
+set -euo pipefail
+install_bundle() {
+  local bundle_dir="\$1"
+  local owner="\$2"
+  local group="\$3"
+  mkdir -p "\${bundle_dir}"
+  install -d -m 0700 -o "\${owner}" -g "\${group}" "\${bundle_dir}"
+  install -m 0600 -o "\${owner}" -g "\${group}" "${REMOTE_TMP_BASE}/control-plane-id_ed25519" "\${bundle_dir}/id_ed25519"
+  install -m 0644 -o "\${owner}" -g "\${group}" "${REMOTE_TMP_BASE}/control-plane-known_hosts" "\${bundle_dir}/known_hosts"
+  install -m 0644 -o "\${owner}" -g "\${group}" "${REMOTE_TMP_BASE}/control-plane-hosts.env" "\${bundle_dir}/hosts.env"
+}
+
+install_bundle "${CONTROL_PLANE_AUTOMATION_ROOT_DIR}" root root
+if [[ -n "$(printf '%s' "${runner_home}")" ]] && id -u github-runner >/dev/null 2>&1; then
+  install_bundle "$(printf '%s' "${runner_home}")/.config/fugue/control-plane-automation" github-runner github-runner
+fi
+EOF
+}
+
+install_control_plane_automation_local_bundles() {
+  local host
+  for host in "${ALL_ALIASES[@]}"; do
+    log "installing local control-plane automation bundle on ${host}"
+    install_control_plane_automation_local_bundle_on_host "${host}"
+  done
+}
+
 setup_control_plane_automation() {
   maybe_reuse_existing_control_plane_automation_bundle
   if ! control_plane_bundle_files_present; then
@@ -992,6 +1030,7 @@ setup_control_plane_automation() {
     build_control_plane_known_hosts
   fi
   install_control_plane_automation_authorized_keys
+  install_control_plane_automation_local_bundles
   publish_control_plane_automation_secret
 }
 

@@ -23,6 +23,8 @@ command_exists() {
 }
 
 CONTROL_PLANE_AUTOMATION_TMP_DIR=""
+LOCAL_CONTROL_PLANE_AUTOMATION_DIR="${FUGUE_LOCAL_CONTROL_PLANE_AUTOMATION_DIR:-${HOME}/.config/fugue/control-plane-automation}"
+LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR="${FUGUE_LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR:-/root/.config/fugue/control-plane-automation}"
 
 detect_primary_private_ip() {
   ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}'
@@ -143,17 +145,22 @@ cleanup_control_plane_automation_tmp() {
   fi
 }
 
-control_plane_automation_secret_field() {
-  local field="$1"
-  local template="{{index .data \"${field}\"}}"
-  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get secret "${FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME}" -o go-template="${template}" 2>/dev/null || true
+use_local_control_plane_automation_bundle_from_dir() {
+  local bundle_dir="$1"
+
+  [[ -r "${bundle_dir}/hosts.env" ]] || return 1
+  [[ -r "${bundle_dir}/id_ed25519" ]] || return 1
+  [[ -r "${bundle_dir}/known_hosts" ]] || return 1
+
+  export FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE="${bundle_dir}/hosts.env"
+  export FUGUE_CONTROL_PLANE_SSH_KEY_FILE="${bundle_dir}/id_ed25519"
+  export FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE="${bundle_dir}/known_hosts"
+  export FUGUE_USE_CONTROL_PLANE_AUTOMATION_SSH=true
+  log "using local control-plane automation bundle from ${bundle_dir}"
+  return 0
 }
 
 prepare_control_plane_automation_ssh() {
-  local private_key_b64=""
-  local known_hosts_b64=""
-  local hosts_env_b64=""
-
   if [[ -n "${FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE:-}" && -r "${FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE}" ]] && \
      [[ -n "${FUGUE_CONTROL_PLANE_SSH_KEY_FILE:-}" && -r "${FUGUE_CONTROL_PLANE_SSH_KEY_FILE}" ]] && \
      [[ -n "${FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE:-}" && -r "${FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE}" ]]; then
@@ -161,33 +168,14 @@ prepare_control_plane_automation_ssh() {
     return
   fi
 
-  private_key_b64="$(control_plane_automation_secret_field "ssh-private-key" | tr -d '\r\n')"
-  known_hosts_b64="$(control_plane_automation_secret_field "ssh-known-hosts" | tr -d '\r\n')"
-  hosts_env_b64="$(control_plane_automation_secret_field "hosts.env" | tr -d '\r\n')"
-
-  if [[ -z "${private_key_b64}" || -z "${known_hosts_b64}" || -z "${hosts_env_b64}" ]]; then
-    fail "missing control-plane automation SSH bundle in ${FUGUE_NAMESPACE}/${FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME}; run the install/update script once to publish it"
+  if use_local_control_plane_automation_bundle_from_dir "${LOCAL_CONTROL_PLANE_AUTOMATION_DIR}"; then
+    return
   fi
-
-  if [[ -z "${CONTROL_PLANE_AUTOMATION_TMP_DIR}" ]]; then
-    CONTROL_PLANE_AUTOMATION_TMP_DIR="$(mktemp -d)"
-    trap cleanup_control_plane_automation_tmp EXIT
+  if [[ "${LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR}" != "${LOCAL_CONTROL_PLANE_AUTOMATION_DIR}" ]] && \
+     use_local_control_plane_automation_bundle_from_dir "${LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR}"; then
+    return
   fi
-
-  FUGUE_CONTROL_PLANE_SSH_KEY_FILE="${CONTROL_PLANE_AUTOMATION_TMP_DIR}/control-plane-id_ed25519"
-  FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE="${CONTROL_PLANE_AUTOMATION_TMP_DIR}/control-plane-known_hosts"
-  FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE="${CONTROL_PLANE_AUTOMATION_TMP_DIR}/control-plane-hosts.env"
-
-  printf '%s' "${private_key_b64}" | base64 --decode >"${FUGUE_CONTROL_PLANE_SSH_KEY_FILE}"
-  chmod 0600 "${FUGUE_CONTROL_PLANE_SSH_KEY_FILE}"
-  printf '%s' "${known_hosts_b64}" | base64 --decode >"${FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE}"
-  chmod 0644 "${FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE}"
-  printf '%s' "${hosts_env_b64}" | base64 --decode >"${FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE}"
-  chmod 0644 "${FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE}"
-  export FUGUE_CONTROL_PLANE_SSH_KEY_FILE
-  export FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE
-  export FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE
-  export FUGUE_USE_CONTROL_PLANE_AUTOMATION_SSH=true
+  fail "missing local control-plane automation bundle on this server; run scripts/bootstrap_control_plane_automation.sh or scripts/install_fugue_ha.sh to install it"
 }
 
 sync_route_a_edge_proxy() {
