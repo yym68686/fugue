@@ -19,7 +19,8 @@ func TestPutAppDomainVerifiesWithCNAMEOnly(t *testing.T) {
 	t.Parallel()
 
 	s, server, apiKey, app, resolver := setupAppDomainTestServer(t)
-	resolver.cname["www.example.com"] = "demo.apps.example.com."
+	expectedTarget := server.primaryCustomDomainTarget(app)
+	resolver.cname["www.example.com"] = expectedTarget + "."
 
 	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/domains", apiKey, map[string]any{
 		"hostname": "www.example.com",
@@ -36,8 +37,8 @@ func TestPutAppDomainVerifiesWithCNAMEOnly(t *testing.T) {
 	if putResponse.AlreadyCurrent {
 		t.Fatal("expected new app domain to be created")
 	}
-	if got := putResponse.Domain.RouteTarget; got != "demo.apps.example.com" {
-		t.Fatalf("expected route target demo.apps.example.com, got %q", got)
+	if got := putResponse.Domain.RouteTarget; got != expectedTarget {
+		t.Fatalf("expected route target %q, got %q", expectedTarget, got)
 	}
 	if putResponse.Domain.VerificationTXTName != "" || putResponse.Domain.VerificationTXTValue != "" {
 		t.Fatalf("expected CNAME-only verification, got %+v", putResponse.Domain)
@@ -55,10 +56,38 @@ func TestPutAppDomainVerifiesWithCNAMEOnly(t *testing.T) {
 	}
 }
 
+func TestPutAppDomainVerifiesWithFlattenedTargetIPs(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app, resolver := setupAppDomainTestServer(t)
+	expectedTarget := server.primaryCustomDomainTarget(app)
+	edgeIP := net.ParseIP("203.0.113.10")
+	resolver.ip["example.com"] = []net.IPAddr{{IP: edgeIP}}
+	resolver.ip[expectedTarget] = []net.IPAddr{{IP: edgeIP}}
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/domains", apiKey, map[string]any{
+		"hostname": "example.com",
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var putResponse struct {
+		Domain model.AppDomain `json:"domain"`
+	}
+	mustDecodeJSON(t, recorder, &putResponse)
+	if got := putResponse.Domain.RouteTarget; got != expectedTarget {
+		t.Fatalf("expected route target %q, got %q", expectedTarget, got)
+	}
+	if putResponse.Domain.Status != model.AppDomainStatusVerified {
+		t.Fatalf("expected verified domain status, got %+v", putResponse.Domain)
+	}
+}
+
 func TestPutAppDomainRequiresCNAMEBeforeCreatingClaim(t *testing.T) {
 	t.Parallel()
 
 	s, server, apiKey, app, _ := setupAppDomainTestServer(t)
+	expectedTarget := server.primaryCustomDomainTarget(app)
 
 	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/domains", apiKey, map[string]any{
 		"hostname": "www.example.com",
@@ -66,11 +95,45 @@ func TestPutAppDomainRequiresCNAMEBeforeCreatingClaim(t *testing.T) {
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadRequest, recorder.Code, recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), "CNAME") {
+	if !strings.Contains(recorder.Body.String(), "CNAME") || !strings.Contains(recorder.Body.String(), expectedTarget) {
 		t.Fatalf("expected CNAME guidance in response, got body=%s", recorder.Body.String())
 	}
 	if _, err := s.GetAppDomain("www.example.com"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expected unrouted hostname to remain unclaimed, got %v", err)
+	}
+}
+
+func TestCustomDomainTargetStaysStableWhenAppRouteChanges(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, app, resolver := setupAppDomainTestServer(t)
+	expectedTarget := server.primaryCustomDomainTarget(app)
+	updatedApp, err := s.UpdateAppRoute(app.ID, model.AppRoute{
+		Hostname:    "renamed.apps.example.com",
+		BaseDomain:  "apps.example.com",
+		PublicURL:   "https://renamed.apps.example.com",
+		ServicePort: 8080,
+	})
+	if err != nil {
+		t.Fatalf("update app route: %v", err)
+	}
+	if got := server.primaryCustomDomainTarget(updatedApp); got != expectedTarget {
+		t.Fatalf("expected stable target %q after route change, got %q", expectedTarget, got)
+	}
+	resolver.cname["www.example.com"] = expectedTarget + "."
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+updatedApp.ID+"/domains", apiKey, map[string]any{
+		"hostname": "www.example.com",
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var putResponse struct {
+		Domain model.AppDomain `json:"domain"`
+	}
+	mustDecodeJSON(t, recorder, &putResponse)
+	if got := putResponse.Domain.RouteTarget; got != expectedTarget {
+		t.Fatalf("expected stable route target %q, got %q", expectedTarget, got)
 	}
 }
 
@@ -141,12 +204,14 @@ func setupAppDomainTestServer(t *testing.T) (*store.Store, *Server, string, mode
 	}
 
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
-		AppBaseDomain:   "apps.example.com",
-		APIPublicDomain: "api.example.com",
-		EdgeTLSAskToken: "edge-secret",
+		AppBaseDomain:          "apps.example.com",
+		CustomDomainBaseDomain: "cname.fugue.pro",
+		APIPublicDomain:        "api.example.com",
+		EdgeTLSAskToken:        "edge-secret",
 	})
 	resolver := &fakeAppDomainResolver{
 		cname: map[string]string{},
+		ip:    map[string][]net.IPAddr{},
 	}
 	server.dnsResolver = resolver
 	return s, server, apiKey, app, resolver
@@ -154,6 +219,7 @@ func setupAppDomainTestServer(t *testing.T) (*store.Store, *Server, string, mode
 
 type fakeAppDomainResolver struct {
 	cname map[string]string
+	ip    map[string][]net.IPAddr
 }
 
 func (f *fakeAppDomainResolver) LookupCNAME(_ context.Context, host string) (string, error) {
@@ -161,4 +227,11 @@ func (f *fakeAppDomainResolver) LookupCNAME(_ context.Context, host string) (str
 		return value, nil
 	}
 	return "", &net.DNSError{IsNotFound: true}
+}
+
+func (f *fakeAppDomainResolver) LookupIPAddr(_ context.Context, host string) ([]net.IPAddr, error) {
+	if values, ok := f.ip[normalizeExternalAppDomain(host)]; ok {
+		return values, nil
+	}
+	return nil, &net.DNSError{IsNotFound: true}
 }

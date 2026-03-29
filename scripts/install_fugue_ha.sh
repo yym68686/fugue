@@ -1177,6 +1177,7 @@ api:
     tag: "${IMAGE_TAG}"
     pullPolicy: IfNotPresent
   appBaseDomain: "${FUGUE_APP_BASE_DOMAIN}"
+  customDomainBaseDomain: "${FUGUE_CUSTOM_DOMAIN_BASE_DOMAIN:-}"
   apiPublicDomain: "${FUGUE_DOMAIN}"
   edgeTLSAskToken: "${FUGUE_EDGE_TLS_ASK_TOKEN}"
   registryPushBase: "${registry_push_base}"

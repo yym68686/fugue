@@ -22,6 +22,7 @@ type Server struct {
 	auth                        *auth.Authenticator
 	log                         *log.Logger
 	appBaseDomain               string
+	customDomainBaseDomain      string
 	apiPublicDomain             string
 	edgeTLSAskToken             string
 	registryPushBase            string
@@ -53,6 +54,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		auth:                        authn,
 		log:                         logger,
 		appBaseDomain:               strings.TrimSpace(strings.ToLower(cfg.AppBaseDomain)),
+		customDomainBaseDomain:      strings.TrimSpace(strings.ToLower(cfg.CustomDomainBaseDomain)),
 		apiPublicDomain:             strings.TrimSpace(strings.ToLower(cfg.APIPublicDomain)),
 		edgeTLSAskToken:             strings.TrimSpace(cfg.EdgeTLSAskToken),
 		registryPushBase:            strings.TrimSpace(cfg.RegistryPushBase),
@@ -78,6 +80,9 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 	}
 	if server.registryPullBase == "" {
 		server.registryPullBase = server.registryPushBase
+	}
+	if server.customDomainBaseDomain == "" {
+		server.customDomainBaseDomain = server.appBaseDomain
 	}
 	if server.clusterJoinRegistryEndpoint == "" {
 		server.clusterJoinRegistryEndpoint = server.registryPullBase

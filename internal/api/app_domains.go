@@ -2,9 +2,10 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
@@ -15,12 +16,17 @@ import (
 
 type appDomainDNSResolver interface {
 	LookupCNAME(ctx context.Context, host string) (string, error)
+	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
 }
 
 type netAppDomainResolver struct{}
 
 func (netAppDomainResolver) LookupCNAME(ctx context.Context, host string) (string, error) {
 	return net.DefaultResolver.LookupCNAME(ctx, host)
+}
+
+func (netAppDomainResolver) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {
+	return net.DefaultResolver.LookupIPAddr(ctx, host)
 }
 
 type appDomainAvailability struct {
@@ -340,6 +346,11 @@ func (s *Server) normalizeRequestedCustomDomain(raw string) (string, string) {
 			return "", "platform-managed hostnames must be updated through the app route endpoint"
 		}
 	}
+	if base := strings.TrimSpace(strings.ToLower(s.customDomainBaseDomain)); base != "" {
+		if hostname == base || strings.HasSuffix(hostname, "."+base) {
+			return "", "hostname is reserved for Fugue custom-domain targets"
+		}
+	}
 	labels := strings.Split(hostname, ".")
 	if len(labels) < 2 {
 		return "", "hostname must be a fully-qualified domain name"
@@ -371,12 +382,13 @@ func (s *Server) evaluateAppDomainVerification(ctx context.Context, app model.Ap
 		verifiedAt := *domain.VerifiedAt
 		updated.VerifiedAt = &verifiedAt
 	}
+	legacyTarget := normalizeExternalAppDomain(updated.RouteTarget)
 	updated.RouteTarget = target
 	updated.VerificationTXTName = ""
 	updated.VerificationTXTValue = ""
 	updated.LastCheckedAt = &now
 
-	verified, message, err := s.customDomainVerificationResult(ctx, app, updated)
+	verified, message, err := s.customDomainVerificationResult(ctx, app, updated, legacyTarget)
 	if err != nil {
 		return domain, false, err
 	}
@@ -407,8 +419,8 @@ func (s *Server) verifyAndPersistAppDomain(ctx context.Context, app model.App, d
 	return updated, verified, nil
 }
 
-func (s *Server) customDomainVerificationResult(ctx context.Context, app model.App, domain model.AppDomain) (bool, string, error) {
-	targets := s.customDomainTargets(app)
+func (s *Server) customDomainVerificationResult(ctx context.Context, app model.App, domain model.AppDomain, legacyTarget string) (bool, string, error) {
+	targets := s.customDomainTargets(app, legacyTarget)
 	if len(targets) == 0 {
 		return false, "custom domain CNAME target is not configured", nil
 	}
@@ -420,29 +432,49 @@ func (s *Server) customDomainVerificationResult(ctx context.Context, app model.A
 
 func (s *Server) customDomainRoutesToAnyTarget(ctx context.Context, hostname string, targets []string) bool {
 	cname, err := s.dnsResolver.LookupCNAME(ctx, hostname)
-	if err != nil {
+	if err == nil {
+		cname = normalizeExternalAppDomain(cname)
+		for _, target := range targets {
+			if cname == normalizeExternalAppDomain(target) {
+				return true
+			}
+		}
+	}
+
+	hostIPs, err := s.dnsResolver.LookupIPAddr(ctx, hostname)
+	if err != nil || len(hostIPs) == 0 {
 		return false
 	}
-	cname = normalizeExternalAppDomain(cname)
 	for _, target := range targets {
-		if cname == normalizeExternalAppDomain(target) {
+		targetIPs, targetErr := s.dnsResolver.LookupIPAddr(ctx, target)
+		if targetErr != nil || len(targetIPs) == 0 {
+			continue
+		}
+		if ipListsIntersect(hostIPs, targetIPs) {
 			return true
 		}
 	}
 	return false
 }
 
-func (s *Server) customDomainTargets(app model.App) []string {
-	targets := make([]string, 0, 1)
+func (s *Server) customDomainTargets(app model.App, legacyTargets ...string) []string {
+	targets := make([]string, 0, 2+len(legacyTargets))
+	if host := s.dedicatedCustomDomainTarget(app); host != "" {
+		targets = append(targets, host)
+	}
 	if app.Route != nil {
 		if host := normalizeExternalAppDomain(app.Route.Hostname); host != "" {
 			targets = append(targets, host)
 		}
 	}
-	return slices.Compact(targets)
+	targets = append(targets, legacyTargets...)
+	return uniqueNormalizedAppDomainHosts(targets...)
 }
 
 func (s *Server) primaryCustomDomainTarget(app model.App) string {
+	if host := s.dedicatedCustomDomainTarget(app); host != "" {
+		return host
+	}
 	targets := s.customDomainTargets(app)
 	if len(targets) == 0 {
 		return ""
@@ -450,8 +482,63 @@ func (s *Server) primaryCustomDomainTarget(app model.App) string {
 	return targets[0]
 }
 
+func (s *Server) dedicatedCustomDomainTarget(app model.App) string {
+	base := normalizeExternalAppDomain(s.customDomainBaseDomain)
+	if base == "" {
+		return ""
+	}
+	label := stableCustomDomainTargetLabel(app)
+	if label == "" {
+		return ""
+	}
+	return label + "." + base
+}
+
+func stableCustomDomainTargetLabel(app model.App) string {
+	appID := strings.TrimSpace(strings.ToLower(app.ID))
+	tenantID := strings.TrimSpace(strings.ToLower(app.TenantID))
+	if appID == "" || tenantID == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(tenantID + ":" + appID))
+	return "d-" + hex.EncodeToString(sum[:10])
+}
+
+func uniqueNormalizedAppDomainHosts(hosts ...string) []string {
+	out := make([]string, 0, len(hosts))
+	seen := make(map[string]struct{}, len(hosts))
+	for _, host := range hosts {
+		host = normalizeExternalAppDomain(host)
+		if host == "" {
+			continue
+		}
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		out = append(out, host)
+	}
+	return out
+}
+
 func normalizeExternalAppDomain(raw string) string {
 	return strings.Trim(strings.TrimSpace(strings.ToLower(raw)), ".")
+}
+
+func ipListsIntersect(left, right []net.IPAddr) bool {
+	if len(left) == 0 || len(right) == 0 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(left))
+	for _, addr := range left {
+		seen[addr.IP.String()] = struct{}{}
+	}
+	for _, addr := range right {
+		if _, ok := seen[addr.IP.String()]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func subtleConstantCompare(left, right string) bool {

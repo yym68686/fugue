@@ -8,6 +8,7 @@ api:
     pullPolicy: IfNotPresent
   databaseURL: ""
   appBaseDomain: fugue.pro
+  customDomainBaseDomain: ""
   apiPublicDomain: api.fugue.pro
   edgeTLSAskToken: ""
   registryPushBase: registry.fugue.pro
