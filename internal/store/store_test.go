@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	runtimepkg "fugue/internal/runtime"
 )
 
 func TestManagedAndExternalOperationFlow(t *testing.T) {
@@ -809,6 +810,121 @@ func TestRuntimePlatformSharedVisibleToAllTenants(t *testing.T) {
 		RuntimeID: runtimeObj.ID,
 	}); err != nil {
 		t.Fatalf("create app on platform-shared runtime: %v", err)
+	}
+}
+
+func TestSyncManagedSharedLocationRuntimesMaterializesSelectableTargets(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	if err := s.SyncManagedSharedLocationRuntimes([]map[string]string{
+		{runtimepkg.LocationCountryCodeLabelKey: "HK"},
+		{runtimepkg.LocationCountryCodeLabelKey: "JP"},
+		{runtimepkg.LocationCountryCodeLabelKey: "hk"},
+	}); err != nil {
+		t.Fatalf("sync managed shared location runtimes: %v", err)
+	}
+
+	baseRuntime, err := s.GetRuntime(managedSharedRuntimeID)
+	if err != nil {
+		t.Fatalf("get base managed shared runtime: %v", err)
+	}
+	if got := baseRuntime.Labels[runtimepkg.LocationCountryCodeLabelKey]; got != "" {
+		t.Fatalf("expected base managed shared runtime to stay unconstrained, got country code %q", got)
+	}
+
+	hkSpec := buildManagedSharedLocationRuntimeSpec(map[string]string{
+		runtimepkg.LocationCountryCodeLabelKey: "hk",
+	})
+	jpSpec := buildManagedSharedLocationRuntimeSpec(map[string]string{
+		runtimepkg.LocationCountryCodeLabelKey: "jp",
+	})
+	hkRuntime, err := s.GetRuntime(hkSpec.ID)
+	if err != nil {
+		t.Fatalf("get hong kong managed shared runtime: %v", err)
+	}
+	if hkRuntime.Type != model.RuntimeTypeManagedShared {
+		t.Fatalf("expected hong kong runtime type %q, got %q", model.RuntimeTypeManagedShared, hkRuntime.Type)
+	}
+	if got := hkRuntime.Labels[runtimepkg.LocationCountryCodeLabelKey]; got != "hk" {
+		t.Fatalf("expected hong kong runtime country code %q, got %q", "hk", got)
+	}
+
+	jpRuntime, err := s.GetRuntime(jpSpec.ID)
+	if err != nil {
+		t.Fatalf("get japan managed shared runtime: %v", err)
+	}
+	if got := jpRuntime.Labels[runtimepkg.LocationCountryCodeLabelKey]; got != "jp" {
+		t.Fatalf("expected japan runtime country code %q, got %q", "jp", got)
+	}
+}
+
+func TestSyncManagedSharedLocationRuntimesDeletesUnusedTargetsAndKeepsReferencedOnesOffline(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	if err := s.SyncManagedSharedLocationRuntimes([]map[string]string{
+		{runtimepkg.LocationCountryCodeLabelKey: "HK"},
+		{runtimepkg.LocationCountryCodeLabelKey: "JP"},
+		{runtimepkg.LocationCountryCodeLabelKey: "US"},
+	}); err != nil {
+		t.Fatalf("initial sync managed shared location runtimes: %v", err)
+	}
+
+	hkSpec := buildManagedSharedLocationRuntimeSpec(map[string]string{
+		runtimepkg.LocationCountryCodeLabelKey: "hk",
+	})
+	jpSpec := buildManagedSharedLocationRuntimeSpec(map[string]string{
+		runtimepkg.LocationCountryCodeLabelKey: "jp",
+	})
+	usSpec := buildManagedSharedLocationRuntimeSpec(map[string]string{
+		runtimepkg.LocationCountryCodeLabelKey: "us",
+	})
+	if _, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: jpSpec.ID,
+	}); err != nil {
+		t.Fatalf("create app on japan shared runtime: %v", err)
+	}
+
+	if err := s.SyncManagedSharedLocationRuntimes([]map[string]string{
+		{runtimepkg.LocationCountryCodeLabelKey: "HK"},
+	}); err != nil {
+		t.Fatalf("resync managed shared location runtimes: %v", err)
+	}
+
+	if _, err := s.GetRuntime(hkSpec.ID); err != nil {
+		t.Fatalf("expected hong kong runtime to remain active: %v", err)
+	}
+	if _, err := s.GetRuntime(usSpec.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected unreferenced united states runtime to be removed, got %v", err)
+	}
+
+	jpRuntime, err := s.GetRuntime(jpSpec.ID)
+	if err != nil {
+		t.Fatalf("expected referenced japan runtime to remain readable: %v", err)
+	}
+	if jpRuntime.Status != model.RuntimeStatusOffline {
+		t.Fatalf("expected referenced japan runtime to become offline, got %q", jpRuntime.Status)
 	}
 }
 

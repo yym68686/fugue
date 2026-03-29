@@ -193,11 +193,16 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	managedSharedRuntime, defaultSharedDisplayRegion, err := s.ensureManagedSharedRuntimeLocationFromSnapshots(snapshots)
+	if err := s.syncManagedSharedLocationRuntimesFromSnapshots(snapshots); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	managedSharedRuntime, err := s.store.GetRuntime(tenantSharedRuntimeID)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
+	_, defaultSharedDisplayRegion, _ := selectDefaultManagedSharedLocation(snapshots)
 
 	runtimes, err := s.store.ListNodes(principal.TenantID, principal.IsPlatformAdmin())
 	if err != nil {
@@ -340,6 +345,8 @@ func buildTenantSharedClusterNode(snapshots []resolvedClusterNodeSnapshot, runti
 	displayRegion := strings.TrimSpace(defaultDisplayRegion)
 	if region, ok := uniqueSharedWorkloadDisplayRegion(snapshots); ok {
 		displayRegion = region
+	} else if sharedLocationCount(snapshots) > 1 {
+		displayRegion = tenantSharedClusterRegion
 	} else if runtimeRegion := managedSharedRuntimeDisplayRegion(runtimeObj, snapshots); runtimeRegion != "" {
 		displayRegion = runtimeRegion
 	}
@@ -357,22 +364,35 @@ func buildTenantSharedClusterNode(snapshots []resolvedClusterNodeSnapshot, runti
 	}, true
 }
 
-func (s *Server) ensureManagedSharedRuntimeLocationFromSnapshots(snapshots []clusterNodeSnapshot) (model.Runtime, string, error) {
-	runtimeObj, err := s.store.GetRuntime(tenantSharedRuntimeID)
-	if err != nil {
-		return model.Runtime{}, "", err
+func (s *Server) syncManagedSharedLocationRuntimesFromSnapshots(snapshots []clusterNodeSnapshot) error {
+	return s.store.SyncManagedSharedLocationRuntimes(sharedLocationLabelSet(snapshots))
+}
+
+func (s *Server) trySyncManagedSharedLocationRuntimes(ctx context.Context) {
+	clientFactory := s.newClusterNodeClient
+	if clientFactory == nil {
+		clientFactory = newClusterNodeClient
 	}
 
-	labels, displayRegion, ok := selectDefaultManagedSharedLocation(snapshots)
-	if !ok || len(labels) == 0 {
-		return runtimeObj, displayRegion, nil
+	client, err := clientFactory()
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("skip managed shared location sync: %v", err)
+		}
+		return
 	}
 
-	updatedRuntime, _, err := s.store.EnsureManagedSharedLocationLabels(labels)
+	snapshots, err := client.listClusterNodeInventory(ctx)
 	if err != nil {
-		return model.Runtime{}, "", err
+		if s.log != nil {
+			s.log.Printf("skip managed shared location sync after inventory failure: %v", err)
+		}
+		return
 	}
-	return updatedRuntime, displayRegion, nil
+
+	if err := s.syncManagedSharedLocationRuntimesFromSnapshots(snapshots); err != nil && s.log != nil {
+		s.log.Printf("skip managed shared location sync after store failure: %v", err)
+	}
 }
 
 func selectDefaultManagedSharedLocation(snapshots []clusterNodeSnapshot) (map[string]string, string, bool) {
@@ -431,6 +451,17 @@ func sharedLocationLabels(snapshot clusterNodeSnapshot) map[string]string {
 		}
 	}
 	return nil
+}
+
+func sharedLocationLabelSet(snapshots []clusterNodeSnapshot) []map[string]string {
+	out := make([]map[string]string, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if !sharedClusterSnapshotCandidate(snapshot) || !clusterNodeSnapshotHasLocation(snapshot) {
+			continue
+		}
+		out = append(out, sharedLocationLabels(snapshot))
+	}
+	return out
 }
 
 func preferSharedLocationSnapshot(left, right clusterNodeSnapshot) bool {
@@ -508,6 +539,21 @@ func sharedLocationKey(snapshot clusterNodeSnapshot) string {
 		return "country:" + snapshot.countryCode
 	}
 	return "region:" + strings.ToLower(strings.TrimSpace(snapshot.node.Region))
+}
+
+func sharedLocationCount(snapshots []resolvedClusterNodeSnapshot) int {
+	if len(snapshots) == 0 {
+		return 0
+	}
+
+	keys := map[string]struct{}{}
+	for _, snapshot := range snapshots {
+		if !clusterNodeSnapshotHasLocation(snapshot.snapshot) {
+			continue
+		}
+		keys[sharedLocationKey(snapshot.snapshot)] = struct{}{}
+	}
+	return len(keys)
 }
 
 func newClusterNodeClient() (*clusterNodeClient, error) {

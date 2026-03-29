@@ -675,8 +675,8 @@ func TestListClusterNodesIncludesAggregatedSharedClusterWithoutVisibleTenantWork
 	if node.Name != tenantSharedClusterNodeName {
 		t.Fatalf("expected %q, got %q", tenantSharedClusterNodeName, node.Name)
 	}
-	if node.Region != "Japan" {
-		t.Fatalf("expected aggregated region label %q, got %q", "Japan", node.Region)
+	if node.Region != tenantSharedClusterRegion {
+		t.Fatalf("expected aggregated region label %q, got %q", tenantSharedClusterRegion, node.Region)
 	}
 	if node.RuntimeID != tenantSharedRuntimeID {
 		t.Fatalf("expected shared node runtime id %q, got %q", tenantSharedRuntimeID, node.RuntimeID)
@@ -689,8 +689,25 @@ func TestListClusterNodesIncludesAggregatedSharedClusterWithoutVisibleTenantWork
 	if err != nil {
 		t.Fatalf("get managed shared runtime: %v", err)
 	}
-	if got := runtimeObj.Labels[runtime.LocationCountryCodeLabelKey]; got != "jp" {
-		t.Fatalf("expected managed shared runtime country code %q, got %q", "jp", got)
+	if got := runtimeObj.Labels[runtime.LocationCountryCodeLabelKey]; got != "" {
+		t.Fatalf("expected managed shared runtime to stay unconstrained, got country code %q", got)
+	}
+	runtimes, err := s.ListRuntimes(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list runtimes: %v", err)
+	}
+	foundJapanTarget := false
+	for _, candidate := range runtimes {
+		if candidate.ID == tenantSharedRuntimeID {
+			continue
+		}
+		if candidate.Type == model.RuntimeTypeManagedShared && candidate.Labels[runtime.LocationCountryCodeLabelKey] == "jp" {
+			foundJapanTarget = true
+			break
+		}
+	}
+	if !foundJapanTarget {
+		t.Fatalf("expected selectable japan managed-shared runtime target, got %#v", runtimes)
 	}
 }
 
@@ -785,6 +802,113 @@ func TestListClusterNodesDoesNotAggregateForeignDedicatedNodesIntoSharedCluster(
 
 	if len(response.ClusterNodes) != 0 {
 		t.Fatalf("expected foreign dedicated node to stay hidden, got %#v", response.ClusterNodes)
+	}
+}
+
+func TestListRuntimesSyncsManagedSharedLocationTargetsFromClusterInventory(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Runtime Viewer")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "viewer", []string{"project.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				switch {
+				case req.Method == http.MethodGet && req.URL.Path == "/api/v1/nodes":
+					return jsonHTTPResponse(http.StatusOK, map[string]any{
+						"items": []map[string]any{
+							{
+								"metadata": map[string]any{
+									"name":              "shared-hk",
+									"creationTimestamp": "2026-03-29T00:00:00Z",
+									"labels": map[string]string{
+										clusterNodeLabelCountryCode: "hk",
+									},
+									"annotations": map[string]string{
+										clusterNodeAnnotationCountry: "Hong Kong",
+									},
+								},
+								"status": map[string]any{
+									"conditions": []map[string]string{{"type": "Ready", "status": "True"}},
+								},
+							},
+							{
+								"metadata": map[string]any{
+									"name":              "shared-jp",
+									"creationTimestamp": "2026-03-29T00:00:01Z",
+									"labels": map[string]string{
+										clusterNodeLabelCountryCode: "jp",
+									},
+									"annotations": map[string]string{
+										clusterNodeAnnotationCountry: "Japan",
+									},
+								},
+								"status": map[string]any{
+									"conditions": []map[string]string{{"type": "Ready", "status": "True"}},
+								},
+							},
+						},
+					}), nil
+				case req.Method == http.MethodGet && req.URL.Path == "/api/v1/pods":
+					return jsonHTTPResponse(http.StatusOK, map[string]any{"items": []any{}}), nil
+				case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/proxy/stats/summary"):
+					return jsonHTTPResponse(http.StatusOK, map[string]any{"node": map[string]any{}}), nil
+				default:
+					return jsonHTTPResponse(http.StatusNotFound, map[string]any{"error": "not found"}), nil
+				}
+			})},
+			baseURL:     "https://kube.test",
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/runtimes", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Runtimes []model.Runtime `json:"runtimes"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+
+	foundBase := false
+	foundHongKong := false
+	foundJapan := false
+	for _, runtimeObj := range response.Runtimes {
+		if runtimeObj.ID == tenantSharedRuntimeID {
+			foundBase = true
+			if got := runtimeObj.Labels[runtime.LocationCountryCodeLabelKey]; got != "" {
+				t.Fatalf("expected base managed shared runtime to stay unconstrained, got country code %q", got)
+			}
+			continue
+		}
+		if runtimeObj.Type != model.RuntimeTypeManagedShared {
+			continue
+		}
+		switch runtimeObj.Labels[runtime.LocationCountryCodeLabelKey] {
+		case "hk":
+			foundHongKong = true
+		case "jp":
+			foundJapan = true
+		}
+	}
+
+	if !foundBase || !foundHongKong || !foundJapan {
+		t.Fatalf("expected runtime list to expose base/hk/jp managed-shared targets, got %#v", response.Runtimes)
 	}
 }
 

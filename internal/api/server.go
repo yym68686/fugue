@@ -720,6 +720,7 @@ func (s *Server) handleGetNodeKeyUsages(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleListRuntimes(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
+	s.trySyncManagedSharedLocationRuntimes(r.Context())
 	runtimes, err := s.store.ListRuntimes(principal.TenantID, principal.IsPlatformAdmin())
 	if err != nil {
 		s.writeStoreError(w, err)

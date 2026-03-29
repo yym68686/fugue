@@ -69,6 +69,7 @@ func (s *Server) handleSetRuntimePoolMode(w http.ResponseWriter, r *http.Request
 	s.appendAudit(principal, "runtime.pool.mode", "runtime", updatedRuntime.ID, updatedRuntime.TenantID, map[string]string{
 		"pool_mode": updatedRuntime.PoolMode,
 	})
+	s.trySyncManagedSharedLocationRuntimes(r.Context())
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"runtime":         updatedRuntime,
 		"node_reconciled": nodeReconciled,
