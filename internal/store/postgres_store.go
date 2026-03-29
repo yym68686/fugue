@@ -2429,6 +2429,23 @@ WHERE id = $1
 }
 
 func (s *Store) pgClaimNextPendingOperation() (model.Operation, bool, error) {
+	return s.pgClaimNextPendingOperationWithFilter("")
+}
+
+func (s *Store) pgClaimNextPendingForegroundOperation() (model.Operation, bool, error) {
+	return s.pgClaimNextPendingOperationWithFilter(`
+  AND NOT (type = $2 AND requested_by_id = $3)
+`, model.OperationTypeImport, model.OperationRequestedByGitHubSyncController)
+}
+
+func (s *Store) pgClaimNextPendingGitHubSyncImportOperation() (model.Operation, bool, error) {
+	return s.pgClaimNextPendingOperationWithFilter(`
+  AND type = $2
+  AND requested_by_id = $3
+`, model.OperationTypeImport, model.OperationRequestedByGitHubSyncController)
+}
+
+func (s *Store) pgClaimNextPendingOperationWithFilter(extraWhere string, args ...any) (model.Operation, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -2438,11 +2455,13 @@ func (s *Store) pgClaimNextPendingOperation() (model.Operation, bool, error) {
 	}
 	defer tx.Rollback()
 
-	op, err := scanOperation(tx.QueryRowContext(ctx, `
+	queryArgs := append([]any{model.OperationStatusPending}, args...)
+	query := `
 WITH next_op AS (
 	SELECT id
 	FROM fugue_operations
 	WHERE status = $1
+` + extraWhere + `
 	ORDER BY created_at ASC
 	FOR UPDATE SKIP LOCKED
 	LIMIT 1
@@ -2450,7 +2469,8 @@ WITH next_op AS (
 SELECT o.id, o.tenant_id, o.type, o.status, o.execution_mode, o.requested_by_type, o.requested_by_id, o.app_id, o.source_runtime_id, o.target_runtime_id, o.desired_replicas, o.desired_spec_json, o.desired_source_json, o.result_message, o.manifest_path, o.assigned_runtime_id, o.error_message, o.created_at, o.updated_at, o.started_at, o.completed_at
 FROM fugue_operations o
 JOIN next_op n ON n.id = o.id
-`, model.OperationStatusPending))
+`
+	op, err := scanOperation(tx.QueryRowContext(ctx, query, queryArgs...))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return model.Operation{}, false, nil

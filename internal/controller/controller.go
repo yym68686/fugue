@@ -35,6 +35,13 @@ type sourceImporter interface {
 	SuggestUploadedComposeServiceEnv(context.Context, sourceimport.UploadComposeServiceEnvRequest) (map[string]string, error)
 }
 
+type operationLane int
+
+const (
+	operationLaneForeground operationLane = iota
+	operationLaneGitHubSyncImport
+)
+
 func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *Service {
 	return &Service{
 		Store:              store,
@@ -117,6 +124,13 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	if requeued > 0 {
 		s.Logger.Printf("requeued %d in-flight managed operations after controller start", requeued)
 	}
+	if err := s.cleanupZombieBuildJobs(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		s.Logger.Printf("zombie build job cleanup error: %v", err)
+	}
+
+	foregroundOps := s.startPendingOperationWorker(ctx, operationLaneForeground)
+	backgroundImports := s.startPendingOperationWorker(ctx, operationLaneGitHubSyncImport)
+	triggerPendingOperationWorkers(foregroundOps, backgroundImports)
 
 	if !eventDriven {
 		ticker := time.NewTicker(s.Config.PollInterval)
@@ -138,6 +152,8 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			case <-githubTickerChan(githubTicker):
 				if err := s.syncGitHubApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
 					s.Logger.Printf("github sync error: %v", err)
+				} else {
+					triggerPendingOperationWorkers(backgroundImports)
 				}
 			case <-ticker.C:
 			}
@@ -150,6 +166,8 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	if s.Config.GitHubSyncInterval > 0 {
 		if err := s.syncGitHubApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			s.Logger.Printf("initial github sync error: %v", err)
+		} else {
+			triggerPendingOperationWorkers(backgroundImports)
 		}
 	}
 
@@ -175,18 +193,14 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 				operationEvents = nil
 				continue
 			}
-			if err := s.drainPendingOperations(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				s.Logger.Printf("drain pending operations error: %v", err)
-			}
+			triggerPendingOperationWorkers(foregroundOps, backgroundImports)
 			if s.Config.KubectlApply {
 				if err := s.reconcileManagedApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
 					s.Logger.Printf("managed app reconcile error: %v", err)
 				}
 			}
 		case <-fallbackTicker.C:
-			if err := s.drainPendingOperations(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				s.Logger.Printf("fallback drain pending operations error: %v", err)
-			}
+			triggerPendingOperationWorkers(foregroundOps, backgroundImports)
 			if s.Config.KubectlApply {
 				if err := s.reconcileManagedApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
 					s.Logger.Printf("fallback managed app reconcile error: %v", err)
@@ -201,10 +215,15 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		case <-githubTickerChan(githubTicker):
 			if err := s.syncGitHubApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				s.Logger.Printf("github sync error: %v", err)
+			} else {
+				triggerPendingOperationWorkers(backgroundImports)
 			}
 		case <-staleTicker.C:
 			if err := s.markRuntimeOfflineStale(); err != nil {
 				s.Logger.Printf("runtime stale sweep error: %v", err)
+			}
+			if err := s.cleanupZombieBuildJobs(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				s.Logger.Printf("zombie build job cleanup error: %v", err)
 			}
 		}
 	}
@@ -214,7 +233,7 @@ func (s *Service) reconcileOnce(ctx context.Context) error {
 	if err := s.markRuntimeOfflineStale(); err != nil {
 		return err
 	}
-	if err := s.drainPendingOperations(ctx); err != nil {
+	if err := s.cleanupZombieBuildJobs(ctx); err != nil {
 		return err
 	}
 	if s.Config.KubectlApply {
@@ -230,36 +249,97 @@ func (s *Service) markRuntimeOfflineStale() error {
 	return nil
 }
 
-func (s *Service) drainPendingOperations(ctx context.Context) error {
+func triggerPendingOperationWorkers(workers ...chan struct{}) {
+	for _, worker := range workers {
+		if worker == nil {
+			continue
+		}
+		select {
+		case worker <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (lane operationLane) String() string {
+	switch lane {
+	case operationLaneForeground:
+		return "foreground"
+	case operationLaneGitHubSyncImport:
+		return "github-sync-import"
+	default:
+		return "unknown"
+	}
+}
+
+func (s *Service) startPendingOperationWorker(ctx context.Context, lane operationLane) chan struct{} {
+	trigger := make(chan struct{}, 1)
+	go func() {
+		ticker := time.NewTicker(s.Config.PollInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-trigger:
+			case <-ticker.C:
+			}
+			if err := s.drainPendingOperationsInLane(ctx, lane); err != nil && !errors.Is(err, context.Canceled) {
+				s.Logger.Printf("drain pending operations (%s) error: %v", lane, err)
+			}
+		}
+	}()
+	return trigger
+}
+
+func (s *Service) claimNextPendingOperationInLane(lane operationLane) (model.Operation, bool, error) {
+	switch lane {
+	case operationLaneForeground:
+		return s.Store.ClaimNextPendingForegroundOperation()
+	case operationLaneGitHubSyncImport:
+		return s.Store.ClaimNextPendingGitHubSyncImportOperation()
+	default:
+		return model.Operation{}, false, fmt.Errorf("unsupported operation lane %d", lane)
+	}
+}
+
+func (s *Service) drainPendingOperationsInLane(ctx context.Context, lane operationLane) error {
 	for {
-		op, found, err := s.Store.ClaimNextPendingOperation()
+		op, found, err := s.claimNextPendingOperationInLane(lane)
 		if err != nil {
 			return fmt.Errorf("claim pending operation: %w", err)
 		}
 		if !found {
 			return nil
 		}
-
-		switch op.ExecutionMode {
-		case model.ExecutionModeManaged:
-			if err := s.executeManagedOperation(ctx, op); err != nil {
-				if errors.Is(err, context.Canceled) {
-					if _, requeueErr := s.Store.RequeueManagedOperation(op.ID, "operation requeued after controller interruption"); requeueErr != nil && !errors.Is(requeueErr, store.ErrConflict) {
-						s.Logger.Printf("operation %s requeue after interruption failed: %v", op.ID, requeueErr)
-					}
-					return err
-				}
-				s.Logger.Printf("operation %s failed: %v", op.ID, err)
-				if _, failErr := s.Store.FailOperation(op.ID, err.Error()); failErr != nil {
-					s.Logger.Printf("operation %s fail update error: %v", op.ID, failErr)
-				}
-			}
-		case model.ExecutionModeAgent:
-			s.Logger.Printf("operation %s dispatched to runtime %s", op.ID, op.AssignedRuntimeID)
-		default:
-			s.Logger.Printf("operation %s has unknown execution mode %s", op.ID, op.ExecutionMode)
+		if err := s.handleClaimedOperation(ctx, op); err != nil {
+			return err
 		}
 	}
+}
+
+func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation) error {
+	switch op.ExecutionMode {
+	case model.ExecutionModeManaged:
+		if err := s.executeManagedOperation(ctx, op); err != nil {
+			if errors.Is(err, context.Canceled) {
+				if _, requeueErr := s.Store.RequeueManagedOperation(op.ID, "operation requeued after controller interruption"); requeueErr != nil && !errors.Is(requeueErr, store.ErrConflict) {
+					s.Logger.Printf("operation %s requeue after interruption failed: %v", op.ID, requeueErr)
+				}
+				return err
+			}
+			s.Logger.Printf("operation %s failed: %v", op.ID, err)
+			if _, failErr := s.Store.FailOperation(op.ID, err.Error()); failErr != nil {
+				s.Logger.Printf("operation %s fail update error: %v", op.ID, failErr)
+			}
+		}
+	case model.ExecutionModeAgent:
+		s.Logger.Printf("operation %s dispatched to runtime %s", op.ID, op.AssignedRuntimeID)
+	default:
+		s.Logger.Printf("operation %s has unknown execution mode %s", op.ID, op.ExecutionMode)
+	}
+	return nil
 }
 
 func (s *Service) executeManagedOperation(ctx context.Context, op model.Operation) error {

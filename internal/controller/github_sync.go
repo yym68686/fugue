@@ -10,8 +10,6 @@ import (
 	"fugue/internal/store"
 )
 
-const autoGitHubSyncRequestedByID = "fugue-controller/github-sync"
-
 func (s *Service) syncGitHubApps(ctx context.Context) error {
 	apps, err := s.Store.ListApps("", true)
 	if err != nil {
@@ -136,7 +134,7 @@ func (s *Service) queueGitHubAutoRebuild(app model.App, branch string) (model.Op
 		TenantID:        app.TenantID,
 		Type:            model.OperationTypeImport,
 		RequestedByType: model.ActorTypeBootstrap,
-		RequestedByID:   autoGitHubSyncRequestedByID,
+		RequestedByID:   model.OperationRequestedByGitHubSyncController,
 		AppID:           app.ID,
 		DesiredSpec:     &spec,
 		DesiredSource:   &source,

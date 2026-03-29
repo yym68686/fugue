@@ -71,6 +71,8 @@ const (
 	ActorTypeNodeKey   = "node-key"
 	ActorTypeRuntime   = "runtime"
 
+	OperationRequestedByGitHubSyncController = "fugue-controller/github-sync"
+
 	ClusterNodeWorkloadKindApp            = "app"
 	ClusterNodeWorkloadKindBackingService = "backing_service"
 

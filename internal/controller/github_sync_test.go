@@ -75,8 +75,8 @@ func TestSyncGitHubAppsQueuesImportWhenCommitChanges(t *testing.T) {
 	if op.Type != model.OperationTypeImport {
 		t.Fatalf("expected import operation, got %q", op.Type)
 	}
-	if op.RequestedByID != autoGitHubSyncRequestedByID {
-		t.Fatalf("expected requested by %q, got %q", autoGitHubSyncRequestedByID, op.RequestedByID)
+	if op.RequestedByID != model.OperationRequestedByGitHubSyncController {
+		t.Fatalf("expected requested by %q, got %q", model.OperationRequestedByGitHubSyncController, op.RequestedByID)
 	}
 	if op.DesiredSource == nil {
 		t.Fatal("expected desired source on queued operation")

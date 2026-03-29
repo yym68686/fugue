@@ -53,6 +53,22 @@ type kubePodList struct {
 	Items []kubePod `json:"items"`
 }
 
+type kubeJobList struct {
+	Items []kubeJobInfo `json:"items"`
+}
+
+type kubeJobInfo struct {
+	Metadata struct {
+		Name   string            `json:"name"`
+		Labels map[string]string `json:"labels,omitempty"`
+	} `json:"metadata"`
+	Status kubeJobStatus `json:"status"`
+}
+
+type kubeJobStatus struct {
+	Active int `json:"active,omitempty"`
+}
+
 type kubePod struct {
 	Metadata struct {
 		Name string `json:"name"`
@@ -127,6 +143,33 @@ func (c *kubeClient) getLease(ctx context.Context, namespace, name string) (kube
 		return kubeLease{}, false, err
 	}
 	return lease, true, nil
+}
+
+func (c *kubeClient) listJobsBySelector(ctx context.Context, namespace, selector string) ([]kubeJobInfo, error) {
+	query := url.Values{}
+	if strings.TrimSpace(selector) != "" {
+		query.Set("labelSelector", selector)
+	}
+
+	var jobList kubeJobList
+	apiPath := "/apis/batch/v1/namespaces/" + c.effectiveNamespace(namespace) + "/jobs"
+	if encoded := query.Encode(); encoded != "" {
+		apiPath += "?" + encoded
+	}
+	_, err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &jobList)
+	if err != nil {
+		return nil, err
+	}
+	return jobList.Items, nil
+}
+
+func (c *kubeClient) deleteJob(ctx context.Context, namespace, name string) error {
+	apiPath := "/apis/batch/v1/namespaces/" + c.effectiveNamespace(namespace) + "/jobs/" + url.PathEscape(strings.TrimSpace(name)) + "?propagationPolicy=Background"
+	status, err := c.doJSON(ctx, http.MethodDelete, apiPath, nil, nil)
+	if status == http.StatusNotFound {
+		return nil
+	}
+	return err
 }
 
 func (c *kubeClient) createLease(ctx context.Context, namespace string, lease kubeLease) error {

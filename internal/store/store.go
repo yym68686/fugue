@@ -1931,6 +1931,14 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 	return app, err
 }
 
+func isGitHubSyncImportOperation(op model.Operation) bool {
+	return op.Type == model.OperationTypeImport && strings.TrimSpace(op.RequestedByID) == model.OperationRequestedByGitHubSyncController
+}
+
+func isForegroundPendingOperation(op model.Operation) bool {
+	return !isGitHubSyncImportOperation(op)
+}
+
 func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 	if op.TenantID == "" || op.Type == "" || op.AppID == "" {
 		return model.Operation{}, ErrInvalidInput
@@ -2056,14 +2064,36 @@ func (s *Store) ClaimNextPendingOperation() (model.Operation, bool, error) {
 	if s.usingDatabase() {
 		return s.pgClaimNextPendingOperation()
 	}
+	return s.claimNextPendingOperationMatching(nil)
+}
+
+func (s *Store) ClaimNextPendingForegroundOperation() (model.Operation, bool, error) {
+	if s.usingDatabase() {
+		return s.pgClaimNextPendingForegroundOperation()
+	}
+	return s.claimNextPendingOperationMatching(isForegroundPendingOperation)
+}
+
+func (s *Store) ClaimNextPendingGitHubSyncImportOperation() (model.Operation, bool, error) {
+	if s.usingDatabase() {
+		return s.pgClaimNextPendingGitHubSyncImportOperation()
+	}
+	return s.claimNextPendingOperationMatching(isGitHubSyncImportOperation)
+}
+
+func (s *Store) claimNextPendingOperationMatching(match func(model.Operation) bool) (model.Operation, bool, error) {
 	var op model.Operation
 	var found bool
 	err := s.withLockedState(true, func(state *model.State) error {
 		pending := make([]int, 0)
 		for idx := range state.Operations {
-			if state.Operations[idx].Status == model.OperationStatusPending {
-				pending = append(pending, idx)
+			if state.Operations[idx].Status != model.OperationStatusPending {
+				continue
 			}
+			if match != nil && !match(state.Operations[idx]) {
+				continue
+			}
+			pending = append(pending, idx)
 		}
 		if len(pending) == 0 {
 			return nil
@@ -2071,36 +2101,43 @@ func (s *Store) ClaimNextPendingOperation() (model.Operation, bool, error) {
 		sort.Slice(pending, func(i, j int) bool {
 			return state.Operations[pending[i]].CreatedAt.Before(state.Operations[pending[j]].CreatedAt)
 		})
-		index := pending[0]
-		now := time.Now().UTC()
-		if state.Operations[index].Type == model.OperationTypeImport {
-			state.Operations[index].Status = model.OperationStatusRunning
-			state.Operations[index].ExecutionMode = model.ExecutionModeManaged
-			state.Operations[index].StartedAt = &now
-			state.Operations[index].ResultMessage = defaultInFlightOperationMessage(state.Operations[index])
-		} else {
-			runtimeIndex := findRuntime(state, state.Operations[index].TargetRuntimeID)
-			if runtimeIndex >= 0 && state.Runtimes[runtimeIndex].Type == model.RuntimeTypeExternalOwned {
-				state.Operations[index].Status = model.OperationStatusWaitingAgent
-				state.Operations[index].ExecutionMode = model.ExecutionModeAgent
-				state.Operations[index].AssignedRuntimeID = state.Operations[index].TargetRuntimeID
-				state.Operations[index].ResultMessage = "task dispatched to external runtime agent"
-			} else {
-				state.Operations[index].Status = model.OperationStatusRunning
-				state.Operations[index].ExecutionMode = model.ExecutionModeManaged
-				state.Operations[index].StartedAt = &now
-				state.Operations[index].ResultMessage = defaultInFlightOperationMessage(state.Operations[index])
-			}
-		}
-		state.Operations[index].UpdatedAt = now
-		if err := applyInFlightOperationToApp(state, &state.Operations[index]); err != nil {
+		claimed, err := claimPendingOperationLocked(state, pending[0])
+		if err != nil {
 			return err
 		}
-		op = state.Operations[index]
+		op = claimed
 		found = true
 		return nil
 	})
 	return op, found, err
+}
+
+func claimPendingOperationLocked(state *model.State, index int) (model.Operation, error) {
+	now := time.Now().UTC()
+	if state.Operations[index].Type == model.OperationTypeImport {
+		state.Operations[index].Status = model.OperationStatusRunning
+		state.Operations[index].ExecutionMode = model.ExecutionModeManaged
+		state.Operations[index].StartedAt = &now
+		state.Operations[index].ResultMessage = defaultInFlightOperationMessage(state.Operations[index])
+	} else {
+		runtimeIndex := findRuntime(state, state.Operations[index].TargetRuntimeID)
+		if runtimeIndex >= 0 && state.Runtimes[runtimeIndex].Type == model.RuntimeTypeExternalOwned {
+			state.Operations[index].Status = model.OperationStatusWaitingAgent
+			state.Operations[index].ExecutionMode = model.ExecutionModeAgent
+			state.Operations[index].AssignedRuntimeID = state.Operations[index].TargetRuntimeID
+			state.Operations[index].ResultMessage = "task dispatched to external runtime agent"
+		} else {
+			state.Operations[index].Status = model.OperationStatusRunning
+			state.Operations[index].ExecutionMode = model.ExecutionModeManaged
+			state.Operations[index].StartedAt = &now
+			state.Operations[index].ResultMessage = defaultInFlightOperationMessage(state.Operations[index])
+		}
+	}
+	state.Operations[index].UpdatedAt = now
+	if err := applyInFlightOperationToApp(state, &state.Operations[index]); err != nil {
+		return model.Operation{}, err
+	}
+	return state.Operations[index], nil
 }
 
 func (s *Store) CompleteManagedOperationWithResult(id, manifestPath, message string, desiredSpec *model.AppSpec, desiredSource *model.AppSource) (model.Operation, error) {
