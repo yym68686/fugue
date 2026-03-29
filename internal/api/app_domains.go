@@ -59,7 +59,7 @@ func (s *Server) handleGetAppDomainAvailability(w http.ResponseWriter, r *http.R
 	if !allowed {
 		return
 	}
-	availability, _, err := s.inspectAppDomainAvailability(app, r.URL.Query().Get("hostname"))
+	availability, _, err := s.inspectAppDomainAvailability(app, r.URL.Query().Get("hostname"), principal.IsPlatformAdmin())
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -86,7 +86,7 @@ func (s *Server) handlePutAppDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	availability, existing, err := s.inspectAppDomainAvailability(app, req.Hostname)
+	availability, existing, err := s.inspectAppDomainAvailability(app, req.Hostname, principal.IsPlatformAdmin())
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -285,9 +285,9 @@ func (s *Server) handleEdgeTLSAsk(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-func (s *Server) inspectAppDomainAvailability(app model.App, raw string) (appDomainAvailability, *model.AppDomain, error) {
+func (s *Server) inspectAppDomainAvailability(app model.App, raw string, allowPlatformRoot bool) (appDomainAvailability, *model.AppDomain, error) {
 	availability := appDomainAvailability{Input: strings.TrimSpace(raw)}
-	hostname, reason := s.normalizeRequestedCustomDomain(raw)
+	hostname, reason := s.normalizeRequestedCustomDomain(raw, allowPlatformRoot)
 	availability.Hostname = hostname
 	if reason != "" {
 		availability.Reason = reason
@@ -327,7 +327,7 @@ func (s *Server) inspectAppDomainAvailability(app model.App, raw string) (appDom
 	return availability, nil, nil
 }
 
-func (s *Server) normalizeRequestedCustomDomain(raw string) (string, string) {
+func (s *Server) normalizeRequestedCustomDomain(raw string, allowPlatformRoot bool) (string, string) {
 	hostname := normalizeExternalAppDomain(raw)
 	if hostname == "" {
 		return "", "hostname is required"
@@ -341,13 +341,17 @@ func (s *Server) normalizeRequestedCustomDomain(raw string) (string, string) {
 	if s.isReservedAppHostname(hostname) {
 		return "", "hostname is reserved"
 	}
-	if base := strings.TrimSpace(strings.ToLower(s.appBaseDomain)); base != "" {
-		if hostname == base || strings.HasSuffix(hostname, "."+base) {
+	appBase := normalizeExternalAppDomain(s.appBaseDomain)
+	customBase := normalizeExternalAppDomain(s.customDomainBaseDomain)
+	allowExactPlatformRoot := allowPlatformRoot && appBase != "" && hostname == appBase
+	if appBase != "" {
+		if (hostname == appBase && !allowExactPlatformRoot) || strings.HasSuffix(hostname, "."+appBase) {
 			return "", "platform-managed hostnames must be updated through the app route endpoint"
 		}
 	}
-	if base := strings.TrimSpace(strings.ToLower(s.customDomainBaseDomain)); base != "" {
-		if hostname == base || strings.HasSuffix(hostname, "."+base) {
+	if customBase != "" {
+		exactCustomTargetRootAllowed := allowExactPlatformRoot && customBase == appBase && hostname == customBase
+		if (hostname == customBase && !exactCustomTargetRootAllowed) || strings.HasSuffix(hostname, "."+customBase) {
 			return "", "hostname is reserved for Fugue custom-domain targets"
 		}
 	}

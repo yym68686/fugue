@@ -18,7 +18,7 @@ import (
 func TestPutAppDomainVerifiesWithCNAMEOnly(t *testing.T) {
 	t.Parallel()
 
-	s, server, apiKey, app, resolver := setupAppDomainTestServer(t)
+	s, server, apiKey, _, app, resolver := setupAppDomainTestServer(t)
 	expectedTarget := server.primaryCustomDomainTarget(app)
 	resolver.cname["www.example.com"] = expectedTarget + "."
 
@@ -59,7 +59,7 @@ func TestPutAppDomainVerifiesWithCNAMEOnly(t *testing.T) {
 func TestPutAppDomainVerifiesWithFlattenedTargetIPs(t *testing.T) {
 	t.Parallel()
 
-	_, server, apiKey, app, resolver := setupAppDomainTestServer(t)
+	_, server, apiKey, _, app, resolver := setupAppDomainTestServer(t)
 	expectedTarget := server.primaryCustomDomainTarget(app)
 	edgeIP := net.ParseIP("203.0.113.10")
 	resolver.ip["example.com"] = []net.IPAddr{{IP: edgeIP}}
@@ -86,7 +86,7 @@ func TestPutAppDomainVerifiesWithFlattenedTargetIPs(t *testing.T) {
 func TestPutAppDomainRequiresCNAMEBeforeCreatingClaim(t *testing.T) {
 	t.Parallel()
 
-	s, server, apiKey, app, _ := setupAppDomainTestServer(t)
+	s, server, apiKey, _, app, _ := setupAppDomainTestServer(t)
 	expectedTarget := server.primaryCustomDomainTarget(app)
 
 	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/domains", apiKey, map[string]any{
@@ -106,7 +106,7 @@ func TestPutAppDomainRequiresCNAMEBeforeCreatingClaim(t *testing.T) {
 func TestCustomDomainTargetStaysStableWhenAppRouteChanges(t *testing.T) {
 	t.Parallel()
 
-	s, server, apiKey, app, resolver := setupAppDomainTestServer(t)
+	s, server, apiKey, _, app, resolver := setupAppDomainTestServer(t)
 	expectedTarget := server.primaryCustomDomainTarget(app)
 	updatedApp, err := s.UpdateAppRoute(app.ID, model.AppRoute{
 		Hostname:    "renamed.apps.example.com",
@@ -140,7 +140,7 @@ func TestCustomDomainTargetStaysStableWhenAppRouteChanges(t *testing.T) {
 func TestEdgeTLSAskAutoVerifiesPendingDomain(t *testing.T) {
 	t.Parallel()
 
-	s, server, _, app, resolver := setupAppDomainTestServer(t)
+	s, server, _, _, app, resolver := setupAppDomainTestServer(t)
 	if _, err := s.PutAppDomain(model.AppDomain{
 		Hostname:    "www.example.com",
 		AppID:       app.ID,
@@ -168,7 +168,96 @@ func TestEdgeTLSAskAutoVerifiesPendingDomain(t *testing.T) {
 	}
 }
 
-func setupAppDomainTestServer(t *testing.T) (*store.Store, *Server, string, model.App, *fakeAppDomainResolver) {
+func TestPutAppDomainAllowsPlatformAdminToClaimPlatformRoot(t *testing.T) {
+	t.Parallel()
+
+	_, server, _, platformAdminKey, app, resolver := setupAppDomainTestServerWithDomains(t, "fugue.pro", "")
+	expectedTarget := server.primaryCustomDomainTarget(app)
+	resolver.cname["fugue.pro"] = expectedTarget + "."
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/domains", platformAdminKey, map[string]any{
+		"hostname": "fugue.pro",
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var putResponse struct {
+		Domain model.AppDomain `json:"domain"`
+	}
+	mustDecodeJSON(t, recorder, &putResponse)
+	if got := putResponse.Domain.Hostname; got != "fugue.pro" {
+		t.Fatalf("expected hostname %q, got %q", "fugue.pro", got)
+	}
+	if got := putResponse.Domain.RouteTarget; got != expectedTarget {
+		t.Fatalf("expected route target %q, got %q", expectedTarget, got)
+	}
+	if putResponse.Domain.Status != model.AppDomainStatusVerified {
+		t.Fatalf("expected verified domain status, got %+v", putResponse.Domain)
+	}
+}
+
+func TestPutAppDomainRejectsPlatformRootForTenantAdmin(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro", "")
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/domains", apiKey, map[string]any{
+		"hostname": "fugue.pro",
+	})
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadRequest, recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "platform-managed hostnames") {
+		t.Fatalf("expected platform-managed hostname error, got body=%s", recorder.Body.String())
+	}
+	if _, err := s.GetAppDomain("fugue.pro"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected platform root to remain unclaimed, got %v", err)
+	}
+}
+
+func TestGetAppDomainAvailabilityAllowsOnlyPlatformAdminForPlatformRoot(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro", "")
+
+	tenantRecorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/domains/availability?hostname=fugue.pro", apiKey, nil)
+	if tenantRecorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, tenantRecorder.Code, tenantRecorder.Body.String())
+	}
+	var tenantResponse struct {
+		Availability appDomainAvailability `json:"availability"`
+	}
+	mustDecodeJSON(t, tenantRecorder, &tenantResponse)
+	if tenantResponse.Availability.Valid {
+		t.Fatalf("expected tenant availability to be invalid, got %+v", tenantResponse.Availability)
+	}
+	if !strings.Contains(tenantResponse.Availability.Reason, "platform-managed hostnames") {
+		t.Fatalf("expected platform-managed hostname error, got %+v", tenantResponse.Availability)
+	}
+
+	adminRecorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/domains/availability?hostname=fugue.pro", platformAdminKey, nil)
+	if adminRecorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, adminRecorder.Code, adminRecorder.Body.String())
+	}
+	var adminResponse struct {
+		Availability appDomainAvailability `json:"availability"`
+	}
+	mustDecodeJSON(t, adminRecorder, &adminResponse)
+	if !adminResponse.Availability.Valid || !adminResponse.Availability.Available {
+		t.Fatalf("expected platform admin availability to be valid and available, got %+v", adminResponse.Availability)
+	}
+	if adminResponse.Availability.Hostname != "fugue.pro" {
+		t.Fatalf("expected hostname %q, got %+v", "fugue.pro", adminResponse.Availability)
+	}
+}
+
+func setupAppDomainTestServer(t *testing.T) (*store.Store, *Server, string, string, model.App, *fakeAppDomainResolver) {
+	t.Helper()
+	return setupAppDomainTestServerWithDomains(t, "apps.example.com", "cname.fugue.pro")
+}
+
+func setupAppDomainTestServerWithDomains(t *testing.T, appBaseDomain, customDomainBaseDomain string) (*store.Store, *Server, string, string, model.App, *fakeAppDomainResolver) {
 	t.Helper()
 
 	s := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -188,15 +277,20 @@ func setupAppDomainTestServer(t *testing.T) (*store.Store, *Server, string, mode
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
 	}
+	_, platformAdminKey, err := s.CreateAPIKey(tenant.ID, "platform-admin", []string{"platform.admin"})
+	if err != nil {
+		t.Fatalf("create platform admin key: %v", err)
+	}
+	routeHostname := "demo." + appBaseDomain
 	app, err := s.CreateAppWithRoute(tenant.ID, project.ID, "demo", "", model.AppSpec{
 		Image:     "ghcr.io/example/demo:latest",
 		Ports:     []int{8080},
 		Replicas:  1,
 		RuntimeID: "runtime_managed_shared",
 	}, model.AppRoute{
-		Hostname:    "demo.apps.example.com",
-		BaseDomain:  "apps.example.com",
-		PublicURL:   "https://demo.apps.example.com",
+		Hostname:    routeHostname,
+		BaseDomain:  appBaseDomain,
+		PublicURL:   "https://" + routeHostname,
 		ServicePort: 8080,
 	})
 	if err != nil {
@@ -204,8 +298,8 @@ func setupAppDomainTestServer(t *testing.T) (*store.Store, *Server, string, mode
 	}
 
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
-		AppBaseDomain:          "apps.example.com",
-		CustomDomainBaseDomain: "cname.fugue.pro",
+		AppBaseDomain:          appBaseDomain,
+		CustomDomainBaseDomain: customDomainBaseDomain,
 		APIPublicDomain:        "api.example.com",
 		EdgeTLSAskToken:        "edge-secret",
 	})
@@ -214,7 +308,7 @@ func setupAppDomainTestServer(t *testing.T) (*store.Store, *Server, string, mode
 		ip:    map[string][]net.IPAddr{},
 	}
 	server.dnsResolver = resolver
-	return s, server, apiKey, app, resolver
+	return s, server, apiKey, platformAdminKey, app, resolver
 }
 
 type fakeAppDomainResolver struct {
