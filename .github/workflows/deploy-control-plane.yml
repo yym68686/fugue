@@ -143,6 +143,9 @@ jobs:
           fi
 
       - name: Upgrade Fugue control plane
+        # Edge fan-out now happens inside the upgrade script using the
+        # control-plane automation secret, so the workflow only needs one
+        # deploy entrypoint.
         env:
           FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
           FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
