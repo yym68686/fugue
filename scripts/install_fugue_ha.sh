@@ -1103,6 +1103,8 @@ install_edge_proxy_on_primary() {
 
   local app_host_tls_directive="tls internal"
   local app_root_tls_directive=$'tls {\n    on_demand\n  }'
+  local app_tls_uploaded="false"
+  local purge_stale_app_tls_material="false"
   local app_root_site_block=""
   if [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && app_tls_cert_matches_domain; then
     log "uploading wildcard app TLS material to ${PRIMARY_ALIAS}"
@@ -1111,14 +1113,17 @@ install_edge_proxy_on_primary() {
     scp_to "${FUGUE_APP_TLS_KEY_FILE}" "${PRIMARY_ALIAS}" "${REMOTE_TMP_BASE}/cloudflare-apps-origin.key"
     app_host_tls_directive="tls /etc/caddy/tls/cloudflare-apps-origin.crt /etc/caddy/tls/cloudflare-apps-origin.key"
     app_root_tls_directive="${app_host_tls_directive}"
+    app_tls_uploaded="true"
   elif [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && remote_app_tls_cert_matches_domain; then
     log "reusing existing wildcard app TLS material already installed on ${PRIMARY_ALIAS}"
     app_host_tls_directive="tls /etc/caddy/tls/cloudflare-apps-origin.crt /etc/caddy/tls/cloudflare-apps-origin.key"
     app_root_tls_directive="${app_host_tls_directive}"
   elif [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && remote_has_app_tls_material; then
-    log "existing app TLS material on ${PRIMARY_ALIAS} does not match ${FUGUE_APP_BASE_DOMAIN}; ignoring it and using on-demand TLS for ${FUGUE_APP_BASE_DOMAIN}"
+    log "existing app TLS material on ${PRIMARY_ALIAS} does not match ${FUGUE_APP_BASE_DOMAIN}; deleting stale cert files and using on-demand TLS for ${FUGUE_APP_BASE_DOMAIN}"
+    purge_stale_app_tls_material="true"
   elif [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && has_app_tls_material; then
-    log "wildcard app TLS cert does not match ${FUGUE_APP_BASE_DOMAIN}; using on-demand TLS for ${FUGUE_APP_BASE_DOMAIN} and tls internal for app hosts"
+    log "wildcard app TLS cert does not match ${FUGUE_APP_BASE_DOMAIN}; deleting stale remote cert files and using on-demand TLS for ${FUGUE_APP_BASE_DOMAIN}"
+    purge_stale_app_tls_material="true"
   fi
 
   if app_base_domain_needs_explicit_edge_site; then
@@ -1154,10 +1159,13 @@ if ! command -v caddy >/dev/null 2>&1; then
 fi
 mkdir -p /etc/caddy
 mkdir -p /etc/caddy/tls
-if [ -f "${REMOTE_TMP_BASE}/cloudflare-apps-origin.crt" ] && [ -f "${REMOTE_TMP_BASE}/cloudflare-apps-origin.key" ]; then
+if [ "${app_tls_uploaded}" = "true" ] && [ -f "${REMOTE_TMP_BASE}/cloudflare-apps-origin.crt" ] && [ -f "${REMOTE_TMP_BASE}/cloudflare-apps-origin.key" ]; then
   install -m 0644 "${REMOTE_TMP_BASE}/cloudflare-apps-origin.crt" /etc/caddy/tls/cloudflare-apps-origin.crt
   install -m 0640 "${REMOTE_TMP_BASE}/cloudflare-apps-origin.key" /etc/caddy/tls/cloudflare-apps-origin.key
   chown root:caddy /etc/caddy/tls/cloudflare-apps-origin.crt /etc/caddy/tls/cloudflare-apps-origin.key
+elif [ "${purge_stale_app_tls_material}" = "true" ]; then
+  rm -f /etc/caddy/tls/cloudflare-apps-origin.crt /etc/caddy/tls/cloudflare-apps-origin.key
+  rm -f "${REMOTE_TMP_BASE}/cloudflare-apps-origin.crt" "${REMOTE_TMP_BASE}/cloudflare-apps-origin.key"
 fi
 cat >/etc/caddy/Caddyfile <<'CADDY'
 {
