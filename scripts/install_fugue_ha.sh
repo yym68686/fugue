@@ -1231,7 +1231,13 @@ PY
 probe_tls_ready() {
   local hostname="\$1"
   local output
-  output="\$(printf '' | openssl s_client -servername "\${hostname}" -connect "\${EDGE_TLS_PROBE_ADDR}" -verify_hostname "\${hostname}" 2>&1 || true)"
+  output="\$(printf '' | openssl s_client -showcerts -servername "\${hostname}" -connect "\${EDGE_TLS_PROBE_ADDR}" -verify_hostname "\${hostname}" -verify_return_error 2>&1 || true)"
+  if printf '%s\n' "\${output}" | grep -Fq 'no peer certificate available'; then
+    return 1
+  fi
+  if ! printf '%s\n' "\${output}" | grep -Fq 'BEGIN CERTIFICATE'; then
+    return 1
+  fi
   if printf '%s\n' "\${output}" | grep -Fq 'Verify return code: 0 (ok)'; then
     return 0
   fi
@@ -1242,7 +1248,7 @@ if [ ! -f "\${EDGE_CUSTOM_DOMAINS_CADDYFILE}" ] || ! cmp -s "\${tmp_caddy}" "\${
   install -m 0644 "\${tmp_caddy}" "\${EDGE_CUSTOM_DOMAINS_CADDYFILE}"
   caddy validate --config "\${EDGE_MAIN_CADDYFILE}"
   if systemctl is-active --quiet caddy; then
-    systemctl reload caddy || systemctl restart caddy
+    systemctl restart caddy
   fi
 fi
 
@@ -1258,7 +1264,9 @@ while IFS= read -r hostname; do
 done < "\${tmp_hosts}"
 SYNC
 chmod 0755 /usr/local/bin/fugue-sync-custom-domains
-install -m 0644 /dev/null /etc/caddy/fugue-custom-domains.caddy
+cat >/etc/caddy/fugue-custom-domains.caddy <<'CUSTOMDOMAINS'
+# Managed by fugue-sync-custom-domains
+CUSTOMDOMAINS
 cat >/etc/systemd/system/fugue-custom-domains-sync.service <<'SERVICE'
 [Unit]
 Description=Sync Fugue custom domains into Caddy
