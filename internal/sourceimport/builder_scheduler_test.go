@@ -102,7 +102,7 @@ func TestSelectBuilderCandidatesHeavyPrefersLargeAndSkipsSmall(t *testing.T) {
 	}
 }
 
-func TestBuilderDemandForProfileUsesPeakMemoryAndEphemeralDemand(t *testing.T) {
+func TestBuilderDemandForProfileUsesRequestedResourcesWhenPresent(t *testing.T) {
 	t.Parallel()
 
 	policy := defaultBuilderPodPolicy()
@@ -114,11 +114,11 @@ func TestBuilderDemandForProfileUsesPeakMemoryAndEphemeralDemand(t *testing.T) {
 	if lightDemand.CPUMilli != parseBuilderCPUMilli("250m") {
 		t.Fatalf("expected light cpu demand 250m, got %dm", lightDemand.CPUMilli)
 	}
-	if lightDemand.MemoryBytes != parseBuilderBytes("2Gi") {
-		t.Fatalf("expected light memory demand 2Gi, got %d", lightDemand.MemoryBytes)
+	if lightDemand.MemoryBytes != parseBuilderBytes("512Mi") {
+		t.Fatalf("expected light memory demand 512Mi, got %d", lightDemand.MemoryBytes)
 	}
-	if lightDemand.EphemeralBytes != parseBuilderBytes("4Gi") {
-		t.Fatalf("expected light ephemeral demand 4Gi, got %d", lightDemand.EphemeralBytes)
+	if lightDemand.EphemeralBytes != parseBuilderBytes("1Gi") {
+		t.Fatalf("expected light ephemeral demand 1Gi, got %d", lightDemand.EphemeralBytes)
 	}
 
 	heavyDemand, err := builderDemandForProfile(policy, builderWorkloadProfileHeavy)
@@ -128,33 +128,11 @@ func TestBuilderDemandForProfileUsesPeakMemoryAndEphemeralDemand(t *testing.T) {
 	if heavyDemand.CPUMilli != parseBuilderCPUMilli("750m") {
 		t.Fatalf("expected heavy cpu demand 750m, got %dm", heavyDemand.CPUMilli)
 	}
-	if heavyDemand.MemoryBytes != parseBuilderBytes("6Gi") {
-		t.Fatalf("expected heavy memory demand 6Gi, got %d", heavyDemand.MemoryBytes)
+	if heavyDemand.MemoryBytes != parseBuilderBytes("1Gi") {
+		t.Fatalf("expected heavy memory demand 1Gi, got %d", heavyDemand.MemoryBytes)
 	}
-	if heavyDemand.EphemeralBytes != parseBuilderBytes("8Gi") {
-		t.Fatalf("expected heavy ephemeral demand 8Gi, got %d", heavyDemand.EphemeralBytes)
-	}
-}
-
-func TestSelectBuilderCandidatesHeavyRejectsNodesWithoutPeakMemoryHeadroom(t *testing.T) {
-	t.Parallel()
-
-	policy := defaultBuilderPodPolicy()
-	demand, err := builderDemandForProfile(policy, builderWorkloadProfileHeavy)
-	if err != nil {
-		t.Fatalf("builder demand: %v", err)
-	}
-
-	candidates := selectBuilderCandidates(policy, builderWorkloadProfileHeavy, demand, []builderNodeSnapshot{
-		builderTestNode("gcp2", "gcp2", policy, policy.LargeNodeLabelValue, "4000m", "4Gi", "16Gi", "0", "0", "0"),
-		builderTestNode("fortedrape8", "fortedrape8", policy, policy.LargeNodeLabelValue, "4000m", "16Gi", "30Gi", "250m", "1Gi", "2Gi"),
-	}, nil, nil)
-
-	if len(candidates) != 1 {
-		t.Fatalf("expected only the large-memory node to remain eligible, got %d candidates", len(candidates))
-	}
-	if got := candidates[0].Node.Name; got != "fortedrape8" {
-		t.Fatalf("expected fortedrape8-like node to remain eligible, got %q", got)
+	if heavyDemand.EphemeralBytes != parseBuilderBytes("3Gi") {
+		t.Fatalf("expected heavy ephemeral demand 3Gi, got %d", heavyDemand.EphemeralBytes)
 	}
 }
 
@@ -283,8 +261,8 @@ func TestSelectBuilderCandidatesIncludesExplicitBuildPoolTenantScopedNodes(t *te
 		t.Fatalf("builder demand: %v", err)
 	}
 
-	shared := builderTestNode("shared-a", "shared-a", policy, policy.MediumNodeLabelValue, "4000m", "16Gi", "24Gi", "500m", "2Gi", "3Gi")
-	alicehk2 := builderTestNode("alicehk2", "fortedrape8", policy, policy.LargeNodeLabelValue, "4000m", "16Gi", "30Gi", "250m", "1Gi", "2Gi")
+	shared := builderTestNode("shared-a", "shared-a", policy, policy.MediumNodeLabelValue, "4000m", "4Gi", "24Gi", "250m", "1536Mi", "3Gi")
+	alicehk2 := builderTestNode("alicehk2", "fortedrape8", policy, policy.LargeNodeLabelValue, "4000m", "4Gi", "30Gi", "250m", "768Mi", "2Gi")
 	alicehk2.Labels[runtime.NodeModeLabelKey] = model.RuntimeTypeManagedOwned
 	alicehk2.Labels[runtime.TenantIDLabelKey] = "tenant_demo"
 	alicehk2.Labels[runtime.RuntimeIDLabelKey] = "runtime_demo"

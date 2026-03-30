@@ -629,38 +629,26 @@ func builderDemandForProfile(policy BuilderPodPolicy, profile builderWorkloadPro
 		workload = policy.Heavy
 	}
 	return builderResourceDemand{
-		CPUMilli: builderSchedulingCPUDemand(
+		CPUMilli: builderSchedulingDemand(
 			parseBuilderCPUMilli(workload.Resources.Requests["cpu"]),
 			parseBuilderCPUMilli(workload.Resources.Limits["cpu"]),
 		),
-		MemoryBytes: builderPeakSchedulingDemand(
+		MemoryBytes: builderSchedulingDemand(
 			parseBuilderBytes(workload.Resources.Requests["memory"]),
 			parseBuilderBytes(workload.Resources.Limits["memory"]),
 		),
-		EphemeralBytes: builderPeakSchedulingDemand(
+		EphemeralBytes: builderSchedulingDemand(
 			parseBuilderBytes(workload.Resources.Requests["ephemeral-storage"]),
 			parseBuilderBytes(workload.Resources.Limits["ephemeral-storage"]),
-			parseBuilderBytes(workload.WorkspaceSizeLimit),
-			parseBuilderBytes(workload.DockerDataSizeLimit),
 		),
 	}, nil
 }
 
-func builderSchedulingCPUDemand(request, limit int64) int64 {
+func builderSchedulingDemand(request, limit int64) int64 {
 	if request > 0 {
 		return request
 	}
 	return limit
-}
-
-func builderPeakSchedulingDemand(values ...int64) int64 {
-	var peak int64
-	for _, value := range values {
-		if value > peak {
-			peak = value
-		}
-	}
-	return peak
 }
 
 func builderSafetyBuffer(allocatable builderResourceDemand, profile builderWorkloadProfile) builderResourceDemand {
