@@ -1,6 +1,11 @@
 package controller
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -147,5 +152,81 @@ func TestBuildManagedBackingServiceStatusTracksCurrentRuntime(t *testing.T) {
 	}
 	if status.CurrentRuntimeReadyAt != readyAt {
 		t.Fatalf("expected service runtime ready at %q, got %q", readyAt, status.CurrentRuntimeReadyAt)
+	}
+}
+
+func TestDeleteManagedAppResourcesDeletesExpectedNamesWhenLabelsAreMissing(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "uni-api-web-api",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/uni-api:v1",
+			Ports:     []int{8000},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Postgres: &model.AppPostgresSpec{
+				Database:    "uniapi",
+				User:        "uniapi",
+				Password:    "secret",
+				ServiceName: "uni-api-web-api-db-postgres",
+			},
+		},
+	}
+
+	var deleted []string
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"items":[]}`)),
+				Header:     make(http.Header),
+			}, nil
+		case req.Method == http.MethodDelete:
+			deleted = append(deleted, req.Method+" "+req.URL.Path)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     make(http.Header),
+			}, nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   "fugue-system",
+	}
+
+	svc := &Service{}
+	if err := svc.deleteManagedAppResources(context.Background(), client, runtime.NamespaceForTenant(app.TenantID), app); err != nil {
+		t.Fatalf("delete managed app resources: %v", err)
+	}
+
+	want := []string{
+		"DELETE /api/v1/namespaces/fg-tenant-demo/services/uni-api-web-api",
+		"DELETE /api/v1/namespaces/fg-tenant-demo/services/uni-api-web-api-db-postgres",
+		"DELETE /api/v1/namespaces/fg-tenant-demo/secrets/uni-api-web-api-pgsec",
+		"DELETE /api/v1/namespaces/fg-tenant-demo/persistentvolumeclaims/uni-api-web-api-db-postgres-data",
+		"DELETE /apis/apps/v1/namespaces/fg-tenant-demo/deployments/uni-api-web-api",
+		"DELETE /apis/apps/v1/namespaces/fg-tenant-demo/deployments/uni-api-web-api-db-postgres",
+	}
+	sort.Strings(deleted)
+	sort.Strings(want)
+	if len(deleted) != len(want) {
+		t.Fatalf("expected delete requests %v, got %v", want, deleted)
+	}
+	for i := range want {
+		if deleted[i] != want[i] {
+			t.Fatalf("expected delete request %q, got %q", want[i], deleted[i])
+		}
 	}
 }

@@ -461,50 +461,89 @@ func (s *Service) pruneManagedAppStaleObjects(ctx context.Context, client *kubeC
 }
 
 func (s *Service) deleteManagedAppResources(ctx context.Context, client *kubeClient, namespace string, app model.App) error {
-	if strings.TrimSpace(app.ID) == "" {
-		return nil
-	}
-
-	deployments, err := s.listOwnedDeploymentNames(ctx, client, namespace, app.ID)
+	resourceNames, err := s.managedAppOwnedResourceNames(ctx, client, namespace, app)
 	if err != nil {
 		return err
 	}
-	for _, name := range deployments {
+
+	for _, name := range resourceNames["Deployment"] {
 		if err := client.deleteDeployment(ctx, namespace, name); err != nil {
 			return err
 		}
 	}
 
-	services, err := s.listOwnedServiceNames(ctx, client, namespace, app.ID)
-	if err != nil {
-		return err
-	}
-	for _, name := range services {
+	for _, name := range resourceNames["Service"] {
 		if err := client.deleteService(ctx, namespace, name); err != nil {
 			return err
 		}
 	}
 
-	pvcs, err := s.listOwnedPersistentVolumeClaimNames(ctx, client, namespace, app.ID)
-	if err != nil {
-		return err
-	}
-	for _, name := range pvcs {
+	for _, name := range resourceNames["PersistentVolumeClaim"] {
 		if err := client.deletePersistentVolumeClaim(ctx, namespace, name); err != nil {
 			return err
 		}
 	}
 
-	secrets, err := s.listOwnedSecretNames(ctx, client, namespace, app.ID)
-	if err != nil {
-		return err
-	}
-	for _, name := range secrets {
+	for _, name := range resourceNames["Secret"] {
 		if err := client.deleteSecret(ctx, namespace, name); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (s *Service) managedAppOwnedResourceNames(ctx context.Context, client *kubeClient, namespace string, app model.App) (map[string][]string, error) {
+	out := make(map[string]map[string]struct{})
+	addNames := func(kind string, names []string) {
+		for _, name := range names {
+			trimmed := strings.TrimSpace(name)
+			if trimmed == "" {
+				continue
+			}
+			if out[kind] == nil {
+				out[kind] = make(map[string]struct{})
+			}
+			out[kind][trimmed] = struct{}{}
+		}
+	}
+
+	for kind, names := range managedAppExpectedObjectNamesByKind(app) {
+		for name := range names {
+			addNames(kind, []string{name})
+		}
+	}
+
+	if strings.TrimSpace(app.ID) != "" {
+		deployments, err := s.listOwnedDeploymentNames(ctx, client, namespace, app.ID)
+		if err != nil {
+			return nil, err
+		}
+		addNames("Deployment", deployments)
+
+		services, err := s.listOwnedServiceNames(ctx, client, namespace, app.ID)
+		if err != nil {
+			return nil, err
+		}
+		addNames("Service", services)
+
+		pvcs, err := s.listOwnedPersistentVolumeClaimNames(ctx, client, namespace, app.ID)
+		if err != nil {
+			return nil, err
+		}
+		addNames("PersistentVolumeClaim", pvcs)
+
+		secrets, err := s.listOwnedSecretNames(ctx, client, namespace, app.ID)
+		if err != nil {
+			return nil, err
+		}
+		addNames("Secret", secrets)
+	}
+
+	sorted := make(map[string][]string, len(out))
+	for kind, names := range out {
+		sorted[kind] = setToSortedNames(names)
+	}
+	return sorted, nil
 }
 
 func (s *Service) listOwnedDeploymentNames(ctx context.Context, client *kubeClient, namespace, appID string) ([]string, error) {
@@ -557,6 +596,22 @@ func listOwnedNames(ctx context.Context, appID string, fn func(selector string) 
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func managedAppExpectedObjectNamesByKind(app model.App) map[string]map[string]struct{} {
+	return desiredObjectNamesByKind(runtime.BuildManagedAppChildObjects(app, runtime.SchedulingConstraints{}, nil))
+}
+
+func setToSortedNames(values map[string]struct{}) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func desiredObjectNamesByKind(objects []map[string]any) map[string]map[string]struct{} {
