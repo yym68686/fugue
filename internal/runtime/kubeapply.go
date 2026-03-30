@@ -113,6 +113,8 @@ func ObjectAPIPath(defaultNamespace string, obj map[string]any) (string, error) 
 	switch {
 	case apiVersion == "v1" && kind == "Namespace":
 		return "/api/v1/namespaces/" + name, nil
+	case apiVersion == "v1" && kind == "PersistentVolumeClaim":
+		return "/api/v1/namespaces/" + namespace + "/persistentvolumeclaims/" + name, nil
 	case apiVersion == "v1" && kind == "Secret":
 		return "/api/v1/namespaces/" + namespace + "/secrets/" + name, nil
 	case apiVersion == "v1" && kind == "Service":

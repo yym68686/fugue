@@ -1319,7 +1319,6 @@ $(render_tls_sans_for_host "${PRIMARY_ALIAS}")
 disable:
   - traefik
   - servicelb
-  - local-storage
 $(render_server_node_labels "${PRIMARY_ALIAS}" "primary")
 CFG
 cat >/etc/rancher/k3s/registries.yaml <<'REG'
@@ -1386,7 +1385,6 @@ $(render_tls_sans_for_host "${host}")
 disable:
   - traefik
   - servicelb
-  - local-storage
 $(render_server_node_labels "${host}" "${role}")
 CFG
 cat >/etc/rancher/k3s/registries.yaml <<'REG'

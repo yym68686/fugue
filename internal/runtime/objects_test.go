@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"strings"
 	"testing"
 
 	"fugue/internal/model"
@@ -42,8 +41,8 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 		},
 	})
 
-	if len(objects) != 7 {
-		t.Fatalf("expected 7 objects, got %d", len(objects))
+	if len(objects) != 8 {
+		t.Fatalf("expected 8 objects, got %d", len(objects))
 	}
 	if kind, _ := objects[1]["kind"].(string); kind != "Secret" {
 		t.Fatalf("expected app files secret, got %#v", objects[1]["kind"])
@@ -51,16 +50,28 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 	if kind, _ := objects[3]["kind"].(string); kind != "Service" {
 		t.Fatalf("expected postgres service, got %#v", objects[3]["kind"])
 	}
-	pgDeployment := objects[4]
+	if kind, _ := objects[4]["kind"].(string); kind != "PersistentVolumeClaim" {
+		t.Fatalf("expected postgres pvc, got %#v", objects[4]["kind"])
+	}
+	pvcSpec := objects[4]["spec"].(map[string]any)
+	accessModes := pvcSpec["accessModes"].([]string)
+	if len(accessModes) != 1 || accessModes[0] != "ReadWriteOnce" {
+		t.Fatalf("unexpected postgres pvc access modes: %#v", accessModes)
+	}
+	requests := pvcSpec["resources"].(map[string]any)["requests"].(map[string]any)
+	if got := requests["storage"]; got != defaultPostgresStorage {
+		t.Fatalf("expected postgres pvc storage %q, got %#v", defaultPostgresStorage, got)
+	}
+	pgDeployment := objects[5]
 	spec := pgDeployment["spec"].(map[string]any)
 	template := spec["template"].(map[string]any)
 	podSpec := template["spec"].(map[string]any)
 	volumes := podSpec["volumes"].([]map[string]any)
-	hostPath := volumes[0]["hostPath"].(map[string]any)
-	if !strings.Contains(hostPath["path"].(string), "/tenant-data/fg-tenant-demo/uni-api-demo/postgres") {
-		t.Fatalf("unexpected postgres host path: %s", hostPath["path"])
+	claim := volumes[0]["persistentVolumeClaim"].(map[string]any)
+	if got := claim["claimName"]; got != "uni-api-demo-postgres-data" {
+		t.Fatalf("unexpected postgres pvc claim name: %#v", got)
 	}
-	appDeployment := objects[5]
+	appDeployment := objects[6]
 	appTemplate := appDeployment["spec"].(map[string]any)["template"].(map[string]any)
 	appPodSpec := appTemplate["spec"].(map[string]any)
 	if _, ok := appPodSpec["initContainers"]; !ok {
@@ -275,11 +286,11 @@ func TestBuildAppObjectsUsesBackingServicesWithoutDuplicatingLegacyInlinePostgre
 	}
 
 	objects := buildAppObjects(app, SchedulingConstraints{})
-	if len(objects) != 7 {
-		t.Fatalf("expected 7 objects, got %d", len(objects))
+	if len(objects) != 8 {
+		t.Fatalf("expected 8 objects, got %d", len(objects))
 	}
 
-	appDeployment := objects[5]
+	appDeployment := objects[6]
 	appLabels := appDeployment["metadata"].(map[string]any)["labels"].(map[string]string)
 	if appLabels[FugueLabelAppID] != "app_demo" {
 		t.Fatalf("expected app id label %q, got %#v", "app_demo", appLabels[FugueLabelAppID])
@@ -316,6 +327,11 @@ func TestBuildAppObjectsUsesBackingServicesWithoutDuplicatingLegacyInlinePostgre
 	}
 	if postgresLabels[FugueLabelBackingServiceType] != model.BackingServiceTypePostgres {
 		t.Fatalf("expected backing service type label %q, got %#v", model.BackingServiceTypePostgres, postgresLabels[FugueLabelBackingServiceType])
+	}
+
+	postgresPVC := objects[4]
+	if got := postgresPVC["metadata"].(map[string]any)["name"]; got != "uni-api-demo-postgres-data" {
+		t.Fatalf("expected managed backing service pvc, got %#v", got)
 	}
 }
 
@@ -384,7 +400,19 @@ func TestBuildManagedPostgresObjectsUseStableSelectors(t *testing.T) {
 		t.Fatalf("expected postgres service selector to omit %s, got %v", FugueLabelOwnerAppID, serviceSelector)
 	}
 
-	postgresDeployment := objects[3]
+	postgresPVC := objects[3]
+	if got := postgresPVC["kind"]; got != "PersistentVolumeClaim" {
+		t.Fatalf("expected postgres pvc, got %#v", got)
+	}
+	postgresPVCLabels := postgresPVC["metadata"].(map[string]any)["labels"].(map[string]string)
+	if got := postgresPVCLabels[FugueLabelBackingServiceID]; got != "service_demo" {
+		t.Fatalf("expected postgres pvc label %s=%q, got %#v", FugueLabelBackingServiceID, "service_demo", got)
+	}
+	if got := postgresPVCLabels[FugueLabelOwnerAppID]; got != "app_demo" {
+		t.Fatalf("expected postgres pvc label %s=%q, got %#v", FugueLabelOwnerAppID, "app_demo", got)
+	}
+
+	postgresDeployment := objects[4]
 	deploymentSelector := postgresDeployment["spec"].(map[string]any)["selector"].(map[string]any)["matchLabels"].(map[string]string)
 	if len(deploymentSelector) != len(expectedSelector) {
 		t.Fatalf("expected postgres deployment selector %v, got %v", expectedSelector, deploymentSelector)

@@ -431,6 +431,19 @@ func (s *Service) pruneManagedAppStaleObjects(ctx context.Context, client *kubeC
 		}
 	}
 
+	pvcs, err := s.listOwnedPersistentVolumeClaimNames(ctx, client, namespace, app.ID)
+	if err != nil {
+		return err
+	}
+	for _, name := range pvcs {
+		if _, ok := desiredByKind["PersistentVolumeClaim"][name]; ok {
+			continue
+		}
+		if err := client.deletePersistentVolumeClaim(ctx, namespace, name); err != nil {
+			return err
+		}
+	}
+
 	secrets, err := s.listOwnedSecretNames(ctx, client, namespace, app.ID)
 	if err != nil {
 		return err
@@ -472,6 +485,16 @@ func (s *Service) deleteManagedAppResources(ctx context.Context, client *kubeCli
 		}
 	}
 
+	pvcs, err := s.listOwnedPersistentVolumeClaimNames(ctx, client, namespace, app.ID)
+	if err != nil {
+		return err
+	}
+	for _, name := range pvcs {
+		if err := client.deletePersistentVolumeClaim(ctx, namespace, name); err != nil {
+			return err
+		}
+	}
+
 	secrets, err := s.listOwnedSecretNames(ctx, client, namespace, app.ID)
 	if err != nil {
 		return err
@@ -493,6 +516,12 @@ func (s *Service) listOwnedDeploymentNames(ctx context.Context, client *kubeClie
 func (s *Service) listOwnedServiceNames(ctx context.Context, client *kubeClient, namespace, appID string) ([]string, error) {
 	return listOwnedNames(ctx, appID, func(selector string) ([]string, error) {
 		return client.listServiceNamesByLabel(ctx, namespace, selector)
+	})
+}
+
+func (s *Service) listOwnedPersistentVolumeClaimNames(ctx context.Context, client *kubeClient, namespace, appID string) ([]string, error) {
+	return listOwnedNames(ctx, appID, func(selector string) ([]string, error) {
+		return client.listPersistentVolumeClaimNamesByLabel(ctx, namespace, selector)
 	})
 }
 

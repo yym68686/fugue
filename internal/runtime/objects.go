@@ -14,6 +14,7 @@ import (
 
 const (
 	defaultPostgresImage      = "postgres:17.6-alpine"
+	defaultPostgresStorage    = "1Gi"
 	defaultWaitImage          = "busybox:1.36"
 	AppWorkspaceContainerName = "fugue-workspace"
 	workspaceVolumeName       = "app-workspace"
@@ -42,6 +43,7 @@ func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, o
 		objects = append(objects,
 			buildPostgresSecretObject(namespace, postgres.secretName, postgresLabels, postgres.spec),
 			buildPostgresServiceObject(namespace, postgres.resourceName, postgresLabels, postgres.spec),
+			buildPostgresPVCObject(namespace, postgres.resourceName, postgresLabels),
 			buildPostgresDeploymentObject(namespace, postgres.secretName, postgres.resourceName, postgresLabels, postgres.spec, scheduling),
 		)
 	}
@@ -257,9 +259,8 @@ func buildPostgresDeploymentObject(namespace, secretName, resourceName string, l
 		"volumes": []map[string]any{
 			{
 				"name": "postgres-data",
-				"hostPath": map[string]any{
-					"path": spec.StoragePath,
-					"type": "DirectoryOrCreate",
+				"persistentVolumeClaim": map[string]any{
+					"claimName": postgresPVCName(resourceName),
 				},
 			},
 		},
@@ -287,6 +288,26 @@ func buildPostgresDeploymentObject(namespace, secretName, resourceName string, l
 					"labels": labels,
 				},
 				"spec": podSpec,
+			},
+		},
+	}
+}
+
+func buildPostgresPVCObject(namespace, resourceName string, labels map[string]string) map[string]any {
+	return map[string]any{
+		"apiVersion": "v1",
+		"kind":       "PersistentVolumeClaim",
+		"metadata": map[string]any{
+			"name":      postgresPVCName(resourceName),
+			"namespace": namespace,
+			"labels":    labels,
+		},
+		"spec": map[string]any{
+			"accessModes": []string{"ReadWriteOnce"},
+			"resources": map[string]any{
+				"requests": map[string]any{
+					"storage": defaultPostgresStorage,
+				},
 			},
 		},
 	}
@@ -707,7 +728,7 @@ func applyScheduling(podSpec *map[string]any, scheduling SchedulingConstraints) 
 	}
 }
 
-func normalizeRuntimePostgresSpec(namespace, baseName string, spec model.AppPostgresSpec) model.AppPostgresSpec {
+func normalizeRuntimePostgresSpec(_ string, baseName string, spec model.AppPostgresSpec) model.AppPostgresSpec {
 	if strings.TrimSpace(spec.Image) == "" {
 		spec.Image = defaultPostgresImage
 	}
@@ -718,9 +739,6 @@ func normalizeRuntimePostgresSpec(namespace, baseName string, spec model.AppPost
 		spec.User = "postgres"
 	}
 	spec.ServiceName = normalizePostgresResourceName(spec.ServiceName, baseName)
-	if strings.TrimSpace(spec.StoragePath) == "" {
-		spec.StoragePath = path.Join("/var/lib/fugue/tenant-data", namespace, baseName, "postgres")
-	}
 	return spec
 }
 
@@ -832,6 +850,10 @@ func postgresSecretName(appName string) string {
 	return appName + "-pgsec"
 }
 
+func postgresPVCName(resourceName string) string {
+	return normalizePostgresAuxiliaryName(resourceName, "data")
+}
+
 func normalizePostgresResourceName(name, baseName string) string {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -842,6 +864,29 @@ func normalizePostgresResourceName(name, baseName string) string {
 		return name[:63]
 	}
 	return name
+}
+
+func normalizePostgresAuxiliaryName(base, suffix string) string {
+	base = model.Slugify(strings.TrimSpace(base))
+	suffix = model.Slugify(strings.TrimSpace(suffix))
+	if base == "" {
+		base = "postgres"
+	}
+	if suffix == "" {
+		if len(base) > 63 {
+			return base[:63]
+		}
+		return base
+	}
+	name := base + "-" + suffix
+	if len(name) <= 63 {
+		return name
+	}
+	maxBaseLen := 63 - len(suffix) - 1
+	if maxBaseLen <= 0 {
+		return name[:63]
+	}
+	return base[:maxBaseLen] + "-" + suffix
 }
 
 func runtimeBackingServiceBaseName(serviceName, fallback string) string {

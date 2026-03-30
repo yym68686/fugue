@@ -2,7 +2,6 @@ package store
 
 import (
 	"fmt"
-	"path"
 	"sort"
 	"strings"
 	"time"
@@ -405,7 +404,7 @@ func normalizeBindingForPersist(binding *model.ServiceBinding, service model.Bac
 	return nil
 }
 
-func normalizeManagedPostgresSpec(tenantID, appName string, spec model.AppPostgresSpec) model.AppPostgresSpec {
+func normalizeManagedPostgresSpec(_ string, appName string, spec model.AppPostgresSpec) model.AppPostgresSpec {
 	out := spec
 	resourceName := postgresServiceNameForApp(appName)
 	if strings.TrimSpace(out.Image) == "" {
@@ -419,9 +418,6 @@ func normalizeManagedPostgresSpec(tenantID, appName string, spec model.AppPostgr
 	}
 	if strings.TrimSpace(out.ServiceName) == "" {
 		out.ServiceName = resourceName
-	}
-	if strings.TrimSpace(out.StoragePath) == "" {
-		out.StoragePath = path.Join("/var/lib/fugue/tenant-data", serviceNamespaceForTenant(tenantID), serviceResourceName(appName), "postgres")
 	}
 	return out
 }

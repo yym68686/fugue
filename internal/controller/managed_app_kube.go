@@ -177,6 +177,10 @@ func (c *kubeClient) listServiceNamesByLabel(ctx context.Context, namespace, lab
 	return c.listNamespacedResourceNames(ctx, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/services", labelSelector)
 }
 
+func (c *kubeClient) listPersistentVolumeClaimNamesByLabel(ctx context.Context, namespace, labelSelector string) ([]string, error) {
+	return c.listNamespacedResourceNames(ctx, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/persistentvolumeclaims", labelSelector)
+}
+
 func (c *kubeClient) listSecretNamesByLabel(ctx context.Context, namespace, labelSelector string) ([]string, error) {
 	return c.listNamespacedResourceNames(ctx, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/secrets", labelSelector)
 }
@@ -188,6 +192,11 @@ func (c *kubeClient) deleteDeployment(ctx context.Context, namespace, name strin
 
 func (c *kubeClient) deleteService(ctx context.Context, namespace, name string) error {
 	_, err := c.doRequest(ctx, http.MethodDelete, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/services/"+url.PathEscape(name), "", nil, nil)
+	return normalizeDeleteNotFound(err)
+}
+
+func (c *kubeClient) deletePersistentVolumeClaim(ctx context.Context, namespace, name string) error {
+	_, err := c.doRequest(ctx, http.MethodDelete, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/persistentvolumeclaims/"+url.PathEscape(name), "", nil, nil)
 	return normalizeDeleteNotFound(err)
 }
 
