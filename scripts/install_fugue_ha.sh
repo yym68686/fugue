@@ -1149,7 +1149,7 @@ EOF
 )"
   fi
 
-  log "installing Route A edge proxy on ${PRIMARY_ALIAS} for ${FUGUE_DOMAIN}, ${FUGUE_REGISTRY_DOMAIN}, *.${FUGUE_APP_BASE_DOMAIN}, and verified custom app domains"
+  log "installing Route A edge proxy on ${PRIMARY_ALIAS} for ${FUGUE_DOMAIN}, ${FUGUE_REGISTRY_DOMAIN}, *.${FUGUE_APP_BASE_DOMAIN}, *.dns.${FUGUE_APP_BASE_DOMAIN}, and verified custom app domains"
   ssh_root "${PRIMARY_ALIAS}" <<EOF
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -1581,7 +1581,6 @@ api:
     tag: "${IMAGE_TAG}"
     pullPolicy: IfNotPresent
   appBaseDomain: "${FUGUE_APP_BASE_DOMAIN}"
-  customDomainBaseDomain: "${FUGUE_CUSTOM_DOMAIN_BASE_DOMAIN:-}"
   apiPublicDomain: "${FUGUE_DOMAIN}"
   edgeTLSAskToken: "${FUGUE_EDGE_TLS_ASK_TOKEN}"
   registryPushBase: "${registry_push_base}"
@@ -1893,6 +1892,8 @@ write_route_a_file() {
     return
   fi
 
+  local custom_domain_target_base="dns.${FUGUE_APP_BASE_DOMAIN}"
+
   cat >"${ROUTE_A_FILE}" <<EOF
 Route A is configured on ${PRIMARY_ALIAS} with Caddy:
   https://${FUGUE_DOMAIN} -> https origin on ${PRIMARY_ALIAS}:443 -> upstream ${EDGE_UPSTREAM} (${EDGE_UPSTREAM_MODE})
@@ -1908,9 +1909,10 @@ Server-side status:
 Cloudflare actions:
   1. Keep the A record for ${FUGUE_DOMAIN} pointing to ${PUBLIC_ENDPOINT_HOST}.
   2. Add a wildcard record for *.${FUGUE_APP_BASE_DOMAIN} pointing to ${PUBLIC_ENDPOINT_HOST}.
-  3. Keep Cloudflare proxy enabled (orange cloud).
-  4. Set SSL/TLS encryption mode to Full.
-  5. Optional but recommended: enable "Always Use HTTPS".
+  3. Add a wildcard record for *.${custom_domain_target_base} pointing to ${PUBLIC_ENDPOINT_HOST} so dedicated custom-domain targets like d-<hash>.${custom_domain_target_base} resolve to the edge.
+  4. Keep Cloudflare proxy enabled (orange cloud).
+  5. Set SSL/TLS encryption mode to Full.
+  6. Optional but recommended: enable "Always Use HTTPS".
 
 GCP actions:
   1. Open tcp/443 to ${PUBLIC_ENDPOINT_HOST} from Cloudflare IP ranges.

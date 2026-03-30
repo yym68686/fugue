@@ -246,7 +246,6 @@ main() {
   FUGUE_REGISTRY_SERVICE_PORT="${FUGUE_REGISTRY_SERVICE_PORT:-5000}"
   FUGUE_API_PUBLIC_DOMAIN="${FUGUE_API_PUBLIC_DOMAIN:-}"
   FUGUE_APP_BASE_DOMAIN="${FUGUE_APP_BASE_DOMAIN:-fugue.pro}"
-  FUGUE_CUSTOM_DOMAIN_BASE_DOMAIN="${FUGUE_CUSTOM_DOMAIN_BASE_DOMAIN:-}"
   FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME="${FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME:-${FUGUE_RELEASE_FULLNAME}-control-plane-automation}"
 
   if [[ -z "${FUGUE_REGISTRY_PUSH_BASE:-}" ]]; then
@@ -295,7 +294,7 @@ main() {
   log "registry pull base: ${FUGUE_REGISTRY_PULL_BASE}"
   log "cluster join registry endpoint: ${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}"
   log "app base domain: ${FUGUE_APP_BASE_DOMAIN}"
-  log "custom domain base domain: ${FUGUE_CUSTOM_DOMAIN_BASE_DOMAIN:-<unset>}"
+  log "custom domain base domain: dns.${FUGUE_APP_BASE_DOMAIN}"
 
   apply_chart_crds
 
@@ -314,7 +313,6 @@ main() {
     --set-string controller.image.repository="${FUGUE_CONTROLLER_IMAGE_REPOSITORY}" \
     --set-string controller.image.tag="${FUGUE_CONTROLLER_IMAGE_TAG}" \
     --set-string api.appBaseDomain="${FUGUE_APP_BASE_DOMAIN}" \
-    --set-string api.customDomainBaseDomain="${FUGUE_CUSTOM_DOMAIN_BASE_DOMAIN}" \
     --set-string api.apiPublicDomain="${FUGUE_API_PUBLIC_DOMAIN}" \
     --set-string api.registryPushBase="${FUGUE_REGISTRY_PUSH_BASE}" \
     --set-string api.registryPullBase="${FUGUE_REGISTRY_PULL_BASE}" \

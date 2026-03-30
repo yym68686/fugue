@@ -529,6 +529,14 @@ func normalizeExternalAppDomain(raw string) string {
 	return strings.Trim(strings.TrimSpace(strings.ToLower(raw)), ".")
 }
 
+func defaultCustomDomainBaseDomain(appBaseDomain string) string {
+	base := normalizeExternalAppDomain(appBaseDomain)
+	if base == "" {
+		return ""
+	}
+	return "dns." + base
+}
+
 func ipListsIntersect(left, right []net.IPAddr) bool {
 	if len(left) == 0 || len(right) == 0 {
 		return false

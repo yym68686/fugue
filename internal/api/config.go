@@ -2,7 +2,6 @@ package api
 
 type ServerConfig struct {
 	AppBaseDomain               string
-	CustomDomainBaseDomain      string
 	APIPublicDomain             string
 	EdgeTLSAskToken             string
 	RegistryPushBase            string

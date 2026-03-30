@@ -90,8 +90,6 @@ spec:
                   key: FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY
             - name: FUGUE_APP_BASE_DOMAIN
               value: {{ .Values.api.appBaseDomain | quote }}
-            - name: FUGUE_CUSTOM_DOMAIN_BASE_DOMAIN
-              value: {{ .Values.api.customDomainBaseDomain | quote }}
             - name: FUGUE_API_PUBLIC_DOMAIN
               value: {{ .Values.api.apiPublicDomain | quote }}
             - name: FUGUE_EDGE_TLS_ASK_TOKEN

@@ -171,7 +171,7 @@ func TestEdgeTLSAskAutoVerifiesPendingDomain(t *testing.T) {
 func TestPutAppDomainAllowsPlatformAdminToClaimPlatformRoot(t *testing.T) {
 	t.Parallel()
 
-	_, server, _, platformAdminKey, app, resolver := setupAppDomainTestServerWithDomains(t, "fugue.pro", "")
+	_, server, _, platformAdminKey, app, resolver := setupAppDomainTestServerWithDomains(t, "fugue.pro")
 	expectedTarget := server.primaryCustomDomainTarget(app)
 	resolver.cname["fugue.pro"] = expectedTarget + "."
 
@@ -200,7 +200,7 @@ func TestPutAppDomainAllowsPlatformAdminToClaimPlatformRoot(t *testing.T) {
 func TestPutAppDomainRejectsPlatformRootForTenantAdmin(t *testing.T) {
 	t.Parallel()
 
-	s, server, apiKey, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro", "")
+	s, server, apiKey, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
 
 	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/domains", apiKey, map[string]any{
 		"hostname": "fugue.pro",
@@ -219,7 +219,7 @@ func TestPutAppDomainRejectsPlatformRootForTenantAdmin(t *testing.T) {
 func TestGetAppDomainAvailabilityAllowsOnlyPlatformAdminForPlatformRoot(t *testing.T) {
 	t.Parallel()
 
-	_, server, apiKey, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro", "")
+	_, server, apiKey, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
 
 	tenantRecorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/domains/availability?hostname=fugue.pro", apiKey, nil)
 	if tenantRecorder.Code != http.StatusOK {
@@ -252,12 +252,23 @@ func TestGetAppDomainAvailabilityAllowsOnlyPlatformAdminForPlatformRoot(t *testi
 	}
 }
 
-func setupAppDomainTestServer(t *testing.T) (*store.Store, *Server, string, string, model.App, *fakeAppDomainResolver) {
-	t.Helper()
-	return setupAppDomainTestServerWithDomains(t, "apps.example.com", "cname.fugue.pro")
+func TestPrimaryCustomDomainTargetDefaultsToDNSNamespace(t *testing.T) {
+	t.Parallel()
+
+	_, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	expectedLabel := stableCustomDomainTargetLabel(app)
+	expectedTarget := expectedLabel + ".dns.fugue.pro"
+	if got := server.primaryCustomDomainTarget(app); got != expectedTarget {
+		t.Fatalf("expected primary custom-domain target %q, got %q", expectedTarget, got)
+	}
 }
 
-func setupAppDomainTestServerWithDomains(t *testing.T, appBaseDomain, customDomainBaseDomain string) (*store.Store, *Server, string, string, model.App, *fakeAppDomainResolver) {
+func setupAppDomainTestServer(t *testing.T) (*store.Store, *Server, string, string, model.App, *fakeAppDomainResolver) {
+	t.Helper()
+	return setupAppDomainTestServerWithDomains(t, "apps.example.com")
+}
+
+func setupAppDomainTestServerWithDomains(t *testing.T, appBaseDomain string) (*store.Store, *Server, string, string, model.App, *fakeAppDomainResolver) {
 	t.Helper()
 
 	s := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -298,10 +309,9 @@ func setupAppDomainTestServerWithDomains(t *testing.T, appBaseDomain, customDoma
 	}
 
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
-		AppBaseDomain:          appBaseDomain,
-		CustomDomainBaseDomain: customDomainBaseDomain,
-		APIPublicDomain:        "api.example.com",
-		EdgeTLSAskToken:        "edge-secret",
+		AppBaseDomain:   appBaseDomain,
+		APIPublicDomain: "api.example.com",
+		EdgeTLSAskToken: "edge-secret",
 	})
 	resolver := &fakeAppDomainResolver{
 		cname: map[string]string{},
