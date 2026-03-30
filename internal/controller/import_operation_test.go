@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"fugue/internal/model"
-	"fugue/internal/runtime"
 	"fugue/internal/sourceimport"
 	"fugue/internal/store"
 )
@@ -55,7 +54,7 @@ func (r *recordingImporter) SuggestUploadedComposeServiceEnv(context.Context, so
 	return nil, fmt.Errorf("unexpected upload compose env refresh")
 }
 
-func TestExecuteManagedImportOperationPassesManagedSharedPlacementToImporter(t *testing.T) {
+func TestExecuteManagedImportOperationDoesNotConstrainBuildPlacementByRuntimeLocation(t *testing.T) {
 	t.Parallel()
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -128,13 +127,8 @@ func TestExecuteManagedImportOperationPassesManagedSharedPlacementToImporter(t *
 		t.Fatal("expected importer to receive github request")
 	}
 
-	wantPlacement := map[string]string{
-		runtime.SharedPoolLabelKey:          runtime.SharedPoolLabelValue,
-		runtime.RegionLabelKey:              "ap-northeast-1",
-		runtime.LocationCountryCodeLabelKey: "jp",
-	}
-	if !reflect.DeepEqual(importer.githubReq.PlacementNodeSelector, wantPlacement) {
-		t.Fatalf("expected placement selector %v, got %v", wantPlacement, importer.githubReq.PlacementNodeSelector)
+	if importer.githubReq.PlacementNodeSelector != nil {
+		t.Fatalf("expected import build placement selector to be nil, got %v", importer.githubReq.PlacementNodeSelector)
 	}
 }
 

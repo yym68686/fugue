@@ -211,7 +211,7 @@ func mergeBuilderStringMap(defaults, override map[string]string) map[string]stri
 
 func builderWorkloadProfileFor(buildStrategy string, stateful bool) builderWorkloadProfile {
 	switch strings.TrimSpace(strings.ToLower(buildStrategy)) {
-	case model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks:
+	case model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks, model.AppBuildStrategyDockerfile:
 		return builderWorkloadProfileHeavy
 	}
 	if stateful {

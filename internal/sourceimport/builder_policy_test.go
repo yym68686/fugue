@@ -5,14 +5,14 @@ import (
 	"testing"
 )
 
-func TestBuilderWorkloadProfileForStatefulDockerfileIsHeavy(t *testing.T) {
+func TestBuilderWorkloadProfileForDockerfileIsHeavy(t *testing.T) {
 	t.Parallel()
 
 	if got := builderWorkloadProfileFor("dockerfile", true); got != builderWorkloadProfileHeavy {
 		t.Fatalf("expected stateful dockerfile build to be heavy, got %q", got)
 	}
-	if got := builderWorkloadProfileFor("dockerfile", false); got != builderWorkloadProfileLight {
-		t.Fatalf("expected stateless dockerfile build to be light, got %q", got)
+	if got := builderWorkloadProfileFor("dockerfile", false); got != builderWorkloadProfileHeavy {
+		t.Fatalf("expected stateless dockerfile build to be heavy, got %q", got)
 	}
 }
 

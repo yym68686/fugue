@@ -629,10 +629,38 @@ func builderDemandForProfile(policy BuilderPodPolicy, profile builderWorkloadPro
 		workload = policy.Heavy
 	}
 	return builderResourceDemand{
-		CPUMilli:       parseBuilderCPUMilli(workload.Resources.Requests["cpu"]),
-		MemoryBytes:    parseBuilderBytes(workload.Resources.Requests["memory"]),
-		EphemeralBytes: parseBuilderBytes(workload.Resources.Requests["ephemeral-storage"]),
+		CPUMilli: builderSchedulingCPUDemand(
+			parseBuilderCPUMilli(workload.Resources.Requests["cpu"]),
+			parseBuilderCPUMilli(workload.Resources.Limits["cpu"]),
+		),
+		MemoryBytes: builderPeakSchedulingDemand(
+			parseBuilderBytes(workload.Resources.Requests["memory"]),
+			parseBuilderBytes(workload.Resources.Limits["memory"]),
+		),
+		EphemeralBytes: builderPeakSchedulingDemand(
+			parseBuilderBytes(workload.Resources.Requests["ephemeral-storage"]),
+			parseBuilderBytes(workload.Resources.Limits["ephemeral-storage"]),
+			parseBuilderBytes(workload.WorkspaceSizeLimit),
+			parseBuilderBytes(workload.DockerDataSizeLimit),
+		),
 	}, nil
+}
+
+func builderSchedulingCPUDemand(request, limit int64) int64 {
+	if request > 0 {
+		return request
+	}
+	return limit
+}
+
+func builderPeakSchedulingDemand(values ...int64) int64 {
+	var peak int64
+	for _, value := range values {
+		if value > peak {
+			peak = value
+		}
+	}
+	return peak
 }
 
 func builderSafetyBuffer(allocatable builderResourceDemand, profile builderWorkloadProfile) builderResourceDemand {
@@ -695,7 +723,10 @@ func builderRatioScore(remaining, total int64) float64 {
 
 func builderAnyNodeMatchesBuildLabel(policy BuilderPodPolicy, snapshots []builderNodeSnapshot) bool {
 	for _, snapshot := range snapshots {
-		if !builderNodeEligibleForBuilders(policy, snapshot) {
+		if !snapshot.Ready || snapshot.DiskPressure || snapshot.Hostname == "" {
+			continue
+		}
+		if !builderNodeTaintsTolerated(policy.Tolerations, snapshot.Taints) {
 			continue
 		}
 		if builderMatchesBuildPool(policy, snapshot) {
@@ -706,10 +737,13 @@ func builderAnyNodeMatchesBuildLabel(policy BuilderPodPolicy, snapshots []builde
 }
 
 func builderNodeEligibleForBuilders(policy BuilderPodPolicy, snapshot builderNodeSnapshot) bool {
-	if !builderNodeIsSharedBuilderCandidate(snapshot) {
+	if !builderNodeTaintsTolerated(policy.Tolerations, snapshot.Taints) {
 		return false
 	}
-	return builderNodeTaintsTolerated(policy.Tolerations, snapshot.Taints)
+	if builderMatchesBuildPool(policy, snapshot) {
+		return true
+	}
+	return builderNodeIsSharedBuilderCandidate(snapshot)
 }
 
 func builderNodeIsSharedBuilderCandidate(snapshot builderNodeSnapshot) bool {
