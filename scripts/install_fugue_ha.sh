@@ -266,16 +266,6 @@ remote_app_tls_cert_matches_domain() {
   ssh_root_run "${PRIMARY_ALIAS}" "openssl x509 -in /etc/caddy/tls/cloudflare-apps-origin.crt -noout -ext subjectAltName 2>/dev/null | grep -F $(printf '%q' "${wildcard}") >/dev/null 2>&1 || openssl x509 -in /etc/caddy/tls/cloudflare-apps-origin.crt -noout -ext subjectAltName 2>/dev/null | grep -F $(printf '%q' "${apex}") >/dev/null 2>&1"
 }
 
-app_base_domain_needs_explicit_edge_site() {
-  [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] || return 1
-  [[ "${FUGUE_APP_BASE_DOMAIN}" != "${FUGUE_DOMAIN}" ]] || return 1
-  [[ "${FUGUE_APP_BASE_DOMAIN}" != "${FUGUE_REGISTRY_DOMAIN}" ]] || return 1
-  if mesh_enabled && [[ "${FUGUE_APP_BASE_DOMAIN}" == "${FUGUE_MESH_DOMAIN}" ]]; then
-    return 1
-  fi
-  return 0
-}
-
 control_plane_bundle_files_present() {
   [[ -r "${CONTROL_PLANE_HOSTS_ENV_FILE}" && -r "${CONTROL_PLANE_SSH_KEY_FILE}" && -r "${CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE}" ]]
 }
@@ -1102,39 +1092,24 @@ install_edge_proxy_on_primary() {
   determine_headscale_upstream
 
   local app_host_tls_directive="tls internal"
-  local app_root_tls_directive=$'tls {\n    on_demand\n  }'
   local app_tls_uploaded="false"
   local purge_stale_app_tls_material="false"
-  local app_root_site_block=""
   if [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && app_tls_cert_matches_domain; then
     log "uploading wildcard app TLS material to ${PRIMARY_ALIAS}"
     prepare_remote_tmp "${PRIMARY_ALIAS}"
     scp_to "${FUGUE_APP_TLS_CERT_FILE}" "${PRIMARY_ALIAS}" "${REMOTE_TMP_BASE}/cloudflare-apps-origin.crt"
     scp_to "${FUGUE_APP_TLS_KEY_FILE}" "${PRIMARY_ALIAS}" "${REMOTE_TMP_BASE}/cloudflare-apps-origin.key"
     app_host_tls_directive="tls /etc/caddy/tls/cloudflare-apps-origin.crt /etc/caddy/tls/cloudflare-apps-origin.key"
-    app_root_tls_directive="${app_host_tls_directive}"
     app_tls_uploaded="true"
   elif [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && remote_app_tls_cert_matches_domain; then
     log "reusing existing wildcard app TLS material already installed on ${PRIMARY_ALIAS}"
     app_host_tls_directive="tls /etc/caddy/tls/cloudflare-apps-origin.crt /etc/caddy/tls/cloudflare-apps-origin.key"
-    app_root_tls_directive="${app_host_tls_directive}"
   elif [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && remote_has_app_tls_material; then
     log "existing app TLS material on ${PRIMARY_ALIAS} does not match ${FUGUE_APP_BASE_DOMAIN}; deleting stale cert files and using on-demand TLS for ${FUGUE_APP_BASE_DOMAIN}"
     purge_stale_app_tls_material="true"
   elif [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && has_app_tls_material; then
     log "wildcard app TLS cert does not match ${FUGUE_APP_BASE_DOMAIN}; deleting stale remote cert files and using on-demand TLS for ${FUGUE_APP_BASE_DOMAIN}"
     purge_stale_app_tls_material="true"
-  fi
-
-  if app_base_domain_needs_explicit_edge_site; then
-    app_root_site_block="$(cat <<EOF
-https://${FUGUE_APP_BASE_DOMAIN} {
-  ${app_root_tls_directive}
-  encode gzip zstd
-  reverse_proxy ${EDGE_UPSTREAM}
-}
-EOF
-)"
   fi
 
   local mesh_site_block=""
@@ -1149,7 +1124,7 @@ EOF
 )"
   fi
 
-  log "installing Route A edge proxy on ${PRIMARY_ALIAS} for ${FUGUE_DOMAIN}, ${FUGUE_REGISTRY_DOMAIN}, *.${FUGUE_APP_BASE_DOMAIN}, *.dns.${FUGUE_APP_BASE_DOMAIN}, and verified custom app domains"
+  log "installing Route A edge proxy on ${PRIMARY_ALIAS} for ${FUGUE_DOMAIN}, ${FUGUE_REGISTRY_DOMAIN}, *.${FUGUE_APP_BASE_DOMAIN}, and verified custom app domains"
   ssh_root "${PRIMARY_ALIAS}" <<EOF
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -1190,22 +1165,22 @@ cat >/usr/local/bin/fugue-sync-custom-domains <<'SYNC'
 set -euo pipefail
 
 config_file="/etc/default/fugue-custom-domains-sync"
-if [ ! -r "${config_file}" ]; then
+if [ ! -r "\${config_file}" ]; then
   exit 0
 fi
 # shellcheck disable=SC1091
-source "${config_file}"
+source "\${config_file}"
 
-tmp_json="$(mktemp)"
-tmp_caddy="$(mktemp)"
-tmp_hosts="$(mktemp)"
+tmp_json="\$(mktemp)"
+tmp_caddy="\$(mktemp)"
+tmp_hosts="\$(mktemp)"
 cleanup() {
-  rm -f "${tmp_json}" "${tmp_caddy}" "${tmp_hosts}"
+  rm -f "\${tmp_json}" "\${tmp_caddy}" "\${tmp_hosts}"
 }
 trap cleanup EXIT
 
-curl -fsS "${EDGE_DOMAINS_URL}" -o "${tmp_json}"
-python3 - "${tmp_json}" "${tmp_caddy}" "${tmp_hosts}" "${EDGE_CUSTOM_DOMAIN_UPSTREAM}" <<'PY'
+curl -fsS "\${EDGE_DOMAINS_URL}" -o "\${tmp_json}"
+python3 - "\${tmp_json}" "\${tmp_caddy}" "\${tmp_hosts}" "\${EDGE_CUSTOM_DOMAIN_UPSTREAM}" <<'PY'
 import json
 import sys
 
@@ -1234,12 +1209,12 @@ with open(hosts_path, "w", encoding="utf-8") as handle:
 PY
 
 report_tls_status() {
-  local hostname="$1"
-  local tls_status="$2"
-  local tls_last_message="$3"
+  local hostname="\$1"
+  local tls_status="\$2"
+  local tls_last_message="\$3"
 
-  python3 - "${hostname}" "${tls_status}" "${tls_last_message}" <<'PY' | \
-    curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @- "${EDGE_TLS_REPORT_URL}" >/dev/null
+  python3 - "\${hostname}" "\${tls_status}" "\${tls_last_message}" <<'PY' | \
+    curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @- "\${EDGE_TLS_REPORT_URL}" >/dev/null
 import json
 import sys
 
@@ -1254,33 +1229,33 @@ PY
 }
 
 probe_tls_ready() {
-  local hostname="$1"
+  local hostname="\$1"
   local output
-  output="$(printf '' | openssl s_client -servername "${hostname}" -connect "${EDGE_TLS_PROBE_ADDR}" -verify_hostname "${hostname}" 2>&1 || true)"
-  if printf '%s\n' "${output}" | grep -Fq 'Verify return code: 0 (ok)'; then
+  output="\$(printf '' | openssl s_client -servername "\${hostname}" -connect "\${EDGE_TLS_PROBE_ADDR}" -verify_hostname "\${hostname}" 2>&1 || true)"
+  if printf '%s\n' "\${output}" | grep -Fq 'Verify return code: 0 (ok)'; then
     return 0
   fi
   return 1
 }
 
-if [ ! -f "${EDGE_CUSTOM_DOMAINS_CADDYFILE}" ] || ! cmp -s "${tmp_caddy}" "${EDGE_CUSTOM_DOMAINS_CADDYFILE}"; then
-  install -m 0644 "${tmp_caddy}" "${EDGE_CUSTOM_DOMAINS_CADDYFILE}"
-  caddy validate --config "${EDGE_MAIN_CADDYFILE}"
+if [ ! -f "\${EDGE_CUSTOM_DOMAINS_CADDYFILE}" ] || ! cmp -s "\${tmp_caddy}" "\${EDGE_CUSTOM_DOMAINS_CADDYFILE}"; then
+  install -m 0644 "\${tmp_caddy}" "\${EDGE_CUSTOM_DOMAINS_CADDYFILE}"
+  caddy validate --config "\${EDGE_MAIN_CADDYFILE}"
   if systemctl is-active --quiet caddy; then
     systemctl reload caddy || systemctl restart caddy
   fi
 fi
 
 while IFS= read -r hostname; do
-  if [ -z "${hostname}" ]; then
+  if [ -z "\${hostname}" ]; then
     continue
   fi
-  if probe_tls_ready "${hostname}"; then
-    report_tls_status "${hostname}" "ready" "" || echo "warning: failed to report ready TLS status for ${hostname}" >&2
+  if probe_tls_ready "\${hostname}"; then
+    report_tls_status "\${hostname}" "ready" "" || echo "warning: failed to report ready TLS status for \${hostname}" >&2
   else
-    report_tls_status "${hostname}" "pending" "waiting for edge certificate issuance" || echo "warning: failed to report pending TLS status for ${hostname}" >&2
+    report_tls_status "\${hostname}" "pending" "waiting for edge certificate issuance" || echo "warning: failed to report pending TLS status for \${hostname}" >&2
   fi
-done < "${tmp_hosts}"
+done < "\${tmp_hosts}"
 SYNC
 chmod 0755 /usr/local/bin/fugue-sync-custom-domains
 install -m 0644 /dev/null /etc/caddy/fugue-custom-domains.caddy
@@ -1328,8 +1303,6 @@ https://${FUGUE_REGISTRY_DOMAIN} {
 
 ${mesh_site_block}
 
-${app_root_site_block}
-
 https://*.${FUGUE_APP_BASE_DOMAIN} {
   ${app_host_tls_directive}
   encode gzip zstd
@@ -1366,10 +1339,8 @@ verify_edge_proxy_config_on_primary() {
     "on_demand_tls {"
     "https:// {"
     "https://*.${FUGUE_APP_BASE_DOMAIN} {"
+    "import /etc/caddy/fugue-custom-domains.caddy"
   )
-  if app_base_domain_needs_explicit_edge_site; then
-    expected_sites+=("https://${FUGUE_APP_BASE_DOMAIN} {")
-  fi
 
   local site_pattern=""
   for site_pattern in "${expected_sites[@]}"; do
@@ -2042,8 +2013,8 @@ Route A is configured on ${PRIMARY_ALIAS} with Caddy:
   https://${FUGUE_DOMAIN} -> https origin on ${PRIMARY_ALIAS}:443 -> upstream ${EDGE_UPSTREAM} (${EDGE_UPSTREAM_MODE})
   https://${FUGUE_REGISTRY_DOMAIN} -> https origin on ${PRIMARY_ALIAS}:443 -> upstream ${REGISTRY_EDGE_UPSTREAM}
 $(if mesh_enabled; then printf '  https://%s -> https origin on %s:443 -> upstream %s\n' "${FUGUE_MESH_DOMAIN}" "${PRIMARY_ALIAS}" "${HEADSCALE_EDGE_UPSTREAM}"; fi)
-$(if app_base_domain_needs_explicit_edge_site; then printf '  https://%s -> https origin on %s:443 -> upstream %s (%s)\n' "${FUGUE_APP_BASE_DOMAIN}" "${PRIMARY_ALIAS}" "${EDGE_UPSTREAM}" "${EDGE_UPSTREAM_MODE}"; fi)
   https://*.${FUGUE_APP_BASE_DOMAIN} -> https origin on ${PRIMARY_ALIAS}:443 -> upstream ${EDGE_UPSTREAM} (${EDGE_UPSTREAM_MODE})
+  verified custom domains -> imported from /etc/caddy/fugue-custom-domains.caddy
 
 Server-side status:
   EDGE_LOCAL_HEALTH=${EDGE_LOCAL_HEALTH}

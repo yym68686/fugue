@@ -634,7 +634,7 @@ func (s *Server) managedEdgeCustomDomain(hostname string) bool {
 		return false
 	}
 	appBase := normalizeExternalAppDomain(s.appBaseDomain)
-	if appBase != "" && (hostname == appBase || strings.HasSuffix(hostname, "."+appBase)) {
+	if appBase != "" && hostname != appBase && strings.HasSuffix(hostname, "."+appBase) {
 		return false
 	}
 	customBase := normalizeExternalAppDomain(s.customDomainBaseDomain)

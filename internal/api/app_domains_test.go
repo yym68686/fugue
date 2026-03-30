@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -324,11 +326,14 @@ func TestEdgeDomainsListsOnlyManagedVerifiedCustomDomains(t *testing.T) {
 		} `json:"domains"`
 	}
 	mustDecodeJSON(t, recorder, &response)
-	if len(response.Domains) != 1 {
-		t.Fatalf("expected exactly one managed custom domain, got %+v", response.Domains)
+	got := make([]string, 0, len(response.Domains))
+	for _, domain := range response.Domains {
+		got = append(got, domain.Hostname)
 	}
-	if response.Domains[0].Hostname != "www.example.com" {
-		t.Fatalf("expected managed custom domain %q, got %+v", "www.example.com", response.Domains)
+	sort.Strings(got)
+	want := []string{"fugue.pro", "www.example.com"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected managed custom domains %v, got %v", want, got)
 	}
 }
 
@@ -393,6 +398,40 @@ func TestEdgeDomainTLSReportUpdatesVerifiedDomainStatus(t *testing.T) {
 	}
 	if domain.TLSLastCheckedAt == nil || domain.TLSReadyAt == nil {
 		t.Fatalf("expected ready report timestamps to be set, got %+v", domain)
+	}
+}
+
+func TestEdgeDomainTLSReportAcceptsPlatformRootCustomDomain(t *testing.T) {
+	t.Parallel()
+
+	s, server, _, platformAdminKey, app, resolver := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	expectedTarget := server.primaryCustomDomainTarget(app)
+	resolver.cname["fugue.pro"] = expectedTarget + "."
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/domains", platformAdminKey, map[string]any{
+		"hostname": "fugue.pro",
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	report := performJSONRequest(t, server, http.MethodPost, "/v1/edge/domains/tls-report?token=edge-secret", "", map[string]any{
+		"hostname":   "fugue.pro",
+		"tls_status": model.AppDomainTLSStatusReady,
+	})
+	if report.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, report.Code, report.Body.String())
+	}
+
+	domain, err := s.GetAppDomain("fugue.pro")
+	if err != nil {
+		t.Fatalf("get app domain after ready report: %v", err)
+	}
+	if domain.TLSStatus != model.AppDomainTLSStatusReady {
+		t.Fatalf("expected ready TLS status, got %+v", domain)
+	}
+	if domain.TLSReadyAt == nil || domain.TLSLastCheckedAt == nil {
+		t.Fatalf("expected ready timestamps to be set, got %+v", domain)
 	}
 }
 
