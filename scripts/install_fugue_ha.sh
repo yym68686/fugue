@@ -1102,7 +1102,7 @@ install_edge_proxy_on_primary() {
   determine_headscale_upstream
 
   local app_host_tls_directive="tls internal"
-  local app_root_tls_directive=$'tls {\n    on_demand\n  }'
+  local app_root_tls_directive="${app_host_tls_directive}"
   local app_tls_uploaded="false"
   local purge_stale_app_tls_material="false"
   local app_root_site_block=""
@@ -1119,10 +1119,10 @@ install_edge_proxy_on_primary() {
     app_host_tls_directive="tls /etc/caddy/tls/cloudflare-apps-origin.crt /etc/caddy/tls/cloudflare-apps-origin.key"
     app_root_tls_directive="${app_host_tls_directive}"
   elif [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && remote_has_app_tls_material; then
-    log "existing app TLS material on ${PRIMARY_ALIAS} does not match ${FUGUE_APP_BASE_DOMAIN}; deleting stale cert files and using on-demand TLS for ${FUGUE_APP_BASE_DOMAIN}"
+    log "existing app TLS material on ${PRIMARY_ALIAS} does not match ${FUGUE_APP_BASE_DOMAIN}; deleting stale cert files and using tls internal for ${FUGUE_APP_BASE_DOMAIN}"
     purge_stale_app_tls_material="true"
   elif [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && has_app_tls_material; then
-    log "wildcard app TLS cert does not match ${FUGUE_APP_BASE_DOMAIN}; deleting stale remote cert files and using on-demand TLS for ${FUGUE_APP_BASE_DOMAIN}"
+    log "wildcard app TLS cert does not match ${FUGUE_APP_BASE_DOMAIN}; deleting stale remote cert files and using tls internal for ${FUGUE_APP_BASE_DOMAIN}"
     purge_stale_app_tls_material="true"
   fi
 
