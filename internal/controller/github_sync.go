@@ -21,10 +21,18 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 	}
 
 	inFlightApps := make(map[string]struct{})
+	latestAttemptedCommits := make(map[string]string)
 	for _, op := range ops {
+		appID := strings.TrimSpace(op.AppID)
+		if appID == "" {
+			continue
+		}
+		if commit := trackedGitHubCommitForOperation(op); commit != "" {
+			latestAttemptedCommits[appID] = commit
+		}
 		switch op.Status {
 		case model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent:
-			inFlightApps[strings.TrimSpace(op.AppID)] = struct{}{}
+			inFlightApps[appID] = struct{}{}
 		}
 	}
 
@@ -49,11 +57,13 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 			)
 			continue
 		}
-		if strings.TrimSpace(latestCommit) == "" || strings.TrimSpace(latestCommit) == strings.TrimSpace(app.Source.CommitSHA) {
+		if strings.TrimSpace(latestCommit) == "" ||
+			strings.TrimSpace(latestCommit) == strings.TrimSpace(app.Source.CommitSHA) ||
+			strings.TrimSpace(latestCommit) == latestAttemptedCommits[strings.TrimSpace(app.ID)] {
 			continue
 		}
 
-		op, err := s.queueGitHubAutoRebuild(app, resolvedBranch)
+		op, err := s.queueGitHubAutoRebuild(app, resolvedBranch, latestCommit)
 		if err != nil {
 			if errors.Is(err, store.ErrConflict) {
 				continue
@@ -91,7 +101,19 @@ func (s *Service) resolveLatestGitHubCommit(ctx context.Context, source model.Ap
 	return resolver(ctx, strings.TrimSpace(source.RepoURL), strings.TrimSpace(source.RepoBranch))
 }
 
-func queueableGitHubSource(source model.AppSource, branch string) (model.AppSource, error) {
+func trackedGitHubCommitForOperation(op model.Operation) string {
+	switch op.Type {
+	case model.OperationTypeImport, model.OperationTypeDeploy:
+	default:
+		return ""
+	}
+	if op.DesiredSource == nil || strings.TrimSpace(op.DesiredSource.Type) != model.AppSourceTypeGitHubPublic {
+		return ""
+	}
+	return strings.TrimSpace(op.DesiredSource.CommitSHA)
+}
+
+func queueableGitHubSource(source model.AppSource, branch string, commit string) (model.AppSource, error) {
 	if strings.TrimSpace(source.Type) != model.AppSourceTypeGitHubPublic {
 		return model.AppSource{}, fmt.Errorf("unsupported source type %q", source.Type)
 	}
@@ -110,6 +132,7 @@ func queueableGitHubSource(source model.AppSource, branch string) (model.AppSour
 		RepoBranch:       strings.TrimSpace(branch),
 		SourceDir:        strings.TrimSpace(source.SourceDir),
 		BuildStrategy:    buildStrategy,
+		CommitSHA:        strings.TrimSpace(commit),
 		DockerfilePath:   strings.TrimSpace(source.DockerfilePath),
 		BuildContextDir:  strings.TrimSpace(source.BuildContextDir),
 		ImageNameSuffix:  strings.TrimSpace(source.ImageNameSuffix),
@@ -119,13 +142,13 @@ func queueableGitHubSource(source model.AppSource, branch string) (model.AppSour
 	}, nil
 }
 
-func (s *Service) queueGitHubAutoRebuild(app model.App, branch string) (model.Operation, error) {
+func (s *Service) queueGitHubAutoRebuild(app model.App, branch string, commit string) (model.Operation, error) {
 	spec := cloneImportSpec(app.Spec)
 	if strings.TrimSpace(spec.RuntimeID) == "" {
 		spec.RuntimeID = "runtime_managed_shared"
 	}
 
-	source, err := queueableGitHubSource(*app.Source, branch)
+	source, err := queueableGitHubSource(*app.Source, branch, commit)
 	if err != nil {
 		return model.Operation{}, err
 	}
