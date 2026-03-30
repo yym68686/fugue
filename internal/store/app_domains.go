@@ -31,6 +31,27 @@ func (s *Store) ListAppDomains(appID string) ([]model.AppDomain, error) {
 	return domains, err
 }
 
+func (s *Store) ListVerifiedAppDomains() ([]model.AppDomain, error) {
+	if s.usingDatabase() {
+		return s.pgListVerifiedAppDomains()
+	}
+
+	domains := make([]model.AppDomain, 0)
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, domain := range state.AppDomains {
+			if domain.Status != model.AppDomainStatusVerified {
+				continue
+			}
+			domains = append(domains, cloneAppDomain(domain))
+		}
+		sort.Slice(domains, func(i, j int) bool {
+			return domains[i].Hostname < domains[j].Hostname
+		})
+		return nil
+	})
+	return domains, err
+}
+
 func (s *Store) GetAppDomain(hostname string) (model.AppDomain, error) {
 	hostname = normalizeAppDomainHostname(hostname)
 	if hostname == "" {
@@ -57,10 +78,12 @@ func (s *Store) PutAppDomain(domain model.AppDomain) (model.AppDomain, error) {
 	domain.AppID = strings.TrimSpace(domain.AppID)
 	domain.TenantID = strings.TrimSpace(domain.TenantID)
 	domain.Status = normalizeAppDomainStatus(domain.Status)
+	domain.TLSStatus = model.NormalizeAppDomainTLSStatus(domain.TLSStatus)
 	domain.VerificationTXTName = normalizeTXTRecordName(domain.VerificationTXTName)
 	domain.VerificationTXTValue = strings.TrimSpace(domain.VerificationTXTValue)
 	domain.RouteTarget = normalizeAppDomainHostname(domain.RouteTarget)
 	domain.LastMessage = strings.TrimSpace(domain.LastMessage)
+	domain.TLSLastMessage = strings.TrimSpace(domain.TLSLastMessage)
 	if domain.Hostname == "" || domain.AppID == "" {
 		return model.AppDomain{}, ErrInvalidInput
 	}
@@ -110,6 +133,24 @@ func (s *Store) PutAppDomain(domain model.AppDomain) (model.AppDomain, error) {
 		if domain.Status == model.AppDomainStatusVerified && domain.VerifiedAt == nil {
 			verifiedAt := now
 			domain.VerifiedAt = &verifiedAt
+		}
+		if domain.Status == model.AppDomainStatusVerified {
+			if domain.TLSStatus == "" {
+				domain.TLSStatus = model.AppDomainTLSStatusPending
+			}
+			if domain.TLSStatus == model.AppDomainTLSStatusReady {
+				if domain.TLSReadyAt == nil {
+					readyAt := now
+					domain.TLSReadyAt = &readyAt
+				}
+			} else {
+				domain.TLSReadyAt = nil
+			}
+		} else {
+			domain.TLSStatus = ""
+			domain.TLSLastMessage = ""
+			domain.TLSLastCheckedAt = nil
+			domain.TLSReadyAt = nil
 		}
 
 		if index >= 0 {
@@ -220,6 +261,10 @@ func sortAppDomains(domains []model.AppDomain) {
 
 func cloneAppDomain(in model.AppDomain) model.AppDomain {
 	out := in
+	out.TLSStatus = model.NormalizeAppDomainTLSStatus(out.TLSStatus)
+	if out.Status == model.AppDomainStatusVerified && out.TLSStatus == "" {
+		out.TLSStatus = model.AppDomainTLSStatusPending
+	}
 	if in.LastCheckedAt != nil {
 		lastCheckedAt := *in.LastCheckedAt
 		out.LastCheckedAt = &lastCheckedAt
@@ -227,6 +272,14 @@ func cloneAppDomain(in model.AppDomain) model.AppDomain {
 	if in.VerifiedAt != nil {
 		verifiedAt := *in.VerifiedAt
 		out.VerifiedAt = &verifiedAt
+	}
+	if in.TLSLastCheckedAt != nil {
+		tlsLastCheckedAt := *in.TLSLastCheckedAt
+		out.TLSLastCheckedAt = &tlsLastCheckedAt
+	}
+	if in.TLSReadyAt != nil {
+		tlsReadyAt := *in.TLSReadyAt
+		out.TLSReadyAt = &tlsReadyAt
 	}
 	return out
 }

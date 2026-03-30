@@ -1102,7 +1102,7 @@ install_edge_proxy_on_primary() {
   determine_headscale_upstream
 
   local app_host_tls_directive="tls internal"
-  local app_root_tls_directive="${app_host_tls_directive}"
+  local app_root_tls_directive=$'tls {\n    on_demand\n  }'
   local app_tls_uploaded="false"
   local purge_stale_app_tls_material="false"
   local app_root_site_block=""
@@ -1119,10 +1119,10 @@ install_edge_proxy_on_primary() {
     app_host_tls_directive="tls /etc/caddy/tls/cloudflare-apps-origin.crt /etc/caddy/tls/cloudflare-apps-origin.key"
     app_root_tls_directive="${app_host_tls_directive}"
   elif [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && remote_has_app_tls_material; then
-    log "existing app TLS material on ${PRIMARY_ALIAS} does not match ${FUGUE_APP_BASE_DOMAIN}; deleting stale cert files and using tls internal for ${FUGUE_APP_BASE_DOMAIN}"
+    log "existing app TLS material on ${PRIMARY_ALIAS} does not match ${FUGUE_APP_BASE_DOMAIN}; deleting stale cert files and using on-demand TLS for ${FUGUE_APP_BASE_DOMAIN}"
     purge_stale_app_tls_material="true"
   elif [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && has_app_tls_material; then
-    log "wildcard app TLS cert does not match ${FUGUE_APP_BASE_DOMAIN}; deleting stale remote cert files and using tls internal for ${FUGUE_APP_BASE_DOMAIN}"
+    log "wildcard app TLS cert does not match ${FUGUE_APP_BASE_DOMAIN}; deleting stale remote cert files and using on-demand TLS for ${FUGUE_APP_BASE_DOMAIN}"
     purge_stale_app_tls_material="true"
   fi
 
@@ -1157,6 +1157,14 @@ if ! command -v caddy >/dev/null 2>&1; then
   apt-get update
   apt-get install -y caddy
 fi
+if ! command -v python3 >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y python3
+fi
+if ! command -v openssl >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y openssl
+fi
 mkdir -p /etc/caddy
 mkdir -p /etc/caddy/tls
 if [ "${app_tls_uploaded}" = "true" ] && [ -f "${REMOTE_TMP_BASE}/cloudflare-apps-origin.crt" ] && [ -f "${REMOTE_TMP_BASE}/cloudflare-apps-origin.key" ]; then
@@ -1167,6 +1175,137 @@ elif [ "${purge_stale_app_tls_material}" = "true" ]; then
   rm -f /etc/caddy/tls/cloudflare-apps-origin.crt /etc/caddy/tls/cloudflare-apps-origin.key
   rm -f "${REMOTE_TMP_BASE}/cloudflare-apps-origin.crt" "${REMOTE_TMP_BASE}/cloudflare-apps-origin.key"
 fi
+cat >/etc/default/fugue-custom-domains-sync <<'EDGEENV'
+EDGE_UPSTREAM=${EDGE_UPSTREAM}
+FUGUE_EDGE_TLS_ASK_TOKEN=${FUGUE_EDGE_TLS_ASK_TOKEN}
+EDGE_DOMAINS_URL=http://${EDGE_UPSTREAM}/v1/edge/domains?token=${FUGUE_EDGE_TLS_ASK_TOKEN}
+EDGE_TLS_REPORT_URL=http://${EDGE_UPSTREAM}/v1/edge/domains/tls-report?token=${FUGUE_EDGE_TLS_ASK_TOKEN}
+EDGE_TLS_PROBE_ADDR=127.0.0.1:443
+EDGE_CUSTOM_DOMAINS_CADDYFILE=/etc/caddy/fugue-custom-domains.caddy
+EDGE_MAIN_CADDYFILE=/etc/caddy/Caddyfile
+EDGE_CUSTOM_DOMAIN_UPSTREAM=${EDGE_UPSTREAM}
+EDGEENV
+cat >/usr/local/bin/fugue-sync-custom-domains <<'SYNC'
+#!/usr/bin/env bash
+set -euo pipefail
+
+config_file="/etc/default/fugue-custom-domains-sync"
+if [ ! -r "${config_file}" ]; then
+  exit 0
+fi
+# shellcheck disable=SC1091
+source "${config_file}"
+
+tmp_json="$(mktemp)"
+tmp_caddy="$(mktemp)"
+tmp_hosts="$(mktemp)"
+cleanup() {
+  rm -f "${tmp_json}" "${tmp_caddy}" "${tmp_hosts}"
+}
+trap cleanup EXIT
+
+curl -fsS "${EDGE_DOMAINS_URL}" -o "${tmp_json}"
+python3 - "${tmp_json}" "${tmp_caddy}" "${tmp_hosts}" "${EDGE_CUSTOM_DOMAIN_UPSTREAM}" <<'PY'
+import json
+import sys
+
+src, dst, hosts_path, upstream = sys.argv[1:5]
+with open(src, "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+
+domains = []
+for item in payload.get("domains", []):
+    hostname = (item.get("hostname") or "").strip().lower().strip(".")
+    if hostname and hostname not in domains:
+        domains.append(hostname)
+domains.sort()
+
+with open(dst, "w", encoding="utf-8") as handle:
+    handle.write("# Managed by fugue-sync-custom-domains\n")
+    for hostname in domains:
+        handle.write(f"\nhttps://{hostname} {{\n")
+        handle.write("  encode gzip zstd\n")
+        handle.write(f"  reverse_proxy {upstream}\n")
+        handle.write("}\n")
+
+with open(hosts_path, "w", encoding="utf-8") as handle:
+    for hostname in domains:
+        handle.write(hostname + "\n")
+PY
+
+report_tls_status() {
+  local hostname="$1"
+  local tls_status="$2"
+  local tls_last_message="$3"
+
+  python3 - "${hostname}" "${tls_status}" "${tls_last_message}" <<'PY' | \
+    curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @- "${EDGE_TLS_REPORT_URL}" >/dev/null
+import json
+import sys
+
+hostname, tls_status, tls_last_message = sys.argv[1:4]
+payload = {
+    "hostname": hostname,
+    "tls_status": tls_status,
+    "tls_last_message": tls_last_message,
+}
+sys.stdout.write(json.dumps(payload))
+PY
+}
+
+probe_tls_ready() {
+  local hostname="$1"
+  local output
+  output="$(printf '' | openssl s_client -servername "${hostname}" -connect "${EDGE_TLS_PROBE_ADDR}" -verify_hostname "${hostname}" 2>&1 || true)"
+  if printf '%s\n' "${output}" | grep -Fq 'Verify return code: 0 (ok)'; then
+    return 0
+  fi
+  return 1
+}
+
+if [ ! -f "${EDGE_CUSTOM_DOMAINS_CADDYFILE}" ] || ! cmp -s "${tmp_caddy}" "${EDGE_CUSTOM_DOMAINS_CADDYFILE}"; then
+  install -m 0644 "${tmp_caddy}" "${EDGE_CUSTOM_DOMAINS_CADDYFILE}"
+  caddy validate --config "${EDGE_MAIN_CADDYFILE}"
+  if systemctl is-active --quiet caddy; then
+    systemctl reload caddy || systemctl restart caddy
+  fi
+fi
+
+while IFS= read -r hostname; do
+  if [ -z "${hostname}" ]; then
+    continue
+  fi
+  if probe_tls_ready "${hostname}"; then
+    report_tls_status "${hostname}" "ready" "" || echo "warning: failed to report ready TLS status for ${hostname}" >&2
+  else
+    report_tls_status "${hostname}" "pending" "waiting for edge certificate issuance" || echo "warning: failed to report pending TLS status for ${hostname}" >&2
+  fi
+done < "${tmp_hosts}"
+SYNC
+chmod 0755 /usr/local/bin/fugue-sync-custom-domains
+install -m 0644 /dev/null /etc/caddy/fugue-custom-domains.caddy
+cat >/etc/systemd/system/fugue-custom-domains-sync.service <<'SERVICE'
+[Unit]
+Description=Sync Fugue custom domains into Caddy
+After=network-online.target caddy.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fugue-sync-custom-domains
+SERVICE
+cat >/etc/systemd/system/fugue-custom-domains-sync.timer <<'TIMER'
+[Unit]
+Description=Periodically sync Fugue custom domains into Caddy
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+Unit=fugue-custom-domains-sync.service
+
+[Install]
+WantedBy=timers.target
+TIMER
 cat >/etc/caddy/Caddyfile <<'CADDY'
 {
   admin off
@@ -1197,6 +1336,8 @@ https://*.${FUGUE_APP_BASE_DOMAIN} {
   reverse_proxy ${EDGE_UPSTREAM}
 }
 
+import /etc/caddy/fugue-custom-domains.caddy
+
 https:// {
   tls {
     on_demand
@@ -1206,9 +1347,13 @@ https:// {
 }
 CADDY
 caddy validate --config /etc/caddy/Caddyfile
+systemctl daemon-reload
 systemctl enable caddy
 systemctl restart caddy
 systemctl is-active --quiet caddy
+systemctl enable fugue-custom-domains-sync.timer
+systemctl restart fugue-custom-domains-sync.timer
+/usr/local/bin/fugue-sync-custom-domains
 EOF
 }
 

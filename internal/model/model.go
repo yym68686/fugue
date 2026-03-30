@@ -296,17 +296,40 @@ const (
 	AppDomainStatusVerified = "verified"
 )
 
+const (
+	AppDomainTLSStatusPending = "pending"
+	AppDomainTLSStatusReady   = "ready"
+	AppDomainTLSStatusError   = "error"
+)
+
+func NormalizeAppDomainTLSStatus(status string) string {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case AppDomainTLSStatusPending:
+		return AppDomainTLSStatusPending
+	case AppDomainTLSStatusReady:
+		return AppDomainTLSStatusReady
+	case AppDomainTLSStatusError:
+		return AppDomainTLSStatusError
+	default:
+		return ""
+	}
+}
+
 type AppDomain struct {
 	Hostname             string     `json:"hostname"`
 	AppID                string     `json:"app_id,omitempty"`
 	TenantID             string     `json:"tenant_id,omitempty"`
 	Status               string     `json:"status"`
+	TLSStatus            string     `json:"tls_status,omitempty"`
 	VerificationTXTName  string     `json:"verification_txt_name,omitempty"`
 	VerificationTXTValue string     `json:"verification_txt_value,omitempty"`
 	RouteTarget          string     `json:"route_target,omitempty"`
 	LastMessage          string     `json:"last_message,omitempty"`
+	TLSLastMessage       string     `json:"tls_last_message,omitempty"`
 	LastCheckedAt        *time.Time `json:"last_checked_at,omitempty"`
 	VerifiedAt           *time.Time `json:"verified_at,omitempty"`
+	TLSLastCheckedAt     *time.Time `json:"tls_last_checked_at,omitempty"`
+	TLSReadyAt           *time.Time `json:"tls_ready_at,omitempty"`
 	CreatedAt            time.Time  `json:"created_at"`
 	UpdatedAt            time.Time  `json:"updated_at"`
 }

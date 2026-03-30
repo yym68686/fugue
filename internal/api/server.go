@@ -95,6 +95,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.HandleFunc("GET /v1/edge/tls/ask", s.handleEdgeTLSAsk)
+	mux.HandleFunc("GET /v1/edge/domains", s.handleEdgeDomains)
+	mux.HandleFunc("POST /v1/edge/domains/tls-report", s.handleEdgeDomainTLSReport)
 
 	mux.Handle("GET /v1/tenants", s.auth.RequireAPI(http.HandlerFunc(s.handleListTenants)))
 	mux.Handle("POST /v1/tenants", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateTenant)))

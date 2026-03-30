@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
@@ -46,6 +47,12 @@ func TestPutAppDomainVerifiesWithCNAMEOnly(t *testing.T) {
 	if putResponse.Domain.Status != model.AppDomainStatusVerified {
 		t.Fatalf("expected verified domain status, got %+v", putResponse.Domain)
 	}
+	if putResponse.Domain.TLSStatus != model.AppDomainTLSStatusPending {
+		t.Fatalf("expected pending TLS status after verification, got %+v", putResponse.Domain)
+	}
+	if putResponse.Domain.TLSReadyAt != nil {
+		t.Fatalf("expected TLS ready timestamp to be empty before edge report, got %+v", putResponse.Domain)
+	}
 
 	found, err := s.GetAppByHostname("www.example.com")
 	if err != nil {
@@ -80,6 +87,9 @@ func TestPutAppDomainVerifiesWithFlattenedTargetIPs(t *testing.T) {
 	}
 	if putResponse.Domain.Status != model.AppDomainStatusVerified {
 		t.Fatalf("expected verified domain status, got %+v", putResponse.Domain)
+	}
+	if putResponse.Domain.TLSStatus != model.AppDomainTLSStatusPending {
+		t.Fatalf("expected pending TLS status after verification, got %+v", putResponse.Domain)
 	}
 }
 
@@ -252,6 +262,140 @@ func TestGetAppDomainAvailabilityAllowsOnlyPlatformAdminForPlatformRoot(t *testi
 	}
 }
 
+func TestEdgeDomainsListsOnlyManagedVerifiedCustomDomains(t *testing.T) {
+	t.Parallel()
+
+	s, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	now := mustTime(t, "2026-03-31T00:00:00Z")
+	domains := []model.AppDomain{
+		{
+			Hostname:    "www.example.com",
+			AppID:       app.ID,
+			TenantID:    app.TenantID,
+			Status:      model.AppDomainStatusVerified,
+			RouteTarget: server.primaryCustomDomainTarget(app),
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		},
+		{
+			Hostname:    "pending.example.com",
+			AppID:       app.ID,
+			TenantID:    app.TenantID,
+			Status:      model.AppDomainStatusPending,
+			RouteTarget: server.primaryCustomDomainTarget(app),
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		},
+		{
+			Hostname:    "fugue.pro",
+			AppID:       app.ID,
+			TenantID:    app.TenantID,
+			Status:      model.AppDomainStatusVerified,
+			RouteTarget: server.primaryCustomDomainTarget(app),
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		},
+		{
+			Hostname:    "d-abc.dns.fugue.pro",
+			AppID:       app.ID,
+			TenantID:    app.TenantID,
+			Status:      model.AppDomainStatusVerified,
+			RouteTarget: server.primaryCustomDomainTarget(app),
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		},
+	}
+	for _, domain := range domains {
+		if _, err := s.PutAppDomain(domain); err != nil {
+			t.Fatalf("put app domain %s: %v", domain.Hostname, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/domains?token=edge-secret", nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Domains []struct {
+			Hostname string `json:"hostname"`
+		} `json:"domains"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if len(response.Domains) != 1 {
+		t.Fatalf("expected exactly one managed custom domain, got %+v", response.Domains)
+	}
+	if response.Domains[0].Hostname != "www.example.com" {
+		t.Fatalf("expected managed custom domain %q, got %+v", "www.example.com", response.Domains)
+	}
+}
+
+func TestEdgeDomainTLSReportUpdatesVerifiedDomainStatus(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, _, app, resolver := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	expectedTarget := server.primaryCustomDomainTarget(app)
+	resolver.cname["www.example.com"] = expectedTarget + "."
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/domains", apiKey, map[string]any{
+		"hostname": "www.example.com",
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	errorReport := performJSONRequest(t, server, http.MethodPost, "/v1/edge/domains/tls-report?token=edge-secret", "", map[string]any{
+		"hostname":         "www.example.com",
+		"tls_status":       model.AppDomainTLSStatusError,
+		"tls_last_message": "certificate issuance failed",
+	})
+	if errorReport.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, errorReport.Code, errorReport.Body.String())
+	}
+
+	domain, err := s.GetAppDomain("www.example.com")
+	if err != nil {
+		t.Fatalf("get app domain after error report: %v", err)
+	}
+	if domain.TLSStatus != model.AppDomainTLSStatusError {
+		t.Fatalf("expected error TLS status, got %+v", domain)
+	}
+	if domain.TLSLastMessage != "certificate issuance failed" {
+		t.Fatalf("expected TLS error message to be stored, got %+v", domain)
+	}
+	if domain.TLSLastCheckedAt == nil {
+		t.Fatalf("expected TLS last checked timestamp to be set, got %+v", domain)
+	}
+	if domain.TLSReadyAt != nil {
+		t.Fatalf("expected TLS ready timestamp to stay empty on error, got %+v", domain)
+	}
+
+	readyReport := performJSONRequest(t, server, http.MethodPost, "/v1/edge/domains/tls-report?token=edge-secret", "", map[string]any{
+		"hostname":         "www.example.com",
+		"tls_status":       model.AppDomainTLSStatusReady,
+		"tls_last_message": "ignored",
+	})
+	if readyReport.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, readyReport.Code, readyReport.Body.String())
+	}
+
+	domain, err = s.GetAppDomain("www.example.com")
+	if err != nil {
+		t.Fatalf("get app domain after ready report: %v", err)
+	}
+	if domain.TLSStatus != model.AppDomainTLSStatusReady {
+		t.Fatalf("expected ready TLS status, got %+v", domain)
+	}
+	if domain.TLSLastMessage != "" {
+		t.Fatalf("expected ready report to clear TLS last message, got %+v", domain)
+	}
+	if domain.TLSLastCheckedAt == nil || domain.TLSReadyAt == nil {
+		t.Fatalf("expected ready report timestamps to be set, got %+v", domain)
+	}
+}
+
 func TestPrimaryCustomDomainTargetDefaultsToDNSNamespace(t *testing.T) {
 	t.Parallel()
 
@@ -324,6 +468,15 @@ func setupAppDomainTestServerWithDomains(t *testing.T, appBaseDomain string) (*s
 type fakeAppDomainResolver struct {
 	cname map[string]string
 	ip    map[string][]net.IPAddr
+}
+
+func mustTime(t *testing.T, raw string) time.Time {
+	t.Helper()
+	value, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		t.Fatalf("parse time %q: %v", raw, err)
+	}
+	return value
 }
 
 func (f *fakeAppDomainResolver) LookupCNAME(_ context.Context, host string) (string, error) {

@@ -125,3 +125,52 @@ func TestDeleteAppDomainReleasesHostname(t *testing.T) {
 		t.Fatalf("expected hostname to be released, got %v", err)
 	}
 }
+
+func TestPutVerifiedAppDomainDefaultsTLSPending(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("TLS Domains")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateAppWithRoute(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppRoute{
+		Hostname:    "demo.apps.example.com",
+		BaseDomain:  "apps.example.com",
+		PublicURL:   "https://demo.apps.example.com",
+		ServicePort: 8080,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	domain, err := s.PutAppDomain(model.AppDomain{
+		Hostname:    "www.example.com",
+		AppID:       app.ID,
+		TenantID:    tenant.ID,
+		Status:      model.AppDomainStatusVerified,
+		RouteTarget: "d-123.dns.fugue.pro",
+	})
+	if err != nil {
+		t.Fatalf("put verified app domain: %v", err)
+	}
+	if domain.TLSStatus != model.AppDomainTLSStatusPending {
+		t.Fatalf("expected pending TLS status, got %+v", domain)
+	}
+	if domain.TLSReadyAt != nil {
+		t.Fatalf("expected TLS ready timestamp to be empty, got %+v", domain)
+	}
+}

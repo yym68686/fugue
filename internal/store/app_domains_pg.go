@@ -15,7 +15,7 @@ func (s *Store) pgListAppDomains(appID string) ([]model.AppDomain, error) {
 	defer cancel()
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT hostname, tenant_id, app_id, status, verification_txt_name, verification_txt_value, route_target, last_message, last_checked_at, verified_at, created_at, updated_at
+SELECT hostname, tenant_id, app_id, status, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, tls_last_message, last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at
 FROM fugue_app_domains
 WHERE app_id = $1
 ORDER BY created_at ASC, hostname ASC
@@ -39,12 +39,41 @@ ORDER BY created_at ASC, hostname ASC
 	return domains, nil
 }
 
+func (s *Store) pgListVerifiedAppDomains() ([]model.AppDomain, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	rows, err := s.db.QueryContext(ctx, `
+SELECT hostname, tenant_id, app_id, status, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, tls_last_message, last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at
+FROM fugue_app_domains
+WHERE status = $1
+ORDER BY hostname ASC
+`, model.AppDomainStatusVerified)
+	if err != nil {
+		return nil, fmt.Errorf("list verified app domains: %w", err)
+	}
+	defer rows.Close()
+
+	domains := make([]model.AppDomain, 0)
+	for rows.Next() {
+		domain, err := scanAppDomain(rows)
+		if err != nil {
+			return nil, err
+		}
+		domains = append(domains, domain)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate verified app domains: %w", err)
+	}
+	return domains, nil
+}
+
 func (s *Store) pgGetAppDomain(hostname string) (model.AppDomain, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	domain, err := scanAppDomain(s.db.QueryRowContext(ctx, `
-SELECT hostname, tenant_id, app_id, status, verification_txt_name, verification_txt_value, route_target, last_message, last_checked_at, verified_at, created_at, updated_at
+SELECT hostname, tenant_id, app_id, status, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, tls_last_message, last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at
 FROM fugue_app_domains
 WHERE lower(hostname) = lower($1)
 `, hostname))
@@ -93,7 +122,7 @@ LIMIT 1
 	}
 
 	existing, err := scanAppDomain(tx.QueryRowContext(ctx, `
-SELECT hostname, tenant_id, app_id, status, verification_txt_name, verification_txt_value, route_target, last_message, last_checked_at, verified_at, created_at, updated_at
+SELECT hostname, tenant_id, app_id, status, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, tls_last_message, last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at
 FROM fugue_app_domains
 WHERE lower(hostname) = lower($1)
 FOR UPDATE
@@ -119,6 +148,24 @@ FOR UPDATE
 		verifiedAt := now
 		domain.VerifiedAt = &verifiedAt
 	}
+	if domain.Status == model.AppDomainStatusVerified {
+		if domain.TLSStatus == "" {
+			domain.TLSStatus = model.AppDomainTLSStatusPending
+		}
+		if domain.TLSStatus == model.AppDomainTLSStatusReady {
+			if domain.TLSReadyAt == nil {
+				readyAt := now
+				domain.TLSReadyAt = &readyAt
+			}
+		} else {
+			domain.TLSReadyAt = nil
+		}
+	} else {
+		domain.TLSStatus = ""
+		domain.TLSLastMessage = ""
+		domain.TLSLastCheckedAt = nil
+		domain.TLSReadyAt = nil
+	}
 
 	if existingFound {
 		if _, err := tx.ExecContext(ctx, `
@@ -126,23 +173,27 @@ UPDATE fugue_app_domains
 SET tenant_id = $2,
 	app_id = $3,
 	status = $4,
-	verification_txt_name = $5,
-	verification_txt_value = $6,
-	route_target = $7,
-	last_message = $8,
-	last_checked_at = $9,
-	verified_at = $10,
-	created_at = $11,
-	updated_at = $12
+	tls_status = $5,
+	verification_txt_name = $6,
+	verification_txt_value = $7,
+	route_target = $8,
+	last_message = $9,
+	tls_last_message = $10,
+	last_checked_at = $11,
+	verified_at = $12,
+	tls_last_checked_at = $13,
+	tls_ready_at = $14,
+	created_at = $15,
+	updated_at = $16
 WHERE lower(hostname) = lower($1)
-`, domain.Hostname, domain.TenantID, domain.AppID, domain.Status, domain.VerificationTXTName, domain.VerificationTXTValue, domain.RouteTarget, domain.LastMessage, domain.LastCheckedAt, domain.VerifiedAt, domain.CreatedAt, domain.UpdatedAt); err != nil {
+`, domain.Hostname, domain.TenantID, domain.AppID, domain.Status, domain.TLSStatus, domain.VerificationTXTName, domain.VerificationTXTValue, domain.RouteTarget, domain.LastMessage, domain.TLSLastMessage, domain.LastCheckedAt, domain.VerifiedAt, domain.TLSLastCheckedAt, domain.TLSReadyAt, domain.CreatedAt, domain.UpdatedAt); err != nil {
 			return model.AppDomain{}, mapDBErr(err)
 		}
 	} else {
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_app_domains (hostname, tenant_id, app_id, status, verification_txt_name, verification_txt_value, route_target, last_message, last_checked_at, verified_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-`, domain.Hostname, domain.TenantID, domain.AppID, domain.Status, domain.VerificationTXTName, domain.VerificationTXTValue, domain.RouteTarget, domain.LastMessage, domain.LastCheckedAt, domain.VerifiedAt, domain.CreatedAt, domain.UpdatedAt); err != nil {
+INSERT INTO fugue_app_domains (hostname, tenant_id, app_id, status, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, tls_last_message, last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+`, domain.Hostname, domain.TenantID, domain.AppID, domain.Status, domain.TLSStatus, domain.VerificationTXTName, domain.VerificationTXTValue, domain.RouteTarget, domain.LastMessage, domain.TLSLastMessage, domain.LastCheckedAt, domain.VerifiedAt, domain.TLSLastCheckedAt, domain.TLSReadyAt, domain.CreatedAt, domain.UpdatedAt); err != nil {
 			return model.AppDomain{}, mapDBErr(err)
 		}
 	}
@@ -164,7 +215,7 @@ func (s *Store) pgDeleteAppDomain(appID, hostname string) (model.AppDomain, erro
 	defer tx.Rollback()
 
 	domain, err := scanAppDomain(tx.QueryRowContext(ctx, `
-SELECT hostname, tenant_id, app_id, status, verification_txt_name, verification_txt_value, route_target, last_message, last_checked_at, verified_at, created_at, updated_at
+SELECT hostname, tenant_id, app_id, status, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, tls_last_message, last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at
 FROM fugue_app_domains
 WHERE lower(hostname) = lower($1)
 FOR UPDATE
@@ -208,19 +259,26 @@ LIMIT 1
 
 func scanAppDomain(scanner sqlScanner) (model.AppDomain, error) {
 	var domain model.AppDomain
+	var tlsStatus sql.NullString
 	var lastCheckedAt sql.NullTime
 	var verifiedAt sql.NullTime
+	var tlsLastCheckedAt sql.NullTime
+	var tlsReadyAt sql.NullTime
 	if err := scanner.Scan(
 		&domain.Hostname,
 		&domain.TenantID,
 		&domain.AppID,
 		&domain.Status,
+		&tlsStatus,
 		&domain.VerificationTXTName,
 		&domain.VerificationTXTValue,
 		&domain.RouteTarget,
 		&domain.LastMessage,
+		&domain.TLSLastMessage,
 		&lastCheckedAt,
 		&verifiedAt,
+		&tlsLastCheckedAt,
+		&tlsReadyAt,
 		&domain.CreatedAt,
 		&domain.UpdatedAt,
 	); err != nil {
@@ -231,12 +289,27 @@ func scanAppDomain(scanner sqlScanner) (model.AppDomain, error) {
 	domain.VerificationTXTName = normalizeTXTRecordName(domain.VerificationTXTName)
 	domain.VerificationTXTValue = strings.TrimSpace(domain.VerificationTXTValue)
 	domain.Status = normalizeAppDomainStatus(domain.Status)
+	domain.TLSStatus = model.NormalizeAppDomainTLSStatus(tlsStatus.String)
 	domain.LastMessage = strings.TrimSpace(domain.LastMessage)
+	domain.TLSLastMessage = strings.TrimSpace(domain.TLSLastMessage)
+	if domain.Status == model.AppDomainStatusVerified && domain.TLSStatus == "" {
+		domain.TLSStatus = model.AppDomainTLSStatusPending
+	}
 	if lastCheckedAt.Valid {
-		domain.LastCheckedAt = &lastCheckedAt.Time
+		value := lastCheckedAt.Time.UTC()
+		domain.LastCheckedAt = &value
 	}
 	if verifiedAt.Valid {
-		domain.VerifiedAt = &verifiedAt.Time
+		value := verifiedAt.Time.UTC()
+		domain.VerifiedAt = &value
+	}
+	if tlsLastCheckedAt.Valid {
+		value := tlsLastCheckedAt.Time.UTC()
+		domain.TLSLastCheckedAt = &value
+	}
+	if tlsReadyAt.Valid {
+		value := tlsReadyAt.Time.UTC()
+		domain.TLSReadyAt = &value
 	}
 	return domain, nil
 }

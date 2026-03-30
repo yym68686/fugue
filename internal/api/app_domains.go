@@ -38,6 +38,12 @@ type appDomainAvailability struct {
 	Reason    string `json:"reason,omitempty"`
 }
 
+type edgeDomainTLSReportRequest struct {
+	Hostname       string `json:"hostname"`
+	TLSStatus      string `json:"tls_status"`
+	TLSLastMessage string `json:"tls_last_message,omitempty"`
+}
+
 func (s *Server) handleListAppDomains(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	app, allowed := s.loadAuthorizedApp(w, r, principal)
@@ -236,12 +242,7 @@ func (s *Server) handleDeleteAppDomain(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleEdgeTLSAsk(w http.ResponseWriter, r *http.Request) {
-	if strings.TrimSpace(s.edgeTLSAskToken) == "" {
-		http.NotFound(w, r)
-		return
-	}
-	if subtleConstantCompare(r.URL.Query().Get("token"), s.edgeTLSAskToken) == false {
-		http.Error(w, "forbidden", http.StatusForbidden)
+	if !s.authorizeEdgeToken(w, r) {
 		return
 	}
 	hostname := normalizeExternalAppDomain(r.URL.Query().Get("domain"))
@@ -283,6 +284,86 @@ func (s *Server) handleEdgeTLSAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+func (s *Server) handleEdgeDomains(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeEdgeToken(w, r) {
+		return
+	}
+	domains, err := s.store.ListVerifiedAppDomains()
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	type edgeDomain struct {
+		Hostname string `json:"hostname"`
+	}
+	filtered := make([]edgeDomain, 0, len(domains))
+	for _, domain := range domains {
+		if !s.managedEdgeCustomDomain(domain.Hostname) {
+			continue
+		}
+		filtered = append(filtered, edgeDomain{Hostname: domain.Hostname})
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"domains": filtered})
+}
+
+func (s *Server) handleEdgeDomainTLSReport(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeEdgeToken(w, r) {
+		return
+	}
+
+	var req edgeDomainTLSReportRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	hostname := normalizeExternalAppDomain(req.Hostname)
+	if hostname == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "hostname is required")
+		return
+	}
+	if !s.managedEdgeCustomDomain(hostname) {
+		httpx.WriteError(w, http.StatusBadRequest, "hostname is not a managed edge custom domain")
+		return
+	}
+	tlsStatus := model.NormalizeAppDomainTLSStatus(req.TLSStatus)
+	if tlsStatus == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "tls_status must be pending, ready, or error")
+		return
+	}
+
+	domain, err := s.store.GetAppDomain(hostname)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if domain.Status != model.AppDomainStatusVerified {
+		httpx.WriteError(w, http.StatusConflict, "domain is not verified")
+		return
+	}
+
+	now := time.Now().UTC()
+	domain.TLSStatus = tlsStatus
+	domain.TLSLastMessage = strings.TrimSpace(req.TLSLastMessage)
+	domain.TLSLastCheckedAt = &now
+	switch tlsStatus {
+	case model.AppDomainTLSStatusReady:
+		domain.TLSLastMessage = ""
+		if domain.TLSReadyAt == nil {
+			domain.TLSReadyAt = &now
+		}
+	default:
+		domain.TLSReadyAt = nil
+	}
+
+	domain, err = s.store.PutAppDomain(domain)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"domain": domain})
 }
 
 func (s *Server) inspectAppDomainAvailability(app model.App, raw string, allowPlatformRoot bool) (appDomainAvailability, *model.AppDomain, error) {
@@ -378,6 +459,7 @@ func (s *Server) evaluateAppDomainVerification(ctx context.Context, app model.Ap
 
 	now := time.Now().UTC()
 	updated := domain
+	wasVerified := updated.Status == model.AppDomainStatusVerified
 	if domain.LastCheckedAt != nil {
 		lastCheckedAt := *domain.LastCheckedAt
 		updated.LastCheckedAt = &lastCheckedAt
@@ -401,6 +483,12 @@ func (s *Server) evaluateAppDomainVerification(ctx context.Context, app model.Ap
 		updated.LastMessage = ""
 		if updated.VerifiedAt == nil {
 			updated.VerifiedAt = &now
+		}
+		if !wasVerified {
+			updated.TLSStatus = model.AppDomainTLSStatusPending
+			updated.TLSLastMessage = ""
+			updated.TLSLastCheckedAt = nil
+			updated.TLSReadyAt = nil
 		}
 	} else {
 		if updated.Status != model.AppDomainStatusVerified {
@@ -537,6 +625,25 @@ func defaultCustomDomainBaseDomain(appBaseDomain string) string {
 	return "dns." + base
 }
 
+func (s *Server) managedEdgeCustomDomain(hostname string) bool {
+	hostname = normalizeExternalAppDomain(hostname)
+	if hostname == "" {
+		return false
+	}
+	if s.isReservedAppHostname(hostname) {
+		return false
+	}
+	appBase := normalizeExternalAppDomain(s.appBaseDomain)
+	if appBase != "" && (hostname == appBase || strings.HasSuffix(hostname, "."+appBase)) {
+		return false
+	}
+	customBase := normalizeExternalAppDomain(s.customDomainBaseDomain)
+	if customBase != "" && (hostname == customBase || strings.HasSuffix(hostname, "."+customBase)) {
+		return false
+	}
+	return true
+}
+
 func ipListsIntersect(left, right []net.IPAddr) bool {
 	if len(left) == 0 || len(right) == 0 {
 		return false
@@ -551,6 +658,18 @@ func ipListsIntersect(left, right []net.IPAddr) bool {
 		}
 	}
 	return false
+}
+
+func (s *Server) authorizeEdgeToken(w http.ResponseWriter, r *http.Request) bool {
+	if strings.TrimSpace(s.edgeTLSAskToken) == "" {
+		http.NotFound(w, r)
+		return false
+	}
+	if !subtleConstantCompare(r.URL.Query().Get("token"), s.edgeTLSAskToken) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 func subtleConstantCompare(left, right string) bool {
