@@ -112,6 +112,7 @@ func (s *Server) handlePutAppDomain(w http.ResponseWriter, r *http.Request) {
 	}
 	if existing != nil {
 		if existing.Status == model.AppDomainStatusVerified {
+			availability.Current = true
 			httpx.WriteJSON(w, http.StatusOK, map[string]any{
 				"domain":          *existing,
 				"availability":    availability,
@@ -124,11 +125,7 @@ func (s *Server) handlePutAppDomain(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusBadGateway, err.Error())
 			return
 		}
-		if !verified {
-			httpx.WriteError(w, http.StatusBadRequest, domain.LastMessage)
-			return
-		}
-		availability.Current = true
+		availability.Current = verified
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{
 			"domain":          domain,
 			"availability":    availability,
@@ -152,17 +149,13 @@ func (s *Server) handlePutAppDomain(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	if !verified {
-		httpx.WriteError(w, http.StatusBadRequest, domain.LastMessage)
-		return
-	}
 	domain, err = s.store.PutAppDomain(domain)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
 	s.appendAudit(principal, "app.domain.put", "app", app.ID, app.TenantID, map[string]string{"hostname": domain.Hostname})
-	availability.Current = true
+	availability.Current = verified
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"domain":          domain,
 		"availability":    availability,

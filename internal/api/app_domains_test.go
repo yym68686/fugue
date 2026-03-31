@@ -95,7 +95,7 @@ func TestPutAppDomainVerifiesWithFlattenedTargetIPs(t *testing.T) {
 	}
 }
 
-func TestPutAppDomainRequiresCNAMEBeforeCreatingClaim(t *testing.T) {
+func TestPutAppDomainCreatesPendingClaimBeforeDNSIsConfigured(t *testing.T) {
 	t.Parallel()
 
 	s, server, apiKey, _, app, _ := setupAppDomainTestServer(t)
@@ -104,14 +104,33 @@ func TestPutAppDomainRequiresCNAMEBeforeCreatingClaim(t *testing.T) {
 	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/domains", apiKey, map[string]any{
 		"hostname": "www.example.com",
 	})
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadRequest, recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), "CNAME") || !strings.Contains(recorder.Body.String(), expectedTarget) {
-		t.Fatalf("expected CNAME guidance in response, got body=%s", recorder.Body.String())
+	var putResponse struct {
+		Domain       model.AppDomain       `json:"domain"`
+		Availability appDomainAvailability `json:"availability"`
 	}
-	if _, err := s.GetAppDomain("www.example.com"); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("expected unrouted hostname to remain unclaimed, got %v", err)
+	mustDecodeJSON(t, recorder, &putResponse)
+	if putResponse.Availability.Current {
+		t.Fatalf("expected pending hostname to stay non-current, got %+v", putResponse.Availability)
+	}
+	if putResponse.Domain.Status != model.AppDomainStatusPending {
+		t.Fatalf("expected pending domain status, got %+v", putResponse.Domain)
+	}
+	if putResponse.Domain.RouteTarget != expectedTarget {
+		t.Fatalf("expected route target %q, got %+v", expectedTarget, putResponse.Domain)
+	}
+	if !strings.Contains(putResponse.Domain.LastMessage, "CNAME") || !strings.Contains(putResponse.Domain.LastMessage, expectedTarget) {
+		t.Fatalf("expected CNAME guidance in pending domain message, got %+v", putResponse.Domain)
+	}
+
+	found, err := s.GetAppDomain("www.example.com")
+	if err != nil {
+		t.Fatalf("expected pending hostname to be claimed, got %v", err)
+	}
+	if found.Status != model.AppDomainStatusPending {
+		t.Fatalf("expected stored domain to stay pending, got %+v", found)
 	}
 }
 
