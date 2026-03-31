@@ -31,7 +31,9 @@ type Importer struct {
 }
 
 type GitHubImportRequest struct {
+	SourceType       string
 	RepoURL          string
+	RepoAuthToken    string
 	Branch           string
 	SourceDir        string
 	RegistryPushBase string
@@ -71,11 +73,11 @@ func NewImporter(workDir string, logger *log.Logger, builderPolicy BuilderPodPol
 	}
 }
 
-func (i *Importer) ImportPublicGitHubStaticSite(ctx context.Context, req GitHubImportRequest) (GitHubImportResult, error) {
+func (i *Importer) ImportGitHubStaticSite(ctx context.Context, req GitHubImportRequest) (GitHubImportResult, error) {
 	if strings.TrimSpace(req.RegistryPushBase) == "" {
 		return GitHubImportResult{}, fmt.Errorf("registry push base is empty")
 	}
-	repo, err := i.clonePublicGitHubRepo(ctx, req.RepoURL, req.Branch, "github-import-*")
+	repo, err := i.cloneGitHubRepo(ctx, req.RepoURL, req.RepoAuthToken, req.Branch, "github-import-*")
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
@@ -355,9 +357,23 @@ func shortCommit(sha string) string {
 }
 
 func runCombinedOutput(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
+	return runCombinedOutputWithEnv(ctx, dir, nil, name, args...)
+}
+
+func runCombinedOutputWithEnv(ctx context.Context, dir string, env map[string]string, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	if strings.TrimSpace(dir) != "" {
 		cmd.Dir = dir
+	}
+	if len(env) > 0 {
+		cmd.Env = append([]string{}, os.Environ()...)
+		for key, value := range env {
+			key = strings.TrimSpace(key)
+			if key == "" {
+				continue
+			}
+			cmd.Env = append(cmd.Env, key+"="+value)
+		}
 	}
 	return cmd.CombinedOutput()
 }

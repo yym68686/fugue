@@ -13,6 +13,7 @@ type rebuildAppRequest struct {
 	SourceDir       *string `json:"source_dir"`
 	DockerfilePath  *string `json:"dockerfile_path"`
 	BuildContextDir *string `json:"build_context_dir"`
+	RepoAuthToken   *string `json:"repo_auth_token"`
 }
 
 func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
@@ -81,13 +82,19 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 		err    error
 	)
 	switch strings.TrimSpace(app.Source.Type) {
-	case model.AppSourceTypeGitHubPublic:
+	case model.AppSourceTypeGitHubPublic, model.AppSourceTypeGitHubPrivate:
 		if strings.TrimSpace(app.Source.RepoURL) == "" {
 			httpx.WriteError(w, http.StatusBadRequest, "app source repo_url is missing")
 			return
 		}
+		repoAuthToken := strings.TrimSpace(app.Source.RepoAuthToken)
+		if req.RepoAuthToken != nil {
+			repoAuthToken = strings.TrimSpace(*req.RepoAuthToken)
+		}
 		source, err = buildQueuedGitHubSource(
 			app.Source.RepoURL,
+			app.Source.Type,
+			repoAuthToken,
 			branch,
 			sourceDir,
 			dockerfilePath,
@@ -129,7 +136,7 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	default:
-		httpx.WriteError(w, http.StatusBadRequest, "only github-public or upload apps can be rebuilt")
+		httpx.WriteError(w, http.StatusBadRequest, "only github-backed or upload apps can be rebuilt")
 		return
 	}
 

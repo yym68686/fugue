@@ -98,7 +98,12 @@ func (s *Service) resolveLatestGitHubCommit(ctx context.Context, source model.Ap
 	if resolver == nil {
 		return "", "", fmt.Errorf("github commit resolver is not configured")
 	}
-	return resolver(ctx, strings.TrimSpace(source.RepoURL), strings.TrimSpace(source.RepoBranch))
+	return resolver(
+		ctx,
+		strings.TrimSpace(source.RepoURL),
+		strings.TrimSpace(source.RepoAuthToken),
+		strings.TrimSpace(source.RepoBranch),
+	)
 }
 
 func trackedGitHubCommitForOperation(op model.Operation) string {
@@ -107,14 +112,14 @@ func trackedGitHubCommitForOperation(op model.Operation) string {
 	default:
 		return ""
 	}
-	if op.DesiredSource == nil || strings.TrimSpace(op.DesiredSource.Type) != model.AppSourceTypeGitHubPublic {
+	if op.DesiredSource == nil || !model.IsGitHubAppSourceType(op.DesiredSource.Type) {
 		return ""
 	}
 	return strings.TrimSpace(op.DesiredSource.CommitSHA)
 }
 
 func queueableGitHubSource(source model.AppSource, branch string, commit string) (model.AppSource, error) {
-	if strings.TrimSpace(source.Type) != model.AppSourceTypeGitHubPublic {
+	if !model.IsGitHubAppSourceType(source.Type) {
 		return model.AppSource{}, fmt.Errorf("unsupported source type %q", source.Type)
 	}
 	if strings.TrimSpace(source.RepoURL) == "" {
@@ -127,9 +132,10 @@ func queueableGitHubSource(source model.AppSource, branch string, commit string)
 	}
 
 	return model.AppSource{
-		Type:             model.AppSourceTypeGitHubPublic,
+		Type:             model.ResolveGitHubAppSourceType(source.Type, strings.TrimSpace(source.RepoAuthToken) != ""),
 		RepoURL:          strings.TrimSpace(source.RepoURL),
 		RepoBranch:       strings.TrimSpace(branch),
+		RepoAuthToken:    strings.TrimSpace(source.RepoAuthToken),
 		SourceDir:        strings.TrimSpace(source.SourceDir),
 		BuildStrategy:    buildStrategy,
 		CommitSHA:        strings.TrimSpace(commit),
@@ -168,7 +174,7 @@ func shouldAutoSyncGitHubApp(app model.App) bool {
 	if app.Source == nil {
 		return false
 	}
-	if strings.TrimSpace(app.Source.Type) != model.AppSourceTypeGitHubPublic {
+	if !model.IsGitHubAppSourceType(app.Source.Type) {
 		return false
 	}
 	if strings.TrimSpace(app.Source.RepoURL) == "" {

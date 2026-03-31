@@ -22,8 +22,9 @@ var fugueManifestCandidates = []string{
 }
 
 type GitHubFugueManifestInspectRequest struct {
-	RepoURL string
-	Branch  string
+	RepoURL       string
+	RepoAuthToken string
+	Branch        string
 }
 
 type GitHubFugueManifest struct {
@@ -70,8 +71,8 @@ type fugueBuildSpec struct {
 	BuildContextDir string `yaml:"build_context_dir"`
 }
 
-func (i *Importer) InspectPublicGitHubFugueManifest(ctx context.Context, req GitHubFugueManifestInspectRequest) (GitHubFugueManifest, error) {
-	repo, err := i.clonePublicGitHubRepo(ctx, req.RepoURL, req.Branch, "github-fugue-manifest-inspect-*")
+func (i *Importer) InspectGitHubFugueManifest(ctx context.Context, req GitHubFugueManifestInspectRequest) (GitHubFugueManifest, error) {
+	repo, err := i.cloneGitHubRepo(ctx, req.RepoURL, req.RepoAuthToken, req.Branch, "github-fugue-manifest-inspect-*")
 	if err != nil {
 		return GitHubFugueManifest{}, err
 	}

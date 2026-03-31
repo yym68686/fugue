@@ -55,7 +55,7 @@ func TestSyncGitHubAppsQueuesImportWhenCommitChanges(t *testing.T) {
 		Store:  stateStore,
 		Config: config.ControllerConfig{GitHubSyncTimeout: time.Second},
 		Logger: log.New(io.Discard, "", 0),
-		latestGitHubCommit: func(context.Context, string, string) (string, string, error) {
+		latestGitHubCommit: func(context.Context, string, string, string) (string, string, error) {
 			return "newcommit", "main", nil
 		},
 	}
@@ -149,7 +149,7 @@ func TestSyncGitHubAppsSkipsAppsWithInFlightOperations(t *testing.T) {
 		Store:  stateStore,
 		Config: config.ControllerConfig{GitHubSyncTimeout: time.Second},
 		Logger: log.New(io.Discard, "", 0),
-		latestGitHubCommit: func(context.Context, string, string) (string, string, error) {
+		latestGitHubCommit: func(context.Context, string, string, string) (string, string, error) {
 			return "newcommit", "main", nil
 		},
 	}
@@ -232,7 +232,7 @@ func TestSyncGitHubAppsSkipsCommitThatAlreadyFailed(t *testing.T) {
 		Store:  stateStore,
 		Config: config.ControllerConfig{GitHubSyncTimeout: time.Second},
 		Logger: log.New(io.Discard, "", 0),
-		latestGitHubCommit: func(context.Context, string, string) (string, string, error) {
+		latestGitHubCommit: func(context.Context, string, string, string) (string, string, error) {
 			return "newcommit", "main", nil
 		},
 	}

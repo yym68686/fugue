@@ -67,6 +67,8 @@ func TestApplyManagedPostgresEnvironmentKeepsExternalDatabaseURL(t *testing.T) {
 func TestBuildQueuedGitHubSourcePreservesComposeMetadata(t *testing.T) {
 	source, err := buildQueuedGitHubSource(
 		"https://github.com/example/demo",
+		model.AppSourceTypeGitHubPublic,
+		"",
 		"main",
 		"",
 		"apps/api/Dockerfile",

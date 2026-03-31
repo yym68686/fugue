@@ -70,6 +70,8 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 
 		source, err := buildQueuedGitHubSource(
 			req.RepoURL,
+			req.RepoVisibility,
+			req.RepoAuthToken,
 			req.Branch,
 			service.SourceDir,
 			service.DockerfilePath,

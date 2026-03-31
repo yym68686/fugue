@@ -98,6 +98,34 @@ ensure_kubeconfig() {
   fi
 }
 
+cleanup_runner_artifacts() {
+  local active_bin active_externals runner_home work_dir
+  runner_home="$(getent passwd "${GITHUB_RUNNER_USER}" | cut -d: -f6)"
+  work_dir="${GITHUB_RUNNER_WORK_DIR:-${runner_home}/actions-runner-work}"
+  active_bin="$(readlink -f "${GITHUB_RUNNER_INSTALL_DIR}/bin" 2>/dev/null || true)"
+  active_externals="$(readlink -f "${GITHUB_RUNNER_INSTALL_DIR}/externals" 2>/dev/null || true)"
+
+  find "${GITHUB_RUNNER_INSTALL_DIR}" -maxdepth 1 -mindepth 1 -type d -name 'bin.*' 2>/dev/null | while read -r path; do
+    if [[ -n "${active_bin}" && "${path}" == "${active_bin}" ]]; then
+      continue
+    fi
+    rm -rf -- "${path}"
+  done
+
+  find "${GITHUB_RUNNER_INSTALL_DIR}" -maxdepth 1 -mindepth 1 -type d -name 'externals.*' 2>/dev/null | while read -r path; do
+    if [[ -n "${active_externals}" && "${path}" == "${active_externals}" ]]; then
+      continue
+    fi
+    rm -rf -- "${path}"
+  done
+
+  if [[ -d "${work_dir}/_update" ]]; then
+    rm -rf -- "${work_dir}/_update"
+    mkdir -p "${work_dir}/_update"
+    chown -R "${GITHUB_RUNNER_USER}:${GITHUB_RUNNER_USER}" "${work_dir}/_update"
+  fi
+}
+
 configure_runner() {
   local runner_url runner_home work_dir config_command
   runner_url="${GITHUB_RUNNER_URL:-https://github.com/${GITHUB_REPOSITORY}}"
@@ -158,6 +186,7 @@ main() {
   ensure_kubeconfig
   configure_runner
   install_service
+  cleanup_runner_artifacts
 
   log "runner installed"
   log "repository: ${GITHUB_REPOSITORY}"

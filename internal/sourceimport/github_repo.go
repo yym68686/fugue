@@ -2,6 +2,7 @@ package sourceimport
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,7 +21,51 @@ type clonedGitHubRepo struct {
 	DefaultAppName    string
 }
 
-func (i *Importer) clonePublicGitHubRepo(ctx context.Context, repoURL, branch, tempPrefix string) (clonedGitHubRepo, error) {
+func gitHubAuthConfigArgs(repoAuthToken string) []string {
+	repoAuthToken = strings.TrimSpace(repoAuthToken)
+	if repoAuthToken == "" {
+		return nil
+	}
+	header := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+repoAuthToken))
+	return []string{
+		"-c",
+		"http.https://github.com/.extraheader=" + header,
+	}
+}
+
+func gitCommandArgsWithGitHubAuth(repoAuthToken string, args ...string) []string {
+	return append(gitHubAuthConfigArgs(repoAuthToken), args...)
+}
+
+func gitCommandEnv() map[string]string {
+	return map[string]string{
+		"GIT_TERMINAL_PROMPT": "0",
+	}
+}
+
+func buildGitCloneInitContainers(repoURL, branch, commitSHA, repoAuthToken string) []map[string]any {
+	containers := []map[string]any{
+		{
+			"name":         "git-clone",
+			"image":        defaultGitCloneImage,
+			"command":      append([]string{"git"}, gitCommandArgsWithGitHubAuth(repoAuthToken, gitCloneArgs(repoURL, "/workspace/repo", branch)...)...),
+			"env":          []map[string]any{{"name": "GIT_TERMINAL_PROMPT", "value": "0"}},
+			"volumeMounts": []map[string]any{{"name": "workspace", "mountPath": "/workspace"}},
+		},
+	}
+	if strings.TrimSpace(commitSHA) == "" {
+		return containers
+	}
+	return append(containers, map[string]any{
+		"name":         "git-checkout",
+		"image":        defaultGitCloneImage,
+		"command":      []string{"git", "-C", "/workspace/repo", "checkout", strings.TrimSpace(commitSHA)},
+		"env":          []map[string]any{{"name": "GIT_TERMINAL_PROMPT", "value": "0"}},
+		"volumeMounts": []map[string]any{{"name": "workspace", "mountPath": "/workspace"}},
+	})
+}
+
+func (i *Importer) cloneGitHubRepo(ctx context.Context, repoURL, repoAuthToken, branch, tempPrefix string) (clonedGitHubRepo, error) {
 	owner, repo, err := parseGitHubRepoURL(repoURL)
 	if err != nil {
 		return clonedGitHubRepo{}, err
@@ -38,8 +83,8 @@ func (i *Importer) clonePublicGitHubRepo(ctx context.Context, repoURL, branch, t
 		return clonedGitHubRepo{}, fmt.Errorf("create import temp dir: %w", err)
 	}
 
-	args := gitCloneArgs(repoURL, repoDir, branch)
-	if output, err := runCombinedOutput(ctx, "", "git", args...); err != nil {
+	args := gitCommandArgsWithGitHubAuth(repoAuthToken, gitCloneArgs(repoURL, repoDir, branch)...)
+	if output, err := runCombinedOutputWithEnv(ctx, "", gitCommandEnv(), "git", args...); err != nil {
 		_ = os.RemoveAll(repoDir)
 		return clonedGitHubRepo{}, fmt.Errorf("git clone: %w: %s", err, strings.TrimSpace(string(output)))
 	}

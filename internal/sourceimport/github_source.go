@@ -9,7 +9,9 @@ import (
 )
 
 type GitHubSourceImportRequest struct {
+	SourceType            string
 	RepoURL               string
+	RepoAuthToken         string
 	Branch                string
 	SourceDir             string
 	DockerfilePath        string
@@ -29,16 +31,19 @@ type GitHubSourceImportOutput struct {
 	Source       model.AppSource
 }
 
-func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourceImportRequest) (GitHubSourceImportOutput, error) {
+func (i *Importer) ImportGitHubSource(ctx context.Context, req GitHubSourceImportRequest) (GitHubSourceImportOutput, error) {
 	buildStrategy := normalizeGitHubBuildStrategy(req.BuildStrategy)
 	if buildStrategy == "" {
 		buildStrategy = model.AppBuildStrategyAuto
 	}
+	sourceType := model.ResolveGitHubAppSourceType(req.SourceType, strings.TrimSpace(req.RepoAuthToken) != "")
 
 	switch buildStrategy {
 	case model.AppBuildStrategyAuto:
-		importResult, err := i.ImportPublicGitHubAuto(ctx, GitHubAutoImportRequest{
+		importResult, err := i.ImportGitHubAuto(ctx, GitHubAutoImportRequest{
+			SourceType:            sourceType,
 			RepoURL:               req.RepoURL,
+			RepoAuthToken:         req.RepoAuthToken,
 			Branch:                req.Branch,
 			SourceDir:             req.SourceDir,
 			DockerfilePath:        req.DockerfilePath,
@@ -56,9 +61,10 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 		return GitHubSourceImportOutput{
 			ImportResult: importResult,
 			Source: model.AppSource{
-				Type:              model.AppSourceTypeGitHubPublic,
+				Type:              sourceType,
 				RepoURL:           strings.TrimSpace(req.RepoURL),
 				RepoBranch:        importResult.Branch,
+				RepoAuthToken:     strings.TrimSpace(req.RepoAuthToken),
 				SourceDir:         importResult.SourceDir,
 				BuildStrategy:     importResult.BuildStrategy,
 				CommitSHA:         importResult.CommitSHA,
@@ -72,8 +78,10 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 			},
 		}, nil
 	case model.AppBuildStrategyStaticSite:
-		importResult, err := i.ImportPublicGitHubStaticSite(ctx, GitHubImportRequest{
+		importResult, err := i.ImportGitHubStaticSite(ctx, GitHubImportRequest{
+			SourceType:       sourceType,
 			RepoURL:          req.RepoURL,
+			RepoAuthToken:    req.RepoAuthToken,
 			Branch:           req.Branch,
 			SourceDir:        req.SourceDir,
 			RegistryPushBase: req.RegistryPushBase,
@@ -86,9 +94,10 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 		return GitHubSourceImportOutput{
 			ImportResult: importResult,
 			Source: model.AppSource{
-				Type:              model.AppSourceTypeGitHubPublic,
+				Type:              sourceType,
 				RepoURL:           strings.TrimSpace(req.RepoURL),
 				RepoBranch:        importResult.Branch,
+				RepoAuthToken:     strings.TrimSpace(req.RepoAuthToken),
 				SourceDir:         importResult.SourceDir,
 				BuildStrategy:     importResult.BuildStrategy,
 				CommitSHA:         importResult.CommitSHA,
@@ -100,8 +109,10 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 			},
 		}, nil
 	case model.AppBuildStrategyDockerfile:
-		importResult, err := i.ImportPublicGitHubDockerfileImage(ctx, GitHubDockerImportRequest{
+		importResult, err := i.ImportGitHubDockerfileImage(ctx, GitHubDockerImportRequest{
+			SourceType:            sourceType,
 			RepoURL:               req.RepoURL,
+			RepoAuthToken:         req.RepoAuthToken,
 			Branch:                req.Branch,
 			DockerfilePath:        req.DockerfilePath,
 			BuildContextDir:       req.BuildContextDir,
@@ -118,9 +129,10 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 		return GitHubSourceImportOutput{
 			ImportResult: importResult,
 			Source: model.AppSource{
-				Type:              model.AppSourceTypeGitHubPublic,
+				Type:              sourceType,
 				RepoURL:           strings.TrimSpace(req.RepoURL),
 				RepoBranch:        importResult.Branch,
+				RepoAuthToken:     strings.TrimSpace(req.RepoAuthToken),
 				BuildStrategy:     importResult.BuildStrategy,
 				CommitSHA:         importResult.CommitSHA,
 				CommitCommittedAt: importResult.CommitCommittedAt,
@@ -133,8 +145,10 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 			},
 		}, nil
 	case model.AppBuildStrategyBuildpacks:
-		importResult, err := i.ImportPublicGitHubBuildpacks(ctx, GitHubBuildpacksImportRequest{
+		importResult, err := i.ImportGitHubBuildpacks(ctx, GitHubBuildpacksImportRequest{
+			SourceType:            sourceType,
 			RepoURL:               req.RepoURL,
+			RepoAuthToken:         req.RepoAuthToken,
 			Branch:                req.Branch,
 			SourceDir:             req.SourceDir,
 			RegistryPushBase:      req.RegistryPushBase,
@@ -150,9 +164,10 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 		return GitHubSourceImportOutput{
 			ImportResult: importResult,
 			Source: model.AppSource{
-				Type:              model.AppSourceTypeGitHubPublic,
+				Type:              sourceType,
 				RepoURL:           strings.TrimSpace(req.RepoURL),
 				RepoBranch:        importResult.Branch,
+				RepoAuthToken:     strings.TrimSpace(req.RepoAuthToken),
 				SourceDir:         importResult.SourceDir,
 				BuildStrategy:     importResult.BuildStrategy,
 				CommitSHA:         importResult.CommitSHA,
@@ -164,8 +179,10 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 			},
 		}, nil
 	case model.AppBuildStrategyNixpacks:
-		importResult, err := i.ImportPublicGitHubNixpacks(ctx, GitHubNixpacksImportRequest{
+		importResult, err := i.ImportGitHubNixpacks(ctx, GitHubNixpacksImportRequest{
+			SourceType:            sourceType,
 			RepoURL:               req.RepoURL,
+			RepoAuthToken:         req.RepoAuthToken,
 			Branch:                req.Branch,
 			SourceDir:             req.SourceDir,
 			RegistryPushBase:      req.RegistryPushBase,
@@ -181,9 +198,10 @@ func (i *Importer) ImportPublicGitHubSource(ctx context.Context, req GitHubSourc
 		return GitHubSourceImportOutput{
 			ImportResult: importResult,
 			Source: model.AppSource{
-				Type:              model.AppSourceTypeGitHubPublic,
+				Type:              sourceType,
 				RepoURL:           strings.TrimSpace(req.RepoURL),
 				RepoBranch:        importResult.Branch,
+				RepoAuthToken:     strings.TrimSpace(req.RepoAuthToken),
 				SourceDir:         importResult.SourceDir,
 				BuildStrategy:     importResult.BuildStrategy,
 				CommitSHA:         importResult.CommitSHA,

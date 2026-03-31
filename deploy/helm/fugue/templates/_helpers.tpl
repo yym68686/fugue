@@ -49,6 +49,14 @@ app.kubernetes.io/component: {{ .component }}
 {{- printf "%s-topology-labeler" (include "fugue.fullname" .) -}}
 {{- end -}}
 
+{{- define "fugue.nodeJanitorName" -}}
+{{- printf "%s-node-janitor" (include "fugue.fullname" .) -}}
+{{- end -}}
+
+{{- define "fugue.registryJanitorName" -}}
+{{- printf "%s-registry-janitor" (include "fugue.fullname" .) -}}
+{{- end -}}
+
 {{- define "fugue.configSecretName" -}}
 {{- printf "%s-config" (include "fugue.fullname" .) -}}
 {{- end -}}

@@ -15,6 +15,7 @@ var ErrSourceTopologyNotFound = errors.New("source topology file not found")
 
 type GitHubComposeServiceEnvRequest struct {
 	RepoURL                string
+	RepoAuthToken          string
 	Branch                 string
 	ComposeService         string
 	AppHosts               map[string]string
@@ -32,11 +33,11 @@ type UploadComposeServiceEnvRequest struct {
 	ManagedPostgresByOwner map[string]model.AppPostgresSpec
 }
 
-func (i *Importer) SuggestPublicGitHubComposeServiceEnv(ctx context.Context, req GitHubComposeServiceEnvRequest) (map[string]string, error) {
+func (i *Importer) SuggestGitHubComposeServiceEnv(ctx context.Context, req GitHubComposeServiceEnvRequest) (map[string]string, error) {
 	if strings.TrimSpace(req.ComposeService) == "" {
 		return nil, nil
 	}
-	repo, err := i.clonePublicGitHubRepo(ctx, req.RepoURL, req.Branch, "github-compose-env-*")
+	repo, err := i.cloneGitHubRepo(ctx, req.RepoURL, req.RepoAuthToken, req.Branch, "github-compose-env-*")
 	if err != nil {
 		return nil, err
 	}

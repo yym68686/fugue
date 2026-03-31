@@ -185,9 +185,10 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if shouldInspectFugueManifestImport(req, buildStrategy) {
-		manifest, inspectErr := s.importer.InspectPublicGitHubFugueManifest(r.Context(), sourceimport.GitHubFugueManifestInspectRequest{
-			RepoURL: strings.TrimSpace(req.RepoURL),
-			Branch:  strings.TrimSpace(req.Branch),
+		manifest, inspectErr := s.importer.InspectGitHubFugueManifest(r.Context(), sourceimport.GitHubFugueManifestInspectRequest{
+			RepoURL:       strings.TrimSpace(req.RepoURL),
+			Branch:        strings.TrimSpace(req.Branch),
+			RepoAuthToken: strings.TrimSpace(req.RepoAuthToken),
 		})
 		switch {
 		case inspectErr == nil:
@@ -228,9 +229,10 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if shouldInspectComposeImport(req, buildStrategy) {
-		stack, inspectErr := s.importer.InspectPublicGitHubCompose(r.Context(), sourceimport.GitHubComposeInspectRequest{
-			RepoURL: strings.TrimSpace(req.RepoURL),
-			Branch:  strings.TrimSpace(req.Branch),
+		stack, inspectErr := s.importer.InspectGitHubCompose(r.Context(), sourceimport.GitHubComposeInspectRequest{
+			RepoURL:       strings.TrimSpace(req.RepoURL),
+			Branch:        strings.TrimSpace(req.Branch),
+			RepoAuthToken: strings.TrimSpace(req.RepoAuthToken),
 		})
 		switch {
 		case inspectErr == nil:
@@ -270,7 +272,18 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	source, err := buildQueuedGitHubSource(req.RepoURL, req.Branch, req.SourceDir, req.DockerfilePath, req.BuildContextDir, buildStrategy, "", "")
+	source, err := buildQueuedGitHubSource(
+		req.RepoURL,
+		req.RepoVisibility,
+		req.RepoAuthToken,
+		req.Branch,
+		req.SourceDir,
+		req.DockerfilePath,
+		req.BuildContextDir,
+		buildStrategy,
+		"",
+		"",
+	)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
@@ -411,7 +424,18 @@ func (s *Server) rollbackImportedApps(apps []model.App) error {
 	return errors.Join(errs...)
 }
 
-func buildQueuedGitHubSource(repoURL, branch, sourceDir, dockerfilePath, buildContextDir, buildStrategy, imageNameSuffix, composeService string) (model.AppSource, error) {
+func normalizeGitHubRepoVisibility(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "public", model.AppSourceTypeGitHubPublic:
+		return "public"
+	case "private", model.AppSourceTypeGitHubPrivate:
+		return "private"
+	default:
+		return ""
+	}
+}
+
+func buildQueuedGitHubSource(repoURL, repoVisibility, repoAuthToken, branch, sourceDir, dockerfilePath, buildContextDir, buildStrategy, imageNameSuffix, composeService string) (model.AppSource, error) {
 	buildStrategy = normalizeBuildStrategy(buildStrategy)
 	switch buildStrategy {
 	case model.AppBuildStrategyAuto, model.AppBuildStrategyStaticSite, model.AppBuildStrategyDockerfile, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks:
@@ -422,17 +446,34 @@ func buildQueuedGitHubSource(repoURL, branch, sourceDir, dockerfilePath, buildCo
 	if repoURL == "" {
 		return model.AppSource{}, fmt.Errorf("repo_url is required")
 	}
+	repoAuthToken = strings.TrimSpace(repoAuthToken)
+	normalizedVisibility := normalizeGitHubRepoVisibility(repoVisibility)
+	if normalizedVisibility == "" {
+		if repoAuthToken != "" {
+			normalizedVisibility = "private"
+		} else {
+			normalizedVisibility = "public"
+		}
+	}
+	if normalizedVisibility == "private" && repoAuthToken == "" {
+		return model.AppSource{}, fmt.Errorf("repo_auth_token is required for private GitHub repositories")
+	}
 
 	source := model.AppSource{
-		Type:            model.AppSourceTypeGitHubPublic,
+		Type:            model.ResolveGitHubAppSourceType("", repoAuthToken != ""),
 		RepoURL:         repoURL,
 		RepoBranch:      strings.TrimSpace(branch),
+		RepoAuthToken:   repoAuthToken,
 		SourceDir:       strings.TrimSpace(sourceDir),
 		BuildStrategy:   buildStrategy,
 		DockerfilePath:  strings.TrimSpace(dockerfilePath),
 		BuildContextDir: strings.TrimSpace(buildContextDir),
 		ImageNameSuffix: strings.TrimSpace(imageNameSuffix),
 		ComposeService:  strings.TrimSpace(composeService),
+	}
+	if normalizedVisibility == "public" {
+		source.Type = model.AppSourceTypeGitHubPublic
+		source.RepoAuthToken = ""
 	}
 	switch buildStrategy {
 	case model.AppBuildStrategyStaticSite, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks:

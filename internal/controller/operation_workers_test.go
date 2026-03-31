@@ -21,7 +21,7 @@ type blockingImporter struct {
 	release chan struct{}
 }
 
-func (i *blockingImporter) ImportPublicGitHubSource(ctx context.Context, req sourceimport.GitHubSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error) {
+func (i *blockingImporter) ImportGitHubSource(ctx context.Context, req sourceimport.GitHubSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error) {
 	select {
 	case <-i.started:
 	default:
@@ -54,7 +54,7 @@ func (i *blockingImporter) ImportUploadedArchiveSource(context.Context, sourceim
 	return sourceimport.GitHubSourceImportOutput{}, fmt.Errorf("unexpected upload import")
 }
 
-func (i *blockingImporter) SuggestPublicGitHubComposeServiceEnv(context.Context, sourceimport.GitHubComposeServiceEnvRequest) (map[string]string, error) {
+func (i *blockingImporter) SuggestGitHubComposeServiceEnv(context.Context, sourceimport.GitHubComposeServiceEnvRequest) (map[string]string, error) {
 	return nil, nil
 }
 

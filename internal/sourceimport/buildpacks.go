@@ -17,7 +17,9 @@ const (
 )
 
 type GitHubBuildpacksImportRequest struct {
+	SourceType            string
 	RepoURL               string
+	RepoAuthToken         string
 	Branch                string
 	SourceDir             string
 	RegistryPushBase      string
@@ -30,6 +32,7 @@ type GitHubBuildpacksImportRequest struct {
 
 type buildpacksBuildRequest struct {
 	RepoURL               string
+	RepoAuthToken         string
 	Branch                string
 	CommitSHA             string
 	SourceLabel           string
@@ -43,20 +46,20 @@ type buildpacksBuildRequest struct {
 	Placement             builderJobPlacement
 }
 
-func (i *Importer) ImportPublicGitHubBuildpacks(ctx context.Context, req GitHubBuildpacksImportRequest) (GitHubImportResult, error) {
+func (i *Importer) ImportGitHubBuildpacks(ctx context.Context, req GitHubBuildpacksImportRequest) (GitHubImportResult, error) {
 	if strings.TrimSpace(req.RegistryPushBase) == "" {
 		return GitHubImportResult{}, fmt.Errorf("registry push base is empty")
 	}
-	repo, err := i.clonePublicGitHubRepo(ctx, req.RepoURL, req.Branch, "github-buildpacks-import-*")
+	repo, err := i.cloneGitHubRepo(ctx, req.RepoURL, req.RepoAuthToken, req.Branch, "github-buildpacks-import-*")
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
 	defer releaseClonedRepo(repo)
 
-	return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
+	return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
 }
 
-func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, sourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
+func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, repoAuthToken, sourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
 	normalizedSourceDir, err := normalizeRepoSourceDir(repo.RepoDir, sourceDir)
 	if err != nil {
 		return GitHubImportResult{}, err
@@ -67,6 +70,7 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
 	if err := buildAndPushBuildpacksImage(ctx, buildpacksBuildRequest{
 		RepoURL:               repoURL,
+		RepoAuthToken:         repoAuthToken,
 		Branch:                repo.Branch,
 		CommitSHA:             repo.CommitSHA,
 		SourceDir:             normalizedSourceDir,
@@ -155,21 +159,7 @@ func buildBuildpacksJobObject(namespace, jobName string, req buildpacksBuildRequ
 	if strings.TrimSpace(req.ArchiveDownloadURL) != "" {
 		initContainers = buildArchiveDownloadInitContainers(req.ArchiveDownloadURL)
 	} else {
-		cloneArgs := gitCloneArgs(req.RepoURL, "/workspace/repo", req.Branch)
-		initContainers = []map[string]any{
-			{
-				"name":         "git-clone",
-				"image":        defaultGitCloneImage,
-				"command":      append([]string{"git"}, cloneArgs...),
-				"volumeMounts": []map[string]any{{"name": "workspace", "mountPath": "/workspace"}},
-			},
-			{
-				"name":         "git-checkout",
-				"image":        defaultGitCloneImage,
-				"command":      []string{"git", "-C", "/workspace/repo", "checkout", strings.TrimSpace(req.CommitSHA)},
-				"volumeMounts": []map[string]any{{"name": "workspace", "mountPath": "/workspace"}},
-			},
-		}
+		initContainers = buildGitCloneInitContainers(req.RepoURL, req.Branch, req.CommitSHA, req.RepoAuthToken)
 	}
 	jobObject := map[string]any{
 		"apiVersion": "batch/v1",

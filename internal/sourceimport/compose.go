@@ -30,8 +30,9 @@ const (
 )
 
 type GitHubComposeInspectRequest struct {
-	RepoURL string
-	Branch  string
+	RepoURL       string
+	RepoAuthToken string
+	Branch        string
 }
 
 type GitHubComposeStack struct {
@@ -82,8 +83,8 @@ type composePortSpec struct {
 	Published int `yaml:"published"`
 }
 
-func (i *Importer) InspectPublicGitHubCompose(ctx context.Context, req GitHubComposeInspectRequest) (GitHubComposeStack, error) {
-	repo, err := i.clonePublicGitHubRepo(ctx, req.RepoURL, req.Branch, "github-compose-inspect-*")
+func (i *Importer) InspectGitHubCompose(ctx context.Context, req GitHubComposeInspectRequest) (GitHubComposeStack, error) {
+	repo, err := i.cloneGitHubRepo(ctx, req.RepoURL, req.RepoAuthToken, req.Branch, "github-compose-inspect-*")
 	if err != nil {
 		return GitHubComposeStack{}, err
 	}

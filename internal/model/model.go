@@ -19,8 +19,9 @@ const (
 	MachineConnectionModeAgent   = "agent"
 	MachineConnectionModeCluster = "cluster"
 
-	AppSourceTypeGitHubPublic = "github-public"
-	AppSourceTypeUpload       = "upload"
+	AppSourceTypeGitHubPublic  = "github-public"
+	AppSourceTypeGitHubPrivate = "github-private"
+	AppSourceTypeUpload        = "upload"
 
 	AppBuildStrategyAuto       = "auto"
 	AppBuildStrategyStaticSite = "static-site"
@@ -79,6 +80,31 @@ const (
 	DefaultAppWorkspaceMountPath = "/workspace"
 	AppWorkspaceInternalDirName  = ".fugue-workspace-state"
 )
+
+func NormalizeGitHubAppSourceType(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case AppSourceTypeGitHubPublic:
+		return AppSourceTypeGitHubPublic
+	case AppSourceTypeGitHubPrivate:
+		return AppSourceTypeGitHubPrivate
+	default:
+		return ""
+	}
+}
+
+func IsGitHubAppSourceType(raw string) bool {
+	return NormalizeGitHubAppSourceType(raw) != ""
+}
+
+func ResolveGitHubAppSourceType(raw string, hasRepoAuth bool) string {
+	if normalized := NormalizeGitHubAppSourceType(raw); normalized != "" {
+		return normalized
+	}
+	if hasRepoAuth {
+		return AppSourceTypeGitHubPrivate
+	}
+	return AppSourceTypeGitHubPublic
+}
 
 type Tenant struct {
 	ID        string    `json:"id"`
@@ -267,6 +293,7 @@ type AppSource struct {
 	Type              string `json:"type"`
 	RepoURL           string `json:"repo_url,omitempty"`
 	RepoBranch        string `json:"repo_branch,omitempty"`
+	RepoAuthToken     string `json:"repo_auth_token,omitempty"`
 	UploadID          string `json:"upload_id,omitempty"`
 	UploadFilename    string `json:"upload_filename,omitempty"`
 	ArchiveSHA256     string `json:"archive_sha256,omitempty"`

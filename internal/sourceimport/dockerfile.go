@@ -20,7 +20,9 @@ const (
 )
 
 type GitHubDockerImportRequest struct {
+	SourceType            string
 	RepoURL               string
+	RepoAuthToken         string
 	Branch                string
 	DockerfilePath        string
 	BuildContextDir       string
@@ -32,21 +34,22 @@ type GitHubDockerImportRequest struct {
 	Stateful              bool
 }
 
-func (i *Importer) ImportPublicGitHubDockerfileImage(ctx context.Context, req GitHubDockerImportRequest) (GitHubImportResult, error) {
+func (i *Importer) ImportGitHubDockerfileImage(ctx context.Context, req GitHubDockerImportRequest) (GitHubImportResult, error) {
 	if strings.TrimSpace(req.RegistryPushBase) == "" {
 		return GitHubImportResult{}, fmt.Errorf("registry push base is empty")
 	}
-	repo, err := i.clonePublicGitHubRepo(ctx, req.RepoURL, req.Branch, "github-docker-import-*")
+	repo, err := i.cloneGitHubRepo(ctx, req.RepoURL, req.RepoAuthToken, req.Branch, "github-docker-import-*")
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
 	defer releaseClonedRepo(repo)
 
-	return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, req.DockerfilePath, req.BuildContextDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
+	return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, req.DockerfilePath, req.BuildContextDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
 }
 
 type dockerfileBuildRequest struct {
 	RepoURL               string
+	RepoAuthToken         string
 	Branch                string
 	CommitSHA             string
 	SourceLabel           string
@@ -103,7 +106,7 @@ func detectDockerBuildInputs(repoDir, dockerfilePath, buildContextDir string) (s
 	return relDockerfile, relContext, nil
 }
 
-func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, dockerfilePath, buildContextDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
+func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, repoAuthToken, dockerfilePath, buildContextDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
 	dockerfilePath, buildContextDir, err := detectDockerBuildInputs(repo.RepoDir, dockerfilePath, buildContextDir)
 	if err != nil {
 		return GitHubImportResult{}, err
@@ -117,6 +120,7 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
 	if err := buildAndPushDockerfileImage(ctx, dockerfileBuildRequest{
 		RepoURL:               repoURL,
+		RepoAuthToken:         repoAuthToken,
 		Branch:                repo.Branch,
 		CommitSHA:             repo.CommitSHA,
 		DockerfilePath:        dockerfilePath,
@@ -262,73 +266,16 @@ func buildJobName(req dockerfileBuildRequest) string {
 }
 
 func buildKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest) (map[string]any, error) {
-	if strings.TrimSpace(req.ArchiveDownloadURL) != "" {
-		return buildArchiveKanikoJobObject(namespace, jobName, req)
-	}
-	contextURL, err := buildGitContextURL(req.RepoURL, req.Branch, req.CommitSHA)
-	if err != nil {
-		return nil, err
-	}
-	kanikoDockerfilePath, err := kanikoDockerfilePath(req.DockerfilePath, req.BuildContextDir)
-	if err != nil {
-		return nil, err
-	}
-
 	args := kanikoDestinationArgs(req.ImageRef,
-		"--context="+contextURL,
-		"--dockerfile="+kanikoDockerfilePath,
-		"--git=branch="+req.Branch,
-		"--git=single-branch=true",
-		"--git=recurse-submodules=true",
-	)
-	if strings.TrimSpace(req.BuildContextDir) != "" && strings.TrimSpace(req.BuildContextDir) != "." {
-		args = append(args, "--context-sub-path="+req.BuildContextDir)
-	}
-
-	jobObject := map[string]any{
-		"apiVersion": "batch/v1",
-		"kind":       "Job",
-		"metadata": map[string]any{
-			"name":      jobName,
-			"namespace": namespace,
-			"labels": map[string]string{
-				"app.kubernetes.io/managed-by": "fugue",
-				"app.kubernetes.io/component":  "builder",
-			},
-		},
-		"spec": map[string]any{
-			"backoffLimit":            0,
-			"ttlSecondsAfterFinished": 3600,
-			"template": map[string]any{
-				"spec": map[string]any{
-					"restartPolicy": "Never",
-					"containers": []map[string]any{
-						{
-							"name":  "kaniko",
-							"image": defaultKanikoImage,
-							"args":  args,
-						},
-					},
-				},
-			},
-		},
-	}
-	metadata := jobObject["metadata"].(map[string]any)
-	metadata["labels"] = mergeBuilderLabels(metadata["labels"].(map[string]string), req.JobLabels)
-	podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
-	applyBuilderPodPolicy(podSpec, req.PodPolicy, req.WorkloadProfile)
-	applyBuilderPlacement(podSpec, req.Placement)
-	return jobObject, nil
-}
-
-func buildArchiveKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest) (map[string]any, error) {
-	args := kanikoDestinationArgs(
-		req.ImageRef,
 		"--context=dir:///workspace/repo",
 		"--dockerfile=/workspace/repo/"+filepath.ToSlash(strings.TrimSpace(req.DockerfilePath)),
 	)
 	if strings.TrimSpace(req.BuildContextDir) != "" && strings.TrimSpace(req.BuildContextDir) != "." {
-		args = append(args, "--context-sub-path="+filepath.ToSlash(strings.TrimSpace(req.BuildContextDir)))
+		args = append(args, "--context-sub-path="+req.BuildContextDir)
+	}
+	initContainers := buildArchiveDownloadInitContainers(req.ArchiveDownloadURL)
+	if strings.TrimSpace(req.ArchiveDownloadURL) == "" {
+		initContainers = buildGitCloneInitContainers(req.RepoURL, req.Branch, req.CommitSHA, req.RepoAuthToken)
 	}
 
 	jobObject := map[string]any{
@@ -354,7 +301,7 @@ func buildArchiveKanikoJobObject(namespace, jobName string, req dockerfileBuildR
 							"emptyDir": map[string]any{},
 						},
 					},
-					"initContainers": buildArchiveDownloadInitContainers(req.ArchiveDownloadURL),
+					"initContainers": initContainers,
 					"containers": []map[string]any{
 						{
 							"name":  "kaniko",
@@ -375,6 +322,13 @@ func buildArchiveKanikoJobObject(namespace, jobName string, req dockerfileBuildR
 	applyBuilderPodPolicy(podSpec, req.PodPolicy, req.WorkloadProfile)
 	applyBuilderPlacement(podSpec, req.Placement)
 	return jobObject, nil
+}
+
+func buildArchiveKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest) (map[string]any, error) {
+	if strings.TrimSpace(req.ArchiveDownloadURL) == "" {
+		return nil, fmt.Errorf("archive download url is empty")
+	}
+	return buildKanikoJobObject(namespace, jobName, req)
 }
 
 func kanikoDockerfilePath(dockerfilePath, buildContextDir string) (string, error) {

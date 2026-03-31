@@ -1,0 +1,222 @@
+{{- $nodeJanitor := (get .Values "nodeJanitor" | default (dict)) -}}
+{{- $nodeJanitorEnabled := true -}}
+{{- if hasKey $nodeJanitor "enabled" -}}
+{{- $nodeJanitorEnabled = (get $nodeJanitor "enabled") -}}
+{{- end -}}
+{{- $nodeJanitorIntervalSeconds := 21600 -}}
+{{- if hasKey $nodeJanitor "intervalSeconds" -}}
+{{- $nodeJanitorIntervalSeconds = (get $nodeJanitor "intervalSeconds") -}}
+{{- end -}}
+{{- $nodeJanitorNodeSelector := dict -}}
+{{- if hasKey $nodeJanitor "nodeSelector" -}}
+{{- $nodeJanitorNodeSelector = (get $nodeJanitor "nodeSelector" | default (dict)) -}}
+{{- end -}}
+{{- $nodeJanitorTolerations := list (dict "operator" "Exists") -}}
+{{- if hasKey $nodeJanitor "tolerations" -}}
+{{- $nodeJanitorTolerations = (get $nodeJanitor "tolerations") -}}
+{{- end -}}
+{{- $nodeJanitorResources := dict -}}
+{{- if hasKey $nodeJanitor "resources" -}}
+{{- $nodeJanitorResources = (get $nodeJanitor "resources" | default (dict)) -}}
+{{- end -}}
+{{- $imagePruneEnabled := true -}}
+{{- if hasKey $nodeJanitor "imagePrune" -}}
+  {{- $imagePrune := (get $nodeJanitor "imagePrune" | default (dict)) -}}
+  {{- if hasKey $imagePrune "enabled" -}}
+    {{- $imagePruneEnabled = (get $imagePrune "enabled") -}}
+  {{- end -}}
+{{- end -}}
+{{- $runnerCleanupEnabled := true -}}
+{{- $runnerCleanupStaleMinAgeHours := 24 -}}
+{{- if hasKey $nodeJanitor "runnerCleanup" -}}
+  {{- $runnerCleanup := (get $nodeJanitor "runnerCleanup" | default (dict)) -}}
+  {{- if hasKey $runnerCleanup "enabled" -}}
+    {{- $runnerCleanupEnabled = (get $runnerCleanup "enabled") -}}
+  {{- end -}}
+  {{- if hasKey $runnerCleanup "staleMinAgeHours" -}}
+    {{- $runnerCleanupStaleMinAgeHours = (get $runnerCleanup "staleMinAgeHours") -}}
+  {{- end -}}
+{{- end -}}
+{{- $legacyTenantDataEnabled := true -}}
+{{- $legacyTenantDataStaleMinAgeHours := 168 -}}
+{{- if hasKey $nodeJanitor "legacyTenantDataCleanup" -}}
+  {{- $legacyTenantData := (get $nodeJanitor "legacyTenantDataCleanup" | default (dict)) -}}
+  {{- if hasKey $legacyTenantData "enabled" -}}
+    {{- $legacyTenantDataEnabled = (get $legacyTenantData "enabled") -}}
+  {{- end -}}
+  {{- if hasKey $legacyTenantData "staleMinAgeHours" -}}
+    {{- $legacyTenantDataStaleMinAgeHours = (get $legacyTenantData "staleMinAgeHours") -}}
+  {{- end -}}
+{{- end -}}
+{{- if $nodeJanitorEnabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "fugue.nodeJanitorName" . }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "node-janitor") | nindent 4 }}
+spec:
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "node-janitor") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "node-janitor") | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config-secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- if .Values.rbac.create }}
+      serviceAccountName: {{ include "fugue.serviceAccountName" . }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: node-janitor
+          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+
+              interval_seconds="{{ $nodeJanitorIntervalSeconds }}"
+              image_prune_enabled="{{ $imagePruneEnabled }}"
+              runner_cleanup_enabled="{{ $runnerCleanupEnabled }}"
+              runner_cleanup_stale_hours="{{ $runnerCleanupStaleMinAgeHours }}"
+              legacy_tenant_data_enabled="{{ $legacyTenantDataEnabled }}"
+              legacy_tenant_data_stale_hours="{{ $legacyTenantDataStaleMinAgeHours }}"
+              host_root="/host"
+              tenant_data_root="${host_root}/var/lib/fugue/tenant-data"
+              runner_root="${host_root}/opt/github-runner"
+              runner_work_root="${host_root}/home/github-runner/actions-runner-work"
+
+              log() {
+                printf '[node-janitor] %s\n' "$*"
+              }
+
+              collect_live_hostpaths() {
+                kubectl get deployments --all-namespaces \
+                  -o jsonpath='{range .items[*]}{range .spec.template.spec.volumes[?(@.hostPath)]}{.hostPath.path}{"\n"}{end}{end}' \
+                  2>/dev/null | awk 'NF > 0' | sort -u
+              }
+
+              prune_host_container_images() {
+                if [[ "${image_prune_enabled}" != "true" ]]; then
+                  return
+                fi
+                if [[ ! -x "${host_root}/usr/local/bin/k3s" ]]; then
+                  log "skip image prune on ${NODE_NAME}: host k3s binary not found"
+                  return
+                fi
+                if chroot "${host_root}" /bin/sh -lc 'k3s crictl rmi --prune >/tmp/fugue-node-janitor-image-prune.log 2>&1'; then
+                  log "unused container images pruned on ${NODE_NAME}"
+                else
+                  status=$?
+                  log "image prune on ${NODE_NAME} returned ${status}; continuing"
+                fi
+              }
+
+              cleanup_runner_artifacts() {
+                local active_bin=""
+                local active_externals=""
+                if [[ "${runner_cleanup_enabled}" != "true" ]]; then
+                  return
+                fi
+                if [[ ! -d "${runner_root}" ]]; then
+                  return
+                fi
+                active_bin="$(readlink -f "${runner_root}/bin" 2>/dev/null || true)"
+                active_externals="$(readlink -f "${runner_root}/externals" 2>/dev/null || true)"
+
+                find "${runner_root}" -maxdepth 1 -mindepth 1 -type d -name 'bin.*' -mmin "+$(( runner_cleanup_stale_hours * 60 ))" 2>/dev/null | while read -r path; do
+                  if [[ -n "${active_bin}" && "${path}" == "${active_bin}" ]]; then
+                    continue
+                  fi
+                  rm -rf -- "${path}"
+                  log "removed stale runner directory ${path#${host_root}}"
+                done
+
+                find "${runner_root}" -maxdepth 1 -mindepth 1 -type d -name 'externals.*' -mmin "+$(( runner_cleanup_stale_hours * 60 ))" 2>/dev/null | while read -r path; do
+                  if [[ -n "${active_externals}" && "${path}" == "${active_externals}" ]]; then
+                    continue
+                  fi
+                  rm -rf -- "${path}"
+                  log "removed stale runner directory ${path#${host_root}}"
+                done
+
+                if [[ -d "${runner_work_root}/_update" ]] && find "${runner_work_root}/_update" -mindepth 0 -mmin "+$(( runner_cleanup_stale_hours * 60 ))" | grep -q .; then
+                  rm -rf -- "${runner_work_root}/_update"
+                  mkdir -p "${runner_work_root}/_update"
+                  chroot "${host_root}" /bin/sh -lc 'chown -R github-runner:github-runner /home/github-runner/actions-runner-work/_update >/dev/null 2>&1 || true'
+                  log "removed stale runner update cache /home/github-runner/actions-runner-work/_update"
+                fi
+              }
+
+              cleanup_legacy_tenant_data() {
+                local live_paths_file
+                if [[ "${legacy_tenant_data_enabled}" != "true" ]]; then
+                  return
+                fi
+                if [[ ! -d "${tenant_data_root}" ]]; then
+                  return
+                fi
+                live_paths_file="$(mktemp)"
+                collect_live_hostpaths | grep '^/var/lib/fugue/tenant-data/' >"${live_paths_file}" || true
+
+                find "${tenant_data_root}" -type d \( -path '*/postgres' -o -path '*/workspace' \) -mmin "+$(( legacy_tenant_data_stale_hours * 60 ))" 2>/dev/null | while read -r path; do
+                  host_path="${path#${host_root}}"
+                  if grep -Fqx -- "${host_path}" "${live_paths_file}"; then
+                    continue
+                  fi
+                  rm -rf -- "${path}"
+                  log "removed stale tenant-data directory ${host_path}"
+                done
+
+                find "${tenant_data_root}" -depth -type d -empty -delete 2>/dev/null || true
+                rm -f "${live_paths_file}"
+              }
+
+              while true; do
+                prune_host_container_images
+                cleanup_runner_artifacts
+                cleanup_legacy_tenant_data
+                sleep "${interval_seconds}"
+              done
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            {{- toYaml $nodeJanitorResources | nindent 12 }}
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+      {{- with $nodeJanitorNodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $nodeJanitorTolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

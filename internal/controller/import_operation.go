@@ -34,12 +34,14 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	var err error
 	var output sourceimport.GitHubSourceImportOutput
 	switch strings.TrimSpace(op.DesiredSource.Type) {
-	case model.AppSourceTypeGitHubPublic:
+	case model.AppSourceTypeGitHubPublic, model.AppSourceTypeGitHubPrivate:
 		if strings.TrimSpace(op.DesiredSource.RepoURL) == "" {
 			return fmt.Errorf("import operation %s missing repo_url", op.ID)
 		}
-		output, err = s.importer.ImportPublicGitHubSource(importCtx, sourceimport.GitHubSourceImportRequest{
+		output, err = s.importer.ImportGitHubSource(importCtx, sourceimport.GitHubSourceImportRequest{
+			SourceType:       strings.TrimSpace(op.DesiredSource.Type),
 			RepoURL:          strings.TrimSpace(op.DesiredSource.RepoURL),
+			RepoAuthToken:    strings.TrimSpace(op.DesiredSource.RepoAuthToken),
 			Branch:           strings.TrimSpace(op.DesiredSource.RepoBranch),
 			SourceDir:        strings.TrimSpace(op.DesiredSource.SourceDir),
 			DockerfilePath:   strings.TrimSpace(op.DesiredSource.DockerfilePath),
@@ -87,7 +89,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 			Stateful:           stateful,
 		})
 	default:
-		return fmt.Errorf("import operation %s only supports github-public or upload source", op.ID)
+		return fmt.Errorf("import operation %s only supports github-backed or upload source", op.ID)
 	}
 	if err != nil {
 		return err
@@ -235,9 +237,10 @@ func (s *Service) suggestComposeServiceEnv(ctx context.Context, app model.App, s
 	}
 
 	switch strings.TrimSpace(source.Type) {
-	case model.AppSourceTypeGitHubPublic:
-		return s.importer.SuggestPublicGitHubComposeServiceEnv(ctx, sourceimport.GitHubComposeServiceEnvRequest{
+	case model.AppSourceTypeGitHubPublic, model.AppSourceTypeGitHubPrivate:
+		return s.importer.SuggestGitHubComposeServiceEnv(ctx, sourceimport.GitHubComposeServiceEnvRequest{
 			RepoURL:                strings.TrimSpace(source.RepoURL),
+			RepoAuthToken:          strings.TrimSpace(source.RepoAuthToken),
 			Branch:                 strings.TrimSpace(source.RepoBranch),
 			ComposeService:         composeService,
 			AppHosts:               appHosts,

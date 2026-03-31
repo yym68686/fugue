@@ -137,8 +137,8 @@ func TestBuildKanikoJobObjectUsesDockerfileRelativeToContextSubPath(t *testing.T
 	containers := podSpec["containers"].([]map[string]any)
 	args := containers[0]["args"].([]string)
 	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "--dockerfile=Dockerfile") {
-		t.Fatalf("expected dockerfile relative to context, got args: %v", args)
+	if !strings.Contains(joined, "--dockerfile=/workspace/repo/apps/api/Dockerfile") {
+		t.Fatalf("expected dockerfile path inside cloned workspace, got args: %v", args)
 	}
 	if !strings.Contains(joined, "--context-sub-path=apps/api") {
 		t.Fatalf("expected context-sub-path to be preserved, got args: %v", args)

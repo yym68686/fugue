@@ -107,6 +107,37 @@ topologyLabeler:
     - operator: Exists
   resources: {}
 
+nodeJanitor:
+  enabled: true
+  intervalSeconds: 21600
+  nodeSelector: {}
+  tolerations:
+    - operator: Exists
+  resources: {}
+  imagePrune:
+    enabled: true
+  runnerCleanup:
+    enabled: true
+    staleMinAgeHours: 24
+  legacyTenantDataCleanup:
+    enabled: true
+    staleMinAgeHours: 168
+
+registryJanitor:
+  enabled: true
+  schedule: "23 4 * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  concurrencyPolicy: Forbid
+  activeDeadlineSeconds: 1800
+  startingDeadlineSeconds: 600
+  nodeSelector: {}
+  tolerations: []
+  resources: {}
+  gc:
+    enabled: true
+    skipWhenActiveJobs: true
+
 service:
   type: ClusterIP
   port: 80

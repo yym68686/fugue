@@ -22,7 +22,7 @@ type sourceUploadFileEnvelope struct {
 
 func isQueuedImportSourceType(sourceType string) bool {
 	switch strings.TrimSpace(sourceType) {
-	case model.AppSourceTypeGitHubPublic, model.AppSourceTypeUpload:
+	case model.AppSourceTypeGitHubPublic, model.AppSourceTypeGitHubPrivate, model.AppSourceTypeUpload:
 		return true
 	default:
 		return false

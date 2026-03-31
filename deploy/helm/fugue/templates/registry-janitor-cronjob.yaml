@@ -1,0 +1,212 @@
+{{- $registryJanitor := (get .Values "registryJanitor" | default (dict)) -}}
+{{- $registryJanitorEnabled := true -}}
+{{- if hasKey $registryJanitor "enabled" -}}
+{{- $registryJanitorEnabled = (get $registryJanitor "enabled") -}}
+{{- end -}}
+{{- $registryJanitorSchedule := "23 4 * * *" -}}
+{{- if hasKey $registryJanitor "schedule" -}}
+{{- $registryJanitorSchedule = (get $registryJanitor "schedule") -}}
+{{- end -}}
+{{- $registryJanitorSuccessfulJobsHistoryLimit := 1 -}}
+{{- if hasKey $registryJanitor "successfulJobsHistoryLimit" -}}
+{{- $registryJanitorSuccessfulJobsHistoryLimit = (get $registryJanitor "successfulJobsHistoryLimit") -}}
+{{- end -}}
+{{- $registryJanitorFailedJobsHistoryLimit := 2 -}}
+{{- if hasKey $registryJanitor "failedJobsHistoryLimit" -}}
+{{- $registryJanitorFailedJobsHistoryLimit = (get $registryJanitor "failedJobsHistoryLimit") -}}
+{{- end -}}
+{{- $registryJanitorConcurrencyPolicy := "Forbid" -}}
+{{- if hasKey $registryJanitor "concurrencyPolicy" -}}
+{{- $registryJanitorConcurrencyPolicy = (get $registryJanitor "concurrencyPolicy") -}}
+{{- end -}}
+{{- $registryJanitorActiveDeadlineSeconds := 1800 -}}
+{{- if hasKey $registryJanitor "activeDeadlineSeconds" -}}
+{{- $registryJanitorActiveDeadlineSeconds = (get $registryJanitor "activeDeadlineSeconds") -}}
+{{- end -}}
+{{- $registryJanitorStartingDeadlineSeconds := 600 -}}
+{{- if hasKey $registryJanitor "startingDeadlineSeconds" -}}
+{{- $registryJanitorStartingDeadlineSeconds = (get $registryJanitor "startingDeadlineSeconds") -}}
+{{- end -}}
+{{- $registryJanitorNodeSelector := dict -}}
+{{- if hasKey $registryJanitor "nodeSelector" -}}
+{{- $registryJanitorNodeSelector = (get $registryJanitor "nodeSelector" | default (dict)) -}}
+{{- end -}}
+{{- $registryJanitorTolerations := list -}}
+{{- if hasKey $registryJanitor "tolerations" -}}
+{{- $registryJanitorTolerations = (get $registryJanitor "tolerations") -}}
+{{- end -}}
+{{- $registryJanitorResources := dict -}}
+{{- if hasKey $registryJanitor "resources" -}}
+{{- $registryJanitorResources = (get $registryJanitor "resources" | default (dict)) -}}
+{{- end -}}
+{{- $registryJanitorGCEnabled := true -}}
+{{- $registryJanitorGCSkipWhenActiveJobs := true -}}
+{{- if hasKey $registryJanitor "gc" -}}
+  {{- $registryJanitorGC := (get $registryJanitor "gc" | default (dict)) -}}
+  {{- if hasKey $registryJanitorGC "enabled" -}}
+    {{- $registryJanitorGCEnabled = (get $registryJanitorGC "enabled") -}}
+  {{- end -}}
+  {{- if hasKey $registryJanitorGC "skipWhenActiveJobs" -}}
+    {{- $registryJanitorGCSkipWhenActiveJobs = (get $registryJanitorGC "skipWhenActiveJobs") -}}
+  {{- end -}}
+{{- end -}}
+{{- if and .Values.registry.enabled $registryJanitorEnabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "fugue.registryJanitorName" . }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "registry-janitor") | nindent 4 }}
+spec:
+  schedule: {{ $registryJanitorSchedule | quote }}
+  concurrencyPolicy: {{ $registryJanitorConcurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ $registryJanitorSuccessfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $registryJanitorFailedJobsHistoryLimit }}
+  startingDeadlineSeconds: {{ $registryJanitorStartingDeadlineSeconds }}
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ $registryJanitorActiveDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "registry-janitor") | nindent 12 }}
+            {{- with .Values.podLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            checksum/config-secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+            {{- with .Values.podAnnotations }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        spec:
+          restartPolicy: OnFailure
+          {{- if .Values.rbac.create }}
+          serviceAccountName: {{ include "fugue.serviceAccountName" . }}
+          {{- end }}
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: registry-janitor
+              image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
+              imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+              command:
+                - /bin/bash
+                - -lc
+                - |
+                  set -euo pipefail
+
+                  namespace="${POD_NAMESPACE}"
+                  registry_deploy="{{ include "fugue.fullname" . }}-registry"
+                  registry_base="http://{{ include "fugue.fullname" . }}-registry:{{ .Values.registry.service.port }}"
+                  gc_enabled="{{ $registryJanitorGCEnabled }}"
+                  gc_skip_when_active_jobs="{{ $registryJanitorGCSkipWhenActiveJobs }}"
+
+                  log() {
+                    printf '[registry-janitor] %s\n' "$*"
+                  }
+
+                  parse_json_array() {
+                    tr -d '\n' | sed -e 's/.*\[[[:space:]]*//' -e 's/[[:space:]]*\].*//' -e 's/","/\n/g' -e 's/^"//' -e 's/"$//'
+                  }
+
+                  registry_catalog() {
+                    curl -fsS "${registry_base}/v2/_catalog?n=1000" 2>/dev/null || printf '%s' '{"repositories":[]}'
+                  }
+
+                  registry_tags() {
+                    local repo="$1"
+                    curl -fsS "${registry_base}/v2/${repo}/tags/list" 2>/dev/null || printf '%s' '{"tags":[]}'
+                  }
+
+                  registry_manifest_digest() {
+                    local repo="$1"
+                    local tag="$2"
+                    curl -fsSI \
+                      -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+                      "${registry_base}/v2/${repo}/manifests/${tag}" 2>/dev/null \
+                      | awk -F': ' 'tolower($1) == "docker-content-digest" {print $2}' \
+                      | tr -d '\r' \
+                      | head -n 1
+                  }
+
+                  registry_delete_manifest() {
+                    local repo="$1"
+                    local digest="$2"
+                    curl -fsS -X DELETE "${registry_base}/v2/${repo}/manifests/${digest}" >/dev/null
+                  }
+
+                  active_job_count() {
+                    kubectl get jobs --all-namespaces -o jsonpath='{range .items[*]}{.status.active}{"\n"}{end}' 2>/dev/null \
+                      | awk '$1 + 0 > 0 {count++} END {print count + 0}'
+                  }
+
+                  declare -A keep_refs=()
+                  while read -r image; do
+                    [[ -n "${image}" ]] || continue
+                    ref="${image}"
+                    if [[ "${ref}" == */* ]]; then
+                      ref="${ref#*/}"
+                    fi
+                    case "${ref}" in
+                      fugue-apps/*:*)
+                        keep_refs["${ref}"]=1
+                        ;;
+                    esac
+                  done < <(
+                    kubectl get deployments --all-namespaces \
+                      -o jsonpath='{range .items[*]}{range .spec.template.spec.containers[*]}{.image}{"\n"}{end}{end}' \
+                      2>/dev/null | awk 'NF > 0'
+                  )
+
+                  deleted_count=0
+                  while read -r repo; do
+                    [[ -n "${repo}" ]] || continue
+                    while read -r tag; do
+                      [[ -n "${tag}" ]] || continue
+                      key="${repo}:${tag}"
+                      if [[ -n "${keep_refs[${key}]:-}" ]]; then
+                        continue
+                      fi
+                      digest="$(registry_manifest_digest "${repo}" "${tag}")"
+                      if [[ -z "${digest}" ]]; then
+                        continue
+                      fi
+                      registry_delete_manifest "${repo}" "${digest}"
+                      deleted_count=$((deleted_count + 1))
+                      log "deleted stale registry tag ${key}"
+                    done < <(registry_tags "${repo}" | parse_json_array)
+                  done < <(registry_catalog | parse_json_array)
+
+                  if [[ "${gc_enabled}" != "true" ]]; then
+                    exit 0
+                  fi
+                  if [[ "${deleted_count}" -eq 0 ]]; then
+                    log "no stale registry tags deleted; skipping GC"
+                    exit 0
+                  fi
+                  if [[ "${gc_skip_when_active_jobs}" == "true" ]] && [[ "$(active_job_count)" -gt 0 ]]; then
+                    log "active Kubernetes jobs detected; skipping registry GC this round"
+                    exit 0
+                  fi
+
+                  kubectl exec -n "${namespace}" "deploy/${registry_deploy}" -- \
+                    registry garbage-collect --delete-untagged /etc/docker/registry/config.yml
+                  log "registry GC completed after deleting ${deleted_count} stale tags"
+              env:
+                - name: POD_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+              resources:
+                {{- toYaml $registryJanitorResources | nindent 16 }}
+          {{- with $registryJanitorNodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $registryJanitorTolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

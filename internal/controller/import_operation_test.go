@@ -20,7 +20,7 @@ type recordingImporter struct {
 	githubComposeEnv    map[string]string
 }
 
-func (r *recordingImporter) ImportPublicGitHubSource(_ context.Context, req sourceimport.GitHubSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error) {
+func (r *recordingImporter) ImportGitHubSource(_ context.Context, req sourceimport.GitHubSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error) {
 	req.JobLabels = cloneStringMap(req.JobLabels)
 	req.PlacementNodeSelector = cloneStringMap(req.PlacementNodeSelector)
 	r.githubReq = &req
@@ -43,7 +43,7 @@ func (r *recordingImporter) ImportUploadedArchiveSource(context.Context, sourcei
 	return sourceimport.GitHubSourceImportOutput{}, fmt.Errorf("unexpected upload import")
 }
 
-func (r *recordingImporter) SuggestPublicGitHubComposeServiceEnv(_ context.Context, req sourceimport.GitHubComposeServiceEnvRequest) (map[string]string, error) {
+func (r *recordingImporter) SuggestGitHubComposeServiceEnv(_ context.Context, req sourceimport.GitHubComposeServiceEnvRequest) (map[string]string, error) {
 	req.AppHosts = cloneStringMap(req.AppHosts)
 	req.ManagedPostgresByOwner = clonePostgresSpecMap(req.ManagedPostgresByOwner)
 	r.githubComposeEnvReq = &req

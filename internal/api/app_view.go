@@ -8,6 +8,7 @@ import (
 
 func sanitizeAppForAPI(app model.App) model.App {
 	out := cloneApp(app)
+	out.Source = sanitizeAppSourceForAPI(out.Source)
 	out.Spec = redactSecretFilesInSpec(out.Spec)
 	out.TechStack = buildAppTechStack(out)
 	return out
@@ -32,8 +33,7 @@ func sanitizeOperationForAPI(op model.Operation) model.Operation {
 		out.DesiredSpec = &spec
 	}
 	if op.DesiredSource != nil {
-		source := *op.DesiredSource
-		out.DesiredSource = &source
+		out.DesiredSource = sanitizeAppSourceForAPI(op.DesiredSource)
 	}
 	return out
 }
@@ -80,6 +80,15 @@ func cloneApp(app model.App) model.App {
 		out.TechStack = append([]model.AppTechnology(nil), app.TechStack...)
 	}
 	return out
+}
+
+func sanitizeAppSourceForAPI(source *model.AppSource) *model.AppSource {
+	if source == nil {
+		return nil
+	}
+	redacted := *source
+	redacted.RepoAuthToken = ""
+	return &redacted
 }
 
 func cloneAppSpec(spec model.AppSpec) model.AppSpec {

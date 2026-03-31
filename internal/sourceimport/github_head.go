@@ -6,14 +6,20 @@ import (
 	"strings"
 )
 
-func LatestPublicGitHubCommit(ctx context.Context, repoURL, branch string) (string, string, error) {
+func LatestGitHubCommit(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error) {
 	if _, _, err := parseGitHubRepoURL(repoURL); err != nil {
 		return "", "", err
 	}
 
 	branch = strings.TrimSpace(branch)
 	if branch == "" {
-		output, err := runCombinedOutput(ctx, "", "git", "ls-remote", "--symref", strings.TrimSpace(repoURL), "HEAD")
+		output, err := runCombinedOutputWithEnv(
+			ctx,
+			"",
+			gitCommandEnv(),
+			"git",
+			gitCommandArgsWithGitHubAuth(repoAuthToken, "ls-remote", "--symref", strings.TrimSpace(repoURL), "HEAD")...,
+		)
 		if err != nil {
 			return "", "", fmt.Errorf("git ls-remote HEAD: %w: %s", err, strings.TrimSpace(string(output)))
 		}
@@ -24,7 +30,13 @@ func LatestPublicGitHubCommit(ctx context.Context, repoURL, branch string) (stri
 		return commitSHA, resolvedBranch, nil
 	}
 
-	output, err := runCombinedOutput(ctx, "", "git", "ls-remote", "--heads", strings.TrimSpace(repoURL), "refs/heads/"+branch)
+	output, err := runCombinedOutputWithEnv(
+		ctx,
+		"",
+		gitCommandEnv(),
+		"git",
+		gitCommandArgsWithGitHubAuth(repoAuthToken, "ls-remote", "--heads", strings.TrimSpace(repoURL), "refs/heads/"+branch)...,
+	)
 	if err != nil {
 		return "", "", fmt.Errorf("git ls-remote branch: %w: %s", err, strings.TrimSpace(string(output)))
 	}

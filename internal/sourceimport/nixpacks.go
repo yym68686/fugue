@@ -18,7 +18,9 @@ const (
 )
 
 type GitHubAutoImportRequest struct {
+	SourceType            string
 	RepoURL               string
+	RepoAuthToken         string
 	Branch                string
 	SourceDir             string
 	DockerfilePath        string
@@ -32,7 +34,9 @@ type GitHubAutoImportRequest struct {
 }
 
 type GitHubNixpacksImportRequest struct {
+	SourceType            string
 	RepoURL               string
+	RepoAuthToken         string
 	Branch                string
 	SourceDir             string
 	RegistryPushBase      string
@@ -45,6 +49,7 @@ type GitHubNixpacksImportRequest struct {
 
 type nixpacksBuildRequest struct {
 	RepoURL               string
+	RepoAuthToken         string
 	Branch                string
 	CommitSHA             string
 	SourceLabel           string
@@ -58,11 +63,11 @@ type nixpacksBuildRequest struct {
 	Placement             builderJobPlacement
 }
 
-func (i *Importer) ImportPublicGitHubAuto(ctx context.Context, req GitHubAutoImportRequest) (GitHubImportResult, error) {
+func (i *Importer) ImportGitHubAuto(ctx context.Context, req GitHubAutoImportRequest) (GitHubImportResult, error) {
 	if strings.TrimSpace(req.RegistryPushBase) == "" {
 		return GitHubImportResult{}, fmt.Errorf("registry push base is empty")
 	}
-	repo, err := i.clonePublicGitHubRepo(ctx, req.RepoURL, req.Branch, "github-auto-import-*")
+	repo, err := i.cloneGitHubRepo(ctx, req.RepoURL, req.RepoAuthToken, req.Branch, "github-auto-import-*")
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
@@ -75,32 +80,32 @@ func (i *Importer) ImportPublicGitHubAuto(ctx context.Context, req GitHubAutoImp
 
 	switch buildStrategy {
 	case model.AppBuildStrategyDockerfile:
-		return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, dockerfilePath, buildContextDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
+		return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, dockerfilePath, buildContextDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
 	case model.AppBuildStrategyStaticSite:
 		return importStaticSiteFromClonedRepo(repo, sourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix)
 	case model.AppBuildStrategyBuildpacks:
-		return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, sourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
+		return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, sourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
 	case model.AppBuildStrategyNixpacks:
-		return importNixpacksFromClonedRepo(ctx, repo, req.RepoURL, sourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
+		return importNixpacksFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, sourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
 	default:
 		return GitHubImportResult{}, fmt.Errorf("unsupported auto-detected build strategy %q", buildStrategy)
 	}
 }
 
-func (i *Importer) ImportPublicGitHubNixpacks(ctx context.Context, req GitHubNixpacksImportRequest) (GitHubImportResult, error) {
+func (i *Importer) ImportGitHubNixpacks(ctx context.Context, req GitHubNixpacksImportRequest) (GitHubImportResult, error) {
 	if strings.TrimSpace(req.RegistryPushBase) == "" {
 		return GitHubImportResult{}, fmt.Errorf("registry push base is empty")
 	}
-	repo, err := i.clonePublicGitHubRepo(ctx, req.RepoURL, req.Branch, "github-nixpacks-import-*")
+	repo, err := i.cloneGitHubRepo(ctx, req.RepoURL, req.RepoAuthToken, req.Branch, "github-nixpacks-import-*")
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
 	defer releaseClonedRepo(repo)
 
-	return importNixpacksFromClonedRepo(ctx, repo, req.RepoURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
+	return importNixpacksFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
 }
 
-func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, sourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
+func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, repoAuthToken, sourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
 	normalizedSourceDir, err := normalizeRepoSourceDir(repo.RepoDir, sourceDir)
 	if err != nil {
 		return GitHubImportResult{}, err
@@ -111,6 +116,7 @@ func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, re
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
 	if err := buildAndPushNixpacksImage(ctx, nixpacksBuildRequest{
 		RepoURL:               repoURL,
+		RepoAuthToken:         repoAuthToken,
 		Branch:                repo.Branch,
 		CommitSHA:             repo.CommitSHA,
 		SourceDir:             normalizedSourceDir,
@@ -323,21 +329,7 @@ func buildNixpacksJobObject(namespace, jobName string, req nixpacksBuildRequest)
 	if strings.TrimSpace(req.ArchiveDownloadURL) != "" {
 		initContainers = buildArchiveDownloadInitContainers(req.ArchiveDownloadURL)
 	} else {
-		cloneArgs := gitCloneArgs(req.RepoURL, "/workspace/repo", req.Branch)
-		initContainers = []map[string]any{
-			{
-				"name":         "git-clone",
-				"image":        defaultGitCloneImage,
-				"command":      append([]string{"git"}, cloneArgs...),
-				"volumeMounts": []map[string]any{{"name": "workspace", "mountPath": "/workspace"}},
-			},
-			{
-				"name":         "git-checkout",
-				"image":        defaultGitCloneImage,
-				"command":      []string{"git", "-C", "/workspace/repo", "checkout", strings.TrimSpace(req.CommitSHA)},
-				"volumeMounts": []map[string]any{{"name": "workspace", "mountPath": "/workspace"}},
-			},
-		}
+		initContainers = buildGitCloneInitContainers(req.RepoURL, req.Branch, req.CommitSHA, req.RepoAuthToken)
 	}
 
 	jobObject := map[string]any{

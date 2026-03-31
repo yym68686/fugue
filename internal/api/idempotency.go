@@ -23,6 +23,8 @@ type importGitHubRequest struct {
 	ProjectID       string                 `json:"project_id"`
 	Project         *importProjectRequest  `json:"project,omitempty"`
 	RepoURL         string                 `json:"repo_url"`
+	RepoVisibility  string                 `json:"repo_visibility"`
+	RepoAuthToken   string                 `json:"repo_auth_token"`
 	Branch          string                 `json:"branch"`
 	SourceDir       string                 `json:"source_dir"`
 	Name            string                 `json:"name"`
@@ -62,6 +64,8 @@ func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID
 		ProjectID       string                 `json:"project_id"`
 		Project         *importProjectRequest  `json:"project,omitempty"`
 		RepoURL         string                 `json:"repo_url"`
+		RepoVisibility  string                 `json:"repo_visibility"`
+		RepoAuthToken   string                 `json:"repo_auth_token"`
 		Branch          string                 `json:"branch"`
 		SourceDir       string                 `json:"source_dir"`
 		Name            string                 `json:"name"`
@@ -81,6 +85,8 @@ func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID
 		ProjectID:       strings.TrimSpace(req.ProjectID),
 		Project:         normalizedImportProjectRequest(req.Project),
 		RepoURL:         strings.TrimSpace(req.RepoURL),
+		RepoVisibility:  strings.TrimSpace(req.RepoVisibility),
+		RepoAuthToken:   strings.TrimSpace(req.RepoAuthToken),
 		Branch:          strings.TrimSpace(req.Branch),
 		SourceDir:       strings.TrimSpace(req.SourceDir),
 		Name:            strings.TrimSpace(req.Name),

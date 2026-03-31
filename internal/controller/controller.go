@@ -24,14 +24,14 @@ type Service struct {
 	importer           sourceImporter
 	registryPushBase   string
 	registryPullBase   string
-	latestGitHubCommit func(ctx context.Context, repoURL, branch string) (string, string, error)
+	latestGitHubCommit func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
 	newKubeClient      func(namespace string) (*kubeClient, error)
 }
 
 type sourceImporter interface {
-	ImportPublicGitHubSource(context.Context, sourceimport.GitHubSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error)
+	ImportGitHubSource(context.Context, sourceimport.GitHubSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error)
 	ImportUploadedArchiveSource(context.Context, sourceimport.UploadSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error)
-	SuggestPublicGitHubComposeServiceEnv(context.Context, sourceimport.GitHubComposeServiceEnvRequest) (map[string]string, error)
+	SuggestGitHubComposeServiceEnv(context.Context, sourceimport.GitHubComposeServiceEnvRequest) (map[string]string, error)
 	SuggestUploadedComposeServiceEnv(context.Context, sourceimport.UploadComposeServiceEnvRequest) (map[string]string, error)
 }
 
@@ -51,7 +51,7 @@ func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *S
 		importer:           sourceimport.NewImporter(cfg.ImportWorkDir, logger, builderPodPolicyFromConfig(cfg.BuilderSchedulingJSON, logger)),
 		registryPushBase:   strings.TrimSpace(cfg.RegistryPushBase),
 		registryPullBase:   strings.TrimSpace(cfg.RegistryPullBase),
-		latestGitHubCommit: sourceimport.LatestPublicGitHubCommit,
+		latestGitHubCommit: sourceimport.LatestGitHubCommit,
 		newKubeClient:      newKubeClient,
 	}
 }
