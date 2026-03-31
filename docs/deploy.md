@@ -162,7 +162,14 @@ Controller GitHub sync knobs:
 
 - `FUGUE_CONTROLLER_GITHUB_SYNC_INTERVAL`: how often the controller checks imported GitHub apps for a newer branch commit. Set `0` to disable the automatic rebuild loop.
 - `FUGUE_CONTROLLER_GITHUB_SYNC_TIMEOUT`: timeout for each upstream GitHub check.
+- `FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_BASE_DELAY`: base retry delay after a tracked commit fails during auto sync. Repeated failures for the same commit back off from this value.
+- `FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_MAX_DELAY`: maximum retry delay for repeated failures of the same tracked commit.
 - `FUGUE_CONTROLLER_MANAGED_APP_ROLLOUT_TIMEOUT`: maximum time a managed deploy operation waits for the Kubernetes rollout to finish before it is marked failed.
+
+Builder scheduling notes:
+
+- Shared nodes can build imported sources whenever their remaining CPU, memory, and ephemeral storage fit the requested build profile; `fugue.io/build=true` is treated as a preference signal instead of a hard gate.
+- Fresh HA installs and control-plane upgrades label `fugue.install/profile=combined` nodes with `fugue.io/build=true` and `fugue.io/build-tier=medium`, so the internal control-plane nodes remain available as fallback builder capacity even when a dedicated large builder is busy.
 
 Registry and cluster-join notes:
 

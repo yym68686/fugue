@@ -277,6 +277,28 @@ func TestSelectBuilderCandidatesIncludesExplicitBuildPoolTenantScopedNodes(t *te
 	}
 }
 
+func TestSelectBuilderCandidatesFallsBackToSharedNodesWhenExplicitBuildPoolIsExhausted(t *testing.T) {
+	t.Parallel()
+
+	policy := defaultBuilderPodPolicy()
+	demand, err := builderDemandForProfile(policy, builderWorkloadProfileHeavy)
+	if err != nil {
+		t.Fatalf("builder demand: %v", err)
+	}
+
+	exhaustedBuilder := builderTestNode("alicehk2", "fortedrape8", policy, policy.LargeNodeLabelValue, "2000m", "4Gi", "12Gi", "1800m", "3500Mi", "10Gi")
+	sharedFallback := builderTestNode("gcp2", "instance-20260322-112431", policy, policy.MediumNodeLabelValue, "4000m", "8Gi", "20Gi", "250m", "1Gi", "2Gi")
+	delete(sharedFallback.Labels, policy.BuildNodeLabelKey)
+
+	candidates := selectBuilderCandidates(policy, builderWorkloadProfileHeavy, demand, []builderNodeSnapshot{exhaustedBuilder, sharedFallback}, nil, nil)
+	if len(candidates) != 1 {
+		t.Fatalf("expected shared fallback to remain eligible when explicit build node is exhausted, got %d candidates", len(candidates))
+	}
+	if got := candidates[0].Node.Name; got != "gcp2" {
+		t.Fatalf("expected gcp2 shared fallback to be selected, got %q", got)
+	}
+}
+
 func TestSelectBuilderCandidatesFiltersByRequiredNodeLabels(t *testing.T) {
 	t.Parallel()
 

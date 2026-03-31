@@ -26,6 +26,7 @@ type Service struct {
 	registryPullBase   string
 	latestGitHubCommit func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
 	newKubeClient      func(namespace string) (*kubeClient, error)
+	now                func() time.Time
 }
 
 type sourceImporter interface {
@@ -53,6 +54,7 @@ func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *S
 		registryPullBase:   strings.TrimSpace(cfg.RegistryPullBase),
 		latestGitHubCommit: sourceimport.LatestGitHubCommit,
 		newKubeClient:      newKubeClient,
+		now:                time.Now,
 	}
 }
 
@@ -88,6 +90,15 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.Config.GitHubSyncTimeout <= 0 {
 		s.Config.GitHubSyncTimeout = 20 * time.Second
 	}
+	if s.Config.GitHubSyncRetryBaseDelay <= 0 {
+		s.Config.GitHubSyncRetryBaseDelay = 5 * time.Minute
+	}
+	if s.Config.GitHubSyncRetryMaxDelay <= 0 {
+		s.Config.GitHubSyncRetryMaxDelay = time.Hour
+	}
+	if s.Config.GitHubSyncRetryMaxDelay < s.Config.GitHubSyncRetryBaseDelay {
+		s.Config.GitHubSyncRetryMaxDelay = s.Config.GitHubSyncRetryBaseDelay
+	}
 	if s.Config.ManagedAppRolloutTimeout <= 0 {
 		s.Config.ManagedAppRolloutTimeout = 10 * time.Minute
 	}
@@ -99,6 +110,9 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	if s.Config.LegacyControllerCheckInterval <= 0 {
 		s.Config.LegacyControllerCheckInterval = 2 * time.Second
+	}
+	if s.now == nil {
+		s.now = time.Now
 	}
 	if s.Config.LeaderElectionEnabled {
 		return s.runWithLeaderElection(ctx)

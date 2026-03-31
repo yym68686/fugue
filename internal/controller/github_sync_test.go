@@ -224,16 +224,24 @@ func TestSyncGitHubAppsSkipsCommitThatAlreadyFailed(t *testing.T) {
 	} else if !found {
 		t.Fatal("expected failed github sync import")
 	}
-	if _, err := stateStore.FailOperation(op.ID, "build failed"); err != nil {
+	op, err = stateStore.FailOperation(op.ID, "build failed")
+	if err != nil {
 		t.Fatalf("fail github sync import: %v", err)
 	}
 
 	svc := &Service{
-		Store:  stateStore,
-		Config: config.ControllerConfig{GitHubSyncTimeout: time.Second},
+		Store: stateStore,
+		Config: config.ControllerConfig{
+			GitHubSyncTimeout:        time.Second,
+			GitHubSyncRetryBaseDelay: 5 * time.Minute,
+			GitHubSyncRetryMaxDelay:  time.Hour,
+		},
 		Logger: log.New(io.Discard, "", 0),
 		latestGitHubCommit: func(context.Context, string, string, string) (string, string, error) {
 			return "newcommit", "main", nil
+		},
+		now: func() time.Time {
+			return op.UpdatedAt.Add(4 * time.Minute)
 		},
 	}
 
@@ -247,6 +255,213 @@ func TestSyncGitHubAppsSkipsCommitThatAlreadyFailed(t *testing.T) {
 	}
 	if len(ops) != 1 {
 		t.Fatalf("expected no extra retry for already-failed commit, got %d operations", len(ops))
+	}
+}
+
+func TestSyncGitHubAppsRetriesFailedCommitAfterBackoff(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.example.com/demo:git-old",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyStaticSite,
+		CommitSHA:     "oldcommit",
+	}, model.AppRoute{
+		Hostname:    "demo.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://demo.example.com",
+		ServicePort: 80,
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	spec := app.Spec
+	source := *app.Source
+	source.CommitSHA = "newcommit"
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeBootstrap,
+		RequestedByID:   model.OperationRequestedByGitHubSyncController,
+		AppID:           app.ID,
+		DesiredSpec:     &spec,
+		DesiredSource:   &source,
+	})
+	if err != nil {
+		t.Fatalf("create failed github sync import: %v", err)
+	}
+	if _, found, err := stateStore.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim failed github sync import: %v", err)
+	} else if !found {
+		t.Fatal("expected failed github sync import")
+	}
+	op, err = stateStore.FailOperation(op.ID, "build failed")
+	if err != nil {
+		t.Fatalf("fail github sync import: %v", err)
+	}
+
+	svc := &Service{
+		Store: stateStore,
+		Config: config.ControllerConfig{
+			GitHubSyncTimeout:        time.Second,
+			GitHubSyncRetryBaseDelay: 5 * time.Minute,
+			GitHubSyncRetryMaxDelay:  time.Hour,
+		},
+		Logger: log.New(io.Discard, "", 0),
+		latestGitHubCommit: func(context.Context, string, string, string) (string, string, error) {
+			return "newcommit", "main", nil
+		},
+		now: func() time.Time {
+			return op.UpdatedAt.Add(6 * time.Minute)
+		},
+	}
+
+	if err := svc.syncGitHubApps(context.Background()); err != nil {
+		t.Fatalf("sync github apps: %v", err)
+	}
+
+	ops, err := stateStore.ListOperations("", true)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(ops) != 2 {
+		t.Fatalf("expected 1 retry operation after backoff, got %d operations", len(ops))
+	}
+	retry := ops[1]
+	if retry.DesiredSource == nil || retry.DesiredSource.CommitSHA != "newcommit" {
+		t.Fatalf("expected retry for commit newcommit, got %#v", retry.DesiredSource)
+	}
+}
+
+func TestSyncGitHubAppsBacksOffRepeatedFailuresForSameCommit(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.example.com/demo:git-old",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyStaticSite,
+		CommitSHA:     "oldcommit",
+	}, model.AppRoute{
+		Hostname:    "demo.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://demo.example.com",
+		ServicePort: 80,
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	spec := app.Spec
+	source := *app.Source
+	source.CommitSHA = "newcommit"
+	op1, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeBootstrap,
+		RequestedByID:   model.OperationRequestedByGitHubSyncController,
+		AppID:           app.ID,
+		DesiredSpec:     &spec,
+		DesiredSource:   &source,
+	})
+	if err != nil {
+		t.Fatalf("create first failed github sync import: %v", err)
+	}
+	if _, found, err := stateStore.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim first failed github sync import: %v", err)
+	} else if !found {
+		t.Fatal("expected first failed github sync import")
+	}
+	if _, err := stateStore.FailOperation(op1.ID, "builder unavailable"); err != nil {
+		t.Fatalf("fail first github sync import: %v", err)
+	}
+
+	op2, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeBootstrap,
+		RequestedByID:   model.OperationRequestedByGitHubSyncController,
+		AppID:           app.ID,
+		DesiredSpec:     &spec,
+		DesiredSource:   &source,
+	})
+	if err != nil {
+		t.Fatalf("create second failed github sync import: %v", err)
+	}
+	if _, found, err := stateStore.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim second failed github sync import: %v", err)
+	} else if !found {
+		t.Fatal("expected second failed github sync import")
+	}
+	op2, err = stateStore.FailOperation(op2.ID, "builder unavailable")
+	if err != nil {
+		t.Fatalf("fail second github sync import: %v", err)
+	}
+
+	svc := &Service{
+		Store: stateStore,
+		Config: config.ControllerConfig{
+			GitHubSyncTimeout:        time.Second,
+			GitHubSyncRetryBaseDelay: 5 * time.Minute,
+			GitHubSyncRetryMaxDelay:  time.Hour,
+		},
+		Logger: log.New(io.Discard, "", 0),
+		latestGitHubCommit: func(context.Context, string, string, string) (string, string, error) {
+			return "newcommit", "main", nil
+		},
+		now: func() time.Time {
+			return op2.UpdatedAt.Add(9 * time.Minute)
+		},
+	}
+
+	if err := svc.syncGitHubApps(context.Background()); err != nil {
+		t.Fatalf("sync github apps: %v", err)
+	}
+
+	ops, err := stateStore.ListOperations("", true)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(ops) != 2 {
+		t.Fatalf("expected retry to remain backed off after two failures, got %d operations", len(ops))
 	}
 }
 

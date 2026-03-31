@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/store"
@@ -21,19 +22,20 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 	}
 
 	inFlightApps := make(map[string]struct{})
-	latestAttemptedCommits := make(map[string]string)
+	trackedCommitStates := collectTrackedGitHubCommitStates(ops)
 	for _, op := range ops {
 		appID := strings.TrimSpace(op.AppID)
 		if appID == "" {
 			continue
 		}
-		if commit := trackedGitHubCommitForOperation(op); commit != "" {
-			latestAttemptedCommits[appID] = commit
-		}
 		switch op.Status {
 		case model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent:
 			inFlightApps[appID] = struct{}{}
 		}
+	}
+	currentTime := time.Now()
+	if s.now != nil {
+		currentTime = s.now()
 	}
 
 	for _, app := range apps {
@@ -57,9 +59,12 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 			)
 			continue
 		}
-		if strings.TrimSpace(latestCommit) == "" ||
-			strings.TrimSpace(latestCommit) == strings.TrimSpace(app.Source.CommitSHA) ||
-			strings.TrimSpace(latestCommit) == latestAttemptedCommits[strings.TrimSpace(app.ID)] {
+		latestCommit = strings.TrimSpace(latestCommit)
+		if latestCommit == "" || latestCommit == strings.TrimSpace(app.Source.CommitSHA) {
+			continue
+		}
+		if state, found := trackedCommitStates[trackedGitHubCommitStateKey(app.ID, latestCommit)]; found &&
+			!gitHubTrackedCommitRetryReady(state, currentTime, s.Config.GitHubSyncRetryBaseDelay, s.Config.GitHubSyncRetryMaxDelay) {
 			continue
 		}
 
@@ -189,4 +194,92 @@ func shortCommitSHA(value string) string {
 		return value[:12]
 	}
 	return value
+}
+
+type trackedGitHubCommitState struct {
+	latest              model.Operation
+	consecutiveFailures int
+}
+
+func collectTrackedGitHubCommitStates(ops []model.Operation) map[string]trackedGitHubCommitState {
+	states := make(map[string]trackedGitHubCommitState)
+	for _, op := range ops {
+		appID := strings.TrimSpace(op.AppID)
+		commit := trackedGitHubCommitForOperation(op)
+		if appID == "" || commit == "" {
+			continue
+		}
+
+		key := trackedGitHubCommitStateKey(appID, commit)
+		state := states[key]
+		if op.Status == model.OperationStatusFailed {
+			state.consecutiveFailures++
+		}
+		if gitHubReleaseSucceeded(op) {
+			state.consecutiveFailures = 0
+		}
+		state.latest = op
+		states[key] = state
+	}
+	return states
+}
+
+func trackedGitHubCommitStateKey(appID, commit string) string {
+	return strings.TrimSpace(appID) + "\x00" + strings.TrimSpace(commit)
+}
+
+func gitHubReleaseSucceeded(op model.Operation) bool {
+	return op.Type == model.OperationTypeDeploy && op.Status == model.OperationStatusCompleted
+}
+
+func gitHubTrackedCommitRetryReady(
+	state trackedGitHubCommitState,
+	now time.Time,
+	baseDelay time.Duration,
+	maxDelay time.Duration,
+) bool {
+	if state.latest.Status != model.OperationStatusFailed {
+		return true
+	}
+
+	retryDelay := gitHubTrackedCommitRetryDelay(baseDelay, maxDelay, state.consecutiveFailures)
+	if retryDelay <= 0 {
+		return true
+	}
+
+	retryAnchor := state.latest.UpdatedAt
+	if state.latest.CompletedAt != nil {
+		retryAnchor = *state.latest.CompletedAt
+	}
+	return !now.Before(retryAnchor.Add(retryDelay))
+}
+
+func gitHubTrackedCommitRetryDelay(baseDelay, maxDelay time.Duration, consecutiveFailures int) time.Duration {
+	if consecutiveFailures <= 0 {
+		return 0
+	}
+	if baseDelay <= 0 {
+		baseDelay = 5 * time.Minute
+	}
+	if maxDelay <= 0 {
+		maxDelay = time.Hour
+	}
+	if maxDelay < baseDelay {
+		maxDelay = baseDelay
+	}
+
+	delay := baseDelay
+	for failures := 1; failures < consecutiveFailures; failures++ {
+		if delay >= maxDelay {
+			return maxDelay
+		}
+		if delay > maxDelay/2 {
+			return maxDelay
+		}
+		delay *= 2
+	}
+	if delay > maxDelay {
+		return maxDelay
+	}
+	return delay
 }

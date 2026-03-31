@@ -507,7 +507,6 @@ func selectBuilderCandidates(policy BuilderPodPolicy, profile builderWorkloadPro
 		reservedByNode[reservation.NodeName] = current
 	}
 
-	requireBuildLabel := builderAnyNodeMatchesBuildLabel(policy, snapshots)
 	candidates := make([]builderCandidate, 0, len(snapshots))
 	for _, snapshot := range snapshots {
 		if !snapshot.Ready || snapshot.DiskPressure || snapshot.Hostname == "" {
@@ -517,9 +516,6 @@ func selectBuilderCandidates(policy BuilderPodPolicy, profile builderWorkloadPro
 			continue
 		}
 		if !builderNodeMatchesRequiredLabels(snapshot, requiredNodeLabels) {
-			continue
-		}
-		if requireBuildLabel && !builderMatchesBuildPool(policy, snapshot) {
 			continue
 		}
 		sizeClass := builderNodeSizeClass(policy, snapshot)

@@ -193,6 +193,15 @@ sync_route_a_edge_proxy() {
   bash ./scripts/sync_fugue_edge_proxy.sh
 }
 
+label_default_builder_nodes() {
+  log "labeling shared control-plane nodes as medium builder candidates"
+  ${KUBECTL} label node -l fugue.install/profile=combined \
+    fugue.io/build=true \
+    fugue.io/build-tier=medium \
+    fugue.io/shared-pool=internal \
+    --overwrite >/dev/null
+}
+
 rollback_release() {
   local rollback_api_deployment="${FUGUE_API_DEPLOYMENT_NAME}"
 
@@ -354,6 +363,8 @@ main() {
     rollback_release || true
     fail "controller rollout failed"
   fi
+
+  label_default_builder_nodes
 
   sync_route_a_edge_proxy
 
