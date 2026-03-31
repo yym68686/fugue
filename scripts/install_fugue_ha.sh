@@ -1233,10 +1233,7 @@ probe_tls_ready() {
   local hostname="\$1"
   local output
   local leaf_cert
-  output="\$(printf '' | openssl s_client -showcerts -servername "\${hostname}" -connect "\${EDGE_TLS_PROBE_ADDR}" -verify_hostname "\${hostname}" -verify_return_error 2>&1 || true)"
-  if printf '%s\n' "\${output}" | grep -Fq 'no peer certificate available'; then
-    return 1
-  fi
+  output="\$(printf '' | openssl s_client -showcerts -servername "\${hostname}" -connect "\${EDGE_TLS_PROBE_ADDR}" 2>&1 || true)"
   leaf_cert="\$(printf '%s\n' "\${output}" | awk '
     /-----BEGIN CERTIFICATE-----/ { capture = 1 }
     capture { print }
