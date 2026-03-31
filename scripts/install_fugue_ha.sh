@@ -1199,6 +1199,7 @@ with open(dst, "w", encoding="utf-8") as handle:
     handle.write("# Managed by fugue-sync-custom-domains\n")
     for hostname in domains:
         handle.write(f"\nhttps://{hostname} {{\n")
+        handle.write("  tls internal\n")
         handle.write("  encode gzip zstd\n")
         handle.write(f"  reverse_proxy {upstream}\n")
         handle.write("}\n")
@@ -1231,14 +1232,20 @@ PY
 probe_tls_ready() {
   local hostname="\$1"
   local output
+  local leaf_cert
   output="\$(printf '' | openssl s_client -showcerts -servername "\${hostname}" -connect "\${EDGE_TLS_PROBE_ADDR}" -verify_hostname "\${hostname}" -verify_return_error 2>&1 || true)"
   if printf '%s\n' "\${output}" | grep -Fq 'no peer certificate available'; then
     return 1
   fi
-  if ! printf '%s\n' "\${output}" | grep -Fq 'BEGIN CERTIFICATE'; then
+  leaf_cert="\$(printf '%s\n' "\${output}" | awk '
+    /-----BEGIN CERTIFICATE-----/ { capture = 1 }
+    capture { print }
+    /-----END CERTIFICATE-----/ && capture { exit }
+  ')"
+  if [ -z "\${leaf_cert}" ]; then
     return 1
   fi
-  if printf '%s\n' "\${output}" | grep -Fq 'Verify return code: 0 (ok)'; then
+  if printf '%s\n' "\${leaf_cert}" | openssl x509 -noout -checkhost "\${hostname}" >/dev/null 2>&1; then
     return 0
   fi
   return 1
