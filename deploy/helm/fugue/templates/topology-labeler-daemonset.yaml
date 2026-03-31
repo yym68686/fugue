@@ -83,6 +83,21 @@ spec:
                 printf '%s' "${value}"
               }
 
+              normalize_country_name() {
+                local value="${1:-}"
+                case "${value}" in
+                  "Hong Kong SAR China")
+                    printf '%s' "Hong Kong"
+                    ;;
+                  "Macao SAR China")
+                    printf '%s' "Macao"
+                    ;;
+                  *)
+                    printf '%s' "${value}"
+                    ;;
+                esac
+              }
+
               detect_public_country() {
                 local json=""
                 local country_name=""
@@ -92,6 +107,7 @@ spec:
                 [ -n "${json}" ] || return 1
                 country_name="$(extract_json_field "${json}" "country_name")"
                 country_code="$(extract_json_field "${json}" "country_code")"
+                country_name="$(normalize_country_name "${country_name}")"
                 [ -n "${country_name}" ] || return 1
                 [ -n "${country_code}" ] || return 1
                 printf '%s\n%s' "${country_name}" "${country_code}"

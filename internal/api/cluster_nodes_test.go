@@ -1077,6 +1077,13 @@ func TestKubeNodeRegionFallbacksToGeolocatedCountry(t *testing.T) {
 	}
 
 	if got := kubeNodeRegion(
+		map[string]string{clusterNodeLabelCountryCode: "hk"},
+		map[string]string{clusterNodeAnnotationCountry: "Hong Kong SAR China"},
+	); got != "Hong Kong" {
+		t.Fatalf("expected normalized hong kong country name, got %q", got)
+	}
+
+	if got := kubeNodeRegion(
 		map[string]string{clusterNodeLabelRegion: "us-central1"},
 		map[string]string{clusterNodeAnnotationCountry: "United States"},
 	); got != "us-central1" {

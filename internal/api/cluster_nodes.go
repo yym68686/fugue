@@ -63,6 +63,7 @@ type clusterNodeSnapshot struct {
 	countryCode  string
 	runtimeID    string
 	pods         []clusterNodePod
+	summary      *kubeNodeSummary
 }
 
 type resolvedClusterNodeSnapshot struct {
@@ -149,7 +150,8 @@ type clusterNodePod struct {
 }
 
 type kubeNodeSummary struct {
-	Node kubeNodeSummaryNode `json:"node"`
+	Node kubeNodeSummaryNode  `json:"node"`
+	Pods []kubeNodeSummaryPod `json:"pods,omitempty"`
 }
 
 type kubeNodeSummaryNode struct {
@@ -173,6 +175,18 @@ type kubeNodeSummaryFS struct {
 	AvailableBytes *uint64 `json:"availableBytes,omitempty"`
 	CapacityBytes  *uint64 `json:"capacityBytes,omitempty"`
 	UsedBytes      *uint64 `json:"usedBytes,omitempty"`
+}
+
+type kubeNodeSummaryPod struct {
+	PodRef           kubeNodeSummaryPodRef `json:"podRef"`
+	CPU              kubeNodeSummaryCPU    `json:"cpu,omitempty"`
+	Memory           kubeNodeSummaryMem    `json:"memory,omitempty"`
+	EphemeralStorage kubeNodeSummaryFS     `json:"ephemeral-storage,omitempty"`
+}
+
+type kubeNodeSummaryPodRef struct {
+	Name      string `json:"name,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
 }
 
 func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) {
@@ -615,6 +629,7 @@ func (c *clusterNodeClient) listClusterNodeInventory(ctx context.Context) ([]clu
 			countryCode:  kubeNodeCountryCode(item.Metadata.Labels),
 			runtimeID:    firstNodeLabel(item.Metadata.Labels, runtime.RuntimeIDLabelKey),
 			pods:         podsByNode[name],
+			summary:      summariesByNode[name],
 		})
 	}
 	return snapshots, nil
@@ -1426,12 +1441,25 @@ func mustParseCIDR(value string) *net.IPNet {
 	return network
 }
 
+func normalizeCountryDisplayName(value string) string {
+	switch strings.TrimSpace(value) {
+	case "":
+		return ""
+	case "Hong Kong SAR China":
+		return "Hong Kong"
+	case "Macao SAR China":
+		return "Macao"
+	default:
+		return strings.TrimSpace(value)
+	}
+}
+
 func kubeNodeRegion(labels, annotations map[string]string) string {
 	if value := firstNodeLabel(labels, clusterNodeLabelRegion, clusterNodeLabelLegacyRegion, "region"); value != "" {
 		return value
 	}
 	if value := firstNodeAnnotation(annotations, clusterNodeAnnotationCountry); value != "" {
-		return value
+		return normalizeCountryDisplayName(value)
 	}
 	if value := firstNodeLabel(labels, clusterNodeLabelCountryCode); value != "" {
 		return strings.ToUpper(value)

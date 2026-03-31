@@ -73,6 +73,7 @@ func cloneApp(app model.App) model.App {
 		out.Route = &route
 	}
 	out.Spec = cloneAppSpec(app.Spec)
+	out.CurrentResourceUsage = cloneResourceUsage(app.CurrentResourceUsage)
 	out.Bindings = cloneServiceBindings(app.Bindings)
 	out.BackingServices = cloneBackingServices(app.BackingServices)
 	if len(app.TechStack) > 0 {
@@ -139,6 +140,7 @@ func cloneBackingServices(services []model.BackingService) []model.BackingServic
 func cloneBackingService(service model.BackingService) model.BackingService {
 	out := service
 	out.Spec = cloneBackingServiceSpec(service.Spec)
+	out.CurrentResourceUsage = cloneResourceUsage(service.CurrentResourceUsage)
 	return out
 }
 
@@ -166,6 +168,14 @@ func cloneServiceBinding(binding model.ServiceBinding) model.ServiceBinding {
 	out := binding
 	out.Env = cloneStringMap(binding.Env)
 	return out
+}
+
+func cloneResourceUsage(usage *model.ResourceUsage) *model.ResourceUsage {
+	if usage == nil {
+		return nil
+	}
+	copied := *usage
+	return &copied
 }
 
 func buildAppTechStack(app model.App) []model.AppTechnology {

@@ -15,6 +15,7 @@ func (s *Server) handleListBackingServices(w http.ResponseWriter, r *http.Reques
 		s.writeStoreError(w, err)
 		return
 	}
+	services = s.overlayCurrentResourceUsageOnServices(r.Context(), services)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"backing_services": cloneBackingServices(services),
 	})
@@ -64,6 +65,7 @@ func (s *Server) handleGetBackingService(w http.ResponseWriter, r *http.Request)
 		httpx.WriteError(w, http.StatusForbidden, "backing service is not visible to this tenant")
 		return
 	}
+	service = firstBackingServiceOrDefault(s.overlayCurrentResourceUsageOnServices(r.Context(), []model.BackingService{service}), service)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"backing_service": cloneBackingService(service),
 	})
@@ -96,6 +98,7 @@ func (s *Server) handleListAppBindings(w http.ResponseWriter, r *http.Request) {
 	if !allowed {
 		return
 	}
+	app = s.overlayCurrentResourceUsageOnApp(r.Context(), app)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"bindings":         cloneServiceBindings(app.Bindings),
 		"backing_services": cloneBackingServices(app.BackingServices),
@@ -220,4 +223,11 @@ func appBindingByID(app model.App, bindingID string) (model.ServiceBinding, bool
 		}
 	}
 	return model.ServiceBinding{}, false
+}
+
+func firstBackingServiceOrDefault(services []model.BackingService, fallback model.BackingService) model.BackingService {
+	if len(services) == 0 {
+		return fallback
+	}
+	return services[0]
 }

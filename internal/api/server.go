@@ -813,6 +813,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		visibleApps = append(visibleApps, app)
 	}
 	visibleApps = s.overlayManagedAppStatuses(r.Context(), visibleApps)
+	visibleApps = s.overlayCurrentResourceUsageOnApps(r.Context(), visibleApps)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"apps": sanitizeAppsForAPI(visibleApps)})
 }
 
@@ -828,6 +829,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	app = s.overlayManagedAppStatus(r.Context(), app)
+	app = s.overlayCurrentResourceUsageOnApp(r.Context(), app)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"app": sanitizeAppForAPI(app)})
 }
 

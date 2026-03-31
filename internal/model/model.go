@@ -215,6 +215,12 @@ type ClusterNodeStorageStats struct {
 	UsagePercent     *float64 `json:"usage_percent,omitempty"`
 }
 
+type ResourceUsage struct {
+	CPUMilliCores         *int64 `json:"cpu_millicores,omitempty"`
+	MemoryBytes           *int64 `json:"memory_bytes,omitempty"`
+	EphemeralStorageBytes *int64 `json:"ephemeral_storage_bytes,omitempty"`
+}
+
 type ClusterNodeWorkloadPod struct {
 	Name  string `json:"name"`
 	Phase string `json:"phase,omitempty"`
@@ -385,6 +391,7 @@ type BackingService struct {
 	Provisioner             string             `json:"provisioner"`
 	Status                  string             `json:"status"`
 	Spec                    BackingServiceSpec `json:"spec"`
+	CurrentResourceUsage    *ResourceUsage     `json:"current_resource_usage,omitempty"`
 	CurrentRuntimeStartedAt *time.Time         `json:"current_runtime_started_at,omitempty"`
 	CurrentRuntimeReadyAt   *time.Time         `json:"current_runtime_ready_at,omitempty"`
 	CreatedAt               time.Time          `json:"created_at"`
@@ -414,20 +421,21 @@ type AppStatus struct {
 }
 
 type App struct {
-	ID              string           `json:"id"`
-	TenantID        string           `json:"tenant_id"`
-	ProjectID       string           `json:"project_id"`
-	Name            string           `json:"name"`
-	Description     string           `json:"description"`
-	Source          *AppSource       `json:"source,omitempty"`
-	Route           *AppRoute        `json:"route,omitempty"`
-	Spec            AppSpec          `json:"spec"`
-	Status          AppStatus        `json:"status"`
-	Bindings        []ServiceBinding `json:"bindings,omitempty"`
-	BackingServices []BackingService `json:"backing_services,omitempty"`
-	TechStack       []AppTechnology  `json:"tech_stack,omitempty"`
-	CreatedAt       time.Time        `json:"created_at"`
-	UpdatedAt       time.Time        `json:"updated_at"`
+	ID                   string           `json:"id"`
+	TenantID             string           `json:"tenant_id"`
+	ProjectID            string           `json:"project_id"`
+	Name                 string           `json:"name"`
+	Description          string           `json:"description"`
+	Source               *AppSource       `json:"source,omitempty"`
+	Route                *AppRoute        `json:"route,omitempty"`
+	Spec                 AppSpec          `json:"spec"`
+	Status               AppStatus        `json:"status"`
+	CurrentResourceUsage *ResourceUsage   `json:"current_resource_usage,omitempty"`
+	Bindings             []ServiceBinding `json:"bindings,omitempty"`
+	BackingServices      []BackingService `json:"backing_services,omitempty"`
+	TechStack            []AppTechnology  `json:"tech_stack,omitempty"`
+	CreatedAt            time.Time        `json:"created_at"`
+	UpdatedAt            time.Time        `json:"updated_at"`
 }
 
 type IdempotencyRecord struct {
