@@ -151,11 +151,26 @@ configure_runner() {
 }
 
 install_service() {
+  local needs_install="false"
   if [[ ! -f "${GITHUB_RUNNER_INSTALL_DIR}/svc.sh" ]]; then
     fail "runner service script not found"
   fi
 
+  if [[ ! -x "${GITHUB_RUNNER_INSTALL_DIR}/runsvc.sh" ]]; then
+    needs_install="true"
+  fi
   if ! compgen -G "/etc/systemd/system/actions.runner.*.service" >/dev/null; then
+    needs_install="true"
+  fi
+
+  if [[ "${needs_install}" == "true" ]] && compgen -G "/etc/systemd/system/actions.runner.*.service" >/dev/null; then
+    (
+      cd "${GITHUB_RUNNER_INSTALL_DIR}"
+      ./svc.sh uninstall || true
+    )
+  fi
+
+  if [[ "${needs_install}" == "true" ]]; then
     (
       cd "${GITHUB_RUNNER_INSTALL_DIR}"
       ./svc.sh install "${GITHUB_RUNNER_USER}"

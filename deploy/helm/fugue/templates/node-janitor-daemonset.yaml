@@ -133,14 +133,73 @@ spec:
               cleanup_runner_artifacts() {
                 local active_bin=""
                 local active_externals=""
+                local runner_bin_link=""
+                local runner_externals_link=""
                 if [[ "${runner_cleanup_enabled}" != "true" ]]; then
                   return
                 fi
                 if [[ ! -d "${runner_root}" ]]; then
                   return
                 fi
-                active_bin="$(readlink -f "${runner_root}/bin" 2>/dev/null || true)"
-                active_externals="$(readlink -f "${runner_root}/externals" 2>/dev/null || true)"
+                runner_bin_link="${runner_root}/bin"
+                runner_externals_link="${runner_root}/externals"
+
+                resolve_runner_dir() {
+                  local link_path="$1"
+                  local target=""
+                  local resolved=""
+
+                  resolved="$(readlink -f "${link_path}" 2>/dev/null || true)"
+                  if [[ -n "${resolved}" ]]; then
+                    printf '%s\n' "${resolved}"
+                    return 0
+                  fi
+
+                  target="$(readlink "${link_path}" 2>/dev/null || true)"
+                  if [[ -z "${target}" ]]; then
+                    return 1
+                  fi
+
+                  if [[ "${target}" == /* ]]; then
+                    resolved="$(readlink -f "${host_root}${target}" 2>/dev/null || true)"
+                  else
+                    resolved="$(readlink -f "$(dirname "${link_path}")/${target}" 2>/dev/null || true)"
+                  fi
+
+                  if [[ -z "${resolved}" ]]; then
+                    return 1
+                  fi
+
+                  printf '%s\n' "${resolved}"
+                  return 0
+                }
+
+                if ! active_bin="$(resolve_runner_dir "${runner_bin_link}")"; then
+                  log "skip runner cleanup on ${NODE_NAME}: unable to resolve active runner bin target ${runner_bin_link#${host_root}}"
+                  return
+                fi
+                if ! active_externals="$(resolve_runner_dir "${runner_externals_link}")"; then
+                  log "skip runner cleanup on ${NODE_NAME}: unable to resolve active runner externals target ${runner_externals_link#${host_root}}"
+                  return
+                fi
+
+                case "${active_bin}" in
+                  "${runner_root}"/bin.*)
+                    ;;
+                  *)
+                    log "skip runner cleanup on ${NODE_NAME}: unexpected active runner bin target ${active_bin#${host_root}}"
+                    return
+                    ;;
+                esac
+
+                case "${active_externals}" in
+                  "${runner_root}"/externals.*)
+                    ;;
+                  *)
+                    log "skip runner cleanup on ${NODE_NAME}: unexpected active runner externals target ${active_externals#${host_root}}"
+                    return
+                    ;;
+                esac
 
                 find "${runner_root}" -maxdepth 1 -mindepth 1 -type d -name 'bin.*' -mmin "+$(( runner_cleanup_stale_hours * 60 ))" 2>/dev/null | while read -r path; do
                   if [[ -n "${active_bin}" && "${path}" == "${active_bin}" ]]; then
