@@ -16,6 +16,7 @@ on:
       - 'deploy/helm/fugue/templates/controller-deployment.yaml'
       - 'deploy/helm/fugue/templates/deployment.yaml'
       - 'deploy/helm/fugue/templates/ingress.yaml'
+      - 'deploy/helm/fugue/templates/node-janitor-daemonset.yaml'
       - 'deploy/helm/fugue/templates/poddisruptionbudgets.yaml'
       - 'deploy/helm/fugue/templates/rbac.yaml'
       - 'deploy/helm/fugue/templates/secret.yaml'
