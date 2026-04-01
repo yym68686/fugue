@@ -8,8 +8,9 @@ const (
 	BillingStatusRestricted = "restricted"
 	BillingStatusOverCap    = "over-cap"
 
-	BillingEventTypeTopUp         = "top-up"
-	BillingEventTypeConfigUpdated = "config-updated"
+	BillingEventTypeTopUp           = "top-up"
+	BillingEventTypeConfigUpdated   = "config-updated"
+	BillingEventTypeBalanceAdjusted = "balance-adjusted"
 
 	DefaultBillingCurrency            = "USD"
 	DefaultBillingHoursPerMonth int64 = 730

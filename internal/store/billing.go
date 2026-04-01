@@ -121,6 +121,42 @@ func (s *Store) TopUpTenantBilling(tenantID string, amountCents int64, note stri
 	return summary, err
 }
 
+func (s *Store) SetTenantBillingBalance(tenantID string, balanceCents int64, metadata map[string]string) (model.TenantBillingSummary, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" || balanceCents < 0 {
+		return model.TenantBillingSummary{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgSetTenantBillingBalance(tenantID, balanceCents, metadata)
+	}
+
+	targetBalanceMicroCents := balanceCents * microCentsPerCent
+	var summary model.TenantBillingSummary
+	err := s.withLockedState(true, func(state *model.State) error {
+		if findTenant(state, tenantID) < 0 {
+			return ErrNotFound
+		}
+		now := time.Now().UTC()
+		billing := ensureTenantBillingRecord(state, tenantID, now)
+		accrueTenantBilling(billing, now)
+		previousBalanceMicroCents := billing.BalanceMicroCents
+		if previousBalanceMicroCents != targetBalanceMicroCents {
+			billing.BalanceMicroCents = targetBalanceMicroCents
+			billing.UpdatedAt = now
+			appendTenantBillingEvent(state, newTenantBillingBalanceAdjustedEvent(
+				tenantID,
+				targetBalanceMicroCents-previousBalanceMicroCents,
+				billing.BalanceMicroCents,
+				now,
+				metadata,
+			))
+		}
+		summary = buildTenantBillingSummary(state, *billing)
+		return nil
+	})
+	return summary, err
+}
+
 func normalizeAppSpecResources(spec *model.AppSpec) error {
 	if spec == nil {
 		return ErrInvalidInput
@@ -342,6 +378,33 @@ func newTenantBillingConfigUpdatedEvent(
 	}
 }
 
+func newTenantBillingBalanceAdjustedEvent(
+	tenantID string,
+	amountMicroCents int64,
+	balanceAfterMicroCents int64,
+	now time.Time,
+	metadata map[string]string,
+) model.TenantBillingEvent {
+	eventMetadata := map[string]string{}
+	for key, value := range metadata {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		eventMetadata[key] = value
+	}
+	return model.TenantBillingEvent{
+		ID:                     model.NewID("billingevt"),
+		TenantID:               tenantID,
+		Type:                   model.BillingEventTypeBalanceAdjusted,
+		AmountMicroCents:       amountMicroCents,
+		BalanceAfterMicroCents: balanceAfterMicroCents,
+		Metadata:               eventMetadata,
+		CreatedAt:              now,
+	}
+}
+
 func tenantHasBillingEvents(state *model.State, tenantID string) bool {
 	if state == nil {
 		return false
@@ -392,7 +455,14 @@ func accrueTenantBilling(record *model.TenantBilling, now time.Time) {
 	record.UpdatedAt = now
 }
 
+func hasBillableManagedEnvelope(spec model.ResourceSpec) bool {
+	return spec.CPUMilliCores > 0 && spec.MemoryMebibytes > 0
+}
+
 func billingHourlyRateMicroCents(record model.TenantBilling) int64 {
+	if !hasBillableManagedEnvelope(record.ManagedCap) {
+		return 0
+	}
 	priceBook := normalizeBillingPriceBook(record.PriceBook)
 	return record.ManagedCap.CPUMilliCores*priceBook.CPUMicroCentsPerMilliCoreHour +
 		record.ManagedCap.MemoryMebibytes*priceBook.MemoryMicroCentsPerMiBHour
@@ -451,7 +521,7 @@ func buildTenantBillingSummary(state *model.State, record model.TenantBilling) m
 func tenantBillingStatus(record model.TenantBilling, committed model.ResourceSpec) (string, string) {
 	switch {
 	case billingHourlyRateMicroCents(record) <= 0:
-		return model.BillingStatusInactive, "Managed billing is inactive until you save a non-zero envelope or launch managed capacity. External-owned runtimes remain free."
+		return model.BillingStatusInactive, "Managed billing is inactive until both CPU and memory are above zero. External-owned runtimes remain free."
 	case resourceSpecExceeds(committed, record.ManagedCap):
 		return model.BillingStatusOverCap, "Current live managed capacity is above the saved envelope. Managed expansion still works while balance stays positive, and Fugue will lift the envelope automatically on the next managed capacity increase."
 	case billingBalanceRestricted(record):

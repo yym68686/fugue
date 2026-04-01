@@ -116,6 +116,57 @@ func (s *Server) handleTopUpBilling(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleSetBillingBalance(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() {
+		httpx.WriteError(w, http.StatusForbidden, "platform admin access required")
+		return
+	}
+
+	var req struct {
+		TenantID     string `json:"tenant_id"`
+		BalanceCents int64  `json:"balance_cents"`
+		Note         string `json:"note"`
+	}
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	tenantID, ok := s.resolveTenantID(principal, req.TenantID)
+	if !ok {
+		httpx.WriteError(w, http.StatusForbidden, "cannot update billing for another tenant")
+		return
+	}
+	if strings.TrimSpace(tenantID) == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "tenant_id is required")
+		return
+	}
+
+	metadata := map[string]string{
+		"source":     "platform-admin",
+		"actor_type": principal.ActorType,
+		"actor_id":   principal.ActorID,
+	}
+	if note := strings.TrimSpace(req.Note); note != "" {
+		metadata["note"] = note
+	}
+
+	summary, err := s.store.SetTenantBillingBalance(tenantID, req.BalanceCents, metadata)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	summary.CurrentUsage = s.currentTenantManagedUsage(r.Context(), tenantID, true)
+	s.appendAudit(principal, "billing.balance.set", "tenant", tenantID, tenantID, map[string]string{
+		"balance_cents": httpxValue(req.BalanceCents),
+		"note":          strings.TrimSpace(req.Note),
+	})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"billing": summary,
+	})
+}
+
 func (s *Server) currentTenantManagedUsage(ctx context.Context, tenantID string, platformAdmin bool) *model.ResourceUsage {
 	apps, err := s.store.ListApps(tenantID, platformAdmin)
 	if err != nil {

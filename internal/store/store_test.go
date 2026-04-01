@@ -3169,6 +3169,165 @@ func TestExplicitZeroBillingConfigDoesNotBackfillAfterConfigEvent(t *testing.T) 
 	}
 }
 
+func TestSetTenantBillingBalanceRecordsSignedAdjustments(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Balance Adjustment Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+
+	metadata := map[string]string{
+		"source":     "platform-admin",
+		"actor_type": model.ActorTypeBootstrap,
+		"actor_id":   "bootstrap-admin",
+	}
+
+	if _, err := s.SetTenantBillingBalance(tenant.ID, 0, metadata); err != nil {
+		t.Fatalf("set balance to zero: %v", err)
+	}
+	if _, err := s.SetTenantBillingBalance(tenant.ID, 1000, metadata); err != nil {
+		t.Fatalf("set balance to 1000 cents: %v", err)
+	}
+	summary, err := s.SetTenantBillingBalance(tenant.ID, 300, metadata)
+	if err != nil {
+		t.Fatalf("set balance to 300 cents: %v", err)
+	}
+
+	if summary.BalanceMicroCents != 300*microCentsPerCent {
+		t.Fatalf("expected final balance 300 cents, got %d microcents", summary.BalanceMicroCents)
+	}
+	if len(summary.Events) < 3 {
+		t.Fatalf("expected at least 3 billing events, got %+v", summary.Events)
+	}
+
+	latest := summary.Events[0]
+	if latest.Type != model.BillingEventTypeBalanceAdjusted {
+		t.Fatalf("expected latest event type %q, got %q", model.BillingEventTypeBalanceAdjusted, latest.Type)
+	}
+	if latest.AmountMicroCents != -700*microCentsPerCent {
+		t.Fatalf("expected latest delta -700 cents, got %d microcents", latest.AmountMicroCents)
+	}
+	if latest.BalanceAfterMicroCents != 300*microCentsPerCent {
+		t.Fatalf("expected latest balance after 300 cents, got %d microcents", latest.BalanceAfterMicroCents)
+	}
+	if latest.Metadata["source"] != "platform-admin" {
+		t.Fatalf("expected latest event source metadata, got %+v", latest.Metadata)
+	}
+
+	previous := summary.Events[1]
+	if previous.Type != model.BillingEventTypeBalanceAdjusted {
+		t.Fatalf("expected previous event type %q, got %q", model.BillingEventTypeBalanceAdjusted, previous.Type)
+	}
+	if previous.AmountMicroCents != 1000*microCentsPerCent {
+		t.Fatalf("expected previous delta +1000 cents, got %d microcents", previous.AmountMicroCents)
+	}
+	if previous.BalanceAfterMicroCents != 1000*microCentsPerCent {
+		t.Fatalf("expected previous balance after 1000 cents, got %d microcents", previous.BalanceAfterMicroCents)
+	}
+
+	noOpSummary, err := s.SetTenantBillingBalance(tenant.ID, 300, metadata)
+	if err != nil {
+		t.Fatalf("repeat balance set: %v", err)
+	}
+	if len(noOpSummary.Events) != len(summary.Events) {
+		t.Fatalf("expected no-op balance set to avoid creating a new event, got %+v", noOpSummary.Events)
+	}
+	if noOpSummary.Events[0].ID != latest.ID {
+		t.Fatalf("expected no-op balance set to keep latest event %s, got %s", latest.ID, noOpSummary.Events[0].ID)
+	}
+}
+
+func TestSingleZeroBillingDimensionPausesManagedBilling(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name       string
+		managedCap model.ResourceSpec
+	}{
+		{
+			name: "cpu zero",
+			managedCap: model.ResourceSpec{
+				CPUMilliCores:   0,
+				MemoryMebibytes: 2048,
+			},
+		},
+		{
+			name: "memory zero",
+			managedCap: model.ResourceSpec{
+				CPUMilliCores:   1000,
+				MemoryMebibytes: 0,
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(filepath.Join(t.TempDir(), "store.json"))
+			if err := s.Init(); err != nil {
+				t.Fatalf("init store: %v", err)
+			}
+
+			tenant, err := s.CreateTenant("Paused Dimension Tenant")
+			if err != nil {
+				t.Fatalf("create tenant: %v", err)
+			}
+
+			if _, err := s.UpdateTenantBilling(tenant.ID, tc.managedCap); err != nil {
+				t.Fatalf("update billing: %v", err)
+			}
+
+			staleAccrual := time.Now().UTC().Add(-48 * time.Hour)
+			var previousBalance int64
+			if err := s.withLockedState(true, func(state *model.State) error {
+				index := findTenantBillingRecord(state, tenant.ID)
+				if index < 0 {
+					t.Fatalf("billing record for tenant %s not found", tenant.ID)
+				}
+				previousBalance = state.TenantBilling[index].BalanceMicroCents
+				state.TenantBilling[index].LastAccruedAt = staleAccrual
+				state.TenantBilling[index].UpdatedAt = staleAccrual
+				return nil
+			}); err != nil {
+				t.Fatalf("seed paused single-dimension billing state: %v", err)
+			}
+
+			summary, err := s.GetTenantBillingSummary(tenant.ID)
+			if err != nil {
+				t.Fatalf("get billing summary: %v", err)
+			}
+
+			if summary.Status != model.BillingStatusInactive {
+				t.Fatalf("expected inactive billing status, got %s", summary.Status)
+			}
+			if summary.HourlyRateMicroCents != 0 {
+				t.Fatalf("expected zero hourly rate, got %d", summary.HourlyRateMicroCents)
+			}
+			if summary.MonthlyEstimateMicroCents != 0 {
+				t.Fatalf("expected zero monthly estimate, got %d", summary.MonthlyEstimateMicroCents)
+			}
+			if summary.BalanceRestricted {
+				t.Fatal("expected balance restriction to stay disabled while billing is paused")
+			}
+			if summary.RunwayHours != nil {
+				t.Fatalf("expected no runway while billing is paused, got %v", *summary.RunwayHours)
+			}
+			if summary.BalanceMicroCents != previousBalance {
+				t.Fatalf(
+					"expected balance %d to remain unchanged while billing is paused, got %d",
+					previousBalance,
+					summary.BalanceMicroCents,
+				)
+			}
+		})
+	}
+}
+
 func TestBillingAllowsScaleDownWhileOverCap(t *testing.T) {
 	t.Parallel()
 

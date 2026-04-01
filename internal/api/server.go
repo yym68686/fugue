@@ -108,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /v1/projects/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteProject)))
 	mux.Handle("GET /v1/billing", s.auth.RequireAPI(http.HandlerFunc(s.handleGetBilling)))
 	mux.Handle("PATCH /v1/billing", s.auth.RequireAPI(http.HandlerFunc(s.handleUpdateBilling)))
+	mux.Handle("PATCH /v1/billing/balance", s.auth.RequireAPI(http.HandlerFunc(s.handleSetBillingBalance)))
 	mux.Handle("POST /v1/billing/top-ups", s.auth.RequireAPI(http.HandlerFunc(s.handleTopUpBilling)))
 
 	mux.Handle("GET /v1/api-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleListAPIKeys)))

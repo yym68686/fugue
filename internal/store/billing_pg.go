@@ -169,6 +169,67 @@ func (s *Store) pgTopUpTenantBilling(tenantID string, amountCents int64, note st
 	return summary, nil
 }
 
+func (s *Store) pgSetTenantBillingBalance(tenantID string, balanceCents int64, metadata map[string]string) (model.TenantBillingSummary, error) {
+	if balanceCents < 0 {
+		return model.TenantBillingSummary{}, ErrInvalidInput
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.TenantBillingSummary{}, fmt.Errorf("begin billing balance transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	exists, err := s.pgTenantExistsTx(ctx, tx, tenantID)
+	if err != nil {
+		return model.TenantBillingSummary{}, err
+	}
+	if !exists {
+		return model.TenantBillingSummary{}, ErrNotFound
+	}
+
+	now := time.Now().UTC()
+	record, err := s.pgEnsureTenantBillingRecordTx(ctx, tx, tenantID, true, now)
+	if err != nil {
+		return model.TenantBillingSummary{}, err
+	}
+	accrueTenantBilling(&record, now)
+	previousBalanceMicroCents := record.BalanceMicroCents
+	targetBalanceMicroCents := balanceCents * microCentsPerCent
+	if previousBalanceMicroCents != targetBalanceMicroCents {
+		record.BalanceMicroCents = targetBalanceMicroCents
+		record.UpdatedAt = now
+	}
+	if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, record); err != nil {
+		return model.TenantBillingSummary{}, err
+	}
+	if previousBalanceMicroCents != targetBalanceMicroCents {
+		if err := s.pgInsertTenantBillingEventTx(ctx, tx, newTenantBillingBalanceAdjustedEvent(
+			tenantID,
+			targetBalanceMicroCents-previousBalanceMicroCents,
+			record.BalanceMicroCents,
+			now,
+			metadata,
+		)); err != nil {
+			return model.TenantBillingSummary{}, err
+		}
+	}
+
+	state, err := s.pgLoadTenantBillingStateTx(ctx, tx, tenantID)
+	if err != nil {
+		return model.TenantBillingSummary{}, err
+	}
+	summary := buildTenantBillingSummary(&state, record)
+
+	if err := tx.Commit(); err != nil {
+		return model.TenantBillingSummary{}, fmt.Errorf("commit billing balance transaction: %w", err)
+	}
+	return summary, nil
+}
+
 func (s *Store) ensureTenantBillingRecordsTx(ctx context.Context, tx *sql.Tx) error {
 	now := time.Now().UTC()
 	defaultRecord := defaultTenantBilling("", now)
