@@ -11,10 +11,14 @@ const (
 	BillingEventTypeTopUp         = "top-up"
 	BillingEventTypeConfigUpdated = "config-updated"
 
-	DefaultBillingCurrency                            = "USD"
-	DefaultBillingHoursPerMonth                 int64 = 730
-	DefaultBillingCPUMicroCentsPerMilliCoreHour int64 = 3000
-	DefaultBillingMemoryMicroCentsPerMiBHour    int64 = 1000
+	DefaultBillingCurrency            = "USD"
+	DefaultBillingHoursPerMonth int64 = 730
+	// Calibrated so a managed envelope of 2 vCPU / 4 GiB displays as roughly $4.00/month.
+	DefaultBillingCPUMicroCentsPerMilliCoreHour int64 = 161
+	DefaultBillingMemoryMicroCentsPerMiBHour    int64 = 55
+
+	DefaultTenantFreeManagedCPUMilliCores   int64 = 500
+	DefaultTenantFreeManagedMemoryMebibytes int64 = 512
 
 	DefaultManagedAppCPUMilliCores        int64 = 250
 	DefaultManagedAppMemoryMebibytes      int64 = 512
@@ -88,6 +92,13 @@ func DefaultManagedPostgresResources() ResourceSpec {
 	return ResourceSpec{
 		CPUMilliCores:   DefaultManagedPostgresCPUMilliCores,
 		MemoryMebibytes: DefaultManagedPostgresMemoryMebibytes,
+	}
+}
+
+func DefaultTenantFreeManagedCap() ResourceSpec {
+	return ResourceSpec{
+		CPUMilliCores:   DefaultTenantFreeManagedCPUMilliCores,
+		MemoryMebibytes: DefaultTenantFreeManagedMemoryMebibytes,
 	}
 }
 

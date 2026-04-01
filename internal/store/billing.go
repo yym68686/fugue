@@ -201,15 +201,15 @@ func ensureTenantBillingDefaults(state *model.State) {
 
 func defaultTenantBilling(tenantID string, now time.Time) model.TenantBilling {
 	record := model.TenantBilling{
-		TenantID:          tenantID,
-		ManagedCap:        model.ResourceSpec{},
-		BalanceMicroCents: 0,
-		PriceBook:         model.DefaultBillingPriceBook(),
-		LastAccruedAt:     now,
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		TenantID:      tenantID,
+		ManagedCap:    model.DefaultTenantFreeManagedCap(),
+		PriceBook:     model.DefaultBillingPriceBook(),
+		LastAccruedAt: now,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 	normalizeTenantBillingRecord(&record, now)
+	record.BalanceMicroCents = billingMonthlyEstimateMicroCents(record)
 	return record
 }
 
@@ -218,6 +218,9 @@ func ensureTenantBillingRecord(state *model.State, tenantID string, now time.Tim
 	if index >= 0 {
 		record := &state.TenantBilling[index]
 		normalizeTenantBillingRecord(record, now)
+		if shouldBackfillLegacyTenantBillingRecord(*record) && !tenantHasBillingEvents(state, tenantID) {
+			backfillLegacyTenantBillingRecord(record, now)
+		}
 		return record
 	}
 	record := defaultTenantBilling(tenantID, now)
@@ -240,6 +243,22 @@ func normalizeTenantBillingRecord(record *model.TenantBilling, now time.Time) {
 	if record.UpdatedAt.IsZero() {
 		record.UpdatedAt = record.CreatedAt
 	}
+}
+
+func shouldBackfillLegacyTenantBillingRecord(record model.TenantBilling) bool {
+	return record.ManagedCap.CPUMilliCores == 0 &&
+		record.ManagedCap.MemoryMebibytes == 0 &&
+		record.BalanceMicroCents == 0
+}
+
+func backfillLegacyTenantBillingRecord(record *model.TenantBilling, now time.Time) {
+	if record == nil {
+		return
+	}
+	record.ManagedCap = model.DefaultTenantFreeManagedCap()
+	record.BalanceMicroCents = billingMonthlyEstimateMicroCents(*record)
+	record.LastAccruedAt = now
+	record.UpdatedAt = now
 }
 
 func normalizeBillingPriceBook(priceBook model.BillingPriceBook) model.BillingPriceBook {
@@ -279,6 +298,18 @@ func appendTenantBillingEvent(state *model.State, event model.TenantBillingEvent
 		state.BillingEvents = []model.TenantBillingEvent{}
 	}
 	state.BillingEvents = append(state.BillingEvents, event)
+}
+
+func tenantHasBillingEvents(state *model.State, tenantID string) bool {
+	if state == nil {
+		return false
+	}
+	for _, event := range state.BillingEvents {
+		if event.TenantID == tenantID {
+			return true
+		}
+	}
+	return false
 }
 
 func deleteTenantBillingRecords(records []model.TenantBilling, tenantID string) []model.TenantBilling {
@@ -544,6 +575,8 @@ func projectedAppManagedBundleCommitment(state *model.State, app model.App, op m
 	current := appManagedBundleCommitment(state, app, app.Status.CurrentRuntimeID, app.Status.CurrentReplicas)
 	projection := cloneBillingProjectionState(state, app)
 	opCopy := op
+	opCopy.DesiredSpec = cloneAppSpec(op.DesiredSpec)
+	opCopy.DesiredSource = cloneAppSource(op.DesiredSource)
 	if strings.TrimSpace(opCopy.ID) == "" {
 		opCopy.ID = "billing-projection"
 	}

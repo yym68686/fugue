@@ -35,6 +35,12 @@ func TestManagedAndExternalOperationFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.ResourceSpec{
+		CPUMilliCores:   500,
+		MemoryMebibytes: 1024,
+	}); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
+	}
 
 	deploySpec := app.Spec
 	deploySpec.Replicas = 2
@@ -567,6 +573,12 @@ func TestDeployOperationConvertsInlinePostgresToBackingServiceOnComplete(t *test
 	})
 	if err != nil {
 		t.Fatalf("create app: %v", err)
+	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.ResourceSpec{
+		CPUMilliCores:   750,
+		MemoryMebibytes: 1536,
+	}); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
 	}
 
 	desiredSpec := app.Spec
@@ -2348,6 +2360,12 @@ func TestClaimAndRequeueManagedOperationRefreshAppStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.ResourceSpec{
+		CPUMilliCores:   500,
+		MemoryMebibytes: 1024,
+	}); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
+	}
 
 	replicas := 2
 	op, err := s.CreateOperation(model.Operation{
@@ -2900,6 +2918,157 @@ func TestBillingBlocksManagedScaleBeyondConfiguredEnvelope(t *testing.T) {
 		DesiredReplicas: &replicas,
 	}); !errors.Is(err, ErrBillingCapExceeded) {
 		t.Fatalf("expected ErrBillingCapExceeded, got %v", err)
+	}
+}
+
+func TestNewTenantsStartWithSeededFreeTierBilling(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Free Tier Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+
+	expectedCap := model.DefaultTenantFreeManagedCap()
+	expectedBalance := billingMonthlyEstimateMicroCents(model.TenantBilling{
+		ManagedCap: expectedCap,
+		PriceBook:  model.DefaultBillingPriceBook(),
+	})
+
+	if err := s.withLockedState(false, func(state *model.State) error {
+		index := findTenantBillingRecord(state, tenant.ID)
+		if index < 0 {
+			t.Fatalf("billing record for tenant %s not found", tenant.ID)
+		}
+		record := state.TenantBilling[index]
+		if record.ManagedCap != expectedCap {
+			t.Fatalf("expected free-tier cap %+v, got %+v", expectedCap, record.ManagedCap)
+		}
+		if record.BalanceMicroCents != expectedBalance {
+			t.Fatalf("expected seeded balance %d, got %d", expectedBalance, record.BalanceMicroCents)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("inspect billing state: %v", err)
+	}
+
+	summary, err := s.GetTenantBillingSummary(tenant.ID)
+	if err != nil {
+		t.Fatalf("get billing summary: %v", err)
+	}
+	if summary.ManagedCap != expectedCap {
+		t.Fatalf("expected summary cap %+v, got %+v", expectedCap, summary.ManagedCap)
+	}
+	if summary.Status != model.BillingStatusActive {
+		t.Fatalf("expected active billing status, got %s", summary.Status)
+	}
+	if summary.MonthlyEstimateMicroCents != expectedBalance {
+		t.Fatalf("expected monthly estimate %d, got %d", expectedBalance, summary.MonthlyEstimateMicroCents)
+	}
+	if summary.BalanceMicroCents != expectedBalance {
+		t.Fatalf("expected seeded summary balance %d, got %d", expectedBalance, summary.BalanceMicroCents)
+	}
+}
+
+func TestLegacyZeroBillingRecordBackfillsSeededFreeTier(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Legacy Billing Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+
+	staleAccrual := time.Now().UTC().Add(-72 * time.Hour)
+	if err := s.withLockedState(true, func(state *model.State) error {
+		index := findTenantBillingRecord(state, tenant.ID)
+		if index < 0 {
+			t.Fatalf("billing record for tenant %s not found", tenant.ID)
+		}
+		state.TenantBilling[index].ManagedCap = model.ResourceSpec{}
+		state.TenantBilling[index].BalanceMicroCents = 0
+		state.TenantBilling[index].LastAccruedAt = staleAccrual
+		state.TenantBilling[index].UpdatedAt = staleAccrual
+		return nil
+	}); err != nil {
+		t.Fatalf("seed legacy billing state: %v", err)
+	}
+
+	summary, err := s.GetTenantBillingSummary(tenant.ID)
+	if err != nil {
+		t.Fatalf("get billing summary: %v", err)
+	}
+
+	expectedCap := model.DefaultTenantFreeManagedCap()
+	expectedBalance := billingMonthlyEstimateMicroCents(model.TenantBilling{
+		ManagedCap: expectedCap,
+		PriceBook:  model.DefaultBillingPriceBook(),
+	})
+
+	if summary.ManagedCap != expectedCap {
+		t.Fatalf("expected backfilled cap %+v, got %+v", expectedCap, summary.ManagedCap)
+	}
+	if summary.MonthlyEstimateMicroCents != expectedBalance {
+		t.Fatalf("expected backfilled monthly estimate %d, got %d", expectedBalance, summary.MonthlyEstimateMicroCents)
+	}
+	if summary.BalanceMicroCents != expectedBalance {
+		t.Fatalf("expected backfilled balance %d without stale drain, got %d", expectedBalance, summary.BalanceMicroCents)
+	}
+}
+
+func TestExplicitZeroBillingConfigDoesNotBackfillAfterConfigEvent(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Paused Billing Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.ResourceSpec{}); err != nil {
+		t.Fatalf("pause billing: %v", err)
+	}
+
+	staleAccrual := time.Now().UTC().Add(-72 * time.Hour)
+	if err := s.withLockedState(true, func(state *model.State) error {
+		index := findTenantBillingRecord(state, tenant.ID)
+		if index < 0 {
+			t.Fatalf("billing record for tenant %s not found", tenant.ID)
+		}
+		state.TenantBilling[index].BalanceMicroCents = 0
+		state.TenantBilling[index].LastAccruedAt = staleAccrual
+		state.TenantBilling[index].UpdatedAt = staleAccrual
+		return nil
+	}); err != nil {
+		t.Fatalf("seed paused billing state: %v", err)
+	}
+
+	summary, err := s.GetTenantBillingSummary(tenant.ID)
+	if err != nil {
+		t.Fatalf("get billing summary: %v", err)
+	}
+
+	if summary.ManagedCap != (model.ResourceSpec{}) {
+		t.Fatalf("expected explicit zero cap to remain paused, got %+v", summary.ManagedCap)
+	}
+	if summary.Status != model.BillingStatusInactive {
+		t.Fatalf("expected inactive billing status, got %s", summary.Status)
+	}
+	if summary.BalanceMicroCents != 0 {
+		t.Fatalf("expected zero balance to remain unchanged, got %d", summary.BalanceMicroCents)
 	}
 }
 

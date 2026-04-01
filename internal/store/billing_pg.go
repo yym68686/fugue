@@ -177,22 +177,23 @@ func (s *Store) pgTopUpTenantBilling(tenantID string, amountCents int64, note st
 
 func (s *Store) ensureTenantBillingRecordsTx(ctx context.Context, tx *sql.Tx) error {
 	now := time.Now().UTC()
-	managedCapJSON, err := marshalJSON(model.ResourceSpec{})
+	defaultRecord := defaultTenantBilling("", now)
+	managedCapJSON, err := marshalJSON(defaultRecord.ManagedCap)
 	if err != nil {
 		return err
 	}
-	priceBookJSON, err := marshalJSON(model.DefaultBillingPriceBook())
+	priceBookJSON, err := marshalJSON(defaultRecord.PriceBook)
 	if err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO fugue_tenant_billing (tenant_id, managed_cap_json, balance_microcents, price_book_json, last_accrued_at, created_at, updated_at)
-SELECT t.id, $1, 0, $2, $3, $3, $3
+SELECT t.id, $1, $2, $3, $4, $4, $4
 FROM fugue_tenants AS t
 LEFT JOIN fugue_tenant_billing AS b
 	ON b.tenant_id = t.id
 WHERE b.tenant_id IS NULL
-`, managedCapJSON, priceBookJSON, now); err != nil {
+`, managedCapJSON, defaultRecord.BalanceMicroCents, priceBookJSON, now); err != nil {
 		return fmt.Errorf("ensure tenant billing defaults: %w", err)
 	}
 	return nil
@@ -327,6 +328,18 @@ func (s *Store) pgEnsureTenantBillingRecordTx(ctx context.Context, tx *sql.Tx, t
 	record, err := s.pgGetTenantBillingRecordTx(ctx, tx, tenantID, forUpdate)
 	if err == nil {
 		normalizeTenantBillingRecord(&record, now)
+		if shouldBackfillLegacyTenantBillingRecord(record) {
+			hasEvents, err := s.pgTenantHasBillingEventsTx(ctx, tx, tenantID)
+			if err != nil {
+				return model.TenantBilling{}, err
+			}
+			if !hasEvents {
+				backfillLegacyTenantBillingRecord(&record, now)
+				if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, record); err != nil {
+					return model.TenantBilling{}, err
+				}
+			}
+		}
 		return record, nil
 	}
 	if !errors.Is(mapDBErr(err), ErrNotFound) {
@@ -361,6 +374,20 @@ WHERE tenant_id = $1
 		return model.TenantBilling{}, err
 	}
 	return record, nil
+}
+
+func (s *Store) pgTenantHasBillingEventsTx(ctx context.Context, tx *sql.Tx, tenantID string) (bool, error) {
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+	SELECT 1
+	FROM fugue_billing_events
+	WHERE tenant_id = $1
+)
+`, tenantID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check tenant billing events %s: %w", tenantID, err)
+	}
+	return exists, nil
 }
 
 func (s *Store) pgInsertTenantBillingRecordTx(ctx context.Context, tx *sql.Tx, record model.TenantBilling) error {

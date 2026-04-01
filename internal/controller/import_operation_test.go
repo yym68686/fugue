@@ -306,6 +306,12 @@ func TestExecuteManagedImportOperationRefreshesComposeEnvWithoutOverwritingCusto
 	}, model.AppRoute{}); err != nil {
 		t.Fatalf("create sibling app: %v", err)
 	}
+	if _, err := stateStore.UpdateTenantBilling(tenant.ID, model.ResourceSpec{
+		CPUMilliCores:   1000,
+		MemoryMebibytes: 2048,
+	}); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
+	}
 
 	specCopy := primaryApp.Spec
 	sourceCopy := *primaryApp.Source
