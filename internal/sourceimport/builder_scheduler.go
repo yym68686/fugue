@@ -61,6 +61,7 @@ type builderResourceDemand struct {
 
 type builderCandidate struct {
 	Node      builderNodeSnapshot
+	Available builderResourceDemand
 	Remaining builderResourceDemand
 }
 
@@ -529,6 +530,7 @@ func selectBuilderCandidates(policy BuilderPodPolicy, profile builderWorkloadPro
 		}
 		remaining := builderSubtractDemand(available, demand)
 		candidates = append(candidates, builderCandidate{
+			Available: available,
 			Node:      snapshot,
 			Remaining: remaining,
 		})
@@ -544,9 +546,12 @@ func selectBuilderCandidates(policy BuilderPodPolicy, profile builderWorkloadPro
 }
 
 func builderPlacementCandidates(candidates []builderCandidate, profile builderWorkloadProfile, candidateCount int) []builderCandidate {
-	limit := candidateCount
+	limit := 2
 	if profile == builderWorkloadProfileHeavy {
 		limit = 1
+	}
+	if candidateCount > 0 && candidateCount < limit {
+		limit = candidateCount
 	}
 	if limit <= 0 || len(candidates) <= limit {
 		return candidates
@@ -556,13 +561,7 @@ func builderPlacementCandidates(candidates []builderCandidate, profile builderWo
 
 func builderCandidateLess(profile builderWorkloadProfile, left, right builderCandidate) bool {
 	descending := profile == builderWorkloadProfileHeavy
-	if cmp := builderCompareResources(left.Node.Allocatable, right.Node.Allocatable); cmp != 0 {
-		if descending {
-			return cmp > 0
-		}
-		return cmp < 0
-	}
-	if cmp := builderCompareResources(left.Remaining, right.Remaining); cmp != 0 {
+	if cmp := builderCompareResources(left.Available, right.Available); cmp != 0 {
 		if descending {
 			return cmp > 0
 		}

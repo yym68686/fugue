@@ -7,17 +7,17 @@ import (
 )
 
 const (
-	defaultBuilderBuildNodeLabelKey     = "fugue.io/build"
-	defaultBuilderBuildNodeLabelValue   = "true"
-	defaultBuilderLargeNodeLabelKey     = "fugue.io/build-tier"
-	defaultBuilderLargeNodeLabelValue   = "large"
-	defaultBuilderMediumNodeLabelValue  = "medium"
-	defaultBuilderSmallNodeLabelValue   = "small"
-	defaultBuilderCandidateCount        = 3
-	defaultBuilderSelectionTimeoutSec   = 120
-	defaultBuilderRetryIntervalSec      = 5
-	defaultBuilderReservationLeaseSec   = 120
-	defaultBuilderPreferredNodeAffinity = 100
+	defaultBuilderBuildNodeLabelKey       = "fugue.io/build"
+	defaultBuilderBuildNodeLabelValue     = "true"
+	defaultBuilderLargeNodeLabelKey       = "fugue.io/build-tier"
+	defaultBuilderLargeNodeLabelValue     = "large"
+	defaultBuilderMediumNodeLabelValue    = "medium"
+	defaultBuilderSmallNodeLabelValue     = "small"
+	defaultBuilderPreferredHostnameWeight = 100
+	defaultBuilderCandidateCount          = 3
+	defaultBuilderSelectionTimeoutSec     = 120
+	defaultBuilderRetryIntervalSec        = 5
+	defaultBuilderReservationLeaseSec     = 120
 )
 
 type builderWorkloadProfile string
@@ -296,32 +296,6 @@ func applyBuilderVolumeSizeLimits(podSpec map[string]any, policy BuilderWorkload
 	}
 }
 
-func applyBuilderPreferredLargeNodeAffinity(podSpec map[string]any, policy BuilderPodPolicy) {
-	labelKey := strings.TrimSpace(policy.LargeNodeLabelKey)
-	labelValue := strings.TrimSpace(policy.LargeNodeLabelValue)
-	if labelKey == "" || labelValue == "" {
-		return
-	}
-	podSpec["affinity"] = map[string]any{
-		"nodeAffinity": map[string]any{
-			"preferredDuringSchedulingIgnoredDuringExecution": []map[string]any{
-				{
-					"weight": defaultBuilderPreferredNodeAffinity,
-					"preference": map[string]any{
-						"matchExpressions": []map[string]any{
-							{
-								"key":      labelKey,
-								"operator": "In",
-								"values":   []string{labelValue},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
 func applyBuilderTolerations(podSpec map[string]any, tolerations []BuilderToleration) {
 	tolerations = normalizeBuilderTolerations(tolerations)
 	if len(tolerations) == 0 {
@@ -402,7 +376,7 @@ func applyBuilderPlacement(podSpec map[string]any, placement builderJobPlacement
 	}
 	nodeAffinity["preferredDuringSchedulingIgnoredDuringExecution"] = []map[string]any{
 		{
-			"weight": defaultBuilderPreferredNodeAffinity,
+			"weight": defaultBuilderPreferredHostnameWeight,
 			"preference": map[string]any{
 				"matchExpressions": []map[string]any{
 					{

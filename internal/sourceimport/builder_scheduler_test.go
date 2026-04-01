@@ -52,7 +52,7 @@ func TestNewBuilderLeaseUsesMicrosecondPrecision(t *testing.T) {
 	}
 }
 
-func TestSelectBuilderCandidatesLightPrefersSmallNodes(t *testing.T) {
+func TestSelectBuilderCandidatesLightPrefersLowerAvailableResources(t *testing.T) {
 	t.Parallel()
 
 	policy := defaultBuilderPodPolicy()
@@ -62,19 +62,19 @@ func TestSelectBuilderCandidatesLightPrefersSmallNodes(t *testing.T) {
 	}
 
 	candidates := selectBuilderCandidates(policy, builderWorkloadProfileLight, demand, []builderNodeSnapshot{
-		builderTestNode("large-a", "large-a", policy, policy.LargeNodeLabelValue, "4000m", "16Gi", "32Gi", "2500m", "9Gi", "24Gi"),
-		builderTestNode("small-a", "small-a", policy, policy.SmallNodeLabelValue, "2000m", "8Gi", "8Gi", "200m", "1Gi", "1Gi"),
+		builderTestNode("lower-available", "lower-available", policy, policy.LargeNodeLabelValue, "4000m", "16Gi", "20Gi", "200m", "12Gi", "2Gi"),
+		builderTestNode("higher-available", "higher-available", policy, policy.SmallNodeLabelValue, "2000m", "8Gi", "10Gi", "200m", "1Gi", "1Gi"),
 	}, nil, nil)
 
 	if len(candidates) != 2 {
 		t.Fatalf("expected 2 candidates, got %d", len(candidates))
 	}
-	if got := candidates[0].Node.Name; got != "small-a" {
-		t.Fatalf("expected small node to rank first for light build, got %q", got)
+	if got := candidates[0].Node.Name; got != "lower-available" {
+		t.Fatalf("expected lowest-available node to rank first for light build, got %q", got)
 	}
 }
 
-func TestSelectBuilderCandidatesHeavyPrefersHigherCapacityNodes(t *testing.T) {
+func TestSelectBuilderCandidatesHeavyPrefersHigherAvailableResources(t *testing.T) {
 	t.Parallel()
 
 	policy := defaultBuilderPodPolicy()
@@ -84,22 +84,15 @@ func TestSelectBuilderCandidatesHeavyPrefersHigherCapacityNodes(t *testing.T) {
 	}
 
 	candidates := selectBuilderCandidates(policy, builderWorkloadProfileHeavy, demand, []builderNodeSnapshot{
-		builderTestNode("small-a", "small-a", policy, policy.SmallNodeLabelValue, "4000m", "16Gi", "16Gi", "250m", "1Gi", "1Gi"),
-		builderTestNode("medium-a", "medium-a", policy, policy.MediumNodeLabelValue, "4000m", "16Gi", "20Gi", "500m", "1Gi", "3Gi"),
-		builderTestNode("large-a", "large-a", policy, policy.LargeNodeLabelValue, "4000m", "16Gi", "30Gi", "500m", "1Gi", "3Gi"),
+		builderTestNode("lower-available", "lower-available", policy, policy.LargeNodeLabelValue, "4000m", "16Gi", "20Gi", "200m", "11Gi", "2Gi"),
+		builderTestNode("higher-available", "higher-available", policy, policy.SmallNodeLabelValue, "2000m", "8Gi", "10Gi", "200m", "2Gi", "1Gi"),
 	}, nil, nil)
 
-	if len(candidates) != 3 {
-		t.Fatalf("expected 3 heavy candidates, got %d", len(candidates))
+	if len(candidates) != 2 {
+		t.Fatalf("expected 2 heavy candidates, got %d", len(candidates))
 	}
-	if got := candidates[0].Node.Name; got != "large-a" {
-		t.Fatalf("expected highest-capacity node to rank first for heavy build, got %q", got)
-	}
-	if got := candidates[1].Node.Name; got != "medium-a" {
-		t.Fatalf("expected second-highest-capacity node to rank second, got %q", got)
-	}
-	if got := candidates[2].Node.Name; got != "small-a" {
-		t.Fatalf("expected lowest-capacity node to rank last, got %q", got)
+	if got := candidates[0].Node.Name; got != "higher-available" {
+		t.Fatalf("expected highest-available node to rank first for heavy build, got %q", got)
 	}
 }
 
@@ -485,12 +478,13 @@ func TestBuildBuilderPlacementPrefersSelectedNode(t *testing.T) {
 	}
 }
 
-func TestBuilderPlacementCandidatesUsesSingleCandidateForHeavyBuilds(t *testing.T) {
+func TestBuilderPlacementCandidatesCapsFallbackByProfile(t *testing.T) {
 	t.Parallel()
 
 	candidates := []builderCandidate{
 		{Node: builderNodeSnapshot{Name: "node-a", Hostname: "host-a"}},
 		{Node: builderNodeSnapshot{Name: "node-b", Hostname: "host-b"}},
+		{Node: builderNodeSnapshot{Name: "node-c", Hostname: "host-c"}},
 	}
 
 	heavy := builderPlacementCandidates(candidates, builderWorkloadProfileHeavy, 3)
@@ -498,9 +492,9 @@ func TestBuilderPlacementCandidatesUsesSingleCandidateForHeavyBuilds(t *testing.
 		t.Fatalf("expected heavy placement to keep only the top candidate, got %+v", heavy)
 	}
 
-	light := builderPlacementCandidates(candidates, builderWorkloadProfileLight, 2)
+	light := builderPlacementCandidates(candidates, builderWorkloadProfileLight, 3)
 	if len(light) != 2 {
-		t.Fatalf("expected light placement to keep both candidates, got %d", len(light))
+		t.Fatalf("expected light placement to keep only two fallback candidates, got %d", len(light))
 	}
 }
 

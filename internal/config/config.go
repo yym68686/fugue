@@ -36,7 +36,6 @@ type ControllerConfig struct {
 	RegistryPullBase              string
 	SourceUploadBaseURL           string
 	ImportWorkDir                 string
-	BuilderSchedulingJSON         string
 	GitHubSyncInterval            time.Duration
 	GitHubSyncTimeout             time.Duration
 	GitHubSyncRetryBaseDelay      time.Duration
@@ -115,7 +114,6 @@ func ControllerFromEnv() ControllerConfig {
 		RegistryPullBase:              strings.TrimSpace(os.Getenv("FUGUE_REGISTRY_PULL_BASE")),
 		SourceUploadBaseURL:           getenv("FUGUE_SOURCE_UPLOAD_BASE_URL", "http://127.0.0.1:8080"),
 		ImportWorkDir:                 getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
-		BuilderSchedulingJSON:         os.Getenv("FUGUE_CONTROLLER_BUILDER_SCHEDULING_JSON"),
 		GitHubSyncInterval:            getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_INTERVAL", time.Minute),
 		GitHubSyncTimeout:             getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_TIMEOUT", 20*time.Second),
 		GitHubSyncRetryBaseDelay:      getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_BASE_DELAY", 5*time.Minute),
