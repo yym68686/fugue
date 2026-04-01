@@ -231,18 +231,6 @@ maybe_reuse_existing_edge_tls_ask_token() {
   fi
 }
 
-backup_legacy_store_on_primary() {
-  log "backing up legacy store.json on ${PRIMARY_ALIAS}"
-  ssh_root "${PRIMARY_ALIAS}" <<'EOF'
-set -euo pipefail
-if [ -f /var/lib/fugue/store.json ]; then
-  backup="/var/lib/fugue/store.json.bak-pg-$(date +%Y%m%d%H%M%S)"
-  cp -a /var/lib/fugue/store.json "${backup}"
-  echo "${backup}"
-fi
-EOF
-}
-
 has_app_tls_material() {
   [[ -f "${FUGUE_APP_TLS_CERT_FILE}" && -f "${FUGUE_APP_TLS_KEY_FILE}" ]]
 }
@@ -2161,7 +2149,6 @@ main() {
   if [[ -z "${FUGUE_EDGE_TLS_ASK_TOKEN}" ]]; then
     FUGUE_EDGE_TLS_ASK_TOKEN="$(generate_secret)"
   fi
-  backup_legacy_store_on_primary
   write_values_override
   copy_chart_and_values
   install_fugue_chart

@@ -44,8 +44,6 @@ spec:
           image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
           imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
           env:
-            - name: FUGUE_STORE_PATH
-              value: /var/lib/fugue/store.json
             - name: FUGUE_DATABASE_URL
               valueFrom:
                 secretKeyRef:

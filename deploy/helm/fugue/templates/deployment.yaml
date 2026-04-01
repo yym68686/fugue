@@ -56,8 +56,6 @@ spec:
           env:
             - name: FUGUE_BIND_ADDR
               value: ":8080"
-            - name: FUGUE_STORE_PATH
-              value: /var/lib/fugue/store.json
             - name: FUGUE_DATABASE_URL
               valueFrom:
                 secretKeyRef:

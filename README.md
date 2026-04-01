@@ -21,7 +21,7 @@ Fugue is a multi-tenant k3s control plane MVP for:
 - `fugue-api`: northbound REST API
 - `fugue-controller`: async operation reconciler for the managed runtime
 - `fugue-agent`: attached runtime agent for user-owned VPS
-- PostgreSQL-backed relational state store with automatic import from legacy `fugue_state` / `store.json`
+- PostgreSQL-backed relational state store
 - `ManagedApp` CRD plus operator-style reconcile for managed apps, with Deployments, Services, and Secrets derived from Kubernetes custom resources
 - managed app observed state written back to `ManagedApp.status`, with API reads preferring Kubernetes-observed runtime state over optimistic database status
 - internal registry flow for imported app images
@@ -31,7 +31,6 @@ Fugue is a multi-tenant k3s control plane MVP for:
 ## Current MVP constraints
 
 - The core control plane now stores state in PostgreSQL tables and uses `LISTEN/NOTIFY` to wake the controller when new operations arrive.
-- On the first relational PostgreSQL startup, Fugue automatically imports the legacy `fugue_state` row or `/var/lib/fugue/store.json` if either exists.
 - The Helm chart now deploys `fugue-api` and `fugue-controller` as separate Deployments, defaults both to `replicaCount=2`, and enables controller leader election so API and controller can scale independently.
 - The bundled install path still keeps PostgreSQL, the internal registry, and other stateful pieces inside the cluster with `hostPath` storage, so it is still an opinionated MVP deployment rather than a fully externalized production topology.
 

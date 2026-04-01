@@ -21,7 +21,6 @@ Assumptions:
 
 This mode installs all three machines as `k3s server` nodes and deploys Fugue as separate `fugue-api` and `fugue-controller` Deployments.
 The chart defaults both Deployments to `replicaCount=2`, keeps authoritative state in PostgreSQL, and enables controller leader election.
-On the first relational PostgreSQL-backed startup, Fugue automatically imports legacy state from the old `fugue_state` row or `/var/lib/fugue/store.json` if either exists.
 The same script also provisions an in-cluster internal registry and can optionally configure a wildcard HTTPS edge for app hostnames.
 
 ## 1. Topology
@@ -155,8 +154,7 @@ helm upgrade --install fugue ./deploy/helm/fugue \
   --set nodeSelector.nodepool=system
 ```
 
-The chart enables an internal PostgreSQL instance by default. If you are upgrading from the legacy file store or the earlier single-row `fugue_state` backend, keep the old data in place for the first PostgreSQL relational boot so Fugue can import it automatically.
-The chart also enables controller leader election by default.
+The chart enables an internal PostgreSQL instance by default and also enables controller leader election by default.
 
 Controller GitHub sync knobs:
 
