@@ -59,28 +59,33 @@ Expected response:
 
 What is already usable on the deployed control plane:
 
-- multi-tenant tenant, project, app, runtime, operation, and audit-event APIs
+- multi-tenant tenant, project, app, runtime, backing-service, operation, and audit-event APIs
 - bootstrap admin flow for platform-wide management
-- tenant-scoped API keys with per-scope authorization
-- reusable tenant-scoped node keys for one-command VPS onboarding
-- separate runtime inventory and real cluster-node inventory, plus the deprecated compatibility nodes view
+- tenant-scoped API keys with per-scope authorization plus patch / rotate / disable / enable / delete lifecycle APIs
+- reusable tenant-scoped node keys for one-command VPS onboarding, plus legacy one-time enroll tokens for older agents
+- separate runtime inventory and real cluster-node inventory, with runtime sharing grants and managed-runtime pool controls
 - one built-in managed shared runtime: `runtime_managed_shared`
-- external node attachment through node bootstrap plus `fugue-agent`
-- asynchronous app deploy, scale, migrate, disable, and delete operations
-- `POST /v1/apps/import-github` for public GitHub repositories, with optional idempotency key support and `auto / static-site / dockerfile / buildpacks / nixpacks` build strategies
-- `POST /v1/apps/{id}/rebuild` to rebuild an imported `github-public` app from the latest repo state, or an imported `upload` app from its saved archive, and redeploy it
+- external node attachment through node bootstrap, cluster join, and `fugue-agent`
+- asynchronous app deploy, scale, disable, migrate, and delete operations
+- automatic managed app routes plus route availability / patch APIs
+- custom-domain claim / list / verify / delete APIs, plus edge token endpoints for TLS ask, domain inventory sync, and TLS status reporting
+- `POST /v1/apps/import-github` for public or private GitHub repositories, with optional idempotency key support, `auto / static-site / dockerfile / buildpacks / nixpacks` build strategies, and topology-aware `fugue.yaml` / Compose imports
+- `POST /v1/apps/import-image` to import an existing Docker / OCI image reference, and `POST /v1/apps/import-upload` to upload a `.tgz` source archive for a new or existing app
+- `POST /v1/apps/{id}/rebuild` to rebuild GitHub-, upload-, or image-backed apps in place
 - automatic background updates for imported GitHub apps: the controller polls the upstream branch, queues rebuilds when the commit changes, and waits for a zero-unavailable rollout before the old replica set is removed
-- `GET/PATCH /v1/apps/{id}/env`, `GET/PUT/DELETE /v1/apps/{id}/files`, and `POST /v1/apps/{id}/restart` to inspect and change app config by queuing deploy operations
-- `GET /v1/backing-services`, `GET /v1/backing-services/{id}`, and `GET /v1/apps/{id}/bindings` to inspect attached service inventory and binding env
+- `GET/PATCH /v1/apps/{id}/env`, `GET/PUT/DELETE /v1/apps/{id}/files`, live `/filesystem/*`, and `POST /v1/apps/{id}/restart` to inspect and change app config
+- `GET/POST/DELETE /v1/backing-services`, `GET/POST/DELETE /v1/apps/{id}/bindings`, and managed Postgres-backed binding env injection
+- build/runtime log snapshot + SSE streaming APIs
 - `DELETE /v1/tenants/{id}` for platform-admin tenant removal with best-effort namespace cleanup reporting
-- `GET /install/join-cluster.sh`, `POST /v1/nodes/join-cluster`, and `POST /v1/nodes/join-cluster/env` for one-command cluster-join onboarding when cluster join is configured
-- runtime-agent pull model: enroll, heartbeat, fetch tasks, mark task complete
+- `GET /install/join-cluster.sh`, `POST /v1/nodes/join-cluster`, `POST /v1/nodes/join-cluster/env`, and the internal `/v1/nodes/join-cluster/cleanup` helper for one-command cluster-join onboarding when cluster join is configured
+- runtime-agent pull model: legacy enroll, heartbeat, fetch tasks, mark task complete
 - audit trail for control-plane actions
 
 What is not implemented yet:
 
-- general project/runtime/app metadata update APIs outside the deploy-oriented app env/files endpoints
-- public APIs for creating/deleting backing services or binding/unbinding them manually
+- general runtime metadata update or runtime delete APIs
+- generic app metadata patch APIs outside route / domain / env / files / bindings / import / rebuild flows
+- backing-service update APIs or service types beyond managed / external Postgres
 - kpack-style buildpacks operator integration
 - autoscaling policies such as HPA/VPA
 - scheduling policies, quotas, billing, or paywall logic
@@ -112,13 +117,14 @@ Tenant API keys can be minted with these scopes:
 
 | Scope | Capability |
 | --- | --- |
-| `project.write` | create projects |
-| `apikey.write` | create more tenant API keys |
+| `project.write` | create / update / delete projects, and can create or delete backing services |
+| `apikey.write` | create / update / rotate / disable / enable / delete tenant API keys |
 | `runtime.attach` | create node keys and external runtime bootstrap credentials |
-| `runtime.write` | create runtimes directly |
-| `app.write` | create apps |
-| `app.deploy` | create deploy operations |
-| `app.scale` | create scale or disable operations |
+| `runtime.write` | create runtimes directly and manage runtime sharing |
+| `app.write` | create apps and most app-side config / route / domain mutations |
+| `app.deploy` | create deploy / import / rebuild / restart operations and bind or unbind services |
+| `app.scale` | create scale operations |
+| `app.disable` | disable apps without broad `app.scale` scope |
 | `app.migrate` | create migrate operations |
 | `app.delete` | delete apps without broad `app.write` scope |
 | `platform.admin` | full platform admin behavior |
@@ -137,10 +143,31 @@ Notes:
 | `GET` | `/healthz` | none | control-plane health check |
 | `GET` | `/readyz` | none | returns `200` while the API is accepting work, `503` during shutdown drain |
 | `GET` | `/install/join-cluster.sh` | none | serves the helper shell script for one-command cluster join when cluster join is configured |
+| `GET` | `/v1/source-uploads/{id}/archive` | download token query param | returns a saved `.tgz` upload archive for internal tooling or controlled download flows |
 | `POST` | `/v1/nodes/bootstrap` | none | exchanges a reusable node key for one machine-specific runtime key |
 | `POST` | `/v1/nodes/join-cluster` | none | exchanges a reusable node key for a runtime record plus a k3s join plan |
 | `POST` | `/v1/nodes/join-cluster/env` | none | form-encoded variant that returns shell-quoted `FUGUE_JOIN_*` values |
-| `POST` | `/v1/agent/enroll` | none | exchanges an enroll token for a runtime record plus runtime key |
+| `POST` | `/v1/nodes/join-cluster/cleanup` | none | internal helper for the install script to prune stale cluster-node records after a rejoin |
+
+### Edge integration endpoints
+
+These endpoints are for the HTTPS edge / TLS automation path and use a shared query-string token instead of bearer auth.
+
+| Method | Path | Auth | Notes |
+| --- | --- | --- | --- |
+| `GET` | `/v1/edge/tls/ask` | edge token | on-demand TLS ask hook; auto-verifies pending domains when DNS is already correct |
+| `GET` | `/v1/edge/domains` | edge token | lists verified custom domains that should be attached at the edge |
+| `POST` | `/v1/edge/domains/tls-report` | edge token | reports `pending` / `ready` / `error` TLS status for one verified custom domain |
+
+### Legacy compatibility endpoints
+
+These routes still exist for older clients, but new integrations should avoid them.
+
+| Method | Path | Auth | Notes |
+| --- | --- | --- | --- |
+| `POST` | `/v1/agent/enroll` | none | legacy one-time enroll-token flow; prefer `/v1/nodes/bootstrap` or cluster join |
+| `GET` | `/v1/nodes` | any API credential | deprecated compatibility runtime view; prefer `/v1/runtimes` plus `/v1/cluster/nodes` |
+| `GET` | `/v1/nodes/{id}` | any API credential | deprecated compatibility detail view for one runtime record |
 
 `POST /v1/nodes/bootstrap` request body:
 
@@ -163,26 +190,13 @@ Notes:
 
 `POST /v1/nodes/join-cluster/env` accepts equivalent `application/x-www-form-urlencoded` fields (`node_key`, `node_name`, `runtime_name`, `machine_name`, `machine_fingerprint`, `endpoint`, `labels`) and returns shell-quoted `FUGUE_JOIN_*` lines for custom installers.
 
-`GET /install/join-cluster.sh` serves the helper shell script used for one-command node onboarding. The script calls `/v1/nodes/join-cluster/env`, writes the k3s agent config, and applies optional registry / mesh settings when cluster join is enabled.
+`POST /v1/nodes/join-cluster/cleanup` accepts `application/x-www-form-urlencoded` fields (`node_key`, `machine_fingerprint`, `current_node_name`) and returns shell-quoted `FUGUE_JOIN_CLEANUP_*` values after pruning stale cluster-node records that still match the same machine fingerprint.
 
-Legacy compatibility: `POST /v1/agent/enroll` still accepts one-time enroll tokens.
+`GET /install/join-cluster.sh` serves the helper shell script used for one-command node onboarding. The script calls `/v1/nodes/join-cluster/env`, writes the k3s agent config, applies optional registry / mesh settings, and then uses `/v1/nodes/join-cluster/cleanup` to garbage-collect stale node records after a successful rejoin.
 
-`POST /v1/agent/enroll` request body:
+`GET /v1/source-uploads/{id}/archive` requires a `download_token` query parameter and is primarily intended for internal builders or other tightly controlled download flows that need to fetch a previously uploaded archive.
 
-```json
-{
-  "enroll_token": "<fugue_enroll_...>",
-  "machine_name": "tenant-vps-1",
-  "machine_fingerprint": "6d6e7b1d9c...",
-  "endpoint": "https://tenant-vps-1.example.com",
-  "labels": {
-    "region": "ap-east-1",
-    "provider": "gcp"
-  }
-}
-```
-
-`runtime_name` and `machine_name` are optional. `machine_fingerprint` should stay stable per machine if you want repeated enroll/bootstrap flows to reuse the same runtime record.
+Legacy compatibility: `POST /v1/agent/enroll` still accepts one-time enroll tokens. Its payload is the same shape as `/v1/nodes/bootstrap`, but uses `enroll_token` instead of `node_key`. New installations should prefer node bootstrap or cluster join.
 
 ### Platform and tenant endpoints
 
@@ -193,27 +207,50 @@ Legacy compatibility: `POST /v1/agent/enroll` still accepts one-time enroll toke
 | `DELETE` | `/v1/tenants/{id}` | `platform.admin` | deletes the tenant and returns best-effort cleanup details for namespace / nodes |
 | `GET` | `/v1/projects` | any API credential | platform admin should pass `tenant_id` query param |
 | `POST` | `/v1/projects` | `project.write` | `tenant_id` optional for tenant key |
+| `PATCH` | `/v1/projects/{id}` | `project.write` | updates project name and/or description |
+| `DELETE` | `/v1/projects/{id}` | `project.write` | deletes a project after its live apps and backing services are gone |
 | `GET` | `/v1/api-keys` | any API credential | lists visible API keys, secrets are redacted |
 | `POST` | `/v1/api-keys` | `apikey.write` | non-admin key cannot mint scopes it does not already hold |
+| `PATCH` | `/v1/api-keys/{id}` | `apikey.write` | updates label and/or scopes |
+| `POST` | `/v1/api-keys/{id}/rotate` | `apikey.write` | rotates the secret and optionally updates label/scopes; the new secret is shown once |
+| `POST` | `/v1/api-keys/{id}/disable` | `apikey.write` | disables a key immediately |
+| `POST` | `/v1/api-keys/{id}/enable` | `apikey.write` | re-enables a disabled key |
+| `DELETE` | `/v1/api-keys/{id}` | `apikey.write` | revokes a key permanently |
 | `GET` | `/v1/node-keys` | any API credential | lists visible node keys, secrets are redacted |
 | `POST` | `/v1/node-keys` | `runtime.attach` | creates a reusable tenant node key |
 | `GET` | `/v1/node-keys/{id}/usages` | any API credential | shows which runtimes have used a node key |
 | `POST` | `/v1/node-keys/{id}/revoke` | `runtime.attach` | revokes a node key so it cannot register more machines |
 | `GET` | `/v1/cluster/nodes` | any API credential | lists real Kubernetes cluster nodes; tenant keys only see their own attached cluster nodes |
-| `GET` | `/v1/nodes` | any API credential | deprecated compatibility view that exposes runtime records, not physical machines |
-| `GET` | `/v1/nodes/{id}` | any API credential | deprecated compatibility detail view for runtime records |
-| `GET` | `/v1/runtimes` | any API credential | lists visible Fugue runtimes, with merged machine identity fields |
-| `POST` | `/v1/runtimes` | `runtime.write` | manual runtime creation; `managed-shared` is platform-admin only |
-| `GET` | `/v1/runtimes/{id}` | any API credential | tenant key can only see shared or same-tenant runtime |
+| `GET` | `/v1/runtimes` | any API credential | lists visible Fugue runtimes, including access / pool mode and merged machine identity fields |
+| `POST` | `/v1/runtimes` | `runtime.write` | manual runtime creation; `managed-shared` is platform-admin only and `managed-owned` must come from the node join flow |
+| `GET` | `/v1/runtimes/{id}` | any API credential | tenant key can see same-tenant, granted, or platform-shared runtime |
+| `GET` | `/v1/runtimes/{id}/sharing` | owner tenant API credential | shows sharing grants for one owned runtime |
+| `POST` | `/v1/runtimes/{id}/sharing/grants` | `runtime.write` + owner tenant | grants another tenant visibility to one private runtime |
+| `DELETE` | `/v1/runtimes/{id}/sharing/grants/{tenant_id}` | `runtime.write` + owner tenant | revokes one runtime sharing grant |
+| `POST` | `/v1/runtimes/{id}/sharing/mode` | `runtime.write` + owner tenant | sets `private` or `platform-shared`; `platform-shared` additionally needs `platform.admin` |
+| `POST` | `/v1/runtimes/{id}/pool-mode` | `platform.admin` | toggles a managed-owned runtime between `dedicated` and `internal-shared` pool behavior |
 | `GET` | `/v1/runtimes/enroll-tokens` | any API credential | platform admin should pass `tenant_id` |
-| `POST` | `/v1/runtimes/enroll-tokens` | `runtime.attach` | creates one-time enroll token |
+| `POST` | `/v1/runtimes/enroll-tokens` | `runtime.attach` | creates one-time legacy enroll token |
 | `GET` | `/v1/backing-services` | any API credential | lists visible backing services |
+| `POST` | `/v1/backing-services` | `app.write` or `project.write` | creates a backing service, currently mainly managed Postgres |
 | `GET` | `/v1/backing-services/{id}` | any API credential | fetch backing service detail if visible to the tenant |
+| `DELETE` | `/v1/backing-services/{id}` | `app.write` or `project.write` | deletes a backing service |
 | `GET` | `/v1/apps` | any API credential | lists visible apps |
-| `POST` | `/v1/apps` | `app.write` | creates app metadata and desired spec |
-| `POST` | `/v1/apps/import-github` | `app.write` + `app.deploy` | imports a public GitHub repository, allocates a default hostname, queues deployment, and honors `Idempotency-Key` |
+| `POST` | `/v1/apps` | `app.write` | creates app metadata and desired spec, and auto-allocates a managed route when app base domain is configured |
+| `POST` | `/v1/apps/import-github` | `app.write` + `app.deploy` | imports a public/private GitHub repo, may expand `fugue.yaml` or Compose into multiple apps, allocates default hostname(s), queues deployment, and honors `Idempotency-Key` |
+| `POST` | `/v1/apps/import-image` | `app.write` + `app.deploy` | imports an existing image reference and queues deployment |
+| `POST` | `/v1/apps/import-upload` | `app.write` + `app.deploy` for new apps; `app.deploy` when `app_id` is supplied | uploads a `.tgz` archive and creates or reimports an app |
 | `GET` | `/v1/apps/{id}` | any API credential | fetch app detail |
+| `GET` | `/v1/apps/{id}/route/availability` | any API credential | validates a managed Fugue hostname under the app base domain |
+| `PATCH` | `/v1/apps/{id}/route` | `app.write` | changes the managed route hostname |
+| `GET` | `/v1/apps/{id}/domains` | any API credential | lists claimed custom domains and verification / TLS state |
+| `GET` | `/v1/apps/{id}/domains/availability` | any API credential | checks whether a custom domain can be claimed |
+| `POST` | `/v1/apps/{id}/domains` | `app.write` | claims or re-checks a custom domain |
+| `POST` | `/v1/apps/{id}/domains/verify` | `app.write` | forces a DNS re-check for a claimed custom domain |
+| `DELETE` | `/v1/apps/{id}/domains` | `app.write` | removes one claimed custom domain via `hostname` query param |
 | `GET` | `/v1/apps/{id}/bindings` | any API credential | returns app-to-service bindings plus the referenced backing services |
+| `POST` | `/v1/apps/{id}/bindings` | `app.write` or `app.deploy` | creates a binding and queues a deploy operation |
+| `DELETE` | `/v1/apps/{id}/bindings/{binding_id}` | `app.write` or `app.deploy` | removes a binding and queues a deploy operation |
 | `GET` | `/v1/apps/{id}/build-logs` | any API credential | returns latest import/build logs, or accepts `operation_id` |
 | `GET` | `/v1/apps/{id}/build-logs/stream` | any API credential | streams build logs and operation status as Server-Sent Events |
 | `GET` | `/v1/apps/{id}/runtime-logs` | any API credential | returns Kubernetes pod logs for `app` or `postgres` |
@@ -228,11 +265,11 @@ Legacy compatibility: `POST /v1/agent/enroll` still accepts one-time enroll toke
 | `PUT` | `/v1/apps/{id}/filesystem/file` | `app.write` or `app.deploy` | creates or overwrites one live file inside the app workspace volume |
 | `POST` | `/v1/apps/{id}/filesystem/directory` | `app.write` or `app.deploy` | creates one live directory inside the app workspace volume |
 | `DELETE` | `/v1/apps/{id}/filesystem` | `app.write` or `app.deploy` | deletes a live file or directory inside the app workspace volume |
-| `POST` | `/v1/apps/{id}/rebuild` | `app.deploy` | rebuilds a `github-public` app from the latest GitHub code or an `upload` app from its saved archive, refreshes the workspace reset token when configured, then queues deployment |
+| `POST` | `/v1/apps/{id}/rebuild` | `app.deploy` | rebuilds a GitHub-, image-, or upload-backed app in place, refreshing the workspace reset token when configured |
 | `POST` | `/v1/apps/{id}/deploy` | `app.deploy` | creates async deploy operation |
 | `POST` | `/v1/apps/{id}/restart` | `app.deploy` | queues a deploy operation with a fresh restart token; disabled apps cannot be restarted, and persistent workspaces are preserved |
 | `POST` | `/v1/apps/{id}/scale` | `app.scale` | creates async scale operation; `replicas` may be `0` |
-| `POST` | `/v1/apps/{id}/disable` | `app.scale` | creates async disable operation and scales the app to `0` |
+| `POST` | `/v1/apps/{id}/disable` | `app.scale` or `app.disable` | idempotently scales the app to `0` |
 | `POST` | `/v1/apps/{id}/migrate` | `app.migrate` | creates async migrate operation |
 | `DELETE` | `/v1/apps/{id}` | `app.write` or `app.delete` | creates async delete operation and removes the app route from the visible app list |
 | `GET` | `/v1/operations` | any API credential | lists operations for visible tenant |
@@ -243,10 +280,10 @@ Important request payloads:
 
 Inventory semantics:
 
-- `/v1/runtimes`: the Fugue deploy-target inventory. Attached VPS metadata such as `machine_name`, `connection_mode`, `cluster_node_name`, and fingerprint fields now live here.
+- `/v1/runtimes`: the Fugue deploy-target inventory. Attached VPS metadata such as `machine_name`, `connection_mode`, `cluster_node_name`, fingerprint fields, sharing state, and pool mode all live here.
 - `/v1/cluster/nodes`: the real Kubernetes node inventory from the cluster API.
 - `/v1/node-keys/{id}/usages`: the mapping from one reusable node key to the runtimes that actually used it.
-- `/v1/nodes`: deprecated compatibility runtime view kept for older clients.
+- `/v1/nodes`: deprecated compatibility runtime view kept for older clients; new integrations should prefer `/v1/runtimes` and `/v1/cluster/nodes`.
 
 `POST /v1/tenants`
 
@@ -266,6 +303,25 @@ Inventory semantics:
 }
 ```
 
+`PATCH /v1/projects/{id}`
+
+```json
+{
+  "name": "production",
+  "description": "shared production workloads"
+}
+```
+
+`DELETE /v1/projects/{id}`
+
+No request body.
+
+Behavior:
+
+- requires `project.write`
+- returns `409 Conflict` while the project still has live apps or backing services
+- when the delete succeeds, the project record is removed entirely
+
 `POST /v1/api-keys`
 
 ```json
@@ -280,10 +336,39 @@ Inventory semantics:
     "app.write",
     "app.deploy",
     "app.scale",
-    "app.migrate"
+    "app.disable",
+    "app.migrate",
+    "app.delete"
   ]
 }
 ```
+
+`PATCH /v1/api-keys/{id}`
+
+```json
+{
+  "label": "preview-ops",
+  "scopes": [
+    "app.write",
+    "app.deploy"
+  ]
+}
+```
+
+`POST /v1/api-keys/{id}/rotate`
+
+The request body is optional. When provided it uses the same `label` / `scopes` fields as `PATCH /v1/api-keys/{id}` and returns a replacement `secret`.
+
+`POST /v1/api-keys/{id}/disable`, `POST /v1/api-keys/{id}/enable`, and `DELETE /v1/api-keys/{id}`
+
+No request body.
+
+Behavior:
+
+- all API-key lifecycle mutations require `apikey.write`
+- rotate invalidates the previous secret immediately and returns the new secret once
+- disable / enable changes authentication behavior immediately
+- delete revokes the key permanently and removes it from later list results
 
 `POST /v1/node-keys`
 
@@ -320,6 +405,45 @@ For a tenant-scoped API key, the request body itself is optional; an empty `POST
 }
 ```
 
+`POST /v1/runtimes/{id}/sharing/grants`
+
+```json
+{
+  "tenant_id": "tenant_yyy"
+}
+```
+
+`POST /v1/runtimes/{id}/sharing/mode`
+
+```json
+{
+  "access_mode": "private"
+}
+```
+
+Or, with an owner-tenant key that also has `platform.admin`:
+
+```json
+{
+  "access_mode": "platform-shared"
+}
+```
+
+`POST /v1/runtimes/{id}/pool-mode`
+
+```json
+{
+  "pool_mode": "internal-shared"
+}
+```
+
+Behavior:
+
+- sharing mutations require an owner-tenant API credential; grants and mode changes additionally require `runtime.write`
+- `platform-shared` is only allowed when the caller also has `platform.admin`
+- pool mode is platform-admin only and only applies to `managed-owned` runtimes
+- when a managed-owned runtime is already attached to a Kubernetes node, changing pool mode also reconciles the node labels / taints used by scheduling
+
 `POST /v1/apps`
 
 ```json
@@ -347,6 +471,8 @@ For a tenant-scoped API key, the request body itself is optional; an empty `POST
 
 `spec.workspace` is optional. When present, Fugue mounts a persistent writable workspace volume (default mount path `/workspace`) and enables the live `/filesystem/*` endpoints for that app. This currently requires a `managed-owned` runtime because the workspace is backed by node-local `hostPath` storage.
 
+When `appBaseDomain` is configured on the control plane, `POST /v1/apps` also allocates a managed Fugue route automatically.
+
 `POST /v1/apps/import-github`
 
 Request headers:
@@ -372,19 +498,80 @@ Idempotency-Key: import-<unique-key>
 
 Import behavior in the current MVP:
 
-- only public GitHub repositories are supported
+- both public and private GitHub repositories are supported
+- `repo_visibility` is optional; when it is `private`, `repo_auth_token` is required
 - `project_id` is optional; if omitted, Fugue reuses the tenant's `default` project or creates it automatically
+- `project` may be supplied instead of `project_id` to create the project inline during the import
 - `build_strategy` is optional; default is `auto`
-- `auto` currently resolves in this order: `Dockerfile` -> ready static site -> `buildpacks` for supported apps -> `nixpacks`
+- `auto` first looks for `fugue.yaml`, then Compose files, and then falls back to the single-app detection pipeline
+- if `fugue.yaml` or Compose is detected, the response still returns the primary `app` + `operation` but also includes `apps`, `operations`, and `fugue_manifest` or `compose_stack` metadata for the expanded topology
+- outside topology imports, `auto` currently resolves in this order: `Dockerfile` -> ready static site -> `buildpacks` for supported apps -> `nixpacks`
 - `static-site` expects `index.html` in the root, `dist/`, `build/`, `public/`, or `site/`
 - `buildpacks` uses Paketo builders for common Node.js / Python / Go / Java / Ruby / PHP / .NET repositories
 - `nixpacks` is the current zero-config app builder for common Node.js, Python, Go, and similar repositories
+- `dockerfile_path` and `build_context_dir` are supported for Dockerfile-based imports
 - `service_port` is optional; if omitted, Fugue uses the detected or strategy default port
 - Git submodules are cloned recursively by default
 - Fugue either packages static files into a Caddy image, builds from Dockerfile, runs Buildpacks/Paketo, or runs Nixpacks and then pushes the image into the internal registry
 - the returned app includes a generated public hostname under your configured app base domain
 - if the same `Idempotency-Key` is replayed with the same request body, Fugue returns the original app + operation instead of creating a duplicate app
 - if the same `Idempotency-Key` is reused with a different request body, Fugue returns `409 Conflict`
+
+`POST /v1/apps/import-image`
+
+```json
+{
+  "tenant_id": "tenant_xxx",
+  "project_id": "project_xxx",
+  "image_ref": "ghcr.io/example/demo:1.2.3",
+  "name": "demo-image",
+  "description": "imported from image",
+  "runtime_id": "runtime_managed_shared",
+  "replicas": 1,
+  "service_port": 8080,
+  "env": {
+    "APP_ENV": "production"
+  }
+}
+```
+
+Behavior:
+
+- imports an existing Docker / OCI image reference without a Git clone or source upload
+- defaults the app name from `image_ref` when `name` is omitted
+- supports the same `project_id` or inline `project` resolution rules as GitHub import
+- queues an `import` operation so the controller can normalize and deploy the image through Fugue's managed runtime flow
+
+`POST /v1/apps/import-upload`
+
+Multipart form fields:
+
+- `request`: a single JSON object using the same fields as GitHub import, plus optional `app_id`
+- `archive`: a `.tgz` or `.tar.gz` source archive
+
+Example:
+
+```bash
+curl -sS "${FUGUE_BASE_URL}/v1/apps/import-upload" \
+  -H "Authorization: Bearer ${FUGUE_TENANT_TOKEN}" \
+  -F 'request={"project_id":"project_xxx","name":"demo-upload","build_strategy":"static-site"};type=application/json' \
+  -F 'archive=@./demo-upload.tgz;type=application/gzip'
+```
+
+Behavior:
+
+- the archive must be gzip-compressed tar and is currently limited to `128 MiB`
+- when `app_id` is omitted, Fugue creates a new imported app and queues an `import` operation
+- when `app_id` is supplied, Fugue stores the new archive and re-queues import for the existing app; this path only requires `app.deploy`
+- uploaded archives are saved as `upload` sources, so later `rebuild` calls can re-run the saved upload import without uploading again
+
+`GET /v1/source-uploads/{id}/archive`
+
+Behavior:
+
+- requires `download_token=<upload-download-token>` in the query string
+- is primarily intended for internal tooling or controlled download flows that need the raw uploaded archive bytes
+- returns the original archive as `application/gzip` (or the recorded upload content type)
 
 `POST /v1/apps/{id}/rebuild`
 
@@ -397,19 +584,69 @@ Optional override:
 ```json
 {
   "branch": "main",
+  "image_ref": "ghcr.io/example/demo:1.2.4",
   "source_dir": "apps/web",
-  "dockerfile_path": "deploy/Dockerfile"
+  "dockerfile_path": "deploy/Dockerfile",
+  "build_context_dir": "apps/web",
+  "repo_auth_token": "<github-token-for-private-rebuilds>"
 }
 ```
 
 Rebuild behavior:
 
-- works for apps originally created from `github-public` or `upload` source
-- for `github-public`, pulls the latest code from the saved repository URL and branch; the optional `branch` override only applies to this source type
+- works for apps originally created from `github-public`, `github-private`, `docker-image`, or `upload` source
+- for GitHub sources, pulls the latest code from the saved repository URL and branch; optional `branch` and `repo_auth_token` overrides only apply to GitHub-backed apps
+- for `docker-image`, rebuild just re-queues import using the saved `image_ref`, optionally overridden by `image_ref`
 - for `upload`, reuses the saved `upload_id` archive and re-queues import with the saved build metadata
+- `source_dir`, `dockerfile_path`, and `build_context_dir` override the saved source layout for the next import
 - clones Git submodules recursively for GitHub imports
 - rebuilds with the saved build strategy (`static-site`, `dockerfile`, `buildpacks`, or `nixpacks`) and pushes a new image into the internal registry
-- keeps the same app id, project, and public hostname, then queues a deploy operation with the new image
+- keeps the same app id, project, and public hostname(s), then queues a new `import` operation with the updated source definition
+
+`GET /v1/apps/{id}/route/availability`
+
+Query parameters:
+
+- `hostname` required; it can be either a full hostname under the app base domain or just the desired label
+
+Behavior:
+
+- validates only Fugue-managed hostnames under the configured app base domain
+- returns normalized `hostname`, `public_url`, `valid`, `available`, `current`, and a human-readable `reason` when rejected
+
+`PATCH /v1/apps/{id}/route`
+
+```json
+{
+  "hostname": "fresh-name"
+}
+```
+
+Behavior:
+
+- requires `app.write`
+- accepts either a bare label or a fully-qualified hostname under the app base domain
+- returns `already_current: true` when the requested managed route is already assigned to the app
+
+`GET /v1/apps/{id}/domains`, `GET /v1/apps/{id}/domains/availability`, `POST /v1/apps/{id}/domains`, `POST /v1/apps/{id}/domains/verify`, and `DELETE /v1/apps/{id}/domains`
+
+Use this request body for create / verify:
+
+```json
+{
+  "hostname": "www.example.com"
+}
+```
+
+Delete uses `hostname` in the query string, for example `/v1/apps/<app-id>/domains?hostname=www.example.com`.
+
+Behavior:
+
+- custom domains are separate from the Fugue-managed app route and must not live under the platform-managed app base domain
+- `POST /v1/apps/{id}/domains` claims or re-checks a hostname and returns the current `domain`, `availability`, and `already_current`
+- verification succeeds when the hostname CNAMEs to Fugue's target or is flattened to the same IP set; until then the response stays `pending` and includes DNS guidance in `last_message`
+- `POST /v1/apps/{id}/domains/verify` forces another DNS check for an already claimed hostname
+- edge automation reports TLS state through `/v1/edge/domains/tls-report`, so each domain record also exposes `tls_status`, `tls_last_message`, and timestamps such as `verified_at` / `tls_ready_at`
 
 `GET /v1/apps/{id}/build-logs`
 
@@ -483,12 +720,40 @@ Behavior:
 - deletes the tenant from Fugue state and returns a `cleanup` object with the namespace name, whether namespace deletion was requested, owned-node counts, and any warnings
 - namespace removal is best-effort; managed-owned nodes may still need manual k3s agent uninstall on the tenant VPS
 
-`GET /v1/backing-services` and `GET /v1/apps/{id}/bindings`
+`GET/POST/DELETE /v1/backing-services` and `GET/POST/DELETE /v1/apps/{id}/bindings`
 
 Behavior:
 
-- backing services are currently exposed as read APIs; managed Postgres created from app specs is reflected here
+- `POST /v1/backing-services` creates a backing service directly; the current northbound write path is mainly managed Postgres
+- `DELETE /v1/backing-services/{id}` removes a backing service record
 - `GET /v1/apps/{id}/bindings` returns both the binding records and the referenced backing-service objects
+- `POST /v1/apps/{id}/bindings` and `DELETE /v1/apps/{id}/bindings/{binding_id}` both queue a deploy operation so the app's effective env matches the desired bindings
+
+`POST /v1/backing-services`
+
+```json
+{
+  "project_id": "project_xxx",
+  "name": "main-db",
+  "description": "primary postgres",
+  "spec": {
+    "postgres": {
+      "database": "app",
+      "user": "app",
+      "password": "secret"
+    }
+  }
+}
+```
+
+`POST /v1/apps/{id}/bindings`
+
+```json
+{
+  "service_id": "svc_xxx",
+  "alias": "db"
+}
+```
 
 `GET /v1/apps/{id}/env`
 
@@ -655,7 +920,7 @@ Behavior:
 Behavior:
 
 - requires `app.deploy`
-- rebuilds from the app's saved source definition
+- rebuilds from the app's saved GitHub, image, or upload source definition
 - refreshes `spec.workspace.reset_token` when a persistent workspace is configured, so the next rollout recreates the workspace contents once
 
 `POST /v1/apps/{id}/scale`
@@ -671,6 +936,11 @@ Behavior:
 ```json
 {}
 ```
+
+Behavior:
+
+- requires either `app.scale` or `app.disable`
+- returns `already_disabled: true` when the app is already fully scaled to zero
 
 `POST /v1/apps/{id}/migrate`
 
@@ -755,7 +1025,9 @@ curl -sS "${FUGUE_BASE_URL}/v1/api-keys" \
       "app.write",
       "app.deploy",
       "app.scale",
-      "app.migrate"
+      "app.disable",
+      "app.migrate",
+      "app.delete"
     ]
   }'
 ```
@@ -894,7 +1166,9 @@ TENANT_KEY_JSON=$(
           "app.write",
           "app.deploy",
           "app.scale",
-          "app.migrate"
+          "app.disable",
+          "app.migrate",
+          "app.delete"
         ]
       }')"
 )

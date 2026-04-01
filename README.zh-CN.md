@@ -59,28 +59,33 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 
 已经可用：
 
-- 多租户 tenant / project / app / runtime / operation / audit-event API
+- 多租户 tenant / project / app / runtime / backing-service / operation / audit-event API
 - bootstrap admin 全平台管理流
-- 带 scope 的租户级 API key
-- 可复用的租户级 node key，用于一条命令接管 VPS
-- runtime 资源视图、真实 cluster node 视图，以及保留给旧客户端的兼容 nodes 视图
+- 带 scope 的租户级 API key，以及 patch / rotate / disable / enable / delete 生命周期 API
+- 可复用的租户级 node key，用于一条命令接管 VPS，并继续保留给旧 agent 的一次性 enroll token
+- runtime 资源视图与真实 cluster node 视图，并支持 runtime sharing grant 与托管运行时 pool 控制
 - 一个内置共享托管运行时：`runtime_managed_shared`
-- 通过 node bootstrap + `fugue-agent` 接入外部节点
-- 异步 app 部署、扩容、迁移、停用、删除
-- `POST /v1/apps/import-github`：导入 GitHub 公共仓库，支持幂等键，以及 `auto / static-site / dockerfile / buildpacks / nixpacks` 构建策略
-- `POST /v1/apps/{id}/rebuild`：对已导入的 `github-public` app 拉取最新代码后重建，或对已导入的 `upload` app 复用已保存归档重建，并重新部署
+- 通过 node bootstrap、cluster join 与 `fugue-agent` 接入外部节点
+- 异步 app 部署、扩容、停用、迁移、删除
+- 自动分配 Fugue 托管路由，并提供路由可用性检查与修改 API
+- 自定义域名 claim / list / verify / delete API，以及供 edge 使用的 TLS ask、域名清单同步、TLS 状态回传 API
+- `POST /v1/apps/import-github`：导入 GitHub 公共或私有仓库，支持幂等键、`auto / static-site / dockerfile / buildpacks / nixpacks` 构建策略，以及 `fugue.yaml` / Compose 拓扑导入
+- `POST /v1/apps/import-image`：导入已有 Docker / OCI 镜像；`POST /v1/apps/import-upload`：上传 `.tgz` 源码包为新 app 或已有 app 重新导入
+- `POST /v1/apps/{id}/rebuild`：对 GitHub / upload / image 来源的 app 原地重建
 - GitHub 导入 app 的自动后台更新：controller 会轮询上游分支最新 commit，发现变化后自动触发重建，并以零不可用滚动更新等待新版本 ready 后再替换旧副本
-- `GET/PATCH /v1/apps/{id}/env`、`GET/PUT/DELETE /v1/apps/{id}/files`、`POST /v1/apps/{id}/restart`：通过排入 deploy operation 来查看和修改 app 配置
-- `GET /v1/backing-services`、`GET /v1/backing-services/{id}`、`GET /v1/apps/{id}/bindings`：查看关联服务清单与 binding env
+- `GET/PATCH /v1/apps/{id}/env`、`GET/PUT/DELETE /v1/apps/{id}/files`、live `/filesystem/*`、`POST /v1/apps/{id}/restart`：查看和修改 app 配置
+- `GET/POST/DELETE /v1/backing-services`、`GET/POST/DELETE /v1/apps/{id}/bindings`，以及托管 Postgres 的 binding env 注入
+- 构建日志 / 运行日志快照与 SSE 流式 API
 - `DELETE /v1/tenants/{id}`：平台管理员删除 tenant，并返回尽力清理 namespace 的结果
-- `GET /install/join-cluster.sh`、`POST /v1/nodes/join-cluster`、`POST /v1/nodes/join-cluster/env`：在开启 cluster join 时提供一条命令接管节点
-- runtime-agent 拉模式：enroll、heartbeat、拉任务、回传任务完成状态
+- `GET /install/join-cluster.sh`、`POST /v1/nodes/join-cluster`、`POST /v1/nodes/join-cluster/env`，以及内部 `/v1/nodes/join-cluster/cleanup`：在开启 cluster join 时提供一条命令接管节点
+- runtime-agent 拉模式：legacy enroll、heartbeat、拉任务、回传任务完成状态
 - 控制面审计日志
 
 尚未实现：
 
-- 除 deploy 风格的 app env/files 之外，更通用的 project/runtime/app 元数据 update API
-- 面向北向 API 的 backing service create/delete，以及 bind/unbind 能力
+- 通用的 runtime 元数据 update 或 runtime delete API
+- 除 route / domain / env / files / bindings / import / rebuild 之外，更通用的 app 元数据 patch API
+- backing-service update API，或超出 managed / external Postgres 之外的服务类型
 - 类似 kpack 的 buildpacks operator 集成
 - HPA / VPA 等自动扩缩容策略
 - 调度策略、租户配额、计费或付费逻辑
@@ -112,13 +117,14 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 
 | Scope | 能力 |
 | --- | --- |
-| `project.write` | 创建项目 |
-| `apikey.write` | 创建更多租户 API key |
+| `project.write` | 创建 / 更新 / 删除项目，也可创建或删除 backing service |
+| `apikey.write` | 创建 / 更新 / rotate / disable / enable / delete 租户 API key |
 | `runtime.attach` | 创建 node key 与外部 runtime 接入凭证 |
-| `runtime.write` | 直接创建 runtime |
-| `app.write` | 创建 app |
-| `app.deploy` | 创建 deploy 操作 |
-| `app.scale` | 创建 scale / disable 操作 |
+| `runtime.write` | 直接创建 runtime，并管理 runtime sharing |
+| `app.write` | 创建 app，以及大多数 app 侧配置 / 路由 / 域名修改 |
+| `app.deploy` | 创建 deploy / import / rebuild / restart 操作，并执行 service bind / unbind |
+| `app.scale` | 创建 scale 操作 |
+| `app.disable` | 在不授予广义 `app.scale` 的情况下停用 app |
 | `app.migrate` | 创建 migrate 操作 |
 | `app.delete` | 在不授予广义 `app.write` 的情况下删除 app |
 | `platform.admin` | 平台管理员行为 |
@@ -137,10 +143,31 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 | `GET` | `/healthz` | 无 | 控制面健康检查 |
 | `GET` | `/readyz` | 无 | API 可接收请求时返回 `200`，进入优雅退出阶段时返回 `503` |
 | `GET` | `/install/join-cluster.sh` | 无 | 在 cluster join 已配置时返回一键接入集群的辅助脚本 |
+| `GET` | `/v1/source-uploads/{id}/archive` | query 里的 download token | 返回已保存的 `.tgz` 上传归档，供内部工具或受控下载链路使用 |
 | `POST` | `/v1/nodes/bootstrap` | 无 | 用可复用 node key 换取单机 runtime key |
 | `POST` | `/v1/nodes/join-cluster` | 无 | 用可复用 node key 换取 runtime 记录和一份 k3s join 计划 |
 | `POST` | `/v1/nodes/join-cluster/env` | 无 | `form` 版本，返回 shell 可直接 `eval` 的 `FUGUE_JOIN_*` 变量 |
-| `POST` | `/v1/agent/enroll` | 无 | 用 enroll token 换取 runtime 记录与 runtime key |
+| `POST` | `/v1/nodes/join-cluster/cleanup` | 无 | join 脚本内部使用的辅助端点，用于节点重接入后清理过期 cluster-node 记录 |
+
+### Edge 集成端点
+
+这些端点服务于 HTTPS edge / TLS 自动化流程，使用 query string 里的共享 token，而不是 bearer auth。
+
+| Method | Path | 鉴权 | 说明 |
+| --- | --- | --- | --- |
+| `GET` | `/v1/edge/tls/ask` | edge token | 按需 TLS ask hook；当 DNS 已正确时会自动把 pending 域名升级为 verified |
+| `GET` | `/v1/edge/domains` | edge token | 列出已经 verified、应被 edge 挂载的自定义域名 |
+| `POST` | `/v1/edge/domains/tls-report` | edge token | 回传某个 verified 自定义域名的 `pending` / `ready` / `error` TLS 状态 |
+
+### 兼容保留端点
+
+这些端点仍然存在，供旧客户端兼容使用；新接入请尽量不要依赖它们。
+
+| Method | Path | 鉴权 | 说明 |
+| --- | --- | --- | --- |
+| `POST` | `/v1/agent/enroll` | 无 | 旧的一次性 enroll-token 流程；新接入应优先使用 `/v1/nodes/bootstrap` 或 cluster join |
+| `GET` | `/v1/nodes` | 任意 API 凭证 | 已废弃的兼容 runtime 视图；新接入请改用 `/v1/runtimes` 与 `/v1/cluster/nodes` |
+| `GET` | `/v1/nodes/{id}` | 任意 API 凭证 | 已废弃的兼容 runtime 详情视图 |
 
 `POST /v1/nodes/bootstrap` 请求体：
 
@@ -163,26 +190,13 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 
 `POST /v1/nodes/join-cluster/env` 接收等价的 `application/x-www-form-urlencoded` 字段（`node_key`、`node_name`、`runtime_name`、`machine_name`、`machine_fingerprint`、`endpoint`、`labels`），并返回 shell 引用安全的 `FUGUE_JOIN_*` 变量，适合你自己拼装安装器。
 
-`GET /install/join-cluster.sh` 会返回 Fugue 的一键接入脚本。这个脚本会调用 `/v1/nodes/join-cluster/env`，写入 k3s agent 配置，并在开启 cluster join 时附带处理 registry / mesh 参数。
+`POST /v1/nodes/join-cluster/cleanup` 接收 `application/x-www-form-urlencoded` 字段（`node_key`、`machine_fingerprint`、`current_node_name`），并返回 shell 引用安全的 `FUGUE_JOIN_CLEANUP_*` 变量，用于清理与同一机器指纹匹配、但已经过期的 cluster-node 记录。
 
-兼容说明：`POST /v1/agent/enroll` 仍支持一次性 enroll token。
+`GET /install/join-cluster.sh` 会返回 Fugue 的一键接入脚本。这个脚本会调用 `/v1/nodes/join-cluster/env`，写入 k3s agent 配置，附带处理 registry / mesh 参数，并在成功重接入后调用 `/v1/nodes/join-cluster/cleanup` 清理陈旧节点记录。
 
-`POST /v1/agent/enroll` 请求体：
+`GET /v1/source-uploads/{id}/archive` 需要在 query string 里提供 `download_token`，主要供内部 builder 或其他受控下载流程拉取此前上传的源码归档。
 
-```json
-{
-  "enroll_token": "<fugue_enroll_...>",
-  "machine_name": "tenant-vps-1",
-  "machine_fingerprint": "6d6e7b1d9c...",
-  "endpoint": "https://tenant-vps-1.example.com",
-  "labels": {
-    "region": "ap-east-1",
-    "provider": "gcp"
-  }
-}
-```
-
-`runtime_name` 和 `machine_name` 都可省略；如果你希望机器反复 enroll / bootstrap 时能复用同一条 runtime 记录，应保持 `machine_fingerprint` 稳定。
+兼容说明：`POST /v1/agent/enroll` 仍支持一次性 enroll token。它的请求体与 `/v1/nodes/bootstrap` 基本一致，只是把 `node_key` 换成了 `enroll_token`。新的接入流程应优先使用 node bootstrap 或 cluster join。
 
 ### 平台与租户端点
 
@@ -193,27 +207,50 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 | `DELETE` | `/v1/tenants/{id}` | `platform.admin` | 删除 tenant，并返回 namespace / 节点的尽力清理结果 |
 | `GET` | `/v1/projects` | 任意 API 凭证 | 平台管理员应传 `tenant_id` 查询参数 |
 | `POST` | `/v1/projects` | `project.write` | 租户 key 可不传 `tenant_id` |
+| `PATCH` | `/v1/projects/{id}` | `project.write` | 更新 project 的 name 和 / 或 description |
+| `DELETE` | `/v1/projects/{id}` | `project.write` | 删除 project；要求其中的 live app 和 backing service 已经清理掉 |
 | `GET` | `/v1/api-keys` | 任意 API 凭证 | 列出可见 API key，密钥部分会脱敏 |
 | `POST` | `/v1/api-keys` | `apikey.write` | 非管理员 key 不能签发自己没有的 scope |
+| `PATCH` | `/v1/api-keys/{id}` | `apikey.write` | 更新 label 和 / 或 scopes |
+| `POST` | `/v1/api-keys/{id}/rotate` | `apikey.write` | 旋转密钥，并可选更新 label / scopes；新 secret 只返回一次 |
+| `POST` | `/v1/api-keys/{id}/disable` | `apikey.write` | 立即禁用一把 key |
+| `POST` | `/v1/api-keys/{id}/enable` | `apikey.write` | 重新启用已禁用的 key |
+| `DELETE` | `/v1/api-keys/{id}` | `apikey.write` | 永久撤销一把 key |
 | `GET` | `/v1/node-keys` | 任意 API 凭证 | 列出可见 node key，密钥部分会脱敏 |
 | `POST` | `/v1/node-keys` | `runtime.attach` | 创建可复用 tenant node key |
 | `GET` | `/v1/node-keys/{id}/usages` | 任意 API 凭证 | 查看某把 node key 实际被哪些 runtime 使用 |
 | `POST` | `/v1/node-keys/{id}/revoke` | `runtime.attach` | 撤销 node key，之后不能再注册新机器 |
 | `GET` | `/v1/cluster/nodes` | 任意 API 凭证 | 列出真实 Kubernetes 节点；租户只会看到属于自己的 cluster 节点 |
-| `GET` | `/v1/nodes` | 任意 API 凭证 | 已废弃的兼容视图，返回的是 runtime 记录，不是真实物理机器 |
-| `GET` | `/v1/nodes/{id}` | 任意 API 凭证 | 已废弃的兼容详情视图，返回的是 runtime 记录 |
-| `GET` | `/v1/runtimes` | 任意 API 凭证 | 列出当前可见的 Fugue runtime，并带上合并后的机器身份字段 |
-| `POST` | `/v1/runtimes` | `runtime.write` | 手动创建 runtime；`managed-shared` 仅限平台管理员 |
-| `GET` | `/v1/runtimes/{id}` | 任意 API 凭证 | 租户 key 只能看到 shared 或自己租户的 runtime |
+| `GET` | `/v1/runtimes` | 任意 API 凭证 | 列出当前可见的 Fugue runtime，并带上 access / pool mode 与合并后的机器身份字段 |
+| `POST` | `/v1/runtimes` | `runtime.write` | 手动创建 runtime；`managed-shared` 仅限平台管理员，`managed-owned` 必须通过节点接入流创建 |
+| `GET` | `/v1/runtimes/{id}` | 任意 API 凭证 | 租户 key 可以看到自己租户的、被 grant 的、或 `platform-shared` 的 runtime |
+| `GET` | `/v1/runtimes/{id}/sharing` | runtime 所属租户的 API 凭证 | 查看某个自有 runtime 的 sharing grants |
+| `POST` | `/v1/runtimes/{id}/sharing/grants` | `runtime.write` + 所属租户 | 向另一个 tenant 授权某个 private runtime 的可见性 |
+| `DELETE` | `/v1/runtimes/{id}/sharing/grants/{tenant_id}` | `runtime.write` + 所属租户 | 撤销某个 runtime sharing grant |
+| `POST` | `/v1/runtimes/{id}/sharing/mode` | `runtime.write` + 所属租户 | 把 runtime 切到 `private` 或 `platform-shared`；后者还需要 `platform.admin` |
+| `POST` | `/v1/runtimes/{id}/pool-mode` | `platform.admin` | 把 `managed-owned` runtime 切到 `dedicated` 或 `internal-shared` pool 行为 |
 | `GET` | `/v1/runtimes/enroll-tokens` | 任意 API 凭证 | 平台管理员应传 `tenant_id` |
-| `POST` | `/v1/runtimes/enroll-tokens` | `runtime.attach` | 创建一次性 enroll token |
+| `POST` | `/v1/runtimes/enroll-tokens` | `runtime.attach` | 创建 legacy 一次性 enroll token |
 | `GET` | `/v1/backing-services` | 任意 API 凭证 | 列出当前可见的 backing service |
+| `POST` | `/v1/backing-services` | `app.write` 或 `project.write` | 创建 backing service，目前主要是托管 Postgres |
 | `GET` | `/v1/backing-services/{id}` | 任意 API 凭证 | 在可见范围内查看 backing service 详情 |
+| `DELETE` | `/v1/backing-services/{id}` | `app.write` 或 `project.write` | 删除 backing service |
 | `GET` | `/v1/apps` | 任意 API 凭证 | 列出可见 app |
-| `POST` | `/v1/apps` | `app.write` | 创建 app 元数据与期望 spec |
-| `POST` | `/v1/apps/import-github` | `app.write` + `app.deploy` | 导入 GitHub 公共仓库，分配默认域名，排入部署，并支持 `Idempotency-Key` |
+| `POST` | `/v1/apps` | `app.write` | 创建 app 元数据与期望 spec；如果已配置 app base domain，还会自动分配 Fugue 托管路由 |
+| `POST` | `/v1/apps/import-github` | `app.write` + `app.deploy` | 导入 GitHub 公共 / 私有仓库，可展开 `fugue.yaml` 或 Compose 多服务拓扑，分配默认域名，并支持 `Idempotency-Key` |
+| `POST` | `/v1/apps/import-image` | `app.write` + `app.deploy` | 导入一个已有镜像引用并排入部署 |
+| `POST` | `/v1/apps/import-upload` | 新 app 需要 `app.write` + `app.deploy`；传 `app_id` 时只需 `app.deploy` | 上传 `.tgz` 源码包，并创建或重新导入 app |
 | `GET` | `/v1/apps/{id}` | 任意 API 凭证 | 查看 app 详情 |
+| `GET` | `/v1/apps/{id}/route/availability` | 任意 API 凭证 | 校验 app base domain 下的 Fugue 托管主机名是否可用 |
+| `PATCH` | `/v1/apps/{id}/route` | `app.write` | 修改 Fugue 托管路由主机名 |
+| `GET` | `/v1/apps/{id}/domains` | 任意 API 凭证 | 列出 app 已 claim 的自定义域名及其验证 / TLS 状态 |
+| `GET` | `/v1/apps/{id}/domains/availability` | 任意 API 凭证 | 检查自定义域名是否可 claim |
+| `POST` | `/v1/apps/{id}/domains` | `app.write` | claim 或重新检查一个自定义域名 |
+| `POST` | `/v1/apps/{id}/domains/verify` | `app.write` | 强制重新做一次 DNS 校验 |
+| `DELETE` | `/v1/apps/{id}/domains` | `app.write` | 通过 `hostname` 查询参数删除一个已 claim 的自定义域名 |
 | `GET` | `/v1/apps/{id}/bindings` | 任意 API 凭证 | 返回 app 到 service 的 binding，以及对应的 backing service |
+| `POST` | `/v1/apps/{id}/bindings` | `app.write` 或 `app.deploy` | 创建 binding，并排入 deploy operation |
+| `DELETE` | `/v1/apps/{id}/bindings/{binding_id}` | `app.write` 或 `app.deploy` | 删除 binding，并排入 deploy operation |
 | `GET` | `/v1/apps/{id}/build-logs` | 任意 API 凭证 | 查看最近一次导入/构建日志，也支持指定 `operation_id` |
 | `GET` | `/v1/apps/{id}/build-logs/stream` | 任意 API 凭证 | 以 Server-Sent Events 流式返回构建日志和 operation 状态 |
 | `GET` | `/v1/apps/{id}/runtime-logs` | 任意 API 凭证 | 查看 `app` 或 `postgres` 的 Kubernetes Pod 日志 |
@@ -228,11 +265,11 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 | `PUT` | `/v1/apps/{id}/filesystem/file` | `app.write` 或 `app.deploy` | 在 app 持久 workspace volume 内创建或覆盖一个 live 文件 |
 | `POST` | `/v1/apps/{id}/filesystem/directory` | `app.write` 或 `app.deploy` | 在 app 持久 workspace volume 内创建一个 live 目录 |
 | `DELETE` | `/v1/apps/{id}/filesystem` | `app.write` 或 `app.deploy` | 在 app 持久 workspace volume 内删除 live 文件或目录 |
-| `POST` | `/v1/apps/{id}/rebuild` | `app.deploy` | 重新拉取 `github-public` app 的最新代码，或复用 `upload` app 已保存的归档，若配置了 workspace 则刷新 reset token，然后重建并排入部署 |
+| `POST` | `/v1/apps/{id}/rebuild` | `app.deploy` | 对 GitHub / image / upload 来源的 app 原地重建；若配置了 workspace 则刷新 reset token |
 | `POST` | `/v1/apps/{id}/deploy` | `app.deploy` | 创建异步 deploy 操作 |
 | `POST` | `/v1/apps/{id}/restart` | `app.deploy` | 生成新的 restart token 并排入 deploy operation；disabled app 不能 restart，且持久 workspace 会被保留 |
 | `POST` | `/v1/apps/{id}/scale` | `app.scale` | 创建异步 scale 操作；`replicas` 可以是 `0` |
-| `POST` | `/v1/apps/{id}/disable` | `app.scale` | 创建异步 disable 操作，把 app 缩到 `0` |
+| `POST` | `/v1/apps/{id}/disable` | `app.scale` 或 `app.disable` | 幂等地把 app 缩到 `0` |
 | `POST` | `/v1/apps/{id}/migrate` | `app.migrate` | 创建异步 migrate 操作 |
 | `DELETE` | `/v1/apps/{id}` | `app.write` 或 `app.delete` | 创建异步 delete 操作，并把 app 从可见列表中移除 |
 | `GET` | `/v1/operations` | 任意 API 凭证 | 查看当前租户可见的操作列表 |
@@ -243,10 +280,10 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 
 资源视图语义：
 
-- `/v1/runtimes`：Fugue 的部署目标清单。接入 VPS 后的 `machine_name`、`connection_mode`、`cluster_node_name`、fingerprint 等身份信息都合并到这里。
+- `/v1/runtimes`：Fugue 的部署目标清单。接入 VPS 后的 `machine_name`、`connection_mode`、`cluster_node_name`、fingerprint，以及 sharing / pool 状态都合并到这里。
 - `/v1/cluster/nodes`：直接来自 Kubernetes API 的真实集群节点清单。
 - `/v1/node-keys/{id}/usages`：一把可复用 node key 到实际 runtime 使用记录的映射。
-- `/v1/nodes`：仅为旧客户端保留的兼容 runtime 视图。
+- `/v1/nodes`：仅为旧客户端保留的兼容 runtime 视图；新接入建议改用 `/v1/runtimes` 和 `/v1/cluster/nodes`。
 
 `POST /v1/tenants`
 
@@ -266,6 +303,25 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 }
 ```
 
+`PATCH /v1/projects/{id}`
+
+```json
+{
+  "name": "production",
+  "description": "shared production workloads"
+}
+```
+
+`DELETE /v1/projects/{id}`
+
+无需请求体。
+
+行为说明：
+
+- 需要 `project.write`
+- 当 project 下仍有 live app 或 backing service 时会返回 `409 Conflict`
+- 删除成功后，project 记录会被彻底移除
+
 `POST /v1/api-keys`
 
 ```json
@@ -280,10 +336,39 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
     "app.write",
     "app.deploy",
     "app.scale",
-    "app.migrate"
+    "app.disable",
+    "app.migrate",
+    "app.delete"
   ]
 }
 ```
+
+`PATCH /v1/api-keys/{id}`
+
+```json
+{
+  "label": "preview-ops",
+  "scopes": [
+    "app.write",
+    "app.deploy"
+  ]
+}
+```
+
+`POST /v1/api-keys/{id}/rotate`
+
+请求体可省略。如果传入，则字段与 `PATCH /v1/api-keys/{id}` 相同，也就是 `label` / `scopes`，并会返回新的 `secret`。
+
+`POST /v1/api-keys/{id}/disable`、`POST /v1/api-keys/{id}/enable`、`DELETE /v1/api-keys/{id}`
+
+无需请求体。
+
+行为说明：
+
+- 所有 API key 生命周期操作都需要 `apikey.write`
+- rotate 会立即使旧 secret 失效，并只返回一次新的 secret
+- disable / enable 会立即影响该 key 的鉴权行为
+- delete 会永久撤销该 key，并把它从后续列表结果中移除
 
 `POST /v1/node-keys`
 
@@ -320,6 +405,45 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 }
 ```
 
+`POST /v1/runtimes/{id}/sharing/grants`
+
+```json
+{
+  "tenant_id": "tenant_yyy"
+}
+```
+
+`POST /v1/runtimes/{id}/sharing/mode`
+
+```json
+{
+  "access_mode": "private"
+}
+```
+
+或者，在所属租户 key 同时带有 `platform.admin` 时：
+
+```json
+{
+  "access_mode": "platform-shared"
+}
+```
+
+`POST /v1/runtimes/{id}/pool-mode`
+
+```json
+{
+  "pool_mode": "internal-shared"
+}
+```
+
+行为说明：
+
+- sharing 相关写操作要求调用方来自 runtime 所属租户；grant / mode 修改还需要 `runtime.write`
+- `platform-shared` 只有在调用方同时带有 `platform.admin` 时才允许
+- pool mode 仅平台管理员可用，并且只适用于 `managed-owned` runtime
+- 如果该 `managed-owned` runtime 已经对应某个 Kubernetes node，切换 pool mode 时还会同步调整调度使用的 node labels / taints
+
 `POST /v1/apps`
 
 ```json
@@ -347,6 +471,8 @@ curl -sS "${FUGUE_BASE_URL}/healthz"
 
 `spec.workspace` 是可选项。配置后，Fugue 会为 app 挂一个可写的持久 workspace volume，默认挂载到 `/workspace`，并为该 app 开启 live `/filesystem/*` 接口。当前这项能力只支持 `managed-owned` runtime，因为底层使用的是节点本地 `hostPath` 存储。
 
+当控制面配置了 `appBaseDomain` 时，`POST /v1/apps` 还会自动给 app 分配一个 Fugue 托管路由。
+
 `POST /v1/apps/import-github`
 
 请求头可选：
@@ -372,19 +498,80 @@ Idempotency-Key: import-<unique-key>
 
 当前 GitHub 导入行为：
 
-- 仅支持 GitHub 公共仓库
+- 支持 GitHub 公共仓库与私有仓库
+- `repo_visibility` 可选；当它是 `private` 时，必须同时提供 `repo_auth_token`
 - `project_id` 可省略；如果不传，Fugue 会复用当前租户的 `default` 项目，不存在就自动创建
+- 也可以传 `project` 代替 `project_id`，在导入时内联创建 project
 - `build_strategy` 可省略，默认是 `auto`
-- `auto` 当前按这个顺序判断：`Dockerfile` -> 已准备好的静态站 -> 对受支持项目优先 `buildpacks` -> `nixpacks`
+- `auto` 会先尝试 `fugue.yaml`，再尝试 Compose 文件，最后才回退到单应用检测管线
+- 如果检测到 `fugue.yaml` 或 Compose，响应仍会返回主 `app` + `operation`，但还会额外带上 `apps`、`operations`，以及 `fugue_manifest` 或 `compose_stack` 元数据
+- 在拓扑导入之外，`auto` 当前按这个顺序判断：`Dockerfile` -> 已准备好的静态站 -> 对受支持项目优先 `buildpacks` -> `nixpacks`
 - `static-site` 要求仓库里已经存在 `index.html`，位置可以在根目录、`dist/`、`build/`、`public/` 或 `site/`
 - `buildpacks` 使用 Paketo builders，适合常见的 Node.js / Python / Go / Java / Ruby / PHP / .NET 仓库
 - `nixpacks` 是当前的免配置应用构建器，主要覆盖常见的 Node.js、Python、Go 等项目
+- Dockerfile 导入支持 `dockerfile_path` 与 `build_context_dir`
 - `service_port` 可省略；如果不传，Fugue 会使用检测到的端口或该构建策略的默认端口
 - Git submodule 默认会递归拉取
 - Fugue 会按项目类型选择：静态目录打包成 Caddy 镜像、直接使用 Dockerfile、走 Buildpacks/Paketo，或用 Nixpacks 生成构建上下文，再推送到内置 registry
 - 返回的 app 会带一个在配置好的 app base domain 下生成的默认公网域名
 - 如果同一个 `Idempotency-Key` 配合同一份请求体被重复提交，Fugue 会返回原来的 app + operation，而不会再创建一个重复 app
 - 如果同一个 `Idempotency-Key` 被用于不同的请求体，Fugue 会返回 `409 Conflict`
+
+`POST /v1/apps/import-image`
+
+```json
+{
+  "tenant_id": "tenant_xxx",
+  "project_id": "project_xxx",
+  "image_ref": "ghcr.io/example/demo:1.2.3",
+  "name": "demo-image",
+  "description": "imported from image",
+  "runtime_id": "runtime_managed_shared",
+  "replicas": 1,
+  "service_port": 8080,
+  "env": {
+    "APP_ENV": "production"
+  }
+}
+```
+
+行为说明：
+
+- 直接导入一个现成的 Docker / OCI 镜像引用，不需要 Git clone 或源码上传
+- 如果不传 `name`，会默认从 `image_ref` 推导 app 名称
+- 支持与 GitHub 导入相同的 `project_id` / 内联 `project` 解析逻辑
+- 会排入一条 `import` operation，由 controller 继续完成规范化与部署
+
+`POST /v1/apps/import-upload`
+
+Multipart 表单字段：
+
+- `request`：一个 JSON 对象，字段与 GitHub 导入基本一致，并额外支持可选的 `app_id`
+- `archive`：一个 `.tgz` 或 `.tar.gz` 源码归档
+
+示例：
+
+```bash
+curl -sS "${FUGUE_BASE_URL}/v1/apps/import-upload" \
+  -H "Authorization: Bearer ${FUGUE_TENANT_TOKEN}" \
+  -F 'request={"project_id":"project_xxx","name":"demo-upload","build_strategy":"static-site"};type=application/json' \
+  -F 'archive=@./demo-upload.tgz;type=application/gzip'
+```
+
+行为说明：
+
+- 归档必须是 gzip 压缩 tar，目前大小上限是 `128 MiB`
+- 不传 `app_id` 时，Fugue 会创建一个新的 imported app，并排入 `import` operation
+- 传入 `app_id` 时，Fugue 会保存这次上传的归档，并对已有 app 重新排入 import；这条路径只需要 `app.deploy`
+- 上传归档会被保存为 `upload` source，因此后续 `rebuild` 可以直接复用已保存归档，不必再次上传
+
+`GET /v1/source-uploads/{id}/archive`
+
+行为说明：
+
+- 必须通过 query string 提供 `download_token=<upload-download-token>`
+- 主要给内部工具或受控下载流程使用，用来直接拿到上传时保存的原始归档字节
+- 返回原始归档内容，类型通常是 `application/gzip`
 
 `POST /v1/apps/{id}/rebuild`
 
@@ -397,19 +584,69 @@ Idempotency-Key: import-<unique-key>
 ```json
 {
   "branch": "main",
+  "image_ref": "ghcr.io/example/demo:1.2.4",
   "source_dir": "apps/web",
-  "dockerfile_path": "deploy/Dockerfile"
+  "dockerfile_path": "deploy/Dockerfile",
+  "build_context_dir": "apps/web",
+  "repo_auth_token": "<private-rebuild-token>"
 }
 ```
 
 当前 rebuild 行为：
 
-- 适用于最初由 `github-public` 或 `upload` 来源创建的 app
-- 对 `github-public`，从保存的仓库 URL 与分支拉取最新代码；可选的 `branch` 覆盖仅对这一类来源生效
+- 适用于最初由 `github-public`、`github-private`、`docker-image`、或 `upload` 来源创建的 app
+- 对 GitHub 来源，会从保存的仓库 URL 与分支拉取最新代码；`branch` 与 `repo_auth_token` 覆盖只对 GitHub 来源生效
+- 对 `docker-image`，会基于已保存的 `image_ref` 重新排队导入，也可以通过 `image_ref` 临时覆盖
 - 对 `upload`，复用保存下来的 `upload_id` 归档，并带着原有构建元数据重新排入 import
+- `source_dir`、`dockerfile_path`、`build_context_dir` 会覆盖下一次导入使用的源码布局
 - 对 GitHub 导入会递归拉取 Git submodule
 - 按保存下来的构建策略（`static-site`、`dockerfile`、`buildpacks` 或 `nixpacks`）重新构建镜像并推送到内置 registry
-- 保持原有 app id、project 与公网域名不变，只更新镜像与 source 元数据，然后排入 deploy 操作
+- 保持原有 app id、project 与公网域名不变，然后把更新后的来源定义重新排入一条新的 `import` operation
+
+`GET /v1/apps/{id}/route/availability`
+
+查询参数：
+
+- `hostname` 必填；既可以是 app base domain 下的完整主机名，也可以只传想要的 label
+
+行为说明：
+
+- 只校验位于已配置 app base domain 下的 Fugue 托管主机名
+- 返回规范化后的 `hostname`、`public_url`、`valid`、`available`、`current`，以及失败时的 `reason`
+
+`PATCH /v1/apps/{id}/route`
+
+```json
+{
+  "hostname": "fresh-name"
+}
+```
+
+行为说明：
+
+- 需要 `app.write`
+- 可以传裸 label，也可以传 app base domain 下的完整主机名
+- 如果目标路由已经属于当前 app，会返回 `already_current: true`
+
+`GET /v1/apps/{id}/domains`、`GET /v1/apps/{id}/domains/availability`、`POST /v1/apps/{id}/domains`、`POST /v1/apps/{id}/domains/verify`、`DELETE /v1/apps/{id}/domains`
+
+create / verify 的请求体：
+
+```json
+{
+  "hostname": "www.example.com"
+}
+```
+
+删除时使用 query string 里的 `hostname`，例如 `/v1/apps/<app-id>/domains?hostname=www.example.com`。
+
+行为说明：
+
+- 自定义域名与 Fugue 托管路由是两套独立能力，且不能位于平台托管的 app base domain 下
+- `POST /v1/apps/{id}/domains` 会 claim 或重新检查一个 hostname，并返回当前 `domain`、`availability`、`already_current`
+- 当 hostname 的 CNAME 指向 Fugue 目标，或被 flatten 到与 Fugue 目标相同的 IP 集合时，就会校验成功；否则会保持 `pending`，并通过 `last_message` 返回 DNS 指引
+- `POST /v1/apps/{id}/domains/verify` 用于对已 claim 的 hostname 强制再做一次 DNS 检查
+- edge 自动化会通过 `/v1/edge/domains/tls-report` 回填 TLS 状态，因此每个 domain 记录还会带有 `tls_status`、`tls_last_message`、以及 `verified_at` / `tls_ready_at` 等时间字段
 
 `GET /v1/apps/{id}/build-logs`
 
@@ -483,12 +720,40 @@ Idempotency-Key: import-<unique-key>
 - 会从 Fugue 状态里删除该 tenant，并返回一个 `cleanup` 对象，其中包含 namespace 名称、是否已发起 namespace 删除、owned node 数量以及告警信息
 - namespace 清理是尽力而为；managed-owned 节点可能仍需要你到租户 VPS 上手动卸载 k3s agent
 
-`GET /v1/backing-services` 与 `GET /v1/apps/{id}/bindings`
+`GET/POST/DELETE /v1/backing-services` 与 `GET/POST/DELETE /v1/apps/{id}/bindings`
 
 行为说明：
 
-- backing service 目前对外只暴露只读 API；由 app spec 创建出来的托管 Postgres 也会反映到这里
+- `POST /v1/backing-services` 允许直接创建 backing service；当前北向写路径主要是托管 Postgres
+- `DELETE /v1/backing-services/{id}` 用于删除 backing service 记录
 - `GET /v1/apps/{id}/bindings` 同时返回 binding 记录和它们引用的 backing service 对象
+- `POST /v1/apps/{id}/bindings` 与 `DELETE /v1/apps/{id}/bindings/{binding_id}` 都会排入 deploy operation，确保 app 的有效 env 与 binding 期望一致
+
+`POST /v1/backing-services`
+
+```json
+{
+  "project_id": "project_xxx",
+  "name": "main-db",
+  "description": "primary postgres",
+  "spec": {
+    "postgres": {
+      "database": "app",
+      "user": "app",
+      "password": "secret"
+    }
+  }
+}
+```
+
+`POST /v1/apps/{id}/bindings`
+
+```json
+{
+  "service_id": "svc_xxx",
+  "alias": "db"
+}
+```
 
 `GET /v1/apps/{id}/env`
 
@@ -655,7 +920,7 @@ Idempotency-Key: import-<unique-key>
 行为说明：
 
 - 需要 `app.deploy`
-- 按 app 当前保存的 source 定义重新构建
+- 按 app 当前保存的 GitHub / image / upload source 定义重新构建
 - 如果配置了持久 workspace，会刷新 `spec.workspace.reset_token`，让下一次 rollout 只在这一次重建时清空并重建 workspace 内容
 
 `POST /v1/apps/{id}/scale`
@@ -671,6 +936,11 @@ Idempotency-Key: import-<unique-key>
 ```json
 {}
 ```
+
+行为说明：
+
+- 需要 `app.scale` 或 `app.disable`
+- 如果 app 已经完全缩到 `0`，会返回 `already_disabled: true`
 
 `POST /v1/apps/{id}/migrate`
 
@@ -755,7 +1025,9 @@ curl -sS "${FUGUE_BASE_URL}/v1/api-keys" \
       "app.write",
       "app.deploy",
       "app.scale",
-      "app.migrate"
+      "app.disable",
+      "app.migrate",
+      "app.delete"
     ]
   }'
 ```
@@ -894,7 +1166,9 @@ TENANT_KEY_JSON=$(
           "app.write",
           "app.deploy",
           "app.scale",
-          "app.migrate"
+          "app.disable",
+          "app.migrate",
+          "app.delete"
         ]
       }')"
 )
