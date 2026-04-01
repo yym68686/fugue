@@ -218,6 +218,9 @@ func ensureTenantBillingRecord(state *model.State, tenantID string, now time.Tim
 	if index >= 0 {
 		record := &state.TenantBilling[index]
 		normalizeTenantBillingRecord(record, now)
+		if shouldRecalibrateTenantBillingPriceBook(*record) {
+			recalibrateTenantBillingPriceBook(record, now)
+		}
 		if shouldBackfillLegacyTenantBillingRecord(*record) && !tenantHasBillingEvents(state, tenantID) {
 			backfillLegacyTenantBillingRecord(record, now)
 		}
@@ -251,10 +254,24 @@ func shouldBackfillLegacyTenantBillingRecord(record model.TenantBilling) bool {
 		record.BalanceMicroCents == 0
 }
 
+func shouldRecalibrateTenantBillingPriceBook(record model.TenantBilling) bool {
+	return normalizeBillingPriceBook(record.PriceBook) != model.DefaultBillingPriceBook()
+}
+
+func recalibrateTenantBillingPriceBook(record *model.TenantBilling, now time.Time) {
+	if record == nil {
+		return
+	}
+	accrueTenantBilling(record, now)
+	record.PriceBook = model.DefaultBillingPriceBook()
+	record.UpdatedAt = now
+}
+
 func backfillLegacyTenantBillingRecord(record *model.TenantBilling, now time.Time) {
 	if record == nil {
 		return
 	}
+	record.PriceBook = model.DefaultBillingPriceBook()
 	record.ManagedCap = model.DefaultTenantFreeManagedCap()
 	record.BalanceMicroCents = billingMonthlyEstimateMicroCents(*record)
 	record.LastAccruedAt = now

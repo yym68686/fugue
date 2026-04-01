@@ -328,6 +328,11 @@ func (s *Store) pgEnsureTenantBillingRecordTx(ctx context.Context, tx *sql.Tx, t
 	record, err := s.pgGetTenantBillingRecordTx(ctx, tx, tenantID, forUpdate)
 	if err == nil {
 		normalizeTenantBillingRecord(&record, now)
+		changed := false
+		if shouldRecalibrateTenantBillingPriceBook(record) {
+			recalibrateTenantBillingPriceBook(&record, now)
+			changed = true
+		}
 		if shouldBackfillLegacyTenantBillingRecord(record) {
 			hasEvents, err := s.pgTenantHasBillingEventsTx(ctx, tx, tenantID)
 			if err != nil {
@@ -335,9 +340,12 @@ func (s *Store) pgEnsureTenantBillingRecordTx(ctx context.Context, tx *sql.Tx, t
 			}
 			if !hasEvents {
 				backfillLegacyTenantBillingRecord(&record, now)
-				if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, record); err != nil {
-					return model.TenantBilling{}, err
-				}
+				changed = true
+			}
+		}
+		if changed {
+			if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, record); err != nil {
+				return model.TenantBilling{}, err
 			}
 		}
 		return record, nil

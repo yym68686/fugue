@@ -3025,6 +3025,82 @@ func TestLegacyZeroBillingRecordBackfillsSeededFreeTier(t *testing.T) {
 	}
 }
 
+func TestLegacyBillingPriceBookRecalibratesToDefault(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Legacy Pricing Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+
+	managedCap := model.ResourceSpec{
+		CPUMilliCores:   2000,
+		MemoryMebibytes: 4096,
+	}
+	stalePriceBook := model.BillingPriceBook{
+		Currency:                      model.DefaultBillingCurrency,
+		HoursPerMonth:                 model.DefaultBillingHoursPerMonth,
+		CPUMicroCentsPerMilliCoreHour: 3000,
+		MemoryMicroCentsPerMiBHour:    900,
+	}
+	if err := s.withLockedState(true, func(state *model.State) error {
+		index := findTenantBillingRecord(state, tenant.ID)
+		if index < 0 {
+			t.Fatalf("billing record for tenant %s not found", tenant.ID)
+		}
+		state.TenantBilling[index].ManagedCap = managedCap
+		state.TenantBilling[index].PriceBook = stalePriceBook
+		state.TenantBilling[index].LastAccruedAt = time.Now().UTC()
+		state.TenantBilling[index].UpdatedAt = time.Now().UTC()
+		return nil
+	}); err != nil {
+		t.Fatalf("seed legacy price book: %v", err)
+	}
+
+	summary, err := s.GetTenantBillingSummary(tenant.ID)
+	if err != nil {
+		t.Fatalf("get billing summary: %v", err)
+	}
+
+	expectedPriceBook := model.DefaultBillingPriceBook()
+	expectedHourly := billingHourlyRateMicroCents(model.TenantBilling{
+		ManagedCap: managedCap,
+		PriceBook:  expectedPriceBook,
+	})
+	expectedMonthly := billingMonthlyEstimateMicroCents(model.TenantBilling{
+		ManagedCap: managedCap,
+		PriceBook:  expectedPriceBook,
+	})
+
+	if summary.PriceBook != expectedPriceBook {
+		t.Fatalf("expected recalibrated price book %+v, got %+v", expectedPriceBook, summary.PriceBook)
+	}
+	if summary.HourlyRateMicroCents != expectedHourly {
+		t.Fatalf("expected hourly rate %d, got %d", expectedHourly, summary.HourlyRateMicroCents)
+	}
+	if summary.MonthlyEstimateMicroCents != expectedMonthly {
+		t.Fatalf("expected monthly estimate %d, got %d", expectedMonthly, summary.MonthlyEstimateMicroCents)
+	}
+
+	if err := s.withLockedState(false, func(state *model.State) error {
+		index := findTenantBillingRecord(state, tenant.ID)
+		if index < 0 {
+			t.Fatalf("billing record for tenant %s not found", tenant.ID)
+		}
+		if state.TenantBilling[index].PriceBook != expectedPriceBook {
+			t.Fatalf("expected persisted price book %+v, got %+v", expectedPriceBook, state.TenantBilling[index].PriceBook)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("inspect recalibrated billing state: %v", err)
+	}
+}
+
 func TestExplicitZeroBillingConfigDoesNotBackfillAfterConfigEvent(t *testing.T) {
 	t.Parallel()
 
