@@ -378,6 +378,7 @@ type AppSpec struct {
 	Env          map[string]string `json:"env,omitempty"`
 	Ports        []int             `json:"ports,omitempty"`
 	Replicas     int               `json:"replicas"`
+	Resources    *ResourceSpec     `json:"resources,omitempty"`
 	RuntimeID    string            `json:"runtime_id"`
 	Files        []AppFile         `json:"files,omitempty"`
 	Workspace    *AppWorkspaceSpec `json:"workspace,omitempty"`
@@ -399,12 +400,13 @@ type AppWorkspaceSpec struct {
 }
 
 type AppPostgresSpec struct {
-	Image       string `json:"image,omitempty"`
-	Database    string `json:"database,omitempty"`
-	User        string `json:"user,omitempty"`
-	Password    string `json:"password,omitempty"`
-	ServiceName string `json:"service_name,omitempty"`
-	StoragePath string `json:"storage_path,omitempty"`
+	Image       string        `json:"image,omitempty"`
+	Database    string        `json:"database,omitempty"`
+	User        string        `json:"user,omitempty"`
+	Password    string        `json:"password,omitempty"`
+	ServiceName string        `json:"service_name,omitempty"`
+	StoragePath string        `json:"storage_path,omitempty"`
+	Resources   *ResourceSpec `json:"resources,omitempty"`
 }
 
 type BackingServiceSpec struct {
@@ -582,4 +584,6 @@ type State struct {
 	Operations       []Operation          `json:"operations"`
 	AuditEvents      []AuditEvent         `json:"audit_events"`
 	Idempotency      []IdempotencyRecord  `json:"idempotency"`
+	TenantBilling    []TenantBilling      `json:"tenant_billing"`
+	BillingEvents    []TenantBillingEvent `json:"billing_events"`
 }

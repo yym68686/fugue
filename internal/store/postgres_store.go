@@ -73,12 +73,23 @@ func (s *Store) pgCreateTenant(name string) (model.Tenant, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Tenant{}, fmt.Errorf("begin create tenant transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
 INSERT INTO fugue_tenants (id, name, slug, status, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6)
-`, tenant.ID, tenant.Name, tenant.Slug, tenant.Status, tenant.CreatedAt, tenant.UpdatedAt)
-	if err != nil {
+`, tenant.ID, tenant.Name, tenant.Slug, tenant.Status, tenant.CreatedAt, tenant.UpdatedAt); err != nil {
 		return model.Tenant{}, mapDBErr(err)
+	}
+	if _, err := s.pgEnsureTenantBillingRecordTx(ctx, tx, tenant.ID, true, tenant.CreatedAt); err != nil {
+		return model.Tenant{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Tenant{}, fmt.Errorf("commit create tenant transaction: %w", err)
 	}
 	return tenant, nil
 }
@@ -1927,6 +1938,9 @@ func (s *Store) pgCreateApp(tenantID, projectID, name, description string, spec 
 	if !projectOK {
 		return model.App{}, ErrNotFound
 	}
+	if err := normalizeAppSpecResources(&spec); err != nil {
+		return model.App{}, err
+	}
 	visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, spec.RuntimeID, tenantID)
 	if err != nil {
 		return model.App{}, err
@@ -2275,6 +2289,9 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 		if !isQueuedImportSourceType(op.DesiredSource.Type) {
 			return model.Operation{}, ErrInvalidInput
 		}
+		if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
+			return model.Operation{}, err
+		}
 		visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, op.DesiredSpec.RuntimeID, op.TenantID)
 		if err != nil {
 			return model.Operation{}, err
@@ -2293,6 +2310,9 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 	case model.OperationTypeDeploy:
 		if op.DesiredSpec == nil {
 			return model.Operation{}, ErrInvalidInput
+		}
+		if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
+			return model.Operation{}, err
 		}
 		visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, op.DesiredSpec.RuntimeID, op.TenantID)
 		if err != nil {
@@ -2342,6 +2362,21 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 	now := time.Now().UTC()
 	op.DesiredSpec = cloneAppSpec(op.DesiredSpec)
 	op.DesiredSource = cloneAppSource(op.DesiredSource)
+	billing, err := s.pgEnsureTenantBillingRecordTx(ctx, tx, app.TenantID, true, now)
+	if err != nil {
+		return model.Operation{}, err
+	}
+	accrueTenantBilling(&billing, now)
+	if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, billing); err != nil {
+		return model.Operation{}, err
+	}
+	billingState, err := s.pgLoadTenantBillingStateTx(ctx, tx, app.TenantID)
+	if err != nil {
+		return model.Operation{}, err
+	}
+	if err := validateManagedOperationBilling(&billingState, billing, app, op); err != nil {
+		return model.Operation{}, err
+	}
 	op.ID = model.NewID("op")
 	op.Status = model.OperationStatusPending
 	op.ExecutionMode = model.ExecutionModeManaged

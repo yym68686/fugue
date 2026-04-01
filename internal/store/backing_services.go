@@ -329,6 +329,10 @@ func cloneBackingServiceSpec(spec model.BackingServiceSpec) model.BackingService
 	out := spec
 	if spec.Postgres != nil {
 		postgres := *spec.Postgres
+		if spec.Postgres.Resources != nil {
+			resources := *spec.Postgres.Resources
+			postgres.Resources = &resources
+		}
 		out.Postgres = &postgres
 	}
 	return out
@@ -370,6 +374,9 @@ func normalizeBackingServiceForPersist(service *model.BackingService, app *model
 	case model.BackingServiceTypePostgres:
 		if service.Spec.Postgres == nil {
 			return ErrInvalidInput
+		}
+		if err := normalizePostgresSpecResources(service.Spec.Postgres); err != nil {
+			return err
 		}
 		normalized := normalizeManagedPostgresSpec(service.TenantID, appNameForService(service, app), *service.Spec.Postgres)
 		service.Spec.Postgres = &normalized
@@ -419,6 +426,12 @@ func normalizeManagedPostgresSpec(_ string, appName string, spec model.AppPostgr
 	if strings.TrimSpace(out.ServiceName) == "" {
 		out.ServiceName = resourceName
 	}
+	resources, err := normalizeWorkloadResources(out.Resources, model.DefaultManagedPostgresResources())
+	if err != nil {
+		fallback := model.DefaultManagedPostgresResources()
+		resources = &fallback
+	}
+	out.Resources = resources
 	return out
 }
 

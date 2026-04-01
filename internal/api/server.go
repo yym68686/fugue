@@ -106,6 +106,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/projects", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateProject)))
 	mux.Handle("PATCH /v1/projects/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchProject)))
 	mux.Handle("DELETE /v1/projects/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteProject)))
+	mux.Handle("GET /v1/billing", s.auth.RequireAPI(http.HandlerFunc(s.handleGetBilling)))
+	mux.Handle("PATCH /v1/billing", s.auth.RequireAPI(http.HandlerFunc(s.handleUpdateBilling)))
+	mux.Handle("POST /v1/billing/top-ups", s.auth.RequireAPI(http.HandlerFunc(s.handleTopUpBilling)))
 
 	mux.Handle("GET /v1/api-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleListAPIKeys)))
 	mux.Handle("POST /v1/api-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateAPIKey)))
@@ -1270,6 +1273,10 @@ func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid input")
 	case errors.Is(err, store.ErrIdempotencyMismatch):
 		httpx.WriteError(w, http.StatusConflict, "idempotency key does not match the original request")
+	case errors.Is(err, store.ErrBillingCapExceeded):
+		httpx.WriteError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, store.ErrBillingBalanceDepleted):
+		httpx.WriteError(w, http.StatusPaymentRequired, err.Error())
 	default:
 		httpx.WriteError(w, http.StatusInternalServerError, err.Error())
 	}

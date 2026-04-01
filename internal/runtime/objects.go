@@ -188,6 +188,7 @@ func buildPostgresServiceObject(namespace, resourceName string, labels map[strin
 
 func buildPostgresDeploymentObject(namespace, secretName, resourceName string, labels map[string]string, spec model.AppPostgresSpec, scheduling SchedulingConstraints) map[string]any {
 	selectorLabels := postgresSelectorLabels(labels)
+	resourceRequirements := runtimeResourceRequirements(spec.Resources, model.DefaultManagedPostgresResources())
 	podSpec := map[string]any{
 		"initContainers": []map[string]any{
 			{
@@ -254,6 +255,7 @@ func buildPostgresDeploymentObject(namespace, secretName, resourceName string, l
 						"mountPath": "/var/lib/postgresql/data",
 					},
 				},
+				"resources": resourceRequirements,
 			},
 		},
 		"volumes": []map[string]any{
@@ -315,8 +317,9 @@ func buildPostgresPVCObject(namespace, resourceName string, labels map[string]st
 
 func buildAppDeploymentObject(namespace string, app model.App, labels map[string]string, scheduling SchedulingConstraints, postgresResources []postgresRuntimeResource) map[string]any {
 	container := map[string]any{
-		"name":  sanitizeName(app.Name),
-		"image": app.Spec.Image,
+		"name":      sanitizeName(app.Name),
+		"image":     app.Spec.Image,
+		"resources": runtimeResourceRequirements(app.Spec.Resources, model.DefaultManagedAppResources()),
 	}
 	if len(app.Spec.Command) > 0 {
 		container["command"] = app.Spec.Command
@@ -468,6 +471,28 @@ func buildAppTCPReadinessProbe(port int) map[string]any {
 		"periodSeconds":       2,
 		"timeoutSeconds":      1,
 		"failureThreshold":    15,
+	}
+}
+
+func runtimeResourceRequirements(spec *model.ResourceSpec, defaults model.ResourceSpec) map[string]any {
+	resources := defaults
+	if spec != nil {
+		if spec.CPUMilliCores > 0 {
+			resources.CPUMilliCores = spec.CPUMilliCores
+		}
+		if spec.MemoryMebibytes > 0 {
+			resources.MemoryMebibytes = spec.MemoryMebibytes
+		}
+	}
+	return map[string]any{
+		"requests": map[string]string{
+			"cpu":    strconv.FormatInt(resources.CPUMilliCores, 10) + "m",
+			"memory": strconv.FormatInt(resources.MemoryMebibytes, 10) + "Mi",
+		},
+		"limits": map[string]string{
+			"cpu":    strconv.FormatInt(resources.CPUMilliCores, 10) + "m",
+			"memory": strconv.FormatInt(resources.MemoryMebibytes, 10) + "Mi",
+		},
 	}
 }
 

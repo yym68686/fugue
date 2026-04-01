@@ -216,6 +216,25 @@ var postgresSchemaStatements = []string{
 	)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_service_bindings_app_service ON fugue_service_bindings (app_id, service_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_service_bindings_service_id ON fugue_service_bindings (service_id)`,
+	`CREATE TABLE IF NOT EXISTS fugue_tenant_billing (
+		tenant_id TEXT PRIMARY KEY REFERENCES fugue_tenants(id) ON DELETE CASCADE,
+		managed_cap_json JSONB NOT NULL,
+		balance_microcents BIGINT NOT NULL DEFAULT 0,
+		price_book_json JSONB NOT NULL,
+		last_accrued_at TIMESTAMPTZ NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL
+	)`,
+	`CREATE TABLE IF NOT EXISTS fugue_billing_events (
+		id TEXT PRIMARY KEY,
+		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
+		type TEXT NOT NULL,
+		amount_microcents BIGINT NOT NULL DEFAULT 0,
+		balance_after_microcents BIGINT NOT NULL DEFAULT 0,
+		metadata_json JSONB NULL,
+		created_at TIMESTAMPTZ NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_billing_events_tenant_created_at ON fugue_billing_events (tenant_id, created_at DESC)`,
 	`CREATE TABLE IF NOT EXISTS fugue_idempotency_keys (
 		scope TEXT NOT NULL,
 		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
@@ -346,6 +365,9 @@ func (s *Store) bootstrapDatabase(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureFailedImportAppStatusTx(ctx, tx); err != nil {
+		return err
+	}
+	if err := s.ensureTenantBillingRecordsTx(ctx, tx); err != nil {
 		return err
 	}
 

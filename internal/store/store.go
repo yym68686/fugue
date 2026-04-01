@@ -166,6 +166,7 @@ func (s *Store) CreateTenant(name string) (model.Tenant, error) {
 			UpdatedAt: now,
 		}
 		state.Tenants = append(state.Tenants, tenant)
+		ensureTenantBillingRecord(state, tenant.ID, now)
 		return nil
 	})
 	return tenant, err
@@ -204,6 +205,8 @@ func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
 		state.ServiceBindings = deleteServiceBindingsByTenant(state.ServiceBindings, id)
 		state.Operations = deleteOperationsByTenant(state.Operations, id)
 		state.AuditEvents = deleteAuditEventsByTenant(state.AuditEvents, id)
+		state.TenantBilling = deleteTenantBillingRecords(state.TenantBilling, id)
+		state.BillingEvents = deleteTenantBillingEvents(state.BillingEvents, id)
 		state.Idempotency = deleteIdempotencyRecordsByTenant(state.Idempotency, id)
 		return nil
 	})
@@ -1869,6 +1872,9 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 	if spec.RuntimeID == "" {
 		spec.RuntimeID = "runtime_managed_shared"
 	}
+	if err := normalizeAppSpecResources(&spec); err != nil {
+		return model.App{}, err
+	}
 	if s.usingDatabase() {
 		return s.pgCreateApp(tenantID, projectID, name, description, spec, source, route)
 	}
@@ -1965,6 +1971,9 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			if !isQueuedImportSourceType(op.DesiredSource.Type) {
 				return ErrInvalidInput
 			}
+			if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
+				return err
+			}
 			if !runtimeVisibleToTenant(state, op.DesiredSpec.RuntimeID, op.TenantID) {
 				return ErrNotFound
 			}
@@ -1975,6 +1984,9 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 		case model.OperationTypeDeploy:
 			if op.DesiredSpec == nil {
 				return ErrInvalidInput
+			}
+			if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
+				return err
 			}
 			if !runtimeVisibleToTenant(state, op.DesiredSpec.RuntimeID, op.TenantID) {
 				return ErrNotFound
@@ -2009,6 +2021,11 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 		now := time.Now().UTC()
 		op.DesiredSpec = cloneAppSpec(op.DesiredSpec)
 		op.DesiredSource = cloneAppSource(op.DesiredSource)
+		billing := ensureTenantBillingRecord(state, app.TenantID, now)
+		accrueTenantBilling(billing, now)
+		if err := validateManagedOperationBilling(state, *billing, app, op); err != nil {
+			return err
+		}
 		op.ID = model.NewID("op")
 		op.Status = model.OperationStatusPending
 		op.ExecutionMode = model.ExecutionModeManaged
@@ -2419,6 +2436,7 @@ func ensureDefaults(state *model.State) {
 	if state.Idempotency == nil {
 		state.Idempotency = []model.IdempotencyRecord{}
 	}
+	ensureTenantBillingDefaults(state)
 	if findRuntime(state, "runtime_managed_shared") < 0 {
 		now := time.Now().UTC()
 		state.Runtimes = append(state.Runtimes, model.Runtime{
@@ -2722,8 +2740,16 @@ func cloneAppSpec(in *model.AppSpec) *model.AppSpec {
 		workspace := *in.Workspace
 		out.Workspace = &workspace
 	}
+	if in.Resources != nil {
+		resources := *in.Resources
+		out.Resources = &resources
+	}
 	if in.Postgres != nil {
 		pg := *in.Postgres
+		if in.Postgres.Resources != nil {
+			resources := *in.Postgres.Resources
+			pg.Resources = &resources
+		}
 		out.Postgres = &pg
 	}
 	return &out

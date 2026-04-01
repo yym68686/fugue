@@ -2844,3 +2844,218 @@ func TestCreateAppRejectsPersistentWorkspaceOnManagedSharedRuntime(t *testing.T)
 		t.Fatalf("expected ErrInvalidInput, got %v", err)
 	}
 }
+
+func TestBillingBlocksManagedScaleBeyondConfiguredEnvelope(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Billing Cap Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.DefaultManagedAppResources()); err != nil {
+		t.Fatalf("update billing: %v", err)
+	}
+	if _, err := s.TopUpTenantBilling(tenant.ID, 500, "seed"); err != nil {
+		t.Fatalf("top up billing: %v", err)
+	}
+
+	deploySpec := app.Spec
+	deployOp, err := s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &deploySpec,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if _, err := s.CompleteManagedOperation(deployOp.ID, "/tmp/demo.yaml", "done"); err != nil {
+		t.Fatalf("complete deploy operation: %v", err)
+	}
+
+	replicas := 2
+	if _, err := s.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeScale,
+		AppID:           app.ID,
+		DesiredReplicas: &replicas,
+	}); !errors.Is(err, ErrBillingCapExceeded) {
+		t.Fatalf("expected ErrBillingCapExceeded, got %v", err)
+	}
+}
+
+func TestBillingAllowsScaleDownWhileOverCap(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Billing Overcap Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	doubleAppCap := model.ResourceSpec{
+		CPUMilliCores:   model.DefaultManagedAppResources().CPUMilliCores * 2,
+		MemoryMebibytes: model.DefaultManagedAppResources().MemoryMebibytes * 2,
+	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, doubleAppCap); err != nil {
+		t.Fatalf("update billing: %v", err)
+	}
+	if _, err := s.TopUpTenantBilling(tenant.ID, 500, "seed"); err != nil {
+		t.Fatalf("top up billing: %v", err)
+	}
+
+	deploySpec := app.Spec
+	deploySpec.Replicas = 2
+	deployOp, err := s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &deploySpec,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if _, err := s.CompleteManagedOperation(deployOp.ID, "/tmp/demo.yaml", "done"); err != nil {
+		t.Fatalf("complete deploy operation: %v", err)
+	}
+
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.DefaultManagedAppResources()); err != nil {
+		t.Fatalf("lower billing cap: %v", err)
+	}
+
+	scaleDown := 1
+	if _, err := s.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeScale,
+		AppID:           app.ID,
+		DesiredReplicas: &scaleDown,
+	}); err != nil {
+		t.Fatalf("expected scale-down to remain allowed, got %v", err)
+	}
+
+	scaleUp := 3
+	if _, err := s.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeScale,
+		AppID:           app.ID,
+		DesiredReplicas: &scaleUp,
+	}); !errors.Is(err, ErrBillingCapExceeded) {
+		t.Fatalf("expected ErrBillingCapExceeded for scale-up while over cap, got %v", err)
+	}
+}
+
+func TestBillingDepletedBalanceOnlyBlocksCapacityIncrease(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Billing Balance Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.ResourceSpec{
+		CPUMilliCores:   1000,
+		MemoryMebibytes: 2048,
+	}); err != nil {
+		t.Fatalf("update billing: %v", err)
+	}
+	if _, err := s.TopUpTenantBilling(tenant.ID, 500, "seed"); err != nil {
+		t.Fatalf("top up billing: %v", err)
+	}
+
+	deploySpec := app.Spec
+	deployOp, err := s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &deploySpec,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if _, err := s.CompleteManagedOperation(deployOp.ID, "/tmp/demo.yaml", "done"); err != nil {
+		t.Fatalf("complete deploy operation: %v", err)
+	}
+
+	if err := s.withLockedState(true, func(state *model.State) error {
+		record := ensureTenantBillingRecord(state, tenant.ID, time.Now().UTC())
+		record.BalanceMicroCents = 0
+		record.UpdatedAt = time.Now().UTC()
+		return nil
+	}); err != nil {
+		t.Fatalf("deplete balance: %v", err)
+	}
+
+	scaleUp := 2
+	if _, err := s.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeScale,
+		AppID:           app.ID,
+		DesiredReplicas: &scaleUp,
+	}); !errors.Is(err, ErrBillingBalanceDepleted) {
+		t.Fatalf("expected ErrBillingBalanceDepleted, got %v", err)
+	}
+
+	scaleDown := 0
+	if _, err := s.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeScale,
+		AppID:           app.ID,
+		DesiredReplicas: &scaleDown,
+	}); err != nil {
+		t.Fatalf("expected scale-down with depleted balance to remain allowed, got %v", err)
+	}
+}

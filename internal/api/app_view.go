@@ -108,8 +108,16 @@ func cloneAppSpec(spec model.AppSpec) model.AppSpec {
 		workspace := *spec.Workspace
 		out.Workspace = &workspace
 	}
+	if spec.Resources != nil {
+		resources := *spec.Resources
+		out.Resources = &resources
+	}
 	if spec.Postgres != nil {
 		postgres := *spec.Postgres
+		if spec.Postgres.Resources != nil {
+			resources := *spec.Postgres.Resources
+			postgres.Resources = &resources
+		}
 		out.Postgres = &postgres
 	}
 	return out
@@ -157,6 +165,10 @@ func cloneBackingServiceSpec(spec model.BackingServiceSpec) model.BackingService
 	out := spec
 	if spec.Postgres != nil {
 		postgres := *spec.Postgres
+		if spec.Postgres.Resources != nil {
+			resources := *spec.Postgres.Resources
+			postgres.Resources = &resources
+		}
 		out.Postgres = &postgres
 	}
 	return out
