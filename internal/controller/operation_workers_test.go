@@ -21,6 +21,10 @@ type blockingImporter struct {
 	release chan struct{}
 }
 
+func (i *blockingImporter) ImportDockerImageSource(context.Context, sourceimport.DockerImageSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error) {
+	return sourceimport.GitHubSourceImportOutput{}, fmt.Errorf("unexpected docker image import")
+}
+
 func (i *blockingImporter) ImportGitHubSource(ctx context.Context, req sourceimport.GitHubSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error) {
 	select {
 	case <-i.started:

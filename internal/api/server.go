@@ -142,6 +142,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/apps", s.auth.RequireAPI(http.HandlerFunc(s.handleListApps)))
 	mux.Handle("POST /v1/apps", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateApp)))
 	mux.Handle("POST /v1/apps/import-github", s.auth.RequireAPI(http.HandlerFunc(s.handleImportGitHubApp)))
+	mux.Handle("POST /v1/apps/import-image", s.auth.RequireAPI(http.HandlerFunc(s.handleImportImageApp)))
 	mux.Handle("POST /v1/apps/import-upload", s.auth.RequireAPI(http.HandlerFunc(s.handleImportUploadApp)))
 	mux.Handle("GET /v1/apps/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetApp)))
 	mux.Handle("GET /v1/apps/{id}/domains", s.auth.RequireAPI(http.HandlerFunc(s.handleListAppDomains)))

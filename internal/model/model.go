@@ -21,6 +21,7 @@ const (
 
 	AppSourceTypeGitHubPublic  = "github-public"
 	AppSourceTypeGitHubPrivate = "github-private"
+	AppSourceTypeDockerImage   = "docker-image"
 	AppSourceTypeUpload        = "upload"
 
 	AppBuildStrategyAuto       = "auto"
@@ -60,6 +61,7 @@ const (
 	OperationStatusFailed       = "failed"
 
 	IdempotencyScopeAppImportGitHub = "app.import_github"
+	IdempotencyScopeAppImportImage  = "app.import_image"
 
 	IdempotencyStatusPending   = "pending"
 	IdempotencyStatusCompleted = "completed"
@@ -294,6 +296,8 @@ type AppSource struct {
 	RepoURL           string `json:"repo_url,omitempty"`
 	RepoBranch        string `json:"repo_branch,omitempty"`
 	RepoAuthToken     string `json:"repo_auth_token,omitempty"`
+	ImageRef          string `json:"image_ref,omitempty"`
+	ResolvedImageRef  string `json:"resolved_image_ref,omitempty"`
 	UploadID          string `json:"upload_id,omitempty"`
 	UploadFilename    string `json:"upload_filename,omitempty"`
 	ArchiveSHA256     string `json:"archive_sha256,omitempty"`

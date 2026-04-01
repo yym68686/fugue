@@ -74,7 +74,7 @@ func TestSelectBuilderCandidatesLightPrefersSmallNodes(t *testing.T) {
 	}
 }
 
-func TestSelectBuilderCandidatesHeavyPrefersLargeAndSkipsSmall(t *testing.T) {
+func TestSelectBuilderCandidatesHeavyPrefersHigherCapacityNodes(t *testing.T) {
 	t.Parallel()
 
 	policy := defaultBuilderPodPolicy()
@@ -89,16 +89,17 @@ func TestSelectBuilderCandidatesHeavyPrefersLargeAndSkipsSmall(t *testing.T) {
 		builderTestNode("large-a", "large-a", policy, policy.LargeNodeLabelValue, "4000m", "16Gi", "30Gi", "500m", "1Gi", "3Gi"),
 	}, nil, nil)
 
-	if len(candidates) != 2 {
-		t.Fatalf("expected 2 heavy candidates, got %d", len(candidates))
+	if len(candidates) != 3 {
+		t.Fatalf("expected 3 heavy candidates, got %d", len(candidates))
 	}
 	if got := candidates[0].Node.Name; got != "large-a" {
-		t.Fatalf("expected large node to rank first for heavy build, got %q", got)
+		t.Fatalf("expected highest-capacity node to rank first for heavy build, got %q", got)
 	}
-	for _, candidate := range candidates {
-		if candidate.Node.Name == "small-a" {
-			t.Fatalf("expected heavy build to exclude explicit small nodes")
-		}
+	if got := candidates[1].Node.Name; got != "medium-a" {
+		t.Fatalf("expected second-highest-capacity node to rank second, got %q", got)
+	}
+	if got := candidates[2].Node.Name; got != "small-a" {
+		t.Fatalf("expected lowest-capacity node to rank last, got %q", got)
 	}
 }
 
@@ -274,6 +275,30 @@ func TestSelectBuilderCandidatesIncludesExplicitBuildPoolTenantScopedNodes(t *te
 	}
 	if got := candidates[0].Node.Name; got != "alicehk2" {
 		t.Fatalf("expected explicit build-pool tenant node to rank first, got %q", got)
+	}
+}
+
+func TestSelectBuilderCandidatesIncludesInternalSharedPoolManagedOwnedNodesWithoutBuildLabel(t *testing.T) {
+	t.Parallel()
+
+	policy := defaultBuilderPodPolicy()
+	demand, err := builderDemandForProfile(policy, builderWorkloadProfileHeavy)
+	if err != nil {
+		t.Fatalf("builder demand: %v", err)
+	}
+
+	sharedPoolNode := builderTestNode("alicehk2", "fortedrape8", policy, policy.LargeNodeLabelValue, "4000m", "8Gi", "30Gi", "250m", "768Mi", "2Gi")
+	delete(sharedPoolNode.Labels, policy.BuildNodeLabelKey)
+	sharedPoolNode.Labels[runtime.NodeModeLabelKey] = model.RuntimeTypeManagedOwned
+	sharedPoolNode.Labels[runtime.TenantIDLabelKey] = "tenant_demo"
+	sharedPoolNode.Labels[runtime.SharedPoolLabelKey] = runtime.SharedPoolLabelValue
+
+	candidates := selectBuilderCandidates(policy, builderWorkloadProfileHeavy, demand, []builderNodeSnapshot{sharedPoolNode}, nil, nil)
+	if len(candidates) != 1 {
+		t.Fatalf("expected internal shared-pool managed-owned node to remain eligible, got %d candidates", len(candidates))
+	}
+	if got := candidates[0].Node.Name; got != "alicehk2" {
+		t.Fatalf("expected alicehk2 to remain eligible via shared-pool label, got %q", got)
 	}
 }
 
@@ -457,6 +482,25 @@ func TestBuildBuilderPlacementPrefersSelectedNode(t *testing.T) {
 	expected := []string{"host-b", "host-a"}
 	if !reflect.DeepEqual(placement.CandidateHostnames, expected) {
 		t.Fatalf("expected ordered hostnames %v, got %v", expected, placement.CandidateHostnames)
+	}
+}
+
+func TestBuilderPlacementCandidatesUsesSingleCandidateForHeavyBuilds(t *testing.T) {
+	t.Parallel()
+
+	candidates := []builderCandidate{
+		{Node: builderNodeSnapshot{Name: "node-a", Hostname: "host-a"}},
+		{Node: builderNodeSnapshot{Name: "node-b", Hostname: "host-b"}},
+	}
+
+	heavy := builderPlacementCandidates(candidates, builderWorkloadProfileHeavy, 3)
+	if len(heavy) != 1 || heavy[0].Node.Name != "node-a" {
+		t.Fatalf("expected heavy placement to keep only the top candidate, got %+v", heavy)
+	}
+
+	light := builderPlacementCandidates(candidates, builderWorkloadProfileLight, 2)
+	if len(light) != 2 {
+		t.Fatalf("expected light placement to keep both candidates, got %d", len(light))
 	}
 }
 

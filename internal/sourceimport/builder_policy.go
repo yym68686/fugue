@@ -229,9 +229,6 @@ func applyBuilderPodPolicy(podSpec map[string]any, policy BuilderPodPolicy, prof
 	applyBuilderResources(podSpec, workloadPolicy.Resources)
 	applyBuilderVolumeSizeLimits(podSpec, workloadPolicy)
 	applyBuilderTolerations(podSpec, policy.Tolerations)
-	if profile == builderWorkloadProfileHeavy {
-		applyBuilderPreferredLargeNodeAffinity(podSpec, policy)
-	}
 }
 
 func applyBuilderResources(podSpec map[string]any, resources BuilderResourceRequirements) {

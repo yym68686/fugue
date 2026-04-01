@@ -34,6 +34,17 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	var err error
 	var output sourceimport.GitHubSourceImportOutput
 	switch strings.TrimSpace(op.DesiredSource.Type) {
+	case model.AppSourceTypeDockerImage:
+		if strings.TrimSpace(op.DesiredSource.ImageRef) == "" {
+			return fmt.Errorf("import operation %s missing image_ref", op.ID)
+		}
+		output, err = s.importer.ImportDockerImageSource(importCtx, sourceimport.DockerImageSourceImportRequest{
+			AppName:          app.Name,
+			ImageNameSuffix:  strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
+			ImageRef:         strings.TrimSpace(op.DesiredSource.ImageRef),
+			RegistryPushBase: s.registryPushBase,
+			ImageRepository:  "fugue-apps",
+		})
 	case model.AppSourceTypeGitHubPublic, model.AppSourceTypeGitHubPrivate:
 		if strings.TrimSpace(op.DesiredSource.RepoURL) == "" {
 			return fmt.Errorf("import operation %s missing repo_url", op.ID)
@@ -89,7 +100,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 			Stateful:           stateful,
 		})
 	default:
-		return fmt.Errorf("import operation %s only supports github-backed or upload source", op.ID)
+		return fmt.Errorf("import operation %s only supports github-backed, image-backed, or upload source", op.ID)
 	}
 	if err != nil {
 		return err

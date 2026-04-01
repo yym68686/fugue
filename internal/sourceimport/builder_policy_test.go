@@ -66,16 +66,8 @@ func TestBuildBuildpacksJobObjectAppliesHeavyBuilderPolicy(t *testing.T) {
 	}
 
 	podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
-	affinity := podSpec["affinity"].(map[string]any)
-	nodeAffinity := affinity["nodeAffinity"].(map[string]any)
-	preferred := nodeAffinity["preferredDuringSchedulingIgnoredDuringExecution"].([]map[string]any)
-	preference := preferred[0]["preference"].(map[string]any)
-	matchExpressions := preference["matchExpressions"].([]map[string]any)
-	if got := matchExpressions[0]["key"]; got != defaultBuilderLargeNodeLabelKey {
-		t.Fatalf("expected large node label key %q, got %#v", defaultBuilderLargeNodeLabelKey, got)
-	}
-	if got := matchExpressions[0]["values"].([]string)[0]; got != defaultBuilderLargeNodeLabelValue {
-		t.Fatalf("expected large node label value %q, got %q", defaultBuilderLargeNodeLabelValue, got)
+	if _, ok := podSpec["affinity"]; ok {
+		t.Fatalf("expected heavy builder policy to avoid generic node affinity")
 	}
 
 	workspace := builderEmptyDirVolume(t, podSpec, "workspace")

@@ -62,7 +62,6 @@ type builderResourceDemand struct {
 type builderCandidate struct {
 	Node      builderNodeSnapshot
 	Remaining builderResourceDemand
-	Score     float64
 }
 
 type builderNodeSnapshot struct {
@@ -287,6 +286,7 @@ func (s *builderScheduler) tryReservePlacement(ctx context.Context, jobName stri
 		return builderJobPlacement{}, "", err
 	}
 	candidates := selectBuilderCandidates(s.policy, s.profile, s.demand, snapshots, reservations, s.requiredNodeLabels)
+	candidates = builderPlacementCandidates(candidates, s.profile, s.candidateCount)
 	if len(candidates) == 0 {
 		return builderJobPlacement{}, "", fmt.Errorf("%w for profile %s", errNoBuilderPlacement, s.profile)
 	}
@@ -322,6 +322,7 @@ func (s *builderScheduler) tryReservePlacement(ctx context.Context, jobName stri
 			return builderJobPlacement{}, "", err
 		}
 		refreshedCandidates := selectBuilderCandidates(s.policy, s.profile, s.demand, refreshedSnapshots, refreshedReservations, s.requiredNodeLabels)
+		refreshedCandidates = builderPlacementCandidates(refreshedCandidates, s.profile, s.candidateCount)
 		if !builderCandidatesContainNode(refreshedCandidates, candidate.Node.Name) {
 			releaseLock()
 			continue
@@ -334,7 +335,7 @@ func (s *builderScheduler) tryReservePlacement(ctx context.Context, jobName stri
 		}
 		releaseLock()
 
-		return buildBuilderPlacement(refreshedCandidates, candidate.Node.Name, s.candidateCount), reservationName, nil
+		return buildBuilderPlacement(refreshedCandidates, candidate.Node.Name, len(refreshedCandidates)), reservationName, nil
 	}
 
 	return builderJobPlacement{}, "", fmt.Errorf("%w after lock contention", errNoBuilderPlacement)
@@ -518,10 +519,6 @@ func selectBuilderCandidates(policy BuilderPodPolicy, profile builderWorkloadPro
 		if !builderNodeMatchesRequiredLabels(snapshot, requiredNodeLabels) {
 			continue
 		}
-		sizeClass := builderNodeSizeClass(policy, snapshot)
-		if profile == builderWorkloadProfileHeavy && sizeClass == policy.SmallNodeLabelValue {
-			continue
-		}
 		available := builderAvailableResources(
 			snapshot,
 			reservedByNode[snapshot.Name],
@@ -534,29 +531,68 @@ func selectBuilderCandidates(policy BuilderPodPolicy, profile builderWorkloadPro
 		candidates = append(candidates, builderCandidate{
 			Node:      snapshot,
 			Remaining: remaining,
-			Score:     builderCandidateScore(policy, profile, sizeClass, snapshot.Allocatable, remaining),
 		})
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].Score != candidates[j].Score {
-			return candidates[i].Score > candidates[j].Score
-		}
-		if candidates[i].Remaining.EphemeralBytes != candidates[j].Remaining.EphemeralBytes {
-			return candidates[i].Remaining.EphemeralBytes > candidates[j].Remaining.EphemeralBytes
-		}
-		if candidates[i].Remaining.MemoryBytes != candidates[j].Remaining.MemoryBytes {
-			return candidates[i].Remaining.MemoryBytes > candidates[j].Remaining.MemoryBytes
-		}
-		if candidates[i].Remaining.CPUMilli != candidates[j].Remaining.CPUMilli {
-			return candidates[i].Remaining.CPUMilli > candidates[j].Remaining.CPUMilli
-		}
-		return candidates[i].Node.Name < candidates[j].Node.Name
+		return builderCandidateLess(profile, candidates[i], candidates[j])
 	})
 	if len(candidates) > policy.CandidateCount {
 		candidates = candidates[:policy.CandidateCount]
 	}
 	return candidates
+}
+
+func builderPlacementCandidates(candidates []builderCandidate, profile builderWorkloadProfile, candidateCount int) []builderCandidate {
+	limit := candidateCount
+	if profile == builderWorkloadProfileHeavy {
+		limit = 1
+	}
+	if limit <= 0 || len(candidates) <= limit {
+		return candidates
+	}
+	return candidates[:limit]
+}
+
+func builderCandidateLess(profile builderWorkloadProfile, left, right builderCandidate) bool {
+	descending := profile == builderWorkloadProfileHeavy
+	if cmp := builderCompareResources(left.Node.Allocatable, right.Node.Allocatable); cmp != 0 {
+		if descending {
+			return cmp > 0
+		}
+		return cmp < 0
+	}
+	if cmp := builderCompareResources(left.Remaining, right.Remaining); cmp != 0 {
+		if descending {
+			return cmp > 0
+		}
+		return cmp < 0
+	}
+	return left.Node.Name < right.Node.Name
+}
+
+func builderCompareResources(left, right builderResourceDemand) int {
+	if left.MemoryBytes != right.MemoryBytes {
+		return compareBuilderInt64(left.MemoryBytes, right.MemoryBytes)
+	}
+	if left.CPUMilli != right.CPUMilli {
+		return compareBuilderInt64(left.CPUMilli, right.CPUMilli)
+	}
+	if left.EphemeralBytes != right.EphemeralBytes {
+		return compareBuilderInt64(left.EphemeralBytes, right.EphemeralBytes)
+	}
+	return 0
+}
+
+func compareBuilderInt64(left, right int64) int {
+	switch {
+	case left < right:
+		return -1
+	case left > right:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func buildBuilderPlacement(candidates []builderCandidate, selectedNodeName string, candidateCount int) builderJobPlacement {
@@ -665,69 +701,24 @@ func builderSafetyBuffer(allocatable builderResourceDemand, profile builderWorkl
 	}
 }
 
-func builderCandidateScore(policy BuilderPodPolicy, profile builderWorkloadProfile, sizeClass string, allocatable, remaining builderResourceDemand) float64 {
-	sizeWeight := 0.0
-	switch profile {
-	case builderWorkloadProfileHeavy:
-		switch sizeClass {
-		case policy.LargeNodeLabelValue:
-			sizeWeight = 120
-		case policy.MediumNodeLabelValue, "":
-			sizeWeight = 70
-		default:
-			sizeWeight = 20
-		}
-	default:
-		switch sizeClass {
-		case policy.SmallNodeLabelValue:
-			sizeWeight = 120
-		case policy.MediumNodeLabelValue, "":
-			sizeWeight = 80
-		case policy.LargeNodeLabelValue:
-			sizeWeight = 20
-		default:
-			sizeWeight = 50
-		}
-	}
-	return sizeWeight +
-		500*builderRatioScore(remaining.EphemeralBytes, allocatable.EphemeralBytes) +
-		250*builderRatioScore(remaining.MemoryBytes, allocatable.MemoryBytes) +
-		150*builderRatioScore(remaining.CPUMilli, allocatable.CPUMilli)
-}
-
-func builderRatioScore(remaining, total int64) float64 {
-	if total <= 0 {
-		return 0
-	}
-	if remaining <= 0 {
-		return 0
-	}
-	return float64(remaining) / float64(total)
-}
-
-func builderAnyNodeMatchesBuildLabel(policy BuilderPodPolicy, snapshots []builderNodeSnapshot) bool {
-	for _, snapshot := range snapshots {
-		if !snapshot.Ready || snapshot.DiskPressure || snapshot.Hostname == "" {
-			continue
-		}
-		if !builderNodeTaintsTolerated(policy.Tolerations, snapshot.Taints) {
-			continue
-		}
-		if builderMatchesBuildPool(policy, snapshot) {
-			return true
-		}
-	}
-	return false
-}
-
 func builderNodeEligibleForBuilders(policy BuilderPodPolicy, snapshot builderNodeSnapshot) bool {
 	if !builderNodeTaintsTolerated(policy.Tolerations, snapshot.Taints) {
 		return false
+	}
+	if builderNodeInSharedPool(snapshot) {
+		return true
 	}
 	if builderMatchesBuildPool(policy, snapshot) {
 		return true
 	}
 	return builderNodeIsSharedBuilderCandidate(snapshot)
+}
+
+func builderNodeInSharedPool(snapshot builderNodeSnapshot) bool {
+	return strings.EqualFold(
+		strings.TrimSpace(snapshot.Labels[runtime.SharedPoolLabelKey]),
+		runtime.SharedPoolLabelValue,
+	)
 }
 
 func builderNodeIsSharedBuilderCandidate(snapshot builderNodeSnapshot) bool {
@@ -803,14 +794,6 @@ func builderMatchesBuildPool(policy BuilderPodPolicy, snapshot builderNodeSnapsh
 		return strings.TrimSpace(value) != ""
 	}
 	return strings.EqualFold(strings.TrimSpace(value), expected)
-}
-
-func builderNodeSizeClass(policy BuilderPodPolicy, snapshot builderNodeSnapshot) string {
-	key := strings.TrimSpace(policy.LargeNodeLabelKey)
-	if key == "" {
-		return ""
-	}
-	return strings.TrimSpace(snapshot.Labels[key])
 }
 
 func builderDemandFits(available, demand builderResourceDemand) bool {

@@ -10,6 +10,7 @@ import (
 
 type rebuildAppRequest struct {
 	Branch          *string `json:"branch"`
+	ImageRef        *string `json:"image_ref"`
 	SourceDir       *string `json:"source_dir"`
 	DockerfilePath  *string `json:"dockerfile_path"`
 	BuildContextDir *string `json:"build_context_dir"`
@@ -82,6 +83,21 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 		err    error
 	)
 	switch strings.TrimSpace(app.Source.Type) {
+	case model.AppSourceTypeDockerImage:
+		imageRef := strings.TrimSpace(app.Source.ImageRef)
+		if req.ImageRef != nil {
+			imageRef = strings.TrimSpace(*req.ImageRef)
+		}
+		if imageRef == "" {
+			httpx.WriteError(w, http.StatusBadRequest, "app source image_ref is missing")
+			return
+		}
+		source, err = buildQueuedImageSource(imageRef)
+		if err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		source.ImageNameSuffix = strings.TrimSpace(app.Source.ImageNameSuffix)
 	case model.AppSourceTypeGitHubPublic, model.AppSourceTypeGitHubPrivate:
 		if strings.TrimSpace(app.Source.RepoURL) == "" {
 			httpx.WriteError(w, http.StatusBadRequest, "app source repo_url is missing")
@@ -136,7 +152,7 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	default:
-		httpx.WriteError(w, http.StatusBadRequest, "only github-backed or upload apps can be rebuilt")
+		httpx.WriteError(w, http.StatusBadRequest, "only github-backed, image-backed, or upload apps can be rebuilt")
 		return
 	}
 
@@ -179,18 +195,23 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(source.UploadID) != "" {
 		auditMetadata["upload_id"] = source.UploadID
 	}
+	if strings.TrimSpace(source.ImageRef) != "" {
+		auditMetadata["image_ref"] = source.ImageRef
+	}
 	s.appendAudit(principal, "app.rebuild", "operation", op.ID, app.TenantID, auditMetadata)
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
 		"operation": sanitizeOperationForAPI(op),
 		"build": map[string]any{
-			"source_type":       source.Type,
-			"branch":            source.RepoBranch,
-			"upload_id":         source.UploadID,
-			"source_dir":        source.SourceDir,
-			"dockerfile_path":   source.DockerfilePath,
-			"build_context_dir": source.BuildContextDir,
-			"build_strategy":    source.BuildStrategy,
-			"compose_service":   source.ComposeService,
+			"source_type":        source.Type,
+			"image_ref":          source.ImageRef,
+			"resolved_image_ref": source.ResolvedImageRef,
+			"branch":             source.RepoBranch,
+			"upload_id":          source.UploadID,
+			"source_dir":         source.SourceDir,
+			"dockerfile_path":    source.DockerfilePath,
+			"build_context_dir":  source.BuildContextDir,
+			"build_strategy":     source.BuildStrategy,
+			"compose_service":    source.ComposeService,
 		},
 	})
 }

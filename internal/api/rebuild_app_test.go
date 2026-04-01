@@ -155,6 +155,59 @@ func TestRebuildAppQueuesImportForUploadSource(t *testing.T) {
 	}
 }
 
+func TestRebuildAppQueuesImportForDockerImageSource(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, tenant, project := setupRebuildAppTestServer(t)
+	app := createImportedAppForRebuildTest(t, s, tenant.ID, project.ID, "demo-image", model.AppSource{
+		Type:             model.AppSourceTypeDockerImage,
+		ImageRef:         "ghcr.io/example/demo:1.2.3",
+		ResolvedImageRef: "registry.example.com/fugue-apps/demo-image:image-abc123",
+	})
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/rebuild", apiKey, nil)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Operation model.Operation `json:"operation"`
+		Build     struct {
+			SourceType       string `json:"source_type"`
+			ImageRef         string `json:"image_ref"`
+			ResolvedImageRef string `json:"resolved_image_ref"`
+		} `json:"build"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+
+	if response.Build.SourceType != model.AppSourceTypeDockerImage {
+		t.Fatalf("expected build source type %q, got %q", model.AppSourceTypeDockerImage, response.Build.SourceType)
+	}
+	if response.Build.ImageRef != "ghcr.io/example/demo:1.2.3" {
+		t.Fatalf("expected build image_ref to match saved source, got %q", response.Build.ImageRef)
+	}
+	if response.Build.ResolvedImageRef != "" {
+		t.Fatalf("expected queued rebuild resolved image ref to be empty, got %q", response.Build.ResolvedImageRef)
+	}
+
+	op, err := s.GetOperation(response.Operation.ID)
+	if err != nil {
+		t.Fatalf("get operation: %v", err)
+	}
+	if op.Type != model.OperationTypeImport {
+		t.Fatalf("expected import operation, got %q", op.Type)
+	}
+	if op.DesiredSource == nil {
+		t.Fatal("expected desired source on queued operation")
+	}
+	if op.DesiredSource.Type != model.AppSourceTypeDockerImage {
+		t.Fatalf("expected queued source type %q, got %q", model.AppSourceTypeDockerImage, op.DesiredSource.Type)
+	}
+	if op.DesiredSource.ImageRef != "ghcr.io/example/demo:1.2.3" {
+		t.Fatalf("expected queued image_ref ghcr.io/example/demo:1.2.3, got %q", op.DesiredSource.ImageRef)
+	}
+}
+
 func TestRebuildAppReturnsNotFoundWhenUploadArchiveMetadataIsMissing(t *testing.T) {
 	t.Parallel()
 

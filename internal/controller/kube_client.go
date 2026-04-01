@@ -53,6 +53,16 @@ type kubePodList struct {
 	Items []kubePod `json:"items"`
 }
 
+type kubeNodeList struct {
+	Items []kubeNode `json:"items"`
+}
+
+type kubeNode struct {
+	Metadata struct {
+		Name string `json:"name"`
+	} `json:"metadata"`
+}
+
 type kubeJobList struct {
 	Items []kubeJobInfo `json:"items"`
 }
@@ -163,6 +173,14 @@ func (c *kubeClient) listJobsBySelector(ctx context.Context, namespace, selector
 	return jobList.Items, nil
 }
 
+func (c *kubeClient) createJob(ctx context.Context, namespace string, job map[string]any) error {
+	status, err := c.doJSON(ctx, http.MethodPost, "/apis/batch/v1/namespaces/"+c.effectiveNamespace(namespace)+"/jobs", job, nil)
+	if status == http.StatusConflict {
+		return nil
+	}
+	return err
+}
+
 func (c *kubeClient) deleteJob(ctx context.Context, namespace, name string) error {
 	apiPath := "/apis/batch/v1/namespaces/" + c.effectiveNamespace(namespace) + "/jobs/" + url.PathEscape(strings.TrimSpace(name)) + "?propagationPolicy=Background"
 	status, err := c.doJSON(ctx, http.MethodDelete, apiPath, nil, nil)
@@ -170,6 +188,23 @@ func (c *kubeClient) deleteJob(ctx context.Context, namespace, name string) erro
 		return nil
 	}
 	return err
+}
+
+func (c *kubeClient) listNodeNames(ctx context.Context) ([]string, error) {
+	var nodeList kubeNodeList
+	if _, err := c.doJSON(ctx, http.MethodGet, "/api/v1/nodes", nil, &nodeList); err != nil {
+		return nil, err
+	}
+
+	names := make([]string, 0, len(nodeList.Items))
+	for _, node := range nodeList.Items {
+		name := strings.TrimSpace(node.Metadata.Name)
+		if name == "" {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names, nil
 }
 
 func (c *kubeClient) createLease(ctx context.Context, namespace string, lease kubeLease) error {

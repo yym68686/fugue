@@ -15,9 +15,28 @@ import (
 )
 
 type recordingImporter struct {
+	dockerImageReq      *sourceimport.DockerImageSourceImportRequest
 	githubReq           *sourceimport.GitHubSourceImportRequest
 	githubComposeEnvReq *sourceimport.GitHubComposeServiceEnvRequest
 	githubComposeEnv    map[string]string
+}
+
+func (r *recordingImporter) ImportDockerImageSource(_ context.Context, req sourceimport.DockerImageSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error) {
+	reqCopy := req
+	r.dockerImageReq = &reqCopy
+	return sourceimport.GitHubSourceImportOutput{
+		ImportResult: sourceimport.GitHubImportResult{
+			DetectedProvider: model.AppSourceTypeDockerImage,
+			ImageRef:         "registry.push.example/fugue-apps/demo:image-abc123",
+			DetectedPort:     9090,
+		},
+		Source: model.AppSource{
+			Type:             model.AppSourceTypeDockerImage,
+			ImageRef:         req.ImageRef,
+			ResolvedImageRef: "registry.push.example/fugue-apps/demo:image-abc123",
+			DetectedProvider: model.AppSourceTypeDockerImage,
+		},
+	}, nil
 }
 
 func (r *recordingImporter) ImportGitHubSource(_ context.Context, req sourceimport.GitHubSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error) {
@@ -52,6 +71,102 @@ func (r *recordingImporter) SuggestGitHubComposeServiceEnv(_ context.Context, re
 
 func (r *recordingImporter) SuggestUploadedComposeServiceEnv(context.Context, sourceimport.UploadComposeServiceEnvRequest) (map[string]string, error) {
 	return nil, fmt.Errorf("unexpected upload compose env refresh")
+}
+
+func TestExecuteManagedImportOperationImportsDockerImageSource(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:     model.AppSourceTypeDockerImage,
+		ImageRef: "nginx:1.27",
+	}, model.AppRoute{
+		Hostname:   "demo.example.com",
+		BaseDomain: "example.com",
+		PublicURL:  "https://demo.example.com",
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	specCopy := app.Spec
+	sourceCopy := *app.Source
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		DesiredSource:   &sourceCopy,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+
+	importer := &recordingImporter{}
+	svc := &Service{
+		Store:            stateStore,
+		Logger:           log.New(io.Discard, "", 0),
+		importer:         importer,
+		registryPushBase: "registry.push.example",
+		registryPullBase: "registry.pull.example",
+	}
+
+	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
+		t.Fatalf("execute managed import operation: %v", err)
+	}
+	if importer.dockerImageReq == nil {
+		t.Fatal("expected importer to receive docker image request")
+	}
+	if importer.dockerImageReq.ImageRef != "nginx:1.27" {
+		t.Fatalf("expected image ref nginx:1.27, got %q", importer.dockerImageReq.ImageRef)
+	}
+
+	ops, err := stateStore.ListOperations(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	var deployOp model.Operation
+	for _, candidate := range ops {
+		if candidate.Type == model.OperationTypeDeploy {
+			deployOp = candidate
+		}
+	}
+	if deployOp.ID == "" || deployOp.DesiredSpec == nil {
+		t.Fatalf("expected deploy operation with desired spec, got %+v", deployOp)
+	}
+	if got := deployOp.DesiredSpec.Image; got != "registry.pull.example/fugue-apps/demo:image-abc123" {
+		t.Fatalf("expected runtime image rewrite, got %q", got)
+	}
+	if !reflect.DeepEqual(deployOp.DesiredSpec.Ports, []int{9090}) {
+		t.Fatalf("expected detected port 9090, got %v", deployOp.DesiredSpec.Ports)
+	}
+	if deployOp.DesiredSource == nil {
+		t.Fatal("expected desired source on deploy operation")
+	}
+	if deployOp.DesiredSource.Type != model.AppSourceTypeDockerImage {
+		t.Fatalf("expected deploy source type %q, got %q", model.AppSourceTypeDockerImage, deployOp.DesiredSource.Type)
+	}
+	if deployOp.DesiredSource.ResolvedImageRef != "registry.push.example/fugue-apps/demo:image-abc123" {
+		t.Fatalf("expected resolved image ref to be persisted, got %q", deployOp.DesiredSource.ResolvedImageRef)
+	}
 }
 
 func TestExecuteManagedImportOperationDoesNotConstrainBuildPlacementByRuntimeLocation(t *testing.T) {
