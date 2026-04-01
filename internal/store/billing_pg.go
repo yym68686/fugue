@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -86,18 +85,13 @@ func (s *Store) pgUpdateTenantBilling(tenantID string, managedCap model.Resource
 	if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, record); err != nil {
 		return model.TenantBillingSummary{}, err
 	}
-	if err := s.pgInsertTenantBillingEventTx(ctx, tx, model.TenantBillingEvent{
-		ID:                     model.NewID("billingevt"),
-		TenantID:               tenantID,
-		Type:                   model.BillingEventTypeConfigUpdated,
-		AmountMicroCents:       0,
-		BalanceAfterMicroCents: record.BalanceMicroCents,
-		Metadata: map[string]string{
-			"cpu_millicores":   strconv.FormatInt(normalizedCap.CPUMilliCores, 10),
-			"memory_mebibytes": strconv.FormatInt(normalizedCap.MemoryMebibytes, 10),
-		},
-		CreatedAt: now,
-	}); err != nil {
+	if err := s.pgInsertTenantBillingEventTx(ctx, tx, newTenantBillingConfigUpdatedEvent(
+		tenantID,
+		normalizedCap,
+		record.BalanceMicroCents,
+		now,
+		nil,
+	)); err != nil {
 		return model.TenantBillingSummary{}, err
 	}
 

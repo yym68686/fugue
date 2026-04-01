@@ -68,18 +68,13 @@ func (s *Store) UpdateTenantBilling(tenantID string, managedCap model.ResourceSp
 		accrueTenantBilling(billing, now)
 		billing.ManagedCap = normalizedCap
 		billing.UpdatedAt = now
-		appendTenantBillingEvent(state, model.TenantBillingEvent{
-			ID:                     model.NewID("billingevt"),
-			TenantID:               tenantID,
-			Type:                   model.BillingEventTypeConfigUpdated,
-			AmountMicroCents:       0,
-			BalanceAfterMicroCents: billing.BalanceMicroCents,
-			Metadata: map[string]string{
-				"cpu_millicores":   strconv.FormatInt(normalizedCap.CPUMilliCores, 10),
-				"memory_mebibytes": strconv.FormatInt(normalizedCap.MemoryMebibytes, 10),
-			},
-			CreatedAt: now,
-		})
+		appendTenantBillingEvent(state, newTenantBillingConfigUpdatedEvent(
+			tenantID,
+			normalizedCap,
+			billing.BalanceMicroCents,
+			now,
+			nil,
+		))
 		summary = buildTenantBillingSummary(state, *billing)
 		return nil
 	})
@@ -317,6 +312,36 @@ func appendTenantBillingEvent(state *model.State, event model.TenantBillingEvent
 	state.BillingEvents = append(state.BillingEvents, event)
 }
 
+func newTenantBillingConfigUpdatedEvent(
+	tenantID string,
+	managedCap model.ResourceSpec,
+	balanceMicroCents int64,
+	now time.Time,
+	metadata map[string]string,
+) model.TenantBillingEvent {
+	eventMetadata := map[string]string{
+		"cpu_millicores":   strconv.FormatInt(managedCap.CPUMilliCores, 10),
+		"memory_mebibytes": strconv.FormatInt(managedCap.MemoryMebibytes, 10),
+	}
+	for key, value := range metadata {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		eventMetadata[key] = value
+	}
+	return model.TenantBillingEvent{
+		ID:                     model.NewID("billingevt"),
+		TenantID:               tenantID,
+		Type:                   model.BillingEventTypeConfigUpdated,
+		AmountMicroCents:       0,
+		BalanceAfterMicroCents: balanceMicroCents,
+		Metadata:               eventMetadata,
+		CreatedAt:              now,
+	}
+}
+
 func tenantHasBillingEvents(state *model.State, tenantID string) bool {
 	if state == nil {
 		return false
@@ -426,13 +451,13 @@ func buildTenantBillingSummary(state *model.State, record model.TenantBilling) m
 func tenantBillingStatus(record model.TenantBilling, committed model.ResourceSpec) (string, string) {
 	switch {
 	case billingHourlyRateMicroCents(record) <= 0:
-		return model.BillingStatusInactive, "Managed billing is inactive. External-owned runtimes remain free."
+		return model.BillingStatusInactive, "Managed billing is inactive until you save a non-zero envelope or launch managed capacity. External-owned runtimes remain free."
 	case resourceSpecExceeds(committed, record.ManagedCap):
-		return model.BillingStatusOverCap, "Current live managed capacity exceeds the configured envelope. Scale down, migrate to BYO, or raise the cap."
+		return model.BillingStatusOverCap, "Current live managed capacity is above the saved envelope. Managed expansion still works while balance stays positive, and Fugue will lift the envelope automatically on the next managed capacity increase."
 	case billingBalanceRestricted(record):
 		return model.BillingStatusRestricted, "Balance is depleted. Top up before increasing managed capacity."
 	default:
-		return model.BillingStatusActive, "Managed capacity is metered hourly from the configured envelope. BYO VPS stays free."
+		return model.BillingStatusActive, "Managed capacity is metered hourly from the saved envelope. Fugue lifts the envelope automatically if a managed capacity increase goes past it. BYO VPS stays free."
 	}
 }
 
@@ -567,21 +592,7 @@ func isBillableManagedRuntimeType(runtimeType string) bool {
 	}
 }
 
-func validateManagedOperationBilling(state *model.State, record model.TenantBilling, app model.App, op model.Operation) error {
-	if billingHourlyRateMicroCents(record) <= 0 {
-		return nil
-	}
-	currentTotal := tenantManagedCommittedResources(state, app.TenantID)
-	currentBundle, nextBundle, err := projectedAppManagedBundleCommitment(state, app, op)
-	if err != nil {
-		return err
-	}
-	nextTotal := addResourceSpec(subtractResourceSpec(currentTotal, currentBundle), nextBundle)
-	currentlyOverCap := resourceSpecExceeds(currentTotal, record.ManagedCap)
-	nextOverCap := resourceSpecExceeds(nextTotal, record.ManagedCap)
-	if nextOverCap && (!currentlyOverCap || resourceSpecExceeds(nextTotal, currentTotal)) {
-		return describeBillingCapExceeded(record, nextTotal)
-	}
+func validateManagedOperationBilling(record model.TenantBilling, currentTotal, nextTotal model.ResourceSpec) error {
 	if billingBalanceRestricted(record) && resourceSpecExceeds(nextTotal, currentTotal) {
 		return describeBillingBalanceDepleted(record)
 	}
@@ -665,6 +676,13 @@ func addResourceSpec(left, right model.ResourceSpec) model.ResourceSpec {
 	}
 }
 
+func maxResourceSpec(left, right model.ResourceSpec) model.ResourceSpec {
+	return model.ResourceSpec{
+		CPUMilliCores:   maxInt64(left.CPUMilliCores, right.CPUMilliCores),
+		MemoryMebibytes: maxInt64(left.MemoryMebibytes, right.MemoryMebibytes),
+	}
+}
+
 func subtractResourceSpec(left, right model.ResourceSpec) model.ResourceSpec {
 	return model.ResourceSpec{
 		CPUMilliCores:   maxInt64(0, left.CPUMilliCores-right.CPUMilliCores),
@@ -688,6 +706,24 @@ func multiplyResourceSpec(spec model.ResourceSpec, factor int64) model.ResourceS
 
 func resourceSpecExceeds(left, right model.ResourceSpec) bool {
 	return left.CPUMilliCores > right.CPUMilliCores || left.MemoryMebibytes > right.MemoryMebibytes
+}
+
+func projectedTenantManagedTotals(state *model.State, app model.App, op model.Operation) (model.ResourceSpec, model.ResourceSpec, error) {
+	currentTotal := tenantManagedCommittedResources(state, app.TenantID)
+	currentBundle, nextBundle, err := projectedAppManagedBundleCommitment(state, app, op)
+	if err != nil {
+		return model.ResourceSpec{}, model.ResourceSpec{}, err
+	}
+	nextTotal := addResourceSpec(subtractResourceSpec(currentTotal, currentBundle), nextBundle)
+	return currentTotal, nextTotal, nil
+}
+
+func nextManagedEnvelope(record model.TenantBilling, currentTotal, nextTotal model.ResourceSpec) (model.ResourceSpec, bool) {
+	if !resourceSpecExceeds(nextTotal, currentTotal) {
+		return record.ManagedCap, false
+	}
+	expanded := maxResourceSpec(record.ManagedCap, nextTotal)
+	return expanded, expanded != record.ManagedCap
 }
 
 func maxInt64(left, right int64) int64 {

@@ -2863,7 +2863,7 @@ func TestCreateAppRejectsPersistentWorkspaceOnManagedSharedRuntime(t *testing.T)
 	}
 }
 
-func TestBillingBlocksManagedScaleBeyondConfiguredEnvelope(t *testing.T) {
+func TestBillingAutoRaisesEnvelopeForManagedScaleBeyondConfiguredEnvelope(t *testing.T) {
 	t.Parallel()
 
 	s := New(filepath.Join(t.TempDir(), "store.json"))
@@ -2916,8 +2916,29 @@ func TestBillingBlocksManagedScaleBeyondConfiguredEnvelope(t *testing.T) {
 		Type:            model.OperationTypeScale,
 		AppID:           app.ID,
 		DesiredReplicas: &replicas,
-	}); !errors.Is(err, ErrBillingCapExceeded) {
-		t.Fatalf("expected ErrBillingCapExceeded, got %v", err)
+	}); err != nil {
+		t.Fatalf("expected scale-up beyond the saved envelope to auto-raise billing, got %v", err)
+	}
+
+	expectedEnvelope := model.ResourceSpec{
+		CPUMilliCores:   model.DefaultManagedAppResources().CPUMilliCores * 2,
+		MemoryMebibytes: model.DefaultManagedAppResources().MemoryMebibytes * 2,
+	}
+	if err := s.withLockedState(false, func(state *model.State) error {
+		record := ensureTenantBillingRecord(state, tenant.ID, time.Now().UTC())
+		if record.ManagedCap != expectedEnvelope {
+			t.Fatalf("expected auto-raised envelope %+v, got %+v", expectedEnvelope, record.ManagedCap)
+		}
+		events := recentTenantBillingEvents(state, tenant.ID)
+		if len(events) == 0 || events[0].Type != model.BillingEventTypeConfigUpdated {
+			t.Fatalf("expected latest billing event to record the auto-raised envelope, got %+v", events)
+		}
+		if source := events[0].Metadata["source"]; source != "auto-expand" {
+			t.Fatalf("expected auto-expand event metadata, got %q", source)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("inspect auto-raised billing state: %v", err)
 	}
 }
 
@@ -3220,8 +3241,22 @@ func TestBillingAllowsScaleDownWhileOverCap(t *testing.T) {
 		Type:            model.OperationTypeScale,
 		AppID:           app.ID,
 		DesiredReplicas: &scaleUp,
-	}); !errors.Is(err, ErrBillingCapExceeded) {
-		t.Fatalf("expected ErrBillingCapExceeded for scale-up while over cap, got %v", err)
+	}); err != nil {
+		t.Fatalf("expected scale-up while above the saved envelope to auto-raise billing, got %v", err)
+	}
+
+	expectedEnvelope := model.ResourceSpec{
+		CPUMilliCores:   model.DefaultManagedAppResources().CPUMilliCores * 3,
+		MemoryMebibytes: model.DefaultManagedAppResources().MemoryMebibytes * 3,
+	}
+	if err := s.withLockedState(false, func(state *model.State) error {
+		record := ensureTenantBillingRecord(state, tenant.ID, time.Now().UTC())
+		if record.ManagedCap != expectedEnvelope {
+			t.Fatalf("expected envelope %+v after auto-raise, got %+v", expectedEnvelope, record.ManagedCap)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("inspect over-cap auto-raise state: %v", err)
 	}
 }
 

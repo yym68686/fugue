@@ -2023,8 +2023,28 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 		op.DesiredSource = cloneAppSource(op.DesiredSource)
 		billing := ensureTenantBillingRecord(state, app.TenantID, now)
 		accrueTenantBilling(billing, now)
-		if err := validateManagedOperationBilling(state, *billing, app, op); err != nil {
+		currentTotal, nextTotal, err := projectedTenantManagedTotals(state, app, op)
+		if err != nil {
 			return err
+		}
+		effectiveBilling := *billing
+		nextEnvelope, envelopeChanged := nextManagedEnvelope(effectiveBilling, currentTotal, nextTotal)
+		if envelopeChanged {
+			effectiveBilling.ManagedCap = nextEnvelope
+		}
+		if err := validateManagedOperationBilling(effectiveBilling, currentTotal, nextTotal); err != nil {
+			return err
+		}
+		if envelopeChanged {
+			billing.ManagedCap = nextEnvelope
+			billing.UpdatedAt = now
+			appendTenantBillingEvent(state, newTenantBillingConfigUpdatedEvent(
+				app.TenantID,
+				nextEnvelope,
+				billing.BalanceMicroCents,
+				now,
+				map[string]string{"source": "auto-expand"},
+			))
 		}
 		op.ID = model.NewID("op")
 		op.Status = model.OperationStatusPending

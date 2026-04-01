@@ -2374,8 +2374,33 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 	if err != nil {
 		return model.Operation{}, err
 	}
-	if err := validateManagedOperationBilling(&billingState, billing, app, op); err != nil {
+	currentTotal, nextTotal, err := projectedTenantManagedTotals(&billingState, app, op)
+	if err != nil {
 		return model.Operation{}, err
+	}
+	effectiveBilling := billing
+	nextEnvelope, envelopeChanged := nextManagedEnvelope(effectiveBilling, currentTotal, nextTotal)
+	if envelopeChanged {
+		effectiveBilling.ManagedCap = nextEnvelope
+	}
+	if err := validateManagedOperationBilling(effectiveBilling, currentTotal, nextTotal); err != nil {
+		return model.Operation{}, err
+	}
+	if envelopeChanged {
+		billing.ManagedCap = nextEnvelope
+		billing.UpdatedAt = now
+		if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, billing); err != nil {
+			return model.Operation{}, err
+		}
+		if err := s.pgInsertTenantBillingEventTx(ctx, tx, newTenantBillingConfigUpdatedEvent(
+			app.TenantID,
+			nextEnvelope,
+			billing.BalanceMicroCents,
+			now,
+			map[string]string{"source": "auto-expand"},
+		)); err != nil {
+			return model.Operation{}, err
+		}
 	}
 	op.ID = model.NewID("op")
 	op.Status = model.OperationStatusPending
