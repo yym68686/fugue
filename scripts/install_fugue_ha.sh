@@ -1674,8 +1674,7 @@ write_values_override() {
   registry_pull_base="$(registry_pull_base_value)"
   local cluster_join_registry_endpoint
   cluster_join_registry_endpoint="$(cluster_join_registry_endpoint_value)"
-  local cluster_join_token
-  cluster_join_token="$(wait_for_primary_node_token)"
+  local cluster_join_ca_hash="${FUGUE_CLUSTER_JOIN_CA_HASH:-}"
   local cluster_join_mesh_provider=""
   local cluster_join_mesh_login_server=""
   local cluster_join_mesh_auth_key=""
@@ -1701,7 +1700,8 @@ api:
   registryPullBase: "${registry_pull_base}"
   clusterJoinRegistryEndpoint: "${cluster_join_registry_endpoint}"
   clusterJoinServer: "${cluster_join_server}"
-  clusterJoinToken: "${cluster_join_token}"
+  clusterJoinCAHash: "${cluster_join_ca_hash}"
+  clusterJoinBootstrapTokenTTL: "15m"
   clusterJoinMeshProvider: "${cluster_join_mesh_provider}"
   clusterJoinMeshLoginServer: "${cluster_join_mesh_login_server}"
   clusterJoinMeshAuthKey: "${cluster_join_mesh_auth_key}"

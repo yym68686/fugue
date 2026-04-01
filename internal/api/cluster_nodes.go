@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -42,6 +43,13 @@ const (
 	tenantSharedClusterNodeName  = "internal-cluster"
 	tenantSharedClusterRegion    = "Multiple countries"
 	tenantSharedRuntimeID        = "runtime_managed_shared"
+	clusterJoinTokenNamespace    = "kube-system"
+	clusterJoinTokenSecretPrefix = "bootstrap-token-"
+	clusterJoinTokenLabelManaged = "fugue.pro/cluster-join-bootstrap"
+	clusterJoinTokenLabelNodeKey = "fugue.pro/node-key-id"
+	clusterJoinTokenLabelRuntime = "fugue.pro/runtime-id"
+	clusterJoinTokenLabelValue   = "true"
+	clusterJoinTokenAuthGroup    = "system:bootstrappers:k3s:default-node-token"
 )
 
 var (
@@ -133,6 +141,18 @@ type kubeNodeCondition struct {
 
 type clusterNodePodList struct {
 	Items []clusterNodePod `json:"items"`
+}
+
+type kubeSecretList struct {
+	Items []kubeSecret `json:"items"`
+}
+
+type kubeSecret struct {
+	Metadata struct {
+		Name        string            `json:"name"`
+		Labels      map[string]string `json:"labels"`
+		Annotations map[string]string `json:"annotations"`
+	} `json:"metadata"`
 }
 
 type clusterNodePod struct {
@@ -733,6 +753,127 @@ func (c *clusterNodeClient) deleteNode(ctx context.Context, nodeName string) err
 	return c.doJSON(ctx, http.MethodDelete, apiPath, nil)
 }
 
+func (c *clusterNodeClient) createBootstrapToken(ctx context.Context, nodeKeyID, runtimeID, caHash string, ttl time.Duration) (string, string, error) {
+	tokenID, err := randomHex(3)
+	if err != nil {
+		return "", "", fmt.Errorf("generate bootstrap token id: %w", err)
+	}
+	tokenSecret, err := randomHex(8)
+	if err != nil {
+		return "", "", fmt.Errorf("generate bootstrap token secret: %w", err)
+	}
+	tokenID = strings.ToLower(strings.TrimSpace(tokenID))
+	tokenSecret = strings.ToLower(strings.TrimSpace(tokenSecret))
+	secretName := clusterJoinBootstrapSecretName(tokenID)
+	payload := map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Secret",
+		"metadata": map[string]any{
+			"name":      secretName,
+			"namespace": clusterJoinTokenNamespace,
+			"labels": map[string]string{
+				clusterJoinTokenLabelManaged: clusterJoinTokenLabelValue,
+				clusterJoinTokenLabelNodeKey: strings.TrimSpace(nodeKeyID),
+				clusterJoinTokenLabelRuntime: strings.TrimSpace(runtimeID),
+			},
+		},
+		"type": "bootstrap.kubernetes.io/token",
+		"stringData": map[string]string{
+			"description":                    "fugue join bootstrap token",
+			"token-id":                       tokenID,
+			"token-secret":                   tokenSecret,
+			"expiration":                     time.Now().UTC().Add(ttl).Format(time.RFC3339),
+			"usage-bootstrap-authentication": "true",
+			"usage-bootstrap-signing":        "true",
+			"auth-extra-groups":              clusterJoinTokenAuthGroup,
+		},
+	}
+	if err := c.doJSONWithBody(ctx, http.MethodPost, "/api/v1/namespaces/"+clusterJoinTokenNamespace+"/secrets", payload, nil); err != nil {
+		return "", "", err
+	}
+	token := tokenID + "." + tokenSecret
+	if normalizedHash := normalizeClusterJoinCAHash(caHash); normalizedHash != "" {
+		token = "K10" + normalizedHash + "::" + token
+	}
+	return token, tokenID, nil
+}
+
+func (c *clusterNodeClient) deleteBootstrapToken(ctx context.Context, tokenID string) error {
+	apiPath := "/api/v1/namespaces/" + clusterJoinTokenNamespace + "/secrets/" + url.PathEscape(clusterJoinBootstrapSecretName(tokenID))
+	return c.doJSON(ctx, http.MethodDelete, apiPath, nil)
+}
+
+func (c *clusterNodeClient) getSecret(ctx context.Context, namespace, name string) (kubeSecret, error) {
+	var secret kubeSecret
+	apiPath := "/api/v1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/secrets/" + url.PathEscape(strings.TrimSpace(name))
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, &secret); err != nil {
+		return kubeSecret{}, err
+	}
+	return secret, nil
+}
+
+func (c *clusterNodeClient) deleteBootstrapTokenIfOwned(ctx context.Context, tokenID, nodeKeyID string) (bool, error) {
+	tokenID = strings.TrimSpace(tokenID)
+	nodeKeyID = strings.TrimSpace(nodeKeyID)
+	if tokenID == "" || nodeKeyID == "" {
+		return false, nil
+	}
+	secretName := clusterJoinBootstrapSecretName(tokenID)
+	secret, err := c.getSecret(ctx, clusterJoinTokenNamespace, secretName)
+	if err != nil {
+		if isKubernetesNodeNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if strings.TrimSpace(secret.Metadata.Labels[clusterJoinTokenLabelNodeKey]) != nodeKeyID {
+		return false, nil
+	}
+	if err := c.deleteBootstrapToken(ctx, tokenID); err != nil {
+		if isKubernetesNodeNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (c *clusterNodeClient) deleteBootstrapTokensByNodeKey(ctx context.Context, nodeKeyID string) ([]string, error) {
+	nodeKeyID = strings.TrimSpace(nodeKeyID)
+	if nodeKeyID == "" {
+		return nil, nil
+	}
+	query := url.Values{}
+	query.Set("labelSelector", clusterJoinTokenLabelManaged+"="+clusterJoinTokenLabelValue+","+clusterJoinTokenLabelNodeKey+"="+nodeKeyID)
+	var secretList kubeSecretList
+	apiPath := "/api/v1/namespaces/" + clusterJoinTokenNamespace + "/secrets?" + query.Encode()
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, &secretList); err != nil {
+		if isKubernetesNodeNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	deleted := make([]string, 0, len(secretList.Items))
+	for _, secret := range secretList.Items {
+		name := strings.TrimSpace(secret.Metadata.Name)
+		if name == "" {
+			continue
+		}
+		tokenID := clusterJoinBootstrapTokenIDFromSecretName(name)
+		if tokenID == "" {
+			continue
+		}
+		if err := c.deleteBootstrapToken(ctx, tokenID); err != nil {
+			if isKubernetesNodeNotFound(err) {
+				continue
+			}
+			return deleted, err
+		}
+		deleted = append(deleted, tokenID)
+	}
+	return deleted, nil
+}
+
 func buildClusterNode(node kubeNode, summary *kubeNodeSummary) model.ClusterNode {
 	out := model.ClusterNode{
 		Name:             strings.TrimSpace(node.Metadata.Name),
@@ -1079,13 +1220,50 @@ func clusterNodeStorageUsage(summary *kubeNodeSummary) (*int64, *int64) {
 	return &value, capacity
 }
 
+func clusterJoinBootstrapSecretName(tokenID string) string {
+	tokenID = strings.ToLower(strings.TrimSpace(tokenID))
+	if tokenID == "" {
+		return clusterJoinTokenSecretPrefix
+	}
+	return clusterJoinTokenSecretPrefix + tokenID
+}
+
+func clusterJoinBootstrapTokenIDFromSecretName(secretName string) string {
+	secretName = strings.TrimSpace(secretName)
+	if !strings.HasPrefix(secretName, clusterJoinTokenSecretPrefix) {
+		return ""
+	}
+	return strings.TrimPrefix(secretName, clusterJoinTokenSecretPrefix)
+}
+
+func normalizeClusterJoinCAHash(raw string) string {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	raw = strings.TrimPrefix(raw, "sha256:")
+	return raw
+}
+
 func (c *clusterNodeClient) doJSON(ctx context.Context, method, apiPath string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+apiPath, nil)
+	return c.doJSONWithBody(ctx, method, apiPath, nil, out)
+}
+
+func (c *clusterNodeClient) doJSONWithBody(ctx context.Context, method, apiPath string, in, out any) error {
+	var bodyReader io.Reader
+	if in != nil {
+		raw, err := json.Marshal(in)
+		if err != nil {
+			return fmt.Errorf("encode kubernetes request body: %w", err)
+		}
+		bodyReader = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+apiPath, bodyReader)
 	if err != nil {
 		return fmt.Errorf("create kubernetes request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.bearerToken)
 	req.Header.Set("Accept", "application/json")
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := c.client.Do(req)
 	if err != nil {

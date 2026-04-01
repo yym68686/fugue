@@ -66,11 +66,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "fugue.configSecretName" . }}
                   key: FUGUE_CLUSTER_JOIN_SERVER
-            - name: FUGUE_CLUSTER_JOIN_TOKEN
+            - name: FUGUE_CLUSTER_JOIN_CA_HASH
               valueFrom:
                 secretKeyRef:
                   name: {{ include "fugue.configSecretName" . }}
-                  key: FUGUE_CLUSTER_JOIN_TOKEN
+                  key: FUGUE_CLUSTER_JOIN_CA_HASH
+            - name: FUGUE_CLUSTER_JOIN_BOOTSTRAP_TOKEN_TTL
+              value: {{ .Values.api.clusterJoinBootstrapTokenTTL | quote }}
             - name: FUGUE_CLUSTER_JOIN_MESH_PROVIDER
               valueFrom:
                 secretKeyRef:

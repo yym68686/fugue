@@ -14,7 +14,8 @@ api:
   registryPullBase: ""
   clusterJoinRegistryEndpoint: ""
   clusterJoinServer: ""
-  clusterJoinToken: ""
+  clusterJoinCAHash: ""
+  clusterJoinBootstrapTokenTTL: 15m
   clusterJoinMeshProvider: ""
   clusterJoinMeshLoginServer: ""
   clusterJoinMeshAuthKey: ""

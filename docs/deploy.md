@@ -174,7 +174,7 @@ Registry and cluster-join notes:
 - `api.registryPushBase` should be the in-cluster address builders use to push imported images.
 - `api.registryPullBase` should be reachable from runtime nodes that need to pull those images.
 - `api.clusterJoinRegistryEndpoint` should be reachable from VPS nodes joined through `/install/join-cluster.sh`.
-- If you want Fugue to expose `/install/join-cluster.sh`, also set `api.clusterJoinServer="https://k3s-api.example.com:6443"` and `api.clusterJoinToken="<k3s-server-token>"`. Optional mesh settings are `api.clusterJoinMeshProvider`, `api.clusterJoinMeshLoginServer`, and `api.clusterJoinMeshAuthKey`.
+- If you want Fugue to expose `/install/join-cluster.sh`, also set `api.clusterJoinServer="https://k3s-api.example.com:6443"` and `api.clusterJoinBootstrapTokenTTL="15m"`. Optional hardening is `api.clusterJoinCAHash="<sha256-of-server-ca>"`. Optional mesh settings are `api.clusterJoinMeshProvider`, `api.clusterJoinMeshLoginServer`, and `api.clusterJoinMeshAuthKey`.
 
 Watch rollout:
 
@@ -288,7 +288,7 @@ Fugue now supports two distinct attachment paths:
 
 ### Option A: join the center cluster (`managed-owned`)
 
-Prerequisite: set `api.clusterJoinServer`, `api.clusterJoinToken`, `api.registryPullBase`, and `api.clusterJoinRegistryEndpoint` in your Helm values so the join endpoints are enabled.
+Prerequisite: set `api.clusterJoinServer`, `api.clusterJoinBootstrapTokenTTL`, `api.registryPullBase`, and `api.clusterJoinRegistryEndpoint` in your Helm values so the join endpoints are enabled. Set `api.clusterJoinCAHash` as well if you want secure-format join tokens.
 
 Create a reusable node key from Fugue:
 

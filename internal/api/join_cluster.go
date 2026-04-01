@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 type joinClusterPlan struct {
 	ServerURL        string   `json:"server_url"`
 	Token            string   `json:"token"`
+	BootstrapTokenID string   `json:"bootstrap_token_id,omitempty"`
 	NodeName         string   `json:"node_name"`
 	NodeLabels       []string `json:"node_labels"`
 	NodeTaints       []string `json:"node_taints"`
@@ -48,6 +50,7 @@ func (s *Server) handleJoinClusterNode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	key, node, join, err := s.bootstrapJoinClusterNode(
+		r.Context(),
 		req.NodeKey,
 		coalesceNodeName(req.NodeName, req.RuntimeName),
 		req.Endpoint,
@@ -56,7 +59,7 @@ func (s *Server) handleJoinClusterNode(w http.ResponseWriter, r *http.Request) {
 		req.MachineFingerprint,
 	)
 	if err != nil {
-		s.writeStoreError(w, err)
+		s.writeJoinClusterError(w, err)
 		return
 	}
 	s.appendAudit(model.Principal{
@@ -86,6 +89,7 @@ func (s *Server) handleJoinClusterNodeEnv(w http.ResponseWriter, r *http.Request
 
 	labels := parseCSVLabels(r.Form.Get("labels"))
 	key, node, join, err := s.bootstrapJoinClusterNode(
+		r.Context(),
 		r.Form.Get("node_key"),
 		coalesceNodeName(r.Form.Get("node_name"), r.Form.Get("runtime_name")),
 		r.Form.Get("endpoint"),
@@ -94,7 +98,7 @@ func (s *Server) handleJoinClusterNodeEnv(w http.ResponseWriter, r *http.Request
 		r.Form.Get("machine_fingerprint"),
 	)
 	if err != nil {
-		s.writeStoreError(w, err)
+		s.writeJoinClusterError(w, err)
 		return
 	}
 
@@ -111,6 +115,7 @@ func (s *Server) handleJoinClusterNodeEnv(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprintf(w, "FUGUE_JOIN_SERVER=%s\n", shellQuote(join.ServerURL))
 	fmt.Fprintf(w, "FUGUE_JOIN_TOKEN=%s\n", shellQuote(join.Token))
+	fmt.Fprintf(w, "FUGUE_JOIN_BOOTSTRAP_TOKEN_ID=%s\n", shellQuote(join.BootstrapTokenID))
 	fmt.Fprintf(w, "FUGUE_JOIN_NODE_NAME=%s\n", shellQuote(join.NodeName))
 	fmt.Fprintf(w, "FUGUE_JOIN_NODE_LABELS=%s\n", shellQuote(strings.Join(join.NodeLabels, ",")))
 	fmt.Fprintf(w, "FUGUE_JOIN_NODE_TAINTS=%s\n", shellQuote(strings.Join(join.NodeTaints, ",")))
@@ -135,6 +140,7 @@ func (s *Server) handleJoinClusterCleanup(w http.ResponseWriter, r *http.Request
 	nodeKey := strings.TrimSpace(r.Form.Get("node_key"))
 	machineFingerprint := strings.TrimSpace(r.Form.Get("machine_fingerprint"))
 	currentNodeName := strings.TrimSpace(r.Form.Get("current_node_name"))
+	bootstrapTokenID := strings.TrimSpace(r.Form.Get("bootstrap_token_id"))
 	if nodeKey == "" || machineFingerprint == "" || currentNodeName == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "node_key, machine_fingerprint, and current_node_name are required")
 		return
@@ -187,7 +193,7 @@ func (s *Server) handleJoinClusterCleanup(w http.ResponseWriter, r *http.Request
 	removedNodes := make([]string, 0, len(staleSnapshots))
 	removedRuntimeIDs := make([]string, 0, len(staleSnapshots))
 	for _, snapshot := range staleSnapshots {
-		if err := client.deleteNode(r.Context(), snapshot.node.Name); err != nil && !strings.Contains(err.Error(), "status=404") {
+		if err := client.deleteNode(r.Context(), snapshot.node.Name); err != nil && !isKubernetesNodeNotFound(err) {
 			httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 			return
 		}
@@ -212,11 +218,20 @@ func (s *Server) handleJoinClusterCleanup(w http.ResponseWriter, r *http.Request
 			"node_key_id":       key.ID,
 		})
 	}
+	bootstrapTokenRemoved := false
+	if bootstrapTokenID != "" {
+		bootstrapTokenRemoved, err = client.deleteBootstrapTokenIfOwned(r.Context(), bootstrapTokenID, key.ID)
+		if err != nil && s.log != nil {
+			s.log.Printf("delete bootstrap token %s for node key %s: %v", bootstrapTokenID, key.ID, err)
+		}
+	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprintf(w, "FUGUE_JOIN_CLEANUP_NODE_COUNT=%s\n", shellQuote(strconv.Itoa(len(removedNodes))))
 	fmt.Fprintf(w, "FUGUE_JOIN_CLEANUP_NODES=%s\n", shellQuote(strings.Join(removedNodes, ",")))
 	fmt.Fprintf(w, "FUGUE_JOIN_CLEANUP_RUNTIME_IDS=%s\n", shellQuote(strings.Join(removedRuntimeIDs, ",")))
+	fmt.Fprintf(w, "FUGUE_JOIN_CLEANUP_BOOTSTRAP_TOKEN_ID=%s\n", shellQuote(bootstrapTokenID))
+	fmt.Fprintf(w, "FUGUE_JOIN_CLEANUP_BOOTSTRAP_TOKEN_REMOVED=%s\n", shellQuote(strconv.FormatBool(bootstrapTokenRemoved)))
 }
 
 func (s *Server) handleJoinClusterInstallScript(w http.ResponseWriter, r *http.Request) {
@@ -228,7 +243,7 @@ func (s *Server) handleJoinClusterInstallScript(w http.ResponseWriter, r *http.R
 	_, _ = fmt.Fprint(w, s.joinClusterInstallScript(publicBaseURL(r)))
 }
 
-func (s *Server) bootstrapJoinClusterNode(nodeKey, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.NodeKey, model.Runtime, joinClusterPlan, error) {
+func (s *Server) bootstrapJoinClusterNode(ctx context.Context, nodeKey, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.NodeKey, model.Runtime, joinClusterPlan, error) {
 	nodeKey = strings.TrimSpace(nodeKey)
 	nodeName = strings.TrimSpace(nodeName)
 	if nodeKey == "" {
@@ -239,9 +254,22 @@ func (s *Server) bootstrapJoinClusterNode(nodeKey, nodeName, endpoint string, la
 	if err != nil {
 		return model.NodeKey{}, model.Runtime{}, joinClusterPlan{}, err
 	}
+	clientFactory := s.newClusterNodeClient
+	if clientFactory == nil {
+		clientFactory = newClusterNodeClient
+	}
+	client, err := clientFactory()
+	if err != nil {
+		return model.NodeKey{}, model.Runtime{}, joinClusterPlan{}, err
+	}
+	token, bootstrapTokenID, err := client.createBootstrapToken(ctx, key.ID, runtimeObj.ID, s.clusterJoinCAHash, s.clusterJoinBootstrapTokenTTL)
+	if err != nil {
+		return model.NodeKey{}, model.Runtime{}, joinClusterPlan{}, err
+	}
 	join := joinClusterPlan{
 		ServerURL:        s.clusterJoinServer,
-		Token:            s.clusterJoinToken,
+		Token:            token,
+		BootstrapTokenID: bootstrapTokenID,
 		NodeName:         runtimeObj.Name,
 		NodeLabels:       runtime.JoinNodeLabels(runtimeObj),
 		NodeTaints:       runtime.JoinNodeTaints(runtimeObj),
@@ -256,7 +284,7 @@ func (s *Server) bootstrapJoinClusterNode(nodeKey, nodeName, endpoint string, la
 }
 
 func (s *Server) clusterJoinConfigured() bool {
-	if strings.TrimSpace(s.clusterJoinServer) == "" || strings.TrimSpace(s.clusterJoinToken) == "" {
+	if strings.TrimSpace(s.clusterJoinServer) == "" || s.clusterJoinBootstrapTokenTTL <= 0 {
 		return false
 	}
 	if strings.TrimSpace(s.registryPullBase) == "" || strings.TrimSpace(s.clusterJoinRegistryEndpoint) == "" {
@@ -266,6 +294,80 @@ func (s *Server) clusterJoinConfigured() bool {
 		return true
 	}
 	return strings.TrimSpace(s.clusterJoinMeshLoginServer) != "" && strings.TrimSpace(s.clusterJoinMeshAuthKey) != ""
+}
+
+type revokeNodeKeyCleanupResult struct {
+	DeletedClusterNodes      []string `json:"deleted_cluster_nodes,omitempty"`
+	DeletedBootstrapTokenIDs []string `json:"deleted_bootstrap_token_ids,omitempty"`
+	DetachedRuntimeIDs       []string `json:"detached_runtime_ids,omitempty"`
+	Warnings                 []string `json:"warnings,omitempty"`
+}
+
+func (s *Server) cleanupRevokedNodeKey(ctx context.Context, key model.NodeKey) revokeNodeKeyCleanupResult {
+	result := revokeNodeKeyCleanupResult{}
+	runtimes, err := s.store.ListRuntimesByNodeKey(key.ID, key.TenantID, false)
+	if err != nil {
+		result.Warnings = append(result.Warnings, "list runtimes for node key cleanup: "+err.Error())
+		return result
+	}
+	needsClusterClient := s.clusterJoinConfigured()
+	if !needsClusterClient {
+		for _, runtimeObj := range runtimes {
+			if runtimeObj.Type == model.RuntimeTypeManagedOwned {
+				needsClusterClient = true
+				break
+			}
+		}
+	}
+	if !needsClusterClient {
+		return result
+	}
+
+	clientFactory := s.newClusterNodeClient
+	if clientFactory == nil {
+		clientFactory = newClusterNodeClient
+	}
+	client, clientErr := clientFactory()
+	if clientErr != nil {
+		result.Warnings = append(result.Warnings, "connect to kubernetes for node key cleanup: "+clientErr.Error())
+	} else {
+		deletedTokenIDs, err := client.deleteBootstrapTokensByNodeKey(ctx, key.ID)
+		if err != nil {
+			result.Warnings = append(result.Warnings, "delete bootstrap tokens for node key cleanup: "+err.Error())
+		} else {
+			result.DeletedBootstrapTokenIDs = deletedTokenIDs
+		}
+	}
+
+	for _, runtimeObj := range runtimes {
+		if runtimeObj.Type != model.RuntimeTypeManagedOwned {
+			continue
+		}
+		nodeName := strings.TrimSpace(runtimeObj.ClusterNodeName)
+		switch {
+		case nodeName == "":
+		case clientErr != nil:
+			result.Warnings = append(result.Warnings, "delete cluster node "+runtimeObj.Name+": kubernetes client unavailable")
+			continue
+		default:
+			if err := client.deleteNode(ctx, nodeName); err != nil && !isKubernetesNodeNotFound(err) {
+				result.Warnings = append(result.Warnings, "delete cluster node "+nodeName+": "+err.Error())
+				continue
+			}
+			result.DeletedClusterNodes = append(result.DeletedClusterNodes, nodeName)
+		}
+
+		detached, err := s.store.DetachRuntimeOwnership(runtimeObj.ID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			result.Warnings = append(result.Warnings, "detach runtime "+runtimeObj.ID+": "+err.Error())
+			continue
+		}
+		result.DetachedRuntimeIDs = append(result.DetachedRuntimeIDs, detached.ID)
+	}
+	return result
 }
 
 func coalesceNodeName(values ...string) string {
@@ -311,6 +413,15 @@ func shellQuote(value string) string {
 		return "''"
 	}
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
+
+func (s *Server) writeJoinClusterError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrInvalidInput):
+		s.writeStoreError(w, err)
+	default:
+		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
+	}
 }
 
 func publicBaseURL(r *http.Request) string {
@@ -615,14 +726,15 @@ cleanup_stale_cluster_nodes() {
   response_file="$(mktemp)"
   log_step "Cleaning up stale cluster-node records..."
   for attempt in $(seq 1 10); do
-    http_code="$(
-      curl -sS -o "${response_file}" -w '%%{http_code}' --max-time 5 -X POST "${FUGUE_API_BASE}/v1/nodes/join-cluster/cleanup" \
-      -H "Content-Type: application/x-www-form-urlencoded" \
-      --data-urlencode "node_key=${FUGUE_NODE_KEY}" \
-      --data-urlencode "machine_fingerprint=${machine_fingerprint}" \
-      --data-urlencode "current_node_name=${FUGUE_JOIN_NODE_NAME}" \
-      2>/dev/null || printf '000'
-    )"
+	    http_code="$(
+	      curl -sS -o "${response_file}" -w '%%{http_code}' --max-time 5 -X POST "${FUGUE_API_BASE}/v1/nodes/join-cluster/cleanup" \
+	      -H "Content-Type: application/x-www-form-urlencoded" \
+	      --data-urlencode "node_key=${FUGUE_NODE_KEY}" \
+	      --data-urlencode "machine_fingerprint=${machine_fingerprint}" \
+	      --data-urlencode "current_node_name=${FUGUE_JOIN_NODE_NAME}" \
+	      --data-urlencode "bootstrap_token_id=${FUGUE_JOIN_BOOTSTRAP_TOKEN_ID:-}" \
+	      2>/dev/null || printf '000'
+	    )"
     case "${http_code}" in
       200|204)
         log_step "Cluster-node cleanup completed."

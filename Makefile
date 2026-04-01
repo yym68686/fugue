@@ -1,10 +1,17 @@
 GOCACHE ?= $(CURDIR)/.gocache
 BIN_DIR ?= $(CURDIR)/bin
 
-.PHONY: test build build-api build-controller build-agent build-cli run-api run-controller run-agent
+.PHONY: test generate-openapi generate-openapi-check build build-api build-controller build-agent build-cli run-api run-controller run-agent
 
 test:
+	env GOCACHE=$(GOCACHE) go run ./cmd/fugue-openapi-gen -spec openapi/openapi.yaml -routes-out internal/api/routes_gen.go -spec-out internal/apispec/spec_gen.go -check
 	env GOCACHE=$(GOCACHE) go test ./...
+
+generate-openapi:
+	env GOCACHE=$(GOCACHE) go generate ./internal/apispec
+
+generate-openapi-check:
+	env GOCACHE=$(GOCACHE) go run ./cmd/fugue-openapi-gen -spec openapi/openapi.yaml -routes-out internal/api/routes_gen.go -spec-out internal/apispec/spec_gen.go -check
 
 build: build-api build-controller build-agent build-cli
 

@@ -1,0 +1,4072 @@
+openapi: 3.1.0
+info:
+  title: Fugue API
+  version: 1.0.0
+  description: |-
+    Authoritative API contract for Fugue.
+    Route registration, served OpenAPI artifacts, and generated checks all derive from this file.
+servers:
+  - url: /
+tags:
+  - name: System
+    description: Health checks, install helpers, and contract endpoints.
+  - name: Edge
+    description: Edge integration and TLS automation endpoints.
+  - name: Tenants
+    description: Tenant lifecycle endpoints.
+  - name: Projects
+    description: Project management endpoints.
+  - name: Billing
+    description: Tenant billing and managed-cap endpoints.
+  - name: API Keys
+    description: API credential lifecycle endpoints.
+  - name: Node Keys
+    description: Reusable node-key management endpoints.
+  - name: Cluster
+    description: Cluster inventory endpoints.
+  - name: Nodes
+    description: Compatibility and bootstrap node endpoints.
+  - name: Runtimes
+    description: Runtime inventory and sharing endpoints.
+  - name: Backing Services
+    description: Backing service and binding endpoints.
+  - name: Apps
+    description: Application deployment, config, logs, filesystem, and import endpoints.
+  - name: Operations
+    description: Async operation endpoints.
+  - name: Audit Events
+    description: Audit-log endpoints.
+  - name: Source Uploads
+    description: Source upload archive endpoints.
+  - name: Agent
+    description: Runtime agent control-plane endpoints.
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Healthz
+      tags: [System]
+      x-fugue-handler: handleHealthz
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /readyz:
+    get:
+      operationId: readyz
+      summary: Readyz
+      tags: [System]
+      x-fugue-handler: handleReadyz
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/edge/tls/ask:
+    get:
+      operationId: edgeTLSAsk
+      summary: Edge TLS Ask
+      tags: [Edge]
+      x-fugue-handler: handleEdgeTLSAsk
+      security:
+        - EdgeToken: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/edge/domains:
+    get:
+      operationId: edgeDomains
+      summary: Edge Domains
+      tags: [Edge]
+      x-fugue-handler: handleEdgeDomains
+      security:
+        - EdgeToken: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/edge/domains/tls-report:
+    post:
+      operationId: edgeDomainTLSReport
+      summary: Edge Domain TLS Report
+      tags: [Edge]
+      x-fugue-handler: handleEdgeDomainTLSReport
+      security:
+        - EdgeToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/tenants:
+    get:
+      operationId: listTenants
+      summary: List Tenants
+      tags: [Tenants]
+      x-fugue-handler: handleListTenants
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createTenant
+      summary: Create Tenant
+      tags: [Tenants]
+      x-fugue-handler: handleCreateTenant
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTenantRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/tenants/{id}:
+    delete:
+      operationId: deleteTenant
+      summary: Delete Tenant
+      tags: [Tenants]
+      x-fugue-handler: handleDeleteTenant
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/projects:
+    get:
+      operationId: listProjects
+      summary: List Projects
+      tags: [Projects]
+      x-fugue-handler: handleListProjects
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/TenantIdQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createProject
+      summary: Create Project
+      tags: [Projects]
+      x-fugue-handler: handleCreateProject
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProjectRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/projects/{id}:
+    patch:
+      operationId: patchProject
+      summary: Patch Project
+      tags: [Projects]
+      x-fugue-handler: handlePatchProject
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchProjectRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deleteProject
+      summary: Delete Project
+      tags: [Projects]
+      x-fugue-handler: handleDeleteProject
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/billing:
+    get:
+      operationId: getBilling
+      summary: Get Billing
+      tags: [Billing]
+      x-fugue-handler: handleGetBilling
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/TenantIdQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BillingResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      operationId: updateBilling
+      summary: Update Billing
+      tags: [Billing]
+      x-fugue-handler: handleUpdateBilling
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateBillingRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BillingResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/billing/balance:
+    patch:
+      operationId: setBillingBalance
+      summary: Set Billing Balance
+      tags: [Billing]
+      x-fugue-handler: handleSetBillingBalance
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetBillingBalanceRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BillingResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/billing/top-ups:
+    post:
+      operationId: topUpBilling
+      summary: Top Up Billing
+      tags: [Billing]
+      x-fugue-handler: handleTopUpBilling
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TopUpBillingRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BillingResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/api-keys:
+    get:
+      operationId: listAPIKeys
+      summary: List API Keys
+      tags: [API Keys]
+      x-fugue-handler: handleListAPIKeys
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIKeyListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createAPIKey
+      summary: Create API Key
+      tags: [API Keys]
+      x-fugue-handler: handleCreateAPIKey
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAPIKeyRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIKeySecretResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/api-keys/{id}:
+    patch:
+      operationId: patchAPIKey
+      summary: Patch API Key
+      tags: [API Keys]
+      x-fugue-handler: handlePatchAPIKey
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchAPIKeyRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIKeyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deleteAPIKey
+      summary: Delete API Key
+      tags: [API Keys]
+      x-fugue-handler: handleDeleteAPIKey
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteAPIKeyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/api-keys/{id}/rotate:
+    post:
+      operationId: rotateAPIKey
+      summary: Rotate API Key
+      tags: [API Keys]
+      x-fugue-handler: handleRotateAPIKey
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RotateAPIKeyRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIKeySecretResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/api-keys/{id}/disable:
+    post:
+      operationId: disableAPIKey
+      summary: Disable API Key
+      tags: [API Keys]
+      x-fugue-handler: handleDisableAPIKey
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIKeyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/api-keys/{id}/enable:
+    post:
+      operationId: enableAPIKey
+      summary: Enable API Key
+      tags: [API Keys]
+      x-fugue-handler: handleEnableAPIKey
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIKeyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/node-keys:
+    get:
+      operationId: listNodeKeys
+      summary: List Node Keys
+      tags: [Node Keys]
+      x-fugue-handler: handleListNodeKeys
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeKeyListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createNodeKey
+      summary: Create Node Key
+      tags: [Node Keys]
+      x-fugue-handler: handleCreateNodeKey
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateNodeKeyRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeKeySecretResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/node-keys/{id}/usages:
+    get:
+      operationId: getNodeKeyUsages
+      summary: Get Node Key Usages
+      tags: [Node Keys]
+      x-fugue-handler: handleGetNodeKeyUsages
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/node-keys/{id}/revoke:
+    post:
+      operationId: revokeNodeKey
+      summary: Revoke Node Key
+      tags: [Node Keys]
+      x-fugue-handler: handleRevokeNodeKey
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RevokeNodeKeyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/cluster/nodes:
+    get:
+      operationId: listClusterNodes
+      summary: List Cluster Nodes
+      tags: [Cluster]
+      x-fugue-handler: handleListClusterNodes
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterNodeListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/nodes:
+    get:
+      operationId: listNodes
+      summary: List Nodes
+      tags: [Nodes]
+      x-fugue-handler: handleListNodes
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/nodes/{id}:
+    get:
+      operationId: getNode
+      summary: Get Node
+      tags: [Nodes]
+      x-fugue-handler: handleGetNode
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/runtimes:
+    get:
+      operationId: listRuntimes
+      summary: List Runtimes
+      tags: [Runtimes]
+      x-fugue-handler: handleListRuntimes
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createRuntime
+      summary: Create Runtime
+      tags: [Runtimes]
+      x-fugue-handler: handleCreateRuntime
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/runtimes/{id}:
+    get:
+      operationId: getRuntime
+      summary: Get Runtime
+      tags: [Runtimes]
+      x-fugue-handler: handleGetRuntime
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/runtimes/{id}/sharing:
+    get:
+      operationId: getRuntimeSharing
+      summary: Get Runtime Sharing
+      tags: [Runtimes]
+      x-fugue-handler: handleGetRuntimeSharing
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeSharingResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/runtimes/{id}/sharing/grants:
+    post:
+      operationId: grantRuntimeAccess
+      summary: Grant Runtime Access
+      tags: [Runtimes]
+      x-fugue-handler: handleGrantRuntimeAccess
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GrantRuntimeAccessRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeAccessGrantResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/runtimes/{id}/sharing/grants/{tenant_id}:
+    delete:
+      operationId: revokeRuntimeAccess
+      summary: Revoke Runtime Access
+      tags: [Runtimes]
+      x-fugue-handler: handleRevokeRuntimeAccess
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/TenantIdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeAccessRevokeResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/runtimes/{id}/sharing/mode:
+    post:
+      operationId: setRuntimeAccessMode
+      summary: Set Runtime Access Mode
+      tags: [Runtimes]
+      x-fugue-handler: handleSetRuntimeAccessMode
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/runtimes/{id}/pool-mode:
+    post:
+      operationId: setRuntimePoolMode
+      summary: Set Runtime Pool Mode
+      tags: [Runtimes]
+      x-fugue-handler: handleSetRuntimePoolMode
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetRuntimePoolModeRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimePoolModeResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/runtimes/enroll-tokens:
+    get:
+      operationId: listEnrollmentTokens
+      summary: List Enrollment Tokens
+      tags: [Runtimes]
+      x-fugue-handler: handleListEnrollmentTokens
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createEnrollmentToken
+      summary: Create Enrollment Token
+      tags: [Runtimes]
+      x-fugue-handler: handleCreateEnrollmentToken
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/backing-services:
+    get:
+      operationId: listBackingServices
+      summary: List Backing Services
+      tags: [Backing Services]
+      x-fugue-handler: handleListBackingServices
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackingServiceListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createBackingService
+      summary: Create Backing Service
+      tags: [Backing Services]
+      x-fugue-handler: handleCreateBackingService
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/backing-services/{id}:
+    get:
+      operationId: getBackingService
+      summary: Get Backing Service
+      tags: [Backing Services]
+      x-fugue-handler: handleGetBackingService
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deleteBackingService
+      summary: Delete Backing Service
+      tags: [Backing Services]
+      x-fugue-handler: handleDeleteBackingService
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps:
+    get:
+      operationId: listApps
+      summary: List Apps
+      tags: [Apps]
+      x-fugue-handler: handleListApps
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createApp
+      summary: Create App
+      tags: [Apps]
+      x-fugue-handler: handleCreateApp
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/import-github:
+    post:
+      operationId: importGitHubApp
+      summary: Import Git Hub App
+      tags: [Apps]
+      x-fugue-handler: handleImportGitHubApp
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportGitHubRequest"
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportGitHubResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/import-image:
+    post:
+      operationId: importImageApp
+      summary: Import Image App
+      tags: [Apps]
+      x-fugue-handler: handleImportImageApp
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportImageRequest"
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportImageResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/import-upload:
+    post:
+      operationId: importUploadApp
+      summary: Import Upload App
+      tags: [Apps]
+      x-fugue-handler: handleImportUploadApp
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}:
+    get:
+      operationId: getApp
+      summary: Get App
+      tags: [Apps]
+      x-fugue-handler: handleGetApp
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deleteApp
+      summary: Delete App
+      tags: [Apps]
+      x-fugue-handler: handleDeleteApp
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDeleteResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/domains:
+    get:
+      operationId: listAppDomains
+      summary: List App Domains
+      tags: [Apps]
+      x-fugue-handler: handleListAppDomains
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDomainListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: putAppDomain
+      summary: Put App Domain
+      tags: [Apps]
+      x-fugue-handler: handlePutAppDomain
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PutAppDomainRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDomainPutResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deleteAppDomain
+      summary: Delete App Domain
+      tags: [Apps]
+      x-fugue-handler: handleDeleteAppDomain
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/HostnameQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDomainResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/domains/availability:
+    get:
+      operationId: getAppDomainAvailability
+      summary: Get App Domain Availability
+      tags: [Apps]
+      x-fugue-handler: handleGetAppDomainAvailability
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/HostnameQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDomainAvailabilityResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/domains/verify:
+    post:
+      operationId: verifyAppDomain
+      summary: Verify App Domain
+      tags: [Apps]
+      x-fugue-handler: handleVerifyAppDomain
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VerifyAppDomainRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDomainVerifyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/route/availability:
+    get:
+      operationId: getAppRouteAvailability
+      summary: Get App Route Availability
+      tags: [Apps]
+      x-fugue-handler: handleGetAppRouteAvailability
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/HostnameQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppRouteAvailabilityResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/route:
+    patch:
+      operationId: patchAppRoute
+      summary: Patch App Route
+      tags: [Apps]
+      x-fugue-handler: handlePatchAppRoute
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchAppRouteRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppRoutePatchResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/bindings:
+    get:
+      operationId: listAppBindings
+      summary: List App Bindings
+      tags: [Apps]
+      x-fugue-handler: handleListAppBindings
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppBindingsResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createAppBinding
+      summary: Create App Binding
+      tags: [Apps]
+      x-fugue-handler: handleCreateAppBinding
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/bindings/{binding_id}:
+    delete:
+      operationId: deleteAppBinding
+      summary: Delete App Binding
+      tags: [Apps]
+      x-fugue-handler: handleDeleteAppBinding
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: binding_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/build-logs:
+    get:
+      operationId: getAppBuildLogs
+      summary: Get App Build Logs
+      tags: [Apps]
+      x-fugue-handler: handleGetAppBuildLogs
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/OperationIdQueryParam"
+        - $ref: "#/components/parameters/TailLinesQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BuildLogsResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/build-logs/stream:
+    get:
+      operationId: streamAppBuildLogs
+      summary: Stream App Build Logs
+      tags: [Apps]
+      x-fugue-handler: handleStreamAppBuildLogs
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/runtime-logs:
+    get:
+      operationId: getAppRuntimeLogs
+      summary: Get App Runtime Logs
+      tags: [Apps]
+      x-fugue-handler: handleGetAppRuntimeLogs
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/ComponentQueryParam"
+        - $ref: "#/components/parameters/PodQueryParam"
+        - $ref: "#/components/parameters/TailLinesQueryParam"
+        - $ref: "#/components/parameters/PreviousQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeLogsResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/runtime-logs/stream:
+    get:
+      operationId: streamAppRuntimeLogs
+      summary: Stream App Runtime Logs
+      tags: [Apps]
+      x-fugue-handler: handleStreamAppRuntimeLogs
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/env:
+    get:
+      operationId: getAppEnv
+      summary: Get App Env
+      tags: [Apps]
+      x-fugue-handler: handleGetAppEnv
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppEnvResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      operationId: patchAppEnv
+      summary: Patch App Env
+      tags: [Apps]
+      x-fugue-handler: handlePatchAppEnv
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchAppEnvRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppEnvResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/files:
+    get:
+      operationId: getAppFiles
+      summary: Get App Files
+      tags: [Apps]
+      x-fugue-handler: handleGetAppFiles
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppFilesResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      operationId: upsertAppFiles
+      summary: Upsert App Files
+      tags: [Apps]
+      x-fugue-handler: handleUpsertAppFiles
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpsertAppFilesRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppFilesResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deleteAppFiles
+      summary: Delete App Files
+      tags: [Apps]
+      x-fugue-handler: handleDeleteAppFiles
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/FilePathsQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppFilesResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/filesystem/tree:
+    get:
+      operationId: getAppFilesystemTree
+      summary: Get App Filesystem Tree
+      tags: [Apps]
+      x-fugue-handler: handleGetAppFilesystemTree
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/ComponentQueryParam"
+        - $ref: "#/components/parameters/DepthQueryParam"
+        - $ref: "#/components/parameters/PathQueryParam"
+        - $ref: "#/components/parameters/PodQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppFilesystemTreeResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/filesystem/file:
+    get:
+      operationId: getAppFilesystemFile
+      summary: Get App Filesystem File
+      tags: [Apps]
+      x-fugue-handler: handleGetAppFilesystemFile
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/ComponentQueryParam"
+        - $ref: "#/components/parameters/MaxBytesQueryParam"
+        - $ref: "#/components/parameters/PathQueryParam"
+        - $ref: "#/components/parameters/PodQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppFilesystemFileResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      operationId: putAppFilesystemFile
+      summary: Put App Filesystem File
+      tags: [Apps]
+      x-fugue-handler: handlePutAppFilesystemFile
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/ComponentQueryParam"
+        - $ref: "#/components/parameters/PodQueryParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PutAppFilesystemFileRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppFilesystemMutationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/filesystem/directory:
+    post:
+      operationId: createAppFilesystemDirectory
+      summary: Create App Filesystem Directory
+      tags: [Apps]
+      x-fugue-handler: handleCreateAppFilesystemDirectory
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/ComponentQueryParam"
+        - $ref: "#/components/parameters/PodQueryParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAppFilesystemDirectoryRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppFilesystemMutationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/filesystem:
+    delete:
+      operationId: deleteAppFilesystemPath
+      summary: Delete App Filesystem Path
+      tags: [Apps]
+      x-fugue-handler: handleDeleteAppFilesystemPath
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/ComponentQueryParam"
+        - $ref: "#/components/parameters/PathQueryParam"
+        - $ref: "#/components/parameters/PodQueryParam"
+        - $ref: "#/components/parameters/RecursiveQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppFilesystemMutationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/rebuild:
+    post:
+      operationId: rebuildApp
+      summary: Rebuild App
+      tags: [Apps]
+      x-fugue-handler: handleRebuildApp
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RebuildAppRequest"
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppRebuildResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/deploy:
+    post:
+      operationId: deployApp
+      summary: Deploy App
+      tags: [Apps]
+      x-fugue-handler: handleDeployApp
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/restart:
+    post:
+      operationId: restartApp
+      summary: Restart App
+      tags: [Apps]
+      x-fugue-handler: handleRestartApp
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppRestartResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/scale:
+    post:
+      operationId: scaleApp
+      summary: Scale App
+      tags: [Apps]
+      x-fugue-handler: handleScaleApp
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScaleAppRequest"
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/disable:
+    post:
+      operationId: disableApp
+      summary: Disable App
+      tags: [Apps]
+      x-fugue-handler: handleDisableApp
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDisableResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/migrate:
+    post:
+      operationId: migrateApp
+      summary: Migrate App
+      tags: [Apps]
+      x-fugue-handler: handleMigrateApp
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/operations:
+    get:
+      operationId: listOperations
+      summary: List Operations
+      tags: [Operations]
+      x-fugue-handler: handleListOperations
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/operations/{id}:
+    get:
+      operationId: getOperation
+      summary: Get Operation
+      tags: [Operations]
+      x-fugue-handler: handleGetOperation
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/audit-events:
+    get:
+      operationId: listAuditEvents
+      summary: List Audit Events
+      tags: [Audit Events]
+      x-fugue-handler: handleListAuditEvents
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditEventListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /install/join-cluster.sh:
+    get:
+      operationId: joinClusterInstallScript
+      summary: Join Cluster Install Script
+      tags: [System]
+      x-fugue-handler: handleJoinClusterInstallScript
+      responses:
+        '200':
+          description: Successful response
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/source-uploads/{id}/archive:
+    get:
+      operationId: getSourceUploadArchive
+      summary: Get Source Upload Archive
+      tags: [Source Uploads]
+      x-fugue-handler: handleGetSourceUploadArchive
+      security:
+        - DownloadToken: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/agent/enroll:
+    post:
+      operationId: agentEnroll
+      summary: Agent Enroll
+      tags: [Agent]
+      x-fugue-handler: handleAgentEnroll
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/nodes/bootstrap:
+    post:
+      operationId: bootstrapNode
+      summary: Bootstrap Node
+      tags: [Nodes]
+      x-fugue-handler: handleBootstrapNode
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/nodes/join-cluster:
+    post:
+      operationId: joinClusterNode
+      summary: Join Cluster Node
+      tags: [Nodes]
+      x-fugue-handler: handleJoinClusterNode
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/nodes/join-cluster/env:
+    post:
+      operationId: joinClusterNodeEnv
+      summary: Join Cluster Node Env
+      tags: [Nodes]
+      x-fugue-handler: handleJoinClusterNodeEnv
+      requestBody:
+        required: false
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Successful response
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/nodes/join-cluster/cleanup:
+    post:
+      operationId: joinClusterCleanup
+      summary: Join Cluster Cleanup
+      tags: [Nodes]
+      x-fugue-handler: handleJoinClusterCleanup
+      requestBody:
+        required: false
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Successful response
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/agent/heartbeat:
+    post:
+      operationId: agentHeartbeat
+      summary: Agent Heartbeat
+      tags: [Agent]
+      x-fugue-handler: handleAgentHeartbeat
+      security:
+        - RuntimeBearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/agent/operations:
+    get:
+      operationId: agentOperations
+      summary: Agent Operations
+      tags: [Agent]
+      x-fugue-handler: handleAgentOperations
+      security:
+        - RuntimeBearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/agent/operations/{id}/complete:
+    post:
+      operationId: agentCompleteOperation
+      summary: Agent Complete Operation
+      tags: [Agent]
+      x-fugue-handler: handleAgentCompleteOperation
+      security:
+        - RuntimeBearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+    RuntimeBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+    EdgeToken:
+      type: apiKey
+      in: query
+      name: token
+    DownloadToken:
+      type: apiKey
+      in: query
+      name: download_token
+  parameters:
+    IdPathParam:
+      in: path
+      name: id
+      required: true
+      schema:
+        type: string
+    TenantIdPathParam:
+      in: path
+      name: tenant_id
+      required: true
+      schema:
+        type: string
+    TenantIdQueryParam:
+      in: query
+      name: tenant_id
+      required: false
+      schema:
+        type: string
+    HostnameQueryParam:
+      in: query
+      name: hostname
+      required: false
+      schema:
+        type: string
+    OperationIdQueryParam:
+      in: query
+      name: operation_id
+      required: false
+      schema:
+        type: string
+    TailLinesQueryParam:
+      in: query
+      name: tail_lines
+      required: false
+      schema:
+        type: integer
+        format: int32
+    ComponentQueryParam:
+      in: query
+      name: component
+      required: false
+      schema:
+        type: string
+    PodQueryParam:
+      in: query
+      name: pod
+      required: false
+      schema:
+        type: string
+    DepthQueryParam:
+      in: query
+      name: depth
+      required: false
+      schema:
+        type: integer
+        format: int32
+    PathQueryParam:
+      in: query
+      name: path
+      required: false
+      schema:
+        type: string
+    FilePathsQueryParam:
+      in: query
+      name: path
+      required: false
+      style: form
+      explode: true
+      schema:
+        type: array
+        items:
+          type: string
+    MaxBytesQueryParam:
+      in: query
+      name: max_bytes
+      required: false
+      schema:
+        type: integer
+        format: int32
+    PreviousQueryParam:
+      in: query
+      name: previous
+      required: false
+      schema:
+        type: boolean
+    RecursiveQueryParam:
+      in: query
+      name: recursive
+      required: false
+      schema:
+        type: boolean
+    IdempotencyKeyHeader:
+      in: header
+      name: Idempotency-Key
+      required: false
+      schema:
+        type: string
+        maxLength: 200
+  schemas:
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
+    StringMap:
+      type: object
+      additionalProperties:
+        type: string
+    Tenant:
+      type: object
+      additionalProperties: false
+      required: [id, name, slug, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        slug:
+          type: string
+        status:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    Project:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, name, slug, description, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        name:
+          type: string
+        slug:
+          type: string
+        description:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    APIKey:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, label, prefix, hash, status, scopes, created_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        label:
+          type: string
+        prefix:
+          type: string
+        hash:
+          type: string
+        status:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+        disabled_at:
+          type: string
+          format: date-time
+    NodeKey:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, label, prefix, hash, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        label:
+          type: string
+        prefix:
+          type: string
+        hash:
+          type: string
+        status:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: string
+          format: date-time
+    NodeKeyCleanupResult:
+      type: object
+      additionalProperties: false
+      properties:
+        deleted_cluster_nodes:
+          type: array
+          items:
+            type: string
+        deleted_bootstrap_token_ids:
+          type: array
+          items:
+            type: string
+        detached_runtime_ids:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            type: string
+    ResourceSpec:
+      type: object
+      additionalProperties: false
+      properties:
+        cpu_millicores:
+          type: integer
+          format: int64
+        memory_mebibytes:
+          type: integer
+          format: int64
+    ResourceUsage:
+      type: object
+      additionalProperties: false
+      properties:
+        cpu_millicores:
+          type: integer
+          format: int64
+        memory_bytes:
+          type: integer
+          format: int64
+        ephemeral_storage_bytes:
+          type: integer
+          format: int64
+    BillingPriceBook:
+      type: object
+      additionalProperties: false
+      required:
+        [currency, hours_per_month, cpu_microcents_per_millicore_hour, memory_microcents_per_mib_hour]
+      properties:
+        currency:
+          type: string
+        hours_per_month:
+          type: integer
+          format: int64
+        cpu_microcents_per_millicore_hour:
+          type: integer
+          format: int64
+        memory_microcents_per_mib_hour:
+          type: integer
+          format: int64
+    TenantBillingEvent:
+      type: object
+      additionalProperties: false
+      required:
+        [id, tenant_id, type, amount_microcents, balance_after_microcents, created_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        type:
+          type: string
+        amount_microcents:
+          type: integer
+          format: int64
+        balance_after_microcents:
+          type: integer
+          format: int64
+        metadata:
+          $ref: "#/components/schemas/StringMap"
+        created_at:
+          type: string
+          format: date-time
+    TenantBillingSummary:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          tenant_id,
+          status,
+          byo_vps_free,
+          over_cap,
+          balance_restricted,
+          managed_cap,
+          managed_committed,
+          managed_available,
+          default_app_resources,
+          default_postgres_resources,
+          price_book,
+          hourly_rate_microcents,
+          monthly_estimate_microcents,
+          balance_microcents,
+          last_accrued_at,
+          updated_at,
+          events
+        ]
+      properties:
+        tenant_id:
+          type: string
+        status:
+          type: string
+        status_reason:
+          type: string
+        byo_vps_free:
+          type: boolean
+        over_cap:
+          type: boolean
+        balance_restricted:
+          type: boolean
+        managed_cap:
+          $ref: "#/components/schemas/ResourceSpec"
+        managed_committed:
+          $ref: "#/components/schemas/ResourceSpec"
+        managed_available:
+          $ref: "#/components/schemas/ResourceSpec"
+        current_usage:
+          $ref: "#/components/schemas/ResourceUsage"
+        default_app_resources:
+          $ref: "#/components/schemas/ResourceSpec"
+        default_postgres_resources:
+          $ref: "#/components/schemas/ResourceSpec"
+        price_book:
+          $ref: "#/components/schemas/BillingPriceBook"
+        hourly_rate_microcents:
+          type: integer
+          format: int64
+        monthly_estimate_microcents:
+          type: integer
+          format: int64
+        balance_microcents:
+          type: integer
+          format: int64
+        runway_hours:
+          type: number
+          format: double
+        last_accrued_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/TenantBillingEvent"
+    AppSource:
+      type: object
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+        repo_url:
+          type: string
+        repo_branch:
+          type: string
+        repo_auth_token:
+          type: string
+        image_ref:
+          type: string
+        resolved_image_ref:
+          type: string
+        upload_id:
+          type: string
+        upload_filename:
+          type: string
+        archive_sha256:
+          type: string
+        archive_size_bytes:
+          type: integer
+          format: int64
+        source_dir:
+          type: string
+        build_strategy:
+          type: string
+        commit_sha:
+          type: string
+        commit_committed_at:
+          type: string
+        dockerfile_path:
+          type: string
+        build_context_dir:
+          type: string
+        image_name_suffix:
+          type: string
+        compose_service:
+          type: string
+        detected_provider:
+          type: string
+        detected_stack:
+          type: string
+    AppTechnology:
+      type: object
+      additionalProperties: false
+      required: [kind, slug, name]
+      properties:
+        kind:
+          type: string
+        slug:
+          type: string
+        name:
+          type: string
+        source:
+          type: string
+    AppRoute:
+      type: object
+      additionalProperties: false
+      properties:
+        hostname:
+          type: string
+        base_domain:
+          type: string
+        public_url:
+          type: string
+        service_port:
+          type: integer
+          format: int32
+    AppDomain:
+      type: object
+      additionalProperties: false
+      required: [hostname, status, created_at, updated_at]
+      properties:
+        hostname:
+          type: string
+        app_id:
+          type: string
+        tenant_id:
+          type: string
+        status:
+          type: string
+        tls_status:
+          type: string
+        verification_txt_name:
+          type: string
+        verification_txt_value:
+          type: string
+        route_target:
+          type: string
+        last_message:
+          type: string
+        tls_last_message:
+          type: string
+        last_checked_at:
+          type: string
+          format: date-time
+        verified_at:
+          type: string
+          format: date-time
+        tls_last_checked_at:
+          type: string
+          format: date-time
+        tls_ready_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    AppFile:
+      type: object
+      additionalProperties: false
+      required: [path]
+      properties:
+        path:
+          type: string
+        content:
+          type: string
+        secret:
+          type: boolean
+        mode:
+          type: integer
+          format: int32
+    AppWorkspaceSpec:
+      type: object
+      additionalProperties: false
+      properties:
+        mount_path:
+          type: string
+        storage_path:
+          type: string
+        reset_token:
+          type: string
+    AppPostgresSpec:
+      type: object
+      additionalProperties: false
+      properties:
+        image:
+          type: string
+        database:
+          type: string
+        user:
+          type: string
+        password:
+          type: string
+        service_name:
+          type: string
+        storage_path:
+          type: string
+        resources:
+          $ref: "#/components/schemas/ResourceSpec"
+    BackingServiceSpec:
+      type: object
+      additionalProperties: false
+      properties:
+        postgres:
+          $ref: "#/components/schemas/AppPostgresSpec"
+    BackingService:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, project_id, name, type, provisioner, status, spec, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        owner_app_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        type:
+          type: string
+        provisioner:
+          type: string
+        status:
+          type: string
+        spec:
+          $ref: "#/components/schemas/BackingServiceSpec"
+        current_resource_usage:
+          $ref: "#/components/schemas/ResourceUsage"
+        current_runtime_started_at:
+          type: string
+          format: date-time
+        current_runtime_ready_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ServiceBinding:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, app_id, service_id, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        app_id:
+          type: string
+        service_id:
+          type: string
+        alias:
+          type: string
+        env:
+          $ref: "#/components/schemas/StringMap"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    AppStatus:
+      type: object
+      additionalProperties: false
+      required: [phase, current_replicas, updated_at]
+      properties:
+        phase:
+          type: string
+        current_runtime_id:
+          type: string
+        current_replicas:
+          type: integer
+          format: int32
+        current_release_started_at:
+          type: string
+          format: date-time
+        current_release_ready_at:
+          type: string
+          format: date-time
+        last_operation_id:
+          type: string
+        last_message:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+    AppSpec:
+      type: object
+      additionalProperties: false
+      properties:
+        image:
+          type: string
+        command:
+          type: array
+          items:
+            type: string
+        args:
+          type: array
+          items:
+            type: string
+        env:
+          $ref: "#/components/schemas/StringMap"
+        ports:
+          type: array
+          items:
+            type: integer
+            format: int32
+        replicas:
+          type: integer
+          format: int32
+        resources:
+          $ref: "#/components/schemas/ResourceSpec"
+        runtime_id:
+          type: string
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppFile"
+        workspace:
+          $ref: "#/components/schemas/AppWorkspaceSpec"
+        postgres:
+          $ref: "#/components/schemas/AppPostgresSpec"
+        restart_token:
+          type: string
+    App:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, project_id, name, description, spec, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        source:
+          $ref: "#/components/schemas/AppSource"
+        route:
+          $ref: "#/components/schemas/AppRoute"
+        spec:
+          $ref: "#/components/schemas/AppSpec"
+        status:
+          $ref: "#/components/schemas/AppStatus"
+        current_resource_usage:
+          $ref: "#/components/schemas/ResourceUsage"
+        bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ServiceBinding"
+        backing_services:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackingService"
+        tech_stack:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppTechnology"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    Runtime:
+      type: object
+      additionalProperties: false
+      required: [id, name, type, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        name:
+          type: string
+        machine_name:
+          type: string
+        type:
+          type: string
+        access_mode:
+          type: string
+        pool_mode:
+          type: string
+        connection_mode:
+          type: string
+        status:
+          type: string
+        endpoint:
+          type: string
+        labels:
+          $ref: "#/components/schemas/StringMap"
+        node_key_id:
+          type: string
+        cluster_node_name:
+          type: string
+        fingerprint_prefix:
+          type: string
+        fingerprint_hash:
+          type: string
+        agent_key_prefix:
+          type: string
+        agent_key_hash:
+          type: string
+        last_seen_at:
+          type: string
+          format: date-time
+        last_heartbeat_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    RuntimeAccessGrant:
+      type: object
+      additionalProperties: false
+      required: [runtime_id, tenant_id, created_at, updated_at]
+      properties:
+        runtime_id:
+          type: string
+        tenant_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ClusterNodeCondition:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+        reason:
+          type: string
+        message:
+          type: string
+        last_transition_at:
+          type: string
+          format: date-time
+    ClusterNodeCPUStats:
+      type: object
+      additionalProperties: false
+      properties:
+        capacity_millicores:
+          type: integer
+          format: int64
+        allocatable_millicores:
+          type: integer
+          format: int64
+        used_millicores:
+          type: integer
+          format: int64
+        usage_percent:
+          type: number
+          format: double
+    ClusterNodeMemoryStats:
+      type: object
+      additionalProperties: false
+      properties:
+        capacity_bytes:
+          type: integer
+          format: int64
+        allocatable_bytes:
+          type: integer
+          format: int64
+        used_bytes:
+          type: integer
+          format: int64
+        usage_percent:
+          type: number
+          format: double
+    ClusterNodeStorageStats:
+      type: object
+      additionalProperties: false
+      properties:
+        capacity_bytes:
+          type: integer
+          format: int64
+        allocatable_bytes:
+          type: integer
+          format: int64
+        used_bytes:
+          type: integer
+          format: int64
+        usage_percent:
+          type: number
+          format: double
+    ClusterNodeWorkloadPod:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+        phase:
+          type: string
+    ClusterNodeWorkload:
+      type: object
+      additionalProperties: false
+      required: [kind, id, name, pod_count]
+      properties:
+        kind:
+          type: string
+        id:
+          type: string
+        name:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        runtime_id:
+          type: string
+        service_type:
+          type: string
+        owner_app_id:
+          type: string
+        namespace:
+          type: string
+        pods:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterNodeWorkloadPod"
+        pod_count:
+          type: integer
+          format: int32
+    ClusterNode:
+      type: object
+      additionalProperties: false
+      required: [name, status]
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+        roles:
+          type: array
+          items:
+            type: string
+        internal_ip:
+          type: string
+        external_ip:
+          type: string
+        public_ip:
+          type: string
+        region:
+          type: string
+        zone:
+          type: string
+        kubelet_version:
+          type: string
+        os_image:
+          type: string
+        kernel_version:
+          type: string
+        container_runtime:
+          type: string
+        conditions:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/ClusterNodeCondition"
+        cpu:
+          $ref: "#/components/schemas/ClusterNodeCPUStats"
+        memory:
+          $ref: "#/components/schemas/ClusterNodeMemoryStats"
+        ephemeral_storage:
+          $ref: "#/components/schemas/ClusterNodeStorageStats"
+        runtime_id:
+          type: string
+        tenant_id:
+          type: string
+        workloads:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterNodeWorkload"
+        created_at:
+          type: string
+          format: date-time
+    Operation:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        type:
+          type: string
+        status:
+          type: string
+        execution_mode:
+          type: string
+        requested_by_type:
+          type: string
+        requested_by_id:
+          type: string
+        app_id:
+          type: string
+        source_runtime_id:
+          type: string
+        target_runtime_id:
+          type: string
+        desired_replicas:
+          type: integer
+          format: int32
+        desired_spec:
+          $ref: "#/components/schemas/AppSpec"
+        desired_source:
+          $ref: "#/components/schemas/AppSource"
+        result_message:
+          type: string
+        manifest_path:
+          type: string
+        assigned_runtime_id:
+          type: string
+        error_message:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+    AuditEvent:
+      type: object
+      additionalProperties: false
+      required: [id, actor_type, actor_id, action, target_type, created_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        actor_type:
+          type: string
+        actor_id:
+          type: string
+        action:
+          type: string
+        target_type:
+          type: string
+        target_id:
+          type: string
+        metadata:
+          $ref: "#/components/schemas/StringMap"
+        created_at:
+          type: string
+          format: date-time
+    AppRouteAvailability:
+      type: object
+      additionalProperties: false
+      required: [valid, available, current]
+      properties:
+        input:
+          type: string
+        label:
+          type: string
+        hostname:
+          type: string
+        base_domain:
+          type: string
+        public_url:
+          type: string
+        valid:
+          type: boolean
+        available:
+          type: boolean
+        current:
+          type: boolean
+        reason:
+          type: string
+    AppDomainAvailability:
+      type: object
+      additionalProperties: false
+      required: [valid, available, current]
+      properties:
+        input:
+          type: string
+        hostname:
+          type: string
+        valid:
+          type: boolean
+        available:
+          type: boolean
+        current:
+          type: boolean
+        reason:
+          type: string
+    AppFilesystemEntry:
+      type: object
+      additionalProperties: false
+      required: [name, path, kind, size, modified_at, has_children]
+      properties:
+        name:
+          type: string
+        path:
+          type: string
+        kind:
+          type: string
+        size:
+          type: integer
+          format: int64
+        mode:
+          type: integer
+          format: int32
+        modified_at:
+          type: string
+          format: date-time
+        has_children:
+          type: boolean
+    RebuildPlan:
+      type: object
+      additionalProperties: false
+      properties:
+        source_type:
+          type: string
+        image_ref:
+          type: string
+        resolved_image_ref:
+          type: string
+        branch:
+          type: string
+        upload_id:
+          type: string
+        source_dir:
+          type: string
+        dockerfile_path:
+          type: string
+        build_context_dir:
+          type: string
+        build_strategy:
+          type: string
+        compose_service:
+          type: string
+    ImportProjectRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+    ImportServiceDetail:
+      type: object
+      additionalProperties: false
+      required:
+        [service, kind, app_id, app_name, operation_id, build_strategy, internal_port, compose_service]
+      properties:
+        service:
+          type: string
+        kind:
+          type: string
+        app_id:
+          type: string
+        app_name:
+          type: string
+        operation_id:
+          type: string
+        build_strategy:
+          type: string
+        internal_port:
+          type: integer
+          format: int32
+        compose_service:
+          type: string
+        public_url:
+          type: string
+        owns_postgres:
+          type: boolean
+    ComposeStackSummary:
+      type: object
+      additionalProperties: false
+      required: [compose_path, primary_service, services, warnings]
+      properties:
+        compose_path:
+          type: string
+        primary_service:
+          type: string
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImportServiceDetail"
+        warnings:
+          type: array
+          items:
+            type: string
+    FugueManifestSummary:
+      type: object
+      additionalProperties: false
+      required: [manifest_path, primary_service, services, warnings]
+      properties:
+        manifest_path:
+          type: string
+        primary_service:
+          type: string
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImportServiceDetail"
+        warnings:
+          type: array
+          items:
+            type: string
+    ImportGitHubIdempotency:
+      type: object
+      additionalProperties: false
+      required: [key, status]
+      properties:
+        key:
+          type: string
+        status:
+          type: string
+        replayed:
+          type: boolean
+    TenantListResponse:
+      type: object
+      additionalProperties: false
+      required: [tenants]
+      properties:
+        tenants:
+          type: array
+          items:
+            $ref: "#/components/schemas/Tenant"
+    TenantResponse:
+      type: object
+      additionalProperties: false
+      required: [tenant]
+      properties:
+        tenant:
+          $ref: "#/components/schemas/Tenant"
+    CreateTenantRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+    ProjectListResponse:
+      type: object
+      additionalProperties: false
+      required: [projects]
+      properties:
+        projects:
+          type: array
+          items:
+            $ref: "#/components/schemas/Project"
+    ProjectResponse:
+      type: object
+      additionalProperties: false
+      required: [project]
+      properties:
+        project:
+          $ref: "#/components/schemas/Project"
+    CreateProjectRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        tenant_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+    PatchProjectRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+    BillingResponse:
+      type: object
+      additionalProperties: false
+      required: [billing]
+      properties:
+        billing:
+          $ref: "#/components/schemas/TenantBillingSummary"
+    UpdateBillingRequest:
+      type: object
+      additionalProperties: false
+      required: [managed_cap]
+      properties:
+        tenant_id:
+          type: string
+        managed_cap:
+          $ref: "#/components/schemas/ResourceSpec"
+    SetBillingBalanceRequest:
+      type: object
+      additionalProperties: false
+      required: [balance_cents]
+      properties:
+        tenant_id:
+          type: string
+        balance_cents:
+          type: integer
+          format: int64
+        note:
+          type: string
+    TopUpBillingRequest:
+      type: object
+      additionalProperties: false
+      required: [amount_cents]
+      properties:
+        tenant_id:
+          type: string
+        amount_cents:
+          type: integer
+          format: int64
+        note:
+          type: string
+    APIKeyListResponse:
+      type: object
+      additionalProperties: false
+      required: [api_keys]
+      properties:
+        api_keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/APIKey"
+    APIKeyResponse:
+      type: object
+      additionalProperties: false
+      required: [api_key]
+      properties:
+        api_key:
+          $ref: "#/components/schemas/APIKey"
+    APIKeySecretResponse:
+      type: object
+      additionalProperties: false
+      required: [api_key, secret]
+      properties:
+        api_key:
+          $ref: "#/components/schemas/APIKey"
+        secret:
+          type: string
+    CreateAPIKeyRequest:
+      type: object
+      additionalProperties: false
+      required: [label, scopes]
+      properties:
+        tenant_id:
+          type: string
+        label:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+    PatchAPIKeyRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        label:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+    RotateAPIKeyRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        label:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+    DeleteAPIKeyResponse:
+      type: object
+      additionalProperties: false
+      required: [deleted, api_key]
+      properties:
+        deleted:
+          type: boolean
+        api_key:
+          $ref: "#/components/schemas/APIKey"
+    NodeKeyListResponse:
+      type: object
+      additionalProperties: false
+      required: [node_keys]
+      properties:
+        node_keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/NodeKey"
+    NodeKeyResponse:
+      type: object
+      additionalProperties: false
+      required: [node_key]
+      properties:
+        node_key:
+          $ref: "#/components/schemas/NodeKey"
+    NodeKeySecretResponse:
+      type: object
+      additionalProperties: false
+      required: [node_key, secret]
+      properties:
+        node_key:
+          $ref: "#/components/schemas/NodeKey"
+        secret:
+          type: string
+    CreateNodeKeyRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        tenant_id:
+          type: string
+        label:
+          type: string
+    RevokeNodeKeyResponse:
+      type: object
+      additionalProperties: false
+      required: [node_key, cleanup]
+      properties:
+        node_key:
+          $ref: "#/components/schemas/NodeKey"
+        cleanup:
+          $ref: "#/components/schemas/NodeKeyCleanupResult"
+    ClusterNodeListResponse:
+      type: object
+      additionalProperties: false
+      required: [cluster_nodes]
+      properties:
+        cluster_nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterNode"
+    RuntimeListResponse:
+      type: object
+      additionalProperties: false
+      required: [runtimes]
+      properties:
+        runtimes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Runtime"
+    RuntimeSharingResponse:
+      type: object
+      additionalProperties: false
+      required: [runtime, grants]
+      properties:
+        runtime:
+          $ref: "#/components/schemas/Runtime"
+        grants:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeAccessGrant"
+    GrantRuntimeAccessRequest:
+      type: object
+      additionalProperties: false
+      required: [tenant_id]
+      properties:
+        tenant_id:
+          type: string
+    RuntimeAccessGrantResponse:
+      type: object
+      additionalProperties: false
+      required: [grant]
+      properties:
+        grant:
+          $ref: "#/components/schemas/RuntimeAccessGrant"
+    RuntimeAccessRevokeResponse:
+      type: object
+      additionalProperties: false
+      required: [removed]
+      properties:
+        removed:
+          type: boolean
+    SetRuntimePoolModeRequest:
+      type: object
+      additionalProperties: false
+      required: [pool_mode]
+      properties:
+        pool_mode:
+          type: string
+    RuntimePoolModeResponse:
+      type: object
+      additionalProperties: false
+      required: [runtime, node_reconciled]
+      properties:
+        runtime:
+          $ref: "#/components/schemas/Runtime"
+        node_reconciled:
+          type: boolean
+    BackingServiceListResponse:
+      type: object
+      additionalProperties: false
+      required: [backing_services]
+      properties:
+        backing_services:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackingService"
+    AppListResponse:
+      type: object
+      additionalProperties: false
+      required: [apps]
+      properties:
+        apps:
+          type: array
+          items:
+            $ref: "#/components/schemas/App"
+    AppResponse:
+      type: object
+      additionalProperties: false
+      required: [app]
+      properties:
+        app:
+          $ref: "#/components/schemas/App"
+    ImportGitHubRequest:
+      type: object
+      additionalProperties: false
+      required: [repo_url]
+      properties:
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        project:
+          $ref: "#/components/schemas/ImportProjectRequest"
+        repo_url:
+          type: string
+        repo_visibility:
+          type: string
+        repo_auth_token:
+          type: string
+        branch:
+          type: string
+        source_dir:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        build_strategy:
+          type: string
+        runtime_id:
+          type: string
+        replicas:
+          type: integer
+          format: int32
+        service_port:
+          type: integer
+          format: int32
+        dockerfile_path:
+          type: string
+        build_context_dir:
+          type: string
+        env:
+          $ref: "#/components/schemas/StringMap"
+        config_content:
+          type: string
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppFile"
+        postgres:
+          $ref: "#/components/schemas/AppPostgresSpec"
+        idempotency_key:
+          type: string
+    ImportGitHubResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        app:
+          $ref: "#/components/schemas/App"
+        operation:
+          $ref: "#/components/schemas/Operation"
+        apps:
+          type: array
+          items:
+            $ref: "#/components/schemas/App"
+        operations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Operation"
+        compose_stack:
+          $ref: "#/components/schemas/ComposeStackSummary"
+        fugue_manifest:
+          $ref: "#/components/schemas/FugueManifestSummary"
+        idempotency:
+          $ref: "#/components/schemas/ImportGitHubIdempotency"
+        request_in_progress:
+          type: boolean
+    ImportImageRequest:
+      type: object
+      additionalProperties: false
+      required: [image_ref]
+      properties:
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        project:
+          $ref: "#/components/schemas/ImportProjectRequest"
+        image_ref:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        runtime_id:
+          type: string
+        replicas:
+          type: integer
+          format: int32
+        service_port:
+          type: integer
+          format: int32
+        env:
+          $ref: "#/components/schemas/StringMap"
+        config_content:
+          type: string
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppFile"
+        postgres:
+          $ref: "#/components/schemas/AppPostgresSpec"
+    ImportImageResponse:
+      type: object
+      additionalProperties: false
+      required: [app, operation]
+      properties:
+        app:
+          $ref: "#/components/schemas/App"
+        operation:
+          $ref: "#/components/schemas/Operation"
+    AppDomainResponse:
+      type: object
+      additionalProperties: false
+      required: [domain]
+      properties:
+        domain:
+          $ref: "#/components/schemas/AppDomain"
+    AppDomainListResponse:
+      type: object
+      additionalProperties: false
+      required: [domains]
+      properties:
+        domains:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppDomain"
+    PutAppDomainRequest:
+      type: object
+      additionalProperties: false
+      required: [hostname]
+      properties:
+        hostname:
+          type: string
+    AppDomainPutResponse:
+      type: object
+      additionalProperties: false
+      required: [domain, availability, already_current]
+      properties:
+        domain:
+          $ref: "#/components/schemas/AppDomain"
+        availability:
+          $ref: "#/components/schemas/AppDomainAvailability"
+        already_current:
+          type: boolean
+    VerifyAppDomainRequest:
+      type: object
+      additionalProperties: false
+      required: [hostname]
+      properties:
+        hostname:
+          type: string
+    AppDomainVerifyResponse:
+      type: object
+      additionalProperties: false
+      required: [domain, verified]
+      properties:
+        domain:
+          $ref: "#/components/schemas/AppDomain"
+        verified:
+          type: boolean
+    AppDomainAvailabilityResponse:
+      type: object
+      additionalProperties: false
+      required: [availability]
+      properties:
+        availability:
+          $ref: "#/components/schemas/AppDomainAvailability"
+    AppRouteAvailabilityResponse:
+      type: object
+      additionalProperties: false
+      required: [availability]
+      properties:
+        availability:
+          $ref: "#/components/schemas/AppRouteAvailability"
+    PatchAppRouteRequest:
+      type: object
+      additionalProperties: false
+      required: [hostname]
+      properties:
+        hostname:
+          type: string
+    AppRoutePatchResponse:
+      type: object
+      additionalProperties: false
+      required: [app, availability, already_current]
+      properties:
+        app:
+          $ref: "#/components/schemas/App"
+        availability:
+          $ref: "#/components/schemas/AppRouteAvailability"
+        already_current:
+          type: boolean
+    AppBindingsResponse:
+      type: object
+      additionalProperties: false
+      required: [bindings, backing_services]
+      properties:
+        bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ServiceBinding"
+        backing_services:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackingService"
+    BuildLogsResponse:
+      type: object
+      additionalProperties: false
+      required:
+        [operation_id, operation_status, job_name, available, source, logs, build_strategy, error_message, result_message, last_updated_at]
+      properties:
+        operation_id:
+          type: string
+        operation_status:
+          type: string
+        job_name:
+          type: string
+        available:
+          type: boolean
+        source:
+          type: string
+        logs:
+          type: string
+        build_strategy:
+          type: string
+        error_message:
+          type: string
+        result_message:
+          type: string
+        last_updated_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+    RuntimeLogsResponse:
+      type: object
+      additionalProperties: false
+      required: [component, namespace, selector, container, pods, logs, warnings]
+      properties:
+        component:
+          type: string
+        namespace:
+          type: string
+        selector:
+          type: string
+        container:
+          type: string
+        pods:
+          type: array
+          items:
+            type: string
+        logs:
+          type: string
+        warnings:
+          type: array
+          items:
+            type: string
+    AppEnvResponse:
+      type: object
+      additionalProperties: false
+      required: [env]
+      properties:
+        env:
+          $ref: "#/components/schemas/StringMap"
+        already_current:
+          type: boolean
+        operation:
+          $ref: "#/components/schemas/Operation"
+    PatchAppEnvRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        set:
+          $ref: "#/components/schemas/StringMap"
+        delete:
+          type: array
+          items:
+            type: string
+    AppFilesResponse:
+      type: object
+      additionalProperties: false
+      required: [files]
+      properties:
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppFile"
+        already_current:
+          type: boolean
+        operation:
+          $ref: "#/components/schemas/Operation"
+    UpsertAppFilesRequest:
+      type: object
+      additionalProperties: false
+      required: [files]
+      properties:
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppFile"
+    AppFilesystemTreeResponse:
+      type: object
+      additionalProperties: false
+      required: [component, pod, path, depth, workspace_root, entries]
+      properties:
+        component:
+          type: string
+        pod:
+          type: string
+        path:
+          type: string
+        depth:
+          type: integer
+          format: int32
+        workspace_root:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppFilesystemEntry"
+    AppFilesystemFileResponse:
+      type: object
+      additionalProperties: false
+      required: [component, pod, path, workspace_root, content, encoding, size, mode, modified_at, truncated]
+      properties:
+        component:
+          type: string
+        pod:
+          type: string
+        path:
+          type: string
+        workspace_root:
+          type: string
+        content:
+          type: string
+        encoding:
+          type: string
+        size:
+          type: integer
+          format: int64
+        mode:
+          type: integer
+          format: int32
+        modified_at:
+          type: string
+          format: date-time
+        truncated:
+          type: boolean
+    PutAppFilesystemFileRequest:
+      type: object
+      additionalProperties: false
+      required: [path, content]
+      properties:
+        path:
+          type: string
+        content:
+          type: string
+        encoding:
+          type: string
+        mode:
+          type: integer
+          format: int32
+        mkdir_parents:
+          type: boolean
+    AppFilesystemMutationResponse:
+      type: object
+      additionalProperties: false
+      required: [component, pod, path, workspace_root]
+      properties:
+        component:
+          type: string
+        pod:
+          type: string
+        path:
+          type: string
+        workspace_root:
+          type: string
+        kind:
+          type: string
+        size:
+          type: integer
+          format: int64
+        mode:
+          type: integer
+          format: int32
+        modified_at:
+          type: string
+          format: date-time
+        deleted:
+          type: boolean
+    CreateAppFilesystemDirectoryRequest:
+      type: object
+      additionalProperties: false
+      required: [path]
+      properties:
+        path:
+          type: string
+        mode:
+          type: integer
+          format: int32
+        parents:
+          type: boolean
+    RebuildAppRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        branch:
+          type: string
+        image_ref:
+          type: string
+        source_dir:
+          type: string
+        dockerfile_path:
+          type: string
+        build_context_dir:
+          type: string
+        repo_auth_token:
+          type: string
+    AppRebuildResponse:
+      type: object
+      additionalProperties: false
+      required: [operation, build]
+      properties:
+        operation:
+          $ref: "#/components/schemas/Operation"
+        build:
+          $ref: "#/components/schemas/RebuildPlan"
+    AppRestartResponse:
+      type: object
+      additionalProperties: false
+      required: [operation, restart_token]
+      properties:
+        operation:
+          $ref: "#/components/schemas/Operation"
+        restart_token:
+          type: string
+    ScaleAppRequest:
+      type: object
+      additionalProperties: false
+      required: [replicas]
+      properties:
+        replicas:
+          type: integer
+          format: int32
+    OperationResponse:
+      type: object
+      additionalProperties: false
+      required: [operation]
+      properties:
+        operation:
+          $ref: "#/components/schemas/Operation"
+    AppDisableResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        app:
+          $ref: "#/components/schemas/App"
+        operation:
+          $ref: "#/components/schemas/Operation"
+        already_disabled:
+          type: boolean
+    AppDeleteResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        operation:
+          $ref: "#/components/schemas/Operation"
+        already_deleting:
+          type: boolean
+    OperationListResponse:
+      type: object
+      additionalProperties: false
+      required: [operations]
+      properties:
+        operations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Operation"
+    AuditEventListResponse:
+      type: object
+      additionalProperties: false
+      required: [audit_events]
+      properties:
+        audit_events:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditEvent"
+  responses:
+    ErrorResponse:
+      description: Error response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"

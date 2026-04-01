@@ -18,31 +18,32 @@ import (
 )
 
 type Server struct {
-	store                       *store.Store
-	auth                        *auth.Authenticator
-	log                         *log.Logger
-	appBaseDomain               string
-	customDomainBaseDomain      string
-	apiPublicDomain             string
-	edgeTLSAskToken             string
-	registryPushBase            string
-	registryPullBase            string
-	clusterJoinRegistryEndpoint string
-	reservedAppHosts            map[string]struct{}
-	clusterJoinServer           string
-	clusterJoinToken            string
-	clusterJoinMeshProvider     string
-	clusterJoinMeshLoginServer  string
-	clusterJoinMeshAuthKey      string
-	importer                    *sourceimport.Importer
-	newClusterNodeClient        func() (*clusterNodeClient, error)
-	newManagedAppStatusClient   func() (*managedAppStatusClient, error)
-	newLogsClient               func(namespace string) (appLogsClient, error)
-	newWorkspacePodLister       func(namespace string) (workspacePodLister, error)
-	workspaceExecRunner         workspacePodExecRunner
-	dnsResolver                 appDomainDNSResolver
-	logStreamTuning             logStreamTuning
-	ready                       atomic.Bool
+	store                        *store.Store
+	auth                         *auth.Authenticator
+	log                          *log.Logger
+	appBaseDomain                string
+	customDomainBaseDomain       string
+	apiPublicDomain              string
+	edgeTLSAskToken              string
+	registryPushBase             string
+	registryPullBase             string
+	clusterJoinRegistryEndpoint  string
+	reservedAppHosts             map[string]struct{}
+	clusterJoinServer            string
+	clusterJoinCAHash            string
+	clusterJoinBootstrapTokenTTL time.Duration
+	clusterJoinMeshProvider      string
+	clusterJoinMeshLoginServer   string
+	clusterJoinMeshAuthKey       string
+	importer                     *sourceimport.Importer
+	newClusterNodeClient         func() (*clusterNodeClient, error)
+	newManagedAppStatusClient    func() (*managedAppStatusClient, error)
+	newLogsClient                func(namespace string) (appLogsClient, error)
+	newWorkspacePodLister        func(namespace string) (workspacePodLister, error)
+	workspaceExecRunner          workspacePodExecRunner
+	dnsResolver                  appDomainDNSResolver
+	logStreamTuning              logStreamTuning
+	ready                        atomic.Bool
 }
 
 func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger, cfg ServerConfig) *Server {
@@ -50,24 +51,25 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		logger = log.Default()
 	}
 	server := &Server{
-		store:                       store,
-		auth:                        authn,
-		log:                         logger,
-		appBaseDomain:               strings.TrimSpace(strings.ToLower(cfg.AppBaseDomain)),
-		customDomainBaseDomain:      defaultCustomDomainBaseDomain(cfg.AppBaseDomain),
-		apiPublicDomain:             strings.TrimSpace(strings.ToLower(cfg.APIPublicDomain)),
-		edgeTLSAskToken:             strings.TrimSpace(cfg.EdgeTLSAskToken),
-		registryPushBase:            strings.TrimSpace(cfg.RegistryPushBase),
-		registryPullBase:            strings.TrimSpace(cfg.RegistryPullBase),
-		clusterJoinRegistryEndpoint: strings.TrimSpace(cfg.ClusterJoinRegistryEndpoint),
-		clusterJoinServer:           strings.TrimSpace(cfg.ClusterJoinServer),
-		clusterJoinToken:            strings.TrimSpace(cfg.ClusterJoinToken),
-		clusterJoinMeshProvider:     strings.TrimSpace(strings.ToLower(cfg.ClusterJoinMeshProvider)),
-		clusterJoinMeshLoginServer:  strings.TrimSpace(cfg.ClusterJoinMeshLoginServer),
-		clusterJoinMeshAuthKey:      strings.TrimSpace(cfg.ClusterJoinMeshAuthKey),
-		importer:                    sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
-		newClusterNodeClient:        newClusterNodeClient,
-		newManagedAppStatusClient:   newManagedAppStatusClient,
+		store:                        store,
+		auth:                         authn,
+		log:                          logger,
+		appBaseDomain:                strings.TrimSpace(strings.ToLower(cfg.AppBaseDomain)),
+		customDomainBaseDomain:       defaultCustomDomainBaseDomain(cfg.AppBaseDomain),
+		apiPublicDomain:              strings.TrimSpace(strings.ToLower(cfg.APIPublicDomain)),
+		edgeTLSAskToken:              strings.TrimSpace(cfg.EdgeTLSAskToken),
+		registryPushBase:             strings.TrimSpace(cfg.RegistryPushBase),
+		registryPullBase:             strings.TrimSpace(cfg.RegistryPullBase),
+		clusterJoinRegistryEndpoint:  strings.TrimSpace(cfg.ClusterJoinRegistryEndpoint),
+		clusterJoinServer:            strings.TrimSpace(cfg.ClusterJoinServer),
+		clusterJoinCAHash:            normalizeClusterJoinCAHash(cfg.ClusterJoinCAHash),
+		clusterJoinBootstrapTokenTTL: cfg.ClusterJoinBootstrapTokenTTL,
+		clusterJoinMeshProvider:      strings.TrimSpace(strings.ToLower(cfg.ClusterJoinMeshProvider)),
+		clusterJoinMeshLoginServer:   strings.TrimSpace(cfg.ClusterJoinMeshLoginServer),
+		clusterJoinMeshAuthKey:       strings.TrimSpace(cfg.ClusterJoinMeshAuthKey),
+		importer:                     sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
+		newClusterNodeClient:         newClusterNodeClient,
+		newManagedAppStatusClient:    newManagedAppStatusClient,
 		newLogsClient: func(namespace string) (appLogsClient, error) {
 			return newKubeLogsClient(namespace)
 		},
@@ -87,122 +89,6 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 	server.reservedAppHosts = reservedAppHosts(server.apiPublicDomain, server.registryPushBase, server.registryPullBase)
 	server.ready.Store(true)
 	return server
-}
-
-func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /healthz", s.handleHealthz)
-	mux.HandleFunc("GET /readyz", s.handleReadyz)
-	mux.HandleFunc("GET /v1/edge/tls/ask", s.handleEdgeTLSAsk)
-	mux.HandleFunc("GET /v1/edge/domains", s.handleEdgeDomains)
-	mux.HandleFunc("POST /v1/edge/domains/tls-report", s.handleEdgeDomainTLSReport)
-
-	mux.Handle("GET /v1/tenants", s.auth.RequireAPI(http.HandlerFunc(s.handleListTenants)))
-	mux.Handle("POST /v1/tenants", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateTenant)))
-	mux.Handle("DELETE /v1/tenants/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteTenant)))
-
-	mux.Handle("GET /v1/projects", s.auth.RequireAPI(http.HandlerFunc(s.handleListProjects)))
-	mux.Handle("POST /v1/projects", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateProject)))
-	mux.Handle("PATCH /v1/projects/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchProject)))
-	mux.Handle("DELETE /v1/projects/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteProject)))
-	mux.Handle("GET /v1/billing", s.auth.RequireAPI(http.HandlerFunc(s.handleGetBilling)))
-	mux.Handle("PATCH /v1/billing", s.auth.RequireAPI(http.HandlerFunc(s.handleUpdateBilling)))
-	mux.Handle("PATCH /v1/billing/balance", s.auth.RequireAPI(http.HandlerFunc(s.handleSetBillingBalance)))
-	mux.Handle("POST /v1/billing/top-ups", s.auth.RequireAPI(http.HandlerFunc(s.handleTopUpBilling)))
-
-	mux.Handle("GET /v1/api-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleListAPIKeys)))
-	mux.Handle("POST /v1/api-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateAPIKey)))
-	mux.Handle("PATCH /v1/api-keys/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchAPIKey)))
-	mux.Handle("POST /v1/api-keys/{id}/rotate", s.auth.RequireAPI(http.HandlerFunc(s.handleRotateAPIKey)))
-	mux.Handle("POST /v1/api-keys/{id}/disable", s.auth.RequireAPI(http.HandlerFunc(s.handleDisableAPIKey)))
-	mux.Handle("POST /v1/api-keys/{id}/enable", s.auth.RequireAPI(http.HandlerFunc(s.handleEnableAPIKey)))
-	mux.Handle("DELETE /v1/api-keys/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteAPIKey)))
-
-	mux.Handle("GET /v1/node-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleListNodeKeys)))
-	mux.Handle("POST /v1/node-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateNodeKey)))
-	mux.Handle("GET /v1/node-keys/{id}/usages", s.auth.RequireAPI(http.HandlerFunc(s.handleGetNodeKeyUsages)))
-	mux.Handle("POST /v1/node-keys/{id}/revoke", s.auth.RequireAPI(http.HandlerFunc(s.handleRevokeNodeKey)))
-
-	mux.Handle("GET /v1/cluster/nodes", s.auth.RequireAPI(http.HandlerFunc(s.handleListClusterNodes)))
-	mux.Handle("GET /v1/nodes", s.auth.RequireAPI(http.HandlerFunc(s.handleListNodes)))
-	mux.Handle("GET /v1/nodes/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetNode)))
-
-	mux.Handle("GET /v1/runtimes", s.auth.RequireAPI(http.HandlerFunc(s.handleListRuntimes)))
-	mux.Handle("POST /v1/runtimes", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateRuntime)))
-	mux.Handle("GET /v1/runtimes/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetRuntime)))
-	mux.Handle("GET /v1/runtimes/{id}/sharing", s.auth.RequireAPI(http.HandlerFunc(s.handleGetRuntimeSharing)))
-	mux.Handle("POST /v1/runtimes/{id}/sharing/grants", s.auth.RequireAPI(http.HandlerFunc(s.handleGrantRuntimeAccess)))
-	mux.Handle("DELETE /v1/runtimes/{id}/sharing/grants/{tenant_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleRevokeRuntimeAccess)))
-	mux.Handle("POST /v1/runtimes/{id}/sharing/mode", s.auth.RequireAPI(http.HandlerFunc(s.handleSetRuntimeAccessMode)))
-	mux.Handle("POST /v1/runtimes/{id}/pool-mode", s.auth.RequireAPI(http.HandlerFunc(s.handleSetRuntimePoolMode)))
-	mux.Handle("GET /v1/runtimes/enroll-tokens", s.auth.RequireAPI(http.HandlerFunc(s.handleListEnrollmentTokens)))
-	mux.Handle("POST /v1/runtimes/enroll-tokens", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateEnrollmentToken)))
-	mux.Handle("GET /v1/backing-services", s.auth.RequireAPI(http.HandlerFunc(s.handleListBackingServices)))
-	mux.Handle("POST /v1/backing-services", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateBackingService)))
-	mux.Handle("GET /v1/backing-services/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetBackingService)))
-	mux.Handle("DELETE /v1/backing-services/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteBackingService)))
-
-	mux.Handle("GET /v1/apps", s.auth.RequireAPI(http.HandlerFunc(s.handleListApps)))
-	mux.Handle("POST /v1/apps", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateApp)))
-	mux.Handle("POST /v1/apps/import-github", s.auth.RequireAPI(http.HandlerFunc(s.handleImportGitHubApp)))
-	mux.Handle("POST /v1/apps/import-image", s.auth.RequireAPI(http.HandlerFunc(s.handleImportImageApp)))
-	mux.Handle("POST /v1/apps/import-upload", s.auth.RequireAPI(http.HandlerFunc(s.handleImportUploadApp)))
-	mux.Handle("GET /v1/apps/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetApp)))
-	mux.Handle("GET /v1/apps/{id}/domains", s.auth.RequireAPI(http.HandlerFunc(s.handleListAppDomains)))
-	mux.Handle("GET /v1/apps/{id}/domains/availability", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppDomainAvailability)))
-	mux.Handle("POST /v1/apps/{id}/domains", s.auth.RequireAPI(http.HandlerFunc(s.handlePutAppDomain)))
-	mux.Handle("POST /v1/apps/{id}/domains/verify", s.auth.RequireAPI(http.HandlerFunc(s.handleVerifyAppDomain)))
-	mux.Handle("DELETE /v1/apps/{id}/domains", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteAppDomain)))
-	mux.Handle("GET /v1/apps/{id}/route/availability", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppRouteAvailability)))
-	mux.Handle("PATCH /v1/apps/{id}/route", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchAppRoute)))
-	mux.Handle("GET /v1/apps/{id}/bindings", s.auth.RequireAPI(http.HandlerFunc(s.handleListAppBindings)))
-	mux.Handle("POST /v1/apps/{id}/bindings", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateAppBinding)))
-	mux.Handle("DELETE /v1/apps/{id}/bindings/{binding_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteAppBinding)))
-	mux.Handle("GET /v1/apps/{id}/build-logs", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppBuildLogs)))
-	mux.Handle("GET /v1/apps/{id}/build-logs/stream", s.auth.RequireAPI(http.HandlerFunc(s.handleStreamAppBuildLogs)))
-	mux.Handle("GET /v1/apps/{id}/runtime-logs", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppRuntimeLogs)))
-	mux.Handle("GET /v1/apps/{id}/runtime-logs/stream", s.auth.RequireAPI(http.HandlerFunc(s.handleStreamAppRuntimeLogs)))
-	mux.Handle("GET /v1/apps/{id}/env", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppEnv)))
-	mux.Handle("PATCH /v1/apps/{id}/env", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchAppEnv)))
-	mux.Handle("GET /v1/apps/{id}/files", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppFiles)))
-	mux.Handle("PUT /v1/apps/{id}/files", s.auth.RequireAPI(http.HandlerFunc(s.handleUpsertAppFiles)))
-	mux.Handle("DELETE /v1/apps/{id}/files", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteAppFiles)))
-	mux.Handle("GET /v1/apps/{id}/filesystem/tree", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppFilesystemTree)))
-	mux.Handle("GET /v1/apps/{id}/filesystem/file", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppFilesystemFile)))
-	mux.Handle("PUT /v1/apps/{id}/filesystem/file", s.auth.RequireAPI(http.HandlerFunc(s.handlePutAppFilesystemFile)))
-	mux.Handle("POST /v1/apps/{id}/filesystem/directory", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateAppFilesystemDirectory)))
-	mux.Handle("DELETE /v1/apps/{id}/filesystem", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteAppFilesystemPath)))
-	mux.Handle("POST /v1/apps/{id}/rebuild", s.auth.RequireAPI(http.HandlerFunc(s.handleRebuildApp)))
-	mux.Handle("POST /v1/apps/{id}/deploy", s.auth.RequireAPI(http.HandlerFunc(s.handleDeployApp)))
-	mux.Handle("POST /v1/apps/{id}/restart", s.auth.RequireAPI(http.HandlerFunc(s.handleRestartApp)))
-	mux.Handle("POST /v1/apps/{id}/scale", s.auth.RequireAPI(http.HandlerFunc(s.handleScaleApp)))
-	mux.Handle("POST /v1/apps/{id}/disable", s.auth.RequireAPI(http.HandlerFunc(s.handleDisableApp)))
-	mux.Handle("POST /v1/apps/{id}/migrate", s.auth.RequireAPI(http.HandlerFunc(s.handleMigrateApp)))
-	mux.Handle("DELETE /v1/apps/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteApp)))
-
-	mux.Handle("GET /v1/operations", s.auth.RequireAPI(http.HandlerFunc(s.handleListOperations)))
-	mux.Handle("GET /v1/operations/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetOperation)))
-
-	mux.Handle("GET /v1/audit-events", s.auth.RequireAPI(http.HandlerFunc(s.handleListAuditEvents)))
-
-	mux.HandleFunc("GET /install/join-cluster.sh", s.handleJoinClusterInstallScript)
-	mux.HandleFunc("GET /v1/source-uploads/{id}/archive", s.handleGetSourceUploadArchive)
-	mux.HandleFunc("POST /v1/agent/enroll", s.handleAgentEnroll)
-	mux.HandleFunc("POST /v1/nodes/bootstrap", s.handleBootstrapNode)
-	mux.HandleFunc("POST /v1/nodes/join-cluster", s.handleJoinClusterNode)
-	mux.HandleFunc("POST /v1/nodes/join-cluster/env", s.handleJoinClusterNodeEnv)
-	mux.HandleFunc("POST /v1/nodes/join-cluster/cleanup", s.handleJoinClusterCleanup)
-	mux.Handle("POST /v1/agent/heartbeat", s.auth.RequireRuntime(http.HandlerFunc(s.handleAgentHeartbeat)))
-	mux.Handle("GET /v1/agent/operations", s.auth.RequireRuntime(http.HandlerFunc(s.handleAgentOperations)))
-	mux.Handle("POST /v1/agent/operations/{id}/complete", s.auth.RequireRuntime(http.HandlerFunc(s.handleAgentCompleteOperation)))
-
-	return loggingMiddleware(s.log, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.maybeHandleAppProxy(w, r) {
-			return
-		}
-		mux.ServeHTTP(w, r)
-	}))
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -615,8 +501,12 @@ func (s *Server) handleRevokeNodeKey(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	cleanup := s.cleanupRevokedNodeKey(r.Context(), key)
 	s.appendAudit(principal, "node_key.revoke", "node_key", key.ID, key.TenantID, map[string]string{"label": key.Label})
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"node_key": key})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"node_key": key,
+		"cleanup":  cleanup,
+	})
 }
 
 func (s *Server) handleListEnrollmentTokens(w http.ResponseWriter, r *http.Request) {

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
@@ -64,20 +65,43 @@ func TestJoinClusterEnvIncludesMeshConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create tenant: %v", err)
 	}
-	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
+	key, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
 	if err != nil {
 		t.Fatalf("create node key: %v", err)
 	}
+	var createdSecret map[string]any
+	kubeServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/namespaces/kube-system/secrets":
+			if err := json.NewDecoder(r.Body).Decode(&createdSecret); err != nil {
+				t.Fatalf("decode bootstrap secret request: %v", err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": "bootstrap-token-created"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
 
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
-		ClusterJoinServer:           "https://100.64.0.1:6443",
-		ClusterJoinToken:            "cluster-token",
-		RegistryPullBase:            "10.128.0.2:30500",
-		ClusterJoinRegistryEndpoint: "100.64.0.1:30500",
-		ClusterJoinMeshProvider:     "tailscale",
-		ClusterJoinMeshLoginServer:  "https://mesh.fugue.pro",
-		ClusterJoinMeshAuthKey:      "tskey-example",
+		ClusterJoinServer:            "https://100.64.0.1:6443",
+		ClusterJoinCAHash:            "deadbeef",
+		ClusterJoinBootstrapTokenTTL: time.Minute,
+		RegistryPullBase:             "10.128.0.2:30500",
+		ClusterJoinRegistryEndpoint:  "100.64.0.1:30500",
+		ClusterJoinMeshProvider:      "tailscale",
+		ClusterJoinMeshLoginServer:   "https://mesh.fugue.pro",
+		ClusterJoinMeshAuthKey:       "tskey-example",
 	})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
 
 	form := url.Values{}
 	form.Set("node_key", nodeSecret)
@@ -95,6 +119,9 @@ func TestJoinClusterEnvIncludesMeshConfig(t *testing.T) {
 	if !strings.Contains(body, "FUGUE_JOIN_SERVER='https://100.64.0.1:6443'") {
 		t.Fatalf("expected join server in response body, got %s", body)
 	}
+	if !strings.Contains(body, "FUGUE_JOIN_TOKEN='K10deadbeef::") {
+		t.Fatalf("expected secure bootstrap token in response body, got %s", body)
+	}
 	if !strings.Contains(body, "FUGUE_JOIN_MESH_PROVIDER='tailscale'") {
 		t.Fatalf("expected mesh provider in response body, got %s", body)
 	}
@@ -109,6 +136,43 @@ func TestJoinClusterEnvIncludesMeshConfig(t *testing.T) {
 	}
 	if !strings.Contains(body, "FUGUE_JOIN_MESH_AUTH_KEY='tskey-example'") {
 		t.Fatalf("expected mesh auth key in response body, got %s", body)
+	}
+	if createdSecret == nil {
+		t.Fatal("expected bootstrap secret request")
+	}
+	metadata := createdSecret["metadata"].(map[string]any)
+	labels := metadata["labels"].(map[string]any)
+	if labels[clusterJoinTokenLabelManaged] != clusterJoinTokenLabelValue {
+		t.Fatalf("expected fugue bootstrap token label, got %#v", labels)
+	}
+	if labels[clusterJoinTokenLabelNodeKey] != key.ID {
+		t.Fatalf("expected node key label %q, got %#v", key.ID, labels)
+	}
+	if strings.TrimSpace(labels[clusterJoinTokenLabelRuntime].(string)) == "" {
+		t.Fatalf("expected runtime id label in bootstrap secret, got %#v", labels)
+	}
+	if got, _ := createdSecret["type"].(string); got != "bootstrap.kubernetes.io/token" {
+		t.Fatalf("expected bootstrap token secret type, got %#v", createdSecret["type"])
+	}
+	stringData := createdSecret["stringData"].(map[string]any)
+	tokenID, _ := stringData["token-id"].(string)
+	if tokenID == "" {
+		t.Fatalf("expected bootstrap token id in secret payload, got %#v", stringData)
+	}
+	if tokenSecret, _ := stringData["token-secret"].(string); tokenSecret == "" {
+		t.Fatalf("expected bootstrap token secret in secret payload, got %#v", stringData)
+	}
+	if authUsage, _ := stringData["usage-bootstrap-authentication"].(string); authUsage != "true" {
+		t.Fatalf("expected bootstrap auth usage in secret payload, got %#v", stringData)
+	}
+	if signingUsage, _ := stringData["usage-bootstrap-signing"].(string); signingUsage != "true" {
+		t.Fatalf("expected bootstrap signing usage in secret payload, got %#v", stringData)
+	}
+	if authGroup, _ := stringData["auth-extra-groups"].(string); authGroup != clusterJoinTokenAuthGroup {
+		t.Fatalf("expected bootstrap auth group %q, got %#v", clusterJoinTokenAuthGroup, stringData)
+	}
+	if !strings.Contains(body, "FUGUE_JOIN_BOOTSTRAP_TOKEN_ID='"+tokenID+"'") {
+		t.Fatalf("expected bootstrap token id %q in response body, got %s", tokenID, body)
 	}
 }
 
@@ -132,6 +196,7 @@ func TestJoinClusterInstallScriptAddsTopologyLabels(t *testing.T) {
 		`/v1/nodes/join-cluster/cleanup`,
 		`--data-urlencode "machine_fingerprint=${machine_fingerprint}"`,
 		`--data-urlencode "current_node_name=${FUGUE_JOIN_NODE_NAME}"`,
+		`--data-urlencode "bootstrap_token_id=${FUGUE_JOIN_BOOTSTRAP_TOKEN_ID:-}"`,
 		`cleanup_stale_cluster_nodes`,
 	} {
 		if !strings.Contains(script, want) {
@@ -189,7 +254,7 @@ func TestJoinClusterCleanupRemovesStaleSameMachineNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create tenant: %v", err)
 	}
-	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
+	key, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
 	if err != nil {
 		t.Fatalf("create node key: %v", err)
 	}
@@ -204,6 +269,7 @@ func TestJoinClusterCleanupRemovesStaleSameMachineNode(t *testing.T) {
 	}
 
 	deletedNodes := make([]string, 0, 1)
+	deletedTokens := make([]string, 0, 1)
 	kubeServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
@@ -258,6 +324,23 @@ func TestJoinClusterCleanupRemovesStaleSameMachineNode(t *testing.T) {
 			}
 			deletedNodes = append(deletedNodes, "alicehk2")
 			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case "/api/v1/namespaces/kube-system/secrets/bootstrap-token-abc123":
+			switch r.Method {
+			case http.MethodGet:
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"metadata": map[string]any{
+						"name": "bootstrap-token-abc123",
+						"labels": map[string]string{
+							clusterJoinTokenLabelNodeKey: key.ID,
+						},
+					},
+				})
+			case http.MethodDelete:
+				deletedTokens = append(deletedTokens, "abc123")
+				_ = json.NewEncoder(w).Encode(map[string]any{})
+			default:
+				http.NotFound(w, r)
+			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -265,11 +348,11 @@ func TestJoinClusterCleanupRemovesStaleSameMachineNode(t *testing.T) {
 	defer kubeServer.Close()
 
 	server := &Server{
-		store:                       s,
-		clusterJoinServer:           "https://100.64.0.1:6443",
-		clusterJoinToken:            "cluster-token",
-		registryPullBase:            "10.128.0.2:30500",
-		clusterJoinRegistryEndpoint: "100.64.0.1:30500",
+		store:                        s,
+		clusterJoinServer:            "https://100.64.0.1:6443",
+		clusterJoinBootstrapTokenTTL: time.Minute,
+		registryPullBase:             "10.128.0.2:30500",
+		clusterJoinRegistryEndpoint:  "100.64.0.1:30500",
 	}
 	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
 		return &clusterNodeClient{
@@ -283,6 +366,7 @@ func TestJoinClusterCleanupRemovesStaleSameMachineNode(t *testing.T) {
 	form.Set("node_key", nodeSecret)
 	form.Set("machine_fingerprint", "machine-123")
 	form.Set("current_node_name", "fortedrape8")
+	form.Set("bootstrap_token_id", "abc123")
 	req := httptest.NewRequest(http.MethodPost, "/v1/nodes/join-cluster/cleanup", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	recorder := httptest.NewRecorder()
@@ -302,8 +386,14 @@ func TestJoinClusterCleanupRemovesStaleSameMachineNode(t *testing.T) {
 	if !strings.Contains(body, "FUGUE_JOIN_CLEANUP_RUNTIME_IDS='"+staleRuntime.ID+"'") {
 		t.Fatalf("expected cleanup runtime list in response body, got %s", body)
 	}
+	if !strings.Contains(body, "FUGUE_JOIN_CLEANUP_BOOTSTRAP_TOKEN_REMOVED='true'") {
+		t.Fatalf("expected bootstrap token cleanup result in response body, got %s", body)
+	}
 	if !slices.Equal(deletedNodes, []string{"alicehk2"}) {
 		t.Fatalf("expected kube delete for alicehk2, got %+v", deletedNodes)
+	}
+	if !slices.Equal(deletedTokens, []string{"abc123"}) {
+		t.Fatalf("expected bootstrap token delete for abc123, got %+v", deletedTokens)
 	}
 
 	staleRuntime, err = s.GetRuntime(staleRuntime.ID)
@@ -332,6 +422,116 @@ func TestJoinClusterCleanupRemovesStaleSameMachineNode(t *testing.T) {
 	}
 	if currentRuntime.ClusterNodeName == "" {
 		t.Fatal("expected current runtime to remain attached to its cluster node")
+	}
+}
+
+func TestRevokeNodeKeyCleansManagedOwnedNodesAndBootstrapTokens(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Revoke Cleanup Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	key, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	runtimeObj, err := func() (model.Runtime, error) {
+		_, runtimeObj, err := s.BootstrapClusterNode(nodeSecret, "worker-1", "https://worker-1.example.com", nil, "worker-1", "fingerprint-1")
+		return runtimeObj, err
+	}()
+	if err != nil {
+		t.Fatalf("bootstrap cluster node: %v", err)
+	}
+	_, apiSecret, err := s.CreateAPIKey(tenant.ID, "runtime-attach", []string{"runtime.attach"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	deletedNodes := make([]string, 0, 1)
+	deletedTokens := make([]string, 0, 1)
+	kubeServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/kube-system/secrets":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{
+							"name": "bootstrap-token-abc123",
+						},
+					},
+				},
+			})
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/namespaces/kube-system/secrets/bootstrap-token-abc123":
+			deletedTokens = append(deletedTokens, "abc123")
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/nodes/"+runtimeObj.ClusterNodeName:
+			deletedNodes = append(deletedNodes, runtimeObj.ClusterNodeName)
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		ClusterJoinServer:            "https://100.64.0.1:6443",
+		ClusterJoinBootstrapTokenTTL: time.Minute,
+		RegistryPullBase:             "10.128.0.2:30500",
+		ClusterJoinRegistryEndpoint:  "100.64.0.1:30500",
+	})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/node-keys/"+key.ID+"/revoke", nil)
+	req.Header.Set("Authorization", "Bearer "+apiSecret)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"status":"revoked"`) {
+		t.Fatalf("expected revoked node key in response body, got %s", body)
+	}
+	if !strings.Contains(body, `"deleted_cluster_nodes":["worker-1"]`) {
+		t.Fatalf("expected deleted cluster node in response body, got %s", body)
+	}
+	if !strings.Contains(body, `"deleted_bootstrap_token_ids":["abc123"]`) {
+		t.Fatalf("expected deleted bootstrap token id in response body, got %s", body)
+	}
+	if !slices.Equal(deletedNodes, []string{runtimeObj.ClusterNodeName}) {
+		t.Fatalf("expected deleted managed-owned node %q, got %+v", runtimeObj.ClusterNodeName, deletedNodes)
+	}
+	if !slices.Equal(deletedTokens, []string{"abc123"}) {
+		t.Fatalf("expected deleted bootstrap token abc123, got %+v", deletedTokens)
+	}
+
+	updatedRuntime, err := s.GetRuntime(runtimeObj.ID)
+	if err != nil {
+		t.Fatalf("get runtime after revoke cleanup: %v", err)
+	}
+	if updatedRuntime.Status != model.RuntimeStatusOffline {
+		t.Fatalf("expected runtime offline after revoke cleanup, got %q", updatedRuntime.Status)
+	}
+	if updatedRuntime.NodeKeyID != "" {
+		t.Fatalf("expected runtime node key cleared after revoke cleanup, got %q", updatedRuntime.NodeKeyID)
+	}
+	if updatedRuntime.ClusterNodeName != "" {
+		t.Fatalf("expected runtime cluster node cleared after revoke cleanup, got %q", updatedRuntime.ClusterNodeName)
 	}
 }
 
