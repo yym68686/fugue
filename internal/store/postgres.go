@@ -18,6 +18,10 @@ import (
 const (
 	postgresBootstrapLockID  int64  = 315609238744281
 	PostgresOperationChannel string = "fugue_operations"
+	postgresPingTimeout             = 20 * time.Second
+	// Bootstrap can serialize across concurrently starting replicas while it
+	// waits on the advisory lock and runs startup repair queries.
+	postgresBootstrapTimeout = 2 * time.Minute
 )
 
 var postgresSchemaStatements = []string{
@@ -285,6 +289,7 @@ var postgresSchemaStatements = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_status_created_at ON fugue_operations (status, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_assigned_runtime_status_created_at ON fugue_operations (assigned_runtime_id, status, created_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_import_failed_app_updated_created ON fugue_operations (app_id, updated_at DESC, created_at DESC) WHERE type = 'import' AND status = 'failed'`,
 	`CREATE TABLE IF NOT EXISTS fugue_audit_events (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NULL,
@@ -319,13 +324,17 @@ func (s *Store) ensureDatabaseReady() error {
 		s.db = db
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), postgresPingTimeout)
+	defer pingCancel()
 
-	if err := s.db.PingContext(ctx); err != nil {
+	if err := s.db.PingContext(pingCtx); err != nil {
 		return fmt.Errorf("ping postgres: %w", err)
 	}
-	if err := s.bootstrapDatabase(ctx); err != nil {
+
+	bootstrapCtx, bootstrapCancel := context.WithTimeout(context.Background(), postgresBootstrapTimeout)
+	defer bootstrapCancel()
+
+	if err := s.bootstrapDatabase(bootstrapCtx); err != nil {
 		return err
 	}
 

@@ -702,6 +702,160 @@ EOF
   ${KUBECTL} -n "${FUGUE_NAMESPACE}" scale deploy "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" --replicas="${original_replicas}" >/dev/null
 }
 
+restore_primary_mesh_network_if_needed() {
+  local primary_node_name=""
+  local primary_config=""
+  local primary_private_ip=""
+  local primary_mesh_ip=""
+  local current_node_ip=""
+  local current_external_ip=""
+  local current_flannel_iface=""
+  local current_flannel_external_ip=""
+  local filtered_config=""
+  local patched_config=""
+  local restore_cmd=""
+  local backup_path=""
+
+  primary_node_name="$(detect_primary_node_name)"
+  if [[ -z "${primary_node_name}" ]]; then
+    log "skip primary mesh restore because the primary node could not be identified"
+    return 0
+  fi
+
+  primary_mesh_ip="$(run_primary_host_root_command "${primary_node_name}" "if command -v tailscale >/dev/null 2>&1; then tailscale ip -4 2>/dev/null | awk 'NR == 1 {print; exit}'; fi" | tr -d '\r')"
+  if [[ -z "${primary_mesh_ip}" ]]; then
+    log "skip primary mesh restore because tailscale has no IPv4 on ${primary_node_name}"
+    return 0
+  fi
+
+  primary_private_ip="$(run_primary_host_root_command "${primary_node_name}" "ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if (\\$i==\"src\") {print \\$(i+1); exit}}'" | tr -d '\r')"
+  [[ -n "${primary_private_ip}" ]] || fail "failed to detect the primary private IP while restoring mesh networking"
+
+  primary_config="$(run_primary_host_root_command "${primary_node_name}" "cat /etc/rancher/k3s/config.yaml 2>/dev/null || true")"
+  if [[ -z "${primary_config}" ]]; then
+    log "skip primary mesh restore because /etc/rancher/k3s/config.yaml is absent on ${primary_node_name}"
+    return 0
+  fi
+
+  current_node_ip="$(printf '%s\n' "${primary_config}" | awk '$1 == "node-ip:" {line=$0; sub(/^[^:]+:[[:space:]]*/, "", line); gsub(/^"|"$/, "", line); print line; exit}')"
+  current_external_ip="$(printf '%s\n' "${primary_config}" | awk '$1 == "node-external-ip:" {line=$0; sub(/^[^:]+:[[:space:]]*/, "", line); gsub(/^"|"$/, "", line); print line; exit}')"
+  current_flannel_iface="$(printf '%s\n' "${primary_config}" | awk '$1 == "flannel-iface:" {line=$0; sub(/^[^:]+:[[:space:]]*/, "", line); gsub(/^"|"$/, "", line); print line; exit}')"
+  current_flannel_external_ip="$(printf '%s\n' "${primary_config}" | awk '$1 == "flannel-external-ip:" {line=$0; sub(/^[^:]+:[[:space:]]*/, "", line); gsub(/^"|"$/, "", line); print line; exit}')"
+
+  if [[ "${current_node_ip}" == "${primary_private_ip}" ]] && \
+     [[ "${current_external_ip}" == "${primary_mesh_ip}" ]] && \
+     [[ "${current_flannel_iface}" == "tailscale0" ]] && \
+     [[ "${current_flannel_external_ip}" == "true" ]]; then
+    return 0
+  fi
+
+  filtered_config="$(printf '%s\n' "${primary_config}" | awk '
+    $1 == "node-ip:" {next}
+    $1 == "node-external-ip:" {next}
+    $1 == "flannel-external-ip:" {next}
+    $1 == "flannel-iface:" {next}
+    {print}
+  ')"
+
+  patched_config="$(printf '%s\n' "${filtered_config}" | awk -v node_ip="${primary_private_ip}" -v mesh_ip="${primary_mesh_ip}" '
+    function print_mesh_block() {
+      printf "node-ip: \"%s\"\n", node_ip
+      printf "node-external-ip: \"%s\"\n", mesh_ip
+      print "flannel-external-ip: true"
+      print "flannel-iface: \"tailscale0\""
+    }
+    {
+      print
+      if (!inserted && $1 == "write-kubeconfig-mode:") {
+        print_mesh_block()
+        inserted = 1
+      }
+    }
+    END {
+      if (!inserted) {
+        print_mesh_block()
+      }
+    }
+  ')"
+
+  log "restoring primary k3s server ${primary_node_name} to mesh networking (${primary_mesh_ip})"
+  restore_cmd="$(cat <<EOF
+set -euo pipefail
+
+config=/etc/rancher/k3s/config.yaml
+backup="\${config}.mesh-restore-\$(date +%Y%m%d%H%M%S)"
+cp "\${config}" "\${backup}"
+cat >"\${config}" <<'CFG'
+${patched_config}
+CFG
+systemctl restart k3s
+systemctl is-active --quiet k3s
+printf '%s\n' "\${backup}"
+EOF
+)"
+  backup_path="$(run_primary_host_root_command "${primary_node_name}" "${restore_cmd}" | tr -d '\r' | tail -n 1)"
+  if [[ -n "${backup_path}" ]]; then
+    log "backed up primary k3s config to ${backup_path} before restoring mesh networking"
+  fi
+
+  if ! wait_for_primary_node_ready "${primary_node_name}"; then
+    fail "primary node ${primary_node_name} did not become Ready after restoring mesh networking"
+  fi
+}
+
+ready_linux_node_count() {
+  ${KUBECTL} get nodes -l kubernetes.io/os=linux --no-headers 2>/dev/null | \
+    awk '$2 == "Ready" || $2 ~ /^Ready,/ {count++} END {print count + 0}'
+}
+
+ensure_coredns_multinode_scheduling() {
+  local desired_replicas="${FUGUE_COREDNS_TARGET_REPLICAS}"
+  local ready_linux_nodes="0"
+  local current_replicas=""
+  local current_primary_selector=""
+  local current_os_selector=""
+  local patch_payload=""
+
+  if ! [[ "${desired_replicas}" =~ ^[0-9]+$ ]] || (( desired_replicas <= 0 )); then
+    fail "FUGUE_COREDNS_TARGET_REPLICAS must be a positive integer"
+  fi
+
+  if ! ${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" get deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" >/dev/null 2>&1; then
+    log "skip CoreDNS HA normalization because deploy/${FUGUE_COREDNS_DEPLOYMENT_NAME} is absent from ${FUGUE_COREDNS_NAMESPACE}"
+    return 0
+  fi
+
+  ready_linux_nodes="$(ready_linux_node_count)"
+  if [[ "${ready_linux_nodes}" =~ ^[0-9]+$ ]] && (( ready_linux_nodes > 0 && desired_replicas > ready_linux_nodes )); then
+    desired_replicas="${ready_linux_nodes}"
+  fi
+  if (( desired_replicas < 1 )); then
+    desired_replicas=1
+  fi
+
+  current_replicas="$(${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" get deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+  current_primary_selector="$(${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" get deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" -o jsonpath='{.spec.template.spec.nodeSelector.fugue\.install/role}' 2>/dev/null || true)"
+  current_os_selector="$(${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" get deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" -o jsonpath='{.spec.template.spec.nodeSelector.kubernetes\.io/os}' 2>/dev/null || true)"
+
+  if [[ "${current_replicas}" == "${desired_replicas}" ]] && \
+     [[ -z "${current_primary_selector}" ]] && \
+     [[ "${current_os_selector}" == "linux" ]]; then
+    return 0
+  fi
+
+  log "ensuring CoreDNS can run on multiple Ready linux nodes (replicas=${desired_replicas})"
+  if [[ -n "${current_primary_selector}" ]]; then
+    ${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" patch deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" --type=json \
+      -p '[{"op":"remove","path":"/spec/template/spec/nodeSelector/fugue.install~1role"}]' >/dev/null
+  fi
+  patch_payload="$(cat <<EOF
+{"spec":{"replicas":${desired_replicas},"template":{"spec":{"nodeSelector":{"kubernetes.io/os":"linux"}}}}}
+EOF
+)"
+  ${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" patch deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" --type=merge -p "${patch_payload}" >/dev/null
+  ${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" rollout status "deploy/${FUGUE_COREDNS_DEPLOYMENT_NAME}" --timeout=180s
+}
+
 relieve_primary_disk_pressure() {
   local primary_node_name=""
   local cleanup_cmd=""
@@ -863,6 +1017,9 @@ main() {
   FUGUE_API_PUBLIC_DOMAIN="${FUGUE_API_PUBLIC_DOMAIN:-}"
   FUGUE_APP_BASE_DOMAIN="${FUGUE_APP_BASE_DOMAIN:-fugue.pro}"
   FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME="${FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME:-${FUGUE_RELEASE_FULLNAME}-control-plane-automation}"
+  FUGUE_COREDNS_NAMESPACE="${FUGUE_COREDNS_NAMESPACE:-kube-system}"
+  FUGUE_COREDNS_DEPLOYMENT_NAME="${FUGUE_COREDNS_DEPLOYMENT_NAME:-coredns}"
+  FUGUE_COREDNS_TARGET_REPLICAS="${FUGUE_COREDNS_TARGET_REPLICAS:-2}"
 
   if [[ -z "${FUGUE_REGISTRY_PUSH_BASE:-}" ]]; then
     FUGUE_REGISTRY_PUSH_BASE="${FUGUE_RELEASE_FULLNAME}-registry.${FUGUE_NAMESPACE}.svc.cluster.local:${FUGUE_REGISTRY_SERVICE_PORT}"
@@ -915,6 +1072,8 @@ main() {
   recover_primary_node_if_needed
   relieve_primary_disk_pressure
   recover_primary_postgres_if_needed
+  restore_primary_mesh_network_if_needed
+  ensure_coredns_multinode_scheduling
 
   apply_chart_crds
 

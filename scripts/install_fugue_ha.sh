@@ -1645,6 +1645,48 @@ total_count="$(k3s kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' 
 EOF
 }
 
+ensure_coredns_multinode_scheduling() {
+  log "ensuring CoreDNS can run on multiple Ready linux nodes"
+  ssh_root "${PRIMARY_ALIAS}" <<'EOF'
+set -euo pipefail
+
+desired_replicas="${FUGUE_COREDNS_TARGET_REPLICAS:-2}"
+if ! [[ "${desired_replicas}" =~ ^[0-9]+$ ]] || (( desired_replicas <= 0 )); then
+  echo "invalid FUGUE_COREDNS_TARGET_REPLICAS=${desired_replicas}" >&2
+  exit 1
+fi
+
+if ! k3s kubectl -n kube-system get deploy coredns >/dev/null 2>&1; then
+  exit 0
+fi
+
+ready_linux_nodes="$(k3s kubectl get nodes -l kubernetes.io/os=linux --no-headers 2>/dev/null | awk '$2 == "Ready" || $2 ~ /^Ready,/ {count++} END {print count+0}')"
+if [[ "${ready_linux_nodes}" =~ ^[0-9]+$ ]] && (( ready_linux_nodes > 0 && desired_replicas > ready_linux_nodes )); then
+  desired_replicas="${ready_linux_nodes}"
+fi
+if (( desired_replicas < 1 )); then
+  desired_replicas=1
+fi
+
+current_replicas="$(k3s kubectl -n kube-system get deploy coredns -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+current_primary_selector="$(k3s kubectl -n kube-system get deploy coredns -o jsonpath='{.spec.template.spec.nodeSelector.fugue\.install/role}' 2>/dev/null || true)"
+current_os_selector="$(k3s kubectl -n kube-system get deploy coredns -o jsonpath='{.spec.template.spec.nodeSelector.kubernetes\.io/os}' 2>/dev/null || true)"
+
+if [[ "${current_replicas}" == "${desired_replicas}" ]] && [[ -z "${current_primary_selector}" ]] && [[ "${current_os_selector}" == "linux" ]]; then
+  exit 0
+fi
+
+if [[ -n "${current_primary_selector}" ]]; then
+  k3s kubectl -n kube-system patch deploy coredns --type=json \
+    -p '[{"op":"remove","path":"/spec/template/spec/nodeSelector/fugue.install~1role"}]' >/dev/null
+fi
+
+k3s kubectl -n kube-system patch deploy coredns --type=merge \
+  -p "{\"spec\":{\"replicas\":${desired_replicas},\"template\":{\"spec\":{\"nodeSelector\":{\"kubernetes.io/os\":\"linux\"}}}}}" >/dev/null
+k3s kubectl -n kube-system rollout status deploy/coredns --timeout=180s
+EOF
+}
+
 label_control_plane_node() {
   local host="$1"
   local role="$2"
@@ -2207,6 +2249,7 @@ main() {
   fi
   cleanup_disabled_addons
   label_control_plane_nodes
+  ensure_coredns_multinode_scheduling
   push_and_import_images "${PRIMARY_ALIAS}"
   push_and_import_images "${SECONDARY_ALIASES[0]}"
   push_and_import_images "${SECONDARY_ALIASES[1]}"
@@ -2226,6 +2269,7 @@ main() {
   verify_edge_proxy_config_on_primary
   if mesh_enabled; then
     configure_control_plane_mesh
+    ensure_coredns_multinode_scheduling
     write_values_override
     copy_chart_and_values
     install_fugue_chart
