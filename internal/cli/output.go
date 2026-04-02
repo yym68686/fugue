@@ -105,6 +105,31 @@ func writeDomainTable(w io.Writer, domains []model.AppDomain) error {
 	return tw.Flush()
 }
 
+func writeAppFileTable(w io.Writer, files []model.AppFile) error {
+	sorted := append([]model.AppFile(nil), files...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Path < sorted[j].Path
+	})
+
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "PATH\tSECRET\tMODE\tBYTES"); err != nil {
+		return err
+	}
+	for _, appFile := range sorted {
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%t\t%s\t%d\n",
+			appFile.Path,
+			appFile.Secret,
+			formatFileMode(appFile.Mode),
+			len(appFile.Content),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
 func writeWorkspaceTree(w io.Writer, tree appFilesystemTreeResponse) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	if _, err := fmt.Fprintln(tw, "NAME\tTYPE\tSIZE\tMODE\tMODIFIED\tPATH"); err != nil {

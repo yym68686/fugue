@@ -24,10 +24,12 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"deploy",
 		"app",
 		"env",
+		"files",
 		"domain",
 		"workspace",
 		"deploy github owner/repo",
 		"fugue env list my-app",
+		"fugue files write my-app /app/config.yaml --from-file config.yaml",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected help output to contain %q, got %q", want, out)
@@ -216,6 +218,94 @@ func TestRunDomainAddByNameUsesSemanticCommand(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
+	}
+}
+
+func TestRunFilesWriteByNameUsesSemanticCommand(t *testing.T) {
+	t.Parallel()
+
+	var gotBody struct {
+		Files []struct {
+			Path    string `json:"path"`
+			Content string `json:"content"`
+			Secret  bool   `json:"secret"`
+			Mode    int32  `json:"mode"`
+		} `json:"files"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/apps/app_123/files":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode files put body: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"files":[{"path":"/app/config.yaml","content":"port: 8080\n","secret":false,"mode":420}],"operation":{"id":"op_123","app_id":"app_123"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"files", "write", "demo", "/app/config.yaml",
+		"--content", "port: 8080\n",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run files write: %v", err)
+	}
+
+	if len(gotBody.Files) != 1 {
+		t.Fatalf("expected one file in body, got %+v", gotBody.Files)
+	}
+	if gotBody.Files[0].Path != "/app/config.yaml" {
+		t.Fatalf("expected file path /app/config.yaml, got %+v", gotBody.Files[0])
+	}
+	if gotBody.Files[0].Content != "port: 8080\n" {
+		t.Fatalf("expected file content to be forwarded, got %+v", gotBody.Files[0])
+	}
+	out := stdout.String()
+	for _, want := range []string{"app_id=app_123", "operation_id=op_123", "/app/config.yaml", "644"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunFilesReadByNameUsesSemanticCommand(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/files":
+			_, _ = w.Write([]byte(`{"files":[{"path":"/app/config.yaml","content":"port: 8080\n","secret":false,"mode":420}]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"files", "read", "demo", "/app/config.yaml",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run files read: %v", err)
+	}
+
+	if got := stdout.String(); got != "port: 8080\n" {
+		t.Fatalf("unexpected files read stdout %q", got)
 	}
 }
 

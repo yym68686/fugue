@@ -445,6 +445,7 @@ FUGUE_LIMIT_CPU="${FUGUE_LIMIT_CPU:-}"
 FUGUE_LIMIT_MEMORY="${FUGUE_LIMIT_MEMORY:-}"
 FUGUE_LIMIT_DISK="${FUGUE_LIMIT_DISK:-}"
 FUGUE_LIMIT_DISK_PATH="${FUGUE_LIMIT_DISK_PATH:-/}"
+FUGUE_PROGRESS_HEARTBEAT_SECONDS="${FUGUE_PROGRESS_HEARTBEAT_SECONDS:-15}"
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -455,6 +456,77 @@ require_cmd() {
 
 log_step() {
   printf '[fugue] %%s\n' "$*" >&2
+}
+
+format_duration() {
+  local total_seconds="${1:-0}"
+  local hours=0
+  local minutes=0
+  local seconds=0
+  case "${total_seconds}" in
+    ''|*[!0-9]*)
+      total_seconds=0
+      ;;
+  esac
+  hours=$((total_seconds / 3600))
+  minutes=$(((total_seconds %% 3600) / 60))
+  seconds=$((total_seconds %% 60))
+  if [ "${hours}" -gt 0 ]; then
+    printf '%%dh%%02dm%%02ds' "${hours}" "${minutes}" "${seconds}"
+    return 0
+  fi
+  if [ "${minutes}" -gt 0 ]; then
+    printf '%%dm%%02ds' "${minutes}" "${seconds}"
+    return 0
+  fi
+  printf '%%ss' "${seconds}"
+}
+
+run_with_heartbeat() {
+  local label="$1"
+  local expected="$2"
+  local started_at=""
+  local elapsed=0
+  local next_notice="${FUGUE_PROGRESS_HEARTBEAT_SECONDS}"
+  local rc=0
+  local command_pid=0
+  shift 2
+
+  started_at="$(date +%%s)"
+  log_step "${label} (expected ${expected})."
+  "$@" &
+  command_pid=$!
+
+  while kill -0 "${command_pid}" 2>/dev/null; do
+    sleep 1
+    if ! kill -0 "${command_pid}" 2>/dev/null; then
+      break
+    fi
+    elapsed=$(( $(date +%%s) - started_at ))
+    if [ "${elapsed}" -ge "${next_notice}" ]; then
+      log_step "${label} is still running after $(format_duration "${elapsed}") (expected ${expected}). This is normal on a first install."
+      next_notice=$((next_notice + FUGUE_PROGRESS_HEARTBEAT_SECONDS))
+    fi
+  done
+
+  if wait "${command_pid}"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  elapsed=$(( $(date +%%s) - started_at ))
+  if [ "${rc}" -ne 0 ]; then
+    log_step "${label} failed after $(format_duration "${elapsed}")."
+    return "${rc}"
+  fi
+  log_step "${label} completed in $(format_duration "${elapsed}")."
+}
+
+print_install_timeline() {
+  log_step "Starting Fugue cluster join for node ${node_name}."
+  log_step "Estimated time: usually under 2 minutes on an existing node, 3-12 minutes on a fresh node."
+  log_step "Longest steps: first k3s download/install (2-10 minutes) and first k3s-agent startup (30 seconds to 5 minutes)."
+  log_step "Heartbeat: long-running steps print progress every ${FUGUE_PROGRESS_HEARTBEAT_SECONDS}s so the install never looks stuck."
 }
 
 usage() {
@@ -529,22 +601,28 @@ parse_args() {
 wait_for_systemd_unit_active() {
   local unit="$1"
   local timeout_seconds="${2:-600}"
-  local interval_seconds="${3:-10}"
+  local interval_seconds="${3:-}"
+  local expected="${4:-30s-5m}"
+  local started_at=""
   local elapsed=0
   local state=""
   local substate=""
+  if [ -z "${interval_seconds}" ]; then
+    interval_seconds="${FUGUE_PROGRESS_HEARTBEAT_SECONDS}"
+  fi
+  started_at="$(date +%%s)"
   while [ "${elapsed}" -lt "${timeout_seconds}" ]; do
+    elapsed=$(( $(date +%%s) - started_at ))
     if systemctl is-active --quiet "${unit}"; then
-      log_step "${unit} is active."
+      log_step "${unit} is active after $(format_duration "${elapsed}")."
       return 0
     fi
     state="$(systemctl is-active "${unit}" 2>/dev/null || true)"
     substate="$(systemctl show "${unit}" --property=SubState --value 2>/dev/null || true)"
-    log_step "Waiting for ${unit} to become active (state=${state:-unknown}, substate=${substate:-unknown}, elapsed=${elapsed}s)..."
+    log_step "Waiting for ${unit} to become active (state=${state:-unknown}, substate=${substate:-unknown}, elapsed=$(format_duration "${elapsed}"), expected ${expected})..."
     sleep "${interval_seconds}"
-    elapsed=$((elapsed + interval_seconds))
   done
-  log_step "${unit} did not become active within ${timeout_seconds}s."
+  log_step "${unit} did not become active within $(format_duration "${timeout_seconds}")."
   systemctl status "${unit}" --no-pager || true
   return 1
 }
@@ -553,9 +631,10 @@ run_systemd_action_and_wait() {
   local action="$1"
   local unit="$2"
   local timeout_seconds="${3:-600}"
-  log_step "Requesting ${action} for ${unit}..."
+  local expected="${4:-30s-5m}"
+  log_step "Requesting ${action} for ${unit} (expected ${expected})..."
   systemctl "${action}" --no-block "${unit}"
-  wait_for_systemd_unit_active "${unit}" "${timeout_seconds}"
+  wait_for_systemd_unit_active "${unit}" "${timeout_seconds}" "${FUGUE_PROGRESS_HEARTBEAT_SECONDS}" "${expected}"
 }
 
 write_file_if_changed() {
@@ -961,11 +1040,15 @@ append_location_node_labels() {
   printf '%%s' "${labels}"
 }
 
+install_tailscale_binaries() {
+  curl -fsSL https://tailscale.com/install.sh | sh 1>&2
+}
+
 install_tailscale() {
   if command -v tailscale >/dev/null 2>&1; then
     return 0
   fi
-  curl -fsSL https://tailscale.com/install.sh | sh 1>&2
+  run_with_heartbeat "Installing tailscale" "10-60s" install_tailscale_binaries
 }
 
 wait_for_tailscale_ipv4() {
@@ -1000,12 +1083,11 @@ connect_mesh() {
       install_tailscale
       systemctl enable tailscaled
       if ! systemctl is-active --quiet tailscaled; then
-        run_systemd_action_and_wait start tailscaled 60
+        run_systemd_action_and_wait start tailscaled 60 "5-30s"
       else
         log_step "tailscaled is already active."
       fi
-      log_step "Running tailscale up for ${hostname}..."
-      tailscale up \
+      run_with_heartbeat "Running tailscale up for ${hostname}" "10-60s" tailscale up \
         --login-server "${FUGUE_JOIN_MESH_LOGIN_SERVER}" \
         --authkey "${FUGUE_JOIN_MESH_AUTH_KEY}" \
         --hostname "${hostname}" \
@@ -1074,6 +1156,10 @@ cleanup_stale_cluster_nodes() {
   return 0
 }
 
+install_k3s_agent_binaries() {
+  curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL="${FUGUE_K3S_CHANNEL}" INSTALL_K3S_EXEC="agent" INSTALL_K3S_SKIP_START="true" sh -
+}
+
 restart_k3s_agent_if_needed() {
   local config_changed="$1"
   systemctl enable k3s-agent
@@ -1083,10 +1169,10 @@ restart_k3s_agent_if_needed() {
     else
       log_step "k3s-agent is not active; starting it."
     fi
-    run_systemd_action_and_wait start k3s-agent 900
+    run_systemd_action_and_wait start k3s-agent 900 "30s-5m on first startup"
   elif [ "${config_changed}" -eq 1 ]; then
     log_step "k3s agent configuration changed; restarting k3s-agent."
-    run_systemd_action_and_wait restart k3s-agent 900
+    run_systemd_action_and_wait restart k3s-agent 900 "15s-3m"
   else
     log_step "k3s-agent configuration unchanged; service already active, skipping restart."
   fi
@@ -1123,6 +1209,8 @@ node_external_ip="${FUGUE_NODE_EXTERNAL_IP:-${node_public_ip}}"
 if [ -n "${node_public_ip}" ] && [ "${node_endpoint}" = "${node_name}" ]; then
   node_endpoint="${node_public_ip}"
 fi
+script_started_at="$(date +%%s)"
+print_install_timeline
 
 join_env="$(mktemp)"
 cleanup() {
@@ -1208,8 +1296,7 @@ elif remove_file_if_present /etc/rancher/k3s/registries.yaml; then
 fi
 
 if ! command -v k3s >/dev/null 2>&1; then
-  log_step "k3s agent is not installed; downloading and installing binaries..."
-  curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL="${FUGUE_K3S_CHANNEL}" INSTALL_K3S_EXEC="agent" INSTALL_K3S_SKIP_START="true" sh -
+  run_with_heartbeat "Downloading and installing k3s agent binaries" "2-10 min on a fresh node" install_k3s_agent_binaries
   log_step "k3s agent install completed; starting service."
   restart_k3s_agent_if_needed 1
 else
@@ -1218,7 +1305,7 @@ fi
 
 systemctl is-active --quiet k3s-agent
 cleanup_stale_cluster_nodes
-log_step "Cluster node join finished."
+log_step "Cluster node join finished in $(format_duration $(( $(date +%%s) - script_started_at )))."
 
 cat <<EOF
 Fugue node joined.

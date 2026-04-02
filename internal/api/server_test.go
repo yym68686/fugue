@@ -223,6 +223,10 @@ func TestJoinClusterInstallScriptAvoidsRedundantRestarts(t *testing.T) {
 
 	for _, want := range []string{
 		`log_step() {`,
+		`format_duration() {`,
+		`run_with_heartbeat() {`,
+		`print_install_timeline() {`,
+		`FUGUE_PROGRESS_HEARTBEAT_SECONDS="${FUGUE_PROGRESS_HEARTBEAT_SECONDS:-15}"`,
 		`wait_for_systemd_unit_active() {`,
 		`run_systemd_action_and_wait() {`,
 		`write_file_if_changed`,
@@ -232,8 +236,11 @@ func TestJoinClusterInstallScriptAvoidsRedundantRestarts(t *testing.T) {
 		`run_systemd_action_and_wait start k3s-agent 900`,
 		`run_systemd_action_and_wait start tailscaled 60`,
 		`Waiting for ${unit} to become active`,
+		`Heartbeat: long-running steps print progress every ${FUGUE_PROGRESS_HEARTBEAT_SECONDS}s so the install never looks stuck.`,
+		`This is normal on a first install.`,
+		`Downloading and installing k3s agent binaries`,
 		`Requesting join parameters from control plane...`,
-		`Cluster node join finished.`,
+		`Cluster node join finished in $(format_duration $(( $(date +%s) - script_started_at ))).`,
 		`case "${http_code}" in`,
 		`000|409|429|5??)`,
 		`--max-time 5`,

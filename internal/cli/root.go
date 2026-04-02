@@ -77,6 +77,7 @@ Environment variables:
   fugue app status my-app
   fugue app logs my-app
   fugue env list my-app
+  fugue files write my-app /app/config.yaml --from-file config.yaml
   fugue domain add my-app www.example.com
   fugue workspace list my-app
 `),
@@ -101,6 +102,7 @@ Environment variables:
 		c.newDeployCommand(),
 		c.newAppCommand(),
 		c.newEnvCommand(),
+		c.newFilesCommand(),
 		c.newDomainCommand(),
 		c.newWorkspaceCommand(),
 	)

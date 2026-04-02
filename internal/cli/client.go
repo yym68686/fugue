@@ -161,6 +161,12 @@ type appEnvResponse struct {
 	Operation      *model.Operation  `json:"operation,omitempty"`
 }
 
+type appFilesResponse struct {
+	Files          []model.AppFile  `json:"files"`
+	AlreadyCurrent bool             `json:"already_current,omitempty"`
+	Operation      *model.Operation `json:"operation,omitempty"`
+}
+
 type appDomainAvailability struct {
 	Input     string `json:"input,omitempty"`
 	Hostname  string `json:"hostname,omitempty"`
@@ -427,6 +433,45 @@ func (c *Client) PatchAppEnv(id string, set map[string]string, deleted []string)
 	var response appEnvResponse
 	if err := c.doJSON(http.MethodPatch, path.Join("/v1/apps", id, "env"), req, &response); err != nil {
 		return appEnvResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) GetAppFiles(id string) (appFilesResponse, error) {
+	var response appFilesResponse
+	if err := c.doJSON(http.MethodGet, path.Join("/v1/apps", id, "files"), nil, &response); err != nil {
+		return appFilesResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) UpsertAppFiles(id string, files []model.AppFile) (appFilesResponse, error) {
+	req := map[string]any{
+		"files": files,
+	}
+	var response appFilesResponse
+	if err := c.doJSON(http.MethodPut, path.Join("/v1/apps", id, "files"), req, &response); err != nil {
+		return appFilesResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) DeleteAppFiles(id string, paths []string) (appFilesResponse, error) {
+	query := url.Values{}
+	for _, filePath := range paths {
+		filePath = strings.TrimSpace(filePath)
+		if filePath == "" {
+			continue
+		}
+		query.Add("path", filePath)
+	}
+	relative := path.Join("/v1/apps", id, "files")
+	if encoded := query.Encode(); encoded != "" {
+		relative += "?" + encoded
+	}
+	var response appFilesResponse
+	if err := c.doJSON(http.MethodDelete, relative, nil, &response); err != nil {
+		return appFilesResponse{}, err
 	}
 	return response, nil
 }
