@@ -120,6 +120,9 @@ func TestBuildManagedAppChildObjectsAddsOwnerReferences(t *testing.T) {
 		if got := ownerRefs[0]["uid"]; got != "uid-demo" {
 			t.Fatalf("unexpected owner reference uid: %#v", got)
 		}
+		if got := ownerRefs[0]["controller"]; got != false {
+			t.Fatalf("managed app owner reference should not claim controller ownership, got %#v", got)
+		}
 	}
 }
 

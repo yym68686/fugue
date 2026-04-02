@@ -178,7 +178,7 @@ func ManagedAppOwnerReference(managed ManagedAppObject) *OwnerReference {
 		Kind:               ManagedAppKind,
 		Name:               managed.Metadata.Name,
 		UID:                managed.Metadata.UID,
-		Controller:         true,
+		Controller:         false,
 		BlockOwnerDeletion: true,
 	}
 }
