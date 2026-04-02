@@ -256,7 +256,7 @@ func buildComposePostgresPlan(appServices, postgresServices []sourceimport.Compo
 			return nil, nil, nil, err
 		}
 		postgresByOwner[owner.Name] = spec
-		hosts[postgres.Name] = spec.ServiceName
+		hosts[postgres.Name] = model.PostgresRWServiceName(spec.ServiceName)
 
 		if len(consumers) > 1 {
 			names := make([]string, 0, len(consumers))
@@ -398,8 +398,9 @@ func applyManagedPostgresEnvironment(env map[string]string, spec model.AppPostgr
 	}
 
 	out := cloneStringMap(env)
-	overrideManagedPostgresEnvIfPresent(out, "DB_HOST", spec.ServiceName)
-	overrideManagedPostgresEnvIfPresent(out, "POSTGRES_HOST", spec.ServiceName)
+	host := model.PostgresRWServiceName(spec.ServiceName)
+	overrideManagedPostgresEnvIfPresent(out, "DB_HOST", host)
+	overrideManagedPostgresEnvIfPresent(out, "POSTGRES_HOST", host)
 	overrideManagedPostgresEnvIfPresent(out, "DB_PORT", "5432")
 	overrideManagedPostgresEnvIfPresent(out, "POSTGRES_PORT", "5432")
 	overrideManagedPostgresEnvIfPresent(out, "DB_NAME", spec.Database)
@@ -436,7 +437,9 @@ func rewriteManagedPostgresURL(value string, spec model.AppPostgresSpec) (string
 	if !strings.Contains(strings.ToLower(parsed.Scheme), "postgres") {
 		return value, false
 	}
-	if !strings.EqualFold(parsed.Hostname(), strings.TrimSpace(spec.ServiceName)) {
+	legacyHost := strings.TrimSpace(spec.ServiceName)
+	host := model.PostgresRWServiceName(spec.ServiceName)
+	if !strings.EqualFold(parsed.Hostname(), legacyHost) && !strings.EqualFold(parsed.Hostname(), host) {
 		return value, false
 	}
 
@@ -444,7 +447,7 @@ func rewriteManagedPostgresURL(value string, spec model.AppPostgresSpec) (string
 	if port == "" {
 		port = "5432"
 	}
-	parsed.Host = net.JoinHostPort(spec.ServiceName, port)
+	parsed.Host = net.JoinHostPort(host, port)
 	parsed.User = url.UserPassword(spec.User, spec.Password)
 	if db := strings.TrimSpace(spec.Database); db != "" {
 		parsed.Path = "/" + strings.TrimPrefix(db, "/")

@@ -141,8 +141,8 @@ func TestBackingServiceLifecycleAndBindingsQueueDeploy(t *testing.T) {
 		Env map[string]string `json:"env"`
 	}
 	mustDecodeJSON(t, recorder, &envResponse)
-	if got := envResponse.Env["DB_HOST"]; got != service.Spec.Postgres.ServiceName {
-		t.Fatalf("expected DB_HOST=%q, got %q", service.Spec.Postgres.ServiceName, got)
+	if got := envResponse.Env["DB_HOST"]; got != model.PostgresRWServiceName(service.Spec.Postgres.ServiceName) {
+		t.Fatalf("expected DB_HOST=%q, got %q", model.PostgresRWServiceName(service.Spec.Postgres.ServiceName), got)
 	}
 	if got := envResponse.Env["DB_NAME"]; got != "demo" {
 		t.Fatalf("expected DB_NAME=demo, got %q", got)

@@ -66,7 +66,16 @@ func mergedAppEnv(app model.App) map[string]string {
 func mergedAppEnvWithSpec(app model.App, spec model.AppSpec) map[string]string {
 	merged := make(map[string]string)
 	for _, bound := range appBoundServices(app) {
-		for key, value := range bound.Binding.Env {
+		bindingEnv := cloneStringMap(bound.Binding.Env)
+		if strings.EqualFold(strings.TrimSpace(bound.Service.Type), model.BackingServiceTypePostgres) && bound.Service.Spec.Postgres != nil {
+			if bindingEnv == nil {
+				bindingEnv = map[string]string{}
+			}
+			for key, value := range defaultAPIBindingPostgresEnv(*bound.Service.Spec.Postgres) {
+				bindingEnv[key] = value
+			}
+		}
+		for key, value := range bindingEnv {
 			merged[key] = value
 		}
 	}
@@ -147,7 +156,7 @@ func legacyAPIBackingServiceName(appName string) string {
 func defaultAPIBindingPostgresEnv(spec model.AppPostgresSpec) map[string]string {
 	return map[string]string{
 		"DB_TYPE":     "postgres",
-		"DB_HOST":     spec.ServiceName,
+		"DB_HOST":     model.PostgresRWServiceName(spec.ServiceName),
 		"DB_PORT":     "5432",
 		"DB_USER":     spec.User,
 		"DB_PASSWORD": spec.Password,

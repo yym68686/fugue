@@ -58,7 +58,7 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 	if got := postgresAliasSpec["type"]; got != "ExternalName" {
 		t.Fatalf("expected postgres alias service type ExternalName, got %#v", got)
 	}
-	if got := postgresAliasSpec["externalName"]; got != "uni-api-demo-postgres-rw" {
+	if got := postgresAliasSpec["externalName"]; got != "uni-api-demo-postgres-rw.fg-tenant-demo.svc.cluster.local" {
 		t.Fatalf("expected postgres alias external name, got %#v", got)
 	}
 	if kind, _ := objects[4]["kind"].(string); kind != CloudNativePGClusterKind {
@@ -79,10 +79,19 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 	appDeployment := objects[5]
 	appTemplate := appDeployment["spec"].(map[string]any)["template"].(map[string]any)
 	appPodSpec := appTemplate["spec"].(map[string]any)
-	if _, ok := appPodSpec["initContainers"]; !ok {
+	initContainers, ok := appPodSpec["initContainers"].([]map[string]any)
+	if !ok {
 		t.Fatalf("expected wait-postgres init container")
 	}
 	containers := appPodSpec["containers"].([]map[string]any)
+	envObjects := containers[0]["env"].([]map[string]any)
+	if got := envValue(envObjects, "DB_HOST"); got != "uni-api-demo-postgres-rw" {
+		t.Fatalf("expected inline postgres DB_HOST to use rw service, got %q", got)
+	}
+	command := initContainers[0]["command"].([]string)
+	if got := command[2]; got != "until nc -z uni-api-demo-postgres-rw 5432; do sleep 2; done" {
+		t.Fatalf("expected wait-postgres init container to target rw service, got %q", got)
+	}
 	volumeMounts := containers[0]["volumeMounts"].([]map[string]any)
 	if volumeMounts[0]["mountPath"] != "/home/api.yaml" {
 		t.Fatalf("unexpected mount path: %#v", volumeMounts[0]["mountPath"])
@@ -422,7 +431,7 @@ func TestBuildManagedPostgresObjectsUseStableSelectors(t *testing.T) {
 		t.Fatalf("expected postgres service alias, got %#v", got)
 	}
 	aliasSpec := postgresAliasService["spec"].(map[string]any)
-	if got := aliasSpec["externalName"]; got != "uni-api-demo-postgres-rw" {
+	if got := aliasSpec["externalName"]; got != "uni-api-demo-postgres-rw.fg-tenant-demo.svc.cluster.local" {
 		t.Fatalf("expected postgres alias external name, got %#v", got)
 	}
 
@@ -508,7 +517,7 @@ func TestBuildAppObjectsKeepsLegacyManagedPostgresResourcesWhenStoragePathPresen
 	if got := aliasSpec["type"]; got != "ExternalName" {
 		t.Fatalf("expected alias service type ExternalName, got %#v", got)
 	}
-	if got := aliasSpec["externalName"]; got != "legacy-postgres-demo-postgres-rw" {
+	if got := aliasSpec["externalName"]; got != "legacy-postgres-demo-postgres-rw.fg-tenant-demo.svc.cluster.local" {
 		t.Fatalf("expected alias external name, got %#v", got)
 	}
 
@@ -627,6 +636,61 @@ func TestBuildWorkspaceReplicationSourceObject(t *testing.T) {
 	}
 	if got := rsyncTLS["copyMethod"]; got != "Direct" {
 		t.Fatalf("expected rsync copyMethod %q, got %#v", "Direct", got)
+	}
+}
+
+func TestMergedRuntimeEnvRepairsLegacyManagedPostgresBindingHost(t *testing.T) {
+	app := model.App{
+		Spec: model.AppSpec{
+			Env: map[string]string{
+				"APP_ENV": "prod",
+			},
+		},
+		BackingServices: []model.BackingService{
+			{
+				ID:   "service_demo",
+				Type: model.BackingServiceTypePostgres,
+				Spec: model.BackingServiceSpec{
+					Postgres: &model.AppPostgresSpec{
+						Database:    "demo",
+						User:        "root",
+						Password:    "secret",
+						ServiceName: "demo-postgres",
+					},
+				},
+			},
+		},
+		Bindings: []model.ServiceBinding{
+			{
+				ServiceID: "service_demo",
+				Env: map[string]string{
+					"DB_TYPE":     "postgres",
+					"DB_HOST":     "demo-postgres",
+					"DB_PORT":     "5432",
+					"DB_USER":     "legacy",
+					"DB_PASSWORD": "legacy-secret",
+					"DB_NAME":     "legacy",
+					"KEEP":        "custom",
+				},
+			},
+		},
+	}
+
+	env := mergedRuntimeEnv(app)
+	if got := env["DB_HOST"]; got != "demo-postgres-rw" {
+		t.Fatalf("expected runtime env DB_HOST to be repaired to rw service, got %q", got)
+	}
+	if got := env["DB_USER"]; got != "root" {
+		t.Fatalf("expected runtime env DB_USER to follow backing service spec, got %q", got)
+	}
+	if got := env["DB_NAME"]; got != "demo" {
+		t.Fatalf("expected runtime env DB_NAME to follow backing service spec, got %q", got)
+	}
+	if got := env["KEEP"]; got != "custom" {
+		t.Fatalf("expected non-postgres binding env to be preserved, got %q", got)
+	}
+	if got := env["APP_ENV"]; got != "prod" {
+		t.Fatalf("expected app env override to remain present, got %q", got)
 	}
 }
 

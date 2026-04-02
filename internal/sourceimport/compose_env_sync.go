@@ -136,7 +136,7 @@ func suggestComposeServiceEnv(services []ComposeService, composeService string, 
 		if !ok || strings.TrimSpace(spec.ServiceName) == "" {
 			continue
 		}
-		serviceHosts[postgres.Name] = strings.TrimSpace(spec.ServiceName)
+		serviceHosts[postgres.Name] = model.PostgresRWServiceName(spec.ServiceName)
 	}
 
 	env := rewriteComposeEnvironmentForSync(target.Environment, serviceHosts)
@@ -224,8 +224,9 @@ func applyManagedPostgresEnvironmentForSync(env map[string]string, spec model.Ap
 		return nil
 	}
 	out := cloneComposeServiceMap(env)
-	overrideManagedPostgresEnvIfPresentForSync(out, "DB_HOST", spec.ServiceName)
-	overrideManagedPostgresEnvIfPresentForSync(out, "POSTGRES_HOST", spec.ServiceName)
+	host := model.PostgresRWServiceName(spec.ServiceName)
+	overrideManagedPostgresEnvIfPresentForSync(out, "DB_HOST", host)
+	overrideManagedPostgresEnvIfPresentForSync(out, "POSTGRES_HOST", host)
 	overrideManagedPostgresEnvIfPresentForSync(out, "DB_PORT", "5432")
 	overrideManagedPostgresEnvIfPresentForSync(out, "POSTGRES_PORT", "5432")
 	overrideManagedPostgresEnvIfPresentForSync(out, "DB_NAME", spec.Database)
@@ -262,7 +263,9 @@ func rewriteManagedPostgresURLForSync(value string, spec model.AppPostgresSpec) 
 	if !strings.Contains(strings.ToLower(parsed.Scheme), "postgres") {
 		return value, false
 	}
-	if !strings.EqualFold(parsed.Hostname(), strings.TrimSpace(spec.ServiceName)) {
+	legacyHost := strings.TrimSpace(spec.ServiceName)
+	host := model.PostgresRWServiceName(spec.ServiceName)
+	if !strings.EqualFold(parsed.Hostname(), legacyHost) && !strings.EqualFold(parsed.Hostname(), host) {
 		return value, false
 	}
 
@@ -270,7 +273,7 @@ func rewriteManagedPostgresURLForSync(value string, spec model.AppPostgresSpec) 
 	if port == "" {
 		port = "5432"
 	}
-	parsed.Host = net.JoinHostPort(spec.ServiceName, port)
+	parsed.Host = net.JoinHostPort(host, port)
 	parsed.User = url.UserPassword(spec.User, spec.Password)
 	if db := strings.TrimSpace(spec.Database); db != "" {
 		parsed.Path = "/" + strings.TrimPrefix(db, "/")

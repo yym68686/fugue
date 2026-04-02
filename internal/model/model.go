@@ -445,6 +445,14 @@ type AppPostgresSpec struct {
 	Resources           *ResourceSpec `json:"resources,omitempty"`
 }
 
+func PostgresRWServiceName(serviceName string) string {
+	serviceName = strings.TrimSpace(serviceName)
+	if serviceName == "" {
+		return ""
+	}
+	return serviceName + "-rw"
+}
+
 type BackingServiceSpec struct {
 	Postgres *AppPostgresSpec `json:"postgres,omitempty"`
 }

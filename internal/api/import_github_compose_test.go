@@ -16,16 +16,16 @@ func TestRewriteComposeEnvironmentRewritesInternalServiceHosts(t *testing.T) {
 
 	got := rewriteComposeEnvironment(env, map[string]string{
 		"api": "uni-api-web-api",
-		"db":  "uni-api-web-api-db-postgres",
+		"db":  "uni-api-web-api-db-postgres-rw",
 	})
 
 	if got["API_BASE_URL"] != "http://uni-api-web-api:8000/v1" {
 		t.Fatalf("unexpected API_BASE_URL rewrite: %q", got["API_BASE_URL"])
 	}
-	if got["DATABASE_URL"] != "postgresql://demo:secret@uni-api-web-api-db-postgres:5432/demo" {
+	if got["DATABASE_URL"] != "postgresql://demo:secret@uni-api-web-api-db-postgres-rw:5432/demo" {
 		t.Fatalf("unexpected DATABASE_URL rewrite: %q", got["DATABASE_URL"])
 	}
-	if got["DB_HOST"] != "uni-api-web-api-db-postgres" {
+	if got["DB_HOST"] != "uni-api-web-api-db-postgres-rw" {
 		t.Fatalf("unexpected DB_HOST rewrite: %q", got["DB_HOST"])
 	}
 }
@@ -42,7 +42,7 @@ func TestApplyManagedPostgresEnvironmentRewritesGeneratedDatabaseURL(t *testing.
 		Password:    "secret-pass",
 	})
 
-	if got["DATABASE_URL"] != "postgresql+asyncpg://uniapi:secret-pass@uni-api-web-api-db-postgres:5432/uniapi" {
+	if got["DATABASE_URL"] != "postgresql+asyncpg://uniapi:secret-pass@uni-api-web-api-db-postgres-rw:5432/uniapi" {
 		t.Fatalf("unexpected DATABASE_URL rewrite: %q", got["DATABASE_URL"])
 	}
 }

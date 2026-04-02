@@ -227,7 +227,7 @@ func buildPostgresServiceObject(namespace, resourceName string, labels map[strin
 		},
 		"spec": map[string]any{
 			"type":         "ExternalName",
-			"externalName": postgresRWServiceName(spec.ServiceName),
+			"externalName": postgresRWServiceFQDN(namespace, spec.ServiceName),
 			"ports": []map[string]any{
 				{
 					"name":       "tcp-5432",
@@ -514,7 +514,7 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 				"command": []string{
 					"sh",
 					"-c",
-					"until nc -z " + postgres.spec.ServiceName + " 5432; do sleep 2; done",
+					"until nc -z " + model.PostgresRWServiceName(postgres.spec.ServiceName) + " 5432; do sleep 2; done",
 				},
 			})
 		}
@@ -736,6 +736,11 @@ func mergedRuntimeEnv(app model.App) map[string]string {
 		}
 		if strings.EqualFold(strings.TrimSpace(service.Type), model.BackingServiceTypePostgres) {
 			hasManagedPostgresBinding = true
+			if service.Spec.Postgres != nil {
+				for key, value := range defaultRuntimePostgresEnv(*service.Spec.Postgres) {
+					merged[key] = value
+				}
+			}
 		}
 	}
 
@@ -1167,7 +1172,7 @@ func runtimeBackingServiceBaseName(serviceName, fallback string) string {
 func defaultRuntimePostgresEnv(spec model.AppPostgresSpec) map[string]string {
 	return map[string]string{
 		"DB_TYPE":     "postgres",
-		"DB_HOST":     spec.ServiceName,
+		"DB_HOST":     model.PostgresRWServiceName(spec.ServiceName),
 		"DB_PORT":     "5432",
 		"DB_USER":     spec.User,
 		"DB_PASSWORD": spec.Password,
@@ -1176,11 +1181,23 @@ func defaultRuntimePostgresEnv(spec model.AppPostgresSpec) map[string]string {
 }
 
 func postgresRWServiceName(clusterName string) string {
-	clusterName = strings.TrimSpace(clusterName)
-	if clusterName == "" {
+	return model.PostgresRWServiceName(clusterName)
+}
+
+func serviceFQDN(namespace, serviceName string) string {
+	namespace = strings.TrimSpace(namespace)
+	serviceName = strings.TrimSpace(serviceName)
+	if serviceName == "" {
 		return ""
 	}
-	return clusterName + "-rw"
+	if namespace == "" {
+		return serviceName
+	}
+	return serviceName + "." + namespace + ".svc.cluster.local"
+}
+
+func postgresRWServiceFQDN(namespace, clusterName string) string {
+	return serviceFQDN(namespace, postgresRWServiceName(clusterName))
 }
 
 func isManagedRuntimeBackingService(service model.BackingService) bool {

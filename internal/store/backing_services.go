@@ -532,7 +532,7 @@ func defaultServiceBindingAlias(alias string, service model.BackingService) stri
 func defaultPostgresBindingEnv(spec model.AppPostgresSpec) map[string]string {
 	return map[string]string{
 		"DB_TYPE":     "postgres",
-		"DB_HOST":     spec.ServiceName,
+		"DB_HOST":     model.PostgresRWServiceName(spec.ServiceName),
 		"DB_PORT":     "5432",
 		"DB_USER":     spec.User,
 		"DB_PASSWORD": spec.Password,
