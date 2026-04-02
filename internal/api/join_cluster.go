@@ -1231,13 +1231,19 @@ install_k3s_agent_binaries() {
 
 restart_k3s_agent_if_needed() {
   local config_changed="$1"
+  local state=""
   systemctl enable k3s-agent
-  if ! systemctl is-active --quiet k3s-agent; then
-    if [ "${config_changed}" -eq 1 ]; then
-      log_step "k3s-agent is not active; starting it with the updated configuration."
+  state="$(systemctl is-active k3s-agent 2>/dev/null || true)"
+  if [ "${state}" != "active" ]; then
+    if [ "${state}" = "activating" ]; then
+      log_step "k3s-agent is still activating from a previous attempt; forcing a clean restart so it reloads the latest join configuration."
+    elif [ "${config_changed}" -eq 1 ]; then
+      log_step "k3s-agent is not active; forcing a clean restart with the updated configuration."
     else
-      log_step "k3s-agent is not active; starting it."
+      log_step "k3s-agent is not active; forcing a clean restart."
     fi
+    systemctl stop k3s-agent >/dev/null 2>&1 || true
+    systemctl reset-failed k3s-agent >/dev/null 2>&1 || true
     run_systemd_action_and_wait start k3s-agent 900 "30s-5m on first startup"
   elif [ "${config_changed}" -eq 1 ]; then
     log_step "k3s agent configuration changed; restarting k3s-agent."
