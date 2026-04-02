@@ -441,6 +441,10 @@ set -euo pipefail
 
 FUGUE_API_BASE=${FUGUE_API_BASE:-%s}
 FUGUE_K3S_CHANNEL="${FUGUE_K3S_CHANNEL:-stable}"
+FUGUE_LIMIT_CPU="${FUGUE_LIMIT_CPU:-}"
+FUGUE_LIMIT_MEMORY="${FUGUE_LIMIT_MEMORY:-}"
+FUGUE_LIMIT_DISK="${FUGUE_LIMIT_DISK:-}"
+FUGUE_LIMIT_DISK_PATH="${FUGUE_LIMIT_DISK_PATH:-/}"
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -451,6 +455,75 @@ require_cmd() {
 
 log_step() {
   printf '[fugue] %%s\n' "$*" >&2
+}
+
+usage() {
+  cat >&2 <<EOF_USAGE
+Usage: join-cluster.sh [--cpu LIMIT] [--memory LIMIT] [--disk LIMIT]
+
+Optional resource caps can also be provided as environment variables:
+  FUGUE_LIMIT_CPU=2
+  FUGUE_LIMIT_MEMORY=4Gi
+  FUGUE_LIMIT_DISK=50Gi
+
+Accepted formats:
+  CPU: integer cores (2), decimal cores (1.5), or millicores (1500m)
+  Memory/Disk: Kubernetes-style sizes such as 4096Mi, 4Gi, 500G, or raw bytes
+
+Examples:
+  curl -fsSL ${FUGUE_API_BASE}/install/join-cluster.sh | \\
+    sudo FUGUE_NODE_KEY='...' \\
+    FUGUE_LIMIT_CPU='2' \\
+    FUGUE_LIMIT_MEMORY='4Gi' \\
+    FUGUE_LIMIT_DISK='50Gi' \\
+    bash
+
+  curl -fsSL ${FUGUE_API_BASE}/install/join-cluster.sh | \\
+    sudo FUGUE_NODE_KEY='...' bash -s -- --cpu 2 --memory 4Gi --disk 50Gi
+EOF_USAGE
+}
+
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --cpu|--cpu-limit)
+        [ "$#" -ge 2 ] || {
+          echo "$1 requires a value" >&2
+          usage
+          exit 1
+        }
+        FUGUE_LIMIT_CPU="$2"
+        shift 2
+        ;;
+      --memory|--memory-limit)
+        [ "$#" -ge 2 ] || {
+          echo "$1 requires a value" >&2
+          usage
+          exit 1
+        }
+        FUGUE_LIMIT_MEMORY="$2"
+        shift 2
+        ;;
+      --disk|--disk-limit|--ephemeral-storage)
+        [ "$#" -ge 2 ] || {
+          echo "$1 requires a value" >&2
+          usage
+          exit 1
+        }
+        FUGUE_LIMIT_DISK="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "unknown argument: $1" >&2
+        usage
+        exit 1
+        ;;
+    esac
+  done
 }
 
 wait_for_systemd_unit_active() {
@@ -504,6 +577,251 @@ remove_file_if_present() {
     return 0
   fi
   return 1
+}
+
+trim_whitespace() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%%"${value##*[![:space:]]}"}"
+  printf '%%s' "${value}"
+}
+
+append_csv_value() {
+  local csv="$1"
+  local entry="$2"
+  if [ -z "${entry}" ]; then
+    printf '%%s' "${csv}"
+    return 0
+  fi
+  if [ -n "${csv}" ]; then
+    printf '%%s,%%s' "${csv}" "${entry}"
+    return 0
+  fi
+  printf '%%s' "${entry}"
+}
+
+parse_cpu_millicores() {
+  local raw=""
+  raw="$(trim_whitespace "$1")"
+  [ -n "${raw}" ] || return 1
+  awk -v raw="${raw}" '
+    BEGIN {
+      value = raw
+      if (value ~ /m$/) {
+        sub(/m$/, "", value)
+        if (value !~ /^[0-9]+$/ || value <= 0) {
+          exit 1
+        }
+        printf "%%d", value
+        exit 0
+      }
+      if (value !~ /^[0-9]+([.][0-9]+)?$/) {
+        exit 1
+      }
+      milli = value * 1000
+      if (milli <= 0) {
+        exit 1
+      }
+      printf "%%d", milli + 0.5
+    }
+  '
+}
+
+parse_quantity_bytes() {
+  local raw=""
+  raw="$(trim_whitespace "$1")"
+  [ -n "${raw}" ] || return 1
+  awk -v raw="${raw}" '
+    BEGIN {
+      value = tolower(raw)
+      if (value !~ /^[0-9]+([.][0-9]+)?([kmgtpe]i?b?)?$/) {
+        exit 1
+      }
+      number = value
+      unit = ""
+      if (match(value, /[kmgtpe]i?b?$/)) {
+        unit = substr(value, RSTART, RLENGTH)
+        number = substr(value, 1, RSTART - 1)
+      }
+      multiplier = 1
+      if (unit == "k" || unit == "kb") {
+        multiplier = 1000
+      } else if (unit == "ki" || unit == "kib") {
+        multiplier = 1024
+      } else if (unit == "m" || unit == "mb") {
+        multiplier = 1000 ^ 2
+      } else if (unit == "mi" || unit == "mib") {
+        multiplier = 1024 ^ 2
+      } else if (unit == "g" || unit == "gb") {
+        multiplier = 1000 ^ 3
+      } else if (unit == "gi" || unit == "gib") {
+        multiplier = 1024 ^ 3
+      } else if (unit == "t" || unit == "tb") {
+        multiplier = 1000 ^ 4
+      } else if (unit == "ti" || unit == "tib") {
+        multiplier = 1024 ^ 4
+      } else if (unit == "p" || unit == "pb") {
+        multiplier = 1000 ^ 5
+      } else if (unit == "pi" || unit == "pib") {
+        multiplier = 1024 ^ 5
+      } else if (unit == "e" || unit == "eb") {
+        multiplier = 1000 ^ 6
+      } else if (unit == "ei" || unit == "eib") {
+        multiplier = 1024 ^ 6
+      }
+      bytes = number * multiplier
+      if (bytes <= 0) {
+        exit 1
+      }
+      printf "%%.0f", bytes
+    }
+  '
+}
+
+format_cpu_millicores() {
+  printf '%%sm' "$1"
+}
+
+format_bytes_quantity() {
+  local bytes="$1"
+  if [ "${bytes}" -ge 1125899906842624 ] && [ $((bytes %% 1125899906842624)) -eq 0 ]; then
+    printf '%%sPi' "$((bytes / 1125899906842624))"
+    return 0
+  fi
+  if [ "${bytes}" -ge 1099511627776 ] && [ $((bytes %% 1099511627776)) -eq 0 ]; then
+    printf '%%sTi' "$((bytes / 1099511627776))"
+    return 0
+  fi
+  if [ "${bytes}" -ge 1073741824 ] && [ $((bytes %% 1073741824)) -eq 0 ]; then
+    printf '%%sGi' "$((bytes / 1073741824))"
+    return 0
+  fi
+  if [ "${bytes}" -ge 1048576 ] && [ $((bytes %% 1048576)) -eq 0 ]; then
+    printf '%%sMi' "$((bytes / 1048576))"
+    return 0
+  fi
+  if [ "${bytes}" -ge 1024 ] && [ $((bytes %% 1024)) -eq 0 ]; then
+    printf '%%sKi' "$((bytes / 1024))"
+    return 0
+  fi
+  printf '%%s' "${bytes}"
+}
+
+detect_total_cpu_millicores() {
+  local cores=""
+  cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+  if [ -z "${cores}" ] && command -v nproc >/dev/null 2>&1; then
+    cores="$(nproc 2>/dev/null || true)"
+  fi
+  case "${cores}" in
+    ''|*[!0-9]*)
+      return 1
+      ;;
+  esac
+  printf '%%s' "$((cores * 1000))"
+}
+
+detect_total_memory_bytes() {
+  local kib=""
+  kib="$(awk '/MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)"
+  case "${kib}" in
+    ''|*[!0-9]*)
+      return 1
+      ;;
+  esac
+  printf '%%s' "$((kib * 1024))"
+}
+
+detect_total_disk_bytes() {
+  local path="${FUGUE_LIMIT_DISK_PATH:-/}"
+  local bytes=""
+  bytes="$(df -B1 -P "${path}" 2>/dev/null | awk 'NR == 2 {print $2; exit}' || true)"
+  case "${bytes}" in
+    ''|*[!0-9]*)
+      return 1
+      ;;
+  esac
+  printf '%%s' "${bytes}"
+}
+
+FUGUE_EFFECTIVE_LIMIT_CPU=""
+FUGUE_EFFECTIVE_LIMIT_MEMORY=""
+FUGUE_EFFECTIVE_LIMIT_DISK=""
+FUGUE_KUBELET_SYSTEM_RESERVED=""
+
+configure_resource_limits() {
+  local system_reserved=""
+  local total=""
+  local limit=""
+  local reserved=""
+
+  if [ -n "${FUGUE_LIMIT_CPU:-}" ]; then
+    total="$(detect_total_cpu_millicores)" || {
+      echo "unable to detect total node CPU capacity" >&2
+      exit 1
+    }
+    limit="$(parse_cpu_millicores "${FUGUE_LIMIT_CPU}")" || {
+      echo "invalid cpu limit: ${FUGUE_LIMIT_CPU}" >&2
+      exit 1
+    }
+    if [ "${limit}" -gt "${total}" ]; then
+      echo "cpu limit ${FUGUE_LIMIT_CPU} exceeds detected node capacity $(format_cpu_millicores "${total}")" >&2
+      exit 1
+    fi
+    FUGUE_EFFECTIVE_LIMIT_CPU="$(format_cpu_millicores "${limit}")"
+    reserved=$((total - limit))
+    if [ "${reserved}" -gt 0 ]; then
+      system_reserved="$(append_csv_value "${system_reserved}" "cpu=$(format_cpu_millicores "${reserved}")")"
+    fi
+  fi
+
+  if [ -n "${FUGUE_LIMIT_MEMORY:-}" ]; then
+    total="$(detect_total_memory_bytes)" || {
+      echo "unable to detect total node memory" >&2
+      exit 1
+    }
+    limit="$(parse_quantity_bytes "${FUGUE_LIMIT_MEMORY}")" || {
+      echo "invalid memory limit: ${FUGUE_LIMIT_MEMORY}" >&2
+      exit 1
+    }
+    if [ "${limit}" -gt "${total}" ]; then
+      echo "memory limit ${FUGUE_LIMIT_MEMORY} exceeds detected node capacity $(format_bytes_quantity "${total}")" >&2
+      exit 1
+    fi
+    FUGUE_EFFECTIVE_LIMIT_MEMORY="$(format_bytes_quantity "${limit}")"
+    reserved=$((total - limit))
+    if [ "${reserved}" -gt 0 ]; then
+      system_reserved="$(append_csv_value "${system_reserved}" "memory=$(format_bytes_quantity "${reserved}")")"
+    fi
+  fi
+
+  if [ -n "${FUGUE_LIMIT_DISK:-}" ]; then
+    total="$(detect_total_disk_bytes)" || {
+      echo "unable to detect total node disk capacity from ${FUGUE_LIMIT_DISK_PATH}" >&2
+      exit 1
+    }
+    limit="$(parse_quantity_bytes "${FUGUE_LIMIT_DISK}")" || {
+      echo "invalid disk limit: ${FUGUE_LIMIT_DISK}" >&2
+      exit 1
+    }
+    if [ "${limit}" -gt "${total}" ]; then
+      echo "disk limit ${FUGUE_LIMIT_DISK} exceeds detected node capacity $(format_bytes_quantity "${total}") on ${FUGUE_LIMIT_DISK_PATH}" >&2
+      exit 1
+    fi
+    FUGUE_EFFECTIVE_LIMIT_DISK="$(format_bytes_quantity "${limit}")"
+    reserved=$((total - limit))
+    if [ "${reserved}" -gt 0 ]; then
+      system_reserved="$(append_csv_value "${system_reserved}" "ephemeral-storage=$(format_bytes_quantity "${reserved}")")"
+    fi
+  fi
+
+  if [ -n "${system_reserved}" ]; then
+    FUGUE_KUBELET_SYSTEM_RESERVED="system-reserved=${system_reserved}"
+  fi
+
+  if [ -n "${FUGUE_LIMIT_CPU:-}${FUGUE_LIMIT_MEMORY:-}${FUGUE_LIMIT_DISK:-}" ]; then
+    log_step "Applying Fugue resource caps: cpu=${FUGUE_EFFECTIVE_LIMIT_CPU:-unbounded}, memory=${FUGUE_EFFECTIVE_LIMIT_MEMORY:-unbounded}, disk=${FUGUE_EFFECTIVE_LIMIT_DISK:-unbounded}."
+  fi
 }
 
 detect_default_node_name() {
@@ -775,6 +1093,8 @@ restart_k3s_agent_if_needed() {
   systemctl is-active --quiet k3s-agent
 }
 
+parse_args "$@"
+
 if [ "$(id -u)" -ne 0 ]; then
   echo "run with sudo, for example: curl -fsSL ${FUGUE_API_BASE}/install/join-cluster.sh | sudo FUGUE_NODE_KEY=... bash" >&2
   exit 1
@@ -784,6 +1104,8 @@ require_cmd curl
 require_cmd systemctl
 require_cmd ip
 require_cmd cmp
+require_cmd awk
+require_cmd df
 
 if [ -f /etc/systemd/system/k3s.service ] || systemctl list-unit-files 2>/dev/null | grep -q '^k3s\.service'; then
   echo "this VPS already runs k3s server; join-cluster.sh only supports agent nodes" >&2
@@ -831,6 +1153,8 @@ if [ -n "${mesh_provider}" ]; then
   flannel_iface="tailscale0"
 fi
 
+configure_resource_limits
+
 log_step "Preparing k3s agent configuration..."
 mkdir -p /etc/rancher/k3s
 k3s_config_tmp="$(mktemp)"
@@ -846,6 +1170,10 @@ k3s_config_tmp="$(mktemp)"
   fi
   csv_to_yaml_list node-label "${FUGUE_JOIN_NODE_LABELS:-}"
   csv_to_yaml_list node-taint "${FUGUE_JOIN_NODE_TAINTS:-}"
+  if [ -n "${FUGUE_KUBELET_SYSTEM_RESERVED:-}" ]; then
+    printf 'kubelet-arg:\n'
+    printf '  - "%%s"\n' "${FUGUE_KUBELET_SYSTEM_RESERVED}"
+  fi
 } >"${k3s_config_tmp}"
 
 k3s_config_changed=0
@@ -901,6 +1229,10 @@ registry_base=${FUGUE_JOIN_REGISTRY_BASE:-}
 registry_endpoint=${FUGUE_JOIN_REGISTRY_ENDPOINT:-}
 labels=${FUGUE_JOIN_NODE_LABELS}
 taints=${FUGUE_JOIN_NODE_TAINTS}
+resource_limit_cpu=${FUGUE_EFFECTIVE_LIMIT_CPU:-}
+resource_limit_memory=${FUGUE_EFFECTIVE_LIMIT_MEMORY:-}
+resource_limit_disk=${FUGUE_EFFECTIVE_LIMIT_DISK:-}
+kubelet_system_reserved=${FUGUE_KUBELET_SYSTEM_RESERVED:-}
 EOF
 `, strconv.Quote(apiBase))
 }

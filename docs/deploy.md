@@ -315,6 +315,32 @@ Useful optional environment variables for the join script:
 - `FUGUE_MACHINE_FINGERPRINT`: override the stable machine identity used for deduplication
 - `FUGUE_NODE_EXTERNAL_IP`: force the published node external IP
 - `FUGUE_K3S_CHANNEL`: choose the k3s release channel
+- `FUGUE_LIMIT_CPU`: cap Fugue allocatable CPU on the node, for example `2`, `1.5`, or `1500m`
+- `FUGUE_LIMIT_MEMORY`: cap Fugue allocatable memory on the node, for example `4Gi`
+- `FUGUE_LIMIT_DISK`: cap Fugue allocatable ephemeral storage on the node, for example `50Gi`
+- `FUGUE_LIMIT_DISK_PATH`: optional filesystem path used to detect total disk size for `FUGUE_LIMIT_DISK`; defaults to `/`
+
+Example with explicit resource caps:
+
+```bash
+curl -fsSL https://fugue-api.example.com/install/join-cluster.sh | \
+  sudo FUGUE_NODE_KEY='<secret-from-node-key-response>' \
+  FUGUE_NODE_NAME='tenant-node-1' \
+  FUGUE_LIMIT_CPU='2' \
+  FUGUE_LIMIT_MEMORY='4Gi' \
+  FUGUE_LIMIT_DISK='50Gi' \
+  bash
+```
+
+The script also accepts CLI flags if you prefer:
+
+```bash
+curl -fsSL https://fugue-api.example.com/install/join-cluster.sh | \
+  sudo FUGUE_NODE_KEY='<secret-from-node-key-response>' \
+  bash -s -- --cpu 2 --memory 4Gi --disk 50Gi
+```
+
+These caps are applied by translating the requested maximums into kubelet `system-reserved` values. In Kubernetes terms, the disk cap maps to allocatable `ephemeral-storage` on the detected filesystem, so the final allocatable value can be slightly lower after kubelet's own safety reservations.
 
 This path creates a `managed-owned` runtime with `connection_mode=cluster`. Fugue labels the joined node with `fugue.io/runtime-id`, `fugue.io/tenant-id`, and `fugue.io/node-mode=managed-owned`, and taints it with `fugue.io/tenant=<tenant-id>:NoSchedule`.
 

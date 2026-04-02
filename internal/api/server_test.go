@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -240,6 +242,59 @@ func TestJoinClusterInstallScriptAvoidsRedundantRestarts(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected join-cluster install script to contain %q", want)
 		}
+	}
+}
+
+func TestJoinClusterInstallScriptSupportsResourceCaps(t *testing.T) {
+	t.Parallel()
+
+	var server Server
+	script := server.joinClusterInstallScript("https://api.fugue.pro")
+
+	for _, want := range []string{
+		`FUGUE_LIMIT_CPU`,
+		`FUGUE_LIMIT_MEMORY`,
+		`FUGUE_LIMIT_DISK`,
+		`FUGUE_LIMIT_DISK_PATH`,
+		`--cpu LIMIT`,
+		`--memory LIMIT`,
+		`--disk LIMIT`,
+		`parse_args "$@"`,
+		`parse_cpu_millicores() {`,
+		`parse_quantity_bytes() {`,
+		`configure_resource_limits() {`,
+		`system-reserved=${system_reserved}`,
+		`ephemeral-storage=$(format_bytes_quantity "${reserved}")`,
+		`printf 'kubelet-arg:\n'`,
+		`FUGUE_KUBELET_SYSTEM_RESERVED="system-reserved=${system_reserved}"`,
+		`resource_limit_cpu=${FUGUE_EFFECTIVE_LIMIT_CPU:-}`,
+		`resource_limit_memory=${FUGUE_EFFECTIVE_LIMIT_MEMORY:-}`,
+		`resource_limit_disk=${FUGUE_EFFECTIVE_LIMIT_DISK:-}`,
+		`kubelet_system_reserved=${FUGUE_KUBELET_SYSTEM_RESERVED:-}`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected join-cluster install script to contain %q", want)
+		}
+	}
+}
+
+func TestJoinClusterInstallScriptHasValidBashSyntax(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	var server Server
+	script := server.joinClusterInstallScript("https://api.fugue.pro")
+	scriptPath := filepath.Join(t.TempDir(), "join-cluster.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write join-cluster script: %v", err)
+	}
+
+	cmd := exec.Command("bash", "-n", scriptPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("bash -n %s: %v\n%s", scriptPath, err, output)
 	}
 }
 
