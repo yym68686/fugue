@@ -3254,6 +3254,10 @@ func TestSetTenantBillingBalanceRecordsSignedAdjustments(t *testing.T) {
 		"actor_id":   "bootstrap-admin",
 	}
 
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.ResourceSpec{}); err != nil {
+		t.Fatalf("pause managed billing before balance adjustments: %v", err)
+	}
+
 	if _, err := s.SetTenantBillingBalance(tenant.ID, 0, metadata); err != nil {
 		t.Fatalf("set balance to zero: %v", err)
 	}
