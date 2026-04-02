@@ -709,6 +709,7 @@ restore_primary_mesh_network_if_needed() {
   local primary_node_name=""
   local primary_config=""
   local primary_private_ip=""
+  local primary_private_ip_cmd=""
   local primary_mesh_ip=""
   local current_node_ip=""
   local current_external_ip=""
@@ -731,7 +732,11 @@ restore_primary_mesh_network_if_needed() {
     return 0
   fi
 
-  primary_private_ip="$(run_primary_host_root_command "${primary_node_name}" "ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if (\\$i==\"src\") {print \\$(i+1); exit}}'" | tr -d '\r')"
+  primary_private_ip_cmd="$(cat <<'EOF'
+ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}'
+EOF
+)"
+  primary_private_ip="$(run_primary_host_root_command "${primary_node_name}" "${primary_private_ip_cmd}" | tr -d '\r')"
   [[ -n "${primary_private_ip}" ]] || fail "failed to detect the primary private IP while restoring mesh networking"
 
   primary_config="$(run_primary_host_root_command "${primary_node_name}" "cat /etc/rancher/k3s/config.yaml 2>/dev/null || true")"
