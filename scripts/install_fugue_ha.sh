@@ -198,11 +198,76 @@ maybe_reuse_existing_bootstrap_key() {
   fi
 
   local existing_key=""
-  existing_key="$(ssh_root_run "${PRIMARY_ALIAS}" "KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n $(printf '%q' "${NAMESPACE}") get secret $(printf '%q' "${CONFIG_SECRET_NAME}") -o jsonpath='{.data.FUGUE_BOOTSTRAP_ADMIN_KEY}' 2>/dev/null | base64 -d 2>/dev/null || true")"
+  existing_key="$(read_existing_config_secret_value "FUGUE_BOOTSTRAP_ADMIN_KEY")"
   if [[ -n "${existing_key}" ]]; then
     BOOTSTRAP_KEY="${existing_key}"
     log "reusing existing bootstrap admin key from ${NAMESPACE}/${CONFIG_SECRET_NAME}"
   fi
+}
+
+read_existing_config_secret_value() {
+  local key="$1"
+  local jsonpath=""
+  jsonpath="{.data.${key}}"
+  ssh_root_run "${PRIMARY_ALIAS}" "KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n $(printf '%q' "${NAMESPACE}") get secret $(printf '%q' "${CONFIG_SECRET_NAME}") -o jsonpath=$(printf '%q' "${jsonpath}") 2>/dev/null | base64 -d 2>/dev/null || true"
+}
+
+existing_cluster_join_mesh_provider() {
+  read_existing_config_secret_value "FUGUE_CLUSTER_JOIN_MESH_PROVIDER"
+}
+
+existing_cluster_join_mesh_login_server() {
+  read_existing_config_secret_value "FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER"
+}
+
+mesh_domain_from_login_server() {
+  local login_server="${1:-}"
+  login_server="${login_server#*://}"
+  login_server="${login_server%%/*}"
+  login_server="${login_server%%:*}"
+  if [[ -n "${login_server}" ]]; then
+    printf '%s' "${login_server}"
+  fi
+}
+
+expected_edge_proxy_mesh_domain() {
+  local login_server=""
+  if mesh_enabled; then
+    printf '%s' "${FUGUE_MESH_DOMAIN}"
+    return 0
+  fi
+  if [[ "$(existing_cluster_join_mesh_provider)" != "tailscale" ]]; then
+    return 1
+  fi
+  login_server="$(existing_cluster_join_mesh_login_server)"
+  [[ -n "${login_server}" ]] || return 1
+  mesh_domain_from_login_server "${login_server}"
+}
+
+maybe_reuse_existing_mesh_edge_settings() {
+  local provider=""
+  local login_server=""
+  local mesh_domain=""
+
+  if mesh_enabled; then
+    return 0
+  fi
+
+  provider="$(existing_cluster_join_mesh_provider)"
+  if [[ "${provider}" != "tailscale" ]]; then
+    return 0
+  fi
+
+  login_server="$(existing_cluster_join_mesh_login_server)"
+  [[ -n "${login_server}" ]] || return 0
+
+  mesh_domain="$(mesh_domain_from_login_server "${login_server}")"
+  [[ -n "${mesh_domain}" ]] || fail "failed to parse mesh domain from existing login server ${login_server}"
+
+  FUGUE_MESH_ENABLED="true"
+  FUGUE_MESH_PROVIDER="${provider}"
+  FUGUE_MESH_DOMAIN="${mesh_domain}"
+  log "reusing existing mesh edge routing from ${NAMESPACE}/${CONFIG_SECRET_NAME} (${login_server})"
 }
 
 maybe_reuse_existing_mesh_auth_key() {
@@ -211,7 +276,7 @@ maybe_reuse_existing_mesh_auth_key() {
   fi
 
   local existing_key=""
-  existing_key="$(ssh_root_run "${PRIMARY_ALIAS}" "KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n $(printf '%q' "${NAMESPACE}") get secret $(printf '%q' "${CONFIG_SECRET_NAME}") -o jsonpath='{.data.FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY}' 2>/dev/null | base64 -d 2>/dev/null || true")"
+  existing_key="$(read_existing_config_secret_value "FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY")"
   if [[ -n "${existing_key}" ]]; then
     FUGUE_MESH_AUTH_KEY="${existing_key}"
     log "reusing existing mesh auth key from ${NAMESPACE}/${CONFIG_SECRET_NAME}"
@@ -224,7 +289,7 @@ maybe_reuse_existing_edge_tls_ask_token() {
   fi
 
   local existing_key=""
-  existing_key="$(ssh_root_run "${PRIMARY_ALIAS}" "KUBECONFIG=/etc/rancher/k3s/k3s.yaml k3s kubectl -n $(printf '%q' "${NAMESPACE}") get secret $(printf '%q' "${CONFIG_SECRET_NAME}") -o jsonpath='{.data.FUGUE_EDGE_TLS_ASK_TOKEN}' 2>/dev/null | base64 -d 2>/dev/null || true")"
+  existing_key="$(read_existing_config_secret_value "FUGUE_EDGE_TLS_ASK_TOKEN")"
   if [[ -n "${existing_key}" ]]; then
     FUGUE_EDGE_TLS_ASK_TOKEN="${existing_key}"
     log "reusing existing edge TLS ask token from ${NAMESPACE}/${CONFIG_SECRET_NAME}"
@@ -1341,6 +1406,11 @@ verify_edge_proxy_config_on_primary() {
     "https://*.${FUGUE_APP_BASE_DOMAIN} {"
     "import /etc/caddy/fugue-custom-domains.caddy"
   )
+  local expected_mesh_domain=""
+  expected_mesh_domain="$(expected_edge_proxy_mesh_domain || true)"
+  if [[ -n "${expected_mesh_domain}" ]]; then
+    expected_sites+=("https://${expected_mesh_domain} {")
+  fi
 
   local site_pattern=""
   for site_pattern in "${expected_sites[@]}"; do

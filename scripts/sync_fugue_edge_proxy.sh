@@ -12,12 +12,16 @@ main() {
   require_cmd openssl
 
   detect_api_ip
+  maybe_reuse_existing_mesh_edge_settings
   maybe_reuse_existing_edge_tls_ask_token
   [[ -n "${FUGUE_EDGE_TLS_ASK_TOKEN}" ]] || fail "failed to detect FUGUE edge TLS ask token"
 
   log "syncing Route A edge proxy on ${PRIMARY_ALIAS}"
   log "configured Route A domain: ${FUGUE_DOMAIN}"
   log "configured app base domain: ${FUGUE_APP_BASE_DOMAIN}"
+  if mesh_enabled; then
+    log "configured mesh domain: ${FUGUE_MESH_DOMAIN}"
+  fi
   log "detected API IP: ${K3S_API_IP}"
 
   install_edge_proxy_on_primary
