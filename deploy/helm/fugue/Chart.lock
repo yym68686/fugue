@@ -1,0 +1,9 @@
+dependencies:
+- name: cloudnative-pg
+  repository: https://cloudnative-pg.github.io/charts
+  version: 0.28.0
+- name: volsync
+  repository: https://backube.github.io/helm-charts
+  version: 0.15.0
+digest: sha256:0337014c7edcffcb2699ace27a1fa16341dab5cbc574ce546e6efa880a3ff852
+generated: "2026-04-02T07:42:55.312834903Z"

@@ -4,3 +4,12 @@ description: Fugue control plane MVP for multi-tenant deployment and runtime orc
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
+dependencies:
+  - name: cloudnative-pg
+    version: 0.28.0
+    repository: https://cloudnative-pg.github.io/charts
+    condition: cnpg.enabled
+  - name: volsync
+    version: 0.15.0
+    repository: https://backube.github.io/helm-charts
+    condition: volsync.enabled

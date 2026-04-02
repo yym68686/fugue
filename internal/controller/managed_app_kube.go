@@ -210,7 +210,11 @@ func (c *kubeClient) listDeploymentNamesByLabel(ctx context.Context, namespace, 
 }
 
 func (c *kubeClient) listCloudNativePGClusterNamesByLabel(ctx context.Context, namespace, labelSelector string) ([]string, error) {
-	return c.listNamespacedResourceNames(ctx, "/apis/postgresql.cnpg.io/v1/namespaces/"+c.effectiveNamespace(namespace)+"/clusters", labelSelector)
+	names, err := c.listNamespacedResourceNames(ctx, "/apis/postgresql.cnpg.io/v1/namespaces/"+c.effectiveNamespace(namespace)+"/clusters", labelSelector)
+	if isKubernetesResourceNotFound(err) {
+		return nil, nil
+	}
+	return names, err
 }
 
 func (c *kubeClient) listServiceNamesByLabel(ctx context.Context, namespace, labelSelector string) ([]string, error) {
@@ -222,11 +226,19 @@ func (c *kubeClient) listPersistentVolumeClaimNamesByLabel(ctx context.Context, 
 }
 
 func (c *kubeClient) listVolSyncReplicationDestinationNamesByLabel(ctx context.Context, namespace, labelSelector string) ([]string, error) {
-	return c.listNamespacedResourceNames(ctx, "/apis/volsync.backube/v1alpha1/namespaces/"+c.effectiveNamespace(namespace)+"/replicationdestinations", labelSelector)
+	names, err := c.listNamespacedResourceNames(ctx, "/apis/volsync.backube/v1alpha1/namespaces/"+c.effectiveNamespace(namespace)+"/replicationdestinations", labelSelector)
+	if isKubernetesResourceNotFound(err) {
+		return nil, nil
+	}
+	return names, err
 }
 
 func (c *kubeClient) listVolSyncReplicationSourceNamesByLabel(ctx context.Context, namespace, labelSelector string) ([]string, error) {
-	return c.listNamespacedResourceNames(ctx, "/apis/volsync.backube/v1alpha1/namespaces/"+c.effectiveNamespace(namespace)+"/replicationsources", labelSelector)
+	names, err := c.listNamespacedResourceNames(ctx, "/apis/volsync.backube/v1alpha1/namespaces/"+c.effectiveNamespace(namespace)+"/replicationsources", labelSelector)
+	if isKubernetesResourceNotFound(err) {
+		return nil, nil
+	}
+	return names, err
 }
 
 func (c *kubeClient) listSecretNamesByLabel(ctx context.Context, namespace, labelSelector string) ([]string, error) {
@@ -379,10 +391,19 @@ func normalizeDeleteNotFound(err error) error {
 	if err == nil {
 		return nil
 	}
-	if strings.Contains(err.Error(), "status=404") {
+	if isKubernetesResourceNotFound(err) {
 		return nil
 	}
 	return err
+}
+
+func isKubernetesResourceNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "status=404") ||
+		strings.Contains(message, "could not find the requested resource")
 }
 
 func shouldRecreateDeploymentAfterImmutableSelector(obj map[string]any, err error) bool {

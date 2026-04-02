@@ -233,6 +233,11 @@ func TestBuildAppObjectsIncludesPersistentWorkspaceSidecar(t *testing.T) {
 	if got := replicationDestination["kind"]; got != VolSyncReplicationDestinationKind {
 		t.Fatalf("expected workspace replication destination, got %#v", got)
 	}
+	destinationSpec := replicationDestination["spec"].(map[string]any)
+	destinationRsyncTLS := destinationSpec["rsyncTLS"].(map[string]any)
+	if got := destinationRsyncTLS["copyMethod"]; got != "Direct" {
+		t.Fatalf("expected workspace replication destination copyMethod %q, got %#v", "Direct", got)
+	}
 
 	strategy := deployment["spec"].(map[string]any)["strategy"].(map[string]any)
 	if got := strategy["type"]; got != "Recreate" {
@@ -442,6 +447,158 @@ func TestBuildManagedPostgresObjectsUseStableSelectors(t *testing.T) {
 	}
 }
 
+func TestBuildAppObjectsKeepsLegacyManagedPostgresResourcesWhenStoragePathPresent(t *testing.T) {
+	app := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "legacy-postgres-demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+		BackingServices: []model.BackingService{
+			{
+				ID:          "service_demo",
+				TenantID:    "tenant_demo",
+				ProjectID:   "project_demo",
+				OwnerAppID:  "app_demo",
+				Name:        "legacy-postgres-demo",
+				Type:        model.BackingServiceTypePostgres,
+				Provisioner: model.BackingServiceProvisionerManaged,
+				Status:      model.BackingServiceStatusActive,
+				Spec: model.BackingServiceSpec{
+					Postgres: &model.AppPostgresSpec{
+						Image:       "postgres:16-alpine",
+						Database:    "demo",
+						User:        "postgres",
+						Password:    "secret",
+						ServiceName: "legacy-postgres-demo-postgres",
+						StoragePath: "/var/lib/fugue/tenant-data/fg-tenant-demo/legacy-postgres-demo/postgres",
+						StorageSize: "2Gi",
+						Instances:   1,
+						Resources:   &model.ResourceSpec{CPUMilliCores: 250, MemoryMebibytes: 512},
+					},
+				},
+			},
+		},
+		Bindings: []model.ServiceBinding{
+			{
+				ID:        "binding_demo",
+				TenantID:  "tenant_demo",
+				AppID:     "app_demo",
+				ServiceID: "service_demo",
+				Alias:     "postgres",
+			},
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	if len(objects) != 8 {
+		t.Fatalf("expected 8 objects, got %d", len(objects))
+	}
+
+	aliasService := objects[2]
+	if got := aliasService["kind"]; got != "Service" {
+		t.Fatalf("expected alias service, got %#v", got)
+	}
+	aliasSpec := aliasService["spec"].(map[string]any)
+	if got := aliasSpec["type"]; got != "ExternalName" {
+		t.Fatalf("expected alias service type ExternalName, got %#v", got)
+	}
+	if got := aliasSpec["externalName"]; got != "legacy-postgres-demo-postgres-rw" {
+		t.Fatalf("expected alias external name, got %#v", got)
+	}
+
+	rwService := objects[3]
+	if got := rwService["kind"]; got != "Service" {
+		t.Fatalf("expected read-write service, got %#v", got)
+	}
+	rwMetadata := rwService["metadata"].(map[string]any)
+	if got := rwMetadata["name"]; got != "legacy-postgres-demo-postgres-rw" {
+		t.Fatalf("expected read-write service name, got %#v", got)
+	}
+	rwSpec := rwService["spec"].(map[string]any)
+	selector := rwSpec["selector"].(map[string]string)
+	if got := selector[FugueLabelName]; got != "legacy-postgres-demo-postgres" {
+		t.Fatalf("expected selector label %s=%q, got %#v", FugueLabelName, "legacy-postgres-demo-postgres", got)
+	}
+
+	postgresPVC := objects[4]
+	if got := postgresPVC["kind"]; got != "PersistentVolumeClaim" {
+		t.Fatalf("expected postgres pvc, got %#v", got)
+	}
+	pvcSpec := postgresPVC["spec"].(map[string]any)
+	requests := pvcSpec["resources"].(map[string]any)["requests"].(map[string]any)
+	if got := requests["storage"]; got != "2Gi" {
+		t.Fatalf("expected legacy postgres pvc storage %q, got %#v", "2Gi", got)
+	}
+
+	postgresDeployment := objects[5]
+	if got := postgresDeployment["kind"]; got != "Deployment" {
+		t.Fatalf("expected legacy postgres deployment, got %#v", got)
+	}
+	if got := postgresDeployment["metadata"].(map[string]any)["name"]; got != "legacy-postgres-demo-postgres" {
+		t.Fatalf("expected legacy postgres deployment name, got %#v", got)
+	}
+}
+
+func TestManagedBackingServiceDeploymentsUseLegacyDeploymentWhenStoragePathPresent(t *testing.T) {
+	app := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "legacy-postgres-demo",
+		BackingServices: []model.BackingService{
+			{
+				ID:          "service_demo",
+				TenantID:    "tenant_demo",
+				ProjectID:   "project_demo",
+				OwnerAppID:  "app_demo",
+				Name:        "legacy-postgres-demo",
+				Type:        model.BackingServiceTypePostgres,
+				Provisioner: model.BackingServiceProvisionerManaged,
+				Status:      model.BackingServiceStatusActive,
+				Spec: model.BackingServiceSpec{
+					Postgres: &model.AppPostgresSpec{
+						Image:       "postgres:16-alpine",
+						Database:    "demo",
+						User:        "postgres",
+						Password:    "secret",
+						ServiceName: "legacy-postgres-demo-postgres",
+						StoragePath: "/var/lib/fugue/tenant-data/fg-tenant-demo/legacy-postgres-demo/postgres",
+						Instances:   1,
+					},
+				},
+			},
+		},
+		Bindings: []model.ServiceBinding{
+			{
+				ID:        "binding_demo",
+				TenantID:  "tenant_demo",
+				AppID:     "app_demo",
+				ServiceID: "service_demo",
+			},
+		},
+	}
+
+	deployments := ManagedBackingServiceDeployments(app, SchedulingConstraints{})
+	if len(deployments) != 1 {
+		t.Fatalf("expected one managed backing service deployment, got %d", len(deployments))
+	}
+	if deployments[0].ResourceKind != "Deployment" {
+		t.Fatalf("expected legacy deployment resource kind, got %q", deployments[0].ResourceKind)
+	}
+	if deployments[0].ResourceName != "legacy-postgres-demo-postgres" {
+		t.Fatalf("unexpected resource name %q", deployments[0].ResourceName)
+	}
+	if deployments[0].RuntimeKey == "" {
+		t.Fatal("expected runtime key for legacy deployment")
+	}
+}
+
 func TestBuildWorkspaceReplicationSourceObject(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",
@@ -467,6 +624,9 @@ func TestBuildWorkspaceReplicationSourceObject(t *testing.T) {
 	}
 	if got := rsyncTLS["keySecret"]; got != "workspace-rsync-key" {
 		t.Fatalf("expected rsync key secret, got %#v", got)
+	}
+	if got := rsyncTLS["copyMethod"]; got != "Direct" {
+		t.Fatalf("expected rsync copyMethod %q, got %#v", "Direct", got)
 	}
 }
 

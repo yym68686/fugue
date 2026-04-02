@@ -56,12 +56,7 @@ func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, o
 	}
 
 	for _, postgres := range postgresResources {
-		postgresLabels := postgresLabels(postgres)
-		objects = append(objects,
-			buildPostgresSecretObject(namespace, postgres.secretName, postgresLabels, postgres.spec),
-			buildPostgresServiceObject(namespace, postgres.resourceName, postgresLabels, postgres.spec),
-			buildPostgresClusterObject(namespace, postgres.secretName, postgres.resourceName, postgresLabels, postgres.spec),
-		)
+		objects = append(objects, buildManagedPostgresObjects(namespace, postgres, scheduling)...)
 	}
 
 	objects = append(objects,
@@ -245,6 +240,29 @@ func buildPostgresServiceObject(namespace, resourceName string, labels map[strin
 	}
 }
 
+func buildPostgresReadWriteServiceObject(namespace, resourceName string, labels map[string]string) map[string]any {
+	return map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Service",
+		"metadata": map[string]any{
+			"name":      postgresRWServiceName(resourceName),
+			"namespace": namespace,
+			"labels":    labels,
+		},
+		"spec": map[string]any{
+			"selector": postgresSelectorLabels(labels),
+			"ports": []map[string]any{
+				{
+					"name":       "tcp-5432",
+					"port":       5432,
+					"targetPort": 5432,
+					"protocol":   "TCP",
+				},
+			},
+		},
+	}
+}
+
 func buildPostgresDeploymentObject(namespace, secretName, resourceName string, labels map[string]string, spec model.AppPostgresSpec, scheduling SchedulingConstraints) map[string]any {
 	selectorLabels := postgresSelectorLabels(labels)
 	resourceRequirements := runtimeResourceRequirements(spec.Resources, model.DefaultManagedPostgresResources())
@@ -354,7 +372,18 @@ func buildPostgresDeploymentObject(namespace, secretName, resourceName string, l
 	}
 }
 
-func buildPostgresPVCObject(namespace, resourceName string, labels map[string]string) map[string]any {
+func buildPostgresPVCObject(namespace, resourceName string, labels map[string]string, spec model.AppPostgresSpec) map[string]any {
+	pvcSpec := map[string]any{
+		"accessModes": []string{"ReadWriteOnce"},
+		"resources": map[string]any{
+			"requests": map[string]any{
+				"storage": spec.StorageSize,
+			},
+		},
+	}
+	if strings.TrimSpace(spec.StorageClassName) != "" {
+		pvcSpec["storageClassName"] = strings.TrimSpace(spec.StorageClassName)
+	}
 	return map[string]any{
 		"apiVersion": "v1",
 		"kind":       "PersistentVolumeClaim",
@@ -363,15 +392,26 @@ func buildPostgresPVCObject(namespace, resourceName string, labels map[string]st
 			"namespace": namespace,
 			"labels":    labels,
 		},
-		"spec": map[string]any{
-			"accessModes": []string{"ReadWriteOnce"},
-			"resources": map[string]any{
-				"requests": map[string]any{
-					"storage": defaultPostgresStorage,
-				},
-			},
-		},
+		"spec": pvcSpec,
 	}
+}
+
+func buildManagedPostgresObjects(namespace string, resource postgresRuntimeResource, scheduling SchedulingConstraints) []map[string]any {
+	labels := postgresLabels(resource)
+	objects := []map[string]any{
+		buildPostgresSecretObject(namespace, resource.secretName, labels, resource.spec),
+		buildPostgresServiceObject(namespace, resource.resourceName, labels, resource.spec),
+	}
+	if managedPostgresUsesLegacyResources(resource.spec) {
+		return append(objects,
+			buildPostgresReadWriteServiceObject(namespace, resource.resourceName, labels),
+			buildPostgresPVCObject(namespace, resource.resourceName, labels, resource.spec),
+			buildPostgresDeploymentObject(namespace, resource.secretName, resource.resourceName, labels, resource.spec, scheduling),
+		)
+	}
+	return append(objects,
+		buildPostgresClusterObject(namespace, resource.secretName, resource.resourceName, labels, resource.spec),
+	)
 }
 
 func buildAppDeploymentObject(namespace string, app model.App, labels map[string]string, scheduling SchedulingConstraints, postgresResources []postgresRuntimeResource) map[string]any {
@@ -582,10 +622,15 @@ func ManagedBackingServiceDeployments(app model.App, scheduling SchedulingConstr
 			continue
 		}
 		object := buildPostgresClusterObject(namespace, resource.secretName, resource.resourceName, postgresLabels(resource), resource.spec)
+		resourceKind := CloudNativePGClusterKind
+		if managedPostgresUsesLegacyResources(resource.spec) {
+			object = buildPostgresDeploymentObject(namespace, resource.secretName, resource.resourceName, postgresLabels(resource), resource.spec, scheduling)
+			resourceKind = "Deployment"
+		}
 		deployments = append(deployments, ManagedBackingServiceDeployment{
 			ServiceID:    resource.serviceID,
 			ResourceName: resource.resourceName,
-			ResourceKind: CloudNativePGClusterKind,
+			ResourceKind: resourceKind,
 			RuntimeKey:   managedDeploymentRuntimeKey(object),
 		})
 	}
@@ -861,6 +906,10 @@ func normalizeRuntimePostgresSpec(_ string, baseName string, spec model.AppPostg
 	return spec
 }
 
+func managedPostgresUsesLegacyResources(spec model.AppPostgresSpec) bool {
+	return strings.TrimSpace(spec.StoragePath) != ""
+}
+
 func normalizeRuntimeAppWorkspaceSpec(app model.App) *model.AppWorkspaceSpec {
 	if app.Spec.Workspace == nil {
 		return nil
@@ -949,7 +998,7 @@ func buildAppWorkspacePVCObject(namespace string, app model.App, labels map[stri
 
 func buildWorkspaceReplicationDestinationObject(namespace string, app model.App, labels map[string]string, spec model.AppWorkspaceSpec) map[string]any {
 	rsyncTLS := map[string]any{
-		"copyMethod": "Snapshot",
+		"copyMethod": "Direct",
 		"capacity":   spec.StorageSize,
 		"accessModes": []string{
 			"ReadWriteOnce",
@@ -994,7 +1043,7 @@ func BuildWorkspaceReplicationSourceObject(app model.App, ownerRef *OwnerReferen
 			"rsyncTLS": map[string]any{
 				"address":    strings.TrimSpace(address),
 				"keySecret":  strings.TrimSpace(keySecret),
-				"copyMethod": "Snapshot",
+				"copyMethod": "Direct",
 			},
 		},
 	}

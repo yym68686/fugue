@@ -172,6 +172,33 @@ persistence:
 rbac:
   create: true
 
+cnpg:
+  enabled: true
+  crds:
+    create: true
+  config:
+    clusterWide: true
+
+volsync:
+  enabled: true
+  manageCRDs: true
+
+snapshotController:
+  enabled: true
+  replicaCount: 2
+  minReadySeconds: 35
+  image:
+    repository: registry.k8s.io/sig-storage/snapshot-controller
+    tag: v8.4.0
+    pullPolicy: IfNotPresent
+  extraArgs:
+    - --v=5
+    - --leader-election=true
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  resources: {}
+
 ingress:
   enabled: false
   className: ""

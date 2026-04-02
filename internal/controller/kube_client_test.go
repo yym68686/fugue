@@ -104,3 +104,68 @@ func TestApplyObjectRecreatesDeploymentAfterImmutableSelectorError(t *testing.T)
 		}
 	}
 }
+
+func TestCustomResourceListingsIgnoreMissingAPI(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		apiPath string
+		call    func(context.Context, *kubeClient) ([]string, error)
+	}{
+		{
+			name:    "cnpg clusters",
+			apiPath: "/apis/postgresql.cnpg.io/v1/namespaces/tenant-demo/clusters",
+			call: func(ctx context.Context, client *kubeClient) ([]string, error) {
+				return client.listCloudNativePGClusterNamesByLabel(ctx, "tenant-demo", "fugue.pro/owner-app-id=app_demo")
+			},
+		},
+		{
+			name:    "volsync destinations",
+			apiPath: "/apis/volsync.backube/v1alpha1/namespaces/tenant-demo/replicationdestinations",
+			call: func(ctx context.Context, client *kubeClient) ([]string, error) {
+				return client.listVolSyncReplicationDestinationNamesByLabel(ctx, "tenant-demo", "fugue.pro/owner-app-id=app_demo")
+			},
+		},
+		{
+			name:    "volsync sources",
+			apiPath: "/apis/volsync.backube/v1alpha1/namespaces/tenant-demo/replicationsources",
+			call: func(ctx context.Context, client *kubeClient) ([]string, error) {
+				return client.listVolSyncReplicationSourceNamesByLabel(ctx, "tenant-demo", "fugue.pro/owner-app-id=app_demo")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			client := &kubeClient{
+				client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if req.Method != http.MethodGet || req.URL.Path != tt.apiPath {
+						t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+					}
+					if got := req.URL.Query().Get("labelSelector"); got != "fugue.pro/owner-app-id=app_demo" {
+						t.Fatalf("unexpected label selector %q", got)
+					}
+					return &http.Response{
+						StatusCode: http.StatusNotFound,
+						Body:       io.NopCloser(strings.NewReader(`{"kind":"Status","status":"Failure","message":"the server could not find the requested resource","reason":"NotFound","code":404}`)),
+						Header:     make(http.Header),
+					}, nil
+				})},
+				baseURL:     "http://kube.test",
+				bearerToken: "token",
+				namespace:   "tenant-demo",
+			}
+
+			names, err := tt.call(context.Background(), client)
+			if err != nil {
+				t.Fatalf("list resources: %v", err)
+			}
+			if len(names) != 0 {
+				t.Fatalf("expected no resources, got %v", names)
+			}
+		})
+	}
+}

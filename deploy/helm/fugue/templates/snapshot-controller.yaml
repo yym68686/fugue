@@ -1,0 +1,161 @@
+{{- if .Values.snapshotController.enabled }}
+{{- $snapshotNodeSelector := default .Values.nodeSelector .Values.snapshotController.nodeSelector -}}
+{{- $snapshotTolerations := default .Values.tolerations .Values.snapshotController.tolerations -}}
+{{- $snapshotAffinity := default .Values.affinity .Values.snapshotController.affinity -}}
+{{- $snapshotName := printf "%s-snapshot-controller" (include "fugue.fullname" .) -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $snapshotName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "snapshot-controller") | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $snapshotName }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "snapshot-controller") | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch", "create", "update", "patch"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotcontents"]
+    verbs: ["create", "get", "list", "watch", "update", "delete", "patch"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotcontents/status"]
+    verbs: ["patch"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots/status"]
+    verbs: ["update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $snapshotName }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "snapshot-controller") | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $snapshotName }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $snapshotName }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $snapshotName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "snapshot-controller") | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "watch", "list", "delete", "update", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $snapshotName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "snapshot-controller") | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $snapshotName }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $snapshotName }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $snapshotName }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "snapshot-controller") | nindent 4 }}
+spec:
+  replicas: {{ .Values.snapshotController.replicaCount }}
+  minReadySeconds: {{ .Values.snapshotController.minReadySeconds }}
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "snapshot-controller") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "snapshot-controller") | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ $snapshotName }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: snapshot-controller
+          image: "{{ .Values.snapshotController.image.repository }}:{{ .Values.snapshotController.image.tag }}"
+          imagePullPolicy: {{ .Values.snapshotController.image.pullPolicy }}
+          args:
+            {{- toYaml .Values.snapshotController.extraArgs | nindent 12 }}
+          resources:
+            {{- toYaml .Values.snapshotController.resources | nindent 12 }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "snapshot-controller") | nindent 14 }}
+      {{- with $snapshotNodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $snapshotAffinity }}
+      affinity:
+        {{- toYaml $snapshotAffinity | nindent 8 }}
+      {{- else }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "snapshot-controller") | nindent 20 }}
+      {{- end }}
+      {{- with $snapshotTolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
