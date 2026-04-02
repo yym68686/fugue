@@ -379,7 +379,7 @@ release_pod_selector() {
   printf 'app.kubernetes.io/instance=%s,app.kubernetes.io/name=fugue' "${FUGUE_RELEASE_NAME}"
 }
 
-release_pod_count_by_phase() {
+release_pod_names_by_phase() {
   local phase="$1"
   local output=""
 
@@ -387,43 +387,62 @@ release_pod_count_by_phase() {
     output="$(timeout 30s ${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
       -l "$(release_pod_selector)" \
       --field-selector "status.phase=${phase}" \
-      --no-headers 2>/dev/null || true)"
+      -o name 2>/dev/null || true)"
   else
     output="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
       -l "$(release_pod_selector)" \
       --field-selector "status.phase=${phase}" \
-      --no-headers 2>/dev/null || true)"
+      -o name 2>/dev/null || true)"
   fi
 
-  printf '%s\n' "${output}" | awk 'NF > 0 {count++} END {print count + 0}'
+  printf '%s\n' "${output}" | awk 'NF > 0'
+}
+
+delete_release_pod_batch() {
+  local phase="$1"
+  shift
+  [[ "$#" -gt 0 ]] || return 0
+
+  if command_exists timeout; then
+    if timeout 60s ${KUBECTL} -n "${FUGUE_NAMESPACE}" delete \
+      --ignore-not-found \
+      --wait=false "$@" >/dev/null 2>&1; then
+      return 0
+    fi
+    log "warning: failed to delete a batch of ${phase} Fugue release pods from ${FUGUE_NAMESPACE}"
+    return 0
+  fi
+
+  if ! ${KUBECTL} -n "${FUGUE_NAMESPACE}" delete \
+    --ignore-not-found \
+    --wait=false "$@" >/dev/null 2>&1; then
+    log "warning: failed to delete a batch of ${phase} Fugue release pods from ${FUGUE_NAMESPACE}"
+  fi
 }
 
 prune_release_pods_by_phase() {
   local phase="$1"
+  local names=""
   local count=""
+  local name=""
+  local -a batch=()
 
-  count="$(release_pod_count_by_phase "${phase}")"
+  names="$(release_pod_names_by_phase "${phase}")"
+  count="$(printf '%s\n' "${names}" | awk 'NF > 0 {count++} END {print count + 0}')"
   [[ "${count}" != "0" ]] || return 0
-
   log "deleting ${count} ${phase} Fugue release pods from ${FUGUE_NAMESPACE}"
-  if command_exists timeout; then
-    if timeout 60s ${KUBECTL} -n "${FUGUE_NAMESPACE}" delete pod \
-      -l "$(release_pod_selector)" \
-      --field-selector "status.phase=${phase}" \
-      --ignore-not-found \
-      --wait=false >/dev/null 2>&1; then
-      return 0
-    fi
-    log "warning: failed to delete ${phase} Fugue release pods from ${FUGUE_NAMESPACE}"
-    return 0
-  fi
 
-  if ! ${KUBECTL} -n "${FUGUE_NAMESPACE}" delete pod \
-    -l "$(release_pod_selector)" \
-    --field-selector "status.phase=${phase}" \
-    --ignore-not-found \
-    --wait=false >/dev/null 2>&1; then
-    log "warning: failed to delete ${phase} Fugue release pods from ${FUGUE_NAMESPACE}"
+  while IFS= read -r name; do
+    [[ -n "${name}" ]] || continue
+    batch+=("${name}")
+    if (( ${#batch[@]} == 50 )); then
+      delete_release_pod_batch "${phase}" "${batch[@]}"
+      batch=()
+    fi
+  done <<< "${names}"
+
+  if (( ${#batch[@]} > 0 )); then
+    delete_release_pod_batch "${phase}" "${batch[@]}"
   fi
 }
 
@@ -436,6 +455,7 @@ prune_terminated_release_pods() {
 recover_primary_node_if_needed() {
   local primary_node_name=""
   local restart_cmd=""
+  local restarted_via_ssh="false"
 
   primary_node_name="$(detect_primary_node_name)"
   if [[ -z "${primary_node_name}" ]]; then
@@ -462,12 +482,17 @@ systemctl is-active --quiet k3s
 EOF
 )"
 
-  if ! run_primary_host_root_command "${primary_node_name}" "${restart_cmd}"; then
-    fail "primary node recovery failed while restarting k3s on ${primary_node_name}"
+  if run_primary_host_root_command "${primary_node_name}" "${restart_cmd}"; then
+    restarted_via_ssh="true"
+  else
+    log "warning: failed to restart k3s on ${primary_node_name} over SSH; waiting to see if cleanup alone restores node readiness"
   fi
 
   if ! wait_for_primary_node_ready "${primary_node_name}"; then
-    fail "primary node ${primary_node_name} remained NotReady after restarting k3s"
+    if [[ "${restarted_via_ssh}" == "true" ]]; then
+      fail "primary node ${primary_node_name} remained NotReady after restarting k3s"
+    fi
+    fail "primary node ${primary_node_name} remained NotReady after cleanup and SSH restart fallback"
   fi
 
   prune_terminated_release_pods
