@@ -338,10 +338,34 @@ control_plane_postgres_selector() {
 }
 
 control_plane_postgres_pod_names() {
+  local active_hashes=""
+  local active_hash=""
+  local active_pod_names=""
+
+  active_hashes="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get rs \
+    -l "$(control_plane_postgres_selector)" \
+    --sort-by=.metadata.creationTimestamp \
+    -o go-template='{{range .items}}{{if gt .spec.replicas 0}}{{index .metadata.labels "pod-template-hash"}}{{"\n"}}{{end}}{{end}}' 2>/dev/null || true)"
+  if [[ -n "${active_hashes}" ]]; then
+    active_pod_names="$(
+      while IFS= read -r active_hash; do
+        [[ -n "${active_hash}" ]] || continue
+        ${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
+          -l "$(control_plane_postgres_selector),pod-template-hash=${active_hash}" \
+          --sort-by=.metadata.creationTimestamp \
+          -o name 2>/dev/null || true
+      done <<<"${active_hashes}" | sed 's#^pod/##' | awk 'NF > 0 {lines[++count]=$0} END {for (i=count; i>=1; i--) print lines[i]}'
+    )"
+    if [[ -n "${active_pod_names}" ]]; then
+      printf '%s\n' "${active_pod_names}"
+      return 0
+    fi
+  fi
+
   ${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
     -l "$(control_plane_postgres_selector)" \
     --sort-by=.metadata.creationTimestamp \
-    -o name 2>/dev/null | sed 's#^pod/##' | awk '{lines[NR]=$0} END {for (i=NR; i>=1; i--) print lines[i]}'
+    -o name 2>/dev/null | sed 's#^pod/##' | tail -n 5 | awk 'NF > 0 {lines[++count]=$0} END {for (i=count; i>=1; i--) print lines[i]}'
 }
 
 control_plane_postgres_logs() {
@@ -349,9 +373,17 @@ control_plane_postgres_logs() {
   local logs=""
 
   [[ -n "${pod_name}" ]] || return 0
-  logs="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" logs "pod/${pod_name}" --previous --tail=200 2>/dev/null || true)"
+  if command_exists timeout; then
+    logs="$(timeout 15s ${KUBECTL} -n "${FUGUE_NAMESPACE}" logs "pod/${pod_name}" --previous --tail=200 2>/dev/null || true)"
+  else
+    logs="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" logs "pod/${pod_name}" --previous --tail=200 2>/dev/null || true)"
+  fi
   if [[ -z "${logs}" ]]; then
-    logs="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" logs "pod/${pod_name}" --tail=200 2>/dev/null || true)"
+    if command_exists timeout; then
+      logs="$(timeout 15s ${KUBECTL} -n "${FUGUE_NAMESPACE}" logs "pod/${pod_name}" --tail=200 2>/dev/null || true)"
+    else
+      logs="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" logs "pod/${pod_name}" --tail=200 2>/dev/null || true)"
+    fi
   fi
   printf '%s' "${logs}"
 }
