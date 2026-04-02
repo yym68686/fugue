@@ -26,6 +26,8 @@ CONTROL_PLANE_AUTOMATION_TMP_DIR=""
 UPGRADE_OVERRIDE_VALUES_FILE=""
 LOCAL_CONTROL_PLANE_AUTOMATION_DIR="${FUGUE_LOCAL_CONTROL_PLANE_AUTOMATION_DIR:-${HOME}/.config/fugue/control-plane-automation}"
 LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR="${FUGUE_LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR:-/root/.config/fugue/control-plane-automation}"
+CONTROL_PLANE_HOSTS_ENV_LOADED="false"
+PRIMARY_CONTROL_PLANE_SSH_OPTS=()
 
 detect_primary_private_ip() {
   ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}'
@@ -233,6 +235,168 @@ prepare_control_plane_automation_ssh() {
   fail "missing local control-plane automation bundle on this server; run scripts/bootstrap_control_plane_automation.sh or scripts/install_fugue_ha.sh to install it"
 }
 
+load_control_plane_hosts_env() {
+  if [[ "${CONTROL_PLANE_HOSTS_ENV_LOADED}" == "true" ]]; then
+    return
+  fi
+  CONTROL_PLANE_HOSTS_ENV_LOADED="true"
+  # shellcheck disable=SC1090
+  source "${FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE}"
+}
+
+primary_control_plane_ssh_login() {
+  load_control_plane_hosts_env
+  local host="${FUGUE_NODE1_HOST:-${FUGUE_NODE1_ALIAS:-}}"
+  local user="${FUGUE_NODE1_USER:-}"
+  [[ -n "${host}" ]] || fail "primary control-plane SSH host is not configured"
+  if [[ -n "${user}" ]]; then
+    printf '%s@%s' "${user}" "${host}"
+    return
+  fi
+  printf '%s' "${host}"
+}
+
+build_primary_control_plane_ssh_opts() {
+  load_control_plane_hosts_env
+  PRIMARY_CONTROL_PLANE_SSH_OPTS=(
+    -o BatchMode=yes
+    -o ConnectTimeout=15
+    -o ServerAliveInterval=15
+    -o ServerAliveCountMax=3
+    -o IdentitiesOnly=yes
+    -i "${FUGUE_CONTROL_PLANE_SSH_KEY_FILE}"
+    -o StrictHostKeyChecking=yes
+    -o UserKnownHostsFile="${FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE}"
+  )
+  if [[ -n "${FUGUE_NODE1_PORT:-}" ]]; then
+    PRIMARY_CONTROL_PLANE_SSH_OPTS+=(-p "${FUGUE_NODE1_PORT}")
+  fi
+}
+
+detect_primary_node_name() {
+  ${KUBECTL} get nodes -l fugue.install/role=primary -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+}
+
+primary_node_has_disk_pressure() {
+  local node_name="$1"
+  local status=""
+  status="$(${KUBECTL} get node "${node_name}" -o jsonpath='{range .status.conditions[?(@.type=="DiskPressure")]}{.status}{end}' 2>/dev/null || true)"
+  [[ "${status}" == "True" ]]
+}
+
+run_primary_host_root_command() {
+  local primary_node_name="$1"
+  local cmd="$2"
+  local local_hostname=""
+  local local_hostname_short=""
+
+  local_hostname="$(hostname 2>/dev/null || true)"
+  local_hostname_short="$(hostname -s 2>/dev/null || true)"
+  if [[ "${local_hostname}" == "${primary_node_name}" || "${local_hostname_short}" == "${primary_node_name}" ]]; then
+    sudo bash -lc "${cmd}"
+    return
+  fi
+
+  prepare_control_plane_automation_ssh
+  build_primary_control_plane_ssh_opts
+  ssh -n "${PRIMARY_CONTROL_PLANE_SSH_OPTS[@]}" "$(primary_control_plane_ssh_login)" \
+    "sudo bash -lc $(printf '%q' "${cmd}")"
+}
+
+wait_for_primary_disk_pressure_clear() {
+  local primary_node_name="$1"
+  local attempt
+
+  for attempt in $(seq 1 24); do
+    if ! primary_node_has_disk_pressure "${primary_node_name}"; then
+      return 0
+    fi
+    sleep 5
+  done
+  return 1
+}
+
+relieve_primary_disk_pressure() {
+  local primary_node_name=""
+  local cleanup_cmd=""
+
+  primary_node_name="$(detect_primary_node_name)"
+  if [[ -z "${primary_node_name}" ]]; then
+    log "skip primary disk-pressure recovery because the primary node could not be identified"
+    return 0
+  fi
+  if ! primary_node_has_disk_pressure "${primary_node_name}"; then
+    return 0
+  fi
+
+  log "primary node ${primary_node_name} is under DiskPressure; running host-level registry cleanup before upgrade"
+  cleanup_cmd="$(cat <<'EOF'
+set -euo pipefail
+
+log() {
+  printf '[fugue-upgrade][primary-cleanup] %s\n' "$*"
+}
+
+registry_root="/var/lib/fugue/registry"
+runner_update_root="/home/github-runner/actions-runner-work/_update"
+registry_image="docker.io/library/registry:2.8.3"
+gc_id="fugue-registry-gc-$(date +%s)"
+
+cleanup() {
+  k3s ctr tasks kill "${gc_id}" >/dev/null 2>&1 || true
+  k3s ctr containers rm "${gc_id}" >/dev/null 2>&1 || true
+}
+
+trap cleanup EXIT
+
+log "filesystem usage before cleanup"
+df -h /
+du -sh "${registry_root}" 2>/dev/null || true
+
+if command -v k3s >/dev/null 2>&1; then
+  if k3s crictl rmi --prune >/tmp/fugue-primary-image-prune.log 2>&1; then
+    log "unused k3s images pruned"
+  else
+    status=$?
+    log "image prune returned ${status}; continuing"
+  fi
+fi
+
+if [[ -d "${runner_update_root}" ]] && find "${runner_update_root}" -mindepth 0 -mmin "+1440" | grep -q .; then
+  rm -rf -- "${runner_update_root}"
+  mkdir -p "${runner_update_root}"
+  chown -R github-runner:github-runner "${runner_update_root}" >/dev/null 2>&1 || true
+  log "removed stale runner update cache ${runner_update_root}"
+fi
+
+if [[ ! -d "${registry_root}/docker/registry/v2" ]]; then
+  log "registry data root ${registry_root} is absent; skipping offline registry GC"
+  exit 0
+fi
+
+if ! k3s ctr images ls | awk 'NR > 1 {print $1}' | grep -Fxq "${registry_image}"; then
+  log "pulling ${registry_image} for offline registry GC"
+  k3s ctr images pull "${registry_image}"
+fi
+
+log "running offline registry garbage-collect against ${registry_root}"
+timeout 600s k3s ctr run --rm \
+  --mount type=bind,src="${registry_root}",dst=/var/lib/registry,options=rbind:rw \
+  "${registry_image}" "${gc_id}" \
+  registry garbage-collect --delete-untagged /etc/docker/registry/config.yml
+
+log "filesystem usage after cleanup"
+du -sh "${registry_root}" 2>/dev/null || true
+df -h /
+EOF
+)"
+  run_primary_host_root_command "${primary_node_name}" "${cleanup_cmd}"
+
+  if ! wait_for_primary_disk_pressure_clear "${primary_node_name}"; then
+    fail "primary node ${primary_node_name} still reports DiskPressure after host-level registry cleanup"
+  fi
+}
+
 sync_route_a_edge_proxy() {
   if [[ "${FUGUE_SYNC_EDGE_PROXY:-true}" != "true" ]]; then
     log "skip Route A edge proxy sync because FUGUE_SYNC_EDGE_PROXY=${FUGUE_SYNC_EDGE_PROXY}"
@@ -360,6 +524,8 @@ main() {
   log "cluster join registry endpoint: ${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}"
   log "app base domain: ${FUGUE_APP_BASE_DOMAIN}"
   log "custom domain base domain: dns.${FUGUE_APP_BASE_DOMAIN}"
+
+  relieve_primary_disk_pressure
 
   apply_chart_crds
 
