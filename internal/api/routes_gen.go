@@ -96,6 +96,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("DELETE /v1/runtimes/{id}/sharing/grants/{tenant_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleRevokeRuntimeAccess)))
 	mux.Handle("POST /v1/runtimes/{id}/sharing/mode", s.auth.RequireAPI(http.HandlerFunc(s.handleSetRuntimeAccessMode)))
 	mux.Handle("GET /v1/source-uploads/{id}/archive", http.HandlerFunc(s.handleGetSourceUploadArchive))
+	mux.Handle("POST /v1/templates/inspect-github", s.auth.RequireAPI(http.HandlerFunc(s.handleInspectGitHubTemplate)))
 	mux.Handle("GET /v1/tenants", s.auth.RequireAPI(http.HandlerFunc(s.handleListTenants)))
 	mux.Handle("POST /v1/tenants", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateTenant)))
 	mux.Handle("DELETE /v1/tenants/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteTenant)))

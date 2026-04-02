@@ -28,21 +28,76 @@ type GitHubFugueManifestInspectRequest struct {
 }
 
 type GitHubFugueManifest struct {
-	RepoOwner      string
-	RepoName       string
-	Branch         string
-	CommitSHA      string
-	DefaultAppName string
-	ManifestPath   string
-	PrimaryService string
-	Services       []ComposeService
-	Warnings       []string
+	RepoOwner         string
+	RepoName          string
+	Branch            string
+	CommitSHA         string
+	CommitCommittedAt string
+	DefaultAppName    string
+	ManifestPath      string
+	PrimaryService    string
+	Services          []ComposeService
+	Template          *GitHubTemplateMetadata
+	Warnings          []string
 }
 
 type fugueManifestFile struct {
 	Version        any                             `yaml:"version"`
 	PrimaryService string                          `yaml:"primary_service"`
+	Template       *fugueManifestTemplate          `yaml:"template"`
 	Services       map[string]fugueManifestService `yaml:"services"`
+}
+
+type GitHubTemplateMetadata struct {
+	DefaultRuntime string
+	DemoURL        string
+	Description    string
+	DocsURL        string
+	Name           string
+	Slug           string
+	SourceMode     string
+	Variables      []GitHubTemplateVariable
+}
+
+type GitHubTemplateVariable struct {
+	DefaultValue string
+	Description  string
+	Generate     string
+	Key          string
+	Label        string
+	Required     bool
+	Secret       bool
+}
+
+type GitHubTemplateInspection struct {
+	Branch            string
+	CommitCommittedAt string
+	CommitSHA         string
+	DefaultAppName    string
+	Manifest          *GitHubFugueManifest
+	RepoName          string
+	RepoOwner         string
+}
+
+type fugueManifestTemplate struct {
+	DefaultRuntime string                          `yaml:"default_runtime"`
+	DemoURL        string                          `yaml:"demo_url"`
+	Description    string                          `yaml:"description"`
+	DocsURL        string                          `yaml:"docs_url"`
+	Name           string                          `yaml:"name"`
+	Slug           string                          `yaml:"slug"`
+	SourceMode     string                          `yaml:"source_mode"`
+	Variables      []fugueManifestTemplateVariable `yaml:"variables"`
+}
+
+type fugueManifestTemplateVariable struct {
+	Default     any    `yaml:"default"`
+	Description string `yaml:"description"`
+	Generate    string `yaml:"generate"`
+	Key         string `yaml:"key"`
+	Label       string `yaml:"label"`
+	Required    bool   `yaml:"required"`
+	Secret      bool   `yaml:"secret"`
 }
 
 type fugueManifestService struct {
@@ -72,13 +127,42 @@ type fugueBuildSpec struct {
 }
 
 func (i *Importer) InspectGitHubFugueManifest(ctx context.Context, req GitHubFugueManifestInspectRequest) (GitHubFugueManifest, error) {
-	repo, err := i.cloneGitHubRepo(ctx, req.RepoURL, req.RepoAuthToken, req.Branch, "github-fugue-manifest-inspect-*")
+	inspection, err := i.InspectGitHubTemplate(ctx, req)
 	if err != nil {
 		return GitHubFugueManifest{}, err
 	}
+	if inspection.Manifest == nil {
+		return GitHubFugueManifest{}, ErrFugueManifestNotFound
+	}
+	return *inspection.Manifest, nil
+}
+
+func (i *Importer) InspectGitHubTemplate(ctx context.Context, req GitHubFugueManifestInspectRequest) (GitHubTemplateInspection, error) {
+	repo, err := i.cloneGitHubRepo(ctx, req.RepoURL, req.RepoAuthToken, req.Branch, "github-fugue-manifest-inspect-*")
+	if err != nil {
+		return GitHubTemplateInspection{}, err
+	}
 	defer releaseClonedRepo(repo)
 
-	return inspectFugueManifestFromRepo(repo)
+	inspection := GitHubTemplateInspection{
+		Branch:            repo.Branch,
+		CommitCommittedAt: repo.CommitCommittedAt,
+		CommitSHA:         repo.CommitSHA,
+		DefaultAppName:    repo.DefaultAppName,
+		RepoName:          repo.RepoName,
+		RepoOwner:         repo.RepoOwner,
+	}
+
+	manifest, err := inspectFugueManifestFromRepo(repo)
+	switch {
+	case err == nil:
+		inspection.Manifest = &manifest
+		return inspection, nil
+	case errors.Is(err, ErrFugueManifestNotFound):
+		return inspection, nil
+	default:
+		return GitHubTemplateInspection{}, err
+	}
 }
 
 func inspectFugueManifestFromRepo(repo clonedGitHubRepo) (GitHubFugueManifest, error) {
@@ -111,13 +195,14 @@ func inspectFugueManifestFromRepo(repo clonedGitHubRepo) (GitHubFugueManifest, e
 	sort.Strings(serviceNames)
 
 	manifest := GitHubFugueManifest{
-		RepoOwner:      repo.RepoOwner,
-		RepoName:       repo.RepoName,
-		Branch:         repo.Branch,
-		CommitSHA:      repo.CommitSHA,
-		DefaultAppName: repo.DefaultAppName,
-		ManifestPath:   manifestPath,
-		Services:       make([]ComposeService, 0, len(serviceNames)),
+		RepoOwner:         repo.RepoOwner,
+		RepoName:          repo.RepoName,
+		Branch:            repo.Branch,
+		CommitSHA:         repo.CommitSHA,
+		CommitCommittedAt: repo.CommitCommittedAt,
+		DefaultAppName:    repo.DefaultAppName,
+		ManifestPath:      manifestPath,
+		Services:          make([]ComposeService, 0, len(serviceNames)),
 	}
 
 	seenNames := make(map[string]struct{}, len(serviceNames))
@@ -138,6 +223,11 @@ func inspectFugueManifestFromRepo(repo clonedGitHubRepo) (GitHubFugueManifest, e
 		return GitHubFugueManifest{}, fmt.Errorf("invalid fugue manifest %q: %w", manifestPath, err)
 	}
 	manifest.PrimaryService = primaryService
+	template, err := resolveFugueManifestTemplate(repo, file.Template)
+	if err != nil {
+		return GitHubFugueManifest{}, fmt.Errorf("invalid fugue manifest %q: %w", manifestPath, err)
+	}
+	manifest.Template = template
 	return manifest, nil
 }
 
@@ -447,4 +537,54 @@ func firstNonEmptyEnvValue(env map[string]string, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func resolveFugueManifestTemplate(repo clonedGitHubRepo, raw *fugueManifestTemplate) (*GitHubTemplateMetadata, error) {
+	if raw == nil {
+		return nil, nil
+	}
+
+	slug := model.Slugify(firstNonEmptyString(raw.Slug, raw.Name, repo.DefaultAppName))
+	if slug == "" {
+		return nil, fmt.Errorf("template.slug is required")
+	}
+
+	name := strings.TrimSpace(raw.Name)
+	if name == "" {
+		name = repo.RepoName
+	}
+
+	variables := make([]GitHubTemplateVariable, 0, len(raw.Variables))
+	seenKeys := make(map[string]struct{}, len(raw.Variables))
+	for _, variable := range raw.Variables {
+		key := strings.TrimSpace(variable.Key)
+		if key == "" {
+			return nil, fmt.Errorf("template.variables[].key is required")
+		}
+		if _, exists := seenKeys[key]; exists {
+			return nil, fmt.Errorf("template.variables %q is duplicated", key)
+		}
+		seenKeys[key] = struct{}{}
+
+		variables = append(variables, GitHubTemplateVariable{
+			DefaultValue: strings.TrimSpace(stringifyComposeValue(variable.Default)),
+			Description:  strings.TrimSpace(variable.Description),
+			Generate:     strings.TrimSpace(variable.Generate),
+			Key:          key,
+			Label:        strings.TrimSpace(variable.Label),
+			Required:     variable.Required,
+			Secret:       variable.Secret,
+		})
+	}
+
+	return &GitHubTemplateMetadata{
+		DefaultRuntime: strings.TrimSpace(raw.DefaultRuntime),
+		DemoURL:        strings.TrimSpace(raw.DemoURL),
+		Description:    strings.TrimSpace(raw.Description),
+		DocsURL:        strings.TrimSpace(raw.DocsURL),
+		Name:           name,
+		Slug:           slug,
+		SourceMode:     strings.TrimSpace(raw.SourceMode),
+		Variables:      variables,
+	}, nil
 }

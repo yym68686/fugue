@@ -109,7 +109,7 @@ func gitCloneArgs(repoURL, repoDir, branch string) []string {
 	return args
 }
 
-func parseGitHubRepoURL(raw string) (string, string, error) {
+func ParseGitHubRepoURL(raw string) (string, string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", "", fmt.Errorf("repo_url is required")
@@ -126,6 +126,10 @@ func parseGitHubRepoURL(raw string) (string, string, error) {
 		return "", "", fmt.Errorf("invalid GitHub repository URL")
 	}
 	return model.Slugify(parts[0]), model.Slugify(parts[1]), nil
+}
+
+func parseGitHubRepoURL(raw string) (string, string, error) {
+	return ParseGitHubRepoURL(raw)
 }
 
 func importStaticSiteFromClonedRepo(repo clonedGitHubRepo, requestedSourceDir, registryPushBase, imageRepository, imageNameSuffix string) (GitHubImportResult, error) {

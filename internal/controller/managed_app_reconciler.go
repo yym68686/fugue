@@ -104,6 +104,13 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 	if err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read deployment status: %w", err))
 	}
+	appPods := make([]kubePod, 0)
+	if found {
+		appPods, err = client.listPodsBySelector(ctx, namespace, managedAppPodLabelSelector(app))
+		if err != nil {
+			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("list app pods: %w", err))
+		}
+	}
 
 	backingServiceStatuses := make([]runtime.ManagedBackingServiceStatus, 0)
 	for _, serviceDeployment := range runtime.ManagedBackingServiceDeployments(app, managed.Spec.Scheduling) {
@@ -114,7 +121,7 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 		backingServiceStatuses = append(backingServiceStatuses, buildManagedBackingServiceStatus(managed.Status, serviceDeployment, serviceDeploymentStatus, deploymentFound))
 	}
 
-	status := buildManagedAppStatus(managed, app, deployment, found, backingServiceStatuses)
+	status := buildManagedAppStatus(managed, app, deployment, found, appPods, backingServiceStatuses)
 	if err := client.patchManagedAppStatus(ctx, namespace, managed.Metadata.Name, status); err != nil {
 		return fmt.Errorf("patch managed app status for %s/%s: %w", namespace, managed.Metadata.Name, err)
 	}
@@ -140,13 +147,14 @@ func patchManagedAppErrorStatus(ctx context.Context, client *kubeClient, namespa
 	return cause
 }
 
-func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, deployment kubeDeployment, found bool, backingServiceStatuses []runtime.ManagedBackingServiceStatus) runtime.ManagedAppStatus {
+func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, deployment kubeDeployment, found bool, pods []kubePod, backingServiceStatuses []runtime.ManagedBackingServiceStatus) runtime.ManagedAppStatus {
 	status := managedAppBaseStatus(managed, app)
 	if found {
 		status.ReadyReplicas = maxInt(deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas)
 		status.Conditions = append([]runtime.ManagedAppCondition(nil), deployment.Status.Conditions...)
 	}
 	status.BackingServices = append([]runtime.ManagedBackingServiceStatus(nil), backingServiceStatuses...)
+	podFailureMessage := managedAppPodFailureMessage(pods)
 
 	switch {
 	case app.Spec.Replicas <= 0:
@@ -164,6 +172,9 @@ func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, depl
 	case deployment.Status.Replicas == 0:
 		status.Phase = runtime.ManagedAppPhasePending
 		status.Message = fmt.Sprintf("deployment created; waiting for replicas (desired=%d)", app.Spec.Replicas)
+	case podFailureMessage != "":
+		status.Phase = runtime.ManagedAppPhaseError
+		status.Message = podFailureMessage
 	default:
 		status.Phase = runtime.ManagedAppPhaseProgressing
 		status.Message = fmt.Sprintf("deployment progressing (%d/%d ready replicas)", status.ReadyReplicas, app.Spec.Replicas)
@@ -226,6 +237,126 @@ func managedAppConditionMessage(condition runtime.ManagedAppCondition, fallback 
 	default:
 		return fallback
 	}
+}
+
+func managedAppPodLabelSelector(app model.App) string {
+	selectors := []string{
+		runtime.FugueLabelManagedBy + "=" + runtime.FugueLabelManagedByValue,
+	}
+	if name := strings.TrimSpace(runtime.RuntimeResourceName(app.Name)); name != "" {
+		selectors = append(selectors, runtime.FugueLabelName+"="+name)
+	}
+	if appID := strings.TrimSpace(app.ID); appID != "" {
+		selectors = append(selectors, runtime.FugueLabelAppID+"="+appID)
+	}
+	if tenantID := strings.TrimSpace(app.TenantID); tenantID != "" {
+		selectors = append(selectors, runtime.FugueLabelTenantID+"="+tenantID)
+	}
+	return strings.Join(selectors, ",")
+}
+
+func managedAppPodFailureMessage(pods []kubePod) string {
+	for _, pod := range pods {
+		if summary := summarizeManagedAppPodFailure(pod); summary != "" {
+			return summary
+		}
+	}
+	return ""
+}
+
+func summarizeManagedAppPodFailure(pod kubePod) string {
+	prefix := "pod " + strings.TrimSpace(pod.Metadata.Name)
+	if node := strings.TrimSpace(pod.Spec.NodeName); node != "" {
+		prefix += " on node " + node
+	}
+	if reason := strings.TrimSpace(pod.Status.Reason); isFailingManagedAppPodReason(reason) {
+		return summarizeManagedAppFailureLine(prefix, reason, strings.TrimSpace(pod.Status.Message))
+	}
+
+	statuses := append([]kubeContainerStatus(nil), pod.Status.InitContainerStatuses...)
+	statuses = append(statuses, pod.Status.ContainerStatuses...)
+	for _, status := range statuses {
+		if status.State.Terminated != nil && isFailingManagedAppTermination(*status.State.Terminated) {
+			return summarizeManagedAppContainerFailure(prefix, status.Name, "terminated", *status.State.Terminated)
+		}
+		if status.LastState.Terminated != nil && isFailingManagedAppTermination(*status.LastState.Terminated) {
+			return summarizeManagedAppContainerFailure(prefix, status.Name, "terminated", *status.LastState.Terminated)
+		}
+		if status.State.Waiting != nil && isFailingManagedAppWaitingReason(status.State.Waiting.Reason) {
+			return summarizeManagedAppContainerFailure(prefix, status.Name, "waiting", *status.State.Waiting)
+		}
+		if status.LastState.Waiting != nil && isFailingManagedAppWaitingReason(status.LastState.Waiting.Reason) {
+			return summarizeManagedAppContainerFailure(prefix, status.Name, "waiting", *status.LastState.Waiting)
+		}
+	}
+
+	phase := strings.TrimSpace(pod.Status.Phase)
+	if strings.EqualFold(phase, "Failed") {
+		return fmt.Sprintf("%s failed with phase %s", prefix, phase)
+	}
+	return ""
+}
+
+func summarizeManagedAppContainerFailure(prefix, containerName, state string, detail kubeStateDetail) string {
+	subject := prefix
+	if strings.TrimSpace(containerName) != "" {
+		subject += " container " + strings.TrimSpace(containerName)
+	}
+	reason := strings.TrimSpace(detail.Reason)
+	message := strings.TrimSpace(detail.Message)
+	if detail.ExitCode != 0 {
+		if message == "" {
+			message = fmt.Sprintf("exit_code=%d", detail.ExitCode)
+		} else {
+			message = fmt.Sprintf("%s (exit_code=%d)", message, detail.ExitCode)
+		}
+	}
+	if reason == "" {
+		reason = state
+	}
+	return summarizeManagedAppFailureLine(subject, reason, message)
+}
+
+func summarizeManagedAppFailureLine(subject, reason, message string) string {
+	subject = strings.TrimSpace(subject)
+	reason = strings.TrimSpace(reason)
+	message = strings.TrimSpace(message)
+	switch {
+	case reason != "" && message != "":
+		return fmt.Sprintf("%s failed: %s: %s", subject, reason, message)
+	case reason != "":
+		return fmt.Sprintf("%s failed: %s", subject, reason)
+	case message != "":
+		return fmt.Sprintf("%s failed: %s", subject, message)
+	default:
+		return fmt.Sprintf("%s failed", subject)
+	}
+}
+
+func isFailingManagedAppPodReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "evicted", "unexpectedadmissionerror":
+		return true
+	default:
+		return false
+	}
+}
+
+func isFailingManagedAppWaitingReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "crashloopbackoff", "createcontainerconfigerror", "createcontainererror", "runcontainererror", "imagepullbackoff", "errimagepull", "invalidimagename", "errimageneverpull":
+		return true
+	default:
+		return false
+	}
+}
+
+func isFailingManagedAppTermination(detail kubeStateDetail) bool {
+	reason := strings.TrimSpace(detail.Reason)
+	if reason == "" {
+		return detail.ExitCode != 0
+	}
+	return !strings.EqualFold(reason, "Completed")
 }
 
 func applyManagedAppReleaseStatus(status *runtime.ManagedAppStatus, previous runtime.ManagedAppStatus, app model.App, scheduling runtime.SchedulingConstraints) {

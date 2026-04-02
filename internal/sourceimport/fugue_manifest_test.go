@@ -177,3 +177,81 @@ services:
 		t.Fatalf("expected inferred primary service web, got %q", parsed.PrimaryService)
 	}
 }
+
+func TestInspectFugueManifestParsesTemplateMetadata(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, "apps", "web"), 0o755); err != nil {
+		t.Fatalf("mkdir web dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "apps", "web", "Dockerfile"), []byte("FROM scratch\nEXPOSE 3000\n"), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	manifest := `version: 1
+primary_service: web
+template:
+  name: Starter storefront
+  slug: starter-storefront
+  description: Deploy a ready-made storefront.
+  docs_url: https://docs.example.com/storefront
+  demo_url: https://demo.example.com/storefront
+  default_runtime: runtime_edge_hk
+  source_mode: github
+  variables:
+    - key: NEXT_PUBLIC_API_BASE_URL
+      label: API base URL
+      description: Public API endpoint.
+      default: https://api.example.com
+      required: true
+    - key: SESSION_SECRET
+      label: Session secret
+      description: Used to sign cookies.
+      generate: password
+      secret: true
+services:
+  web:
+    public: true
+    build:
+      strategy: dockerfile
+      context: apps/web
+      dockerfile: Dockerfile
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "fugue.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write fugue manifest: %v", err)
+	}
+
+	parsed, err := inspectFugueManifestFromRepo(clonedGitHubRepo{
+		RepoOwner:      "example",
+		RepoName:       "storefront",
+		RepoDir:        repoDir,
+		Branch:         "main",
+		CommitSHA:      "abcdef123456",
+		DefaultAppName: "storefront",
+	})
+	if err != nil {
+		t.Fatalf("inspect fugue manifest: %v", err)
+	}
+	if parsed.Template == nil {
+		t.Fatal("expected template metadata to be parsed")
+	}
+	if parsed.Template.Slug != "starter-storefront" {
+		t.Fatalf("unexpected template slug: %q", parsed.Template.Slug)
+	}
+	if parsed.Template.Name != "Starter storefront" {
+		t.Fatalf("unexpected template name: %q", parsed.Template.Name)
+	}
+	if parsed.Template.DefaultRuntime != "runtime_edge_hk" {
+		t.Fatalf("unexpected default runtime: %q", parsed.Template.DefaultRuntime)
+	}
+	if parsed.Template.SourceMode != "github" {
+		t.Fatalf("unexpected source mode: %q", parsed.Template.SourceMode)
+	}
+	if len(parsed.Template.Variables) != 2 {
+		t.Fatalf("expected 2 template variables, got %d", len(parsed.Template.Variables))
+	}
+	if parsed.Template.Variables[0].Key != "NEXT_PUBLIC_API_BASE_URL" || parsed.Template.Variables[0].DefaultValue != "https://api.example.com" || !parsed.Template.Variables[0].Required {
+		t.Fatalf("unexpected first template variable: %+v", parsed.Template.Variables[0])
+	}
+	if parsed.Template.Variables[1].Key != "SESSION_SECRET" || parsed.Template.Variables[1].Generate != "password" || !parsed.Template.Variables[1].Secret {
+		t.Fatalf("unexpected second template variable: %+v", parsed.Template.Variables[1])
+	}
+}

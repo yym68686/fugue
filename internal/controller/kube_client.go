@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -81,16 +82,42 @@ type kubeJobStatus struct {
 
 type kubePod struct {
 	Metadata struct {
-		Name string `json:"name"`
+		Name              string    `json:"name"`
+		CreationTimestamp time.Time `json:"creationTimestamp"`
 	} `json:"metadata"`
 	Spec struct {
+		NodeName       string `json:"nodeName,omitempty"`
+		InitContainers []struct {
+			Name string `json:"name"`
+		} `json:"initContainers"`
 		Containers []struct {
 			Name string `json:"name"`
 		} `json:"containers"`
 	} `json:"spec"`
 	Status struct {
-		Phase string `json:"phase"`
+		Phase                 string                `json:"phase"`
+		Reason                string                `json:"reason,omitempty"`
+		Message               string                `json:"message,omitempty"`
+		InitContainerStatuses []kubeContainerStatus `json:"initContainerStatuses,omitempty"`
+		ContainerStatuses     []kubeContainerStatus `json:"containerStatuses,omitempty"`
 	} `json:"status"`
+}
+
+type kubeContainerStatus struct {
+	Name      string           `json:"name"`
+	State     kubeRuntimeState `json:"state,omitempty"`
+	LastState kubeRuntimeState `json:"lastState,omitempty"`
+}
+
+type kubeRuntimeState struct {
+	Waiting    *kubeStateDetail `json:"waiting,omitempty"`
+	Terminated *kubeStateDetail `json:"terminated,omitempty"`
+}
+
+type kubeStateDetail struct {
+	Reason   string `json:"reason,omitempty"`
+	Message  string `json:"message,omitempty"`
+	ExitCode int    `json:"exitCode,omitempty"`
 }
 
 func newKubeClient(namespace string) (*kubeClient, error) {
@@ -227,6 +254,25 @@ func (c *kubeClient) updateLease(ctx context.Context, namespace string, lease ku
 }
 
 func (c *kubeClient) podWithContainerExists(ctx context.Context, namespace, labelSelector, containerName string) (bool, error) {
+	pods, err := c.listPodsBySelector(ctx, namespace, labelSelector)
+	if err != nil {
+		return false, err
+	}
+
+	for _, pod := range pods {
+		if pod.Status.Phase == "Succeeded" || pod.Status.Phase == "Failed" {
+			continue
+		}
+		for _, container := range pod.Spec.Containers {
+			if container.Name == containerName {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func (c *kubeClient) listPodsBySelector(ctx context.Context, namespace, labelSelector string) ([]kubePod, error) {
 	query := url.Values{}
 	if strings.TrimSpace(labelSelector) != "" {
 		query.Set("labelSelector", labelSelector)
@@ -239,20 +285,19 @@ func (c *kubeClient) podWithContainerExists(ctx context.Context, namespace, labe
 	}
 	_, err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &podList)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 
-	for _, pod := range podList.Items {
-		if pod.Status.Phase == "Succeeded" || pod.Status.Phase == "Failed" {
-			continue
+	sort.Slice(podList.Items, func(i, j int) bool {
+		left := podList.Items[i]
+		right := podList.Items[j]
+		if !left.Metadata.CreationTimestamp.Equal(right.Metadata.CreationTimestamp) {
+			return left.Metadata.CreationTimestamp.After(right.Metadata.CreationTimestamp)
 		}
-		for _, container := range pod.Spec.Containers {
-			if container.Name == containerName {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
+		return left.Metadata.Name < right.Metadata.Name
+	})
+
+	return podList.Items, nil
 }
 
 func (c *kubeClient) doJSON(ctx context.Context, method, apiPath string, body any, out any) (int, error) {

@@ -32,6 +32,8 @@ tags:
     description: Backing service and binding endpoints.
   - name: Apps
     description: Application deployment, config, logs, filesystem, and import endpoints.
+  - name: Templates
+    description: Template metadata inspection endpoints.
   - name: Operations
     description: Async operation endpoints.
   - name: Audit Events
@@ -1033,6 +1035,29 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ImportGitHubResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/templates/inspect-github:
+    post:
+      operationId: inspectGitHubTemplate
+      summary: Inspect Git Hub Template
+      tags: [Templates]
+      x-fugue-handler: handleInspectGitHubTemplate
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InspectGitHubTemplateRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InspectGitHubTemplateResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps/import-image:
@@ -3561,6 +3586,139 @@ components:
       properties:
         app:
           $ref: "#/components/schemas/App"
+    InspectGitHubTemplateRequest:
+      type: object
+      additionalProperties: false
+      required: [repo_url]
+      properties:
+        repo_url:
+          type: string
+        repo_visibility:
+          type: string
+        repo_auth_token:
+          type: string
+        branch:
+          type: string
+    InspectGitHubTemplateRepository:
+      type: object
+      additionalProperties: false
+      required:
+        [branch, commit_sha, commit_committed_at, default_app_name, repo_name, repo_owner, repo_url, repo_visibility]
+      properties:
+        repo_url:
+          type: string
+        repo_visibility:
+          type: string
+        repo_owner:
+          type: string
+        repo_name:
+          type: string
+        branch:
+          type: string
+        commit_sha:
+          type: string
+        commit_committed_at:
+          type: string
+        default_app_name:
+          type: string
+    InspectGitHubTemplateManifestService:
+      type: object
+      additionalProperties: false
+      required:
+        [build_context_dir, build_strategy, compose_service, dockerfile_path, internal_port, kind, published, service, source_dir]
+      properties:
+        service:
+          type: string
+        kind:
+          type: string
+        build_strategy:
+          type: string
+        internal_port:
+          type: integer
+          format: int32
+        compose_service:
+          type: string
+        published:
+          type: boolean
+        source_dir:
+          type: string
+        dockerfile_path:
+          type: string
+        build_context_dir:
+          type: string
+    InspectGitHubTemplateManifest:
+      type: object
+      additionalProperties: false
+      required: [manifest_path, primary_service, services, warnings]
+      properties:
+        manifest_path:
+          type: string
+        primary_service:
+          type: string
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/InspectGitHubTemplateManifestService"
+        warnings:
+          type: array
+          items:
+            type: string
+    TemplateVariable:
+      type: object
+      additionalProperties: false
+      required: [default_value, description, generate, key, label, required, secret]
+      properties:
+        key:
+          type: string
+        label:
+          type: string
+        description:
+          type: string
+        default_value:
+          type: string
+        secret:
+          type: boolean
+        required:
+          type: boolean
+        generate:
+          type: string
+    TemplateMetadata:
+      type: object
+      additionalProperties: false
+      required:
+        [default_runtime, demo_url, description, docs_url, name, slug, source_mode, variables]
+      properties:
+        slug:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        demo_url:
+          type: string
+        docs_url:
+          type: string
+        source_mode:
+          type: string
+        default_runtime:
+          type: string
+        variables:
+          type: array
+          items:
+            $ref: "#/components/schemas/TemplateVariable"
+    InspectGitHubTemplateResponse:
+      type: object
+      additionalProperties: false
+      required: [repository]
+      properties:
+        repository:
+          $ref: "#/components/schemas/InspectGitHubTemplateRepository"
+        fugue_manifest:
+          $ref: "#/components/schemas/InspectGitHubTemplateManifest"
+          nullable: true
+        template:
+          $ref: "#/components/schemas/TemplateMetadata"
+          nullable: true
     ImportGitHubRequest:
       type: object
       additionalProperties: false
