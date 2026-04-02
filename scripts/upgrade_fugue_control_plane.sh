@@ -28,6 +28,10 @@ LOCAL_CONTROL_PLANE_AUTOMATION_DIR="${FUGUE_LOCAL_CONTROL_PLANE_AUTOMATION_DIR:-
 LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR="${FUGUE_LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR:-/root/.config/fugue/control-plane-automation}"
 CONTROL_PLANE_HOSTS_ENV_LOADED="false"
 PRIMARY_CONTROL_PLANE_SSH_OPTS=()
+PRIMARY_DISK_PRESSURE_CLEAR_POLL_SECONDS="${FUGUE_PRIMARY_DISK_PRESSURE_CLEAR_POLL_SECONDS:-5}"
+# Kubelet delays clearing DiskPressure for evictionPressureTransitionPeriod
+# (5m by default on our k3s nodes), so keep a wider recovery window here.
+PRIMARY_DISK_PRESSURE_CLEAR_TIMEOUT_SECONDS="${FUGUE_PRIMARY_DISK_PRESSURE_CLEAR_TIMEOUT_SECONDS:-600}"
 
 detect_primary_private_ip() {
   ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}'
@@ -306,12 +310,23 @@ run_primary_host_root_command() {
 wait_for_primary_disk_pressure_clear() {
   local primary_node_name="$1"
   local attempt
+  local max_attempts
 
-  for attempt in $(seq 1 24); do
+  if ! [[ "${PRIMARY_DISK_PRESSURE_CLEAR_POLL_SECONDS}" =~ ^[0-9]+$ ]] || (( PRIMARY_DISK_PRESSURE_CLEAR_POLL_SECONDS <= 0 )); then
+    fail "FUGUE_PRIMARY_DISK_PRESSURE_CLEAR_POLL_SECONDS must be a positive integer"
+  fi
+  if ! [[ "${PRIMARY_DISK_PRESSURE_CLEAR_TIMEOUT_SECONDS}" =~ ^[0-9]+$ ]] || (( PRIMARY_DISK_PRESSURE_CLEAR_TIMEOUT_SECONDS <= 0 )); then
+    fail "FUGUE_PRIMARY_DISK_PRESSURE_CLEAR_TIMEOUT_SECONDS must be a positive integer"
+  fi
+
+  max_attempts=$(( (PRIMARY_DISK_PRESSURE_CLEAR_TIMEOUT_SECONDS + PRIMARY_DISK_PRESSURE_CLEAR_POLL_SECONDS - 1) / PRIMARY_DISK_PRESSURE_CLEAR_POLL_SECONDS ))
+  log "waiting up to ${PRIMARY_DISK_PRESSURE_CLEAR_TIMEOUT_SECONDS}s for primary node ${primary_node_name} to clear DiskPressure"
+
+  for attempt in $(seq 1 "${max_attempts}"); do
     if ! primary_node_has_disk_pressure "${primary_node_name}"; then
       return 0
     fi
-    sleep 5
+    sleep "${PRIMARY_DISK_PRESSURE_CLEAR_POLL_SECONDS}"
   done
   return 1
 }
