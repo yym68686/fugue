@@ -658,6 +658,39 @@ remove_file_if_present() {
   return 1
 }
 
+sanitize_k3s_env_file() {
+  local target_path="$1"
+  local sanitized_tmp=""
+  [ -f "${target_path}" ] || return 1
+  sanitized_tmp="$(mktemp)"
+  awk '
+    /^[[:space:]]*#/ { print; next }
+    /^[[:space:]]*$/ { print; next }
+    /^[[:space:]]*(export[[:space:]]+|declare[[:space:]]+-x[[:space:]]+)?K3S_[A-Za-z0-9_]*=/ { next }
+    { print }
+  ' "${target_path}" >"${sanitized_tmp}"
+  write_file_if_changed "${sanitized_tmp}" "${target_path}"
+}
+
+sanitize_k3s_agent_environment_files() {
+  local sanitized_any=1
+  local target_path=""
+  for target_path in \
+    /etc/default/k3s-agent \
+    /etc/sysconfig/k3s-agent \
+    /etc/systemd/system/k3s-agent.service.env; do
+    if sanitize_k3s_env_file "${target_path}"; then
+      log_step "Sanitized stale K3S_* environment overrides from ${target_path}."
+      sanitized_any=0
+    fi
+  done
+  if [ "${sanitized_any}" -eq 0 ]; then
+    return 0
+  fi
+  log_step "k3s-agent environment files are already free of stale K3S_* overrides."
+  return 1
+}
+
 ensure_k3s_agent_service_override() {
   local k3s_binary=""
   local override_tmp=""
@@ -671,6 +704,8 @@ ensure_k3s_agent_service_override() {
 Environment="K3S_URL="
 Environment="K3S_TOKEN="
 Environment="K3S_TOKEN_FILE="
+Environment="K3S_CONFIG_FILE="
+Environment="K3S_CONFIG_FILE_MODE="
 Environment="K3S_CLUSTER_SECRET="
 Environment="K3S_AGENT_TOKEN="
 Environment="K3S_AGENT_TOKEN_FILE="
@@ -1336,13 +1371,18 @@ if ! command -v k3s >/dev/null 2>&1; then
   k3s_installed_now=1
 fi
 
+k3s_environment_files_changed=0
+if sanitize_k3s_agent_environment_files; then
+  k3s_environment_files_changed=1
+fi
+
 k3s_service_override_changed=0
 if ensure_k3s_agent_service_override; then
   k3s_service_override_changed=1
 fi
 
 k3s_restart_needed="${k3s_config_changed}"
-if [ "${k3s_installed_now}" -eq 1 ] || [ "${k3s_service_override_changed}" -eq 1 ]; then
+if [ "${k3s_installed_now}" -eq 1 ] || [ "${k3s_environment_files_changed}" -eq 1 ] || [ "${k3s_service_override_changed}" -eq 1 ]; then
   k3s_restart_needed=1
 fi
 
