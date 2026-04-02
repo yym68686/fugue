@@ -386,7 +386,7 @@ wait_for_control_plane_postgres_pods_gone() {
   for attempt in $(seq 1 24); do
     names="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
       -l "$(control_plane_postgres_selector)" \
-      -o go-template='{{range .items}}{{if and (ne .status.phase "Failed") (ne .status.phase "Succeeded")}}{{.metadata.name}} {{end}}{{end}}' 2>/dev/null || true)"
+      -o go-template='{{range .items}}{{if eq .status.phase "Running"}}{{.metadata.name}} {{end}}{{end}}' 2>/dev/null || true)"
     if [[ -z "${names}" ]]; then
       return 0
     fi
