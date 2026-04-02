@@ -457,41 +457,41 @@ recover_primary_postgres_if_needed() {
 set -euo pipefail
 
 log() {
-  printf '[fugue-upgrade][primary-postgres-repair] %s\n' "$*"
+  printf '[fugue-upgrade][primary-postgres-repair] %s\n' "\$*"
 }
 
 postgres_root=$(printf '%q' "${PRIMARY_POSTGRES_DATA_ROOT}")
-pgdata="${postgres_root}/pgdata"
-backup_dir="${postgres_root}/pgdata.pre-resetwal-$(date -u +%Y%m%dT%H%M%SZ)"
+pgdata="\${postgres_root}/pgdata"
+backup_dir="\${postgres_root}/pgdata.pre-resetwal-\$(date -u +%Y%m%dT%H%M%SZ)"
 postgres_image=$(printf '%q' "${PRIMARY_POSTGRES_IMAGE}")
-repair_id="fugue-postgres-repair-$(date +%s)"
+repair_id="fugue-postgres-repair-\$(date +%s)"
 
 cleanup() {
-  k3s ctr tasks kill "${repair_id}" >/dev/null 2>&1 || true
-  k3s ctr containers rm "${repair_id}" >/dev/null 2>&1 || true
+  k3s ctr tasks kill "\${repair_id}" >/dev/null 2>&1 || true
+  k3s ctr containers rm "\${repair_id}" >/dev/null 2>&1 || true
 }
 
 trap cleanup EXIT
 
-if [[ ! -d "${pgdata}" ]]; then
-  log "postgres data directory ${pgdata} does not exist; skipping WAL recovery"
+if [[ ! -d "\${pgdata}" ]]; then
+  log "postgres data directory \${pgdata} does not exist; skipping WAL recovery"
   exit 0
 fi
 
-cp -a "${pgdata}" "${backup_dir}"
-log "backed up ${pgdata} to ${backup_dir}"
+cp -a "\${pgdata}" "\${backup_dir}"
+log "backed up \${pgdata} to \${backup_dir}"
 
-rm -f "${pgdata}/postmaster.pid"
+rm -f "\${pgdata}/postmaster.pid"
 
-if ! k3s ctr images ls | awk 'NR > 1 {print $1}' | grep -Fxq "${postgres_image}"; then
-  log "pulling ${postgres_image}"
-  k3s ctr images pull "${postgres_image}"
+if ! k3s ctr images ls | awk 'NR > 1 {print $1}' | grep -Fxq "\${postgres_image}"; then
+  log "pulling \${postgres_image}"
+  k3s ctr images pull "\${postgres_image}"
 fi
 
-log "running pg_resetwal against ${pgdata}"
+log "running pg_resetwal against \${pgdata}"
 timeout 300s k3s ctr run --rm \
-  --mount type=bind,src="${postgres_root}",dst=/var/lib/postgresql/data,options=rbind:rw \
-  "${postgres_image}" "${repair_id}" \
+  --mount type=bind,src="\${postgres_root}",dst=/var/lib/postgresql/data,options=rbind:rw \
+  "\${postgres_image}" "\${repair_id}" \
   sh -lc 'set -euo pipefail; chown -R 70:70 /var/lib/postgresql/data; su-exec postgres pg_resetwal -f /var/lib/postgresql/data/pgdata'
 
 log "pg_resetwal completed"
