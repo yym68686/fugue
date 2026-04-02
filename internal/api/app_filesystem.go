@@ -36,15 +36,15 @@ const (
 	filesystemMarkerParentMissing = "__FUGUE_PARENT_MISSING__"
 )
 
-type workspacePodLister interface {
+type filesystemPodLister interface {
 	listPodsBySelector(ctx context.Context, namespace, selector string) ([]kubePodInfo, error)
 }
 
-type workspacePodExecRunner interface {
+type filesystemPodExecRunner interface {
 	Run(ctx context.Context, namespace, podName, containerName string, stdin []byte, command ...string) ([]byte, error)
 }
 
-type kubeWorkspaceExecRunner struct{}
+type kubeFilesystemExecRunner struct{}
 
 type filesystemAPIError struct {
 	StatusCode int
@@ -57,7 +57,7 @@ type appFilesystemTarget struct {
 	component     string
 	podName       string
 	containerName string
-	workspaceRoot string
+	rootPath      string
 }
 
 type appFilesystemEntry struct {
@@ -70,7 +70,7 @@ type appFilesystemEntry struct {
 	HasChildren bool      `json:"has_children"`
 }
 
-var errKubeWorkspaceExecUnavailable = errors.New("kubernetes workspace exec is unavailable")
+var errKubeFilesystemExecUnavailable = errors.New("kubernetes filesystem exec is unavailable")
 
 func (e *filesystemAPIError) Error() string {
 	if e == nil {
@@ -82,8 +82,8 @@ func (e *filesystemAPIError) Error() string {
 	return e.Message
 }
 
-func (r kubeWorkspaceExecRunner) Run(ctx context.Context, namespace, podName, containerName string, stdin []byte, command ...string) ([]byte, error) {
-	config, client, err := newKubeWorkspaceExecRESTClient()
+func (r kubeFilesystemExecRunner) Run(ctx context.Context, namespace, podName, containerName string, stdin []byte, command ...string) ([]byte, error) {
+	config, client, err := newKubeFilesystemExecRESTClient()
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +103,7 @@ func (r kubeWorkspaceExecRunner) Run(ctx context.Context, namespace, podName, co
 			TTY:       false,
 		}, clientgoscheme.ParameterCodec)
 
-	executor, err := newKubeWorkspaceExecExecutor(config, request.URL())
+	executor, err := newKubeFilesystemExecExecutor(config, request.URL())
 	if err != nil {
 		return nil, fmt.Errorf("create kubernetes exec stream for pod %s container %s: %w", podName, containerName, err)
 	}
@@ -137,7 +137,7 @@ func (r kubeWorkspaceExecRunner) Run(ctx context.Context, namespace, podName, co
 	return append([]byte(nil), stdout.Bytes()...), nil
 }
 
-func newKubeWorkspaceExecExecutor(config *rest.Config, requestURL *url.URL) (remotecommand.Executor, error) {
+func newKubeFilesystemExecExecutor(config *rest.Config, requestURL *url.URL) (remotecommand.Executor, error) {
 	websocketExecutor, err := remotecommand.NewWebSocketExecutor(config, http.MethodPost, requestURL.String())
 	if err != nil {
 		return nil, fmt.Errorf("create websocket executor: %w", err)
@@ -153,10 +153,10 @@ func newKubeWorkspaceExecExecutor(config *rest.Config, requestURL *url.URL) (rem
 	})
 }
 
-func newKubeWorkspaceExecRESTClient() (*rest.Config, rest.Interface, error) {
+func newKubeFilesystemExecRESTClient() (*rest.Config, rest.Interface, error) {
 	baseConfig, err := rest.InClusterConfig()
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: load in-cluster kubernetes config: %w", errKubeWorkspaceExecUnavailable, err)
+		return nil, nil, fmt.Errorf("%w: load in-cluster kubernetes config: %w", errKubeFilesystemExecUnavailable, err)
 	}
 
 	clientConfig := rest.CopyConfig(baseConfig)
@@ -164,11 +164,11 @@ func newKubeWorkspaceExecRESTClient() (*rest.Config, rest.Interface, error) {
 	groupVersion := corev1.SchemeGroupVersion
 	clientConfig.GroupVersion = &groupVersion
 	clientConfig.NegotiatedSerializer = clientgoscheme.Codecs.WithoutConversion()
-	clientConfig.UserAgent = "fugue-api-workspace-exec"
+	clientConfig.UserAgent = "fugue-api-filesystem-exec"
 
 	client, err := rest.RESTClientFor(clientConfig)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: create kubernetes exec client: %w", errKubeWorkspaceExecUnavailable, err)
+		return nil, nil, fmt.Errorf("%w: create kubernetes exec client: %w", errKubeFilesystemExecUnavailable, err)
 	}
 	return baseConfig, client, nil
 }
@@ -191,14 +191,16 @@ func (s *Server) handleGetAppFilesystemTree(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	target, err := s.resolveAppFilesystemTarget(r.Context(), app, component, r.URL.Query().Get("pod"))
+	target, requestPath, err := s.resolveAppFilesystemTarget(
+		r.Context(),
+		app,
+		component,
+		r.URL.Query().Get("pod"),
+		r.URL.Query().Get("path"),
+		true,
+	)
 	if err != nil {
 		writeFilesystemError(w, err)
-		return
-	}
-	requestPath, err := normalizeFilesystemPath(target.workspaceRoot, r.URL.Query().Get("path"), true)
-	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -223,7 +225,7 @@ func (s *Server) handleGetAppFilesystemTree(w http.ResponseWriter, r *http.Reque
 		"pod":            target.podName,
 		"path":           requestPath,
 		"depth":          depth,
-		"workspace_root": target.workspaceRoot,
+		"workspace_root": target.rootPath,
 		"entries":        entries,
 	})
 }
@@ -246,14 +248,16 @@ func (s *Server) handleGetAppFilesystemFile(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	target, err := s.resolveAppFilesystemTarget(r.Context(), app, component, r.URL.Query().Get("pod"))
+	target, requestPath, err := s.resolveAppFilesystemTarget(
+		r.Context(),
+		app,
+		component,
+		r.URL.Query().Get("pod"),
+		r.URL.Query().Get("path"),
+		false,
+	)
 	if err != nil {
 		writeFilesystemError(w, err)
-		return
-	}
-	requestPath, err := normalizeFilesystemPath(target.workspaceRoot, r.URL.Query().Get("path"), false)
-	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -278,7 +282,7 @@ func (s *Server) handleGetAppFilesystemFile(w http.ResponseWriter, r *http.Reque
 		"component":      component,
 		"pod":            target.podName,
 		"path":           requestPath,
-		"workspace_root": target.workspaceRoot,
+		"workspace_root": target.rootPath,
 		"content":        content,
 		"encoding":       encoding,
 		"size":           size,
@@ -317,14 +321,16 @@ func (s *Server) handlePutAppFilesystemFile(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	target, err := s.resolveAppFilesystemTarget(r.Context(), app, component, r.URL.Query().Get("pod"))
+	target, requestPath, err := s.resolveAppFilesystemTarget(
+		r.Context(),
+		app,
+		component,
+		r.URL.Query().Get("pod"),
+		req.Path,
+		false,
+	)
 	if err != nil {
 		writeFilesystemError(w, err)
-		return
-	}
-	requestPath, err := normalizeFilesystemPath(target.workspaceRoot, req.Path, false)
-	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	contentBytes, err := decodeFilesystemContent(req.Content, req.Encoding)
@@ -352,7 +358,7 @@ func (s *Server) handlePutAppFilesystemFile(w http.ResponseWriter, r *http.Reque
 		"component":      component,
 		"pod":            target.podName,
 		"path":           requestPath,
-		"workspace_root": target.workspaceRoot,
+		"workspace_root": target.rootPath,
 		"size":           size,
 		"mode":           mode,
 		"modified_at":    modifiedAt,
@@ -386,14 +392,16 @@ func (s *Server) handleCreateAppFilesystemDirectory(w http.ResponseWriter, r *ht
 		return
 	}
 
-	target, err := s.resolveAppFilesystemTarget(r.Context(), app, component, r.URL.Query().Get("pod"))
+	target, requestPath, err := s.resolveAppFilesystemTarget(
+		r.Context(),
+		app,
+		component,
+		r.URL.Query().Get("pod"),
+		req.Path,
+		false,
+	)
 	if err != nil {
 		writeFilesystemError(w, err)
-		return
-	}
-	requestPath, err := normalizeFilesystemPath(target.workspaceRoot, req.Path, false)
-	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -416,7 +424,7 @@ func (s *Server) handleCreateAppFilesystemDirectory(w http.ResponseWriter, r *ht
 		"component":      component,
 		"pod":            target.podName,
 		"path":           requestPath,
-		"workspace_root": target.workspaceRoot,
+		"workspace_root": target.rootPath,
 		"kind":           "dir",
 		"size":           size,
 		"mode":           mode,
@@ -446,14 +454,16 @@ func (s *Server) handleDeleteAppFilesystemPath(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	target, err := s.resolveAppFilesystemTarget(r.Context(), app, component, r.URL.Query().Get("pod"))
+	target, requestPath, err := s.resolveAppFilesystemTarget(
+		r.Context(),
+		app,
+		component,
+		r.URL.Query().Get("pod"),
+		r.URL.Query().Get("path"),
+		false,
+	)
 	if err != nil {
 		writeFilesystemError(w, err)
-		return
-	}
-	requestPath, err := normalizeFilesystemPath(target.workspaceRoot, r.URL.Query().Get("path"), false)
-	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -470,38 +480,52 @@ func (s *Server) handleDeleteAppFilesystemPath(w http.ResponseWriter, r *http.Re
 		"component":      component,
 		"pod":            target.podName,
 		"path":           requestPath,
-		"workspace_root": target.workspaceRoot,
+		"workspace_root": target.rootPath,
 		"deleted":        true,
 	})
 }
 
-func (s *Server) resolveAppFilesystemTarget(ctx context.Context, app model.App, component, requestedPod string) (appFilesystemTarget, error) {
+func (s *Server) resolveAppFilesystemTarget(
+	ctx context.Context,
+	app model.App,
+	component,
+	requestedPod,
+	rawPath string,
+	allowRoot bool,
+) (appFilesystemTarget, string, error) {
 	if component != "app" {
-		return appFilesystemTarget{}, &filesystemAPIError{StatusCode: http.StatusBadRequest, Message: "component must be app"}
-	}
-	if app.Spec.Workspace == nil {
-		return appFilesystemTarget{}, &filesystemAPIError{StatusCode: http.StatusBadRequest, Message: "app does not have a persistent workspace"}
+		return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusBadRequest, Message: "component must be app"}
 	}
 
-	workspaceRoot, err := model.NormalizeAppWorkspaceMountPath(app.Spec.Workspace.MountPath)
-	if err != nil {
-		return appFilesystemTarget{}, &filesystemAPIError{StatusCode: http.StatusBadRequest, Message: "app workspace mount_path is invalid", Err: err}
-	}
-
-	runtimeObj, err := s.store.GetRuntime(app.Spec.RuntimeID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return appFilesystemTarget{}, &filesystemAPIError{StatusCode: http.StatusBadRequest, Message: "app runtime is not available"}
+	workspaceRoot := ""
+	if app.Spec.Workspace != nil {
+		var err error
+		workspaceRoot, err = model.NormalizeAppWorkspaceMountPath(app.Spec.Workspace.MountPath)
+		if err != nil {
+			return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusBadRequest, Message: "app workspace mount_path is invalid", Err: err}
 		}
-		return appFilesystemTarget{}, err
-	}
-	if runtimeObj.Type != model.RuntimeTypeManagedOwned {
-		return appFilesystemTarget{}, &filesystemAPIError{StatusCode: http.StatusBadRequest, Message: "persistent workspace requires a managed-owned runtime"}
 	}
 
-	listerFactory := s.newWorkspacePodLister
+	requestPath, rootPath, useWorkspace, err := resolveFilesystemPath(rawPath, allowRoot, workspaceRoot)
+	if err != nil {
+		return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusBadRequest, Message: err.Error()}
+	}
+	if useWorkspace {
+		runtimeObj, err := s.store.GetRuntime(app.Spec.RuntimeID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusBadRequest, Message: "app runtime is not available"}
+			}
+			return appFilesystemTarget{}, "", err
+		}
+		if runtimeObj.Type != model.RuntimeTypeManagedOwned {
+			return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusBadRequest, Message: "persistent workspace requires a managed-owned runtime"}
+		}
+	}
+
+	listerFactory := s.newFilesystemPodLister
 	if listerFactory == nil {
-		listerFactory = func(namespace string) (workspacePodLister, error) {
+		listerFactory = func(namespace string) (filesystemPodLister, error) {
 			return newKubeLogsClient(namespace)
 		}
 	}
@@ -509,41 +533,45 @@ func (s *Server) resolveAppFilesystemTarget(ctx context.Context, app model.App, 
 	namespace := runtime.NamespaceForTenant(app.TenantID)
 	lister, err := listerFactory(namespace)
 	if err != nil {
-		return appFilesystemTarget{}, &filesystemAPIError{StatusCode: http.StatusServiceUnavailable, Message: "workspace access is not available", Err: err}
+		return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusServiceUnavailable, Message: "filesystem access is not available", Err: err}
 	}
 
-	selector, _, err := runtimeLogTarget(app, "app")
+	selector, appContainerName, err := runtimeLogTarget(app, "app")
 	if err != nil {
-		return appFilesystemTarget{}, &filesystemAPIError{StatusCode: http.StatusBadRequest, Message: err.Error()}
+		return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusBadRequest, Message: err.Error()}
 	}
 
 	pods, err := lister.listPodsBySelector(ctx, namespace, selector)
 	if err != nil {
-		return appFilesystemTarget{}, &filesystemAPIError{StatusCode: http.StatusInternalServerError, Message: "list app pods", Err: err}
+		return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusInternalServerError, Message: "list app pods", Err: err}
 	}
 	sortPodsByCreation(pods)
 	pods = filterPodsByName(pods, requestedPod)
 	if len(pods) == 0 {
 		if strings.TrimSpace(requestedPod) != "" {
-			return appFilesystemTarget{}, &filesystemAPIError{StatusCode: http.StatusNotFound, Message: "no matching pods found"}
+			return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusNotFound, Message: "no matching pods found"}
 		}
 		if app.Spec.Replicas <= 0 || app.Status.CurrentReplicas <= 0 {
-			return appFilesystemTarget{}, &filesystemAPIError{StatusCode: http.StatusConflict, Message: "app has no running pod for workspace access"}
+			return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusConflict, Message: "app has no running pod for filesystem access"}
 		}
-		return appFilesystemTarget{}, &filesystemAPIError{StatusCode: http.StatusNotFound, Message: "no running app pods found"}
+		return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusNotFound, Message: "no running app pods found"}
 	}
 
 	pod := chooseFilesystemPod(pods)
 	if pod.Metadata.Name == "" {
-		return appFilesystemTarget{}, &filesystemAPIError{StatusCode: http.StatusNotFound, Message: "no running app pods found"}
+		return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusNotFound, Message: "no running app pods found"}
+	}
+	containerName := appContainerName
+	if useWorkspace {
+		containerName = runtime.AppWorkspaceContainerName
 	}
 	return appFilesystemTarget{
 		namespace:     namespace,
 		component:     component,
 		podName:       pod.Metadata.Name,
-		containerName: runtime.AppWorkspaceContainerName,
-		workspaceRoot: workspaceRoot,
-	}, nil
+		containerName: containerName,
+		rootPath:      rootPath,
+	}, requestPath, nil
 }
 
 func chooseFilesystemPod(pods []kubePodInfo) kubePodInfo {
@@ -559,9 +587,9 @@ func chooseFilesystemPod(pods []kubePodInfo) kubePodInfo {
 }
 
 func (s *Server) runAppFilesystemCommand(ctx context.Context, target appFilesystemTarget, stdin []byte, command ...string) ([]byte, error) {
-	runner := s.workspaceExecRunner
+	runner := s.filesystemExecRunner
 	if runner == nil {
-		runner = kubeWorkspaceExecRunner{}
+		runner = kubeFilesystemExecRunner{}
 	}
 
 	commandCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -579,8 +607,8 @@ func writeFilesystemError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.As(err, &apiErr):
 		httpx.WriteError(w, apiErr.StatusCode, apiErr.Message)
-	case errors.Is(err, errKubeWorkspaceExecUnavailable):
-		httpx.WriteError(w, http.StatusServiceUnavailable, "workspace access is not available in the api runtime")
+	case errors.Is(err, errKubeFilesystemExecUnavailable):
+		httpx.WriteError(w, http.StatusServiceUnavailable, "filesystem access is not available in the api runtime")
 	case errors.Is(err, store.ErrNotFound):
 		httpx.WriteError(w, http.StatusNotFound, "resource not found")
 	default:
@@ -648,21 +676,66 @@ func parseFilesystemReadMaxBytes(raw string) (int, error) {
 	return value, nil
 }
 
-func normalizeFilesystemPath(workspaceRoot, rawPath string, allowRoot bool) (string, error) {
+func resolveFilesystemPath(rawPath string, allowRoot bool, workspaceRoot string) (string, string, bool, error) {
+	rootPath := "/"
+	useWorkspace := false
+	if strings.TrimSpace(rawPath) == "" && workspaceRoot != "" {
+		rootPath = workspaceRoot
+		useWorkspace = true
+	}
+	if strings.TrimSpace(rawPath) != "" {
+		cleaned, err := model.NormalizeAbsolutePath(rawPath)
+		if err != nil {
+			return "", "", false, fmt.Errorf("path must be absolute")
+		}
+		if workspaceRoot != "" && isPathWithinFilesystemRoot(workspaceRoot, cleaned) {
+			rootPath = workspaceRoot
+			useWorkspace = true
+		}
+	}
+
+	reservedRoot := ""
+	if useWorkspace && workspaceRoot != "" {
+		reservedRoot = model.AppWorkspaceInternalPath(workspaceRoot)
+	}
+
+	requestPath, err := normalizeFilesystemPath(rootPath, rawPath, allowRoot, reservedRoot)
+	if err != nil {
+		return "", "", false, err
+	}
+	return requestPath, rootPath, useWorkspace, nil
+}
+
+func isPathWithinFilesystemRoot(rootPath, targetPath string) bool {
+	rootPath = path.Clean(strings.TrimSpace(rootPath))
+	targetPath = path.Clean(strings.TrimSpace(targetPath))
+	if rootPath == "" || targetPath == "" || rootPath == "." || targetPath == "." {
+		return false
+	}
+	if rootPath == "/" {
+		return path.IsAbs(targetPath)
+	}
+	return model.PathWithinBase(rootPath, targetPath)
+}
+
+func normalizeFilesystemPath(rootPath, rawPath string, allowRoot bool, reservedRoot string) (string, error) {
 	if strings.TrimSpace(rawPath) == "" {
-		rawPath = workspaceRoot
+		rawPath = rootPath
 	}
 	cleaned, err := model.NormalizeAbsolutePath(rawPath)
 	if err != nil {
 		return "", fmt.Errorf("path must be absolute")
 	}
-	if !model.PathWithinBase(workspaceRoot, cleaned) {
-		return "", fmt.Errorf("path must be inside the app workspace %s", workspaceRoot)
+	if !isPathWithinFilesystemRoot(rootPath, cleaned) {
+		return "", fmt.Errorf("path must be inside the app filesystem root %s", rootPath)
 	}
-	if !allowRoot && cleaned == path.Clean(workspaceRoot) {
+	if !allowRoot && cleaned == path.Clean(rootPath) {
+		if path.Clean(rootPath) == "/" {
+			return "", fmt.Errorf("path must not be the filesystem root")
+		}
 		return "", fmt.Errorf("path must not be the workspace root")
 	}
-	if model.PathWithinBase(model.AppWorkspaceInternalPath(workspaceRoot), cleaned) {
+	if reservedRoot != "" && isPathWithinFilesystemRoot(reservedRoot, cleaned) {
 		return "", fmt.Errorf("path is reserved for fugue workspace metadata")
 	}
 	return cleaned, nil

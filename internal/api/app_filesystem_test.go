@@ -17,12 +17,12 @@ import (
 	"fugue/internal/store"
 )
 
-type fakeWorkspacePodLister struct {
+type fakeFilesystemPodLister struct {
 	pods []kubePodInfo
 	err  error
 }
 
-func (f fakeWorkspacePodLister) listPodsBySelector(_ context.Context, _, _ string) ([]kubePodInfo, error) {
+func (f fakeFilesystemPodLister) listPodsBySelector(_ context.Context, _, _ string) ([]kubePodInfo, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -31,7 +31,7 @@ func (f fakeWorkspacePodLister) listPodsBySelector(_ context.Context, _, _ strin
 	return out, nil
 }
 
-type fakeWorkspaceExecCall struct {
+type fakeFilesystemExecCall struct {
 	namespace string
 	podName   string
 	container string
@@ -39,14 +39,14 @@ type fakeWorkspaceExecCall struct {
 	command   []string
 }
 
-type fakeWorkspaceExecRunner struct {
+type fakeFilesystemExecRunner struct {
 	outputs [][]byte
 	errs    []error
-	calls   []fakeWorkspaceExecCall
+	calls   []fakeFilesystemExecCall
 }
 
-func (f *fakeWorkspaceExecRunner) Run(_ context.Context, namespace, podName, containerName string, stdin []byte, command ...string) ([]byte, error) {
-	call := fakeWorkspaceExecCall{
+func (f *fakeFilesystemExecRunner) Run(_ context.Context, namespace, podName, containerName string, stdin []byte, command ...string) ([]byte, error) {
+	call := fakeFilesystemExecCall{
 		namespace: namespace,
 		podName:   podName,
 		container: containerName,
@@ -61,7 +61,7 @@ func (f *fakeWorkspaceExecRunner) Run(_ context.Context, namespace, podName, con
 		return nil, err
 	}
 	if len(f.outputs) == 0 {
-		return nil, errors.New("unexpected workspace exec call")
+		return nil, errors.New("unexpected filesystem exec call")
 	}
 	out := f.outputs[0]
 	f.outputs = f.outputs[1:]
@@ -71,31 +71,31 @@ func (f *fakeWorkspaceExecRunner) Run(_ context.Context, namespace, podName, con
 func TestAppFilesystemTreeAndReadUseWorkspaceSidecar(t *testing.T) {
 	t.Parallel()
 
-	_, server, apiKey, app := setupAppFilesystemTestServer(t)
+	_, server, apiKey, app := setupAppFilesystemTestServer(t, true)
 
 	pod := kubePodInfo{}
 	pod.Metadata.Name = "demo-pod"
 	pod.Metadata.CreationTimestamp = time.Now().UTC()
 	pod.Status.Phase = "Running"
 
-	server.newWorkspacePodLister = func(namespace string) (workspacePodLister, error) {
+	server.newFilesystemPodLister = func(namespace string) (filesystemPodLister, error) {
 		if namespace == "" {
 			t.Fatal("expected namespace")
 		}
-		return fakeWorkspacePodLister{pods: []kubePodInfo{pod}}, nil
+		return fakeFilesystemPodLister{pods: []kubePodInfo{pod}}, nil
 	}
 
 	treeOutput := strings.Join([]string{
 		encodeFilesystemTreeLine("dir", "/workspace/dir", "dir", 0, 0o755, time.Unix(1700000000, 0).UTC(), true),
 		encodeFilesystemTreeLine("file.txt", "/workspace/file.txt", "file", 5, 0o644, time.Unix(1700000001, 0).UTC(), false),
 	}, "\n")
-	runner := &fakeWorkspaceExecRunner{
+	runner := &fakeFilesystemExecRunner{
 		outputs: [][]byte{
 			[]byte(treeOutput),
 			[]byte("5\t644\t1700000001\nhello"),
 		},
 	}
-	server.workspaceExecRunner = runner
+	server.filesystemExecRunner = runner
 
 	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/filesystem/tree?path=/workspace", apiKey, nil)
 	if recorder.Code != http.StatusOK {
@@ -150,7 +150,7 @@ func TestAppFilesystemTreeAndReadUseWorkspaceSidecar(t *testing.T) {
 		t.Fatalf("expected file mode 0644, got %o", fileResponse.Mode)
 	}
 	if len(runner.calls) != 2 {
-		t.Fatalf("expected 2 workspace exec calls, got %d", len(runner.calls))
+		t.Fatalf("expected 2 filesystem exec calls, got %d", len(runner.calls))
 	}
 	if runner.calls[0].container != runtime.AppWorkspaceContainerName {
 		t.Fatalf("expected workspace sidecar container %q, got %q", runtime.AppWorkspaceContainerName, runner.calls[0].container)
@@ -160,24 +160,24 @@ func TestAppFilesystemTreeAndReadUseWorkspaceSidecar(t *testing.T) {
 func TestAppFilesystemWriteDirectoryAndDelete(t *testing.T) {
 	t.Parallel()
 
-	_, server, apiKey, app := setupAppFilesystemTestServer(t)
+	_, server, apiKey, app := setupAppFilesystemTestServer(t, true)
 
 	pod := kubePodInfo{}
 	pod.Metadata.Name = "demo-pod"
 	pod.Metadata.CreationTimestamp = time.Now().UTC()
 	pod.Status.Phase = "Running"
 
-	server.newWorkspacePodLister = func(string) (workspacePodLister, error) {
-		return fakeWorkspacePodLister{pods: []kubePodInfo{pod}}, nil
+	server.newFilesystemPodLister = func(string) (filesystemPodLister, error) {
+		return fakeFilesystemPodLister{pods: []kubePodInfo{pod}}, nil
 	}
-	runner := &fakeWorkspaceExecRunner{
+	runner := &fakeFilesystemExecRunner{
 		outputs: [][]byte{
 			[]byte("2\t640\t1700000002"),
 			[]byte("0\t755\t1700000003"),
 			[]byte(""),
 		},
 	}
-	server.workspaceExecRunner = runner
+	server.filesystemExecRunner = runner
 
 	recorder := performJSONRequest(t, server, http.MethodPut, "/v1/apps/"+app.ID+"/filesystem/file", apiKey, map[string]any{
 		"path":          "/workspace/notes/hello.txt",
@@ -217,7 +217,7 @@ func TestAppFilesystemWriteDirectoryAndDelete(t *testing.T) {
 	}
 
 	if len(runner.calls) != 3 {
-		t.Fatalf("expected 3 workspace exec calls, got %d", len(runner.calls))
+		t.Fatalf("expected 3 filesystem exec calls, got %d", len(runner.calls))
 	}
 	if string(runner.calls[0].stdin) != "hi" {
 		t.Fatalf("expected write stdin hi, got %q", string(runner.calls[0].stdin))
@@ -233,46 +233,150 @@ func TestAppFilesystemWriteDirectoryAndDelete(t *testing.T) {
 	}
 }
 
-func TestAppFilesystemRejectsPathsOutsideWorkspace(t *testing.T) {
+func TestAppFilesystemUsesAppContainerOutsideWorkspace(t *testing.T) {
 	t.Parallel()
 
-	_, server, apiKey, app := setupAppFilesystemTestServer(t)
+	_, server, apiKey, app := setupAppFilesystemTestServer(t, true)
 
 	pod := kubePodInfo{}
 	pod.Metadata.Name = "demo-pod"
 	pod.Metadata.CreationTimestamp = time.Now().UTC()
 	pod.Status.Phase = "Running"
 
-	server.newWorkspacePodLister = func(string) (workspacePodLister, error) {
-		return fakeWorkspacePodLister{pods: []kubePodInfo{pod}}, nil
+	server.newFilesystemPodLister = func(string) (filesystemPodLister, error) {
+		return fakeFilesystemPodLister{pods: []kubePodInfo{pod}}, nil
 	}
-	runner := &fakeWorkspaceExecRunner{}
-	server.workspaceExecRunner = runner
+	runner := &fakeFilesystemExecRunner{
+		outputs: [][]byte{
+			[]byte("10\t644\t1700000004\nroot-entry"),
+		},
+	}
+	server.filesystemExecRunner = runner
 
 	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/filesystem/file?path=/etc/passwd", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Content       string `json:"content"`
+		Path          string `json:"path"`
+		WorkspaceRoot string `json:"workspace_root"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Path != "/etc/passwd" {
+		t.Fatalf("unexpected path %q", response.Path)
+	}
+	if response.WorkspaceRoot != "/" {
+		t.Fatalf("expected filesystem root /, got %q", response.WorkspaceRoot)
+	}
+	if response.Content != "root-entry" {
+		t.Fatalf("unexpected file content %q", response.Content)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("expected 1 filesystem exec call, got %d", len(runner.calls))
+	}
+	_, appContainerName, err := runtimeLogTarget(app, "app")
+	if err != nil {
+		t.Fatalf("runtime log target: %v", err)
+	}
+	if runner.calls[0].container != appContainerName {
+		t.Fatalf("expected app container %q, got %q", appContainerName, runner.calls[0].container)
+	}
+}
+
+func TestAppFilesystemSupportsAppsWithoutPersistentWorkspace(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app := setupAppFilesystemTestServer(t, false)
+
+	pod := kubePodInfo{}
+	pod.Metadata.Name = "demo-pod"
+	pod.Metadata.CreationTimestamp = time.Now().UTC()
+	pod.Status.Phase = "Running"
+
+	server.newFilesystemPodLister = func(string) (filesystemPodLister, error) {
+		return fakeFilesystemPodLister{pods: []kubePodInfo{pod}}, nil
+	}
+	runner := &fakeFilesystemExecRunner{
+		outputs: [][]byte{
+			[]byte(encodeFilesystemTreeLine("app", "/app", "dir", 0, 0o755, time.Unix(1700000005, 0).UTC(), true)),
+		},
+	}
+	server.filesystemExecRunner = runner
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/filesystem/tree", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Path          string               `json:"path"`
+		WorkspaceRoot string               `json:"workspace_root"`
+		Entries       []appFilesystemEntry `json:"entries"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Path != "/" {
+		t.Fatalf("expected root path /, got %q", response.Path)
+	}
+	if response.WorkspaceRoot != "/" {
+		t.Fatalf("expected filesystem root /, got %q", response.WorkspaceRoot)
+	}
+	if len(response.Entries) != 1 || response.Entries[0].Path != "/app" {
+		t.Fatalf("unexpected filesystem entries %#v", response.Entries)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("expected 1 filesystem exec call, got %d", len(runner.calls))
+	}
+	_, appContainerName, err := runtimeLogTarget(app, "app")
+	if err != nil {
+		t.Fatalf("runtime log target: %v", err)
+	}
+	if runner.calls[0].container != appContainerName {
+		t.Fatalf("expected app container %q, got %q", appContainerName, runner.calls[0].container)
+	}
+}
+
+func TestAppFilesystemRejectsReservedWorkspaceMetadata(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app := setupAppFilesystemTestServer(t, true)
+
+	pod := kubePodInfo{}
+	pod.Metadata.Name = "demo-pod"
+	pod.Metadata.CreationTimestamp = time.Now().UTC()
+	pod.Status.Phase = "Running"
+
+	server.newFilesystemPodLister = func(string) (filesystemPodLister, error) {
+		return fakeFilesystemPodLister{pods: []kubePodInfo{pod}}, nil
+	}
+	runner := &fakeFilesystemExecRunner{}
+	server.filesystemExecRunner = runner
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/filesystem/file?path=/workspace/.fugue-workspace-state/token", apiKey, nil)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadRequest, recorder.Code, recorder.Body.String())
 	}
 	if len(runner.calls) != 0 {
-		t.Fatalf("expected no workspace exec calls, got %d", len(runner.calls))
+		t.Fatalf("expected no filesystem exec calls, got %d", len(runner.calls))
 	}
 }
 
 func TestAppFilesystemExecUnavailableReturnsServiceUnavailable(t *testing.T) {
 	t.Parallel()
 
-	_, server, apiKey, app := setupAppFilesystemTestServer(t)
+	_, server, apiKey, app := setupAppFilesystemTestServer(t, true)
 
 	pod := kubePodInfo{}
 	pod.Metadata.Name = "demo-pod"
 	pod.Metadata.CreationTimestamp = time.Now().UTC()
 	pod.Status.Phase = "Running"
 
-	server.newWorkspacePodLister = func(string) (workspacePodLister, error) {
-		return fakeWorkspacePodLister{pods: []kubePodInfo{pod}}, nil
+	server.newFilesystemPodLister = func(string) (filesystemPodLister, error) {
+		return fakeFilesystemPodLister{pods: []kubePodInfo{pod}}, nil
 	}
-	server.workspaceExecRunner = &fakeWorkspaceExecRunner{
-		errs: []error{errKubeWorkspaceExecUnavailable},
+	server.filesystemExecRunner = &fakeFilesystemExecRunner{
+		errs: []error{errKubeFilesystemExecUnavailable},
 	}
 
 	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/filesystem/file?path=/workspace/file.txt", apiKey, nil)
@@ -284,12 +388,12 @@ func TestAppFilesystemExecUnavailableReturnsServiceUnavailable(t *testing.T) {
 		Error string `json:"error"`
 	}
 	mustDecodeJSON(t, recorder, &response)
-	if response.Error != "workspace access is not available in the api runtime" {
+	if response.Error != "filesystem access is not available in the api runtime" {
 		t.Fatalf("unexpected error message %q", response.Error)
 	}
 }
 
-func setupAppFilesystemTestServer(t *testing.T) (*store.Store, *Server, string, model.App) {
+func setupAppFilesystemTestServer(t *testing.T, withWorkspace bool) (*store.Store, *Server, string, model.App) {
 	t.Helper()
 
 	s := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -313,13 +417,16 @@ func setupAppFilesystemTestServer(t *testing.T) (*store.Store, *Server, string, 
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
 	}
-	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+	spec := model.AppSpec{
 		Image:     "ghcr.io/example/demo:latest",
 		Ports:     []int{8080},
 		Replicas:  1,
 		RuntimeID: runtimeObj.ID,
-		Workspace: &model.AppWorkspaceSpec{},
-	})
+	}
+	if withWorkspace {
+		spec.Workspace = &model.AppWorkspaceSpec{}
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", spec)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}

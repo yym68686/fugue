@@ -39,8 +39,8 @@ type Server struct {
 	newClusterNodeClient         func() (*clusterNodeClient, error)
 	newManagedAppStatusClient    func() (*managedAppStatusClient, error)
 	newLogsClient                func(namespace string) (appLogsClient, error)
-	newWorkspacePodLister        func(namespace string) (workspacePodLister, error)
-	workspaceExecRunner          workspacePodExecRunner
+	newFilesystemPodLister       func(namespace string) (filesystemPodLister, error)
+	filesystemExecRunner         filesystemPodExecRunner
 	dnsResolver                  appDomainDNSResolver
 	logStreamTuning              logStreamTuning
 	ready                        atomic.Bool
@@ -73,12 +73,12 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		newLogsClient: func(namespace string) (appLogsClient, error) {
 			return newKubeLogsClient(namespace)
 		},
-		newWorkspacePodLister: func(namespace string) (workspacePodLister, error) {
+		newFilesystemPodLister: func(namespace string) (filesystemPodLister, error) {
 			return newKubeLogsClient(namespace)
 		},
-		workspaceExecRunner: kubeWorkspaceExecRunner{},
-		dnsResolver:         netAppDomainResolver{},
-		logStreamTuning:     defaultLogStreamTuning(),
+		filesystemExecRunner: kubeFilesystemExecRunner{},
+		dnsResolver:          netAppDomainResolver{},
+		logStreamTuning:      defaultLogStreamTuning(),
 	}
 	if server.registryPullBase == "" {
 		server.registryPullBase = server.registryPushBase
