@@ -164,6 +164,38 @@ tolerations:
   - key: node.kubernetes.io/disk-pressure
     operator: Exists
     effect: NoSchedule
+api:
+  # Explicit non-empty tolerations prevent Helm's `default` fallback from
+  # inheriting the global disk-pressure toleration onto stateless workloads.
+  tolerations:
+    - key: node.kubernetes.io/not-ready
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 300
+    - key: node.kubernetes.io/unreachable
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 300
+controller:
+  tolerations:
+    - key: node.kubernetes.io/not-ready
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 300
+    - key: node.kubernetes.io/unreachable
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 300
+snapshotController:
+  tolerations:
+    - key: node.kubernetes.io/not-ready
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 300
+    - key: node.kubernetes.io/unreachable
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 300
 EOF
   printf '%s' "${UPGRADE_OVERRIDE_VALUES_FILE}"
 }
