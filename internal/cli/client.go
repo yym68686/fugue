@@ -21,44 +21,213 @@ type Client struct {
 	httpClient *http.Client
 }
 
-type importUploadProjectRequest struct {
+type importProjectRequest struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 }
 
 type importUploadRequest struct {
-	AppID           string                      `json:"app_id,omitempty"`
-	TenantID        string                      `json:"tenant_id,omitempty"`
-	ProjectID       string                      `json:"project_id,omitempty"`
-	Project         *importUploadProjectRequest `json:"project,omitempty"`
-	SourceDir       string                      `json:"source_dir,omitempty"`
-	Name            string                      `json:"name,omitempty"`
-	Description     string                      `json:"description,omitempty"`
-	BuildStrategy   string                      `json:"build_strategy,omitempty"`
-	RuntimeID       string                      `json:"runtime_id,omitempty"`
-	Replicas        int                         `json:"replicas,omitempty"`
-	ServicePort     int                         `json:"service_port,omitempty"`
-	DockerfilePath  string                      `json:"dockerfile_path,omitempty"`
-	BuildContextDir string                      `json:"build_context_dir,omitempty"`
-	Env             map[string]string           `json:"env,omitempty"`
+	AppID           string                 `json:"app_id,omitempty"`
+	TenantID        string                 `json:"tenant_id,omitempty"`
+	ProjectID       string                 `json:"project_id,omitempty"`
+	Project         *importProjectRequest  `json:"project,omitempty"`
+	SourceDir       string                 `json:"source_dir,omitempty"`
+	Name            string                 `json:"name,omitempty"`
+	Description     string                 `json:"description,omitempty"`
+	BuildStrategy   string                 `json:"build_strategy,omitempty"`
+	RuntimeID       string                 `json:"runtime_id,omitempty"`
+	Replicas        int                    `json:"replicas,omitempty"`
+	ServicePort     int                    `json:"service_port,omitempty"`
+	DockerfilePath  string                 `json:"dockerfile_path,omitempty"`
+	BuildContextDir string                 `json:"build_context_dir,omitempty"`
+	Env             map[string]string      `json:"env,omitempty"`
+	ConfigContent   string                 `json:"config_content,omitempty"`
+	Files           []model.AppFile        `json:"files,omitempty"`
+	Postgres        *model.AppPostgresSpec `json:"postgres,omitempty"`
 }
 
 type importGitHubRequest struct {
-	TenantID        string                      `json:"tenant_id,omitempty"`
-	ProjectID       string                      `json:"project_id,omitempty"`
-	Project         *importUploadProjectRequest `json:"project,omitempty"`
-	RepoURL         string                      `json:"repo_url,omitempty"`
-	Branch          string                      `json:"branch,omitempty"`
-	SourceDir       string                      `json:"source_dir,omitempty"`
-	Name            string                      `json:"name,omitempty"`
-	Description     string                      `json:"description,omitempty"`
-	BuildStrategy   string                      `json:"build_strategy,omitempty"`
-	RuntimeID       string                      `json:"runtime_id,omitempty"`
-	Replicas        int                         `json:"replicas,omitempty"`
-	ServicePort     int                         `json:"service_port,omitempty"`
-	DockerfilePath  string                      `json:"dockerfile_path,omitempty"`
-	BuildContextDir string                      `json:"build_context_dir,omitempty"`
-	Env             map[string]string           `json:"env,omitempty"`
+	TenantID        string                 `json:"tenant_id,omitempty"`
+	ProjectID       string                 `json:"project_id,omitempty"`
+	Project         *importProjectRequest  `json:"project,omitempty"`
+	RepoURL         string                 `json:"repo_url,omitempty"`
+	RepoVisibility  string                 `json:"repo_visibility,omitempty"`
+	RepoAuthToken   string                 `json:"repo_auth_token,omitempty"`
+	Branch          string                 `json:"branch,omitempty"`
+	SourceDir       string                 `json:"source_dir,omitempty"`
+	Name            string                 `json:"name,omitempty"`
+	Description     string                 `json:"description,omitempty"`
+	BuildStrategy   string                 `json:"build_strategy,omitempty"`
+	RuntimeID       string                 `json:"runtime_id,omitempty"`
+	Replicas        int                    `json:"replicas,omitempty"`
+	ServicePort     int                    `json:"service_port,omitempty"`
+	DockerfilePath  string                 `json:"dockerfile_path,omitempty"`
+	BuildContextDir string                 `json:"build_context_dir,omitempty"`
+	Env             map[string]string      `json:"env,omitempty"`
+	ConfigContent   string                 `json:"config_content,omitempty"`
+	Files           []model.AppFile        `json:"files,omitempty"`
+	Postgres        *model.AppPostgresSpec `json:"postgres,omitempty"`
+	IdempotencyKey  string                 `json:"idempotency_key,omitempty"`
+}
+
+type importGitHubIdempotency struct {
+	Key      string `json:"key"`
+	Status   string `json:"status"`
+	Replayed bool   `json:"replayed,omitempty"`
+}
+
+type importGitHubResponse struct {
+	App               *model.App               `json:"app,omitempty"`
+	Operation         *model.Operation         `json:"operation,omitempty"`
+	Apps              []model.App              `json:"apps,omitempty"`
+	Operations        []model.Operation        `json:"operations,omitempty"`
+	ComposeStack      map[string]any           `json:"compose_stack,omitempty"`
+	FugueManifest     map[string]any           `json:"fugue_manifest,omitempty"`
+	Idempotency       *importGitHubIdempotency `json:"idempotency,omitempty"`
+	RequestInProgress bool                     `json:"request_in_progress,omitempty"`
+}
+
+type importUploadResponse struct {
+	App       model.App       `json:"app"`
+	Operation model.Operation `json:"operation"`
+}
+
+type importImageRequest struct {
+	TenantID      string                 `json:"tenant_id,omitempty"`
+	ProjectID     string                 `json:"project_id,omitempty"`
+	Project       *importProjectRequest  `json:"project,omitempty"`
+	ImageRef      string                 `json:"image_ref,omitempty"`
+	Name          string                 `json:"name,omitempty"`
+	Description   string                 `json:"description,omitempty"`
+	RuntimeID     string                 `json:"runtime_id,omitempty"`
+	Replicas      int                    `json:"replicas,omitempty"`
+	ServicePort   int                    `json:"service_port,omitempty"`
+	Env           map[string]string      `json:"env,omitempty"`
+	ConfigContent string                 `json:"config_content,omitempty"`
+	Files         []model.AppFile        `json:"files,omitempty"`
+	Postgres      *model.AppPostgresSpec `json:"postgres,omitempty"`
+}
+
+type importImageResponse struct {
+	App       model.App       `json:"app"`
+	Operation model.Operation `json:"operation"`
+}
+
+type buildLogsResponse struct {
+	OperationID     string     `json:"operation_id"`
+	OperationStatus string     `json:"operation_status"`
+	JobName         string     `json:"job_name"`
+	Available       bool       `json:"available"`
+	Source          string     `json:"source"`
+	Logs            string     `json:"logs"`
+	Summary         string     `json:"summary,omitempty"`
+	BuildStrategy   string     `json:"build_strategy"`
+	ErrorMessage    string     `json:"error_message"`
+	ResultMessage   string     `json:"result_message"`
+	LastUpdatedAt   time.Time  `json:"last_updated_at"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+	StartedAt       *time.Time `json:"started_at,omitempty"`
+}
+
+type runtimeLogsOptions struct {
+	Component string
+	Pod       string
+	TailLines int
+	Previous  bool
+}
+
+type runtimeLogsResponse struct {
+	Component string   `json:"component"`
+	Namespace string   `json:"namespace"`
+	Selector  string   `json:"selector"`
+	Container string   `json:"container"`
+	Pods      []string `json:"pods"`
+	Logs      string   `json:"logs"`
+	Warnings  []string `json:"warnings"`
+}
+
+type restartAppResponse struct {
+	Operation    model.Operation `json:"operation"`
+	RestartToken string          `json:"restart_token"`
+}
+
+type operationResponse struct {
+	Operation model.Operation `json:"operation"`
+}
+
+type appEnvResponse struct {
+	Env            map[string]string `json:"env"`
+	AlreadyCurrent bool              `json:"already_current,omitempty"`
+	Operation      *model.Operation  `json:"operation,omitempty"`
+}
+
+type appDomainAvailability struct {
+	Input     string `json:"input,omitempty"`
+	Hostname  string `json:"hostname,omitempty"`
+	Valid     bool   `json:"valid"`
+	Available bool   `json:"available"`
+	Current   bool   `json:"current"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+type appDomainPutResponse struct {
+	Domain         model.AppDomain       `json:"domain"`
+	Availability   appDomainAvailability `json:"availability"`
+	AlreadyCurrent bool                  `json:"already_current"`
+}
+
+type appDomainVerifyResponse struct {
+	Domain   model.AppDomain `json:"domain"`
+	Verified bool            `json:"verified"`
+}
+
+type appFilesystemEntry struct {
+	Name        string    `json:"name"`
+	Path        string    `json:"path"`
+	Kind        string    `json:"kind"`
+	Size        int64     `json:"size"`
+	Mode        int32     `json:"mode,omitempty"`
+	ModifiedAt  time.Time `json:"modified_at"`
+	HasChildren bool      `json:"has_children"`
+}
+
+type appFilesystemTreeResponse struct {
+	Component     string               `json:"component"`
+	Pod           string               `json:"pod"`
+	Path          string               `json:"path"`
+	Depth         int                  `json:"depth"`
+	WorkspaceRoot string               `json:"workspace_root"`
+	Entries       []appFilesystemEntry `json:"entries"`
+}
+
+type appFilesystemFileResponse struct {
+	Component     string    `json:"component"`
+	Pod           string    `json:"pod"`
+	Path          string    `json:"path"`
+	WorkspaceRoot string    `json:"workspace_root"`
+	Content       string    `json:"content"`
+	Encoding      string    `json:"encoding"`
+	Size          int64     `json:"size"`
+	Mode          int32     `json:"mode"`
+	ModifiedAt    time.Time `json:"modified_at"`
+	Truncated     bool      `json:"truncated"`
+}
+
+type appFilesystemMutationResponse struct {
+	Component     string     `json:"component"`
+	Pod           string     `json:"pod"`
+	Path          string     `json:"path"`
+	WorkspaceRoot string     `json:"workspace_root"`
+	Kind          string     `json:"kind,omitempty"`
+	Size          int64      `json:"size,omitempty"`
+	Mode          int32      `json:"mode,omitempty"`
+	ModifiedAt    *time.Time `json:"modified_at,omitempty"`
+	Deleted       bool       `json:"deleted,omitempty"`
+}
+
+type appDeleteResponse struct {
+	Operation       *model.Operation `json:"operation,omitempty"`
+	AlreadyDeleting bool             `json:"already_deleting,omitempty"`
 }
 
 type apiError struct {
@@ -120,58 +289,70 @@ func (c *Client) ListApps() ([]model.App, error) {
 	return response.Apps, nil
 }
 
-func (c *Client) ImportUpload(req importUploadRequest, archiveName string, archiveBytes []byte) (model.App, model.Operation, error) {
+func (c *Client) ListRuntimes() ([]model.Runtime, error) {
+	var response struct {
+		Runtimes []model.Runtime `json:"runtimes"`
+	}
+	if err := c.doJSON(http.MethodGet, "/v1/runtimes", nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Runtimes, nil
+}
+
+func (c *Client) ImportUpload(req importUploadRequest, archiveName string, archiveBytes []byte) (importUploadResponse, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
 	requestJSON, err := json.Marshal(req)
 	if err != nil {
-		return model.App{}, model.Operation{}, fmt.Errorf("marshal request: %w", err)
+		return importUploadResponse{}, fmt.Errorf("marshal request: %w", err)
 	}
 	if err := writer.WriteField("request", string(requestJSON)); err != nil {
-		return model.App{}, model.Operation{}, fmt.Errorf("write request field: %w", err)
+		return importUploadResponse{}, fmt.Errorf("write request field: %w", err)
 	}
 	part, err := writer.CreateFormFile("archive", archiveName)
 	if err != nil {
-		return model.App{}, model.Operation{}, fmt.Errorf("create archive field: %w", err)
+		return importUploadResponse{}, fmt.Errorf("create archive field: %w", err)
 	}
 	if _, err := part.Write(archiveBytes); err != nil {
-		return model.App{}, model.Operation{}, fmt.Errorf("write archive field: %w", err)
+		return importUploadResponse{}, fmt.Errorf("write archive field: %w", err)
 	}
 	if err := writer.Close(); err != nil {
-		return model.App{}, model.Operation{}, fmt.Errorf("close multipart writer: %w", err)
+		return importUploadResponse{}, fmt.Errorf("close multipart writer: %w", err)
 	}
 
 	httpReq, err := http.NewRequest(http.MethodPost, c.resolveURL("/v1/apps/import-upload"), &body)
 	if err != nil {
-		return model.App{}, model.Operation{}, fmt.Errorf("build request: %w", err)
+		return importUploadResponse{}, fmt.Errorf("build request: %w", err)
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+c.token)
 	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
 
 	payload, err := c.do(httpReq)
 	if err != nil {
-		return model.App{}, model.Operation{}, err
+		return importUploadResponse{}, err
 	}
-	var response struct {
-		App       model.App       `json:"app"`
-		Operation model.Operation `json:"operation"`
-	}
+	var response importUploadResponse
 	if err := json.Unmarshal(payload, &response); err != nil {
-		return model.App{}, model.Operation{}, fmt.Errorf("decode import upload response: %w", err)
+		return importUploadResponse{}, fmt.Errorf("decode import upload response: %w", err)
 	}
-	return response.App, response.Operation, nil
+	return response, nil
 }
 
-func (c *Client) ImportGitHub(req importGitHubRequest) (model.App, model.Operation, error) {
-	var response struct {
-		App       model.App       `json:"app"`
-		Operation model.Operation `json:"operation"`
-	}
+func (c *Client) ImportGitHub(req importGitHubRequest) (importGitHubResponse, error) {
+	var response importGitHubResponse
 	if err := c.doJSON(http.MethodPost, "/v1/apps/import-github", req, &response); err != nil {
-		return model.App{}, model.Operation{}, err
+		return importGitHubResponse{}, err
 	}
-	return response.App, response.Operation, nil
+	return response, nil
+}
+
+func (c *Client) ImportImage(req importImageRequest) (importImageResponse, error) {
+	var response importImageResponse
+	if err := c.doJSON(http.MethodPost, "/v1/apps/import-image", req, &response); err != nil {
+		return importImageResponse{}, err
+	}
+	return response, nil
 }
 
 func (c *Client) GetOperation(id string) (model.Operation, error) {
@@ -194,31 +375,276 @@ func (c *Client) GetApp(id string) (model.App, error) {
 	return response.App, nil
 }
 
-func (c *Client) GetBuildLogs(appID, operationID string) (string, error) {
+func (c *Client) RestartApp(id string) (restartAppResponse, error) {
+	var response restartAppResponse
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "restart"), nil, &response); err != nil {
+		return restartAppResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) ScaleApp(id string, replicas int) (operationResponse, error) {
+	var response operationResponse
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "scale"), map[string]int{"replicas": replicas}, &response); err != nil {
+		return operationResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) MigrateApp(id, targetRuntimeID string) (operationResponse, error) {
+	var response operationResponse
+	req := map[string]string{"target_runtime_id": strings.TrimSpace(targetRuntimeID)}
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "migrate"), req, &response); err != nil {
+		return operationResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) DeleteApp(id string) (appDeleteResponse, error) {
+	var response appDeleteResponse
+	if err := c.doJSON(http.MethodDelete, path.Join("/v1/apps", id), nil, &response); err != nil {
+		return appDeleteResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) GetAppEnv(id string) (appEnvResponse, error) {
+	var response appEnvResponse
+	if err := c.doJSON(http.MethodGet, path.Join("/v1/apps", id, "env"), nil, &response); err != nil {
+		return appEnvResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) PatchAppEnv(id string, set map[string]string, deleted []string) (appEnvResponse, error) {
+	req := map[string]any{}
+	if len(set) > 0 {
+		req["set"] = set
+	}
+	if len(deleted) > 0 {
+		req["delete"] = deleted
+	}
+	var response appEnvResponse
+	if err := c.doJSON(http.MethodPatch, path.Join("/v1/apps", id, "env"), req, &response); err != nil {
+		return appEnvResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) ListAppDomains(id string) ([]model.AppDomain, error) {
+	var response struct {
+		Domains []model.AppDomain `json:"domains"`
+	}
+	if err := c.doJSON(http.MethodGet, path.Join("/v1/apps", id, "domains"), nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Domains, nil
+}
+
+func (c *Client) GetAppDomainAvailability(id, hostname string) (appDomainAvailability, error) {
+	query := url.Values{}
+	query.Set("hostname", strings.TrimSpace(hostname))
+	relative := path.Join("/v1/apps", id, "domains", "availability") + "?" + query.Encode()
+	var response struct {
+		Availability appDomainAvailability `json:"availability"`
+	}
+	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
+		return appDomainAvailability{}, err
+	}
+	return response.Availability, nil
+}
+
+func (c *Client) PutAppDomain(id, hostname string) (appDomainPutResponse, error) {
+	var response appDomainPutResponse
+	req := map[string]string{"hostname": strings.TrimSpace(hostname)}
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "domains"), req, &response); err != nil {
+		return appDomainPutResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) VerifyAppDomain(id, hostname string) (appDomainVerifyResponse, error) {
+	var response appDomainVerifyResponse
+	req := map[string]string{"hostname": strings.TrimSpace(hostname)}
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "domains", "verify"), req, &response); err != nil {
+		return appDomainVerifyResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) DeleteAppDomain(id, hostname string) (model.AppDomain, error) {
+	query := url.Values{}
+	query.Set("hostname", strings.TrimSpace(hostname))
+	relative := path.Join("/v1/apps", id, "domains") + "?" + query.Encode()
+	var response struct {
+		Domain model.AppDomain `json:"domain"`
+	}
+	if err := c.doJSON(http.MethodDelete, relative, nil, &response); err != nil {
+		return model.AppDomain{}, err
+	}
+	return response.Domain, nil
+}
+
+func (c *Client) GetAppFilesystemTree(id, requestPath, pod string) (appFilesystemTreeResponse, error) {
+	query := url.Values{}
+	if strings.TrimSpace(requestPath) != "" {
+		query.Set("path", strings.TrimSpace(requestPath))
+	}
+	if strings.TrimSpace(pod) != "" {
+		query.Set("pod", strings.TrimSpace(pod))
+	}
+	relative := path.Join("/v1/apps", id, "filesystem", "tree")
+	if encoded := query.Encode(); encoded != "" {
+		relative += "?" + encoded
+	}
+	var response appFilesystemTreeResponse
+	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
+		return appFilesystemTreeResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) GetAppFilesystemFile(id, requestPath, pod string, maxBytes int) (appFilesystemFileResponse, error) {
+	query := url.Values{}
+	if strings.TrimSpace(requestPath) != "" {
+		query.Set("path", strings.TrimSpace(requestPath))
+	}
+	if strings.TrimSpace(pod) != "" {
+		query.Set("pod", strings.TrimSpace(pod))
+	}
+	if maxBytes > 0 {
+		query.Set("max_bytes", fmt.Sprintf("%d", maxBytes))
+	}
+	relative := path.Join("/v1/apps", id, "filesystem", "file")
+	if encoded := query.Encode(); encoded != "" {
+		relative += "?" + encoded
+	}
+	var response appFilesystemFileResponse
+	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
+		return appFilesystemFileResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) PutAppFilesystemFile(id, requestPath, content, encoding, pod string, mode int32, mkdirParents bool) (appFilesystemMutationResponse, error) {
+	req := map[string]any{
+		"path":          strings.TrimSpace(requestPath),
+		"content":       content,
+		"mkdir_parents": mkdirParents,
+	}
+	if strings.TrimSpace(encoding) != "" {
+		req["encoding"] = strings.TrimSpace(encoding)
+	}
+	if mode > 0 {
+		req["mode"] = mode
+	}
+	query := url.Values{}
+	if strings.TrimSpace(pod) != "" {
+		query.Set("pod", strings.TrimSpace(pod))
+	}
+	relative := path.Join("/v1/apps", id, "filesystem", "file")
+	if encoded := query.Encode(); encoded != "" {
+		relative += "?" + encoded
+	}
+	var response appFilesystemMutationResponse
+	if err := c.doJSON(http.MethodPut, relative, req, &response); err != nil {
+		return appFilesystemMutationResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) CreateAppFilesystemDirectory(id, requestPath, pod string, mode int32, parents bool) (appFilesystemMutationResponse, error) {
+	req := map[string]any{
+		"path":    strings.TrimSpace(requestPath),
+		"parents": parents,
+	}
+	if mode > 0 {
+		req["mode"] = mode
+	}
+	query := url.Values{}
+	if strings.TrimSpace(pod) != "" {
+		query.Set("pod", strings.TrimSpace(pod))
+	}
+	relative := path.Join("/v1/apps", id, "filesystem", "directory")
+	if encoded := query.Encode(); encoded != "" {
+		relative += "?" + encoded
+	}
+	var response appFilesystemMutationResponse
+	if err := c.doJSON(http.MethodPost, relative, req, &response); err != nil {
+		return appFilesystemMutationResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) DeleteAppFilesystemPath(id, requestPath, pod string, recursive bool) (appFilesystemMutationResponse, error) {
+	query := url.Values{}
+	if strings.TrimSpace(requestPath) != "" {
+		query.Set("path", strings.TrimSpace(requestPath))
+	}
+	if strings.TrimSpace(pod) != "" {
+		query.Set("pod", strings.TrimSpace(pod))
+	}
+	if recursive {
+		query.Set("recursive", "true")
+	}
+	relative := path.Join("/v1/apps", id, "filesystem")
+	if encoded := query.Encode(); encoded != "" {
+		relative += "?" + encoded
+	}
+	var response appFilesystemMutationResponse
+	if err := c.doJSON(http.MethodDelete, relative, nil, &response); err != nil {
+		return appFilesystemMutationResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) GetBuildLogs(appID, operationID string, tailLines int) (buildLogsResponse, error) {
 	query := url.Values{}
 	if strings.TrimSpace(operationID) != "" {
 		query.Set("operation_id", strings.TrimSpace(operationID))
 	}
-	query.Set("tail_lines", "200")
+	if tailLines <= 0 {
+		tailLines = 200
+	}
+	query.Set("tail_lines", fmt.Sprintf("%d", tailLines))
 	relative := path.Join("/v1/apps", appID, "build-logs")
 	if encoded := query.Encode(); encoded != "" {
 		relative += "?" + encoded
 	}
 	payload, err := c.doJSONRaw(http.MethodGet, relative, nil)
 	if err != nil {
-		return "", err
+		return buildLogsResponse{}, err
 	}
-	var response struct {
-		Logs    string `json:"logs"`
-		Summary string `json:"summary"`
-	}
+	var response buildLogsResponse
 	if err := json.Unmarshal(payload, &response); err != nil {
-		return "", fmt.Errorf("decode build logs response: %w", err)
+		return buildLogsResponse{}, fmt.Errorf("decode build logs response: %w", err)
 	}
-	if strings.TrimSpace(response.Logs) != "" {
-		return response.Logs, nil
+	return response, nil
+}
+
+func (c *Client) GetRuntimeLogs(appID string, opts runtimeLogsOptions) (runtimeLogsResponse, error) {
+	query := url.Values{}
+	if strings.TrimSpace(opts.Component) != "" {
+		query.Set("component", strings.TrimSpace(opts.Component))
 	}
-	return response.Summary, nil
+	if strings.TrimSpace(opts.Pod) != "" {
+		query.Set("pod", strings.TrimSpace(opts.Pod))
+	}
+	if opts.TailLines > 0 {
+		query.Set("tail_lines", fmt.Sprintf("%d", opts.TailLines))
+	}
+	if opts.Previous {
+		query.Set("previous", "true")
+	}
+	relative := path.Join("/v1/apps", appID, "runtime-logs")
+	if encoded := query.Encode(); encoded != "" {
+		relative += "?" + encoded
+	}
+	var response runtimeLogsResponse
+	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
+		return runtimeLogsResponse{}, err
+	}
+	return response, nil
 }
 
 func (c *Client) doJSON(method, relativePath string, requestBody any, responseBody any) error {

@@ -319,42 +319,41 @@ func (s *Server) cleanupRevokedNodeKey(ctx context.Context, key model.NodeKey) r
 			}
 		}
 	}
-	if !needsClusterClient {
-		return result
-	}
 
-	clientFactory := s.newClusterNodeClient
-	if clientFactory == nil {
-		clientFactory = newClusterNodeClient
-	}
-	client, clientErr := clientFactory()
-	if clientErr != nil {
-		result.Warnings = append(result.Warnings, "connect to kubernetes for node key cleanup: "+clientErr.Error())
-	} else {
-		deletedTokenIDs, err := client.deleteBootstrapTokensByNodeKey(ctx, key.ID)
-		if err != nil {
-			result.Warnings = append(result.Warnings, "delete bootstrap tokens for node key cleanup: "+err.Error())
+	var client *clusterNodeClient
+	var clientErr error
+	if needsClusterClient {
+		clientFactory := s.newClusterNodeClient
+		if clientFactory == nil {
+			clientFactory = newClusterNodeClient
+		}
+		client, clientErr = clientFactory()
+		if clientErr != nil {
+			result.Warnings = append(result.Warnings, "connect to kubernetes for node key cleanup: "+clientErr.Error())
 		} else {
-			result.DeletedBootstrapTokenIDs = deletedTokenIDs
+			deletedTokenIDs, err := client.deleteBootstrapTokensByNodeKey(ctx, key.ID)
+			if err != nil {
+				result.Warnings = append(result.Warnings, "delete bootstrap tokens for node key cleanup: "+err.Error())
+			} else {
+				result.DeletedBootstrapTokenIDs = deletedTokenIDs
+			}
 		}
 	}
 
 	for _, runtimeObj := range runtimes {
-		if runtimeObj.Type != model.RuntimeTypeManagedOwned {
-			continue
-		}
-		nodeName := strings.TrimSpace(runtimeObj.ClusterNodeName)
-		switch {
-		case nodeName == "":
-		case clientErr != nil:
-			result.Warnings = append(result.Warnings, "delete cluster node "+runtimeObj.Name+": kubernetes client unavailable")
-			continue
-		default:
-			if err := client.deleteNode(ctx, nodeName); err != nil && !isKubernetesNodeNotFound(err) {
-				result.Warnings = append(result.Warnings, "delete cluster node "+nodeName+": "+err.Error())
-				continue
+		if runtimeObj.Type == model.RuntimeTypeManagedOwned {
+			nodeName := strings.TrimSpace(runtimeObj.ClusterNodeName)
+			switch {
+			case nodeName == "":
+			case clientErr != nil:
+				result.Warnings = append(result.Warnings, "delete cluster node "+nodeName+": kubernetes client unavailable")
+			default:
+				if err := client.deleteNode(ctx, nodeName); err != nil && !isKubernetesNodeNotFound(err) {
+					result.Warnings = append(result.Warnings, "delete cluster node "+nodeName+": "+err.Error())
+				} else {
+					result.DeletedClusterNodes = append(result.DeletedClusterNodes, nodeName)
+				}
 			}
-			result.DeletedClusterNodes = append(result.DeletedClusterNodes, nodeName)
 		}
 
 		detached, err := s.store.DetachRuntimeOwnership(runtimeObj.ID)

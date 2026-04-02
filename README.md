@@ -65,7 +65,33 @@ make build-cli
 ./bin/fugue deploy --help
 ```
 
-The `build-cli` GitHub Actions workflow now compiles `fugue` binaries for Linux and macOS whenever matching changes are pushed to `main`.
+Install the released CLI in one line:
+
+macOS and Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.ps1 | iex"
+```
+
+The installers download the matching archive from the latest GitHub Release and install `fugue` into a writable bin directory. To pin a release or choose a different install directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.sh | env FUGUE_VERSION=v0.1.0 FUGUE_INSTALL_DIR=$HOME/.local/bin sh
+```
+
+```powershell
+$env:FUGUE_VERSION='v0.1.0'
+$env:FUGUE_INSTALL_DIR="$env:LOCALAPPDATA\Programs\Fugue\bin"
+irm https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.ps1 | iex
+```
+
+The `build-cli` GitHub Actions workflow now packages `fugue` archives for Linux, macOS, and Windows whenever matching changes are pushed to `main`. The `release-cli` workflow publishes those archives as GitHub Release assets when a `v*` tag is pushed.
 
 Run the API and controller in separate terminals:
 

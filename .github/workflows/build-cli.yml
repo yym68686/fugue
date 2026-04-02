@@ -12,23 +12,14 @@ on:
       - 'go.mod'
       - 'go.sum'
       - 'Makefile'
+      - 'scripts/package_fugue_cli.sh'
+      - 'scripts/install_fugue_cli.sh'
+      - 'scripts/install_fugue_cli.ps1'
   workflow_dispatch:
 
 jobs:
-  build:
+  package:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,18 +29,15 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build fugue CLI
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
-        run: |
-          mkdir -p dist
-          go build -trimpath -ldflags="-s -w" -o "dist/fugue-${GOOS}-${GOARCH}" ./cmd/fugue
+      - name: Run tests
+        run: go test ./...
 
-      - name: Upload artifact
+      - name: Package fugue CLI archives
+        run: ./scripts/package_fugue_cli.sh "${RUNNER_TEMP}/fugue-cli"
+
+      - name: Upload packaged artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: fugue-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/fugue-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: fugue-cli-dist
+          path: ${{ runner.temp }}/fugue-cli/*
           if-no-files-found: error

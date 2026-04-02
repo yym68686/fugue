@@ -4,266 +4,19 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"fugue/internal/model"
 )
 
-type DeployOptions struct {
-	BaseURL         string
-	Token           string
-	WorkingDir      string
-	TenantID        string
-	TenantName      string
-	AppID           string
-	AppName         string
-	ProjectID       string
-	ProjectName     string
-	Description     string
-	BuildStrategy   string
-	RepoURL         string
-	Branch          string
-	EnvFile         string
-	SourceDir       string
-	DockerfilePath  string
-	BuildContextDir string
-	RuntimeID       string
-	Replicas        int
-	ServicePort     int
-	Wait            bool
-	PollInterval    time.Duration
-}
-
-func Run(args []string) error {
-	if len(args) == 0 {
-		printTopLevelUsage(os.Stderr)
-		return fmt.Errorf("command is required")
-	}
-	switch args[0] {
-	case "-h", "--help", "help":
-		printTopLevelUsage(os.Stdout)
-		return nil
-	case "deploy":
-		return runDeploy(args[1:])
-	default:
-		printTopLevelUsage(os.Stderr)
-		return fmt.Errorf("unknown command %q", args[0])
-	}
-}
-
-func runDeploy(args []string) error {
-	return runDeployWithStreams(args, os.Stdout, os.Stderr)
-}
-
-func runDeployWithStreams(args []string, stdout, stderr io.Writer) error {
-	workingDir, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("get working directory: %w", err)
-	}
-
-	opts := DeployOptions{
-		BaseURL:       firstNonEmpty(os.Getenv("FUGUE_BASE_URL")),
-		Token:         firstNonEmpty(os.Getenv("FUGUE_TOKEN"), os.Getenv("FUGUE_API_KEY"), os.Getenv("FUGUE_BOOTSTRAP_KEY")),
-		WorkingDir:    workingDir,
-		TenantID:      firstNonEmpty(os.Getenv("FUGUE_TENANT_ID")),
-		TenantName:    firstNonEmpty(os.Getenv("FUGUE_TENANT"), os.Getenv("FUGUE_TENANT_NAME")),
-		ProjectName:   "default",
-		BuildStrategy: model.AppBuildStrategyAuto,
-		Wait:          true,
-		PollInterval:  2 * time.Second,
-	}
-
-	fs := flag.NewFlagSet("deploy", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	fs.Usage = func() {
-		printDeployUsage(fs.Output())
-	}
-	fs.StringVar(&opts.BaseURL, "base-url", opts.BaseURL, "Fugue API base URL")
-	fs.StringVar(&opts.Token, "token", opts.Token, "Fugue API token")
-	fs.StringVar(&opts.WorkingDir, "dir", opts.WorkingDir, "project directory to deploy")
-	fs.StringVar(&opts.TenantID, "tenant-id", opts.TenantID, "target tenant ID")
-	fs.StringVar(&opts.TenantName, "tenant", opts.TenantName, "target tenant name or slug")
-	fs.StringVar(&opts.AppID, "app-id", "", "existing app ID to redeploy")
-	fs.StringVar(&opts.AppName, "name", "", "app name (defaults to current directory name)")
-	fs.StringVar(&opts.ProjectID, "project-id", "", "target project ID")
-	fs.StringVar(&opts.ProjectName, "project", opts.ProjectName, "target project name")
-	fs.StringVar(&opts.Description, "description", "", "app description when creating a new app")
-	fs.StringVar(&opts.BuildStrategy, "build-strategy", opts.BuildStrategy, "build strategy: auto, static-site, dockerfile, buildpacks, nixpacks")
-	fs.StringVar(&opts.RepoURL, "repo-url", "", "public GitHub repository URL to import instead of uploading local source")
-	fs.StringVar(&opts.Branch, "branch", "", "Git branch for --repo-url imports")
-	fs.StringVar(&opts.EnvFile, "env-file", "", "local .env file to inject as app env")
-	fs.StringVar(&opts.SourceDir, "source-dir", "", "source directory relative to project root")
-	fs.StringVar(&opts.DockerfilePath, "dockerfile-path", "", "Dockerfile path relative to project root")
-	fs.StringVar(&opts.BuildContextDir, "build-context-dir", "", "build context directory relative to project root")
-	fs.StringVar(&opts.RuntimeID, "runtime-id", "", "target runtime ID")
-	fs.IntVar(&opts.Replicas, "replicas", 0, "desired replica count")
-	fs.IntVar(&opts.ServicePort, "service-port", 0, "service port override")
-	fs.BoolVar(&opts.Wait, "wait", opts.Wait, "wait for the build/deploy operation to complete")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
-		}
-		return err
-	}
-
-	if opts.AppName == "" {
-		opts.AppName = defaultDeployAppName(opts.WorkingDir, opts.RepoURL)
-	}
-	if opts.AppName == "" {
-		opts.AppName = "app"
-	}
-
-	client, err := NewClient(opts.BaseURL, opts.Token)
-	if err != nil {
-		return err
-	}
-
-	if strings.TrimSpace(opts.RepoURL) != "" && strings.TrimSpace(opts.AppID) != "" {
-		return fmt.Errorf("--app-id cannot be used with --repo-url")
-	}
-
-	resolvedTenantID := ""
-	resolvedProjectID := ""
-	var createProjectRequest *importUploadProjectRequest
-	if strings.TrimSpace(opts.AppID) == "" {
-		resolvedTenantID, err = resolveTenantSelection(client, opts.TenantID, opts.TenantName)
-		if err != nil {
-			return err
-		}
-
-		resolvedProjectID, createProjectRequest, err = resolveProjectSelection(client, resolvedTenantID, opts.ProjectID, opts.ProjectName)
-		if err != nil {
-			return err
-		}
-	}
-
-	envVars, envPath, err := loadDeploymentEnv(opts.WorkingDir, opts.EnvFile, strings.TrimSpace(opts.RepoURL) != "")
-	if err != nil {
-		return err
-	}
-	if envPath != "" {
-		fmt.Fprintf(stderr, "Loaded %d env vars from %s\n", len(envVars), envPath)
-	}
-
-	var (
-		app model.App
-		op  model.Operation
-	)
-	if strings.TrimSpace(opts.RepoURL) != "" {
-		request := importGitHubRequest{
-			TenantID:        resolvedTenantID,
-			SourceDir:       strings.TrimSpace(opts.SourceDir),
-			RepoURL:         strings.TrimSpace(opts.RepoURL),
-			Branch:          strings.TrimSpace(opts.Branch),
-			Name:            opts.AppName,
-			Description:     strings.TrimSpace(opts.Description),
-			BuildStrategy:   strings.TrimSpace(opts.BuildStrategy),
-			RuntimeID:       strings.TrimSpace(opts.RuntimeID),
-			Replicas:        opts.Replicas,
-			ServicePort:     opts.ServicePort,
-			DockerfilePath:  strings.TrimSpace(opts.DockerfilePath),
-			BuildContextDir: strings.TrimSpace(opts.BuildContextDir),
-			Env:             envVars,
-		}
-		if resolvedProjectID != "" {
-			request.ProjectID = resolvedProjectID
-		} else if createProjectRequest != nil {
-			request.Project = createProjectRequest
-		}
-		fmt.Fprintf(stderr, "Importing %s\n", request.RepoURL)
-		app, op, err = client.ImportGitHub(request)
-		if err != nil {
-			return err
-		}
-	} else {
-		resolvedAppID, err := resolveAppSelection(client, opts.AppID, opts.AppName, resolvedProjectID, resolvedTenantID)
-		if err != nil {
-			return err
-		}
-
-		archiveBytes, archiveName, err := createSourceArchive(opts.WorkingDir, opts.AppName)
-		if err != nil {
-			return err
-		}
-
-		request := importUploadRequest{
-			AppID:           resolvedAppID,
-			TenantID:        resolvedTenantID,
-			SourceDir:       strings.TrimSpace(opts.SourceDir),
-			Name:            opts.AppName,
-			Description:     strings.TrimSpace(opts.Description),
-			BuildStrategy:   strings.TrimSpace(opts.BuildStrategy),
-			RuntimeID:       strings.TrimSpace(opts.RuntimeID),
-			Replicas:        opts.Replicas,
-			ServicePort:     opts.ServicePort,
-			DockerfilePath:  strings.TrimSpace(opts.DockerfilePath),
-			BuildContextDir: strings.TrimSpace(opts.BuildContextDir),
-			Env:             envVars,
-		}
-		if resolvedAppID == "" {
-			if resolvedProjectID != "" {
-				request.ProjectID = resolvedProjectID
-			} else if createProjectRequest != nil {
-				request.Project = createProjectRequest
-			}
-		}
-
-		fmt.Fprintf(stderr, "Uploading %s (%d bytes)\n", archiveName, len(archiveBytes))
-		app, op, err = client.ImportUpload(request, archiveName, archiveBytes)
-		if err != nil {
-			return err
-		}
-	}
-	fmt.Fprintf(stderr, "Queued operation %s for app %s\n", op.ID, app.ID)
-
-	if !opts.Wait {
-		fmt.Fprintf(stdout, "app_id=%s\noperation_id=%s\n", app.ID, op.ID)
-		return nil
-	}
-
-	lastStatus := ""
-	for {
-		currentOp, err := client.GetOperation(op.ID)
-		if err != nil {
-			return err
-		}
-		status := strings.TrimSpace(currentOp.Status)
-		if status != lastStatus {
-			fmt.Fprintf(stderr, "operation_status=%s\n", status)
-			lastStatus = status
-		}
-		switch status {
-		case model.OperationStatusCompleted:
-			finalApp, err := client.GetApp(app.ID)
-			if err != nil {
-				return err
-			}
-			if finalApp.Route != nil && strings.TrimSpace(finalApp.Route.PublicURL) != "" {
-				fmt.Fprintf(stdout, "app_id=%s\nurl=%s\n", finalApp.ID, finalApp.Route.PublicURL)
-			} else {
-				fmt.Fprintf(stdout, "app_id=%s\n", finalApp.ID)
-			}
-			return nil
-		case model.OperationStatusFailed:
-			logs, logsErr := client.GetBuildLogs(app.ID, op.ID)
-			if logsErr == nil && strings.TrimSpace(logs) != "" {
-				return fmt.Errorf("operation %s failed: %s\n\n%s", op.ID, strings.TrimSpace(currentOp.ErrorMessage), strings.TrimSpace(logs))
-			}
-			if strings.TrimSpace(currentOp.ErrorMessage) != "" {
-				return fmt.Errorf("operation %s failed: %s", op.ID, strings.TrimSpace(currentOp.ErrorMessage))
-			}
-			return fmt.Errorf("operation %s failed", op.ID)
-		}
-		time.Sleep(opts.PollInterval)
-	}
+type projectSelection struct {
+	ID     string
+	Create *importProjectRequest
 }
 
 func resolveTenantSelection(client *Client, tenantID, tenantName string) (string, error) {
@@ -308,28 +61,78 @@ func resolveTenantSelection(client *Client, tenantID, tenantName string) (string
 	return "", fmt.Errorf("multiple tenants are visible; pass --tenant or --tenant-id")
 }
 
-func resolveProjectSelection(client *Client, tenantID, projectID, projectName string) (string, *importUploadProjectRequest, error) {
+func resolveProjectCreationSelection(client *Client, tenantID, projectID, projectName string) (projectSelection, error) {
 	projectID = strings.TrimSpace(projectID)
 	projectName = strings.TrimSpace(projectName)
 	if projectID != "" {
-		return projectID, nil, nil
+		return projectSelection{ID: projectID}, nil
 	}
 	if projectName == "" || strings.EqualFold(projectName, "default") {
-		return "", nil, nil
+		return projectSelection{}, nil
 	}
 	if strings.TrimSpace(tenantID) == "" {
-		return "", nil, fmt.Errorf("tenant id is required to resolve project %q", projectName)
+		return projectSelection{}, fmt.Errorf("tenant id is required to resolve project %q", projectName)
 	}
 	projects, err := client.ListProjects(tenantID)
 	if err != nil {
-		return "", nil, err
+		return projectSelection{}, err
 	}
 	for _, project := range projects {
-		if strings.EqualFold(project.Name, projectName) || strings.EqualFold(project.Slug, model.Slugify(projectName)) {
-			return project.ID, nil, nil
+		switch {
+		case strings.EqualFold(project.ID, projectName):
+			return projectSelection{ID: project.ID}, nil
+		case strings.EqualFold(project.Name, projectName):
+			return projectSelection{ID: project.ID}, nil
+		case strings.EqualFold(project.Slug, model.Slugify(projectName)):
+			return projectSelection{ID: project.ID}, nil
 		}
 	}
-	return "", &importUploadProjectRequest{Name: projectName}, nil
+	return projectSelection{Create: &importProjectRequest{Name: projectName}}, nil
+}
+
+func resolveProjectSelection(client *Client, tenantID, projectID, projectName string) (string, *importProjectRequest, error) {
+	selection, err := resolveProjectCreationSelection(client, tenantID, projectID, projectName)
+	if err != nil {
+		return "", nil, err
+	}
+	return selection.ID, selection.Create, nil
+}
+
+func resolveProjectReference(client *Client, tenantID, projectID, projectName string) (string, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID != "" {
+		return projectID, nil
+	}
+	projectName = strings.TrimSpace(projectName)
+	if projectName == "" {
+		return "", nil
+	}
+	if strings.TrimSpace(tenantID) == "" {
+		return "", fmt.Errorf("tenant is required to resolve project %q", projectName)
+	}
+	projects, err := client.ListProjects(tenantID)
+	if err != nil {
+		return "", err
+	}
+	matches := make([]model.Project, 0, 1)
+	for _, project := range projects {
+		switch {
+		case strings.EqualFold(project.ID, projectName):
+			matches = append(matches, project)
+		case strings.EqualFold(project.Name, projectName):
+			matches = append(matches, project)
+		case strings.EqualFold(project.Slug, model.Slugify(projectName)):
+			matches = append(matches, project)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("project %q not found", projectName)
+	case 1:
+		return matches[0].ID, nil
+	default:
+		return "", fmt.Errorf("multiple projects match %q; pass --project-id", projectName)
+	}
 }
 
 func resolveAppSelection(client *Client, appID, appName, projectID, tenantID string) (string, error) {
@@ -337,31 +140,80 @@ func resolveAppSelection(client *Client, appID, appName, projectID, tenantID str
 	if appID != "" {
 		return appID, nil
 	}
+	appName = strings.TrimSpace(appName)
+	if appName == "" {
+		return "", nil
+	}
 	apps, err := client.ListApps()
 	if err != nil {
 		return "", err
 	}
-	name := model.Slugify(appName)
-	matches := make([]model.App, 0, 1)
-	for _, app := range apps {
-		if tenantID != "" && app.TenantID != tenantID {
-			continue
-		}
-		if !strings.EqualFold(app.Name, name) {
-			continue
-		}
-		if projectID != "" && app.ProjectID != projectID {
-			continue
-		}
-		matches = append(matches, app)
-	}
+	matches := matchVisibleApps(apps, appName, projectID, tenantID)
 	switch len(matches) {
 	case 0:
 		return "", nil
 	case 1:
 		return matches[0].ID, nil
 	default:
-		return "", fmt.Errorf("multiple apps named %q are visible; pass --app-id or --project-id", name)
+		return "", fmt.Errorf("multiple apps match %q; pass --app-id or --project-id", appName)
+	}
+}
+
+func resolveAppReference(client *Client, appRef, projectID, tenantID string) (model.App, error) {
+	appRef = strings.TrimSpace(appRef)
+	if appRef == "" {
+		return model.App{}, fmt.Errorf("app is required")
+	}
+	apps, err := client.ListApps()
+	if err != nil {
+		return model.App{}, err
+	}
+	matches := matchVisibleApps(apps, appRef, projectID, tenantID)
+	switch len(matches) {
+	case 0:
+		return model.App{}, fmt.Errorf("app %q not found", appRef)
+	case 1:
+		return matches[0], nil
+	default:
+		return model.App{}, fmt.Errorf("multiple apps match %q; pass --project or use an app id", appRef)
+	}
+}
+
+func resolveRuntimeSelection(client *Client, runtimeID, runtimeName string) (string, error) {
+	runtimeID = strings.TrimSpace(runtimeID)
+	if runtimeID != "" {
+		return runtimeID, nil
+	}
+	runtimeName = strings.TrimSpace(runtimeName)
+	if runtimeName == "" {
+		return "", nil
+	}
+	switch strings.ToLower(runtimeName) {
+	case "shared", "managed-shared", "runtime_managed_shared":
+		return "runtime_managed_shared", nil
+	}
+	runtimes, err := client.ListRuntimes()
+	if err != nil {
+		return "", err
+	}
+	matches := make([]model.Runtime, 0, 1)
+	for _, runtimeObj := range runtimes {
+		switch {
+		case strings.EqualFold(runtimeObj.ID, runtimeName):
+			matches = append(matches, runtimeObj)
+		case strings.EqualFold(runtimeObj.Name, runtimeName):
+			matches = append(matches, runtimeObj)
+		case strings.EqualFold(model.Slugify(runtimeObj.Name), model.Slugify(runtimeName)):
+			matches = append(matches, runtimeObj)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("runtime %q not found", runtimeName)
+	case 1:
+		return matches[0].ID, nil
+	default:
+		return "", fmt.Errorf("multiple runtimes match %q; pass --runtime-id", runtimeName)
 	}
 }
 
@@ -489,47 +341,62 @@ func repoURLAppName(repoURL string) string {
 	return model.Slugify(parts[len(parts)-1])
 }
 
-func printTopLevelUsage(w io.Writer) {
-	_, _ = fmt.Fprintln(w, "Usage: fugue deploy [flags]")
+func normalizeGitHubRepoArg(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "git@github.com:") {
+		repo := strings.TrimSpace(strings.TrimPrefix(raw, "git@github.com:"))
+		repo = strings.TrimSuffix(repo, ".git")
+		return "https://github.com/" + strings.Trim(repo, "/")
+	}
+	if strings.Contains(raw, "://") {
+		return raw
+	}
+	return "https://github.com/" + strings.Trim(strings.TrimSuffix(raw, ".git"), "/")
 }
 
-func printDeployUsage(w io.Writer) {
-	_, _ = fmt.Fprintln(w, "Usage: fugue deploy [flags]")
-	_, _ = fmt.Fprintln(w)
-	_, _ = fmt.Fprintln(w, "Required environment or flags:")
-	_, _ = fmt.Fprintln(w, "  FUGUE_BASE_URL / --base-url")
-	_, _ = fmt.Fprintln(w, "  FUGUE_TOKEN / --token")
-	_, _ = fmt.Fprintln(w)
-	_, _ = fmt.Fprintln(w, "Common examples:")
-	_, _ = fmt.Fprintln(w, "  fugue deploy --name cerebr")
-	_, _ = fmt.Fprintln(w, "  fugue deploy --repo-url https://github.com/example/cerebr --branch main")
-	_, _ = fmt.Fprintln(w, "  fugue deploy --tenant my-tenant --project default --name cerebr")
-	_, _ = fmt.Fprintln(w, "  fugue deploy --app-id <app-id>")
-	_, _ = fmt.Fprintln(w)
-	_, _ = fmt.Fprintln(w, "Flags:")
-	fs := []string{
-		"  --base-url string           Fugue API base URL",
-		"  --token string              Fugue API token",
-		"  --dir string                project directory to upload or use as the env-file base directory",
-		"  --tenant-id string          target tenant ID",
-		"  --tenant string             target tenant name or slug",
-		"  --project-id string         target project ID",
-		"  --project string            target project name",
-		"  --app-id string             existing app ID to redeploy",
-		"  --name string               app name",
-		"  --build-strategy string     auto, static-site, dockerfile, buildpacks, nixpacks",
-		"  --repo-url string           public GitHub repository URL to import",
-		"  --branch string             Git branch for --repo-url imports",
-		"  --env-file string           local .env file to inject as app env (defaults to <dir>/.env for --repo-url)",
-		"  --source-dir string         source directory relative to project root",
-		"  --dockerfile-path string    Dockerfile path relative to project root",
-		"  --build-context-dir string  build context directory relative to project root",
-		"  --runtime-id string         target runtime ID",
-		"  --replicas int              desired replica count",
-		"  --service-port int          service port override",
-		"  --wait                      wait for operation completion (default true)",
+func imageRefAppName(imageRef string) string {
+	imageRef = strings.TrimSpace(imageRef)
+	if imageRef == "" {
+		return ""
 	}
-	for _, line := range fs {
-		_, _ = fmt.Fprintln(w, line)
+	if idx := strings.Index(imageRef, "@"); idx >= 0 {
+		imageRef = imageRef[:idx]
 	}
+	lastSegment := imageRef
+	if idx := strings.LastIndex(lastSegment, "/"); idx >= 0 {
+		lastSegment = lastSegment[idx+1:]
+	}
+	if idx := strings.Index(lastSegment, ":"); idx >= 0 {
+		lastSegment = lastSegment[:idx]
+	}
+	return model.Slugify(lastSegment)
+}
+
+func matchVisibleApps(apps []model.App, ref, projectID, tenantID string) []model.App {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return nil
+	}
+	slug := model.Slugify(ref)
+	matches := make([]model.App, 0, 1)
+	for _, app := range apps {
+		if tenantID != "" && app.TenantID != tenantID {
+			continue
+		}
+		if projectID != "" && app.ProjectID != projectID {
+			continue
+		}
+		switch {
+		case strings.EqualFold(app.ID, ref):
+			matches = append(matches, app)
+		case strings.EqualFold(app.Name, ref):
+			matches = append(matches, app)
+		case slug != "" && strings.EqualFold(app.Name, slug):
+			matches = append(matches, app)
+		}
+	}
+	return matches
 }

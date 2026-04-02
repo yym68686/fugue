@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -532,6 +533,73 @@ func TestRevokeNodeKeyCleansManagedOwnedNodesAndBootstrapTokens(t *testing.T) {
 	}
 	if updatedRuntime.ClusterNodeName != "" {
 		t.Fatalf("expected runtime cluster node cleared after revoke cleanup, got %q", updatedRuntime.ClusterNodeName)
+	}
+}
+
+func TestRevokeNodeKeyInvalidatesExternalRuntimeCredentialsWithoutClusterJoinConfig(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("External Revoke Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	key, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	runtimeObj, runtimeKey, err := func() (model.Runtime, string, error) {
+		_, runtimeObj, runtimeKey, err := s.BootstrapNode(nodeSecret, "worker-1", "https://worker-1.example.com", nil, "worker-1", "fingerprint-1")
+		return runtimeObj, runtimeKey, err
+	}()
+	if err != nil {
+		t.Fatalf("bootstrap external node: %v", err)
+	}
+	if _, _, err := s.AuthenticateRuntimeKey(runtimeKey); err != nil {
+		t.Fatalf("authenticate runtime key before revoke: %v", err)
+	}
+	_, apiSecret, err := s.CreateAPIKey(tenant.ID, "runtime-attach", []string{"runtime.attach"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	req := httptest.NewRequest(http.MethodPost, "/v1/node-keys/"+key.ID+"/revoke", nil)
+	req.Header.Set("Authorization", "Bearer "+apiSecret)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"status":"revoked"`) {
+		t.Fatalf("expected revoked node key in response body, got %s", body)
+	}
+	if !strings.Contains(body, `"detached_runtime_ids":["`+runtimeObj.ID+`"]`) {
+		t.Fatalf("expected detached external runtime id in response body, got %s", body)
+	}
+
+	updatedRuntime, err := s.GetRuntime(runtimeObj.ID)
+	if err != nil {
+		t.Fatalf("get runtime after revoke cleanup: %v", err)
+	}
+	if updatedRuntime.Status != model.RuntimeStatusOffline {
+		t.Fatalf("expected runtime offline after revoke cleanup, got %q", updatedRuntime.Status)
+	}
+	if updatedRuntime.NodeKeyID != "" {
+		t.Fatalf("expected runtime node key cleared after revoke cleanup, got %q", updatedRuntime.NodeKeyID)
+	}
+	if updatedRuntime.AgentKeyPrefix != "" || updatedRuntime.AgentKeyHash != "" {
+		t.Fatalf("expected runtime agent key cleared after revoke cleanup, got prefix=%q hash=%q", updatedRuntime.AgentKeyPrefix, updatedRuntime.AgentKeyHash)
+	}
+	if _, _, err := s.AuthenticateRuntimeKey(runtimeKey); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected runtime key invalid after revoke, got %v", err)
 	}
 }
 

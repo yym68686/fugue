@@ -65,7 +65,33 @@ make build-cli
 ./bin/fugue deploy --help
 ```
 
-`build-cli` GitHub Actions workflow 会在匹配的变更推送到 `main` 后自动编译 Linux 和 macOS 的 `fugue` 二进制。
+一行安装已发布的 CLI：
+
+macOS / Linux：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.sh | sh
+```
+
+Windows PowerShell：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.ps1 | iex"
+```
+
+安装脚本会从最新的 GitHub Release 下载匹配当前系统和架构的压缩包，并把 `fugue` 安装到一个可写的 bin 目录。如果你想固定版本或自定义安装目录：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.sh | env FUGUE_VERSION=v0.1.0 FUGUE_INSTALL_DIR=$HOME/.local/bin sh
+```
+
+```powershell
+$env:FUGUE_VERSION='v0.1.0'
+$env:FUGUE_INSTALL_DIR="$env:LOCALAPPDATA\Programs\Fugue\bin"
+irm https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.ps1 | iex
+```
+
+`build-cli` GitHub Actions workflow 会在匹配的变更推送到 `main` 后打包 Linux、macOS、Windows 的 `fugue` 压缩包；`release-cli` workflow 会在推送 `v*` tag 时把这些压缩包发布成 GitHub Release 资产。
 
 在两个终端里分别运行 API 和 controller：
 

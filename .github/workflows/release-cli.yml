@@ -1,0 +1,34 @@
+name: release-cli
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Package fugue CLI archives
+        run: ./scripts/package_fugue_cli.sh "${RUNNER_TEMP}/fugue-cli"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: true
+          files: ${{ runner.temp }}/fugue-cli/*
+          generate_release_notes: true
