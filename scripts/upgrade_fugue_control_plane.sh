@@ -337,35 +337,30 @@ control_plane_postgres_selector() {
   printf 'app.kubernetes.io/component=postgres,app.kubernetes.io/instance=%s,app.kubernetes.io/name=fugue' "${FUGUE_RELEASE_NAME}"
 }
 
-control_plane_postgres_pod_names() {
-  local active_hashes=""
-  local active_hash=""
-  local active_pod_names=""
-
-  active_hashes="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get rs \
-    -l "$(control_plane_postgres_selector)" \
-    --sort-by=.metadata.creationTimestamp \
-    -o go-template='{{range .items}}{{if gt .spec.replicas 0}}{{index .metadata.labels "pod-template-hash"}}{{"\n"}}{{end}}{{end}}' 2>/dev/null || true)"
-  if [[ -n "${active_hashes}" ]]; then
-    active_pod_names="$(
-      while IFS= read -r active_hash; do
-        [[ -n "${active_hash}" ]] || continue
-        ${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
-          -l "$(control_plane_postgres_selector),pod-template-hash=${active_hash}" \
-          --sort-by=.metadata.creationTimestamp \
-          -o name 2>/dev/null || true
-      done <<<"${active_hashes}" | sed 's#^pod/##' | awk 'NF > 0 {lines[++count]=$0} END {for (i=count; i>=1; i--) print lines[i]}'
-    )"
-    if [[ -n "${active_pod_names}" ]]; then
-      printf '%s\n' "${active_pod_names}"
-      return 0
-    fi
-  fi
-
+control_plane_postgres_pod_status_lines() {
   ${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
     -l "$(control_plane_postgres_selector)" \
     --sort-by=.metadata.creationTimestamp \
-    -o name 2>/dev/null | sed 's#^pod/##' | tail -n 5 | awk 'NF > 0 {lines[++count]=$0} END {for (i=count; i>=1; i--) print lines[i]}'
+    -o custom-columns=NAME:.metadata.name,READY:.status.containerStatuses[0].ready,PHASE:.status.phase,RESTARTS:.status.containerStatuses[0].restartCount \
+    --no-headers 2>/dev/null | tail -n 10
+}
+
+control_plane_postgres_pod_summary() {
+  control_plane_postgres_pod_status_lines | awk '
+    NF > 0 {
+      printf "%s%s(ready=%s phase=%s restarts=%s)", sep, $1, $2, $3, $4
+      sep = ", "
+    }
+    END {
+      if (NR == 0) {
+        printf "none"
+      }
+    }
+  '
+}
+
+control_plane_postgres_pod_names() {
+  control_plane_postgres_pod_status_lines | awk 'NF > 0 {lines[++count]=$1} END {for (i=count; i>=1; i--) print lines[i]}'
 }
 
 control_plane_postgres_logs() {
@@ -397,23 +392,17 @@ control_plane_postgres_has_invalid_checkpoint() {
     [[ "${logs}" == *"could not locate a valid checkpoint record"* ]]
 }
 
-control_plane_postgres_is_unavailable() {
-  local desired_replicas=""
-  local ready_replicas=""
-
-  desired_replicas="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get deploy "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
-  ready_replicas="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get deploy "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
-
-  [[ -n "${desired_replicas}" ]] || desired_replicas="0"
-  [[ -n "${ready_replicas}" ]] || ready_replicas="0"
-  [[ "${desired_replicas}" != "0" && "${ready_replicas}" == "0" ]]
+control_plane_postgres_has_ready_pod() {
+  control_plane_postgres_pod_status_lines | awk 'NF > 0 && $2 == "true" && $3 == "Running" {found=1} END {exit found ? 0 : 1}'
 }
 
 invalid_checkpoint_control_plane_postgres_pod_name() {
   local pod_name=""
   local attempt=""
+  local pod_summary=""
 
   for attempt in $(seq 1 6); do
+    pod_summary="$(control_plane_postgres_pod_summary)"
     while IFS= read -r pod_name; do
       [[ -n "${pod_name}" ]] || continue
       if control_plane_postgres_has_invalid_checkpoint "${pod_name}"; then
@@ -422,11 +411,16 @@ invalid_checkpoint_control_plane_postgres_pod_name() {
       fi
     done < <(control_plane_postgres_pod_names)
 
-    if ! control_plane_postgres_is_unavailable || (( attempt == 6 )); then
-      break
+    if control_plane_postgres_has_ready_pod; then
+      return 1
     fi
 
-    log "control-plane postgres has no ready replicas yet; waiting for a replacement pod before checking WAL corruption again"
+    if (( attempt == 6 )); then
+      log "control-plane postgres still has no ready pods after ${attempt} checks; inspected ${pod_summary}"
+      return 2
+    fi
+
+    log "control-plane postgres has no ready pods yet; inspected ${pod_summary}; waiting before checking WAL corruption again"
     sleep 5
   done
 
@@ -454,6 +448,7 @@ recover_primary_postgres_if_needed() {
   local postgres_pod_name=""
   local original_replicas=""
   local repair_cmd=""
+  local detect_status=0
 
   primary_node_name="$(detect_primary_node_name)"
   if [[ -z "${primary_node_name}" ]]; then
@@ -461,8 +456,23 @@ recover_primary_postgres_if_needed() {
     return 0
   fi
 
-  if ! postgres_pod_name="$(invalid_checkpoint_control_plane_postgres_pod_name)"; then
-    return 0
+  postgres_pod_name="$(invalid_checkpoint_control_plane_postgres_pod_name)" || detect_status=$?
+  case "${detect_status}" in
+    0)
+      ;;
+    1)
+      return 0
+      ;;
+    2)
+      fail "control-plane postgres had no ready pods before upgrade, but no invalid-checkpoint signature was found in recent logs"
+      ;;
+    *)
+      fail "control-plane postgres recovery pre-check failed with unexpected status ${detect_status}"
+      ;;
+  esac
+
+  if [[ -z "${postgres_pod_name}" ]]; then
+    fail "control-plane postgres recovery pre-check succeeded without returning a pod name"
   fi
 
   log "detected invalid checkpoint in control-plane postgres pod ${postgres_pod_name}; resetting WAL on the primary host"
