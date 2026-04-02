@@ -291,6 +291,28 @@ type ClusterNode struct {
 	CreatedAt        *time.Time                      `json:"created_at,omitempty"`
 }
 
+type ControlPlaneComponent struct {
+	Component         string `json:"component"`
+	DeploymentName    string `json:"deployment_name"`
+	Image             string `json:"image"`
+	ImageRepository   string `json:"image_repository"`
+	ImageTag          string `json:"image_tag"`
+	Status            string `json:"status"`
+	DesiredReplicas   int    `json:"desired_replicas"`
+	ReadyReplicas     int    `json:"ready_replicas"`
+	UpdatedReplicas   int    `json:"updated_replicas"`
+	AvailableReplicas int    `json:"available_replicas"`
+}
+
+type ControlPlaneStatus struct {
+	Namespace       string                  `json:"namespace"`
+	ReleaseInstance string                  `json:"release_instance"`
+	Version         string                  `json:"version"`
+	Status          string                  `json:"status"`
+	ObservedAt      time.Time               `json:"observed_at"`
+	Components      []ControlPlaneComponent `json:"components"`
+}
+
 type AppSource struct {
 	Type              string `json:"type"`
 	RepoURL           string `json:"repo_url,omitempty"`

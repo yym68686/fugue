@@ -13,6 +13,8 @@ type APIConfig struct {
 	StorePath                    string
 	DatabaseURL                  string
 	BootstrapAdminKey            string
+	ControlPlaneNamespace        string
+	ControlPlaneReleaseInstance  string
 	AppBaseDomain                string
 	APIPublicDomain              string
 	EdgeTLSAskToken              string
@@ -83,6 +85,8 @@ func APIFromEnv() APIConfig {
 		StorePath:                    getenv("FUGUE_STORE_PATH", "./data/store.json"),
 		DatabaseURL:                  getenv("FUGUE_DATABASE_URL", ""),
 		BootstrapAdminKey:            getenv("FUGUE_BOOTSTRAP_ADMIN_KEY", "fugue_bootstrap_admin_change_me"),
+		ControlPlaneNamespace:        getenv("FUGUE_CONTROL_PLANE_NAMESPACE", ""),
+		ControlPlaneReleaseInstance:  getenv("FUGUE_CONTROL_PLANE_RELEASE_INSTANCE", ""),
 		AppBaseDomain:                getenv("FUGUE_APP_BASE_DOMAIN", "fugue.pro"),
 		APIPublicDomain:              getenv("FUGUE_API_PUBLIC_DOMAIN", "api.fugue.pro"),
 		EdgeTLSAskToken:              strings.TrimSpace(os.Getenv("FUGUE_EDGE_TLS_ASK_TOKEN")),

@@ -24,6 +24,8 @@ func main() {
 	}
 
 	server := api.NewServer(store, auth.New(store, cfg.BootstrapAdminKey), logger, api.ServerConfig{
+		ControlPlaneNamespace:        cfg.ControlPlaneNamespace,
+		ControlPlaneReleaseInstance:  cfg.ControlPlaneReleaseInstance,
 		AppBaseDomain:                cfg.AppBaseDomain,
 		APIPublicDomain:              cfg.APIPublicDomain,
 		EdgeTLSAskToken:              cfg.EdgeTLSAskToken,

@@ -614,6 +614,23 @@ paths:
                 $ref: "#/components/schemas/ClusterNodeListResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/cluster/control-plane:
+    get:
+      operationId: getControlPlaneStatus
+      summary: Get Control Plane Status
+      tags: [Cluster]
+      x-fugue-handler: handleGetControlPlaneStatus
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ControlPlaneStatusResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/nodes:
     get:
       operationId: listNodes
@@ -3505,6 +3522,63 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ClusterNode"
+    ControlPlaneComponent:
+      type: object
+      additionalProperties: false
+      required:
+        [component, deployment_name, image, image_repository, image_tag, status, desired_replicas, ready_replicas, updated_replicas, available_replicas]
+      properties:
+        component:
+          type: string
+        deployment_name:
+          type: string
+        image:
+          type: string
+        image_repository:
+          type: string
+        image_tag:
+          type: string
+        status:
+          type: string
+        desired_replicas:
+          type: integer
+          format: int32
+        ready_replicas:
+          type: integer
+          format: int32
+        updated_replicas:
+          type: integer
+          format: int32
+        available_replicas:
+          type: integer
+          format: int32
+    ControlPlaneStatus:
+      type: object
+      additionalProperties: false
+      required: [namespace, release_instance, version, status, observed_at, components]
+      properties:
+        namespace:
+          type: string
+        release_instance:
+          type: string
+        version:
+          type: string
+        status:
+          type: string
+        observed_at:
+          type: string
+          format: date-time
+        components:
+          type: array
+          items:
+            $ref: "#/components/schemas/ControlPlaneComponent"
+    ControlPlaneStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [control_plane]
+      properties:
+        control_plane:
+          $ref: "#/components/schemas/ControlPlaneStatus"
     RuntimeListResponse:
       type: object
       additionalProperties: false

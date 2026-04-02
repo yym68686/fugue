@@ -3,6 +3,8 @@ package api
 import "time"
 
 type ServerConfig struct {
+	ControlPlaneNamespace        string
+	ControlPlaneReleaseInstance  string
 	AppBaseDomain                string
 	APIPublicDomain              string
 	EdgeTLSAskToken              string

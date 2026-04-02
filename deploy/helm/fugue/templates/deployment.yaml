@@ -56,6 +56,12 @@ spec:
           env:
             - name: FUGUE_BIND_ADDR
               value: ":8080"
+            - name: FUGUE_CONTROL_PLANE_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: FUGUE_CONTROL_PLANE_RELEASE_INSTANCE
+              value: {{ .Release.Name | quote }}
             - name: FUGUE_DATABASE_URL
               valueFrom:
                 secretKeyRef:

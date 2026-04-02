@@ -21,6 +21,8 @@ type Server struct {
 	store                        *store.Store
 	auth                         *auth.Authenticator
 	log                          *log.Logger
+	controlPlaneNamespace        string
+	controlPlaneReleaseInstance  string
 	appBaseDomain                string
 	customDomainBaseDomain       string
 	apiPublicDomain              string
@@ -54,6 +56,8 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		store:                        store,
 		auth:                         authn,
 		log:                          logger,
+		controlPlaneNamespace:        strings.TrimSpace(cfg.ControlPlaneNamespace),
+		controlPlaneReleaseInstance:  strings.TrimSpace(cfg.ControlPlaneReleaseInstance),
 		appBaseDomain:                strings.TrimSpace(strings.ToLower(cfg.AppBaseDomain)),
 		customDomainBaseDomain:       defaultCustomDomainBaseDomain(cfg.AppBaseDomain),
 		apiPublicDomain:              strings.TrimSpace(strings.ToLower(cfg.APIPublicDomain)),
