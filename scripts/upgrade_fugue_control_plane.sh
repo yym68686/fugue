@@ -505,7 +505,7 @@ log "backed up \${pgdata} to \${backup_dir}"
 
 rm -f "\${pgdata}/postmaster.pid"
 
-if ! k3s ctr images ls | awk 'NR > 1 {print $1}' | grep -Fxq "\${postgres_image}"; then
+if ! k3s ctr images ls | awk 'NR > 1 {print \$1}' | grep -Fxq "\${postgres_image}"; then
   log "pulling \${postgres_image}"
   k3s ctr images pull "\${postgres_image}"
 fi
