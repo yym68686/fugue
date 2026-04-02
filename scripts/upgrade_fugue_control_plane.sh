@@ -397,16 +397,38 @@ control_plane_postgres_has_invalid_checkpoint() {
     [[ "${logs}" == *"could not locate a valid checkpoint record"* ]]
 }
 
+control_plane_postgres_is_unavailable() {
+  local desired_replicas=""
+  local ready_replicas=""
+
+  desired_replicas="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get deploy "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+  ready_replicas="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get deploy "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+
+  [[ -n "${desired_replicas}" ]] || desired_replicas="0"
+  [[ -n "${ready_replicas}" ]] || ready_replicas="0"
+  [[ "${desired_replicas}" != "0" && "${ready_replicas}" == "0" ]]
+}
+
 invalid_checkpoint_control_plane_postgres_pod_name() {
   local pod_name=""
+  local attempt=""
 
-  while IFS= read -r pod_name; do
-    [[ -n "${pod_name}" ]] || continue
-    if control_plane_postgres_has_invalid_checkpoint "${pod_name}"; then
-      printf '%s' "${pod_name}"
-      return 0
+  for attempt in $(seq 1 6); do
+    while IFS= read -r pod_name; do
+      [[ -n "${pod_name}" ]] || continue
+      if control_plane_postgres_has_invalid_checkpoint "${pod_name}"; then
+        printf '%s' "${pod_name}"
+        return 0
+      fi
+    done < <(control_plane_postgres_pod_names)
+
+    if ! control_plane_postgres_is_unavailable || (( attempt == 6 )); then
+      break
     fi
-  done < <(control_plane_postgres_pod_names)
+
+    log "control-plane postgres has no ready replicas yet; waiting for a replacement pod before checking WAL corruption again"
+    sleep 5
+  done
 
   return 1
 }
