@@ -231,6 +231,9 @@ func (s *Service) reconcileOnce(ctx context.Context) error {
 	if err := s.markRuntimeOfflineStale(); err != nil {
 		return err
 	}
+	if err := s.queueAutomaticFailovers(); err != nil {
+		return err
+	}
 	if err := s.cleanupZombieBuildJobs(ctx); err != nil {
 		return err
 	}
@@ -349,6 +352,8 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	switch op.Type {
 	case model.OperationTypeImport:
 		return s.executeManagedImportOperation(ctx, op, app)
+	case model.OperationTypeFailover:
+		return s.executeManagedFailoverOperation(ctx, op, app)
 	case model.OperationTypeDeploy:
 		if op.DesiredSpec == nil {
 			return fmt.Errorf("deploy operation %s missing desired spec", op.ID)

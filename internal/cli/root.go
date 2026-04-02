@@ -75,6 +75,7 @@ Environment variables:
   fugue deploy image nginx:1.27
   fugue app list
   fugue app status my-app
+  fugue app failover my-app
   fugue app logs my-app
   fugue env list my-app
   fugue files write my-app /app/config.yaml --from-file config.yaml

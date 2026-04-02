@@ -131,6 +131,72 @@ func TestManagedAndExternalOperationFlow(t *testing.T) {
 	}
 }
 
+func TestStatefulFailoverOperationUsesAppFailoverPolicy(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Failover Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	sourceRuntime, _, err := s.CreateRuntime(tenant.ID, "source-node", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create source runtime: %v", err)
+	}
+	targetRuntime, _, err := s.CreateRuntime(tenant.ID, "target-node", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create target runtime: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: sourceRuntime.ID,
+		Workspace: &model.AppWorkspaceSpec{},
+		Postgres: &model.AppPostgresSpec{
+			Database: "demo",
+		},
+		Failover: &model.AppFailoverSpec{
+			TargetRuntimeID: targetRuntime.ID,
+			Auto:            true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	op, err := s.CreateOperation(model.Operation{
+		TenantID: tenant.ID,
+		Type:     model.OperationTypeFailover,
+		AppID:    app.ID,
+	})
+	if err != nil {
+		t.Fatalf("create failover operation: %v", err)
+	}
+	if got := op.SourceRuntimeID; got != sourceRuntime.ID {
+		t.Fatalf("expected source runtime %q, got %q", sourceRuntime.ID, got)
+	}
+	if got := op.TargetRuntimeID; got != targetRuntime.ID {
+		t.Fatalf("expected target runtime %q, got %q", targetRuntime.ID, got)
+	}
+
+	if _, err := s.CreateOperation(model.Operation{
+		TenantID: tenant.ID,
+		Type:     model.OperationTypeFailover,
+		AppID:    app.ID,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected failover conflict while another operation is in flight, got %v", err)
+	}
+}
+
 func TestClearLegacyPostgresStoragePathsClearsAppAndOwnedServiceMetadata(t *testing.T) {
 	t.Parallel()
 

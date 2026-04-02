@@ -48,11 +48,12 @@ const (
 	NodeKeyStatusActive  = "active"
 	NodeKeyStatusRevoked = "revoked"
 
-	OperationTypeImport  = "import"
-	OperationTypeDeploy  = "deploy"
-	OperationTypeScale   = "scale"
-	OperationTypeMigrate = "migrate"
-	OperationTypeDelete  = "delete"
+	OperationTypeImport   = "import"
+	OperationTypeDeploy   = "deploy"
+	OperationTypeScale    = "scale"
+	OperationTypeMigrate  = "migrate"
+	OperationTypeFailover = "failover"
+	OperationTypeDelete   = "delete"
 
 	OperationStatusPending      = "pending"
 	OperationStatusRunning      = "running"
@@ -75,6 +76,7 @@ const (
 	ActorTypeRuntime   = "runtime"
 
 	OperationRequestedByGitHubSyncController = "fugue-controller/github-sync"
+	OperationRequestedByAutoFailover         = "fugue-controller/auto-failover"
 
 	ClusterNodeWorkloadKindApp            = "app"
 	ClusterNodeWorkloadKindBackingService = "backing_service"
@@ -405,6 +407,7 @@ type AppSpec struct {
 	Files        []AppFile         `json:"files,omitempty"`
 	Workspace    *AppWorkspaceSpec `json:"workspace,omitempty"`
 	Postgres     *AppPostgresSpec  `json:"postgres,omitempty"`
+	Failover     *AppFailoverSpec  `json:"failover,omitempty"`
 	RestartToken string            `json:"restart_token,omitempty"`
 }
 
@@ -416,19 +419,30 @@ type AppFile struct {
 }
 
 type AppWorkspaceSpec struct {
-	MountPath   string `json:"mount_path,omitempty"`
-	StoragePath string `json:"storage_path,omitempty"`
-	ResetToken  string `json:"reset_token,omitempty"`
+	MountPath        string `json:"mount_path,omitempty"`
+	StoragePath      string `json:"storage_path,omitempty"`
+	StorageSize      string `json:"storage_size,omitempty"`
+	StorageClassName string `json:"storage_class_name,omitempty"`
+	ResetToken       string `json:"reset_token,omitempty"`
+}
+
+type AppFailoverSpec struct {
+	TargetRuntimeID string `json:"target_runtime_id,omitempty"`
+	Auto            bool   `json:"auto,omitempty"`
 }
 
 type AppPostgresSpec struct {
-	Image       string        `json:"image,omitempty"`
-	Database    string        `json:"database,omitempty"`
-	User        string        `json:"user,omitempty"`
-	Password    string        `json:"password,omitempty"`
-	ServiceName string        `json:"service_name,omitempty"`
-	StoragePath string        `json:"storage_path,omitempty"`
-	Resources   *ResourceSpec `json:"resources,omitempty"`
+	Image               string        `json:"image,omitempty"`
+	Database            string        `json:"database,omitempty"`
+	User                string        `json:"user,omitempty"`
+	Password            string        `json:"password,omitempty"`
+	ServiceName         string        `json:"service_name,omitempty"`
+	StoragePath         string        `json:"storage_path,omitempty"`
+	StorageSize         string        `json:"storage_size,omitempty"`
+	StorageClassName    string        `json:"storage_class_name,omitempty"`
+	Instances           int           `json:"instances,omitempty"`
+	SynchronousReplicas int           `json:"synchronous_replicas,omitempty"`
+	Resources           *ResourceSpec `json:"resources,omitempty"`
 }
 
 type BackingServiceSpec struct {

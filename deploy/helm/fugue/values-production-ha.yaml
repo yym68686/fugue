@@ -1,0 +1,59 @@
+# Production HA baseline for Fugue.
+#
+# This profile assumes:
+# - PostgreSQL is externalized to an HA service with automatic failover.
+# - The image registry is externalized and reachable from builders and runtime nodes.
+# - Secrets are materialized by an external secret manager into the referenced Secret.
+# - An external load balancer or VIP fronts multiple synchronized Fugue edge nodes.
+
+configSecret:
+  existingSecretName: fugue-production-config
+
+api:
+  replicaCount: 3
+  databaseURL: postgres://fugue:replace-me@postgres-ha.example.internal:5432/fugue?sslmode=require
+  appBaseDomain: apps.example.com
+  apiPublicDomain: api.example.com
+  registryPushBase: registry.example.internal/fugue-apps
+  registryPullBase: registry.example.internal/fugue-apps
+  clusterJoinRegistryEndpoint: registry.example.internal:5000
+  hostNetwork: false
+  minReadySeconds: 5
+  terminationGracePeriodSeconds: 40
+  shutdownDrainDelay: 10s
+  shutdownTimeout: 30s
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+controller:
+  replicaCount: 3
+  pollInterval: 5s
+  fallbackPollInterval: 30s
+  runtimeOfflineAfter: 90s
+  kubectlApply: true
+  leaderElection:
+    enabled: true
+    leaseDuration: 15s
+    renewDeadline: 10s
+    retryPeriod: 2s
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+registry:
+  enabled: false
+
+postgres:
+  enabled: false
+
+headscale:
+  enabled: false
+
+ingress:
+  enabled: false

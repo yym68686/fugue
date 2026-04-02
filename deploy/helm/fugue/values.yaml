@@ -1,5 +1,8 @@
 bootstrapAdminKey: "fugue_bootstrap_admin_change_me"
 
+configSecret:
+  existingSecretName: ""
+
 api:
   replicaCount: 2
   image:

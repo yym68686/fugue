@@ -1955,6 +1955,25 @@ func (s *Store) pgCreateApp(tenantID, projectID, name, description string, spec 
 	if err := validateWorkspaceSpecForRuntime(spec, runtimeType); err != nil {
 		return model.App{}, err
 	}
+	if err := validateFailoverSpec(spec); err != nil {
+		return model.App{}, err
+	}
+	if spec.Failover != nil {
+		visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, spec.Failover.TargetRuntimeID, tenantID)
+		if err != nil {
+			return model.App{}, err
+		}
+		if !visible {
+			return model.App{}, ErrNotFound
+		}
+		targetRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, spec.Failover.TargetRuntimeID)
+		if err != nil {
+			return model.App{}, err
+		}
+		if err := validateFailoverTargetRuntimeType(targetRuntimeType); err != nil {
+			return model.App{}, err
+		}
+	}
 
 	now := time.Now().UTC()
 	allowPendingImport := source != nil && isQueuedImportSourceType(source.Type) && strings.TrimSpace(spec.Image) == ""
@@ -2306,6 +2325,25 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 		if err := validateWorkspaceSpecForRuntime(*op.DesiredSpec, runtimeType); err != nil {
 			return model.Operation{}, err
 		}
+		if err := validateFailoverSpec(*op.DesiredSpec); err != nil {
+			return model.Operation{}, err
+		}
+		if op.DesiredSpec.Failover != nil {
+			visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, op.DesiredSpec.Failover.TargetRuntimeID, op.TenantID)
+			if err != nil {
+				return model.Operation{}, err
+			}
+			if !visible {
+				return model.Operation{}, ErrNotFound
+			}
+			targetRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.DesiredSpec.Failover.TargetRuntimeID)
+			if err != nil {
+				return model.Operation{}, err
+			}
+			if err := validateFailoverTargetRuntimeType(targetRuntimeType); err != nil {
+				return model.Operation{}, err
+			}
+		}
 		op.TargetRuntimeID = op.DesiredSpec.RuntimeID
 	case model.OperationTypeDeploy:
 		if op.DesiredSpec == nil {
@@ -2327,6 +2365,25 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 		}
 		if err := validateWorkspaceSpecForRuntime(*op.DesiredSpec, runtimeType); err != nil {
 			return model.Operation{}, err
+		}
+		if err := validateFailoverSpec(*op.DesiredSpec); err != nil {
+			return model.Operation{}, err
+		}
+		if op.DesiredSpec.Failover != nil {
+			visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, op.DesiredSpec.Failover.TargetRuntimeID, op.TenantID)
+			if err != nil {
+				return model.Operation{}, err
+			}
+			if !visible {
+				return model.Operation{}, ErrNotFound
+			}
+			targetRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.DesiredSpec.Failover.TargetRuntimeID)
+			if err != nil {
+				return model.Operation{}, err
+			}
+			if err := validateFailoverTargetRuntimeType(targetRuntimeType); err != nil {
+				return model.Operation{}, err
+			}
 		}
 		op.TargetRuntimeID = op.DesiredSpec.RuntimeID
 	case model.OperationTypeScale:
@@ -2355,6 +2412,52 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 			return model.Operation{}, ErrInvalidInput
 		}
 		op.SourceRuntimeID = app.Spec.RuntimeID
+	case model.OperationTypeFailover:
+		var inFlightCount int
+		if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(1)
+FROM fugue_operations
+WHERE app_id = $1
+  AND status IN ($2, $3, $4)
+`, app.ID, model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent).Scan(&inFlightCount); err != nil {
+			return model.Operation{}, fmt.Errorf("count in-flight app operations: %w", err)
+		}
+		if inFlightCount > 0 {
+			return model.Operation{}, ErrConflict
+		}
+		targetRuntimeID := strings.TrimSpace(op.TargetRuntimeID)
+		if targetRuntimeID == "" && app.Spec.Failover != nil {
+			targetRuntimeID = strings.TrimSpace(app.Spec.Failover.TargetRuntimeID)
+		}
+		if targetRuntimeID == "" {
+			return model.Operation{}, ErrInvalidInput
+		}
+		visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, targetRuntimeID, op.TenantID)
+		if err != nil {
+			return model.Operation{}, err
+		}
+		if !visible {
+			return model.Operation{}, ErrNotFound
+		}
+		targetRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, targetRuntimeID)
+		if err != nil {
+			return model.Operation{}, err
+		}
+		if err := validateFailoverTargetRuntimeType(targetRuntimeType); err != nil {
+			return model.Operation{}, err
+		}
+		sourceRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, app.Spec.RuntimeID)
+		if err != nil {
+			return model.Operation{}, err
+		}
+		if err := validateFailoverTargetRuntimeType(sourceRuntimeType); err != nil {
+			return model.Operation{}, err
+		}
+		if strings.TrimSpace(app.Spec.RuntimeID) == targetRuntimeID {
+			return model.Operation{}, ErrInvalidInput
+		}
+		op.SourceRuntimeID = app.Spec.RuntimeID
+		op.TargetRuntimeID = targetRuntimeID
 	default:
 		return model.Operation{}, ErrInvalidInput
 	}
@@ -3756,6 +3859,18 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 		}
 		app.Spec.RuntimeID = op.TargetRuntimeID
 		app.Status.Phase = "migrated"
+		app.Status.CurrentRuntimeID = op.TargetRuntimeID
+		app.Status.CurrentReplicas = app.Spec.Replicas
+		if op.ExecutionMode != model.ExecutionModeManaged {
+			app.Status.CurrentReleaseStartedAt = nil
+			app.Status.CurrentReleaseReadyAt = nil
+		}
+	case model.OperationTypeFailover:
+		if op.TargetRuntimeID == "" {
+			return ErrInvalidInput
+		}
+		app.Spec.RuntimeID = op.TargetRuntimeID
+		app.Status.Phase = "failed-over"
 		app.Status.CurrentRuntimeID = op.TargetRuntimeID
 		app.Status.CurrentReplicas = app.Spec.Replicas
 		if op.ExecutionMode != model.ExecutionModeManaged {

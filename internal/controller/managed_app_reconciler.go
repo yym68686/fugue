@@ -93,11 +93,19 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 
 	ownerRef := runtime.ManagedAppOwnerReference(managed)
 	childObjects := runtime.BuildManagedAppChildObjects(app, managed.Spec.Scheduling, ownerRef)
+	fenceEpoch, err := s.currentAppFenceEpoch(ctx, client, app)
+	if err != nil {
+		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read app fence epoch: %w", err))
+	}
+	decorateManagedAppObjectsWithFenceEpoch(childObjects, app, fenceEpoch)
 	if err := client.applyObjects(ctx, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("apply managed app child objects: %w", err))
 	}
 	if err := s.pruneManagedAppStaleObjects(ctx, client, namespace, app, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("prune stale managed app child objects: %w", err))
+	}
+	if err := s.reconcileWorkspaceReplicationSource(ctx, client, app, ownerRef); err != nil {
+		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("reconcile workspace replication source: %w", err))
 	}
 
 	deployment, found, err := client.getDeployment(ctx, namespace, runtime.RuntimeResourceName(app.Name))
@@ -114,11 +122,20 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 
 	backingServiceStatuses := make([]runtime.ManagedBackingServiceStatus, 0)
 	for _, serviceDeployment := range runtime.ManagedBackingServiceDeployments(app, managed.Spec.Scheduling) {
-		serviceDeploymentStatus, deploymentFound, err := client.getDeployment(ctx, namespace, serviceDeployment.ResourceName)
-		if err != nil {
-			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read backing service deployment %s status: %w", serviceDeployment.ResourceName, err))
+		switch serviceDeployment.ResourceKind {
+		case runtime.CloudNativePGClusterKind:
+			clusterStatus, clusterFound, err := client.getCloudNativePGCluster(ctx, namespace, serviceDeployment.ResourceName)
+			if err != nil {
+				return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read backing service cluster %s status: %w", serviceDeployment.ResourceName, err))
+			}
+			backingServiceStatuses = append(backingServiceStatuses, buildManagedBackingServiceClusterStatus(managed.Status, serviceDeployment, clusterStatus, clusterFound))
+		default:
+			serviceDeploymentStatus, deploymentFound, err := client.getDeployment(ctx, namespace, serviceDeployment.ResourceName)
+			if err != nil {
+				return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read backing service deployment %s status: %w", serviceDeployment.ResourceName, err))
+			}
+			backingServiceStatuses = append(backingServiceStatuses, buildManagedBackingServiceStatus(managed.Status, serviceDeployment, serviceDeploymentStatus, deploymentFound))
 		}
-		backingServiceStatuses = append(backingServiceStatuses, buildManagedBackingServiceStatus(managed.Status, serviceDeployment, serviceDeploymentStatus, deploymentFound))
 	}
 
 	status := buildManagedAppStatus(managed, app, deployment, found, appPods, backingServiceStatuses)
@@ -465,6 +482,33 @@ func buildManagedBackingServiceStatus(previous runtime.ManagedAppStatus, deploym
 	return out
 }
 
+func buildManagedBackingServiceClusterStatus(previous runtime.ManagedAppStatus, deployment runtime.ManagedBackingServiceDeployment, status kubeCloudNativePGCluster, found bool) runtime.ManagedBackingServiceStatus {
+	out := runtime.ManagedBackingServiceStatus{
+		ServiceID:  deployment.ServiceID,
+		RuntimeKey: deployment.RuntimeKey,
+	}
+	if !found {
+		return out
+	}
+
+	prev := managedBackingServiceStatusByID(previous.BackingServices, deployment.ServiceID)
+	if strings.TrimSpace(prev.RuntimeKey) == strings.TrimSpace(deployment.RuntimeKey) {
+		out.CurrentRuntimeStartedAt = strings.TrimSpace(prev.CurrentRuntimeStartedAt)
+		out.CurrentRuntimeReadyAt = strings.TrimSpace(prev.CurrentRuntimeReadyAt)
+	}
+	if out.CurrentRuntimeStartedAt == "" {
+		out.CurrentRuntimeStartedAt = formatKubeTimestamp(time.Now().UTC())
+	}
+	if managedBackingServiceClusterReady(status, found) {
+		if out.CurrentRuntimeReadyAt == "" {
+			out.CurrentRuntimeReadyAt = formatKubeTimestamp(time.Now().UTC())
+		}
+	} else {
+		out.CurrentRuntimeReadyAt = ""
+	}
+	return out
+}
+
 func managedBackingServiceStatusByID(statuses []runtime.ManagedBackingServiceStatus, serviceID string) runtime.ManagedBackingServiceStatus {
 	serviceID = strings.TrimSpace(serviceID)
 	for _, status := range statuses {
@@ -492,6 +536,27 @@ func managedBackingServiceReady(deployment kubeDeployment, found bool) bool {
 		return false
 	}
 	if deployment.Status.UnavailableReplicas > 0 {
+		return false
+	}
+	return true
+}
+
+func managedBackingServiceClusterReady(cluster kubeCloudNativePGCluster, found bool) bool {
+	if !found {
+		return false
+	}
+	desiredInstances := cluster.Spec.Instances
+	if desiredInstances <= 0 {
+		desiredInstances = 1
+	}
+	if cluster.Status.ReadyInstances < desiredInstances {
+		return false
+	}
+	if strings.TrimSpace(cluster.Status.CurrentPrimary) == "" {
+		return false
+	}
+	targetPrimary := strings.TrimSpace(cluster.Status.TargetPrimary)
+	if targetPrimary != "" && targetPrimary != strings.TrimSpace(cluster.Status.CurrentPrimary) {
 		return false
 	}
 	return true
@@ -549,6 +614,19 @@ func (s *Service) pruneManagedAppStaleObjects(ctx context.Context, client *kubeC
 		}
 	}
 
+	clusters, err := s.listOwnedCloudNativePGClusterNames(ctx, client, namespace, app.ID)
+	if err != nil {
+		return err
+	}
+	for _, name := range clusters {
+		if _, ok := desiredByKind[runtime.CloudNativePGClusterKind][name]; ok {
+			continue
+		}
+		if err := client.deleteCloudNativePGCluster(ctx, namespace, name); err != nil {
+			return err
+		}
+	}
+
 	services, err := s.listOwnedServiceNames(ctx, client, namespace, app.ID)
 	if err != nil {
 		return err
@@ -558,6 +636,32 @@ func (s *Service) pruneManagedAppStaleObjects(ctx context.Context, client *kubeC
 			continue
 		}
 		if err := client.deleteService(ctx, namespace, name); err != nil {
+			return err
+		}
+	}
+
+	replicationDestinations, err := s.listOwnedVolSyncReplicationDestinationNames(ctx, client, namespace, app.ID)
+	if err != nil {
+		return err
+	}
+	for _, name := range replicationDestinations {
+		if _, ok := desiredByKind[runtime.VolSyncReplicationDestinationKind][name]; ok {
+			continue
+		}
+		if err := client.deleteVolSyncReplicationDestination(ctx, namespace, name); err != nil {
+			return err
+		}
+	}
+
+	replicationSources, err := s.listOwnedVolSyncReplicationSourceNames(ctx, client, namespace, app.ID)
+	if err != nil {
+		return err
+	}
+	for _, name := range replicationSources {
+		if _, ok := desiredByKind[runtime.VolSyncReplicationSourceKind][name]; ok {
+			continue
+		}
+		if err := client.deleteVolSyncReplicationSource(ctx, namespace, name); err != nil {
 			return err
 		}
 	}
@@ -603,8 +707,26 @@ func (s *Service) deleteManagedAppResources(ctx context.Context, client *kubeCli
 		}
 	}
 
+	for _, name := range resourceNames[runtime.CloudNativePGClusterKind] {
+		if err := client.deleteCloudNativePGCluster(ctx, namespace, name); err != nil {
+			return err
+		}
+	}
+
 	for _, name := range resourceNames["Service"] {
 		if err := client.deleteService(ctx, namespace, name); err != nil {
+			return err
+		}
+	}
+
+	for _, name := range resourceNames[runtime.VolSyncReplicationDestinationKind] {
+		if err := client.deleteVolSyncReplicationDestination(ctx, namespace, name); err != nil {
+			return err
+		}
+	}
+
+	for _, name := range resourceNames[runtime.VolSyncReplicationSourceKind] {
+		if err := client.deleteVolSyncReplicationSource(ctx, namespace, name); err != nil {
 			return err
 		}
 	}
@@ -651,6 +773,12 @@ func (s *Service) managedAppOwnedResourceNames(ctx context.Context, client *kube
 		}
 		addNames("Deployment", deployments)
 
+		clusters, err := s.listOwnedCloudNativePGClusterNames(ctx, client, namespace, app.ID)
+		if err != nil {
+			return nil, err
+		}
+		addNames(runtime.CloudNativePGClusterKind, clusters)
+
 		services, err := s.listOwnedServiceNames(ctx, client, namespace, app.ID)
 		if err != nil {
 			return nil, err
@@ -662,6 +790,18 @@ func (s *Service) managedAppOwnedResourceNames(ctx context.Context, client *kube
 			return nil, err
 		}
 		addNames("PersistentVolumeClaim", pvcs)
+
+		replicationDestinations, err := s.listOwnedVolSyncReplicationDestinationNames(ctx, client, namespace, app.ID)
+		if err != nil {
+			return nil, err
+		}
+		addNames(runtime.VolSyncReplicationDestinationKind, replicationDestinations)
+
+		replicationSources, err := s.listOwnedVolSyncReplicationSourceNames(ctx, client, namespace, app.ID)
+		if err != nil {
+			return nil, err
+		}
+		addNames(runtime.VolSyncReplicationSourceKind, replicationSources)
 
 		secrets, err := s.listOwnedSecretNames(ctx, client, namespace, app.ID)
 		if err != nil {
@@ -683,6 +823,12 @@ func (s *Service) listOwnedDeploymentNames(ctx context.Context, client *kubeClie
 	})
 }
 
+func (s *Service) listOwnedCloudNativePGClusterNames(ctx context.Context, client *kubeClient, namespace, appID string) ([]string, error) {
+	return listOwnedNames(ctx, appID, func(selector string) ([]string, error) {
+		return client.listCloudNativePGClusterNamesByLabel(ctx, namespace, selector)
+	})
+}
+
 func (s *Service) listOwnedServiceNames(ctx context.Context, client *kubeClient, namespace, appID string) ([]string, error) {
 	return listOwnedNames(ctx, appID, func(selector string) ([]string, error) {
 		return client.listServiceNamesByLabel(ctx, namespace, selector)
@@ -692,6 +838,18 @@ func (s *Service) listOwnedServiceNames(ctx context.Context, client *kubeClient,
 func (s *Service) listOwnedPersistentVolumeClaimNames(ctx context.Context, client *kubeClient, namespace, appID string) ([]string, error) {
 	return listOwnedNames(ctx, appID, func(selector string) ([]string, error) {
 		return client.listPersistentVolumeClaimNamesByLabel(ctx, namespace, selector)
+	})
+}
+
+func (s *Service) listOwnedVolSyncReplicationDestinationNames(ctx context.Context, client *kubeClient, namespace, appID string) ([]string, error) {
+	return listOwnedNames(ctx, appID, func(selector string) ([]string, error) {
+		return client.listVolSyncReplicationDestinationNamesByLabel(ctx, namespace, selector)
+	})
+}
+
+func (s *Service) listOwnedVolSyncReplicationSourceNames(ctx context.Context, client *kubeClient, namespace, appID string) ([]string, error) {
+	return listOwnedNames(ctx, appID, func(selector string) ([]string, error) {
+		return client.listVolSyncReplicationSourceNamesByLabel(ctx, namespace, selector)
 	})
 }
 
@@ -730,7 +888,14 @@ func listOwnedNames(ctx context.Context, appID string, fn func(selector string) 
 }
 
 func managedAppExpectedObjectNamesByKind(app model.App) map[string]map[string]struct{} {
-	return desiredObjectNamesByKind(runtime.BuildManagedAppChildObjects(app, runtime.SchedulingConstraints{}, nil))
+	out := desiredObjectNamesByKind(runtime.BuildManagedAppChildObjects(app, runtime.SchedulingConstraints{}, nil))
+	if app.Spec.Workspace != nil {
+		if out[runtime.VolSyncReplicationSourceKind] == nil {
+			out[runtime.VolSyncReplicationSourceKind] = make(map[string]struct{})
+		}
+		out[runtime.VolSyncReplicationSourceKind][runtime.WorkspaceReplicationSourceName(app)] = struct{}{}
+	}
+	return out
 }
 
 func setToSortedNames(values map[string]struct{}) []string {

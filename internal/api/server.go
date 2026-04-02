@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"fugue/internal/auth"
+	"fugue/internal/failover"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
@@ -104,7 +105,17 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "shutting down")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	results := s.readinessCheckResults(r.Context())
+	statusCode := http.StatusOK
+	status := "ok"
+	if readinessHasFailure(results) {
+		statusCode = http.StatusServiceUnavailable
+		status = "degraded"
+	}
+	httpx.WriteJSON(w, statusCode, map[string]any{
+		"status": status,
+		"checks": results,
+	})
 }
 
 func (s *Server) SetReady(ready bool) {
@@ -886,8 +897,8 @@ func (s *Server) handleMigrateApp(w http.ResponseWriter, r *http.Request) {
 	if !allowed {
 		return
 	}
-	if hasManagedStatefulBinding(app) || app.Spec.Workspace != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "stateful apps with managed backing services or persistent workspaces are not migratable yet")
+	if blockerMessage := failover.MigrationBlockerMessage(app); blockerMessage != "" {
+		httpx.WriteError(w, http.StatusBadRequest, blockerMessage)
 		return
 	}
 	var req struct {
@@ -910,6 +921,47 @@ func (s *Server) handleMigrateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.appendAudit(principal, "app.migrate", "operation", op.ID, app.TenantID, map[string]string{"app_id": app.ID, "target_runtime_id": req.TargetRuntimeID})
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": sanitizeOperationForAPI(op)})
+}
+
+func (s *Server) handleFailoverApp(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("app.failover") && !principal.HasScope("app.migrate") {
+		httpx.WriteError(w, http.StatusForbidden, "missing app.failover or app.migrate scope")
+		return
+	}
+	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	if !allowed {
+		return
+	}
+	var req struct {
+		TargetRuntimeID string `json:"target_runtime_id"`
+	}
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	targetRuntimeID := strings.TrimSpace(req.TargetRuntimeID)
+	if targetRuntimeID == "" && app.Spec.Failover != nil {
+		targetRuntimeID = strings.TrimSpace(app.Spec.Failover.TargetRuntimeID)
+	}
+	if targetRuntimeID == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "target_runtime_id is required when app.spec.failover.target_runtime_id is not configured")
+		return
+	}
+	op, err := s.store.CreateOperation(model.Operation{
+		TenantID:        app.TenantID,
+		Type:            model.OperationTypeFailover,
+		RequestedByType: principal.ActorType,
+		RequestedByID:   principal.ActorID,
+		AppID:           app.ID,
+		TargetRuntimeID: targetRuntimeID,
+	})
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.appendAudit(principal, "app.failover", "operation", op.ID, app.TenantID, map[string]string{"app_id": app.ID, "target_runtime_id": targetRuntimeID})
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": sanitizeOperationForAPI(op)})
 }
 

@@ -40,6 +40,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/apps/{id}/domains/verify", s.auth.RequireAPI(http.HandlerFunc(s.handleVerifyAppDomain)))
 	mux.Handle("GET /v1/apps/{id}/env", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppEnv)))
 	mux.Handle("PATCH /v1/apps/{id}/env", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchAppEnv)))
+	mux.Handle("POST /v1/apps/{id}/failover", s.auth.RequireAPI(http.HandlerFunc(s.handleFailoverApp)))
 	mux.Handle("GET /v1/apps/{id}/files", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppFiles)))
 	mux.Handle("PUT /v1/apps/{id}/files", s.auth.RequireAPI(http.HandlerFunc(s.handleUpsertAppFiles)))
 	mux.Handle("DELETE /v1/apps/{id}/files", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteAppFiles)))

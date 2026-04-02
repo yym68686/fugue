@@ -37,6 +37,22 @@ type kubeDeployment struct {
 	} `json:"status"`
 }
 
+type kubeCloudNativePGCluster struct {
+	Metadata struct {
+		Name       string `json:"name"`
+		Generation int64  `json:"generation,omitempty"`
+	} `json:"metadata"`
+	Spec struct {
+		Instances int `json:"instances,omitempty"`
+	} `json:"spec"`
+	Status struct {
+		Phase          string `json:"phase,omitempty"`
+		ReadyInstances int    `json:"readyInstances,omitempty"`
+		CurrentPrimary string `json:"currentPrimary,omitempty"`
+		TargetPrimary  string `json:"targetPrimary,omitempty"`
+	} `json:"status"`
+}
+
 func (c *kubeClient) applyObject(ctx context.Context, obj map[string]any, out any) error {
 	apiPath, err := runtime.ObjectAPIPath(c.namespace, obj)
 	if err != nil {
@@ -169,8 +185,32 @@ func (c *kubeClient) getDeployment(ctx context.Context, namespace, name string) 
 	return deployment, true, nil
 }
 
+func (c *kubeClient) getCloudNativePGCluster(ctx context.Context, namespace, name string) (kubeCloudNativePGCluster, bool, error) {
+	var cluster kubeCloudNativePGCluster
+	status, err := c.doJSON(ctx, http.MethodGet, cloudNativePGClusterAPIPath(c.effectiveNamespace(namespace), name), nil, &cluster)
+	if err != nil {
+		if status == http.StatusNotFound {
+			return kubeCloudNativePGCluster{}, false, nil
+		}
+		return kubeCloudNativePGCluster{}, false, err
+	}
+	return cluster, true, nil
+}
+
+func (c *kubeClient) getVolSyncReplicationDestination(ctx context.Context, namespace, name string) (map[string]any, bool, error) {
+	return c.getRawNamespacedObject(ctx, volSyncReplicationDestinationAPIPath(c.effectiveNamespace(namespace), name))
+}
+
+func (c *kubeClient) getVolSyncReplicationSource(ctx context.Context, namespace, name string) (map[string]any, bool, error) {
+	return c.getRawNamespacedObject(ctx, volSyncReplicationSourceAPIPath(c.effectiveNamespace(namespace), name))
+}
+
 func (c *kubeClient) listDeploymentNamesByLabel(ctx context.Context, namespace, labelSelector string) ([]string, error) {
 	return c.listNamespacedResourceNames(ctx, "/apis/apps/v1/namespaces/"+c.effectiveNamespace(namespace)+"/deployments", labelSelector)
+}
+
+func (c *kubeClient) listCloudNativePGClusterNamesByLabel(ctx context.Context, namespace, labelSelector string) ([]string, error) {
+	return c.listNamespacedResourceNames(ctx, "/apis/postgresql.cnpg.io/v1/namespaces/"+c.effectiveNamespace(namespace)+"/clusters", labelSelector)
 }
 
 func (c *kubeClient) listServiceNamesByLabel(ctx context.Context, namespace, labelSelector string) ([]string, error) {
@@ -181,12 +221,25 @@ func (c *kubeClient) listPersistentVolumeClaimNamesByLabel(ctx context.Context, 
 	return c.listNamespacedResourceNames(ctx, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/persistentvolumeclaims", labelSelector)
 }
 
+func (c *kubeClient) listVolSyncReplicationDestinationNamesByLabel(ctx context.Context, namespace, labelSelector string) ([]string, error) {
+	return c.listNamespacedResourceNames(ctx, "/apis/volsync.backube/v1alpha1/namespaces/"+c.effectiveNamespace(namespace)+"/replicationdestinations", labelSelector)
+}
+
+func (c *kubeClient) listVolSyncReplicationSourceNamesByLabel(ctx context.Context, namespace, labelSelector string) ([]string, error) {
+	return c.listNamespacedResourceNames(ctx, "/apis/volsync.backube/v1alpha1/namespaces/"+c.effectiveNamespace(namespace)+"/replicationsources", labelSelector)
+}
+
 func (c *kubeClient) listSecretNamesByLabel(ctx context.Context, namespace, labelSelector string) ([]string, error) {
 	return c.listNamespacedResourceNames(ctx, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/secrets", labelSelector)
 }
 
 func (c *kubeClient) deleteDeployment(ctx context.Context, namespace, name string) error {
 	_, err := c.doRequest(ctx, http.MethodDelete, "/apis/apps/v1/namespaces/"+c.effectiveNamespace(namespace)+"/deployments/"+url.PathEscape(name), "", nil, nil)
+	return normalizeDeleteNotFound(err)
+}
+
+func (c *kubeClient) deleteCloudNativePGCluster(ctx context.Context, namespace, name string) error {
+	_, err := c.doRequest(ctx, http.MethodDelete, cloudNativePGClusterAPIPath(c.effectiveNamespace(namespace), name), "", nil, nil)
 	return normalizeDeleteNotFound(err)
 }
 
@@ -200,9 +253,31 @@ func (c *kubeClient) deletePersistentVolumeClaim(ctx context.Context, namespace,
 	return normalizeDeleteNotFound(err)
 }
 
+func (c *kubeClient) deleteVolSyncReplicationDestination(ctx context.Context, namespace, name string) error {
+	_, err := c.doRequest(ctx, http.MethodDelete, volSyncReplicationDestinationAPIPath(c.effectiveNamespace(namespace), name), "", nil, nil)
+	return normalizeDeleteNotFound(err)
+}
+
+func (c *kubeClient) deleteVolSyncReplicationSource(ctx context.Context, namespace, name string) error {
+	_, err := c.doRequest(ctx, http.MethodDelete, volSyncReplicationSourceAPIPath(c.effectiveNamespace(namespace), name), "", nil, nil)
+	return normalizeDeleteNotFound(err)
+}
+
 func (c *kubeClient) deleteSecret(ctx context.Context, namespace, name string) error {
 	_, err := c.doRequest(ctx, http.MethodDelete, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/secrets/"+url.PathEscape(name), "", nil, nil)
 	return normalizeDeleteNotFound(err)
+}
+
+func (c *kubeClient) patchVolSyncReplicationSourceTrigger(ctx context.Context, namespace, name, manual string) error {
+	body := map[string]any{
+		"spec": map[string]any{
+			"trigger": map[string]any{
+				"manual": strings.TrimSpace(manual),
+			},
+		},
+	}
+	_, err := c.doRequest(ctx, http.MethodPatch, volSyncReplicationSourceAPIPath(c.effectiveNamespace(namespace), name), "application/merge-patch+json", body, nil)
+	return err
 }
 
 func (c *kubeClient) listNamespacedResourceNames(ctx context.Context, apiPath, labelSelector string) ([]string, error) {
@@ -274,6 +349,30 @@ func (c *kubeClient) doRequest(ctx context.Context, method, apiPath, contentType
 
 func managedAppAPIPath(namespace, name string) string {
 	return "/apis/" + runtime.ManagedAppAPIGroup + "/v1alpha1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/" + runtime.ManagedAppPlural + "/" + url.PathEscape(strings.TrimSpace(name))
+}
+
+func cloudNativePGClusterAPIPath(namespace, name string) string {
+	return "/apis/postgresql.cnpg.io/v1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/clusters/" + url.PathEscape(strings.TrimSpace(name))
+}
+
+func volSyncReplicationDestinationAPIPath(namespace, name string) string {
+	return "/apis/volsync.backube/v1alpha1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/replicationdestinations/" + url.PathEscape(strings.TrimSpace(name))
+}
+
+func volSyncReplicationSourceAPIPath(namespace, name string) string {
+	return "/apis/volsync.backube/v1alpha1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/replicationsources/" + url.PathEscape(strings.TrimSpace(name))
+}
+
+func (c *kubeClient) getRawNamespacedObject(ctx context.Context, apiPath string) (map[string]any, bool, error) {
+	var out map[string]any
+	status, err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &out)
+	if err != nil {
+		if status == http.StatusNotFound {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return out, true, nil
 }
 
 func normalizeDeleteNotFound(err error) error {

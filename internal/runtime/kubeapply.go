@@ -121,6 +121,12 @@ func ObjectAPIPath(defaultNamespace string, obj map[string]any) (string, error) 
 		return "/api/v1/namespaces/" + namespace + "/services/" + name, nil
 	case apiVersion == "apps/v1" && kind == "Deployment":
 		return "/apis/apps/v1/namespaces/" + namespace + "/deployments/" + name, nil
+	case apiVersion == CloudNativePGAPIVersion && kind == CloudNativePGClusterKind:
+		return "/apis/postgresql.cnpg.io/v1/namespaces/" + namespace + "/clusters/" + name, nil
+	case apiVersion == VolSyncAPIVersion && kind == VolSyncReplicationDestinationKind:
+		return "/apis/volsync.backube/v1alpha1/namespaces/" + namespace + "/replicationdestinations/" + name, nil
+	case apiVersion == VolSyncAPIVersion && kind == VolSyncReplicationSourceKind:
+		return "/apis/volsync.backube/v1alpha1/namespaces/" + namespace + "/replicationsources/" + name, nil
 	case apiVersion == ManagedAppAPIVersion && kind == ManagedAppKind:
 		return "/apis/" + ManagedAppAPIGroup + "/v1alpha1/namespaces/" + namespace + "/" + ManagedAppPlural + "/" + name, nil
 	default:

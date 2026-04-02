@@ -13,12 +13,22 @@ import (
 )
 
 const (
-	defaultPostgresImage      = "postgres:17.6-alpine"
-	defaultPostgresStorage    = "1Gi"
-	defaultWaitImage          = "busybox:1.36"
-	AppWorkspaceContainerName = "fugue-workspace"
-	workspaceVolumeName       = "app-workspace"
-	workspaceSidecarName      = AppWorkspaceContainerName
+	defaultPostgresImage                = ""
+	defaultPostgresStorage              = "1Gi"
+	defaultPostgresInstances            = 3
+	defaultPostgresSynchronousReplicas  = 1
+	defaultWorkspaceStorage             = "10Gi"
+	defaultWorkspaceReplicationSchedule = "*/5 * * * *"
+	defaultWaitImage                    = "busybox:1.36"
+	AppWorkspaceContainerName           = "fugue-workspace"
+	workspaceVolumeName                 = "app-workspace"
+	workspaceSidecarName                = AppWorkspaceContainerName
+
+	CloudNativePGAPIVersion           = "postgresql.cnpg.io/v1"
+	CloudNativePGClusterKind          = "Cluster"
+	VolSyncAPIVersion                 = "volsync.backube/v1alpha1"
+	VolSyncReplicationSourceKind      = "ReplicationSource"
+	VolSyncReplicationDestinationKind = "ReplicationDestination"
 )
 
 func buildAppObjects(app model.App, scheduling SchedulingConstraints) []map[string]any {
@@ -38,13 +48,19 @@ func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, o
 		objects = append(objects, buildAppFilesSecretObject(namespace, appName, app.Spec.Files, labels))
 	}
 
+	if workspaceSpec := normalizeRuntimeAppWorkspaceSpec(app); workspaceSpec != nil {
+		objects = append(objects,
+			buildAppWorkspacePVCObject(namespace, app, labels, *workspaceSpec),
+			buildWorkspaceReplicationDestinationObject(namespace, app, labels, *workspaceSpec),
+		)
+	}
+
 	for _, postgres := range postgresResources {
 		postgresLabels := postgresLabels(postgres)
 		objects = append(objects,
 			buildPostgresSecretObject(namespace, postgres.secretName, postgresLabels, postgres.spec),
 			buildPostgresServiceObject(namespace, postgres.resourceName, postgresLabels, postgres.spec),
-			buildPostgresPVCObject(namespace, postgres.resourceName, postgresLabels),
-			buildPostgresDeploymentObject(namespace, postgres.secretName, postgres.resourceName, postgresLabels, postgres.spec, scheduling),
+			buildPostgresClusterObject(namespace, postgres.secretName, postgres.resourceName, postgresLabels, postgres.spec),
 		)
 	}
 
@@ -158,12 +174,54 @@ func buildPostgresSecretObject(namespace, secretName string, labels map[string]s
 			"POSTGRES_DB":       spec.Database,
 			"POSTGRES_USER":     spec.User,
 			"POSTGRES_PASSWORD": spec.Password,
+			"username":          spec.User,
+			"password":          spec.Password,
+			"database":          spec.Database,
 		},
 	}
 }
 
+func buildPostgresClusterObject(namespace, secretName, resourceName string, labels map[string]string, spec model.AppPostgresSpec) map[string]any {
+	clusterSpec := map[string]any{
+		"instances":             spec.Instances,
+		"enableSuperuserAccess": false,
+		"bootstrap": map[string]any{
+			"initdb": map[string]any{
+				"database": spec.Database,
+				"owner":    spec.User,
+				"secret": map[string]any{
+					"name": secretName,
+				},
+			},
+		},
+		"storage": map[string]any{
+			"size": spec.StorageSize,
+		},
+	}
+	if strings.TrimSpace(spec.StorageClassName) != "" {
+		clusterSpec["storage"].(map[string]any)["storageClass"] = strings.TrimSpace(spec.StorageClassName)
+	}
+	if strings.TrimSpace(spec.Image) != "" {
+		clusterSpec["imageName"] = strings.TrimSpace(spec.Image)
+	}
+	if spec.SynchronousReplicas > 0 && spec.Instances > 1 {
+		clusterSpec["minSyncReplicas"] = spec.SynchronousReplicas
+		clusterSpec["maxSyncReplicas"] = spec.SynchronousReplicas
+	}
+
+	return map[string]any{
+		"apiVersion": CloudNativePGAPIVersion,
+		"kind":       CloudNativePGClusterKind,
+		"metadata": map[string]any{
+			"name":      resourceName,
+			"namespace": namespace,
+			"labels":    labels,
+		},
+		"spec": clusterSpec,
+	}
+}
+
 func buildPostgresServiceObject(namespace, resourceName string, labels map[string]string, spec model.AppPostgresSpec) map[string]any {
-	selectorLabels := postgresSelectorLabels(labels)
 	return map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Service",
@@ -173,7 +231,8 @@ func buildPostgresServiceObject(namespace, resourceName string, labels map[strin
 			"labels":    labels,
 		},
 		"spec": map[string]any{
-			"selector": selectorLabels,
+			"type":         "ExternalName",
+			"externalName": postgresRWServiceName(spec.ServiceName),
 			"ports": []map[string]any{
 				{
 					"name":       "tcp-5432",
@@ -381,9 +440,8 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		})
 		volumes = append(volumes, map[string]any{
 			"name": workspaceVolumeName,
-			"hostPath": map[string]any{
-				"path": workspaceSpec.StoragePath,
-				"type": "DirectoryOrCreate",
+			"persistentVolumeClaim": map[string]any{
+				"claimName": WorkspacePVCName(app),
 			},
 		})
 		initContainers = append(initContainers, buildAppWorkspaceInitContainer(*workspaceSpec))
@@ -444,13 +502,7 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		},
 		"spec": map[string]any{
 			"replicas": app.Spec.Replicas,
-			"strategy": map[string]any{
-				"type": "RollingUpdate",
-				"rollingUpdate": map[string]any{
-					"maxUnavailable": 0,
-					"maxSurge":       1,
-				},
-			},
+			"strategy": deploymentStrategy(app),
 			"selector": map[string]any{
 				"matchLabels": labels,
 			},
@@ -511,6 +563,7 @@ type postgresRuntimeResource struct {
 type ManagedBackingServiceDeployment struct {
 	ServiceID    string
 	ResourceName string
+	ResourceKind string
 	RuntimeKey   string
 }
 
@@ -528,10 +581,11 @@ func ManagedBackingServiceDeployments(app model.App, scheduling SchedulingConstr
 		if strings.TrimSpace(resource.serviceID) == "" {
 			continue
 		}
-		object := buildPostgresDeploymentObject(namespace, resource.secretName, resource.resourceName, postgresLabels(resource), resource.spec, scheduling)
+		object := buildPostgresClusterObject(namespace, resource.secretName, resource.resourceName, postgresLabels(resource), resource.spec)
 		deployments = append(deployments, ManagedBackingServiceDeployment{
 			ServiceID:    resource.serviceID,
 			ResourceName: resource.resourceName,
+			ResourceKind: CloudNativePGClusterKind,
 			RuntimeKey:   managedDeploymentRuntimeKey(object),
 		})
 	}
@@ -592,6 +646,16 @@ func managedPostgresResources(namespace string, app model.App) []postgresRuntime
 func managedDeploymentRuntimeKey(obj map[string]any) string {
 	metadata, _ := obj["metadata"].(map[string]any)
 	spec, _ := obj["spec"].(map[string]any)
+	specPayload := any(nil)
+	if spec != nil {
+		if template, ok := spec["template"]; ok && template != nil {
+			specPayload = map[string]any{
+				"template": template,
+			}
+		} else {
+			specPayload = spec
+		}
+	}
 	payload := map[string]any{
 		"apiVersion": obj["apiVersion"],
 		"kind":       obj["kind"],
@@ -599,9 +663,7 @@ func managedDeploymentRuntimeKey(obj map[string]any) string {
 			"name":      metadata["name"],
 			"namespace": metadata["namespace"],
 		},
-		"spec": map[string]any{
-			"template": spec["template"],
-		},
+		"spec": specPayload,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -685,6 +747,19 @@ func buildAppServiceObject(namespace string, app model.App, labels map[string]st
 	}
 }
 
+func deploymentStrategy(app model.App) map[string]any {
+	if normalizeRuntimeAppWorkspaceSpec(app) != nil {
+		return map[string]any{"type": "Recreate"}
+	}
+	return map[string]any{
+		"type": "RollingUpdate",
+		"rollingUpdate": map[string]any{
+			"maxUnavailable": 0,
+			"maxSurge":       1,
+		},
+	}
+}
+
 func buildEnvObjects(env map[string]string) []map[string]any {
 	if len(env) == 0 {
 		return nil
@@ -764,6 +839,25 @@ func normalizeRuntimePostgresSpec(_ string, baseName string, spec model.AppPostg
 		spec.User = "postgres"
 	}
 	spec.ServiceName = normalizePostgresResourceName(spec.ServiceName, baseName)
+	if strings.TrimSpace(spec.StorageSize) == "" {
+		spec.StorageSize = defaultPostgresStorage
+	}
+	spec.StorageClassName = strings.TrimSpace(spec.StorageClassName)
+	if spec.Instances <= 0 {
+		spec.Instances = defaultPostgresInstances
+	}
+	if spec.Instances < 1 {
+		spec.Instances = 1
+	}
+	if spec.SynchronousReplicas < 0 {
+		spec.SynchronousReplicas = 0
+	}
+	if spec.SynchronousReplicas == 0 && spec.Instances > 1 {
+		spec.SynchronousReplicas = defaultPostgresSynchronousReplicas
+	}
+	if spec.SynchronousReplicas >= spec.Instances {
+		spec.SynchronousReplicas = spec.Instances - 1
+	}
 	return spec
 }
 
@@ -787,6 +881,10 @@ func normalizeRuntimeAppWorkspaceSpec(app model.App) *model.AppWorkspaceSpec {
 		storagePath = path.Join("/var/lib/fugue/tenant-data", namespace, "apps", workspaceStorageBaseName(app), "workspace")
 	}
 	spec.StoragePath = storagePath
+	if strings.TrimSpace(spec.StorageSize) == "" {
+		spec.StorageSize = defaultWorkspaceStorage
+	}
+	spec.StorageClassName = strings.TrimSpace(spec.StorageClassName)
 	return &spec
 }
 
@@ -823,6 +921,85 @@ func buildAppWorkspaceInitContainer(spec model.AppWorkspaceSpec) map[string]any 
 			},
 		},
 	}
+}
+
+func buildAppWorkspacePVCObject(namespace string, app model.App, labels map[string]string, spec model.AppWorkspaceSpec) map[string]any {
+	pvcSpec := map[string]any{
+		"accessModes": []string{"ReadWriteOnce"},
+		"resources": map[string]any{
+			"requests": map[string]any{
+				"storage": spec.StorageSize,
+			},
+		},
+	}
+	if strings.TrimSpace(spec.StorageClassName) != "" {
+		pvcSpec["storageClassName"] = strings.TrimSpace(spec.StorageClassName)
+	}
+	return map[string]any{
+		"apiVersion": "v1",
+		"kind":       "PersistentVolumeClaim",
+		"metadata": map[string]any{
+			"name":      WorkspacePVCName(app),
+			"namespace": namespace,
+			"labels":    labels,
+		},
+		"spec": pvcSpec,
+	}
+}
+
+func buildWorkspaceReplicationDestinationObject(namespace string, app model.App, labels map[string]string, spec model.AppWorkspaceSpec) map[string]any {
+	rsyncTLS := map[string]any{
+		"copyMethod": "Snapshot",
+		"capacity":   spec.StorageSize,
+		"accessModes": []string{
+			"ReadWriteOnce",
+		},
+	}
+	if strings.TrimSpace(spec.StorageClassName) != "" {
+		rsyncTLS["storageClassName"] = strings.TrimSpace(spec.StorageClassName)
+	}
+	return map[string]any{
+		"apiVersion": VolSyncAPIVersion,
+		"kind":       VolSyncReplicationDestinationKind,
+		"metadata": map[string]any{
+			"name":      WorkspaceReplicationDestinationName(app),
+			"namespace": namespace,
+			"labels":    labels,
+		},
+		"spec": map[string]any{
+			"trigger": map[string]any{
+				"manual": "bootstrap",
+			},
+			"rsyncTLS": rsyncTLS,
+		},
+	}
+}
+
+func BuildWorkspaceReplicationSourceObject(app model.App, ownerRef *OwnerReference, address, keySecret string) map[string]any {
+	namespace := NamespaceForTenant(app.TenantID)
+	labels := appLabels(app)
+	source := map[string]any{
+		"apiVersion": VolSyncAPIVersion,
+		"kind":       VolSyncReplicationSourceKind,
+		"metadata": map[string]any{
+			"name":      WorkspaceReplicationSourceName(app),
+			"namespace": namespace,
+			"labels":    labels,
+		},
+		"spec": map[string]any{
+			"sourcePVC": WorkspacePVCName(app),
+			"trigger": map[string]any{
+				"schedule": defaultWorkspaceReplicationSchedule,
+			},
+			"rsyncTLS": map[string]any{
+				"address":    strings.TrimSpace(address),
+				"keySecret":  strings.TrimSpace(keySecret),
+				"copyMethod": "Snapshot",
+			},
+		},
+	}
+	attachOwnerReference([]map[string]any{source}, ownerRef)
+	return source
 }
 
 func buildAppWorkspaceSidecar(spec model.AppWorkspaceSpec) map[string]any {
@@ -865,6 +1042,18 @@ fi`
 
 func appFilesSecretName(appName string) string {
 	return appName + "-files"
+}
+
+func WorkspacePVCName(app model.App) string {
+	return normalizePostgresAuxiliaryName(workspaceStorageBaseName(app), "workspace")
+}
+
+func WorkspaceReplicationDestinationName(app model.App) string {
+	return normalizePostgresAuxiliaryName(workspaceStorageBaseName(app), "workspace-dst")
+}
+
+func WorkspaceReplicationSourceName(app model.App) string {
+	return normalizePostgresAuxiliaryName(workspaceStorageBaseName(app), "workspace-src")
 }
 
 func postgresResourceName(appName string) string {
@@ -935,6 +1124,14 @@ func defaultRuntimePostgresEnv(spec model.AppPostgresSpec) map[string]string {
 		"DB_PASSWORD": spec.Password,
 		"DB_NAME":     spec.Database,
 	}
+}
+
+func postgresRWServiceName(clusterName string) string {
+	clusterName = strings.TrimSpace(clusterName)
+	if clusterName == "" {
+		return ""
+	}
+	return clusterName + "-rw"
 }
 
 func isManagedRuntimeBackingService(service model.BackingService) bool {

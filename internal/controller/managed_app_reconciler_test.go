@@ -365,9 +365,8 @@ func TestDeleteManagedAppResourcesDeletesExpectedNamesWhenLabelsAreMissing(t *te
 		"DELETE /api/v1/namespaces/fg-tenant-demo/services/uni-api-web-api",
 		"DELETE /api/v1/namespaces/fg-tenant-demo/services/uni-api-web-api-db-postgres",
 		"DELETE /api/v1/namespaces/fg-tenant-demo/secrets/uni-api-web-api-pgsec",
-		"DELETE /api/v1/namespaces/fg-tenant-demo/persistentvolumeclaims/uni-api-web-api-db-postgres-data",
 		"DELETE /apis/apps/v1/namespaces/fg-tenant-demo/deployments/uni-api-web-api",
-		"DELETE /apis/apps/v1/namespaces/fg-tenant-demo/deployments/uni-api-web-api-db-postgres",
+		"DELETE /apis/postgresql.cnpg.io/v1/namespaces/fg-tenant-demo/clusters/uni-api-web-api-db-postgres",
 	}
 	sort.Strings(deleted)
 	sort.Strings(want)

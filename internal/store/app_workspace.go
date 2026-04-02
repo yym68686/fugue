@@ -23,6 +23,9 @@ func validateWorkspaceSpec(spec model.AppSpec) error {
 	if spec.Workspace == nil {
 		return nil
 	}
+	if spec.Replicas > 1 {
+		return ErrInvalidInput
+	}
 
 	mountPath, err := model.NormalizeAppWorkspaceMountPath(spec.Workspace.MountPath)
 	if err != nil {

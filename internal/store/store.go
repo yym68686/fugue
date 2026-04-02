@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -60,6 +61,32 @@ func (s *Store) Init() error {
 		}
 		repairAllAPIKeyStatuses(state)
 		repairAllAppStatuses(state)
+		return nil
+	})
+}
+
+func (s *Store) CheckReadiness(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s.usingDatabase() {
+		if s.db == nil || !s.dbReady {
+			if err := s.ensureDatabaseReady(); err != nil {
+				return err
+			}
+		}
+		pingCtx := ctx
+		cancel := func() {}
+		if _, ok := ctx.Deadline(); !ok {
+			pingCtx, cancel = context.WithTimeout(ctx, 3*time.Second)
+		}
+		defer cancel()
+		if err := s.db.PingContext(pingCtx); err != nil {
+			return fmt.Errorf("ping postgres: %w", err)
+		}
+		return nil
+	}
+	return s.withFileLockedState(false, func(state *model.State) error {
 		return nil
 	})
 }
@@ -1893,6 +1920,9 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 		if err := validateWorkspaceRuntimeState(state, spec.RuntimeID, spec); err != nil {
 			return err
 		}
+		if err := validateFailoverRuntimeState(state, tenantID, spec); err != nil {
+			return err
+		}
 		for _, existing := range state.Apps {
 			if existing.TenantID == tenantID && existing.ProjectID == projectID && strings.EqualFold(existing.Name, name) {
 				return ErrConflict
@@ -1980,6 +2010,9 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			if err := validateWorkspaceRuntimeState(state, op.DesiredSpec.RuntimeID, *op.DesiredSpec); err != nil {
 				return err
 			}
+			if err := validateFailoverRuntimeState(state, op.TenantID, *op.DesiredSpec); err != nil {
+				return err
+			}
 			op.TargetRuntimeID = op.DesiredSpec.RuntimeID
 		case model.OperationTypeDeploy:
 			if op.DesiredSpec == nil {
@@ -1992,6 +2025,9 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 				return ErrNotFound
 			}
 			if err := validateWorkspaceRuntimeState(state, op.DesiredSpec.RuntimeID, *op.DesiredSpec); err != nil {
+				return err
+			}
+			if err := validateFailoverRuntimeState(state, op.TenantID, *op.DesiredSpec); err != nil {
 				return err
 			}
 			op.TargetRuntimeID = op.DesiredSpec.RuntimeID
@@ -2014,6 +2050,39 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 				return ErrInvalidInput
 			}
 			op.SourceRuntimeID = app.Spec.RuntimeID
+		case model.OperationTypeFailover:
+			if hasInFlightOperationForApp(state.Operations, app.ID) {
+				return ErrConflict
+			}
+			targetRuntimeID := strings.TrimSpace(op.TargetRuntimeID)
+			if targetRuntimeID == "" && app.Spec.Failover != nil {
+				targetRuntimeID = strings.TrimSpace(app.Spec.Failover.TargetRuntimeID)
+			}
+			if targetRuntimeID == "" {
+				return ErrInvalidInput
+			}
+			if !runtimeVisibleToTenant(state, targetRuntimeID, op.TenantID) {
+				return ErrNotFound
+			}
+			targetRuntimeIndex := findRuntime(state, targetRuntimeID)
+			if targetRuntimeIndex < 0 {
+				return ErrNotFound
+			}
+			if err := validateFailoverTargetRuntimeType(state.Runtimes[targetRuntimeIndex].Type); err != nil {
+				return err
+			}
+			sourceRuntimeIndex := findRuntime(state, app.Spec.RuntimeID)
+			if sourceRuntimeIndex < 0 {
+				return ErrNotFound
+			}
+			if err := validateFailoverTargetRuntimeType(state.Runtimes[sourceRuntimeIndex].Type); err != nil {
+				return err
+			}
+			if strings.TrimSpace(app.Spec.RuntimeID) == targetRuntimeID {
+				return ErrInvalidInput
+			}
+			op.SourceRuntimeID = app.Spec.RuntimeID
+			op.TargetRuntimeID = targetRuntimeID
 		default:
 			return ErrInvalidInput
 		}
@@ -2760,6 +2829,10 @@ func cloneAppSpec(in *model.AppSpec) *model.AppSpec {
 		workspace := *in.Workspace
 		out.Workspace = &workspace
 	}
+	if in.Failover != nil {
+		failover := *in.Failover
+		out.Failover = &failover
+	}
 	if in.Resources != nil {
 		resources := *in.Resources
 		out.Resources = &resources
@@ -2853,6 +2926,18 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 			app.Status.CurrentReleaseStartedAt = nil
 			app.Status.CurrentReleaseReadyAt = nil
 		}
+	case model.OperationTypeFailover:
+		if op.TargetRuntimeID == "" {
+			return ErrInvalidInput
+		}
+		app.Spec.RuntimeID = op.TargetRuntimeID
+		app.Status.Phase = "failed-over"
+		app.Status.CurrentRuntimeID = op.TargetRuntimeID
+		app.Status.CurrentReplicas = app.Spec.Replicas
+		if op.ExecutionMode != model.ExecutionModeManaged {
+			app.Status.CurrentReleaseStartedAt = nil
+			app.Status.CurrentReleaseReadyAt = nil
+		}
 	default:
 		return ErrInvalidInput
 	}
@@ -2918,6 +3003,8 @@ func inFlightOperationPhase(op model.Operation) (string, error) {
 		return "deleting", nil
 	case model.OperationTypeMigrate:
 		return "migrating", nil
+	case model.OperationTypeFailover:
+		return "failing-over", nil
 	default:
 		return "", ErrInvalidInput
 	}
@@ -2959,6 +3046,8 @@ func operationActionLabel(op model.Operation) string {
 		return "delete"
 	case model.OperationTypeMigrate:
 		return "migrate"
+	case model.OperationTypeFailover:
+		return "failover"
 	default:
 		return "operation"
 	}

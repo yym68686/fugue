@@ -2,6 +2,8 @@
 
 This document describes how to deploy the current Fugue MVP onto your k3s environment and how to attach a user-owned VPS runtime.
 
+For the production HA / DR path with external PostgreSQL, external registry, external secret materialization, and multi-edge ingress, see `docs/ha-dr.md`.
+
 ## Quick path for your current 3 VPS
 
 If you want the current MVP on exactly three VPS and you already have SSH aliases `gcp1`, `gcp2`, and `gcp3`, use:
@@ -422,6 +424,19 @@ curl -sS http://127.0.0.1:8080/v1/apps/<app-id>/migrate \
   -d '{"target_runtime_id":"<attached-runtime-id>"}'
 ```
 
+Audit failover readiness before doing that:
+
+```bash
+fugue --base-url http://127.0.0.1:8080 --token <tenant-api-key> app failover
+fugue --base-url http://127.0.0.1:8080 --token <tenant-api-key> app failover <app-name>
+```
+
+Interpretation:
+
+- `ready`: stateless failover is currently eligible
+- `caution`: no hard blocker exists, but redundancy is incomplete or runtime posture is weak
+- `blocked`: Fugue-managed state is still attached, so one-click failover remains intentionally disabled
+
 Flow:
 
 1. The API writes an async `operation`.
@@ -434,5 +449,8 @@ Flow:
 - `fugue-api` and `fugue-controller` now run as separate Deployments. The chart defaults both to 2 replicas and enables controller leader election.
 - Authoritative control-plane state now lives in PostgreSQL. The API and controller still keep local scratch data under `/var/lib/fugue` for import / render work.
 - The bundled chart keeps PostgreSQL, the internal registry, and optional `headscale` in-cluster with `hostPath` storage. For production, externalize or harden those stateful dependencies and their placement.
+- The chart now supports `configSecret.existingSecretName` so production deployments can source Fugue credentials from an external secret manager instead of chart-generated literals.
+- A production HA baseline is included in `deploy/helm/fugue/values-production-ha.yaml`.
+- `fugue app failover` uses the same migration blocker rules as the API, so you can audit app-level failover eligibility before an incident.
 - `api.registryPushBase` must be reachable from builder jobs inside the cluster. `api.registryPullBase` and `api.clusterJoinRegistryEndpoint` must be reachable from the runtime nodes that pull images.
 - If the controller cannot reach the in-cluster Kubernetes API, `managed-shared` and `managed-owned` deploys will stop at the render/apply stage.

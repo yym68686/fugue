@@ -129,6 +129,47 @@ func TestRunAppScaleByNameUsesSemanticCommand(t *testing.T) {
 	}
 }
 
+func TestRunAppFailoverByNameAuditsReadiness(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":2},"status":{"phase":"ready","current_runtime_id":"runtime_managed_shared","current_replicas":2},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":2},"status":{"phase":"ready","current_runtime_id":"runtime_managed_shared","current_replicas":2},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes":
+			_, _ = w.Write([]byte(`{"runtimes":[{"id":"runtime_managed_shared","name":"shared","type":"managed-shared","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "failover", "demo",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app failover: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{
+		"app_id=app_123",
+		"classification=ready",
+		"summary=eligible for stateless failover",
+		"runtime_type=managed-shared",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
 func TestRunEnvSetByNameUsesSemanticCommand(t *testing.T) {
 	t.Parallel()
 

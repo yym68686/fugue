@@ -107,6 +107,8 @@ make run-controller
 ## 部署
 
 部署说明见 [docs/deploy.md](docs/deploy.md)。
+生产可用的 HA / DR 路径见 [docs/ha-dr.md](docs/ha-dr.md) 和 [deploy/helm/fugue/values-production-ha.yaml](deploy/helm/fugue/values-production-ha.yaml)。CLI 里也新增了 `fugue app failover`，可以直接审计哪些 app 已经具备无状态故障转移条件，哪些还被托管数据库或持久工作区阻塞。
+真正的托管有状态 failover 由独立的 controller/API failover workflow 提供，见 [docs/ha-dr.md](docs/ha-dr.md)。
 
 ## 三台 VPS 一键安装
 

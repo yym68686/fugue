@@ -107,6 +107,9 @@ make run-controller
 ## Deployment
 
 See [docs/deploy.md](docs/deploy.md).
+For the production HA / DR path, see [docs/ha-dr.md](docs/ha-dr.md) and [deploy/helm/fugue/values-production-ha.yaml](deploy/helm/fugue/values-production-ha.yaml).
+The CLI now includes `fugue app failover` so you can audit which apps are already eligible for stateless failover and which ones are still blocked by managed state.
+Managed stateful failover itself is exposed separately through the controller/API failover workflow described in [docs/ha-dr.md](docs/ha-dr.md).
 
 ## One-command install for 3 VPS
 

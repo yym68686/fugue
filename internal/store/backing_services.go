@@ -9,7 +9,12 @@ import (
 	"fugue/internal/model"
 )
 
-const defaultManagedBackingPostgresImage = "postgres:17.6-alpine"
+const (
+	defaultManagedBackingPostgresImage               = ""
+	defaultManagedBackingPostgresStorage             = "1Gi"
+	defaultManagedBackingPostgresInstances           = 3
+	defaultManagedBackingPostgresSynchronousReplicas = 1
+)
 
 func (s *Store) ListBackingServices(tenantID string, platformAdmin bool) ([]model.BackingService, error) {
 	if s.usingDatabase() {
@@ -425,6 +430,22 @@ func normalizeManagedPostgresSpec(_ string, appName string, spec model.AppPostgr
 	}
 	if strings.TrimSpace(out.ServiceName) == "" {
 		out.ServiceName = resourceName
+	}
+	if strings.TrimSpace(out.StorageSize) == "" {
+		out.StorageSize = defaultManagedBackingPostgresStorage
+	}
+	out.StorageClassName = strings.TrimSpace(out.StorageClassName)
+	if out.Instances <= 0 {
+		out.Instances = defaultManagedBackingPostgresInstances
+	}
+	if out.SynchronousReplicas < 0 {
+		out.SynchronousReplicas = 0
+	}
+	if out.SynchronousReplicas == 0 && out.Instances > 1 {
+		out.SynchronousReplicas = defaultManagedBackingPostgresSynchronousReplicas
+	}
+	if out.SynchronousReplicas >= out.Instances {
+		out.SynchronousReplicas = out.Instances - 1
 	}
 	resources, err := normalizeWorkloadResources(out.Resources, model.DefaultManagedPostgresResources())
 	if err != nil {

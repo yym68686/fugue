@@ -56,6 +56,90 @@ func TestCreateNodeKeyAllowsEmptyBodyForTenantKey(t *testing.T) {
 	}
 }
 
+func TestReadyzReportsHealthyDependencies(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	kubeServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/apis/apps/v1/namespaces/fugue-system/deployments" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer kubeServer.Close()
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		ControlPlaneNamespace: "fugue-system",
+	})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{
+		`"status":"ok"`,
+		`"store":{"status":"ok"}`,
+		`"kubernetes_api":{"status":"ok"}`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected readyz response to contain %q, got %s", want, body)
+		}
+	}
+}
+
+func TestReadyzFailsWhenKubernetesDependencyIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		ControlPlaneNamespace: "fugue-system",
+	})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return nil, errors.New("cluster unavailable")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{
+		`"status":"degraded"`,
+		`"store":{"status":"ok"}`,
+		`"kubernetes_api":{"status":"error","message":"cluster unavailable"}`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected readyz response to contain %q, got %s", want, body)
+		}
+	}
+}
+
 func TestJoinClusterEnvIncludesMeshConfig(t *testing.T) {
 	t.Parallel()
 

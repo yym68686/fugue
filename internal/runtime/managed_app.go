@@ -275,6 +275,10 @@ func cloneManagedAppSpec(spec model.AppSpec) model.AppSpec {
 		workspace := *spec.Workspace
 		out.Workspace = &workspace
 	}
+	if spec.Failover != nil {
+		failover := *spec.Failover
+		out.Failover = &failover
+	}
 	if spec.Postgres != nil {
 		postgres := *spec.Postgres
 		out.Postgres = &postgres

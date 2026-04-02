@@ -49,6 +49,7 @@ func (c *CLI) newAppCommand() *cobra.Command {
 	cmd.AddCommand(
 		c.newAppListCommand(),
 		c.newAppStatusCommand(),
+		c.newAppFailoverCommand(),
 		c.newAppLogsCommand(),
 		c.newAppRestartCommand(),
 		c.newAppScaleCommand(),

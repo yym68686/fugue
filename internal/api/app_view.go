@@ -108,6 +108,10 @@ func cloneAppSpec(spec model.AppSpec) model.AppSpec {
 		workspace := *spec.Workspace
 		out.Workspace = &workspace
 	}
+	if spec.Failover != nil {
+		failover := *spec.Failover
+		out.Failover = &failover
+	}
 	if spec.Resources != nil {
 		resources := *spec.Resources
 		out.Resources = &resources

@@ -41,37 +41,42 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 		},
 	})
 
-	if len(objects) != 8 {
-		t.Fatalf("expected 8 objects, got %d", len(objects))
+	if len(objects) != 7 {
+		t.Fatalf("expected 7 objects, got %d", len(objects))
 	}
 	if kind, _ := objects[1]["kind"].(string); kind != "Secret" {
 		t.Fatalf("expected app files secret, got %#v", objects[1]["kind"])
 	}
+	if kind, _ := objects[2]["kind"].(string); kind != "Secret" {
+		t.Fatalf("expected postgres secret, got %#v", objects[2]["kind"])
+	}
 	if kind, _ := objects[3]["kind"].(string); kind != "Service" {
-		t.Fatalf("expected postgres service, got %#v", objects[3]["kind"])
+		t.Fatalf("expected postgres alias service, got %#v", objects[3]["kind"])
 	}
-	if kind, _ := objects[4]["kind"].(string); kind != "PersistentVolumeClaim" {
-		t.Fatalf("expected postgres pvc, got %#v", objects[4]["kind"])
+	postgresAliasService := objects[3]
+	postgresAliasSpec := postgresAliasService["spec"].(map[string]any)
+	if got := postgresAliasSpec["type"]; got != "ExternalName" {
+		t.Fatalf("expected postgres alias service type ExternalName, got %#v", got)
 	}
-	pvcSpec := objects[4]["spec"].(map[string]any)
-	accessModes := pvcSpec["accessModes"].([]string)
-	if len(accessModes) != 1 || accessModes[0] != "ReadWriteOnce" {
-		t.Fatalf("unexpected postgres pvc access modes: %#v", accessModes)
+	if got := postgresAliasSpec["externalName"]; got != "uni-api-demo-postgres-rw" {
+		t.Fatalf("expected postgres alias external name, got %#v", got)
 	}
-	requests := pvcSpec["resources"].(map[string]any)["requests"].(map[string]any)
-	if got := requests["storage"]; got != defaultPostgresStorage {
-		t.Fatalf("expected postgres pvc storage %q, got %#v", defaultPostgresStorage, got)
+	if kind, _ := objects[4]["kind"].(string); kind != CloudNativePGClusterKind {
+		t.Fatalf("expected postgres cluster, got %#v", objects[4]["kind"])
 	}
-	pgDeployment := objects[5]
-	spec := pgDeployment["spec"].(map[string]any)
-	template := spec["template"].(map[string]any)
-	podSpec := template["spec"].(map[string]any)
-	volumes := podSpec["volumes"].([]map[string]any)
-	claim := volumes[0]["persistentVolumeClaim"].(map[string]any)
-	if got := claim["claimName"]; got != "uni-api-demo-postgres-data" {
-		t.Fatalf("unexpected postgres pvc claim name: %#v", got)
+	clusterSpec := objects[4]["spec"].(map[string]any)
+	if got := clusterSpec["instances"]; got != defaultPostgresInstances {
+		t.Fatalf("expected postgres instances %d, got %#v", defaultPostgresInstances, got)
 	}
-	appDeployment := objects[6]
+	storage := clusterSpec["storage"].(map[string]any)
+	if got := storage["size"]; got != defaultPostgresStorage {
+		t.Fatalf("expected postgres storage %q, got %#v", defaultPostgresStorage, got)
+	}
+	initdb := clusterSpec["bootstrap"].(map[string]any)["initdb"].(map[string]any)
+	if got := initdb["database"]; got != "uniapi" {
+		t.Fatalf("expected initdb database %q, got %#v", "uniapi", got)
+	}
+	appDeployment := objects[5]
 	appTemplate := appDeployment["spec"].(map[string]any)["template"].(map[string]any)
 	appPodSpec := appTemplate["spec"].(map[string]any)
 	if _, ok := appPodSpec["initContainers"]; !ok {
@@ -181,7 +186,7 @@ func TestBuildAppObjectsIncludesPersistentWorkspaceSidecar(t *testing.T) {
 	}
 
 	objects := buildAppObjects(app, SchedulingConstraints{})
-	deployment := objects[1]
+	deployment := objects[3]
 	template := deployment["spec"].(map[string]any)["template"].(map[string]any)
 	podSpec := template["spec"].(map[string]any)
 
@@ -189,9 +194,9 @@ func TestBuildAppObjectsIncludesPersistentWorkspaceSidecar(t *testing.T) {
 	if len(volumes) != 1 {
 		t.Fatalf("expected one workspace volume, got %d", len(volumes))
 	}
-	hostPath := volumes[0]["hostPath"].(map[string]any)
-	if hostPath["path"] != "/var/lib/fugue/tenant-data/fg-tenant-demo/apps/app_demo/workspace" {
-		t.Fatalf("unexpected workspace host path: %s", hostPath["path"])
+	claim := volumes[0]["persistentVolumeClaim"].(map[string]any)
+	if got := claim["claimName"]; got != WorkspacePVCName(app) {
+		t.Fatalf("unexpected workspace pvc claim: %#v", got)
 	}
 
 	containers := podSpec["containers"].([]map[string]any)
@@ -213,6 +218,25 @@ func TestBuildAppObjectsIncludesPersistentWorkspaceSidecar(t *testing.T) {
 	command := initContainers[0]["command"].([]string)
 	if got := command[len(command)-1]; got != "workspace-reset-1" {
 		t.Fatalf("expected workspace reset token in init container command, got %q", got)
+	}
+
+	workspacePVC := objects[1]
+	if got := workspacePVC["kind"]; got != "PersistentVolumeClaim" {
+		t.Fatalf("expected workspace pvc, got %#v", got)
+	}
+	requests := workspacePVC["spec"].(map[string]any)["resources"].(map[string]any)["requests"].(map[string]any)
+	if got := requests["storage"]; got != defaultWorkspaceStorage {
+		t.Fatalf("expected workspace storage %q, got %#v", defaultWorkspaceStorage, got)
+	}
+
+	replicationDestination := objects[2]
+	if got := replicationDestination["kind"]; got != VolSyncReplicationDestinationKind {
+		t.Fatalf("expected workspace replication destination, got %#v", got)
+	}
+
+	strategy := deployment["spec"].(map[string]any)["strategy"].(map[string]any)
+	if got := strategy["type"]; got != "Recreate" {
+		t.Fatalf("expected workspace deployment strategy Recreate, got %#v", got)
 	}
 }
 
@@ -286,11 +310,11 @@ func TestBuildAppObjectsUsesBackingServicesWithoutDuplicatingLegacyInlinePostgre
 	}
 
 	objects := buildAppObjects(app, SchedulingConstraints{})
-	if len(objects) != 8 {
-		t.Fatalf("expected 8 objects, got %d", len(objects))
+	if len(objects) != 7 {
+		t.Fatalf("expected 7 objects, got %d", len(objects))
 	}
 
-	appDeployment := objects[6]
+	appDeployment := objects[5]
 	appLabels := appDeployment["metadata"].(map[string]any)["labels"].(map[string]string)
 	if appLabels[FugueLabelAppID] != "app_demo" {
 		t.Fatalf("expected app id label %q, got %#v", "app_demo", appLabels[FugueLabelAppID])
@@ -314,11 +338,11 @@ func TestBuildAppObjectsUsesBackingServicesWithoutDuplicatingLegacyInlinePostgre
 		t.Fatalf("expected APP_ENV=prod, got %q", got)
 	}
 
-	postgresService := objects[3]
-	if got := postgresService["metadata"].(map[string]any)["name"]; got != "uni-api-demo-postgres" {
+	postgresCluster := objects[4]
+	if got := postgresCluster["metadata"].(map[string]any)["name"]; got != "uni-api-demo-postgres" {
 		t.Fatalf("expected managed backing service resource name, got %#v", got)
 	}
-	postgresLabels := postgresService["metadata"].(map[string]any)["labels"].(map[string]string)
+	postgresLabels := postgresCluster["metadata"].(map[string]any)["labels"].(map[string]string)
 	if postgresLabels[FugueLabelBackingServiceID] != "service_demo" {
 		t.Fatalf("expected backing service id label %q, got %#v", "service_demo", postgresLabels[FugueLabelBackingServiceID])
 	}
@@ -329,9 +353,10 @@ func TestBuildAppObjectsUsesBackingServicesWithoutDuplicatingLegacyInlinePostgre
 		t.Fatalf("expected backing service type label %q, got %#v", model.BackingServiceTypePostgres, postgresLabels[FugueLabelBackingServiceType])
 	}
 
-	postgresPVC := objects[4]
-	if got := postgresPVC["metadata"].(map[string]any)["name"]; got != "uni-api-demo-postgres-data" {
-		t.Fatalf("expected managed backing service pvc, got %#v", got)
+	clusterSpec := postgresCluster["spec"].(map[string]any)
+	storage := clusterSpec["storage"].(map[string]any)
+	if got := storage["size"]; got != defaultPostgresStorage {
+		t.Fatalf("expected postgres storage %q, got %#v", defaultPostgresStorage, got)
 	}
 }
 
@@ -378,63 +403,70 @@ func TestBuildManagedPostgresObjectsUseStableSelectors(t *testing.T) {
 	}
 
 	objects := buildAppObjects(app, SchedulingConstraints{})
-	postgresService := objects[2]
-	serviceSelector := postgresService["spec"].(map[string]any)["selector"].(map[string]string)
-	expectedSelector := map[string]string{
-		FugueLabelName:      "uni-api-demo-postgres",
-		FugueLabelComponent: "postgres",
-		FugueLabelManagedBy: FugueLabelManagedByValue,
+	postgresSecret := objects[1]
+	secretLabels := postgresSecret["metadata"].(map[string]any)["labels"].(map[string]string)
+	if got := secretLabels[FugueLabelBackingServiceID]; got != "service_demo" {
+		t.Fatalf("expected postgres secret label %s=%q, got %#v", FugueLabelBackingServiceID, "service_demo", got)
 	}
-	if len(serviceSelector) != len(expectedSelector) {
-		t.Fatalf("expected postgres service selector %v, got %v", expectedSelector, serviceSelector)
-	}
-	for key, value := range expectedSelector {
-		if got := serviceSelector[key]; got != value {
-			t.Fatalf("expected postgres service selector %s=%q, got %#v", key, value, got)
-		}
-	}
-	if _, exists := serviceSelector[FugueLabelBackingServiceID]; exists {
-		t.Fatalf("expected postgres service selector to omit %s, got %v", FugueLabelBackingServiceID, serviceSelector)
-	}
-	if _, exists := serviceSelector[FugueLabelOwnerAppID]; exists {
-		t.Fatalf("expected postgres service selector to omit %s, got %v", FugueLabelOwnerAppID, serviceSelector)
+	if got := secretLabels[FugueLabelOwnerAppID]; got != "app_demo" {
+		t.Fatalf("expected postgres secret label %s=%q, got %#v", FugueLabelOwnerAppID, "app_demo", got)
 	}
 
-	postgresPVC := objects[3]
-	if got := postgresPVC["kind"]; got != "PersistentVolumeClaim" {
-		t.Fatalf("expected postgres pvc, got %#v", got)
+	postgresAliasService := objects[2]
+	if got := postgresAliasService["kind"]; got != "Service" {
+		t.Fatalf("expected postgres service alias, got %#v", got)
 	}
-	postgresPVCLabels := postgresPVC["metadata"].(map[string]any)["labels"].(map[string]string)
-	if got := postgresPVCLabels[FugueLabelBackingServiceID]; got != "service_demo" {
-		t.Fatalf("expected postgres pvc label %s=%q, got %#v", FugueLabelBackingServiceID, "service_demo", got)
-	}
-	if got := postgresPVCLabels[FugueLabelOwnerAppID]; got != "app_demo" {
-		t.Fatalf("expected postgres pvc label %s=%q, got %#v", FugueLabelOwnerAppID, "app_demo", got)
+	aliasSpec := postgresAliasService["spec"].(map[string]any)
+	if got := aliasSpec["externalName"]; got != "uni-api-demo-postgres-rw" {
+		t.Fatalf("expected postgres alias external name, got %#v", got)
 	}
 
-	postgresDeployment := objects[4]
-	deploymentSelector := postgresDeployment["spec"].(map[string]any)["selector"].(map[string]any)["matchLabels"].(map[string]string)
-	if len(deploymentSelector) != len(expectedSelector) {
-		t.Fatalf("expected postgres deployment selector %v, got %v", expectedSelector, deploymentSelector)
+	postgresCluster := objects[3]
+	if got := postgresCluster["kind"]; got != CloudNativePGClusterKind {
+		t.Fatalf("expected postgres cluster, got %#v", got)
 	}
-	for key, value := range expectedSelector {
-		if got := deploymentSelector[key]; got != value {
-			t.Fatalf("expected postgres deployment selector %s=%q, got %#v", key, value, got)
-		}
-	}
-	if _, exists := deploymentSelector[FugueLabelBackingServiceID]; exists {
-		t.Fatalf("expected postgres deployment selector to omit %s, got %v", FugueLabelBackingServiceID, deploymentSelector)
-	}
-	if _, exists := deploymentSelector[FugueLabelOwnerAppID]; exists {
-		t.Fatalf("expected postgres deployment selector to omit %s, got %v", FugueLabelOwnerAppID, deploymentSelector)
-	}
-
-	metadataLabels := postgresDeployment["metadata"].(map[string]any)["labels"].(map[string]string)
+	metadataLabels := postgresCluster["metadata"].(map[string]any)["labels"].(map[string]string)
 	if got := metadataLabels[FugueLabelBackingServiceID]; got != "service_demo" {
 		t.Fatalf("expected postgres metadata label %s=%q, got %#v", FugueLabelBackingServiceID, "service_demo", got)
 	}
 	if got := metadataLabels[FugueLabelOwnerAppID]; got != "app_demo" {
 		t.Fatalf("expected postgres metadata label %s=%q, got %#v", FugueLabelOwnerAppID, "app_demo", got)
+	}
+
+	clusterSpec := postgresCluster["spec"].(map[string]any)
+	if got := clusterSpec["instances"]; got != defaultPostgresInstances {
+		t.Fatalf("expected postgres instances %d, got %#v", defaultPostgresInstances, got)
+	}
+	if got := clusterSpec["maxSyncReplicas"]; got != defaultPostgresSynchronousReplicas {
+		t.Fatalf("expected postgres max sync replicas %d, got %#v", defaultPostgresSynchronousReplicas, got)
+	}
+}
+
+func TestBuildWorkspaceReplicationSourceObject(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			RuntimeID: "runtime_demo",
+			Workspace: &model.AppWorkspaceSpec{},
+		},
+	}
+
+	object := BuildWorkspaceReplicationSourceObject(app, nil, "tls://destination.default.svc:8000", "workspace-rsync-key")
+	if got := object["kind"]; got != VolSyncReplicationSourceKind {
+		t.Fatalf("expected workspace replication source, got %#v", got)
+	}
+	spec := object["spec"].(map[string]any)
+	if got := spec["sourcePVC"]; got != WorkspacePVCName(app) {
+		t.Fatalf("expected source pvc %q, got %#v", WorkspacePVCName(app), got)
+	}
+	rsyncTLS := spec["rsyncTLS"].(map[string]any)
+	if got := rsyncTLS["address"]; got != "tls://destination.default.svc:8000" {
+		t.Fatalf("expected rsync address, got %#v", got)
+	}
+	if got := rsyncTLS["keySecret"]; got != "workspace-rsync-key" {
+		t.Fatalf("expected rsync key secret, got %#v", got)
 	}
 }
 

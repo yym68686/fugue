@@ -1852,6 +1852,31 @@ paths:
                 additionalProperties: true
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/failover:
+    post:
+      operationId: failoverApp
+      summary: Fail Over App
+      tags: [Apps]
+      x-fugue-handler: handleFailoverApp
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FailoverAppRequest"
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/operations:
     get:
       operationId: listOperations
@@ -2651,8 +2676,20 @@ components:
           type: string
         storage_path:
           type: string
+        storage_size:
+          type: string
+        storage_class_name:
+          type: string
         reset_token:
           type: string
+    AppFailoverSpec:
+      type: object
+      additionalProperties: false
+      properties:
+        target_runtime_id:
+          type: string
+        auto:
+          type: boolean
     AppPostgresSpec:
       type: object
       additionalProperties: false
@@ -2669,6 +2706,16 @@ components:
           type: string
         storage_path:
           type: string
+        storage_size:
+          type: string
+        storage_class_name:
+          type: string
+        instances:
+          type: integer
+          format: int32
+        synchronous_replicas:
+          type: integer
+          format: int32
         resources:
           $ref: "#/components/schemas/ResourceSpec"
     BackingServiceSpec:
@@ -2800,6 +2847,8 @@ components:
           $ref: "#/components/schemas/AppWorkspaceSpec"
         postgres:
           $ref: "#/components/schemas/AppPostgresSpec"
+        failover:
+          $ref: "#/components/schemas/AppFailoverSpec"
         restart_token:
           type: string
     App:
@@ -3115,6 +3164,12 @@ components:
         completed_at:
           type: string
           format: date-time
+    FailoverAppRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        target_runtime_id:
+          type: string
     AuditEvent:
       type: object
       additionalProperties: false
