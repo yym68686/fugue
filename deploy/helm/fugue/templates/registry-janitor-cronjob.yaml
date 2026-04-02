@@ -112,18 +112,19 @@ spec:
                   }
 
                   registry_catalog() {
-                    curl -fsS "${registry_base}/v2/_catalog?n=1000" 2>/dev/null || printf '%s' '{"repositories":[]}'
+                    curl -fsS --max-time 10 "${registry_base}/v2/_catalog?n=1000" 2>/dev/null || printf '%s' '{"repositories":[]}'
                   }
 
                   registry_tags() {
                     local repo="$1"
-                    curl -fsS "${registry_base}/v2/${repo}/tags/list" 2>/dev/null || printf '%s' '{"tags":[]}'
+                    curl -fsS --max-time 10 "${registry_base}/v2/${repo}/tags/list" 2>/dev/null || printf '%s' '{"tags":[]}'
                   }
 
                   registry_manifest_digest() {
                     local repo="$1"
                     local tag="$2"
                     curl -fsSI \
+                      --max-time 10 \
                       -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
                       "${registry_base}/v2/${repo}/manifests/${tag}" 2>/dev/null \
                       | awk -F': ' 'tolower($1) == "docker-content-digest" {print $2}' \
@@ -134,12 +135,18 @@ spec:
                   registry_delete_manifest() {
                     local repo="$1"
                     local digest="$2"
-                    curl -fsS -X DELETE "${registry_base}/v2/${repo}/manifests/${digest}" >/dev/null
+                    curl -fsS --max-time 10 -X DELETE "${registry_base}/v2/${repo}/manifests/${digest}" >/dev/null
                   }
 
-                  active_job_count() {
-                    kubectl get jobs --all-namespaces -o jsonpath='{range .items[*]}{.status.active}{"\n"}{end}' 2>/dev/null \
-                      | awk '$1 + 0 > 0 {count++} END {print count + 0}'
+                  active_non_janitor_job_count() {
+                    kubectl get jobs --all-namespaces \
+                      -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.metadata.labels.app\.kubernetes\.io/component}{"\t"}{.status.active}{"\n"}{end}' 2>/dev/null \
+                      | awk -F '\t' '$4 + 0 > 0 && $3 != "registry-janitor" {count++} END {print count + 0}'
+                  }
+
+                  registry_ready() {
+                    kubectl -n "${namespace}" get "deploy/${registry_deploy}" >/dev/null 2>&1 || return 1
+                    kubectl -n "${namespace}" rollout status "deploy/${registry_deploy}" --timeout=30s >/dev/null 2>&1
                   }
 
                   declare -A keep_refs=()
@@ -186,8 +193,13 @@ spec:
                     log "no stale registry tags deleted; skipping GC"
                     exit 0
                   fi
-                  if [[ "${gc_skip_when_active_jobs}" == "true" ]] && [[ "$(active_job_count)" -gt 0 ]]; then
-                    log "active Kubernetes jobs detected; skipping registry GC this round"
+                  active_job_count="$(active_non_janitor_job_count)"
+                  if [[ "${gc_skip_when_active_jobs}" == "true" ]] && [[ "${active_job_count}" -gt 0 ]]; then
+                    log "active non-janitor Kubernetes jobs detected (${active_job_count}); skipping registry GC this round"
+                    exit 0
+                  fi
+                  if ! registry_ready; then
+                    log "registry deployment is unavailable; skipping registry GC this round"
                     exit 0
                   fi
 

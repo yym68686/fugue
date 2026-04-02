@@ -74,7 +74,14 @@ topologyLabeler:
   nodeSelector: {}
   tolerations:
     - operator: Exists
-  resources: {}
+  resources:
+    requests:
+      cpu: 5m
+      memory: 32Mi
+      ephemeral-storage: 16Mi
+    limits:
+      memory: 128Mi
+      ephemeral-storage: 128Mi
 
 nodeJanitor:
   enabled: true
@@ -82,7 +89,14 @@ nodeJanitor:
   nodeSelector: {}
   tolerations:
     - operator: Exists
-  resources: {}
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+      ephemeral-storage: 32Mi
+    limits:
+      memory: 256Mi
+      ephemeral-storage: 256Mi
   imagePrune:
     enabled: true
   runnerCleanup:
@@ -101,8 +115,16 @@ registryJanitor:
   activeDeadlineSeconds: 1800
   startingDeadlineSeconds: 600
   nodeSelector: {}
-  tolerations: []
-  resources: {}
+  tolerations:
+    - operator: Exists
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+      ephemeral-storage: 32Mi
+    limits:
+      memory: 256Mi
+      ephemeral-storage: 256Mi
   gc:
     enabled: true
     skipWhenActiveJobs: true

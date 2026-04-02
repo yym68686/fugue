@@ -23,6 +23,7 @@ command_exists() {
 }
 
 CONTROL_PLANE_AUTOMATION_TMP_DIR=""
+UPGRADE_OVERRIDE_VALUES_FILE=""
 LOCAL_CONTROL_PLANE_AUTOMATION_DIR="${FUGUE_LOCAL_CONTROL_PLANE_AUTOMATION_DIR:-${HOME}/.config/fugue/control-plane-automation}"
 LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR="${FUGUE_LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR:-/root/.config/fugue/control-plane-automation}"
 
@@ -145,6 +146,28 @@ cleanup_control_plane_automation_tmp() {
   fi
 }
 
+cleanup_upgrade_override_values() {
+  if [[ -n "${UPGRADE_OVERRIDE_VALUES_FILE}" && -f "${UPGRADE_OVERRIDE_VALUES_FILE}" ]]; then
+    rm -f "${UPGRADE_OVERRIDE_VALUES_FILE}"
+  fi
+}
+
+cleanup_tmp_artifacts() {
+  cleanup_control_plane_automation_tmp
+  cleanup_upgrade_override_values
+}
+
+write_upgrade_override_values() {
+  UPGRADE_OVERRIDE_VALUES_FILE="$(mktemp -t fugue-upgrade-values.XXXXXX.yaml)"
+  cat >"${UPGRADE_OVERRIDE_VALUES_FILE}" <<'EOF'
+tolerations:
+  - key: node.kubernetes.io/disk-pressure
+    operator: Exists
+    effect: NoSchedule
+EOF
+  printf '%s' "${UPGRADE_OVERRIDE_VALUES_FILE}"
+}
+
 use_local_control_plane_automation_bundle_from_dir() {
   local bundle_dir="$1"
 
@@ -237,6 +260,7 @@ main() {
   export KUBECONFIG="${KUBECONFIG:-${HOME}/.kube/config}"
   KUBECTL="$(detect_kubectl)"
   export KUBECTL
+  trap cleanup_tmp_artifacts EXIT
 
   FUGUE_RELEASE_NAME="${FUGUE_RELEASE_NAME:-fugue}"
   FUGUE_NAMESPACE="${FUGUE_NAMESPACE:-fugue-system}"
@@ -307,6 +331,9 @@ main() {
 
   apply_chart_crds
 
+  upgrade_override_values_file="$(write_upgrade_override_values)"
+  log "injecting disk-pressure toleration for primary-pinned hostPath control-plane pods"
+
   # Do not use Helm's release-wide --wait here. It waits on every resource in
   # the chart, including DaemonSets scheduled onto stale/NotReady nodes. That
   # can deadlock control-plane upgrades exactly when the new API needs to clean
@@ -317,6 +344,7 @@ main() {
     --reset-then-reuse-values \
     --history-max 20 \
     --timeout "${FUGUE_HELM_TIMEOUT}" \
+    -f "${upgrade_override_values_file}" \
     --set-string api.image.repository="${FUGUE_API_IMAGE_REPOSITORY}" \
     --set-string api.image.tag="${FUGUE_API_IMAGE_TAG}" \
     --set-string controller.image.repository="${FUGUE_CONTROLLER_IMAGE_REPOSITORY}" \
