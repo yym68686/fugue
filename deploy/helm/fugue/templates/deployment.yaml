@@ -1,4 +1,4 @@
-{{- $apiNodeSelector := default .Values.nodeSelector .Values.api.nodeSelector -}}
+{{- $apiNodeSelector := .Values.api.nodeSelector -}}
 {{- $apiTolerations := default .Values.tolerations .Values.api.tolerations -}}
 {{- $apiAffinity := default .Values.affinity .Values.api.affinity -}}
 apiVersion: apps/v1

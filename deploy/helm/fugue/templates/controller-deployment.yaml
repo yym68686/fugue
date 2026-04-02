@@ -1,4 +1,4 @@
-{{- $controllerNodeSelector := default .Values.nodeSelector .Values.controller.nodeSelector -}}
+{{- $controllerNodeSelector := .Values.controller.nodeSelector -}}
 {{- $controllerTolerations := default .Values.tolerations .Values.controller.tolerations -}}
 {{- $controllerAffinity := default .Values.affinity .Values.controller.affinity -}}
 apiVersion: apps/v1

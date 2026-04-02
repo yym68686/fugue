@@ -1,5 +1,5 @@
 {{- if .Values.snapshotController.enabled }}
-{{- $snapshotNodeSelector := default .Values.nodeSelector .Values.snapshotController.nodeSelector -}}
+{{- $snapshotNodeSelector := .Values.snapshotController.nodeSelector -}}
 {{- $snapshotTolerations := default .Values.tolerations .Values.snapshotController.tolerations -}}
 {{- $snapshotAffinity := default .Values.affinity .Values.snapshotController.affinity -}}
 {{- $snapshotName := printf "%s-snapshot-controller" (include "fugue.fullname" .) -}}
