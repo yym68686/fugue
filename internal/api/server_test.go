@@ -232,7 +232,7 @@ func TestJoinClusterInstallScriptAvoidsRedundantRestarts(t *testing.T) {
 		`write_file_if_changed`,
 		`remove_file_if_present`,
 		`cmp -s`,
-		`restart_k3s_agent_if_needed "${k3s_config_changed}"`,
+		`restart_k3s_agent_if_needed "${k3s_restart_needed}"`,
 		`run_systemd_action_and_wait start k3s-agent 900`,
 		`run_systemd_action_and_wait start tailscaled 60`,
 		`Waiting for ${unit} to become active`,
@@ -245,6 +245,14 @@ func TestJoinClusterInstallScriptAvoidsRedundantRestarts(t *testing.T) {
 		`000|409|429|5??)`,
 		`--max-time 5`,
 		`INSTALL_K3S_SKIP_START="true"`,
+		`ensure_k3s_agent_service_override() {`,
+		`/etc/systemd/system/k3s-agent.service.d/10-fugue-managed.conf`,
+		`Environment="K3S_URL="`,
+		`Environment="K3S_TOKEN="`,
+		`Environment="K3S_NODE_LABEL="`,
+		`ExecStart=${k3s_binary} agent`,
+		`Updated k3s-agent systemd override to ignore stale installer settings.`,
+		`k3s_restart_needed=1`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected join-cluster install script to contain %q", want)

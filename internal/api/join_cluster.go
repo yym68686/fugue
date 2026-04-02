@@ -658,6 +658,40 @@ remove_file_if_present() {
   return 1
 }
 
+ensure_k3s_agent_service_override() {
+  local k3s_binary=""
+  local override_tmp=""
+  k3s_binary="$(command -v k3s 2>/dev/null || true)"
+  [ -n "${k3s_binary}" ] || return 1
+  mkdir -p /etc/systemd/system/k3s-agent.service.d
+  override_tmp="$(mktemp)"
+  cat >"${override_tmp}" <<EOF_K3S_AGENT_OVERRIDE
+[Service]
+# Fugue manages these through /etc/rancher/k3s/config.yaml during cluster join.
+Environment="K3S_URL="
+Environment="K3S_TOKEN="
+Environment="K3S_TOKEN_FILE="
+Environment="K3S_CLUSTER_SECRET="
+Environment="K3S_AGENT_TOKEN="
+Environment="K3S_AGENT_TOKEN_FILE="
+Environment="K3S_NODE_NAME="
+Environment="K3S_NODE_LABEL="
+Environment="K3S_NODE_TAINT="
+Environment="K3S_FLANNEL_IFACE="
+Environment="K3S_NODE_EXTERNAL_IP="
+Environment="K3S_KUBELET_ARG="
+ExecStart=
+ExecStart=${k3s_binary} agent
+EOF_K3S_AGENT_OVERRIDE
+  if write_file_if_changed "${override_tmp}" /etc/systemd/system/k3s-agent.service.d/10-fugue-managed.conf; then
+    log_step "Updated k3s-agent systemd override to ignore stale installer settings."
+    systemctl daemon-reload
+    return 0
+  fi
+  log_step "k3s-agent systemd override is unchanged."
+  return 1
+}
+
 trim_whitespace() {
   local value="$1"
   value="${value#"${value%%[![:space:]]*}"}"
@@ -1295,13 +1329,24 @@ elif remove_file_if_present /etc/rancher/k3s/registries.yaml; then
   k3s_config_changed=1
 fi
 
+k3s_installed_now=0
 if ! command -v k3s >/dev/null 2>&1; then
   run_with_heartbeat "Downloading and installing k3s agent binaries" "2-10 min on a fresh node" install_k3s_agent_binaries
   log_step "k3s agent install completed; starting service."
-  restart_k3s_agent_if_needed 1
-else
-  restart_k3s_agent_if_needed "${k3s_config_changed}"
+  k3s_installed_now=1
 fi
+
+k3s_service_override_changed=0
+if ensure_k3s_agent_service_override; then
+  k3s_service_override_changed=1
+fi
+
+k3s_restart_needed="${k3s_config_changed}"
+if [ "${k3s_installed_now}" -eq 1 ] || [ "${k3s_service_override_changed}" -eq 1 ]; then
+  k3s_restart_needed=1
+fi
+
+restart_k3s_agent_if_needed "${k3s_restart_needed}"
 
 systemctl is-active --quiet k3s-agent
 cleanup_stale_cluster_nodes
