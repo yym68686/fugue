@@ -317,14 +317,17 @@ run_primary_host_root_command() {
   local_hostname="$(hostname 2>/dev/null || true)"
   local_hostname_short="$(hostname -s 2>/dev/null || true)"
   if [[ "${local_hostname}" == "${primary_node_name}" || "${local_hostname_short}" == "${primary_node_name}" ]]; then
-    sudo bash -lc "${cmd}"
-    return
+    if sudo -n true >/dev/null 2>&1; then
+      sudo -n bash -lc "${cmd}"
+      return
+    fi
+    log "local primary host ${primary_node_name} requires interactive sudo; falling back to automation SSH"
   fi
 
   prepare_control_plane_automation_ssh
   build_primary_control_plane_ssh_opts
   ssh -n "${PRIMARY_CONTROL_PLANE_SSH_OPTS[@]}" "$(primary_control_plane_ssh_login)" \
-    "sudo bash -lc $(printf '%q' "${cmd}")"
+    "sudo -n bash -lc $(printf '%q' "${cmd}")"
 }
 
 wait_for_primary_node_ready() {
