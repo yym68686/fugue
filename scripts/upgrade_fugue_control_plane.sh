@@ -32,6 +32,8 @@ PRIMARY_DISK_PRESSURE_CLEAR_POLL_SECONDS="${FUGUE_PRIMARY_DISK_PRESSURE_CLEAR_PO
 # Kubelet delays clearing DiskPressure for evictionPressureTransitionPeriod
 # (5m by default on our k3s nodes), so keep a wider recovery window here.
 PRIMARY_DISK_PRESSURE_CLEAR_TIMEOUT_SECONDS="${FUGUE_PRIMARY_DISK_PRESSURE_CLEAR_TIMEOUT_SECONDS:-600}"
+PRIMARY_NODE_READY_POLL_SECONDS="${FUGUE_PRIMARY_NODE_READY_POLL_SECONDS:-5}"
+PRIMARY_NODE_READY_TIMEOUT_SECONDS="${FUGUE_PRIMARY_NODE_READY_TIMEOUT_SECONDS:-300}"
 PRIMARY_POSTGRES_DATA_ROOT="${FUGUE_PRIMARY_POSTGRES_DATA_ROOT:-/var/lib/fugue/postgres}"
 PRIMARY_POSTGRES_IMAGE="${FUGUE_PRIMARY_POSTGRES_IMAGE:-docker.io/library/postgres:16-alpine}"
 
@@ -283,10 +285,26 @@ detect_primary_node_name() {
   ${KUBECTL} get nodes -l fugue.install/role=primary -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
 }
 
+primary_node_is_ready() {
+  local node_name="$1"
+  local status=""
+
+  if command_exists timeout; then
+    status="$(timeout 15s ${KUBECTL} get node "${node_name}" -o jsonpath='{range .status.conditions[?(@.type=="Ready")]}{.status}{end}' 2>/dev/null || true)"
+  else
+    status="$(${KUBECTL} get node "${node_name}" -o jsonpath='{range .status.conditions[?(@.type=="Ready")]}{.status}{end}' 2>/dev/null || true)"
+  fi
+  [[ "${status}" == "True" ]]
+}
+
 primary_node_has_disk_pressure() {
   local node_name="$1"
   local status=""
-  status="$(${KUBECTL} get node "${node_name}" -o jsonpath='{range .status.conditions[?(@.type=="DiskPressure")]}{.status}{end}' 2>/dev/null || true)"
+  if command_exists timeout; then
+    status="$(timeout 15s ${KUBECTL} get node "${node_name}" -o jsonpath='{range .status.conditions[?(@.type=="DiskPressure")]}{.status}{end}' 2>/dev/null || true)"
+  else
+    status="$(${KUBECTL} get node "${node_name}" -o jsonpath='{range .status.conditions[?(@.type=="DiskPressure")]}{.status}{end}' 2>/dev/null || true)"
+  fi
   [[ "${status}" == "True" ]]
 }
 
@@ -307,6 +325,30 @@ run_primary_host_root_command() {
   build_primary_control_plane_ssh_opts
   ssh -n "${PRIMARY_CONTROL_PLANE_SSH_OPTS[@]}" "$(primary_control_plane_ssh_login)" \
     "sudo bash -lc $(printf '%q' "${cmd}")"
+}
+
+wait_for_primary_node_ready() {
+  local primary_node_name="$1"
+  local attempt
+  local max_attempts
+
+  if ! [[ "${PRIMARY_NODE_READY_POLL_SECONDS}" =~ ^[0-9]+$ ]] || (( PRIMARY_NODE_READY_POLL_SECONDS <= 0 )); then
+    fail "FUGUE_PRIMARY_NODE_READY_POLL_SECONDS must be a positive integer"
+  fi
+  if ! [[ "${PRIMARY_NODE_READY_TIMEOUT_SECONDS}" =~ ^[0-9]+$ ]] || (( PRIMARY_NODE_READY_TIMEOUT_SECONDS <= 0 )); then
+    fail "FUGUE_PRIMARY_NODE_READY_TIMEOUT_SECONDS must be a positive integer"
+  fi
+
+  max_attempts=$(( (PRIMARY_NODE_READY_TIMEOUT_SECONDS + PRIMARY_NODE_READY_POLL_SECONDS - 1) / PRIMARY_NODE_READY_POLL_SECONDS ))
+  log "waiting up to ${PRIMARY_NODE_READY_TIMEOUT_SECONDS}s for primary node ${primary_node_name} to report Ready"
+
+  for attempt in $(seq 1 "${max_attempts}"); do
+    if primary_node_is_ready "${primary_node_name}"; then
+      return 0
+    fi
+    sleep "${PRIMARY_NODE_READY_POLL_SECONDS}"
+  done
+  return 1
 }
 
 wait_for_primary_disk_pressure_clear() {
@@ -331,6 +373,104 @@ wait_for_primary_disk_pressure_clear() {
     sleep "${PRIMARY_DISK_PRESSURE_CLEAR_POLL_SECONDS}"
   done
   return 1
+}
+
+release_pod_selector() {
+  printf 'app.kubernetes.io/instance=%s,app.kubernetes.io/name=fugue' "${FUGUE_RELEASE_NAME}"
+}
+
+release_pod_count_by_phase() {
+  local phase="$1"
+  local output=""
+
+  if command_exists timeout; then
+    output="$(timeout 30s ${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
+      -l "$(release_pod_selector)" \
+      --field-selector "status.phase=${phase}" \
+      --no-headers 2>/dev/null || true)"
+  else
+    output="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
+      -l "$(release_pod_selector)" \
+      --field-selector "status.phase=${phase}" \
+      --no-headers 2>/dev/null || true)"
+  fi
+
+  printf '%s\n' "${output}" | awk 'NF > 0 {count++} END {print count + 0}'
+}
+
+prune_release_pods_by_phase() {
+  local phase="$1"
+  local count=""
+
+  count="$(release_pod_count_by_phase "${phase}")"
+  [[ "${count}" != "0" ]] || return 0
+
+  log "deleting ${count} ${phase} Fugue release pods from ${FUGUE_NAMESPACE}"
+  if command_exists timeout; then
+    if timeout 60s ${KUBECTL} -n "${FUGUE_NAMESPACE}" delete pod \
+      -l "$(release_pod_selector)" \
+      --field-selector "status.phase=${phase}" \
+      --ignore-not-found \
+      --wait=false >/dev/null 2>&1; then
+      return 0
+    fi
+    log "warning: failed to delete ${phase} Fugue release pods from ${FUGUE_NAMESPACE}"
+    return 0
+  fi
+
+  if ! ${KUBECTL} -n "${FUGUE_NAMESPACE}" delete pod \
+    -l "$(release_pod_selector)" \
+    --field-selector "status.phase=${phase}" \
+    --ignore-not-found \
+    --wait=false >/dev/null 2>&1; then
+    log "warning: failed to delete ${phase} Fugue release pods from ${FUGUE_NAMESPACE}"
+  fi
+}
+
+prune_terminated_release_pods() {
+  prune_release_pods_by_phase Failed
+  prune_release_pods_by_phase Succeeded
+  prune_release_pods_by_phase Unknown
+}
+
+recover_primary_node_if_needed() {
+  local primary_node_name=""
+  local restart_cmd=""
+
+  primary_node_name="$(detect_primary_node_name)"
+  if [[ -z "${primary_node_name}" ]]; then
+    log "skip primary node recovery because the primary node could not be identified"
+    return 0
+  fi
+
+  prune_terminated_release_pods
+
+  if primary_node_is_ready "${primary_node_name}"; then
+    return 0
+  fi
+
+  log "primary node ${primary_node_name} is NotReady; restarting k3s on the primary host"
+  restart_cmd="$(cat <<'EOF'
+set -euo pipefail
+
+if command -v k3s >/dev/null 2>&1; then
+  k3s crictl rmi --prune >/tmp/fugue-primary-node-image-prune.log 2>&1 || true
+fi
+
+systemctl restart k3s
+systemctl is-active --quiet k3s
+EOF
+)"
+
+  if ! run_primary_host_root_command "${primary_node_name}" "${restart_cmd}"; then
+    fail "primary node recovery failed while restarting k3s on ${primary_node_name}"
+  fi
+
+  if ! wait_for_primary_node_ready "${primary_node_name}"; then
+    fail "primary node ${primary_node_name} remained NotReady after restarting k3s"
+  fi
+
+  prune_terminated_release_pods
 }
 
 control_plane_postgres_selector() {
@@ -747,6 +887,7 @@ main() {
   log "app base domain: ${FUGUE_APP_BASE_DOMAIN}"
   log "custom domain base domain: dns.${FUGUE_APP_BASE_DOMAIN}"
 
+  recover_primary_node_if_needed
   relieve_primary_disk_pressure
   recover_primary_postgres_if_needed
 
