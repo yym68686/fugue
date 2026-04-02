@@ -6,6 +6,10 @@ log() {
   printf '[fugue-upgrade] %s\n' "$*"
 }
 
+log_stderr() {
+  printf '[fugue-upgrade] %s\n' "$*" >&2
+}
+
 fail() {
   printf '[fugue-upgrade] ERROR: %s\n' "$*" >&2
   exit 1
@@ -221,7 +225,7 @@ use_local_control_plane_automation_bundle_from_dir() {
   export FUGUE_CONTROL_PLANE_SSH_KEY_FILE="${bundle_dir}/id_ed25519"
   export FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE="${bundle_dir}/known_hosts"
   export FUGUE_USE_CONTROL_PLANE_AUTOMATION_SSH=true
-  log "using local control-plane automation bundle from ${bundle_dir}"
+  log_stderr "using local control-plane automation bundle from ${bundle_dir}"
   return 0
 }
 
@@ -321,7 +325,7 @@ run_primary_host_root_command() {
       sudo -n bash -lc "${cmd}"
       return
     fi
-    log "local primary host ${primary_node_name} requires interactive sudo; falling back to automation SSH"
+    log_stderr "local primary host ${primary_node_name} requires interactive sudo; falling back to automation SSH"
   fi
 
   prepare_control_plane_automation_ssh
