@@ -32,6 +32,8 @@ PRIMARY_DISK_PRESSURE_CLEAR_POLL_SECONDS="${FUGUE_PRIMARY_DISK_PRESSURE_CLEAR_PO
 # Kubelet delays clearing DiskPressure for evictionPressureTransitionPeriod
 # (5m by default on our k3s nodes), so keep a wider recovery window here.
 PRIMARY_DISK_PRESSURE_CLEAR_TIMEOUT_SECONDS="${FUGUE_PRIMARY_DISK_PRESSURE_CLEAR_TIMEOUT_SECONDS:-600}"
+PRIMARY_POSTGRES_DATA_ROOT="${FUGUE_PRIMARY_POSTGRES_DATA_ROOT:-/var/lib/fugue/postgres}"
+PRIMARY_POSTGRES_IMAGE="${FUGUE_PRIMARY_POSTGRES_IMAGE:-docker.io/library/postgres:16-alpine}"
 
 detect_primary_private_ip() {
   ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}'
@@ -331,6 +333,146 @@ wait_for_primary_disk_pressure_clear() {
   return 1
 }
 
+control_plane_postgres_selector() {
+  printf 'app.kubernetes.io/component=postgres,app.kubernetes.io/instance=%s,app.kubernetes.io/name=fugue' "${FUGUE_RELEASE_NAME}"
+}
+
+control_plane_postgres_pod_names() {
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
+    -l "$(control_plane_postgres_selector)" \
+    --sort-by=.metadata.creationTimestamp \
+    -o name 2>/dev/null | sed 's#^pod/##' | awk '{lines[NR]=$0} END {for (i=NR; i>=1; i--) print lines[i]}'
+}
+
+control_plane_postgres_logs() {
+  local pod_name="$1"
+  local logs=""
+
+  [[ -n "${pod_name}" ]] || return 0
+  logs="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" logs "pod/${pod_name}" --previous --tail=200 2>/dev/null || true)"
+  if [[ -z "${logs}" ]]; then
+    logs="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" logs "pod/${pod_name}" --tail=200 2>/dev/null || true)"
+  fi
+  printf '%s' "${logs}"
+}
+
+control_plane_postgres_has_invalid_checkpoint() {
+  local pod_name="$1"
+  local logs=""
+
+  logs="$(control_plane_postgres_logs "${pod_name}")"
+  [[ "${logs}" == *"invalid resource manager ID in checkpoint record"* ]] || \
+    [[ "${logs}" == *"could not locate a valid checkpoint record"* ]]
+}
+
+invalid_checkpoint_control_plane_postgres_pod_name() {
+  local pod_name=""
+
+  while IFS= read -r pod_name; do
+    [[ -n "${pod_name}" ]] || continue
+    if control_plane_postgres_has_invalid_checkpoint "${pod_name}"; then
+      printf '%s' "${pod_name}"
+      return 0
+    fi
+  done < <(control_plane_postgres_pod_names)
+
+  return 1
+}
+
+wait_for_control_plane_postgres_pods_gone() {
+  local attempt
+  local names=""
+
+  for attempt in $(seq 1 24); do
+    names="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
+      -l "$(control_plane_postgres_selector)" \
+      -o go-template='{{range .items}}{{if and (ne .status.phase "Failed") (ne .status.phase "Succeeded")}}{{.metadata.name}} {{end}}{{end}}' 2>/dev/null || true)"
+    if [[ -z "${names}" ]]; then
+      return 0
+    fi
+    sleep 5
+  done
+  return 1
+}
+
+recover_primary_postgres_if_needed() {
+  local primary_node_name=""
+  local postgres_pod_name=""
+  local original_replicas=""
+  local repair_cmd=""
+
+  primary_node_name="$(detect_primary_node_name)"
+  if [[ -z "${primary_node_name}" ]]; then
+    log "skip primary postgres recovery because the primary node could not be identified"
+    return 0
+  fi
+
+  if ! postgres_pod_name="$(invalid_checkpoint_control_plane_postgres_pod_name)"; then
+    return 0
+  fi
+
+  log "detected invalid checkpoint in control-plane postgres pod ${postgres_pod_name}; resetting WAL on the primary host"
+  original_replicas="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get deploy "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+  [[ -n "${original_replicas}" ]] || original_replicas="1"
+
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" scale deploy "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" --replicas=0 >/dev/null
+  if ! wait_for_control_plane_postgres_pods_gone; then
+    ${KUBECTL} -n "${FUGUE_NAMESPACE}" scale deploy "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" --replicas="${original_replicas}" >/dev/null || true
+    fail "control-plane postgres pods did not terminate before WAL recovery"
+  fi
+
+  repair_cmd="$(cat <<EOF
+set -euo pipefail
+
+log() {
+  printf '[fugue-upgrade][primary-postgres-repair] %s\n' "$*"
+}
+
+postgres_root=$(printf '%q' "${PRIMARY_POSTGRES_DATA_ROOT}")
+pgdata="${postgres_root}/pgdata"
+backup_dir="${postgres_root}/pgdata.pre-resetwal-$(date -u +%Y%m%dT%H%M%SZ)"
+postgres_image=$(printf '%q' "${PRIMARY_POSTGRES_IMAGE}")
+repair_id="fugue-postgres-repair-$(date +%s)"
+
+cleanup() {
+  k3s ctr tasks kill "${repair_id}" >/dev/null 2>&1 || true
+  k3s ctr containers rm "${repair_id}" >/dev/null 2>&1 || true
+}
+
+trap cleanup EXIT
+
+if [[ ! -d "${pgdata}" ]]; then
+  log "postgres data directory ${pgdata} does not exist; skipping WAL recovery"
+  exit 0
+fi
+
+cp -a "${pgdata}" "${backup_dir}"
+log "backed up ${pgdata} to ${backup_dir}"
+
+rm -f "${pgdata}/postmaster.pid"
+
+if ! k3s ctr images ls | awk 'NR > 1 {print $1}' | grep -Fxq "${postgres_image}"; then
+  log "pulling ${postgres_image}"
+  k3s ctr images pull "${postgres_image}"
+fi
+
+log "running pg_resetwal against ${pgdata}"
+timeout 300s k3s ctr run --rm \
+  --mount type=bind,src="${postgres_root}",dst=/var/lib/postgresql/data,options=rbind:rw \
+  "${postgres_image}" "${repair_id}" \
+  sh -lc 'set -euo pipefail; chown -R 70:70 /var/lib/postgresql/data; su-exec postgres pg_resetwal -f /var/lib/postgresql/data/pgdata'
+
+log "pg_resetwal completed"
+EOF
+)"
+  if ! run_primary_host_root_command "${primary_node_name}" "${repair_cmd}"; then
+    ${KUBECTL} -n "${FUGUE_NAMESPACE}" scale deploy "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" --replicas="${original_replicas}" >/dev/null || true
+    fail "control-plane postgres WAL recovery failed"
+  fi
+
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" scale deploy "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" --replicas="${original_replicas}" >/dev/null
+}
+
 relieve_primary_disk_pressure() {
   local primary_node_name=""
   local cleanup_cmd=""
@@ -480,6 +622,7 @@ main() {
   FUGUE_API_DEPLOYMENT_NAME="${FUGUE_API_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}-api}"
   FUGUE_LEGACY_API_DEPLOYMENT_NAME="${FUGUE_LEGACY_API_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}}"
   FUGUE_CONTROLLER_DEPLOYMENT_NAME="${FUGUE_CONTROLLER_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}-controller}"
+  FUGUE_POSTGRES_DEPLOYMENT_NAME="${FUGUE_POSTGRES_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}-postgres}"
   FUGUE_HELM_TIMEOUT="${FUGUE_HELM_TIMEOUT:-10m0s}"
   FUGUE_ROLLOUT_TIMEOUT="${FUGUE_ROLLOUT_TIMEOUT:-300s}"
   FUGUE_SMOKE_RETRIES="${FUGUE_SMOKE_RETRIES:-12}"
@@ -541,6 +684,7 @@ main() {
   log "custom domain base domain: dns.${FUGUE_APP_BASE_DOMAIN}"
 
   relieve_primary_disk_pressure
+  recover_primary_postgres_if_needed
 
   apply_chart_crds
 
