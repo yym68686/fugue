@@ -129,14 +129,19 @@ make run-api
 make run-controller
 ```
 
-## Deployment
+## Deploy control plane
 
-See [docs/deploy.md](docs/deploy.md).
-For the production HA / DR path, see [docs/ha-dr.md](docs/ha-dr.md) and [deploy/helm/fugue/values-production-ha.yaml](deploy/helm/fugue/values-production-ha.yaml).
-The CLI now includes `fugue app continuity audit` so you can audit which apps are already eligible for stateless failover and which ones are still blocked by managed state.
-Managed stateful failover itself is exposed separately through the controller/API failover workflow described in [docs/ha-dr.md](docs/ha-dr.md).
+Use the GitHub Actions workflow to deploy or upgrade the remote Fugue control plane:
 
-## One-command install for 3 VPS
+<a href="https://github.com/yym68686/fugue/actions/workflows/deploy-control-plane.yml">
+  <img src="https://raw.githubusercontent.com/yym68686/fugue/main/docs/assets/deploy-control-plane.svg" alt="Deploy control plane" width="460">
+</a>
+
+For normal control-plane releases, push to `main` or open the workflow page above and click `Run workflow`.
+
+[![deploy-control-plane](https://github.com/yym68686/fugue/actions/workflows/deploy-control-plane.yml/badge.svg)](https://github.com/yym68686/fugue/actions/workflows/deploy-control-plane.yml)
+
+## Bootstrap 3 VPS
 
 If you already have SSH aliases `gcp1`, `gcp2`, and `gcp3`, and each remote user is either `root` or has passwordless `sudo`, you can install the current all-in-one MVP with:
 

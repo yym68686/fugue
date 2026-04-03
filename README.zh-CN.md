@@ -135,7 +135,19 @@ make run-controller
 生产可用的 HA / DR 路径见 [docs/ha-dr.md](docs/ha-dr.md) 和 [deploy/helm/fugue/values-production-ha.yaml](deploy/helm/fugue/values-production-ha.yaml)。CLI 里也新增了 `fugue app continuity audit`，可以直接审计哪些 app 已经具备无状态故障转移条件，哪些还被托管数据库或持久工作区阻塞。
 真正的托管有状态 failover 由独立的 controller/API failover workflow 提供，见 [docs/ha-dr.md](docs/ha-dr.md)。
 
-## 三台 VPS 一键安装
+## 一键部署控制面
+
+通过 GitHub Actions workflow 来部署或升级远端 Fugue control plane：
+
+<a href="https://github.com/yym68686/fugue/actions/workflows/deploy-control-plane.yml">
+  <img src="https://raw.githubusercontent.com/yym68686/fugue/main/docs/assets/deploy-control-plane.svg" alt="Deploy control plane" width="460">
+</a>
+
+正常的 control-plane 发布路径是推送到 `main`，或者直接打开上面的 workflow 页面点击 `Run workflow`。
+
+[![deploy-control-plane](https://github.com/yym68686/fugue/actions/workflows/deploy-control-plane.yml/badge.svg)](https://github.com/yym68686/fugue/actions/workflows/deploy-control-plane.yml)
+
+## 三台 VPS 初始化安装
 
 如果你已经有 `gcp1`、`gcp2`、`gcp3` 三个 SSH 别名，并且远端用户要么是 `root`，要么拥有免密 `sudo`，可以直接这样安装当前 all-in-one MVP：
 
