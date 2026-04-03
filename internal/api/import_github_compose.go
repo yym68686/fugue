@@ -339,7 +339,7 @@ func composePostgresSpec(service sourceimport.ComposeService, ownerAppName strin
 		spec.Database = ownerAppName
 	}
 	if spec.User == "" {
-		spec.User = model.DefaultManagedPostgresUser(ownerAppName, spec.StoragePath)
+		spec.User = model.DefaultManagedPostgresUser(ownerAppName)
 	}
 	if err := model.ValidateManagedPostgresUser(ownerAppName, spec); err != nil {
 		return model.AppPostgresSpec{}, fmt.Errorf("invalid postgres config for compose service %q: %w", service.Name, err)

@@ -2004,7 +2004,7 @@ func (s *Store) pgCreateApp(tenantID, projectID, name, description string, spec 
 	var ownedService *model.BackingService
 	var binding *model.ServiceBinding
 	if app.Spec.Postgres != nil {
-		service, appBinding := ownedLegacyPostgresResources(app)
+		service, appBinding := ownedManagedPostgresResources(app)
 		service.Name = s.pgNextAvailableBackingServiceNameTx(ctx, tx, tenantID, projectID, service.Name)
 		ownedService = &service
 		binding = &appBinding

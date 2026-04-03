@@ -183,7 +183,6 @@ func TestComposePostgresSpecKeepsExplicitServiceName(t *testing.T) {
 		Image: "postgres:17.6-alpine",
 		Postgres: &model.AppPostgresSpec{
 			ServiceName: "custom-db",
-			StoragePath: "/data/custom-db",
 			Database:    "demo",
 			User:        "demo",
 			Password:    "secret",
@@ -194,9 +193,6 @@ func TestComposePostgresSpecKeepsExplicitServiceName(t *testing.T) {
 	}
 	if spec.ServiceName != "custom-db" {
 		t.Fatalf("expected explicit service name to be preserved, got %q", spec.ServiceName)
-	}
-	if spec.StoragePath != "/data/custom-db" {
-		t.Fatalf("expected explicit storage path to be preserved, got %q", spec.StoragePath)
 	}
 }
 

@@ -9,10 +9,9 @@ func TestDefaultManagedPostgresUser(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		appName     string
-		storagePath string
-		want        string
+		name    string
+		appName string
+		want    string
 	}{
 		{
 			name:    "cnpg uses app scoped user",
@@ -24,12 +23,6 @@ func TestDefaultManagedPostgresUser(t *testing.T) {
 			appName: "123-demo",
 			want:    "app_123_demo",
 		},
-		{
-			name:        "legacy storage path keeps postgres",
-			appName:     "fugue-web",
-			storagePath: "/var/lib/postgres",
-			want:        "postgres",
-		},
 	}
 
 	for _, tc := range tests {
@@ -37,7 +30,7 @@ func TestDefaultManagedPostgresUser(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := DefaultManagedPostgresUser(tc.appName, tc.storagePath); got != tc.want {
+			if got := DefaultManagedPostgresUser(tc.appName); got != tc.want {
 				t.Fatalf("expected %q, got %q", tc.want, got)
 			}
 		})
@@ -55,12 +48,5 @@ func TestValidateManagedPostgresUser(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), `managed CNPG postgres user "postgres" is reserved`) {
 		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if err := ValidateManagedPostgresUser("fugue-web", AppPostgresSpec{
-		User:        "postgres",
-		StoragePath: "/var/lib/postgres",
-	}); err != nil {
-		t.Fatalf("expected legacy storage path to allow postgres, got %v", err)
 	}
 }

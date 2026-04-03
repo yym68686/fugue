@@ -5,13 +5,9 @@ import (
 	"strings"
 )
 
-const legacyManagedPostgresUser = "postgres"
+const managedPostgresReservedUser = "postgres"
 
-func DefaultManagedPostgresUser(appName string, storagePath string) string {
-	if strings.TrimSpace(storagePath) != "" {
-		return legacyManagedPostgresUser
-	}
-
+func DefaultManagedPostgresUser(appName string) string {
 	slug := strings.ReplaceAll(Slugify(appName), "-", "_")
 	slug = strings.Trim(slug, "_")
 	if slug == "" {
@@ -30,16 +26,13 @@ func DefaultManagedPostgresUser(appName string, storagePath string) string {
 }
 
 func ValidateManagedPostgresUser(appName string, spec AppPostgresSpec) error {
-	if strings.TrimSpace(spec.StoragePath) != "" {
-		return nil
-	}
-	if !strings.EqualFold(strings.TrimSpace(spec.User), legacyManagedPostgresUser) {
+	if !strings.EqualFold(strings.TrimSpace(spec.User), managedPostgresReservedUser) {
 		return nil
 	}
 
 	return fmt.Errorf(
 		"managed CNPG postgres user %q is reserved; use an app-scoped user such as %q",
-		legacyManagedPostgresUser,
-		DefaultManagedPostgresUser(appName, spec.StoragePath),
+		managedPostgresReservedUser,
+		DefaultManagedPostgresUser(appName),
 	)
 }

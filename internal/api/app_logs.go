@@ -682,7 +682,7 @@ func runtimeLogTarget(app model.App, component string) (string, string, error) {
 			}
 			serviceName += "-postgres"
 		}
-		return "app.kubernetes.io/name=" + serviceName + ",app.kubernetes.io/component=postgres,app.kubernetes.io/managed-by=fugue", "postgres", nil
+		return "cnpg.io/cluster=" + serviceName + ",app.kubernetes.io/managed-by=cloudnative-pg", "postgres", nil
 	default:
 		return "", "", fmt.Errorf("unsupported component %q", component)
 	}

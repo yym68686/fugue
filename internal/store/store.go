@@ -52,13 +52,10 @@ func (s *Store) Init() error {
 		if err := s.pgRepairAppStatuses(); err != nil {
 			return err
 		}
-		return s.pgMigrateLegacyAppBackingServices()
+		return nil
 	}
 	return s.withFileLockedState(true, func(state *model.State) error {
 		ensureDefaults(state)
-		if err := migrateLegacyAppBackingServicesState(state); err != nil {
-			return err
-		}
 		repairAllAPIKeyStatuses(state)
 		repairAllAppStatuses(state)
 		return nil
@@ -1957,7 +1954,7 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 			UpdatedAt: now,
 		}
 		if app.Spec.Postgres != nil {
-			service, binding := ownedLegacyPostgresResources(app)
+			service, binding := ownedManagedPostgresResources(app)
 			service.Name = nextAvailableBackingServiceName(state, tenantID, projectID, service.Name)
 			state.BackingServices = append(state.BackingServices, service)
 			state.ServiceBindings = append(state.ServiceBindings, binding)

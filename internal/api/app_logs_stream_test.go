@@ -146,6 +146,43 @@ func TestRuntimeLogsStreamResumesFromLastEventID(t *testing.T) {
 	}
 }
 
+func TestRuntimeLogTargetUsesCNPGSelectorForManagedPostgres(t *testing.T) {
+	t.Parallel()
+
+	s, _, _, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Postgres: &model.AppPostgresSpec{
+			Database: "demo",
+			User:     "demo",
+			Password: "secret",
+		},
+	})
+	app, err := s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if len(app.BackingServices) != 1 || app.BackingServices[0].Spec.Postgres == nil {
+		t.Fatalf("expected one managed postgres backing service, got %#v", app.BackingServices)
+	}
+
+	serviceName := strings.TrimSpace(app.BackingServices[0].Spec.Postgres.ServiceName)
+	selector, containerName, err := runtimeLogTarget(app, "postgres")
+	if err != nil {
+		t.Fatalf("runtime log target: %v", err)
+	}
+
+	wantSelector := "cnpg.io/cluster=" + serviceName + ",app.kubernetes.io/managed-by=cloudnative-pg"
+	if selector != wantSelector {
+		t.Fatalf("expected selector %q, got %q", wantSelector, selector)
+	}
+	if containerName != "postgres" {
+		t.Fatalf("expected container name postgres, got %q", containerName)
+	}
+}
+
 func TestBuildLogsStreamEmitsStatusAndTerminalEnd(t *testing.T) {
 	t.Parallel()
 

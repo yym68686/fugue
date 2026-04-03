@@ -316,92 +316,8 @@ ORDER BY b.created_at ASC, s.created_at ASC
 	sortBackingServices(services)
 	sortServiceBindings(bindings)
 
-	if app.Spec.Postgres != nil && !hasBackingServiceType(services, model.BackingServiceTypePostgres) {
-		service, binding := legacyInlinePostgresResources(*app)
-		services = append(services, service)
-		bindings = append(bindings, binding)
-		sortBackingServices(services)
-		sortServiceBindings(bindings)
-	}
-
 	app.Bindings = bindings
 	app.BackingServices = services
-	return nil
-}
-
-func (s *Store) pgMigrateLegacyAppBackingServices() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin migrate legacy backing services transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	rows, err := tx.QueryContext(ctx, `
-SELECT id, tenant_id, project_id, name, description, source_json, route_json, spec_json, status_json, created_at, updated_at
-FROM fugue_apps
-FOR UPDATE
-`)
-	if err != nil {
-		return fmt.Errorf("list apps for legacy backing service migration: %w", err)
-	}
-	apps := make([]model.App, 0)
-	for rows.Next() {
-		app, err := scanApp(rows)
-		if err != nil {
-			rows.Close()
-			return err
-		}
-		apps = append(apps, app)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return fmt.Errorf("iterate apps for legacy backing service migration: %w", err)
-	}
-	rows.Close()
-
-	for _, app := range apps {
-		if app.Spec.Postgres == nil || isDeletedApp(app) {
-			continue
-		}
-		if owned, err := s.pgHasOwnedPostgresServiceTx(ctx, tx, app.ID); err != nil {
-			return err
-		} else if owned {
-			app.Spec.Postgres = nil
-			if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
-				return err
-			}
-			continue
-		}
-		if bound, err := s.pgAppHasBindingToServiceTypeTx(ctx, tx, app.ID, model.BackingServiceTypePostgres); err != nil {
-			return err
-		} else if bound {
-			app.Spec.Postgres = nil
-			if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
-				return err
-			}
-			continue
-		}
-
-		service, binding := ownedLegacyPostgresResources(app)
-		service.Name = s.pgNextAvailableBackingServiceNameTx(ctx, tx, app.TenantID, app.ProjectID, service.Name)
-		if err := s.pgInsertBackingServiceTx(ctx, tx, service); err != nil {
-			return err
-		}
-		if err := s.pgInsertServiceBindingTx(ctx, tx, binding); err != nil {
-			return err
-		}
-		app.Spec.Postgres = nil
-		if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
-			return err
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit migrate legacy backing services transaction: %w", err)
-	}
 	return nil
 }
 
@@ -417,7 +333,7 @@ func (s *Store) pgApplyDesiredSpecBackingServicesTx(ctx context.Context, tx *sql
 		return err
 	} else if found {
 		now := time.Now().UTC()
-		normalized := normalizeManagedPostgresSpec(app.TenantID, appNameForService(&service, app), *desiredSpec.Postgres)
+		normalized := normalizeManagedPostgresSpec(appNameForService(&service, app), *desiredSpec.Postgres)
 		service.Type = model.BackingServiceTypePostgres
 		service.Provisioner = model.BackingServiceProvisionerManaged
 		service.Status = model.BackingServiceStatusActive
@@ -444,7 +360,7 @@ func (s *Store) pgApplyDesiredSpecBackingServicesTx(ctx context.Context, tx *sql
 	if cloned := cloneAppSpec(desiredSpec); cloned != nil {
 		appCopy.Spec = *cloned
 	}
-	service, binding := ownedLegacyPostgresResources(appCopy)
+	service, binding := ownedManagedPostgresResources(appCopy)
 	service.Name = s.pgNextAvailableBackingServiceNameTx(ctx, tx, app.TenantID, app.ProjectID, service.Name)
 	if err := s.pgInsertBackingServiceTx(ctx, tx, service); err != nil {
 		return err

@@ -26,30 +26,32 @@ import (
 )
 
 const (
-	clusterNodePodLabelSelector  = "app.kubernetes.io/managed-by=fugue,app.kubernetes.io/name"
-	clusterNodeStatsConcurrency  = 4
-	clusterNodeConditionReady    = "Ready"
-	clusterNodeConditionMemory   = "MemoryPressure"
-	clusterNodeConditionDisk     = "DiskPressure"
-	clusterNodeConditionPID      = "PIDPressure"
-	clusterNodeLabelRegion       = "topology.kubernetes.io/region"
-	clusterNodeLabelLegacyRegion = "failure-domain.beta.kubernetes.io/region"
-	clusterNodeLabelZone         = "topology.kubernetes.io/zone"
-	clusterNodeLabelLegacyZone   = "failure-domain.beta.kubernetes.io/zone"
-	clusterNodeLabelCountryCode  = "fugue.io/location-country-code"
-	clusterNodeLabelPublicIP     = "fugue.io/public-ip"
-	clusterNodeAnnotationCountry = "fugue.io/location-country"
-	clusterNodeAnnotationK3sHost = "k3s.io/hostname"
-	tenantSharedClusterNodeName  = "internal-cluster"
-	tenantSharedClusterRegion    = "Multiple countries"
-	tenantSharedRuntimeID        = "runtime_managed_shared"
-	clusterJoinTokenNamespace    = "kube-system"
-	clusterJoinTokenSecretPrefix = "bootstrap-token-"
-	clusterJoinTokenLabelManaged = "fugue.pro/cluster-join-bootstrap"
-	clusterJoinTokenLabelNodeKey = "fugue.pro/node-key-id"
-	clusterJoinTokenLabelRuntime = "fugue.pro/runtime-id"
-	clusterJoinTokenLabelValue   = "true"
-	clusterJoinTokenAuthGroup    = "system:bootstrappers:k3s:default-node-token"
+	clusterNodeManagedPodLabelSelector = "app.kubernetes.io/managed-by=fugue,app.kubernetes.io/name"
+	clusterNodeCNPGPodLabelSelector    = "app.kubernetes.io/managed-by=cloudnative-pg,cnpg.io/cluster"
+	clusterNodeCNPGClusterLabel        = "cnpg.io/cluster"
+	clusterNodeStatsConcurrency        = 4
+	clusterNodeConditionReady          = "Ready"
+	clusterNodeConditionMemory         = "MemoryPressure"
+	clusterNodeConditionDisk           = "DiskPressure"
+	clusterNodeConditionPID            = "PIDPressure"
+	clusterNodeLabelRegion             = "topology.kubernetes.io/region"
+	clusterNodeLabelLegacyRegion       = "failure-domain.beta.kubernetes.io/region"
+	clusterNodeLabelZone               = "topology.kubernetes.io/zone"
+	clusterNodeLabelLegacyZone         = "failure-domain.beta.kubernetes.io/zone"
+	clusterNodeLabelCountryCode        = "fugue.io/location-country-code"
+	clusterNodeLabelPublicIP           = "fugue.io/public-ip"
+	clusterNodeAnnotationCountry       = "fugue.io/location-country"
+	clusterNodeAnnotationK3sHost       = "k3s.io/hostname"
+	tenantSharedClusterNodeName        = "internal-cluster"
+	tenantSharedClusterRegion          = "Multiple countries"
+	tenantSharedRuntimeID              = "runtime_managed_shared"
+	clusterJoinTokenNamespace          = "kube-system"
+	clusterJoinTokenSecretPrefix       = "bootstrap-token-"
+	clusterJoinTokenLabelManaged       = "fugue.pro/cluster-join-bootstrap"
+	clusterJoinTokenLabelNodeKey       = "fugue.pro/node-key-id"
+	clusterJoinTokenLabelRuntime       = "fugue.pro/runtime-id"
+	clusterJoinTokenLabelValue         = "true"
+	clusterJoinTokenAuthGroup          = "system:bootstrappers:k3s:default-node-token"
 )
 
 var (
@@ -628,7 +630,7 @@ func (c *clusterNodeClient) listClusterNodeInventory(ctx context.Context) ([]clu
 		return nil, err
 	}
 
-	podsByNode, err := c.listFuguePodsByNode(ctx)
+	podsByNode, err := c.listManagedPodsByNode(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -655,27 +657,45 @@ func (c *clusterNodeClient) listClusterNodeInventory(ctx context.Context) ([]clu
 	return snapshots, nil
 }
 
-func (c *clusterNodeClient) listFuguePodsByNode(ctx context.Context) (map[string][]clusterNodePod, error) {
-	query := url.Values{}
-	query.Set("labelSelector", clusterNodePodLabelSelector)
-
-	var podList clusterNodePodList
-	if err := c.doJSON(ctx, http.MethodGet, "/api/v1/pods?"+query.Encode(), &podList); err != nil {
-		return nil, err
+func (c *clusterNodeClient) listManagedPodsByNode(ctx context.Context) (map[string][]clusterNodePod, error) {
+	selectors := []string{
+		clusterNodeManagedPodLabelSelector,
+		clusterNodeCNPGPodLabelSelector,
 	}
-
 	podsByNode := make(map[string][]clusterNodePod)
-	for _, pod := range podList.Items {
-		nodeName := strings.TrimSpace(pod.Spec.NodeName)
-		if nodeName == "" {
-			continue
+	seenPods := make(map[string]struct{})
+
+	for _, selector := range selectors {
+		query := url.Values{}
+		query.Set("labelSelector", selector)
+
+		var podList clusterNodePodList
+		if err := c.doJSON(ctx, http.MethodGet, "/api/v1/pods?"+query.Encode(), &podList); err != nil {
+			return nil, err
 		}
-		phase := strings.TrimSpace(pod.Status.Phase)
-		if strings.EqualFold(phase, "Succeeded") || strings.EqualFold(phase, "Failed") {
-			continue
+
+		for _, pod := range podList.Items {
+			nodeName := strings.TrimSpace(pod.Spec.NodeName)
+			if nodeName == "" {
+				continue
+			}
+			phase := strings.TrimSpace(pod.Status.Phase)
+			if strings.EqualFold(phase, "Succeeded") || strings.EqualFold(phase, "Failed") {
+				continue
+			}
+
+			podKey := clusterNamespacedResourceKey(strings.TrimSpace(pod.Metadata.Namespace), strings.TrimSpace(pod.Metadata.Name))
+			if podKey != "" {
+				if _, exists := seenPods[podKey]; exists {
+					continue
+				}
+				seenPods[podKey] = struct{}{}
+			}
+
+			podsByNode[nodeName] = append(podsByNode[nodeName], pod)
 		}
-		podsByNode[nodeName] = append(podsByNode[nodeName], pod)
 	}
+
 	return podsByNode, nil
 }
 
@@ -1408,6 +1428,12 @@ func (r clusterWorkloadResolver) resolvePod(pod clusterNodePod) (model.ClusterNo
 	}
 	if serviceID := strings.TrimSpace(labels[runtime.FugueLabelBackingServiceID]); serviceID != "" {
 		if service, ok := r.servicesByID[serviceID]; ok {
+			return clusterNodeWorkloadForService(service, pod.Metadata.Namespace), true
+		}
+	}
+	if cnpgClusterName := strings.TrimSpace(labels[clusterNodeCNPGClusterLabel]); cnpgClusterName != "" {
+		key := clusterNamespacedResourceKey(strings.TrimSpace(pod.Metadata.Namespace), cnpgClusterName)
+		if service, ok := r.servicesByNamespacedApp[key]; ok {
 			return clusterNodeWorkloadForService(service, pod.Metadata.Namespace), true
 		}
 	}

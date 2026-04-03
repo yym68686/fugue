@@ -437,7 +437,6 @@ type AppPostgresSpec struct {
 	User                string        `json:"user,omitempty"`
 	Password            string        `json:"password,omitempty"`
 	ServiceName         string        `json:"service_name,omitempty"`
-	StoragePath         string        `json:"storage_path,omitempty"`
 	StorageSize         string        `json:"storage_size,omitempty"`
 	StorageClassName    string        `json:"storage_class_name,omitempty"`
 	Instances           int           `json:"instances,omitempty"`

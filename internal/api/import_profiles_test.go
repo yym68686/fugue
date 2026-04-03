@@ -54,15 +54,3 @@ func TestNormalizeGenericPostgresSpecRejectsReservedCNPGUser(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
-
-func TestNormalizeGenericPostgresSpecAllowsLegacyStoragePathPostgresUser(t *testing.T) {
-	spec, err := normalizeGenericPostgresSpec("fugue-web", &model.AppPostgresSpec{
-		StoragePath: "/var/lib/postgres",
-	})
-	if err != nil {
-		t.Fatalf("normalize postgres spec: %v", err)
-	}
-	if spec.User != "postgres" {
-		t.Fatalf("expected legacy postgres user, got %q", spec.User)
-	}
-}

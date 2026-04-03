@@ -311,10 +311,6 @@ func (s *Service) projectComposeServiceState(app model.App) (map[string]string, 
 }
 
 func appOwnedPostgresSpec(app model.App) *model.AppPostgresSpec {
-	if app.Spec.Postgres != nil {
-		specCopy := *app.Spec.Postgres
-		return &specCopy
-	}
 	for _, service := range app.BackingServices {
 		if service.Type != model.BackingServiceTypePostgres || service.Spec.Postgres == nil {
 			continue

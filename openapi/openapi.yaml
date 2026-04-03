@@ -2790,8 +2790,6 @@ components:
           type: string
         service_name:
           type: string
-        storage_path:
-          type: string
         storage_size:
           type: string
         storage_class_name:

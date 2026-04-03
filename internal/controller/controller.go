@@ -374,11 +374,6 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		return fmt.Errorf("unsupported operation type %s", op.Type)
 	}
 
-	legacyPostgresCleanupNeeded := false
-	if op.Type == model.OperationTypeDelete || op.Type == model.OperationTypeMigrate {
-		legacyPostgresCleanupNeeded = len(store.LegacyPostgresStoragePaths(app)) > 0
-	}
-
 	scheduling, err := s.managedSchedulingConstraints(app.Spec.RuntimeID)
 	if err != nil {
 		return err
@@ -395,15 +390,6 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			if err := s.deleteManagedAppDesiredState(ctx, app); err != nil {
 				return fmt.Errorf("delete managed app desired state %s: %w", app.ID, err)
 			}
-			if legacyPostgresCleanupNeeded {
-				client, err := s.kubeClient()
-				if err != nil {
-					return fmt.Errorf("initialize kubernetes cleanup client: %w", err)
-				}
-				if err := s.triggerLegacyPostgresCleanup(ctx, client, app, op.ID); err != nil {
-					return fmt.Errorf("trigger legacy postgres cleanup for deleted app %s: %w", app.ID, err)
-				}
-			}
 		default:
 			bundle, err = s.Renderer.RenderManagedAppBundle(app, scheduling)
 			if err != nil {
@@ -414,18 +400,6 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			}
 			if err := s.waitForManagedAppRollout(ctx, app); err != nil {
 				return fmt.Errorf("wait for managed app rollout %s: %w", app.ID, err)
-			}
-			if op.Type == model.OperationTypeMigrate && legacyPostgresCleanupNeeded {
-				client, err := s.kubeClient()
-				if err != nil {
-					return fmt.Errorf("initialize kubernetes cleanup client: %w", err)
-				}
-				if err := s.triggerLegacyPostgresCleanup(ctx, client, app, op.ID); err != nil {
-					return fmt.Errorf("trigger legacy postgres cleanup for migrated app %s: %w", app.ID, err)
-				}
-				if err := s.clearLegacyPostgresMetadataAndSyncManagedApp(ctx, client, app.ID, scheduling); err != nil {
-					return fmt.Errorf("clear legacy postgres metadata for migrated app %s: %w", app.ID, err)
-				}
 			}
 		}
 	}

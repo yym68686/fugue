@@ -56,7 +56,7 @@ func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, o
 	}
 
 	for _, postgres := range postgresResources {
-		objects = append(objects, buildManagedPostgresObjects(namespace, postgres, scheduling)...)
+		objects = append(objects, buildManagedPostgresObjects(namespace, postgres)...)
 	}
 
 	objects = append(objects,
@@ -117,14 +117,6 @@ func postgresLabels(resource postgresRuntimeResource) map[string]string {
 		labels[FugueLabelOwnerAppID] = ownerAppID
 	}
 	return labels
-}
-
-func postgresSelectorLabels(labels map[string]string) map[string]string {
-	return labelSubset(labels,
-		FugueLabelName,
-		FugueLabelComponent,
-		FugueLabelManagedBy,
-	)
 }
 
 func labelSubset(labels map[string]string, keys ...string) map[string]string {
@@ -240,178 +232,13 @@ func buildPostgresServiceObject(namespace, resourceName string, labels map[strin
 	}
 }
 
-func buildPostgresReadWriteServiceObject(namespace, resourceName string, labels map[string]string) map[string]any {
-	return map[string]any{
-		"apiVersion": "v1",
-		"kind":       "Service",
-		"metadata": map[string]any{
-			"name":      postgresRWServiceName(resourceName),
-			"namespace": namespace,
-			"labels":    labels,
-		},
-		"spec": map[string]any{
-			"selector": postgresSelectorLabels(labels),
-			"ports": []map[string]any{
-				{
-					"name":       "tcp-5432",
-					"port":       5432,
-					"targetPort": 5432,
-					"protocol":   "TCP",
-				},
-			},
-		},
-	}
-}
-
-func buildPostgresDeploymentObject(namespace, secretName, resourceName string, labels map[string]string, spec model.AppPostgresSpec, scheduling SchedulingConstraints) map[string]any {
-	selectorLabels := postgresSelectorLabels(labels)
-	resourceRequirements := runtimeResourceRequirements(spec.Resources, model.DefaultManagedPostgresResources())
-	podSpec := map[string]any{
-		"initContainers": []map[string]any{
-			{
-				"name":  "init-data-dir",
-				"image": spec.Image,
-				"command": []string{
-					"sh",
-					"-c",
-					"mkdir -p /var/lib/postgresql/data && chown -R $(id -u postgres):$(id -g postgres) /var/lib/postgresql/data",
-				},
-				"securityContext": map[string]any{
-					"runAsUser": 0,
-				},
-				"volumeMounts": []map[string]any{
-					{
-						"name":      "postgres-data",
-						"mountPath": "/var/lib/postgresql/data",
-					},
-				},
-			},
-		},
-		"containers": []map[string]any{
-			{
-				"name":  "postgres",
-				"image": spec.Image,
-				"env": []map[string]any{
-					{
-						"name": "POSTGRES_DB",
-						"valueFrom": map[string]any{
-							"secretKeyRef": map[string]any{
-								"name": secretName,
-								"key":  "POSTGRES_DB",
-							},
-						},
-					},
-					{
-						"name": "POSTGRES_USER",
-						"valueFrom": map[string]any{
-							"secretKeyRef": map[string]any{
-								"name": secretName,
-								"key":  "POSTGRES_USER",
-							},
-						},
-					},
-					{
-						"name": "POSTGRES_PASSWORD",
-						"valueFrom": map[string]any{
-							"secretKeyRef": map[string]any{
-								"name": secretName,
-								"key":  "POSTGRES_PASSWORD",
-							},
-						},
-					},
-				},
-				"ports": []map[string]any{
-					{
-						"containerPort": 5432,
-						"protocol":      "TCP",
-					},
-				},
-				"volumeMounts": []map[string]any{
-					{
-						"name":      "postgres-data",
-						"mountPath": "/var/lib/postgresql/data",
-					},
-				},
-				"resources": resourceRequirements,
-			},
-		},
-		"volumes": []map[string]any{
-			{
-				"name": "postgres-data",
-				"persistentVolumeClaim": map[string]any{
-					"claimName": postgresPVCName(resourceName),
-				},
-			},
-		},
-	}
-	applyScheduling(&podSpec, scheduling)
-
-	return map[string]any{
-		"apiVersion": "apps/v1",
-		"kind":       "Deployment",
-		"metadata": map[string]any{
-			"name":      resourceName,
-			"namespace": namespace,
-			"labels":    labels,
-		},
-		"spec": map[string]any{
-			"replicas": 1,
-			"strategy": map[string]any{
-				"type": "Recreate",
-			},
-			"selector": map[string]any{
-				"matchLabels": selectorLabels,
-			},
-			"template": map[string]any{
-				"metadata": map[string]any{
-					"labels": labels,
-				},
-				"spec": podSpec,
-			},
-		},
-	}
-}
-
-func buildPostgresPVCObject(namespace, resourceName string, labels map[string]string, spec model.AppPostgresSpec) map[string]any {
-	pvcSpec := map[string]any{
-		"accessModes": []string{"ReadWriteOnce"},
-		"resources": map[string]any{
-			"requests": map[string]any{
-				"storage": spec.StorageSize,
-			},
-		},
-	}
-	if strings.TrimSpace(spec.StorageClassName) != "" {
-		pvcSpec["storageClassName"] = strings.TrimSpace(spec.StorageClassName)
-	}
-	return map[string]any{
-		"apiVersion": "v1",
-		"kind":       "PersistentVolumeClaim",
-		"metadata": map[string]any{
-			"name":      postgresPVCName(resourceName),
-			"namespace": namespace,
-			"labels":    labels,
-		},
-		"spec": pvcSpec,
-	}
-}
-
-func buildManagedPostgresObjects(namespace string, resource postgresRuntimeResource, scheduling SchedulingConstraints) []map[string]any {
+func buildManagedPostgresObjects(namespace string, resource postgresRuntimeResource) []map[string]any {
 	labels := postgresLabels(resource)
-	objects := []map[string]any{
+	return []map[string]any{
 		buildPostgresSecretObject(namespace, resource.secretName, labels, resource.spec),
 		buildPostgresServiceObject(namespace, resource.resourceName, labels, resource.spec),
-	}
-	if managedPostgresUsesLegacyResources(resource.spec) {
-		return append(objects,
-			buildPostgresReadWriteServiceObject(namespace, resource.resourceName, labels),
-			buildPostgresPVCObject(namespace, resource.resourceName, labels, resource.spec),
-			buildPostgresDeploymentObject(namespace, resource.secretName, resource.resourceName, labels, resource.spec, scheduling),
-		)
-	}
-	return append(objects,
 		buildPostgresClusterObject(namespace, resource.secretName, resource.resourceName, labels, resource.spec),
-	)
+	}
 }
 
 func buildAppDeploymentObject(namespace string, app model.App, labels map[string]string, scheduling SchedulingConstraints, postgresResources []postgresRuntimeResource) map[string]any {
@@ -622,15 +449,10 @@ func ManagedBackingServiceDeployments(app model.App, scheduling SchedulingConstr
 			continue
 		}
 		object := buildPostgresClusterObject(namespace, resource.secretName, resource.resourceName, postgresLabels(resource), resource.spec)
-		resourceKind := CloudNativePGClusterKind
-		if managedPostgresUsesLegacyResources(resource.spec) {
-			object = buildPostgresDeploymentObject(namespace, resource.secretName, resource.resourceName, postgresLabels(resource), resource.spec, scheduling)
-			resourceKind = "Deployment"
-		}
 		deployments = append(deployments, ManagedBackingServiceDeployment{
 			ServiceID:    resource.serviceID,
 			ResourceName: resource.resourceName,
-			ResourceKind: resourceKind,
+			ResourceKind: CloudNativePGClusterKind,
 			RuntimeKey:   managedDeploymentRuntimeKey(object),
 		})
 	}
@@ -656,7 +478,7 @@ func managedPostgresResources(namespace string, app model.App) []postgresRuntime
 			continue
 		}
 		baseName := runtimeBackingServiceBaseName(service.Name, app.Name)
-		spec := normalizeRuntimePostgresSpec(namespace, baseName, *service.Spec.Postgres)
+		spec := normalizeRuntimePostgresSpec(baseName, *service.Spec.Postgres)
 		resources = append(resources, postgresRuntimeResource{
 			baseName:     baseName,
 			resourceName: spec.ServiceName,
@@ -672,7 +494,7 @@ func managedPostgresResources(namespace string, app model.App) []postgresRuntime
 
 	if len(resources) == 0 && app.Spec.Postgres != nil {
 		baseName := runtimeBackingServiceBaseName("", app.Name)
-		spec := normalizeRuntimePostgresSpec(namespace, baseName, *app.Spec.Postgres)
+		spec := normalizeRuntimePostgresSpec(baseName, *app.Spec.Postgres)
 		resources = append(resources, postgresRuntimeResource{
 			baseName:     baseName,
 			resourceName: spec.ServiceName,
@@ -746,7 +568,7 @@ func mergedRuntimeEnv(app model.App) map[string]string {
 
 	if !hasManagedPostgresBinding && app.Spec.Postgres != nil {
 		baseName := runtimeBackingServiceBaseName("", app.Name)
-		for key, value := range defaultRuntimePostgresEnv(normalizeRuntimePostgresSpec(NamespaceForTenant(app.TenantID), baseName, *app.Spec.Postgres)) {
+		for key, value := range defaultRuntimePostgresEnv(normalizeRuntimePostgresSpec(baseName, *app.Spec.Postgres)) {
 			if _, exists := merged[key]; !exists {
 				merged[key] = value
 			}
@@ -878,7 +700,7 @@ func applyScheduling(podSpec *map[string]any, scheduling SchedulingConstraints) 
 	}
 }
 
-func normalizeRuntimePostgresSpec(_ string, baseName string, spec model.AppPostgresSpec) model.AppPostgresSpec {
+func normalizeRuntimePostgresSpec(baseName string, spec model.AppPostgresSpec) model.AppPostgresSpec {
 	if strings.TrimSpace(spec.Image) == "" {
 		spec.Image = defaultPostgresImage
 	}
@@ -886,7 +708,7 @@ func normalizeRuntimePostgresSpec(_ string, baseName string, spec model.AppPostg
 		spec.Database = baseName
 	}
 	if strings.TrimSpace(spec.User) == "" {
-		spec.User = model.DefaultManagedPostgresUser(baseName, spec.StoragePath)
+		spec.User = model.DefaultManagedPostgresUser(baseName)
 	}
 	spec.ServiceName = normalizePostgresResourceName(spec.ServiceName, baseName)
 	if strings.TrimSpace(spec.StorageSize) == "" {
@@ -909,10 +731,6 @@ func normalizeRuntimePostgresSpec(_ string, baseName string, spec model.AppPostg
 		spec.SynchronousReplicas = spec.Instances - 1
 	}
 	return spec
-}
-
-func managedPostgresUsesLegacyResources(spec model.AppPostgresSpec) bool {
-	return strings.TrimSpace(spec.StoragePath) != ""
 }
 
 func normalizeRuntimeAppWorkspaceSpec(app model.App) *model.AppWorkspaceSpec {
@@ -1116,10 +934,6 @@ func postgresResourceName(appName string) string {
 
 func postgresSecretName(appName string) string {
 	return appName + "-pgsec"
-}
-
-func postgresPVCName(resourceName string) string {
-	return normalizePostgresAuxiliaryName(resourceName, "data")
 }
 
 func normalizePostgresResourceName(name, baseName string) string {

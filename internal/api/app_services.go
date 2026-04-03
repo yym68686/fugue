@@ -29,33 +29,6 @@ func appBoundServices(app model.App) []appBoundService {
 		})
 	}
 
-	if len(bound) == 0 && app.Spec.Postgres != nil {
-		spec := normalizeLegacyAPIAppPostgresSpec(app)
-		bound = append(bound, appBoundService{
-			Binding: model.ServiceBinding{
-				ID:        "legacy-postgres-binding-" + app.ID,
-				TenantID:  app.TenantID,
-				AppID:     app.ID,
-				ServiceID: "legacy-postgres-" + app.ID,
-				Alias:     "postgres",
-				Env:       defaultAPIBindingPostgresEnv(spec),
-			},
-			Service: model.BackingService{
-				ID:          "legacy-postgres-" + app.ID,
-				TenantID:    app.TenantID,
-				ProjectID:   app.ProjectID,
-				OwnerAppID:  app.ID,
-				Name:        legacyAPIBackingServiceName(app.Name),
-				Type:        model.BackingServiceTypePostgres,
-				Provisioner: model.BackingServiceProvisionerManaged,
-				Status:      model.BackingServiceStatusActive,
-				Spec: model.BackingServiceSpec{
-					Postgres: &spec,
-				},
-			},
-		})
-	}
-
 	return bound
 }
 
@@ -125,32 +98,6 @@ func firstManagedPostgresBinding(app model.App) (appBoundService, bool) {
 func isManagedBackingService(service model.BackingService) bool {
 	provisioner := strings.TrimSpace(service.Provisioner)
 	return provisioner == "" || strings.EqualFold(provisioner, model.BackingServiceProvisionerManaged)
-}
-
-func normalizeLegacyAPIAppPostgresSpec(app model.App) model.AppPostgresSpec {
-	spec := *app.Spec.Postgres
-	baseName := legacyAPIBackingServiceName(app.Name)
-	if strings.TrimSpace(spec.Database) == "" {
-		spec.Database = baseName
-	}
-	if strings.TrimSpace(spec.User) == "" {
-		spec.User = model.DefaultManagedPostgresUser(app.Name, spec.StoragePath)
-	}
-	if strings.TrimSpace(spec.ServiceName) == "" {
-		spec.ServiceName = baseName + "-postgres"
-	}
-	return spec
-}
-
-func legacyAPIBackingServiceName(appName string) string {
-	name := model.Slugify(appName)
-	if len(name) > 50 {
-		name = name[:50]
-	}
-	if strings.TrimSpace(name) == "" {
-		return "app"
-	}
-	return name
 }
 
 func defaultAPIBindingPostgresEnv(spec model.AppPostgresSpec) map[string]string {

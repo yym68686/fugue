@@ -113,7 +113,6 @@ type fugueManifestService struct {
 	User        string `yaml:"user"`
 	Password    string `yaml:"password"`
 	ServiceName string `yaml:"service_name"`
-	StoragePath string `yaml:"storage_path"`
 }
 
 type fugueBuildSpec struct {
@@ -283,7 +282,6 @@ func resolveFugueManifestService(repoDir, rawName string, raw fugueManifestServi
 			User:        strings.TrimSpace(raw.User),
 			Password:    strings.TrimSpace(raw.Password),
 			ServiceName: strings.TrimSpace(raw.ServiceName),
-			StoragePath: strings.TrimSpace(raw.StoragePath),
 		}
 		if strings.TrimSpace(postgresSpec.Database) == "" {
 			postgresSpec.Database = firstNonEmptyEnvValue(service.Environment, "POSTGRES_DB", "POSTGRES_DATABASE", "DB_NAME")

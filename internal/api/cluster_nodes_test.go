@@ -568,6 +568,182 @@ func TestListClusterNodesIncludesSharedNodesHostingTenantWorkloads(t *testing.T)
 	}
 }
 
+func TestListClusterNodesIncludesCNPGBackingServiceWorkloads(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("CNPG Cluster Nodes Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	runtimeObj, _, err := s.CreateRuntime(tenant.ID, "worker-1", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create runtime: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "viewer", []string{"project.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: runtimeObj.ID,
+		Postgres: &model.AppPostgresSpec{
+			Database: "demo",
+			User:     "demo",
+			Password: "secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if len(app.BackingServices) != 1 {
+		t.Fatalf("expected one backing service, got %d", len(app.BackingServices))
+	}
+	service := app.BackingServices[0]
+	namespace := runtime.NamespaceForTenant(tenant.ID)
+
+	kubeServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/api/v1/nodes":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{
+							"name":              "worker-1",
+							"creationTimestamp": "2026-03-25T00:00:00Z",
+							"labels": map[string]string{
+								"node-role.kubernetes.io/worker": "",
+								"topology.kubernetes.io/region":  "ap-east-1",
+								"topology.kubernetes.io/zone":    "ap-east-1a",
+							},
+						},
+						"status": map[string]any{
+							"addresses": []map[string]string{
+								{"type": "InternalIP", "address": "10.0.0.10"},
+							},
+							"conditions": []map[string]string{
+								{
+									"type":   "Ready",
+									"status": "True",
+								},
+							},
+						},
+					},
+				},
+			})
+		case "/api/v1/pods":
+			switch r.URL.Query().Get("labelSelector") {
+			case clusterNodeManagedPodLabelSelector:
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"items": []map[string]any{
+						{
+							"metadata": map[string]any{
+								"name":      "demo-7b95d6b54f-z2f4g",
+								"namespace": namespace,
+								"labels": map[string]string{
+									runtime.FugueLabelName:      "demo",
+									runtime.FugueLabelManagedBy: runtime.FugueLabelManagedByValue,
+									runtime.FugueLabelAppID:     app.ID,
+								},
+							},
+							"spec": map[string]any{
+								"nodeName": "worker-1",
+							},
+							"status": map[string]any{
+								"phase": "Running",
+							},
+						},
+					},
+				})
+			case clusterNodeCNPGPodLabelSelector:
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"items": []map[string]any{
+						{
+							"metadata": map[string]any{
+								"name":      service.Spec.Postgres.ServiceName + "-1",
+								"namespace": namespace,
+								"labels": map[string]string{
+									"app.kubernetes.io/managed-by": "cloudnative-pg",
+									"cnpg.io/cluster":              service.Spec.Postgres.ServiceName,
+								},
+							},
+							"spec": map[string]any{
+								"nodeName": "worker-1",
+							},
+							"status": map[string]any{
+								"phase": "Running",
+							},
+						},
+					},
+				})
+			default:
+				t.Fatalf("unexpected pod selector %q", r.URL.Query().Get("labelSelector"))
+			}
+		default:
+			if strings.HasPrefix(r.URL.Path, "/api/v1/nodes/") && strings.HasSuffix(r.URL.Path, "/proxy/stats/summary") {
+				_ = json.NewEncoder(w).Encode(map[string]any{})
+				return
+			}
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/cluster/nodes", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		ClusterNodes []model.ClusterNode `json:"cluster_nodes"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+
+	if len(response.ClusterNodes) != 1 {
+		t.Fatalf("expected one visible node, got %#v", response.ClusterNodes)
+	}
+	node := response.ClusterNodes[0]
+	if len(node.Workloads) != 2 {
+		t.Fatalf("expected app and backing service workloads, got %#v", node.Workloads)
+	}
+
+	serviceWorkload := node.Workloads[1]
+	if serviceWorkload.Kind != model.ClusterNodeWorkloadKindBackingService {
+		t.Fatalf("expected backing service workload, got %#v", serviceWorkload)
+	}
+	if serviceWorkload.ID != service.ID {
+		t.Fatalf("expected backing service id %q, got %#v", service.ID, serviceWorkload)
+	}
+	if serviceWorkload.PodCount != 1 || len(serviceWorkload.Pods) != 1 {
+		t.Fatalf("expected one CNPG pod, got %#v", serviceWorkload)
+	}
+}
+
 func TestListClusterNodesIncludesAggregatedSharedClusterWithoutVisibleTenantWorkloads(t *testing.T) {
 	t.Parallel()
 

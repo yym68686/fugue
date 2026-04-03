@@ -577,9 +577,6 @@ func appManagedBundleCommitment(state *model.State, app model.App, runtimeID str
 	for _, service := range services {
 		total = addResourceSpec(total, backingServiceResources(service))
 	}
-	if len(services) == 0 && app.Spec.Postgres != nil {
-		total = addResourceSpec(total, postgresEffectiveResources(*app.Spec.Postgres))
-	}
 	return total
 }
 

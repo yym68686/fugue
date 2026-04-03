@@ -163,12 +163,9 @@ func normalizeGenericPostgresSpec(appName string, override *model.AppPostgresSpe
 		if strings.TrimSpace(override.ServiceName) != "" {
 			spec.ServiceName = strings.TrimSpace(override.ServiceName)
 		}
-		if strings.TrimSpace(override.StoragePath) != "" {
-			spec.StoragePath = strings.TrimSpace(override.StoragePath)
-		}
 	}
 	if spec.User == "" {
-		spec.User = model.DefaultManagedPostgresUser(appName, spec.StoragePath)
+		spec.User = model.DefaultManagedPostgresUser(appName)
 	}
 	if err := model.ValidateManagedPostgresUser(appName, spec); err != nil {
 		return model.AppPostgresSpec{}, err
