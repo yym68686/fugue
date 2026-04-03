@@ -240,6 +240,23 @@ paths:
                 $ref: "#/components/schemas/ProjectResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/projects/image-usage:
+    get:
+      operationId: listProjectImageUsage
+      summary: List Project Image Usage
+      tags: [Projects]
+      x-fugue-handler: handleListProjectImageUsage
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectImageUsageResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/projects/{id}:
     patch:
       operationId: patchProject
@@ -1160,6 +1177,75 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AppDeleteResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/images:
+    get:
+      operationId: getAppImages
+      summary: Get App Images
+      tags: [Apps]
+      x-fugue-handler: handleGetAppImages
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppImageInventoryResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/images/redeploy:
+    post:
+      operationId: redeployAppImage
+      summary: Redeploy App Image
+      tags: [Apps]
+      x-fugue-handler: handleRedeployAppImage
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppImageActionRequest"
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppImageRedeployResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/images/delete:
+    post:
+      operationId: deleteAppImage
+      summary: Delete App Image
+      tags: [Apps]
+      x-fugue-handler: handleDeleteAppImage
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppImageActionRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppImageDeleteResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/domains:
@@ -3400,6 +3486,228 @@ components:
       properties:
         project:
           $ref: "#/components/schemas/Project"
+    AppImageSummary:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          version_count,
+          current_version_count,
+          stale_version_count,
+          total_size_bytes,
+          current_size_bytes,
+          stale_size_bytes,
+          reclaimable_size_bytes
+        ]
+      properties:
+        version_count:
+          type: integer
+          format: int32
+        current_version_count:
+          type: integer
+          format: int32
+        stale_version_count:
+          type: integer
+          format: int32
+        total_size_bytes:
+          type: integer
+          format: int64
+        current_size_bytes:
+          type: integer
+          format: int64
+        stale_size_bytes:
+          type: integer
+          format: int64
+        reclaimable_size_bytes:
+          type: integer
+          format: int64
+    AppImageVersion:
+      type: object
+      additionalProperties: false
+      required:
+        [image_ref, status, current, delete_supported, redeploy_supported]
+      properties:
+        image_ref:
+          type: string
+        runtime_image_ref:
+          type: string
+        digest:
+          type: string
+        status:
+          type: string
+        current:
+          type: boolean
+        size_bytes:
+          type: integer
+          format: int64
+        reclaimable_size_bytes:
+          type: integer
+          format: int64
+        delete_supported:
+          type: boolean
+        redeploy_supported:
+          type: boolean
+        last_deployed_at:
+          type: string
+          format: date-time
+        source:
+          $ref: "#/components/schemas/AppSource"
+    AppImageActionRequest:
+      type: object
+      additionalProperties: false
+      required: [image_ref]
+      properties:
+        image_ref:
+          type: string
+    AppImageInventoryResponse:
+      type: object
+      additionalProperties: false
+      required:
+        [app_id, registry_configured, reclaim_requires_gc, summary, versions]
+      properties:
+        app_id:
+          type: string
+        registry_configured:
+          type: boolean
+        reclaim_requires_gc:
+          type: boolean
+        reclaim_note:
+          type: string
+        summary:
+          $ref: "#/components/schemas/AppImageSummary"
+        versions:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppImageVersion"
+    AppImageDeleteResponse:
+      type: object
+      additionalProperties: false
+      required:
+        [deleted, already_missing, registry_configured, reclaim_requires_gc]
+      properties:
+        image:
+          $ref: "#/components/schemas/AppImageVersion"
+        deleted:
+          type: boolean
+        already_missing:
+          type: boolean
+        registry_configured:
+          type: boolean
+        reclaim_requires_gc:
+          type: boolean
+        reclaim_note:
+          type: string
+        reclaimed_size_bytes:
+          type: integer
+          format: int64
+    AppImageRedeployResponse:
+      type: object
+      additionalProperties: false
+      required: [operation]
+      properties:
+        image:
+          $ref: "#/components/schemas/AppImageVersion"
+        operation:
+          $ref: "#/components/schemas/Operation"
+    ProjectImageUsageAppSummary:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          app_id,
+          app_name,
+          version_count,
+          current_version_count,
+          stale_version_count,
+          total_size_bytes,
+          current_size_bytes,
+          stale_size_bytes,
+          reclaimable_size_bytes
+        ]
+      properties:
+        app_id:
+          type: string
+        app_name:
+          type: string
+        version_count:
+          type: integer
+          format: int32
+        current_version_count:
+          type: integer
+          format: int32
+        stale_version_count:
+          type: integer
+          format: int32
+        total_size_bytes:
+          type: integer
+          format: int64
+        current_size_bytes:
+          type: integer
+          format: int64
+        stale_size_bytes:
+          type: integer
+          format: int64
+        reclaimable_size_bytes:
+          type: integer
+          format: int64
+    ProjectImageUsageSummary:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          project_id,
+          version_count,
+          current_version_count,
+          stale_version_count,
+          total_size_bytes,
+          current_size_bytes,
+          stale_size_bytes,
+          reclaimable_size_bytes,
+          apps
+        ]
+      properties:
+        project_id:
+          type: string
+        version_count:
+          type: integer
+          format: int32
+        current_version_count:
+          type: integer
+          format: int32
+        stale_version_count:
+          type: integer
+          format: int32
+        total_size_bytes:
+          type: integer
+          format: int64
+        current_size_bytes:
+          type: integer
+          format: int64
+        stale_size_bytes:
+          type: integer
+          format: int64
+        reclaimable_size_bytes:
+          type: integer
+          format: int64
+        apps:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProjectImageUsageAppSummary"
+    ProjectImageUsageResponse:
+      type: object
+      additionalProperties: false
+      required: [registry_configured, reclaim_requires_gc, projects]
+      properties:
+        registry_configured:
+          type: boolean
+        reclaim_requires_gc:
+          type: boolean
+        reclaim_note:
+          type: string
+        projects:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProjectImageUsageSummary"
     CreateProjectRequest:
       type: object
       additionalProperties: false

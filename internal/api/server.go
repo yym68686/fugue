@@ -39,6 +39,7 @@ type Server struct {
 	clusterJoinMeshLoginServer   string
 	clusterJoinMeshAuthKey       string
 	importer                     *sourceimport.Importer
+	appImageRegistry             appImageRegistry
 	newClusterNodeClient         func() (*clusterNodeClient, error)
 	newManagedAppStatusClient    func() (*managedAppStatusClient, error)
 	newLogsClient                func(namespace string) (appLogsClient, error)
@@ -73,6 +74,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		clusterJoinMeshLoginServer:   strings.TrimSpace(cfg.ClusterJoinMeshLoginServer),
 		clusterJoinMeshAuthKey:       strings.TrimSpace(cfg.ClusterJoinMeshAuthKey),
 		importer:                     sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
+		appImageRegistry:             newRemoteAppImageRegistry(),
 		newClusterNodeClient:         newClusterNodeClient,
 		newManagedAppStatusClient:    newManagedAppStatusClient,
 		newLogsClient: func(namespace string) (appLogsClient, error) {
