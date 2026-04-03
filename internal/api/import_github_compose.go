@@ -326,6 +326,9 @@ func composePostgresSpec(service sourceimport.ComposeService, ownerAppName strin
 	if strings.TrimSpace(spec.User) == "" {
 		spec.User = firstNonEmptyComposeValue(service.Environment, "POSTGRES_USER", "DB_USER")
 	}
+	if service.Postgres == nil && strings.EqualFold(strings.TrimSpace(spec.User), "postgres") {
+		spec.User = ""
+	}
 	if strings.TrimSpace(spec.Password) == "" {
 		spec.Password = firstNonEmptyComposeValue(service.Environment, "POSTGRES_PASSWORD", "DB_PASSWORD")
 	}

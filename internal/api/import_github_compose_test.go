@@ -243,7 +243,7 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 				InternalPort: 3000,
 				Published:    true,
 				Environment: map[string]string{
-					"DSN":       "postgresql://demo:secret@postgres:5432/claude_code_hub",
+					"DSN":       "postgresql://postgres:postgres@postgres:5432/claude_code_hub",
 					"REDIS_URL": "redis://redis:6379",
 				},
 				DependsOn: []string{"postgres", "redis"},
@@ -254,8 +254,8 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 				Image: "postgres:18",
 				Environment: map[string]string{
 					"POSTGRES_DB":       "claude_code_hub",
-					"POSTGRES_USER":     "demo",
-					"POSTGRES_PASSWORD": "secret",
+					"POSTGRES_USER":     "postgres",
+					"POSTGRES_PASSWORD": "postgres",
 				},
 			},
 			{
@@ -301,7 +301,7 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 	if got := primaryApp.Spec.Env["REDIS_URL"]; got != "redis://claude-code-hub-redis:6379" {
 		t.Fatalf("expected REDIS_URL to target mirrored redis app, got %q", got)
 	}
-	if got := primaryApp.Spec.Env["DSN"]; got != "postgresql://demo:secret@claude-code-hub-postgres-postgres-rw:5432/claude_code_hub" {
+	if got := primaryApp.Spec.Env["DSN"]; got != "postgresql://claude_code_hub:postgres@claude-code-hub-postgres-postgres-rw:5432/claude_code_hub" {
 		t.Fatalf("expected DSN rewrite to managed postgres host, got %q", got)
 	}
 	if primaryApp.Route == nil || primaryApp.Route.ServicePort != 3000 {
@@ -371,6 +371,28 @@ func TestComposePostgresSpecKeepsExplicitCNPGImage(t *testing.T) {
 	}
 	if spec.Image != "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie" {
 		t.Fatalf("expected CNPG image to be preserved, got %q", spec.Image)
+	}
+}
+
+func TestComposePostgresSpecNormalizesReservedComposeEnvUser(t *testing.T) {
+	spec, err := composePostgresSpec(sourceimport.ComposeService{
+		Name:  "db",
+		Kind:  sourceimport.ComposeServiceKindPostgres,
+		Image: "postgres:17.6-alpine",
+		Environment: map[string]string{
+			"POSTGRES_DB":       "claude_code_hub",
+			"POSTGRES_USER":     "postgres",
+			"POSTGRES_PASSWORD": "postgres",
+		},
+	}, "claude-code-hub")
+	if err != nil {
+		t.Fatalf("compose postgres spec: %v", err)
+	}
+	if spec.User != "claude_code_hub" {
+		t.Fatalf("expected reserved compose user to normalize to claude_code_hub, got %q", spec.User)
+	}
+	if spec.Password != "postgres" {
+		t.Fatalf("expected compose password to be preserved, got %q", spec.Password)
 	}
 }
 
