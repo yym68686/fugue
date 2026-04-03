@@ -68,6 +68,9 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 	if got := clusterSpec["instances"]; got != defaultPostgresInstances {
 		t.Fatalf("expected postgres instances %d, got %#v", defaultPostgresInstances, got)
 	}
+	if _, ok := clusterSpec["maxSyncReplicas"]; ok {
+		t.Fatalf("expected single-instance postgres to omit maxSyncReplicas, got %#v", clusterSpec["maxSyncReplicas"])
+	}
 	storage := clusterSpec["storage"].(map[string]any)
 	if got := storage["size"]; got != defaultPostgresStorage {
 		t.Fatalf("expected postgres storage %q, got %#v", defaultPostgresStorage, got)
@@ -102,6 +105,12 @@ func TestNormalizeRuntimePostgresSpecDefaultsToAppScopedUser(t *testing.T) {
 	spec := normalizeRuntimePostgresSpec("", "fugue-web", model.AppPostgresSpec{})
 	if spec.User != "fugue_web" {
 		t.Fatalf("expected app-scoped user fugue_web, got %q", spec.User)
+	}
+	if spec.Instances != 1 {
+		t.Fatalf("expected default postgres instances 1, got %d", spec.Instances)
+	}
+	if spec.SynchronousReplicas != 0 {
+		t.Fatalf("expected default synchronous replicas 0 for single-instance postgres, got %d", spec.SynchronousReplicas)
 	}
 }
 
@@ -467,8 +476,8 @@ func TestBuildManagedPostgresObjectsUseStableSelectors(t *testing.T) {
 	if got := clusterSpec["instances"]; got != defaultPostgresInstances {
 		t.Fatalf("expected postgres instances %d, got %#v", defaultPostgresInstances, got)
 	}
-	if got := clusterSpec["maxSyncReplicas"]; got != defaultPostgresSynchronousReplicas {
-		t.Fatalf("expected postgres max sync replicas %d, got %#v", defaultPostgresSynchronousReplicas, got)
+	if _, ok := clusterSpec["maxSyncReplicas"]; ok {
+		t.Fatalf("expected single-instance postgres to omit maxSyncReplicas, got %#v", clusterSpec["maxSyncReplicas"])
 	}
 }
 

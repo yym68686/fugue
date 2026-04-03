@@ -12,7 +12,7 @@ import (
 const (
 	defaultManagedBackingPostgresImage               = ""
 	defaultManagedBackingPostgresStorage             = "1Gi"
-	defaultManagedBackingPostgresInstances           = 3
+	defaultManagedBackingPostgresInstances           = 1
 	defaultManagedBackingPostgresSynchronousReplicas = 1
 )
 

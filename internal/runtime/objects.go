@@ -15,7 +15,7 @@ import (
 const (
 	defaultPostgresImage                = ""
 	defaultPostgresStorage              = "1Gi"
-	defaultPostgresInstances            = 3
+	defaultPostgresInstances            = 1
 	defaultPostgresSynchronousReplicas  = 1
 	defaultWorkspaceStorage             = "10Gi"
 	defaultWorkspaceReplicationSchedule = "*/5 * * * *"
