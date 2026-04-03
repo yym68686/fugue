@@ -182,7 +182,9 @@ func resolveComposeService(repoDir, serviceName string, raw composeServiceRaw, v
 	}
 	if !hasBuild {
 		if strings.TrimSpace(raw.Image) != "" {
-			return ComposeService{}, fmt.Sprintf("compose service %q uses image %q without build; Fugue currently skips non-build compose services except managed postgres", serviceName, strings.TrimSpace(raw.Image)), nil
+			service.Kind = ComposeServiceKindApp
+			service.InternalPort = detectComposeDeclaredPort(raw.Ports)
+			return service, fmt.Sprintf("compose service %q uses image %q without build; Fugue will mirror the image directly and will not auto-sync repository commits for this service", serviceName, strings.TrimSpace(raw.Image)), nil
 		}
 		return ComposeService{}, fmt.Sprintf("compose service %q is skipped because it has no build or supported managed backing service", serviceName), nil
 	}
@@ -340,6 +342,20 @@ func composeServicePublishesPorts(rawPorts []any) bool {
 		}
 	}
 	return false
+}
+
+func detectComposeDeclaredPort(rawPorts []any) int {
+	detected := 0
+	for _, raw := range rawPorts {
+		port, _, ok := parseComposePort(raw)
+		if !ok || port <= 0 {
+			continue
+		}
+		if detected == 0 || port < detected {
+			detected = port
+		}
+	}
+	return detected
 }
 
 func parseComposePort(raw any) (int, bool, bool) {

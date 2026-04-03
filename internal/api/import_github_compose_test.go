@@ -1,11 +1,14 @@
 package api
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"fugue/internal/auth"
 	"fugue/internal/model"
 	"fugue/internal/sourceimport"
+	"fugue/internal/store"
 )
 
 func TestRewriteComposeEnvironmentRewritesInternalServiceHosts(t *testing.T) {
@@ -86,6 +89,25 @@ func TestBuildQueuedGitHubSourcePreservesComposeMetadata(t *testing.T) {
 	}
 	if source.ComposeService != "api" {
 		t.Fatalf("expected compose service api, got %q", source.ComposeService)
+	}
+}
+
+func TestBuildQueuedImageSourcePreservesComposeMetadata(t *testing.T) {
+	source, err := buildQueuedImageSource("redis:7-alpine", "redis", "redis")
+	if err != nil {
+		t.Fatalf("build queued image source: %v", err)
+	}
+	if source.Type != model.AppSourceTypeDockerImage {
+		t.Fatalf("expected image source type %q, got %q", model.AppSourceTypeDockerImage, source.Type)
+	}
+	if source.ImageRef != "redis:7-alpine" {
+		t.Fatalf("expected image ref redis:7-alpine, got %q", source.ImageRef)
+	}
+	if source.ImageNameSuffix != "redis" {
+		t.Fatalf("expected image suffix redis, got %q", source.ImageNameSuffix)
+	}
+	if source.ComposeService != "redis" {
+		t.Fatalf("expected compose service redis, got %q", source.ComposeService)
 	}
 }
 
@@ -176,6 +198,128 @@ func TestResolveTopologyPrimaryServiceFallsBackWhenPreferredIsEmpty(t *testing.T
 	}
 	if primary.Name != "web" {
 		t.Fatalf("expected auto-selected web, got %q", primary.Name)
+	}
+}
+
+func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Compose Import Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		AppBaseDomain:    "apps.example.com",
+		RegistryPushBase: "registry.internal.example",
+	})
+
+	result, err := server.importResolvedGitHubTopology(
+		model.Principal{ActorType: model.ActorTypeAPIKey, ActorID: "key"},
+		tenant.ID,
+		importGitHubRequest{
+			ProjectID:      project.ID,
+			RepoURL:        "https://github.com/ding113/claude-code-hub",
+			RepoVisibility: "public",
+		},
+		"runtime_managed_shared",
+		1,
+		"Imported from GitHub",
+		"claude-code-hub",
+		[]sourceimport.ComposeService{
+			{
+				Name:         "app",
+				Kind:         sourceimport.ComposeServiceKindApp,
+				Image:        "ghcr.io/ding113/claude-code-hub:latest",
+				InternalPort: 3000,
+				Published:    true,
+				Environment: map[string]string{
+					"DSN":       "postgresql://demo:secret@postgres:5432/claude_code_hub",
+					"REDIS_URL": "redis://redis:6379",
+				},
+				DependsOn: []string{"postgres", "redis"},
+			},
+			{
+				Name:  "postgres",
+				Kind:  sourceimport.ComposeServiceKindPostgres,
+				Image: "postgres:18",
+				Environment: map[string]string{
+					"POSTGRES_DB":       "claude_code_hub",
+					"POSTGRES_USER":     "demo",
+					"POSTGRES_PASSWORD": "secret",
+				},
+			},
+			{
+				Name:  "redis",
+				Kind:  sourceimport.ComposeServiceKindApp,
+				Image: "redis:7-alpine",
+			},
+		},
+		"",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("import resolved topology: %v", err)
+	}
+	if result.PrimaryService != "app" {
+		t.Fatalf("expected primary service app, got %q", result.PrimaryService)
+	}
+	if len(result.Apps) != 2 {
+		t.Fatalf("expected 2 apps, got %d", len(result.Apps))
+	}
+	if len(result.Operations) != 2 {
+		t.Fatalf("expected 2 operations, got %d", len(result.Operations))
+	}
+
+	appsByService := map[string]model.App{}
+	for _, app := range result.Apps {
+		if app.Source == nil {
+			t.Fatalf("expected app %s to keep source metadata", app.Name)
+		}
+		appsByService[app.Source.ComposeService] = app
+	}
+
+	primaryApp, ok := appsByService["app"]
+	if !ok {
+		t.Fatal("expected primary app compose service metadata")
+	}
+	if primaryApp.Source.Type != model.AppSourceTypeDockerImage {
+		t.Fatalf("expected primary source type %q, got %q", model.AppSourceTypeDockerImage, primaryApp.Source.Type)
+	}
+	if primaryApp.Source.ImageRef != "ghcr.io/ding113/claude-code-hub:latest" {
+		t.Fatalf("unexpected primary image ref: %q", primaryApp.Source.ImageRef)
+	}
+	if got := primaryApp.Spec.Env["REDIS_URL"]; got != "redis://claude-code-hub-redis:6379" {
+		t.Fatalf("expected REDIS_URL to target mirrored redis app, got %q", got)
+	}
+	if got := primaryApp.Spec.Env["DSN"]; got != "postgresql://demo:secret@claude-code-hub-postgres-postgres-rw:5432/claude_code_hub" {
+		t.Fatalf("expected DSN rewrite to managed postgres host, got %q", got)
+	}
+	if primaryApp.Route == nil || primaryApp.Route.ServicePort != 3000 {
+		t.Fatalf("expected primary route to keep service port 3000, got %+v", primaryApp.Route)
+	}
+
+	redisApp, ok := appsByService["redis"]
+	if !ok {
+		t.Fatal("expected redis app compose service metadata")
+	}
+	if redisApp.Source.Type != model.AppSourceTypeDockerImage {
+		t.Fatalf("expected redis source type %q, got %q", model.AppSourceTypeDockerImage, redisApp.Source.Type)
+	}
+	if redisApp.Route != nil && redisApp.Route.ServicePort != 0 {
+		t.Fatalf("expected redis to remain internal-only before image port detection, got %+v", redisApp.Route)
+	}
+	if redisApp.Spec.Ports != nil {
+		t.Fatalf("expected redis spec ports to be detected at import time, got %#v", redisApp.Spec.Ports)
 	}
 }
 

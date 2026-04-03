@@ -107,3 +107,92 @@ func TestInspectComposeStackFromRepoParsesBuildAndPostgresServices(t *testing.T)
 		t.Fatalf("unexpected db env: %v", dbService.Environment)
 	}
 }
+
+func TestInspectComposeStackFromRepoParsesImageBackedServices(t *testing.T) {
+	repoDir := t.TempDir()
+	compose := `services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: claude_code_hub
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: secret
+  redis:
+    image: redis:7-alpine
+  app:
+    image: ghcr.io/ding113/claude-code-hub:latest
+    environment:
+      DSN: postgresql://demo:secret@postgres:5432/claude_code_hub
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "23000:3000"
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "docker-compose.yaml"), []byte(compose), 0o644); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+
+	stack, err := inspectComposeStackFromRepo(clonedGitHubRepo{
+		RepoOwner:      "ding113",
+		RepoName:       "claude-code-hub",
+		RepoDir:        repoDir,
+		Branch:         "main",
+		CommitSHA:      "abcdef123456",
+		DefaultAppName: "claude-code-hub",
+	})
+	if err != nil {
+		t.Fatalf("inspect compose stack: %v", err)
+	}
+	if stack.ComposePath != "docker-compose.yaml" {
+		t.Fatalf("unexpected compose path: %q", stack.ComposePath)
+	}
+	if len(stack.Warnings) != 2 {
+		t.Fatalf("expected warnings for app and redis image services, got %v", stack.Warnings)
+	}
+	if len(stack.Services) != 3 {
+		t.Fatalf("expected 3 services, got %d", len(stack.Services))
+	}
+
+	var appService, redisService, postgresService ComposeService
+	for _, service := range stack.Services {
+		switch service.Name {
+		case "app":
+			appService = service
+		case "redis":
+			redisService = service
+		case "postgres":
+			postgresService = service
+		}
+	}
+
+	if appService.Kind != ComposeServiceKindApp {
+		t.Fatalf("expected app to be importable, got %q", appService.Kind)
+	}
+	if appService.Image != "ghcr.io/ding113/claude-code-hub:latest" {
+		t.Fatalf("unexpected app image: %q", appService.Image)
+	}
+	if !appService.Published || appService.InternalPort != 3000 {
+		t.Fatalf("unexpected app exposure: %+v", appService)
+	}
+	if len(appService.DependsOn) != 2 || appService.DependsOn[0] != "postgres" || appService.DependsOn[1] != "redis" {
+		t.Fatalf("unexpected app depends_on: %v", appService.DependsOn)
+	}
+
+	if redisService.Kind != ComposeServiceKindApp {
+		t.Fatalf("expected redis to be importable as app, got %q", redisService.Kind)
+	}
+	if redisService.Image != "redis:7-alpine" {
+		t.Fatalf("unexpected redis image: %q", redisService.Image)
+	}
+	if redisService.Published || redisService.InternalPort != 0 {
+		t.Fatalf("unexpected redis exposure: %+v", redisService)
+	}
+
+	if postgresService.Kind != ComposeServiceKindPostgres {
+		t.Fatalf("expected postgres to stay managed, got %q", postgresService.Kind)
+	}
+}

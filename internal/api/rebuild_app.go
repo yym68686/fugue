@@ -92,12 +92,15 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusBadRequest, "app source image_ref is missing")
 			return
 		}
-		source, err = buildQueuedImageSource(imageRef)
+		source, err = buildQueuedImageSource(
+			imageRef,
+			strings.TrimSpace(app.Source.ImageNameSuffix),
+			strings.TrimSpace(app.Source.ComposeService),
+		)
 		if err != nil {
 			httpx.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		source.ImageNameSuffix = strings.TrimSpace(app.Source.ImageNameSuffix)
 	case model.AppSourceTypeGitHubPublic, model.AppSourceTypeGitHubPrivate:
 		if strings.TrimSpace(app.Source.RepoURL) == "" {
 			httpx.WriteError(w, http.StatusBadRequest, "app source repo_url is missing")

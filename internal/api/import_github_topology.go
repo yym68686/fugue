@@ -23,7 +23,7 @@ type importedGitHubTopology struct {
 func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantID string, req importGitHubRequest, runtimeID string, replicas int, description string, baseName string, services []sourceimport.ComposeService, preferredPrimary string, warnings []string) (importedGitHubTopology, error) {
 	appServices, postgresServices := splitComposeServices(services)
 	if len(appServices) == 0 {
-		return importedGitHubTopology{}, invalidComposeImportf("topology does not define any buildable application services")
+		return importedGitHubTopology{}, invalidComposeImportf("topology does not define any deployable application services")
 	}
 	if err := validateComposeDependencies(appServices, postgresServices); err != nil {
 		return importedGitHubTopology{}, invalidComposeImport(err)
@@ -68,18 +68,7 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 			}
 		}
 
-		source, err := buildQueuedGitHubSource(
-			req.RepoURL,
-			req.RepoVisibility,
-			req.RepoAuthToken,
-			req.Branch,
-			service.SourceDir,
-			service.DockerfilePath,
-			service.BuildContextDir,
-			service.BuildStrategy,
-			service.Name,
-			service.Name,
-		)
+		source, err := buildQueuedComposeServiceSource(req, service)
 		if err != nil {
 			return importedGitHubTopology{}, invalidComposeImport(err)
 		}
@@ -164,12 +153,18 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 			return importedGitHubTopology{}, rollback(err)
 		}
 
-		s.appendAudit(principal, "app.import_github", "app", app.ID, app.TenantID, map[string]string{
-			"repo_url":        sourceCopy.RepoURL,
-			"build_strategy":  sourceCopy.BuildStrategy,
+		auditMetadata := map[string]string{
+			"repo_url":        strings.TrimSpace(req.RepoURL),
 			"compose_service": sourceCopy.ComposeService,
 			"hostname":        route.Hostname,
-		})
+		}
+		if strings.TrimSpace(sourceCopy.BuildStrategy) != "" {
+			auditMetadata["build_strategy"] = sourceCopy.BuildStrategy
+		}
+		if strings.TrimSpace(sourceCopy.ImageRef) != "" {
+			auditMetadata["image_ref"] = sourceCopy.ImageRef
+		}
+		s.appendAudit(principal, "app.import_github", "app", app.ID, app.TenantID, auditMetadata)
 
 		ops = append(ops, op)
 		appsByService[plan.Service.Name] = app
@@ -180,13 +175,17 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 	for _, plan := range plans {
 		app := appsByService[plan.Service.Name]
 		op := opsByService[plan.Service.Name]
+		buildStrategy := strings.TrimSpace(plan.Service.BuildStrategy)
+		if buildStrategy == "" && plan.Source.Type == model.AppSourceTypeDockerImage {
+			buildStrategy = model.AppSourceTypeDockerImage
+		}
 		serviceInfo := map[string]any{
 			"service":         plan.Service.Name,
 			"kind":            plan.Service.Kind,
 			"app_id":          app.ID,
 			"app_name":        app.Name,
 			"operation_id":    op.ID,
-			"build_strategy":  plan.Service.BuildStrategy,
+			"build_strategy":  buildStrategy,
 			"internal_port":   firstServicePort(app.Spec),
 			"compose_service": plan.Service.Name,
 		}
@@ -222,4 +221,22 @@ func resolveTopologyPrimaryService(services []sourceimport.ComposeService, prefe
 		}
 	}
 	return sourceimport.ComposeService{}, fmt.Errorf("primary service %q does not exist", preferred)
+}
+
+func buildQueuedComposeServiceSource(req importGitHubRequest, service sourceimport.ComposeService) (model.AppSource, error) {
+	if strings.TrimSpace(service.Image) != "" && strings.TrimSpace(service.BuildStrategy) == "" {
+		return buildQueuedImageSource(service.Image, service.Name, service.Name)
+	}
+	return buildQueuedGitHubSource(
+		req.RepoURL,
+		req.RepoVisibility,
+		req.RepoAuthToken,
+		req.Branch,
+		service.SourceDir,
+		service.DockerfilePath,
+		service.BuildContextDir,
+		service.BuildStrategy,
+		service.Name,
+		service.Name,
+	)
 }

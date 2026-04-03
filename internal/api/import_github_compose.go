@@ -94,7 +94,7 @@ func validateComposeDependencies(appServices, postgresServices []sourceimport.Co
 			if _, ok := supported[dep]; ok {
 				continue
 			}
-			return fmt.Errorf("compose service %q depends_on unsupported service %q; Fugue currently imports buildable app services and managed postgres only", service.Name, dep)
+			return fmt.Errorf("compose service %q depends_on unsupported service %q; Fugue currently imports application services and managed postgres only", service.Name, dep)
 		}
 	}
 	return nil

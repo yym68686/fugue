@@ -58,7 +58,7 @@ func (s *Server) handleImportImageApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	source, err := buildQueuedImageSource(req.ImageRef)
+	source, err := buildQueuedImageSource(req.ImageRef, "", "")
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
@@ -179,14 +179,16 @@ func (s *Server) handleImportImageApp(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func buildQueuedImageSource(imageRef string) (model.AppSource, error) {
+func buildQueuedImageSource(imageRef, imageNameSuffix, composeService string) (model.AppSource, error) {
 	imageRef = strings.TrimSpace(imageRef)
 	if imageRef == "" {
 		return model.AppSource{}, fmt.Errorf("image_ref is required")
 	}
 	return model.AppSource{
-		Type:     model.AppSourceTypeDockerImage,
-		ImageRef: imageRef,
+		Type:            model.AppSourceTypeDockerImage,
+		ImageRef:        imageRef,
+		ImageNameSuffix: strings.TrimSpace(imageNameSuffix),
+		ComposeService:  strings.TrimSpace(composeService),
 	}, nil
 }
 
