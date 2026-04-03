@@ -147,6 +147,45 @@ func TestHandleListProjectImageUsageReturnsProjectSummary(t *testing.T) {
 	}
 }
 
+func TestHandleGetBillingCountsManagedImageInventoryStorage(t *testing.T) {
+	t.Parallel()
+
+	stateStore, server, apiKey, tenant, _, _, _, _, _, _ := setupAppImagesTestServer(t)
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/billing", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Billing model.TenantBillingSummary `json:"billing"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+
+	if got := response.Billing.ManagedCommitted.StorageGibibytes; got != 1 {
+		t.Fatalf("expected billing committed storage to include 1 GiB of image inventory, got %d", got)
+	}
+	if !response.Billing.OverCap {
+		t.Fatalf("expected billing to be over-cap after adding image inventory storage, got %#v", response.Billing)
+	}
+	priceBook := model.DefaultBillingPriceBook()
+	freeCap := model.DefaultTenantFreeManagedCap()
+	expectedHourly := freeCap.CPUMilliCores*priceBook.CPUMicroCentsPerMilliCoreHour +
+		freeCap.MemoryMebibytes*priceBook.MemoryMicroCentsPerMiBHour +
+		priceBook.StorageMicroCentsPerGiBHour
+	if response.Billing.HourlyRateMicroCents != expectedHourly {
+		t.Fatalf("expected hourly rate %d with image inventory storage, got %d", expectedHourly, response.Billing.HourlyRateMicroCents)
+	}
+
+	summary, err := stateStore.GetTenantBillingSummary(tenant.ID)
+	if err != nil {
+		t.Fatalf("reload billing summary: %v", err)
+	}
+	if got := summary.ManagedCommitted.StorageGibibytes; got != 1 {
+		t.Fatalf("expected synced store billing summary to retain 1 GiB image storage, got %d", got)
+	}
+}
+
 func TestHandleRedeployAppImageQueuesHistoricalDeploy(t *testing.T) {
 	t.Parallel()
 

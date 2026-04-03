@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/appimages"
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
@@ -16,16 +17,18 @@ import (
 )
 
 type Service struct {
-	Store              *store.Store
-	Config             config.ControllerConfig
-	Renderer           runtime.Renderer
-	Logger             *log.Logger
-	importer           sourceImporter
-	registryPushBase   string
-	registryPullBase   string
-	latestGitHubCommit func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
-	newKubeClient      func(namespace string) (*kubeClient, error)
-	now                func() time.Time
+	Store                   *store.Store
+	Config                  config.ControllerConfig
+	Renderer                runtime.Renderer
+	Logger                  *log.Logger
+	importer                sourceImporter
+	registryPushBase        string
+	registryPullBase        string
+	inspectManagedImage     appimages.InspectFunc
+	syncBillingImageStorage bool
+	latestGitHubCommit      func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
+	newKubeClient           func(namespace string) (*kubeClient, error)
+	now                     func() time.Time
 }
 
 type sourceImporter interface {
@@ -98,6 +101,10 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.now == nil {
 		s.now = time.Now
 	}
+	if s.inspectManagedImage == nil {
+		s.inspectManagedImage = appimages.NewRemoteInspector().InspectImage
+	}
+	s.syncBillingImageStorage = true
 	if s.Config.LeaderElectionEnabled {
 		return s.runWithLeaderElection(ctx)
 	}

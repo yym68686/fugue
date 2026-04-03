@@ -149,6 +149,9 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	if _, err := s.Store.CompleteManagedOperationWithResult(op.ID, "", message, &finalSpec, &finalSource); err != nil {
 		return fmt.Errorf("complete import operation %s: %w", op.ID, err)
 	}
+	if err := s.syncTenantBillingImageStorage(ctx, app.TenantID); err != nil && s.Logger != nil {
+		s.Logger.Printf("skip billing image storage sync after import op=%s tenant=%s: %v", op.ID, app.TenantID, err)
+	}
 
 	s.Logger.Printf("operation %s completed import build; pushed_image=%s runtime_image=%s deploy=%s", op.ID, output.ImportResult.ImageRef, finalSpec.Image, deployOp.ID)
 	return nil

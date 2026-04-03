@@ -223,12 +223,14 @@ var postgresSchemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS fugue_tenant_billing (
 		tenant_id TEXT PRIMARY KEY REFERENCES fugue_tenants(id) ON DELETE CASCADE,
 		managed_cap_json JSONB NOT NULL,
+		managed_image_storage_gibibytes BIGINT NOT NULL DEFAULT 0,
 		balance_microcents BIGINT NOT NULL DEFAULT 0,
 		price_book_json JSONB NOT NULL,
 		last_accrued_at TIMESTAMPTZ NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL
 	)`,
+	`ALTER TABLE fugue_tenant_billing ADD COLUMN IF NOT EXISTS managed_image_storage_gibibytes BIGINT NOT NULL DEFAULT 0`,
 	`CREATE TABLE IF NOT EXISTS fugue_billing_events (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
@@ -286,9 +288,10 @@ var postgresSchemaStatements = []string{
 		updated_at TIMESTAMPTZ NOT NULL,
 		started_at TIMESTAMPTZ NULL,
 		completed_at TIMESTAMPTZ NULL
-	)`,
+		)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_status_created_at ON fugue_operations (status, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_assigned_runtime_status_created_at ON fugue_operations (assigned_runtime_id, status, created_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_tenant_app_created_at ON fugue_operations (tenant_id, app_id, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_import_failed_app_updated_created ON fugue_operations (app_id, updated_at DESC, created_at DESC) WHERE type = 'import' AND status = 'failed'`,
 	`CREATE TABLE IF NOT EXISTS fugue_audit_events (
 		id TEXT PRIMARY KEY,

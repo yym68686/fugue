@@ -34,13 +34,13 @@ func (s *Store) pgGetTenantBillingSummary(tenantID string) (model.TenantBillingS
 	if err != nil {
 		return model.TenantBillingSummary{}, err
 	}
-	accrueTenantBilling(&record, now)
-	if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, record); err != nil {
-		return model.TenantBillingSummary{}, err
-	}
-
 	state, err := s.pgLoadTenantBillingStateTx(ctx, tx, tenantID)
 	if err != nil {
+		return model.TenantBillingSummary{}, err
+	}
+	committed := tenantManagedCommittedResourcesForBilling(&state, record)
+	accrueTenantBillingWithCommittedStorage(&record, committed.StorageGibibytes, now)
+	if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, record); err != nil {
 		return model.TenantBillingSummary{}, err
 	}
 	summary := buildTenantBillingSummary(&state, record)
@@ -79,7 +79,12 @@ func (s *Store) pgUpdateTenantBilling(tenantID string, managedCap model.BillingR
 	if err != nil {
 		return model.TenantBillingSummary{}, err
 	}
-	accrueTenantBilling(&record, now)
+	state, err := s.pgLoadTenantBillingStateTx(ctx, tx, tenantID)
+	if err != nil {
+		return model.TenantBillingSummary{}, err
+	}
+	committed := tenantManagedCommittedResourcesForBilling(&state, record)
+	accrueTenantBillingWithCommittedStorage(&record, committed.StorageGibibytes, now)
 	record.ManagedCap = normalizedCap
 	record.UpdatedAt = now
 	if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, record); err != nil {
@@ -95,10 +100,6 @@ func (s *Store) pgUpdateTenantBilling(tenantID string, managedCap model.BillingR
 		return model.TenantBillingSummary{}, err
 	}
 
-	state, err := s.pgLoadTenantBillingStateTx(ctx, tx, tenantID)
-	if err != nil {
-		return model.TenantBillingSummary{}, err
-	}
 	summary := buildTenantBillingSummary(&state, record)
 
 	if err := tx.Commit(); err != nil {
@@ -134,7 +135,12 @@ func (s *Store) pgTopUpTenantBilling(tenantID string, amountCents int64, note st
 	if err != nil {
 		return model.TenantBillingSummary{}, err
 	}
-	accrueTenantBilling(&record, now)
+	state, err := s.pgLoadTenantBillingStateTx(ctx, tx, tenantID)
+	if err != nil {
+		return model.TenantBillingSummary{}, err
+	}
+	committed := tenantManagedCommittedResourcesForBilling(&state, record)
+	accrueTenantBillingWithCommittedStorage(&record, committed.StorageGibibytes, now)
 	record.BalanceMicroCents += amountCents * microCentsPerCent
 	record.UpdatedAt = now
 	if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, record); err != nil {
@@ -157,10 +163,6 @@ func (s *Store) pgTopUpTenantBilling(tenantID string, amountCents int64, note st
 		return model.TenantBillingSummary{}, err
 	}
 
-	state, err := s.pgLoadTenantBillingStateTx(ctx, tx, tenantID)
-	if err != nil {
-		return model.TenantBillingSummary{}, err
-	}
 	summary := buildTenantBillingSummary(&state, record)
 
 	if err := tx.Commit(); err != nil {
@@ -196,7 +198,12 @@ func (s *Store) pgSetTenantBillingBalance(tenantID string, balanceCents int64, m
 	if err != nil {
 		return model.TenantBillingSummary{}, err
 	}
-	accrueTenantBilling(&record, now)
+	state, err := s.pgLoadTenantBillingStateTx(ctx, tx, tenantID)
+	if err != nil {
+		return model.TenantBillingSummary{}, err
+	}
+	committed := tenantManagedCommittedResourcesForBilling(&state, record)
+	accrueTenantBillingWithCommittedStorage(&record, committed.StorageGibibytes, now)
 	previousBalanceMicroCents := record.BalanceMicroCents
 	targetBalanceMicroCents := balanceCents * microCentsPerCent
 	if previousBalanceMicroCents != targetBalanceMicroCents {
@@ -218,14 +225,54 @@ func (s *Store) pgSetTenantBillingBalance(tenantID string, balanceCents int64, m
 		}
 	}
 
+	summary := buildTenantBillingSummary(&state, record)
+
+	if err := tx.Commit(); err != nil {
+		return model.TenantBillingSummary{}, fmt.Errorf("commit billing balance transaction: %w", err)
+	}
+	return summary, nil
+}
+
+func (s *Store) pgSyncTenantBillingImageStorage(tenantID string, storageGibibytes int64) (model.TenantBillingSummary, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.TenantBillingSummary{}, fmt.Errorf("begin billing image sync transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	exists, err := s.pgTenantExistsTx(ctx, tx, tenantID)
+	if err != nil {
+		return model.TenantBillingSummary{}, err
+	}
+	if !exists {
+		return model.TenantBillingSummary{}, ErrNotFound
+	}
+
+	now := time.Now().UTC()
+	record, err := s.pgEnsureTenantBillingRecordTx(ctx, tx, tenantID, true, now)
+	if err != nil {
+		return model.TenantBillingSummary{}, err
+	}
 	state, err := s.pgLoadTenantBillingStateTx(ctx, tx, tenantID)
 	if err != nil {
+		return model.TenantBillingSummary{}, err
+	}
+	committed := tenantManagedCommittedResourcesForBilling(&state, record)
+	accrueTenantBillingWithCommittedStorage(&record, committed.StorageGibibytes, now)
+	if record.ManagedImageStorageGibibytes != storageGibibytes {
+		record.ManagedImageStorageGibibytes = storageGibibytes
+		record.UpdatedAt = now
+	}
+	if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, record); err != nil {
 		return model.TenantBillingSummary{}, err
 	}
 	summary := buildTenantBillingSummary(&state, record)
 
 	if err := tx.Commit(); err != nil {
-		return model.TenantBillingSummary{}, fmt.Errorf("commit billing balance transaction: %w", err)
+		return model.TenantBillingSummary{}, fmt.Errorf("commit billing image sync transaction: %w", err)
 	}
 	return summary, nil
 }
@@ -242,13 +289,13 @@ func (s *Store) ensureTenantBillingRecordsTx(ctx context.Context, tx *sql.Tx) er
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_tenant_billing (tenant_id, managed_cap_json, balance_microcents, price_book_json, last_accrued_at, created_at, updated_at)
-SELECT t.id, $1, $2, $3, $4, $4, $4
+INSERT INTO fugue_tenant_billing (tenant_id, managed_cap_json, managed_image_storage_gibibytes, balance_microcents, price_book_json, last_accrued_at, created_at, updated_at)
+SELECT t.id, $1, $2, $3, $4, $5, $5, $5
 FROM fugue_tenants AS t
 LEFT JOIN fugue_tenant_billing AS b
 	ON b.tenant_id = t.id
 WHERE b.tenant_id IS NULL
-`, managedCapJSON, defaultRecord.BalanceMicroCents, priceBookJSON, now); err != nil {
+`, managedCapJSON, defaultRecord.ManagedImageStorageGibibytes, defaultRecord.BalanceMicroCents, priceBookJSON, now); err != nil {
 		return fmt.Errorf("ensure tenant billing defaults: %w", err)
 	}
 	return nil
@@ -425,7 +472,7 @@ func (s *Store) pgEnsureTenantBillingRecordTx(ctx context.Context, tx *sql.Tx, t
 
 func (s *Store) pgGetTenantBillingRecordTx(ctx context.Context, tx *sql.Tx, tenantID string, forUpdate bool) (model.TenantBilling, error) {
 	query := `
-SELECT tenant_id, managed_cap_json, balance_microcents, price_book_json, last_accrued_at, created_at, updated_at
+SELECT tenant_id, managed_cap_json, managed_image_storage_gibibytes, balance_microcents, price_book_json, last_accrued_at, created_at, updated_at
 FROM fugue_tenant_billing
 WHERE tenant_id = $1
 `
@@ -463,10 +510,10 @@ func (s *Store) pgInsertTenantBillingRecordTx(ctx context.Context, tx *sql.Tx, r
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_tenant_billing (tenant_id, managed_cap_json, balance_microcents, price_book_json, last_accrued_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO fugue_tenant_billing (tenant_id, managed_cap_json, managed_image_storage_gibibytes, balance_microcents, price_book_json, last_accrued_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 ON CONFLICT (tenant_id) DO NOTHING
-`, record.TenantID, managedCapJSON, record.BalanceMicroCents, priceBookJSON, record.LastAccruedAt, record.CreatedAt, record.UpdatedAt); err != nil {
+`, record.TenantID, managedCapJSON, record.ManagedImageStorageGibibytes, record.BalanceMicroCents, priceBookJSON, record.LastAccruedAt, record.CreatedAt, record.UpdatedAt); err != nil {
 		return fmt.Errorf("insert tenant billing %s: %w", record.TenantID, err)
 	}
 	return nil
@@ -484,13 +531,14 @@ func (s *Store) pgUpdateTenantBillingRecordTx(ctx context.Context, tx *sql.Tx, r
 	if _, err := tx.ExecContext(ctx, `
 UPDATE fugue_tenant_billing
 SET managed_cap_json = $2,
-	balance_microcents = $3,
-	price_book_json = $4,
-	last_accrued_at = $5,
-	created_at = $6,
-	updated_at = $7
+	managed_image_storage_gibibytes = $3,
+	balance_microcents = $4,
+	price_book_json = $5,
+	last_accrued_at = $6,
+	created_at = $7,
+	updated_at = $8
 WHERE tenant_id = $1
-`, record.TenantID, managedCapJSON, record.BalanceMicroCents, priceBookJSON, record.LastAccruedAt, record.CreatedAt, record.UpdatedAt); err != nil {
+`, record.TenantID, managedCapJSON, record.ManagedImageStorageGibibytes, record.BalanceMicroCents, priceBookJSON, record.LastAccruedAt, record.CreatedAt, record.UpdatedAt); err != nil {
 		return fmt.Errorf("update tenant billing %s: %w", record.TenantID, err)
 	}
 	return nil
@@ -514,7 +562,7 @@ func scanTenantBilling(scanner sqlScanner) (model.TenantBilling, error) {
 	var record model.TenantBilling
 	var managedCapRaw []byte
 	var priceBookRaw []byte
-	if err := scanner.Scan(&record.TenantID, &managedCapRaw, &record.BalanceMicroCents, &priceBookRaw, &record.LastAccruedAt, &record.CreatedAt, &record.UpdatedAt); err != nil {
+	if err := scanner.Scan(&record.TenantID, &managedCapRaw, &record.ManagedImageStorageGibibytes, &record.BalanceMicroCents, &priceBookRaw, &record.LastAccruedAt, &record.CreatedAt, &record.UpdatedAt); err != nil {
 		return model.TenantBilling{}, err
 	}
 	managedCap, err := decodeJSONValue[model.BillingResourceSpec](managedCapRaw)

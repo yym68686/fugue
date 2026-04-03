@@ -636,8 +636,23 @@ func (s *Server) handleGetNodeKeyUsages(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleListRuntimes(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	s.trySyncManagedSharedLocationRuntimes(r.Context())
+	timings := serverTimingFromContext(r.Context())
+
+	syncLocations, err := readBoolQuery(r, "sync_locations", true)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if syncLocations {
+		syncStartedAt := time.Now()
+		s.trySyncManagedSharedLocationRuntimes(r.Context())
+		timings.Add("runtime_sync", time.Since(syncStartedAt))
+	}
+
+	storeStartedAt := time.Now()
 	runtimes, err := s.store.ListRuntimes(principal.TenantID, principal.IsPlatformAdmin())
+	timings.Add("store_runtimes", time.Since(storeStartedAt))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -712,7 +727,23 @@ func (s *Server) handleCreateRuntime(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
+	timings := serverTimingFromContext(r.Context())
+
+	includeLiveStatus, err := readBoolQuery(r, "include_live_status", true)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	includeResourceUsage, err := readBoolQuery(r, "include_resource_usage", true)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	storeStartedAt := time.Now()
 	apps, err := s.store.ListApps(principal.TenantID, principal.IsPlatformAdmin())
+	timings.Add("store_apps", time.Since(storeStartedAt))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -724,8 +755,16 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		}
 		visibleApps = append(visibleApps, app)
 	}
-	visibleApps = s.overlayManagedAppStatuses(r.Context(), visibleApps)
-	visibleApps = s.overlayCurrentResourceUsageOnApps(r.Context(), visibleApps)
+	if includeLiveStatus {
+		liveStatusStartedAt := time.Now()
+		visibleApps = s.overlayManagedAppStatuses(r.Context(), visibleApps)
+		timings.Add("live_status", time.Since(liveStatusStartedAt))
+	}
+	if includeResourceUsage {
+		resourceUsageStartedAt := time.Now()
+		visibleApps = s.overlayCurrentResourceUsageOnApps(r.Context(), visibleApps)
+		timings.Add("resource_usage", time.Since(resourceUsageStartedAt))
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"apps": sanitizeAppsForAPI(visibleApps)})
 }
 
@@ -1013,7 +1052,19 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListOperations(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	ops, err := s.store.ListOperations(principal.TenantID, principal.IsPlatformAdmin())
+	timings := serverTimingFromContext(r.Context())
+	appID := readOptionalStringQuery(r, "app_id")
+
+	storeStartedAt := time.Now()
+	var ops []model.Operation
+	var err error
+	if appID != "" {
+		ops, err = s.store.ListOperationsByApp(principal.TenantID, principal.IsPlatformAdmin(), appID)
+		timings.Add("store_operations_app", time.Since(storeStartedAt))
+	} else {
+		ops, err = s.store.ListOperations(principal.TenantID, principal.IsPlatformAdmin())
+		timings.Add("store_operations", time.Since(storeStartedAt))
+	}
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

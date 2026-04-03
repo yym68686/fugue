@@ -13,6 +13,9 @@ func (s *Server) Handler() http.Handler {
 		if s.maybeHandleAppProxy(w, r) {
 			return
 		}
-		mux.ServeHTTP(w, r)
+
+		timedRequest, recorder := withServerTiming(r)
+		timedWriter := newServerTimingResponseWriter(w, recorder)
+		mux.ServeHTTP(timedWriter, timedRequest)
 	}))
 }

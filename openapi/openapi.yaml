@@ -698,6 +698,13 @@ paths:
       x-fugue-handler: handleListRuntimes
       security:
         - BearerAuth: []
+      parameters:
+        - in: query
+          name: sync_locations
+          required: false
+          description: When false, skip sync-on-read for managed shared runtime locations.
+          schema:
+            type: boolean
       responses:
         '200':
           description: Successful response
@@ -1013,6 +1020,19 @@ paths:
       x-fugue-handler: handleListApps
       security:
         - BearerAuth: []
+      parameters:
+        - in: query
+          name: include_live_status
+          required: false
+          description: When false, skip the managed app live status overlay.
+          schema:
+            type: boolean
+        - in: query
+          name: include_resource_usage
+          required: false
+          description: When false, skip the current resource usage overlay.
+          schema:
+            type: boolean
       responses:
         '200':
           description: Successful response
@@ -2002,6 +2022,13 @@ paths:
       x-fugue-handler: handleListOperations
       security:
         - BearerAuth: []
+      parameters:
+        - in: query
+          name: app_id
+          required: false
+          description: Limit operations to a single app.
+          schema:
+            type: string
       responses:
         '200':
           description: Successful response

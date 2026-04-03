@@ -42,7 +42,8 @@ func (s *Store) GetTenantBillingSummary(tenantID string) (model.TenantBillingSum
 		}
 		now := time.Now().UTC()
 		billing := ensureTenantBillingRecord(state, tenantID, now)
-		accrueTenantBilling(billing, now)
+		committed := tenantManagedCommittedResourcesForBilling(state, *billing)
+		accrueTenantBillingWithCommittedStorage(billing, committed.StorageGibibytes, now)
 		summary = buildTenantBillingSummary(state, *billing)
 		return nil
 	})
@@ -70,7 +71,8 @@ func (s *Store) UpdateTenantBilling(tenantID string, managedCap model.BillingRes
 		}
 		now := time.Now().UTC()
 		billing := ensureTenantBillingRecord(state, tenantID, now)
-		accrueTenantBilling(billing, now)
+		committed := tenantManagedCommittedResourcesForBilling(state, *billing)
+		accrueTenantBillingWithCommittedStorage(billing, committed.StorageGibibytes, now)
 		billing.ManagedCap = normalizedCap
 		billing.UpdatedAt = now
 		appendTenantBillingEvent(state, newTenantBillingConfigUpdatedEvent(
@@ -103,7 +105,8 @@ func (s *Store) TopUpTenantBilling(tenantID string, amountCents int64, note stri
 		}
 		now := time.Now().UTC()
 		billing := ensureTenantBillingRecord(state, tenantID, now)
-		accrueTenantBilling(billing, now)
+		committed := tenantManagedCommittedResourcesForBilling(state, *billing)
+		accrueTenantBillingWithCommittedStorage(billing, committed.StorageGibibytes, now)
 		billing.BalanceMicroCents += amountCents * microCentsPerCent
 		billing.UpdatedAt = now
 
@@ -143,7 +146,8 @@ func (s *Store) SetTenantBillingBalance(tenantID string, balanceCents int64, met
 		}
 		now := time.Now().UTC()
 		billing := ensureTenantBillingRecord(state, tenantID, now)
-		accrueTenantBilling(billing, now)
+		committed := tenantManagedCommittedResourcesForBilling(state, *billing)
+		accrueTenantBillingWithCommittedStorage(billing, committed.StorageGibibytes, now)
 		previousBalanceMicroCents := billing.BalanceMicroCents
 		if previousBalanceMicroCents != targetBalanceMicroCents {
 			billing.BalanceMicroCents = targetBalanceMicroCents
@@ -155,6 +159,34 @@ func (s *Store) SetTenantBillingBalance(tenantID string, balanceCents int64, met
 				now,
 				metadata,
 			))
+		}
+		summary = buildTenantBillingSummary(state, *billing)
+		return nil
+	})
+	return summary, err
+}
+
+func (s *Store) SyncTenantBillingImageStorage(tenantID string, storageGibibytes int64) (model.TenantBillingSummary, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" || storageGibibytes < 0 {
+		return model.TenantBillingSummary{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgSyncTenantBillingImageStorage(tenantID, storageGibibytes)
+	}
+
+	var summary model.TenantBillingSummary
+	err := s.withLockedState(true, func(state *model.State) error {
+		if findTenant(state, tenantID) < 0 {
+			return ErrNotFound
+		}
+		now := time.Now().UTC()
+		billing := ensureTenantBillingRecord(state, tenantID, now)
+		committed := tenantManagedCommittedResourcesForBilling(state, *billing)
+		accrueTenantBillingWithCommittedStorage(billing, committed.StorageGibibytes, now)
+		if billing.ManagedImageStorageGibibytes != storageGibibytes {
+			billing.ManagedImageStorageGibibytes = storageGibibytes
+			billing.UpdatedAt = now
 		}
 		summary = buildTenantBillingSummary(state, *billing)
 		return nil
@@ -286,6 +318,9 @@ func normalizeTenantBillingRecord(record *model.TenantBilling, now time.Time) {
 		return
 	}
 	record.TenantID = strings.TrimSpace(record.TenantID)
+	if record.ManagedImageStorageGibibytes < 0 {
+		record.ManagedImageStorageGibibytes = 0
+	}
 	record.PriceBook = normalizeBillingPriceBook(record.PriceBook)
 	if record.CreatedAt.IsZero() {
 		record.CreatedAt = now
@@ -302,6 +337,7 @@ func shouldBackfillLegacyTenantBillingRecord(record model.TenantBilling) bool {
 	return record.ManagedCap.CPUMilliCores == 0 &&
 		record.ManagedCap.MemoryMebibytes == 0 &&
 		record.ManagedCap.StorageGibibytes == 0 &&
+		record.ManagedImageStorageGibibytes == 0 &&
 		record.BalanceMicroCents == 0
 }
 
@@ -464,6 +500,10 @@ func deleteTenantBillingEvents(events []model.TenantBillingEvent, tenantID strin
 }
 
 func accrueTenantBilling(record *model.TenantBilling, now time.Time) {
+	accrueTenantBillingWithCommittedStorage(record, record.ManagedCap.StorageGibibytes, now)
+}
+
+func accrueTenantBillingWithCommittedStorage(record *model.TenantBilling, committedStorageGibibytes int64, now time.Time) {
 	if record == nil {
 		return
 	}
@@ -471,7 +511,7 @@ func accrueTenantBilling(record *model.TenantBilling, now time.Time) {
 	if !now.After(record.LastAccruedAt) {
 		return
 	}
-	hourlyRate := billingHourlyRateMicroCents(*record)
+	hourlyRate := billingHourlyRateMicroCentsWithCommittedStorage(*record, committedStorageGibibytes)
 	if hourlyRate > 0 {
 		record.BalanceMicroCents -= hourlyRate * now.Sub(record.LastAccruedAt).Nanoseconds() / int64(time.Hour)
 	}
@@ -484,26 +524,43 @@ func hasBillableManagedEnvelope(spec model.BillingResourceSpec) bool {
 }
 
 func billingHourlyRateMicroCents(record model.TenantBilling) int64 {
+	return billingHourlyRateMicroCentsWithCommittedStorage(record, record.ManagedCap.StorageGibibytes)
+}
+
+func billingHourlyRateMicroCentsWithCommittedStorage(record model.TenantBilling, committedStorageGibibytes int64) int64 {
 	if !hasBillableManagedEnvelope(record.ManagedCap) {
 		return 0
 	}
 	priceBook := normalizeBillingPriceBook(record.PriceBook)
 	return record.ManagedCap.CPUMilliCores*priceBook.CPUMicroCentsPerMilliCoreHour +
 		record.ManagedCap.MemoryMebibytes*priceBook.MemoryMicroCentsPerMiBHour +
-		record.ManagedCap.StorageGibibytes*priceBook.StorageMicroCentsPerGiBHour
+		billingChargeableStorageGibibytes(record, committedStorageGibibytes)*priceBook.StorageMicroCentsPerGiBHour
 }
 
 func billingMonthlyEstimateMicroCents(record model.TenantBilling) int64 {
+	return billingMonthlyEstimateMicroCentsWithCommittedStorage(record, record.ManagedCap.StorageGibibytes)
+}
+
+func billingMonthlyEstimateMicroCentsWithCommittedStorage(record model.TenantBilling, committedStorageGibibytes int64) int64 {
 	priceBook := normalizeBillingPriceBook(record.PriceBook)
-	return billingHourlyRateMicroCents(record) * priceBook.HoursPerMonth
+	return billingHourlyRateMicroCentsWithCommittedStorage(record, committedStorageGibibytes) * priceBook.HoursPerMonth
 }
 
 func billingBalanceRestricted(record model.TenantBilling) bool {
-	return billingHourlyRateMicroCents(record) > 0 && record.BalanceMicroCents <= 0
+	return billingBalanceRestrictedWithCommittedStorage(record, record.ManagedCap.StorageGibibytes)
 }
 
 func billingRunwayHours(record model.TenantBilling) *float64 {
-	hourlyRate := billingHourlyRateMicroCents(record)
+	return billingRunwayHoursWithCommittedStorage(record, record.ManagedCap.StorageGibibytes)
+}
+
+func billingBalanceRestrictedWithCommittedStorage(record model.TenantBilling, committedStorageGibibytes int64) bool {
+	return billingHourlyRateMicroCentsWithCommittedStorage(record, committedStorageGibibytes) > 0 &&
+		record.BalanceMicroCents <= 0
+}
+
+func billingRunwayHoursWithCommittedStorage(record model.TenantBilling, committedStorageGibibytes int64) *float64 {
+	hourlyRate := billingHourlyRateMicroCentsWithCommittedStorage(record, committedStorageGibibytes)
 	if hourlyRate <= 0 || record.BalanceMicroCents <= 0 {
 		return nil
 	}
@@ -512,11 +569,11 @@ func billingRunwayHours(record model.TenantBilling) *float64 {
 }
 
 func buildTenantBillingSummary(state *model.State, record model.TenantBilling) model.TenantBillingSummary {
-	committed := tenantManagedCommittedResources(state, record.TenantID)
+	committed := tenantManagedCommittedResourcesForBilling(state, record)
 	available := clampResourceSpecSub(record.ManagedCap, committed)
-	billingActive := billingHourlyRateMicroCents(record) > 0
+	billingActive := billingHourlyRateMicroCentsWithCommittedStorage(record, committed.StorageGibibytes) > 0
 	overCap := billingActive && resourceSpecExceeds(committed, record.ManagedCap)
-	balanceRestricted := billingBalanceRestricted(record)
+	balanceRestricted := billingBalanceRestrictedWithCommittedStorage(record, committed.StorageGibibytes)
 	status, reason := tenantBillingStatus(record, committed)
 	events := recentTenantBillingEvents(state, record.TenantID)
 
@@ -533,10 +590,10 @@ func buildTenantBillingSummary(state *model.State, record model.TenantBilling) m
 		DefaultAppResources:       model.BillingResourceSpec{},
 		DefaultPostgresResources:  model.DefaultManagedPostgresBillingResources(),
 		PriceBook:                 normalizeBillingPriceBook(record.PriceBook),
-		HourlyRateMicroCents:      billingHourlyRateMicroCents(record),
-		MonthlyEstimateMicroCents: billingMonthlyEstimateMicroCents(record),
+		HourlyRateMicroCents:      billingHourlyRateMicroCentsWithCommittedStorage(record, committed.StorageGibibytes),
+		MonthlyEstimateMicroCents: billingMonthlyEstimateMicroCentsWithCommittedStorage(record, committed.StorageGibibytes),
 		BalanceMicroCents:         record.BalanceMicroCents,
-		RunwayHours:               billingRunwayHours(record),
+		RunwayHours:               billingRunwayHoursWithCommittedStorage(record, committed.StorageGibibytes),
 		LastAccruedAt:             record.LastAccruedAt,
 		UpdatedAt:                 record.UpdatedAt,
 		Events:                    events,
@@ -545,14 +602,14 @@ func buildTenantBillingSummary(state *model.State, record model.TenantBilling) m
 
 func tenantBillingStatus(record model.TenantBilling, committed model.BillingResourceSpec) (string, string) {
 	switch {
-	case billingHourlyRateMicroCents(record) <= 0:
-		return model.BillingStatusInactive, "Managed billing is inactive until both CPU and memory are above zero. Storage is billed when configured inside an active managed envelope. External-owned runtimes remain free."
+	case billingHourlyRateMicroCentsWithCommittedStorage(record, committed.StorageGibibytes) <= 0:
+		return model.BillingStatusInactive, "Managed billing is inactive until both CPU and memory are above zero. Storage, including retained managed image inventory, is billed inside an active managed envelope. External-owned runtimes remain free."
 	case resourceSpecExceeds(committed, record.ManagedCap):
-		return model.BillingStatusOverCap, "Current live managed capacity is above the saved envelope. Managed expansion still works while balance stays positive, and Fugue will lift the envelope automatically on the next managed capacity increase."
-	case billingBalanceRestricted(record):
+		return model.BillingStatusOverCap, "Current live managed capacity is above the saved envelope. This includes retained managed image inventory. Managed expansion still works while balance stays positive, and Fugue will lift the envelope automatically on the next managed capacity increase."
+	case billingBalanceRestrictedWithCommittedStorage(record, committed.StorageGibibytes):
 		return model.BillingStatusRestricted, "Balance is depleted. Top up before increasing managed capacity."
 	default:
-		return model.BillingStatusActive, "Managed capacity is metered hourly from the saved envelope, including configured storage. Fugue lifts the envelope automatically if a managed capacity increase goes past it. BYO VPS stays free."
+		return model.BillingStatusActive, "Managed capacity is metered hourly from the saved envelope. Storage billing uses the higher of the saved storage envelope or current managed storage, including retained managed image inventory. BYO VPS stays free."
 	}
 }
 
@@ -591,6 +648,15 @@ func tenantManagedCommittedResources(state *model.State, tenantID string) model.
 		total = addResourceSpec(total, appManagedBundleCommitment(state, app, app.Status.CurrentRuntimeID, app.Status.CurrentReplicas))
 	}
 	return total
+}
+
+func tenantManagedCommittedResourcesForBilling(state *model.State, record model.TenantBilling) model.BillingResourceSpec {
+	return addManagedImageStorageCommitment(tenantManagedCommittedResources(state, record.TenantID), record.ManagedImageStorageGibibytes)
+}
+
+func addManagedImageStorageCommitment(spec model.BillingResourceSpec, imageStorageGibibytes int64) model.BillingResourceSpec {
+	spec.StorageGibibytes += maxInt64(0, imageStorageGibibytes)
+	return spec
 }
 
 func appManagedBundleCommitment(state *model.State, app model.App, runtimeID string, replicas int) model.BillingResourceSpec {
@@ -695,8 +761,9 @@ func isBillableManagedRuntimeType(runtimeType string) bool {
 }
 
 func validateManagedOperationBilling(record model.TenantBilling, currentTotal, nextTotal model.BillingResourceSpec) error {
-	if billingBalanceRestricted(record) && resourceSpecExceeds(nextTotal, currentTotal) {
-		return describeBillingBalanceDepleted(record)
+	if billingBalanceRestrictedWithCommittedStorage(record, currentTotal.StorageGibibytes) &&
+		resourceSpecExceeds(nextTotal, currentTotal) {
+		return describeBillingBalanceDepletedWithCommittedStorage(record, currentTotal.StorageGibibytes)
 	}
 	return nil
 }
@@ -826,6 +893,16 @@ func projectedTenantManagedTotals(state *model.State, app model.App, op model.Op
 	return currentTotal, nextTotal, nil
 }
 
+func projectedTenantManagedTotalsWithBilling(state *model.State, app model.App, op model.Operation, record model.TenantBilling) (model.BillingResourceSpec, model.BillingResourceSpec, error) {
+	currentTotal, nextTotal, err := projectedTenantManagedTotals(state, app, op)
+	if err != nil {
+		return model.BillingResourceSpec{}, model.BillingResourceSpec{}, err
+	}
+	return addManagedImageStorageCommitment(currentTotal, record.ManagedImageStorageGibibytes),
+		addManagedImageStorageCommitment(nextTotal, record.ManagedImageStorageGibibytes),
+		nil
+}
+
 func nextManagedEnvelope(record model.TenantBilling, currentTotal, nextTotal model.BillingResourceSpec) (model.BillingResourceSpec, bool) {
 	if !resourceSpecExceeds(nextTotal, currentTotal) {
 		return record.ManagedCap, false
@@ -855,7 +932,11 @@ func describeBillingCapExceeded(record model.TenantBilling, nextTotal model.Bill
 }
 
 func describeBillingBalanceDepleted(record model.TenantBilling) error {
-	hourlyRateMicroCents := billingHourlyRateMicroCents(record)
+	return describeBillingBalanceDepletedWithCommittedStorage(record, record.ManagedCap.StorageGibibytes)
+}
+
+func describeBillingBalanceDepletedWithCommittedStorage(record model.TenantBilling, committedStorageGibibytes int64) error {
+	hourlyRateMicroCents := billingHourlyRateMicroCentsWithCommittedStorage(record, committedStorageGibibytes)
 	if hourlyRateMicroCents <= 0 {
 		return ErrBillingBalanceDepleted
 	}
@@ -865,6 +946,10 @@ func describeBillingBalanceDepleted(record model.TenantBilling) error {
 		record.BalanceMicroCents,
 		hourlyRateMicroCents,
 	)
+}
+
+func billingChargeableStorageGibibytes(record model.TenantBilling, committedStorageGibibytes int64) int64 {
+	return maxInt64(record.ManagedCap.StorageGibibytes, committedStorageGibibytes)
 }
 
 func workspaceStorageGibibytes(spec *model.AppWorkspaceSpec) int64 {

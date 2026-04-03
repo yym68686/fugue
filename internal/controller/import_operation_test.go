@@ -169,6 +169,80 @@ func TestExecuteManagedImportOperationImportsDockerImageSource(t *testing.T) {
 	}
 }
 
+func TestExecuteManagedImportOperationSyncsBillingImageStorage(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:     model.AppSourceTypeDockerImage,
+		ImageRef: "nginx:1.27",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	specCopy := app.Spec
+	sourceCopy := *app.Source
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		DesiredSource:   &sourceCopy,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+
+	svc := &Service{
+		Store:                   stateStore,
+		Logger:                  log.New(io.Discard, "", 0),
+		importer:                &recordingImporter{},
+		registryPushBase:        "registry.push.example",
+		registryPullBase:        "registry.pull.example",
+		syncBillingImageStorage: true,
+		inspectManagedImage: func(_ context.Context, imageRef string) (bool, map[string]int64, error) {
+			if imageRef != "registry.push.example/fugue-apps/demo:image-abc123" {
+				return false, nil, nil
+			}
+			return true, map[string]int64{
+				"sha256:manifest": 32,
+				"sha256:config":   64,
+			}, nil
+		},
+	}
+
+	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
+		t.Fatalf("execute managed import operation: %v", err)
+	}
+
+	summary, err := stateStore.GetTenantBillingSummary(tenant.ID)
+	if err != nil {
+		t.Fatalf("get billing summary: %v", err)
+	}
+	if got := summary.ManagedCommitted.StorageGibibytes; got != 1 {
+		t.Fatalf("expected billing summary to include 1 GiB synced image storage, got %d", got)
+	}
+}
+
 func TestExecuteManagedImportOperationDoesNotConstrainBuildPlacementByRuntimeLocation(t *testing.T) {
 	t.Parallel()
 

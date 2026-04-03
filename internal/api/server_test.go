@@ -856,3 +856,49 @@ func TestNodeKeyUsagesEndpointReturnsRuntimes(t *testing.T) {
 		t.Fatalf("expected runtimes list in response body, got %s", body)
 	}
 }
+
+func TestListRuntimesAllowsSkippingManagedLocationSync(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Runtime Sync Skip Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, apiSecret, err := s.CreateAPIKey(tenant.ID, "viewer", []string{"project.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	clusterClientCalls := 0
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		clusterClientCalls++
+		return nil, errors.New("unexpected cluster inventory lookup")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/runtimes?sync_locations=false", nil)
+	req.Header.Set("Authorization", "Bearer "+apiSecret)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	if clusterClientCalls != 0 {
+		t.Fatalf("expected managed location sync to be skipped, got %d calls", clusterClientCalls)
+	}
+
+	serverTiming := recorder.Header().Get("Server-Timing")
+	if !strings.Contains(serverTiming, "store_runtimes;dur=") {
+		t.Fatalf("expected store_runtimes timing metric, got %q", serverTiming)
+	}
+	if strings.Contains(serverTiming, "runtime_sync;dur=") {
+		t.Fatalf("expected runtime_sync timing metric to be absent, got %q", serverTiming)
+	}
+}

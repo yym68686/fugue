@@ -54,13 +54,14 @@ type BillingPriceBook struct {
 }
 
 type TenantBilling struct {
-	TenantID          string              `json:"tenant_id"`
-	ManagedCap        BillingResourceSpec `json:"managed_cap"`
-	BalanceMicroCents int64               `json:"balance_microcents"`
-	PriceBook         BillingPriceBook    `json:"price_book"`
-	LastAccruedAt     time.Time           `json:"last_accrued_at"`
-	CreatedAt         time.Time           `json:"created_at"`
-	UpdatedAt         time.Time           `json:"updated_at"`
+	TenantID                     string              `json:"tenant_id"`
+	ManagedCap                   BillingResourceSpec `json:"managed_cap"`
+	ManagedImageStorageGibibytes int64               `json:"managed_image_storage_gibibytes,omitempty"`
+	BalanceMicroCents            int64               `json:"balance_microcents"`
+	PriceBook                    BillingPriceBook    `json:"price_book"`
+	LastAccruedAt                time.Time           `json:"last_accrued_at"`
+	CreatedAt                    time.Time           `json:"created_at"`
+	UpdatedAt                    time.Time           `json:"updated_at"`
 }
 
 type TenantBillingEvent struct {

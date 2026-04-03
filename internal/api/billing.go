@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"fugue/internal/appimages"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 )
@@ -22,6 +23,7 @@ func (s *Server) handleGetBilling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.refreshTenantBillingImageStorage(r.Context(), tenantID, principal.IsPlatformAdmin())
 	summary, err := s.store.GetTenantBillingSummary(tenantID)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -59,6 +61,7 @@ func (s *Server) handleUpdateBilling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.refreshTenantBillingImageStorage(r.Context(), tenantID, principal.IsPlatformAdmin())
 	summary, err := s.store.UpdateTenantBilling(tenantID, req.ManagedCap)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -102,6 +105,7 @@ func (s *Server) handleTopUpBilling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.refreshTenantBillingImageStorage(r.Context(), tenantID, principal.IsPlatformAdmin())
 	summary, err := s.store.TopUpTenantBilling(tenantID, req.AmountCents, req.Note)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -153,6 +157,7 @@ func (s *Server) handleSetBillingBalance(w http.ResponseWriter, r *http.Request)
 		metadata["note"] = note
 	}
 
+	s.refreshTenantBillingImageStorage(r.Context(), tenantID, true)
 	summary, err := s.store.SetTenantBillingBalance(tenantID, req.BalanceCents, metadata)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -166,6 +171,79 @@ func (s *Server) handleSetBillingBalance(w http.ResponseWriter, r *http.Request)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"billing": summary,
 	})
+}
+
+func (s *Server) refreshTenantBillingImageStorage(ctx context.Context, tenantID string, platformAdmin bool) {
+	if !s.appImageInventoryConfigured() {
+		return
+	}
+	storageGibibytes, err := s.currentTenantManagedImageStorageGibibytes(ctx, tenantID, platformAdmin)
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("skip billing image storage refresh for tenant=%s: %v", tenantID, err)
+		}
+		return
+	}
+	if _, err := s.store.SyncTenantBillingImageStorage(tenantID, storageGibibytes); err != nil && s.log != nil {
+		s.log.Printf("skip billing image storage sync for tenant=%s: %v", tenantID, err)
+	}
+}
+
+func (s *Server) currentTenantManagedImageStorageGibibytes(ctx context.Context, tenantID string, platformAdmin bool) (int64, error) {
+	apps, err := s.store.ListApps(tenantID, platformAdmin)
+	if err != nil {
+		return 0, err
+	}
+	if platformAdmin {
+		filtered := make([]model.App, 0, len(apps))
+		for _, app := range apps {
+			if app.TenantID == tenantID {
+				filtered = append(filtered, app)
+			}
+		}
+		apps = filtered
+	}
+
+	ops, err := s.store.ListOperations(tenantID, platformAdmin)
+	if err != nil {
+		return 0, err
+	}
+	if platformAdmin {
+		appIDs := make(map[string]struct{}, len(apps))
+		for _, app := range apps {
+			appIDs[app.ID] = struct{}{}
+		}
+		filtered := make([]model.Operation, 0, len(ops))
+		for _, op := range ops {
+			if _, ok := appIDs[op.AppID]; ok {
+				filtered = append(filtered, op)
+			}
+		}
+		ops = filtered
+	}
+
+	storageBytes, err := appimages.MeasureTenantStorageBytes(ctx, func(ctx context.Context, imageRef string) (bool, map[string]int64, error) {
+		result, err := s.appImageRegistry.InspectImage(ctx, imageRef)
+		if err != nil {
+			return false, nil, err
+		}
+		return result.Exists, cloneAppImageBlobSizes(result.BlobSizes), nil
+	}, apps, ops, s.registryPushBase, s.registryPullBase)
+	if err != nil {
+		return 0, err
+	}
+	return appimages.StorageBytesToGibibytes(storageBytes), nil
+}
+
+func cloneAppImageBlobSizes(blobSizes map[string]int64) map[string]int64 {
+	if len(blobSizes) == 0 {
+		return nil
+	}
+	cloned := make(map[string]int64, len(blobSizes))
+	for digest, sizeBytes := range blobSizes {
+		cloned[digest] = sizeBytes
+	}
+	return cloned
 }
 
 func (s *Server) currentTenantManagedUsage(ctx context.Context, tenantID string, platformAdmin bool) *model.ResourceUsage {

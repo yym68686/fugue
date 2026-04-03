@@ -213,6 +213,7 @@ type kubeNodeSummaryPodRef struct {
 
 func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
+	timings := serverTimingFromContext(r.Context())
 
 	clientFactory := s.newClusterNodeClient
 	if clientFactory == nil {
@@ -224,15 +225,20 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	inventoryStartedAt := time.Now()
 	snapshots, err := client.listClusterNodeInventory(r.Context())
+	timings.Add("cluster_inventory", time.Since(inventoryStartedAt))
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+
+	syncStartedAt := time.Now()
 	if err := s.syncManagedSharedLocationRuntimesFromSnapshots(snapshots); err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
+	timings.Add("runtime_sync", time.Since(syncStartedAt))
 	managedSharedRuntime, err := s.store.GetRuntime(tenantSharedRuntimeID)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -240,17 +246,25 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 	}
 	_, defaultSharedDisplayRegion, _ := selectDefaultManagedSharedLocation(snapshots)
 
+	storeNodesStartedAt := time.Now()
 	runtimes, err := s.store.ListNodes(principal.TenantID, principal.IsPlatformAdmin())
+	timings.Add("store_nodes", time.Since(storeNodesStartedAt))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
+
+	storeAppsStartedAt := time.Now()
 	apps, err := s.store.ListApps(principal.TenantID, principal.IsPlatformAdmin())
+	timings.Add("store_apps", time.Since(storeAppsStartedAt))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
+
+	storeServicesStartedAt := time.Now()
 	services, err := s.store.ListBackingServices(principal.TenantID, principal.IsPlatformAdmin())
+	timings.Add("store_services", time.Since(storeServicesStartedAt))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

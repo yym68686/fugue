@@ -6,11 +6,14 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/sourceimport"
+
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -134,18 +137,27 @@ type projectImageUsageAccumulator struct {
 
 func (s *Server) handleListProjectImageUsage(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
+	timings := serverTimingFromContext(r.Context())
+
+	appsStartedAt := time.Now()
 	apps, err := s.store.ListApps(principal.TenantID, principal.IsPlatformAdmin())
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	ops, err := s.store.ListOperations(principal.TenantID, principal.IsPlatformAdmin())
+	timings.Add("store_apps", time.Since(appsStartedAt))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
 
+	opsStartedAt := time.Now()
+	ops, err := s.store.ListOperations(principal.TenantID, principal.IsPlatformAdmin())
+	timings.Add("store_operations", time.Since(opsStartedAt))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+
+	buildStartedAt := time.Now()
 	response, err := s.buildProjectImageUsageResponse(r.Context(), visibleAppsForImageInventory(apps), ops)
+	timings.Add("project_image_usage", time.Since(buildStartedAt))
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadGateway, err.Error())
 		return
@@ -155,16 +167,23 @@ func (s *Server) handleListProjectImageUsage(w http.ResponseWriter, r *http.Requ
 
 func (s *Server) handleGetAppImages(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
+	timings := serverTimingFromContext(r.Context())
 	app, allowed := s.loadAuthorizedApp(w, r, principal)
 	if !allowed {
 		return
 	}
-	ops, err := s.store.ListOperations(principal.TenantID, principal.IsPlatformAdmin())
+
+	opsStartedAt := time.Now()
+	ops, err := s.store.ListOperationsByApp(principal.TenantID, principal.IsPlatformAdmin(), app.ID)
+	timings.Add("store_operations_app", time.Since(opsStartedAt))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	inventory, err := s.buildAppImageInventory(r.Context(), app, filterAppOperations(ops, app.ID))
+
+	inventoryStartedAt := time.Now()
+	inventory, err := s.buildAppImageInventory(r.Context(), app, ops)
+	timings.Add("app_image_inventory", time.Since(inventoryStartedAt))
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadGateway, err.Error())
 		return
@@ -174,6 +193,7 @@ func (s *Server) handleGetAppImages(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRedeployAppImage(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
+	timings := serverTimingFromContext(r.Context())
 	if !principal.IsPlatformAdmin() && !principal.HasScope("app.deploy") {
 		httpx.WriteError(w, http.StatusForbidden, "missing app.deploy scope")
 		return
@@ -193,12 +213,16 @@ func (s *Server) handleRedeployAppImage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	ops, err := s.store.ListOperations(principal.TenantID, principal.IsPlatformAdmin())
+	opsStartedAt := time.Now()
+	ops, err := s.store.ListOperationsByApp(principal.TenantID, principal.IsPlatformAdmin(), app.ID)
+	timings.Add("store_operations_app", time.Since(opsStartedAt))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	inventory, err := s.buildAppImageInventory(r.Context(), app, filterAppOperations(ops, app.ID))
+	inventoryStartedAt := time.Now()
+	inventory, err := s.buildAppImageInventory(r.Context(), app, ops)
+	timings.Add("app_image_inventory", time.Since(inventoryStartedAt))
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadGateway, err.Error())
 		return
@@ -255,6 +279,7 @@ func (s *Server) handleRedeployAppImage(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleDeleteAppImage(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
+	timings := serverTimingFromContext(r.Context())
 	if !principal.IsPlatformAdmin() && !principal.HasScope("app.write") && !principal.HasScope("app.delete") {
 		httpx.WriteError(w, http.StatusForbidden, "missing app.write or app.delete scope")
 		return
@@ -274,12 +299,16 @@ func (s *Server) handleDeleteAppImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ops, err := s.store.ListOperations(principal.TenantID, principal.IsPlatformAdmin())
+	opsStartedAt := time.Now()
+	ops, err := s.store.ListOperationsByApp(principal.TenantID, principal.IsPlatformAdmin(), app.ID)
+	timings.Add("store_operations_app", time.Since(opsStartedAt))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	inventory, err := s.buildAppImageInventory(r.Context(), app, filterAppOperations(ops, app.ID))
+	inventoryStartedAt := time.Now()
+	inventory, err := s.buildAppImageInventory(r.Context(), app, ops)
+	timings.Add("app_image_inventory", time.Since(inventoryStartedAt))
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadGateway, err.Error())
 		return
@@ -326,6 +355,7 @@ func (s *Server) handleDeleteAppImage(w http.ResponseWriter, r *http.Request) {
 		"registry_gc":  "completed",
 		"delete_state": appImageDeleteAuditState(deleteResult),
 	})
+	s.refreshTenantBillingImageStorage(r.Context(), app.TenantID, principal.IsPlatformAdmin())
 	httpx.WriteJSON(w, http.StatusOK, appImageDeleteResponse{
 		Image:              &version.Response,
 		Deleted:            deleteResult.Deleted,
@@ -457,12 +487,26 @@ func (s *Server) buildAppImageInventory(
 	sort.Strings(imageRefs)
 
 	inspectResults := make(map[string]appImageRegistryInspectResult, len(imageRefs))
+	var inspectResultsMu sync.Mutex
+
+	inspectGroup, inspectCtx := errgroup.WithContext(ctx)
+	inspectGroup.SetLimit(6)
 	for _, imageRef := range imageRefs {
-		result, err := s.appImageRegistry.InspectImage(ctx, imageRef)
-		if err != nil {
-			return builtAppImageInventory{}, err
-		}
-		inspectResults[imageRef] = result
+		imageRef := imageRef
+		inspectGroup.Go(func() error {
+			result, err := s.appImageRegistry.InspectImage(inspectCtx, imageRef)
+			if err != nil {
+				return err
+			}
+
+			inspectResultsMu.Lock()
+			inspectResults[imageRef] = result
+			inspectResultsMu.Unlock()
+			return nil
+		})
+	}
+	if err := inspectGroup.Wait(); err != nil {
+		return builtAppImageInventory{}, err
 	}
 
 	blobUsageCount := make(map[string]int)
@@ -769,16 +813,6 @@ func visibleAppsForImageInventory(apps []model.App) []model.App {
 		visible = append(visible, app)
 	}
 	return visible
-}
-
-func filterAppOperations(ops []model.Operation, appID string) []model.Operation {
-	filtered := make([]model.Operation, 0)
-	for _, op := range ops {
-		if op.AppID == appID {
-			filtered = append(filtered, op)
-		}
-	}
-	return filtered
 }
 
 func appCurrentImageTimestamp(app model.App) *time.Time {

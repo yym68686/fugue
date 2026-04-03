@@ -2106,11 +2106,11 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 		op.DesiredSpec = cloneAppSpec(op.DesiredSpec)
 		op.DesiredSource = cloneAppSource(op.DesiredSource)
 		billing := ensureTenantBillingRecord(state, app.TenantID, now)
-		accrueTenantBilling(billing, now)
-		currentTotal, nextTotal, err := projectedTenantManagedTotals(state, app, op)
+		currentTotal, nextTotal, err := projectedTenantManagedTotalsWithBilling(state, app, op, *billing)
 		if err != nil {
 			return err
 		}
+		accrueTenantBillingWithCommittedStorage(billing, currentTotal.StorageGibibytes, now)
 		effectiveBilling := *billing
 		nextEnvelope, envelopeChanged := nextManagedEnvelope(effectiveBilling, currentTotal, nextTotal)
 		if envelopeChanged {
@@ -2156,6 +2156,34 @@ func (s *Store) ListOperations(tenantID string, platformAdmin bool) ([]model.Ope
 			if platformAdmin || op.TenantID == tenantID {
 				ops = append(ops, op)
 			}
+		}
+		sort.Slice(ops, func(i, j int) bool {
+			return ops[i].CreatedAt.Before(ops[j].CreatedAt)
+		})
+		return nil
+	})
+	return ops, err
+}
+
+func (s *Store) ListOperationsByApp(tenantID string, platformAdmin bool, appID string) ([]model.Operation, error) {
+	appID = strings.TrimSpace(appID)
+	if appID == "" {
+		return s.ListOperations(tenantID, platformAdmin)
+	}
+	if s.usingDatabase() {
+		return s.pgListOperationsByApp(tenantID, platformAdmin, appID)
+	}
+
+	var ops []model.Operation
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, op := range state.Operations {
+			if !platformAdmin && op.TenantID != tenantID {
+				continue
+			}
+			if strings.TrimSpace(op.AppID) != appID {
+				continue
+			}
+			ops = append(ops, op)
 		}
 		sort.Slice(ops, func(i, j int) bool {
 			return ops[i].CreatedAt.Before(ops[j].CreatedAt)

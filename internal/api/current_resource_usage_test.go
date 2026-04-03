@@ -2,9 +2,11 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"fugue/internal/auth"
@@ -289,5 +291,88 @@ func assertResourceUsage(t *testing.T, usage *model.ResourceUsage, cpuMilliCores
 	}
 	if usage.EphemeralStorageBytes == nil || *usage.EphemeralStorageBytes != ephemeralStorageBytes {
 		t.Fatalf("expected ephemeral_storage_bytes=%d, got %#v", ephemeralStorageBytes, usage)
+	}
+}
+
+func TestListAppsAllowsSkippingOptionalOverlays(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Overlay Skip Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "viewer", []string{"project.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	if _, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:    "ghcr.io/example/demo:latest",
+		Ports:    []int{8080},
+		Replicas: 1,
+	}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	managedStatusCalls := 0
+	clusterInventoryCalls := 0
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server.newManagedAppStatusClient = func() (*managedAppStatusClient, error) {
+		managedStatusCalls++
+		return nil, errors.New("unexpected managed status lookup")
+	}
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		clusterInventoryCalls++
+		return nil, errors.New("unexpected cluster inventory lookup")
+	}
+
+	recorder := performJSONRequest(
+		t,
+		server,
+		http.MethodGet,
+		"/v1/apps?include_live_status=false&include_resource_usage=false",
+		apiKey,
+		nil,
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	if managedStatusCalls != 0 {
+		t.Fatalf("expected managed status overlay to be skipped, got %d calls", managedStatusCalls)
+	}
+	if clusterInventoryCalls != 0 {
+		t.Fatalf("expected resource usage overlay to be skipped, got %d calls", clusterInventoryCalls)
+	}
+
+	var response struct {
+		Apps []model.App `json:"apps"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if len(response.Apps) != 1 {
+		t.Fatalf("expected one app, got %#v", response.Apps)
+	}
+	if response.Apps[0].CurrentResourceUsage != nil {
+		t.Fatalf("expected current_resource_usage to be omitted when disabled, got %#v", response.Apps[0].CurrentResourceUsage)
+	}
+
+	serverTiming := recorder.Header().Get("Server-Timing")
+	if !strings.Contains(serverTiming, "store_apps;dur=") {
+		t.Fatalf("expected store_apps timing metric, got %q", serverTiming)
+	}
+	if strings.Contains(serverTiming, "live_status;dur=") {
+		t.Fatalf("expected live_status timing metric to be absent, got %q", serverTiming)
+	}
+	if strings.Contains(serverTiming, "resource_usage;dur=") {
+		t.Fatalf("expected resource_usage timing metric to be absent, got %q", serverTiming)
 	}
 }

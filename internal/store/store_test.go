@@ -3369,6 +3369,92 @@ func TestAppEffectiveResourcesIncludeWorkspaceStorage(t *testing.T) {
 	}
 }
 
+func TestSyncTenantBillingImageStorageContributesToCommittedStorageAndEstimate(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Image Billing Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+
+	summary, err := s.SyncTenantBillingImageStorage(tenant.ID, 5)
+	if err != nil {
+		t.Fatalf("sync image storage: %v", err)
+	}
+
+	if got := summary.ManagedCommitted.StorageGibibytes; got != 5 {
+		t.Fatalf("expected committed image storage 5 GiB, got %d", got)
+	}
+	if got := summary.HourlyRateMicroCents; got != billingHourlyRateMicroCentsWithCommittedStorage(model.TenantBilling{
+		ManagedCap: model.DefaultTenantFreeManagedCap(),
+		PriceBook:  model.DefaultBillingPriceBook(),
+	}, 5) {
+		t.Fatalf("expected hourly rate to include image storage, got %d", got)
+	}
+	if got := summary.MonthlyEstimateMicroCents; got != billingMonthlyEstimateMicroCentsWithCommittedStorage(model.TenantBilling{
+		ManagedCap: model.DefaultTenantFreeManagedCap(),
+		PriceBook:  model.DefaultBillingPriceBook(),
+	}, 5) {
+		t.Fatalf("expected monthly estimate to include image storage, got %d", got)
+	}
+	if !summary.OverCap {
+		t.Fatal("expected image storage beyond saved envelope to mark billing over-cap")
+	}
+}
+
+func TestSyncTenantBillingImageStorageAccruesUsingPreviousSnapshot(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Image Billing Accrual Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	if _, err := s.SyncTenantBillingImageStorage(tenant.ID, 2); err != nil {
+		t.Fatalf("seed image storage: %v", err)
+	}
+
+	startBalance := int64(9_000_000_000)
+	staleAccruedAt := time.Now().UTC().Add(-2 * time.Hour)
+	var seeded model.TenantBilling
+	if err := s.withLockedState(true, func(state *model.State) error {
+		index := findTenantBillingRecord(state, tenant.ID)
+		if index < 0 {
+			t.Fatalf("billing record for tenant %s not found", tenant.ID)
+		}
+		state.TenantBilling[index].BalanceMicroCents = startBalance
+		state.TenantBilling[index].LastAccruedAt = staleAccruedAt
+		state.TenantBilling[index].UpdatedAt = staleAccruedAt
+		seeded = state.TenantBilling[index]
+		return nil
+	}); err != nil {
+		t.Fatalf("seed stale billing snapshot: %v", err)
+	}
+
+	summary, err := s.SyncTenantBillingImageStorage(tenant.ID, 8)
+	if err != nil {
+		t.Fatalf("sync updated image storage: %v", err)
+	}
+
+	elapsedNanos := summary.LastAccruedAt.Sub(staleAccruedAt).Nanoseconds()
+	expectedBalance := startBalance - billingHourlyRateMicroCentsWithCommittedStorage(seeded, 2)*elapsedNanos/int64(time.Hour)
+	if summary.BalanceMicroCents != expectedBalance {
+		t.Fatalf("expected balance %d after accruing with previous image storage snapshot, got %d", expectedBalance, summary.BalanceMicroCents)
+	}
+	if got := summary.ManagedCommitted.StorageGibibytes; got != 8 {
+		t.Fatalf("expected committed storage to refresh to 8 GiB, got %d", got)
+	}
+}
+
 func TestExplicitZeroBillingConfigDoesNotBackfillAfterConfigEvent(t *testing.T) {
 	t.Parallel()
 
