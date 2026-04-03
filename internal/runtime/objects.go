@@ -243,9 +243,11 @@ func buildManagedPostgresObjects(namespace string, resource postgresRuntimeResou
 
 func buildAppDeploymentObject(namespace string, app model.App, labels map[string]string, scheduling SchedulingConstraints, postgresResources []postgresRuntimeResource) map[string]any {
 	container := map[string]any{
-		"name":      sanitizeName(app.Name),
-		"image":     app.Spec.Image,
-		"resources": runtimeResourceRequirements(app.Spec.Resources, model.DefaultManagedAppResources()),
+		"name":  sanitizeName(app.Name),
+		"image": app.Spec.Image,
+	}
+	if resources := runtimeResourceRequirements(app.Spec.Resources); resources != nil {
+		container["resources"] = resources
 	}
 	if len(app.Spec.Command) > 0 {
 		container["command"] = app.Spec.Command
@@ -393,25 +395,31 @@ func buildAppTCPReadinessProbe(port int) map[string]any {
 	}
 }
 
-func runtimeResourceRequirements(spec *model.ResourceSpec, defaults model.ResourceSpec) map[string]any {
-	resources := defaults
-	if spec != nil {
-		if spec.CPUMilliCores > 0 {
-			resources.CPUMilliCores = spec.CPUMilliCores
-		}
-		if spec.MemoryMebibytes > 0 {
-			resources.MemoryMebibytes = spec.MemoryMebibytes
-		}
+func runtimeResourceRequirements(spec *model.ResourceSpec) map[string]any {
+	if spec == nil {
+		return nil
 	}
+
+	requests := map[string]string{}
+	limits := map[string]string{}
+
+	if spec.CPUMilliCores > 0 {
+		cpu := strconv.FormatInt(spec.CPUMilliCores, 10) + "m"
+		requests["cpu"] = cpu
+		limits["cpu"] = cpu
+	}
+	if spec.MemoryMebibytes > 0 {
+		memory := strconv.FormatInt(spec.MemoryMebibytes, 10) + "Mi"
+		requests["memory"] = memory
+		limits["memory"] = memory
+	}
+	if len(requests) == 0 {
+		return nil
+	}
+
 	return map[string]any{
-		"requests": map[string]string{
-			"cpu":    strconv.FormatInt(resources.CPUMilliCores, 10) + "m",
-			"memory": strconv.FormatInt(resources.MemoryMebibytes, 10) + "Mi",
-		},
-		"limits": map[string]string{
-			"cpu":    strconv.FormatInt(resources.CPUMilliCores, 10) + "m",
-			"memory": strconv.FormatInt(resources.MemoryMebibytes, 10) + "Mi",
-		},
+		"requests": requests,
+		"limits":   limits,
 	}
 }
 

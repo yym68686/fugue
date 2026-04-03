@@ -161,7 +161,7 @@ func normalizeAppSpecResources(spec *model.AppSpec) error {
 	if spec == nil {
 		return ErrInvalidInput
 	}
-	resources, err := normalizeWorkloadResources(spec.Resources, model.DefaultManagedAppResources())
+	resources, err := normalizeOptionalWorkloadResources(spec.Resources)
 	if err != nil {
 		return err
 	}
@@ -172,6 +172,20 @@ func normalizeAppSpecResources(spec *model.AppSpec) error {
 		}
 	}
 	return nil
+}
+
+func normalizeOptionalWorkloadResources(spec *model.ResourceSpec) (*model.ResourceSpec, error) {
+	if spec == nil {
+		return nil, nil
+	}
+	out := *spec
+	if out.CPUMilliCores < 0 || out.MemoryMebibytes < 0 {
+		return nil, ErrInvalidInput
+	}
+	if out.CPUMilliCores == 0 && out.MemoryMebibytes == 0 {
+		return nil, nil
+	}
+	return &out, nil
 }
 
 func normalizePostgresSpecResources(spec *model.AppPostgresSpec) error {
@@ -505,7 +519,7 @@ func buildTenantBillingSummary(state *model.State, record model.TenantBilling) m
 		ManagedCap:                record.ManagedCap,
 		ManagedCommitted:          committed,
 		ManagedAvailable:          available,
-		DefaultAppResources:       model.DefaultManagedAppResources(),
+		DefaultAppResources:       model.ResourceSpec{},
 		DefaultPostgresResources:  model.DefaultManagedPostgresResources(),
 		PriceBook:                 normalizeBillingPriceBook(record.PriceBook),
 		HourlyRateMicroCents:      billingHourlyRateMicroCents(record),
@@ -629,7 +643,7 @@ func appEffectiveResources(spec model.AppSpec) model.ResourceSpec {
 	if spec.Resources != nil {
 		return *spec.Resources
 	}
-	return model.DefaultManagedAppResources()
+	return model.ResourceSpec{}
 }
 
 func postgresEffectiveResources(spec model.AppPostgresSpec) model.ResourceSpec {

@@ -194,6 +194,74 @@ func TestBuildAppDeploymentUsesRollingUpdateAndReadinessProbe(t *testing.T) {
 	}
 }
 
+func TestBuildAppDeploymentOmitsResourcesWhenUnset(t *testing.T) {
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	deployment := objects[1]
+	spec := deployment["spec"].(map[string]any)
+	template := spec["template"].(map[string]any)
+	podSpec := template["spec"].(map[string]any)
+	containers := podSpec["containers"].([]map[string]any)
+	if _, ok := containers[0]["resources"]; ok {
+		t.Fatalf("expected app container resources to be omitted when unset, got %#v", containers[0]["resources"])
+	}
+}
+
+func TestBuildAppDeploymentIncludesExplicitResources(t *testing.T) {
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			Resources: &model.ResourceSpec{MemoryMebibytes: 1536},
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	deployment := objects[1]
+	spec := deployment["spec"].(map[string]any)
+	template := spec["template"].(map[string]any)
+	podSpec := template["spec"].(map[string]any)
+	containers := podSpec["containers"].([]map[string]any)
+	resources, ok := containers[0]["resources"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected explicit app resources, got %#v", containers[0]["resources"])
+	}
+	requests, ok := resources["requests"].(map[string]string)
+	if !ok {
+		t.Fatalf("expected resource requests map, got %#v", resources["requests"])
+	}
+	limits, ok := resources["limits"].(map[string]string)
+	if !ok {
+		t.Fatalf("expected resource limits map, got %#v", resources["limits"])
+	}
+	if got := requests["memory"]; got != "1536Mi" {
+		t.Fatalf("expected memory request 1536Mi, got %#v", got)
+	}
+	if got := limits["memory"]; got != "1536Mi" {
+		t.Fatalf("expected memory limit 1536Mi, got %#v", got)
+	}
+	if _, ok := requests["cpu"]; ok {
+		t.Fatalf("expected cpu request to remain unset, got %#v", requests["cpu"])
+	}
+	if _, ok := limits["cpu"]; ok {
+		t.Fatalf("expected cpu limit to remain unset, got %#v", limits["cpu"])
+	}
+}
+
 func TestBuildAppObjectsIncludesPersistentWorkspaceSidecar(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",

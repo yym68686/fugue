@@ -2719,10 +2719,12 @@ func TestDeleteProjectConflictsUntilAppDeleted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	appResources := model.DefaultManagedAppResources()
 	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
 		Image:     "ghcr.io/example/demo:latest",
 		Ports:     []int{8080},
 		Replicas:  1,
+		Resources: &appResources,
 		RuntimeID: "runtime_managed_shared",
 	})
 	if err != nil {
@@ -2948,10 +2950,12 @@ func TestBillingAutoRaisesEnvelopeForManagedScaleBeyondConfiguredEnvelope(t *tes
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	appResources := model.DefaultManagedAppResources()
 	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
 		Image:     "ghcr.io/example/demo:latest",
 		Ports:     []int{8080},
 		Replicas:  1,
+		Resources: &appResources,
 		RuntimeID: "runtime_managed_shared",
 	})
 	if err != nil {
@@ -3011,6 +3015,37 @@ func TestBillingAutoRaisesEnvelopeForManagedScaleBeyondConfiguredEnvelope(t *tes
 	}
 }
 
+func TestCreateAppLeavesResourcesUnsetWhenNotSpecified(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Unbounded App Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	if app.Spec.Resources != nil {
+		t.Fatalf("expected app resources to remain unset, got %+v", *app.Spec.Resources)
+	}
+}
+
 func TestNewTenantsStartWithSeededFreeTierBilling(t *testing.T) {
 	t.Parallel()
 
@@ -3062,6 +3097,9 @@ func TestNewTenantsStartWithSeededFreeTierBilling(t *testing.T) {
 	}
 	if summary.BalanceMicroCents != expectedBalance {
 		t.Fatalf("expected seeded summary balance %d, got %d", expectedBalance, summary.BalanceMicroCents)
+	}
+	if summary.DefaultAppResources != (model.ResourceSpec{}) {
+		t.Fatalf("expected app default resources to remain unset, got %+v", summary.DefaultAppResources)
 	}
 }
 
@@ -3417,10 +3455,12 @@ func TestBillingAllowsScaleDownWhileOverCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	appResources := model.DefaultManagedAppResources()
 	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
 		Image:     "ghcr.io/example/demo:latest",
 		Ports:     []int{8080},
 		Replicas:  1,
+		Resources: &appResources,
 		RuntimeID: "runtime_managed_shared",
 	})
 	if err != nil {
@@ -3508,10 +3548,12 @@ func TestBillingDepletedBalanceOnlyBlocksCapacityIncrease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	appResources := model.DefaultManagedAppResources()
 	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
 		Image:     "ghcr.io/example/demo:latest",
 		Ports:     []int{8080},
 		Replicas:  1,
+		Resources: &appResources,
 		RuntimeID: "runtime_managed_shared",
 	})
 	if err != nil {
