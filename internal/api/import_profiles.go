@@ -143,13 +143,12 @@ func normalizeAppFiles(configContent string, files []model.AppFile) ([]model.App
 
 func normalizeGenericPostgresSpec(appName string, override *model.AppPostgresSpec) (model.AppPostgresSpec, error) {
 	spec := model.AppPostgresSpec{
-		Image:       "postgres:17.6-alpine",
 		Database:    appName,
 		ServiceName: appName + "-postgres",
 	}
 	if override != nil {
 		if strings.TrimSpace(override.Image) != "" {
-			spec.Image = strings.TrimSpace(override.Image)
+			spec.Image = model.NormalizeManagedPostgresImage(override.Image)
 		}
 		if strings.TrimSpace(override.Database) != "" {
 			spec.Database = strings.TrimSpace(override.Database)
@@ -164,6 +163,7 @@ func normalizeGenericPostgresSpec(appName string, override *model.AppPostgresSpe
 			spec.ServiceName = strings.TrimSpace(override.ServiceName)
 		}
 	}
+	spec.Image = model.NormalizeManagedPostgresImage(spec.Image)
 	if spec.User == "" {
 		spec.User = model.DefaultManagedPostgresUser(appName)
 	}

@@ -114,6 +114,15 @@ func TestNormalizeRuntimePostgresSpecDefaultsToAppScopedUser(t *testing.T) {
 	}
 }
 
+func TestNormalizeRuntimePostgresSpecStripsOfficialPostgresImage(t *testing.T) {
+	spec := normalizeRuntimePostgresSpec("fugue-web", model.AppPostgresSpec{
+		Image: "postgres:16-alpine",
+	})
+	if spec.Image != "" {
+		t.Fatalf("expected official postgres image to be stripped, got %q", spec.Image)
+	}
+}
+
 func TestBuildPostgresClusterUsesSingleRuntimePlacement(t *testing.T) {
 	app := model.App{
 		TenantID: "tenant_demo",

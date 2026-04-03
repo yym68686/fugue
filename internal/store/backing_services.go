@@ -446,6 +446,7 @@ func normalizeBindingForPersist(binding *model.ServiceBinding, service model.Bac
 func normalizeManagedPostgresSpec(appName, appRuntimeID string, spec model.AppPostgresSpec) model.AppPostgresSpec {
 	out := spec
 	resourceName := postgresServiceNameForApp(appName)
+	out.Image = model.NormalizeManagedPostgresImage(out.Image)
 	if strings.TrimSpace(out.Image) == "" {
 		out.Image = defaultManagedBackingPostgresImage
 	}

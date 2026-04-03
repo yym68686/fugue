@@ -522,6 +522,9 @@ func TestCreateAppConvertsInlinePostgresToBackingService(t *testing.T) {
 	if got := service.Spec.Postgres.RuntimeID; got != app.Spec.RuntimeID {
 		t.Fatalf("expected postgres runtime %q, got %q", app.Spec.RuntimeID, got)
 	}
+	if got := service.Spec.Postgres.Image; got != "" {
+		t.Fatalf("expected official postgres image to be stripped, got %q", got)
+	}
 	if got := service.Spec.Postgres.Instances; got != 1 {
 		t.Fatalf("expected default postgres instances 1, got %d", got)
 	}
@@ -567,6 +570,7 @@ func TestCreateAppRejectsReservedCNPGPostgresUser(t *testing.T) {
 		Replicas:  1,
 		RuntimeID: "runtime_managed_shared",
 		Postgres: &model.AppPostgresSpec{
+			Image:    "postgres:16-alpine",
 			User:     "postgres",
 			Password: "secret",
 		},
@@ -611,6 +615,7 @@ func TestDeployOperationConvertsInlinePostgresToBackingServiceOnComplete(t *test
 
 	desiredSpec := app.Spec
 	desiredSpec.Postgres = &model.AppPostgresSpec{
+		Image:    "postgres:17.6-alpine",
 		Database: "demo",
 		User:     "root",
 		Password: "secret",
@@ -663,6 +668,9 @@ func TestDeployOperationConvertsInlinePostgresToBackingServiceOnComplete(t *test
 	}
 	if got := persisted.BackingServices[0].Spec.Postgres.RuntimeID; got != app.Spec.RuntimeID {
 		t.Fatalf("expected postgres runtime %q after deploy, got %q", app.Spec.RuntimeID, got)
+	}
+	if got := persisted.BackingServices[0].Spec.Postgres.Image; got != "" {
+		t.Fatalf("expected official postgres image to be stripped after deploy, got %q", got)
 	}
 }
 

@@ -117,6 +117,9 @@ func TestBuildImportedAppSpecAllowsGenericStatefulInputs(t *testing.T) {
 	if spec.Postgres == nil {
 		t.Fatal("expected postgres spec to be preserved")
 	}
+	if spec.Postgres.Image != "" {
+		t.Fatalf("expected official postgres image to be stripped, got %q", spec.Postgres.Image)
+	}
 	if spec.Postgres.ServiceName != "demo-api-postgres" {
 		t.Fatalf("unexpected postgres service name: %q", spec.Postgres.ServiceName)
 	}
@@ -205,8 +208,25 @@ func TestComposePostgresSpecDefaultsToAppScopedUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compose postgres spec: %v", err)
 	}
+	if spec.Image != "" {
+		t.Fatalf("expected official postgres image to be stripped, got %q", spec.Image)
+	}
 	if spec.User != "fugue_web" {
 		t.Fatalf("expected app-scoped user fugue_web, got %q", spec.User)
+	}
+}
+
+func TestComposePostgresSpecKeepsExplicitCNPGImage(t *testing.T) {
+	spec, err := composePostgresSpec(sourceimport.ComposeService{
+		Name:  "db",
+		Kind:  sourceimport.ComposeServiceKindPostgres,
+		Image: "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie",
+	}, "fugue-web")
+	if err != nil {
+		t.Fatalf("compose postgres spec: %v", err)
+	}
+	if spec.Image != "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie" {
+		t.Fatalf("expected CNPG image to be preserved, got %q", spec.Image)
 	}
 }
 

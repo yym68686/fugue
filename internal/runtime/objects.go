@@ -817,6 +817,7 @@ func buildPostgresTolerations(placements []SchedulingConstraints) []map[string]a
 }
 
 func normalizeRuntimePostgresSpec(baseName string, spec model.AppPostgresSpec) model.AppPostgresSpec {
+	spec.Image = model.NormalizeManagedPostgresImage(spec.Image)
 	if strings.TrimSpace(spec.Image) == "" {
 		spec.Image = defaultPostgresImage
 	}

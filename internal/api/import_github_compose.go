@@ -318,7 +318,7 @@ func composePostgresSpec(service sourceimport.ComposeService, ownerAppName strin
 		spec = *service.Postgres
 	}
 	if strings.TrimSpace(spec.Image) == "" {
-		spec.Image = strings.TrimSpace(service.Image)
+		spec.Image = model.NormalizeManagedPostgresImage(service.Image)
 	}
 	if strings.TrimSpace(spec.Database) == "" {
 		spec.Database = firstNonEmptyComposeValue(service.Environment, "POSTGRES_DB", "POSTGRES_DATABASE", "DB_NAME")
@@ -332,9 +332,7 @@ func composePostgresSpec(service sourceimport.ComposeService, ownerAppName strin
 	if strings.TrimSpace(spec.ServiceName) == "" {
 		spec.ServiceName = model.Slugify(ownerAppName + "-" + service.Name + "-postgres")
 	}
-	if spec.Image == "" {
-		spec.Image = "postgres:17.6-alpine"
-	}
+	spec.Image = model.NormalizeManagedPostgresImage(spec.Image)
 	if spec.Database == "" {
 		spec.Database = ownerAppName
 	}

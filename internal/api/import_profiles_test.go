@@ -38,8 +38,35 @@ func TestNormalizeGenericPostgresSpecDefaultsToAppScopedUserForCNPG(t *testing.T
 	if err != nil {
 		t.Fatalf("normalize postgres spec: %v", err)
 	}
+	if spec.Image != "" {
+		t.Fatalf("expected generic managed postgres image to stay empty, got %q", spec.Image)
+	}
 	if spec.User != "fugue_web" {
 		t.Fatalf("expected app-scoped user fugue_web, got %q", spec.User)
+	}
+}
+
+func TestNormalizeGenericPostgresSpecStripsOfficialPostgresImage(t *testing.T) {
+	spec, err := normalizeGenericPostgresSpec("fugue-web", &model.AppPostgresSpec{
+		Image: "postgres:17.6-alpine",
+	})
+	if err != nil {
+		t.Fatalf("normalize postgres spec: %v", err)
+	}
+	if spec.Image != "" {
+		t.Fatalf("expected official postgres image to be stripped, got %q", spec.Image)
+	}
+}
+
+func TestNormalizeGenericPostgresSpecKeepsCNPGImage(t *testing.T) {
+	spec, err := normalizeGenericPostgresSpec("fugue-web", &model.AppPostgresSpec{
+		Image: "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie",
+	})
+	if err != nil {
+		t.Fatalf("normalize postgres spec: %v", err)
+	}
+	if spec.Image != "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie" {
+		t.Fatalf("expected CNPG image to be preserved, got %q", spec.Image)
 	}
 }
 

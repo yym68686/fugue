@@ -50,3 +50,50 @@ func TestValidateManagedPostgresUser(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestNormalizeManagedPostgresImage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		image string
+		want  string
+	}{
+		{
+			name:  "blank stays blank",
+			image: "",
+			want:  "",
+		},
+		{
+			name:  "official postgres image is stripped",
+			image: "postgres:16-alpine",
+			want:  "",
+		},
+		{
+			name:  "docker hub postgres image is stripped",
+			image: "docker.io/library/postgres:17",
+			want:  "",
+		},
+		{
+			name:  "cnpg image is preserved",
+			image: "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie",
+			want:  "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie",
+		},
+		{
+			name:  "other custom image is preserved",
+			image: "ghcr.io/example/custom-postgres:latest",
+			want:  "ghcr.io/example/custom-postgres:latest",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := NormalizeManagedPostgresImage(tc.image); got != tc.want {
+				t.Fatalf("expected %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
