@@ -51,7 +51,7 @@ func (s *Store) pgGetTenantBillingSummary(tenantID string) (model.TenantBillingS
 	return summary, nil
 }
 
-func (s *Store) pgUpdateTenantBilling(tenantID string, managedCap model.ResourceSpec) (model.TenantBillingSummary, error) {
+func (s *Store) pgUpdateTenantBilling(tenantID string, managedCap model.BillingResourceSpec) (model.TenantBillingSummary, error) {
 	normalizedCap, err := normalizeBillingCap(managedCap)
 	if err != nil {
 		return model.TenantBillingSummary{}, err
@@ -517,7 +517,7 @@ func scanTenantBilling(scanner sqlScanner) (model.TenantBilling, error) {
 	if err := scanner.Scan(&record.TenantID, &managedCapRaw, &record.BalanceMicroCents, &priceBookRaw, &record.LastAccruedAt, &record.CreatedAt, &record.UpdatedAt); err != nil {
 		return model.TenantBilling{}, err
 	}
-	managedCap, err := decodeJSONValue[model.ResourceSpec](managedCapRaw)
+	managedCap, err := decodeJSONValue[model.BillingResourceSpec](managedCapRaw)
 	if err != nil {
 		return model.TenantBilling{}, err
 	}

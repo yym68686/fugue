@@ -92,7 +92,11 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 	}
 
 	ownerRef := runtime.ManagedAppOwnerReference(managed)
-	childObjects := runtime.BuildManagedAppChildObjects(app, managed.Spec.Scheduling, ownerRef)
+	postgresPlacements, err := s.managedPostgresPlacements(app)
+	if err != nil {
+		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("resolve postgres placements: %w", err))
+	}
+	childObjects := runtime.BuildManagedAppChildObjectsWithPlacements(app, managed.Spec.Scheduling, postgresPlacements, ownerRef)
 	fenceEpoch, err := s.currentAppFenceEpoch(ctx, client, app)
 	if err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read app fence epoch: %w", err))
@@ -121,7 +125,7 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 	}
 
 	backingServiceStatuses := make([]runtime.ManagedBackingServiceStatus, 0)
-	for _, serviceDeployment := range runtime.ManagedBackingServiceDeployments(app, managed.Spec.Scheduling) {
+	for _, serviceDeployment := range runtime.ManagedBackingServiceDeploymentsWithPlacements(app, managed.Spec.Scheduling, postgresPlacements) {
 		switch serviceDeployment.ResourceKind {
 		case runtime.CloudNativePGClusterKind:
 			clusterStatus, clusterFound, err := client.getCloudNativePGCluster(ctx, namespace, serviceDeployment.ResourceName)

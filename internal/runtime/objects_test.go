@@ -114,6 +114,144 @@ func TestNormalizeRuntimePostgresSpecDefaultsToAppScopedUser(t *testing.T) {
 	}
 }
 
+func TestBuildPostgresClusterUsesSingleRuntimePlacement(t *testing.T) {
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_primary",
+			Postgres: &model.AppPostgresSpec{
+				Database:  "demo",
+				User:      "demo_user",
+				Password:  "secret",
+				RuntimeID: "runtime_primary",
+			},
+		},
+	}
+
+	objects := buildAppObjectsWithPlacements(app, SchedulingConstraints{}, map[string][]SchedulingConstraints{
+		"demo-postgres": {
+			{
+				NodeSelector: map[string]string{
+					RuntimeIDLabelKey: "runtime_primary",
+					TenantIDLabelKey:  "tenant_demo",
+				},
+				Tolerations: []Toleration{
+					{
+						Key:      TenantTaintKey,
+						Operator: "Equal",
+						Value:    "tenant_demo",
+						Effect:   "NoSchedule",
+					},
+				},
+			},
+		},
+	})
+
+	clusterSpec := objects[3]["spec"].(map[string]any)
+	affinity, ok := clusterSpec["affinity"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected postgres affinity, got %#v", clusterSpec["affinity"])
+	}
+	nodeAffinity := affinity["nodeAffinity"].(map[string]any)
+	required := nodeAffinity["requiredDuringSchedulingIgnoredDuringExecution"].(map[string]any)
+	terms := required["nodeSelectorTerms"].([]map[string]any)
+	if len(terms) != 1 {
+		t.Fatalf("expected one node selector term, got %d", len(terms))
+	}
+	expressions := terms[0]["matchExpressions"].([]map[string]any)
+	if len(expressions) != 2 {
+		t.Fatalf("expected two node selector expressions, got %d", len(expressions))
+	}
+	tolerations := affinity["tolerations"].([]map[string]any)
+	if len(tolerations) != 1 {
+		t.Fatalf("expected one postgres toleration, got %d", len(tolerations))
+	}
+	if _, ok := affinity["enablePodAntiAffinity"]; ok {
+		t.Fatalf("expected single-runtime postgres to omit pod anti-affinity, got %#v", affinity["enablePodAntiAffinity"])
+	}
+}
+
+func TestBuildPostgresClusterUsesFailoverPlacementsAndAntiAffinity(t *testing.T) {
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_primary",
+			Postgres: &model.AppPostgresSpec{
+				Database:                "demo",
+				User:                    "demo_user",
+				Password:                "secret",
+				RuntimeID:               "runtime_primary",
+				FailoverTargetRuntimeID: "runtime_failover",
+				Instances:               2,
+				SynchronousReplicas:     1,
+			},
+		},
+	}
+
+	objects := buildAppObjectsWithPlacements(app, SchedulingConstraints{}, map[string][]SchedulingConstraints{
+		"demo-postgres": {
+			{
+				NodeSelector: map[string]string{
+					RuntimeIDLabelKey: "runtime_primary",
+					TenantIDLabelKey:  "tenant_demo",
+				},
+				Tolerations: []Toleration{
+					{
+						Key:      TenantTaintKey,
+						Operator: "Equal",
+						Value:    "tenant_demo",
+						Effect:   "NoSchedule",
+					},
+				},
+			},
+			{
+				NodeSelector: map[string]string{
+					RuntimeIDLabelKey: "runtime_failover",
+					TenantIDLabelKey:  "tenant_demo",
+				},
+				Tolerations: []Toleration{
+					{
+						Key:      TenantTaintKey,
+						Operator: "Equal",
+						Value:    "tenant_demo",
+						Effect:   "NoSchedule",
+					},
+				},
+			},
+		},
+	})
+
+	clusterSpec := objects[3]["spec"].(map[string]any)
+	if got := clusterSpec["maxSyncReplicas"]; got != 1 {
+		t.Fatalf("expected maxSyncReplicas=1, got %#v", got)
+	}
+	affinity := clusterSpec["affinity"].(map[string]any)
+	if got := affinity["enablePodAntiAffinity"]; got != true {
+		t.Fatalf("expected pod anti-affinity enabled, got %#v", got)
+	}
+	if got := affinity["podAntiAffinityType"]; got != "required" {
+		t.Fatalf("expected required pod anti-affinity type, got %#v", got)
+	}
+	nodeAffinity := affinity["nodeAffinity"].(map[string]any)
+	required := nodeAffinity["requiredDuringSchedulingIgnoredDuringExecution"].(map[string]any)
+	terms := required["nodeSelectorTerms"].([]map[string]any)
+	if len(terms) != 2 {
+		t.Fatalf("expected two node selector terms, got %d", len(terms))
+	}
+	tolerations := affinity["tolerations"].([]map[string]any)
+	if len(tolerations) != 1 {
+		t.Fatalf("expected deduplicated postgres tolerations, got %d", len(tolerations))
+	}
+}
+
 func TestBuildAppDeploymentTemplateAnnotationsTrackFilesAndRestart(t *testing.T) {
 	app := model.App{
 		TenantID: "tenant_demo",

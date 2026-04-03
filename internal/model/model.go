@@ -432,16 +432,18 @@ type AppFailoverSpec struct {
 }
 
 type AppPostgresSpec struct {
-	Image               string        `json:"image,omitempty"`
-	Database            string        `json:"database,omitempty"`
-	User                string        `json:"user,omitempty"`
-	Password            string        `json:"password,omitempty"`
-	ServiceName         string        `json:"service_name,omitempty"`
-	StorageSize         string        `json:"storage_size,omitempty"`
-	StorageClassName    string        `json:"storage_class_name,omitempty"`
-	Instances           int           `json:"instances,omitempty"`
-	SynchronousReplicas int           `json:"synchronous_replicas,omitempty"`
-	Resources           *ResourceSpec `json:"resources,omitempty"`
+	Image                   string        `json:"image,omitempty"`
+	Database                string        `json:"database,omitempty"`
+	User                    string        `json:"user,omitempty"`
+	Password                string        `json:"password,omitempty"`
+	ServiceName             string        `json:"service_name,omitempty"`
+	RuntimeID               string        `json:"runtime_id,omitempty"`
+	FailoverTargetRuntimeID string        `json:"failover_target_runtime_id,omitempty"`
+	StorageSize             string        `json:"storage_size,omitempty"`
+	StorageClassName        string        `json:"storage_class_name,omitempty"`
+	Instances               int           `json:"instances,omitempty"`
+	SynchronousReplicas     int           `json:"synchronous_replicas,omitempty"`
+	Resources               *ResourceSpec `json:"resources,omitempty"`
 }
 
 func PostgresRWServiceName(serviceName string) string {

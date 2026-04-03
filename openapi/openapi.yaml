@@ -1963,6 +1963,37 @@ paths:
                 $ref: "#/components/schemas/OperationResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/continuity:
+    patch:
+      operationId: patchAppContinuity
+      summary: Patch App Continuity
+      tags: [Apps]
+      x-fugue-handler: handlePatchAppContinuity
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchAppContinuityRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppContinuityResponse"
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppContinuityResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/operations:
     get:
       operationId: listOperations
@@ -2501,6 +2532,19 @@ components:
         memory_mebibytes:
           type: integer
           format: int64
+    BillingResourceSpec:
+      type: object
+      additionalProperties: false
+      properties:
+        cpu_millicores:
+          type: integer
+          format: int64
+        memory_mebibytes:
+          type: integer
+          format: int64
+        storage_gibibytes:
+          type: integer
+          format: int64
     ResourceUsage:
       type: object
       additionalProperties: false
@@ -2518,7 +2562,7 @@ components:
       type: object
       additionalProperties: false
       required:
-        [currency, hours_per_month, cpu_microcents_per_millicore_hour, memory_microcents_per_mib_hour]
+        [currency, hours_per_month, cpu_microcents_per_millicore_hour, memory_microcents_per_mib_hour, storage_microcents_per_gib_hour]
       properties:
         currency:
           type: string
@@ -2529,6 +2573,9 @@ components:
           type: integer
           format: int64
         memory_microcents_per_mib_hour:
+          type: integer
+          format: int64
+        storage_microcents_per_gib_hour:
           type: integer
           format: int64
     TenantBillingEvent:
@@ -2591,17 +2638,17 @@ components:
         balance_restricted:
           type: boolean
         managed_cap:
-          $ref: "#/components/schemas/ResourceSpec"
+          $ref: "#/components/schemas/BillingResourceSpec"
         managed_committed:
-          $ref: "#/components/schemas/ResourceSpec"
+          $ref: "#/components/schemas/BillingResourceSpec"
         managed_available:
-          $ref: "#/components/schemas/ResourceSpec"
+          $ref: "#/components/schemas/BillingResourceSpec"
         current_usage:
           $ref: "#/components/schemas/ResourceUsage"
         default_app_resources:
-          $ref: "#/components/schemas/ResourceSpec"
+          $ref: "#/components/schemas/BillingResourceSpec"
         default_postgres_resources:
-          $ref: "#/components/schemas/ResourceSpec"
+          $ref: "#/components/schemas/BillingResourceSpec"
         price_book:
           $ref: "#/components/schemas/BillingPriceBook"
         hourly_rate_microcents:
@@ -2789,6 +2836,10 @@ components:
         password:
           type: string
         service_name:
+          type: string
+        runtime_id:
+          type: string
+        failover_target_runtime_id:
           type: string
         storage_size:
           type: string
@@ -3254,6 +3305,32 @@ components:
       properties:
         target_runtime_id:
           type: string
+    AppContinuityAppFailoverRequest:
+      type: object
+      additionalProperties: false
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+        target_runtime_id:
+          type: string
+    AppContinuityDatabaseFailoverRequest:
+      type: object
+      additionalProperties: false
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+        target_runtime_id:
+          type: string
+    PatchAppContinuityRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        app_failover:
+          $ref: "#/components/schemas/AppContinuityAppFailoverRequest"
+        database_failover:
+          $ref: "#/components/schemas/AppContinuityDatabaseFailoverRequest"
     AuditEvent:
       type: object
       additionalProperties: false
@@ -3740,7 +3817,7 @@ components:
         tenant_id:
           type: string
         managed_cap:
-          $ref: "#/components/schemas/ResourceSpec"
+          $ref: "#/components/schemas/BillingResourceSpec"
     SetBillingBalanceRequest:
       type: object
       additionalProperties: false
@@ -4609,6 +4686,18 @@ components:
           $ref: "#/components/schemas/Operation"
         restart_token:
           type: string
+    AppContinuityResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        app_failover:
+          $ref: "#/components/schemas/AppFailoverSpec"
+        database:
+          $ref: "#/components/schemas/AppPostgresSpec"
+        already_current:
+          type: boolean
+        operation:
+          $ref: "#/components/schemas/Operation"
     ScaleAppRequest:
       type: object
       additionalProperties: false

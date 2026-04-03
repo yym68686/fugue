@@ -143,6 +143,10 @@ func BuildManagedAppObject(app model.App, scheduling SchedulingConstraints) map[
 }
 
 func BuildManagedAppStateObjects(app model.App, scheduling SchedulingConstraints) []map[string]any {
+	return BuildManagedAppStateObjectsWithPlacements(app, scheduling, nil)
+}
+
+func BuildManagedAppStateObjectsWithPlacements(app model.App, scheduling SchedulingConstraints, postgresPlacements map[string][]SchedulingConstraints) []map[string]any {
 	return []map[string]any{
 		buildNamespaceObject(NamespaceForTenant(app.TenantID)),
 		BuildManagedAppObject(app, scheduling),
@@ -150,7 +154,11 @@ func BuildManagedAppStateObjects(app model.App, scheduling SchedulingConstraints
 }
 
 func BuildManagedAppChildObjects(app model.App, scheduling SchedulingConstraints, ownerRef *OwnerReference) []map[string]any {
-	objects := buildAppObjectsWithOwner(app, scheduling, ownerRef)
+	return BuildManagedAppChildObjectsWithPlacements(app, scheduling, nil, ownerRef)
+}
+
+func BuildManagedAppChildObjectsWithPlacements(app model.App, scheduling SchedulingConstraints, postgresPlacements map[string][]SchedulingConstraints, ownerRef *OwnerReference) []map[string]any {
+	objects := buildAppObjectsWithOwner(app, scheduling, postgresPlacements, ownerRef)
 	if len(objects) == 0 {
 		return nil
 	}

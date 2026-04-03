@@ -461,8 +461,28 @@ func runtimeReferencedByState(state *model.State, runtimeID string) bool {
 		if !isDeletedApp(app) && strings.TrimSpace(app.Spec.RuntimeID) == runtimeID {
 			return true
 		}
+		if app.Spec.Failover != nil && strings.TrimSpace(app.Spec.Failover.TargetRuntimeID) == runtimeID {
+			return true
+		}
+		if app.Spec.Postgres != nil {
+			for _, postgresRuntimeID := range managedPostgresReferencedRuntimeIDs(app.Spec.RuntimeID, *app.Spec.Postgres) {
+				if postgresRuntimeID == runtimeID {
+					return true
+				}
+			}
+		}
 		if strings.TrimSpace(app.Status.CurrentRuntimeID) == runtimeID {
 			return true
+		}
+	}
+	for _, service := range state.BackingServices {
+		if service.Spec.Postgres == nil || isDeletedBackingService(service) {
+			continue
+		}
+		for _, postgresRuntimeID := range managedPostgresReferencedRuntimeIDs("", *service.Spec.Postgres) {
+			if postgresRuntimeID == runtimeID {
+				return true
+			}
 		}
 	}
 	for _, op := range state.Operations {
@@ -477,6 +497,16 @@ func runtimeReferencedByState(state *model.State, runtimeID string) bool {
 		}
 		if op.DesiredSpec != nil && strings.TrimSpace(op.DesiredSpec.RuntimeID) == runtimeID {
 			return true
+		}
+		if op.DesiredSpec != nil && op.DesiredSpec.Failover != nil && strings.TrimSpace(op.DesiredSpec.Failover.TargetRuntimeID) == runtimeID {
+			return true
+		}
+		if op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
+			for _, postgresRuntimeID := range managedPostgresReferencedRuntimeIDs(op.DesiredSpec.RuntimeID, *op.DesiredSpec.Postgres) {
+				if postgresRuntimeID == runtimeID {
+					return true
+				}
+			}
 		}
 	}
 	return false
@@ -523,9 +553,20 @@ SELECT EXISTS (
 	FROM fugue_apps
 	WHERE (
 		COALESCE(spec_json->>'runtime_id', '') = $1
+		OR COALESCE(spec_json#>>'{failover,target_runtime_id}', '') = $1
+		OR COALESCE(spec_json#>>'{postgres,runtime_id}', '') = $1
+		OR COALESCE(spec_json#>>'{postgres,failover_target_runtime_id}', '') = $1
 		OR COALESCE(status_json->>'current_runtime_id', '') = $1
 	)
 	AND lower(COALESCE(status_json->>'phase', '')) <> 'deleted'
+) OR EXISTS (
+	SELECT 1
+	FROM fugue_backing_services
+	WHERE (
+		COALESCE(spec_json#>>'{postgres,runtime_id}', '') = $1
+		OR COALESCE(spec_json#>>'{postgres,failover_target_runtime_id}', '') = $1
+	)
+	AND lower(COALESCE(status, '')) <> 'deleted'
 ) OR EXISTS (
 	SELECT 1
 	FROM fugue_operations
@@ -533,6 +574,9 @@ SELECT EXISTS (
 	   OR target_runtime_id = $1
 	   OR assigned_runtime_id = $1
 	   OR COALESCE(desired_spec_json->>'runtime_id', '') = $1
+	   OR COALESCE(desired_spec_json#>>'{failover,target_runtime_id}', '') = $1
+	   OR COALESCE(desired_spec_json#>>'{postgres,runtime_id}', '') = $1
+	   OR COALESCE(desired_spec_json#>>'{postgres,failover_target_runtime_id}', '') = $1
 )
 `, runtimeID).Scan(&referenced); err != nil {
 		return false, fmt.Errorf("check runtime %s references: %w", runtimeID, err)

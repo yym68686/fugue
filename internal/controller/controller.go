@@ -374,12 +374,21 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		return fmt.Errorf("unsupported operation type %s", op.Type)
 	}
 
+	app, err = store.OverlayDesiredManagedPostgres(app)
+	if err != nil {
+		return fmt.Errorf("overlay desired managed postgres state for app %s: %w", app.ID, err)
+	}
+	postgresPlacements, err := s.managedPostgresPlacements(app)
+	if err != nil {
+		return fmt.Errorf("resolve managed postgres placements for app %s: %w", app.ID, err)
+	}
+
 	scheduling, err := s.managedSchedulingConstraints(app.Spec.RuntimeID)
 	if err != nil {
 		return err
 	}
 
-	bundle, err := s.Renderer.RenderAppBundle(app, scheduling)
+	bundle, err := s.Renderer.RenderAppBundleWithPlacements(app, scheduling, postgresPlacements)
 	if err != nil {
 		return fmt.Errorf("render manifest for app %s: %w", app.ID, err)
 	}

@@ -32,18 +32,21 @@ func NamespaceForTenant(tenantID string) string {
 }
 
 func (r Renderer) RenderAppBundle(app model.App, constraints ...SchedulingConstraints) (Bundle, error) {
+	var scheduling SchedulingConstraints
+	if len(constraints) > 0 {
+		scheduling = constraints[0]
+	}
+	return r.RenderAppBundleWithPlacements(app, scheduling, nil)
+}
+
+func (r Renderer) RenderAppBundleWithPlacements(app model.App, scheduling SchedulingConstraints, postgresPlacements map[string][]SchedulingConstraints) (Bundle, error) {
 	namespace := NamespaceForTenant(app.TenantID)
 	path := filepath.Join(r.BaseDir, namespace, fmt.Sprintf("%s.yaml", model.Slugify(app.Name)))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return Bundle{}, fmt.Errorf("create render directory: %w", err)
 	}
 
-	var scheduling SchedulingConstraints
-	if len(constraints) > 0 {
-		scheduling = constraints[0]
-	}
-
-	objects := buildAppObjects(app, scheduling)
+	objects := buildAppObjectsWithPlacements(app, scheduling, postgresPlacements)
 	manifest, err := marshalObjectsToManifest(objects)
 	if err != nil {
 		return Bundle{}, fmt.Errorf("render manifest: %w", err)
@@ -60,18 +63,21 @@ func (r Renderer) RenderAppBundle(app model.App, constraints ...SchedulingConstr
 }
 
 func (r Renderer) RenderManagedAppBundle(app model.App, constraints ...SchedulingConstraints) (Bundle, error) {
+	var scheduling SchedulingConstraints
+	if len(constraints) > 0 {
+		scheduling = constraints[0]
+	}
+	return r.RenderManagedAppBundleWithPlacements(app, scheduling, nil)
+}
+
+func (r Renderer) RenderManagedAppBundleWithPlacements(app model.App, scheduling SchedulingConstraints, postgresPlacements map[string][]SchedulingConstraints) (Bundle, error) {
 	namespace := NamespaceForTenant(app.TenantID)
 	path := filepath.Join(r.BaseDir, namespace, fmt.Sprintf("%s-managedapp.yaml", ManagedAppResourceName(app)))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return Bundle{}, fmt.Errorf("create render directory: %w", err)
 	}
 
-	var scheduling SchedulingConstraints
-	if len(constraints) > 0 {
-		scheduling = constraints[0]
-	}
-
-	objects := BuildManagedAppStateObjects(app, scheduling)
+	objects := BuildManagedAppStateObjectsWithPlacements(app, scheduling, postgresPlacements)
 	manifest, err := marshalObjectsToManifest(objects)
 	if err != nil {
 		return Bundle{}, fmt.Errorf("render managed app manifest: %w", err)

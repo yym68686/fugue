@@ -1961,6 +1961,9 @@ func (s *Store) pgCreateApp(tenantID, projectID, name, description string, spec 
 	if err := validateFailoverSpec(spec); err != nil {
 		return model.App{}, err
 	}
+	if err := validateManagedPostgresRuntimeSpec(spec.RuntimeID, derefPostgresSpec(spec.Postgres)); err != nil {
+		return model.App{}, err
+	}
 	if spec.Failover != nil {
 		visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, spec.Failover.TargetRuntimeID, tenantID)
 		if err != nil {
@@ -1974,6 +1977,22 @@ func (s *Store) pgCreateApp(tenantID, projectID, name, description string, spec 
 			return model.App{}, err
 		}
 		if err := validateFailoverTargetRuntimeType(targetRuntimeType); err != nil {
+			return model.App{}, err
+		}
+	}
+	for _, runtimeID := range managedPostgresReferencedRuntimeIDs(spec.RuntimeID, derefPostgresSpec(spec.Postgres)) {
+		visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, runtimeID, tenantID)
+		if err != nil {
+			return model.App{}, err
+		}
+		if !visible {
+			return model.App{}, ErrNotFound
+		}
+		runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, runtimeID)
+		if err != nil {
+			return model.App{}, err
+		}
+		if err := validateFailoverTargetRuntimeType(runtimeType); err != nil {
 			return model.App{}, err
 		}
 	}
@@ -2334,6 +2353,9 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 		if err := validateFailoverSpec(*op.DesiredSpec); err != nil {
 			return model.Operation{}, err
 		}
+		if err := validateManagedPostgresRuntimeSpec(op.DesiredSpec.RuntimeID, derefPostgresSpec(op.DesiredSpec.Postgres)); err != nil {
+			return model.Operation{}, err
+		}
 		if op.DesiredSpec.Failover != nil {
 			visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, op.DesiredSpec.Failover.TargetRuntimeID, op.TenantID)
 			if err != nil {
@@ -2347,6 +2369,22 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 				return model.Operation{}, err
 			}
 			if err := validateFailoverTargetRuntimeType(targetRuntimeType); err != nil {
+				return model.Operation{}, err
+			}
+		}
+		for _, runtimeID := range managedPostgresReferencedRuntimeIDs(op.DesiredSpec.RuntimeID, derefPostgresSpec(op.DesiredSpec.Postgres)) {
+			visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, runtimeID, op.TenantID)
+			if err != nil {
+				return model.Operation{}, err
+			}
+			if !visible {
+				return model.Operation{}, ErrNotFound
+			}
+			runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, runtimeID)
+			if err != nil {
+				return model.Operation{}, err
+			}
+			if err := validateFailoverTargetRuntimeType(runtimeType); err != nil {
 				return model.Operation{}, err
 			}
 		}
@@ -2378,6 +2416,9 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 		if err := validateFailoverSpec(*op.DesiredSpec); err != nil {
 			return model.Operation{}, err
 		}
+		if err := validateManagedPostgresRuntimeSpec(op.DesiredSpec.RuntimeID, derefPostgresSpec(op.DesiredSpec.Postgres)); err != nil {
+			return model.Operation{}, err
+		}
 		if op.DesiredSpec.Failover != nil {
 			visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, op.DesiredSpec.Failover.TargetRuntimeID, op.TenantID)
 			if err != nil {
@@ -2391,6 +2432,22 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 				return model.Operation{}, err
 			}
 			if err := validateFailoverTargetRuntimeType(targetRuntimeType); err != nil {
+				return model.Operation{}, err
+			}
+		}
+		for _, runtimeID := range managedPostgresReferencedRuntimeIDs(op.DesiredSpec.RuntimeID, derefPostgresSpec(op.DesiredSpec.Postgres)) {
+			visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, runtimeID, op.TenantID)
+			if err != nil {
+				return model.Operation{}, err
+			}
+			if !visible {
+				return model.Operation{}, ErrNotFound
+			}
+			runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, runtimeID)
+			if err != nil {
+				return model.Operation{}, err
+			}
+			if err := validateFailoverTargetRuntimeType(runtimeType); err != nil {
 				return model.Operation{}, err
 			}
 		}

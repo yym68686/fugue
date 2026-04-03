@@ -41,8 +41,8 @@ func (s *Server) handleUpdateBilling(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		TenantID   string             `json:"tenant_id"`
-		ManagedCap model.ResourceSpec `json:"managed_cap"`
+		TenantID   string                    `json:"tenant_id"`
+		ManagedCap model.BillingResourceSpec `json:"managed_cap"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -66,8 +66,9 @@ func (s *Server) handleUpdateBilling(w http.ResponseWriter, r *http.Request) {
 	}
 	summary.CurrentUsage = s.currentTenantManagedUsage(r.Context(), tenantID, principal.IsPlatformAdmin())
 	s.appendAudit(principal, "billing.update", "tenant", tenantID, tenantID, map[string]string{
-		"cpu_millicores":   strings.TrimSpace(httpxValue(req.ManagedCap.CPUMilliCores)),
-		"memory_mebibytes": strings.TrimSpace(httpxValue(req.ManagedCap.MemoryMebibytes)),
+		"cpu_millicores":    strings.TrimSpace(httpxValue(req.ManagedCap.CPUMilliCores)),
+		"memory_mebibytes":  strings.TrimSpace(httpxValue(req.ManagedCap.MemoryMebibytes)),
+		"storage_gibibytes": strings.TrimSpace(httpxValue(req.ManagedCap.StorageGibibytes)),
 	})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"billing": summary,

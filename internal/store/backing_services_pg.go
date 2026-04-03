@@ -333,7 +333,7 @@ func (s *Store) pgApplyDesiredSpecBackingServicesTx(ctx context.Context, tx *sql
 		return err
 	} else if found {
 		now := time.Now().UTC()
-		normalized := normalizeManagedPostgresSpec(appNameForService(&service, app), *desiredSpec.Postgres)
+		normalized := normalizeManagedPostgresSpec(appNameForService(&service, app), app.Spec.RuntimeID, *desiredSpec.Postgres)
 		service.Type = model.BackingServiceTypePostgres
 		service.Provisioner = model.BackingServiceProvisionerManaged
 		service.Status = model.BackingServiceStatusActive

@@ -1923,6 +1923,9 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 		if err := validateFailoverRuntimeState(state, tenantID, spec); err != nil {
 			return err
 		}
+		if err := validateManagedPostgresRuntimeState(state, tenantID, spec.RuntimeID, spec.Postgres); err != nil {
+			return err
+		}
 		for _, existing := range state.Apps {
 			if existing.TenantID == tenantID && existing.ProjectID == projectID && strings.EqualFold(existing.Name, name) {
 				return ErrConflict
@@ -2016,6 +2019,9 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			if err := validateFailoverRuntimeState(state, op.TenantID, *op.DesiredSpec); err != nil {
 				return err
 			}
+			if err := validateManagedPostgresRuntimeState(state, op.TenantID, op.DesiredSpec.RuntimeID, op.DesiredSpec.Postgres); err != nil {
+				return err
+			}
 			op.TargetRuntimeID = op.DesiredSpec.RuntimeID
 		case model.OperationTypeDeploy:
 			if op.DesiredSpec == nil {
@@ -2034,6 +2040,9 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 				return err
 			}
 			if err := validateFailoverRuntimeState(state, op.TenantID, *op.DesiredSpec); err != nil {
+				return err
+			}
+			if err := validateManagedPostgresRuntimeState(state, op.TenantID, op.DesiredSpec.RuntimeID, op.DesiredSpec.Postgres); err != nil {
 				return err
 			}
 			op.TargetRuntimeID = op.DesiredSpec.RuntimeID

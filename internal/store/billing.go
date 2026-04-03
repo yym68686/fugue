@@ -3,6 +3,8 @@ package store
 import (
 	"errors"
 	"fmt"
+	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,11 +16,14 @@ import (
 var (
 	ErrBillingCapExceeded     = errors.New("billing cap exceeded")
 	ErrBillingBalanceDepleted = errors.New("billing balance depleted")
+
+	billingQuantityPattern = regexp.MustCompile(`^([+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)([a-zA-Z]{0,2})$`)
 )
 
 const (
 	billingHistoryLimit       = 12
 	microCentsPerCent   int64 = 1_000_000
+	bytesPerGiB         int64 = 1 << 30
 )
 
 func (s *Store) GetTenantBillingSummary(tenantID string) (model.TenantBillingSummary, error) {
@@ -44,7 +49,7 @@ func (s *Store) GetTenantBillingSummary(tenantID string) (model.TenantBillingSum
 	return summary, err
 }
 
-func (s *Store) UpdateTenantBilling(tenantID string, managedCap model.ResourceSpec) (model.TenantBillingSummary, error) {
+func (s *Store) UpdateTenantBilling(tenantID string, managedCap model.BillingResourceSpec) (model.TenantBillingSummary, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	if tenantID == "" {
 		return model.TenantBillingSummary{}, ErrInvalidInput
@@ -221,9 +226,9 @@ func normalizeWorkloadResources(spec *model.ResourceSpec, defaults model.Resourc
 	return &out, nil
 }
 
-func normalizeBillingCap(cap model.ResourceSpec) (model.ResourceSpec, error) {
-	if cap.CPUMilliCores < 0 || cap.MemoryMebibytes < 0 {
-		return model.ResourceSpec{}, ErrInvalidInput
+func normalizeBillingCap(cap model.BillingResourceSpec) (model.BillingResourceSpec, error) {
+	if cap.CPUMilliCores < 0 || cap.MemoryMebibytes < 0 || cap.StorageGibibytes < 0 {
+		return model.BillingResourceSpec{}, ErrInvalidInput
 	}
 	return cap, nil
 }
@@ -296,6 +301,7 @@ func normalizeTenantBillingRecord(record *model.TenantBilling, now time.Time) {
 func shouldBackfillLegacyTenantBillingRecord(record model.TenantBilling) bool {
 	return record.ManagedCap.CPUMilliCores == 0 &&
 		record.ManagedCap.MemoryMebibytes == 0 &&
+		record.ManagedCap.StorageGibibytes == 0 &&
 		record.BalanceMicroCents == 0
 }
 
@@ -337,6 +343,9 @@ func normalizeBillingPriceBook(priceBook model.BillingPriceBook) model.BillingPr
 	if priceBook.MemoryMicroCentsPerMiBHour <= 0 {
 		priceBook.MemoryMicroCentsPerMiBHour = defaults.MemoryMicroCentsPerMiBHour
 	}
+	if priceBook.StorageMicroCentsPerGiBHour <= 0 {
+		priceBook.StorageMicroCentsPerGiBHour = defaults.StorageMicroCentsPerGiBHour
+	}
 	return priceBook
 }
 
@@ -364,14 +373,15 @@ func appendTenantBillingEvent(state *model.State, event model.TenantBillingEvent
 
 func newTenantBillingConfigUpdatedEvent(
 	tenantID string,
-	managedCap model.ResourceSpec,
+	managedCap model.BillingResourceSpec,
 	balanceMicroCents int64,
 	now time.Time,
 	metadata map[string]string,
 ) model.TenantBillingEvent {
 	eventMetadata := map[string]string{
-		"cpu_millicores":   strconv.FormatInt(managedCap.CPUMilliCores, 10),
-		"memory_mebibytes": strconv.FormatInt(managedCap.MemoryMebibytes, 10),
+		"cpu_millicores":    strconv.FormatInt(managedCap.CPUMilliCores, 10),
+		"memory_mebibytes":  strconv.FormatInt(managedCap.MemoryMebibytes, 10),
+		"storage_gibibytes": strconv.FormatInt(managedCap.StorageGibibytes, 10),
 	}
 	for key, value := range metadata {
 		key = strings.TrimSpace(key)
@@ -469,7 +479,7 @@ func accrueTenantBilling(record *model.TenantBilling, now time.Time) {
 	record.UpdatedAt = now
 }
 
-func hasBillableManagedEnvelope(spec model.ResourceSpec) bool {
+func hasBillableManagedEnvelope(spec model.BillingResourceSpec) bool {
 	return spec.CPUMilliCores > 0 && spec.MemoryMebibytes > 0
 }
 
@@ -479,7 +489,8 @@ func billingHourlyRateMicroCents(record model.TenantBilling) int64 {
 	}
 	priceBook := normalizeBillingPriceBook(record.PriceBook)
 	return record.ManagedCap.CPUMilliCores*priceBook.CPUMicroCentsPerMilliCoreHour +
-		record.ManagedCap.MemoryMebibytes*priceBook.MemoryMicroCentsPerMiBHour
+		record.ManagedCap.MemoryMebibytes*priceBook.MemoryMicroCentsPerMiBHour +
+		record.ManagedCap.StorageGibibytes*priceBook.StorageMicroCentsPerGiBHour
 }
 
 func billingMonthlyEstimateMicroCents(record model.TenantBilling) int64 {
@@ -519,8 +530,8 @@ func buildTenantBillingSummary(state *model.State, record model.TenantBilling) m
 		ManagedCap:                record.ManagedCap,
 		ManagedCommitted:          committed,
 		ManagedAvailable:          available,
-		DefaultAppResources:       model.ResourceSpec{},
-		DefaultPostgresResources:  model.DefaultManagedPostgresResources(),
+		DefaultAppResources:       model.BillingResourceSpec{},
+		DefaultPostgresResources:  model.DefaultManagedPostgresBillingResources(),
 		PriceBook:                 normalizeBillingPriceBook(record.PriceBook),
 		HourlyRateMicroCents:      billingHourlyRateMicroCents(record),
 		MonthlyEstimateMicroCents: billingMonthlyEstimateMicroCents(record),
@@ -532,16 +543,16 @@ func buildTenantBillingSummary(state *model.State, record model.TenantBilling) m
 	}
 }
 
-func tenantBillingStatus(record model.TenantBilling, committed model.ResourceSpec) (string, string) {
+func tenantBillingStatus(record model.TenantBilling, committed model.BillingResourceSpec) (string, string) {
 	switch {
 	case billingHourlyRateMicroCents(record) <= 0:
-		return model.BillingStatusInactive, "Managed billing is inactive until both CPU and memory are above zero. External-owned runtimes remain free."
+		return model.BillingStatusInactive, "Managed billing is inactive until both CPU and memory are above zero. Storage is billed when configured inside an active managed envelope. External-owned runtimes remain free."
 	case resourceSpecExceeds(committed, record.ManagedCap):
 		return model.BillingStatusOverCap, "Current live managed capacity is above the saved envelope. Managed expansion still works while balance stays positive, and Fugue will lift the envelope automatically on the next managed capacity increase."
 	case billingBalanceRestricted(record):
 		return model.BillingStatusRestricted, "Balance is depleted. Top up before increasing managed capacity."
 	default:
-		return model.BillingStatusActive, "Managed capacity is metered hourly from the saved envelope. Fugue lifts the envelope automatically if a managed capacity increase goes past it. BYO VPS stays free."
+		return model.BillingStatusActive, "Managed capacity is metered hourly from the saved envelope, including configured storage. Fugue lifts the envelope automatically if a managed capacity increase goes past it. BYO VPS stays free."
 	}
 }
 
@@ -568,8 +579,8 @@ func recentTenantBillingEvents(state *model.State, tenantID string) []model.Tena
 	return events
 }
 
-func tenantManagedCommittedResources(state *model.State, tenantID string) model.ResourceSpec {
-	total := model.ResourceSpec{}
+func tenantManagedCommittedResources(state *model.State, tenantID string) model.BillingResourceSpec {
+	total := model.BillingResourceSpec{}
 	if state == nil {
 		return total
 	}
@@ -582,9 +593,9 @@ func tenantManagedCommittedResources(state *model.State, tenantID string) model.
 	return total
 }
 
-func appManagedBundleCommitment(state *model.State, app model.App, runtimeID string, replicas int) model.ResourceSpec {
+func appManagedBundleCommitment(state *model.State, app model.App, runtimeID string, replicas int) model.BillingResourceSpec {
 	if replicas <= 0 || !isBillableManagedRuntimeType(runtimeTypeForState(state, runtimeID)) {
-		return model.ResourceSpec{}
+		return model.BillingResourceSpec{}
 	}
 	total := multiplyResourceSpec(appEffectiveResources(app.Spec), int64(replicas))
 	services := boundManagedServicesForApp(state, app.ID)
@@ -632,25 +643,35 @@ func isBillableManagedBackingService(service model.BackingService) bool {
 	return provisioner == "" || provisioner == model.BackingServiceProvisionerManaged
 }
 
-func backingServiceResources(service model.BackingService) model.ResourceSpec {
+func backingServiceResources(service model.BackingService) model.BillingResourceSpec {
 	if service.Spec.Postgres == nil {
-		return model.ResourceSpec{}
+		return model.BillingResourceSpec{}
 	}
 	return postgresEffectiveResources(*service.Spec.Postgres)
 }
 
-func appEffectiveResources(spec model.AppSpec) model.ResourceSpec {
+func appEffectiveResources(spec model.AppSpec) model.BillingResourceSpec {
+	compute := model.ResourceSpec{}
 	if spec.Resources != nil {
-		return *spec.Resources
+		compute = *spec.Resources
 	}
-	return model.ResourceSpec{}
+	return model.BillingResourceSpec{
+		CPUMilliCores:    compute.CPUMilliCores,
+		MemoryMebibytes:  compute.MemoryMebibytes,
+		StorageGibibytes: workspaceStorageGibibytes(spec.Workspace),
+	}
 }
 
-func postgresEffectiveResources(spec model.AppPostgresSpec) model.ResourceSpec {
+func postgresEffectiveResources(spec model.AppPostgresSpec) model.BillingResourceSpec {
+	compute := model.DefaultManagedPostgresResources()
 	if spec.Resources != nil {
-		return *spec.Resources
+		compute = *spec.Resources
 	}
-	return model.DefaultManagedPostgresResources()
+	return model.BillingResourceSpec{
+		CPUMilliCores:    compute.CPUMilliCores,
+		MemoryMebibytes:  compute.MemoryMebibytes,
+		StorageGibibytes: postgresStorageGibibytes(&spec),
+	}
 }
 
 func runtimeTypeForState(state *model.State, runtimeID string) string {
@@ -673,14 +694,14 @@ func isBillableManagedRuntimeType(runtimeType string) bool {
 	}
 }
 
-func validateManagedOperationBilling(record model.TenantBilling, currentTotal, nextTotal model.ResourceSpec) error {
+func validateManagedOperationBilling(record model.TenantBilling, currentTotal, nextTotal model.BillingResourceSpec) error {
 	if billingBalanceRestricted(record) && resourceSpecExceeds(nextTotal, currentTotal) {
 		return describeBillingBalanceDepleted(record)
 	}
 	return nil
 }
 
-func projectedAppManagedBundleCommitment(state *model.State, app model.App, op model.Operation) (model.ResourceSpec, model.ResourceSpec, error) {
+func projectedAppManagedBundleCommitment(state *model.State, app model.App, op model.Operation) (model.BillingResourceSpec, model.BillingResourceSpec, error) {
 	current := appManagedBundleCommitment(state, app, app.Status.CurrentRuntimeID, app.Status.CurrentReplicas)
 	projection := cloneBillingProjectionState(state, app)
 	opCopy := op
@@ -690,10 +711,10 @@ func projectedAppManagedBundleCommitment(state *model.State, app model.App, op m
 		opCopy.ID = "billing-projection"
 	}
 	if err := applyOperationToApp(&projection, &opCopy); err != nil {
-		return model.ResourceSpec{}, model.ResourceSpec{}, err
+		return model.BillingResourceSpec{}, model.BillingResourceSpec{}, err
 	}
 	if len(projection.Apps) == 0 {
-		return current, model.ResourceSpec{}, nil
+		return current, model.BillingResourceSpec{}, nil
 	}
 	projectedApp := projection.Apps[0]
 	next := appManagedBundleCommitment(&projection, projectedApp, projectedApp.Status.CurrentRuntimeID, projectedApp.Status.CurrentReplicas)
@@ -750,56 +771,62 @@ func cloneAppForBilling(app model.App) model.App {
 	return out
 }
 
-func addResourceSpec(left, right model.ResourceSpec) model.ResourceSpec {
-	return model.ResourceSpec{
-		CPUMilliCores:   left.CPUMilliCores + right.CPUMilliCores,
-		MemoryMebibytes: left.MemoryMebibytes + right.MemoryMebibytes,
+func addResourceSpec(left, right model.BillingResourceSpec) model.BillingResourceSpec {
+	return model.BillingResourceSpec{
+		CPUMilliCores:    left.CPUMilliCores + right.CPUMilliCores,
+		MemoryMebibytes:  left.MemoryMebibytes + right.MemoryMebibytes,
+		StorageGibibytes: left.StorageGibibytes + right.StorageGibibytes,
 	}
 }
 
-func maxResourceSpec(left, right model.ResourceSpec) model.ResourceSpec {
-	return model.ResourceSpec{
-		CPUMilliCores:   maxInt64(left.CPUMilliCores, right.CPUMilliCores),
-		MemoryMebibytes: maxInt64(left.MemoryMebibytes, right.MemoryMebibytes),
+func maxResourceSpec(left, right model.BillingResourceSpec) model.BillingResourceSpec {
+	return model.BillingResourceSpec{
+		CPUMilliCores:    maxInt64(left.CPUMilliCores, right.CPUMilliCores),
+		MemoryMebibytes:  maxInt64(left.MemoryMebibytes, right.MemoryMebibytes),
+		StorageGibibytes: maxInt64(left.StorageGibibytes, right.StorageGibibytes),
 	}
 }
 
-func subtractResourceSpec(left, right model.ResourceSpec) model.ResourceSpec {
-	return model.ResourceSpec{
-		CPUMilliCores:   maxInt64(0, left.CPUMilliCores-right.CPUMilliCores),
-		MemoryMebibytes: maxInt64(0, left.MemoryMebibytes-right.MemoryMebibytes),
+func subtractResourceSpec(left, right model.BillingResourceSpec) model.BillingResourceSpec {
+	return model.BillingResourceSpec{
+		CPUMilliCores:    maxInt64(0, left.CPUMilliCores-right.CPUMilliCores),
+		MemoryMebibytes:  maxInt64(0, left.MemoryMebibytes-right.MemoryMebibytes),
+		StorageGibibytes: maxInt64(0, left.StorageGibibytes-right.StorageGibibytes),
 	}
 }
 
-func clampResourceSpecSub(left, right model.ResourceSpec) model.ResourceSpec {
+func clampResourceSpecSub(left, right model.BillingResourceSpec) model.BillingResourceSpec {
 	return subtractResourceSpec(left, right)
 }
 
-func multiplyResourceSpec(spec model.ResourceSpec, factor int64) model.ResourceSpec {
+func multiplyResourceSpec(spec model.BillingResourceSpec, factor int64) model.BillingResourceSpec {
 	if factor <= 0 {
-		return model.ResourceSpec{}
+		return model.BillingResourceSpec{}
 	}
-	return model.ResourceSpec{
-		CPUMilliCores:   spec.CPUMilliCores * factor,
-		MemoryMebibytes: spec.MemoryMebibytes * factor,
+	return model.BillingResourceSpec{
+		CPUMilliCores:    spec.CPUMilliCores * factor,
+		MemoryMebibytes:  spec.MemoryMebibytes * factor,
+		StorageGibibytes: spec.StorageGibibytes * factor,
 	}
 }
 
-func resourceSpecExceeds(left, right model.ResourceSpec) bool {
-	return left.CPUMilliCores > right.CPUMilliCores || left.MemoryMebibytes > right.MemoryMebibytes
+func resourceSpecExceeds(left, right model.BillingResourceSpec) bool {
+	return left.CPUMilliCores > right.CPUMilliCores ||
+		left.MemoryMebibytes > right.MemoryMebibytes ||
+		left.StorageGibibytes > right.StorageGibibytes
 }
 
-func projectedTenantManagedTotals(state *model.State, app model.App, op model.Operation) (model.ResourceSpec, model.ResourceSpec, error) {
+func projectedTenantManagedTotals(state *model.State, app model.App, op model.Operation) (model.BillingResourceSpec, model.BillingResourceSpec, error) {
 	currentTotal := tenantManagedCommittedResources(state, app.TenantID)
 	currentBundle, nextBundle, err := projectedAppManagedBundleCommitment(state, app, op)
 	if err != nil {
-		return model.ResourceSpec{}, model.ResourceSpec{}, err
+		return model.BillingResourceSpec{}, model.BillingResourceSpec{}, err
 	}
 	nextTotal := addResourceSpec(subtractResourceSpec(currentTotal, currentBundle), nextBundle)
 	return currentTotal, nextTotal, nil
 }
 
-func nextManagedEnvelope(record model.TenantBilling, currentTotal, nextTotal model.ResourceSpec) (model.ResourceSpec, bool) {
+func nextManagedEnvelope(record model.TenantBilling, currentTotal, nextTotal model.BillingResourceSpec) (model.BillingResourceSpec, bool) {
 	if !resourceSpecExceeds(nextTotal, currentTotal) {
 		return record.ManagedCap, false
 	}
@@ -814,14 +841,16 @@ func maxInt64(left, right int64) int64 {
 	return right
 }
 
-func describeBillingCapExceeded(record model.TenantBilling, nextTotal model.ResourceSpec) error {
+func describeBillingCapExceeded(record model.TenantBilling, nextTotal model.BillingResourceSpec) error {
 	return fmt.Errorf(
-		"%w: requested managed capacity cpu=%dm/%dm memory=%dMi/%dMi",
+		"%w: requested managed capacity cpu=%dm/%dm memory=%dMi/%dMi storage=%dGi/%dGi",
 		ErrBillingCapExceeded,
 		nextTotal.CPUMilliCores,
 		record.ManagedCap.CPUMilliCores,
 		nextTotal.MemoryMebibytes,
 		record.ManagedCap.MemoryMebibytes,
+		nextTotal.StorageGibibytes,
+		record.ManagedCap.StorageGibibytes,
 	)
 }
 
@@ -836,4 +865,91 @@ func describeBillingBalanceDepleted(record model.TenantBilling) error {
 		record.BalanceMicroCents,
 		hourlyRateMicroCents,
 	)
+}
+
+func workspaceStorageGibibytes(spec *model.AppWorkspaceSpec) int64 {
+	if spec == nil {
+		return 0
+	}
+	size := strings.TrimSpace(spec.StorageSize)
+	if size == "" {
+		size = model.DefaultManagedWorkspaceStorageSize
+	}
+	return storageQuantityGibibytes(size)
+}
+
+func postgresStorageGibibytes(spec *model.AppPostgresSpec) int64 {
+	if spec == nil {
+		return 0
+	}
+	size := strings.TrimSpace(spec.StorageSize)
+	if size == "" {
+		size = model.DefaultManagedPostgresStorageSize
+	}
+	return storageQuantityGibibytes(size)
+}
+
+func storageQuantityGibibytes(value string) int64 {
+	bytes, ok := parseStorageQuantityBytes(value)
+	if !ok || bytes <= 0 {
+		return 0
+	}
+	return int64(math.Ceil(float64(bytes) / float64(bytesPerGiB)))
+}
+
+func parseStorageQuantityBytes(value string) (int64, bool) {
+	number, suffix, ok := splitBillingQuantity(value)
+	if !ok {
+		return 0, false
+	}
+
+	multiplier := 0.0
+	switch suffix {
+	case "":
+		multiplier = 1
+	case "K":
+		multiplier = 1_000
+	case "M":
+		multiplier = 1_000_000
+	case "G":
+		multiplier = 1_000_000_000
+	case "T":
+		multiplier = 1_000_000_000_000
+	case "P":
+		multiplier = 1_000_000_000_000_000
+	case "E":
+		multiplier = 1_000_000_000_000_000_000
+	case "Ki":
+		multiplier = 1 << 10
+	case "Mi":
+		multiplier = 1 << 20
+	case "Gi":
+		multiplier = 1 << 30
+	case "Ti":
+		multiplier = 1 << 40
+	case "Pi":
+		multiplier = 1 << 50
+	case "Ei":
+		multiplier = 1 << 60
+	default:
+		return 0, false
+	}
+
+	parsed, err := strconv.ParseFloat(number, 64)
+	if err != nil {
+		return 0, false
+	}
+	return int64(math.Round(parsed * multiplier)), true
+}
+
+func splitBillingQuantity(value string) (string, string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", "", false
+	}
+	matches := billingQuantityPattern.FindStringSubmatch(value)
+	if len(matches) != 3 {
+		return "", "", false
+	}
+	return matches[1], matches[2], true
 }

@@ -32,13 +32,17 @@ const (
 )
 
 func buildAppObjects(app model.App, scheduling SchedulingConstraints) []map[string]any {
-	return buildAppObjectsWithOwner(app, scheduling, nil)
+	return buildAppObjectsWithPlacements(app, scheduling, nil)
 }
 
-func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, ownerRef *OwnerReference) []map[string]any {
+func buildAppObjectsWithPlacements(app model.App, scheduling SchedulingConstraints, postgresPlacements map[string][]SchedulingConstraints) []map[string]any {
+	return buildAppObjectsWithOwner(app, scheduling, postgresPlacements, nil)
+}
+
+func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, postgresPlacements map[string][]SchedulingConstraints, ownerRef *OwnerReference) []map[string]any {
 	namespace := NamespaceForTenant(app.TenantID)
 	appName := sanitizeName(app.Name)
-	postgresResources := managedPostgresResources(namespace, app)
+	postgresResources := managedPostgresResources(namespace, app, postgresPlacements)
 	labels := appLabels(app)
 	objects := []map[string]any{
 		buildNamespaceObject(namespace),
@@ -168,7 +172,7 @@ func buildPostgresSecretObject(namespace, secretName string, labels map[string]s
 	}
 }
 
-func buildPostgresClusterObject(namespace, secretName, resourceName string, labels map[string]string, spec model.AppPostgresSpec) map[string]any {
+func buildPostgresClusterObject(namespace, secretName, resourceName string, labels map[string]string, spec model.AppPostgresSpec, placements []SchedulingConstraints) map[string]any {
 	clusterSpec := map[string]any{
 		"instances":             spec.Instances,
 		"enableSuperuserAccess": false,
@@ -194,6 +198,9 @@ func buildPostgresClusterObject(namespace, secretName, resourceName string, labe
 	if spec.SynchronousReplicas > 0 && spec.Instances > 1 {
 		clusterSpec["minSyncReplicas"] = spec.SynchronousReplicas
 		clusterSpec["maxSyncReplicas"] = spec.SynchronousReplicas
+	}
+	if affinity := buildPostgresAffinity(spec, placements); len(affinity) > 0 {
+		clusterSpec["affinity"] = affinity
 	}
 
 	return map[string]any{
@@ -237,7 +244,7 @@ func buildManagedPostgresObjects(namespace string, resource postgresRuntimeResou
 	return []map[string]any{
 		buildPostgresSecretObject(namespace, resource.secretName, labels, resource.spec),
 		buildPostgresServiceObject(namespace, resource.resourceName, labels, resource.spec),
-		buildPostgresClusterObject(namespace, resource.secretName, resource.resourceName, labels, resource.spec),
+		buildPostgresClusterObject(namespace, resource.secretName, resource.resourceName, labels, resource.spec, resource.placements),
 	}
 }
 
@@ -428,6 +435,7 @@ type postgresRuntimeResource struct {
 	resourceName string
 	secretName   string
 	spec         model.AppPostgresSpec
+	placements   []SchedulingConstraints
 	serviceID    string
 	serviceType  string
 	ownerAppID   string
@@ -444,19 +452,23 @@ type ManagedBackingServiceDeployment struct {
 
 func ManagedAppReleaseKey(app model.App, scheduling SchedulingConstraints) string {
 	namespace := NamespaceForTenant(app.TenantID)
-	object := buildAppDeploymentObject(namespace, app, appLabels(app), scheduling, managedPostgresResources(namespace, app))
+	object := buildAppDeploymentObject(namespace, app, appLabels(app), scheduling, managedPostgresResources(namespace, app, nil))
 	return managedDeploymentRuntimeKey(object)
 }
 
 func ManagedBackingServiceDeployments(app model.App, scheduling SchedulingConstraints) []ManagedBackingServiceDeployment {
+	return ManagedBackingServiceDeploymentsWithPlacements(app, scheduling, nil)
+}
+
+func ManagedBackingServiceDeploymentsWithPlacements(app model.App, scheduling SchedulingConstraints, postgresPlacements map[string][]SchedulingConstraints) []ManagedBackingServiceDeployment {
 	namespace := NamespaceForTenant(app.TenantID)
-	resources := managedPostgresResources(namespace, app)
+	resources := managedPostgresResources(namespace, app, postgresPlacements)
 	deployments := make([]ManagedBackingServiceDeployment, 0, len(resources))
 	for _, resource := range resources {
 		if strings.TrimSpace(resource.serviceID) == "" {
 			continue
 		}
-		object := buildPostgresClusterObject(namespace, resource.secretName, resource.resourceName, postgresLabels(resource), resource.spec)
+		object := buildPostgresClusterObject(namespace, resource.secretName, resource.resourceName, postgresLabels(resource), resource.spec, resource.placements)
 		deployments = append(deployments, ManagedBackingServiceDeployment{
 			ServiceID:    resource.serviceID,
 			ResourceName: resource.resourceName,
@@ -467,7 +479,7 @@ func ManagedBackingServiceDeployments(app model.App, scheduling SchedulingConstr
 	return deployments
 }
 
-func managedPostgresResources(namespace string, app model.App) []postgresRuntimeResource {
+func managedPostgresResources(namespace string, app model.App, postgresPlacements map[string][]SchedulingConstraints) []postgresRuntimeResource {
 	servicesByID := make(map[string]model.BackingService, len(app.BackingServices))
 	for _, service := range app.BackingServices {
 		servicesByID[service.ID] = service
@@ -492,6 +504,7 @@ func managedPostgresResources(namespace string, app model.App) []postgresRuntime
 			resourceName: spec.ServiceName,
 			secretName:   postgresSecretName(baseName),
 			spec:         spec,
+			placements:   postgresPlacements[spec.ServiceName],
 			serviceID:    service.ID,
 			serviceType:  service.Type,
 			ownerAppID:   service.OwnerAppID,
@@ -508,6 +521,7 @@ func managedPostgresResources(namespace string, app model.App) []postgresRuntime
 			resourceName: spec.ServiceName,
 			secretName:   postgresSecretName(baseName),
 			spec:         spec,
+			placements:   postgresPlacements[spec.ServiceName],
 			serviceType:  model.BackingServiceTypePostgres,
 			ownerAppID:   app.ID,
 			tenantID:     app.TenantID,
@@ -708,6 +722,100 @@ func applyScheduling(podSpec *map[string]any, scheduling SchedulingConstraints) 
 	}
 }
 
+func buildPostgresAffinity(spec model.AppPostgresSpec, placements []SchedulingConstraints) map[string]any {
+	if len(placements) == 0 {
+		return nil
+	}
+
+	affinity := map[string]any{}
+	if nodeAffinity := buildPostgresNodeAffinity(placements); len(nodeAffinity) > 0 {
+		affinity["nodeAffinity"] = nodeAffinity
+	}
+	if tolerations := buildPostgresTolerations(placements); len(tolerations) > 0 {
+		affinity["tolerations"] = tolerations
+	}
+	if spec.Instances > 1 && len(placements) > 1 {
+		affinity["enablePodAntiAffinity"] = true
+		affinity["podAntiAffinityType"] = "required"
+		affinity["topologyKey"] = "kubernetes.io/hostname"
+	}
+	if len(affinity) == 0 {
+		return nil
+	}
+	return affinity
+}
+
+func buildPostgresNodeAffinity(placements []SchedulingConstraints) map[string]any {
+	terms := make([]map[string]any, 0, len(placements))
+	for _, placement := range placements {
+		expressions := selectorMatchExpressions(placement.NodeSelector)
+		if len(expressions) == 0 {
+			continue
+		}
+		terms = append(terms, map[string]any{
+			"matchExpressions": expressions,
+		})
+	}
+	if len(terms) == 0 {
+		return nil
+	}
+	return map[string]any{
+		"requiredDuringSchedulingIgnoredDuringExecution": map[string]any{
+			"nodeSelectorTerms": terms,
+		},
+	}
+}
+
+func selectorMatchExpressions(selector map[string]string) []map[string]any {
+	if len(selector) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(selector))
+	for key := range selector {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	expressions := make([]map[string]any, 0, len(keys))
+	for _, key := range keys {
+		expressions = append(expressions, map[string]any{
+			"key":      key,
+			"operator": "In",
+			"values":   []string{selector[key]},
+		})
+	}
+	return expressions
+}
+
+func buildPostgresTolerations(placements []SchedulingConstraints) []map[string]any {
+	seen := make(map[string]struct{})
+	tolerations := make([]map[string]any, 0)
+	for _, placement := range placements {
+		for _, toleration := range placement.Tolerations {
+			key := strings.Join([]string{
+				toleration.Key,
+				toleration.Operator,
+				toleration.Value,
+				toleration.Effect,
+			}, "\x00")
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			tolerations = append(tolerations, map[string]any{
+				"key":      toleration.Key,
+				"operator": toleration.Operator,
+				"value":    toleration.Value,
+				"effect":   toleration.Effect,
+			})
+		}
+	}
+	if len(tolerations) == 0 {
+		return nil
+	}
+	return tolerations
+}
+
 func normalizeRuntimePostgresSpec(baseName string, spec model.AppPostgresSpec) model.AppPostgresSpec {
 	if strings.TrimSpace(spec.Image) == "" {
 		spec.Image = defaultPostgresImage
@@ -723,14 +831,22 @@ func normalizeRuntimePostgresSpec(baseName string, spec model.AppPostgresSpec) m
 		spec.StorageSize = defaultPostgresStorage
 	}
 	spec.StorageClassName = strings.TrimSpace(spec.StorageClassName)
+	spec.RuntimeID = strings.TrimSpace(spec.RuntimeID)
+	spec.FailoverTargetRuntimeID = strings.TrimSpace(spec.FailoverTargetRuntimeID)
 	if spec.Instances <= 0 {
 		spec.Instances = defaultPostgresInstances
 	}
 	if spec.Instances < 1 {
 		spec.Instances = 1
 	}
+	if spec.FailoverTargetRuntimeID != "" && spec.Instances < 2 {
+		spec.Instances = 2
+	}
 	if spec.SynchronousReplicas < 0 {
 		spec.SynchronousReplicas = 0
+	}
+	if spec.FailoverTargetRuntimeID != "" && spec.SynchronousReplicas < 1 {
+		spec.SynchronousReplicas = 1
 	}
 	if spec.SynchronousReplicas == 0 && spec.Instances > 1 {
 		spec.SynchronousReplicas = defaultPostgresSynchronousReplicas

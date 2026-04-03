@@ -35,7 +35,7 @@ func TestManagedAndExternalOperationFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
-	if _, err := s.UpdateTenantBilling(tenant.ID, model.ResourceSpec{
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
 		CPUMilliCores:   500,
 		MemoryMebibytes: 1024,
 	}); err != nil {
@@ -519,6 +519,9 @@ func TestCreateAppConvertsInlinePostgresToBackingService(t *testing.T) {
 	if got := service.Spec.Postgres.Database; got != "demo" {
 		t.Fatalf("expected database demo, got %q", got)
 	}
+	if got := service.Spec.Postgres.RuntimeID; got != app.Spec.RuntimeID {
+		t.Fatalf("expected postgres runtime %q, got %q", app.Spec.RuntimeID, got)
+	}
 	if got := service.Spec.Postgres.Instances; got != 1 {
 		t.Fatalf("expected default postgres instances 1, got %d", got)
 	}
@@ -599,7 +602,7 @@ func TestDeployOperationConvertsInlinePostgresToBackingServiceOnComplete(t *test
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
-	if _, err := s.UpdateTenantBilling(tenant.ID, model.ResourceSpec{
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
 		CPUMilliCores:   750,
 		MemoryMebibytes: 1536,
 	}); err != nil {
@@ -658,6 +661,9 @@ func TestDeployOperationConvertsInlinePostgresToBackingServiceOnComplete(t *test
 	if got := persisted.BackingServices[0].Spec.Postgres.Database; got != "demo" {
 		t.Fatalf("expected database demo after deploy, got %q", got)
 	}
+	if got := persisted.BackingServices[0].Spec.Postgres.RuntimeID; got != app.Spec.RuntimeID {
+		t.Fatalf("expected postgres runtime %q after deploy, got %q", app.Spec.RuntimeID, got)
+	}
 }
 
 func TestDeployOperationRejectsReservedCNPGPostgresUser(t *testing.T) {
@@ -701,6 +707,103 @@ func TestDeployOperationRejectsReservedCNPGPostgresUser(t *testing.T) {
 	})
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestCreateAppRejectsManagedPostgresFailoverTargetMatchingPrimary(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Stateful Failover Validation")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	_, err = s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8000},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Postgres: &model.AppPostgresSpec{
+			FailoverTargetRuntimeID: "runtime_managed_shared",
+			Password:                "secret",
+		},
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
+func TestRuntimeReferencedByStateIncludesContinuityTargets(t *testing.T) {
+	t.Parallel()
+
+	state := &model.State{
+		Apps: []model.App{
+			{
+				ID: "app_demo",
+				Spec: model.AppSpec{
+					RuntimeID: "runtime_app_primary",
+					Failover: &model.AppFailoverSpec{
+						TargetRuntimeID: "runtime_app_failover",
+						Auto:            true,
+					},
+				},
+				Status: model.AppStatus{
+					CurrentRuntimeID: "runtime_app_primary",
+				},
+			},
+		},
+		BackingServices: []model.BackingService{
+			{
+				ID:     "service_demo",
+				Status: model.BackingServiceStatusActive,
+				Spec: model.BackingServiceSpec{
+					Postgres: &model.AppPostgresSpec{
+						RuntimeID:               "runtime_db_primary",
+						FailoverTargetRuntimeID: "runtime_db_failover",
+					},
+				},
+			},
+		},
+		Operations: []model.Operation{
+			{
+				ID: "op_demo",
+				DesiredSpec: &model.AppSpec{
+					RuntimeID: "runtime_op_primary",
+					Failover: &model.AppFailoverSpec{
+						TargetRuntimeID: "runtime_op_failover",
+					},
+					Postgres: &model.AppPostgresSpec{
+						RuntimeID:               "runtime_op_db_primary",
+						FailoverTargetRuntimeID: "runtime_op_db_failover",
+					},
+				},
+			},
+		},
+	}
+
+	referencedRuntimeIDs := []string{
+		"runtime_app_primary",
+		"runtime_app_failover",
+		"runtime_db_primary",
+		"runtime_db_failover",
+		"runtime_op_primary",
+		"runtime_op_failover",
+		"runtime_op_db_primary",
+		"runtime_op_db_failover",
+	}
+	for _, runtimeID := range referencedRuntimeIDs {
+		if !runtimeReferencedByState(state, runtimeID) {
+			t.Fatalf("expected runtime %q to be referenced", runtimeID)
+		}
 	}
 }
 
@@ -2429,7 +2532,7 @@ func TestClaimAndRequeueManagedOperationRefreshAppStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
-	if _, err := s.UpdateTenantBilling(tenant.ID, model.ResourceSpec{
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
 		CPUMilliCores:   500,
 		MemoryMebibytes: 1024,
 	}); err != nil {
@@ -2962,7 +3065,7 @@ func TestBillingAutoRaisesEnvelopeForManagedScaleBeyondConfiguredEnvelope(t *tes
 		t.Fatalf("create app: %v", err)
 	}
 
-	if _, err := s.UpdateTenantBilling(tenant.ID, model.DefaultManagedAppResources()); err != nil {
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpecFromResourceSpec(model.DefaultManagedAppResources())); err != nil {
 		t.Fatalf("update billing: %v", err)
 	}
 	if _, err := s.TopUpTenantBilling(tenant.ID, 500, "seed"); err != nil {
@@ -2993,7 +3096,7 @@ func TestBillingAutoRaisesEnvelopeForManagedScaleBeyondConfiguredEnvelope(t *tes
 		t.Fatalf("expected scale-up beyond the saved envelope to auto-raise billing, got %v", err)
 	}
 
-	expectedEnvelope := model.ResourceSpec{
+	expectedEnvelope := model.BillingResourceSpec{
 		CPUMilliCores:   model.DefaultManagedAppResources().CPUMilliCores * 2,
 		MemoryMebibytes: model.DefaultManagedAppResources().MemoryMebibytes * 2,
 	}
@@ -3098,7 +3201,7 @@ func TestNewTenantsStartWithSeededFreeTierBilling(t *testing.T) {
 	if summary.BalanceMicroCents != expectedBalance {
 		t.Fatalf("expected seeded summary balance %d, got %d", expectedBalance, summary.BalanceMicroCents)
 	}
-	if summary.DefaultAppResources != (model.ResourceSpec{}) {
+	if summary.DefaultAppResources != (model.BillingResourceSpec{}) {
 		t.Fatalf("expected app default resources to remain unset, got %+v", summary.DefaultAppResources)
 	}
 }
@@ -3122,7 +3225,7 @@ func TestLegacyZeroBillingRecordBackfillsSeededFreeTier(t *testing.T) {
 		if index < 0 {
 			t.Fatalf("billing record for tenant %s not found", tenant.ID)
 		}
-		state.TenantBilling[index].ManagedCap = model.ResourceSpec{}
+		state.TenantBilling[index].ManagedCap = model.BillingResourceSpec{}
 		state.TenantBilling[index].BalanceMicroCents = 0
 		state.TenantBilling[index].LastAccruedAt = staleAccrual
 		state.TenantBilling[index].UpdatedAt = staleAccrual
@@ -3166,9 +3269,10 @@ func TestLegacyBillingPriceBookRecalibratesToDefault(t *testing.T) {
 		t.Fatalf("create tenant: %v", err)
 	}
 
-	managedCap := model.ResourceSpec{
-		CPUMilliCores:   2000,
-		MemoryMebibytes: 4096,
+	managedCap := model.BillingResourceSpec{
+		CPUMilliCores:    2000,
+		MemoryMebibytes:  4096,
+		StorageGibibytes: 30,
 	}
 	stalePriceBook := model.BillingPriceBook{
 		Currency:                      model.DefaultBillingCurrency,
@@ -3229,6 +3333,42 @@ func TestLegacyBillingPriceBookRecalibratesToDefault(t *testing.T) {
 	}
 }
 
+func TestBillingPriceBookCalibratesTwoCPUFourGiThirtyGiNearFourDollars(t *testing.T) {
+	t.Parallel()
+
+	monthlyEstimate := billingMonthlyEstimateMicroCents(model.TenantBilling{
+		ManagedCap: model.BillingResourceSpec{
+			CPUMilliCores:    2000,
+			MemoryMebibytes:  4096,
+			StorageGibibytes: 30,
+		},
+		PriceBook: model.DefaultBillingPriceBook(),
+	})
+
+	if monthlyEstimate < 399_000_000 || monthlyEstimate > 401_000_000 {
+		t.Fatalf("expected 2 cpu / 4 GiB / 30 GiB monthly estimate near $4.00, got %d microcents", monthlyEstimate)
+	}
+}
+
+func TestAppEffectiveResourcesIncludeWorkspaceStorage(t *testing.T) {
+	t.Parallel()
+
+	compute := model.DefaultManagedAppResources()
+	got := appEffectiveResources(model.AppSpec{
+		Resources: &compute,
+		Workspace: &model.AppWorkspaceSpec{},
+	})
+
+	want := model.BillingResourceSpec{
+		CPUMilliCores:    compute.CPUMilliCores,
+		MemoryMebibytes:  compute.MemoryMebibytes,
+		StorageGibibytes: 10,
+	}
+	if got != want {
+		t.Fatalf("expected workspace billing resources %+v, got %+v", want, got)
+	}
+}
+
 func TestExplicitZeroBillingConfigDoesNotBackfillAfterConfigEvent(t *testing.T) {
 	t.Parallel()
 
@@ -3242,7 +3382,7 @@ func TestExplicitZeroBillingConfigDoesNotBackfillAfterConfigEvent(t *testing.T) 
 		t.Fatalf("create tenant: %v", err)
 	}
 
-	if _, err := s.UpdateTenantBilling(tenant.ID, model.ResourceSpec{}); err != nil {
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{}); err != nil {
 		t.Fatalf("pause billing: %v", err)
 	}
 
@@ -3265,7 +3405,7 @@ func TestExplicitZeroBillingConfigDoesNotBackfillAfterConfigEvent(t *testing.T) 
 		t.Fatalf("get billing summary: %v", err)
 	}
 
-	if summary.ManagedCap != (model.ResourceSpec{}) {
+	if summary.ManagedCap != (model.BillingResourceSpec{}) {
 		t.Fatalf("expected explicit zero cap to remain paused, got %+v", summary.ManagedCap)
 	}
 	if summary.Status != model.BillingStatusInactive {
@@ -3295,7 +3435,7 @@ func TestSetTenantBillingBalanceRecordsSignedAdjustments(t *testing.T) {
 		"actor_id":   "bootstrap-admin",
 	}
 
-	if _, err := s.UpdateTenantBilling(tenant.ID, model.ResourceSpec{}); err != nil {
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{}); err != nil {
 		t.Fatalf("pause managed billing before balance adjustments: %v", err)
 	}
 
@@ -3359,18 +3499,18 @@ func TestSingleZeroBillingDimensionPausesManagedBilling(t *testing.T) {
 
 	testCases := []struct {
 		name       string
-		managedCap model.ResourceSpec
+		managedCap model.BillingResourceSpec
 	}{
 		{
 			name: "cpu zero",
-			managedCap: model.ResourceSpec{
+			managedCap: model.BillingResourceSpec{
 				CPUMilliCores:   0,
 				MemoryMebibytes: 2048,
 			},
 		},
 		{
 			name: "memory zero",
-			managedCap: model.ResourceSpec{
+			managedCap: model.BillingResourceSpec{
 				CPUMilliCores:   1000,
 				MemoryMebibytes: 0,
 			},
@@ -3467,7 +3607,7 @@ func TestBillingAllowsScaleDownWhileOverCap(t *testing.T) {
 		t.Fatalf("create app: %v", err)
 	}
 
-	doubleAppCap := model.ResourceSpec{
+	doubleAppCap := model.BillingResourceSpec{
 		CPUMilliCores:   model.DefaultManagedAppResources().CPUMilliCores * 2,
 		MemoryMebibytes: model.DefaultManagedAppResources().MemoryMebibytes * 2,
 	}
@@ -3493,7 +3633,7 @@ func TestBillingAllowsScaleDownWhileOverCap(t *testing.T) {
 		t.Fatalf("complete deploy operation: %v", err)
 	}
 
-	if _, err := s.UpdateTenantBilling(tenant.ID, model.DefaultManagedAppResources()); err != nil {
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpecFromResourceSpec(model.DefaultManagedAppResources())); err != nil {
 		t.Fatalf("lower billing cap: %v", err)
 	}
 
@@ -3517,7 +3657,7 @@ func TestBillingAllowsScaleDownWhileOverCap(t *testing.T) {
 		t.Fatalf("expected scale-up while above the saved envelope to auto-raise billing, got %v", err)
 	}
 
-	expectedEnvelope := model.ResourceSpec{
+	expectedEnvelope := model.BillingResourceSpec{
 		CPUMilliCores:   model.DefaultManagedAppResources().CPUMilliCores * 3,
 		MemoryMebibytes: model.DefaultManagedAppResources().MemoryMebibytes * 3,
 	}
@@ -3560,7 +3700,7 @@ func TestBillingDepletedBalanceOnlyBlocksCapacityIncrease(t *testing.T) {
 		t.Fatalf("create app: %v", err)
 	}
 
-	if _, err := s.UpdateTenantBilling(tenant.ID, model.ResourceSpec{
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
 		CPUMilliCores:   1000,
 		MemoryMebibytes: 2048,
 	}); err != nil {

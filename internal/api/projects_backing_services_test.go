@@ -85,7 +85,7 @@ func TestBackingServiceLifecycleAndBindingsQueueDeploy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
-	if _, err := s.UpdateTenantBilling(tenant.ID, model.ResourceSpec{
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
 		CPUMilliCores:   750,
 		MemoryMebibytes: 1536,
 	}); err != nil {

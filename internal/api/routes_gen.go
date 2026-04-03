@@ -31,6 +31,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("DELETE /v1/apps/{id}/bindings/{binding_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteAppBinding)))
 	mux.Handle("GET /v1/apps/{id}/build-logs", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppBuildLogs)))
 	mux.Handle("GET /v1/apps/{id}/build-logs/stream", s.auth.RequireAPI(http.HandlerFunc(s.handleStreamAppBuildLogs)))
+	mux.Handle("PATCH /v1/apps/{id}/continuity", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchAppContinuity)))
 	mux.Handle("POST /v1/apps/{id}/deploy", s.auth.RequireAPI(http.HandlerFunc(s.handleDeployApp)))
 	mux.Handle("POST /v1/apps/{id}/disable", s.auth.RequireAPI(http.HandlerFunc(s.handleDisableApp)))
 	mux.Handle("GET /v1/apps/{id}/domains", s.auth.RequireAPI(http.HandlerFunc(s.handleListAppDomains)))

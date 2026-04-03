@@ -306,7 +306,7 @@ func TestExecuteManagedImportOperationRefreshesComposeEnvWithoutOverwritingCusto
 	}, model.AppRoute{}); err != nil {
 		t.Fatalf("create sibling app: %v", err)
 	}
-	if _, err := stateStore.UpdateTenantBilling(tenant.ID, model.ResourceSpec{
+	if _, err := stateStore.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
 		CPUMilliCores:   1000,
 		MemoryMebibytes: 2048,
 	}); err != nil {

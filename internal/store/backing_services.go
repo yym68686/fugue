@@ -260,7 +260,7 @@ func applyDesiredSpecBackingServicesState(state *model.State, app *model.App, de
 	if serviceIndex := findOwnedBackingServiceByAppAndType(state, app.ID, model.BackingServiceTypePostgres); serviceIndex >= 0 {
 		now := time.Now().UTC()
 		service := cloneBackingService(state.BackingServices[serviceIndex])
-		normalized := normalizeManagedPostgresSpec(appNameForService(&service, app), *desiredSpec.Postgres)
+		normalized := normalizeManagedPostgresSpec(appNameForService(&service, app), app.Spec.RuntimeID, *desiredSpec.Postgres)
 		service.Type = model.BackingServiceTypePostgres
 		service.Provisioner = model.BackingServiceProvisionerManaged
 		service.Status = model.BackingServiceStatusActive
@@ -287,6 +287,47 @@ func applyDesiredSpecBackingServicesState(state *model.State, app *model.App, de
 	state.ServiceBindings = append(state.ServiceBindings, binding)
 	desiredSpec.Postgres = nil
 	return nil
+}
+
+func OverlayDesiredManagedPostgres(app model.App) (model.App, error) {
+	if app.Spec.Postgres == nil {
+		return app, nil
+	}
+	if err := validateManagedPostgresSpecForAppName(app.Name, app.Spec.Postgres); err != nil {
+		return model.App{}, err
+	}
+
+	out := app
+	normalized := normalizeManagedPostgresSpec(out.Name, out.Spec.RuntimeID, *out.Spec.Postgres)
+
+	for index, service := range out.BackingServices {
+		if service.Type != model.BackingServiceTypePostgres || service.Spec.Postgres == nil {
+			continue
+		}
+		if strings.TrimSpace(service.OwnerAppID) != strings.TrimSpace(out.ID) {
+			continue
+		}
+		serviceCopy := cloneBackingService(service)
+		serviceCopy.Spec.Postgres = &normalized
+		out.BackingServices[index] = serviceCopy
+		ensureBoundPostgresViewBinding(&out, serviceCopy, normalized)
+		out.Spec.Postgres = nil
+		return out, nil
+	}
+
+	if appHasBoundServiceType(out, model.BackingServiceTypePostgres) {
+		out.Spec.Postgres = nil
+		return out, nil
+	}
+
+	out.Spec.Postgres = &normalized
+	service, binding := appManagedPostgresResources(out)
+	out.BackingServices = append(out.BackingServices, service)
+	out.Bindings = append(out.Bindings, binding)
+	sortBackingServices(out.BackingServices)
+	sortServiceBindings(out.Bindings)
+	out.Spec.Postgres = nil
+	return out, nil
 }
 
 func isDeletedBackingService(service model.BackingService) bool {
@@ -355,7 +396,11 @@ func normalizeBackingServiceForPersist(service *model.BackingService, app *model
 		if err := validateManagedPostgresSpecForAppName(appNameForService(service, app), service.Spec.Postgres); err != nil {
 			return err
 		}
-		normalized := normalizeManagedPostgresSpec(appNameForService(service, app), *service.Spec.Postgres)
+		runtimeID := ""
+		if app != nil {
+			runtimeID = app.Spec.RuntimeID
+		}
+		normalized := normalizeManagedPostgresSpec(appNameForService(service, app), runtimeID, *service.Spec.Postgres)
 		service.Spec.Postgres = &normalized
 		if strings.TrimSpace(service.Description) == "" {
 			service.Description = "Managed postgres service"
@@ -398,7 +443,7 @@ func normalizeBindingForPersist(binding *model.ServiceBinding, service model.Bac
 	return nil
 }
 
-func normalizeManagedPostgresSpec(appName string, spec model.AppPostgresSpec) model.AppPostgresSpec {
+func normalizeManagedPostgresSpec(appName, appRuntimeID string, spec model.AppPostgresSpec) model.AppPostgresSpec {
 	out := spec
 	resourceName := postgresServiceNameForApp(appName)
 	if strings.TrimSpace(out.Image) == "" {
@@ -413,6 +458,11 @@ func normalizeManagedPostgresSpec(appName string, spec model.AppPostgresSpec) mo
 	if strings.TrimSpace(out.ServiceName) == "" {
 		out.ServiceName = resourceName
 	}
+	out.RuntimeID = strings.TrimSpace(out.RuntimeID)
+	if out.RuntimeID == "" {
+		out.RuntimeID = strings.TrimSpace(appRuntimeID)
+	}
+	out.FailoverTargetRuntimeID = strings.TrimSpace(out.FailoverTargetRuntimeID)
 	if strings.TrimSpace(out.StorageSize) == "" {
 		out.StorageSize = defaultManagedBackingPostgresStorage
 	}
@@ -420,8 +470,14 @@ func normalizeManagedPostgresSpec(appName string, spec model.AppPostgresSpec) mo
 	if out.Instances <= 0 {
 		out.Instances = defaultManagedBackingPostgresInstances
 	}
+	if out.FailoverTargetRuntimeID != "" && out.Instances < 2 {
+		out.Instances = 2
+	}
 	if out.SynchronousReplicas < 0 {
 		out.SynchronousReplicas = 0
+	}
+	if out.FailoverTargetRuntimeID != "" && out.SynchronousReplicas < 1 {
+		out.SynchronousReplicas = 1
 	}
 	if out.SynchronousReplicas == 0 && out.Instances > 1 {
 		out.SynchronousReplicas = defaultManagedBackingPostgresSynchronousReplicas
@@ -441,7 +497,6 @@ func normalizeManagedPostgresSpec(appName string, spec model.AppPostgresSpec) mo
 func ownedManagedPostgresResources(app model.App) (model.BackingService, model.ServiceBinding) {
 	service, binding := appManagedPostgresResources(app)
 	now := time.Now().UTC()
-	service.ID = model.NewID("service")
 	service.TenantID = app.TenantID
 	service.ProjectID = app.ProjectID
 	service.OwnerAppID = app.ID
@@ -452,7 +507,6 @@ func ownedManagedPostgresResources(app model.App) (model.BackingService, model.S
 	service.CreatedAt = now
 	service.UpdatedAt = now
 
-	binding.ID = model.NewID("binding")
 	binding.TenantID = app.TenantID
 	binding.AppID = app.ID
 	binding.ServiceID = service.ID
@@ -463,7 +517,7 @@ func ownedManagedPostgresResources(app model.App) (model.BackingService, model.S
 }
 
 func appManagedPostgresResources(app model.App) (model.BackingService, model.ServiceBinding) {
-	spec := normalizeManagedPostgresSpec(app.Name, *app.Spec.Postgres)
+	spec := normalizeManagedPostgresSpec(app.Name, app.Spec.RuntimeID, *app.Spec.Postgres)
 	service := model.BackingService{
 		ID:          "app-postgres-" + app.ID,
 		TenantID:    app.TenantID,
@@ -487,6 +541,50 @@ func appManagedPostgresResources(app model.App) (model.BackingService, model.Ser
 		Env:       defaultPostgresBindingEnv(spec),
 	}
 	return service, binding
+}
+
+func appHasBoundServiceType(app model.App, serviceType string) bool {
+	servicesByID := make(map[string]model.BackingService, len(app.BackingServices))
+	for _, service := range app.BackingServices {
+		servicesByID[service.ID] = service
+	}
+
+	for _, binding := range app.Bindings {
+		service, ok := servicesByID[binding.ServiceID]
+		if !ok {
+			continue
+		}
+		if service.Type == serviceType && !isDeletedBackingService(service) {
+			return true
+		}
+	}
+	return false
+}
+
+func ensureBoundPostgresViewBinding(app *model.App, service model.BackingService, spec model.AppPostgresSpec) {
+	if app == nil {
+		return
+	}
+	for index, binding := range app.Bindings {
+		if binding.ServiceID != service.ID {
+			continue
+		}
+		bindingCopy := cloneServiceBinding(binding)
+		bindingCopy.Alias = defaultServiceBindingAlias(bindingCopy.Alias, service)
+		bindingCopy.Env = defaultPostgresBindingEnv(spec)
+		app.Bindings[index] = bindingCopy
+		return
+	}
+
+	app.Bindings = append(app.Bindings, model.ServiceBinding{
+		ID:        "app-postgres-binding-" + app.ID,
+		TenantID:  app.TenantID,
+		AppID:     app.ID,
+		ServiceID: service.ID,
+		Alias:     defaultServiceBindingAlias("", service),
+		Env:       defaultPostgresBindingEnv(spec),
+	})
+	sortServiceBindings(app.Bindings)
 }
 
 func defaultOwnedBackingServiceName(appName, serviceType string) string {
