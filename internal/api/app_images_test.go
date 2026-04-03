@@ -165,14 +165,14 @@ func TestHandleGetBillingCountsManagedImageInventoryStorage(t *testing.T) {
 	if got := response.Billing.ManagedCommitted.StorageGibibytes; got != 1 {
 		t.Fatalf("expected billing committed storage to include 1 GiB of image inventory, got %d", got)
 	}
-	if !response.Billing.OverCap {
-		t.Fatalf("expected billing to be over-cap after adding image inventory storage, got %#v", response.Billing)
+	if response.Billing.OverCap {
+		t.Fatalf("expected default 5 GiB storage cap to absorb 1 GiB of image inventory, got %#v", response.Billing)
 	}
 	priceBook := model.DefaultBillingPriceBook()
 	freeCap := model.DefaultTenantFreeManagedCap()
 	expectedHourly := freeCap.CPUMilliCores*priceBook.CPUMicroCentsPerMilliCoreHour +
 		freeCap.MemoryMebibytes*priceBook.MemoryMicroCentsPerMiBHour +
-		priceBook.StorageMicroCentsPerGiBHour
+		freeCap.StorageGibibytes*priceBook.StorageMicroCentsPerGiBHour
 	if response.Billing.HourlyRateMicroCents != expectedHourly {
 		t.Fatalf("expected hourly rate %d with image inventory storage, got %d", expectedHourly, response.Billing.HourlyRateMicroCents)
 	}

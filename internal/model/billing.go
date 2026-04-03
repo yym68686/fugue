@@ -21,7 +21,7 @@ const (
 
 	DefaultTenantFreeManagedCPUMilliCores    int64 = 500
 	DefaultTenantFreeManagedMemoryMebibytes  int64 = 512
-	DefaultTenantFreeManagedStorageGibibytes int64 = 0
+	DefaultTenantFreeManagedStorageGibibytes int64 = 5
 
 	DefaultManagedAppCPUMilliCores         int64 = 250
 	DefaultManagedAppMemoryMebibytes       int64 = 512

@@ -3402,8 +3402,8 @@ func TestSyncTenantBillingImageStorageContributesToCommittedStorageAndEstimate(t
 	}, 5) {
 		t.Fatalf("expected monthly estimate to include image storage, got %d", got)
 	}
-	if !summary.OverCap {
-		t.Fatal("expected image storage beyond saved envelope to mark billing over-cap")
+	if summary.OverCap {
+		t.Fatal("expected image storage matching the default saved envelope not to mark billing over-cap")
 	}
 }
 
