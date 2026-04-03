@@ -18,8 +18,6 @@ const (
 	appImageStatusMissing   = "missing"
 )
 
-const appImageReclaimNote = "Deleting a saved image version removes its registry manifest reference. Actual disk bytes may remain until the registry garbage collector runs."
-
 type appImageSummary struct {
 	VersionCount         int   `json:"version_count"`
 	CurrentVersionCount  int   `json:"current_version_count"`
@@ -73,26 +71,26 @@ type appImageRedeployResponse struct {
 }
 
 type projectImageUsageAppSummary struct {
-	AppID                 string `json:"app_id"`
-	AppName               string `json:"app_name"`
-	VersionCount          int    `json:"version_count"`
-	CurrentVersionCount   int    `json:"current_version_count"`
-	StaleVersionCount     int    `json:"stale_version_count"`
-	TotalSizeBytes        int64  `json:"total_size_bytes"`
-	CurrentSizeBytes      int64  `json:"current_size_bytes"`
-	StaleSizeBytes        int64  `json:"stale_size_bytes"`
-	ReclaimableSizeBytes  int64  `json:"reclaimable_size_bytes"`
+	AppID                string `json:"app_id"`
+	AppName              string `json:"app_name"`
+	VersionCount         int    `json:"version_count"`
+	CurrentVersionCount  int    `json:"current_version_count"`
+	StaleVersionCount    int    `json:"stale_version_count"`
+	TotalSizeBytes       int64  `json:"total_size_bytes"`
+	CurrentSizeBytes     int64  `json:"current_size_bytes"`
+	StaleSizeBytes       int64  `json:"stale_size_bytes"`
+	ReclaimableSizeBytes int64  `json:"reclaimable_size_bytes"`
 }
 
 type projectImageUsageSummary struct {
-	ProjectID            string                       `json:"project_id"`
-	VersionCount         int                          `json:"version_count"`
-	CurrentVersionCount  int                          `json:"current_version_count"`
-	StaleVersionCount    int                          `json:"stale_version_count"`
-	TotalSizeBytes       int64                        `json:"total_size_bytes"`
-	CurrentSizeBytes     int64                        `json:"current_size_bytes"`
-	StaleSizeBytes       int64                        `json:"stale_size_bytes"`
-	ReclaimableSizeBytes int64                        `json:"reclaimable_size_bytes"`
+	ProjectID            string                        `json:"project_id"`
+	VersionCount         int                           `json:"version_count"`
+	CurrentVersionCount  int                           `json:"current_version_count"`
+	StaleVersionCount    int                           `json:"stale_version_count"`
+	TotalSizeBytes       int64                         `json:"total_size_bytes"`
+	CurrentSizeBytes     int64                         `json:"current_size_bytes"`
+	StaleSizeBytes       int64                         `json:"stale_size_bytes"`
+	ReclaimableSizeBytes int64                         `json:"reclaimable_size_bytes"`
 	Apps                 []projectImageUsageAppSummary `json:"apps"`
 }
 
@@ -306,18 +304,33 @@ func (s *Server) handleDeleteAppImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.runAppImageRegistryGarbageCollect(r.Context()); err != nil {
+		s.appendAudit(principal, "app.image.delete", "app", app.ID, app.TenantID, map[string]string{
+			"app_id":       app.ID,
+			"image_ref":    version.Candidate.ImageRef,
+			"digest":       deleteResult.Digest,
+			"registry_gc":  "failed",
+			"delete_state": appImageDeleteAuditState(deleteResult),
+		})
+		httpx.WriteError(w, http.StatusBadGateway, fmt.Sprintf(
+			"saved image reference was removed, but immediate registry cleanup failed: %v",
+			err,
+		))
+		return
+	}
+
 	s.appendAudit(principal, "app.image.delete", "app", app.ID, app.TenantID, map[string]string{
-		"app_id":    app.ID,
-		"image_ref": version.Candidate.ImageRef,
-		"digest":    deleteResult.Digest,
+		"app_id":       app.ID,
+		"image_ref":    version.Candidate.ImageRef,
+		"digest":       deleteResult.Digest,
+		"registry_gc":  "completed",
+		"delete_state": appImageDeleteAuditState(deleteResult),
 	})
 	httpx.WriteJSON(w, http.StatusOK, appImageDeleteResponse{
 		Image:              &version.Response,
 		Deleted:            deleteResult.Deleted,
 		AlreadyMissing:     deleteResult.AlreadyMissing,
 		RegistryConfigured: true,
-		ReclaimRequiresGC:  true,
-		ReclaimNote:        appImageReclaimNote,
 		ReclaimedSizeBytes: version.Response.ReclaimableSizeBytes,
 	})
 }
@@ -329,10 +342,6 @@ func (s *Server) buildProjectImageUsageResponse(
 ) (projectImageUsageResponse, error) {
 	response := projectImageUsageResponse{
 		RegistryConfigured: s.appImageInventoryConfigured(),
-		ReclaimRequiresGC:  s.appImageInventoryConfigured(),
-	}
-	if response.ReclaimRequiresGC {
-		response.ReclaimNote = appImageReclaimNote
 	}
 	if !response.RegistryConfigured {
 		return response, nil
@@ -424,7 +433,6 @@ func (s *Server) buildAppImageInventory(
 		Response: appImageInventoryResponse{
 			AppID:              app.ID,
 			RegistryConfigured: s.appImageInventoryConfigured(),
-			ReclaimRequiresGC:  s.appImageInventoryConfigured(),
 			Versions:           []appImageVersion{},
 		},
 		VersionByImageRef:    make(map[string]builtAppImageVersion),
@@ -432,9 +440,6 @@ func (s *Server) buildAppImageInventory(
 		CurrentBlobSizes:     make(map[string]int64),
 		StaleBlobSizes:       make(map[string]int64),
 		ReclaimableBlobSizes: make(map[string]int64),
-	}
-	if inventory.Response.ReclaimRequiresGC {
-		inventory.Response.ReclaimNote = appImageReclaimNote
 	}
 	if !inventory.Response.RegistryConfigured {
 		return inventory, nil
@@ -742,6 +747,17 @@ func (s *Server) isManagedRegistryRef(imageRef string) bool {
 
 func (s *Server) appImageInventoryConfigured() bool {
 	return strings.TrimSpace(s.registryPushBase) != "" && s.appImageRegistry != nil
+}
+
+func appImageDeleteAuditState(result appImageRegistryDeleteResult) string {
+	switch {
+	case result.Deleted:
+		return "deleted"
+	case result.AlreadyMissing:
+		return "already_missing"
+	default:
+		return "noop"
+	}
 }
 
 func visibleAppsForImageInventory(apps []model.App) []model.App {

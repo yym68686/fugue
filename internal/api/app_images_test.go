@@ -2,9 +2,11 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
@@ -93,8 +95,11 @@ func TestHandleGetAppImagesReturnsCurrentAndHistoricalVersions(t *testing.T) {
 	if staleVersion.Source == nil || staleVersion.Source.CommitSHA == "" {
 		t.Fatalf("expected stale version source metadata, got %#v", staleVersion)
 	}
-	if response.ReclaimNote == "" {
-		t.Fatalf("expected reclaim note for project %s", project.ID)
+	if response.ReclaimRequiresGC {
+		t.Fatalf("expected inventory to report immediate cleanup, got %#v", response)
+	}
+	if response.ReclaimNote != "" {
+		t.Fatalf("expected no reclaim note for project %s, got %q", project.ID, response.ReclaimNote)
 	}
 }
 
@@ -113,6 +118,12 @@ func TestHandleListProjectImageUsageReturnsProjectSummary(t *testing.T) {
 
 	if !response.RegistryConfigured {
 		t.Fatal("expected registry inventory to be configured")
+	}
+	if response.ReclaimRequiresGC {
+		t.Fatalf("expected project image usage to report immediate cleanup, got %#v", response)
+	}
+	if response.ReclaimNote != "" {
+		t.Fatalf("expected no reclaim note in project usage response, got %q", response.ReclaimNote)
 	}
 	if len(response.Projects) != 1 {
 		t.Fatalf("expected one project summary, got %#v", response.Projects)
@@ -170,6 +181,20 @@ func TestHandleDeleteAppImageDeletesHistoricalRegistryVersion(t *testing.T) {
 	t.Parallel()
 
 	_, server, apiKey, _, _, app, fakeRegistry, oldImageRef, _, _ := setupAppImagesTestServer(t)
+	pod := kubePodInfo{}
+	pod.Metadata.Name = "fugue-fugue-registry-abc123"
+	pod.Metadata.CreationTimestamp = time.Date(2026, 4, 3, 9, 0, 0, 0, time.UTC)
+	pod.Status.Phase = "Running"
+	server.newFilesystemPodLister = func(namespace string) (filesystemPodLister, error) {
+		if namespace != "fugue-system" {
+			t.Fatalf("expected control-plane namespace fugue-system, got %q", namespace)
+		}
+		return fakeFilesystemPodLister{pods: []kubePodInfo{pod}}, nil
+	}
+	runner := &fakeFilesystemExecRunner{
+		outputs: [][]byte{{}},
+	}
+	server.filesystemExecRunner = runner
 
 	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/images/delete", apiKey, map[string]any{
 		"image_ref": oldImageRef,
@@ -187,8 +212,63 @@ func TestHandleDeleteAppImageDeletesHistoricalRegistryVersion(t *testing.T) {
 	if response.ReclaimedSizeBytes != 60 {
 		t.Fatalf("expected reclaimed size estimate 60, got %#v", response)
 	}
+	if response.ReclaimRequiresGC {
+		t.Fatalf("expected delete response to report immediate cleanup, got %#v", response)
+	}
+	if response.ReclaimNote != "" {
+		t.Fatalf("expected delete response to omit reclaim note, got %q", response.ReclaimNote)
+	}
 	if len(fakeRegistry.deleted) != 1 || fakeRegistry.deleted[0] != oldImageRef {
 		t.Fatalf("expected fake registry delete for %q, got %#v", oldImageRef, fakeRegistry.deleted)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("expected registry GC exec call, got %d", len(runner.calls))
+	}
+	if runner.calls[0].namespace != "fugue-system" {
+		t.Fatalf("expected registry GC namespace fugue-system, got %#v", runner.calls[0])
+	}
+	if runner.calls[0].podName != pod.Metadata.Name {
+		t.Fatalf("expected registry GC pod %q, got %#v", pod.Metadata.Name, runner.calls[0])
+	}
+	if runner.calls[0].container != "registry" {
+		t.Fatalf("expected registry GC container registry, got %#v", runner.calls[0])
+	}
+	if got := runner.calls[0].command; len(got) != 4 || got[0] != "registry" || got[1] != "garbage-collect" || got[2] != "--delete-untagged" || got[3] != "/etc/docker/registry/config.yml" {
+		t.Fatalf("unexpected registry GC command %#v", got)
+	}
+}
+
+func TestHandleDeleteAppImageReturnsBadGatewayWhenRegistryGCFails(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, _, _, app, fakeRegistry, oldImageRef, _, _ := setupAppImagesTestServer(t)
+	pod := kubePodInfo{}
+	pod.Metadata.Name = "fugue-fugue-registry-abc123"
+	pod.Metadata.CreationTimestamp = time.Date(2026, 4, 3, 9, 0, 0, 0, time.UTC)
+	pod.Status.Phase = "Running"
+	server.newFilesystemPodLister = func(string) (filesystemPodLister, error) {
+		return fakeFilesystemPodLister{pods: []kubePodInfo{pod}}, nil
+	}
+	server.filesystemExecRunner = &fakeFilesystemExecRunner{
+		errs: []error{errors.New("gc failed")},
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/images/delete", apiKey, map[string]any{
+		"image_ref": oldImageRef,
+	})
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadGateway, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Error string `json:"error"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Error == "" {
+		t.Fatalf("expected delete error message, got %#v", response)
+	}
+	if len(fakeRegistry.deleted) != 1 || fakeRegistry.deleted[0] != oldImageRef {
+		t.Fatalf("expected manifest delete to happen before GC failure, got %#v", fakeRegistry.deleted)
 	}
 }
 
@@ -326,8 +406,10 @@ func setupAppImagesTestServer(t *testing.T) (*store.Store, *Server, string, mode
 	}
 
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
-		RegistryPushBase: pushBase,
-		RegistryPullBase: pullBase,
+		ControlPlaneNamespace:       "fugue-system",
+		ControlPlaneReleaseInstance: "fugue",
+		RegistryPushBase:            pushBase,
+		RegistryPullBase:            pullBase,
 	})
 	fakeRegistry := &fakeAppImageRegistry{
 		images: map[string]appImageRegistryInspectResult{
