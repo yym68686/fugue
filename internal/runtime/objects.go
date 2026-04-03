@@ -886,7 +886,7 @@ func normalizeRuntimePostgresSpec(_ string, baseName string, spec model.AppPostg
 		spec.Database = baseName
 	}
 	if strings.TrimSpace(spec.User) == "" {
-		spec.User = "postgres"
+		spec.User = model.DefaultManagedPostgresUser(baseName, spec.StoragePath)
 	}
 	spec.ServiceName = normalizePostgresResourceName(spec.ServiceName, baseName)
 	if strings.TrimSpace(spec.StorageSize) == "" {

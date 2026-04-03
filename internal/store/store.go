@@ -1902,6 +1902,9 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 	if err := normalizeAppSpecResources(&spec); err != nil {
 		return model.App{}, err
 	}
+	if err := validateManagedPostgresSpecForAppName(name, spec.Postgres); err != nil {
+		return model.App{}, err
+	}
 	if s.usingDatabase() {
 		return s.pgCreateApp(tenantID, projectID, name, description, spec, source, route)
 	}
@@ -2004,6 +2007,9 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
 				return err
 			}
+			if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
+				return err
+			}
 			if !runtimeVisibleToTenant(state, op.DesiredSpec.RuntimeID, op.TenantID) {
 				return ErrNotFound
 			}
@@ -2019,6 +2025,9 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 				return ErrInvalidInput
 			}
 			if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
+				return err
+			}
+			if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
 				return err
 			}
 			if !runtimeVisibleToTenant(state, op.DesiredSpec.RuntimeID, op.TenantID) {

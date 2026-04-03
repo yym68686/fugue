@@ -98,6 +98,22 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 	}
 }
 
+func TestNormalizeRuntimePostgresSpecDefaultsToAppScopedUser(t *testing.T) {
+	spec := normalizeRuntimePostgresSpec("", "fugue-web", model.AppPostgresSpec{})
+	if spec.User != "fugue_web" {
+		t.Fatalf("expected app-scoped user fugue_web, got %q", spec.User)
+	}
+}
+
+func TestNormalizeRuntimePostgresSpecKeepsLegacyPostgresUserForStoragePath(t *testing.T) {
+	spec := normalizeRuntimePostgresSpec("", "fugue-web", model.AppPostgresSpec{
+		StoragePath: "/var/lib/postgres",
+	})
+	if spec.User != "postgres" {
+		t.Fatalf("expected legacy postgres user, got %q", spec.User)
+	}
+}
+
 func TestBuildAppDeploymentTemplateAnnotationsTrackFilesAndRestart(t *testing.T) {
 	app := model.App{
 		TenantID: "tenant_demo",

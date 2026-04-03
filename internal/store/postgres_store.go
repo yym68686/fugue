@@ -1941,6 +1941,9 @@ func (s *Store) pgCreateApp(tenantID, projectID, name, description string, spec 
 	if err := normalizeAppSpecResources(&spec); err != nil {
 		return model.App{}, err
 	}
+	if err := validateManagedPostgresSpecForAppName(name, spec.Postgres); err != nil {
+		return model.App{}, err
+	}
 	visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, spec.RuntimeID, tenantID)
 	if err != nil {
 		return model.App{}, err
@@ -2311,6 +2314,9 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 		if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
 			return model.Operation{}, err
 		}
+		if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
+			return model.Operation{}, err
+		}
 		visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, op.DesiredSpec.RuntimeID, op.TenantID)
 		if err != nil {
 			return model.Operation{}, err
@@ -2350,6 +2356,9 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 			return model.Operation{}, ErrInvalidInput
 		}
 		if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
+			return model.Operation{}, err
+		}
+		if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
 			return model.Operation{}, err
 		}
 		visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, op.DesiredSpec.RuntimeID, op.TenantID)

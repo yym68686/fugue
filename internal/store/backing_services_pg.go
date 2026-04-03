@@ -409,6 +409,9 @@ func (s *Store) pgApplyDesiredSpecBackingServicesTx(ctx context.Context, tx *sql
 	if app == nil || desiredSpec == nil || desiredSpec.Postgres == nil {
 		return nil
 	}
+	if err := validateManagedPostgresSpecForAppName(app.Name, desiredSpec.Postgres); err != nil {
+		return err
+	}
 
 	if service, found, err := s.pgGetOwnedBackingServiceByAppAndTypeTx(ctx, tx, app.ID, model.BackingServiceTypePostgres, true); err != nil {
 		return err

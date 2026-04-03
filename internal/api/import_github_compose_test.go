@@ -1,6 +1,7 @@
 package api
 
 import (
+	"strings"
 	"testing"
 
 	"fugue/internal/model"
@@ -196,5 +197,36 @@ func TestComposePostgresSpecKeepsExplicitServiceName(t *testing.T) {
 	}
 	if spec.StoragePath != "/data/custom-db" {
 		t.Fatalf("expected explicit storage path to be preserved, got %q", spec.StoragePath)
+	}
+}
+
+func TestComposePostgresSpecDefaultsToAppScopedUser(t *testing.T) {
+	spec, err := composePostgresSpec(sourceimport.ComposeService{
+		Name:  "db",
+		Kind:  sourceimport.ComposeServiceKindPostgres,
+		Image: "postgres:17.6-alpine",
+	}, "fugue-web")
+	if err != nil {
+		t.Fatalf("compose postgres spec: %v", err)
+	}
+	if spec.User != "fugue_web" {
+		t.Fatalf("expected app-scoped user fugue_web, got %q", spec.User)
+	}
+}
+
+func TestComposePostgresSpecRejectsReservedCNPGUser(t *testing.T) {
+	_, err := composePostgresSpec(sourceimport.ComposeService{
+		Name:  "db",
+		Kind:  sourceimport.ComposeServiceKindPostgres,
+		Image: "postgres:17.6-alpine",
+		Postgres: &model.AppPostgresSpec{
+			User: "postgres",
+		},
+	}, "fugue-web")
+	if err == nil {
+		t.Fatal("expected reserved user error")
+	}
+	if !strings.Contains(err.Error(), `managed CNPG postgres user "postgres" is reserved`) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

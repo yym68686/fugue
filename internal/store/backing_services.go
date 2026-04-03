@@ -287,6 +287,9 @@ func applyDesiredSpecBackingServicesState(state *model.State, app *model.App, de
 	if state == nil || app == nil || desiredSpec == nil || desiredSpec.Postgres == nil {
 		return nil
 	}
+	if err := validateManagedPostgresSpecForAppName(app.Name, desiredSpec.Postgres); err != nil {
+		return err
+	}
 
 	if serviceIndex := findOwnedBackingServiceByAppAndType(state, app.ID, model.BackingServiceTypePostgres); serviceIndex >= 0 {
 		now := time.Now().UTC()
@@ -383,6 +386,9 @@ func normalizeBackingServiceForPersist(service *model.BackingService, app *model
 		if err := normalizePostgresSpecResources(service.Spec.Postgres); err != nil {
 			return err
 		}
+		if err := validateManagedPostgresSpecForAppName(appNameForService(service, app), service.Spec.Postgres); err != nil {
+			return err
+		}
 		normalized := normalizeManagedPostgresSpec(service.TenantID, appNameForService(service, app), *service.Spec.Postgres)
 		service.Spec.Postgres = &normalized
 		if strings.TrimSpace(service.Description) == "" {
@@ -393,6 +399,16 @@ func normalizeBackingServiceForPersist(service *model.BackingService, app *model
 		}
 	default:
 		return ErrInvalidInput
+	}
+	return nil
+}
+
+func validateManagedPostgresSpecForAppName(appName string, spec *model.AppPostgresSpec) error {
+	if spec == nil {
+		return nil
+	}
+	if err := model.ValidateManagedPostgresUser(appName, *spec); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
 	return nil
 }
@@ -426,7 +442,7 @@ func normalizeManagedPostgresSpec(_ string, appName string, spec model.AppPostgr
 		out.Database = serviceResourceName(appName)
 	}
 	if strings.TrimSpace(out.User) == "" {
-		out.User = "postgres"
+		out.User = model.DefaultManagedPostgresUser(appName, out.StoragePath)
 	}
 	if strings.TrimSpace(out.ServiceName) == "" {
 		out.ServiceName = resourceName

@@ -1,6 +1,11 @@
 package api
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"fugue/internal/model"
+)
 
 func TestNormalizeAppFilesUsesDefaultConfigPath(t *testing.T) {
 	files, err := normalizeAppFiles("providers: []", nil)
@@ -25,5 +30,39 @@ func TestNormalizeAppFilesAllowsEmptyInput(t *testing.T) {
 	}
 	if files != nil {
 		t.Fatalf("expected nil files, got %#v", files)
+	}
+}
+
+func TestNormalizeGenericPostgresSpecDefaultsToAppScopedUserForCNPG(t *testing.T) {
+	spec, err := normalizeGenericPostgresSpec("fugue-web", nil)
+	if err != nil {
+		t.Fatalf("normalize postgres spec: %v", err)
+	}
+	if spec.User != "fugue_web" {
+		t.Fatalf("expected app-scoped user fugue_web, got %q", spec.User)
+	}
+}
+
+func TestNormalizeGenericPostgresSpecRejectsReservedCNPGUser(t *testing.T) {
+	_, err := normalizeGenericPostgresSpec("fugue-web", &model.AppPostgresSpec{
+		User: "postgres",
+	})
+	if err == nil {
+		t.Fatal("expected reserved user error")
+	}
+	if !strings.Contains(err.Error(), `managed CNPG postgres user "postgres" is reserved`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNormalizeGenericPostgresSpecAllowsLegacyStoragePathPostgresUser(t *testing.T) {
+	spec, err := normalizeGenericPostgresSpec("fugue-web", &model.AppPostgresSpec{
+		StoragePath: "/var/lib/postgres",
+	})
+	if err != nil {
+		t.Fatalf("normalize postgres spec: %v", err)
+	}
+	if spec.User != "postgres" {
+		t.Fatalf("expected legacy postgres user, got %q", spec.User)
 	}
 }

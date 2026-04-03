@@ -134,7 +134,7 @@ func normalizeLegacyAPIAppPostgresSpec(app model.App) model.AppPostgresSpec {
 		spec.Database = baseName
 	}
 	if strings.TrimSpace(spec.User) == "" {
-		spec.User = "postgres"
+		spec.User = model.DefaultManagedPostgresUser(app.Name, spec.StoragePath)
 	}
 	if strings.TrimSpace(spec.ServiceName) == "" {
 		spec.ServiceName = baseName + "-postgres"

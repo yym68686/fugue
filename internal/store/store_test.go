@@ -614,6 +614,38 @@ func TestCreateAppConvertsInlinePostgresToBackingService(t *testing.T) {
 	}
 }
 
+func TestCreateAppRejectsReservedCNPGPostgresUser(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Stateful Create Validation")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	_, err = s.CreateApp(tenant.ID, project.ID, "fugue-web", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8000},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Postgres: &model.AppPostgresSpec{
+			User:     "postgres",
+			Password: "secret",
+		},
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	}
+}
+
 func TestDeployOperationConvertsInlinePostgresToBackingServiceOnComplete(t *testing.T) {
 	t.Parallel()
 
@@ -698,6 +730,50 @@ func TestDeployOperationConvertsInlinePostgresToBackingServiceOnComplete(t *test
 	}
 	if got := persisted.BackingServices[0].Spec.Postgres.Database; got != "demo" {
 		t.Fatalf("expected database demo after deploy, got %q", got)
+	}
+}
+
+func TestDeployOperationRejectsReservedCNPGPostgresUser(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Stateful Deploy Validation")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8000},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	desiredSpec := app.Spec
+	desiredSpec.Postgres = &model.AppPostgresSpec{
+		User:     "postgres",
+		Password: "secret",
+	}
+
+	_, err = s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &desiredSpec,
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput, got %v", err)
 	}
 }
 

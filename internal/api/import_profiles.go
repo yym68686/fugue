@@ -145,7 +145,6 @@ func normalizeGenericPostgresSpec(appName string, override *model.AppPostgresSpe
 	spec := model.AppPostgresSpec{
 		Image:       "postgres:17.6-alpine",
 		Database:    appName,
-		User:        "postgres",
 		ServiceName: appName + "-postgres",
 	}
 	if override != nil {
@@ -167,6 +166,12 @@ func normalizeGenericPostgresSpec(appName string, override *model.AppPostgresSpe
 		if strings.TrimSpace(override.StoragePath) != "" {
 			spec.StoragePath = strings.TrimSpace(override.StoragePath)
 		}
+	}
+	if spec.User == "" {
+		spec.User = model.DefaultManagedPostgresUser(appName, spec.StoragePath)
+	}
+	if err := model.ValidateManagedPostgresUser(appName, spec); err != nil {
+		return model.AppPostgresSpec{}, err
 	}
 	if spec.Password == "" {
 		password, err := randomHex(24)
