@@ -427,8 +427,10 @@ curl -sS http://127.0.0.1:8080/v1/apps/<app-id>/migrate \
 Audit failover readiness before doing that:
 
 ```bash
-fugue --base-url http://127.0.0.1:8080 --token <tenant-api-key> app failover
-fugue --base-url http://127.0.0.1:8080 --token <tenant-api-key> app failover <app-name>
+export FUGUE_BASE_URL=http://127.0.0.1:8080
+export FUGUE_API_KEY=<tenant-api-key>
+fugue app continuity audit
+fugue app continuity audit <app-name>
 ```
 
 Interpretation:
@@ -451,6 +453,6 @@ Flow:
 - The bundled chart keeps PostgreSQL, the internal registry, and optional `headscale` in-cluster with `hostPath` storage. For production, externalize or harden those stateful dependencies and their placement.
 - The chart now supports `configSecret.existingSecretName` so production deployments can source Fugue credentials from an external secret manager instead of chart-generated literals.
 - A production HA baseline is included in `deploy/helm/fugue/values-production-ha.yaml`.
-- `fugue app failover` uses the same migration blocker rules as the API, so you can audit app-level failover eligibility before an incident.
+- `fugue app continuity audit` uses the same migration blocker rules as the API, so you can audit app-level failover eligibility before an incident.
 - `api.registryPushBase` must be reachable from builder jobs inside the cluster. `api.registryPullBase` and `api.clusterJoinRegistryEndpoint` must be reachable from the runtime nodes that pull images.
 - If the controller cannot reach the in-cluster Kubernetes API, `managed-shared` and `managed-owned` deploys will stop at the render/apply stage.

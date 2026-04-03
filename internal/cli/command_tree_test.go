@@ -21,15 +21,21 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		"Fugue is a semantic CLI over the Fugue control-plane API.",
+		"export FUGUE_API_KEY=<your-api-key>",
+		"Base URL defaults to FUGUE_BASE_URL, then FUGUE_API_URL, then https://api.fugue.pro.",
+		"Tenant is auto-selected when your key only sees one tenant.",
+		"Deploy and create flows default to the \"default\" project when you do not pass --project.",
 		"deploy",
 		"app",
-		"env",
-		"files",
-		"domain",
-		"workspace",
+		"project",
+		"service",
+		"ops",
+		"template",
+		"admin",
 		"deploy github owner/repo",
-		"fugue env list my-app",
-		"fugue files write my-app /app/config.yaml --from-file config.yaml",
+		"fugue app continuity audit my-app",
+		"fugue app config put my-app /app/config.yaml --from-file config.yaml",
+		"fugue admin runtime ls",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected help output to contain %q, got %q", want, out)
@@ -129,7 +135,7 @@ func TestRunAppScaleByNameUsesSemanticCommand(t *testing.T) {
 	}
 }
 
-func TestRunAppFailoverByNameAuditsReadiness(t *testing.T) {
+func TestRunAppContinuityAuditByNameUsesExplicitCommand(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -151,10 +157,10 @@ func TestRunAppFailoverByNameAuditsReadiness(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"app", "failover", "demo",
+		"app", "continuity", "audit", "demo",
 	}, &stdout, &stderr)
 	if err != nil {
-		t.Fatalf("run app failover: %v", err)
+		t.Fatalf("run app continuity audit: %v", err)
 	}
 
 	out := stdout.String()
@@ -164,6 +170,52 @@ func TestRunAppFailoverByNameAuditsReadiness(t *testing.T) {
 		"summary=eligible for stateless failover",
 		"runtime_type=managed-shared",
 	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAppFailoverRunByNameExecutesFailover(t *testing.T) {
+	t.Parallel()
+
+	var gotBody map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_a","replicas":1},"status":{"phase":"ready","current_runtime_id":"runtime_a","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes":
+			_, _ = w.Write([]byte(`{"runtimes":[{"id":"runtime_b","tenant_id":"tenant_123","name":"runtime-b","type":"external-owned","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/failover":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode failover body: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_123","app_id":"app_123","type":"failover","status":"pending"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "failover", "run", "demo",
+		"--to", "runtime_b",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app failover run: %v", err)
+	}
+
+	if gotBody["target_runtime_id"] != "runtime_b" {
+		t.Fatalf("expected target_runtime_id runtime_b, got %+v", gotBody)
+	}
+	out := stdout.String()
+	for _, want := range []string{"app_id=app_123", "operation_id=op_123"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}

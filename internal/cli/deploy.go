@@ -31,7 +31,7 @@ func resolveTenantSelection(client *Client, tenantID, tenantName string) (string
 		return "", err
 	}
 	if len(tenants) == 0 {
-		return "", fmt.Errorf("no visible tenants; create a tenant first or pass --tenant-id")
+		return "", fmt.Errorf("no visible tenants; ask an admin for access or create one with \"fugue admin tenant create <name>\"")
 	}
 	if tenantName != "" {
 		slug := model.Slugify(tenantName)
@@ -52,13 +52,13 @@ func resolveTenantSelection(client *Client, tenantID, tenantName string) (string
 		case 1:
 			return matches[0].ID, nil
 		default:
-			return "", fmt.Errorf("multiple tenants match %q; pass --tenant-id", tenantName)
+			return "", fmt.Errorf("multiple tenants match %q; rerun with an exact --tenant value", tenantName)
 		}
 	}
 	if len(tenants) == 1 {
 		return tenants[0].ID, nil
 	}
-	return "", fmt.Errorf("multiple tenants are visible; pass --tenant or --tenant-id")
+	return "", fmt.Errorf("multiple tenants are visible; rerun with --tenant <name>")
 }
 
 func resolveProjectCreationSelection(client *Client, tenantID, projectID, projectName string) (projectSelection, error) {
@@ -71,7 +71,7 @@ func resolveProjectCreationSelection(client *Client, tenantID, projectID, projec
 		return projectSelection{}, nil
 	}
 	if strings.TrimSpace(tenantID) == "" {
-		return projectSelection{}, fmt.Errorf("tenant id is required to resolve project %q", projectName)
+		return projectSelection{}, fmt.Errorf("project %q needs a tenant context; rerun with --tenant <name>", projectName)
 	}
 	projects, err := client.ListProjects(tenantID)
 	if err != nil {
@@ -108,7 +108,7 @@ func resolveProjectReference(client *Client, tenantID, projectID, projectName st
 		return "", nil
 	}
 	if strings.TrimSpace(tenantID) == "" {
-		return "", fmt.Errorf("tenant is required to resolve project %q", projectName)
+		return "", fmt.Errorf("project %q needs a tenant context; rerun with --tenant <name>", projectName)
 	}
 	projects, err := client.ListProjects(tenantID)
 	if err != nil {
@@ -131,7 +131,7 @@ func resolveProjectReference(client *Client, tenantID, projectID, projectName st
 	case 1:
 		return matches[0].ID, nil
 	default:
-		return "", fmt.Errorf("multiple projects match %q; pass --project-id", projectName)
+		return "", fmt.Errorf("multiple projects match %q; rerun with a more specific --project value", projectName)
 	}
 }
 
@@ -155,7 +155,7 @@ func resolveAppSelection(client *Client, appID, appName, projectID, tenantID str
 	case 1:
 		return matches[0].ID, nil
 	default:
-		return "", fmt.Errorf("multiple apps match %q; pass --app-id or --project-id", appName)
+		return "", fmt.Errorf("multiple apps match %q; rerun with --project <name> or use an app id", appName)
 	}
 }
 
@@ -213,7 +213,7 @@ func resolveRuntimeSelection(client *Client, runtimeID, runtimeName string) (str
 	case 1:
 		return matches[0].ID, nil
 	default:
-		return "", fmt.Errorf("multiple runtimes match %q; pass --runtime-id", runtimeName)
+		return "", fmt.Errorf("multiple runtimes match %q; rerun with the exact runtime name or use --runtime-id", runtimeName)
 	}
 }
 

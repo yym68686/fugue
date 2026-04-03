@@ -57,11 +57,15 @@ func (c *CLI) newWorkspaceCommand() *cobra.Command {
 	return cmd
 }
 
+func (c *CLI) newWorkspaceCompatCommand() *cobra.Command {
+	return hideCompatCommand(c.newWorkspaceCommand(), "fugue app workspace")
+}
+
 func (c *CLI) newWorkspaceListCommand() *cobra.Command {
 	opts := workspaceCommonOptions{}
 	cmd := &cobra.Command{
-		Use:     "list <app> [path]",
-		Aliases: []string{"ls", "tree"},
+		Use:     "ls <app> [path]",
+		Aliases: []string{"list", "tree"},
 		Short:   "List files in the persistent workspace",
 		Args:    cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -94,8 +98,8 @@ func (c *CLI) newWorkspaceListCommand() *cobra.Command {
 func (c *CLI) newWorkspaceReadCommand() *cobra.Command {
 	opts := workspaceReadOptions{MaxBytes: 256 * 1024}
 	cmd := &cobra.Command{
-		Use:     "read <app> <path>",
-		Aliases: []string{"cat"},
+		Use:     "get <app> <path>",
+		Aliases: []string{"read", "cat"},
 		Short:   "Read a file from the persistent workspace",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -136,8 +140,9 @@ func (c *CLI) newWorkspaceReadCommand() *cobra.Command {
 func (c *CLI) newWorkspaceWriteCommand() *cobra.Command {
 	opts := workspaceWriteOptions{Parents: true}
 	cmd := &cobra.Command{
-		Use:   "write <app> <path>",
-		Short: "Write a file into the persistent workspace",
+		Use:     "put <app> <path>",
+		Aliases: []string{"write"},
+		Short:   "Write a file into the persistent workspace",
 		Long: strings.TrimSpace(`
 Provide file content with --content or --from-file.
 
@@ -249,8 +254,8 @@ func (c *CLI) newWorkspaceMkdirCommand() *cobra.Command {
 func (c *CLI) newWorkspaceRemoveCommand() *cobra.Command {
 	opts := workspaceRemoveOptions{}
 	cmd := &cobra.Command{
-		Use:     "remove <app> <path>",
-		Aliases: []string{"rm", "delete"},
+		Use:     "rm <app> <path>",
+		Aliases: []string{"remove", "delete"},
 		Short:   "Delete a file or directory from the persistent workspace",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {

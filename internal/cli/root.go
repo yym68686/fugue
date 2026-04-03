@@ -9,6 +9,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const defaultCloudBaseURL = "https://api.fugue.pro"
+
 type rootOptions struct {
 	BaseURL     string
 	Token       string
@@ -58,29 +60,46 @@ func (c *CLI) newRootCommand() *cobra.Command {
 		Long: strings.TrimSpace(`
 Fugue is a semantic CLI over the Fugue control-plane API.
 
-Use name-based commands such as "deploy", "app list", and "app logs" instead of
+Quick start for most users:
+  1. Export one issued API key:
+     export FUGUE_API_KEY=<your-api-key>
+  2. Run normal commands:
+     fugue deploy .
+     fugue app ls
+
+Defaults and auto-selection:
+  - Base URL defaults to FUGUE_BASE_URL, then FUGUE_API_URL, then ` + defaultCloudBaseURL + `.
+  - Tenant is auto-selected when your key only sees one tenant.
+  - Deploy and create flows default to the "default" project when you do not pass --project.
+  - Prefer names. ID flags stay hidden as compatibility escape hatches.
+
+Use name-based commands such as "deploy", "app ls", and "app logs" instead of
 calling low-level API endpoints directly. The CLI resolves tenant, project, app,
-runtime, domain, and workspace names where possible, while still allowing
-ID-based flags as hidden escape hatches for compatibility.
+runtime, service, domain, and workspace names where possible.
 
 Environment variables:
-  FUGUE_BASE_URL
-  FUGUE_TOKEN / FUGUE_API_KEY / FUGUE_BOOTSTRAP_KEY
+  FUGUE_API_KEY / FUGUE_TOKEN / FUGUE_BOOTSTRAP_KEY
+  FUGUE_BASE_URL / FUGUE_API_URL
   FUGUE_TENANT / FUGUE_TENANT_NAME / FUGUE_TENANT_ID
   FUGUE_PROJECT / FUGUE_PROJECT_NAME / FUGUE_PROJECT_ID
 `),
 		Example: strings.TrimSpace(`
+  export FUGUE_API_KEY=<your-api-key>
   fugue deploy .
+  fugue app ls
+  fugue --tenant acme deploy github owner/repo
+  fugue --project marketing app logs web --follow
+  fugue --base-url https://api.example.com app ls
   fugue deploy github owner/repo --branch main
   fugue deploy image nginx:1.27
-  fugue app list
   fugue app status my-app
-  fugue app failover my-app
-  fugue app logs my-app
-  fugue env list my-app
-  fugue files write my-app /app/config.yaml --from-file config.yaml
-  fugue domain add my-app www.example.com
-  fugue workspace list my-app
+  fugue app continuity audit my-app
+  fugue app logs runtime my-app --follow
+  fugue app config put my-app /app/config.yaml --from-file config.yaml
+  fugue app domain add my-app www.example.com
+  fugue service ls
+  fugue project usage
+  fugue admin runtime ls
 `),
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			return c.validateOutput()
@@ -88,10 +107,10 @@ Environment variables:
 	}
 
 	flags := cmd.PersistentFlags()
-	flags.StringVar(&c.root.BaseURL, "base-url", c.root.BaseURL, "Fugue API base URL (or FUGUE_BASE_URL)")
-	flags.StringVar(&c.root.Token, "token", c.root.Token, "Fugue API token (or FUGUE_TOKEN/FUGUE_API_KEY/FUGUE_BOOTSTRAP_KEY)")
-	flags.StringVar(&c.root.TenantName, "tenant", c.root.TenantName, "Tenant name or slug")
-	flags.StringVar(&c.root.ProjectName, "project", c.root.ProjectName, "Project name")
+	flags.StringVar(&c.root.BaseURL, "base-url", c.root.BaseURL, "Optional API base URL. Defaults to FUGUE_BASE_URL, then FUGUE_API_URL, then "+defaultCloudBaseURL)
+	flags.StringVar(&c.root.Token, "token", c.root.Token, "API key or bootstrap key. Reads FUGUE_API_KEY, FUGUE_TOKEN, or FUGUE_BOOTSTRAP_KEY")
+	flags.StringVar(&c.root.TenantName, "tenant", c.root.TenantName, "Optional tenant name or slug. Needed only when your key can see multiple tenants")
+	flags.StringVar(&c.root.ProjectName, "project", c.root.ProjectName, "Optional project name. Deploy/create defaults to the default project when omitted")
 	flags.StringVarP(&c.root.Output, "output", "o", c.root.Output, "Output format: text or json")
 	flags.BoolVar(&c.root.JSONOutput, "json", false, "Shortcut for --output json")
 	flags.StringVar(&c.root.TenantID, "tenant-id", c.root.TenantID, "Tenant ID")
@@ -102,10 +121,15 @@ Environment variables:
 	cmd.AddCommand(
 		c.newDeployCommand(),
 		c.newAppCommand(),
-		c.newEnvCommand(),
-		c.newFilesCommand(),
-		c.newDomainCommand(),
-		c.newWorkspaceCommand(),
+		c.newProjectCommand(),
+		c.newServiceCommand(),
+		c.newOpsCommand(),
+		c.newTemplateCommand(),
+		c.newAdminCommand(),
+		c.newEnvCompatCommand(),
+		c.newFilesCompatCommand(),
+		c.newDomainCompatCommand(),
+		c.newWorkspaceCompatCommand(),
 	)
 	return cmd
 }
@@ -190,7 +214,7 @@ func (c *CLI) resolveCreateSelections(client *Client) (string, projectSelection,
 }
 
 func (c *CLI) effectiveBaseURL() string {
-	return firstNonEmpty(c.root.BaseURL, os.Getenv("FUGUE_BASE_URL"))
+	return firstNonEmpty(c.root.BaseURL, os.Getenv("FUGUE_BASE_URL"), os.Getenv("FUGUE_API_URL"), defaultCloudBaseURL)
 }
 
 func (c *CLI) effectiveToken() string {

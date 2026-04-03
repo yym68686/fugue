@@ -93,6 +93,31 @@ irm https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_
 
 `build-cli` GitHub Actions workflow 会在匹配的变更推送到 `main` 后打包 Linux、macOS、Windows 的 `fugue` 压缩包；`release-cli` workflow 会在推送 `v*` tag 时把这些压缩包发布成 GitHub Release 资产。
 
+## CLI 快速开始
+
+对大多数用户来说，最小配置只需要一个已发放的 API key：
+
+```bash
+export FUGUE_API_KEY=<your-api-key>
+fugue deploy .
+fugue app ls
+```
+
+默认行为：
+
+- CLI 默认使用 `https://api.fugue.pro`；只有在自托管场景下才需要通过 `FUGUE_BASE_URL`、`FUGUE_API_URL` 或 `--base-url` 覆盖
+- 如果你的 key 只能看到一个 tenant，Fugue 会自动选中它
+- deploy 和 create 流程在不传 `--project` 时默认落到 `default` project
+- 优先使用名字；ID 只保留为隐藏的兼容兜底参数
+
+如果你使用的是自托管控制面，只需要先设置一次地址：
+
+```bash
+export FUGUE_BASE_URL=https://api.example.com
+export FUGUE_API_KEY=<your-api-key>
+fugue app ls
+```
+
 在两个终端里分别运行 API 和 controller：
 
 ```bash
@@ -107,7 +132,7 @@ make run-controller
 ## 部署
 
 部署说明见 [docs/deploy.md](docs/deploy.md)。
-生产可用的 HA / DR 路径见 [docs/ha-dr.md](docs/ha-dr.md) 和 [deploy/helm/fugue/values-production-ha.yaml](deploy/helm/fugue/values-production-ha.yaml)。CLI 里也新增了 `fugue app failover`，可以直接审计哪些 app 已经具备无状态故障转移条件，哪些还被托管数据库或持久工作区阻塞。
+生产可用的 HA / DR 路径见 [docs/ha-dr.md](docs/ha-dr.md) 和 [deploy/helm/fugue/values-production-ha.yaml](deploy/helm/fugue/values-production-ha.yaml)。CLI 里也新增了 `fugue app continuity audit`，可以直接审计哪些 app 已经具备无状态故障转移条件，哪些还被托管数据库或持久工作区阻塞。
 真正的托管有状态 failover 由独立的 controller/API failover workflow 提供，见 [docs/ha-dr.md](docs/ha-dr.md)。
 
 ## 三台 VPS 一键安装

@@ -34,10 +34,14 @@ func (c *CLI) newEnvCommand() *cobra.Command {
 	return cmd
 }
 
+func (c *CLI) newEnvCompatCommand() *cobra.Command {
+	return hideCompatCommand(c.newEnvCommand(), "fugue app env")
+}
+
 func (c *CLI) newEnvListCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:     "list <app>",
-		Aliases: []string{"ls", "show"},
+		Use:     "ls <app>",
+		Aliases: []string{"list", "show"},
 		Short:   "Show effective env vars for an app",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -130,8 +134,8 @@ func (c *CLI) newEnvRemoveCommand() *cobra.Command {
 		Wait bool
 	}{Wait: true}
 	cmd := &cobra.Command{
-		Use:     "remove <app> <KEY...>",
-		Aliases: []string{"rm", "delete", "unset"},
+		Use:     "unset <app> <KEY...>",
+		Aliases: []string{"rm", "remove", "delete"},
 		Short:   "Remove env vars from an app",
 		Args:    cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {

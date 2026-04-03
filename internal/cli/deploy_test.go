@@ -11,6 +11,39 @@ import (
 	"testing"
 )
 
+func TestEffectiveBaseURLUsesCloudDefaultAndEnvAliases(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cli := newCLI(&stdout, &stderr)
+
+	if got := cli.effectiveBaseURL(); got != defaultCloudBaseURL {
+		t.Fatalf("expected default base url %q, got %q", defaultCloudBaseURL, got)
+	}
+
+	t.Setenv("FUGUE_API_URL", "https://api.example.com")
+	if got := cli.effectiveBaseURL(); got != "https://api.example.com" {
+		t.Fatalf("expected FUGUE_API_URL to be used, got %q", got)
+	}
+
+	t.Setenv("FUGUE_BASE_URL", "https://api.internal.example.com")
+	if got := cli.effectiveBaseURL(); got != "https://api.internal.example.com" {
+		t.Fatalf("expected FUGUE_BASE_URL to override FUGUE_API_URL, got %q", got)
+	}
+}
+
+func TestNewClientMissingTokenErrorExplainsHowToConfigureAuth(t *testing.T) {
+	_, err := NewClient(defaultCloudBaseURL, "")
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	message := err.Error()
+	for _, want := range []string{"API key is required", "FUGUE_API_KEY", "FUGUE_BOOTSTRAP_KEY"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("expected error %q to contain %q", message, want)
+		}
+	}
+}
+
 func TestResolveTenantSelectionAutoSelectsSingleVisibleTenant(t *testing.T) {
 	t.Parallel()
 

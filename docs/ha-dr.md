@@ -167,8 +167,10 @@ Remaining boundary:
 You can audit the current app portfolio directly from the CLI:
 
 ```bash
-fugue --base-url https://api.example.com --token <tenant-api-key> app failover
-fugue --base-url https://api.example.com --token <tenant-api-key> app failover <app-name>
+export FUGUE_BASE_URL=https://api.example.com
+export FUGUE_API_KEY=<tenant-api-key>
+fugue app continuity audit
+fugue app continuity audit <app-name>
 ```
 
 The CLI reports three classes:
@@ -177,4 +179,4 @@ The CLI reports three classes:
 - `caution`: Fugue does not see a hard stateful blocker, but replicas/runtime posture still need work
 - `blocked`: stateless migration is intentionally blocked because managed backing services or persistent workspace state are still attached
 
-That audit is intentionally conservative: it reports stateless failover posture, not whether the new managed stateful failover workflow has been configured for a specific app.
+That audit is intentionally conservative: it reports stateless failover posture, not whether the new managed stateful failover workflow has been configured for a specific app. To execute a failover, use `fugue app failover run <app-name> --to <runtime>`.

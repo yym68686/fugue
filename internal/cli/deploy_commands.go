@@ -94,11 +94,20 @@ func (c *CLI) newDeployCommand() *cobra.Command {
 		Long: strings.TrimSpace(`
 Deploy is the primary high-level entrypoint for Fugue.
 
+Most users only need one API key plus a source location.
+
 Without a subcommand it uploads local source from the current directory (or an
 explicit path). Use "deploy github" to import from GitHub and "deploy image" to
 create an app directly from an image reference.
+
+Defaults:
+  - Tenant is auto-selected when your key only sees one tenant.
+  - Project defaults to "default" when omitted.
+  - Runtime defaults to the shared managed runtime when omitted.
+  - App name defaults from the directory, repo, or image name when possible.
 `),
 		Example: strings.TrimSpace(`
+  export FUGUE_API_KEY=<your-api-key>
   fugue deploy .
   fugue deploy ./examples/demo --name demo
   fugue deploy --app demo .
@@ -146,6 +155,8 @@ create an app directly from an image reference.
 	cmd.AddCommand(
 		c.newDeployGitHubCommand(),
 		c.newDeployImageCommand(),
+		c.newDeployInspectCommand(),
+		c.newDeployPlanCommand(),
 	)
 	return cmd
 }
@@ -160,9 +171,15 @@ func (c *CLI) newDeployGitHubCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "github <repo-or-url>",
 		Short: "Deploy from GitHub",
-		Args:  cobra.ExactArgs(1),
+		Long: strings.TrimSpace(`
+Import a GitHub repository as an app.
+
+You normally only need the repo reference. Fugue defaults the tenant, project,
+runtime, and app name when they are not ambiguous.
+`),
+		Args: cobra.ExactArgs(1),
 		Example: strings.TrimSpace(`
-  fugue deploy github owner/repo
+	  fugue deploy github owner/repo
   fugue deploy github owner/repo --branch main
   fugue deploy github https://github.com/example/app --private --repo-token $GITHUB_TOKEN
 `),
@@ -182,9 +199,15 @@ func (c *CLI) newDeployImageCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "image <image-ref>",
 		Short: "Deploy directly from an image reference",
-		Args:  cobra.ExactArgs(1),
+		Long: strings.TrimSpace(`
+Create an app directly from a container image.
+
+If you omit --name, Fugue derives one from the image name. Tenant and project
+selection follow the same automatic rules as "fugue deploy".
+`),
+		Args: cobra.ExactArgs(1),
 		Example: strings.TrimSpace(`
-  fugue deploy image nginx:1.27
+	  fugue deploy image nginx:1.27
   fugue deploy image ghcr.io/example/app:latest --name demo --replicas 2
 `),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -207,11 +230,11 @@ func (c *CLI) newDeployImageCommand() *cobra.Command {
 
 func bindCommonDeployFlags(cmd *cobra.Command, opts *deployCommonOptions, includeName bool) {
 	if includeName {
-		cmd.Flags().StringVar(&opts.Name, "name", "", "App name")
+		cmd.Flags().StringVar(&opts.Name, "name", "", "App name. Defaults from the source directory or repo name")
 	}
 	cmd.Flags().StringVar(&opts.Description, "description", "", "App description")
 	cmd.Flags().StringVar(&opts.EnvFile, "env-file", "", "Local .env file to inject as app env")
-	cmd.Flags().StringVar(&opts.RuntimeName, "runtime", "", "Runtime name")
+	cmd.Flags().StringVar(&opts.RuntimeName, "runtime", "", "Runtime name. Defaults to the shared managed runtime")
 	cmd.Flags().StringVar(&opts.RuntimeID, "runtime-id", "", "Runtime ID")
 	cmd.Flags().IntVar(&opts.Replicas, "replicas", 0, "Desired replica count")
 	cmd.Flags().IntVar(&opts.ServicePort, "port", 0, "Service port override")

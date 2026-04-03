@@ -173,18 +173,54 @@ func writeAppStatus(w io.Writer, app model.App) error {
 	if app.Source != nil {
 		sourceType = strings.TrimSpace(app.Source.Type)
 	}
+	failoverTarget := ""
+	if app.Spec.Failover != nil {
+		failoverTarget = strings.TrimSpace(app.Spec.Failover.TargetRuntimeID)
+	}
+	workspaceRoot := ""
+	if app.Spec.Workspace != nil {
+		workspaceRoot = strings.TrimSpace(app.Spec.Workspace.MountPath)
+	}
+	postgresRuntime := ""
+	if app.Spec.Postgres != nil {
+		postgresRuntime = strings.TrimSpace(app.Spec.Postgres.RuntimeID)
+	}
 	return writeKeyValues(w,
 		kvPair{Key: "app_id", Value: app.ID},
 		kvPair{Key: "name", Value: app.Name},
 		kvPair{Key: "tenant_id", Value: app.TenantID},
 		kvPair{Key: "project_id", Value: app.ProjectID},
 		kvPair{Key: "phase", Value: strings.TrimSpace(app.Status.Phase)},
-		kvPair{Key: "replicas", Value: fmt.Sprintf("%d", maxInt(app.Status.CurrentReplicas, app.Spec.Replicas))},
+		kvPair{Key: "desired_replicas", Value: fmt.Sprintf("%d", app.Spec.Replicas)},
+		kvPair{Key: "current_replicas", Value: fmt.Sprintf("%d", app.Status.CurrentReplicas)},
 		kvPair{Key: "runtime_id", Value: runtimeID},
 		kvPair{Key: "source", Value: sourceType},
+		kvPair{Key: "source_ref", Value: sourceRef(app.Source)},
+		kvPair{Key: "failover_target_runtime_id", Value: failoverTarget},
+		kvPair{Key: "workspace_root", Value: workspaceRoot},
+		kvPair{Key: "postgres_runtime_id", Value: postgresRuntime},
+		kvPair{Key: "bindings", Value: fmt.Sprintf("%d", len(app.Bindings))},
+		kvPair{Key: "last_operation_id", Value: app.Status.LastOperationID},
+		kvPair{Key: "last_message", Value: app.Status.LastMessage},
 		kvPair{Key: "url", Value: url},
 		kvPair{Key: "updated_at", Value: formatTime(app.UpdatedAt)},
 	)
+}
+
+func sourceRef(source *model.AppSource) string {
+	if source == nil {
+		return ""
+	}
+	switch {
+	case strings.TrimSpace(source.RepoURL) != "":
+		return source.RepoURL
+	case strings.TrimSpace(source.ImageRef) != "":
+		return source.ImageRef
+	case strings.TrimSpace(source.ResolvedImageRef) != "":
+		return source.ResolvedImageRef
+	default:
+		return ""
+	}
 }
 
 func formatTime(t time.Time) string {

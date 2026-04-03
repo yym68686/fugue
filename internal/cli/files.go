@@ -33,10 +33,10 @@ type filesResult struct {
 
 func (c *CLI) newFilesCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "files",
-		Short: "Inspect and update declarative app files",
+		Use:   "config",
+		Short: "Inspect and update declarative app config files",
 		Long: strings.TrimSpace(`
-Use "files" for declarative config files that are applied on the next deploy.
+Use "config" for declarative files that are applied on the next deploy.
 
 Use "workspace" for direct reads and writes inside a persistent runtime workspace.
 `),
@@ -50,10 +50,22 @@ Use "workspace" for direct reads and writes inside a persistent runtime workspac
 	return cmd
 }
 
+func (c *CLI) newFilesCompatCommand() *cobra.Command {
+	cmd := c.newFilesCommand()
+	cmd.Use = "files"
+	cmd.Short = "Compatibility alias for app config"
+	cmd.Long = strings.TrimSpace(`
+Compatibility alias for declarative app config files.
+
+Prefer "fugue app config" for the primary UX.
+`)
+	return hideCompatCommand(cmd, "fugue app config")
+}
+
 func (c *CLI) newFilesListCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:     "list <app>",
-		Aliases: []string{"ls"},
+		Use:     "ls <app>",
+		Aliases: []string{"list"},
 		Short:   "List declarative files configured on an app",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -79,8 +91,8 @@ func (c *CLI) newFilesListCommand() *cobra.Command {
 
 func (c *CLI) newFilesReadCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:     "read <app> <absolute-path>",
-		Aliases: []string{"cat"},
+		Use:     "get <app> <absolute-path>",
+		Aliases: []string{"read", "cat"},
 		Short:   "Read one declarative app file",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -124,8 +136,9 @@ func (c *CLI) newFilesWriteCommand() *cobra.Command {
 		filesMutationOptions: filesMutationOptions{Wait: true},
 	}
 	cmd := &cobra.Command{
-		Use:   "write <app> <absolute-path>",
-		Short: "Create or update one declarative app file",
+		Use:     "put <app> <absolute-path>",
+		Aliases: []string{"write"},
+		Short:   "Create or update one declarative app file",
 		Long: strings.TrimSpace(`
 Provide file content with --content or --from-file.
 
@@ -182,8 +195,8 @@ directly into a running container.
 func (c *CLI) newFilesRemoveCommand() *cobra.Command {
 	opts := filesMutationOptions{Wait: true}
 	cmd := &cobra.Command{
-		Use:     "remove <app> <absolute-path...>",
-		Aliases: []string{"rm", "delete"},
+		Use:     "rm <app> <absolute-path...>",
+		Aliases: []string{"remove", "delete"},
 		Short:   "Remove one or more declarative app files",
 		Args:    cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {

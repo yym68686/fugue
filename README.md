@@ -93,6 +93,31 @@ irm https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_
 
 The `build-cli` GitHub Actions workflow now packages `fugue` archives for Linux, macOS, and Windows whenever matching changes are pushed to `main`. The `release-cli` workflow publishes those archives as GitHub Release assets when a `v*` tag is pushed.
 
+## CLI quick start
+
+For most users, the minimum setup is one issued API key:
+
+```bash
+export FUGUE_API_KEY=<your-api-key>
+fugue deploy .
+fugue app ls
+```
+
+Defaults:
+
+- the CLI uses `https://api.fugue.pro` unless you override it with `FUGUE_BASE_URL`, `FUGUE_API_URL`, or `--base-url`
+- if your key only sees one tenant, Fugue auto-selects it
+- deploy and create flows default to the `default` project when you omit `--project`
+- name-based commands are preferred; IDs stay as hidden compatibility escape hatches
+
+For self-hosted control planes, set the base URL once:
+
+```bash
+export FUGUE_BASE_URL=https://api.example.com
+export FUGUE_API_KEY=<your-api-key>
+fugue app ls
+```
+
 Run the API and controller in separate terminals:
 
 ```bash
@@ -108,7 +133,7 @@ make run-controller
 
 See [docs/deploy.md](docs/deploy.md).
 For the production HA / DR path, see [docs/ha-dr.md](docs/ha-dr.md) and [deploy/helm/fugue/values-production-ha.yaml](deploy/helm/fugue/values-production-ha.yaml).
-The CLI now includes `fugue app failover` so you can audit which apps are already eligible for stateless failover and which ones are still blocked by managed state.
+The CLI now includes `fugue app continuity audit` so you can audit which apps are already eligible for stateless failover and which ones are still blocked by managed state.
 Managed stateful failover itself is exposed separately through the controller/API failover workflow described in [docs/ha-dr.md](docs/ha-dr.md).
 
 ## One-command install for 3 VPS

@@ -244,13 +244,13 @@ func NewClient(baseURL, token string) (*Client, error) {
 	baseURL = strings.TrimSpace(baseURL)
 	token = strings.TrimSpace(token)
 	if baseURL == "" {
-		return nil, fmt.Errorf("base url is required")
+		return nil, fmt.Errorf("base url is required; pass --base-url or set FUGUE_BASE_URL/FUGUE_API_URL")
 	}
 	if token == "" {
-		return nil, fmt.Errorf("token is required")
+		return nil, fmt.Errorf("API key is required; pass --token or set FUGUE_API_KEY, FUGUE_TOKEN, or FUGUE_BOOTSTRAP_KEY")
 	}
 	if _, err := url.Parse(baseURL); err != nil {
-		return nil, fmt.Errorf("parse base url: %w", err)
+		return nil, fmt.Errorf("parse base url %q: %w", baseURL, err)
 	}
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),

@@ -43,10 +43,14 @@ func (c *CLI) newDomainCommand() *cobra.Command {
 	return cmd
 }
 
+func (c *CLI) newDomainCompatCommand() *cobra.Command {
+	return hideCompatCommand(c.newDomainCommand(), "fugue app domain")
+}
+
 func (c *CLI) newDomainListCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:     "list <app>",
-		Aliases: []string{"ls"},
+		Use:     "ls <app>",
+		Aliases: []string{"list"},
 		Short:   "List custom domains for an app",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -169,8 +173,8 @@ func (c *CLI) newDomainVerifyCommand() *cobra.Command {
 
 func (c *CLI) newDomainRemoveCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:     "remove <app> <hostname>",
-		Aliases: []string{"rm", "delete", "detach"},
+		Use:     "rm <app> <hostname>",
+		Aliases: []string{"remove", "delete", "detach"},
 		Short:   "Remove a custom domain from an app",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
