@@ -835,15 +835,42 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Spec *model.AppSpec `json:"spec"`
+		Spec      *model.AppSpec          `json:"spec"`
+		Workspace *model.AppWorkspaceSpec `json:"workspace"`
 	}
-	if err := httpx.DecodeJSON(r, &req); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
-		return
+	if r.ContentLength != 0 {
+		if err := httpx.DecodeJSON(r, &req); err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
-	spec := app.Spec
+	spec := cloneAppSpec(app.Spec)
 	if req.Spec != nil {
-		spec = *req.Spec
+		spec = cloneAppSpec(*req.Spec)
+	}
+	if req.Workspace != nil {
+		workspace := model.AppWorkspaceSpec{}
+		if spec.Workspace != nil {
+			workspace = *spec.Workspace
+		}
+		if mountPath := strings.TrimSpace(req.Workspace.MountPath); mountPath != "" {
+			workspace.MountPath = mountPath
+		} else if strings.TrimSpace(workspace.MountPath) == "" {
+			workspace.MountPath = model.DefaultAppWorkspaceMountPath
+		}
+		if storagePath := strings.TrimSpace(req.Workspace.StoragePath); storagePath != "" {
+			workspace.StoragePath = storagePath
+		}
+		if storageSize := strings.TrimSpace(req.Workspace.StorageSize); storageSize != "" {
+			workspace.StorageSize = storageSize
+		}
+		if storageClassName := strings.TrimSpace(req.Workspace.StorageClassName); storageClassName != "" {
+			workspace.StorageClassName = storageClassName
+		}
+		if resetToken := strings.TrimSpace(req.Workspace.ResetToken); resetToken != "" {
+			workspace.ResetToken = resetToken
+		}
+		spec.Workspace = &workspace
 	}
 	op, err := s.store.CreateOperation(model.Operation{
 		TenantID:        app.TenantID,
