@@ -2,70 +2,30 @@
 
 [English README](README.md)
 
-Fugue 是一个面向多租户场景的 k3s 控制平面 MVP，核心目标是：
+Fugue 是一个面向 k3s 的多租户应用控制平面。它把 OpenAPI-first 的控制面 API、异步 controller 和语义化 CLI 组合在一起，用来在共享托管运行时和接入的自有运行时上部署、运维应用。
 
-- 租户与项目隔离
-- 基于 API key 的访问控制
-- 在你的 k3s 集群内提供共享托管运行时
-- 通过可复用 node key + agent 接入用户自有 VPS
-- 异步部署、扩容、迁移操作
-- 从 GitHub 公共仓库导入静态站点，并自动分配默认域名
-- 为控制面动作保留审计事件
+## 当前状态
 
-> Fugue 的本意是古典乐中严密、精巧的“赋格”曲，词根代表着“转移与遁走”。
-> 我的系统 `fugue.pro` 就像是在服务器集群上演奏赋格：当流量来袭，它能像增加交响乐声部一样自动扩容；当节点宕机，它能像音符游走一样实现毫秒级的自动转移。
-> 它把混乱、复杂的底层服务器运维，变成了一场严密、全自动、永不停歇的优雅编排。
+- `fugue-api` 和 `fugue-controller` 已拆分为独立控制面组件，并可以独立扩缩。常规控制面部署路径使用 PostgreSQL 作为权威状态存储，新的 operation 会通过 `LISTEN/NOTIFY` 唤醒 controller。
+- HTTP API 已切到 OpenAPI-first 工作流。`openapi/openapi.yaml` 是单一事实来源，生成路由由它派生，服务端会直接提供 `/openapi.yaml`、`/openapi.json` 和 `/docs`。
+- CLI 已经是主操作入口：支持本地源码部署、GitHub 仓库导入、镜像直部署，以及 app / runtime / service / operation 的日常运维。
+- GitHub 导入不再只覆盖公开静态站点，现已支持公开/私有仓库、自动构建策略识别（`static-site`、`dockerfile`、`buildpacks`、`nixpacks`）、`fugue.yaml` 或 Compose 的 stack 导入，以及对已跟踪仓库的后台同步。
+- 连续性能力已经成为一等工作流：可以审计 failover 就绪度、配置 app / database 的 failover 目标，并对托管运行时执行 controller 驱动的 failover。
+- 默认 Helm Chart 仍是偏自托管的一体化基线；生产 HA 路径则把 PostgreSQL、registry、secret 和 edge 外部化。
 
-## 仓库当前实现
+## 当前已支持的能力
 
-- `fugue-api`：北向 REST API
-- `fugue-controller`：托管运行时的异步操作协调器
-- `fugue-agent`：用户自有 VPS 的附加运行时 agent
-- 基于 PostgreSQL 关系表的状态存储
-- `ManagedApp` CRD + operator 风格 reconcile：controller 把托管 app 的期望状态写入 Kubernetes，自定义资源再负责收敛 Deployment、Service 和 Secret
-- 托管 app 的观测状态写回 `ManagedApp.status`，API 读取时优先以 Kubernetes 观测态覆盖数据库里的乐观状态
-- 导入 GitHub 项目后的内置镜像仓库推送链路
-- GitHub 导入 app 的后台 commit 轮询：检测到上游分支更新后自动排入 rebuild / deploy，并等待 rollout ready 后再完成替换
-- 用于在 k3s 上安装核心控制面的 Helm Chart
+- 多租户 tenant / project / API key / audit event，以及 platform admin 视角的控制面能力。
+- `managed-shared`、`managed-owned`、`external-owned` 三类 runtime，以及通过可复用 node key + `fugue-agent` 接入的自有节点。
+- 从本地上传、GitHub 仓库或容器镜像创建并部署应用。
+- 异步 deploy / rebuild / scale / restart / migrate / failover / delete 操作。
+- app 的 domain / route、env / config / files / workspace、运行日志 / 构建日志、operation 历史。
+- backing service 和 service binding，包括托管 PostgreSQL 流程。
+- 集群 inventory、app/service 当前资源使用量叠加、runtime sharing，以及控制面状态检查。
 
-## 当前 MVP 限制
+## CLI 快速开始
 
-- 核心控制面现在已经切到 PostgreSQL 关系表，并使用 `LISTEN/NOTIFY` 在新 operation 到达时唤醒 controller
-- Helm Chart 现在会把 `fugue-api` 和 `fugue-controller` 部署成独立的 Deployment，默认都使用 `replicaCount=2`，并为 controller 开启 leader election，因此 API 和 controller 可以独立扩缩
-- 当前附带的一键安装路径仍把 PostgreSQL、内置 registry 和其他有状态组件放在集群内，并使用 `hostPath` 持久化，所以它仍是偏 MVP 的部署形态，还不是完全外部化的生产拓扑
-
-## 仓库结构
-
-```text
-cmd/fugue
-cmd/fugue-api
-cmd/fugue-controller
-cmd/fugue-agent
-internal/api
-internal/auth
-internal/config
-internal/controller
-internal/runtime
-internal/store
-deploy/helm/fugue
-docs/deploy.md
-```
-
-## 本地开发
-
-```bash
-make test
-make build
-```
-
-仅构建 CLI：
-
-```bash
-make build-cli
-./bin/fugue deploy --help
-```
-
-一行安装已发布的 CLI：
+安装已发布的 CLI：
 
 macOS / Linux：
 
@@ -79,23 +39,7 @@ Windows PowerShell：
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.ps1 | iex"
 ```
 
-安装脚本会从最新的 GitHub Release 下载匹配当前系统和架构的压缩包，并把 `fugue` 安装到一个可写的 bin 目录。如果你想固定版本或自定义安装目录：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.sh | env FUGUE_VERSION=v0.1.0 FUGUE_INSTALL_DIR=$HOME/.local/bin sh
-```
-
-```powershell
-$env:FUGUE_VERSION='v0.1.0'
-$env:FUGUE_INSTALL_DIR="$env:LOCALAPPDATA\Programs\Fugue\bin"
-irm https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.ps1 | iex
-```
-
-`build-cli` GitHub Actions workflow 会在匹配的变更推送到 `main` 后打包 Linux、macOS、Windows 的 `fugue` 压缩包；`release-cli` workflow 会在推送 `v*` tag 时把这些压缩包发布成 GitHub Release 资产。
-
-## CLI 快速开始
-
-对大多数用户来说，最小配置只需要一个已发放的 API key：
+使用一个已签发的 API key 即可开始：
 
 ```bash
 export FUGUE_API_KEY=<your-api-key>
@@ -103,27 +47,64 @@ fugue deploy .
 fugue app ls
 ```
 
-默认行为：
-
-- CLI 默认使用 `https://api.fugue.pro`；只有在自托管场景下才需要通过 `FUGUE_BASE_URL`、`FUGUE_API_URL` 或 `--base-url` 覆盖
-- 如果你的 key 只能看到一个 tenant，Fugue 会自动选中它
-- deploy 和 create 流程在不传 `--project` 时默认落到 `default` project
-- 优先使用名字；ID 只保留为隐藏的兼容兜底参数
-
-高频语义入口：
-
-- `fugue app deploy <app>` 重新部署当前期望配置
-- `fugue app binding bind <app> <service>` 管理服务绑定
-- `fugue operation ls --app <app>` 查看操作历史
-- `fugue admin runtime access <runtime>` 查看 runtime 共享授权
-
-如果你使用的是自托管控制面，只需要先设置一次地址：
+如果你用的是自托管控制面，只需要先设置一次地址：
 
 ```bash
 export FUGUE_BASE_URL=https://api.example.com
 export FUGUE_API_KEY=<your-api-key>
 fugue app ls
 ```
+
+常用流程：
+
+- `fugue deploy github owner/repo --branch main`
+- `fugue deploy github https://github.com/example/app --private --repo-token $GITHUB_TOKEN`
+- `fugue deploy image nginx:1.27`
+- `fugue app status my-app`
+- `fugue app logs runtime my-app --follow`
+- `fugue app binding bind my-app postgres`
+- `fugue app continuity audit my-app`
+- `fugue app failover run my-app --to runtime-b`
+- `fugue operation ls --app my-app`
+
+`build-cli` 会在 `main` 上的相关变更合入后打包 CLI 压缩包，`release-cli` 会在推送 `v*` tag 时把这些压缩包发布为 GitHub Release 资产。
+
+## 控制面发布与部署
+
+远端 control plane 的常规发布路径是 [`.github/workflows/deploy-control-plane.yml`](.github/workflows/deploy-control-plane.yml)。推送到 `main` 或手动触发该 workflow，它会构建并推送 `fugue-api` / `fugue-controller` 镜像，然后在自托管 runner 上执行升级。
+
+`scripts/install_fugue_ha.sh` 只用于当前“三台 VPS 打包拓扑”的首次引导，不应用于日常 control-plane 更新。
+
+更多部署文档：
+
+- [一体化 / 自托管部署指南](docs/deploy.md)
+- [生产 HA / DR 指南](docs/ha-dr.md)
+- [默认 Helm values](deploy/helm/fugue/values.yaml)
+- [生产 HA values](deploy/helm/fugue/values-production-ha.yaml)
+
+## 本地开发
+
+```bash
+make test
+make build
+```
+
+如果你只想构建 CLI：
+
+```bash
+make build-cli
+./bin/fugue --help
+```
+
+如果你修改了 HTTP API 契约，先改 `openapi/openapi.yaml`，再重新生成派生产物：
+
+```bash
+make generate-openapi
+```
+
+`make test` 已经包含 OpenAPI 生成物漂移检查。
+
+为了快速本地运行，在未设置 `FUGUE_DATABASE_URL` 时，二进制会回退到 `./data/store.json`。
 
 在两个终端里分别运行 API 和 controller：
 
@@ -136,40 +117,22 @@ make run-api
 make run-controller
 ```
 
-## 部署
+本地 API 启动后，可以直接访问 `http://127.0.0.1:8080/openapi.yaml`、`http://127.0.0.1:8080/openapi.json` 和 `http://127.0.0.1:8080/docs` 查看契约与文档。
 
-部署说明见 [docs/deploy.md](docs/deploy.md)。
-生产可用的 HA / DR 路径见 [docs/ha-dr.md](docs/ha-dr.md) 和 [deploy/helm/fugue/values-production-ha.yaml](deploy/helm/fugue/values-production-ha.yaml)。CLI 里也新增了 `fugue app continuity audit`，可以直接审计哪些 app 已经具备无状态故障转移条件，哪些还被托管数据库或持久工作区阻塞。
-真正的托管有状态 failover 由独立的 controller/API failover workflow 提供，见 [docs/ha-dr.md](docs/ha-dr.md)。
+## 仓库结构
 
-## 一键部署控制面
-
-通过 GitHub Actions workflow 来部署或升级远端 Fugue control plane：
-
-<a href="https://github.com/yym68686/fugue/actions/workflows/deploy-control-plane.yml">
-  <img src="https://raw.githubusercontent.com/yym68686/fugue/main/docs/assets/deploy-control-plane.svg" alt="Deploy control plane" width="460">
-</a>
-
-正常的 control-plane 发布路径是推送到 `main`，或者直接打开上面的 workflow 页面点击 `Run workflow`。
-
-[![deploy-control-plane](https://github.com/yym68686/fugue/actions/workflows/deploy-control-plane.yml/badge.svg)](https://github.com/yym68686/fugue/actions/workflows/deploy-control-plane.yml)
-
-## 三台 VPS 初始化安装
-
-如果你已经有 `gcp1`、`gcp2`、`gcp3` 三个 SSH 别名，并且远端用户要么是 `root`，要么拥有免密 `sudo`，可以直接这样安装当前 all-in-one MVP：
-
-```bash
-FUGUE_DOMAIN=<your-fugue-api-domain> ./scripts/install_fugue_ha.sh
+```text
+cmd/fugue                  CLI
+cmd/fugue-api              API server
+cmd/fugue-controller       Async controller
+cmd/fugue-agent            Attached runtime agent
+openapi/                   权威 API 契约
+internal/api               HTTP handler 与契约输出
+internal/cli               CLI 命令与交互层
+internal/controller        Operation worker 与 reconcile 逻辑
+internal/runtime           托管运行时渲染与应用逻辑
+internal/sourceimport      源码导入与构建识别
+internal/store             PostgreSQL 状态存储
+deploy/helm/fugue          控制面 Helm Chart
+docs/                      部署与 HA/DR 文档
 ```
-
-这个安装脚本会：
-
-- 在本地构建 `fugue-api` 和 `fugue-controller` 镜像
-- 在 `gcp1/gcp2/gcp3` 上创建一个 3 节点 k3s HA 集群
-- 把镜像导入每个节点的 `containerd`
-- 用拆分后的 `fugue-api` 和 `fugue-controller` Deployment 安装 Helm Chart
-- 默认把 API 和 controller 都设为 2 个副本，并为 controller 开启 leader election
-- 通过集群内 `NodePort` Service 暴露 Fugue API
-- 可选地在 `gcp1` 上配置 Caddy，作为代理到该 `NodePort` 的 HTTPS 边缘入口
-
-生成的 kubeconfig 和 bootstrap key 会写入 `.dist/fugue-install/`。

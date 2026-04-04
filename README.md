@@ -2,72 +2,32 @@
 
 [中文 README](README.zh-CN.md)
 
-Fugue is a multi-tenant k3s control plane MVP for:
+Fugue is a multi-tenant application control plane for k3s. It combines an OpenAPI-first API, an async controller, and a semantic CLI for deploying and operating apps across shared managed runtimes and attached user-owned runtimes.
 
-- tenant and project isolation
-- API-key based access control
-- shared managed runtime inside your k3s cluster
-- attached user-owned nodes via reusable node key + agent
-- async deploy, scale, and migrate operations
-- GitHub public repo import for static sites with automatic default hostname
-- audit events for control-plane actions
+## Current status
 
-> Fugue 的本意是古典乐中严密、精巧的“赋格”曲，词根代表着“转移与遁走”。
-> 我的系统 `fugue.pro` 就像是在服务器集群上演奏赋格：当流量来袭，它能像增加交响乐声部一样自动扩容；当节点宕机，它能像音符游走一样实现毫秒级的自动转移。
-> 它把混乱、复杂的底层服务器运维，变成了一场严密、全自动、永不停歇的优雅编排。
+- `fugue-api` and `fugue-controller` now run as separate control-plane components and scale independently. The normal control-plane deployment path uses PostgreSQL as the authoritative store, and the controller is woken by `LISTEN/NOTIFY` when new operations arrive.
+- The HTTP surface is OpenAPI-first. `openapi/openapi.yaml` is the source of truth, generated routes are derived from it, and the server publishes `/openapi.yaml`, `/openapi.json`, and `/docs`.
+- The CLI is the main operator interface. It supports deploys from local source, GitHub repositories, and container images, plus day-to-day app, runtime, service, and operation workflows.
+- GitHub imports now support public and private repos, automatic build detection (`static-site`, `dockerfile`, `buildpacks`, `nixpacks`), stack-aware imports from `fugue.yaml` or Compose, and background sync for tracked repositories.
+- Continuity is now a first-class workflow: audit failover posture, configure app/database failover targets, and execute controller-driven failover for managed runtimes.
+- The bundled Helm chart is still an opinionated self-hosted baseline. The production HA path externalizes PostgreSQL, the registry, secrets, and the edge.
 
-## What is implemented in this repository
+## What Fugue can do today
 
-- `fugue-api`: northbound REST API
-- `fugue-controller`: async operation reconciler for the managed runtime
-- `fugue-agent`: attached runtime agent for user-owned VPS
-- PostgreSQL-backed relational state store
-- `ManagedApp` CRD plus operator-style reconcile for managed apps, with Deployments, Services, and Secrets derived from Kubernetes custom resources
-- managed app observed state written back to `ManagedApp.status`, with API reads preferring Kubernetes-observed runtime state over optimistic database status
-- internal registry flow for imported app images
-- background commit polling for imported GitHub apps, with automatic rebuild/redeploy and rollout completion only after the new revision is ready
-- Helm chart for installing the core control plane on k3s
+- Multi-tenant tenants, projects, API keys, audit events, and platform-admin views.
+- Runtime inventory for `managed-shared`, `managed-owned`, and `external-owned` runtimes, including attached nodes through reusable node keys and `fugue-agent`.
+- App deployment from local uploads, GitHub repositories, or container images.
+- Async deploy, rebuild, scale, restart, migrate, failover, and delete operations.
+- App domains/routes, env/config/files/workspace management, runtime/build logs, and operation history.
+- Backing services and service bindings, including managed PostgreSQL flows.
+- Cluster inventory, current resource usage overlays, runtime sharing, and control-plane status inspection.
 
-## Current MVP constraints
+## CLI quick start
 
-- The core control plane now stores state in PostgreSQL tables and uses `LISTEN/NOTIFY` to wake the controller when new operations arrive.
-- The Helm chart now deploys `fugue-api` and `fugue-controller` as separate Deployments, defaults both to `replicaCount=2`, and enables controller leader election so API and controller can scale independently.
-- The bundled install path still keeps PostgreSQL, the internal registry, and other stateful pieces inside the cluster with `hostPath` storage, so it is still an opinionated MVP deployment rather than a fully externalized production topology.
+Install a released CLI:
 
-## Repository layout
-
-```text
-cmd/fugue
-cmd/fugue-api
-cmd/fugue-controller
-cmd/fugue-agent
-internal/api
-internal/auth
-internal/config
-internal/controller
-internal/runtime
-internal/store
-deploy/helm/fugue
-docs/deploy.md
-```
-
-## Local development
-
-```bash
-make test
-make build
-```
-
-Build only the CLI:
-
-```bash
-make build-cli
-./bin/fugue deploy --help
-```
-
-Install the released CLI in one line:
-
-macOS and Linux:
+macOS / Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.sh | sh
@@ -79,43 +39,13 @@ Windows PowerShell:
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.ps1 | iex"
 ```
 
-The installers download the matching archive from the latest GitHub Release and install `fugue` into a writable bin directory. To pin a release or choose a different install directory:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.sh | env FUGUE_VERSION=v0.1.0 FUGUE_INSTALL_DIR=$HOME/.local/bin sh
-```
-
-```powershell
-$env:FUGUE_VERSION='v0.1.0'
-$env:FUGUE_INSTALL_DIR="$env:LOCALAPPDATA\Programs\Fugue\bin"
-irm https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.ps1 | iex
-```
-
-The `build-cli` GitHub Actions workflow now packages `fugue` archives for Linux, macOS, and Windows whenever matching changes are pushed to `main`. The `release-cli` workflow publishes those archives as GitHub Release assets when a `v*` tag is pushed.
-
-## CLI quick start
-
-For most users, the minimum setup is one issued API key:
+Use it with one issued API key:
 
 ```bash
 export FUGUE_API_KEY=<your-api-key>
 fugue deploy .
 fugue app ls
 ```
-
-Defaults:
-
-- the CLI uses `https://api.fugue.pro` unless you override it with `FUGUE_BASE_URL`, `FUGUE_API_URL`, or `--base-url`
-- if your key only sees one tenant, Fugue auto-selects it
-- deploy and create flows default to the `default` project when you omit `--project`
-- name-based commands are preferred; IDs stay as hidden compatibility escape hatches
-
-High-frequency semantic entrypoints:
-
-- `fugue app deploy <app>` redeploys the current desired spec
-- `fugue app binding bind <app> <service>` manages service bindings
-- `fugue operation ls --app <app>` inspects operation history
-- `fugue admin runtime access <runtime>` shows runtime sharing grants
 
 For self-hosted control planes, set the base URL once:
 
@@ -124,6 +54,57 @@ export FUGUE_BASE_URL=https://api.example.com
 export FUGUE_API_KEY=<your-api-key>
 fugue app ls
 ```
+
+Common workflows:
+
+- `fugue deploy github owner/repo --branch main`
+- `fugue deploy github https://github.com/example/app --private --repo-token $GITHUB_TOKEN`
+- `fugue deploy image nginx:1.27`
+- `fugue app status my-app`
+- `fugue app logs runtime my-app --follow`
+- `fugue app binding bind my-app postgres`
+- `fugue app continuity audit my-app`
+- `fugue app failover run my-app --to runtime-b`
+- `fugue operation ls --app my-app`
+
+`build-cli` packages CLI archives on relevant pushes to `main`, and `release-cli` publishes them as GitHub Release assets when a `v*` tag is pushed.
+
+## Deploying the control plane
+
+Normal remote control-plane releases go through [`.github/workflows/deploy-control-plane.yml`](.github/workflows/deploy-control-plane.yml). Push to `main` or run that workflow manually; it builds and pushes the `fugue-api` and `fugue-controller` images, then upgrades the control plane on the self-hosted runner.
+
+`scripts/install_fugue_ha.sh` is only for initial bootstrap of the bundled three-VPS topology. Do not use it for routine control-plane updates.
+
+Further deployment docs:
+
+- [Bundled/self-hosted deploy guide](docs/deploy.md)
+- [Production HA / DR guide](docs/ha-dr.md)
+- [Default Helm values](deploy/helm/fugue/values.yaml)
+- [Production HA values](deploy/helm/fugue/values-production-ha.yaml)
+
+## Local development
+
+```bash
+make test
+make build
+```
+
+To build only the CLI:
+
+```bash
+make build-cli
+./bin/fugue --help
+```
+
+If you change the HTTP API contract, start in `openapi/openapi.yaml` and regenerate artifacts:
+
+```bash
+make generate-openapi
+```
+
+`make test` already checks OpenAPI generated-artifact drift.
+
+For quick local runs, the binaries fall back to `./data/store.json` when `FUGUE_DATABASE_URL` is unset.
 
 Run the API and controller in separate terminals:
 
@@ -136,34 +117,22 @@ make run-api
 make run-controller
 ```
 
-## Deploy control plane
+With the API running locally, the contract is served at `http://127.0.0.1:8080/openapi.yaml`, `http://127.0.0.1:8080/openapi.json`, and `http://127.0.0.1:8080/docs`.
 
-Use the GitHub Actions workflow to deploy or upgrade the remote Fugue control plane:
+## Repository layout
 
-<a href="https://github.com/yym68686/fugue/actions/workflows/deploy-control-plane.yml">
-  <img src="https://raw.githubusercontent.com/yym68686/fugue/main/docs/assets/deploy-control-plane.svg" alt="Deploy control plane" width="460">
-</a>
-
-For normal control-plane releases, push to `main` or open the workflow page above and click `Run workflow`.
-
-[![deploy-control-plane](https://github.com/yym68686/fugue/actions/workflows/deploy-control-plane.yml/badge.svg)](https://github.com/yym68686/fugue/actions/workflows/deploy-control-plane.yml)
-
-## Bootstrap 3 VPS
-
-If you already have SSH aliases `gcp1`, `gcp2`, and `gcp3`, and each remote user is either `root` or has passwordless `sudo`, you can install the current all-in-one MVP with:
-
-```bash
-FUGUE_DOMAIN=<your-fugue-api-domain> ./scripts/install_fugue_ha.sh
+```text
+cmd/fugue                  CLI
+cmd/fugue-api              API server
+cmd/fugue-controller       Async controller
+cmd/fugue-agent            Attached runtime agent
+openapi/                   Authoritative API contract
+internal/api               HTTP handlers and contract serving
+internal/cli               CLI commands and UX
+internal/controller        Operation workers and reconciliation
+internal/runtime           Managed-runtime rendering/apply logic
+internal/sourceimport      Source import and build detection
+internal/store             PostgreSQL-backed state store
+deploy/helm/fugue          Control-plane Helm chart
+docs/                      Deployment and HA/DR guides
 ```
-
-This installer:
-
-- builds `fugue-api` and `fugue-controller` images locally
-- creates a 3-node k3s HA cluster on `gcp1/gcp2/gcp3`
-- imports the images into each node's `containerd`
-- installs the Helm chart with separate `fugue-api` and `fugue-controller` Deployments
-- defaults both API and controller to 2 replicas, with controller leader election enabled
-- exposes the Fugue API through a cluster `NodePort` Service
-- optionally configures Caddy on `gcp1` as the HTTPS edge that proxies to that `NodePort`
-
-The generated kubeconfig and bootstrap key are written into `.dist/fugue-install/`.
