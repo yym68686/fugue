@@ -6,6 +6,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/sourceimport"
@@ -14,6 +15,12 @@ import (
 const bytesPerGiB int64 = 1 << 30
 
 type InspectFunc func(ctx context.Context, imageRef string) (bool, map[string]int64, error)
+
+type managedImageCandidate struct {
+	ImageRef       string
+	Current        bool
+	LastDeployedAt *time.Time
+}
 
 func ManagedImageRefs(
 	app model.App,
@@ -83,6 +90,87 @@ func DeletableManagedImageRefs(
 	return deletable
 }
 
+func ExcessManagedImageRefs(
+	ctx context.Context,
+	inspect InspectFunc,
+	app model.App,
+	ops []model.Operation,
+	registryPushBase string,
+	registryPullBase string,
+	limit int,
+) ([]string, error) {
+	if inspect == nil || strings.TrimSpace(registryPushBase) == "" {
+		return nil, nil
+	}
+
+	limit = model.EffectiveAppImageMirrorLimit(limit)
+	candidates := collectAppImageCandidates(app, ops, registryPushBase, registryPullBase)
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	imageRefs := make([]string, 0, len(candidates))
+	for imageRef := range candidates {
+		imageRefs = append(imageRefs, imageRef)
+	}
+	sort.Strings(imageRefs)
+
+	staleExisting := make([]managedImageCandidate, 0, len(imageRefs))
+	currentExistingCount := 0
+	for _, imageRef := range imageRefs {
+		exists, _, err := inspect(ctx, imageRef)
+		if err != nil {
+			return nil, fmt.Errorf("inspect image %s: %w", imageRef, err)
+		}
+		if !exists {
+			continue
+		}
+
+		candidate := candidates[imageRef]
+		if candidate.Current {
+			currentExistingCount++
+			continue
+		}
+		staleExisting = append(staleExisting, candidate)
+	}
+	if len(staleExisting) == 0 {
+		return nil, nil
+	}
+
+	sort.Slice(staleExisting, func(i, j int) bool {
+		leftTimestamp := timestampFromPointer(staleExisting[i].LastDeployedAt)
+		rightTimestamp := timestampFromPointer(staleExisting[j].LastDeployedAt)
+		if leftTimestamp != rightTimestamp {
+			return leftTimestamp > rightTimestamp
+		}
+		return staleExisting[i].ImageRef < staleExisting[j].ImageRef
+	})
+
+	staleKeepCount := limit - currentExistingCount
+	if staleKeepCount < 0 {
+		staleKeepCount = 0
+	}
+	if staleKeepCount >= len(staleExisting) {
+		return nil, nil
+	}
+
+	excess := append([]managedImageCandidate(nil), staleExisting[staleKeepCount:]...)
+	sort.Slice(excess, func(i, j int) bool {
+		leftTimestamp := timestampFromPointer(excess[i].LastDeployedAt)
+		rightTimestamp := timestampFromPointer(excess[j].LastDeployedAt)
+		if leftTimestamp != rightTimestamp {
+			return leftTimestamp < rightTimestamp
+		}
+		return excess[i].ImageRef < excess[j].ImageRef
+	})
+
+	excessRefs := make([]string, 0, len(excess))
+	for _, candidate := range excess {
+		excessRefs = append(excessRefs, candidate.ImageRef)
+	}
+	return excessRefs, nil
+}
+
 func MeasureTenantStorageBytes(
 	ctx context.Context,
 	inspect InspectFunc,
@@ -148,9 +236,27 @@ func collectAppImageRefs(
 	registryPushBase string,
 	registryPullBase string,
 ) map[string]struct{} {
+	candidates := collectAppImageCandidates(app, ops, registryPushBase, registryPullBase)
 	refs := make(map[string]struct{})
-	if imageRef := managedImageRefForSource(app, app.Source, app.Spec.Image, registryPushBase, registryPullBase); imageRef != "" {
+	for imageRef := range candidates {
 		refs[imageRef] = struct{}{}
+	}
+	return refs
+}
+
+func collectAppImageCandidates(
+	app model.App,
+	ops []model.Operation,
+	registryPushBase string,
+	registryPullBase string,
+) map[string]managedImageCandidate {
+	candidates := make(map[string]managedImageCandidate)
+	if imageRef := managedImageRefForSource(app, app.Source, app.Spec.Image, registryPushBase, registryPullBase); imageRef != "" {
+		candidates[imageRef] = managedImageCandidate{
+			ImageRef:       imageRef,
+			Current:        true,
+			LastDeployedAt: appCurrentImageTimestamp(app),
+		}
 	}
 	for _, op := range ops {
 		if op.DesiredSource == nil {
@@ -160,11 +266,21 @@ func collectAppImageRefs(
 		if op.DesiredSpec != nil {
 			runtimeImageRef = strings.TrimSpace(op.DesiredSpec.Image)
 		}
-		if imageRef := managedImageRefForSource(app, op.DesiredSource, runtimeImageRef, registryPushBase, registryPullBase); imageRef != "" {
-			refs[imageRef] = struct{}{}
+		imageRef := managedImageRefForSource(app, op.DesiredSource, runtimeImageRef, registryPushBase, registryPullBase)
+		if imageRef == "" {
+			continue
 		}
+		candidate := managedImageCandidate{
+			ImageRef:       imageRef,
+			LastDeployedAt: appImageOperationTimestamp(op),
+		}
+		if existing, ok := candidates[imageRef]; ok {
+			candidates[imageRef] = mergeManagedImageCandidate(existing, candidate)
+			continue
+		}
+		candidates[imageRef] = candidate
 	}
-	return refs
+	return candidates
 }
 
 func managedImageRefForSource(
@@ -282,6 +398,65 @@ func isManagedRegistryRef(imageRef, registryPushBase string) bool {
 		return false
 	}
 	return strings.HasPrefix(imageRef, pushBase+"/")
+}
+
+func appCurrentImageTimestamp(app model.App) *time.Time {
+	if app.Status.CurrentReleaseReadyAt != nil {
+		return cloneTimePointer(app.Status.CurrentReleaseReadyAt)
+	}
+	if !app.Status.UpdatedAt.IsZero() {
+		value := app.Status.UpdatedAt.UTC()
+		return &value
+	}
+	if !app.UpdatedAt.IsZero() {
+		value := app.UpdatedAt.UTC()
+		return &value
+	}
+	return nil
+}
+
+func appImageOperationTimestamp(op model.Operation) *time.Time {
+	if op.CompletedAt != nil {
+		return cloneTimePointer(op.CompletedAt)
+	}
+	if op.StartedAt != nil {
+		return cloneTimePointer(op.StartedAt)
+	}
+	if !op.UpdatedAt.IsZero() {
+		value := op.UpdatedAt.UTC()
+		return &value
+	}
+	if !op.CreatedAt.IsZero() {
+		value := op.CreatedAt.UTC()
+		return &value
+	}
+	return nil
+}
+
+func mergeManagedImageCandidate(existing, next managedImageCandidate) managedImageCandidate {
+	out := existing
+	if next.Current {
+		out.Current = true
+	}
+	if timestampFromPointer(next.LastDeployedAt) > timestampFromPointer(out.LastDeployedAt) {
+		out.LastDeployedAt = cloneTimePointer(next.LastDeployedAt)
+	}
+	return out
+}
+
+func cloneTimePointer(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copied := value.UTC()
+	return &copied
+}
+
+func timestampFromPointer(value *time.Time) int64 {
+	if value == nil {
+		return 0
+	}
+	return value.UTC().UnixNano()
 }
 
 func unionBlobSizes(target, source map[string]int64) {

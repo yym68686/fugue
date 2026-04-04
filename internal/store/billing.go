@@ -198,6 +198,10 @@ func normalizeAppSpecResources(spec *model.AppSpec) error {
 	if spec == nil {
 		return ErrInvalidInput
 	}
+	if spec.ImageMirrorLimit < 0 {
+		return ErrInvalidInput
+	}
+	model.ApplyAppSpecDefaults(spec)
 	resources, err := normalizeOptionalWorkloadResources(spec.Resources)
 	if err != nil {
 		return err
@@ -739,7 +743,7 @@ func appEffectiveResources(spec model.AppSpec) model.BillingResourceSpec {
 	return model.BillingResourceSpec{
 		CPUMilliCores:    compute.CPUMilliCores,
 		MemoryMebibytes:  compute.MemoryMebibytes,
-		StorageGibibytes: workspaceStorageGibibytes(spec.Workspace),
+		StorageGibibytes: appStorageGibibytes(spec),
 	}
 }
 
@@ -965,6 +969,24 @@ func describeBillingBalanceDepletedWithCommittedStorage(record model.TenantBilli
 
 func billingChargeableStorageGibibytes(record model.TenantBilling, committedStorageGibibytes int64) int64 {
 	return maxInt64(record.ManagedCap.StorageGibibytes, committedStorageGibibytes)
+}
+
+func appStorageGibibytes(spec model.AppSpec) int64 {
+	if spec.PersistentStorage != nil {
+		return persistentStorageGibibytes(spec.PersistentStorage)
+	}
+	return workspaceStorageGibibytes(spec.Workspace)
+}
+
+func persistentStorageGibibytes(spec *model.AppPersistentStorageSpec) int64 {
+	if spec == nil {
+		return 0
+	}
+	size := strings.TrimSpace(spec.StorageSize)
+	if size == "" {
+		size = model.DefaultManagedWorkspaceStorageSize
+	}
+	return storageQuantityGibibytes(size)
 }
 
 func workspaceStorageGibibytes(spec *model.AppWorkspaceSpec) int64 {

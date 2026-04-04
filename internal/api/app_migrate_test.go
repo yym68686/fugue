@@ -57,7 +57,7 @@ func TestMigrateAppRejectsStatefulFailoverBlockers(t *testing.T) {
 	}
 	body := recorder.Body.String()
 	for _, want := range []string{
-		"stateful migration is blocked by managed backing services and persistent workspace",
+		"stateful migration is blocked by managed backing services and persistent storage",
 		"replicated operator-backed storage before failover",
 	} {
 		if !strings.Contains(body, want) {

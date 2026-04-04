@@ -181,6 +181,140 @@ func TestPatchAppEnvAndRestartCreateDeployOperations(t *testing.T) {
 	}
 }
 
+func TestPatchAppEnvAndRestartRecoverFailedImportedAppDesiredState(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app, recoveredImage, recoveredSource := setupFailedImportedAppRecoveryServer(t)
+
+	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID+"/env", apiKey, map[string]any{
+		"set": map[string]string{
+			"FIXED": "1",
+		},
+	})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var patchResponse struct {
+		Operation model.Operation `json:"operation"`
+	}
+	mustDecodeJSON(t, recorder, &patchResponse)
+	if patchResponse.Operation.DesiredSpec == nil {
+		t.Fatal("expected desired spec in recovered deploy operation")
+	}
+	if got := patchResponse.Operation.DesiredSpec.Image; got != recoveredImage {
+		t.Fatalf("expected recovered image %q, got %q", recoveredImage, got)
+	}
+	if got := patchResponse.Operation.DesiredSpec.Env["BROKEN"]; got != "1" {
+		t.Fatalf("expected recovered env BROKEN=1, got %q", got)
+	}
+	if got := patchResponse.Operation.DesiredSpec.Env["FIXED"]; got != "1" {
+		t.Fatalf("expected patched env FIXED=1, got %q", got)
+	}
+	if patchResponse.Operation.DesiredSource == nil {
+		t.Fatal("expected desired source in recovered deploy operation")
+	}
+	if got := patchResponse.Operation.DesiredSource.ResolvedImageRef; got != recoveredSource.ResolvedImageRef {
+		t.Fatalf("expected recovered resolved image ref %q, got %q", recoveredSource.ResolvedImageRef, got)
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/restart", apiKey, map[string]any{})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var restartResponse struct {
+		Operation model.Operation `json:"operation"`
+	}
+	mustDecodeJSON(t, recorder, &restartResponse)
+	if restartResponse.Operation.DesiredSpec == nil {
+		t.Fatal("expected desired spec on restart operation")
+	}
+	if got := restartResponse.Operation.DesiredSpec.Image; got != recoveredImage {
+		t.Fatalf("expected restart image %q, got %q", recoveredImage, got)
+	}
+	if got := restartResponse.Operation.DesiredSpec.Env["FIXED"]; got != "1" {
+		t.Fatalf("expected restart to preserve recovered env FIXED=1, got %q", got)
+	}
+	if restartResponse.Operation.DesiredSpec.RestartToken == "" {
+		t.Fatal("expected restart token in desired spec")
+	}
+	if restartResponse.Operation.DesiredSource == nil {
+		t.Fatal("expected desired source on restart operation")
+	}
+	if got := restartResponse.Operation.DesiredSource.ResolvedImageRef; got != recoveredSource.ResolvedImageRef {
+		t.Fatalf("expected restart resolved image ref %q, got %q", recoveredSource.ResolvedImageRef, got)
+	}
+}
+
+func TestPatchAppImageMirrorLimitUpdatesAppWithoutDeployOperation(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID, apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var getResponse struct {
+		App model.App `json:"app"`
+	}
+	mustDecodeJSON(t, recorder, &getResponse)
+	if got := getResponse.App.Spec.ImageMirrorLimit; got != model.DefaultAppImageMirrorLimit {
+		t.Fatalf("expected default image mirror limit %d, got %d", model.DefaultAppImageMirrorLimit, got)
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID, apiKey, map[string]any{
+		"image_mirror_limit": 3,
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var patchResponse struct {
+		AlreadyCurrent bool      `json:"already_current"`
+		App            model.App `json:"app"`
+	}
+	mustDecodeJSON(t, recorder, &patchResponse)
+	if patchResponse.AlreadyCurrent {
+		t.Fatal("expected patch response to report a change")
+	}
+	if got := patchResponse.App.Spec.ImageMirrorLimit; got != 3 {
+		t.Fatalf("expected patched image mirror limit 3, got %d", got)
+	}
+
+	ops, err := s.ListOperations("", true)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(ops) != 0 {
+		t.Fatalf("expected no deploy operations for image mirror limit patch, got %d", len(ops))
+	}
+
+	updatedApp, err := s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get updated app: %v", err)
+	}
+	if got := updatedApp.Spec.ImageMirrorLimit; got != 3 {
+		t.Fatalf("expected stored image mirror limit 3, got %d", got)
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID, apiKey, map[string]any{
+		"image_mirror_limit": 3,
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	mustDecodeJSON(t, recorder, &patchResponse)
+	if !patchResponse.AlreadyCurrent {
+		t.Fatal("expected repeated patch response to report already_current")
+	}
+}
+
 func TestGetAppEnvMergesBindingEnvAndAppEnvOverrides(t *testing.T) {
 	t.Parallel()
 
@@ -397,6 +531,104 @@ func setupAppConfigTestServer(t *testing.T, spec model.AppSpec) (*store.Store, *
 
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
 	return s, server, apiKey, app
+}
+
+func setupFailedImportedAppRecoveryServer(t *testing.T) (*store.Store, *Server, string, model.App, string, model.AppSource) {
+	t.Helper()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Recovered Import Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.write", "app.deploy"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	app, err := s.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Env: map[string]string{
+			"BASE": "1",
+		},
+	}, model.AppSource{
+		Type:     model.AppSourceTypeDockerImage,
+		ImageRef: "ghcr.io/example/demo:1.2.3",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	importSpec := app.Spec
+	importSource := *app.Source
+	importOp, err := s.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		Type:          model.OperationTypeImport,
+		AppID:         app.ID,
+		DesiredSpec:   &importSpec,
+		DesiredSource: &importSource,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim import operation: %v", err)
+	} else if !found {
+		t.Fatal("expected import operation")
+	}
+
+	recoveredSpec := app.Spec
+	recoveredSpec.Image = "registry.pull.example/fugue-apps/demo:image-abc123"
+	recoveredSpec.Env = map[string]string{
+		"BASE":   "1",
+		"BROKEN": "1",
+	}
+	recoveredSource := *app.Source
+	recoveredSource.ResolvedImageRef = "registry.push.example/fugue-apps/demo:image-abc123"
+	if _, err := s.CompleteManagedOperationWithResult(importOp.ID, "/tmp/import.yaml", "imported", &recoveredSpec, &recoveredSource); err != nil {
+		t.Fatalf("complete import operation: %v", err)
+	}
+
+	failedDeploySpec := recoveredSpec
+	failedDeployOp, err := s.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		Type:          model.OperationTypeDeploy,
+		AppID:         app.ID,
+		DesiredSpec:   &failedDeploySpec,
+		DesiredSource: &recoveredSource,
+	})
+	if err != nil {
+		t.Fatalf("create failed deploy operation: %v", err)
+	}
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim failed deploy operation: %v", err)
+	} else if !found {
+		t.Fatal("expected failed deploy operation")
+	}
+	if _, err := s.FailOperation(failedDeployOp.ID, "runtime exited with code 3"); err != nil {
+		t.Fatalf("fail deploy operation: %v", err)
+	}
+
+	storedApp, err := s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get failed app: %v", err)
+	}
+	if storedApp.Spec.Image != "" {
+		t.Fatalf("expected stored app image to remain empty after failed deploy, got %q", storedApp.Spec.Image)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	return s, server, apiKey, storedApp, recoveredSpec.Image, recoveredSource
 }
 
 func performJSONRequest(t *testing.T, server *Server, method, target, apiKey string, body any) *httptest.ResponseRecorder {

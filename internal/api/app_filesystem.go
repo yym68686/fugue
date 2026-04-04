@@ -506,11 +506,25 @@ func (s *Server) resolveAppFilesystemTarget(
 		}
 	}
 
-	requestPath, rootPath, useWorkspace, err := resolveFilesystemPath(rawPath, allowRoot, workspaceRoot)
+	requestPath := ""
+	rootPath := "/"
+	usePersistentStorage := false
+	var err error
+	switch {
+	case app.Spec.PersistentStorage != nil:
+		var mounts []model.AppPersistentStorageMount
+		mounts, err = normalizePersistentFilesystemMounts(app.Spec.PersistentStorage)
+		if err != nil {
+			return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusBadRequest, Message: "app persistent_storage is invalid", Err: err}
+		}
+		requestPath, rootPath, usePersistentStorage, err = resolvePersistentFilesystemPath(rawPath, allowRoot, mounts)
+	default:
+		requestPath, rootPath, usePersistentStorage, err = resolveFilesystemPath(rawPath, allowRoot, workspaceRoot)
+	}
 	if err != nil {
 		return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusBadRequest, Message: err.Error()}
 	}
-	if useWorkspace {
+	if usePersistentStorage {
 		runtimeObj, err := s.store.GetRuntime(app.Spec.RuntimeID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
@@ -519,7 +533,7 @@ func (s *Server) resolveAppFilesystemTarget(
 			return appFilesystemTarget{}, "", err
 		}
 		if !model.RuntimeSupportsPersistentWorkspace(runtimeObj.Type) {
-			return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusBadRequest, Message: "persistent workspace requires a managed-shared or managed-owned runtime"}
+			return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusBadRequest, Message: "persistent storage requires a managed-shared or managed-owned runtime"}
 		}
 	}
 
@@ -562,7 +576,7 @@ func (s *Server) resolveAppFilesystemTarget(
 		return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusNotFound, Message: "no running app pods found"}
 	}
 	containerName := appContainerName
-	if useWorkspace {
+	if usePersistentStorage {
 		containerName = runtime.AppWorkspaceContainerName
 	}
 	return appFilesystemTarget{
@@ -699,11 +713,83 @@ func resolveFilesystemPath(rawPath string, allowRoot bool, workspaceRoot string)
 		reservedRoot = model.AppWorkspaceInternalPath(workspaceRoot)
 	}
 
-	requestPath, err := normalizeFilesystemPath(rootPath, rawPath, allowRoot, reservedRoot)
+	requestPath, err := normalizeFilesystemPath(rootPath, rawPath, allowRoot, reservedRoot, false, useWorkspace)
 	if err != nil {
 		return "", "", false, err
 	}
 	return requestPath, rootPath, useWorkspace, nil
+}
+
+func resolvePersistentFilesystemPath(rawPath string, allowRoot bool, mounts []model.AppPersistentStorageMount) (string, string, bool, error) {
+	if strings.TrimSpace(rawPath) == "" {
+		requestPath, err := normalizeFilesystemPath("/", rawPath, allowRoot, "", false, false)
+		if err != nil {
+			return "", "", false, err
+		}
+		return requestPath, "/", false, nil
+	}
+
+	cleaned, err := model.NormalizeAbsolutePath(rawPath)
+	if err != nil {
+		return "", "", false, fmt.Errorf("path must be absolute")
+	}
+	selected, found := findPersistentFilesystemMount(mounts, cleaned)
+	if !found {
+		requestPath, err := normalizeFilesystemPath("/", cleaned, allowRoot, "", false, false)
+		if err != nil {
+			return "", "", false, err
+		}
+		return requestPath, "/", false, nil
+	}
+	requestPath, err := normalizeFilesystemPath(selected.Path, cleaned, allowRoot, "", strings.EqualFold(selected.Kind, model.AppPersistentStorageMountKindFile), false)
+	if err != nil {
+		return "", "", false, err
+	}
+	return requestPath, selected.Path, true, nil
+}
+
+func normalizePersistentFilesystemMounts(spec *model.AppPersistentStorageSpec) ([]model.AppPersistentStorageMount, error) {
+	if spec == nil || len(spec.Mounts) == 0 {
+		return nil, nil
+	}
+	mounts := make([]model.AppPersistentStorageMount, 0, len(spec.Mounts))
+	for _, mount := range spec.Mounts {
+		kind, err := model.NormalizeAppPersistentStorageMountKind(mount.Kind)
+		if err != nil {
+			return nil, err
+		}
+		pathValue, err := model.NormalizeAppPersistentStorageMountPath(kind, mount.Path)
+		if err != nil {
+			return nil, err
+		}
+		normalized := mount
+		normalized.Kind = kind
+		normalized.Path = pathValue
+		mounts = append(mounts, normalized)
+	}
+	sort.Slice(mounts, func(i, j int) bool {
+		if len(mounts[i].Path) == len(mounts[j].Path) {
+			return mounts[i].Path < mounts[j].Path
+		}
+		return len(mounts[i].Path) > len(mounts[j].Path)
+	})
+	return mounts, nil
+}
+
+func findPersistentFilesystemMount(mounts []model.AppPersistentStorageMount, targetPath string) (model.AppPersistentStorageMount, bool) {
+	for _, mount := range mounts {
+		switch strings.TrimSpace(strings.ToLower(mount.Kind)) {
+		case model.AppPersistentStorageMountKindFile:
+			if mount.Path == targetPath {
+				return mount, true
+			}
+		case model.AppPersistentStorageMountKindDirectory:
+			if model.PathWithinBase(mount.Path, targetPath) {
+				return mount, true
+			}
+		}
+	}
+	return model.AppPersistentStorageMount{}, false
 }
 
 func isPathWithinFilesystemRoot(rootPath, targetPath string) bool {
@@ -718,7 +804,7 @@ func isPathWithinFilesystemRoot(rootPath, targetPath string) bool {
 	return model.PathWithinBase(rootPath, targetPath)
 }
 
-func normalizeFilesystemPath(rootPath, rawPath string, allowRoot bool, reservedRoot string) (string, error) {
+func normalizeFilesystemPath(rootPath, rawPath string, allowRoot bool, reservedRoot string, rootIsFile bool, isWorkspaceRoot bool) (string, error) {
 	if strings.TrimSpace(rawPath) == "" {
 		rawPath = rootPath
 	}
@@ -729,11 +815,14 @@ func normalizeFilesystemPath(rootPath, rawPath string, allowRoot bool, reservedR
 	if !isPathWithinFilesystemRoot(rootPath, cleaned) {
 		return "", fmt.Errorf("path must be inside the app filesystem root %s", rootPath)
 	}
-	if !allowRoot && cleaned == path.Clean(rootPath) {
+	if !allowRoot && cleaned == path.Clean(rootPath) && !rootIsFile {
 		if path.Clean(rootPath) == "/" {
 			return "", fmt.Errorf("path must not be the filesystem root")
 		}
-		return "", fmt.Errorf("path must not be the workspace root")
+		if isWorkspaceRoot {
+			return "", fmt.Errorf("path must not be the workspace root")
+		}
+		return "", fmt.Errorf("path must not be the persistent storage root")
 	}
 	if reservedRoot != "" && isPathWithinFilesystemRoot(reservedRoot, cleaned) {
 		return "", fmt.Errorf("path is reserved for fugue workspace metadata")

@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"path"
@@ -23,6 +24,7 @@ const (
 	AppWorkspaceContainerName           = "fugue-workspace"
 	workspaceVolumeName                 = "app-workspace"
 	workspaceSidecarName                = AppWorkspaceContainerName
+	persistentStorageRootPath           = "/fugue-persistent-storage"
 
 	CloudNativePGAPIVersion           = "postgresql.cnpg.io/v1"
 	CloudNativePGClusterKind          = "Cluster"
@@ -56,6 +58,11 @@ func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, p
 		objects = append(objects,
 			buildAppWorkspacePVCObject(namespace, app, labels, *workspaceSpec),
 			buildWorkspaceReplicationDestinationObject(namespace, app, labels, *workspaceSpec),
+		)
+	} else if storageSpec := normalizeRuntimeAppPersistentStorageSpec(app); storageSpec != nil {
+		objects = append(objects,
+			buildAppPersistentStoragePVCObject(namespace, app, labels, *storageSpec),
+			buildPersistentStorageReplicationDestinationObject(namespace, app, labels, *storageSpec),
 		)
 	}
 
@@ -322,6 +329,16 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		})
 		initContainers = append(initContainers, buildAppWorkspaceInitContainer(*workspaceSpec))
 		sidecars = append(sidecars, buildAppWorkspaceSidecar(*workspaceSpec))
+	} else if storageSpec := normalizeRuntimeAppPersistentStorageSpec(app); storageSpec != nil {
+		volumeMounts = append(volumeMounts, buildPersistentStorageVolumeMounts(*storageSpec)...)
+		volumes = append(volumes, map[string]any{
+			"name": workspaceVolumeName,
+			"persistentVolumeClaim": map[string]any{
+				"claimName": WorkspacePVCName(app),
+			},
+		})
+		initContainers = append(initContainers, buildAppPersistentStorageInitContainer(*storageSpec))
+		sidecars = append(sidecars, buildAppPersistentStorageSidecar(*storageSpec))
 	}
 	if len(volumeMounts) > 0 {
 		container["volumeMounts"] = volumeMounts
@@ -642,7 +659,7 @@ func buildAppServiceObject(namespace string, app model.App, labels map[string]st
 }
 
 func deploymentStrategy(app model.App) map[string]any {
-	if normalizeRuntimeAppWorkspaceSpec(app) != nil {
+	if normalizeRuntimeAppWorkspaceSpec(app) != nil || normalizeRuntimeAppPersistentStorageSpec(app) != nil {
 		return map[string]any{"type": "Recreate"}
 	}
 	return map[string]any{
@@ -885,6 +902,64 @@ func normalizeRuntimeAppWorkspaceSpec(app model.App) *model.AppWorkspaceSpec {
 	return &spec
 }
 
+func normalizeRuntimeAppPersistentStorageSpec(app model.App) *model.AppPersistentStorageSpec {
+	if app.Spec.PersistentStorage == nil {
+		return nil
+	}
+	spec := *app.Spec.PersistentStorage
+	storagePath, err := model.NormalizeAppPersistentStoragePath(spec.StoragePath)
+	if err != nil {
+		return nil
+	}
+	if storagePath == "" {
+		namespace := NamespaceForTenant(app.TenantID)
+		storagePath = path.Join("/var/lib/fugue/tenant-data", namespace, "apps", workspaceStorageBaseName(app), "persistent-storage")
+	}
+	spec.StoragePath = storagePath
+	if strings.TrimSpace(spec.StorageSize) == "" {
+		spec.StorageSize = defaultWorkspaceStorage
+	}
+	spec.StorageClassName = strings.TrimSpace(spec.StorageClassName)
+	if len(spec.Mounts) == 0 {
+		return nil
+	}
+
+	mounts := make([]model.AppPersistentStorageMount, 0, len(spec.Mounts))
+	for _, mount := range spec.Mounts {
+		kind, err := model.NormalizeAppPersistentStorageMountKind(mount.Kind)
+		if err != nil {
+			return nil
+		}
+		pathValue, err := model.NormalizeAppPersistentStorageMountPath(kind, mount.Path)
+		if err != nil {
+			return nil
+		}
+		normalized := mount
+		normalized.Kind = kind
+		normalized.Path = pathValue
+		if normalized.Mode == 0 {
+			normalized.Mode = defaultPersistentStorageMountMode(normalized)
+		}
+		mounts = append(mounts, normalized)
+	}
+	spec.Mounts = mounts
+	return &spec
+}
+
+func defaultPersistentStorageMountMode(mount model.AppPersistentStorageMount) int32 {
+	switch strings.TrimSpace(strings.ToLower(mount.Kind)) {
+	case model.AppPersistentStorageMountKindDirectory:
+		return 0o755
+	case model.AppPersistentStorageMountKindFile:
+		if mount.Secret {
+			return 0o600
+		}
+		return 0o644
+	default:
+		return 0o644
+	}
+}
+
 func workspaceStorageBaseName(app model.App) string {
 	if id := strings.TrimSpace(app.ID); id != "" {
 		return id
@@ -1015,6 +1090,173 @@ func buildAppWorkspaceSidecar(spec model.AppWorkspaceSpec) map[string]any {
 			},
 		},
 	}
+}
+
+func buildPersistentStorageVolumeMounts(spec model.AppPersistentStorageSpec) []map[string]any {
+	mounts := make([]map[string]any, 0, len(spec.Mounts))
+	for _, mount := range spec.Mounts {
+		mounts = append(mounts, map[string]any{
+			"name":      workspaceVolumeName,
+			"mountPath": mount.Path,
+			"subPath":   model.AppPersistentStorageMountSubPath(mount),
+		})
+	}
+	return mounts
+}
+
+func buildAppPersistentStorageInitContainer(spec model.AppPersistentStorageSpec) map[string]any {
+	return map[string]any{
+		"name":  "init-persistent-storage",
+		"image": defaultWaitImage,
+		"command": []string{
+			"sh",
+			"-lc",
+			persistentStorageInitScript(),
+			"sh",
+			persistentStorageRootPath,
+			strings.TrimSpace(spec.ResetToken),
+			buildPersistentStorageMountPlan(spec),
+		},
+		"securityContext": map[string]any{
+			"runAsUser": 0,
+		},
+		"volumeMounts": []map[string]any{
+			{
+				"name":      workspaceVolumeName,
+				"mountPath": persistentStorageRootPath,
+			},
+		},
+	}
+}
+
+func buildAppPersistentStoragePVCObject(namespace string, app model.App, labels map[string]string, spec model.AppPersistentStorageSpec) map[string]any {
+	return buildPersistentStoragePVCObject(namespace, app, labels, spec.StorageSize, spec.StorageClassName)
+}
+
+func buildPersistentStoragePVCObject(namespace string, app model.App, labels map[string]string, storageSize, storageClassName string) map[string]any {
+	pvcSpec := map[string]any{
+		"accessModes": []string{"ReadWriteOnce"},
+		"resources": map[string]any{
+			"requests": map[string]any{
+				"storage": storageSize,
+			},
+		},
+	}
+	if strings.TrimSpace(storageClassName) != "" {
+		pvcSpec["storageClassName"] = strings.TrimSpace(storageClassName)
+	}
+	return map[string]any{
+		"apiVersion": "v1",
+		"kind":       "PersistentVolumeClaim",
+		"metadata": map[string]any{
+			"name":      WorkspacePVCName(app),
+			"namespace": namespace,
+			"labels":    labels,
+		},
+		"spec": pvcSpec,
+	}
+}
+
+func buildPersistentStorageReplicationDestinationObject(namespace string, app model.App, labels map[string]string, spec model.AppPersistentStorageSpec) map[string]any {
+	rsyncTLS := map[string]any{
+		"copyMethod": "Direct",
+		"capacity":   spec.StorageSize,
+		"accessModes": []string{
+			"ReadWriteOnce",
+		},
+	}
+	if strings.TrimSpace(spec.StorageClassName) != "" {
+		rsyncTLS["storageClassName"] = strings.TrimSpace(spec.StorageClassName)
+	}
+	return map[string]any{
+		"apiVersion": VolSyncAPIVersion,
+		"kind":       VolSyncReplicationDestinationKind,
+		"metadata": map[string]any{
+			"name":      WorkspaceReplicationDestinationName(app),
+			"namespace": namespace,
+			"labels":    labels,
+		},
+		"spec": map[string]any{
+			"trigger": map[string]any{
+				"manual": "bootstrap",
+			},
+			"rsyncTLS": rsyncTLS,
+		},
+	}
+}
+
+func buildAppPersistentStorageSidecar(spec model.AppPersistentStorageSpec) map[string]any {
+	return map[string]any{
+		"name":  workspaceSidecarName,
+		"image": defaultWaitImage,
+		"command": []string{
+			"sh",
+			"-lc",
+			"trap 'exit 0' TERM INT; while :; do sleep 3600; done",
+		},
+		"volumeMounts": buildPersistentStorageVolumeMounts(spec),
+	}
+}
+
+func buildPersistentStorageMountPlan(spec model.AppPersistentStorageSpec) string {
+	lines := make([]string, 0, len(spec.Mounts))
+	for _, mount := range spec.Mounts {
+		lines = append(lines, strings.Join([]string{
+			strings.TrimSpace(strings.ToLower(mount.Kind)),
+			model.AppPersistentStorageMountKey(mount),
+			strconv.FormatInt(int64(mount.Mode), 8),
+			base64.StdEncoding.EncodeToString([]byte(mount.SeedContent)),
+		}, "\t"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func persistentStorageInitScript() string {
+	return `storage_root="$1"
+token="$2"
+plan="$3"
+state_dir="$storage_root/` + model.AppPersistentStorageInternalDirName + `"
+mounts_dir="$storage_root/` + model.AppPersistentStorageMountRootPath("") + `"
+marker="$state_dir/reset-token"
+mkdir -p "$state_dir" "$mounts_dir"
+if [ -n "$token" ]; then
+  current=""
+  if [ -f "$marker" ]; then
+    current="$(cat "$marker" 2>/dev/null || true)"
+  fi
+  if [ "$current" != "$token" ]; then
+    rm -rf "$mounts_dir"/* 2>/dev/null || true
+    mkdir -p "$mounts_dir"
+    printf '%s' "$token" > "$marker"
+  fi
+fi
+if [ -z "$plan" ]; then
+  exit 0
+fi
+printf '%s\n' "$plan" | while IFS='	' read -r kind key mode seed; do
+  [ -n "$kind" ] || continue
+  target="$mounts_dir/$key"
+  case "$kind" in
+    directory)
+      mkdir -p "$target"
+      if [ -n "$mode" ] && [ "$mode" != "0" ]; then
+        chmod "$mode" "$target" 2>/dev/null || true
+      fi
+      ;;
+    file)
+      mkdir -p "$(dirname "$target")"
+      if [ ! -f "$target" ]; then
+        : > "$target"
+        if [ -n "$seed" ]; then
+          printf '%s' "$seed" | base64 -d > "$target"
+        fi
+      fi
+      if [ -n "$mode" ] && [ "$mode" != "0" ]; then
+        chmod "$mode" "$target" 2>/dev/null || true
+      fi
+      ;;
+  esac
+done`
 }
 
 func workspaceInitScript() string {

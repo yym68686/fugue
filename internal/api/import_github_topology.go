@@ -164,6 +164,7 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 			effectiveImportServicePort(requestedPort, service.InternalPort),
 			"",
 			nil,
+			service.PersistentStorage,
 			postgres,
 			suggestedEnv,
 		)

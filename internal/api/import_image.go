@@ -125,6 +125,7 @@ func (s *Server) handleImportImageApp(w http.ResponseWriter, r *http.Request) {
 			effectiveImportServicePort(req.ServicePort, 0),
 			req.ConfigContent,
 			req.Files,
+			nil,
 			req.Postgres,
 			req.Env,
 		)

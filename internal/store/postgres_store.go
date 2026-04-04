@@ -2124,6 +2124,39 @@ func (s *Store) pgUpdateAppRoute(id string, route model.AppRoute) (model.App, er
 	return app, nil
 }
 
+func (s *Store) pgUpdateAppImageMirrorLimit(id string, limit int) (model.App, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.App{}, fmt.Errorf("begin update app image mirror limit transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	app, err := s.pgGetAppTx(ctx, tx, id, true)
+	if err != nil {
+		return model.App{}, mapDBErr(err)
+	}
+	if isDeletedApp(app) {
+		return model.App{}, ErrNotFound
+	}
+
+	app.Spec.ImageMirrorLimit = limit
+	app.UpdatedAt = time.Now().UTC()
+	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+		return model.App{}, mapDBErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return model.App{}, fmt.Errorf("commit update app image mirror limit transaction: %w", err)
+	}
+	normalizeAppStatusForRead(&app)
+	if err := s.pgHydrateAppBackingServices(context.Background(), &app); err != nil {
+		return model.App{}, err
+	}
+	return app, nil
+}
+
 func (s *Store) pgPurgeApp(id string) (model.App, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -3936,6 +3969,7 @@ func scanApp(scanner sqlScanner) (model.App, error) {
 	app.Route = route
 	app.Spec = spec
 	app.Status = status
+	model.ApplyAppSpecDefaults(&app.Spec)
 	return app, nil
 }
 
@@ -3975,6 +4009,7 @@ func scanOperation(scanner sqlScanner) (model.Operation, error) {
 	if err != nil {
 		return model.Operation{}, err
 	}
+	model.ApplyAppSpecDefaults(desiredSpec)
 	desiredSource, err := decodeJSONPointer[model.AppSource](desiredSourceRaw)
 	if err != nil {
 		return model.Operation{}, err

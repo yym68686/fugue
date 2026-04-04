@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"fugue/internal/model"
 )
 
 func TestInspectComposeStackFromRepoParsesBuildAndPostgresServices(t *testing.T) {
@@ -210,6 +212,12 @@ func TestInspectComposeStackFromRepoParsesEnvFilesAndIgnoredFields(t *testing.T)
 	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte("FROM scratch\nEXPOSE 8080\n"), 0o644); err != nil {
 		t.Fatalf("write Dockerfile: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(repoDir, "api.yaml"), []byte("providers: []\n"), 0o644); err != nil {
+		t.Fatalf("write api yaml: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoDir, "data"), 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
 	if err := os.MkdirAll(filepath.Join(repoDir, "env"), 0o755); err != nil {
 		t.Fatalf("mkdir env dir: %v", err)
 	}
@@ -229,6 +237,9 @@ func TestInspectComposeStackFromRepoParsesEnvFilesAndIgnoredFields(t *testing.T)
       demo.owner: fugue
     deploy:
       replicas: 2
+    volumes:
+      - ./api.yaml:/home/api.yaml
+      - ./data:/home/data
 `
 	if err := os.WriteFile(filepath.Join(repoDir, "compose.yaml"), []byte(compose), 0o644); err != nil {
 		t.Fatalf("write compose file: %v", err)
@@ -247,6 +258,27 @@ func TestInspectComposeStackFromRepoParsesEnvFilesAndIgnoredFields(t *testing.T)
 	}
 	if service.Environment["FROM_FILE"] != "true" || service.Environment["SHARED"] != "inline" {
 		t.Fatalf("expected env_file values to merge with inline env, got %#v", service.Environment)
+	}
+	if service.PersistentStorage == nil || len(service.PersistentStorage.Mounts) != 2 {
+		t.Fatalf("expected persistent storage mounts, got %+v", service.PersistentStorage)
+	}
+	fileMounts := 0
+	dirMounts := 0
+	for _, mount := range service.PersistentStorage.Mounts {
+		switch mount.Kind {
+		case model.AppPersistentStorageMountKindFile:
+			fileMounts++
+		case model.AppPersistentStorageMountKindDirectory:
+			dirMounts++
+		}
+	}
+	if fileMounts != 1 || dirMounts != 1 {
+		t.Fatalf("expected one file and one directory mount, got %+v", service.PersistentStorage.Mounts)
+	}
+	for _, field := range service.IgnoredFields {
+		if field == "volumes" {
+			t.Fatalf("expected supported bind mounts not to remain in ignored fields, got %#v", service.IgnoredFields)
+		}
 	}
 	if len(service.IgnoredFields) == 0 {
 		t.Fatalf("expected ignored field report, got %+v", service)

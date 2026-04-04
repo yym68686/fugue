@@ -37,7 +37,7 @@ func repoNameFromGitHubURL(repoURL string) string {
 	return parts[len(parts)-1]
 }
 
-func (s *Server) buildImportedAppSpec(buildStrategy, appName, imageRef, runtimeID string, replicas, servicePort int, configContent string, files []model.AppFile, postgres *model.AppPostgresSpec, suggestedEnv map[string]string) (model.AppSpec, error) {
+func (s *Server) buildImportedAppSpec(buildStrategy, appName, imageRef, runtimeID string, replicas, servicePort int, configContent string, files []model.AppFile, persistentStorage *model.AppPersistentStorageSpec, postgres *model.AppPostgresSpec, suggestedEnv map[string]string) (model.AppSpec, error) {
 	if replicas <= 0 {
 		replicas = 1
 	}
@@ -70,6 +70,10 @@ func (s *Server) buildImportedAppSpec(buildStrategy, appName, imageRef, runtimeI
 	if err != nil {
 		return model.AppSpec{}, err
 	}
+	normalizedPersistentStorage, err := normalizeImportedPersistentStorage(persistentStorage, appFiles)
+	if err != nil {
+		return model.AppSpec{}, err
+	}
 	var normalizedPostgres *model.AppPostgresSpec
 	if postgres != nil {
 		pgSpec, err := normalizeGenericPostgresSpec(appName, postgres)
@@ -79,13 +83,14 @@ func (s *Server) buildImportedAppSpec(buildStrategy, appName, imageRef, runtimeI
 		normalizedPostgres = &pgSpec
 	}
 	return model.AppSpec{
-		Image:     imageRef,
-		Env:       env,
-		Ports:     ports,
-		Replicas:  replicas,
-		RuntimeID: runtimeID,
-		Files:     appFiles,
-		Postgres:  normalizedPostgres,
+		Image:             imageRef,
+		Env:               env,
+		Ports:             ports,
+		Replicas:          replicas,
+		RuntimeID:         runtimeID,
+		Files:             appFiles,
+		PersistentStorage: normalizedPersistentStorage,
+		Postgres:          normalizedPostgres,
 	}, nil
 }
 
@@ -139,6 +144,83 @@ func normalizeAppFiles(configContent string, files []model.AppFile) ([]model.App
 		return nil, nil
 	}
 	return normalizeUploadedFiles(out)
+}
+
+func normalizeImportedPersistentStorage(storage *model.AppPersistentStorageSpec, files []model.AppFile) (*model.AppPersistentStorageSpec, error) {
+	if storage == nil {
+		return nil, nil
+	}
+
+	normalized := *storage
+	if storagePath, err := model.NormalizeAppPersistentStoragePath(storage.StoragePath); err != nil {
+		return nil, err
+	} else {
+		normalized.StoragePath = storagePath
+	}
+	normalized.StorageSize = strings.TrimSpace(storage.StorageSize)
+	normalized.StorageClassName = strings.TrimSpace(storage.StorageClassName)
+	normalized.ResetToken = strings.TrimSpace(storage.ResetToken)
+	normalized.Mounts = nil
+
+	for index, mount := range storage.Mounts {
+		kind, err := model.NormalizeAppPersistentStorageMountKind(mount.Kind)
+		if err != nil {
+			return nil, fmt.Errorf("persistent_storage.mounts[%d].kind: %w", index, err)
+		}
+		pathValue, err := model.NormalizeAppPersistentStorageMountPath(kind, mount.Path)
+		if err != nil {
+			return nil, fmt.Errorf("persistent_storage.mounts[%d].path: %w", index, err)
+		}
+		if mount.Mode < 0 || mount.Mode > 0o777 {
+			return nil, fmt.Errorf("persistent_storage.mounts[%d].mode must be between 0 and 0777", index)
+		}
+		normalizedMount := mount
+		normalizedMount.Kind = kind
+		normalizedMount.Path = pathValue
+		if normalizedMount.Mode == 0 {
+			switch normalizedMount.Kind {
+			case model.AppPersistentStorageMountKindDirectory:
+				normalizedMount.Mode = 0o755
+			case model.AppPersistentStorageMountKindFile:
+				if normalizedMount.Secret {
+					normalizedMount.Mode = 0o600
+				} else {
+					normalizedMount.Mode = 0o644
+				}
+			}
+		}
+		for _, existing := range normalized.Mounts {
+			if model.AppPersistentStorageMountPathConflict(existing, normalizedMount) {
+				return nil, fmt.Errorf("persistent_storage.mounts contains overlapping path %s", normalizedMount.Path)
+			}
+		}
+		for _, file := range files {
+			if importedPersistentStorageConflictsWithFile(normalizedMount, file.Path) {
+				return nil, fmt.Errorf("persistent_storage.mounts[%d].path overlaps file %s", index, file.Path)
+			}
+		}
+		normalized.Mounts = append(normalized.Mounts, normalizedMount)
+	}
+
+	if len(normalized.Mounts) == 0 {
+		return nil, nil
+	}
+	return &normalized, nil
+}
+
+func importedPersistentStorageConflictsWithFile(mount model.AppPersistentStorageMount, filePath string) bool {
+	filePath = strings.TrimSpace(filePath)
+	if filePath == "" {
+		return false
+	}
+	switch mount.Kind {
+	case model.AppPersistentStorageMountKindFile:
+		return mount.Path == filePath
+	case model.AppPersistentStorageMountKindDirectory:
+		return model.PathWithinBase(mount.Path, filePath)
+	default:
+		return false
+	}
 }
 
 func normalizeGenericPostgresSpec(appName string, override *model.AppPostgresSpec) (model.AppPostgresSpec, error) {

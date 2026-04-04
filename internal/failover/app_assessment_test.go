@@ -44,7 +44,7 @@ func TestAssessAppBlockedByManagedState(t *testing.T) {
 	if assessment.Classification != AppClassificationBlocked {
 		t.Fatalf("expected classification %q, got %q", AppClassificationBlocked, assessment.Classification)
 	}
-	if got, want := assessment.Summary, "blocked by managed backing services and persistent workspace"; got != want {
+	if got, want := assessment.Summary, "blocked by managed backing services and persistent storage"; got != want {
 		t.Fatalf("expected summary %q, got %q", want, got)
 	}
 	if len(assessment.Blockers) != 2 {

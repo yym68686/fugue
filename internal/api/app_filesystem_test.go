@@ -425,8 +425,106 @@ func TestAppFilesystemExecUnavailableReturnsServiceUnavailable(t *testing.T) {
 	}
 }
 
+func TestAppFilesystemReadsPersistentStorageFileMountViaSidecar(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app := setupAppFilesystemPersistentStorageTestServer(t)
+
+	pod := kubePodInfo{}
+	pod.Metadata.Name = "demo-pod"
+	pod.Metadata.CreationTimestamp = time.Now().UTC()
+	pod.Status.Phase = "Running"
+
+	server.newFilesystemPodLister = func(string) (filesystemPodLister, error) {
+		return fakeFilesystemPodLister{pods: []kubePodInfo{pod}}, nil
+	}
+	runner := &fakeFilesystemExecRunner{
+		outputs: [][]byte{
+			[]byte("12\t644\t1700000001\nproviders: []"),
+		},
+	}
+	server.filesystemExecRunner = runner
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/filesystem/file?path=/home/api.yaml", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Path          string `json:"path"`
+		WorkspaceRoot string `json:"workspace_root"`
+		Content       string `json:"content"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Path != "/home/api.yaml" {
+		t.Fatalf("unexpected file path %q", response.Path)
+	}
+	if response.WorkspaceRoot != "/home/api.yaml" {
+		t.Fatalf("expected persistent storage root /home/api.yaml, got %q", response.WorkspaceRoot)
+	}
+	if response.Content != "providers: []" {
+		t.Fatalf("unexpected file content %q", response.Content)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("expected 1 filesystem exec call, got %d", len(runner.calls))
+	}
+	if runner.calls[0].container != runtime.AppWorkspaceContainerName {
+		t.Fatalf("expected persistent storage sidecar container %q, got %q", runtime.AppWorkspaceContainerName, runner.calls[0].container)
+	}
+	if got := runner.calls[0].command[len(runner.calls[0].command)-2:]; strings.Join(got, ",") != "/home/api.yaml,262144" {
+		t.Fatalf("unexpected read command args: %v", got)
+	}
+}
+
 func setupAppFilesystemTestServer(t *testing.T, withWorkspace bool) (*store.Store, *Server, string, model.App) {
 	return setupAppFilesystemTestServerForRuntime(t, withWorkspace, "")
+}
+
+func setupAppFilesystemPersistentStorageTestServer(t *testing.T) (*store.Store, *Server, string, model.App) {
+	t.Helper()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Filesystem Persistent Storage Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	runtimeObj, _, err := s.CreateRuntime(tenant.ID, "worker-1", model.RuntimeTypeManagedOwned, "https://runtime.example.com", nil)
+	if err != nil {
+		t.Fatalf("create runtime: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.write", "app.deploy"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: runtimeObj.ID,
+		PersistentStorage: &model.AppPersistentStorageSpec{
+			Mounts: []model.AppPersistentStorageMount{
+				{
+					Kind:        model.AppPersistentStorageMountKindFile,
+					Path:        "/home/api.yaml",
+					SeedContent: "providers: []\n",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create persistent storage app: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	return s, server, apiKey, app
 }
 
 func setupAppFilesystemTestServerForRuntime(t *testing.T, withWorkspace bool, runtimeID string) (*store.Store, *Server, string, model.App) {

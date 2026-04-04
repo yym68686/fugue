@@ -26,6 +26,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/apps/import-image", s.auth.RequireAPI(http.HandlerFunc(s.handleImportImageApp)))
 	mux.Handle("POST /v1/apps/import-upload", s.auth.RequireAPI(http.HandlerFunc(s.handleImportUploadApp)))
 	mux.Handle("GET /v1/apps/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetApp)))
+	mux.Handle("PATCH /v1/apps/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchApp)))
 	mux.Handle("DELETE /v1/apps/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteApp)))
 	mux.Handle("GET /v1/apps/{id}/bindings", s.auth.RequireAPI(http.HandlerFunc(s.handleListAppBindings)))
 	mux.Handle("POST /v1/apps/{id}/bindings", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateAppBinding)))

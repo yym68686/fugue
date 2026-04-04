@@ -844,11 +844,19 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	spec := cloneAppSpec(app.Spec)
+	spec, source, err := s.recoverAppDeployBaseline(app)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
 	if req.Spec != nil {
 		spec = cloneAppSpec(*req.Spec)
 	}
 	if req.Workspace != nil {
+		if spec.PersistentStorage != nil {
+			httpx.WriteError(w, http.StatusBadRequest, "workspace patch is not supported when persistent_storage is configured")
+			return
+		}
 		workspace := model.AppWorkspaceSpec{}
 		if spec.Workspace != nil {
 			workspace = *spec.Workspace
@@ -879,6 +887,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		RequestedByID:   principal.ActorID,
 		AppID:           app.ID,
 		DesiredSpec:     &spec,
+		DesiredSource:   source,
 	})
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -1248,6 +1257,19 @@ func (s *Server) handleAgentCompleteOperation(w http.ResponseWriter, r *http.Req
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
+	}
+	if op.Type == model.OperationTypeDeploy {
+		deployedApp, appErr := s.store.GetApp(op.AppID)
+		if appErr != nil {
+			if s.log != nil {
+				s.log.Printf("reload deployed app %s after agent completion failed: %v", op.AppID, appErr)
+			}
+		} else {
+			if err := s.pruneExcessManagedAppImages(r.Context(), deployedApp); err != nil && s.log != nil {
+				s.log.Printf("prune excess managed app images for app=%s failed: %v", deployedApp.ID, err)
+			}
+			s.refreshTenantBillingImageStorage(r.Context(), deployedApp.TenantID, true)
+		}
 	}
 	if op.Type == model.OperationTypeDelete {
 		if err := s.cleanupDeletedAppImages(r.Context(), deletingApp); err != nil && s.log != nil {

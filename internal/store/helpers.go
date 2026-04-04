@@ -91,6 +91,10 @@ func repairFailedAppPhase(app *model.App) bool {
 }
 
 func normalizeAppStatusForRead(app *model.App) {
+	if app == nil {
+		return
+	}
+	model.ApplyAppSpecDefaults(&app.Spec)
 	repairFailedAppPhase(app)
 }
 

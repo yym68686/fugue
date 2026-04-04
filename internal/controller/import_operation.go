@@ -30,7 +30,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		"fugue.pro/app-id":       app.ID,
 		"fugue.pro/tenant-id":    app.TenantID,
 	}
-	stateful := op.DesiredSpec.Workspace != nil || op.DesiredSpec.Postgres != nil
+	stateful := op.DesiredSpec.Workspace != nil || op.DesiredSpec.PersistentStorage != nil || op.DesiredSpec.Postgres != nil
 	var err error
 	var output sourceimport.GitHubSourceImportOutput
 	switch strings.TrimSpace(op.DesiredSource.Type) {
@@ -358,6 +358,13 @@ func cloneImportSpec(spec model.AppSpec) model.AppSpec {
 	if spec.Workspace != nil {
 		workspace := *spec.Workspace
 		out.Workspace = &workspace
+	}
+	if spec.PersistentStorage != nil {
+		storage := *spec.PersistentStorage
+		if len(spec.PersistentStorage.Mounts) > 0 {
+			storage.Mounts = append([]model.AppPersistentStorageMount(nil), spec.PersistentStorage.Mounts...)
+		}
+		out.PersistentStorage = &storage
 	}
 	if spec.Postgres != nil {
 		postgres := *spec.Postgres

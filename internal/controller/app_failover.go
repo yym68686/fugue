@@ -168,7 +168,7 @@ func normalizeStringMap(raw any) map[string]string {
 }
 
 func (s *Service) reconcileWorkspaceReplicationSource(ctx context.Context, client *kubeClient, app model.App, ownerRef *runtime.OwnerReference) error {
-	if client == nil || app.Spec.Workspace == nil {
+	if client == nil || (app.Spec.Workspace == nil && app.Spec.PersistentStorage == nil) {
 		return nil
 	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)
@@ -188,7 +188,7 @@ func (s *Service) reconcileWorkspaceReplicationSource(ctx context.Context, clien
 }
 
 func (s *Service) ensureWorkspaceFinalSync(ctx context.Context, client *kubeClient, app model.App, syncToken string) error {
-	if client == nil || app.Spec.Workspace == nil {
+	if client == nil || (app.Spec.Workspace == nil && app.Spec.PersistentStorage == nil) {
 		return nil
 	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)

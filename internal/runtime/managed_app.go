@@ -283,6 +283,13 @@ func cloneManagedAppSpec(spec model.AppSpec) model.AppSpec {
 		workspace := *spec.Workspace
 		out.Workspace = &workspace
 	}
+	if spec.PersistentStorage != nil {
+		storage := *spec.PersistentStorage
+		if len(spec.PersistentStorage.Mounts) > 0 {
+			storage.Mounts = append([]model.AppPersistentStorageMount(nil), spec.PersistentStorage.Mounts...)
+		}
+		out.PersistentStorage = &storage
+	}
 	if spec.Failover != nil {
 		failover := *spec.Failover
 		out.Failover = &failover

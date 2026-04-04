@@ -1849,6 +1849,36 @@ func (s *Store) UpdateAppRoute(id string, route model.AppRoute) (model.App, erro
 	return app, err
 }
 
+func (s *Store) UpdateAppImageMirrorLimit(id string, limit int) (model.App, error) {
+	id = strings.TrimSpace(id)
+	if id == "" || limit < 0 {
+		return model.App{}, ErrInvalidInput
+	}
+	limit = model.EffectiveAppImageMirrorLimit(limit)
+	if s.usingDatabase() {
+		return s.pgUpdateAppImageMirrorLimit(id, limit)
+	}
+
+	var app model.App
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findApp(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		app = state.Apps[index]
+		if isDeletedApp(app) {
+			return ErrNotFound
+		}
+		app.Spec.ImageMirrorLimit = limit
+		app.UpdatedAt = time.Now().UTC()
+		state.Apps[index] = app
+		normalizeAppStatusForRead(&app)
+		hydrateAppBackingServices(state, &app)
+		return nil
+	})
+	return app, err
+}
+
 func (s *Store) PurgeApp(id string) (model.App, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -2922,6 +2952,13 @@ func cloneAppSpec(in *model.AppSpec) *model.AppSpec {
 		workspace := *in.Workspace
 		out.Workspace = &workspace
 	}
+	if in.PersistentStorage != nil {
+		storage := *in.PersistentStorage
+		if len(in.PersistentStorage.Mounts) > 0 {
+			storage.Mounts = append([]model.AppPersistentStorageMount(nil), in.PersistentStorage.Mounts...)
+		}
+		out.PersistentStorage = &storage
+	}
 	if in.Failover != nil {
 		failover := *in.Failover
 		out.Failover = &failover
@@ -2938,6 +2975,7 @@ func cloneAppSpec(in *model.AppSpec) *model.AppSpec {
 		}
 		out.Postgres = &pg
 	}
+	model.ApplyAppSpecDefaults(&out)
 	return &out
 }
 

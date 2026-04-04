@@ -893,7 +893,7 @@ func listOwnedNames(ctx context.Context, appID string, fn func(selector string) 
 
 func managedAppExpectedObjectNamesByKind(app model.App) map[string]map[string]struct{} {
 	out := desiredObjectNamesByKind(runtime.BuildManagedAppChildObjects(app, runtime.SchedulingConstraints{}, nil))
-	if app.Spec.Workspace != nil {
+	if app.Spec.Workspace != nil || app.Spec.PersistentStorage != nil {
 		if out[runtime.VolSyncReplicationSourceKind] == nil {
 			out[runtime.VolSyncReplicationSourceKind] = make(map[string]struct{})
 		}

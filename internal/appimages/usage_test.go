@@ -1,11 +1,183 @@
 package appimages
 
 import (
+	"context"
 	"reflect"
 	"testing"
+	"time"
 
 	"fugue/internal/model"
 )
+
+func TestExcessManagedImageRefsDeletesOldestExistingStaleImagesBeyondLimit(t *testing.T) {
+	t.Parallel()
+
+	const (
+		pushBase = "registry.push.example"
+		pullBase = "registry.pull.example"
+	)
+
+	currentReadyAt := time.Date(2026, 4, 5, 10, 0, 0, 0, time.UTC)
+	oldCompletedAt := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	newCompletedAt := time.Date(2026, 4, 4, 10, 0, 0, 0, time.UTC)
+
+	app := model.App{
+		ID:   "app-limit",
+		Name: "demo",
+		Spec: model.AppSpec{
+			Image:            pullBase + "/fugue-apps/example-demo:git-current",
+			ImageMirrorLimit: 1,
+		},
+		Source: &model.AppSource{
+			Type:             model.AppSourceTypeGitHubPublic,
+			ResolvedImageRef: pushBase + "/fugue-apps/example-demo:git-current",
+		},
+		Status: model.AppStatus{
+			CurrentReleaseReadyAt: &currentReadyAt,
+		},
+	}
+	ops := []model.Operation{
+		{
+			AppID: "app-limit",
+			DesiredSpec: &model.AppSpec{
+				Image: pullBase + "/fugue-apps/example-demo:git-old",
+			},
+			DesiredSource: &model.AppSource{
+				Type:             model.AppSourceTypeGitHubPublic,
+				ResolvedImageRef: pushBase + "/fugue-apps/example-demo:git-old",
+			},
+			CompletedAt: &oldCompletedAt,
+		},
+		{
+			AppID: "app-limit",
+			DesiredSpec: &model.AppSpec{
+				Image: pullBase + "/fugue-apps/example-demo:git-new",
+			},
+			DesiredSource: &model.AppSource{
+				Type:             model.AppSourceTypeGitHubPublic,
+				ResolvedImageRef: pushBase + "/fugue-apps/example-demo:git-new",
+			},
+			CompletedAt: &newCompletedAt,
+		},
+	}
+
+	got, err := ExcessManagedImageRefs(
+		context.Background(),
+		func(_ context.Context, imageRef string) (bool, map[string]int64, error) {
+			return true, map[string]int64{"sha256:" + imageRef: 1}, nil
+		},
+		app,
+		ops,
+		pushBase,
+		pullBase,
+		app.Spec.ImageMirrorLimit,
+	)
+	if err != nil {
+		t.Fatalf("excess managed image refs: %v", err)
+	}
+
+	want := []string{
+		pushBase + "/fugue-apps/example-demo:git-old",
+		pushBase + "/fugue-apps/example-demo:git-new",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected excess refs %v, got %v", want, got)
+	}
+}
+
+func TestExcessManagedImageRefsIgnoresMissingStaleImages(t *testing.T) {
+	t.Parallel()
+
+	const (
+		pushBase = "registry.push.example"
+		pullBase = "registry.pull.example"
+	)
+
+	currentReadyAt := time.Date(2026, 4, 5, 10, 0, 0, 0, time.UTC)
+	oldCompletedAt := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	midCompletedAt := time.Date(2026, 4, 2, 10, 0, 0, 0, time.UTC)
+	missingCompletedAt := time.Date(2026, 4, 4, 10, 0, 0, 0, time.UTC)
+
+	app := model.App{
+		ID:   "app-limit-missing",
+		Name: "demo",
+		Spec: model.AppSpec{
+			Image:            pullBase + "/fugue-apps/example-demo:git-current",
+			ImageMirrorLimit: 2,
+		},
+		Source: &model.AppSource{
+			Type:             model.AppSourceTypeGitHubPublic,
+			ResolvedImageRef: pushBase + "/fugue-apps/example-demo:git-current",
+		},
+		Status: model.AppStatus{
+			CurrentReleaseReadyAt: &currentReadyAt,
+		},
+	}
+	ops := []model.Operation{
+		{
+			AppID: "app-limit-missing",
+			DesiredSpec: &model.AppSpec{
+				Image: pullBase + "/fugue-apps/example-demo:git-old",
+			},
+			DesiredSource: &model.AppSource{
+				Type:             model.AppSourceTypeGitHubPublic,
+				ResolvedImageRef: pushBase + "/fugue-apps/example-demo:git-old",
+			},
+			CompletedAt: &oldCompletedAt,
+		},
+		{
+			AppID: "app-limit-missing",
+			DesiredSpec: &model.AppSpec{
+				Image: pullBase + "/fugue-apps/example-demo:git-mid",
+			},
+			DesiredSource: &model.AppSource{
+				Type:             model.AppSourceTypeGitHubPublic,
+				ResolvedImageRef: pushBase + "/fugue-apps/example-demo:git-mid",
+			},
+			CompletedAt: &midCompletedAt,
+		},
+		{
+			AppID: "app-limit-missing",
+			DesiredSpec: &model.AppSpec{
+				Image: pullBase + "/fugue-apps/example-demo:git-missing",
+			},
+			DesiredSource: &model.AppSource{
+				Type:             model.AppSourceTypeGitHubPublic,
+				ResolvedImageRef: pushBase + "/fugue-apps/example-demo:git-missing",
+			},
+			CompletedAt: &missingCompletedAt,
+		},
+	}
+
+	existingRefs := map[string]bool{
+		pushBase + "/fugue-apps/example-demo:git-current": true,
+		pushBase + "/fugue-apps/example-demo:git-mid":     true,
+		pushBase + "/fugue-apps/example-demo:git-old":     true,
+		pushBase + "/fugue-apps/example-demo:git-missing": false,
+	}
+
+	got, err := ExcessManagedImageRefs(
+		context.Background(),
+		func(_ context.Context, imageRef string) (bool, map[string]int64, error) {
+			return existingRefs[imageRef], nil, nil
+		},
+		app,
+		ops,
+		pushBase,
+		pullBase,
+		app.Spec.ImageMirrorLimit,
+	)
+	if err != nil {
+		t.Fatalf("excess managed image refs: %v", err)
+	}
+
+	want := []string{
+		pushBase + "/fugue-apps/example-demo:git-old",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected excess refs %v, got %v", want, got)
+	}
+}
 
 func TestDeletableManagedImageRefsOnlyReturnsTargetExclusiveRefs(t *testing.T) {
 	t.Parallel()

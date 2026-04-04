@@ -50,13 +50,20 @@ func sanitizeOperationsForAPI(ops []model.Operation) []model.Operation {
 }
 
 func redactSecretFilesInSpec(spec model.AppSpec) model.AppSpec {
-	if len(spec.Files) == 0 {
+	if len(spec.Files) == 0 && (spec.PersistentStorage == nil || len(spec.PersistentStorage.Mounts) == 0) {
 		return spec
 	}
-	spec.Files = cloneAppFiles(spec.Files)
+	spec = cloneAppSpec(spec)
 	for index := range spec.Files {
 		if spec.Files[index].Secret {
 			spec.Files[index].Content = ""
+		}
+	}
+	if spec.PersistentStorage != nil {
+		for index := range spec.PersistentStorage.Mounts {
+			if spec.PersistentStorage.Mounts[index].Secret {
+				spec.PersistentStorage.Mounts[index].SeedContent = ""
+			}
 		}
 	}
 	return spec
@@ -120,6 +127,11 @@ func cloneAppSpec(spec model.AppSpec) model.AppSpec {
 		workspace := *spec.Workspace
 		out.Workspace = &workspace
 	}
+	if spec.PersistentStorage != nil {
+		storage := *spec.PersistentStorage
+		storage.Mounts = cloneAppPersistentStorageMounts(spec.PersistentStorage.Mounts)
+		out.PersistentStorage = &storage
+	}
 	if spec.Failover != nil {
 		failover := *spec.Failover
 		out.Failover = &failover
@@ -136,6 +148,7 @@ func cloneAppSpec(spec model.AppSpec) model.AppSpec {
 		}
 		out.Postgres = &postgres
 	}
+	model.ApplyAppSpecDefaults(&out)
 	return out
 }
 
@@ -156,6 +169,15 @@ func cloneAppFiles(files []model.AppFile) []model.AppFile {
 	}
 	out := make([]model.AppFile, len(files))
 	copy(out, files)
+	return out
+}
+
+func cloneAppPersistentStorageMounts(mounts []model.AppPersistentStorageMount) []model.AppPersistentStorageMount {
+	if len(mounts) == 0 {
+		return nil
+	}
+	out := make([]model.AppPersistentStorageMount, len(mounts))
+	copy(out, mounts)
 	return out
 }
 

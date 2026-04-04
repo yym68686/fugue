@@ -81,8 +81,12 @@ const (
 	ClusterNodeWorkloadKindApp            = "app"
 	ClusterNodeWorkloadKindBackingService = "backing_service"
 
-	DefaultAppWorkspaceMountPath = "/workspace"
-	AppWorkspaceInternalDirName  = ".fugue-workspace-state"
+	DefaultAppWorkspaceMountPath           = "/workspace"
+	AppWorkspaceInternalDirName            = ".fugue-workspace-state"
+	AppPersistentStorageInternalDirName    = ".fugue-persistent-storage-state"
+	AppPersistentStorageMountKindDirectory = "directory"
+	AppPersistentStorageMountKindFile      = "file"
+	DefaultAppImageMirrorLimit             = 5
 )
 
 func NormalizeGitHubAppSourceType(raw string) string {
@@ -108,6 +112,20 @@ func ResolveGitHubAppSourceType(raw string, hasRepoAuth bool) string {
 		return AppSourceTypeGitHubPrivate
 	}
 	return AppSourceTypeGitHubPublic
+}
+
+func EffectiveAppImageMirrorLimit(value int) int {
+	if value <= 0 {
+		return DefaultAppImageMirrorLimit
+	}
+	return value
+}
+
+func ApplyAppSpecDefaults(spec *AppSpec) {
+	if spec == nil {
+		return
+	}
+	spec.ImageMirrorLimit = EffectiveAppImageMirrorLimit(spec.ImageMirrorLimit)
 }
 
 type Tenant struct {
@@ -397,19 +415,21 @@ type AppDomain struct {
 }
 
 type AppSpec struct {
-	Image        string            `json:"image"`
-	Command      []string          `json:"command,omitempty"`
-	Args         []string          `json:"args,omitempty"`
-	Env          map[string]string `json:"env,omitempty"`
-	Ports        []int             `json:"ports,omitempty"`
-	Replicas     int               `json:"replicas"`
-	Resources    *ResourceSpec     `json:"resources,omitempty"`
-	RuntimeID    string            `json:"runtime_id"`
-	Files        []AppFile         `json:"files,omitempty"`
-	Workspace    *AppWorkspaceSpec `json:"workspace,omitempty"`
-	Postgres     *AppPostgresSpec  `json:"postgres,omitempty"`
-	Failover     *AppFailoverSpec  `json:"failover,omitempty"`
-	RestartToken string            `json:"restart_token,omitempty"`
+	Image             string                    `json:"image"`
+	Command           []string                  `json:"command,omitempty"`
+	Args              []string                  `json:"args,omitempty"`
+	Env               map[string]string         `json:"env,omitempty"`
+	Ports             []int                     `json:"ports,omitempty"`
+	Replicas          int                       `json:"replicas"`
+	Resources         *ResourceSpec             `json:"resources,omitempty"`
+	RuntimeID         string                    `json:"runtime_id"`
+	Files             []AppFile                 `json:"files,omitempty"`
+	Workspace         *AppWorkspaceSpec         `json:"workspace,omitempty"`
+	PersistentStorage *AppPersistentStorageSpec `json:"persistent_storage,omitempty"`
+	Postgres          *AppPostgresSpec          `json:"postgres,omitempty"`
+	Failover          *AppFailoverSpec          `json:"failover,omitempty"`
+	ImageMirrorLimit  int                       `json:"image_mirror_limit,omitempty"`
+	RestartToken      string                    `json:"restart_token,omitempty"`
 }
 
 type AppFile struct {
@@ -425,6 +445,22 @@ type AppWorkspaceSpec struct {
 	StorageSize      string `json:"storage_size,omitempty"`
 	StorageClassName string `json:"storage_class_name,omitempty"`
 	ResetToken       string `json:"reset_token,omitempty"`
+}
+
+type AppPersistentStorageSpec struct {
+	StoragePath      string                      `json:"storage_path,omitempty"`
+	StorageSize      string                      `json:"storage_size,omitempty"`
+	StorageClassName string                      `json:"storage_class_name,omitempty"`
+	ResetToken       string                      `json:"reset_token,omitempty"`
+	Mounts           []AppPersistentStorageMount `json:"mounts,omitempty"`
+}
+
+type AppPersistentStorageMount struct {
+	Kind        string `json:"kind,omitempty"`
+	Path        string `json:"path,omitempty"`
+	SeedContent string `json:"seed_content,omitempty"`
+	Secret      bool   `json:"secret,omitempty"`
+	Mode        int32  `json:"mode,omitempty"`
 }
 
 type AppFailoverSpec struct {

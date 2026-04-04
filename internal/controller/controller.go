@@ -477,6 +477,21 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	if err != nil {
 		return fmt.Errorf("complete operation %s: %w", op.ID, err)
 	}
+	if op.Type == model.OperationTypeDeploy {
+		deployedApp, appErr := s.Store.GetApp(app.ID)
+		if appErr != nil {
+			if s.Logger != nil {
+				s.Logger.Printf("reload deployed app %s after completion failed: %v", app.ID, appErr)
+			}
+		} else {
+			if err := s.pruneExcessManagedAppImages(ctx, deployedApp); err != nil && s.Logger != nil {
+				s.Logger.Printf("prune excess managed app images for app=%s failed: %v", deployedApp.ID, err)
+			}
+			if err := s.syncTenantBillingImageStorage(ctx, deployedApp.TenantID); err != nil && s.Logger != nil {
+				s.Logger.Printf("sync billing image storage after deploy for tenant=%s failed: %v", deployedApp.TenantID, err)
+			}
+		}
+	}
 	if op.Type == model.OperationTypeDelete {
 		if err := s.cleanupDeletedAppImages(ctx, app); err != nil && s.Logger != nil {
 			s.Logger.Printf("cleanup deleted app images for app=%s failed: %v", app.ID, err)

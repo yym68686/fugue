@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"strings"
 	"testing"
 
 	"fugue/internal/model"
@@ -482,6 +483,92 @@ func TestBuildAppObjectsIncludesPersistentWorkspaceSidecar(t *testing.T) {
 	strategy := deployment["spec"].(map[string]any)["strategy"].(map[string]any)
 	if got := strategy["type"]; got != "Recreate" {
 		t.Fatalf("expected workspace deployment strategy Recreate, got %#v", got)
+	}
+}
+
+func TestBuildAppObjectsIncludesPersistentStorageMounts(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				ResetToken: "storage-reset-1",
+				Mounts: []model.AppPersistentStorageMount{
+					{
+						Kind:        model.AppPersistentStorageMountKindFile,
+						Path:        "/home/api.yaml",
+						SeedContent: "providers: []\n",
+					},
+					{
+						Kind: model.AppPersistentStorageMountKindDirectory,
+						Path: "/home/data",
+					},
+				},
+			},
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	deployment := objects[3]
+	template := deployment["spec"].(map[string]any)["template"].(map[string]any)
+	podSpec := template["spec"].(map[string]any)
+
+	volumes := podSpec["volumes"].([]map[string]any)
+	if len(volumes) != 1 {
+		t.Fatalf("expected one persistent storage volume, got %d", len(volumes))
+	}
+	claim := volumes[0]["persistentVolumeClaim"].(map[string]any)
+	if got := claim["claimName"]; got != WorkspacePVCName(app) {
+		t.Fatalf("unexpected persistent storage pvc claim: %#v", got)
+	}
+
+	containers := podSpec["containers"].([]map[string]any)
+	if len(containers) != 2 {
+		t.Fatalf("expected app container and storage sidecar, got %d containers", len(containers))
+	}
+	appMounts := containers[0]["volumeMounts"].([]map[string]any)
+	if len(appMounts) != 2 {
+		t.Fatalf("expected two persistent storage mounts, got %+v", appMounts)
+	}
+	if appMounts[0]["mountPath"] != "/home/api.yaml" {
+		t.Fatalf("unexpected file mount path: %#v", appMounts[0]["mountPath"])
+	}
+	if got := appMounts[0]["subPath"]; !strings.HasPrefix(got.(string), "mounts/mount-") {
+		t.Fatalf("expected file mount subPath to target persistent storage mount, got %#v", got)
+	}
+	if appMounts[1]["mountPath"] != "/home/data" {
+		t.Fatalf("unexpected directory mount path: %#v", appMounts[1]["mountPath"])
+	}
+
+	initContainers := podSpec["initContainers"].([]map[string]any)
+	if len(initContainers) != 1 {
+		t.Fatalf("expected one persistent storage init container, got %d", len(initContainers))
+	}
+	command := initContainers[0]["command"].([]string)
+	if got := command[len(command)-2]; got != "storage-reset-1" {
+		t.Fatalf("expected persistent storage reset token in init container command, got %q", got)
+	}
+	if got := command[len(command)-1]; !strings.Contains(got, "file\tmount-") {
+		t.Fatalf("expected persistent storage mount plan to include file mount metadata, got %q", got)
+	}
+
+	persistentPVC := objects[1]
+	if got := persistentPVC["kind"]; got != "PersistentVolumeClaim" {
+		t.Fatalf("expected persistent storage pvc, got %#v", got)
+	}
+	requests := persistentPVC["spec"].(map[string]any)["resources"].(map[string]any)["requests"].(map[string]any)
+	if got := requests["storage"]; got != defaultWorkspaceStorage {
+		t.Fatalf("expected persistent storage size %q, got %#v", defaultWorkspaceStorage, got)
+	}
+
+	strategy := deployment["spec"].(map[string]any)["strategy"].(map[string]any)
+	if got := strategy["type"]; got != "Recreate" {
+		t.Fatalf("expected persistent storage deployment strategy Recreate, got %#v", got)
 	}
 }
 

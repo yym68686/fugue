@@ -300,7 +300,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		spec, err := s.buildImportedAppSpec(source.BuildStrategy, candidateName, "", runtimeID, replicas, effectiveImportServicePort(servicePort, 0), req.ConfigContent, req.Files, req.Postgres, req.Env)
+		spec, err := s.buildImportedAppSpec(source.BuildStrategy, candidateName, "", runtimeID, replicas, effectiveImportServicePort(servicePort, 0), req.ConfigContent, req.Files, nil, req.Postgres, req.Env)
 		if err != nil {
 			httpx.WriteError(w, http.StatusBadRequest, err.Error())
 			return

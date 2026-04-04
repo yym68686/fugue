@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"fugue/internal/model"
 
@@ -25,8 +26,9 @@ var composeFileCandidates = []string{
 }
 
 const (
-	ComposeServiceKindApp      = "app"
-	ComposeServiceKindPostgres = "postgres"
+	ComposeServiceKindApp         = "app"
+	ComposeServiceKindPostgres    = "postgres"
+	maxComposePersistentSeedBytes = 1 << 20
 )
 
 type GitHubComposeInspectRequest struct {
@@ -48,37 +50,38 @@ type GitHubComposeStack struct {
 }
 
 type ComposeService struct {
-	Name            string
-	Kind            string
-	ServiceType     string
-	BackingService  bool
-	Image           string
-	BuildStrategy   string
-	SourceDir       string
-	DockerfilePath  string
-	BuildContextDir string
-	BuildArgs       map[string]string
-	BuildTarget     string
-	InternalPort    int
-	Published       bool
-	Environment     map[string]string
-	DependsOn       []string
-	Bindings        []ServiceBinding
-	OwnerService    string
-	EnvFiles        []string
-	Command         []string
-	Entrypoint      []string
-	Healthcheck     *ServiceHealthcheck
-	Profiles        []string
-	Volumes         []string
-	Secrets         []string
-	Configs         []string
-	Networks        []string
-	Labels          map[string]string
-	Deploy          map[string]any
-	IgnoredFields   []string
-	InferenceReport []TopologyInference
-	Postgres        *model.AppPostgresSpec
+	Name              string
+	Kind              string
+	ServiceType       string
+	BackingService    bool
+	Image             string
+	BuildStrategy     string
+	SourceDir         string
+	DockerfilePath    string
+	BuildContextDir   string
+	BuildArgs         map[string]string
+	BuildTarget       string
+	InternalPort      int
+	Published         bool
+	Environment       map[string]string
+	DependsOn         []string
+	Bindings          []ServiceBinding
+	OwnerService      string
+	EnvFiles          []string
+	Command           []string
+	Entrypoint        []string
+	Healthcheck       *ServiceHealthcheck
+	Profiles          []string
+	Volumes           []string
+	PersistentStorage *model.AppPersistentStorageSpec
+	Secrets           []string
+	Configs           []string
+	Networks          []string
+	Labels            map[string]string
+	Deploy            map[string]any
+	IgnoredFields     []string
+	InferenceReport   []TopologyInference
+	Postgres          *model.AppPostgresSpec
 }
 
 type composeFile struct {
@@ -229,6 +232,12 @@ func resolveComposeService(repoDir, serviceName string, raw composeServiceRaw, v
 	}
 	service.InferenceReport = appendMissingComposeEnvFileInference(service.InferenceReport, service.Name, missingEnvFiles)
 	service.Published = composeServicePublishesPorts(raw.Ports)
+	persistentStorage, storageInferences, ignoredVolumeEntries, err := resolveComposePersistentStorage(repoDir, service.Name, raw.Volumes)
+	if err != nil {
+		return ComposeService{}, "", fmt.Errorf("resolve volumes for compose service %q: %w", serviceName, err)
+	}
+	service.PersistentStorage = persistentStorage
+	service.InferenceReport = append(service.InferenceReport, storageInferences...)
 
 	buildSpec, hasBuild, err := parseComposeBuildSpec(raw.Build)
 	if err != nil {
@@ -239,6 +248,11 @@ func resolveComposeService(repoDir, serviceName string, raw composeServiceRaw, v
 	service.ServiceType = ServiceTypeApp
 	detectedType := detectServiceTypeFromImage(raw.Image)
 	ignoredFields := collectComposeIgnoredFields(raw, hasBuild, buildSpec)
+	if len(ignoredFields) > 0 {
+		if !ignoredVolumeEntries {
+			ignoredFields = removeIgnoredField(ignoredFields, "volumes")
+		}
+	}
 	if len(ignoredFields) > 0 {
 		service.IgnoredFields = append([]string(nil), ignoredFields...)
 		service.InferenceReport = appendInference(
@@ -544,6 +558,223 @@ func parseComposeBool(raw any, fallback bool) bool {
 	default:
 		return fallback
 	}
+}
+
+func resolveComposePersistentStorage(repoDir, serviceName string, raw any) (*model.AppPersistentStorageSpec, []TopologyInference, bool, error) {
+	entries := composeVolumeEntries(raw)
+	if len(entries) == 0 {
+		return nil, nil, false, nil
+	}
+
+	mounts := make([]model.AppPersistentStorageMount, 0, len(entries))
+	report := make([]TopologyInference, 0, len(entries))
+	ignored := false
+	for _, entry := range entries {
+		mount, handled, inferences, err := resolveComposePersistentStorageMount(repoDir, serviceName, entry)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		report = append(report, inferences...)
+		if !handled {
+			ignored = true
+			continue
+		}
+		mounts = append(mounts, *mount)
+	}
+	if len(mounts) == 0 {
+		return nil, report, ignored, nil
+	}
+	return &model.AppPersistentStorageSpec{Mounts: mounts}, report, ignored, nil
+}
+
+func composeVolumeEntries(raw any) []any {
+	switch value := raw.(type) {
+	case nil:
+		return nil
+	case string:
+		if strings.TrimSpace(value) == "" {
+			return nil
+		}
+		return []any{value}
+	case []any:
+		return append([]any(nil), value...)
+	case map[string]any:
+		if len(value) == 0 {
+			return nil
+		}
+		return []any{value}
+	default:
+		return []any{raw}
+	}
+}
+
+func resolveComposePersistentStorageMount(repoDir, serviceName string, raw any) (*model.AppPersistentStorageMount, bool, []TopologyInference, error) {
+	sourcePath, targetPath, readOnly, ok, reason := parseComposePersistentStorageBinding(raw)
+	if !ok {
+		return nil, false, appendInference(nil, InferenceLevelWarning, "volumes", serviceName, "%s", reason), nil
+	}
+
+	fullPath, err := secureRepoJoin(repoDir, sourcePath)
+	if err != nil {
+		return nil, false, appendInference(nil, InferenceLevelWarning, "volumes", serviceName, "ignored repository bind mount %q -> %q: %v", sourcePath, targetPath, err), nil
+	}
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, appendInference(nil, InferenceLevelWarning, "volumes", serviceName, "ignored repository bind mount %q -> %q because the source path does not exist in the repository", sourcePath, targetPath), nil
+		}
+		return nil, false, nil, err
+	}
+
+	var mount model.AppPersistentStorageMount
+	switch {
+	case info.IsDir():
+		mount = model.AppPersistentStorageMount{
+			Kind: model.AppPersistentStorageMountKindDirectory,
+			Path: targetPath,
+			Mode: int32(info.Mode().Perm()),
+		}
+	case info.Mode().IsRegular():
+		data, err := os.ReadFile(fullPath)
+		if err != nil {
+			return nil, false, nil, err
+		}
+		if len(data) > maxComposePersistentSeedBytes {
+			return nil, false, appendInference(nil, InferenceLevelWarning, "volumes", serviceName, "ignored repository bind mount %q -> %q because the file exceeds %d bytes", sourcePath, targetPath, maxComposePersistentSeedBytes), nil
+		}
+		if !utf8.Valid(data) {
+			return nil, false, appendInference(nil, InferenceLevelWarning, "volumes", serviceName, "ignored repository bind mount %q -> %q because only UTF-8 text files are supported for seeded persistent file storage", sourcePath, targetPath), nil
+		}
+		mount = model.AppPersistentStorageMount{
+			Kind:        model.AppPersistentStorageMountKindFile,
+			Path:        targetPath,
+			SeedContent: string(data),
+			Mode:        int32(info.Mode().Perm()),
+		}
+	default:
+		return nil, false, appendInference(nil, InferenceLevelWarning, "volumes", serviceName, "ignored repository bind mount %q -> %q because only regular files and directories are supported", sourcePath, targetPath), nil
+	}
+
+	report := appendInference(nil, InferenceLevelInfo, "volumes", serviceName, "imported repository bind mount %q -> %q as persistent %s storage", sourcePath, targetPath, mount.Kind)
+	if readOnly {
+		report = appendInference(report, InferenceLevelWarning, "volumes", serviceName, "compose bind mount %q -> %q was declared read_only; Fugue imported it as writable persistent storage", sourcePath, targetPath)
+	}
+	return &mount, true, report, nil
+}
+
+func parseComposePersistentStorageBinding(raw any) (string, string, bool, bool, string) {
+	switch value := raw.(type) {
+	case string:
+		return parseComposeShortPersistentStorageBinding(value)
+	case map[string]any:
+		return parseComposeLongPersistentStorageBinding(value)
+	default:
+		return "", "", false, false, "ignored volume entry because only repository-relative bind mounts are supported for persistent storage"
+	}
+}
+
+func parseComposeShortPersistentStorageBinding(raw string) (string, string, bool, bool, string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", false, false, "ignored empty volume entry"
+	}
+	parts := strings.Split(raw, ":")
+	if len(parts) < 2 {
+		return "", "", false, false, fmt.Sprintf("ignored volume %q because it is not a repository-relative bind mount", raw)
+	}
+	source := cleanComposePersistentSourcePath(parts[0])
+	target := strings.TrimSpace(parts[1])
+	mode := ""
+	if len(parts) > 2 {
+		mode = strings.TrimSpace(strings.Join(parts[2:], ":"))
+	}
+	if !isRelativeComposePersistentSource(source) {
+		return "", "", false, false, fmt.Sprintf("ignored volume %q because it is not a repository-relative bind mount", raw)
+	}
+	targetPath, err := model.NormalizeAbsolutePath(target)
+	if err != nil || targetPath == "/" {
+		return "", "", false, false, fmt.Sprintf("ignored repository bind mount %q because the target path %q is invalid", raw, target)
+	}
+	return source, targetPath, strings.Contains(strings.ToLower(mode), "ro"), true, ""
+}
+
+func parseComposeLongPersistentStorageBinding(raw map[string]any) (string, string, bool, bool, string) {
+	if len(raw) == 0 {
+		return "", "", false, false, "ignored empty volume entry"
+	}
+	volumeType := strings.TrimSpace(strings.ToLower(stringifyComposeValue(raw["type"])))
+	if volumeType != "" && volumeType != "bind" {
+		return "", "", false, false, "ignored volume entry because only bind mounts are supported for persistent storage"
+	}
+	source := cleanComposePersistentSourcePath(firstNonEmptyComposeString(raw, "source", "src"))
+	target := firstNonEmptyComposeString(raw, "target", "destination", "dst")
+	if !isRelativeComposePersistentSource(source) {
+		return "", "", false, false, "ignored volume entry because only repository-relative bind mounts are supported for persistent storage"
+	}
+	targetPath, err := model.NormalizeAbsolutePath(target)
+	if err != nil || targetPath == "/" {
+		return "", "", false, false, fmt.Sprintf("ignored repository bind mount %q because the target path %q is invalid", source, target)
+	}
+	readOnly := parseComposeBool(raw["read_only"], false)
+	if _, ok := raw["readonly"]; ok {
+		readOnly = parseComposeBool(raw["readonly"], readOnly)
+	}
+	return source, targetPath, readOnly, true, ""
+}
+
+func cleanComposePersistentSourcePath(raw string) string {
+	raw = filepath.ToSlash(strings.TrimSpace(raw))
+	if raw == "" {
+		return ""
+	}
+	switch {
+	case raw == "." || raw == "./":
+		return "."
+	case strings.HasPrefix(raw, "./"):
+		cleaned := filepath.ToSlash(filepath.Clean(strings.TrimPrefix(raw, "./")))
+		if cleaned == "." {
+			return "."
+		}
+		return "./" + cleaned
+	case strings.HasPrefix(raw, "../"):
+		return filepath.ToSlash(filepath.Clean(raw))
+	default:
+		return filepath.ToSlash(filepath.Clean(raw))
+	}
+}
+
+func isRelativeComposePersistentSource(source string) bool {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return false
+	}
+	return source == "." || strings.HasPrefix(source, "./") || strings.HasPrefix(source, "../")
+}
+
+func firstNonEmptyComposeString(values map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(stringifyComposeValue(values[key])); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func removeIgnoredField(fields []string, field string) []string {
+	if len(fields) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(fields))
+	for _, value := range fields {
+		if value == field {
+			continue
+		}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func parseComposeStringList(raw any) []string {

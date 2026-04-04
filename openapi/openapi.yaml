@@ -1252,6 +1252,30 @@ paths:
                 $ref: "#/components/schemas/AppResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+    patch:
+      operationId: patchApp
+      summary: Patch App
+      tags: [Apps]
+      x-fugue-handler: handlePatchApp
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchAppRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppPatchResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
     delete:
       operationId: deleteApp
       summary: Delete App
@@ -2455,7 +2479,7 @@ components:
       in: query
       name: path
       required: false
-      description: Absolute path inside the selected filesystem scope. Tree requests default to the persistent workspace mount when configured, otherwise to /. Read, write, and delete operations require an explicit file or directory path.
+      description: Absolute path inside the selected filesystem scope. Tree requests default to the persistent workspace mount when legacy workspace storage is configured, otherwise to /. Read, write, and delete operations require an explicit file or directory path.
       schema:
         type: string
     FilePathsQueryParam:
@@ -2918,6 +2942,38 @@ components:
           type: string
         reset_token:
           type: string
+    AppPersistentStorageMount:
+      type: object
+      additionalProperties: false
+      required: [path]
+      properties:
+        kind:
+          type: string
+        path:
+          type: string
+        seed_content:
+          type: string
+        secret:
+          type: boolean
+        mode:
+          type: integer
+          format: int32
+    AppPersistentStorageSpec:
+      type: object
+      additionalProperties: false
+      properties:
+        storage_path:
+          type: string
+        storage_size:
+          type: string
+        storage_class_name:
+          type: string
+        reset_token:
+          type: string
+        mounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppPersistentStorageMount"
     AppFailoverSpec:
       type: object
       additionalProperties: false
@@ -3083,10 +3139,15 @@ components:
             $ref: "#/components/schemas/AppFile"
         workspace:
           $ref: "#/components/schemas/AppWorkspaceSpec"
+        persistent_storage:
+          $ref: "#/components/schemas/AppPersistentStorageSpec"
         postgres:
           $ref: "#/components/schemas/AppPostgresSpec"
         failover:
           $ref: "#/components/schemas/AppFailoverSpec"
+        image_mirror_limit:
+          type: integer
+          format: int32
         restart_token:
           type: string
     App:
@@ -4020,6 +4081,13 @@ components:
           type: string
         description:
           type: string
+    PatchAppRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        image_mirror_limit:
+          type: integer
+          format: int32
     BillingResponse:
       type: object
       additionalProperties: false
@@ -4317,6 +4385,15 @@ components:
       properties:
         app:
           $ref: "#/components/schemas/App"
+    AppPatchResponse:
+      type: object
+      additionalProperties: false
+      required: [app, already_current]
+      properties:
+        app:
+          $ref: "#/components/schemas/App"
+        already_current:
+          type: boolean
     InspectGitHubTemplateRequest:
       type: object
       additionalProperties: false
@@ -4864,7 +4941,7 @@ components:
           type: integer
           format: int32
         workspace_root:
-          description: Root path of the current filesystem scope. This is the persistent workspace mount when browsing workspace storage, or / when browsing the live container filesystem.
+          description: Root path of the current filesystem scope. This is the selected persistent storage mount when browsing persisted storage, or / when browsing the live container filesystem.
           type: string
         entries:
           type: array
@@ -4882,7 +4959,7 @@ components:
         path:
           type: string
         workspace_root:
-          description: Root path of the current filesystem scope. This is the persistent workspace mount when browsing workspace storage, or / when browsing the live container filesystem.
+          description: Root path of the current filesystem scope. This is the selected persistent storage mount when browsing persisted storage, or / when browsing the live container filesystem.
           type: string
         content:
           type: string
@@ -4927,7 +5004,7 @@ components:
         path:
           type: string
         workspace_root:
-          description: Root path of the current filesystem scope. This is the persistent workspace mount when browsing workspace storage, or / when browsing the live container filesystem.
+          description: Root path of the current filesystem scope. This is the selected persistent storage mount when browsing persisted storage, or / when browsing the live container filesystem.
           type: string
         kind:
           type: string

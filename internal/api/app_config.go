@@ -43,7 +43,11 @@ func (s *Server) handlePatchAppEnv(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	spec := cloneAppSpec(app.Spec)
+	spec, source, err := s.recoverAppDeployBaseline(app)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
 	env, changed, err := applyEnvPatch(spec.Env, req.Set, req.Delete)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -65,6 +69,7 @@ func (s *Server) handlePatchAppEnv(w http.ResponseWriter, r *http.Request) {
 		RequestedByID:   principal.ActorID,
 		AppID:           app.ID,
 		DesiredSpec:     &spec,
+		DesiredSource:   source,
 	})
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -114,9 +119,14 @@ func (s *Server) handleUpsertAppFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	spec := cloneAppSpec(app.Spec)
+	spec, source, err := s.recoverAppDeployBaseline(app)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	currentFiles := cloneAppFiles(spec.Files)
 	spec.Files, _ = upsertAppFiles(spec.Files, files)
-	if appFilesEqual(app.Spec.Files, spec.Files) {
+	if appFilesEqual(currentFiles, spec.Files) {
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{
 			"files":           defaultAppFiles(cloneAppFiles(spec.Files)),
 			"already_current": true,
@@ -131,6 +141,7 @@ func (s *Server) handleUpsertAppFiles(w http.ResponseWriter, r *http.Request) {
 		RequestedByID:   principal.ActorID,
 		AppID:           app.ID,
 		DesiredSpec:     &spec,
+		DesiredSource:   source,
 	})
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -161,9 +172,14 @@ func (s *Server) handleDeleteAppFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	spec := cloneAppSpec(app.Spec)
+	spec, source, err := s.recoverAppDeployBaseline(app)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	currentFiles := cloneAppFiles(spec.Files)
 	spec.Files, _ = deleteAppFiles(spec.Files, paths)
-	if appFilesEqual(app.Spec.Files, spec.Files) {
+	if appFilesEqual(currentFiles, spec.Files) {
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{
 			"files":           defaultAppFiles(cloneAppFiles(spec.Files)),
 			"already_current": true,
@@ -178,6 +194,7 @@ func (s *Server) handleDeleteAppFiles(w http.ResponseWriter, r *http.Request) {
 		RequestedByID:   principal.ActorID,
 		AppID:           app.ID,
 		DesiredSpec:     &spec,
+		DesiredSource:   source,
 	})
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -206,7 +223,11 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	spec := cloneAppSpec(app.Spec)
+	spec, source, err := s.recoverAppDeployBaseline(app)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
 	spec.RestartToken = model.NewID("restart")
 	op, err := s.store.CreateOperation(model.Operation{
 		TenantID:        app.TenantID,
@@ -215,6 +236,7 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		RequestedByID:   principal.ActorID,
 		AppID:           app.ID,
 		DesiredSpec:     &spec,
+		DesiredSource:   source,
 	})
 	if err != nil {
 		s.writeStoreError(w, err)

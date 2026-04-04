@@ -3051,6 +3051,50 @@ func TestCreateAppAllowsPersistentWorkspaceOnManagedSharedRuntime(t *testing.T) 
 	}
 }
 
+func TestCreateAppAllowsPersistentStorageOnManagedSharedRuntime(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Persistent Storage Validation Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		PersistentStorage: &model.AppPersistentStorageSpec{
+			Mounts: []model.AppPersistentStorageMount{
+				{
+					Kind:        model.AppPersistentStorageMountKindFile,
+					Path:        "/home/api.yaml",
+					SeedContent: "providers: []\n",
+				},
+				{
+					Kind: model.AppPersistentStorageMountKindDirectory,
+					Path: "/home/data",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected managed-shared persistent storage app to be valid, got %v", err)
+	}
+	if app.Spec.PersistentStorage == nil || len(app.Spec.PersistentStorage.Mounts) != 2 {
+		t.Fatalf("expected persistent storage to be preserved, got %+v", app.Spec.PersistentStorage)
+	}
+}
+
 func TestBillingAutoRaisesEnvelopeForManagedScaleBeyondConfiguredEnvelope(t *testing.T) {
 	t.Parallel()
 
@@ -3380,6 +3424,33 @@ func TestAppEffectiveResourcesIncludeWorkspaceStorage(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("expected workspace billing resources %+v, got %+v", want, got)
+	}
+}
+
+func TestAppEffectiveResourcesIncludePersistentStorage(t *testing.T) {
+	t.Parallel()
+
+	compute := model.DefaultManagedAppResources()
+	got := appEffectiveResources(model.AppSpec{
+		Resources: &compute,
+		PersistentStorage: &model.AppPersistentStorageSpec{
+			StorageSize: "12Gi",
+			Mounts: []model.AppPersistentStorageMount{
+				{
+					Kind: model.AppPersistentStorageMountKindDirectory,
+					Path: "/home/data",
+				},
+			},
+		},
+	})
+
+	want := model.BillingResourceSpec{
+		CPUMilliCores:    compute.CPUMilliCores,
+		MemoryMebibytes:  compute.MemoryMebibytes,
+		StorageGibibytes: 12,
+	}
+	if got != want {
+		t.Fatalf("expected persistent storage billing resources %+v, got %+v", want, got)
 	}
 }
 

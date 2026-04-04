@@ -126,6 +126,19 @@ func TestBuildImportedAppSpecAllowsGenericStatefulInputs(t *testing.T) {
 			Content: "DEMO=true\n",
 			Secret:  true,
 		}},
+		&model.AppPersistentStorageSpec{
+			Mounts: []model.AppPersistentStorageMount{
+				{
+					Kind:        model.AppPersistentStorageMountKindFile,
+					Path:        "/home/config/api.yaml",
+					SeedContent: "providers: []\n",
+				},
+				{
+					Kind: model.AppPersistentStorageMountKindDirectory,
+					Path: "/home/data",
+				},
+			},
+		},
 		&model.AppPostgresSpec{
 			Image:    "postgres:17.6-alpine",
 			Database: "demo",
@@ -150,6 +163,15 @@ func TestBuildImportedAppSpecAllowsGenericStatefulInputs(t *testing.T) {
 	}
 	if spec.Env["DATABASE_URL"] == "" {
 		t.Fatalf("expected env to be preserved, got %v", spec.Env)
+	}
+	if spec.PersistentStorage == nil || len(spec.PersistentStorage.Mounts) != 2 {
+		t.Fatalf("expected persistent storage mounts, got %+v", spec.PersistentStorage)
+	}
+	if spec.PersistentStorage.Mounts[0].Mode != 0o644 {
+		t.Fatalf("expected file mount mode 0644, got %o", spec.PersistentStorage.Mounts[0].Mode)
+	}
+	if spec.PersistentStorage.Mounts[1].Mode != 0o755 {
+		t.Fatalf("expected directory mount mode 0755, got %o", spec.PersistentStorage.Mounts[1].Mode)
 	}
 	if len(spec.Files) != 2 {
 		t.Fatalf("expected 2 files, got %d", len(spec.Files))
@@ -247,6 +269,19 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 					"DSN":       "postgresql://postgres:postgres@postgres:5432/claude_code_hub",
 					"REDIS_URL": "redis://redis:6379",
 				},
+				PersistentStorage: &model.AppPersistentStorageSpec{
+					Mounts: []model.AppPersistentStorageMount{
+						{
+							Kind:        model.AppPersistentStorageMountKindFile,
+							Path:        "/home/api.yaml",
+							SeedContent: "providers: []\n",
+						},
+						{
+							Kind: model.AppPersistentStorageMountKindDirectory,
+							Path: "/home/data",
+						},
+					},
+				},
 				DependsOn: []string{"postgres", "redis"},
 			},
 			{
@@ -315,6 +350,9 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 	}
 	if got := primaryApp.Spec.Env["DSN"]; got != "postgresql://claude_code_hub:postgres@claude-code-hub-postgres-postgres-rw:5432/claude_code_hub" {
 		t.Fatalf("expected DSN rewrite to managed postgres host, got %q", got)
+	}
+	if primaryApp.Spec.PersistentStorage == nil || len(primaryApp.Spec.PersistentStorage.Mounts) != 2 {
+		t.Fatalf("expected primary app persistent storage, got %+v", primaryApp.Spec.PersistentStorage)
 	}
 	if primaryApp.Route == nil || primaryApp.Route.ServicePort != 3000 {
 		t.Fatalf("expected primary route to keep service port 3000, got %+v", primaryApp.Route)

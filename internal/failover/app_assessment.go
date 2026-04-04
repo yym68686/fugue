@@ -61,8 +61,8 @@ func MigrationBlockers(app model.App) []string {
 	if hasManagedStatefulService(app) {
 		blockers = append(blockers, "managed backing services")
 	}
-	if app.Spec.Workspace != nil {
-		blockers = append(blockers, "persistent workspace")
+	if app.Spec.Workspace != nil || app.Spec.PersistentStorage != nil {
+		blockers = append(blockers, "persistent storage")
 	}
 	return blockers
 }

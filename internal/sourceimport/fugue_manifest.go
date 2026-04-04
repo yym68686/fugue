@@ -307,6 +307,12 @@ func resolveFugueManifestService(repoDir, rawName string, raw fugueManifestServi
 		return ComposeService{}, fmt.Errorf("fugue service name %q is invalid", rawName)
 	}
 	service.InferenceReport = appendMissingComposeEnvFileInference(service.InferenceReport, service.Name, missingEnvFiles)
+	persistentStorage, storageInferences, ignoredVolumeEntries, err := resolveComposePersistentStorage(repoDir, service.Name, raw.Volumes)
+	if err != nil {
+		return ComposeService{}, fmt.Errorf("resolve fugue service %q volumes: %w", rawName, err)
+	}
+	service.PersistentStorage = persistentStorage
+	service.InferenceReport = append(service.InferenceReport, storageInferences...)
 
 	buildSpec, hasBuild, err := parseFugueBuildSpec(raw.Build)
 	if err != nil && raw.Build != nil {
@@ -315,6 +321,9 @@ func resolveFugueManifestService(repoDir, rawName string, raw fugueManifestServi
 	service.BuildArgs = cloneStringMapLocal(buildSpec.Args)
 	service.BuildTarget = strings.TrimSpace(buildSpec.Target)
 	service.IgnoredFields = collectFugueIgnoredFields(raw, hasBuild, buildSpec)
+	if !ignoredVolumeEntries {
+		service.IgnoredFields = removeIgnoredField(service.IgnoredFields, "volumes")
+	}
 	if len(service.IgnoredFields) > 0 {
 		service.InferenceReport = appendInference(
 			service.InferenceReport,
