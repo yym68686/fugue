@@ -356,7 +356,7 @@ func isConsolePausedLifecycleValue(value string) bool {
 	return normalized != "" && includesConsoleKeyword(normalized, "disabled", "paused")
 }
 
-func buildConsoleProjectLifecycle(statuses []string, appCount, serviceCount int, tracksGitHub bool) consoleProjectLifecycle {
+func buildConsoleProjectLifecycle(statuses []string, appCount, serviceCount int, tracksGitHub bool, hasLiveApp, hasPendingApp bool) consoleProjectLifecycle {
 	normalized := make([]string, 0, len(statuses))
 	for _, status := range statuses {
 		value := normalizeConsoleText(status)
@@ -370,6 +370,8 @@ func buildConsoleProjectLifecycle(statuses []string, appCount, serviceCount int,
 		return consoleProjectLifecycle{Label: "Deleting", Live: true, SyncMode: "active", Tone: "danger"}
 	case containsAnyConsoleStatus(normalized, []string{"error", "fail", "stopped"}):
 		return consoleProjectLifecycle{Label: "Error", Live: false, SyncMode: "passive", Tone: "danger"}
+	case hasLiveApp && hasPendingApp:
+		return consoleProjectLifecycle{Label: "Updating", Live: true, SyncMode: "active", Tone: "info"}
 	case containsConsoleStatus(normalized, "importing"):
 		return consoleProjectLifecycle{Label: "Importing", Live: true, SyncMode: "active", Tone: "positive"}
 	case containsConsoleStatus(normalized, "building"):
@@ -698,6 +700,8 @@ func (s *Server) buildConsoleGalleryResponse(ctx context.Context, principal mode
 		backingServicesByID := make(map[string]model.BackingService)
 		resourceUsageItems := make([]*model.ResourceUsage, 0, len(appItems)*2)
 		statuses := make([]string, 0, len(appItems)*2)
+		hasLiveApp := false
+		hasPendingApp := false
 		tracksGitHub := false
 		serviceCount := 0
 
@@ -706,12 +710,21 @@ func (s *Server) buildConsoleGalleryResponse(ctx context.Context, principal mode
 				tracksGitHub = true
 			}
 
-			if hasConsoleLiveRelease(app) || readConsoleActiveReleaseOperation(activeOperationsByAppID[app.ID], app) == nil {
+			activeOperation := readConsoleActiveReleaseOperation(activeOperationsByAppID[app.ID], app)
+			liveRelease := hasConsoleLiveRelease(app)
+			if liveRelease {
+				hasLiveApp = true
+			}
+			if activeOperation != nil {
+				hasPendingApp = true
+			}
+
+			if liveRelease || activeOperation == nil {
 				serviceCount++
 				statuses = append(statuses, app.Status.Phase)
 			}
 
-			if activeOperation := readConsoleActiveReleaseOperation(activeOperationsByAppID[app.ID], app); activeOperation != nil {
+			if activeOperation != nil {
 				serviceCount++
 				statuses = append(statuses, readConsolePendingServiceLabel(activeOperation))
 			}
@@ -731,7 +744,14 @@ func (s *Server) buildConsoleGalleryResponse(ctx context.Context, principal mode
 
 		serviceCount += len(backingServices)
 		project := projectsByID[projectID]
-		lifecycle := buildConsoleProjectLifecycle(statuses, len(appItems), serviceCount, tracksGitHub)
+		lifecycle := buildConsoleProjectLifecycle(
+			statuses,
+			len(appItems),
+			serviceCount,
+			tracksGitHub,
+			hasLiveApp,
+			hasPendingApp,
+		)
 		records = append(records, consoleProjectSummaryRecord{
 			project: consoleProjectSummary{
 				AppCount:              len(appItems),
