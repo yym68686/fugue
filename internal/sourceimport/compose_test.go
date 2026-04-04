@@ -185,14 +185,65 @@ func TestInspectComposeStackFromRepoParsesImageBackedServices(t *testing.T) {
 	if redisService.Kind != ComposeServiceKindApp {
 		t.Fatalf("expected redis to be importable as app, got %q", redisService.Kind)
 	}
+	if redisService.ServiceType != ServiceTypeRedis || !redisService.BackingService {
+		t.Fatalf("expected redis to be classified as mirrored redis backing service, got %+v", redisService)
+	}
 	if redisService.Image != "redis:7-alpine" {
 		t.Fatalf("unexpected redis image: %q", redisService.Image)
 	}
-	if redisService.Published || redisService.InternalPort != 0 {
+	if redisService.Published || redisService.InternalPort != 6379 {
 		t.Fatalf("unexpected redis exposure: %+v", redisService)
 	}
 
 	if postgresService.Kind != ComposeServiceKindPostgres {
 		t.Fatalf("expected postgres to stay managed, got %q", postgresService.Kind)
+	}
+}
+
+func TestInspectComposeStackFromRepoParsesEnvFilesAndIgnoredFields(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte("FROM scratch\nEXPOSE 8080\n"), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoDir, "env"), 0o755); err != nil {
+		t.Fatalf("mkdir env dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "env", "app.env"), []byte("FROM_FILE=true\nSHARED=env-file\n"), 0o644); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	compose := `services:
+  app:
+    build: .
+    env_file:
+      - env/app.env
+    environment:
+      SHARED: inline
+    command:
+      - ./server
+    labels:
+      demo.owner: fugue
+    deploy:
+      replicas: 2
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "compose.yaml"), []byte(compose), 0o644); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+
+	stack, err := inspectComposeStackFromRepo(clonedGitHubRepo{RepoDir: repoDir, DefaultAppName: "demo"})
+	if err != nil {
+		t.Fatalf("inspect compose stack: %v", err)
+	}
+	if len(stack.Services) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(stack.Services))
+	}
+	service := stack.Services[0]
+	if len(service.EnvFiles) != 1 || service.EnvFiles[0] != "env/app.env" {
+		t.Fatalf("unexpected env files: %#v", service.EnvFiles)
+	}
+	if service.Environment["FROM_FILE"] != "true" || service.Environment["SHARED"] != "inline" {
+		t.Fatalf("expected env_file values to merge with inline env, got %#v", service.Environment)
+	}
+	if len(service.IgnoredFields) == 0 {
+		t.Fatalf("expected ignored field report, got %+v", service)
 	}
 }

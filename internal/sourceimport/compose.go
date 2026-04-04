@@ -36,28 +36,48 @@ type GitHubComposeInspectRequest struct {
 }
 
 type GitHubComposeStack struct {
-	RepoOwner      string
-	RepoName       string
-	Branch         string
-	CommitSHA      string
-	DefaultAppName string
-	ComposePath    string
-	Services       []ComposeService
-	Warnings       []string
+	RepoOwner       string
+	RepoName        string
+	Branch          string
+	CommitSHA       string
+	DefaultAppName  string
+	ComposePath     string
+	Services        []ComposeService
+	Warnings        []string
+	InferenceReport []TopologyInference
 }
 
 type ComposeService struct {
 	Name            string
 	Kind            string
+	ServiceType     string
+	BackingService  bool
 	Image           string
 	BuildStrategy   string
 	SourceDir       string
 	DockerfilePath  string
 	BuildContextDir string
+	BuildArgs       map[string]string
+	BuildTarget     string
 	InternalPort    int
 	Published       bool
 	Environment     map[string]string
 	DependsOn       []string
+	Bindings        []ServiceBinding
+	OwnerService    string
+	EnvFiles        []string
+	Command         []string
+	Entrypoint      []string
+	Healthcheck     *ServiceHealthcheck
+	Profiles        []string
+	Volumes         []string
+	Secrets         []string
+	Configs         []string
+	Networks        []string
+	Labels          map[string]string
+	Deploy          map[string]any
+	IgnoredFields   []string
+	InferenceReport []TopologyInference
 	Postgres        *model.AppPostgresSpec
 }
 
@@ -69,13 +89,26 @@ type composeServiceRaw struct {
 	Image       string `yaml:"image"`
 	Build       any    `yaml:"build"`
 	Environment any    `yaml:"environment"`
+	EnvFile     any    `yaml:"env_file"`
 	Ports       []any  `yaml:"ports"`
 	DependsOn   any    `yaml:"depends_on"`
+	Command     any    `yaml:"command"`
+	Entrypoint  any    `yaml:"entrypoint"`
+	Healthcheck any    `yaml:"healthcheck"`
+	Profiles    any    `yaml:"profiles"`
+	Volumes     any    `yaml:"volumes"`
+	Secrets     any    `yaml:"secrets"`
+	Configs     any    `yaml:"configs"`
+	Networks    any    `yaml:"networks"`
+	Labels      any    `yaml:"labels"`
+	Deploy      any    `yaml:"deploy"`
 }
 
 type composeBuildSpec struct {
 	Context    string `yaml:"context"`
 	Dockerfile string `yaml:"dockerfile"`
+	Args       map[string]string
+	Target     string `yaml:"target"`
 }
 
 type composePortSpec struct {
@@ -140,6 +173,9 @@ func inspectComposeStackFromRepo(repo clonedGitHubRepo) (GitHubComposeStack, err
 		if service.Kind == "" {
 			continue
 		}
+		if len(service.InferenceReport) > 0 {
+			stack.InferenceReport = append(stack.InferenceReport, service.InferenceReport...)
+		}
 		stack.Services = append(stack.Services, service)
 	}
 
@@ -159,31 +195,91 @@ func findComposeFile(repoDir string) (string, error) {
 }
 
 func resolveComposeService(repoDir, serviceName string, raw composeServiceRaw, vars map[string]string) (ComposeService, string, error) {
+	envFiles, fileEnv, err := readComposeServiceEnvFiles(repoDir, raw.EnvFile, vars)
+	if err != nil {
+		return ComposeService{}, "", fmt.Errorf("load env_file for compose service %q: %w", serviceName, err)
+	}
+
 	service := ComposeService{
-		Name:        model.Slugify(serviceName),
-		Image:       strings.TrimSpace(raw.Image),
-		Environment: parseComposeEnvironment(raw.Environment, vars),
-		DependsOn:   parseComposeDependsOn(raw.DependsOn),
+		Name:         slugifyOptional(serviceName),
+		Image:        strings.TrimSpace(raw.Image),
+		Environment:  mergeComposeEnvironment(fileEnv, parseComposeEnvironment(raw.Environment, vars)),
+		DependsOn:    parseComposeDependsOn(raw.DependsOn),
+		EnvFiles:     envFiles,
+		Command:      parseComposeStringList(raw.Command),
+		Entrypoint:   parseComposeStringList(raw.Entrypoint),
+		Healthcheck:  parseComposeHealthcheck(raw.Healthcheck),
+		Profiles:     parseComposeStringList(raw.Profiles),
+		Volumes:      parseComposeRefList(raw.Volumes),
+		Secrets:      parseComposeRefList(raw.Secrets),
+		Configs:      parseComposeRefList(raw.Configs),
+		Networks:     parseComposeRefList(raw.Networks),
+		Labels:       parseComposeStringMap(raw.Labels, vars),
+		Deploy:       parseComposeLooseMap(raw.Deploy),
+		Bindings:     nil,
+		OwnerService: "",
 	}
 	if service.Name == "" {
 		return ComposeService{}, "", fmt.Errorf("compose service name %q is invalid", serviceName)
 	}
 	service.Published = composeServicePublishesPorts(raw.Ports)
 
-	if isComposePostgresService(raw.Image) {
-		service.Kind = ComposeServiceKindPostgres
-		service.InternalPort = 5432
-		return service, "", nil
-	}
-
 	buildSpec, hasBuild, err := parseComposeBuildSpec(raw.Build)
 	if err != nil {
 		return ComposeService{}, "", fmt.Errorf("parse build spec for compose service %q: %w", serviceName, err)
 	}
+	service.BuildArgs = cloneStringMapLocal(buildSpec.Args)
+	service.BuildTarget = strings.TrimSpace(buildSpec.Target)
+	service.ServiceType = ServiceTypeApp
+	detectedType := detectServiceTypeFromImage(raw.Image)
+	ignoredFields := collectComposeIgnoredFields(raw, hasBuild, buildSpec)
+	if len(ignoredFields) > 0 {
+		service.IgnoredFields = append([]string(nil), ignoredFields...)
+		service.InferenceReport = appendInference(
+			service.InferenceReport,
+			InferenceLevelInfo,
+			"ignored_fields",
+			service.Name,
+			"preserved but not applied during import: %s",
+			strings.Join(ignoredFields, ", "),
+		)
+	}
+
+	if detectedType == ServiceTypePostgres && !hasBuild {
+		service.Kind = ComposeServiceKindPostgres
+		service.ServiceType = ServiceTypePostgres
+		service.BackingService = true
+		service.InternalPort = defaultPortForService(service)
+		service.InferenceReport = appendInference(
+			service.InferenceReport,
+			InferenceLevelInfo,
+			"classification",
+			service.Name,
+			"classified from image %q as managed postgres backing service",
+			strings.TrimSpace(raw.Image),
+		)
+		return service, "", nil
+	}
 	if !hasBuild {
 		if strings.TrimSpace(raw.Image) != "" {
 			service.Kind = ComposeServiceKindApp
+			service.ServiceType = firstNonEmptyServiceType(detectedType, ServiceTypeCustom)
+			service.BackingService = detectedType != "" && detectedType != ServiceTypeApp && detectedType != ServiceTypeCustom
 			service.InternalPort = detectComposeDeclaredPort(raw.Ports)
+			if service.InternalPort == 0 {
+				service.InternalPort = defaultPortForService(service)
+			}
+			if service.BackingService {
+				service.InferenceReport = appendInference(
+					service.InferenceReport,
+					InferenceLevelInfo,
+					"classification",
+					service.Name,
+					"classified from image %q as service_type %q and imported as a mirrored workload because Fugue has no managed adapter for it yet",
+					strings.TrimSpace(raw.Image),
+					service.ServiceType,
+				)
+			}
 			return service, fmt.Sprintf("compose service %q uses image %q without build; Fugue will mirror the image directly and will not auto-sync repository commits for this service", serviceName, strings.TrimSpace(raw.Image)), nil
 		}
 		return ComposeService{}, fmt.Sprintf("compose service %q is skipped because it has no build or supported managed backing service", serviceName), nil
@@ -194,6 +290,7 @@ func resolveComposeService(repoDir, serviceName string, raw composeServiceRaw, v
 		return ComposeService{}, "", fmt.Errorf("resolve build inputs for compose service %q: %w", serviceName, err)
 	}
 	service.Kind = ComposeServiceKindApp
+	service.ServiceType = ServiceTypeApp
 	service.BuildStrategy = buildStrategy
 	service.SourceDir = sourceDir
 	service.DockerfilePath = dockerfilePath
@@ -258,16 +355,338 @@ func parseComposeBuildSpec(raw any) (composeBuildSpec, bool, error) {
 		return composeBuildSpec{Context: strings.TrimSpace(value)}, true, nil
 	case map[string]any:
 		spec := composeBuildSpec{}
-		if contextRaw, ok := value["context"].(string); ok {
-			spec.Context = contextRaw
-		}
-		if dockerfileRaw, ok := value["dockerfile"].(string); ok {
-			spec.Dockerfile = dockerfileRaw
-		}
+		spec.Context = stringifyComposeValue(value["context"])
+		spec.Dockerfile = stringifyComposeValue(value["dockerfile"])
+		spec.Target = stringifyComposeValue(value["target"])
+		spec.Args = parseComposeStringMap(value["args"], nil)
 		return spec, true, nil
 	default:
 		return composeBuildSpec{}, false, fmt.Errorf("unsupported build spec type %T", raw)
 	}
+}
+
+func firstNonEmptyServiceType(values ...string) string {
+	for _, value := range values {
+		value = normalizeServiceType(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func mergeComposeEnvironment(base, override map[string]string) map[string]string {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(base)+len(override))
+	for key, value := range base {
+		out[key] = value
+	}
+	for key, value := range override {
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func readComposeServiceEnvFiles(repoDir string, raw any, vars map[string]string) ([]string, map[string]string, error) {
+	paths := parseComposeStringList(raw)
+	if len(paths) == 0 {
+		return nil, nil, nil
+	}
+	env := make(map[string]string)
+	outPaths := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = resolveComposeInterpolation(path, vars)
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		fullPath, err := secureRepoJoin(repoDir, path)
+		if err != nil {
+			return nil, nil, err
+		}
+		data, err := os.ReadFile(fullPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		outPaths = append(outPaths, filepath.ToSlash(path))
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			key, value, ok := strings.Cut(line, "=")
+			if !ok {
+				continue
+			}
+			key = strings.TrimSpace(key)
+			if key == "" {
+				continue
+			}
+			env[key] = resolveComposeInterpolation(strings.TrimSpace(value), vars)
+		}
+	}
+	return outPaths, dropEmptyComposeMap(env), nil
+}
+
+func parseComposeStringList(raw any) []string {
+	switch value := raw.(type) {
+	case nil:
+		return nil
+	case string:
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return nil
+		}
+		return []string{value}
+	case []any:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			entry := strings.TrimSpace(stringifyComposeValue(item))
+			if entry == "" {
+				continue
+			}
+			out = append(out, entry)
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func parseComposeRefList(raw any) []string {
+	switch value := raw.(type) {
+	case nil:
+		return nil
+	case string:
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return nil
+		}
+		return []string{value}
+	case []any:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			switch typed := item.(type) {
+			case map[string]any:
+				for key := range typed {
+					key = strings.TrimSpace(key)
+					if key != "" {
+						out = append(out, key)
+					}
+					break
+				}
+			default:
+				entry := strings.TrimSpace(stringifyComposeValue(item))
+				if entry != "" {
+					out = append(out, entry)
+				}
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		sort.Strings(out)
+		return out
+	case map[string]any:
+		out := make([]string, 0, len(value))
+		for key := range value {
+			key = strings.TrimSpace(key)
+			if key != "" {
+				out = append(out, key)
+			}
+		}
+		sort.Strings(out)
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func parseServiceBindings(raw any) []ServiceBinding {
+	switch value := raw.(type) {
+	case nil:
+		return nil
+	case string:
+		service := slugifyOptional(value)
+		if service == "" {
+			return nil
+		}
+		return []ServiceBinding{{Service: service, Source: BindingSourceExplicit}}
+	case []any:
+		bindings := make([]ServiceBinding, 0, len(value))
+		for _, item := range value {
+			switch typed := item.(type) {
+			case map[string]any:
+				service := slugifyOptional(stringifyComposeValue(typed["service"]))
+				if service == "" {
+					continue
+				}
+				bindings = append(bindings, ServiceBinding{Service: service, Source: BindingSourceExplicit})
+			default:
+				service := slugifyOptional(stringifyComposeValue(item))
+				if service == "" {
+					continue
+				}
+				bindings = append(bindings, ServiceBinding{Service: service, Source: BindingSourceExplicit})
+			}
+		}
+		return uniqueBindings(bindings)
+	default:
+		return nil
+	}
+}
+
+func parseComposeStringMap(raw any, vars map[string]string) map[string]string {
+	switch value := raw.(type) {
+	case nil:
+		return nil
+	case map[string]any:
+		out := make(map[string]string, len(value))
+		for key, rawValue := range value {
+			key = strings.TrimSpace(key)
+			if key == "" {
+				continue
+			}
+			resolved := stringifyComposeValue(rawValue)
+			if vars != nil {
+				resolved = resolveComposeInterpolation(resolved, vars)
+			}
+			out[key] = strings.TrimSpace(resolved)
+		}
+		return dropEmptyComposeMap(out)
+	case []any:
+		out := make(map[string]string, len(value))
+		for _, item := range value {
+			entry := strings.TrimSpace(stringifyComposeValue(item))
+			if entry == "" {
+				continue
+			}
+			key, rawValue, hasValue := strings.Cut(entry, "=")
+			key = strings.TrimSpace(key)
+			if key == "" {
+				continue
+			}
+			if !hasValue {
+				out[key] = ""
+				continue
+			}
+			if vars != nil {
+				rawValue = resolveComposeInterpolation(rawValue, vars)
+			}
+			out[key] = strings.TrimSpace(rawValue)
+		}
+		return dropEmptyComposeMap(out)
+	default:
+		return nil
+	}
+}
+
+func parseComposeLooseMap(raw any) map[string]any {
+	value, ok := raw.(map[string]any)
+	if !ok || len(value) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(value))
+	for key, item := range value {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		out[key] = item
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func parseComposeHealthcheck(raw any) *ServiceHealthcheck {
+	value, ok := raw.(map[string]any)
+	if !ok || len(value) == 0 {
+		return nil
+	}
+	healthcheck := &ServiceHealthcheck{
+		Test:          parseComposeStringList(value["test"]),
+		Interval:      strings.TrimSpace(stringifyComposeValue(value["interval"])),
+		Timeout:       strings.TrimSpace(stringifyComposeValue(value["timeout"])),
+		StartPeriod:   strings.TrimSpace(stringifyComposeValue(value["start_period"])),
+		StartInterval: strings.TrimSpace(stringifyComposeValue(value["start_interval"])),
+		Disable:       strings.EqualFold(strings.TrimSpace(stringifyComposeValue(value["disable"])), "true"),
+	}
+	if retries, err := atoiComposeValue(value["retries"]); err == nil && retries > 0 {
+		healthcheck.Retries = retries
+	}
+	if len(healthcheck.Test) == 0 &&
+		healthcheck.Interval == "" &&
+		healthcheck.Timeout == "" &&
+		healthcheck.StartPeriod == "" &&
+		healthcheck.StartInterval == "" &&
+		healthcheck.Retries == 0 &&
+		!healthcheck.Disable {
+		return nil
+	}
+	return healthcheck
+}
+
+func collectComposeIgnoredFields(raw composeServiceRaw, hasBuild bool, buildSpec composeBuildSpec) []string {
+	fields := make([]string, 0, 12)
+	appendIfPresent := func(name string, raw any) {
+		switch value := raw.(type) {
+		case nil:
+			return
+		case string:
+			if strings.TrimSpace(value) != "" {
+				fields = append(fields, name)
+			}
+		case []any:
+			if len(value) > 0 {
+				fields = append(fields, name)
+			}
+		case map[string]any:
+			if len(value) > 0 {
+				fields = append(fields, name)
+			}
+		default:
+			fields = append(fields, name)
+		}
+	}
+	appendIfPresent("command", raw.Command)
+	appendIfPresent("entrypoint", raw.Entrypoint)
+	appendIfPresent("healthcheck", raw.Healthcheck)
+	appendIfPresent("profiles", raw.Profiles)
+	appendIfPresent("volumes", raw.Volumes)
+	appendIfPresent("secrets", raw.Secrets)
+	appendIfPresent("configs", raw.Configs)
+	appendIfPresent("networks", raw.Networks)
+	appendIfPresent("labels", raw.Labels)
+	appendIfPresent("deploy", raw.Deploy)
+	if len(raw.Ports) > 1 {
+		fields = append(fields, "ports")
+	}
+	if hasBuild {
+		if len(buildSpec.Args) > 0 {
+			fields = append(fields, "build.args")
+		}
+		if strings.TrimSpace(buildSpec.Target) != "" {
+			fields = append(fields, "build.target")
+		}
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	sort.Strings(fields)
+	return fields
 }
 
 func parseComposeEnvironment(raw any, vars map[string]string) map[string]string {
@@ -311,7 +730,7 @@ func parseComposeDependsOn(raw any) []string {
 	case []any:
 		deps := make([]string, 0, len(value))
 		for _, item := range value {
-			name := model.Slugify(strings.TrimSpace(stringifyComposeValue(item)))
+			name := slugifyOptional(stringifyComposeValue(item))
 			if name == "" {
 				continue
 			}
@@ -322,7 +741,7 @@ func parseComposeDependsOn(raw any) []string {
 	case map[string]any:
 		deps := make([]string, 0, len(value))
 		for key := range value {
-			name := model.Slugify(strings.TrimSpace(key))
+			name := slugifyOptional(key)
 			if name == "" {
 				continue
 			}

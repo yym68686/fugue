@@ -39,13 +39,15 @@ type GitHubFugueManifest struct {
 	Services          []ComposeService
 	Template          *GitHubTemplateMetadata
 	Warnings          []string
+	InferenceReport   []TopologyInference
 }
 
 type fugueManifestFile struct {
-	Version        any                             `yaml:"version"`
-	PrimaryService string                          `yaml:"primary_service"`
-	Template       *fugueManifestTemplate          `yaml:"template"`
-	Services       map[string]fugueManifestService `yaml:"services"`
+	Version         any                             `yaml:"version"`
+	PrimaryService  string                          `yaml:"primary_service"`
+	Template        *fugueManifestTemplate          `yaml:"template"`
+	Services        map[string]fugueManifestService `yaml:"services"`
+	BackingServices map[string]fugueManifestService `yaml:"backing_services"`
 }
 
 type GitHubTemplateMetadata struct {
@@ -101,18 +103,32 @@ type fugueManifestTemplateVariable struct {
 }
 
 type fugueManifestService struct {
-	Type        string `yaml:"type"`
-	Public      bool   `yaml:"public"`
-	Image       string `yaml:"image"`
-	Port        int    `yaml:"port"`
-	Build       any    `yaml:"build"`
-	Env         any    `yaml:"env"`
-	Environment any    `yaml:"environment"`
-	DependsOn   any    `yaml:"depends_on"`
-	Database    string `yaml:"database"`
-	User        string `yaml:"user"`
-	Password    string `yaml:"password"`
-	ServiceName string `yaml:"service_name"`
+	Type         string `yaml:"type"`
+	ServiceType  string `yaml:"service_type"`
+	Public       bool   `yaml:"public"`
+	Image        string `yaml:"image"`
+	Port         int    `yaml:"port"`
+	Build        any    `yaml:"build"`
+	Env          any    `yaml:"env"`
+	Environment  any    `yaml:"environment"`
+	EnvFile      any    `yaml:"env_file"`
+	DependsOn    any    `yaml:"depends_on"`
+	Bindings     any    `yaml:"bindings"`
+	OwnerService string `yaml:"owner_service"`
+	Database     string `yaml:"database"`
+	User         string `yaml:"user"`
+	Password     string `yaml:"password"`
+	ServiceName  string `yaml:"service_name"`
+	Command      any    `yaml:"command"`
+	Entrypoint   any    `yaml:"entrypoint"`
+	Healthcheck  any    `yaml:"healthcheck"`
+	Profiles     any    `yaml:"profiles"`
+	Volumes      any    `yaml:"volumes"`
+	Secrets      any    `yaml:"secrets"`
+	Configs      any    `yaml:"configs"`
+	Networks     any    `yaml:"networks"`
+	Labels       any    `yaml:"labels"`
+	Deploy       any    `yaml:"deploy"`
 }
 
 type fugueBuildSpec struct {
@@ -123,6 +139,8 @@ type fugueBuildSpec struct {
 	Dockerfile      string `yaml:"dockerfile"`
 	DockerfilePath  string `yaml:"dockerfile_path"`
 	BuildContextDir string `yaml:"build_context_dir"`
+	Args            map[string]string
+	Target          string `yaml:"target"`
 }
 
 func (i *Importer) InspectGitHubFugueManifest(ctx context.Context, req GitHubFugueManifestInspectRequest) (GitHubFugueManifest, error) {
@@ -182,13 +200,23 @@ func inspectFugueManifestFromRepo(repo clonedGitHubRepo) (GitHubFugueManifest, e
 	if err := validateFugueManifestVersion(file.Version); err != nil {
 		return GitHubFugueManifest{}, fmt.Errorf("invalid fugue manifest %q: %w", manifestPath, err)
 	}
-	if len(file.Services) == 0 {
+	if len(file.Services) == 0 && len(file.BackingServices) == 0 {
 		return GitHubFugueManifest{}, fmt.Errorf("fugue manifest %q does not define services", manifestPath)
 	}
 
 	vars := readComposeEnvDefaults(repo.RepoDir)
-	serviceNames := make([]string, 0, len(file.Services))
-	for name := range file.Services {
+	type manifestEntry struct {
+		Raw             fugueManifestService
+		DeclaredBacking bool
+	}
+	entries := make(map[string]manifestEntry, len(file.Services)+len(file.BackingServices))
+	serviceNames := make([]string, 0, len(file.Services)+len(file.BackingServices))
+	for name, raw := range file.Services {
+		entries[name] = manifestEntry{Raw: raw}
+		serviceNames = append(serviceNames, name)
+	}
+	for name, raw := range file.BackingServices {
+		entries[name] = manifestEntry{Raw: raw, DeclaredBacking: true}
 		serviceNames = append(serviceNames, name)
 	}
 	sort.Strings(serviceNames)
@@ -206,7 +234,8 @@ func inspectFugueManifestFromRepo(repo clonedGitHubRepo) (GitHubFugueManifest, e
 
 	seenNames := make(map[string]struct{}, len(serviceNames))
 	for _, rawName := range serviceNames {
-		service, err := resolveFugueManifestService(repo.RepoDir, rawName, file.Services[rawName], vars)
+		entry := entries[rawName]
+		service, err := resolveFugueManifestService(repo.RepoDir, rawName, entry.Raw, entry.DeclaredBacking, vars)
 		if err != nil {
 			return GitHubFugueManifest{}, err
 		}
@@ -214,6 +243,9 @@ func inspectFugueManifestFromRepo(repo clonedGitHubRepo) (GitHubFugueManifest, e
 			return GitHubFugueManifest{}, fmt.Errorf("fugue manifest %q contains duplicate normalized service name %q", manifestPath, service.Name)
 		}
 		seenNames[service.Name] = struct{}{}
+		if len(service.InferenceReport) > 0 {
+			manifest.InferenceReport = append(manifest.InferenceReport, service.InferenceReport...)
+		}
 		manifest.Services = append(manifest.Services, service)
 	}
 
@@ -247,25 +279,68 @@ func validateFugueManifestVersion(raw any) error {
 	return fmt.Errorf("unsupported version %q", version)
 }
 
-func resolveFugueManifestService(repoDir, rawName string, raw fugueManifestService, vars map[string]string) (ComposeService, error) {
+func resolveFugueManifestService(repoDir, rawName string, raw fugueManifestService, declaredBacking bool, vars map[string]string) (ComposeService, error) {
+	envFiles, fileEnv, err := readComposeServiceEnvFiles(repoDir, raw.EnvFile, vars)
+	if err != nil {
+		return ComposeService{}, fmt.Errorf("load env_file for fugue service %q: %w", rawName, err)
+	}
 	service := ComposeService{
-		Name:        model.Slugify(rawName),
-		Image:       strings.TrimSpace(raw.Image),
-		Environment: mergeFugueManifestEnvironment(raw.Env, raw.Environment, vars),
-		DependsOn:   parseComposeDependsOn(raw.DependsOn),
+		Name:         slugifyOptional(rawName),
+		Image:        strings.TrimSpace(raw.Image),
+		Environment:  mergeComposeEnvironment(fileEnv, mergeFugueManifestEnvironment(raw.Env, raw.Environment, vars)),
+		DependsOn:    parseComposeDependsOn(raw.DependsOn),
+		Bindings:     parseServiceBindings(raw.Bindings),
+		OwnerService: strings.TrimSpace(raw.OwnerService),
+		EnvFiles:     envFiles,
+		Command:      parseComposeStringList(raw.Command),
+		Entrypoint:   parseComposeStringList(raw.Entrypoint),
+		Healthcheck:  parseComposeHealthcheck(raw.Healthcheck),
+		Profiles:     parseComposeStringList(raw.Profiles),
+		Volumes:      parseComposeRefList(raw.Volumes),
+		Secrets:      parseComposeRefList(raw.Secrets),
+		Configs:      parseComposeRefList(raw.Configs),
+		Networks:     parseComposeRefList(raw.Networks),
+		Labels:       parseComposeStringMap(raw.Labels, vars),
+		Deploy:       parseComposeLooseMap(raw.Deploy),
 	}
 	if service.Name == "" {
 		return ComposeService{}, fmt.Errorf("fugue service name %q is invalid", rawName)
 	}
 
-	kind, err := resolveFugueManifestServiceKind(raw.Type, service.Image, raw.Build != nil)
-	if err != nil {
+	buildSpec, hasBuild, err := parseFugueBuildSpec(raw.Build)
+	if err != nil && raw.Build != nil {
 		return ComposeService{}, fmt.Errorf("resolve fugue service %q: %w", rawName, err)
 	}
+	service.BuildArgs = cloneStringMapLocal(buildSpec.Args)
+	service.BuildTarget = strings.TrimSpace(buildSpec.Target)
+	service.IgnoredFields = collectFugueIgnoredFields(raw, hasBuild, buildSpec)
+	if len(service.IgnoredFields) > 0 {
+		service.InferenceReport = appendInference(
+			service.InferenceReport,
+			InferenceLevelInfo,
+			"ignored_fields",
+			service.Name,
+			"preserved but not applied during import: %s",
+			strings.Join(service.IgnoredFields, ", "),
+		)
+	}
 
-	switch kind {
-	case ComposeServiceKindPostgres:
-		if raw.Build != nil {
+	serviceType := firstNonEmptyServiceType(raw.ServiceType, raw.Type, detectServiceTypeFromImage(service.Image))
+	if serviceType == "" && hasBuild {
+		serviceType = ServiceTypeApp
+	}
+	if serviceType == "" && declaredBacking {
+		serviceType = ServiceTypeCustom
+	}
+	if serviceType == "" && isComposePostgresService(service.Image) {
+		serviceType = ServiceTypePostgres
+	}
+	service.ServiceType = firstNonEmptyServiceType(serviceType, ServiceTypeApp)
+	service.BackingService = declaredBacking || (service.ServiceType != ServiceTypeApp && service.ServiceType != ServiceTypeCustom)
+
+	switch service.ServiceType {
+	case ServiceTypePostgres:
+		if hasBuild {
 			return ComposeService{}, fmt.Errorf("fugue postgres service %q must not define build", rawName)
 		}
 		if raw.Public {
@@ -275,6 +350,7 @@ func resolveFugueManifestService(repoDir, rawName string, raw fugueManifestServi
 			return ComposeService{}, fmt.Errorf("fugue postgres service %q only supports port 5432", rawName)
 		}
 		service.Kind = ComposeServiceKindPostgres
+		service.BackingService = true
 		service.InternalPort = 5432
 		postgresSpec := model.AppPostgresSpec{
 			Image:       strings.TrimSpace(raw.Image),
@@ -293,54 +369,62 @@ func resolveFugueManifestService(repoDir, rawName string, raw fugueManifestServi
 			postgresSpec.Password = firstNonEmptyEnvValue(service.Environment, "POSTGRES_PASSWORD", "DB_PASSWORD")
 		}
 		service.Postgres = &postgresSpec
+		service.InferenceReport = appendInference(
+			service.InferenceReport,
+			InferenceLevelInfo,
+			"classification",
+			service.Name,
+			"classified from fugue manifest as managed postgres backing service",
+		)
 		return service, nil
-	case ComposeServiceKindApp:
-		buildStrategy, sourceDir, dockerfilePath, buildContextDir, detectedPort, err := resolveFugueBuildInputs(repoDir, raw.Build)
-		if err != nil {
-			return ComposeService{}, fmt.Errorf("resolve build inputs for fugue service %q: %w", rawName, err)
+	default:
+		if hasBuild {
+			buildStrategy, sourceDir, dockerfilePath, buildContextDir, detectedPort, err := resolveFugueBuildInputs(repoDir, raw.Build)
+			if err != nil {
+				return ComposeService{}, fmt.Errorf("resolve build inputs for fugue service %q: %w", rawName, err)
+			}
+			if raw.Port > 0 {
+				detectedPort = raw.Port
+			}
+			service.Kind = ComposeServiceKindApp
+			service.BuildStrategy = buildStrategy
+			service.SourceDir = sourceDir
+			service.DockerfilePath = dockerfilePath
+			service.BuildContextDir = buildContextDir
+			service.InternalPort = detectedPort
+			service.Published = raw.Public
+			return service, nil
 		}
-		if raw.Port > 0 {
-			detectedPort = raw.Port
+		if strings.TrimSpace(service.Image) == "" {
+			return ComposeService{}, fmt.Errorf("fugue service %q requires build or image", rawName)
 		}
 		service.Kind = ComposeServiceKindApp
-		service.BuildStrategy = buildStrategy
-		service.SourceDir = sourceDir
-		service.DockerfilePath = dockerfilePath
-		service.BuildContextDir = buildContextDir
-		service.InternalPort = detectedPort
+		service.InternalPort = raw.Port
+		if service.InternalPort <= 0 {
+			service.InternalPort = defaultPortForService(service)
+		}
 		service.Published = raw.Public
+		if service.BackingService {
+			service.InferenceReport = appendInference(
+				service.InferenceReport,
+				InferenceLevelInfo,
+				"classification",
+				service.Name,
+				"classified from fugue manifest as service_type %q and imported as an image-backed mirrored workload",
+				service.ServiceType,
+			)
+		}
 		return service, nil
-	default:
-		return ComposeService{}, fmt.Errorf("unsupported fugue service type %q", kind)
-	}
-}
-
-func resolveFugueManifestServiceKind(rawType, image string, hasBuild bool) (string, error) {
-	switch strings.TrimSpace(strings.ToLower(rawType)) {
-	case "":
-		if !hasBuild && isComposePostgresService(image) {
-			return ComposeServiceKindPostgres, nil
-		}
-		if !hasBuild {
-			return "", fmt.Errorf("app services require build")
-		}
-		return ComposeServiceKindApp, nil
-	case ComposeServiceKindApp:
-		if !hasBuild {
-			return "", fmt.Errorf("app services require build")
-		}
-		return ComposeServiceKindApp, nil
-	case ComposeServiceKindPostgres:
-		return ComposeServiceKindPostgres, nil
-	default:
-		return "", fmt.Errorf("unsupported service type %q", rawType)
 	}
 }
 
 func resolveFugueBuildInputs(repoDir string, raw any) (string, string, string, string, int, error) {
-	spec, err := parseFugueBuildSpec(raw)
+	spec, hasBuild, err := parseFugueBuildSpec(raw)
 	if err != nil {
 		return "", "", "", "", 0, err
+	}
+	if !hasBuild {
+		return "", "", "", "", 0, fmt.Errorf("build is required")
 	}
 
 	strategy := normalizeGitHubBuildStrategy(firstNonEmptyString(spec.Strategy, spec.BuildStrategy))
@@ -405,12 +489,12 @@ func resolveFugueBuildInputs(repoDir string, raw any) (string, string, string, s
 	}
 }
 
-func parseFugueBuildSpec(raw any) (fugueBuildSpec, error) {
+func parseFugueBuildSpec(raw any) (fugueBuildSpec, bool, error) {
 	switch value := raw.(type) {
 	case nil:
-		return fugueBuildSpec{}, fmt.Errorf("build is required")
+		return fugueBuildSpec{}, false, nil
 	case string:
-		return fugueBuildSpec{Context: strings.TrimSpace(value)}, nil
+		return fugueBuildSpec{Context: strings.TrimSpace(value)}, true, nil
 	case map[string]any:
 		spec := fugueBuildSpec{}
 		if strategyRaw, ok := value["strategy"]; ok {
@@ -434,10 +518,59 @@ func parseFugueBuildSpec(raw any) (fugueBuildSpec, error) {
 		if buildContextDirRaw, ok := value["build_context_dir"]; ok {
 			spec.BuildContextDir = stringifyComposeValue(buildContextDirRaw)
 		}
-		return spec, nil
+		spec.Target = stringifyComposeValue(value["target"])
+		spec.Args = parseComposeStringMap(value["args"], nil)
+		return spec, true, nil
 	default:
-		return fugueBuildSpec{}, fmt.Errorf("unsupported build spec type %T", raw)
+		return fugueBuildSpec{}, false, fmt.Errorf("unsupported build spec type %T", raw)
 	}
+}
+
+func collectFugueIgnoredFields(raw fugueManifestService, hasBuild bool, buildSpec fugueBuildSpec) []string {
+	fields := make([]string, 0, 12)
+	appendIfPresent := func(name string, raw any) {
+		switch value := raw.(type) {
+		case nil:
+			return
+		case string:
+			if strings.TrimSpace(value) != "" {
+				fields = append(fields, name)
+			}
+		case []any:
+			if len(value) > 0 {
+				fields = append(fields, name)
+			}
+		case map[string]any:
+			if len(value) > 0 {
+				fields = append(fields, name)
+			}
+		default:
+			fields = append(fields, name)
+		}
+	}
+	appendIfPresent("command", raw.Command)
+	appendIfPresent("entrypoint", raw.Entrypoint)
+	appendIfPresent("healthcheck", raw.Healthcheck)
+	appendIfPresent("profiles", raw.Profiles)
+	appendIfPresent("volumes", raw.Volumes)
+	appendIfPresent("secrets", raw.Secrets)
+	appendIfPresent("configs", raw.Configs)
+	appendIfPresent("networks", raw.Networks)
+	appendIfPresent("labels", raw.Labels)
+	appendIfPresent("deploy", raw.Deploy)
+	if hasBuild {
+		if len(buildSpec.Args) > 0 {
+			fields = append(fields, "build.args")
+		}
+		if strings.TrimSpace(buildSpec.Target) != "" {
+			fields = append(fields, "build.target")
+		}
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	sort.Strings(fields)
+	return fields
 }
 
 func normalizeBuildDockerfilePath(contextDir, dockerfilePath string) string {
@@ -488,12 +621,12 @@ func mergeFugueManifestEnvironment(primary, secondary any, vars map[string]strin
 func resolveFugueManifestPrimaryService(rawPrimary string, services []ComposeService) (string, error) {
 	rawPrimary = strings.TrimSpace(rawPrimary)
 	if rawPrimary != "" {
-		primary := model.Slugify(rawPrimary)
+		primary := slugifyOptional(rawPrimary)
 		for _, service := range services {
 			if service.Name != primary {
 				continue
 			}
-			if service.Kind != ComposeServiceKindApp {
+			if service.Kind != ComposeServiceKindApp || service.BackingService {
 				return "", fmt.Errorf("primary_service %q must point to an app service", rawPrimary)
 			}
 			return primary, nil
@@ -503,7 +636,7 @@ func resolveFugueManifestPrimaryService(rawPrimary string, services []ComposeSer
 
 	publicServices := make([]string, 0)
 	for _, service := range services {
-		if service.Kind == ComposeServiceKindApp && service.Published {
+		if service.Kind == ComposeServiceKindApp && !service.BackingService && service.Published {
 			publicServices = append(publicServices, service.Name)
 		}
 	}

@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"sort"
 	"strings"
 
 	"fugue/internal/httpx"
@@ -92,7 +93,7 @@ func sanitizeGitHubTemplateManifest(manifest *sourceimport.GitHubFugueManifest) 
 
 	services := make([]map[string]any, 0, len(manifest.Services))
 	for _, service := range manifest.Services {
-		services = append(services, map[string]any{
+		serviceInfo := map[string]any{
 			"build_context_dir": service.BuildContextDir,
 			"build_strategy":    service.BuildStrategy,
 			"compose_service":   service.Name,
@@ -101,15 +102,29 @@ func sanitizeGitHubTemplateManifest(manifest *sourceimport.GitHubFugueManifest) 
 			"kind":              service.Kind,
 			"published":         service.Published,
 			"service":           service.Name,
+			"service_type":      service.ServiceType,
 			"source_dir":        service.SourceDir,
-		})
+		}
+		if service.BackingService {
+			serviceInfo["backing_service"] = true
+		}
+		if len(service.Bindings) > 0 {
+			targets := make([]string, 0, len(service.Bindings))
+			for _, binding := range service.Bindings {
+				targets = append(targets, binding.Service)
+			}
+			sort.Strings(targets)
+			serviceInfo["binding_targets"] = targets
+		}
+		services = append(services, serviceInfo)
 	}
 
 	return map[string]any{
-		"manifest_path":   manifest.ManifestPath,
-		"primary_service": manifest.PrimaryService,
-		"services":        services,
-		"warnings":        append([]string(nil), manifest.Warnings...),
+		"manifest_path":    manifest.ManifestPath,
+		"primary_service":  manifest.PrimaryService,
+		"services":         services,
+		"warnings":         append([]string(nil), manifest.Warnings...),
+		"inference_report": append([]sourceimport.TopologyInference(nil), manifest.InferenceReport...),
 	}
 }
 

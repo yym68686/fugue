@@ -3532,6 +3532,19 @@ components:
           type: string
         description:
           type: string
+    TopologyInference:
+      type: object
+      additionalProperties: false
+      required: [level, category, service, message]
+      properties:
+        level:
+          type: string
+        category:
+          type: string
+        service:
+          type: string
+        message:
+          type: string
     ImportServiceDetail:
       type: object
       additionalProperties: false
@@ -3555,6 +3568,12 @@ components:
           format: int32
         compose_service:
           type: string
+        service_type:
+          type: string
+        binding_targets:
+          type: array
+          items:
+            type: string
         public_url:
           type: string
         owns_postgres:
@@ -3562,7 +3581,7 @@ components:
     ComposeStackSummary:
       type: object
       additionalProperties: false
-      required: [compose_path, primary_service, services, warnings]
+      required: [compose_path, primary_service, services, warnings, inference_report]
       properties:
         compose_path:
           type: string
@@ -3576,10 +3595,14 @@ components:
           type: array
           items:
             type: string
+        inference_report:
+          type: array
+          items:
+            $ref: "#/components/schemas/TopologyInference"
     FugueManifestSummary:
       type: object
       additionalProperties: false
-      required: [manifest_path, primary_service, services, warnings]
+      required: [manifest_path, primary_service, services, warnings, inference_report]
       properties:
         manifest_path:
           type: string
@@ -3593,6 +3616,10 @@ components:
           type: array
           items:
             type: string
+        inference_report:
+          type: array
+          items:
+            $ref: "#/components/schemas/TopologyInference"
     ImportGitHubIdempotency:
       type: object
       additionalProperties: false
@@ -4321,6 +4348,14 @@ components:
           format: int32
         compose_service:
           type: string
+        service_type:
+          type: string
+        backing_service:
+          type: boolean
+        binding_targets:
+          type: array
+          items:
+            type: string
         published:
           type: boolean
         source_dir:
@@ -4332,7 +4367,7 @@ components:
     InspectGitHubTemplateManifest:
       type: object
       additionalProperties: false
-      required: [manifest_path, primary_service, services, warnings]
+      required: [manifest_path, primary_service, services, warnings, inference_report]
       properties:
         manifest_path:
           type: string
@@ -4346,6 +4381,10 @@ components:
           type: array
           items:
             type: string
+        inference_report:
+          type: array
+          items:
+            $ref: "#/components/schemas/TopologyInference"
     TemplateVariable:
       type: object
       additionalProperties: false

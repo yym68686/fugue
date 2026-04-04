@@ -3,9 +3,6 @@ package sourceimport
 import (
 	"context"
 	"errors"
-	"fmt"
-	"net"
-	"net/url"
 	"strings"
 
 	"fugue/internal/model"
@@ -70,78 +67,60 @@ func (i *Importer) SuggestUploadedComposeServiceEnv(_ context.Context, req Uploa
 }
 
 func suggestComposeServiceEnvFromRepo(repo clonedGitHubRepo, composeService string, appHosts map[string]string, managedPostgresByOwner map[string]model.AppPostgresSpec) (map[string]string, error) {
-	services, err := inspectImportableServicesFromRepo(repo)
+	topology, err := inspectImportableTopologyFromRepo(repo)
 	if err != nil {
 		return nil, err
 	}
-	return suggestComposeServiceEnv(services, composeService, appHosts, managedPostgresByOwner)
+	return suggestComposeServiceEnvForTopology(topology, composeService, appHosts, managedPostgresByOwner)
 }
 
-func inspectImportableServicesFromRepo(repo clonedGitHubRepo) ([]ComposeService, error) {
+func inspectImportableTopologyFromRepo(repo clonedGitHubRepo) (NormalizedTopology, error) {
 	manifest, err := inspectFugueManifestFromRepo(repo)
 	switch {
 	case err == nil:
-		return manifest.Services, nil
+		return manifest.Topology(), nil
 	case err != nil && !errors.Is(err, ErrFugueManifestNotFound):
-		return nil, err
+		return NormalizedTopology{}, err
 	}
 
 	stack, err := inspectComposeStackFromRepo(repo)
 	switch {
 	case err == nil:
-		return stack.Services, nil
+		return stack.Topology(), nil
 	case err != nil && !errors.Is(err, ErrComposeNotFound):
-		return nil, err
+		return NormalizedTopology{}, err
 	default:
-		return nil, ErrSourceTopologyNotFound
+		return NormalizedTopology{}, ErrSourceTopologyNotFound
 	}
 }
 
+func inspectImportableServicesFromRepo(repo clonedGitHubRepo) ([]ComposeService, error) {
+	topology, err := inspectImportableTopologyFromRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	return topology.Services, nil
+}
+
 func suggestComposeServiceEnv(services []ComposeService, composeService string, appHosts map[string]string, managedPostgresByOwner map[string]model.AppPostgresSpec) (map[string]string, error) {
-	composeService = model.Slugify(composeService)
+	return suggestComposeServiceEnvForTopology(NormalizedTopology{Services: append([]ComposeService(nil), services...)}, composeService, appHosts, managedPostgresByOwner)
+}
+
+func suggestComposeServiceEnvForTopology(topology NormalizedTopology, composeService string, appHosts map[string]string, managedPostgresByOwner map[string]model.AppPostgresSpec) (map[string]string, error) {
+	composeService = slugifyOptional(composeService)
 	if composeService == "" {
 		return nil, nil
 	}
-
-	appServices := make([]ComposeService, 0, len(services))
-	postgresServices := make([]ComposeService, 0)
-	var target *ComposeService
-	for i := range services {
-		service := services[i]
-		switch service.Kind {
-		case ComposeServiceKindApp:
-			appServices = append(appServices, service)
-		case ComposeServiceKindPostgres:
-			postgresServices = append(postgresServices, service)
-		}
-		if service.Name == composeService {
-			target = &services[i]
-		}
+	plan, err := AnalyzeNormalizedTopology(topology, "")
+	if err != nil {
+		return nil, err
 	}
-	if target == nil {
-		return nil, fmt.Errorf("compose service %q not found in source topology", composeService)
-	}
-
-	serviceHosts := cloneComposeServiceMap(appHosts)
-	if serviceHosts == nil {
-		serviceHosts = map[string]string{}
-	}
-	for _, postgres := range postgresServices {
-		consumers := composePostgresConsumersForSync(appServices, postgres.Name)
-		if len(consumers) == 0 {
-			continue
-		}
-		owner := pickComposePostgresOwnerForSync(consumers)
-		spec, ok := managedPostgresByOwner[owner.Name]
-		if !ok || strings.TrimSpace(spec.ServiceName) == "" {
-			continue
-		}
-		serviceHosts[postgres.Name] = model.PostgresRWServiceName(spec.ServiceName)
-	}
-
-	env := rewriteComposeEnvironmentForSync(target.Environment, serviceHosts)
-	if spec, ok := managedPostgresByOwner[target.Name]; ok {
-		env = applyManagedPostgresEnvironmentForSync(env, spec)
+	env, _, err := ResolveTopologyServiceEnvironment(plan, composeService, TopologyDeployment{
+		ServiceHosts:           cloneStringMapLocal(appHosts),
+		ManagedPostgresByOwner: cloneManagedPostgresMap(managedPostgresByOwner),
+	})
+	if err != nil {
+		return nil, err
 	}
 	if len(env) == 0 {
 		return nil, nil
@@ -149,201 +128,13 @@ func suggestComposeServiceEnv(services []ComposeService, composeService string, 
 	return env, nil
 }
 
-func composePostgresConsumersForSync(appServices []ComposeService, postgresService string) []ComposeService {
-	consumers := make([]ComposeService, 0)
-	for _, service := range appServices {
-		if composeServiceDependsOnForSync(service, postgresService) || composeEnvironmentReferencesServiceForSync(service.Environment, postgresService) {
-			consumers = append(consumers, service)
-		}
-	}
-	return consumers
-}
-
-func pickComposePostgresOwnerForSync(consumers []ComposeService) ComposeService {
-	best := consumers[0]
-	bestScore := composePostgresOwnerScoreForSync(best)
-	for _, service := range consumers[1:] {
-		score := composePostgresOwnerScoreForSync(service)
-		if score > bestScore || (score == bestScore && service.Name < best.Name) {
-			best = service
-			bestScore = score
-		}
-	}
-	return best
-}
-
-func composePostgresOwnerScoreForSync(service ComposeService) int {
-	score := 0
-	switch service.Name {
-	case "api":
-		score += 100
-	case "backend":
-		score += 90
-	case "server":
-		score += 80
-	case "app":
-		score += 60
-	}
-	if strings.Contains(service.Name, "api") || strings.Contains(service.Name, "back") {
-		score += 30
-	}
-	return score
-}
-
-func composeServiceDependsOnForSync(service ComposeService, target string) bool {
-	for _, dep := range service.DependsOn {
-		if dep == target {
-			return true
-		}
-	}
-	return false
-}
-
-func composeEnvironmentReferencesServiceForSync(env map[string]string, service string) bool {
-	for _, value := range env {
-		if composeEnvValueReferencesServiceForSync(value, service) {
-			return true
-		}
-	}
-	return false
-}
-
-func rewriteComposeEnvironmentForSync(env map[string]string, hosts map[string]string) map[string]string {
-	if len(env) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(env))
-	for key, value := range env {
-		out[key] = rewriteComposeEnvValueForSync(value, hosts)
-	}
-	return out
-}
-
-func applyManagedPostgresEnvironmentForSync(env map[string]string, spec model.AppPostgresSpec) map[string]string {
-	if len(env) == 0 {
-		return nil
-	}
-	out := cloneComposeServiceMap(env)
-	host := model.PostgresRWServiceName(spec.ServiceName)
-	overrideManagedPostgresEnvIfPresentForSync(out, "DB_HOST", host)
-	overrideManagedPostgresEnvIfPresentForSync(out, "POSTGRES_HOST", host)
-	overrideManagedPostgresEnvIfPresentForSync(out, "DB_PORT", "5432")
-	overrideManagedPostgresEnvIfPresentForSync(out, "POSTGRES_PORT", "5432")
-	overrideManagedPostgresEnvIfPresentForSync(out, "DB_NAME", spec.Database)
-	overrideManagedPostgresEnvIfPresentForSync(out, "POSTGRES_DB", spec.Database)
-	overrideManagedPostgresEnvIfPresentForSync(out, "POSTGRES_DATABASE", spec.Database)
-	overrideManagedPostgresEnvIfPresentForSync(out, "DB_USER", spec.User)
-	overrideManagedPostgresEnvIfPresentForSync(out, "POSTGRES_USER", spec.User)
-	overrideManagedPostgresEnvIfPresentForSync(out, "DB_PASSWORD", spec.Password)
-	overrideManagedPostgresEnvIfPresentForSync(out, "POSTGRES_PASSWORD", spec.Password)
-
-	for key, value := range out {
-		if rewritten, ok := rewriteManagedPostgresURLForSync(value, spec); ok {
-			out[key] = rewritten
-		}
-	}
-	return out
-}
-
-func overrideManagedPostgresEnvIfPresentForSync(env map[string]string, key, value string) {
-	if _, ok := env[key]; ok {
-		env[key] = value
-	}
-}
-
-func rewriteManagedPostgresURLForSync(value string, spec model.AppPostgresSpec) (string, bool) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return value, false
-	}
-	parsed, err := url.Parse(value)
-	if err != nil || parsed.Scheme == "" || parsed.Hostname() == "" {
-		return value, false
-	}
-	if !strings.Contains(strings.ToLower(parsed.Scheme), "postgres") {
-		return value, false
-	}
-	legacyHost := strings.TrimSpace(spec.ServiceName)
-	host := model.PostgresRWServiceName(spec.ServiceName)
-	if !strings.EqualFold(parsed.Hostname(), legacyHost) && !strings.EqualFold(parsed.Hostname(), host) {
-		return value, false
-	}
-
-	port := parsed.Port()
-	if port == "" {
-		port = "5432"
-	}
-	parsed.Host = net.JoinHostPort(host, port)
-	parsed.User = url.UserPassword(spec.User, spec.Password)
-	if db := strings.TrimSpace(spec.Database); db != "" {
-		parsed.Path = "/" + strings.TrimPrefix(db, "/")
-	}
-	return parsed.String(), true
-}
-
-func rewriteComposeEnvValueForSync(value string, hosts map[string]string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return value
-	}
-	if replacement, ok := hosts[value]; ok {
-		return replacement
-	}
-
-	if parsed, err := url.Parse(value); err == nil && parsed.Scheme != "" && parsed.Host != "" {
-		host := parsed.Hostname()
-		if replacement, ok := hosts[host]; ok {
-			if port := parsed.Port(); port != "" {
-				parsed.Host = net.JoinHostPort(replacement, port)
-			} else {
-				parsed.Host = replacement
-			}
-			return parsed.String()
-		}
-	}
-
-	if host, port, err := net.SplitHostPort(value); err == nil {
-		if replacement, ok := hosts[host]; ok {
-			return net.JoinHostPort(replacement, port)
-		}
-	}
-
-	for service, replacement := range hosts {
-		value = strings.ReplaceAll(value, "://"+service+":", "://"+replacement+":")
-		value = strings.ReplaceAll(value, "://"+service+"/", "://"+replacement+"/")
-		value = strings.ReplaceAll(value, "@"+service+":", "@"+replacement+":")
-		value = strings.ReplaceAll(value, "@"+service+"/", "@"+replacement+"/")
-	}
-	return value
-}
-
-func composeEnvValueReferencesServiceForSync(value, service string) bool {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return false
-	}
-	if value == service {
-		return true
-	}
-	if parsed, err := url.Parse(value); err == nil && parsed.Scheme != "" && parsed.Hostname() == service {
-		return true
-	}
-	if host, _, err := net.SplitHostPort(value); err == nil && host == service {
-		return true
-	}
-	return strings.Contains(value, "://"+service+":") ||
-		strings.Contains(value, "://"+service+"/") ||
-		strings.Contains(value, "@"+service+":") ||
-		strings.Contains(value, "@"+service+"/")
-}
-
-func cloneComposeServiceMap(values map[string]string) map[string]string {
+func cloneManagedPostgresMap(values map[string]model.AppPostgresSpec) map[string]model.AppPostgresSpec {
 	if len(values) == 0 {
 		return nil
 	}
-	cloned := make(map[string]string, len(values))
+	out := make(map[string]model.AppPostgresSpec, len(values))
 	for key, value := range values {
-		cloned[key] = value
+		out[key] = value
 	}
-	return cloned
+	return out
 }

@@ -255,3 +255,74 @@ services:
 		t.Fatalf("unexpected second template variable: %+v", parsed.Template.Variables[1])
 	}
 }
+
+func TestInspectFugueManifestParsesBackingServicesAndBindings(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte("FROM scratch\nEXPOSE 3000\n"), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	manifest := `version: 1
+primary_service: api
+services:
+  api:
+    public: true
+    build:
+      strategy: dockerfile
+      context: .
+      dockerfile: Dockerfile
+    bindings:
+      - db
+      - cache
+backing_services:
+  db:
+    type: postgres
+    image: postgres:17.6-alpine
+    owner_service: api
+  cache:
+    service_type: redis
+    image: redis:7-alpine
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "fugue.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write fugue manifest: %v", err)
+	}
+
+	parsed, err := inspectFugueManifestFromRepo(clonedGitHubRepo{
+		RepoOwner:      "example",
+		RepoName:       "demo",
+		RepoDir:        repoDir,
+		Branch:         "main",
+		CommitSHA:      "abcdef123456",
+		DefaultAppName: "demo",
+	})
+	if err != nil {
+		t.Fatalf("inspect fugue manifest: %v", err)
+	}
+	if len(parsed.Services) != 3 {
+		t.Fatalf("expected 3 services, got %d", len(parsed.Services))
+	}
+
+	var apiService, dbService, cacheService ComposeService
+	for _, service := range parsed.Services {
+		switch service.Name {
+		case "api":
+			apiService = service
+		case "db":
+			dbService = service
+		case "cache":
+			cacheService = service
+		}
+	}
+
+	if len(apiService.Bindings) != 2 {
+		t.Fatalf("expected explicit api bindings, got %+v", apiService.Bindings)
+	}
+	if dbService.Kind != ComposeServiceKindPostgres || !dbService.BackingService || dbService.OwnerService != "api" {
+		t.Fatalf("unexpected db service: %+v", dbService)
+	}
+	if cacheService.Kind != ComposeServiceKindApp || cacheService.ServiceType != ServiceTypeRedis || !cacheService.BackingService {
+		t.Fatalf("unexpected cache service: %+v", cacheService)
+	}
+	if len(parsed.InferenceReport) == 0 {
+		t.Fatalf("expected inference report, got %+v", parsed)
+	}
+}

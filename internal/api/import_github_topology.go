@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"fugue/internal/model"
@@ -11,54 +12,64 @@ import (
 )
 
 type importedGitHubTopology struct {
-	PrimaryApp     model.App
-	PrimaryOp      model.Operation
-	Apps           []model.App
-	Operations     []model.Operation
-	PrimaryService string
-	ServiceDetails []map[string]any
-	Warnings       []string
+	PrimaryApp      model.App
+	PrimaryOp       model.Operation
+	Apps            []model.App
+	Operations      []model.Operation
+	PrimaryService  string
+	ServiceDetails  []map[string]any
+	Warnings        []string
+	InferenceReport []sourceimport.TopologyInference
 }
 
-func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantID string, req importGitHubRequest, runtimeID string, replicas int, description string, baseName string, services []sourceimport.ComposeService, preferredPrimary string, warnings []string) (importedGitHubTopology, error) {
-	appServices, postgresServices := splitComposeServices(services)
-	if len(appServices) == 0 {
-		return importedGitHubTopology{}, invalidComposeImportf("topology does not define any deployable application services")
-	}
-	if err := validateComposeDependencies(appServices, postgresServices); err != nil {
-		return importedGitHubTopology{}, invalidComposeImport(err)
-	}
+type composeImportNamingStrategy struct {
+	MaxAttempts       int
+	MaxServiceNameLen int
+}
 
-	primaryService, err := resolveTopologyPrimaryService(appServices, preferredPrimary)
+var defaultComposeImportNamingStrategy = composeImportNamingStrategy{
+	MaxAttempts:       8,
+	MaxServiceNameLen: 50,
+}
+
+func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantID string, req importGitHubRequest, runtimeID string, replicas int, description string, baseName string, topology sourceimport.NormalizedTopology) (importedGitHubTopology, error) {
+	topologyPlan, err := sourceimport.AnalyzeNormalizedTopology(topology, topology.PrimaryService)
 	if err != nil {
 		return importedGitHubTopology{}, invalidComposeImport(err)
 	}
 
-	appNames, primaryHost, err := s.allocateComposeAppNames(tenantID, req.ProjectID, baseName, appServices, primaryService.Name)
+	appNames, primaryHost, err := s.allocateComposeAppNames(tenantID, req.ProjectID, baseName, topologyPlan.Deployable, topologyPlan.PrimaryService)
 	if err != nil {
 		return importedGitHubTopology{}, err
 	}
 
-	postgresByOwner, postgresHosts, postgresWarnings, err := buildComposePostgresPlan(appServices, postgresServices, appNames)
-	if err != nil {
-		return importedGitHubTopology{}, invalidComposeImport(err)
+	deployment := sourceimport.TopologyDeployment{
+		ServiceHosts:           cloneStringMap(appNames),
+		ManagedPostgresByOwner: map[string]model.AppPostgresSpec{},
+	}
+	for _, backing := range topologyPlan.ManagedBackings {
+		ownerAppName, ok := appNames[backing.OwnerService]
+		if !ok {
+			return importedGitHubTopology{}, invalidComposeImportf("managed backing service %q resolved to unknown owner %q", backing.Service.Name, backing.OwnerService)
+		}
+		spec, specErr := sourceimport.ManagedPostgresSpec(backing.Service, ownerAppName)
+		if specErr != nil {
+			return importedGitHubTopology{}, invalidComposeImport(specErr)
+		}
+		deployment.ManagedPostgresByOwner[backing.OwnerService] = spec
 	}
 
-	serviceHosts := make(map[string]string, len(appNames)+len(postgresHosts))
-	for serviceName, appName := range appNames {
-		serviceHosts[serviceName] = appName
-	}
-	for serviceName, host := range postgresHosts {
-		serviceHosts[serviceName] = host
-	}
-
-	plans := make([]composeAppPlan, 0, len(appServices))
-	sortedServices := orderComposeServicesForCreation(appServices, primaryService.Name)
-	for _, service := range sortedServices {
-		suggestedEnv := rewriteComposeEnvironment(service.Environment, serviceHosts)
+	plans := make([]composeAppPlan, 0, len(topologyPlan.Deployable))
+	inferenceReport := append([]sourceimport.TopologyInference(nil), topologyPlan.InferenceReport...)
+	for _, service := range topologyPlan.Deployable {
+		suggestedEnv, envInferences, resolveErr := sourceimport.ResolveTopologyServiceEnvironment(topologyPlan, service.Name, deployment)
+		if resolveErr != nil {
+			return importedGitHubTopology{}, invalidComposeImport(resolveErr)
+		}
+		inferenceReport = append(inferenceReport, envInferences...)
 		var route *model.AppRoute
 		requestedPort := 0
-		if service.Name == primaryService.Name {
+		if service.Name == topologyPlan.PrimaryService {
 			requestedPort = req.ServicePort
 			route = &model.AppRoute{
 				Hostname:    primaryHost,
@@ -74,10 +85,9 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 		}
 
 		var postgres *model.AppPostgresSpec
-		if spec, ok := postgresByOwner[service.Name]; ok {
+		if spec, ok := deployment.ManagedPostgresByOwner[service.Name]; ok {
 			specCopy := spec
 			postgres = &specCopy
-			suggestedEnv = applyManagedPostgresEnvironment(suggestedEnv, specCopy)
 		}
 		suggestedEnv = mergeImportedEnv(suggestedEnv, req.Env)
 
@@ -172,55 +182,131 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 	}
 
 	serviceDetails := make([]map[string]any, 0, len(plans))
-	for _, plan := range plans {
-		app := appsByService[plan.Service.Name]
-		op := opsByService[plan.Service.Name]
-		buildStrategy := strings.TrimSpace(plan.Service.BuildStrategy)
-		if buildStrategy == "" && plan.Source.Type == model.AppSourceTypeDockerImage {
+	for _, appPlan := range plans {
+		app := appsByService[appPlan.Service.Name]
+		op := opsByService[appPlan.Service.Name]
+		buildStrategy := strings.TrimSpace(appPlan.Service.BuildStrategy)
+		if buildStrategy == "" && appPlan.Source.Type == model.AppSourceTypeDockerImage {
 			buildStrategy = model.AppSourceTypeDockerImage
 		}
 		serviceInfo := map[string]any{
-			"service":         plan.Service.Name,
-			"kind":            plan.Service.Kind,
+			"service":         appPlan.Service.Name,
+			"kind":            appPlan.Service.Kind,
 			"app_id":          app.ID,
 			"app_name":        app.Name,
 			"operation_id":    op.ID,
 			"build_strategy":  buildStrategy,
 			"internal_port":   firstServicePort(app.Spec),
-			"compose_service": plan.Service.Name,
+			"compose_service": appPlan.Service.Name,
 		}
 		if app.Route != nil && strings.TrimSpace(app.Route.PublicURL) != "" {
 			serviceInfo["public_url"] = app.Route.PublicURL
 		}
-		if _, ok := postgresByOwner[plan.Service.Name]; ok {
+		serviceInfo["service_type"] = strings.TrimSpace(appPlan.Service.ServiceType)
+		if bindings := topologyPlan.BindingsBySource[appPlan.Service.Name]; len(bindings) > 0 {
+			targets := make([]string, 0, len(bindings))
+			for _, binding := range bindings {
+				targets = append(targets, binding.Service)
+			}
+			sort.Strings(targets)
+			serviceInfo["binding_targets"] = targets
+		}
+		if _, ok := deployment.ManagedPostgresByOwner[appPlan.Service.Name]; ok {
 			serviceInfo["owns_postgres"] = true
 		}
 		serviceDetails = append(serviceDetails, serviceInfo)
 	}
 
 	return importedGitHubTopology{
-		PrimaryApp:     appsByService[primaryService.Name],
-		PrimaryOp:      opsByService[primaryService.Name],
-		Apps:           apps,
-		Operations:     ops,
-		PrimaryService: primaryService.Name,
-		ServiceDetails: serviceDetails,
-		Warnings:       append(append([]string(nil), warnings...), postgresWarnings...),
+		PrimaryApp:      appsByService[topologyPlan.PrimaryService],
+		PrimaryOp:       opsByService[topologyPlan.PrimaryService],
+		Apps:            apps,
+		Operations:      ops,
+		PrimaryService:  topologyPlan.PrimaryService,
+		ServiceDetails:  serviceDetails,
+		Warnings:        append([]string(nil), topologyPlan.Warnings...),
+		InferenceReport: inferenceReport,
 	}, nil
 }
 
-func resolveTopologyPrimaryService(services []sourceimport.ComposeService, preferred string) (sourceimport.ComposeService, error) {
-	preferred = strings.TrimSpace(preferred)
-	if preferred == "" {
-		return pickPrimaryComposeService(services), nil
+func (s *Server) allocateComposeAppNames(tenantID, projectID, baseName string, services []sourceimport.ComposeService, primaryService string) (map[string]string, string, error) {
+	apps, err := s.store.ListApps(tenantID, false)
+	if err != nil {
+		return nil, "", err
 	}
-	preferred = model.Slugify(preferred)
-	for _, service := range services {
-		if service.Name == preferred {
-			return service, nil
+
+	for attempt := 0; attempt < defaultComposeImportNamingStrategy.MaxAttempts; attempt++ {
+		primaryName, primaryHost := buildImportIdentity(baseName, s.appBaseDomain, attempt)
+		if s.isReservedAppHostname(primaryHost) {
+			continue
 		}
+
+		names := make(map[string]string, len(services))
+		usedNames := make(map[string]struct{}, len(services))
+		conflict := false
+		for _, service := range services {
+			name := primaryName
+			if service.Name != primaryService {
+				name = truncateSlug(primaryName+"-"+service.Name, defaultComposeImportNamingStrategy.MaxServiceNameLen)
+			}
+			if name == "" {
+				conflict = true
+				break
+			}
+			if _, exists := usedNames[name]; exists {
+				conflict = true
+				break
+			}
+			names[service.Name] = name
+			usedNames[name] = struct{}{}
+		}
+		if conflict {
+			continue
+		}
+
+		hostConflict := false
+		for _, existing := range apps {
+			if existing.ProjectID != projectID {
+				continue
+			}
+			for _, planned := range names {
+				if strings.EqualFold(strings.TrimSpace(existing.Name), planned) {
+					hostConflict = true
+					break
+				}
+			}
+			if hostConflict {
+				break
+			}
+		}
+		if hostConflict {
+			continue
+		}
+		for _, existing := range apps {
+			if existing.Route == nil {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(existing.Route.Hostname), primaryHost) {
+				hostConflict = true
+				break
+			}
+		}
+		if hostConflict {
+			continue
+		}
+		if _, err := s.store.GetAppByHostname(primaryHost); err == nil {
+			continue
+		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, "", err
+		}
+		return names, primaryHost, nil
 	}
-	return sourceimport.ComposeService{}, fmt.Errorf("primary service %q does not exist", preferred)
+
+	return nil, "", store.ErrConflict
+}
+
+func resolveTopologyPrimaryService(services []sourceimport.ComposeService, preferred string) (sourceimport.ComposeService, error) {
+	return sourceimport.SelectPrimaryTopologyService(services, preferred)
 }
 
 func buildQueuedComposeServiceSource(req importGitHubRequest, service sourceimport.ComposeService) (model.AppSource, error) {

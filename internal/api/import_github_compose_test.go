@@ -235,10 +235,11 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 		1,
 		"Imported from GitHub",
 		"claude-code-hub",
-		[]sourceimport.ComposeService{
+		sourceimport.NormalizedTopology{Services: []sourceimport.ComposeService{
 			{
 				Name:         "app",
 				Kind:         sourceimport.ComposeServiceKindApp,
+				ServiceType:  sourceimport.ServiceTypeCustom,
 				Image:        "ghcr.io/ding113/claude-code-hub:latest",
 				InternalPort: 3000,
 				Published:    true,
@@ -249,9 +250,11 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 				DependsOn: []string{"postgres", "redis"},
 			},
 			{
-				Name:  "postgres",
-				Kind:  sourceimport.ComposeServiceKindPostgres,
-				Image: "postgres:18",
+				Name:           "postgres",
+				Kind:           sourceimport.ComposeServiceKindPostgres,
+				ServiceType:    sourceimport.ServiceTypePostgres,
+				BackingService: true,
+				Image:          "postgres:18",
 				Environment: map[string]string{
 					"POSTGRES_DB":       "claude_code_hub",
 					"POSTGRES_USER":     "postgres",
@@ -259,13 +262,13 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 				},
 			},
 			{
-				Name:  "redis",
-				Kind:  sourceimport.ComposeServiceKindApp,
-				Image: "redis:7-alpine",
+				Name:           "redis",
+				Kind:           sourceimport.ComposeServiceKindApp,
+				ServiceType:    sourceimport.ServiceTypeRedis,
+				BackingService: true,
+				Image:          "redis:7-alpine",
 			},
-		},
-		"",
-		nil,
+		}},
 	)
 	if err != nil {
 		t.Fatalf("import resolved topology: %v", err)
@@ -278,6 +281,9 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 	}
 	if len(result.Operations) != 2 {
 		t.Fatalf("expected 2 operations, got %d", len(result.Operations))
+	}
+	if len(result.InferenceReport) == 0 {
+		t.Fatalf("expected topology inference report, got %+v", result)
 	}
 
 	appsByService := map[string]model.App{}
