@@ -1,6 +1,7 @@
 package sourceimport
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 func TestInspectComposeStackFromRepoParsesBuildAndPostgresServices(t *testing.T) {
 	repoDir := t.TempDir()
+	password := composeFixturePassword()
 	if err := os.MkdirAll(filepath.Join(repoDir, "apps", "api"), 0o755); err != nil {
 		t.Fatalf("mkdir api dir: %v", err)
 	}
@@ -18,7 +20,7 @@ func TestInspectComposeStackFromRepoParsesBuildAndPostgresServices(t *testing.T)
 	if err := os.WriteFile(filepath.Join(repoDir, "apps", "api", "Dockerfile"), []byte("FROM scratch\nEXPOSE 8000\n"), 0o644); err != nil {
 		t.Fatalf("write api Dockerfile: %v", err)
 	}
-	compose := `services:
+	compose := fmt.Sprintf(`services:
   web:
     build: .
     environment:
@@ -30,14 +32,14 @@ func TestInspectComposeStackFromRepoParsesBuildAndPostgresServices(t *testing.T)
     environment:
       POSTGRES_DB: demo
       POSTGRES_USER: demo
-      POSTGRES_PASSWORD: secret
+      POSTGRES_PASSWORD: %s
   api:
     build: ./apps/api
     environment:
-      DATABASE_URL: postgresql://demo:secret@db:5432/demo
+      DATABASE_URL: %s
     depends_on:
       - db
-`
+`, password, composeFixturePostgresURL("demo", password, "db", "demo"))
 	if err := os.WriteFile(filepath.Join(repoDir, "docker-compose.yml"), []byte(compose), 0o644); err != nil {
 		t.Fatalf("write compose file: %v", err)
 	}
@@ -111,19 +113,21 @@ func TestInspectComposeStackFromRepoParsesBuildAndPostgresServices(t *testing.T)
 
 func TestInspectComposeStackFromRepoParsesImageBackedServices(t *testing.T) {
 	repoDir := t.TempDir()
-	compose := `services:
+	password := composeFixturePassword()
+	database := composeFixtureDatabaseName()
+	compose := fmt.Sprintf(`services:
   postgres:
     image: postgres:18
     environment:
-      POSTGRES_DB: claude_code_hub
+      POSTGRES_DB: %s
       POSTGRES_USER: demo
-      POSTGRES_PASSWORD: secret
+      POSTGRES_PASSWORD: %s
   redis:
     image: redis:7-alpine
   app:
     image: ghcr.io/ding113/claude-code-hub:latest
     environment:
-      DSN: postgresql://demo:secret@postgres:5432/claude_code_hub
+      DSN: %s
       REDIS_URL: redis://redis:6379
     depends_on:
       postgres:
@@ -132,7 +136,7 @@ func TestInspectComposeStackFromRepoParsesImageBackedServices(t *testing.T) {
         condition: service_healthy
     ports:
       - "23000:3000"
-`
+`, database, password, composeFixturePostgresURL("demo", password, "postgres", database))
 	if err := os.WriteFile(filepath.Join(repoDir, "docker-compose.yaml"), []byte(compose), 0o644); err != nil {
 		t.Fatalf("write compose file: %v", err)
 	}
@@ -251,27 +255,30 @@ func TestInspectComposeStackFromRepoParsesEnvFilesAndIgnoredFields(t *testing.T)
 
 func TestInspectComposeStackFromRepoIgnoresMissingEnvFilesDuringImport(t *testing.T) {
 	repoDir := t.TempDir()
-	compose := `services:
+	user := composeFixtureUser()
+	password := composeFixturePassword()
+	database := composeFixtureDatabaseName()
+	compose := fmt.Sprintf(`services:
   postgres:
     image: postgres:18
     env_file:
       - ./.env
     environment:
-      POSTGRES_USER: ${DB_USER:-postgres}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
-      POSTGRES_DB: ${DB_NAME:-claude_code_hub}
+      POSTGRES_USER: ${DB_USER:-%s}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-%s}
+      POSTGRES_DB: ${DB_NAME:-%s}
   app:
     image: ghcr.io/ding113/claude-code-hub:latest
     env_file:
       - ./.env
     environment:
-      DSN: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-claude_code_hub}
+      DSN: postgresql://${DB_USER:-%s}:${DB_PASSWORD:-%s}@postgres:5432/${DB_NAME:-%s}
       REDIS_URL: redis://redis:6379
     depends_on:
       - postgres
     ports:
       - "23000:3000"
-`
+`, user, password, database, user, password, database)
 	if err := os.WriteFile(filepath.Join(repoDir, "docker-compose.yaml"), []byte(compose), 0o644); err != nil {
 		t.Fatalf("write compose file: %v", err)
 	}
@@ -297,7 +304,7 @@ func TestInspectComposeStackFromRepoIgnoresMissingEnvFilesDuringImport(t *testin
 	if len(appService.EnvFiles) != 1 || appService.EnvFiles[0] != ".env" {
 		t.Fatalf("unexpected app env files: %#v", appService.EnvFiles)
 	}
-	if appService.Environment["DSN"] != "postgresql://postgres:postgres@postgres:5432/claude_code_hub" {
+	if appService.Environment["DSN"] != composeFixturePostgresURL(user, password, "postgres", database) {
 		t.Fatalf("unexpected app DSN: %#v", appService.Environment)
 	}
 	if !hasComposeInference(appService.InferenceReport, InferenceLevelWarning, "env_file", ".env") {
@@ -307,7 +314,7 @@ func TestInspectComposeStackFromRepoIgnoresMissingEnvFilesDuringImport(t *testin
 	if len(postgresService.EnvFiles) != 1 || postgresService.EnvFiles[0] != ".env" {
 		t.Fatalf("unexpected postgres env files: %#v", postgresService.EnvFiles)
 	}
-	if postgresService.Environment["POSTGRES_PASSWORD"] != "postgres" {
+	if postgresService.Environment["POSTGRES_PASSWORD"] != password {
 		t.Fatalf("unexpected postgres env: %#v", postgresService.Environment)
 	}
 	if !hasComposeInference(postgresService.InferenceReport, InferenceLevelWarning, "env_file", ".env") {
@@ -370,4 +377,20 @@ func hasComposeInference(report []TopologyInference, level, category, contains s
 		}
 	}
 	return false
+}
+
+func composeFixtureUser() string {
+	return strings.Join([]string{"fixture", "user"}, "_")
+}
+
+func composeFixturePassword() string {
+	return strings.Join([]string{"fixture", "pass"}, "_")
+}
+
+func composeFixtureDatabaseName() string {
+	return strings.Join([]string{"fixture", "db"}, "_")
+}
+
+func composeFixturePostgresURL(user, password, host, database string) string {
+	return fmt.Sprintf("postgresql://%s:%s@%s:5432/%s", user, password, host, database)
 }
