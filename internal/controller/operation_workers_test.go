@@ -7,6 +7,7 @@ import (
 	"log"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -630,6 +631,193 @@ func TestForegroundActivateClaimsDependencyReadyDeployFirst(t *testing.T) {
 	}
 	if claimed.ID != appDeploy.ID {
 		t.Fatalf("expected app deploy %s after dependency ready, got %s", appDeploy.ID, claimed.ID)
+	}
+}
+
+func TestForegroundActivateFailsDeployWithMissingComposeDependency(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo-app", "", model.AppSpec{
+		Image:     "registry.push.example/fugue-apps/demo-app:git-old",
+		Ports:     []int{3000},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:             model.AppSourceTypeDockerImage,
+		ImageRef:         "ghcr.io/example/demo-app:old",
+		ComposeService:   "app",
+		ComposeDependsOn: []string{"redis"},
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create app service: %v", err)
+	}
+
+	appSpec := app.Spec
+	appSpec.Image = "registry.push.example/fugue-apps/demo-app:new"
+	appSource := *app.Source
+	appDeploy, err := stateStore.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		Type:          model.OperationTypeDeploy,
+		AppID:         app.ID,
+		DesiredSpec:   &appSpec,
+		DesiredSource: &appSource,
+	})
+	if err != nil {
+		t.Fatalf("create app deploy: %v", err)
+	}
+
+	svc := &Service{
+		Store:  stateStore,
+		Logger: log.New(io.Discard, "", 0),
+	}
+
+	if _, found, err := svc.claimNextPendingOperationInLane(operationLaneForegroundActivate); err != nil {
+		t.Fatalf("claim blocked deploy: %v", err)
+	} else if found {
+		t.Fatal("expected blocked deploy to fail instead of being claimed")
+	}
+
+	op, err := stateStore.GetOperation(appDeploy.ID)
+	if err != nil {
+		t.Fatalf("get blocked deploy: %v", err)
+	}
+	if op.Status != model.OperationStatusFailed {
+		t.Fatalf("expected blocked deploy status %q, got %q", model.OperationStatusFailed, op.Status)
+	}
+	if !strings.Contains(op.ErrorMessage, `compose dependency "redis"`) {
+		t.Fatalf("expected compose dependency failure message, got %q", op.ErrorMessage)
+	}
+}
+
+func TestForegroundActivateFailsBlockedComposeDeployAndClaimsQueuedDelete(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo-app", "", model.AppSpec{
+		Image:     "registry.push.example/fugue-apps/demo-app:git-old",
+		Ports:     []int{3000},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:             model.AppSourceTypeDockerImage,
+		ImageRef:         "ghcr.io/example/demo-app:old",
+		ComposeService:   "app",
+		ComposeDependsOn: []string{"redis"},
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create app service: %v", err)
+	}
+
+	redis, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo-redis", "", model.AppSpec{
+		Image:     "registry.push.example/fugue-apps/demo-redis:git-old",
+		Ports:     []int{6379},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:           model.AppSourceTypeDockerImage,
+		ImageRef:       "redis:7-alpine",
+		ComposeService: "redis",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create redis service: %v", err)
+	}
+
+	redisSpec := redis.Spec
+	redisSource := *redis.Source
+	redisImport, err := stateStore.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		Type:          model.OperationTypeImport,
+		AppID:         redis.ID,
+		DesiredSpec:   &redisSpec,
+		DesiredSource: &redisSource,
+	})
+	if err != nil {
+		t.Fatalf("create redis import: %v", err)
+	}
+	if _, found, err := stateStore.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim redis import: %v", err)
+	} else if !found {
+		t.Fatal("expected redis import to be claimed")
+	}
+	if _, err := stateStore.FailOperation(redisImport.ID, "resolve image digest: MANIFEST_UNKNOWN"); err != nil {
+		t.Fatalf("fail redis import: %v", err)
+	}
+
+	appSpec := app.Spec
+	appSpec.Image = "registry.push.example/fugue-apps/demo-app:new"
+	appSource := *app.Source
+	appDeploy, err := stateStore.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		Type:          model.OperationTypeDeploy,
+		AppID:         app.ID,
+		DesiredSpec:   &appSpec,
+		DesiredSource: &appSource,
+	})
+	if err != nil {
+		t.Fatalf("create app deploy: %v", err)
+	}
+
+	deleteOp, err := stateStore.CreateOperation(model.Operation{
+		TenantID: tenant.ID,
+		Type:     model.OperationTypeDelete,
+		AppID:    app.ID,
+	})
+	if err != nil {
+		t.Fatalf("create queued delete: %v", err)
+	}
+
+	svc := &Service{
+		Store:  stateStore,
+		Logger: log.New(io.Discard, "", 0),
+	}
+
+	claimed, found, err := svc.claimNextPendingOperationInLane(operationLaneForegroundActivate)
+	if err != nil {
+		t.Fatalf("claim after dependency failure: %v", err)
+	}
+	if !found {
+		t.Fatal("expected queued delete to become claimable after blocked deploy fails")
+	}
+	if claimed.ID != deleteOp.ID {
+		t.Fatalf("expected delete operation %s after dependency failure, got %s", deleteOp.ID, claimed.ID)
+	}
+
+	op, err := stateStore.GetOperation(appDeploy.ID)
+	if err != nil {
+		t.Fatalf("get blocked deploy: %v", err)
+	}
+	if op.Status != model.OperationStatusFailed {
+		t.Fatalf("expected blocked deploy status %q, got %q", model.OperationStatusFailed, op.Status)
+	}
+	if !strings.Contains(op.ErrorMessage, `"failed"`) && !strings.Contains(op.ErrorMessage, "MANIFEST_UNKNOWN") {
+		t.Fatalf("expected dependency failure details in deploy error, got %q", op.ErrorMessage)
 	}
 }
 

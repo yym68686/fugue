@@ -26,10 +26,28 @@ var composeFileCandidates = []string{
 }
 
 const (
-	ComposeServiceKindApp         = "app"
-	ComposeServiceKindPostgres    = "postgres"
-	maxComposePersistentSeedBytes = 1 << 20
+	ComposeServiceKindApp                 = "app"
+	ComposeServiceKindPostgres            = "postgres"
+	maxComposePersistentSeedBytes         = 1 << 20
+	defaultComposePersistentFileMode      = 0o644
+	defaultComposePersistentDirectoryMode = 0o755
 )
+
+var composeMissingPersistentFileBaseNames = map[string]struct{}{
+	".env":          {},
+	"authors":       {},
+	"containerfile": {},
+	"copying":       {},
+	"dockerfile":    {},
+	"gemfile":       {},
+	"license":       {},
+	"makefile":      {},
+	"notice":        {},
+	"pipfile":       {},
+	"procfile":      {},
+	"rakefile":      {},
+	"readme":        {},
+}
 
 type GitHubComposeInspectRequest struct {
 	RepoURL       string
@@ -621,7 +639,17 @@ func resolveComposePersistentStorageMount(repoDir, serviceName string, raw any) 
 	info, err := os.Stat(fullPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, false, appendInference(nil, InferenceLevelWarning, "volumes", serviceName, "ignored repository bind mount %q -> %q because the source path does not exist in the repository", sourcePath, targetPath), nil
+			mount := inferMissingComposePersistentStorageMount(sourcePath, targetPath)
+			return &mount, true, appendInference(
+				nil,
+				InferenceLevelWarning,
+				"volumes",
+				serviceName,
+				"inferred missing repository bind mount %q -> %q as empty persistent %s storage because the source path does not exist in the repository",
+				sourcePath,
+				targetPath,
+				mount.Kind,
+			), nil
 		}
 		return nil, false, nil, err
 	}
@@ -660,6 +688,41 @@ func resolveComposePersistentStorageMount(repoDir, serviceName string, raw any) 
 		report = appendInference(report, InferenceLevelWarning, "volumes", serviceName, "compose bind mount %q -> %q was declared read_only; Fugue imported it as writable persistent storage", sourcePath, targetPath)
 	}
 	return &mount, true, report, nil
+}
+
+func inferMissingComposePersistentStorageMount(sourcePath, targetPath string) model.AppPersistentStorageMount {
+	kind := inferMissingComposePersistentStorageMountKind(sourcePath, targetPath)
+	mount := model.AppPersistentStorageMount{
+		Kind: kind,
+		Path: targetPath,
+	}
+	switch kind {
+	case model.AppPersistentStorageMountKindFile:
+		mount.Mode = defaultComposePersistentFileMode
+	case model.AppPersistentStorageMountKindDirectory:
+		mount.Mode = defaultComposePersistentDirectoryMode
+	}
+	return mount
+}
+
+func inferMissingComposePersistentStorageMountKind(sourcePath, targetPath string) string {
+	if composePersistentPathLooksLikeFile(sourcePath) || composePersistentPathLooksLikeFile(targetPath) {
+		return model.AppPersistentStorageMountKindFile
+	}
+	return model.AppPersistentStorageMountKindDirectory
+}
+
+func composePersistentPathLooksLikeFile(raw string) bool {
+	base := strings.TrimSpace(filepath.Base(strings.TrimSpace(raw)))
+	switch base {
+	case "", ".", "..", string(filepath.Separator):
+		return false
+	}
+	if strings.Contains(base, ".") {
+		return true
+	}
+	_, ok := composeMissingPersistentFileBaseNames[strings.ToLower(base)]
+	return ok
 }
 
 func parseComposePersistentStorageBinding(raw any) (string, string, bool, bool, string) {

@@ -327,38 +327,60 @@ func (s *Service) startPendingOperationWorkers(ctx context.Context, lane operati
 }
 
 func (s *Service) claimNextPendingOperationInLane(lane operationLane) (model.Operation, bool, error) {
-	activeOps, err := s.Store.ListActiveOperations()
-	if err != nil {
-		return model.Operation{}, false, fmt.Errorf("list active operations: %w", err)
-	}
-	apps, err := s.Store.ListApps("", true)
-	if err != nil {
-		return model.Operation{}, false, fmt.Errorf("list apps: %w", err)
-	}
-	appsByID, composeAppsByProject := indexAppsForPendingOperations(apps)
-	activeOpsByApp := indexActiveOperationsByApp(activeOps)
+	for {
+		activeOps, err := s.Store.ListActiveOperations()
+		if err != nil {
+			return model.Operation{}, false, fmt.Errorf("list active operations: %w", err)
+		}
+		apps, err := s.Store.ListApps("", true)
+		if err != nil {
+			return model.Operation{}, false, fmt.Errorf("list apps: %w", err)
+		}
+		appsByID, composeAppsByProject := indexAppsForPendingOperations(apps)
+		activeOpsByApp := indexActiveOperationsByApp(activeOps)
 
-	for _, op := range activeOps {
-		if op.Status != model.OperationStatusPending {
+		restartScan := false
+		for _, op := range activeOps {
+			if op.Status != model.OperationStatusPending {
+				continue
+			}
+			if !pendingOperationMatchesLane(op, lane) {
+				continue
+			}
+			app, ok := appsByID[op.AppID]
+			ready, terminalReason := pendingOperationReadyForClaim(op, app, ok, activeOpsByApp, composeAppsByProject)
+			if terminalReason != "" {
+				if s.Logger != nil {
+					s.Logger.Printf("operation %s failed before claim: %s", op.ID, terminalReason)
+				}
+				if _, failErr := s.Store.FailOperation(op.ID, terminalReason); failErr != nil {
+					if errors.Is(failErr, store.ErrConflict) || errors.Is(failErr, store.ErrNotFound) {
+						restartScan = true
+						break
+					}
+					return model.Operation{}, false, fmt.Errorf("fail blocked pending operation %s: %w", op.ID, failErr)
+				}
+				restartScan = true
+				break
+			}
+			if !ready {
+				continue
+			}
+			claimed, claimedOK, claimErr := s.Store.TryClaimPendingOperation(op.ID)
+			if claimErr != nil {
+				return model.Operation{}, false, fmt.Errorf("try claim operation %s: %w", op.ID, claimErr)
+			}
+			if !claimedOK {
+				restartScan = true
+				break
+			}
+			return claimed, true, nil
+		}
+		if restartScan {
 			continue
 		}
-		if !pendingOperationMatchesLane(op, lane) {
-			continue
-		}
-		app, ok := appsByID[op.AppID]
-		if !pendingOperationReadyForClaim(op, app, ok, activeOpsByApp, composeAppsByProject) {
-			continue
-		}
-		claimed, claimedOK, claimErr := s.Store.TryClaimPendingOperation(op.ID)
-		if claimErr != nil {
-			return model.Operation{}, false, fmt.Errorf("try claim operation %s: %w", op.ID, claimErr)
-		}
-		if !claimedOK {
-			continue
-		}
-		return claimed, true, nil
+		return model.Operation{}, false, nil
 	}
-	return model.Operation{}, false, nil
 }
 
 func (s *Service) drainPendingOperationsInLane(ctx context.Context, lane operationLane) error {

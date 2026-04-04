@@ -399,6 +399,86 @@ func TestInspectComposeStackFromRepoSupportsOptionalEnvFileEntries(t *testing.T)
 	}
 }
 
+func TestInspectComposeStackFromRepoInfersMissingBindMountsAsEmptyPersistentStorage(t *testing.T) {
+	repoDir := t.TempDir()
+	compose := `services:
+  app:
+    image: ghcr.io/example/app:latest
+    volumes:
+      - ./api.yaml:/home/api.yaml
+      - ./data:/home/data
+      - ./Dockerfile:/workspace/Dockerfile
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "docker-compose.yml"), []byte(compose), 0o644); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+
+	stack, err := inspectComposeStackFromRepo(clonedGitHubRepo{
+		RepoOwner:      "example",
+		RepoName:       "demo",
+		RepoDir:        repoDir,
+		Branch:         "main",
+		CommitSHA:      "abcdef123456",
+		DefaultAppName: "demo",
+	})
+	if err != nil {
+		t.Fatalf("inspect compose stack: %v", err)
+	}
+	if len(stack.Services) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(stack.Services))
+	}
+
+	service := stack.Services[0]
+	if service.PersistentStorage == nil || len(service.PersistentStorage.Mounts) != 3 {
+		t.Fatalf("expected inferred persistent storage mounts, got %+v", service.PersistentStorage)
+	}
+
+	fileMount := service.PersistentStorage.Mounts[0]
+	if fileMount.Kind != model.AppPersistentStorageMountKindFile || fileMount.Path != "/home/api.yaml" {
+		t.Fatalf("unexpected inferred file mount: %+v", fileMount)
+	}
+	if fileMount.SeedContent != "" {
+		t.Fatalf("expected missing file mount to be empty, got %q", fileMount.SeedContent)
+	}
+	if fileMount.Mode != defaultComposePersistentFileMode {
+		t.Fatalf("expected missing file mount mode %o, got %o", defaultComposePersistentFileMode, fileMount.Mode)
+	}
+
+	dirMount := service.PersistentStorage.Mounts[1]
+	if dirMount.Kind != model.AppPersistentStorageMountKindDirectory || dirMount.Path != "/home/data" {
+		t.Fatalf("unexpected inferred directory mount: %+v", dirMount)
+	}
+	if dirMount.Mode != defaultComposePersistentDirectoryMode {
+		t.Fatalf("expected missing directory mount mode %o, got %o", defaultComposePersistentDirectoryMode, dirMount.Mode)
+	}
+
+	extensionlessFileMount := service.PersistentStorage.Mounts[2]
+	if extensionlessFileMount.Kind != model.AppPersistentStorageMountKindFile || extensionlessFileMount.Path != "/workspace/Dockerfile" {
+		t.Fatalf("unexpected inferred extensionless file mount: %+v", extensionlessFileMount)
+	}
+
+	for _, field := range service.IgnoredFields {
+		if field == "volumes" {
+			t.Fatalf("expected inferred bind mounts not to remain in ignored fields, got %#v", service.IgnoredFields)
+		}
+	}
+
+	reportMessages := make([]string, 0, len(service.InferenceReport))
+	for _, inference := range service.InferenceReport {
+		reportMessages = append(reportMessages, inference.Message)
+	}
+	reportText := strings.Join(reportMessages, "\n")
+	for _, expected := range []string{
+		`inferred missing repository bind mount "./api.yaml" -> "/home/api.yaml" as empty persistent file storage because the source path does not exist in the repository`,
+		`inferred missing repository bind mount "./data" -> "/home/data" as empty persistent directory storage because the source path does not exist in the repository`,
+		`inferred missing repository bind mount "./Dockerfile" -> "/workspace/Dockerfile" as empty persistent file storage because the source path does not exist in the repository`,
+	} {
+		if !strings.Contains(reportText, expected) {
+			t.Fatalf("expected inference report to contain %q, got %s", expected, reportText)
+		}
+	}
+}
+
 func hasComposeInference(report []TopologyInference, level, category, contains string) bool {
 	for _, inference := range report {
 		if inference.Level != level || inference.Category != category {

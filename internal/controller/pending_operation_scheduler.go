@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"fmt"
 	"strings"
 
 	"fugue/internal/model"
@@ -57,38 +58,42 @@ func pendingOperationReadyForClaim(
 	hasApp bool,
 	activeOpsByApp map[string][]model.Operation,
 	composeAppsByProject map[string]map[string]model.App,
-) bool {
+) (bool, string) {
 	if !pendingOperationHasClaimTurn(op, activeOpsByApp[op.AppID]) {
-		return false
+		return false, ""
 	}
 	if op.Type != model.OperationTypeDeploy || !hasApp {
-		return true
+		return true, ""
 	}
 
 	dependencies := composeDependenciesForOperation(op, app)
 	if len(dependencies) == 0 {
-		return true
+		return true, ""
 	}
 	projectApps := composeAppsByProject[strings.TrimSpace(app.ProjectID)]
 	if len(projectApps) == 0 {
-		return false
+		return false, missingComposeDependencyMessage(op, app, strings.TrimSpace(dependencies[0]))
 	}
 	for _, dependency := range dependencies {
-		dependencyApp, ok := projectApps[strings.TrimSpace(dependency)]
+		dependency = strings.TrimSpace(dependency)
+		if dependency == "" {
+			continue
+		}
+		dependencyApp, ok := projectApps[dependency]
 		if !ok {
-			return false
+			return false, missingComposeDependencyMessage(op, app, dependency)
 		}
 		if dependencyApp.ID == app.ID {
 			continue
 		}
 		if len(activeOpsByApp[dependencyApp.ID]) > 0 {
-			return false
+			return false, ""
 		}
 		if !strings.EqualFold(strings.TrimSpace(dependencyApp.Status.Phase), "deployed") {
-			return false
+			return false, unavailableComposeDependencyMessage(op, app, dependency, dependencyApp)
 		}
 	}
-	return true
+	return true, ""
 }
 
 func pendingOperationHasClaimTurn(op model.Operation, appOps []model.Operation) bool {
@@ -121,4 +126,45 @@ func operationCreatedBefore(left, right model.Operation) bool {
 		return left.ID < right.ID
 	}
 	return left.CreatedAt.Before(right.CreatedAt)
+}
+
+func composeServiceNameForOperation(op model.Operation, app model.App) string {
+	if op.DesiredSource != nil {
+		if service := strings.TrimSpace(op.DesiredSource.ComposeService); service != "" {
+			return service
+		}
+	}
+	if app.Source != nil {
+		if service := strings.TrimSpace(app.Source.ComposeService); service != "" {
+			return service
+		}
+	}
+	return strings.TrimSpace(app.Name)
+}
+
+func missingComposeDependencyMessage(op model.Operation, app model.App, dependency string) string {
+	service := composeServiceNameForOperation(op, app)
+	if service == "" {
+		return fmt.Sprintf("compose dependency %q is missing from the project", dependency)
+	}
+	return fmt.Sprintf("compose dependency %q for service %q is missing from the project", dependency, service)
+}
+
+func unavailableComposeDependencyMessage(op model.Operation, app model.App, dependency string, dependencyApp model.App) string {
+	service := composeServiceNameForOperation(op, app)
+	phase := strings.TrimSpace(dependencyApp.Status.Phase)
+	if phase == "" {
+		phase = "unknown"
+	}
+	message := strings.TrimSpace(dependencyApp.Status.LastMessage)
+
+	base := fmt.Sprintf("compose dependency %q", dependency)
+	if service != "" {
+		base = fmt.Sprintf("%s for service %q", base, service)
+	}
+	base = fmt.Sprintf("%s cannot proceed because app %q is %q", base, strings.TrimSpace(dependencyApp.Name), phase)
+	if message == "" {
+		return base
+	}
+	return fmt.Sprintf("%s: %s", base, message)
 }
