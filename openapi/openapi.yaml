@@ -45,6 +45,21 @@ tags:
   - name: Agent
     description: Runtime agent control-plane endpoints.
 paths:
+  /button.svg:
+    get:
+      operationId: getDeployButton
+      summary: Get Deploy Button
+      tags: [System]
+      x-fugue-handler: handleButtonSVG
+      responses:
+        '200':
+          description: Successful response
+          content:
+            image/svg+xml:
+              schema:
+                type: string
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /healthz:
     get:
       operationId: healthz
@@ -1205,16 +1220,17 @@ paths:
         content:
           multipart/form-data:
             schema:
-              type: object
-              additionalProperties: true
+              $ref: "#/components/schemas/ImportUploadMultipartRequest"
+            encoding:
+              request:
+                contentType: application/json
       responses:
         '202':
           description: Successful response
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/ImportUploadResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}:
@@ -4492,6 +4508,58 @@ components:
           $ref: "#/components/schemas/AppPostgresSpec"
         idempotency_key:
           type: string
+    ImportUploadRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        app_id:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        project:
+          $ref: "#/components/schemas/ImportProjectRequest"
+        source_dir:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        build_strategy:
+          type: string
+        runtime_id:
+          type: string
+        replicas:
+          type: integer
+          format: int32
+        service_port:
+          type: integer
+          format: int32
+        dockerfile_path:
+          type: string
+        build_context_dir:
+          type: string
+        env:
+          $ref: "#/components/schemas/StringMap"
+        config_content:
+          type: string
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppFile"
+        postgres:
+          $ref: "#/components/schemas/AppPostgresSpec"
+    ImportUploadMultipartRequest:
+      type: object
+      additionalProperties: false
+      required: [request, archive]
+      properties:
+        request:
+          $ref: "#/components/schemas/ImportUploadRequest"
+        archive:
+          type: string
+          format: binary
     ImportGitHubResponse:
       type: object
       additionalProperties: false
@@ -4516,6 +4584,26 @@ components:
           $ref: "#/components/schemas/ImportGitHubIdempotency"
         request_in_progress:
           type: boolean
+    ImportUploadResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        app:
+          $ref: "#/components/schemas/App"
+        operation:
+          $ref: "#/components/schemas/Operation"
+        apps:
+          type: array
+          items:
+            $ref: "#/components/schemas/App"
+        operations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Operation"
+        compose_stack:
+          $ref: "#/components/schemas/ComposeStackSummary"
+        fugue_manifest:
+          $ref: "#/components/schemas/FugueManifestSummary"
     ImportImageRequest:
       type: object
       additionalProperties: false

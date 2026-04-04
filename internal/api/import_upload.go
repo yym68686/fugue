@@ -13,6 +13,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/sourceimport"
 	"fugue/internal/store"
 )
 
@@ -163,11 +164,6 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	source, err := buildQueuedUploadSource(upload, req.SourceDir, req.DockerfilePath, req.BuildContextDir, buildStrategy, "", "")
-	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
-		return
-	}
 
 	description := strings.TrimSpace(req.Description)
 	if description == "" {
@@ -179,6 +175,75 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if baseName == "" {
 		baseName = "app"
+	}
+
+	replicas := req.Replicas
+	if replicas <= 0 {
+		replicas = 1
+	}
+	runtimeID := strings.TrimSpace(req.RuntimeID)
+	if runtimeID == "" {
+		runtimeID = "runtime_managed_shared"
+	}
+
+	if shouldInspectUploadTopologyImport(req, buildStrategy) {
+		topology, inspectErr := s.importer.InspectUploadedImportableTopology(r.Context(), sourceimport.UploadTopologyInspectRequest{
+			ArchiveFilename:  sourceFileName,
+			ArchiveSHA256:    upload.SHA256,
+			ArchiveSizeBytes: upload.SizeBytes,
+			ArchiveData:      archiveBytes,
+			AppName:          baseName,
+		})
+		switch {
+		case inspectErr == nil:
+			project, created, err := s.resolveImportProjectFields(tenantID, req.ProjectID, req.Project)
+			if err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
+			req.ProjectID = project.ID
+			var cleanupProject *model.Project
+			if created {
+				projectCopy := project
+				cleanupProject = &projectCopy
+				s.appendAudit(principal, "project.create", "project", project.ID, project.TenantID, map[string]string{"name": project.Name})
+			}
+			cleanupEnabled := true
+			defer func() {
+				if !cleanupEnabled {
+					return
+				}
+				if err := s.cleanupImportArtifacts(cleanupProject, nil); err != nil {
+					s.log.Printf("cleanup failed after upload topology import error for tenant=%s upload=%s: %v", tenantID, upload.ID, err)
+				}
+			}()
+
+			result, err := s.importResolvedUploadTopology(principal, tenantID, req, upload, runtimeID, replicas, description, baseName, topology)
+			if err != nil {
+				if errors.Is(err, store.ErrConflict) {
+					httpx.WriteError(w, http.StatusConflict, err.Error())
+					return
+				}
+				if errors.Is(err, errInvalidComposeImport) {
+					httpx.WriteError(w, http.StatusBadRequest, err.Error())
+					return
+				}
+				s.writeStoreError(w, err)
+				return
+			}
+			cleanupEnabled = false
+			httpx.WriteJSON(w, http.StatusAccepted, uploadTopologyImportResponse(topology, result))
+			return
+		case inspectErr != nil && !errors.Is(inspectErr, sourceimport.ErrSourceTopologyNotFound):
+			httpx.WriteError(w, http.StatusBadRequest, inspectErr.Error())
+			return
+		}
+	}
+
+	source, err := buildQueuedUploadSource(upload, req.SourceDir, req.DockerfilePath, req.BuildContextDir, buildStrategy, "", "")
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	project, _, err := s.resolveImportProjectFields(tenantID, req.ProjectID, req.Project)
@@ -194,11 +259,7 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		runtimeID := strings.TrimSpace(req.RuntimeID)
-		if runtimeID == "" {
-			runtimeID = "runtime_managed_shared"
-		}
-		spec, err := s.buildImportedAppSpec(source.BuildStrategy, candidateName, "", runtimeID, req.Replicas, effectiveImportServicePort(req.ServicePort, 0), req.ConfigContent, req.Files, req.Postgres, req.Env)
+		spec, err := s.buildImportedAppSpec(source.BuildStrategy, candidateName, "", runtimeID, replicas, effectiveImportServicePort(req.ServicePort, 0), req.ConfigContent, req.Files, req.Postgres, req.Env)
 		if err != nil {
 			httpx.WriteError(w, http.StatusBadRequest, err.Error())
 			return
@@ -249,6 +310,50 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 		"app":       sanitizeAppForAPI(app),
 		"operation": sanitizeOperationForAPI(op),
 	})
+}
+
+func shouldInspectUploadTopologyImport(req importUploadRequest, buildStrategy string) bool {
+	if strings.TrimSpace(req.AppID) != "" {
+		return false
+	}
+	if normalizeBuildStrategy(buildStrategy) != model.AppBuildStrategyAuto {
+		return false
+	}
+	if strings.TrimSpace(req.SourceDir) != "" || strings.TrimSpace(req.DockerfilePath) != "" || strings.TrimSpace(req.BuildContextDir) != "" {
+		return false
+	}
+	if strings.TrimSpace(req.ConfigContent) != "" || len(req.Files) > 0 || req.Postgres != nil {
+		return false
+	}
+	return true
+}
+
+func uploadTopologyImportResponse(topology sourceimport.NormalizedTopology, result importedGitHubTopology) map[string]any {
+	response := map[string]any{
+		"app":        sanitizeAppForAPI(result.PrimaryApp),
+		"operation":  sanitizeOperationForAPI(result.PrimaryOp),
+		"apps":       sanitizeAppsForAPI(result.Apps),
+		"operations": sanitizeOperationsForAPI(result.Operations),
+	}
+	switch strings.TrimSpace(topology.SourceKind) {
+	case sourceimport.TopologySourceKindFugue:
+		response["fugue_manifest"] = map[string]any{
+			"manifest_path":    topology.SourcePath,
+			"primary_service":  result.PrimaryService,
+			"services":         result.ServiceDetails,
+			"warnings":         result.Warnings,
+			"inference_report": result.InferenceReport,
+		}
+	default:
+		response["compose_stack"] = map[string]any{
+			"compose_path":     topology.SourcePath,
+			"primary_service":  result.PrimaryService,
+			"services":         result.ServiceDetails,
+			"warnings":         result.Warnings,
+			"inference_report": result.InferenceReport,
+		}
+	}
+	return response
 }
 
 func (s *Server) handleGetSourceUploadArchive(w http.ResponseWriter, r *http.Request) {

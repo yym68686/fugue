@@ -5,6 +5,7 @@ package api
 import "net/http"
 
 func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
+	mux.Handle("GET /button.svg", http.HandlerFunc(s.handleButtonSVG))
 	mux.Handle("GET /healthz", http.HandlerFunc(s.handleHealthz))
 	mux.Handle("GET /install/join-cluster.sh", http.HandlerFunc(s.handleJoinClusterInstallScript))
 	mux.Handle("GET /readyz", http.HandlerFunc(s.handleReadyz))

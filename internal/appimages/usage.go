@@ -15,6 +15,74 @@ const bytesPerGiB int64 = 1 << 30
 
 type InspectFunc func(ctx context.Context, imageRef string) (bool, map[string]int64, error)
 
+func ManagedImageRefs(
+	app model.App,
+	ops []model.Operation,
+	registryPushBase string,
+	registryPullBase string,
+) []string {
+	refs := collectAppImageRefs(app, ops, registryPushBase, registryPullBase)
+	if len(refs) == 0 {
+		return nil
+	}
+
+	sorted := make([]string, 0, len(refs))
+	for imageRef := range refs {
+		sorted = append(sorted, imageRef)
+	}
+	sort.Strings(sorted)
+	return sorted
+}
+
+func ManagedImageRefSet(
+	apps []model.App,
+	ops []model.Operation,
+	registryPushBase string,
+	registryPullBase string,
+) map[string]struct{} {
+	opsByAppID := make(map[string][]model.Operation)
+	for _, op := range ops {
+		appID := strings.TrimSpace(op.AppID)
+		if appID == "" {
+			continue
+		}
+		opsByAppID[appID] = append(opsByAppID[appID], op)
+	}
+
+	refs := make(map[string]struct{})
+	for _, app := range apps {
+		for imageRef := range collectAppImageRefs(app, opsByAppID[app.ID], registryPushBase, registryPullBase) {
+			refs[imageRef] = struct{}{}
+		}
+	}
+	return refs
+}
+
+func DeletableManagedImageRefs(
+	deletedApp model.App,
+	deletedAppOps []model.Operation,
+	remainingApps []model.App,
+	remainingOps []model.Operation,
+	registryPushBase string,
+	registryPullBase string,
+) []string {
+	targetRefs := collectAppImageRefs(deletedApp, deletedAppOps, registryPushBase, registryPullBase)
+	if len(targetRefs) == 0 {
+		return nil
+	}
+
+	remainingRefs := ManagedImageRefSet(remainingApps, remainingOps, registryPushBase, registryPullBase)
+	deletable := make([]string, 0, len(targetRefs))
+	for imageRef := range targetRefs {
+		if _, inUse := remainingRefs[imageRef]; inUse {
+			continue
+		}
+		deletable = append(deletable, imageRef)
+	}
+	sort.Strings(deletable)
+	return deletable
+}
+
 func MeasureTenantStorageBytes(
 	ctx context.Context,
 	inspect InspectFunc,

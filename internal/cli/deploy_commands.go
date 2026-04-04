@@ -377,10 +377,7 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 	if err != nil {
 		return err
 	}
-	return c.finishImportBundle(client, importBundle{
-		PrimaryApp: response.App,
-		PrimaryOp:  response.Operation,
-	}, opts.Wait)
+	return c.finishImportBundle(client, bundleFromUploadResponse(response), opts.Wait)
 }
 
 func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingDir string) error {
@@ -542,6 +539,28 @@ func resolveDeployPath(pathArg, compatDir string) (string, error) {
 }
 
 func bundleFromGitHubResponse(response importGitHubResponse) importBundle {
+	bundle := importBundle{
+		Apps:          dedupeApps(response.Apps, response.App),
+		Operations:    dedupeOperations(response.Operations, response.Operation),
+		ComposeStack:  response.ComposeStack,
+		FugueManifest: response.FugueManifest,
+	}
+	if response.App != nil {
+		bundle.PrimaryApp = *response.App
+	}
+	if response.Operation != nil {
+		bundle.PrimaryOp = *response.Operation
+	}
+	if bundle.PrimaryApp.ID == "" && len(bundle.Apps) > 0 {
+		bundle.PrimaryApp = bundle.Apps[0]
+	}
+	if bundle.PrimaryOp.ID == "" && len(bundle.Operations) > 0 {
+		bundle.PrimaryOp = bundle.Operations[0]
+	}
+	return bundle
+}
+
+func bundleFromUploadResponse(response importUploadResponse) importBundle {
 	bundle := importBundle{
 		Apps:          dedupeApps(response.Apps, response.App),
 		Operations:    dedupeOperations(response.Operations, response.Operation),

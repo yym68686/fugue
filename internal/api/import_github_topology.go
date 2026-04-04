@@ -22,6 +22,23 @@ type importedGitHubTopology struct {
 	InferenceReport []sourceimport.TopologyInference
 }
 
+type topologySourceBuilder func(service sourceimport.ComposeService, composeDependsOn []string) (model.AppSource, error)
+
+type topologyAuditMetadataBuilder func(source model.AppSource, route model.AppRoute) map[string]string
+
+type topologyImportOptions struct {
+	ProjectID          string
+	RuntimeID          string
+	Replicas           int
+	ServicePort        int
+	Description        string
+	BaseName           string
+	Env                map[string]string
+	AuditAction        string
+	BuildSource        topologySourceBuilder
+	BuildAuditMetadata topologyAuditMetadataBuilder
+}
+
 type composeImportNamingStrategy struct {
 	MaxAttempts       int
 	MaxServiceNameLen int
@@ -33,12 +50,59 @@ var defaultComposeImportNamingStrategy = composeImportNamingStrategy{
 }
 
 func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantID string, req importGitHubRequest, runtimeID string, replicas int, description string, baseName string, topology sourceimport.NormalizedTopology) (importedGitHubTopology, error) {
+	return s.importResolvedTopology(principal, tenantID, topologyImportOptions{
+		ProjectID:   req.ProjectID,
+		RuntimeID:   runtimeID,
+		Replicas:    replicas,
+		ServicePort: req.ServicePort,
+		Description: description,
+		BaseName:    baseName,
+		Env:         req.Env,
+		AuditAction: "app.import_github",
+		BuildSource: func(service sourceimport.ComposeService, composeDependsOn []string) (model.AppSource, error) {
+			return buildQueuedComposeServiceSource(req, service, composeDependsOn)
+		},
+		BuildAuditMetadata: func(source model.AppSource, _ model.AppRoute) map[string]string {
+			return map[string]string{
+				"repo_url": strings.TrimSpace(req.RepoURL),
+			}
+		},
+	}, topology)
+}
+
+func (s *Server) importResolvedUploadTopology(principal model.Principal, tenantID string, req importUploadRequest, upload model.SourceUpload, runtimeID string, replicas int, description string, baseName string, topology sourceimport.NormalizedTopology) (importedGitHubTopology, error) {
+	return s.importResolvedTopology(principal, tenantID, topologyImportOptions{
+		ProjectID:   req.ProjectID,
+		RuntimeID:   runtimeID,
+		Replicas:    replicas,
+		ServicePort: req.ServicePort,
+		Description: description,
+		BaseName:    baseName,
+		Env:         req.Env,
+		AuditAction: "app.import_upload",
+		BuildSource: func(service sourceimport.ComposeService, composeDependsOn []string) (model.AppSource, error) {
+			return buildQueuedUploadComposeServiceSource(upload, service, composeDependsOn)
+		},
+		BuildAuditMetadata: func(source model.AppSource, _ model.AppRoute) map[string]string {
+			return map[string]string{
+				"upload_id":      strings.TrimSpace(upload.ID),
+				"archive_sha256": strings.TrimSpace(upload.SHA256),
+			}
+		},
+	}, topology)
+}
+
+func (s *Server) importResolvedTopology(principal model.Principal, tenantID string, options topologyImportOptions, topology sourceimport.NormalizedTopology) (importedGitHubTopology, error) {
+	if options.BuildSource == nil {
+		return importedGitHubTopology{}, fmt.Errorf("topology source builder is required")
+	}
+
 	topologyPlan, err := sourceimport.AnalyzeNormalizedTopology(topology, topology.PrimaryService)
 	if err != nil {
 		return importedGitHubTopology{}, invalidComposeImport(err)
 	}
 
-	appNames, primaryHost, err := s.allocateComposeAppNames(tenantID, req.ProjectID, baseName, topologyPlan.Deployable, topologyPlan.PrimaryService)
+	appNames, primaryHost, err := s.allocateComposeAppNames(tenantID, options.ProjectID, options.BaseName, topologyPlan.Deployable, topologyPlan.PrimaryService)
 	if err != nil {
 		return importedGitHubTopology{}, err
 	}
@@ -70,7 +134,7 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 		var route *model.AppRoute
 		requestedPort := 0
 		if service.Name == topologyPlan.PrimaryService {
-			requestedPort = req.ServicePort
+			requestedPort = options.ServicePort
 			route = &model.AppRoute{
 				Hostname:    primaryHost,
 				BaseDomain:  s.appBaseDomain,
@@ -79,7 +143,7 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 			}
 		}
 
-		source, err := buildQueuedComposeServiceSource(req, service, composeDeployDependencies(topologyPlan, service.Name))
+		source, err := options.BuildSource(service, composeDeployDependencies(topologyPlan, service.Name))
 		if err != nil {
 			return importedGitHubTopology{}, invalidComposeImport(err)
 		}
@@ -89,14 +153,14 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 			specCopy := spec
 			postgres = &specCopy
 		}
-		suggestedEnv = mergeImportedEnv(suggestedEnv, req.Env)
+		suggestedEnv = mergeImportedEnv(suggestedEnv, options.Env)
 
 		spec, err := s.buildImportedAppSpec(
 			service.BuildStrategy,
 			appNames[service.Name],
 			"",
-			runtimeID,
-			replicas,
+			options.RuntimeID,
+			options.Replicas,
 			effectiveImportServicePort(requestedPort, service.InternalPort),
 			"",
 			nil,
@@ -130,16 +194,16 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 		return baseErr
 	}
 	for _, plan := range plans {
-		appDescription := description
+		appDescription := options.Description
 		if len(plans) > 1 {
-			appDescription = fmt.Sprintf("%s (service %s)", description, plan.Service.Name)
+			appDescription = fmt.Sprintf("%s (service %s)", options.Description, plan.Service.Name)
 		}
 
 		route := model.AppRoute{}
 		if plan.Route != nil {
 			route = *plan.Route
 		}
-		app, err := s.store.CreateImportedApp(tenantID, req.ProjectID, plan.AppName, appDescription, plan.Spec, plan.Source, route)
+		app, err := s.store.CreateImportedApp(tenantID, options.ProjectID, plan.AppName, appDescription, plan.Spec, plan.Source, route)
 		if err != nil {
 			if err == store.ErrConflict {
 				return importedGitHubTopology{}, rollback(fmt.Errorf("topology import naming conflict for service %q: %w", plan.Service.Name, store.ErrConflict))
@@ -164,7 +228,6 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 		}
 
 		auditMetadata := map[string]string{
-			"repo_url":        strings.TrimSpace(req.RepoURL),
 			"compose_service": sourceCopy.ComposeService,
 			"hostname":        route.Hostname,
 		}
@@ -174,7 +237,17 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 		if strings.TrimSpace(sourceCopy.ImageRef) != "" {
 			auditMetadata["image_ref"] = sourceCopy.ImageRef
 		}
-		s.appendAudit(principal, "app.import_github", "app", app.ID, app.TenantID, auditMetadata)
+		if options.BuildAuditMetadata != nil {
+			for key, value := range options.BuildAuditMetadata(sourceCopy, route) {
+				if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+					continue
+				}
+				auditMetadata[key] = value
+			}
+		}
+		if strings.TrimSpace(options.AuditAction) != "" {
+			s.appendAudit(principal, options.AuditAction, "app", app.ID, app.TenantID, auditMetadata)
+		}
 
 		ops = append(ops, op)
 		appsByService[plan.Service.Name] = app
@@ -356,6 +429,33 @@ func buildQueuedComposeServiceSource(req importGitHubRequest, service sourceimpo
 			req.RepoVisibility,
 			req.RepoAuthToken,
 			req.Branch,
+			service.SourceDir,
+			service.DockerfilePath,
+			service.BuildContextDir,
+			service.BuildStrategy,
+			service.Name,
+			service.Name,
+		)
+	}
+	if err != nil {
+		return model.AppSource{}, err
+	}
+	if len(composeDependsOn) > 0 {
+		source.ComposeDependsOn = append([]string(nil), composeDependsOn...)
+	}
+	return source, nil
+}
+
+func buildQueuedUploadComposeServiceSource(upload model.SourceUpload, service sourceimport.ComposeService, composeDependsOn []string) (model.AppSource, error) {
+	var (
+		source model.AppSource
+		err    error
+	)
+	if strings.TrimSpace(service.Image) != "" && strings.TrimSpace(service.BuildStrategy) == "" {
+		source, err = buildQueuedImageSource(service.Image, service.Name, service.Name)
+	} else {
+		source, err = buildQueuedUploadSource(
+			upload,
 			service.SourceDir,
 			service.DockerfilePath,
 			service.BuildContextDir,

@@ -25,6 +25,7 @@ type Service struct {
 	registryPushBase        string
 	registryPullBase        string
 	inspectManagedImage     appimages.InspectFunc
+	deleteManagedImage      func(context.Context, string) (appimages.DeleteResult, error)
 	syncBillingImageStorage bool
 	latestGitHubCommit      func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
 	newKubeClient           func(namespace string) (*kubeClient, error)
@@ -104,6 +105,9 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	if s.inspectManagedImage == nil {
 		s.inspectManagedImage = appimages.NewRemoteInspector().InspectImage
+	}
+	if s.deleteManagedImage == nil {
+		s.deleteManagedImage = appimages.DeleteRemoteImage
 	}
 	s.syncBillingImageStorage = true
 	if s.Config.LeaderElectionEnabled {
@@ -472,6 +476,14 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	_, err = s.Store.CompleteManagedOperation(op.ID, bundle.ManifestPath, message)
 	if err != nil {
 		return fmt.Errorf("complete operation %s: %w", op.ID, err)
+	}
+	if op.Type == model.OperationTypeDelete {
+		if err := s.cleanupDeletedAppImages(ctx, app); err != nil && s.Logger != nil {
+			s.Logger.Printf("cleanup deleted app images for app=%s failed: %v", app.ID, err)
+		}
+		if err := s.syncTenantBillingImageStorage(ctx, app.TenantID); err != nil && s.Logger != nil {
+			s.Logger.Printf("sync billing image storage after delete for tenant=%s failed: %v", app.TenantID, err)
+		}
 	}
 	s.Logger.Printf("operation %s completed on managed runtime; manifest=%s", op.ID, bundle.ManifestPath)
 	return nil

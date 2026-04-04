@@ -1204,10 +1204,29 @@ func (s *Server) handleAgentCompleteOperation(w http.ResponseWriter, r *http.Req
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	var deletingApp model.App
+	opBeforeComplete, err := s.store.GetOperation(r.PathValue("id"))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if opBeforeComplete.Type == model.OperationTypeDelete {
+		deletingApp, err = s.store.GetApp(opBeforeComplete.AppID)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+	}
 	op, err := s.store.CompleteAgentOperation(r.PathValue("id"), principal.ActorID, req.ManifestPath, req.Message)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
+	}
+	if op.Type == model.OperationTypeDelete {
+		if err := s.cleanupDeletedAppImages(r.Context(), deletingApp); err != nil && s.log != nil {
+			s.log.Printf("cleanup deleted app images for app=%s failed: %v", deletingApp.ID, err)
+		}
+		s.refreshTenantBillingImageStorage(r.Context(), deletingApp.TenantID, true)
 	}
 	s.appendAudit(principal, "operation.complete", "operation", op.ID, op.TenantID, map[string]string{"mode": op.ExecutionMode})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"operation": op})

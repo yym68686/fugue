@@ -88,8 +88,12 @@ type importGitHubResponse struct {
 }
 
 type importUploadResponse struct {
-	App       model.App       `json:"app"`
-	Operation model.Operation `json:"operation"`
+	App           *model.App        `json:"app,omitempty"`
+	Operation     *model.Operation  `json:"operation,omitempty"`
+	Apps          []model.App       `json:"apps,omitempty"`
+	Operations    []model.Operation `json:"operations,omitempty"`
+	ComposeStack  map[string]any    `json:"compose_stack,omitempty"`
+	FugueManifest map[string]any    `json:"fugue_manifest,omitempty"`
 }
 
 type importImageRequest struct {

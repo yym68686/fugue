@@ -100,6 +100,163 @@ func TestImportUploadAppQueuesPendingImport(t *testing.T) {
 	}
 }
 
+func TestImportUploadAppImportsComposeTopology(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Upload Compose Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "uploader", []string{"app.write", "app.deploy"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		AppBaseDomain: "apps.example.com",
+	})
+
+	archiveBytes := mustTarGz(t, map[string]string{
+		"docker-compose.yml": `
+services:
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    depends_on:
+      - db
+      - worker
+    environment:
+      DATABASE_URL: postgresql://demo:secret@db:5432/demo
+      WORKER_URL: http://worker:8080
+  worker:
+    image: ghcr.io/example/worker:latest
+    environment:
+      DATABASE_URL: postgresql://demo:secret@db:5432/demo
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: demo
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: secret
+`,
+		"web/Dockerfile": "FROM node:22-alpine\nEXPOSE 3000\n",
+	})
+	body, contentType := newImportUploadMultipartBody(t, importUploadRequest{
+		Name: "demo-stack",
+	}, "demo-stack.tgz", archiveBytes)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/apps/import-upload", body)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", contentType)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		App        model.App         `json:"app"`
+		Operation  model.Operation   `json:"operation"`
+		Apps       []model.App       `json:"apps"`
+		Operations []model.Operation `json:"operations"`
+		Compose    struct {
+			ComposePath    string `json:"compose_path"`
+			PrimaryService string `json:"primary_service"`
+			Services       []struct {
+				Service        string `json:"service"`
+				BuildStrategy  string `json:"build_strategy"`
+				AppID          string `json:"app_id"`
+				OperationID    string `json:"operation_id"`
+				ComposeService string `json:"compose_service"`
+			} `json:"services"`
+		} `json:"compose_stack"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Compose.ComposePath != "docker-compose.yml" {
+		t.Fatalf("expected compose path docker-compose.yml, got %q", response.Compose.ComposePath)
+	}
+	if response.Compose.PrimaryService != "web" {
+		t.Fatalf("expected primary service web, got %q", response.Compose.PrimaryService)
+	}
+	if len(response.Apps) != 2 {
+		t.Fatalf("expected 2 apps, got %d", len(response.Apps))
+	}
+	if len(response.Operations) != 2 {
+		t.Fatalf("expected 2 operations, got %d", len(response.Operations))
+	}
+	if len(response.Compose.Services) != 2 {
+		t.Fatalf("expected 2 compose services, got %d", len(response.Compose.Services))
+	}
+
+	appsByService := map[string]model.App{}
+	for _, app := range response.Apps {
+		if app.Source == nil {
+			t.Fatalf("expected app %s to preserve source metadata", app.Name)
+		}
+		appsByService[app.Source.ComposeService] = app
+	}
+
+	webApp, ok := appsByService["web"]
+	if !ok {
+		t.Fatal("expected web app in compose response")
+	}
+	if webApp.Source.Type != model.AppSourceTypeUpload {
+		t.Fatalf("expected web source type %q, got %q", model.AppSourceTypeUpload, webApp.Source.Type)
+	}
+	if webApp.Source.UploadID == "" {
+		t.Fatal("expected upload-backed web source to keep upload id")
+	}
+	if webApp.Source.DockerfilePath != "web/Dockerfile" {
+		t.Fatalf("expected dockerfile path web/Dockerfile, got %q", webApp.Source.DockerfilePath)
+	}
+	if webApp.Source.BuildContextDir != "web" {
+		t.Fatalf("expected build context web, got %q", webApp.Source.BuildContextDir)
+	}
+	if stringsContain(webApp.Source.ComposeDependsOn, "db") {
+		t.Fatalf("expected managed postgres backing to be removed from dependencies, got %v", webApp.Source.ComposeDependsOn)
+	}
+	if webApp.Route == nil || webApp.Route.ServicePort != 3000 {
+		t.Fatalf("expected web route service port 3000, got %+v", webApp.Route)
+	}
+	if got := webApp.Spec.Env["WORKER_URL"]; got == "" {
+		t.Fatalf("expected worker URL env to be preserved, got %+v", webApp.Spec.Env)
+	}
+	if got := webApp.Spec.Env["DATABASE_URL"]; got == "" {
+		t.Fatalf("expected rewritten database url, got %+v", webApp.Spec.Env)
+	}
+
+	workerApp, ok := appsByService["worker"]
+	if !ok {
+		t.Fatal("expected worker app in compose response")
+	}
+	if workerApp.Source.Type != model.AppSourceTypeDockerImage {
+		t.Fatalf("expected worker source type %q, got %q", model.AppSourceTypeDockerImage, workerApp.Source.Type)
+	}
+	if workerApp.Source.ImageRef != "ghcr.io/example/worker:latest" {
+		t.Fatalf("expected worker image ref ghcr.io/example/worker:latest, got %q", workerApp.Source.ImageRef)
+	}
+
+	storedApps, err := s.ListApps(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list apps: %v", err)
+	}
+	if len(storedApps) != 2 {
+		t.Fatalf("expected 2 stored apps, got %d", len(storedApps))
+	}
+}
+
 func TestGetSourceUploadArchiveRequiresDownloadToken(t *testing.T) {
 	t.Parallel()
 

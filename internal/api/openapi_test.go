@@ -28,6 +28,12 @@ func TestOpenAPIDocumentEndpoints(t *testing.T) {
 		contains    string
 	}{
 		{
+			name:        "button svg",
+			path:        "/button.svg",
+			contentType: "image/svg+xml; charset=utf-8",
+			contains:    "Deploy to",
+		},
+		{
 			name:        "yaml",
 			path:        "/openapi.yaml",
 			contentType: "application/yaml; charset=utf-8",
