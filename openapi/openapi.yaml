@@ -16,6 +16,8 @@ tags:
     description: Tenant lifecycle endpoints.
   - name: Projects
     description: Project management endpoints.
+  - name: Console
+    description: Console-specific gallery, detail, and change-stream endpoints.
   - name: Billing
     description: Tenant billing and managed-cap endpoints.
   - name: API Keys
@@ -255,6 +257,59 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProjectImageUsageResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/console/gallery:
+    get:
+      operationId: getConsoleGallery
+      summary: Get Console Gallery
+      tags: [Console]
+      x-fugue-handler: handleGetConsoleGallery
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsoleGalleryResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/console/gallery/stream:
+    get:
+      operationId: streamConsoleGallery
+      summary: Stream Console Gallery Changes
+      tags: [Console]
+      x-fugue-handler: handleStreamConsoleGallery
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/console/projects/{id}:
+    get:
+      operationId: getConsoleProject
+      summary: Get Console Project
+      tags: [Console]
+      x-fugue-handler: handleGetConsoleProject
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsoleProjectDetailResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/projects/{id}:
@@ -3588,6 +3643,94 @@ components:
       properties:
         project:
           $ref: "#/components/schemas/Project"
+    ConsoleProjectBadge:
+      type: object
+      additionalProperties: false
+      required: [kind, label, meta]
+      properties:
+        kind:
+          type: string
+        label:
+          type: string
+        meta:
+          type: string
+    ConsoleProjectLifecycle:
+      type: object
+      additionalProperties: false
+      required: [label, live, sync_mode, tone]
+      properties:
+        label:
+          type: string
+        live:
+          type: boolean
+        sync_mode:
+          type: string
+        tone:
+          type: string
+    ConsoleProjectSummary:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          id,
+          name,
+          app_count,
+          service_count,
+          resource_usage_snapshot,
+          service_badges,
+          lifecycle
+        ]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        app_count:
+          type: integer
+          format: int32
+        service_count:
+          type: integer
+          format: int32
+        resource_usage_snapshot:
+          $ref: "#/components/schemas/ResourceUsage"
+        service_badges:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConsoleProjectBadge"
+        lifecycle:
+          $ref: "#/components/schemas/ConsoleProjectLifecycle"
+    ConsoleGalleryResponse:
+      type: object
+      additionalProperties: false
+      required: [projects]
+      properties:
+        projects:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConsoleProjectSummary"
+    ConsoleProjectDetailResponse:
+      type: object
+      additionalProperties: false
+      required: [project_id, project_name, apps, operations, cluster_nodes]
+      properties:
+        project:
+          $ref: "#/components/schemas/Project"
+        project_id:
+          type: string
+        project_name:
+          type: string
+        apps:
+          type: array
+          items:
+            $ref: "#/components/schemas/App"
+        operations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Operation"
+        cluster_nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterNode"
     AppImageSummary:
       type: object
       additionalProperties: false
