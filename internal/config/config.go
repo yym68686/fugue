@@ -39,6 +39,7 @@ type ControllerConfig struct {
 	RegistryPullBase              string
 	SourceUploadBaseURL           string
 	ImportWorkDir                 string
+	ForegroundImportWorkers       int
 	GitHubSyncInterval            time.Duration
 	GitHubSyncTimeout             time.Duration
 	GitHubSyncRetryBaseDelay      time.Duration
@@ -120,6 +121,7 @@ func ControllerFromEnv() ControllerConfig {
 		RegistryPullBase:              strings.TrimSpace(os.Getenv("FUGUE_REGISTRY_PULL_BASE")),
 		SourceUploadBaseURL:           getenv("FUGUE_SOURCE_UPLOAD_BASE_URL", "http://127.0.0.1:8080"),
 		ImportWorkDir:                 getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
+		ForegroundImportWorkers:       getenvInt("FUGUE_CONTROLLER_FOREGROUND_IMPORT_WORKERS", 2),
 		GitHubSyncInterval:            getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_INTERVAL", time.Minute),
 		GitHubSyncTimeout:             getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_TIMEOUT", 20*time.Second),
 		GitHubSyncRetryBaseDelay:      getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_BASE_DELAY", 5*time.Minute),
@@ -195,6 +197,19 @@ func getenvDuration(key string, fallback time.Duration) time.Duration {
 	parsed, err := time.ParseDuration(value)
 	if err != nil {
 		log.Printf("invalid duration in %s=%q, using fallback %s", key, value, fallback)
+		return fallback
+	}
+	return parsed
+}
+
+func getenvInt(key string, fallback int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		log.Printf("invalid integer in %s=%q, using fallback %d", key, value, fallback)
 		return fallback
 	}
 	return parsed

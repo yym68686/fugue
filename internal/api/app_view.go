@@ -64,10 +64,7 @@ func redactSecretFilesInSpec(spec model.AppSpec) model.AppSpec {
 
 func cloneApp(app model.App) model.App {
 	out := app
-	if app.Source != nil {
-		source := *app.Source
-		out.Source = &source
-	}
+	out.Source = cloneAppSource(app.Source)
 	if app.Route != nil {
 		route := *app.Route
 		out.Route = &route
@@ -86,9 +83,24 @@ func sanitizeAppSourceForAPI(source *model.AppSource) *model.AppSource {
 	if source == nil {
 		return nil
 	}
-	redacted := *source
+	redacted := cloneAppSource(source)
+	if redacted == nil {
+		return nil
+	}
 	redacted.RepoAuthToken = ""
-	return &redacted
+	redacted.ComposeDependsOn = nil
+	return redacted
+}
+
+func cloneAppSource(source *model.AppSource) *model.AppSource {
+	if source == nil {
+		return nil
+	}
+	cloned := *source
+	if len(source.ComposeDependsOn) > 0 {
+		cloned.ComposeDependsOn = append([]string(nil), source.ComposeDependsOn...)
+	}
+	return &cloned
 }
 
 func cloneAppSpec(spec model.AppSpec) model.AppSpec {

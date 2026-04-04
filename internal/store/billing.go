@@ -603,13 +603,13 @@ func buildTenantBillingSummary(state *model.State, record model.TenantBilling) m
 func tenantBillingStatus(record model.TenantBilling, committed model.BillingResourceSpec) (string, string) {
 	switch {
 	case billingHourlyRateMicroCentsWithCommittedStorage(record, committed.StorageGibibytes) <= 0:
-		return model.BillingStatusInactive, "Managed billing is inactive until both CPU and memory are above zero. Storage, including retained managed image inventory, is billed inside an active managed envelope. External-owned runtimes remain free."
+		return model.BillingStatusInactive, "Managed billing is inactive until both CPU and memory are above zero. Storage, including retained managed image inventory, is billed inside an active managed envelope. BYO VPS runtimes remain free."
 	case resourceSpecExceeds(committed, record.ManagedCap):
 		return model.BillingStatusOverCap, "Current live managed capacity is above the saved envelope. This includes retained managed image inventory. Managed expansion still works while balance stays positive, and Fugue will lift the envelope automatically on the next managed capacity increase."
 	case billingBalanceRestrictedWithCommittedStorage(record, committed.StorageGibibytes):
 		return model.BillingStatusRestricted, "Balance is depleted. Top up before increasing managed capacity."
 	default:
-		return model.BillingStatusActive, "Managed capacity is metered hourly from the saved envelope. Storage billing uses the higher of the saved storage envelope or current managed storage, including retained managed image inventory. BYO VPS stays free."
+		return model.BillingStatusActive, "Managed capacity is metered hourly from the saved envelope. Storage billing uses the higher of the saved storage envelope or current managed storage, including retained managed image inventory. Only internal-cluster workloads count toward managed capacity; BYO VPS stays free."
 	}
 }
 
@@ -660,12 +660,18 @@ func addManagedImageStorageCommitment(spec model.BillingResourceSpec, imageStora
 }
 
 func appManagedBundleCommitment(state *model.State, app model.App, runtimeID string, replicas int) model.BillingResourceSpec {
-	if replicas <= 0 || !isBillableManagedRuntimeType(runtimeTypeForState(state, runtimeID)) {
+	if replicas <= 0 {
 		return model.BillingResourceSpec{}
 	}
-	total := multiplyResourceSpec(appEffectiveResources(app.Spec), int64(replicas))
+	total := model.BillingResourceSpec{}
+	if isBillableManagedRuntimeType(runtimeTypeForState(state, runtimeID)) {
+		total = multiplyResourceSpec(appEffectiveResources(app.Spec), int64(replicas))
+	}
 	services := boundManagedServicesForApp(state, app.ID)
 	for _, service := range services {
+		if !isBillableManagedRuntimeType(runtimeTypeForState(state, backingServiceRuntimeID(service, runtimeID))) {
+			continue
+		}
 		total = addResourceSpec(total, backingServiceResources(service))
 	}
 	return total
@@ -716,6 +722,15 @@ func backingServiceResources(service model.BackingService) model.BillingResource
 	return postgresEffectiveResources(*service.Spec.Postgres)
 }
 
+func backingServiceRuntimeID(service model.BackingService, fallbackRuntimeID string) string {
+	if service.Spec.Postgres != nil {
+		if runtimeID := strings.TrimSpace(service.Spec.Postgres.RuntimeID); runtimeID != "" {
+			return runtimeID
+		}
+	}
+	return strings.TrimSpace(fallbackRuntimeID)
+}
+
 func appEffectiveResources(spec model.AppSpec) model.BillingResourceSpec {
 	compute := model.ResourceSpec{}
 	if spec.Resources != nil {
@@ -753,7 +768,7 @@ func runtimeTypeForState(state *model.State, runtimeID string) string {
 
 func isBillableManagedRuntimeType(runtimeType string) bool {
 	switch strings.TrimSpace(runtimeType) {
-	case model.RuntimeTypeManagedShared, model.RuntimeTypeManagedOwned:
+	case model.RuntimeTypeManagedShared:
 		return true
 	default:
 		return false

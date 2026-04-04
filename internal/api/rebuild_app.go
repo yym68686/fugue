@@ -158,6 +158,9 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "only github-backed, image-backed, or upload apps can be rebuilt")
 		return
 	}
+	if len(app.Source.ComposeDependsOn) > 0 {
+		source.ComposeDependsOn = append([]string(nil), app.Source.ComposeDependsOn...)
+	}
 
 	spec := cloneAppSpec(app.Spec)
 	if spec.Replicas < 1 {

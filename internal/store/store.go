@@ -2193,6 +2193,25 @@ func (s *Store) ListOperationsByApp(tenantID string, platformAdmin bool, appID s
 	return ops, err
 }
 
+func (s *Store) ListActiveOperations() ([]model.Operation, error) {
+	if s.usingDatabase() {
+		return s.pgListActiveOperations()
+	}
+
+	var ops []model.Operation
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, op := range state.Operations {
+			if !isActiveOperationStatus(op.Status) {
+				continue
+			}
+			ops = append(ops, op)
+		}
+		sortActiveOperations(ops)
+		return nil
+	})
+	return ops, err
+}
+
 func (s *Store) GetOperation(id string) (model.Operation, error) {
 	if s.usingDatabase() {
 		return s.pgGetOperation(id)
@@ -2207,6 +2226,34 @@ func (s *Store) GetOperation(id string) (model.Operation, error) {
 		return nil
 	})
 	return op, err
+}
+
+func (s *Store) TryClaimPendingOperation(id string) (model.Operation, bool, error) {
+	if s.usingDatabase() {
+		return s.pgTryClaimPendingOperation(id)
+	}
+
+	var (
+		op      model.Operation
+		claimed bool
+	)
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findOperation(state, id)
+		if index < 0 {
+			return nil
+		}
+		if state.Operations[index].Status != model.OperationStatusPending {
+			return nil
+		}
+		claimedOp, err := claimPendingOperationLocked(state, index)
+		if err != nil {
+			return err
+		}
+		op = claimedOp
+		claimed = true
+		return nil
+	})
+	return op, claimed, err
 }
 
 func (s *Store) ClaimNextPendingOperation() (model.Operation, bool, error) {
@@ -2847,6 +2894,9 @@ func cloneAppSource(in *model.AppSource) *model.AppSource {
 		return nil
 	}
 	out := *in
+	if len(in.ComposeDependsOn) > 0 {
+		out.ComposeDependsOn = append([]string(nil), in.ComposeDependsOn...)
+	}
 	return &out
 }
 

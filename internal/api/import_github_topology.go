@@ -79,7 +79,7 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 			}
 		}
 
-		source, err := buildQueuedComposeServiceSource(req, service)
+		source, err := buildQueuedComposeServiceSource(req, service, composeDeployDependencies(topologyPlan, service.Name))
 		if err != nil {
 			return importedGitHubTopology{}, invalidComposeImport(err)
 		}
@@ -309,20 +309,66 @@ func resolveTopologyPrimaryService(services []sourceimport.ComposeService, prefe
 	return sourceimport.SelectPrimaryTopologyService(services, preferred)
 }
 
-func buildQueuedComposeServiceSource(req importGitHubRequest, service sourceimport.ComposeService) (model.AppSource, error) {
-	if strings.TrimSpace(service.Image) != "" && strings.TrimSpace(service.BuildStrategy) == "" {
-		return buildQueuedImageSource(service.Image, service.Name, service.Name)
+func composeDeployDependencies(plan sourceimport.TopologyPlan, serviceName string) []string {
+	deployable := make(map[string]struct{}, len(plan.Deployable))
+	for _, service := range plan.Deployable {
+		name := strings.TrimSpace(service.Name)
+		if name == "" {
+			continue
+		}
+		deployable[name] = struct{}{}
 	}
-	return buildQueuedGitHubSource(
-		req.RepoURL,
-		req.RepoVisibility,
-		req.RepoAuthToken,
-		req.Branch,
-		service.SourceDir,
-		service.DockerfilePath,
-		service.BuildContextDir,
-		service.BuildStrategy,
-		service.Name,
-		service.Name,
+
+	serviceName = strings.TrimSpace(serviceName)
+	dependencies := make([]string, 0, len(plan.BindingsBySource[serviceName]))
+	seen := make(map[string]struct{}, len(plan.BindingsBySource[serviceName]))
+	for _, binding := range plan.BindingsBySource[serviceName] {
+		dependency := strings.TrimSpace(binding.Service)
+		if dependency == "" || dependency == serviceName {
+			continue
+		}
+		if _, ok := deployable[dependency]; !ok {
+			continue
+		}
+		if _, ok := seen[dependency]; ok {
+			continue
+		}
+		seen[dependency] = struct{}{}
+		dependencies = append(dependencies, dependency)
+	}
+	sort.Strings(dependencies)
+	if len(dependencies) == 0 {
+		return nil
+	}
+	return dependencies
+}
+
+func buildQueuedComposeServiceSource(req importGitHubRequest, service sourceimport.ComposeService, composeDependsOn []string) (model.AppSource, error) {
+	var (
+		source model.AppSource
+		err    error
 	)
+	if strings.TrimSpace(service.Image) != "" && strings.TrimSpace(service.BuildStrategy) == "" {
+		source, err = buildQueuedImageSource(service.Image, service.Name, service.Name)
+	} else {
+		source, err = buildQueuedGitHubSource(
+			req.RepoURL,
+			req.RepoVisibility,
+			req.RepoAuthToken,
+			req.Branch,
+			service.SourceDir,
+			service.DockerfilePath,
+			service.BuildContextDir,
+			service.BuildStrategy,
+			service.Name,
+			service.Name,
+		)
+	}
+	if err != nil {
+		return model.AppSource{}, err
+	}
+	if len(composeDependsOn) > 0 {
+		source.ComposeDependsOn = append([]string(nil), composeDependsOn...)
+	}
+	return source, nil
 }

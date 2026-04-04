@@ -113,7 +113,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	output.ImportResult.SuggestedEnv = mergeSuggestedImportEnv(output.ImportResult.SuggestedEnv, composeSuggestedEnv)
 
 	finalSpec := cloneImportSpec(*op.DesiredSpec)
-	finalSource := output.Source
+	finalSource := restoreQueuedSourceMetadata(output.Source, *op.DesiredSource)
 	runtimeImageRef, err := rewriteImportedImageRef(strings.TrimSpace(output.ImportResult.ImageRef), s.registryPushBase, s.registryPullBase)
 	if err != nil {
 		return err
@@ -237,6 +237,17 @@ func mergeSuggestedImportEnv(base, override map[string]string) map[string]string
 		return nil
 	}
 	return merged
+}
+
+func restoreQueuedSourceMetadata(imported model.AppSource, queued model.AppSource) model.AppSource {
+	imported.ImageNameSuffix = strings.TrimSpace(queued.ImageNameSuffix)
+	imported.ComposeService = strings.TrimSpace(queued.ComposeService)
+	if len(queued.ComposeDependsOn) > 0 {
+		imported.ComposeDependsOn = append([]string(nil), queued.ComposeDependsOn...)
+	} else {
+		imported.ComposeDependsOn = nil
+	}
+	return imported
 }
 
 func (s *Service) suggestComposeServiceEnv(ctx context.Context, app model.App, source model.AppSource) (map[string]string, error) {

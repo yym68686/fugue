@@ -36,11 +36,14 @@ func TestSyncGitHubAppsQueuesImportWhenCommitChanges(t *testing.T) {
 		Replicas:  1,
 		RuntimeID: "runtime_managed_shared",
 	}, model.AppSource{
-		Type:          model.AppSourceTypeGitHubPublic,
-		RepoURL:       "https://github.com/example/demo",
-		RepoBranch:    "main",
-		BuildStrategy: model.AppBuildStrategyStaticSite,
-		CommitSHA:     "oldcommit",
+		Type:             model.AppSourceTypeGitHubPublic,
+		RepoURL:          "https://github.com/example/demo",
+		RepoBranch:       "main",
+		BuildStrategy:    model.AppBuildStrategyStaticSite,
+		CommitSHA:        "oldcommit",
+		ImageNameSuffix:  "web",
+		ComposeService:   "app",
+		ComposeDependsOn: []string{"redis"},
 	}, model.AppRoute{
 		Hostname:    "demo.example.com",
 		BaseDomain:  "example.com",
@@ -86,6 +89,15 @@ func TestSyncGitHubAppsQueuesImportWhenCommitChanges(t *testing.T) {
 	}
 	if op.DesiredSource.CommitSHA != "newcommit" {
 		t.Fatalf("expected queued source commit newcommit, got %q", op.DesiredSource.CommitSHA)
+	}
+	if op.DesiredSource.ImageNameSuffix != "web" {
+		t.Fatalf("expected queued image suffix web, got %q", op.DesiredSource.ImageNameSuffix)
+	}
+	if op.DesiredSource.ComposeService != "app" {
+		t.Fatalf("expected queued compose service app, got %q", op.DesiredSource.ComposeService)
+	}
+	if len(op.DesiredSource.ComposeDependsOn) != 1 || op.DesiredSource.ComposeDependsOn[0] != "redis" {
+		t.Fatalf("expected queued compose dependencies [redis], got %v", op.DesiredSource.ComposeDependsOn)
 	}
 
 	app, err = stateStore.GetApp(app.ID)

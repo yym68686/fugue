@@ -148,6 +148,7 @@ func queueableGitHubSource(source model.AppSource, branch string, commit string)
 		BuildContextDir:  strings.TrimSpace(source.BuildContextDir),
 		ImageNameSuffix:  strings.TrimSpace(source.ImageNameSuffix),
 		ComposeService:   strings.TrimSpace(source.ComposeService),
+		ComposeDependsOn: append([]string(nil), source.ComposeDependsOn...),
 		DetectedProvider: strings.TrimSpace(source.DetectedProvider),
 		DetectedStack:    strings.TrimSpace(source.DetectedStack),
 	}, nil

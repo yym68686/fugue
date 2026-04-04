@@ -352,11 +352,13 @@ func TestExecuteManagedImportOperationRefreshesComposeEnvWithoutOverwritingCusto
 			Password:    "secret",
 		},
 	}, model.AppSource{
-		Type:           model.AppSourceTypeGitHubPublic,
-		RepoURL:        "https://github.com/example/demo",
-		RepoBranch:     "main",
-		BuildStrategy:  model.AppBuildStrategyBuildpacks,
-		ComposeService: "api",
+		Type:             model.AppSourceTypeGitHubPublic,
+		RepoURL:          "https://github.com/example/demo",
+		RepoBranch:       "main",
+		BuildStrategy:    model.AppBuildStrategyBuildpacks,
+		ImageNameSuffix:  "api",
+		ComposeService:   "api",
+		ComposeDependsOn: []string{"web"},
 	}, model.AppRoute{
 		Hostname:    "demo.example.com",
 		BaseDomain:  "example.com",
@@ -446,6 +448,18 @@ func TestExecuteManagedImportOperationRefreshesComposeEnvWithoutOverwritingCusto
 	}
 	if deployOp.ID == "" || deployOp.DesiredSpec == nil {
 		t.Fatalf("expected deploy operation with desired spec, got %+v", deployOp)
+	}
+	if deployOp.DesiredSource == nil {
+		t.Fatalf("expected deploy operation to keep desired source metadata, got %+v", deployOp)
+	}
+	if deployOp.DesiredSource.ImageNameSuffix != "api" {
+		t.Fatalf("expected deploy image suffix api, got %q", deployOp.DesiredSource.ImageNameSuffix)
+	}
+	if deployOp.DesiredSource.ComposeService != "api" {
+		t.Fatalf("expected deploy compose service api, got %q", deployOp.DesiredSource.ComposeService)
+	}
+	if !reflect.DeepEqual(deployOp.DesiredSource.ComposeDependsOn, []string{"web"}) {
+		t.Fatalf("expected deploy compose dependencies [web], got %v", deployOp.DesiredSource.ComposeDependsOn)
 	}
 	if got := deployOp.DesiredSpec.Env["KEEP"]; got != "custom-value" {
 		t.Fatalf("expected custom KEEP to be preserved, got %q", got)

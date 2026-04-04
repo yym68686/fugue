@@ -2678,6 +2678,35 @@ WHERE app_id = $1
 	return ops, nil
 }
 
+func (s *Store) pgListActiveOperations() ([]model.Operation, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+FROM fugue_operations
+WHERE status IN ($1, $2, $3)
+ORDER BY created_at ASC, id ASC
+`, model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent)
+	if err != nil {
+		return nil, fmt.Errorf("list active operations: %w", err)
+	}
+	defer rows.Close()
+
+	ops := make([]model.Operation, 0)
+	for rows.Next() {
+		op, err := scanOperation(rows)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, op)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate active operations: %w", err)
+	}
+	return ops, nil
+}
+
 func (s *Store) pgGetOperation(id string) (model.Operation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2691,6 +2720,76 @@ WHERE id = $1
 		return model.Operation{}, mapDBErr(err)
 	}
 	return op, nil
+}
+
+func (s *Store) pgTryClaimPendingOperation(id string) (model.Operation, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Operation{}, false, fmt.Errorf("begin try-claim operation transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	op, err := scanOperation(tx.QueryRowContext(ctx, `
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+FROM fugue_operations
+WHERE id = $1
+  AND status = $2
+FOR UPDATE SKIP LOCKED
+`, id, model.OperationStatusPending))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.Operation{}, false, nil
+		}
+		return model.Operation{}, false, fmt.Errorf("try claim pending operation %s: %w", id, err)
+	}
+
+	now := time.Now().UTC()
+	if op.Type == model.OperationTypeImport {
+		op.Status = model.OperationStatusRunning
+		op.ExecutionMode = model.ExecutionModeManaged
+		op.StartedAt = &now
+		op.ResultMessage = defaultInFlightOperationMessage(op)
+	} else {
+		runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.TargetRuntimeID)
+		if err != nil {
+			return model.Operation{}, false, err
+		}
+		if runtimeType == model.RuntimeTypeExternalOwned {
+			op.Status = model.OperationStatusWaitingAgent
+			op.ExecutionMode = model.ExecutionModeAgent
+			op.AssignedRuntimeID = op.TargetRuntimeID
+			op.ResultMessage = "task dispatched to external runtime agent"
+		} else {
+			op.Status = model.OperationStatusRunning
+			op.ExecutionMode = model.ExecutionModeManaged
+			op.StartedAt = &now
+			op.ResultMessage = defaultInFlightOperationMessage(op)
+		}
+	}
+	op.UpdatedAt = now
+
+	if err := s.pgUpdateOperationTx(ctx, tx, op); err != nil {
+		return model.Operation{}, false, err
+	}
+
+	app, err := s.pgGetAppTx(ctx, tx, op.AppID, true)
+	if err != nil {
+		return model.Operation{}, false, mapDBErr(err)
+	}
+	if err := applyInFlightOperationToAppModel(&app, &op); err != nil {
+		return model.Operation{}, false, err
+	}
+	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+		return model.Operation{}, false, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return model.Operation{}, false, fmt.Errorf("commit try-claim operation %s: %w", id, err)
+	}
+	return op, true, nil
 }
 
 func (s *Store) pgClaimNextPendingOperation() (model.Operation, bool, error) {

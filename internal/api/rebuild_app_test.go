@@ -16,12 +16,14 @@ func TestRebuildAppQueuesImportForGitHubSource(t *testing.T) {
 
 	s, server, apiKey, tenant, project := setupRebuildAppTestServer(t)
 	app := createImportedAppForRebuildTest(t, s, tenant.ID, project.ID, "demo-github", model.AppSource{
-		Type:            model.AppSourceTypeGitHubPublic,
-		RepoURL:         "https://github.com/example/demo",
-		RepoBranch:      "main",
-		SourceDir:       "public",
-		BuildStrategy:   model.AppBuildStrategyStaticSite,
-		ImageNameSuffix: "web",
+		Type:             model.AppSourceTypeGitHubPublic,
+		RepoURL:          "https://github.com/example/demo",
+		RepoBranch:       "main",
+		SourceDir:        "public",
+		BuildStrategy:    model.AppBuildStrategyStaticSite,
+		ImageNameSuffix:  "web",
+		ComposeService:   "app",
+		ComposeDependsOn: []string{"redis"},
 	})
 
 	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/rebuild", apiKey, map[string]any{
@@ -55,6 +57,12 @@ func TestRebuildAppQueuesImportForGitHubSource(t *testing.T) {
 	if response.Build.SourceDir != "dist" {
 		t.Fatalf("expected build source_dir dist, got %q", response.Build.SourceDir)
 	}
+	if response.Operation.DesiredSource == nil {
+		t.Fatal("expected sanitized desired source in response")
+	}
+	if len(response.Operation.DesiredSource.ComposeDependsOn) != 0 {
+		t.Fatalf("expected response desired source to hide internal compose dependencies, got %v", response.Operation.DesiredSource.ComposeDependsOn)
+	}
 
 	op, err := s.GetOperation(response.Operation.ID)
 	if err != nil {
@@ -77,6 +85,12 @@ func TestRebuildAppQueuesImportForGitHubSource(t *testing.T) {
 	}
 	if op.DesiredSource.ImageNameSuffix != "web" {
 		t.Fatalf("expected queued image name suffix web, got %q", op.DesiredSource.ImageNameSuffix)
+	}
+	if op.DesiredSource.ComposeService != "app" {
+		t.Fatalf("expected queued compose service app, got %q", op.DesiredSource.ComposeService)
+	}
+	if len(op.DesiredSource.ComposeDependsOn) != 1 || op.DesiredSource.ComposeDependsOn[0] != "redis" {
+		t.Fatalf("expected queued compose dependencies [redis], got %v", op.DesiredSource.ComposeDependsOn)
 	}
 }
 

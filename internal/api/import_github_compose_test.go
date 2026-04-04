@@ -304,6 +304,12 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 	if primaryApp.Source.ImageRef != "ghcr.io/ding113/claude-code-hub:latest" {
 		t.Fatalf("unexpected primary image ref: %q", primaryApp.Source.ImageRef)
 	}
+	if !stringsContain(primaryApp.Source.ComposeDependsOn, "redis") {
+		t.Fatalf("expected primary app dependencies to include redis, got %v", primaryApp.Source.ComposeDependsOn)
+	}
+	if stringsContain(primaryApp.Source.ComposeDependsOn, "postgres") {
+		t.Fatalf("expected primary app dependencies to exclude managed postgres backing, got %v", primaryApp.Source.ComposeDependsOn)
+	}
 	if got := primaryApp.Spec.Env["REDIS_URL"]; got != "redis://claude-code-hub-redis:6379" {
 		t.Fatalf("expected REDIS_URL to target mirrored redis app, got %q", got)
 	}
@@ -327,6 +333,15 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 	if redisApp.Spec.Ports != nil {
 		t.Fatalf("expected redis spec ports to be detected at import time, got %#v", redisApp.Spec.Ports)
 	}
+}
+
+func stringsContain(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func TestComposePostgresSpecKeepsExplicitServiceName(t *testing.T) {

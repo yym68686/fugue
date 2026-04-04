@@ -276,10 +276,10 @@ func (s *Server) currentTenantManagedUsage(ctx context.Context, tenantID string,
 		if app.TenantID != tenantID || app.Status.CurrentReplicas <= 0 {
 			continue
 		}
-		if !isManagedBillingRuntimeType(runtimeTypes[strings.TrimSpace(app.Status.CurrentRuntimeID)]) {
-			continue
+		appRuntimeID := strings.TrimSpace(app.Status.CurrentRuntimeID)
+		if isManagedBillingRuntimeType(runtimeTypes[appRuntimeID]) {
+			addCurrentResourceUsage(&accumulator, app.CurrentResourceUsage)
 		}
-		addCurrentResourceUsage(&accumulator, app.CurrentResourceUsage)
 		seenServices := map[string]struct{}{}
 		for _, service := range app.BackingServices {
 			serviceID := strings.TrimSpace(service.ID)
@@ -291,6 +291,9 @@ func (s *Server) currentTenantManagedUsage(ctx context.Context, tenantID string,
 			}
 			seenServices[serviceID] = struct{}{}
 			if !isManagedBillingBackingService(service) {
+				continue
+			}
+			if !isManagedBillingRuntimeType(runtimeTypes[billingServiceRuntimeID(service, appRuntimeID)]) {
 				continue
 			}
 			addCurrentResourceUsage(&accumulator, service.CurrentResourceUsage)
@@ -323,11 +326,20 @@ func addCurrentResourceUsage(accumulator *resourceUsageAccumulator, usage *model
 
 func isManagedBillingRuntimeType(runtimeType string) bool {
 	switch strings.TrimSpace(runtimeType) {
-	case model.RuntimeTypeManagedShared, model.RuntimeTypeManagedOwned:
+	case model.RuntimeTypeManagedShared:
 		return true
 	default:
 		return false
 	}
+}
+
+func billingServiceRuntimeID(service model.BackingService, fallbackRuntimeID string) string {
+	if service.Spec.Postgres != nil {
+		if runtimeID := strings.TrimSpace(service.Spec.Postgres.RuntimeID); runtimeID != "" {
+			return runtimeID
+		}
+	}
+	return strings.TrimSpace(fallbackRuntimeID)
 }
 
 func isManagedBillingBackingService(service model.BackingService) bool {
