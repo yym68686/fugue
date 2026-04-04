@@ -3016,7 +3016,7 @@ func TestManagedPostgresBindingIsExclusivePerService(t *testing.T) {
 	}
 }
 
-func TestCreateAppRejectsPersistentWorkspaceOnManagedSharedRuntime(t *testing.T) {
+func TestCreateAppAllowsPersistentWorkspaceOnManagedSharedRuntime(t *testing.T) {
 	t.Parallel()
 
 	s := New(filepath.Join(t.TempDir(), "store.json"))
@@ -3033,15 +3033,21 @@ func TestCreateAppRejectsPersistentWorkspaceOnManagedSharedRuntime(t *testing.T)
 		t.Fatalf("create project: %v", err)
 	}
 
-	_, err = s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
 		Image:     "ghcr.io/example/demo:latest",
 		Ports:     []int{8080},
 		Replicas:  1,
 		RuntimeID: "runtime_managed_shared",
 		Workspace: &model.AppWorkspaceSpec{},
 	})
-	if !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("expected ErrInvalidInput, got %v", err)
+	if err != nil {
+		t.Fatalf("expected managed-shared workspace app to be valid, got %v", err)
+	}
+	if app.Spec.RuntimeID != "runtime_managed_shared" {
+		t.Fatalf("expected runtime_managed_shared, got %q", app.Spec.RuntimeID)
+	}
+	if app.Spec.Workspace == nil {
+		t.Fatal("expected workspace to be preserved")
 	}
 }
 

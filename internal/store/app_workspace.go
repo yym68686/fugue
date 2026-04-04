@@ -13,7 +13,7 @@ func validateWorkspaceSpecForRuntime(spec model.AppSpec, runtimeType string) err
 	if spec.Workspace == nil {
 		return nil
 	}
-	if runtimeType != model.RuntimeTypeManagedOwned {
+	if !model.RuntimeSupportsPersistentWorkspace(runtimeType) {
 		return ErrInvalidInput
 	}
 	return nil

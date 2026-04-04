@@ -518,8 +518,8 @@ func (s *Server) resolveAppFilesystemTarget(
 			}
 			return appFilesystemTarget{}, "", err
 		}
-		if runtimeObj.Type != model.RuntimeTypeManagedOwned {
-			return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusBadRequest, Message: "persistent workspace requires a managed-owned runtime"}
+		if !model.RuntimeSupportsPersistentWorkspace(runtimeObj.Type) {
+			return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusBadRequest, Message: "persistent workspace requires a managed-shared or managed-owned runtime"}
 		}
 	}
 

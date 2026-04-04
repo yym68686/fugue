@@ -157,6 +157,38 @@ func TestAppFilesystemTreeAndReadUseWorkspaceSidecar(t *testing.T) {
 	}
 }
 
+func TestAppFilesystemAllowsWorkspaceOnManagedSharedRuntime(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app := setupAppFilesystemTestServerForRuntime(t, true, "runtime_managed_shared")
+
+	pod := kubePodInfo{}
+	pod.Metadata.Name = "demo-pod"
+	pod.Metadata.CreationTimestamp = time.Now().UTC()
+	pod.Status.Phase = "Running"
+
+	server.newFilesystemPodLister = func(string) (filesystemPodLister, error) {
+		return fakeFilesystemPodLister{pods: []kubePodInfo{pod}}, nil
+	}
+	runner := &fakeFilesystemExecRunner{
+		outputs: [][]byte{
+			[]byte("4\t644\t1700000001\ntest"),
+		},
+	}
+	server.filesystemExecRunner = runner
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/filesystem/file?path=/workspace/file.txt", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("expected 1 filesystem exec call, got %d", len(runner.calls))
+	}
+	if runner.calls[0].container != runtime.AppWorkspaceContainerName {
+		t.Fatalf("expected workspace sidecar container %q, got %q", runtime.AppWorkspaceContainerName, runner.calls[0].container)
+	}
+}
+
 func TestAppFilesystemWriteDirectoryAndDelete(t *testing.T) {
 	t.Parallel()
 
@@ -394,6 +426,10 @@ func TestAppFilesystemExecUnavailableReturnsServiceUnavailable(t *testing.T) {
 }
 
 func setupAppFilesystemTestServer(t *testing.T, withWorkspace bool) (*store.Store, *Server, string, model.App) {
+	return setupAppFilesystemTestServerForRuntime(t, withWorkspace, "")
+}
+
+func setupAppFilesystemTestServerForRuntime(t *testing.T, withWorkspace bool, runtimeID string) (*store.Store, *Server, string, model.App) {
 	t.Helper()
 
 	s := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -409,9 +445,12 @@ func setupAppFilesystemTestServer(t *testing.T, withWorkspace bool) (*store.Stor
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	runtimeObj, _, err := s.CreateRuntime(tenant.ID, "worker-1", model.RuntimeTypeManagedOwned, "https://runtime.example.com", nil)
-	if err != nil {
-		t.Fatalf("create runtime: %v", err)
+	if strings.TrimSpace(runtimeID) == "" {
+		runtimeObj, _, err := s.CreateRuntime(tenant.ID, "worker-1", model.RuntimeTypeManagedOwned, "https://runtime.example.com", nil)
+		if err != nil {
+			t.Fatalf("create runtime: %v", err)
+		}
+		runtimeID = runtimeObj.ID
 	}
 	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.write", "app.deploy"})
 	if err != nil {
@@ -421,7 +460,7 @@ func setupAppFilesystemTestServer(t *testing.T, withWorkspace bool) (*store.Stor
 		Image:     "ghcr.io/example/demo:latest",
 		Ports:     []int{8080},
 		Replicas:  1,
-		RuntimeID: runtimeObj.ID,
+		RuntimeID: runtimeID,
 	}
 	if withWorkspace {
 		spec.Workspace = &model.AppWorkspaceSpec{}

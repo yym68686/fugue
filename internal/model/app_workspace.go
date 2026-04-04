@@ -36,6 +36,15 @@ func NormalizeAppWorkspaceStoragePath(raw string) (string, error) {
 	return NormalizeAbsolutePath(raw)
 }
 
+func RuntimeSupportsPersistentWorkspace(runtimeType string) bool {
+	switch strings.TrimSpace(runtimeType) {
+	case RuntimeTypeManagedOwned, RuntimeTypeManagedShared:
+		return true
+	default:
+		return false
+	}
+}
+
 func AppWorkspaceInternalPath(mountPath string) string {
 	return path.Join(strings.TrimSpace(mountPath), AppWorkspaceInternalDirName)
 }
