@@ -10,6 +10,13 @@
 - Do not patch live control-plane Deployments by hand with ad-hoc image tags when the intended change can be released through the normal workflow.
 - If an emergency investigation requires SSH access, keep it read-only by default; only perform manual remote recovery when the user explicitly asks for that exception.
 
+## General Design Constraints
+
+- Do not add project-specific code paths, heuristics, adapters, conditionals, or migration logic keyed to a particular project name, repository name, slug, hostname, or demo fixture.
+- Do not hardcode any user/project/repository-specific names to make one import path, template, manifest, or deployment succeed.
+- When behavior needs to vary, express it through explicit schema, configuration, generic metadata, or reusable adapters rather than matching a specific project.
+- If an existing implementation appears to require a one-off workaround for a named project, stop and redesign it into a general mechanism before merging.
+
 ## API Contract Rules
 
 - Fugue now follows an OpenAPI-first workflow. The single source of truth for the HTTP API is `openapi/openapi.yaml`.
