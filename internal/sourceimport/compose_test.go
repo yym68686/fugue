@@ -3,6 +3,7 @@ package sourceimport
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -246,4 +247,127 @@ func TestInspectComposeStackFromRepoParsesEnvFilesAndIgnoredFields(t *testing.T)
 	if len(service.IgnoredFields) == 0 {
 		t.Fatalf("expected ignored field report, got %+v", service)
 	}
+}
+
+func TestInspectComposeStackFromRepoIgnoresMissingEnvFilesDuringImport(t *testing.T) {
+	repoDir := t.TempDir()
+	compose := `services:
+  postgres:
+    image: postgres:18
+    env_file:
+      - ./.env
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-claude_code_hub}
+  app:
+    image: ghcr.io/ding113/claude-code-hub:latest
+    env_file:
+      - ./.env
+    environment:
+      DSN: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-claude_code_hub}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - postgres
+    ports:
+      - "23000:3000"
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "docker-compose.yaml"), []byte(compose), 0o644); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+
+	stack, err := inspectComposeStackFromRepo(clonedGitHubRepo{RepoDir: repoDir, DefaultAppName: "demo"})
+	if err != nil {
+		t.Fatalf("inspect compose stack: %v", err)
+	}
+	if len(stack.Services) != 2 {
+		t.Fatalf("expected 2 services, got %d", len(stack.Services))
+	}
+
+	var appService, postgresService ComposeService
+	for _, service := range stack.Services {
+		switch service.Name {
+		case "app":
+			appService = service
+		case "postgres":
+			postgresService = service
+		}
+	}
+
+	if len(appService.EnvFiles) != 1 || appService.EnvFiles[0] != ".env" {
+		t.Fatalf("unexpected app env files: %#v", appService.EnvFiles)
+	}
+	if appService.Environment["DSN"] != "postgresql://postgres:postgres@postgres:5432/claude_code_hub" {
+		t.Fatalf("unexpected app DSN: %#v", appService.Environment)
+	}
+	if !hasComposeInference(appService.InferenceReport, InferenceLevelWarning, "env_file", ".env") {
+		t.Fatalf("expected app env_file warning, got %#v", appService.InferenceReport)
+	}
+
+	if len(postgresService.EnvFiles) != 1 || postgresService.EnvFiles[0] != ".env" {
+		t.Fatalf("unexpected postgres env files: %#v", postgresService.EnvFiles)
+	}
+	if postgresService.Environment["POSTGRES_PASSWORD"] != "postgres" {
+		t.Fatalf("unexpected postgres env: %#v", postgresService.Environment)
+	}
+	if !hasComposeInference(postgresService.InferenceReport, InferenceLevelWarning, "env_file", ".env") {
+		t.Fatalf("expected postgres env_file warning, got %#v", postgresService.InferenceReport)
+	}
+}
+
+func TestInspectComposeStackFromRepoSupportsOptionalEnvFileEntries(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, "env"), 0o755); err != nil {
+		t.Fatalf("mkdir env dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "env", "app.env"), []byte("FROM_FILE=true\n"), 0o644); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte("FROM scratch\nEXPOSE 8080\n"), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	compose := `services:
+  app:
+    build: .
+    env_file:
+      - path: ./.env
+        required: false
+      - path: ./env/app.env
+    environment:
+      SHARED: inline
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "compose.yaml"), []byte(compose), 0o644); err != nil {
+		t.Fatalf("write compose file: %v", err)
+	}
+
+	stack, err := inspectComposeStackFromRepo(clonedGitHubRepo{RepoDir: repoDir, DefaultAppName: "demo"})
+	if err != nil {
+		t.Fatalf("inspect compose stack: %v", err)
+	}
+	if len(stack.Services) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(stack.Services))
+	}
+
+	service := stack.Services[0]
+	if len(service.EnvFiles) != 2 || service.EnvFiles[0] != ".env" || service.EnvFiles[1] != "env/app.env" {
+		t.Fatalf("unexpected env files: %#v", service.EnvFiles)
+	}
+	if service.Environment["FROM_FILE"] != "true" || service.Environment["SHARED"] != "inline" {
+		t.Fatalf("unexpected environment: %#v", service.Environment)
+	}
+	if hasComposeInference(service.InferenceReport, InferenceLevelWarning, "env_file", ".env") {
+		t.Fatalf("expected optional missing env_file to stay quiet, got %#v", service.InferenceReport)
+	}
+}
+
+func hasComposeInference(report []TopologyInference, level, category, contains string) bool {
+	for _, inference := range report {
+		if inference.Level != level || inference.Category != category {
+			continue
+		}
+		if contains == "" || strings.Contains(inference.Message, contains) {
+			return true
+		}
+	}
+	return false
 }

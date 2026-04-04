@@ -280,7 +280,7 @@ func validateFugueManifestVersion(raw any) error {
 }
 
 func resolveFugueManifestService(repoDir, rawName string, raw fugueManifestService, declaredBacking bool, vars map[string]string) (ComposeService, error) {
-	envFiles, fileEnv, err := readComposeServiceEnvFiles(repoDir, raw.EnvFile, vars)
+	envFiles, fileEnv, missingEnvFiles, err := readComposeServiceEnvFiles(repoDir, raw.EnvFile, vars)
 	if err != nil {
 		return ComposeService{}, fmt.Errorf("load env_file for fugue service %q: %w", rawName, err)
 	}
@@ -306,6 +306,7 @@ func resolveFugueManifestService(repoDir, rawName string, raw fugueManifestServi
 	if service.Name == "" {
 		return ComposeService{}, fmt.Errorf("fugue service name %q is invalid", rawName)
 	}
+	service.InferenceReport = appendMissingComposeEnvFileInference(service.InferenceReport, service.Name, missingEnvFiles)
 
 	buildSpec, hasBuild, err := parseFugueBuildSpec(raw.Build)
 	if err != nil && raw.Build != nil {

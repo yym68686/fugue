@@ -116,6 +116,11 @@ type composePortSpec struct {
 	Published int `yaml:"published"`
 }
 
+type composeEnvFileRef struct {
+	Path     string
+	Required bool
+}
+
 func (i *Importer) InspectGitHubCompose(ctx context.Context, req GitHubComposeInspectRequest) (GitHubComposeStack, error) {
 	repo, err := i.cloneGitHubRepo(ctx, req.RepoURL, req.RepoAuthToken, req.Branch, "github-compose-inspect-*")
 	if err != nil {
@@ -195,7 +200,7 @@ func findComposeFile(repoDir string) (string, error) {
 }
 
 func resolveComposeService(repoDir, serviceName string, raw composeServiceRaw, vars map[string]string) (ComposeService, string, error) {
-	envFiles, fileEnv, err := readComposeServiceEnvFiles(repoDir, raw.EnvFile, vars)
+	envFiles, fileEnv, missingEnvFiles, err := readComposeServiceEnvFiles(repoDir, raw.EnvFile, vars)
 	if err != nil {
 		return ComposeService{}, "", fmt.Errorf("load env_file for compose service %q: %w", serviceName, err)
 	}
@@ -222,6 +227,7 @@ func resolveComposeService(repoDir, serviceName string, raw composeServiceRaw, v
 	if service.Name == "" {
 		return ComposeService{}, "", fmt.Errorf("compose service name %q is invalid", serviceName)
 	}
+	service.InferenceReport = appendMissingComposeEnvFileInference(service.InferenceReport, service.Name, missingEnvFiles)
 	service.Published = composeServicePublishesPorts(raw.Ports)
 
 	buildSpec, hasBuild, err := parseComposeBuildSpec(raw.Build)
@@ -297,6 +303,20 @@ func resolveComposeService(repoDir, serviceName string, raw composeServiceRaw, v
 	service.BuildContextDir = buildContextDir
 	service.InternalPort = detectedPort
 	return service, "", nil
+}
+
+func appendMissingComposeEnvFileInference(report []TopologyInference, serviceName string, paths []string) []TopologyInference {
+	for _, path := range paths {
+		report = appendInference(
+			report,
+			InferenceLevelWarning,
+			"env_file",
+			serviceName,
+			"declared env_file %q was not found in the repository and was ignored during import; provide any required values explicitly if the service depends on them",
+			path,
+		)
+	}
+	return report
 }
 
 func resolveComposeBuildInputs(repoDir string, buildSpec composeBuildSpec) (string, string, string, string, int, error) {
@@ -392,28 +412,34 @@ func mergeComposeEnvironment(base, override map[string]string) map[string]string
 	return out
 }
 
-func readComposeServiceEnvFiles(repoDir string, raw any, vars map[string]string) ([]string, map[string]string, error) {
-	paths := parseComposeStringList(raw)
-	if len(paths) == 0 {
-		return nil, nil, nil
+func readComposeServiceEnvFiles(repoDir string, raw any, vars map[string]string) ([]string, map[string]string, []string, error) {
+	refs := parseComposeEnvFileRefs(raw, vars)
+	if len(refs) == 0 {
+		return nil, nil, nil, nil
 	}
 	env := make(map[string]string)
-	outPaths := make([]string, 0, len(paths))
-	for _, path := range paths {
-		path = resolveComposeInterpolation(path, vars)
-		path = strings.TrimSpace(path)
+	outPaths := make([]string, 0, len(refs))
+	missingPaths := make([]string, 0)
+	for _, ref := range refs {
+		path := cleanComposeEnvFilePath(ref.Path)
 		if path == "" {
 			continue
 		}
+		outPaths = append(outPaths, path)
 		fullPath, err := secureRepoJoin(repoDir, path)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		data, err := os.ReadFile(fullPath)
 		if err != nil {
-			return nil, nil, err
+			if errors.Is(err, os.ErrNotExist) {
+				if ref.Required {
+					missingPaths = append(missingPaths, path)
+				}
+				continue
+			}
+			return nil, nil, nil, err
 		}
-		outPaths = append(outPaths, filepath.ToSlash(path))
 		for _, line := range strings.Split(string(data), "\n") {
 			line = strings.TrimSpace(line)
 			if line == "" || strings.HasPrefix(line, "#") {
@@ -430,7 +456,94 @@ func readComposeServiceEnvFiles(repoDir string, raw any, vars map[string]string)
 			env[key] = resolveComposeInterpolation(strings.TrimSpace(value), vars)
 		}
 	}
-	return outPaths, dropEmptyComposeMap(env), nil
+	return outPaths, dropEmptyComposeMap(env), missingPaths, nil
+}
+
+func parseComposeEnvFileRefs(raw any, vars map[string]string) []composeEnvFileRef {
+	switch value := raw.(type) {
+	case nil:
+		return nil
+	case string:
+		ref, ok := parseComposeEnvFileRef(value, vars)
+		if !ok {
+			return nil
+		}
+		return []composeEnvFileRef{ref}
+	case []any:
+		out := make([]composeEnvFileRef, 0, len(value))
+		for _, item := range value {
+			ref, ok := parseComposeEnvFileRef(item, vars)
+			if !ok {
+				continue
+			}
+			out = append(out, ref)
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	case map[string]any:
+		ref, ok := parseComposeEnvFileRef(value, vars)
+		if !ok {
+			return nil
+		}
+		return []composeEnvFileRef{ref}
+	default:
+		return nil
+	}
+}
+
+func parseComposeEnvFileRef(raw any, vars map[string]string) (composeEnvFileRef, bool) {
+	switch value := raw.(type) {
+	case nil:
+		return composeEnvFileRef{}, false
+	case string:
+		path := cleanComposeEnvFilePath(resolveComposeInterpolation(value, vars))
+		if path == "" {
+			return composeEnvFileRef{}, false
+		}
+		return composeEnvFileRef{Path: path, Required: true}, true
+	case map[string]any:
+		path := cleanComposeEnvFilePath(resolveComposeInterpolation(stringifyComposeValue(value["path"]), vars))
+		if path == "" {
+			return composeEnvFileRef{}, false
+		}
+		required := true
+		if rawRequired, ok := value["required"]; ok {
+			required = parseComposeBool(rawRequired, true)
+		}
+		return composeEnvFileRef{Path: path, Required: required}, true
+	default:
+		return composeEnvFileRef{}, false
+	}
+}
+
+func cleanComposeEnvFilePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	return filepath.ToSlash(filepath.Clean(path))
+}
+
+func parseComposeBool(raw any, fallback bool) bool {
+	switch value := raw.(type) {
+	case nil:
+		return fallback
+	case bool:
+		return value
+	case string:
+		switch strings.TrimSpace(strings.ToLower(value)) {
+		case "1", "true", "yes", "on":
+			return true
+		case "0", "false", "no", "off":
+			return false
+		default:
+			return fallback
+		}
+	default:
+		return fallback
+	}
 }
 
 func parseComposeStringList(raw any) []string {
