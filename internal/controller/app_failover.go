@@ -353,7 +353,7 @@ func (s *Service) executeManagedFailoverOperation(ctx context.Context, op model.
 			if err := s.applyManagedAppDesiredState(ctx, fencedApp, scheduling); err != nil {
 				return fmt.Errorf("apply fenced managed app state %s: %w", app.ID, err)
 			}
-			if err := s.waitForManagedAppRollout(ctx, fencedApp); err != nil {
+			if err := s.waitForManagedAppRollout(ctx, fencedApp, ""); err != nil {
 				return fmt.Errorf("wait for fenced managed app rollout %s: %w", app.ID, err)
 			}
 		}
@@ -378,7 +378,7 @@ func (s *Service) executeManagedFailoverOperation(ctx context.Context, op model.
 		if err := s.applyManagedAppDesiredState(ctx, failedOverApp, scheduling); err != nil {
 			return fmt.Errorf("apply failed-over managed app state %s: %w", app.ID, err)
 		}
-		if err := s.waitForManagedAppRollout(ctx, failedOverApp); err != nil {
+		if err := s.waitForManagedAppRollout(ctx, failedOverApp, ""); err != nil {
 			return fmt.Errorf("wait for failed-over managed app rollout %s: %w", app.ID, err)
 		}
 	}

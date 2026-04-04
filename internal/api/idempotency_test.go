@@ -75,3 +75,33 @@ func TestHashImportGitHubRequestChangesWhenEnvChanges(t *testing.T) {
 		t.Fatal("expected different hashes when env changes")
 	}
 }
+
+func TestHashImportGitHubRequestChangesWhenPersistentStorageSeedFilesChange(t *testing.T) {
+	req := importGitHubRequest{
+		ProjectID: "project_1",
+		RepoURL:   "https://github.com/example/demo",
+		Branch:    "main",
+		Name:      "demo",
+		PersistentStorageSeedFiles: []importGitHubPersistentStorageSeedFile{
+			{
+				Service:     "app",
+				Path:        "/home/api.yaml",
+				SeedContent: "providers: []\n",
+			},
+		},
+	}
+	hashA, err := hashImportGitHubRequest("tenant_1", req, "runtime_managed_shared", 1)
+	if err != nil {
+		t.Fatalf("hash request a: %v", err)
+	}
+
+	req.PersistentStorageSeedFiles[0].SeedContent = "providers:\n  - openai\n"
+	hashB, err := hashImportGitHubRequest("tenant_1", req, "runtime_managed_shared", 1)
+	if err != nil {
+		t.Fatalf("hash request b: %v", err)
+	}
+
+	if hashA == hashB {
+		t.Fatal("expected different hashes when persistent storage seed files change")
+	}
+}

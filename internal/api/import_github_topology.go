@@ -50,6 +50,12 @@ var defaultComposeImportNamingStrategy = composeImportNamingStrategy{
 }
 
 func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantID string, req importGitHubRequest, runtimeID string, replicas int, description string, baseName string, topology sourceimport.NormalizedTopology) (importedGitHubTopology, error) {
+	services, err := applyImportGitHubPersistentStorageSeedFiles(topology.Services, req.PersistentStorageSeedFiles)
+	if err != nil {
+		return importedGitHubTopology{}, invalidComposeImport(err)
+	}
+	topology.Services = services
+
 	return s.importResolvedTopology(principal, tenantID, topologyImportOptions{
 		ProjectID:   req.ProjectID,
 		RuntimeID:   runtimeID,
@@ -68,6 +74,106 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 			}
 		},
 	}, topology)
+}
+
+func applyImportGitHubPersistentStorageSeedFiles(services []sourceimport.ComposeService, overrides []importGitHubPersistentStorageSeedFile) ([]sourceimport.ComposeService, error) {
+	if len(overrides) == 0 {
+		return services, nil
+	}
+
+	clonedServices := cloneComposeServicesForImport(services)
+	serviceIndexes := make(map[string]int, len(clonedServices))
+	for index, service := range clonedServices {
+		name := strings.TrimSpace(service.Name)
+		if name == "" {
+			continue
+		}
+		serviceIndexes[name] = index
+	}
+
+	seen := make(map[string]struct{}, len(overrides))
+	for index, override := range overrides {
+		serviceName := strings.TrimSpace(override.Service)
+		if serviceName == "" {
+			return nil, fmt.Errorf("persistent_storage_seed_files[%d].service is required", index)
+		}
+
+		path := strings.TrimSpace(override.Path)
+		if path == "" {
+			return nil, fmt.Errorf("persistent_storage_seed_files[%d].path is required", index)
+		}
+
+		key := serviceName + "\x00" + path
+		if _, exists := seen[key]; exists {
+			return nil, fmt.Errorf("persistent_storage_seed_files contains duplicate entry for service %q path %q", serviceName, path)
+		}
+		seen[key] = struct{}{}
+
+		serviceIndex, ok := serviceIndexes[serviceName]
+		if !ok {
+			return nil, fmt.Errorf("persistent_storage_seed_files references unknown service %q", serviceName)
+		}
+
+		service := &clonedServices[serviceIndex]
+		if service.PersistentStorage == nil {
+			return nil, fmt.Errorf("persistent_storage_seed_files references service %q without persistent storage", serviceName)
+		}
+
+		seedFileIndex := -1
+		for candidateIndex, seedFile := range service.PersistentStorageSeedFiles {
+			if strings.TrimSpace(seedFile.Path) == path {
+				seedFileIndex = candidateIndex
+				break
+			}
+		}
+		if seedFileIndex < 0 {
+			return nil, fmt.Errorf("persistent_storage_seed_files references unknown editable file %q for service %q", path, serviceName)
+		}
+
+		mountIndex := -1
+		for candidateIndex, mount := range service.PersistentStorage.Mounts {
+			if strings.TrimSpace(mount.Path) == path {
+				mountIndex = candidateIndex
+				break
+			}
+		}
+		if mountIndex < 0 {
+			return nil, fmt.Errorf("persistent_storage_seed_files references persistent file %q for service %q that is no longer available", path, serviceName)
+		}
+		if service.PersistentStorage.Mounts[mountIndex].Kind != model.AppPersistentStorageMountKindFile {
+			return nil, fmt.Errorf("persistent_storage_seed_files references non-file mount %q for service %q", path, serviceName)
+		}
+
+		service.PersistentStorage.Mounts[mountIndex].SeedContent = override.SeedContent
+		service.PersistentStorageSeedFiles[seedFileIndex].SeedContent = override.SeedContent
+	}
+
+	return clonedServices, nil
+}
+
+func cloneComposeServicesForImport(services []sourceimport.ComposeService) []sourceimport.ComposeService {
+	if len(services) == 0 {
+		return nil
+	}
+
+	clonedServices := make([]sourceimport.ComposeService, len(services))
+	for index, service := range services {
+		cloned := service
+
+		if service.PersistentStorage != nil {
+			storage := *service.PersistentStorage
+			storage.Mounts = append([]model.AppPersistentStorageMount(nil), service.PersistentStorage.Mounts...)
+			cloned.PersistentStorage = &storage
+		}
+
+		cloned.PersistentStorageSeedFiles = append(
+			[]sourceimport.PersistentStorageSeedFile(nil),
+			service.PersistentStorageSeedFiles...,
+		)
+		clonedServices[index] = cloned
+	}
+
+	return clonedServices
 }
 
 func (s *Server) importResolvedUploadTopology(principal model.Principal, tenantID string, req importUploadRequest, upload model.SourceUpload, runtimeID string, replicas int, description string, baseName string, topology sourceimport.NormalizedTopology) (importedGitHubTopology, error) {

@@ -1285,6 +1285,12 @@ paths:
         - BearerAuth: []
       parameters:
         - $ref: "#/components/parameters/IdPathParam"
+        - in: query
+          name: force
+          required: false
+          description: Abort in-flight build or deploy work before deleting the app, and purge the app immediately when no live runtime still needs cleanup.
+          schema:
+            type: boolean
       responses:
         '202':
           description: Successful response
@@ -2958,6 +2964,29 @@ components:
         mode:
           type: integer
           format: int32
+    PersistentStorageSeedFile:
+      type: object
+      additionalProperties: false
+      required: [mode, path, seed_content]
+      properties:
+        path:
+          type: string
+        mode:
+          type: integer
+          format: int32
+        seed_content:
+          type: string
+    ImportGitHubPersistentStorageSeedFile:
+      type: object
+      additionalProperties: false
+      required: [path, seed_content, service]
+      properties:
+        service:
+          type: string
+        path:
+          type: string
+        seed_content:
+          type: string
     AppPersistentStorageSpec:
       type: object
       additionalProperties: false
@@ -4433,7 +4462,7 @@ components:
       type: object
       additionalProperties: false
       required:
-        [build_context_dir, build_strategy, compose_service, dockerfile_path, internal_port, kind, published, service, source_dir]
+        [build_context_dir, build_strategy, compose_service, dockerfile_path, internal_port, kind, persistent_storage_seed_files, published, service, source_dir]
       properties:
         service:
           type: string
@@ -4462,12 +4491,37 @@ components:
           type: string
         build_context_dir:
           type: string
+        persistent_storage_seed_files:
+          type: array
+          items:
+            $ref: "#/components/schemas/PersistentStorageSeedFile"
     InspectGitHubTemplateManifest:
       type: object
       additionalProperties: false
       required: [manifest_path, primary_service, services, warnings, inference_report]
       properties:
         manifest_path:
+          type: string
+        primary_service:
+          type: string
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/InspectGitHubTemplateManifestService"
+        warnings:
+          type: array
+          items:
+            type: string
+        inference_report:
+          type: array
+          items:
+            $ref: "#/components/schemas/TopologyInference"
+    InspectGitHubTemplateComposeStack:
+      type: object
+      additionalProperties: false
+      required: [compose_path, primary_service, services, warnings, inference_report]
+      properties:
+        compose_path:
           type: string
         primary_service:
           type: string
@@ -4536,6 +4590,9 @@ components:
         fugue_manifest:
           $ref: "#/components/schemas/InspectGitHubTemplateManifest"
           nullable: true
+        compose_stack:
+          $ref: "#/components/schemas/InspectGitHubTemplateComposeStack"
+          nullable: true
         template:
           $ref: "#/components/schemas/TemplateMetadata"
           nullable: true
@@ -4586,6 +4643,10 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AppFile"
+        persistent_storage_seed_files:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImportGitHubPersistentStorageSeedFile"
         postgres:
           $ref: "#/components/schemas/AppPostgresSpec"
         idempotency_key:
@@ -5117,6 +5178,8 @@ components:
         operation:
           $ref: "#/components/schemas/Operation"
         already_deleting:
+          type: boolean
+        deleted:
           type: boolean
     OperationListResponse:
       type: object

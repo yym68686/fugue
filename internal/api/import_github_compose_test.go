@@ -373,6 +373,91 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 	}
 }
 
+func TestImportResolvedGitHubTopologyAppliesPersistentStorageSeedFileOverrides(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Persistent Storage Seed Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		AppBaseDomain:    "apps.example.com",
+		RegistryPushBase: "registry.internal.example",
+	})
+
+	result, err := server.importResolvedGitHubTopology(
+		model.Principal{ActorType: model.ActorTypeAPIKey, ActorID: "key"},
+		tenant.ID,
+		importGitHubRequest{
+			ProjectID:      project.ID,
+			RepoURL:        "https://github.com/example/demo",
+			RepoVisibility: "public",
+			PersistentStorageSeedFiles: []importGitHubPersistentStorageSeedFile{
+				{
+					Service:     "app",
+					Path:        "/home/api.yaml",
+					SeedContent: "providers:\n  - openai\n",
+				},
+			},
+		},
+		"runtime_managed_shared",
+		1,
+		"Imported from GitHub",
+		"demo",
+		sourceimport.NormalizedTopology{Services: []sourceimport.ComposeService{
+			{
+				Name:         "app",
+				Kind:         sourceimport.ComposeServiceKindApp,
+				ServiceType:  sourceimport.ServiceTypeCustom,
+				Image:        "ghcr.io/example/app:latest",
+				InternalPort: 3000,
+				Published:    true,
+				PersistentStorage: &model.AppPersistentStorageSpec{
+					Mounts: []model.AppPersistentStorageMount{
+						{
+							Kind:        model.AppPersistentStorageMountKindFile,
+							Path:        "/home/api.yaml",
+							Mode:        0o644,
+							SeedContent: "",
+						},
+					},
+				},
+				PersistentStorageSeedFiles: []sourceimport.PersistentStorageSeedFile{
+					{
+						Path:        "/home/api.yaml",
+						Mode:        0o644,
+						SeedContent: "",
+					},
+				},
+			},
+		}},
+	)
+	if err != nil {
+		t.Fatalf("import resolved topology: %v", err)
+	}
+	if len(result.Apps) != 1 {
+		t.Fatalf("expected 1 app, got %d", len(result.Apps))
+	}
+	if result.Apps[0].Spec.PersistentStorage == nil || len(result.Apps[0].Spec.PersistentStorage.Mounts) != 1 {
+		t.Fatalf("expected persistent storage on imported app, got %+v", result.Apps[0].Spec.PersistentStorage)
+	}
+
+	fileMount := result.Apps[0].Spec.PersistentStorage.Mounts[0]
+	if fileMount.Path != "/home/api.yaml" || fileMount.SeedContent != "providers:\n  - openai\n" {
+		t.Fatalf("expected persistent storage seed override to apply, got %+v", fileMount)
+	}
+}
+
 func stringsContain(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {

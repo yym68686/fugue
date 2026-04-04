@@ -10,7 +10,7 @@ import (
 	"fugue/internal/runtime"
 )
 
-func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App) error {
+func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, operationID string) error {
 	client, err := s.kubeClient()
 	if err != nil {
 		return fmt.Errorf("initialize kubernetes rollout client: %w", err)
@@ -32,6 +32,12 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App) e
 	lastMessage := ""
 
 	for {
+		if strings.TrimSpace(operationID) != "" {
+			if err := s.ensureOperationStillActive(operationID); err != nil {
+				return err
+			}
+		}
+
 		deployment, found, err := client.getDeployment(waitCtx, namespace, name)
 		if err != nil {
 			return fmt.Errorf("read deployment rollout for %s/%s: %w", namespace, name, err)

@@ -86,7 +86,7 @@ func TestWaitForManagedAppRolloutFailsWhenManagedAppReportsError(t *testing.T) {
 		},
 	}
 
-	err := svc.waitForManagedAppRollout(context.Background(), app)
+	err := svc.waitForManagedAppRollout(context.Background(), app, "")
 	if err == nil {
 		t.Fatal("expected rollout wait to fail")
 	}

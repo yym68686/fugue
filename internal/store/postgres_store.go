@@ -2986,6 +2986,9 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string,
 	if runtimeID != "" && op.AssignedRuntimeID != runtimeID {
 		return model.Operation{}, ErrNotFound
 	}
+	if !operationCanTransitionToCompleted(op) {
+		return model.Operation{}, ErrConflict
+	}
 	if desiredSpec != nil {
 		op.DesiredSpec = cloneAppSpec(desiredSpec)
 	}

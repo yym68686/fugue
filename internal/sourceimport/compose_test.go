@@ -456,6 +456,15 @@ func TestInspectComposeStackFromRepoInfersMissingBindMountsAsEmptyPersistentStor
 	if extensionlessFileMount.Kind != model.AppPersistentStorageMountKindFile || extensionlessFileMount.Path != "/workspace/Dockerfile" {
 		t.Fatalf("unexpected inferred extensionless file mount: %+v", extensionlessFileMount)
 	}
+	if len(service.PersistentStorageSeedFiles) != 2 {
+		t.Fatalf("expected editable seed files for the missing file mounts, got %+v", service.PersistentStorageSeedFiles)
+	}
+	if service.PersistentStorageSeedFiles[0].Path != "/home/api.yaml" || service.PersistentStorageSeedFiles[0].Mode != defaultComposePersistentFileMode || service.PersistentStorageSeedFiles[0].SeedContent != "" {
+		t.Fatalf("unexpected first editable seed file: %+v", service.PersistentStorageSeedFiles[0])
+	}
+	if service.PersistentStorageSeedFiles[1].Path != "/workspace/Dockerfile" || service.PersistentStorageSeedFiles[1].Mode != defaultComposePersistentFileMode || service.PersistentStorageSeedFiles[1].SeedContent != "" {
+		t.Fatalf("unexpected second editable seed file: %+v", service.PersistentStorageSeedFiles[1])
+	}
 
 	for _, field := range service.IgnoredFields {
 		if field == "volumes" {

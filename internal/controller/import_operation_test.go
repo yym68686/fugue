@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -166,6 +167,90 @@ func TestExecuteManagedImportOperationImportsDockerImageSource(t *testing.T) {
 	}
 	if deployOp.DesiredSource.ResolvedImageRef != "registry.push.example/fugue-apps/demo:image-abc123" {
 		t.Fatalf("expected resolved image ref to be persisted, got %q", deployOp.DesiredSource.ResolvedImageRef)
+	}
+}
+
+func TestExecuteManagedImportOperationStopsAfterForceDelete(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:       model.AppSourceTypeGitHubPublic,
+		RepoURL:    "https://github.com/example/demo",
+		RepoBranch: "main",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	specCopy := app.Spec
+	sourceCopy := *app.Source
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		DesiredSource:   &sourceCopy,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+
+	importer := newControlledImporter()
+	svc := &Service{
+		Store:            stateStore,
+		Logger:           log.New(io.Discard, "", 0),
+		importer:         importer,
+		registryPushBase: "registry.push.example",
+		registryPullBase: "registry.pull.example",
+	}
+
+	resultCh := make(chan error, 1)
+	go func() {
+		resultCh <- svc.executeManagedImportOperation(context.Background(), op, app)
+	}()
+
+	startedOpID := <-importer.started
+	if startedOpID != op.ID {
+		t.Fatalf("expected importer start for op %s, got %s", op.ID, startedOpID)
+	}
+
+	if _, err := stateStore.FailOperation(op.ID, "build canceled so the app can be force deleted"); err != nil {
+		t.Fatalf("fail import operation: %v", err)
+	}
+
+	importer.release(op.ID)
+
+	if err := <-resultCh; !errors.Is(err, errOperationNoLongerActive) {
+		t.Fatalf("expected %v after force delete, got %v", errOperationNoLongerActive, err)
+	}
+
+	ops, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+	for _, candidate := range ops {
+		if candidate.Type == model.OperationTypeDeploy {
+			t.Fatalf("expected no deploy operation after force delete, got %+v", candidate)
+		}
 	}
 }
 

@@ -1048,8 +1048,17 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "missing app.write or app.delete scope")
 		return
 	}
+	force, err := readBoolQuery(r, "force", false)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	app, allowed := s.loadAuthorizedApp(w, r, principal)
 	if !allowed {
+		return
+	}
+	if force {
+		s.handleForceDeleteApp(w, r, principal, app)
 		return
 	}
 	if strings.EqualFold(strings.TrimSpace(app.Status.Phase), "deleting") {

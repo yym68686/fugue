@@ -67,39 +67,46 @@ type GitHubComposeStack struct {
 	InferenceReport []TopologyInference
 }
 
+type PersistentStorageSeedFile struct {
+	Path        string `json:"path,omitempty"`
+	Mode        int32  `json:"mode,omitempty"`
+	SeedContent string `json:"seed_content,omitempty"`
+}
+
 type ComposeService struct {
-	Name              string
-	Kind              string
-	ServiceType       string
-	BackingService    bool
-	Image             string
-	BuildStrategy     string
-	SourceDir         string
-	DockerfilePath    string
-	BuildContextDir   string
-	BuildArgs         map[string]string
-	BuildTarget       string
-	InternalPort      int
-	Published         bool
-	Environment       map[string]string
-	DependsOn         []string
-	Bindings          []ServiceBinding
-	OwnerService      string
-	EnvFiles          []string
-	Command           []string
-	Entrypoint        []string
-	Healthcheck       *ServiceHealthcheck
-	Profiles          []string
-	Volumes           []string
-	PersistentStorage *model.AppPersistentStorageSpec
-	Secrets           []string
-	Configs           []string
-	Networks          []string
-	Labels            map[string]string
-	Deploy            map[string]any
-	IgnoredFields     []string
-	InferenceReport   []TopologyInference
-	Postgres          *model.AppPostgresSpec
+	Name                       string
+	Kind                       string
+	ServiceType                string
+	BackingService             bool
+	Image                      string
+	BuildStrategy              string
+	SourceDir                  string
+	DockerfilePath             string
+	BuildContextDir            string
+	BuildArgs                  map[string]string
+	BuildTarget                string
+	InternalPort               int
+	Published                  bool
+	Environment                map[string]string
+	DependsOn                  []string
+	Bindings                   []ServiceBinding
+	OwnerService               string
+	EnvFiles                   []string
+	Command                    []string
+	Entrypoint                 []string
+	Healthcheck                *ServiceHealthcheck
+	Profiles                   []string
+	Volumes                    []string
+	PersistentStorage          *model.AppPersistentStorageSpec
+	PersistentStorageSeedFiles []PersistentStorageSeedFile
+	Secrets                    []string
+	Configs                    []string
+	Networks                   []string
+	Labels                     map[string]string
+	Deploy                     map[string]any
+	IgnoredFields              []string
+	InferenceReport            []TopologyInference
+	Postgres                   *model.AppPostgresSpec
 }
 
 type composeFile struct {
@@ -250,11 +257,12 @@ func resolveComposeService(repoDir, serviceName string, raw composeServiceRaw, v
 	}
 	service.InferenceReport = appendMissingComposeEnvFileInference(service.InferenceReport, service.Name, missingEnvFiles)
 	service.Published = composeServicePublishesPorts(raw.Ports)
-	persistentStorage, storageInferences, ignoredVolumeEntries, err := resolveComposePersistentStorage(repoDir, service.Name, raw.Volumes)
+	persistentStorage, persistentStorageSeedFiles, storageInferences, ignoredVolumeEntries, err := resolveComposePersistentStorage(repoDir, service.Name, raw.Volumes)
 	if err != nil {
 		return ComposeService{}, "", fmt.Errorf("resolve volumes for compose service %q: %w", serviceName, err)
 	}
 	service.PersistentStorage = persistentStorage
+	service.PersistentStorageSeedFiles = persistentStorageSeedFiles
 	service.InferenceReport = append(service.InferenceReport, storageInferences...)
 
 	buildSpec, hasBuild, err := parseComposeBuildSpec(raw.Build)
@@ -578,19 +586,20 @@ func parseComposeBool(raw any, fallback bool) bool {
 	}
 }
 
-func resolveComposePersistentStorage(repoDir, serviceName string, raw any) (*model.AppPersistentStorageSpec, []TopologyInference, bool, error) {
+func resolveComposePersistentStorage(repoDir, serviceName string, raw any) (*model.AppPersistentStorageSpec, []PersistentStorageSeedFile, []TopologyInference, bool, error) {
 	entries := composeVolumeEntries(raw)
 	if len(entries) == 0 {
-		return nil, nil, false, nil
+		return nil, nil, nil, false, nil
 	}
 
 	mounts := make([]model.AppPersistentStorageMount, 0, len(entries))
+	seedFiles := make([]PersistentStorageSeedFile, 0, len(entries))
 	report := make([]TopologyInference, 0, len(entries))
 	ignored := false
 	for _, entry := range entries {
-		mount, handled, inferences, err := resolveComposePersistentStorageMount(repoDir, serviceName, entry)
+		mount, seedFile, handled, inferences, err := resolveComposePersistentStorageMount(repoDir, serviceName, entry)
 		if err != nil {
-			return nil, nil, false, err
+			return nil, nil, nil, false, err
 		}
 		report = append(report, inferences...)
 		if !handled {
@@ -598,11 +607,14 @@ func resolveComposePersistentStorage(repoDir, serviceName string, raw any) (*mod
 			continue
 		}
 		mounts = append(mounts, *mount)
+		if seedFile != nil {
+			seedFiles = append(seedFiles, *seedFile)
+		}
 	}
 	if len(mounts) == 0 {
-		return nil, report, ignored, nil
+		return nil, seedFiles, report, ignored, nil
 	}
-	return &model.AppPersistentStorageSpec{Mounts: mounts}, report, ignored, nil
+	return &model.AppPersistentStorageSpec{Mounts: mounts}, seedFiles, report, ignored, nil
 }
 
 func composeVolumeEntries(raw any) []any {
@@ -626,21 +638,21 @@ func composeVolumeEntries(raw any) []any {
 	}
 }
 
-func resolveComposePersistentStorageMount(repoDir, serviceName string, raw any) (*model.AppPersistentStorageMount, bool, []TopologyInference, error) {
+func resolveComposePersistentStorageMount(repoDir, serviceName string, raw any) (*model.AppPersistentStorageMount, *PersistentStorageSeedFile, bool, []TopologyInference, error) {
 	sourcePath, targetPath, readOnly, ok, reason := parseComposePersistentStorageBinding(raw)
 	if !ok {
-		return nil, false, appendInference(nil, InferenceLevelWarning, "volumes", serviceName, "%s", reason), nil
+		return nil, nil, false, appendInference(nil, InferenceLevelWarning, "volumes", serviceName, "%s", reason), nil
 	}
 
 	fullPath, err := secureRepoJoin(repoDir, sourcePath)
 	if err != nil {
-		return nil, false, appendInference(nil, InferenceLevelWarning, "volumes", serviceName, "ignored repository bind mount %q -> %q: %v", sourcePath, targetPath, err), nil
+		return nil, nil, false, appendInference(nil, InferenceLevelWarning, "volumes", serviceName, "ignored repository bind mount %q -> %q: %v", sourcePath, targetPath, err), nil
 	}
 	info, err := os.Stat(fullPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			mount := inferMissingComposePersistentStorageMount(sourcePath, targetPath)
-			return &mount, true, appendInference(
+			return &mount, missingComposePersistentStorageSeedFile(mount), true, appendInference(
 				nil,
 				InferenceLevelWarning,
 				"volumes",
@@ -651,7 +663,7 @@ func resolveComposePersistentStorageMount(repoDir, serviceName string, raw any) 
 				mount.Kind,
 			), nil
 		}
-		return nil, false, nil, err
+		return nil, nil, false, nil, err
 	}
 
 	var mount model.AppPersistentStorageMount
@@ -665,13 +677,13 @@ func resolveComposePersistentStorageMount(repoDir, serviceName string, raw any) 
 	case info.Mode().IsRegular():
 		data, err := os.ReadFile(fullPath)
 		if err != nil {
-			return nil, false, nil, err
+			return nil, nil, false, nil, err
 		}
 		if len(data) > maxComposePersistentSeedBytes {
-			return nil, false, appendInference(nil, InferenceLevelWarning, "volumes", serviceName, "ignored repository bind mount %q -> %q because the file exceeds %d bytes", sourcePath, targetPath, maxComposePersistentSeedBytes), nil
+			return nil, nil, false, appendInference(nil, InferenceLevelWarning, "volumes", serviceName, "ignored repository bind mount %q -> %q because the file exceeds %d bytes", sourcePath, targetPath, maxComposePersistentSeedBytes), nil
 		}
 		if !utf8.Valid(data) {
-			return nil, false, appendInference(nil, InferenceLevelWarning, "volumes", serviceName, "ignored repository bind mount %q -> %q because only UTF-8 text files are supported for seeded persistent file storage", sourcePath, targetPath), nil
+			return nil, nil, false, appendInference(nil, InferenceLevelWarning, "volumes", serviceName, "ignored repository bind mount %q -> %q because only UTF-8 text files are supported for seeded persistent file storage", sourcePath, targetPath), nil
 		}
 		mount = model.AppPersistentStorageMount{
 			Kind:        model.AppPersistentStorageMountKindFile,
@@ -680,14 +692,14 @@ func resolveComposePersistentStorageMount(repoDir, serviceName string, raw any) 
 			Mode:        int32(info.Mode().Perm()),
 		}
 	default:
-		return nil, false, appendInference(nil, InferenceLevelWarning, "volumes", serviceName, "ignored repository bind mount %q -> %q because only regular files and directories are supported", sourcePath, targetPath), nil
+		return nil, nil, false, appendInference(nil, InferenceLevelWarning, "volumes", serviceName, "ignored repository bind mount %q -> %q because only regular files and directories are supported", sourcePath, targetPath), nil
 	}
 
 	report := appendInference(nil, InferenceLevelInfo, "volumes", serviceName, "imported repository bind mount %q -> %q as persistent %s storage", sourcePath, targetPath, mount.Kind)
 	if readOnly {
 		report = appendInference(report, InferenceLevelWarning, "volumes", serviceName, "compose bind mount %q -> %q was declared read_only; Fugue imported it as writable persistent storage", sourcePath, targetPath)
 	}
-	return &mount, true, report, nil
+	return &mount, nil, true, report, nil
 }
 
 func inferMissingComposePersistentStorageMount(sourcePath, targetPath string) model.AppPersistentStorageMount {
@@ -703,6 +715,18 @@ func inferMissingComposePersistentStorageMount(sourcePath, targetPath string) mo
 		mount.Mode = defaultComposePersistentDirectoryMode
 	}
 	return mount
+}
+
+func missingComposePersistentStorageSeedFile(mount model.AppPersistentStorageMount) *PersistentStorageSeedFile {
+	if mount.Kind != model.AppPersistentStorageMountKindFile {
+		return nil
+	}
+
+	return &PersistentStorageSeedFile{
+		Path:        mount.Path,
+		Mode:        mount.Mode,
+		SeedContent: mount.SeedContent,
+	}
 }
 
 func inferMissingComposePersistentStorageMountKind(sourcePath, targetPath string) string {

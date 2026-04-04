@@ -2391,6 +2391,9 @@ func (s *Store) completeOperation(id, runtimeID, manifestPath, message string, d
 		if runtimeID != "" && state.Operations[index].AssignedRuntimeID != runtimeID {
 			return ErrNotFound
 		}
+		if !operationCanTransitionToCompleted(state.Operations[index]) {
+			return ErrConflict
+		}
 		if desiredSpec != nil {
 			state.Operations[index].DesiredSpec = cloneAppSpec(desiredSpec)
 		}
@@ -3096,6 +3099,15 @@ func applyInFlightOperationToApp(state *model.State, op *model.Operation) error 
 	app.Status.UpdatedAt = now
 	app.UpdatedAt = now
 	return nil
+}
+
+func operationCanTransitionToCompleted(op model.Operation) bool {
+	switch op.Status {
+	case model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent:
+		return true
+	default:
+		return false
+	}
 }
 
 func isRequeueableManagedOperation(op model.Operation) bool {

@@ -105,6 +105,9 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	if err != nil {
 		return err
 	}
+	if err := s.ensureOperationStillActive(op.ID); err != nil {
+		return err
+	}
 
 	composeSuggestedEnv, composeEnvErr := s.suggestComposeServiceEnv(importCtx, app, *op.DesiredSource)
 	if composeEnvErr != nil && s.Logger != nil {
@@ -131,6 +134,10 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		finalSpec.Ports = []int{detectedPort}
 	}
 	finalSpec.Env = mergeImportEnv(finalSpec.Env, output.ImportResult.SuggestedEnv)
+
+	if err := s.ensureOperationStillActive(op.ID); err != nil {
+		return err
+	}
 
 	deployOp, err := s.Store.CreateOperation(model.Operation{
 		TenantID:        app.TenantID,

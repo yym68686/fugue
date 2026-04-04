@@ -408,6 +408,10 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 				}
 				return err
 			}
+			if errors.Is(err, errOperationNoLongerActive) {
+				s.Logger.Printf("operation %s stopped before completion: %v", op.ID, err)
+				return nil
+			}
 			s.Logger.Printf("operation %s failed: %v", op.ID, err)
 			if _, failErr := s.Store.FailOperation(op.ID, err.Error()); failErr != nil {
 				s.Logger.Printf("operation %s fail update error: %v", op.ID, failErr)
@@ -452,6 +456,10 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		return fmt.Errorf("unsupported operation type %s", op.Type)
 	}
 
+	if err := s.ensureOperationStillActive(op.ID); err != nil {
+		return err
+	}
+
 	app, err = store.OverlayDesiredManagedPostgres(app)
 	if err != nil {
 		return fmt.Errorf("overlay desired managed postgres state for app %s: %w", app.ID, err)
@@ -485,10 +493,14 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			if err := s.applyManagedAppDesiredState(ctx, app, scheduling); err != nil {
 				return fmt.Errorf("apply managed app desired state %s: %w", app.ID, err)
 			}
-			if err := s.waitForManagedAppRollout(ctx, app); err != nil {
+			if err := s.waitForManagedAppRollout(ctx, app, op.ID); err != nil {
 				return fmt.Errorf("wait for managed app rollout %s: %w", app.ID, err)
 			}
 		}
+	}
+
+	if err := s.ensureOperationStillActive(op.ID); err != nil {
+		return err
 	}
 
 	message := fmt.Sprintf("managed app reconciled in namespace %s", bundle.TenantNamespace)

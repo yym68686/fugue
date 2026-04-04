@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -501,6 +502,108 @@ func TestDeleteAppIsIdempotentAndHiddenFromAppListWhileDeleting(t *testing.T) {
 	}
 	if len(ops) != 1 {
 		t.Fatalf("expected exactly one delete operation, got %d", len(ops))
+	}
+}
+
+func TestForceDeletePurgesFailedImportedApp(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, app, _, _ := setupFailedImportedAppRecoveryServer(t)
+
+	recorder := performJSONRequest(
+		t,
+		server,
+		http.MethodDelete,
+		"/v1/apps/"+app.ID+"?force=true",
+		apiKey,
+		nil,
+	)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Deleted bool `json:"deleted"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if !response.Deleted {
+		t.Fatal("expected deleted=true")
+	}
+
+	if _, err := s.GetApp(app.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected app to be purged, got %v", err)
+	}
+}
+
+func TestForceDeleteFailsActiveDeployAndQueuesDelete(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+
+	nextSpec := app.Spec
+	nextSpec.Image = "ghcr.io/example/demo:next"
+	deployOp, err := s.CreateOperation(model.Operation{
+		TenantID:    app.TenantID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &nextSpec,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim deploy operation: %v", err)
+	} else if !found {
+		t.Fatal("expected deploy operation to be claimable")
+	}
+
+	recorder := performJSONRequest(
+		t,
+		server,
+		http.MethodDelete,
+		"/v1/apps/"+app.ID+"?force=true",
+		apiKey,
+		nil,
+	)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Deleted   bool            `json:"deleted"`
+		Operation model.Operation `json:"operation"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Deleted {
+		t.Fatal("expected delete to be queued, not immediate")
+	}
+	if response.Operation.Type != model.OperationTypeDelete {
+		t.Fatalf("expected delete operation response, got %+v", response.Operation)
+	}
+
+	failedDeploy, err := s.GetOperation(deployOp.ID)
+	if err != nil {
+		t.Fatalf("get failed deploy operation: %v", err)
+	}
+	if failedDeploy.Status != model.OperationStatusFailed {
+		t.Fatalf("expected failed deploy status, got %q", failedDeploy.Status)
+	}
+
+	storedApp, err := s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get deleting app: %v", err)
+	}
+	if got := storedApp.Status.Phase; got != "deleting" {
+		t.Fatalf("expected deleting phase, got %q", got)
+	}
+
+	if _, err := s.CompleteManagedOperation(deployOp.ID, "/tmp/deploy.yaml", "done"); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("expected complete failed deploy to conflict, got %v", err)
 	}
 }
 
