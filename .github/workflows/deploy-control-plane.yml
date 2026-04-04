@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - '.github/workflows/deploy-control-plane.yml'
+      - 'assets/**'
       - 'cmd/fugue-api/**'
       - 'cmd/fugue-controller/**'
       - 'internal/**'
