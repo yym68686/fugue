@@ -110,6 +110,13 @@ Defaults:
 - deploy and create flows default to the `default` project when you omit `--project`
 - name-based commands are preferred; IDs stay as hidden compatibility escape hatches
 
+High-frequency semantic entrypoints:
+
+- `fugue app deploy <app>` redeploys the current desired spec
+- `fugue app binding bind <app> <service>` manages service bindings
+- `fugue operation ls --app <app>` inspects operation history
+- `fugue admin runtime access <runtime>` shows runtime sharing grants
+
 For self-hosted control planes, set the base URL once:
 
 ```bash

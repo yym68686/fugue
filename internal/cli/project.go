@@ -12,8 +12,9 @@ import (
 
 func (c *CLI) newProjectCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "project",
-		Short: "Inspect and manage projects",
+		Use:     "project",
+		Aliases: []string{"projects"},
+		Short:   "Inspect and manage projects",
 		Long: strings.TrimSpace(`
 Project commands normally auto-select the tenant when your key only sees one.
 
@@ -22,12 +23,36 @@ Pass --tenant only when you are acting across multiple visible tenants.
 	}
 	cmd.AddCommand(
 		c.newProjectListCommand(),
+		c.newProjectShowCommand(),
 		c.newProjectCreateCommand(),
 		c.newProjectRenameCommand(),
 		c.newProjectRemoveCommand(),
 		c.newProjectUsageCommand(),
 	)
 	return cmd
+}
+
+func (c *CLI) newProjectShowCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:     "show <project>",
+		Aliases: []string{"get", "status", "info"},
+		Short:   "Show one project",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			project, err := c.resolveNamedProject(client, args[0])
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"project": project})
+			}
+			return renderProject(c.stdout, project)
+		},
+	}
 }
 
 func (c *CLI) newProjectListCommand() *cobra.Command {
@@ -116,8 +141,8 @@ func (c *CLI) newProjectRenameCommand() *cobra.Command {
 
 func (c *CLI) newProjectRemoveCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:     "rm <project>",
-		Aliases: []string{"remove", "delete"},
+		Use:     "delete <project>",
+		Aliases: []string{"rm", "remove"},
 		Short:   "Delete a project",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

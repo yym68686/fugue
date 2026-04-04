@@ -44,8 +44,9 @@ type workspaceRemoveOptions struct {
 
 func (c *CLI) newWorkspaceCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "workspace",
-		Short: "Browse and edit an app's persistent workspace",
+		Use:     "workspace",
+		Aliases: []string{"fs"},
+		Short:   "Browse and edit an app's persistent workspace",
 	}
 	cmd.AddCommand(
 		c.newWorkspaceListCommand(),
@@ -254,8 +255,8 @@ func (c *CLI) newWorkspaceMkdirCommand() *cobra.Command {
 func (c *CLI) newWorkspaceRemoveCommand() *cobra.Command {
 	opts := workspaceRemoveOptions{}
 	cmd := &cobra.Command{
-		Use:     "rm <app> <path>",
-		Aliases: []string{"remove", "delete"},
+		Use:     "delete <app> <path>",
+		Aliases: []string{"rm", "remove"},
 		Short:   "Delete a file or directory from the persistent workspace",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {

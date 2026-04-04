@@ -288,8 +288,8 @@ func (c *CLI) newAdminAPIKeyStateCommand(mode string) *cobra.Command {
 
 func (c *CLI) newAdminAPIKeyRemoveCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:     "rm <api-key>",
-		Aliases: []string{"remove", "delete"},
+		Use:     "delete <api-key>",
+		Aliases: []string{"rm", "remove"},
 		Short:   "Delete an API key",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -464,12 +464,14 @@ func (c *CLI) newAdminNodeKeyRevokeCommand() *cobra.Command {
 
 func (c *CLI) newAdminRuntimeCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "runtime",
-		Short: "Manage runtime inventory and sharing",
+		Use:     "runtime",
+		Aliases: []string{"runtimes"},
+		Short:   "Manage runtime inventory and sharing",
 	}
 	cmd.AddCommand(
 		c.newAdminRuntimeListCommand(),
 		c.newAdminRuntimeShowCommand(),
+		c.newAdminRuntimeAccessCommand(),
 		c.newAdminRuntimeCreateCommand(),
 		c.newAdminRuntimeShareCommand(),
 		c.newAdminRuntimeUnshareCommand(),
@@ -520,9 +522,10 @@ func (c *CLI) newAdminRuntimeListCommand() *cobra.Command {
 
 func (c *CLI) newAdminRuntimeShowCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "show <runtime>",
-		Short: "Show one runtime",
-		Args:  cobra.ExactArgs(1),
+		Use:     "show <runtime>",
+		Aliases: []string{"get", "status", "info"},
+		Short:   "Show one runtime",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {
@@ -536,6 +539,49 @@ func (c *CLI) newAdminRuntimeShowCommand() *cobra.Command {
 				return writeJSON(c.stdout, map[string]any{"runtime": runtimeObj})
 			}
 			return renderRuntime(c.stdout, runtimeObj)
+		},
+	}
+}
+
+func (c *CLI) newAdminRuntimeAccessCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:     "access <runtime>",
+		Aliases: []string{"sharing"},
+		Short:   "Show who can access a runtime",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			runtimeObj, err := c.resolveNamedRuntime(client, args[0])
+			if err != nil {
+				return err
+			}
+			response, err := client.GetRuntimeSharing(runtimeObj.ID)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			if err := renderRuntime(c.stdout, response.Runtime); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(c.stdout, "grants=%d\n", len(response.Grants)); err != nil {
+				return err
+			}
+			if len(response.Grants) == 0 {
+				return nil
+			}
+			tenantNames, err := c.visibleTenantNamesByID(client)
+			if err != nil {
+				c.progressf("warning=tenant inventory unavailable: %v", err)
+			}
+			if _, err := fmt.Fprintln(c.stdout); err != nil {
+				return err
+			}
+			return writeRuntimeAccessGrantTable(c.stdout, response.Grants, tenantNames)
 		},
 	}
 }
@@ -597,9 +643,10 @@ func (c *CLI) newAdminRuntimeCreateCommand() *cobra.Command {
 
 func (c *CLI) newAdminRuntimeShareCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "share <runtime> <tenant>",
-		Short: "Grant another tenant access to a runtime",
-		Args:  cobra.ExactArgs(2),
+		Use:     "share <runtime> <tenant>",
+		Aliases: []string{"grant"},
+		Short:   "Grant another tenant access to a runtime",
+		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {
@@ -631,9 +678,10 @@ func (c *CLI) newAdminRuntimeShareCommand() *cobra.Command {
 
 func (c *CLI) newAdminRuntimeUnshareCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "unshare <runtime> <tenant>",
-		Short: "Revoke tenant access to a runtime",
-		Args:  cobra.ExactArgs(2),
+		Use:     "unshare <runtime> <tenant>",
+		Aliases: []string{"revoke"},
+		Short:   "Revoke tenant access to a runtime",
+		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {
@@ -665,9 +713,10 @@ func (c *CLI) newAdminRuntimeUnshareCommand() *cobra.Command {
 
 func (c *CLI) newAdminRuntimeShareModeCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "share-mode <runtime> <mode>",
-		Short: "Set runtime access mode",
-		Args:  cobra.ExactArgs(2),
+		Use:     "share-mode <runtime> <mode>",
+		Aliases: []string{"access-mode"},
+		Short:   "Set runtime access mode",
+		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {
@@ -905,8 +954,9 @@ func (c *CLI) newAdminBillingCommand() *cobra.Command {
 
 func (c *CLI) newAdminBillingShowCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "show",
-		Short: "Show tenant billing status",
+		Use:     "show",
+		Aliases: []string{"get", "status"},
+		Short:   "Show tenant billing status",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {
@@ -1095,8 +1145,8 @@ func (c *CLI) newAdminTenantCreateCommand() *cobra.Command {
 
 func (c *CLI) newAdminTenantRemoveCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:     "rm <tenant>",
-		Aliases: []string{"remove", "delete"},
+		Use:     "delete <tenant>",
+		Aliases: []string{"rm", "remove"},
 		Short:   "Delete a tenant",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

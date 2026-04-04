@@ -11,8 +11,9 @@ import (
 
 func (c *CLI) newAppServiceCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "service",
-		Short: "List, bind, and unbind app services",
+		Use:     "binding",
+		Aliases: []string{"bindings"},
+		Short:   "List, bind, and unbind app service bindings",
 	}
 	cmd.AddCommand(
 		c.newAppServiceListCommand(),
@@ -20,6 +21,14 @@ func (c *CLI) newAppServiceCommand() *cobra.Command {
 		c.newAppServiceUnbindCommand(),
 	)
 	return cmd
+}
+
+func (c *CLI) newAppServiceCompatCommand() *cobra.Command {
+	cmd := c.newAppServiceCommand()
+	cmd.Use = "service"
+	cmd.Aliases = []string{"services"}
+	cmd.Short = "Compatibility alias for app bindings"
+	return hideCompatCommand(cmd, "fugue app binding")
 }
 
 func (c *CLI) newAppServiceListCommand() *cobra.Command {

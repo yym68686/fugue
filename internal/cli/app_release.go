@@ -11,8 +11,9 @@ import (
 
 func (c *CLI) newAppReleaseCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "release",
-		Short: "Inspect and operate app releases",
+		Use:     "release",
+		Aliases: []string{"releases", "image", "images"},
+		Short:   "Inspect and operate app releases",
 	}
 	cmd.AddCommand(
 		c.newAppReleaseListCommand(),
@@ -27,7 +28,7 @@ func (c *CLI) newAppReleaseCommand() *cobra.Command {
 func (c *CLI) newAppReleaseListCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:     "ls <app>",
-		Aliases: []string{"list"},
+		Aliases: []string{"list", "show"},
 		Short:   "List release images for an app",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -63,6 +64,27 @@ func (c *CLI) newAppReleaseListCommand() *cobra.Command {
 			return writeAppImageTable(c.stdout, inventory.Versions)
 		},
 	}
+}
+
+func (c *CLI) newAppDeployShortcutCommand() *cobra.Command {
+	cmd := c.newAppReleaseDeployCommand()
+	cmd.Use = "deploy <app>"
+	cmd.Short = "Deploy the app's current desired spec"
+	return cmd
+}
+
+func (c *CLI) newAppRebuildShortcutCommand() *cobra.Command {
+	cmd := c.newAppReleaseRebuildCommand()
+	cmd.Use = "rebuild <app>"
+	cmd.Short = "Rebuild an app from its source definition"
+	return cmd
+}
+
+func (c *CLI) newAppRollbackShortcutCommand() *cobra.Command {
+	cmd := c.newAppReleaseRollbackCommand()
+	cmd.Use = "rollback <app> [image-ref]"
+	cmd.Short = "Rollback to a previous release image"
+	return cmd
 }
 
 func (c *CLI) newAppReleaseRebuildCommand() *cobra.Command {

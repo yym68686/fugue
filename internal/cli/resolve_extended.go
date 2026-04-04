@@ -237,6 +237,25 @@ func (c *CLI) resolveNamedTenant(client *Client, ref string) (model.Tenant, erro
 	return resolveSingleMatch(ref, matches, "tenant")
 }
 
+func (c *CLI) visibleTenantNamesByID(client *Client) (map[string]string, error) {
+	tenants, err := client.ListTenants()
+	if err != nil {
+		return nil, err
+	}
+	names := make(map[string]string, len(tenants))
+	for _, tenant := range tenants {
+		name := strings.TrimSpace(tenant.Name)
+		if name == "" {
+			name = strings.TrimSpace(tenant.Slug)
+		}
+		if name == "" {
+			name = strings.TrimSpace(tenant.ID)
+		}
+		names[strings.TrimSpace(tenant.ID)] = name
+	}
+	return names, nil
+}
+
 func resolveDefaultProjectForCreate(client *Client, tenantID string) (model.Project, bool, error) {
 	projects, err := client.ListProjects(tenantID)
 	if err != nil {

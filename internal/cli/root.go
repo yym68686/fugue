@@ -73,9 +73,10 @@ Defaults and auto-selection:
   - Deploy and create flows default to the "default" project when you do not pass --project.
   - Prefer names. ID flags stay hidden as compatibility escape hatches.
 
-Use name-based commands such as "deploy", "app ls", and "app logs" instead of
-calling low-level API endpoints directly. The CLI resolves tenant, project, app,
-runtime, service, domain, and workspace names where possible.
+Use name-based commands such as "deploy", "app ls", "operation ls", and
+"app logs" instead of calling low-level API endpoints directly. The CLI
+resolves tenant, project, app, runtime, service, domain, binding, and
+workspace names where possible.
 
 Environment variables:
   FUGUE_API_KEY / FUGUE_TOKEN / FUGUE_BOOTSTRAP_KEY
@@ -93,13 +94,16 @@ Environment variables:
   fugue deploy github owner/repo --branch main
   fugue deploy image nginx:1.27
   fugue app status my-app
-  fugue app continuity audit my-app
+  fugue app continuity enable my-app --app-to runtime-b
   fugue app logs runtime my-app --follow
+  fugue app binding bind my-app postgres
+  fugue app deploy my-app
   fugue app config put my-app /app/config.yaml --from-file config.yaml
   fugue app domain add my-app www.example.com
   fugue service ls
+  fugue operation ls --app my-app
+  fugue admin runtime access shared
   fugue project usage
-  fugue admin runtime ls
 `),
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			return c.validateOutput()

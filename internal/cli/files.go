@@ -33,8 +33,9 @@ type filesResult struct {
 
 func (c *CLI) newFilesCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "config",
-		Short: "Inspect and update declarative app config files",
+		Use:     "config",
+		Aliases: []string{"files", "configs"},
+		Short:   "Inspect and update declarative app config files",
 		Long: strings.TrimSpace(`
 Use "config" for declarative files that are applied on the next deploy.
 
@@ -195,8 +196,8 @@ directly into a running container.
 func (c *CLI) newFilesRemoveCommand() *cobra.Command {
 	opts := filesMutationOptions{Wait: true}
 	cmd := &cobra.Command{
-		Use:     "rm <app> <absolute-path...>",
-		Aliases: []string{"remove", "delete"},
+		Use:     "delete <app> <absolute-path...>",
+		Aliases: []string{"rm", "remove"},
 		Short:   "Remove one or more declarative app files",
 		Args:    cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {

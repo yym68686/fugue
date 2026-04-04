@@ -51,7 +51,10 @@ type appCommandResult struct {
 
 func (c *CLI) newAppCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "app",
+		Use: "app",
+		Aliases: []string{
+			"apps",
+		},
 		Short: "Inspect, operate, and troubleshoot apps",
 		Long: strings.TrimSpace(`
 Use app names for normal day-to-day operations.
@@ -70,7 +73,11 @@ in more than one visible project or tenant.
 		c.newAppRouteCommand(),
 		c.newDomainCommand(),
 		c.newAppServiceCommand(),
+		c.newAppServiceCompatCommand(),
 		c.newAppReleaseCommand(),
+		c.newAppDeployShortcutCommand(),
+		c.newAppRebuildShortcutCommand(),
+		c.newAppRollbackShortcutCommand(),
 		c.newAppContinuityCommand(),
 		c.newAppFailoverCommand(),
 		c.newAppRestartCommand(),
@@ -113,7 +120,7 @@ func (c *CLI) newAppListCommand() *cobra.Command {
 func (c *CLI) newAppStatusCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:     "status <app>",
-		Aliases: []string{"info"},
+		Aliases: []string{"show", "get", "info"},
 		Short:   "Show app status",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -309,8 +316,8 @@ func (c *CLI) newAppRemoveCommand() *cobra.Command {
 func (c *CLI) newAppMoveCommand() *cobra.Command {
 	opts := appMoveCommandOptions{Wait: true}
 	cmd := &cobra.Command{
-		Use:     "migrate <app>",
-		Aliases: []string{"move"},
+		Use:     "move <app>",
+		Aliases: []string{"migrate"},
 		Short:   "Move an app to another runtime",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

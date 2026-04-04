@@ -52,7 +52,7 @@ func writeStringMap(w io.Writer, values map[string]string) error {
 
 func writeAppTable(w io.Writer, apps []model.App) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "APP\tSTATUS\tREPLICAS\tRUNTIME\tURL"); err != nil {
+	if _, err := fmt.Fprintln(tw, "APP\tSTATUS\tREPLICAS\tRUNTIME\tUSAGE\tURL"); err != nil {
 		return err
 	}
 	for _, app := range apps {
@@ -66,11 +66,12 @@ func writeAppTable(w io.Writer, apps []model.App) error {
 		}
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%d\t%s\t%s\n",
+			"%s\t%s\t%d\t%s\t%s\t%s\n",
 			app.Name,
 			strings.TrimSpace(app.Status.Phase),
 			maxInt(app.Status.CurrentReplicas, app.Spec.Replicas),
 			runtimeID,
+			formatResourceUsageSummary(app.CurrentResourceUsage),
 			url,
 		); err != nil {
 			return err
@@ -199,6 +200,7 @@ func writeAppStatus(w io.Writer, app model.App) error {
 		kvPair{Key: "failover_target_runtime_id", Value: failoverTarget},
 		kvPair{Key: "workspace_root", Value: workspaceRoot},
 		kvPair{Key: "postgres_runtime_id", Value: postgresRuntime},
+		kvPair{Key: "current_resource_usage", Value: formatResourceUsageSummary(app.CurrentResourceUsage)},
 		kvPair{Key: "bindings", Value: fmt.Sprintf("%d", len(app.Bindings))},
 		kvPair{Key: "last_operation_id", Value: app.Status.LastOperationID},
 		kvPair{Key: "last_message", Value: app.Status.LastMessage},

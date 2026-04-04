@@ -25,9 +25,25 @@ func (c *CLI) newAppContinuityCommand() *cobra.Command {
 	}
 	cmd.AddCommand(
 		c.newAppContinuityAuditCommand(),
-		c.newAppContinuitySetCommand(),
-		c.newAppContinuityOffCommand(),
+		c.newAppContinuityEnableCommand(),
+		c.newAppContinuityDisableCommand(),
 	)
+	return cmd
+}
+
+func (c *CLI) newAppContinuityEnableCommand() *cobra.Command {
+	cmd := c.newAppContinuitySetCommand()
+	cmd.Use = "enable <app>"
+	cmd.Aliases = []string{"on", "set"}
+	cmd.Short = "Enable app and/or database continuity targets"
+	return cmd
+}
+
+func (c *CLI) newAppContinuityDisableCommand() *cobra.Command {
+	cmd := c.newAppContinuityOffCommand()
+	cmd.Use = "disable <app>"
+	cmd.Aliases = []string{"off"}
+	cmd.Short = "Disable app and/or database continuity"
 	return cmd
 }
 
@@ -198,7 +214,7 @@ func (c *CLI) newAppFailoverCommand() *cobra.Command {
 		Use:   "failover",
 		Short: "Execute app failover",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("use \"fugue app failover run <app>\" to execute failover, or \"fugue app continuity audit [app]\" to audit readiness")
+			return fmt.Errorf("use \"fugue app failover exec <app>\" to execute failover, or \"fugue app continuity audit [app]\" to audit readiness")
 		},
 	}
 	cmd.AddCommand(c.newAppFailoverRunCommand())
@@ -212,9 +228,10 @@ func (c *CLI) newAppFailoverRunCommand() *cobra.Command {
 		Wait        bool
 	}{Wait: true}
 	cmd := &cobra.Command{
-		Use:   "run <app>",
-		Short: "Execute failover to a target runtime",
-		Args:  cobra.ExactArgs(1),
+		Use:     "exec <app>",
+		Aliases: []string{"run"},
+		Short:   "Execute failover to a target runtime",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {

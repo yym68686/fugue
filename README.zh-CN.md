@@ -110,6 +110,13 @@ fugue app ls
 - deploy 和 create 流程在不传 `--project` 时默认落到 `default` project
 - 优先使用名字；ID 只保留为隐藏的兼容兜底参数
 
+高频语义入口：
+
+- `fugue app deploy <app>` 重新部署当前期望配置
+- `fugue app binding bind <app> <service>` 管理服务绑定
+- `fugue operation ls --app <app>` 查看操作历史
+- `fugue admin runtime access <runtime>` 查看 runtime 共享授权
+
 如果你使用的是自托管控制面，只需要先设置一次地址：
 
 ```bash

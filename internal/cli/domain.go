@@ -30,8 +30,9 @@ type domainMutationResult struct {
 
 func (c *CLI) newDomainCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "domain",
-		Short: "Inspect and manage app custom domains",
+		Use:     "domain",
+		Aliases: []string{"domains"},
+		Short:   "Inspect and manage app custom domains",
 	}
 	cmd.AddCommand(
 		c.newDomainListCommand(),
@@ -173,8 +174,8 @@ func (c *CLI) newDomainVerifyCommand() *cobra.Command {
 
 func (c *CLI) newDomainRemoveCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:     "rm <app> <hostname>",
-		Aliases: []string{"remove", "delete", "detach"},
+		Use:     "delete <app> <hostname>",
+		Aliases: []string{"rm", "remove", "detach"},
 		Short:   "Remove a custom domain from an app",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {

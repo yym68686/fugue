@@ -23,8 +23,9 @@ type envCommandResult struct {
 
 func (c *CLI) newEnvCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "env",
-		Short: "Inspect and update app environment variables",
+		Use:     "env",
+		Aliases: []string{"vars", "variables"},
+		Short:   "Inspect and update app environment variables",
 	}
 	cmd.AddCommand(
 		c.newEnvListCommand(),

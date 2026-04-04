@@ -9,8 +9,9 @@ import (
 
 func (c *CLI) newAppRouteCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "route",
-		Short: "Inspect and manage the primary app route",
+		Use:     "route",
+		Aliases: []string{"routes"},
+		Short:   "Inspect and manage the primary app route",
 	}
 	cmd.AddCommand(
 		c.newAppRouteShowCommand(),
@@ -23,7 +24,7 @@ func (c *CLI) newAppRouteCommand() *cobra.Command {
 func (c *CLI) newAppRouteShowCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:     "show <app>",
-		Aliases: []string{"status"},
+		Aliases: []string{"status", "get"},
 		Short:   "Show the app's primary route",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

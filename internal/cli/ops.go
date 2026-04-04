@@ -13,8 +13,9 @@ import (
 
 func (c *CLI) newOpsCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "ops",
-		Short: "Inspect operations and audit activity",
+		Use:     "operation",
+		Aliases: []string{"ops", "operations"},
+		Short:   "Inspect operations and audit activity",
 	}
 	cmd.AddCommand(
 		c.newOpsListCommand(),
@@ -31,7 +32,7 @@ func (c *CLI) newOpsListCommand() *cobra.Command {
 	}{}
 	cmd := &cobra.Command{
 		Use:     "ls",
-		Aliases: []string{"list"},
+		Aliases: []string{"list", "history"},
 		Short:   "List operations",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
@@ -58,9 +59,10 @@ func (c *CLI) newOpsListCommand() *cobra.Command {
 
 func (c *CLI) newOpsShowCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "show <operation>",
-		Short: "Show one operation",
-		Args:  cobra.ExactArgs(1),
+		Use:     "show <operation>",
+		Aliases: []string{"get", "status"},
+		Short:   "Show one operation",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {
@@ -83,9 +85,10 @@ func (c *CLI) newOpsWatchCommand() *cobra.Command {
 		App string
 	}{}
 	cmd := &cobra.Command{
-		Use:   "watch [operation]",
-		Short: "Watch an operation until it completes",
-		Args:  cobra.MaximumNArgs(1),
+		Use:     "watch [operation]",
+		Aliases: []string{"wait"},
+		Short:   "Watch an operation until it completes",
+		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {
@@ -130,8 +133,9 @@ func (c *CLI) newOpsWatchCommand() *cobra.Command {
 
 func (c *CLI) newOpsAuditCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "audit",
-		Short: "List audit events",
+		Use:     "audit",
+		Aliases: []string{"events"},
+		Short:   "List audit events",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {

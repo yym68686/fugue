@@ -29,13 +29,16 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"app",
 		"project",
 		"service",
-		"ops",
+		"operation",
 		"template",
 		"admin",
 		"deploy github owner/repo",
-		"fugue app continuity audit my-app",
+		"fugue app continuity enable my-app --app-to runtime-b",
+		"fugue app binding bind my-app postgres",
+		"fugue app deploy my-app",
 		"fugue app config put my-app /app/config.yaml --from-file config.yaml",
-		"fugue admin runtime ls",
+		"fugue operation ls --app my-app",
+		"fugue admin runtime access shared",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected help output to contain %q, got %q", want, out)
@@ -176,6 +179,52 @@ func TestRunAppContinuityAuditByNameUsesExplicitCommand(t *testing.T) {
 	}
 }
 
+func TestRunAppContinuityEnableUsesSemanticCommand(t *testing.T) {
+	t.Parallel()
+
+	var gotBody patchAppContinuityRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_a","replicas":1},"status":{"phase":"ready","current_runtime_id":"runtime_a","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes":
+			_, _ = w.Write([]byte(`{"runtimes":[{"id":"runtime_b","tenant_id":"tenant_123","name":"runtime-b","type":"external-owned","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/apps/app_123/continuity":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode continuity body: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"app_failover":{"target_runtime_id":"runtime_b","auto":true},"operation":{"id":"op_123","app_id":"app_123"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "continuity", "enable", "demo",
+		"--app-to", "runtime-b",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app continuity enable: %v", err)
+	}
+
+	if gotBody.AppFailover == nil || gotBody.AppFailover.TargetRuntimeID != "runtime_b" || !gotBody.AppFailover.Enabled {
+		t.Fatalf("unexpected app failover request %+v", gotBody.AppFailover)
+	}
+	out := stdout.String()
+	for _, want := range []string{"app_id=app_123", "operation_id=op_123", "app_failover_enabled=true", "app_failover_target_runtime_id=runtime_b"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
 func TestRunAppFailoverRunByNameExecutesFailover(t *testing.T) {
 	t.Parallel()
 
@@ -214,6 +263,42 @@ func TestRunAppFailoverRunByNameExecutesFailover(t *testing.T) {
 	if gotBody["target_runtime_id"] != "runtime_b" {
 		t.Fatalf("expected target_runtime_id runtime_b, got %+v", gotBody)
 	}
+	out := stdout.String()
+	for _, want := range []string{"app_id=app_123", "operation_id=op_123"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAppDeployShortcutUsesSemanticCommand(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/deploy":
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_123","app_id":"app_123"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "deploy", "demo",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app deploy shortcut: %v", err)
+	}
+
 	out := stdout.String()
 	for _, want := range []string{"app_id=app_123", "operation_id=op_123"} {
 		if !strings.Contains(out, want) {
@@ -435,5 +520,43 @@ func TestRunWorkspaceReadUsesRelativePathWithinWorkspace(t *testing.T) {
 
 	if got := stdout.String(); got != "hello from fugue\n" {
 		t.Fatalf("unexpected workspace read stdout %q", got)
+	}
+}
+
+func TestRunAdminRuntimeAccessShowsSharingGrants(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes":
+			_, _ = w.Write([]byte(`{"runtimes":[{"id":"runtime_b","tenant_id":"tenant_123","name":"runtime-b","type":"external-owned","access_mode":"shared","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes/runtime_b":
+			_, _ = w.Write([]byte(`{"runtime":{"id":"runtime_b","tenant_id":"tenant_123","name":"runtime-b","type":"external-owned","access_mode":"shared","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes/runtime_b/sharing":
+			_, _ = w.Write([]byte(`{"runtime":{"id":"runtime_b","tenant_id":"tenant_123","name":"runtime-b","type":"external-owned","access_mode":"shared","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"grants":[{"runtime_id":"runtime_b","tenant_id":"tenant_999","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-03T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
+			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Owner","slug":"owner"},{"id":"tenant_999","name":"Acme","slug":"acme"}]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"admin", "runtime", "access", "runtime-b",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run admin runtime access: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"runtime_id=runtime_b", "access_mode=shared", "grants=1", "Acme", "tenant_999"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
 	}
 }

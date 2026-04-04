@@ -141,6 +141,14 @@ func writeBindingTable(w io.Writer, bindings []model.ServiceBinding, services []
 	}
 	sorted := append([]model.ServiceBinding(nil), bindings...)
 	sort.Slice(sorted, func(i, j int) bool {
+		leftName := firstNonEmpty(serviceNames[sorted[i].ServiceID], sorted[i].ServiceID)
+		rightName := firstNonEmpty(serviceNames[sorted[j].ServiceID], sorted[j].ServiceID)
+		if compare := strings.Compare(leftName, rightName); compare != 0 {
+			return compare < 0
+		}
+		if compare := strings.Compare(sorted[i].Alias, sorted[j].Alias); compare != 0 {
+			return compare < 0
+		}
 		return strings.Compare(sorted[i].ID, sorted[j].ID) < 0
 	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
@@ -157,6 +165,34 @@ func writeBindingTable(w io.Writer, bindings []model.ServiceBinding, services []
 			binding.Alias,
 			len(binding.Env),
 			formatTime(binding.UpdatedAt),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func writeRuntimeAccessGrantTable(w io.Writer, grants []model.RuntimeAccessGrant, tenantNames map[string]string) error {
+	sorted := append([]model.RuntimeAccessGrant(nil), grants...)
+	sort.Slice(sorted, func(i, j int) bool {
+		leftTenant := firstNonEmpty(tenantNames[sorted[i].TenantID], sorted[i].TenantID)
+		rightTenant := firstNonEmpty(tenantNames[sorted[j].TenantID], sorted[j].TenantID)
+		if compare := strings.Compare(leftTenant, rightTenant); compare != 0 {
+			return compare < 0
+		}
+		return strings.Compare(sorted[i].TenantID, sorted[j].TenantID) < 0
+	})
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "TENANT\tTENANT_ID\tUPDATED"); err != nil {
+		return err
+	}
+	for _, grant := range sorted {
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\n",
+			firstNonEmpty(tenantNames[grant.TenantID], grant.TenantID),
+			grant.TenantID,
+			formatTime(grant.UpdatedAt),
 		); err != nil {
 			return err
 		}

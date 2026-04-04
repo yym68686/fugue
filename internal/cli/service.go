@@ -12,13 +12,16 @@ import (
 
 func (c *CLI) newServiceCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "service",
-		Short: "Inspect and manage backing services",
+		Use:     "service",
+		Aliases: []string{"services", "db", "database"},
+		Short:   "Inspect and manage backing services",
 		Long: strings.TrimSpace(`
 Use service names for normal operations.
 
 Service creation defaults to the default project when you omit --project and
 your tenant already has one.
+
+Use "fugue app binding" to attach or detach a backing service from an app.
 `),
 	}
 	cmd.AddCommand(
@@ -156,9 +159,10 @@ func (c *CLI) newServiceCreateCommand() *cobra.Command {
 
 func (c *CLI) newServiceShowCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "show <service>",
-		Short: "Show a backing service",
-		Args:  cobra.ExactArgs(1),
+		Use:     "show <service>",
+		Aliases: []string{"get", "status", "info"},
+		Short:   "Show a backing service",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {
@@ -182,8 +186,8 @@ func (c *CLI) newServiceShowCommand() *cobra.Command {
 
 func (c *CLI) newServiceRemoveCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:     "rm <service>",
-		Aliases: []string{"remove", "delete"},
+		Use:     "delete <service>",
+		Aliases: []string{"rm", "remove"},
 		Short:   "Delete a backing service",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -221,6 +225,7 @@ func renderBackingService(w io.Writer, service model.BackingService) error {
 		{Key: "type", Value: service.Type},
 		{Key: "status", Value: service.Status},
 		{Key: "project_id", Value: service.ProjectID},
+		{Key: "current_resource_usage", Value: formatResourceUsageSummary(service.CurrentResourceUsage)},
 	}
 	if strings.TrimSpace(service.OwnerAppID) != "" {
 		pairs = append(pairs, kvPair{Key: "owner_app_id", Value: service.OwnerAppID})
