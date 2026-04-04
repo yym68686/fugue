@@ -7,10 +7,12 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
+	"fugue/internal/store"
 )
 
 func TestOverlayManagedAppStatusesUsesKubernetesObservedState(t *testing.T) {
@@ -113,6 +115,73 @@ func TestOverlayManagedAppStatusUsesSingleObjectLookup(t *testing.T) {
 	}
 	if updated.Status.LastMessage != "deployment ready" {
 		t.Fatalf("unexpected last message: %q", updated.Status.LastMessage)
+	}
+}
+
+func TestLoadConsoleAppsUsesManagedAppOverlay(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Console Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: tenantSharedRuntimeID,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	managed := runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{})
+	managed["status"] = map[string]any{
+		"phase":         runtime.ManagedAppPhaseError,
+		"message":       "startup failed",
+		"readyReplicas": 0,
+	}
+
+	server := newManagedAppTestServer(t, map[string]any{
+		"items": []map[string]any{managed},
+	})
+	defer server.Close()
+
+	apiServer := &Server{
+		store: stateStore,
+		log:   log.New(io.Discard, "", 0),
+		newManagedAppStatusClient: func() (*managedAppStatusClient, error) {
+			return &managedAppStatusClient{
+				client:      server.Client(),
+				baseURL:     server.URL,
+				bearerToken: "test",
+			}, nil
+		},
+	}
+
+	apps, err := apiServer.loadConsoleApps(context.Background(), model.Principal{
+		TenantID: tenant.ID,
+	}, false)
+	if err != nil {
+		t.Fatalf("load console apps: %v", err)
+	}
+	if len(apps) != 1 {
+		t.Fatalf("expected one console app, got %d", len(apps))
+	}
+	if apps[0].Status.Phase != "failed" {
+		t.Fatalf("expected failed phase from managed app overlay, got %q", apps[0].Status.Phase)
+	}
+	if apps[0].Status.LastMessage != "startup failed" {
+		t.Fatalf("expected managed app message, got %q", apps[0].Status.LastMessage)
 	}
 }
 

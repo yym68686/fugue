@@ -28,6 +28,7 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App) e
 
 	namespace := runtime.NamespaceForTenant(app.TenantID)
 	name := runtime.RuntimeResourceName(app.Name)
+	managedAppName := runtime.ManagedAppResourceName(app)
 	lastMessage := ""
 
 	for {
@@ -46,6 +47,14 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App) e
 			}
 			return nil
 		}
+
+		managed, foundManagedApp, err := client.getManagedApp(waitCtx, namespace, managedAppName)
+		if err != nil {
+			return fmt.Errorf("read managed app rollout for %s/%s: %w", namespace, managedAppName, err)
+		}
+		if failureMessage := managedAppRolloutFailure(managed, foundManagedApp); failureMessage != "" {
+			return fmt.Errorf("managed app %s/%s rollout failed: %s", namespace, managedAppName, failureMessage)
+		}
 		if strings.TrimSpace(message) != "" {
 			lastMessage = strings.TrimSpace(message)
 		}
@@ -59,6 +68,25 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App) e
 		case <-ticker.C:
 		}
 	}
+}
+
+func managedAppRolloutFailure(managed runtime.ManagedAppObject, found bool) string {
+	if !found {
+		return ""
+	}
+	if !strings.EqualFold(strings.TrimSpace(managed.Status.Phase), runtime.ManagedAppPhaseError) {
+		return ""
+	}
+	if managed.Status.ObservedGeneration < managed.Metadata.Generation {
+		return ""
+	}
+
+	message := strings.TrimSpace(managed.Status.Message)
+	if message != "" {
+		return message
+	}
+
+	return "managed app reported an error"
 }
 
 func (s *Service) refreshManagedAppStatus(ctx context.Context, client *kubeClient, app model.App) error {

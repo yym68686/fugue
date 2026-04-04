@@ -1,6 +1,10 @@
 package api
 
-import "testing"
+import (
+	"testing"
+
+	"fugue/internal/model"
+)
 
 func TestBuildConsoleProjectLifecycleUsesUpdatingForMixedLiveAndPending(t *testing.T) {
 	t.Parallel()
@@ -42,5 +46,24 @@ func TestBuildConsoleProjectLifecycleKeepsBuildingForPendingOnly(t *testing.T) {
 
 	if lifecycle.Label != "Building" {
 		t.Fatalf("expected pending-only lifecycle to stay Building, got %q", lifecycle.Label)
+	}
+}
+
+func TestReadConsoleActiveReleaseOperationIgnoresPendingDeployForFailedApp(t *testing.T) {
+	t.Parallel()
+
+	operation := &model.Operation{
+		ID:     "op_demo",
+		Type:   model.OperationTypeDeploy,
+		Status: model.OperationStatusRunning,
+	}
+	app := model.App{
+		Status: model.AppStatus{
+			Phase: "failed",
+		},
+	}
+
+	if got := readConsoleActiveReleaseOperation(operation, app); got != nil {
+		t.Fatalf("expected failed app to ignore active deploy operation, got %+v", got)
 	}
 }

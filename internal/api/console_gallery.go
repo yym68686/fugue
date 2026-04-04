@@ -356,6 +356,11 @@ func isConsolePausedLifecycleValue(value string) bool {
 	return normalized != "" && includesConsoleKeyword(normalized, "disabled", "paused")
 }
 
+func isConsoleTerminalAppFailurePhase(app model.App) bool {
+	normalized := normalizeConsoleText(app.Status.Phase)
+	return normalized != "" && includesConsoleKeyword(normalized, "error", "fail", "stopped")
+}
+
 func buildConsoleProjectLifecycle(statuses []string, appCount, serviceCount int, tracksGitHub bool, hasLiveApp, hasPendingApp bool) consoleProjectLifecycle {
 	normalized := make([]string, 0, len(statuses))
 	for _, status := range statuses {
@@ -472,6 +477,9 @@ func hasConsoleLiveRelease(app model.App) bool {
 
 func readConsoleActiveReleaseOperation(operation *model.Operation, app model.App) *model.Operation {
 	if operation == nil {
+		return nil
+	}
+	if isConsoleTerminalAppFailurePhase(app) {
 		return nil
 	}
 
@@ -627,6 +635,7 @@ func (s *Server) loadConsoleApps(ctx context.Context, principal model.Principal,
 		return nil, err
 	}
 	visible := visibleConsoleApps(apps)
+	visible = s.overlayManagedAppStatuses(ctx, visible)
 	if includeResourceUsage {
 		visible = s.overlayCurrentResourceUsageOnApps(ctx, visible)
 	}
