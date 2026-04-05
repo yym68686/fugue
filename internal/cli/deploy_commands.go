@@ -30,20 +30,24 @@ type deployCommonOptions struct {
 
 type deployLocalOptions struct {
 	deployCommonOptions
-	AppRef        string
-	AppID         string
-	Dir           string
-	RepoURLCompat string
-	Branch        string
-	Private       bool
-	RepoToken     string
+	AppRef         string
+	AppID          string
+	Dir            string
+	RepoURLCompat  string
+	Branch         string
+	Private        bool
+	RepoToken      string
+	IdempotencyKey string
+	SeedFiles      []string
 }
 
 type deployGitHubOptions struct {
 	deployCommonOptions
-	Branch    string
-	Private   bool
-	RepoToken string
+	Branch         string
+	Private        bool
+	RepoToken      string
+	IdempotencyKey string
+	SeedFiles      []string
 }
 
 type deployImageOptions struct {
@@ -64,15 +68,17 @@ type importBundle struct {
 	Operations    []model.Operation
 	ComposeStack  map[string]any
 	FugueManifest map[string]any
+	Idempotency   *importGitHubIdempotency
 }
 
 type importBundleJSON struct {
-	App           *model.App        `json:"app,omitempty"`
-	Operation     *model.Operation  `json:"operation,omitempty"`
-	Apps          []model.App       `json:"apps,omitempty"`
-	Operations    []model.Operation `json:"operations,omitempty"`
-	ComposeStack  map[string]any    `json:"compose_stack,omitempty"`
-	FugueManifest map[string]any    `json:"fugue_manifest,omitempty"`
+	App           *model.App               `json:"app,omitempty"`
+	Operation     *model.Operation         `json:"operation,omitempty"`
+	Apps          []model.App              `json:"apps,omitempty"`
+	Operations    []model.Operation        `json:"operations,omitempty"`
+	ComposeStack  map[string]any           `json:"compose_stack,omitempty"`
+	FugueManifest map[string]any           `json:"fugue_manifest,omitempty"`
+	Idempotency   *importGitHubIdempotency `json:"idempotency,omitempty"`
 }
 
 func runDeployWithStreams(args []string, stdout, stderr io.Writer) error {
@@ -122,6 +128,8 @@ Defaults:
 					Branch:              opts.Branch,
 					Private:             opts.Private,
 					RepoToken:           opts.RepoToken,
+					IdempotencyKey:      opts.IdempotencyKey,
+					SeedFiles:           opts.SeedFiles,
 				}
 				baseDir, err := resolveDeployPath("", opts.Dir)
 				if err != nil {
@@ -145,12 +153,16 @@ Defaults:
 	cmd.Flags().StringVar(&opts.Branch, "branch", "", "Git branch for --repo-url compatibility mode")
 	cmd.Flags().BoolVar(&opts.Private, "private", false, "Treat the repository as private")
 	cmd.Flags().StringVar(&opts.RepoToken, "repo-token", "", "GitHub token for private repo imports")
+	cmd.Flags().StringVar(&opts.IdempotencyKey, "idempotency-key", "", "Compatibility idempotency key for --repo-url imports")
+	cmd.Flags().StringArrayVar(&opts.SeedFiles, "seed-file", nil, "Compatibility persistent storage seed file override: <service>:<path>=<local-file>")
 	_ = cmd.Flags().MarkHidden("dir")
 	_ = cmd.Flags().MarkHidden("app-id")
 	_ = cmd.Flags().MarkHidden("repo-url")
 	_ = cmd.Flags().MarkHidden("branch")
 	_ = cmd.Flags().MarkHidden("private")
 	_ = cmd.Flags().MarkHidden("repo-token")
+	_ = cmd.Flags().MarkHidden("idempotency-key")
+	_ = cmd.Flags().MarkHidden("seed-file")
 
 	cmd.AddCommand(
 		c.newDeployGitHubCommand(),
@@ -191,6 +203,8 @@ runtime, and app name when they are not ambiguous.
 	cmd.Flags().StringVar(&opts.Branch, "branch", "", "Git branch to import")
 	cmd.Flags().BoolVar(&opts.Private, "private", false, "Treat the repository as private")
 	cmd.Flags().StringVar(&opts.RepoToken, "repo-token", "", "GitHub token for private repo imports")
+	cmd.Flags().StringVar(&opts.IdempotencyKey, "idempotency-key", "", "Optional idempotency key to dedupe repeated imports")
+	cmd.Flags().StringArrayVar(&opts.SeedFiles, "seed-file", nil, "Persistent storage seed override: <service>:<path>=<local-file>")
 	return cmd
 }
 
@@ -410,6 +424,13 @@ func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingD
 	if envPath != "" {
 		c.progressf("Loaded %d env vars from %s", len(envVars), envPath)
 	}
+	seedFiles, err := loadPersistentStorageSeedFiles(workingDir, opts.SeedFiles)
+	if err != nil {
+		return err
+	}
+	if len(seedFiles) > 0 {
+		c.progressf("Loaded %d persistent storage seed file override(s)", len(seedFiles))
+	}
 
 	name := strings.TrimSpace(opts.Name)
 	if name == "" {
@@ -419,20 +440,22 @@ func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingD
 		name = "app"
 	}
 	request := importGitHubRequest{
-		TenantID:        tenantID,
-		SourceDir:       strings.TrimSpace(opts.SourceDir),
-		RepoURL:         repoURL,
-		Branch:          strings.TrimSpace(opts.Branch),
-		Name:            name,
-		Description:     strings.TrimSpace(opts.Description),
-		BuildStrategy:   strings.TrimSpace(opts.BuildStrategy),
-		RuntimeID:       strings.TrimSpace(runtimeID),
-		Replicas:        opts.Replicas,
-		ServicePort:     opts.ServicePort,
-		DockerfilePath:  strings.TrimSpace(opts.DockerfilePath),
-		BuildContextDir: strings.TrimSpace(opts.BuildContextDir),
-		Env:             envVars,
-		RepoAuthToken:   strings.TrimSpace(opts.RepoToken),
+		TenantID:                   tenantID,
+		SourceDir:                  strings.TrimSpace(opts.SourceDir),
+		RepoURL:                    repoURL,
+		Branch:                     strings.TrimSpace(opts.Branch),
+		Name:                       name,
+		Description:                strings.TrimSpace(opts.Description),
+		BuildStrategy:              strings.TrimSpace(opts.BuildStrategy),
+		RuntimeID:                  strings.TrimSpace(runtimeID),
+		Replicas:                   opts.Replicas,
+		ServicePort:                opts.ServicePort,
+		DockerfilePath:             strings.TrimSpace(opts.DockerfilePath),
+		BuildContextDir:            strings.TrimSpace(opts.BuildContextDir),
+		Env:                        envVars,
+		RepoAuthToken:              strings.TrimSpace(opts.RepoToken),
+		PersistentStorageSeedFiles: seedFiles,
+		IdempotencyKey:             strings.TrimSpace(opts.IdempotencyKey),
 	}
 	if opts.Private {
 		request.RepoVisibility = "private"
@@ -452,7 +475,15 @@ func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingD
 		if c.wantsJSON() {
 			return writeJSON(c.stdout, response)
 		}
-		return writeKeyValues(c.stdout, kvPair{Key: "request_in_progress", Value: "true"})
+		pairs := []kvPair{{Key: "request_in_progress", Value: "true"}}
+		if response.Idempotency != nil {
+			pairs = append(pairs,
+				kvPair{Key: "idempotency_key", Value: response.Idempotency.Key},
+				kvPair{Key: "idempotency_status", Value: response.Idempotency.Status},
+				kvPair{Key: "idempotency_replayed", Value: fmt.Sprintf("%t", response.Idempotency.Replayed)},
+			)
+		}
+		return writeKeyValues(c.stdout, pairs...)
 	}
 	return c.finishImportBundle(client, bundleFromGitHubResponse(response), opts.Wait)
 }
@@ -544,6 +575,7 @@ func bundleFromGitHubResponse(response importGitHubResponse) importBundle {
 		Operations:    dedupeOperations(response.Operations, response.Operation),
 		ComposeStack:  response.ComposeStack,
 		FugueManifest: response.FugueManifest,
+		Idempotency:   response.Idempotency,
 	}
 	if response.App != nil {
 		bundle.PrimaryApp = *response.App
@@ -661,6 +693,7 @@ func (c *CLI) renderImportBundle(bundle importBundle, waited bool) error {
 			Operations:    bundle.Operations,
 			ComposeStack:  bundle.ComposeStack,
 			FugueManifest: bundle.FugueManifest,
+			Idempotency:   bundle.Idempotency,
 		}
 		if strings.TrimSpace(bundle.PrimaryApp.ID) != "" {
 			appCopy := bundle.PrimaryApp
@@ -679,6 +712,13 @@ func (c *CLI) renderImportBundle(bundle importBundle, waited bool) error {
 	}
 	if strings.TrimSpace(bundle.PrimaryOp.ID) != "" {
 		pairs = append(pairs, kvPair{Key: "operation_id", Value: bundle.PrimaryOp.ID})
+	}
+	if bundle.Idempotency != nil {
+		pairs = append(pairs,
+			kvPair{Key: "idempotency_key", Value: bundle.Idempotency.Key},
+			kvPair{Key: "idempotency_status", Value: bundle.Idempotency.Status},
+			kvPair{Key: "idempotency_replayed", Value: fmt.Sprintf("%t", bundle.Idempotency.Replayed)},
+		)
 	}
 	if waited && bundle.PrimaryApp.Route != nil && strings.TrimSpace(bundle.PrimaryApp.Route.PublicURL) != "" {
 		pairs = append(pairs, kvPair{Key: "url", Value: bundle.PrimaryApp.Route.PublicURL})
@@ -835,4 +875,48 @@ func findOperationByID(operations []model.Operation, id string) (model.Operation
 		}
 	}
 	return model.Operation{}, false
+}
+
+func loadPersistentStorageSeedFiles(workingDir string, specs []string) ([]importGitHubPersistentStorageSeedFile, error) {
+	if len(specs) == 0 {
+		return nil, nil
+	}
+	files := make([]importGitHubPersistentStorageSeedFile, 0, len(specs))
+	for _, spec := range specs {
+		file, err := parsePersistentStorageSeedFileSpec(workingDir, spec)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, file)
+	}
+	return files, nil
+}
+
+func parsePersistentStorageSeedFileSpec(workingDir, spec string) (importGitHubPersistentStorageSeedFile, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return importGitHubPersistentStorageSeedFile{}, fmt.Errorf("seed file spec is required")
+	}
+	target, localFile, ok := strings.Cut(spec, "=")
+	if !ok || strings.TrimSpace(localFile) == "" {
+		return importGitHubPersistentStorageSeedFile{}, fmt.Errorf("seed file %q must use <service>:<path>=<local-file>", spec)
+	}
+	service, path, ok := strings.Cut(strings.TrimSpace(target), ":")
+	if !ok || strings.TrimSpace(service) == "" || strings.TrimSpace(path) == "" {
+		return importGitHubPersistentStorageSeedFile{}, fmt.Errorf("seed file %q must use <service>:<path>=<local-file>", spec)
+	}
+
+	localFile = strings.TrimSpace(localFile)
+	if !filepath.IsAbs(localFile) {
+		localFile = filepath.Join(workingDir, localFile)
+	}
+	content, err := os.ReadFile(localFile)
+	if err != nil {
+		return importGitHubPersistentStorageSeedFile{}, fmt.Errorf("read seed file %s: %w", localFile, err)
+	}
+	return importGitHubPersistentStorageSeedFile{
+		Service:     strings.TrimSpace(service),
+		Path:        strings.TrimSpace(path),
+		SeedContent: string(content),
+	}, nil
 }

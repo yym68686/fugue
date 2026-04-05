@@ -186,7 +186,7 @@ func writeAppStatus(w io.Writer, app model.App) error {
 	if app.Spec.Postgres != nil {
 		postgresRuntime = strings.TrimSpace(app.Spec.Postgres.RuntimeID)
 	}
-	return writeKeyValues(w,
+	pairs := []kvPair{
 		kvPair{Key: "app_id", Value: app.ID},
 		kvPair{Key: "name", Value: app.Name},
 		kvPair{Key: "tenant_id", Value: app.TenantID},
@@ -201,12 +201,39 @@ func writeAppStatus(w io.Writer, app model.App) error {
 		kvPair{Key: "workspace_root", Value: workspaceRoot},
 		kvPair{Key: "postgres_runtime_id", Value: postgresRuntime},
 		kvPair{Key: "current_resource_usage", Value: formatResourceUsageSummary(app.CurrentResourceUsage)},
+		kvPair{Key: "release_retain", Value: formatImageMirrorLimit(app.Spec.ImageMirrorLimit)},
+		kvPair{Key: "image_mirror_limit", Value: formatImageMirrorLimit(app.Spec.ImageMirrorLimit)},
 		kvPair{Key: "bindings", Value: fmt.Sprintf("%d", len(app.Bindings))},
 		kvPair{Key: "last_operation_id", Value: app.Status.LastOperationID},
 		kvPair{Key: "last_message", Value: app.Status.LastMessage},
 		kvPair{Key: "url", Value: url},
+		kvPair{Key: "release_started_at", Value: formatModeTime(app.Status.CurrentReleaseStartedAt)},
+		kvPair{Key: "release_ready_at", Value: formatModeTime(app.Status.CurrentReleaseReadyAt)},
 		kvPair{Key: "updated_at", Value: formatTime(app.UpdatedAt)},
-	)
+	}
+	if app.Route != nil {
+		pairs = append(pairs,
+			kvPair{Key: "route_hostname", Value: strings.TrimSpace(app.Route.Hostname)},
+			kvPair{Key: "route_base_domain", Value: strings.TrimSpace(app.Route.BaseDomain)},
+		)
+	}
+	if app.Source != nil {
+		pairs = append(pairs,
+			kvPair{Key: "repo_branch", Value: strings.TrimSpace(app.Source.RepoBranch)},
+			kvPair{Key: "commit_sha", Value: strings.TrimSpace(app.Source.CommitSHA)},
+			kvPair{Key: "commit_committed_at", Value: strings.TrimSpace(app.Source.CommitCommittedAt)},
+			kvPair{Key: "image_ref", Value: strings.TrimSpace(app.Source.ImageRef)},
+			kvPair{Key: "resolved_image_ref", Value: strings.TrimSpace(app.Source.ResolvedImageRef)},
+			kvPair{Key: "build_strategy", Value: strings.TrimSpace(app.Source.BuildStrategy)},
+			kvPair{Key: "source_dir", Value: strings.TrimSpace(app.Source.SourceDir)},
+			kvPair{Key: "dockerfile_path", Value: strings.TrimSpace(app.Source.DockerfilePath)},
+			kvPair{Key: "build_context_dir", Value: strings.TrimSpace(app.Source.BuildContextDir)},
+			kvPair{Key: "compose_service", Value: strings.TrimSpace(app.Source.ComposeService)},
+			kvPair{Key: "detected_provider", Value: strings.TrimSpace(app.Source.DetectedProvider)},
+			kvPair{Key: "detected_stack", Value: strings.TrimSpace(app.Source.DetectedStack)},
+		)
+	}
+	return writeKeyValues(w, pairs...)
 }
 
 func sourceRef(source *model.AppSource) string {

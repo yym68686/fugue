@@ -212,12 +212,41 @@ func (c *CLI) newAppContinuityOffCommand() *cobra.Command {
 func (c *CLI) newAppFailoverCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "failover",
-		Short: "Execute app failover",
+		Short: "Inspect, configure, and execute app failover",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("use \"fugue app failover exec <app>\" to execute failover, or \"fugue app continuity audit [app]\" to audit readiness")
+			return cmd.Help()
 		},
 	}
-	cmd.AddCommand(c.newAppFailoverRunCommand())
+	cmd.AddCommand(
+		c.newAppFailoverStatusCommand(),
+		c.newAppFailoverConfigureCommand(),
+		c.newAppFailoverDisableCommand(),
+		c.newAppFailoverRunCommand(),
+	)
+	return cmd
+}
+
+func (c *CLI) newAppFailoverStatusCommand() *cobra.Command {
+	cmd := c.newAppContinuityAuditCommand()
+	cmd.Use = "status [app]"
+	cmd.Aliases = []string{"audit", "show", "get"}
+	cmd.Short = "Show failover readiness for one app or all visible apps"
+	return cmd
+}
+
+func (c *CLI) newAppFailoverConfigureCommand() *cobra.Command {
+	cmd := c.newAppContinuitySetCommand()
+	cmd.Use = "configure <app>"
+	cmd.Aliases = []string{"set", "enable"}
+	cmd.Short = "Configure app and/or database failover targets"
+	return cmd
+}
+
+func (c *CLI) newAppFailoverDisableCommand() *cobra.Command {
+	cmd := c.newAppContinuityOffCommand()
+	cmd.Use = "disable <app>"
+	cmd.Aliases = []string{"off"}
+	cmd.Short = "Disable app and/or database failover"
 	return cmd
 }
 

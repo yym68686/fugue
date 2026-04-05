@@ -52,13 +52,13 @@ func resolveTenantSelection(client *Client, tenantID, tenantName string) (string
 		case 1:
 			return matches[0].ID, nil
 		default:
-			return "", fmt.Errorf("multiple tenants match %q; rerun with an exact --tenant value", tenantName)
+			return "", multipleMatchesError("tenant", tenantName, matches, describeTenantMatch)
 		}
 	}
 	if len(tenants) == 1 {
 		return tenants[0].ID, nil
 	}
-	return "", fmt.Errorf("multiple tenants are visible; rerun with --tenant <name>")
+	return "", visibleMatchesError("multiple tenants are visible; rerun with --tenant <name>:", tenants, describeTenantMatch)
 }
 
 func resolveProjectCreationSelection(client *Client, tenantID, projectID, projectName string) (projectSelection, error) {
@@ -131,7 +131,7 @@ func resolveProjectReference(client *Client, tenantID, projectID, projectName st
 	case 1:
 		return matches[0].ID, nil
 	default:
-		return "", fmt.Errorf("multiple projects match %q; rerun with a more specific --project value", projectName)
+		return "", multipleMatchesError("project", projectName, matches, describeProjectMatch)
 	}
 }
 
@@ -155,7 +155,7 @@ func resolveAppSelection(client *Client, appID, appName, projectID, tenantID str
 	case 1:
 		return matches[0].ID, nil
 	default:
-		return "", fmt.Errorf("multiple apps match %q; rerun with --project <name> or use an app id", appName)
+		return "", multipleMatchesError("app", appName, matches, describeAppMatch)
 	}
 }
 
@@ -175,7 +175,7 @@ func resolveAppReference(client *Client, appRef, projectID, tenantID string) (mo
 	case 1:
 		return matches[0], nil
 	default:
-		return model.App{}, fmt.Errorf("multiple apps match %q; pass --project or use an app id", appRef)
+		return model.App{}, multipleMatchesError("app", appRef, matches, describeAppMatch)
 	}
 }
 
@@ -213,7 +213,7 @@ func resolveRuntimeSelection(client *Client, runtimeID, runtimeName string) (str
 	case 1:
 		return matches[0].ID, nil
 	default:
-		return "", fmt.Errorf("multiple runtimes match %q; rerun with the exact runtime name or use --runtime-id", runtimeName)
+		return "", multipleMatchesError("runtime", runtimeName, matches, describeRuntimeMatch)
 	}
 }
 

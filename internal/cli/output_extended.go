@@ -536,19 +536,123 @@ func writeTemplateServiceTable(w io.Writer, services []inspectGitHubTemplateMani
 		return strings.Compare(sorted[i].Service, sorted[j].Service) < 0
 	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "SERVICE\tKIND\tBUILD\tPORT\tPUBLISHED\tSOURCE"); err != nil {
+	if _, err := fmt.Fprintln(tw, "SERVICE\tTYPE\tKIND\tBACKING\tBUILD\tPORT\tPUBLISHED\tSOURCE\tBINDINGS\tSEED_FILES"); err != nil {
 		return err
 	}
 	for _, service := range sorted {
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%d\t%t\t%s\n",
+			"%s\t%s\t%s\t%t\t%s\t%d\t%t\t%s\t%s\t%d\n",
 			service.Service,
+			firstNonEmpty(service.ServiceType, service.Kind),
 			service.Kind,
+			service.BackingService,
 			service.BuildStrategy,
 			service.InternalPort,
 			service.Published,
 			firstNonEmpty(service.SourceDir, service.BuildContextDir),
+			strings.Join(service.BindingTargets, ","),
+			len(service.PersistentStorageSeedFiles),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func writeTemplateVariableTable(w io.Writer, variables []templateVariable) error {
+	sorted := append([]templateVariable(nil), variables...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return strings.Compare(sorted[i].Key, sorted[j].Key) < 0
+	})
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "KEY\tREQUIRED\tSECRET\tDEFAULT\tLABEL"); err != nil {
+		return err
+	}
+	for _, variable := range sorted {
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%t\t%t\t%s\t%s\n",
+			variable.Key,
+			variable.Required,
+			variable.Secret,
+			variable.DefaultValue,
+			firstNonEmpty(variable.Label, variable.Description),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func hasTemplateSeedFiles(services []inspectGitHubTemplateManifestService) bool {
+	for _, service := range services {
+		if len(service.PersistentStorageSeedFiles) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func writeTemplateSeedFileTable(w io.Writer, services []inspectGitHubTemplateManifestService) error {
+	type row struct {
+		Service string
+		Path    string
+		Mode    int32
+		Seeded  bool
+	}
+	rows := make([]row, 0)
+	for _, service := range services {
+		for _, file := range service.PersistentStorageSeedFiles {
+			rows = append(rows, row{
+				Service: service.Service,
+				Path:    file.Path,
+				Mode:    file.Mode,
+				Seeded:  strings.TrimSpace(file.SeedContent) != "",
+			})
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Service == rows[j].Service {
+			return strings.Compare(rows[i].Path, rows[j].Path) < 0
+		}
+		return strings.Compare(rows[i].Service, rows[j].Service) < 0
+	})
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "SERVICE\tPATH\tMODE\tSEEDED"); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%t\n", row.Service, row.Path, formatFileMode(row.Mode), row.Seeded); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func writeTemplateInferenceTable(w io.Writer, report []templateTopologyInference) error {
+	sorted := append([]templateTopologyInference(nil), report...)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Service == sorted[j].Service {
+			if sorted[i].Category == sorted[j].Category {
+				return strings.Compare(sorted[i].Message, sorted[j].Message) < 0
+			}
+			return strings.Compare(sorted[i].Category, sorted[j].Category) < 0
+		}
+		return strings.Compare(sorted[i].Service, sorted[j].Service) < 0
+	})
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "LEVEL\tCATEGORY\tSERVICE\tMESSAGE"); err != nil {
+		return err
+	}
+	for _, inference := range sorted {
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\n",
+			inference.Level,
+			inference.Category,
+			inference.Service,
+			inference.Message,
 		); err != nil {
 			return err
 		}

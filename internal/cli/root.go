@@ -91,19 +91,23 @@ Environment variables:
   fugue --tenant acme deploy github owner/repo
   fugue --project marketing app logs web --follow
   fugue --base-url https://api.example.com app ls
+  fugue deploy inspect .
   fugue deploy github owner/repo --branch main
   fugue deploy image nginx:1.27
   fugue app status my-app
-  fugue app continuity enable my-app --app-to runtime-b
+  fugue app source show my-app
+  fugue app failover configure my-app --app-to runtime-b
   fugue app logs runtime my-app --follow
   fugue app binding bind my-app postgres
-  fugue app deploy my-app
+  fugue app release deploy my-app
   fugue app config put my-app /app/config.yaml --from-file config.yaml
-  fugue app domain add my-app www.example.com
+  fugue app domain primary set my-app www.example.com
   fugue service ls
+  fugue service postgres create app-db --runtime shared
   fugue operation ls --app my-app
-  fugue admin runtime access shared
-  fugue project usage
+  fugue runtime access show shared
+  fugue project overview
+  fugue project storage
 `),
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			return c.validateOutput()
@@ -126,9 +130,10 @@ Environment variables:
 		c.newDeployCommand(),
 		c.newAppCommand(),
 		c.newProjectCommand(),
+		c.newRuntimeCommand(),
 		c.newServiceCommand(),
 		c.newOpsCommand(),
-		c.newTemplateCommand(),
+		hideCompatCommand(c.newTemplateCommand(), "fugue deploy inspect"),
 		c.newAdminCommand(),
 		c.newEnvCompatCommand(),
 		c.newFilesCompatCommand(),

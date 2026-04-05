@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/model"
+
 	"github.com/spf13/cobra"
 )
 
@@ -21,6 +23,7 @@ func (c *CLI) newAppReleaseCommand() *cobra.Command {
 		c.newAppReleaseDeployCommand(),
 		c.newAppReleaseRollbackCommand(),
 		c.newAppReleasePruneCommand(),
+		c.newAppReleasePolicyCommand(),
 	)
 	return cmd
 }
@@ -309,6 +312,92 @@ func (c *CLI) newAppReleasePruneCommand() *cobra.Command {
 			)
 		},
 	}
+}
+
+func (c *CLI) newAppReleasePolicyCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "policy",
+		Short: "Show and update release retention policy",
+	}
+	cmd.AddCommand(
+		c.newAppReleasePolicyShowCommand(),
+		c.newAppReleasePolicySetCommand(),
+	)
+	return cmd
+}
+
+func (c *CLI) newAppReleasePolicyShowCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show <app>",
+		Short: "Show how many release images Fugue retains",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			app, err = client.GetApp(app.ID)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{
+					"app":                app,
+					"image_mirror_limit": model.EffectiveAppImageMirrorLimit(app.Spec.ImageMirrorLimit),
+				})
+			}
+			return writeKeyValues(c.stdout,
+				kvPair{Key: "app", Value: app.Name},
+				kvPair{Key: "release_retain", Value: formatImageMirrorLimit(app.Spec.ImageMirrorLimit)},
+			)
+		},
+	}
+}
+
+func (c *CLI) newAppReleasePolicySetCommand() *cobra.Command {
+	opts := struct {
+		Retain int
+	}{Retain: model.DefaultAppImageMirrorLimit}
+	cmd := &cobra.Command{
+		Use:   "set <app>",
+		Short: "Set how many release images Fugue retains",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			response, err := client.SetAppImageMirrorLimit(app.ID, opts.Retain)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			if err := writeKeyValues(c.stdout,
+				kvPair{Key: "app", Value: response.App.Name},
+				kvPair{Key: "release_retain", Value: formatImageMirrorLimit(response.App.Spec.ImageMirrorLimit)},
+				kvPair{Key: "already_current", Value: fmt.Sprintf("%t", response.AlreadyCurrent)},
+			); err != nil {
+				return err
+			}
+			return nil
+		},
+	}
+	cmd.Flags().IntVar(&opts.Retain, "retain", opts.Retain, "How many release images to retain")
+	return cmd
+}
+
+func formatImageMirrorLimit(value int) string {
+	return fmt.Sprintf("%d", model.EffectiveAppImageMirrorLimit(value))
 }
 
 func defaultRollbackImage(versions []appImageVersion) (appImageVersion, error) {

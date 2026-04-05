@@ -10,6 +10,21 @@ import (
 	"github.com/spf13/cobra"
 )
 
+type postgresServiceCreateOptions struct {
+	Description         string
+	RuntimeName         string
+	RuntimeID           string
+	Database            string
+	User                string
+	Password            string
+	Image               string
+	ServiceName         string
+	StorageSize         string
+	StorageClass        string
+	Instances           int
+	SynchronousReplicas int
+}
+
 func (c *CLI) newServiceCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "service",
@@ -21,12 +36,15 @@ Use service names for normal operations.
 Service creation defaults to the default project when you omit --project and
 your tenant already has one.
 
+Use "fugue service postgres create <name>" for the primary creation flow.
+
 Use "fugue app binding" to attach or detach a backing service from an app.
 `),
 	}
 	cmd.AddCommand(
 		c.newServiceListCommand(),
-		c.newServiceCreateCommand(),
+		c.newServicePostgresCommand(),
+		hideCompatCommand(c.newServiceCreateCommand(), "fugue service postgres create"),
 		c.newServiceShowCommand(),
 		c.newServiceRemoveCommand(),
 	)
@@ -62,86 +80,22 @@ func (c *CLI) newServiceListCommand() *cobra.Command {
 
 func (c *CLI) newServiceCreateCommand() *cobra.Command {
 	opts := struct {
-		Description         string
-		Type                string
-		RuntimeName         string
-		RuntimeID           string
-		Database            string
-		User                string
-		Password            string
-		Image               string
-		ServiceName         string
-		StorageSize         string
-		StorageClass        string
-		Instances           int
-		SynchronousReplicas int
+		postgresServiceCreateOptions
+		Type string
 	}{Type: model.BackingServiceTypePostgres}
 	cmd := &cobra.Command{
 		Use:   "create <name>",
-		Short: "Create a backing service",
+		Short: "Compatibility alias for service postgres create",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := c.newClient()
-			if err != nil {
-				return err
-			}
-			tenantID, err := resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
-			if err != nil {
-				return err
-			}
-			projectID, err := resolveProjectReference(client, tenantID, c.effectiveProjectID(), c.effectiveProjectName())
-			if err != nil {
-				return err
-			}
-			if strings.TrimSpace(projectID) == "" {
-				project, ok, err := resolveDefaultProjectForCreate(client, tenantID)
-				if err != nil {
-					return err
-				}
-				if !ok {
-					return fmt.Errorf("project is required; pass --project or create a default project first")
-				}
-				projectID = project.ID
-			}
 			if !strings.EqualFold(strings.TrimSpace(opts.Type), model.BackingServiceTypePostgres) {
 				return fmt.Errorf("unsupported service type %q", opts.Type)
 			}
-			runtimeID, err := resolveRuntimeSelection(client, opts.RuntimeID, opts.RuntimeName)
-			if err != nil {
-				return err
-			}
-			spec := model.BackingServiceSpec{
-				Postgres: &model.AppPostgresSpec{
-					Image:               strings.TrimSpace(opts.Image),
-					Database:            strings.TrimSpace(opts.Database),
-					User:                strings.TrimSpace(opts.User),
-					Password:            opts.Password,
-					ServiceName:         strings.TrimSpace(opts.ServiceName),
-					RuntimeID:           strings.TrimSpace(runtimeID),
-					StorageSize:         strings.TrimSpace(opts.StorageSize),
-					StorageClassName:    strings.TrimSpace(opts.StorageClass),
-					Instances:           opts.Instances,
-					SynchronousReplicas: opts.SynchronousReplicas,
-				},
-			}
-			service, err := client.CreateBackingService(createBackingServiceRequest{
-				TenantID:    tenantID,
-				ProjectID:   projectID,
-				Name:        args[0],
-				Description: opts.Description,
-				Spec:        spec,
-			})
-			if err != nil {
-				return err
-			}
-			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"backing_service": service})
-			}
-			return renderBackingService(c.stdout, service)
+			return c.createPostgresService(args[0], opts.postgresServiceCreateOptions)
 		},
 	}
 	cmd.Flags().StringVar(&opts.Description, "description", "", "Service description")
-	cmd.Flags().StringVar(&opts.Type, "type", opts.Type, "Service type")
+	cmd.Flags().StringVar(&opts.Type, "type", opts.Type, "Compatibility service type flag")
 	cmd.Flags().StringVar(&opts.RuntimeName, "runtime", "", "Runtime name for managed postgres")
 	cmd.Flags().StringVar(&opts.RuntimeID, "runtime-id", "", "Runtime ID for managed postgres")
 	cmd.Flags().StringVar(&opts.Database, "database", "", "Database name")
@@ -155,6 +109,99 @@ func (c *CLI) newServiceCreateCommand() *cobra.Command {
 	cmd.Flags().IntVar(&opts.SynchronousReplicas, "sync-replicas", 0, "Number of synchronous postgres replicas")
 	_ = cmd.Flags().MarkHidden("runtime-id")
 	return cmd
+}
+
+func (c *CLI) newServicePostgresCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "postgres",
+		Aliases: []string{"pg"},
+		Short:   "Create postgres backing services",
+	}
+	cmd.AddCommand(c.newServicePostgresCreateCommand())
+	return cmd
+}
+
+func (c *CLI) newServicePostgresCreateCommand() *cobra.Command {
+	opts := postgresServiceCreateOptions{}
+	cmd := &cobra.Command{
+		Use:   "create <name>",
+		Short: "Create a postgres backing service",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return c.createPostgresService(args[0], opts)
+		},
+	}
+	cmd.Flags().StringVar(&opts.Description, "description", "", "Service description")
+	cmd.Flags().StringVar(&opts.RuntimeName, "runtime", "", "Runtime name for managed postgres")
+	cmd.Flags().StringVar(&opts.RuntimeID, "runtime-id", "", "Runtime ID for managed postgres")
+	cmd.Flags().StringVar(&opts.Database, "database", "", "Database name")
+	cmd.Flags().StringVar(&opts.User, "user", "", "Database user")
+	cmd.Flags().StringVar(&opts.Password, "password", "", "Database password")
+	cmd.Flags().StringVar(&opts.Image, "image", "", "Postgres image override")
+	cmd.Flags().StringVar(&opts.ServiceName, "service-name", "", "Kubernetes service name override")
+	cmd.Flags().StringVar(&opts.StorageSize, "storage-size", "", "Persistent storage size")
+	cmd.Flags().StringVar(&opts.StorageClass, "storage-class", "", "Persistent storage class")
+	cmd.Flags().IntVar(&opts.Instances, "instances", 0, "Number of postgres instances")
+	cmd.Flags().IntVar(&opts.SynchronousReplicas, "sync-replicas", 0, "Number of synchronous postgres replicas")
+	_ = cmd.Flags().MarkHidden("runtime-id")
+	return cmd
+}
+
+func (c *CLI) createPostgresService(name string, opts postgresServiceCreateOptions) error {
+	client, err := c.newClient()
+	if err != nil {
+		return err
+	}
+	tenantID, err := resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+	if err != nil {
+		return err
+	}
+	projectID, err := resolveProjectReference(client, tenantID, c.effectiveProjectID(), c.effectiveProjectName())
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(projectID) == "" {
+		project, ok, err := resolveDefaultProjectForCreate(client, tenantID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("project is required; pass --project or create a default project first")
+		}
+		projectID = project.ID
+	}
+	runtimeID, err := resolveRuntimeSelection(client, opts.RuntimeID, opts.RuntimeName)
+	if err != nil {
+		return err
+	}
+	spec := model.BackingServiceSpec{
+		Postgres: &model.AppPostgresSpec{
+			Image:               strings.TrimSpace(opts.Image),
+			Database:            strings.TrimSpace(opts.Database),
+			User:                strings.TrimSpace(opts.User),
+			Password:            opts.Password,
+			ServiceName:         strings.TrimSpace(opts.ServiceName),
+			RuntimeID:           strings.TrimSpace(runtimeID),
+			StorageSize:         strings.TrimSpace(opts.StorageSize),
+			StorageClassName:    strings.TrimSpace(opts.StorageClass),
+			Instances:           opts.Instances,
+			SynchronousReplicas: opts.SynchronousReplicas,
+		},
+	}
+	service, err := client.CreateBackingService(createBackingServiceRequest{
+		TenantID:    tenantID,
+		ProjectID:   projectID,
+		Name:        name,
+		Description: opts.Description,
+		Spec:        spec,
+	})
+	if err != nil {
+		return err
+	}
+	if c.wantsJSON() {
+		return writeJSON(c.stdout, map[string]any{"backing_service": service})
+	}
+	return renderBackingService(c.stdout, service)
 }
 
 func (c *CLI) newServiceShowCommand() *cobra.Command {

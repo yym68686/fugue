@@ -23,21 +23,34 @@ Pass --tenant only when you are acting across multiple visible tenants.
 	}
 	cmd.AddCommand(
 		c.newProjectListCommand(),
+		c.newProjectOverviewCommand(),
+		c.newProjectWatchCommand(),
+		c.newProjectAppsCommand(),
+		c.newProjectOpsCommand(),
+		c.newProjectMetaCommand(),
 		c.newProjectShowCommand(),
 		c.newProjectCreateCommand(),
 		c.newProjectRenameCommand(),
 		c.newProjectRemoveCommand(),
+		c.newProjectStorageCommand(),
 		c.newProjectUsageCommand(),
 	)
 	return cmd
 }
 
 func (c *CLI) newProjectShowCommand() *cobra.Command {
+	cmd := c.newProjectOverviewCommand()
+	cmd.Use = "show [project]"
+	cmd.Aliases = []string{"get", "status", "info"}
+	cmd.Short = "Compatibility alias for project overview"
+	return hideCompatCommand(cmd, "fugue project overview")
+}
+
+func (c *CLI) newProjectMetaCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:     "show <project>",
-		Aliases: []string{"get", "status", "info"},
-		Short:   "Show one project",
-		Args:    cobra.ExactArgs(1),
+		Use:   "meta <project>",
+		Short: "Show project metadata",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {
@@ -174,7 +187,7 @@ func (c *CLI) newProjectRemoveCommand() *cobra.Command {
 }
 
 func (c *CLI) newProjectUsageCommand() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "usage [project]",
 		Short: "Show image-usage by project",
 		Args:  cobra.MaximumNArgs(1),
@@ -238,6 +251,16 @@ func (c *CLI) newProjectUsageCommand() *cobra.Command {
 			return writeProjectUsageTable(c.stdout, usage.Projects)
 		},
 	}
+	return hideCompatCommand(cmd, "fugue project storage")
+}
+
+func (c *CLI) newProjectStorageCommand() *cobra.Command {
+	cmd := c.newProjectUsageCommand()
+	cmd.Use = "storage [project]"
+	cmd.Short = "Show project image storage usage"
+	cmd.Hidden = false
+	cmd.Deprecated = ""
+	return cmd
 }
 
 func renderProject(w io.Writer, project model.Project) error {

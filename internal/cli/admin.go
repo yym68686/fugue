@@ -24,7 +24,7 @@ Use a bootstrap key or admin API key here only when you are doing setup.
 	}
 	cmd.AddCommand(
 		c.newAdminAccessCommand(),
-		c.newAdminRuntimeCommand(),
+		hideCompatCommand(c.newAdminRuntimeCommand(), "fugue runtime"),
 		c.newAdminClusterCommand(),
 		c.newAdminBillingCommand(),
 		c.newAdminTenantCommand(),

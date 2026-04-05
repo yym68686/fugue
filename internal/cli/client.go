@@ -26,6 +26,12 @@ type importProjectRequest struct {
 	Description string `json:"description"`
 }
 
+type importGitHubPersistentStorageSeedFile struct {
+	Service     string `json:"service"`
+	Path        string `json:"path"`
+	SeedContent string `json:"seed_content"`
+}
+
 type importUploadRequest struct {
 	AppID           string                 `json:"app_id,omitempty"`
 	TenantID        string                 `json:"tenant_id,omitempty"`
@@ -47,27 +53,28 @@ type importUploadRequest struct {
 }
 
 type importGitHubRequest struct {
-	TenantID        string                 `json:"tenant_id,omitempty"`
-	ProjectID       string                 `json:"project_id,omitempty"`
-	Project         *importProjectRequest  `json:"project,omitempty"`
-	RepoURL         string                 `json:"repo_url,omitempty"`
-	RepoVisibility  string                 `json:"repo_visibility,omitempty"`
-	RepoAuthToken   string                 `json:"repo_auth_token,omitempty"`
-	Branch          string                 `json:"branch,omitempty"`
-	SourceDir       string                 `json:"source_dir,omitempty"`
-	Name            string                 `json:"name,omitempty"`
-	Description     string                 `json:"description,omitempty"`
-	BuildStrategy   string                 `json:"build_strategy,omitempty"`
-	RuntimeID       string                 `json:"runtime_id,omitempty"`
-	Replicas        int                    `json:"replicas,omitempty"`
-	ServicePort     int                    `json:"service_port,omitempty"`
-	DockerfilePath  string                 `json:"dockerfile_path,omitempty"`
-	BuildContextDir string                 `json:"build_context_dir,omitempty"`
-	Env             map[string]string      `json:"env,omitempty"`
-	ConfigContent   string                 `json:"config_content,omitempty"`
-	Files           []model.AppFile        `json:"files,omitempty"`
-	Postgres        *model.AppPostgresSpec `json:"postgres,omitempty"`
-	IdempotencyKey  string                 `json:"idempotency_key,omitempty"`
+	TenantID                   string                                  `json:"tenant_id,omitempty"`
+	ProjectID                  string                                  `json:"project_id,omitempty"`
+	Project                    *importProjectRequest                   `json:"project,omitempty"`
+	RepoURL                    string                                  `json:"repo_url,omitempty"`
+	RepoVisibility             string                                  `json:"repo_visibility,omitempty"`
+	RepoAuthToken              string                                  `json:"repo_auth_token,omitempty"`
+	Branch                     string                                  `json:"branch,omitempty"`
+	SourceDir                  string                                  `json:"source_dir,omitempty"`
+	Name                       string                                  `json:"name,omitempty"`
+	Description                string                                  `json:"description,omitempty"`
+	BuildStrategy              string                                  `json:"build_strategy,omitempty"`
+	RuntimeID                  string                                  `json:"runtime_id,omitempty"`
+	Replicas                   int                                     `json:"replicas,omitempty"`
+	ServicePort                int                                     `json:"service_port,omitempty"`
+	DockerfilePath             string                                  `json:"dockerfile_path,omitempty"`
+	BuildContextDir            string                                  `json:"build_context_dir,omitempty"`
+	Env                        map[string]string                       `json:"env,omitempty"`
+	ConfigContent              string                                  `json:"config_content,omitempty"`
+	Files                      []model.AppFile                         `json:"files,omitempty"`
+	PersistentStorageSeedFiles []importGitHubPersistentStorageSeedFile `json:"persistent_storage_seed_files,omitempty"`
+	Postgres                   *model.AppPostgresSpec                  `json:"postgres,omitempty"`
+	IdempotencyKey             string                                  `json:"idempotency_key,omitempty"`
 }
 
 type importGitHubIdempotency struct {
@@ -310,43 +317,61 @@ func (c *Client) ListRuntimes() ([]model.Runtime, error) {
 }
 
 func (c *Client) ImportUpload(req importUploadRequest, archiveName string, archiveBytes []byte) (importUploadResponse, error) {
+	var response importUploadResponse
+	if err := c.doMultipartJSON("/v1/apps/import-upload", req, archiveName, archiveBytes, &response); err != nil {
+		return importUploadResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) InspectUploadTemplate(req importUploadRequest, archiveName string, archiveBytes []byte) (inspectUploadTemplateResponse, error) {
+	var response inspectUploadTemplateResponse
+	if err := c.doMultipartJSON("/v1/templates/inspect-upload", req, archiveName, archiveBytes, &response); err != nil {
+		return inspectUploadTemplateResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) doMultipartJSON(relativePath string, requestBody any, archiveName string, archiveBytes []byte, responseBody any) error {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
-	requestJSON, err := json.Marshal(req)
+	requestJSON, err := json.Marshal(requestBody)
 	if err != nil {
-		return importUploadResponse{}, fmt.Errorf("marshal request: %w", err)
+		return fmt.Errorf("marshal request: %w", err)
 	}
 	if err := writer.WriteField("request", string(requestJSON)); err != nil {
-		return importUploadResponse{}, fmt.Errorf("write request field: %w", err)
+		return fmt.Errorf("write request field: %w", err)
 	}
 	part, err := writer.CreateFormFile("archive", archiveName)
 	if err != nil {
-		return importUploadResponse{}, fmt.Errorf("create archive field: %w", err)
+		return fmt.Errorf("create archive field: %w", err)
 	}
 	if _, err := part.Write(archiveBytes); err != nil {
-		return importUploadResponse{}, fmt.Errorf("write archive field: %w", err)
+		return fmt.Errorf("write archive field: %w", err)
 	}
 	if err := writer.Close(); err != nil {
-		return importUploadResponse{}, fmt.Errorf("close multipart writer: %w", err)
+		return fmt.Errorf("close multipart writer: %w", err)
 	}
 
-	httpReq, err := http.NewRequest(http.MethodPost, c.resolveURL("/v1/apps/import-upload"), &body)
+	httpReq, err := http.NewRequest(http.MethodPost, c.resolveURL(relativePath), &body)
 	if err != nil {
-		return importUploadResponse{}, fmt.Errorf("build request: %w", err)
+		return fmt.Errorf("build request: %w", err)
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+c.token)
 	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
 
 	payload, err := c.do(httpReq)
 	if err != nil {
-		return importUploadResponse{}, err
+		return err
 	}
-	var response importUploadResponse
-	if err := json.Unmarshal(payload, &response); err != nil {
-		return importUploadResponse{}, fmt.Errorf("decode import upload response: %w", err)
+	if responseBody == nil {
+		return nil
 	}
-	return response, nil
+	if err := json.Unmarshal(payload, responseBody); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+	return nil
 }
 
 func (c *Client) ImportGitHub(req importGitHubRequest) (importGitHubResponse, error) {

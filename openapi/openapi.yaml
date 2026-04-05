@@ -1184,6 +1184,32 @@ paths:
                 $ref: "#/components/schemas/InspectGitHubTemplateResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/templates/inspect-upload:
+    post:
+      operationId: inspectUploadTemplate
+      summary: Inspect Upload Template
+      tags: [Templates]
+      x-fugue-handler: handleInspectUploadTemplate
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/ImportUploadMultipartRequest"
+            encoding:
+              request:
+                contentType: application/json
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InspectUploadTemplateResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/import-image:
     post:
       operationId: importImageApp
@@ -4595,6 +4621,37 @@ components:
           nullable: true
         template:
           $ref: "#/components/schemas/TemplateMetadata"
+          nullable: true
+    InspectUploadTemplateUpload:
+      type: object
+      additionalProperties: false
+      required: [archive_filename, archive_sha256, archive_size_bytes, default_app_name]
+      properties:
+        archive_filename:
+          type: string
+        archive_sha256:
+          type: string
+        archive_size_bytes:
+          type: integer
+          format: int64
+        default_app_name:
+          type: string
+        source_kind:
+          type: string
+        source_path:
+          type: string
+    InspectUploadTemplateResponse:
+      type: object
+      additionalProperties: false
+      required: [upload]
+      properties:
+        upload:
+          $ref: "#/components/schemas/InspectUploadTemplateUpload"
+        fugue_manifest:
+          $ref: "#/components/schemas/InspectGitHubTemplateManifest"
+          nullable: true
+        compose_stack:
+          $ref: "#/components/schemas/InspectGitHubTemplateComposeStack"
           nullable: true
     ImportGitHubRequest:
       type: object

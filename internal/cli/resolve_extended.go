@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -138,7 +139,7 @@ func matchVisibleNodeKeys(keys []model.NodeKey, ref string) []model.NodeKey {
 	return matches
 }
 
-func resolveSingleMatch[T any](ref string, matches []T, kind string) (T, error) {
+func resolveSingleMatch[T any](ref string, matches []T, kind string, describe func(T) string) (T, error) {
 	var zero T
 	switch len(matches) {
 	case 0:
@@ -146,7 +147,7 @@ func resolveSingleMatch[T any](ref string, matches []T, kind string) (T, error) 
 	case 1:
 		return matches[0], nil
 	default:
-		return zero, fmt.Errorf("multiple %ss match %q", kind, strings.TrimSpace(ref))
+		return zero, multipleMatchesError(kind, ref, matches, describe)
 	}
 }
 
@@ -159,7 +160,7 @@ func (c *CLI) resolveNamedProject(client *Client, ref string) (model.Project, er
 	if err != nil {
 		return model.Project{}, err
 	}
-	return resolveSingleMatch(ref, matchVisibleProjects(projects, ref), "project")
+	return resolveSingleMatch(ref, matchVisibleProjects(projects, ref), "project", describeProjectMatch)
 }
 
 func (c *CLI) resolveNamedService(client *Client, ref string) (model.BackingService, error) {
@@ -171,7 +172,7 @@ func (c *CLI) resolveNamedService(client *Client, ref string) (model.BackingServ
 	if err != nil {
 		return model.BackingService{}, err
 	}
-	return resolveSingleMatch(ref, matchVisibleServices(filterServices(services, tenantID, projectID), ref), "service")
+	return resolveSingleMatch(ref, matchVisibleServices(filterServices(services, tenantID, projectID), ref), "service", describeServiceMatch)
 }
 
 func (c *CLI) resolveNamedRuntime(client *Client, ref string) (model.Runtime, error) {
@@ -198,7 +199,7 @@ func (c *CLI) resolveNamedAPIKey(client *Client, ref string) (model.APIKey, erro
 	if err != nil {
 		return model.APIKey{}, err
 	}
-	return resolveSingleMatch(ref, matchVisibleAPIKeys(filterAPIKeys(keys, tenantID), ref), "api key")
+	return resolveSingleMatch(ref, matchVisibleAPIKeys(filterAPIKeys(keys, tenantID), ref), "api key", describeAPIKeyMatch)
 }
 
 func (c *CLI) resolveNamedNodeKey(client *Client, ref string) (model.NodeKey, error) {
@@ -214,7 +215,7 @@ func (c *CLI) resolveNamedNodeKey(client *Client, ref string) (model.NodeKey, er
 	if err != nil {
 		return model.NodeKey{}, err
 	}
-	return resolveSingleMatch(ref, matchVisibleNodeKeys(filterNodeKeys(keys, tenantID), ref), "node key")
+	return resolveSingleMatch(ref, matchVisibleNodeKeys(filterNodeKeys(keys, tenantID), ref), "node key", describeNodeKeyMatch)
 }
 
 func (c *CLI) resolveNamedTenant(client *Client, ref string) (model.Tenant, error) {
@@ -234,7 +235,7 @@ func (c *CLI) resolveNamedTenant(client *Client, ref string) (model.Tenant, erro
 			matches = append(matches, tenant)
 		}
 	}
-	return resolveSingleMatch(ref, matches, "tenant")
+	return resolveSingleMatch(ref, matches, "tenant", describeTenantMatch)
 }
 
 func (c *CLI) visibleTenantNamesByID(client *Client) (map[string]string, error) {
@@ -270,4 +271,98 @@ func resolveDefaultProjectForCreate(client *Client, tenantID string) (model.Proj
 		}
 	}
 	return model.Project{}, false, nil
+}
+
+func multipleMatchesError[T any](kind, ref string, matches []T, describe func(T) string) error {
+	lines := []string{fmt.Sprintf("multiple %ss match %q:", kind, strings.TrimSpace(ref))}
+	for _, match := range matches {
+		label := strings.TrimSpace(describe(match))
+		if label == "" {
+			continue
+		}
+		lines = append(lines, "  - "+label)
+	}
+	return errors.New(strings.Join(lines, "\n"))
+}
+
+func visibleMatchesError[T any](message string, matches []T, describe func(T) string) error {
+	lines := []string{strings.TrimSpace(message)}
+	for _, match := range matches {
+		label := strings.TrimSpace(describe(match))
+		if label == "" {
+			continue
+		}
+		lines = append(lines, "  - "+label)
+	}
+	return errors.New(strings.Join(lines, "\n"))
+}
+
+func describeProjectMatch(project model.Project) string {
+	return fmt.Sprintf(
+		"%s (project_id=%s tenant_id=%s slug=%s)",
+		firstNonEmpty(project.Name, project.ID),
+		project.ID,
+		project.TenantID,
+		project.Slug,
+	)
+}
+
+func describeServiceMatch(service model.BackingService) string {
+	return fmt.Sprintf(
+		"%s (service_id=%s project_id=%s tenant_id=%s type=%s)",
+		firstNonEmpty(service.Name, service.ID),
+		service.ID,
+		service.ProjectID,
+		service.TenantID,
+		service.Type,
+	)
+}
+
+func describeTenantMatch(tenant model.Tenant) string {
+	return fmt.Sprintf(
+		"%s (tenant_id=%s slug=%s)",
+		firstNonEmpty(tenant.Name, tenant.ID),
+		tenant.ID,
+		tenant.Slug,
+	)
+}
+
+func describeAPIKeyMatch(key model.APIKey) string {
+	return fmt.Sprintf(
+		"%s (api_key_id=%s prefix=%s tenant_id=%s)",
+		firstNonEmpty(key.Label, key.Prefix, key.ID),
+		key.ID,
+		key.Prefix,
+		key.TenantID,
+	)
+}
+
+func describeNodeKeyMatch(key model.NodeKey) string {
+	return fmt.Sprintf(
+		"%s (node_key_id=%s prefix=%s tenant_id=%s)",
+		firstNonEmpty(key.Label, key.Prefix, key.ID),
+		key.ID,
+		key.Prefix,
+		key.TenantID,
+	)
+}
+
+func describeAppMatch(app model.App) string {
+	return fmt.Sprintf(
+		"%s (app_id=%s project_id=%s tenant_id=%s)",
+		firstNonEmpty(app.Name, app.ID),
+		app.ID,
+		app.ProjectID,
+		app.TenantID,
+	)
+}
+
+func describeRuntimeMatch(runtime model.Runtime) string {
+	return fmt.Sprintf(
+		"%s (runtime_id=%s type=%s tenant_id=%s)",
+		firstNonEmpty(runtime.Name, runtime.ID),
+		runtime.ID,
+		runtime.Type,
+		runtime.TenantID,
+	)
 }

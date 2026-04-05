@@ -328,23 +328,49 @@ type inspectGitHubTemplateRepository struct {
 	DefaultAppName    string `json:"default_app_name"`
 }
 
+type templateTopologyInference struct {
+	Level    string `json:"level"`
+	Category string `json:"category"`
+	Service  string `json:"service"`
+	Message  string `json:"message"`
+}
+
+type persistentStorageSeedFile struct {
+	Path        string `json:"path"`
+	Mode        int32  `json:"mode"`
+	SeedContent string `json:"seed_content"`
+}
+
 type inspectGitHubTemplateManifestService struct {
-	Service         string `json:"service"`
-	Kind            string `json:"kind"`
-	BuildStrategy   string `json:"build_strategy"`
-	InternalPort    int    `json:"internal_port"`
-	ComposeService  string `json:"compose_service"`
-	Published       bool   `json:"published"`
-	SourceDir       string `json:"source_dir"`
-	DockerfilePath  string `json:"dockerfile_path"`
-	BuildContextDir string `json:"build_context_dir"`
+	Service                    string                      `json:"service"`
+	Kind                       string                      `json:"kind"`
+	ServiceType                string                      `json:"service_type,omitempty"`
+	BackingService             bool                        `json:"backing_service,omitempty"`
+	BuildStrategy              string                      `json:"build_strategy"`
+	InternalPort               int                         `json:"internal_port"`
+	ComposeService             string                      `json:"compose_service"`
+	Published                  bool                        `json:"published"`
+	SourceDir                  string                      `json:"source_dir"`
+	DockerfilePath             string                      `json:"dockerfile_path"`
+	BuildContextDir            string                      `json:"build_context_dir"`
+	BindingTargets             []string                    `json:"binding_targets,omitempty"`
+	PersistentStorageSeedFiles []persistentStorageSeedFile `json:"persistent_storage_seed_files"`
 }
 
 type inspectGitHubTemplateManifest struct {
-	ManifestPath   string                                 `json:"manifest_path"`
-	PrimaryService string                                 `json:"primary_service"`
-	Services       []inspectGitHubTemplateManifestService `json:"services"`
-	Warnings       []string                               `json:"warnings"`
+	ManifestPath    string                                 `json:"manifest_path"`
+	PrimaryService  string                                 `json:"primary_service"`
+	Services        []inspectGitHubTemplateManifestService `json:"services"`
+	Warnings        []string                               `json:"warnings"`
+	InferenceReport []templateTopologyInference            `json:"inference_report"`
+}
+
+type inspectGitHubTemplateComposeStack struct {
+	ComposePath     string                                 `json:"compose_path"`
+	PrimaryService  string                                 `json:"primary_service"`
+	Services        []inspectGitHubTemplateManifestService `json:"services"`
+	Warnings        []string                               `json:"warnings"`
+	InferenceReport []templateTopologyInference            `json:"inference_report"`
 }
 
 type templateVariable struct {
@@ -369,9 +395,25 @@ type templateMetadata struct {
 }
 
 type inspectGitHubTemplateResponse struct {
-	Repository    inspectGitHubTemplateRepository `json:"repository"`
-	FugueManifest *inspectGitHubTemplateManifest  `json:"fugue_manifest,omitempty"`
-	Template      *templateMetadata               `json:"template,omitempty"`
+	Repository    inspectGitHubTemplateRepository    `json:"repository"`
+	FugueManifest *inspectGitHubTemplateManifest     `json:"fugue_manifest,omitempty"`
+	ComposeStack  *inspectGitHubTemplateComposeStack `json:"compose_stack,omitempty"`
+	Template      *templateMetadata                  `json:"template,omitempty"`
+}
+
+type inspectUploadTemplateUpload struct {
+	ArchiveFilename  string `json:"archive_filename"`
+	ArchiveSHA256    string `json:"archive_sha256"`
+	ArchiveSizeBytes int64  `json:"archive_size_bytes"`
+	DefaultAppName   string `json:"default_app_name"`
+	SourceKind       string `json:"source_kind,omitempty"`
+	SourcePath       string `json:"source_path,omitempty"`
+}
+
+type inspectUploadTemplateResponse struct {
+	Upload        inspectUploadTemplateUpload        `json:"upload"`
+	FugueManifest *inspectGitHubTemplateManifest     `json:"fugue_manifest,omitempty"`
+	ComposeStack  *inspectGitHubTemplateComposeStack `json:"compose_stack,omitempty"`
 }
 
 func (c *Client) CreateTenant(name string) (model.Tenant, error) {
