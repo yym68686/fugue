@@ -196,6 +196,10 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 				httpx.WriteError(w, http.StatusBadRequest, "startup_command is only supported for single-app imports")
 				return
 			}
+			if hasImportedPersistentStorage(req.PersistentStorage) {
+				httpx.WriteError(w, http.StatusBadRequest, "persistent_storage is only supported for single-app imports")
+				return
+			}
 			if _, err := ensureImportProject(); err != nil {
 				s.writeStoreError(w, err)
 				return
@@ -242,6 +246,10 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		case inspectErr == nil:
 			if hasStartupCommand(req.StartupCommand) {
 				httpx.WriteError(w, http.StatusBadRequest, "startup_command is only supported for single-app imports")
+				return
+			}
+			if hasImportedPersistentStorage(req.PersistentStorage) {
+				httpx.WriteError(w, http.StatusBadRequest, "persistent_storage is only supported for single-app imports")
 				return
 			}
 			if _, err := ensureImportProject(); err != nil {
@@ -308,7 +316,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		spec, err := s.buildImportedAppSpec(source.BuildStrategy, candidateName, "", runtimeID, replicas, effectiveImportServicePort(servicePort, 0), req.ConfigContent, req.Files, nil, req.Postgres, req.Env)
+		spec, err := s.buildImportedAppSpec(source.BuildStrategy, candidateName, "", runtimeID, replicas, effectiveImportServicePort(servicePort, 0), req.ConfigContent, req.Files, req.PersistentStorage, req.Postgres, req.Env)
 		if err != nil {
 			httpx.WriteError(w, http.StatusBadRequest, err.Error())
 			return

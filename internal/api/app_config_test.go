@@ -421,6 +421,155 @@ func TestPatchAppStartupCommandQueuesDeployOperation(t *testing.T) {
 	}
 }
 
+func TestPatchAppPersistentStorageQueuesCombinedDeployOperation(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+
+	startupCommand := "npm run start"
+	requestBody := map[string]any{
+		"startup_command": startupCommand,
+		"persistent_storage": map[string]any{
+			"mounts": []map[string]any{
+				{
+					"kind": "directory",
+					"path": "/var/lib/data",
+				},
+				{
+					"kind":         "file",
+					"path":         "/srv/config.json",
+					"seed_content": "{\"enabled\":true}",
+				},
+			},
+		},
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID, apiKey, requestBody)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var patchResponse struct {
+		AlreadyCurrent bool            `json:"already_current"`
+		App            model.App       `json:"app"`
+		Operation      model.Operation `json:"operation"`
+	}
+	mustDecodeJSON(t, recorder, &patchResponse)
+	if patchResponse.AlreadyCurrent {
+		t.Fatal("expected persistent storage patch to report a change")
+	}
+	if patchResponse.Operation.ID == "" {
+		t.Fatal("expected deploy operation for persistent storage patch")
+	}
+	if patchResponse.App.Spec.PersistentStorage != nil {
+		t.Fatalf("expected response app persistent storage to stay unchanged until deploy completes, got %+v", patchResponse.App.Spec.PersistentStorage)
+	}
+	if len(patchResponse.App.Spec.Command) != 0 {
+		t.Fatalf("expected response app command to stay unchanged until deploy completes, got %#v", patchResponse.App.Spec.Command)
+	}
+
+	op, err := s.GetOperation(patchResponse.Operation.ID)
+	if err != nil {
+		t.Fatalf("get operation: %v", err)
+	}
+	if op.Type != model.OperationTypeDeploy {
+		t.Fatalf("expected deploy operation, got %q", op.Type)
+	}
+	if op.DesiredSpec == nil {
+		t.Fatal("expected desired spec on persistent storage patch operation")
+	}
+	if len(op.DesiredSpec.Command) != 3 || op.DesiredSpec.Command[0] != "sh" || op.DesiredSpec.Command[1] != "-lc" || op.DesiredSpec.Command[2] != startupCommand {
+		t.Fatalf("expected desired spec command to wrap startup command, got %#v", op.DesiredSpec.Command)
+	}
+	if op.DesiredSpec.PersistentStorage == nil || len(op.DesiredSpec.PersistentStorage.Mounts) != 2 {
+		t.Fatalf("expected desired persistent storage mounts, got %+v", op.DesiredSpec.PersistentStorage)
+	}
+	if got := op.DesiredSpec.PersistentStorage.Mounts[0].Mode; got != 0o755 {
+		t.Fatalf("expected default directory mount mode 0755, got %o", got)
+	}
+	if got := op.DesiredSpec.PersistentStorage.Mounts[1].Mode; got != 0o644 {
+		t.Fatalf("expected default file mount mode 0644, got %o", got)
+	}
+	if got := op.DesiredSpec.PersistentStorage.Mounts[1].SeedContent; got != "{\"enabled\":true}" {
+		t.Fatalf("expected desired file seed content to persist, got %q", got)
+	}
+
+	ops, err := s.ListOperations("", true)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected a single combined deploy operation, got %d", len(ops))
+	}
+
+	completeNextManagedOperation(t, s)
+
+	updatedApp, err := s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get updated app: %v", err)
+	}
+	if len(updatedApp.Spec.Command) != 3 || updatedApp.Spec.Command[0] != "sh" || updatedApp.Spec.Command[1] != "-lc" || updatedApp.Spec.Command[2] != startupCommand {
+		t.Fatalf("expected stored command to wrap startup command, got %#v", updatedApp.Spec.Command)
+	}
+	if updatedApp.Spec.PersistentStorage == nil || len(updatedApp.Spec.PersistentStorage.Mounts) != 2 {
+		t.Fatalf("expected stored persistent storage mounts, got %+v", updatedApp.Spec.PersistentStorage)
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID, apiKey, requestBody)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	mustDecodeJSON(t, recorder, &patchResponse)
+	if !patchResponse.AlreadyCurrent {
+		t.Fatal("expected repeated persistent storage patch to report already_current")
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID, apiKey, map[string]any{
+		"persistent_storage": map[string]any{
+			"mounts": []map[string]any{},
+		},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	mustDecodeJSON(t, recorder, &patchResponse)
+	if patchResponse.AlreadyCurrent {
+		t.Fatal("expected clearing persistent storage to report a change")
+	}
+	if patchResponse.Operation.ID == "" {
+		t.Fatal("expected deploy operation when clearing persistent storage")
+	}
+
+	op, err = s.GetOperation(patchResponse.Operation.ID)
+	if err != nil {
+		t.Fatalf("get clear operation: %v", err)
+	}
+	if op.DesiredSpec == nil {
+		t.Fatal("expected desired spec on clear persistent storage operation")
+	}
+	if op.DesiredSpec.PersistentStorage != nil {
+		t.Fatalf("expected persistent storage to be cleared in desired spec, got %+v", op.DesiredSpec.PersistentStorage)
+	}
+	if len(op.DesiredSpec.Command) != 3 || op.DesiredSpec.Command[0] != "sh" || op.DesiredSpec.Command[1] != "-lc" || op.DesiredSpec.Command[2] != startupCommand {
+		t.Fatalf("expected startup command to remain unchanged when clearing persistent storage, got %#v", op.DesiredSpec.Command)
+	}
+
+	completeNextManagedOperation(t, s)
+
+	updatedApp, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get cleared app: %v", err)
+	}
+	if updatedApp.Spec.PersistentStorage != nil {
+		t.Fatalf("expected persistent storage to be cleared, got %+v", updatedApp.Spec.PersistentStorage)
+	}
+}
+
 func TestGetAppEnvMergesBindingEnvAndAppEnvOverrides(t *testing.T) {
 	t.Parallel()
 

@@ -3,6 +3,8 @@ package api
 import (
 	"net/http/httptest"
 	"testing"
+
+	"fugue/internal/model"
 )
 
 func TestResolveIdempotencyKeyPrefersHeader(t *testing.T) {
@@ -103,6 +105,42 @@ func TestHashImportGitHubRequestChangesWhenPersistentStorageSeedFilesChange(t *t
 
 	if hashA == hashB {
 		t.Fatal("expected different hashes when persistent storage seed files change")
+	}
+}
+
+func TestHashImportGitHubRequestChangesWhenPersistentStorageChanges(t *testing.T) {
+	req := importGitHubRequest{
+		ProjectID: "project_1",
+		RepoURL:   "https://github.com/example/demo",
+		Branch:    "main",
+		Name:      "demo",
+		PersistentStorage: &model.AppPersistentStorageSpec{
+			Mounts: []model.AppPersistentStorageMount{
+				{
+					Kind: "directory",
+					Path: "/var/lib/data",
+				},
+				{
+					Kind:        "file",
+					Path:        "/srv/config.json",
+					SeedContent: "{\"demo\":true}",
+				},
+			},
+		},
+	}
+	hashA, err := hashImportGitHubRequest("tenant_1", req, "runtime_managed_shared", 1)
+	if err != nil {
+		t.Fatalf("hash request a: %v", err)
+	}
+
+	req.PersistentStorage.Mounts[1].SeedContent = "{\"demo\":false}"
+	hashB, err := hashImportGitHubRequest("tenant_1", req, "runtime_managed_shared", 1)
+	if err != nil {
+		t.Fatalf("hash request b: %v", err)
+	}
+
+	if hashA == hashB {
+		t.Fatal("expected different hashes when persistent storage changes")
 	}
 }
 

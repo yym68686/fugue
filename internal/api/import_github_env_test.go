@@ -10,7 +10,7 @@ import (
 	"fugue/internal/store"
 )
 
-func TestImportGitHubStoresRequestedEnvOnCreatedApp(t *testing.T) {
+func TestImportGitHubStoresRequestedEnvStartupCommandAndPersistentStorageOnCreatedApp(t *testing.T) {
 	t.Parallel()
 
 	s := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -39,6 +39,19 @@ func TestImportGitHubStoresRequestedEnvOnCreatedApp(t *testing.T) {
 		"build_strategy":  model.AppBuildStrategyDockerfile,
 		"dockerfile_path": "Dockerfile",
 		"startup_command": startupCommand,
+		"persistent_storage": map[string]any{
+			"mounts": []map[string]any{
+				{
+					"kind": "directory",
+					"path": "/var/lib/data",
+				},
+				{
+					"kind":         "file",
+					"path":         "/srv/config.json",
+					"seed_content": "{\"demo\":true}",
+				},
+			},
+		},
 		"env": map[string]string{
 			"OPENAI_API_KEY": "sk-demo",
 			"APP_ENV":        "production",
@@ -67,6 +80,15 @@ func TestImportGitHubStoresRequestedEnvOnCreatedApp(t *testing.T) {
 	if len(app.Spec.Command) != 3 || app.Spec.Command[0] != "sh" || app.Spec.Command[1] != "-lc" || app.Spec.Command[2] != startupCommand {
 		t.Fatalf("expected app command to wrap startup command, got %#v", app.Spec.Command)
 	}
+	if app.Spec.PersistentStorage == nil || len(app.Spec.PersistentStorage.Mounts) != 2 {
+		t.Fatalf("expected app persistent storage mounts, got %+v", app.Spec.PersistentStorage)
+	}
+	if got := app.Spec.PersistentStorage.Mounts[0].Mode; got != 0o755 {
+		t.Fatalf("expected directory mount mode 0755, got %o", got)
+	}
+	if got := app.Spec.PersistentStorage.Mounts[1].Mode; got != 0o644 {
+		t.Fatalf("expected file mount mode 0644, got %o", got)
+	}
 
 	op, err := s.GetOperation(response.Operation.ID)
 	if err != nil {
@@ -83,5 +105,8 @@ func TestImportGitHubStoresRequestedEnvOnCreatedApp(t *testing.T) {
 	}
 	if len(op.DesiredSpec.Command) != 3 || op.DesiredSpec.Command[0] != "sh" || op.DesiredSpec.Command[1] != "-lc" || op.DesiredSpec.Command[2] != startupCommand {
 		t.Fatalf("expected desired spec command to wrap startup command, got %#v", op.DesiredSpec.Command)
+	}
+	if op.DesiredSpec.PersistentStorage == nil || len(op.DesiredSpec.PersistentStorage.Mounts) != 2 {
+		t.Fatalf("expected desired spec persistent storage mounts, got %+v", op.DesiredSpec.PersistentStorage)
 	}
 }

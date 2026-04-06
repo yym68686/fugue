@@ -23,24 +23,25 @@ const (
 )
 
 type importUploadRequest struct {
-	AppID           string                 `json:"app_id"`
-	TenantID        string                 `json:"tenant_id"`
-	ProjectID       string                 `json:"project_id"`
-	Project         *importProjectRequest  `json:"project,omitempty"`
-	SourceDir       string                 `json:"source_dir"`
-	Name            string                 `json:"name"`
-	Description     string                 `json:"description"`
-	BuildStrategy   string                 `json:"build_strategy"`
-	RuntimeID       string                 `json:"runtime_id"`
-	Replicas        int                    `json:"replicas"`
-	ServicePort     int                    `json:"service_port"`
-	DockerfilePath  string                 `json:"dockerfile_path"`
-	BuildContextDir string                 `json:"build_context_dir"`
-	Env             map[string]string      `json:"env"`
-	ConfigContent   string                 `json:"config_content"`
-	Files           []model.AppFile        `json:"files"`
-	StartupCommand  *string                `json:"startup_command,omitempty"`
-	Postgres        *model.AppPostgresSpec `json:"postgres"`
+	AppID             string                          `json:"app_id"`
+	TenantID          string                          `json:"tenant_id"`
+	ProjectID         string                          `json:"project_id"`
+	Project           *importProjectRequest           `json:"project,omitempty"`
+	SourceDir         string                          `json:"source_dir"`
+	Name              string                          `json:"name"`
+	Description       string                          `json:"description"`
+	BuildStrategy     string                          `json:"build_strategy"`
+	RuntimeID         string                          `json:"runtime_id"`
+	Replicas          int                             `json:"replicas"`
+	ServicePort       int                             `json:"service_port"`
+	DockerfilePath    string                          `json:"dockerfile_path"`
+	BuildContextDir   string                          `json:"build_context_dir"`
+	Env               map[string]string               `json:"env"`
+	ConfigContent     string                          `json:"config_content"`
+	Files             []model.AppFile                 `json:"files"`
+	StartupCommand    *string                         `json:"startup_command,omitempty"`
+	PersistentStorage *model.AppPersistentStorageSpec `json:"persistent_storage,omitempty"`
+	Postgres          *model.AppPostgresSpec          `json:"postgres"`
 }
 
 func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
@@ -117,6 +118,14 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			spec.Env = env
+		}
+		if req.PersistentStorage != nil {
+			normalizedPersistentStorage, err := normalizeImportedPersistentStorage(req.PersistentStorage, spec.Files)
+			if err != nil {
+				httpx.WriteError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			spec.PersistentStorage = normalizedPersistentStorage
 		}
 		applyStartupCommand(&spec, req.StartupCommand)
 
@@ -202,6 +211,10 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 				httpx.WriteError(w, http.StatusBadRequest, "startup_command is only supported for single-app imports")
 				return
 			}
+			if hasImportedPersistentStorage(req.PersistentStorage) {
+				httpx.WriteError(w, http.StatusBadRequest, "persistent_storage is only supported for single-app imports")
+				return
+			}
 			project, created, err := s.resolveImportProjectFields(tenantID, req.ProjectID, req.Project)
 			if err != nil {
 				s.writeStoreError(w, err)
@@ -265,7 +278,7 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		spec, err := s.buildImportedAppSpec(source.BuildStrategy, candidateName, "", runtimeID, replicas, effectiveImportServicePort(req.ServicePort, 0), req.ConfigContent, req.Files, nil, req.Postgres, req.Env)
+		spec, err := s.buildImportedAppSpec(source.BuildStrategy, candidateName, "", runtimeID, replicas, effectiveImportServicePort(req.ServicePort, 0), req.ConfigContent, req.Files, req.PersistentStorage, req.Postgres, req.Env)
 		if err != nil {
 			httpx.WriteError(w, http.StatusBadRequest, err.Error())
 			return

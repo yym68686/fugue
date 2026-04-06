@@ -4145,6 +4145,8 @@ components:
           format: int32
         startup_command:
           type: string
+        persistent_storage:
+          $ref: "#/components/schemas/AppPersistentStorageSpec"
     BillingResponse:
       type: object
       additionalProperties: false
@@ -4706,6 +4708,8 @@ components:
             $ref: "#/components/schemas/AppFile"
         startup_command:
           type: string
+        persistent_storage:
+          $ref: "#/components/schemas/AppPersistentStorageSpec"
         persistent_storage_seed_files:
           type: array
           items:
@@ -4756,6 +4760,8 @@ components:
             $ref: "#/components/schemas/AppFile"
         startup_command:
           type: string
+        persistent_storage:
+          $ref: "#/components/schemas/AppPersistentStorageSpec"
         postgres:
           $ref: "#/components/schemas/AppPostgresSpec"
     ImportUploadMultipartRequest:
@@ -4847,6 +4853,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AppFile"
+        persistent_storage:
+          $ref: "#/components/schemas/AppPersistentStorageSpec"
         postgres:
           $ref: "#/components/schemas/AppPostgresSpec"
     ImportImageResponse:

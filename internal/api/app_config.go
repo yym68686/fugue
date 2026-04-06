@@ -420,6 +420,41 @@ func appFileEqual(left, right model.AppFile) bool {
 		left.Mode == right.Mode
 }
 
+func appPersistentStorageEqual(left, right *model.AppPersistentStorageSpec) bool {
+	switch {
+	case left == nil || right == nil:
+		return left == nil && right == nil
+	case left.StoragePath != right.StoragePath:
+		return false
+	case left.StorageSize != right.StorageSize:
+		return false
+	case left.StorageClassName != right.StorageClassName:
+		return false
+	case left.ResetToken != right.ResetToken:
+		return false
+	}
+
+	if len(left.Mounts) != len(right.Mounts) {
+		return false
+	}
+
+	for index := range left.Mounts {
+		if !appPersistentStorageMountEqual(left.Mounts[index], right.Mounts[index]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func appPersistentStorageMountEqual(left, right model.AppPersistentStorageMount) bool {
+	return left.Kind == right.Kind &&
+		left.Path == right.Path &&
+		left.SeedContent == right.SeedContent &&
+		left.Secret == right.Secret &&
+		left.Mode == right.Mode
+}
+
 func defaultStringMap(in map[string]string) map[string]string {
 	if in == nil {
 		return map[string]string{}

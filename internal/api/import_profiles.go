@@ -98,6 +98,10 @@ func hasStartupCommand(value *string) bool {
 	return value != nil && strings.TrimSpace(*value) != ""
 }
 
+func hasImportedPersistentStorage(value *model.AppPersistentStorageSpec) bool {
+	return value != nil
+}
+
 func normalizeStartupCommand(value *string) []string {
 	if value == nil {
 		return nil

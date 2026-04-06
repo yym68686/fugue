@@ -46,6 +46,7 @@ type importGitHubRequest struct {
 	ConfigContent              string                                  `json:"config_content"`
 	Files                      []model.AppFile                         `json:"files"`
 	StartupCommand             *string                                 `json:"startup_command,omitempty"`
+	PersistentStorage          *model.AppPersistentStorageSpec         `json:"persistent_storage,omitempty"`
 	PersistentStorageSeedFiles []importGitHubPersistentStorageSeedFile `json:"persistent_storage_seed_files"`
 	Postgres                   *model.AppPostgresSpec                  `json:"postgres"`
 	IdempotencyKey             string                                  `json:"idempotency_key"`
@@ -89,6 +90,7 @@ func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID
 		ConfigContent              string                                  `json:"config_content"`
 		Files                      []model.AppFile                         `json:"files"`
 		StartupCommand             string                                  `json:"startup_command"`
+		PersistentStorage          *model.AppPersistentStorageSpec         `json:"persistent_storage,omitempty"`
 		PersistentStorageSeedFiles []importGitHubPersistentStorageSeedFile `json:"persistent_storage_seed_files"`
 		Postgres                   *model.AppPostgresSpec                  `json:"postgres"`
 	}{
@@ -112,6 +114,7 @@ func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID
 		ConfigContent:              strings.TrimSpace(req.ConfigContent),
 		Files:                      req.Files,
 		StartupCommand:             strings.Join(normalizeStartupCommand(req.StartupCommand), "\x00"),
+		PersistentStorage:          req.PersistentStorage,
 		PersistentStorageSeedFiles: normalizedImportGitHubPersistentStorageSeedFiles(req.PersistentStorageSeedFiles),
 		Postgres:                   req.Postgres,
 	}

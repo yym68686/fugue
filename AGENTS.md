@@ -14,8 +14,11 @@
 
 - Do not add project-specific code paths, heuristics, adapters, conditionals, or migration logic keyed to a particular project name, repository name, slug, hostname, or demo fixture.
 - Do not hardcode any user/project/repository-specific names to make one import path, template, manifest, or deployment succeed.
+- Do not hardcode specific startup commands, entrypoint strings, filenames, ports, dependency names, or directory names just to make one uploaded project or one failing app deploy successfully.
+- Zero-config detection and auto-repair behavior must be derived from generic runtime metadata, explicit configuration, or reusable language/framework rules; never from a named project, a copied incident sample, or a single user's repository layout.
 - When behavior needs to vary, express it through explicit schema, configuration, generic metadata, or reusable adapters rather than matching a specific project.
 - If an existing implementation appears to require a one-off workaround for a named project, stop and redesign it into a general mechanism before merging.
+- The same rule applies to tests and fixtures: avoid embedding real user identifiers, app names, repository names, upload folder names, or one-off startup files from production incidents unless the test is explicitly documenting a stable public compatibility contract. Prefer neutral synthetic fixtures that exercise the generalized rule instead of replaying a single customer's project shape.
 
 ## API Contract Rules
 

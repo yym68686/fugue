@@ -17,7 +17,7 @@ import (
 	"fugue/internal/store"
 )
 
-func TestImportUploadAppQueuesPendingImport(t *testing.T) {
+func TestImportUploadAppQueuesPendingImportWithPersistentStorage(t *testing.T) {
 	t.Parallel()
 
 	s := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -46,6 +46,19 @@ func TestImportUploadAppQueuesPendingImport(t *testing.T) {
 		Name:           "demo-app",
 		BuildStrategy:  model.AppBuildStrategyStaticSite,
 		StartupCommand: &startupCommand,
+		PersistentStorage: &model.AppPersistentStorageSpec{
+			Mounts: []model.AppPersistentStorageMount{
+				{
+					Kind: "directory",
+					Path: "/var/lib/data",
+				},
+				{
+					Kind:        "file",
+					Path:        "/srv/config.json",
+					SeedContent: "{\"demo\":true}",
+				},
+			},
+		},
 	}, "demo-app.tgz", archiveBytes)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/apps/import-upload", body)
@@ -108,11 +121,23 @@ func TestImportUploadAppQueuesPendingImport(t *testing.T) {
 	if len(app.Spec.Command) != 3 || app.Spec.Command[0] != "sh" || app.Spec.Command[1] != "-lc" || app.Spec.Command[2] != startupCommand {
 		t.Fatalf("expected app command to wrap startup command, got %#v", app.Spec.Command)
 	}
+	if app.Spec.PersistentStorage == nil || len(app.Spec.PersistentStorage.Mounts) != 2 {
+		t.Fatalf("expected app persistent storage mounts, got %+v", app.Spec.PersistentStorage)
+	}
+	if got := app.Spec.PersistentStorage.Mounts[0].Mode; got != 0o755 {
+		t.Fatalf("expected directory mount mode 0755, got %o", got)
+	}
+	if got := app.Spec.PersistentStorage.Mounts[1].Mode; got != 0o644 {
+		t.Fatalf("expected file mount mode 0644, got %o", got)
+	}
 	if op.DesiredSpec == nil {
 		t.Fatal("expected desired spec on queued operation")
 	}
 	if len(op.DesiredSpec.Command) != 3 || op.DesiredSpec.Command[0] != "sh" || op.DesiredSpec.Command[1] != "-lc" || op.DesiredSpec.Command[2] != startupCommand {
 		t.Fatalf("expected desired spec command to wrap startup command, got %#v", op.DesiredSpec.Command)
+	}
+	if op.DesiredSpec.PersistentStorage == nil || len(op.DesiredSpec.PersistentStorage.Mounts) != 2 {
+		t.Fatalf("expected desired spec persistent storage mounts, got %+v", op.DesiredSpec.PersistentStorage)
 	}
 }
 
@@ -328,6 +353,70 @@ services:
 	}
 	if response.Error != "startup_command is only supported for single-app imports" {
 		t.Fatalf("expected startup command topology error, got %q", response.Error)
+	}
+}
+
+func TestImportUploadAppRejectsPersistentStorageForTopologyImport(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Upload Compose Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "uploader", []string{"app.write", "app.deploy"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		AppBaseDomain: "apps.example.com",
+	})
+
+	archiveBytes := mustTarGz(t, map[string]string{
+		"docker-compose.yml": `
+services:
+  web:
+    image: ghcr.io/example/web:latest
+    ports:
+      - "3000:3000"
+`,
+	})
+	body, contentType := newImportUploadMultipartBody(t, importUploadRequest{
+		Name: "demo-stack",
+		PersistentStorage: &model.AppPersistentStorageSpec{
+			Mounts: []model.AppPersistentStorageMount{
+				{
+					Kind: "directory",
+					Path: "/var/lib/data",
+				},
+			},
+		},
+	}, "demo-stack.tgz", archiveBytes)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/apps/import-upload", body)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", contentType)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadRequest, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Error != "persistent_storage is only supported for single-app imports" {
+		t.Fatalf("expected persistent storage topology error, got %q", response.Error)
 	}
 }
 
