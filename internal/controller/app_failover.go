@@ -9,6 +9,7 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
+	"fugue/internal/store"
 )
 
 const minimumAppFenceLeaseDuration = 5 * time.Minute
@@ -364,8 +365,16 @@ func (s *Service) executeManagedFailoverOperation(ctx context.Context, op model.
 	}
 
 	failedOverApp := app
-	failedOverApp.Spec.RuntimeID = targetRuntimeID
-	failedOverApp.Spec.Replicas = originalReplicas
+	failedOverSpec := store.FailoverDesiredSpec(app, targetRuntimeID)
+	if failedOverSpec == nil {
+		return fmt.Errorf("build failover desired spec for app %s", app.ID)
+	}
+	failedOverSpec.Replicas = originalReplicas
+	failedOverApp.Spec = *failedOverSpec
+	failedOverApp, err = store.OverlayDesiredManagedPostgres(failedOverApp)
+	if err != nil {
+		return fmt.Errorf("overlay managed postgres failover state for app %s: %w", app.ID, err)
+	}
 	scheduling, err := s.managedSchedulingConstraints(failedOverApp.Spec.RuntimeID)
 	if err != nil {
 		return err
@@ -384,7 +393,7 @@ func (s *Service) executeManagedFailoverOperation(ctx context.Context, op model.
 	}
 
 	message := fmt.Sprintf("managed app failed over from runtime %s to %s", sourceRuntimeID, targetRuntimeID)
-	if _, err := s.Store.CompleteManagedOperation(op.ID, bundle.ManifestPath, message); err != nil {
+	if _, err := s.Store.CompleteManagedOperationWithResult(op.ID, bundle.ManifestPath, message, failedOverSpec, nil); err != nil {
 		return fmt.Errorf("complete failover operation %s: %w", op.ID, err)
 	}
 	s.Logger.Printf("operation %s completed failover from %s to %s", op.ID, sourceRuntimeID, targetRuntimeID)

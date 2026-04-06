@@ -3082,7 +3082,7 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string,
 	if err != nil {
 		return model.Operation{}, mapDBErr(err)
 	}
-	if op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeDatabaseSwitchover {
+	if operationAppliesDesiredSpecBackingServices(op) {
 		if err := s.pgApplyDesiredSpecBackingServicesTx(ctx, tx, &app, op.DesiredSpec); err != nil {
 			return model.Operation{}, err
 		}
@@ -4184,16 +4184,8 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 			app.Status.CurrentReleaseReadyAt = nil
 		}
 	case model.OperationTypeFailover:
-		if op.TargetRuntimeID == "" {
-			return ErrInvalidInput
-		}
-		app.Spec.RuntimeID = op.TargetRuntimeID
-		app.Status.Phase = "failed-over"
-		app.Status.CurrentRuntimeID = op.TargetRuntimeID
-		app.Status.CurrentReplicas = app.Spec.Replicas
-		if op.ExecutionMode != model.ExecutionModeManaged {
-			app.Status.CurrentReleaseStartedAt = nil
-			app.Status.CurrentReleaseReadyAt = nil
+		if err := applyCompletedFailoverToAppModel(app, op); err != nil {
+			return err
 		}
 	case model.OperationTypeDatabaseSwitchover:
 		if op.DesiredSpec == nil {

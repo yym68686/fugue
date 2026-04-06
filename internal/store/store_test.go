@@ -335,6 +335,109 @@ func TestDatabaseSwitchoverOperationUsesManagedPostgresPrimaryAndPreservesAppSta
 	}
 }
 
+func TestFailoverOperationPreservesManagedPostgresPlacement(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Failover Postgres Continuity")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	sourceRuntime, _, err := s.CreateRuntime(tenant.ID, "source-runtime", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create source runtime: %v", err)
+	}
+	targetRuntime, _, err := s.CreateRuntime(tenant.ID, "target-runtime", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create target runtime: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: sourceRuntime.ID,
+		Postgres: &model.AppPostgresSpec{
+			Database: "demo",
+		},
+		Failover: &model.AppFailoverSpec{
+			TargetRuntimeID: targetRuntime.ID,
+			Auto:            true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	failoverSpec := FailoverDesiredSpec(app, targetRuntime.ID)
+	if failoverSpec == nil {
+		t.Fatal("expected failover desired spec")
+	}
+	if failoverSpec.RuntimeID != targetRuntime.ID {
+		t.Fatalf("expected failover desired runtime %q, got %q", targetRuntime.ID, failoverSpec.RuntimeID)
+	}
+	if failoverSpec.Postgres == nil {
+		t.Fatal("expected failover desired postgres spec")
+	}
+	if got := failoverSpec.Postgres.RuntimeID; got != sourceRuntime.ID {
+		t.Fatalf("expected failover desired postgres runtime %q, got %q", sourceRuntime.ID, got)
+	}
+
+	op, err := s.CreateOperation(model.Operation{
+		TenantID: tenant.ID,
+		Type:     model.OperationTypeFailover,
+		AppID:    app.ID,
+	})
+	if err != nil {
+		t.Fatalf("create failover operation: %v", err)
+	}
+
+	if _, err := s.CompleteManagedOperationWithResult(op.ID, "/tmp/demo-failover.yaml", "failed over", failoverSpec, nil); err != nil {
+		t.Fatalf("complete failover operation: %v", err)
+	}
+
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if got := app.Spec.RuntimeID; got != targetRuntime.ID {
+		t.Fatalf("expected app runtime %q after failover, got %q", targetRuntime.ID, got)
+	}
+	if app.Spec.Postgres != nil {
+		t.Fatalf("expected app spec postgres to remain externalized, got %+v", app.Spec.Postgres)
+	}
+	if got := app.Status.Phase; got != "failed-over" {
+		t.Fatalf("expected failed-over phase, got %q", got)
+	}
+	if got := app.Status.CurrentRuntimeID; got != targetRuntime.ID {
+		t.Fatalf("expected current runtime %q, got %q", targetRuntime.ID, got)
+	}
+
+	currentDatabase := OwnedManagedPostgresSpec(app)
+	if currentDatabase == nil {
+		t.Fatal("expected managed postgres spec after failover")
+	}
+	if got := currentDatabase.RuntimeID; got != sourceRuntime.ID {
+		t.Fatalf("expected managed postgres runtime to stay pinned to %q, got %q", sourceRuntime.ID, got)
+	}
+	if got := currentDatabase.Instances; got != 1 {
+		t.Fatalf("expected managed postgres instances 1, got %d", got)
+	}
+	if len(app.BackingServices) != 1 || app.BackingServices[0].Spec.Postgres == nil {
+		t.Fatalf("expected one managed postgres backing service, got %+v", app.BackingServices)
+	}
+	if got := app.BackingServices[0].Spec.Postgres.RuntimeID; got != sourceRuntime.ID {
+		t.Fatalf("expected backing service postgres runtime %q, got %q", sourceRuntime.ID, got)
+	}
+}
+
 func TestMigrateOperationRejectsExternalRuntimeWhenAppHasBoundManagedPostgres(t *testing.T) {
 	t.Parallel()
 

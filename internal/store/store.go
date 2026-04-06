@@ -3125,16 +3125,13 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 			app.Status.CurrentReleaseReadyAt = nil
 		}
 	case model.OperationTypeFailover:
-		if op.TargetRuntimeID == "" {
-			return ErrInvalidInput
+		if op.DesiredSpec != nil {
+			if err := applyDesiredSpecBackingServicesState(state, app, op.DesiredSpec); err != nil {
+				return err
+			}
 		}
-		app.Spec.RuntimeID = op.TargetRuntimeID
-		app.Status.Phase = "failed-over"
-		app.Status.CurrentRuntimeID = op.TargetRuntimeID
-		app.Status.CurrentReplicas = app.Spec.Replicas
-		if op.ExecutionMode != model.ExecutionModeManaged {
-			app.Status.CurrentReleaseStartedAt = nil
-			app.Status.CurrentReleaseReadyAt = nil
+		if err := applyCompletedFailoverToAppModel(app, op); err != nil {
+			return err
 		}
 	case model.OperationTypeDatabaseSwitchover:
 		if op.DesiredSpec == nil {

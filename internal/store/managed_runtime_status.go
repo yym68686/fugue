@@ -60,7 +60,7 @@ func (s *Store) pgSyncManagedAppRuntimeStatus(appID string, currentReleaseStarte
 	}
 	now := time.Now().UTC()
 	if syncAppReleaseRuntimeStatus(&app, currentReleaseStartedAt, currentReleaseReadyAt, now) {
-		if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+		if err := s.pgUpdateAppRuntimeStatusTx(ctx, tx, app); err != nil {
 			return err
 		}
 	}
@@ -77,13 +77,42 @@ func (s *Store) pgSyncManagedAppRuntimeStatus(appID string, currentReleaseStarte
 			return mapDBErr(err)
 		}
 		if syncBackingServiceRuntimeStatus(&service, serviceStatus.CurrentRuntimeStartedAt, serviceStatus.CurrentRuntimeReadyAt, now) {
-			if err := s.pgUpdateBackingServiceTx(ctx, tx, service); err != nil {
+			if err := s.pgUpdateBackingServiceRuntimeStatusTx(ctx, tx, service); err != nil {
 				return err
 			}
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) pgUpdateAppRuntimeStatusTx(ctx context.Context, tx *sql.Tx, app model.App) error {
+	statusJSON, err := marshalJSON(app.Status)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE fugue_apps
+SET status_json = $2,
+	updated_at = $3
+WHERE id = $1
+`, app.ID, statusJSON, app.UpdatedAt); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) pgUpdateBackingServiceRuntimeStatusTx(ctx context.Context, tx *sql.Tx, service model.BackingService) error {
+	if _, err := tx.ExecContext(ctx, `
+UPDATE fugue_backing_services
+SET current_runtime_started_at = $2,
+	current_runtime_ready_at = $3,
+	updated_at = $4
+WHERE id = $1
+`, service.ID, service.CurrentRuntimeStartedAt, service.CurrentRuntimeReadyAt, service.UpdatedAt); err != nil {
 		return err
 	}
 	return nil
