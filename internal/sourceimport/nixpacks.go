@@ -252,10 +252,14 @@ func detectZeroConfigProviderAndPortSignal(repoDir, sourceDir string) (string, i
 	case pathExists(filepath.Join(appDir, "package.json")):
 		return "nodejs", 3000, detectNodePublicService(appDir)
 	case pythonAnalysis.IsPythonProject:
-		if pythonAnalysis.DetectedPort > 0 {
-			return "python", pythonAnalysis.DetectedPort, true
+		exposesPublicService := pythonAnalysis.HasWebEntrypoint
+		if pythonProjectPrefersBackgroundNetwork(pythonAnalysis) {
+			exposesPublicService = false
 		}
-		return "python", 8000, pythonAnalysis.HasWebEntrypoint
+		if pythonAnalysis.DetectedPort > 0 {
+			return "python", pythonAnalysis.DetectedPort, exposesPublicService
+		}
+		return "python", 8000, exposesPublicService
 	case pathExists(filepath.Join(appDir, "go.mod")):
 		return "go", 8080, detectGoPublicService(appDir)
 	case pathExists(filepath.Join(appDir, "pom.xml")) ||

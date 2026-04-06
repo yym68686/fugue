@@ -165,3 +165,37 @@ def index():
 		t.Fatalf("expected suggested startup command %q, got %q", want, got)
 	}
 }
+
+func TestAnalyzePythonProjectDetectsDualWebhookAndPollingModes(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "bot.py"), []byte(`from telegram.ext import ApplicationBuilder
+
+application = ApplicationBuilder().token("demo").build()
+
+if WEB_HOOK:
+    application.run_webhook("0.0.0.0", 8000, webhook_url=WEB_HOOK)
+else:
+    application.run_polling()
+`), 0o644); err != nil {
+		t.Fatalf("write bot.py: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "pyproject.toml"), []byte("[project]\nname='demo-bot'\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject.toml: %v", err)
+	}
+
+	analysis, err := analyzePythonProject(repoDir, ".")
+	if err != nil {
+		t.Fatalf("analyze python project: %v", err)
+	}
+	if !analysis.HasWebhookEntrypoint {
+		t.Fatal("expected webhook entrypoint to be detected")
+	}
+	if !analysis.HasPollingEntrypoint {
+		t.Fatal("expected polling entrypoint to be detected")
+	}
+	if !pythonProjectPrefersBackgroundNetwork(analysis) {
+		t.Fatal("expected dual-mode bot to prefer background network")
+	}
+}

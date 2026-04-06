@@ -302,6 +302,9 @@ func importDockerfileFromExtractedUpload(ctx context.Context, src extractedUploa
 		return GitHubImportResult{}, err
 	}
 	detectedStack := detectPrimaryTechStack(src.RootDir, buildContextDir)
+	if exposesPublicService && shouldSuppressDetectedPublicServiceForProject(src.RootDir, buildContextDir, detectedStack) {
+		exposesPublicService = false
+	}
 	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix)
 	if err := buildAndPushDockerfileImage(ctx, dockerfileBuildRequest{
 		CommitSHA:             src.ArchiveSHA256,

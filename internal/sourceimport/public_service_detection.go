@@ -191,6 +191,14 @@ func detectRustPublicService(appDir string) bool {
 	}, rustPublicServiceMarkers)
 }
 
+func shouldSuppressDetectedPublicServiceForProject(repoDir, sourceDir, detectedStack string) bool {
+	if strings.TrimSpace(detectedStack) != "python" {
+		return false
+	}
+	analysis, err := analyzePythonProject(repoDir, sourceDir)
+	return err == nil && pythonProjectPrefersBackgroundNetwork(analysis)
+}
+
 func anyFileContainsAny(paths []string, markers []string) bool {
 	for _, path := range paths {
 		if fileContainsAny(path, markers) {

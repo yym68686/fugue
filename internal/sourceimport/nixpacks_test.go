@@ -175,6 +175,23 @@ app = ApplicationBuilder().token("demo").build()
 			wantPublic: false,
 		},
 		{
+			name: "python-dual-mode-bot",
+			files: map[string]string{
+				"bot.py": `from telegram.ext import ApplicationBuilder
+app = ApplicationBuilder().token("demo").build()
+
+if WEB_HOOK:
+    app.run_webhook("0.0.0.0", 8000, webhook_url=WEB_HOOK)
+else:
+    app.run_polling()
+`,
+				"pyproject.toml": "[project]\nname='demo-bot'\n",
+			},
+			wantProv:   "python",
+			wantPort:   8000,
+			wantPublic: false,
+		},
+		{
 			name: "go-web",
 			files: map[string]string{
 				"go.mod":  "module example.com/demo\n",

@@ -15,6 +15,8 @@ type pythonProjectAnalysis struct {
 	IsPythonProject       bool
 	HasDependencyManifest bool
 	HasWebEntrypoint      bool
+	HasWebhookEntrypoint  bool
+	HasPollingEntrypoint  bool
 	DetectedPort          int
 	InferredRequirements  []string
 	SuggestedStartCommand string
@@ -121,6 +123,13 @@ func analyzePythonProjectInDir(appDir string) (pythonProjectAnalysis, error) {
 		fileImports := collectPythonImportPaths(content)
 		for _, importPath := range fileImports {
 			imports[importPath] = struct{}{}
+		}
+		if !analysis.HasWebhookEntrypoint && pythonFileLooksLikeWebhookEntrypoint(content) {
+			analysis.HasWebhookEntrypoint = true
+			analysis.HasWebEntrypoint = true
+		}
+		if !analysis.HasPollingEntrypoint && pythonFileLooksLikePollingEntrypoint(content) {
+			analysis.HasPollingEntrypoint = true
 		}
 		if !analysis.HasWebEntrypoint && pythonFileLooksLikeWebEntrypoint(content) {
 			analysis.HasWebEntrypoint = true
@@ -389,6 +398,9 @@ func betterPythonStartupCommandCandidate(next, current pythonStartupCommandCandi
 }
 
 func pythonFileLooksLikeWebEntrypoint(content string) bool {
+	if pythonFileLooksLikeWebhookEntrypoint(content) {
+		return true
+	}
 	if pythonAssignedVariable(content, pythonFlaskAppPattern) != "" || pythonAssignedVariable(content, pythonASGIAppPattern) != "" {
 		return true
 	}
@@ -402,6 +414,36 @@ func pythonFileLooksLikeWebEntrypoint(content string) bool {
 		}
 	}
 	return false
+}
+
+func pythonFileLooksLikeWebhookEntrypoint(content string) bool {
+	return pythonContentContainsAny(content,
+		"run_webhook(",
+		"start_webhook(",
+		"set_webhook(",
+	)
+}
+
+func pythonFileLooksLikePollingEntrypoint(content string) bool {
+	return pythonContentContainsAny(content,
+		"run_polling(",
+		"start_polling(",
+		"long_polling(",
+	)
+}
+
+func pythonContentContainsAny(content string, markers ...string) bool {
+	content = strings.ToLower(content)
+	for _, marker := range markers {
+		if strings.Contains(content, strings.ToLower(strings.TrimSpace(marker))) {
+			return true
+		}
+	}
+	return false
+}
+
+func pythonProjectPrefersBackgroundNetwork(analysis pythonProjectAnalysis) bool {
+	return analysis.HasWebhookEntrypoint && analysis.HasPollingEntrypoint
 }
 
 func pythonAssignedVariable(content string, pattern *regexp.Regexp) string {

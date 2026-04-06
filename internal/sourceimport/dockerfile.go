@@ -116,6 +116,9 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		return GitHubImportResult{}, err
 	}
 	detectedStack := detectPrimaryTechStack(repo.RepoDir, buildContextDir)
+	if exposesPublicService && shouldSuppressDetectedPublicServiceForProject(repo.RepoDir, buildContextDir, detectedStack) {
+		exposesPublicService = false
+	}
 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
 	if err := buildAndPushDockerfileImage(ctx, dockerfileBuildRequest{
