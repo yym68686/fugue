@@ -54,6 +54,7 @@ type GitHubImportResult struct {
 	ImageRef                string
 	DefaultAppName          string
 	DetectedPort            int
+	ExposesPublicService    bool
 	DetectedProvider        string
 	DetectedStack           string
 	SuggestedEnv            map[string]string
@@ -146,17 +147,18 @@ func importStaticSiteFromClonedRepo(repo clonedGitHubRepo, requestedSourceDir, r
 	}
 
 	return GitHubImportResult{
-		RepoOwner:         repo.RepoOwner,
-		RepoName:          repo.RepoName,
-		Branch:            repo.Branch,
-		CommitSHA:         repo.CommitSHA,
-		CommitCommittedAt: repo.CommitCommittedAt,
-		SourceDir:         relativeImportedSourceDir(repo.RepoDir, sourceDir),
-		BuildStrategy:     model.AppBuildStrategyStaticSite,
-		ImageRef:          imageRef,
-		DefaultAppName:    repo.DefaultAppName,
-		DetectedPort:      80,
-		DetectedStack:     detectedStack,
+		RepoOwner:            repo.RepoOwner,
+		RepoName:             repo.RepoName,
+		Branch:               repo.Branch,
+		CommitSHA:            repo.CommitSHA,
+		CommitCommittedAt:    repo.CommitCommittedAt,
+		SourceDir:            relativeImportedSourceDir(repo.RepoDir, sourceDir),
+		BuildStrategy:        model.AppBuildStrategyStaticSite,
+		ImageRef:             imageRef,
+		DefaultAppName:       repo.DefaultAppName,
+		DetectedPort:         80,
+		ExposesPublicService: true,
+		DetectedStack:        detectedStack,
 	}, nil
 }
 

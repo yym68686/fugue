@@ -132,6 +132,9 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		finalSpec.Ports = nil
 	} else if requestedPort := firstPositivePort(finalSpec.Ports); requestedPort > 0 {
 		finalSpec.Ports = []int{requestedPort}
+	} else if shouldAutoBackgroundImportedApp(*op.DesiredSource, output.ImportResult) {
+		finalSpec.NetworkMode = model.AppNetworkModeBackground
+		finalSpec.Ports = nil
 	} else if detectedPort := effectiveImportPort(output.ImportResult.DetectedPort, output.ImportResult.BuildStrategy); detectedPort > 0 {
 		finalSpec.Ports = []int{detectedPort}
 	}
@@ -201,6 +204,13 @@ func effectiveImportPort(detected int, buildStrategy string) int {
 	default:
 		return 80
 	}
+}
+
+func shouldAutoBackgroundImportedApp(source model.AppSource, result sourceimport.GitHubImportResult) bool {
+	if strings.TrimSpace(source.ComposeService) != "" {
+		return false
+	}
+	return !result.ExposesPublicService
 }
 
 func firstPositivePort(ports []int) int {

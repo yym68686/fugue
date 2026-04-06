@@ -128,29 +128,88 @@ version = "0.1.0"
 
 func TestDetectNixpacksProviderAndPort(t *testing.T) {
 	tests := []struct {
-		name     string
-		files    []string
-		wantProv string
-		wantPort int
+		name       string
+		files      map[string]string
+		wantProv   string
+		wantPort   int
+		wantPublic bool
 	}{
-		{name: "node", files: []string{"package.json"}, wantProv: "nodejs", wantPort: 3000},
-		{name: "python", files: []string{"pyproject.toml"}, wantProv: "python", wantPort: 8000},
-		{name: "python-source", files: []string{"main.py"}, wantProv: "python", wantPort: 8000},
-		{name: "go", files: []string{"go.mod"}, wantProv: "go", wantPort: 8080},
-		{name: "generic", files: []string{"README.md"}, wantProv: "generic", wantPort: 3000},
+		{
+			name: "node-web",
+			files: map[string]string{
+				"package.json": `{"name":"demo","dependencies":{"next":"15.0.0"}}`,
+			},
+			wantProv:   "nodejs",
+			wantPort:   3000,
+			wantPublic: true,
+		},
+		{
+			name: "node-worker",
+			files: map[string]string{
+				"package.json": `{"name":"demo","dependencies":{"telegraf":"4.0.0"}}`,
+			},
+			wantProv:   "nodejs",
+			wantPort:   3000,
+			wantPublic: false,
+		},
+		{
+			name: "python-web",
+			files: map[string]string{
+				"main.py": `from fastapi import FastAPI
+app = FastAPI()
+`,
+			},
+			wantProv:   "python",
+			wantPort:   8000,
+			wantPublic: true,
+		},
+		{
+			name: "python-worker",
+			files: map[string]string{
+				"main.py": `from telegram.ext import ApplicationBuilder
+app = ApplicationBuilder().token("demo").build()
+`,
+			},
+			wantProv:   "python",
+			wantPort:   8000,
+			wantPublic: false,
+		},
+		{
+			name: "go-web",
+			files: map[string]string{
+				"go.mod":  "module example.com/demo\n",
+				"main.go": "package main\nimport \"net/http\"\nfunc main(){ _ = http.ListenAndServe(\":8080\", nil) }\n",
+			},
+			wantProv:   "go",
+			wantPort:   8080,
+			wantPublic: true,
+		},
+		{
+			name: "generic",
+			files: map[string]string{
+				"README.md": "demo",
+			},
+			wantProv:   "generic",
+			wantPort:   3000,
+			wantPublic: false,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			repoDir := t.TempDir()
-			for _, file := range tt.files {
-				if err := os.WriteFile(filepath.Join(repoDir, file), []byte("x"), 0o644); err != nil {
+			for file, content := range tt.files {
+				fullPath := filepath.Join(repoDir, file)
+				if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+					t.Fatalf("mkdir %s: %v", filepath.Dir(fullPath), err)
+				}
+				if err := os.WriteFile(fullPath, []byte(content), 0o644); err != nil {
 					t.Fatalf("write %s: %v", file, err)
 				}
 			}
-			gotProv, gotPort := detectNixpacksProviderAndPort(repoDir, ".")
-			if gotProv != tt.wantProv || gotPort != tt.wantPort {
-				t.Fatalf("unexpected provider/port: got %s/%d want %s/%d", gotProv, gotPort, tt.wantProv, tt.wantPort)
+			gotProv, gotPort, gotPublic := detectZeroConfigProviderAndPortSignal(repoDir, ".")
+			if gotProv != tt.wantProv || gotPort != tt.wantPort || gotPublic != tt.wantPublic {
+				t.Fatalf("unexpected provider/port/public: got %s/%d/%t want %s/%d/%t", gotProv, gotPort, gotPublic, tt.wantProv, tt.wantPort, tt.wantPublic)
 			}
 		})
 	}

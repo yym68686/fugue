@@ -112,7 +112,7 @@ func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, re
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
-	provider, port := detectNixpacksProviderAndPort(repo.RepoDir, normalizedSourceDir)
+	provider, port, exposesPublicService := detectZeroConfigProviderAndPortSignal(repo.RepoDir, normalizedSourceDir)
 	detectedStack := detectPrimaryTechStack(repo.RepoDir, normalizedSourceDir)
 	sourceOverlayFiles, pythonAnalysis, err := buildPythonOverlayFiles(repo.RepoDir, normalizedSourceDir)
 	if err != nil {
@@ -155,6 +155,7 @@ func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, re
 		ImageRef:                imageRef,
 		DefaultAppName:          repo.DefaultAppName,
 		DetectedPort:            port,
+		ExposesPublicService:    exposesPublicService,
 		DetectedProvider:        provider,
 		DetectedStack:           detectedStack,
 		SuggestedEnv:            suggestedNixpacksEnv(port),
@@ -232,6 +233,11 @@ func detectNixpacksProviderAndPort(repoDir, sourceDir string) (string, int) {
 }
 
 func detectZeroConfigProviderAndPort(repoDir, sourceDir string) (string, int) {
+	provider, port, _ := detectZeroConfigProviderAndPortSignal(repoDir, sourceDir)
+	return provider, port
+}
+
+func detectZeroConfigProviderAndPortSignal(repoDir, sourceDir string) (string, int, bool) {
 	appDir := repoDir
 	if strings.TrimSpace(sourceDir) != "" && strings.TrimSpace(sourceDir) != "." {
 		appDir = filepath.Join(repoDir, filepath.FromSlash(sourceDir))
@@ -244,28 +250,28 @@ func detectZeroConfigProviderAndPort(repoDir, sourceDir string) (string, int) {
 
 	switch {
 	case pathExists(filepath.Join(appDir, "package.json")):
-		return "nodejs", 3000
+		return "nodejs", 3000, detectNodePublicService(appDir)
 	case pythonAnalysis.IsPythonProject:
 		if pythonAnalysis.DetectedPort > 0 {
-			return "python", pythonAnalysis.DetectedPort
+			return "python", pythonAnalysis.DetectedPort, true
 		}
-		return "python", 8000
+		return "python", 8000, pythonAnalysis.HasWebEntrypoint
 	case pathExists(filepath.Join(appDir, "go.mod")):
-		return "go", 8080
+		return "go", 8080, detectGoPublicService(appDir)
 	case pathExists(filepath.Join(appDir, "pom.xml")) ||
 		pathExists(filepath.Join(appDir, "build.gradle")) ||
 		pathExists(filepath.Join(appDir, "build.gradle.kts")):
-		return "java", 8080
+		return "java", 8080, detectJavaPublicService(appDir)
 	case pathExists(filepath.Join(appDir, "Gemfile")):
-		return "ruby", 3000
+		return "ruby", 3000, detectRubyPublicService(appDir)
 	case pathExists(filepath.Join(appDir, "composer.json")):
-		return "php", 8080
+		return "php", 8080, detectPHPPublicService(appDir)
 	case hasGlob(filepath.Join(appDir, "*.csproj")):
-		return "dotnet", 8080
+		return "dotnet", 8080, detectDotnetPublicService(appDir)
 	case pathExists(filepath.Join(appDir, "Cargo.toml")):
-		return "rust", 3000
+		return "rust", 3000, detectRustPublicService(appDir)
 	default:
-		return "generic", 3000
+		return "generic", 3000, false
 	}
 }
 

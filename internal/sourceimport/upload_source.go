@@ -278,13 +278,14 @@ func importStaticSiteFromExtractedUpload(src extractedUploadSource, requestedSou
 	}
 
 	return GitHubImportResult{
-		CommitSHA:      src.ArchiveSHA256,
-		SourceDir:      relativeImportedSourceDir(src.RootDir, sourceDir),
-		BuildStrategy:  model.AppBuildStrategyStaticSite,
-		ImageRef:       imageRef,
-		DefaultAppName: src.DefaultAppName,
-		DetectedPort:   80,
-		DetectedStack:  detectedStack,
+		CommitSHA:            src.ArchiveSHA256,
+		SourceDir:            relativeImportedSourceDir(src.RootDir, sourceDir),
+		BuildStrategy:        model.AppBuildStrategyStaticSite,
+		ImageRef:             imageRef,
+		DefaultAppName:       src.DefaultAppName,
+		DetectedPort:         80,
+		ExposesPublicService: true,
+		DetectedStack:        detectedStack,
 	}, nil
 }
 
@@ -296,7 +297,7 @@ func importDockerfileFromExtractedUpload(ctx context.Context, src extractedUploa
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
-	detectedPort, err := detectDockerfilePort(src.RootDir, dockerfilePath)
+	detectedPort, exposesPublicService, err := detectDockerfilePortSignal(src.RootDir, dockerfilePath)
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
@@ -317,15 +318,16 @@ func importDockerfileFromExtractedUpload(ctx context.Context, src extractedUploa
 		return GitHubImportResult{}, err
 	}
 	return GitHubImportResult{
-		CommitSHA:        src.ArchiveSHA256,
-		BuildStrategy:    model.AppBuildStrategyDockerfile,
-		DockerfilePath:   dockerfilePath,
-		BuildContextDir:  buildContextDir,
-		ImageRef:         imageRef,
-		DefaultAppName:   src.DefaultAppName,
-		DetectedPort:     detectedPort,
-		DetectedProvider: model.AppBuildStrategyDockerfile,
-		DetectedStack:    detectedStack,
+		CommitSHA:            src.ArchiveSHA256,
+		BuildStrategy:        model.AppBuildStrategyDockerfile,
+		DockerfilePath:       dockerfilePath,
+		BuildContextDir:      buildContextDir,
+		ImageRef:             imageRef,
+		DefaultAppName:       src.DefaultAppName,
+		DetectedPort:         detectedPort,
+		ExposesPublicService: exposesPublicService,
+		DetectedProvider:     model.AppBuildStrategyDockerfile,
+		DetectedStack:        detectedStack,
 	}, nil
 }
 
@@ -337,7 +339,7 @@ func importBuildpacksFromExtractedUpload(ctx context.Context, src extractedUploa
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
-	provider, port := detectBuildpacksProviderAndPort(src.RootDir, normalizedSourceDir)
+	provider, port, exposesPublicService := detectZeroConfigProviderAndPortSignal(src.RootDir, normalizedSourceDir)
 	detectedStack := detectPrimaryTechStack(src.RootDir, normalizedSourceDir)
 	sourceOverlayFiles, pythonAnalysis, err := buildPythonOverlayFiles(src.RootDir, normalizedSourceDir)
 	if err != nil {
@@ -372,6 +374,7 @@ func importBuildpacksFromExtractedUpload(ctx context.Context, src extractedUploa
 		ImageRef:                imageRef,
 		DefaultAppName:          src.DefaultAppName,
 		DetectedPort:            port,
+		ExposesPublicService:    exposesPublicService,
 		DetectedProvider:        provider,
 		DetectedStack:           detectedStack,
 		SuggestedEnv:            suggestedBuildpacksEnv(port),
@@ -387,7 +390,7 @@ func importNixpacksFromExtractedUpload(ctx context.Context, src extractedUploadS
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
-	provider, port := detectNixpacksProviderAndPort(src.RootDir, normalizedSourceDir)
+	provider, port, exposesPublicService := detectZeroConfigProviderAndPortSignal(src.RootDir, normalizedSourceDir)
 	detectedStack := detectPrimaryTechStack(src.RootDir, normalizedSourceDir)
 	sourceOverlayFiles, pythonAnalysis, err := buildPythonOverlayFiles(src.RootDir, normalizedSourceDir)
 	if err != nil {
@@ -420,6 +423,7 @@ func importNixpacksFromExtractedUpload(ctx context.Context, src extractedUploadS
 		ImageRef:                imageRef,
 		DefaultAppName:          src.DefaultAppName,
 		DetectedPort:            port,
+		ExposesPublicService:    exposesPublicService,
 		DetectedProvider:        provider,
 		DetectedStack:           detectedStack,
 		SuggestedEnv:            suggestedNixpacksEnv(port),

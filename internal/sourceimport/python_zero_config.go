@@ -14,6 +14,7 @@ import (
 type pythonProjectAnalysis struct {
 	IsPythonProject       bool
 	HasDependencyManifest bool
+	HasWebEntrypoint      bool
 	DetectedPort          int
 	InferredRequirements  []string
 	SuggestedStartCommand string
@@ -120,6 +121,9 @@ func analyzePythonProjectInDir(appDir string) (pythonProjectAnalysis, error) {
 		fileImports := collectPythonImportPaths(content)
 		for _, importPath := range fileImports {
 			imports[importPath] = struct{}{}
+		}
+		if !analysis.HasWebEntrypoint && pythonFileLooksLikeWebEntrypoint(content) {
+			analysis.HasWebEntrypoint = true
 		}
 		if analysis.DetectedPort == 0 {
 			analysis.DetectedPort = detectPythonPortFromContent(content)

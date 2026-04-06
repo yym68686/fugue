@@ -69,7 +69,7 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
-	provider, port := detectBuildpacksProviderAndPort(repo.RepoDir, normalizedSourceDir)
+	provider, port, exposesPublicService := detectZeroConfigProviderAndPortSignal(repo.RepoDir, normalizedSourceDir)
 	detectedStack := detectPrimaryTechStack(repo.RepoDir, normalizedSourceDir)
 	sourceOverlayFiles, pythonAnalysis, err := buildPythonOverlayFiles(repo.RepoDir, normalizedSourceDir)
 	if err != nil {
@@ -114,6 +114,7 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		ImageRef:                imageRef,
 		DefaultAppName:          repo.DefaultAppName,
 		DetectedPort:            port,
+		ExposesPublicService:    exposesPublicService,
 		DetectedProvider:        provider,
 		DetectedStack:           detectedStack,
 		SuggestedEnv:            suggestedBuildpacksEnv(port),

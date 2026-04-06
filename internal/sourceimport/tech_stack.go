@@ -1,17 +1,17 @@
 package sourceimport
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
 type packageManifest struct {
-	Dependencies         map[string]any `json:"dependencies"`
-	DevDependencies      map[string]any `json:"devDependencies"`
-	PeerDependencies     map[string]any `json:"peerDependencies"`
-	OptionalDependencies map[string]any `json:"optionalDependencies"`
+	Dependencies         map[string]any    `json:"dependencies"`
+	DevDependencies      map[string]any    `json:"devDependencies"`
+	PeerDependencies     map[string]any    `json:"peerDependencies"`
+	OptionalDependencies map[string]any    `json:"optionalDependencies"`
+	Scripts              map[string]string `json:"scripts"`
 }
 
 func detectPrimaryTechStack(repoDir, sourceDir string) string {
@@ -109,14 +109,8 @@ func detectPrimaryTechStackInDir(appDir string) string {
 }
 
 func detectNodeTechStack(appDir string) string {
-	manifestPath := filepath.Join(appDir, "package.json")
-	data, err := os.ReadFile(manifestPath)
+	manifest, err := readPackageManifest(appDir)
 	if err != nil {
-		return "nodejs"
-	}
-
-	var manifest packageManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
 		return "nodejs"
 	}
 

@@ -56,10 +56,12 @@ func (i *Importer) ImportDockerImageSource(ctx context.Context, req DockerImageS
 	}
 
 	detectedPort := 80
+	exposesPublicService := false
 	configFile, configErr := readRemoteImageConfig(sourceImageRef, sourceOptions...)
 	if configErr == nil {
 		if port := detectExposedPortFromImageConfig(configFile); port > 0 {
 			detectedPort = port
+			exposesPublicService = true
 		}
 	} else if i != nil && i.Logger != nil {
 		i.Logger.Printf("skip image config inspection for %s: %v", sourceImageRef, configErr)
@@ -67,10 +69,11 @@ func (i *Importer) ImportDockerImageSource(ctx context.Context, req DockerImageS
 
 	return GitHubSourceImportOutput{
 		ImportResult: GitHubImportResult{
-			DefaultAppName:   defaultImportedImageAppName(req.AppName, sourceImageRef),
-			DetectedPort:     detectedPort,
-			DetectedProvider: model.AppSourceTypeDockerImage,
-			ImageRef:         destImageRef,
+			DefaultAppName:       defaultImportedImageAppName(req.AppName, sourceImageRef),
+			DetectedPort:         detectedPort,
+			ExposesPublicService: exposesPublicService,
+			DetectedProvider:     model.AppSourceTypeDockerImage,
+			ImageRef:             destImageRef,
 		},
 		Source: model.AppSource{
 			Type:             model.AppSourceTypeDockerImage,

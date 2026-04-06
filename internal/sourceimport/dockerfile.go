@@ -111,7 +111,7 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
-	detectedPort, err := detectDockerfilePort(repo.RepoDir, dockerfilePath)
+	detectedPort, exposesPublicService, err := detectDockerfilePortSignal(repo.RepoDir, dockerfilePath)
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
@@ -135,30 +135,36 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 	}
 
 	return GitHubImportResult{
-		RepoOwner:         repo.RepoOwner,
-		RepoName:          repo.RepoName,
-		Branch:            repo.Branch,
-		CommitSHA:         repo.CommitSHA,
-		CommitCommittedAt: repo.CommitCommittedAt,
-		BuildStrategy:     model.AppBuildStrategyDockerfile,
-		DockerfilePath:    dockerfilePath,
-		BuildContextDir:   buildContextDir,
-		ImageRef:          imageRef,
-		DefaultAppName:    repo.DefaultAppName,
-		DetectedPort:      detectedPort,
-		DetectedProvider:  model.AppBuildStrategyDockerfile,
-		DetectedStack:     detectedStack,
+		RepoOwner:            repo.RepoOwner,
+		RepoName:             repo.RepoName,
+		Branch:               repo.Branch,
+		CommitSHA:            repo.CommitSHA,
+		CommitCommittedAt:    repo.CommitCommittedAt,
+		BuildStrategy:        model.AppBuildStrategyDockerfile,
+		DockerfilePath:       dockerfilePath,
+		BuildContextDir:      buildContextDir,
+		ImageRef:             imageRef,
+		DefaultAppName:       repo.DefaultAppName,
+		DetectedPort:         detectedPort,
+		ExposesPublicService: exposesPublicService,
+		DetectedProvider:     model.AppBuildStrategyDockerfile,
+		DetectedStack:        detectedStack,
 	}, nil
 }
 
 func detectDockerfilePort(repoDir, dockerfilePath string) (int, error) {
+	port, _, err := detectDockerfilePortSignal(repoDir, dockerfilePath)
+	return port, err
+}
+
+func detectDockerfilePortSignal(repoDir, dockerfilePath string) (int, bool, error) {
 	fullPath, err := secureRepoJoin(repoDir, dockerfilePath)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	data, err := os.ReadFile(fullPath)
 	if err != nil {
-		return 0, fmt.Errorf("read dockerfile %q: %w", dockerfilePath, err)
+		return 0, false, fmt.Errorf("read dockerfile %q: %w", dockerfilePath, err)
 	}
 
 	detected := 0
@@ -186,9 +192,9 @@ func detectDockerfilePort(repoDir, dockerfilePath string) (int, error) {
 		}
 	}
 	if detected > 0 {
-		return detected, nil
+		return detected, true, nil
 	}
-	return 80, nil
+	return 80, false, nil
 }
 
 func secureRepoJoin(repoDir, rel string) (string, error) {

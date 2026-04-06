@@ -42,9 +42,10 @@ func (i *blockingImporter) ImportGitHubSource(ctx context.Context, req sourceimp
 
 	return sourceimport.GitHubSourceImportOutput{
 		ImportResult: sourceimport.GitHubImportResult{
-			BuildStrategy: model.AppBuildStrategyDockerfile,
-			ImageRef:      "registry.push.example/fugue-apps/demo:git-abc123",
-			DetectedPort:  8080,
+			BuildStrategy:        model.AppBuildStrategyDockerfile,
+			ImageRef:             "registry.push.example/fugue-apps/demo:git-abc123",
+			DetectedPort:         8080,
+			ExposesPublicService: true,
 		},
 		Source: model.AppSource{
 			Type:           model.AppSourceTypeGitHubPublic,
@@ -103,9 +104,10 @@ func (i *controlledImporter) ImportGitHubSource(ctx context.Context, req sourcei
 
 	return sourceimport.GitHubSourceImportOutput{
 		ImportResult: sourceimport.GitHubImportResult{
-			BuildStrategy: model.AppBuildStrategyDockerfile,
-			ImageRef:      "registry.push.example/fugue-apps/demo:git-abc123",
-			DetectedPort:  8080,
+			BuildStrategy:        model.AppBuildStrategyDockerfile,
+			ImageRef:             "registry.push.example/fugue-apps/demo:git-abc123",
+			DetectedPort:         8080,
+			ExposesPublicService: true,
 		},
 		Source: model.AppSource{
 			Type:          model.AppSourceTypeGitHubPublic,
