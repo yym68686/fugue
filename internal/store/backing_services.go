@@ -562,6 +562,35 @@ func appHasBoundServiceType(app model.App, serviceType string) bool {
 	return false
 }
 
+func appHasManagedPostgresService(app model.App) bool {
+	if app.Spec.Postgres != nil {
+		return true
+	}
+
+	servicesByID := make(map[string]model.BackingService, len(app.BackingServices))
+	for _, service := range app.BackingServices {
+		servicesByID[service.ID] = service
+	}
+
+	for _, binding := range app.Bindings {
+		service, ok := servicesByID[binding.ServiceID]
+		if !ok {
+			continue
+		}
+		if isManagedPostgresService(service) {
+			return true
+		}
+	}
+
+	for _, service := range app.BackingServices {
+		if strings.TrimSpace(service.OwnerAppID) == strings.TrimSpace(app.ID) && isManagedPostgresService(service) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func ensureBoundPostgresViewBinding(app *model.App, service model.BackingService, spec model.AppPostgresSpec) {
 	if app == nil {
 		return
@@ -889,7 +918,14 @@ func hasBindingsOnOtherApps(bindings []model.ServiceBinding, serviceID, appID st
 }
 
 func requiresExclusiveBinding(service model.BackingService) bool {
+	return isManagedPostgresService(service)
+}
+
+func isManagedPostgresService(service model.BackingService) bool {
 	if !strings.EqualFold(strings.TrimSpace(service.Type), model.BackingServiceTypePostgres) {
+		return false
+	}
+	if isDeletedBackingService(service) {
 		return false
 	}
 	provisioner := strings.TrimSpace(strings.ToLower(service.Provisioner))

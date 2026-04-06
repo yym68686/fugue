@@ -2510,6 +2510,15 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 		if hasPersistentWorkspace(app) {
 			return model.Operation{}, ErrInvalidInput
 		}
+		if appHasManagedPostgresService(app) {
+			targetRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.TargetRuntimeID)
+			if err != nil {
+				return model.Operation{}, err
+			}
+			if err := validateFailoverTargetRuntimeType(targetRuntimeType); err != nil {
+				return model.Operation{}, err
+			}
+		}
 		op.SourceRuntimeID = app.Spec.RuntimeID
 	case model.OperationTypeFailover:
 		var inFlightCount int

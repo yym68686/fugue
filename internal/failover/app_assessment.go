@@ -50,17 +50,14 @@ func AssessApp(app model.App, runtime *model.Runtime) AppAssessment {
 		assessment.Summary = "review " + joinHumanList(warnings)
 	default:
 		assessment.Classification = AppClassificationReady
-		assessment.Summary = "eligible for stateless failover"
+		assessment.Summary = "eligible for live transfer"
 	}
 
 	return assessment
 }
 
 func MigrationBlockers(app model.App) []string {
-	blockers := make([]string, 0, 2)
-	if hasManagedStatefulService(app) {
-		blockers = append(blockers, "managed backing services")
-	}
+	blockers := make([]string, 0, 1)
 	if app.Spec.Workspace != nil || app.Spec.PersistentStorage != nil {
 		blockers = append(blockers, "persistent storage")
 	}
@@ -73,7 +70,7 @@ func MigrationBlockerMessage(app model.App) string {
 		return ""
 	}
 	return fmt.Sprintf(
-		"stateful migration is blocked by %s; externalize state or move it to replicated operator-backed storage before failover",
+		"live transfer is blocked by %s; externalize state or move it to replicated operator-backed storage before failover",
 		joinHumanList(blockers),
 	)
 }
@@ -110,46 +107,6 @@ func failoverWarnings(app model.App, runtime *model.Runtime) []string {
 	}
 
 	return warnings
-}
-
-func hasManagedStatefulService(app model.App) bool {
-	if app.Spec.Postgres != nil {
-		return true
-	}
-
-	servicesByID := make(map[string]model.BackingService, len(app.BackingServices))
-	for _, service := range app.BackingServices {
-		servicesByID[service.ID] = service
-	}
-
-	for _, binding := range app.Bindings {
-		service, ok := servicesByID[binding.ServiceID]
-		if !ok {
-			continue
-		}
-		if isManagedPostgresService(service) {
-			return true
-		}
-	}
-
-	for _, service := range app.BackingServices {
-		if service.OwnerAppID == app.ID && isManagedPostgresService(service) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func isManagedPostgresService(service model.BackingService) bool {
-	if !strings.EqualFold(strings.TrimSpace(service.Type), model.BackingServiceTypePostgres) {
-		return false
-	}
-	if strings.EqualFold(strings.TrimSpace(service.Status), model.BackingServiceStatusDeleted) {
-		return false
-	}
-	provisioner := strings.TrimSpace(strings.ToLower(service.Provisioner))
-	return provisioner == "" || provisioner == model.BackingServiceProvisionerManaged
 }
 
 func currentRuntimeID(app model.App) string {

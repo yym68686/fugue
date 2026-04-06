@@ -2094,6 +2094,15 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			if hasPersistentWorkspace(app) {
 				return ErrInvalidInput
 			}
+			if appHasManagedPostgresService(app) {
+				targetRuntimeIndex := findRuntime(state, op.TargetRuntimeID)
+				if targetRuntimeIndex < 0 {
+					return ErrNotFound
+				}
+				if err := validateFailoverTargetRuntimeType(state.Runtimes[targetRuntimeIndex].Type); err != nil {
+					return err
+				}
+			}
 			op.SourceRuntimeID = app.Spec.RuntimeID
 		case model.OperationTypeFailover:
 			if hasInFlightOperationForApp(state.Operations, app.ID) {

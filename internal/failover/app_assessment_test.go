@@ -44,18 +44,18 @@ func TestAssessAppBlockedByManagedState(t *testing.T) {
 	if assessment.Classification != AppClassificationBlocked {
 		t.Fatalf("expected classification %q, got %q", AppClassificationBlocked, assessment.Classification)
 	}
-	if got, want := assessment.Summary, "blocked by managed backing services and persistent storage"; got != want {
+	if got, want := assessment.Summary, "blocked by persistent storage"; got != want {
 		t.Fatalf("expected summary %q, got %q", want, got)
 	}
-	if len(assessment.Blockers) != 2 {
-		t.Fatalf("expected 2 blockers, got %#v", assessment.Blockers)
+	if len(assessment.Blockers) != 1 || assessment.Blockers[0] != "persistent storage" {
+		t.Fatalf("expected persistent storage blocker, got %#v", assessment.Blockers)
 	}
 	if len(assessment.Warnings) == 0 || assessment.Warnings[0] != "desired replicas are below 2" {
 		t.Fatalf("expected replica warning, got %#v", assessment.Warnings)
 	}
 }
 
-func TestAssessAppReadyForStatelessFailover(t *testing.T) {
+func TestAssessAppReadyForLiveTransfer(t *testing.T) {
 	t.Parallel()
 
 	app := model.App{
@@ -80,7 +80,56 @@ func TestAssessAppReadyForStatelessFailover(t *testing.T) {
 	if assessment.Classification != AppClassificationReady {
 		t.Fatalf("expected classification %q, got %q", AppClassificationReady, assessment.Classification)
 	}
-	if got, want := assessment.Summary, "eligible for stateless failover"; got != want {
+	if got, want := assessment.Summary, "eligible for live transfer"; got != want {
+		t.Fatalf("expected summary %q, got %q", want, got)
+	}
+	if len(assessment.Blockers) != 0 {
+		t.Fatalf("expected no blockers, got %#v", assessment.Blockers)
+	}
+	if len(assessment.Warnings) != 0 {
+		t.Fatalf("expected no warnings, got %#v", assessment.Warnings)
+	}
+}
+
+func TestAssessAppReadyWithManagedPostgresAndNoPersistentStorage(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:   "app_123",
+		Name: "demo",
+		Spec: model.AppSpec{
+			RuntimeID: "runtime_managed_shared",
+			Replicas:  2,
+		},
+		Status: model.AppStatus{
+			CurrentRuntimeID: "runtime_managed_shared",
+			CurrentReplicas:  2,
+		},
+		Bindings: []model.ServiceBinding{
+			{
+				ServiceID: "svc_pg",
+			},
+		},
+		BackingServices: []model.BackingService{
+			{
+				ID:          "svc_pg",
+				Type:        model.BackingServiceTypePostgres,
+				Provisioner: model.BackingServiceProvisionerManaged,
+				Status:      model.BackingServiceStatusActive,
+			},
+		},
+	}
+
+	assessment := AssessApp(app, &model.Runtime{
+		ID:     "runtime_managed_shared",
+		Type:   model.RuntimeTypeManagedShared,
+		Status: model.RuntimeStatusActive,
+	})
+
+	if assessment.Classification != AppClassificationReady {
+		t.Fatalf("expected classification %q, got %q", AppClassificationReady, assessment.Classification)
+	}
+	if got, want := assessment.Summary, "eligible for live transfer"; got != want {
 		t.Fatalf("expected summary %q, got %q", want, got)
 	}
 	if len(assessment.Blockers) != 0 {

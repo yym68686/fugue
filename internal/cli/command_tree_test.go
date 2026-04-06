@@ -190,7 +190,7 @@ func TestRunAppContinuityAuditByNameUsesExplicitCommand(t *testing.T) {
 	for _, want := range []string{
 		"app_id=app_123",
 		"classification=ready",
-		"summary=eligible for stateless failover",
+		"summary=eligible for live transfer",
 		"runtime_type=managed-shared",
 	} {
 		if !strings.Contains(out, want) {
