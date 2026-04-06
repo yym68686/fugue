@@ -17,9 +17,14 @@ func (s *Server) handleGetAppEnv(w http.ResponseWriter, r *http.Request) {
 	if !allowed {
 		return
 	}
+	spec, _, err := s.recoverAppDeployBaseline(app)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
 	s.appendAudit(principal, "app.env.read", "app", app.ID, app.TenantID, nil)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"env": defaultStringMap(mergedAppEnv(app)),
+		"env": defaultStringMap(mergedAppEnvWithSpec(app, spec)),
 	})
 }
 

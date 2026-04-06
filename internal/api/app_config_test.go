@@ -248,6 +248,28 @@ func TestPatchAppEnvAndRestartRecoverFailedImportedAppDesiredState(t *testing.T)
 	}
 }
 
+func TestGetAppEnvRecoversFailedImportedAppDesiredState(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app, _, _ := setupFailedImportedAppRecoveryServer(t)
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/env", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var envResponse struct {
+		Env map[string]string `json:"env"`
+	}
+	mustDecodeJSON(t, recorder, &envResponse)
+	if got := envResponse.Env["BASE"]; got != "1" {
+		t.Fatalf("expected recovered env BASE=1, got %q", got)
+	}
+	if got := envResponse.Env["BROKEN"]; got != "1" {
+		t.Fatalf("expected recovered env BROKEN=1, got %q", got)
+	}
+}
+
 func TestPatchAppImageMirrorLimitUpdatesAppWithoutDeployOperation(t *testing.T) {
 	t.Parallel()
 
