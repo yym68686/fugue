@@ -31,10 +31,12 @@ func TestImportImageStoresRequestedEnvOnCreatedApp(t *testing.T) {
 		AppBaseDomain:    "apps.example.com",
 		RegistryPushBase: "registry.internal.example",
 	})
+	startupCommand := "npm run serve"
 	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/import-image", apiKey, map[string]any{
-		"tenant_id":    tenant.ID,
-		"image_ref":    "ghcr.io/example/demo:1.2.3",
-		"service_port": 9090,
+		"tenant_id":       tenant.ID,
+		"image_ref":       "ghcr.io/example/demo:1.2.3",
+		"service_port":    9090,
+		"startup_command": startupCommand,
 		"env": map[string]string{
 			"OPENAI_API_KEY": "sk-demo",
 			"APP_ENV":        "production",
@@ -76,6 +78,9 @@ func TestImportImageStoresRequestedEnvOnCreatedApp(t *testing.T) {
 	if len(app.Spec.Ports) != 1 || app.Spec.Ports[0] != 9090 {
 		t.Fatalf("expected requested service port 9090, got %v", app.Spec.Ports)
 	}
+	if len(app.Spec.Command) != 3 || app.Spec.Command[0] != "sh" || app.Spec.Command[1] != "-lc" || app.Spec.Command[2] != startupCommand {
+		t.Fatalf("expected app command to wrap startup command, got %#v", app.Spec.Command)
+	}
 
 	op, err := s.GetOperation(response.Operation.ID)
 	if err != nil {
@@ -98,5 +103,8 @@ func TestImportImageStoresRequestedEnvOnCreatedApp(t *testing.T) {
 	}
 	if got := op.DesiredSpec.Env["APP_ENV"]; got != "production" {
 		t.Fatalf("expected desired spec env APP_ENV=production, got %q", got)
+	}
+	if len(op.DesiredSpec.Command) != 3 || op.DesiredSpec.Command[0] != "sh" || op.DesiredSpec.Command[1] != "-lc" || op.DesiredSpec.Command[2] != startupCommand {
+		t.Fatalf("expected desired spec command to wrap startup command, got %#v", op.DesiredSpec.Command)
 	}
 }

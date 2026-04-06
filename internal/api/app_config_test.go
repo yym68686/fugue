@@ -316,6 +316,111 @@ func TestPatchAppImageMirrorLimitUpdatesAppWithoutDeployOperation(t *testing.T) 
 	}
 }
 
+func TestPatchAppStartupCommandQueuesDeployOperation(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+
+	startupCommand := "npm run start"
+	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID, apiKey, map[string]any{
+		"startup_command": startupCommand,
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var patchResponse struct {
+		AlreadyCurrent bool            `json:"already_current"`
+		App            model.App       `json:"app"`
+		Operation      model.Operation `json:"operation"`
+	}
+	mustDecodeJSON(t, recorder, &patchResponse)
+	if patchResponse.AlreadyCurrent {
+		t.Fatal("expected startup command patch to report a change")
+	}
+	if patchResponse.Operation.ID == "" {
+		t.Fatal("expected deploy operation in patch response")
+	}
+	if len(patchResponse.App.Spec.Command) != 0 {
+		t.Fatalf("expected response app to remain unchanged until deploy completes, got %#v", patchResponse.App.Spec.Command)
+	}
+
+	op, err := s.GetOperation(patchResponse.Operation.ID)
+	if err != nil {
+		t.Fatalf("get operation: %v", err)
+	}
+	if op.Type != model.OperationTypeDeploy {
+		t.Fatalf("expected deploy operation, got %q", op.Type)
+	}
+	if op.DesiredSpec == nil {
+		t.Fatal("expected desired spec on deploy operation")
+	}
+	if len(op.DesiredSpec.Command) != 3 || op.DesiredSpec.Command[0] != "sh" || op.DesiredSpec.Command[1] != "-lc" || op.DesiredSpec.Command[2] != startupCommand {
+		t.Fatalf("expected desired spec command to wrap startup command, got %#v", op.DesiredSpec.Command)
+	}
+
+	completeNextManagedOperation(t, s)
+
+	updatedApp, err := s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get updated app: %v", err)
+	}
+	if len(updatedApp.Spec.Command) != 3 || updatedApp.Spec.Command[0] != "sh" || updatedApp.Spec.Command[1] != "-lc" || updatedApp.Spec.Command[2] != startupCommand {
+		t.Fatalf("expected stored command to wrap startup command, got %#v", updatedApp.Spec.Command)
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID, apiKey, map[string]any{
+		"startup_command": startupCommand,
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	mustDecodeJSON(t, recorder, &patchResponse)
+	if !patchResponse.AlreadyCurrent {
+		t.Fatal("expected repeated startup command patch to report already_current")
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID, apiKey, map[string]any{
+		"startup_command": "",
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	mustDecodeJSON(t, recorder, &patchResponse)
+	if patchResponse.AlreadyCurrent {
+		t.Fatal("expected clearing startup command to report a change")
+	}
+	if patchResponse.Operation.ID == "" {
+		t.Fatal("expected deploy operation when clearing startup command")
+	}
+
+	op, err = s.GetOperation(patchResponse.Operation.ID)
+	if err != nil {
+		t.Fatalf("get clear operation: %v", err)
+	}
+	if op.DesiredSpec == nil {
+		t.Fatal("expected desired spec when clearing startup command")
+	}
+	if len(op.DesiredSpec.Command) != 0 {
+		t.Fatalf("expected cleared startup command to remove command, got %#v", op.DesiredSpec.Command)
+	}
+
+	completeNextManagedOperation(t, s)
+
+	updatedApp, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get cleared app: %v", err)
+	}
+	if len(updatedApp.Spec.Command) != 0 {
+		t.Fatalf("expected cleared startup command to persist, got %#v", updatedApp.Spec.Command)
+	}
+}
+
 func TestGetAppEnvMergesBindingEnvAndAppEnvOverrides(t *testing.T) {
 	t.Parallel()
 

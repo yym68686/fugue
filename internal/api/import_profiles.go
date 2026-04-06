@@ -94,6 +94,45 @@ func (s *Server) buildImportedAppSpec(buildStrategy, appName, imageRef, runtimeI
 	}, nil
 }
 
+func hasStartupCommand(value *string) bool {
+	return value != nil && strings.TrimSpace(*value) != ""
+}
+
+func normalizeStartupCommand(value *string) []string {
+	if value == nil {
+		return nil
+	}
+
+	trimmed := strings.TrimSpace(*value)
+	if trimmed == "" {
+		return nil
+	}
+
+	return []string{"sh", "-lc", trimmed}
+}
+
+func applyStartupCommand(spec *model.AppSpec, value *string) {
+	if spec == nil || value == nil {
+		return
+	}
+
+	spec.Command = normalizeStartupCommand(value)
+}
+
+func startupCommandsEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+
+	return true
+}
+
 func normalizeImportedEnv(in map[string]string) (map[string]string, error) {
 	if len(in) == 0 {
 		return nil, nil

@@ -39,6 +39,7 @@ type importUploadRequest struct {
 	Env             map[string]string      `json:"env"`
 	ConfigContent   string                 `json:"config_content"`
 	Files           []model.AppFile        `json:"files"`
+	StartupCommand  *string                `json:"startup_command,omitempty"`
 	Postgres        *model.AppPostgresSpec `json:"postgres"`
 }
 
@@ -117,6 +118,7 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 			}
 			spec.Env = env
 		}
+		applyStartupCommand(&spec, req.StartupCommand)
 
 		op, err := s.store.CreateOperation(model.Operation{
 			TenantID:        app.TenantID,
@@ -196,6 +198,10 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 		})
 		switch {
 		case inspectErr == nil:
+			if hasStartupCommand(req.StartupCommand) {
+				httpx.WriteError(w, http.StatusBadRequest, "startup_command is only supported for single-app imports")
+				return
+			}
 			project, created, err := s.resolveImportProjectFields(tenantID, req.ProjectID, req.Project)
 			if err != nil {
 				s.writeStoreError(w, err)
@@ -264,6 +270,7 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		applyStartupCommand(&spec, req.StartupCommand)
 		route := model.AppRoute{
 			Hostname:    candidateHost,
 			BaseDomain:  s.appBaseDomain,

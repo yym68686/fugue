@@ -192,6 +192,10 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		})
 		switch {
 		case inspectErr == nil:
+			if hasStartupCommand(req.StartupCommand) {
+				httpx.WriteError(w, http.StatusBadRequest, "startup_command is only supported for single-app imports")
+				return
+			}
 			if _, err := ensureImportProject(); err != nil {
 				s.writeStoreError(w, err)
 				return
@@ -236,6 +240,10 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		})
 		switch {
 		case inspectErr == nil:
+			if hasStartupCommand(req.StartupCommand) {
+				httpx.WriteError(w, http.StatusBadRequest, "startup_command is only supported for single-app imports")
+				return
+			}
 			if _, err := ensureImportProject(); err != nil {
 				s.writeStoreError(w, err)
 				return
@@ -305,6 +313,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		applyStartupCommand(&spec, req.StartupCommand)
 
 		route := model.AppRoute{
 			Hostname:    candidateHost,

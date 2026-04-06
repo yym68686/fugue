@@ -12,19 +12,20 @@ import (
 )
 
 type importImageRequest struct {
-	TenantID      string                 `json:"tenant_id"`
-	ProjectID     string                 `json:"project_id"`
-	Project       *importProjectRequest  `json:"project,omitempty"`
-	ImageRef      string                 `json:"image_ref"`
-	Name          string                 `json:"name"`
-	Description   string                 `json:"description"`
-	RuntimeID     string                 `json:"runtime_id"`
-	Replicas      int                    `json:"replicas"`
-	ServicePort   int                    `json:"service_port"`
-	Env           map[string]string      `json:"env"`
-	ConfigContent string                 `json:"config_content"`
-	Files         []model.AppFile        `json:"files"`
-	Postgres      *model.AppPostgresSpec `json:"postgres"`
+	TenantID       string                 `json:"tenant_id"`
+	ProjectID      string                 `json:"project_id"`
+	Project        *importProjectRequest  `json:"project,omitempty"`
+	ImageRef       string                 `json:"image_ref"`
+	Name           string                 `json:"name"`
+	Description    string                 `json:"description"`
+	RuntimeID      string                 `json:"runtime_id"`
+	Replicas       int                    `json:"replicas"`
+	ServicePort    int                    `json:"service_port"`
+	Env            map[string]string      `json:"env"`
+	ConfigContent  string                 `json:"config_content"`
+	Files          []model.AppFile        `json:"files"`
+	StartupCommand *string                `json:"startup_command,omitempty"`
+	Postgres       *model.AppPostgresSpec `json:"postgres"`
 }
 
 func (s *Server) handleImportImageApp(w http.ResponseWriter, r *http.Request) {
@@ -133,6 +134,7 @@ func (s *Server) handleImportImageApp(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		applyStartupCommand(&spec, req.StartupCommand)
 		route := model.AppRoute{
 			Hostname:    candidateHost,
 			BaseDomain:  s.appBaseDomain,

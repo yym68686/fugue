@@ -105,3 +105,28 @@ func TestHashImportGitHubRequestChangesWhenPersistentStorageSeedFilesChange(t *t
 		t.Fatal("expected different hashes when persistent storage seed files change")
 	}
 }
+
+func TestHashImportGitHubRequestChangesWhenStartupCommandChanges(t *testing.T) {
+	command := "npm run start"
+	req := importGitHubRequest{
+		ProjectID:      "project_1",
+		RepoURL:        "https://github.com/example/demo",
+		Branch:         "main",
+		Name:           "demo",
+		StartupCommand: &command,
+	}
+	hashA, err := hashImportGitHubRequest("tenant_1", req, "runtime_managed_shared", 1)
+	if err != nil {
+		t.Fatalf("hash request a: %v", err)
+	}
+
+	command = "npm run worker"
+	hashB, err := hashImportGitHubRequest("tenant_1", req, "runtime_managed_shared", 1)
+	if err != nil {
+		t.Fatalf("hash request b: %v", err)
+	}
+
+	if hashA == hashB {
+		t.Fatal("expected different hashes when startup command changes")
+	}
+}

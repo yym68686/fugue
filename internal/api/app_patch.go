@@ -19,24 +19,87 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		ImageMirrorLimit *int `json:"image_mirror_limit"`
+		ImageMirrorLimit *int    `json:"image_mirror_limit"`
+		StartupCommand   *string `json:"startup_command,omitempty"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.ImageMirrorLimit == nil {
-		httpx.WriteError(w, http.StatusBadRequest, "image_mirror_limit is required")
+	if req.ImageMirrorLimit == nil && req.StartupCommand == nil {
+		httpx.WriteError(w, http.StatusBadRequest, "image_mirror_limit or startup_command is required")
 		return
 	}
-	if *req.ImageMirrorLimit < 0 {
+	if req.ImageMirrorLimit != nil && *req.ImageMirrorLimit < 0 {
 		httpx.WriteError(w, http.StatusBadRequest, "image_mirror_limit must be greater than or equal to 0")
 		return
 	}
 
-	currentLimit := model.EffectiveAppImageMirrorLimit(app.Spec.ImageMirrorLimit)
-	nextLimit := model.EffectiveAppImageMirrorLimit(*req.ImageMirrorLimit)
-	if currentLimit == nextLimit {
+	currentApp := app
+	responseApp := app
+	changed := false
+	auditMetadata := map[string]string{}
+
+	if req.ImageMirrorLimit != nil {
+		currentLimit := model.EffectiveAppImageMirrorLimit(app.Spec.ImageMirrorLimit)
+		nextLimit := model.EffectiveAppImageMirrorLimit(*req.ImageMirrorLimit)
+		if currentLimit != nextLimit {
+			updatedApp, err := s.store.UpdateAppImageMirrorLimit(app.ID, nextLimit)
+			if err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
+			currentApp = updatedApp
+			responseApp = updatedApp
+			changed = true
+			auditMetadata["image_mirror_limit"] = httpxValue(nextLimit)
+
+			if nextLimit < currentLimit {
+				if err := s.pruneExcessManagedAppImages(r.Context(), updatedApp); err != nil && s.log != nil {
+					s.log.Printf("prune excess managed app images for app=%s failed: %v", updatedApp.ID, err)
+				}
+				s.refreshTenantBillingImageStorage(r.Context(), updatedApp.TenantID, principal.IsPlatformAdmin())
+			}
+		}
+	}
+
+	var operation *model.Operation
+	if req.StartupCommand != nil {
+		spec, source, err := s.recoverAppDeployBaseline(currentApp)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+
+		currentCommand := append([]string(nil), spec.Command...)
+		spec.ImageMirrorLimit = model.EffectiveAppImageMirrorLimit(currentApp.Spec.ImageMirrorLimit)
+		applyStartupCommand(&spec, req.StartupCommand)
+
+		if !startupCommandsEqual(currentCommand, spec.Command) {
+			op, err := s.store.CreateOperation(model.Operation{
+				TenantID:        currentApp.TenantID,
+				Type:            model.OperationTypeDeploy,
+				RequestedByType: principal.ActorType,
+				RequestedByID:   principal.ActorID,
+				AppID:           currentApp.ID,
+				DesiredSpec:     &spec,
+				DesiredSource:   source,
+			})
+			if err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
+			operation = &op
+			changed = true
+			if len(spec.Command) == 0 {
+				auditMetadata["startup_command"] = "cleared"
+			} else {
+				auditMetadata["startup_command"] = "set"
+			}
+		}
+	}
+
+	if !changed {
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{
 			"app":             sanitizeAppForAPI(app),
 			"already_current": true,
@@ -44,24 +107,13 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updatedApp, err := s.store.UpdateAppImageMirrorLimit(app.ID, nextLimit)
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-
-	if nextLimit < currentLimit {
-		if err := s.pruneExcessManagedAppImages(r.Context(), updatedApp); err != nil && s.log != nil {
-			s.log.Printf("prune excess managed app images for app=%s failed: %v", updatedApp.ID, err)
-		}
-		s.refreshTenantBillingImageStorage(r.Context(), updatedApp.TenantID, principal.IsPlatformAdmin())
-	}
-
-	s.appendAudit(principal, "app.patch", "app", updatedApp.ID, updatedApp.TenantID, map[string]string{
-		"image_mirror_limit": httpxValue(nextLimit),
-	})
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"app":             sanitizeAppForAPI(updatedApp),
+	s.appendAudit(principal, "app.patch", "app", currentApp.ID, currentApp.TenantID, auditMetadata)
+	response := map[string]any{
+		"app":             sanitizeAppForAPI(responseApp),
 		"already_current": false,
-	})
+	}
+	if operation != nil {
+		response["operation"] = sanitizeOperationForAPI(*operation)
+	}
+	httpx.WriteJSON(w, http.StatusOK, response)
 }

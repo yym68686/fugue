@@ -4143,6 +4143,8 @@ components:
         image_mirror_limit:
           type: integer
           format: int32
+        startup_command:
+          type: string
     BillingResponse:
       type: object
       additionalProperties: false
@@ -4449,6 +4451,8 @@ components:
           $ref: "#/components/schemas/App"
         already_current:
           type: boolean
+        operation:
+          $ref: "#/components/schemas/Operation"
     InspectGitHubTemplateRequest:
       type: object
       additionalProperties: false
@@ -4700,6 +4704,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AppFile"
+        startup_command:
+          type: string
         persistent_storage_seed_files:
           type: array
           items:
@@ -4748,6 +4754,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AppFile"
+        startup_command:
+          type: string
         postgres:
           $ref: "#/components/schemas/AppPostgresSpec"
     ImportUploadMultipartRequest:
@@ -4832,6 +4840,8 @@ components:
         env:
           $ref: "#/components/schemas/StringMap"
         config_content:
+          type: string
+        startup_command:
           type: string
         files:
           type: array
