@@ -15,6 +15,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	runtimepkg "fugue/internal/runtime"
 )
 
 const serviceAccountNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
@@ -60,7 +62,8 @@ type kubeNodeList struct {
 
 type kubeNode struct {
 	Metadata struct {
-		Name string `json:"name"`
+		Name   string            `json:"name"`
+		Labels map[string]string `json:"labels,omitempty"`
 	} `json:"metadata"`
 }
 
@@ -232,6 +235,27 @@ func (c *kubeClient) listNodeNames(ctx context.Context) ([]string, error) {
 		names = append(names, name)
 	}
 	return names, nil
+}
+
+func (c *kubeClient) listNodeRuntimeIDs(ctx context.Context) (map[string]string, error) {
+	var nodeList kubeNodeList
+	if _, err := c.doJSON(ctx, http.MethodGet, "/api/v1/nodes", nil, &nodeList); err != nil {
+		return nil, err
+	}
+
+	runtimeIDs := make(map[string]string, len(nodeList.Items))
+	for _, node := range nodeList.Items {
+		name := strings.TrimSpace(node.Metadata.Name)
+		if name == "" {
+			continue
+		}
+		runtimeID := strings.TrimSpace(node.Metadata.Labels[runtimepkg.RuntimeIDLabelKey])
+		if runtimeID == "" {
+			continue
+		}
+		runtimeIDs[name] = runtimeID
+	}
+	return runtimeIDs, nil
 }
 
 func (c *kubeClient) createLease(ctx context.Context, namespace string, lease kubeLease) error {

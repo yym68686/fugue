@@ -2025,6 +2025,7 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 		if app.TenantID != op.TenantID {
 			return ErrNotFound
 		}
+		hydrateAppBackingServices(state, &app)
 
 		switch op.Type {
 		case model.OperationTypeImport:
@@ -2137,6 +2138,50 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			}
 			op.SourceRuntimeID = app.Spec.RuntimeID
 			op.TargetRuntimeID = targetRuntimeID
+		case model.OperationTypeDatabaseSwitchover:
+			if hasInFlightOperationForApp(state.Operations, app.ID) {
+				return ErrConflict
+			}
+			targetRuntimeID := strings.TrimSpace(op.TargetRuntimeID)
+			if targetRuntimeID == "" {
+				return ErrInvalidInput
+			}
+			if !runtimeVisibleToTenant(state, targetRuntimeID, op.TenantID) {
+				return ErrNotFound
+			}
+			postgresSpec := OwnedManagedPostgresSpec(app)
+			if postgresSpec == nil {
+				return ErrInvalidInput
+			}
+			sourceRuntimeID := strings.TrimSpace(postgresSpec.RuntimeID)
+			if sourceRuntimeID == "" {
+				sourceRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
+			}
+			if sourceRuntimeID == "" {
+				return ErrInvalidInput
+			}
+			targetRuntimeIndex := findRuntime(state, targetRuntimeID)
+			if targetRuntimeIndex < 0 {
+				return ErrNotFound
+			}
+			if err := validateFailoverTargetRuntimeType(state.Runtimes[targetRuntimeIndex].Type); err != nil {
+				return err
+			}
+			sourceRuntimeIndex := findRuntime(state, sourceRuntimeID)
+			if sourceRuntimeIndex < 0 {
+				return ErrNotFound
+			}
+			if err := validateFailoverTargetRuntimeType(state.Runtimes[sourceRuntimeIndex].Type); err != nil {
+				return err
+			}
+			if sourceRuntimeID == targetRuntimeID {
+				return ErrInvalidInput
+			}
+			op.SourceRuntimeID = sourceRuntimeID
+			op.TargetRuntimeID = targetRuntimeID
+			if op.DesiredSpec == nil {
+				op.DesiredSpec = cloneAppSpec(&app.Spec)
+			}
 		default:
 			return ErrInvalidInput
 		}
@@ -3081,11 +3126,21 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 			app.Status.CurrentReleaseStartedAt = nil
 			app.Status.CurrentReleaseReadyAt = nil
 		}
+	case model.OperationTypeDatabaseSwitchover:
+		if op.DesiredSpec == nil {
+			return ErrInvalidInput
+		}
+		if err := applyDesiredSpecBackingServicesState(state, app, op.DesiredSpec); err != nil {
+			return err
+		}
+		app.Spec = *op.DesiredSpec
 	default:
 		return ErrInvalidInput
 	}
-	app.Status.LastOperationID = op.ID
-	app.Status.LastMessage = op.ResultMessage
+	if op.Type != model.OperationTypeDatabaseSwitchover {
+		app.Status.LastOperationID = op.ID
+		app.Status.LastMessage = op.ResultMessage
+	}
 	app.Status.UpdatedAt = now
 	app.UpdatedAt = now
 	return nil
@@ -3095,6 +3150,9 @@ func applyInFlightOperationToApp(state *model.State, op *model.Operation) error 
 	appIndex := findApp(state, op.AppID)
 	if appIndex < 0 {
 		return ErrNotFound
+	}
+	if op.Type == model.OperationTypeDatabaseSwitchover {
+		return nil
 	}
 	phase, err := inFlightOperationPhase(*op)
 	if err != nil {
@@ -3157,6 +3215,8 @@ func inFlightOperationPhase(op model.Operation) (string, error) {
 		return "migrating", nil
 	case model.OperationTypeFailover:
 		return "failing-over", nil
+	case model.OperationTypeDatabaseSwitchover:
+		return "database-switchover", nil
 	default:
 		return "", ErrInvalidInput
 	}
@@ -3200,6 +3260,8 @@ func operationActionLabel(op model.Operation) string {
 		return "migrate"
 	case model.OperationTypeFailover:
 		return "failover"
+	case model.OperationTypeDatabaseSwitchover:
+		return "database switchover"
 	default:
 		return "operation"
 	}
@@ -3217,6 +3279,9 @@ func firstPositiveSpecPort(ports []int) int {
 func applyFailedOperationToApp(state *model.State, op *model.Operation) {
 	appIndex := findApp(state, op.AppID)
 	if appIndex < 0 {
+		return
+	}
+	if op.Type == model.OperationTypeDatabaseSwitchover {
 		return
 	}
 	now := time.Now().UTC()

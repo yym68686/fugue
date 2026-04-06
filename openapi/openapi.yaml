@@ -2115,6 +2115,31 @@ paths:
                 $ref: "#/components/schemas/OperationResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/database/switchover:
+    post:
+      operationId: switchoverAppDatabase
+      summary: Switchover App Database
+      tags: [Apps]
+      x-fugue-handler: handleSwitchoverAppDatabase
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FailoverAppRequest"
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/continuity:
     patch:
       operationId: patchAppContinuity

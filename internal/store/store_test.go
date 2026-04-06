@@ -197,6 +197,201 @@ func TestStatefulFailoverOperationUsesAppFailoverPolicy(t *testing.T) {
 	}
 }
 
+func TestDatabaseSwitchoverOperationUsesManagedPostgresPrimaryAndPreservesAppStatus(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Database Switchover")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	appRuntime, _, err := s.CreateRuntime(tenant.ID, "app-runtime", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create app runtime: %v", err)
+	}
+	databaseSource, _, err := s.CreateRuntime(tenant.ID, "db-source", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create database source runtime: %v", err)
+	}
+	databaseTarget, _, err := s.CreateRuntime(tenant.ID, "db-target", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create database target runtime: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: appRuntime.ID,
+		Postgres: &model.AppPostgresSpec{
+			Database:  "demo",
+			RuntimeID: databaseSource.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	currentApp, err := s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get current app: %v", err)
+	}
+	currentDatabase := OwnedManagedPostgresSpec(currentApp)
+	if currentDatabase == nil {
+		t.Fatalf("expected owned managed postgres spec, got app=%+v", currentApp)
+	}
+	if got := currentDatabase.RuntimeID; got != databaseSource.ID {
+		t.Fatalf("expected owned managed postgres runtime %q, got %q", databaseSource.ID, got)
+	}
+
+	deploySpec := app.Spec
+	deployOp, err := s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &deploySpec,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if _, err := s.CompleteManagedOperation(deployOp.ID, "/tmp/demo.yaml", "deployed"); err != nil {
+		t.Fatalf("complete deploy operation: %v", err)
+	}
+
+	switchoverOp, err := s.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeDatabaseSwitchover,
+		AppID:           app.ID,
+		TargetRuntimeID: databaseTarget.ID,
+	})
+	if err != nil {
+		t.Fatalf("create database switchover operation: %v", err)
+	}
+	if got := switchoverOp.SourceRuntimeID; got != databaseSource.ID {
+		t.Fatalf("expected database source runtime %q, got %q", databaseSource.ID, got)
+	}
+	if got := switchoverOp.TargetRuntimeID; got != databaseTarget.ID {
+		t.Fatalf("expected database target runtime %q, got %q", databaseTarget.ID, got)
+	}
+
+	finalSpec := deploySpec
+	finalSpec.Postgres = &model.AppPostgresSpec{
+		Database:                "demo",
+		RuntimeID:               databaseTarget.ID,
+		FailoverTargetRuntimeID: databaseSource.ID,
+		Instances:               2,
+		SynchronousReplicas:     1,
+	}
+	if _, err := s.CompleteManagedOperationWithResult(
+		switchoverOp.ID,
+		"/tmp/demo-db.yaml",
+		"managed postgres switched over",
+		&finalSpec,
+		nil,
+	); err != nil {
+		t.Fatalf("complete database switchover operation: %v", err)
+	}
+
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.Status.Phase != "deployed" {
+		t.Fatalf("expected app phase to remain deployed, got %q", app.Status.Phase)
+	}
+	if app.Status.LastOperationID != deployOp.ID {
+		t.Fatalf("expected last operation to stay %q, got %q", deployOp.ID, app.Status.LastOperationID)
+	}
+	if app.Status.LastMessage != "deployed" {
+		t.Fatalf("expected last message to stay deployed, got %q", app.Status.LastMessage)
+	}
+	if app.Spec.Postgres != nil {
+		t.Fatalf("expected app spec postgres to remain externalized, got %+v", app.Spec.Postgres)
+	}
+	currentDatabase = OwnedManagedPostgresSpec(app)
+	if currentDatabase == nil {
+		t.Fatal("expected owned managed postgres spec after switchover")
+	}
+	if got := currentDatabase.RuntimeID; got != databaseTarget.ID {
+		t.Fatalf("expected owned managed postgres runtime %q, got %q", databaseTarget.ID, got)
+	}
+	if got := currentDatabase.FailoverTargetRuntimeID; got != databaseSource.ID {
+		t.Fatalf("expected owned managed postgres failover runtime %q, got %q", databaseSource.ID, got)
+	}
+	if len(app.BackingServices) != 1 || app.BackingServices[0].Spec.Postgres == nil {
+		t.Fatalf("expected one managed postgres backing service, got %+v", app.BackingServices)
+	}
+	if got := app.BackingServices[0].Spec.Postgres.RuntimeID; got != databaseTarget.ID {
+		t.Fatalf("expected backing service postgres runtime %q, got %q", databaseTarget.ID, got)
+	}
+	if got := app.BackingServices[0].Spec.Postgres.FailoverTargetRuntimeID; got != databaseSource.ID {
+		t.Fatalf("expected backing service postgres failover runtime %q, got %q", databaseSource.ID, got)
+	}
+}
+
+func TestMigrateOperationRejectsExternalRuntimeWhenAppHasBoundManagedPostgres(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Bound Managed Postgres")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	sourceRuntime, _, err := s.CreateRuntime(tenant.ID, "source", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create source runtime: %v", err)
+	}
+	externalRuntime, _, err := s.CreateRuntime(tenant.ID, "target", model.RuntimeTypeExternalOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create external runtime: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: sourceRuntime.ID,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	service, err := s.CreateBackingService(tenant.ID, project.ID, "shared-db", "", model.BackingServiceSpec{
+		Postgres: &model.AppPostgresSpec{
+			Database: "demo",
+			User:     "demo",
+			Password: "secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create backing service: %v", err)
+	}
+	if _, err := s.BindBackingService(tenant.ID, app.ID, service.ID, "", nil); err != nil {
+		t.Fatalf("bind backing service: %v", err)
+	}
+
+	if _, err := s.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeMigrate,
+		AppID:           app.ID,
+		TargetRuntimeID: externalRuntime.ID,
+	}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected invalid input for external runtime with bound managed postgres, got %v", err)
+	}
+}
+
 func TestSharedNodeKeyBootstrapsMultipleNodesAndCanBeRevoked(t *testing.T) {
 	t.Parallel()
 

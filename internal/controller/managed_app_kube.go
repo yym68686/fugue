@@ -46,10 +46,12 @@ type kubeCloudNativePGCluster struct {
 		Instances int `json:"instances,omitempty"`
 	} `json:"spec"`
 	Status struct {
-		Phase          string `json:"phase,omitempty"`
-		ReadyInstances int    `json:"readyInstances,omitempty"`
-		CurrentPrimary string `json:"currentPrimary,omitempty"`
-		TargetPrimary  string `json:"targetPrimary,omitempty"`
+		Phase                  string `json:"phase,omitempty"`
+		PhaseReason            string `json:"phaseReason,omitempty"`
+		ReadyInstances         int    `json:"readyInstances,omitempty"`
+		CurrentPrimary         string `json:"currentPrimary,omitempty"`
+		TargetPrimary          string `json:"targetPrimary,omitempty"`
+		TargetPrimaryTimestamp string `json:"targetPrimaryTimestamp,omitempty"`
 	} `json:"status"`
 }
 
@@ -166,6 +168,29 @@ func (c *kubeClient) patchManagedAppStatus(ctx context.Context, namespace, name 
 		ctx,
 		http.MethodPatch,
 		managedAppAPIPath(namespace, name)+"/status",
+		"application/merge-patch+json",
+		body,
+		nil,
+	)
+	return err
+}
+
+func (c *kubeClient) patchCloudNativePGClusterStatus(
+	ctx context.Context,
+	namespace, name, targetPrimary, phase, phaseReason string,
+) error {
+	body := map[string]any{
+		"status": map[string]any{
+			"targetPrimary":          strings.TrimSpace(targetPrimary),
+			"targetPrimaryTimestamp": time.Now().UTC().Format(time.RFC3339),
+			"phase":                  strings.TrimSpace(phase),
+			"phaseReason":            strings.TrimSpace(phaseReason),
+		},
+	}
+	_, err := c.doRequest(
+		ctx,
+		http.MethodPatch,
+		cloudNativePGClusterAPIPath(c.effectiveNamespace(namespace), name)+"/status",
 		"application/merge-patch+json",
 		body,
 		nil,

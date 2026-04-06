@@ -7,6 +7,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/store"
 )
 
 func (s *Server) handlePatchAppContinuity(w http.ResponseWriter, r *http.Request) {
@@ -127,32 +128,7 @@ func (s *Server) handlePatchAppContinuity(w http.ResponseWriter, r *http.Request
 }
 
 func normalizedOwnedManagedPostgresSpec(app model.App) *model.AppPostgresSpec {
-	for _, service := range app.BackingServices {
-		if service.Type != model.BackingServiceTypePostgres || service.Spec.Postgres == nil {
-			continue
-		}
-		if strings.TrimSpace(service.OwnerAppID) != strings.TrimSpace(app.ID) {
-			continue
-		}
-		spec := cloneAppPostgresSpec(service.Spec.Postgres)
-		if spec == nil {
-			return nil
-		}
-		if strings.TrimSpace(spec.RuntimeID) == "" {
-			spec.RuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
-		}
-		spec.FailoverTargetRuntimeID = strings.TrimSpace(spec.FailoverTargetRuntimeID)
-		if spec.FailoverTargetRuntimeID != "" {
-			if spec.Instances < 2 {
-				spec.Instances = 2
-			}
-			if spec.SynchronousReplicas < 1 {
-				spec.SynchronousReplicas = 1
-			}
-		}
-		return spec
-	}
-	return nil
+	return store.OwnedManagedPostgresSpec(app)
 }
 
 func sanitizePostgresSpecForContinuityResponse(spec *model.AppPostgresSpec) *model.AppPostgresSpec {

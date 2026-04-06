@@ -591,6 +591,26 @@ func appHasManagedPostgresService(app model.App) bool {
 	return false
 }
 
+func OwnedManagedPostgresSpec(app model.App) *model.AppPostgresSpec {
+	if app.Spec.Postgres != nil {
+		normalized := normalizeManagedPostgresSpec(app.Name, app.Spec.RuntimeID, *app.Spec.Postgres)
+		return &normalized
+	}
+
+	for _, service := range app.BackingServices {
+		if strings.TrimSpace(service.OwnerAppID) != strings.TrimSpace(app.ID) {
+			continue
+		}
+		if !isManagedPostgresService(service) || service.Spec.Postgres == nil {
+			continue
+		}
+		normalized := normalizeManagedPostgresSpec(appNameForService(&service, &app), app.Spec.RuntimeID, *service.Spec.Postgres)
+		return &normalized
+	}
+
+	return nil
+}
+
 func ensureBoundPostgresViewBinding(app *model.App, service model.BackingService, spec model.AppPostgresSpec) {
 	if app == nil {
 		return

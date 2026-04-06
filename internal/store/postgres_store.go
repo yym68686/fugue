@@ -2523,7 +2523,7 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 	case model.OperationTypeFailover:
 		var inFlightCount int
 		if err := tx.QueryRowContext(ctx, `
-SELECT COUNT(1)
+	SELECT COUNT(1)
 FROM fugue_operations
 WHERE app_id = $1
   AND status IN ($2, $3, $4)
@@ -2566,6 +2566,63 @@ WHERE app_id = $1
 		}
 		op.SourceRuntimeID = app.Spec.RuntimeID
 		op.TargetRuntimeID = targetRuntimeID
+	case model.OperationTypeDatabaseSwitchover:
+		var inFlightCount int
+		if err := tx.QueryRowContext(ctx, `
+	SELECT COUNT(1)
+	FROM fugue_operations
+	WHERE app_id = $1
+	  AND status IN ($2, $3, $4)
+	`, app.ID, model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent).Scan(&inFlightCount); err != nil {
+			return model.Operation{}, fmt.Errorf("count in-flight app operations: %w", err)
+		}
+		if inFlightCount > 0 {
+			return model.Operation{}, ErrConflict
+		}
+		targetRuntimeID := strings.TrimSpace(op.TargetRuntimeID)
+		if targetRuntimeID == "" {
+			return model.Operation{}, ErrInvalidInput
+		}
+		visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, targetRuntimeID, op.TenantID)
+		if err != nil {
+			return model.Operation{}, err
+		}
+		if !visible {
+			return model.Operation{}, ErrNotFound
+		}
+		postgresSpec := OwnedManagedPostgresSpec(app)
+		if postgresSpec == nil {
+			return model.Operation{}, ErrInvalidInput
+		}
+		sourceRuntimeID := strings.TrimSpace(postgresSpec.RuntimeID)
+		if sourceRuntimeID == "" {
+			sourceRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
+		}
+		if sourceRuntimeID == "" {
+			return model.Operation{}, ErrInvalidInput
+		}
+		targetRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, targetRuntimeID)
+		if err != nil {
+			return model.Operation{}, err
+		}
+		if err := validateFailoverTargetRuntimeType(targetRuntimeType); err != nil {
+			return model.Operation{}, err
+		}
+		sourceRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, sourceRuntimeID)
+		if err != nil {
+			return model.Operation{}, err
+		}
+		if err := validateFailoverTargetRuntimeType(sourceRuntimeType); err != nil {
+			return model.Operation{}, err
+		}
+		if sourceRuntimeID == targetRuntimeID {
+			return model.Operation{}, ErrInvalidInput
+		}
+		op.SourceRuntimeID = sourceRuntimeID
+		op.TargetRuntimeID = targetRuntimeID
+		if op.DesiredSpec == nil {
+			op.DesiredSpec = cloneAppSpec(&app.Spec)
+		}
 	default:
 		return model.Operation{}, ErrInvalidInput
 	}
@@ -3019,7 +3076,7 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string,
 	if err != nil {
 		return model.Operation{}, mapDBErr(err)
 	}
-	if op.Type == model.OperationTypeDeploy {
+	if op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeDatabaseSwitchover {
 		if err := s.pgApplyDesiredSpecBackingServicesTx(ctx, tx, &app, op.DesiredSpec); err != nil {
 			return model.Operation{}, err
 		}
@@ -4125,17 +4182,27 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 			app.Status.CurrentReleaseStartedAt = nil
 			app.Status.CurrentReleaseReadyAt = nil
 		}
+	case model.OperationTypeDatabaseSwitchover:
+		if op.DesiredSpec == nil {
+			return ErrInvalidInput
+		}
+		app.Spec = *op.DesiredSpec
 	default:
 		return ErrInvalidInput
 	}
-	app.Status.LastOperationID = op.ID
-	app.Status.LastMessage = op.ResultMessage
+	if op.Type != model.OperationTypeDatabaseSwitchover {
+		app.Status.LastOperationID = op.ID
+		app.Status.LastMessage = op.ResultMessage
+	}
 	app.Status.UpdatedAt = now
 	app.UpdatedAt = now
 	return nil
 }
 
 func applyInFlightOperationToAppModel(app *model.App, op *model.Operation) error {
+	if op.Type == model.OperationTypeDatabaseSwitchover {
+		return nil
+	}
 	phase, err := inFlightOperationPhase(*op)
 	if err != nil {
 		return err
@@ -4150,6 +4217,9 @@ func applyInFlightOperationToAppModel(app *model.App, op *model.Operation) error
 }
 
 func applyFailedOperationToAppModel(app *model.App, op *model.Operation) {
+	if op.Type == model.OperationTypeDatabaseSwitchover {
+		return
+	}
 	now := time.Now().UTC()
 	app.Status.Phase = failedPhaseForApp(*app)
 	app.Status.LastOperationID = op.ID
