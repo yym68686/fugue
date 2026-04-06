@@ -25,6 +25,7 @@ const (
 	workspaceVolumeName                 = "app-workspace"
 	workspaceSidecarName                = AppWorkspaceContainerName
 	persistentStorageRootPath           = "/fugue-persistent-storage"
+	buildpackLauncherPath               = "/cnb/lifecycle/launcher"
 
 	CloudNativePGAPIVersion           = "postgresql.cnpg.io/v1"
 	CloudNativePGClusterKind          = "Cluster"
@@ -263,11 +264,12 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 	if resources := runtimeResourceRequirements(app.Spec.Resources); resources != nil {
 		container["resources"] = resources
 	}
-	if len(app.Spec.Command) > 0 {
-		container["command"] = app.Spec.Command
+	command, args := runtimeAppContainerCommandAndArgs(app)
+	if len(command) > 0 {
+		container["command"] = command
 	}
-	if len(app.Spec.Args) > 0 {
-		container["args"] = app.Spec.Args
+	if len(args) > 0 {
+		container["args"] = args
 	}
 	if len(app.Spec.Ports) > 0 {
 		ports := make([]map[string]any, 0, len(app.Spec.Ports))
@@ -405,6 +407,25 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 			},
 		},
 	}
+}
+
+func runtimeAppContainerCommandAndArgs(app model.App) ([]string, []string) {
+	command := append([]string(nil), app.Spec.Command...)
+	args := append([]string(nil), app.Spec.Args...)
+	if !usesBuildpackLauncherCommand(app) {
+		return command, args
+	}
+
+	launcherArgs := append([]string(nil), command...)
+	launcherArgs = append(launcherArgs, args...)
+	return []string{buildpackLauncherPath}, launcherArgs
+}
+
+func usesBuildpackLauncherCommand(app model.App) bool {
+	if len(app.Spec.Command) == 0 || app.Source == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(app.Source.BuildStrategy), model.AppBuildStrategyBuildpacks)
 }
 
 func buildAppTCPReadinessProbe(port int) map[string]any {
