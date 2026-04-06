@@ -3730,8 +3730,8 @@ SELECT EXISTS (
 
 func (s *Store) pgGetAppTx(ctx context.Context, tx *sql.Tx, id string, forUpdate bool) (model.App, error) {
 	query := `
-SELECT id, tenant_id, project_id, name, description, source_json, route_json, spec_json, status_json, created_at, updated_at
-FROM fugue_apps
+	SELECT id, tenant_id, project_id, name, description, source_json, route_json, spec_json, status_json, created_at, updated_at
+	FROM fugue_apps
 WHERE id = $1
 `
 	if forUpdate {
@@ -3739,6 +3739,9 @@ WHERE id = $1
 	}
 	app, err := scanApp(tx.QueryRowContext(ctx, query, id))
 	if err != nil {
+		return model.App{}, err
+	}
+	if err := s.pgHydrateAppBackingServicesWithQueryer(ctx, tx, &app); err != nil {
 		return model.App{}, err
 	}
 	return app, nil

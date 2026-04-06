@@ -276,14 +276,18 @@ func (s *Store) pgUnbindBackingService(bindingID string) (model.ServiceBinding, 
 }
 
 func (s *Store) pgHydrateAppBackingServices(ctx context.Context, app *model.App) error {
+	return s.pgHydrateAppBackingServicesWithQueryer(ctx, s.db, app)
+}
+
+func (s *Store) pgHydrateAppBackingServicesWithQueryer(ctx context.Context, queryer sqlQueryer, app *model.App) error {
 	if app == nil {
 		return nil
 	}
-	rows, err := s.db.QueryContext(ctx, `
-SELECT b.id, b.tenant_id, b.app_id, b.service_id, b.alias, b.env_json, b.created_at, b.updated_at,
-       s.id, s.tenant_id, s.project_id, s.owner_app_id, s.name, s.description, s.type, s.provisioner, s.status, s.spec_json, s.current_runtime_started_at, s.current_runtime_ready_at, s.created_at, s.updated_at
-FROM fugue_service_bindings AS b
-JOIN fugue_backing_services AS s ON s.id = b.service_id
+	rows, err := queryer.QueryContext(ctx, `
+	SELECT b.id, b.tenant_id, b.app_id, b.service_id, b.alias, b.env_json, b.created_at, b.updated_at,
+	       s.id, s.tenant_id, s.project_id, s.owner_app_id, s.name, s.description, s.type, s.provisioner, s.status, s.spec_json, s.current_runtime_started_at, s.current_runtime_ready_at, s.created_at, s.updated_at
+	FROM fugue_service_bindings AS b
+	JOIN fugue_backing_services AS s ON s.id = b.service_id
 WHERE b.app_id = $1
 ORDER BY b.created_at ASC, s.created_at ASC
 `, app.ID)

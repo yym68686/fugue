@@ -3,6 +3,7 @@ module fugue
 go 1.25.7
 
 require (
+	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/getkin/kin-openapi v0.134.0
 	github.com/google/go-containerregistry v0.21.3
 	github.com/jackc/pgx/v5 v5.9.1
