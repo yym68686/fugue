@@ -104,3 +104,64 @@ func TestBuildPythonOverlayFilesSkipsProjectsWithExplicitManifest(t *testing.T) 
 		t.Fatalf("expected no generated overlay files, got %d", len(files))
 	}
 }
+
+func TestAnalyzePythonProjectSuggestsExecutableWebScriptStartupCommand(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "app.py"), []byte(`from flask import Flask
+
+app = Flask(__name__)
+
+@app.route("/")
+def index():
+    return "ok"
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
+`), 0o644); err != nil {
+		t.Fatalf("write app.py: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "requirements.txt"), []byte("flask\n"), 0o644); err != nil {
+		t.Fatalf("write requirements.txt: %v", err)
+	}
+
+	analysis, err := analyzePythonProject(repoDir, ".")
+	if err != nil {
+		t.Fatalf("analyze python project: %v", err)
+	}
+	if got := analysis.SuggestedStartCommand; got != "python app.py" {
+		t.Fatalf("expected suggested startup command %q, got %q", "python app.py", got)
+	}
+	if analysis.DetectedPort != 5000 {
+		t.Fatalf("expected detected port 5000, got %d", analysis.DetectedPort)
+	}
+}
+
+func TestAnalyzePythonProjectSuggestsFlaskModuleStartupCommandWithoutMainGuard(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "service.py"), []byte(`from flask import Flask
+
+application = Flask(__name__)
+
+@application.route("/")
+def index():
+    return "ok"
+`), 0o644); err != nil {
+		t.Fatalf("write service.py: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "requirements.txt"), []byte("flask\n"), 0o644); err != nil {
+		t.Fatalf("write requirements.txt: %v", err)
+	}
+
+	analysis, err := analyzePythonProject(repoDir, ".")
+	if err != nil {
+		t.Fatalf("analyze python project: %v", err)
+	}
+	want := "python -m flask --app service:application run --host 0.0.0.0 --port ${PORT:-8000}"
+	if got := analysis.SuggestedStartCommand; got != want {
+		t.Fatalf("expected suggested startup command %q, got %q", want, got)
+	}
+}

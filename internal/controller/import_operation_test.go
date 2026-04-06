@@ -20,6 +20,7 @@ type recordingImporter struct {
 	githubReq           *sourceimport.GitHubSourceImportRequest
 	githubComposeEnvReq *sourceimport.GitHubComposeServiceEnvRequest
 	githubComposeEnv    map[string]string
+	githubOutput        *sourceimport.GitHubSourceImportOutput
 }
 
 func (r *recordingImporter) ImportDockerImageSource(_ context.Context, req sourceimport.DockerImageSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error) {
@@ -44,6 +45,10 @@ func (r *recordingImporter) ImportGitHubSource(_ context.Context, req sourceimpo
 	req.JobLabels = cloneStringMap(req.JobLabels)
 	req.PlacementNodeSelector = cloneStringMap(req.PlacementNodeSelector)
 	r.githubReq = &req
+	if r.githubOutput != nil {
+		output := *r.githubOutput
+		return output, nil
+	}
 	return sourceimport.GitHubSourceImportOutput{
 		ImportResult: sourceimport.GitHubImportResult{
 			BuildStrategy: model.AppBuildStrategyDockerfile,
@@ -554,6 +559,208 @@ func TestExecuteManagedImportOperationRefreshesComposeEnvWithoutOverwritingCusto
 	}
 	if got := deployOp.DesiredSpec.Env["PORT"]; got != "8080" {
 		t.Fatalf("expected compose PORT to override build suggestion, got %q", got)
+	}
+}
+
+func TestExecuteManagedImportOperationAppliesSuggestedStartupCommandWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyBuildpacks,
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	specCopy := app.Spec
+	sourceCopy := *app.Source
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		DesiredSource:   &sourceCopy,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+
+	importer := &recordingImporter{
+		githubOutput: &sourceimport.GitHubSourceImportOutput{
+			ImportResult: sourceimport.GitHubImportResult{
+				BuildStrategy:           model.AppBuildStrategyBuildpacks,
+				ImageRef:                "registry.push.example/fugue-apps/demo:git-abc123",
+				DetectedPort:            5000,
+				SuggestedStartupCommand: "python app.py",
+				SuggestedEnv:            map[string]string{"PORT": "5000"},
+			},
+			Source: model.AppSource{
+				Type:             model.AppSourceTypeGitHubPublic,
+				RepoURL:          "https://github.com/example/demo",
+				RepoBranch:       "main",
+				BuildStrategy:    model.AppBuildStrategyBuildpacks,
+				ResolvedImageRef: "registry.push.example/fugue-apps/demo:git-abc123",
+				DetectedProvider: "python",
+			},
+		},
+	}
+	svc := &Service{
+		Store:            stateStore,
+		Logger:           log.New(io.Discard, "", 0),
+		importer:         importer,
+		registryPushBase: "registry.push.example",
+		registryPullBase: "registry.pull.example",
+	}
+
+	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
+		t.Fatalf("execute managed import operation: %v", err)
+	}
+
+	ops, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+	var deployOp model.Operation
+	for _, candidate := range ops {
+		if candidate.Type == model.OperationTypeDeploy {
+			deployOp = candidate
+		}
+	}
+	if deployOp.ID == "" || deployOp.DesiredSpec == nil {
+		t.Fatalf("expected deploy operation with desired spec, got %+v", deployOp)
+	}
+	if !reflect.DeepEqual(deployOp.DesiredSpec.Command, []string{"sh", "-lc", "python app.py"}) {
+		t.Fatalf("expected suggested startup command to be applied, got %#v", deployOp.DesiredSpec.Command)
+	}
+	if got := deployOp.DesiredSpec.Env["PORT"]; got != "5000" {
+		t.Fatalf("expected suggested PORT env to be preserved, got %q", got)
+	}
+
+	completedImport, err := stateStore.GetOperation(op.ID)
+	if err != nil {
+		t.Fatalf("get completed import operation: %v", err)
+	}
+	if completedImport.DesiredSpec == nil {
+		t.Fatal("expected completed import operation to persist desired spec")
+	}
+	if !reflect.DeepEqual(completedImport.DesiredSpec.Command, []string{"sh", "-lc", "python app.py"}) {
+		t.Fatalf("expected completed import operation to persist inferred command, got %#v", completedImport.DesiredSpec.Command)
+	}
+}
+
+func TestExecuteManagedImportOperationDoesNotOverrideExplicitStartupCommand(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Command:   []string{"sh", "-lc", "python -m custom"},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyBuildpacks,
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	specCopy := app.Spec
+	sourceCopy := *app.Source
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		DesiredSource:   &sourceCopy,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+
+	importer := &recordingImporter{
+		githubOutput: &sourceimport.GitHubSourceImportOutput{
+			ImportResult: sourceimport.GitHubImportResult{
+				BuildStrategy:           model.AppBuildStrategyBuildpacks,
+				ImageRef:                "registry.push.example/fugue-apps/demo:git-abc123",
+				DetectedPort:            5000,
+				SuggestedStartupCommand: "python app.py",
+			},
+			Source: model.AppSource{
+				Type:             model.AppSourceTypeGitHubPublic,
+				RepoURL:          "https://github.com/example/demo",
+				RepoBranch:       "main",
+				BuildStrategy:    model.AppBuildStrategyBuildpacks,
+				ResolvedImageRef: "registry.push.example/fugue-apps/demo:git-abc123",
+				DetectedProvider: "python",
+			},
+		},
+	}
+	svc := &Service{
+		Store:            stateStore,
+		Logger:           log.New(io.Discard, "", 0),
+		importer:         importer,
+		registryPushBase: "registry.push.example",
+		registryPullBase: "registry.pull.example",
+	}
+
+	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
+		t.Fatalf("execute managed import operation: %v", err)
+	}
+
+	ops, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+	var deployOp model.Operation
+	for _, candidate := range ops {
+		if candidate.Type == model.OperationTypeDeploy {
+			deployOp = candidate
+		}
+	}
+	if deployOp.ID == "" || deployOp.DesiredSpec == nil {
+		t.Fatalf("expected deploy operation with desired spec, got %+v", deployOp)
+	}
+	if !reflect.DeepEqual(deployOp.DesiredSpec.Command, []string{"sh", "-lc", "python -m custom"}) {
+		t.Fatalf("expected explicit startup command to win, got %#v", deployOp.DesiredSpec.Command)
 	}
 }
 

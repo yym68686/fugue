@@ -16,12 +16,23 @@ type pythonProjectAnalysis struct {
 	HasDependencyManifest bool
 	DetectedPort          int
 	InferredRequirements  []string
+	SuggestedStartCommand string
+}
+
+type pythonStartupCommandCandidate struct {
+	Command      string
+	RelativePath string
+	Score        int
 }
 
 var (
-	pythonUvicornPortPattern = regexp.MustCompile(`(?s)\buvicorn\.run\s*\([^)]*?\bport\s*=\s*([0-9]{2,5})`)
-	pythonAppRunPortPattern  = regexp.MustCompile(`(?s)\bapp\.run\s*\([^)]*?\bport\s*=\s*([0-9]{2,5})`)
-	pythonImportNamePattern  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	pythonUvicornPortPattern  = regexp.MustCompile(`(?s)\buvicorn\.run\s*\([^)]*?\bport\s*=\s*([0-9]{2,5})`)
+	pythonAppRunPortPattern   = regexp.MustCompile(`(?s)\bapp\.run\s*\([^)]*?\bport\s*=\s*([0-9]{2,5})`)
+	pythonImportNamePattern   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	pythonMainGuardPattern    = regexp.MustCompile(`(?m)^\s*if\s+__name__\s*==\s*["']__main__["']\s*:`)
+	pythonFlaskAppPattern     = regexp.MustCompile(`(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*Flask\s*\(`)
+	pythonASGIAppPattern      = regexp.MustCompile(`(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:FastAPI|Starlette)\s*\(`)
+	pythonShellSafeArgPattern = regexp.MustCompile(`^[A-Za-z0-9_./-]+$`)
 )
 
 var pythonDependencyAliasByImport = map[string]string{
@@ -99,23 +110,29 @@ func analyzePythonProjectInDir(appDir string) (pythonProjectAnalysis, error) {
 	}
 
 	imports := make(map[string]struct{})
+	bestStartupCandidate := pythonStartupCommandCandidate{}
 	for _, filePath := range pythonFiles {
 		contentBytes, err := os.ReadFile(filePath)
 		if err != nil {
 			return analysis, err
 		}
 		content := string(contentBytes)
-		for _, importPath := range collectPythonImportPaths(content) {
+		fileImports := collectPythonImportPaths(content)
+		for _, importPath := range fileImports {
 			imports[importPath] = struct{}{}
 		}
 		if analysis.DetectedPort == 0 {
 			analysis.DetectedPort = detectPythonPortFromContent(content)
+		}
+		if candidate, ok := inferPythonStartupCommandCandidate(appDir, filePath, content, analysis.DetectedPort); ok && betterPythonStartupCommandCandidate(candidate, bestStartupCandidate) {
+			bestStartupCandidate = candidate
 		}
 	}
 
 	if !analysis.HasDependencyManifest {
 		analysis.InferredRequirements = inferPythonRequirements(imports, localModules)
 	}
+	analysis.SuggestedStartCommand = bestStartupCandidate.Command
 
 	return analysis, nil
 }
@@ -304,6 +321,133 @@ func detectPythonPortFromContent(content string) int {
 		}
 	}
 	return 0
+}
+
+func inferPythonStartupCommandCandidate(appDir, filePath, content string, detectedPort int) (pythonStartupCommandCandidate, bool) {
+	relativePath, err := filepath.Rel(appDir, filePath)
+	if err != nil {
+		return pythonStartupCommandCandidate{}, false
+	}
+	relativePath = filepath.ToSlash(strings.TrimSpace(relativePath))
+	if relativePath == "" || relativePath == "." {
+		return pythonStartupCommandCandidate{}, false
+	}
+
+	rootBonus := 0
+	if !strings.Contains(relativePath, "/") {
+		rootBonus = 25
+	}
+	scorePenalty := len(relativePath)
+
+	if pythonMainGuardPattern.MatchString(content) && pythonFileLooksLikeWebEntrypoint(content) {
+		return pythonStartupCommandCandidate{
+			Command:      "python " + shellArgForStartupCommand(relativePath),
+			RelativePath: relativePath,
+			Score:        300 + rootBonus - scorePenalty,
+		}, true
+	}
+
+	moduleRef := pythonModuleReferenceFromRelativePath(relativePath)
+	if moduleRef == "" {
+		return pythonStartupCommandCandidate{}, false
+	}
+	port := defaultPythonStartupPort(detectedPort)
+
+	if variable := pythonAssignedVariable(content, pythonASGIAppPattern); variable != "" {
+		return pythonStartupCommandCandidate{
+			Command:      "python -m uvicorn " + moduleRef + ":" + variable + " --host 0.0.0.0 --port ${PORT:-" + strconv.Itoa(port) + "}",
+			RelativePath: relativePath,
+			Score:        220 + rootBonus - scorePenalty,
+		}, true
+	}
+	if variable := pythonAssignedVariable(content, pythonFlaskAppPattern); variable != "" {
+		return pythonStartupCommandCandidate{
+			Command:      "python -m flask --app " + moduleRef + ":" + variable + " run --host 0.0.0.0 --port ${PORT:-" + strconv.Itoa(port) + "}",
+			RelativePath: relativePath,
+			Score:        200 + rootBonus - scorePenalty,
+		}, true
+	}
+
+	return pythonStartupCommandCandidate{}, false
+}
+
+func betterPythonStartupCommandCandidate(next, current pythonStartupCommandCandidate) bool {
+	if strings.TrimSpace(next.Command) == "" {
+		return false
+	}
+	if strings.TrimSpace(current.Command) == "" {
+		return true
+	}
+	if next.Score != current.Score {
+		return next.Score > current.Score
+	}
+	return next.RelativePath < current.RelativePath
+}
+
+func pythonFileLooksLikeWebEntrypoint(content string) bool {
+	if pythonAssignedVariable(content, pythonFlaskAppPattern) != "" || pythonAssignedVariable(content, pythonASGIAppPattern) != "" {
+		return true
+	}
+	if strings.Contains(content, "uvicorn.run(") || strings.Contains(content, "app.run(") || strings.Contains(content, "application.run(") || strings.Contains(content, ".route(") {
+		return true
+	}
+	for _, importPath := range collectPythonImportPaths(content) {
+		switch strings.TrimSpace(importPath) {
+		case "aiohttp", "bottle", "django", "fastapi", "flask", "http.server", "quart", "sanic", "socketserver", "starlette", "tornado", "uvicorn", "wsgiref":
+			return true
+		}
+	}
+	return false
+}
+
+func pythonAssignedVariable(content string, pattern *regexp.Regexp) string {
+	matches := pattern.FindStringSubmatch(content)
+	if len(matches) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(matches[1])
+}
+
+func pythonModuleReferenceFromRelativePath(relativePath string) string {
+	relativePath = filepath.ToSlash(strings.TrimSpace(relativePath))
+	switch {
+	case relativePath == "", relativePath == ".", relativePath == "__init__.py":
+		return ""
+	case strings.HasSuffix(relativePath, "/__init__.py"):
+		relativePath = strings.TrimSuffix(relativePath, "/__init__.py")
+	case strings.HasSuffix(relativePath, ".py"):
+		relativePath = strings.TrimSuffix(relativePath, ".py")
+	default:
+		return ""
+	}
+	if relativePath == "" {
+		return ""
+	}
+	parts := strings.Split(relativePath, "/")
+	for _, part := range parts {
+		if !pythonImportNamePattern.MatchString(part) {
+			return ""
+		}
+	}
+	return strings.Join(parts, ".")
+}
+
+func defaultPythonStartupPort(detectedPort int) int {
+	if detectedPort > 0 {
+		return detectedPort
+	}
+	return 8000
+}
+
+func shellArgForStartupCommand(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "''"
+	}
+	if pythonShellSafeArgPattern.MatchString(value) {
+		return value
+	}
+	return shellQuoteForOverlay(value)
 }
 
 func buildGeneratedPythonRequirements(requirements []string) string {

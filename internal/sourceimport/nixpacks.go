@@ -113,7 +113,7 @@ func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, re
 	}
 	provider, port := detectNixpacksProviderAndPort(repo.RepoDir, normalizedSourceDir)
 	detectedStack := detectPrimaryTechStack(repo.RepoDir, normalizedSourceDir)
-	sourceOverlayFiles, _, err := buildPythonOverlayFiles(repo.RepoDir, normalizedSourceDir)
+	sourceOverlayFiles, pythonAnalysis, err := buildPythonOverlayFiles(repo.RepoDir, normalizedSourceDir)
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
@@ -139,19 +139,20 @@ func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, re
 	}
 
 	return GitHubImportResult{
-		RepoOwner:         repo.RepoOwner,
-		RepoName:          repo.RepoName,
-		Branch:            repo.Branch,
-		CommitSHA:         repo.CommitSHA,
-		CommitCommittedAt: repo.CommitCommittedAt,
-		SourceDir:         normalizeImportedSourceDirValue(normalizedSourceDir),
-		BuildStrategy:     model.AppBuildStrategyNixpacks,
-		ImageRef:          imageRef,
-		DefaultAppName:    repo.DefaultAppName,
-		DetectedPort:      port,
-		DetectedProvider:  provider,
-		DetectedStack:     detectedStack,
-		SuggestedEnv:      suggestedNixpacksEnv(port),
+		RepoOwner:               repo.RepoOwner,
+		RepoName:                repo.RepoName,
+		Branch:                  repo.Branch,
+		CommitSHA:               repo.CommitSHA,
+		CommitCommittedAt:       repo.CommitCommittedAt,
+		SourceDir:               normalizeImportedSourceDirValue(normalizedSourceDir),
+		BuildStrategy:           model.AppBuildStrategyNixpacks,
+		ImageRef:                imageRef,
+		DefaultAppName:          repo.DefaultAppName,
+		DetectedPort:            port,
+		DetectedProvider:        provider,
+		DetectedStack:           detectedStack,
+		SuggestedEnv:            suggestedNixpacksEnv(port),
+		SuggestedStartupCommand: pythonAnalysis.SuggestedStartCommand,
 	}, nil
 }
 

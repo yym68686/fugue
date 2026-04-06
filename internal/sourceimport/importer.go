@@ -42,21 +42,22 @@ type GitHubImportRequest struct {
 }
 
 type GitHubImportResult struct {
-	RepoOwner         string
-	RepoName          string
-	Branch            string
-	CommitSHA         string
-	CommitCommittedAt string
-	SourceDir         string
-	BuildStrategy     string
-	DockerfilePath    string
-	BuildContextDir   string
-	ImageRef          string
-	DefaultAppName    string
-	DetectedPort      int
-	DetectedProvider  string
-	DetectedStack     string
-	SuggestedEnv      map[string]string
+	RepoOwner               string
+	RepoName                string
+	Branch                  string
+	CommitSHA               string
+	CommitCommittedAt       string
+	SourceDir               string
+	BuildStrategy           string
+	DockerfilePath          string
+	BuildContextDir         string
+	ImageRef                string
+	DefaultAppName          string
+	DetectedPort            int
+	DetectedProvider        string
+	DetectedStack           string
+	SuggestedEnv            map[string]string
+	SuggestedStartupCommand string
 }
 
 func NewImporter(workDir string, logger *log.Logger, builderPolicy BuilderPodPolicy) *Importer {

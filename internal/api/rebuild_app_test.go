@@ -304,6 +304,60 @@ func TestRebuildAppRefreshesWorkspaceResetToken(t *testing.T) {
 	}
 }
 
+func TestRebuildAppRecoversFailedImportedAppPatchedEnv(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, app, recoveredImage, _ := setupFailedImportedAppRecoveryServer(t)
+
+	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID+"/env", apiKey, map[string]any{
+		"set": map[string]string{
+			"FIXED": "1",
+		},
+	})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/rebuild", apiKey, nil)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Operation model.Operation `json:"operation"`
+		Build     struct {
+			SourceType    string `json:"source_type"`
+			Branch        string `json:"branch"`
+			BuildStrategy string `json:"build_strategy"`
+		} `json:"build"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+
+	if response.Build.SourceType != model.AppSourceTypeDockerImage {
+		t.Fatalf("expected rebuild source type %q, got %q", model.AppSourceTypeDockerImage, response.Build.SourceType)
+	}
+
+	op, err := s.GetOperation(response.Operation.ID)
+	if err != nil {
+		t.Fatalf("get rebuild operation: %v", err)
+	}
+	if op.Type != model.OperationTypeImport {
+		t.Fatalf("expected import operation, got %q", op.Type)
+	}
+	if op.DesiredSpec == nil {
+		t.Fatal("expected desired spec on rebuild operation")
+	}
+	if got := op.DesiredSpec.Image; got != recoveredImage {
+		t.Fatalf("expected recovered image %q, got %q", recoveredImage, got)
+	}
+	if got := op.DesiredSpec.Env["BROKEN"]; got != "1" {
+		t.Fatalf("expected rebuild to recover BROKEN=1, got %q", got)
+	}
+	if got := op.DesiredSpec.Env["FIXED"]; got != "1" {
+		t.Fatalf("expected rebuild to preserve patched FIXED=1, got %q", got)
+	}
+}
+
 func setupRebuildAppTestServer(t *testing.T) (*store.Store, *Server, string, model.Tenant, model.Project) {
 	t.Helper()
 

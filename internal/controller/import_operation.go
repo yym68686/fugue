@@ -134,6 +134,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		finalSpec.Ports = []int{detectedPort}
 	}
 	finalSpec.Env = mergeImportEnv(finalSpec.Env, output.ImportResult.SuggestedEnv)
+	finalSpec.Command = mergeImportCommand(finalSpec.Command, finalSpec.Args, output.ImportResult.SuggestedStartupCommand)
 
 	if err := s.ensureOperationStillActive(op.ID); err != nil {
 		return err
@@ -227,6 +228,17 @@ func mergeImportEnv(current, suggested map[string]string) map[string]string {
 		return nil
 	}
 	return merged
+}
+
+func mergeImportCommand(current, args []string, suggested string) []string {
+	if len(current) > 0 || len(args) > 0 {
+		return current
+	}
+	suggested = strings.TrimSpace(suggested)
+	if suggested == "" {
+		return nil
+	}
+	return []string{"sh", "-lc", suggested}
 }
 
 func mergeSuggestedImportEnv(base, override map[string]string) map[string]string {

@@ -28,7 +28,12 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 	if !allowed {
 		return
 	}
-	if app.Source == nil {
+	spec, baselineSource, err := s.recoverAppDeployBaseline(app)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if baselineSource == nil {
 		httpx.WriteError(w, http.StatusBadRequest, "app does not have an import source")
 		return
 	}
@@ -41,19 +46,19 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	branch := strings.TrimSpace(app.Source.RepoBranch)
+	branch := strings.TrimSpace(baselineSource.RepoBranch)
 	if req.Branch != nil {
 		branch = strings.TrimSpace(*req.Branch)
 	}
 
-	buildStrategy := strings.TrimSpace(app.Source.BuildStrategy)
+	buildStrategy := strings.TrimSpace(baselineSource.BuildStrategy)
 	if buildStrategy == "" {
 		buildStrategy = model.AppBuildStrategyStaticSite
 	}
 
-	sourceDir := strings.TrimSpace(app.Source.SourceDir)
-	dockerfilePath := strings.TrimSpace(app.Source.DockerfilePath)
-	buildContextDir := strings.TrimSpace(app.Source.BuildContextDir)
+	sourceDir := strings.TrimSpace(baselineSource.SourceDir)
+	dockerfilePath := strings.TrimSpace(baselineSource.DockerfilePath)
+	buildContextDir := strings.TrimSpace(baselineSource.BuildContextDir)
 	switch buildStrategy {
 	case model.AppBuildStrategyStaticSite, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks:
 		if req.SourceDir != nil {
@@ -79,12 +84,12 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		source model.AppSource
-		err    error
+		source   model.AppSource
+		buildErr error
 	)
-	switch strings.TrimSpace(app.Source.Type) {
+	switch strings.TrimSpace(baselineSource.Type) {
 	case model.AppSourceTypeDockerImage:
-		imageRef := strings.TrimSpace(app.Source.ImageRef)
+		imageRef := strings.TrimSpace(baselineSource.ImageRef)
 		if req.ImageRef != nil {
 			imageRef = strings.TrimSpace(*req.ImageRef)
 		}
@@ -92,42 +97,42 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusBadRequest, "app source image_ref is missing")
 			return
 		}
-		source, err = buildQueuedImageSource(
+		source, buildErr = buildQueuedImageSource(
 			imageRef,
-			strings.TrimSpace(app.Source.ImageNameSuffix),
-			strings.TrimSpace(app.Source.ComposeService),
+			strings.TrimSpace(baselineSource.ImageNameSuffix),
+			strings.TrimSpace(baselineSource.ComposeService),
 		)
-		if err != nil {
-			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		if buildErr != nil {
+			httpx.WriteError(w, http.StatusBadRequest, buildErr.Error())
 			return
 		}
 	case model.AppSourceTypeGitHubPublic, model.AppSourceTypeGitHubPrivate:
-		if strings.TrimSpace(app.Source.RepoURL) == "" {
+		if strings.TrimSpace(baselineSource.RepoURL) == "" {
 			httpx.WriteError(w, http.StatusBadRequest, "app source repo_url is missing")
 			return
 		}
-		repoAuthToken := strings.TrimSpace(app.Source.RepoAuthToken)
+		repoAuthToken := strings.TrimSpace(baselineSource.RepoAuthToken)
 		if req.RepoAuthToken != nil {
 			repoAuthToken = strings.TrimSpace(*req.RepoAuthToken)
 		}
-		source, err = buildQueuedGitHubSource(
-			app.Source.RepoURL,
-			app.Source.Type,
+		source, buildErr = buildQueuedGitHubSource(
+			baselineSource.RepoURL,
+			baselineSource.Type,
 			repoAuthToken,
 			branch,
 			sourceDir,
 			dockerfilePath,
 			buildContextDir,
 			buildStrategy,
-			strings.TrimSpace(app.Source.ImageNameSuffix),
-			strings.TrimSpace(app.Source.ComposeService),
+			strings.TrimSpace(baselineSource.ImageNameSuffix),
+			strings.TrimSpace(baselineSource.ComposeService),
 		)
-		if err != nil {
-			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		if buildErr != nil {
+			httpx.WriteError(w, http.StatusBadRequest, buildErr.Error())
 			return
 		}
 	case model.AppSourceTypeUpload:
-		uploadID := strings.TrimSpace(app.Source.UploadID)
+		uploadID := strings.TrimSpace(baselineSource.UploadID)
 		if uploadID == "" {
 			httpx.WriteError(w, http.StatusBadRequest, "app source upload_id is missing")
 			return
@@ -141,28 +146,26 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusBadRequest, "app source upload is not visible to this tenant")
 			return
 		}
-		source, err = buildQueuedUploadSource(
+		source, buildErr = buildQueuedUploadSource(
 			upload,
 			sourceDir,
 			dockerfilePath,
 			buildContextDir,
 			buildStrategy,
-			strings.TrimSpace(app.Source.ImageNameSuffix),
-			strings.TrimSpace(app.Source.ComposeService),
+			strings.TrimSpace(baselineSource.ImageNameSuffix),
+			strings.TrimSpace(baselineSource.ComposeService),
 		)
-		if err != nil {
-			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		if buildErr != nil {
+			httpx.WriteError(w, http.StatusBadRequest, buildErr.Error())
 			return
 		}
 	default:
 		httpx.WriteError(w, http.StatusBadRequest, "only github-backed, image-backed, or upload apps can be rebuilt")
 		return
 	}
-	if len(app.Source.ComposeDependsOn) > 0 {
-		source.ComposeDependsOn = append([]string(nil), app.Source.ComposeDependsOn...)
+	if len(baselineSource.ComposeDependsOn) > 0 {
+		source.ComposeDependsOn = append([]string(nil), baselineSource.ComposeDependsOn...)
 	}
-
-	spec := cloneAppSpec(app.Spec)
 	if spec.Replicas < 1 {
 		spec.Replicas = 1
 	}

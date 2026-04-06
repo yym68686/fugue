@@ -339,7 +339,7 @@ func importBuildpacksFromExtractedUpload(ctx context.Context, src extractedUploa
 	}
 	provider, port := detectBuildpacksProviderAndPort(src.RootDir, normalizedSourceDir)
 	detectedStack := detectPrimaryTechStack(src.RootDir, normalizedSourceDir)
-	sourceOverlayFiles, _, err := buildPythonOverlayFiles(src.RootDir, normalizedSourceDir)
+	sourceOverlayFiles, pythonAnalysis, err := buildPythonOverlayFiles(src.RootDir, normalizedSourceDir)
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
@@ -359,15 +359,16 @@ func importBuildpacksFromExtractedUpload(ctx context.Context, src extractedUploa
 		return GitHubImportResult{}, err
 	}
 	return GitHubImportResult{
-		CommitSHA:        src.ArchiveSHA256,
-		SourceDir:        normalizeImportedSourceDirValue(normalizedSourceDir),
-		BuildStrategy:    model.AppBuildStrategyBuildpacks,
-		ImageRef:         imageRef,
-		DefaultAppName:   src.DefaultAppName,
-		DetectedPort:     port,
-		DetectedProvider: provider,
-		DetectedStack:    detectedStack,
-		SuggestedEnv:     suggestedBuildpacksEnv(port),
+		CommitSHA:               src.ArchiveSHA256,
+		SourceDir:               normalizeImportedSourceDirValue(normalizedSourceDir),
+		BuildStrategy:           model.AppBuildStrategyBuildpacks,
+		ImageRef:                imageRef,
+		DefaultAppName:          src.DefaultAppName,
+		DetectedPort:            port,
+		DetectedProvider:        provider,
+		DetectedStack:           detectedStack,
+		SuggestedEnv:            suggestedBuildpacksEnv(port),
+		SuggestedStartupCommand: pythonAnalysis.SuggestedStartCommand,
 	}, nil
 }
 
@@ -381,7 +382,7 @@ func importNixpacksFromExtractedUpload(ctx context.Context, src extractedUploadS
 	}
 	provider, port := detectNixpacksProviderAndPort(src.RootDir, normalizedSourceDir)
 	detectedStack := detectPrimaryTechStack(src.RootDir, normalizedSourceDir)
-	sourceOverlayFiles, _, err := buildPythonOverlayFiles(src.RootDir, normalizedSourceDir)
+	sourceOverlayFiles, pythonAnalysis, err := buildPythonOverlayFiles(src.RootDir, normalizedSourceDir)
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
@@ -401,15 +402,16 @@ func importNixpacksFromExtractedUpload(ctx context.Context, src extractedUploadS
 		return GitHubImportResult{}, err
 	}
 	return GitHubImportResult{
-		CommitSHA:        src.ArchiveSHA256,
-		SourceDir:        normalizeImportedSourceDirValue(normalizedSourceDir),
-		BuildStrategy:    model.AppBuildStrategyNixpacks,
-		ImageRef:         imageRef,
-		DefaultAppName:   src.DefaultAppName,
-		DetectedPort:     port,
-		DetectedProvider: provider,
-		DetectedStack:    detectedStack,
-		SuggestedEnv:     suggestedNixpacksEnv(port),
+		CommitSHA:               src.ArchiveSHA256,
+		SourceDir:               normalizeImportedSourceDirValue(normalizedSourceDir),
+		BuildStrategy:           model.AppBuildStrategyNixpacks,
+		ImageRef:                imageRef,
+		DefaultAppName:          src.DefaultAppName,
+		DetectedPort:            port,
+		DetectedProvider:        provider,
+		DetectedStack:           detectedStack,
+		SuggestedEnv:            suggestedNixpacksEnv(port),
+		SuggestedStartupCommand: pythonAnalysis.SuggestedStartCommand,
 	}, nil
 }
 
