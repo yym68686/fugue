@@ -39,6 +39,7 @@ type buildpacksBuildRequest struct {
 	ArchiveDownloadURL    string
 	SourceDir             string
 	ImageRef              string
+	SourceOverlayFiles    []sourceOverlayFile
 	JobLabels             map[string]string
 	PlacementNodeSelector map[string]string
 	PodPolicy             BuilderPodPolicy
@@ -66,6 +67,10 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 	}
 	provider, port := detectBuildpacksProviderAndPort(repo.RepoDir, normalizedSourceDir)
 	detectedStack := detectPrimaryTechStack(repo.RepoDir, normalizedSourceDir)
+	sourceOverlayFiles, _, err := buildPythonOverlayFiles(repo.RepoDir, normalizedSourceDir)
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
 	if err := buildAndPushBuildpacksImage(ctx, buildpacksBuildRequest{
@@ -75,6 +80,7 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		CommitSHA:             repo.CommitSHA,
 		SourceDir:             normalizedSourceDir,
 		ImageRef:              imageRef,
+		SourceOverlayFiles:    sourceOverlayFiles,
 		JobLabels:             jobLabels,
 		PlacementNodeSelector: placementNodeSelector,
 		PodPolicy:             builderPolicy,
@@ -160,6 +166,13 @@ func buildBuildpacksJobObject(namespace, jobName string, req buildpacksBuildRequ
 		initContainers = buildArchiveDownloadInitContainers(req.ArchiveDownloadURL)
 	} else {
 		initContainers = buildGitCloneInitContainers(req.RepoURL, req.Branch, req.CommitSHA, req.RepoAuthToken)
+	}
+	sourceOverlayContainer, err := buildSourceOverlayInitContainer(workingDir, req.SourceOverlayFiles)
+	if err != nil {
+		return nil, err
+	}
+	if sourceOverlayContainer != nil {
+		initContainers = append(initContainers, sourceOverlayContainer)
 	}
 	jobObject := map[string]any{
 		"apiVersion": "batch/v1",

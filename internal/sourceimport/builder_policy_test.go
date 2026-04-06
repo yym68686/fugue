@@ -2,6 +2,7 @@ package sourceimport
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -88,6 +89,61 @@ func TestBuildBuildpacksJobObjectAppliesHeavyBuilderPolicy(t *testing.T) {
 	limits := builderResourceValues(t, initContainer, "limits")
 	if got := limits["ephemeral-storage"]; got != "8Gi" {
 		t.Fatalf("expected heavy init ephemeral-storage limit 8Gi, got %q", got)
+	}
+}
+
+func TestBuildBuildpacksJobObjectInjectsSourceOverlayBeforeBuild(t *testing.T) {
+	t.Parallel()
+
+	jobObject, err := buildBuildpacksJobObject("fugue-system", "build-demo", buildpacksBuildRequest{
+		ArchiveDownloadURL: "https://example.com/archive.tar.gz",
+		SourceDir:          ".",
+		ImageRef:           "10.128.0.2:30500/fugue-apps/demo:git-abc123",
+		SourceOverlayFiles: []sourceOverlayFile{
+			{
+				RelativePath:  "requirements.txt",
+				Content:       "fastapi\n",
+				OnlyIfMissing: true,
+			},
+		},
+		WorkloadProfile: builderWorkloadProfileHeavy,
+	})
+	if err != nil {
+		t.Fatalf("build buildpacks job object: %v", err)
+	}
+
+	podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	initContainers := podSpec["initContainers"].([]map[string]any)
+	if len(initContainers) != 2 {
+		t.Fatalf("expected download and overlay init containers, got %d", len(initContainers))
+	}
+	if got := initContainers[1]["name"]; got != "source-overlay" {
+		t.Fatalf("expected source-overlay init container, got %#v", got)
+	}
+	command := initContainers[1]["command"].([]string)
+	if !strings.Contains(command[2], "requirements.txt") {
+		t.Fatalf("expected overlay command to mention requirements.txt, got %q", command[2])
+	}
+}
+
+func TestBuildNixpacksJobObjectUsesCompatibleShellOptions(t *testing.T) {
+	t.Parallel()
+
+	jobObject, err := buildNixpacksJobObject("fugue-system", "build-demo", nixpacksBuildRequest{
+		ArchiveDownloadURL: "https://example.com/archive.tar.gz",
+		SourceDir:          ".",
+		ImageRef:           "10.128.0.2:30500/fugue-apps/demo:git-abc123",
+		WorkloadProfile:    builderWorkloadProfileLight,
+	})
+	if err != nil {
+		t.Fatalf("build nixpacks job object: %v", err)
+	}
+
+	podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	initContainers := podSpec["initContainers"].([]map[string]any)
+	command := initContainers[len(initContainers)-1]["command"].([]string)
+	if strings.Contains(command[2], "pipefail") {
+		t.Fatalf("expected nixpacks init script to avoid pipefail, got %q", command[2])
 	}
 }
 

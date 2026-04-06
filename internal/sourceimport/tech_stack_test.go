@@ -48,3 +48,16 @@ func TestDetectPrimaryTechStackWalksUpFromStaticOutputDir(t *testing.T) {
 		t.Fatalf("expected nextjs stack from dist source dir, got %q", got)
 	}
 }
+
+func TestDetectPrimaryTechStackRecognizesPythonSourceWithoutManifest(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "main.py"), []byte("print('hello')\n"), 0o644); err != nil {
+		t.Fatalf("write main.py: %v", err)
+	}
+
+	if got := detectPrimaryTechStack(repoDir, "."); got != "python" {
+		t.Fatalf("expected python stack, got %q", got)
+	}
+}

@@ -56,6 +56,7 @@ type nixpacksBuildRequest struct {
 	ArchiveDownloadURL    string
 	SourceDir             string
 	ImageRef              string
+	SourceOverlayFiles    []sourceOverlayFile
 	JobLabels             map[string]string
 	PlacementNodeSelector map[string]string
 	PodPolicy             BuilderPodPolicy
@@ -112,6 +113,10 @@ func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, re
 	}
 	provider, port := detectNixpacksProviderAndPort(repo.RepoDir, normalizedSourceDir)
 	detectedStack := detectPrimaryTechStack(repo.RepoDir, normalizedSourceDir)
+	sourceOverlayFiles, _, err := buildPythonOverlayFiles(repo.RepoDir, normalizedSourceDir)
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
 	if err := buildAndPushNixpacksImage(ctx, nixpacksBuildRequest{
@@ -121,6 +126,7 @@ func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, re
 		CommitSHA:             repo.CommitSHA,
 		SourceDir:             normalizedSourceDir,
 		ImageRef:              imageRef,
+		SourceOverlayFiles:    sourceOverlayFiles,
 		JobLabels:             jobLabels,
 		PlacementNodeSelector: placementNodeSelector,
 		PodPolicy:             builderPolicy,
@@ -224,13 +230,18 @@ func detectZeroConfigProviderAndPort(repoDir, sourceDir string) (string, int) {
 		appDir = filepath.Join(repoDir, filepath.FromSlash(sourceDir))
 	}
 
+	pythonAnalysis, err := analyzePythonProjectInDir(appDir)
+	if err != nil {
+		pythonAnalysis = pythonProjectAnalysis{}
+	}
+
 	switch {
 	case pathExists(filepath.Join(appDir, "package.json")):
 		return "nodejs", 3000
-	case pathExists(filepath.Join(appDir, "pyproject.toml")) ||
-		pathExists(filepath.Join(appDir, "requirements.txt")) ||
-		pathExists(filepath.Join(appDir, "Pipfile")) ||
-		pathExists(filepath.Join(appDir, "manage.py")):
+	case pythonAnalysis.IsPythonProject:
+		if pythonAnalysis.DetectedPort > 0 {
+			return "python", pythonAnalysis.DetectedPort
+		}
 		return "python", 8000
 	case pathExists(filepath.Join(appDir, "go.mod")):
 		return "go", 8080
@@ -331,6 +342,13 @@ func buildNixpacksJobObject(namespace, jobName string, req nixpacksBuildRequest)
 	} else {
 		initContainers = buildGitCloneInitContainers(req.RepoURL, req.Branch, req.CommitSHA, req.RepoAuthToken)
 	}
+	sourceOverlayContainer, err := buildSourceOverlayInitContainer(workingDir, req.SourceOverlayFiles)
+	if err != nil {
+		return nil, err
+	}
+	if sourceOverlayContainer != nil {
+		initContainers = append(initContainers, sourceOverlayContainer)
+	}
 
 	jobObject := map[string]any{
 		"apiVersion": "batch/v1",
@@ -358,7 +376,7 @@ func buildNixpacksJobObject(namespace, jobName string, req nixpacksBuildRequest)
 					"initContainers": append(initContainers, map[string]any{
 						"name":       "nixpacks",
 						"image":      defaultNixpacksImage,
-						"command":    []string{"sh", "-lc", "set -euo pipefail\nmkdir -p /workspace/generated\nnixpacks plan . --format json > /workspace/generated/nixpacks-plan.json\nnixpacks build . --out /workspace/generated\ntest -f /workspace/generated/Dockerfile\n"},
+						"command":    []string{"sh", "-lc", "set -eu\nmkdir -p /workspace/generated\nnixpacks plan . --format json > /workspace/generated/nixpacks-plan.json\nnixpacks build . --out /workspace/generated\ntest -f /workspace/generated/Dockerfile\n"},
 						"workingDir": workingDir,
 						"volumeMounts": []map[string]any{
 							{"name": "workspace", "mountPath": "/workspace"},

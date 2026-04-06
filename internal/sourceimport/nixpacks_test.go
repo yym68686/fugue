@@ -77,6 +77,31 @@ func TestDetectAutoImportInputsPrefersBuildpacksForSupportedApps(t *testing.T) {
 	}
 }
 
+func TestDetectAutoImportInputsPrefersBuildpacksForPythonSourceWithoutManifest(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "main.py"), []byte(`import fastapi
+import uvicorn
+
+uvicorn.run(app, port=4684)
+`), 0o644); err != nil {
+		t.Fatalf("write main.py: %v", err)
+	}
+
+	buildStrategy, sourceDir, dockerfilePath, buildContextDir, err := detectAutoImportInputs(repoDir, "", "", "")
+	if err != nil {
+		t.Fatalf("detect auto inputs: %v", err)
+	}
+	if buildStrategy != model.AppBuildStrategyBuildpacks {
+		t.Fatalf("expected buildpacks strategy, got %q", buildStrategy)
+	}
+	if sourceDir != "." {
+		t.Fatalf("expected source dir ., got %q", sourceDir)
+	}
+	if dockerfilePath != "" || buildContextDir != "" {
+		t.Fatalf("expected no dockerfile inputs, got dockerfile=%q context=%q", dockerfilePath, buildContextDir)
+	}
+}
+
 func TestDetectAutoImportInputsFallsBackToNixpacksForUnsupportedBuildpacksProvider(t *testing.T) {
 	repoDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(repoDir, "Cargo.toml"), []byte(`[package]
@@ -110,6 +135,7 @@ func TestDetectNixpacksProviderAndPort(t *testing.T) {
 	}{
 		{name: "node", files: []string{"package.json"}, wantProv: "nodejs", wantPort: 3000},
 		{name: "python", files: []string{"pyproject.toml"}, wantProv: "python", wantPort: 8000},
+		{name: "python-source", files: []string{"main.py"}, wantProv: "python", wantPort: 8000},
 		{name: "go", files: []string{"go.mod"}, wantProv: "go", wantPort: 8080},
 		{name: "generic", files: []string{"README.md"}, wantProv: "generic", wantPort: 3000},
 	}

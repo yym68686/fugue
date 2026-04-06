@@ -79,13 +79,15 @@ func pathWithinRepo(repoDir, target string) bool {
 }
 
 func detectPrimaryTechStackInDir(appDir string) string {
+	pythonAnalysis, err := analyzePythonProjectInDir(appDir)
+	if err != nil {
+		pythonAnalysis = pythonProjectAnalysis{}
+	}
+
 	switch {
 	case pathExists(filepath.Join(appDir, "package.json")):
 		return detectNodeTechStack(appDir)
-	case pathExists(filepath.Join(appDir, "pyproject.toml")) ||
-		pathExists(filepath.Join(appDir, "requirements.txt")) ||
-		pathExists(filepath.Join(appDir, "Pipfile")) ||
-		pathExists(filepath.Join(appDir, "manage.py")):
+	case pythonAnalysis.IsPythonProject:
 		return "python"
 	case pathExists(filepath.Join(appDir, "go.mod")):
 		return "go"
