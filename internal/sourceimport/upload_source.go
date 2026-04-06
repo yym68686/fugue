@@ -343,6 +343,11 @@ func importBuildpacksFromExtractedUpload(ctx context.Context, src extractedUploa
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
+	systemOverlayFiles, systemPackages, err := buildBuildpacksSystemPackageOverlayFiles(src.RootDir, normalizedSourceDir)
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
+	sourceOverlayFiles = append(sourceOverlayFiles, systemOverlayFiles...)
 	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix)
 	if err := buildAndPushBuildpacksImage(ctx, buildpacksBuildRequest{
 		CommitSHA:             src.ArchiveSHA256,
@@ -353,6 +358,8 @@ func importBuildpacksFromExtractedUpload(ctx context.Context, src extractedUploa
 		SourceOverlayFiles:    sourceOverlayFiles,
 		JobLabels:             jobLabels,
 		PlacementNodeSelector: placementNodeSelector,
+		DetectedProvider:      provider,
+		IncludeAptBuildpack:   len(systemPackages.Packages) > 0 || systemPackages.HasExplicitBuildpackApt,
 		PodPolicy:             builderPolicy,
 		WorkloadProfile:       builderWorkloadProfileFor(model.AppBuildStrategyBuildpacks, stateful),
 	}); err != nil {
@@ -386,6 +393,10 @@ func importNixpacksFromExtractedUpload(ctx context.Context, src extractedUploadS
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
+	systemPackages, err := analyzeSystemPackages(src.RootDir, normalizedSourceDir)
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
 	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix)
 	if err := buildAndPushNixpacksImage(ctx, nixpacksBuildRequest{
 		CommitSHA:             src.ArchiveSHA256,
@@ -394,6 +405,7 @@ func importNixpacksFromExtractedUpload(ctx context.Context, src extractedUploadS
 		SourceDir:             normalizedSourceDir,
 		ImageRef:              imageRef,
 		SourceOverlayFiles:    sourceOverlayFiles,
+		SystemPackages:        systemPackages.Packages,
 		JobLabels:             jobLabels,
 		PlacementNodeSelector: placementNodeSelector,
 		PodPolicy:             builderPolicy,

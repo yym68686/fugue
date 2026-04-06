@@ -142,8 +142,34 @@ func TestBuildBuildpacksJobObjectUsesHostNetworkForPackBuild(t *testing.T) {
 	podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
 	container := podSpec["containers"].([]map[string]any)[0]
 	command := container["command"].([]string)
-	if !strings.Contains(command[2], `--network "host"`) {
+	if !strings.Contains(command[2], "--network") || !strings.Contains(command[2], defaultBuildpacksContainerNetwork) {
 		t.Fatalf("expected pack build command to use host network, got %q", command[2])
+	}
+}
+
+func TestBuildBuildpacksJobObjectAddsAptAndLanguageBuildpacksWhenRequested(t *testing.T) {
+	t.Parallel()
+
+	jobObject, err := buildBuildpacksJobObject("fugue-system", "build-demo", buildpacksBuildRequest{
+		ArchiveDownloadURL:  "https://example.com/archive.tar.gz",
+		SourceDir:           ".",
+		ImageRef:            "10.128.0.2:30500/fugue-apps/demo:git-abc123",
+		DetectedProvider:    "python",
+		IncludeAptBuildpack: true,
+		WorkloadProfile:     builderWorkloadProfileHeavy,
+	})
+	if err != nil {
+		t.Fatalf("build buildpacks job object: %v", err)
+	}
+
+	podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	container := podSpec["containers"].([]map[string]any)[0]
+	command := container["command"].([]string)
+	if !strings.Contains(command[2], defaultPaketoAptBuildpack) {
+		t.Fatalf("expected pack build command to include apt buildpack, got %q", command[2])
+	}
+	if !strings.Contains(command[2], "paketo-buildpacks/python") {
+		t.Fatalf("expected pack build command to include python buildpack, got %q", command[2])
 	}
 }
 
@@ -165,6 +191,28 @@ func TestBuildNixpacksJobObjectUsesCompatibleShellOptions(t *testing.T) {
 	command := initContainers[len(initContainers)-1]["command"].([]string)
 	if strings.Contains(command[2], "pipefail") {
 		t.Fatalf("expected nixpacks init script to avoid pipefail, got %q", command[2])
+	}
+}
+
+func TestBuildNixpacksJobObjectPassesInferredSystemPackages(t *testing.T) {
+	t.Parallel()
+
+	jobObject, err := buildNixpacksJobObject("fugue-system", "build-demo", nixpacksBuildRequest{
+		ArchiveDownloadURL: "https://example.com/archive.tar.gz",
+		SourceDir:          ".",
+		ImageRef:           "10.128.0.2:30500/fugue-apps/demo:git-abc123",
+		SystemPackages:     []string{"ffmpeg", "git"},
+		WorkloadProfile:    builderWorkloadProfileLight,
+	})
+	if err != nil {
+		t.Fatalf("build nixpacks job object: %v", err)
+	}
+
+	podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	initContainers := podSpec["initContainers"].([]map[string]any)
+	command := initContainers[len(initContainers)-1]["command"].([]string)
+	if !strings.Contains(command[2], "--apt 'ffmpeg' 'git'") {
+		t.Fatalf("expected nixpacks command to include inferred apt packages, got %q", command[2])
 	}
 }
 

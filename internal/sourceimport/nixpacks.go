@@ -57,6 +57,7 @@ type nixpacksBuildRequest struct {
 	SourceDir             string
 	ImageRef              string
 	SourceOverlayFiles    []sourceOverlayFile
+	SystemPackages        []string
 	JobLabels             map[string]string
 	PlacementNodeSelector map[string]string
 	PodPolicy             BuilderPodPolicy
@@ -117,6 +118,10 @@ func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, re
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
+	systemPackages, err := analyzeSystemPackages(repo.RepoDir, normalizedSourceDir)
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
 	if err := buildAndPushNixpacksImage(ctx, nixpacksBuildRequest{
@@ -127,6 +132,7 @@ func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, re
 		SourceDir:             normalizedSourceDir,
 		ImageRef:              imageRef,
 		SourceOverlayFiles:    sourceOverlayFiles,
+		SystemPackages:        systemPackages.Packages,
 		JobLabels:             jobLabels,
 		PlacementNodeSelector: placementNodeSelector,
 		PodPolicy:             builderPolicy,
@@ -337,6 +343,7 @@ func buildNixpacksJobObject(namespace, jobName string, req nixpacksBuildRequest)
 	if strings.TrimSpace(req.SourceDir) != "" && strings.TrimSpace(req.SourceDir) != "." {
 		workingDir += "/" + filepath.ToSlash(strings.TrimSpace(req.SourceDir))
 	}
+	nixpacksScript := buildNixpacksScript(req.SystemPackages)
 	initContainers := []map[string]any{}
 	if strings.TrimSpace(req.ArchiveDownloadURL) != "" {
 		initContainers = buildArchiveDownloadInitContainers(req.ArchiveDownloadURL)
@@ -377,7 +384,7 @@ func buildNixpacksJobObject(namespace, jobName string, req nixpacksBuildRequest)
 					"initContainers": append(initContainers, map[string]any{
 						"name":       "nixpacks",
 						"image":      defaultNixpacksImage,
-						"command":    []string{"sh", "-lc", "set -eu\nmkdir -p /workspace/generated\nnixpacks plan . --format json > /workspace/generated/nixpacks-plan.json\nnixpacks build . --out /workspace/generated\ntest -f /workspace/generated/Dockerfile\n"},
+						"command":    []string{"sh", "-lc", nixpacksScript},
 						"workingDir": workingDir,
 						"volumeMounts": []map[string]any{
 							{"name": "workspace", "mountPath": "/workspace"},
@@ -403,4 +410,22 @@ func buildNixpacksJobObject(namespace, jobName string, req nixpacksBuildRequest)
 	applyBuilderPodPolicy(podSpec, req.PodPolicy, req.WorkloadProfile)
 	applyBuilderPlacement(podSpec, req.Placement)
 	return jobObject, nil
+}
+
+func buildNixpacksScript(systemPackages []string) string {
+	aptArgs := ""
+	if len(systemPackages) > 0 {
+		quotedPackages := make([]string, 0, len(systemPackages))
+		for _, pkg := range systemPackages {
+			pkg = strings.TrimSpace(pkg)
+			if pkg == "" {
+				continue
+			}
+			quotedPackages = append(quotedPackages, shellQuoteForOverlay(pkg))
+		}
+		if len(quotedPackages) > 0 {
+			aptArgs = " --apt " + strings.Join(quotedPackages, " ")
+		}
+	}
+	return "set -eu\nmkdir -p /workspace/generated\nnixpacks plan . --format json" + aptArgs + " > /workspace/generated/nixpacks-plan.json\nnixpacks build . --out /workspace/generated" + aptArgs + "\ntest -f /workspace/generated/Dockerfile\n"
 }

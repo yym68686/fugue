@@ -14,6 +14,7 @@ const (
 	defaultBuildpacksImage            = "docker.io/library/docker:27-dind"
 	defaultPackVersion                = "0.39.1"
 	defaultPaketoBuilderImage         = "docker.io/paketobuildpacks/builder-jammy-base:latest"
+	defaultPaketoAptBuildpack         = "paketo-buildpacks/apt"
 	defaultBuildpacksContainerNetwork = "host"
 )
 
@@ -43,6 +44,8 @@ type buildpacksBuildRequest struct {
 	SourceOverlayFiles    []sourceOverlayFile
 	JobLabels             map[string]string
 	PlacementNodeSelector map[string]string
+	DetectedProvider      string
+	IncludeAptBuildpack   bool
 	PodPolicy             BuilderPodPolicy
 	WorkloadProfile       builderWorkloadProfile
 	Placement             builderJobPlacement
@@ -72,6 +75,11 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
+	systemOverlayFiles, systemPackages, err := buildBuildpacksSystemPackageOverlayFiles(repo.RepoDir, normalizedSourceDir)
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
+	sourceOverlayFiles = append(sourceOverlayFiles, systemOverlayFiles...)
 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
 	if err := buildAndPushBuildpacksImage(ctx, buildpacksBuildRequest{
@@ -84,6 +92,8 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		SourceOverlayFiles:    sourceOverlayFiles,
 		JobLabels:             jobLabels,
 		PlacementNodeSelector: placementNodeSelector,
+		DetectedProvider:      provider,
+		IncludeAptBuildpack:   len(systemPackages.Packages) > 0 || systemPackages.HasExplicitBuildpackApt,
 		PodPolicy:             builderPolicy,
 		WorkloadProfile: builderWorkloadProfileFor(
 			model.AppBuildStrategyBuildpacks,
@@ -162,7 +172,7 @@ func buildBuildpacksJobObject(namespace, jobName string, req buildpacksBuildRequ
 		workingDir += "/" + filepath.ToSlash(strings.TrimSpace(req.SourceDir))
 	}
 
-	script := buildpacksJobScript(workingDir, req.ImageRef)
+	script := buildpacksJobScript(workingDir, req.ImageRef, req.DetectedProvider, req.IncludeAptBuildpack)
 	initContainers := []map[string]any{}
 	if strings.TrimSpace(req.ArchiveDownloadURL) != "" {
 		initContainers = buildArchiveDownloadInitContainers(req.ArchiveDownloadURL)
@@ -230,12 +240,30 @@ func buildBuildpacksJobObject(namespace, jobName string, req buildpacksBuildRequ
 	return jobObject, nil
 }
 
-func buildpacksJobScript(workingDir, imageRef string) string {
+func buildpacksJobScript(workingDir, imageRef, provider string, includeAptBuildpack bool) string {
 	registryHost := registryHostFromImageRef(imageRef)
-	insecureRegistryFlag := ""
-	if isInsecureRegistryHost(registryHost) {
-		insecureRegistryFlag = fmt.Sprintf(" --insecure-registry %q", registryHost)
+	packArgs := []string{
+		"build",
+		shellQuoteForOverlay(imageRef),
+		"--path",
+		shellQuoteForOverlay(workingDir),
+		"--builder",
+		shellQuoteForOverlay(defaultPaketoBuilderImage),
+		"--publish",
+		"--trust-builder",
 	}
+	if includeAptBuildpack {
+		if buildpackRef := paketoLanguageBuildpack(provider); buildpackRef != "" {
+			packArgs = append(packArgs,
+				"--buildpack", shellQuoteForOverlay(defaultPaketoAptBuildpack),
+				"--buildpack", shellQuoteForOverlay(buildpackRef),
+			)
+		}
+	}
+	if isInsecureRegistryHost(registryHost) {
+		packArgs = append(packArgs, "--insecure-registry", shellQuoteForOverlay(registryHost))
+	}
+	packArgs = append(packArgs, "--network", shellQuoteForOverlay(defaultBuildpacksContainerNetwork))
 	return fmt.Sprintf(`set -euo pipefail
 apk add --no-cache curl tar >/dev/null
 export DOCKER_HOST=unix:///var/run/docker.sock
@@ -262,6 +290,27 @@ esac
 pack_url="https://github.com/buildpacks/pack/releases/download/v%s/${pack_archive}"
 curl -fsSL "$pack_url" -o /tmp/pack.tgz
 tar -xzf /tmp/pack.tgz -C /workspace/bin pack
-/workspace/bin/pack build %q --path %q --builder %q --publish --trust-builder%s --network %q
-`, defaultPackVersion, defaultPackVersion, defaultPackVersion, imageRef, workingDir, defaultPaketoBuilderImage, insecureRegistryFlag, defaultBuildpacksContainerNetwork)
+/workspace/bin/pack %s
+`, defaultPackVersion, defaultPackVersion, defaultPackVersion, strings.Join(packArgs, " "))
+}
+
+func paketoLanguageBuildpack(provider string) string {
+	switch strings.TrimSpace(strings.ToLower(provider)) {
+	case "dotnet":
+		return "paketo-buildpacks/dotnet-core"
+	case "go":
+		return "paketo-buildpacks/go"
+	case "java":
+		return "paketo-buildpacks/java"
+	case "nodejs":
+		return "paketo-buildpacks/nodejs"
+	case "php":
+		return "paketo-buildpacks/php"
+	case "python":
+		return "paketo-buildpacks/python"
+	case "ruby":
+		return "paketo-buildpacks/ruby"
+	default:
+		return ""
+	}
 }
