@@ -11,9 +11,10 @@ import (
 )
 
 const (
-	defaultBuildpacksImage    = "docker.io/library/docker:27-dind"
-	defaultPackVersion        = "0.39.1"
-	defaultPaketoBuilderImage = "docker.io/paketobuildpacks/builder-jammy-base:latest"
+	defaultBuildpacksImage            = "docker.io/library/docker:27-dind"
+	defaultPackVersion                = "0.39.1"
+	defaultPaketoBuilderImage         = "docker.io/paketobuildpacks/builder-jammy-base:latest"
+	defaultBuildpacksContainerNetwork = "host"
 )
 
 type GitHubBuildpacksImportRequest struct {
@@ -260,6 +261,6 @@ esac
 pack_url="https://github.com/buildpacks/pack/releases/download/v%s/${pack_archive}"
 curl -fsSL "$pack_url" -o /tmp/pack.tgz
 tar -xzf /tmp/pack.tgz -C /workspace/bin pack
-/workspace/bin/pack build %q --path %q --builder %q --publish --trust-builder%s
-`, defaultPackVersion, defaultPackVersion, defaultPackVersion, imageRef, workingDir, defaultPaketoBuilderImage, insecureRegistryFlag)
+/workspace/bin/pack build %q --path %q --builder %q --publish --trust-builder%s --network %q
+`, defaultPackVersion, defaultPackVersion, defaultPackVersion, imageRef, workingDir, defaultPaketoBuilderImage, insecureRegistryFlag, defaultBuildpacksContainerNetwork)
 }

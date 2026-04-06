@@ -126,6 +126,27 @@ func TestBuildBuildpacksJobObjectInjectsSourceOverlayBeforeBuild(t *testing.T) {
 	}
 }
 
+func TestBuildBuildpacksJobObjectUsesHostNetworkForPackBuild(t *testing.T) {
+	t.Parallel()
+
+	jobObject, err := buildBuildpacksJobObject("fugue-system", "build-demo", buildpacksBuildRequest{
+		ArchiveDownloadURL: "https://example.com/archive.tar.gz",
+		SourceDir:          ".",
+		ImageRef:           "10.128.0.2:30500/fugue-apps/demo:git-abc123",
+		WorkloadProfile:    builderWorkloadProfileHeavy,
+	})
+	if err != nil {
+		t.Fatalf("build buildpacks job object: %v", err)
+	}
+
+	podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	container := podSpec["containers"].([]map[string]any)[0]
+	command := container["command"].([]string)
+	if !strings.Contains(command[2], `--network "host"`) {
+		t.Fatalf("expected pack build command to use host network, got %q", command[2])
+	}
+}
+
 func TestBuildNixpacksJobObjectUsesCompatibleShellOptions(t *testing.T) {
 	t.Parallel()
 
