@@ -665,10 +665,19 @@ func parseBoolQuery(raw string) (bool, error) {
 }
 
 func runtimeLogTarget(app model.App, component string) (string, string, error) {
-	appName := runtimeResourceName(app.Name)
+	appName := runtime.RuntimeResourceName(app.Name)
 	switch component {
 	case "app":
-		return "app.kubernetes.io/name=" + appName + ",app.kubernetes.io/managed-by=fugue", appName, nil
+		selectors := []string{
+			runtime.FugueLabelManagedBy + "=" + runtime.FugueLabelManagedByValue,
+		}
+		if appName != "" {
+			selectors = append(selectors, runtime.FugueLabelName+"="+appName)
+		}
+		if appID := strings.TrimSpace(app.ID); appID != "" {
+			selectors = append(selectors, runtime.FugueLabelAppID+"="+appID)
+		}
+		return strings.Join(selectors, ","), appName, nil
 	case "postgres":
 		bound, ok := firstManagedPostgresBinding(app)
 		if !ok || bound.Service.Spec.Postgres == nil {
@@ -676,7 +685,7 @@ func runtimeLogTarget(app model.App, component string) (string, string, error) {
 		}
 		serviceName := strings.TrimSpace(bound.Service.Spec.Postgres.ServiceName)
 		if serviceName == "" {
-			serviceName = runtimeResourceName(bound.Service.Name)
+			serviceName = runtime.RuntimeResourceName(bound.Service.Name)
 			if serviceName == "" {
 				serviceName = appName
 			}
@@ -686,14 +695,6 @@ func runtimeLogTarget(app model.App, component string) (string, string, error) {
 	default:
 		return "", "", fmt.Errorf("unsupported component %q", component)
 	}
-}
-
-func runtimeResourceName(name string) string {
-	name = model.Slugify(name)
-	if len(name) > 50 {
-		return name[:50]
-	}
-	return name
 }
 
 func buildStrategyFromOperation(op model.Operation) string {

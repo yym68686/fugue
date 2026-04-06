@@ -168,3 +168,26 @@ func TestHashImportGitHubRequestChangesWhenStartupCommandChanges(t *testing.T) {
 		t.Fatal("expected different hashes when startup command changes")
 	}
 }
+
+func TestHashImportGitHubRequestChangesWhenNetworkModeChanges(t *testing.T) {
+	req := importGitHubRequest{
+		ProjectID: "project_1",
+		RepoURL:   "https://github.com/example/demo",
+		Branch:    "main",
+		Name:      "demo",
+	}
+	hashA, err := hashImportGitHubRequest("tenant_1", req, "runtime_managed_shared", 1)
+	if err != nil {
+		t.Fatalf("hash request a: %v", err)
+	}
+
+	req.NetworkMode = model.AppNetworkModeBackground
+	hashB, err := hashImportGitHubRequest("tenant_1", req, "runtime_managed_shared", 1)
+	if err != nil {
+		t.Fatalf("hash request b: %v", err)
+	}
+
+	if hashA == hashB {
+		t.Fatal("expected different hashes when network mode changes")
+	}
+}

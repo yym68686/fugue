@@ -141,6 +141,86 @@ func TestImportUploadAppQueuesPendingImportWithPersistentStorage(t *testing.T) {
 	}
 }
 
+func TestImportUploadBackgroundModeSkipsRouteAndServicePort(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Upload Background Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "uploader", []string{"app.write", "app.deploy"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		AppBaseDomain: "apps.example.com",
+	})
+
+	archiveBytes := mustTarGz(t, map[string]string{
+		"Dockerfile": "FROM nginx:alpine\n",
+	})
+	body, contentType := newImportUploadMultipartBody(t, importUploadRequest{
+		Name:           "demo-app",
+		BuildStrategy:  model.AppBuildStrategyDockerfile,
+		NetworkMode:    model.AppNetworkModeBackground,
+		ServicePort:    8080,
+		DockerfilePath: "Dockerfile",
+	}, "demo-app.tgz", archiveBytes)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/apps/import-upload", body)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", contentType)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		App       model.App       `json:"app"`
+		Operation model.Operation `json:"operation"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	app, err := s.GetApp(response.App.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.Spec.NetworkMode != model.AppNetworkModeBackground {
+		t.Fatalf("expected app network mode %q, got %q", model.AppNetworkModeBackground, app.Spec.NetworkMode)
+	}
+	if len(app.Spec.Ports) != 0 {
+		t.Fatalf("expected background app to clear service ports, got %v", app.Spec.Ports)
+	}
+	if app.Route != nil && app.Route.Hostname != "" {
+		t.Fatalf("expected background app route to stay empty, got %+v", app.Route)
+	}
+
+	op, err := s.GetOperation(response.Operation.ID)
+	if err != nil {
+		t.Fatalf("get operation: %v", err)
+	}
+	if op.DesiredSpec == nil {
+		t.Fatal("expected desired spec on queued operation")
+	}
+	if op.DesiredSpec.NetworkMode != model.AppNetworkModeBackground {
+		t.Fatalf("expected desired spec network mode %q, got %q", model.AppNetworkModeBackground, op.DesiredSpec.NetworkMode)
+	}
+	if len(op.DesiredSpec.Ports) != 0 {
+		t.Fatalf("expected background desired spec to clear service ports, got %v", op.DesiredSpec.Ports)
+	}
+}
+
 func TestImportUploadAppImportsComposeTopology(t *testing.T) {
 	t.Parallel()
 

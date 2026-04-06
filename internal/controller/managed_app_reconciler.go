@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -80,6 +81,14 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 	if namespace == "" {
 		namespace = runtime.NamespaceForTenant(app.TenantID)
 	}
+	if appID := strings.TrimSpace(app.ID); appID == "" {
+		return s.cleanupOrphanManagedApp(ctx, client, namespace, managed, app, "orphaned managed app: spec.appID is empty")
+	} else if _, err := s.Store.GetApp(appID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return s.cleanupOrphanManagedApp(ctx, client, namespace, managed, app, "orphaned managed app: app not found in store")
+		}
+		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read app from store: %w", err))
+	}
 	if strings.TrimSpace(managed.Metadata.DeletionTimestamp) != "" {
 		status := managedAppBaseStatus(managed, app)
 		status.Phase = runtime.ManagedAppPhaseDeleting
@@ -112,7 +121,7 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("reconcile workspace replication source: %w", err))
 	}
 
-	deployment, found, err := client.getDeployment(ctx, namespace, runtime.RuntimeResourceName(app.Name))
+	deployment, found, err := client.getDeployment(ctx, namespace, runtime.RuntimeAppResourceName(app))
 	if err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read deployment status: %w", err))
 	}
@@ -152,6 +161,42 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 	return nil
 }
 
+func (s *Service) cleanupOrphanManagedApp(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, reason string) error {
+	managedName := strings.TrimSpace(managed.Metadata.Name)
+	if managedName == "" {
+		managedName = runtime.ManagedAppResourceName(app)
+	}
+
+	status := managedAppBaseStatus(managed, app)
+	status.Phase = runtime.ManagedAppPhaseDeleting
+	status.Message = strings.TrimSpace(reason)
+	status.ReadyReplicas = 0
+	if managedName != "" {
+		if err := client.patchManagedAppStatus(ctx, namespace, managedName, status); err != nil && !isKubernetesResourceNotFound(err) {
+			if s.Logger != nil {
+				s.Logger.Printf("patch orphan managed app status failed for %s/%s: %v", namespace, managedName, err)
+			}
+		}
+	}
+
+	var cleanupErrs []error
+	if managedName != "" {
+		if err := client.deleteManagedApp(ctx, namespace, managedName); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("delete managed app custom resource: %w", err))
+		}
+	}
+	if err := s.deleteManagedAppResources(ctx, client, namespace, app); err != nil {
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("delete managed app child resources: %w", err))
+	}
+	if err := errors.Join(cleanupErrs...); err != nil {
+		return fmt.Errorf("cleanup orphan managed app %s/%s: %w", namespace, managedName, err)
+	}
+	if s.Logger != nil {
+		s.Logger.Printf("deleted orphan managed app %s/%s: %s", namespace, managedName, strings.TrimSpace(reason))
+	}
+	return nil
+}
+
 func patchManagedAppErrorStatus(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, cause error) error {
 	status := managedAppBaseStatus(managed, app)
 	status.Phase = runtime.ManagedAppPhaseError
@@ -187,7 +232,7 @@ func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, depl
 		status.Message = "desired replicas set to 0"
 	case !found:
 		status.Phase = runtime.ManagedAppPhasePending
-		status.Message = fmt.Sprintf("waiting for deployment %s", runtime.RuntimeResourceName(app.Name))
+		status.Message = fmt.Sprintf("waiting for deployment %s", runtime.RuntimeAppResourceName(app))
 	case hasDeploymentFailureCondition(deployment.Status.Conditions):
 		status.Phase = runtime.ManagedAppPhaseError
 		status.Message = deploymentFailureMessage(deployment.Status.Conditions)

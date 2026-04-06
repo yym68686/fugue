@@ -3201,6 +3201,8 @@ components:
             type: string
         env:
           $ref: "#/components/schemas/StringMap"
+        network_mode:
+          $ref: "#/components/schemas/AppNetworkMode"
         ports:
           type: array
           items:
@@ -4716,6 +4718,8 @@ components:
         replicas:
           type: integer
           format: int32
+        network_mode:
+          $ref: "#/components/schemas/AppNetworkMode"
         service_port:
           type: integer
           format: int32
@@ -4768,6 +4772,8 @@ components:
         replicas:
           type: integer
           format: int32
+        network_mode:
+          $ref: "#/components/schemas/AppNetworkMode"
         service_port:
           type: integer
           format: int32
@@ -4865,6 +4871,8 @@ components:
         replicas:
           type: integer
           format: int32
+        network_mode:
+          $ref: "#/components/schemas/AppNetworkMode"
         service_port:
           type: integer
           format: int32
@@ -4955,6 +4963,13 @@ components:
       properties:
         availability:
           $ref: "#/components/schemas/AppRouteAvailability"
+    AppNetworkMode:
+      type: string
+      description: |
+        Omit this field to deploy a public service with a managed route.
+        Set `background` to run the app without a public route, Kubernetes Service,
+        or readiness port.
+      enum: [background]
     PatchAppRouteRequest:
       type: object
       additionalProperties: false

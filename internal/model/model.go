@@ -30,6 +30,8 @@ const (
 	AppBuildStrategyBuildpacks = "buildpacks"
 	AppBuildStrategyNixpacks   = "nixpacks"
 
+	AppNetworkModeBackground = "background"
+
 	BackingServiceTypePostgres = "postgres"
 
 	BackingServiceProvisionerManaged  = "managed"
@@ -126,7 +128,37 @@ func ApplyAppSpecDefaults(spec *AppSpec) {
 	if spec == nil {
 		return
 	}
+	spec.NetworkMode = NormalizeAppNetworkMode(spec.NetworkMode)
 	spec.ImageMirrorLimit = EffectiveAppImageMirrorLimit(spec.ImageMirrorLimit)
+}
+
+func NormalizeAppNetworkMode(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case AppNetworkModeBackground:
+		return AppNetworkModeBackground
+	default:
+		return ""
+	}
+}
+
+func AppUsesBackgroundNetwork(spec AppSpec) bool {
+	return NormalizeAppNetworkMode(spec.NetworkMode) == AppNetworkModeBackground
+}
+
+func AppPublicServicePort(spec AppSpec) int {
+	if AppUsesBackgroundNetwork(spec) {
+		return 0
+	}
+	for _, port := range spec.Ports {
+		if port > 0 {
+			return port
+		}
+	}
+	return 0
+}
+
+func AppExposesPublicService(spec AppSpec) bool {
+	return AppPublicServicePort(spec) > 0
 }
 
 type Tenant struct {
@@ -420,6 +452,7 @@ type AppSpec struct {
 	Command           []string                  `json:"command,omitempty"`
 	Args              []string                  `json:"args,omitempty"`
 	Env               map[string]string         `json:"env,omitempty"`
+	NetworkMode       string                    `json:"network_mode,omitempty"`
 	Ports             []int                     `json:"ports,omitempty"`
 	Replicas          int                       `json:"replicas"`
 	Resources         *ResourceSpec             `json:"resources,omitempty"`

@@ -29,7 +29,7 @@ func TestWaitForManagedAppRolloutFailsWhenManagedAppReportsError(t *testing.T) {
 		},
 	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)
-	deploymentName := runtime.RuntimeResourceName(app.Name)
+	deploymentName := runtime.RuntimeAppResourceName(app)
 	managedAppName := runtime.ManagedAppResourceName(app)
 
 	deployment := kubeDeployment{}

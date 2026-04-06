@@ -112,6 +112,19 @@ func ManagedAppResourceName(app model.App) string {
 	return name
 }
 
+func RuntimeAppResourceName(app model.App) string {
+	if id := strings.TrimSpace(app.ID); id != "" {
+		if name := RuntimeResourceName(id); name != "" {
+			return name
+		}
+	}
+	name := RuntimeResourceName(app.Name)
+	if name == "" {
+		return "app"
+	}
+	return name
+}
+
 func RuntimeResourceName(name string) string {
 	return sanitizeName(name)
 }

@@ -118,6 +118,55 @@ func TestPatchAppRouteUpdatesHostnameAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestAppRouteEndpointsRejectBackgroundApps(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Background Route Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.write", "app.deploy"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	app, err := s.CreateApp(tenant.ID, project.ID, "worker", "", model.AppSpec{
+		Image:       "ghcr.io/example/worker:latest",
+		NetworkMode: model.AppNetworkModeBackground,
+		Replicas:    1,
+		RuntimeID:   "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create background app: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		AppBaseDomain:   "apps.example.com",
+		APIPublicDomain: "api.example.com",
+	})
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/route/availability?hostname=worker", apiKey, nil)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadRequest, recorder.Code, recorder.Body.String())
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID+"/route", apiKey, map[string]any{
+		"hostname": "worker",
+	})
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadRequest, recorder.Code, recorder.Body.String())
+	}
+}
+
 func setupAppRouteTestServer(t *testing.T) (*store.Store, *Server, string, model.App, model.App) {
 	t.Helper()
 

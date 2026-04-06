@@ -60,7 +60,12 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "internal registry is not configured")
 		return
 	}
-	if strings.TrimSpace(s.appBaseDomain) == "" {
+	networkMode, err := resolveImportNetworkMode(req.NetworkMode)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strings.TrimSpace(s.appBaseDomain) == "" && networkMode != model.AppNetworkModeBackground {
 		httpx.WriteError(w, http.StatusInternalServerError, "app base domain is not configured")
 		return
 	}
@@ -192,6 +197,10 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		})
 		switch {
 		case inspectErr == nil:
+			if networkMode == model.AppNetworkModeBackground {
+				httpx.WriteError(w, http.StatusBadRequest, "network_mode is only supported for single-app imports")
+				return
+			}
 			if hasStartupCommand(req.StartupCommand) {
 				httpx.WriteError(w, http.StatusBadRequest, "startup_command is only supported for single-app imports")
 				return
@@ -244,6 +253,10 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		})
 		switch {
 		case inspectErr == nil:
+			if networkMode == model.AppNetworkModeBackground {
+				httpx.WriteError(w, http.StatusBadRequest, "network_mode is only supported for single-app imports")
+				return
+			}
 			if hasStartupCommand(req.StartupCommand) {
 				httpx.WriteError(w, http.StatusBadRequest, "startup_command is only supported for single-app imports")
 				return
@@ -322,12 +335,16 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		applyStartupCommand(&spec, req.StartupCommand)
+		applyImportedNetworkMode(&spec, networkMode)
 
-		route := model.AppRoute{
-			Hostname:    candidateHost,
-			BaseDomain:  s.appBaseDomain,
-			PublicURL:   "https://" + candidateHost,
-			ServicePort: firstServicePort(spec),
+		route := model.AppRoute{}
+		if !model.AppUsesBackgroundNetwork(spec) {
+			route = model.AppRoute{
+				Hostname:    candidateHost,
+				BaseDomain:  s.appBaseDomain,
+				PublicURL:   "https://" + candidateHost,
+				ServicePort: firstServicePort(spec),
+			}
 		}
 		app, err = s.store.CreateImportedApp(tenantID, req.ProjectID, candidateName, description, spec, source, route)
 		if err == nil {

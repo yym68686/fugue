@@ -33,6 +33,7 @@ type importUploadRequest struct {
 	BuildStrategy     string                          `json:"build_strategy"`
 	RuntimeID         string                          `json:"runtime_id"`
 	Replicas          int                             `json:"replicas"`
+	NetworkMode       string                          `json:"network_mode"`
 	ServicePort       int                             `json:"service_port"`
 	DockerfilePath    string                          `json:"dockerfile_path"`
 	BuildContextDir   string                          `json:"build_context_dir"`
@@ -69,6 +70,11 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	buildStrategy := normalizeBuildStrategy(req.BuildStrategy)
+	networkMode, err := resolveImportNetworkMode(req.NetworkMode)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	sourceFileName := archiveHeader.Filename
 	if strings.TrimSpace(sourceFileName) == "" {
 		sourceFileName = "source.tgz"
@@ -111,6 +117,7 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 		if req.ServicePort > 0 {
 			spec.Ports = []int{req.ServicePort}
 		}
+		applyImportedNetworkMode(&spec, networkMode)
 		if req.Env != nil {
 			env, err := normalizeImportedEnv(req.Env)
 			if err != nil {
@@ -165,7 +172,7 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "cannot create app for another tenant")
 		return
 	}
-	if strings.TrimSpace(s.appBaseDomain) == "" {
+	if strings.TrimSpace(s.appBaseDomain) == "" && networkMode != model.AppNetworkModeBackground {
 		httpx.WriteError(w, http.StatusInternalServerError, "app base domain is not configured")
 		return
 	}
@@ -207,6 +214,10 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 		})
 		switch {
 		case inspectErr == nil:
+			if networkMode == model.AppNetworkModeBackground {
+				httpx.WriteError(w, http.StatusBadRequest, "network_mode is only supported for single-app imports")
+				return
+			}
 			if hasStartupCommand(req.StartupCommand) {
 				httpx.WriteError(w, http.StatusBadRequest, "startup_command is only supported for single-app imports")
 				return
@@ -284,11 +295,15 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		applyStartupCommand(&spec, req.StartupCommand)
-		route := model.AppRoute{
-			Hostname:    candidateHost,
-			BaseDomain:  s.appBaseDomain,
-			PublicURL:   "https://" + candidateHost,
-			ServicePort: firstServicePort(spec),
+		applyImportedNetworkMode(&spec, networkMode)
+		route := model.AppRoute{}
+		if !model.AppUsesBackgroundNetwork(spec) {
+			route = model.AppRoute{
+				Hostname:    candidateHost,
+				BaseDomain:  s.appBaseDomain,
+				PublicURL:   "https://" + candidateHost,
+				ServicePort: firstServicePort(spec),
+			}
 		}
 		app, err = s.store.CreateImportedApp(tenantID, project.ID, candidateName, description, spec, source, route)
 		if err == nil {

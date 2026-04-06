@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -42,7 +43,7 @@ func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) boo
 		return true
 	}
 
-	target, err := url.Parse(serviceURLForApp(app))
+	target, err := url.Parse(s.serviceURLForApp(r.Context(), app))
 	if err != nil {
 		http.Error(w, "invalid app target", http.StatusInternalServerError)
 		return true
@@ -72,21 +73,49 @@ func (s *Server) isAppHostname(host string) bool {
 	return strings.HasSuffix(host, "."+base)
 }
 
-func serviceURLForApp(app model.App) string {
+func (s *Server) serviceURLForApp(ctx context.Context, app model.App) string {
 	port := 80
 	if app.Route != nil && app.Route.ServicePort > 0 {
 		port = app.Route.ServicePort
 	} else if len(app.Spec.Ports) > 0 {
 		port = app.Spec.Ports[0]
 	}
-	namespace := runtime.NamespaceForTenant(app.TenantID)
-	return "http://" + sanitizeProxyName(app.Name) + "." + namespace + ".svc.cluster.local:" + strconv.Itoa(port)
+	return "http://" + s.serviceHostForApp(ctx, app) + ":" + strconv.Itoa(port)
 }
 
-func sanitizeProxyName(name string) string {
-	name = model.Slugify(name)
-	if len(name) > 50 {
-		return name[:50]
+func (s *Server) serviceHostForApp(ctx context.Context, app model.App) string {
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	primaryHost := appServiceHost(namespace, runtime.RuntimeAppResourceName(app))
+	legacyHost := appServiceHost(namespace, runtime.RuntimeResourceName(app.Name))
+	if legacyHost == "" || legacyHost == primaryHost {
+		return primaryHost
 	}
-	return name
+	if s.serviceHostResolves(ctx, primaryHost) {
+		return primaryHost
+	}
+	if s.serviceHostResolves(ctx, legacyHost) {
+		return legacyHost
+	}
+	return primaryHost
+}
+
+func (s *Server) serviceHostResolves(ctx context.Context, host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" || s == nil || s.dnsResolver == nil {
+		return false
+	}
+	addrs, err := s.dnsResolver.LookupIPAddr(ctx, host)
+	return err == nil && len(addrs) > 0
+}
+
+func appServiceHost(namespace, serviceName string) string {
+	serviceName = strings.TrimSpace(serviceName)
+	namespace = strings.TrimSpace(namespace)
+	if serviceName == "" {
+		return ""
+	}
+	if namespace == "" {
+		return serviceName
+	}
+	return serviceName + "." + namespace + ".svc.cluster.local"
 }

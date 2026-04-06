@@ -128,7 +128,9 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	if strings.TrimSpace(finalSpec.RuntimeID) == "" {
 		finalSpec.RuntimeID = "runtime_managed_shared"
 	}
-	if requestedPort := firstPositivePort(finalSpec.Ports); requestedPort > 0 {
+	if model.AppUsesBackgroundNetwork(finalSpec) {
+		finalSpec.Ports = nil
+	} else if requestedPort := firstPositivePort(finalSpec.Ports); requestedPort > 0 {
 		finalSpec.Ports = []int{requestedPort}
 	} else if detectedPort := effectiveImportPort(output.ImportResult.DetectedPort, output.ImportResult.BuildStrategy); detectedPort > 0 {
 		finalSpec.Ports = []int{detectedPort}

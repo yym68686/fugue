@@ -2382,6 +2382,73 @@ func TestDeployOperationUpdatesRouteServicePort(t *testing.T) {
 	}
 }
 
+func TestDeployOperationClearsRouteForBackgroundApps(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Background Route")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "workers", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.example.com/demo:old",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyDockerfile,
+	}, model.AppRoute{
+		Hostname:    "demo.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://demo.example.com",
+		ServicePort: 80,
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	spec := app.Spec
+	spec.Image = "registry.example.com/demo:new"
+	spec.NetworkMode = model.AppNetworkModeBackground
+	spec.Ports = nil
+	op, err := s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &spec,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim deploy operation: %v", err)
+	} else if !found {
+		t.Fatal("expected deploy operation")
+	}
+	if _, err := s.CompleteManagedOperation(op.ID, "/tmp/demo.yaml", "deployed"); err != nil {
+		t.Fatalf("complete deploy operation: %v", err)
+	}
+
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.Route != nil {
+		t.Fatalf("expected background deploy to clear route, got %+v", app.Route)
+	}
+}
+
 func TestFailedOperationMarksAppFailed(t *testing.T) {
 	t.Parallel()
 

@@ -43,7 +43,7 @@ func buildAppObjectsWithPlacements(app model.App, scheduling SchedulingConstrain
 
 func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, postgresPlacements map[string][]SchedulingConstraints, ownerRef *OwnerReference) []map[string]any {
 	namespace := NamespaceForTenant(app.TenantID)
-	appName := sanitizeName(app.Name)
+	appRuntimeName := RuntimeAppResourceName(app)
 	postgresResources := managedPostgresResources(namespace, app, postgresPlacements)
 	labels := appLabels(app)
 	objects := []map[string]any{
@@ -51,7 +51,7 @@ func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, p
 	}
 
 	if len(app.Spec.Files) > 0 {
-		objects = append(objects, buildAppFilesSecretObject(namespace, appName, app.Spec.Files, labels))
+		objects = append(objects, buildAppFilesSecretObject(namespace, appRuntimeName, app.Spec.Files, labels))
 	}
 
 	if workspaceSpec := normalizeRuntimeAppWorkspaceSpec(app); workspaceSpec != nil {
@@ -70,10 +70,10 @@ func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, p
 		objects = append(objects, buildManagedPostgresObjects(namespace, postgres)...)
 	}
 
-	objects = append(objects,
-		buildAppDeploymentObject(namespace, app, labels, scheduling, postgresResources),
-		buildAppServiceObject(namespace, app, labels),
-	)
+	objects = append(objects, buildAppDeploymentObject(namespace, app, labels, scheduling, postgresResources))
+	if serviceObject := buildAppServiceObject(namespace, app, labels); serviceObject != nil {
+		objects = append(objects, serviceObject)
+	}
 	attachOwnerReference(objects, ownerRef)
 	return objects
 }
@@ -256,6 +256,7 @@ func buildManagedPostgresObjects(namespace string, resource postgresRuntimeResou
 }
 
 func buildAppDeploymentObject(namespace string, app model.App, labels map[string]string, scheduling SchedulingConstraints, postgresResources []postgresRuntimeResource) map[string]any {
+	resourceName := RuntimeAppResourceName(app)
 	container := map[string]any{
 		"name":  sanitizeName(app.Name),
 		"image": app.Spec.Image,
@@ -311,7 +312,7 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		volumes = append(volumes, map[string]any{
 			"name": "app-files",
 			"secret": map[string]any{
-				"secretName": appFilesSecretName(sanitizeName(app.Name)),
+				"secretName": appFilesSecretName(resourceName),
 				"items":      items,
 			},
 		})
@@ -389,7 +390,7 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		"apiVersion": "apps/v1",
 		"kind":       "Deployment",
 		"metadata": map[string]any{
-			"name":      sanitizeName(app.Name),
+			"name":      resourceName,
 			"namespace": namespace,
 			"labels":    labels,
 		},
@@ -625,6 +626,10 @@ func mergedRuntimeEnv(app model.App) map[string]string {
 }
 
 func buildAppServiceObject(namespace string, app model.App, labels map[string]string) map[string]any {
+	if !model.AppExposesPublicService(app.Spec) {
+		return nil
+	}
+
 	servicePorts := make([]map[string]any, 0, len(app.Spec.Ports))
 	for _, port := range app.Spec.Ports {
 		servicePorts = append(servicePorts, map[string]any{
@@ -634,20 +639,11 @@ func buildAppServiceObject(namespace string, app model.App, labels map[string]st
 			"protocol":   "TCP",
 		})
 	}
-	if len(servicePorts) == 0 {
-		servicePorts = append(servicePorts, map[string]any{
-			"name":       "tcp-80",
-			"port":       80,
-			"targetPort": 80,
-			"protocol":   "TCP",
-		})
-	}
-
 	return map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Service",
 		"metadata": map[string]any{
-			"name":      sanitizeName(app.Name),
+			"name":      RuntimeAppResourceName(app),
 			"namespace": namespace,
 			"labels":    labels,
 		},

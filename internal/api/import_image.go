@@ -20,6 +20,7 @@ type importImageRequest struct {
 	Description       string                          `json:"description"`
 	RuntimeID         string                          `json:"runtime_id"`
 	Replicas          int                             `json:"replicas"`
+	NetworkMode       string                          `json:"network_mode"`
 	ServicePort       int                             `json:"service_port"`
 	Env               map[string]string               `json:"env"`
 	ConfigContent     string                          `json:"config_content"`
@@ -55,10 +56,6 @@ func (s *Server) handleImportImageApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "internal registry is not configured")
 		return
 	}
-	if strings.TrimSpace(s.appBaseDomain) == "" {
-		httpx.WriteError(w, http.StatusInternalServerError, "app base domain is not configured")
-		return
-	}
 
 	source, err := buildQueuedImageSource(req.ImageRef, "", "")
 	if err != nil {
@@ -73,6 +70,15 @@ func (s *Server) handleImportImageApp(w http.ResponseWriter, r *http.Request) {
 	runtimeID := strings.TrimSpace(req.RuntimeID)
 	if runtimeID == "" {
 		runtimeID = "runtime_managed_shared"
+	}
+	networkMode, err := resolveImportNetworkMode(req.NetworkMode)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strings.TrimSpace(s.appBaseDomain) == "" && networkMode != model.AppNetworkModeBackground {
+		httpx.WriteError(w, http.StatusInternalServerError, "app base domain is not configured")
+		return
 	}
 
 	description := strings.TrimSpace(req.Description)
@@ -136,11 +142,15 @@ func (s *Server) handleImportImageApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		applyStartupCommand(&spec, req.StartupCommand)
-		route := model.AppRoute{
-			Hostname:    candidateHost,
-			BaseDomain:  s.appBaseDomain,
-			PublicURL:   "https://" + candidateHost,
-			ServicePort: firstServicePort(spec),
+		applyImportedNetworkMode(&spec, networkMode)
+		route := model.AppRoute{}
+		if !model.AppUsesBackgroundNetwork(spec) {
+			route = model.AppRoute{
+				Hostname:    candidateHost,
+				BaseDomain:  s.appBaseDomain,
+				PublicURL:   "https://" + candidateHost,
+				ServicePort: firstServicePort(spec),
+			}
 		}
 		app, err = s.store.CreateImportedApp(tenantID, project.ID, candidateName, description, spec, source, route)
 		if err == nil {

@@ -94,7 +94,7 @@ func decorateManagedAppObjectsWithFenceEpoch(objects []map[string]any, app model
 	if len(objects) == 0 || epoch == "" {
 		return
 	}
-	resourceName := runtime.RuntimeResourceName(app.Name)
+	resourceName := runtime.RuntimeAppResourceName(app)
 	for _, obj := range objects {
 		kind, _ := obj["kind"].(string)
 		name, _ := objectNameAndNamespace("", obj)

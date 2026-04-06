@@ -102,6 +102,55 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 	}
 }
 
+func TestBuildAppObjectsUseAppIDScopedRuntimeNames(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo_123",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Files: []model.AppFile{
+				{
+					Path:    "/app/config.yaml",
+					Content: "demo: true",
+				},
+			},
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	if len(objects) != 4 {
+		t.Fatalf("expected 4 objects, got %d", len(objects))
+	}
+
+	appFilesSecret := objects[1]
+	if got := appFilesSecret["metadata"].(map[string]any)["name"]; got != "app-demo-123-files" {
+		t.Fatalf("expected app files secret name %q, got %#v", "app-demo-123-files", got)
+	}
+
+	appDeployment := objects[2]
+	deploymentMetadata := appDeployment["metadata"].(map[string]any)
+	if got := deploymentMetadata["name"]; got != "app-demo-123" {
+		t.Fatalf("expected deployment name %q, got %#v", "app-demo-123", got)
+	}
+	deploymentLabels := deploymentMetadata["labels"].(map[string]string)
+	if got := deploymentLabels[FugueLabelName]; got != "demo" {
+		t.Fatalf("expected human-readable app label %q, got %#v", "demo", got)
+	}
+	containers := appDeployment["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]map[string]any)
+	if got := containers[0]["name"]; got != "demo" {
+		t.Fatalf("expected app container name %q, got %#v", "demo", got)
+	}
+
+	appService := objects[3]
+	if got := appService["metadata"].(map[string]any)["name"]; got != "app-demo-123" {
+		t.Fatalf("expected service name %q, got %#v", "app-demo-123", got)
+	}
+}
+
 func TestNormalizeRuntimePostgresSpecDefaultsToAppScopedUser(t *testing.T) {
 	spec := normalizeRuntimePostgresSpec("fugue-web", model.AppPostgresSpec{})
 	if spec.User != "fugue_web" {
@@ -339,6 +388,36 @@ func TestBuildAppDeploymentUsesRollingUpdateAndReadinessProbe(t *testing.T) {
 	tcpSocket := readinessProbe["tcpSocket"].(map[string]any)
 	if tcpSocket["port"] != 8080 {
 		t.Fatalf("expected readiness probe port 8080, got %#v", tcpSocket["port"])
+	}
+}
+
+func TestBuildAppObjectsSkipsServiceForBackgroundApps(t *testing.T) {
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "worker",
+		Spec: model.AppSpec{
+			Image:       "ghcr.io/example/worker:latest",
+			NetworkMode: model.AppNetworkModeBackground,
+			Replicas:    1,
+			RuntimeID:   "runtime_demo",
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	if len(objects) != 2 {
+		t.Fatalf("expected namespace and deployment only, got %d objects", len(objects))
+	}
+	if kind, _ := objects[1]["kind"].(string); kind != "Deployment" {
+		t.Fatalf("expected deployment object, got %#v", objects[1]["kind"])
+	}
+
+	deployment := objects[1]
+	spec := deployment["spec"].(map[string]any)
+	template := spec["template"].(map[string]any)
+	podSpec := template["spec"].(map[string]any)
+	containers := podSpec["containers"].([]map[string]any)
+	if _, ok := containers[0]["readinessProbe"]; ok {
+		t.Fatalf("expected background app to omit readiness probe, got %#v", containers[0]["readinessProbe"])
 	}
 }
 

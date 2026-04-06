@@ -39,6 +39,7 @@ type importGitHubRequest struct {
 	BuildStrategy              string                                  `json:"build_strategy"`
 	RuntimeID                  string                                  `json:"runtime_id"`
 	Replicas                   int                                     `json:"replicas"`
+	NetworkMode                string                                  `json:"network_mode"`
 	ServicePort                int                                     `json:"service_port"`
 	DockerfilePath             string                                  `json:"dockerfile_path"`
 	BuildContextDir            string                                  `json:"build_context_dir"`
@@ -83,6 +84,7 @@ func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID
 		BuildStrategy              string                                  `json:"build_strategy"`
 		RuntimeID                  string                                  `json:"runtime_id"`
 		Replicas                   int                                     `json:"replicas"`
+		NetworkMode                string                                  `json:"network_mode"`
 		ServicePort                int                                     `json:"service_port"`
 		DockerfilePath             string                                  `json:"dockerfile_path"`
 		BuildContextDir            string                                  `json:"build_context_dir"`
@@ -107,6 +109,7 @@ func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID
 		BuildStrategy:              normalizeBuildStrategy(req.BuildStrategy),
 		RuntimeID:                  strings.TrimSpace(runtimeID),
 		Replicas:                   replicas,
+		NetworkMode:                model.NormalizeAppNetworkMode(req.NetworkMode),
 		ServicePort:                req.ServicePort,
 		DockerfilePath:             strings.TrimSpace(req.DockerfilePath),
 		BuildContextDir:            strings.TrimSpace(req.BuildContextDir),

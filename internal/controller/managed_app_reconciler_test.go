@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"sort"
@@ -11,6 +12,7 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
+	"fugue/internal/store"
 )
 
 func TestBuildManagedAppStatusKeepsCurrentReleaseDuringRollout(t *testing.T) {
@@ -539,10 +541,10 @@ func TestDeleteManagedAppResourcesDeletesExpectedNamesWhenLabelsAreMissing(t *te
 	}
 
 	want := []string{
-		"DELETE /api/v1/namespaces/fg-tenant-demo/services/uni-api-web-api",
+		"DELETE /api/v1/namespaces/fg-tenant-demo/services/app-demo",
 		"DELETE /api/v1/namespaces/fg-tenant-demo/services/uni-api-web-api-db-postgres",
 		"DELETE /api/v1/namespaces/fg-tenant-demo/secrets/uni-api-web-api-pgsec",
-		"DELETE /apis/apps/v1/namespaces/fg-tenant-demo/deployments/uni-api-web-api",
+		"DELETE /apis/apps/v1/namespaces/fg-tenant-demo/deployments/app-demo",
 		"DELETE /apis/postgresql.cnpg.io/v1/namespaces/fg-tenant-demo/clusters/uni-api-web-api-db-postgres",
 	}
 	sort.Strings(deleted)
@@ -614,8 +616,8 @@ func TestDeleteManagedAppResourcesIgnoresMissingCustomResourceAPIsForStatelessAp
 	}
 
 	want := []string{
-		"DELETE /api/v1/namespaces/fg-tenant-demo/services/uni-api-web-api",
-		"DELETE /apis/apps/v1/namespaces/fg-tenant-demo/deployments/uni-api-web-api",
+		"DELETE /api/v1/namespaces/fg-tenant-demo/services/app-demo",
+		"DELETE /apis/apps/v1/namespaces/fg-tenant-demo/deployments/app-demo",
 	}
 	sort.Strings(deleted)
 	sort.Strings(want)
@@ -625,6 +627,113 @@ func TestDeleteManagedAppResourcesIgnoresMissingCustomResourceAPIsForStatelessAp
 	for i := range want {
 		if deleted[i] != want[i] {
 			t.Fatalf("expected delete request %q, got %q", want[i], deleted[i])
+		}
+	}
+}
+
+func TestReconcileManagedAppObjectDeletesOrphanedManagedApp(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(t.TempDir() + "/store.json")
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	namespace := runtime.NamespaceForTenant("tenant_demo")
+	managedName := "app-demo"
+	var patchedStatus runtime.ManagedAppStatus
+	var deleted []string
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodPatch && req.URL.Path == managedAppAPIPath(namespace, managedName)+"/status":
+			var body struct {
+				Status runtime.ManagedAppStatus `json:"status"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Fatalf("decode managed app status patch: %v", err)
+			}
+			patchedStatus = body.Status
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     make(http.Header),
+			}, nil
+		case req.Method == http.MethodGet && (strings.HasPrefix(req.URL.Path, "/apis/postgresql.cnpg.io/") || strings.HasPrefix(req.URL.Path, "/apis/volsync.backube/")):
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader(`{"kind":"Status","status":"Failure","message":"the server could not find the requested resource","reason":"NotFound","code":404}`)),
+				Header:     make(http.Header),
+			}, nil
+		case req.Method == http.MethodGet:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"items":[]}`)),
+				Header:     make(http.Header),
+			}, nil
+		case req.Method == http.MethodDelete:
+			deleted = append(deleted, req.Method+" "+req.URL.Path)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     make(http.Header),
+			}, nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   "fugue-system",
+	}
+	svc := &Service{Store: stateStore}
+
+	managed := runtime.ManagedAppObject{
+		Metadata: runtime.ManagedAppMeta{
+			Name:       managedName,
+			Namespace:  namespace,
+			Generation: 1,
+		},
+		Spec: runtime.ManagedAppSpec{
+			AppID:    "app_demo",
+			TenantID: "tenant_demo",
+			Name:     "demo",
+			AppSpec: model.AppSpec{
+				Image:     "ghcr.io/example/demo:latest",
+				Ports:     []int{8080},
+				Replicas:  1,
+				RuntimeID: "runtime_demo",
+			},
+		},
+	}
+
+	if err := svc.reconcileManagedAppObject(context.Background(), client, managed); err != nil {
+		t.Fatalf("reconcile orphaned managed app: %v", err)
+	}
+
+	if patchedStatus.Phase != runtime.ManagedAppPhaseDeleting {
+		t.Fatalf("expected orphan status phase %q, got %q", runtime.ManagedAppPhaseDeleting, patchedStatus.Phase)
+	}
+	if !strings.Contains(patchedStatus.Message, "app not found in store") {
+		t.Fatalf("expected orphan status message to mention missing store app, got %q", patchedStatus.Message)
+	}
+
+	wantDeleted := []string{
+		"DELETE " + managedAppAPIPath(namespace, managedName),
+		"DELETE /api/v1/namespaces/" + namespace + "/services/app-demo",
+		"DELETE /apis/apps/v1/namespaces/" + namespace + "/deployments/app-demo",
+	}
+	sort.Strings(deleted)
+	sort.Strings(wantDeleted)
+	if len(deleted) != len(wantDeleted) {
+		t.Fatalf("expected delete requests %v, got %v", wantDeleted, deleted)
+	}
+	for i := range wantDeleted {
+		if deleted[i] != wantDeleted[i] {
+			t.Fatalf("expected delete request %q, got %q", wantDeleted[i], deleted[i])
 		}
 	}
 }

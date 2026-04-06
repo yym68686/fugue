@@ -28,6 +28,10 @@ type appRouteAvailability struct {
 }
 
 func (s *Server) createAppWithAutoRoute(tenantID, projectID, name, description string, spec model.AppSpec) (model.App, error) {
+	if model.AppUsesBackgroundNetwork(spec) {
+		return s.store.CreateApp(tenantID, projectID, name, description, spec)
+	}
+
 	appName := strings.TrimSpace(name)
 	if appName == "" {
 		appName = "app"
@@ -77,6 +81,10 @@ func (s *Server) handleGetAppRouteAvailability(w http.ResponseWriter, r *http.Re
 	if !allowed {
 		return
 	}
+	if !model.AppExposesPublicService(app.Spec) {
+		httpx.WriteError(w, http.StatusBadRequest, "app does not expose a public service")
+		return
+	}
 
 	availability, err := s.inspectAppRouteAvailability(app, r.URL.Query().Get("hostname"))
 	if err != nil {
@@ -96,6 +104,10 @@ func (s *Server) handlePatchAppRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	app, allowed := s.loadAuthorizedApp(w, r, principal)
 	if !allowed {
+		return
+	}
+	if !model.AppExposesPublicService(app.Spec) {
+		httpx.WriteError(w, http.StatusBadRequest, "app does not expose a public service")
 		return
 	}
 
@@ -249,23 +261,16 @@ func buildAutoRouteHostname(baseName, baseDomain string, attempt int) string {
 }
 
 func (s *Server) buildManagedAppRoute(app model.App, hostname string) model.AppRoute {
-	servicePort := firstServicePort(app.Spec)
-	if app.Route != nil && app.Route.ServicePort > 0 {
-		servicePort = app.Route.ServicePort
-	}
 	return model.AppRoute{
 		Hostname:    hostname,
 		BaseDomain:  s.appBaseDomain,
 		PublicURL:   "https://" + hostname,
-		ServicePort: servicePort,
+		ServicePort: firstServicePort(app.Spec),
 	}
 }
 
 func firstServicePort(spec model.AppSpec) int {
-	if len(spec.Ports) > 0 && spec.Ports[0] > 0 {
-		return spec.Ports[0]
-	}
-	return 80
+	return model.AppPublicServicePort(spec)
 }
 
 func (s *Server) isReservedAppHostname(host string) bool {

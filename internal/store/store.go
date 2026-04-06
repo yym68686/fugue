@@ -1833,10 +1833,7 @@ func (s *Store) UpdateAppRoute(id string, route model.AppRoute) (model.App, erro
 				route.ServicePort = app.Route.ServicePort
 			}
 			if route.ServicePort <= 0 {
-				route.ServicePort = firstPositiveSpecPort(app.Spec.Ports)
-			}
-			if route.ServicePort <= 0 {
-				route.ServicePort = 80
+				route.ServicePort = model.AppPublicServicePort(app.Spec)
 			}
 		}
 		app.Route = cloneAppRoute(&route)
@@ -1927,6 +1924,9 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 		spec.RuntimeID = "runtime_managed_shared"
 	}
 	if err := normalizeAppSpecResources(&spec); err != nil {
+		return model.App{}, err
+	}
+	if err := validateAppNetworkMode(spec); err != nil {
 		return model.App{}, err
 	}
 	if err := validateManagedPostgresSpecForAppName(name, spec.Postgres); err != nil {
@@ -2038,6 +2038,9 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
 				return err
 			}
+			if err := validateAppNetworkMode(*op.DesiredSpec); err != nil {
+				return err
+			}
 			if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
 				return err
 			}
@@ -2059,6 +2062,9 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 				return ErrInvalidInput
 			}
 			if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
+				return err
+			}
+			if err := validateAppNetworkMode(*op.DesiredSpec); err != nil {
 				return err
 			}
 			if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
@@ -3063,7 +3069,11 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 		}
 		app.Spec = *op.DesiredSpec
 		if app.Route != nil {
-			app.Route.ServicePort = firstPositiveSpecPort(app.Spec.Ports)
+			if model.AppExposesPublicService(app.Spec) {
+				app.Route.ServicePort = model.AppPublicServicePort(app.Spec)
+			} else {
+				app.Route = nil
+			}
 		}
 		if op.DesiredSource != nil {
 			app.Source = cloneAppSource(op.DesiredSource)

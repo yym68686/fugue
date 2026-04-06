@@ -1,6 +1,10 @@
 package api
 
-import "testing"
+import (
+	"testing"
+
+	"fugue/internal/model"
+)
 
 func TestSummarizeKubePodFailureEvicted(t *testing.T) {
 	var pod kubePodInfo
@@ -25,5 +29,23 @@ func TestKubeJobFailedWithFailedCondition(t *testing.T) {
 	}
 	if !kubeJobFailed(status) {
 		t.Fatal("expected job to be failed")
+	}
+}
+
+func TestRuntimeLogTargetUsesAppIDSelectorForAppComponent(t *testing.T) {
+	selector, containerName, err := runtimeLogTarget(model.App{
+		ID:   "app_demo",
+		Name: "demo",
+	}, "app")
+	if err != nil {
+		t.Fatalf("runtime log target: %v", err)
+	}
+
+	wantSelector := "app.kubernetes.io/managed-by=fugue,app.kubernetes.io/name=demo,fugue.pro/app-id=app_demo"
+	if selector != wantSelector {
+		t.Fatalf("expected selector %q, got %q", wantSelector, selector)
+	}
+	if containerName != "demo" {
+		t.Fatalf("expected container name %q, got %q", "demo", containerName)
 	}
 }

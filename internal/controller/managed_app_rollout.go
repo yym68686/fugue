@@ -27,7 +27,7 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, o
 	defer ticker.Stop()
 
 	namespace := runtime.NamespaceForTenant(app.TenantID)
-	name := runtime.RuntimeResourceName(app.Name)
+	name := runtime.RuntimeAppResourceName(app)
 	managedAppName := runtime.ManagedAppResourceName(app)
 	lastMessage := ""
 
