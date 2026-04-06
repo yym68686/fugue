@@ -175,7 +175,11 @@ func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, depl
 		status.Conditions = append([]runtime.ManagedAppCondition(nil), deployment.Status.Conditions...)
 	}
 	status.BackingServices = append([]runtime.ManagedBackingServiceStatus(nil), backingServiceStatuses...)
-	podFailureMessage := managedAppPodFailureMessage(pods)
+	podFailureCutoff, allowPodFailure := managedAppPodFailureCutoff(managed.Status, app, managed.Spec.Scheduling)
+	podFailureMessage := ""
+	if allowPodFailure {
+		podFailureMessage = managedAppPodFailureMessage(pods, podFailureCutoff)
+	}
 
 	switch {
 	case app.Spec.Replicas <= 0:
@@ -276,8 +280,44 @@ func managedAppPodLabelSelector(app model.App) string {
 	return strings.Join(selectors, ",")
 }
 
-func managedAppPodFailureMessage(pods []kubePod) string {
+func managedAppPodFailureCutoff(previous runtime.ManagedAppStatus, app model.App, scheduling runtime.SchedulingConstraints) (*time.Time, bool) {
+	releaseKey := strings.TrimSpace(runtime.ManagedAppReleaseKey(app, scheduling))
+	if releaseKey == "" {
+		return nil, true
+	}
+
+	if strings.TrimSpace(previous.PendingReleaseKey) == releaseKey {
+		return parseManagedAppStatusTimestamp(previous.PendingReleaseStartedAt), true
+	}
+
+	currentKey := strings.TrimSpace(previous.CurrentReleaseKey)
+	if currentKey != "" && currentKey != releaseKey {
+		return nil, false
+	}
+	if currentKey == releaseKey {
+		return parseManagedAppStatusTimestamp(previous.CurrentReleaseStartedAt), true
+	}
+
+	return nil, true
+}
+
+func parseManagedAppStatusTimestamp(raw string) *time.Time {
+	timestamp := strings.TrimSpace(raw)
+	if timestamp == "" {
+		return nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, timestamp)
+	if err != nil {
+		return nil
+	}
+	return &parsed
+}
+
+func managedAppPodFailureMessage(pods []kubePod, notBefore *time.Time) string {
 	for _, pod := range pods {
+		if notBefore != nil && pod.Metadata.CreationTimestamp.Before(notBefore.UTC()) {
+			continue
+		}
 		if summary := summarizeManagedAppPodFailure(pod); summary != "" {
 			return summary
 		}

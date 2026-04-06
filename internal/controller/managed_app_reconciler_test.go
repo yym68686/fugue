@@ -210,6 +210,183 @@ func TestBuildManagedAppStatusMarksCrashLoopingPodsAsError(t *testing.T) {
 	}
 }
 
+func TestBuildManagedAppStatusIgnoresPodFailuresFromPreviousRelease(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:v2",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	managed := runtime.ManagedAppObject{
+		Metadata: runtime.ManagedAppMeta{
+			Generation: 2,
+		},
+		Spec: runtime.ManagedAppSpec{
+			Scheduling: runtime.SchedulingConstraints{},
+		},
+		Status: runtime.ManagedAppStatus{
+			CurrentReleaseKey:       "release_previous",
+			CurrentReleaseStartedAt: time.Date(2026, time.March, 26, 9, 0, 0, 0, time.UTC).Format(time.RFC3339Nano),
+		},
+	}
+	deployment := kubeDeployment{}
+	deployment.Metadata.Generation = 2
+	deployment.Status.ObservedGeneration = 2
+	deployment.Status.Replicas = 1
+	deployment.Status.UpdatedReplicas = 1
+
+	pods := []kubePod{
+		{
+			Metadata: struct {
+				Name              string    `json:"name"`
+				CreationTimestamp time.Time `json:"creationTimestamp"`
+			}{
+				Name:              "demo-old",
+				CreationTimestamp: time.Date(2026, time.March, 26, 9, 1, 0, 0, time.UTC),
+			},
+			Status: struct {
+				Phase                 string                `json:"phase"`
+				Reason                string                `json:"reason,omitempty"`
+				Message               string                `json:"message,omitempty"`
+				InitContainerStatuses []kubeContainerStatus `json:"initContainerStatuses,omitempty"`
+				ContainerStatuses     []kubeContainerStatus `json:"containerStatuses,omitempty"`
+			}{
+				Phase: "Running",
+				ContainerStatuses: []kubeContainerStatus{
+					{
+						Name: "demo",
+						State: kubeRuntimeState{
+							Waiting: &kubeStateDetail{
+								Reason: "CrashLoopBackOff",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	status := buildManagedAppStatus(managed, app, deployment, true, pods, nil)
+
+	if status.Phase != runtime.ManagedAppPhaseProgressing {
+		t.Fatalf("expected phase progressing, got %q", status.Phase)
+	}
+	if status.PendingReleaseKey != runtime.ManagedAppReleaseKey(app, runtime.SchedulingConstraints{}) {
+		t.Fatalf("expected pending release key to be set for the new rollout, got %q", status.PendingReleaseKey)
+	}
+}
+
+func TestBuildManagedAppStatusOnlyConsidersPodFailuresAfterPendingReleaseStart(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:v2",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	releaseKey := runtime.ManagedAppReleaseKey(app, runtime.SchedulingConstraints{})
+	pendingStartedAt := time.Date(2026, time.March, 26, 10, 0, 0, 0, time.UTC)
+	managed := runtime.ManagedAppObject{
+		Metadata: runtime.ManagedAppMeta{
+			Generation: 2,
+		},
+		Spec: runtime.ManagedAppSpec{
+			Scheduling: runtime.SchedulingConstraints{},
+		},
+		Status: runtime.ManagedAppStatus{
+			PendingReleaseKey:       releaseKey,
+			PendingReleaseStartedAt: pendingStartedAt.Format(time.RFC3339Nano),
+		},
+	}
+	deployment := kubeDeployment{}
+	deployment.Metadata.Generation = 2
+	deployment.Status.ObservedGeneration = 2
+	deployment.Status.Replicas = 1
+	deployment.Status.UpdatedReplicas = 1
+
+	pods := []kubePod{
+		{
+			Metadata: struct {
+				Name              string    `json:"name"`
+				CreationTimestamp time.Time `json:"creationTimestamp"`
+			}{
+				Name:              "demo-old",
+				CreationTimestamp: pendingStartedAt.Add(-time.Minute),
+			},
+			Status: struct {
+				Phase                 string                `json:"phase"`
+				Reason                string                `json:"reason,omitempty"`
+				Message               string                `json:"message,omitempty"`
+				InitContainerStatuses []kubeContainerStatus `json:"initContainerStatuses,omitempty"`
+				ContainerStatuses     []kubeContainerStatus `json:"containerStatuses,omitempty"`
+			}{
+				Phase: "Running",
+				ContainerStatuses: []kubeContainerStatus{
+					{
+						Name: "demo",
+						State: kubeRuntimeState{
+							Waiting: &kubeStateDetail{
+								Reason: "CrashLoopBackOff",
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			Metadata: struct {
+				Name              string    `json:"name"`
+				CreationTimestamp time.Time `json:"creationTimestamp"`
+			}{
+				Name:              "demo-new",
+				CreationTimestamp: pendingStartedAt.Add(time.Minute),
+			},
+			Status: struct {
+				Phase                 string                `json:"phase"`
+				Reason                string                `json:"reason,omitempty"`
+				Message               string                `json:"message,omitempty"`
+				InitContainerStatuses []kubeContainerStatus `json:"initContainerStatuses,omitempty"`
+				ContainerStatuses     []kubeContainerStatus `json:"containerStatuses,omitempty"`
+			}{
+				Phase: "Running",
+				ContainerStatuses: []kubeContainerStatus{
+					{
+						Name: "demo",
+						State: kubeRuntimeState{
+							Waiting: &kubeStateDetail{
+								Reason: "CrashLoopBackOff",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	status := buildManagedAppStatus(managed, app, deployment, true, pods, nil)
+
+	if status.Phase != runtime.ManagedAppPhaseError {
+		t.Fatalf("expected phase error, got %q", status.Phase)
+	}
+	if !strings.Contains(status.Message, "demo-new") {
+		t.Fatalf("expected only the new pod failure to be reported, got %q", status.Message)
+	}
+	if strings.Contains(status.Message, "demo-old") {
+		t.Fatalf("expected old pod failure to be ignored, got %q", status.Message)
+	}
+}
+
 func TestBuildManagedAppStatusKeepsContainerCreatingPodsAsProgressing(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",
