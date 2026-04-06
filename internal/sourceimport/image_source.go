@@ -113,6 +113,14 @@ func craneOptionsForImageRef(ctx context.Context, imageRef string) []crane.Optio
 	return options
 }
 
+func InspectRemoteImageConfig(ctx context.Context, imageRef string) (*v1.ConfigFile, error) {
+	normalized, err := normalizeContainerImageRef(imageRef)
+	if err != nil {
+		return nil, err
+	}
+	return readRemoteImageConfig(normalized, craneOptionsForImageRef(ctx, normalized)...)
+}
+
 func readRemoteImageConfig(imageRef string, options ...crane.Option) (*v1.ConfigFile, error) {
 	data, err := crane.Config(imageRef, options...)
 	if err != nil {

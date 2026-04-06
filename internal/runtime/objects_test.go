@@ -342,40 +342,6 @@ func TestBuildAppDeploymentUsesRollingUpdateAndReadinessProbe(t *testing.T) {
 	}
 }
 
-func TestBuildAppDeploymentUsesBuildpackLauncherForCommandOverride(t *testing.T) {
-	app := model.App{
-		TenantID: "tenant_demo",
-		Name:     "demo",
-		Source: &model.AppSource{
-			Type:          model.AppSourceTypeUpload,
-			BuildStrategy: model.AppBuildStrategyBuildpacks,
-		},
-		Spec: model.AppSpec{
-			Image:     "ghcr.io/example/demo:latest",
-			Command:   []string{"sh", "-lc", "python3 proxy_server.py"},
-			Replicas:  1,
-			RuntimeID: "runtime_demo",
-		},
-	}
-
-	objects := buildAppObjects(app, SchedulingConstraints{})
-	deployment := objects[1]
-	spec := deployment["spec"].(map[string]any)
-	template := spec["template"].(map[string]any)
-	podSpec := template["spec"].(map[string]any)
-	containers := podSpec["containers"].([]map[string]any)
-	container := containers[0]
-
-	command := container["command"].([]string)
-	if len(command) != 1 || command[0] != buildpackLauncherPath {
-		t.Fatalf("expected buildpack launcher command, got %#v", command)
-	}
-	args := container["args"].([]string)
-	if len(args) != 3 || args[0] != "sh" || args[1] != "-lc" || args[2] != "python3 proxy_server.py" {
-		t.Fatalf("expected original command moved into args, got %#v", args)
-	}
-}
-
 func TestBuildAppDeploymentOmitsResourcesWhenUnset(t *testing.T) {
 	app := model.App{
 		TenantID: "tenant_demo",

@@ -17,19 +17,20 @@ import (
 )
 
 type Service struct {
-	Store                   *store.Store
-	Config                  config.ControllerConfig
-	Renderer                runtime.Renderer
-	Logger                  *log.Logger
-	importer                sourceImporter
-	registryPushBase        string
-	registryPullBase        string
-	inspectManagedImage     appimages.InspectFunc
-	deleteManagedImage      func(context.Context, string) (appimages.DeleteResult, error)
-	syncBillingImageStorage bool
-	latestGitHubCommit      func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
-	newKubeClient           func(namespace string) (*kubeClient, error)
-	now                     func() time.Time
+	Store                     *store.Store
+	Config                    config.ControllerConfig
+	Renderer                  runtime.Renderer
+	Logger                    *log.Logger
+	importer                  sourceImporter
+	registryPushBase          string
+	registryPullBase          string
+	inspectManagedImage       appimages.InspectFunc
+	inspectManagedImageConfig imageConfigInspector
+	deleteManagedImage        func(context.Context, string) (appimages.DeleteResult, error)
+	syncBillingImageStorage   bool
+	latestGitHubCommit        func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
+	newKubeClient             func(namespace string) (*kubeClient, error)
+	now                       func() time.Time
 }
 
 type sourceImporter interface {
@@ -105,6 +106,9 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	if s.inspectManagedImage == nil {
 		s.inspectManagedImage = appimages.NewRemoteInspector().InspectImage
+	}
+	if s.inspectManagedImageConfig == nil {
+		s.inspectManagedImageConfig = sourceimport.InspectRemoteImageConfig
 	}
 	if s.deleteManagedImage == nil {
 		s.deleteManagedImage = appimages.DeleteRemoteImage
@@ -473,6 +477,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	if err != nil {
 		return err
 	}
+	app = s.appWithResolvedLaunchOverride(ctx, app)
 
 	bundle, err := s.Renderer.RenderAppBundleWithPlacements(app, scheduling, postgresPlacements)
 	if err != nil {
