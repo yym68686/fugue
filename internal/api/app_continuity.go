@@ -29,6 +29,7 @@ func (s *Server) handlePatchAppContinuity(w http.ResponseWriter, r *http.Request
 		DatabaseFailover *struct {
 			Enabled         bool   `json:"enabled"`
 			TargetRuntimeID string `json:"target_runtime_id"`
+			RebalanceNow    bool   `json:"rebalance_now"`
 		} `json:"database_failover"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
@@ -76,12 +77,17 @@ func (s *Server) handlePatchAppContinuity(w http.ResponseWriter, r *http.Request
 			nextDatabase = cloneAppPostgresSpec(currentDatabase)
 		}
 		if req.DatabaseFailover.Enabled {
+			if req.DatabaseFailover.RebalanceNow {
+				httpx.WriteError(w, http.StatusBadRequest, "database_failover.rebalance_now is only supported when enabled is false")
+				return
+			}
 			targetRuntimeID := strings.TrimSpace(req.DatabaseFailover.TargetRuntimeID)
 			if targetRuntimeID == "" {
 				httpx.WriteError(w, http.StatusBadRequest, "database_failover.target_runtime_id is required when enabled")
 				return
 			}
 			nextDatabase.FailoverTargetRuntimeID = targetRuntimeID
+			nextDatabase.PrimaryPlacementPendingRebalance = false
 			if nextDatabase.Instances < 2 {
 				nextDatabase.Instances = 2
 			}
@@ -92,6 +98,15 @@ func (s *Server) handlePatchAppContinuity(w http.ResponseWriter, r *http.Request
 			nextDatabase.FailoverTargetRuntimeID = ""
 			nextDatabase.Instances = 1
 			nextDatabase.SynchronousReplicas = 0
+			if req.DatabaseFailover.RebalanceNow {
+				nextDatabase.PrimaryPlacementPendingRebalance = false
+			} else {
+				nextDatabase.PrimaryPlacementPendingRebalance =
+					currentDatabase.PrimaryPlacementPendingRebalance ||
+						strings.TrimSpace(currentDatabase.FailoverTargetRuntimeID) != "" ||
+						currentDatabase.Instances > 1 ||
+						currentDatabase.SynchronousReplicas > 0
+			}
 		}
 		if !reflect.DeepEqual(currentDatabase, nextDatabase) {
 			spec.Postgres = cloneAppPostgresSpec(nextDatabase)

@@ -156,3 +156,204 @@ func TestPatchAppContinuityReturnsAlreadyCurrent(t *testing.T) {
 		t.Fatalf("expected already_current response, got %s", body)
 	}
 }
+
+func TestPatchAppContinuityDisableDatabaseFailoverQueuesPendingPlacementRebalance(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Continuity Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	sourceRuntime, _, err := s.CreateRuntime(tenant.ID, "source-node", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create source runtime: %v", err)
+	}
+	targetRuntime, _, err := s.CreateRuntime(tenant.ID, "target-node", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create target runtime: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.write", "app.deploy"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		RuntimeID: sourceRuntime.ID,
+		Replicas:  1,
+		Postgres: &model.AppPostgresSpec{
+			Database:                "demo",
+			Password:                "secret",
+			FailoverTargetRuntimeID: targetRuntime.ID,
+			Instances:               2,
+			SynchronousReplicas:     1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID+"/continuity", apiKey, map[string]any{
+		"database_failover": map[string]any{
+			"enabled": false,
+		},
+	})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Operation struct {
+			ID string `json:"id"`
+		} `json:"operation"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	op, err := s.GetOperation(response.Operation.ID)
+	if err != nil {
+		t.Fatalf("get operation: %v", err)
+	}
+	if op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
+		t.Fatalf("expected desired postgres spec on operation, got %+v", op.DesiredSpec)
+	}
+	if op.DesiredSpec.Postgres.FailoverTargetRuntimeID != "" {
+		t.Fatalf("expected failover target to be cleared, got %+v", op.DesiredSpec.Postgres)
+	}
+	if op.DesiredSpec.Postgres.Instances != 1 || op.DesiredSpec.Postgres.SynchronousReplicas != 0 {
+		t.Fatalf("expected single-instance postgres after disable, got %+v", op.DesiredSpec.Postgres)
+	}
+	if !op.DesiredSpec.Postgres.PrimaryPlacementPendingRebalance {
+		t.Fatalf("expected primary placement rebalance to stay pending, got %+v", op.DesiredSpec.Postgres)
+	}
+}
+
+func TestPatchAppContinuityDisableDatabaseFailoverRebalanceNowClearsPendingPlacement(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Continuity Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	sourceRuntime, _, err := s.CreateRuntime(tenant.ID, "source-node", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create source runtime: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.write", "app.deploy"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		RuntimeID: sourceRuntime.ID,
+		Replicas:  1,
+		Postgres: &model.AppPostgresSpec{
+			Database:                         "demo",
+			Password:                         "secret",
+			Instances:                        1,
+			PrimaryPlacementPendingRebalance: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID+"/continuity", apiKey, map[string]any{
+		"database_failover": map[string]any{
+			"enabled":       false,
+			"rebalance_now": true,
+		},
+	})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Operation struct {
+			ID string `json:"id"`
+		} `json:"operation"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	op, err := s.GetOperation(response.Operation.ID)
+	if err != nil {
+		t.Fatalf("get operation: %v", err)
+	}
+	if op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
+		t.Fatalf("expected desired postgres spec on operation, got %+v", op.DesiredSpec)
+	}
+	if op.DesiredSpec.Postgres.PrimaryPlacementPendingRebalance {
+		t.Fatalf("expected rebalance_now to clear pending placement hold, got %+v", op.DesiredSpec.Postgres)
+	}
+}
+
+func TestPatchAppContinuityRejectsDatabaseFailoverRebalanceNowWhenEnabled(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Continuity Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	sourceRuntime, _, err := s.CreateRuntime(tenant.ID, "source-node", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create source runtime: %v", err)
+	}
+	targetRuntime, _, err := s.CreateRuntime(tenant.ID, "target-node", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create target runtime: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.write", "app.deploy"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		RuntimeID: sourceRuntime.ID,
+		Replicas:  1,
+		Postgres: &model.AppPostgresSpec{
+			Database: "demo",
+			Password: "secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID+"/continuity", apiKey, map[string]any{
+		"database_failover": map[string]any{
+			"enabled":           true,
+			"target_runtime_id": targetRuntime.ID,
+			"rebalance_now":     true,
+		},
+	})
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadRequest, recorder.Code, recorder.Body.String())
+	}
+}

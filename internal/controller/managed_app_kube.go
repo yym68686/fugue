@@ -39,11 +39,13 @@ type kubeDeployment struct {
 
 type kubeCloudNativePGCluster struct {
 	Metadata struct {
-		Name       string `json:"name"`
-		Generation int64  `json:"generation,omitempty"`
+		Name        string            `json:"name"`
+		Generation  int64             `json:"generation,omitempty"`
+		Annotations map[string]string `json:"annotations,omitempty"`
 	} `json:"metadata"`
 	Spec struct {
-		Instances int `json:"instances,omitempty"`
+		Instances int            `json:"instances,omitempty"`
+		Affinity  map[string]any `json:"affinity,omitempty"`
 	} `json:"spec"`
 	Status struct {
 		Phase                  string `json:"phase,omitempty"`

@@ -105,7 +105,12 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 	if err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("resolve postgres placements: %w", err))
 	}
+	postgresAffinityOverrides, err := s.managedPostgresAffinityOverrides(ctx, app)
+	if err != nil {
+		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("resolve postgres affinity overrides: %w", err))
+	}
 	childObjects := runtime.BuildManagedAppChildObjectsWithPlacements(app, managed.Spec.Scheduling, postgresPlacements, ownerRef)
+	applyManagedPostgresAffinityOverrides(childObjects, postgresAffinityOverrides)
 	fenceEpoch, err := s.currentAppFenceEpoch(ctx, client, app)
 	if err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read app fence epoch: %w", err))
@@ -681,6 +686,28 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func applyManagedPostgresAffinityOverrides(objects []map[string]any, overrides map[string]map[string]any) {
+	if len(objects) == 0 || len(overrides) == 0 {
+		return
+	}
+	for _, obj := range objects {
+		kind, _ := obj["kind"].(string)
+		if strings.TrimSpace(kind) != runtime.CloudNativePGClusterKind {
+			continue
+		}
+		name, _ := objectNameAndNamespace("", obj)
+		override := cloneAnyMap(overrides[strings.TrimSpace(name)])
+		if len(override) == 0 {
+			continue
+		}
+		spec, _ := obj["spec"].(map[string]any)
+		if spec == nil {
+			continue
+		}
+		spec["affinity"] = override
+	}
 }
 
 func (s *Service) pruneManagedAppStaleObjects(ctx context.Context, client *kubeClient, namespace string, app model.App, desiredObjects []map[string]any) error {

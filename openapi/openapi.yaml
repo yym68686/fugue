@@ -3080,6 +3080,8 @@ components:
           type: string
         failover_target_runtime_id:
           type: string
+        primary_placement_pending_rebalance:
+          type: boolean
         storage_size:
           type: string
         storage_class_name:
@@ -3569,6 +3571,8 @@ components:
           type: boolean
         target_runtime_id:
           type: string
+        rebalance_now:
+          type: boolean
     PatchAppContinuityRequest:
       type: object
       additionalProperties: false
