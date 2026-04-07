@@ -50,6 +50,9 @@ spec:
                   type: string
                 name:
                   type: string
+                source:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
                 appSpec:
                   type: object
                   x-kubernetes-preserve-unknown-fields: true

@@ -433,6 +433,55 @@ func TestBuildPostgresClusterPendingRebalanceDisablesPodSpecReconciliation(t *te
 	}
 }
 
+func TestBuildSingleInstancePostgresClusterPendingRebalanceDisablesPodSpecReconciliation(t *testing.T) {
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_primary",
+			Postgres: &model.AppPostgresSpec{
+				Database:                         "demo",
+				User:                             "demo_user",
+				Password:                         "secret",
+				RuntimeID:                        "runtime_primary",
+				Instances:                        1,
+				PrimaryPlacementPendingRebalance: true,
+			},
+		},
+	}
+
+	objects := buildAppObjectsWithPlacements(app, SchedulingConstraints{}, map[string][]SchedulingConstraints{
+		"demo-postgres": {
+			{
+				NodeSelector: map[string]string{
+					RuntimeIDLabelKey: "runtime_primary",
+					TenantIDLabelKey:  "tenant_demo",
+				},
+				Tolerations: []Toleration{
+					{
+						Key:      TenantTaintKey,
+						Operator: "Equal",
+						Value:    "tenant_demo",
+						Effect:   "NoSchedule",
+					},
+				},
+			},
+		},
+	})
+
+	metadata := objects[3]["metadata"].(map[string]any)
+	annotations, ok := metadata["annotations"].(map[string]string)
+	if !ok {
+		t.Fatalf("expected postgres cluster annotations, got %#v", metadata["annotations"])
+	}
+	if got := annotations[CloudNativePGReconcilePodSpecAnno]; got != CloudNativePGReconcilePodSpecHold {
+		t.Fatalf("expected %s=%q, got %#v", CloudNativePGReconcilePodSpecAnno, CloudNativePGReconcilePodSpecHold, got)
+	}
+}
+
 func TestBuildAppDeploymentTemplateAnnotationsTrackFilesAndRestart(t *testing.T) {
 	app := model.App{
 		TenantID: "tenant_demo",
