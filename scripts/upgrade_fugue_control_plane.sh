@@ -128,6 +128,8 @@ rollout_status() {
 
 apply_chart_crds() {
   local crd_dir="${FUGUE_HELM_CHART_PATH}/crds"
+  local attempt=0
+  local max_attempts=3
 
   if [[ ! -d "${crd_dir}" ]]; then
     log "skip CRD apply because ${crd_dir} does not exist"
@@ -139,9 +141,41 @@ apply_chart_crds() {
     return 0
   fi
 
-  log "applying Helm CRDs from ${crd_dir}"
-  ${KUBECTL} apply -f "${crd_dir}"
-  ${KUBECTL} wait --for=condition=Established --timeout=60s -f "${crd_dir}"
+  while (( attempt < max_attempts )); do
+    attempt=$((attempt + 1))
+    log "applying Helm CRDs from ${crd_dir} (attempt ${attempt}/${max_attempts})"
+    ${KUBECTL} apply -f "${crd_dir}"
+    ${KUBECTL} wait --for=condition=Established --timeout=60s -f "${crd_dir}"
+    if verify_chart_crds_in_sync "${crd_dir}"; then
+      return 0
+    fi
+    if (( attempt < max_attempts )); then
+      log "Helm CRDs still drift after apply; retrying"
+      sleep 2
+    fi
+  done
+
+  fail "Helm CRDs still drift after apply; refusing to continue upgrade"
+}
+
+verify_chart_crds_in_sync() {
+  local crd_dir="$1"
+  local diff_output=""
+
+  if diff_output="$(${KUBECTL} diff -f "${crd_dir}" 2>&1)"; then
+    return 0
+  fi
+
+  local status=$?
+  if (( status == 1 )); then
+    log_stderr "Helm CRD drift detected after apply:"
+    printf '%s\n' "${diff_output}" >&2
+    return 1
+  fi
+
+  log_stderr "kubectl diff failed while verifying Helm CRDs (exit=${status}):"
+  printf '%s\n' "${diff_output}" >&2
+  return "${status}"
 }
 
 deployment_exists() {

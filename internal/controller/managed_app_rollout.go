@@ -29,6 +29,10 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, o
 	namespace := runtime.NamespaceForTenant(app.TenantID)
 	name := runtime.RuntimeAppResourceName(app)
 	managedAppName := runtime.ManagedAppResourceName(app)
+	backingServices, err := s.managedBackingServiceRolloutTargets(waitCtx, app)
+	if err != nil {
+		return fmt.Errorf("resolve backing service rollout targets for %s/%s: %w", namespace, name, err)
+	}
 	lastMessage := ""
 
 	for {
@@ -47,19 +51,38 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, o
 		if err != nil {
 			return err
 		}
-		if ready {
-			if err := s.refreshManagedAppStatus(waitCtx, client, app); err != nil {
-				s.Logger.Printf("refresh managed app status after rollout failed for %s/%s: %v", namespace, name, err)
-			}
-			return nil
-		}
-
 		managed, foundManagedApp, err := client.getManagedApp(waitCtx, namespace, managedAppName)
 		if err != nil {
 			return fmt.Errorf("read managed app rollout for %s/%s: %w", namespace, managedAppName, err)
 		}
 		if failureMessage := managedAppRolloutFailure(managed, foundManagedApp); failureMessage != "" {
 			return fmt.Errorf("managed app %s/%s rollout failed: %s", namespace, managedAppName, failureMessage)
+		}
+		if ready {
+			backingServicesReady, backingServiceMessage, err := managedBackingServicesRolloutReady(waitCtx, client, namespace, backingServices)
+			if err != nil {
+				return err
+			}
+			if !backingServicesReady {
+				if strings.TrimSpace(backingServiceMessage) != "" {
+					lastMessage = strings.TrimSpace(backingServiceMessage)
+				}
+				select {
+				case <-waitCtx.Done():
+					if lastMessage != "" {
+						return fmt.Errorf("wait for deployment rollout %s/%s: %w (%s)", namespace, name, waitCtx.Err(), lastMessage)
+					}
+					return fmt.Errorf("wait for deployment rollout %s/%s: %w", namespace, name, waitCtx.Err())
+				case <-ticker.C:
+					continue
+				}
+			}
+			if s.Store != nil {
+				if err := s.refreshManagedAppStatus(waitCtx, client, app); err != nil {
+					s.Logger.Printf("refresh managed app status after rollout failed for %s/%s: %v", namespace, name, err)
+				}
+			}
+			return nil
 		}
 		if strings.TrimSpace(message) != "" {
 			lastMessage = strings.TrimSpace(message)
@@ -74,6 +97,90 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, o
 		case <-ticker.C:
 		}
 	}
+}
+
+func (s *Service) managedBackingServiceRolloutTargets(ctx context.Context, app model.App) ([]runtime.ManagedBackingServiceDeployment, error) {
+	postgresPlacements, err := s.managedPostgresPlacements(ctx, app)
+	if err != nil {
+		return nil, fmt.Errorf("resolve postgres placements: %w", err)
+	}
+	scheduling, err := s.managedSchedulingConstraints(app.Spec.RuntimeID)
+	if err != nil {
+		return nil, err
+	}
+	return runtime.ManagedBackingServiceDeploymentsWithPlacements(app, scheduling, postgresPlacements), nil
+}
+
+func managedBackingServicesRolloutReady(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	deployments []runtime.ManagedBackingServiceDeployment,
+) (bool, string, error) {
+	for _, deployment := range deployments {
+		switch deployment.ResourceKind {
+		case runtime.CloudNativePGClusterKind:
+			cluster, found, err := client.getCloudNativePGCluster(ctx, namespace, deployment.ResourceName)
+			if err != nil {
+				return false, "", fmt.Errorf("read backing service cluster %s/%s: %w", namespace, deployment.ResourceName, err)
+			}
+			ready, message := managedBackingServiceClusterRolloutReady(deployment.ResourceName, cluster, found)
+			if !ready {
+				return false, message, nil
+			}
+		default:
+			status, found, err := client.getDeployment(ctx, namespace, deployment.ResourceName)
+			if err != nil {
+				return false, "", fmt.Errorf("read backing service deployment %s/%s: %w", namespace, deployment.ResourceName, err)
+			}
+			ready, message, err := deploymentRolloutReady(status, found, 1, deployment.ResourceName)
+			if err != nil {
+				return false, "", fmt.Errorf("wait for backing service deployment %s/%s: %w", namespace, deployment.ResourceName, err)
+			}
+			if !ready {
+				return false, message, nil
+			}
+		}
+	}
+	return true, "", nil
+}
+
+func managedBackingServiceClusterRolloutReady(clusterName string, cluster kubeCloudNativePGCluster, found bool) (bool, string) {
+	clusterName = strings.TrimSpace(clusterName)
+	if clusterName == "" {
+		clusterName = "cluster"
+	}
+	if !found {
+		return false, fmt.Sprintf("waiting for backing service cluster %s to be created", clusterName)
+	}
+
+	desiredInstances := cluster.Spec.Instances
+	if desiredInstances <= 0 {
+		desiredInstances = 1
+	}
+	if cluster.Status.ReadyInstances != desiredInstances {
+		return false, fmt.Sprintf(
+			"waiting for backing service cluster %s to settle (%d/%d ready instances)",
+			clusterName,
+			cluster.Status.ReadyInstances,
+			desiredInstances,
+		)
+	}
+
+	currentPrimary := strings.TrimSpace(cluster.Status.CurrentPrimary)
+	if currentPrimary == "" {
+		return false, fmt.Sprintf("waiting for backing service cluster %s current primary", clusterName)
+	}
+	targetPrimary := strings.TrimSpace(cluster.Status.TargetPrimary)
+	if targetPrimary != "" && targetPrimary != currentPrimary {
+		return false, fmt.Sprintf(
+			"waiting for backing service cluster %s switchover to settle (%s -> %s)",
+			clusterName,
+			currentPrimary,
+			targetPrimary,
+		)
+	}
+	return true, fmt.Sprintf("backing service cluster %s ready", clusterName)
 }
 
 func managedAppRolloutFailure(managed runtime.ManagedAppObject, found bool) string {
