@@ -56,6 +56,12 @@ func fallbackLiveAppPhase(app model.App) (string, bool) {
 	if isDeletedApp(app) {
 		return "", false
 	}
+	if app.Status.CurrentReleaseReadyAt != nil {
+		return "deployed", true
+	}
+	if app.Status.CurrentReleaseStartedAt != nil {
+		return "deploying", true
+	}
 	if strings.TrimSpace(app.Status.CurrentRuntimeID) == "" && app.Status.CurrentReplicas <= 0 {
 		return "", false
 	}

@@ -4,7 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/go-containerregistry/pkg/crane"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
 )
 
 func TestNormalizeContainerImageRefAppliesDefaultRegistryAndTag(t *testing.T) {
@@ -50,4 +52,118 @@ func TestDefaultMirroredImageRefUsesDigestTagAndSluggedRepoName(t *testing.T) {
 	if !strings.HasPrefix(got, "registry.internal.example/fugue-apps/demo:image-0123456789ab") {
 		t.Fatalf("unexpected mirrored image ref: %q", got)
 	}
+}
+
+func TestDetectImageBackgroundOverrideFromImageDetectsDualModePythonBot(t *testing.T) {
+	t.Parallel()
+
+	img, configFile := newTestImageWithConfig(t, map[string]string{
+		"/home/bot.py": `from telegram.ext import ApplicationBuilder
+
+application = ApplicationBuilder().token("demo").build()
+
+if WEB_HOOK:
+    application.run_webhook("0.0.0.0", 8000, webhook_url=WEB_HOOK)
+else:
+    application.run_polling()
+`,
+		"/home/pyproject.toml": "[project]\nname='demo-bot'\n",
+	}, v1.Config{
+		Entrypoint: []string{"python", "-u", "/home/bot.py"},
+		WorkingDir: "/home",
+		ExposedPorts: map[string]struct{}{
+			"8000/tcp": {},
+		},
+	})
+
+	stack, suppress, err := detectImageBackgroundOverrideFromImage(img, configFile)
+	if err != nil {
+		t.Fatalf("detect image background override: %v", err)
+	}
+	if stack != "python" {
+		t.Fatalf("expected detected stack python, got %q", stack)
+	}
+	if !suppress {
+		t.Fatal("expected dual-mode python bot image to suppress public-service readiness")
+	}
+}
+
+func TestDetectImageBackgroundOverrideFromImageKeepsPythonWebServicePublic(t *testing.T) {
+	t.Parallel()
+
+	img, configFile := newTestImageWithConfig(t, map[string]string{
+		"/app/service.py": `from flask import Flask
+
+application = Flask(__name__)
+
+if __name__ == "__main__":
+    application.run(host="0.0.0.0", port=8000)
+`,
+		"/app/pyproject.toml": "[project]\nname='demo-web'\n",
+	}, v1.Config{
+		Entrypoint: []string{"python", "-u", "/app/service.py"},
+		WorkingDir: "/app",
+		ExposedPorts: map[string]struct{}{
+			"8000/tcp": {},
+		},
+	})
+
+	stack, suppress, err := detectImageBackgroundOverrideFromImage(img, configFile)
+	if err != nil {
+		t.Fatalf("detect image background override: %v", err)
+	}
+	if stack != "python" {
+		t.Fatalf("expected detected stack python, got %q", stack)
+	}
+	if suppress {
+		t.Fatal("expected python web service image to keep public-service readiness")
+	}
+}
+
+func TestPythonImageAnalysisDirSupportsShellWrappedPythonEntrypoint(t *testing.T) {
+	t.Parallel()
+
+	got, ok := pythonImageAnalysisDir(&v1.ConfigFile{
+		Config: v1.Config{
+			Entrypoint: []string{"/bin/sh", "-c", "exec python -u /home/bot.py"},
+			WorkingDir: "/home",
+		},
+	})
+	if !ok {
+		t.Fatal("expected shell-wrapped python entrypoint to be recognized")
+	}
+	if got != "/home" {
+		t.Fatalf("expected /home analysis dir, got %q", got)
+	}
+}
+
+func newTestImageWithConfig(t *testing.T, files map[string]string, config v1.Config) (v1.Image, *v1.ConfigFile) {
+	t.Helper()
+
+	fileMap := make(map[string][]byte, len(files))
+	for path, content := range files {
+		fileMap[path] = []byte(content)
+	}
+
+	img, err := crane.Image(fileMap)
+	if err != nil {
+		t.Fatalf("create test image: %v", err)
+	}
+
+	configFile, err := img.ConfigFile()
+	if err != nil {
+		t.Fatalf("read base config file: %v", err)
+	}
+	configFile.Config = config
+
+	img, err = mutate.ConfigFile(img, configFile)
+	if err != nil {
+		t.Fatalf("apply config file: %v", err)
+	}
+
+	configFile, err = img.ConfigFile()
+	if err != nil {
+		t.Fatalf("read updated config file: %v", err)
+	}
+	return img, configFile
 }

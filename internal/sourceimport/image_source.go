@@ -1,9 +1,14 @@
 package sourceimport
 
 import (
+	"archive/tar"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -13,6 +18,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
 )
 
 type DockerImageSourceImportRequest struct {
@@ -55,16 +61,27 @@ func (i *Importer) ImportDockerImageSource(ctx context.Context, req DockerImageS
 		return GitHubSourceImportOutput{}, fmt.Errorf("mirror image into internal registry: %w", err)
 	}
 
+	destOptions := craneOptionsForImageRef(ctx, destImageRef)
 	detectedPort := 80
 	exposesPublicService := false
-	configFile, configErr := readRemoteImageConfig(sourceImageRef, sourceOptions...)
+	detectedStack := ""
+	configFile, configErr := readRemoteImageConfig(destImageRef, destOptions...)
 	if configErr == nil {
 		if port := detectExposedPortFromImageConfig(configFile); port > 0 {
 			detectedPort = port
 			exposesPublicService = true
 		}
+		stack, suppressPublicService, suppressErr := detectImageBackgroundOverride(destImageRef, configFile, destOptions...)
+		if suppressErr == nil {
+			detectedStack = stack
+			if suppressPublicService {
+				exposesPublicService = false
+			}
+		} else if i != nil && i.Logger != nil {
+			i.Logger.Printf("skip image background inspection for %s: %v", destImageRef, suppressErr)
+		}
 	} else if i != nil && i.Logger != nil {
-		i.Logger.Printf("skip image config inspection for %s: %v", sourceImageRef, configErr)
+		i.Logger.Printf("skip image config inspection for %s: %v", destImageRef, configErr)
 	}
 
 	return GitHubSourceImportOutput{
@@ -73,6 +90,7 @@ func (i *Importer) ImportDockerImageSource(ctx context.Context, req DockerImageS
 			DetectedPort:         detectedPort,
 			ExposesPublicService: exposesPublicService,
 			DetectedProvider:     model.AppSourceTypeDockerImage,
+			DetectedStack:        detectedStack,
 			ImageRef:             destImageRef,
 		},
 		Source: model.AppSource{
@@ -81,6 +99,7 @@ func (i *Importer) ImportDockerImageSource(ctx context.Context, req DockerImageS
 			ResolvedImageRef: destImageRef,
 			ImageNameSuffix:  strings.TrimSpace(req.ImageNameSuffix),
 			DetectedProvider: model.AppSourceTypeDockerImage,
+			DetectedStack:    detectedStack,
 		},
 	}, nil
 }
@@ -135,6 +154,260 @@ func readRemoteImageConfig(imageRef string, options ...crane.Option) (*v1.Config
 		return nil, fmt.Errorf("decode image config: %w", err)
 	}
 	return &configFile, nil
+}
+
+func detectImageBackgroundOverride(imageRef string, configFile *v1.ConfigFile, options ...crane.Option) (string, bool, error) {
+	img, err := crane.Pull(imageRef, options...)
+	if err != nil {
+		return "", false, fmt.Errorf("pull image for background inspection: %w", err)
+	}
+	return detectImageBackgroundOverrideFromImage(img, configFile)
+}
+
+func detectImageBackgroundOverrideFromImage(img v1.Image, configFile *v1.ConfigFile) (string, bool, error) {
+	analysis, ok, err := analyzePythonProjectInImage(img, configFile)
+	if err != nil {
+		return "", false, err
+	}
+	if !ok || !analysis.IsPythonProject {
+		return "", false, nil
+	}
+	return "python", pythonProjectPrefersBackgroundNetwork(analysis), nil
+}
+
+func analyzePythonProjectInRemoteImage(imageRef string, configFile *v1.ConfigFile, options ...crane.Option) (pythonProjectAnalysis, bool, error) {
+	img, err := crane.Pull(imageRef, options...)
+	if err != nil {
+		return pythonProjectAnalysis{}, false, fmt.Errorf("pull image for python inspection: %w", err)
+	}
+	return analyzePythonProjectInImage(img, configFile)
+}
+
+func analyzePythonProjectInImage(img v1.Image, configFile *v1.ConfigFile) (pythonProjectAnalysis, bool, error) {
+	appDir, ok := pythonImageAnalysisDir(configFile)
+	if !ok {
+		return pythonProjectAnalysis{}, false, nil
+	}
+
+	extractRoot, err := os.MkdirTemp("", "fugue-image-python-*")
+	if err != nil {
+		return pythonProjectAnalysis{}, false, fmt.Errorf("create image inspection dir: %w", err)
+	}
+	defer os.RemoveAll(extractRoot)
+
+	extractedDir, ok, err := extractImageSubtreeToDir(img, extractRoot, appDir)
+	if err != nil {
+		return pythonProjectAnalysis{}, false, err
+	}
+	if !ok {
+		return pythonProjectAnalysis{}, false, nil
+	}
+
+	analysis, err := analyzePythonProjectInDir(extractedDir)
+	if err != nil {
+		return pythonProjectAnalysis{}, false, err
+	}
+	return analysis, true, nil
+}
+
+func pythonImageAnalysisDir(configFile *v1.ConfigFile) (string, bool) {
+	args, ok := pythonInvocationArgs(imageConfigCommandTokens(configFile))
+	if !ok {
+		return "", false
+	}
+
+	workingDir := normalizeImageConfigPath(configFile.Config.WorkingDir)
+	for index := 0; index < len(args); index++ {
+		token := strings.TrimSpace(args[index])
+		if token == "" {
+			continue
+		}
+		switch token {
+		case "-m":
+			if workingDir == "" || workingDir == "/" {
+				return "", false
+			}
+			return workingDir, true
+		case "-c":
+			return "", false
+		}
+		if strings.HasPrefix(token, "-") {
+			continue
+		}
+		if !strings.HasSuffix(strings.ToLower(token), ".py") {
+			return "", false
+		}
+
+		scriptPath := resolveImageConfigPath(token, workingDir)
+		if scriptPath == "" {
+			return "", false
+		}
+		scriptDir := path.Dir(scriptPath)
+		if scriptDir == "." || scriptDir == "/" {
+			return "", false
+		}
+		return scriptDir, true
+	}
+
+	return "", false
+}
+
+func imageConfigCommandTokens(configFile *v1.ConfigFile) []string {
+	if configFile == nil {
+		return nil
+	}
+	tokens := make([]string, 0, len(configFile.Config.Entrypoint)+len(configFile.Config.Cmd))
+	for _, token := range configFile.Config.Entrypoint {
+		if trimmed := strings.TrimSpace(token); trimmed != "" {
+			tokens = append(tokens, trimmed)
+		}
+	}
+	for _, token := range configFile.Config.Cmd {
+		if trimmed := strings.TrimSpace(token); trimmed != "" {
+			tokens = append(tokens, trimmed)
+		}
+	}
+	if len(tokens) >= 3 && isPOSIXShellExecutable(tokens[0]) && strings.TrimSpace(tokens[1]) == "-c" {
+		return strings.Fields(strings.TrimSpace(tokens[2]))
+	}
+	return tokens
+}
+
+func pythonInvocationArgs(tokens []string) ([]string, bool) {
+	if len(tokens) == 0 {
+		return nil, false
+	}
+	for len(tokens) > 0 && strings.TrimSpace(tokens[0]) == "exec" {
+		tokens = tokens[1:]
+	}
+	if len(tokens) == 0 {
+		return nil, false
+	}
+
+	if looksLikePythonExecutable(tokens[0]) {
+		return tokens[1:], true
+	}
+	if path.Base(strings.TrimSpace(tokens[0])) == "env" && len(tokens) > 1 && looksLikePythonExecutable(tokens[1]) {
+		return tokens[2:], true
+	}
+	return nil, false
+}
+
+func looksLikePythonExecutable(token string) bool {
+	base := strings.ToLower(path.Base(strings.TrimSpace(token)))
+	switch {
+	case base == "python":
+		return true
+	case strings.HasPrefix(base, "python2"):
+		return true
+	case strings.HasPrefix(base, "python3"):
+		return true
+	case strings.HasPrefix(base, "pypy"):
+		return true
+	default:
+		return false
+	}
+}
+
+func isPOSIXShellExecutable(token string) bool {
+	switch strings.ToLower(path.Base(strings.TrimSpace(token))) {
+	case "sh", "ash", "bash", "dash":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeImageConfigPath(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	clean := path.Clean(raw)
+	if clean == "." {
+		return ""
+	}
+	if !strings.HasPrefix(clean, "/") {
+		clean = "/" + clean
+	}
+	return path.Clean(clean)
+}
+
+func resolveImageConfigPath(rawPath, workingDir string) string {
+	rawPath = strings.TrimSpace(rawPath)
+	if rawPath == "" {
+		return ""
+	}
+	if strings.HasPrefix(rawPath, "/") {
+		return normalizeImageConfigPath(rawPath)
+	}
+	workingDir = normalizeImageConfigPath(workingDir)
+	if workingDir == "" {
+		return ""
+	}
+	return path.Clean(path.Join(workingDir, rawPath))
+}
+
+func extractImageSubtreeToDir(img v1.Image, rootDir, imageDir string) (string, bool, error) {
+	imageDir = strings.TrimPrefix(normalizeImageConfigPath(imageDir), "/")
+	if imageDir == "" {
+		return "", false, nil
+	}
+
+	reader := mutate.Extract(img)
+	defer reader.Close()
+
+	tarReader := tar.NewReader(reader)
+	wrote := false
+	for {
+		header, err := tarReader.Next()
+		switch {
+		case err == io.EOF:
+			if !wrote {
+				return "", false, nil
+			}
+			return filepath.Join(rootDir, filepath.FromSlash(imageDir)), true, nil
+		case err != nil:
+			return "", false, fmt.Errorf("extract image filesystem: %w", err)
+		}
+
+		entryName := strings.TrimPrefix(path.Clean(strings.TrimSpace(header.Name)), "/")
+		if entryName == "." || entryName == "" {
+			continue
+		}
+		if entryName != imageDir && !strings.HasPrefix(entryName, imageDir+"/") {
+			continue
+		}
+
+		targetPath := filepath.Join(rootDir, filepath.FromSlash(entryName))
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(targetPath, 0o755); err != nil {
+				return "", false, fmt.Errorf("create extracted dir %s: %w", targetPath, err)
+			}
+			wrote = true
+		case tar.TypeReg, tar.TypeRegA:
+			if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+				return "", false, fmt.Errorf("create extracted file parent %s: %w", targetPath, err)
+			}
+			mode := os.FileMode(header.Mode).Perm()
+			if mode == 0 {
+				mode = 0o644
+			}
+			file, err := os.OpenFile(targetPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+			if err != nil {
+				return "", false, fmt.Errorf("create extracted file %s: %w", targetPath, err)
+			}
+			if _, err := io.Copy(file, tarReader); err != nil {
+				file.Close()
+				return "", false, fmt.Errorf("write extracted file %s: %w", targetPath, err)
+			}
+			if err := file.Close(); err != nil {
+				return "", false, fmt.Errorf("close extracted file %s: %w", targetPath, err)
+			}
+			wrote = true
+		}
+	}
 }
 
 func detectExposedPortFromImageConfig(configFile *v1.ConfigFile) int {

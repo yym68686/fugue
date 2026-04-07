@@ -16,6 +16,7 @@ import (
 )
 
 type recordingImporter struct {
+	dockerImageOutput   *sourceimport.GitHubSourceImportOutput
 	dockerImageReq      *sourceimport.DockerImageSourceImportRequest
 	githubReq           *sourceimport.GitHubSourceImportRequest
 	githubComposeEnvReq *sourceimport.GitHubComposeServiceEnvRequest
@@ -26,6 +27,10 @@ type recordingImporter struct {
 func (r *recordingImporter) ImportDockerImageSource(_ context.Context, req sourceimport.DockerImageSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error) {
 	reqCopy := req
 	r.dockerImageReq = &reqCopy
+	if r.dockerImageOutput != nil {
+		output := *r.dockerImageOutput
+		return output, nil
+	}
 	return sourceimport.GitHubSourceImportOutput{
 		ImportResult: sourceimport.GitHubImportResult{
 			DetectedProvider:     model.AppSourceTypeDockerImage,
@@ -844,6 +849,100 @@ func TestExecuteManagedImportOperationKeepsBackgroundAppsPortless(t *testing.T) 
 	}
 	if len(deployOp.DesiredSpec.Ports) != 0 {
 		t.Fatalf("expected background deploy spec to stay portless, got %v", deployOp.DesiredSpec.Ports)
+	}
+}
+
+func TestExecuteManagedImportOperationAutoBackgroundsDockerImageWithoutPublicServiceSignal(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "workers", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "worker", "", model.AppSpec{
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:     model.AppSourceTypeDockerImage,
+		ImageRef: "ghcr.io/example/worker:latest",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	specCopy := app.Spec
+	sourceCopy := *app.Source
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		DesiredSource:   &sourceCopy,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+
+	importer := &recordingImporter{
+		dockerImageOutput: &sourceimport.GitHubSourceImportOutput{
+			ImportResult: sourceimport.GitHubImportResult{
+				DetectedProvider:     model.AppSourceTypeDockerImage,
+				ImageRef:             "registry.push.example/fugue-apps/worker:image-abc123",
+				DetectedPort:         8000,
+				ExposesPublicService: false,
+				DetectedStack:        "python",
+			},
+			Source: model.AppSource{
+				Type:             model.AppSourceTypeDockerImage,
+				ImageRef:         "ghcr.io/example/worker:latest",
+				ResolvedImageRef: "registry.push.example/fugue-apps/worker:image-abc123",
+				DetectedProvider: model.AppSourceTypeDockerImage,
+				DetectedStack:    "python",
+			},
+		},
+	}
+	svc := &Service{
+		Store:            stateStore,
+		Logger:           log.New(io.Discard, "", 0),
+		importer:         importer,
+		registryPushBase: "registry.push.example",
+		registryPullBase: "registry.pull.example",
+	}
+
+	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
+		t.Fatalf("execute managed import operation: %v", err)
+	}
+
+	ops, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+	var deployOp model.Operation
+	for _, candidate := range ops {
+		if candidate.Type == model.OperationTypeDeploy {
+			deployOp = candidate
+		}
+	}
+	if deployOp.ID == "" || deployOp.DesiredSpec == nil {
+		t.Fatalf("expected deploy operation with desired spec, got %+v", deployOp)
+	}
+	if deployOp.DesiredSpec.NetworkMode != model.AppNetworkModeBackground {
+		t.Fatalf("expected deploy spec network mode %q, got %q", model.AppNetworkModeBackground, deployOp.DesiredSpec.NetworkMode)
+	}
+	if len(deployOp.DesiredSpec.Ports) != 0 {
+		t.Fatalf("expected auto-background deploy spec to stay portless, got %v", deployOp.DesiredSpec.Ports)
 	}
 }
 
