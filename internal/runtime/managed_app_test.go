@@ -170,8 +170,8 @@ func TestManagedAppRoundTripPreservesSourceForComposeAliases(t *testing.T) {
 	}
 
 	objects := BuildManagedAppChildObjects(roundTrip, SchedulingConstraints{}, nil)
-	if len(objects) != 3 {
-		t.Fatalf("expected deployment + service + compose alias, got %d", len(objects))
+	if len(objects) != 4 {
+		t.Fatalf("expected deployment + service + compose alias + legacy app-name alias, got %d", len(objects))
 	}
 
 	aliasService := objects[2]
@@ -181,6 +181,12 @@ func TestManagedAppRoundTripPreservesSourceForComposeAliases(t *testing.T) {
 	metadata := aliasService["metadata"].(map[string]any)
 	if got := metadata["name"]; got != ComposeServiceAliasName(app.ProjectID, "mongodb") {
 		t.Fatalf("expected alias name %q, got %#v", ComposeServiceAliasName(app.ProjectID, "mongodb"), got)
+	}
+
+	legacyAliasService := objects[3]
+	legacyMetadata := legacyAliasService["metadata"].(map[string]any)
+	if got := legacyMetadata["name"]; got != "demo-mongodb" {
+		t.Fatalf("expected legacy app-name alias %q, got %#v", "demo-mongodb", got)
 	}
 }
 

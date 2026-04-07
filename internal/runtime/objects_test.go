@@ -169,8 +169,8 @@ func TestBuildAppObjectsIncludeComposeServiceAlias(t *testing.T) {
 	}
 
 	objects := buildAppObjects(app, SchedulingConstraints{})
-	if len(objects) != 4 {
-		t.Fatalf("expected 4 objects, got %d", len(objects))
+	if len(objects) != 5 {
+		t.Fatalf("expected 5 objects, got %d", len(objects))
 	}
 
 	aliasService := objects[3]
@@ -186,6 +186,21 @@ func TestBuildAppObjectsIncludeComposeServiceAlias(t *testing.T) {
 	}
 	if got := aliasSpec["externalName"]; got != "app-demo-123.fg-tenant-demo.svc.cluster.local" {
 		t.Fatalf("expected compose alias external name, got %#v", got)
+	}
+
+	legacyAliasService := objects[4]
+	if got := legacyAliasService["kind"]; got != "Service" {
+		t.Fatalf("expected legacy compose app-name alias service, got %#v", got)
+	}
+	if got := legacyAliasService["metadata"].(map[string]any)["name"]; got != "demo-api" {
+		t.Fatalf("expected legacy app-name alias service name %q, got %#v", "demo-api", got)
+	}
+	legacyAliasSpec := legacyAliasService["spec"].(map[string]any)
+	if got := legacyAliasSpec["type"]; got != "ExternalName" {
+		t.Fatalf("expected legacy app-name alias service type ExternalName, got %#v", got)
+	}
+	if got := legacyAliasSpec["externalName"]; got != "app-demo-123.fg-tenant-demo.svc.cluster.local" {
+		t.Fatalf("expected legacy app-name alias external name, got %#v", got)
 	}
 }
 

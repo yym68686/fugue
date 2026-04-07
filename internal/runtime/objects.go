@@ -79,6 +79,9 @@ func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, p
 	if aliasObject := buildComposeServiceAliasObject(namespace, app); aliasObject != nil {
 		objects = append(objects, aliasObject)
 	}
+	if aliasObject := buildLegacyComposeAppNameAliasObject(namespace, app); aliasObject != nil {
+		objects = append(objects, aliasObject)
+	}
 	attachOwnerReference(objects, ownerRef)
 	return objects
 }
@@ -721,11 +724,72 @@ func buildComposeServiceAliasObject(namespace string, app model.App) map[string]
 	}
 }
 
+func buildLegacyComposeAppNameAliasObject(namespace string, app model.App) map[string]any {
+	if app.Source == nil || !model.AppExposesPublicService(app.Spec) {
+		return nil
+	}
+	composeService := strings.TrimSpace(app.Source.ComposeService)
+	if composeService == "" {
+		return nil
+	}
+	aliasName := RuntimeResourceName(app.Name)
+	if aliasName == "" {
+		return nil
+	}
+	if aliasName == RuntimeAppResourceName(app) || aliasName == ComposeServiceAliasName(app.ProjectID, composeService) {
+		return nil
+	}
+	serviceFQDN := serviceFQDN(namespace, RuntimeAppResourceName(app))
+	if serviceFQDN == "" {
+		return nil
+	}
+
+	servicePorts := make([]map[string]any, 0, len(app.Spec.Ports))
+	for _, port := range app.Spec.Ports {
+		if port <= 0 {
+			continue
+		}
+		servicePorts = append(servicePorts, map[string]any{
+			"name":       "tcp-" + strconv.Itoa(port),
+			"port":       port,
+			"targetPort": port,
+			"protocol":   "TCP",
+		})
+	}
+	if len(servicePorts) == 0 {
+		return nil
+	}
+
+	return map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Service",
+		"metadata": map[string]any{
+			"name":      aliasName,
+			"namespace": namespace,
+			"labels":    legacyComposeAppNameAliasLabels(app),
+		},
+		"spec": map[string]any{
+			"type":         "ExternalName",
+			"externalName": serviceFQDN,
+			"ports":        servicePorts,
+		},
+	}
+}
+
 func composeServiceAliasLabels(app model.App, composeService string) map[string]string {
 	labels := appLabels(app)
 	labels[FugueLabelComponent] = "compose-service-alias"
 	if composeService = sanitizeName(composeService); composeService != "" {
 		labels[FugueLabelName] = composeService
+	}
+	return labels
+}
+
+func legacyComposeAppNameAliasLabels(app model.App) map[string]string {
+	labels := appLabels(app)
+	labels[FugueLabelComponent] = "legacy-compose-app-name-alias"
+	if name := RuntimeResourceName(app.Name); name != "" {
+		labels[FugueLabelName] = name
 	}
 	return labels
 }
