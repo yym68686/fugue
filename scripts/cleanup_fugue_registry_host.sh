@@ -9,6 +9,8 @@ REGISTRY_IMAGE="${FUGUE_REGISTRY_IMAGE:-docker.io/library/registry:2.8.3}"
 UPLOAD_STALE_MINUTES="${FUGUE_REGISTRY_UPLOAD_STALE_MINUTES:-1440}"
 RUN_IMAGE_PRUNE="${FUGUE_RUN_IMAGE_PRUNE:-true}"
 SCALE_REGISTRY_DEPLOYMENT="${FUGUE_SCALE_REGISTRY_DEPLOYMENT:-true}"
+RUN_REGISTRY_PREFLIGHT_AUDIT="${FUGUE_RUN_REGISTRY_PREFLIGHT_AUDIT:-true}"
+ALLOW_INCONSISTENT_CLEANUP="${FUGUE_REGISTRY_ALLOW_INCONSISTENT_CLEANUP:-false}"
 
 log() {
   printf '[fugue-registry-cleanup] %s\n' "$*"
@@ -30,6 +32,27 @@ fi
 show_usage() {
   df -h /
   du -sh "${REGISTRY_ROOT}" 2>/dev/null || true
+}
+
+run_registry_preflight_audit() {
+  if [[ "${RUN_REGISTRY_PREFLIGHT_AUDIT}" != "true" ]]; then
+    return
+  fi
+
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local audit_script="${script_dir}/audit_fugue_registry_host.sh"
+
+  if ! FUGUE_REGISTRY_ROOT="${REGISTRY_ROOT}" \
+    FUGUE_REGISTRY_AUDIT_FAIL_ON_INCONSISTENCY=true \
+    bash "${audit_script}"; then
+    if [[ "${ALLOW_INCONSISTENT_CLEANUP}" == "true" ]]; then
+      log "registry metadata audit failed, but cleanup override is enabled"
+      return
+    fi
+    log "registry metadata audit failed; aborting cleanup before destructive changes"
+    exit 1
+  fi
 }
 
 registry_exists() {
@@ -99,6 +122,7 @@ run_offline_gc() {
 
 log "filesystem usage before cleanup"
 show_usage
+run_registry_preflight_audit
 
 registry_present="false"
 if registry_exists; then

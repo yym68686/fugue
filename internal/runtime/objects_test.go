@@ -151,6 +151,44 @@ func TestBuildAppObjectsUseAppIDScopedRuntimeNames(t *testing.T) {
 	}
 }
 
+func TestBuildAppObjectsIncludeComposeServiceAlias(t *testing.T) {
+	app := model.App{
+		ID:        "app_demo_123",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo_123456",
+		Name:      "demo-api",
+		Source: &model.AppSource{
+			ComposeService: "api",
+		},
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	if len(objects) != 4 {
+		t.Fatalf("expected 4 objects, got %d", len(objects))
+	}
+
+	aliasService := objects[3]
+	if got := aliasService["kind"]; got != "Service" {
+		t.Fatalf("expected compose alias service, got %#v", got)
+	}
+	if got := aliasService["metadata"].(map[string]any)["name"]; got != ComposeServiceAliasName(app.ProjectID, "api") {
+		t.Fatalf("expected compose alias service name %q, got %#v", ComposeServiceAliasName(app.ProjectID, "api"), got)
+	}
+	aliasSpec := aliasService["spec"].(map[string]any)
+	if got := aliasSpec["type"]; got != "ExternalName" {
+		t.Fatalf("expected compose alias service type ExternalName, got %#v", got)
+	}
+	if got := aliasSpec["externalName"]; got != "app-demo-123.fg-tenant-demo.svc.cluster.local" {
+		t.Fatalf("expected compose alias external name, got %#v", got)
+	}
+}
+
 func TestNormalizeRuntimePostgresSpecDefaultsToAppScopedUser(t *testing.T) {
 	spec := normalizeRuntimePostgresSpec("fugue-web", model.AppPostgresSpec{})
 	if spec.User != "fugue_web" {

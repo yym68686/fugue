@@ -74,6 +74,9 @@ func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, p
 	if serviceObject := buildAppServiceObject(namespace, app, labels); serviceObject != nil {
 		objects = append(objects, serviceObject)
 	}
+	if aliasObject := buildComposeServiceAliasObject(namespace, app); aliasObject != nil {
+		objects = append(objects, aliasObject)
+	}
 	attachOwnerReference(objects, ownerRef)
 	return objects
 }
@@ -652,6 +655,61 @@ func buildAppServiceObject(namespace string, app model.App, labels map[string]st
 			"ports":    servicePorts,
 		},
 	}
+}
+
+func buildComposeServiceAliasObject(namespace string, app model.App) map[string]any {
+	if app.Source == nil || !model.AppExposesPublicService(app.Spec) {
+		return nil
+	}
+	composeService := strings.TrimSpace(app.Source.ComposeService)
+	aliasName := ComposeServiceAliasName(app.ProjectID, composeService)
+	if aliasName == "" || aliasName == RuntimeAppResourceName(app) {
+		return nil
+	}
+	serviceFQDN := serviceFQDN(namespace, RuntimeAppResourceName(app))
+	if serviceFQDN == "" {
+		return nil
+	}
+
+	servicePorts := make([]map[string]any, 0, len(app.Spec.Ports))
+	for _, port := range app.Spec.Ports {
+		if port <= 0 {
+			continue
+		}
+		servicePorts = append(servicePorts, map[string]any{
+			"name":       "tcp-" + strconv.Itoa(port),
+			"port":       port,
+			"targetPort": port,
+			"protocol":   "TCP",
+		})
+	}
+	if len(servicePorts) == 0 {
+		return nil
+	}
+
+	return map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Service",
+		"metadata": map[string]any{
+			"name":      aliasName,
+			"namespace": namespace,
+			"labels":    composeServiceAliasLabels(app, composeService),
+		},
+		"spec": map[string]any{
+			"type":         "ExternalName",
+			"externalName": serviceFQDN,
+			"ports":        servicePorts,
+		},
+	}
+}
+
+func composeServiceAliasLabels(app model.App, composeService string) map[string]string {
+	labels := appLabels(app)
+	labels[FugueLabelComponent] = "compose-service-alias"
+	if composeService = sanitizeName(composeService); composeService != "" {
+		labels[FugueLabelName] = composeService
+	}
+	return labels
 }
 
 func deploymentStrategy(app model.App) map[string]any {

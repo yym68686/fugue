@@ -1,6 +1,7 @@
 package sourceimport
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -51,6 +52,81 @@ func TestDefaultMirroredImageRefUsesDigestTagAndSluggedRepoName(t *testing.T) {
 	)
 	if !strings.HasPrefix(got, "registry.internal.example/fugue-apps/demo:image-0123456789ab") {
 		t.Fatalf("unexpected mirrored image ref: %q", got)
+	}
+}
+
+func TestValidateMirroredImageReferenceWithClients(t *testing.T) {
+	t.Parallel()
+
+	imageRef := "registry.internal.example/fugue-apps/demo:image-0123456789ab"
+	expectedDigest := "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	wantDigestRef := "registry.internal.example/fugue-apps/demo@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	manifestRefs := make([]string, 0, 2)
+
+	err := validateMirroredImageReferenceWithClients(
+		imageRef,
+		expectedDigest,
+		func(ref string, _ ...crane.Option) (string, error) {
+			if ref != imageRef {
+				t.Fatalf("unexpected digest lookup ref %q", ref)
+			}
+			return expectedDigest, nil
+		},
+		func(ref string, _ ...crane.Option) ([]byte, error) {
+			manifestRefs = append(manifestRefs, ref)
+			return []byte("{}"), nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("validate mirrored image ref: %v", err)
+	}
+	if len(manifestRefs) != 2 || manifestRefs[0] != imageRef || manifestRefs[1] != wantDigestRef {
+		t.Fatalf("unexpected manifest lookup refs: %v", manifestRefs)
+	}
+}
+
+func TestValidateMirroredImageReferenceWithClientsDetectsDigestMismatch(t *testing.T) {
+	t.Parallel()
+
+	imageRef := "registry.internal.example/fugue-apps/demo:image-0123456789ab"
+	expectedDigest := "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	err := validateMirroredImageReferenceWithClients(
+		imageRef,
+		expectedDigest,
+		func(string, ...crane.Option) (string, error) {
+			return "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", nil
+		},
+		func(string, ...crane.Option) ([]byte, error) {
+			return []byte("{}"), nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+		t.Fatalf("expected digest mismatch error, got %v", err)
+	}
+}
+
+func TestValidateMirroredImageReferenceWithClientsDetectsMissingDigestManifest(t *testing.T) {
+	t.Parallel()
+
+	imageRef := "registry.internal.example/fugue-apps/demo:image-0123456789ab"
+	expectedDigest := "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	err := validateMirroredImageReferenceWithClients(
+		imageRef,
+		expectedDigest,
+		func(string, ...crane.Option) (string, error) {
+			return expectedDigest, nil
+		},
+		func(ref string, _ ...crane.Option) ([]byte, error) {
+			if strings.Contains(ref, "@sha256:") {
+				return nil, errors.New("MANIFEST_UNKNOWN")
+			}
+			return []byte("{}"), nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "fetch manifest by digest") {
+		t.Fatalf("expected digest manifest error, got %v", err)
 	}
 }
 

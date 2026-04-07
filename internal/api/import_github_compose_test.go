@@ -7,6 +7,7 @@ import (
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
+	"fugue/internal/runtime"
 	"fugue/internal/sourceimport"
 	"fugue/internal/store"
 )
@@ -345,7 +346,7 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 	if stringsContain(primaryApp.Source.ComposeDependsOn, "postgres") {
 		t.Fatalf("expected primary app dependencies to exclude managed postgres backing, got %v", primaryApp.Source.ComposeDependsOn)
 	}
-	if got := primaryApp.Spec.Env["REDIS_URL"]; got != "redis://claude-code-hub-redis:6379" {
+	if got := primaryApp.Spec.Env["REDIS_URL"]; got != "redis://"+runtime.ComposeServiceAliasName(project.ID, "redis")+":6379" {
 		t.Fatalf("expected REDIS_URL to target mirrored redis app, got %q", got)
 	}
 	if got := primaryApp.Spec.Env["DSN"]; got != "postgresql://claude_code_hub:postgres@claude-code-hub-postgres-postgres-rw:5432/claude_code_hub" {

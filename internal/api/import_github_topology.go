@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"fugue/internal/model"
+	"fugue/internal/runtime"
 	"fugue/internal/sourceimport"
 	"fugue/internal/store"
 )
@@ -212,9 +213,17 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 	if err != nil {
 		return importedGitHubTopology{}, err
 	}
+	serviceHosts := make(map[string]string, len(appNames))
+	for serviceName, appName := range appNames {
+		aliasName := runtime.ComposeServiceAliasName(options.ProjectID, serviceName)
+		if aliasName == "" {
+			aliasName = appName
+		}
+		serviceHosts[serviceName] = aliasName
+	}
 
 	deployment := sourceimport.TopologyDeployment{
-		ServiceHosts:           cloneStringMap(appNames),
+		ServiceHosts:           cloneStringMap(serviceHosts),
 		ManagedPostgresByOwner: map[string]model.AppPostgresSpec{},
 	}
 	for _, backing := range topologyPlan.ManagedBackings {

@@ -89,7 +89,7 @@ const (
 	AppPersistentStorageInternalDirName    = ".fugue-persistent-storage-state"
 	AppPersistentStorageMountKindDirectory = "directory"
 	AppPersistentStorageMountKindFile      = "file"
-	DefaultAppImageMirrorLimit             = 5
+	DefaultAppImageMirrorLimit             = 1
 )
 
 func NormalizeGitHubAppSourceType(raw string) string {

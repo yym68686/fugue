@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/runtime"
 	"fugue/internal/sourceimport"
 )
 
@@ -341,16 +342,23 @@ func (s *Service) projectComposeServiceState(app model.App) (map[string]string, 
 		if composeService == "" {
 			continue
 		}
-		appHosts[composeService] = strings.TrimSpace(candidate.Name)
+		if model.AppExposesPublicService(candidate.Spec) {
+			if aliasName := runtime.ComposeServiceAliasName(candidate.ProjectID, composeService); aliasName != "" {
+				appHosts[composeService] = aliasName
+			}
+		}
 		if postgres := appOwnedPostgresSpec(candidate); postgres != nil {
 			managedPostgresByOwner[composeService] = *postgres
 		}
 	}
 	if len(appHosts) == 0 {
-		return nil, nil, nil
+		appHosts = nil
 	}
 	if len(managedPostgresByOwner) == 0 {
 		managedPostgresByOwner = nil
+	}
+	if appHosts == nil && managedPostgresByOwner == nil {
+		return nil, nil, nil
 	}
 	return appHosts, managedPostgresByOwner, nil
 }

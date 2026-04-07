@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"fugue/internal/model"
+	"fugue/internal/runtime"
 	"fugue/internal/sourceimport"
 	"fugue/internal/store"
 )
@@ -523,8 +524,8 @@ func TestExecuteManagedImportOperationRefreshesComposeEnvWithoutOverwritingCusto
 	}
 
 	wantHosts := map[string]string{
-		"api": "demo-api",
-		"web": "demo-web",
+		"api": runtime.ComposeServiceAliasName(project.ID, "api"),
+		"web": runtime.ComposeServiceAliasName(project.ID, "web"),
 	}
 	if !reflect.DeepEqual(importer.githubComposeEnvReq.AppHosts, wantHosts) {
 		t.Fatalf("expected compose app hosts %v, got %v", wantHosts, importer.githubComposeEnvReq.AppHosts)

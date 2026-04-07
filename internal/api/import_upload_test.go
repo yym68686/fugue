@@ -14,6 +14,7 @@ import (
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
+	"fugue/internal/runtime"
 	"fugue/internal/store"
 )
 
@@ -351,8 +352,8 @@ services:
 	if webApp.Route == nil || webApp.Route.ServicePort != 3000 {
 		t.Fatalf("expected web route service port 3000, got %+v", webApp.Route)
 	}
-	if got := webApp.Spec.Env["WORKER_URL"]; got == "" {
-		t.Fatalf("expected worker URL env to be preserved, got %+v", webApp.Spec.Env)
+	if got := webApp.Spec.Env["WORKER_URL"]; got != "http://"+runtime.ComposeServiceAliasName(webApp.ProjectID, "worker")+":8080" {
+		t.Fatalf("expected worker URL env to target compose alias, got %+v", webApp.Spec.Env)
 	}
 	if got := webApp.Spec.Env["DATABASE_URL"]; got == "" {
 		t.Fatalf("expected rewritten database url, got %+v", webApp.Spec.Env)

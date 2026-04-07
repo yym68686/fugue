@@ -29,6 +29,9 @@ type DockerImageSourceImportRequest struct {
 	RegistryPushBase string
 }
 
+type remoteImageDigestFunc func(string, ...crane.Option) (string, error)
+type remoteImageManifestFunc func(string, ...crane.Option) ([]byte, error)
+
 func (i *Importer) ImportDockerImageSource(ctx context.Context, req DockerImageSourceImportRequest) (GitHubSourceImportOutput, error) {
 	if strings.TrimSpace(req.RegistryPushBase) == "" {
 		return GitHubSourceImportOutput{}, fmt.Errorf("registry push base is empty")
@@ -62,6 +65,9 @@ func (i *Importer) ImportDockerImageSource(ctx context.Context, req DockerImageS
 	}
 
 	destOptions := craneOptionsForImageRef(ctx, destImageRef)
+	if err := validateMirroredImageReference(destImageRef, digest, destOptions...); err != nil {
+		return GitHubSourceImportOutput{}, fmt.Errorf("validate mirrored image in internal registry: %w", err)
+	}
 	detectedPort := 80
 	exposesPublicService := false
 	detectedStack := ""
@@ -154,6 +160,60 @@ func readRemoteImageConfig(imageRef string, options ...crane.Option) (*v1.Config
 		return nil, fmt.Errorf("decode image config: %w", err)
 	}
 	return &configFile, nil
+}
+
+func validateMirroredImageReference(imageRef, expectedDigest string, options ...crane.Option) error {
+	return validateMirroredImageReferenceWithClients(imageRef, expectedDigest, crane.Digest, crane.Manifest, options...)
+}
+
+func validateMirroredImageReferenceWithClients(imageRef, expectedDigest string, digestFn remoteImageDigestFunc, manifestFn remoteImageManifestFunc, options ...crane.Option) error {
+	imageRef = strings.TrimSpace(imageRef)
+	expectedDigest = strings.TrimSpace(expectedDigest)
+	if imageRef == "" {
+		return fmt.Errorf("destination image ref is empty")
+	}
+	if expectedDigest == "" {
+		return fmt.Errorf("expected digest is empty")
+	}
+
+	if _, err := manifestFn(imageRef, options...); err != nil {
+		return fmt.Errorf("fetch manifest by tag: %w", err)
+	}
+	actualDigest, err := digestFn(imageRef, options...)
+	if err != nil {
+		return fmt.Errorf("resolve mirrored image digest: %w", err)
+	}
+	if actualDigest != expectedDigest {
+		return fmt.Errorf("digest mismatch: expected %s, got %s", expectedDigest, actualDigest)
+	}
+	digestRef, err := digestReferenceFromImageRef(imageRef, actualDigest)
+	if err != nil {
+		return err
+	}
+	if _, err := manifestFn(digestRef, options...); err != nil {
+		return fmt.Errorf("fetch manifest by digest: %w", err)
+	}
+	return nil
+}
+
+func digestReferenceFromImageRef(imageRef, digest string) (string, error) {
+	imageRef = strings.TrimSpace(imageRef)
+	digest = strings.TrimSpace(digest)
+	if imageRef == "" {
+		return "", fmt.Errorf("image ref is empty")
+	}
+	if digest == "" {
+		return "", fmt.Errorf("digest is empty")
+	}
+	ref, err := name.ParseReference(imageRef, imageReferenceNameOptions(imageRef)...)
+	if err != nil {
+		return "", fmt.Errorf("parse image ref for digest lookup: %w", err)
+	}
+	digestRef, err := name.NewDigest(ref.Context().Name()+"@"+digest, imageReferenceNameOptions(imageRef)...)
+	if err != nil {
+		return "", fmt.Errorf("parse digest reference: %w", err)
+	}
+	return digestRef.Name(), nil
 }
 
 func detectImageBackgroundOverride(imageRef string, configFile *v1.ConfigFile, options ...crane.Option) (string, bool, error) {

@@ -125,6 +125,19 @@ func RuntimeAppResourceName(app model.App) string {
 	return name
 }
 
+func ComposeServiceAliasName(projectID, composeService string) string {
+	composeService = model.Slugify(strings.TrimSpace(composeService))
+	if composeService == "" {
+		return ""
+	}
+
+	projectID = model.Slugify(strings.ReplaceAll(strings.TrimSpace(projectID), "_", "-"))
+	if projectID == "" {
+		return composeService
+	}
+	return normalizePostgresAuxiliaryName(projectID, composeService)
+}
+
 func RuntimeResourceName(name string) string {
 	return sanitizeName(name)
 }
