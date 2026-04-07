@@ -175,7 +175,7 @@ func (s *Service) applyManagedDesiredAppState(
 	if err != nil {
 		return runtime.Bundle{}, fmt.Errorf("overlay desired managed postgres state for app %s: %w", app.ID, err)
 	}
-	postgresPlacements, err := s.managedPostgresPlacements(app)
+	postgresPlacements, err := s.managedPostgresPlacements(ctx, app)
 	if err != nil {
 		return runtime.Bundle{}, fmt.Errorf("resolve managed postgres placements for app %s: %w", app.ID, err)
 	}

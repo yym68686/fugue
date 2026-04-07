@@ -101,7 +101,7 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 	}
 
 	ownerRef := runtime.ManagedAppOwnerReference(managed)
-	postgresPlacements, err := s.managedPostgresPlacements(app)
+	postgresPlacements, err := s.managedPostgresPlacements(ctx, app)
 	if err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("resolve postgres placements: %w", err))
 	}
