@@ -176,7 +176,34 @@ Registry and cluster-join notes:
 - `api.registryPushBase` should be the in-cluster address builders use to push imported images.
 - `api.registryPullBase` should be reachable from runtime nodes that need to pull those images.
 - `api.clusterJoinRegistryEndpoint` should be reachable from VPS nodes joined through `/install/join-cluster.sh`.
+- The bundled registry still defaults to a host-path convenience baseline. Do not keep it on the primary node root disk in production.
+- If you must keep the bundled registry, move it to dedicated storage with either `registry.persistence.mode=pvc` or `registry.persistence.mode=existingClaim`.
 - If you want Fugue to expose `/install/join-cluster.sh`, also set `api.clusterJoinServer="https://k3s-api.example.com:6443"` and `api.clusterJoinBootstrapTokenTTL="15m"`. Optional hardening is `api.clusterJoinCAHash="<sha256-of-server-ca>"`. Optional mesh settings are `api.clusterJoinMeshProvider`, `api.clusterJoinMeshLoginServer`, and `api.clusterJoinMeshAuthKey`.
+
+Example bundled-registry PVC override:
+
+```yaml
+registry:
+  persistence:
+    mode: pvc
+    size: 200Gi
+    storageClassName: fast-rwo
+```
+
+Example bundled-registry existing-claim override:
+
+```yaml
+registry:
+  persistence:
+    mode: existingClaim
+    existingClaim: fugue-registry-data
+```
+
+The bundled registry now enables Docker Distribution upload purging by default. For emergency host-level cleanup on a control-plane node, use:
+
+```bash
+sudo ./scripts/cleanup_fugue_registry_host.sh
+```
 
 Watch rollout:
 

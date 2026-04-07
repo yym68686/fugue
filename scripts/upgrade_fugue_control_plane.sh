@@ -892,6 +892,7 @@ log() {
 registry_root="/var/lib/fugue/registry"
 runner_update_root="/home/github-runner/actions-runner-work/_update"
 registry_image="docker.io/library/registry:2.8.3"
+stale_upload_minutes="${FUGUE_REGISTRY_UPLOAD_STALE_MINUTES:-1440}"
 gc_id="fugue-registry-gc-$(date +%s)"
 
 cleanup() {
@@ -900,6 +901,22 @@ cleanup() {
 }
 
 trap cleanup EXIT
+
+purge_stale_registry_uploads() {
+  local repositories_root="${registry_root}/docker/registry/v2/repositories"
+  local uploads_root=""
+  local path=""
+
+  [[ -d "${repositories_root}" ]] || return 0
+
+  while IFS= read -r uploads_root; do
+    while IFS= read -r path; do
+      [[ -n "${path}" ]] || continue
+      rm -rf -- "${path}"
+      log "removed stale registry upload ${path}"
+    done < <(find "${uploads_root}" -mindepth 1 -maxdepth 1 -type d -mmin "+${stale_upload_minutes}" -print)
+  done < <(find "${repositories_root}" -type d -name '_uploads' -print)
+}
 
 log "filesystem usage before cleanup"
 df -h /
@@ -925,6 +942,8 @@ if [[ ! -d "${registry_root}/docker/registry/v2" ]]; then
   log "registry data root ${registry_root} is absent; skipping offline registry GC"
   exit 0
 fi
+
+purge_stale_registry_uploads
 
 if ! k3s ctr images ls | awk 'NR > 1 {print $1}' | grep -Fxq "${registry_image}"; then
   log "pulling ${registry_image} for offline registry GC"

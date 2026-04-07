@@ -1,0 +1,55 @@
+{{- $registry := (.Values.registry | default (dict)) -}}
+{{- $registryMaintenance := (get $registry "maintenance" | default (dict)) -}}
+{{- $registryUploadPurge := (get $registryMaintenance "uploadPurge" | default (dict)) -}}
+{{- $registryUploadPurgeEnabled := true -}}
+{{- $registryUploadPurgeAge := "168h" -}}
+{{- $registryUploadPurgeInterval := "24h" -}}
+{{- $registryUploadPurgeDryRun := false -}}
+{{- if hasKey $registryUploadPurge "enabled" -}}
+{{- $registryUploadPurgeEnabled = (get $registryUploadPurge "enabled") -}}
+{{- end -}}
+{{- if hasKey $registryUploadPurge "age" -}}
+{{- $registryUploadPurgeAge = (get $registryUploadPurge "age") -}}
+{{- end -}}
+{{- if hasKey $registryUploadPurge "interval" -}}
+{{- $registryUploadPurgeInterval = (get $registryUploadPurge "interval") -}}
+{{- end -}}
+{{- if hasKey $registryUploadPurge "dryRun" -}}
+{{- $registryUploadPurgeDryRun = (get $registryUploadPurge "dryRun") -}}
+{{- end -}}
+{{- if .Values.registry.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "fugue.fullname" . }}-registry-config
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "registry") | nindent 4 }}
+data:
+  config.yml: |
+    version: 0.1
+    log:
+      fields:
+        service: registry
+    storage:
+      cache:
+        blobdescriptor: inmemory
+      delete:
+        enabled: true
+      filesystem:
+        rootdirectory: /var/lib/registry
+      maintenance:
+        uploadpurging:
+          enabled: {{ $registryUploadPurgeEnabled }}
+          age: {{ $registryUploadPurgeAge | quote }}
+          interval: {{ $registryUploadPurgeInterval | quote }}
+          dryrun: {{ $registryUploadPurgeDryRun }}
+    http:
+      addr: :5000
+      headers:
+        X-Content-Type-Options: [nosniff]
+    health:
+      storagedriver:
+        enabled: true
+        interval: 10s
+        threshold: 3
+{{- end }}

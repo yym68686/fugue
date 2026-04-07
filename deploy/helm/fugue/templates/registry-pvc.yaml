@@ -1,0 +1,23 @@
+{{- $registry := (.Values.registry | default (dict)) -}}
+{{- $registryPersistence := (get $registry "persistence" | default (dict)) -}}
+{{- $registryPersistenceMode := "hostPath" -}}
+{{- if hasKey $registryPersistence "mode" -}}
+{{- $registryPersistenceMode = (get $registryPersistence "mode") -}}
+{{- end -}}
+{{- if and .Values.registry.enabled (eq $registryPersistenceMode "pvc") }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "fugue.fullname" . }}-registry-data
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "registry") | nindent 4 }}
+spec:
+  accessModes:
+    - {{ default "ReadWriteOnce" (get $registryPersistence "accessMode") }}
+  resources:
+    requests:
+      storage: {{ default "50Gi" (get $registryPersistence "size") }}
+  {{- if (get $registryPersistence "storageClassName") }}
+  storageClassName: {{ (get $registryPersistence "storageClassName") | quote }}
+  {{- end }}
+{{- end }}

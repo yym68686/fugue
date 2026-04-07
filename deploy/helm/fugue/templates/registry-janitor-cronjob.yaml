@@ -108,7 +108,12 @@ spec:
                   }
 
                   parse_json_array() {
-                    tr -d '\n' | sed -e 's/.*\[[[:space:]]*//' -e 's/[[:space:]]*\].*//' -e 's/","/\n/g' -e 's/^"//' -e 's/"$//'
+                    local payload=""
+                    payload="$(tr -d '\n')"
+                    if ! printf '%s' "${payload}" | grep -q '\['; then
+                      return 0
+                    fi
+                    printf '%s' "${payload}" | sed -e 's/.*\[[[:space:]]*//' -e 's/[[:space:]]*\].*//' -e 's/","/\n/g' -e 's/^"//' -e 's/"$//'
                   }
 
                   registry_catalog() {
@@ -129,13 +134,15 @@ spec:
                       "${registry_base}/v2/${repo}/manifests/${tag}" 2>/dev/null \
                       | awk -F': ' 'tolower($1) == "docker-content-digest" {print $2}' \
                       | tr -d '\r' \
-                      | head -n 1
+                      | head -n 1 || true
                   }
 
                   registry_delete_manifest() {
                     local repo="$1"
                     local digest="$2"
-                    curl -fsS --max-time 10 -X DELETE "${registry_base}/v2/${repo}/manifests/${digest}" >/dev/null
+                    if ! curl -fsS --max-time 10 -X DELETE "${registry_base}/v2/${repo}/manifests/${digest}" >/dev/null; then
+                      log "skip deleting ${repo}@${digest}: registry delete request failed"
+                    fi
                   }
 
                   active_non_janitor_job_count() {

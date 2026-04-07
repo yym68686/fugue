@@ -14,6 +14,8 @@ Recommended production topology:
 - Materialize Fugue runtime secrets from an external secret manager into a Kubernetes `Secret`.
 - Run multiple synchronized Fugue edge nodes and place a health-checked load balancer or VIP in front of them.
 
+If you temporarily keep the bundled registry, do not leave it on the primary node root disk. At minimum, switch `registry.persistence.mode` to `pvc` or `existingClaim` so the registry data lands on dedicated storage instead of `/var/lib/fugue/registry` on the root filesystem.
+
 The chart now includes a production baseline file at `deploy/helm/fugue/values-production-ha.yaml`.
 
 ## 2. External secrets

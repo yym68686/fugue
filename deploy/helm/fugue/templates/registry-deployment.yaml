@@ -1,3 +1,12 @@
+{{- $registry := (.Values.registry | default (dict)) -}}
+{{- $registryPersistence := (get $registry "persistence" | default (dict)) -}}
+{{- $registryPersistenceMode := "hostPath" -}}
+{{- if hasKey $registryPersistence "mode" -}}
+{{- $registryPersistenceMode = (get $registryPersistence "mode") -}}
+{{- end -}}
+{{- if and .Values.registry.enabled (ne $registryPersistenceMode "hostPath") (ne $registryPersistenceMode "pvc") (ne $registryPersistenceMode "existingClaim") -}}
+{{- fail (printf "unsupported registry.persistence.mode %q (expected hostPath, pvc, or existingClaim)" $registryPersistenceMode) -}}
+{{- end -}}
 {{- if .Values.registry.enabled }}
 apiVersion: apps/v1
 kind: Deployment
@@ -14,6 +23,8 @@ spec:
     metadata:
       labels:
         {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "registry") | nindent 8 }}
+      annotations:
+        checksum/registry-config: {{ include (print $.Template.BasePath "/registry-configmap.yaml") . | sha256sum }}
     spec:
       containers:
         - name: registry
@@ -23,12 +34,11 @@ spec:
             - name: registry
               containerPort: 5000
               protocol: TCP
-          env:
-            - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
-              value: /var/lib/registry
-            - name: REGISTRY_STORAGE_DELETE_ENABLED
-              value: "true"
           volumeMounts:
+            - name: registry-config
+              mountPath: /etc/docker/registry/config.yml
+              subPath: config.yml
+              readOnly: true
             - name: registry-data
               mountPath: /var/lib/registry
           readinessProbe:
@@ -46,10 +56,24 @@ spec:
           resources:
             {{- toYaml .Values.registry.resources | nindent 12 }}
       volumes:
+        - name: registry-config
+          configMap:
+            name: {{ printf "%s-registry-config" (include "fugue.fullname" .) | quote }}
+            items:
+              - key: config.yml
+                path: config.yml
         - name: registry-data
+          {{- if eq $registryPersistenceMode "hostPath" }}
           hostPath:
-            path: {{ .Values.registry.persistence.hostPath | quote }}
+            path: {{ default "/var/lib/fugue/registry" (get $registryPersistence "hostPath") | quote }}
             type: DirectoryOrCreate
+          {{- else if eq $registryPersistenceMode "pvc" }}
+          persistentVolumeClaim:
+            claimName: {{ printf "%s-registry-data" (include "fugue.fullname" .) | quote }}
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ required "registry.persistence.existingClaim must be set when registry.persistence.mode=existingClaim" (get $registryPersistence "existingClaim") | quote }}
+          {{- end }}
       {{- with (default .Values.nodeSelector .Values.registry.nodeSelector) }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

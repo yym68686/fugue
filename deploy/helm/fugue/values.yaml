@@ -147,7 +147,18 @@ registry:
     targetPort: 5000
     nodePort: 30500
   persistence:
+    mode: hostPath
     hostPath: /var/lib/fugue/registry
+    existingClaim: ""
+    accessMode: ReadWriteOnce
+    size: 50Gi
+    storageClassName: ""
+  maintenance:
+    uploadPurge:
+      enabled: true
+      age: 168h
+      interval: 24h
+      dryRun: false
   nodeSelector: {}
   resources: {}
 
