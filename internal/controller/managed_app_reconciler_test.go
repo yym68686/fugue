@@ -565,6 +565,60 @@ func TestDeleteManagedAppResourcesDeletesExpectedNamesWhenLabelsAreMissing(t *te
 	}
 }
 
+func TestBackfillManagedAppSourceUsesStoreSourceForLegacyManagedApps(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID: "app_demo",
+	}
+	stored := model.App{
+		Source: &model.AppSource{
+			Type:             model.AppSourceTypeDockerImage,
+			ImageRef:         "mongo:7.0",
+			ComposeService:   "mongodb",
+			ComposeDependsOn: []string{"api"},
+		},
+	}
+
+	backfillManagedAppSource(&app, stored)
+
+	if app.Source == nil {
+		t.Fatal("expected store source to backfill legacy managed app")
+	}
+	if app.Source.ComposeService != "mongodb" {
+		t.Fatalf("expected compose service mongodb, got %q", app.Source.ComposeService)
+	}
+
+	stored.Source.ComposeDependsOn[0] = "changed"
+	if got := app.Source.ComposeDependsOn[0]; got != "api" {
+		t.Fatalf("expected copied compose dependencies to stay unchanged, got %q", got)
+	}
+}
+
+func TestBackfillManagedAppSourceDoesNotOverrideManagedSnapshot(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID: "app_demo",
+		Source: &model.AppSource{
+			Type:           model.AppSourceTypeDockerImage,
+			ComposeService: "managed",
+		},
+	}
+	stored := model.App{
+		Source: &model.AppSource{
+			Type:           model.AppSourceTypeDockerImage,
+			ComposeService: "store",
+		},
+	}
+
+	backfillManagedAppSource(&app, stored)
+
+	if got := app.Source.ComposeService; got != "managed" {
+		t.Fatalf("expected managed snapshot source to win, got %q", got)
+	}
+}
+
 func TestDeleteManagedAppResourcesIgnoresMissingCustomResourceAPIsForStatelessApps(t *testing.T) {
 	t.Parallel()
 

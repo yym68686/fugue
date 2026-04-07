@@ -57,6 +57,7 @@ type ManagedAppSpec struct {
 	TenantID        string                 `json:"tenantID"`
 	ProjectID       string                 `json:"projectID,omitempty"`
 	Name            string                 `json:"name"`
+	Source          *model.AppSource       `json:"source,omitempty"`
 	AppSpec         model.AppSpec          `json:"appSpec"`
 	Bindings        []model.ServiceBinding `json:"bindings,omitempty"`
 	BackingServices []model.BackingService `json:"backingServices,omitempty"`
@@ -159,6 +160,7 @@ func BuildManagedAppObject(app model.App, scheduling SchedulingConstraints) map[
 			TenantID:        strings.TrimSpace(app.TenantID),
 			ProjectID:       strings.TrimSpace(app.ProjectID),
 			Name:            strings.TrimSpace(app.Name),
+			Source:          cloneManagedAppSource(app.Source),
 			AppSpec:         cloneManagedAppSpec(app.Spec),
 			Bindings:        cloneManagedServiceBindings(app.Bindings),
 			BackingServices: cloneManagedBackingServices(app.BackingServices),
@@ -223,6 +225,7 @@ func AppFromManagedApp(managed ManagedAppObject) model.App {
 		TenantID:        strings.TrimSpace(managed.Spec.TenantID),
 		ProjectID:       strings.TrimSpace(managed.Spec.ProjectID),
 		Name:            strings.TrimSpace(managed.Spec.Name),
+		Source:          cloneManagedAppSource(managed.Spec.Source),
 		Spec:            cloneManagedAppSpec(managed.Spec.AppSpec),
 		Bindings:        cloneManagedServiceBindings(managed.Spec.Bindings),
 		BackingServices: cloneManagedBackingServices(managed.Spec.BackingServices),
@@ -325,6 +328,17 @@ func cloneManagedAppSpec(spec model.AppSpec) model.AppSpec {
 		out.Postgres = &postgres
 	}
 	return out
+}
+
+func cloneManagedAppSource(source *model.AppSource) *model.AppSource {
+	if source == nil {
+		return nil
+	}
+	out := *source
+	if len(source.ComposeDependsOn) > 0 {
+		out.ComposeDependsOn = append([]string(nil), source.ComposeDependsOn...)
+	}
+	return &out
 }
 
 func cloneManagedServiceBindings(bindings []model.ServiceBinding) []model.ServiceBinding {

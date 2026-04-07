@@ -13,6 +13,12 @@ func TestBuildManagedAppStateObjectsEncodesDesiredState(t *testing.T) {
 		TenantID:  "tenant_demo",
 		ProjectID: "project_demo",
 		Name:      "demo",
+		Source: &model.AppSource{
+			Type:             model.AppSourceTypeDockerImage,
+			ImageRef:         "ghcr.io/example/demo:latest",
+			ComposeService:   "api",
+			ComposeDependsOn: []string{"worker"},
+		},
 		Spec: model.AppSpec{
 			Image:     "ghcr.io/example/demo:latest",
 			Ports:     []int{8080},
@@ -65,6 +71,10 @@ func TestBuildManagedAppStateObjectsEncodesDesiredState(t *testing.T) {
 	}
 	if got := spec["tenantID"]; got != "tenant_demo" {
 		t.Fatalf("unexpected tenant id: %#v", got)
+	}
+	source := spec["source"].(map[string]any)
+	if got := source["compose_service"]; got != "api" {
+		t.Fatalf("unexpected compose service: %#v", got)
 	}
 	appSpec := spec["appSpec"].(map[string]any)
 	if got := appSpec["image"]; got != "ghcr.io/example/demo:latest" {
@@ -123,6 +133,54 @@ func TestBuildManagedAppChildObjectsAddsOwnerReferences(t *testing.T) {
 		if got := ownerRefs[0]["controller"]; got != false {
 			t.Fatalf("managed app owner reference should not claim controller ownership, got %#v", got)
 		}
+	}
+}
+
+func TestManagedAppRoundTripPreservesSourceForComposeAliases(t *testing.T) {
+	app := model.App{
+		ID:        "app_demo_123",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "demo-mongodb",
+		Source: &model.AppSource{
+			Type:           model.AppSourceTypeDockerImage,
+			ImageRef:       "mongo:7.0",
+			ComposeService: "mongodb",
+		},
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/mongo:latest",
+			Ports:     []int{27017},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	managedMap := BuildManagedAppObject(app, SchedulingConstraints{})
+	managed, err := ManagedAppObjectFromMap(managedMap)
+	if err != nil {
+		t.Fatalf("decode managed app object: %v", err)
+	}
+
+	roundTrip := AppFromManagedApp(managed)
+	if roundTrip.Source == nil {
+		t.Fatal("expected source to survive managed app round-trip")
+	}
+	if roundTrip.Source.ComposeService != "mongodb" {
+		t.Fatalf("expected compose service mongodb, got %q", roundTrip.Source.ComposeService)
+	}
+
+	objects := BuildManagedAppChildObjects(roundTrip, SchedulingConstraints{}, nil)
+	if len(objects) != 3 {
+		t.Fatalf("expected deployment + service + compose alias, got %d", len(objects))
+	}
+
+	aliasService := objects[2]
+	if got := aliasService["kind"]; got != "Service" {
+		t.Fatalf("expected compose alias service, got %#v", got)
+	}
+	metadata := aliasService["metadata"].(map[string]any)
+	if got := metadata["name"]; got != ComposeServiceAliasName(app.ProjectID, "mongodb") {
+		t.Fatalf("expected alias name %q, got %#v", ComposeServiceAliasName(app.ProjectID, "mongodb"), got)
 	}
 }
 

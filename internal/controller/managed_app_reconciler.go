@@ -83,11 +83,13 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 	}
 	if appID := strings.TrimSpace(app.ID); appID == "" {
 		return s.cleanupOrphanManagedApp(ctx, client, namespace, managed, app, "orphaned managed app: spec.appID is empty")
-	} else if _, err := s.Store.GetApp(appID); err != nil {
+	} else if storedApp, err := s.Store.GetApp(appID); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return s.cleanupOrphanManagedApp(ctx, client, namespace, managed, app, "orphaned managed app: app not found in store")
 		}
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read app from store: %w", err))
+	} else {
+		backfillManagedAppSource(&app, storedApp)
 	}
 	if strings.TrimSpace(managed.Metadata.DeletionTimestamp) != "" {
 		status := managedAppBaseStatus(managed, app)
@@ -974,6 +976,17 @@ func listOwnedNames(ctx context.Context, appID string, fn func(selector string) 
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func backfillManagedAppSource(app *model.App, stored model.App) {
+	if app == nil || app.Source != nil || stored.Source == nil {
+		return
+	}
+	sourceCopy := *stored.Source
+	if len(stored.Source.ComposeDependsOn) > 0 {
+		sourceCopy.ComposeDependsOn = append([]string(nil), stored.Source.ComposeDependsOn...)
+	}
+	app.Source = &sourceCopy
 }
 
 func managedAppExpectedObjectNamesByKind(app model.App) map[string]map[string]struct{} {
