@@ -438,6 +438,58 @@ func TestFailoverOperationPreservesManagedPostgresPlacement(t *testing.T) {
 	}
 }
 
+func TestOwnedManagedPostgresSpecPreservesPendingPlacementWhileFailoverEnabled(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Postgres Pending Rebalance")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	sourceRuntime, _, err := s.CreateRuntime(tenant.ID, "source", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create source runtime: %v", err)
+	}
+	targetRuntime, _, err := s.CreateRuntime(tenant.ID, "target", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create target runtime: %v", err)
+	}
+
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		RuntimeID: sourceRuntime.ID,
+		Replicas:  1,
+		Postgres: &model.AppPostgresSpec{
+			Database:                         "demo",
+			Password:                         "secret",
+			RuntimeID:                        sourceRuntime.ID,
+			FailoverTargetRuntimeID:          targetRuntime.ID,
+			Instances:                        2,
+			SynchronousReplicas:              1,
+			PrimaryPlacementPendingRebalance: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	currentDatabase := OwnedManagedPostgresSpec(app)
+	if currentDatabase == nil {
+		t.Fatal("expected owned managed postgres spec")
+	}
+	if !currentDatabase.PrimaryPlacementPendingRebalance {
+		t.Fatalf("expected pending placement hold to survive normalization, got %+v", currentDatabase)
+	}
+}
+
 func TestMigrateOperationRejectsExternalRuntimeWhenAppHasBoundManagedPostgres(t *testing.T) {
 	t.Parallel()
 

@@ -77,17 +77,23 @@ func (s *Server) handlePatchAppContinuity(w http.ResponseWriter, r *http.Request
 			nextDatabase = cloneAppPostgresSpec(currentDatabase)
 		}
 		if req.DatabaseFailover.Enabled {
-			if req.DatabaseFailover.RebalanceNow {
-				httpx.WriteError(w, http.StatusBadRequest, "database_failover.rebalance_now is only supported when enabled is false")
-				return
-			}
 			targetRuntimeID := strings.TrimSpace(req.DatabaseFailover.TargetRuntimeID)
 			if targetRuntimeID == "" {
 				httpx.WriteError(w, http.StatusBadRequest, "database_failover.target_runtime_id is required when enabled")
 				return
 			}
+			topologyChangeRequested :=
+				strings.TrimSpace(currentDatabase.FailoverTargetRuntimeID) != targetRuntimeID ||
+					currentDatabase.Instances < 2 ||
+					currentDatabase.SynchronousReplicas < 1
 			nextDatabase.FailoverTargetRuntimeID = targetRuntimeID
-			nextDatabase.PrimaryPlacementPendingRebalance = false
+			if req.DatabaseFailover.RebalanceNow {
+				nextDatabase.PrimaryPlacementPendingRebalance = false
+			} else if topologyChangeRequested {
+				nextDatabase.PrimaryPlacementPendingRebalance = true
+			} else {
+				nextDatabase.PrimaryPlacementPendingRebalance = currentDatabase.PrimaryPlacementPendingRebalance
+			}
 			if nextDatabase.Instances < 2 {
 				nextDatabase.Instances = 2
 			}

@@ -91,6 +91,9 @@ func TestPatchAppContinuityQueuesDeploy(t *testing.T) {
 	if op.DesiredSpec.Postgres.Instances != 2 || op.DesiredSpec.Postgres.SynchronousReplicas != 1 {
 		t.Fatalf("expected two-instance postgres failover pair, got %+v", op.DesiredSpec.Postgres)
 	}
+	if !op.DesiredSpec.Postgres.PrimaryPlacementPendingRebalance {
+		t.Fatalf("expected enable to preserve live placement pending rebalance, got %+v", op.DesiredSpec.Postgres)
+	}
 }
 
 func TestPatchAppContinuityReturnsAlreadyCurrent(t *testing.T) {
@@ -305,7 +308,7 @@ func TestPatchAppContinuityDisableDatabaseFailoverRebalanceNowClearsPendingPlace
 	}
 }
 
-func TestPatchAppContinuityRejectsDatabaseFailoverRebalanceNowWhenEnabled(t *testing.T) {
+func TestPatchAppContinuityEnableDatabaseFailoverRebalanceNowClearsPendingPlacement(t *testing.T) {
 	t.Parallel()
 
 	s := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -337,8 +340,9 @@ func TestPatchAppContinuityRejectsDatabaseFailoverRebalanceNowWhenEnabled(t *tes
 		RuntimeID: sourceRuntime.ID,
 		Replicas:  1,
 		Postgres: &model.AppPostgresSpec{
-			Database: "demo",
-			Password: "secret",
+			Database:                         "demo",
+			Password:                         "secret",
+			PrimaryPlacementPendingRebalance: true,
 		},
 	})
 	if err != nil {
@@ -353,7 +357,26 @@ func TestPatchAppContinuityRejectsDatabaseFailoverRebalanceNowWhenEnabled(t *tes
 			"rebalance_now":     true,
 		},
 	})
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadRequest, recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Operation struct {
+			ID string `json:"id"`
+		} `json:"operation"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	op, err := s.GetOperation(response.Operation.ID)
+	if err != nil {
+		t.Fatalf("get operation: %v", err)
+	}
+	if op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
+		t.Fatalf("expected desired postgres spec on operation, got %+v", op.DesiredSpec)
+	}
+	if op.DesiredSpec.Postgres.PrimaryPlacementPendingRebalance {
+		t.Fatalf("expected rebalance_now to clear pending placement hold on enable, got %+v", op.DesiredSpec.Postgres)
 	}
 }

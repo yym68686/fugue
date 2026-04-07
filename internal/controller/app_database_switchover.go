@@ -147,6 +147,7 @@ func databaseSwitchoverSpec(
 		}
 		postgresCopy.RuntimeID = strings.TrimSpace(primaryRuntimeID)
 		postgresCopy.FailoverTargetRuntimeID = strings.TrimSpace(failoverTargetRuntimeID)
+		postgresCopy.PrimaryPlacementPendingRebalance = false
 		if postgresCopy.Instances < 2 {
 			postgresCopy.Instances = 2
 		}

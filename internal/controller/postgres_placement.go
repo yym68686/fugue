@@ -150,9 +150,6 @@ func (s *Service) managedPostgresServiceAffinityOverride(
 	if !spec.PrimaryPlacementPendingRebalance {
 		return nil, nil
 	}
-	if strings.TrimSpace(spec.FailoverTargetRuntimeID) != "" || spec.Instances > 1 {
-		return nil, nil
-	}
 
 	primaryRuntimeID := strings.TrimSpace(spec.RuntimeID)
 	if primaryRuntimeID == "" {

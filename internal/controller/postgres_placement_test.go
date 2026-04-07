@@ -409,6 +409,128 @@ func TestManagedPostgresAffinityOverridesReuseLiveClusterAffinityWhilePendingReb
 	}
 }
 
+func TestManagedPostgresAffinityOverridesReuseLiveClusterAffinityWhileEnablePendingRebalance(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Placement Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	if err := stateStore.SyncManagedSharedLocationRuntimes([]map[string]string{{
+		runtimepkg.LocationCountryCodeLabelKey: "us",
+	}}); err != nil {
+		t.Fatalf("sync shared runtimes: %v", err)
+	}
+
+	sourceRuntimeID := managedSharedRuntimeIDForLabels(t, stateStore, map[string]string{
+		runtimepkg.LocationCountryCodeLabelKey: "us",
+	})
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: tenant.ID,
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			RuntimeID: sourceRuntimeID,
+			Postgres: &model.AppPostgresSpec{
+				Database:                         "demo",
+				User:                             "demo",
+				Password:                         "secret",
+				ServiceName:                      "demo-postgres",
+				RuntimeID:                        sourceRuntimeID,
+				FailoverTargetRuntimeID:          "runtime_target",
+				Instances:                        2,
+				SynchronousReplicas:              1,
+				PrimaryPlacementPendingRebalance: true,
+			},
+		},
+	}
+
+	namespace := runtimepkg.NamespaceForTenant(app.TenantID)
+	expectedAffinity := map[string]any{
+		"nodeAffinity": map[string]any{
+			"requiredDuringSchedulingIgnoredDuringExecution": map[string]any{
+				"nodeSelectorTerms": []any{
+					map[string]any{
+						"matchExpressions": []any{
+							map[string]any{
+								"key":      kubeHostnameLabelKey,
+								"operator": "In",
+								"values":   []any{"shared-us-1"},
+							},
+						},
+					},
+					map[string]any{
+						"matchExpressions": []any{
+							map[string]any{
+								"key":      runtimepkg.RuntimeIDLabelKey,
+								"operator": "In",
+								"values":   []any{"runtime_target"},
+							},
+						},
+					},
+				},
+			},
+		},
+		"enablePodAntiAffinity": true,
+		"podAntiAffinityType":   "required",
+		"topologyKey":           "kubernetes.io/hostname",
+	}
+
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case cloudNativePGClusterAPIPath(namespace, "demo-postgres"):
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{
+					"name": "demo-postgres",
+				},
+				"spec": map[string]any{
+					"instances": 2,
+					"affinity":  expectedAffinity,
+				},
+			}); err != nil {
+				t.Fatalf("encode cluster: %v", err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	svc := &Service{
+		Store:  stateStore,
+		Logger: log.New(io.Discard, "", 0),
+		newKubeClient: func(namespace string) (*kubeClient, error) {
+			return &kubeClient{
+				client:      kubeServer.Client(),
+				baseURL:     kubeServer.URL,
+				bearerToken: "test",
+				namespace:   namespace,
+			}, nil
+		},
+	}
+
+	overrides, err := svc.managedPostgresAffinityOverrides(context.Background(), app)
+	if err != nil {
+		t.Fatalf("resolve postgres affinity overrides: %v", err)
+	}
+
+	got := overrides["demo-postgres"]
+	if got == nil {
+		t.Fatalf("expected affinity override for demo-postgres, got %#v", overrides)
+	}
+	if !reflect.DeepEqual(got, expectedAffinity) {
+		t.Fatalf("expected affinity override %#v, got %#v", expectedAffinity, got)
+	}
+}
+
 func TestApplyManagedPostgresAffinityOverridesReplacesClusterAffinity(t *testing.T) {
 	t.Parallel()
 

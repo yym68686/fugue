@@ -464,9 +464,6 @@ func normalizeManagedPostgresSpec(appName, appRuntimeID string, spec model.AppPo
 		out.RuntimeID = strings.TrimSpace(appRuntimeID)
 	}
 	out.FailoverTargetRuntimeID = strings.TrimSpace(out.FailoverTargetRuntimeID)
-	if out.FailoverTargetRuntimeID != "" {
-		out.PrimaryPlacementPendingRebalance = false
-	}
 	if strings.TrimSpace(out.StorageSize) == "" {
 		out.StorageSize = defaultManagedBackingPostgresStorage
 	}
@@ -476,9 +473,6 @@ func normalizeManagedPostgresSpec(appName, appRuntimeID string, spec model.AppPo
 	}
 	if out.FailoverTargetRuntimeID != "" && out.Instances < 2 {
 		out.Instances = 2
-	}
-	if out.Instances > 1 {
-		out.PrimaryPlacementPendingRebalance = false
 	}
 	if out.SynchronousReplicas < 0 {
 		out.SynchronousReplicas = 0
