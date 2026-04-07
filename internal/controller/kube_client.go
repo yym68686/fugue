@@ -67,6 +67,36 @@ type kubeNode struct {
 	} `json:"metadata"`
 }
 
+type kubePersistentVolumeClaim struct {
+	Metadata struct {
+		Name        string            `json:"name"`
+		Annotations map[string]string `json:"annotations,omitempty"`
+		Labels      map[string]string `json:"labels,omitempty"`
+	} `json:"metadata"`
+	Spec struct {
+		VolumeName string `json:"volumeName,omitempty"`
+	} `json:"spec"`
+}
+
+type kubePersistentVolume struct {
+	Metadata struct {
+		Name string `json:"name"`
+	} `json:"metadata"`
+	Spec struct {
+		NodeAffinity struct {
+			Required *struct {
+				NodeSelectorTerms []struct {
+					MatchExpressions []struct {
+						Key      string   `json:"key,omitempty"`
+						Operator string   `json:"operator,omitempty"`
+						Values   []string `json:"values,omitempty"`
+					} `json:"matchExpressions,omitempty"`
+				} `json:"nodeSelectorTerms,omitempty"`
+			} `json:"required,omitempty"`
+		} `json:"nodeAffinity,omitempty"`
+	} `json:"spec"`
+}
+
 type kubeJobList struct {
 	Items []kubeJobInfo `json:"items"`
 }
@@ -89,7 +119,13 @@ type kubePod struct {
 		CreationTimestamp time.Time `json:"creationTimestamp"`
 	} `json:"metadata"`
 	Spec struct {
-		NodeName       string `json:"nodeName,omitempty"`
+		NodeName string `json:"nodeName,omitempty"`
+		Volumes  []struct {
+			Name                  string `json:"name,omitempty"`
+			PersistentVolumeClaim *struct {
+				ClaimName string `json:"claimName,omitempty"`
+			} `json:"persistentVolumeClaim,omitempty"`
+		} `json:"volumes,omitempty"`
 		InitContainers []struct {
 			Name string `json:"name"`
 		} `json:"initContainers"`
@@ -237,6 +273,18 @@ func (c *kubeClient) listNodeNames(ctx context.Context) ([]string, error) {
 	return names, nil
 }
 
+func (c *kubeClient) getNode(ctx context.Context, name string) (kubeNode, bool, error) {
+	var node kubeNode
+	status, err := c.doJSON(ctx, http.MethodGet, "/api/v1/nodes/"+url.PathEscape(strings.TrimSpace(name)), nil, &node)
+	if err != nil {
+		if status == http.StatusNotFound {
+			return kubeNode{}, false, nil
+		}
+		return kubeNode{}, false, err
+	}
+	return node, true, nil
+}
+
 func (c *kubeClient) listNodeRuntimeIDs(ctx context.Context) (map[string]string, error) {
 	var nodeList kubeNodeList
 	if _, err := c.doJSON(ctx, http.MethodGet, "/api/v1/nodes", nil, &nodeList); err != nil {
@@ -296,6 +344,18 @@ func (c *kubeClient) podWithContainerExists(ctx context.Context, namespace, labe
 	return false, nil
 }
 
+func (c *kubeClient) getPod(ctx context.Context, namespace, name string) (kubePod, bool, error) {
+	var pod kubePod
+	status, err := c.doJSON(ctx, http.MethodGet, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/pods/"+url.PathEscape(strings.TrimSpace(name)), nil, &pod)
+	if err != nil {
+		if status == http.StatusNotFound {
+			return kubePod{}, false, nil
+		}
+		return kubePod{}, false, err
+	}
+	return pod, true, nil
+}
+
 func (c *kubeClient) listPodsBySelector(ctx context.Context, namespace, labelSelector string) ([]kubePod, error) {
 	query := url.Values{}
 	if strings.TrimSpace(labelSelector) != "" {
@@ -322,6 +382,30 @@ func (c *kubeClient) listPodsBySelector(ctx context.Context, namespace, labelSel
 	})
 
 	return podList.Items, nil
+}
+
+func (c *kubeClient) getPersistentVolumeClaim(ctx context.Context, namespace, name string) (kubePersistentVolumeClaim, bool, error) {
+	var pvc kubePersistentVolumeClaim
+	status, err := c.doJSON(ctx, http.MethodGet, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/persistentvolumeclaims/"+url.PathEscape(strings.TrimSpace(name)), nil, &pvc)
+	if err != nil {
+		if status == http.StatusNotFound {
+			return kubePersistentVolumeClaim{}, false, nil
+		}
+		return kubePersistentVolumeClaim{}, false, err
+	}
+	return pvc, true, nil
+}
+
+func (c *kubeClient) getPersistentVolume(ctx context.Context, name string) (kubePersistentVolume, bool, error) {
+	var pv kubePersistentVolume
+	status, err := c.doJSON(ctx, http.MethodGet, "/api/v1/persistentvolumes/"+url.PathEscape(strings.TrimSpace(name)), nil, &pv)
+	if err != nil {
+		if status == http.StatusNotFound {
+			return kubePersistentVolume{}, false, nil
+		}
+		return kubePersistentVolume{}, false, err
+	}
+	return pv, true, nil
 }
 
 func (c *kubeClient) doJSON(ctx context.Context, method, apiPath string, body any, out any) (int, error) {

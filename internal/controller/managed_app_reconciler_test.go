@@ -160,7 +160,13 @@ func TestBuildManagedAppStatusMarksCrashLoopingPodsAsError(t *testing.T) {
 				CreationTimestamp: time.Date(2026, time.March, 26, 10, 0, 0, 0, time.UTC),
 			},
 			Spec: struct {
-				NodeName       string `json:"nodeName,omitempty"`
+				NodeName string `json:"nodeName,omitempty"`
+				Volumes  []struct {
+					Name                  string `json:"name,omitempty"`
+					PersistentVolumeClaim *struct {
+						ClaimName string `json:"claimName,omitempty"`
+					} `json:"persistentVolumeClaim,omitempty"`
+				} `json:"volumes,omitempty"`
 				InitContainers []struct {
 					Name string `json:"name"`
 				} `json:"initContainers"`

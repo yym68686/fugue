@@ -434,6 +434,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	if err != nil {
 		return fmt.Errorf("load app %s: %w", op.AppID, err)
 	}
+	var completionDesiredSpec *model.AppSpec
 
 	switch op.Type {
 	case model.OperationTypeImport:
@@ -447,6 +448,14 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			return fmt.Errorf("deploy operation %s missing desired spec", op.ID)
 		}
 		app.Spec = *op.DesiredSpec
+		if alignedSpec, changed, err := s.alignManagedPostgresRuntimeToObservedPrimary(ctx, app); err != nil {
+			if s.Logger != nil {
+				s.Logger.Printf("skip managed postgres runtime alignment for app %s: %v", app.ID, err)
+			}
+		} else if changed {
+			app.Spec = alignedSpec
+			completionDesiredSpec = cloneControllerAppSpec(&alignedSpec)
+		}
 	case model.OperationTypeScale:
 		if op.DesiredReplicas == nil {
 			return fmt.Errorf("scale operation %s missing desired replicas", op.ID)
@@ -514,7 +523,11 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	if op.Type == model.OperationTypeDelete {
 		message = fmt.Sprintf("managed app deleted from namespace %s", bundle.TenantNamespace)
 	}
-	_, err = s.Store.CompleteManagedOperation(op.ID, bundle.ManifestPath, message)
+	if completionDesiredSpec != nil {
+		_, err = s.Store.CompleteManagedOperationWithResult(op.ID, bundle.ManifestPath, message, completionDesiredSpec, nil)
+	} else {
+		_, err = s.Store.CompleteManagedOperation(op.ID, bundle.ManifestPath, message)
+	}
 	if err != nil {
 		return fmt.Errorf("complete operation %s: %w", op.ID, err)
 	}
