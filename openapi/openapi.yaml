@@ -282,6 +282,13 @@ paths:
       x-fugue-handler: handleGetConsoleGallery
       security:
         - BearerAuth: []
+      parameters:
+        - in: query
+          name: include_live_status
+          required: false
+          description: When true, attempt the managed app live status overlay; defaults to false.
+          schema:
+            type: boolean
       responses:
         '200':
           description: Successful response
@@ -299,6 +306,13 @@ paths:
       x-fugue-handler: handleStreamConsoleGallery
       security:
         - BearerAuth: []
+      parameters:
+        - in: query
+          name: include_live_status
+          required: false
+          description: When true, attempt the managed app live status overlay; defaults to false.
+          schema:
+            type: boolean
       responses:
         '200':
           description: Successful response
@@ -318,6 +332,12 @@ paths:
         - BearerAuth: []
       parameters:
         - $ref: "#/components/parameters/IdPathParam"
+        - in: query
+          name: include_live_status
+          required: false
+          description: When true, attempt the managed app live status overlay; defaults to false.
+          schema:
+            type: boolean
       responses:
         '200':
           description: Successful response
@@ -1094,7 +1114,7 @@ paths:
         - in: query
           name: include_live_status
           required: false
-          description: When false, skip the managed app live status overlay.
+          description: When true, attempt the managed app live status overlay; defaults to false.
           schema:
             type: boolean
         - in: query

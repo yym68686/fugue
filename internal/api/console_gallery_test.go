@@ -1,9 +1,14 @@
 package api
 
 import (
+	"errors"
+	"net/http"
+	"path/filepath"
 	"testing"
 
+	"fugue/internal/auth"
 	"fugue/internal/model"
+	"fugue/internal/store"
 )
 
 func TestBuildConsoleProjectLifecycleUsesUpdatingForMixedLiveAndPending(t *testing.T) {
@@ -65,5 +70,59 @@ func TestReadConsoleActiveReleaseOperationIgnoresPendingDeployForFailedApp(t *te
 
 	if got := readConsoleActiveReleaseOperation(operation, app); got != nil {
 		t.Fatalf("expected failed app to ignore active deploy operation, got %+v", got)
+	}
+}
+
+func TestConsoleGallerySkipsLiveStatusOverlayByDefault(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Console Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "viewer", []string{"project.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	if _, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: tenantSharedRuntimeID,
+	}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	managedStatusCalls := 0
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server.newManagedAppStatusClient = func() (*managedAppStatusClient, error) {
+		managedStatusCalls++
+		return nil, errors.New("unexpected managed status lookup")
+	}
+
+	recorder := performJSONRequest(
+		t,
+		server,
+		http.MethodGet,
+		"/v1/console/gallery",
+		apiKey,
+		nil,
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	if managedStatusCalls != 0 {
+		t.Fatalf("expected console gallery to skip live status overlay by default, got %d calls", managedStatusCalls)
 	}
 }

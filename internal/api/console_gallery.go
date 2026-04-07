@@ -629,25 +629,27 @@ func visibleConsoleApps(apps []model.App) []model.App {
 	return visible
 }
 
-func (s *Server) loadConsoleApps(ctx context.Context, principal model.Principal, includeResourceUsage bool) ([]model.App, error) {
+func (s *Server) loadConsoleApps(ctx context.Context, principal model.Principal, includeLiveStatus bool, includeResourceUsage bool) ([]model.App, error) {
 	apps, err := s.store.ListApps(principal.TenantID, principal.IsPlatformAdmin())
 	if err != nil {
 		return nil, err
 	}
 	visible := visibleConsoleApps(apps)
-	visible = s.overlayManagedAppStatuses(ctx, visible)
+	if includeLiveStatus {
+		visible = s.overlayManagedAppStatuses(ctx, visible)
+	}
 	if includeResourceUsage {
 		visible = s.overlayCurrentResourceUsageOnApps(ctx, visible)
 	}
 	return sanitizeAppsForAPI(visible), nil
 }
 
-func (s *Server) buildConsoleGalleryResponse(ctx context.Context, principal model.Principal) (consoleGalleryResponse, error) {
+func (s *Server) buildConsoleGalleryResponse(ctx context.Context, principal model.Principal, includeLiveStatus bool) (consoleGalleryResponse, error) {
 	projects, err := s.store.ListProjects(principal.TenantID)
 	if err != nil {
 		return consoleGalleryResponse{}, err
 	}
-	apps, err := s.loadConsoleApps(ctx, principal, true)
+	apps, err := s.loadConsoleApps(ctx, principal, includeLiveStatus, true)
 	if err != nil {
 		return consoleGalleryResponse{}, err
 	}
@@ -792,12 +794,12 @@ func (s *Server) buildConsoleGalleryResponse(ctx context.Context, principal mode
 	return response, nil
 }
 
-func (s *Server) buildConsoleGalleryHash(ctx context.Context, principal model.Principal) (string, error) {
+func (s *Server) buildConsoleGalleryHash(ctx context.Context, principal model.Principal, includeLiveStatus bool) (string, error) {
 	projects, err := s.store.ListProjects(principal.TenantID)
 	if err != nil {
 		return "", err
 	}
-	apps, err := s.loadConsoleApps(ctx, principal, false)
+	apps, err := s.loadConsoleApps(ctx, principal, includeLiveStatus, false)
 	if err != nil {
 		return "", err
 	}
@@ -982,7 +984,13 @@ func (s *Server) loadConsoleProjectClusterNodes(
 
 func (s *Server) handleGetConsoleGallery(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	response, err := s.buildConsoleGalleryResponse(r.Context(), principal)
+	includeLiveStatus, err := readBoolQuery(r, "include_live_status", false)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	response, err := s.buildConsoleGalleryResponse(r.Context(), principal, includeLiveStatus)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -998,6 +1006,11 @@ func (s *Server) handleGetConsoleProject(w http.ResponseWriter, r *http.Request)
 		httpx.WriteError(w, http.StatusBadRequest, "project id is required")
 		return
 	}
+	includeLiveStatus, err := readBoolQuery(r, "include_live_status", false)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	projects, err := s.store.ListProjects(principal.TenantID)
 	if err != nil {
@@ -1009,7 +1022,7 @@ func (s *Server) handleGetConsoleProject(w http.ResponseWriter, r *http.Request)
 		projectByID[project.ID] = project
 	}
 
-	apps, err := s.loadConsoleApps(r.Context(), principal, true)
+	apps, err := s.loadConsoleApps(r.Context(), principal, includeLiveStatus, true)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -1086,6 +1099,11 @@ func valueOrNilProject(project model.Project, ok bool) *model.Project {
 
 func (s *Server) handleStreamConsoleGallery(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
+	includeLiveStatus, err := readBoolQuery(r, "include_live_status", false)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	stream, err := newSSEWriter(w)
 	if err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, err.Error())
@@ -1096,7 +1114,7 @@ func (s *Server) handleStreamConsoleGallery(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	hash, err := s.buildConsoleGalleryHash(r.Context(), principal)
+	hash, err := s.buildConsoleGalleryHash(r.Context(), principal, includeLiveStatus)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -1123,7 +1141,7 @@ func (s *Server) handleStreamConsoleGallery(w http.ResponseWriter, r *http.Reque
 				return
 			}
 		case <-ticker.C:
-			nextHash, err := s.buildConsoleGalleryHash(r.Context(), principal)
+			nextHash, err := s.buildConsoleGalleryHash(r.Context(), principal, includeLiveStatus)
 			if err != nil {
 				var httpErr consoleHTTPError
 				if errors.As(err, &httpErr) {

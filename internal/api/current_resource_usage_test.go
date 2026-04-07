@@ -376,3 +376,61 @@ func TestListAppsAllowsSkippingOptionalOverlays(t *testing.T) {
 		t.Fatalf("expected resource_usage timing metric to be absent, got %q", serverTiming)
 	}
 }
+
+func TestListAppsSkipsLiveStatusOverlayByDefault(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Default Overlay Skip Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "viewer", []string{"project.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	if _, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:    "ghcr.io/example/demo:latest",
+		Ports:    []int{8080},
+		Replicas: 1,
+	}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	managedStatusCalls := 0
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server.newManagedAppStatusClient = func() (*managedAppStatusClient, error) {
+		managedStatusCalls++
+		return nil, errors.New("unexpected managed status lookup")
+	}
+
+	recorder := performJSONRequest(
+		t,
+		server,
+		http.MethodGet,
+		"/v1/apps?include_resource_usage=false",
+		apiKey,
+		nil,
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	if managedStatusCalls != 0 {
+		t.Fatalf("expected managed status overlay to be skipped by default, got %d calls", managedStatusCalls)
+	}
+
+	serverTiming := recorder.Header().Get("Server-Timing")
+	if strings.Contains(serverTiming, "live_status;dur=") {
+		t.Fatalf("expected live_status timing metric to be absent by default, got %q", serverTiming)
+	}
+}

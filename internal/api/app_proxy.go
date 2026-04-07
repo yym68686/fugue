@@ -37,7 +37,7 @@ func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) boo
 		http.Error(w, "app lookup failed", http.StatusInternalServerError)
 		return true
 	}
-	app = s.overlayManagedAppStatus(r.Context(), app)
+	app = s.overlayManagedAppStatusCached(app)
 	if app.Spec.Replicas == 0 || app.Status.CurrentReplicas == 0 {
 		http.Error(w, "app is disabled", http.StatusServiceUnavailable)
 		return true

@@ -42,6 +42,7 @@ type Server struct {
 	appImageRegistry             appImageRegistry
 	newClusterNodeClient         func() (*clusterNodeClient, error)
 	newManagedAppStatusClient    func() (*managedAppStatusClient, error)
+	managedAppStatusCache        managedAppStatusCache
 	newLogsClient                func(namespace string) (appLogsClient, error)
 	newFilesystemPodLister       func(namespace string) (filesystemPodLister, error)
 	filesystemExecRunner         filesystemPodExecRunner
@@ -77,6 +78,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		appImageRegistry:             newRemoteAppImageRegistry(),
 		newClusterNodeClient:         newClusterNodeClient,
 		newManagedAppStatusClient:    newManagedAppStatusClient,
+		managedAppStatusCache:        newManagedAppStatusCache(0, 0),
 		newLogsClient: func(namespace string) (appLogsClient, error) {
 			return newKubeLogsClient(namespace)
 		},
@@ -729,7 +731,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	timings := serverTimingFromContext(r.Context())
 
-	includeLiveStatus, err := readBoolQuery(r, "include_live_status", true)
+	includeLiveStatus, err := readBoolQuery(r, "include_live_status", false)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
