@@ -30,7 +30,8 @@ Pass --tenant only when you are acting across multiple visible tenants.
 		c.newProjectMetaCommand(),
 		c.newProjectShowCommand(),
 		c.newProjectCreateCommand(),
-		c.newProjectRenameCommand(),
+		c.newProjectEditCommand(),
+		hideCompatCommand(c.newProjectRenameCommand(), "fugue project edit"),
 		c.newProjectRemoveCommand(),
 		c.newProjectStorageCommand(),
 		c.newProjectUsageCommand(),
@@ -128,28 +129,68 @@ func (c *CLI) newProjectCreateCommand() *cobra.Command {
 func (c *CLI) newProjectRenameCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "rename <project> <new-name>",
-		Short: "Rename a project",
+		Short: "Compatibility alias for project edit",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := c.newClient()
-			if err != nil {
-				return err
-			}
-			project, err := c.resolveNamedProject(client, args[0])
-			if err != nil {
-				return err
-			}
 			newName := strings.TrimSpace(args[1])
-			project, err = client.PatchProject(project.ID, &newName, nil)
-			if err != nil {
-				return err
-			}
-			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"project": project})
-			}
-			return renderProject(c.stdout, project)
+			return c.patchProjectMetadata(args[0], &newName, nil)
 		},
 	}
+}
+
+func (c *CLI) newProjectEditCommand() *cobra.Command {
+	opts := struct {
+		Name             string
+		Description      string
+		ClearDescription bool
+	}{}
+	cmd := &cobra.Command{
+		Use:   "edit <project> [new-name]",
+		Short: "Rename a project or update its description",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 2 && strings.TrimSpace(opts.Name) != "" {
+				return fmt.Errorf("new project name must be provided either as an argument or with --name")
+			}
+			if opts.ClearDescription && flagChanged(cmd, "description") {
+				return fmt.Errorf("--description and --clear-description cannot be used together")
+			}
+			var name *string
+			switch {
+			case len(args) == 2:
+				value := strings.TrimSpace(args[1])
+				if value == "" {
+					return fmt.Errorf("new project name is required")
+				}
+				name = &value
+			case flagChanged(cmd, "name"):
+				value := strings.TrimSpace(opts.Name)
+				if value == "" {
+					return fmt.Errorf("new project name is required")
+				}
+				name = &value
+			}
+
+			var description *string
+			switch {
+			case opts.ClearDescription:
+				value := ""
+				description = &value
+			case flagChanged(cmd, "description"):
+				value := opts.Description
+				description = &value
+			}
+
+			if name == nil && description == nil {
+				return fmt.Errorf("at least one of [new-name], --name, --description, or --clear-description is required")
+			}
+			return c.patchProjectMetadata(args[0], name, description)
+		},
+	}
+	cmd.Flags().StringVar(&opts.Name, "name", "", "New project name")
+	cmd.Flags().StringVar(&opts.Description, "description", "", "Project description")
+	cmd.Flags().BoolVar(&opts.ClearDescription, "clear-description", false, "Clear the project description")
+	return cmd
 }
 
 func (c *CLI) newProjectRemoveCommand() *cobra.Command {
@@ -184,6 +225,25 @@ func (c *CLI) newProjectRemoveCommand() *cobra.Command {
 			return err
 		},
 	}
+}
+
+func (c *CLI) patchProjectMetadata(projectRef string, name, description *string) error {
+	client, err := c.newClient()
+	if err != nil {
+		return err
+	}
+	project, err := c.resolveNamedProject(client, projectRef)
+	if err != nil {
+		return err
+	}
+	project, err = client.PatchProject(project.ID, name, description)
+	if err != nil {
+		return err
+	}
+	if c.wantsJSON() {
+		return writeJSON(c.stdout, map[string]any{"project": project})
+	}
+	return renderProject(c.stdout, project)
 }
 
 func (c *CLI) newProjectUsageCommand() *cobra.Command {

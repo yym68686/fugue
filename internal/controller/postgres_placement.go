@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -98,92 +97,6 @@ func (s *Service) managedPostgresServicePlacements(
 	return placements, nil
 }
 
-func (s *Service) managedPostgresAffinityOverrides(ctx context.Context, app model.App) (map[string]map[string]any, error) {
-	overrides := make(map[string]map[string]any)
-
-	buildOverride := func(serviceName, appRuntimeID string, spec model.AppPostgresSpec) error {
-		serviceName = strings.TrimSpace(serviceName)
-		if serviceName == "" {
-			return nil
-		}
-
-		affinity, err := s.managedPostgresServiceAffinityOverride(ctx, app, serviceName, appRuntimeID, spec)
-		if err != nil {
-			return err
-		}
-		if len(affinity) > 0 {
-			overrides[serviceName] = affinity
-		}
-		return nil
-	}
-
-	for _, service := range app.BackingServices {
-		if service.Type != model.BackingServiceTypePostgres || service.Spec.Postgres == nil {
-			continue
-		}
-		if !strings.EqualFold(strings.TrimSpace(service.Provisioner), model.BackingServiceProvisionerManaged) {
-			continue
-		}
-		if err := buildOverride(service.Spec.Postgres.ServiceName, app.Spec.RuntimeID, *service.Spec.Postgres); err != nil {
-			return nil, err
-		}
-	}
-
-	if app.Spec.Postgres != nil {
-		if err := buildOverride(app.Spec.Postgres.ServiceName, app.Spec.RuntimeID, *app.Spec.Postgres); err != nil {
-			return nil, err
-		}
-	}
-
-	if len(overrides) == 0 {
-		return nil, nil
-	}
-	return overrides, nil
-}
-
-func (s *Service) managedPostgresServiceAffinityOverride(
-	ctx context.Context,
-	app model.App,
-	serviceName, appRuntimeID string,
-	spec model.AppPostgresSpec,
-) (map[string]any, error) {
-	if !spec.PrimaryPlacementPendingRebalance {
-		return nil, nil
-	}
-
-	primaryRuntimeID := strings.TrimSpace(spec.RuntimeID)
-	if primaryRuntimeID == "" {
-		primaryRuntimeID = strings.TrimSpace(appRuntimeID)
-	}
-	if primaryRuntimeID == "" {
-		return nil, nil
-	}
-
-	runtimeObj, err := s.Store.GetRuntime(primaryRuntimeID)
-	if err != nil {
-		return nil, fmt.Errorf("load postgres primary runtime %s: %w", primaryRuntimeID, err)
-	}
-	if runtimeObj.Type != model.RuntimeTypeManagedShared {
-		return nil, nil
-	}
-
-	client, err := s.kubeClient()
-	if err != nil {
-		return nil, fmt.Errorf("initialize kubernetes client: %w", err)
-	}
-
-	namespace := runtimepkg.NamespaceForTenant(app.TenantID)
-	cluster, found, err := client.getCloudNativePGCluster(ctx, namespace, serviceName)
-	if err != nil {
-		return nil, fmt.Errorf("read cloudnativepg cluster %s/%s: %w", namespace, serviceName, err)
-	}
-	if !found || len(cluster.Spec.Affinity) == 0 {
-		return nil, nil
-	}
-
-	return cloneAnyMap(cluster.Spec.Affinity), nil
-}
-
 func (s *Service) managedPostgresPrimaryPlacement(
 	ctx context.Context,
 	app model.App,
@@ -221,21 +134,6 @@ func (s *Service) managedPostgresPrimaryPlacement(
 		return exactPlacement, nil
 	}
 	return primaryPlacement, nil
-}
-
-func cloneAnyMap(in map[string]any) map[string]any {
-	if len(in) == 0 {
-		return nil
-	}
-	data, err := json.Marshal(in)
-	if err != nil {
-		return nil
-	}
-	var out map[string]any
-	if err := json.Unmarshal(data, &out); err != nil {
-		return nil
-	}
-	return out
 }
 
 func (s *Service) managedSharedPostgresPrimaryHostPlacement(

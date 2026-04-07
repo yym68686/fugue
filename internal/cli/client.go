@@ -33,23 +33,26 @@ type importGitHubPersistentStorageSeedFile struct {
 }
 
 type importUploadRequest struct {
-	AppID           string                 `json:"app_id,omitempty"`
-	TenantID        string                 `json:"tenant_id,omitempty"`
-	ProjectID       string                 `json:"project_id,omitempty"`
-	Project         *importProjectRequest  `json:"project,omitempty"`
-	SourceDir       string                 `json:"source_dir,omitempty"`
-	Name            string                 `json:"name,omitempty"`
-	Description     string                 `json:"description,omitempty"`
-	BuildStrategy   string                 `json:"build_strategy,omitempty"`
-	RuntimeID       string                 `json:"runtime_id,omitempty"`
-	Replicas        int                    `json:"replicas,omitempty"`
-	ServicePort     int                    `json:"service_port,omitempty"`
-	DockerfilePath  string                 `json:"dockerfile_path,omitempty"`
-	BuildContextDir string                 `json:"build_context_dir,omitempty"`
-	Env             map[string]string      `json:"env,omitempty"`
-	ConfigContent   string                 `json:"config_content,omitempty"`
-	Files           []model.AppFile        `json:"files,omitempty"`
-	Postgres        *model.AppPostgresSpec `json:"postgres,omitempty"`
+	AppID             string                          `json:"app_id,omitempty"`
+	TenantID          string                          `json:"tenant_id,omitempty"`
+	ProjectID         string                          `json:"project_id,omitempty"`
+	Project           *importProjectRequest           `json:"project,omitempty"`
+	SourceDir         string                          `json:"source_dir,omitempty"`
+	Name              string                          `json:"name,omitempty"`
+	Description       string                          `json:"description,omitempty"`
+	BuildStrategy     string                          `json:"build_strategy,omitempty"`
+	RuntimeID         string                          `json:"runtime_id,omitempty"`
+	Replicas          int                             `json:"replicas,omitempty"`
+	NetworkMode       string                          `json:"network_mode,omitempty"`
+	ServicePort       int                             `json:"service_port,omitempty"`
+	DockerfilePath    string                          `json:"dockerfile_path,omitempty"`
+	BuildContextDir   string                          `json:"build_context_dir,omitempty"`
+	Env               map[string]string               `json:"env,omitempty"`
+	ConfigContent     string                          `json:"config_content,omitempty"`
+	Files             []model.AppFile                 `json:"files,omitempty"`
+	StartupCommand    *string                         `json:"startup_command,omitempty"`
+	PersistentStorage *model.AppPersistentStorageSpec `json:"persistent_storage,omitempty"`
+	Postgres          *model.AppPostgresSpec          `json:"postgres,omitempty"`
 }
 
 type importGitHubRequest struct {
@@ -66,12 +69,15 @@ type importGitHubRequest struct {
 	BuildStrategy              string                                  `json:"build_strategy,omitempty"`
 	RuntimeID                  string                                  `json:"runtime_id,omitempty"`
 	Replicas                   int                                     `json:"replicas,omitempty"`
+	NetworkMode                string                                  `json:"network_mode,omitempty"`
 	ServicePort                int                                     `json:"service_port,omitempty"`
 	DockerfilePath             string                                  `json:"dockerfile_path,omitempty"`
 	BuildContextDir            string                                  `json:"build_context_dir,omitempty"`
 	Env                        map[string]string                       `json:"env,omitempty"`
 	ConfigContent              string                                  `json:"config_content,omitempty"`
 	Files                      []model.AppFile                         `json:"files,omitempty"`
+	StartupCommand             *string                                 `json:"startup_command,omitempty"`
+	PersistentStorage          *model.AppPersistentStorageSpec         `json:"persistent_storage,omitempty"`
 	PersistentStorageSeedFiles []importGitHubPersistentStorageSeedFile `json:"persistent_storage_seed_files,omitempty"`
 	Postgres                   *model.AppPostgresSpec                  `json:"postgres,omitempty"`
 	IdempotencyKey             string                                  `json:"idempotency_key,omitempty"`
@@ -104,19 +110,22 @@ type importUploadResponse struct {
 }
 
 type importImageRequest struct {
-	TenantID      string                 `json:"tenant_id,omitempty"`
-	ProjectID     string                 `json:"project_id,omitempty"`
-	Project       *importProjectRequest  `json:"project,omitempty"`
-	ImageRef      string                 `json:"image_ref,omitempty"`
-	Name          string                 `json:"name,omitempty"`
-	Description   string                 `json:"description,omitempty"`
-	RuntimeID     string                 `json:"runtime_id,omitempty"`
-	Replicas      int                    `json:"replicas,omitempty"`
-	ServicePort   int                    `json:"service_port,omitempty"`
-	Env           map[string]string      `json:"env,omitempty"`
-	ConfigContent string                 `json:"config_content,omitempty"`
-	Files         []model.AppFile        `json:"files,omitempty"`
-	Postgres      *model.AppPostgresSpec `json:"postgres,omitempty"`
+	TenantID          string                          `json:"tenant_id,omitempty"`
+	ProjectID         string                          `json:"project_id,omitempty"`
+	Project           *importProjectRequest           `json:"project,omitempty"`
+	ImageRef          string                          `json:"image_ref,omitempty"`
+	Name              string                          `json:"name,omitempty"`
+	Description       string                          `json:"description,omitempty"`
+	RuntimeID         string                          `json:"runtime_id,omitempty"`
+	Replicas          int                             `json:"replicas,omitempty"`
+	NetworkMode       string                          `json:"network_mode,omitempty"`
+	ServicePort       int                             `json:"service_port,omitempty"`
+	Env               map[string]string               `json:"env,omitempty"`
+	ConfigContent     string                          `json:"config_content,omitempty"`
+	Files             []model.AppFile                 `json:"files,omitempty"`
+	StartupCommand    *string                         `json:"startup_command,omitempty"`
+	PersistentStorage *model.AppPersistentStorageSpec `json:"persistent_storage,omitempty"`
+	Postgres          *model.AppPostgresSpec          `json:"postgres,omitempty"`
 }
 
 type importImageResponse struct {

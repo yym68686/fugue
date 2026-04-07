@@ -2,7 +2,9 @@ package cli
 
 import (
 	"net/http"
+	"net/url"
 	"path"
+	"strconv"
 
 	"fugue/internal/model"
 )
@@ -43,25 +45,54 @@ type consoleProjectDetailResponse struct {
 	ProjectName  string              `json:"project_name"`
 }
 
+type consoleGalleryStreamEvent struct {
+	Hash string `json:"hash"`
+}
+
 type appPatchResponse struct {
-	App            model.App `json:"app"`
-	AlreadyCurrent bool      `json:"already_current,omitempty"`
+	App            model.App        `json:"app"`
+	AlreadyCurrent bool             `json:"already_current,omitempty"`
+	Operation      *model.Operation `json:"operation,omitempty"`
 }
 
 func (c *Client) GetConsoleGallery() (consoleGalleryResponse, error) {
+	return c.GetConsoleGalleryWithLiveStatus(false)
+}
+
+func (c *Client) GetConsoleGalleryWithLiveStatus(includeLiveStatus bool) (consoleGalleryResponse, error) {
 	var response consoleGalleryResponse
-	if err := c.doJSON(http.MethodGet, "/v1/console/gallery", nil, &response); err != nil {
+	relative := "/v1/console/gallery"
+	if includeLiveStatus {
+		relative += "?include_live_status=" + url.QueryEscape(strconv.FormatBool(includeLiveStatus))
+	}
+	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
 		return consoleGalleryResponse{}, err
 	}
 	return response, nil
 }
 
 func (c *Client) GetConsoleProject(id string) (consoleProjectDetailResponse, error) {
+	return c.GetConsoleProjectWithLiveStatus(id, false)
+}
+
+func (c *Client) GetConsoleProjectWithLiveStatus(id string, includeLiveStatus bool) (consoleProjectDetailResponse, error) {
 	var response consoleProjectDetailResponse
-	if err := c.doJSON(http.MethodGet, path.Join("/v1/console/projects", id), nil, &response); err != nil {
+	relative := path.Join("/v1/console/projects", id)
+	if includeLiveStatus {
+		relative += "?include_live_status=" + url.QueryEscape(strconv.FormatBool(includeLiveStatus))
+	}
+	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
 		return consoleProjectDetailResponse{}, err
 	}
 	return response, nil
+}
+
+func (c *Client) StreamConsoleGallery(includeLiveStatus bool, handler func(sseEvent) error) error {
+	relative := "/v1/console/gallery/stream"
+	if includeLiveStatus {
+		relative += "?include_live_status=" + url.QueryEscape(strconv.FormatBool(includeLiveStatus))
+	}
+	return c.streamSSE(relative, handler)
 }
 
 func (c *Client) SetAppImageMirrorLimit(id string, limit int) (appPatchResponse, error) {

@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,18 +15,40 @@ import (
 )
 
 type deployCommonOptions struct {
-	Name            string
-	Description     string
-	EnvFile         string
-	RuntimeName     string
-	RuntimeID       string
-	Replicas        int
-	ServicePort     int
-	Wait            bool
-	SourceDir       string
-	BuildStrategy   string
-	DockerfilePath  string
-	BuildContextDir string
+	Name                      string
+	Description               string
+	EnvFile                   string
+	RuntimeName               string
+	RuntimeID                 string
+	Replicas                  int
+	ServicePort               int
+	Wait                      bool
+	SourceDir                 string
+	BuildStrategy             string
+	DockerfilePath            string
+	BuildContextDir           string
+	Background                bool
+	StartupCommand            string
+	FileSpecs                 []string
+	SecretFileSpecs           []string
+	StorageSize               string
+	StorageClass              string
+	StorageMounts             []string
+	StorageFiles              []string
+	ManagedPostgres           bool
+	PostgresRuntime           string
+	PostgresRuntimeID         string
+	PostgresDatabase          string
+	PostgresUser              string
+	PostgresPassword          string
+	PostgresImage             string
+	PostgresServiceName       string
+	PostgresStorageSize       string
+	PostgresStorageClass      string
+	PostgresInstances         int
+	PostgresSyncReplicas      int
+	PostgresFailoverTo        string
+	PostgresFailoverRuntimeID string
 }
 
 type deployLocalOptions struct {
@@ -51,14 +74,7 @@ type deployGitHubOptions struct {
 }
 
 type deployImageOptions struct {
-	Name        string
-	Description string
-	EnvFile     string
-	RuntimeName string
-	RuntimeID   string
-	Replicas    int
-	ServicePort int
-	Wait        bool
+	deployCommonOptions
 }
 
 type importBundle struct {
@@ -168,7 +184,7 @@ Defaults:
 		c.newDeployGitHubCommand(),
 		c.newDeployImageCommand(),
 		c.newDeployInspectCommand(),
-		c.newDeployPlanCommand(),
+		hideCompatCommand(c.newDeployPlanCommand(), "fugue deploy inspect"),
 	)
 	return cmd
 }
@@ -209,7 +225,11 @@ runtime, and app name when they are not ambiguous.
 }
 
 func (c *CLI) newDeployImageCommand() *cobra.Command {
-	opts := deployImageOptions{Wait: true}
+	opts := deployImageOptions{
+		deployCommonOptions: deployCommonOptions{
+			Wait: true,
+		},
+	}
 	cmd := &cobra.Command{
 		Use:   "image <image-ref>",
 		Short: "Deploy directly from an image reference",
@@ -228,17 +248,16 @@ selection follow the same automatic rules as "fugue deploy".
 			return c.runDeployImage(args[0], opts)
 		},
 	}
-	cmd.Flags().StringVar(&opts.Name, "name", "", "App name (defaults to the image name)")
-	cmd.Flags().StringVar(&opts.Description, "description", "", "App description")
-	cmd.Flags().StringVar(&opts.EnvFile, "env-file", "", "Local .env file to inject as app env")
-	cmd.Flags().StringVar(&opts.RuntimeName, "runtime", "", "Runtime name")
-	cmd.Flags().StringVar(&opts.RuntimeID, "runtime-id", "", "Runtime ID")
-	cmd.Flags().IntVar(&opts.Replicas, "replicas", 0, "Desired replica count")
-	cmd.Flags().IntVar(&opts.ServicePort, "port", 0, "Service port override")
-	cmd.Flags().IntVar(&opts.ServicePort, "service-port", 0, "Service port override")
-	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for operation completion")
+	bindCommonDeployFlags(cmd, &opts.deployCommonOptions, true)
 	_ = cmd.Flags().MarkHidden("runtime-id")
 	_ = cmd.Flags().MarkHidden("service-port")
+	_ = cmd.Flags().MarkHidden("source-dir")
+	_ = cmd.Flags().MarkHidden("build")
+	_ = cmd.Flags().MarkHidden("build-strategy")
+	_ = cmd.Flags().MarkHidden("dockerfile")
+	_ = cmd.Flags().MarkHidden("dockerfile-path")
+	_ = cmd.Flags().MarkHidden("context")
+	_ = cmd.Flags().MarkHidden("build-context-dir")
 	return cmd
 }
 
@@ -261,11 +280,35 @@ func bindCommonDeployFlags(cmd *cobra.Command, opts *deployCommonOptions, includ
 	cmd.Flags().StringVar(&opts.BuildContextDir, "context", "", "Docker build context relative to the project root")
 	cmd.Flags().StringVar(&opts.DockerfilePath, "dockerfile-path", "", "Dockerfile path relative to the project root")
 	cmd.Flags().StringVar(&opts.BuildContextDir, "build-context-dir", "", "Docker build context relative to the project root")
+	cmd.Flags().BoolVar(&opts.Background, "background", false, "Deploy as a background worker with no public ingress")
+	cmd.Flags().StringVar(&opts.StartupCommand, "command", "", "Startup shell command override")
+	cmd.Flags().StringArrayVar(&opts.FileSpecs, "file", nil, "Declarative app file from a local source: <absolute-path>[:mode]=<local-file>")
+	cmd.Flags().StringArrayVar(&opts.SecretFileSpecs, "secret-file", nil, "Secret declarative app file from a local source: <absolute-path>[:mode]=<local-file>")
+	cmd.Flags().StringVar(&opts.StorageSize, "storage-size", "", "Persistent storage size, for example 10Gi")
+	cmd.Flags().StringVar(&opts.StorageClass, "storage-class", "", "Persistent storage class")
+	cmd.Flags().StringArrayVar(&opts.StorageMounts, "mount", nil, "Persistent directory mount path, for example /data")
+	cmd.Flags().StringArrayVar(&opts.StorageFiles, "mount-file", nil, "Persistent file mount from a local source: <absolute-path>[:mode]=<local-file>")
+	cmd.Flags().BoolVar(&opts.ManagedPostgres, "managed-postgres", false, "Provision an app-owned managed Postgres database")
+	cmd.Flags().StringVar(&opts.PostgresRuntime, "postgres-runtime", "", "Runtime name for managed Postgres")
+	cmd.Flags().StringVar(&opts.PostgresRuntimeID, "postgres-runtime-id", "", "Runtime ID for managed Postgres")
+	cmd.Flags().StringVar(&opts.PostgresDatabase, "postgres-database", "", "Database name for managed Postgres")
+	cmd.Flags().StringVar(&opts.PostgresUser, "postgres-user", "", "Database user for managed Postgres")
+	cmd.Flags().StringVar(&opts.PostgresPassword, "postgres-password", "", "Database password for managed Postgres")
+	cmd.Flags().StringVar(&opts.PostgresImage, "postgres-image", "", "Managed Postgres image override")
+	cmd.Flags().StringVar(&opts.PostgresServiceName, "postgres-service-name", "", "Managed Postgres service name override")
+	cmd.Flags().StringVar(&opts.PostgresStorageSize, "postgres-storage-size", "", "Managed Postgres storage size")
+	cmd.Flags().StringVar(&opts.PostgresStorageClass, "postgres-storage-class", "", "Managed Postgres storage class")
+	cmd.Flags().IntVar(&opts.PostgresInstances, "postgres-instances", 0, "Managed Postgres instance count")
+	cmd.Flags().IntVar(&opts.PostgresSyncReplicas, "postgres-sync-replicas", 0, "Managed Postgres synchronous replica count")
+	cmd.Flags().StringVar(&opts.PostgresFailoverTo, "postgres-failover-to", "", "Runtime name for managed Postgres failover")
+	cmd.Flags().StringVar(&opts.PostgresFailoverRuntimeID, "postgres-failover-runtime-id", "", "Runtime ID for managed Postgres failover")
 	_ = cmd.Flags().MarkHidden("runtime-id")
 	_ = cmd.Flags().MarkHidden("service-port")
 	_ = cmd.Flags().MarkHidden("build-strategy")
 	_ = cmd.Flags().MarkHidden("dockerfile-path")
 	_ = cmd.Flags().MarkHidden("build-context-dir")
+	_ = cmd.Flags().MarkHidden("postgres-runtime-id")
+	_ = cmd.Flags().MarkHidden("postgres-failover-runtime-id")
 }
 
 func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
@@ -300,6 +343,14 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 	}
 	if envPath != "" {
 		c.progressf("Loaded %d env vars from %s", len(envVars), envPath)
+	}
+	files, err := buildDeployFiles(workingDir, opts.FileSpecs, opts.SecretFileSpecs)
+	if err != nil {
+		return err
+	}
+	persistentStorage, err := buildDeployPersistentStorage(workingDir, opts.StorageSize, opts.StorageClass, opts.StorageMounts, opts.StorageFiles)
+	if err != nil {
+		return err
 	}
 
 	targetApp := model.App{}
@@ -355,6 +406,10 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 	if archiveBaseName == "" {
 		archiveBaseName = "app"
 	}
+	postgres, err := c.buildDeployManagedPostgres(client, firstNonEmpty(strings.TrimSpace(opts.Name), strings.TrimSpace(targetApp.Name), archiveBaseName), opts.deployCommonOptions)
+	if err != nil {
+		return err
+	}
 
 	archiveBytes, archiveName, err := createSourceArchive(workingDir, archiveBaseName)
 	if err != nil {
@@ -362,18 +417,23 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 	}
 
 	request := importUploadRequest{
-		AppID:           resolvedAppID,
-		TenantID:        tenantID,
-		SourceDir:       strings.TrimSpace(opts.SourceDir),
-		Name:            strings.TrimSpace(opts.Name),
-		Description:     strings.TrimSpace(opts.Description),
-		BuildStrategy:   strings.TrimSpace(opts.BuildStrategy),
-		RuntimeID:       strings.TrimSpace(runtimeID),
-		Replicas:        opts.Replicas,
-		ServicePort:     opts.ServicePort,
-		DockerfilePath:  strings.TrimSpace(opts.DockerfilePath),
-		BuildContextDir: strings.TrimSpace(opts.BuildContextDir),
-		Env:             envVars,
+		AppID:             resolvedAppID,
+		TenantID:          tenantID,
+		SourceDir:         strings.TrimSpace(opts.SourceDir),
+		Name:              strings.TrimSpace(opts.Name),
+		Description:       strings.TrimSpace(opts.Description),
+		BuildStrategy:     strings.TrimSpace(opts.BuildStrategy),
+		RuntimeID:         strings.TrimSpace(runtimeID),
+		Replicas:          opts.Replicas,
+		NetworkMode:       deployNetworkMode(opts.Background),
+		ServicePort:       opts.ServicePort,
+		DockerfilePath:    strings.TrimSpace(opts.DockerfilePath),
+		BuildContextDir:   strings.TrimSpace(opts.BuildContextDir),
+		Env:               envVars,
+		Files:             files,
+		StartupCommand:    deployStartupCommandPointer(opts.StartupCommand),
+		PersistentStorage: persistentStorage,
+		Postgres:          postgres,
 	}
 	if request.Name == "" && strings.TrimSpace(targetApp.Name) == "" {
 		request.Name = archiveBaseName
@@ -424,6 +484,14 @@ func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingD
 	if envPath != "" {
 		c.progressf("Loaded %d env vars from %s", len(envVars), envPath)
 	}
+	files, err := buildDeployFiles(workingDir, opts.FileSpecs, opts.SecretFileSpecs)
+	if err != nil {
+		return err
+	}
+	persistentStorage, err := buildDeployPersistentStorage(workingDir, opts.StorageSize, opts.StorageClass, opts.StorageMounts, opts.StorageFiles)
+	if err != nil {
+		return err
+	}
 	seedFiles, err := loadPersistentStorageSeedFiles(workingDir, opts.SeedFiles)
 	if err != nil {
 		return err
@@ -439,6 +507,10 @@ func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingD
 	if name == "" {
 		name = "app"
 	}
+	postgres, err := c.buildDeployManagedPostgres(client, name, opts.deployCommonOptions)
+	if err != nil {
+		return err
+	}
 	request := importGitHubRequest{
 		TenantID:                   tenantID,
 		SourceDir:                  strings.TrimSpace(opts.SourceDir),
@@ -449,12 +521,17 @@ func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingD
 		BuildStrategy:              strings.TrimSpace(opts.BuildStrategy),
 		RuntimeID:                  strings.TrimSpace(runtimeID),
 		Replicas:                   opts.Replicas,
+		NetworkMode:                deployNetworkMode(opts.Background),
 		ServicePort:                opts.ServicePort,
 		DockerfilePath:             strings.TrimSpace(opts.DockerfilePath),
 		BuildContextDir:            strings.TrimSpace(opts.BuildContextDir),
 		Env:                        envVars,
+		Files:                      files,
+		StartupCommand:             deployStartupCommandPointer(opts.StartupCommand),
+		PersistentStorage:          persistentStorage,
 		RepoAuthToken:              strings.TrimSpace(opts.RepoToken),
 		PersistentStorageSeedFiles: seedFiles,
+		Postgres:                   postgres,
 		IdempotencyKey:             strings.TrimSpace(opts.IdempotencyKey),
 	}
 	if opts.Private {
@@ -516,6 +593,14 @@ func (c *CLI) runDeployImage(imageRef string, opts deployImageOptions) error {
 	if envPath != "" {
 		c.progressf("Loaded %d env vars from %s", len(envVars), envPath)
 	}
+	files, err := buildDeployFiles(workingDir, opts.FileSpecs, opts.SecretFileSpecs)
+	if err != nil {
+		return err
+	}
+	persistentStorage, err := buildDeployPersistentStorage(workingDir, opts.StorageSize, opts.StorageClass, opts.StorageMounts, opts.StorageFiles)
+	if err != nil {
+		return err
+	}
 
 	name := strings.TrimSpace(opts.Name)
 	if name == "" {
@@ -524,15 +609,24 @@ func (c *CLI) runDeployImage(imageRef string, opts deployImageOptions) error {
 	if name == "" {
 		name = "app"
 	}
+	postgres, err := c.buildDeployManagedPostgres(client, name, opts.deployCommonOptions)
+	if err != nil {
+		return err
+	}
 	request := importImageRequest{
-		TenantID:    tenantID,
-		ImageRef:    imageRef,
-		Name:        name,
-		Description: strings.TrimSpace(opts.Description),
-		RuntimeID:   strings.TrimSpace(runtimeID),
-		Replicas:    opts.Replicas,
-		ServicePort: opts.ServicePort,
-		Env:         envVars,
+		TenantID:          tenantID,
+		ImageRef:          imageRef,
+		Name:              name,
+		Description:       strings.TrimSpace(opts.Description),
+		RuntimeID:         strings.TrimSpace(runtimeID),
+		Replicas:          opts.Replicas,
+		NetworkMode:       deployNetworkMode(opts.Background),
+		ServicePort:       opts.ServicePort,
+		Env:               envVars,
+		Files:             files,
+		StartupCommand:    deployStartupCommandPointer(opts.StartupCommand),
+		PersistentStorage: persistentStorage,
+		Postgres:          postgres,
 	}
 	if strings.TrimSpace(projectSel.ID) != "" {
 		request.ProjectID = projectSel.ID
@@ -919,4 +1013,164 @@ func parsePersistentStorageSeedFileSpec(workingDir, spec string) (importGitHubPe
 		Path:        strings.TrimSpace(path),
 		SeedContent: string(content),
 	}, nil
+}
+
+func deployNetworkMode(background bool) string {
+	if background {
+		return model.AppNetworkModeBackground
+	}
+	return ""
+}
+
+func deployStartupCommandPointer(raw string) *string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	return trimmedStringPointer(raw)
+}
+
+func buildDeployFiles(workingDir string, fileSpecs, secretFileSpecs []string) ([]model.AppFile, error) {
+	if len(fileSpecs) == 0 && len(secretFileSpecs) == 0 {
+		return nil, nil
+	}
+	index := map[string]model.AppFile{}
+	for _, raw := range fileSpecs {
+		appFile, err := parseDeployAppFileSpec(workingDir, raw, false)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := index[appFile.Path]; exists {
+			return nil, fmt.Errorf("duplicate file path %s", appFile.Path)
+		}
+		index[appFile.Path] = appFile
+	}
+	for _, raw := range secretFileSpecs {
+		appFile, err := parseDeployAppFileSpec(workingDir, raw, true)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := index[appFile.Path]; exists {
+			return nil, fmt.Errorf("duplicate file path %s", appFile.Path)
+		}
+		index[appFile.Path] = appFile
+	}
+	files := make([]model.AppFile, 0, len(index))
+	for _, appFile := range index {
+		files = append(files, appFile)
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return strings.Compare(files[i].Path, files[j].Path) < 0
+	})
+	return files, nil
+}
+
+func parseDeployAppFileSpec(workingDir, raw string, secret bool) (model.AppFile, error) {
+	target, localFile, ok := strings.Cut(strings.TrimSpace(raw), "=")
+	if !ok || strings.TrimSpace(localFile) == "" {
+		return model.AppFile{}, fmt.Errorf("file %q must use <absolute-path>[:mode]=<local-file>", raw)
+	}
+	defaultMode := int32(0o644)
+	if secret {
+		defaultMode = 0o600
+	}
+	pathValue, modeValue, err := parsePathWithOptionalMode(target, defaultMode)
+	if err != nil {
+		return model.AppFile{}, err
+	}
+	content, err := readUTF8LocalFile(workingDir, localFile)
+	if err != nil {
+		return model.AppFile{}, err
+	}
+	return model.AppFile{
+		Path:    pathValue,
+		Content: content,
+		Secret:  secret,
+		Mode:    modeValue,
+	}, nil
+}
+
+func buildDeployPersistentStorage(workingDir, storageSize, storageClass string, mounts, mountFiles []string) (*model.AppPersistentStorageSpec, error) {
+	requested := strings.TrimSpace(storageSize) != "" ||
+		strings.TrimSpace(storageClass) != "" ||
+		len(mounts) > 0 ||
+		len(mountFiles) > 0
+	if !requested {
+		return nil, nil
+	}
+	storageMounts, err := buildUpdatedAppStorageMounts(workingDir, nil, mounts, mountFiles)
+	if err != nil {
+		return nil, err
+	}
+	if len(storageMounts) == 0 {
+		storageMounts = []model.AppPersistentStorageMount{
+			{
+				Kind: model.AppPersistentStorageMountKindDirectory,
+				Path: model.DefaultAppWorkspaceMountPath,
+				Mode: 0o755,
+			},
+		}
+	}
+	return &model.AppPersistentStorageSpec{
+		StorageSize:      strings.TrimSpace(storageSize),
+		StorageClassName: strings.TrimSpace(storageClass),
+		Mounts:           storageMounts,
+	}, nil
+}
+
+func (c *CLI) buildDeployManagedPostgres(client *Client, appName string, opts deployCommonOptions) (*model.AppPostgresSpec, error) {
+	if !deployWantsManagedPostgres(opts) {
+		return nil, nil
+	}
+	spec := &model.AppPostgresSpec{
+		Database:         strings.TrimSpace(opts.PostgresDatabase),
+		User:             strings.TrimSpace(opts.PostgresUser),
+		Password:         opts.PostgresPassword,
+		Image:            strings.TrimSpace(opts.PostgresImage),
+		ServiceName:      strings.TrimSpace(opts.PostgresServiceName),
+		StorageSize:      strings.TrimSpace(opts.PostgresStorageSize),
+		StorageClassName: strings.TrimSpace(opts.PostgresStorageClass),
+	}
+	if opts.PostgresInstances > 0 {
+		spec.Instances = opts.PostgresInstances
+	}
+	if opts.PostgresSyncReplicas > 0 {
+		spec.SynchronousReplicas = opts.PostgresSyncReplicas
+	}
+	if strings.TrimSpace(opts.PostgresRuntime) != "" || strings.TrimSpace(opts.PostgresRuntimeID) != "" {
+		runtimeID, err := resolveRuntimeSelection(client, opts.PostgresRuntimeID, opts.PostgresRuntime)
+		if err != nil {
+			return nil, err
+		}
+		spec.RuntimeID = runtimeID
+	}
+	if strings.TrimSpace(opts.PostgresFailoverTo) != "" || strings.TrimSpace(opts.PostgresFailoverRuntimeID) != "" {
+		runtimeID, err := resolveRuntimeSelection(client, opts.PostgresFailoverRuntimeID, opts.PostgresFailoverTo)
+		if err != nil {
+			return nil, err
+		}
+		spec.FailoverTargetRuntimeID = runtimeID
+	}
+	if strings.TrimSpace(spec.User) != "" {
+		if err := model.ValidateManagedPostgresUser(appName, *spec); err != nil {
+			return nil, err
+		}
+	}
+	return spec, nil
+}
+
+func deployWantsManagedPostgres(opts deployCommonOptions) bool {
+	return opts.ManagedPostgres ||
+		strings.TrimSpace(opts.PostgresRuntime) != "" ||
+		strings.TrimSpace(opts.PostgresRuntimeID) != "" ||
+		strings.TrimSpace(opts.PostgresDatabase) != "" ||
+		strings.TrimSpace(opts.PostgresUser) != "" ||
+		strings.TrimSpace(opts.PostgresPassword) != "" ||
+		strings.TrimSpace(opts.PostgresImage) != "" ||
+		strings.TrimSpace(opts.PostgresServiceName) != "" ||
+		strings.TrimSpace(opts.PostgresStorageSize) != "" ||
+		strings.TrimSpace(opts.PostgresStorageClass) != "" ||
+		opts.PostgresInstances > 0 ||
+		opts.PostgresSyncReplicas > 0 ||
+		strings.TrimSpace(opts.PostgresFailoverTo) != "" ||
+		strings.TrimSpace(opts.PostgresFailoverRuntimeID) != ""
 }

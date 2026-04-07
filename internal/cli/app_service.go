@@ -11,24 +11,24 @@ import (
 
 func (c *CLI) newAppServiceCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "binding",
-		Aliases: []string{"bindings"},
-		Short:   "List, bind, and unbind app service bindings",
+		Use:     "service",
+		Aliases: []string{"services"},
+		Short:   "Attach, detach, and inspect app service connections",
 	}
 	cmd.AddCommand(
 		c.newAppServiceListCommand(),
-		c.newAppServiceBindCommand(),
-		c.newAppServiceUnbindCommand(),
+		c.newAppServiceAttachCommand(),
+		c.newAppServiceDetachCommand(),
 	)
 	return cmd
 }
 
-func (c *CLI) newAppServiceCompatCommand() *cobra.Command {
+func (c *CLI) newAppBindingCompatCommand() *cobra.Command {
 	cmd := c.newAppServiceCommand()
-	cmd.Use = "service"
-	cmd.Aliases = []string{"services"}
-	cmd.Short = "Compatibility alias for app bindings"
-	return hideCompatCommand(cmd, "fugue app binding")
+	cmd.Use = "binding"
+	cmd.Aliases = []string{"bindings"}
+	cmd.Short = "Compatibility alias for app service connections"
+	return cmd
 }
 
 func (c *CLI) newAppServiceListCommand() *cobra.Command {
@@ -71,16 +71,17 @@ func (c *CLI) newAppServiceListCommand() *cobra.Command {
 	}
 }
 
-func (c *CLI) newAppServiceBindCommand() *cobra.Command {
+func (c *CLI) newAppServiceAttachCommand() *cobra.Command {
 	opts := struct {
 		Alias string
 		Env   []string
 		Wait  bool
 	}{Wait: true}
 	cmd := &cobra.Command{
-		Use:   "bind <app> <service>",
-		Short: "Bind a backing service to an app",
-		Args:  cobra.ExactArgs(2),
+		Use:     "attach <app> <service>",
+		Aliases: []string{"bind"},
+		Short:   "Attach a backing service to an app",
+		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {
@@ -129,14 +130,15 @@ func (c *CLI) newAppServiceBindCommand() *cobra.Command {
 	return cmd
 }
 
-func (c *CLI) newAppServiceUnbindCommand() *cobra.Command {
+func (c *CLI) newAppServiceDetachCommand() *cobra.Command {
 	opts := struct {
 		Wait bool
 	}{Wait: true}
 	cmd := &cobra.Command{
-		Use:   "unbind <app> <binding-or-service>",
-		Short: "Unbind a backing service from an app",
-		Args:  cobra.ExactArgs(2),
+		Use:     "detach <app> <binding-or-service>",
+		Aliases: []string{"unbind"},
+		Short:   "Detach a backing service from an app",
+		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {

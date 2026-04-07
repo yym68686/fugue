@@ -28,6 +28,8 @@ const (
 
 	CloudNativePGAPIVersion           = "postgresql.cnpg.io/v1"
 	CloudNativePGClusterKind          = "Cluster"
+	CloudNativePGReconcilePodSpecAnno = "cnpg.io/reconcilePodSpec"
+	CloudNativePGReconcilePodSpecHold = "disabled"
 	VolSyncAPIVersion                 = "volsync.backube/v1alpha1"
 	VolSyncReplicationSourceKind      = "ReplicationSource"
 	VolSyncReplicationDestinationKind = "ReplicationDestination"
@@ -213,15 +215,31 @@ func buildPostgresClusterObject(namespace, secretName, resourceName string, labe
 		clusterSpec["affinity"] = affinity
 	}
 
+	metadata := map[string]any{
+		"name":      resourceName,
+		"namespace": namespace,
+		"labels":    labels,
+	}
+	if annotations := buildPostgresClusterAnnotations(spec); len(annotations) > 0 {
+		metadata["annotations"] = annotations
+	}
+
 	return map[string]any{
 		"apiVersion": CloudNativePGAPIVersion,
 		"kind":       CloudNativePGClusterKind,
-		"metadata": map[string]any{
-			"name":      resourceName,
-			"namespace": namespace,
-			"labels":    labels,
-		},
-		"spec": clusterSpec,
+		"metadata":   metadata,
+		"spec":       clusterSpec,
+	}
+}
+
+func buildPostgresClusterAnnotations(spec model.AppPostgresSpec) map[string]string {
+	if !spec.PrimaryPlacementPendingRebalance {
+		return nil
+	}
+	// Hold pod-spec reconciliation during two-phase failover changes so the
+	// current primary is not restarted just because placement changes.
+	return map[string]string{
+		CloudNativePGReconcilePodSpecAnno: CloudNativePGReconcilePodSpecHold,
 	}
 }
 

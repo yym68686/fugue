@@ -129,6 +129,7 @@ type appContinuityAppFailoverRequest struct {
 type appContinuityDatabaseFailoverRequest struct {
 	Enabled         bool   `json:"enabled"`
 	TargetRuntimeID string `json:"target_runtime_id,omitempty"`
+	RebalanceNow    bool   `json:"rebalance_now,omitempty"`
 }
 
 type patchAppContinuityRequest struct {
@@ -571,17 +572,48 @@ func (c *Client) RebuildApp(id string, request rebuildPlanRequest) (appRebuildRe
 }
 
 func (c *Client) DeployApp(id string, spec *model.AppSpec) (operationResponse, error) {
+	return c.DeployAppWithWorkspace(id, spec, nil)
+}
+
+func (c *Client) DeployAppWithWorkspace(id string, spec *model.AppSpec, workspace *model.AppWorkspaceSpec) (operationResponse, error) {
 	request := map[string]any{}
 	if spec != nil {
 		request["spec"] = spec
 	}
+	if workspace != nil {
+		request["workspace"] = workspace
+	}
 	var body any
-	if spec != nil {
+	if len(request) > 0 {
 		body = request
 	}
 	var response operationResponse
 	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "deploy"), body, &response); err != nil {
 		return operationResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) PatchAppStartupCommand(id string, startupCommand *string) (appPatchResponse, error) {
+	request := map[string]any{}
+	if startupCommand != nil {
+		request["startup_command"] = strings.TrimSpace(*startupCommand)
+	}
+	var response appPatchResponse
+	if err := c.doJSON(http.MethodPatch, path.Join("/v1/apps", id), request, &response); err != nil {
+		return appPatchResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) PatchAppPersistentStorage(id string, storage *model.AppPersistentStorageSpec) (appPatchResponse, error) {
+	request := map[string]any{}
+	if storage != nil {
+		request["persistent_storage"] = storage
+	}
+	var response appPatchResponse
+	if err := c.doJSON(http.MethodPatch, path.Join("/v1/apps", id), request, &response); err != nil {
+		return appPatchResponse{}, err
 	}
 	return response, nil
 }
@@ -614,6 +646,17 @@ func (c *Client) PatchAppContinuity(id string, request patchAppContinuityRequest
 	var response appContinuityResponse
 	if err := c.doJSON(http.MethodPatch, path.Join("/v1/apps", id, "continuity"), request, &response); err != nil {
 		return appContinuityResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) SwitchoverAppDatabase(id, targetRuntimeID string) (operationResponse, error) {
+	request := map[string]string{
+		"target_runtime_id": strings.TrimSpace(targetRuntimeID),
+	}
+	var response operationResponse
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "database", "switchover"), request, &response); err != nil {
+		return operationResponse{}, err
 	}
 	return response, nil
 }

@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"fugue/internal/model"
 )
 
 func TestRootHelpListsSemanticCommands(t *testing.T) {
@@ -39,9 +41,11 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"deploy github owner/repo",
 		"fugue app source show my-app",
 		"fugue app failover configure my-app --app-to runtime-b",
-		"fugue app binding bind my-app postgres",
+		"fugue app service attach my-app postgres",
 		"fugue app release deploy my-app",
+		"fugue app command set my-app --command \"python app.py\"",
 		"fugue app config put my-app /app/config.yaml --from-file config.yaml",
+		"fugue app storage set my-app --size 10Gi --mount /data",
 		"fugue app domain primary set my-app www.example.com",
 		"fugue service postgres create app-db --runtime shared",
 		"fugue operation ls --app my-app",
@@ -62,6 +66,306 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 	} {
 		if strings.Contains(out, unwanted) {
 			t.Fatalf("expected help output to omit %q, got %q", unwanted, out)
+		}
+	}
+}
+
+func TestRunDeployImageSupportsIntentFlags(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8080\n"), 0o644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	secretPath := filepath.Join(t.TempDir(), "app.env")
+	if err := os.WriteFile(secretPath, []byte("TOKEN=secret\n"), 0o600); err != nil {
+		t.Fatalf("write secret file: %v", err)
+	}
+	settingsPath := filepath.Join(t.TempDir(), "settings.yaml")
+	if err := os.WriteFile(settingsPath, []byte("theme: prod\n"), 0o644); err != nil {
+		t.Fatalf("write settings file: %v", err)
+	}
+
+	var gotRequest importImageRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
+			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/import-image":
+			if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
+				t.Fatalf("decode image import request: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","name":"demo"},"operation":{"id":"op_123"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"deploy", "image", "ghcr.io/example/demo:latest",
+		"--name", "demo",
+		"--background",
+		"--command", "python app.py",
+		"--file", "/app/config.yaml=" + configPath,
+		"--secret-file", "/app/.env:600=" + secretPath,
+		"--storage-size", "20Gi",
+		"--storage-class", "fast",
+		"--mount", "/data",
+		"--mount-file", "/app/settings.yaml=" + settingsPath,
+		"--managed-postgres",
+		"--postgres-database", "appdb",
+		"--postgres-user", "app_user",
+		"--postgres-password", "secret",
+		"--postgres-storage-size", "5Gi",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run deploy image: %v", err)
+	}
+
+	if gotRequest.NetworkMode != model.AppNetworkModeBackground {
+		t.Fatalf("expected background network mode, got %+v", gotRequest)
+	}
+	if gotRequest.StartupCommand == nil || *gotRequest.StartupCommand != "python app.py" {
+		t.Fatalf("expected startup command to be forwarded, got %+v", gotRequest.StartupCommand)
+	}
+	if len(gotRequest.Files) != 2 {
+		t.Fatalf("expected two declarative files, got %+v", gotRequest.Files)
+	}
+	fileByPath := map[string]model.AppFile{}
+	for _, appFile := range gotRequest.Files {
+		fileByPath[appFile.Path] = appFile
+	}
+	if fileByPath["/app/config.yaml"].Content != "port: 8080\n" || fileByPath["/app/config.yaml"].Secret {
+		t.Fatalf("unexpected config file payload %+v", fileByPath["/app/config.yaml"])
+	}
+	if fileByPath["/app/.env"].Content != "TOKEN=secret\n" || !fileByPath["/app/.env"].Secret || fileByPath["/app/.env"].Mode != 0o600 {
+		t.Fatalf("unexpected secret file payload %+v", fileByPath["/app/.env"])
+	}
+	if gotRequest.PersistentStorage == nil || gotRequest.PersistentStorage.StorageSize != "20Gi" || gotRequest.PersistentStorage.StorageClassName != "fast" {
+		t.Fatalf("unexpected persistent storage payload %+v", gotRequest.PersistentStorage)
+	}
+	if len(gotRequest.PersistentStorage.Mounts) != 2 {
+		t.Fatalf("expected two persistent storage mounts, got %+v", gotRequest.PersistentStorage.Mounts)
+	}
+	mountByPath := map[string]model.AppPersistentStorageMount{}
+	for _, mount := range gotRequest.PersistentStorage.Mounts {
+		mountByPath[mount.Path] = mount
+	}
+	if mountByPath["/data"].Kind != model.AppPersistentStorageMountKindDirectory {
+		t.Fatalf("expected /data directory mount, got %+v", mountByPath["/data"])
+	}
+	if mountByPath["/app/settings.yaml"].Kind != model.AppPersistentStorageMountKindFile || mountByPath["/app/settings.yaml"].SeedContent != "theme: prod\n" {
+		t.Fatalf("unexpected file mount %+v", mountByPath["/app/settings.yaml"])
+	}
+	if gotRequest.Postgres == nil || gotRequest.Postgres.Database != "appdb" || gotRequest.Postgres.User != "app_user" || gotRequest.Postgres.Password != "secret" || gotRequest.Postgres.StorageSize != "5Gi" {
+		t.Fatalf("unexpected managed postgres payload %+v", gotRequest.Postgres)
+	}
+	if got := stdout.String(); got != "app_id=app_123\noperation_id=op_123\n" {
+		t.Fatalf("unexpected stdout %q", got)
+	}
+}
+
+func TestRunAppCommandSetUsesStartupCommandPatch(t *testing.T) {
+	t.Parallel()
+
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/apps/app_123":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode app patch body: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"operation":{"id":"op_123","app_id":"app_123"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "command", "set", "demo",
+		"--command", "python app.py",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app command set: %v", err)
+	}
+
+	if gotBody["startup_command"] != "python app.py" {
+		t.Fatalf("expected startup_command patch, got %+v", gotBody)
+	}
+	out := stdout.String()
+	for _, want := range []string{"app_id=app_123", "operation_id=op_123", "startup_command=python app.py"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAppStorageSetBuildsPersistentStorageSpec(t *testing.T) {
+	t.Parallel()
+
+	settingsPath := filepath.Join(t.TempDir(), "settings.yaml")
+	if err := os.WriteFile(settingsPath, []byte("theme: prod\n"), 0o644); err != nil {
+		t.Fatalf("write settings file: %v", err)
+	}
+
+	var gotBody struct {
+		Spec model.AppSpec `json:"spec"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/deploy":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode deploy body: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_123","app_id":"app_123"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "storage", "set", "demo",
+		"--size", "20Gi",
+		"--class", "fast",
+		"--mount", "/data",
+		"--mount-file", "/app/settings.yaml=" + settingsPath,
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app storage set: %v", err)
+	}
+
+	if gotBody.Spec.Workspace != nil {
+		t.Fatalf("expected workspace to be cleared, got %+v", gotBody.Spec.Workspace)
+	}
+	if gotBody.Spec.PersistentStorage == nil || gotBody.Spec.PersistentStorage.StorageSize != "20Gi" || gotBody.Spec.PersistentStorage.StorageClassName != "fast" {
+		t.Fatalf("unexpected persistent storage spec %+v", gotBody.Spec.PersistentStorage)
+	}
+	if len(gotBody.Spec.PersistentStorage.Mounts) != 2 {
+		t.Fatalf("expected two mounts, got %+v", gotBody.Spec.PersistentStorage.Mounts)
+	}
+	out := stdout.String()
+	for _, want := range []string{"app_id=app_123", "operation_id=op_123", "storage_mode=persistent_storage", "storage_size=20Gi"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAppDatabaseSwitchoverUsesDatabaseEndpoint(t *testing.T) {
+	t.Parallel()
+
+	var gotBody map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_a","replicas":1,"postgres":{"runtime_id":"runtime_a","database":"app","user":"app","service_name":"demo-postgres","failover_target_runtime_id":"runtime_b"}},"status":{"phase":"ready","current_runtime_id":"runtime_a","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_a","replicas":1,"postgres":{"runtime_id":"runtime_a","database":"app","user":"app","service_name":"demo-postgres","failover_target_runtime_id":"runtime_b"}},"status":{"phase":"ready","current_runtime_id":"runtime_a","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes":
+			_, _ = w.Write([]byte(`{"runtimes":[{"id":"runtime_b","tenant_id":"tenant_123","name":"runtime-b","type":"external-owned","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/database/switchover":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode switchover body: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_123","app_id":"app_123","type":"database-switchover","status":"pending"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "db", "switchover", "demo", "runtime-b",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app db switchover: %v", err)
+	}
+
+	if gotBody["target_runtime_id"] != "runtime_b" {
+		t.Fatalf("expected target_runtime_id runtime_b, got %+v", gotBody)
+	}
+	out := stdout.String()
+	for _, want := range []string{"app_id=app_123", "operation_id=op_123", "target_runtime_id=runtime_b"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunProjectEditPatchesMetadata(t *testing.T) {
+	t.Parallel()
+
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
+			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/projects"):
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","tenant_id":"tenant_123","name":"demo","slug":"demo","description":"old","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/projects/project_123":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode patch project body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"project":{"id":"project_123","tenant_id":"tenant_123","name":"demo-v2","slug":"demo-v2","description":"new description","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-03T00:00:00Z"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"project", "edit", "demo",
+		"--name", "demo-v2",
+		"--description", "new description",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run project edit: %v", err)
+	}
+
+	if gotBody["name"] != "demo-v2" || gotBody["description"] != "new description" {
+		t.Fatalf("unexpected project patch body %+v", gotBody)
+	}
+	out := stdout.String()
+	for _, want := range []string{"project_id=project_123", "name=demo-v2", "description=new description"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
 	}
 }

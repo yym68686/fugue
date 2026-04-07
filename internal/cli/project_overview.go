@@ -19,7 +19,10 @@ import (
 )
 
 func (c *CLI) newProjectOverviewCommand() *cobra.Command {
-	return &cobra.Command{
+	opts := struct {
+		Live bool
+	}{Live: true}
+	cmd := &cobra.Command{
 		Use:     "overview [project]",
 		Aliases: []string{"status"},
 		Short:   "Show project live overview",
@@ -30,7 +33,7 @@ func (c *CLI) newProjectOverviewCommand() *cobra.Command {
 				return err
 			}
 			if len(args) == 0 {
-				gallery, err := client.GetConsoleGallery()
+				gallery, err := client.GetConsoleGalleryWithLiveStatus(opts.Live)
 				if err != nil {
 					return err
 				}
@@ -40,7 +43,7 @@ func (c *CLI) newProjectOverviewCommand() *cobra.Command {
 				return writeConsoleProjectTable(c.stdout, gallery.Projects)
 			}
 
-			summary, detail, err := c.loadConsoleProjectOverview(client, args[0])
+			summary, detail, err := c.loadConsoleProjectOverview(client, args[0], opts.Live)
 			if err != nil {
 				return err
 			}
@@ -54,6 +57,8 @@ func (c *CLI) newProjectOverviewCommand() *cobra.Command {
 			return renderConsoleProjectOverview(c.stdout, summary, detail)
 		},
 	}
+	cmd.Flags().BoolVar(&opts.Live, "live", opts.Live, "Include live runtime status in project snapshots")
+	return cmd
 }
 
 func (c *CLI) newProjectAppsCommand() *cobra.Command {
@@ -66,7 +71,7 @@ func (c *CLI) newProjectAppsCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, detail, err := c.loadConsoleProjectOverview(client, args[0])
+			_, detail, err := c.loadConsoleProjectOverview(client, args[0], true)
 			if err != nil {
 				return err
 			}
@@ -89,7 +94,7 @@ func (c *CLI) newProjectOpsCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, detail, err := c.loadConsoleProjectOverview(client, args[0])
+			_, detail, err := c.loadConsoleProjectOverview(client, args[0], true)
 			if err != nil {
 				return err
 			}
@@ -104,7 +109,9 @@ func (c *CLI) newProjectOpsCommand() *cobra.Command {
 func (c *CLI) newProjectWatchCommand() *cobra.Command {
 	opts := struct {
 		Interval time.Duration
-	}{Interval: 5 * time.Second}
+		Poll     bool
+		Live     bool
+	}{Interval: 5 * time.Second, Live: true}
 	cmd := &cobra.Command{
 		Use:   "watch [project]",
 		Short: "Watch project overview changes",
@@ -116,51 +123,15 @@ func (c *CLI) newProjectWatchCommand() *cobra.Command {
 			}
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
-
-			var previousHash [32]byte
-			first := true
-			for {
-				snapshot, hashValue, err := c.loadProjectWatchSnapshot(ctx, client, args)
-				if err != nil {
-					return err
-				}
-				if first || hashValue != previousHash {
-					if !first {
-						if _, err := fmt.Fprintln(c.stdout); err != nil {
-							return err
-						}
-					}
-					previousHash = hashValue
-					if c.wantsJSON() {
-						if err := writeJSON(c.stdout, snapshot); err != nil {
-							return err
-						}
-					} else {
-						if _, err := fmt.Fprintf(c.stdout, "observed_at=%s\n", formatTime(time.Now().UTC())); err != nil {
-							return err
-						}
-						switch value := snapshot.(type) {
-						case consoleGalleryResponse:
-							if err := writeConsoleProjectTable(c.stdout, value.Projects); err != nil {
-								return err
-							}
-						case projectOverviewSnapshot:
-							if err := renderConsoleProjectOverview(c.stdout, value.Summary, value.Detail); err != nil {
-								return err
-							}
-						}
-					}
-					first = false
-				}
-				select {
-				case <-ctx.Done():
-					return nil
-				case <-time.After(opts.Interval):
-				}
+			if opts.Poll {
+				return c.watchProjectPolling(ctx, client, args, opts.Interval, opts.Live)
 			}
+			return c.watchProjectStream(ctx, client, args, opts.Live)
 		},
 	}
 	cmd.Flags().DurationVar(&opts.Interval, "interval", opts.Interval, "Polling interval")
+	cmd.Flags().BoolVar(&opts.Poll, "poll", false, "Use polling instead of the default server-sent events stream")
+	cmd.Flags().BoolVar(&opts.Live, "live", opts.Live, "Include live runtime status in project snapshots")
 	return cmd
 }
 
@@ -169,9 +140,127 @@ type projectOverviewSnapshot struct {
 	Detail  consoleProjectDetailResponse `json:"detail"`
 }
 
-func (c *CLI) loadProjectWatchSnapshot(ctx context.Context, client *Client, args []string) (any, [32]byte, error) {
+func (c *CLI) watchProjectPolling(ctx context.Context, client *Client, args []string, interval time.Duration, includeLiveStatus bool) error {
+	var previousHash [32]byte
+	first := true
+	for {
+		snapshot, hashValue, err := c.loadProjectWatchSnapshot(ctx, client, args, includeLiveStatus)
+		if err != nil {
+			return err
+		}
+		if first || hashValue != previousHash {
+			if err := c.renderProjectWatchSnapshot(snapshot, !first); err != nil {
+				return err
+			}
+			previousHash = hashValue
+			first = false
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(interval):
+		}
+	}
+}
+
+func (c *CLI) watchProjectStream(ctx context.Context, client *Client, args []string, includeLiveStatus bool) error {
+	var (
+		previousHash [32]byte
+		first        = true
+	)
+	render := func() error {
+		snapshot, hashValue, err := c.loadProjectWatchSnapshot(ctx, client, args, includeLiveStatus)
+		if err != nil {
+			return err
+		}
+		if !first && hashValue == previousHash {
+			return nil
+		}
+		if err := c.renderProjectWatchSnapshot(snapshot, !first); err != nil {
+			return err
+		}
+		previousHash = hashValue
+		first = false
+		return nil
+	}
+	if err := render(); err != nil {
+		return err
+	}
+	for {
+		if err := client.StreamConsoleGallery(includeLiveStatus, func(event sseEvent) error {
+			switch strings.TrimSpace(event.Event) {
+			case "", "heartbeat":
+				return nil
+			case "error":
+				message, err := decodeConsoleStreamError(event.Data)
+				if err != nil {
+					return err
+				}
+				return fmt.Errorf("%s", firstNonEmpty(message, "console gallery stream failed"))
+			case "ready", "changed":
+				return render()
+			default:
+				return nil
+			}
+		}); err != nil {
+			select {
+			case <-ctx.Done():
+				return nil
+			default:
+			}
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(1 * time.Second):
+		}
+		c.progressf("console stream disconnected; reconnecting")
+	}
+}
+
+func (c *CLI) renderProjectWatchSnapshot(snapshot any, separate bool) error {
+	if separate {
+		if _, err := fmt.Fprintln(c.stdout); err != nil {
+			return err
+		}
+	}
+	if c.wantsJSON() {
+		return writeJSON(c.stdout, snapshot)
+	}
+	if _, err := fmt.Fprintf(c.stdout, "observed_at=%s\n", formatTime(time.Now().UTC())); err != nil {
+		return err
+	}
+	switch value := snapshot.(type) {
+	case consoleGalleryResponse:
+		return writeConsoleProjectTable(c.stdout, value.Projects)
+	case projectOverviewSnapshot:
+		return renderConsoleProjectOverview(c.stdout, value.Summary, value.Detail)
+	default:
+		return nil
+	}
+}
+
+func decodeConsoleStreamError(raw []byte) (string, error) {
+	decoded, err := decodeSSEEventData(raw)
+	if err != nil {
+		return "", err
+	}
+	if decoded == nil {
+		return "", nil
+	}
+	switch value := decoded.(type) {
+	case map[string]any:
+		message, _ := value["error"].(string)
+		return strings.TrimSpace(message), nil
+	default:
+		return "", nil
+	}
+}
+
+func (c *CLI) loadProjectWatchSnapshot(ctx context.Context, client *Client, args []string, includeLiveStatus bool) (any, [32]byte, error) {
 	if len(args) == 0 {
-		gallery, err := client.GetConsoleGallery()
+		gallery, err := client.GetConsoleGalleryWithLiveStatus(includeLiveStatus)
 		if err != nil {
 			return nil, [32]byte{}, err
 		}
@@ -181,7 +270,7 @@ func (c *CLI) loadProjectWatchSnapshot(ctx context.Context, client *Client, args
 		}
 		return gallery, sha256.Sum256(sum), nil
 	}
-	summary, detail, err := c.loadConsoleProjectOverview(client, args[0])
+	summary, detail, err := c.loadConsoleProjectOverview(client, args[0], includeLiveStatus)
 	if err != nil {
 		return nil, [32]byte{}, err
 	}
@@ -198,16 +287,16 @@ func (c *CLI) loadProjectWatchSnapshot(ctx context.Context, client *Client, args
 	return snapshot, sha256.Sum256(sum), nil
 }
 
-func (c *CLI) loadConsoleProjectOverview(client *Client, ref string) (*consoleProjectSummary, consoleProjectDetailResponse, error) {
+func (c *CLI) loadConsoleProjectOverview(client *Client, ref string, includeLiveStatus bool) (*consoleProjectSummary, consoleProjectDetailResponse, error) {
 	project, err := c.resolveNamedProject(client, ref)
 	if err != nil {
 		return nil, consoleProjectDetailResponse{}, err
 	}
-	detail, err := client.GetConsoleProject(project.ID)
+	detail, err := client.GetConsoleProjectWithLiveStatus(project.ID, includeLiveStatus)
 	if err != nil {
 		return nil, consoleProjectDetailResponse{}, err
 	}
-	gallery, err := client.GetConsoleGallery()
+	gallery, err := client.GetConsoleGalleryWithLiveStatus(includeLiveStatus)
 	if err != nil {
 		return nil, detail, nil
 	}

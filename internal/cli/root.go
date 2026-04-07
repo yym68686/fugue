@@ -85,28 +85,33 @@ Environment variables:
   FUGUE_PROJECT / FUGUE_PROJECT_NAME / FUGUE_PROJECT_ID
 `),
 		Example: strings.TrimSpace(`
-  export FUGUE_API_KEY=<your-api-key>
-  fugue deploy .
-  fugue app ls
-  fugue --tenant acme deploy github owner/repo
-  fugue --project marketing app logs web --follow
-  fugue --base-url https://api.example.com app ls
-  fugue deploy inspect .
-  fugue deploy github owner/repo --branch main
-  fugue deploy image nginx:1.27
-  fugue app status my-app
-  fugue app source show my-app
-  fugue app failover configure my-app --app-to runtime-b
-  fugue app logs runtime my-app --follow
-  fugue app binding bind my-app postgres
-  fugue app release deploy my-app
-  fugue app config put my-app /app/config.yaml --from-file config.yaml
-  fugue app domain primary set my-app www.example.com
-  fugue service ls
-  fugue service postgres create app-db --runtime shared
-  fugue operation ls --app my-app
-  fugue runtime access show shared
+	  export FUGUE_API_KEY=<your-api-key>
+	  fugue deploy .
+	  fugue app ls
+	  fugue --tenant acme deploy github owner/repo
+	  fugue --project marketing app logs web --follow
+	  fugue --base-url https://api.example.com app ls
+	  fugue deploy inspect .
+	  fugue deploy github owner/repo --branch main
+	  fugue deploy image nginx:1.27
+	  fugue app status my-app
+	  fugue app source show my-app
+	  fugue app failover configure my-app --app-to runtime-b
+	  fugue app logs runtime my-app --follow
+	  fugue app service attach my-app postgres
+	  fugue app release deploy my-app
+	  fugue app command set my-app --command "python app.py"
+	  fugue app config put my-app /app/config.yaml --from-file config.yaml
+	  fugue app storage set my-app --size 10Gi --mount /data
+	  fugue app db configure my-app --database app --user app
+	  fugue app domain primary set my-app www.example.com
+	  fugue service ls
+	  fugue service postgres create app-db --runtime shared
+	  fugue operation ls --app my-app
+	  fugue runtime access show shared
   fugue project overview
+  fugue project watch marketing
+  fugue project edit marketing --description "landing pages"
   fugue project storage
 `),
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {

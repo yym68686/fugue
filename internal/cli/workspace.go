@@ -43,10 +43,18 @@ type workspaceRemoveOptions struct {
 }
 
 func (c *CLI) newWorkspaceCommand() *cobra.Command {
+	cmd := c.newFilesystemCommand()
+	cmd.Use = "workspace"
+	cmd.Aliases = nil
+	cmd.Short = "Compatibility alias for app fs"
+	return cmd
+}
+
+func (c *CLI) newFilesystemCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "workspace",
-		Aliases: []string{"fs"},
-		Short:   "Browse and edit an app's persistent workspace",
+		Use:     "fs",
+		Aliases: []string{"filesystem"},
+		Short:   "Browse and edit an app's persistent runtime filesystem",
 	}
 	cmd.AddCommand(
 		c.newWorkspaceListCommand(),
@@ -59,7 +67,7 @@ func (c *CLI) newWorkspaceCommand() *cobra.Command {
 }
 
 func (c *CLI) newWorkspaceCompatCommand() *cobra.Command {
-	return hideCompatCommand(c.newWorkspaceCommand(), "fugue app workspace")
+	return hideCompatCommand(c.newWorkspaceCommand(), "fugue app fs")
 }
 
 func (c *CLI) newWorkspaceListCommand() *cobra.Command {

@@ -104,6 +104,7 @@ func (c *CLI) newAppContinuitySetCommand() *cobra.Command {
 		AppRuntimeID   string
 		DBRuntimeName  string
 		DBRuntimeID    string
+		RebalanceNow   bool
 		Wait           bool
 	}{Wait: true}
 	cmd := &cobra.Command{
@@ -139,6 +140,7 @@ func (c *CLI) newAppContinuitySetCommand() *cobra.Command {
 				request.DatabaseFailover = &appContinuityDatabaseFailoverRequest{
 					Enabled:         true,
 					TargetRuntimeID: runtimeID,
+					RebalanceNow:    opts.RebalanceNow,
 				}
 			}
 			if request.AppFailover == nil && request.DatabaseFailover == nil {
@@ -159,6 +161,7 @@ func (c *CLI) newAppContinuitySetCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.AppRuntimeID, "app-runtime-id", "", "Target runtime ID for app failover")
 	cmd.Flags().StringVar(&opts.DBRuntimeName, "db-to", "", "Target runtime for database failover")
 	cmd.Flags().StringVar(&opts.DBRuntimeID, "db-runtime-id", "", "Target runtime ID for database failover")
+	cmd.Flags().BoolVar(&opts.RebalanceNow, "rebalance-now", false, "Clear any pending managed Postgres placement hold when configuring database failover")
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for the deploy operation to complete")
 	_ = cmd.Flags().MarkHidden("app-runtime-id")
 	_ = cmd.Flags().MarkHidden("db-runtime-id")
@@ -167,9 +170,10 @@ func (c *CLI) newAppContinuitySetCommand() *cobra.Command {
 
 func (c *CLI) newAppContinuityOffCommand() *cobra.Command {
 	opts := struct {
-		App  bool
-		DB   bool
-		Wait bool
+		App          bool
+		DB           bool
+		RebalanceNow bool
+		Wait         bool
 	}{Wait: true}
 	cmd := &cobra.Command{
 		Use:   "off <app>",
@@ -191,7 +195,10 @@ func (c *CLI) newAppContinuityOffCommand() *cobra.Command {
 				request.AppFailover = &appContinuityAppFailoverRequest{Enabled: false}
 			}
 			if disableDB {
-				request.DatabaseFailover = &appContinuityDatabaseFailoverRequest{Enabled: false}
+				request.DatabaseFailover = &appContinuityDatabaseFailoverRequest{
+					Enabled:      false,
+					RebalanceNow: opts.RebalanceNow,
+				}
 			}
 			response, err := client.PatchAppContinuity(app.ID, request)
 			if err != nil {
@@ -205,6 +212,7 @@ func (c *CLI) newAppContinuityOffCommand() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&opts.App, "app", false, "Disable only app failover")
 	cmd.Flags().BoolVar(&opts.DB, "db", false, "Disable only database failover")
+	cmd.Flags().BoolVar(&opts.RebalanceNow, "rebalance-now", false, "Clear any pending managed Postgres placement hold while disabling database failover")
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for the deploy operation to complete")
 	return cmd
 }

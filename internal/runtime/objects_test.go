@@ -347,6 +347,75 @@ func TestBuildPostgresClusterUsesFailoverPlacementsAndAntiAffinity(t *testing.T)
 	if len(tolerations) != 1 {
 		t.Fatalf("expected deduplicated postgres tolerations, got %d", len(tolerations))
 	}
+	metadata := objects[3]["metadata"].(map[string]any)
+	if _, ok := metadata["annotations"]; ok {
+		t.Fatalf("expected failover cluster without pending rebalance to omit annotations, got %#v", metadata["annotations"])
+	}
+}
+
+func TestBuildPostgresClusterPendingRebalanceDisablesPodSpecReconciliation(t *testing.T) {
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_primary",
+			Postgres: &model.AppPostgresSpec{
+				Database:                         "demo",
+				User:                             "demo_user",
+				Password:                         "secret",
+				RuntimeID:                        "runtime_primary",
+				FailoverTargetRuntimeID:          "runtime_failover",
+				Instances:                        2,
+				SynchronousReplicas:              1,
+				PrimaryPlacementPendingRebalance: true,
+			},
+		},
+	}
+
+	objects := buildAppObjectsWithPlacements(app, SchedulingConstraints{}, map[string][]SchedulingConstraints{
+		"demo-postgres": {
+			{
+				NodeSelector: map[string]string{
+					RuntimeIDLabelKey: "runtime_primary",
+					TenantIDLabelKey:  "tenant_demo",
+				},
+				Tolerations: []Toleration{
+					{
+						Key:      TenantTaintKey,
+						Operator: "Equal",
+						Value:    "tenant_demo",
+						Effect:   "NoSchedule",
+					},
+				},
+			},
+			{
+				NodeSelector: map[string]string{
+					RuntimeIDLabelKey: "runtime_failover",
+					TenantIDLabelKey:  "tenant_demo",
+				},
+				Tolerations: []Toleration{
+					{
+						Key:      TenantTaintKey,
+						Operator: "Equal",
+						Value:    "tenant_demo",
+						Effect:   "NoSchedule",
+					},
+				},
+			},
+		},
+	})
+
+	metadata := objects[3]["metadata"].(map[string]any)
+	annotations, ok := metadata["annotations"].(map[string]string)
+	if !ok {
+		t.Fatalf("expected postgres cluster annotations, got %#v", metadata["annotations"])
+	}
+	if got := annotations[CloudNativePGReconcilePodSpecAnno]; got != CloudNativePGReconcilePodSpecHold {
+		t.Fatalf("expected %s=%q, got %#v", CloudNativePGReconcilePodSpecAnno, CloudNativePGReconcilePodSpecHold, got)
+	}
 }
 
 func TestBuildAppDeploymentTemplateAnnotationsTrackFilesAndRestart(t *testing.T) {
