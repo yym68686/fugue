@@ -224,3 +224,80 @@ func TestSetRuntimeAccessModeRequiresPlatformAdmin(t *testing.T) {
 		t.Fatalf("expected status %d for consumer visibility after platform share, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestRuntimeOwnerCanSetPublicAccessAndOffer(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	owner, err := s.CreateTenant("Public Offer Owner")
+	if err != nil {
+		t.Fatalf("create owner tenant: %v", err)
+	}
+	consumer, err := s.CreateTenant("Public Offer Consumer")
+	if err != nil {
+		t.Fatalf("create consumer tenant: %v", err)
+	}
+	_, ownerKey, err := s.CreateAPIKey(owner.ID, "owner-writer", []string{"runtime.write"})
+	if err != nil {
+		t.Fatalf("create owner api key: %v", err)
+	}
+	_, consumerKey, err := s.CreateAPIKey(consumer.ID, "consumer", []string{"project.write"})
+	if err != nil {
+		t.Fatalf("create consumer api key: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(owner.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	_, runtimeObj, err := s.BootstrapClusterNode(nodeSecret, "public-offer-node", "https://public-offer-node.example.com", nil, "", "")
+	if err != nil {
+		t.Fatalf("bootstrap cluster node: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/runtimes/"+runtimeObj.ID+"/sharing/mode", ownerKey, map[string]any{
+		"access_mode": model.RuntimeAccessModePublic,
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d for owner public share, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var accessModeResponse struct {
+		Runtime model.Runtime `json:"runtime"`
+	}
+	mustDecodeJSON(t, recorder, &accessModeResponse)
+	if accessModeResponse.Runtime.AccessMode != model.RuntimeAccessModePublic {
+		t.Fatalf("expected public access mode, got %q", accessModeResponse.Runtime.AccessMode)
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodPost, "/v1/runtimes/"+runtimeObj.ID+"/public-offer", ownerKey, map[string]any{
+		"reference_bundle": map[string]any{
+			"cpu_millicores":    2000,
+			"memory_mebibytes":  4096,
+			"storage_gibibytes": 30,
+		},
+		"reference_monthly_price_microcents": 400 * int64(1_000_000),
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d for public offer update, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var offerResponse struct {
+		Runtime model.Runtime `json:"runtime"`
+	}
+	mustDecodeJSON(t, recorder, &offerResponse)
+	if offerResponse.Runtime.PublicOffer == nil {
+		t.Fatal("expected runtime public offer in response")
+	}
+	if offerResponse.Runtime.PublicOffer.ReferenceMonthlyPriceMicroCents != 400*int64(1_000_000) {
+		t.Fatalf("unexpected public offer monthly price: %+v", offerResponse.Runtime.PublicOffer)
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/runtimes/"+runtimeObj.ID, consumerKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d for consumer visibility after public share, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+}

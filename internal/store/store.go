@@ -1585,7 +1585,7 @@ func (s *Store) SetRuntimeAccessMode(runtimeID, ownerTenantID, accessMode string
 		return model.Runtime{}, ErrInvalidInput
 	}
 	switch accessMode {
-	case model.RuntimeAccessModePrivate, model.RuntimeAccessModePlatformShared:
+	case model.RuntimeAccessModePrivate, model.RuntimeAccessModePublic, model.RuntimeAccessModePlatformShared:
 	default:
 		return model.Runtime{}, ErrInvalidInput
 	}
@@ -1608,6 +1608,42 @@ func (s *Store) SetRuntimeAccessMode(runtimeID, ownerTenantID, accessMode string
 			return ErrInvalidInput
 		}
 		state.Runtimes[index].AccessMode = normalizeRuntimeAccessMode(state.Runtimes[index].Type, accessMode)
+		state.Runtimes[index].UpdatedAt = time.Now().UTC()
+		runtime = state.Runtimes[index]
+		return nil
+	})
+	return runtime, err
+}
+
+func (s *Store) SetRuntimePublicOffer(runtimeID, ownerTenantID string, offer model.RuntimePublicOffer) (model.Runtime, error) {
+	runtimeID = strings.TrimSpace(runtimeID)
+	ownerTenantID = strings.TrimSpace(ownerTenantID)
+	if runtimeID == "" || ownerTenantID == "" {
+		return model.Runtime{}, ErrInvalidInput
+	}
+	normalizedOffer, err := normalizeRuntimePublicOffer(offer)
+	if err != nil {
+		return model.Runtime{}, err
+	}
+	if s.usingDatabase() {
+		return s.pgSetRuntimePublicOffer(runtimeID, ownerTenantID, normalizedOffer)
+	}
+
+	var runtime model.Runtime
+	err = s.withLockedState(true, func(state *model.State) error {
+		ensureRuntimeMetadata(state)
+
+		index := findRuntime(state, runtimeID)
+		if index < 0 {
+			return ErrNotFound
+		}
+		if state.Runtimes[index].TenantID != ownerTenantID || state.Runtimes[index].TenantID == "" {
+			return ErrNotFound
+		}
+		if state.Runtimes[index].Type == model.RuntimeTypeManagedShared {
+			return ErrInvalidInput
+		}
+		state.Runtimes[index].PublicOffer = cloneRuntimePublicOffer(&normalizedOffer)
 		state.Runtimes[index].UpdatedAt = time.Now().UTC()
 		runtime = state.Runtimes[index]
 		return nil
@@ -2195,18 +2231,30 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 		now := time.Now().UTC()
 		op.DesiredSpec = cloneAppSpec(op.DesiredSpec)
 		op.DesiredSource = cloneAppSource(op.DesiredSource)
-		billing := ensureTenantBillingRecord(state, app.TenantID, now)
+		billing := accrueTenantBillingLedger(state, app.TenantID, now)
+		if billing == nil {
+			return ErrNotFound
+		}
 		currentTotal, nextTotal, err := projectedTenantManagedTotalsWithBilling(state, app, op, *billing)
 		if err != nil {
 			return err
 		}
-		accrueTenantBillingWithCommittedStorage(billing, currentTotal.StorageGibibytes, now)
+		currentPublicHourlyRateMicroCents, nextPublicHourlyRateMicroCents, err := projectedTenantPublicRuntimeHourlyRates(state, app, op)
+		if err != nil {
+			return err
+		}
 		effectiveBilling := *billing
 		nextEnvelope, envelopeChanged := nextManagedEnvelope(effectiveBilling, currentTotal, nextTotal)
 		if envelopeChanged {
 			effectiveBilling.ManagedCap = nextEnvelope
 		}
-		if err := validateManagedOperationBilling(effectiveBilling, currentTotal, nextTotal); err != nil {
+		if err := validateTenantOperationBilling(
+			effectiveBilling,
+			currentTotal,
+			nextTotal,
+			currentPublicHourlyRateMicroCents,
+			nextPublicHourlyRateMicroCents,
+		); err != nil {
 			return err
 		}
 		if envelopeChanged {
@@ -3627,7 +3675,8 @@ func runtimeVisibleToTenant(state *model.State, runtimeID, tenantID string) bool
 	if runtime.Type == model.RuntimeTypeManagedShared {
 		return true
 	}
-	if normalizeRuntimeAccessMode(runtime.Type, runtime.AccessMode) == model.RuntimeAccessModePlatformShared {
+	switch normalizeRuntimeAccessMode(runtime.Type, runtime.AccessMode) {
+	case model.RuntimeAccessModePlatformShared, model.RuntimeAccessModePublic:
 		return true
 	}
 	return findRuntimeAccessGrant(state, runtime.ID, tenantID) >= 0
@@ -3683,6 +3732,7 @@ func detachRuntimeOwnership(state *model.State, runtimeIndex int, now time.Time)
 	runtime := &state.Runtimes[runtimeIndex]
 	resetRuntimeSharing(state, runtime.ID)
 	runtime.AccessMode = model.RuntimeAccessModePrivate
+	runtime.PublicOffer = nil
 	runtime.PoolMode = model.RuntimePoolModeDedicated
 	runtime.Status = model.RuntimeStatusOffline
 	runtime.NodeKeyID = ""
@@ -3698,6 +3748,11 @@ func normalizeRuntimeAccessMode(runtimeType, accessMode string) string {
 	switch strings.TrimSpace(accessMode) {
 	case model.RuntimeAccessModePlatformShared:
 		return model.RuntimeAccessModePlatformShared
+	case model.RuntimeAccessModePublic:
+		if runtimeType == model.RuntimeTypeManagedShared {
+			return model.RuntimeAccessModePlatformShared
+		}
+		return model.RuntimeAccessModePublic
 	case model.RuntimeAccessModePrivate:
 		if runtimeType == model.RuntimeTypeManagedShared {
 			return model.RuntimeAccessModePlatformShared

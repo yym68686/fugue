@@ -41,9 +41,10 @@ func (s *Store) GetTenantBillingSummary(tenantID string) (model.TenantBillingSum
 			return ErrNotFound
 		}
 		now := time.Now().UTC()
-		billing := ensureTenantBillingRecord(state, tenantID, now)
-		committed := tenantManagedCommittedResourcesForBilling(state, *billing)
-		accrueTenantBillingWithCommittedStorage(billing, committed.StorageGibibytes, now)
+		billing := accrueTenantBillingLedger(state, tenantID, now)
+		if billing == nil {
+			return ErrNotFound
+		}
 		summary = buildTenantBillingSummary(state, *billing)
 		return nil
 	})
@@ -70,9 +71,10 @@ func (s *Store) UpdateTenantBilling(tenantID string, managedCap model.BillingRes
 			return ErrNotFound
 		}
 		now := time.Now().UTC()
-		billing := ensureTenantBillingRecord(state, tenantID, now)
-		committed := tenantManagedCommittedResourcesForBilling(state, *billing)
-		accrueTenantBillingWithCommittedStorage(billing, committed.StorageGibibytes, now)
+		billing := accrueTenantBillingLedger(state, tenantID, now)
+		if billing == nil {
+			return ErrNotFound
+		}
 		billing.ManagedCap = normalizedCap
 		billing.UpdatedAt = now
 		appendTenantBillingEvent(state, newTenantBillingConfigUpdatedEvent(
@@ -104,9 +106,10 @@ func (s *Store) TopUpTenantBilling(tenantID string, amountCents int64, note stri
 			return ErrNotFound
 		}
 		now := time.Now().UTC()
-		billing := ensureTenantBillingRecord(state, tenantID, now)
-		committed := tenantManagedCommittedResourcesForBilling(state, *billing)
-		accrueTenantBillingWithCommittedStorage(billing, committed.StorageGibibytes, now)
+		billing := accrueTenantBillingLedger(state, tenantID, now)
+		if billing == nil {
+			return ErrNotFound
+		}
 		billing.BalanceMicroCents += amountCents * microCentsPerCent
 		billing.UpdatedAt = now
 
@@ -145,9 +148,10 @@ func (s *Store) SetTenantBillingBalance(tenantID string, balanceCents int64, met
 			return ErrNotFound
 		}
 		now := time.Now().UTC()
-		billing := ensureTenantBillingRecord(state, tenantID, now)
-		committed := tenantManagedCommittedResourcesForBilling(state, *billing)
-		accrueTenantBillingWithCommittedStorage(billing, committed.StorageGibibytes, now)
+		billing := accrueTenantBillingLedger(state, tenantID, now)
+		if billing == nil {
+			return ErrNotFound
+		}
 		previousBalanceMicroCents := billing.BalanceMicroCents
 		if previousBalanceMicroCents != targetBalanceMicroCents {
 			billing.BalanceMicroCents = targetBalanceMicroCents
@@ -181,9 +185,10 @@ func (s *Store) SyncTenantBillingImageStorage(tenantID string, storageGibibytes 
 			return ErrNotFound
 		}
 		now := time.Now().UTC()
-		billing := ensureTenantBillingRecord(state, tenantID, now)
-		committed := tenantManagedCommittedResourcesForBilling(state, *billing)
-		accrueTenantBillingWithCommittedStorage(billing, committed.StorageGibibytes, now)
+		billing := accrueTenantBillingLedger(state, tenantID, now)
+		if billing == nil {
+			return ErrNotFound
+		}
 		if billing.ManagedImageStorageGibibytes != storageGibibytes {
 			billing.ManagedImageStorageGibibytes = storageGibibytes
 			billing.UpdatedAt = now
@@ -389,6 +394,129 @@ func normalizeBillingPriceBook(priceBook model.BillingPriceBook) model.BillingPr
 	return priceBook
 }
 
+func cloneRuntimePublicOffer(offer *model.RuntimePublicOffer) *model.RuntimePublicOffer {
+	if offer == nil {
+		return nil
+	}
+	out := *offer
+	return &out
+}
+
+func normalizeRuntimePublicOfferPriceBook(priceBook model.BillingPriceBook) model.BillingPriceBook {
+	defaults := model.DefaultBillingPriceBook()
+	if strings.TrimSpace(priceBook.Currency) == "" {
+		priceBook.Currency = defaults.Currency
+	}
+	if priceBook.HoursPerMonth <= 0 {
+		priceBook.HoursPerMonth = defaults.HoursPerMonth
+	}
+	if priceBook.CPUMicroCentsPerMilliCoreHour < 0 {
+		priceBook.CPUMicroCentsPerMilliCoreHour = 0
+	}
+	if priceBook.MemoryMicroCentsPerMiBHour < 0 {
+		priceBook.MemoryMicroCentsPerMiBHour = 0
+	}
+	if priceBook.StorageMicroCentsPerGiBHour < 0 {
+		priceBook.StorageMicroCentsPerGiBHour = 0
+	}
+	return priceBook
+}
+
+func normalizeRuntimePublicOffer(offer model.RuntimePublicOffer) (model.RuntimePublicOffer, error) {
+	if offer.ReferenceBundle.CPUMilliCores < 0 ||
+		offer.ReferenceBundle.MemoryMebibytes < 0 ||
+		offer.ReferenceBundle.StorageGibibytes < 0 ||
+		offer.ReferenceMonthlyPriceMicroCents < 0 {
+		return model.RuntimePublicOffer{}, ErrInvalidInput
+	}
+
+	offer.PriceBook = normalizeRuntimePublicOfferPriceBook(offer.PriceBook)
+	offer.ReferenceBundle = model.BillingResourceSpec{
+		CPUMilliCores:    maxInt64(0, offer.ReferenceBundle.CPUMilliCores),
+		MemoryMebibytes:  maxInt64(0, offer.ReferenceBundle.MemoryMebibytes),
+		StorageGibibytes: maxInt64(0, offer.ReferenceBundle.StorageGibibytes),
+	}
+
+	chargeCPU := !offer.Free && !offer.FreeCPU
+	chargeMemory := !offer.Free && !offer.FreeMemory
+	chargeStorage := !offer.Free && !offer.FreeStorage
+	if chargeCPU && offer.ReferenceBundle.CPUMilliCores <= 0 {
+		return model.RuntimePublicOffer{}, ErrInvalidInput
+	}
+	if chargeMemory && offer.ReferenceBundle.MemoryMebibytes <= 0 {
+		return model.RuntimePublicOffer{}, ErrInvalidInput
+	}
+	if chargeStorage && offer.ReferenceBundle.StorageGibibytes <= 0 {
+		return model.RuntimePublicOffer{}, ErrInvalidInput
+	}
+
+	offer.PriceBook = deriveRuntimePublicOfferPriceBook(offer)
+	if offer.UpdatedAt.IsZero() {
+		offer.UpdatedAt = time.Now().UTC()
+	}
+	return offer, nil
+}
+
+func deriveRuntimePublicOfferPriceBook(offer model.RuntimePublicOffer) model.BillingPriceBook {
+	priceBook := normalizeRuntimePublicOfferPriceBook(offer.PriceBook)
+	if offer.Free || offer.ReferenceMonthlyPriceMicroCents <= 0 {
+		priceBook.CPUMicroCentsPerMilliCoreHour = 0
+		priceBook.MemoryMicroCentsPerMiBHour = 0
+		priceBook.StorageMicroCentsPerGiBHour = 0
+		return priceBook
+	}
+
+	defaults := model.DefaultBillingPriceBook()
+	cpuWeight := int64(0)
+	if !offer.FreeCPU {
+		cpuWeight = offer.ReferenceBundle.CPUMilliCores * defaults.CPUMicroCentsPerMilliCoreHour
+	}
+	memoryWeight := int64(0)
+	if !offer.FreeMemory {
+		memoryWeight = offer.ReferenceBundle.MemoryMebibytes * defaults.MemoryMicroCentsPerMiBHour
+	}
+	storageWeight := int64(0)
+	if !offer.FreeStorage {
+		storageWeight = offer.ReferenceBundle.StorageGibibytes * defaults.StorageMicroCentsPerGiBHour
+	}
+	totalWeight := cpuWeight + memoryWeight + storageWeight
+	if totalWeight <= 0 || priceBook.HoursPerMonth <= 0 {
+		priceBook.CPUMicroCentsPerMilliCoreHour = 0
+		priceBook.MemoryMicroCentsPerMiBHour = 0
+		priceBook.StorageMicroCentsPerGiBHour = 0
+		return priceBook
+	}
+
+	scaleNumerator := offer.ReferenceMonthlyPriceMicroCents
+	scaleDenominator := totalWeight * priceBook.HoursPerMonth
+	priceBook.CPUMicroCentsPerMilliCoreHour = 0
+	priceBook.MemoryMicroCentsPerMiBHour = 0
+	priceBook.StorageMicroCentsPerGiBHour = 0
+	if !offer.FreeCPU {
+		priceBook.CPUMicroCentsPerMilliCoreHour = int64(math.Round(
+			float64(defaults.CPUMicroCentsPerMilliCoreHour*scaleNumerator) / float64(scaleDenominator),
+		))
+	}
+	if !offer.FreeMemory {
+		priceBook.MemoryMicroCentsPerMiBHour = int64(math.Round(
+			float64(defaults.MemoryMicroCentsPerMiBHour*scaleNumerator) / float64(scaleDenominator),
+		))
+	}
+	if !offer.FreeStorage {
+		priceBook.StorageMicroCentsPerGiBHour = int64(math.Round(
+			float64(defaults.StorageMicroCentsPerGiBHour*scaleNumerator) / float64(scaleDenominator),
+		))
+	}
+	return priceBook
+}
+
+type publicRuntimeChargeComponent struct {
+	OwnerTenantID        string
+	RuntimeID            string
+	RuntimeName          string
+	HourlyRateMicroCents int64
+}
+
 func findTenantBillingRecord(state *model.State, tenantID string) int {
 	if state == nil {
 		return -1
@@ -469,6 +597,34 @@ func newTenantBillingBalanceAdjustedEvent(
 	}
 }
 
+func newTenantBillingPublicRuntimeEvent(
+	tenantID string,
+	eventType string,
+	amountMicroCents int64,
+	balanceAfterMicroCents int64,
+	now time.Time,
+	metadata map[string]string,
+) model.TenantBillingEvent {
+	eventMetadata := map[string]string{}
+	for key, value := range metadata {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		eventMetadata[key] = value
+	}
+	return model.TenantBillingEvent{
+		ID:                     model.NewID("billingevt"),
+		TenantID:               tenantID,
+		Type:                   eventType,
+		AmountMicroCents:       amountMicroCents,
+		BalanceAfterMicroCents: balanceAfterMicroCents,
+		Metadata:               eventMetadata,
+		CreatedAt:              now,
+	}
+}
+
 func tenantHasBillingEvents(state *model.State, tenantID string) bool {
 	if state == nil {
 		return false
@@ -523,6 +679,189 @@ func accrueTenantBillingWithCommittedStorage(record *model.TenantBilling, commit
 	record.UpdatedAt = now
 }
 
+func accrueTenantBillingLedger(state *model.State, tenantID string, now time.Time) *model.TenantBilling {
+	if state == nil || strings.TrimSpace(tenantID) == "" {
+		return nil
+	}
+	record := ensureTenantBillingRecord(state, tenantID, now)
+	if record == nil {
+		return nil
+	}
+
+	lastAccruedAt := record.LastAccruedAt
+	committed := tenantManagedCommittedResourcesForBilling(state, *record)
+	accrueTenantBillingWithCommittedStorage(record, committed.StorageGibibytes, now)
+	if !now.After(lastAccruedAt) {
+		return record
+	}
+
+	elapsedNanos := now.Sub(lastAccruedAt).Nanoseconds()
+	if elapsedNanos <= 0 {
+		return record
+	}
+
+	for _, component := range tenantPublicRuntimeChargeComponents(state, tenantID) {
+		if component.HourlyRateMicroCents <= 0 {
+			continue
+		}
+		amountMicroCents := component.HourlyRateMicroCents * elapsedNanos / int64(time.Hour)
+		if amountMicroCents <= 0 {
+			continue
+		}
+
+		consumerIndex := findTenantBillingRecord(state, tenantID)
+		if consumerIndex < 0 {
+			continue
+		}
+		state.TenantBilling[consumerIndex].BalanceMicroCents -= amountMicroCents
+		state.TenantBilling[consumerIndex].UpdatedAt = now
+		appendTenantBillingEvent(state, newTenantBillingPublicRuntimeEvent(
+			tenantID,
+			model.BillingEventTypePublicRuntimeDebit,
+			-amountMicroCents,
+			state.TenantBilling[consumerIndex].BalanceMicroCents,
+			now,
+			map[string]string{
+				"counterparty_tenant_id": component.OwnerTenantID,
+				"runtime_id":             component.RuntimeID,
+				"runtime_name":           component.RuntimeName,
+			},
+		))
+
+		ownerRecord := ensureTenantBillingRecord(state, component.OwnerTenantID, now)
+		ownerRecord.BalanceMicroCents += amountMicroCents
+		ownerRecord.UpdatedAt = now
+		appendTenantBillingEvent(state, newTenantBillingPublicRuntimeEvent(
+			component.OwnerTenantID,
+			model.BillingEventTypePublicRuntimeCredit,
+			amountMicroCents,
+			ownerRecord.BalanceMicroCents,
+			now,
+			map[string]string{
+				"counterparty_tenant_id": tenantID,
+				"runtime_id":             component.RuntimeID,
+				"runtime_name":           component.RuntimeName,
+			},
+		))
+	}
+
+	index := findTenantBillingRecord(state, tenantID)
+	if index < 0 {
+		return nil
+	}
+	return &state.TenantBilling[index]
+}
+
+func publicRuntimeOfferHourlyRateMicroCents(offer model.RuntimePublicOffer, resources model.BillingResourceSpec) int64 {
+	priceBook := normalizeRuntimePublicOfferPriceBook(offer.PriceBook)
+	if offer.Free {
+		return 0
+	}
+	return resources.CPUMilliCores*priceBook.CPUMicroCentsPerMilliCoreHour +
+		resources.MemoryMebibytes*priceBook.MemoryMicroCentsPerMiBHour +
+		resources.StorageGibibytes*priceBook.StorageMicroCentsPerGiBHour
+}
+
+func publicRuntimeChargeComponentForResources(state *model.State, consumerTenantID, runtimeID string, resources model.BillingResourceSpec) (publicRuntimeChargeComponent, bool) {
+	if state == nil || strings.TrimSpace(runtimeID) == "" {
+		return publicRuntimeChargeComponent{}, false
+	}
+	if resources.CPUMilliCores <= 0 && resources.MemoryMebibytes <= 0 && resources.StorageGibibytes <= 0 {
+		return publicRuntimeChargeComponent{}, false
+	}
+
+	index := findRuntime(state, runtimeID)
+	if index < 0 {
+		return publicRuntimeChargeComponent{}, false
+	}
+	runtime := state.Runtimes[index]
+	if strings.TrimSpace(runtime.TenantID) == "" || runtime.TenantID == consumerTenantID {
+		return publicRuntimeChargeComponent{}, false
+	}
+	if normalizeRuntimeAccessMode(runtime.Type, runtime.AccessMode) != model.RuntimeAccessModePublic || runtime.PublicOffer == nil {
+		return publicRuntimeChargeComponent{}, false
+	}
+
+	hourlyRate := publicRuntimeOfferHourlyRateMicroCents(*runtime.PublicOffer, resources)
+	if hourlyRate <= 0 {
+		return publicRuntimeChargeComponent{}, false
+	}
+	return publicRuntimeChargeComponent{
+		OwnerTenantID:        runtime.TenantID,
+		RuntimeID:            runtime.ID,
+		RuntimeName:          runtime.Name,
+		HourlyRateMicroCents: hourlyRate,
+	}, true
+}
+
+func mergePublicRuntimeChargeComponent(components map[string]publicRuntimeChargeComponent, component publicRuntimeChargeComponent) {
+	if components == nil || component.HourlyRateMicroCents <= 0 {
+		return
+	}
+	key := component.OwnerTenantID + ":" + component.RuntimeID
+	if existing, ok := components[key]; ok {
+		existing.HourlyRateMicroCents += component.HourlyRateMicroCents
+		components[key] = existing
+		return
+	}
+	components[key] = component
+}
+
+func tenantPublicRuntimeChargeComponents(state *model.State, tenantID string) []publicRuntimeChargeComponent {
+	if state == nil || strings.TrimSpace(tenantID) == "" {
+		return nil
+	}
+	aggregated := make(map[string]publicRuntimeChargeComponent)
+	for _, app := range state.Apps {
+		if app.TenantID != tenantID || isDeletedApp(app) {
+			continue
+		}
+		if app.Status.CurrentReplicas <= 0 || strings.TrimSpace(app.Status.CurrentRuntimeID) == "" {
+			continue
+		}
+		if component, ok := publicRuntimeChargeComponentForResources(
+			state,
+			tenantID,
+			app.Status.CurrentRuntimeID,
+			multiplyResourceSpec(appEffectiveResources(app.Spec), int64(app.Status.CurrentReplicas)),
+		); ok {
+			mergePublicRuntimeChargeComponent(aggregated, component)
+		}
+		for _, service := range boundManagedServicesForApp(state, app.ID) {
+			if component, ok := publicRuntimeChargeComponentForResources(
+				state,
+				tenantID,
+				backingServiceRuntimeID(service, app.Status.CurrentRuntimeID),
+				backingServiceResources(service),
+			); ok {
+				mergePublicRuntimeChargeComponent(aggregated, component)
+			}
+		}
+	}
+	components := make([]publicRuntimeChargeComponent, 0, len(aggregated))
+	for _, component := range aggregated {
+		components = append(components, component)
+	}
+	sort.Slice(components, func(i, j int) bool {
+		if components[i].OwnerTenantID == components[j].OwnerTenantID {
+			if components[i].RuntimeID == components[j].RuntimeID {
+				return components[i].RuntimeName < components[j].RuntimeName
+			}
+			return components[i].RuntimeID < components[j].RuntimeID
+		}
+		return components[i].OwnerTenantID < components[j].OwnerTenantID
+	})
+	return components
+}
+
+func tenantPublicRuntimeOutgoingHourlyRateMicroCents(state *model.State, tenantID string) int64 {
+	total := int64(0)
+	for _, component := range tenantPublicRuntimeChargeComponents(state, tenantID) {
+		total += component.HourlyRateMicroCents
+	}
+	return total
+}
+
 func hasBillableManagedEnvelope(spec model.BillingResourceSpec) bool {
 	return spec.CPUMilliCores > 0 && spec.MemoryMebibytes > 0
 }
@@ -550,6 +889,16 @@ func billingMonthlyEstimateMicroCentsWithCommittedStorage(record model.TenantBil
 	return billingHourlyRateMicroCentsWithCommittedStorage(record, committedStorageGibibytes) * priceBook.HoursPerMonth
 }
 
+func billingOutgoingHourlyRateMicroCentsWithCommittedStorage(state *model.State, record model.TenantBilling, committedStorageGibibytes int64) int64 {
+	return billingHourlyRateMicroCentsWithCommittedStorage(record, committedStorageGibibytes) +
+		tenantPublicRuntimeOutgoingHourlyRateMicroCents(state, record.TenantID)
+}
+
+func billingOutgoingMonthlyEstimateMicroCentsWithCommittedStorage(state *model.State, record model.TenantBilling, committedStorageGibibytes int64) int64 {
+	priceBook := normalizeBillingPriceBook(record.PriceBook)
+	return billingOutgoingHourlyRateMicroCentsWithCommittedStorage(state, record, committedStorageGibibytes) * priceBook.HoursPerMonth
+}
+
 func billingBalanceRestricted(record model.TenantBilling) bool {
 	return billingBalanceRestrictedWithCommittedStorage(record, record.ManagedCap.StorageGibibytes)
 }
@@ -572,13 +921,27 @@ func billingRunwayHoursWithCommittedStorage(record model.TenantBilling, committe
 	return &hours
 }
 
+func billingOutgoingBalanceRestrictedWithCommittedStorage(state *model.State, record model.TenantBilling, committedStorageGibibytes int64) bool {
+	return billingOutgoingHourlyRateMicroCentsWithCommittedStorage(state, record, committedStorageGibibytes) > 0 &&
+		record.BalanceMicroCents <= 0
+}
+
+func billingOutgoingRunwayHoursWithCommittedStorage(state *model.State, record model.TenantBilling, committedStorageGibibytes int64) *float64 {
+	hourlyRate := billingOutgoingHourlyRateMicroCentsWithCommittedStorage(state, record, committedStorageGibibytes)
+	if hourlyRate <= 0 || record.BalanceMicroCents <= 0 {
+		return nil
+	}
+	hours := float64(record.BalanceMicroCents) / float64(hourlyRate)
+	return &hours
+}
+
 func buildTenantBillingSummary(state *model.State, record model.TenantBilling) model.TenantBillingSummary {
 	committed := tenantManagedCommittedResourcesForBilling(state, record)
 	available := clampResourceSpecSub(record.ManagedCap, committed)
-	billingActive := billingHourlyRateMicroCentsWithCommittedStorage(record, committed.StorageGibibytes) > 0
+	billingActive := billingOutgoingHourlyRateMicroCentsWithCommittedStorage(state, record, committed.StorageGibibytes) > 0
 	overCap := billingActive && resourceSpecExceeds(committed, record.ManagedCap)
-	balanceRestricted := billingBalanceRestrictedWithCommittedStorage(record, committed.StorageGibibytes)
-	status, reason := tenantBillingStatus(record, committed)
+	balanceRestricted := billingOutgoingBalanceRestrictedWithCommittedStorage(state, record, committed.StorageGibibytes)
+	status, reason := tenantBillingStatus(state, record, committed)
 	events := recentTenantBillingEvents(state, record.TenantID)
 
 	return model.TenantBillingSummary{
@@ -594,26 +957,31 @@ func buildTenantBillingSummary(state *model.State, record model.TenantBilling) m
 		DefaultAppResources:       model.BillingResourceSpec{},
 		DefaultPostgresResources:  model.DefaultManagedPostgresBillingResources(),
 		PriceBook:                 normalizeBillingPriceBook(record.PriceBook),
-		HourlyRateMicroCents:      billingHourlyRateMicroCentsWithCommittedStorage(record, committed.StorageGibibytes),
-		MonthlyEstimateMicroCents: billingMonthlyEstimateMicroCentsWithCommittedStorage(record, committed.StorageGibibytes),
+		HourlyRateMicroCents:      billingOutgoingHourlyRateMicroCentsWithCommittedStorage(state, record, committed.StorageGibibytes),
+		MonthlyEstimateMicroCents: billingOutgoingMonthlyEstimateMicroCentsWithCommittedStorage(state, record, committed.StorageGibibytes),
 		BalanceMicroCents:         record.BalanceMicroCents,
-		RunwayHours:               billingRunwayHoursWithCommittedStorage(record, committed.StorageGibibytes),
+		RunwayHours:               billingOutgoingRunwayHoursWithCommittedStorage(state, record, committed.StorageGibibytes),
 		LastAccruedAt:             record.LastAccruedAt,
 		UpdatedAt:                 record.UpdatedAt,
 		Events:                    events,
 	}
 }
 
-func tenantBillingStatus(record model.TenantBilling, committed model.BillingResourceSpec) (string, string) {
+func tenantBillingStatus(state *model.State, record model.TenantBilling, committed model.BillingResourceSpec) (string, string) {
+	managedHourlyRate := billingHourlyRateMicroCentsWithCommittedStorage(record, committed.StorageGibibytes)
+	publicHourlyRate := tenantPublicRuntimeOutgoingHourlyRateMicroCents(state, record.TenantID)
+	totalHourlyRate := managedHourlyRate + publicHourlyRate
 	switch {
-	case billingHourlyRateMicroCentsWithCommittedStorage(record, committed.StorageGibibytes) <= 0:
-		return model.BillingStatusInactive, "Managed billing is inactive until both CPU and memory are above zero. Storage, including retained managed image inventory, is billed inside an active managed envelope. BYO VPS runtimes remain free."
+	case totalHourlyRate <= 0:
+		return model.BillingStatusInactive, "Managed billing is inactive until both CPU and memory are above zero, and no paid public server usage is active. Storage, including retained managed image inventory, is billed inside an active managed envelope. Your own attached servers remain free unless you publish them for others."
 	case resourceSpecExceeds(committed, record.ManagedCap):
 		return model.BillingStatusOverCap, "Current live managed capacity is above the saved envelope. This includes retained managed image inventory. Managed expansion still works while balance stays positive, and Fugue will lift the envelope automatically on the next managed capacity increase."
-	case billingBalanceRestrictedWithCommittedStorage(record, committed.StorageGibibytes):
-		return model.BillingStatusRestricted, "Balance is depleted. Top up before increasing managed capacity."
+	case billingOutgoingBalanceRestrictedWithCommittedStorage(state, record, committed.StorageGibibytes):
+		return model.BillingStatusRestricted, "Balance is depleted. Top up before increasing managed capacity or deploying onto paid public servers."
+	case publicHourlyRate > 0 && managedHourlyRate <= 0:
+		return model.BillingStatusActive, "Deployments placed on paid public servers are metered hourly from your balance. Your own attached servers remain free unless you publish them for others."
 	default:
-		return model.BillingStatusActive, "Managed capacity is metered hourly from the saved envelope. Storage billing uses the higher of the saved storage envelope or current managed storage, including retained managed image inventory. Only internal-cluster workloads count toward managed capacity; BYO VPS stays free."
+		return model.BillingStatusActive, "Managed capacity is metered hourly from the saved envelope. Storage billing uses the higher of the saved storage envelope or current managed storage, including retained managed image inventory. Paid public-server deployments also deduct credits hourly, while your own attached servers stay free unless you publish them for others."
 	}
 }
 
@@ -779,10 +1147,23 @@ func isBillableManagedRuntimeType(runtimeType string) bool {
 	}
 }
 
-func validateManagedOperationBilling(record model.TenantBilling, currentTotal, nextTotal model.BillingResourceSpec) error {
-	if billingBalanceRestrictedWithCommittedStorage(record, currentTotal.StorageGibibytes) &&
-		resourceSpecExceeds(nextTotal, currentTotal) {
-		return describeBillingBalanceDepletedWithCommittedStorage(record, currentTotal.StorageGibibytes)
+func validateTenantOperationBilling(
+	record model.TenantBilling,
+	currentTotal model.BillingResourceSpec,
+	nextTotal model.BillingResourceSpec,
+	currentPublicHourlyRateMicroCents int64,
+	nextPublicHourlyRateMicroCents int64,
+) error {
+	totalOutgoingNext := billingHourlyRateMicroCentsWithCommittedStorage(record, nextTotal.StorageGibibytes) + nextPublicHourlyRateMicroCents
+	if record.BalanceMicroCents <= 0 &&
+		(resourceSpecExceeds(nextTotal, currentTotal) || nextPublicHourlyRateMicroCents > currentPublicHourlyRateMicroCents) &&
+		totalOutgoingNext > 0 {
+		return fmt.Errorf(
+			"%w: balance=%d hourly_rate=%d microcents",
+			ErrBillingBalanceDepleted,
+			record.BalanceMicroCents,
+			totalOutgoingNext,
+		)
 	}
 	return nil
 }
@@ -920,6 +1301,50 @@ func projectedTenantManagedTotalsWithBilling(state *model.State, app model.App, 
 	return addManagedImageStorageCommitment(currentTotal, record.ManagedImageStorageGibibytes),
 		addManagedImageStorageCommitment(nextTotal, record.ManagedImageStorageGibibytes),
 		nil
+}
+
+func cloneTenantBillingState(state *model.State) model.State {
+	if state == nil {
+		return model.State{}
+	}
+	projection := model.State{
+		Apps:            make([]model.App, 0, len(state.Apps)),
+		BackingServices: make([]model.BackingService, 0, len(state.BackingServices)),
+		ServiceBindings: make([]model.ServiceBinding, 0, len(state.ServiceBindings)),
+		Runtimes:        make([]model.Runtime, 0, len(state.Runtimes)),
+	}
+	for _, app := range state.Apps {
+		projection.Apps = append(projection.Apps, cloneAppForBilling(app))
+	}
+	for _, service := range state.BackingServices {
+		projection.BackingServices = append(projection.BackingServices, cloneBackingService(service))
+	}
+	for _, binding := range state.ServiceBindings {
+		projection.ServiceBindings = append(projection.ServiceBindings, cloneServiceBinding(binding))
+	}
+	for _, runtime := range state.Runtimes {
+		runtimeCopy := runtime
+		runtimeCopy.Labels = cloneMap(runtime.Labels)
+		runtimeCopy.PublicOffer = cloneRuntimePublicOffer(runtime.PublicOffer)
+		projection.Runtimes = append(projection.Runtimes, runtimeCopy)
+	}
+	return projection
+}
+
+func projectedTenantPublicRuntimeHourlyRates(state *model.State, app model.App, op model.Operation) (int64, int64, error) {
+	currentRate := tenantPublicRuntimeOutgoingHourlyRateMicroCents(state, app.TenantID)
+	projection := cloneTenantBillingState(state)
+	opCopy := op
+	opCopy.DesiredSpec = cloneAppSpec(op.DesiredSpec)
+	opCopy.DesiredSource = cloneAppSource(op.DesiredSource)
+	if strings.TrimSpace(opCopy.ID) == "" {
+		opCopy.ID = "billing-public-runtime-projection"
+	}
+	if err := applyOperationToApp(&projection, &opCopy); err != nil {
+		return 0, 0, err
+	}
+	nextRate := tenantPublicRuntimeOutgoingHourlyRateMicroCents(&projection, app.TenantID)
+	return currentRate, nextRate, nil
 }
 
 func nextManagedEnvelope(record model.TenantBilling, currentTotal, nextTotal model.BillingResourceSpec) (model.BillingResourceSpec, bool) {

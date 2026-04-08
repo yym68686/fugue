@@ -935,16 +935,39 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: true
+              $ref: "#/components/schemas/SetRuntimeAccessModeRequest"
       responses:
         '200':
           description: Successful response
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/RuntimeAccessModeResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/runtimes/{id}/public-offer:
+    post:
+      operationId: setRuntimePublicOffer
+      summary: Set Runtime Public Offer
+      tags: [Runtimes]
+      x-fugue-handler: handleSetRuntimePublicOffer
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetRuntimePublicOfferRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimePublicOfferResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/runtimes/{id}/pool-mode:
@@ -3314,6 +3337,8 @@ components:
           type: string
         access_mode:
           type: string
+        public_offer:
+          $ref: "#/components/schemas/RuntimePublicOffer"
         pool_mode:
           type: string
         connection_mode:
@@ -3360,6 +3385,29 @@ components:
         created_at:
           type: string
           format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    RuntimePublicOffer:
+      type: object
+      additionalProperties: false
+      required: [reference_bundle, price_book, updated_at]
+      properties:
+        reference_bundle:
+          $ref: "#/components/schemas/BillingResourceSpec"
+        reference_monthly_price_microcents:
+          type: integer
+          format: int64
+        free:
+          type: boolean
+        free_cpu:
+          type: boolean
+        free_memory:
+          type: boolean
+        free_storage:
+          type: boolean
+        price_book:
+          $ref: "#/components/schemas/BillingPriceBook"
         updated_at:
           type: string
           format: date-time
@@ -4454,6 +4502,44 @@ components:
       properties:
         removed:
           type: boolean
+    SetRuntimeAccessModeRequest:
+      type: object
+      additionalProperties: false
+      required: [access_mode]
+      properties:
+        access_mode:
+          type: string
+    RuntimeAccessModeResponse:
+      type: object
+      additionalProperties: false
+      required: [runtime]
+      properties:
+        runtime:
+          $ref: "#/components/schemas/Runtime"
+    SetRuntimePublicOfferRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reference_bundle:
+          $ref: "#/components/schemas/BillingResourceSpec"
+        reference_monthly_price_microcents:
+          type: integer
+          format: int64
+        free:
+          type: boolean
+        free_cpu:
+          type: boolean
+        free_memory:
+          type: boolean
+        free_storage:
+          type: boolean
+    RuntimePublicOfferResponse:
+      type: object
+      additionalProperties: false
+      required: [runtime]
+      properties:
+        runtime:
+          $ref: "#/components/schemas/Runtime"
     SetRuntimePoolModeRequest:
       type: object
       additionalProperties: false

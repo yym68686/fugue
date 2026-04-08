@@ -1434,6 +1434,154 @@ func TestRuntimePlatformSharedVisibleToAllTenants(t *testing.T) {
 	}
 }
 
+func TestRuntimePublicAccessTransfersAccruedBalanceToOwner(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	owner, err := s.CreateTenant("Public Runtime Owner")
+	if err != nil {
+		t.Fatalf("create owner tenant: %v", err)
+	}
+	consumer, err := s.CreateTenant("Public Runtime Consumer")
+	if err != nil {
+		t.Fatalf("create consumer tenant: %v", err)
+	}
+	project, err := s.CreateProject(consumer.ID, "public-runtime-project", "")
+	if err != nil {
+		t.Fatalf("create consumer project: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(owner.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	_, runtimeObj, err := s.BootstrapClusterNode(nodeSecret, "public-node", "https://public-node.example.com", nil, "", "")
+	if err != nil {
+		t.Fatalf("bootstrap cluster node: %v", err)
+	}
+	runtimeObj, err = s.SetRuntimeAccessMode(runtimeObj.ID, owner.ID, model.RuntimeAccessModePublic)
+	if err != nil {
+		t.Fatalf("set runtime public access mode: %v", err)
+	}
+	offer, err := normalizeRuntimePublicOffer(model.RuntimePublicOffer{
+		ReferenceBundle: model.BillingResourceSpec{
+			CPUMilliCores:    2000,
+			MemoryMebibytes:  4096,
+			StorageGibibytes: 30,
+		},
+		ReferenceMonthlyPriceMicroCents: 400 * microCentsPerCent,
+	})
+	if err != nil {
+		t.Fatalf("normalize public offer: %v", err)
+	}
+	runtimeObj, err = s.SetRuntimePublicOffer(runtimeObj.ID, owner.ID, offer)
+	if err != nil {
+		t.Fatalf("set runtime public offer: %v", err)
+	}
+	if runtimeObj.PublicOffer == nil {
+		t.Fatal("expected runtime public offer to be saved")
+	}
+
+	appSpec := model.AppSpec{
+		Image:     "nginx:1.27",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: runtimeObj.ID,
+		Resources: &model.ResourceSpec{
+			CPUMilliCores:   1000,
+			MemoryMebibytes: 1024,
+		},
+		Workspace: &model.AppWorkspaceSpec{
+			StorageSize: "10Gi",
+		},
+	}
+	app, err := s.CreateApp(consumer.ID, project.ID, "public-runtime-app", "", appSpec)
+	if err != nil {
+		t.Fatalf("create app on public runtime: %v", err)
+	}
+	deployOp, err := s.CreateOperation(model.Operation{
+		AppID:       app.ID,
+		DesiredSpec: cloneAppSpec(&appSpec),
+		TenantID:    consumer.ID,
+		Type:        model.OperationTypeDeploy,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if _, err := s.CompleteManagedOperation(deployOp.ID, "/manifests/public-runtime.yaml", "public runtime deploy finished"); err != nil {
+		t.Fatalf("complete deploy operation: %v", err)
+	}
+
+	startConsumerBalance := int64(10_000 * microCentsPerCent)
+	startOwnerBalance := int64(0)
+	staleAccruedAt := time.Now().UTC().Add(-2 * time.Hour)
+	if err := s.withLockedState(true, func(state *model.State) error {
+		consumerBilling := ensureTenantBillingRecord(state, consumer.ID, staleAccruedAt)
+		consumerBilling.ManagedCap = model.BillingResourceSpec{}
+		consumerBilling.BalanceMicroCents = startConsumerBalance
+		consumerBilling.LastAccruedAt = staleAccruedAt
+		consumerBilling.UpdatedAt = staleAccruedAt
+		appendTenantBillingEvent(state, newTenantBillingBalanceAdjustedEvent(
+			consumer.ID,
+			0,
+			startConsumerBalance,
+			staleAccruedAt,
+			map[string]string{"source": "test-seed"},
+		))
+
+		ownerBilling := ensureTenantBillingRecord(state, owner.ID, staleAccruedAt)
+		ownerBilling.ManagedCap = model.BillingResourceSpec{}
+		ownerBilling.BalanceMicroCents = startOwnerBalance
+		ownerBilling.LastAccruedAt = staleAccruedAt
+		ownerBilling.UpdatedAt = staleAccruedAt
+		appendTenantBillingEvent(state, newTenantBillingBalanceAdjustedEvent(
+			owner.ID,
+			0,
+			startOwnerBalance,
+			staleAccruedAt,
+			map[string]string{"source": "test-seed"},
+		))
+		return nil
+	}); err != nil {
+		t.Fatalf("seed billing timestamps: %v", err)
+	}
+
+	consumerSummary, err := s.GetTenantBillingSummary(consumer.ID)
+	if err != nil {
+		t.Fatalf("get consumer billing summary: %v", err)
+	}
+	expectedHourlyRate := publicRuntimeOfferHourlyRateMicroCents(*runtimeObj.PublicOffer, model.BillingResourceSpec{
+		CPUMilliCores:    1000,
+		MemoryMebibytes:  1024,
+		StorageGibibytes: 10,
+	})
+	elapsedNanos := consumerSummary.LastAccruedAt.Sub(staleAccruedAt).Nanoseconds()
+	expectedTransfer := expectedHourlyRate * elapsedNanos / int64(time.Hour)
+	if consumerSummary.BalanceMicroCents != startConsumerBalance-expectedTransfer {
+		t.Fatalf("expected consumer balance %d, got %d", startConsumerBalance-expectedTransfer, consumerSummary.BalanceMicroCents)
+	}
+	if consumerSummary.HourlyRateMicroCents != expectedHourlyRate {
+		t.Fatalf("expected public runtime hourly rate %d, got %d", expectedHourlyRate, consumerSummary.HourlyRateMicroCents)
+	}
+	if len(consumerSummary.Events) == 0 || consumerSummary.Events[0].Type != model.BillingEventTypePublicRuntimeDebit {
+		t.Fatalf("expected latest consumer event %q, got %+v", model.BillingEventTypePublicRuntimeDebit, consumerSummary.Events)
+	}
+
+	ownerSummary, err := s.GetTenantBillingSummary(owner.ID)
+	if err != nil {
+		t.Fatalf("get owner billing summary: %v", err)
+	}
+	if ownerSummary.BalanceMicroCents != startOwnerBalance+expectedTransfer {
+		t.Fatalf("expected owner balance %d, got %d", startOwnerBalance+expectedTransfer, ownerSummary.BalanceMicroCents)
+	}
+	if len(ownerSummary.Events) == 0 || ownerSummary.Events[0].Type != model.BillingEventTypePublicRuntimeCredit {
+		t.Fatalf("expected latest owner event %q, got %+v", model.BillingEventTypePublicRuntimeCredit, ownerSummary.Events)
+	}
+}
+
 func TestSyncManagedSharedLocationRuntimesMaterializesSelectableTargets(t *testing.T) {
 	t.Parallel()
 
@@ -4339,5 +4487,92 @@ func TestBillingDepletedBalanceOnlyBlocksCapacityIncrease(t *testing.T) {
 		DesiredReplicas: &scaleDown,
 	}); err != nil {
 		t.Fatalf("expected scale-down with depleted balance to remain allowed, got %v", err)
+	}
+}
+
+func TestBillingDepletedBalanceBlocksDeployOntoPaidPublicRuntime(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	owner, err := s.CreateTenant("Paid Public Runtime Owner")
+	if err != nil {
+		t.Fatalf("create owner tenant: %v", err)
+	}
+	consumer, err := s.CreateTenant("Paid Public Runtime Consumer")
+	if err != nil {
+		t.Fatalf("create consumer tenant: %v", err)
+	}
+	project, err := s.CreateProject(consumer.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(owner.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	_, runtimeObj, err := s.BootstrapClusterNode(nodeSecret, "paid-public-node", "https://paid-public-node.example.com", nil, "", "")
+	if err != nil {
+		t.Fatalf("bootstrap cluster node: %v", err)
+	}
+	if _, err := s.SetRuntimeAccessMode(runtimeObj.ID, owner.ID, model.RuntimeAccessModePublic); err != nil {
+		t.Fatalf("set runtime public: %v", err)
+	}
+	if _, err := s.SetRuntimePublicOffer(runtimeObj.ID, owner.ID, model.RuntimePublicOffer{
+		ReferenceBundle: model.BillingResourceSpec{
+			CPUMilliCores:    1000,
+			MemoryMebibytes:  1024,
+			StorageGibibytes: 10,
+		},
+		ReferenceMonthlyPriceMicroCents: 200 * microCentsPerCent,
+	}); err != nil {
+		t.Fatalf("set runtime public offer: %v", err)
+	}
+
+	if err := s.withLockedState(true, func(state *model.State) error {
+		record := ensureTenantBillingRecord(state, consumer.ID, time.Now().UTC())
+		record.ManagedCap = model.BillingResourceSpec{}
+		record.BalanceMicroCents = 0
+		record.UpdatedAt = time.Now().UTC()
+		appendTenantBillingEvent(state, newTenantBillingBalanceAdjustedEvent(
+			consumer.ID,
+			0,
+			0,
+			record.UpdatedAt,
+			map[string]string{"source": "test-seed"},
+		))
+		return nil
+	}); err != nil {
+		t.Fatalf("deplete consumer balance: %v", err)
+	}
+
+	appSpec := model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: runtimeObj.ID,
+		Resources: &model.ResourceSpec{
+			CPUMilliCores:   1000,
+			MemoryMebibytes: 1024,
+		},
+		Workspace: &model.AppWorkspaceSpec{
+			StorageSize: "10Gi",
+		},
+	}
+	app, err := s.CreateApp(consumer.ID, project.ID, "demo", "", appSpec)
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	if _, err := s.CreateOperation(model.Operation{
+		TenantID:    consumer.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: cloneAppSpec(&appSpec),
+	}); !errors.Is(err, ErrBillingBalanceDepleted) {
+		t.Fatalf("expected ErrBillingBalanceDepleted for paid public runtime deploy, got %v", err)
 	}
 }

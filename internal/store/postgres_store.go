@@ -1331,7 +1331,7 @@ SET last_seen_at = NOW(),
 	status = $2,
 	updated_at = NOW()
 WHERE agent_key_hash = $1
-RETURNING id, tenant_id, name, machine_name, type, access_mode, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+RETURNING id, tenant_id, name, machine_name, type, access_mode, public_offer_json, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 `, model.HashSecret(secret), model.RuntimeStatusActive))
 	if err != nil {
 		return model.Runtime{}, model.Principal{}, mapDBErr(err)
@@ -1367,7 +1367,7 @@ SET last_heartbeat_at = NOW(),
 	updated_at = NOW(),
 	endpoint = CASE WHEN $3 <> '' THEN $3 ELSE endpoint END
 WHERE id = $1
-RETURNING id, tenant_id, name, machine_name, type, access_mode, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+RETURNING id, tenant_id, name, machine_name, type, access_mode, public_offer_json, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 `, runtimeID, model.RuntimeStatusActive, endpoint))
 	if err != nil {
 		return model.Runtime{}, mapDBErr(err)
@@ -1444,7 +1444,7 @@ func (s *Store) pgListRuntimesByNodeKey(nodeKeyID, tenantID string, platformAdmi
 	defer cancel()
 
 	query := `
-SELECT id, tenant_id, name, machine_name, type, access_mode, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+SELECT id, tenant_id, name, machine_name, type, access_mode, public_offer_json, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_runtimes
 WHERE node_key_id = $1
 `
@@ -1480,7 +1480,7 @@ func (s *Store) pgListRuntimesByFilter(tenantID string, platformAdmin bool, node
 	defer cancel()
 
 	query := `
-SELECT id, tenant_id, name, machine_name, type, access_mode, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+SELECT id, tenant_id, name, machine_name, type, access_mode, public_offer_json, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_runtimes AS r
 `
 	args := make([]any, 0, 3)
@@ -1493,8 +1493,9 @@ FROM fugue_runtimes AS r
 		tenantArg := len(args) + 1
 		sharedTypeArg := tenantArg + 1
 		platformSharedArg := sharedTypeArg + 1
-		clauses = append(clauses, fmt.Sprintf("(r.tenant_id = $%d OR r.type = $%d OR r.access_mode = $%d OR EXISTS (SELECT 1 FROM fugue_runtime_access_grants AS g WHERE g.runtime_id = r.id AND g.tenant_id = $%d))", tenantArg, sharedTypeArg, platformSharedArg, tenantArg))
-		args = append(args, tenantID, model.RuntimeTypeManagedShared, model.RuntimeAccessModePlatformShared)
+		publicArg := platformSharedArg + 1
+		clauses = append(clauses, fmt.Sprintf("(r.tenant_id = $%d OR r.type = $%d OR r.access_mode IN ($%d, $%d) OR EXISTS (SELECT 1 FROM fugue_runtime_access_grants AS g WHERE g.runtime_id = r.id AND g.tenant_id = $%d))", tenantArg, sharedTypeArg, platformSharedArg, publicArg, tenantArg))
+		args = append(args, tenantID, model.RuntimeTypeManagedShared, model.RuntimeAccessModePlatformShared, model.RuntimeAccessModePublic)
 	}
 	if len(clauses) > 0 {
 		query += ` WHERE ` + strings.Join(clauses, " AND ")
@@ -1526,7 +1527,7 @@ func (s *Store) pgGetRuntime(id string) (model.Runtime, error) {
 	defer cancel()
 
 	runtime, err := scanRuntime(s.db.QueryRowContext(ctx, `
-SELECT id, tenant_id, name, machine_name, type, access_mode, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+SELECT id, tenant_id, name, machine_name, type, access_mode, public_offer_json, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_runtimes
 WHERE id = $1
 `, id))
@@ -1561,7 +1562,7 @@ func (s *Store) pgDetachRuntimeOwnership(runtimeID string) (model.Runtime, error
 
 func (s *Store) pgFindManagedOwnedRuntimeTx(ctx context.Context, tx *sql.Tx, nodeKeyID, runtimeName string) (model.Runtime, bool, error) {
 	runtime, err := scanRuntime(tx.QueryRowContext(ctx, `
-SELECT id, tenant_id, name, machine_name, type, access_mode, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+SELECT id, tenant_id, name, machine_name, type, access_mode, public_offer_json, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_runtimes
 WHERE type = $1
   AND node_key_id = $2
@@ -1579,7 +1580,7 @@ FOR UPDATE
 
 func (s *Store) pgGetRuntimeTx(ctx context.Context, tx *sql.Tx, id string, forUpdate bool) (model.Runtime, error) {
 	query := `
-SELECT id, tenant_id, name, machine_name, type, access_mode, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+SELECT id, tenant_id, name, machine_name, type, access_mode, public_offer_json, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_runtimes
 WHERE id = $1
 `
@@ -1598,7 +1599,7 @@ func (s *Store) pgFindRuntimeByFingerprintTx(ctx context.Context, tx *sql.Tx, te
 		return model.Runtime{}, false, nil
 	}
 	query := `
-SELECT id, tenant_id, name, machine_name, type, access_mode, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+SELECT id, tenant_id, name, machine_name, type, access_mode, public_offer_json, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_runtimes
 WHERE tenant_id = $1
   AND fingerprint_hash = $2
@@ -1623,7 +1624,7 @@ func (s *Store) pgListRuntimesByFingerprintTx(ctx context.Context, tx *sql.Tx, f
 		return nil, nil
 	}
 	query := `
-SELECT id, tenant_id, name, machine_name, type, access_mode, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+SELECT id, tenant_id, name, machine_name, type, access_mode, public_offer_json, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_runtimes
 WHERE fingerprint_hash = $1
 ORDER BY updated_at DESC, created_at DESC
@@ -1672,6 +1673,7 @@ func (s *Store) pgDetachRuntimeOwnershipTx(ctx context.Context, tx *sql.Tx, runt
 		return err
 	}
 	runtime.AccessMode = model.RuntimeAccessModePrivate
+	runtime.PublicOffer = nil
 	runtime.PoolMode = model.RuntimePoolModeDedicated
 	runtime.Status = model.RuntimeStatusOffline
 	runtime.NodeKeyID = ""
@@ -1686,7 +1688,7 @@ func (s *Store) pgDetachRuntimeOwnershipTx(ctx context.Context, tx *sql.Tx, runt
 
 func (s *Store) pgFindRuntimeCandidateTx(ctx context.Context, tx *sql.Tx, tenantID, nodeKeyID, runtimeType, machineName, runtimeName, endpoint string) (model.Runtime, bool, error) {
 	query := `
-SELECT id, tenant_id, name, machine_name, type, access_mode, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+SELECT id, tenant_id, name, machine_name, type, access_mode, public_offer_json, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_runtimes
 WHERE tenant_id = $1
   AND type = $2
@@ -1743,10 +1745,14 @@ func (s *Store) pgInsertRuntimeTx(ctx context.Context, tx *sql.Tx, runtime model
 	if err != nil {
 		return err
 	}
+	publicOfferJSON, err := marshalNullableJSON(runtime.PublicOffer)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_runtimes (id, tenant_id, name, machine_name, type, access_mode, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
-`, runtime.ID, nullIfEmpty(runtime.TenantID), runtime.Name, runtime.MachineName, runtime.Type, normalizeRuntimeAccessMode(runtime.Type, runtime.AccessMode), model.NormalizeRuntimePoolMode(runtime.Type, runtime.PoolMode), runtime.ConnectionMode, runtime.Status, runtime.Endpoint, labelsJSON, nullIfEmpty(runtime.NodeKeyID), runtime.ClusterNodeName, runtime.FingerprintPrefix, runtime.FingerprintHash, runtime.AgentKeyPrefix, runtime.AgentKeyHash, runtime.LastSeenAt, runtime.LastHeartbeatAt, runtime.CreatedAt, runtime.UpdatedAt); err != nil {
+INSERT INTO fugue_runtimes (id, tenant_id, name, machine_name, type, access_mode, public_offer_json, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+`, runtime.ID, nullIfEmpty(runtime.TenantID), runtime.Name, runtime.MachineName, runtime.Type, normalizeRuntimeAccessMode(runtime.Type, runtime.AccessMode), publicOfferJSON, model.NormalizeRuntimePoolMode(runtime.Type, runtime.PoolMode), runtime.ConnectionMode, runtime.Status, runtime.Endpoint, labelsJSON, nullIfEmpty(runtime.NodeKeyID), runtime.ClusterNodeName, runtime.FingerprintPrefix, runtime.FingerprintHash, runtime.AgentKeyPrefix, runtime.AgentKeyHash, runtime.LastSeenAt, runtime.LastHeartbeatAt, runtime.CreatedAt, runtime.UpdatedAt); err != nil {
 		return mapDBErr(err)
 	}
 	return nil
@@ -1757,28 +1763,33 @@ func (s *Store) pgUpdateRuntimeTx(ctx context.Context, tx *sql.Tx, runtime model
 	if err != nil {
 		return err
 	}
+	publicOfferJSON, err := marshalNullableJSON(runtime.PublicOffer)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE fugue_runtimes
 SET name = $2,
 	machine_name = $3,
 	type = $4,
 	access_mode = $5,
-	pool_mode = $6,
-	connection_mode = $7,
-	status = $8,
-	endpoint = $9,
-	labels_json = $10,
-	node_key_id = $11,
-	cluster_node_name = $12,
-	fingerprint_prefix = $13,
-	fingerprint_hash = $14,
-	agent_key_prefix = $15,
-	agent_key_hash = $16,
-	last_seen_at = $17,
-	last_heartbeat_at = $18,
-	updated_at = $19
+	public_offer_json = $6,
+	pool_mode = $7,
+	connection_mode = $8,
+	status = $9,
+	endpoint = $10,
+	labels_json = $11,
+	node_key_id = $12,
+	cluster_node_name = $13,
+	fingerprint_prefix = $14,
+	fingerprint_hash = $15,
+	agent_key_prefix = $16,
+	agent_key_hash = $17,
+	last_seen_at = $18,
+	last_heartbeat_at = $19,
+	updated_at = $20
 WHERE id = $1
-`, runtime.ID, runtime.Name, runtime.MachineName, runtime.Type, normalizeRuntimeAccessMode(runtime.Type, runtime.AccessMode), model.NormalizeRuntimePoolMode(runtime.Type, runtime.PoolMode), runtime.ConnectionMode, runtime.Status, runtime.Endpoint, labelsJSON, nullIfEmpty(runtime.NodeKeyID), runtime.ClusterNodeName, runtime.FingerprintPrefix, runtime.FingerprintHash, runtime.AgentKeyPrefix, runtime.AgentKeyHash, runtime.LastSeenAt, runtime.LastHeartbeatAt, runtime.UpdatedAt); err != nil {
+`, runtime.ID, runtime.Name, runtime.MachineName, runtime.Type, normalizeRuntimeAccessMode(runtime.Type, runtime.AccessMode), publicOfferJSON, model.NormalizeRuntimePoolMode(runtime.Type, runtime.PoolMode), runtime.ConnectionMode, runtime.Status, runtime.Endpoint, labelsJSON, nullIfEmpty(runtime.NodeKeyID), runtime.ClusterNodeName, runtime.FingerprintPrefix, runtime.FingerprintHash, runtime.AgentKeyPrefix, runtime.AgentKeyHash, runtime.LastSeenAt, runtime.LastHeartbeatAt, runtime.UpdatedAt); err != nil {
 		return fmt.Errorf("update runtime %s: %w", runtime.ID, err)
 	}
 	return nil
@@ -1795,7 +1806,7 @@ func (s *Store) pgEnsureManagedSharedLocationLabels(labels map[string]string) (m
 	defer tx.Rollback()
 
 	runtimeObj, err := scanRuntime(tx.QueryRowContext(ctx, `
-SELECT id, tenant_id, name, machine_name, type, access_mode, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+SELECT id, tenant_id, name, machine_name, type, access_mode, public_offer_json, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_runtimes
 WHERE id = $1
 FOR UPDATE
@@ -2636,11 +2647,7 @@ WHERE app_id = $1
 	now := time.Now().UTC()
 	op.DesiredSpec = cloneAppSpec(op.DesiredSpec)
 	op.DesiredSource = cloneAppSource(op.DesiredSource)
-	billing, err := s.pgEnsureTenantBillingRecordTx(ctx, tx, app.TenantID, true, now)
-	if err != nil {
-		return model.Operation{}, err
-	}
-	billingState, err := s.pgLoadTenantBillingStateTx(ctx, tx, app.TenantID)
+	billing, billingState, err := s.pgAccrueTenantBillingTx(ctx, tx, app.TenantID, now)
 	if err != nil {
 		return model.Operation{}, err
 	}
@@ -2648,8 +2655,8 @@ WHERE app_id = $1
 	if err != nil {
 		return model.Operation{}, err
 	}
-	accrueTenantBillingWithCommittedStorage(&billing, currentTotal.StorageGibibytes, now)
-	if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, billing); err != nil {
+	currentPublicHourlyRateMicroCents, nextPublicHourlyRateMicroCents, err := projectedTenantPublicRuntimeHourlyRates(&billingState, app, op)
+	if err != nil {
 		return model.Operation{}, err
 	}
 	effectiveBilling := billing
@@ -2657,7 +2664,13 @@ WHERE app_id = $1
 	if envelopeChanged {
 		effectiveBilling.ManagedCap = nextEnvelope
 	}
-	if err := validateManagedOperationBilling(effectiveBilling, currentTotal, nextTotal); err != nil {
+	if err := validateTenantOperationBilling(
+		effectiveBilling,
+		currentTotal,
+		nextTotal,
+		currentPublicHourlyRateMicroCents,
+		nextPublicHourlyRateMicroCents,
+	); err != nil {
 		return model.Operation{}, err
 	}
 	if envelopeChanged {
@@ -3432,7 +3445,8 @@ WHERE id = $1
 	if owner.Valid && owner.String == tenantID && tenantID != "" {
 		return true, nil
 	}
-	if normalizeRuntimeAccessMode(runtimeType, accessMode) == model.RuntimeAccessModePlatformShared {
+	switch normalizeRuntimeAccessMode(runtimeType, accessMode) {
+	case model.RuntimeAccessModePlatformShared, model.RuntimeAccessModePublic:
 		return true, nil
 	}
 	if strings.TrimSpace(tenantID) == "" {
@@ -3635,7 +3649,7 @@ WHERE runtime_id = $1
 func (s *Store) pgSetRuntimeAccessMode(runtimeID, ownerTenantID, accessMode string) (model.Runtime, error) {
 	accessMode = strings.TrimSpace(accessMode)
 	switch accessMode {
-	case model.RuntimeAccessModePrivate, model.RuntimeAccessModePlatformShared:
+	case model.RuntimeAccessModePrivate, model.RuntimeAccessModePublic, model.RuntimeAccessModePlatformShared:
 	default:
 		return model.Runtime{}, ErrInvalidInput
 	}
@@ -3667,6 +3681,38 @@ func (s *Store) pgSetRuntimeAccessMode(runtimeID, ownerTenantID, accessMode stri
 	}
 	if err := tx.Commit(); err != nil {
 		return model.Runtime{}, fmt.Errorf("commit set runtime access mode transaction: %w", err)
+	}
+	return runtimeObj, nil
+}
+
+func (s *Store) pgSetRuntimePublicOffer(runtimeID, ownerTenantID string, offer model.RuntimePublicOffer) (model.Runtime, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Runtime{}, fmt.Errorf("begin set runtime public offer transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	runtimeObj, err := s.pgGetRuntimeTx(ctx, tx, runtimeID, true)
+	if err != nil {
+		return model.Runtime{}, err
+	}
+	if runtimeObj.TenantID == "" || runtimeObj.TenantID != ownerTenantID {
+		return model.Runtime{}, ErrNotFound
+	}
+	if runtimeObj.Type == model.RuntimeTypeManagedShared {
+		return model.Runtime{}, ErrInvalidInput
+	}
+
+	runtimeObj.PublicOffer = cloneRuntimePublicOffer(&offer)
+	runtimeObj.UpdatedAt = time.Now().UTC()
+	if err := s.pgUpdateRuntimeTx(ctx, tx, runtimeObj); err != nil {
+		return model.Runtime{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Runtime{}, fmt.Errorf("commit set runtime public offer transaction: %w", err)
 	}
 	return runtimeObj, nil
 }
@@ -3947,6 +3993,7 @@ func scanRuntime(scanner sqlScanner) (model.Runtime, error) {
 	var tenantID sql.NullString
 	var machineName sql.NullString
 	var accessMode sql.NullString
+	var publicOfferRaw []byte
 	var poolMode sql.NullString
 	var connectionMode sql.NullString
 	var endpoint sql.NullString
@@ -3966,6 +4013,7 @@ func scanRuntime(scanner sqlScanner) (model.Runtime, error) {
 		&machineName,
 		&runtime.Type,
 		&accessMode,
+		&publicOfferRaw,
 		&poolMode,
 		&connectionMode,
 		&runtime.Status,
@@ -3987,6 +4035,17 @@ func scanRuntime(scanner sqlScanner) (model.Runtime, error) {
 	runtime.TenantID = tenantID.String
 	runtime.MachineName = machineName.String
 	runtime.AccessMode = normalizeRuntimeAccessMode(runtime.Type, accessMode.String)
+	publicOffer, err := decodeJSONValue[model.RuntimePublicOffer](publicOfferRaw)
+	if err != nil {
+		return model.Runtime{}, err
+	}
+	publicOffer.PriceBook = normalizeRuntimePublicOfferPriceBook(publicOffer.PriceBook)
+	if !publicOffer.UpdatedAt.IsZero() || publicOffer.ReferenceMonthlyPriceMicroCents != 0 ||
+		publicOffer.Free || publicOffer.FreeCPU || publicOffer.FreeMemory || publicOffer.FreeStorage ||
+		publicOffer.ReferenceBundle != (model.BillingResourceSpec{}) ||
+		publicOffer.PriceBook != (model.BillingPriceBook{}) {
+		runtime.PublicOffer = cloneRuntimePublicOffer(&publicOffer)
+	}
 	runtime.PoolMode = model.NormalizeRuntimePoolMode(runtime.Type, poolMode.String)
 	runtime.ConnectionMode = connectionMode.String
 	runtime.Endpoint = endpoint.String

@@ -101,7 +101,7 @@ func (s *Server) handleSetRuntimeAccessMode(w http.ResponseWriter, r *http.Reque
 	}
 	req.AccessMode = strings.TrimSpace(req.AccessMode)
 	switch req.AccessMode {
-	case model.RuntimeAccessModePrivate, model.RuntimeAccessModePlatformShared:
+	case model.RuntimeAccessModePrivate, model.RuntimeAccessModePublic, model.RuntimeAccessModePlatformShared:
 	default:
 		httpx.WriteError(w, http.StatusBadRequest, "invalid access_mode")
 		return

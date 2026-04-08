@@ -104,6 +104,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/runtimes/enroll-tokens", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateEnrollmentToken)))
 	mux.Handle("GET /v1/runtimes/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetRuntime)))
 	mux.Handle("POST /v1/runtimes/{id}/pool-mode", s.auth.RequireAPI(http.HandlerFunc(s.handleSetRuntimePoolMode)))
+	mux.Handle("POST /v1/runtimes/{id}/public-offer", s.auth.RequireAPI(http.HandlerFunc(s.handleSetRuntimePublicOffer)))
 	mux.Handle("GET /v1/runtimes/{id}/sharing", s.auth.RequireAPI(http.HandlerFunc(s.handleGetRuntimeSharing)))
 	mux.Handle("POST /v1/runtimes/{id}/sharing/grants", s.auth.RequireAPI(http.HandlerFunc(s.handleGrantRuntimeAccess)))
 	mux.Handle("DELETE /v1/runtimes/{id}/sharing/grants/{tenant_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleRevokeRuntimeAccess)))

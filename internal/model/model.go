@@ -11,6 +11,7 @@ const (
 	RuntimeTypeExternalOwned = "external-owned"
 
 	RuntimeAccessModePrivate        = "private"
+	RuntimeAccessModePublic         = "public"
 	RuntimeAccessModePlatformShared = "platform-shared"
 
 	RuntimePoolModeDedicated      = "dedicated"
@@ -219,27 +220,39 @@ type NodeKey struct {
 }
 
 type Runtime struct {
-	ID                string            `json:"id"`
-	TenantID          string            `json:"tenant_id,omitempty"`
-	Name              string            `json:"name"`
-	MachineName       string            `json:"machine_name,omitempty"`
-	Type              string            `json:"type"`
-	AccessMode        string            `json:"access_mode,omitempty"`
-	PoolMode          string            `json:"pool_mode,omitempty"`
-	ConnectionMode    string            `json:"connection_mode,omitempty"`
-	Status            string            `json:"status"`
-	Endpoint          string            `json:"endpoint,omitempty"`
-	Labels            map[string]string `json:"labels,omitempty"`
-	NodeKeyID         string            `json:"node_key_id,omitempty"`
-	ClusterNodeName   string            `json:"cluster_node_name,omitempty"`
-	FingerprintPrefix string            `json:"fingerprint_prefix,omitempty"`
-	FingerprintHash   string            `json:"fingerprint_hash,omitempty"`
-	AgentKeyPrefix    string            `json:"agent_key_prefix,omitempty"`
-	AgentKeyHash      string            `json:"agent_key_hash,omitempty"`
-	LastSeenAt        *time.Time        `json:"last_seen_at,omitempty"`
-	LastHeartbeatAt   *time.Time        `json:"last_heartbeat_at,omitempty"`
-	CreatedAt         time.Time         `json:"created_at"`
-	UpdatedAt         time.Time         `json:"updated_at"`
+	ID                string              `json:"id"`
+	TenantID          string              `json:"tenant_id,omitempty"`
+	Name              string              `json:"name"`
+	MachineName       string              `json:"machine_name,omitempty"`
+	Type              string              `json:"type"`
+	AccessMode        string              `json:"access_mode,omitempty"`
+	PublicOffer       *RuntimePublicOffer `json:"public_offer,omitempty"`
+	PoolMode          string              `json:"pool_mode,omitempty"`
+	ConnectionMode    string              `json:"connection_mode,omitempty"`
+	Status            string              `json:"status"`
+	Endpoint          string              `json:"endpoint,omitempty"`
+	Labels            map[string]string   `json:"labels,omitempty"`
+	NodeKeyID         string              `json:"node_key_id,omitempty"`
+	ClusterNodeName   string              `json:"cluster_node_name,omitempty"`
+	FingerprintPrefix string              `json:"fingerprint_prefix,omitempty"`
+	FingerprintHash   string              `json:"fingerprint_hash,omitempty"`
+	AgentKeyPrefix    string              `json:"agent_key_prefix,omitempty"`
+	AgentKeyHash      string              `json:"agent_key_hash,omitempty"`
+	LastSeenAt        *time.Time          `json:"last_seen_at,omitempty"`
+	LastHeartbeatAt   *time.Time          `json:"last_heartbeat_at,omitempty"`
+	CreatedAt         time.Time           `json:"created_at"`
+	UpdatedAt         time.Time           `json:"updated_at"`
+}
+
+type RuntimePublicOffer struct {
+	ReferenceBundle                 BillingResourceSpec `json:"reference_bundle"`
+	ReferenceMonthlyPriceMicroCents int64               `json:"reference_monthly_price_microcents,omitempty"`
+	Free                            bool                `json:"free,omitempty"`
+	FreeCPU                         bool                `json:"free_cpu,omitempty"`
+	FreeMemory                      bool                `json:"free_memory,omitempty"`
+	FreeStorage                     bool                `json:"free_storage,omitempty"`
+	PriceBook                       BillingPriceBook    `json:"price_book"`
+	UpdatedAt                       time.Time           `json:"updated_at"`
 }
 
 type Machine struct {

@@ -113,6 +113,7 @@ var postgresSchemaStatements = []string{
 		machine_name TEXT NOT NULL DEFAULT '',
 		type TEXT NOT NULL,
 		access_mode TEXT NOT NULL DEFAULT 'private',
+		public_offer_json JSONB NULL,
 		pool_mode TEXT NOT NULL DEFAULT 'dedicated',
 		connection_mode TEXT NOT NULL DEFAULT '',
 		status TEXT NOT NULL,
@@ -131,6 +132,7 @@ var postgresSchemaStatements = []string{
 	)`,
 	`ALTER TABLE fugue_runtimes ADD COLUMN IF NOT EXISTS machine_name TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE fugue_runtimes ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'private'`,
+	`ALTER TABLE fugue_runtimes ADD COLUMN IF NOT EXISTS public_offer_json JSONB NULL`,
 	`ALTER TABLE fugue_runtimes ADD COLUMN IF NOT EXISTS pool_mode TEXT NOT NULL DEFAULT 'dedicated'`,
 	`ALTER TABLE fugue_runtimes ADD COLUMN IF NOT EXISTS connection_mode TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE fugue_runtimes ADD COLUMN IF NOT EXISTS cluster_node_name TEXT NOT NULL DEFAULT ''`,
@@ -445,13 +447,14 @@ func (s *Store) ensureManagedRuntimeTx(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `
-INSERT INTO fugue_runtimes (id, tenant_id, name, machine_name, type, access_mode, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at)
-VALUES ($1, NULL, $2, $2, $3, $4, $5, '', $6, $7, $8, NULL, '', '', '', '', '', NULL, NULL, $9, $10)
+INSERT INTO fugue_runtimes (id, tenant_id, name, machine_name, type, access_mode, public_offer_json, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at)
+VALUES ($1, NULL, $2, $2, $3, $4, NULL, $5, '', $6, $7, $8, NULL, '', '', '', '', '', NULL, NULL, $9, $10)
 ON CONFLICT (id) DO UPDATE SET
 	name = EXCLUDED.name,
 	machine_name = EXCLUDED.machine_name,
 	type = EXCLUDED.type,
 	access_mode = EXCLUDED.access_mode,
+	public_offer_json = EXCLUDED.public_offer_json,
 	pool_mode = EXCLUDED.pool_mode,
 	status = EXCLUDED.status,
 	endpoint = EXCLUDED.endpoint,
@@ -505,9 +508,10 @@ SET access_mode = CASE
 	WHEN type = $1 THEN $2
 	WHEN access_mode = $2 THEN $2
 	WHEN access_mode = $3 THEN $3
+	WHEN access_mode = $4 THEN $4
 	ELSE $3
 END
-`, model.RuntimeTypeManagedShared, model.RuntimeAccessModePlatformShared, model.RuntimeAccessModePrivate); err != nil {
+`, model.RuntimeTypeManagedShared, model.RuntimeAccessModePlatformShared, model.RuntimeAccessModePrivate, model.RuntimeAccessModePublic); err != nil {
 		return fmt.Errorf("normalize runtime access mode defaults: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
