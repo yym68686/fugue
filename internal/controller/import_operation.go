@@ -141,6 +141,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	}
 	finalSpec.Env = mergeImportEnv(finalSpec.Env, output.ImportResult.SuggestedEnv)
 	finalSpec.Command = mergeImportCommand(finalSpec.Command, finalSpec.Args, output.ImportResult.SuggestedStartupCommand)
+	finalSpec.RestartToken = model.NewID("restart")
 
 	if err := s.ensureOperationStillActive(op.ID); err != nil {
 		return err

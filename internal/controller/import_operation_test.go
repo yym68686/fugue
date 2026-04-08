@@ -8,6 +8,7 @@ import (
 	"log"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"fugue/internal/model"
@@ -172,6 +173,9 @@ func TestExecuteManagedImportOperationImportsDockerImageSource(t *testing.T) {
 	if !reflect.DeepEqual(deployOp.DesiredSpec.Ports, []int{9090}) {
 		t.Fatalf("expected detected port 9090, got %v", deployOp.DesiredSpec.Ports)
 	}
+	if !strings.HasPrefix(deployOp.DesiredSpec.RestartToken, "restart_") {
+		t.Fatalf("expected deploy restart token to be refreshed, got %q", deployOp.DesiredSpec.RestartToken)
+	}
 	if deployOp.DesiredSource == nil {
 		t.Fatal("expected desired source on deploy operation")
 	}
@@ -180,6 +184,98 @@ func TestExecuteManagedImportOperationImportsDockerImageSource(t *testing.T) {
 	}
 	if deployOp.DesiredSource.ResolvedImageRef != "registry.push.example/fugue-apps/demo:image-abc123" {
 		t.Fatalf("expected resolved image ref to be persisted, got %q", deployOp.DesiredSource.ResolvedImageRef)
+	}
+
+	completedImport, err := stateStore.GetOperation(op.ID)
+	if err != nil {
+		t.Fatalf("get completed import operation: %v", err)
+	}
+	if completedImport.DesiredSpec == nil {
+		t.Fatal("expected completed import operation to persist desired spec")
+	}
+	if completedImport.DesiredSpec.RestartToken != deployOp.DesiredSpec.RestartToken {
+		t.Fatalf("expected completed import restart token %q, got %q", deployOp.DesiredSpec.RestartToken, completedImport.DesiredSpec.RestartToken)
+	}
+}
+
+func TestExecuteManagedImportOperationRefreshesExistingRestartToken(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:        "registry.pull.example/fugue-apps/demo:git-abc123",
+		Replicas:     1,
+		RuntimeID:    "runtime_managed_shared",
+		RestartToken: "restart_old",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyDockerfile,
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	specCopy := app.Spec
+	sourceCopy := *app.Source
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		DesiredSource:   &sourceCopy,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+
+	importer := &recordingImporter{}
+	svc := &Service{
+		Store:            stateStore,
+		Logger:           log.New(io.Discard, "", 0),
+		importer:         importer,
+		registryPushBase: "registry.push.example",
+		registryPullBase: "registry.pull.example",
+	}
+
+	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
+		t.Fatalf("execute managed import operation: %v", err)
+	}
+
+	ops, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+	var deployOp model.Operation
+	for _, candidate := range ops {
+		if candidate.Type == model.OperationTypeDeploy {
+			deployOp = candidate
+		}
+	}
+	if deployOp.ID == "" || deployOp.DesiredSpec == nil {
+		t.Fatalf("expected deploy operation with desired spec, got %+v", deployOp)
+	}
+	if deployOp.DesiredSpec.RestartToken == "restart_old" {
+		t.Fatalf("expected rebuild to refresh restart token, got %q", deployOp.DesiredSpec.RestartToken)
+	}
+	if !strings.HasPrefix(deployOp.DesiredSpec.RestartToken, "restart_") {
+		t.Fatalf("expected restart token prefix, got %q", deployOp.DesiredSpec.RestartToken)
 	}
 }
 
