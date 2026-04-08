@@ -514,7 +514,7 @@ func runtimeReferencedByState(state *model.State, runtimeID string) bool {
 
 func (s *Store) pgListManagedSharedLocationRuntimesTx(ctx context.Context, tx *sql.Tx) ([]model.Runtime, error) {
 	rows, err := tx.QueryContext(ctx, `
-SELECT id, tenant_id, name, machine_name, type, access_mode, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+SELECT id, tenant_id, name, machine_name, type, access_mode, public_offer_json, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_runtimes
 WHERE type = $1
   AND id LIKE $2
