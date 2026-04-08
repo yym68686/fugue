@@ -80,14 +80,17 @@ func (i *Importer) ImportGitHubSource(ctx context.Context, req GitHubSourceImpor
 		}, nil
 	case model.AppBuildStrategyStaticSite:
 		importResult, err := i.ImportGitHubStaticSite(ctx, GitHubImportRequest{
-			SourceType:       sourceType,
-			RepoURL:          req.RepoURL,
-			RepoAuthToken:    req.RepoAuthToken,
-			Branch:           req.Branch,
-			SourceDir:        req.SourceDir,
-			RegistryPushBase: req.RegistryPushBase,
-			ImageRepository:  req.ImageRepository,
-			ImageNameSuffix:  req.ImageNameSuffix,
+			SourceType:            sourceType,
+			RepoURL:               req.RepoURL,
+			RepoAuthToken:         req.RepoAuthToken,
+			Branch:                req.Branch,
+			SourceDir:             req.SourceDir,
+			RegistryPushBase:      req.RegistryPushBase,
+			ImageRepository:       req.ImageRepository,
+			ImageNameSuffix:       req.ImageNameSuffix,
+			JobLabels:             req.JobLabels,
+			PlacementNodeSelector: req.PlacementNodeSelector,
+			Stateful:              req.Stateful,
 		})
 		if err != nil {
 			return GitHubSourceImportOutput{}, err

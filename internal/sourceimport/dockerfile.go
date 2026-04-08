@@ -57,6 +57,7 @@ type dockerfileBuildRequest struct {
 	DockerfilePath        string
 	BuildContextDir       string
 	ImageRef              string
+	SourceOverlayFiles    []sourceOverlayFile
 	JobLabels             map[string]string
 	PlacementNodeSelector map[string]string
 	PodPolicy             BuilderPodPolicy
@@ -285,6 +286,13 @@ func buildKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest)
 	initContainers := buildArchiveDownloadInitContainers(req.ArchiveDownloadURL)
 	if strings.TrimSpace(req.ArchiveDownloadURL) == "" {
 		initContainers = buildGitCloneInitContainers(req.RepoURL, req.Branch, req.CommitSHA, req.RepoAuthToken)
+	}
+	sourceOverlayContainer, err := buildSourceOverlayInitContainer("/workspace/repo", req.SourceOverlayFiles)
+	if err != nil {
+		return nil, err
+	}
+	if sourceOverlayContainer != nil {
+		initContainers = append(initContainers, sourceOverlayContainer)
 	}
 
 	jobObject := map[string]any{

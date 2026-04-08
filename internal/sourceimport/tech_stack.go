@@ -143,3 +143,12 @@ func (manifest packageManifest) hasDependency(name string) bool {
 	}
 	return false
 }
+
+func (manifest packageManifest) hasScript(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" || len(manifest.Scripts) == 0 {
+		return false
+	}
+	value, ok := manifest.Scripts[name]
+	return ok && strings.TrimSpace(value) != ""
+}

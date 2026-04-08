@@ -84,7 +84,7 @@ func (i *Importer) ImportGitHubAuto(ctx context.Context, req GitHubAutoImportReq
 	case model.AppBuildStrategyDockerfile:
 		return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, dockerfilePath, buildContextDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
 	case model.AppBuildStrategyStaticSite:
-		return importStaticSiteFromClonedRepo(repo, sourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix)
+		return importStaticSiteFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, sourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
 	case model.AppBuildStrategyBuildpacks:
 		return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, sourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
 	case model.AppBuildStrategyNixpacks:
@@ -208,24 +208,6 @@ func detectAutoImportInputs(repoDir, requestedSourceDir, requestedDockerfilePath
 	}
 
 	return model.AppBuildStrategyNixpacks, ".", "", "", nil
-}
-
-func detectAutoStaticSiteDir(repoDir string) (string, error) {
-	candidates := []string{".", "dist", "build", "site"}
-	for _, candidate := range candidates {
-		fullPath := repoDir
-		if candidate != "." {
-			fullPath = filepath.Join(repoDir, candidate)
-		}
-		info, err := os.Stat(fullPath)
-		if err != nil || !info.IsDir() {
-			continue
-		}
-		if _, err := os.Stat(filepath.Join(fullPath, "index.html")); err == nil {
-			return fullPath, nil
-		}
-	}
-	return "", fmt.Errorf("no ready static-site entrypoint found")
 }
 
 func detectNixpacksProviderAndPort(repoDir, sourceDir string) (string, int) {

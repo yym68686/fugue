@@ -31,14 +31,17 @@ type Importer struct {
 }
 
 type GitHubImportRequest struct {
-	SourceType       string
-	RepoURL          string
-	RepoAuthToken    string
-	Branch           string
-	SourceDir        string
-	RegistryPushBase string
-	ImageRepository  string
-	ImageNameSuffix  string
+	SourceType            string
+	RepoURL               string
+	RepoAuthToken         string
+	Branch                string
+	SourceDir             string
+	RegistryPushBase      string
+	ImageRepository       string
+	ImageNameSuffix       string
+	JobLabels             map[string]string
+	PlacementNodeSelector map[string]string
+	Stateful              bool
 }
 
 type GitHubImportResult struct {
@@ -85,7 +88,7 @@ func (i *Importer) ImportGitHubStaticSite(ctx context.Context, req GitHubImportR
 	}
 	defer releaseClonedRepo(repo)
 
-	return importStaticSiteFromClonedRepo(repo, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix)
+	return importStaticSiteFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
 }
 
 func gitOutput(ctx context.Context, repoDir string, args ...string) (string, error) {
@@ -134,16 +137,39 @@ func parseGitHubRepoURL(raw string) (string, string, error) {
 	return ParseGitHubRepoURL(raw)
 }
 
-func importStaticSiteFromClonedRepo(repo clonedGitHubRepo, requestedSourceDir, registryPushBase, imageRepository, imageNameSuffix string) (GitHubImportResult, error) {
+func importStaticSiteFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, repoAuthToken, requestedSourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
 	sourceDir, err := detectStaticSiteDir(repo.RepoDir, requestedSourceDir)
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
-	detectedStack := detectPrimaryTechStack(repo.RepoDir, relativeImportedSourceDir(repo.RepoDir, sourceDir))
+	plan, err := planStaticSiteImport(repo.RepoDir, relativeImportedSourceDir(repo.RepoDir, sourceDir))
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
-	if err := buildAndPushStaticSiteImage(sourceDir, imageRef); err != nil {
-		return GitHubImportResult{}, err
+	if len(plan.SourceOverlay) > 0 {
+		if err := buildAndPushDockerfileImage(ctx, dockerfileBuildRequest{
+			RepoURL:               repoURL,
+			RepoAuthToken:         repoAuthToken,
+			Branch:                repo.Branch,
+			CommitSHA:             repo.CommitSHA,
+			SourceLabel:           repo.DefaultAppName,
+			DockerfilePath:        plan.DockerfilePath,
+			BuildContextDir:       plan.BuildContextDir,
+			ImageRef:              imageRef,
+			JobLabels:             jobLabels,
+			PlacementNodeSelector: placementNodeSelector,
+			PodPolicy:             builderPolicy,
+			WorkloadProfile:       builderWorkloadProfileFor(model.AppBuildStrategyDockerfile, stateful),
+			SourceOverlayFiles:    plan.SourceOverlay,
+		}); err != nil {
+			return GitHubImportResult{}, err
+		}
+	} else {
+		if err := buildAndPushStaticSiteImage(sourceDir, imageRef); err != nil {
+			return GitHubImportResult{}, err
+		}
 	}
 
 	return GitHubImportResult{
@@ -152,42 +178,15 @@ func importStaticSiteFromClonedRepo(repo clonedGitHubRepo, requestedSourceDir, r
 		Branch:               repo.Branch,
 		CommitSHA:            repo.CommitSHA,
 		CommitCommittedAt:    repo.CommitCommittedAt,
-		SourceDir:            relativeImportedSourceDir(repo.RepoDir, sourceDir),
+		SourceDir:            plan.SourceDir,
 		BuildStrategy:        model.AppBuildStrategyStaticSite,
 		ImageRef:             imageRef,
 		DefaultAppName:       repo.DefaultAppName,
 		DetectedPort:         80,
 		ExposesPublicService: true,
-		DetectedStack:        detectedStack,
+		DetectedProvider:     plan.DetectedProvider,
+		DetectedStack:        plan.DetectedStack,
 	}, nil
-}
-
-func detectStaticSiteDir(repoDir, requested string) (string, error) {
-	candidates := []string{}
-	if strings.TrimSpace(requested) != "" {
-		candidates = append(candidates, strings.TrimSpace(requested))
-	} else {
-		candidates = append(candidates, ".", "dist", "build", "public", "site")
-	}
-
-	for _, candidate := range candidates {
-		fullPath := repoDir
-		if candidate != "." {
-			fullPath = filepath.Join(repoDir, candidate)
-		}
-		info, err := os.Stat(fullPath)
-		if err != nil || !info.IsDir() {
-			continue
-		}
-		if _, err := os.Stat(filepath.Join(fullPath, "index.html")); err == nil {
-			return fullPath, nil
-		}
-	}
-
-	if strings.TrimSpace(requested) != "" {
-		return "", fmt.Errorf("source_dir %q does not contain index.html", requested)
-	}
-	return "", fmt.Errorf("no static-site entrypoint found; this MVP currently requires index.html in root, dist/, build/, public/, or site/")
 }
 
 func buildAndPushStaticSiteImage(sourceDir, imageRef string) error {

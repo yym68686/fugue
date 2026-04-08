@@ -75,7 +75,7 @@ func (i *Importer) ImportUploadedArchiveSource(ctx context.Context, req UploadSo
 		req.BuildContextDir = buildContextDir
 		return i.ImportUploadedArchiveSource(ctx, req)
 	case model.AppBuildStrategyStaticSite:
-		result, err := importStaticSiteFromExtractedUpload(src, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix)
+		result, err := importStaticSiteFromExtractedUpload(ctx, src, req.ArchiveDownloadURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
 		if err != nil {
 			return GitHubSourceImportOutput{}, err
 		}
@@ -265,27 +265,52 @@ func extractTarGzArchive(dstDir string, archiveData []byte) error {
 	}
 }
 
-func importStaticSiteFromExtractedUpload(src extractedUploadSource, requestedSourceDir, registryPushBase, imageRepository, imageNameSuffix string) (GitHubImportResult, error) {
+func importStaticSiteFromExtractedUpload(ctx context.Context, src extractedUploadSource, archiveDownloadURL, requestedSourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
 	sourceDir, err := detectStaticSiteDir(src.RootDir, requestedSourceDir)
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
-	detectedStack := detectPrimaryTechStack(src.RootDir, relativeImportedSourceDir(src.RootDir, sourceDir))
+	plan, err := planStaticSiteImport(src.RootDir, relativeImportedSourceDir(src.RootDir, sourceDir))
+	if err != nil {
+		return GitHubImportResult{}, err
+	}
 
 	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix)
-	if err := buildAndPushStaticSiteImage(sourceDir, imageRef); err != nil {
-		return GitHubImportResult{}, err
+	if len(plan.SourceOverlay) > 0 {
+		if strings.TrimSpace(archiveDownloadURL) == "" {
+			return GitHubImportResult{}, fmt.Errorf("archive download url is required for static-site source builds")
+		}
+		if err := buildAndPushDockerfileImage(ctx, dockerfileBuildRequest{
+			CommitSHA:             src.ArchiveSHA256,
+			SourceLabel:           src.DefaultAppName,
+			ArchiveDownloadURL:    strings.TrimSpace(archiveDownloadURL),
+			DockerfilePath:        plan.DockerfilePath,
+			BuildContextDir:       plan.BuildContextDir,
+			ImageRef:              imageRef,
+			SourceOverlayFiles:    plan.SourceOverlay,
+			JobLabels:             jobLabels,
+			PlacementNodeSelector: placementNodeSelector,
+			PodPolicy:             builderPolicy,
+			WorkloadProfile:       builderWorkloadProfileFor(model.AppBuildStrategyDockerfile, stateful),
+		}); err != nil {
+			return GitHubImportResult{}, err
+		}
+	} else {
+		if err := buildAndPushStaticSiteImage(sourceDir, imageRef); err != nil {
+			return GitHubImportResult{}, err
+		}
 	}
 
 	return GitHubImportResult{
 		CommitSHA:            src.ArchiveSHA256,
-		SourceDir:            relativeImportedSourceDir(src.RootDir, sourceDir),
+		SourceDir:            plan.SourceDir,
 		BuildStrategy:        model.AppBuildStrategyStaticSite,
 		ImageRef:             imageRef,
 		DefaultAppName:       src.DefaultAppName,
 		DetectedPort:         80,
 		ExposesPublicService: true,
-		DetectedStack:        detectedStack,
+		DetectedProvider:     plan.DetectedProvider,
+		DetectedStack:        plan.DetectedStack,
 	}, nil
 }
 
