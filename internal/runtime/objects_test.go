@@ -560,6 +560,32 @@ func TestBuildAppDeploymentUsesRollingUpdateAndReadinessProbe(t *testing.T) {
 	if tcpSocket["port"] != 8080 {
 		t.Fatalf("expected readiness probe port 8080, got %#v", tcpSocket["port"])
 	}
+	if got := containers[0]["imagePullPolicy"]; got != "Always" {
+		t.Fatalf("expected tagged images to use imagePullPolicy Always, got %#v", got)
+	}
+}
+
+func TestBuildAppDeploymentUsesIfNotPresentForDigestPinnedImages(t *testing.T) {
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	deployment := objects[1]
+	spec := deployment["spec"].(map[string]any)
+	template := spec["template"].(map[string]any)
+	podSpec := template["spec"].(map[string]any)
+	containers := podSpec["containers"].([]map[string]any)
+	if got := containers[0]["imagePullPolicy"]; got != "IfNotPresent" {
+		t.Fatalf("expected digest-pinned images to use imagePullPolicy IfNotPresent, got %#v", got)
+	}
 }
 
 func TestBuildAppObjectsSkipsServiceForBackgroundApps(t *testing.T) {

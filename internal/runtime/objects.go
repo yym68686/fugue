@@ -285,6 +285,9 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		"name":  sanitizeName(app.Name),
 		"image": app.Spec.Image,
 	}
+	if pullPolicy := imagePullPolicyForImage(app.Spec.Image); pullPolicy != "" {
+		container["imagePullPolicy"] = pullPolicy
+	}
 	if resources := runtimeResourceRequirements(app.Spec.Resources); resources != nil {
 		container["resources"] = resources
 	}
@@ -442,6 +445,17 @@ func buildAppTCPReadinessProbe(port int) map[string]any {
 		"timeoutSeconds":      1,
 		"failureThreshold":    15,
 	}
+}
+
+func imagePullPolicyForImage(image string) string {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return ""
+	}
+	if strings.Contains(image, "@") {
+		return "IfNotPresent"
+	}
+	return "Always"
 }
 
 func runtimeResourceRequirements(spec *model.ResourceSpec) map[string]any {
