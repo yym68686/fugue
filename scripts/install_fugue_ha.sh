@@ -1262,8 +1262,18 @@ with open(dst, "w", encoding="utf-8") as handle:
     for hostname in domains:
         handle.write(f"\nhttps://{hostname} {{\n")
         handle.write("  tls internal\n")
-        handle.write("  encode gzip zstd\n")
-        handle.write(f"  reverse_proxy {upstream}\n")
+        handle.write("  @sse header Accept *text/event-stream*\n")
+        handle.write("  @stream path /stream */stream\n")
+        handle.write("  handle @sse {\n")
+        handle.write(f"    reverse_proxy {upstream}\n")
+        handle.write("  }\n")
+        handle.write("  handle @stream {\n")
+        handle.write(f"    reverse_proxy {upstream}\n")
+        handle.write("  }\n")
+        handle.write("  handle {\n")
+        handle.write("    encode gzip zstd\n")
+        handle.write(f"    reverse_proxy {upstream}\n")
+        handle.write("  }\n")
         handle.write("}\n")
 
 with open(hosts_path, "w", encoding="utf-8") as handle:
@@ -1365,8 +1375,18 @@ cat >/etc/caddy/Caddyfile <<'CADDY'
 
 https://${FUGUE_DOMAIN} {
   tls internal
-  encode gzip zstd
-  reverse_proxy ${EDGE_UPSTREAM}
+  @sse header Accept *text/event-stream*
+  @stream path /stream */stream
+  handle @sse {
+    reverse_proxy ${EDGE_UPSTREAM}
+  }
+  handle @stream {
+    reverse_proxy ${EDGE_UPSTREAM}
+  }
+  handle {
+    encode gzip zstd
+    reverse_proxy ${EDGE_UPSTREAM}
+  }
 }
 
 https://${FUGUE_REGISTRY_DOMAIN} {
@@ -1379,8 +1399,18 @@ ${mesh_site_block}
 
 https://*.${FUGUE_APP_BASE_DOMAIN} {
   ${app_host_tls_directive}
-  encode gzip zstd
-  reverse_proxy ${EDGE_UPSTREAM}
+  @sse header Accept *text/event-stream*
+  @stream path /stream */stream
+  handle @sse {
+    reverse_proxy ${EDGE_UPSTREAM}
+  }
+  handle @stream {
+    reverse_proxy ${EDGE_UPSTREAM}
+  }
+  handle {
+    encode gzip zstd
+    reverse_proxy ${EDGE_UPSTREAM}
+  }
 }
 
 import /etc/caddy/fugue-custom-domains.caddy
@@ -1389,8 +1419,18 @@ https:// {
   tls {
     on_demand
   }
-  encode gzip zstd
-  reverse_proxy ${EDGE_UPSTREAM}
+  @sse header Accept *text/event-stream*
+  @stream path /stream */stream
+  handle @sse {
+    reverse_proxy ${EDGE_UPSTREAM}
+  }
+  handle @stream {
+    reverse_proxy ${EDGE_UPSTREAM}
+  }
+  handle {
+    encode gzip zstd
+    reverse_proxy ${EDGE_UPSTREAM}
+  }
 }
 CADDY
 caddy validate --config /etc/caddy/Caddyfile

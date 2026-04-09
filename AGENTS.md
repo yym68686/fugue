@@ -9,6 +9,7 @@
 - Do not build images locally and then transfer them to control-plane or cluster nodes over `ssh`, `scp`, `rsync`, `ctr`, `docker save/load`, or similar direct image copy methods.
 - Do not patch live control-plane Deployments by hand with ad-hoc image tags when the intended change can be released through the normal workflow.
 - If an emergency investigation requires SSH access, keep it read-only by default; only perform manual remote recovery when the user explicitly asks for that exception.
+- If an emergency incident requires a temporary manual hotfix on a live control-plane node, backport the same change into this repository immediately and treat the GitHub Actions deployment workflow as the required durable follow-up before calling the rollout complete.
 
 ## General Design Constraints
 
