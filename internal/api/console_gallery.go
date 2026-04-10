@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ const (
 	consoleGalleryStreamPollInterval      = 5 * time.Second
 	consoleGalleryStreamHeartbeatInterval = 15 * time.Second
 	consoleGalleryStreamRetryMS           = 5000
+	defaultConsoleGalleryCacheTTL         = 5 * time.Second
 )
 
 type consoleHTTPError struct {
@@ -990,13 +992,34 @@ func (s *Server) handleGetConsoleGallery(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	response, err := s.buildConsoleGalleryResponse(r.Context(), principal, includeLiveStatus)
+	response, err := s.cachedConsoleGalleryResponse(
+		r.Context(),
+		principal,
+		includeLiveStatus,
+	)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
 
 	httpx.WriteJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) cachedConsoleGalleryResponse(
+	ctx context.Context,
+	principal model.Principal,
+	includeLiveStatus bool,
+) (consoleGalleryResponse, error) {
+	return s.consoleGalleryCache.do(
+		consoleGalleryCacheKey(principal, includeLiveStatus),
+		func() (consoleGalleryResponse, error) {
+			return s.buildConsoleGalleryResponse(ctx, principal, includeLiveStatus)
+		},
+	)
+}
+
+func consoleGalleryCacheKey(principal model.Principal, includeLiveStatus bool) string {
+	return principalVisibilityCacheKey(principal) + "|live=" + strconv.FormatBool(includeLiveStatus)
 }
 
 func (s *Server) handleGetConsoleProject(w http.ResponseWriter, r *http.Request) {

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -17,8 +18,9 @@ import (
 )
 
 const (
-	appImageStatusAvailable = "available"
-	appImageStatusMissing   = "missing"
+	appImageStatusAvailable          = "available"
+	appImageStatusMissing            = "missing"
+	defaultProjectImageUsageCacheTTL = 15 * time.Second
 )
 
 type appImageSummary struct {
@@ -137,32 +139,63 @@ type projectImageUsageAccumulator struct {
 
 func (s *Server) handleListProjectImageUsage(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	timings := serverTimingFromContext(r.Context())
-
-	appsStartedAt := time.Now()
-	apps, err := s.store.ListApps(principal.TenantID, principal.IsPlatformAdmin())
-	timings.Add("store_apps", time.Since(appsStartedAt))
+	response, err := s.cachedProjectImageUsageResponse(r.Context(), principal)
 	if err != nil {
+		var httpErr consoleHTTPError
+		if errors.As(err, &httpErr) {
+			httpx.WriteError(w, httpErr.status, httpErr.message)
+			return
+		}
 		s.writeStoreError(w, err)
-		return
-	}
-
-	opsStartedAt := time.Now()
-	ops, err := s.store.ListOperations(principal.TenantID, principal.IsPlatformAdmin())
-	timings.Add("store_operations", time.Since(opsStartedAt))
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-
-	buildStartedAt := time.Now()
-	response, err := s.buildProjectImageUsageResponse(r.Context(), visibleAppsForImageInventory(apps), ops)
-	timings.Add("project_image_usage", time.Since(buildStartedAt))
-	if err != nil {
-		httpx.WriteError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) cachedProjectImageUsageResponse(
+	ctx context.Context,
+	principal model.Principal,
+) (projectImageUsageResponse, error) {
+	return s.projectImageUsageCache.do(
+		projectImageUsageCacheKey(principal),
+		func() (projectImageUsageResponse, error) {
+			timings := serverTimingFromContext(ctx)
+
+			appsStartedAt := time.Now()
+			apps, err := s.store.ListApps(principal.TenantID, principal.IsPlatformAdmin())
+			timings.Add("store_apps", time.Since(appsStartedAt))
+			if err != nil {
+				return projectImageUsageResponse{}, err
+			}
+
+			opsStartedAt := time.Now()
+			ops, err := s.store.ListOperations(principal.TenantID, principal.IsPlatformAdmin())
+			timings.Add("store_operations", time.Since(opsStartedAt))
+			if err != nil {
+				return projectImageUsageResponse{}, err
+			}
+
+			buildStartedAt := time.Now()
+			response, err := s.buildProjectImageUsageResponse(
+				ctx,
+				visibleAppsForImageInventory(apps),
+				ops,
+			)
+			timings.Add("project_image_usage", time.Since(buildStartedAt))
+			if err != nil {
+				return projectImageUsageResponse{}, consoleHTTPError{
+					message: err.Error(),
+					status:  http.StatusBadGateway,
+				}
+			}
+
+			return response, nil
+		},
+	)
+}
+
+func projectImageUsageCacheKey(principal model.Principal) string {
+	return principalVisibilityCacheKey(principal)
 }
 
 func (s *Server) handleGetAppImages(w http.ResponseWriter, r *http.Request) {

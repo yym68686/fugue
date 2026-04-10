@@ -147,6 +147,26 @@ func TestHandleListProjectImageUsageReturnsProjectSummary(t *testing.T) {
 	}
 }
 
+func TestHandleListProjectImageUsageCachesRegistryFanout(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, _, _, _, fakeRegistry, _, _, _ := setupAppImagesTestServer(t)
+
+	first := performJSONRequest(t, server, http.MethodGet, "/v1/projects/image-usage", apiKey, nil)
+	if first.Code != http.StatusOK {
+		t.Fatalf("expected first status %d, got %d body=%s", http.StatusOK, first.Code, first.Body.String())
+	}
+
+	second := performJSONRequest(t, server, http.MethodGet, "/v1/projects/image-usage", apiKey, nil)
+	if second.Code != http.StatusOK {
+		t.Fatalf("expected second status %d, got %d body=%s", http.StatusOK, second.Code, second.Body.String())
+	}
+
+	if fakeRegistry.inspectCalls != 2 {
+		t.Fatalf("expected cached project image usage to inspect two images once, got %d calls", fakeRegistry.inspectCalls)
+	}
+}
+
 func TestHandleGetBillingCountsManagedImageInventoryStorage(t *testing.T) {
 	t.Parallel()
 
@@ -312,11 +332,13 @@ func TestHandleDeleteAppImageReturnsBadGatewayWhenRegistryGCFails(t *testing.T) 
 }
 
 type fakeAppImageRegistry struct {
-	deleted []string
-	images  map[string]appImageRegistryInspectResult
+	deleted      []string
+	images       map[string]appImageRegistryInspectResult
+	inspectCalls int
 }
 
 func (f *fakeAppImageRegistry) InspectImage(_ context.Context, imageRef string) (appImageRegistryInspectResult, error) {
+	f.inspectCalls++
 	if result, ok := f.images[imageRef]; ok {
 		return cloneAppImageRegistryInspectResult(result), nil
 	}

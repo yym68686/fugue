@@ -40,9 +40,11 @@ type Server struct {
 	clusterJoinMeshAuthKey       string
 	importer                     *sourceimport.Importer
 	appImageRegistry             appImageRegistry
+	projectImageUsageCache       expiringResponseCache[projectImageUsageResponse]
 	newClusterNodeClient         func() (*clusterNodeClient, error)
 	newManagedAppStatusClient    func() (*managedAppStatusClient, error)
 	managedAppStatusCache        managedAppStatusCache
+	consoleGalleryCache          expiringResponseCache[consoleGalleryResponse]
 	newLogsClient                func(namespace string) (appLogsClient, error)
 	newFilesystemPodLister       func(namespace string) (filesystemPodLister, error)
 	filesystemExecRunner         filesystemPodExecRunner
@@ -76,9 +78,11 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		clusterJoinMeshAuthKey:       strings.TrimSpace(cfg.ClusterJoinMeshAuthKey),
 		importer:                     sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
 		appImageRegistry:             newRemoteAppImageRegistry(),
+		projectImageUsageCache:       newExpiringResponseCache[projectImageUsageResponse](defaultProjectImageUsageCacheTTL),
 		newClusterNodeClient:         newClusterNodeClient,
 		newManagedAppStatusClient:    newManagedAppStatusClient,
 		managedAppStatusCache:        newManagedAppStatusCache(0, 0),
+		consoleGalleryCache:          newExpiringResponseCache[consoleGalleryResponse](defaultConsoleGalleryCacheTTL),
 		newLogsClient: func(namespace string) (appLogsClient, error) {
 			return newKubeLogsClient(namespace)
 		},

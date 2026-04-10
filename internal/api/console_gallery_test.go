@@ -126,3 +126,69 @@ func TestConsoleGallerySkipsLiveStatusOverlayByDefault(t *testing.T) {
 		t.Fatalf("expected console gallery to skip live status overlay by default, got %d calls", managedStatusCalls)
 	}
 }
+
+func TestConsoleGalleryCachesResourceOverlayBetweenRequests(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Console Cache Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "viewer", []string{"project.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	if _, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: tenantSharedRuntimeID,
+	}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	clusterInventoryCalls := 0
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		clusterInventoryCalls++
+		return nil, errors.New("unexpected cluster inventory lookup")
+	}
+
+	first := performJSONRequest(
+		t,
+		server,
+		http.MethodGet,
+		"/v1/console/gallery",
+		apiKey,
+		nil,
+	)
+	if first.Code != http.StatusOK {
+		t.Fatalf("expected first status %d, got %d body=%s", http.StatusOK, first.Code, first.Body.String())
+	}
+
+	second := performJSONRequest(
+		t,
+		server,
+		http.MethodGet,
+		"/v1/console/gallery",
+		apiKey,
+		nil,
+	)
+	if second.Code != http.StatusOK {
+		t.Fatalf("expected second status %d, got %d body=%s", http.StatusOK, second.Code, second.Body.String())
+	}
+
+	if clusterInventoryCalls != 1 {
+		t.Fatalf("expected cached console gallery to collapse resource overlay fanout, got %d lookups", clusterInventoryCalls)
+	}
+}
