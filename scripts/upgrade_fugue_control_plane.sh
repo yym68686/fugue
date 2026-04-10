@@ -38,6 +38,8 @@ PRIMARY_DISK_PRESSURE_CLEAR_POLL_SECONDS="${FUGUE_PRIMARY_DISK_PRESSURE_CLEAR_PO
 PRIMARY_DISK_PRESSURE_CLEAR_TIMEOUT_SECONDS="${FUGUE_PRIMARY_DISK_PRESSURE_CLEAR_TIMEOUT_SECONDS:-600}"
 PRIMARY_NODE_READY_POLL_SECONDS="${FUGUE_PRIMARY_NODE_READY_POLL_SECONDS:-5}"
 PRIMARY_NODE_READY_TIMEOUT_SECONDS="${FUGUE_PRIMARY_NODE_READY_TIMEOUT_SECONDS:-300}"
+LOCAL_KUBE_API_READY_POLL_SECONDS="${FUGUE_LOCAL_KUBE_API_READY_POLL_SECONDS:-2}"
+LOCAL_KUBE_API_READY_TIMEOUT_SECONDS="${FUGUE_LOCAL_KUBE_API_READY_TIMEOUT_SECONDS:-180}"
 PRIMARY_POSTGRES_DATA_ROOT="${FUGUE_PRIMARY_POSTGRES_DATA_ROOT:-/var/lib/fugue/postgres}"
 PRIMARY_POSTGRES_IMAGE="${FUGUE_PRIMARY_POSTGRES_IMAGE:-docker.io/library/postgres:16-alpine}"
 
@@ -392,6 +394,40 @@ wait_for_primary_node_ready() {
   return 1
 }
 
+local_kube_api_is_ready() {
+  local readyz=""
+
+  if command_exists timeout; then
+    readyz="$(timeout 10s ${KUBECTL} get --raw='/readyz' 2>/dev/null || true)"
+  else
+    readyz="$(${KUBECTL} get --raw='/readyz' 2>/dev/null || true)"
+  fi
+  [[ "${readyz}" == *"ok"* ]]
+}
+
+wait_for_local_kube_api_ready() {
+  local attempt
+  local max_attempts
+
+  if ! [[ "${LOCAL_KUBE_API_READY_POLL_SECONDS}" =~ ^[0-9]+$ ]] || (( LOCAL_KUBE_API_READY_POLL_SECONDS <= 0 )); then
+    fail "FUGUE_LOCAL_KUBE_API_READY_POLL_SECONDS must be a positive integer"
+  fi
+  if ! [[ "${LOCAL_KUBE_API_READY_TIMEOUT_SECONDS}" =~ ^[0-9]+$ ]] || (( LOCAL_KUBE_API_READY_TIMEOUT_SECONDS <= 0 )); then
+    fail "FUGUE_LOCAL_KUBE_API_READY_TIMEOUT_SECONDS must be a positive integer"
+  fi
+
+  max_attempts=$(( (LOCAL_KUBE_API_READY_TIMEOUT_SECONDS + LOCAL_KUBE_API_READY_POLL_SECONDS - 1) / LOCAL_KUBE_API_READY_POLL_SECONDS ))
+  log "waiting up to ${LOCAL_KUBE_API_READY_TIMEOUT_SECONDS}s for local kube-apiserver to answer /readyz"
+
+  for attempt in $(seq 1 "${max_attempts}"); do
+    if local_kube_api_is_ready; then
+      return 0
+    fi
+    sleep "${LOCAL_KUBE_API_READY_POLL_SECONDS}"
+  done
+  return 1
+}
+
 wait_for_primary_disk_pressure_clear() {
   local primary_node_name="$1"
   local attempt
@@ -527,6 +563,10 @@ EOF
     restarted_via_ssh="true"
   else
     log "warning: failed to restart k3s on ${primary_node_name} over SSH; waiting to see if cleanup alone restores node readiness"
+  fi
+
+  if [[ "${restarted_via_ssh}" == "true" ]] && ! wait_for_local_kube_api_ready; then
+    fail "local kube-apiserver did not recover after restarting k3s on primary node ${primary_node_name}"
   fi
 
   if ! wait_for_primary_node_ready "${primary_node_name}"; then
@@ -844,6 +884,10 @@ EOF
     log "backed up primary k3s config to ${backup_path} before restoring mesh networking"
   fi
 
+  if ! wait_for_local_kube_api_ready; then
+    fail "local kube-apiserver did not recover after restoring mesh networking on ${primary_node_name}"
+  fi
+
   if ! wait_for_primary_node_ready "${primary_node_name}"; then
     fail "primary node ${primary_node_name} did not become Ready after restoring mesh networking"
   fi
@@ -1118,6 +1162,7 @@ main() {
   require_env FUGUE_SMOKE_URL
 
   command_exists helm || fail "helm is not installed"
+  wait_for_local_kube_api_ready
   ${KUBECTL} version --client >/dev/null
   helm status "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" >/dev/null
 
