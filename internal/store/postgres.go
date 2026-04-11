@@ -3,7 +3,9 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,14 +24,31 @@ const (
 	// Bootstrap can serialize across concurrently starting replicas while it
 	// waits on the advisory lock and runs startup repair queries.
 	postgresBootstrapTimeout = 2 * time.Minute
+	// When schema changes do need to run DDL, fail fast on blocked relation
+	// locks so bootstrap can retry instead of hanging the whole API startup.
+	postgresBootstrapLockTimeout = 5 * time.Second
 )
 
-var postgresSchemaStatements = []string{
-	`CREATE TABLE IF NOT EXISTS fugue_meta (
+const (
+	postgresSchemaVersionMetaKey     = "schema_version"
+	postgresSchemaVersionValue       = "relational-v1"
+	postgresSchemaFingerprintMetaKey = "schema_fingerprint"
+)
+
+var postgresBootstrapRetryableCodes = map[string]struct{}{
+	"40P01": {}, // deadlock_detected
+	"40001": {}, // serialization_failure
+	"55P03": {}, // lock_not_available
+}
+
+var postgresMetaSchemaStatement = `CREATE TABLE IF NOT EXISTS fugue_meta (
 		key TEXT PRIMARY KEY,
 		value TEXT NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-	)`,
+	)`
+
+var postgresSchemaStatements = []string{
+	postgresMetaSchemaStatement,
 	`CREATE TABLE IF NOT EXISTS fugue_tenants (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
@@ -348,6 +367,21 @@ func (s *Store) ensureDatabaseReady() error {
 }
 
 func (s *Store) bootstrapDatabase(ctx context.Context) error {
+	for attempt := 0; ; attempt++ {
+		err := s.bootstrapDatabaseOnce(ctx)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil || !isRetryableBootstrapError(err) {
+			return err
+		}
+		if sleepErr := sleepContext(ctx, bootstrapRetryDelay(attempt)); sleepErr != nil {
+			return fmt.Errorf("retry postgres bootstrap after transient failure: %w", errors.Join(err, sleepErr))
+		}
+	}
+}
+
+func (s *Store) bootstrapDatabaseOnce(ctx context.Context) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin bootstrap transaction: %w", err)
@@ -357,18 +391,16 @@ func (s *Store) bootstrapDatabase(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock($1)", postgresBootstrapLockID); err != nil {
 		return fmt.Errorf("acquire postgres advisory lock: %w", err)
 	}
-	for _, stmt := range postgresSchemaStatements {
-		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("apply postgres schema: %w", err)
-		}
+	if _, err := s.applyPostgresSchemaTx(ctx, tx); err != nil {
+		return err
 	}
 
-	schemaVersion, exists, err := s.getMetaTx(ctx, tx, "schema_version")
+	schemaVersion, exists, err := s.getMetaTx(ctx, tx, postgresSchemaVersionMetaKey)
 	if err != nil {
 		return err
 	}
-	if !exists || schemaVersion != "relational-v1" {
-		if err := s.upsertMetaTx(ctx, tx, "schema_version", "relational-v1"); err != nil {
+	if !exists || schemaVersion != postgresSchemaVersionValue {
+		if err := s.upsertMetaTx(ctx, tx, postgresSchemaVersionMetaKey, postgresSchemaVersionValue); err != nil {
 			return err
 		}
 	}
@@ -389,6 +421,33 @@ func (s *Store) bootstrapDatabase(ctx context.Context) error {
 		return fmt.Errorf("commit bootstrap transaction: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) applyPostgresSchemaTx(ctx context.Context, tx *sql.Tx) (bool, error) {
+	if _, err := tx.ExecContext(ctx, postgresMetaSchemaStatement); err != nil {
+		return false, fmt.Errorf("ensure postgres meta table: %w", err)
+	}
+
+	desiredFingerprint := postgresSchemaFingerprint()
+	currentFingerprint, exists, err := s.getMetaTx(ctx, tx, postgresSchemaFingerprintMetaKey)
+	if err != nil {
+		return false, err
+	}
+	if exists && currentFingerprint == desiredFingerprint {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `SELECT set_config('lock_timeout', $1, true)`, formatPostgresDuration(postgresBootstrapLockTimeout)); err != nil {
+		return false, fmt.Errorf("set postgres bootstrap lock timeout: %w", err)
+	}
+	for _, stmt := range postgresSchemaStatements[1:] {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return false, fmt.Errorf("apply postgres schema: %w", err)
+		}
+	}
+	if err := s.upsertMetaTx(ctx, tx, postgresSchemaFingerprintMetaKey, desiredFingerprint); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Store) ensureFailedImportAppStatusTx(ctx context.Context, tx *sql.Tx) error {
@@ -582,6 +641,56 @@ func decodeJSONPointer[T any](raw []byte) (*T, error) {
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+func isRetryableBootstrapError(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	_, retryable := postgresBootstrapRetryableCodes[pgErr.Code]
+	return retryable
+}
+
+func postgresSchemaFingerprint() string {
+	hasher := sha256.New()
+	for _, stmt := range postgresSchemaStatements {
+		_, _ = hasher.Write([]byte(strings.TrimSpace(stmt)))
+		_, _ = hasher.Write([]byte{0})
+	}
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+func bootstrapRetryDelay(attempt int) time.Duration {
+	delay := 250 * time.Millisecond
+	for range attempt {
+		if delay >= 2*time.Second {
+			return 2 * time.Second
+		}
+		delay *= 2
+	}
+	if delay > 2*time.Second {
+		return 2 * time.Second
+	}
+	return delay
+}
+
+func formatPostgresDuration(d time.Duration) string {
+	if d%time.Second == 0 {
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	}
+	return fmt.Sprintf("%dms", d/time.Millisecond)
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func mapDBErr(err error) error {
