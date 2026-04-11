@@ -531,6 +531,13 @@ func TestExecuteManagedImportOperationRefreshesComposeEnvWithoutOverwritingCusto
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	if _, err := stateStore.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
+		CPUMilliCores:    1000,
+		MemoryMebibytes:  2048,
+		StorageGibibytes: 1,
+	}); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
+	}
 
 	primaryApp, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo-api", "", model.AppSpec{
 		Env: map[string]string{
@@ -576,13 +583,6 @@ func TestExecuteManagedImportOperationRefreshesComposeEnvWithoutOverwritingCusto
 	}, model.AppRoute{}); err != nil {
 		t.Fatalf("create sibling app: %v", err)
 	}
-	if _, err := stateStore.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
-		CPUMilliCores:   1000,
-		MemoryMebibytes: 2048,
-	}); err != nil {
-		t.Fatalf("raise billing cap: %v", err)
-	}
-
 	specCopy := primaryApp.Spec
 	sourceCopy := *primaryApp.Source
 	op, err := stateStore.CreateOperation(model.Operation{
