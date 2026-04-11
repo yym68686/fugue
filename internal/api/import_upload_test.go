@@ -234,6 +234,7 @@ func TestImportUploadAppImportsComposeTopology(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create tenant: %v", err)
 	}
+	raiseManagedTestCap(t, s, tenant.ID)
 	_, apiKey, err := s.CreateAPIKey(tenant.ID, "uploader", []string{"app.write", "app.deploy"})
 	if err != nil {
 		t.Fatalf("create api key: %v", err)

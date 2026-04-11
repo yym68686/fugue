@@ -98,6 +98,10 @@ func (s *Store) pgCreateBackingService(tenantID, projectID, name, description st
 	}
 
 	now := time.Now().UTC()
+	billing, billingState, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
+	if err != nil {
+		return model.BackingService{}, err
+	}
 	service := model.BackingService{
 		ID:          model.NewID("service"),
 		TenantID:    tenantID,
@@ -115,6 +119,11 @@ func (s *Store) pgCreateBackingService(tenantID, projectID, name, description st
 		return model.BackingService{}, err
 	}
 	service.Name = s.pgNextAvailableBackingServiceNameTx(ctx, tx, tenantID, projectID, service.Name)
+	if err := validateTenantManagedCapacityProjection(&billingState, billing, func(projection *model.State) {
+		projection.BackingServices = append(projection.BackingServices, cloneBackingService(service))
+	}); err != nil {
+		return model.BackingService{}, err
+	}
 	if err := s.pgInsertBackingServiceTx(ctx, tx, service); err != nil {
 		return model.BackingService{}, err
 	}
@@ -240,6 +249,15 @@ func (s *Store) pgBindBackingService(tenantID, appID, serviceID, alias string, e
 		UpdatedAt: now,
 	}
 	if err := normalizeBindingForPersist(&binding, service); err != nil {
+		return model.ServiceBinding{}, err
+	}
+	billing, billingState, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
+	if err != nil {
+		return model.ServiceBinding{}, err
+	}
+	if err := validateTenantManagedCapacityProjection(&billingState, billing, func(projection *model.State) {
+		projection.ServiceBindings = append(projection.ServiceBindings, cloneServiceBinding(binding))
+	}); err != nil {
 		return model.ServiceBinding{}, err
 	}
 	if err := s.pgInsertServiceBindingTx(ctx, tx, binding); err != nil {

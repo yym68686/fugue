@@ -70,6 +70,10 @@ func (s *Store) pgUpdateTenantBilling(tenantID string, managedCap model.BillingR
 	if err != nil {
 		return model.TenantBillingSummary{}, err
 	}
+	committed := tenantManagedCommittedResourcesForBilling(&state, record)
+	if err := validateCommittedManagedCapacity(normalizedCap, committed); err != nil {
+		return model.TenantBillingSummary{}, err
+	}
 	record.ManagedCap = normalizedCap
 	record.UpdatedAt = now
 	if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, record); err != nil {
@@ -405,7 +409,7 @@ func (s *Store) pgAccrueTenantBillingTx(ctx context.Context, tx *sql.Tx, tenantI
 
 	lastAccruedAt := record.LastAccruedAt
 	committed := tenantManagedCommittedResourcesForBilling(&state, record)
-	accrueTenantBillingWithCommittedStorage(&record, committed.StorageGibibytes, now)
+	accrueTenantBillingWithCommittedResources(&record, committed, now)
 	if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, record); err != nil {
 		return model.TenantBilling{}, model.State{}, err
 	}

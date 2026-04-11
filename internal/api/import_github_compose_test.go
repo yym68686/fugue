@@ -240,6 +240,7 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	raiseManagedTestCap(t, s, tenant.ID)
 
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
 		AppBaseDomain:    "apps.example.com",

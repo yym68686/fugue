@@ -31,6 +31,7 @@ func TestCurrentResourceUsageIsAggregatedAcrossNodesForAppsAndBackingServices(t 
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	raiseManagedTestCap(t, s, tenant.ID)
 	_, apiKey, err := s.CreateAPIKey(tenant.ID, "viewer", []string{"project.write"})
 	if err != nil {
 		t.Fatalf("create api key: %v", err)

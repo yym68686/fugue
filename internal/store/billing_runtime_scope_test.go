@@ -160,6 +160,9 @@ func TestManagedSharedBackingServiceStillCountsWhenAppRunsOnManagedOwned(t *test
 	if err != nil {
 		t.Fatalf("create managed-owned runtime: %v", err)
 	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.DefaultManagedPostgresBillingResources()); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
+	}
 
 	deployBillingTestApp(t, s, tenant.ID, project.ID, "byo-app", model.AppSpec{
 		Image:     "ghcr.io/example/demo:latest",

@@ -2012,6 +2012,10 @@ func (s *Store) pgCreateApp(tenantID, projectID, name, description string, spec 
 	}
 
 	now := time.Now().UTC()
+	billing, billingState, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
+	if err != nil {
+		return model.App{}, err
+	}
 	allowPendingImport := source != nil && isQueuedImportSourceType(source.Type) && strings.TrimSpace(spec.Image) == ""
 	phase := "created"
 	if allowPendingImport {
@@ -2042,6 +2046,17 @@ func (s *Store) pgCreateApp(tenantID, projectID, name, description string, spec 
 		ownedService = &service
 		binding = &appBinding
 		app.Spec.Postgres = nil
+	}
+	if err := validateTenantManagedCapacityProjection(&billingState, billing, func(projection *model.State) {
+		projection.Apps = append(projection.Apps, cloneAppForBilling(app))
+		if ownedService != nil {
+			projection.BackingServices = append(projection.BackingServices, cloneBackingService(*ownedService))
+		}
+		if binding != nil {
+			projection.ServiceBindings = append(projection.ServiceBindings, cloneServiceBinding(*binding))
+		}
+	}); err != nil {
+		return model.App{}, err
 	}
 	sourceJSON, err := marshalNullableJSON(app.Source)
 	if err != nil {
@@ -2659,35 +2674,14 @@ WHERE app_id = $1
 	if err != nil {
 		return model.Operation{}, err
 	}
-	effectiveBilling := billing
-	nextEnvelope, envelopeChanged := nextManagedEnvelope(effectiveBilling, currentTotal, nextTotal)
-	if envelopeChanged {
-		effectiveBilling.ManagedCap = nextEnvelope
-	}
 	if err := validateTenantOperationBilling(
-		effectiveBilling,
+		billing,
 		currentTotal,
 		nextTotal,
 		currentPublicHourlyRateMicroCents,
 		nextPublicHourlyRateMicroCents,
 	); err != nil {
 		return model.Operation{}, err
-	}
-	if envelopeChanged {
-		billing.ManagedCap = nextEnvelope
-		billing.UpdatedAt = now
-		if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, billing); err != nil {
-			return model.Operation{}, err
-		}
-		if err := s.pgInsertTenantBillingEventTx(ctx, tx, newTenantBillingConfigUpdatedEvent(
-			app.TenantID,
-			nextEnvelope,
-			billing.BalanceMicroCents,
-			now,
-			map[string]string{"source": "auto-expand"},
-		)); err != nil {
-			return model.Operation{}, err
-		}
 	}
 	op.ID = model.NewID("op")
 	op.Status = model.OperationStatusPending

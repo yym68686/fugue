@@ -72,6 +72,7 @@ func TestBackingServiceLifecycleAndBindingsQueueDeploy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	raiseManagedTestCap(t, s, tenant.ID)
 	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.write", "app.deploy"})
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
@@ -86,8 +87,9 @@ func TestBackingServiceLifecycleAndBindingsQueueDeploy(t *testing.T) {
 		t.Fatalf("create app: %v", err)
 	}
 	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
-		CPUMilliCores:   750,
-		MemoryMebibytes: 1536,
+		CPUMilliCores:    750,
+		MemoryMebibytes:  1536,
+		StorageGibibytes: 1,
 	}); err != nil {
 		t.Fatalf("raise billing cap: %v", err)
 	}
@@ -200,6 +202,7 @@ func TestGetAppIncludesStructuredTechStack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	raiseManagedTestCap(t, s, tenant.ID)
 	_, apiKey, err := s.CreateAPIKey(tenant.ID, "viewer", []string{"app.write"})
 	if err != nil {
 		t.Fatalf("create api key: %v", err)

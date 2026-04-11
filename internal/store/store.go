@@ -2001,6 +2001,10 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 			}
 		}
 		now := time.Now().UTC()
+		billing := accrueTenantBillingLedger(state, tenantID, now)
+		if billing == nil {
+			return ErrNotFound
+		}
 		phase := "created"
 		if allowPendingImport {
 			phase = "importing"
@@ -2022,12 +2026,29 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
+		var ownedService *model.BackingService
+		var ownedBinding *model.ServiceBinding
 		if app.Spec.Postgres != nil {
 			service, binding := ownedManagedPostgresResources(app)
 			service.Name = nextAvailableBackingServiceName(state, tenantID, projectID, service.Name)
-			state.BackingServices = append(state.BackingServices, service)
-			state.ServiceBindings = append(state.ServiceBindings, binding)
+			ownedService = &service
+			ownedBinding = &binding
 			app.Spec.Postgres = nil
+		}
+		if err := validateTenantManagedCapacityProjection(state, *billing, func(projection *model.State) {
+			projection.Apps = append(projection.Apps, cloneAppForBilling(app))
+			if ownedService != nil {
+				projection.BackingServices = append(projection.BackingServices, cloneBackingService(*ownedService))
+			}
+			if ownedBinding != nil {
+				projection.ServiceBindings = append(projection.ServiceBindings, cloneServiceBinding(*ownedBinding))
+			}
+		}); err != nil {
+			return err
+		}
+		if ownedService != nil {
+			state.BackingServices = append(state.BackingServices, *ownedService)
+			state.ServiceBindings = append(state.ServiceBindings, *ownedBinding)
 		}
 		hydrateAppBackingServices(state, &app)
 		state.Apps = append(state.Apps, app)
@@ -2243,30 +2264,14 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 		if err != nil {
 			return err
 		}
-		effectiveBilling := *billing
-		nextEnvelope, envelopeChanged := nextManagedEnvelope(effectiveBilling, currentTotal, nextTotal)
-		if envelopeChanged {
-			effectiveBilling.ManagedCap = nextEnvelope
-		}
 		if err := validateTenantOperationBilling(
-			effectiveBilling,
+			*billing,
 			currentTotal,
 			nextTotal,
 			currentPublicHourlyRateMicroCents,
 			nextPublicHourlyRateMicroCents,
 		); err != nil {
 			return err
-		}
-		if envelopeChanged {
-			billing.ManagedCap = nextEnvelope
-			billing.UpdatedAt = now
-			appendTenantBillingEvent(state, newTenantBillingConfigUpdatedEvent(
-				app.TenantID,
-				nextEnvelope,
-				billing.BalanceMicroCents,
-				now,
-				map[string]string{"source": "auto-expand"},
-			))
 		}
 		op.ID = model.NewID("op")
 		op.Status = model.OperationStatusPending

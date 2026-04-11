@@ -40,6 +40,7 @@ func TestListClusterNodesIncludesMetricsConditionsAndWorkloads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
 	}
+	raiseManagedTestCap(t, s, tenant.ID)
 	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
 		Image:     "ghcr.io/example/demo:latest",
 		Ports:     []int{8080},
@@ -334,6 +335,7 @@ func TestListClusterNodesIncludesSharedNodesHostingTenantWorkloads(t *testing.T)
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
 	}
+	raiseManagedTestCap(t, s, tenant.ID)
 
 	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
 		Image:     "ghcr.io/example/demo:latest",

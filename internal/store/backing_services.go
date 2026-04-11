@@ -73,6 +73,10 @@ func (s *Store) CreateBackingService(tenantID, projectID, name, description stri
 			return ErrNotFound
 		}
 		now := time.Now().UTC()
+		billing := accrueTenantBillingLedger(state, tenantID, now)
+		if billing == nil {
+			return ErrNotFound
+		}
 		service = model.BackingService{
 			ID:          model.NewID("service"),
 			TenantID:    tenantID,
@@ -91,6 +95,11 @@ func (s *Store) CreateBackingService(tenantID, projectID, name, description stri
 		}
 		if backingServiceNameExists(state, tenantID, projectID, service.Name, "") {
 			return ErrConflict
+		}
+		if err := validateTenantManagedCapacityProjection(state, *billing, func(projection *model.State) {
+			projection.BackingServices = append(projection.BackingServices, cloneBackingService(service))
+		}); err != nil {
+			return err
 		}
 		state.BackingServices = append(state.BackingServices, service)
 		return nil
@@ -188,6 +197,15 @@ func (s *Store) BindBackingService(tenantID, appID, serviceID, alias string, env
 			UpdatedAt: now,
 		}
 		if err := normalizeBindingForPersist(&binding, service); err != nil {
+			return err
+		}
+		billing := accrueTenantBillingLedger(state, tenantID, now)
+		if billing == nil {
+			return ErrNotFound
+		}
+		if err := validateTenantManagedCapacityProjection(state, *billing, func(projection *model.State) {
+			projection.ServiceBindings = append(projection.ServiceBindings, cloneServiceBinding(binding))
+		}); err != nil {
 			return err
 		}
 		state.ServiceBindings = append(state.ServiceBindings, binding)

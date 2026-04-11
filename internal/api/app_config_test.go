@@ -14,6 +14,18 @@ import (
 	"fugue/internal/store"
 )
 
+func raiseManagedTestCap(t *testing.T, s *store.Store, tenantID string) {
+	t.Helper()
+
+	if _, err := s.UpdateTenantBilling(tenantID, model.BillingResourceSpec{
+		CPUMilliCores:    2000,
+		MemoryMebibytes:  4096,
+		StorageGibibytes: 30,
+	}); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
+	}
+}
+
 func TestAppReadRedactsSecretFilesButDedicatedConfigEndpointsReturnValues(t *testing.T) {
 	t.Parallel()
 
@@ -899,6 +911,7 @@ func setupAppConfigTestServer(t *testing.T, spec model.AppSpec) (*store.Store, *
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	raiseManagedTestCap(t, s, tenant.ID)
 	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.write", "app.deploy"})
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
@@ -928,6 +941,7 @@ func setupFailedImportedAppRecoveryServer(t *testing.T) (*store.Store, *Server, 
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	raiseManagedTestCap(t, s, tenant.ID)
 	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.write", "app.deploy"})
 	if err != nil {
 		t.Fatalf("create api key: %v", err)

@@ -834,6 +834,9 @@ func TestCreateAppConvertsInlinePostgresToBackingService(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.DefaultManagedPostgresBillingResources()); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
+	}
 
 	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
 		Image:     "ghcr.io/example/demo:latest",
@@ -957,8 +960,9 @@ func TestDeployOperationConvertsInlinePostgresToBackingServiceOnComplete(t *test
 		t.Fatalf("create app: %v", err)
 	}
 	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
-		CPUMilliCores:   750,
-		MemoryMebibytes: 1536,
+		CPUMilliCores:    750,
+		MemoryMebibytes:  1536,
+		StorageGibibytes: 1,
 	}); err != nil {
 		t.Fatalf("raise billing cap: %v", err)
 	}
@@ -3461,6 +3465,13 @@ func TestPurgeAppRemovesImportedPlaceholderResources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
+		CPUMilliCores:    750,
+		MemoryMebibytes:  1536,
+		StorageGibibytes: 1,
+	}); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
+	}
 	app, err := s.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
 		Replicas:  1,
 		RuntimeID: "runtime_managed_shared",
@@ -3660,7 +3671,7 @@ func TestCreateAppAllowsPersistentStorageOnManagedSharedRuntime(t *testing.T) {
 	}
 }
 
-func TestBillingAutoRaisesEnvelopeForManagedScaleBeyondConfiguredEnvelope(t *testing.T) {
+func TestBillingRejectsManagedScaleBeyondConfiguredEnvelope(t *testing.T) {
 	t.Parallel()
 
 	s := New(filepath.Join(t.TempDir(), "store.json"))
@@ -3715,29 +3726,19 @@ func TestBillingAutoRaisesEnvelopeForManagedScaleBeyondConfiguredEnvelope(t *tes
 		Type:            model.OperationTypeScale,
 		AppID:           app.ID,
 		DesiredReplicas: &replicas,
-	}); err != nil {
-		t.Fatalf("expected scale-up beyond the saved envelope to auto-raise billing, got %v", err)
+	}); !errors.Is(err, ErrBillingCapExceeded) {
+		t.Fatalf("expected ErrBillingCapExceeded, got %v", err)
 	}
 
-	expectedEnvelope := model.BillingResourceSpec{
-		CPUMilliCores:   model.DefaultManagedAppResources().CPUMilliCores * 2,
-		MemoryMebibytes: model.DefaultManagedAppResources().MemoryMebibytes * 2,
-	}
+	expectedEnvelope := model.BillingResourceSpecFromResourceSpec(model.DefaultManagedAppResources())
 	if err := s.withLockedState(false, func(state *model.State) error {
 		record := ensureTenantBillingRecord(state, tenant.ID, time.Now().UTC())
 		if record.ManagedCap != expectedEnvelope {
-			t.Fatalf("expected auto-raised envelope %+v, got %+v", expectedEnvelope, record.ManagedCap)
-		}
-		events := recentTenantBillingEvents(state, tenant.ID)
-		if len(events) == 0 || events[0].Type != model.BillingEventTypeConfigUpdated {
-			t.Fatalf("expected latest billing event to record the auto-raised envelope, got %+v", events)
-		}
-		if source := events[0].Metadata["source"]; source != "auto-expand" {
-			t.Fatalf("expected auto-expand event metadata, got %q", source)
+			t.Fatalf("expected cap to stay at %+v, got %+v", expectedEnvelope, record.ManagedCap)
 		}
 		return nil
 	}); err != nil {
-		t.Fatalf("inspect auto-raised billing state: %v", err)
+		t.Fatalf("inspect billing state: %v", err)
 	}
 }
 
@@ -3791,6 +3792,19 @@ func TestNewTenantsStartWithSeededFreeTierBilling(t *testing.T) {
 		PriceBook:  model.DefaultBillingPriceBook(),
 	})
 
+	staleAccrual := time.Now().UTC().Add(-72 * time.Hour)
+	if err := s.withLockedState(true, func(state *model.State) error {
+		index := findTenantBillingRecord(state, tenant.ID)
+		if index < 0 {
+			t.Fatalf("billing record for tenant %s not found", tenant.ID)
+		}
+		state.TenantBilling[index].LastAccruedAt = staleAccrual
+		state.TenantBilling[index].UpdatedAt = staleAccrual
+		return nil
+	}); err != nil {
+		t.Fatalf("seed idle billing state: %v", err)
+	}
+
 	if err := s.withLockedState(false, func(state *model.State) error {
 		index := findTenantBillingRecord(state, tenant.ID)
 		if index < 0 {
@@ -3815,14 +3829,17 @@ func TestNewTenantsStartWithSeededFreeTierBilling(t *testing.T) {
 	if summary.ManagedCap != expectedCap {
 		t.Fatalf("expected summary cap %+v, got %+v", expectedCap, summary.ManagedCap)
 	}
-	if summary.Status != model.BillingStatusActive {
-		t.Fatalf("expected active billing status, got %s", summary.Status)
+	if summary.Status != model.BillingStatusInactive {
+		t.Fatalf("expected inactive billing status for an empty tenant, got %s", summary.Status)
 	}
-	if summary.MonthlyEstimateMicroCents != expectedBalance {
-		t.Fatalf("expected monthly estimate %d, got %d", expectedBalance, summary.MonthlyEstimateMicroCents)
+	if summary.HourlyRateMicroCents != 0 {
+		t.Fatalf("expected zero hourly rate for an empty tenant, got %d", summary.HourlyRateMicroCents)
+	}
+	if summary.MonthlyEstimateMicroCents != 0 {
+		t.Fatalf("expected zero monthly estimate for an empty tenant, got %d", summary.MonthlyEstimateMicroCents)
 	}
 	if summary.BalanceMicroCents != expectedBalance {
-		t.Fatalf("expected seeded summary balance %d, got %d", expectedBalance, summary.BalanceMicroCents)
+		t.Fatalf("expected seeded summary balance %d without idle drain, got %d", expectedBalance, summary.BalanceMicroCents)
 	}
 	if summary.DefaultAppResources != (model.BillingResourceSpec{}) {
 		t.Fatalf("expected app default resources to remain unset, got %+v", summary.DefaultAppResources)
@@ -3871,8 +3888,14 @@ func TestLegacyZeroBillingRecordBackfillsSeededFreeTier(t *testing.T) {
 	if summary.ManagedCap != expectedCap {
 		t.Fatalf("expected backfilled cap %+v, got %+v", expectedCap, summary.ManagedCap)
 	}
-	if summary.MonthlyEstimateMicroCents != expectedBalance {
-		t.Fatalf("expected backfilled monthly estimate %d, got %d", expectedBalance, summary.MonthlyEstimateMicroCents)
+	if summary.Status != model.BillingStatusInactive {
+		t.Fatalf("expected backfilled empty tenant to remain inactive, got %s", summary.Status)
+	}
+	if summary.HourlyRateMicroCents != 0 {
+		t.Fatalf("expected backfilled empty tenant hourly rate 0, got %d", summary.HourlyRateMicroCents)
+	}
+	if summary.MonthlyEstimateMicroCents != 0 {
+		t.Fatalf("expected backfilled empty tenant monthly estimate 0, got %d", summary.MonthlyEstimateMicroCents)
 	}
 	if summary.BalanceMicroCents != expectedBalance {
 		t.Fatalf("expected backfilled balance %d without stale drain, got %d", expectedBalance, summary.BalanceMicroCents)
@@ -3923,23 +3946,18 @@ func TestLegacyBillingPriceBookRecalibratesToDefault(t *testing.T) {
 	}
 
 	expectedPriceBook := model.DefaultBillingPriceBook()
-	expectedHourly := billingHourlyRateMicroCents(model.TenantBilling{
-		ManagedCap: managedCap,
-		PriceBook:  expectedPriceBook,
-	})
-	expectedMonthly := billingMonthlyEstimateMicroCents(model.TenantBilling{
-		ManagedCap: managedCap,
-		PriceBook:  expectedPriceBook,
-	})
 
 	if summary.PriceBook != expectedPriceBook {
 		t.Fatalf("expected recalibrated price book %+v, got %+v", expectedPriceBook, summary.PriceBook)
 	}
-	if summary.HourlyRateMicroCents != expectedHourly {
-		t.Fatalf("expected hourly rate %d, got %d", expectedHourly, summary.HourlyRateMicroCents)
+	if summary.Status != model.BillingStatusInactive {
+		t.Fatalf("expected recalibrated empty tenant to remain inactive, got %s", summary.Status)
 	}
-	if summary.MonthlyEstimateMicroCents != expectedMonthly {
-		t.Fatalf("expected monthly estimate %d, got %d", expectedMonthly, summary.MonthlyEstimateMicroCents)
+	if summary.HourlyRateMicroCents != 0 {
+		t.Fatalf("expected hourly rate 0 without active billable resources, got %d", summary.HourlyRateMicroCents)
+	}
+	if summary.MonthlyEstimateMicroCents != 0 {
+		t.Fatalf("expected monthly estimate 0 without active billable resources, got %d", summary.MonthlyEstimateMicroCents)
 	}
 
 	if err := s.withLockedState(false, func(state *model.State) error {
@@ -4054,6 +4072,63 @@ func TestSyncTenantBillingImageStorageContributesToCommittedStorageAndEstimate(t
 	}
 	if summary.OverCap {
 		t.Fatal("expected image storage matching the default saved envelope not to mark billing over-cap")
+	}
+}
+
+func TestAnyActiveManagedResourceTurnsOnFullSavedEnvelopeBilling(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Image-Only Billing Gate Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	if _, err := s.SyncTenantBillingImageStorage(tenant.ID, 1); err != nil {
+		t.Fatalf("seed image storage: %v", err)
+	}
+
+	startBalance := int64(9_000_000_000)
+	staleAccruedAt := time.Now().UTC().Add(-2 * time.Hour)
+	if err := s.withLockedState(true, func(state *model.State) error {
+		index := findTenantBillingRecord(state, tenant.ID)
+		if index < 0 {
+			t.Fatalf("billing record for tenant %s not found", tenant.ID)
+		}
+		state.TenantBilling[index].BalanceMicroCents = startBalance
+		state.TenantBilling[index].LastAccruedAt = staleAccruedAt
+		state.TenantBilling[index].UpdatedAt = staleAccruedAt
+		return nil
+	}); err != nil {
+		t.Fatalf("seed stale billing gate state: %v", err)
+	}
+
+	summary, err := s.GetTenantBillingSummary(tenant.ID)
+	if err != nil {
+		t.Fatalf("get billing summary: %v", err)
+	}
+
+	expectedHourly := billingHourlyRateMicroCents(model.TenantBilling{
+		ManagedCap: model.DefaultTenantFreeManagedCap(),
+		PriceBook:  model.DefaultBillingPriceBook(),
+	})
+	elapsedNanos := summary.LastAccruedAt.Sub(staleAccruedAt).Nanoseconds()
+	expectedBalance := startBalance - expectedHourly*elapsedNanos/int64(time.Hour)
+
+	if summary.Status != model.BillingStatusActive {
+		t.Fatalf("expected active billing status once image storage exists, got %s", summary.Status)
+	}
+	if got := summary.ManagedCommitted.StorageGibibytes; got != 1 {
+		t.Fatalf("expected committed image storage 1 GiB, got %d", got)
+	}
+	if summary.HourlyRateMicroCents != expectedHourly {
+		t.Fatalf("expected full saved-envelope hourly rate %d, got %d", expectedHourly, summary.HourlyRateMicroCents)
+	}
+	if summary.BalanceMicroCents != expectedBalance {
+		t.Fatalf("expected balance %d after gating on the full envelope, got %d", expectedBalance, summary.BalanceMicroCents)
 	}
 }
 
@@ -4315,6 +4390,65 @@ func TestSingleZeroBillingDimensionPausesManagedBilling(t *testing.T) {
 	}
 }
 
+func TestBillingRejectsLoweringCapBelowCurrentCommitted(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Billing Overcap Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	appResources := model.DefaultManagedAppResources()
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		Resources: &appResources,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	doubleAppCap := model.BillingResourceSpec{
+		CPUMilliCores:   model.DefaultManagedAppResources().CPUMilliCores * 2,
+		MemoryMebibytes: model.DefaultManagedAppResources().MemoryMebibytes * 2,
+	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, doubleAppCap); err != nil {
+		t.Fatalf("update billing: %v", err)
+	}
+	if _, err := s.TopUpTenantBilling(tenant.ID, 500, "seed"); err != nil {
+		t.Fatalf("top up billing: %v", err)
+	}
+
+	deploySpec := app.Spec
+	deploySpec.Replicas = 2
+	deployOp, err := s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &deploySpec,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if _, err := s.CompleteManagedOperation(deployOp.ID, "/tmp/demo.yaml", "done"); err != nil {
+		t.Fatalf("complete deploy operation: %v", err)
+	}
+
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpecFromResourceSpec(model.DefaultManagedAppResources())); !errors.Is(err, ErrBillingCapExceeded) {
+		t.Fatalf("expected ErrBillingCapExceeded when lowering cap below committed resources, got %v", err)
+	}
+}
+
 func TestBillingAllowsScaleDownWhileOverCap(t *testing.T) {
 	t.Parallel()
 
@@ -4369,8 +4503,13 @@ func TestBillingAllowsScaleDownWhileOverCap(t *testing.T) {
 		t.Fatalf("complete deploy operation: %v", err)
 	}
 
-	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpecFromResourceSpec(model.DefaultManagedAppResources())); err != nil {
-		t.Fatalf("lower billing cap: %v", err)
+	if err := s.withLockedState(true, func(state *model.State) error {
+		record := ensureTenantBillingRecord(state, tenant.ID, time.Now().UTC())
+		record.ManagedCap = model.BillingResourceSpecFromResourceSpec(model.DefaultManagedAppResources())
+		record.UpdatedAt = time.Now().UTC()
+		return nil
+	}); err != nil {
+		t.Fatalf("seed legacy over-cap billing state: %v", err)
 	}
 
 	scaleDown := 1
@@ -4389,22 +4528,136 @@ func TestBillingAllowsScaleDownWhileOverCap(t *testing.T) {
 		Type:            model.OperationTypeScale,
 		AppID:           app.ID,
 		DesiredReplicas: &scaleUp,
-	}); err != nil {
-		t.Fatalf("expected scale-up while above the saved envelope to auto-raise billing, got %v", err)
+	}); !errors.Is(err, ErrBillingCapExceeded) {
+		t.Fatalf("expected ErrBillingCapExceeded while legacy state remains over cap, got %v", err)
+	}
+}
+
+func TestCreateBackingServiceRejectsManagedCapacityBeyondCap(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
 	}
 
-	expectedEnvelope := model.BillingResourceSpec{
-		CPUMilliCores:   model.DefaultManagedAppResources().CPUMilliCores * 3,
-		MemoryMebibytes: model.DefaultManagedAppResources().MemoryMebibytes * 3,
+	tenant, err := s.CreateTenant("Backing Service Billing Cap Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
 	}
-	if err := s.withLockedState(false, func(state *model.State) error {
-		record := ensureTenantBillingRecord(state, tenant.ID, time.Now().UTC())
-		if record.ManagedCap != expectedEnvelope {
-			t.Fatalf("expected envelope %+v after auto-raise, got %+v", expectedEnvelope, record.ManagedCap)
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("inspect over-cap auto-raise state: %v", err)
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{}); err != nil {
+		t.Fatalf("set billing cap: %v", err)
+	}
+
+	if _, err := s.CreateBackingService(tenant.ID, project.ID, "shared-db", "", model.BackingServiceSpec{
+		Postgres: &model.AppPostgresSpec{
+			Database:  "demo",
+			User:      "demo",
+			Password:  "secret",
+			RuntimeID: "runtime_managed_shared",
+		},
+	}); !errors.Is(err, ErrBillingCapExceeded) {
+		t.Fatalf("expected ErrBillingCapExceeded, got %v", err)
+	}
+}
+
+func TestBindBackingServiceRejectsManagedCapacityBeyondCap(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Binding Billing Cap Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	appResources := model.DefaultManagedAppResources()
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		Resources: &appResources,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpecFromResourceSpec(appResources)); err != nil {
+		t.Fatalf("set billing cap: %v", err)
+	}
+
+	deploySpec := app.Spec
+	deployOp, err := s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &deploySpec,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if _, err := s.CompleteManagedOperation(deployOp.ID, "/tmp/demo.yaml", "done"); err != nil {
+		t.Fatalf("complete deploy operation: %v", err)
+	}
+
+	service, err := s.CreateBackingService(tenant.ID, project.ID, "shared-db", "", model.BackingServiceSpec{
+		Postgres: &model.AppPostgresSpec{
+			Database: "demo",
+			User:     "demo",
+			Password: "secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create backing service: %v", err)
+	}
+
+	if _, err := s.BindBackingService(tenant.ID, app.ID, service.ID, "", nil); !errors.Is(err, ErrBillingCapExceeded) {
+		t.Fatalf("expected ErrBillingCapExceeded, got %v", err)
+	}
+}
+
+func TestCreateAppWithInlineManagedPostgresRejectsManagedCapacityBeyondCap(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Inline Postgres Billing Cap Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{}); err != nil {
+		t.Fatalf("set billing cap: %v", err)
+	}
+
+	if _, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Postgres: &model.AppPostgresSpec{
+			Database: "demo",
+			User:     "demo",
+			Password: "secret",
+		},
+	}); !errors.Is(err, ErrBillingCapExceeded) {
+		t.Fatalf("expected ErrBillingCapExceeded, got %v", err)
 	}
 }
 
