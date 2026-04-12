@@ -347,44 +347,61 @@ func (s *builderScheduler) loadNodeSnapshots(ctx context.Context) ([]builderNode
 	if err != nil {
 		return nil, err
 	}
-	summaries := make(map[string]*builderKubeNodeSummary, len(nodes))
+	snapshots := make([]builderNodeSnapshot, 0, len(nodes))
+	eligibleCount := 0
+	var lastSummaryErr error
 	for _, node := range nodes {
-		name := strings.TrimSpace(node.Metadata.Name)
-		if name == "" {
+		snapshot := builderSnapshotFromKubeNode(node)
+		if !s.nodeNeedsSummary(snapshot) {
 			continue
 		}
-		summary, err := s.client.getNodeSummary(ctx, name)
+		eligibleCount++
+		summary, err := s.client.getNodeSummary(ctx, snapshot.Name)
 		if err != nil {
-			return nil, err
+			lastSummaryErr = fmt.Errorf("node %s: %w", snapshot.Name, err)
+			continue
 		}
-		summaries[name] = summary
-	}
-	snapshots := make([]builderNodeSnapshot, 0, len(nodes))
-	for _, node := range nodes {
-		snapshot := builderNodeSnapshot{
-			Name:         strings.TrimSpace(node.Metadata.Name),
-			Hostname:     strings.TrimSpace(node.Metadata.Labels[builderHostnameLabelKey]),
-			Labels:       node.Metadata.Labels,
-			Taints:       node.Spec.Taints,
-			Ready:        builderNodeConditionStatus(node.Status.Conditions, "Ready"),
-			DiskPressure: builderNodeConditionStatus(node.Status.Conditions, "DiskPressure"),
-			Allocatable: builderResourceDemand{
-				CPUMilli:       parseBuilderCPUMilli(node.Status.Allocatable["cpu"]),
-				MemoryBytes:    parseBuilderBytes(node.Status.Allocatable["memory"]),
-				EphemeralBytes: parseBuilderBytes(node.Status.Allocatable["ephemeral-storage"]),
-			},
-			Used: builderResourceDemand{},
-		}
-		if snapshot.Hostname == "" {
-			snapshot.Hostname = snapshot.Name
-		}
-		if summary := summaries[snapshot.Name]; summary != nil {
-			snapshot.Used = builderUsedResources(summary, snapshot.Allocatable.MemoryBytes)
-			snapshot.FilesystemAvailableBytes = builderNodeFilesystemAvailableBytes(summary)
-		}
+		snapshot.Used = builderUsedResources(summary, snapshot.Allocatable.MemoryBytes)
+		snapshot.FilesystemAvailableBytes = builderNodeFilesystemAvailableBytes(summary)
 		snapshots = append(snapshots, snapshot)
 	}
+	if eligibleCount > 0 && len(snapshots) == 0 && lastSummaryErr != nil {
+		return nil, fmt.Errorf("load builder node stats summaries: %w", lastSummaryErr)
+	}
 	return snapshots, nil
+}
+
+func builderSnapshotFromKubeNode(node builderKubeNode) builderNodeSnapshot {
+	snapshot := builderNodeSnapshot{
+		Name:         strings.TrimSpace(node.Metadata.Name),
+		Hostname:     strings.TrimSpace(node.Metadata.Labels[builderHostnameLabelKey]),
+		Labels:       node.Metadata.Labels,
+		Taints:       node.Spec.Taints,
+		Ready:        builderNodeConditionStatus(node.Status.Conditions, "Ready"),
+		DiskPressure: builderNodeConditionStatus(node.Status.Conditions, "DiskPressure"),
+		Allocatable: builderResourceDemand{
+			CPUMilli:       parseBuilderCPUMilli(node.Status.Allocatable["cpu"]),
+			MemoryBytes:    parseBuilderBytes(node.Status.Allocatable["memory"]),
+			EphemeralBytes: parseBuilderBytes(node.Status.Allocatable["ephemeral-storage"]),
+		},
+	}
+	if snapshot.Hostname == "" {
+		snapshot.Hostname = snapshot.Name
+	}
+	return snapshot
+}
+
+func (s *builderScheduler) nodeNeedsSummary(snapshot builderNodeSnapshot) bool {
+	if snapshot.Name == "" || !snapshot.Ready || snapshot.DiskPressure || snapshot.Hostname == "" {
+		return false
+	}
+	if !builderNodeEligibleForBuilders(s.policy, snapshot) {
+		return false
+	}
+	if !builderNodeMatchesRequiredLabels(snapshot, s.requiredNodeLabels) {
+		return false
+	}
+	return true
 }
 
 func (s *builderScheduler) listActiveReservations(ctx context.Context, now time.Time) ([]builderReservation, error) {

@@ -539,6 +539,91 @@ func TestBuildBuildpacksJobObjectPlacementOverridesGenericAffinity(t *testing.T)
 	}
 }
 
+func TestLoadNodeSnapshotsSkipsUnavailableNodeSummaries(t *testing.T) {
+	t.Parallel()
+
+	policy := defaultBuilderPodPolicy()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes":
+			writeBuilderTestJSON(t, w, builderKubeNodeList{
+				Items: []builderKubeNode{
+					builderTestKubeNode("node-a", "host-a", policy),
+					builderTestKubeNode("node-b", "host-b", policy),
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes/node-a/proxy/stats/summary":
+			http.Error(w, `{"message":"stats unavailable"}`, http.StatusServiceUnavailable)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes/node-b/proxy/stats/summary":
+			writeBuilderTestJSON(t, w, builderTestNodeSummary("18Gi"))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	scheduler := &builderScheduler{
+		client: &builderKubeClient{
+			client:    server.Client(),
+			baseURL:   server.URL,
+			namespace: "fugue-system",
+		},
+		policy: policy,
+	}
+
+	snapshots, err := scheduler.loadNodeSnapshots(context.Background())
+	if err != nil {
+		t.Fatalf("load node snapshots: %v", err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("expected 1 snapshot after skipping unavailable summary, got %d", len(snapshots))
+	}
+	if got := snapshots[0].Name; got != "node-b" {
+		t.Fatalf("expected node-b snapshot to remain, got %q", got)
+	}
+}
+
+func TestLoadNodeSnapshotsFailsWhenAllEligibleSummariesAreUnavailable(t *testing.T) {
+	t.Parallel()
+
+	policy := defaultBuilderPodPolicy()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes":
+			writeBuilderTestJSON(t, w, builderKubeNodeList{
+				Items: []builderKubeNode{
+					builderTestKubeNode("node-a", "host-a", policy),
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes/node-a/proxy/stats/summary":
+			http.Error(w, `{"message":"stats unavailable"}`, http.StatusServiceUnavailable)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	scheduler := &builderScheduler{
+		client: &builderKubeClient{
+			client:    server.Client(),
+			baseURL:   server.URL,
+			namespace: "fugue-system",
+		},
+		policy: policy,
+	}
+
+	_, err := scheduler.loadNodeSnapshots(context.Background())
+	if err == nil {
+		t.Fatalf("expected load node snapshots to fail when all summaries are unavailable")
+	}
+	if !strings.Contains(err.Error(), "load builder node stats summaries") {
+		t.Fatalf("expected summary error context, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "node-a") {
+		t.Fatalf("expected failing node name in error, got %v", err)
+	}
+}
+
 func TestTryAcquireNodeLockCreateUsesMicrosecondPrecision(t *testing.T) {
 	t.Parallel()
 
@@ -643,6 +728,39 @@ func builderTestNode(name, hostname string, policy BuilderPodPolicy, sizeClass, 
 	return builderTestNodeWithFS(name, hostname, policy, sizeClass, cpu, memory, ephemeral, ephemeral, usedCPU, usedMemory, usedEphemeral)
 }
 
+func builderTestKubeNode(name, hostname string, policy BuilderPodPolicy) builderKubeNode {
+	var node builderKubeNode
+	node.Metadata.Name = name
+	node.Metadata.Labels = map[string]string{
+		builderHostnameLabelKey:  hostname,
+		policy.BuildNodeLabelKey: valueOrDefault(policy.BuildNodeLabelValue, "true"),
+		policy.LargeNodeLabelKey: policy.MediumNodeLabelValue,
+	}
+	node.Status.Conditions = []builderKubeNodeCondition{
+		{Type: "Ready", Status: "True"},
+	}
+	node.Status.Allocatable = map[string]string{
+		"cpu":               "2000m",
+		"memory":            "8Gi",
+		"ephemeral-storage": "10Gi",
+	}
+	return node
+}
+
+func builderTestNodeSummary(filesystemAvailable string) builderKubeNodeSummary {
+	return builderKubeNodeSummary{
+		Node: builderKubeSummaryNode{
+			Memory: builderKubeSummaryMem{
+				WorkingSetBytes: builderUint64Ptr(uint64(parseBuilderBytes("1Gi"))),
+			},
+			FS: builderKubeSummaryFS{
+				AvailableBytes: builderUint64Ptr(uint64(parseBuilderBytes(filesystemAvailable))),
+				CapacityBytes:  builderUint64Ptr(uint64(parseBuilderBytes("30Gi"))),
+			},
+		},
+	}
+}
+
 func builderTestNodeWithFS(name, hostname string, policy BuilderPodPolicy, sizeClass, cpu, memory, ephemeral, filesystemAvailable, usedCPU, usedMemory, usedEphemeral string) builderNodeSnapshot {
 	return builderNodeSnapshot{
 		Name:     name,
@@ -686,4 +804,13 @@ func assertMicrosecondKubeTimestamp(t *testing.T, value string) {
 
 func builderUint64Ptr(value uint64) *uint64 {
 	return &value
+}
+
+func writeBuilderTestJSON(t *testing.T, w http.ResponseWriter, value any) {
+	t.Helper()
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		t.Fatalf("encode response: %v", err)
+	}
 }
