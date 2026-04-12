@@ -169,3 +169,60 @@ func TestMigrateAppRejectsExternalRuntimeForManagedPostgres(t *testing.T) {
 		t.Fatalf("expected invalid input response body, got %s", recorder.Body.String())
 	}
 }
+
+func TestMigrateAppRecoversFailedImportedAppBaseline(t *testing.T) {
+	t.Parallel()
+
+	s, server, _, app, recoveredImage, recoveredSource := setupFailedImportedAppRecoveryServer(t)
+	targetRuntime, _, err := s.CreateRuntime(app.TenantID, "tenant-vps-1", model.RuntimeTypeExternalOwned, "https://vps.example.com", nil)
+	if err != nil {
+		t.Fatalf("create target runtime: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(app.TenantID, "tenant-admin", []string{"app.write", "app.migrate"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/migrate", apiKey, map[string]any{
+		"target_runtime_id": targetRuntime.ID,
+	})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	ops, err := s.ListOperationsByApp(app.TenantID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+
+	var migrateOp model.Operation
+	found := false
+	for _, op := range ops {
+		if op.Type != model.OperationTypeMigrate || op.Status != model.OperationStatusPending {
+			continue
+		}
+		migrateOp = op
+		found = true
+	}
+	if !found {
+		t.Fatal("expected pending migrate operation")
+	}
+	if migrateOp.DesiredSpec == nil {
+		t.Fatal("expected migrate operation desired spec")
+	}
+	if migrateOp.DesiredSource == nil {
+		t.Fatal("expected migrate operation desired source")
+	}
+	if got := migrateOp.DesiredSpec.Image; got != recoveredImage {
+		t.Fatalf("expected recovered image %q, got %q", recoveredImage, got)
+	}
+	if got := migrateOp.DesiredSpec.RuntimeID; got != targetRuntime.ID {
+		t.Fatalf("expected desired runtime %q, got %q", targetRuntime.ID, got)
+	}
+	if got := migrateOp.TargetRuntimeID; got != targetRuntime.ID {
+		t.Fatalf("expected target runtime %q, got %q", targetRuntime.ID, got)
+	}
+	if got := migrateOp.DesiredSource.ResolvedImageRef; got != recoveredSource.ResolvedImageRef {
+		t.Fatalf("expected recovered source image ref %q, got %q", recoveredSource.ResolvedImageRef, got)
+	}
+}

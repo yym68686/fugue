@@ -2152,14 +2152,45 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			op.SourceRuntimeID = app.Spec.RuntimeID
 			op.TargetRuntimeID = app.Spec.RuntimeID
 		case model.OperationTypeMigrate:
-			if op.TargetRuntimeID == "" || !runtimeVisibleToTenant(state, op.TargetRuntimeID, op.TenantID) {
+			targetRuntimeID := strings.TrimSpace(op.TargetRuntimeID)
+			if op.DesiredSpec != nil {
+				if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
+					return err
+				}
+				if err := validateAppNetworkMode(*op.DesiredSpec); err != nil {
+					return err
+				}
+				if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
+					return err
+				}
+				if strings.TrimSpace(op.DesiredSpec.RuntimeID) == "" {
+					op.DesiredSpec.RuntimeID = targetRuntimeID
+				}
+				if strings.TrimSpace(op.DesiredSpec.RuntimeID) != targetRuntimeID {
+					return ErrInvalidInput
+				}
+				if !runtimeVisibleToTenant(state, op.DesiredSpec.RuntimeID, op.TenantID) {
+					return ErrNotFound
+				}
+				if err := validateWorkspaceRuntimeState(state, op.DesiredSpec.RuntimeID, *op.DesiredSpec); err != nil {
+					return err
+				}
+				if err := validateFailoverRuntimeState(state, op.TenantID, *op.DesiredSpec); err != nil {
+					return err
+				}
+				if err := validateManagedPostgresRuntimeState(state, op.TenantID, op.DesiredSpec.RuntimeID, op.DesiredSpec.Postgres); err != nil {
+					return err
+				}
+				targetRuntimeID = op.DesiredSpec.RuntimeID
+			}
+			if targetRuntimeID == "" || !runtimeVisibleToTenant(state, targetRuntimeID, op.TenantID) {
 				return ErrNotFound
 			}
-			if hasPersistentWorkspace(app) {
+			if hasPersistentWorkspace(app) || (op.DesiredSpec != nil && (op.DesiredSpec.Workspace != nil || op.DesiredSpec.PersistentStorage != nil)) {
 				return ErrInvalidInput
 			}
 			if appHasManagedPostgresService(app) {
-				targetRuntimeIndex := findRuntime(state, op.TargetRuntimeID)
+				targetRuntimeIndex := findRuntime(state, targetRuntimeID)
 				if targetRuntimeIndex < 0 {
 					return ErrNotFound
 				}
@@ -2167,6 +2198,7 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 					return err
 				}
 			}
+			op.TargetRuntimeID = targetRuntimeID
 			op.SourceRuntimeID = app.Spec.RuntimeID
 		case model.OperationTypeFailover:
 			if hasInFlightOperationForApp(state.Operations, app.ID) {
@@ -3166,16 +3198,13 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 		state.ServiceBindings = deleteServiceBindingsByApp(state.ServiceBindings, app.ID)
 		state.BackingServices = deleteOwnedBackingServicesByApp(state.BackingServices, app.ID)
 	case model.OperationTypeMigrate:
-		if op.TargetRuntimeID == "" {
-			return ErrInvalidInput
+		if op.DesiredSpec != nil {
+			if err := applyDesiredSpecBackingServicesState(state, app, op.DesiredSpec); err != nil {
+				return err
+			}
 		}
-		app.Spec.RuntimeID = op.TargetRuntimeID
-		app.Status.Phase = "migrated"
-		app.Status.CurrentRuntimeID = op.TargetRuntimeID
-		app.Status.CurrentReplicas = app.Spec.Replicas
-		if op.ExecutionMode != model.ExecutionModeManaged {
-			app.Status.CurrentReleaseStartedAt = nil
-			app.Status.CurrentReleaseReadyAt = nil
+		if err := applyCompletedMigrateToAppModel(app, op); err != nil {
+			return err
 		}
 	case model.OperationTypeFailover:
 		if op.DesiredSpec != nil {

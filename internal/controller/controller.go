@@ -274,6 +274,37 @@ func (s *Service) markRuntimeOfflineStale() error {
 	if _, err := s.Store.MarkRuntimeOfflineStale(s.Config.RuntimeOfflineAfter); err != nil {
 		return fmt.Errorf("mark runtime offline: %w", err)
 	}
+	if err := s.syncManagedOwnedClusterRuntimeStatuses(); err != nil && s.Logger != nil {
+		s.Logger.Printf("managed-owned cluster runtime status sync error: %v", err)
+	}
+	return nil
+}
+
+func (s *Service) syncManagedOwnedClusterRuntimeStatuses() error {
+	if !s.Config.KubectlApply {
+		return nil
+	}
+
+	newClient := s.newKubeClient
+	if newClient == nil {
+		newClient = newKubeClient
+	}
+
+	client, err := newClient("")
+	if err != nil {
+		return fmt.Errorf("new kube client: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	nodeReadyByName, err := client.listNodeReadyStates(ctx)
+	if err != nil {
+		return fmt.Errorf("list node readiness: %w", err)
+	}
+	if _, err := s.Store.SyncManagedOwnedClusterRuntimeStatuses(nodeReadyByName); err != nil {
+		return fmt.Errorf("sync managed-owned cluster runtime statuses: %w", err)
+	}
 	return nil
 }
 
@@ -463,10 +494,21 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		app.Spec.Replicas = *op.DesiredReplicas
 	case model.OperationTypeDelete:
 	case model.OperationTypeMigrate:
-		if op.TargetRuntimeID == "" {
-			return fmt.Errorf("migrate operation %s missing target runtime", op.ID)
+		if op.DesiredSpec != nil {
+			app.Spec = *op.DesiredSpec
+		} else {
+			if op.TargetRuntimeID == "" {
+				return fmt.Errorf("migrate operation %s missing target runtime", op.ID)
+			}
+			app.Spec.RuntimeID = op.TargetRuntimeID
 		}
-		app.Spec.RuntimeID = op.TargetRuntimeID
+		if op.DesiredSource != nil {
+			source := *op.DesiredSource
+			if len(op.DesiredSource.ComposeDependsOn) > 0 {
+				source.ComposeDependsOn = append([]string(nil), op.DesiredSource.ComposeDependsOn...)
+			}
+			app.Source = &source
+		}
 	default:
 		return fmt.Errorf("unsupported operation type %s", op.Type)
 	}

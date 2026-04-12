@@ -216,10 +216,21 @@ func (s *AgentService) processTask(ctx context.Context, task AgentTask) error {
 		app.Spec.Replicas = *task.Operation.DesiredReplicas
 	case model.OperationTypeDelete:
 	case model.OperationTypeMigrate:
-		if task.Operation.TargetRuntimeID == "" {
-			return fmt.Errorf("migrate task missing target runtime")
+		if task.Operation.DesiredSpec != nil {
+			app.Spec = *task.Operation.DesiredSpec
+		} else {
+			if task.Operation.TargetRuntimeID == "" {
+				return fmt.Errorf("migrate task missing target runtime")
+			}
+			app.Spec.RuntimeID = task.Operation.TargetRuntimeID
 		}
-		app.Spec.RuntimeID = task.Operation.TargetRuntimeID
+		if task.Operation.DesiredSource != nil {
+			source := *task.Operation.DesiredSource
+			if len(task.Operation.DesiredSource.ComposeDependsOn) > 0 {
+				source.ComposeDependsOn = append([]string(nil), task.Operation.DesiredSource.ComposeDependsOn...)
+			}
+			app.Source = &source
+		}
 	default:
 		return fmt.Errorf("unsupported task type %s", task.Operation.Type)
 	}

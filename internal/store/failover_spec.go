@@ -42,7 +42,7 @@ func operationAppliesDesiredSpecBackingServices(op model.Operation) bool {
 		return false
 	}
 	switch op.Type {
-	case model.OperationTypeDeploy, model.OperationTypeDatabaseSwitchover, model.OperationTypeFailover:
+	case model.OperationTypeDeploy, model.OperationTypeMigrate, model.OperationTypeDatabaseSwitchover, model.OperationTypeFailover:
 		return true
 	default:
 		return false
@@ -60,6 +60,36 @@ func applyCompletedFailoverToAppModel(app *model.App, op *model.Operation) error
 	}
 	app.Spec.RuntimeID = op.TargetRuntimeID
 	app.Status.Phase = "failed-over"
+	app.Status.CurrentRuntimeID = op.TargetRuntimeID
+	app.Status.CurrentReplicas = app.Spec.Replicas
+	if op.ExecutionMode != model.ExecutionModeManaged {
+		app.Status.CurrentReleaseStartedAt = nil
+		app.Status.CurrentReleaseReadyAt = nil
+	}
+	return nil
+}
+
+func applyCompletedMigrateToAppModel(app *model.App, op *model.Operation) error {
+	if strings.TrimSpace(op.TargetRuntimeID) == "" {
+		return ErrInvalidInput
+	}
+	if op.DesiredSpec != nil {
+		app.Spec = *op.DesiredSpec
+	} else {
+		app.Spec.RuntimeID = op.TargetRuntimeID
+	}
+	app.Spec.RuntimeID = op.TargetRuntimeID
+	if app.Route != nil {
+		if model.AppExposesPublicService(app.Spec) {
+			app.Route.ServicePort = model.AppPublicServicePort(app.Spec)
+		} else {
+			app.Route = nil
+		}
+	}
+	if op.DesiredSource != nil {
+		app.Source = cloneAppSource(op.DesiredSource)
+	}
+	app.Status.Phase = "migrated"
 	app.Status.CurrentRuntimeID = op.TargetRuntimeID
 	app.Status.CurrentReplicas = app.Spec.Replicas
 	if op.ExecutionMode != model.ExecutionModeManaged {

@@ -131,6 +131,195 @@ func TestManagedAndExternalOperationFlow(t *testing.T) {
 	}
 }
 
+func TestMigrateOperationAppliesDesiredSpecAndSource(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Acme")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "web project")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
+		CPUMilliCores:   500,
+		MemoryMebibytes: 1024,
+	}); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
+	}
+
+	app, err := s.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:       model.AppSourceTypeGitHubPublic,
+		RepoURL:    "https://github.com/example/demo",
+		RepoBranch: "main",
+	}, model.AppRoute{
+		Hostname:    "demo.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://demo.example.com",
+		ServicePort: 80,
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+	externalRuntime, _, err := s.CreateRuntime(tenant.ID, "tenant-vps-1", model.RuntimeTypeExternalOwned, "https://vps.example.com", nil)
+	if err != nil {
+		t.Fatalf("create external runtime: %v", err)
+	}
+
+	desiredSpec := app.Spec
+	desiredSpec.Image = "registry.pull.example/fugue-apps/demo:git-new"
+	desiredSpec.Ports = []int{8080}
+	desiredSpec.RuntimeID = externalRuntime.ID
+	desiredSource := model.AppSource{
+		Type:             model.AppSourceTypeGitHubPublic,
+		RepoURL:          "https://github.com/example/demo",
+		RepoBranch:       "main",
+		CommitSHA:        "newcommit",
+		ResolvedImageRef: "registry.push.example/fugue-apps/demo:git-new",
+		ComposeDependsOn: []string{"redis"},
+	}
+
+	migrateOp, err := s.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeMigrate,
+		AppID:           app.ID,
+		TargetRuntimeID: externalRuntime.ID,
+		DesiredSpec:     &desiredSpec,
+		DesiredSource:   &desiredSource,
+	})
+	if err != nil {
+		t.Fatalf("create migrate operation: %v", err)
+	}
+
+	claimed, found, err := s.ClaimNextPendingOperation()
+	if err != nil {
+		t.Fatalf("claim migrate operation: %v", err)
+	}
+	if !found {
+		t.Fatal("expected migrate operation")
+	}
+	if claimed.ID != migrateOp.ID || claimed.Status != model.OperationStatusWaitingAgent || claimed.AssignedRuntimeID != externalRuntime.ID {
+		t.Fatalf("unexpected claimed migrate operation: %+v", claimed)
+	}
+
+	if _, err := s.CompleteAgentOperation(migrateOp.ID, externalRuntime.ID, "/tmp/nginx-external.yaml", "migrated"); err != nil {
+		t.Fatalf("complete agent migrate operation: %v", err)
+	}
+
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app after migrate: %v", err)
+	}
+	if got := app.Spec.RuntimeID; got != externalRuntime.ID {
+		t.Fatalf("expected runtime %q, got %q", externalRuntime.ID, got)
+	}
+	if got := app.Spec.Image; got != desiredSpec.Image {
+		t.Fatalf("expected image %q, got %q", desiredSpec.Image, got)
+	}
+	if got := app.Route.ServicePort; got != 8080 {
+		t.Fatalf("expected route service port 8080, got %d", got)
+	}
+	if app.Source == nil {
+		t.Fatal("expected source to be updated")
+	}
+	if got := app.Source.CommitSHA; got != desiredSource.CommitSHA {
+		t.Fatalf("expected commit %q, got %q", desiredSource.CommitSHA, got)
+	}
+	if got := app.Source.ResolvedImageRef; got != desiredSource.ResolvedImageRef {
+		t.Fatalf("expected resolved image ref %q, got %q", desiredSource.ResolvedImageRef, got)
+	}
+	if app.Status.Phase != "migrated" {
+		t.Fatalf("expected phase migrated, got %q", app.Status.Phase)
+	}
+}
+
+func TestSyncManagedOwnedClusterRuntimeStatuses(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Acme")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+
+	_, secretReady, err := s.CreateNodeKey(tenant.ID, "ready")
+	if err != nil {
+		t.Fatalf("create ready node key: %v", err)
+	}
+	_, runtimeReady, err := s.BootstrapClusterNode(secretReady, "cluster-ready", "https://ready.example.com", nil, "cluster-ready", "cluster-ready")
+	if err != nil {
+		t.Fatalf("bootstrap ready node: %v", err)
+	}
+	_, secretNotReady, err := s.CreateNodeKey(tenant.ID, "not-ready")
+	if err != nil {
+		t.Fatalf("create not-ready node key: %v", err)
+	}
+	_, runtimeNotReady, err := s.BootstrapClusterNode(secretNotReady, "cluster-not-ready", "https://not-ready.example.com", nil, "cluster-not-ready", "cluster-not-ready")
+	if err != nil {
+		t.Fatalf("bootstrap not-ready node: %v", err)
+	}
+	readyNodeName := runtimeReady.ClusterNodeName
+	if readyNodeName == "" {
+		readyNodeName = runtimeReady.Name
+	}
+	notReadyNodeName := runtimeNotReady.ClusterNodeName
+	if notReadyNodeName == "" {
+		notReadyNodeName = runtimeNotReady.Name
+	}
+
+	changed, err := s.SyncManagedOwnedClusterRuntimeStatuses(map[string]bool{
+		readyNodeName:    true,
+		notReadyNodeName: false,
+	})
+	if err != nil {
+		t.Fatalf("sync managed-owned cluster runtime statuses: %v", err)
+	}
+	if changed != 1 {
+		t.Fatalf("expected 1 runtime status change, got %d", changed)
+	}
+
+	runtimeReady, err = s.GetRuntime(runtimeReady.ID)
+	if err != nil {
+		t.Fatalf("get ready runtime: %v", err)
+	}
+	if runtimeReady.Status != model.RuntimeStatusActive {
+		t.Fatalf("expected ready runtime active, got %q", runtimeReady.Status)
+	}
+	runtimeNotReady, err = s.GetRuntime(runtimeNotReady.ID)
+	if err != nil {
+		t.Fatalf("get not-ready runtime: %v", err)
+	}
+	if runtimeNotReady.Status != model.RuntimeStatusOffline {
+		t.Fatalf("expected not-ready runtime offline, got %q", runtimeNotReady.Status)
+	}
+
+	changed, err = s.SyncManagedOwnedClusterRuntimeStatuses(map[string]bool{
+		readyNodeName:    false,
+		notReadyNodeName: true,
+	})
+	if err != nil {
+		t.Fatalf("resync managed-owned cluster runtime statuses: %v", err)
+	}
+	if changed != 2 {
+		t.Fatalf("expected 2 runtime status changes, got %d", changed)
+	}
+}
+
 func TestStatefulFailoverOperationUsesAppFailoverPolicy(t *testing.T) {
 	t.Parallel()
 

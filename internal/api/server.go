@@ -991,6 +991,12 @@ func (s *Server) handleMigrateApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	spec, source, err := s.recoverAppDeployBaseline(app)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	spec.RuntimeID = strings.TrimSpace(req.TargetRuntimeID)
 	op, err := s.store.CreateOperation(model.Operation{
 		TenantID:        app.TenantID,
 		Type:            model.OperationTypeMigrate,
@@ -998,6 +1004,8 @@ func (s *Server) handleMigrateApp(w http.ResponseWriter, r *http.Request) {
 		RequestedByID:   principal.ActorID,
 		AppID:           app.ID,
 		TargetRuntimeID: req.TargetRuntimeID,
+		DesiredSpec:     &spec,
+		DesiredSource:   source,
 	})
 	if err != nil {
 		s.writeStoreError(w, err)

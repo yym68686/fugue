@@ -65,6 +65,14 @@ type kubeNode struct {
 		Name   string            `json:"name"`
 		Labels map[string]string `json:"labels,omitempty"`
 	} `json:"metadata"`
+	Status struct {
+		Conditions []kubeNodeCondition `json:"conditions,omitempty"`
+	} `json:"status"`
+}
+
+type kubeNodeCondition struct {
+	Type   string `json:"type,omitempty"`
+	Status string `json:"status,omitempty"`
 }
 
 type kubePersistentVolumeClaim struct {
@@ -273,6 +281,23 @@ func (c *kubeClient) listNodeNames(ctx context.Context) ([]string, error) {
 	return names, nil
 }
 
+func (c *kubeClient) listNodeReadyStates(ctx context.Context) (map[string]bool, error) {
+	var nodeList kubeNodeList
+	if _, err := c.doJSON(ctx, http.MethodGet, "/api/v1/nodes", nil, &nodeList); err != nil {
+		return nil, err
+	}
+
+	readyByName := make(map[string]bool, len(nodeList.Items))
+	for _, node := range nodeList.Items {
+		name := strings.TrimSpace(node.Metadata.Name)
+		if name == "" {
+			continue
+		}
+		readyByName[name] = kubeNodeReady(node)
+	}
+	return readyByName, nil
+}
+
 func (c *kubeClient) getNode(ctx context.Context, name string) (kubeNode, bool, error) {
 	var node kubeNode
 	status, err := c.doJSON(ctx, http.MethodGet, "/api/v1/nodes/"+url.PathEscape(strings.TrimSpace(name)), nil, &node)
@@ -283,6 +308,16 @@ func (c *kubeClient) getNode(ctx context.Context, name string) (kubeNode, bool, 
 		return kubeNode{}, false, err
 	}
 	return node, true, nil
+}
+
+func kubeNodeReady(node kubeNode) bool {
+	for _, condition := range node.Status.Conditions {
+		if !strings.EqualFold(strings.TrimSpace(condition.Type), "Ready") {
+			continue
+		}
+		return strings.EqualFold(strings.TrimSpace(condition.Status), "True")
+	}
+	return false
 }
 
 func (c *kubeClient) listNodeRuntimeIDs(ctx context.Context) (map[string]string, error) {
