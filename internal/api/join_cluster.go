@@ -29,6 +29,8 @@ type joinClusterPlan struct {
 	MeshAuthKey      string   `json:"mesh_auth_key,omitempty"`
 }
 
+const auditActionNodeJoinClusterRequested = "node.join_cluster_requested"
+
 func (s *Server) handleJoinClusterNode(w http.ResponseWriter, r *http.Request) {
 	if !s.clusterJoinConfigured() {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "cluster join is not configured")
@@ -66,7 +68,7 @@ func (s *Server) handleJoinClusterNode(w http.ResponseWriter, r *http.Request) {
 		ActorType: model.ActorTypeNodeKey,
 		ActorID:   key.ID,
 		TenantID:  key.TenantID,
-	}, "node.join_cluster", "node", node.ID, key.TenantID, map[string]string{
+	}, auditActionNodeJoinClusterRequested, "node", node.ID, key.TenantID, map[string]string{
 		"name":        node.Name,
 		"node_key_id": key.ID,
 		"runtime_id":  node.ID,
@@ -106,7 +108,7 @@ func (s *Server) handleJoinClusterNodeEnv(w http.ResponseWriter, r *http.Request
 		ActorType: model.ActorTypeNodeKey,
 		ActorID:   key.ID,
 		TenantID:  key.TenantID,
-	}, "node.join_cluster", "node", node.ID, key.TenantID, map[string]string{
+	}, auditActionNodeJoinClusterRequested, "node", node.ID, key.TenantID, map[string]string{
 		"name":        node.Name,
 		"node_key_id": key.ID,
 		"runtime_id":  node.ID,
@@ -416,7 +418,9 @@ func shellQuote(value string) string {
 
 func (s *Server) writeJoinClusterError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrInvalidInput):
+	case errors.Is(err, store.ErrInvalidInput):
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrConflict):
 		s.writeStoreError(w, err)
 	default:
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())

@@ -263,6 +263,140 @@ func TestJoinClusterEnvIncludesMeshConfig(t *testing.T) {
 	}
 }
 
+func TestJoinClusterEnvNormalizesNodeNameAndWritesRequestedAudit(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Join Cluster Audit Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+
+	kubeServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/namespaces/kube-system/secrets":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": "bootstrap-token-created"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		ClusterJoinServer:            "https://100.64.0.1:6443",
+		ClusterJoinCAHash:            "deadbeef",
+		ClusterJoinBootstrapTokenTTL: time.Minute,
+		RegistryPullBase:             "10.128.0.2:30500",
+		ClusterJoinRegistryEndpoint:  "100.64.0.1:30500",
+	})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	form := url.Values{}
+	form.Set("node_key", nodeSecret)
+	form.Set("node_name", "VM-0-17-ubuntu-2")
+	form.Set("machine_name", "VM-0-17-ubuntu")
+	form.Set("machine_fingerprint", "cluster-name-fingerprint")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/nodes/join-cluster/env", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "FUGUE_JOIN_NODE_NAME='vm-0-17-ubuntu-2'") {
+		t.Fatalf("expected normalized node name in response body, got %s", body)
+	}
+
+	events, err := s.ListAuditEvents(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected one audit event, got %+v", events)
+	}
+	if events[0].Action != auditActionNodeJoinClusterRequested {
+		t.Fatalf("expected audit action %q, got %q", auditActionNodeJoinClusterRequested, events[0].Action)
+	}
+	if events[0].Metadata["name"] != "vm-0-17-ubuntu-2" {
+		t.Fatalf("expected normalized audit node name, got %+v", events[0].Metadata)
+	}
+}
+
+func TestJoinClusterEnvRejectsInvalidKubernetesNodeName(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Join Cluster Invalid Name Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		ClusterJoinServer:            "https://100.64.0.1:6443",
+		ClusterJoinCAHash:            "deadbeef",
+		ClusterJoinBootstrapTokenTTL: time.Minute,
+		RegistryPullBase:             "10.128.0.2:30500",
+		ClusterJoinRegistryEndpoint:  "100.64.0.1:30500",
+	})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		t.Fatal("cluster client should not be created for invalid node names")
+		return nil, nil
+	}
+
+	form := url.Values{}
+	form.Set("node_key", nodeSecret)
+	form.Set("node_name", "VM_0_17_ubuntu")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/nodes/join-cluster/env", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadRequest, recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "invalid cluster node name") {
+		t.Fatalf("expected invalid node name error, got %s", recorder.Body.String())
+	}
+
+	events, err := s.ListAuditEvents(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected no audit events for invalid node name, got %+v", events)
+	}
+}
+
 func TestJoinClusterInstallScriptAddsTopologyLabels(t *testing.T) {
 	t.Parallel()
 

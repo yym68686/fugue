@@ -2012,6 +2012,46 @@ func TestBootstrapNodeTransfersOwnershipAcrossTenants(t *testing.T) {
 	}
 }
 
+func TestBootstrapClusterNodeNormalizesKubernetesNodeName(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Cluster Name Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, secret, err := s.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+
+	_, runtimeObj, err := s.BootstrapClusterNode(
+		secret,
+		"VM-0-17-ubuntu-2",
+		"https://cluster.example.com",
+		nil,
+		"VM-0-17-ubuntu",
+		"cluster-name-fingerprint",
+	)
+	if err != nil {
+		t.Fatalf("bootstrap cluster node: %v", err)
+	}
+
+	if runtimeObj.Name != "vm-0-17-ubuntu-2" {
+		t.Fatalf("expected normalized runtime name, got %q", runtimeObj.Name)
+	}
+	if runtimeObj.ClusterNodeName != "vm-0-17-ubuntu-2" {
+		t.Fatalf("expected normalized cluster node name, got %q", runtimeObj.ClusterNodeName)
+	}
+	if runtimeObj.MachineName != "VM-0-17-ubuntu" {
+		t.Fatalf("expected original machine name to be preserved, got %q", runtimeObj.MachineName)
+	}
+}
+
 func TestBootstrapClusterNodeTransfersOwnershipAcrossTenants(t *testing.T) {
 	t.Parallel()
 

@@ -16,6 +16,7 @@ import (
 
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 )
 
 var (
@@ -993,13 +994,18 @@ func (s *Store) BootstrapClusterNode(secret, runtimeName, endpoint string, label
 	if secret == "" {
 		return model.NodeKey{}, model.Runtime{}, ErrInvalidInput
 	}
+	normalizedRuntimeName, err := normalizeClusterNodeName(runtimeName)
+	if err != nil {
+		return model.NodeKey{}, model.Runtime{}, err
+	}
+	runtimeName = normalizedRuntimeName
 	if s.usingDatabase() {
 		return s.pgBootstrapClusterNode(secret, runtimeName, endpoint, labels, machineName, machineFingerprint)
 	}
 
 	var key model.NodeKey
 	var runtime model.Runtime
-	err := s.withLockedState(true, func(state *model.State) error {
+	err = s.withLockedState(true, func(state *model.State) error {
 		ensureRuntimeMetadata(state)
 
 		hash := model.HashSecret(secret)
@@ -1052,6 +1058,9 @@ func (s *Store) BootstrapClusterNode(secret, runtimeName, endpoint string, label
 			if transferByFingerprint {
 				resetRuntimeSharing(state, state.Runtimes[runtimeIndex].ID)
 				state.Runtimes[runtimeIndex].AccessMode = model.RuntimeAccessModePrivate
+			}
+			if runtimeName != "" {
+				state.Runtimes[runtimeIndex].Name = runtimeName
 			}
 			state.Runtimes[runtimeIndex].Type = model.RuntimeTypeManagedOwned
 			state.Runtimes[runtimeIndex].Status = model.RuntimeStatusActive
@@ -2880,6 +2889,19 @@ func normalizedMachineName(machineName, runtimeName, endpoint string) string {
 		return endpoint
 	}
 	return "node"
+}
+
+func normalizeClusterNodeName(name string) (string, error) {
+	raw := strings.TrimSpace(name)
+	if raw == "" {
+		return "", nil
+	}
+
+	normalized := strings.ToLower(raw)
+	if errs := k8svalidation.IsDNS1123Subdomain(normalized); len(errs) > 0 {
+		return "", fmt.Errorf("%w: invalid cluster node name %q: %s", ErrInvalidInput, raw, strings.Join(errs, "; "))
+	}
+	return normalized, nil
 }
 
 func normalizedMachineFingerprint(machineFingerprint, machineName, runtimeName, endpoint string) string {

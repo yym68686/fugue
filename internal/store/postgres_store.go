@@ -1108,6 +1108,9 @@ WHERE id = $1
 			}
 			runtime.AccessMode = model.RuntimeAccessModePrivate
 		}
+		if runtimeName != "" {
+			runtime.Name = runtimeName
+		}
 		runtime.Type = model.RuntimeTypeManagedOwned
 		runtime.Status = model.RuntimeStatusActive
 		runtime.TenantID = key.TenantID
