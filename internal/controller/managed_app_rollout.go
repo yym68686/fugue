@@ -59,7 +59,7 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, o
 			return fmt.Errorf("managed app %s/%s rollout failed: %s", namespace, managedAppName, failureMessage)
 		}
 		if ready {
-			backingServicesReady, backingServiceMessage, err := managedBackingServicesRolloutReady(waitCtx, client, namespace, backingServices)
+			backingServicesReady, backingServiceMessage, err := s.managedBackingServicesRolloutReady(waitCtx, client, namespace, backingServices)
 			if err != nil {
 				return err
 			}
@@ -76,6 +76,9 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, o
 				case <-ticker.C:
 					continue
 				}
+			}
+			if err := s.cleanupStrandedManagedAppPods(waitCtx, client, namespace, app); err != nil && s.Logger != nil {
+				s.Logger.Printf("cleanup stranded managed app pods after rollout failed for %s/%s: %v", namespace, name, err)
 			}
 			if s.Store != nil {
 				if err := s.refreshManagedAppStatus(waitCtx, client, app); err != nil {
@@ -111,7 +114,7 @@ func (s *Service) managedBackingServiceRolloutTargets(ctx context.Context, app m
 	return runtime.ManagedBackingServiceDeploymentsWithPlacements(app, scheduling, postgresPlacements), nil
 }
 
-func managedBackingServicesRolloutReady(
+func (s *Service) managedBackingServicesRolloutReady(
 	ctx context.Context,
 	client *kubeClient,
 	namespace string,
@@ -123,6 +126,9 @@ func managedBackingServicesRolloutReady(
 			cluster, found, err := client.getCloudNativePGCluster(ctx, namespace, deployment.ResourceName)
 			if err != nil {
 				return false, "", fmt.Errorf("read backing service cluster %s/%s: %w", namespace, deployment.ResourceName, err)
+			}
+			if err := s.cleanupStrandedManagedPostgresPods(ctx, client, namespace, deployment.ResourceName); err != nil && s.Logger != nil {
+				s.Logger.Printf("cleanup stranded managed postgres pods for %s/%s failed: %v", namespace, deployment.ResourceName, err)
 			}
 			ready, message := managedBackingServiceClusterRolloutReady(deployment.ResourceName, cluster, found)
 			if !ready {
@@ -158,9 +164,9 @@ func managedBackingServiceClusterRolloutReady(clusterName string, cluster kubeCl
 	if desiredInstances <= 0 {
 		desiredInstances = 1
 	}
-	if cluster.Status.ReadyInstances != desiredInstances {
+	if cluster.Status.ReadyInstances < 1 {
 		return false, fmt.Sprintf(
-			"waiting for backing service cluster %s to settle (%d/%d ready instances)",
+			"waiting for backing service cluster %s primary readiness (%d/%d ready instances)",
 			clusterName,
 			cluster.Status.ReadyInstances,
 			desiredInstances,
@@ -180,7 +186,107 @@ func managedBackingServiceClusterRolloutReady(clusterName string, cluster kubeCl
 			targetPrimary,
 		)
 	}
+	if cluster.Status.ReadyInstances > desiredInstances {
+		return false, fmt.Sprintf(
+			"waiting for backing service cluster %s to settle (%d/%d ready instances)",
+			clusterName,
+			cluster.Status.ReadyInstances,
+			desiredInstances,
+		)
+	}
+	if cluster.Status.ReadyInstances < desiredInstances {
+		return true, fmt.Sprintf(
+			"backing service cluster %s primary ready (%d/%d instances); remaining replicas recovering",
+			clusterName,
+			cluster.Status.ReadyInstances,
+			desiredInstances,
+		)
+	}
 	return true, fmt.Sprintf("backing service cluster %s ready", clusterName)
+}
+
+func (s *Service) cleanupStrandedManagedAppPods(ctx context.Context, client *kubeClient, namespace string, app model.App) error {
+	return s.cleanupStrandedPodsBySelector(ctx, client, namespace, managedAppPodLabelSelector(app), "managed app")
+}
+
+func (s *Service) cleanupStrandedManagedPostgresPods(ctx context.Context, client *kubeClient, namespace, clusterName string) error {
+	clusterName = strings.TrimSpace(clusterName)
+	if clusterName == "" {
+		return nil
+	}
+	return s.cleanupStrandedPodsBySelector(ctx, client, namespace, fmt.Sprintf(managedPostgresPodSelectorTemplate, clusterName), "managed postgres")
+}
+
+func (s *Service) cleanupStrandedPodsBySelector(ctx context.Context, client *kubeClient, namespace, selector, resourceLabel string) error {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return nil
+	}
+
+	pods, err := client.listPodsBySelector(ctx, namespace, selector)
+	if err != nil {
+		return err
+	}
+
+	nodeReadyCache := make(map[string]bool)
+	nodeKnownCache := make(map[string]bool)
+	for _, pod := range pods {
+		if strings.TrimSpace(pod.Metadata.DeletionTimestamp) == "" {
+			continue
+		}
+		nodeName := strings.TrimSpace(pod.Spec.NodeName)
+		if nodeName == "" {
+			continue
+		}
+		ready, known, err := podNodeReadyState(ctx, client, nodeName, nodeReadyCache, nodeKnownCache)
+		if err != nil {
+			return err
+		}
+		if known && ready {
+			continue
+		}
+		if err := client.forceDeletePod(ctx, namespace, pod.Metadata.Name); err != nil {
+			return err
+		}
+		if s.Logger != nil {
+			s.Logger.Printf(
+				"force deleted stranded %s pod %s/%s on unavailable node %s",
+				strings.TrimSpace(resourceLabel),
+				namespace,
+				strings.TrimSpace(pod.Metadata.Name),
+				nodeName,
+			)
+		}
+	}
+	return nil
+}
+
+func podNodeReadyState(
+	ctx context.Context,
+	client *kubeClient,
+	nodeName string,
+	readyCache map[string]bool,
+	knownCache map[string]bool,
+) (ready bool, known bool, err error) {
+	nodeName = strings.TrimSpace(nodeName)
+	if nodeName == "" {
+		return false, false, nil
+	}
+	if cached, ok := readyCache[nodeName]; ok {
+		return cached, knownCache[nodeName], nil
+	}
+	node, found, err := client.getNode(ctx, nodeName)
+	if err != nil {
+		return false, false, err
+	}
+	knownCache[nodeName] = found
+	if !found {
+		readyCache[nodeName] = false
+		return false, false, nil
+	}
+	ready = kubeNodeReady(node)
+	readyCache[nodeName] = ready
+	return ready, true, nil
 }
 
 func managedAppRolloutFailure(managed runtime.ManagedAppObject, found bool) string {

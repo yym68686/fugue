@@ -155,6 +155,7 @@ func TestBuildManagedAppStatusMarksCrashLoopingPodsAsError(t *testing.T) {
 			Metadata: struct {
 				Name              string    `json:"name"`
 				CreationTimestamp time.Time `json:"creationTimestamp"`
+				DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
 			}{
 				Name:              "demo-abc123",
 				CreationTimestamp: time.Date(2026, time.March, 26, 10, 0, 0, 0, time.UTC),
@@ -254,6 +255,7 @@ func TestBuildManagedAppStatusIgnoresPodFailuresFromPreviousRelease(t *testing.T
 			Metadata: struct {
 				Name              string    `json:"name"`
 				CreationTimestamp time.Time `json:"creationTimestamp"`
+				DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
 			}{
 				Name:              "demo-old",
 				CreationTimestamp: time.Date(2026, time.March, 26, 9, 1, 0, 0, time.UTC),
@@ -328,6 +330,7 @@ func TestBuildManagedAppStatusOnlyConsidersPodFailuresAfterPendingReleaseStart(t
 			Metadata: struct {
 				Name              string    `json:"name"`
 				CreationTimestamp time.Time `json:"creationTimestamp"`
+				DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
 			}{
 				Name:              "demo-old",
 				CreationTimestamp: pendingStartedAt.Add(-time.Minute),
@@ -356,6 +359,7 @@ func TestBuildManagedAppStatusOnlyConsidersPodFailuresAfterPendingReleaseStart(t
 			Metadata: struct {
 				Name              string    `json:"name"`
 				CreationTimestamp time.Time `json:"creationTimestamp"`
+				DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
 			}{
 				Name:              "demo-new",
 				CreationTimestamp: pendingStartedAt.Add(time.Minute),

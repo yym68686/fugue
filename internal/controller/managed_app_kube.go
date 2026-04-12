@@ -307,6 +307,18 @@ func (c *kubeClient) deleteSecret(ctx context.Context, namespace, name string) e
 	return normalizeDeleteNotFound(err)
 }
 
+func (c *kubeClient) forceDeletePod(ctx context.Context, namespace, name string) error {
+	apiPath := "/api/v1/namespaces/" + c.effectiveNamespace(namespace) + "/pods/" + url.PathEscape(strings.TrimSpace(name))
+	query := url.Values{}
+	query.Set("gracePeriodSeconds", "0")
+	query.Set("propagationPolicy", "Background")
+	if encoded := query.Encode(); encoded != "" {
+		apiPath += "?" + encoded
+	}
+	_, err := c.doRequest(ctx, http.MethodDelete, apiPath, "", nil, nil)
+	return normalizeDeleteNotFound(err)
+}
+
 func (c *kubeClient) patchVolSyncReplicationSourceTrigger(ctx context.Context, namespace, name, manual string) error {
 	body := map[string]any{
 		"spec": map[string]any{

@@ -479,6 +479,13 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			return fmt.Errorf("deploy operation %s missing desired spec", op.ID)
 		}
 		app.Spec = *op.DesiredSpec
+		if op.DesiredSource != nil {
+			source := *op.DesiredSource
+			if len(op.DesiredSource.ComposeDependsOn) > 0 {
+				source.ComposeDependsOn = append([]string(nil), op.DesiredSource.ComposeDependsOn...)
+			}
+			app.Source = &source
+		}
 		if alignedSpec, changed, err := s.alignManagedPostgresRuntimeToObservedPrimary(ctx, app); err != nil {
 			if s.Logger != nil {
 				s.Logger.Printf("skip managed postgres runtime alignment for app %s: %v", app.ID, err)
@@ -566,7 +573,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		message = fmt.Sprintf("managed app deleted from namespace %s", bundle.TenantNamespace)
 	}
 	if completionDesiredSpec != nil {
-		_, err = s.Store.CompleteManagedOperationWithResult(op.ID, bundle.ManifestPath, message, completionDesiredSpec, nil)
+		_, err = s.Store.CompleteManagedOperationWithResult(op.ID, bundle.ManifestPath, message, completionDesiredSpec, op.DesiredSource)
 	} else {
 		_, err = s.Store.CompleteManagedOperation(op.ID, bundle.ManifestPath, message)
 	}

@@ -125,6 +125,7 @@ type kubePod struct {
 	Metadata struct {
 		Name              string    `json:"name"`
 		CreationTimestamp time.Time `json:"creationTimestamp"`
+		DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
 	} `json:"metadata"`
 	Spec struct {
 		NodeName string `json:"nodeName,omitempty"`

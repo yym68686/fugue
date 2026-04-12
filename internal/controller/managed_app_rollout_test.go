@@ -157,7 +157,6 @@ func TestWaitForManagedAppRolloutWaitsForManagedPostgresClusterHealth(t *testing
 		"observedGeneration": 1,
 	}
 
-	var managedAppGets int32
 	var clusterGets int32
 	var kubeServer *httptest.Server
 
@@ -194,10 +193,6 @@ func TestWaitForManagedAppRolloutWaitsForManagedPostgresClusterHealth(t *testing
 				t.Fatalf("encode deployment: %v", err)
 			}
 		case managedAppAPIPath(namespace, managedAppName):
-			if atomic.AddInt32(&managedAppGets, 1) > 2 {
-				http.NotFound(w, r)
-				return
-			}
 			if err := json.NewEncoder(w).Encode(managedApp); err != nil {
 				t.Fatalf("encode managed app: %v", err)
 			}
@@ -205,11 +200,11 @@ func TestWaitForManagedAppRolloutWaitsForManagedPostgresClusterHealth(t *testing
 			cluster := kubeCloudNativePGCluster{}
 			cluster.Metadata.Name = clusterName
 			cluster.Spec.Instances = 2
-			cluster.Status.CurrentPrimary = clusterName + "-1"
 			if atomic.AddInt32(&clusterGets, 1) >= 2 {
+				cluster.Status.CurrentPrimary = clusterName + "-1"
 				cluster.Status.ReadyInstances = 2
 			} else {
-				cluster.Status.ReadyInstances = 1
+				cluster.Status.ReadyInstances = 0
 			}
 			if err := json.NewEncoder(w).Encode(cluster); err != nil {
 				t.Fatalf("encode cluster: %v", err)
@@ -241,12 +236,215 @@ func TestManagedBackingServiceClusterRolloutReady(t *testing.T) {
 		t.Fatal("expected exact ready instance count to be treated as ready")
 	}
 
-	cluster.Status.ReadyInstances = 2
+	cluster.Spec.Instances = 2
+	cluster.Status.ReadyInstances = 1
 	ready, message := managedBackingServiceClusterRolloutReady("demo-postgres", cluster, true)
+	if !ready {
+		t.Fatal("expected primary-ready replica recovery to keep rollout available")
+	}
+	if !strings.Contains(message, "remaining replicas recovering") {
+		t.Fatalf("expected recovery message while replicas catch up, got %q", message)
+	}
+
+	cluster.Spec.Instances = 1
+	cluster.Status.ReadyInstances = 2
+	ready, message = managedBackingServiceClusterRolloutReady("demo-postgres", cluster, true)
 	if ready {
 		t.Fatal("expected extra ready instances to keep rollout pending until scale down settles")
 	}
 	if !strings.Contains(message, "to settle") {
 		t.Fatalf("expected settle message when cluster still has extra ready instances, got %q", message)
+	}
+}
+
+func TestWaitForManagedAppRolloutAllowsManagedPostgresPrimaryRecoveryAndCleansUpStrandedPods(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Replicas: 1,
+		},
+		BackingServices: []model.BackingService{
+			{
+				ID:          "service_demo_postgres",
+				TenantID:    "tenant_demo",
+				OwnerAppID:  "app_demo",
+				Name:        "demo-postgres",
+				Type:        model.BackingServiceTypePostgres,
+				Provisioner: model.BackingServiceProvisionerManaged,
+				Status:      model.BackingServiceStatusActive,
+				Spec: model.BackingServiceSpec{
+					Postgres: &model.AppPostgresSpec{
+						ServiceName: "demo-postgres",
+						Instances:   2,
+					},
+				},
+			},
+		},
+		Bindings: []model.ServiceBinding{
+			{
+				ID:        "binding_demo_postgres",
+				TenantID:  "tenant_demo",
+				AppID:     "app_demo",
+				ServiceID: "service_demo_postgres",
+			},
+		},
+	}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	deploymentName := runtime.RuntimeAppResourceName(app)
+	managedAppName := runtime.ManagedAppResourceName(app)
+	clusterName := "demo-postgres"
+
+	deployment := kubeDeployment{}
+	deployment.Metadata.Name = deploymentName
+	deployment.Metadata.Generation = 1
+	deployment.Status.ObservedGeneration = 1
+	deployment.Status.Replicas = 1
+	deployment.Status.UpdatedReplicas = 1
+	deployment.Status.ReadyReplicas = 1
+	deployment.Status.AvailableReplicas = 1
+
+	managedApp := runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{})
+	managedMetadata, _ := managedApp["metadata"].(map[string]any)
+	if managedMetadata == nil {
+		managedMetadata = map[string]any{}
+		managedApp["metadata"] = managedMetadata
+	}
+	managedMetadata["generation"] = 1
+	managedApp["status"] = map[string]any{
+		"phase":              runtime.ManagedAppPhaseReady,
+		"message":            "deployment ready",
+		"observedGeneration": 1,
+	}
+
+	var deletedPod atomic.Int32
+	var kubeServer *httptest.Server
+
+	svc := &Service{
+		Config: config.ControllerConfig{
+			ManagedAppRolloutTimeout: 2 * time.Second,
+			PollInterval:             10 * time.Millisecond,
+		},
+		Logger: log.New(io.Discard, "", 0),
+		newKubeClient: func(namespace string) (*kubeClient, error) {
+			return &kubeClient{
+				client:      kubeServer.Client(),
+				baseURL:     kubeServer.URL,
+				bearerToken: "test",
+				namespace:   namespace,
+			}, nil
+		},
+	}
+
+	kubeServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/apis/apps/v1/namespaces/"+namespace+"/deployments/"+deploymentName:
+			if err := json.NewEncoder(w).Encode(deployment); err != nil {
+				t.Fatalf("encode deployment: %v", err)
+			}
+		case r.Method == http.MethodGet && r.URL.Path == managedAppAPIPath(namespace, managedAppName):
+			if err := json.NewEncoder(w).Encode(managedApp); err != nil {
+				t.Fatalf("encode managed app: %v", err)
+			}
+		case r.Method == http.MethodGet && r.URL.Path == cloudNativePGClusterAPIPath(namespace, clusterName):
+			cluster := kubeCloudNativePGCluster{}
+			cluster.Metadata.Name = clusterName
+			cluster.Spec.Instances = 2
+			cluster.Status.ReadyInstances = 1
+			cluster.Status.CurrentPrimary = "demo-postgres-4"
+			if err := json.NewEncoder(w).Encode(cluster); err != nil {
+				t.Fatalf("encode cluster: %v", err)
+			}
+		case r.Method == http.MethodGet &&
+			r.URL.Path == "/api/v1/namespaces/"+namespace+"/pods" &&
+			r.URL.Query().Get("labelSelector") == "cnpg.io/cluster=demo-postgres,app.kubernetes.io/managed-by=cloudnative-pg":
+			pods := kubePodList{
+				Items: []kubePod{
+					{
+						Metadata: struct {
+							Name              string    `json:"name"`
+							CreationTimestamp time.Time `json:"creationTimestamp"`
+							DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
+						}{
+							Name:              "demo-postgres-1",
+							CreationTimestamp: time.Date(2026, time.April, 12, 10, 0, 0, 0, time.UTC),
+							DeletionTimestamp: time.Date(2026, time.April, 12, 11, 0, 0, 0, time.UTC).Format(time.RFC3339),
+						},
+						Spec: struct {
+							NodeName string `json:"nodeName,omitempty"`
+							Volumes  []struct {
+								Name                  string `json:"name,omitempty"`
+								PersistentVolumeClaim *struct {
+									ClaimName string `json:"claimName,omitempty"`
+								} `json:"persistentVolumeClaim,omitempty"`
+							} `json:"volumes,omitempty"`
+							InitContainers []struct {
+								Name string `json:"name"`
+							} `json:"initContainers"`
+							Containers []struct {
+								Name string `json:"name"`
+							} `json:"containers"`
+						}{
+							NodeName: "node-old",
+						},
+					},
+					{
+						Metadata: struct {
+							Name              string    `json:"name"`
+							CreationTimestamp time.Time `json:"creationTimestamp"`
+							DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
+						}{
+							Name:              "demo-postgres-4",
+							CreationTimestamp: time.Date(2026, time.April, 12, 11, 10, 0, 0, time.UTC),
+						},
+						Spec: struct {
+							NodeName string `json:"nodeName,omitempty"`
+							Volumes  []struct {
+								Name                  string `json:"name,omitempty"`
+								PersistentVolumeClaim *struct {
+									ClaimName string `json:"claimName,omitempty"`
+								} `json:"persistentVolumeClaim,omitempty"`
+							} `json:"volumes,omitempty"`
+							InitContainers []struct {
+								Name string `json:"name"`
+							} `json:"initContainers"`
+							Containers []struct {
+								Name string `json:"name"`
+							} `json:"containers"`
+						}{
+							NodeName: "node-new",
+						},
+					},
+				},
+			}
+			if err := json.NewEncoder(w).Encode(pods); err != nil {
+				t.Fatalf("encode pod list: %v", err)
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes/node-old":
+			node := kubeNode{}
+			node.Metadata.Name = "node-old"
+			node.Status.Conditions = []kubeNodeCondition{{Type: "Ready", Status: "False"}}
+			if err := json.NewEncoder(w).Encode(node); err != nil {
+				t.Fatalf("encode old node: %v", err)
+			}
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/v1/namespaces/"+namespace+"/pods/demo-postgres-1"):
+			deletedPod.Store(1)
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	if err := svc.waitForManagedAppRollout(context.Background(), app, ""); err != nil {
+		t.Fatalf("expected rollout wait to succeed once the primary is ready, got %v", err)
+	}
+	if deletedPod.Load() == 0 {
+		t.Fatal("expected stranded managed postgres pod to be force deleted")
 	}
 }
