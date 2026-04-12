@@ -2298,6 +2298,46 @@ func (s *Store) pgUpdateAppImageMirrorLimit(id string, limit int) (model.App, er
 	return app, nil
 }
 
+func (s *Store) pgSyncObservedManagedPostgresSpec(id string, desiredSpec model.AppSpec) (model.App, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.App{}, fmt.Errorf("begin sync observed managed postgres transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	app, err := s.pgGetAppTx(ctx, tx, id, true)
+	if err != nil {
+		return model.App{}, mapDBErr(err)
+	}
+	if isDeletedApp(app) {
+		return model.App{}, ErrNotFound
+	}
+
+	spec := cloneAppSpec(&desiredSpec)
+	if spec == nil {
+		return model.App{}, ErrInvalidInput
+	}
+	if err := s.pgApplyDesiredSpecBackingServicesTx(ctx, tx, &app, spec); err != nil {
+		return model.App{}, err
+	}
+	app.Spec = *spec
+	app.UpdatedAt = time.Now().UTC()
+	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+		return model.App{}, mapDBErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return model.App{}, fmt.Errorf("commit sync observed managed postgres transaction: %w", err)
+	}
+	normalizeAppStatusForRead(&app)
+	if err := s.pgHydrateAppBackingServices(context.Background(), &app); err != nil {
+		return model.App{}, err
+	}
+	return app, nil
+}
+
 func (s *Store) pgPurgeApp(id string) (model.App, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

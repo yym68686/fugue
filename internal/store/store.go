@@ -2009,6 +2009,43 @@ func (s *Store) UpdateAppImageMirrorLimit(id string, limit int) (model.App, erro
 	return app, err
 }
 
+func (s *Store) SyncObservedManagedPostgresSpec(id string, desiredSpec model.AppSpec) (model.App, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.App{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgSyncObservedManagedPostgresSpec(id, desiredSpec)
+	}
+
+	var app model.App
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findApp(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		app = state.Apps[index]
+		if isDeletedApp(app) {
+			return ErrNotFound
+		}
+
+		spec := cloneAppSpec(&desiredSpec)
+		if spec == nil {
+			return ErrInvalidInput
+		}
+		if err := applyDesiredSpecBackingServicesState(state, &app, spec); err != nil {
+			return err
+		}
+		app.Spec = *spec
+		app.UpdatedAt = time.Now().UTC()
+		state.Apps[index] = app
+		normalizeAppStatusForRead(&app)
+		hydrateAppBackingServices(state, &app)
+		return nil
+	})
+	return app, err
+}
+
 func (s *Store) PurgeApp(id string) (model.App, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {

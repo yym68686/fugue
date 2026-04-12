@@ -240,6 +240,212 @@ func TestAlignManagedPostgresRuntimeToObservedPrimaryUsesPVCSelectedNode(t *test
 	}
 }
 
+func TestObservedManagedPostgresDesiredAppConsumesOfflineFailoverTarget(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Observed Failover Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if err := stateStore.SyncManagedSharedLocationRuntimes([]map[string]string{
+		{runtimepkg.LocationCountryCodeLabelKey: "jp"},
+		{runtimepkg.LocationCountryCodeLabelKey: "us"},
+	}); err != nil {
+		t.Fatalf("sync managed shared runtimes: %v", err)
+	}
+	runtimes, err := stateStore.ListRuntimes("", true)
+	if err != nil {
+		t.Fatalf("list runtimes: %v", err)
+	}
+	sourceRuntimeID := ""
+	targetRuntimeID := ""
+	for _, runtimeObj := range runtimes {
+		if runtimeObj.Type != model.RuntimeTypeManagedShared {
+			continue
+		}
+		switch runtimeObj.Labels[runtimepkg.LocationCountryCodeLabelKey] {
+		case "jp":
+			sourceRuntimeID = runtimeObj.ID
+		case "us":
+			targetRuntimeID = runtimeObj.ID
+		}
+	}
+	if sourceRuntimeID == "" || targetRuntimeID == "" {
+		t.Fatalf("expected managed shared source/target runtimes, got source=%q target=%q", sourceRuntimeID, targetRuntimeID)
+	}
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: sourceRuntimeID,
+		Resources: &model.ResourceSpec{
+			CPUMilliCores:   100,
+			MemoryMebibytes: 128,
+		},
+		Postgres: &model.AppPostgresSpec{
+			ServiceName:                      "demo-postgres",
+			RuntimeID:                        sourceRuntimeID,
+			FailoverTargetRuntimeID:          targetRuntimeID,
+			Instances:                        2,
+			SynchronousReplicas:              1,
+			PrimaryPlacementPendingRebalance: true,
+			Resources: &model.ResourceSpec{
+				CPUMilliCores:   100,
+				MemoryMebibytes: 128,
+			},
+		},
+	}, model.AppSource{
+		Type:           model.AppSourceTypeGitHubPublic,
+		RepoURL:        "https://github.com/example/demo",
+		RepoBranch:     "main",
+		BuildStrategy:  model.AppBuildStrategyDockerfile,
+		DockerfilePath: "Dockerfile",
+		CommitSHA:      "head",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+	if err := stateStore.SyncManagedSharedLocationRuntimes([]map[string]string{
+		{runtimepkg.LocationCountryCodeLabelKey: "us"},
+	}); err != nil {
+		t.Fatalf("resync managed shared runtimes: %v", err)
+	}
+	sourceRuntime, err := stateStore.GetRuntime(sourceRuntimeID)
+	if err != nil {
+		t.Fatalf("get source runtime: %v", err)
+	}
+	if sourceRuntime.Status != model.RuntimeStatusOffline {
+		t.Fatalf("expected source runtime offline, got %q", sourceRuntime.Status)
+	}
+	targetRuntime, err := stateStore.GetRuntime(targetRuntimeID)
+	if err != nil {
+		t.Fatalf("get target runtime: %v", err)
+	}
+	if targetRuntime.Status != model.RuntimeStatusActive {
+		t.Fatalf("expected target runtime active, got %q", targetRuntime.Status)
+	}
+
+	namespace := runtimepkg.NamespaceForTenant(app.TenantID)
+	clusterName := "demo-postgres"
+	primaryPodName := "demo-postgres-4"
+	targetNodeName := "node-target"
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case cloudNativePGClusterAPIPath(namespace, clusterName):
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{
+					"name": clusterName,
+				},
+				"spec": map[string]any{
+					"instances": 2,
+				},
+				"status": map[string]any{
+					"currentPrimary": primaryPodName,
+				},
+			}); err != nil {
+				t.Fatalf("encode cluster: %v", err)
+			}
+		case "/api/v1/namespaces/" + namespace + "/pods/" + primaryPodName:
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{
+					"name": primaryPodName,
+				},
+				"spec": map[string]any{
+					"nodeName": targetNodeName,
+				},
+				"status": map[string]any{
+					"phase": "Running",
+				},
+			}); err != nil {
+				t.Fatalf("encode pod: %v", err)
+			}
+		case "/api/v1/nodes/" + targetNodeName:
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{
+					"name": targetNodeName,
+					"labels": map[string]any{
+						runtimepkg.RuntimeIDLabelKey: targetRuntime.ID,
+						kubeHostnameLabelKey:         targetNodeName,
+					},
+				},
+			}); err != nil {
+				t.Fatalf("encode node: %v", err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	svc := &Service{
+		Store:  stateStore,
+		Logger: log.New(io.Discard, "", 0),
+		newKubeClient: func(namespace string) (*kubeClient, error) {
+			return &kubeClient{
+				client:      kubeServer.Client(),
+				baseURL:     kubeServer.URL,
+				bearerToken: "test",
+				namespace:   namespace,
+			}, nil
+		},
+	}
+
+	updatedApp, changed, err := svc.observedManagedPostgresDesiredApp(context.Background(), app)
+	if err != nil {
+		t.Fatalf("sync observed managed postgres desired app: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected observed managed postgres desired app to change state")
+	}
+
+	postgres := store.OwnedManagedPostgresSpec(updatedApp)
+	if postgres == nil {
+		t.Fatal("expected updated app to retain managed postgres")
+	}
+	if got := postgres.RuntimeID; got != targetRuntime.ID {
+		t.Fatalf("expected postgres runtime %q, got %q", targetRuntime.ID, got)
+	}
+	if got := postgres.FailoverTargetRuntimeID; got != "" {
+		t.Fatalf("expected failover target to be cleared, got %q", got)
+	}
+	if got := postgres.Instances; got != 1 {
+		t.Fatalf("expected instances=1, got %d", got)
+	}
+	if got := postgres.SynchronousReplicas; got != 0 {
+		t.Fatalf("expected synchronous replicas=0, got %d", got)
+	}
+	if postgres.PrimaryPlacementPendingRebalance {
+		t.Fatal("expected placement pending rebalance to be cleared")
+	}
+
+	storedApp, err := stateStore.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get synced app: %v", err)
+	}
+	storedPostgres := store.OwnedManagedPostgresSpec(storedApp)
+	if storedPostgres == nil {
+		t.Fatal("expected stored app to retain managed postgres")
+	}
+	if got := storedPostgres.RuntimeID; got != targetRuntime.ID {
+		t.Fatalf("expected stored postgres runtime %q, got %q", targetRuntime.ID, got)
+	}
+	if got := storedPostgres.FailoverTargetRuntimeID; got != "" {
+		t.Fatalf("expected stored failover target cleared, got %q", got)
+	}
+}
+
 func TestExecuteManagedOperationDeployUsesDesiredSourceAndAlignedPostgresRuntime(t *testing.T) {
 	t.Parallel()
 

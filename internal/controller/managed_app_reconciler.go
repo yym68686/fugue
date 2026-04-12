@@ -75,6 +75,47 @@ func (s *Service) reconcileManagedApps(ctx context.Context) error {
 	return firstErr
 }
 
+func (s *Service) appHasActiveOperation(app model.App) (bool, error) {
+	if strings.TrimSpace(app.ID) == "" {
+		return false, nil
+	}
+
+	ops, err := s.Store.ListOperationsByApp(app.TenantID, false, app.ID)
+	if err != nil {
+		return false, err
+	}
+	for _, op := range ops {
+		switch op.Status {
+		case model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent:
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Service) observedManagedPostgresDesiredApp(ctx context.Context, app model.App) (model.App, bool, error) {
+	alignedSpec, changed, err := s.alignManagedPostgresRuntimeToObservedPrimary(ctx, app)
+	if err != nil || !changed {
+		return app, changed, err
+	}
+
+	alignedApp := app
+	alignedApp.Spec = alignedSpec
+	alignedApp, err = store.OverlayDesiredManagedPostgres(alignedApp)
+	if err != nil {
+		return app, false, fmt.Errorf("overlay observed managed postgres desired state for app %s: %w", app.ID, err)
+	}
+
+	updatedApp, err := s.Store.SyncObservedManagedPostgresSpec(app.ID, alignedSpec)
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("persist observed managed postgres desired state for app %s failed: %v", app.ID, err)
+		}
+		return alignedApp, true, nil
+	}
+	return updatedApp, true, nil
+}
+
 func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeClient, managed runtime.ManagedAppObject) error {
 	app := runtime.AppFromManagedApp(managed)
 	namespace := strings.TrimSpace(managed.Metadata.Namespace)
@@ -89,7 +130,25 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 		}
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read app from store: %w", err))
 	} else {
-		backfillManagedAppSource(&app, storedApp)
+		hasActiveOp, opErr := s.appHasActiveOperation(storedApp)
+		switch {
+		case opErr != nil:
+			if s.Logger != nil {
+				s.Logger.Printf("skip active operation check for managed app %s: %v", app.ID, opErr)
+			}
+			backfillManagedAppSource(&app, storedApp)
+		case hasActiveOp:
+			backfillManagedAppSource(&app, storedApp)
+		default:
+			app = storedApp
+			if observedApp, changed, syncErr := s.observedManagedPostgresDesiredApp(ctx, storedApp); syncErr != nil {
+				if s.Logger != nil {
+					s.Logger.Printf("skip observed managed postgres sync for app %s: %v", app.ID, syncErr)
+				}
+			} else if changed {
+				app = observedApp
+			}
+		}
 	}
 	if strings.TrimSpace(managed.Metadata.DeletionTimestamp) != "" {
 		status := managedAppBaseStatus(managed, app)

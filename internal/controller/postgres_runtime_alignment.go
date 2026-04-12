@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -23,9 +24,6 @@ func (s *Service) alignManagedPostgresRuntimeToObservedPrimary(ctx context.Conte
 
 	postgres := store.OwnedManagedPostgresSpec(app)
 	if postgres == nil {
-		return *desired, false, nil
-	}
-	if postgres.Instances != 1 || strings.TrimSpace(postgres.FailoverTargetRuntimeID) != "" {
 		return *desired, false, nil
 	}
 
@@ -50,18 +48,82 @@ func (s *Service) alignManagedPostgresRuntimeToObservedPrimary(ctx context.Conte
 	} else {
 		desired.Postgres = cloneControllerPostgresSpec(desired.Postgres)
 	}
-	desired.Postgres.RuntimeID = actualRuntimeID
 
-	if s.Logger != nil {
-		s.Logger.Printf(
-			"aligning single-instance managed postgres for app %s from runtime %s to %s based on %s",
-			app.ID,
-			desiredRuntimeID,
-			actualRuntimeID,
-			detail,
-		)
+	targetRuntimeID := strings.TrimSpace(postgres.FailoverTargetRuntimeID)
+	consumeFailover, err := s.shouldConsumeObservedManagedPostgresFailover(
+		desiredRuntimeID,
+		actualRuntimeID,
+		targetRuntimeID,
+	)
+	if err != nil {
+		return *desired, false, err
 	}
-	return *desired, true, nil
+	switch {
+	case consumeFailover:
+		desired.Postgres.RuntimeID = actualRuntimeID
+		desired.Postgres.FailoverTargetRuntimeID = ""
+		desired.Postgres.Instances = 1
+		desired.Postgres.SynchronousReplicas = 0
+		desired.Postgres.PrimaryPlacementPendingRebalance = false
+		if s.Logger != nil {
+			s.Logger.Printf(
+				"consuming managed postgres failover for app %s from runtime %s to %s based on %s",
+				app.ID,
+				desiredRuntimeID,
+				actualRuntimeID,
+				detail,
+			)
+		}
+		return *desired, true, nil
+	case postgres.Instances == 1 && targetRuntimeID == "":
+		desired.Postgres.RuntimeID = actualRuntimeID
+		if s.Logger != nil {
+			s.Logger.Printf(
+				"aligning single-instance managed postgres for app %s from runtime %s to %s based on %s",
+				app.ID,
+				desiredRuntimeID,
+				actualRuntimeID,
+				detail,
+			)
+		}
+		return *desired, true, nil
+	default:
+		return *desired, false, nil
+	}
+}
+
+func (s *Service) shouldConsumeObservedManagedPostgresFailover(sourceRuntimeID, actualRuntimeID, targetRuntimeID string) (bool, error) {
+	sourceRuntimeID = strings.TrimSpace(sourceRuntimeID)
+	actualRuntimeID = strings.TrimSpace(actualRuntimeID)
+	targetRuntimeID = strings.TrimSpace(targetRuntimeID)
+	if sourceRuntimeID == "" || actualRuntimeID == "" || targetRuntimeID == "" {
+		return false, nil
+	}
+	if actualRuntimeID != targetRuntimeID || actualRuntimeID == sourceRuntimeID {
+		return false, nil
+	}
+
+	unavailable, err := s.runtimeUnavailable(sourceRuntimeID)
+	if err != nil {
+		return false, err
+	}
+	return unavailable, nil
+}
+
+func (s *Service) runtimeUnavailable(runtimeID string) (bool, error) {
+	runtimeID = strings.TrimSpace(runtimeID)
+	if runtimeID == "" {
+		return false, nil
+	}
+
+	runtimeObj, err := s.Store.GetRuntime(runtimeID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return true, nil
+		}
+		return false, fmt.Errorf("load runtime %s: %w", runtimeID, err)
+	}
+	return strings.EqualFold(strings.TrimSpace(runtimeObj.Status), model.RuntimeStatusOffline), nil
 }
 
 func (s *Service) observedManagedPostgresPrimaryRuntimeID(ctx context.Context, app model.App, spec model.AppPostgresSpec) (string, string, error) {
