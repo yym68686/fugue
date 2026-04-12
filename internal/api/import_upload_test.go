@@ -2,6 +2,7 @@ package api
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
@@ -139,6 +140,80 @@ func TestImportUploadAppQueuesPendingImportWithPersistentStorage(t *testing.T) {
 	}
 	if op.DesiredSpec.PersistentStorage == nil || len(op.DesiredSpec.PersistentStorage.Mounts) != 2 {
 		t.Fatalf("expected desired spec persistent storage mounts, got %+v", op.DesiredSpec.PersistentStorage)
+	}
+}
+
+func TestImportUploadAppAcceptsZipArchive(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Upload Zip Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "uploader", []string{"app.write", "app.deploy"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		AppBaseDomain: "apps.example.com",
+	})
+
+	archiveBytes := mustZip(t, map[string]string{
+		"demo-main/index.html": "<h1>zip upload</h1>\n",
+	})
+	body, contentType := newImportUploadMultipartBody(t, importUploadRequest{
+		Name:          "demo-app",
+		BuildStrategy: model.AppBuildStrategyStaticSite,
+	}, "demo-main.zip", archiveBytes)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/apps/import-upload", body)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", contentType)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		App       model.App       `json:"app"`
+		Operation model.Operation `json:"operation"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Operation.ID == "" {
+		t.Fatal("expected operation id in response")
+	}
+
+	op, err := s.GetOperation(response.Operation.ID)
+	if err != nil {
+		t.Fatalf("get operation: %v", err)
+	}
+	if op.DesiredSource == nil {
+		t.Fatal("expected desired source on queued operation")
+	}
+	if op.DesiredSource.UploadID == "" {
+		t.Fatal("expected upload id on queued source")
+	}
+
+	upload, archiveData, err := s.GetSourceUploadArchive(op.DesiredSource.UploadID)
+	if err != nil {
+		t.Fatalf("get source upload archive: %v", err)
+	}
+	if upload.Filename != "demo-main.zip" {
+		t.Fatalf("expected stored upload filename demo-main.zip, got %q", upload.Filename)
+	}
+	if len(archiveData) == 0 {
+		t.Fatal("expected stored archive bytes")
 	}
 }
 
@@ -602,6 +677,26 @@ func mustTarGz(t *testing.T, files map[string]string) []byte {
 	}
 	if err := gzipWriter.Close(); err != nil {
 		t.Fatalf("close gzip writer: %v", err)
+	}
+	return buffer.Bytes()
+}
+
+func mustZip(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+
+	var buffer bytes.Buffer
+	writer := zip.NewWriter(&buffer)
+	for name, content := range files {
+		entry, err := writer.Create(name)
+		if err != nil {
+			t.Fatalf("create zip entry: %v", err)
+		}
+		if _, err := entry.Write([]byte(content)); err != nil {
+			t.Fatalf("write zip content: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close zip writer: %v", err)
 	}
 	return buffer.Bytes()
 }

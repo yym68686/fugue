@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/appimages"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/sourceimport"
@@ -118,10 +119,11 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 
 	finalSpec := cloneImportSpec(*op.DesiredSpec)
 	finalSource := restoreQueuedSourceMetadata(output.Source, *op.DesiredSource)
-	runtimeImageRef, err := rewriteImportedImageRef(strings.TrimSpace(output.ImportResult.ImageRef), s.registryPushBase, s.registryPullBase)
+	managedImageRef, runtimeImageRef, err := s.resolveImportedManagedImageRef(importCtx, app, *op.DesiredSource, finalSource, strings.TrimSpace(output.ImportResult.ImageRef))
 	if err != nil {
 		return err
 	}
+	finalSource.ResolvedImageRef = managedImageRef
 	finalSpec.Image = runtimeImageRef
 	if finalSpec.Replicas <= 0 {
 		finalSpec.Replicas = 1
@@ -168,7 +170,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		s.Logger.Printf("skip billing image storage sync after import op=%s tenant=%s: %v", op.ID, app.TenantID, err)
 	}
 
-	s.Logger.Printf("operation %s completed import build; pushed_image=%s runtime_image=%s deploy=%s", op.ID, output.ImportResult.ImageRef, finalSpec.Image, deployOp.ID)
+	s.Logger.Printf("operation %s completed import build; managed_image=%s runtime_image=%s deploy=%s", op.ID, managedImageRef, finalSpec.Image, deployOp.ID)
 	return nil
 }
 
@@ -272,7 +274,137 @@ func mergeSuggestedImportEnv(base, override map[string]string) map[string]string
 	return merged
 }
 
+func (s *Service) resolveImportedManagedImageRef(
+	ctx context.Context,
+	app model.App,
+	queuedSource model.AppSource,
+	importedSource model.AppSource,
+	importResultImageRef string,
+) (string, string, error) {
+	seen := make(map[string]struct{})
+	directCandidates := []string{
+		strings.TrimSpace(importResultImageRef),
+		strings.TrimSpace(importedSource.ResolvedImageRef),
+	}
+	for _, candidate := range directCandidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+
+		runtimeImageRef, err := rewriteImportedImageRef(candidate, s.registryPushBase, s.registryPullBase)
+		if err == nil {
+			return candidate, runtimeImageRef, nil
+		}
+		if s.Logger != nil {
+			s.Logger.Printf("ignore invalid imported managed image ref for app %s candidate=%s: %v", app.ID, candidate, err)
+		}
+	}
+
+	importedForInference := importedSource
+	importedForInference.ResolvedImageRef = ""
+	queuedForInference := queuedSource
+	queuedForInference.ResolvedImageRef = ""
+
+	inferredCandidates := make([]string, 0, 2)
+	appendInferredCandidate := func(source model.AppSource) {
+		candidate := strings.TrimSpace(appimages.ManagedImageRefForSource(app, &source, "", s.registryPushBase, s.registryPullBase))
+		if candidate == "" {
+			return
+		}
+		if _, ok := seen[candidate]; ok {
+			return
+		}
+		seen[candidate] = struct{}{}
+		inferredCandidates = append(inferredCandidates, candidate)
+	}
+	appendInferredCandidate(importedForInference)
+	appendInferredCandidate(queuedForInference)
+
+	if len(inferredCandidates) == 0 {
+		return "", "", fmt.Errorf("import completed without an image reference and no managed image candidate could be inferred")
+	}
+	if s.inspectManagedImage == nil {
+		return "", "", fmt.Errorf("import completed without an image reference and no image inspector is configured to verify inferred candidates (%s)", strings.Join(inferredCandidates, ", "))
+	}
+
+	for _, candidate := range inferredCandidates {
+		exists, _, err := s.inspectManagedImage(ctx, candidate)
+		if err != nil {
+			return "", "", fmt.Errorf("inspect inferred managed image %s: %w", candidate, err)
+		}
+		if !exists {
+			continue
+		}
+		runtimeImageRef, err := rewriteImportedImageRef(candidate, s.registryPushBase, s.registryPullBase)
+		if err != nil {
+			return "", "", err
+		}
+		if s.Logger != nil {
+			s.Logger.Printf("recovered missing import image ref for app %s using inferred managed image %s", app.ID, candidate)
+		}
+		return candidate, runtimeImageRef, nil
+	}
+
+	return "", "", fmt.Errorf("import completed without an image reference and no managed image candidate exists (tried %s)", strings.Join(inferredCandidates, ", "))
+}
+
 func restoreQueuedSourceMetadata(imported model.AppSource, queued model.AppSource) model.AppSource {
+	if strings.TrimSpace(imported.Type) == "" {
+		imported.Type = strings.TrimSpace(queued.Type)
+	}
+	if strings.TrimSpace(imported.RepoURL) == "" {
+		imported.RepoURL = strings.TrimSpace(queued.RepoURL)
+	}
+	if strings.TrimSpace(imported.RepoBranch) == "" {
+		imported.RepoBranch = strings.TrimSpace(queued.RepoBranch)
+	}
+	if strings.TrimSpace(imported.RepoAuthToken) == "" {
+		imported.RepoAuthToken = strings.TrimSpace(queued.RepoAuthToken)
+	}
+	if strings.TrimSpace(imported.ImageRef) == "" {
+		imported.ImageRef = strings.TrimSpace(queued.ImageRef)
+	}
+	if strings.TrimSpace(imported.UploadID) == "" {
+		imported.UploadID = strings.TrimSpace(queued.UploadID)
+	}
+	if strings.TrimSpace(imported.UploadFilename) == "" {
+		imported.UploadFilename = strings.TrimSpace(queued.UploadFilename)
+	}
+	if strings.TrimSpace(imported.ArchiveSHA256) == "" {
+		imported.ArchiveSHA256 = strings.TrimSpace(queued.ArchiveSHA256)
+	}
+	if imported.ArchiveSizeBytes <= 0 {
+		imported.ArchiveSizeBytes = queued.ArchiveSizeBytes
+	}
+	if strings.TrimSpace(imported.SourceDir) == "" {
+		imported.SourceDir = strings.TrimSpace(queued.SourceDir)
+	}
+	if strings.TrimSpace(imported.BuildStrategy) == "" {
+		imported.BuildStrategy = strings.TrimSpace(queued.BuildStrategy)
+	}
+	if strings.TrimSpace(imported.CommitSHA) == "" {
+		imported.CommitSHA = strings.TrimSpace(queued.CommitSHA)
+	}
+	if strings.TrimSpace(imported.CommitCommittedAt) == "" {
+		imported.CommitCommittedAt = strings.TrimSpace(queued.CommitCommittedAt)
+	}
+	if strings.TrimSpace(imported.DockerfilePath) == "" {
+		imported.DockerfilePath = strings.TrimSpace(queued.DockerfilePath)
+	}
+	if strings.TrimSpace(imported.BuildContextDir) == "" {
+		imported.BuildContextDir = strings.TrimSpace(queued.BuildContextDir)
+	}
+	if strings.TrimSpace(imported.DetectedProvider) == "" {
+		imported.DetectedProvider = strings.TrimSpace(queued.DetectedProvider)
+	}
+	if strings.TrimSpace(imported.DetectedStack) == "" {
+		imported.DetectedStack = strings.TrimSpace(queued.DetectedStack)
+	}
 	imported.ImageNameSuffix = strings.TrimSpace(queued.ImageNameSuffix)
 	imported.ComposeService = strings.TrimSpace(queued.ComposeService)
 	if len(queued.ComposeDependsOn) > 0 {

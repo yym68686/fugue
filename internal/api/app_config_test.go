@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"fugue/internal/auth"
@@ -279,6 +280,55 @@ func TestGetAppEnvRecoversFailedImportedAppDesiredState(t *testing.T) {
 	}
 	if got := envResponse.Env["BROKEN"]; got != "1" {
 		t.Fatalf("expected recovered env BROKEN=1, got %q", got)
+	}
+}
+
+func TestRestartAppRejectsBlankDeployableImage(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Blank Image Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	raiseManagedTestCap(t, s, tenant.ID)
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.write", "app.deploy"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	app, err := s.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:     model.AppSourceTypeDockerImage,
+		ImageRef: "ghcr.io/example/demo:latest",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/restart", apiKey, map[string]any{})
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusConflict, recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "app has no deployable image") {
+		t.Fatalf("expected conflict to mention missing deployable image, got body=%s", recorder.Body.String())
+	}
+
+	ops, err := s.ListOperationsByApp(app.TenantID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+	if len(ops) != 0 {
+		t.Fatalf("expected no operations to be queued, got %d", len(ops))
 	}
 }
 

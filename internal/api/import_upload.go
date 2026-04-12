@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -431,9 +430,6 @@ func decodeImportUploadMultipart(r *http.Request) (importUploadRequest, *multipa
 	}
 	defer archiveFile.Close()
 
-	if err := validateUploadArchiveName(archiveHeader.Filename); err != nil {
-		return importUploadRequest{}, nil, nil, err
-	}
 	archiveBytes, err := io.ReadAll(io.LimitReader(archiveFile, maxSourceUploadArchiveBytes+1))
 	if err != nil {
 		return importUploadRequest{}, nil, nil, fmt.Errorf("read archive: %w", err)
@@ -444,20 +440,10 @@ func decodeImportUploadMultipart(r *http.Request) (importUploadRequest, *multipa
 	if len(archiveBytes) > maxSourceUploadArchiveBytes {
 		return importUploadRequest{}, nil, nil, fmt.Errorf("archive exceeds %d bytes", maxSourceUploadArchiveBytes)
 	}
-	if !bytes.HasPrefix(archiveBytes, []byte{0x1f, 0x8b}) {
-		return importUploadRequest{}, nil, nil, fmt.Errorf("archive must be a .tgz or .tar.gz file")
+	if _, err := sourceimport.DetectUploadArchiveFormat(archiveHeader.Filename, archiveBytes); err != nil {
+		return importUploadRequest{}, nil, nil, err
 	}
 	return req, archiveHeader, archiveBytes, nil
-}
-
-func validateUploadArchiveName(name string) error {
-	lower := strings.ToLower(strings.TrimSpace(name))
-	switch {
-	case strings.HasSuffix(lower, ".tgz"), strings.HasSuffix(lower, ".tar.gz"):
-		return nil
-	default:
-		return fmt.Errorf("archive filename must end with .tgz or .tar.gz")
-	}
 }
 
 func buildQueuedUploadSource(upload model.SourceUpload, sourceDir, dockerfilePath, buildContextDir, buildStrategy, imageNameSuffix, composeService string) (model.AppSource, error) {
@@ -496,8 +482,15 @@ func buildQueuedUploadSource(upload model.SourceUpload, sourceDir, dockerfilePat
 
 func uploadSourceBaseName(filename string) string {
 	name := strings.TrimSpace(filename)
-	name = strings.TrimSuffix(name, ".tar.gz")
-	name = strings.TrimSuffix(name, ".tgz")
+	lower := strings.ToLower(name)
+	switch {
+	case strings.HasSuffix(lower, ".tar.gz"):
+		name = name[:len(name)-len(".tar.gz")]
+	case strings.HasSuffix(lower, ".tgz"):
+		name = name[:len(name)-len(".tgz")]
+	case strings.HasSuffix(lower, ".zip"):
+		name = name[:len(name)-len(".zip")]
+	}
 	name = strings.TrimSuffix(name, filepath.Ext(name))
 	return name
 }

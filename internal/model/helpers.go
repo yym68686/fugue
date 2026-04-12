@@ -51,6 +51,17 @@ func NormalizeScopes(scopes []string) []string {
 }
 
 func Slugify(input string) string {
+	if out := slugify(input); out != "" {
+		return out
+	}
+	return "item"
+}
+
+func SlugifyOptional(input string) string {
+	return slugify(input)
+}
+
+func slugify(input string) string {
 	input = strings.ToLower(strings.TrimSpace(input))
 	var b strings.Builder
 	lastDash := false
@@ -69,11 +80,7 @@ func Slugify(input string) string {
 			}
 		}
 	}
-	out := strings.Trim(b.String(), "-")
-	if out == "" {
-		return "item"
-	}
-	return out
+	return strings.Trim(b.String(), "-")
 }
 
 func randomHex(n int) string {

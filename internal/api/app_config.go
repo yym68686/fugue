@@ -233,6 +233,10 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	if strings.TrimSpace(spec.Image) == "" {
+		httpx.WriteError(w, http.StatusConflict, "app has no deployable image; rebuild or re-import before restarting")
+		return
+	}
 	spec.RestartToken = model.NewID("restart")
 	op, err := s.store.CreateOperation(model.Operation{
 		TenantID:        app.TenantID,

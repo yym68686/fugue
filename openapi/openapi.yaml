@@ -4913,6 +4913,7 @@ components:
         request:
           $ref: "#/components/schemas/ImportUploadRequest"
         archive:
+          description: Source archive upload. Fugue accepts .zip, .tgz, and .tar.gz archives.
           type: string
           format: binary
     ImportGitHubResponse:

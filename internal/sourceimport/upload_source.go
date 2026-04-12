@@ -1,14 +1,9 @@
 package sourceimport
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
 	"context"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"fugue/internal/model"
@@ -40,6 +35,7 @@ type extractedUploadSource struct {
 	ArchiveName    string
 	ArchiveSHA256  string
 	ArchiveSize    int64
+	CleanupDir     string
 	RootDir        string
 	DefaultAppName string
 }
@@ -180,14 +176,15 @@ func (i *Importer) extractUploadedArchive(req UploadSourceImportRequest) (extrac
 	if err != nil {
 		return extractedUploadSource{}, fmt.Errorf("create upload import temp dir: %w", err)
 	}
-	if err := extractTarGzArchive(rootDir, req.ArchiveData); err != nil {
+	effectiveRootDir, err := extractUploadArchive(rootDir, req.ArchiveFilename, req.ArchiveData)
+	if err != nil {
 		_ = os.RemoveAll(rootDir)
 		return extractedUploadSource{}, err
 	}
 
 	defaultAppName := model.Slugify(strings.TrimSpace(req.AppName))
 	if defaultAppName == "" {
-		defaultAppName = model.Slugify(strings.TrimSuffix(strings.TrimSpace(req.ArchiveFilename), filepath.Ext(strings.TrimSpace(req.ArchiveFilename))))
+		defaultAppName = model.Slugify(uploadArchiveBaseName(req.ArchiveFilename))
 	}
 	if defaultAppName == "" {
 		defaultAppName = "app"
@@ -198,71 +195,21 @@ func (i *Importer) extractUploadedArchive(req UploadSourceImportRequest) (extrac
 		ArchiveName:    strings.TrimSpace(req.ArchiveFilename),
 		ArchiveSHA256:  strings.TrimSpace(req.ArchiveSHA256),
 		ArchiveSize:    req.ArchiveSizeBytes,
-		RootDir:        rootDir,
+		CleanupDir:     rootDir,
+		RootDir:        effectiveRootDir,
 		DefaultAppName: defaultAppName,
 	}, nil
 }
 
 func releaseExtractedUploadSource(src extractedUploadSource) {
-	if strings.TrimSpace(src.RootDir) == "" {
+	targetDir := strings.TrimSpace(src.CleanupDir)
+	if targetDir == "" {
+		targetDir = strings.TrimSpace(src.RootDir)
+	}
+	if targetDir == "" {
 		return
 	}
-	_ = os.RemoveAll(src.RootDir)
-}
-
-func extractTarGzArchive(dstDir string, archiveData []byte) error {
-	gzipReader, err := gzip.NewReader(bytes.NewReader(archiveData))
-	if err != nil {
-		return fmt.Errorf("open uploaded archive: %w", err)
-	}
-	defer gzipReader.Close()
-
-	tarReader := tar.NewReader(gzipReader)
-	for {
-		header, err := tarReader.Next()
-		switch {
-		case err == io.EOF:
-			return nil
-		case err != nil:
-			return fmt.Errorf("read uploaded archive: %w", err)
-		}
-
-		name := filepath.Clean(strings.TrimPrefix(header.Name, "./"))
-		if name == "." || name == "" {
-			continue
-		}
-		if strings.HasPrefix(name, ".."+string(filepath.Separator)) || name == ".." || filepath.IsAbs(name) {
-			return fmt.Errorf("archive entry %q escapes destination", header.Name)
-		}
-		targetPath := filepath.Join(dstDir, name)
-		if !strings.HasPrefix(filepath.Clean(targetPath), filepath.Clean(dstDir)+string(filepath.Separator)) && filepath.Clean(targetPath) != filepath.Clean(dstDir) {
-			return fmt.Errorf("archive entry %q escapes destination", header.Name)
-		}
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(targetPath, 0o755); err != nil {
-				return fmt.Errorf("mkdir %q: %w", name, err)
-			}
-		case tar.TypeReg, tar.TypeRegA:
-			if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
-				return fmt.Errorf("mkdir parent for %q: %w", name, err)
-			}
-			file, err := os.OpenFile(targetPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(header.Mode)&0o777)
-			if err != nil {
-				return fmt.Errorf("create %q: %w", name, err)
-			}
-			if _, err := io.Copy(file, tarReader); err != nil {
-				file.Close()
-				return fmt.Errorf("write %q: %w", name, err)
-			}
-			if err := file.Close(); err != nil {
-				return fmt.Errorf("close %q: %w", name, err)
-			}
-		default:
-			// Skip special files and links during local inspection extraction.
-		}
-	}
+	_ = os.RemoveAll(targetDir)
 }
 
 func importStaticSiteFromExtractedUpload(ctx context.Context, src extractedUploadSource, archiveDownloadURL, requestedSourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
@@ -468,7 +415,7 @@ func defaultUploadedImageRef(registryPushBase, imageRepository, appName, archive
 	if repoPath == "" {
 		repoPath = "app"
 	}
-	if suffix := model.Slugify(imageNameSuffix); suffix != "" {
+	if suffix := model.SlugifyOptional(imageNameSuffix); suffix != "" {
 		repoPath += "-" + suffix
 	}
 	tagSeed := strings.TrimSpace(archiveSHA256)
@@ -480,14 +427,111 @@ func defaultUploadedImageRef(registryPushBase, imageRepository, appName, archive
 
 func buildArchiveDownloadInitContainers(archiveURL string) []map[string]any {
 	script := fmt.Sprintf(`set -euo pipefail
-mkdir -p /workspace/repo
-wget -O /workspace/source.tgz %q
-tar -xzf /workspace/source.tgz -C /workspace/repo
+python3 - <<'PY'
+import os
+import shutil
+import sys
+import tarfile
+import urllib.request
+import zipfile
+from pathlib import Path, PurePosixPath
+
+archive_url = %q
+workspace = Path("/workspace")
+archive_path = workspace / "source-archive"
+repo_root = workspace / "repo"
+
+repo_root.mkdir(parents=True, exist_ok=True)
+
+with urllib.request.urlopen(archive_url) as response, archive_path.open("wb") as output:
+    shutil.copyfileobj(response, output)
+
+with archive_path.open("rb") as handle:
+    magic = handle.read(4)
+
+def should_skip(rel_path: str) -> bool:
+    parts = [part for part in PurePosixPath(rel_path).parts if part not in ("", ".")]
+    if "__MACOSX" in parts:
+        return True
+    base = parts[-1] if parts else ""
+    return base == ".DS_Store" or base.startswith("._")
+
+def safe_target(rel_path: str) -> Path:
+    target = (repo_root / Path(rel_path)).resolve()
+    base = repo_root.resolve()
+    if target != base and base not in target.parents:
+        raise ValueError(f"archive entry {rel_path!r} escapes destination")
+    return target
+
+def normalized_parts(raw_name: str):
+    normalized_name = raw_name.replace("\\", "/")
+    if normalized_name.startswith("./"):
+        normalized_name = normalized_name[2:]
+    rel = PurePosixPath(normalized_name)
+    rel_text = rel.as_posix()
+    if rel_text in ("", "."):
+        return None
+    if rel.is_absolute() or rel.parts and rel.parts[0] == "..":
+        raise ValueError(f"archive entry {raw_name!r} escapes destination")
+    if should_skip(rel_text):
+        return None
+    return rel_text
+
+def extract_tar():
+    with tarfile.open(archive_path, "r:gz") as archive:
+        for member in archive.getmembers():
+            rel_text = normalized_parts(member.name)
+            if not rel_text:
+                continue
+            target = safe_target(rel_text)
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif member.isreg():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.extractfile(member) as source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+                os.chmod(target, member.mode & 0o777 or 0o644)
+
+def extract_zip():
+    with zipfile.ZipFile(archive_path) as archive:
+        for member in archive.infolist():
+            rel_text = normalized_parts(member.filename)
+            if not rel_text:
+                continue
+            target = safe_target(rel_text)
+            is_dir = member.is_dir() if hasattr(member, "is_dir") else member.filename.endswith("/")
+            if is_dir:
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member) as source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+                mode = (member.external_attr >> 16) & 0o777
+                os.chmod(target, mode or 0o644)
+
+if magic.startswith(b"\x1f\x8b"):
+    extract_tar()
+elif magic in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"):
+    extract_zip()
+else:
+    raise SystemExit("unsupported source upload archive format")
+
+entries = list(repo_root.iterdir())
+if not entries:
+    raise SystemExit("uploaded archive does not contain any files")
+if len(entries) == 1 and entries[0].is_dir():
+    lifted_root = workspace / "repo-lifted"
+    if lifted_root.exists():
+        shutil.rmtree(lifted_root)
+    entries[0].replace(lifted_root)
+    repo_root.rmdir()
+    lifted_root.replace(repo_root)
+PY
 `, strings.TrimSpace(archiveURL))
 	return []map[string]any{
 		{
 			"name":         "source-download",
-			"image":        defaultGitCloneImage,
+			"image":        "python:3.12-alpine",
 			"command":      []string{"sh", "-lc", script},
 			"volumeMounts": []map[string]any{{"name": "workspace", "mountPath": "/workspace"}},
 		},

@@ -499,10 +499,8 @@ func defaultMirroredImageRef(registryPushBase, imageRepository, appName, sourceI
 	}
 
 	repoPath := defaultImportedImageAppName(appName, sourceImageRef)
-	if trimmedSuffix := strings.TrimSpace(imageNameSuffix); trimmedSuffix != "" {
-		if suffix := model.Slugify(trimmedSuffix); suffix != "" {
-			repoPath += "-" + suffix
-		}
+	if suffix := model.SlugifyOptional(imageNameSuffix); suffix != "" {
+		repoPath += "-" + suffix
 	}
 	if repoPath == "" {
 		repoPath = "image"

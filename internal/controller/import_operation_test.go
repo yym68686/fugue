@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/sourceimport"
@@ -24,6 +25,8 @@ type recordingImporter struct {
 	githubComposeEnvReq *sourceimport.GitHubComposeServiceEnvRequest
 	githubComposeEnv    map[string]string
 	githubOutput        *sourceimport.GitHubSourceImportOutput
+	uploadReq           *sourceimport.UploadSourceImportRequest
+	uploadOutput        *sourceimport.GitHubSourceImportOutput
 }
 
 func (r *recordingImporter) ImportDockerImageSource(_ context.Context, req sourceimport.DockerImageSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error) {
@@ -73,7 +76,15 @@ func (r *recordingImporter) ImportGitHubSource(_ context.Context, req sourceimpo
 	}, nil
 }
 
-func (r *recordingImporter) ImportUploadedArchiveSource(context.Context, sourceimport.UploadSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error) {
+func (r *recordingImporter) ImportUploadedArchiveSource(_ context.Context, req sourceimport.UploadSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error) {
+	req.JobLabels = cloneStringMap(req.JobLabels)
+	req.PlacementNodeSelector = cloneStringMap(req.PlacementNodeSelector)
+	reqCopy := req
+	r.uploadReq = &reqCopy
+	if r.uploadOutput != nil {
+		output := *r.uploadOutput
+		return output, nil
+	}
 	return sourceimport.GitHubSourceImportOutput{}, fmt.Errorf("unexpected upload import")
 }
 
@@ -276,6 +287,233 @@ func TestExecuteManagedImportOperationRefreshesExistingRestartToken(t *testing.T
 	}
 	if !strings.HasPrefix(deployOp.DesiredSpec.RestartToken, "restart_") {
 		t.Fatalf("expected restart token prefix, got %q", deployOp.DesiredSpec.RestartToken)
+	}
+}
+
+func TestExecuteManagedImportOperationRecoversMissingUploadImageRefFromManagedRegistry(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	upload, err := stateStore.CreateSourceUpload(tenant.ID, "demo.tgz", "application/gzip", []byte("archive-bytes"))
+	if err != nil {
+		t.Fatalf("create source upload: %v", err)
+	}
+	expectedManagedImageRef := "registry.push.example/fugue-apps/demo:upload-" + upload.SHA256[:12]
+	expectedRuntimeImageRef := "registry.pull.example/fugue-apps/demo:upload-" + upload.SHA256[:12]
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:             model.AppSourceTypeUpload,
+		UploadID:         upload.ID,
+		UploadFilename:   upload.Filename,
+		ArchiveSHA256:    upload.SHA256,
+		ArchiveSizeBytes: upload.SizeBytes,
+		BuildStrategy:    model.AppBuildStrategyDockerfile,
+		DockerfilePath:   "Dockerfile",
+		BuildContextDir:  ".",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	specCopy := app.Spec
+	sourceCopy := *app.Source
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		DesiredSource:   &sourceCopy,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+
+	importer := &recordingImporter{
+		uploadOutput: &sourceimport.GitHubSourceImportOutput{
+			ImportResult: sourceimport.GitHubImportResult{
+				BuildStrategy:        model.AppBuildStrategyDockerfile,
+				DetectedPort:         8080,
+				ExposesPublicService: true,
+			},
+			Source: model.AppSource{
+				Type:            model.AppSourceTypeUpload,
+				BuildStrategy:   model.AppBuildStrategyDockerfile,
+				DockerfilePath:  "Dockerfile",
+				BuildContextDir: ".",
+			},
+		},
+	}
+	svc := &Service{
+		Store:            stateStore,
+		Config:           config.ControllerConfig{SourceUploadBaseURL: "http://source.example"},
+		Logger:           log.New(io.Discard, "", 0),
+		importer:         importer,
+		registryPushBase: "registry.push.example",
+		registryPullBase: "registry.pull.example",
+		inspectManagedImage: func(_ context.Context, imageRef string) (bool, map[string]int64, error) {
+			return imageRef == expectedManagedImageRef, nil, nil
+		},
+	}
+
+	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
+		t.Fatalf("execute managed import operation: %v", err)
+	}
+	if importer.uploadReq == nil {
+		t.Fatal("expected importer to receive upload request")
+	}
+
+	ops, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+	var deployOp model.Operation
+	for _, candidate := range ops {
+		if candidate.Type == model.OperationTypeDeploy {
+			deployOp = candidate
+		}
+	}
+	if deployOp.ID == "" || deployOp.DesiredSpec == nil {
+		t.Fatalf("expected deploy operation with desired spec, got %+v", deployOp)
+	}
+	if got := deployOp.DesiredSpec.Image; got != expectedRuntimeImageRef {
+		t.Fatalf("expected recovered runtime image %q, got %q", expectedRuntimeImageRef, got)
+	}
+	if deployOp.DesiredSource == nil {
+		t.Fatal("expected desired source on recovered deploy operation")
+	}
+	if got := deployOp.DesiredSource.ResolvedImageRef; got != expectedManagedImageRef {
+		t.Fatalf("expected recovered managed image ref %q, got %q", expectedManagedImageRef, got)
+	}
+	if got := deployOp.DesiredSource.UploadID; got != upload.ID {
+		t.Fatalf("expected upload metadata to be preserved, got upload_id %q", got)
+	}
+	if got := deployOp.DesiredSource.ArchiveSHA256; got != upload.SHA256 {
+		t.Fatalf("expected upload sha %q, got %q", upload.SHA256, got)
+	}
+}
+
+func TestExecuteManagedImportOperationFailsClearlyWhenUploadImageRefCannotBeRecovered(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	upload, err := stateStore.CreateSourceUpload(tenant.ID, "demo.tgz", "application/gzip", []byte("archive-bytes"))
+	if err != nil {
+		t.Fatalf("create source upload: %v", err)
+	}
+	expectedManagedImageRef := "registry.push.example/fugue-apps/demo:upload-" + upload.SHA256[:12]
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:             model.AppSourceTypeUpload,
+		UploadID:         upload.ID,
+		UploadFilename:   upload.Filename,
+		ArchiveSHA256:    upload.SHA256,
+		ArchiveSizeBytes: upload.SizeBytes,
+		BuildStrategy:    model.AppBuildStrategyDockerfile,
+		DockerfilePath:   "Dockerfile",
+		BuildContextDir:  ".",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	specCopy := app.Spec
+	sourceCopy := *app.Source
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		DesiredSource:   &sourceCopy,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+
+	importer := &recordingImporter{
+		uploadOutput: &sourceimport.GitHubSourceImportOutput{
+			ImportResult: sourceimport.GitHubImportResult{
+				BuildStrategy:        model.AppBuildStrategyDockerfile,
+				DetectedPort:         8080,
+				ExposesPublicService: true,
+			},
+			Source: model.AppSource{
+				Type:            model.AppSourceTypeUpload,
+				BuildStrategy:   model.AppBuildStrategyDockerfile,
+				DockerfilePath:  "Dockerfile",
+				BuildContextDir: ".",
+			},
+		},
+	}
+	svc := &Service{
+		Store:            stateStore,
+		Config:           config.ControllerConfig{SourceUploadBaseURL: "http://source.example"},
+		Logger:           log.New(io.Discard, "", 0),
+		importer:         importer,
+		registryPushBase: "registry.push.example",
+		registryPullBase: "registry.pull.example",
+		inspectManagedImage: func(_ context.Context, imageRef string) (bool, map[string]int64, error) {
+			if imageRef != expectedManagedImageRef {
+				t.Fatalf("unexpected inferred image ref %q", imageRef)
+			}
+			return false, nil, nil
+		},
+	}
+
+	err = svc.executeManagedImportOperation(context.Background(), op, app)
+	if err == nil {
+		t.Fatal("expected execute managed import operation to fail")
+	}
+	if !strings.Contains(err.Error(), "import completed without an image reference and no managed image candidate exists") {
+		t.Fatalf("expected explicit missing image error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), expectedManagedImageRef) {
+		t.Fatalf("expected error to mention inferred candidate %q, got %v", expectedManagedImageRef, err)
+	}
+
+	ops, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+	for _, candidate := range ops {
+		if candidate.Type == model.OperationTypeDeploy {
+			t.Fatalf("expected no deploy operation after unrecoverable import, got %+v", candidate)
+		}
 	}
 }
 

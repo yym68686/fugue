@@ -71,6 +71,30 @@ func TestBuildGitContextURL(t *testing.T) {
 	}
 }
 
+func TestDefaultImportedImageRefOmitsBlankOptionalSuffix(t *testing.T) {
+	t.Parallel()
+
+	got := defaultImportedImageRef("registry.push.example", "fugue-apps", clonedGitHubRepo{
+		RepoOwner: "Example",
+		RepoName:  "Demo",
+		CommitSHA: "abcdef1234567890",
+	}, "")
+	want := "registry.push.example/fugue-apps/example-demo:git-abcdef123456"
+	if got != want {
+		t.Fatalf("unexpected imported image ref:\nwant: %s\ngot:  %s", want, got)
+	}
+}
+
+func TestDefaultUploadedImageRefOmitsBlankOptionalSuffix(t *testing.T) {
+	t.Parallel()
+
+	got := defaultUploadedImageRef("registry.push.example", "fugue-apps", "Demo App", "abcdef1234567890", "")
+	want := "registry.push.example/fugue-apps/demo-app:upload-abcdef123456"
+	if got != want {
+		t.Fatalf("unexpected uploaded image ref:\nwant: %s\ngot:  %s", want, got)
+	}
+}
+
 func TestIsInsecureRegistryHostTreatsClusterServiceAsInsecure(t *testing.T) {
 	t.Parallel()
 

@@ -65,6 +65,16 @@ func ManagedImageRefSet(
 	return refs
 }
 
+func ManagedImageRefForSource(
+	app model.App,
+	source *model.AppSource,
+	runtimeImageRef string,
+	registryPushBase string,
+	registryPullBase string,
+) string {
+	return managedImageRefForSource(app, source, runtimeImageRef, registryPushBase, registryPullBase)
+}
+
 func DeletableManagedImageRefs(
 	deletedApp model.App,
 	deletedAppOps []model.Operation,
@@ -331,7 +341,7 @@ func inferManagedGitHubImageRef(registryPushBase string, source *model.AppSource
 	}
 
 	repoPath := repoOwner + "-" + repoName
-	if suffix := model.Slugify(strings.TrimSpace(source.ImageNameSuffix)); suffix != "" {
+	if suffix := model.SlugifyOptional(source.ImageNameSuffix); suffix != "" {
 		repoPath += "-" + suffix
 	}
 	return fmt.Sprintf("%s/fugue-apps/%s:git-%s", strings.Trim(strings.TrimSpace(registryPushBase), "/"), repoPath, commitSHA)
@@ -354,7 +364,7 @@ func inferManagedUploadImageRef(registryPushBase, appName string, source *model.
 	if repoPath == "" {
 		repoPath = "app"
 	}
-	if suffix := model.Slugify(strings.TrimSpace(source.ImageNameSuffix)); suffix != "" {
+	if suffix := model.SlugifyOptional(source.ImageNameSuffix); suffix != "" {
 		repoPath += "-" + suffix
 	}
 	return fmt.Sprintf("%s/fugue-apps/%s:upload-%s", strings.Trim(strings.TrimSpace(registryPushBase), "/"), repoPath, shortTag)

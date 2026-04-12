@@ -85,6 +85,33 @@ func TestExcessManagedImageRefsDeletesOldestExistingStaleImagesBeyondLimit(t *te
 	}
 }
 
+func TestManagedImageRefForSourceGitHubOmitsBlankOptionalSuffix(t *testing.T) {
+	t.Parallel()
+
+	got := ManagedImageRefForSource(model.App{Name: "demo"}, &model.AppSource{
+		Type:      model.AppSourceTypeGitHubPublic,
+		RepoURL:   "https://github.com/Example/Demo",
+		CommitSHA: "abcdef1234567890",
+	}, "", "registry.push.example", "registry.pull.example")
+	want := "registry.push.example/fugue-apps/example-demo:git-abcdef123456"
+	if got != want {
+		t.Fatalf("expected github managed image ref %q, got %q", want, got)
+	}
+}
+
+func TestManagedImageRefForSourceUploadOmitsBlankOptionalSuffix(t *testing.T) {
+	t.Parallel()
+
+	got := ManagedImageRefForSource(model.App{Name: "Demo App"}, &model.AppSource{
+		Type:          model.AppSourceTypeUpload,
+		ArchiveSHA256: "abcdef1234567890",
+	}, "", "registry.push.example", "registry.pull.example")
+	want := "registry.push.example/fugue-apps/demo-app:upload-abcdef123456"
+	if got != want {
+		t.Fatalf("expected upload managed image ref %q, got %q", want, got)
+	}
+}
+
 func TestExcessManagedImageRefsIgnoresMissingStaleImages(t *testing.T) {
 	t.Parallel()
 

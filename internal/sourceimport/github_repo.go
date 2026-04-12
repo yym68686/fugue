@@ -128,7 +128,7 @@ func defaultImportedImageRef(registryPushBase, imageRepository string, repo clon
 		imageRepository = "fugue-apps"
 	}
 	repoPath := model.Slugify(repo.RepoOwner) + "-" + model.Slugify(repo.RepoName)
-	if suffix := model.Slugify(imageNameSuffix); suffix != "" {
+	if suffix := model.SlugifyOptional(imageNameSuffix); suffix != "" {
 		repoPath += "-" + suffix
 	}
 	return fmt.Sprintf("%s/%s/%s:git-%s", strings.TrimSpace(registryPushBase), imageRepository, repoPath, shortCommit(repo.CommitSHA))
