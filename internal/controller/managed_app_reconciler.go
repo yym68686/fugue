@@ -235,9 +235,6 @@ func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, depl
 	case !found:
 		status.Phase = runtime.ManagedAppPhasePending
 		status.Message = fmt.Sprintf("waiting for deployment %s", runtime.RuntimeAppResourceName(app))
-	case hasDeploymentFailureCondition(deployment.Status.Conditions):
-		status.Phase = runtime.ManagedAppPhaseError
-		status.Message = deploymentFailureMessage(deployment.Status.Conditions)
 	case status.ReadyReplicas >= app.Spec.Replicas:
 		status.Phase = runtime.ManagedAppPhaseReady
 		status.Message = fmt.Sprintf("deployment ready (%d/%d replicas)", status.ReadyReplicas, app.Spec.Replicas)
@@ -247,6 +244,9 @@ func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, depl
 	case podFailureMessage != "":
 		status.Phase = runtime.ManagedAppPhaseError
 		status.Message = podFailureMessage
+	case hasDeploymentFailureCondition(deployment.Status.Conditions):
+		status.Phase = runtime.ManagedAppPhaseError
+		status.Message = deploymentFailureMessage(deployment.Status.Conditions)
 	default:
 		status.Phase = runtime.ManagedAppPhaseProgressing
 		status.Message = fmt.Sprintf("deployment progressing (%d/%d ready replicas)", status.ReadyReplicas, app.Spec.Replicas)

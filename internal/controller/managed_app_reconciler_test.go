@@ -219,6 +219,110 @@ func TestBuildManagedAppStatusMarksCrashLoopingPodsAsError(t *testing.T) {
 	}
 }
 
+func TestBuildManagedAppStatusPrefersPodFailureOverDeploymentCondition(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:v2",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	managed := runtime.ManagedAppObject{
+		Metadata: runtime.ManagedAppMeta{
+			Generation: 2,
+		},
+		Spec: runtime.ManagedAppSpec{
+			Scheduling: runtime.SchedulingConstraints{},
+		},
+	}
+	deployment := kubeDeployment{}
+	deployment.Metadata.Generation = 2
+	deployment.Status.ObservedGeneration = 2
+	deployment.Status.Replicas = 1
+	deployment.Status.UpdatedReplicas = 1
+	deployment.Status.Conditions = []runtime.ManagedAppCondition{
+		{
+			Type:    "Progressing",
+			Status:  "False",
+			Reason:  "ProgressDeadlineExceeded",
+			Message: "ReplicaSet \"demo-abc123\" has timed out progressing.",
+		},
+	}
+
+	pods := []kubePod{
+		{
+			Metadata: struct {
+				Name              string    `json:"name"`
+				CreationTimestamp time.Time `json:"creationTimestamp"`
+				DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
+			}{
+				Name:              "demo-abc123",
+				CreationTimestamp: time.Date(2026, time.March, 26, 10, 0, 0, 0, time.UTC),
+			},
+			Spec: struct {
+				NodeName string `json:"nodeName,omitempty"`
+				Volumes  []struct {
+					Name                  string `json:"name,omitempty"`
+					PersistentVolumeClaim *struct {
+						ClaimName string `json:"claimName,omitempty"`
+					} `json:"persistentVolumeClaim,omitempty"`
+				} `json:"volumes,omitempty"`
+				InitContainers []struct {
+					Name string `json:"name"`
+				} `json:"initContainers"`
+				Containers []struct {
+					Name string `json:"name"`
+				} `json:"containers"`
+			}{
+				NodeName: "gcp1",
+			},
+			Status: struct {
+				Phase                 string                `json:"phase"`
+				Reason                string                `json:"reason,omitempty"`
+				Message               string                `json:"message,omitempty"`
+				InitContainerStatuses []kubeContainerStatus `json:"initContainerStatuses,omitempty"`
+				ContainerStatuses     []kubeContainerStatus `json:"containerStatuses,omitempty"`
+			}{
+				Phase: "Running",
+				ContainerStatuses: []kubeContainerStatus{
+					{
+						Name: "demo",
+						State: kubeRuntimeState{
+							Waiting: &kubeStateDetail{
+								Reason:  "CrashLoopBackOff",
+								Message: "back-off restarting failed container",
+							},
+						},
+						LastState: kubeRuntimeState{
+							Terminated: &kubeStateDetail{
+								Reason:   "Error",
+								ExitCode: 1,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	status := buildManagedAppStatus(managed, app, deployment, true, pods, nil)
+
+	if status.Phase != runtime.ManagedAppPhaseError {
+		t.Fatalf("expected phase error, got %q", status.Phase)
+	}
+	if !strings.Contains(status.Message, "demo-abc123") {
+		t.Fatalf("expected pod failure in message, got %q", status.Message)
+	}
+	if strings.Contains(status.Message, "ProgressDeadlineExceeded") {
+		t.Fatalf("expected pod failure to override deployment condition, got %q", status.Message)
+	}
+}
+
 func TestBuildManagedAppStatusIgnoresPodFailuresFromPreviousRelease(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",
