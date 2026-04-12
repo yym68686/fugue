@@ -852,6 +852,28 @@ paths:
                 additionalProperties: true
         default:
           $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deleteRuntime
+      summary: Delete Runtime
+      tags: [Runtimes]
+      x-fugue-handler: handleDeleteRuntime
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteRuntimeResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/runtimes/{id}/sharing:
     get:
       operationId: getRuntimeSharing
@@ -4470,6 +4492,15 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Runtime"
+    DeleteRuntimeResponse:
+      type: object
+      additionalProperties: false
+      required: [deleted, runtime]
+      properties:
+        deleted:
+          type: boolean
+        runtime:
+          $ref: "#/components/schemas/Runtime"
     RuntimeSharingResponse:
       type: object
       additionalProperties: false

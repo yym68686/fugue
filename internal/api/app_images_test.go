@@ -171,10 +171,31 @@ func TestHandleGetBillingCountsManagedImageInventoryStorage(t *testing.T) {
 	t.Parallel()
 
 	stateStore, server, apiKey, tenant, _, _, _, _, _, _ := setupAppImagesTestServer(t)
+	server.billingImageStorageRefresh = newBillingImageStorageRefreshScheduler(5*time.Millisecond, time.Second)
 
 	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/billing", apiKey, nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		summary, err := stateStore.GetTenantBillingSummary(tenant.ID)
+		if err != nil {
+			t.Fatalf("reload billing summary: %v", err)
+		}
+		if summary.ManagedCommitted.StorageGibibytes == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected async billing refresh to persist 1 GiB of image inventory, got %d", summary.ManagedCommitted.StorageGibibytes)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/billing", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected refreshed status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
 
 	var response struct {

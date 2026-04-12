@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -572,6 +573,9 @@ func TestFailoverOperationPreservesManagedPostgresPlacement(t *testing.T) {
 	if failoverSpec.RuntimeID != targetRuntime.ID {
 		t.Fatalf("expected failover desired runtime %q, got %q", targetRuntime.ID, failoverSpec.RuntimeID)
 	}
+	if failoverSpec.Failover != nil {
+		t.Fatalf("expected failover desired spec to consume app failover config, got %+v", failoverSpec.Failover)
+	}
 	if failoverSpec.Postgres == nil {
 		t.Fatal("expected failover desired postgres spec")
 	}
@@ -599,6 +603,9 @@ func TestFailoverOperationPreservesManagedPostgresPlacement(t *testing.T) {
 	if got := app.Spec.RuntimeID; got != targetRuntime.ID {
 		t.Fatalf("expected app runtime %q after failover, got %q", targetRuntime.ID, got)
 	}
+	if app.Spec.Failover != nil {
+		t.Fatalf("expected app failover config to be consumed after failover, got %+v", app.Spec.Failover)
+	}
 	if app.Spec.Postgres != nil {
 		t.Fatalf("expected app spec postgres to remain externalized, got %+v", app.Spec.Postgres)
 	}
@@ -624,6 +631,128 @@ func TestFailoverOperationPreservesManagedPostgresPlacement(t *testing.T) {
 	}
 	if got := app.BackingServices[0].Spec.Postgres.RuntimeID; got != sourceRuntime.ID {
 		t.Fatalf("expected backing service postgres runtime %q, got %q", sourceRuntime.ID, got)
+	}
+}
+
+func TestFailoverOperationConsumesManagedPostgresContinuityTarget(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Failover Continuity Consume")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	sourceRuntime, _, err := s.CreateRuntime(tenant.ID, "source-runtime", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create source runtime: %v", err)
+	}
+	targetRuntime, _, err := s.CreateRuntime(tenant.ID, "target-runtime", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create target runtime: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: sourceRuntime.ID,
+		Postgres: &model.AppPostgresSpec{
+			Database:                         "demo",
+			RuntimeID:                        sourceRuntime.ID,
+			FailoverTargetRuntimeID:          targetRuntime.ID,
+			Instances:                        2,
+			SynchronousReplicas:              1,
+			PrimaryPlacementPendingRebalance: true,
+		},
+		Failover: &model.AppFailoverSpec{
+			TargetRuntimeID: targetRuntime.ID,
+			Auto:            true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	failoverSpec := FailoverDesiredSpec(app, targetRuntime.ID)
+	if failoverSpec == nil {
+		t.Fatal("expected failover desired spec")
+	}
+	if failoverSpec.Failover != nil {
+		t.Fatalf("expected failover desired spec to consume app failover config, got %+v", failoverSpec.Failover)
+	}
+	if failoverSpec.Postgres == nil {
+		t.Fatal("expected failover desired postgres spec")
+	}
+	if got := failoverSpec.Postgres.RuntimeID; got != targetRuntime.ID {
+		t.Fatalf("expected failover desired postgres runtime %q, got %q", targetRuntime.ID, got)
+	}
+	if got := failoverSpec.Postgres.FailoverTargetRuntimeID; got != "" {
+		t.Fatalf("expected failover desired postgres target to be cleared, got %q", got)
+	}
+	if got := failoverSpec.Postgres.Instances; got != 1 {
+		t.Fatalf("expected failover desired postgres instances 1, got %d", got)
+	}
+	if got := failoverSpec.Postgres.SynchronousReplicas; got != 0 {
+		t.Fatalf("expected failover desired postgres synchronous replicas 0, got %d", got)
+	}
+	if failoverSpec.Postgres.PrimaryPlacementPendingRebalance {
+		t.Fatalf("expected failover desired postgres pending rebalance to clear, got %+v", failoverSpec.Postgres)
+	}
+
+	op, err := s.CreateOperation(model.Operation{
+		TenantID: tenant.ID,
+		Type:     model.OperationTypeFailover,
+		AppID:    app.ID,
+	})
+	if err != nil {
+		t.Fatalf("create failover operation: %v", err)
+	}
+
+	if _, err := s.CompleteManagedOperationWithResult(op.ID, "/tmp/demo-failover.yaml", "failed over", failoverSpec, nil); err != nil {
+		t.Fatalf("complete failover operation: %v", err)
+	}
+
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.Spec.Failover != nil {
+		t.Fatalf("expected app failover config to be consumed after failover, got %+v", app.Spec.Failover)
+	}
+	currentDatabase := OwnedManagedPostgresSpec(app)
+	if currentDatabase == nil {
+		t.Fatal("expected managed postgres spec after failover")
+	}
+	if got := currentDatabase.RuntimeID; got != targetRuntime.ID {
+		t.Fatalf("expected managed postgres runtime %q after failover, got %q", targetRuntime.ID, got)
+	}
+	if got := currentDatabase.FailoverTargetRuntimeID; got != "" {
+		t.Fatalf("expected managed postgres failover target to be cleared, got %q", got)
+	}
+	if got := currentDatabase.Instances; got != 1 {
+		t.Fatalf("expected managed postgres instances 1 after failover, got %d", got)
+	}
+	if got := currentDatabase.SynchronousReplicas; got != 0 {
+		t.Fatalf("expected managed postgres synchronous replicas 0 after failover, got %d", got)
+	}
+	if currentDatabase.PrimaryPlacementPendingRebalance {
+		t.Fatalf("expected managed postgres pending rebalance to clear after failover, got %+v", currentDatabase)
+	}
+	if len(app.BackingServices) != 1 || app.BackingServices[0].Spec.Postgres == nil {
+		t.Fatalf("expected one managed postgres backing service, got %+v", app.BackingServices)
+	}
+	if got := app.BackingServices[0].Spec.Postgres.RuntimeID; got != targetRuntime.ID {
+		t.Fatalf("expected backing service postgres runtime %q, got %q", targetRuntime.ID, got)
+	}
+	if got := app.BackingServices[0].Spec.Postgres.FailoverTargetRuntimeID; got != "" {
+		t.Fatalf("expected backing service postgres target to be cleared, got %q", got)
 	}
 }
 
@@ -2049,6 +2178,182 @@ func TestBootstrapClusterNodeNormalizesKubernetesNodeName(t *testing.T) {
 	}
 	if runtimeObj.MachineName != "VM-0-17-ubuntu" {
 		t.Fatalf("expected original machine name to be preserved, got %q", runtimeObj.MachineName)
+	}
+}
+
+func TestDeleteRuntimeRemovesOfflineOwnedRuntime(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Delete Runtime Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	runtimeObj, _, err := s.CreateRuntime(tenant.ID, "orphaned-node", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create runtime: %v", err)
+	}
+	if _, err := s.DetachRuntimeOwnership(runtimeObj.ID); err != nil {
+		t.Fatalf("detach runtime ownership: %v", err)
+	}
+
+	deletedRuntime, err := s.DeleteRuntime(runtimeObj.ID)
+	if err != nil {
+		t.Fatalf("delete runtime: %v", err)
+	}
+	if deletedRuntime.ID != runtimeObj.ID {
+		t.Fatalf("expected deleted runtime %q, got %q", runtimeObj.ID, deletedRuntime.ID)
+	}
+	if _, err := s.GetRuntime(runtimeObj.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected runtime to be deleted, got %v", err)
+	}
+}
+
+func TestDeleteRuntimeRejectsReferencedOfflineRuntime(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Delete Runtime Blocked Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "blocked-runtime", "blocked runtime project")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
+		CPUMilliCores:   500,
+		MemoryMebibytes: 1024,
+	}); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
+	}
+	runtimeObj, _, err := s.CreateRuntime(tenant.ID, "blocked-node", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create runtime: %v", err)
+	}
+	if _, err := s.CreateApp(tenant.ID, project.ID, "blocked-app", "", model.AppSpec{
+		Image:     "nginx:1.27",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: runtimeObj.ID,
+	}); err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	if _, err := s.DetachRuntimeOwnership(runtimeObj.ID); err != nil {
+		t.Fatalf("detach runtime ownership: %v", err)
+	}
+
+	_, err = s.DeleteRuntime(runtimeObj.ID)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected conflict deleting referenced runtime, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "apps, services, or active operations") {
+		t.Fatalf("expected delete blocker message, got %v", err)
+	}
+}
+
+func TestListAppsMetadataOmitsHydratedBackingServices(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("App Metadata Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "metadata", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
+		CPUMilliCores:    2_000,
+		MemoryMebibytes:  4_096,
+		StorageGibibytes: 20,
+	}); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
+	}
+
+	created, err := s.CreateApp(tenant.ID, project.ID, "metadata-app", "", model.AppSpec{
+		Image:     "ghcr.io/example/metadata:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Postgres: &model.AppPostgresSpec{
+			Database:  "metadata",
+			User:      "metadata",
+			Password:  "secret",
+			RuntimeID: "runtime_managed_shared",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	fullApps, err := s.ListApps(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list apps: %v", err)
+	}
+	if len(fullApps) != 1 {
+		t.Fatalf("expected one full app, got %+v", fullApps)
+	}
+	if len(fullApps[0].BackingServices) != 1 {
+		t.Fatalf("expected hydrated backing service in full view, got %+v", fullApps[0].BackingServices)
+	}
+
+	metadataApps, err := s.ListAppsMetadata(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list app metadata: %v", err)
+	}
+	if len(metadataApps) != 1 {
+		t.Fatalf("expected one metadata app, got %+v", metadataApps)
+	}
+	if metadataApps[0].ID != created.ID {
+		t.Fatalf("expected metadata app %q, got %q", created.ID, metadataApps[0].ID)
+	}
+	if len(metadataApps[0].BackingServices) != 0 {
+		t.Fatalf("expected metadata view to omit backing services, got %+v", metadataApps[0].BackingServices)
+	}
+	if metadataApps[0].Spec.Image != created.Spec.Image {
+		t.Fatalf("expected metadata view to preserve spec image %q, got %q", created.Spec.Image, metadataApps[0].Spec.Image)
+	}
+
+	metadataByID, err := s.ListAppsMetadataByIDs([]string{"", created.ID, created.ID})
+	if err != nil {
+		t.Fatalf("list app metadata by ids: %v", err)
+	}
+	if len(metadataByID) != 1 {
+		t.Fatalf("expected one metadata app by id, got %+v", metadataByID)
+	}
+	if metadataByID[0].ID != created.ID {
+		t.Fatalf("expected metadata app by id %q, got %q", created.ID, metadataByID[0].ID)
+	}
+	if len(metadataByID[0].BackingServices) != 0 {
+		t.Fatalf("expected metadata by id view to omit backing services, got %+v", metadataByID[0].BackingServices)
+	}
+
+	metadataByProject, err := s.ListAppsMetadataByProjectIDs([]string{"", project.ID, project.ID})
+	if err != nil {
+		t.Fatalf("list app metadata by project ids: %v", err)
+	}
+	if len(metadataByProject) != 1 {
+		t.Fatalf("expected one metadata app by project, got %+v", metadataByProject)
+	}
+	if metadataByProject[0].ID != created.ID {
+		t.Fatalf("expected metadata app by project %q, got %q", created.ID, metadataByProject[0].ID)
+	}
+	if len(metadataByProject[0].BackingServices) != 0 {
+		t.Fatalf("expected metadata by project view to omit backing services, got %+v", metadataByProject[0].BackingServices)
 	}
 }
 

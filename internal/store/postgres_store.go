@@ -1563,6 +1563,44 @@ func (s *Store) pgDetachRuntimeOwnership(runtimeID string) (model.Runtime, error
 	return runtime, nil
 }
 
+func (s *Store) pgDeleteRuntime(runtimeID string) (model.Runtime, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Runtime{}, fmt.Errorf("begin delete runtime transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	runtime, err := s.pgGetRuntimeTx(ctx, tx, runtimeID, true)
+	if err != nil {
+		return model.Runtime{}, err
+	}
+	if err := validateRuntimeDeletion(runtime); err != nil {
+		return model.Runtime{}, err
+	}
+
+	referenced, err := s.pgRuntimeHasDeleteBlockersTx(ctx, tx, runtimeID)
+	if err != nil {
+		return model.Runtime{}, err
+	}
+	if referenced {
+		return model.Runtime{}, fmt.Errorf("%w: runtime still has apps, services, or active operations", ErrConflict)
+	}
+
+	if err := s.pgDeleteRuntimeAccessGrantsTx(ctx, tx, runtime.ID); err != nil {
+		return model.Runtime{}, err
+	}
+	if err := s.pgDeleteRuntimeTx(ctx, tx, runtime.ID); err != nil {
+		return model.Runtime{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Runtime{}, fmt.Errorf("commit delete runtime transaction: %w", err)
+	}
+	return runtime, nil
+}
+
 func (s *Store) pgFindManagedOwnedRuntimeTx(ctx context.Context, tx *sql.Tx, nodeKeyID, runtimeName string) (model.Runtime, bool, error) {
 	runtime, err := scanRuntime(tx.QueryRowContext(ctx, `
 SELECT id, tenant_id, name, machine_name, type, access_mode, public_offer_json, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
@@ -1840,6 +1878,22 @@ FOR UPDATE
 }
 
 func (s *Store) pgListApps(tenantID string, platformAdmin bool) ([]model.App, error) {
+	return s.pgListAppsView(tenantID, platformAdmin, true)
+}
+
+func (s *Store) pgListAppsMetadata(tenantID string, platformAdmin bool) ([]model.App, error) {
+	return s.pgListAppsView(tenantID, platformAdmin, false)
+}
+
+func (s *Store) pgListAppsMetadataByIDs(appIDs []string) ([]model.App, error) {
+	return s.pgListAppsViewByIDs("id", appIDs, false)
+}
+
+func (s *Store) pgListAppsMetadataByProjectIDs(projectIDs []string) ([]model.App, error) {
+	return s.pgListAppsViewByIDs("project_id", projectIDs, false)
+}
+
+func (s *Store) pgListAppsView(tenantID string, platformAdmin bool, hydrateBackingServices bool) ([]model.App, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -1867,8 +1921,66 @@ FROM fugue_apps
 			return nil, err
 		}
 		normalizeAppStatusForRead(&app)
-		if err := s.pgHydrateAppBackingServices(ctx, &app); err != nil {
+		if hydrateBackingServices {
+			if err := s.pgHydrateAppBackingServices(ctx, &app); err != nil {
+				return nil, err
+			}
+		}
+		if isDeletedApp(app) {
+			continue
+		}
+		apps = append(apps, app)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate apps: %w", err)
+	}
+	return apps, nil
+}
+
+func (s *Store) pgListAppsViewByIDs(column string, ids []string, hydrateBackingServices bool) ([]model.App, error) {
+	ids = sortedTrimmedStringKeys(trimmedStringSet(ids))
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	switch column {
+	case "id", "project_id":
+	default:
+		return nil, fmt.Errorf("list apps: unsupported column %q", column)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	query := fmt.Sprintf(`
+SELECT id, tenant_id, project_id, name, description, source_json, route_json, spec_json, status_json, created_at, updated_at
+FROM fugue_apps
+WHERE %s IN (%s)
+ORDER BY created_at ASC
+`, column, sqlPlaceholderList(1, len(ids)))
+
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list apps: %w", err)
+	}
+	defer rows.Close()
+
+	apps := make([]model.App, 0, len(ids))
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
 			return nil, err
+		}
+		normalizeAppStatusForRead(&app)
+		if hydrateBackingServices {
+			if err := s.pgHydrateAppBackingServices(ctx, &app); err != nil {
+				return nil, err
+			}
 		}
 		if isDeletedApp(app) {
 			continue
@@ -4357,4 +4469,12 @@ func sortOperationsByCreatedAt(ops []model.Operation) {
 	sort.Slice(ops, func(i, j int) bool {
 		return ops[i].CreatedAt.Before(ops[j].CreatedAt)
 	})
+}
+
+func sqlPlaceholderList(start, count int) string {
+	placeholders := make([]string, 0, count)
+	for i := range count {
+		placeholders = append(placeholders, fmt.Sprintf("$%d", start+i))
+	}
+	return strings.Join(placeholders, ", ")
 }

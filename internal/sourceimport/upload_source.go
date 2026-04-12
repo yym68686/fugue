@@ -182,13 +182,7 @@ func (i *Importer) extractUploadedArchive(req UploadSourceImportRequest) (extrac
 		return extractedUploadSource{}, err
 	}
 
-	defaultAppName := model.Slugify(strings.TrimSpace(req.AppName))
-	if defaultAppName == "" {
-		defaultAppName = model.Slugify(uploadArchiveBaseName(req.ArchiveFilename))
-	}
-	if defaultAppName == "" {
-		defaultAppName = "app"
-	}
+	defaultAppName := resolveUploadedArchiveDefaultAppName(req.AppName, req.ArchiveFilename)
 
 	return extractedUploadSource{
 		UploadID:       strings.TrimSpace(req.UploadID),
@@ -210,6 +204,16 @@ func releaseExtractedUploadSource(src extractedUploadSource) {
 		return
 	}
 	_ = os.RemoveAll(targetDir)
+}
+
+func resolveUploadedArchiveDefaultAppName(requestedName, archiveFilename string) string {
+	if slug := model.SlugifyOptional(strings.TrimSpace(requestedName)); slug != "" {
+		return slug
+	}
+	if slug := model.SlugifyOptional(uploadArchiveBaseName(archiveFilename)); slug != "" {
+		return slug
+	}
+	return "app"
 }
 
 func importStaticSiteFromExtractedUpload(ctx context.Context, src extractedUploadSource, archiveDownloadURL, requestedSourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {

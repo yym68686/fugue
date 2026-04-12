@@ -151,9 +151,7 @@ services:
 		"demo-main/web/Dockerfile":      "FROM scratch\nEXPOSE 3000\n",
 		"__MACOSX/._docker-compose.yml": "ignored metadata\n",
 	})
-	body, contentType := newImportUploadMultipartBody(t, importUploadRequest{
-		Name: "demo-main",
-	}, "demo-main.zip", archiveBytes)
+	body, contentType := newImportUploadMultipartBody(t, importUploadRequest{}, "demo-main.zip", archiveBytes)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/templates/inspect-upload", body)
 	req.Header.Set("Authorization", "Bearer "+apiKey)

@@ -32,13 +32,7 @@ func (s *Server) handleInspectUploadTemplate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	baseName := normalizeImportBaseName(strings.TrimSpace(req.Name))
-	if baseName == "" {
-		baseName = normalizeImportBaseName(uploadSourceBaseName(archiveHeader.Filename))
-	}
-	if baseName == "" {
-		baseName = "app"
-	}
+	baseName := resolveUploadImportBaseName(req.Name, archiveHeader.Filename)
 
 	archiveSHA256 := sha256.Sum256(archiveBytes)
 	response := map[string]any{

@@ -59,7 +59,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 				if err := s.pruneExcessManagedAppImages(r.Context(), updatedApp); err != nil && s.log != nil {
 					s.log.Printf("prune excess managed app images for app=%s failed: %v", updatedApp.ID, err)
 				}
-				s.refreshTenantBillingImageStorage(r.Context(), updatedApp.TenantID, principal.IsPlatformAdmin())
+				s.scheduleTenantBillingImageStorageRefresh(updatedApp.TenantID)
 			}
 		}
 	}

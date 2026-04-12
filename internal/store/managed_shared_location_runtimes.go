@@ -584,6 +584,53 @@ SELECT EXISTS (
 	return referenced, nil
 }
 
+func (s *Store) pgRuntimeHasDeleteBlockersTx(ctx context.Context, tx *sql.Tx, runtimeID string) (bool, error) {
+	runtimeID = strings.TrimSpace(runtimeID)
+	if runtimeID == "" {
+		return false, nil
+	}
+
+	var referenced bool
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+	SELECT 1
+	FROM fugue_apps
+	WHERE (
+		COALESCE(spec_json->>'runtime_id', '') = $1
+		OR COALESCE(spec_json#>>'{failover,target_runtime_id}', '') = $1
+		OR COALESCE(spec_json#>>'{postgres,runtime_id}', '') = $1
+		OR COALESCE(spec_json#>>'{postgres,failover_target_runtime_id}', '') = $1
+		OR COALESCE(status_json->>'current_runtime_id', '') = $1
+	)
+	AND lower(COALESCE(status_json->>'phase', '')) <> 'deleted'
+) OR EXISTS (
+	SELECT 1
+	FROM fugue_backing_services
+	WHERE (
+		COALESCE(spec_json#>>'{postgres,runtime_id}', '') = $1
+		OR COALESCE(spec_json#>>'{postgres,failover_target_runtime_id}', '') = $1
+	)
+	AND lower(COALESCE(status, '')) <> 'deleted'
+) OR EXISTS (
+	SELECT 1
+	FROM fugue_operations
+	WHERE status IN ($2, $3, $4)
+	  AND (
+		source_runtime_id = $1
+		OR target_runtime_id = $1
+		OR assigned_runtime_id = $1
+		OR COALESCE(desired_spec_json->>'runtime_id', '') = $1
+		OR COALESCE(desired_spec_json#>>'{failover,target_runtime_id}', '') = $1
+		OR COALESCE(desired_spec_json#>>'{postgres,runtime_id}', '') = $1
+		OR COALESCE(desired_spec_json#>>'{postgres,failover_target_runtime_id}', '') = $1
+	  )
+)
+`, runtimeID, model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent).Scan(&referenced); err != nil {
+		return false, fmt.Errorf("check runtime %s delete blockers: %w", runtimeID, err)
+	}
+	return referenced, nil
+}
+
 func (s *Store) pgDeleteRuntimeTx(ctx context.Context, tx *sql.Tx, runtimeID string) error {
 	if strings.TrimSpace(runtimeID) == "" {
 		return nil

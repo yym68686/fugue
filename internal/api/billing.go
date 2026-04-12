@@ -23,7 +23,7 @@ func (s *Server) handleGetBilling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.refreshTenantBillingImageStorage(r.Context(), tenantID, principal.IsPlatformAdmin())
+	s.scheduleTenantBillingImageStorageRefresh(tenantID)
 	summary, err := s.store.GetTenantBillingSummary(tenantID)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -61,7 +61,7 @@ func (s *Server) handleUpdateBilling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.refreshTenantBillingImageStorage(r.Context(), tenantID, principal.IsPlatformAdmin())
+	s.scheduleTenantBillingImageStorageRefresh(tenantID)
 	summary, err := s.store.UpdateTenantBilling(tenantID, req.ManagedCap)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -105,7 +105,7 @@ func (s *Server) handleTopUpBilling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.refreshTenantBillingImageStorage(r.Context(), tenantID, principal.IsPlatformAdmin())
+	s.scheduleTenantBillingImageStorageRefresh(tenantID)
 	summary, err := s.store.TopUpTenantBilling(tenantID, req.AmountCents, req.Note)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -157,7 +157,7 @@ func (s *Server) handleSetBillingBalance(w http.ResponseWriter, r *http.Request)
 		metadata["note"] = note
 	}
 
-	s.refreshTenantBillingImageStorage(r.Context(), tenantID, true)
+	s.scheduleTenantBillingImageStorageRefresh(tenantID)
 	summary, err := s.store.SetTenantBillingBalance(tenantID, req.BalanceCents, metadata)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -173,53 +173,33 @@ func (s *Server) handleSetBillingBalance(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-func (s *Server) refreshTenantBillingImageStorage(ctx context.Context, tenantID string, platformAdmin bool) {
+func (s *Server) scheduleTenantBillingImageStorageRefresh(tenantID string) {
 	if !s.appImageInventoryConfigured() {
 		return
 	}
-	storageGibibytes, err := s.currentTenantManagedImageStorageGibibytes(ctx, tenantID, platformAdmin)
-	if err != nil {
-		if s.log != nil {
-			s.log.Printf("skip billing image storage refresh for tenant=%s: %v", tenantID, err)
-		}
-		return
-	}
-	if _, err := s.store.SyncTenantBillingImageStorage(tenantID, storageGibibytes); err != nil && s.log != nil {
-		s.log.Printf("skip billing image storage sync for tenant=%s: %v", tenantID, err)
-	}
+	s.billingImageStorageRefresh.schedule(tenantID, s.log, s.refreshTenantBillingImageStorage)
 }
 
-func (s *Server) currentTenantManagedImageStorageGibibytes(ctx context.Context, tenantID string, platformAdmin bool) (int64, error) {
-	apps, err := s.store.ListApps(tenantID, platformAdmin)
+func (s *Server) refreshTenantBillingImageStorage(ctx context.Context, tenantID string) error {
+	if !s.appImageInventoryConfigured() {
+		return nil
+	}
+	storageGibibytes, err := s.currentTenantManagedImageStorageGibibytes(ctx, tenantID)
 	if err != nil {
-		return 0, err
+		return err
 	}
-	if platformAdmin {
-		filtered := make([]model.App, 0, len(apps))
-		for _, app := range apps {
-			if app.TenantID == tenantID {
-				filtered = append(filtered, app)
-			}
-		}
-		apps = filtered
-	}
+	_, err = s.store.SyncTenantBillingImageStorage(tenantID, storageGibibytes)
+	return err
+}
 
-	ops, err := s.store.ListOperations(tenantID, platformAdmin)
+func (s *Server) currentTenantManagedImageStorageGibibytes(ctx context.Context, tenantID string) (int64, error) {
+	apps, err := s.store.ListAppsMetadata(tenantID, false)
 	if err != nil {
 		return 0, err
 	}
-	if platformAdmin {
-		appIDs := make(map[string]struct{}, len(apps))
-		for _, app := range apps {
-			appIDs[app.ID] = struct{}{}
-		}
-		filtered := make([]model.Operation, 0, len(ops))
-		for _, op := range ops {
-			if _, ok := appIDs[op.AppID]; ok {
-				filtered = append(filtered, op)
-			}
-		}
-		ops = filtered
+	ops, err := s.store.ListOperations(tenantID, false)
+	if err != nil {
+		return 0, err
 	}
 
 	storageBytes, err := appimages.MeasureTenantStorageBytes(ctx, func(ctx context.Context, imageRef string) (bool, map[string]int64, error) {

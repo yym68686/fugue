@@ -1451,6 +1451,42 @@ func (s *Store) DetachRuntimeOwnership(runtimeID string) (model.Runtime, error) 
 	return runtime, err
 }
 
+func (s *Store) DeleteRuntime(runtimeID string) (model.Runtime, error) {
+	runtimeID = strings.TrimSpace(runtimeID)
+	if runtimeID == "" {
+		return model.Runtime{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgDeleteRuntime(runtimeID)
+	}
+
+	var runtime model.Runtime
+	err := s.withLockedState(true, func(state *model.State) error {
+		ensureRuntimeMetadata(state)
+		index := findRuntime(state, runtimeID)
+		if index < 0 {
+			return ErrNotFound
+		}
+
+		candidate := state.Runtimes[index]
+		if err := validateRuntimeDeletion(candidate); err != nil {
+			return err
+		}
+		if runtimeHasDeleteBlockersState(state, runtimeID) {
+			return fmt.Errorf("%w: runtime still has apps, services, or active operations", ErrConflict)
+		}
+
+		state.RuntimeGrants = deleteRuntimeAccessGrantsByRuntime(
+			state.RuntimeGrants,
+			runtimeID,
+		)
+		runtime = candidate
+		state.Runtimes = append(state.Runtimes[:index], state.Runtimes[index+1:]...)
+		return nil
+	})
+	return runtime, err
+}
+
 func (s *Store) RuntimeVisibleToTenant(runtimeID, tenantID string, platformAdmin bool) (bool, error) {
 	runtimeID = strings.TrimSpace(runtimeID)
 	if runtimeID == "" {
@@ -1747,6 +1783,53 @@ func (s *Store) ListApps(tenantID string, platformAdmin bool) ([]model.App, erro
 	if s.usingDatabase() {
 		return s.pgListApps(tenantID, platformAdmin)
 	}
+	return s.listAppsView(tenantID, platformAdmin, true)
+}
+
+// ListAppsMetadata returns app records without hydrating backing services or bindings.
+// Callers that only need routing, source, spec, and status should prefer this lighter view.
+func (s *Store) ListAppsMetadata(tenantID string, platformAdmin bool) ([]model.App, error) {
+	if s.usingDatabase() {
+		return s.pgListAppsMetadata(tenantID, platformAdmin)
+	}
+	return s.listAppsView(tenantID, platformAdmin, false)
+}
+
+func (s *Store) ListAppsMetadataByIDs(appIDs []string) ([]model.App, error) {
+	appIDSet := trimmedStringSet(appIDs)
+	if len(appIDSet) == 0 {
+		return nil, nil
+	}
+	if s.usingDatabase() {
+		return s.pgListAppsMetadataByIDs(sortedTrimmedStringKeys(appIDSet))
+	}
+	return s.listAppsViewFiltered(false, func(app model.App) bool {
+		_, ok := appIDSet[strings.TrimSpace(app.ID)]
+		return ok
+	})
+}
+
+func (s *Store) ListAppsMetadataByProjectIDs(projectIDs []string) ([]model.App, error) {
+	projectIDSet := trimmedStringSet(projectIDs)
+	if len(projectIDSet) == 0 {
+		return nil, nil
+	}
+	if s.usingDatabase() {
+		return s.pgListAppsMetadataByProjectIDs(sortedTrimmedStringKeys(projectIDSet))
+	}
+	return s.listAppsViewFiltered(false, func(app model.App) bool {
+		_, ok := projectIDSet[strings.TrimSpace(app.ProjectID)]
+		return ok
+	})
+}
+
+func (s *Store) listAppsView(tenantID string, platformAdmin bool, hydrateBackingServices bool) ([]model.App, error) {
+	return s.listAppsViewFiltered(hydrateBackingServices, func(app model.App) bool {
+		return platformAdmin || app.TenantID == tenantID
+	})
+}
+
+func (s *Store) listAppsViewFiltered(hydrateBackingServices bool, include func(model.App) bool) ([]model.App, error) {
 	var apps []model.App
 	err := s.withLockedState(false, func(state *model.State) error {
 		for _, app := range state.Apps {
@@ -1754,8 +1837,13 @@ func (s *Store) ListApps(tenantID string, platformAdmin bool) ([]model.App, erro
 				continue
 			}
 			normalizeAppStatusForRead(&app)
-			hydrateAppBackingServices(state, &app)
-			if platformAdmin || app.TenantID == tenantID {
+			if hydrateBackingServices {
+				hydrateAppBackingServices(state, &app)
+			} else {
+				app.Bindings = nil
+				app.BackingServices = nil
+			}
+			if include == nil || include(app) {
 				apps = append(apps, app)
 			}
 		}
@@ -3516,6 +3604,89 @@ func deleteRuntimeAccessGrantsByRuntime(grants []model.RuntimeAccessGrant, runti
 	return filtered
 }
 
+func validateRuntimeDeletion(runtimeObj model.Runtime) error {
+	if runtimeObj.Type == model.RuntimeTypeManagedShared {
+		return fmt.Errorf("%w: managed shared runtimes cannot be deleted", ErrConflict)
+	}
+	if strings.TrimSpace(runtimeObj.TenantID) == "" {
+		return fmt.Errorf("%w: runtime must belong to a tenant before it can be deleted", ErrConflict)
+	}
+	if !strings.EqualFold(strings.TrimSpace(runtimeObj.Status), model.RuntimeStatusOffline) {
+		return fmt.Errorf("%w: runtime must be offline before it can be deleted", ErrConflict)
+	}
+	return nil
+}
+
+func runtimeHasDeleteBlockersState(state *model.State, runtimeID string) bool {
+	runtimeID = strings.TrimSpace(runtimeID)
+	if state == nil || runtimeID == "" {
+		return false
+	}
+
+	for _, app := range state.Apps {
+		if isDeletedApp(app) {
+			continue
+		}
+		if strings.TrimSpace(app.Spec.RuntimeID) == runtimeID {
+			return true
+		}
+		if app.Spec.Failover != nil && strings.TrimSpace(app.Spec.Failover.TargetRuntimeID) == runtimeID {
+			return true
+		}
+		if app.Spec.Postgres != nil {
+			for _, postgresRuntimeID := range managedPostgresReferencedRuntimeIDs(app.Spec.RuntimeID, *app.Spec.Postgres) {
+				if postgresRuntimeID == runtimeID {
+					return true
+				}
+			}
+		}
+		if strings.TrimSpace(app.Status.CurrentRuntimeID) == runtimeID {
+			return true
+		}
+	}
+
+	for _, service := range state.BackingServices {
+		if service.Spec.Postgres == nil || isDeletedBackingService(service) {
+			continue
+		}
+		for _, postgresRuntimeID := range managedPostgresReferencedRuntimeIDs("", *service.Spec.Postgres) {
+			if postgresRuntimeID == runtimeID {
+				return true
+			}
+		}
+	}
+
+	for _, op := range state.Operations {
+		if !isActiveOperationStatus(op.Status) {
+			continue
+		}
+		if strings.TrimSpace(op.SourceRuntimeID) == runtimeID {
+			return true
+		}
+		if strings.TrimSpace(op.TargetRuntimeID) == runtimeID {
+			return true
+		}
+		if strings.TrimSpace(op.AssignedRuntimeID) == runtimeID {
+			return true
+		}
+		if op.DesiredSpec != nil && strings.TrimSpace(op.DesiredSpec.RuntimeID) == runtimeID {
+			return true
+		}
+		if op.DesiredSpec != nil && op.DesiredSpec.Failover != nil && strings.TrimSpace(op.DesiredSpec.Failover.TargetRuntimeID) == runtimeID {
+			return true
+		}
+		if op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
+			for _, postgresRuntimeID := range managedPostgresReferencedRuntimeIDs(op.DesiredSpec.RuntimeID, *op.DesiredSpec.Postgres) {
+				if postgresRuntimeID == runtimeID {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
 func deleteAppsByTenant(apps []model.App, tenantID string) []model.App {
 	filtered := apps[:0]
 	for _, app := range apps {
@@ -3716,6 +3887,40 @@ func appIDsForProject(apps []model.App, projectID string) []string {
 			out = append(out, app.ID)
 		}
 	}
+	return out
+}
+
+func trimmedStringSet(values []string) map[string]struct{} {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		out[trimmed] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func sortedTrimmedStringKeys(values map[string]struct{}) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	sort.Strings(out)
 	return out
 }
 

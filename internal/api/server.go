@@ -45,6 +45,7 @@ type Server struct {
 	newManagedAppStatusClient    func() (*managedAppStatusClient, error)
 	managedAppStatusCache        managedAppStatusCache
 	consoleGalleryCache          expiringResponseCache[consoleGalleryResponse]
+	billingImageStorageRefresh   billingImageStorageRefreshScheduler
 	newLogsClient                func(namespace string) (appLogsClient, error)
 	newFilesystemPodLister       func(namespace string) (filesystemPodLister, error)
 	filesystemExecRunner         filesystemPodExecRunner
@@ -83,6 +84,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		newManagedAppStatusClient:    newManagedAppStatusClient,
 		managedAppStatusCache:        newManagedAppStatusCache(0, 0),
 		consoleGalleryCache:          newExpiringResponseCache[consoleGalleryResponse](defaultConsoleGalleryCacheTTL),
+		billingImageStorageRefresh:   newBillingImageStorageRefreshScheduler(0, 0),
 		newLogsClient: func(namespace string) (appLogsClient, error) {
 			return newKubeLogsClient(namespace)
 		},
@@ -1291,14 +1293,14 @@ func (s *Server) handleAgentCompleteOperation(w http.ResponseWriter, r *http.Req
 			if err := s.pruneExcessManagedAppImages(r.Context(), deployedApp); err != nil && s.log != nil {
 				s.log.Printf("prune excess managed app images for app=%s failed: %v", deployedApp.ID, err)
 			}
-			s.refreshTenantBillingImageStorage(r.Context(), deployedApp.TenantID, true)
+			s.scheduleTenantBillingImageStorageRefresh(deployedApp.TenantID)
 		}
 	}
 	if op.Type == model.OperationTypeDelete {
 		if err := s.cleanupDeletedAppImages(r.Context(), deletingApp); err != nil && s.log != nil {
 			s.log.Printf("cleanup deleted app images for app=%s failed: %v", deletingApp.ID, err)
 		}
-		s.refreshTenantBillingImageStorage(r.Context(), deletingApp.TenantID, true)
+		s.scheduleTenantBillingImageStorageRefresh(deletingApp.TenantID)
 	}
 	s.appendAudit(principal, "operation.complete", "operation", op.ID, op.TenantID, map[string]string{"mode": op.ExecutionMode})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"operation": op})

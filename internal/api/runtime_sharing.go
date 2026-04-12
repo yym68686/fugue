@@ -123,13 +123,22 @@ func (s *Server) handleSetRuntimeAccessMode(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) runtimeSharingOwner(w http.ResponseWriter, principal model.Principal, runtimeID string) (model.Runtime, bool) {
+	return s.runtimeOwner(w, principal, runtimeID, "only runtime owner can manage sharing")
+}
+
+func (s *Server) runtimeOwner(
+	w http.ResponseWriter,
+	principal model.Principal,
+	runtimeID string,
+	forbiddenMessage string,
+) (model.Runtime, bool) {
 	runtimeObj, err := s.store.GetRuntime(runtimeID)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return model.Runtime{}, false
 	}
 	if runtimeObj.TenantID == "" || runtimeObj.TenantID != principal.TenantID {
-		httpx.WriteError(w, http.StatusForbidden, "only runtime owner can manage sharing")
+		httpx.WriteError(w, http.StatusForbidden, forbiddenMessage)
 		return model.Runtime{}, false
 	}
 	return runtimeObj, true

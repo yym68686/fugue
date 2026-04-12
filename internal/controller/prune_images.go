@@ -23,7 +23,7 @@ func (s *Service) pruneExcessManagedAppImages(ctx context.Context, app model.App
 	if err != nil {
 		return err
 	}
-	allApps, err := s.Store.ListApps("", true)
+	allApps, err := s.Store.ListAppsMetadata("", true)
 	if err != nil {
 		return err
 	}

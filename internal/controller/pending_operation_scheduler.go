@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"fugue/internal/model"
@@ -50,6 +51,47 @@ func indexActiveOperationsByApp(ops []model.Operation) map[string][]model.Operat
 		grouped[op.AppID] = append(grouped[op.AppID], op)
 	}
 	return grouped
+}
+
+func pendingDeployAppIDsForLane(ops []model.Operation, lane operationLane) map[string]struct{} {
+	appIDs := make(map[string]struct{})
+	for _, op := range ops {
+		if op.Status != model.OperationStatusPending {
+			continue
+		}
+		if !pendingOperationMatchesLane(op, lane) || op.Type != model.OperationTypeDeploy {
+			continue
+		}
+		appID := strings.TrimSpace(op.AppID)
+		if appID == "" {
+			continue
+		}
+		appIDs[appID] = struct{}{}
+	}
+	return appIDs
+}
+
+func mergePendingOperationApps(directApps, projectApps []model.App) []model.App {
+	if len(projectApps) == 0 {
+		return directApps
+	}
+
+	apps := make([]model.App, 0, len(directApps)+len(projectApps))
+	seen := make(map[string]struct{}, len(directApps)+len(projectApps))
+	for _, group := range [][]model.App{directApps, projectApps} {
+		for _, app := range group {
+			appID := strings.TrimSpace(app.ID)
+			if appID == "" {
+				continue
+			}
+			if _, ok := seen[appID]; ok {
+				continue
+			}
+			seen[appID] = struct{}{}
+			apps = append(apps, app)
+		}
+	}
+	return apps
 }
 
 func pendingOperationReadyForClaim(
@@ -167,4 +209,50 @@ func unavailableComposeDependencyMessage(op model.Operation, app model.App, depe
 		return base
 	}
 	return fmt.Sprintf("%s: %s", base, message)
+}
+
+func (s *Service) loadAppsForPendingOperationClaim(activeOps []model.Operation, lane operationLane) ([]model.App, error) {
+	deployAppIDs := pendingDeployAppIDsForLane(activeOps, lane)
+	if len(deployAppIDs) == 0 {
+		return nil, nil
+	}
+
+	directApps, err := s.Store.ListAppsMetadataByIDs(sortedStringKeys(deployAppIDs))
+	if err != nil {
+		return nil, fmt.Errorf("list pending deploy apps: %w", err)
+	}
+
+	projectIDs := make(map[string]struct{}, len(directApps))
+	for _, app := range directApps {
+		projectID := strings.TrimSpace(app.ProjectID)
+		if projectID == "" {
+			continue
+		}
+		projectIDs[projectID] = struct{}{}
+	}
+	if len(projectIDs) == 0 {
+		return directApps, nil
+	}
+
+	projectApps, err := s.Store.ListAppsMetadataByProjectIDs(sortedStringKeys(projectIDs))
+	if err != nil {
+		return nil, fmt.Errorf("list pending deploy project apps: %w", err)
+	}
+	return mergePendingOperationApps(directApps, projectApps), nil
+}
+
+func sortedStringKeys(values map[string]struct{}) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	sort.Strings(out)
+	return out
 }

@@ -186,13 +186,7 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 	if description == "" {
 		description = fmt.Sprintf("Uploaded from %s", sourceFileName)
 	}
-	baseName := normalizeImportBaseName(strings.TrimSpace(req.Name))
-	if baseName == "" {
-		baseName = normalizeImportBaseName(uploadSourceBaseName(sourceFileName))
-	}
-	if baseName == "" {
-		baseName = "app"
-	}
+	baseName := resolveUploadImportBaseName(req.Name, sourceFileName)
 
 	replicas := req.Replicas
 	if replicas <= 0 {
@@ -493,4 +487,26 @@ func uploadSourceBaseName(filename string) string {
 	}
 	name = strings.TrimSuffix(name, filepath.Ext(name))
 	return name
+}
+
+func resolveUploadImportBaseName(requestedName, archiveFilename string) string {
+	if baseName := normalizeImportBaseNameOptional(requestedName); baseName != "" {
+		return baseName
+	}
+	if baseName := normalizeImportBaseNameOptional(uploadSourceBaseName(archiveFilename)); baseName != "" {
+		return baseName
+	}
+	return "app"
+}
+
+func normalizeImportBaseNameOptional(raw string) string {
+	value := model.SlugifyOptional(strings.TrimSpace(raw))
+	if value == "" {
+		return ""
+	}
+	const maxImportBaseNameLen = 50
+	if len(value) <= maxImportBaseNameLen {
+		return value
+	}
+	return strings.Trim(value[:maxImportBaseNameLen], "-")
 }

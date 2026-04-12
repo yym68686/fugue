@@ -18,7 +18,7 @@ func (s *Service) cleanupDeletedAppImages(ctx context.Context, app model.App) er
 	if err != nil {
 		return err
 	}
-	remainingApps, err := s.Store.ListApps("", true)
+	remainingApps, err := s.Store.ListAppsMetadata("", true)
 	if err != nil {
 		return err
 	}

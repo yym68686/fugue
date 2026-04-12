@@ -12,7 +12,7 @@ func (s *Service) syncTenantBillingImageStorage(ctx context.Context, tenantID st
 		return nil
 	}
 
-	apps, err := s.Store.ListApps(tenantID, false)
+	apps, err := s.Store.ListAppsMetadata(tenantID, false)
 	if err != nil {
 		return err
 	}

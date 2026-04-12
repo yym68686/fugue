@@ -6,10 +6,10 @@ import (
 	"fugue/internal/model"
 )
 
-// FailoverDesiredSpec preserves the current managed postgres placement while
-// moving the app runtime to a new target. Without this pinning, a postgres
-// spec that implicitly followed app.Spec.RuntimeID would be reinterpreted onto
-// the failover target runtime.
+// FailoverDesiredSpec moves the app to the failover target and consumes the
+// configured app failover so the service re-enters an explicit manual re-arm
+// state. Managed postgres continuity is only consumed when it was actually
+// targeting the same runtime; otherwise the current placement stays pinned.
 func FailoverDesiredSpec(app model.App, targetRuntimeID string) *model.AppSpec {
 	targetRuntimeID = strings.TrimSpace(targetRuntimeID)
 	if targetRuntimeID == "" {
@@ -21,6 +21,7 @@ func FailoverDesiredSpec(app model.App, targetRuntimeID string) *model.AppSpec {
 		return nil
 	}
 	next.RuntimeID = targetRuntimeID
+	next.Failover = nil
 	next.Postgres = nil
 
 	currentDatabase := OwnedManagedPostgresSpec(app)
@@ -33,8 +34,19 @@ func FailoverDesiredSpec(app model.App, targetRuntimeID string) *model.AppSpec {
 		resources := *currentDatabase.Resources
 		postgres.Resources = &resources
 	}
+	if shouldConsumeManagedPostgresFailover(*currentDatabase, targetRuntimeID) {
+		postgres.RuntimeID = targetRuntimeID
+		postgres.FailoverTargetRuntimeID = ""
+		postgres.Instances = 1
+		postgres.SynchronousReplicas = 0
+		postgres.PrimaryPlacementPendingRebalance = false
+	}
 	next.Postgres = &postgres
 	return next
+}
+
+func shouldConsumeManagedPostgresFailover(spec model.AppPostgresSpec, targetRuntimeID string) bool {
+	return strings.TrimSpace(spec.FailoverTargetRuntimeID) == strings.TrimSpace(targetRuntimeID)
 }
 
 func operationAppliesDesiredSpecBackingServices(op model.Operation) bool {

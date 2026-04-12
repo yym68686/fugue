@@ -162,7 +162,7 @@ func (s *Server) cachedProjectImageUsageResponse(
 			timings := serverTimingFromContext(ctx)
 
 			appsStartedAt := time.Now()
-			apps, err := s.store.ListApps(principal.TenantID, principal.IsPlatformAdmin())
+			apps, err := s.store.ListAppsMetadata(principal.TenantID, principal.IsPlatformAdmin())
 			timings.Add("store_apps", time.Since(appsStartedAt))
 			if err != nil {
 				return projectImageUsageResponse{}, err
@@ -388,7 +388,7 @@ func (s *Server) handleDeleteAppImage(w http.ResponseWriter, r *http.Request) {
 		"registry_gc":  "completed",
 		"delete_state": appImageDeleteAuditState(deleteResult),
 	})
-	s.refreshTenantBillingImageStorage(r.Context(), app.TenantID, principal.IsPlatformAdmin())
+	s.scheduleTenantBillingImageStorageRefresh(app.TenantID)
 	httpx.WriteJSON(w, http.StatusOK, appImageDeleteResponse{
 		Image:              &version.Response,
 		Deleted:            deleteResult.Deleted,
