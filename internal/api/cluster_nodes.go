@@ -42,6 +42,7 @@ const (
 	clusterNodeLabelPublicIP           = "fugue.io/public-ip"
 	clusterNodeAnnotationCountry       = "fugue.io/location-country"
 	clusterNodeAnnotationK3sHost       = "k3s.io/hostname"
+	defaultClusterNodeInventoryCacheTTL = 5 * time.Second
 	tenantSharedClusterNodeName        = "internal-cluster"
 	tenantSharedClusterRegion          = "Multiple countries"
 	tenantSharedRuntimeID              = "runtime_managed_shared"
@@ -211,23 +212,41 @@ type kubeNodeSummaryPodRef struct {
 	Namespace string `json:"namespace,omitempty"`
 }
 
+const clusterNodeInventoryCacheKey = "shared"
+
+func (s *Server) loadClusterNodeInventory(ctx context.Context) ([]clusterNodeSnapshot, error) {
+	timings := serverTimingFromContext(ctx)
+	startedAt := time.Now()
+
+	snapshots, err := s.clusterNodeInventoryCache.do(
+		clusterNodeInventoryCacheKey,
+		func() ([]clusterNodeSnapshot, error) {
+			clientFactory := s.newClusterNodeClient
+			if clientFactory == nil {
+				clientFactory = newClusterNodeClient
+			}
+
+			client, err := clientFactory()
+			if err != nil {
+				return nil, err
+			}
+
+			return client.listClusterNodeInventory(ctx)
+		},
+	)
+	timings.Add("cluster_inventory", time.Since(startedAt))
+	if err != nil {
+		return nil, err
+	}
+
+	return snapshots, nil
+}
+
 func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	timings := serverTimingFromContext(r.Context())
 
-	clientFactory := s.newClusterNodeClient
-	if clientFactory == nil {
-		clientFactory = newClusterNodeClient
-	}
-	client, err := clientFactory()
-	if err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
-		return
-	}
-
-	inventoryStartedAt := time.Now()
-	snapshots, err := client.listClusterNodeInventory(r.Context())
-	timings.Add("cluster_inventory", time.Since(inventoryStartedAt))
+	snapshots, err := s.loadClusterNodeInventory(r.Context())
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -419,20 +438,7 @@ func (s *Server) syncManagedSharedLocationRuntimesFromSnapshots(snapshots []clus
 }
 
 func (s *Server) trySyncManagedSharedLocationRuntimes(ctx context.Context) {
-	clientFactory := s.newClusterNodeClient
-	if clientFactory == nil {
-		clientFactory = newClusterNodeClient
-	}
-
-	client, err := clientFactory()
-	if err != nil {
-		if s.log != nil {
-			s.log.Printf("skip managed shared location sync: %v", err)
-		}
-		return
-	}
-
-	snapshots, err := client.listClusterNodeInventory(ctx)
+	snapshots, err := s.loadClusterNodeInventory(ctx)
 	if err != nil {
 		if s.log != nil {
 			s.log.Printf("skip managed shared location sync after inventory failure: %v", err)

@@ -41,6 +41,7 @@ type Server struct {
 	importer                     *sourceimport.Importer
 	appImageRegistry             appImageRegistry
 	projectImageUsageCache       expiringResponseCache[projectImageUsageResponse]
+	clusterNodeInventoryCache    expiringResponseCache[[]clusterNodeSnapshot]
 	newClusterNodeClient         func() (*clusterNodeClient, error)
 	newManagedAppStatusClient    func() (*managedAppStatusClient, error)
 	managedAppStatusCache        managedAppStatusCache
@@ -80,6 +81,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		importer:                     sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
 		appImageRegistry:             newRemoteAppImageRegistry(),
 		projectImageUsageCache:       newExpiringResponseCache[projectImageUsageResponse](defaultProjectImageUsageCacheTTL),
+		clusterNodeInventoryCache:    newExpiringResponseCache[[]clusterNodeSnapshot](defaultClusterNodeInventoryCacheTTL),
 		newClusterNodeClient:         newClusterNodeClient,
 		newManagedAppStatusClient:    newManagedAppStatusClient,
 		managedAppStatusCache:        newManagedAppStatusCache(0, 0),

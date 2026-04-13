@@ -14,6 +14,8 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -647,16 +649,46 @@ func (s *Server) loadConsoleApps(ctx context.Context, principal model.Principal,
 }
 
 func (s *Server) buildConsoleGalleryResponse(ctx context.Context, principal model.Principal, includeLiveStatus bool) (consoleGalleryResponse, error) {
-	projects, err := s.store.ListProjects(principal.TenantID)
-	if err != nil {
-		return consoleGalleryResponse{}, err
-	}
-	apps, err := s.loadConsoleApps(ctx, principal, includeLiveStatus, true)
-	if err != nil {
-		return consoleGalleryResponse{}, err
-	}
-	operations, err := s.store.ListOperations(principal.TenantID, principal.IsPlatformAdmin())
-	if err != nil {
+	timings := serverTimingFromContext(ctx)
+
+	var (
+		projects   []model.Project
+		apps       []model.App
+		operations []model.Operation
+	)
+
+	loadGroup, loadCtx := errgroup.WithContext(ctx)
+	loadGroup.Go(func() error {
+		startedAt := time.Now()
+		result, err := s.store.ListProjects(principal.TenantID)
+		timings.Add("store_projects", time.Since(startedAt))
+		if err != nil {
+			return err
+		}
+		projects = result
+		return nil
+	})
+	loadGroup.Go(func() error {
+		startedAt := time.Now()
+		result, err := s.loadConsoleApps(loadCtx, principal, includeLiveStatus, true)
+		timings.Add("console_apps", time.Since(startedAt))
+		if err != nil {
+			return err
+		}
+		apps = result
+		return nil
+	})
+	loadGroup.Go(func() error {
+		startedAt := time.Now()
+		result, err := s.store.ListOperations(principal.TenantID, principal.IsPlatformAdmin())
+		timings.Add("store_operations", time.Since(startedAt))
+		if err != nil {
+			return err
+		}
+		operations = result
+		return nil
+	})
+	if err := loadGroup.Wait(); err != nil {
 		return consoleGalleryResponse{}, err
 	}
 
@@ -837,21 +869,7 @@ func (s *Server) loadConsoleProjectClusterNodes(
 ) ([]model.ClusterNode, error) {
 	timings := serverTimingFromContext(ctx)
 
-	clientFactory := s.newClusterNodeClient
-	if clientFactory == nil {
-		clientFactory = newClusterNodeClient
-	}
-	client, err := clientFactory()
-	if err != nil {
-		return nil, consoleHTTPError{
-			message: err.Error(),
-			status:  http.StatusServiceUnavailable,
-		}
-	}
-
-	inventoryStartedAt := time.Now()
-	snapshots, err := client.listClusterNodeInventory(ctx)
-	timings.Add("cluster_inventory", time.Since(inventoryStartedAt))
+	snapshots, err := s.loadClusterNodeInventory(ctx)
 	if err != nil {
 		return nil, consoleHTTPError{
 			message: err.Error(),

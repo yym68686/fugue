@@ -154,17 +154,17 @@ func (s *Server) handleJoinClusterCleanup(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	clientFactory := s.newClusterNodeClient
-	if clientFactory == nil {
-		clientFactory = newClusterNodeClient
-	}
-	client, err := clientFactory()
+	snapshots, err := s.loadClusterNodeInventory(r.Context())
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
 
-	snapshots, err := client.listClusterNodeInventory(r.Context())
+	clientFactory := s.newClusterNodeClient
+	if clientFactory == nil {
+		clientFactory = newClusterNodeClient
+	}
+	client, err := clientFactory()
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return

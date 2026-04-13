@@ -69,16 +69,7 @@ func (s *Server) currentResourceUsageOverlay(ctx context.Context, apps []model.A
 		return overlay
 	}
 
-	clientFactory := s.newClusterNodeClient
-	if clientFactory == nil {
-		clientFactory = newClusterNodeClient
-	}
-	client, err := clientFactory()
-	if err != nil {
-		return overlay
-	}
-
-	snapshots, err := client.listClusterNodeInventory(ctx)
+	snapshots, err := s.loadClusterNodeInventory(ctx)
 	if err != nil {
 		if s.log != nil {
 			s.log.Printf("current resource usage overlay inventory error: %v", err)
