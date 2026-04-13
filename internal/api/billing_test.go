@@ -257,3 +257,45 @@ func TestHandleGetBillingCurrentUsageOnlyCountsInternalClusterWorkloads(t *testi
 	mustDecodeJSON(t, recorder, &response)
 	assertResourceUsage(t, response.Billing.CurrentUsage, 100, 128*1024*1024, 1*1024*1024*1024)
 }
+
+func TestGetBillingAllowsSkippingCurrentUsageAggregation(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Billing No Usage Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "billing-viewer", []string{"billing.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		t.Fatal("expected live usage aggregation to be skipped")
+		return nil, nil
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/billing?include_current_usage=false", nil)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Billing model.TenantBillingSummary `json:"billing"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Billing.CurrentUsage != nil {
+		t.Fatalf("expected current usage to be omitted, got %#v", response.Billing.CurrentUsage)
+	}
+}

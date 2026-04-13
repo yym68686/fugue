@@ -26,6 +26,15 @@ type importProjectRequest struct {
 	Description string `json:"description"`
 }
 
+type createAppRequest struct {
+	TenantID    string           `json:"tenant_id,omitempty"`
+	ProjectID   string           `json:"project_id,omitempty"`
+	Name        string           `json:"name,omitempty"`
+	Description string           `json:"description,omitempty"`
+	Spec        model.AppSpec    `json:"spec"`
+	Source      *model.AppSource `json:"source,omitempty"`
+}
+
 type importGitHubPersistentStorageSeedFile struct {
 	Service     string `json:"service"`
 	Path        string `json:"path"`
@@ -131,6 +140,10 @@ type importImageRequest struct {
 type importImageResponse struct {
 	App       model.App       `json:"app"`
 	Operation model.Operation `json:"operation"`
+}
+
+type appCreateResponse struct {
+	App model.App `json:"app"`
 }
 
 type buildLogsResponse struct {
@@ -315,6 +328,14 @@ func (c *Client) ListApps() ([]model.App, error) {
 	return response.Apps, nil
 }
 
+func (c *Client) CreateApp(request createAppRequest) (model.App, error) {
+	var response appCreateResponse
+	if err := c.doJSON(http.MethodPost, "/v1/apps", request, &response); err != nil {
+		return model.App{}, err
+	}
+	return response.App, nil
+}
+
 func (c *Client) ListRuntimes() ([]model.Runtime, error) {
 	var response struct {
 		Runtimes []model.Runtime `json:"runtimes"`
@@ -445,8 +466,20 @@ func (c *Client) MigrateApp(id, targetRuntimeID string) (operationResponse, erro
 }
 
 func (c *Client) DeleteApp(id string) (appDeleteResponse, error) {
+	return c.deleteApp(id, false)
+}
+
+func (c *Client) DeleteAppForce(id string) (appDeleteResponse, error) {
+	return c.deleteApp(id, true)
+}
+
+func (c *Client) deleteApp(id string, force bool) (appDeleteResponse, error) {
 	var response appDeleteResponse
-	if err := c.doJSON(http.MethodDelete, path.Join("/v1/apps", id), nil, &response); err != nil {
+	relative := path.Join("/v1/apps", id)
+	if force {
+		relative += "?force=true"
+	}
+	if err := c.doJSON(http.MethodDelete, relative, nil, &response); err != nil {
 		return appDeleteResponse{}, err
 	}
 	return response, nil

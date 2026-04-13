@@ -227,8 +227,9 @@ func (c *CLI) newAppFailoverCommand() *cobra.Command {
 	}
 	cmd.AddCommand(
 		c.newAppFailoverStatusCommand(),
-		c.newAppFailoverConfigureCommand(),
-		c.newAppFailoverDisableCommand(),
+		c.newAppFailoverPolicyCommand(),
+		hideCompatCommand(c.newAppFailoverConfigureCommand(), "fugue app failover policy set"),
+		hideCompatCommand(c.newAppFailoverDisableCommand(), "fugue app failover policy clear"),
 		c.newAppFailoverRunCommand(),
 	)
 	return cmd
@@ -255,6 +256,34 @@ func (c *CLI) newAppFailoverDisableCommand() *cobra.Command {
 	cmd.Use = "disable <app>"
 	cmd.Aliases = []string{"off"}
 	cmd.Short = "Disable app and/or database failover"
+	return cmd
+}
+
+func (c *CLI) newAppFailoverPolicyCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "policy",
+		Short: "Inspect and update failover policy targets",
+	}
+	cmd.AddCommand(
+		c.newAppFailoverPolicySetCommand(),
+		c.newAppFailoverPolicyClearCommand(),
+	)
+	return cmd
+}
+
+func (c *CLI) newAppFailoverPolicySetCommand() *cobra.Command {
+	cmd := c.newAppContinuitySetCommand()
+	cmd.Use = "set <app>"
+	cmd.Aliases = []string{"configure"}
+	cmd.Short = "Set app and/or database failover targets"
+	return cmd
+}
+
+func (c *CLI) newAppFailoverPolicyClearCommand() *cobra.Command {
+	cmd := c.newAppContinuityOffCommand()
+	cmd.Use = "clear <app>"
+	cmd.Aliases = []string{"disable", "off"}
+	cmd.Short = "Clear app and/or database failover targets"
 	return cmd
 }
 

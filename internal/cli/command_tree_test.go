@@ -39,10 +39,11 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"admin",
 		"deploy inspect .",
 		"deploy github owner/repo",
+		"fugue app overview my-app",
 		"fugue app source show my-app",
-		"fugue app failover configure my-app --app-to runtime-b",
+		"fugue app failover policy set my-app --app-to runtime-b",
 		"fugue app service attach my-app postgres",
-		"fugue app release deploy my-app",
+		"fugue app redeploy my-app",
 		"fugue app command set my-app --command \"python app.py\"",
 		"fugue app config put my-app /app/config.yaml --from-file config.yaml",
 		"fugue app storage set my-app --size 10Gi --mount /data",
@@ -51,7 +52,7 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"fugue operation ls --app my-app",
 		"fugue runtime access show shared",
 		"fugue project overview",
-		"fugue project storage",
+		"fugue project images usage",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected help output to contain %q, got %q", want, out)
@@ -363,7 +364,7 @@ func TestRunProjectEditPatchesMetadata(t *testing.T) {
 		t.Fatalf("unexpected project patch body %+v", gotBody)
 	}
 	out := stdout.String()
-	for _, want := range []string{"project_id=project_123", "name=demo-v2", "description=new description"} {
+	for _, want := range []string{"project=demo-v2", "tenant=Acme", "description=new description"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
@@ -417,6 +418,60 @@ func TestRunDeployGitHubSubcommandNormalizesOwnerRepo(t *testing.T) {
 	}
 }
 
+func TestRunAppCreateStagesGitHubSource(t *testing.T) {
+	t.Parallel()
+
+	var gotRequest createAppRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
+			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/projects"):
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_default","tenant_id":"tenant_123","name":"default","slug":"default","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps":
+			if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
+				t.Fatalf("decode create app request: %v", err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_default","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1,"ports":[8080]},"status":{"phase":"importing"},"source":{"type":"github-public","repo_url":"example/demo","repo_branch":"main","build_strategy":"buildpacks"},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "create", "demo",
+		"--github", "example/demo",
+		"--branch", "main",
+		"--build", "buildpacks",
+		"--port", "8080",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app create: %v", err)
+	}
+
+	if gotRequest.Name != "demo" || gotRequest.TenantID != "tenant_123" || gotRequest.ProjectID != "" {
+		t.Fatalf("unexpected create request %+v", gotRequest)
+	}
+	if gotRequest.Source == nil || gotRequest.Source.Type != model.AppSourceTypeGitHubPublic || gotRequest.Source.RepoURL != "example/demo" || gotRequest.Source.RepoBranch != "main" {
+		t.Fatalf("unexpected staged source %+v", gotRequest.Source)
+	}
+	if gotRequest.Spec.Ports[0] != 8080 {
+		t.Fatalf("expected service port 8080, got %+v", gotRequest.Spec.Ports)
+	}
+	out := stdout.String()
+	for _, want := range []string{"app=demo", "phase=importing", "source=github-public", "next_step=fugue app rebuild demo"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
 func TestRunAppScaleByNameUsesSemanticCommand(t *testing.T) {
 	t.Parallel()
 
@@ -454,8 +509,8 @@ func TestRunAppScaleByNameUsesSemanticCommand(t *testing.T) {
 		t.Fatalf("expected replicas=3, got %#v", gotScaleBody["replicas"])
 	}
 	output := stdout.String()
-	if !strings.Contains(output, "app_id=app_123") {
-		t.Fatalf("expected stdout to contain app id, got %q", output)
+	if !strings.Contains(output, "app=demo") {
+		t.Fatalf("expected stdout to contain app name, got %q", output)
 	}
 	if !strings.Contains(output, "operation_id=op_123") {
 		t.Fatalf("expected stdout to contain operation id, got %q", output)
@@ -843,6 +898,8 @@ func TestRunServicePostgresCreateUsesTypedCommand(t *testing.T) {
 			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/projects"):
 			_, _ = w.Write([]byte(`{"projects":[{"id":"project_default","tenant_id":"tenant_123","name":"default","slug":"default","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes":
+			_, _ = w.Write([]byte(`{"runtimes":[{"id":"runtime_managed_shared","tenant_id":"tenant_123","name":"shared","type":"managed-shared","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/backing-services":
 			if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
 				t.Fatalf("decode backing service request: %v", err)
@@ -876,7 +933,7 @@ func TestRunServicePostgresCreateUsesTypedCommand(t *testing.T) {
 		t.Fatalf("expected postgres runtime runtime_managed_shared, got %+v", gotRequest.Spec.Postgres)
 	}
 	out := stdout.String()
-	for _, want := range []string{"service_id=svc_123", "name=app-db", "type=postgres", "runtime_id=runtime_managed_shared"} {
+	for _, want := range []string{"service=app-db", "project=default", "type=postgres", "runtime=shared"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
@@ -965,6 +1022,145 @@ func TestRunRuntimeAttachUsesSaferInstructions(t *testing.T) {
 	}
 }
 
+func TestRunRuntimeOfferSetPublishesOffer(t *testing.T) {
+	t.Parallel()
+
+	var gotRequest setRuntimePublicOfferRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes":
+			_, _ = w.Write([]byte(`{"runtimes":[{"id":"runtime_123","tenant_id":"tenant_123","name":"edge-a","type":"external-owned","access_mode":"public","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes/runtime_123":
+			_, _ = w.Write([]byte(`{"runtime":{"id":"runtime_123","tenant_id":"tenant_123","name":"edge-a","type":"external-owned","access_mode":"public","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
+			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runtimes/runtime_123/public-offer":
+			if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
+				t.Fatalf("decode runtime offer request: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"runtime":{"id":"runtime_123","tenant_id":"tenant_123","name":"edge-a","type":"external-owned","access_mode":"public","status":"active","public_offer":{"reference_bundle":{"cpu_millicores":2000,"memory_mebibytes":4096,"storage_gibibytes":50},"reference_monthly_price_microcents":19990000,"free_storage":true,"price_book":{"currency":"USD","hours_per_month":730},"updated_at":"2026-04-02T00:00:00Z"},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"runtime", "offer", "set", "edge-a",
+		"--cpu", "2000",
+		"--memory", "4096",
+		"--storage", "50",
+		"--monthly-usd", "19.99",
+		"--free-storage",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run runtime offer set: %v", err)
+	}
+
+	if gotRequest.ReferenceBundle.CPUMilliCores != 2000 || gotRequest.ReferenceBundle.MemoryMebibytes != 4096 || gotRequest.ReferenceBundle.StorageGibibytes != 50 {
+		t.Fatalf("unexpected reference bundle %+v", gotRequest.ReferenceBundle)
+	}
+	if gotRequest.ReferenceMonthlyPriceMicroCents != 19_990_000 || !gotRequest.FreeStorage {
+		t.Fatalf("unexpected offer request %+v", gotRequest)
+	}
+	out := stdout.String()
+	for _, want := range []string{"runtime=edge-a", "tenant=Acme", "published=true", "reference_monthly_price=USD 19.99", "free_storage=true"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunRuntimeDeleteUsesSemanticCommand(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes":
+			_, _ = w.Write([]byte(`{"runtimes":[{"id":"runtime_123","tenant_id":"tenant_123","name":"edge-a","type":"external-owned","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes/runtime_123":
+			_, _ = w.Write([]byte(`{"runtime":{"id":"runtime_123","tenant_id":"tenant_123","name":"edge-a","type":"external-owned","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
+			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/runtimes/runtime_123":
+			_, _ = w.Write([]byte(`{"deleted":true,"runtime":{"id":"runtime_123","tenant_id":"tenant_123","name":"edge-a","type":"external-owned","status":"deleted","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-03T00:00:00Z"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"runtime", "delete", "edge-a",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run runtime delete: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"runtime=edge-a", "tenant=Acme", "deleted=true"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAppOverviewAggregatesRelatedState(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_runtime_id":"runtime_managed_shared","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_runtime_id":"runtime_managed_shared","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
+			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/projects"):
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","tenant_id":"tenant_123","name":"demo","slug":"demo","description":"demo project","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes":
+			_, _ = w.Write([]byte(`{"runtimes":[{"id":"runtime_managed_shared","tenant_id":"tenant_123","name":"shared","type":"managed-shared","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/domains":
+			_, _ = w.Write([]byte(`{"domains":[{"hostname":"www.example.com","status":"active","tls_status":"ready","route_target":"demo.apps.example.com","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/bindings":
+			_, _ = w.Write([]byte(`{"bindings":[{"id":"binding_123","tenant_id":"tenant_123","app_id":"app_123","service_id":"svc_123","alias":"postgres","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}],"backing_services":[{"id":"svc_123","tenant_id":"tenant_123","project_id":"project_123","name":"app-db","type":"postgres","status":"active","spec":{"postgres":{"runtime_id":"runtime_managed_shared","database":"app","user":"app"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations":
+			_, _ = w.Write([]byte(`{"operations":[{"id":"op_123","tenant_id":"tenant_123","app_id":"app_123","type":"deploy","status":"completed","execution_mode":"managed","requested_by_type":"api-key","requested_by_id":"key_123","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/images":
+			_, _ = w.Write([]byte(`{"app_id":"app_123","registry_configured":true,"summary":{"version_count":1,"current_version_count":1,"stale_version_count":0,"reclaimable_size_bytes":0},"versions":[{"image_ref":"registry.example.com/demo:abc123","status":"ready","current":true,"size_bytes":1048576}]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "overview", "demo",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app overview: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"app=demo", "project=demo", "runtime=shared", "domains", "www.example.com", "services", "postgres", "images", "versions=1", "operations", "op_123"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
 func TestRunAppFailoverRunByNameExecutesFailover(t *testing.T) {
 	t.Parallel()
 
@@ -1004,7 +1200,7 @@ func TestRunAppFailoverRunByNameExecutesFailover(t *testing.T) {
 		t.Fatalf("expected target_runtime_id runtime_b, got %+v", gotBody)
 	}
 	out := stdout.String()
-	for _, want := range []string{"app_id=app_123", "operation_id=op_123"} {
+	for _, want := range []string{"app=demo", "operation_id=op_123"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
@@ -1040,7 +1236,7 @@ func TestRunAppDeployShortcutUsesSemanticCommand(t *testing.T) {
 	}
 
 	out := stdout.String()
-	for _, want := range []string{"app_id=app_123", "operation_id=op_123"} {
+	for _, want := range []string{"app=demo", "operation_id=op_123"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}

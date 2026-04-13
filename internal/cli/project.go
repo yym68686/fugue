@@ -2,10 +2,7 @@ package cli
 
 import (
 	"fmt"
-	"io"
 	"strings"
-
-	"fugue/internal/model"
 
 	"github.com/spf13/cobra"
 )
@@ -27,14 +24,15 @@ Pass --tenant only when you are acting across multiple visible tenants.
 		c.newProjectWatchCommand(),
 		c.newProjectAppsCommand(),
 		c.newProjectOpsCommand(),
+		c.newProjectImagesCommand(),
 		c.newProjectMetaCommand(),
 		c.newProjectShowCommand(),
 		c.newProjectCreateCommand(),
 		c.newProjectEditCommand(),
 		hideCompatCommand(c.newProjectRenameCommand(), "fugue project edit"),
 		c.newProjectRemoveCommand(),
-		c.newProjectStorageCommand(),
-		c.newProjectUsageCommand(),
+		hideCompatCommand(c.newProjectStorageCommand(), "fugue project images usage"),
+		hideCompatCommand(c.newProjectUsageCommand(), "fugue project images usage"),
 	)
 	return cmd
 }
@@ -64,7 +62,7 @@ func (c *CLI) newProjectMetaCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"project": project})
 			}
-			return renderProject(c.stdout, project)
+			return c.renderProjectDetail(client, project)
 		},
 	}
 }
@@ -90,7 +88,7 @@ func (c *CLI) newProjectListCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"projects": projects})
 			}
-			return writeProjectTable(c.stdout, projects)
+			return writeProjectTableWithContext(c.stdout, projects, c.loadTenantNames(client), c.showIDs())
 		},
 	}
 }
@@ -119,7 +117,7 @@ func (c *CLI) newProjectCreateCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"project": project})
 			}
-			return renderProject(c.stdout, project)
+			return c.renderProjectDetail(client, project)
 		},
 	}
 	cmd.Flags().StringVar(&opts.Description, "description", "", "Project description")
@@ -218,7 +216,7 @@ func (c *CLI) newProjectRemoveCommand() *cobra.Command {
 					"project": project,
 				})
 			}
-			if err := renderProject(c.stdout, project); err != nil {
+			if err := c.renderProjectDetail(client, project); err != nil {
 				return err
 			}
 			_, err = fmt.Fprintln(c.stdout, "deleted=true")
@@ -243,10 +241,19 @@ func (c *CLI) patchProjectMetadata(projectRef string, name, description *string)
 	if c.wantsJSON() {
 		return writeJSON(c.stdout, map[string]any{"project": project})
 	}
-	return renderProject(c.stdout, project)
+	return c.renderProjectDetail(client, project)
 }
 
-func (c *CLI) newProjectUsageCommand() *cobra.Command {
+func (c *CLI) newProjectImagesCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "images",
+		Short: "Inspect project image inventory and usage",
+	}
+	cmd.AddCommand(c.newProjectImageUsageCommand())
+	return cmd
+}
+
+func (c *CLI) newProjectImageUsageCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "usage [project]",
 		Short: "Show image-usage by project",
@@ -260,6 +267,7 @@ func (c *CLI) newProjectUsageCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			projectNames := c.loadProjectNames(client, "")
 			if len(args) == 1 {
 				project, err := c.resolveNamedProject(client, args[0])
 				if err != nil {
@@ -276,8 +284,9 @@ func (c *CLI) newProjectUsageCommand() *cobra.Command {
 							"project":             summary,
 						})
 					}
+					projectName := firstNonEmptyTrimmed(projectNames[summary.ProjectID], project.Name, summary.ProjectID)
 					if err := writeKeyValues(c.stdout,
-						kvPair{Key: "project_id", Value: summary.ProjectID},
+						kvPair{Key: "project", Value: formatDisplayName(projectName, summary.ProjectID, c.showIDs())},
 						kvPair{Key: "version_count", Value: fmt.Sprintf("%d", summary.VersionCount)},
 						kvPair{Key: "reclaimable", Value: formatBytes(summary.ReclaimableSizeBytes)},
 					); err != nil {
@@ -308,27 +317,24 @@ func (c *CLI) newProjectUsageCommand() *cobra.Command {
 			if _, err := fmt.Fprintln(c.stdout); err != nil {
 				return err
 			}
-			return writeProjectUsageTable(c.stdout, usage.Projects)
+			return writeProjectUsageTableWithContext(c.stdout, usage.Projects, projectNames, c.showIDs())
 		},
 	}
-	return hideCompatCommand(cmd, "fugue project storage")
+	return cmd
+}
+
+func (c *CLI) newProjectUsageCommand() *cobra.Command {
+	cmd := c.newProjectImageUsageCommand()
+	cmd.Use = "usage [project]"
+	cmd.Short = "Compatibility alias for project images usage"
+	return cmd
 }
 
 func (c *CLI) newProjectStorageCommand() *cobra.Command {
-	cmd := c.newProjectUsageCommand()
+	cmd := c.newProjectImageUsageCommand()
 	cmd.Use = "storage [project]"
 	cmd.Short = "Show project image storage usage"
 	cmd.Hidden = false
 	cmd.Deprecated = ""
 	return cmd
-}
-
-func renderProject(w io.Writer, project model.Project) error {
-	return writeKeyValues(w,
-		kvPair{Key: "project_id", Value: project.ID},
-		kvPair{Key: "tenant_id", Value: project.TenantID},
-		kvPair{Key: "name", Value: project.Name},
-		kvPair{Key: "slug", Value: project.Slug},
-		kvPair{Key: "description", Value: project.Description},
-	)
 }

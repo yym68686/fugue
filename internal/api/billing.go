@@ -22,6 +22,11 @@ func (s *Server) handleGetBilling(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "tenant_id is required")
 		return
 	}
+	includeCurrentUsage, err := readBoolQuery(r, "include_current_usage", true)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	s.scheduleTenantBillingImageStorageRefresh(tenantID)
 	summary, err := s.store.GetTenantBillingSummary(tenantID)
@@ -29,7 +34,9 @@ func (s *Server) handleGetBilling(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	summary.CurrentUsage = s.currentTenantManagedUsage(r.Context(), tenantID, principal.IsPlatformAdmin())
+	if includeCurrentUsage {
+		summary.CurrentUsage = s.currentTenantManagedUsage(r.Context(), tenantID, principal.IsPlatformAdmin())
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"billing": summary,
 	})

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"io"
 	"strings"
 
 	"fugue/internal/model"
@@ -73,7 +72,28 @@ func (c *CLI) newServiceListCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"backing_services": filtered})
 			}
-			return writeServiceTable(c.stdout, filtered)
+			projectNames := c.loadProjectNames(client, tenantID)
+			var (
+				appNames     map[string]string
+				runtimeNames map[string]string
+				needsApps    bool
+				needsRuntime bool
+			)
+			for _, service := range filtered {
+				if strings.TrimSpace(service.OwnerAppID) != "" {
+					needsApps = true
+				}
+				if service.Spec.Postgres != nil && strings.TrimSpace(service.Spec.Postgres.RuntimeID) != "" {
+					needsRuntime = true
+				}
+			}
+			if needsApps {
+				appNames = c.loadAppNames(client)
+			}
+			if needsRuntime {
+				runtimeNames = c.loadRuntimeNames(client)
+			}
+			return writeServiceTableWithContext(c.stdout, filtered, projectNames, appNames, runtimeNames, c.showIDs())
 		},
 	}
 }
@@ -201,7 +221,7 @@ func (c *CLI) createPostgresService(name string, opts postgresServiceCreateOptio
 	if c.wantsJSON() {
 		return writeJSON(c.stdout, map[string]any{"backing_service": service})
 	}
-	return renderBackingService(c.stdout, service)
+	return c.renderBackingServiceDetail(client, service)
 }
 
 func (c *CLI) newServiceShowCommand() *cobra.Command {
@@ -226,7 +246,7 @@ func (c *CLI) newServiceShowCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"backing_service": service})
 			}
-			return renderBackingService(c.stdout, service)
+			return c.renderBackingServiceDetail(client, service)
 		},
 	}
 }
@@ -256,38 +276,11 @@ func (c *CLI) newServiceRemoveCommand() *cobra.Command {
 					"backing_service": service,
 				})
 			}
-			if err := renderBackingService(c.stdout, service); err != nil {
+			if err := c.renderBackingServiceDetail(client, service); err != nil {
 				return err
 			}
 			_, err = fmt.Fprintln(c.stdout, "deleted=true")
 			return err
 		},
 	}
-}
-
-func renderBackingService(w io.Writer, service model.BackingService) error {
-	pairs := []kvPair{
-		{Key: "service_id", Value: service.ID},
-		{Key: "name", Value: service.Name},
-		{Key: "type", Value: service.Type},
-		{Key: "status", Value: service.Status},
-		{Key: "project_id", Value: service.ProjectID},
-		{Key: "current_resource_usage", Value: formatResourceUsageSummary(service.CurrentResourceUsage)},
-	}
-	if strings.TrimSpace(service.OwnerAppID) != "" {
-		pairs = append(pairs, kvPair{Key: "owner_app_id", Value: service.OwnerAppID})
-	}
-	if service.Spec.Postgres != nil {
-		pairs = append(pairs,
-			kvPair{Key: "runtime_id", Value: service.Spec.Postgres.RuntimeID},
-			kvPair{Key: "database", Value: service.Spec.Postgres.Database},
-			kvPair{Key: "user", Value: service.Spec.Postgres.User},
-			kvPair{Key: "service_name", Value: service.Spec.Postgres.ServiceName},
-			kvPair{Key: "storage_size", Value: service.Spec.Postgres.StorageSize},
-		)
-		if service.Spec.Postgres.Instances > 0 {
-			pairs = append(pairs, kvPair{Key: "instances", Value: fmt.Sprintf("%d", service.Spec.Postgres.Instances)})
-		}
-	}
-	return writeKeyValues(w, pairs...)
 }

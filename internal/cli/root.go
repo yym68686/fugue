@@ -20,6 +20,7 @@ type rootOptions struct {
 	ProjectName string
 	Output      string
 	JSONOutput  bool
+	ShowIDs     bool
 }
 
 type CLI struct {
@@ -67,11 +68,12 @@ Quick start for most users:
      fugue deploy .
      fugue app ls
 
-Defaults and auto-selection:
-  - Base URL defaults to FUGUE_BASE_URL, then FUGUE_API_URL, then ` + defaultCloudBaseURL + `.
-  - Tenant is auto-selected when your key only sees one tenant.
-  - Deploy and create flows default to the "default" project when you do not pass --project.
-  - Prefer names. ID flags stay hidden as compatibility escape hatches.
+	Defaults and auto-selection:
+	  - Base URL defaults to FUGUE_BASE_URL, then FUGUE_API_URL, then ` + defaultCloudBaseURL + `.
+	  - Tenant is auto-selected when your key only sees one tenant.
+	  - Deploy and create flows default to the "default" project when you do not pass --project.
+	  - Prefer names. Use --show-ids when you need internal identifiers in text output.
+	  - ID flags stay hidden as compatibility escape hatches.
 
 Use name-based commands such as "deploy", "app ls", "operation ls", and
 "app logs" instead of calling low-level API endpoints directly. The CLI
@@ -94,12 +96,15 @@ Environment variables:
 	  fugue deploy inspect .
 	  fugue deploy github owner/repo --branch main
 	  fugue deploy image nginx:1.27
+	  fugue app create my-app --github owner/repo --branch main
 	  fugue app status my-app
+	  fugue app overview my-app
 	  fugue app source show my-app
-	  fugue app failover configure my-app --app-to runtime-b
+	  fugue app rebuild my-app
+	  fugue app redeploy my-app
+	  fugue app failover policy set my-app --app-to runtime-b
 	  fugue app logs runtime my-app --follow
 	  fugue app service attach my-app postgres
-	  fugue app release deploy my-app
 	  fugue app command set my-app --command "python app.py"
 	  fugue app config put my-app /app/config.yaml --from-file config.yaml
 	  fugue app storage set my-app --size 10Gi --mount /data
@@ -108,12 +113,13 @@ Environment variables:
 	  fugue service ls
 	  fugue service postgres create app-db --runtime shared
 	  fugue operation ls --app my-app
+	  fugue runtime enroll create edge-a
 	  fugue runtime access show shared
-  fugue project overview
-  fugue project watch marketing
-  fugue project edit marketing --description "landing pages"
-  fugue project storage
-`),
+	  fugue project overview
+	  fugue project watch marketing
+	  fugue project edit marketing --description "landing pages"
+	  fugue project images usage marketing
+	`),
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			return c.validateOutput()
 		},
@@ -126,6 +132,7 @@ Environment variables:
 	flags.StringVar(&c.root.ProjectName, "project", c.root.ProjectName, "Optional project name. Deploy/create defaults to the default project when omitted")
 	flags.StringVarP(&c.root.Output, "output", "o", c.root.Output, "Output format: text or json")
 	flags.BoolVar(&c.root.JSONOutput, "json", false, "Shortcut for --output json")
+	flags.BoolVar(&c.root.ShowIDs, "show-ids", false, "Include internal IDs in text output where supported")
 	flags.StringVar(&c.root.TenantID, "tenant-id", c.root.TenantID, "Tenant ID")
 	flags.StringVar(&c.root.ProjectID, "project-id", c.root.ProjectID, "Project ID")
 	_ = flags.MarkHidden("tenant-id")
@@ -170,6 +177,10 @@ func (c *CLI) validateOutput() error {
 
 func (c *CLI) wantsJSON() bool {
 	return c.effectiveOutput() == "json"
+}
+
+func (c *CLI) showIDs() bool {
+	return !c.wantsJSON() && c.root.ShowIDs
 }
 
 func (c *CLI) newClient() (*Client, error) {

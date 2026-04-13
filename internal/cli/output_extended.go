@@ -85,16 +85,28 @@ func formatCurrencyMicroCents(value int64, currency string) string {
 }
 
 func writeProjectTable(w io.Writer, projects []model.Project) error {
+	return writeProjectTableWithContext(w, projects, nil, false)
+}
+
+func writeProjectTableWithContext(w io.Writer, projects []model.Project, tenantNames map[string]string, showIDs bool) error {
 	sorted := append([]model.Project(nil), projects...)
 	sort.Slice(sorted, func(i, j int) bool {
 		return strings.Compare(sorted[i].Name, sorted[j].Name) < 0
 	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "PROJECT\tDESCRIPTION\tUPDATED"); err != nil {
+	if _, err := fmt.Fprintln(tw, "PROJECT\tTENANT\tDESCRIPTION\tUPDATED"); err != nil {
 		return err
 	}
 	for _, project := range sorted {
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\n", project.Name, project.Description, formatTime(project.UpdatedAt)); err != nil {
+		tenantName := firstNonEmptyTrimmed(tenantNames[project.TenantID], project.TenantID)
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\n",
+			formatDisplayName(project.Name, project.ID, showIDs),
+			formatDisplayName(tenantName, project.TenantID, showIDs),
+			project.Description,
+			formatTime(project.UpdatedAt),
+		); err != nil {
 			return err
 		}
 	}
@@ -102,6 +114,10 @@ func writeProjectTable(w io.Writer, projects []model.Project) error {
 }
 
 func writeServiceTable(w io.Writer, services []model.BackingService) error {
+	return writeServiceTableWithContext(w, services, nil, nil, nil, false)
+}
+
+func writeServiceTableWithContext(w io.Writer, services []model.BackingService, projectNames, appNames, runtimeNames map[string]string, showIDs bool) error {
 	sorted := append([]model.BackingService(nil), services...)
 	sort.Slice(sorted, func(i, j int) bool {
 		return strings.Compare(sorted[i].Name, sorted[j].Name) < 0
@@ -115,15 +131,18 @@ func writeServiceTable(w io.Writer, services []model.BackingService) error {
 		if service.Spec.Postgres != nil {
 			runtimeID = strings.TrimSpace(service.Spec.Postgres.RuntimeID)
 		}
+		projectName := firstNonEmptyTrimmed(projectNames[service.ProjectID], service.ProjectID)
+		ownerName := firstNonEmptyTrimmed(appNames[service.OwnerAppID], service.OwnerAppID)
+		runtimeName := firstNonEmptyTrimmed(runtimeNames[runtimeID], runtimeID)
 		if _, err := fmt.Fprintf(
 			tw,
 			"%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			service.Name,
+			formatDisplayName(service.Name, service.ID, showIDs),
 			service.Type,
 			service.Status,
-			service.ProjectID,
-			service.OwnerAppID,
-			runtimeID,
+			formatDisplayName(projectName, service.ProjectID, showIDs),
+			formatDisplayName(ownerName, service.OwnerAppID, showIDs),
+			formatDisplayName(runtimeName, runtimeID, showIDs),
 			formatResourceUsageSummary(service.CurrentResourceUsage),
 		); err != nil {
 			return err
@@ -234,8 +253,17 @@ func writeAppImageTable(w io.Writer, versions []appImageVersion) error {
 }
 
 func writeProjectUsageTable(w io.Writer, projects []projectImageUsageSummary) error {
+	return writeProjectUsageTableWithContext(w, projects, nil, false)
+}
+
+func writeProjectUsageTableWithContext(w io.Writer, projects []projectImageUsageSummary, projectNames map[string]string, showIDs bool) error {
 	sorted := append([]projectImageUsageSummary(nil), projects...)
 	sort.Slice(sorted, func(i, j int) bool {
+		left := firstNonEmptyTrimmed(projectNames[sorted[i].ProjectID], sorted[i].ProjectID)
+		right := firstNonEmptyTrimmed(projectNames[sorted[j].ProjectID], sorted[j].ProjectID)
+		if compare := strings.Compare(left, right); compare != 0 {
+			return compare < 0
+		}
 		return strings.Compare(sorted[i].ProjectID, sorted[j].ProjectID) < 0
 	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
@@ -243,10 +271,11 @@ func writeProjectUsageTable(w io.Writer, projects []projectImageUsageSummary) er
 		return err
 	}
 	for _, project := range sorted {
+		projectName := firstNonEmptyTrimmed(projectNames[project.ProjectID], project.ProjectID)
 		if _, err := fmt.Fprintf(
 			tw,
 			"%s\t%d\t%d\t%d\t%s\n",
-			project.ProjectID,
+			formatDisplayName(projectName, project.ProjectID, showIDs),
 			project.VersionCount,
 			project.CurrentVersionCount,
 			project.StaleVersionCount,
@@ -385,6 +414,10 @@ func writeNodeKeyTable(w io.Writer, keys []model.NodeKey) error {
 }
 
 func writeRuntimeTable(w io.Writer, runtimes []model.Runtime) error {
+	return writeRuntimeTableWithContext(w, runtimes, nil, false)
+}
+
+func writeRuntimeTableWithContext(w io.Writer, runtimes []model.Runtime, tenantNames map[string]string, showIDs bool) error {
 	sorted := append([]model.Runtime(nil), runtimes...)
 	sort.Slice(sorted, func(i, j int) bool {
 		return strings.Compare(sorted[i].Name, sorted[j].Name) < 0
@@ -394,15 +427,16 @@ func writeRuntimeTable(w io.Writer, runtimes []model.Runtime) error {
 		return err
 	}
 	for _, runtime := range sorted {
+		tenantName := firstNonEmptyTrimmed(tenantNames[runtime.TenantID], runtime.TenantID)
 		if _, err := fmt.Fprintf(
 			tw,
 			"%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			runtime.Name,
+			formatDisplayName(runtime.Name, runtime.ID, showIDs),
 			runtime.Type,
 			runtime.AccessMode,
 			runtime.PoolMode,
 			runtime.Status,
-			runtime.TenantID,
+			formatDisplayName(tenantName, runtime.TenantID, showIDs),
 			runtime.Endpoint,
 		); err != nil {
 			return err

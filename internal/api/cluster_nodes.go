@@ -3,8 +3,10 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,33 +28,33 @@ import (
 )
 
 const (
-	clusterNodeManagedPodLabelSelector = "app.kubernetes.io/managed-by=fugue,app.kubernetes.io/name"
-	clusterNodeCNPGPodLabelSelector    = "app.kubernetes.io/managed-by=cloudnative-pg,cnpg.io/cluster"
-	clusterNodeCNPGClusterLabel        = "cnpg.io/cluster"
-	clusterNodeStatsConcurrency        = 4
-	clusterNodeConditionReady          = "Ready"
-	clusterNodeConditionMemory         = "MemoryPressure"
-	clusterNodeConditionDisk           = "DiskPressure"
-	clusterNodeConditionPID            = "PIDPressure"
-	clusterNodeLabelRegion             = "topology.kubernetes.io/region"
-	clusterNodeLabelLegacyRegion       = "failure-domain.beta.kubernetes.io/region"
-	clusterNodeLabelZone               = "topology.kubernetes.io/zone"
-	clusterNodeLabelLegacyZone         = "failure-domain.beta.kubernetes.io/zone"
-	clusterNodeLabelCountryCode        = "fugue.io/location-country-code"
-	clusterNodeLabelPublicIP           = "fugue.io/public-ip"
-	clusterNodeAnnotationCountry       = "fugue.io/location-country"
-	clusterNodeAnnotationK3sHost       = "k3s.io/hostname"
+	clusterNodeManagedPodLabelSelector  = "app.kubernetes.io/managed-by=fugue,app.kubernetes.io/name"
+	clusterNodeCNPGPodLabelSelector     = "app.kubernetes.io/managed-by=cloudnative-pg,cnpg.io/cluster"
+	clusterNodeCNPGClusterLabel         = "cnpg.io/cluster"
+	clusterNodeStatsConcurrency         = 4
+	clusterNodeConditionReady           = "Ready"
+	clusterNodeConditionMemory          = "MemoryPressure"
+	clusterNodeConditionDisk            = "DiskPressure"
+	clusterNodeConditionPID             = "PIDPressure"
+	clusterNodeLabelRegion              = "topology.kubernetes.io/region"
+	clusterNodeLabelLegacyRegion        = "failure-domain.beta.kubernetes.io/region"
+	clusterNodeLabelZone                = "topology.kubernetes.io/zone"
+	clusterNodeLabelLegacyZone          = "failure-domain.beta.kubernetes.io/zone"
+	clusterNodeLabelCountryCode         = "fugue.io/location-country-code"
+	clusterNodeLabelPublicIP            = "fugue.io/public-ip"
+	clusterNodeAnnotationCountry        = "fugue.io/location-country"
+	clusterNodeAnnotationK3sHost        = "k3s.io/hostname"
 	defaultClusterNodeInventoryCacheTTL = 5 * time.Second
-	tenantSharedClusterNodeName        = "internal-cluster"
-	tenantSharedClusterRegion          = "Multiple countries"
-	tenantSharedRuntimeID              = "runtime_managed_shared"
-	clusterJoinTokenNamespace          = "kube-system"
-	clusterJoinTokenSecretPrefix       = "bootstrap-token-"
-	clusterJoinTokenLabelManaged       = "fugue.pro/cluster-join-bootstrap"
-	clusterJoinTokenLabelNodeKey       = "fugue.pro/node-key-id"
-	clusterJoinTokenLabelRuntime       = "fugue.pro/runtime-id"
-	clusterJoinTokenLabelValue         = "true"
-	clusterJoinTokenAuthGroup          = "system:bootstrappers:k3s:default-node-token"
+	tenantSharedClusterNodeName         = "internal-cluster"
+	tenantSharedClusterRegion           = "Multiple countries"
+	tenantSharedRuntimeID               = "runtime_managed_shared"
+	clusterJoinTokenNamespace           = "kube-system"
+	clusterJoinTokenSecretPrefix        = "bootstrap-token-"
+	clusterJoinTokenLabelManaged        = "fugue.pro/cluster-join-bootstrap"
+	clusterJoinTokenLabelNodeKey        = "fugue.pro/node-key-id"
+	clusterJoinTokenLabelRuntime        = "fugue.pro/runtime-id"
+	clusterJoinTokenLabelValue          = "true"
+	clusterJoinTokenAuthGroup           = "system:bootstrappers:k3s:default-node-token"
 )
 
 var (
@@ -93,6 +95,11 @@ type clusterWorkloadResolver struct {
 	servicesByID            map[string]model.BackingService
 	appsByNamespacedName    map[string]model.App
 	servicesByNamespacedApp map[string]model.BackingService
+}
+
+type managedSharedLocationSyncState struct {
+	mu       sync.Mutex
+	lastHash string
 }
 
 type kubeNodeList struct {
@@ -245,6 +252,11 @@ func (s *Server) loadClusterNodeInventory(ctx context.Context) ([]clusterNodeSna
 func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	timings := serverTimingFromContext(r.Context())
+	syncLocations, err := readBoolQuery(r, "sync_locations", true)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	snapshots, err := s.loadClusterNodeInventory(r.Context())
 	if err != nil {
@@ -252,12 +264,14 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	syncStartedAt := time.Now()
-	if err := s.syncManagedSharedLocationRuntimesFromSnapshots(snapshots); err != nil {
-		s.writeStoreError(w, err)
-		return
+	if syncLocations {
+		syncStartedAt := time.Now()
+		if err := s.syncManagedSharedLocationRuntimesFromSnapshots(snapshots); err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		timings.Add("runtime_sync", time.Since(syncStartedAt))
 	}
-	timings.Add("runtime_sync", time.Since(syncStartedAt))
 	managedSharedRuntime, err := s.store.GetRuntime(tenantSharedRuntimeID)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -434,7 +448,20 @@ func buildTenantSharedClusterNode(snapshots []resolvedClusterNodeSnapshot, runti
 }
 
 func (s *Server) syncManagedSharedLocationRuntimesFromSnapshots(snapshots []clusterNodeSnapshot) error {
-	return s.store.SyncManagedSharedLocationRuntimes(sharedLocationLabelSet(snapshots))
+	locations := sharedLocationLabelSet(snapshots)
+	hash := managedSharedLocationSetHash(locations)
+
+	s.managedSharedLocationSync.mu.Lock()
+	defer s.managedSharedLocationSync.mu.Unlock()
+
+	if hash == s.managedSharedLocationSync.lastHash {
+		return nil
+	}
+	if err := s.store.SyncManagedSharedLocationRuntimes(locations); err != nil {
+		return err
+	}
+	s.managedSharedLocationSync.lastHash = hash
+	return nil
 }
 
 func (s *Server) trySyncManagedSharedLocationRuntimes(ctx context.Context) {
@@ -518,6 +545,39 @@ func sharedLocationLabelSet(snapshots []clusterNodeSnapshot) []map[string]string
 		out = append(out, sharedLocationLabels(snapshot))
 	}
 	return out
+}
+
+func managedSharedLocationSetHash(locations []map[string]string) string {
+	if len(locations) == 0 {
+		return "empty"
+	}
+
+	entries := make([]string, 0, len(locations))
+	for _, labels := range locations {
+		if len(labels) == 0 {
+			continue
+		}
+
+		keys := make([]string, 0, len(labels))
+		for key := range labels {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+
+		parts := make([]string, 0, len(keys))
+		for _, key := range keys {
+			parts = append(parts, key+"="+strings.TrimSpace(labels[key]))
+		}
+		entries = append(entries, strings.Join(parts, ","))
+	}
+
+	if len(entries) == 0 {
+		return "empty"
+	}
+
+	sort.Strings(entries)
+	sum := sha256.Sum256([]byte(strings.Join(entries, "\n")))
+	return hex.EncodeToString(sum[:8])
 }
 
 func preferSharedLocationSnapshot(left, right clusterNodeSnapshot) bool {

@@ -72,6 +72,14 @@ func (c *CLI) newAppReleaseListCommand() *cobra.Command {
 func (c *CLI) newAppDeployShortcutCommand() *cobra.Command {
 	cmd := c.newAppReleaseDeployCommand()
 	cmd.Use = "deploy <app>"
+	cmd.Short = "Compatibility alias for app redeploy"
+	return cmd
+}
+
+func (c *CLI) newAppRedeployCommand() *cobra.Command {
+	cmd := c.newAppReleaseDeployCommand()
+	cmd.Use = "redeploy <app>"
+	cmd.Aliases = []string{"apply"}
 	cmd.Short = "Deploy the app's current desired spec"
 	return cmd
 }

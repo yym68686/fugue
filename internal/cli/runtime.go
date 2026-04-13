@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"fugue/internal/model"
@@ -13,18 +14,81 @@ func (c *CLI) newRuntimeCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "runtime",
 		Aliases: []string{"runtimes"},
-		Short:   "Inspect, attach, and manage runtimes",
+		Short:   "Inspect, enroll, and manage runtimes",
 	}
 	cmd.AddCommand(
-		c.newAdminRuntimeListCommand(),
-		c.newAdminRuntimeShowCommand(),
+		c.newRuntimeListCommand(),
+		c.newRuntimeShowCommand(),
 		c.newRuntimeAccessCommand(),
 		c.newRuntimePoolCommand(),
-		c.newAdminRuntimeTokenCommand(),
-		c.newRuntimeAttachCommand(),
+		c.newRuntimeOfferCommand(),
+		c.newRuntimeEnrollCommand(),
+		hideCompatCommand(c.newRuntimeAttachCommand(), "fugue runtime enroll create"),
 		c.newRuntimeDoctorCommand(),
+		c.newRuntimeDeleteCommand(),
 	)
 	return cmd
+}
+
+func (c *CLI) newRuntimeListCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:     "ls",
+		Aliases: []string{"list"},
+		Short:   "List visible runtimes",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			runtimes, err := client.ListRuntimes()
+			if err != nil {
+				return err
+			}
+			tenantID := c.effectiveTenantID()
+			if strings.TrimSpace(tenantID) == "" && strings.TrimSpace(c.effectiveTenantName()) != "" {
+				tenantID, err = resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+				if err != nil {
+					return err
+				}
+			}
+			if strings.TrimSpace(tenantID) != "" {
+				filtered := make([]model.Runtime, 0, len(runtimes))
+				for _, runtime := range runtimes {
+					if runtime.TenantID == tenantID || runtime.TenantID == "" {
+						filtered = append(filtered, runtime)
+					}
+				}
+				runtimes = filtered
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"runtimes": runtimes})
+			}
+			return writeRuntimeTableWithContext(c.stdout, runtimes, c.loadTenantNames(client), c.showIDs())
+		},
+	}
+}
+
+func (c *CLI) newRuntimeShowCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:     "show <runtime>",
+		Aliases: []string{"get", "status", "info"},
+		Short:   "Show one runtime",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			runtimeObj, err := c.resolveNamedRuntime(client, args[0])
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"runtime": runtimeObj})
+			}
+			return c.renderRuntimeDetail(client, runtimeObj)
+		},
+	}
 }
 
 func (c *CLI) newRuntimeAccessCommand() *cobra.Command {
@@ -63,7 +127,7 @@ func (c *CLI) newRuntimeAccessShowCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, response)
 			}
-			if err := renderRuntime(c.stdout, response.Runtime); err != nil {
+			if err := c.renderRuntimeDetail(client, response.Runtime); err != nil {
 				return err
 			}
 			if _, err := fmt.Fprintf(c.stdout, "grants=%d\n", len(response.Grants)); err != nil {
@@ -105,7 +169,7 @@ func (c *CLI) newRuntimeAccessSetCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"runtime": runtimeObj})
 			}
-			return renderRuntime(c.stdout, runtimeObj)
+			return c.renderRuntimeDetail(client, runtimeObj)
 		},
 	}
 }
@@ -135,9 +199,11 @@ func (c *CLI) newRuntimeAccessGrantCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"grant": grant})
 			}
+			runtimeLabel := formatDisplayName(runtimeObj.Name, runtimeObj.ID, c.showIDs())
+			tenantLabel := formatDisplayName(firstNonEmptyTrimmed(tenant.Name, tenant.Slug, tenant.ID), tenant.ID, c.showIDs())
 			return writeKeyValues(c.stdout,
-				kvPair{Key: "runtime_id", Value: grant.RuntimeID},
-				kvPair{Key: "tenant_id", Value: grant.TenantID},
+				kvPair{Key: "runtime", Value: runtimeLabel},
+				kvPair{Key: "tenant", Value: tenantLabel},
 				kvPair{Key: "created_at", Value: formatTime(grant.CreatedAt)},
 			)
 		},
@@ -170,9 +236,11 @@ func (c *CLI) newRuntimeAccessRevokeCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"removed": removed})
 			}
+			runtimeLabel := formatDisplayName(runtimeObj.Name, runtimeObj.ID, c.showIDs())
+			tenantLabel := formatDisplayName(firstNonEmptyTrimmed(tenant.Name, tenant.Slug, tenant.ID), tenant.ID, c.showIDs())
 			return writeKeyValues(c.stdout,
-				kvPair{Key: "runtime_id", Value: runtimeObj.ID},
-				kvPair{Key: "tenant_id", Value: tenant.ID},
+				kvPair{Key: "runtime", Value: runtimeLabel},
+				kvPair{Key: "tenant", Value: tenantLabel},
 				kvPair{Key: "removed", Value: fmt.Sprintf("%t", removed)},
 			)
 		},
@@ -208,7 +276,7 @@ func (c *CLI) newRuntimePoolShowCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"runtime": runtimeObj})
 			}
-			return renderRuntime(c.stdout, runtimeObj)
+			return c.renderRuntimeDetail(client, runtimeObj)
 		},
 	}
 }
@@ -234,13 +302,158 @@ func (c *CLI) newRuntimePoolSetCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, response)
 			}
-			if err := renderRuntime(c.stdout, response.Runtime); err != nil {
+			if err := c.renderRuntimeDetail(client, response.Runtime); err != nil {
 				return err
 			}
 			_, err = fmt.Fprintf(c.stdout, "node_reconciled=%t\n", response.NodeReconciled)
 			return err
 		},
 	}
+}
+
+func (c *CLI) newRuntimeOfferCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "offer",
+		Short: "Inspect and update a runtime public offer",
+	}
+	cmd.AddCommand(
+		c.newRuntimeOfferShowCommand(),
+		c.newRuntimeOfferSetCommand(),
+	)
+	return cmd
+}
+
+func (c *CLI) newRuntimeOfferShowCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show <runtime>",
+		Short: "Show the current public offer for a runtime",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			runtimeObj, err := c.resolveNamedRuntime(client, args[0])
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{
+					"runtime":      runtimeObj,
+					"public_offer": runtimeObj.PublicOffer,
+				})
+			}
+			return c.renderRuntimeOffer(client, runtimeObj)
+		},
+	}
+}
+
+func (c *CLI) newRuntimeOfferSetCommand() *cobra.Command {
+	opts := struct {
+		CPU         int64
+		Memory      int64
+		Storage     int64
+		MonthlyUSD  string
+		Free        bool
+		FreeCPU     bool
+		FreeMemory  bool
+		FreeStorage bool
+	}{}
+	cmd := &cobra.Command{
+		Use:   "set <runtime>",
+		Short: "Publish or update a runtime public offer",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			runtimeObj, err := c.resolveNamedRuntime(client, args[0])
+			if err != nil {
+				return err
+			}
+			monthlyPrice, err := parseRuntimeOfferMonthlyUSD(opts.MonthlyUSD)
+			if err != nil {
+				return err
+			}
+			if !opts.Free && !opts.FreeCPU && !opts.FreeMemory && !opts.FreeStorage && monthlyPrice <= 0 {
+				return fmt.Errorf("one of --monthly-usd, --free, --free-cpu, --free-memory, or --free-storage is required")
+			}
+			runtimeObj, err = client.SetRuntimePublicOffer(runtimeObj.ID, setRuntimePublicOfferRequest{
+				ReferenceBundle: model.BillingResourceSpec{
+					CPUMilliCores:    opts.CPU,
+					MemoryMebibytes:  opts.Memory,
+					StorageGibibytes: opts.Storage,
+				},
+				ReferenceMonthlyPriceMicroCents: monthlyPrice,
+				Free:                            opts.Free,
+				FreeCPU:                         opts.FreeCPU,
+				FreeMemory:                      opts.FreeMemory,
+				FreeStorage:                     opts.FreeStorage,
+			})
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"runtime": runtimeObj})
+			}
+			return c.renderRuntimeOffer(client, runtimeObj)
+		},
+	}
+	cmd.Flags().Int64Var(&opts.CPU, "cpu", 0, "Reference CPU bundle in millicores")
+	cmd.Flags().Int64Var(&opts.Memory, "memory", 0, "Reference memory bundle in MiB")
+	cmd.Flags().Int64Var(&opts.Storage, "storage", 0, "Reference storage bundle in GiB")
+	cmd.Flags().StringVar(&opts.MonthlyUSD, "monthly-usd", "", "Reference monthly price in USD, for example 19.99")
+	cmd.Flags().BoolVar(&opts.Free, "free", false, "Mark the full runtime offer as free")
+	cmd.Flags().BoolVar(&opts.FreeCPU, "free-cpu", false, "Do not charge for CPU")
+	cmd.Flags().BoolVar(&opts.FreeMemory, "free-memory", false, "Do not charge for memory")
+	cmd.Flags().BoolVar(&opts.FreeStorage, "free-storage", false, "Do not charge for storage")
+	return cmd
+}
+
+func (c *CLI) newRuntimeEnrollCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "enroll",
+		Short: "Manage runtime enrollment tokens",
+	}
+	cmd.AddCommand(
+		c.newRuntimeEnrollListCommand(),
+		c.newRuntimeEnrollCreateCommand(),
+	)
+	return cmd
+}
+
+func (c *CLI) newRuntimeEnrollListCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:     "ls",
+		Aliases: []string{"list"},
+		Short:   "List runtime enrollment tokens",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			tenantID, err := resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+			if err != nil {
+				return err
+			}
+			tokens, err := client.ListEnrollmentTokens(tenantID)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"enrollment_tokens": tokens})
+			}
+			return writeEnrollmentTokenTable(c.stdout, tokens)
+		},
+	}
+}
+
+func (c *CLI) newRuntimeEnrollCreateCommand() *cobra.Command {
+	cmd := c.newRuntimeAttachCommand()
+	cmd.Use = "create <label>"
+	cmd.Short = "Create a runtime enrollment token with join instructions"
+	return cmd
 }
 
 func (c *CLI) newRuntimeAttachCommand() *cobra.Command {
@@ -336,7 +549,7 @@ func (c *CLI) newRuntimeDoctorCommand() *cobra.Command {
 					"warnings":      warnings,
 				})
 			}
-			if err := renderRuntime(c.stdout, runtimeObj); err != nil {
+			if err := c.renderRuntimeDetail(client, runtimeObj); err != nil {
 				return err
 			}
 			if err := writeKeyValues(c.stdout,
@@ -355,4 +568,73 @@ func (c *CLI) newRuntimeDoctorCommand() *cobra.Command {
 			return writeClusterNodeTable(c.stdout, matchingNodes)
 		},
 	}
+}
+
+func (c *CLI) newRuntimeDeleteCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:     "delete <runtime>",
+		Aliases: []string{"rm", "remove"},
+		Short:   "Delete a runtime",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			runtimeObj, err := c.resolveNamedRuntime(client, args[0])
+			if err != nil {
+				return err
+			}
+			response, err := client.DeleteRuntime(runtimeObj.ID)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			if err := c.renderRuntimeDetail(client, response.Runtime); err != nil {
+				return err
+			}
+			return writeKeyValues(c.stdout, kvPair{Key: "deleted", Value: fmt.Sprintf("%t", response.Deleted)})
+		},
+	}
+}
+
+func (c *CLI) renderRuntimeOffer(client *Client, runtimeObj model.Runtime) error {
+	tenantName := firstNonEmptyTrimmed(c.loadTenantNames(client)[runtimeObj.TenantID], runtimeObj.TenantID)
+	pairs := []kvPair{
+		{Key: "runtime", Value: formatDisplayName(runtimeObj.Name, runtimeObj.ID, c.showIDs())},
+		{Key: "tenant", Value: formatDisplayName(tenantName, runtimeObj.TenantID, c.showIDs())},
+	}
+	if runtimeObj.PublicOffer == nil {
+		pairs = append(pairs, kvPair{Key: "published", Value: "false"})
+		return writeKeyValues(c.stdout, pairs...)
+	}
+	offer := runtimeObj.PublicOffer
+	pairs = append(pairs,
+		kvPair{Key: "published", Value: "true"},
+		kvPair{Key: "reference_bundle", Value: formatBillingResourceSpec(offer.ReferenceBundle)},
+		kvPair{Key: "reference_monthly_price", Value: formatCurrencyMicroCents(offer.ReferenceMonthlyPriceMicroCents, offer.PriceBook.Currency)},
+		kvPair{Key: "free", Value: fmt.Sprintf("%t", offer.Free)},
+		kvPair{Key: "free_cpu", Value: fmt.Sprintf("%t", offer.FreeCPU)},
+		kvPair{Key: "free_memory", Value: fmt.Sprintf("%t", offer.FreeMemory)},
+		kvPair{Key: "free_storage", Value: fmt.Sprintf("%t", offer.FreeStorage)},
+		kvPair{Key: "updated_at", Value: formatTime(offer.UpdatedAt)},
+	)
+	return writeKeyValues(c.stdout, pairs...)
+}
+
+func parseRuntimeOfferMonthlyUSD(raw string) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse --monthly-usd: %w", err)
+	}
+	if value < 0 {
+		return 0, fmt.Errorf("--monthly-usd must be greater than or equal to 0")
+	}
+	return int64(value * 1_000_000), nil
 }

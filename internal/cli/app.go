@@ -64,10 +64,13 @@ in more than one visible project or tenant.
 `),
 	}
 	cmd.AddCommand(
+		c.newAppCreateCommand(),
 		c.newAppListCommand(),
 		c.newAppStatusCommand(),
+		c.newAppOverviewCommand(),
+		c.newAppWatchCommand(),
 		c.newAppSourceCommand(),
-		c.newAppSyncCommand(),
+		hideCompatCommand(c.newAppSyncCommand(), "fugue app source show or fugue app rebuild"),
 		c.newAppLogsCommand(),
 		c.newEnvCommand(),
 		c.newFilesCommand(),
@@ -80,10 +83,11 @@ in more than one visible project or tenant.
 		c.newAppServiceCommand(),
 		hideCompatCommand(c.newAppBindingCompatCommand(), "fugue app service"),
 		c.newAppDatabaseCommand(),
+		c.newAppRedeployCommand(),
+		c.newAppRebuildShortcutCommand(),
+		c.newAppRollbackShortcutCommand(),
 		c.newAppReleaseCommand(),
-		hideCompatCommand(c.newAppDeployShortcutCommand(), "fugue app release deploy"),
-		hideCompatCommand(c.newAppRebuildShortcutCommand(), "fugue app release rebuild"),
-		hideCompatCommand(c.newAppRollbackShortcutCommand(), "fugue app release rollback"),
+		hideCompatCommand(c.newAppDeployShortcutCommand(), "fugue app redeploy"),
 		hideCompatCommand(c.newAppContinuityCommand(), "fugue app failover"),
 		c.newAppFailoverCommand(),
 		c.newAppRestartCommand(),
@@ -118,7 +122,11 @@ func (c *CLI) newAppListCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"apps": filtered})
 			}
-			return writeAppTable(c.stdout, filtered)
+			runtimes, err := client.ListRuntimes()
+			if err != nil {
+				c.progressf("warning=runtime inventory unavailable: %v", err)
+			}
+			return writeAppTableWithRuntimeNames(c.stdout, filtered, mapRuntimeNames(runtimes), c.showIDs())
 		},
 	}
 }
@@ -145,7 +153,7 @@ func (c *CLI) newAppStatusCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"app": finalApp})
 			}
-			return writeAppStatus(c.stdout, finalApp)
+			return c.renderAppStatus(client, finalApp)
 		},
 	}
 }
@@ -278,7 +286,12 @@ func (c *CLI) newAppScaleCommand() *cobra.Command {
 }
 
 func (c *CLI) newAppRemoveCommand() *cobra.Command {
-	opts := appRemoveCommandOptions{Wait: true}
+	opts := struct {
+		appRemoveCommandOptions
+		Force bool
+	}{
+		appRemoveCommandOptions: appRemoveCommandOptions{Wait: true},
+	}
 	cmd := &cobra.Command{
 		Use:     "delete <app>",
 		Aliases: []string{"rm", "remove"},
@@ -293,7 +306,12 @@ func (c *CLI) newAppRemoveCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			response, err := client.DeleteApp(app.ID)
+			var response appDeleteResponse
+			if opts.Force {
+				response, err = client.DeleteAppForce(app.ID)
+			} else {
+				response, err = client.DeleteApp(app.ID)
+			}
 			if err != nil {
 				return err
 			}
@@ -316,6 +334,7 @@ func (c *CLI) newAppRemoveCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for operation completion")
+	cmd.Flags().BoolVar(&opts.Force, "force", false, "Abort in-flight work before deleting and purge the app when possible")
 	return cmd
 }
 
@@ -699,13 +718,13 @@ func (c *CLI) renderAppCommandResult(result appCommandResult) error {
 	}
 	pairs := make([]kvPair, 0, 6)
 	if result.App != nil {
-		pairs = append(pairs, kvPair{Key: "app_id", Value: result.App.ID})
+		pairs = append(pairs, kvPair{Key: "app", Value: formatDisplayName(result.App.Name, result.App.ID, c.showIDs())})
 		pairs = append(pairs, kvPair{Key: "phase", Value: strings.TrimSpace(result.App.Status.Phase)})
 		runtimeID := strings.TrimSpace(result.App.Status.CurrentRuntimeID)
 		if runtimeID == "" {
 			runtimeID = strings.TrimSpace(result.App.Spec.RuntimeID)
 		}
-		pairs = append(pairs, kvPair{Key: "runtime_id", Value: runtimeID})
+		pairs = append(pairs, kvPair{Key: "runtime", Value: runtimeID})
 		if result.App.Route != nil && strings.TrimSpace(result.App.Route.PublicURL) != "" {
 			pairs = append(pairs, kvPair{Key: "url", Value: result.App.Route.PublicURL})
 		}

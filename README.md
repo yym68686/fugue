@@ -10,7 +10,7 @@ Fugue is a multi-tenant application control plane for k3s. It combines an OpenAP
 - The HTTP surface is OpenAPI-first. `openapi/openapi.yaml` is the source of truth, generated routes are derived from it, and the server publishes `/openapi.yaml`, `/openapi.json`, and `/docs`.
 - The CLI is the main operator interface. It supports deploys from local source, GitHub repositories, and container images, plus day-to-day app, runtime, service, and operation workflows.
 - GitHub imports now support public and private repos, automatic build detection (`static-site`, `dockerfile`, `buildpacks`, `nixpacks`), stack-aware imports from `fugue.yaml` or Compose, and background sync for tracked repositories.
-- Continuity is now a first-class workflow: audit failover posture, configure app/database failover targets, and execute controller-driven failover for managed runtimes.
+- Failover is now a first-class workflow: inspect current posture, set app/database failover targets, and execute controller-driven failover for managed runtimes.
 - The bundled Helm chart is still an opinionated self-hosted baseline. The production HA path externalizes PostgreSQL, the registry, secrets, and the edge.
 
 ## What Fugue can do today
@@ -60,11 +60,15 @@ Common workflows:
 - `fugue deploy github owner/repo --branch main`
 - `fugue deploy github https://github.com/example/app --private --repo-token $GITHUB_TOKEN`
 - `fugue deploy image nginx:1.27`
+- `fugue app create my-app --github owner/repo --branch main`
 - `fugue app status my-app`
+- `fugue app overview my-app`
 - `fugue app logs runtime my-app --follow`
-- `fugue app binding bind my-app postgres`
-- `fugue app continuity audit my-app`
+- `fugue app service attach my-app postgres`
+- `fugue app failover status my-app`
 - `fugue app failover run my-app --to runtime-b`
+- `fugue runtime enroll create edge-a`
+- `fugue project images usage marketing`
 - `fugue operation ls --app my-app`
 
 `build-cli` packages CLI archives on relevant pushes to `main`, and `release-cli` publishes them as GitHub Release assets when a `v*` tag is pushed.

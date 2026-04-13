@@ -51,6 +51,10 @@ func writeStringMap(w io.Writer, values map[string]string) error {
 }
 
 func writeAppTable(w io.Writer, apps []model.App) error {
+	return writeAppTableWithRuntimeNames(w, apps, nil, false)
+}
+
+func writeAppTableWithRuntimeNames(w io.Writer, apps []model.App, runtimeNames map[string]string, showIDs bool) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	if _, err := fmt.Fprintln(tw, "APP\tSTATUS\tREPLICAS\tRUNTIME\tUSAGE\tURL"); err != nil {
 		return err
@@ -64,13 +68,14 @@ func writeAppTable(w io.Writer, apps []model.App) error {
 		if app.Route != nil {
 			url = strings.TrimSpace(app.Route.PublicURL)
 		}
+		runtimeName := firstNonEmptyTrimmed(runtimeNames[runtimeID], runtimeID)
 		if _, err := fmt.Fprintf(
 			tw,
 			"%s\t%s\t%d\t%s\t%s\t%s\n",
-			app.Name,
+			formatDisplayName(app.Name, app.ID, showIDs),
 			strings.TrimSpace(app.Status.Phase),
 			maxInt(app.Status.CurrentReplicas, app.Spec.Replicas),
-			runtimeID,
+			formatDisplayName(runtimeName, runtimeID, showIDs),
 			formatResourceUsageSummary(app.CurrentResourceUsage),
 			url,
 		); err != nil {
@@ -162,6 +167,10 @@ func writeMultiAppSummary(w io.Writer, apps []model.App) error {
 }
 
 func writeAppStatus(w io.Writer, app model.App) error {
+	return writeAppStatusWithContext(w, app, nil, nil, nil, false)
+}
+
+func writeAppStatusWithContext(w io.Writer, app model.App, tenantNames, projectNames, runtimeNames map[string]string, showIDs bool) error {
 	url := ""
 	if app.Route != nil {
 		url = strings.TrimSpace(app.Route.PublicURL)
@@ -186,22 +195,25 @@ func writeAppStatus(w io.Writer, app model.App) error {
 	if app.Spec.Postgres != nil {
 		postgresRuntime = strings.TrimSpace(app.Spec.Postgres.RuntimeID)
 	}
+	tenantName := firstNonEmptyTrimmed(tenantNames[app.TenantID], app.TenantID)
+	projectName := firstNonEmptyTrimmed(projectNames[app.ProjectID], app.ProjectID)
+	runtimeName := firstNonEmptyTrimmed(runtimeNames[runtimeID], runtimeID)
+	failoverTargetName := firstNonEmptyTrimmed(runtimeNames[failoverTarget], failoverTarget)
+	postgresRuntimeName := firstNonEmptyTrimmed(runtimeNames[postgresRuntime], postgresRuntime)
 	pairs := []kvPair{
-		kvPair{Key: "app_id", Value: app.ID},
-		kvPair{Key: "name", Value: app.Name},
-		kvPair{Key: "tenant_id", Value: app.TenantID},
-		kvPair{Key: "project_id", Value: app.ProjectID},
+		kvPair{Key: "app", Value: formatDisplayName(app.Name, app.ID, showIDs)},
+		kvPair{Key: "tenant", Value: formatDisplayName(tenantName, app.TenantID, showIDs)},
+		kvPair{Key: "project", Value: formatDisplayName(projectName, app.ProjectID, showIDs)},
 		kvPair{Key: "phase", Value: strings.TrimSpace(app.Status.Phase)},
 		kvPair{Key: "desired_replicas", Value: fmt.Sprintf("%d", app.Spec.Replicas)},
 		kvPair{Key: "current_replicas", Value: fmt.Sprintf("%d", app.Status.CurrentReplicas)},
-		kvPair{Key: "runtime_id", Value: runtimeID},
+		kvPair{Key: "runtime", Value: formatDisplayName(runtimeName, runtimeID, showIDs)},
 		kvPair{Key: "source", Value: sourceType},
 		kvPair{Key: "source_ref", Value: sourceRef(app.Source)},
-		kvPair{Key: "failover_target_runtime_id", Value: failoverTarget},
+		kvPair{Key: "failover_target_runtime", Value: formatDisplayName(failoverTargetName, failoverTarget, showIDs)},
 		kvPair{Key: "workspace_root", Value: workspaceRoot},
-		kvPair{Key: "postgres_runtime_id", Value: postgresRuntime},
+		kvPair{Key: "postgres_runtime", Value: formatDisplayName(postgresRuntimeName, postgresRuntime, showIDs)},
 		kvPair{Key: "current_resource_usage", Value: formatResourceUsageSummary(app.CurrentResourceUsage)},
-		kvPair{Key: "release_retain", Value: formatImageMirrorLimit(app.Spec.ImageMirrorLimit)},
 		kvPair{Key: "image_mirror_limit", Value: formatImageMirrorLimit(app.Spec.ImageMirrorLimit)},
 		kvPair{Key: "bindings", Value: fmt.Sprintf("%d", len(app.Bindings))},
 		kvPair{Key: "last_operation_id", Value: app.Status.LastOperationID},

@@ -27,8 +27,11 @@ type appRouteAvailability struct {
 	Reason     string `json:"reason,omitempty"`
 }
 
-func (s *Server) createAppWithAutoRoute(tenantID, projectID, name, description string, spec model.AppSpec) (model.App, error) {
+func (s *Server) createAppWithAutoRoute(tenantID, projectID, name, description string, spec model.AppSpec, source *model.AppSource) (model.App, error) {
 	if model.AppUsesBackgroundNetwork(spec) {
+		if source != nil {
+			return s.store.CreateImportedAppWithoutRoute(tenantID, projectID, name, description, spec, *source)
+		}
 		return s.store.CreateApp(tenantID, projectID, name, description, spec)
 	}
 
@@ -58,12 +61,21 @@ func (s *Server) createAppWithAutoRoute(tenantID, projectID, name, description s
 			return model.App{}, err
 		}
 
-		app, createErr := s.store.CreateAppWithRoute(tenantID, projectID, appName, description, spec, model.AppRoute{
+		route := model.AppRoute{
 			Hostname:    candidateHost,
 			BaseDomain:  s.appBaseDomain,
 			PublicURL:   "https://" + candidateHost,
 			ServicePort: firstServicePort(spec),
-		})
+		}
+		var (
+			app       model.App
+			createErr error
+		)
+		if source != nil {
+			app, createErr = s.store.CreateImportedApp(tenantID, projectID, appName, description, spec, *source, route)
+		} else {
+			app, createErr = s.store.CreateAppWithRoute(tenantID, projectID, appName, description, spec, route)
+		}
 		if createErr == nil {
 			return app, nil
 		}

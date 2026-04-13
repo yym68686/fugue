@@ -277,6 +277,20 @@ type runtimePoolModeResponse struct {
 	NodeReconciled bool          `json:"node_reconciled"`
 }
 
+type runtimeDeleteResponse struct {
+	Deleted bool          `json:"deleted"`
+	Runtime model.Runtime `json:"runtime"`
+}
+
+type setRuntimePublicOfferRequest struct {
+	ReferenceBundle                 model.BillingResourceSpec `json:"reference_bundle"`
+	ReferenceMonthlyPriceMicroCents int64                     `json:"reference_monthly_price_microcents,omitempty"`
+	Free                            bool                      `json:"free,omitempty"`
+	FreeCPU                         bool                      `json:"free_cpu,omitempty"`
+	FreeMemory                      bool                      `json:"free_memory,omitempty"`
+	FreeStorage                     bool                      `json:"free_storage,omitempty"`
+}
+
 type enrollmentTokenListResponse struct {
 	EnrollmentTokens []model.EnrollmentToken `json:"enrollment_tokens"`
 }
@@ -851,6 +865,14 @@ func (c *Client) CreateRuntime(request createRuntimeRequest) (runtimeCreateRespo
 	return response, nil
 }
 
+func (c *Client) DeleteRuntime(id string) (runtimeDeleteResponse, error) {
+	var response runtimeDeleteResponse
+	if err := c.doJSON(http.MethodDelete, path.Join("/v1/runtimes", id), nil, &response); err != nil {
+		return runtimeDeleteResponse{}, err
+	}
+	return response, nil
+}
+
 func (c *Client) GetRuntimeSharing(id string) (runtimeSharingResponse, error) {
 	var response runtimeSharingResponse
 	if err := c.doJSON(http.MethodGet, path.Join("/v1/runtimes", id, "sharing"), nil, &response); err != nil {
@@ -880,6 +902,14 @@ func (c *Client) SetRuntimeAccessMode(id, accessMode string) (model.Runtime, err
 	var response runtimeAccessModeResponse
 	request := map[string]string{"access_mode": strings.TrimSpace(accessMode)}
 	if err := c.doJSON(http.MethodPost, path.Join("/v1/runtimes", id, "sharing", "mode"), request, &response); err != nil {
+		return model.Runtime{}, err
+	}
+	return response.Runtime, nil
+}
+
+func (c *Client) SetRuntimePublicOffer(id string, request setRuntimePublicOfferRequest) (model.Runtime, error) {
+	var response runtimeResponse
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/runtimes", id, "public-offer"), request, &response); err != nil {
 		return model.Runtime{}, err
 	}
 	return response.Runtime, nil

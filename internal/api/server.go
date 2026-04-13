@@ -42,6 +42,7 @@ type Server struct {
 	appImageRegistry             appImageRegistry
 	projectImageUsageCache       expiringResponseCache[projectImageUsageResponse]
 	clusterNodeInventoryCache    expiringResponseCache[[]clusterNodeSnapshot]
+	managedSharedLocationSync    managedSharedLocationSyncState
 	newClusterNodeClient         func() (*clusterNodeClient, error)
 	newManagedAppStatusClient    func() (*managedAppStatusClient, error)
 	managedAppStatusCache        managedAppStatusCache
@@ -809,11 +810,12 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		TenantID    string        `json:"tenant_id"`
-		ProjectID   string        `json:"project_id"`
-		Name        string        `json:"name"`
-		Description string        `json:"description"`
-		Spec        model.AppSpec `json:"spec"`
+		TenantID    string           `json:"tenant_id"`
+		ProjectID   string           `json:"project_id"`
+		Name        string           `json:"name"`
+		Description string           `json:"description"`
+		Spec        model.AppSpec    `json:"spec"`
+		Source      *model.AppSource `json:"source,omitempty"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -825,14 +827,23 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	source, err := s.normalizeCreateAppSource(req.Source)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	var (
 		app model.App
-		err error
 	)
 	if strings.TrimSpace(s.appBaseDomain) != "" {
-		app, err = s.createAppWithAutoRoute(tenantID, req.ProjectID, req.Name, req.Description, req.Spec)
+		app, err = s.createAppWithAutoRoute(tenantID, req.ProjectID, req.Name, req.Description, req.Spec, source)
 	} else {
-		app, err = s.store.CreateApp(tenantID, req.ProjectID, req.Name, req.Description, req.Spec)
+		if source != nil {
+			app, err = s.store.CreateImportedAppWithoutRoute(tenantID, req.ProjectID, req.Name, req.Description, req.Spec, *source)
+		} else {
+			app, err = s.store.CreateApp(tenantID, req.ProjectID, req.Name, req.Description, req.Spec)
+		}
 	}
 	if err != nil {
 		s.writeStoreError(w, err)

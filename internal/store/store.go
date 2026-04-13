@@ -1941,6 +1941,10 @@ func (s *Store) CreateImportedApp(tenantID, projectID, name, description string,
 	return s.createApp(tenantID, projectID, name, description, spec, &source, &route)
 }
 
+func (s *Store) CreateImportedAppWithoutRoute(tenantID, projectID, name, description string, spec model.AppSpec, source model.AppSource) (model.App, error) {
+	return s.createApp(tenantID, projectID, name, description, spec, &source, nil)
+}
+
 func (s *Store) UpdateAppRoute(id string, route model.AppRoute) (model.App, error) {
 	id = strings.TrimSpace(id)
 	route.Hostname = strings.TrimSpace(strings.ToLower(route.Hostname))

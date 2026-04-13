@@ -1244,6 +1244,101 @@ func TestKubeNodePublicIPPrefersExplicitLabel(t *testing.T) {
 	}
 }
 
+func TestListClusterNodesAllowsSkippingManagedLocationSync(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Cluster Nodes Sync Skip Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, apiSecret, err := s.CreateAPIKey(tenant.ID, "viewer", []string{"project.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	kubeServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/api/v1/nodes":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{
+							"name":              "worker-1",
+							"creationTimestamp": "2026-03-25T00:00:00Z",
+							"labels": map[string]string{
+								"node-role.kubernetes.io/worker": "",
+								"topology.kubernetes.io/region":  "ap-southeast-1",
+							},
+						},
+						"status": map[string]any{
+							"addresses": []map[string]string{
+								{"type": "InternalIP", "address": "10.0.0.10"},
+							},
+							"conditions": []map[string]string{
+								{
+									"type":               "Ready",
+									"status":             "True",
+									"reason":             "KubeletReady",
+									"message":            "kubelet is posting ready status",
+									"lastTransitionTime": "2026-03-25T00:01:00Z",
+								},
+							},
+							"capacity":    map[string]string{},
+							"allocatable": map[string]string{},
+							"nodeInfo":    map[string]string{},
+						},
+					},
+				},
+			})
+		case "/api/v1/pods":
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}})
+		case "/api/v1/nodes/worker-1/proxy/stats/summary":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"node": map[string]any{
+					"nodeName": "worker-1",
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/cluster/nodes?sync_locations=false", nil)
+	req.Header.Set("Authorization", "Bearer "+apiSecret)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	serverTiming := recorder.Header().Get("Server-Timing")
+	if !strings.Contains(serverTiming, "cluster_inventory;dur=") {
+		t.Fatalf("expected cluster_inventory timing metric, got %q", serverTiming)
+	}
+	if strings.Contains(serverTiming, "runtime_sync;dur=") {
+		t.Fatalf("expected runtime_sync timing metric to be absent, got %q", serverTiming)
+	}
+}
+
 func TestKubeNodeRegionFallbacksToGeolocatedCountry(t *testing.T) {
 	t.Parallel()
 

@@ -400,6 +400,12 @@ paths:
         - BearerAuth: []
       parameters:
         - $ref: "#/components/parameters/TenantIdQueryParam"
+        - in: query
+          name: include_current_usage
+          required: false
+          description: When false, skip live managed usage aggregation and return committed billing data only.
+          schema:
+            type: boolean
       responses:
         '200':
           description: Successful response
@@ -712,6 +718,13 @@ paths:
       x-fugue-handler: handleListClusterNodes
       security:
         - BearerAuth: []
+      parameters:
+        - in: query
+          name: sync_locations
+          required: false
+          description: When false, skip sync-on-read for managed shared runtime locations.
+          schema:
+            type: boolean
       responses:
         '200':
           description: Successful response
