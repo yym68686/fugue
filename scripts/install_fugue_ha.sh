@@ -1695,7 +1695,7 @@ EOF
 }
 
 ensure_coredns_multinode_scheduling() {
-  log "ensuring CoreDNS can run on multiple Ready linux nodes"
+  log "ensuring CoreDNS stays on installer-managed control-plane nodes"
   ssh_root "${PRIMARY_ALIAS}" <<'EOF'
 set -euo pipefail
 
@@ -1709,29 +1709,55 @@ if ! k3s kubectl -n kube-system get deploy coredns >/dev/null 2>&1; then
   exit 0
 fi
 
-ready_linux_nodes="$(k3s kubectl get nodes -l kubernetes.io/os=linux --no-headers 2>/dev/null | awk '$2 == "Ready" || $2 ~ /^Ready,/ {count++} END {print count+0}')"
-if [[ "${ready_linux_nodes}" =~ ^[0-9]+$ ]] && (( ready_linux_nodes > 0 && desired_replicas > ready_linux_nodes )); then
-  desired_replicas="${ready_linux_nodes}"
+count_ready_nodes() {
+  local selector="$1"
+  k3s kubectl get nodes -l "${selector}" --no-headers 2>/dev/null | \
+    awk '$2 == "Ready" || $2 ~ /^Ready,/ {count++} END {print count+0}'
+}
+
+coredns_selector_key="fugue.install/profile"
+coredns_selector_value="combined"
+# Keep CoreDNS off worker nodes so pod DNS does not vary with worker host resolvers.
+ready_coredns_nodes="$(count_ready_nodes "kubernetes.io/os=linux,${coredns_selector_key}=${coredns_selector_value}")"
+if ! [[ "${ready_coredns_nodes}" =~ ^[0-9]+$ ]] || (( ready_coredns_nodes == 0 )); then
+  coredns_selector_key="node-role.kubernetes.io/control-plane"
+  coredns_selector_value="true"
+  ready_coredns_nodes="$(count_ready_nodes "kubernetes.io/os=linux,${coredns_selector_key}=${coredns_selector_value}")"
+fi
+if ! [[ "${ready_coredns_nodes}" =~ ^[0-9]+$ ]] || (( ready_coredns_nodes == 0 )); then
+  echo "no Ready linux control-plane nodes available for CoreDNS scheduling" >&2
+  exit 1
+fi
+if (( desired_replicas > ready_coredns_nodes )); then
+  desired_replicas="${ready_coredns_nodes}"
 fi
 if (( desired_replicas < 1 )); then
   desired_replicas=1
 fi
 
 current_replicas="$(k3s kubectl -n kube-system get deploy coredns -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
-current_primary_selector="$(k3s kubectl -n kube-system get deploy coredns -o jsonpath='{.spec.template.spec.nodeSelector.fugue\.install/role}' 2>/dev/null || true)"
+current_profile_selector="$(k3s kubectl -n kube-system get deploy coredns -o jsonpath='{.spec.template.spec.nodeSelector.fugue\.install/profile}' 2>/dev/null || true)"
+current_control_plane_selector="$(k3s kubectl -n kube-system get deploy coredns -o jsonpath='{.spec.template.spec.nodeSelector.node-role\.kubernetes\.io/control-plane}' 2>/dev/null || true)"
 current_os_selector="$(k3s kubectl -n kube-system get deploy coredns -o jsonpath='{.spec.template.spec.nodeSelector.kubernetes\.io/os}' 2>/dev/null || true)"
 
-if [[ "${current_replicas}" == "${desired_replicas}" ]] && [[ -z "${current_primary_selector}" ]] && [[ "${current_os_selector}" == "linux" ]]; then
-  exit 0
+if [[ "${current_replicas}" == "${desired_replicas}" ]] && [[ "${current_os_selector}" == "linux" ]]; then
+  if [[ "${coredns_selector_key}" == "fugue.install/profile" ]] && [[ "${current_profile_selector}" == "${coredns_selector_value}" ]]; then
+    exit 0
+  fi
+  if [[ "${coredns_selector_key}" == "node-role.kubernetes.io/control-plane" ]] && [[ "${current_control_plane_selector}" == "${coredns_selector_value}" ]]; then
+    exit 0
+  fi
 fi
 
-if [[ -n "${current_primary_selector}" ]]; then
-  k3s kubectl -n kube-system patch deploy coredns --type=json \
-    -p '[{"op":"remove","path":"/spec/template/spec/nodeSelector/fugue.install~1role"}]' >/dev/null
-fi
+patch_payload="$(cat <<EOF_PATCH
+[
+  {"op":"add","path":"/spec/replicas","value":${desired_replicas}},
+  {"op":"add","path":"/spec/template/spec/nodeSelector","value":{"kubernetes.io/os":"linux","${coredns_selector_key}":"${coredns_selector_value}"}}
+]
+EOF_PATCH
+)"
 
-k3s kubectl -n kube-system patch deploy coredns --type=merge \
-  -p "{\"spec\":{\"replicas\":${desired_replicas},\"template\":{\"spec\":{\"nodeSelector\":{\"kubernetes.io/os\":\"linux\"}}}}}" >/dev/null
+k3s kubectl -n kube-system patch deploy coredns --type=json -p "${patch_payload}" >/dev/null
 k3s kubectl -n kube-system rollout status deploy/coredns --timeout=180s
 EOF
 }

@@ -893,16 +893,20 @@ EOF
   fi
 }
 
-ready_linux_node_count() {
-  ${KUBECTL} get nodes -l kubernetes.io/os=linux --no-headers 2>/dev/null | \
+ready_nodes_matching_selector() {
+  local selector="$1"
+  ${KUBECTL} get nodes -l "${selector}" --no-headers 2>/dev/null | \
     awk '$2 == "Ready" || $2 ~ /^Ready,/ {count++} END {print count + 0}'
 }
 
 ensure_coredns_multinode_scheduling() {
   local desired_replicas="${FUGUE_COREDNS_TARGET_REPLICAS}"
-  local ready_linux_nodes="0"
+  local coredns_selector_key="fugue.install/profile"
+  local coredns_selector_value="combined"
+  local ready_coredns_nodes="0"
   local current_replicas=""
-  local current_primary_selector=""
+  local current_profile_selector=""
+  local current_control_plane_selector=""
   local current_os_selector=""
   local patch_payload=""
 
@@ -915,34 +919,46 @@ ensure_coredns_multinode_scheduling() {
     return 0
   fi
 
-  ready_linux_nodes="$(ready_linux_node_count)"
-  if [[ "${ready_linux_nodes}" =~ ^[0-9]+$ ]] && (( ready_linux_nodes > 0 && desired_replicas > ready_linux_nodes )); then
-    desired_replicas="${ready_linux_nodes}"
+  # Keep CoreDNS off worker nodes so pod DNS does not vary with worker host resolvers.
+  ready_coredns_nodes="$(ready_nodes_matching_selector "kubernetes.io/os=linux,${coredns_selector_key}=${coredns_selector_value}")"
+  if ! [[ "${ready_coredns_nodes}" =~ ^[0-9]+$ ]] || (( ready_coredns_nodes == 0 )); then
+    coredns_selector_key="node-role.kubernetes.io/control-plane"
+    coredns_selector_value="true"
+    ready_coredns_nodes="$(ready_nodes_matching_selector "kubernetes.io/os=linux,${coredns_selector_key}=${coredns_selector_value}")"
+  fi
+  if ! [[ "${ready_coredns_nodes}" =~ ^[0-9]+$ ]] || (( ready_coredns_nodes == 0 )); then
+    fail "no Ready linux control-plane nodes available for CoreDNS scheduling"
+  fi
+  if (( desired_replicas > ready_coredns_nodes )); then
+    desired_replicas="${ready_coredns_nodes}"
   fi
   if (( desired_replicas < 1 )); then
     desired_replicas=1
   fi
 
   current_replicas="$(${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" get deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
-  current_primary_selector="$(${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" get deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" -o jsonpath='{.spec.template.spec.nodeSelector.fugue\.install/role}' 2>/dev/null || true)"
+  current_profile_selector="$(${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" get deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" -o jsonpath='{.spec.template.spec.nodeSelector.fugue\.install/profile}' 2>/dev/null || true)"
+  current_control_plane_selector="$(${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" get deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" -o jsonpath='{.spec.template.spec.nodeSelector.node-role\.kubernetes\.io/control-plane}' 2>/dev/null || true)"
   current_os_selector="$(${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" get deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" -o jsonpath='{.spec.template.spec.nodeSelector.kubernetes\.io/os}' 2>/dev/null || true)"
 
-  if [[ "${current_replicas}" == "${desired_replicas}" ]] && \
-     [[ -z "${current_primary_selector}" ]] && \
-     [[ "${current_os_selector}" == "linux" ]]; then
-    return 0
+  if [[ "${current_replicas}" == "${desired_replicas}" ]] && [[ "${current_os_selector}" == "linux" ]]; then
+    if [[ "${coredns_selector_key}" == "fugue.install/profile" ]] && [[ "${current_profile_selector}" == "${coredns_selector_value}" ]]; then
+      return 0
+    fi
+    if [[ "${coredns_selector_key}" == "node-role.kubernetes.io/control-plane" ]] && [[ "${current_control_plane_selector}" == "${coredns_selector_value}" ]]; then
+      return 0
+    fi
   fi
 
-  log "ensuring CoreDNS can run on multiple Ready linux nodes (replicas=${desired_replicas})"
-  if [[ -n "${current_primary_selector}" ]]; then
-    ${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" patch deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" --type=json \
-      -p '[{"op":"remove","path":"/spec/template/spec/nodeSelector/fugue.install~1role"}]' >/dev/null
-  fi
+  log "ensuring CoreDNS stays on control-plane nodes (replicas=${desired_replicas})"
   patch_payload="$(cat <<EOF
-{"spec":{"replicas":${desired_replicas},"template":{"spec":{"nodeSelector":{"kubernetes.io/os":"linux"}}}}}
+[
+  {"op":"add","path":"/spec/replicas","value":${desired_replicas}},
+  {"op":"add","path":"/spec/template/spec/nodeSelector","value":{"kubernetes.io/os":"linux","${coredns_selector_key}":"${coredns_selector_value}"}}
+]
 EOF
 )"
-  ${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" patch deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" --type=merge -p "${patch_payload}" >/dev/null
+  ${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" patch deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" --type=json -p "${patch_payload}" >/dev/null
   ${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" rollout status "deploy/${FUGUE_COREDNS_DEPLOYMENT_NAME}" --timeout=180s
 }
 
