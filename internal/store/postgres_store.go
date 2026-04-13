@@ -163,6 +163,34 @@ ORDER BY created_at ASC
 	return projects, nil
 }
 
+func (s *Store) pgListAllProjects() ([]model.Project, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, tenant_id, name, slug, description, created_at, updated_at
+FROM fugue_projects
+ORDER BY created_at ASC
+`)
+	if err != nil {
+		return nil, fmt.Errorf("list projects: %w", err)
+	}
+	defer rows.Close()
+
+	projects := make([]model.Project, 0)
+	for rows.Next() {
+		project, err := scanProject(rows)
+		if err != nil {
+			return nil, err
+		}
+		projects = append(projects, project)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate projects: %w", err)
+	}
+	return projects, nil
+}
+
 func (s *Store) pgGetProject(id string) (model.Project, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1921,11 +1949,6 @@ FROM fugue_apps
 			return nil, err
 		}
 		normalizeAppStatusForRead(&app)
-		if hydrateBackingServices {
-			if err := s.pgHydrateAppBackingServices(ctx, &app); err != nil {
-				return nil, err
-			}
-		}
 		if isDeletedApp(app) {
 			continue
 		}
@@ -1933,6 +1956,11 @@ FROM fugue_apps
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate apps: %w", err)
+	}
+	if hydrateBackingServices {
+		if err := s.pgHydrateAppsBackingServices(ctx, apps); err != nil {
+			return nil, err
+		}
 	}
 	return apps, nil
 }
@@ -1977,11 +2005,6 @@ ORDER BY created_at ASC
 			return nil, err
 		}
 		normalizeAppStatusForRead(&app)
-		if hydrateBackingServices {
-			if err := s.pgHydrateAppBackingServices(ctx, &app); err != nil {
-				return nil, err
-			}
-		}
 		if isDeletedApp(app) {
 			continue
 		}
@@ -1989,6 +2012,11 @@ ORDER BY created_at ASC
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate apps: %w", err)
+	}
+	if hydrateBackingServices {
+		if err := s.pgHydrateAppsBackingServices(ctx, apps); err != nil {
+			return nil, err
+		}
 	}
 	return apps, nil
 }

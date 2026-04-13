@@ -670,7 +670,12 @@ func (s *Server) buildConsoleGalleryResponse(ctx context.Context, principal mode
 	})
 	loadGroup.Go(func() error {
 		startedAt := time.Now()
-		result, err := s.loadConsoleApps(loadCtx, principal, includeLiveStatus, true)
+		// The landing gallery only needs rollout / lifecycle state to render the
+		// project list. Live resource usage overlays trigger a full cluster
+		// inventory walk and turn the summary path into the slowest request in the
+		// console. Keep the summary lean and let detailed views refresh usage on
+		// demand.
+		result, err := s.loadConsoleApps(loadCtx, principal, includeLiveStatus, false)
 		timings.Add("console_apps", time.Since(startedAt))
 		if err != nil {
 			return err

@@ -185,11 +185,19 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	if principal.IsPlatformAdmin() {
 		tenantID = strings.TrimSpace(r.URL.Query().Get("tenant_id"))
 	}
-	if tenantID == "" {
-		httpx.WriteError(w, http.StatusBadRequest, "tenant_id is required")
-		return
+	var (
+		projects []model.Project
+		err      error
+	)
+	if principal.IsPlatformAdmin() && tenantID == "" {
+		projects, err = s.store.ListAllProjects()
+	} else {
+		if tenantID == "" {
+			httpx.WriteError(w, http.StatusBadRequest, "tenant_id is required")
+			return
+		}
+		projects, err = s.store.ListProjects(tenantID)
 	}
-	projects, err := s.store.ListProjects(tenantID)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

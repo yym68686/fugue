@@ -127,7 +127,7 @@ func TestConsoleGallerySkipsLiveStatusOverlayByDefault(t *testing.T) {
 	}
 }
 
-func TestConsoleGalleryCachesResourceOverlayBetweenRequests(t *testing.T) {
+func TestConsoleGallerySkipsResourceOverlayByDefault(t *testing.T) {
 	t.Parallel()
 
 	s := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -188,7 +188,7 @@ func TestConsoleGalleryCachesResourceOverlayBetweenRequests(t *testing.T) {
 		t.Fatalf("expected second status %d, got %d body=%s", http.StatusOK, second.Code, second.Body.String())
 	}
 
-	if clusterInventoryCalls != 1 {
-		t.Fatalf("expected cached console gallery to collapse resource overlay fanout, got %d lookups", clusterInventoryCalls)
+	if clusterInventoryCalls != 0 {
+		t.Fatalf("expected console gallery summary to skip resource overlay by default, got %d lookups", clusterInventoryCalls)
 	}
 }

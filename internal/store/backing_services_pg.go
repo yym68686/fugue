@@ -297,6 +297,10 @@ func (s *Store) pgHydrateAppBackingServices(ctx context.Context, app *model.App)
 	return s.pgHydrateAppBackingServicesWithQueryer(ctx, s.db, app)
 }
 
+func (s *Store) pgHydrateAppsBackingServices(ctx context.Context, apps []model.App) error {
+	return s.pgHydrateAppsBackingServicesWithQueryer(ctx, s.db, apps)
+}
+
 func (s *Store) pgHydrateAppBackingServicesWithQueryer(ctx context.Context, queryer sqlQueryer, app *model.App) error {
 	if app == nil {
 		return nil
@@ -340,6 +344,94 @@ ORDER BY b.created_at ASC, s.created_at ASC
 
 	app.Bindings = bindings
 	app.BackingServices = services
+	return nil
+}
+
+func (s *Store) pgHydrateAppsBackingServicesWithQueryer(
+	ctx context.Context,
+	queryer sqlQueryer,
+	apps []model.App,
+) error {
+	if len(apps) == 0 {
+		return nil
+	}
+
+	appIDs := make([]string, 0, len(apps))
+	appsByID := make(map[string]*model.App, len(apps))
+	for index := range apps {
+		appID := strings.TrimSpace(apps[index].ID)
+		if appID == "" {
+			continue
+		}
+		apps[index].Bindings = nil
+		apps[index].BackingServices = nil
+		appIDs = append(appIDs, appID)
+		appsByID[appID] = &apps[index]
+	}
+
+	appIDs = sortedTrimmedStringKeys(trimmedStringSet(appIDs))
+	if len(appIDs) == 0 {
+		return nil
+	}
+
+	args := make([]any, 0, len(appIDs))
+	for _, appID := range appIDs {
+		args = append(args, appID)
+	}
+
+	rows, err := queryer.QueryContext(ctx, fmt.Sprintf(`
+	SELECT b.id, b.tenant_id, b.app_id, b.service_id, b.alias, b.env_json, b.created_at, b.updated_at,
+	       s.id, s.tenant_id, s.project_id, s.owner_app_id, s.name, s.description, s.type, s.provisioner, s.status, s.spec_json, s.current_runtime_started_at, s.current_runtime_ready_at, s.created_at, s.updated_at
+	FROM fugue_service_bindings AS b
+	JOIN fugue_backing_services AS s ON s.id = b.service_id
+	WHERE b.app_id IN (%s)
+	ORDER BY b.app_id ASC, b.created_at ASC, s.created_at ASC
+`, sqlPlaceholderList(1, len(appIDs))), args...)
+	if err != nil {
+		return fmt.Errorf("query app backing services: %w", err)
+	}
+	defer rows.Close()
+
+	bindingsByAppID := make(map[string][]model.ServiceBinding, len(appIDs))
+	servicesByAppID := make(map[string]map[string]model.BackingService, len(appIDs))
+	for rows.Next() {
+		binding, service, err := scanBoundBackingService(rows)
+		if err != nil {
+			return err
+		}
+		if isDeletedBackingService(service) {
+			continue
+		}
+
+		appID := strings.TrimSpace(binding.AppID)
+		if appID == "" {
+			continue
+		}
+
+		bindingsByAppID[appID] = append(bindingsByAppID[appID], binding)
+		if _, ok := servicesByAppID[appID]; !ok {
+			servicesByAppID[appID] = make(map[string]model.BackingService)
+		}
+		servicesByAppID[appID][service.ID] = service
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate app backing services: %w", err)
+	}
+
+	for appID, app := range appsByID {
+		if bindings := bindingsByAppID[appID]; len(bindings) > 0 {
+			app.Bindings = sortAndNormalizeBindings(bindings)
+		}
+
+		if serviceMap := servicesByAppID[appID]; len(serviceMap) > 0 {
+			services := make([]model.BackingService, 0, len(serviceMap))
+			for _, service := range serviceMap {
+				services = append(services, service)
+			}
+			app.BackingServices = sortAndNormalizeServices(services)
+		}
+	}
+
 	return nil
 }
 

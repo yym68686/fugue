@@ -257,6 +257,22 @@ func (s *Store) ListProjects(tenantID string) ([]model.Project, error) {
 	return projects, err
 }
 
+func (s *Store) ListAllProjects() ([]model.Project, error) {
+	if s.usingDatabase() {
+		return s.pgListAllProjects()
+	}
+
+	var projects []model.Project
+	err := s.withLockedState(false, func(state *model.State) error {
+		projects = append(projects, state.Projects...)
+		sort.Slice(projects, func(i, j int) bool {
+			return projects[i].CreatedAt.Before(projects[j].CreatedAt)
+		})
+		return nil
+	})
+	return projects, err
+}
+
 func (s *Store) GetProject(id string) (model.Project, error) {
 	if s.usingDatabase() {
 		return s.pgGetProject(id)
