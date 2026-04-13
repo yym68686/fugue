@@ -179,9 +179,15 @@ func summarizeBuilderPodFailure(pod builderPod) string {
 func summarizeBuilderContainerFailure(prefix string, status builderContainerStatus) string {
 	name := strings.TrimSpace(status.Name)
 	if status.State.Terminated != nil {
+		if !isFailingBuilderContainerTermination(*status.State.Terminated) {
+			return ""
+		}
 		return formatContainerFailureLine(prefix, name, "terminated", *status.State.Terminated)
 	}
 	if status.LastState.Terminated != nil {
+		if !isFailingBuilderContainerTermination(*status.LastState.Terminated) {
+			return ""
+		}
 		return formatContainerFailureLine(prefix, name, "terminated", *status.LastState.Terminated)
 	}
 	if status.State.Waiting != nil {
@@ -191,6 +197,14 @@ func summarizeBuilderContainerFailure(prefix string, status builderContainerStat
 		return formatContainerFailureLine(prefix, name, "waiting", *status.LastState.Waiting)
 	}
 	return ""
+}
+
+func isFailingBuilderContainerTermination(detail builderStateDetail) bool {
+	reason := strings.TrimSpace(detail.Reason)
+	if detail.ExitCode != 0 {
+		return true
+	}
+	return reason != "" && !strings.EqualFold(reason, "Completed")
 }
 
 func formatContainerFailureLine(prefix, containerName, state string, detail builderStateDetail) string {

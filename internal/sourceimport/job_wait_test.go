@@ -41,3 +41,38 @@ func TestSummarizeBuilderPodFailureEvicted(t *testing.T) {
 		t.Fatalf("unexpected summary:\nwant: %s\ngot:  %s", want, got)
 	}
 }
+
+func TestSummarizeBuilderPodFailureIgnoresCompletedInitContainers(t *testing.T) {
+	var pod builderPod
+	pod.Metadata.Name = "build-pod-2"
+	pod.Spec.NodeName = "node-a"
+	pod.Status.Phase = "Failed"
+	pod.Status.InitContainerStatuses = []builderContainerStatus{
+		{
+			Name: "git-clone",
+			State: builderRuntimeState{
+				Terminated: &builderStateDetail{Reason: "Completed", ExitCode: 0},
+			},
+		},
+		{
+			Name: "git-checkout",
+			State: builderRuntimeState{
+				Terminated: &builderStateDetail{Reason: "Completed", ExitCode: 0},
+			},
+		},
+	}
+	pod.Status.ContainerStatuses = []builderContainerStatus{
+		{
+			Name: "buildpacks",
+			State: builderRuntimeState{
+				Terminated: &builderStateDetail{Reason: "Error", ExitCode: 1},
+			},
+		},
+	}
+
+	got := summarizeBuilderPodFailure(pod)
+	want := "pod build-pod-2 on node node-a container buildpacks failed: Error: exit_code=1"
+	if got != want {
+		t.Fatalf("unexpected summary:\nwant: %s\ngot:  %s", want, got)
+	}
+}

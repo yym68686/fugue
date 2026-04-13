@@ -530,6 +530,14 @@ func summarizeKubeContainerFailure(prefix, containerName, state string, detail k
 	return summarizeKubeFailureLine(subject, reason, message)
 }
 
+func isFailingKubeContainerTermination(detail kubeStateDetail) bool {
+	reason := strings.TrimSpace(detail.Reason)
+	if detail.ExitCode != 0 {
+		return true
+	}
+	return reason != "" && !strings.EqualFold(reason, "Completed")
+}
+
 func summarizeKubePodFailure(pod kubePodInfo) string {
 	prefix := "pod " + strings.TrimSpace(pod.Metadata.Name)
 	if node := strings.TrimSpace(pod.Spec.NodeName); node != "" {
@@ -542,9 +550,15 @@ func summarizeKubePodFailure(pod kubePodInfo) string {
 	statuses = append(statuses, pod.Status.ContainerStatuses...)
 	for _, status := range statuses {
 		if status.State.Terminated != nil {
+			if !isFailingKubeContainerTermination(*status.State.Terminated) {
+				continue
+			}
 			return summarizeKubeContainerFailure(prefix, status.Name, "terminated", *status.State.Terminated)
 		}
 		if status.LastState.Terminated != nil {
+			if !isFailingKubeContainerTermination(*status.LastState.Terminated) {
+				continue
+			}
 			return summarizeKubeContainerFailure(prefix, status.Name, "terminated", *status.LastState.Terminated)
 		}
 		if status.State.Waiting != nil {

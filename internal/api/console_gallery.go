@@ -834,30 +834,15 @@ func (s *Server) buildConsoleGalleryResponse(ctx context.Context, principal mode
 }
 
 func (s *Server) buildConsoleGalleryHash(ctx context.Context, principal model.Principal, includeLiveStatus bool) (string, error) {
-	projects, err := s.store.ListProjects(principal.TenantID)
-	if err != nil {
-		return "", err
-	}
-	apps, err := s.loadConsoleApps(ctx, principal, includeLiveStatus, false)
-	if err != nil {
-		return "", err
-	}
-	operations, err := s.store.ListOperations(principal.TenantID, principal.IsPlatformAdmin())
+	response, err := s.cachedConsoleGalleryResponse(ctx, principal, includeLiveStatus)
 	if err != nil {
 		return "", err
 	}
 
-	payload := struct {
-		Apps       []model.App       `json:"apps"`
-		Operations []model.Operation `json:"operations"`
-		Projects   []model.Project   `json:"projects"`
-	}{
-		Apps:       apps,
-		Operations: sanitizeOperationsForAPI(operations),
-		Projects:   projects,
-	}
-
-	data, err := json.Marshal(payload)
+	// The stream should only notify clients when the visible gallery summary
+	// changes. Hashing raw apps / operations causes false positives from
+	// metadata churn that never reaches the UI.
+	data, err := json.Marshal(response)
 	if err != nil {
 		return "", err
 	}

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"path/filepath"
@@ -190,5 +191,92 @@ func TestConsoleGallerySkipsResourceOverlayByDefault(t *testing.T) {
 
 	if clusterInventoryCalls != 0 {
 		t.Fatalf("expected console gallery summary to skip resource overlay by default, got %d lookups", clusterInventoryCalls)
+	}
+}
+
+func TestConsoleGalleryHashIgnoresInactiveDatabaseSwitchoverOperations(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Console Hash Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	appRuntime, _, err := s.CreateRuntime(tenant.ID, "app-runtime", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create app runtime: %v", err)
+	}
+	databaseSource, _, err := s.CreateRuntime(tenant.ID, "db-source", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create database source runtime: %v", err)
+	}
+	databaseTarget, _, err := s.CreateRuntime(tenant.ID, "db-target", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create database target runtime: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: appRuntime.ID,
+		Postgres: &model.AppPostgresSpec{
+			Database:  "demo",
+			RuntimeID: databaseSource.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	deploySpec := app.Spec
+	deployOp, err := s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &deploySpec,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if _, err := s.CompleteManagedOperation(deployOp.ID, "/tmp/demo.yaml", "deployed"); err != nil {
+		t.Fatalf("complete deploy operation: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server.consoleGalleryCache = newExpiringResponseCache[consoleGalleryResponse](0)
+	principal := model.Principal{TenantID: tenant.ID}
+
+	initialHash, err := server.buildConsoleGalleryHash(context.Background(), principal, false)
+	if err != nil {
+		t.Fatalf("build initial hash: %v", err)
+	}
+
+	op, err := s.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeDatabaseSwitchover,
+		AppID:           app.ID,
+		TargetRuntimeID: databaseTarget.ID,
+	})
+	if err != nil {
+		t.Fatalf("create database switchover operation: %v", err)
+	}
+	if _, err := s.FailOperation(op.ID, "database switchover unavailable"); err != nil {
+		t.Fatalf("fail database switchover operation: %v", err)
+	}
+
+	nextHash, err := server.buildConsoleGalleryHash(context.Background(), principal, false)
+	if err != nil {
+		t.Fatalf("build next hash: %v", err)
+	}
+
+	if initialHash != nextHash {
+		t.Fatalf("expected hash to ignore inactive database switchover operations, got %q then %q", initialHash, nextHash)
 	}
 }
