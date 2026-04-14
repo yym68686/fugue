@@ -1066,7 +1066,7 @@ find "$target" -mindepth 1 -maxdepth 1 -exec sh -c '
     mode="$(stat -c %a "$entry" 2>/dev/null || printf "")"
     modified="$(stat -c %Y "$entry" 2>/dev/null || printf 0)"
     has_children=false
-    if [ "$kind" = dir ] && find "$entry" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
+    if [ "$kind" = dir ]; then
       has_children=true
     fi
     printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
