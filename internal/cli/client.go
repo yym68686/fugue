@@ -18,7 +18,16 @@ import (
 type Client struct {
 	baseURL    string
 	token      string
+	cookie     string
 	httpClient *http.Client
+	observer   requestObserver
+}
+
+type clientOptions struct {
+	Cookie         string
+	Observer       requestObserver
+	RequireToken   bool
+	RequestTimeout time.Duration
 }
 
 type importProjectRequest struct {
@@ -274,23 +283,36 @@ type apiError struct {
 }
 
 func NewClient(baseURL, token string) (*Client, error) {
+	return newClientWithOptions(baseURL, token, clientOptions{RequireToken: true})
+}
+
+func newClientWithOptions(baseURL, token string, opts clientOptions) (*Client, error) {
 	baseURL = strings.TrimSpace(baseURL)
 	token = strings.TrimSpace(token)
 	if baseURL == "" {
 		return nil, fmt.Errorf("base url is required; pass --base-url or set FUGUE_BASE_URL/FUGUE_API_URL")
 	}
-	if token == "" {
+	if opts.RequireToken && token == "" {
 		return nil, fmt.Errorf("API key is required; pass --token or set FUGUE_API_KEY, FUGUE_TOKEN, or FUGUE_BOOTSTRAP_KEY")
+	}
+	if !opts.RequireToken && token == "" && strings.TrimSpace(opts.Cookie) == "" {
+		return nil, fmt.Errorf("either an API key or cookie is required")
 	}
 	if _, err := url.Parse(baseURL); err != nil {
 		return nil, fmt.Errorf("parse base url %q: %w", baseURL, err)
 	}
+	timeout := opts.RequestTimeout
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
+		cookie:  strings.TrimSpace(opts.Cookie),
 		httpClient: &http.Client{
-			Timeout: 60 * time.Second,
+			Timeout: timeout,
 		},
+		observer: opts.Observer,
 	}, nil
 }
 
@@ -601,8 +623,11 @@ func (c *Client) DeleteAppDomain(id, hostname string) (model.AppDomain, error) {
 	return response.Domain, nil
 }
 
-func (c *Client) GetAppFilesystemTree(id, requestPath, pod string) (appFilesystemTreeResponse, error) {
+func (c *Client) GetAppFilesystemTree(id, component, requestPath, pod string) (appFilesystemTreeResponse, error) {
 	query := url.Values{}
+	if strings.TrimSpace(component) != "" {
+		query.Set("component", strings.TrimSpace(component))
+	}
 	if strings.TrimSpace(requestPath) != "" {
 		query.Set("path", strings.TrimSpace(requestPath))
 	}
@@ -620,8 +645,11 @@ func (c *Client) GetAppFilesystemTree(id, requestPath, pod string) (appFilesyste
 	return response, nil
 }
 
-func (c *Client) GetAppFilesystemFile(id, requestPath, pod string, maxBytes int) (appFilesystemFileResponse, error) {
+func (c *Client) GetAppFilesystemFile(id, component, requestPath, pod string, maxBytes int) (appFilesystemFileResponse, error) {
 	query := url.Values{}
+	if strings.TrimSpace(component) != "" {
+		query.Set("component", strings.TrimSpace(component))
+	}
 	if strings.TrimSpace(requestPath) != "" {
 		query.Set("path", strings.TrimSpace(requestPath))
 	}
@@ -642,7 +670,7 @@ func (c *Client) GetAppFilesystemFile(id, requestPath, pod string, maxBytes int)
 	return response, nil
 }
 
-func (c *Client) PutAppFilesystemFile(id, requestPath, content, encoding, pod string, mode int32, mkdirParents bool) (appFilesystemMutationResponse, error) {
+func (c *Client) PutAppFilesystemFile(id, component, requestPath, content, encoding, pod string, mode int32, mkdirParents bool) (appFilesystemMutationResponse, error) {
 	req := map[string]any{
 		"path":          strings.TrimSpace(requestPath),
 		"content":       content,
@@ -655,6 +683,9 @@ func (c *Client) PutAppFilesystemFile(id, requestPath, content, encoding, pod st
 		req["mode"] = mode
 	}
 	query := url.Values{}
+	if strings.TrimSpace(component) != "" {
+		query.Set("component", strings.TrimSpace(component))
+	}
 	if strings.TrimSpace(pod) != "" {
 		query.Set("pod", strings.TrimSpace(pod))
 	}
@@ -669,7 +700,7 @@ func (c *Client) PutAppFilesystemFile(id, requestPath, content, encoding, pod st
 	return response, nil
 }
 
-func (c *Client) CreateAppFilesystemDirectory(id, requestPath, pod string, mode int32, parents bool) (appFilesystemMutationResponse, error) {
+func (c *Client) CreateAppFilesystemDirectory(id, component, requestPath, pod string, mode int32, parents bool) (appFilesystemMutationResponse, error) {
 	req := map[string]any{
 		"path":    strings.TrimSpace(requestPath),
 		"parents": parents,
@@ -678,6 +709,9 @@ func (c *Client) CreateAppFilesystemDirectory(id, requestPath, pod string, mode 
 		req["mode"] = mode
 	}
 	query := url.Values{}
+	if strings.TrimSpace(component) != "" {
+		query.Set("component", strings.TrimSpace(component))
+	}
 	if strings.TrimSpace(pod) != "" {
 		query.Set("pod", strings.TrimSpace(pod))
 	}
@@ -692,8 +726,11 @@ func (c *Client) CreateAppFilesystemDirectory(id, requestPath, pod string, mode 
 	return response, nil
 }
 
-func (c *Client) DeleteAppFilesystemPath(id, requestPath, pod string, recursive bool) (appFilesystemMutationResponse, error) {
+func (c *Client) DeleteAppFilesystemPath(id, component, requestPath, pod string, recursive bool) (appFilesystemMutationResponse, error) {
 	query := url.Values{}
+	if strings.TrimSpace(component) != "" {
+		query.Set("component", strings.TrimSpace(component))
+	}
 	if strings.TrimSpace(requestPath) != "" {
 		query.Set("path", strings.TrimSpace(requestPath))
 	}
@@ -798,29 +835,33 @@ func (c *Client) doJSONRaw(method, relativePath string, requestBody any) ([]byte
 }
 
 func (c *Client) do(httpReq *http.Request) ([]byte, error) {
-	resp, err := c.httpClient.Do(httpReq)
+	result, err := c.doPrepared(httpReq)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	payload, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if result.StatusCode < 200 || result.StatusCode >= 300 {
 		var apiErr apiError
-		if err := json.Unmarshal(payload, &apiErr); err == nil && strings.TrimSpace(apiErr.Error) != "" {
+		if err := json.Unmarshal(result.Payload, &apiErr); err == nil && strings.TrimSpace(apiErr.Error) != "" {
 			return nil, fmt.Errorf("%s", apiErr.Error)
 		}
-		if trimmed := strings.TrimSpace(string(payload)); trimmed != "" {
-			return nil, fmt.Errorf("request failed: status=%d body=%s", resp.StatusCode, trimmed)
+		if trimmed := strings.TrimSpace(string(result.Payload)); trimmed != "" {
+			return nil, fmt.Errorf("request failed: status=%d body=%s", result.StatusCode, trimmed)
 		}
-		return nil, fmt.Errorf("request failed: status=%d", resp.StatusCode)
+		return nil, fmt.Errorf("request failed: status=%d", result.StatusCode)
 	}
-	return payload, nil
+	return result.Payload, nil
 }
 
 func (c *Client) resolveURL(relativePath string) string {
-	return c.baseURL + relativePath
+	trimmed := strings.TrimSpace(relativePath)
+	if trimmed == "" {
+		return c.baseURL
+	}
+	if parsed, err := url.Parse(trimmed); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		return parsed.String()
+	}
+	if !strings.HasPrefix(trimmed, "/") {
+		trimmed = "/" + trimmed
+	}
+	return c.baseURL + trimmed
 }

@@ -55,6 +55,12 @@ export FUGUE_API_KEY=<your-api-key>
 fugue app ls
 ```
 
+如果你还想排查产品层 `fugue-web` 页面 API，再额外设置一次 web 地址：
+
+```bash
+export FUGUE_WEB_BASE_URL=https://app.example.com
+```
+
 常用流程：
 
 - `fugue deploy github owner/repo --branch main`
@@ -63,6 +69,7 @@ fugue app ls
 - `fugue app create my-app --github owner/repo --branch main`
 - `fugue app status my-app`
 - `fugue app overview my-app`
+- `fugue app fs ls my-app / --source live`
 - `fugue app logs runtime my-app --follow`
 - `fugue app service attach my-app postgres`
 - `fugue app failover status my-app`
@@ -72,6 +79,8 @@ fugue app ls
 - `fugue project images usage marketing`
 - `fugue operation ls --app my-app`
 - `fugue operation show op_123 --show-secrets`
+- `fugue api request GET /v1/apps`
+- `fugue diagnose timing -- app overview my-app`
 - `fugue admin cluster status`
 - `fugue admin cluster pods --namespace kube-system`
 - `fugue admin cluster events --namespace kube-system --limit 20`
@@ -82,8 +91,18 @@ fugue app ls
 - `fugue admin cluster dns resolve api.github.com --server 10.43.0.10`
 - `fugue admin cluster net connect api.github.com:443`
 - `fugue admin cluster tls probe 104.18.32.47:443 --server-name api.github.com`
+- `fugue admin users ls`
+- `fugue admin users show user@example.com`
+- `fugue web diagnose admin-users`
+- `fugue web diagnose /api/fugue/console/pages/api-keys --cookie 'fugue_session=...'`
 
 `fugue app overview` 和 `fugue operation ls/show/watch` 在 JSON 输出里默认会脱敏 env 值、密码、repo token 和 secret 文件内容。只有在确实需要原始值排障时才显式传 `--show-secrets`。
+
+`fugue app fs` 现在同时支持持久化存储根目录和 live runtime filesystem。传 `--source persistent` 时会限制在 workspace / persistent storage 挂载点内；传 `--source live` 时会直接查看运行中容器里的 `/`、`/app`、`/tmp`、`/etc` 等路径。
+
+`fugue api request` 会直接展示任意控制面接口的 status、headers、server-timing、body 和传输层耗时。`fugue diagnose timing -- <command...>` 则会包装任意 Fugue CLI 命令，输出它发出的每个 HTTP 请求的 DNS / connect / TLS / TTFB / total timing。
+
+`fugue admin users` 和 `fugue web diagnose` 下的 admin alias 读取的是和 `fugue-web` 管理员产品 UI 相同的 page snapshot 路径。使用这些命令前先设置 `FUGUE_WEB_BASE_URL`，或者显式传 `--web-base-url`。admin page snapshot 接受 bootstrap bearer 鉴权；如果你要排查 workspace 级 console page route，也可以通过 `--cookie` 传入浏览器 session cookie。
 
 当 API 侧配置了 `FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY` 后，`fugue admin cluster status` 还会附带最近一次 `deploy-control-plane` GitHub Actions workflow run，便于把 control plane 升级和当前集群状态对上。
 

@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 
@@ -13,6 +14,7 @@ const defaultCloudBaseURL = "https://api.fugue.pro"
 
 type rootOptions struct {
 	BaseURL     string
+	WebBaseURL  string
 	Token       string
 	TenantID    string
 	TenantName  string
@@ -24,9 +26,10 @@ type rootOptions struct {
 }
 
 type CLI struct {
-	stdout io.Writer
-	stderr io.Writer
-	root   rootOptions
+	stdout   io.Writer
+	stderr   io.Writer
+	root     rootOptions
+	observer requestObserver
 }
 
 func Run(args []string) error {
@@ -70,6 +73,7 @@ Quick start for most users:
 
 	Defaults and auto-selection:
 	  - Base URL defaults to FUGUE_BASE_URL, then FUGUE_API_URL, then ` + defaultCloudBaseURL + `.
+	  - Web Base URL defaults to FUGUE_WEB_BASE_URL, then APP_BASE_URL, then a best-effort guess from the API base URL.
 	  - Tenant is auto-selected when your key only sees one tenant.
 	  - Deploy and create flows default to the "default" project when you do not pass --project.
 	  - App and operation JSON output redacts secrets by default. Pass --show-secrets only when you explicitly need raw values.
@@ -84,6 +88,7 @@ workspace names where possible.
 Environment variables:
   FUGUE_API_KEY / FUGUE_TOKEN / FUGUE_BOOTSTRAP_KEY
   FUGUE_BASE_URL / FUGUE_API_URL
+  FUGUE_WEB_BASE_URL / APP_BASE_URL
   FUGUE_TENANT / FUGUE_TENANT_NAME / FUGUE_TENANT_ID
   FUGUE_PROJECT / FUGUE_PROJECT_NAME / FUGUE_PROJECT_ID
 `),
@@ -128,6 +133,10 @@ Environment variables:
 	  fugue admin cluster dns resolve api.github.com --server 10.43.0.10
 	  fugue admin cluster net connect api.github.com:443
 	  fugue admin cluster tls probe 104.18.32.47:443 --server-name api.github.com
+	  fugue api request GET /v1/apps
+	  fugue diagnose timing -- app overview my-app
+	  fugue admin users ls
+	  fugue web diagnose admin-users
 	`),
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			return c.validateOutput()
@@ -136,6 +145,7 @@ Environment variables:
 
 	flags := cmd.PersistentFlags()
 	flags.StringVar(&c.root.BaseURL, "base-url", c.root.BaseURL, "Optional API base URL. Defaults to FUGUE_BASE_URL, then FUGUE_API_URL, then "+defaultCloudBaseURL)
+	flags.StringVar(&c.root.WebBaseURL, "web-base-url", c.root.WebBaseURL, "Optional web base URL. Defaults to FUGUE_WEB_BASE_URL, then APP_BASE_URL, then a best-effort guess from --base-url")
 	flags.StringVar(&c.root.Token, "token", c.root.Token, "API key or bootstrap key. Reads FUGUE_API_KEY, FUGUE_TOKEN, or FUGUE_BOOTSTRAP_KEY")
 	flags.StringVar(&c.root.TenantName, "tenant", c.root.TenantName, "Optional tenant name or slug. Needed only when your key can see multiple tenants")
 	flags.StringVar(&c.root.ProjectName, "project", c.root.ProjectName, "Optional project name. Deploy/create defaults to the default project when omitted")
@@ -153,9 +163,13 @@ Environment variables:
 		c.newProjectCommand(),
 		c.newRuntimeCommand(),
 		c.newServiceCommand(),
+		c.newAPICommand(),
+		c.newDiagnoseCommand(),
+		c.newWebCommand(),
 		c.newOpsCommand(),
 		hideCompatCommand(c.newTemplateCommand(), "fugue deploy inspect"),
 		c.newAdminCommand(),
+		hideCompatCommand(c.newCurlCommand(), "fugue api request"),
 		c.newEnvCompatCommand(),
 		c.newFilesCompatCommand(),
 		c.newDomainCompatCommand(),
@@ -197,7 +211,25 @@ func (c *CLI) newClient() (*Client, error) {
 	if err := c.validateOutput(); err != nil {
 		return nil, err
 	}
-	return NewClient(c.effectiveBaseURL(), c.effectiveToken())
+	return newClientWithOptions(c.effectiveBaseURL(), c.effectiveToken(), clientOptions{
+		Observer:     c.observer,
+		RequireToken: true,
+	})
+}
+
+func (c *CLI) newWebClient(cookie string) (*Client, error) {
+	if err := c.validateOutput(); err != nil {
+		return nil, err
+	}
+	baseURL := c.effectiveWebBaseURL()
+	if strings.TrimSpace(baseURL) == "" {
+		return nil, fmt.Errorf("web base url is required; pass --web-base-url or set FUGUE_WEB_BASE_URL/APP_BASE_URL")
+	}
+	return newClientWithOptions(baseURL, c.effectiveToken(), clientOptions{
+		Cookie:       cookie,
+		Observer:     c.observer,
+		RequireToken: false,
+	})
 }
 
 func (c *CLI) progressf(format string, args ...any) {
@@ -252,6 +284,10 @@ func (c *CLI) effectiveBaseURL() string {
 	return firstNonEmpty(c.root.BaseURL, os.Getenv("FUGUE_BASE_URL"), os.Getenv("FUGUE_API_URL"), defaultCloudBaseURL)
 }
 
+func (c *CLI) effectiveWebBaseURL() string {
+	return firstNonEmpty(c.root.WebBaseURL, os.Getenv("FUGUE_WEB_BASE_URL"), os.Getenv("APP_BASE_URL"), deriveWebBaseURL(c.effectiveBaseURL()))
+}
+
 func (c *CLI) effectiveToken() string {
 	return firstNonEmpty(c.root.Token, os.Getenv("FUGUE_TOKEN"), os.Getenv("FUGUE_API_KEY"), os.Getenv("FUGUE_BOOTSTRAP_KEY"))
 }
@@ -270,4 +306,39 @@ func (c *CLI) effectiveProjectID() string {
 
 func (c *CLI) effectiveProjectName() string {
 	return firstNonEmpty(c.root.ProjectName, os.Getenv("FUGUE_PROJECT"), os.Getenv("FUGUE_PROJECT_NAME"))
+}
+
+func deriveWebBaseURL(apiBaseURL string) string {
+	apiBaseURL = strings.TrimSpace(apiBaseURL)
+	if apiBaseURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(apiBaseURL)
+	if err != nil {
+		return ""
+	}
+	if strings.HasPrefix(parsed.Hostname(), "api.") {
+		hostname := strings.TrimPrefix(parsed.Hostname(), "api.")
+		if hostname == "" {
+			return ""
+		}
+		if port := parsed.Port(); port != "" {
+			parsed.Host = hostname + ":" + port
+		} else {
+			parsed.Host = hostname
+		}
+		parsed.Path = ""
+		parsed.RawPath = ""
+		parsed.RawQuery = ""
+		parsed.Fragment = ""
+		return strings.TrimRight(parsed.String(), "/")
+	}
+	if parsed.Path == "" || parsed.Path == "/" {
+		return strings.TrimRight(parsed.String(), "/")
+	}
+	parsed.Path = ""
+	parsed.RawPath = ""
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return strings.TrimRight(parsed.String(), "/")
 }

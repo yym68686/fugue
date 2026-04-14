@@ -15,7 +15,9 @@ import (
 )
 
 type workspaceCommonOptions struct {
-	Pod string
+	Component string
+	Pod       string
+	Source    string
 }
 
 type workspaceReadOptions struct {
@@ -54,7 +56,7 @@ func (c *CLI) newFilesystemCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "fs",
 		Aliases: []string{"filesystem"},
-		Short:   "Browse and edit an app's persistent runtime filesystem",
+		Short:   "Browse persisted storage or the live runtime filesystem",
 	}
 	cmd.AddCommand(
 		c.newWorkspaceListCommand(),
@@ -75,7 +77,7 @@ func (c *CLI) newWorkspaceListCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "ls <app> [path]",
 		Aliases: []string{"list", "tree"},
-		Short:   "List files in the persistent workspace",
+		Short:   "List files in persisted storage or the live runtime filesystem",
 		Args:    cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
@@ -86,11 +88,15 @@ func (c *CLI) newWorkspaceListCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			requestPath, err := resolveWorkspacePath(app, optionalArg(args, 1), true)
+			component, err := normalizeFilesystemComponent(opts.Component)
 			if err != nil {
 				return err
 			}
-			response, err := client.GetAppFilesystemTree(app.ID, requestPath, opts.Pod)
+			requestPath, err := resolveFilesystemPathForCLI(app, optionalArg(args, 1), true, opts.Source)
+			if err != nil {
+				return err
+			}
+			response, err := client.GetAppFilesystemTree(app.ID, component, requestPath, opts.Pod)
 			if err != nil {
 				return err
 			}
@@ -109,7 +115,7 @@ func (c *CLI) newWorkspaceReadCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "get <app> <path>",
 		Aliases: []string{"read", "cat"},
-		Short:   "Read a file from the persistent workspace",
+		Short:   "Read a file from persisted storage or the live runtime filesystem",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
@@ -120,11 +126,15 @@ func (c *CLI) newWorkspaceReadCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			requestPath, err := resolveWorkspacePath(app, args[1], false)
+			component, err := normalizeFilesystemComponent(opts.Component)
 			if err != nil {
 				return err
 			}
-			response, err := client.GetAppFilesystemFile(app.ID, requestPath, opts.Pod, opts.MaxBytes)
+			requestPath, err := resolveFilesystemPathForCLI(app, args[1], false, opts.Source)
+			if err != nil {
+				return err
+			}
+			response, err := client.GetAppFilesystemFile(app.ID, component, requestPath, opts.Pod, opts.MaxBytes)
 			if err != nil {
 				return err
 			}
@@ -151,7 +161,7 @@ func (c *CLI) newWorkspaceWriteCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "put <app> <path>",
 		Aliases: []string{"write"},
-		Short:   "Write a file into the persistent workspace",
+		Short:   "Write a file into persisted storage or the live runtime filesystem",
 		Long: strings.TrimSpace(`
 Provide file content with --content or --from-file.
 
@@ -167,7 +177,11 @@ Use --from-file - to read bytes from stdin.
 			if err != nil {
 				return err
 			}
-			requestPath, err := resolveWorkspacePath(app, args[1], false)
+			component, err := normalizeFilesystemComponent(opts.Component)
+			if err != nil {
+				return err
+			}
+			requestPath, err := resolveFilesystemPathForCLI(app, args[1], false, opts.Source)
 			if err != nil {
 				return err
 			}
@@ -176,7 +190,7 @@ Use --from-file - to read bytes from stdin.
 				return err
 			}
 			encoding, content := encodeWorkspaceWriteContent(contentBytes)
-			response, err := client.PutAppFilesystemFile(app.ID, requestPath, content, encoding, opts.Pod, opts.Mode, opts.Parents)
+			response, err := client.PutAppFilesystemFile(app.ID, component, requestPath, content, encoding, opts.Pod, opts.Mode, opts.Parents)
 			if err != nil {
 				return err
 			}
@@ -214,7 +228,7 @@ func (c *CLI) newWorkspaceMkdirCommand() *cobra.Command {
 	opts := workspaceMkdirOptions{Parents: true}
 	cmd := &cobra.Command{
 		Use:   "mkdir <app> <path>",
-		Short: "Create a directory in the persistent workspace",
+		Short: "Create a directory in persisted storage or the live runtime filesystem",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
@@ -225,11 +239,15 @@ func (c *CLI) newWorkspaceMkdirCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			requestPath, err := resolveWorkspacePath(app, args[1], false)
+			component, err := normalizeFilesystemComponent(opts.Component)
 			if err != nil {
 				return err
 			}
-			response, err := client.CreateAppFilesystemDirectory(app.ID, requestPath, opts.Pod, opts.Mode, opts.Parents)
+			requestPath, err := resolveFilesystemPathForCLI(app, args[1], false, opts.Source)
+			if err != nil {
+				return err
+			}
+			response, err := client.CreateAppFilesystemDirectory(app.ID, component, requestPath, opts.Pod, opts.Mode, opts.Parents)
 			if err != nil {
 				return err
 			}
@@ -265,7 +283,7 @@ func (c *CLI) newWorkspaceRemoveCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "delete <app> <path>",
 		Aliases: []string{"rm", "remove"},
-		Short:   "Delete a file or directory from the persistent workspace",
+		Short:   "Delete a file or directory from persisted storage or the live runtime filesystem",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
@@ -276,11 +294,15 @@ func (c *CLI) newWorkspaceRemoveCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			requestPath, err := resolveWorkspacePath(app, args[1], false)
+			component, err := normalizeFilesystemComponent(opts.Component)
 			if err != nil {
 				return err
 			}
-			response, err := client.DeleteAppFilesystemPath(app.ID, requestPath, opts.Pod, opts.Recursive)
+			requestPath, err := resolveFilesystemPathForCLI(app, args[1], false, opts.Source)
+			if err != nil {
+				return err
+			}
+			response, err := client.DeleteAppFilesystemPath(app.ID, component, requestPath, opts.Pod, opts.Recursive)
 			if err != nil {
 				return err
 			}
@@ -303,8 +325,9 @@ func (c *CLI) newWorkspaceRemoveCommand() *cobra.Command {
 }
 
 func bindWorkspaceCommonFlags(cmd *cobra.Command, opts *workspaceCommonOptions) {
+	cmd.Flags().StringVar(&opts.Source, "source", "auto", "Filesystem source: auto, persistent, or live")
+	cmd.Flags().StringVar(&opts.Component, "component", "app", "Runtime component. Currently only 'app' is supported")
 	cmd.Flags().StringVar(&opts.Pod, "pod", "", "Specific pod name")
-	_ = cmd.Flags().MarkHidden("pod")
 }
 
 func (c *CLI) resolveWorkspaceApp(client *Client, appRef string) (model.App, error) {
@@ -322,23 +345,109 @@ func optionalArg(args []string, index int) string {
 	return args[index]
 }
 
-func resolveWorkspacePath(app model.App, raw string, allowRoot bool) (string, error) {
-	root, err := workspaceRoot(app)
+func resolveFilesystemPathForCLI(app model.App, raw string, allowRoot bool, source string) (string, error) {
+	source, err := normalizeFilesystemSource(source)
 	if err != nil {
 		return "", err
 	}
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		if allowRoot {
-			return root, nil
+		switch source {
+		case "persistent":
+			root, err := workspaceRoot(app)
+			if err != nil {
+				return "", err
+			}
+			if allowRoot {
+				return root, nil
+			}
+			return "", fmt.Errorf("path is required")
+		case "live":
+			if allowRoot {
+				return "/", nil
+			}
+			return "", fmt.Errorf("path is required")
+		default:
+			root, err := workspaceRoot(app)
+			if err == nil {
+				if allowRoot {
+					return root, nil
+				}
+				return "", fmt.Errorf("path is required")
+			}
+			if allowRoot {
+				return "/", nil
+			}
+			return "", fmt.Errorf("path is required")
 		}
-		return "", fmt.Errorf("path is required")
 	}
+
+	root, rootErr := workspaceRoot(app)
+	switch source {
+	case "persistent":
+		if rootErr != nil {
+			return "", rootErr
+		}
+		return resolvePersistentCLIPath(root, raw, allowRoot)
+	case "live":
+		return resolveLiveCLIPath(raw, allowRoot)
+	default:
+		if strings.HasPrefix(raw, "/") {
+			if rootErr == nil && isPathWithinFilesystemRootForCLI(root, raw) {
+				return resolvePersistentCLIPath(root, raw, allowRoot)
+			}
+			return resolveLiveCLIPath(raw, allowRoot)
+		}
+		if rootErr == nil {
+			return resolvePersistentCLIPath(root, raw, allowRoot)
+		}
+		return resolveLiveCLIPath(raw, allowRoot)
+	}
+}
+
+func normalizeFilesystemSource(raw string) (string, error) {
+	value := strings.TrimSpace(strings.ToLower(raw))
+	if value == "" {
+		value = "auto"
+	}
+	switch value {
+	case "auto", "persistent", "live":
+		return value, nil
+	default:
+		return "", fmt.Errorf("source must be auto, persistent, or live")
+	}
+}
+
+func normalizeFilesystemComponent(raw string) (string, error) {
+	value := strings.TrimSpace(strings.ToLower(raw))
+	if value == "" {
+		value = "app"
+	}
+	if value != "app" {
+		return "", fmt.Errorf("component must be app")
+	}
+	return value, nil
+}
+
+func resolvePersistentCLIPath(root, raw string, allowRoot bool) (string, error) {
 	if !strings.HasPrefix(raw, "/") {
 		raw = path.Join(root, raw)
 	}
+	if !isPathWithinFilesystemRootForCLI(root, raw) {
+		return "", fmt.Errorf("path must be inside the persistent workspace root %s", root)
+	}
 	if !allowRoot && path.Clean(raw) == path.Clean(root) {
 		return "", fmt.Errorf("path must not be the workspace root")
+	}
+	return raw, nil
+}
+
+func resolveLiveCLIPath(raw string, allowRoot bool) (string, error) {
+	if !strings.HasPrefix(raw, "/") {
+		raw = path.Join("/", raw)
+	}
+	if !allowRoot && path.Clean(raw) == "/" {
+		return "", fmt.Errorf("path must not be the filesystem root")
 	}
 	return raw, nil
 }
@@ -352,6 +461,18 @@ func workspaceRoot(app model.App) (string, error) {
 		return "", fmt.Errorf("app workspace mount_path is invalid: %w", err)
 	}
 	return root, nil
+}
+
+func isPathWithinFilesystemRootForCLI(rootPath, targetPath string) bool {
+	rootPath = path.Clean(strings.TrimSpace(rootPath))
+	targetPath = path.Clean(strings.TrimSpace(targetPath))
+	if rootPath == "" || targetPath == "" || rootPath == "." || targetPath == "." {
+		return false
+	}
+	if rootPath == "/" {
+		return path.IsAbs(targetPath)
+	}
+	return model.PathWithinBase(rootPath, targetPath)
 }
 
 func loadWorkspaceWriteContent(opts workspaceWriteOptions) ([]byte, error) {

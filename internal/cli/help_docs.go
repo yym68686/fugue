@@ -103,10 +103,31 @@ fugue app config delete my-app /app/config.yaml
 `),
 	},
 	"fugue app fs": {
+		Long: strings.TrimSpace(`
+Browse either persisted storage mounts or the live runtime filesystem.
+
+Use --source persistent to stay inside the app workspace or persistent storage roots, and use --source live when you want the current container filesystem such as /, /tmp, /etc, or /app.
+`),
 		Example: strings.TrimSpace(`
 fugue app fs ls my-app
+fugue app fs ls my-app / --source live
 fugue app fs put my-app notes/hello.txt --from-file hello.txt
 fugue app fs get my-app notes/hello.txt
+`),
+	},
+	"fugue api": {
+		Example: "fugue api request GET /v1/apps",
+	},
+	"fugue api request": {
+		Long: strings.TrimSpace(`
+Send a raw HTTP request to the Fugue control-plane API and show the status line, response headers, server-timing, body, and transport timings.
+
+Use this when you need to inspect a response directly instead of going through the semantic command surface.
+`),
+		Example: strings.TrimSpace(`
+fugue api request GET /v1/apps
+fugue api request POST /v1/apps/app_123/restart
+fugue api request PATCH /v1/apps/app_123/env --body '{"set":{"DEBUG":"1"}}'
 `),
 	},
 	"fugue operation": {
@@ -370,6 +391,38 @@ fugue admin cluster rollout status kube-system deployment coredns
 fugue admin cluster rollout status fugue-system daemonset topology-labeler
 `),
 	},
+	"fugue admin users": {
+		Example: strings.TrimSpace(`
+fugue admin users ls
+fugue admin users show user@example.com
+fugue admin users enrich
+`),
+	},
+	"fugue admin users ls": {
+		Long: strings.TrimSpace(`
+List the product-layer admin users snapshot served by fugue-web.
+
+This view matches the admin users page shell instead of the lower-level control-plane object model, so it is useful when you are debugging product-layer user state.
+`),
+	},
+	"fugue admin users show": {
+		Long: strings.TrimSpace(`
+Show one user from the enriched admin users snapshot, including billing and product usage summaries when they are available.
+`),
+		Example: "fugue admin users show user@example.com",
+	},
+	"fugue admin users enrich": {
+		Long: strings.TrimSpace(`
+Load the fully enriched admin users snapshot with billing and usage overlays from fugue-web.
+`),
+		Example: "fugue admin users enrich",
+	},
+	"fugue admin users usage": {
+		Long: strings.TrimSpace(`
+Load the lighter-weight admin users usage snapshot when you only need service-count and resource-usage summaries.
+`),
+		Example: "fugue admin users usage",
+	},
 	"fugue admin billing": {
 		Example: strings.TrimSpace(`
 fugue admin billing show
@@ -382,6 +435,35 @@ fugue admin billing topup 25 --note "manual credit"
 fugue admin tenant ls
 fugue admin tenant create acme
 fugue admin tenant delete acme
+`),
+	},
+	"fugue diagnose": {
+		Example: "fugue diagnose timing -- app overview my-app",
+	},
+	"fugue diagnose timing": {
+		Long: strings.TrimSpace(`
+Wrap another Fugue CLI command and capture per-request DNS, connect, TLS, TTFB, total, and server-timing metrics for every HTTP call it makes.
+
+Use this when the semantic command surface works but feels unexpectedly slow and you need to see whether latency is in transport, backend timing, or client-side fan-out.
+`),
+		Example: strings.TrimSpace(`
+fugue diagnose timing -- app overview my-app
+fugue diagnose timing --passthrough -- admin users enrich
+`),
+	},
+	"fugue web": {
+		Example: "fugue web diagnose admin-users",
+	},
+	"fugue web diagnose": {
+		Long: strings.TrimSpace(`
+Request a fugue-web page snapshot or arbitrary product-layer route and show the raw HTTP response plus transport timings.
+
+Named targets such as admin-users and admin-cluster resolve to the matching fugue-web snapshot routes.
+`),
+		Example: strings.TrimSpace(`
+fugue web diagnose admin-users
+fugue web diagnose /api/fugue/admin/pages/users/enrich
+fugue web diagnose GET /api/fugue/console/pages/api-keys --cookie 'fugue_session=...'
 `),
 	},
 }
@@ -563,12 +645,18 @@ func sampleUseToken(path, token string) string {
 		return "edge-a"
 	case "operation":
 		return "op_123"
+	case "email":
+		return "user@example.com"
 	case "hostname":
 		return "www.example.com"
 	case "repo-or-url":
 		return "owner/repo"
 	case "path-or-repo":
 		return "."
+	case "path-or-url":
+		return "/v1/apps"
+	case "page-or-path":
+		return "admin-users"
 	case "image-ref":
 		return "ghcr.io/example/demo:abc123"
 	case "namespace":
@@ -646,6 +734,8 @@ func sampleModeValue(path string) string {
 
 func samplePathValue(path string) string {
 	switch {
+	case strings.Contains(path, " app fs ls"):
+		return "/"
 	case strings.Contains(path, " app fs put"), strings.Contains(path, " app fs get"), strings.Contains(path, " app fs delete"):
 		return "notes/hello.txt"
 	case strings.Contains(path, " app fs mkdir"):
@@ -675,6 +765,8 @@ func sampleFlagsForCommand(cmd *cobra.Command) string {
 		return "--from-file config.yaml"
 	case "fugue app fs put":
 		return "--from-file hello.txt"
+	case "fugue api request":
+		return "GET /v1/apps"
 	case "fugue app db configure":
 		return "--database app --user app --password secret"
 	case "fugue app storage set":
@@ -723,6 +815,12 @@ func sampleFlagsForCommand(cmd *cobra.Command) string {
 		return "--timeout 5s"
 	case "fugue admin cluster tls probe":
 		return "--server-name api.github.com"
+	case "fugue admin users show":
+		return ""
+	case "fugue diagnose timing":
+		return "-- app overview my-app"
+	case "fugue web diagnose":
+		return "admin-users"
 	case "fugue operation ls", "fugue operation watch":
 		return "--app my-app"
 	}

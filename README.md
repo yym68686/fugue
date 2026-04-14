@@ -55,6 +55,12 @@ export FUGUE_API_KEY=<your-api-key>
 fugue app ls
 ```
 
+If you also want product-layer `fugue-web` diagnostics, set the web base URL too:
+
+```bash
+export FUGUE_WEB_BASE_URL=https://app.example.com
+```
+
 Common workflows:
 
 - `fugue deploy github owner/repo --branch main`
@@ -63,6 +69,7 @@ Common workflows:
 - `fugue app create my-app --github owner/repo --branch main`
 - `fugue app status my-app`
 - `fugue app overview my-app`
+- `fugue app fs ls my-app / --source live`
 - `fugue app logs runtime my-app --follow`
 - `fugue app service attach my-app postgres`
 - `fugue app failover status my-app`
@@ -72,6 +79,8 @@ Common workflows:
 - `fugue project images usage marketing`
 - `fugue operation ls --app my-app`
 - `fugue operation show op_123 --show-secrets`
+- `fugue api request GET /v1/apps`
+- `fugue diagnose timing -- app overview my-app`
 - `fugue admin cluster status`
 - `fugue admin cluster pods --namespace kube-system`
 - `fugue admin cluster events --namespace kube-system --limit 20`
@@ -82,8 +91,18 @@ Common workflows:
 - `fugue admin cluster dns resolve api.github.com --server 10.43.0.10`
 - `fugue admin cluster net connect api.github.com:443`
 - `fugue admin cluster tls probe 104.18.32.47:443 --server-name api.github.com`
+- `fugue admin users ls`
+- `fugue admin users show user@example.com`
+- `fugue web diagnose admin-users`
+- `fugue web diagnose /api/fugue/console/pages/api-keys --cookie 'fugue_session=...'`
 
 `fugue app overview` and `fugue operation ls/show/watch` now redact env values, passwords, repo tokens, and secret-backed file content by default in JSON output. Pass `--show-secrets` only when you explicitly need the raw values during a debugging session.
+
+`fugue app fs` now supports both persisted storage roots and the live runtime filesystem. Use `--source persistent` to stay inside workspace/persistent storage mounts, or `--source live` to inspect the running container filesystem such as `/`, `/app`, `/tmp`, or `/etc`.
+
+`fugue api request` shows raw status, headers, server-timing, body, and transport timings for any control-plane endpoint. `fugue diagnose timing -- <command...>` wraps any Fugue CLI command and reports DNS/connect/TLS/TTFB/total timing for each HTTP request it makes.
+
+`fugue admin users` and the admin aliases under `fugue web diagnose` read the same `fugue-web` page snapshot routes that power the admin product UI. Set `FUGUE_WEB_BASE_URL` (or pass `--web-base-url`) for those commands. Admin page snapshots accept bootstrap bearer auth; workspace-scoped console page routes can also be diagnosed by passing a session cookie with `--cookie`.
 
 When `FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY` is configured on the API, `fugue admin cluster status` also shows the latest `deploy-control-plane` workflow run so you can correlate control-plane image rollouts with cluster state.
 

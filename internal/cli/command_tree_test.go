@@ -28,6 +28,7 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"Fugue is a semantic CLI over the Fugue control-plane API.",
 		"export FUGUE_API_KEY=<your-api-key>",
 		"Base URL defaults to FUGUE_BASE_URL, then FUGUE_API_URL, then https://api.fugue.pro.",
+		"Web Base URL defaults to FUGUE_WEB_BASE_URL, then APP_BASE_URL, then a best-effort guess from the API base URL.",
 		"Tenant is auto-selected when your key only sees one tenant.",
 		"Deploy and create flows default to the \"default\" project when you do not pass --project.",
 		"App and operation JSON output redacts secrets by default. Pass --show-secrets only when you explicitly need raw values.",
@@ -36,6 +37,9 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"project",
 		"runtime",
 		"service",
+		"api",
+		"diagnose",
+		"web",
 		"operation",
 		"admin",
 		"deploy inspect .",
@@ -60,6 +64,10 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"fugue admin cluster pods --namespace kube-system",
 		"fugue admin cluster workload show kube-system deployment coredns",
 		"fugue admin cluster dns resolve api.github.com --server 10.43.0.10",
+		"fugue api request GET /v1/apps",
+		"fugue diagnose timing -- app overview my-app",
+		"fugue admin users ls",
+		"fugue web diagnose admin-users",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected help output to contain %q, got %q", want, out)
@@ -1473,6 +1481,208 @@ func TestRunWorkspaceReadUsesRelativePathWithinWorkspace(t *testing.T) {
 
 	if got := stdout.String(); got != "hello from fugue\n" {
 		t.Fatalf("unexpected workspace read stdout %q", got)
+	}
+}
+
+func TestRunAppFilesystemListFallsBackToLiveFilesystem(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/filesystem/tree":
+			if got := r.URL.Query().Get("path"); got != "/" {
+				t.Fatalf("expected live filesystem path /, got %q", got)
+			}
+			if got := r.URL.Query().Get("component"); got != "app" {
+				t.Fatalf("expected component=app, got %q", got)
+			}
+			_, _ = w.Write([]byte(`{"component":"app","pod":"demo-pod","path":"/","depth":1,"workspace_root":"/","entries":[{"name":"tmp","path":"/tmp","kind":"dir","size":0,"mode":493,"modified_at":"2026-04-02T00:00:00Z","has_children":true}]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "fs", "ls", "demo", "/",
+		"-o", "json",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app fs ls live: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{`"workspace_root": "/"`, `"/tmp"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected live fs output to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAPIRequestShowsRawResponse(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/apps" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer token" {
+			t.Fatalf("expected bearer token auth, got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Server-Timing", "app;dur=12.3")
+		w.WriteHeader(http.StatusTeapot)
+		_, _ = w.Write([]byte(`{"error":"short and stout"}`))
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"-o", "json",
+		"api", "request", "GET", "/v1/apps",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run api request: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{`"status_code": 418`, `"server_timing": "app;dur=12.3"`, `short and stout`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected api request output to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunDiagnoseTimingCapturesRequests(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			w.Header().Set("Server-Timing", "apps;dur=4.5")
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"-o", "json",
+		"diagnose", "timing", "--", "app", "ls",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run diagnose timing: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{`"command": [`, `/v1/apps`, `"status_code": 200`, `"server_timing": "apps;dur=4.5"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected diagnose timing output to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAdminUsersListUsesWebSnapshot(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/fugue/admin/pages/users" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer token" {
+			t.Fatalf("expected bearer token auth, got %q", got)
+		}
+		_, _ = w.Write([]byte(`{
+			"enrichmentState":"pending",
+			"errors":[],
+			"summary":{"adminCount":1,"blockedCount":0,"deletedCount":0,"userCount":1},
+			"users":[{
+				"billing":{"balanceLabel":"","limitLabel":"Loading billing…","loadError":"","loading":true,"monthlyEstimateLabel":"","statusLabel":"","statusReason":""},
+				"canBlock":false,
+				"canDelete":false,
+				"canDemoteAdmin":false,
+				"canPromoteToAdmin":false,
+				"canUnblock":false,
+				"email":"user@example.com",
+				"isAdmin":true,
+				"lastLoginExact":"2026-04-02T00:00:00Z",
+				"lastLoginLabel":"today",
+				"name":"User",
+				"provider":"GitHub",
+				"serviceCount":2,
+				"status":"Active",
+				"statusTone":"positive",
+				"usage":{"cpuLabel":"200m cpu","diskLabel":"1 GiB","imageLabel":"500 MiB","loading":false,"memoryLabel":"512 MiB","serviceCount":2,"serviceCountLabel":"2 services"},
+				"verified":true
+			}]
+		}`))
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--web-base-url", server.URL,
+		"--token", "token",
+		"-o", "json",
+		"admin", "users", "ls",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run admin users ls: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{`"enrichmentState": "pending"`, `"email": "user@example.com"`, `"serviceCount": 2`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected admin users output to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunWebDiagnoseUsesAliasTarget(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/fugue/admin/pages/users" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--web-base-url", server.URL,
+		"--token", "token",
+		"-o", "json",
+		"web", "diagnose", "admin-users",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run web diagnose: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{`/api/fugue/admin/pages/users`, `"status_code": 200`, `\"ok\":true`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected web diagnose output to contain %q, got %q", want, out)
+		}
 	}
 }
 
