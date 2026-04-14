@@ -618,6 +618,44 @@ func TestBuildAppObjectsSkipsServiceForBackgroundApps(t *testing.T) {
 	}
 }
 
+func TestBuildAppObjectsKeepsInternalServiceWithoutPublicRoute(t *testing.T) {
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "worker",
+		Spec: model.AppSpec{
+			Image:       "ghcr.io/example/worker:latest",
+			NetworkMode: model.AppNetworkModeInternal,
+			Ports:       []int{7777},
+			Replicas:    1,
+			RuntimeID:   "runtime_demo",
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	if len(objects) != 3 {
+		t.Fatalf("expected namespace, deployment, and service, got %d objects", len(objects))
+	}
+	if kind, _ := objects[2]["kind"].(string); kind != "Service" {
+		t.Fatalf("expected service object, got %#v", objects[2]["kind"])
+	}
+
+	deployment := objects[1]
+	spec := deployment["spec"].(map[string]any)
+	template := spec["template"].(map[string]any)
+	podSpec := template["spec"].(map[string]any)
+	containers := podSpec["containers"].([]map[string]any)
+	if _, ok := containers[0]["readinessProbe"]; !ok {
+		t.Fatalf("expected internal app to keep readiness probe, got %#v", containers[0])
+	}
+
+	service := objects[2]
+	serviceSpec := service["spec"].(map[string]any)
+	ports := serviceSpec["ports"].([]map[string]any)
+	if len(ports) != 1 || ports[0]["port"] != 7777 {
+		t.Fatalf("expected internal service port 7777, got %#v", ports)
+	}
+}
+
 func TestBuildAppDeploymentOmitsResourcesWhenUnset(t *testing.T) {
 	app := model.App{
 		TenantID: "tenant_demo",

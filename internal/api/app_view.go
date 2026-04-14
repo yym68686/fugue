@@ -4,12 +4,14 @@ import (
 	"strings"
 
 	"fugue/internal/model"
+	"fugue/internal/runtime"
 )
 
 func sanitizeAppForAPI(app model.App) model.App {
 	out := cloneApp(app)
 	out.Source = sanitizeAppSourceForAPI(out.Source)
 	out.Spec = redactSecretFilesInSpec(out.Spec)
+	out.InternalService = buildAppInternalService(out)
 	out.TechStack = buildAppTechStack(out)
 	return out
 }
@@ -97,6 +99,27 @@ func sanitizeAppSourceForAPI(source *model.AppSource) *model.AppSource {
 	redacted.RepoAuthToken = ""
 	redacted.ComposeDependsOn = nil
 	return redacted
+}
+
+func buildAppInternalService(app model.App) *model.AppInternalService {
+	if !model.AppHasClusterService(app.Spec) {
+		return nil
+	}
+	serviceName := strings.TrimSpace(runtime.RuntimeAppResourceName(app))
+	namespace := strings.TrimSpace(runtime.NamespaceForTenant(app.TenantID))
+	if serviceName == "" {
+		return nil
+	}
+	host := serviceName
+	if namespace != "" {
+		host = serviceName + "." + namespace + ".svc.cluster.local"
+	}
+	return &model.AppInternalService{
+		Name:      serviceName,
+		Namespace: namespace,
+		Host:      host,
+		Port:      model.AppServicePort(app.Spec),
+	}
 }
 
 func cloneAppSource(source *model.AppSource) *model.AppSource {

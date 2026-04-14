@@ -3324,6 +3324,19 @@ components:
         service_port:
           type: integer
           format: int32
+    AppInternalService:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        namespace:
+          type: string
+        host:
+          type: string
+        port:
+          type: integer
+          format: int32
     AppDomain:
       type: object
       additionalProperties: false
@@ -3649,6 +3662,8 @@ components:
           $ref: "#/components/schemas/AppSource"
         route:
           $ref: "#/components/schemas/AppRoute"
+        internal_service:
+          $ref: "#/components/schemas/AppInternalService"
         spec:
           $ref: "#/components/schemas/AppSpec"
         status:
@@ -5875,9 +5890,11 @@ components:
       type: string
       description: |
         Omit this field to deploy a public service with a managed route.
+        Set `internal` to run the app with a cluster-internal Kubernetes Service
+        and readiness checks, but without a public route.
         Set `background` to run the app without a public route, Kubernetes Service,
         or readiness port.
-      enum: [background]
+      enum: [background, internal]
     PatchAppRouteRequest:
       type: object
       additionalProperties: false

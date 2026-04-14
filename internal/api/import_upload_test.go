@@ -353,6 +353,91 @@ func TestImportUploadBackgroundModeSkipsRouteAndServicePort(t *testing.T) {
 	}
 }
 
+func TestImportUploadInternalModeSkipsRouteButExposesInternalService(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Upload Internal Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "uploader", []string{"app.write", "app.deploy"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+
+	archiveBytes := mustTarGz(t, map[string]string{
+		"Dockerfile": "FROM nginx:alpine\n",
+	})
+	body, contentType := newImportUploadMultipartBody(t, importUploadRequest{
+		Name:           "demo-app",
+		BuildStrategy:  model.AppBuildStrategyDockerfile,
+		NetworkMode:    model.AppNetworkModeInternal,
+		ServicePort:    7777,
+		DockerfilePath: "Dockerfile",
+	}, "demo-app.tgz", archiveBytes)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/apps/import-upload", body)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", contentType)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		App       model.App       `json:"app"`
+		Operation model.Operation `json:"operation"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if response.App.InternalService == nil || response.App.InternalService.Port != 7777 {
+		t.Fatalf("expected internal service metadata with port 7777, got %+v", response.App.InternalService)
+	}
+	if response.App.Route != nil && response.App.Route.Hostname != "" {
+		t.Fatalf("expected response app route to stay empty, got %+v", response.App.Route)
+	}
+
+	app, err := s.GetApp(response.App.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.Spec.NetworkMode != model.AppNetworkModeInternal {
+		t.Fatalf("expected app network mode %q, got %q", model.AppNetworkModeInternal, app.Spec.NetworkMode)
+	}
+	if len(app.Spec.Ports) != 1 || app.Spec.Ports[0] != 7777 {
+		t.Fatalf("expected internal app to preserve service port 7777, got %v", app.Spec.Ports)
+	}
+	if app.Route != nil && app.Route.Hostname != "" {
+		t.Fatalf("expected internal app route to stay empty, got %+v", app.Route)
+	}
+
+	op, err := s.GetOperation(response.Operation.ID)
+	if err != nil {
+		t.Fatalf("get operation: %v", err)
+	}
+	if op.DesiredSpec == nil {
+		t.Fatal("expected desired spec on queued operation")
+	}
+	if op.DesiredSpec.NetworkMode != model.AppNetworkModeInternal {
+		t.Fatalf("expected desired spec network mode %q, got %q", model.AppNetworkModeInternal, op.DesiredSpec.NetworkMode)
+	}
+	if len(op.DesiredSpec.Ports) != 1 || op.DesiredSpec.Ports[0] != 7777 {
+		t.Fatalf("expected internal desired spec to preserve service port 7777, got %v", op.DesiredSpec.Ports)
+	}
+}
+
 func TestImportUploadAppImportsComposeTopology(t *testing.T) {
 	t.Parallel()
 

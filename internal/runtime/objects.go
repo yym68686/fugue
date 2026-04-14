@@ -664,7 +664,7 @@ func mergedRuntimeEnv(app model.App) map[string]string {
 }
 
 func buildAppServiceObject(namespace string, app model.App, labels map[string]string) map[string]any {
-	if !model.AppExposesPublicService(app.Spec) {
+	if !model.AppHasClusterService(app.Spec) {
 		return nil
 	}
 
@@ -693,7 +693,7 @@ func buildAppServiceObject(namespace string, app model.App, labels map[string]st
 }
 
 func buildComposeServiceAliasObject(namespace string, app model.App) map[string]any {
-	if app.Source == nil || !model.AppExposesPublicService(app.Spec) {
+	if app.Source == nil || !model.AppHasClusterService(app.Spec) {
 		return nil
 	}
 	composeService := strings.TrimSpace(app.Source.ComposeService)
@@ -739,7 +739,7 @@ func buildComposeServiceAliasObject(namespace string, app model.App) map[string]
 }
 
 func buildLegacyComposeAppNameAliasObject(namespace string, app model.App) map[string]any {
-	if app.Source == nil || !model.AppExposesPublicService(app.Spec) {
+	if app.Source == nil || !model.AppHasClusterService(app.Spec) {
 		return nil
 	}
 	composeService := strings.TrimSpace(app.Source.ComposeService)

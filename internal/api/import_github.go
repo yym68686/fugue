@@ -65,7 +65,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if strings.TrimSpace(s.appBaseDomain) == "" && networkMode != model.AppNetworkModeBackground {
+	if strings.TrimSpace(s.appBaseDomain) == "" && networkMode == "" {
 		httpx.WriteError(w, http.StatusInternalServerError, "app base domain is not configured")
 		return
 	}
@@ -338,7 +338,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		applyImportedNetworkMode(&spec, networkMode)
 
 		route := model.AppRoute{}
-		if !model.AppUsesBackgroundNetwork(spec) {
+		if model.AppManagedRouteEnabled(spec) {
 			route = model.AppRoute{
 				Hostname:    candidateHost,
 				BaseDomain:  s.appBaseDomain,

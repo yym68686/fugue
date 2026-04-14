@@ -28,7 +28,7 @@ type appRouteAvailability struct {
 }
 
 func (s *Server) createAppWithAutoRoute(tenantID, projectID, name, description string, spec model.AppSpec, source *model.AppSource) (model.App, error) {
-	if model.AppUsesBackgroundNetwork(spec) {
+	if !model.AppManagedRouteEnabled(spec) {
 		if source != nil {
 			return s.store.CreateImportedAppWithoutRoute(tenantID, projectID, name, description, spec, *source)
 		}

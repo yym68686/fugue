@@ -14,7 +14,7 @@ func resolveImportNetworkMode(raw string) (string, error) {
 	}
 	normalized := model.NormalizeAppNetworkMode(raw)
 	if normalized == "" {
-		return "", fmt.Errorf("network_mode must be background when set")
+		return "", fmt.Errorf("network_mode must be background or internal when set")
 	}
 	return normalized, nil
 }

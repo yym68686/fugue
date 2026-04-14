@@ -475,7 +475,7 @@ func (s *Service) projectComposeServiceState(app model.App) (map[string]string, 
 		if composeService == "" {
 			continue
 		}
-		if model.AppExposesPublicService(candidate.Spec) {
+		if model.AppHasClusterService(candidate.Spec) {
 			if aliasName := runtime.ComposeServiceAliasName(candidate.ProjectID, composeService); aliasName != "" {
 				appHosts[composeService] = aliasName
 			}

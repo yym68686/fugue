@@ -32,6 +32,7 @@ const (
 	AppBuildStrategyNixpacks   = "nixpacks"
 
 	AppNetworkModeBackground = "background"
+	AppNetworkModeInternal   = "internal"
 
 	BackingServiceTypePostgres = "postgres"
 
@@ -137,6 +138,8 @@ func NormalizeAppNetworkMode(raw string) string {
 	switch strings.TrimSpace(strings.ToLower(raw)) {
 	case AppNetworkModeBackground:
 		return AppNetworkModeBackground
+	case AppNetworkModeInternal:
+		return AppNetworkModeInternal
 	default:
 		return ""
 	}
@@ -146,7 +149,15 @@ func AppUsesBackgroundNetwork(spec AppSpec) bool {
 	return NormalizeAppNetworkMode(spec.NetworkMode) == AppNetworkModeBackground
 }
 
-func AppPublicServicePort(spec AppSpec) int {
+func AppUsesInternalNetwork(spec AppSpec) bool {
+	return NormalizeAppNetworkMode(spec.NetworkMode) == AppNetworkModeInternal
+}
+
+func AppManagedRouteEnabled(spec AppSpec) bool {
+	return !AppUsesBackgroundNetwork(spec) && !AppUsesInternalNetwork(spec)
+}
+
+func AppServicePort(spec AppSpec) int {
 	if AppUsesBackgroundNetwork(spec) {
 		return 0
 	}
@@ -156,6 +167,17 @@ func AppPublicServicePort(spec AppSpec) int {
 		}
 	}
 	return 0
+}
+
+func AppHasClusterService(spec AppSpec) bool {
+	return AppServicePort(spec) > 0
+}
+
+func AppPublicServicePort(spec AppSpec) int {
+	if !AppManagedRouteEnabled(spec) {
+		return 0
+	}
+	return AppServicePort(spec)
 }
 
 func AppExposesPublicService(spec AppSpec) bool {
@@ -577,6 +599,13 @@ type AppRoute struct {
 	ServicePort int    `json:"service_port,omitempty"`
 }
 
+type AppInternalService struct {
+	Name      string `json:"name,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+	Host      string `json:"host,omitempty"`
+	Port      int    `json:"port,omitempty"`
+}
+
 const (
 	AppDomainStatusPending  = "pending"
 	AppDomainStatusVerified = "verified"
@@ -751,6 +780,7 @@ type App struct {
 	Description          string           `json:"description"`
 	Source               *AppSource       `json:"source,omitempty"`
 	Route                *AppRoute        `json:"route,omitempty"`
+	InternalService      *AppInternalService `json:"internal_service,omitempty"`
 	Spec                 AppSpec          `json:"spec"`
 	Status               AppStatus        `json:"status"`
 	CurrentResourceUsage *ResourceUsage   `json:"current_resource_usage,omitempty"`

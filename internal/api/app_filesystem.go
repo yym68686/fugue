@@ -1062,9 +1062,10 @@ find "$target" -mindepth 1 -maxdepth 1 -exec sh -c '
     elif [ -d "$entry" ]; then
       kind=dir
     fi
-    size="$(stat -c %s "$entry" 2>/dev/null || printf 0)"
-    mode="$(stat -c %a "$entry" 2>/dev/null || printf "")"
-    modified="$(stat -c %Y "$entry" 2>/dev/null || printf 0)"
+    meta="$(stat -c "%s	%a	%Y" "$entry" 2>/dev/null || printf "0		0")"
+    IFS="$(printf "\t")" read -r size mode modified <<EOF
+$meta
+EOF
     has_children=false
     if [ "$kind" = dir ]; then
       has_children=true

@@ -171,7 +171,7 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "cannot create app for another tenant")
 		return
 	}
-	if strings.TrimSpace(s.appBaseDomain) == "" && networkMode != model.AppNetworkModeBackground {
+	if strings.TrimSpace(s.appBaseDomain) == "" && networkMode == "" {
 		httpx.WriteError(w, http.StatusInternalServerError, "app base domain is not configured")
 		return
 	}
@@ -290,7 +290,7 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 		applyStartupCommand(&spec, req.StartupCommand)
 		applyImportedNetworkMode(&spec, networkMode)
 		route := model.AppRoute{}
-		if !model.AppUsesBackgroundNetwork(spec) {
+		if model.AppManagedRouteEnabled(spec) {
 			route = model.AppRoute{
 				Hostname:    candidateHost,
 				BaseDomain:  s.appBaseDomain,
