@@ -47,6 +47,8 @@ type Server struct {
 	appImageRegistry             appImageRegistry
 	projectImageUsageCache       expiringResponseCache[projectImageUsageResponse]
 	clusterNodeInventoryCache    expiringResponseCache[[]clusterNodeSnapshot]
+	appProxyAppCache             expiringResponseCache[model.App]
+	appProxyServiceHostCache     expiringResponseCache[string]
 	managedSharedLocationSync    managedSharedLocationSyncState
 	newClusterNodeClient         func() (*clusterNodeClient, error)
 	newManagedAppStatusClient    func() (*managedAppStatusClient, error)
@@ -93,6 +95,8 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		appImageRegistry:             newRemoteAppImageRegistry(),
 		projectImageUsageCache:       newExpiringResponseCache[projectImageUsageResponse](defaultProjectImageUsageCacheTTL),
 		clusterNodeInventoryCache:    newExpiringResponseCache[[]clusterNodeSnapshot](defaultClusterNodeInventoryCacheTTL),
+		appProxyAppCache:             newExpiringResponseCache[model.App](defaultAppProxyLookupCacheTTL),
+		appProxyServiceHostCache:     newExpiringResponseCache[string](defaultAppProxyLookupCacheTTL),
 		newClusterNodeClient:         newClusterNodeClient,
 		newManagedAppStatusClient:    newManagedAppStatusClient,
 		managedAppStatusCache:        newManagedAppStatusCache(0, 0),

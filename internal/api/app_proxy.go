@@ -7,11 +7,14 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
 )
+
+const defaultAppProxyLookupCacheTTL = 5 * time.Second
 
 func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) bool {
 	host := strings.TrimSpace(strings.ToLower(r.Host))
@@ -25,7 +28,7 @@ func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) boo
 		return false
 	}
 
-	app, err := s.store.GetAppByHostname(host)
+	app, err := s.loadAppByHostnameCached(host)
 	if err != nil {
 		if err == store.ErrNotFound {
 			if s.isAppHostname(host) {
@@ -62,6 +65,17 @@ func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) boo
 	return true
 }
 
+func (s *Server) loadAppByHostnameCached(host string) (model.App, error) {
+	host = strings.TrimSpace(strings.ToLower(host))
+	if host == "" || s == nil || s.store == nil {
+		return model.App{}, store.ErrNotFound
+	}
+
+	return s.appProxyAppCache.do(host, func() (model.App, error) {
+		return s.store.GetAppByHostname(host)
+	})
+}
+
 func (s *Server) isAppHostname(host string) bool {
 	if s.isReservedAppHostname(host) {
 		return false
@@ -84,6 +98,21 @@ func (s *Server) serviceURLForApp(ctx context.Context, app model.App) string {
 }
 
 func (s *Server) serviceHostForApp(ctx context.Context, app model.App) string {
+	cacheKey := strings.TrimSpace(app.ID + "|" + app.TenantID + "|" + app.Name)
+	if cacheKey == "" {
+		return s.resolveServiceHostForApp(ctx, app)
+	}
+
+	resolved, err := s.appProxyServiceHostCache.do(cacheKey, func() (string, error) {
+		return s.resolveServiceHostForApp(ctx, app), nil
+	})
+	if err != nil || strings.TrimSpace(resolved) == "" {
+		return s.resolveServiceHostForApp(ctx, app)
+	}
+	return resolved
+}
+
+func (s *Server) resolveServiceHostForApp(ctx context.Context, app model.App) string {
 	namespace := runtime.NamespaceForTenant(app.TenantID)
 	primaryHost := appServiceHost(namespace, runtime.RuntimeAppResourceName(app))
 	legacyHost := appServiceHost(namespace, runtime.RuntimeResourceName(app.Name))
