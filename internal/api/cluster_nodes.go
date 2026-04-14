@@ -44,7 +44,10 @@ const (
 	clusterNodeLabelPublicIP            = "fugue.io/public-ip"
 	clusterNodeAnnotationCountry        = "fugue.io/location-country"
 	clusterNodeAnnotationK3sHost        = "k3s.io/hostname"
-	defaultClusterNodeInventoryCacheTTL = 5 * time.Second
+	defaultClusterNodeInventoryCacheTTL = 30 * time.Second
+	clusterNodeInventoryMaxStale        = 5 * time.Minute
+	clusterNodeInventoryRefreshTimeout  = 5 * time.Second
+	clusterNodeInventoryWarmInterval    = 25 * time.Second
 	tenantSharedClusterNodeName         = "internal-cluster"
 	tenantSharedClusterRegion           = "Multiple countries"
 	tenantSharedRuntimeID               = "runtime_managed_shared"
@@ -224,29 +227,120 @@ const clusterNodeInventoryCacheKey = "shared"
 func (s *Server) loadClusterNodeInventory(ctx context.Context) ([]clusterNodeSnapshot, error) {
 	timings := serverTimingFromContext(ctx)
 	startedAt := time.Now()
+	now := time.Now()
 
-	snapshots, err := s.clusterNodeInventoryCache.do(
-		clusterNodeInventoryCacheKey,
-		func() ([]clusterNodeSnapshot, error) {
-			clientFactory := s.newClusterNodeClient
-			if clientFactory == nil {
-				clientFactory = newClusterNodeClient
-			}
+	if entry, ok := s.clusterNodeInventoryCache.getEntry(clusterNodeInventoryCacheKey); ok {
+		if now.Before(entry.expiresAt) {
+			timings.Add("cluster_inventory", time.Since(startedAt))
+			return entry.value, nil
+		}
+		if now.Before(entry.expiresAt.Add(clusterNodeInventoryMaxStale)) {
+			s.refreshClusterNodeInventoryAsync()
+			timings.Add("cluster_inventory", time.Since(startedAt))
+			return entry.value, nil
+		}
+	}
 
-			client, err := clientFactory()
-			if err != nil {
-				return nil, err
-			}
-
-			return client.listClusterNodeInventory(ctx)
-		},
-	)
+	snapshots, err := s.refreshClusterNodeInventory(ctx)
 	timings.Add("cluster_inventory", time.Since(startedAt))
 	if err != nil {
 		return nil, err
 	}
 
 	return snapshots, nil
+}
+
+func (s *Server) StartBackgroundWarmers(ctx context.Context) {
+	if s == nil || ctx == nil || !s.shouldWarmClusterNodeInventory() {
+		return
+	}
+	s.startClusterNodeInventoryWarmLoop(ctx)
+}
+
+func (s *Server) shouldWarmClusterNodeInventory() bool {
+	if s == nil {
+		return false
+	}
+	if s.newClusterNodeClient != nil {
+		return true
+	}
+	return strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST")) != "" &&
+		strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_PORT")) != ""
+}
+
+func (s *Server) startClusterNodeInventoryWarmLoop(ctx context.Context) {
+	s.refreshClusterNodeInventoryAsync()
+
+	go func() {
+		ticker := time.NewTicker(clusterNodeInventoryWarmInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.refreshClusterNodeInventoryAsync()
+			}
+		}
+	}()
+}
+
+func (s *Server) clusterNodeInventoryRefreshContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		return context.WithTimeout(context.Background(), clusterNodeInventoryRefreshTimeout)
+	}
+	return context.WithTimeout(parent, clusterNodeInventoryRefreshTimeout)
+}
+
+func (s *Server) fetchClusterNodeInventory(ctx context.Context) ([]clusterNodeSnapshot, error) {
+	clientFactory := s.newClusterNodeClient
+	if clientFactory == nil {
+		clientFactory = newClusterNodeClient
+	}
+
+	client, err := clientFactory()
+	if err != nil {
+		return nil, err
+	}
+
+	refreshCtx, cancel := s.clusterNodeInventoryRefreshContext(ctx)
+	defer cancel()
+
+	return client.listClusterNodeInventory(refreshCtx)
+}
+
+func (s *Server) refreshClusterNodeInventory(ctx context.Context) ([]clusterNodeSnapshot, error) {
+	return s.clusterNodeInventoryCache.do(
+		clusterNodeInventoryCacheKey,
+		func() ([]clusterNodeSnapshot, error) {
+			return s.fetchClusterNodeInventory(ctx)
+		},
+	)
+}
+
+func (s *Server) refreshClusterNodeInventoryAsync() {
+	if s == nil {
+		return
+	}
+
+	ch := s.clusterNodeInventoryCache.group.DoChan(clusterNodeInventoryCacheKey, func() (any, error) {
+		value, err := s.fetchClusterNodeInventory(context.Background())
+		if err != nil {
+			var zero []clusterNodeSnapshot
+			return zero, err
+		}
+		s.clusterNodeInventoryCache.set(clusterNodeInventoryCacheKey, value)
+		return value, nil
+	})
+
+	go func() {
+		result, ok := <-ch
+		if !ok || result.Err == nil || s.log == nil {
+			return
+		}
+		s.log.Printf("cluster inventory background refresh error: %v", result.Err)
+	}()
 }
 
 func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) {

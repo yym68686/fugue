@@ -1,12 +1,15 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
@@ -1415,4 +1418,142 @@ func TestBuildClusterNodeStorageStatsReconcilesStaleNodeCapacity(t *testing.T) {
 	if *stats.UsedBytes > *stats.CapacityBytes {
 		t.Fatalf("expected used bytes <= capacity after reconciliation, got %#v", stats)
 	}
+}
+
+func TestLoadClusterNodeInventoryReturnsStaleSnapshotWhileBackgroundRefreshUpdatesCache(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	var summaryCalls atomic.Int32
+	kubeServer := newClusterNodeInventoryTestServer("fresh-node", &summaryCalls)
+	defer kubeServer.Close()
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+	server.clusterNodeInventoryCache = newExpiringResponseCache[[]clusterNodeSnapshot](defaultClusterNodeInventoryCacheTTL)
+	server.clusterNodeInventoryCache.set(clusterNodeInventoryCacheKey, []clusterNodeSnapshot{
+		{
+			node: model.ClusterNode{Name: "stale-node"},
+		},
+	})
+	server.clusterNodeInventoryCache.mu.Lock()
+	entry := server.clusterNodeInventoryCache.byKey[clusterNodeInventoryCacheKey]
+	entry.expiresAt = time.Now().Add(-time.Second)
+	server.clusterNodeInventoryCache.byKey[clusterNodeInventoryCacheKey] = entry
+	server.clusterNodeInventoryCache.mu.Unlock()
+
+	snapshots, err := server.loadClusterNodeInventory(context.Background())
+	if err != nil {
+		t.Fatalf("load cluster node inventory: %v", err)
+	}
+	if len(snapshots) != 1 || snapshots[0].node.Name != "stale-node" {
+		t.Fatalf("expected stale snapshot immediately, got %#v", snapshots)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if refreshed, ok := server.clusterNodeInventoryCache.get(clusterNodeInventoryCacheKey); ok &&
+			len(refreshed) == 1 && refreshed[0].node.Name == "fresh-node" {
+			if summaryCalls.Load() == 0 {
+				t.Fatal("expected background refresh to read node summaries")
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatal("expected background refresh to replace stale cluster inventory")
+}
+
+func TestStartBackgroundWarmersPreloadsClusterNodeInventory(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	kubeServer := newClusterNodeInventoryTestServer("warm-node", nil)
+	defer kubeServer.Close()
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server.StartBackgroundWarmers(ctx)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if snapshots, ok := server.clusterNodeInventoryCache.get(clusterNodeInventoryCacheKey); ok &&
+			len(snapshots) == 1 && snapshots[0].node.Name == "warm-node" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatal("expected background warmers to preload cluster inventory")
+}
+
+func newClusterNodeInventoryTestServer(nodeName string, summaryCalls *atomic.Int32) *httptest.Server {
+	return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/api/v1/nodes":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{
+							"name":              nodeName,
+							"creationTimestamp": "2026-04-14T00:00:00Z",
+							"labels": map[string]string{
+								"topology.kubernetes.io/region": "ap-east-1",
+								"topology.kubernetes.io/zone":   "ap-east-1a",
+							},
+						},
+						"status": map[string]any{
+							"addresses": []map[string]string{
+								{"type": "InternalIP", "address": "10.0.0.10"},
+							},
+							"conditions": []map[string]string{
+								{"type": "Ready", "status": "True"},
+							},
+						},
+					},
+				},
+			})
+		case "/api/v1/pods":
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}})
+		default:
+			if strings.HasPrefix(r.URL.Path, "/api/v1/nodes/") && strings.HasSuffix(r.URL.Path, "/proxy/stats/summary") {
+				if summaryCalls != nil {
+					summaryCalls.Add(1)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"node": map[string]any{
+						"nodeName": nodeName,
+					},
+				})
+				return
+			}
+			http.NotFound(w, r)
+		}
+	}))
 }

@@ -44,14 +44,16 @@ func main() {
 		ClusterJoinMeshAuthKey:       cfg.ClusterJoinMeshAuthKey,
 		ImportWorkDir:                cfg.ImportWorkDir,
 	})
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	server.StartBackgroundWarmers(ctx)
+
 	httpServer := &http.Server{
 		Addr:              cfg.BindAddr,
 		Handler:           server.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	go func() {
 		<-ctx.Done()
 		server.SetReady(false)

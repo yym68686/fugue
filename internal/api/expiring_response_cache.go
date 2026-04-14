@@ -27,16 +27,24 @@ func newExpiringResponseCache[T any](ttl time.Duration) expiringResponseCache[T]
 	}
 }
 
-func (c *expiringResponseCache[T]) get(key string) (T, bool) {
-	var zero T
+func (c *expiringResponseCache[T]) getEntry(key string) (expiringResponseCacheEntry[T], bool) {
 	if c == nil {
-		return zero, false
+		return expiringResponseCacheEntry[T]{}, false
 	}
 
 	c.mu.RLock()
 	entry, ok := c.byKey[key]
 	c.mu.RUnlock()
-	if !ok || !entry.ok || time.Now().After(entry.expiresAt) {
+	if !ok || !entry.ok {
+		return expiringResponseCacheEntry[T]{}, false
+	}
+	return entry, true
+}
+
+func (c *expiringResponseCache[T]) get(key string) (T, bool) {
+	var zero T
+	entry, ok := c.getEntry(key)
+	if !ok || time.Now().After(entry.expiresAt) {
 		return zero, false
 	}
 	return entry.value, true
