@@ -473,7 +473,7 @@ func pumpLogSource(ctx context.Context, client appLogsClient, source logStreamSo
 
 func (s *Server) handleStreamAppBuildLogs(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
 	}
@@ -710,7 +710,24 @@ func (s *Server) handleStreamAppBuildLogs(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleStreamAppRuntimeLogs(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	component := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("component")))
+	if component == "" {
+		component = "app"
+	}
+	if component != "app" && component != "postgres" {
+		httpx.WriteError(w, http.StatusBadRequest, "component must be app or postgres")
+		return
+	}
+
+	var (
+		app     model.App
+		allowed bool
+	)
+	if component == "postgres" {
+		app, allowed = s.loadAuthorizedApp(w, r, principal)
+	} else {
+		app, allowed = s.loadAuthorizedAppMetadata(w, r, principal)
+	}
 	if !allowed {
 		return
 	}
@@ -722,15 +739,6 @@ func (s *Server) handleStreamAppRuntimeLogs(w http.ResponseWriter, r *http.Reque
 	}
 	if runtimeObj.Type == model.RuntimeTypeExternalOwned {
 		httpx.WriteError(w, http.StatusBadRequest, "runtime logs are only available for managed runtimes")
-		return
-	}
-
-	component := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("component")))
-	if component == "" {
-		component = "app"
-	}
-	if component != "app" && component != "postgres" {
-		httpx.WriteError(w, http.StatusBadRequest, "component must be app or postgres")
 		return
 	}
 

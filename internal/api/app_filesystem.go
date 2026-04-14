@@ -175,7 +175,7 @@ func newKubeFilesystemExecRESTClient() (*rest.Config, rest.Interface, error) {
 
 func (s *Server) handleGetAppFilesystemTree(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
 	}
@@ -232,7 +232,7 @@ func (s *Server) handleGetAppFilesystemTree(w http.ResponseWriter, r *http.Reque
 
 func (s *Server) handleGetAppFilesystemFile(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
 	}
@@ -298,7 +298,7 @@ func (s *Server) handlePutAppFilesystemFile(w http.ResponseWriter, r *http.Reque
 		httpx.WriteError(w, http.StatusForbidden, "missing app.write or app.deploy scope")
 		return
 	}
-	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
 	}
@@ -371,7 +371,7 @@ func (s *Server) handleCreateAppFilesystemDirectory(w http.ResponseWriter, r *ht
 		httpx.WriteError(w, http.StatusForbidden, "missing app.write or app.deploy scope")
 		return
 	}
-	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
 	}
@@ -438,7 +438,7 @@ func (s *Server) handleDeleteAppFilesystemPath(w http.ResponseWriter, r *http.Re
 		httpx.WriteError(w, http.StatusForbidden, "missing app.write or app.deploy scope")
 		return
 	}
-	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
 	}

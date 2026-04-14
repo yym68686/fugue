@@ -720,7 +720,7 @@ func buildStrategyFromOperation(op model.Operation) string {
 
 func (s *Server) handleGetAppBuildLogs(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
 	}
@@ -762,7 +762,24 @@ func (s *Server) handleGetAppBuildLogs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetAppRuntimeLogs(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	component := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("component")))
+	if component == "" {
+		component = "app"
+	}
+	if component != "app" && component != "postgres" {
+		httpx.WriteError(w, http.StatusBadRequest, "component must be app or postgres")
+		return
+	}
+
+	var (
+		app     model.App
+		allowed bool
+	)
+	if component == "postgres" {
+		app, allowed = s.loadAuthorizedApp(w, r, principal)
+	} else {
+		app, allowed = s.loadAuthorizedAppMetadata(w, r, principal)
+	}
 	if !allowed {
 		return
 	}
@@ -774,15 +791,6 @@ func (s *Server) handleGetAppRuntimeLogs(w http.ResponseWriter, r *http.Request)
 	}
 	if runtimeObj.Type == model.RuntimeTypeExternalOwned {
 		httpx.WriteError(w, http.StatusBadRequest, "runtime logs are only available for managed runtimes")
-		return
-	}
-
-	component := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("component")))
-	if component == "" {
-		component = "app"
-	}
-	if component != "app" && component != "postgres" {
-		httpx.WriteError(w, http.StatusBadRequest, "component must be app or postgres")
 		return
 	}
 
@@ -848,14 +856,14 @@ func (s *Server) resolveBuildOperation(app model.App, requestedOperationID strin
 		return op, nil
 	}
 
-	ops, err := s.store.ListOperations(app.TenantID, false)
+	ops, err := s.store.ListOperationsByApp(app.TenantID, false, app.ID)
 	if err != nil {
 		return model.Operation{}, err
 	}
 	var latest model.Operation
 	found := false
 	for _, op := range ops {
-		if op.AppID != app.ID || op.Type != model.OperationTypeImport {
+		if op.Type != model.OperationTypeImport {
 			continue
 		}
 		if !found || op.CreatedAt.After(latest.CreatedAt) {

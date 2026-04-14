@@ -2043,6 +2043,25 @@ WHERE id = $1
 	return app, nil
 }
 
+func (s *Store) pgGetAppMetadata(id string) (model.App, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	app, err := scanApp(s.db.QueryRowContext(ctx, `
+SELECT id, tenant_id, project_id, name, description, source_json, route_json, spec_json, status_json, created_at, updated_at
+FROM fugue_apps
+WHERE id = $1
+`, id))
+	if err != nil {
+		return model.App{}, mapDBErr(err)
+	}
+	normalizeAppStatusForRead(&app)
+	if isDeletedApp(app) {
+		return model.App{}, ErrNotFound
+	}
+	return app, nil
+}
+
 func (s *Store) pgGetAppByHostname(hostname string) (model.App, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

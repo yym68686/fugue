@@ -13,18 +13,36 @@ import (
 
 func (s *Server) handleGetAppEnv(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
 	}
-	spec, _, err := s.recoverAppDeployBaseline(app)
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
+
+	spec := cloneAppSpec(app.Spec)
+	env := map[string]string(nil)
+
+	if appDeployBaselineNeedsRecovery(spec, app.Source) {
+		fullApp, allowed := s.loadAuthorizedApp(w, r, principal)
+		if !allowed {
+			return
+		}
+		spec, _, err := s.recoverAppDeployBaseline(fullApp)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		env = mergedAppEnvWithSpec(fullApp, spec)
+	} else {
+		bindings, err := s.store.ListServiceBindings(app.ID)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		env = mergedAppEnvWithBindings(spec, bindings)
 	}
 	s.appendAudit(principal, "app.env.read", "app", app.ID, app.TenantID, nil)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"env": defaultStringMap(mergedAppEnvWithSpec(app, spec)),
+		"env": defaultStringMap(env),
 	})
 }
 

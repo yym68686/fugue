@@ -201,7 +201,7 @@ func projectImageUsageCacheKey(principal model.Principal) string {
 func (s *Server) handleGetAppImages(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	timings := serverTimingFromContext(r.Context())
-	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
 	}
@@ -236,7 +236,7 @@ func (s *Server) handleRedeployAppImage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
 	}
@@ -322,7 +322,7 @@ func (s *Server) handleDeleteAppImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
 	}

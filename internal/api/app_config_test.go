@@ -699,6 +699,85 @@ func TestGetAppEnvMergesBindingEnvAndAppEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestGetImportedAppEnvMergesBindingEnvWithoutRecovery(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Imported Config Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	raiseManagedTestCap(t, s, tenant.ID)
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.read"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	app, err := s.CreateImportedApp(
+		tenant.ID,
+		project.ID,
+		"demo",
+		"",
+		model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_managed_shared",
+			Env: map[string]string{
+				"DB_HOST":   "override-db.internal",
+				"LOG_LEVEL": "debug",
+			},
+			Postgres: &model.AppPostgresSpec{
+				Database: "demo",
+				User:     "root",
+				Password: "secret",
+			},
+		},
+		model.AppSource{
+			Type:     model.AppSourceTypeDockerImage,
+			ImageRef: "ghcr.io/example/demo:latest",
+		},
+		model.AppRoute{},
+	)
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/env", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Env map[string]string `json:"env"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if got := response.Env["DB_TYPE"]; got != "postgres" {
+		t.Fatalf("expected DB_TYPE=postgres, got %q", got)
+	}
+	if got := response.Env["DB_HOST"]; got != "override-db.internal" {
+		t.Fatalf("expected app env to override DB_HOST, got %q", got)
+	}
+	if got := response.Env["DB_USER"]; got != "root" {
+		t.Fatalf("expected DB_USER=root from binding env, got %q", got)
+	}
+	if got := response.Env["DB_NAME"]; got != "demo" {
+		t.Fatalf("expected DB_NAME=demo from binding env, got %q", got)
+	}
+	if got := response.Env["LOG_LEVEL"]; got != "debug" {
+		t.Fatalf("expected LOG_LEVEL=debug, got %q", got)
+	}
+}
+
 func TestUpsertAndDeleteAppFilesCreateDeployOperations(t *testing.T) {
 	t.Parallel()
 

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"fugue/internal/httpx"
@@ -1098,16 +1099,10 @@ func (s *Server) handleGetConsoleProject(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	operations, err := s.store.ListOperations(principal.TenantID, principal.IsPlatformAdmin())
+	projectOperations, err := s.loadConsoleProjectOperations(principal, appIDs)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
-	}
-	projectOperations := make([]model.Operation, 0)
-	for _, operation := range sanitizeOperationsForAPI(operations) {
-		if _, ok := appIDs[operation.AppID]; ok {
-			projectOperations = append(projectOperations, operation)
-		}
 	}
 
 	clusterNodes, err := s.loadConsoleProjectClusterNodes(r.Context(), principal, projectID, appIDs, serviceIDs)
@@ -1134,6 +1129,71 @@ func (s *Server) handleGetConsoleProject(w http.ResponseWriter, r *http.Request)
 	}
 
 	httpx.WriteJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) loadConsoleProjectOperations(
+	principal model.Principal,
+	appIDs map[string]struct{},
+) ([]model.Operation, error) {
+	if len(appIDs) == 0 {
+		return []model.Operation{}, nil
+	}
+
+	orderedAppIDs := make([]string, 0, len(appIDs))
+	for appID := range appIDs {
+		appID = strings.TrimSpace(appID)
+		if appID != "" {
+			orderedAppIDs = append(orderedAppIDs, appID)
+		}
+	}
+	if len(orderedAppIDs) == 0 {
+		return []model.Operation{}, nil
+	}
+	sort.Strings(orderedAppIDs)
+
+	var (
+		group      errgroup.Group
+		mu         sync.Mutex
+		operations []model.Operation
+	)
+	group.SetLimit(4)
+
+	for _, appID := range orderedAppIDs {
+		appID := appID
+		group.Go(func() error {
+			result, err := s.store.ListOperationsByApp(
+				principal.TenantID,
+				principal.IsPlatformAdmin(),
+				appID,
+			)
+			if err != nil {
+				return err
+			}
+
+			sanitized := sanitizeOperationsForAPI(result)
+			if len(sanitized) == 0 {
+				return nil
+			}
+
+			mu.Lock()
+			operations = append(operations, sanitized...)
+			mu.Unlock()
+			return nil
+		})
+	}
+
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+
+	sort.Slice(operations, func(i, j int) bool {
+		if operations[i].CreatedAt.Equal(operations[j].CreatedAt) {
+			return operations[i].ID < operations[j].ID
+		}
+		return operations[i].CreatedAt.Before(operations[j].CreatedAt)
+	})
+
+	return operations, nil
 }
 
 func valueOrNilProject(project model.Project, ok bool) *model.Project {

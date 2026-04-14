@@ -46,7 +46,7 @@ type edgeDomainTLSReportRequest struct {
 
 func (s *Server) handleListAppDomains(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
 	}
@@ -61,7 +61,7 @@ func (s *Server) handleListAppDomains(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetAppDomainAvailability(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
 	}
@@ -79,7 +79,7 @@ func (s *Server) handlePutAppDomain(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "missing app.write scope")
 		return
 	}
-	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
 	}
@@ -169,7 +169,7 @@ func (s *Server) handleVerifyAppDomain(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "missing app.write scope")
 		return
 	}
-	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
 	}
@@ -216,7 +216,7 @@ func (s *Server) handleDeleteAppDomain(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "missing app.write scope")
 		return
 	}
-	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
 	}

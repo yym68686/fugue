@@ -1892,6 +1892,28 @@ func (s *Store) GetApp(id string) (model.App, error) {
 	return app, err
 }
 
+func (s *Store) GetAppMetadata(id string) (model.App, error) {
+	if s.usingDatabase() {
+		return s.pgGetAppMetadata(id)
+	}
+	var app model.App
+	err := s.withLockedState(false, func(state *model.State) error {
+		index := findApp(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		app = state.Apps[index]
+		normalizeAppStatusForRead(&app)
+		app.Bindings = nil
+		app.BackingServices = nil
+		if isDeletedApp(app) {
+			return ErrNotFound
+		}
+		return nil
+	})
+	return app, err
+}
+
 func (s *Store) GetAppByHostname(hostname string) (model.App, error) {
 	hostname = normalizeAppDomainHostname(hostname)
 	if s.usingDatabase() {

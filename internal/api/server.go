@@ -1360,6 +1360,19 @@ func (s *Server) loadAuthorizedApp(w http.ResponseWriter, r *http.Request, princ
 	return app, true
 }
 
+func (s *Server) loadAuthorizedAppMetadata(w http.ResponseWriter, r *http.Request, principal model.Principal) (model.App, bool) {
+	app, err := s.store.GetAppMetadata(r.PathValue("id"))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return model.App{}, false
+	}
+	if !principal.IsPlatformAdmin() && app.TenantID != principal.TenantID {
+		httpx.WriteError(w, http.StatusForbidden, "app is not visible to this tenant")
+		return model.App{}, false
+	}
+	return app, true
+}
+
 func (s *Server) loadAuthorizedProject(w http.ResponseWriter, r *http.Request, principal model.Principal) (model.Project, bool) {
 	project, err := s.store.GetProject(r.PathValue("id"))
 	if err != nil {

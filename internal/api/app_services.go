@@ -36,6 +36,22 @@ func mergedAppEnv(app model.App) map[string]string {
 	return mergedAppEnvWithSpec(app, app.Spec)
 }
 
+func mergedAppEnvWithBindings(spec model.AppSpec, bindings []model.ServiceBinding) map[string]string {
+	merged := make(map[string]string)
+	for _, binding := range bindings {
+		for key, value := range cloneStringMap(binding.Env) {
+			merged[key] = value
+		}
+	}
+	for key, value := range spec.Env {
+		merged[key] = value
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
+}
+
 func mergedAppEnvWithSpec(app model.App, spec model.AppSpec) map[string]string {
 	merged := make(map[string]string)
 	for _, bound := range appBoundServices(app) {
