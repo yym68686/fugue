@@ -74,6 +74,47 @@ func TestReadConsoleActiveReleaseOperationIgnoresPendingDeployForFailedApp(t *te
 	}
 }
 
+func TestScopeConsoleActiveOperationsKeepsTenantOwnedOperations(t *testing.T) {
+	t.Parallel()
+
+	principal := model.Principal{
+		TenantID: "tenant_a",
+		Scopes:   map[string]struct{}{},
+	}
+	operations := []model.Operation{
+		{ID: "op_owned", TenantID: "tenant_a", AppID: "app_a"},
+		{ID: "op_other", TenantID: "tenant_b", AppID: "app_b"},
+	}
+
+	filtered := scopeConsoleActiveOperations(principal, operations)
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 tenant-scoped operation, got %d", len(filtered))
+	}
+	if filtered[0].ID != "op_owned" {
+		t.Fatalf("expected owned operation to remain, got %q", filtered[0].ID)
+	}
+}
+
+func TestScopeConsoleActiveOperationsKeepsPlatformAdminView(t *testing.T) {
+	t.Parallel()
+
+	principal := model.Principal{
+		TenantID: "tenant_a",
+		Scopes: map[string]struct{}{
+			"platform.admin": {},
+		},
+	}
+	operations := []model.Operation{
+		{ID: "op_owned", TenantID: "tenant_a", AppID: "app_a"},
+		{ID: "op_other", TenantID: "tenant_b", AppID: "app_b"},
+	}
+
+	filtered := scopeConsoleActiveOperations(principal, operations)
+	if len(filtered) != 2 {
+		t.Fatalf("expected platform admin to keep all active operations, got %d", len(filtered))
+	}
+}
+
 func TestConsoleGallerySkipsLiveStatusOverlayByDefault(t *testing.T) {
 	t.Parallel()
 

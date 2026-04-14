@@ -551,6 +551,22 @@ func collectConsoleActiveOperations(operations []model.Operation) map[string]*mo
 	return activeByAppID
 }
 
+func scopeConsoleActiveOperations(principal model.Principal, operations []model.Operation) []model.Operation {
+	if principal.IsPlatformAdmin() {
+		return operations
+	}
+
+	filtered := make([]model.Operation, 0, len(operations))
+	for _, operation := range operations {
+		if strings.TrimSpace(operation.TenantID) != principal.TenantID {
+			continue
+		}
+		filtered = append(filtered, operation)
+	}
+
+	return filtered
+}
+
 func sumConsoleResourceUsage(items []*model.ResourceUsage) model.ResourceUsage {
 	var (
 		cpuMillicores         *int64
@@ -685,12 +701,12 @@ func (s *Server) buildConsoleGalleryResponse(ctx context.Context, principal mode
 	})
 	loadGroup.Go(func() error {
 		startedAt := time.Now()
-		result, err := s.store.ListOperations(principal.TenantID, principal.IsPlatformAdmin())
+		result, err := s.store.ListActiveOperations()
 		timings.Add("store_operations", time.Since(startedAt))
 		if err != nil {
 			return err
 		}
-		operations = result
+		operations = scopeConsoleActiveOperations(principal, result)
 		return nil
 	})
 	if err := loadGroup.Wait(); err != nil {
