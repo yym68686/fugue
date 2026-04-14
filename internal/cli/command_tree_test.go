@@ -30,6 +30,7 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"Base URL defaults to FUGUE_BASE_URL, then FUGUE_API_URL, then https://api.fugue.pro.",
 		"Tenant is auto-selected when your key only sees one tenant.",
 		"Deploy and create flows default to the \"default\" project when you do not pass --project.",
+		"App and operation JSON output redacts secrets by default. Pass --show-secrets only when you explicitly need raw values.",
 		"deploy",
 		"app",
 		"project",
@@ -50,9 +51,15 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"fugue app domain primary set my-app www.example.com",
 		"fugue service postgres create app-db --runtime shared",
 		"fugue operation ls --app my-app",
+		"fugue operation show op_123 --show-secrets",
 		"fugue runtime access show shared",
+		"fugue runtime doctor shared",
 		"fugue project overview",
 		"fugue project images usage",
+		"fugue admin cluster status",
+		"fugue admin cluster pods --namespace kube-system",
+		"fugue admin cluster workload show kube-system deployment coredns",
+		"fugue admin cluster dns resolve api.github.com --server 10.43.0.10",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected help output to contain %q, got %q", want, out)
@@ -1495,4 +1502,332 @@ func TestRunAdminRuntimeAccessShowsSharingGrants(t *testing.T) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
 	}
+}
+
+func TestRunAppOverviewRedactsSecretsByDefault(t *testing.T) {
+	t.Parallel()
+
+	server := newAppOverviewSecretFixtureServer(t)
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "overview", "demo",
+		"-o", "json",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app overview: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{
+		`"repo_auth_token": "[redacted]"`,
+		`"DB_PASSWORD": "[redacted]"`,
+		`"content": "[redacted]"`,
+		`"seed_content": "[redacted]"`,
+		`"password": "[redacted]"`,
+		`"DATABASE_URL": "[redacted]"`,
+		`"OP_SECRET": "[redacted]"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected redacted overview output to contain %q, got %q", want, out)
+		}
+	}
+	for _, secret := range []string{
+		"repo-token-123",
+		"db-secret-123",
+		"TOKEN=runtime-secret",
+		"seed-secret-123",
+		"service-password-123",
+		"postgres://demo:binding-secret-123@db",
+		"operation-secret-123",
+	} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("expected overview output to redact %q, got %q", secret, out)
+		}
+	}
+}
+
+func TestRunAppOverviewShowSecretsOptIn(t *testing.T) {
+	t.Parallel()
+
+	server := newAppOverviewSecretFixtureServer(t)
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "overview", "demo",
+		"--show-secrets",
+		"-o", "json",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app overview --show-secrets: %v", err)
+	}
+
+	out := stdout.String()
+	for _, secret := range []string{
+		`"repo_auth_token": "repo-token-123"`,
+		`"DB_PASSWORD": "db-secret-123"`,
+		`"content": "TOKEN=runtime-secret\n"`,
+		`"seed_content": "seed-secret-123"`,
+		`"password": "service-password-123"`,
+		`"DATABASE_URL": "postgres://demo:binding-secret-123@db"`,
+		`"OP_SECRET": "operation-secret-123"`,
+	} {
+		if !strings.Contains(out, secret) {
+			t.Fatalf("expected overview output to contain %q, got %q", secret, out)
+		}
+	}
+}
+
+func TestRunOperationListRedactsSecretsByDefault(t *testing.T) {
+	t.Parallel()
+
+	server := newOperationSecretFixtureServer(t)
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"operation", "ls",
+		"--app", "demo",
+		"-o", "json",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run operation ls: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{
+		`"password": "[redacted]"`,
+		`"OP_SECRET": "[redacted]"`,
+		`"repo_auth_token": "[redacted]"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected redacted operation output to contain %q, got %q", want, out)
+		}
+	}
+	for _, secret := range []string{
+		"operation-db-password-123",
+		"operation-secret-123",
+		"operation-repo-token-123",
+	} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("expected operation output to redact %q, got %q", secret, out)
+		}
+	}
+}
+
+func TestRunOperationShowSecretsOptIn(t *testing.T) {
+	t.Parallel()
+
+	server := newOperationSecretFixtureServer(t)
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"operation", "show", "op_123",
+		"--show-secrets",
+		"-o", "json",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run operation show --show-secrets: %v", err)
+	}
+
+	out := stdout.String()
+	for _, secret := range []string{
+		`"password": "operation-db-password-123"`,
+		`"OP_SECRET": "operation-secret-123"`,
+		`"repo_auth_token": "operation-repo-token-123"`,
+	} {
+		if !strings.Contains(out, secret) {
+			t.Fatalf("expected operation output to contain %q, got %q", secret, out)
+		}
+	}
+}
+
+func TestRunRuntimeDoctorManagedSharedIncludesLocationNodes(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes":
+			_, _ = w.Write([]byte(`{"runtimes":[{"id":"runtime_managed_shared","tenant_id":"tenant_123","name":"shared","type":"managed-shared","status":"active","endpoint":"https://shared.example.com","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes/runtime_managed_shared":
+			_, _ = w.Write([]byte(`{"runtime":{"id":"runtime_managed_shared","tenant_id":"tenant_123","name":"shared","type":"managed-shared","status":"active","endpoint":"https://shared.example.com","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/nodes":
+			_, _ = w.Write([]byte(`{"cluster_nodes":[{"name":"gcp3","status":"ready","runtime_id":"runtime_managed_shared_loc_gcp3","conditions":{"Ready":{"status":"True"}},"created_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
+			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"runtime", "doctor", "shared",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run runtime doctor: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"runtime=shared", "cluster_nodes=1", "gcp3"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAdminClusterStatusShowsDeployWorkflow(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/control-plane":
+			_, _ = w.Write([]byte(`{
+				"control_plane":{
+					"namespace":"fugue-system",
+					"release_instance":"fugue",
+					"version":"deadbeef",
+					"status":"ready",
+					"observed_at":"2026-04-14T00:00:00Z",
+					"deploy_workflow":{
+						"repository":"acme/fugue",
+						"workflow":"deploy-control-plane.yml",
+						"status":"completed",
+						"conclusion":"success",
+						"run_number":42,
+						"head_sha":"deadbeef",
+						"head_branch":"main",
+						"html_url":"https://github.com/acme/fugue/actions/runs/42",
+						"observed_at":"2026-04-14T00:00:00Z"
+					},
+					"components":[]
+				}
+			}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"admin", "cluster", "status",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run admin cluster status: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{
+		"deploy_workflow_repository=acme/fugue",
+		"deploy_workflow=deploy-control-plane.yml",
+		"deploy_workflow_status=completed",
+		"deploy_workflow_run_number=42",
+		"deploy_workflow_head_sha=deadbeef",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAdminClusterPodsListsSystemPods(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/pods":
+			if got := r.URL.Query().Get("namespace"); got != "kube-system" {
+				t.Fatalf("expected namespace filter kube-system, got %q", got)
+			}
+			_, _ = w.Write([]byte(`{"cluster_pods":[{"namespace":"kube-system","name":"coredns-abc","phase":"Running","ready":true,"node_name":"gcp1","owner":{"kind":"ReplicaSet","name":"coredns-85f7d9b4"},"containers":[{"name":"coredns","image":"coredns/coredns:v1.11.1","ready":true,"restart_count":1,"state":"running"}]}]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"admin", "cluster", "pods",
+		"--namespace", "kube-system",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run admin cluster pods: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"kube-system", "coredns-abc", "gcp1", "ReplicaSet/coredns-85f7d9b4"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func newAppOverviewSecretFixtureServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","source":{"type":"github-private","repo_url":"https://github.com/acme/demo","repo_auth_token":"repo-token-123"},"spec":{"image":"ghcr.io/acme/demo:latest","runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_runtime_id":"runtime_managed_shared","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","source":{"type":"github-private","repo_url":"https://github.com/acme/demo","repo_auth_token":"repo-token-123"},"spec":{"image":"ghcr.io/acme/demo:latest","runtime_id":"runtime_managed_shared","replicas":1,"env":{"DB_PASSWORD":"db-secret-123"},"files":[{"path":"/app/.env","content":"TOKEN=runtime-secret\n","secret":true}],"persistent_storage":{"storage_size":"10Gi","mounts":[{"kind":"file","path":"/data/seed.txt","seed_content":"seed-secret-123","secret":true}]},"postgres":{"database":"demo","user":"demo","password":"service-password-123"}},"status":{"phase":"ready","current_runtime_id":"runtime_managed_shared","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/domains":
+			_, _ = w.Write([]byte(`{"domains":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/bindings":
+			_, _ = w.Write([]byte(`{"bindings":[{"id":"binding_123","tenant_id":"tenant_123","app_id":"app_123","service_id":"svc_123","alias":"postgres","env":{"DATABASE_URL":"postgres://demo:binding-secret-123@db"},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}],"backing_services":[{"id":"svc_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo-db","type":"postgres","provisioner":"managed","status":"active","spec":{"postgres":{"runtime_id":"runtime_managed_shared","database":"demo","user":"demo","password":"service-password-123"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations":
+			_, _ = w.Write([]byte(`{"operations":[{"id":"op_123","tenant_id":"tenant_123","app_id":"app_123","type":"deploy","status":"completed","execution_mode":"managed","requested_by_type":"api-key","requested_by_id":"key_123","desired_source":{"type":"github-private","repo_url":"https://github.com/acme/demo","repo_auth_token":"operation-repo-token-123"},"desired_spec":{"image":"ghcr.io/acme/demo:next","runtime_id":"runtime_managed_shared","replicas":1,"env":{"OP_SECRET":"operation-secret-123"},"postgres":{"database":"demo","user":"demo","password":"operation-db-password-123"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/images":
+			_, _ = w.Write([]byte(`{"app_id":"app_123","registry_configured":true,"summary":{"version_count":1,"current_version_count":1,"stale_version_count":0,"reclaimable_size_bytes":0},"versions":[]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+}
+
+func newOperationSecretFixtureServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"image":"ghcr.io/acme/demo:latest","runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations":
+			if got := r.URL.Query().Get("app_id"); got != "app_123" {
+				t.Fatalf("expected app_id filter app_123, got %q", got)
+			}
+			_, _ = w.Write([]byte(`{"operations":[{"id":"op_123","tenant_id":"tenant_123","app_id":"app_123","type":"deploy","status":"completed","execution_mode":"managed","requested_by_type":"api-key","requested_by_id":"key_123","desired_source":{"type":"github-private","repo_url":"https://github.com/acme/demo","repo_auth_token":"operation-repo-token-123"},"desired_spec":{"image":"ghcr.io/acme/demo:next","runtime_id":"runtime_managed_shared","replicas":1,"env":{"OP_SECRET":"operation-secret-123"},"postgres":{"database":"demo","user":"demo","password":"operation-db-password-123"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op_123":
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_123","tenant_id":"tenant_123","app_id":"app_123","type":"deploy","status":"completed","execution_mode":"managed","requested_by_type":"api-key","requested_by_id":"key_123","desired_source":{"type":"github-private","repo_url":"https://github.com/acme/demo","repo_auth_token":"operation-repo-token-123"},"desired_spec":{"image":"ghcr.io/acme/demo:next","runtime_id":"runtime_managed_shared","replicas":1,"env":{"OP_SECRET":"operation-secret-123"},"postgres":{"database":"demo","user":"demo","password":"operation-db-password-123"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
 }

@@ -28,7 +28,8 @@ func (c *CLI) newOpsCommand() *cobra.Command {
 
 func (c *CLI) newOpsListCommand() *cobra.Command {
 	opts := struct {
-		App string
+		App         string
+		ShowSecrets bool
 	}{}
 	cmd := &cobra.Command{
 		Use:     "ls",
@@ -47,6 +48,9 @@ func (c *CLI) newOpsListCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if !opts.ShowSecrets {
+				operations = redactOperationsForOutput(operations)
+			}
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"operations": operations})
 			}
@@ -54,11 +58,15 @@ func (c *CLI) newOpsListCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&opts.App, "app", "", "Limit operations to one app")
+	cmd.Flags().BoolVar(&opts.ShowSecrets, "show-secrets", false, "Show env values, passwords, and other sensitive fields")
 	return cmd
 }
 
 func (c *CLI) newOpsShowCommand() *cobra.Command {
-	return &cobra.Command{
+	opts := struct {
+		ShowSecrets bool
+	}{}
+	cmd := &cobra.Command{
 		Use:     "show <operation>",
 		Aliases: []string{"get", "status"},
 		Short:   "Show one operation",
@@ -72,17 +80,23 @@ func (c *CLI) newOpsShowCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if !opts.ShowSecrets {
+				op = redactOperationForOutput(op)
+			}
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"operation": op})
 			}
 			return renderOperation(c.stdout, op)
 		},
 	}
+	cmd.Flags().BoolVar(&opts.ShowSecrets, "show-secrets", false, "Show env values, passwords, and other sensitive fields")
+	return cmd
 }
 
 func (c *CLI) newOpsWatchCommand() *cobra.Command {
 	opts := struct {
-		App string
+		App         string
+		ShowSecrets bool
 	}{}
 	cmd := &cobra.Command{
 		Use:     "watch [operation]",
@@ -121,6 +135,9 @@ func (c *CLI) newOpsWatchCommand() *cobra.Command {
 			if len(finalOps) > 0 {
 				op = finalOps[0]
 			}
+			if !opts.ShowSecrets {
+				op = redactOperationForOutput(op)
+			}
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"operation": op})
 			}
@@ -128,6 +145,7 @@ func (c *CLI) newOpsWatchCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&opts.App, "app", "", "Watch the most recent operation for an app")
+	cmd.Flags().BoolVar(&opts.ShowSecrets, "show-secrets", false, "Show env values, passwords, and other sensitive fields")
 	return cmd
 }
 
@@ -173,6 +191,17 @@ func latestOperation(operations []model.Operation) (model.Operation, error) {
 		return sorted[i].CreatedAt.After(sorted[j].CreatedAt)
 	})
 	return sorted[0], nil
+}
+
+func redactOperationsForOutput(operations []model.Operation) []model.Operation {
+	if len(operations) == 0 {
+		return nil
+	}
+	out := make([]model.Operation, 0, len(operations))
+	for _, operation := range operations {
+		out = append(out, redactOperationForOutput(operation))
+	}
+	return out
 }
 
 func renderOperation(w io.Writer, op model.Operation) error {

@@ -10,6 +10,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	runtimeDoctorManagedSharedBaseID   = "runtime_managed_shared"
+	runtimeDoctorManagedSharedIDPrefix = "runtime_managed_shared_loc_"
+)
+
 func (c *CLI) newRuntimeCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "runtime",
@@ -523,12 +528,7 @@ func (c *CLI) newRuntimeDoctorCommand() *cobra.Command {
 			if nodesErr != nil {
 				c.progressf("warning=cluster inventory unavailable: %v", nodesErr)
 			}
-			matchingNodes := make([]model.ClusterNode, 0, 1)
-			for _, node := range nodes {
-				if strings.EqualFold(strings.TrimSpace(node.RuntimeID), strings.TrimSpace(runtimeObj.ID)) {
-					matchingNodes = append(matchingNodes, node)
-				}
-			}
+			matchingNodes := matchRuntimeDoctorClusterNodes(runtimeObj, nodes)
 			warnings := make([]string, 0, 4)
 			if !strings.EqualFold(strings.TrimSpace(runtimeObj.Status), "active") {
 				warnings = append(warnings, "runtime is not active")
@@ -568,6 +568,29 @@ func (c *CLI) newRuntimeDoctorCommand() *cobra.Command {
 			return writeClusterNodeTable(c.stdout, matchingNodes)
 		},
 	}
+}
+
+func matchRuntimeDoctorClusterNodes(runtimeObj model.Runtime, nodes []model.ClusterNode) []model.ClusterNode {
+	if len(nodes) == 0 {
+		return nil
+	}
+	runtimeID := strings.TrimSpace(runtimeObj.ID)
+	out := make([]model.ClusterNode, 0, len(nodes))
+	for _, node := range nodes {
+		nodeRuntimeID := strings.TrimSpace(node.RuntimeID)
+		if strings.EqualFold(nodeRuntimeID, runtimeID) {
+			out = append(out, node)
+			continue
+		}
+		if runtimeObj.Type != model.RuntimeTypeManagedShared {
+			continue
+		}
+		if runtimeID == runtimeDoctorManagedSharedBaseID &&
+			(strings.HasPrefix(nodeRuntimeID, runtimeDoctorManagedSharedIDPrefix) || strings.EqualFold(nodeRuntimeID, runtimeDoctorManagedSharedBaseID)) {
+			out = append(out, node)
+		}
+	}
+	return out
 }
 
 func (c *CLI) newRuntimeDeleteCommand() *cobra.Command {

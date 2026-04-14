@@ -24,7 +24,10 @@ type appOverviewSnapshot struct {
 }
 
 func (c *CLI) newAppOverviewCommand() *cobra.Command {
-	return &cobra.Command{
+	opts := struct {
+		ShowSecrets bool
+	}{}
+	cmd := &cobra.Command{
 		Use:   "overview <app>",
 		Short: "Show an app overview with related state",
 		Args:  cobra.ExactArgs(1),
@@ -37,14 +40,17 @@ func (c *CLI) newAppOverviewCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return c.renderAppOverviewSnapshot(client, snapshot, false)
+			return c.renderAppOverviewSnapshot(client, snapshot, false, opts.ShowSecrets)
 		},
 	}
+	cmd.Flags().BoolVar(&opts.ShowSecrets, "show-secrets", false, "Show env values, passwords, and other sensitive fields")
+	return cmd
 }
 
 func (c *CLI) newAppWatchCommand() *cobra.Command {
 	opts := struct {
-		Interval time.Duration
+		Interval    time.Duration
+		ShowSecrets bool
 	}{Interval: 5 * time.Second}
 	cmd := &cobra.Command{
 		Use:   "watch <app>",
@@ -57,14 +63,15 @@ func (c *CLI) newAppWatchCommand() *cobra.Command {
 			}
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
-			return c.watchAppOverview(ctx, client, args[0], opts.Interval)
+			return c.watchAppOverview(ctx, client, args[0], opts.Interval, opts.ShowSecrets)
 		},
 	}
 	cmd.Flags().DurationVar(&opts.Interval, "interval", opts.Interval, "Polling interval")
+	cmd.Flags().BoolVar(&opts.ShowSecrets, "show-secrets", false, "Show env values, passwords, and other sensitive fields")
 	return cmd
 }
 
-func (c *CLI) watchAppOverview(ctx context.Context, client *Client, ref string, interval time.Duration) error {
+func (c *CLI) watchAppOverview(ctx context.Context, client *Client, ref string, interval time.Duration, showSecrets bool) error {
 	var previousHash [32]byte
 	first := true
 	for {
@@ -73,7 +80,7 @@ func (c *CLI) watchAppOverview(ctx context.Context, client *Client, ref string, 
 			return err
 		}
 		if first || hashValue != previousHash {
-			if err := c.renderAppOverviewSnapshot(client, snapshot, !first); err != nil {
+			if err := c.renderAppOverviewSnapshot(client, snapshot, !first, showSecrets); err != nil {
 				return err
 			}
 			previousHash = hashValue
@@ -133,11 +140,14 @@ func (c *CLI) loadAppOverview(client *Client, ref string) (appOverviewSnapshot, 
 	return snapshot, nil
 }
 
-func (c *CLI) renderAppOverviewSnapshot(client *Client, snapshot appOverviewSnapshot, separate bool) error {
+func (c *CLI) renderAppOverviewSnapshot(client *Client, snapshot appOverviewSnapshot, separate bool, showSecrets bool) error {
 	if separate {
 		if _, err := fmt.Fprintln(c.stdout); err != nil {
 			return err
 		}
+	}
+	if !showSecrets {
+		snapshot = redactOverviewSnapshotForOutput(snapshot)
 	}
 	if c.wantsJSON() {
 		return writeJSON(c.stdout, snapshot)

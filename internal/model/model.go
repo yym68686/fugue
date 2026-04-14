@@ -371,12 +371,172 @@ type ControlPlaneComponent struct {
 }
 
 type ControlPlaneStatus struct {
-	Namespace       string                  `json:"namespace"`
-	ReleaseInstance string                  `json:"release_instance"`
-	Version         string                  `json:"version"`
-	Status          string                  `json:"status"`
-	ObservedAt      time.Time               `json:"observed_at"`
-	Components      []ControlPlaneComponent `json:"components"`
+	Namespace       string                   `json:"namespace"`
+	ReleaseInstance string                   `json:"release_instance"`
+	Version         string                   `json:"version"`
+	Status          string                   `json:"status"`
+	ObservedAt      time.Time                `json:"observed_at"`
+	Components      []ControlPlaneComponent  `json:"components"`
+	DeployWorkflow  *ControlPlaneWorkflowRun `json:"deploy_workflow,omitempty"`
+}
+
+type ControlPlaneWorkflowRun struct {
+	Repository string     `json:"repository"`
+	Workflow   string     `json:"workflow"`
+	Status     string     `json:"status"`
+	Conclusion string     `json:"conclusion,omitempty"`
+	RunNumber  int        `json:"run_number,omitempty"`
+	Event      string     `json:"event,omitempty"`
+	HeadBranch string     `json:"head_branch,omitempty"`
+	HeadSHA    string     `json:"head_sha"`
+	HTMLURL    string     `json:"html_url,omitempty"`
+	CreatedAt  *time.Time `json:"created_at,omitempty"`
+	UpdatedAt  *time.Time `json:"updated_at,omitempty"`
+	ObservedAt time.Time  `json:"observed_at"`
+	Error      string     `json:"error,omitempty"`
+}
+
+type ClusterPodOwner struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+}
+
+type ClusterPodContainer struct {
+	Name         string `json:"name"`
+	Image        string `json:"image"`
+	Ready        bool   `json:"ready"`
+	RestartCount int32  `json:"restart_count"`
+	State        string `json:"state"`
+	Reason       string `json:"reason,omitempty"`
+	Message      string `json:"message,omitempty"`
+}
+
+type ClusterPod struct {
+	Namespace  string                `json:"namespace"`
+	Name       string                `json:"name"`
+	Phase      string                `json:"phase"`
+	NodeName   string                `json:"node_name,omitempty"`
+	PodIP      string                `json:"pod_ip,omitempty"`
+	HostIP     string                `json:"host_ip,omitempty"`
+	QOSClass   string                `json:"qos_class,omitempty"`
+	Owner      *ClusterPodOwner      `json:"owner,omitempty"`
+	Labels     map[string]string     `json:"labels,omitempty"`
+	Ready      bool                  `json:"ready"`
+	StartTime  *time.Time            `json:"start_time,omitempty"`
+	Containers []ClusterPodContainer `json:"containers"`
+}
+
+type ClusterEvent struct {
+	Namespace       string     `json:"namespace"`
+	Name            string     `json:"name"`
+	Type            string     `json:"type"`
+	Reason          string     `json:"reason"`
+	Message         string     `json:"message"`
+	ObjectKind      string     `json:"object_kind"`
+	ObjectName      string     `json:"object_name"`
+	ObjectNamespace string     `json:"object_namespace,omitempty"`
+	Count           int32      `json:"count,omitempty"`
+	FirstTimestamp  *time.Time `json:"first_timestamp,omitempty"`
+	LastTimestamp   *time.Time `json:"last_timestamp,omitempty"`
+	EventTime       *time.Time `json:"event_time,omitempty"`
+}
+
+type ClusterDNSAnswer struct {
+	Type  string `json:"type"`
+	Value string `json:"value"`
+}
+
+type ClusterDNSResolveResult struct {
+	Name       string             `json:"name"`
+	Server     string             `json:"server,omitempty"`
+	RecordType string             `json:"record_type"`
+	Answers    []ClusterDNSAnswer `json:"answers"`
+	ObservedAt time.Time          `json:"observed_at"`
+	Error      string             `json:"error,omitempty"`
+}
+
+type ClusterNetworkConnectResult struct {
+	Target            string    `json:"target"`
+	Network           string    `json:"network,omitempty"`
+	Success           bool      `json:"success"`
+	DurationMillis    int64     `json:"duration_ms"`
+	RemoteAddr        string    `json:"remote_addr,omitempty"`
+	ResolvedAddresses []string  `json:"resolved_addresses,omitempty"`
+	ObservedAt        time.Time `json:"observed_at,omitempty"`
+	Error             string    `json:"error,omitempty"`
+}
+
+type ClusterTLSPeerCertificate struct {
+	Subject     string    `json:"subject"`
+	Issuer      string    `json:"issuer"`
+	SHA256      string    `json:"sha256"`
+	DNSNames    []string  `json:"dns_names,omitempty"`
+	IPAddresses []string  `json:"ip_addresses,omitempty"`
+	NotBefore   time.Time `json:"not_before,omitempty"`
+	NotAfter    time.Time `json:"not_after,omitempty"`
+}
+
+type ClusterTLSProbeResult struct {
+	Target             string                      `json:"target"`
+	ServerName         string                      `json:"server_name,omitempty"`
+	Success            bool                        `json:"success"`
+	DurationMillis     int64                       `json:"duration_ms"`
+	Version            string                      `json:"version,omitempty"`
+	CipherSuite        string                      `json:"cipher_suite,omitempty"`
+	NegotiatedProtocol string                      `json:"negotiated_protocol,omitempty"`
+	Verified           bool                        `json:"verified,omitempty"`
+	VerificationError  string                      `json:"verification_error,omitempty"`
+	ObservedAt         time.Time                   `json:"observed_at,omitempty"`
+	PeerCertificates   []ClusterTLSPeerCertificate `json:"peer_certificates,omitempty"`
+	Error              string                      `json:"error,omitempty"`
+}
+
+type ClusterWorkloadCondition struct {
+	Type    string `json:"type"`
+	Status  string `json:"status"`
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+type ClusterWorkloadContainer struct {
+	Name  string `json:"name"`
+	Image string `json:"image"`
+}
+
+type ClusterWorkloadDetail struct {
+	APIVersion        string                     `json:"api_version"`
+	Kind              string                     `json:"kind"`
+	Namespace         string                     `json:"namespace"`
+	Name              string                     `json:"name"`
+	Selector          string                     `json:"selector,omitempty"`
+	Labels            map[string]string          `json:"labels,omitempty"`
+	Annotations       map[string]string          `json:"annotations,omitempty"`
+	NodeSelector      map[string]string          `json:"node_selector,omitempty"`
+	Tolerations       []string                   `json:"tolerations,omitempty"`
+	Containers        []ClusterWorkloadContainer `json:"containers,omitempty"`
+	InitContainers    []ClusterWorkloadContainer `json:"init_containers,omitempty"`
+	DesiredReplicas   *int32                     `json:"desired_replicas,omitempty"`
+	ReadyReplicas     *int32                     `json:"ready_replicas,omitempty"`
+	UpdatedReplicas   *int32                     `json:"updated_replicas,omitempty"`
+	AvailableReplicas *int32                     `json:"available_replicas,omitempty"`
+	CurrentReplicas   *int32                     `json:"current_replicas,omitempty"`
+	Conditions        []ClusterWorkloadCondition `json:"conditions,omitempty"`
+	Pods              []ClusterPod               `json:"pods,omitempty"`
+	Manifest          map[string]any             `json:"manifest,omitempty"`
+}
+
+type ClusterRolloutStatus struct {
+	Kind              string                     `json:"kind"`
+	Namespace         string                     `json:"namespace"`
+	Name              string                     `json:"name"`
+	Status            string                     `json:"status"`
+	DesiredReplicas   *int32                     `json:"desired_replicas,omitempty"`
+	ReadyReplicas     *int32                     `json:"ready_replicas,omitempty"`
+	UpdatedReplicas   *int32                     `json:"updated_replicas,omitempty"`
+	AvailableReplicas *int32                     `json:"available_replicas,omitempty"`
+	Message           string                     `json:"message,omitempty"`
+	Conditions        []ClusterWorkloadCondition `json:"conditions,omitempty"`
+	ObservedAt        time.Time                  `json:"observed_at,omitempty"`
 }
 
 type AppSource struct {

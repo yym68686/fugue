@@ -72,6 +72,7 @@ Quick start for most users:
 	  - Base URL defaults to FUGUE_BASE_URL, then FUGUE_API_URL, then ` + defaultCloudBaseURL + `.
 	  - Tenant is auto-selected when your key only sees one tenant.
 	  - Deploy and create flows default to the "default" project when you do not pass --project.
+	  - App and operation JSON output redacts secrets by default. Pass --show-secrets only when you explicitly need raw values.
 	  - Prefer names. Use --show-ids when you need internal identifiers in text output.
 	  - ID flags stay hidden as compatibility escape hatches.
 
@@ -113,12 +114,20 @@ Environment variables:
 	  fugue service ls
 	  fugue service postgres create app-db --runtime shared
 	  fugue operation ls --app my-app
+	  fugue operation show op_123 --show-secrets
 	  fugue runtime enroll create edge-a
 	  fugue runtime access show shared
+	  fugue runtime doctor shared
 	  fugue project overview
 	  fugue project watch marketing
 	  fugue project edit marketing --description "landing pages"
 	  fugue project images usage marketing
+	  fugue admin cluster status
+	  fugue admin cluster pods --namespace kube-system
+	  fugue admin cluster workload show kube-system deployment coredns
+	  fugue admin cluster dns resolve api.github.com --server 10.43.0.10
+	  fugue admin cluster net connect api.github.com:443
+	  fugue admin cluster tls probe 104.18.32.47:443 --server-name api.github.com
 	`),
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			return c.validateOutput()

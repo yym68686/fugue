@@ -24,6 +24,11 @@ type Server struct {
 	log                          *log.Logger
 	controlPlaneNamespace        string
 	controlPlaneReleaseInstance  string
+	controlPlaneGitHubRepository string
+	controlPlaneGitHubWorkflow   string
+	controlPlaneGitHubAPIURL     string
+	controlPlaneGitHubToken      string
+	controlPlaneHTTPClient       *http.Client
 	appBaseDomain                string
 	customDomainBaseDomain       string
 	apiPublicDomain              string
@@ -66,6 +71,11 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		log:                          logger,
 		controlPlaneNamespace:        strings.TrimSpace(cfg.ControlPlaneNamespace),
 		controlPlaneReleaseInstance:  strings.TrimSpace(cfg.ControlPlaneReleaseInstance),
+		controlPlaneGitHubRepository: strings.TrimSpace(cfg.ControlPlaneGitHubRepository),
+		controlPlaneGitHubWorkflow:   strings.TrimSpace(cfg.ControlPlaneGitHubWorkflow),
+		controlPlaneGitHubAPIURL:     strings.TrimRight(strings.TrimSpace(cfg.ControlPlaneGitHubAPIURL), "/"),
+		controlPlaneGitHubToken:      strings.TrimSpace(cfg.ControlPlaneGitHubToken),
+		controlPlaneHTTPClient:       &http.Client{Timeout: 10 * time.Second},
 		appBaseDomain:                strings.TrimSpace(strings.ToLower(cfg.AppBaseDomain)),
 		customDomainBaseDomain:       defaultCustomDomainBaseDomain(cfg.AppBaseDomain),
 		apiPublicDomain:              strings.TrimSpace(strings.ToLower(cfg.APIPublicDomain)),
@@ -103,6 +113,12 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 	}
 	if server.clusterJoinRegistryEndpoint == "" {
 		server.clusterJoinRegistryEndpoint = server.registryPullBase
+	}
+	if server.controlPlaneGitHubAPIURL == "" {
+		server.controlPlaneGitHubAPIURL = "https://api.github.com"
+	}
+	if server.controlPlaneGitHubWorkflow == "" {
+		server.controlPlaneGitHubWorkflow = "deploy-control-plane.yml"
 	}
 	server.reservedAppHosts = reservedAppHosts(server.apiPublicDomain, server.registryPushBase, server.registryPullBase)
 	server.ready.Store(true)

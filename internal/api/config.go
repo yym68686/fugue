@@ -5,6 +5,10 @@ import "time"
 type ServerConfig struct {
 	ControlPlaneNamespace        string
 	ControlPlaneReleaseInstance  string
+	ControlPlaneGitHubRepository string
+	ControlPlaneGitHubWorkflow   string
+	ControlPlaneGitHubAPIURL     string
+	ControlPlaneGitHubToken      string
 	AppBaseDomain                string
 	APIPublicDomain              string
 	EdgeTLSAskToken              string

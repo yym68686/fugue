@@ -68,8 +68,24 @@ Common workflows:
 - `fugue app failover status my-app`
 - `fugue app failover run my-app --to runtime-b`
 - `fugue runtime enroll create edge-a`
+- `fugue runtime doctor shared`
 - `fugue project images usage marketing`
 - `fugue operation ls --app my-app`
+- `fugue operation show op_123 --show-secrets`
+- `fugue admin cluster status`
+- `fugue admin cluster pods --namespace kube-system`
+- `fugue admin cluster events --namespace kube-system --limit 20`
+- `fugue admin cluster logs --namespace kube-system --pod coredns-abc --container coredns --tail 200`
+- `fugue admin cluster exec --namespace kube-system --pod coredns-abc -- cat /etc/resolv.conf`
+- `fugue admin cluster workload show kube-system deployment coredns`
+- `fugue admin cluster rollout status kube-system deployment coredns`
+- `fugue admin cluster dns resolve api.github.com --server 10.43.0.10`
+- `fugue admin cluster net connect api.github.com:443`
+- `fugue admin cluster tls probe 104.18.32.47:443 --server-name api.github.com`
+
+`fugue app overview` and `fugue operation ls/show/watch` now redact env values, passwords, repo tokens, and secret-backed file content by default in JSON output. Pass `--show-secrets` only when you explicitly need the raw values during a debugging session.
+
+When `FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY` is configured on the API, `fugue admin cluster status` also shows the latest `deploy-control-plane` workflow run so you can correlate control-plane image rollouts with cluster state.
 
 `build-cli` packages CLI archives on relevant pushes to `main`, and `release-cli` publishes them as GitHub Release assets when a `v*` tag is pushed.
 

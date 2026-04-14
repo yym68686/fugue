@@ -751,6 +751,238 @@ paths:
                 $ref: "#/components/schemas/ControlPlaneStatusResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/cluster/pods:
+    get:
+      operationId: listClusterPods
+      summary: List Cluster Pods
+      tags: [Cluster]
+      x-fugue-handler: handleListClusterPods
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/NamespaceQueryParam"
+        - $ref: "#/components/parameters/NodeQueryParam"
+        - $ref: "#/components/parameters/LabelSelectorQueryParam"
+        - $ref: "#/components/parameters/IncludeTerminatedQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterPodListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/cluster/events:
+    get:
+      operationId: listClusterEvents
+      summary: List Cluster Events
+      tags: [Cluster]
+      x-fugue-handler: handleListClusterEvents
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/NamespaceQueryParam"
+        - $ref: "#/components/parameters/InvolvedObjectKindQueryParam"
+        - $ref: "#/components/parameters/InvolvedObjectNameQueryParam"
+        - $ref: "#/components/parameters/EventTypeQueryParam"
+        - $ref: "#/components/parameters/EventReasonQueryParam"
+        - $ref: "#/components/parameters/LimitQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterEventListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/cluster/logs:
+    get:
+      operationId: getClusterLogs
+      summary: Get Cluster Logs
+      tags: [Cluster]
+      x-fugue-handler: handleGetClusterLogs
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/NamespaceQueryParam"
+        - $ref: "#/components/parameters/PodQueryParam"
+        - $ref: "#/components/parameters/ContainerQueryParam"
+        - $ref: "#/components/parameters/TailLinesQueryParam"
+        - $ref: "#/components/parameters/PreviousQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterLogsResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/cluster/exec:
+    post:
+      operationId: execClusterPod
+      summary: Exec Cluster Pod
+      tags: [Cluster]
+      x-fugue-handler: handleExecClusterPod
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClusterExecRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterExecResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/cluster/dns/resolve:
+    get:
+      operationId: resolveClusterDNS
+      summary: Resolve Cluster DNS
+      tags: [Cluster]
+      x-fugue-handler: handleResolveClusterDNS
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: name
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/DNSServerQueryParam"
+        - $ref: "#/components/parameters/RecordTypeQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterDNSResolveResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/cluster/net/connect:
+    get:
+      operationId: connectClusterNetwork
+      summary: Connect Cluster Network
+      tags: [Cluster]
+      x-fugue-handler: handleConnectClusterNetwork
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: target
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/TimeoutMillisQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterNetworkConnectResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/cluster/tls/probe:
+    get:
+      operationId: probeClusterTLS
+      summary: Probe Cluster TLS
+      tags: [Cluster]
+      x-fugue-handler: handleProbeClusterTLS
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: target
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/ServerNameQueryParam"
+        - $ref: "#/components/parameters/TimeoutMillisQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterTLSProbeResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/cluster/workloads/{namespace}/{kind}/{name}:
+    get:
+      operationId: getClusterWorkload
+      summary: Get Cluster Workload
+      tags: [Cluster]
+      x-fugue-handler: handleGetClusterWorkload
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: namespace
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: kind
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: name
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterWorkloadResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/cluster/rollouts/{namespace}/{kind}/{name}:
+    get:
+      operationId: getClusterRolloutStatus
+      summary: Get Cluster Rollout Status
+      tags: [Cluster]
+      x-fugue-handler: handleGetClusterRolloutStatus
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: namespace
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: kind
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: name
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterRolloutStatusResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/nodes:
     get:
       operationId: listNodes
@@ -2600,6 +2832,92 @@ components:
     PodQueryParam:
       in: query
       name: pod
+      required: false
+      schema:
+        type: string
+    NamespaceQueryParam:
+      in: query
+      name: namespace
+      required: false
+      schema:
+        type: string
+    ContainerQueryParam:
+      in: query
+      name: container
+      required: false
+      schema:
+        type: string
+    NodeQueryParam:
+      in: query
+      name: node
+      required: false
+      schema:
+        type: string
+    LabelSelectorQueryParam:
+      in: query
+      name: label_selector
+      required: false
+      schema:
+        type: string
+    IncludeTerminatedQueryParam:
+      in: query
+      name: include_terminated
+      required: false
+      schema:
+        type: boolean
+    InvolvedObjectKindQueryParam:
+      in: query
+      name: kind
+      required: false
+      schema:
+        type: string
+    InvolvedObjectNameQueryParam:
+      in: query
+      name: name
+      required: false
+      schema:
+        type: string
+    EventTypeQueryParam:
+      in: query
+      name: type
+      required: false
+      schema:
+        type: string
+    EventReasonQueryParam:
+      in: query
+      name: reason
+      required: false
+      schema:
+        type: string
+    LimitQueryParam:
+      in: query
+      name: limit
+      required: false
+      schema:
+        type: integer
+        format: int32
+    DNSServerQueryParam:
+      in: query
+      name: server
+      required: false
+      schema:
+        type: string
+    RecordTypeQueryParam:
+      in: query
+      name: type
+      required: false
+      schema:
+        type: string
+    TimeoutMillisQueryParam:
+      in: query
+      name: timeout_ms
+      required: false
+      schema:
+        type: integer
+        format: int32
+    ServerNameQueryParam:
+      in: query
+      name: server_name
       required: false
       schema:
         type: string
@@ -4489,6 +4807,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ControlPlaneComponent"
+        deploy_workflow:
+          $ref: "#/components/schemas/ControlPlaneWorkflowRun"
     ControlPlaneStatusResponse:
       type: object
       additionalProperties: false
@@ -4496,6 +4816,439 @@ components:
       properties:
         control_plane:
           $ref: "#/components/schemas/ControlPlaneStatus"
+    ControlPlaneWorkflowRun:
+      type: object
+      additionalProperties: false
+      required: [repository, workflow, status, head_sha, observed_at]
+      properties:
+        repository:
+          type: string
+        workflow:
+          type: string
+        status:
+          type: string
+        conclusion:
+          type: string
+        run_number:
+          type: integer
+          format: int32
+        event:
+          type: string
+        head_branch:
+          type: string
+        head_sha:
+          type: string
+        html_url:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        observed_at:
+          type: string
+          format: date-time
+        error:
+          type: string
+    ClusterPodOwner:
+      type: object
+      additionalProperties: false
+      required: [kind, name]
+      properties:
+        kind:
+          type: string
+        name:
+          type: string
+    ClusterPodContainer:
+      type: object
+      additionalProperties: false
+      required: [name, image, ready, restart_count, state]
+      properties:
+        name:
+          type: string
+        image:
+          type: string
+        ready:
+          type: boolean
+        restart_count:
+          type: integer
+          format: int32
+        state:
+          type: string
+        reason:
+          type: string
+        message:
+          type: string
+    ClusterPod:
+      type: object
+      additionalProperties: false
+      required: [namespace, name, phase, ready, containers]
+      properties:
+        namespace:
+          type: string
+        name:
+          type: string
+        phase:
+          type: string
+        node_name:
+          type: string
+        pod_ip:
+          type: string
+        host_ip:
+          type: string
+        qos_class:
+          type: string
+        owner:
+          $ref: "#/components/schemas/ClusterPodOwner"
+        labels:
+          $ref: "#/components/schemas/StringMap"
+        ready:
+          type: boolean
+        start_time:
+          type: string
+          format: date-time
+        containers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterPodContainer"
+    ClusterPodListResponse:
+      type: object
+      additionalProperties: false
+      required: [cluster_pods]
+      properties:
+        cluster_pods:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterPod"
+    ClusterEvent:
+      type: object
+      additionalProperties: false
+      required: [namespace, name, type, reason, message, object_kind, object_name]
+      properties:
+        namespace:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+        reason:
+          type: string
+        message:
+          type: string
+        object_kind:
+          type: string
+        object_name:
+          type: string
+        object_namespace:
+          type: string
+        count:
+          type: integer
+          format: int32
+        first_timestamp:
+          type: string
+          format: date-time
+        last_timestamp:
+          type: string
+          format: date-time
+        event_time:
+          type: string
+          format: date-time
+    ClusterEventListResponse:
+      type: object
+      additionalProperties: false
+      required: [events]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterEvent"
+    ClusterLogsResponse:
+      type: object
+      additionalProperties: false
+      required: [namespace, pod, logs]
+      properties:
+        namespace:
+          type: string
+        pod:
+          type: string
+        container:
+          type: string
+        logs:
+          type: string
+    ClusterExecRequest:
+      type: object
+      additionalProperties: false
+      required: [namespace, pod, command]
+      properties:
+        namespace:
+          type: string
+        pod:
+          type: string
+        container:
+          type: string
+        command:
+          type: array
+          items:
+            type: string
+    ClusterExecResponse:
+      type: object
+      additionalProperties: false
+      required: [namespace, pod, command, output]
+      properties:
+        namespace:
+          type: string
+        pod:
+          type: string
+        container:
+          type: string
+        command:
+          type: array
+          items:
+            type: string
+        output:
+          type: string
+    ClusterDNSAnswer:
+      type: object
+      additionalProperties: false
+      required: [type, value]
+      properties:
+        type:
+          type: string
+        value:
+          type: string
+    ClusterDNSResolveResponse:
+      type: object
+      additionalProperties: false
+      required: [name, record_type, answers, observed_at]
+      properties:
+        name:
+          type: string
+        server:
+          type: string
+        record_type:
+          type: string
+        answers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterDNSAnswer"
+        observed_at:
+          type: string
+          format: date-time
+        error:
+          type: string
+    ClusterNetworkConnectResponse:
+      type: object
+      additionalProperties: false
+      required: [target, success, duration_ms]
+      properties:
+        target:
+          type: string
+        network:
+          type: string
+        success:
+          type: boolean
+        duration_ms:
+          type: integer
+          format: int64
+        remote_addr:
+          type: string
+        resolved_addresses:
+          type: array
+          items:
+            type: string
+        observed_at:
+          type: string
+          format: date-time
+        error:
+          type: string
+    ClusterTLSPeerCertificate:
+      type: object
+      additionalProperties: false
+      required: [subject, issuer, sha256]
+      properties:
+        subject:
+          type: string
+        issuer:
+          type: string
+        sha256:
+          type: string
+        dns_names:
+          type: array
+          items:
+            type: string
+        ip_addresses:
+          type: array
+          items:
+            type: string
+        not_before:
+          type: string
+          format: date-time
+        not_after:
+          type: string
+          format: date-time
+    ClusterTLSProbeResponse:
+      type: object
+      additionalProperties: false
+      required: [target, success, duration_ms]
+      properties:
+        target:
+          type: string
+        server_name:
+          type: string
+        success:
+          type: boolean
+        duration_ms:
+          type: integer
+          format: int64
+        version:
+          type: string
+        cipher_suite:
+          type: string
+        negotiated_protocol:
+          type: string
+        verified:
+          type: boolean
+        verification_error:
+          type: string
+        observed_at:
+          type: string
+          format: date-time
+        peer_certificates:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterTLSPeerCertificate"
+        error:
+          type: string
+    ClusterWorkloadCondition:
+      type: object
+      additionalProperties: false
+      required: [type, status]
+      properties:
+        type:
+          type: string
+        status:
+          type: string
+        reason:
+          type: string
+        message:
+          type: string
+    ClusterWorkloadContainer:
+      type: object
+      additionalProperties: false
+      required: [name, image]
+      properties:
+        name:
+          type: string
+        image:
+          type: string
+    ClusterWorkloadDetail:
+      type: object
+      additionalProperties: false
+      required: [api_version, kind, namespace, name]
+      properties:
+        api_version:
+          type: string
+        kind:
+          type: string
+        namespace:
+          type: string
+        name:
+          type: string
+        selector:
+          type: string
+        labels:
+          $ref: "#/components/schemas/StringMap"
+        annotations:
+          $ref: "#/components/schemas/StringMap"
+        node_selector:
+          $ref: "#/components/schemas/StringMap"
+        tolerations:
+          type: array
+          items:
+            type: string
+        containers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterWorkloadContainer"
+        init_containers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterWorkloadContainer"
+        desired_replicas:
+          type: integer
+          format: int32
+        ready_replicas:
+          type: integer
+          format: int32
+        updated_replicas:
+          type: integer
+          format: int32
+        available_replicas:
+          type: integer
+          format: int32
+        current_replicas:
+          type: integer
+          format: int32
+        conditions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterWorkloadCondition"
+        pods:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterPod"
+        manifest:
+          type: object
+          additionalProperties: true
+    ClusterWorkloadResponse:
+      type: object
+      additionalProperties: false
+      required: [workload]
+      properties:
+        workload:
+          $ref: "#/components/schemas/ClusterWorkloadDetail"
+    ClusterRolloutStatus:
+      type: object
+      additionalProperties: false
+      required: [kind, namespace, name, status]
+      properties:
+        kind:
+          type: string
+        namespace:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+        desired_replicas:
+          type: integer
+          format: int32
+        ready_replicas:
+          type: integer
+          format: int32
+        updated_replicas:
+          type: integer
+          format: int32
+        available_replicas:
+          type: integer
+          format: int32
+        message:
+          type: string
+        conditions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterWorkloadCondition"
+        observed_at:
+          type: string
+          format: date-time
+    ClusterRolloutStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [rollout]
+      properties:
+        rollout:
+          $ref: "#/components/schemas/ClusterRolloutStatus"
     RuntimeListResponse:
       type: object
       additionalProperties: false

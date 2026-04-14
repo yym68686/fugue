@@ -854,6 +854,15 @@ func (c *CLI) newAdminClusterCommand() *cobra.Command {
 	cmd.AddCommand(
 		c.newAdminClusterNodesCommand(),
 		c.newAdminClusterStatusCommand(),
+		c.newAdminClusterPodsCommand(),
+		c.newAdminClusterEventsCommand(),
+		c.newAdminClusterLogsCommand(),
+		c.newAdminClusterExecCommand(),
+		c.newAdminClusterDNSCommand(),
+		c.newAdminClusterNetCommand(),
+		c.newAdminClusterTLSCommand(),
+		c.newAdminClusterWorkloadCommand(),
+		c.newAdminClusterRolloutCommand(),
 		c.newAdminClusterJoinScriptCommand(),
 	)
 	return cmd
@@ -904,6 +913,21 @@ func (c *CLI) newAdminClusterStatusCommand() *cobra.Command {
 				kvPair{Key: "observed_at", Value: formatTime(status.ObservedAt)},
 			); err != nil {
 				return err
+			}
+			if status.DeployWorkflow != nil {
+				if err := writeKeyValues(c.stdout,
+					kvPair{Key: "deploy_workflow_repository", Value: status.DeployWorkflow.Repository},
+					kvPair{Key: "deploy_workflow", Value: status.DeployWorkflow.Workflow},
+					kvPair{Key: "deploy_workflow_status", Value: status.DeployWorkflow.Status},
+					kvPair{Key: "deploy_workflow_conclusion", Value: status.DeployWorkflow.Conclusion},
+					kvPair{Key: "deploy_workflow_run_number", Value: formatInt(status.DeployWorkflow.RunNumber)},
+					kvPair{Key: "deploy_workflow_head_sha", Value: status.DeployWorkflow.HeadSHA},
+					kvPair{Key: "deploy_workflow_head_branch", Value: status.DeployWorkflow.HeadBranch},
+					kvPair{Key: "deploy_workflow_url", Value: status.DeployWorkflow.HTMLURL},
+					kvPair{Key: "deploy_workflow_error", Value: status.DeployWorkflow.Error},
+				); err != nil {
+					return err
+				}
 			}
 			if len(status.Components) == 0 {
 				return nil

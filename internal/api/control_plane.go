@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -52,6 +54,22 @@ type kubeContainer struct {
 	Image string `json:"image"`
 }
 
+type githubWorkflowRunsResponse struct {
+	WorkflowRuns []githubWorkflowRun `json:"workflow_runs"`
+}
+
+type githubWorkflowRun struct {
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	RunNumber  int    `json:"run_number"`
+	Event      string `json:"event"`
+	HeadBranch string `json:"head_branch"`
+	HeadSHA    string `json:"head_sha"`
+	HTMLURL    string `json:"html_url"`
+	CreatedAt  string `json:"created_at"`
+	UpdatedAt  string `json:"updated_at"`
+}
+
 func (s *Server) handleGetControlPlaneStatus(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	if !principal.IsPlatformAdmin() {
@@ -83,6 +101,9 @@ func (s *Server) handleGetControlPlaneStatus(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
+	}
+	if workflow := s.readControlPlaneWorkflowRun(r.Context()); workflow != nil {
+		controlPlane.DeployWorkflow = workflow
 	}
 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"control_plane": controlPlane})
@@ -324,4 +345,121 @@ func readControlPlaneStatus(components []model.ControlPlaneComponent, commonVers
 		return controlPlaneStatusReady
 	}
 	return controlPlaneStatusDegraded
+}
+
+func (s *Server) readControlPlaneWorkflowRun(ctx context.Context) *model.ControlPlaneWorkflowRun {
+	repository := strings.TrimSpace(s.controlPlaneGitHubRepository)
+	if repository == "" {
+		return nil
+	}
+
+	run := &model.ControlPlaneWorkflowRun{
+		Repository: repository,
+		Workflow:   defaultControlPlaneWorkflow(s.controlPlaneGitHubWorkflow),
+		ObservedAt: time.Now().UTC(),
+	}
+
+	apiURL, err := s.controlPlaneWorkflowRunsURL(repository, run.Workflow)
+	if err != nil {
+		run.Status = "unavailable"
+		run.Error = err.Error()
+		return run
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		run.Status = "unavailable"
+		run.Error = err.Error()
+		return run
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "fugue-api")
+	if token := strings.TrimSpace(s.controlPlaneGitHubToken); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	client := s.controlPlaneHTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		run.Status = "unavailable"
+		run.Error = err.Error()
+		return run
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		run.Status = "unavailable"
+		run.Error = fmt.Sprintf("github actions api failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return run
+	}
+
+	var payload githubWorkflowRunsResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		run.Status = "unavailable"
+		run.Error = fmt.Sprintf("decode github actions response: %v", err)
+		return run
+	}
+	if len(payload.WorkflowRuns) == 0 {
+		run.Status = "unknown"
+		run.Error = "no workflow runs found"
+		return run
+	}
+
+	latest := payload.WorkflowRuns[0]
+	run.Status = strings.TrimSpace(latest.Status)
+	run.Conclusion = strings.TrimSpace(latest.Conclusion)
+	run.RunNumber = latest.RunNumber
+	run.Event = strings.TrimSpace(latest.Event)
+	run.HeadBranch = strings.TrimSpace(latest.HeadBranch)
+	run.HeadSHA = strings.TrimSpace(latest.HeadSHA)
+	run.HTMLURL = strings.TrimSpace(latest.HTMLURL)
+	run.CreatedAt = parseOptionalRFC3339(latest.CreatedAt)
+	run.UpdatedAt = parseOptionalRFC3339(latest.UpdatedAt)
+	return run
+}
+
+func (s *Server) controlPlaneWorkflowRunsURL(repository, workflow string) (string, error) {
+	parts := strings.Split(strings.TrimSpace(repository), "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return "", fmt.Errorf("control plane github repository must be owner/repo")
+	}
+	baseURL := strings.TrimRight(strings.TrimSpace(s.controlPlaneGitHubAPIURL), "/")
+	if baseURL == "" {
+		baseURL = "https://api.github.com"
+	}
+	query := url.Values{}
+	query.Set("per_page", "1")
+	return fmt.Sprintf(
+		"%s/repos/%s/%s/actions/workflows/%s/runs?%s",
+		baseURL,
+		url.PathEscape(parts[0]),
+		url.PathEscape(parts[1]),
+		url.PathEscape(strings.TrimSpace(workflow)),
+		query.Encode(),
+	), nil
+}
+
+func defaultControlPlaneWorkflow(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "deploy-control-plane.yml"
+	}
+	return value
+}
+
+func parseOptionalRFC3339(raw string) *time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return nil
+	}
+	copy := parsed.UTC()
+	return &copy
 }

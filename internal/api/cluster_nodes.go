@@ -340,6 +340,8 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 		if ok {
 			node.RuntimeID = runtimeObj.ID
 			node.TenantID = runtimeObj.TenantID
+		} else if snapshot.runtimeID != "" {
+			node.RuntimeID = snapshot.runtimeID
 		}
 		node.Workloads = workloads
 		if principal.IsPlatformAdmin() || ok {

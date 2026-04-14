@@ -15,6 +15,10 @@ type APIConfig struct {
 	BootstrapAdminKey            string
 	ControlPlaneNamespace        string
 	ControlPlaneReleaseInstance  string
+	ControlPlaneGitHubRepository string
+	ControlPlaneGitHubWorkflow   string
+	ControlPlaneGitHubAPIURL     string
+	ControlPlaneGitHubToken      string
 	AppBaseDomain                string
 	APIPublicDomain              string
 	EdgeTLSAskToken              string
@@ -88,6 +92,10 @@ func APIFromEnv() APIConfig {
 		BootstrapAdminKey:            getenv("FUGUE_BOOTSTRAP_ADMIN_KEY", "fugue_bootstrap_admin_change_me"),
 		ControlPlaneNamespace:        getenv("FUGUE_CONTROL_PLANE_NAMESPACE", ""),
 		ControlPlaneReleaseInstance:  getenv("FUGUE_CONTROL_PLANE_RELEASE_INSTANCE", ""),
+		ControlPlaneGitHubRepository: strings.TrimSpace(os.Getenv("FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY")),
+		ControlPlaneGitHubWorkflow:   getenv("FUGUE_CONTROL_PLANE_GITHUB_WORKFLOW", "deploy-control-plane.yml"),
+		ControlPlaneGitHubAPIURL:     getenv("FUGUE_CONTROL_PLANE_GITHUB_API_URL", "https://api.github.com"),
+		ControlPlaneGitHubToken:      strings.TrimSpace(os.Getenv("FUGUE_CONTROL_PLANE_GITHUB_TOKEN")),
 		AppBaseDomain:                getenv("FUGUE_APP_BASE_DOMAIN", "fugue.pro"),
 		APIPublicDomain:              getenv("FUGUE_API_PUBLIC_DOMAIN", "api.fugue.pro"),
 		EdgeTLSAskToken:              strings.TrimSpace(os.Getenv("FUGUE_EDGE_TLS_ASK_TOKEN")),
