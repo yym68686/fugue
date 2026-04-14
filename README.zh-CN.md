@@ -60,12 +60,32 @@ fugue app ls
 - `fugue deploy github owner/repo --branch main`
 - `fugue deploy github https://github.com/example/app --private --repo-token $GITHUB_TOKEN`
 - `fugue deploy image nginx:1.27`
+- `fugue app create my-app --github owner/repo --branch main`
 - `fugue app status my-app`
+- `fugue app overview my-app`
 - `fugue app logs runtime my-app --follow`
-- `fugue app binding bind my-app postgres`
-- `fugue app continuity audit my-app`
+- `fugue app service attach my-app postgres`
+- `fugue app failover status my-app`
 - `fugue app failover run my-app --to runtime-b`
+- `fugue runtime enroll create edge-a`
+- `fugue runtime doctor shared`
+- `fugue project images usage marketing`
 - `fugue operation ls --app my-app`
+- `fugue operation show op_123 --show-secrets`
+- `fugue admin cluster status`
+- `fugue admin cluster pods --namespace kube-system`
+- `fugue admin cluster events --namespace kube-system --limit 20`
+- `fugue admin cluster logs --namespace kube-system --pod coredns-abc --container coredns --tail 200`
+- `fugue admin cluster exec --namespace kube-system --pod coredns-abc -- cat /etc/resolv.conf`
+- `fugue admin cluster workload show kube-system deployment coredns`
+- `fugue admin cluster rollout status kube-system deployment coredns`
+- `fugue admin cluster dns resolve api.github.com --server 10.43.0.10`
+- `fugue admin cluster net connect api.github.com:443`
+- `fugue admin cluster tls probe 104.18.32.47:443 --server-name api.github.com`
+
+`fugue app overview` 和 `fugue operation ls/show/watch` 在 JSON 输出里默认会脱敏 env 值、密码、repo token 和 secret 文件内容。只有在确实需要原始值排障时才显式传 `--show-secrets`。
+
+当 API 侧配置了 `FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY` 后，`fugue admin cluster status` 还会附带最近一次 `deploy-control-plane` GitHub Actions workflow run，便于把 control plane 升级和当前集群状态对上。
 
 `build-cli` 会在 `main` 上的相关变更合入后打包 CLI 压缩包，`release-cli` 会在推送 `v*` tag 时把这些压缩包发布为 GitHub Release 资产。
 

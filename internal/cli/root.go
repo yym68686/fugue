@@ -161,6 +161,7 @@ Environment variables:
 		c.newDomainCompatCommand(),
 		c.newWorkspaceCompatCommand(),
 	)
+	applyHelpDocs(cmd)
 	return cmd
 }
 

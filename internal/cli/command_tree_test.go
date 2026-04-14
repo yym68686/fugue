@@ -78,6 +78,16 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 	}
 }
 
+func TestVisibleCommandsHaveLongAndExamples(t *testing.T) {
+	t.Parallel()
+
+	root := newCLI(io.Discard, io.Discard).newRootCommand()
+	missing := undocumentedCommandsReport(root)
+	if len(missing) != 0 {
+		t.Fatalf("expected help docs for all visible commands:\n%s", strings.Join(missing, "\n"))
+	}
+}
+
 func TestRunDeployImageSupportsIntentFlags(t *testing.T) {
 	t.Parallel()
 
