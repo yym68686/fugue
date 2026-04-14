@@ -215,9 +215,17 @@ tolerations:
     operator: Exists
     effect: NoSchedule
 api:
+  # Keep the control-plane API off tenant-owned runtime nodes. When this
+  # lands on a shared app node, tenant traffic can directly inflate page-load
+  # latency for fugue-web and other callers.
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: "true"
   # Explicit non-empty tolerations prevent Helm's `default` fallback from
   # inheriting the global disk-pressure toleration onto stateless workloads.
   tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
     - key: node.kubernetes.io/not-ready
       operator: Exists
       effect: NoExecute
@@ -227,7 +235,12 @@ api:
       effect: NoExecute
       tolerationSeconds: 300
 controller:
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: "true"
   tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
     - key: node.kubernetes.io/not-ready
       operator: Exists
       effect: NoExecute
@@ -237,7 +250,12 @@ controller:
       effect: NoExecute
       tolerationSeconds: 300
 snapshotController:
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: "true"
   tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
     - key: node.kubernetes.io/not-ready
       operator: Exists
       effect: NoExecute

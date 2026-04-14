@@ -1898,6 +1898,20 @@ api:
   terminationGracePeriodSeconds: 40
   shutdownDrainDelay: "5s"
   shutdownTimeout: "25s"
+  nodeSelector:
+    "node-role.kubernetes.io/control-plane": "true"
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    - key: node.kubernetes.io/not-ready
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 300
+    - key: node.kubernetes.io/unreachable
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 300
   resources:
     requests:
       cpu: 100m
@@ -1925,6 +1939,20 @@ controller:
   migrationGuard:
     legacyControllerContainerName: "controller"
     checkInterval: "2s"
+  nodeSelector:
+    "node-role.kubernetes.io/control-plane": "true"
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    - key: node.kubernetes.io/not-ready
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 300
+    - key: node.kubernetes.io/unreachable
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 300
   resources:
     requests:
       cpu: 100m
@@ -1932,6 +1960,22 @@ controller:
     limits:
       cpu: 500m
       memory: 512Mi
+
+snapshotController:
+  nodeSelector:
+    "node-role.kubernetes.io/control-plane": "true"
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    - key: node.kubernetes.io/not-ready
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 300
+    - key: node.kubernetes.io/unreachable
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 300
 
 service:
   type: NodePort
