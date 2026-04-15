@@ -22,27 +22,28 @@ const (
 )
 
 type importUploadRequest struct {
-	AppID             string                          `json:"app_id"`
-	TenantID          string                          `json:"tenant_id"`
-	ProjectID         string                          `json:"project_id"`
-	Project           *importProjectRequest           `json:"project,omitempty"`
-	SourceDir         string                          `json:"source_dir"`
-	Name              string                          `json:"name"`
-	Description       string                          `json:"description"`
-	BuildStrategy     string                          `json:"build_strategy"`
-	RuntimeID         string                          `json:"runtime_id"`
-	Replicas          int                             `json:"replicas"`
-	NetworkMode       string                          `json:"network_mode"`
-	ServicePort       int                             `json:"service_port"`
-	DockerfilePath    string                          `json:"dockerfile_path"`
-	BuildContextDir   string                          `json:"build_context_dir"`
-	Env               map[string]string               `json:"env"`
-	ServiceEnv        map[string]map[string]string    `json:"service_env"`
-	ConfigContent     string                          `json:"config_content"`
-	Files             []model.AppFile                 `json:"files"`
-	StartupCommand    *string                         `json:"startup_command,omitempty"`
-	PersistentStorage *model.AppPersistentStorageSpec `json:"persistent_storage,omitempty"`
-	Postgres          *model.AppPostgresSpec          `json:"postgres"`
+	AppID                    string                                            `json:"app_id"`
+	TenantID                 string                                            `json:"tenant_id"`
+	ProjectID                string                                            `json:"project_id"`
+	Project                  *importProjectRequest                             `json:"project,omitempty"`
+	SourceDir                string                                            `json:"source_dir"`
+	Name                     string                                            `json:"name"`
+	Description              string                                            `json:"description"`
+	BuildStrategy            string                                            `json:"build_strategy"`
+	RuntimeID                string                                            `json:"runtime_id"`
+	Replicas                 int                                               `json:"replicas"`
+	NetworkMode              string                                            `json:"network_mode"`
+	ServicePort              int                                               `json:"service_port"`
+	DockerfilePath           string                                            `json:"dockerfile_path"`
+	BuildContextDir          string                                            `json:"build_context_dir"`
+	Env                      map[string]string                                 `json:"env"`
+	ServiceEnv               map[string]map[string]string                      `json:"service_env"`
+	ServicePersistentStorage map[string]model.ServicePersistentStorageOverride `json:"service_persistent_storage"`
+	ConfigContent            string                                            `json:"config_content"`
+	Files                    []model.AppFile                                   `json:"files"`
+	StartupCommand           *string                                           `json:"startup_command,omitempty"`
+	PersistentStorage        *model.AppPersistentStorageSpec                   `json:"persistent_storage,omitempty"`
+	Postgres                 *model.AppPostgresSpec                            `json:"postgres"`
 }
 
 func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {

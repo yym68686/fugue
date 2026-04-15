@@ -19,6 +19,7 @@ type deployCommonOptions struct {
 	Description               string
 	EnvFile                   string
 	ServiceEnvFiles           []string
+	ServiceStorageSizes       []string
 	RuntimeName               string
 	RuntimeID                 string
 	Replicas                  int
@@ -269,6 +270,7 @@ func bindCommonDeployFlags(cmd *cobra.Command, opts *deployCommonOptions, includ
 	cmd.Flags().StringVar(&opts.Description, "description", "", "App description")
 	cmd.Flags().StringVar(&opts.EnvFile, "env-file", "", "Local .env file to inject as app env")
 	cmd.Flags().StringArrayVar(&opts.ServiceEnvFiles, "service-env-file", nil, "Service-specific .env override for topology imports: <service>=<path>")
+	cmd.Flags().StringArrayVar(&opts.ServiceStorageSizes, "service-storage-size", nil, "Service-specific persistent storage size override for topology imports: <service>=<size>")
 	cmd.Flags().StringVar(&opts.RuntimeName, "runtime", "", "Runtime name. Defaults to the shared managed runtime")
 	cmd.Flags().StringVar(&opts.RuntimeID, "runtime-id", "", "Runtime ID")
 	cmd.Flags().IntVar(&opts.Replicas, "replicas", 0, "Desired replica count")
@@ -353,6 +355,13 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 	if len(serviceEnvPaths) > 0 {
 		c.progressf("Loaded %d service-specific env file override(s) for topology imports", len(serviceEnvPaths))
 	}
+	servicePersistentStorage, err := loadTopologyServicePersistentStorageOverrides(opts.ServiceStorageSizes)
+	if err != nil {
+		return err
+	}
+	if len(servicePersistentStorage) > 0 {
+		c.progressf("Loaded %d service-specific persistent storage override(s) for topology imports", len(servicePersistentStorage))
+	}
 	files, err := buildDeployFiles(workingDir, opts.FileSpecs, opts.SecretFileSpecs)
 	if err != nil {
 		return err
@@ -426,24 +435,25 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 	}
 
 	request := importUploadRequest{
-		AppID:             resolvedAppID,
-		TenantID:          tenantID,
-		SourceDir:         strings.TrimSpace(opts.SourceDir),
-		Name:              strings.TrimSpace(opts.Name),
-		Description:       strings.TrimSpace(opts.Description),
-		BuildStrategy:     strings.TrimSpace(opts.BuildStrategy),
-		RuntimeID:         strings.TrimSpace(runtimeID),
-		Replicas:          opts.Replicas,
-		NetworkMode:       deployNetworkMode(opts.Background),
-		ServicePort:       opts.ServicePort,
-		DockerfilePath:    strings.TrimSpace(opts.DockerfilePath),
-		BuildContextDir:   strings.TrimSpace(opts.BuildContextDir),
-		Env:               envVars,
-		ServiceEnv:        serviceEnv,
-		Files:             files,
-		StartupCommand:    deployStartupCommandPointer(opts.StartupCommand),
-		PersistentStorage: persistentStorage,
-		Postgres:          postgres,
+		AppID:                    resolvedAppID,
+		TenantID:                 tenantID,
+		SourceDir:                strings.TrimSpace(opts.SourceDir),
+		Name:                     strings.TrimSpace(opts.Name),
+		Description:              strings.TrimSpace(opts.Description),
+		BuildStrategy:            strings.TrimSpace(opts.BuildStrategy),
+		RuntimeID:                strings.TrimSpace(runtimeID),
+		Replicas:                 opts.Replicas,
+		NetworkMode:              deployNetworkMode(opts.Background),
+		ServicePort:              opts.ServicePort,
+		DockerfilePath:           strings.TrimSpace(opts.DockerfilePath),
+		BuildContextDir:          strings.TrimSpace(opts.BuildContextDir),
+		Env:                      envVars,
+		ServiceEnv:               serviceEnv,
+		ServicePersistentStorage: servicePersistentStorage,
+		Files:                    files,
+		StartupCommand:           deployStartupCommandPointer(opts.StartupCommand),
+		PersistentStorage:        persistentStorage,
+		Postgres:                 postgres,
 	}
 	if request.Name == "" && strings.TrimSpace(targetApp.Name) == "" {
 		request.Name = archiveBaseName
@@ -501,6 +511,13 @@ func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingD
 	if len(serviceEnvPaths) > 0 {
 		c.progressf("Loaded %d service-specific env file override(s) for topology imports", len(serviceEnvPaths))
 	}
+	servicePersistentStorage, err := loadTopologyServicePersistentStorageOverrides(opts.ServiceStorageSizes)
+	if err != nil {
+		return err
+	}
+	if len(servicePersistentStorage) > 0 {
+		c.progressf("Loaded %d service-specific persistent storage override(s) for topology imports", len(servicePersistentStorage))
+	}
 	files, err := buildDeployFiles(workingDir, opts.FileSpecs, opts.SecretFileSpecs)
 	if err != nil {
 		return err
@@ -544,6 +561,7 @@ func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingD
 		BuildContextDir:            strings.TrimSpace(opts.BuildContextDir),
 		Env:                        envVars,
 		ServiceEnv:                 serviceEnv,
+		ServicePersistentStorage:   servicePersistentStorage,
 		Files:                      files,
 		StartupCommand:             deployStartupCommandPointer(opts.StartupCommand),
 		PersistentStorage:          persistentStorage,
@@ -590,6 +608,9 @@ func (c *CLI) runDeployImage(imageRef string, opts deployImageOptions) error {
 	}
 	if len(opts.ServiceEnvFiles) > 0 {
 		return fmt.Errorf("--service-env-file is only supported for source imports")
+	}
+	if len(opts.ServiceStorageSizes) > 0 {
+		return fmt.Errorf("--service-storage-size is only supported for source imports")
 	}
 	workingDir, err := os.Getwd()
 	if err != nil {

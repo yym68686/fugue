@@ -388,6 +388,10 @@ func rewriteTopologyEnvironment(env map[string]string, hosts map[string]string) 
 	}
 	out := make(map[string]string, len(env))
 	for key, value := range env {
+		if topologyEnvKeyUsesLogicalServiceName(key) {
+			out[key] = strings.TrimSpace(value)
+			continue
+		}
 		out[key] = rewriteTopologyEnvValue(value, hosts)
 	}
 	return out
@@ -487,12 +491,23 @@ func rewriteTopologyEnvValue(value string, hosts map[string]string) string {
 }
 
 func environmentReferencesService(env map[string]string, service string) bool {
-	for _, value := range env {
+	for key, value := range env {
+		if topologyEnvKeyUsesLogicalServiceName(key) {
+			continue
+		}
 		if envValueReferencesService(value, service) {
 			return true
 		}
 	}
 	return false
+}
+
+func topologyEnvKeyUsesLogicalServiceName(key string) bool {
+	key = strings.TrimSpace(strings.ToUpper(key))
+	if key == "" {
+		return false
+	}
+	return strings.HasSuffix(key, "_COMPOSE_SERVICE")
 }
 
 func envValueReferencesService(value, service string) bool {

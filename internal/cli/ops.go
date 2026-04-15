@@ -20,6 +20,7 @@ func (c *CLI) newOpsCommand() *cobra.Command {
 	cmd.AddCommand(
 		c.newOpsListCommand(),
 		c.newOpsShowCommand(),
+		c.newOpsExplainCommand(),
 		c.newOpsWatchCommand(),
 		c.newOpsAuditCommand(),
 	)
@@ -29,6 +30,9 @@ func (c *CLI) newOpsCommand() *cobra.Command {
 func (c *CLI) newOpsListCommand() *cobra.Command {
 	opts := struct {
 		App         string
+		Project     string
+		Limit       int
+		All         bool
 		ShowSecrets bool
 	}{}
 	cmd := &cobra.Command{
@@ -36,28 +40,89 @@ func (c *CLI) newOpsListCommand() *cobra.Command {
 		Aliases: []string{"list", "history"},
 		Short:   "List operations",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(opts.App) != "" && strings.TrimSpace(opts.Project) != "" {
+				return fmt.Errorf("--app and --project cannot be used together")
+			}
+			if opts.All && opts.Limit > 0 {
+				return fmt.Errorf("--all and --limit cannot be used together")
+			}
 			client, err := c.newClient()
 			if err != nil {
 				return err
 			}
-			appID, err := c.resolveOpsAppID(client, opts.App)
+
+			var (
+				appID         string
+				operations    []model.Operation
+				appInventory  []model.App
+				needInventory = strings.TrimSpace(opts.Project) != "" || !c.wantsJSON()
+			)
+			if strings.TrimSpace(opts.App) != "" {
+				app, err := c.resolveNamedApp(client, opts.App)
+				if err != nil {
+					return err
+				}
+				appID = app.ID
+				if needInventory {
+					appInventory = []model.App{app}
+				}
+			}
+
+			operations, err = client.ListOperations(appID)
 			if err != nil {
 				return err
 			}
-			operations, err := client.ListOperations(appID)
-			if err != nil {
-				return err
+
+			if needInventory && len(appInventory) == 0 {
+				appInventory, err = client.ListApps()
+				if err != nil {
+					return err
+				}
 			}
+
+			projectID := ""
+			if strings.TrimSpace(opts.Project) != "" {
+				project, err := c.resolveNamedProject(client, opts.Project)
+				if err != nil {
+					return err
+				}
+				projectID = project.ID
+				appIDs := make(map[string]struct{})
+				for _, app := range appInventory {
+					if strings.TrimSpace(app.ProjectID) != strings.TrimSpace(projectID) {
+						continue
+					}
+					appIDs[strings.TrimSpace(app.ID)] = struct{}{}
+				}
+				operations = filterOperationsByAppIDs(operations, appIDs)
+			}
+
+			sortOperationsNewestFirst(operations)
+			totalOperations := len(operations)
+			limit := resolveOperationListLimit(opts.Limit, opts.All, appID, projectID, c.wantsJSON())
+			if limit > 0 && len(operations) > limit {
+				operations = operations[:limit]
+			}
+
 			if !opts.ShowSecrets {
 				operations = redactOperationsForOutput(operations)
 			}
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"operations": operations})
 			}
-			return writeOperationTable(c.stdout, operations)
+			if err := writeOperationTableWithApps(c.stdout, operations, mapAppNames(appInventory)); err != nil {
+				return err
+			}
+			if limit > 0 && totalOperations > len(operations) {
+				_, _ = fmt.Fprintf(c.stderr, "showing %d of %d operations; use --limit, --all, --app, or --project to narrow\n", len(operations), totalOperations)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&opts.App, "app", "", "Limit operations to one app")
+	cmd.Flags().StringVar(&opts.Project, "project", "", "Limit operations to one project")
+	cmd.Flags().IntVar(&opts.Limit, "limit", 0, "Maximum number of operations to show")
+	cmd.Flags().BoolVar(&opts.All, "all", false, "Show the full operation list without the default text-mode limit")
 	cmd.Flags().BoolVar(&opts.ShowSecrets, "show-secrets", false, "Show env values, passwords, and other sensitive fields")
 	return cmd
 }
@@ -80,13 +145,59 @@ func (c *CLI) newOpsShowCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			diagnosis, err := c.tryLoadOperationDiagnosis(client, op)
+			if err != nil {
+				return err
+			}
 			if !opts.ShowSecrets {
 				op = redactOperationForOutput(op)
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"operation": op})
+				payload := map[string]any{"operation": op}
+				if diagnosis != nil {
+					payload["diagnosis"] = diagnosis
+				}
+				return writeJSON(c.stdout, payload)
 			}
-			return renderOperation(c.stdout, op)
+			return renderOperationWithDiagnosis(c.stdout, op, diagnosis)
+		},
+	}
+	cmd.Flags().BoolVar(&opts.ShowSecrets, "show-secrets", false, "Show env values, passwords, and other sensitive fields")
+	return cmd
+}
+
+func (c *CLI) newOpsExplainCommand() *cobra.Command {
+	opts := struct {
+		ShowSecrets bool
+	}{}
+	cmd := &cobra.Command{
+		Use:     "explain <operation>",
+		Aliases: []string{"diagnose"},
+		Short:   "Explain why an operation is pending or waiting",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			op, err := client.GetOperation(args[0])
+			if err != nil {
+				return err
+			}
+			diagnosis, err := client.GetOperationDiagnosis(op.ID)
+			if err != nil {
+				return err
+			}
+			if !opts.ShowSecrets {
+				op = redactOperationForOutput(op)
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{
+					"operation": op,
+					"diagnosis": diagnosis,
+				})
+			}
+			return renderOperationWithDiagnosis(c.stdout, op, &diagnosis)
 		},
 	}
 	cmd.Flags().BoolVar(&opts.ShowSecrets, "show-secrets", false, "Show env values, passwords, and other sensitive fields")
@@ -205,6 +316,10 @@ func redactOperationsForOutput(operations []model.Operation) []model.Operation {
 }
 
 func renderOperation(w io.Writer, op model.Operation) error {
+	return renderOperationWithDiagnosis(w, op, nil)
+}
+
+func renderOperationWithDiagnosis(w io.Writer, op model.Operation, diagnosis *model.OperationDiagnosis) error {
 	pairs := []kvPair{
 		{Key: "operation_id", Value: op.ID},
 		{Key: "status", Value: op.Status},
@@ -226,5 +341,91 @@ func renderOperation(w io.Writer, op model.Operation) error {
 	if op.DesiredReplicas != nil {
 		pairs = append(pairs, kvPair{Key: "desired_replicas", Value: fmt.Sprintf("%d", *op.DesiredReplicas)})
 	}
+	if diagnosis != nil {
+		pairs = append(pairs,
+			kvPair{Key: "diagnosis_category", Value: diagnosis.Category},
+			kvPair{Key: "diagnosis_summary", Value: diagnosis.Summary},
+			kvPair{Key: "diagnosis_hint", Value: diagnosis.Hint},
+			kvPair{Key: "diagnosis_service", Value: diagnosis.Service},
+		)
+		if len(diagnosis.DependencyChain) > 0 {
+			pairs = append(pairs, kvPair{Key: "diagnosis_dependency_chain", Value: strings.Join(diagnosis.DependencyChain, " -> ")})
+		}
+		if blockedBy := formatOperationDiagnosisBlockedBy(diagnosis.BlockedBy); blockedBy != "" {
+			pairs = append(pairs, kvPair{Key: "diagnosis_blocked_by", Value: blockedBy})
+		}
+	}
 	return writeKeyValues(w, pairs...)
+}
+
+func (c *CLI) tryLoadOperationDiagnosis(client *Client, op model.Operation) (*model.OperationDiagnosis, error) {
+	switch strings.TrimSpace(op.Status) {
+	case model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent:
+		return client.TryGetOperationDiagnosis(op.ID)
+	default:
+		return nil, nil
+	}
+}
+
+func resolveOperationListLimit(requested int, showAll bool, appID, projectID string, jsonOutput bool) int {
+	if showAll {
+		return 0
+	}
+	if requested > 0 {
+		return requested
+	}
+	if jsonOutput {
+		return 0
+	}
+	if strings.TrimSpace(appID) != "" || strings.TrimSpace(projectID) != "" {
+		return 0
+	}
+	return 20
+}
+
+func filterOperationsByAppIDs(operations []model.Operation, appIDs map[string]struct{}) []model.Operation {
+	if len(appIDs) == 0 {
+		return nil
+	}
+	filtered := make([]model.Operation, 0, len(operations))
+	for _, operation := range operations {
+		if _, ok := appIDs[strings.TrimSpace(operation.AppID)]; !ok {
+			continue
+		}
+		filtered = append(filtered, operation)
+	}
+	return filtered
+}
+
+func sortOperationsNewestFirst(operations []model.Operation) {
+	sort.Slice(operations, func(i, j int) bool {
+		if operations[i].CreatedAt.Equal(operations[j].CreatedAt) {
+			return operations[i].ID < operations[j].ID
+		}
+		return operations[i].CreatedAt.After(operations[j].CreatedAt)
+	})
+}
+
+func formatOperationDiagnosisBlockedBy(blockers []model.OperationDiagnosisBlocker) string {
+	if len(blockers) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(blockers))
+	for _, blocker := range blockers {
+		label := strings.TrimSpace(blocker.OperationID)
+		if status := strings.TrimSpace(blocker.Status); status != "" {
+			label += " " + status
+		}
+		if opType := strings.TrimSpace(blocker.Type); opType != "" {
+			label += " " + opType
+		}
+		if appName := strings.TrimSpace(blocker.AppName); appName != "" {
+			label += " " + appName
+		}
+		if service := strings.TrimSpace(blocker.Service); service != "" {
+			label += " (" + service + ")"
+		}
+		parts = append(parts, label)
+	}
+	return strings.Join(parts, "; ")
 }

@@ -103,32 +103,49 @@ type fugueManifestTemplateVariable struct {
 }
 
 type fugueManifestService struct {
-	Type         string `yaml:"type"`
-	ServiceType  string `yaml:"service_type"`
-	Public       bool   `yaml:"public"`
-	Image        string `yaml:"image"`
-	Port         int    `yaml:"port"`
-	Build        any    `yaml:"build"`
-	Env          any    `yaml:"env"`
-	Environment  any    `yaml:"environment"`
-	EnvFile      any    `yaml:"env_file"`
-	DependsOn    any    `yaml:"depends_on"`
-	Bindings     any    `yaml:"bindings"`
-	OwnerService string `yaml:"owner_service"`
-	Database     string `yaml:"database"`
-	User         string `yaml:"user"`
-	Password     string `yaml:"password"`
-	ServiceName  string `yaml:"service_name"`
-	Command      any    `yaml:"command"`
-	Entrypoint   any    `yaml:"entrypoint"`
-	Healthcheck  any    `yaml:"healthcheck"`
-	Profiles     any    `yaml:"profiles"`
-	Volumes      any    `yaml:"volumes"`
-	Secrets      any    `yaml:"secrets"`
-	Configs      any    `yaml:"configs"`
-	Networks     any    `yaml:"networks"`
-	Labels       any    `yaml:"labels"`
-	Deploy       any    `yaml:"deploy"`
+	Type              string                          `yaml:"type"`
+	ServiceType       string                          `yaml:"service_type"`
+	Public            bool                            `yaml:"public"`
+	Image             string                          `yaml:"image"`
+	Port              int                             `yaml:"port"`
+	Build             any                             `yaml:"build"`
+	Env               any                             `yaml:"env"`
+	Environment       any                             `yaml:"environment"`
+	EnvFile           any                             `yaml:"env_file"`
+	PersistentStorage *fugueManifestPersistentStorage `yaml:"persistent_storage"`
+	DependsOn         any                             `yaml:"depends_on"`
+	Bindings          any                             `yaml:"bindings"`
+	OwnerService      string                          `yaml:"owner_service"`
+	Database          string                          `yaml:"database"`
+	User              string                          `yaml:"user"`
+	Password          string                          `yaml:"password"`
+	ServiceName       string                          `yaml:"service_name"`
+	Command           any                             `yaml:"command"`
+	Entrypoint        any                             `yaml:"entrypoint"`
+	Healthcheck       any                             `yaml:"healthcheck"`
+	Profiles          any                             `yaml:"profiles"`
+	Volumes           any                             `yaml:"volumes"`
+	Secrets           any                             `yaml:"secrets"`
+	Configs           any                             `yaml:"configs"`
+	Networks          any                             `yaml:"networks"`
+	Labels            any                             `yaml:"labels"`
+	Deploy            any                             `yaml:"deploy"`
+}
+
+type fugueManifestPersistentStorage struct {
+	StoragePath      string                                `yaml:"storage_path"`
+	StorageSize      string                                `yaml:"storage_size"`
+	StorageClassName string                                `yaml:"storage_class_name"`
+	ResetToken       string                                `yaml:"reset_token"`
+	Mounts           []fugueManifestPersistentStorageMount `yaml:"mounts"`
+}
+
+type fugueManifestPersistentStorageMount struct {
+	Kind        string `yaml:"kind"`
+	Path        string `yaml:"path"`
+	SeedContent string `yaml:"seed_content"`
+	Secret      bool   `yaml:"secret"`
+	Mode        int32  `yaml:"mode"`
 }
 
 type fugueBuildSpec struct {
@@ -311,8 +328,16 @@ func resolveFugueManifestService(repoDir, rawName string, raw fugueManifestServi
 	if err != nil {
 		return ComposeService{}, fmt.Errorf("resolve fugue service %q volumes: %w", rawName, err)
 	}
-	service.PersistentStorage = persistentStorage
-	service.PersistentStorageSeedFiles = persistentStorageSeedFiles
+	manifestStorage, manifestStorageSeedFiles, err := resolveFugueManifestPersistentStorage(raw.PersistentStorage)
+	if err != nil {
+		return ComposeService{}, fmt.Errorf("resolve fugue service %q persistent_storage: %w", rawName, err)
+	}
+	mergedPersistentStorage, err := mergePersistentStorageSpecs(persistentStorage, manifestStorage)
+	if err != nil {
+		return ComposeService{}, fmt.Errorf("merge fugue service %q persistent_storage: %w", rawName, err)
+	}
+	service.PersistentStorage = mergedPersistentStorage
+	service.PersistentStorageSeedFiles = append(persistentStorageSeedFiles, manifestStorageSeedFiles...)
 	service.InferenceReport = append(service.InferenceReport, storageInferences...)
 
 	buildSpec, hasBuild, err := parseFugueBuildSpec(raw.Build)
@@ -427,6 +452,141 @@ func resolveFugueManifestService(repoDir, rawName string, raw fugueManifestServi
 		}
 		return service, nil
 	}
+}
+
+func resolveFugueManifestPersistentStorage(raw *fugueManifestPersistentStorage) (*model.AppPersistentStorageSpec, []PersistentStorageSeedFile, error) {
+	if raw == nil {
+		return nil, nil, nil
+	}
+
+	storagePath, err := model.NormalizeAppPersistentStoragePath(raw.StoragePath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	spec := &model.AppPersistentStorageSpec{
+		StoragePath:      storagePath,
+		StorageSize:      strings.TrimSpace(raw.StorageSize),
+		StorageClassName: strings.TrimSpace(raw.StorageClassName),
+		ResetToken:       strings.TrimSpace(raw.ResetToken),
+	}
+	seedFiles := make([]PersistentStorageSeedFile, 0, len(raw.Mounts))
+	for index, mount := range raw.Mounts {
+		normalized, err := normalizeImportedPersistentStorageMount(model.AppPersistentStorageMount{
+			Kind:        mount.Kind,
+			Path:        mount.Path,
+			SeedContent: mount.SeedContent,
+			Secret:      mount.Secret,
+			Mode:        mount.Mode,
+		}, index)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, existing := range spec.Mounts {
+			if model.AppPersistentStorageMountPathConflict(existing, normalized) {
+				return nil, nil, fmt.Errorf("persistent_storage.mounts contains overlapping path %s", normalized.Path)
+			}
+		}
+		spec.Mounts = append(spec.Mounts, normalized)
+		if seedFile := persistentStorageSeedFileForMount(normalized); seedFile != nil {
+			seedFiles = append(seedFiles, *seedFile)
+		}
+	}
+	if len(spec.Mounts) == 0 && spec.StoragePath == "" && spec.StorageSize == "" && spec.StorageClassName == "" && spec.ResetToken == "" {
+		return nil, nil, nil
+	}
+	return spec, seedFiles, nil
+}
+
+func normalizeImportedPersistentStorageMount(mount model.AppPersistentStorageMount, index int) (model.AppPersistentStorageMount, error) {
+	kind, err := model.NormalizeAppPersistentStorageMountKind(mount.Kind)
+	if err != nil {
+		return model.AppPersistentStorageMount{}, fmt.Errorf("persistent_storage.mounts[%d].kind: %w", index, err)
+	}
+	pathValue, err := model.NormalizeAppPersistentStorageMountPath(kind, mount.Path)
+	if err != nil {
+		return model.AppPersistentStorageMount{}, fmt.Errorf("persistent_storage.mounts[%d].path: %w", index, err)
+	}
+	if mount.Mode < 0 || mount.Mode > 0o777 {
+		return model.AppPersistentStorageMount{}, fmt.Errorf("persistent_storage.mounts[%d].mode must be between 0 and 0777", index)
+	}
+	normalized := mount
+	normalized.Kind = kind
+	normalized.Path = pathValue
+	if normalized.Mode == 0 {
+		normalized.Mode = defaultImportedPersistentStorageMountMode(normalized)
+	}
+	return normalized, nil
+}
+
+func defaultImportedPersistentStorageMountMode(mount model.AppPersistentStorageMount) int32 {
+	switch mount.Kind {
+	case model.AppPersistentStorageMountKindDirectory:
+		return 0o755
+	case model.AppPersistentStorageMountKindFile:
+		if mount.Secret {
+			return 0o600
+		}
+		return 0o644
+	default:
+		return 0
+	}
+}
+
+func persistentStorageSeedFileForMount(mount model.AppPersistentStorageMount) *PersistentStorageSeedFile {
+	if mount.Kind != model.AppPersistentStorageMountKindFile {
+		return nil
+	}
+	return &PersistentStorageSeedFile{
+		Path:        mount.Path,
+		Mode:        mount.Mode,
+		SeedContent: mount.SeedContent,
+	}
+}
+
+func mergePersistentStorageSpecs(base, override *model.AppPersistentStorageSpec) (*model.AppPersistentStorageSpec, error) {
+	switch {
+	case base == nil && override == nil:
+		return nil, nil
+	case base == nil:
+		cloned := clonePersistentStorageSpec(override)
+		return &cloned, nil
+	case override == nil:
+		cloned := clonePersistentStorageSpec(base)
+		return &cloned, nil
+	}
+
+	merged := clonePersistentStorageSpec(base)
+	if strings.TrimSpace(override.StoragePath) != "" {
+		merged.StoragePath = strings.TrimSpace(override.StoragePath)
+	}
+	if strings.TrimSpace(override.StorageSize) != "" {
+		merged.StorageSize = strings.TrimSpace(override.StorageSize)
+	}
+	if strings.TrimSpace(override.StorageClassName) != "" {
+		merged.StorageClassName = strings.TrimSpace(override.StorageClassName)
+	}
+	if strings.TrimSpace(override.ResetToken) != "" {
+		merged.ResetToken = strings.TrimSpace(override.ResetToken)
+	}
+	for _, mount := range override.Mounts {
+		for _, existing := range merged.Mounts {
+			if model.AppPersistentStorageMountPathConflict(existing, mount) {
+				return nil, fmt.Errorf("persistent_storage mounts overlap at %s", mount.Path)
+			}
+		}
+		merged.Mounts = append(merged.Mounts, mount)
+	}
+	return &merged, nil
+}
+
+func clonePersistentStorageSpec(spec *model.AppPersistentStorageSpec) model.AppPersistentStorageSpec {
+	if spec == nil {
+		return model.AppPersistentStorageSpec{}
+	}
+	cloned := *spec
+	cloned.Mounts = append([]model.AppPersistentStorageMount(nil), spec.Mounts...)
+	return cloned
 }
 
 func resolveFugueBuildInputs(repoDir string, raw any) (string, string, string, string, int, error) {

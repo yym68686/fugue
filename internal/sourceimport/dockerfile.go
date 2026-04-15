@@ -2,6 +2,8 @@ package sourceimport
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -268,11 +270,33 @@ func buildJobName(req dockerfileBuildRequest) string {
 	if suffix == "" {
 		suffix = "source"
 	}
+	if salt := buildJobSalt(req); salt != "" {
+		suffix += "-" + salt
+	}
 	name := "fugue-build-" + base + "-" + suffix
 	if len(name) > 63 {
 		name = name[:63]
 	}
 	return strings.TrimRight(name, "-")
+}
+
+func buildJobSalt(req dockerfileBuildRequest) string {
+	seed := strings.TrimSpace(req.ImageRef)
+	if seed == "" {
+		seed = strings.Join([]string{
+			strings.TrimSpace(req.DockerfilePath),
+			strings.TrimSpace(req.BuildContextDir),
+			strings.TrimSpace(req.ArchiveDownloadURL),
+			strings.TrimSpace(req.RepoURL),
+			strings.TrimSpace(req.SourceLabel),
+		}, "\x00")
+	}
+	seed = strings.TrimSpace(seed)
+	if seed == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(sum[:4])
 }
 
 func buildKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest) (map[string]any, error) {

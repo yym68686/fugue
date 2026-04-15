@@ -2629,6 +2629,25 @@ paths:
                 $ref: "#/components/schemas/OperationResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/operations/{id}/diagnosis:
+    get:
+      operationId: getOperationDiagnosis
+      summary: Get Operation Diagnosis
+      tags: [Operations]
+      x-fugue-handler: handleGetOperationDiagnosis
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationDiagnosisResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/audit-events:
     get:
       operationId: listAuditEvents
@@ -3558,6 +3577,16 @@ components:
           type: string
         seed_content:
           type: string
+    ServicePersistentStorageOverride:
+      type: object
+      additionalProperties: false
+      properties:
+        storage_size:
+          type: string
+    ServicePersistentStorageOverrideMap:
+      type: object
+      additionalProperties:
+        $ref: "#/components/schemas/ServicePersistentStorageOverride"
     AppPersistentStorageSpec:
       type: object
       additionalProperties: false
@@ -4094,6 +4123,46 @@ components:
         completed_at:
           type: string
           format: date-time
+    OperationDiagnosisBlocker:
+      type: object
+      additionalProperties: false
+      required: [operation_id]
+      properties:
+        operation_id:
+          type: string
+        app_id:
+          type: string
+        app_name:
+          type: string
+        service:
+          type: string
+        type:
+          type: string
+        status:
+          type: string
+    OperationDiagnosis:
+      type: object
+      additionalProperties: false
+      required: [category, summary]
+      properties:
+        category:
+          type: string
+        summary:
+          type: string
+        hint:
+          type: string
+        app_name:
+          type: string
+        service:
+          type: string
+        dependency_chain:
+          type: array
+          items:
+            type: string
+        blocked_by:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperationDiagnosisBlocker"
     FailoverAppRequest:
       type: object
       additionalProperties: false
@@ -5858,6 +5927,8 @@ components:
           $ref: "#/components/schemas/StringMap"
         service_env:
           $ref: "#/components/schemas/ServiceEnvMap"
+        service_persistent_storage:
+          $ref: "#/components/schemas/ServicePersistentStorageOverrideMap"
         config_content:
           type: string
         files:
@@ -5914,6 +5985,8 @@ components:
           $ref: "#/components/schemas/StringMap"
         service_env:
           $ref: "#/components/schemas/ServiceEnvMap"
+        service_persistent_storage:
+          $ref: "#/components/schemas/ServicePersistentStorageOverrideMap"
         config_content:
           type: string
         files:
@@ -6620,6 +6693,13 @@ components:
       properties:
         operation:
           $ref: "#/components/schemas/Operation"
+    OperationDiagnosisResponse:
+      type: object
+      additionalProperties: false
+      required: [diagnosis]
+      properties:
+        diagnosis:
+          $ref: "#/components/schemas/OperationDiagnosis"
     AppDisableResponse:
       type: object
       additionalProperties: false

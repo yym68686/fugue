@@ -224,6 +224,26 @@ func TestResolveTopologyPrimaryServiceFallsBackWhenPreferredIsEmpty(t *testing.T
 	}
 }
 
+func TestComposeDeployDependenciesIgnoreEnvironmentBindings(t *testing.T) {
+	deps := composeDeployDependencies(sourceimport.TopologyPlan{
+		Deployable: []sourceimport.ComposeService{
+			{Name: "gateway"},
+			{Name: "runtime"},
+			{Name: "cache"},
+		},
+		BindingsBySource: map[string][]sourceimport.ServiceBinding{
+			"gateway": {
+				{Service: "runtime", Source: sourceimport.BindingSourceEnv},
+				{Service: "cache", Source: sourceimport.BindingSourceExplicit},
+			},
+		},
+	}, "gateway")
+
+	if len(deps) != 1 || deps[0] != "cache" {
+		t.Fatalf("expected only explicit or depends_on bindings to become deploy dependencies, got %+v", deps)
+	}
+}
+
 func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testing.T) {
 	t.Parallel()
 

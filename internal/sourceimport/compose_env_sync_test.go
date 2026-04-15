@@ -25,6 +25,7 @@ func TestSuggestComposeServiceEnvRewritesCurrentTopologyHosts(t *testing.T) {
     environment:
       API_BASE_URL: http://api:8000/v1
       DATABASE_URL: postgresql://demo:secret@db:5432/demo
+      ARGUS_FUGUE_RUNTIME_COMPOSE_SERVICE: api
     depends_on:
       - api
       - db
@@ -69,6 +70,9 @@ func TestSuggestComposeServiceEnvRewritesCurrentTopologyHosts(t *testing.T) {
 	}
 	if got := workerEnv["DATABASE_URL"]; got != "postgresql://demo:secret@demo-api-postgres-rw:5432/demo" {
 		t.Fatalf("expected worker DATABASE_URL host rewrite, got %q", got)
+	}
+	if got := workerEnv["ARGUS_FUGUE_RUNTIME_COMPOSE_SERVICE"]; got != "api" {
+		t.Fatalf("expected logical compose service selector to be preserved, got %q", got)
 	}
 
 	apiEnv, err := suggestComposeServiceEnv(services, "api", appHosts, managedPostgresByOwner)

@@ -67,6 +67,28 @@ func loadTopologyServiceEnvFiles(workingDir string, specs []string) (map[string]
 	return serviceEnv, loadedPaths, nil
 }
 
+func loadTopologyServicePersistentStorageOverrides(specs []string) (map[string]model.ServicePersistentStorageOverride, error) {
+	if len(specs) == 0 {
+		return nil, nil
+	}
+
+	overrides := make(map[string]model.ServicePersistentStorageOverride, len(specs))
+	for _, spec := range specs {
+		serviceName, storageSize, err := parseServiceStorageSizeSpec(spec)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := overrides[serviceName]; exists {
+			return nil, fmt.Errorf("duplicate service storage override for %q", serviceName)
+		}
+		overrides[serviceName] = model.ServicePersistentStorageOverride{StorageSize: storageSize}
+	}
+	if len(overrides) == 0 {
+		return nil, nil
+	}
+	return overrides, nil
+}
+
 func parseServiceEnvFileSpec(raw string) (string, string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -85,6 +107,26 @@ func parseServiceEnvFileSpec(raw string) (string, string, error) {
 		return "", "", fmt.Errorf("service env file spec requires a file path")
 	}
 	return serviceName, envPath, nil
+}
+
+func parseServiceStorageSizeSpec(raw string) (string, string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", fmt.Errorf("service storage override cannot be empty")
+	}
+	serviceName, storageSize, ok := strings.Cut(raw, "=")
+	if !ok {
+		return "", "", fmt.Errorf("service storage override must be <service>=<size>")
+	}
+	serviceName = model.SlugifyOptional(strings.TrimSpace(serviceName))
+	if serviceName == "" {
+		return "", "", fmt.Errorf("service storage override requires a service name")
+	}
+	storageSize = strings.TrimSpace(storageSize)
+	if storageSize == "" {
+		return "", "", fmt.Errorf("service storage override requires a storage size")
+	}
+	return serviceName, storageSize, nil
 }
 
 func resolveEnvFilePath(workingDir, envFile string, autoDefault bool) (string, error) {

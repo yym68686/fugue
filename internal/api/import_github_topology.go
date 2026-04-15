@@ -28,17 +28,18 @@ type topologySourceBuilder func(service sourceimport.ComposeService, composeDepe
 type topologyAuditMetadataBuilder func(source model.AppSource, route model.AppRoute) map[string]string
 
 type topologyImportOptions struct {
-	ProjectID          string
-	RuntimeID          string
-	Replicas           int
-	ServicePort        int
-	Description        string
-	BaseName           string
-	Env                map[string]string
-	ServiceEnv         map[string]map[string]string
-	AuditAction        string
-	BuildSource        topologySourceBuilder
-	BuildAuditMetadata topologyAuditMetadataBuilder
+	ProjectID                string
+	RuntimeID                string
+	Replicas                 int
+	ServicePort              int
+	Description              string
+	BaseName                 string
+	Env                      map[string]string
+	ServiceEnv               map[string]map[string]string
+	ServicePersistentStorage map[string]model.ServicePersistentStorageOverride
+	AuditAction              string
+	BuildSource              topologySourceBuilder
+	BuildAuditMetadata       topologyAuditMetadataBuilder
 }
 
 type composeImportNamingStrategy struct {
@@ -59,15 +60,16 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 	topology.Services = services
 
 	return s.importResolvedTopology(principal, tenantID, topologyImportOptions{
-		ProjectID:   req.ProjectID,
-		RuntimeID:   runtimeID,
-		Replicas:    replicas,
-		ServicePort: req.ServicePort,
-		Description: description,
-		BaseName:    baseName,
-		Env:         req.Env,
-		ServiceEnv:  normalizedImportServiceEnv(req.ServiceEnv),
-		AuditAction: "app.import_github",
+		ProjectID:                req.ProjectID,
+		RuntimeID:                runtimeID,
+		Replicas:                 replicas,
+		ServicePort:              req.ServicePort,
+		Description:              description,
+		BaseName:                 baseName,
+		Env:                      req.Env,
+		ServiceEnv:               normalizedImportServiceEnv(req.ServiceEnv),
+		ServicePersistentStorage: normalizedImportServicePersistentStorage(req.ServicePersistentStorage),
+		AuditAction:              "app.import_github",
 		BuildSource: func(service sourceimport.ComposeService, composeDependsOn []string) (model.AppSource, error) {
 			return buildQueuedComposeServiceSource(req, service, composeDependsOn)
 		},
@@ -205,17 +207,56 @@ func validateTopologyServiceEnvOverrides(services []sourceimport.ComposeService,
 	return nil
 }
 
+func applyTopologyServicePersistentStorageOverrides(services []sourceimport.ComposeService, overrides map[string]model.ServicePersistentStorageOverride) ([]sourceimport.ComposeService, error) {
+	if len(overrides) == 0 {
+		return services, nil
+	}
+
+	clonedServices := cloneComposeServicesForImport(services)
+	serviceIndexes := make(map[string]int, len(clonedServices))
+	for index, service := range clonedServices {
+		name := strings.TrimSpace(service.Name)
+		if name == "" {
+			continue
+		}
+		serviceIndexes[name] = index
+	}
+
+	for rawService, rawOverride := range overrides {
+		serviceName := model.SlugifyOptional(strings.TrimSpace(rawService))
+		if serviceName == "" {
+			continue
+		}
+		serviceIndex, ok := serviceIndexes[serviceName]
+		if !ok {
+			return nil, fmt.Errorf("service_persistent_storage references unknown service %q", serviceName)
+		}
+		service := &clonedServices[serviceIndex]
+		if service.PersistentStorage == nil {
+			return nil, fmt.Errorf("service_persistent_storage references service %q without persistent storage", serviceName)
+		}
+		storageSize := strings.TrimSpace(rawOverride.StorageSize)
+		if storageSize == "" {
+			return nil, fmt.Errorf("service_persistent_storage.%s.storage_size is required", serviceName)
+		}
+		service.PersistentStorage.StorageSize = storageSize
+	}
+
+	return clonedServices, nil
+}
+
 func (s *Server) importResolvedUploadTopology(principal model.Principal, tenantID string, req importUploadRequest, upload model.SourceUpload, runtimeID string, replicas int, description string, baseName string, topology sourceimport.NormalizedTopology) (importedGitHubTopology, error) {
 	return s.importResolvedTopology(principal, tenantID, topologyImportOptions{
-		ProjectID:   req.ProjectID,
-		RuntimeID:   runtimeID,
-		Replicas:    replicas,
-		ServicePort: req.ServicePort,
-		Description: description,
-		BaseName:    baseName,
-		Env:         req.Env,
-		ServiceEnv:  normalizedImportServiceEnv(req.ServiceEnv),
-		AuditAction: "app.import_upload",
+		ProjectID:                req.ProjectID,
+		RuntimeID:                runtimeID,
+		Replicas:                 replicas,
+		ServicePort:              req.ServicePort,
+		Description:              description,
+		BaseName:                 baseName,
+		Env:                      req.Env,
+		ServiceEnv:               normalizedImportServiceEnv(req.ServiceEnv),
+		ServicePersistentStorage: normalizedImportServicePersistentStorage(req.ServicePersistentStorage),
+		AuditAction:              "app.import_upload",
 		BuildSource: func(service sourceimport.ComposeService, composeDependsOn []string) (model.AppSource, error) {
 			return buildQueuedUploadComposeServiceSource(upload, service, composeDependsOn)
 		},
@@ -235,6 +276,11 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 	if err := validateTopologyServiceEnvOverrides(topology.Services, options.ServiceEnv); err != nil {
 		return importedGitHubTopology{}, invalidComposeImport(err)
 	}
+	services, err := applyTopologyServicePersistentStorageOverrides(topology.Services, options.ServicePersistentStorage)
+	if err != nil {
+		return importedGitHubTopology{}, invalidComposeImport(err)
+	}
+	topology.Services = services
 
 	topologyPlan, err := sourceimport.AnalyzeNormalizedTopology(topology, topology.PrimaryService)
 	if err != nil {
@@ -545,6 +591,11 @@ func composeDeployDependencies(plan sourceimport.TopologyPlan, serviceName strin
 	dependencies := make([]string, 0, len(plan.BindingsBySource[serviceName]))
 	seen := make(map[string]struct{}, len(plan.BindingsBySource[serviceName]))
 	for _, binding := range plan.BindingsBySource[serviceName] {
+		switch strings.TrimSpace(binding.Source) {
+		case "", sourceimport.BindingSourceExplicit, sourceimport.BindingSourceDependsOn:
+		default:
+			continue
+		}
 		dependency := strings.TrimSpace(binding.Service)
 		if dependency == "" || dependency == serviceName {
 			continue

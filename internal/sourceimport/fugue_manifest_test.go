@@ -326,3 +326,58 @@ backing_services:
 		t.Fatalf("expected inference report, got %+v", parsed)
 	}
 }
+
+func TestInspectFugueManifestMergesPersistentStorageSettings(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, "state"), 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte("FROM scratch\nEXPOSE 8080\n"), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	manifest := `version: 1
+services:
+  gateway:
+    public: true
+    build:
+      strategy: dockerfile
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./state:/data/argus
+    persistent_storage:
+      storage_size: 512Mi
+      storage_class_name: fast-rwo
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "fugue.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write fugue manifest: %v", err)
+	}
+
+	parsed, err := inspectFugueManifestFromRepo(clonedGitHubRepo{
+		RepoOwner:      "example",
+		RepoName:       "demo",
+		RepoDir:        repoDir,
+		Branch:         "main",
+		CommitSHA:      "abcdef123456",
+		DefaultAppName: "demo",
+	})
+	if err != nil {
+		t.Fatalf("inspect fugue manifest: %v", err)
+	}
+	if len(parsed.Services) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(parsed.Services))
+	}
+	service := parsed.Services[0]
+	if service.PersistentStorage == nil {
+		t.Fatal("expected persistent storage to be present")
+	}
+	if got := service.PersistentStorage.StorageSize; got != "512Mi" {
+		t.Fatalf("expected storage size 512Mi, got %q", got)
+	}
+	if got := service.PersistentStorage.StorageClassName; got != "fast-rwo" {
+		t.Fatalf("expected storage class fast-rwo, got %q", got)
+	}
+	if len(service.PersistentStorage.Mounts) != 1 || service.PersistentStorage.Mounts[0].Path != "/data/argus" {
+		t.Fatalf("expected imported volume mount to remain attached, got %+v", service.PersistentStorage.Mounts)
+	}
+}

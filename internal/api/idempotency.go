@@ -26,32 +26,33 @@ type importGitHubPersistentStorageSeedFile struct {
 }
 
 type importGitHubRequest struct {
-	TenantID                   string                                  `json:"tenant_id"`
-	ProjectID                  string                                  `json:"project_id"`
-	Project                    *importProjectRequest                   `json:"project,omitempty"`
-	RepoURL                    string                                  `json:"repo_url"`
-	RepoVisibility             string                                  `json:"repo_visibility"`
-	RepoAuthToken              string                                  `json:"repo_auth_token"`
-	Branch                     string                                  `json:"branch"`
-	SourceDir                  string                                  `json:"source_dir"`
-	Name                       string                                  `json:"name"`
-	Description                string                                  `json:"description"`
-	BuildStrategy              string                                  `json:"build_strategy"`
-	RuntimeID                  string                                  `json:"runtime_id"`
-	Replicas                   int                                     `json:"replicas"`
-	NetworkMode                string                                  `json:"network_mode"`
-	ServicePort                int                                     `json:"service_port"`
-	DockerfilePath             string                                  `json:"dockerfile_path"`
-	BuildContextDir            string                                  `json:"build_context_dir"`
-	Env                        map[string]string                       `json:"env"`
-	ServiceEnv                 map[string]map[string]string            `json:"service_env"`
-	ConfigContent              string                                  `json:"config_content"`
-	Files                      []model.AppFile                         `json:"files"`
-	StartupCommand             *string                                 `json:"startup_command,omitempty"`
-	PersistentStorage          *model.AppPersistentStorageSpec         `json:"persistent_storage,omitempty"`
-	PersistentStorageSeedFiles []importGitHubPersistentStorageSeedFile `json:"persistent_storage_seed_files"`
-	Postgres                   *model.AppPostgresSpec                  `json:"postgres"`
-	IdempotencyKey             string                                  `json:"idempotency_key"`
+	TenantID                   string                                            `json:"tenant_id"`
+	ProjectID                  string                                            `json:"project_id"`
+	Project                    *importProjectRequest                             `json:"project,omitempty"`
+	RepoURL                    string                                            `json:"repo_url"`
+	RepoVisibility             string                                            `json:"repo_visibility"`
+	RepoAuthToken              string                                            `json:"repo_auth_token"`
+	Branch                     string                                            `json:"branch"`
+	SourceDir                  string                                            `json:"source_dir"`
+	Name                       string                                            `json:"name"`
+	Description                string                                            `json:"description"`
+	BuildStrategy              string                                            `json:"build_strategy"`
+	RuntimeID                  string                                            `json:"runtime_id"`
+	Replicas                   int                                               `json:"replicas"`
+	NetworkMode                string                                            `json:"network_mode"`
+	ServicePort                int                                               `json:"service_port"`
+	DockerfilePath             string                                            `json:"dockerfile_path"`
+	BuildContextDir            string                                            `json:"build_context_dir"`
+	Env                        map[string]string                                 `json:"env"`
+	ServiceEnv                 map[string]map[string]string                      `json:"service_env"`
+	ServicePersistentStorage   map[string]model.ServicePersistentStorageOverride `json:"service_persistent_storage"`
+	ConfigContent              string                                            `json:"config_content"`
+	Files                      []model.AppFile                                   `json:"files"`
+	StartupCommand             *string                                           `json:"startup_command,omitempty"`
+	PersistentStorage          *model.AppPersistentStorageSpec                   `json:"persistent_storage,omitempty"`
+	PersistentStorageSeedFiles []importGitHubPersistentStorageSeedFile           `json:"persistent_storage_seed_files"`
+	Postgres                   *model.AppPostgresSpec                            `json:"postgres"`
+	IdempotencyKey             string                                            `json:"idempotency_key"`
 }
 
 func resolveIdempotencyKey(r *http.Request, bodyKey string) (string, error) {
@@ -72,31 +73,32 @@ func resolveIdempotencyKey(r *http.Request, bodyKey string) (string, error) {
 
 func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID string, replicas int) (string, error) {
 	payload := struct {
-		TenantID                   string                                  `json:"tenant_id"`
-		ProjectID                  string                                  `json:"project_id"`
-		Project                    *importProjectRequest                   `json:"project,omitempty"`
-		RepoURL                    string                                  `json:"repo_url"`
-		RepoVisibility             string                                  `json:"repo_visibility"`
-		RepoAuthToken              string                                  `json:"repo_auth_token"`
-		Branch                     string                                  `json:"branch"`
-		SourceDir                  string                                  `json:"source_dir"`
-		Name                       string                                  `json:"name"`
-		Description                string                                  `json:"description"`
-		BuildStrategy              string                                  `json:"build_strategy"`
-		RuntimeID                  string                                  `json:"runtime_id"`
-		Replicas                   int                                     `json:"replicas"`
-		NetworkMode                string                                  `json:"network_mode"`
-		ServicePort                int                                     `json:"service_port"`
-		DockerfilePath             string                                  `json:"dockerfile_path"`
-		BuildContextDir            string                                  `json:"build_context_dir"`
-		Env                        map[string]string                       `json:"env"`
-		ServiceEnv                 map[string]map[string]string            `json:"service_env"`
-		ConfigContent              string                                  `json:"config_content"`
-		Files                      []model.AppFile                         `json:"files"`
-		StartupCommand             string                                  `json:"startup_command"`
-		PersistentStorage          *model.AppPersistentStorageSpec         `json:"persistent_storage,omitempty"`
-		PersistentStorageSeedFiles []importGitHubPersistentStorageSeedFile `json:"persistent_storage_seed_files"`
-		Postgres                   *model.AppPostgresSpec                  `json:"postgres"`
+		TenantID                   string                                            `json:"tenant_id"`
+		ProjectID                  string                                            `json:"project_id"`
+		Project                    *importProjectRequest                             `json:"project,omitempty"`
+		RepoURL                    string                                            `json:"repo_url"`
+		RepoVisibility             string                                            `json:"repo_visibility"`
+		RepoAuthToken              string                                            `json:"repo_auth_token"`
+		Branch                     string                                            `json:"branch"`
+		SourceDir                  string                                            `json:"source_dir"`
+		Name                       string                                            `json:"name"`
+		Description                string                                            `json:"description"`
+		BuildStrategy              string                                            `json:"build_strategy"`
+		RuntimeID                  string                                            `json:"runtime_id"`
+		Replicas                   int                                               `json:"replicas"`
+		NetworkMode                string                                            `json:"network_mode"`
+		ServicePort                int                                               `json:"service_port"`
+		DockerfilePath             string                                            `json:"dockerfile_path"`
+		BuildContextDir            string                                            `json:"build_context_dir"`
+		Env                        map[string]string                                 `json:"env"`
+		ServiceEnv                 map[string]map[string]string                      `json:"service_env"`
+		ServicePersistentStorage   map[string]model.ServicePersistentStorageOverride `json:"service_persistent_storage"`
+		ConfigContent              string                                            `json:"config_content"`
+		Files                      []model.AppFile                                   `json:"files"`
+		StartupCommand             string                                            `json:"startup_command"`
+		PersistentStorage          *model.AppPersistentStorageSpec                   `json:"persistent_storage,omitempty"`
+		PersistentStorageSeedFiles []importGitHubPersistentStorageSeedFile           `json:"persistent_storage_seed_files"`
+		Postgres                   *model.AppPostgresSpec                            `json:"postgres"`
 	}{
 		TenantID:                   strings.TrimSpace(tenantID),
 		ProjectID:                  strings.TrimSpace(req.ProjectID),
@@ -117,6 +119,7 @@ func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID
 		BuildContextDir:            strings.TrimSpace(req.BuildContextDir),
 		Env:                        req.Env,
 		ServiceEnv:                 normalizedImportServiceEnv(req.ServiceEnv),
+		ServicePersistentStorage:   normalizedImportServicePersistentStorage(req.ServicePersistentStorage),
 		ConfigContent:              strings.TrimSpace(req.ConfigContent),
 		Files:                      req.Files,
 		StartupCommand:             strings.Join(normalizeStartupCommand(req.StartupCommand), "\x00"),
@@ -191,6 +194,28 @@ func normalizedImportServiceEnv(serviceEnv map[string]map[string]string) map[str
 		if len(values) > 0 {
 			normalized[serviceName] = values
 		}
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
+}
+
+func normalizedImportServicePersistentStorage(overrides map[string]model.ServicePersistentStorageOverride) map[string]model.ServicePersistentStorageOverride {
+	if len(overrides) == 0 {
+		return nil
+	}
+
+	normalized := make(map[string]model.ServicePersistentStorageOverride, len(overrides))
+	for rawService, rawOverride := range overrides {
+		serviceName := model.SlugifyOptional(strings.TrimSpace(rawService))
+		if serviceName == "" {
+			continue
+		}
+		override := model.ServicePersistentStorageOverride{
+			StorageSize: strings.TrimSpace(rawOverride.StorageSize),
+		}
+		normalized[serviceName] = override
 	}
 	if len(normalized) == 0 {
 		return nil
