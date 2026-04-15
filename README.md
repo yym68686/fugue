@@ -92,6 +92,7 @@ Common workflows:
 - `fugue app logs query my-app --table gateway_request_logs --since 1h --match status=500`
 - `fugue app logs pods my-app`
 - `fugue app request my-app GET /admin/requests --query page=2 --query status=500 --header-from-env X-Service-Key=SERVICE_KEY`
+- `fugue app diagnose my-app`
 - `fugue app logs runtime my-app --follow`
 - `fugue app service attach my-app postgres`
 - `fugue app failover status my-app`
@@ -112,12 +113,17 @@ Common workflows:
 - `fugue admin cluster exec --namespace app-demo --pod postgres-0 --retries 4 --timeout 2m -- sh -lc "psql -c 'select now()'"`
 - `fugue admin cluster workload show kube-system deployment coredns`
 - `fugue admin cluster rollout status kube-system deployment coredns`
+- `fugue admin cluster node inspect gcp1`
+- `fugue admin cluster node disk gcp1`
+- `fugue admin cluster node journal gcp1`
+- `fugue admin cluster node metrics gcp1`
 - `fugue admin cluster dns resolve api.github.com --server 10.43.0.10`
 - `fugue admin cluster net connect api.github.com:443`
 - `fugue admin cluster net websocket my-app --path "/socket.io/?EIO=4&transport=websocket"`
 - `fugue admin cluster tls probe 104.18.32.47:443 --server-name api.github.com`
 - `fugue admin users ls`
 - `fugue admin users show user@example.com`
+- `fugue admin users resolve user@example.com`
 - `fugue web diagnose admin-users`
 - `fugue web diagnose /api/fugue/console/pages/api-keys --cookie 'fugue_session=...'`
 
@@ -135,7 +141,11 @@ Common workflows:
 
 `fugue app request` lets you call an app's own internal HTTP routes from the control plane side, including admin endpoints that require service keys already present in the app env. Pass `--header-from-env Header=ENV_KEY` to fill auth headers from the effective app env instead of copying secrets into your shell.
 
+When `fugue app request` fails with a low-level error such as `connection refused`, the CLI now also asks the control plane for runtime diagnosis and appends the likely scheduling or storage root cause. This turns a plain transport failure into evidence like "PVC node affinity conflict" or "pod was evicted after disk pressure".
+
 `fugue app overview` now includes a diagnosis section that stitches together the latest import, linked deploy, image inventory, and current runtime pod state. This is the single-command path for cases like "import succeeded, deploy ran, but the runtime image never became available".
+
+`fugue app diagnose` is the direct root-cause command for managed runtimes. Use it when you need the CLI to say "pod was evicted, node had disk pressure, replacement pod is blocked by volume node affinity" instead of making you reconstruct that chain from logs and events by hand.
 
 `fugue app env ls` text output now renders a table with separate source and reference columns plus override information, so normal terminal output is usable without falling back to `--json`.
 
@@ -149,9 +159,13 @@ Common workflows:
 
 `fugue admin cluster exec` now retries transient EOF and stream-reset failures by default, and exposes `--retries`, `--retry-delay`, and `--timeout` for longer diagnostic commands.
 
+`fugue admin cluster node inspect` uses the existing `node-janitor` DaemonSet to gather host-side `df` / `du` snapshots, kubelet eviction journal lines, related events, and fresh `stats/summary` evidence without SSH. The narrower `node disk`, `node journal`, and `node metrics` subcommands expose the same data in focused views.
+
 Released CLI builds can upgrade themselves with `fugue upgrade`. When the current binary is behind the latest GitHub Release, normal text-mode commands also print a reminder telling you which version is available. Set `FUGUE_SKIP_UPDATE_CHECK=1` if you need to suppress that reminder in a shell session.
 
 `fugue admin users` and the admin aliases under `fugue web diagnose` read the same `fugue-web` page snapshot routes that power the admin product UI. Set `FUGUE_WEB_BASE_URL` (or pass `--web-base-url`) for those commands. Admin page snapshots accept bootstrap bearer auth; workspace-scoped console page routes can also be diagnosed by passing a session cookie with `--cookie`.
+
+`fugue admin users resolve <email>` is the direct answer to "which tenant/workspace does this user actually land in?". It resolves one email to the enriched workspace snapshot, including tenant id/name, default project, first app, and whether a workspace admin key is available.
 
 When `FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY` is configured on the API, `fugue admin cluster status` also shows the latest `deploy-control-plane` workflow run so you can correlate control-plane image rollouts with cluster state.
 

@@ -137,6 +137,7 @@ Environment variables:
 	  fugue app logs query my-app --table gateway_request_logs --since 1h --match status=500
 	  fugue app logs pods my-app
 	  fugue app request my-app /healthz
+	  fugue app diagnose my-app
 	  fugue app domain primary set my-app www.example.com
 	  fugue service ls
 	  fugue service postgres create app-db --runtime shared
@@ -152,6 +153,7 @@ Environment variables:
 	  fugue project images usage marketing
 	  fugue admin cluster status
 	  fugue admin cluster pods --namespace kube-system
+	  fugue admin cluster node inspect gcp1
 	  fugue admin cluster workload show kube-system deployment coredns
 	  fugue admin cluster dns resolve api.github.com --server 10.43.0.10
 	  fugue admin cluster net connect api.github.com:443
@@ -160,6 +162,7 @@ Environment variables:
 	  fugue api request GET /v1/apps
 	  fugue diagnose timing -- app overview my-app
 	  fugue admin users ls
+	  fugue admin users resolve user@example.com
 	  fugue web diagnose admin-users
 	`),
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {

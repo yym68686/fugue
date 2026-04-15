@@ -113,6 +113,17 @@ fugue app request my-app /healthz
 fugue app request my-app GET /admin/requests --query page=2 --query status=500 --header-from-env X-Service-Key=SERVICE_KEY
 `),
 	},
+	"fugue app diagnose": {
+		Long: strings.TrimSpace(`
+Summarize the most likely runtime root cause for one app by combining pod state, scheduling events, and node pressure signals.
+
+Use this when app request or runtime logs only tell you "connection refused" or "pod pending" but you need the CLI to explain the likely scheduling, eviction, or storage-affinity cause.
+`),
+		Example: strings.TrimSpace(`
+fugue app diagnose my-app
+fugue app diagnose my-app --component postgres
+`),
+	},
 	"fugue app command": {
 		Example: strings.TrimSpace(`
 fugue app command show my-app
@@ -482,6 +493,39 @@ fugue admin cluster tls probe 104.18.32.47:443 --server-name api.github.com
 	"fugue admin cluster workload": {
 		Example: "fugue admin cluster workload show kube-system deployment coredns",
 	},
+	"fugue admin cluster node": {
+		Example: strings.TrimSpace(`
+fugue admin cluster node inspect gcp1
+fugue admin cluster node disk gcp1
+fugue admin cluster node journal gcp1
+`),
+	},
+	"fugue admin cluster node inspect": {
+		Long: strings.TrimSpace(`
+Collect the host-level disk totals, largest paths, kubelet journal excerpts, metrics availability signal, and related Kubernetes events for one node.
+
+This is the CLI path for replacing the usual SSH + df + journalctl workflow during disk-pressure and eviction incidents.
+`),
+		Example: "fugue admin cluster node inspect gcp1",
+	},
+	"fugue admin cluster node disk": {
+		Long: strings.TrimSpace(`
+Show the node filesystem totals plus the largest host paths as seen from the node-janitor daemonset, without SSH.
+`),
+		Example: "fugue admin cluster node disk gcp1",
+	},
+	"fugue admin cluster node journal": {
+		Long: strings.TrimSpace(`
+Show recent kubelet eviction and metrics-related journal evidence from the host so you can see why the node started evicting pods or stopped serving stats.
+`),
+		Example: "fugue admin cluster node journal gcp1",
+	},
+	"fugue admin cluster node metrics": {
+		Long: strings.TrimSpace(`
+Explain why node CPU, memory, or storage metrics are present or missing by combining fresh stats/summary probes with host journal evidence.
+`),
+		Example: "fugue admin cluster node metrics gcp1",
+	},
 	"fugue admin cluster workload show": {
 		Long: strings.TrimSpace(`
 Show the normalized workload summary plus the raw manifest snapshot for a Deployment, DaemonSet, StatefulSet, or Pod.
@@ -526,6 +570,14 @@ This view matches the admin users page shell instead of the lower-level control-
 Show one user from the enriched admin users snapshot, including billing and product usage summaries when they are available.
 `),
 		Example: "fugue admin users show user@example.com",
+	},
+	"fugue admin users resolve": {
+		Long: strings.TrimSpace(`
+Resolve one email to the concrete workspace and tenant snapshot that backs that user in fugue-web.
+
+Use this when you know the human email address first and need to jump straight to the matching tenant or workspace without manually scanning the whole tenant list.
+`),
+		Example: "fugue admin users resolve user@example.com",
 	},
 	"fugue admin users enrich": {
 		Long: strings.TrimSpace(`

@@ -3636,10 +3636,17 @@ FOR UPDATE
 	return len(ids), nil
 }
 
+type sqlExecContexter interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 func (s *Store) pgAppendAuditEvent(event model.AuditEvent) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	return s.pgAppendAuditEventTx(ctx, s.db, event)
+}
 
+func (s *Store) pgAppendAuditEventTx(ctx context.Context, exec sqlExecContexter, event model.AuditEvent) error {
 	if event.ID == "" {
 		event.ID = model.NewID("audit")
 	}
@@ -3650,10 +3657,10 @@ func (s *Store) pgAppendAuditEvent(event model.AuditEvent) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `
-INSERT INTO fugue_audit_events (id, tenant_id, actor_type, actor_id, action, target_type, target_id, metadata_json, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-`, event.ID, nullIfEmpty(event.TenantID), event.ActorType, event.ActorID, event.Action, event.TargetType, event.TargetID, metadataJSON, event.CreatedAt)
+	_, err = exec.ExecContext(ctx, `
+	INSERT INTO fugue_audit_events (id, tenant_id, actor_type, actor_id, action, target_type, target_id, metadata_json, created_at)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`, event.ID, nullIfEmpty(event.TenantID), event.ActorType, event.ActorID, event.Action, event.TargetType, event.TargetID, metadataJSON, event.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("append audit event: %w", err)
 	}
@@ -3833,7 +3840,10 @@ SELECT EXISTS (
 		return nil
 	}
 
-	return s.pgDeleteProjectTx(ctx, tx, project)
+	if err := s.pgDeleteProjectTx(ctx, tx, project); err != nil {
+		return err
+	}
+	return s.pgAppendAuditEventTx(ctx, tx, projectDeleteFinalizedAuditEvent(project))
 }
 
 func (s *Store) pgRuntimeVisibleToTenantTx(ctx context.Context, tx *sql.Tx, runtimeID, tenantID string) (bool, error) {

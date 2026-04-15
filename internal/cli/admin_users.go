@@ -27,23 +27,24 @@ type adminUsersSummary struct {
 }
 
 type adminUserView struct {
-	Billing           adminUserBillingView `json:"billing"`
-	CanBlock          bool                 `json:"canBlock"`
-	CanDelete         bool                 `json:"canDelete"`
-	CanDemoteAdmin    bool                 `json:"canDemoteAdmin"`
-	CanPromoteToAdmin bool                 `json:"canPromoteToAdmin"`
-	CanUnblock        bool                 `json:"canUnblock"`
-	Email             string               `json:"email"`
-	IsAdmin           bool                 `json:"isAdmin"`
-	LastLoginExact    string               `json:"lastLoginExact"`
-	LastLoginLabel    string               `json:"lastLoginLabel"`
-	Name              string               `json:"name"`
-	Provider          string               `json:"provider"`
-	ServiceCount      int                  `json:"serviceCount"`
-	Status            string               `json:"status"`
-	StatusTone        string               `json:"statusTone"`
-	Usage             adminUserUsageView   `json:"usage"`
-	Verified          bool                 `json:"verified"`
+	Billing           adminUserBillingView    `json:"billing"`
+	CanBlock          bool                    `json:"canBlock"`
+	CanDelete         bool                    `json:"canDelete"`
+	CanDemoteAdmin    bool                    `json:"canDemoteAdmin"`
+	CanPromoteToAdmin bool                    `json:"canPromoteToAdmin"`
+	CanUnblock        bool                    `json:"canUnblock"`
+	Email             string                  `json:"email"`
+	IsAdmin           bool                    `json:"isAdmin"`
+	LastLoginExact    string                  `json:"lastLoginExact"`
+	LastLoginLabel    string                  `json:"lastLoginLabel"`
+	Name              string                  `json:"name"`
+	Provider          string                  `json:"provider"`
+	ServiceCount      int                     `json:"serviceCount"`
+	Status            string                  `json:"status"`
+	StatusTone        string                  `json:"statusTone"`
+	Usage             adminUserUsageView      `json:"usage"`
+	Verified          bool                    `json:"verified"`
+	Workspace         *adminUserWorkspaceView `json:"workspace"`
 }
 
 type adminUserBillingView struct {
@@ -54,6 +55,7 @@ type adminUserBillingView struct {
 	MonthlyEstimateLabel string `json:"monthlyEstimateLabel"`
 	StatusLabel          string `json:"statusLabel"`
 	StatusReason         string `json:"statusReason"`
+	TenantID             string `json:"tenantId"`
 }
 
 type adminUserUsageView struct {
@@ -64,6 +66,15 @@ type adminUserUsageView struct {
 	MemoryLabel       string `json:"memoryLabel"`
 	ServiceCount      int    `json:"serviceCount"`
 	ServiceCountLabel string `json:"serviceCountLabel"`
+}
+
+type adminUserWorkspaceView struct {
+	AdminKeyLabel      string `json:"adminKeyLabel"`
+	DefaultProjectID   string `json:"defaultProjectId"`
+	DefaultProjectName string `json:"defaultProjectName"`
+	FirstAppID         string `json:"firstAppId"`
+	TenantID           string `json:"tenantId"`
+	TenantName         string `json:"tenantName"`
 }
 
 type adminUsersUsageSnapshot struct {
@@ -84,6 +95,7 @@ func (c *CLI) newAdminUsersCommand() *cobra.Command {
 	cmd.AddCommand(
 		c.newAdminUsersListCommand(),
 		c.newAdminUsersShowCommand(),
+		c.newAdminUsersResolveCommand(),
 		c.newAdminUsersEnrichCommand(),
 		c.newAdminUsersUsageCommand(),
 	)
@@ -172,6 +184,41 @@ func (c *CLI) newAdminUsersEnrichCommand() *cobra.Command {
 				return writeJSON(c.stdout, snapshot)
 			}
 			return renderAdminUsersSnapshot(c.stdout, snapshot)
+		},
+	}
+	cmd.Flags().StringVar(&opts.Cookie, "cookie", "", "Optional web session cookie header value")
+	return cmd
+}
+
+func (c *CLI) newAdminUsersResolveCommand() *cobra.Command {
+	opts := struct {
+		Cookie string
+	}{}
+	cmd := &cobra.Command{
+		Use:   "resolve <email>",
+		Short: "Resolve one email to the concrete workspace and tenant snapshot",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newWebClient(opts.Cookie)
+			if err != nil {
+				return err
+			}
+			snapshot, err := fetchAdminUsersSnapshot(client, "/api/fugue/admin/pages/users/enrich")
+			if err != nil {
+				return err
+			}
+			user, ok := findAdminUser(snapshot.Users, args[0])
+			if !ok {
+				return fmt.Errorf("admin user %q not found", args[0])
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{
+					"enrichmentState": snapshot.EnrichmentState,
+					"errors":          snapshot.Errors,
+					"user":            user,
+				})
+			}
+			return renderAdminUserResolve(c.stdout, snapshot.Errors, user)
 		},
 	}
 	cmd.Flags().StringVar(&opts.Cookie, "cookie", "", "Optional web session cookie header value")
@@ -279,12 +326,31 @@ func renderAdminUser(w io.Writer, errors []string, user adminUserView) error {
 		{Key: "billing_balance", Value: firstNonEmpty(user.Billing.BalanceLabel, "unavailable")},
 		{Key: "billing_monthly_estimate", Value: firstNonEmpty(user.Billing.MonthlyEstimateLabel, "unavailable")},
 		{Key: "billing_status", Value: firstNonEmpty(user.Billing.StatusLabel, "unavailable")},
+		{Key: "tenant_id", Value: firstNonEmpty(user.Billing.TenantID, workspaceTenantID(user.Workspace))},
+		{Key: "workspace", Value: workspaceTenantName(user.Workspace)},
+		{Key: "default_project", Value: workspaceDefaultProject(user.Workspace)},
+		{Key: "first_app_id", Value: workspaceFirstAppID(user.Workspace)},
 	}
 	if user.Billing.StatusReason != "" {
 		pairs = append(pairs, kvPair{Key: "billing_reason", Value: user.Billing.StatusReason})
 	}
 	if user.Billing.LoadError != "" {
 		pairs = append(pairs, kvPair{Key: "billing_error", Value: user.Billing.LoadError})
+	}
+	if len(errors) > 0 {
+		pairs = append(pairs, kvPair{Key: "snapshot_errors", Value: strings.Join(errors, " | ")})
+	}
+	return writeKeyValues(w, pairs...)
+}
+
+func renderAdminUserResolve(w io.Writer, errors []string, user adminUserView) error {
+	pairs := []kvPair{
+		{Key: "email", Value: user.Email},
+		{Key: "tenant_id", Value: firstNonEmpty(user.Billing.TenantID, workspaceTenantID(user.Workspace))},
+		{Key: "tenant_name", Value: workspaceTenantName(user.Workspace)},
+		{Key: "default_project", Value: workspaceDefaultProject(user.Workspace)},
+		{Key: "first_app_id", Value: workspaceFirstAppID(user.Workspace)},
+		{Key: "workspace_admin_key", Value: workspaceAdminKeyLabel(user.Workspace)},
 	}
 	if len(errors) > 0 {
 		pairs = append(pairs, kvPair{Key: "snapshot_errors", Value: strings.Join(errors, " | ")})
@@ -364,4 +430,42 @@ func summarizeAdminUserUsage(usage adminUserUsageView) string {
 		}
 	}
 	return strings.Join(parts, " / ")
+}
+
+func workspaceTenantID(workspace *adminUserWorkspaceView) string {
+	if workspace == nil {
+		return ""
+	}
+	return strings.TrimSpace(workspace.TenantID)
+}
+
+func workspaceTenantName(workspace *adminUserWorkspaceView) string {
+	if workspace == nil {
+		return ""
+	}
+	return strings.TrimSpace(workspace.TenantName)
+}
+
+func workspaceDefaultProject(workspace *adminUserWorkspaceView) string {
+	if workspace == nil {
+		return ""
+	}
+	if name := strings.TrimSpace(workspace.DefaultProjectName); name != "" {
+		return name
+	}
+	return strings.TrimSpace(workspace.DefaultProjectID)
+}
+
+func workspaceFirstAppID(workspace *adminUserWorkspaceView) string {
+	if workspace == nil {
+		return ""
+	}
+	return strings.TrimSpace(workspace.FirstAppID)
+}
+
+func workspaceAdminKeyLabel(workspace *adminUserWorkspaceView) string {
+	if workspace == nil {
+		return ""
+	}
+	return strings.TrimSpace(workspace.AdminKeyLabel)
 }

@@ -1196,6 +1196,9 @@ func TestRunAppOverviewAggregatesRelatedState(t *testing.T) {
 			_, _ = w.Write([]byte(`{"app_id":"app_123","registry_configured":true,"summary":{"version_count":1,"current_version_count":1,"stale_version_count":0,"reclaimable_size_bytes":0},"versions":[{"image_ref":"registry.example.com/demo:abc123","status":"ready","current":true,"size_bytes":1048576}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-pods":
 			_, _ = w.Write([]byte(`{"component":"app","namespace":"tenant-123","selector":"app.kubernetes.io/name=demo","container":"demo","groups":[{"owner_kind":"ReplicaSet","owner_name":"demo-8c9f6d74f7","parent":{"kind":"Deployment","name":"demo"},"revision":"13","desired_replicas":1,"current_replicas":1,"ready_replicas":1,"available_replicas":1,"containers":[{"name":"demo","image":"registry.example.com/demo:abc123"}],"pods":[{"namespace":"tenant-123","name":"demo-8c9f6d74f7-abc12","phase":"Running","ready":true,"node_name":"gcp1","containers":[{"name":"demo","image":"registry.example.com/demo:abc123","ready":true,"restart_count":0,"state":"running"}]}],"warnings":[]}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/diagnosis":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not found"}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -1388,6 +1391,9 @@ func TestRunAppOverviewDiagnosisExplainsMissingRuntimeImage(t *testing.T) {
 			_, _ = w.Write([]byte(`{"app_id":"app_123","registry_configured":true,"summary":{"version_count":1,"current_version_count":0,"stale_version_count":0,"reclaimable_size_bytes":0},"versions":[{"image_ref":"registry.example.com/demo-managed:sha256","runtime_image_ref":"registry.example.com/demo-runtime:sha256","status":"missing","current":false}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-pods":
 			_, _ = w.Write([]byte(`{"component":"app","namespace":"tenant-123","selector":"app.kubernetes.io/name=demo","container":"demo","groups":[{"owner_kind":"ReplicaSet","owner_name":"demo-9f8d7c6b5","parent":{"kind":"Deployment","name":"demo"},"revision":"14","desired_replicas":1,"current_replicas":1,"ready_replicas":0,"available_replicas":0,"containers":[{"name":"demo","image":"registry.example.com/demo-runtime:sha256"}],"pods":[{"namespace":"tenant-123","name":"demo-9f8d7c6b5-abc12","phase":"Pending","ready":false,"node_name":"gcp1","containers":[{"name":"demo","image":"registry.example.com/demo-runtime:sha256","ready":false,"restart_count":0,"state":"waiting","reason":"ErrImagePull","message":"manifest unknown"}]}],"warnings":[]}],"warnings":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/diagnosis":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not found"}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -2754,6 +2760,9 @@ func newAppOverviewSecretFixtureServer(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"app_id":"app_123","registry_configured":true,"summary":{"version_count":1,"current_version_count":1,"stale_version_count":0,"reclaimable_size_bytes":0},"versions":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-pods":
 			_, _ = w.Write([]byte(`{"component":"app","namespace":"tenant-123","selector":"app.kubernetes.io/name=demo","container":"demo","groups":[{"owner_kind":"ReplicaSet","owner_name":"demo-8c9f6d74f7","parent":{"kind":"Deployment","name":"demo"},"revision":"13","desired_replicas":1,"current_replicas":1,"ready_replicas":1,"available_replicas":1,"containers":[{"name":"demo","image":"ghcr.io/acme/demo:latest"}],"pods":[{"namespace":"tenant-123","name":"demo-8c9f6d74f7-abc12","phase":"Running","ready":true,"node_name":"gcp1","owner":{"kind":"ReplicaSet","name":"demo-8c9f6d74f7"},"containers":[{"name":"demo","image":"ghcr.io/acme/demo:latest","ready":true,"restart_count":0,"state":"running"}]}],"warnings":[]}],"warnings":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/diagnosis":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not found"}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}

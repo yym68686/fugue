@@ -3993,6 +3993,21 @@ func projectDeleteRequested(state *model.State, projectID string) bool {
 	return ok
 }
 
+func projectDeleteFinalizedAuditEvent(project model.Project) model.AuditEvent {
+	return model.AuditEvent{
+		TenantID:   project.TenantID,
+		ActorType:  model.ActorTypeSystem,
+		ActorID:    "project-delete-finalizer",
+		Action:     "project.delete",
+		TargetType: "project",
+		TargetID:   project.ID,
+		Metadata: map[string]string{
+			"finalized_from_request": "true",
+			"name":                   project.Name,
+		},
+	}
+}
+
 func markProjectDeleteRequested(state *model.State, projectID string, requestedAt time.Time) bool {
 	if state.ProjectDeleteRequests == nil {
 		state.ProjectDeleteRequests = make(map[string]time.Time)
@@ -4049,8 +4064,12 @@ func maybeFinalizeRequestedProjectDelete(state *model.State, projectID string) e
 	if projectHasLiveResources(state, projectID) {
 		return nil
 	}
-	_, err := deleteProjectFromState(state, projectID)
-	return err
+	project, err := deleteProjectFromState(state, projectID)
+	if err != nil {
+		return err
+	}
+	state.AuditEvents = append(state.AuditEvents, projectDeleteFinalizedAuditEvent(project))
+	return nil
 }
 
 func projectHasLiveResources(state *model.State, projectID string) bool {

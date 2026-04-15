@@ -92,6 +92,7 @@ fugue app ls
 - `fugue app logs query my-app --table gateway_request_logs --since 1h --match status=500`
 - `fugue app logs pods my-app`
 - `fugue app request my-app GET /admin/requests --query page=2 --query status=500 --header-from-env X-Service-Key=SERVICE_KEY`
+- `fugue app diagnose my-app`
 - `fugue app logs runtime my-app --follow`
 - `fugue app service attach my-app postgres`
 - `fugue app failover status my-app`
@@ -112,12 +113,17 @@ fugue app ls
 - `fugue admin cluster exec --namespace app-demo --pod postgres-0 --retries 4 --timeout 2m -- sh -lc "psql -c 'select now()'"`
 - `fugue admin cluster workload show kube-system deployment coredns`
 - `fugue admin cluster rollout status kube-system deployment coredns`
+- `fugue admin cluster node inspect gcp1`
+- `fugue admin cluster node disk gcp1`
+- `fugue admin cluster node journal gcp1`
+- `fugue admin cluster node metrics gcp1`
 - `fugue admin cluster dns resolve api.github.com --server 10.43.0.10`
 - `fugue admin cluster net connect api.github.com:443`
 - `fugue admin cluster net websocket my-app --path "/socket.io/?EIO=4&transport=websocket"`
 - `fugue admin cluster tls probe 104.18.32.47:443 --server-name api.github.com`
 - `fugue admin users ls`
 - `fugue admin users show user@example.com`
+- `fugue admin users resolve user@example.com`
 - `fugue web diagnose admin-users`
 - `fugue web diagnose /api/fugue/console/pages/api-keys --cookie 'fugue_session=...'`
 
@@ -135,7 +141,11 @@ fugue app ls
 
 `fugue app request` 允许你从控制面侧直接请求应用自己的内部 HTTP 路由，包括那些依赖 app env 里 service key 的管理接口。通过 `--header-from-env Header=ENV_KEY` 可以直接从应用的有效 env 填充认证头，不用把 secret 再复制到本地 shell。
 
+当 `fugue app request` 只报出 `connection refused` 这类底层连接错误时，CLI 现在会继续向控制面请求 runtime diagnosis，并把更接近根因的调度 / 存储提示拼到报错里，例如 “PVC node affinity conflict” 或 “pod was evicted after disk pressure”。
+
 `fugue app overview` 现在会带一个 diagnosis 段，把最近一次 import、对应 deploy、镜像 inventory 和当前 runtime pod 状态串成一条根因摘要。像“import 成功了、deploy 也跑了，但 runtime 镜像没有真正可用”这类问题，可以直接用一条命令看到。
+
+`fugue app diagnose` 是面向 managed runtime 的直接根因命令。需要 CLI 直接把 “pod 被驱逐、节点有 disk pressure、替换 pod 又被 volume node affinity 卡住” 这条链讲清楚时，用它最直接。
 
 `fugue app env ls` 的 text 输出现在会直接渲染成带 `source`、`ref` 和覆盖信息的表格，正常终端使用时不再必须依赖 `--json`。
 
@@ -149,9 +159,13 @@ fugue app ls
 
 `fugue admin cluster exec` 现在默认会对瞬时 EOF 和 stream reset 失败做重试，并暴露 `--retries`、`--retry-delay`、`--timeout` 给长耗时诊断命令使用。
 
+`fugue admin cluster node inspect` 会复用现有 `node-janitor` DaemonSet，在不 SSH 的情况下收集宿主机侧的 `df` / `du` 快照、kubelet 驱逐 journal、相关 event，以及最新 `stats/summary` 证据。`node disk`、`node journal`、`node metrics` 则是对应的聚焦视图。
+
 已发布的 CLI 现在可以直接用 `fugue upgrade` 自升级。当前二进制如果落后于最新 GitHub Release，普通 text 模式命令也会提示你从哪个版本升级到哪个版本。若你在某个 shell 会话里不想看到这个提醒，可以设置 `FUGUE_SKIP_UPDATE_CHECK=1`。
 
 `fugue admin users` 和 `fugue web diagnose` 下的 admin alias 读取的是和 `fugue-web` 管理员产品 UI 相同的 page snapshot 路径。使用这些命令前先设置 `FUGUE_WEB_BASE_URL`，或者显式传 `--web-base-url`。admin page snapshot 接受 bootstrap bearer 鉴权；如果你要排查 workspace 级 console page route，也可以通过 `--cookie` 传入浏览器 session cookie。
+
+`fugue admin users resolve <email>` 则直接回答“这个用户到底映射到哪个 tenant/workspace”。它会返回 enrichment 后的 workspace snapshot，包括 tenant id/name、default project、first app，以及 workspace admin key 是否可用。
 
 当 API 侧配置了 `FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY` 后，`fugue admin cluster status` 还会附带最近一次 `deploy-control-plane` GitHub Actions workflow run，便于把 control plane 升级和当前集群状态对上。
 

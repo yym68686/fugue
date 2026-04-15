@@ -455,6 +455,9 @@ func summarizeManagedAppPodFailure(pod kubePod) string {
 	if reason := strings.TrimSpace(pod.Status.Reason); isFailingManagedAppPodReason(reason) {
 		return summarizeManagedAppFailureLine(prefix, reason, strings.TrimSpace(pod.Status.Message))
 	}
+	if summary := summarizeManagedAppPodConditionFailure(prefix, pod.Status.Conditions); summary != "" {
+		return summary
+	}
 
 	statuses := append([]kubeContainerStatus(nil), pod.Status.InitContainerStatuses...)
 	statuses = append(statuses, pod.Status.ContainerStatuses...)
@@ -518,11 +521,59 @@ func summarizeManagedAppFailureLine(subject, reason, message string) string {
 
 func isFailingManagedAppPodReason(reason string) bool {
 	switch strings.ToLower(strings.TrimSpace(reason)) {
-	case "evicted", "unexpectedadmissionerror":
+	case "evicted", "unexpectedadmissionerror", "unschedulable":
 		return true
 	default:
 		return false
 	}
+}
+
+func summarizeManagedAppPodConditionFailure(prefix string, conditions []kubePodCondition) string {
+	for _, condition := range conditions {
+		if !isFailingManagedAppPodCondition(condition) {
+			continue
+		}
+		reason := strings.TrimSpace(condition.Reason)
+		if reason == "" {
+			reason = strings.TrimSpace(condition.Type)
+		}
+		return summarizeManagedAppFailureLine(prefix, reason, strings.TrimSpace(condition.Message))
+	}
+	return ""
+}
+
+func isFailingManagedAppPodCondition(condition kubePodCondition) bool {
+	if !strings.EqualFold(strings.TrimSpace(condition.Status), "False") {
+		return false
+	}
+	reason := strings.ToLower(strings.TrimSpace(condition.Reason))
+	if reason == "unschedulable" {
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(condition.Type), "PodScheduled") {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(condition.Message))
+	if message == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"volume node affinity conflict",
+		"unbound immediate persistentvolumeclaims",
+		"persistentvolumeclaim",
+		"disk-pressure",
+		"didn't tolerate",
+		"did not tolerate",
+		"untolerated taint",
+		"had taint",
+		"insufficient ",
+		"node affinity",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func isFailingManagedAppWaitingReason(reason string) bool {

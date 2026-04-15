@@ -64,6 +64,10 @@ func (c *CLI) newAppRequestCommand() *cobra.Command {
 				MaxBodyBytes:   opts.MaxBodyBytes,
 			})
 			if err != nil {
+				diagnosis, diagnosisErr := client.TryGetAppDiagnosis(app.ID, "app")
+				if diagnosisErr == nil {
+					return wrapAppRequestErrorWithDiagnosis(err, diagnosis)
+				}
 				return err
 			}
 			if c.wantsJSON() {
@@ -132,4 +136,21 @@ func parseSimpleStringAssignments(values []string) (map[string]string, error) {
 		out[key] = value
 	}
 	return out, nil
+}
+
+func wrapAppRequestErrorWithDiagnosis(err error, diagnosis *appDiagnosis) error {
+	if err == nil || diagnosis == nil || strings.EqualFold(strings.TrimSpace(diagnosis.Category), "available") {
+		return err
+	}
+	lines := []string{strings.TrimSpace(err.Error())}
+	if summary := strings.TrimSpace(diagnosis.Summary); summary != "" {
+		lines = append(lines, "app diagnosis: "+summary)
+	}
+	if hint := strings.TrimSpace(diagnosis.Hint); hint != "" {
+		lines = append(lines, "hint: "+hint)
+	}
+	if len(diagnosis.Evidence) > 0 {
+		lines = append(lines, "evidence: "+strings.TrimSpace(diagnosis.Evidence[0]))
+	}
+	return fmt.Errorf("%s", strings.Join(lines, "\n"))
 }

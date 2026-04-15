@@ -154,6 +154,34 @@ func TestDeleteProjectCascadeQueuesDeleteAndFinalizesProject(t *testing.T) {
 	if _, err := s.GetBackingService(createServiceResponse.BackingService.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expected backing service to be deleted with project cleanup, got %v", err)
 	}
+
+	events, err := s.ListAuditEvents(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	var sawDeleteRequest bool
+	var sawFinalDelete bool
+	for _, event := range events {
+		if event.TargetID != project.ID {
+			continue
+		}
+		switch event.Action {
+		case "project.delete_request":
+			sawDeleteRequest = true
+		case "project.delete":
+			if event.ActorType == model.ActorTypeSystem &&
+				event.ActorID == "project-delete-finalizer" &&
+				event.Metadata["finalized_from_request"] == "true" {
+				sawFinalDelete = true
+			}
+		}
+	}
+	if !sawDeleteRequest {
+		t.Fatalf("expected project.delete_request audit event for %s, got %+v", project.ID, events)
+	}
+	if !sawFinalDelete {
+		t.Fatalf("expected finalizer project.delete audit event for %s, got %+v", project.ID, events)
+	}
 }
 
 func TestBackingServiceLifecycleAndBindingsQueueDeploy(t *testing.T) {

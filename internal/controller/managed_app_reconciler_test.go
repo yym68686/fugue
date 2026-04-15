@@ -181,6 +181,7 @@ func TestBuildManagedAppStatusMarksCrashLoopingPodsAsError(t *testing.T) {
 				Phase                 string                `json:"phase"`
 				Reason                string                `json:"reason,omitempty"`
 				Message               string                `json:"message,omitempty"`
+				Conditions            []kubePodCondition    `json:"conditions,omitempty"`
 				InitContainerStatuses []kubeContainerStatus `json:"initContainerStatuses,omitempty"`
 				ContainerStatuses     []kubeContainerStatus `json:"containerStatuses,omitempty"`
 			}{
@@ -285,6 +286,7 @@ func TestBuildManagedAppStatusPrefersPodFailureOverDeploymentCondition(t *testin
 				Phase                 string                `json:"phase"`
 				Reason                string                `json:"reason,omitempty"`
 				Message               string                `json:"message,omitempty"`
+				Conditions            []kubePodCondition    `json:"conditions,omitempty"`
 				InitContainerStatuses []kubeContainerStatus `json:"initContainerStatuses,omitempty"`
 				ContainerStatuses     []kubeContainerStatus `json:"containerStatuses,omitempty"`
 			}{
@@ -368,6 +370,7 @@ func TestBuildManagedAppStatusIgnoresPodFailuresFromPreviousRelease(t *testing.T
 				Phase                 string                `json:"phase"`
 				Reason                string                `json:"reason,omitempty"`
 				Message               string                `json:"message,omitempty"`
+				Conditions            []kubePodCondition    `json:"conditions,omitempty"`
 				InitContainerStatuses []kubeContainerStatus `json:"initContainerStatuses,omitempty"`
 				ContainerStatuses     []kubeContainerStatus `json:"containerStatuses,omitempty"`
 			}{
@@ -443,6 +446,7 @@ func TestBuildManagedAppStatusOnlyConsidersPodFailuresAfterPendingReleaseStart(t
 				Phase                 string                `json:"phase"`
 				Reason                string                `json:"reason,omitempty"`
 				Message               string                `json:"message,omitempty"`
+				Conditions            []kubePodCondition    `json:"conditions,omitempty"`
 				InitContainerStatuses []kubeContainerStatus `json:"initContainerStatuses,omitempty"`
 				ContainerStatuses     []kubeContainerStatus `json:"containerStatuses,omitempty"`
 			}{
@@ -472,6 +476,7 @@ func TestBuildManagedAppStatusOnlyConsidersPodFailuresAfterPendingReleaseStart(t
 				Phase                 string                `json:"phase"`
 				Reason                string                `json:"reason,omitempty"`
 				Message               string                `json:"message,omitempty"`
+				Conditions            []kubePodCondition    `json:"conditions,omitempty"`
 				InitContainerStatuses []kubeContainerStatus `json:"initContainerStatuses,omitempty"`
 				ContainerStatuses     []kubeContainerStatus `json:"containerStatuses,omitempty"`
 			}{
@@ -536,6 +541,7 @@ func TestBuildManagedAppStatusKeepsContainerCreatingPodsAsProgressing(t *testing
 				Phase                 string                `json:"phase"`
 				Reason                string                `json:"reason,omitempty"`
 				Message               string                `json:"message,omitempty"`
+				Conditions            []kubePodCondition    `json:"conditions,omitempty"`
 				InitContainerStatuses []kubeContainerStatus `json:"initContainerStatuses,omitempty"`
 				ContainerStatuses     []kubeContainerStatus `json:"containerStatuses,omitempty"`
 			}{
@@ -561,6 +567,80 @@ func TestBuildManagedAppStatusKeepsContainerCreatingPodsAsProgressing(t *testing
 	}
 	if !strings.Contains(status.Message, "deployment progressing") {
 		t.Fatalf("expected rollout progress message, got %q", status.Message)
+	}
+}
+
+func TestBuildManagedAppStatusMarksUnschedulablePodsAsError(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:v2",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	managed := runtime.ManagedAppObject{
+		Metadata: runtime.ManagedAppMeta{
+			Generation: 2,
+		},
+		Spec: runtime.ManagedAppSpec{
+			Scheduling: runtime.SchedulingConstraints{},
+		},
+	}
+	deployment := kubeDeployment{}
+	deployment.Metadata.Generation = 2
+	deployment.Status.ObservedGeneration = 2
+	deployment.Status.Replicas = 1
+	deployment.Status.UpdatedReplicas = 1
+
+	pods := []kubePod{
+		{
+			Metadata: struct {
+				Name              string    `json:"name"`
+				CreationTimestamp time.Time `json:"creationTimestamp"`
+				DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
+			}{
+				Name:              "demo-abc123",
+				CreationTimestamp: time.Date(2026, time.March, 26, 10, 0, 0, 0, time.UTC),
+			},
+			Status: struct {
+				Phase                 string                `json:"phase"`
+				Reason                string                `json:"reason,omitempty"`
+				Message               string                `json:"message,omitempty"`
+				Conditions            []kubePodCondition    `json:"conditions,omitempty"`
+				InitContainerStatuses []kubeContainerStatus `json:"initContainerStatuses,omitempty"`
+				ContainerStatuses     []kubeContainerStatus `json:"containerStatuses,omitempty"`
+			}{
+				Phase: "Pending",
+				Conditions: []kubePodCondition{
+					{
+						Type:    "PodScheduled",
+						Status:  "False",
+						Reason:  "Unschedulable",
+						Message: "0/4 nodes are available: 1 node(s) had volume node affinity conflict, 1 node(s) had untolerated taint {node.kubernetes.io/disk-pressure: }. preemption: 0/4 nodes are available: 4 Preemption is not helpful for scheduling.",
+					},
+				},
+			},
+		},
+	}
+
+	status := buildManagedAppStatus(managed, app, deployment, true, pods, nil)
+
+	if status.Phase != runtime.ManagedAppPhaseError {
+		t.Fatalf("expected phase error, got %q", status.Phase)
+	}
+	if !strings.Contains(status.Message, "volume node affinity conflict") {
+		t.Fatalf("expected node affinity conflict in message, got %q", status.Message)
+	}
+	if !strings.Contains(status.Message, "disk-pressure") {
+		t.Fatalf("expected disk-pressure in message, got %q", status.Message)
+	}
+	if !strings.Contains(status.Message, "demo-abc123") {
+		t.Fatalf("expected pod name in message, got %q", status.Message)
 	}
 }
 

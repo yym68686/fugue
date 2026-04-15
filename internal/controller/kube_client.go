@@ -146,9 +146,17 @@ type kubePod struct {
 		Phase                 string                `json:"phase"`
 		Reason                string                `json:"reason,omitempty"`
 		Message               string                `json:"message,omitempty"`
+		Conditions            []kubePodCondition    `json:"conditions,omitempty"`
 		InitContainerStatuses []kubeContainerStatus `json:"initContainerStatuses,omitempty"`
 		ContainerStatuses     []kubeContainerStatus `json:"containerStatuses,omitempty"`
 	} `json:"status"`
+}
+
+type kubePodCondition struct {
+	Type    string `json:"type,omitempty"`
+	Status  string `json:"status,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 type kubeContainerStatus struct {

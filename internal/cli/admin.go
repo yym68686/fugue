@@ -854,6 +854,7 @@ func (c *CLI) newAdminClusterCommand() *cobra.Command {
 	}
 	cmd.AddCommand(
 		c.newAdminClusterNodesCommand(),
+		c.newAdminClusterNodeCommand(),
 		c.newAdminClusterStatusCommand(),
 		c.newAdminClusterPodsCommand(),
 		c.newAdminClusterEventsCommand(),

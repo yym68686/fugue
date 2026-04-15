@@ -69,6 +69,7 @@ in more than one visible project or tenant.
 		c.newAppStatusCommand(),
 		c.newAppOverviewCommand(),
 		c.newAppWatchCommand(),
+		c.newAppDiagnosisCommand(),
 		c.newAppSourceCommand(),
 		hideCompatCommand(c.newAppSyncCommand(), "fugue app source show or fugue app rebuild"),
 		c.newAppLogsCommand(),

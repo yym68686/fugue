@@ -458,11 +458,31 @@ func collectRuntimeLogs(ctx context.Context, client appLogsClient, namespace str
 			TailLines: tailLines,
 			Previous:  previous,
 		})
-		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("%s: %v", pod.Metadata.Name, err))
+		sectionLabel := fmt.Sprintf("==> %s <==", pod.Metadata.Name)
+		if err != nil || strings.TrimSpace(out) == "" {
+			if !previous {
+				previousOut, previousErr := client.readPodLogs(ctx, namespace, pod.Metadata.Name, kubeLogOptions{
+					Container: containerName,
+					TailLines: tailLines,
+					Previous:  true,
+				})
+				if previousErr == nil && strings.TrimSpace(previousOut) != "" {
+					sections = append(sections, fmt.Sprintf("==> %s (previous) <==\n%s", pod.Metadata.Name, strings.TrimSpace(previousOut)))
+					continue
+				}
+				if previousErr != nil && !isKubeNotFound(previousErr) {
+					warnings = append(warnings, fmt.Sprintf("%s previous logs: %v", pod.Metadata.Name, previousErr))
+				}
+			}
+			if err != nil && !isKubeNotFound(err) {
+				warnings = append(warnings, fmt.Sprintf("%s: %v", pod.Metadata.Name, err))
+			}
+			if summary := summarizeKubePodFailure(pod); summary != "" {
+				sections = append(sections, sectionLabel+"\n"+summary)
+			}
 			continue
 		}
-		sections = append(sections, fmt.Sprintf("==> %s <==\n%s", pod.Metadata.Name, strings.TrimSpace(out)))
+		sections = append(sections, sectionLabel+"\n"+strings.TrimSpace(out))
 	}
 	return strings.TrimSpace(strings.Join(sections, "\n\n")), warnings
 }

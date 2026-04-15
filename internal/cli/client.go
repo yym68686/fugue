@@ -364,10 +364,18 @@ func (c *Client) ListProjects(tenantID string) ([]model.Project, error) {
 }
 
 func (c *Client) ListApps() ([]model.App, error) {
+	return c.ListAppsWithLiveStatus(true)
+}
+
+func (c *Client) ListAppsWithLiveStatus(includeLiveStatus bool) ([]model.App, error) {
 	var response struct {
 		Apps []model.App `json:"apps"`
 	}
-	if err := c.doJSON(http.MethodGet, "/v1/apps", nil, &response); err != nil {
+	relative := "/v1/apps"
+	if includeLiveStatus {
+		relative += "?include_live_status=true"
+	}
+	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
 		return nil, err
 	}
 	return response.Apps, nil

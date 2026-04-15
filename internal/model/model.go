@@ -79,6 +79,7 @@ const (
 	ActorTypeAPIKey    = "api-key"
 	ActorTypeNodeKey   = "node-key"
 	ActorTypeRuntime   = "runtime"
+	ActorTypeSystem    = "system"
 
 	OperationRequestedByGitHubSyncController = "fugue-controller/github-sync"
 	OperationRequestedByAutoFailover         = "fugue-controller/auto-failover"

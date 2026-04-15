@@ -56,7 +56,7 @@ func writeAppTable(w io.Writer, apps []model.App) error {
 
 func writeAppTableWithRuntimeNames(w io.Writer, apps []model.App, runtimeNames map[string]string, showIDs bool) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "APP\tSTATUS\tREPLICAS\tRUNTIME\tUSAGE\tURL"); err != nil {
+	if _, err := fmt.Fprintln(tw, "APP\tSTATUS\tREPLICAS\tRUNTIME\tUSAGE\tURL\tDETAIL"); err != nil {
 		return err
 	}
 	for _, app := range apps {
@@ -71,18 +71,31 @@ func writeAppTableWithRuntimeNames(w io.Writer, apps []model.App, runtimeNames m
 		runtimeName := firstNonEmptyTrimmed(runtimeNames[runtimeID], runtimeID)
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%d\t%s\t%s\t%s\n",
+			"%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
 			formatDisplayName(app.Name, app.ID, showIDs),
 			strings.TrimSpace(app.Status.Phase),
 			maxInt(app.Status.CurrentReplicas, app.Spec.Replicas),
 			formatDisplayName(runtimeName, runtimeID, showIDs),
 			formatResourceUsageSummary(app.CurrentResourceUsage),
 			url,
+			formatAppListDetail(app.Status.LastMessage),
 		); err != nil {
 			return err
 		}
 	}
 	return tw.Flush()
+}
+
+func formatAppListDetail(message string) string {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return ""
+	}
+	const maxLen = 96
+	if len(message) <= maxLen {
+		return message
+	}
+	return strings.TrimSpace(message[:maxLen-3]) + "..."
 }
 
 func writeDomainTable(w io.Writer, domains []model.AppDomain) error {

@@ -4081,6 +4081,28 @@ func TestRequestedProjectDeleteFinalizesAfterLastAppDelete(t *testing.T) {
 	if _, err := s.GetBackingService(service.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected backing service to be deleted after project cleanup, got %v", err)
 	}
+	events, err := s.ListAuditEvents(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected one finalizer audit event, got %+v", events)
+	}
+	if events[0].Action != "project.delete" {
+		t.Fatalf("expected project.delete audit event, got %q", events[0].Action)
+	}
+	if events[0].ActorType != model.ActorTypeSystem {
+		t.Fatalf("expected system actor type, got %q", events[0].ActorType)
+	}
+	if events[0].ActorID != "project-delete-finalizer" {
+		t.Fatalf("expected project delete finalizer actor id, got %q", events[0].ActorID)
+	}
+	if events[0].TargetID != project.ID {
+		t.Fatalf("expected deleted project target %q, got %q", project.ID, events[0].TargetID)
+	}
+	if got := events[0].Metadata["finalized_from_request"]; got != "true" {
+		t.Fatalf("expected finalized_from_request metadata, got %+v", events[0].Metadata)
+	}
 }
 
 func TestPurgeAppRemovesImportedPlaceholderResources(t *testing.T) {

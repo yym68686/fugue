@@ -746,6 +746,29 @@ paths:
                 $ref: "#/components/schemas/ClusterNodeListResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/cluster/nodes/{name}/diagnosis:
+    get:
+      operationId: getClusterNodeDiagnosis
+      summary: Get Cluster Node Diagnosis
+      tags: [Cluster]
+      x-fugue-handler: handleGetClusterNodeDiagnosis
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterNodeDiagnosisResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/cluster/control-plane:
     get:
       operationId: getControlPlaneStatus
@@ -2171,6 +2194,31 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AppHTTPRequestResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/diagnosis:
+    get:
+      operationId: getAppDiagnosis
+      summary: Get App Diagnosis
+      tags: [Apps]
+      x-fugue-handler: handleGetAppDiagnosis
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: query
+          name: component
+          required: false
+          schema:
+            type: string
+            enum: [app, postgres]
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDiagnosisResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/files:
@@ -4071,6 +4119,100 @@ components:
         created_at:
           type: string
           format: date-time
+    ClusterNodeFilesystemUsage:
+      type: object
+      additionalProperties: false
+      required: [mount_path]
+      properties:
+        filesystem:
+          type: string
+        mount_path:
+          type: string
+        size_bytes:
+          type: integer
+          format: int64
+        used_bytes:
+          type: integer
+          format: int64
+        available_bytes:
+          type: integer
+          format: int64
+        used_percent:
+          type: number
+    ClusterNodePathUsage:
+      type: object
+      additionalProperties: false
+      required: [path]
+      properties:
+        path:
+          type: string
+        bytes:
+          type: integer
+          format: int64
+    ClusterNodeJournalEntry:
+      type: object
+      additionalProperties: false
+      required: [message]
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        unit:
+          type: string
+        message:
+          type: string
+    ClusterNodeMetricsDiagnosis:
+      type: object
+      additionalProperties: false
+      required: [status, summary, evidence, warnings]
+      properties:
+        status:
+          type: string
+        summary:
+          type: string
+        evidence:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            type: string
+    ClusterNodeDiagnosis:
+      type: object
+      additionalProperties: false
+      required: [summary, filesystems, hot_paths, journal, events, warnings]
+      properties:
+        node:
+          $ref: "#/components/schemas/ClusterNode"
+        summary:
+          type: string
+        janitor_namespace:
+          type: string
+        janitor_pod:
+          type: string
+        filesystems:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterNodeFilesystemUsage"
+        hot_paths:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterNodePathUsage"
+        journal:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterNodeJournalEntry"
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterEvent"
+        metrics:
+          $ref: "#/components/schemas/ClusterNodeMetricsDiagnosis"
+        warnings:
+          type: array
+          items:
+            type: string
     Operation:
       type: object
       additionalProperties: false
@@ -4967,6 +5109,13 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ClusterNode"
+    ClusterNodeDiagnosisResponse:
+      type: object
+      additionalProperties: false
+      required: [diagnosis]
+      properties:
+        diagnosis:
+          $ref: "#/components/schemas/ClusterNodeDiagnosis"
     ControlPlaneComponent:
       type: object
       additionalProperties: false
@@ -6327,6 +6476,13 @@ components:
           type: array
           items:
             type: string
+    AppDiagnosisResponse:
+      type: object
+      additionalProperties: false
+      required: [diagnosis]
+      properties:
+        diagnosis:
+          $ref: "#/components/schemas/AppDiagnosis"
     AppEnvResponse:
       type: object
       additionalProperties: false
@@ -6497,6 +6653,45 @@ components:
           type: string
         timing:
           $ref: "#/components/schemas/HTTPDiagnosticTiming"
+    AppDiagnosis:
+      type: object
+      additionalProperties: false
+      required: [category, summary, evidence, warnings, events]
+      properties:
+        category:
+          type: string
+        summary:
+          type: string
+        hint:
+          type: string
+        component:
+          type: string
+        namespace:
+          type: string
+        selector:
+          type: string
+        implicated_node:
+          type: string
+        implicated_pod:
+          type: string
+        live_pods:
+          type: integer
+          format: int32
+        ready_pods:
+          type: integer
+          format: int32
+        evidence:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            type: string
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterEvent"
     AppFilesResponse:
       type: object
       additionalProperties: false
