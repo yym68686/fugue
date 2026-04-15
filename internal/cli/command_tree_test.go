@@ -26,17 +26,24 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		"Fugue is a semantic CLI over the Fugue control-plane API.",
-		"export FUGUE_API_KEY=<your-api-key>",
+		"curl -fsSL https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.sh | sh",
+		"https://fugue.pro/app/api-keys",
+		"https://app.example.com/app/api-keys",
+		"Use a tenant API key for normal deploys. Use a platform-admin/bootstrap key only for admin commands.",
+		"export FUGUE_API_KEY=<copied-access-key>",
 		"Base URL defaults to FUGUE_BASE_URL, then FUGUE_API_URL, then https://api.fugue.pro.",
 		"Web Base URL defaults to FUGUE_WEB_BASE_URL, then APP_BASE_URL, then a best-effort guess from the API base URL.",
 		"Tenant is auto-selected when your key only sees one tenant.",
 		"Deploy and create flows default to the \"default\" project when you do not pass --project.",
 		"App and operation JSON output redacts secrets by default. Pass --show-secrets only when you explicitly need raw values.",
+		"FUGUE_SKIP_UPDATE_CHECK",
 		"deploy",
 		"app",
 		"project",
 		"runtime",
 		"service",
+		"version",
+		"upgrade",
 		"api",
 		"diagnose",
 		"web",
@@ -54,6 +61,8 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"fugue app storage set my-app --size 10Gi --mount /data",
 		"fugue app domain primary set my-app www.example.com",
 		"fugue service postgres create app-db --runtime shared",
+		"fugue version --check-latest",
+		"fugue upgrade",
 		"fugue operation ls --app my-app",
 		"fugue operation show op_123 --show-secrets",
 		"fugue runtime access show shared",
@@ -68,6 +77,7 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"fugue diagnose timing -- app overview my-app",
 		"fugue admin users ls",
 		"fugue web diagnose admin-users",
+		"Use fugue CLI and the current FUGUE_API_KEY to deploy this project.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected help output to contain %q, got %q", want, out)
@@ -1312,10 +1322,153 @@ func TestRunEnvSetByNameUsesSemanticCommand(t *testing.T) {
 		t.Fatalf("expected no delete keys, got %+v", gotBody.Delete)
 	}
 	out := stdout.String()
-	for _, want := range []string{"app_id=app_123", "operation_id=op_123", "DEBUG=1", "FOO=bar"} {
+	for _, want := range []string{"app=demo", "app_id=app_123", "operation_id=op_123", "DEBUG", "FOO", "1", "bar"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
+	}
+}
+
+func TestRunEnvListTextShowsSources(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/env":
+			_, _ = w.Write([]byte(`{"env":{"DB_HOST":"override-db.internal","SERVICE_KEY":"svc-secret"},"entries":[{"key":"DB_HOST","value":"override-db.internal","source":"app","source_ref":"spec.env","overrides":["binding:postgres"]},{"key":"SERVICE_KEY","value":"svc-secret","source":"binding","source_ref":"postgres"}]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"env", "ls", "demo",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run env ls: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"app=demo", "env_count=2", "KEY", "VALUE", "SOURCE", "DB_HOST", "app:spec.env", "binding:postgres"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAppDatabaseQueryByNameUsesSemanticCommand(t *testing.T) {
+	t.Parallel()
+
+	var gotBody struct {
+		SQL       string `json:"sql"`
+		MaxRows   int    `json:"max_rows"`
+		TimeoutMS int    `json:"timeout_ms"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/database/query":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode db query body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"database":"demo","host":"db.internal","user":"demo","columns":[{"name":"status","database_type":"TEXT"}],"rows":[{"status":"ok"}],"row_count":1,"max_rows":100,"read_only":true,"duration_ms":12}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "db", "query", "demo",
+		"--sql", "select status from gateway_request_logs limit 1",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app db query: %v", err)
+	}
+
+	if gotBody.SQL != "select status from gateway_request_logs limit 1" {
+		t.Fatalf("unexpected sql body %+v", gotBody)
+	}
+	if gotBody.MaxRows != 100 || gotBody.TimeoutMS <= 0 {
+		t.Fatalf("expected default max_rows/timeout_ms, got %+v", gotBody)
+	}
+	out := stdout.String()
+	for _, want := range []string{"database=demo", "host=db.internal", "read_only=true", "status", "ok"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAppRequestUsesEnvHeaderAndQueryFlags(t *testing.T) {
+	t.Parallel()
+
+	var gotBody struct {
+		Method         string              `json:"method"`
+		Path           string              `json:"path"`
+		Query          map[string][]string `json:"query"`
+		HeadersFromEnv map[string]string   `json:"headers_from_env"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","ports":[8080],"replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/request":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode app request body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"method":"GET","url":"http://demo-123/admin/requests?page=2","status":"200 OK","status_code":200,"headers":{"Content-Type":["application/json"]},"body":"{\"items\":[{\"id\":\"req_123\"}]}","body_encoding":"utf-8","body_size":27,"timing":{"total":"8ms"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"-o", "json",
+		"app", "request", "demo", "GET", "/admin/requests",
+		"--query", "page=2",
+		"--header-from-env", "X-Service-Key=SERVICE_KEY",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app request: %v", err)
+	}
+
+	if gotBody.Method != "GET" || gotBody.Path != "/admin/requests" {
+		t.Fatalf("unexpected app request body %+v", gotBody)
+	}
+	if got := gotBody.Query["page"]; len(got) != 1 || got[0] != "2" {
+		t.Fatalf("expected page=2 in query body, got %+v", gotBody.Query)
+	}
+	if gotBody.HeadersFromEnv["X-Service-Key"] != "SERVICE_KEY" {
+		t.Fatalf("expected header-from-env to be forwarded, got %+v", gotBody.HeadersFromEnv)
+	}
+	var response struct {
+		StatusCode int    `json:"status_code"`
+		URL        string `json:"url"`
+		Body       string `json:"body"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decode app request output: %v", err)
+	}
+	if response.StatusCode != 200 || response.URL != "http://demo-123/admin/requests?page=2" || !strings.Contains(response.Body, `"req_123"`) {
+		t.Fatalf("unexpected app request output %+v", response)
 	}
 }
 
@@ -2006,6 +2159,60 @@ func TestRunAdminClusterPodsListsSystemPods(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
+	}
+}
+
+func TestRunAdminClusterExecForwardsRetryFlags(t *testing.T) {
+	t.Parallel()
+
+	var gotBody struct {
+		Namespace    string   `json:"namespace"`
+		Pod          string   `json:"pod"`
+		Command      []string `json:"command"`
+		Retries      int      `json:"retries"`
+		RetryDelayMS int      `json:"retry_delay_ms"`
+		TimeoutMS    int      `json:"timeout_ms"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/cluster/exec" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode cluster exec body: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"namespace":"kube-system","pod":"coredns-abc","command":["cat","/etc/resolv.conf"],"output":"10.43.0.10\n","attempt_count":2}`))
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"admin", "cluster", "exec",
+		"--namespace", "kube-system",
+		"--pod", "coredns-abc",
+		"--retries", "4",
+		"--retry-delay", "500ms",
+		"--timeout", "2m",
+		"--",
+		"cat", "/etc/resolv.conf",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run admin cluster exec: %v", err)
+	}
+
+	if gotBody.Namespace != "kube-system" || gotBody.Pod != "coredns-abc" {
+		t.Fatalf("unexpected exec target %+v", gotBody)
+	}
+	if gotBody.Retries != 4 || gotBody.RetryDelayMS != 500 || gotBody.TimeoutMS != 120000 {
+		t.Fatalf("expected retry fields to be forwarded, got %+v", gotBody)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "10.43.0.10" {
+		t.Fatalf("unexpected exec stdout %q", got)
+	}
+	if !strings.Contains(stderr.String(), "cluster_exec_attempts=2") {
+		t.Fatalf("expected retry note on stderr, got %q", stderr.String())
 	}
 }
 

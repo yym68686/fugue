@@ -39,26 +39,41 @@ Windows PowerShell：
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.ps1 | iex"
 ```
 
-使用一个已签发的 API key 即可开始：
+先在“访问密钥 / Access keys”页面创建或复制一个访问密钥：
+
+- Fugue Cloud：`https://fugue.pro/app/api-keys`
+- 自托管：你的 Fugue Web 地址加上 `/app/api-keys`，例如 `https://app.example.com/app/api-keys`
+
+普通部署优先使用 tenant 级访问密钥。`fugue admin ...`、跨 tenant 排障、产品层管理员诊断这类场景，再使用 platform-admin key 或 bootstrap key。
+
+拿到密钥后即可开始：
 
 ```bash
-export FUGUE_API_KEY=<your-api-key>
+export FUGUE_API_KEY=<copied-access-key>
 fugue deploy .
 fugue app ls
+```
+
+后续如果你想查看当前 CLI 版本或原地升级：
+
+```bash
+fugue version --check-latest
+fugue upgrade
 ```
 
 如果你用的是自托管控制面，只需要先设置一次地址：
 
 ```bash
 export FUGUE_BASE_URL=https://api.example.com
-export FUGUE_API_KEY=<your-api-key>
+export FUGUE_WEB_BASE_URL=https://app.example.com
+export FUGUE_API_KEY=<copied-access-key>
 fugue app ls
 ```
 
-如果你还想排查产品层 `fugue-web` 页面 API，再额外设置一次 web 地址：
+如果你想让 Codex 直接接手部署，把密钥导出到 Codex 会使用的 shell 里，然后给它一句明确指令，例如：
 
-```bash
-export FUGUE_WEB_BASE_URL=https://app.example.com
+```text
+使用 fugue CLI 和当前的 FUGUE_API_KEY 部署这个项目。
 ```
 
 常用流程：
@@ -69,7 +84,10 @@ export FUGUE_WEB_BASE_URL=https://app.example.com
 - `fugue app create my-app --github owner/repo --branch main`
 - `fugue app status my-app`
 - `fugue app overview my-app`
+- `fugue app env ls my-app`
 - `fugue app fs ls my-app / --source live`
+- `fugue app db query my-app --sql "select * from gateway_request_logs order by created_at desc limit 50"`
+- `fugue app request my-app GET /admin/requests --query page=2 --query status=500 --header-from-env X-Service-Key=SERVICE_KEY`
 - `fugue app logs runtime my-app --follow`
 - `fugue app service attach my-app postgres`
 - `fugue app failover status my-app`
@@ -86,6 +104,7 @@ export FUGUE_WEB_BASE_URL=https://app.example.com
 - `fugue admin cluster events --namespace kube-system --limit 20`
 - `fugue admin cluster logs --namespace kube-system --pod coredns-abc --container coredns --tail 200`
 - `fugue admin cluster exec --namespace kube-system --pod coredns-abc -- cat /etc/resolv.conf`
+- `fugue admin cluster exec --namespace app-demo --pod postgres-0 --retries 4 --timeout 2m -- sh -lc "psql -c 'select now()'"`
 - `fugue admin cluster workload show kube-system deployment coredns`
 - `fugue admin cluster rollout status kube-system deployment coredns`
 - `fugue admin cluster dns resolve api.github.com --server 10.43.0.10`
@@ -100,7 +119,17 @@ export FUGUE_WEB_BASE_URL=https://app.example.com
 
 `fugue app fs` 现在同时支持持久化存储根目录和 live runtime filesystem。传 `--source persistent` 时会限制在 workspace / persistent storage 挂载点内；传 `--source live` 时会直接查看运行中容器里的 `/`、`/app`、`/tmp`、`/etc` 等路径。
 
+`fugue app db query` 现在可以直接基于应用的有效 PostgreSQL 连接执行只读 SQL，不需要先 `cluster exec` 进 Postgres pod。它适合直接查业务表，例如 `users`、`gateway_request_logs`、请求审计表，并且默认会限制返回行数，避免日常排障时一次拉太多数据。
+
+`fugue app request` 允许你从控制面侧直接请求应用自己的内部 HTTP 路由，包括那些依赖 app env 里 service key 的管理接口。通过 `--header-from-env Header=ENV_KEY` 可以直接从应用的有效 env 填充认证头，不用把 secret 再复制到本地 shell。
+
+`fugue app env ls` 的 text 输出现在会直接渲染成带来源和覆盖信息的表格，正常终端使用时不再必须依赖 `--json`。
+
 `fugue api request` 会直接展示任意控制面接口的 status、headers、server-timing、body 和传输层耗时。`fugue diagnose timing -- <command...>` 则会包装任意 Fugue CLI 命令，输出它发出的每个 HTTP 请求的 DNS / connect / TLS / TTFB / total timing。
+
+`fugue admin cluster exec` 现在默认会对瞬时 EOF 和 stream reset 失败做重试，并暴露 `--retries`、`--retry-delay`、`--timeout` 给长耗时诊断命令使用。
+
+已发布的 CLI 现在可以直接用 `fugue upgrade` 自升级。当前二进制如果落后于最新 GitHub Release，普通 text 模式命令也会提示你从哪个版本升级到哪个版本。若你在某个 shell 会话里不想看到这个提醒，可以设置 `FUGUE_SKIP_UPDATE_CHECK=1`。
 
 `fugue admin users` 和 `fugue web diagnose` 下的 admin alias 读取的是和 `fugue-web` 管理员产品 UI 相同的 page snapshot 路径。使用这些命令前先设置 `FUGUE_WEB_BASE_URL`，或者显式传 `--web-base-url`。admin page snapshot 接受 bootstrap bearer 鉴权；如果你要排查 workspace 级 console page route，也可以通过 `--cookie` 传入浏览器 session cookie。
 

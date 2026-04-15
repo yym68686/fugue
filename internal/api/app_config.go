@@ -13,36 +13,28 @@ import (
 
 func (s *Server) handleGetAppEnv(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
+	app, allowed := s.loadAuthorizedApp(w, r, principal)
 	if !allowed {
 		return
 	}
 
 	spec := cloneAppSpec(app.Spec)
-	env := map[string]string(nil)
+	envDetails := appEnvDetails{}
 
 	if appDeployBaselineNeedsRecovery(spec, app.Source) {
-		fullApp, allowed := s.loadAuthorizedApp(w, r, principal)
-		if !allowed {
-			return
-		}
-		spec, _, err := s.recoverAppDeployBaseline(fullApp)
+		spec, _, err := s.recoverAppDeployBaseline(app)
 		if err != nil {
 			s.writeStoreError(w, err)
 			return
 		}
-		env = mergedAppEnvWithSpec(fullApp, spec)
+		envDetails = mergedAppEnvDetails(app, spec)
 	} else {
-		bindings, err := s.store.ListServiceBindings(app.ID)
-		if err != nil {
-			s.writeStoreError(w, err)
-			return
-		}
-		env = mergedAppEnvWithBindings(spec, bindings)
+		envDetails = mergedAppEnvDetails(app, spec)
 	}
 	s.appendAudit(principal, "app.env.read", "app", app.ID, app.TenantID, nil)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"env": defaultStringMap(env),
+		"env":     defaultStringMap(envDetails.Env),
+		"entries": envDetails.Entries,
 	})
 }
 
@@ -78,8 +70,10 @@ func (s *Server) handlePatchAppEnv(w http.ResponseWriter, r *http.Request) {
 	}
 	spec.Env = env
 	if !changed {
+		envDetails := mergedAppEnvDetails(app, spec)
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{
-			"env":             defaultStringMap(mergedAppEnvWithSpec(app, spec)),
+			"env":             defaultStringMap(envDetails.Env),
+			"entries":         envDetails.Entries,
 			"already_current": true,
 		})
 		return
@@ -100,8 +94,10 @@ func (s *Server) handlePatchAppEnv(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.appendAudit(principal, "app.env.patch", "operation", op.ID, app.TenantID, map[string]string{"app_id": app.ID})
+	envDetails := mergedAppEnvDetails(app, spec)
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
-		"env":       defaultStringMap(mergedAppEnvWithSpec(app, spec)),
+		"env":       defaultStringMap(envDetails.Env),
+		"entries":   envDetails.Entries,
 		"operation": sanitizeOperationForAPI(op),
 	})
 }

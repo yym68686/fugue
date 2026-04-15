@@ -2,7 +2,10 @@ package cli
 
 import (
 	"fmt"
+	"io"
+	"sort"
 	"strings"
+	"text/tabwriter"
 
 	"fugue/internal/model"
 
@@ -15,10 +18,12 @@ type envMutationOptions struct {
 }
 
 type envCommandResult struct {
-	AppID          string            `json:"app_id,omitempty"`
-	Env            map[string]string `json:"env"`
-	Operation      *model.Operation  `json:"operation,omitempty"`
-	AlreadyCurrent bool              `json:"already_current,omitempty"`
+	AppName        string              `json:"app_name,omitempty"`
+	AppID          string              `json:"app_id,omitempty"`
+	Env            map[string]string   `json:"env"`
+	Entries        []model.AppEnvEntry `json:"entries,omitempty"`
+	Operation      *model.Operation    `json:"operation,omitempty"`
+	AlreadyCurrent bool                `json:"already_current,omitempty"`
 }
 
 func (c *CLI) newEnvCommand() *cobra.Command {
@@ -59,8 +64,10 @@ func (c *CLI) newEnvListCommand() *cobra.Command {
 				return err
 			}
 			return c.renderEnvCommandResult(envCommandResult{
-				AppID: app.ID,
-				Env:   response.Env,
+				AppName: app.Name,
+				AppID:   app.ID,
+				Env:     response.Env,
+				Entries: response.Entries,
 			})
 		},
 	}
@@ -118,8 +125,10 @@ Inline values override keys loaded from --file when both are provided.
 				response.Env = latest.Env
 			}
 			return c.renderEnvCommandResult(envCommandResult{
+				AppName:        app.Name,
 				AppID:          app.ID,
 				Env:            response.Env,
+				Entries:        response.Entries,
 				Operation:      response.Operation,
 				AlreadyCurrent: response.AlreadyCurrent,
 			})
@@ -168,8 +177,10 @@ func (c *CLI) newEnvRemoveCommand() *cobra.Command {
 				response.Env = latest.Env
 			}
 			return c.renderEnvCommandResult(envCommandResult{
+				AppName:        app.Name,
 				AppID:          app.ID,
 				Env:            response.Env,
+				Entries:        response.Entries,
 				Operation:      response.Operation,
 				AlreadyCurrent: response.AlreadyCurrent,
 			})
@@ -244,7 +255,14 @@ func (c *CLI) renderEnvCommandResult(result envCommandResult) error {
 	if c.wantsJSON() {
 		return writeJSON(c.stdout, result)
 	}
-	pairs := make([]kvPair, 0, 3)
+	pairs := make([]kvPair, 0, 5)
+	if strings.TrimSpace(result.AppName) != "" {
+		label := strings.TrimSpace(result.AppName)
+		if c.showIDs() && strings.TrimSpace(result.AppID) != "" && !strings.EqualFold(label, result.AppID) {
+			label += " (" + result.AppID + ")"
+		}
+		pairs = append(pairs, kvPair{Key: "app", Value: label})
+	}
 	if strings.TrimSpace(result.AppID) != "" {
 		pairs = append(pairs, kvPair{Key: "app_id", Value: result.AppID})
 	}
@@ -254,10 +272,12 @@ func (c *CLI) renderEnvCommandResult(result envCommandResult) error {
 	if result.AlreadyCurrent {
 		pairs = append(pairs, kvPair{Key: "already_current", Value: "true"})
 	}
+	entries := normalizeEnvEntries(result.Env, result.Entries)
+	pairs = append(pairs, kvPair{Key: "env_count", Value: fmt.Sprintf("%d", len(entries))})
 	if err := writeKeyValues(c.stdout, pairs...); err != nil {
 		return err
 	}
-	if len(result.Env) == 0 {
+	if len(entries) == 0 {
 		return nil
 	}
 	if len(pairs) > 0 {
@@ -265,5 +285,66 @@ func (c *CLI) renderEnvCommandResult(result envCommandResult) error {
 			return err
 		}
 	}
-	return writeStringMap(c.stdout, result.Env)
+	return writeEnvEntryTable(c.stdout, entries)
+}
+
+func normalizeEnvEntries(values map[string]string, entries []model.AppEnvEntry) []model.AppEnvEntry {
+	if len(entries) > 0 {
+		out := make([]model.AppEnvEntry, len(entries))
+		copy(out, entries)
+		sort.Slice(out, func(i, j int) bool {
+			return out[i].Key < out[j].Key
+		})
+		return out
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]model.AppEnvEntry, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, model.AppEnvEntry{Key: key, Value: values[key]})
+	}
+	return out
+}
+
+func writeEnvEntryTable(w io.Writer, entries []model.AppEnvEntry) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "KEY\tVALUE\tSOURCE\tOVERRIDES"); err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		source := strings.TrimSpace(entry.Source)
+		if sourceRef := strings.TrimSpace(entry.SourceRef); sourceRef != "" {
+			if source == "" {
+				source = sourceRef
+			} else {
+				source = source + ":" + sourceRef
+			}
+		}
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\n",
+			entry.Key,
+			formatInlineTableValue(entry.Value),
+			source,
+			strings.Join(entry.Overrides, ", "),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func formatInlineTableValue(value string) string {
+	replacer := strings.NewReplacer(
+		"\n", "\\n",
+		"\r", "\\r",
+		"\t", "\\t",
+	)
+	return replacer.Replace(value)
 }

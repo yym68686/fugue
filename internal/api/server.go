@@ -1,6 +1,7 @@
 package api
 
 import (
+	"database/sql"
 	"errors"
 	"io"
 	"log"
@@ -58,6 +59,8 @@ type Server struct {
 	newLogsClient                func(namespace string) (appLogsClient, error)
 	newFilesystemPodLister       func(namespace string) (filesystemPodLister, error)
 	filesystemExecRunner         filesystemPodExecRunner
+	appRequestHTTPClient         *http.Client
+	openAppDatabase              func(driverName, dsn string) (*sql.DB, error)
 	dnsResolver                  appDomainDNSResolver
 	logStreamTuning              logStreamTuning
 	ready                        atomic.Bool
@@ -109,6 +112,8 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 			return newKubeLogsClient(namespace)
 		},
 		filesystemExecRunner: kubeFilesystemExecRunner{},
+		appRequestHTTPClient: &http.Client{},
+		openAppDatabase:      sql.Open,
 		dnsResolver:          netAppDomainResolver{},
 		logStreamTuning:      defaultLogStreamTuning(),
 	}

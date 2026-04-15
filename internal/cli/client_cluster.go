@@ -43,18 +43,24 @@ type clusterLogsResponse struct {
 }
 
 type clusterExecRequest struct {
-	Namespace string   `json:"namespace"`
-	Pod       string   `json:"pod"`
-	Container string   `json:"container,omitempty"`
-	Command   []string `json:"command"`
+	Namespace    string        `json:"namespace"`
+	Pod          string        `json:"pod"`
+	Container    string        `json:"container,omitempty"`
+	Command      []string      `json:"command"`
+	Retries      int           `json:"retries,omitempty"`
+	RetryDelay   time.Duration `json:"-"`
+	Timeout      time.Duration `json:"-"`
+	RetryDelayMS int           `json:"retry_delay_ms,omitempty"`
+	TimeoutMS    int           `json:"timeout_ms,omitempty"`
 }
 
 type clusterExecResponse struct {
-	Namespace string   `json:"namespace"`
-	Pod       string   `json:"pod"`
-	Container string   `json:"container,omitempty"`
-	Command   []string `json:"command"`
-	Output    string   `json:"output"`
+	Namespace    string   `json:"namespace"`
+	Pod          string   `json:"pod"`
+	Container    string   `json:"container,omitempty"`
+	Command      []string `json:"command"`
+	Output       string   `json:"output"`
+	AttemptCount int      `json:"attempt_count,omitempty"`
 }
 
 func (c *Client) ListClusterPods(opts clusterPodsOptions) ([]model.ClusterPod, error) {
@@ -141,6 +147,12 @@ func (c *Client) GetClusterLogs(opts clusterLogsOptions) (clusterLogsResponse, e
 }
 
 func (c *Client) ExecClusterPod(req clusterExecRequest) (clusterExecResponse, error) {
+	if req.RetryDelayMS == 0 && req.RetryDelay > 0 {
+		req.RetryDelayMS = int(req.RetryDelay.Milliseconds())
+	}
+	if req.TimeoutMS == 0 && req.Timeout > 0 {
+		req.TimeoutMS = int(req.Timeout.Milliseconds())
+	}
 	var response clusterExecResponse
 	if err := c.doJSON(http.MethodPost, "/v1/cluster/exec", req, &response); err != nil {
 		return clusterExecResponse{}, err

@@ -606,6 +606,14 @@ type AppInternalService struct {
 	Port      int    `json:"port,omitempty"`
 }
 
+type AppEnvEntry struct {
+	Key       string   `json:"key"`
+	Value     string   `json:"value"`
+	Source    string   `json:"source,omitempty"`
+	SourceRef string   `json:"source_ref,omitempty"`
+	Overrides []string `json:"overrides,omitempty"`
+}
+
 const (
 	AppDomainStatusPending  = "pending"
 	AppDomainStatusVerified = "verified"
@@ -773,22 +781,22 @@ type AppStatus struct {
 }
 
 type App struct {
-	ID                   string           `json:"id"`
-	TenantID             string           `json:"tenant_id"`
-	ProjectID            string           `json:"project_id"`
-	Name                 string           `json:"name"`
-	Description          string           `json:"description"`
-	Source               *AppSource       `json:"source,omitempty"`
-	Route                *AppRoute        `json:"route,omitempty"`
+	ID                   string              `json:"id"`
+	TenantID             string              `json:"tenant_id"`
+	ProjectID            string              `json:"project_id"`
+	Name                 string              `json:"name"`
+	Description          string              `json:"description"`
+	Source               *AppSource          `json:"source,omitempty"`
+	Route                *AppRoute           `json:"route,omitempty"`
 	InternalService      *AppInternalService `json:"internal_service,omitempty"`
-	Spec                 AppSpec          `json:"spec"`
-	Status               AppStatus        `json:"status"`
-	CurrentResourceUsage *ResourceUsage   `json:"current_resource_usage,omitempty"`
-	Bindings             []ServiceBinding `json:"bindings,omitempty"`
-	BackingServices      []BackingService `json:"backing_services,omitempty"`
-	TechStack            []AppTechnology  `json:"tech_stack,omitempty"`
-	CreatedAt            time.Time        `json:"created_at"`
-	UpdatedAt            time.Time        `json:"updated_at"`
+	Spec                 AppSpec             `json:"spec"`
+	Status               AppStatus           `json:"status"`
+	CurrentResourceUsage *ResourceUsage      `json:"current_resource_usage,omitempty"`
+	Bindings             []ServiceBinding    `json:"bindings,omitempty"`
+	BackingServices      []BackingService    `json:"backing_services,omitempty"`
+	TechStack            []AppTechnology     `json:"tech_stack,omitempty"`
+	CreatedAt            time.Time           `json:"created_at"`
+	UpdatedAt            time.Time           `json:"updated_at"`
 }
 
 type IdempotencyRecord struct {

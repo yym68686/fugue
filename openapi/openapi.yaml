@@ -2068,6 +2068,56 @@ paths:
                 $ref: "#/components/schemas/AppEnvResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/database/query:
+    post:
+      operationId: queryAppDatabase
+      summary: Query App Database
+      tags: [Apps]
+      x-fugue-handler: handleQueryAppDatabase
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppDatabaseQueryRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDatabaseQueryResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/request:
+    post:
+      operationId: requestAppInternalHTTP
+      summary: Request App Internal HTTP Endpoint
+      tags: [Apps]
+      x-fugue-handler: handleRequestAppInternalHTTP
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppHTTPRequestRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppHTTPRequestResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/files:
     get:
       operationId: getAppFiles
@@ -2983,6 +3033,12 @@ components:
       type: object
       additionalProperties:
         type: string
+    StringListMap:
+      type: object
+      additionalProperties:
+        type: array
+        items:
+          type: string
     Tenant:
       type: object
       additionalProperties: false
@@ -5006,6 +5062,15 @@ components:
           type: array
           items:
             type: string
+        retries:
+          type: integer
+          format: int32
+        retry_delay_ms:
+          type: integer
+          format: int32
+        timeout_ms:
+          type: integer
+          format: int32
     ClusterExecResponse:
       type: object
       additionalProperties: false
@@ -5023,6 +5088,9 @@ components:
             type: string
         output:
           type: string
+        attempt_count:
+          type: integer
+          format: int32
     ClusterDNSAnswer:
       type: object
       additionalProperties: false
@@ -5991,10 +6059,31 @@ components:
       properties:
         env:
           $ref: "#/components/schemas/StringMap"
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppEnvEntry"
         already_current:
           type: boolean
         operation:
           $ref: "#/components/schemas/Operation"
+    AppEnvEntry:
+      type: object
+      additionalProperties: false
+      required: [key, value]
+      properties:
+        key:
+          type: string
+        value:
+          type: string
+        source:
+          type: string
+        source_ref:
+          type: string
+        overrides:
+          type: array
+          items:
+            type: string
     PatchAppEnvRequest:
       type: object
       additionalProperties: false
@@ -6005,6 +6094,134 @@ components:
           type: array
           items:
             type: string
+    AppDatabaseQueryRequest:
+      type: object
+      additionalProperties: false
+      required: [sql]
+      properties:
+        sql:
+          type: string
+        max_rows:
+          type: integer
+          format: int32
+        timeout_ms:
+          type: integer
+          format: int32
+    AppDatabaseQueryColumn:
+      type: object
+      additionalProperties: false
+      required: [name, database_type]
+      properties:
+        name:
+          type: string
+        database_type:
+          type: string
+    AppDatabaseQueryRow:
+      type: object
+      additionalProperties: true
+    AppDatabaseQueryResponse:
+      type: object
+      additionalProperties: false
+      required: [database, host, user, columns, rows, row_count, max_rows, read_only, duration_ms]
+      properties:
+        database:
+          type: string
+        host:
+          type: string
+        user:
+          type: string
+        columns:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppDatabaseQueryColumn"
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppDatabaseQueryRow"
+        row_count:
+          type: integer
+          format: int32
+        max_rows:
+          type: integer
+          format: int32
+        truncated:
+          type: boolean
+        read_only:
+          type: boolean
+        duration_ms:
+          type: integer
+          format: int64
+    AppHTTPRequestRequest:
+      type: object
+      additionalProperties: false
+      required: [method, path]
+      properties:
+        method:
+          type: string
+        path:
+          type: string
+        query:
+          $ref: "#/components/schemas/StringListMap"
+        headers:
+          $ref: "#/components/schemas/StringListMap"
+        headers_from_env:
+          $ref: "#/components/schemas/StringMap"
+        body:
+          type: string
+        body_encoding:
+          type: string
+        timeout_ms:
+          type: integer
+          format: int32
+        max_body_bytes:
+          type: integer
+          format: int32
+    HTTPDiagnosticTiming:
+      type: object
+      additionalProperties: false
+      required: [total]
+      properties:
+        dns:
+          type: string
+        connect:
+          type: string
+        tls:
+          type: string
+        ttfb:
+          type: string
+        total:
+          type: string
+        reused_connection:
+          type: boolean
+    AppHTTPRequestResponse:
+      type: object
+      additionalProperties: false
+      required: [method, url, status, status_code, headers, body, body_encoding, body_size, timing]
+      properties:
+        method:
+          type: string
+        url:
+          type: string
+        status:
+          type: string
+        status_code:
+          type: integer
+          format: int32
+        headers:
+          $ref: "#/components/schemas/StringListMap"
+        body:
+          type: string
+        body_encoding:
+          type: string
+        body_size:
+          type: integer
+          format: int64
+        truncated:
+          type: boolean
+        server_timing:
+          type: string
+        timing:
+          $ref: "#/components/schemas/HTTPDiagnosticTiming"
     AppFilesResponse:
       type: object
       additionalProperties: false

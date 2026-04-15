@@ -48,6 +48,17 @@ fugue app logs runtime my-app --follow
 fugue app logs build my-app --tail 200
 `),
 	},
+	"fugue app request": {
+		Long: strings.TrimSpace(`
+Request an app internal HTTP endpoint directly from the control plane and inspect the upstream status, headers, body, and timings.
+
+Use --header-from-env when the app protects internal admin routes with a key that is already present in the effective app env.
+`),
+		Example: strings.TrimSpace(`
+fugue app request my-app /healthz
+fugue app request my-app GET /admin/requests --query page=2 --query status=500 --header-from-env X-Service-Key=SERVICE_KEY
+`),
+	},
 	"fugue app command": {
 		Example: strings.TrimSpace(`
 fugue app command show my-app
@@ -58,8 +69,20 @@ fugue app command clear my-app
 	"fugue app db": {
 		Example: strings.TrimSpace(`
 fugue app db show my-app
+fugue app db query my-app --sql "select count(*) from gateway_request_logs"
 fugue app db configure my-app --database app --user app --password secret
 fugue app db switchover my-app runtime-b
+`),
+	},
+	"fugue app db query": {
+		Long: strings.TrimSpace(`
+Run a read-only SQL query against the app effective Postgres connection derived from DATABASE_URL or DB_* env, including managed Postgres defaults.
+
+This is the primary CLI path for inspecting business tables and request-log tables without manually execing into the Postgres pod.
+`),
+		Example: strings.TrimSpace(`
+fugue app db query my-app --sql "select count(*) from users"
+fugue app db query my-app --sql "select * from gateway_request_logs order by created_at desc limit 50"
 `),
 	},
 	"fugue app failover": {
@@ -223,6 +246,28 @@ fugue runtime doctor shared
 fugue runtime doctor edge-a
 `),
 	},
+	"fugue version": {
+		Long: strings.TrimSpace(`
+Show the currently running Fugue CLI build version, commit, and build timestamp.
+
+Pass --check-latest when you also want to compare the current binary against the latest released CLI version from GitHub Releases.
+`),
+		Example: strings.TrimSpace(`
+fugue version
+fugue version --check-latest
+`),
+	},
+	"fugue upgrade": {
+		Long: strings.TrimSpace(`
+Download the latest released Fugue CLI archive for the current operating system and architecture, verify its checksum, and replace the currently running binary.
+
+Use --check when you only want to see whether a newer release is available without installing it.
+`),
+		Example: strings.TrimSpace(`
+fugue upgrade --check
+fugue upgrade
+`),
+	},
 	"fugue service": {
 		Example: strings.TrimSpace(`
 fugue service ls
@@ -314,11 +359,12 @@ This is the CLI entrypoint for cluster-level troubleshooting when app logs are n
 		Long: strings.TrimSpace(`
 Run a one-shot diagnostic command inside a pod in any namespace.
 
-Use this when you need to inspect resolv.conf, run nslookup, curl an upstream, or compare behavior between system pods and app pods.
+Use this when you need to inspect resolv.conf, run nslookup, curl an upstream, or compare behavior between system pods and app pods. The command retries transient EOF and stream failures by default; use --retries 0 when you need fully single-shot behavior.
 `),
 		Example: strings.TrimSpace(`
 fugue admin cluster exec --namespace kube-system --pod coredns-abc -- cat /etc/resolv.conf
 fugue admin cluster exec --namespace app-demo --pod web-abc -- nslookup api.github.com
+fugue admin cluster exec --namespace app-demo --pod web-abc --retries 4 --timeout 2m -- sh -lc "psql -c 'select now()'"
 `),
 	},
 	"fugue admin cluster dns": {

@@ -65,9 +65,17 @@ func (c *CLI) newRootCommand() *cobra.Command {
 Fugue is a semantic CLI over the Fugue control-plane API.
 
 Quick start for most users:
-  1. Export one issued API key:
-     export FUGUE_API_KEY=<your-api-key>
-  2. Run normal commands:
+  1. Install the CLI:
+     macOS / Linux:
+       curl -fsSL https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.sh | sh
+     Windows PowerShell:
+       powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.ps1 | iex"
+  2. Open the Access keys page and copy one key:
+     Fugue Cloud: https://fugue.pro/app/api-keys
+     Self-hosted: your Fugue web URL + /app/api-keys (for example https://app.example.com/app/api-keys)
+     Use a tenant API key for normal deploys. Use a platform-admin/bootstrap key only for admin commands.
+  3. Export the key and run normal commands:
+     export FUGUE_API_KEY=<copied-access-key>
      fugue deploy .
      fugue app ls
 
@@ -91,12 +99,20 @@ Environment variables:
   FUGUE_WEB_BASE_URL / APP_BASE_URL
   FUGUE_TENANT / FUGUE_TENANT_NAME / FUGUE_TENANT_ID
   FUGUE_PROJECT / FUGUE_PROJECT_NAME / FUGUE_PROJECT_ID
+  FUGUE_SKIP_UPDATE_CHECK
 `),
 		Example: strings.TrimSpace(`
-	  export FUGUE_API_KEY=<your-api-key>
+	  curl -fsSL https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.sh | sh
+	  export FUGUE_API_KEY=<copied-access-key>
 	  fugue deploy .
 	  fugue app ls
+	  fugue version --check-latest
+	  fugue upgrade
+	  # self-hosted control plane
+	  export FUGUE_BASE_URL=https://api.example.com
+	  export FUGUE_WEB_BASE_URL=https://app.example.com
 	  fugue --tenant acme deploy github owner/repo
+	  # in Codex: "Use fugue CLI and the current FUGUE_API_KEY to deploy this project."
 	  fugue --project marketing app logs web --follow
 	  fugue --base-url https://api.example.com app ls
 	  fugue deploy inspect .
@@ -115,6 +131,8 @@ Environment variables:
 	  fugue app config put my-app /app/config.yaml --from-file config.yaml
 	  fugue app storage set my-app --size 10Gi --mount /data
 	  fugue app db configure my-app --database app --user app
+	  fugue app db query my-app --sql "select count(*) from users"
+	  fugue app request my-app /healthz
 	  fugue app domain primary set my-app www.example.com
 	  fugue service ls
 	  fugue service postgres create app-db --runtime shared
@@ -139,7 +157,11 @@ Environment variables:
 	  fugue web diagnose admin-users
 	`),
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			return c.validateOutput()
+			if err := c.validateOutput(); err != nil {
+				return err
+			}
+			c.maybeWarnAboutCLIUpdate(cmd)
+			return nil
 		},
 	}
 
@@ -163,6 +185,8 @@ Environment variables:
 		c.newProjectCommand(),
 		c.newRuntimeCommand(),
 		c.newServiceCommand(),
+		c.newVersionCommand(),
+		c.newUpgradeCommand(),
 		c.newAPICommand(),
 		c.newDiagnoseCommand(),
 		c.newWebCommand(),

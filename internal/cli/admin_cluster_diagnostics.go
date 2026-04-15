@@ -103,7 +103,11 @@ func (c *CLI) newAdminClusterLogsCommand() *cobra.Command {
 }
 
 func (c *CLI) newAdminClusterExecCommand() *cobra.Command {
-	opts := clusterExecRequest{}
+	opts := clusterExecRequest{
+		Retries:    2,
+		RetryDelay: 250 * time.Millisecond,
+		Timeout:    60 * time.Second,
+	}
 	cmd := &cobra.Command{
 		Use:   "exec --namespace <namespace> --pod <pod> -- <command...>",
 		Short: "Run a diagnostic command inside a pod",
@@ -127,6 +131,9 @@ func (c *CLI) newAdminClusterExecCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, result)
 			}
+			if result.AttemptCount > 1 {
+				c.progressf("cluster_exec_attempts=%d", result.AttemptCount)
+			}
 			_, err = fmt.Fprintln(c.stdout, strings.TrimRight(result.Output, "\n"))
 			return err
 		},
@@ -134,6 +141,9 @@ func (c *CLI) newAdminClusterExecCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.Namespace, "namespace", "", "Pod namespace")
 	cmd.Flags().StringVar(&opts.Pod, "pod", "", "Pod name")
 	cmd.Flags().StringVar(&opts.Container, "container", "", "Container name")
+	cmd.Flags().IntVar(&opts.Retries, "retries", opts.Retries, "Retry count for transient EOF or stream failures")
+	cmd.Flags().DurationVar(&opts.RetryDelay, "retry-delay", opts.RetryDelay, "Delay between retry attempts")
+	cmd.Flags().DurationVar(&opts.Timeout, "timeout", opts.Timeout, "Per-attempt exec timeout")
 	return cmd
 }
 

@@ -198,9 +198,10 @@ type operationResponse struct {
 }
 
 type appEnvResponse struct {
-	Env            map[string]string `json:"env"`
-	AlreadyCurrent bool              `json:"already_current,omitempty"`
-	Operation      *model.Operation  `json:"operation,omitempty"`
+	Env            map[string]string   `json:"env"`
+	Entries        []model.AppEnvEntry `json:"entries,omitempty"`
+	AlreadyCurrent bool                `json:"already_current,omitempty"`
+	Operation      *model.Operation    `json:"operation,omitempty"`
 }
 
 type appFilesResponse struct {

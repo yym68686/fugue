@@ -7,7 +7,9 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -216,10 +218,13 @@ func (s *Server) handleExecClusterPod(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Namespace string   `json:"namespace"`
-		Pod       string   `json:"pod"`
-		Container string   `json:"container"`
-		Command   []string `json:"command"`
+		Namespace    string   `json:"namespace"`
+		Pod          string   `json:"pod"`
+		Container    string   `json:"container"`
+		Command      []string `json:"command"`
+		Retries      int      `json:"retries"`
+		RetryDelayMS int      `json:"retry_delay_ms"`
+		TimeoutMS    int      `json:"timeout_ms"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -233,14 +238,39 @@ func (s *Server) handleExecClusterPod(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "namespace, pod, and command are required")
 		return
 	}
+	if req.Retries < 0 {
+		httpx.WriteError(w, http.StatusBadRequest, "retries cannot be negative")
+		return
+	}
+	if req.RetryDelayMS < 0 {
+		httpx.WriteError(w, http.StatusBadRequest, "retry_delay_ms cannot be negative")
+		return
+	}
+	if req.TimeoutMS < 0 {
+		httpx.WriteError(w, http.StatusBadRequest, "timeout_ms cannot be negative")
+		return
+	}
 
 	runner := s.filesystemExecRunner
 	if runner == nil {
 		runner = kubeFilesystemExecRunner{}
 	}
-	commandCtx, cancel := context.WithTimeout(r.Context(), clusterExecTimeout)
+	timeout := clusterExecTimeout
+	if req.TimeoutMS > 0 {
+		timeout = time.Duration(req.TimeoutMS) * time.Millisecond
+	}
+	commandCtx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
-	output, err := runner.Run(commandCtx, req.Namespace, req.Pod, req.Container, nil, req.Command...)
+	output, attempts, err := runClusterExecWithRetries(
+		commandCtx,
+		runner,
+		req.Namespace,
+		req.Pod,
+		req.Container,
+		req.Command,
+		req.Retries,
+		time.Duration(req.RetryDelayMS)*time.Millisecond,
+	)
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -253,11 +283,12 @@ func (s *Server) handleExecClusterPod(w http.ResponseWriter, r *http.Request) {
 		"command":   strings.Join(req.Command, " "),
 	})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"namespace": req.Namespace,
-		"pod":       req.Pod,
-		"container": req.Container,
-		"command":   req.Command,
-		"output":    string(output),
+		"namespace":     req.Namespace,
+		"pod":           req.Pod,
+		"container":     req.Container,
+		"command":       req.Command,
+		"output":        string(output),
+		"attempt_count": attempts,
 	})
 }
 
@@ -1227,6 +1258,63 @@ func normalizeClusterDNSServerValue(raw string) string {
 		return raw
 	}
 	return net.JoinHostPort(raw, "53")
+}
+
+func runClusterExecWithRetries(
+	ctx context.Context,
+	runner filesystemPodExecRunner,
+	namespace string,
+	podName string,
+	containerName string,
+	command []string,
+	retries int,
+	retryDelay time.Duration,
+) ([]byte, int, error) {
+	if retries < 0 {
+		retries = 0
+	}
+	if retryDelay <= 0 {
+		retryDelay = 250 * time.Millisecond
+	}
+	attempts := 0
+	for {
+		attempts++
+		output, err := runner.Run(ctx, namespace, podName, containerName, nil, command...)
+		if err == nil {
+			return output, attempts, nil
+		}
+		if attempts >= retries+1 || !isRetryableClusterExecError(err) {
+			return nil, attempts, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, attempts, ctx.Err()
+		case <-time.After(retryDelay):
+		}
+	}
+}
+
+func isRetryableClusterExecError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	text := strings.ToLower(strings.TrimSpace(err.Error()))
+	for _, marker := range []string{
+		"unexpected eof",
+		"eof",
+		"connection reset by peer",
+		"client connection lost",
+		"stream error",
+		"websocket: close 1006",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func manifestMap(value any) (map[string]any, error) {

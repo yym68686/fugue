@@ -679,7 +679,8 @@ func TestGetAppEnvMergesBindingEnvAndAppEnvOverrides(t *testing.T) {
 	}
 
 	var response struct {
-		Env map[string]string `json:"env"`
+		Env     map[string]string   `json:"env"`
+		Entries []model.AppEnvEntry `json:"entries"`
 	}
 	mustDecodeJSON(t, recorder, &response)
 	if got := response.Env["DB_TYPE"]; got != "postgres" {
@@ -696,6 +697,19 @@ func TestGetAppEnvMergesBindingEnvAndAppEnvOverrides(t *testing.T) {
 	}
 	if got := response.Env["LOG_LEVEL"]; got != "debug" {
 		t.Fatalf("expected LOG_LEVEL=debug, got %q", got)
+	}
+	byKey := make(map[string]model.AppEnvEntry, len(response.Entries))
+	for _, entry := range response.Entries {
+		byKey[entry.Key] = entry
+	}
+	if entry := byKey["DB_HOST"]; entry.Source != "app" || entry.SourceRef != "spec.env" {
+		t.Fatalf("expected DB_HOST source app/spec.env, got %+v", entry)
+	}
+	if entry := byKey["DB_HOST"]; len(entry.Overrides) == 0 {
+		t.Fatalf("expected DB_HOST overrides metadata, got %+v", entry)
+	}
+	if entry := byKey["DB_USER"]; entry.Source == "" {
+		t.Fatalf("expected DB_USER source metadata, got %+v", entry)
 	}
 }
 

@@ -39,26 +39,41 @@ Windows PowerShell:
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.ps1 | iex"
 ```
 
-Use it with one issued API key:
+Create or copy an access key from the Access keys page:
+
+- Fugue Cloud: `https://fugue.pro/app/api-keys`
+- Self-hosted: your Fugue web URL plus `/app/api-keys`, for example `https://app.example.com/app/api-keys`
+
+Use a tenant-scoped access key for normal deploys. Reserve platform-admin keys or bootstrap keys for `fugue admin ...`, cross-tenant investigation, or product-layer admin diagnostics.
+
+Use it with one copied access key:
 
 ```bash
-export FUGUE_API_KEY=<your-api-key>
+export FUGUE_API_KEY=<copied-access-key>
 fugue deploy .
 fugue app ls
+```
+
+To check the current CLI version or upgrade in place later:
+
+```bash
+fugue version --check-latest
+fugue upgrade
 ```
 
 For self-hosted control planes, set the base URL once:
 
 ```bash
 export FUGUE_BASE_URL=https://api.example.com
-export FUGUE_API_KEY=<your-api-key>
+export FUGUE_WEB_BASE_URL=https://app.example.com
+export FUGUE_API_KEY=<copied-access-key>
 fugue app ls
 ```
 
-If you also want product-layer `fugue-web` diagnostics, set the web base URL too:
+If you want Codex to take over the deploy, export the key in the shell Codex will use and give it a direct prompt such as:
 
-```bash
-export FUGUE_WEB_BASE_URL=https://app.example.com
+```text
+Use fugue CLI and the current FUGUE_API_KEY to deploy this project.
 ```
 
 Common workflows:
@@ -69,7 +84,10 @@ Common workflows:
 - `fugue app create my-app --github owner/repo --branch main`
 - `fugue app status my-app`
 - `fugue app overview my-app`
+- `fugue app env ls my-app`
 - `fugue app fs ls my-app / --source live`
+- `fugue app db query my-app --sql "select * from gateway_request_logs order by created_at desc limit 50"`
+- `fugue app request my-app GET /admin/requests --query page=2 --query status=500 --header-from-env X-Service-Key=SERVICE_KEY`
 - `fugue app logs runtime my-app --follow`
 - `fugue app service attach my-app postgres`
 - `fugue app failover status my-app`
@@ -86,6 +104,7 @@ Common workflows:
 - `fugue admin cluster events --namespace kube-system --limit 20`
 - `fugue admin cluster logs --namespace kube-system --pod coredns-abc --container coredns --tail 200`
 - `fugue admin cluster exec --namespace kube-system --pod coredns-abc -- cat /etc/resolv.conf`
+- `fugue admin cluster exec --namespace app-demo --pod postgres-0 --retries 4 --timeout 2m -- sh -lc "psql -c 'select now()'"`
 - `fugue admin cluster workload show kube-system deployment coredns`
 - `fugue admin cluster rollout status kube-system deployment coredns`
 - `fugue admin cluster dns resolve api.github.com --server 10.43.0.10`
@@ -100,7 +119,17 @@ Common workflows:
 
 `fugue app fs` now supports both persisted storage roots and the live runtime filesystem. Use `--source persistent` to stay inside workspace/persistent storage mounts, or `--source live` to inspect the running container filesystem such as `/`, `/app`, `/tmp`, or `/etc`.
 
+`fugue app db query` lets you run read-only SQL against an app's effective PostgreSQL connection without first dropping into `cluster exec`. It is intended for direct business-table inspection such as `users`, `gateway_request_logs`, or request audit tables, and caps rows by default so routine diagnostics stay safe.
+
+`fugue app request` lets you call an app's own internal HTTP routes from the control plane side, including admin endpoints that require service keys already present in the app env. Pass `--header-from-env Header=ENV_KEY` to fill auth headers from the effective app env instead of copying secrets into your shell.
+
+`fugue app env ls` text output now renders a table with value source and override information, so normal terminal output is usable without falling back to `--json`.
+
 `fugue api request` shows raw status, headers, server-timing, body, and transport timings for any control-plane endpoint. `fugue diagnose timing -- <command...>` wraps any Fugue CLI command and reports DNS/connect/TLS/TTFB/total timing for each HTTP request it makes.
+
+`fugue admin cluster exec` now retries transient EOF and stream-reset failures by default, and exposes `--retries`, `--retry-delay`, and `--timeout` for longer diagnostic commands.
+
+Released CLI builds can upgrade themselves with `fugue upgrade`. When the current binary is behind the latest GitHub Release, normal text-mode commands also print a reminder telling you which version is available. Set `FUGUE_SKIP_UPDATE_CHECK=1` if you need to suppress that reminder in a shell session.
 
 `fugue admin users` and the admin aliases under `fugue web diagnose` read the same `fugue-web` page snapshot routes that power the admin product UI. Set `FUGUE_WEB_BASE_URL` (or pass `--web-base-url`) for those commands. Admin page snapshots accept bootstrap bearer auth; workspace-scoped console page routes can also be diagnosed by passing a session cookie with `--cookie`.
 

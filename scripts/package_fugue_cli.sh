@@ -6,7 +6,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
 DIST_DIR=${1:-"${REPO_ROOT}/dist/cli"}
 GO_CACHE_DIR=${GOCACHE:-"${REPO_ROOT}/.gocache"}
-LDFLAGS=${FUGUE_CLI_LDFLAGS:-"-s -w"}
+BASE_LDFLAGS=${FUGUE_CLI_LDFLAGS:-"-s -w"}
 TARGETS=${FUGUE_CLI_TARGETS:-"linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64"}
 
 sha256_file() {
@@ -40,11 +40,58 @@ require_command go
 require_command tar
 require_command zip
 
+resolve_build_version() {
+  if [ -n "${FUGUE_CLI_VERSION:-}" ]; then
+    printf '%s\n' "${FUGUE_CLI_VERSION}"
+    return 0
+  fi
+
+  if git -C "${REPO_ROOT}" describe --tags --exact-match >/dev/null 2>&1; then
+    git -C "${REPO_ROOT}" describe --tags --exact-match
+    return 0
+  fi
+
+  if git -C "${REPO_ROOT}" rev-parse --short HEAD >/dev/null 2>&1; then
+    printf 'dev-%s\n' "$(git -C "${REPO_ROOT}" rev-parse --short HEAD)"
+    return 0
+  fi
+
+  printf 'dev\n'
+}
+
+resolve_build_commit() {
+  if [ -n "${FUGUE_CLI_COMMIT:-}" ]; then
+    printf '%s\n' "${FUGUE_CLI_COMMIT}"
+    return 0
+  fi
+
+  if git -C "${REPO_ROOT}" rev-parse --short HEAD >/dev/null 2>&1; then
+    git -C "${REPO_ROOT}" rev-parse --short HEAD
+    return 0
+  fi
+
+  printf 'unknown\n'
+}
+
+resolve_build_time() {
+  if [ -n "${FUGUE_CLI_BUILD_TIME:-}" ]; then
+    printf '%s\n' "${FUGUE_CLI_BUILD_TIME}"
+    return 0
+  fi
+
+  date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
 mkdir -p "${DIST_DIR}"
 rm -f "${DIST_DIR}"/fugue_*.tar.gz "${DIST_DIR}"/fugue_*.zip "${DIST_DIR}"/fugue_checksums.txt
 
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fugue-cli-dist.XXXXXX")
 trap 'rm -rf "${WORK_DIR}"' EXIT INT TERM HUP
+
+BUILD_VERSION=$(resolve_build_version)
+BUILD_COMMIT=$(resolve_build_commit)
+BUILD_TIME=$(resolve_build_time)
+LDFLAGS="${BASE_LDFLAGS} -X fugue/internal/cli.buildVersion=${BUILD_VERSION} -X fugue/internal/cli.buildCommit=${BUILD_COMMIT} -X fugue/internal/cli.buildTime=${BUILD_TIME}"
 
 for target in ${TARGETS}; do
   goos=${target%/*}

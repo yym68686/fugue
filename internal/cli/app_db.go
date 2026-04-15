@@ -18,6 +18,7 @@ func (c *CLI) newAppDatabaseCommand() *cobra.Command {
 	}
 	cmd.AddCommand(
 		c.newAppDatabaseShowCommand(),
+		c.newAppDatabaseQueryCommand(),
 		c.newAppDatabaseConfigureCommand(),
 		c.newAppDatabaseDisableCommand(),
 		c.newAppDatabaseSwitchoverCommand(),

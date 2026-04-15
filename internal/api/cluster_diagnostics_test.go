@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -373,5 +374,44 @@ func TestExecClusterPodUsesExecRunner(t *testing.T) {
 	}
 	if len(runner.calls) != 1 || runner.calls[0].namespace != "kube-system" || runner.calls[0].podName != "coredns-abc" {
 		t.Fatalf("unexpected exec runner calls: %+v", runner.calls)
+	}
+}
+
+func TestExecClusterPodRetriesTransientEOF(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	runner := &fakeFilesystemExecRunner{
+		errs:    []error{io.EOF},
+		outputs: [][]byte{[]byte("ok\n")},
+	}
+	server.filesystemExecRunner = runner
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/cluster/exec", "bootstrap-secret", map[string]any{
+		"namespace":      "kube-system",
+		"pod":            "coredns-abc",
+		"command":        []string{"cat", "/etc/resolv.conf"},
+		"retries":        2,
+		"retry_delay_ms": 1,
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Output       string `json:"output"`
+		AttemptCount int    `json:"attempt_count"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Output != "ok\n" || response.AttemptCount != 2 {
+		t.Fatalf("unexpected retry response %+v", response)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("expected 2 runner calls, got %+v", runner.calls)
 	}
 }
