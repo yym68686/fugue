@@ -22,6 +22,7 @@ type appOverviewSnapshot struct {
 	Operations      []model.Operation             `json:"operations,omitempty"`
 	Images          *appImageInventoryResponse    `json:"images,omitempty"`
 	PodInventory    *model.AppRuntimePodInventory `json:"pod_inventory,omitempty"`
+	Diagnosis       *appOverviewDiagnosis         `json:"diagnosis,omitempty"`
 }
 
 func (c *CLI) newAppOverviewCommand() *cobra.Command {
@@ -143,6 +144,11 @@ func (c *CLI) loadAppOverview(client *Client, ref string) (appOverviewSnapshot, 
 	} else {
 		snapshot.PodInventory = &podInventory
 	}
+	if diagnosis, err := c.buildAppOverviewDiagnosis(client, snapshot); err != nil {
+		c.progressf("warning=app diagnosis unavailable: %v", err)
+	} else {
+		snapshot.Diagnosis = diagnosis
+	}
 	return snapshot, nil
 }
 
@@ -163,6 +169,17 @@ func (c *CLI) renderAppOverviewSnapshot(client *Client, snapshot appOverviewSnap
 	}
 	if err := c.renderAppStatus(client, snapshot.App); err != nil {
 		return err
+	}
+	if snapshot.Diagnosis != nil {
+		if _, err := fmt.Fprintln(c.stdout); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(c.stdout, "diagnosis"); err != nil {
+			return err
+		}
+		if err := renderAppOverviewDiagnosis(c.stdout, snapshot.Diagnosis); err != nil {
+			return err
+		}
 	}
 	if len(snapshot.Domains) > 0 {
 		if _, err := fmt.Fprintln(c.stdout); err != nil {

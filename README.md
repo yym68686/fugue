@@ -85,6 +85,7 @@ Common workflows:
 - `fugue app create my-app --github owner/repo --branch main`
 - `fugue app status my-app`
 - `fugue app overview my-app`
+- `fugue app logs build my-app --operation op_import_123`
 - `fugue app env ls my-app`
 - `fugue app fs ls my-app / --source live`
 - `fugue app db query my-app --sql "select * from gateway_request_logs order by created_at desc limit 50"`
@@ -99,6 +100,7 @@ Common workflows:
 - `fugue runtime doctor shared`
 - `fugue project images usage marketing`
 - `fugue operation ls --app my-app`
+- `fugue operation ls --project marketing --type deploy --status pending`
 - `fugue operation show op_123 --show-secrets`
 - `fugue api request GET /v1/apps`
 - `fugue diagnose timing -- app overview my-app`
@@ -127,11 +129,17 @@ Common workflows:
 
 `fugue app logs query` is the semantic wrapper for log-style tables stored in the app database. Instead of writing raw SQL for every investigation, you can point it at a table, apply `--since` / `--until`, add exact or substring filters, and let the CLI build the read-only query.
 
+`fugue app logs build` now renders the artifact chain as part of the text output: build, push, publish, deploy, and runtime. Use it when `"import build completed"` alone is too weak and you need to verify whether the image was recorded, published to the registry, linked to deploy, and then observed in runtime pods.
+
 `fugue app logs pods` shows the current pod group plus recent ReplicaSet rollout context, including the revision that replaced an older pod set. This is the CLI path for seeing old rollout context even after `app overview` has moved on to the new revision.
 
 `fugue app request` lets you call an app's own internal HTTP routes from the control plane side, including admin endpoints that require service keys already present in the app env. Pass `--header-from-env Header=ENV_KEY` to fill auth headers from the effective app env instead of copying secrets into your shell.
 
+`fugue app overview` now includes a diagnosis section that stitches together the latest import, linked deploy, image inventory, and current runtime pod state. This is the single-command path for cases like "import succeeded, deploy ran, but the runtime image never became available".
+
 `fugue app env ls` text output now renders a table with separate source and reference columns plus override information, so normal terminal output is usable without falling back to `--json`.
+
+`fugue operation ls` defaults to a smaller text-mode window and supports `--project`, `--type`, and `--status`, so single-app or single-project investigations no longer require manual eyeballing of a full operation dump.
 
 `fugue api request` shows raw status, headers, server-timing, body, and transport timings for any control-plane endpoint. `fugue diagnose timing -- <command...>` wraps any Fugue CLI command and reports DNS/connect/TLS/TTFB/total timing for each HTTP request it makes.
 

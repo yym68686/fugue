@@ -40,12 +40,13 @@ fugue app service attach my-app postgres
 	},
 	"fugue app overview": {
 		Long: strings.TrimSpace(`
-Show the app plus related domains, bindings, backing services, operations, image inventory, and runtime pod rollout context in one snapshot.
+Show the app plus related domains, bindings, backing services, operations, image inventory, runtime pod rollout context, and a root-cause diagnosis section in one snapshot.
 
 JSON output redacts env values, passwords, repo tokens, and secret-backed file content by default. Pass --show-secrets only when you explicitly need the raw values for debugging.
 `),
 		Example: strings.TrimSpace(`
 fugue app overview my-app
+fugue app overview my-app --output json
 fugue app overview my-app --show-secrets --output json
 `),
 	},
@@ -66,6 +67,17 @@ fugue app logs runtime my-app --follow
 fugue app logs build my-app --tail 200
 fugue app logs query my-app --table gateway_request_logs --since 1h --match status=500
 fugue app logs pods my-app
+`),
+	},
+	"fugue app logs build": {
+		Long: strings.TrimSpace(`
+Read build logs and the derived artifact pipeline summary for one app build operation.
+
+Besides the raw log tail, text output shows build, push, publish, deploy, and runtime stages so you can confirm whether the built image was recorded, published to the registry, referenced by deploy, and observed in pods.
+`),
+		Example: strings.TrimSpace(`
+fugue app logs build my-app
+fugue app logs build my-app --operation op_import_123 --tail 500
 `),
 	},
 	"fugue app logs query": {
@@ -204,12 +216,13 @@ fugue operation watch --app my-app
 	},
 	"fugue operation ls": {
 		Long: strings.TrimSpace(`
-List operations across all visible apps or narrow the result set to one app with --app.
+List operations across all visible apps or narrow the result set to one app, project, operation type, or status.
 
 JSON output redacts desired env values, passwords, and repo tokens by default. Pass --show-secrets only when you explicitly need the raw values for debugging.
 `),
 		Example: strings.TrimSpace(`
 fugue operation ls
+fugue operation ls --project marketing --type deploy --status pending
 fugue operation ls --app my-app --show-secrets --output json
 `),
 	},

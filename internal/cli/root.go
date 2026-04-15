@@ -127,6 +127,7 @@ Environment variables:
 	  fugue app redeploy my-app
 	  fugue app failover policy set my-app --app-to runtime-b
 	  fugue app logs runtime my-app --follow
+	  fugue app logs build my-app --operation op_import_123
 	  fugue app service attach my-app postgres
 	  fugue app command set my-app --command "python app.py"
 	  fugue app config put my-app /app/config.yaml --from-file config.yaml
@@ -140,6 +141,7 @@ Environment variables:
 	  fugue service ls
 	  fugue service postgres create app-db --runtime shared
 	  fugue operation ls --app my-app
+	  fugue operation ls --project marketing --type deploy --status pending
 	  fugue operation show op_123 --show-secrets
 	  fugue runtime enroll create edge-a
 	  fugue runtime access show shared

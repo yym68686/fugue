@@ -31,6 +31,8 @@ func (c *CLI) newOpsListCommand() *cobra.Command {
 	opts := struct {
 		App         string
 		Project     string
+		Types       []string
+		Statuses    []string
 		Limit       int
 		All         bool
 		ShowSecrets bool
@@ -52,11 +54,25 @@ func (c *CLI) newOpsListCommand() *cobra.Command {
 			}
 
 			var (
-				appID         string
-				operations    []model.Operation
-				appInventory  []model.App
-				needInventory = strings.TrimSpace(opts.Project) != "" || !c.wantsJSON()
+				appID           string
+				tenantIDFilter  string
+				projectIDFilter string
+				operations      []model.Operation
+				appInventory    []model.App
+				needInventory   bool
 			)
+			tenantIDFilter, projectIDFilter, err = c.resolveFilterSelections(client)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(opts.Project) != "" {
+				project, err := c.resolveNamedProject(client, opts.Project)
+				if err != nil {
+					return err
+				}
+				projectIDFilter = project.ID
+			}
+			needInventory = strings.TrimSpace(projectIDFilter) != "" || !c.wantsJSON()
 			if strings.TrimSpace(opts.App) != "" {
 				app, err := c.resolveNamedApp(client, opts.App)
 				if err != nil {
@@ -80,26 +96,25 @@ func (c *CLI) newOpsListCommand() *cobra.Command {
 				}
 			}
 
-			projectID := ""
-			if strings.TrimSpace(opts.Project) != "" {
-				project, err := c.resolveNamedProject(client, opts.Project)
-				if err != nil {
-					return err
-				}
-				projectID = project.ID
+			if strings.TrimSpace(tenantIDFilter) != "" {
+				operations = filterOperationsByTenantID(operations, tenantIDFilter)
+			}
+			if strings.TrimSpace(projectIDFilter) != "" {
 				appIDs := make(map[string]struct{})
 				for _, app := range appInventory {
-					if strings.TrimSpace(app.ProjectID) != strings.TrimSpace(projectID) {
+					if strings.TrimSpace(app.ProjectID) != strings.TrimSpace(projectIDFilter) {
 						continue
 					}
 					appIDs[strings.TrimSpace(app.ID)] = struct{}{}
 				}
 				operations = filterOperationsByAppIDs(operations, appIDs)
 			}
+			operations = filterOperationsByKinds(operations, opts.Types)
+			operations = filterOperationsByStatuses(operations, opts.Statuses)
 
 			sortOperationsNewestFirst(operations)
 			totalOperations := len(operations)
-			limit := resolveOperationListLimit(opts.Limit, opts.All, appID, projectID, c.wantsJSON())
+			limit := resolveOperationListLimit(opts.Limit, opts.All, c.wantsJSON())
 			if limit > 0 && len(operations) > limit {
 				operations = operations[:limit]
 			}
@@ -114,13 +129,15 @@ func (c *CLI) newOpsListCommand() *cobra.Command {
 				return err
 			}
 			if limit > 0 && totalOperations > len(operations) {
-				_, _ = fmt.Fprintf(c.stderr, "showing %d of %d operations; use --limit, --all, --app, or --project to narrow\n", len(operations), totalOperations)
+				_, _ = fmt.Fprintf(c.stderr, "showing %d of %d operations; use --limit, --all, --app, --project, --type, or --status to narrow\n", len(operations), totalOperations)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&opts.App, "app", "", "Limit operations to one app")
 	cmd.Flags().StringVar(&opts.Project, "project", "", "Limit operations to one project")
+	cmd.Flags().StringSliceVar(&opts.Types, "type", nil, "Limit operations to one or more operation types")
+	cmd.Flags().StringSliceVar(&opts.Statuses, "status", nil, "Limit operations to one or more statuses")
 	cmd.Flags().IntVar(&opts.Limit, "limit", 0, "Maximum number of operations to show")
 	cmd.Flags().BoolVar(&opts.All, "all", false, "Show the full operation list without the default text-mode limit")
 	cmd.Flags().BoolVar(&opts.ShowSecrets, "show-secrets", false, "Show env values, passwords, and other sensitive fields")
@@ -367,7 +384,7 @@ func (c *CLI) tryLoadOperationDiagnosis(client *Client, op model.Operation) (*mo
 	}
 }
 
-func resolveOperationListLimit(requested int, showAll bool, appID, projectID string, jsonOutput bool) int {
+func resolveOperationListLimit(requested int, showAll bool, jsonOutput bool) int {
 	if showAll {
 		return 0
 	}
@@ -375,9 +392,6 @@ func resolveOperationListLimit(requested int, showAll bool, appID, projectID str
 		return requested
 	}
 	if jsonOutput {
-		return 0
-	}
-	if strings.TrimSpace(appID) != "" || strings.TrimSpace(projectID) != "" {
 		return 0
 	}
 	return 20
@@ -395,6 +409,65 @@ func filterOperationsByAppIDs(operations []model.Operation, appIDs map[string]st
 		filtered = append(filtered, operation)
 	}
 	return filtered
+}
+
+func filterOperationsByTenantID(operations []model.Operation, tenantID string) []model.Operation {
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return operations
+	}
+	filtered := make([]model.Operation, 0, len(operations))
+	for _, operation := range operations {
+		if strings.TrimSpace(operation.TenantID) != tenantID {
+			continue
+		}
+		filtered = append(filtered, operation)
+	}
+	return filtered
+}
+
+func filterOperationsByKinds(operations []model.Operation, requested []string) []model.Operation {
+	allowed := normalizedFilterSet(requested)
+	if len(allowed) == 0 {
+		return operations
+	}
+	filtered := make([]model.Operation, 0, len(operations))
+	for _, operation := range operations {
+		if _, ok := allowed[strings.ToLower(strings.TrimSpace(operation.Type))]; !ok {
+			continue
+		}
+		filtered = append(filtered, operation)
+	}
+	return filtered
+}
+
+func filterOperationsByStatuses(operations []model.Operation, requested []string) []model.Operation {
+	allowed := normalizedFilterSet(requested)
+	if len(allowed) == 0 {
+		return operations
+	}
+	filtered := make([]model.Operation, 0, len(operations))
+	for _, operation := range operations {
+		if _, ok := allowed[strings.ToLower(strings.TrimSpace(operation.Status))]; !ok {
+			continue
+		}
+		filtered = append(filtered, operation)
+	}
+	return filtered
+}
+
+func normalizedFilterSet(values []string) map[string]struct{} {
+	normalized := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		for _, value := range strings.Split(raw, ",") {
+			value = strings.ToLower(strings.TrimSpace(value))
+			if value == "" {
+				continue
+			}
+			normalized[value] = struct{}{}
+		}
+	}
+	return normalized
 }
 
 func sortOperationsNewestFirst(operations []model.Operation) {

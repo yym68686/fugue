@@ -85,6 +85,7 @@ fugue app ls
 - `fugue app create my-app --github owner/repo --branch main`
 - `fugue app status my-app`
 - `fugue app overview my-app`
+- `fugue app logs build my-app --operation op_import_123`
 - `fugue app env ls my-app`
 - `fugue app fs ls my-app / --source live`
 - `fugue app db query my-app --sql "select * from gateway_request_logs order by created_at desc limit 50"`
@@ -99,6 +100,7 @@ fugue app ls
 - `fugue runtime doctor shared`
 - `fugue project images usage marketing`
 - `fugue operation ls --app my-app`
+- `fugue operation ls --project marketing --type deploy --status pending`
 - `fugue operation show op_123 --show-secrets`
 - `fugue api request GET /v1/apps`
 - `fugue diagnose timing -- app overview my-app`
@@ -127,11 +129,17 @@ fugue app ls
 
 `fugue app logs query` 是面向业务日志表的语义化封装。如果日志本身存放在应用数据库里，不需要每次都手写 SQL；你可以直接指定表名，加上 `--since` / `--until` 和字段过滤，让 CLI 自动生成只读查询。
 
+`fugue app logs build` 现在会在 text 输出里直接补上构建产物链路：build、push、publish、deploy、runtime。遇到只看到 `"import build completed"` 还不足以判断问题时，可以用它确认镜像是否被记录、是否真正出现在 registry、是否被 deploy 引用、以及最终有没有出现在运行中的 pod 里。
+
 `fugue app logs pods` 会展示当前 pod 组以及最近的 ReplicaSet rollout 上下文，包括哪一个 revision 替换了旧 pod 组。这个命令适合在 `app overview` 已经切到新 revision 之后，继续查看旧 rollout 的上下文。
 
 `fugue app request` 允许你从控制面侧直接请求应用自己的内部 HTTP 路由，包括那些依赖 app env 里 service key 的管理接口。通过 `--header-from-env Header=ENV_KEY` 可以直接从应用的有效 env 填充认证头，不用把 secret 再复制到本地 shell。
 
+`fugue app overview` 现在会带一个 diagnosis 段，把最近一次 import、对应 deploy、镜像 inventory 和当前 runtime pod 状态串成一条根因摘要。像“import 成功了、deploy 也跑了，但 runtime 镜像没有真正可用”这类问题，可以直接用一条命令看到。
+
 `fugue app env ls` 的 text 输出现在会直接渲染成带 `source`、`ref` 和覆盖信息的表格，正常终端使用时不再必须依赖 `--json`。
+
+`fugue operation ls` 现在默认会把 text 输出限制在较小窗口里，并支持 `--project`、`--type`、`--status` 过滤。排查单个 project 或单类 operation 时，不需要再先把整页输出打出来再人工筛选。
 
 `fugue api request` 会直接展示任意控制面接口的 status、headers、server-timing、body 和传输层耗时。`fugue diagnose timing -- <command...>` 则会包装任意 Fugue CLI 命令，输出它发出的每个 HTTP 请求的 DNS / connect / TLS / TTFB / total timing。
 

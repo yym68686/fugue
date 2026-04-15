@@ -164,19 +164,20 @@ type appCreateResponse struct {
 }
 
 type buildLogsResponse struct {
-	OperationID     string     `json:"operation_id"`
-	OperationStatus string     `json:"operation_status"`
-	JobName         string     `json:"job_name"`
-	Available       bool       `json:"available"`
-	Source          string     `json:"source"`
-	Logs            string     `json:"logs"`
-	Summary         string     `json:"summary,omitempty"`
-	BuildStrategy   string     `json:"build_strategy"`
-	ErrorMessage    string     `json:"error_message"`
-	ResultMessage   string     `json:"result_message"`
-	LastUpdatedAt   time.Time  `json:"last_updated_at"`
-	CompletedAt     *time.Time `json:"completed_at,omitempty"`
-	StartedAt       *time.Time `json:"started_at,omitempty"`
+	OperationID     string                  `json:"operation_id"`
+	OperationStatus string                  `json:"operation_status"`
+	JobName         string                  `json:"job_name"`
+	Available       bool                    `json:"available"`
+	Source          string                  `json:"source"`
+	Logs            string                  `json:"logs"`
+	Summary         string                  `json:"summary,omitempty"`
+	BuildStrategy   string                  `json:"build_strategy"`
+	ErrorMessage    string                  `json:"error_message"`
+	ResultMessage   string                  `json:"result_message"`
+	LastUpdatedAt   time.Time               `json:"last_updated_at"`
+	CompletedAt     *time.Time              `json:"completed_at,omitempty"`
+	StartedAt       *time.Time              `json:"started_at,omitempty"`
+	ArtifactSummary *appBuildArtifactReport `json:"artifact_summary,omitempty"`
 }
 
 type runtimeLogsOptions struct {

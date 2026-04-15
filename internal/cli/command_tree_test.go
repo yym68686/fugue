@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/model"
 )
@@ -1216,6 +1218,337 @@ func TestRunAppOverviewAggregatesRelatedState(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
+	}
+}
+
+func TestRunAppBuildLogsShowsArtifactStages(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/build-logs":
+			_, _ = w.Write([]byte(`{
+				"operation_id":"op_import",
+				"operation_status":"completed",
+				"job_name":"build-demo",
+				"available":false,
+				"source":"job",
+				"summary":"import build completed",
+				"build_strategy":"dockerfile"
+			}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op_import":
+			_, _ = w.Write([]byte(`{"operation":{
+				"id":"op_import",
+				"tenant_id":"tenant_123",
+				"app_id":"app_123",
+				"type":"import",
+				"status":"completed",
+				"result_message":"queued deploy operation op_deploy",
+				"desired_source":{
+					"type":"github-private",
+					"build_strategy":"dockerfile",
+					"compose_service":"runtime",
+					"resolved_image_ref":"registry.example.com/demo-managed:sha256"
+				},
+				"created_at":"2026-04-02T00:00:00Z",
+				"updated_at":"2026-04-02T00:01:00Z"
+			}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations":
+			if got := r.URL.Query().Get("app_id"); got != "app_123" {
+				t.Fatalf("expected app_id filter app_123, got %q", got)
+			}
+			_, _ = w.Write([]byte(`{"operations":[
+				{
+					"id":"op_deploy",
+					"tenant_id":"tenant_123",
+					"app_id":"app_123",
+					"type":"deploy",
+					"status":"completed",
+					"result_message":"deployed revision 13",
+					"desired_spec":{"image":"registry.example.com/demo-runtime:sha256","runtime_id":"runtime_managed_shared","replicas":1},
+					"created_at":"2026-04-02T00:02:00Z",
+					"updated_at":"2026-04-02T00:03:00Z"
+				},
+				{
+					"id":"op_import",
+					"tenant_id":"tenant_123",
+					"app_id":"app_123",
+					"type":"import",
+					"status":"completed",
+					"result_message":"queued deploy operation op_deploy",
+					"desired_source":{
+						"type":"github-private",
+						"build_strategy":"dockerfile",
+						"compose_service":"runtime",
+						"resolved_image_ref":"registry.example.com/demo-managed:sha256"
+					},
+					"created_at":"2026-04-02T00:00:00Z",
+					"updated_at":"2026-04-02T00:01:00Z"
+				}
+			]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/images":
+			_, _ = w.Write([]byte(`{"app_id":"app_123","registry_configured":true,"summary":{"version_count":1,"current_version_count":1,"stale_version_count":0,"reclaimable_size_bytes":0},"versions":[{"image_ref":"registry.example.com/demo-managed:sha256","runtime_image_ref":"registry.example.com/demo-runtime:sha256","status":"ready","current":true,"size_bytes":1048576}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-pods":
+			_, _ = w.Write([]byte(`{"component":"app","namespace":"tenant-123","selector":"app.kubernetes.io/name=demo","container":"demo","groups":[{"owner_kind":"ReplicaSet","owner_name":"demo-8c9f6d74f7","parent":{"kind":"Deployment","name":"demo"},"revision":"13","desired_replicas":1,"current_replicas":1,"ready_replicas":1,"available_replicas":1,"containers":[{"name":"demo","image":"registry.example.com/demo-runtime:sha256"}],"pods":[{"namespace":"tenant-123","name":"demo-8c9f6d74f7-abc12","phase":"Running","ready":true,"node_name":"gcp1","containers":[{"name":"demo","image":"registry.example.com/demo-runtime:sha256","ready":true,"restart_count":0,"state":"running"}]}],"warnings":[]}],"warnings":[]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "logs", "build", "demo",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app logs build: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{
+		"summary=import build completed",
+		"service=runtime",
+		"managed_image_ref=registry.example.com/demo-managed:sha256",
+		"runtime_image_ref=registry.example.com/demo-runtime:sha256",
+		"registry_image_status=available",
+		"deploy_operation_id=op_deploy",
+		"deploy_status=completed",
+		"stages",
+		"build",
+		"push",
+		"publish",
+		"deploy",
+		"runtime",
+		"1/1 pods ready",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAppOverviewDiagnosisExplainsMissingRuntimeImage(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"degraded","current_runtime_id":"runtime_managed_shared","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:10:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"degraded","current_runtime_id":"runtime_managed_shared","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:10:00Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
+			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/projects"):
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","tenant_id":"tenant_123","name":"demo","slug":"demo","description":"demo project","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes":
+			_, _ = w.Write([]byte(`{"runtimes":[{"id":"runtime_managed_shared","tenant_id":"tenant_123","name":"shared","type":"managed-shared","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/domains":
+			_, _ = w.Write([]byte(`{"domains":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/bindings":
+			_, _ = w.Write([]byte(`{"bindings":[],"backing_services":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations":
+			if got := r.URL.Query().Get("app_id"); got != "app_123" {
+				t.Fatalf("expected app_id filter app_123, got %q", got)
+			}
+			_, _ = w.Write([]byte(`{"operations":[
+				{
+					"id":"op_deploy",
+					"tenant_id":"tenant_123",
+					"app_id":"app_123",
+					"type":"deploy",
+					"status":"completed",
+					"result_message":"deployed revision 14",
+					"desired_spec":{"image":"registry.example.com/demo-runtime:sha256","runtime_id":"runtime_managed_shared","replicas":1},
+					"created_at":"2026-04-02T00:02:00Z",
+					"updated_at":"2026-04-02T00:03:00Z"
+				},
+				{
+					"id":"op_import",
+					"tenant_id":"tenant_123",
+					"app_id":"app_123",
+					"type":"import",
+					"status":"completed",
+					"result_message":"queued deploy operation op_deploy",
+					"desired_source":{
+						"type":"github-private",
+						"build_strategy":"dockerfile",
+						"compose_service":"runtime",
+						"resolved_image_ref":"registry.example.com/demo-managed:sha256"
+					},
+					"created_at":"2026-04-02T00:00:00Z",
+					"updated_at":"2026-04-02T00:01:00Z"
+				}
+			]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/images":
+			_, _ = w.Write([]byte(`{"app_id":"app_123","registry_configured":true,"summary":{"version_count":1,"current_version_count":0,"stale_version_count":0,"reclaimable_size_bytes":0},"versions":[{"image_ref":"registry.example.com/demo-managed:sha256","runtime_image_ref":"registry.example.com/demo-runtime:sha256","status":"missing","current":false}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-pods":
+			_, _ = w.Write([]byte(`{"component":"app","namespace":"tenant-123","selector":"app.kubernetes.io/name=demo","container":"demo","groups":[{"owner_kind":"ReplicaSet","owner_name":"demo-9f8d7c6b5","parent":{"kind":"Deployment","name":"demo"},"revision":"14","desired_replicas":1,"current_replicas":1,"ready_replicas":0,"available_replicas":0,"containers":[{"name":"demo","image":"registry.example.com/demo-runtime:sha256"}],"pods":[{"namespace":"tenant-123","name":"demo-9f8d7c6b5-abc12","phase":"Pending","ready":false,"node_name":"gcp1","containers":[{"name":"demo","image":"registry.example.com/demo-runtime:sha256","ready":false,"restart_count":0,"state":"waiting","reason":"ErrImagePull","message":"manifest unknown"}]}],"warnings":[]}],"warnings":[]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "overview", "demo",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app overview: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{
+		"diagnosis",
+		"category=runtime-image-missing",
+		`summary=build op_import queued deploy op_deploy, but managed image "registry.example.com/demo-managed:sha256" is missing from registry inventory`,
+		"service=runtime",
+		"build_operation_id=op_import",
+		"deploy_operation_id=op_deploy",
+		"registry_image_status=missing",
+		"latest_pod_group=ReplicaSet/demo-9f8d7c6b5",
+		"evidence=registry image status=missing",
+		"evidence=pod demo-9f8d7c6b5-abc12 container demo ErrImagePull: manifest unknown",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunOperationListFiltersProjectTypeAndStatus(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
+			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects":
+			if got := r.URL.Query().Get("tenant_id"); got != "tenant_123" {
+				t.Fatalf("expected tenant_id filter tenant_123, got %q", got)
+			}
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","tenant_id":"tenant_123","name":"demo","slug":"demo","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations":
+			if got := r.URL.Query().Get("app_id"); got != "" {
+				t.Fatalf("expected operation ls project filter to stay client-side, got app_id=%q", got)
+			}
+			_, _ = w.Write([]byte(`{"operations":[
+				{"id":"op_keep","tenant_id":"tenant_123","app_id":"app_123","type":"deploy","status":"pending","created_at":"2026-04-02T00:03:00Z","updated_at":"2026-04-02T00:03:00Z"},
+				{"id":"op_other_status","tenant_id":"tenant_123","app_id":"app_123","type":"deploy","status":"completed","created_at":"2026-04-02T00:02:00Z","updated_at":"2026-04-02T00:02:00Z"},
+				{"id":"op_other_type","tenant_id":"tenant_123","app_id":"app_123","type":"import","status":"pending","created_at":"2026-04-02T00:01:00Z","updated_at":"2026-04-02T00:01:00Z"},
+				{"id":"op_other_project","tenant_id":"tenant_123","app_id":"app_999","type":"deploy","status":"pending","created_at":"2026-04-02T00:04:00Z","updated_at":"2026-04-02T00:04:00Z"}
+			]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[
+				{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},
+				{"id":"app_999","tenant_id":"tenant_123","project_id":"project_999","name":"other","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}
+			]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"operation", "ls",
+		"--project", "demo",
+		"--type", "deploy",
+		"--status", "pending",
+		"-o", "json",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run operation ls filtered: %v", err)
+	}
+
+	var payload struct {
+		Operations []model.Operation `json:"operations"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode operation ls output: %v", err)
+	}
+	if len(payload.Operations) != 1 || payload.Operations[0].ID != "op_keep" {
+		t.Fatalf("expected only op_keep after filtering, got %+v", payload.Operations)
+	}
+}
+
+func TestRunOperationListTextDefaultsToTwentyRows(t *testing.T) {
+	t.Parallel()
+
+	operations := make([]model.Operation, 0, 25)
+	for index := 1; index <= 25; index++ {
+		stamp := time.Date(2026, time.April, 2, 0, index, 0, 0, time.UTC)
+		operations = append(operations, model.Operation{
+			ID:        fmt.Sprintf("op_%02d", index),
+			TenantID:  "tenant_123",
+			AppID:     "app_123",
+			Type:      "deploy",
+			Status:    "completed",
+			CreatedAt: stamp,
+			UpdatedAt: stamp,
+		})
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations":
+			if err := json.NewEncoder(w).Encode(map[string]any{"operations": operations}); err != nil {
+				t.Fatalf("encode operations: %v", err)
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"apps": []model.App{{
+					ID:        "app_123",
+					TenantID:  "tenant_123",
+					ProjectID: "project_123",
+					Name:      "demo",
+					CreatedAt: time.Date(2026, time.April, 2, 0, 0, 0, 0, time.UTC),
+					UpdatedAt: time.Date(2026, time.April, 2, 0, 0, 0, 0, time.UTC),
+				}},
+			}); err != nil {
+				t.Fatalf("encode apps: %v", err)
+			}
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"operation", "ls",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run operation ls: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"op_25", "op_06"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+	for _, unwanted := range []string{"op_05", "op_01"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("expected stdout to omit %q under default limit, got %q", unwanted, out)
+		}
+	}
+	if !strings.Contains(stderr.String(), "showing 20 of 25 operations; use --limit, --all, --app, --project, --type, or --status to narrow") {
+		t.Fatalf("expected narrowing hint on stderr, got %q", stderr.String())
 	}
 }
 

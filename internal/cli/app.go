@@ -541,21 +541,11 @@ func (c *CLI) renderBuildLogs(client *Client, appID string, opts appLogsCommandO
 	if err != nil {
 		return err
 	}
+	logs.ArtifactSummary = c.collectBuildArtifactReport(client, appID, logs)
 	if c.wantsJSON() {
 		return writeJSON(c.stdout, logs)
 	}
-	text := strings.TrimSpace(logs.Logs)
-	if text == "" {
-		text = strings.TrimSpace(logs.Summary)
-	}
-	if text == "" {
-		text = strings.TrimSpace(logs.ResultMessage)
-	}
-	if text == "" {
-		text = "no build logs available"
-	}
-	_, err = fmt.Fprintln(c.stdout, text)
-	return err
+	return renderBuildLogsReport(c.stdout, logs)
 }
 
 func (c *CLI) renderRuntimeLogs(client *Client, appID string, opts runtimeLogsOptions, follow bool) error {
