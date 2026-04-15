@@ -79,6 +79,7 @@ fugue app ls
 常用流程：
 
 - `fugue deploy github owner/repo --branch main`
+- `fugue deploy github owner/repo --service-env-file gateway=.env.gateway --service-env-file runtime=.env.runtime`
 - `fugue deploy github https://github.com/example/app --private --repo-token $GITHUB_TOKEN`
 - `fugue deploy image nginx:1.27`
 - `fugue app create my-app --github owner/repo --branch main`
@@ -87,6 +88,8 @@ fugue app ls
 - `fugue app env ls my-app`
 - `fugue app fs ls my-app / --source live`
 - `fugue app db query my-app --sql "select * from gateway_request_logs order by created_at desc limit 50"`
+- `fugue app logs query my-app --table gateway_request_logs --since 1h --match status=500`
+- `fugue app logs pods my-app`
 - `fugue app request my-app GET /admin/requests --query page=2 --query status=500 --header-from-env X-Service-Key=SERVICE_KEY`
 - `fugue app logs runtime my-app --follow`
 - `fugue app service attach my-app postgres`
@@ -109,6 +112,7 @@ fugue app ls
 - `fugue admin cluster rollout status kube-system deployment coredns`
 - `fugue admin cluster dns resolve api.github.com --server 10.43.0.10`
 - `fugue admin cluster net connect api.github.com:443`
+- `fugue admin cluster net websocket my-app --path "/socket.io/?EIO=4&transport=websocket"`
 - `fugue admin cluster tls probe 104.18.32.47:443 --server-name api.github.com`
 - `fugue admin users ls`
 - `fugue admin users show user@example.com`
@@ -121,11 +125,19 @@ fugue app ls
 
 `fugue app db query` 现在可以直接基于应用的有效 PostgreSQL 连接执行只读 SQL，不需要先 `cluster exec` 进 Postgres pod。它适合直接查业务表，例如 `users`、`gateway_request_logs`、请求审计表，并且默认会限制返回行数，避免日常排障时一次拉太多数据。
 
+`fugue app logs query` 是面向业务日志表的语义化封装。如果日志本身存放在应用数据库里，不需要每次都手写 SQL；你可以直接指定表名，加上 `--since` / `--until` 和字段过滤，让 CLI 自动生成只读查询。
+
+`fugue app logs pods` 会展示当前 pod 组以及最近的 ReplicaSet rollout 上下文，包括哪一个 revision 替换了旧 pod 组。这个命令适合在 `app overview` 已经切到新 revision 之后，继续查看旧 rollout 的上下文。
+
 `fugue app request` 允许你从控制面侧直接请求应用自己的内部 HTTP 路由，包括那些依赖 app env 里 service key 的管理接口。通过 `--header-from-env Header=ENV_KEY` 可以直接从应用的有效 env 填充认证头，不用把 secret 再复制到本地 shell。
 
-`fugue app env ls` 的 text 输出现在会直接渲染成带来源和覆盖信息的表格，正常终端使用时不再必须依赖 `--json`。
+`fugue app env ls` 的 text 输出现在会直接渲染成带 `source`、`ref` 和覆盖信息的表格，正常终端使用时不再必须依赖 `--json`。
 
 `fugue api request` 会直接展示任意控制面接口的 status、headers、server-timing、body 和传输层耗时。`fugue diagnose timing -- <command...>` 则会包装任意 Fugue CLI 命令，输出它发出的每个 HTTP 请求的 DNS / connect / TLS / TTFB / total timing。
+
+`fugue deploy github ... --service-env-file service=.env.file` 允许 topology 导入时按 service 单独注入 env 覆盖。`gateway`、`runtime`、`worker` 这类服务需要不同密钥或 feature flag 时，不必再把所有配置揉进一个共享 env 文件。
+
+`fugue admin cluster net websocket` 会对同一个 websocket 端点做两次握手：一次直连 app 的 cluster service，一次走 app 的 public route。CLI 会把两边的状态和自动结论一起返回，所以像 `service=101 / public_route=502` 这类问题，不需要再 SSH 到节点上做 `kubectl` 对照实验。
 
 `fugue admin cluster exec` 现在默认会对瞬时 EOF 和 stream reset 失败做重试，并暴露 `--retries`、`--retry-delay`、`--timeout` 给长耗时诊断命令使用。
 

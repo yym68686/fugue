@@ -35,6 +35,7 @@ type topologyImportOptions struct {
 	Description        string
 	BaseName           string
 	Env                map[string]string
+	ServiceEnv         map[string]map[string]string
 	AuditAction        string
 	BuildSource        topologySourceBuilder
 	BuildAuditMetadata topologyAuditMetadataBuilder
@@ -65,6 +66,7 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 		Description: description,
 		BaseName:    baseName,
 		Env:         req.Env,
+		ServiceEnv:  normalizedImportServiceEnv(req.ServiceEnv),
 		AuditAction: "app.import_github",
 		BuildSource: func(service sourceimport.ComposeService, composeDependsOn []string) (model.AppSource, error) {
 			return buildQueuedComposeServiceSource(req, service, composeDependsOn)
@@ -177,6 +179,32 @@ func cloneComposeServicesForImport(services []sourceimport.ComposeService) []sou
 	return clonedServices
 }
 
+func validateTopologyServiceEnvOverrides(services []sourceimport.ComposeService, serviceEnv map[string]map[string]string) error {
+	if len(serviceEnv) == 0 {
+		return nil
+	}
+
+	knownServices := make(map[string]struct{}, len(services))
+	for _, service := range services {
+		name := strings.TrimSpace(service.Name)
+		if name == "" {
+			continue
+		}
+		knownServices[name] = struct{}{}
+	}
+	for serviceName := range serviceEnv {
+		serviceName = strings.TrimSpace(serviceName)
+		if serviceName == "" {
+			continue
+		}
+		if _, ok := knownServices[serviceName]; ok {
+			continue
+		}
+		return fmt.Errorf("service_env references unknown service %q", serviceName)
+	}
+	return nil
+}
+
 func (s *Server) importResolvedUploadTopology(principal model.Principal, tenantID string, req importUploadRequest, upload model.SourceUpload, runtimeID string, replicas int, description string, baseName string, topology sourceimport.NormalizedTopology) (importedGitHubTopology, error) {
 	return s.importResolvedTopology(principal, tenantID, topologyImportOptions{
 		ProjectID:   req.ProjectID,
@@ -186,6 +214,7 @@ func (s *Server) importResolvedUploadTopology(principal model.Principal, tenantI
 		Description: description,
 		BaseName:    baseName,
 		Env:         req.Env,
+		ServiceEnv:  normalizedImportServiceEnv(req.ServiceEnv),
 		AuditAction: "app.import_upload",
 		BuildSource: func(service sourceimport.ComposeService, composeDependsOn []string) (model.AppSource, error) {
 			return buildQueuedUploadComposeServiceSource(upload, service, composeDependsOn)
@@ -202,6 +231,9 @@ func (s *Server) importResolvedUploadTopology(principal model.Principal, tenantI
 func (s *Server) importResolvedTopology(principal model.Principal, tenantID string, options topologyImportOptions, topology sourceimport.NormalizedTopology) (importedGitHubTopology, error) {
 	if options.BuildSource == nil {
 		return importedGitHubTopology{}, fmt.Errorf("topology source builder is required")
+	}
+	if err := validateTopologyServiceEnvOverrides(topology.Services, options.ServiceEnv); err != nil {
+		return importedGitHubTopology{}, invalidComposeImport(err)
 	}
 
 	topologyPlan, err := sourceimport.AnalyzeNormalizedTopology(topology, topology.PrimaryService)
@@ -269,6 +301,7 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 			postgres = &specCopy
 		}
 		suggestedEnv = mergeImportedEnv(suggestedEnv, options.Env)
+		suggestedEnv = mergeImportedEnv(suggestedEnv, options.ServiceEnv[service.Name])
 
 		spec, err := s.buildImportedAppSpec(
 			service.BuildStrategy,

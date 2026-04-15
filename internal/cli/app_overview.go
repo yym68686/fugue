@@ -15,12 +15,13 @@ import (
 )
 
 type appOverviewSnapshot struct {
-	App             model.App                  `json:"app"`
-	Domains         []model.AppDomain          `json:"domains,omitempty"`
-	Bindings        []model.ServiceBinding     `json:"bindings,omitempty"`
-	BackingServices []model.BackingService     `json:"backing_services,omitempty"`
-	Operations      []model.Operation          `json:"operations,omitempty"`
-	Images          *appImageInventoryResponse `json:"images,omitempty"`
+	App             model.App                     `json:"app"`
+	Domains         []model.AppDomain             `json:"domains,omitempty"`
+	Bindings        []model.ServiceBinding        `json:"bindings,omitempty"`
+	BackingServices []model.BackingService        `json:"backing_services,omitempty"`
+	Operations      []model.Operation             `json:"operations,omitempty"`
+	Images          *appImageInventoryResponse    `json:"images,omitempty"`
+	PodInventory    *model.AppRuntimePodInventory `json:"pod_inventory,omitempty"`
 }
 
 func (c *CLI) newAppOverviewCommand() *cobra.Command {
@@ -137,6 +138,11 @@ func (c *CLI) loadAppOverview(client *Client, ref string) (appOverviewSnapshot, 
 	} else {
 		snapshot.Images = &images
 	}
+	if podInventory, err := client.GetAppRuntimePods(app.ID, "app"); err != nil {
+		c.progressf("warning=runtime pod inventory unavailable: %v", err)
+	} else {
+		snapshot.PodInventory = &podInventory
+	}
 	return snapshot, nil
 }
 
@@ -199,6 +205,20 @@ func (c *CLI) renderAppOverviewSnapshot(client *Client, snapshot appOverviewSnap
 			if err := writeAppImageTable(c.stdout, snapshot.Images.Versions); err != nil {
 				return err
 			}
+		}
+	}
+	if snapshot.PodInventory != nil {
+		for _, warning := range snapshot.PodInventory.Warnings {
+			c.progressf("warning=%s", warning)
+		}
+		if _, err := fmt.Fprintln(c.stdout); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(c.stdout, "pods"); err != nil {
+			return err
+		}
+		if err := renderAppRuntimePodInventory(c.stdout, *snapshot.PodInventory); err != nil {
+			return err
 		}
 	}
 	if len(snapshot.Operations) > 0 {

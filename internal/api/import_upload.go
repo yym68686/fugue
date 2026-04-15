@@ -37,6 +37,7 @@ type importUploadRequest struct {
 	DockerfilePath    string                          `json:"dockerfile_path"`
 	BuildContextDir   string                          `json:"build_context_dir"`
 	Env               map[string]string               `json:"env"`
+	ServiceEnv        map[string]map[string]string    `json:"service_env"`
 	ConfigContent     string                          `json:"config_content"`
 	Files             []model.AppFile                 `json:"files"`
 	StartupCommand    *string                         `json:"startup_command,omitempty"`

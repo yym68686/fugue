@@ -20,6 +20,8 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
+
+	appsv1 "k8s.io/api/apps/v1"
 )
 
 const serviceAccountNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
@@ -56,34 +58,50 @@ type kubePodList struct {
 
 type kubePodInfo struct {
 	Metadata struct {
-		Name              string    `json:"name"`
-		CreationTimestamp time.Time `json:"creationTimestamp"`
+		Namespace         string            `json:"namespace,omitempty"`
+		Name              string            `json:"name"`
+		CreationTimestamp time.Time         `json:"creationTimestamp"`
+		Labels            map[string]string `json:"labels,omitempty"`
+		OwnerReferences   []struct {
+			Kind string `json:"kind,omitempty"`
+			Name string `json:"name,omitempty"`
+		} `json:"ownerReferences,omitempty"`
 	} `json:"metadata"`
 	Spec struct {
 		NodeName       string `json:"nodeName,omitempty"`
 		InitContainers []struct {
-			Name string `json:"name"`
+			Name  string `json:"name"`
+			Image string `json:"image,omitempty"`
 		} `json:"initContainers"`
 		Containers []struct {
-			Name string `json:"name"`
+			Name  string `json:"name"`
+			Image string `json:"image,omitempty"`
 		} `json:"containers"`
 	} `json:"spec"`
 	Status struct {
 		Phase                 string                `json:"phase"`
 		Reason                string                `json:"reason,omitempty"`
 		Message               string                `json:"message,omitempty"`
+		PodIP                 string                `json:"podIP,omitempty"`
+		HostIP                string                `json:"hostIP,omitempty"`
+		QOSClass              string                `json:"qosClass,omitempty"`
+		StartTime             *time.Time            `json:"startTime,omitempty"`
 		InitContainerStatuses []kubeContainerStatus `json:"initContainerStatuses,omitempty"`
 		ContainerStatuses     []kubeContainerStatus `json:"containerStatuses,omitempty"`
 	} `json:"status"`
 }
 
 type kubeContainerStatus struct {
-	Name      string           `json:"name"`
-	State     kubeRuntimeState `json:"state,omitempty"`
-	LastState kubeRuntimeState `json:"lastState,omitempty"`
+	Name         string           `json:"name"`
+	Image        string           `json:"image,omitempty"`
+	Ready        bool             `json:"ready"`
+	RestartCount int32            `json:"restartCount,omitempty"`
+	State        kubeRuntimeState `json:"state,omitempty"`
+	LastState    kubeRuntimeState `json:"lastState,omitempty"`
 }
 
 type kubeRuntimeState struct {
+	Running    *struct{}        `json:"running,omitempty"`
 	Waiting    *kubeStateDetail `json:"waiting,omitempty"`
 	Terminated *kubeStateDetail `json:"terminated,omitempty"`
 }
@@ -226,6 +244,23 @@ func (c *kubeLogsClient) listPodsBySelector(ctx context.Context, namespace, sele
 	return pods.Items, nil
 }
 
+func (c *kubeLogsClient) listReplicaSetsBySelector(ctx context.Context, namespace, selector string) ([]appsv1.ReplicaSet, error) {
+	query := url.Values{}
+	if strings.TrimSpace(selector) != "" {
+		query.Set("labelSelector", selector)
+	}
+
+	var replicaSets appsv1.ReplicaSetList
+	apiPath := "/apis/apps/v1/namespaces/" + c.effectiveNamespace(namespace) + "/replicasets"
+	if encoded := query.Encode(); encoded != "" {
+		apiPath += "?" + encoded
+	}
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, &replicaSets); err != nil {
+		return nil, err
+	}
+	return replicaSets.Items, nil
+}
+
 func (c *kubeLogsClient) readPodLogs(ctx context.Context, namespace, podName string, opts kubeLogOptions) (string, error) {
 	apiPath := c.podLogsAPIPath(namespace, podName, opts)
 	return c.doText(ctx, http.MethodGet, apiPath)
@@ -330,6 +365,15 @@ func (c *kubeLogsClient) doRequest(ctx context.Context, method, apiPath string) 
 func isKubeNotFound(err error) bool {
 	var statusErr *kubeStatusError
 	return errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound
+}
+
+func isForbiddenStatusError(err error) bool {
+	var statusErr *kubeStatusError
+	if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusForbidden {
+		return true
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "status=403")
 }
 
 func podContainerNames(pod kubePodInfo, includeInit bool) []string {

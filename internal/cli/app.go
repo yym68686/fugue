@@ -207,6 +207,8 @@ Use "app logs runtime" and "app logs build" for explicit semantics. The bare
 	cmd.AddCommand(
 		c.newAppRuntimeLogsCommand(),
 		c.newAppBuildLogsCommand(),
+		c.newAppLogsQueryCommand(),
+		c.newAppLogsPodsCommand(),
 	)
 	return cmd
 }

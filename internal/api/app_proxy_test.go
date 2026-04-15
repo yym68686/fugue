@@ -1,14 +1,23 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
+	"log"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
+
+	"github.com/gorilla/websocket"
 )
 
 type fakeServiceResolver struct {
@@ -207,5 +216,175 @@ func TestMaybeHandleAppProxyUsesCustomDomainLookup(t *testing.T) {
 
 	if _, err := storeState.GetAppDomain("fugue.pro"); err != nil {
 		t.Fatalf("expected custom domain to be stored: %v", err)
+	}
+}
+
+func TestAppProxyProxiesWebsocketUpgrades(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServer(t)
+	specCopy := app.Spec
+	deployOp, err := storeState.CreateOperation(model.Operation{
+		TenantID:        app.TenantID,
+		Type:            model.OperationTypeDeploy,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		ExecutionMode:   model.ExecutionModeManaged,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if _, err := storeState.CompleteManagedOperationWithResult(deployOp.ID, "", "deployed", &specCopy, nil); err != nil {
+		t.Fatalf("complete deploy operation: %v", err)
+	}
+	app, err = storeState.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("reload deployed app: %v", err)
+	}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	serviceHost := "app-demo." + namespace + ".svc.cluster.local"
+	server.dnsResolver = fakeServiceResolver{
+		ips: map[string][]net.IPAddr{
+			serviceHost: {
+				{IP: net.ParseIP("127.0.0.1")},
+			},
+		},
+	}
+
+	backendErrors := make(chan error, 1)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ws" {
+			http.NotFound(w, r)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			backendErrors <- err
+			return
+		}
+		defer conn.Close()
+		if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			backendErrors <- err
+			return
+		}
+		messageType, payload, err := conn.ReadMessage()
+		if err != nil {
+			backendErrors <- err
+			return
+		}
+		if string(payload) != "ping" {
+			backendErrors <- errors.New("unexpected websocket payload: " + string(payload))
+			return
+		}
+		if err := conn.WriteMessage(messageType, []byte("pong")); err != nil {
+			backendErrors <- err
+			return
+		}
+		backendErrors <- nil
+	}))
+	defer backend.Close()
+
+	backendURL, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse backend url: %v", err)
+	}
+	server.appProxyTransport = &http.Transport{
+		Proxy:             nil,
+		ForceAttemptHTTP2: false,
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, backendURL.Host)
+		},
+	}
+
+	public := httptest.NewServer(server.Handler())
+	defer public.Close()
+
+	clientURL, err := url.Parse(public.URL)
+	if err != nil {
+		t.Fatalf("parse public url: %v", err)
+	}
+	dialer := websocket.Dialer{
+		NetDialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, clientURL.Host)
+		},
+	}
+
+	conn, resp, err := dialer.Dial("ws://"+app.Route.Hostname+"/ws", nil)
+	if err != nil {
+		responseBody := ""
+		if resp != nil && resp.Body != nil {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			responseBody = string(bodyBytes)
+			resp.Body.Close()
+		}
+		t.Fatalf("dial proxied websocket: %v body=%s", err, responseBody)
+	}
+	defer conn.Close()
+
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("set client read deadline: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
+		t.Fatalf("write proxied websocket message: %v", err)
+	}
+	_, payload, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read proxied websocket response: %v", err)
+	}
+	if string(payload) != "pong" {
+		t.Fatalf("expected proxied websocket payload %q, got %q", "pong", string(payload))
+	}
+	if err := <-backendErrors; err != nil {
+		t.Fatalf("backend websocket validation failed: %v", err)
+	}
+}
+
+func TestAppProxyLogsUpstreamProxyErrors(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServer(t)
+	specCopy := app.Spec
+	deployOp, err := storeState.CreateOperation(model.Operation{
+		TenantID:        app.TenantID,
+		Type:            model.OperationTypeDeploy,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		ExecutionMode:   model.ExecutionModeManaged,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if _, err := storeState.CompleteManagedOperationWithResult(deployOp.ID, "", "deployed", &specCopy, nil); err != nil {
+		t.Fatalf("complete deploy operation: %v", err)
+	}
+	app, err = storeState.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("reload deployed app: %v", err)
+	}
+	var logBuffer bytes.Buffer
+	server.log = log.New(&logBuffer, "", 0)
+	server.appProxyTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("dial upstream exploded")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://"+app.Route.Hostname+"/healthz", nil)
+	req.Host = app.Route.Hostname
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadGateway, recorder.Code, recorder.Body.String())
+	}
+	logged := logBuffer.String()
+	if !strings.Contains(logged, "app proxy failed") {
+		t.Fatalf("expected proxy failure log entry, got %q", logged)
+	}
+	if !strings.Contains(logged, "dial upstream exploded") {
+		t.Fatalf("expected proxy error to be logged, got %q", logged)
 	}
 }

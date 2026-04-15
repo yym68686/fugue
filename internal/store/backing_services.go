@@ -72,6 +72,9 @@ func (s *Store) CreateBackingService(tenantID, projectID, name, description stri
 		if !projectBelongsToTenant(state, projectID, tenantID) {
 			return ErrNotFound
 		}
+		if projectDeleteRequested(state, projectID) {
+			return ErrConflict
+		}
 		now := time.Now().UTC()
 		billing := accrueTenantBillingLedger(state, tenantID, now)
 		if billing == nil {
@@ -125,7 +128,7 @@ func (s *Store) DeleteBackingService(id string) (model.BackingService, error) {
 			return ErrConflict
 		}
 		state.BackingServices = append(state.BackingServices[:index], state.BackingServices[index+1:]...)
-		return nil
+		return maybeFinalizeRequestedProjectDelete(state, service.ProjectID)
 	})
 	return service, err
 }
@@ -848,6 +851,17 @@ func deleteBackingServicesByProject(services []model.BackingService, projectID s
 		filtered = append(filtered, service)
 	}
 	return filtered
+}
+
+func deleteUnboundBackingServicesByProject(state *model.State, projectID string) {
+	filtered := state.BackingServices[:0]
+	for _, service := range state.BackingServices {
+		if service.ProjectID == projectID && !hasServiceBindings(state, service.ID) {
+			continue
+		}
+		filtered = append(filtered, service)
+	}
+	state.BackingServices = filtered
 }
 
 func deleteServiceBindingsByTenant(bindings []model.ServiceBinding, tenantID string) []model.ServiceBinding {

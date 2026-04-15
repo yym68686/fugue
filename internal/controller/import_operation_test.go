@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/config"
 	"fugue/internal/model"
@@ -410,7 +411,7 @@ func TestExecuteManagedImportOperationRecoversMissingUploadImageRefFromManagedRe
 	}
 }
 
-func TestExecuteManagedImportOperationFailsClearlyWhenUploadImageRefCannotBeRecovered(t *testing.T) {
+func TestExecuteManagedImportOperationFallsBackToInferredUploadImageRefWhenRegistryLags(t *testing.T) {
 	t.Parallel()
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -432,6 +433,7 @@ func TestExecuteManagedImportOperationFailsClearlyWhenUploadImageRefCannotBeReco
 		t.Fatalf("create source upload: %v", err)
 	}
 	expectedManagedImageRef := "registry.push.example/fugue-apps/demo:upload-" + upload.SHA256[:12]
+	expectedRuntimeImageRef := "registry.pull.example/fugue-apps/demo:upload-" + upload.SHA256[:12]
 
 	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
 		Replicas:  1,
@@ -480,40 +482,53 @@ func TestExecuteManagedImportOperationFailsClearlyWhenUploadImageRefCannotBeReco
 			},
 		},
 	}
+	inspectCalls := 0
 	svc := &Service{
-		Store:            stateStore,
-		Config:           config.ControllerConfig{SourceUploadBaseURL: "http://source.example"},
-		Logger:           log.New(io.Discard, "", 0),
-		importer:         importer,
-		registryPushBase: "registry.push.example",
-		registryPullBase: "registry.pull.example",
+		Store:                         stateStore,
+		Config:                        config.ControllerConfig{SourceUploadBaseURL: "http://source.example"},
+		Logger:                        log.New(io.Discard, "", 0),
+		importer:                      importer,
+		registryPushBase:              "registry.push.example",
+		registryPullBase:              "registry.pull.example",
+		importImageInspectRetryDelay:  time.Millisecond,
+		importImageInspectMaxAttempts: 3,
 		inspectManagedImage: func(_ context.Context, imageRef string) (bool, map[string]int64, error) {
 			if imageRef != expectedManagedImageRef {
 				t.Fatalf("unexpected inferred image ref %q", imageRef)
 			}
+			inspectCalls++
 			return false, nil, nil
 		},
 	}
 
-	err = svc.executeManagedImportOperation(context.Background(), op, app)
-	if err == nil {
-		t.Fatal("expected execute managed import operation to fail")
+	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
+		t.Fatalf("execute managed import operation with inferred fallback: %v", err)
 	}
-	if !strings.Contains(err.Error(), "import completed without an image reference and no managed image candidate exists") {
-		t.Fatalf("expected explicit missing image error, got %v", err)
-	}
-	if !strings.Contains(err.Error(), expectedManagedImageRef) {
-		t.Fatalf("expected error to mention inferred candidate %q, got %v", expectedManagedImageRef, err)
+	if inspectCalls != 3 {
+		t.Fatalf("expected 3 registry inspect attempts before fallback, got %d", inspectCalls)
 	}
 
 	ops, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
 	if err != nil {
 		t.Fatalf("list app operations: %v", err)
 	}
+	var deployOp model.Operation
 	for _, candidate := range ops {
 		if candidate.Type == model.OperationTypeDeploy {
-			t.Fatalf("expected no deploy operation after unrecoverable import, got %+v", candidate)
+			deployOp = candidate
 		}
+	}
+	if deployOp.ID == "" || deployOp.DesiredSpec == nil {
+		t.Fatalf("expected deploy operation after inferred fallback, got %+v", deployOp)
+	}
+	if got := deployOp.DesiredSpec.Image; got != expectedRuntimeImageRef {
+		t.Fatalf("expected fallback runtime image %q, got %q", expectedRuntimeImageRef, got)
+	}
+	if deployOp.DesiredSource == nil {
+		t.Fatal("expected desired source on fallback deploy operation")
+	}
+	if got := deployOp.DesiredSource.ResolvedImageRef; got != expectedManagedImageRef {
+		t.Fatalf("expected fallback managed image ref %q, got %q", expectedManagedImageRef, got)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"fugue/internal/auth"
@@ -53,6 +54,105 @@ func TestPatchProjectUpdatesNameAndDescription(t *testing.T) {
 	}
 	if response.Project.Slug != "backend-core" {
 		t.Fatalf("expected updated slug backend-core, got %q", response.Project.Slug)
+	}
+}
+
+func TestDeleteProjectCascadeQueuesDeleteAndFinalizesProject(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Project Cascade Delete Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	raiseManagedTestCap(t, s, tenant.ID)
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.deploy", "app.write", "project.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/backing-services", apiKey, map[string]any{
+		"project_id": project.ID,
+		"name":       "main-db",
+		"spec": model.BackingServiceSpec{
+			Postgres: &model.AppPostgresSpec{Database: "demo", User: "demo", Password: "secret"},
+		},
+	})
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusCreated, recorder.Code, recorder.Body.String())
+	}
+
+	var createServiceResponse struct {
+		BackingService model.BackingService `json:"backing_service"`
+	}
+	mustDecodeJSON(t, recorder, &createServiceResponse)
+
+	recorder = performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/bindings", apiKey, map[string]any{
+		"service_id": createServiceResponse.BackingService.ID,
+	})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodDelete, "/v1/projects/"+project.ID+"?cascade=true", apiKey, nil)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var deleteResponse struct {
+		DeleteRequested bool              `json:"delete_requested"`
+		Deleted         bool              `json:"deleted"`
+		Operations      []model.Operation `json:"operations"`
+		Project         model.Project     `json:"project"`
+	}
+	mustDecodeJSON(t, recorder, &deleteResponse)
+	if !deleteResponse.DeleteRequested {
+		t.Fatal("expected delete_requested=true")
+	}
+	if deleteResponse.Deleted {
+		t.Fatal("expected project delete to remain in progress")
+	}
+	if len(deleteResponse.Operations) != 1 {
+		t.Fatalf("expected one queued delete operation, got %+v", deleteResponse.Operations)
+	}
+	if deleteResponse.Operations[0].Type != model.OperationTypeDelete {
+		t.Fatalf("expected delete operation, got %q", deleteResponse.Operations[0].Type)
+	}
+
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app after project delete request: %v", err)
+	}
+	if got := strings.TrimSpace(strings.ToLower(app.Status.Phase)); !strings.Contains(got, "deleting") {
+		t.Fatalf("expected deleting phase after cascade delete request, got %q", app.Status.Phase)
+	}
+
+	completeNextManagedOperation(t, s)
+	completeNextManagedOperation(t, s)
+
+	if _, err := s.GetProject(project.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected project to be deleted after delete operation completed, got %v", err)
+	}
+	if _, err := s.GetBackingService(createServiceResponse.BackingService.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected backing service to be deleted with project cleanup, got %v", err)
 	}
 }
 

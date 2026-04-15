@@ -18,6 +18,7 @@ type deployCommonOptions struct {
 	Name                      string
 	Description               string
 	EnvFile                   string
+	ServiceEnvFiles           []string
 	RuntimeName               string
 	RuntimeID                 string
 	Replicas                  int
@@ -267,6 +268,7 @@ func bindCommonDeployFlags(cmd *cobra.Command, opts *deployCommonOptions, includ
 	}
 	cmd.Flags().StringVar(&opts.Description, "description", "", "App description")
 	cmd.Flags().StringVar(&opts.EnvFile, "env-file", "", "Local .env file to inject as app env")
+	cmd.Flags().StringArrayVar(&opts.ServiceEnvFiles, "service-env-file", nil, "Service-specific .env override for topology imports: <service>=<path>")
 	cmd.Flags().StringVar(&opts.RuntimeName, "runtime", "", "Runtime name. Defaults to the shared managed runtime")
 	cmd.Flags().StringVar(&opts.RuntimeID, "runtime-id", "", "Runtime ID")
 	cmd.Flags().IntVar(&opts.Replicas, "replicas", 0, "Desired replica count")
@@ -343,6 +345,13 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 	}
 	if envPath != "" {
 		c.progressf("Loaded %d env vars from %s", len(envVars), envPath)
+	}
+	serviceEnv, serviceEnvPaths, err := loadTopologyServiceEnvFiles(workingDir, opts.ServiceEnvFiles)
+	if err != nil {
+		return err
+	}
+	if len(serviceEnvPaths) > 0 {
+		c.progressf("Loaded %d service-specific env file override(s) for topology imports", len(serviceEnvPaths))
 	}
 	files, err := buildDeployFiles(workingDir, opts.FileSpecs, opts.SecretFileSpecs)
 	if err != nil {
@@ -430,6 +439,7 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 		DockerfilePath:    strings.TrimSpace(opts.DockerfilePath),
 		BuildContextDir:   strings.TrimSpace(opts.BuildContextDir),
 		Env:               envVars,
+		ServiceEnv:        serviceEnv,
 		Files:             files,
 		StartupCommand:    deployStartupCommandPointer(opts.StartupCommand),
 		PersistentStorage: persistentStorage,
@@ -484,6 +494,13 @@ func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingD
 	if envPath != "" {
 		c.progressf("Loaded %d env vars from %s", len(envVars), envPath)
 	}
+	serviceEnv, serviceEnvPaths, err := loadTopologyServiceEnvFiles(workingDir, opts.ServiceEnvFiles)
+	if err != nil {
+		return err
+	}
+	if len(serviceEnvPaths) > 0 {
+		c.progressf("Loaded %d service-specific env file override(s) for topology imports", len(serviceEnvPaths))
+	}
 	files, err := buildDeployFiles(workingDir, opts.FileSpecs, opts.SecretFileSpecs)
 	if err != nil {
 		return err
@@ -526,6 +543,7 @@ func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingD
 		DockerfilePath:             strings.TrimSpace(opts.DockerfilePath),
 		BuildContextDir:            strings.TrimSpace(opts.BuildContextDir),
 		Env:                        envVars,
+		ServiceEnv:                 serviceEnv,
 		Files:                      files,
 		StartupCommand:             deployStartupCommandPointer(opts.StartupCommand),
 		PersistentStorage:          persistentStorage,
@@ -569,6 +587,9 @@ func (c *CLI) runDeployImage(imageRef string, opts deployImageOptions) error {
 	imageRef = strings.TrimSpace(imageRef)
 	if imageRef == "" {
 		return fmt.Errorf("image is required")
+	}
+	if len(opts.ServiceEnvFiles) > 0 {
+		return fmt.Errorf("--service-env-file is only supported for source imports")
 	}
 	workingDir, err := os.Getwd()
 	if err != nil {

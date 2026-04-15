@@ -15,7 +15,6 @@ import (
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/runtime"
 	"fugue/internal/store"
 )
 
@@ -490,6 +489,15 @@ services:
 	})
 	body, contentType := newImportUploadMultipartBody(t, importUploadRequest{
 		Name: "demo-stack",
+		ServiceEnv: map[string]map[string]string{
+			"web": {
+				"GATEWAY_ONLY": "1",
+				"WORKER_URL":   "http://override.internal:9000",
+			},
+			"worker": {
+				"WORKER_ONLY": "1",
+			},
+		},
 	}, "demo-stack.tgz", archiveBytes)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/apps/import-upload", body)
@@ -569,11 +577,14 @@ services:
 	if webApp.Route == nil || webApp.Route.ServicePort != 3000 {
 		t.Fatalf("expected web route service port 3000, got %+v", webApp.Route)
 	}
-	if got := webApp.Spec.Env["WORKER_URL"]; got != "http://"+runtime.ComposeServiceAliasName(webApp.ProjectID, "worker")+":8080" {
-		t.Fatalf("expected worker URL env to target compose alias, got %+v", webApp.Spec.Env)
+	if got := webApp.Spec.Env["WORKER_URL"]; got != "http://override.internal:9000" {
+		t.Fatalf("expected service env override to win for worker URL, got %+v", webApp.Spec.Env)
 	}
 	if got := webApp.Spec.Env["DATABASE_URL"]; got == "" {
 		t.Fatalf("expected rewritten database url, got %+v", webApp.Spec.Env)
+	}
+	if got := webApp.Spec.Env["GATEWAY_ONLY"]; got != "1" {
+		t.Fatalf("expected web service env override, got %+v", webApp.Spec.Env)
 	}
 
 	workerApp, ok := appsByService["worker"]
@@ -585,6 +596,12 @@ services:
 	}
 	if workerApp.Source.ImageRef != "ghcr.io/example/worker:latest" {
 		t.Fatalf("expected worker image ref ghcr.io/example/worker:latest, got %q", workerApp.Source.ImageRef)
+	}
+	if got := workerApp.Spec.Env["WORKER_ONLY"]; got != "1" {
+		t.Fatalf("expected worker-only override on worker app, got %+v", workerApp.Spec.Env)
+	}
+	if _, ok := workerApp.Spec.Env["GATEWAY_ONLY"]; ok {
+		t.Fatalf("expected gateway override to stay off worker app, got %+v", workerApp.Spec.Env)
 	}
 
 	storedApps, err := s.ListApps(tenant.ID, false)

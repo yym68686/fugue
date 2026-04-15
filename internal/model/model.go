@@ -513,6 +513,30 @@ type ClusterTLSProbeResult struct {
 	Error              string                      `json:"error,omitempty"`
 }
 
+type ClusterWebSocketProbeAttempt struct {
+	Target         string            `json:"target"`
+	URL            string            `json:"url,omitempty"`
+	Status         string            `json:"status,omitempty"`
+	StatusCode     int               `json:"status_code,omitempty"`
+	Upgraded       bool              `json:"upgraded"`
+	DurationMillis int64             `json:"duration_ms"`
+	Headers        map[string]string `json:"headers,omitempty"`
+	BodyPreview    string            `json:"body_preview,omitempty"`
+	Error          string            `json:"error,omitempty"`
+}
+
+type ClusterWebSocketProbeResult struct {
+	AppID           string                       `json:"app_id"`
+	AppName         string                       `json:"app_name"`
+	Path            string                       `json:"path"`
+	RouteConfigured bool                         `json:"route_configured"`
+	Service         ClusterWebSocketProbeAttempt `json:"service"`
+	PublicRoute     ClusterWebSocketProbeAttempt `json:"public_route"`
+	ConclusionCode  string                       `json:"conclusion_code"`
+	Conclusion      string                       `json:"conclusion"`
+	ObservedAt      time.Time                    `json:"observed_at"`
+}
+
 type ClusterWorkloadCondition struct {
 	Type    string `json:"type"`
 	Status  string `json:"status"`
@@ -523,6 +547,29 @@ type ClusterWorkloadCondition struct {
 type ClusterWorkloadContainer struct {
 	Name  string `json:"name"`
 	Image string `json:"image"`
+}
+
+type AppRuntimePodGroup struct {
+	OwnerKind         string                     `json:"owner_kind"`
+	OwnerName         string                     `json:"owner_name"`
+	Parent            *ClusterPodOwner           `json:"parent,omitempty"`
+	Revision          string                     `json:"revision,omitempty"`
+	CreatedAt         *time.Time                 `json:"created_at,omitempty"`
+	DesiredReplicas   *int32                     `json:"desired_replicas,omitempty"`
+	ReadyReplicas     *int32                     `json:"ready_replicas,omitempty"`
+	AvailableReplicas *int32                     `json:"available_replicas,omitempty"`
+	CurrentReplicas   *int32                     `json:"current_replicas,omitempty"`
+	Containers        []ClusterWorkloadContainer `json:"containers,omitempty"`
+	Pods              []ClusterPod               `json:"pods"`
+}
+
+type AppRuntimePodInventory struct {
+	Component string               `json:"component"`
+	Namespace string               `json:"namespace"`
+	Selector  string               `json:"selector"`
+	Container string               `json:"container"`
+	Groups    []AppRuntimePodGroup `json:"groups"`
+	Warnings  []string             `json:"warnings,omitempty"`
 }
 
 type ClusterWorkloadDetail struct {
@@ -896,22 +943,23 @@ func NormalizeRuntimePoolMode(runtimeType, poolMode string) string {
 }
 
 type State struct {
-	Version          string               `json:"version"`
-	Tenants          []Tenant             `json:"tenants"`
-	Projects         []Project            `json:"projects"`
-	APIKeys          []APIKey             `json:"api_keys"`
-	EnrollmentTokens []EnrollmentToken    `json:"enrollment_tokens"`
-	NodeKeys         []NodeKey            `json:"node_keys"`
-	Machines         []Machine            `json:"machines"`
-	Runtimes         []Runtime            `json:"runtimes"`
-	RuntimeGrants    []RuntimeAccessGrant `json:"runtime_grants"`
-	Apps             []App                `json:"apps"`
-	AppDomains       []AppDomain          `json:"app_domains"`
-	BackingServices  []BackingService     `json:"backing_services"`
-	ServiceBindings  []ServiceBinding     `json:"service_bindings"`
-	Operations       []Operation          `json:"operations"`
-	AuditEvents      []AuditEvent         `json:"audit_events"`
-	Idempotency      []IdempotencyRecord  `json:"idempotency"`
-	TenantBilling    []TenantBilling      `json:"tenant_billing"`
-	BillingEvents    []TenantBillingEvent `json:"billing_events"`
+	Version               string               `json:"version"`
+	Tenants               []Tenant             `json:"tenants"`
+	Projects              []Project            `json:"projects"`
+	ProjectDeleteRequests map[string]time.Time `json:"project_delete_requests,omitempty"`
+	APIKeys               []APIKey             `json:"api_keys"`
+	EnrollmentTokens      []EnrollmentToken    `json:"enrollment_tokens"`
+	NodeKeys              []NodeKey            `json:"node_keys"`
+	Machines              []Machine            `json:"machines"`
+	Runtimes              []Runtime            `json:"runtimes"`
+	RuntimeGrants         []RuntimeAccessGrant `json:"runtime_grants"`
+	Apps                  []App                `json:"apps"`
+	AppDomains            []AppDomain          `json:"app_domains"`
+	BackingServices       []BackingService     `json:"backing_services"`
+	ServiceBindings       []ServiceBinding     `json:"service_bindings"`
+	Operations            []Operation          `json:"operations"`
+	AuditEvents           []AuditEvent         `json:"audit_events"`
+	Idempotency           []IdempotencyRecord  `json:"idempotency"`
+	TenantBilling         []TenantBilling      `json:"tenant_billing"`
+	BillingEvents         []TenantBillingEvent `json:"billing_events"`
 }

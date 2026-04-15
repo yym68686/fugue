@@ -44,6 +44,7 @@ type importGitHubRequest struct {
 	DockerfilePath             string                                  `json:"dockerfile_path"`
 	BuildContextDir            string                                  `json:"build_context_dir"`
 	Env                        map[string]string                       `json:"env"`
+	ServiceEnv                 map[string]map[string]string            `json:"service_env"`
 	ConfigContent              string                                  `json:"config_content"`
 	Files                      []model.AppFile                         `json:"files"`
 	StartupCommand             *string                                 `json:"startup_command,omitempty"`
@@ -89,6 +90,7 @@ func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID
 		DockerfilePath             string                                  `json:"dockerfile_path"`
 		BuildContextDir            string                                  `json:"build_context_dir"`
 		Env                        map[string]string                       `json:"env"`
+		ServiceEnv                 map[string]map[string]string            `json:"service_env"`
 		ConfigContent              string                                  `json:"config_content"`
 		Files                      []model.AppFile                         `json:"files"`
 		StartupCommand             string                                  `json:"startup_command"`
@@ -114,6 +116,7 @@ func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID
 		DockerfilePath:             strings.TrimSpace(req.DockerfilePath),
 		BuildContextDir:            strings.TrimSpace(req.BuildContextDir),
 		Env:                        req.Env,
+		ServiceEnv:                 normalizedImportServiceEnv(req.ServiceEnv),
 		ConfigContent:              strings.TrimSpace(req.ConfigContent),
 		Files:                      req.Files,
 		StartupCommand:             strings.Join(normalizeStartupCommand(req.StartupCommand), "\x00"),
@@ -160,5 +163,37 @@ func normalizedImportGitHubPersistentStorageSeedFiles(files []importGitHubPersis
 		return normalized[i].Service < normalized[j].Service
 	})
 
+	return normalized
+}
+
+func normalizedImportServiceEnv(serviceEnv map[string]map[string]string) map[string]map[string]string {
+	if len(serviceEnv) == 0 {
+		return nil
+	}
+
+	normalized := make(map[string]map[string]string, len(serviceEnv))
+	for rawService, rawEnv := range serviceEnv {
+		serviceName := model.SlugifyOptional(strings.TrimSpace(rawService))
+		if serviceName == "" {
+			continue
+		}
+		values := normalized[serviceName]
+		if values == nil {
+			values = map[string]string{}
+		}
+		for rawKey, rawValue := range rawEnv {
+			key := strings.TrimSpace(rawKey)
+			if key == "" {
+				continue
+			}
+			values[key] = rawValue
+		}
+		if len(values) > 0 {
+			normalized[serviceName] = values
+		}
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
 	return normalized
 }

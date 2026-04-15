@@ -13,6 +13,24 @@ type commandHelpDoc struct {
 }
 
 var commandHelpDocOverrides = map[string]commandHelpDoc{
+	"fugue deploy": {
+		Example: strings.TrimSpace(`
+fugue deploy .
+fugue deploy github owner/repo
+fugue deploy github owner/repo --service-env-file gateway=.env.gateway --service-env-file runtime=.env.runtime
+`),
+	},
+	"fugue deploy github": {
+		Long: strings.TrimSpace(`
+Import a GitHub repository as an app or topology.
+
+When Fugue detects a compose stack or fugue manifest, you can pass --service-env-file repeatedly to inject different env overrides into different topology services without collapsing everything into one shared env file.
+`),
+		Example: strings.TrimSpace(`
+fugue deploy github owner/repo
+fugue deploy github owner/repo --branch main --service-env-file gateway=.env.gateway --service-env-file runtime=.env.runtime
+`),
+	},
 	"fugue app": {
 		Example: strings.TrimSpace(`
 fugue app overview my-app
@@ -22,7 +40,7 @@ fugue app service attach my-app postgres
 	},
 	"fugue app overview": {
 		Long: strings.TrimSpace(`
-Show the app plus related domains, bindings, backing services, operations, and image inventory in one snapshot.
+Show the app plus related domains, bindings, backing services, operations, image inventory, and runtime pod rollout context in one snapshot.
 
 JSON output redacts env values, passwords, repo tokens, and secret-backed file content by default. Pass --show-secrets only when you explicitly need the raw values for debugging.
 `),
@@ -46,6 +64,30 @@ fugue app watch my-app --interval 10s --show-secrets --output json
 		Example: strings.TrimSpace(`
 fugue app logs runtime my-app --follow
 fugue app logs build my-app --tail 200
+fugue app logs query my-app --table gateway_request_logs --since 1h --match status=500
+fugue app logs pods my-app
+`),
+	},
+	"fugue app logs query": {
+		Long: strings.TrimSpace(`
+Query a business log table through the app effective Postgres connection with semantic time-window and field filters.
+
+Use this when request logs, gateway logs, or audit rows live in the app database and plain runtime log tailing is not enough.
+`),
+		Example: strings.TrimSpace(`
+fugue app logs query my-app --table gateway_request_logs --since 1h --match status=500 --contains path=/admin
+fugue app logs query my-app --table request_audit --column created_at --column method --column path --limit 100
+`),
+	},
+	"fugue app logs pods": {
+		Long: strings.TrimSpace(`
+Show the current pod group plus recent ReplicaSet rollout context for an app so you can see which revision replaced which pod set.
+
+This is the CLI path for inspecting old rollout context when current runtime logs alone no longer explain what changed.
+`),
+		Example: strings.TrimSpace(`
+fugue app logs pods my-app
+fugue app logs pods my-app --component postgres
 `),
 	},
 	"fugue app request": {
@@ -324,6 +366,7 @@ fugue admin runtime token create edge-a --ttl 3600
 fugue admin cluster status
 fugue admin cluster pods --namespace kube-system
 fugue admin cluster dns resolve api.github.com --server 10.43.0.10
+fugue admin cluster net websocket my-app --path /ws
 `),
 	},
 	"fugue admin cluster status": {
@@ -382,7 +425,10 @@ fugue admin cluster dns resolve api.github.com --server 10.43.0.10 --type A
 `),
 	},
 	"fugue admin cluster net": {
-		Example: "fugue admin cluster net connect api.github.com:443",
+		Example: strings.TrimSpace(`
+fugue admin cluster net connect api.github.com:443
+fugue admin cluster net websocket my-app --path /ws
+`),
 	},
 	"fugue admin cluster net connect": {
 		Long: strings.TrimSpace(`
@@ -393,6 +439,17 @@ Use this to separate DNS issues from raw reachability and routing problems.
 		Example: strings.TrimSpace(`
 fugue admin cluster net connect api.github.com:443
 fugue admin cluster net connect 91.103.120.48:443 --timeout 5s
+`),
+	},
+	"fugue admin cluster net websocket": {
+		Long: strings.TrimSpace(`
+Run the same websocket handshake twice: once directly against the app cluster service, and once against the app public route.
+
+Use this when a websocket endpoint returns 502 through the route and you need the CLI to tell you whether the app itself upgrades correctly while the proxy path fails.
+`),
+		Example: strings.TrimSpace(`
+fugue admin cluster net websocket my-app --path /ws
+fugue admin cluster net websocket my-app --path "/socket.io/?EIO=4&transport=websocket" --header Cookie=session=abc
 `),
 	},
 	"fugue admin cluster tls": {

@@ -17,20 +17,22 @@ import (
 )
 
 type Service struct {
-	Store                     *store.Store
-	Config                    config.ControllerConfig
-	Renderer                  runtime.Renderer
-	Logger                    *log.Logger
-	importer                  sourceImporter
-	registryPushBase          string
-	registryPullBase          string
-	inspectManagedImage       appimages.InspectFunc
-	inspectManagedImageConfig imageConfigInspector
-	deleteManagedImage        func(context.Context, string) (appimages.DeleteResult, error)
-	syncBillingImageStorage   bool
-	latestGitHubCommit        func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
-	newKubeClient             func(namespace string) (*kubeClient, error)
-	now                       func() time.Time
+	Store                         *store.Store
+	Config                        config.ControllerConfig
+	Renderer                      runtime.Renderer
+	Logger                        *log.Logger
+	importer                      sourceImporter
+	registryPushBase              string
+	registryPullBase              string
+	inspectManagedImage           appimages.InspectFunc
+	inspectManagedImageConfig     imageConfigInspector
+	deleteManagedImage            func(context.Context, string) (appimages.DeleteResult, error)
+	syncBillingImageStorage       bool
+	latestGitHubCommit            func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
+	newKubeClient                 func(namespace string) (*kubeClient, error)
+	importImageInspectRetryDelay  time.Duration
+	importImageInspectMaxAttempts int
+	now                           func() time.Time
 }
 
 type sourceImporter interface {

@@ -23,12 +23,16 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
 	clusterProbeDefaultTimeout = 5 * time.Second
 	clusterExecTimeout         = 30 * time.Second
+	clusterWebSocketBodyBytes  = 4 << 10
+	clusterWebSocketSampleKey  = "dGhlIHNhbXBsZSBub25jZQ=="
+	clusterWebSocketSampleAck  = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
 )
 
 func (s *Server) handleListClusterPods(w http.ResponseWriter, r *http.Request) {
@@ -100,7 +104,7 @@ func (s *Server) handleListClusterEvents(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	events, err := client.listCoreEvents(r.Context(), readOptionalStringQuery(r, "namespace"))
+	events, err := client.listClusterEvents(r.Context(), readOptionalStringQuery(r, "namespace"))
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -347,6 +351,51 @@ func (s *Server) handleConnectClusterNetwork(w http.ResponseWriter, r *http.Requ
 	httpx.WriteJSON(w, http.StatusOK, result)
 }
 
+func (s *Server) handleProbeClusterWebSocket(w http.ResponseWriter, r *http.Request) {
+	principal, ok := requirePlatformAdmin(w, r)
+	if !ok {
+		return
+	}
+
+	var req struct {
+		AppID     string            `json:"app_id"`
+		Path      string            `json:"path"`
+		Headers   map[string]string `json:"headers"`
+		TimeoutMS int               `json:"timeout_ms"`
+	}
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.AppID = strings.TrimSpace(req.AppID)
+	if req.AppID == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "app_id is required")
+		return
+	}
+
+	timeout := clusterProbeDefaultTimeout
+	if req.TimeoutMS > 0 {
+		timeout = time.Duration(req.TimeoutMS) * time.Millisecond
+	}
+
+	app, err := s.store.GetApp(req.AppID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	result, err := s.probeClusterWebSocket(r.Context(), app, req.Path, req.Headers, timeout)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	s.appendAudit(principal, "cluster.net.websocket", "app", app.ID, app.TenantID, map[string]string{
+		"path":            result.Path,
+		"conclusion_code": result.ConclusionCode,
+	})
+	httpx.WriteJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) handleProbeClusterTLS(w http.ResponseWriter, r *http.Request) {
 	principal, ok := requirePlatformAdmin(w, r)
 	if !ok {
@@ -430,6 +479,52 @@ func (s *Server) handleGetClusterRolloutStatus(w http.ResponseWriter, r *http.Re
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"rollout": rollout})
 }
 
+func (s *Server) probeClusterWebSocket(ctx context.Context, app model.App, requestPath string, headers map[string]string, timeout time.Duration) (model.ClusterWebSocketProbeResult, error) {
+	normalizedPath, err := normalizeClusterWebSocketPath(requestPath)
+	if err != nil {
+		return model.ClusterWebSocketProbeResult{}, err
+	}
+	if timeout <= 0 {
+		timeout = clusterProbeDefaultTimeout
+	}
+
+	result := model.ClusterWebSocketProbeResult{
+		AppID:       app.ID,
+		AppName:     app.Name,
+		Path:        normalizedPath,
+		ObservedAt:  time.Now().UTC(),
+		Service:     model.ClusterWebSocketProbeAttempt{Target: "service"},
+		PublicRoute: model.ClusterWebSocketProbeAttempt{Target: "public_route"},
+	}
+
+	if model.AppHasClusterService(app.Spec) {
+		serviceURL, buildErr := buildClusterWebSocketURL(s.serviceURLForApp(ctx, app), normalizedPath)
+		if buildErr != nil {
+			result.Service.Error = buildErr.Error()
+		} else {
+			result.Service = s.probeClusterWebSocketAttempt(ctx, "service", serviceURL, headers, timeout)
+		}
+	} else {
+		result.Service.Error = "app does not expose a cluster service"
+	}
+
+	publicBaseURL := clusterWebSocketPublicBaseURL(app)
+	result.RouteConfigured = publicBaseURL != ""
+	if result.RouteConfigured {
+		publicURL, buildErr := buildClusterWebSocketURL(publicBaseURL, normalizedPath)
+		if buildErr != nil {
+			result.PublicRoute.Error = buildErr.Error()
+		} else {
+			result.PublicRoute = s.probeClusterWebSocketAttempt(ctx, "public_route", publicURL, headers, timeout)
+		}
+	} else {
+		result.PublicRoute.Error = "app does not have a public route"
+	}
+
+	result.ConclusionCode, result.Conclusion = explainClusterWebSocketProbe(result)
+	return result, nil
+}
+
 func requirePlatformAdmin(w http.ResponseWriter, r *http.Request) (model.Principal, bool) {
 	principal := mustPrincipal(r)
 	if !principal.IsPlatformAdmin() {
@@ -477,6 +572,42 @@ func (c *clusterNodeClient) listCoreEvents(ctx context.Context, namespace string
 		return nil, err
 	}
 	return events.Items, nil
+}
+
+func (c *clusterNodeClient) listEventsV1(ctx context.Context, namespace string) ([]eventsv1.Event, error) {
+	var events eventsv1.EventList
+	apiPath := "/apis/events.k8s.io/v1/events"
+	if ns := strings.TrimSpace(namespace); ns != "" {
+		apiPath = "/apis/events.k8s.io/v1/namespaces/" + url.PathEscape(ns) + "/events"
+	}
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, &events); err != nil {
+		return nil, err
+	}
+	return events.Items, nil
+}
+
+func (c *clusterNodeClient) listClusterEvents(ctx context.Context, namespace string) ([]corev1.Event, error) {
+	events, err := c.listCoreEvents(ctx, namespace)
+	if err == nil {
+		return events, nil
+	}
+	if !isForbiddenStatusError(err) {
+		return nil, err
+	}
+
+	eventsV1, fallbackErr := c.listEventsV1(ctx, namespace)
+	if fallbackErr != nil {
+		if isForbiddenStatusError(fallbackErr) {
+			return nil, fmt.Errorf("cluster events access is forbidden in both core/v1 and events.k8s.io/v1")
+		}
+		return nil, fallbackErr
+	}
+
+	converted := make([]corev1.Event, 0, len(eventsV1))
+	for _, event := range eventsV1 {
+		converted = append(converted, coreEventFromEventsV1(event))
+	}
+	return converted, nil
 }
 
 func (c *clusterNodeClient) readClusterWorkloadDetail(
@@ -806,6 +937,34 @@ func clusterEventFromCore(event corev1.Event) model.ClusterEvent {
 		LastTimestamp:   nonZeroTime(event.LastTimestamp.Time),
 		EventTime:       nonZeroTime(event.EventTime.Time),
 	}
+}
+
+func coreEventFromEventsV1(event eventsv1.Event) corev1.Event {
+	out := corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: strings.TrimSpace(event.Namespace),
+			Name:      strings.TrimSpace(event.Name),
+		},
+		Type:    strings.TrimSpace(event.Type),
+		Reason:  strings.TrimSpace(event.Reason),
+		Message: strings.TrimSpace(event.Note),
+		InvolvedObject: corev1.ObjectReference{
+			Kind:      strings.TrimSpace(event.Regarding.Kind),
+			Namespace: strings.TrimSpace(event.Regarding.Namespace),
+			Name:      strings.TrimSpace(event.Regarding.Name),
+		},
+		EventTime: event.EventTime,
+	}
+	if event.DeprecatedCount > 0 {
+		out.Count = event.DeprecatedCount
+	}
+	if !event.DeprecatedFirstTimestamp.IsZero() {
+		out.FirstTimestamp = event.DeprecatedFirstTimestamp
+	}
+	if !event.DeprecatedLastTimestamp.IsZero() {
+		out.LastTimestamp = event.DeprecatedLastTimestamp
+	}
+	return out
 }
 
 func clusterEventSortTime(event model.ClusterEvent) time.Time {
@@ -1175,6 +1334,231 @@ func probeClusterTLS(ctx context.Context, target, serverName string, timeout tim
 	}
 
 	return result, nil
+}
+
+func (s *Server) probeClusterWebSocketAttempt(ctx context.Context, target, rawURL string, headers map[string]string, timeout time.Duration) model.ClusterWebSocketProbeAttempt {
+	attempt := model.ClusterWebSocketProbeAttempt{
+		Target: target,
+		URL:    rawURL,
+	}
+	if timeout <= 0 {
+		timeout = clusterProbeDefaultTimeout
+	}
+	client := s.newClusterProbeHTTPClient(timeout)
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		attempt.Error = fmt.Sprintf("build websocket request: %v", err)
+		return attempt
+	}
+	for key, value := range headers {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		httpReq.Header.Set(key, value)
+	}
+	httpReq.Header.Set("Connection", "Upgrade")
+	httpReq.Header.Set("Upgrade", "websocket")
+	httpReq.Header.Set("Sec-WebSocket-Version", "13")
+	httpReq.Header.Set("Sec-WebSocket-Key", clusterWebSocketSampleKey)
+	if strings.TrimSpace(httpReq.Header.Get("Accept")) == "" {
+		httpReq.Header.Set("Accept", "*/*")
+	}
+
+	startedAt := time.Now()
+	resp, err := client.Do(httpReq)
+	attempt.DurationMillis = time.Since(startedAt).Milliseconds()
+	if err != nil {
+		attempt.Error = err.Error()
+		return attempt
+	}
+	defer resp.Body.Close()
+
+	attempt.Status = resp.Status
+	attempt.StatusCode = resp.StatusCode
+	attempt.Headers = clusterWebSocketHeaders(resp.Header)
+	attempt.Upgraded = clusterWebSocketHandshakeSucceeded(resp)
+	if !attempt.Upgraded {
+		attempt.BodyPreview = readClusterWebSocketBodyPreview(resp.Body, clusterWebSocketBodyBytes)
+	}
+	return attempt
+}
+
+func (s *Server) newClusterProbeHTTPClient(timeout time.Duration) *http.Client {
+	baseClient := s.appRequestHTTPClient
+	if baseClient == nil {
+		baseClient = &http.Client{}
+	}
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if current, ok := baseClient.Transport.(*http.Transport); ok && current != nil {
+		transport = current.Clone()
+	}
+	transport.ForceAttemptHTTP2 = false
+	transport.ResponseHeaderTimeout = timeout
+	transport.TLSHandshakeTimeout = timeout
+
+	return &http.Client{
+		Transport: transport,
+		Jar:       baseClient.Jar,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+func normalizeClusterWebSocketPath(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "/", nil
+	}
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "ws://") || strings.HasPrefix(raw, "wss://") {
+		return "", fmt.Errorf("path must be relative to the app service or public route")
+	}
+	if strings.HasPrefix(raw, "?") {
+		return "/" + raw, nil
+	}
+	if strings.HasPrefix(raw, "/") {
+		return raw, nil
+	}
+	return "/" + raw, nil
+}
+
+func buildClusterWebSocketURL(baseURL, requestPath string) (string, error) {
+	base, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return "", fmt.Errorf("parse base URL: %w", err)
+	}
+	relative, err := url.Parse(requestPath)
+	if err != nil {
+		return "", fmt.Errorf("parse request path: %w", err)
+	}
+	base.Path = joinClusterWebSocketPath(base.Path, relative.Path)
+	base.RawPath = ""
+	base.RawQuery = relative.RawQuery
+	base.Fragment = ""
+	return base.String(), nil
+}
+
+func joinClusterWebSocketPath(basePath, requestPath string) string {
+	basePath = strings.TrimSpace(basePath)
+	requestPath = strings.TrimSpace(requestPath)
+	switch {
+	case requestPath == "":
+		if basePath == "" {
+			return "/"
+		}
+		return basePath
+	case strings.HasPrefix(requestPath, "/"):
+		return requestPath
+	case basePath == "" || basePath == "/":
+		return "/" + requestPath
+	default:
+		return strings.TrimRight(basePath, "/") + "/" + requestPath
+	}
+}
+
+func clusterWebSocketPublicBaseURL(app model.App) string {
+	if app.Route == nil {
+		return ""
+	}
+	if value := strings.TrimSpace(app.Route.PublicURL); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(app.Route.Hostname); value != "" {
+		return "https://" + value
+	}
+	return ""
+}
+
+func clusterWebSocketHeaders(header http.Header) map[string]string {
+	if len(header) == 0 {
+		return nil
+	}
+	values := make(map[string]string, len(header))
+	for key, entries := range header {
+		key = strings.TrimSpace(key)
+		if key == "" || len(entries) == 0 {
+			continue
+		}
+		values[key] = strings.Join(entries, ", ")
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	return values
+}
+
+func clusterWebSocketHandshakeSucceeded(resp *http.Response) bool {
+	if resp == nil || resp.StatusCode != http.StatusSwitchingProtocols {
+		return false
+	}
+	if !clusterHeaderContainsToken(resp.Header.Get("Connection"), "upgrade") {
+		return false
+	}
+	if !clusterHeaderContainsToken(resp.Header.Get("Upgrade"), "websocket") {
+		return false
+	}
+	return strings.TrimSpace(resp.Header.Get("Sec-WebSocket-Accept")) == clusterWebSocketSampleAck
+}
+
+func clusterHeaderContainsToken(raw, token string) bool {
+	token = strings.ToLower(strings.TrimSpace(token))
+	if token == "" {
+		return false
+	}
+	for _, part := range strings.Split(strings.ToLower(raw), ",") {
+		if strings.TrimSpace(part) == token {
+			return true
+		}
+	}
+	return false
+}
+
+func readClusterWebSocketBodyPreview(body io.Reader, maxBytes int) string {
+	if body == nil {
+		return ""
+	}
+	if maxBytes <= 0 {
+		maxBytes = clusterWebSocketBodyBytes
+	}
+	payload, err := io.ReadAll(io.LimitReader(body, int64(maxBytes+1)))
+	if err != nil {
+		return fmt.Sprintf("read response body: %v", err)
+	}
+	truncated := len(payload) > maxBytes
+	if truncated {
+		payload = payload[:maxBytes]
+	}
+	preview := strings.TrimSpace(string(payload))
+	if truncated {
+		preview += "..."
+	}
+	return preview
+}
+
+func explainClusterWebSocketProbe(result model.ClusterWebSocketProbeResult) (string, string) {
+	switch {
+	case !result.RouteConfigured && result.Service.Upgraded:
+		return "public_route_missing_service_ok", "The app service accepted the WebSocket upgrade directly, but the app does not have a public route configured."
+	case !result.RouteConfigured:
+		return "public_route_missing", "The app does not have a public route configured. Only the direct service probe could be evaluated."
+	case result.Service.Upgraded && result.PublicRoute.Upgraded:
+		return "service_and_public_route_ok", "WebSocket handshakes upgraded both directly against the app service and through the public route."
+	case result.Service.Upgraded && result.PublicRoute.StatusCode == http.StatusBadGateway:
+		return "public_route_502_service_ok", "WebSocket handshake succeeded directly against the app service, but the public route returned 502. The proxy layer is failing before the request reaches the app."
+	case result.Service.Upgraded && strings.TrimSpace(result.PublicRoute.Error) != "":
+		return "public_route_error_service_ok", "WebSocket handshake succeeded directly against the app service, but the public-route probe failed before it could upgrade. The route or edge path is the likely fault domain."
+	case result.Service.Upgraded && !result.PublicRoute.Upgraded:
+		return "public_route_rejected_service_ok", "The app service accepted the WebSocket upgrade directly, but the public route did not return 101. Compare the public-route status and headers to isolate the proxy behavior."
+	case !result.Service.Upgraded && result.PublicRoute.Upgraded:
+		return "service_probe_failed_public_route_ok", "The public route upgraded successfully even though the direct service probe did not. The app may require route-specific headers or middleware."
+	default:
+		return "service_rejected", "The direct app-service probe did not upgrade, so the failure is not isolated to the public proxy path. Inspect the service response and app endpoint behavior first."
+	}
 }
 
 func clusterPeerCertificates(certificates []*x509.Certificate) []model.ClusterTLSPeerCertificate {

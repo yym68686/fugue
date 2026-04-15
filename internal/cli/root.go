@@ -117,6 +117,7 @@ Environment variables:
 	  fugue --base-url https://api.example.com app ls
 	  fugue deploy inspect .
 	  fugue deploy github owner/repo --branch main
+	  fugue deploy github owner/repo --service-env-file gateway=.env.gateway --service-env-file runtime=.env.runtime
 	  fugue deploy image nginx:1.27
 	  fugue app create my-app --github owner/repo --branch main
 	  fugue app status my-app
@@ -132,6 +133,8 @@ Environment variables:
 	  fugue app storage set my-app --size 10Gi --mount /data
 	  fugue app db configure my-app --database app --user app
 	  fugue app db query my-app --sql "select count(*) from users"
+	  fugue app logs query my-app --table gateway_request_logs --since 1h --match status=500
+	  fugue app logs pods my-app
 	  fugue app request my-app /healthz
 	  fugue app domain primary set my-app www.example.com
 	  fugue service ls
@@ -150,6 +153,7 @@ Environment variables:
 	  fugue admin cluster workload show kube-system deployment coredns
 	  fugue admin cluster dns resolve api.github.com --server 10.43.0.10
 	  fugue admin cluster net connect api.github.com:443
+	  fugue admin cluster net websocket my-app --path /ws
 	  fugue admin cluster tls probe 104.18.32.47:443 --server-name api.github.com
 	  fugue api request GET /v1/apps
 	  fugue diagnose timing -- app overview my-app

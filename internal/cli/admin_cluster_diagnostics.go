@@ -190,7 +190,10 @@ func (c *CLI) newAdminClusterNetCommand() *cobra.Command {
 		Use:   "net",
 		Short: "Run network reachability probes from the control plane",
 	}
-	cmd.AddCommand(c.newAdminClusterNetConnectCommand())
+	cmd.AddCommand(
+		c.newAdminClusterNetConnectCommand(),
+		c.newAdminClusterNetWebSocketCommand(),
+	)
 	return cmd
 }
 
@@ -218,6 +221,56 @@ func (c *CLI) newAdminClusterNetConnectCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().DurationVar(&opts.Timeout, "timeout", opts.Timeout, "Connection timeout")
+	return cmd
+}
+
+func (c *CLI) newAdminClusterNetWebSocketCommand() *cobra.Command {
+	opts := struct {
+		Path    string
+		Headers []string
+		Timeout time.Duration
+	}{
+		Path:    "/",
+		Timeout: 10 * time.Second,
+	}
+	cmd := &cobra.Command{
+		Use:   "websocket <app>",
+		Short: "Compare a direct app-service websocket handshake with the public route handshake",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			tenantID, projectID, err := c.resolveFilterSelections(client)
+			if err != nil {
+				return err
+			}
+			app, err := resolveAppReference(client, args[0], projectID, tenantID)
+			if err != nil {
+				return err
+			}
+			headers, err := parseHeaderArgs(opts.Headers)
+			if err != nil {
+				return err
+			}
+			result, err := client.ProbeClusterWebSocket(clusterWebSocketProbeRequest{
+				AppID:   app.ID,
+				Path:    strings.TrimSpace(opts.Path),
+				Headers: headers,
+			}, opts.Timeout)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, result)
+			}
+			return renderClusterWebSocketProbeResult(c.stdout, result)
+		},
+	}
+	cmd.Flags().StringVar(&opts.Path, "path", opts.Path, "WebSocket request path, optionally including a query string")
+	cmd.Flags().StringArrayVar(&opts.Headers, "header", nil, "Additional request header: Key=Value")
+	cmd.Flags().DurationVar(&opts.Timeout, "timeout", opts.Timeout, "Per-handshake timeout")
 	return cmd
 }
 
@@ -331,6 +384,32 @@ func trimCommandArgs(args []string) []string {
 		out = append(out, arg)
 	}
 	return out
+}
+
+func parseHeaderArgs(values []string) (map[string]string, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	headers := make(map[string]string, len(values))
+	for _, raw := range values {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(raw, "=")
+		if !ok {
+			return nil, fmt.Errorf("header %q must be Key=Value", raw)
+		}
+		key = strings.TrimSpace(key)
+		if key == "" {
+			return nil, fmt.Errorf("header %q is missing a key", raw)
+		}
+		headers[key] = strings.TrimSpace(value)
+	}
+	if len(headers) == 0 {
+		return nil, nil
+	}
+	return headers, nil
 }
 
 func writeClusterPodTable(w io.Writer, pods []model.ClusterPod) error {
@@ -496,6 +575,61 @@ func renderClusterNetworkConnectResult(w io.Writer, result model.ClusterNetworkC
 		kvPair{Key: "error", Value: result.Error},
 		kvPair{Key: "observed_at", Value: formatTime(result.ObservedAt)},
 	)
+}
+
+func renderClusterWebSocketProbeResult(w io.Writer, result model.ClusterWebSocketProbeResult) error {
+	if err := writeKeyValues(w,
+		kvPair{Key: "app", Value: result.AppName},
+		kvPair{Key: "app_id", Value: result.AppID},
+		kvPair{Key: "path", Value: result.Path},
+		kvPair{Key: "route_configured", Value: fmt.Sprintf("%t", result.RouteConfigured)},
+		kvPair{Key: "conclusion_code", Value: result.ConclusionCode},
+		kvPair{Key: "conclusion", Value: result.Conclusion},
+		kvPair{Key: "observed_at", Value: formatTime(result.ObservedAt)},
+	); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	if err := renderClusterWebSocketProbeAttempt(w, "service", result.Service); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	return renderClusterWebSocketProbeAttempt(w, "public_route", result.PublicRoute)
+}
+
+func renderClusterWebSocketProbeAttempt(w io.Writer, label string, attempt model.ClusterWebSocketProbeAttempt) error {
+	if _, err := fmt.Fprintln(w, label); err != nil {
+		return err
+	}
+	if err := writeKeyValues(w,
+		kvPair{Key: "target", Value: attempt.Target},
+		kvPair{Key: "url", Value: attempt.URL},
+		kvPair{Key: "status", Value: attempt.Status},
+		kvPair{Key: "status_code", Value: strconv.Itoa(attempt.StatusCode)},
+		kvPair{Key: "upgraded", Value: fmt.Sprintf("%t", attempt.Upgraded)},
+		kvPair{Key: "duration_ms", Value: strconv.FormatInt(attempt.DurationMillis, 10)},
+		kvPair{Key: "error", Value: attempt.Error},
+	); err != nil {
+		return err
+	}
+	if strings.TrimSpace(attempt.BodyPreview) != "" {
+		if _, err := fmt.Fprintf(w, "body_preview=%s\n", attempt.BodyPreview); err != nil {
+			return err
+		}
+	}
+	if len(attempt.Headers) > 0 {
+		if _, err := fmt.Fprintln(w, "headers"); err != nil {
+			return err
+		}
+		if err := writeStringMap(w, attempt.Headers); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func renderClusterTLSProbeResult(w io.Writer, result model.ClusterTLSProbeResult) error {

@@ -79,6 +79,7 @@ Use fugue CLI and the current FUGUE_API_KEY to deploy this project.
 Common workflows:
 
 - `fugue deploy github owner/repo --branch main`
+- `fugue deploy github owner/repo --service-env-file gateway=.env.gateway --service-env-file runtime=.env.runtime`
 - `fugue deploy github https://github.com/example/app --private --repo-token $GITHUB_TOKEN`
 - `fugue deploy image nginx:1.27`
 - `fugue app create my-app --github owner/repo --branch main`
@@ -87,6 +88,8 @@ Common workflows:
 - `fugue app env ls my-app`
 - `fugue app fs ls my-app / --source live`
 - `fugue app db query my-app --sql "select * from gateway_request_logs order by created_at desc limit 50"`
+- `fugue app logs query my-app --table gateway_request_logs --since 1h --match status=500`
+- `fugue app logs pods my-app`
 - `fugue app request my-app GET /admin/requests --query page=2 --query status=500 --header-from-env X-Service-Key=SERVICE_KEY`
 - `fugue app logs runtime my-app --follow`
 - `fugue app service attach my-app postgres`
@@ -109,6 +112,7 @@ Common workflows:
 - `fugue admin cluster rollout status kube-system deployment coredns`
 - `fugue admin cluster dns resolve api.github.com --server 10.43.0.10`
 - `fugue admin cluster net connect api.github.com:443`
+- `fugue admin cluster net websocket my-app --path "/socket.io/?EIO=4&transport=websocket"`
 - `fugue admin cluster tls probe 104.18.32.47:443 --server-name api.github.com`
 - `fugue admin users ls`
 - `fugue admin users show user@example.com`
@@ -121,11 +125,19 @@ Common workflows:
 
 `fugue app db query` lets you run read-only SQL against an app's effective PostgreSQL connection without first dropping into `cluster exec`. It is intended for direct business-table inspection such as `users`, `gateway_request_logs`, or request audit tables, and caps rows by default so routine diagnostics stay safe.
 
+`fugue app logs query` is the semantic wrapper for log-style tables stored in the app database. Instead of writing raw SQL for every investigation, you can point it at a table, apply `--since` / `--until`, add exact or substring filters, and let the CLI build the read-only query.
+
+`fugue app logs pods` shows the current pod group plus recent ReplicaSet rollout context, including the revision that replaced an older pod set. This is the CLI path for seeing old rollout context even after `app overview` has moved on to the new revision.
+
 `fugue app request` lets you call an app's own internal HTTP routes from the control plane side, including admin endpoints that require service keys already present in the app env. Pass `--header-from-env Header=ENV_KEY` to fill auth headers from the effective app env instead of copying secrets into your shell.
 
-`fugue app env ls` text output now renders a table with value source and override information, so normal terminal output is usable without falling back to `--json`.
+`fugue app env ls` text output now renders a table with separate source and reference columns plus override information, so normal terminal output is usable without falling back to `--json`.
 
 `fugue api request` shows raw status, headers, server-timing, body, and transport timings for any control-plane endpoint. `fugue diagnose timing -- <command...>` wraps any Fugue CLI command and reports DNS/connect/TLS/TTFB/total timing for each HTTP request it makes.
+
+`fugue deploy github ... --service-env-file service=.env.file` lets topology imports inject different env overrides into different compose or fugue-manifest services. Use this when `gateway`, `runtime`, `worker`, or similar services need different credentials or feature flags without flattening everything into one shared env file.
+
+`fugue admin cluster net websocket` runs the same websocket handshake twice: directly against the app cluster service and again through the app public route. It returns both statuses plus an automatic conclusion, so a `service=101 / public_route=502` incident can be diagnosed from the CLI without dropping to SSH and `kubectl`.
 
 `fugue admin cluster exec` now retries transient EOF and stream-reset failures by default, and exposes `--retries`, `--retry-delay`, and `--timeout` for longer diagnostic commands.
 

@@ -1,10 +1,13 @@
 package api
 
 import (
+	"bufio"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -59,6 +62,7 @@ type Server struct {
 	newLogsClient                func(namespace string) (appLogsClient, error)
 	newFilesystemPodLister       func(namespace string) (filesystemPodLister, error)
 	filesystemExecRunner         filesystemPodExecRunner
+	appProxyTransport            http.RoundTripper
 	appRequestHTTPClient         *http.Client
 	openAppDatabase              func(driverName, dsn string) (*sql.DB, error)
 	dnsResolver                  appDomainDNSResolver
@@ -112,6 +116,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 			return newKubeLogsClient(namespace)
 		},
 		filesystemExecRunner: kubeFilesystemExecRunner{},
+		appProxyTransport:    newDefaultAppProxyTransport(),
 		appRequestHTTPClient: &http.Client{},
 		openAppDatabase:      sql.Open,
 		dnsResolver:          netAppDomainResolver{},
@@ -293,17 +298,42 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "missing project.write scope")
 		return
 	}
+	cascade, err := readBoolQuery(r, "cascade", false)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	project, allowed := s.loadAuthorizedProject(w, r, principal)
 	if !allowed {
 		return
 	}
-	project, err := s.store.DeleteProject(project.ID)
+
+	if cascade {
+		statusCode, response, auditMeta, err := s.deleteProjectCascade(principal, project)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		action := "project.delete"
+		if statusCode == http.StatusAccepted {
+			action = "project.delete_request"
+		}
+		s.appendAudit(principal, action, "project", project.ID, project.TenantID, auditMeta)
+		httpx.WriteJSON(w, statusCode, response)
+		return
+	}
+
+	project, err = s.store.DeleteProject(project.ID)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
 	s.appendAudit(principal, "project.delete", "project", project.ID, project.TenantID, map[string]string{"name": project.Name})
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"project": project})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"delete_requested": false,
+		"deleted":          true,
+		"project":          project,
+	})
 }
 
 func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
@@ -1496,4 +1526,31 @@ func (r *statusRecorder) Flush() {
 		return
 	}
 	flusher.Flush()
+}
+
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("response writer does not support hijacking")
+	}
+	return hijacker.Hijack()
+}
+
+func (r *statusRecorder) Push(target string, opts *http.PushOptions) error {
+	pusher, ok := r.ResponseWriter.(http.Pusher)
+	if !ok {
+		return http.ErrNotSupported
+	}
+	return pusher.Push(target, opts)
+}
+
+func (r *statusRecorder) ReadFrom(reader io.Reader) (int64, error) {
+	if readerFrom, ok := r.ResponseWriter.(io.ReaderFrom); ok {
+		return readerFrom.ReadFrom(reader)
+	}
+	return io.Copy(r.ResponseWriter, reader)
+}
+
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
 }

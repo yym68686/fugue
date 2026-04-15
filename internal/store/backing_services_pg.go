@@ -96,6 +96,13 @@ func (s *Store) pgCreateBackingService(tenantID, projectID, name, description st
 	if !projectOK {
 		return model.BackingService{}, ErrNotFound
 	}
+	deleteRequested, err := s.pgProjectDeleteRequestedTx(ctx, tx, projectID)
+	if err != nil {
+		return model.BackingService{}, err
+	}
+	if deleteRequested {
+		return model.BackingService{}, ErrConflict
+	}
 
 	now := time.Now().UTC()
 	billing, billingState, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
@@ -160,6 +167,9 @@ func (s *Store) pgDeleteBackingService(id string) (model.BackingService, error) 
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_backing_services WHERE id = $1`, id); err != nil {
 		return model.BackingService{}, fmt.Errorf("delete backing service %s: %w", id, err)
+	}
+	if err := s.pgTryFinalizeRequestedProjectDeleteTx(ctx, tx, service.ProjectID); err != nil {
+		return model.BackingService{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return model.BackingService{}, fmt.Errorf("commit delete backing service transaction: %w", err)

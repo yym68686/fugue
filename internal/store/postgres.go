@@ -66,6 +66,7 @@ var postgresSchemaStatements = []string{
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL
 	)`,
+	`ALTER TABLE fugue_projects ADD COLUMN IF NOT EXISTS delete_requested_at TIMESTAMPTZ NULL`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_projects_tenant_slug ON fugue_projects (tenant_id, slug)`,
 	`CREATE TABLE IF NOT EXISTS fugue_api_keys (
 		id TEXT PRIMARY KEY,

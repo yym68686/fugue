@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
+	"fugue/internal/runtime"
 	"fugue/internal/store"
 )
 
@@ -229,6 +232,73 @@ func TestListClusterPodsReturnsSystemPods(t *testing.T) {
 	}
 }
 
+func TestListClusterEventsFallsBackToEventsV1WhenCoreEventsForbidden(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	kubeServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/namespaces/kube-system/events":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"kind":"Status","apiVersion":"v1","status":"Failure","message":"events is forbidden","reason":"Forbidden","code":403}`))
+		case "/apis/events.k8s.io/v1/namespaces/kube-system/events":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{
+							"namespace": "kube-system",
+							"name":      "coredns.182739",
+						},
+						"regarding": map[string]any{
+							"kind":      "Pod",
+							"namespace": "kube-system",
+							"name":      "coredns-abc",
+						},
+						"type":            "Warning",
+						"reason":          "BackOff",
+						"note":            "Back-off restarting failed container",
+						"eventTime":       "2026-04-15T01:10:00.000000Z",
+						"deprecatedCount": 3,
+					},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/cluster/events?namespace=kube-system", "bootstrap-secret", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Events []model.ClusterEvent `json:"events"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if len(response.Events) != 1 {
+		t.Fatalf("expected one event, got %+v", response.Events)
+	}
+	if response.Events[0].Reason != "BackOff" || response.Events[0].ObjectName != "coredns-abc" || response.Events[0].Count != 3 {
+		t.Fatalf("unexpected fallback event %+v", response.Events[0])
+	}
+}
+
 func TestGetClusterWorkloadReturnsNodeSelectorAndPods(t *testing.T) {
 	t.Parallel()
 
@@ -413,5 +483,96 @@ func TestExecClusterPodRetriesTransientEOF(t *testing.T) {
 	}
 	if len(runner.calls) != 2 {
 		t.Fatalf("expected 2 runner calls, got %+v", runner.calls)
+	}
+}
+
+func TestProbeClusterWebSocketDistinguishesService101FromPublic502(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("WebSocket Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateImportedApp(
+		tenant.ID,
+		project.ID,
+		"demo",
+		"",
+		model.AppSpec{
+			RuntimeID: "runtime_managed_shared",
+			Replicas:  1,
+			Ports:     []int{3000},
+		},
+		model.AppSource{Type: model.AppSourceTypeUpload},
+		model.AppRoute{
+			Hostname:    "demo.apps.example.com",
+			PublicURL:   "http://public.example.test",
+			ServicePort: 3000,
+		},
+	)
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	serviceHost := appServiceHost(runtime.NamespaceForTenant(tenant.ID), runtime.RuntimeAppResourceName(app))
+	probeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ws" {
+			t.Fatalf("unexpected probe path %q", r.URL.Path)
+		}
+		if got := strings.TrimSpace(r.Header.Get("Upgrade")); !strings.EqualFold(got, "websocket") {
+			t.Fatalf("expected websocket upgrade header, got %q", got)
+		}
+		switch strings.Split(r.Host, ":")[0] {
+		case serviceHost:
+			w.Header().Set("Connection", "Upgrade")
+			w.Header().Set("Upgrade", "websocket")
+			w.Header().Set("Sec-WebSocket-Accept", clusterWebSocketSampleAck)
+			w.WriteHeader(http.StatusSwitchingProtocols)
+		case "public.example.test":
+			http.Error(w, "upstream app is unavailable", http.StatusBadGateway)
+		default:
+			t.Fatalf("unexpected probe host %q", r.Host)
+		}
+	}))
+	defer probeServer.Close()
+
+	transport := probeServer.Client().Transport.(*http.Transport).Clone()
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, probeServer.Listener.Addr().String())
+	}
+
+	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	server.appRequestHTTPClient = &http.Client{Transport: transport}
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/cluster/net/websocket", "bootstrap-secret", map[string]any{
+		"app_id": app.ID,
+		"path":   "/ws",
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	var response model.ClusterWebSocketProbeResult
+	mustDecodeJSON(t, recorder, &response)
+	if response.ConclusionCode != "public_route_502_service_ok" {
+		t.Fatalf("unexpected conclusion %+v", response)
+	}
+	if !response.Service.Upgraded || response.Service.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("expected direct service upgrade, got %+v", response.Service)
+	}
+	if response.PublicRoute.Upgraded || response.PublicRoute.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected public route 502, got %+v", response.PublicRoute)
+	}
+	if !strings.Contains(response.PublicRoute.BodyPreview, "upstream app is unavailable") {
+		t.Fatalf("expected public route body preview, got %+v", response.PublicRoute)
 	}
 }

@@ -3983,6 +3983,106 @@ func TestDeleteProjectConflictsUntilAppDeleted(t *testing.T) {
 	}
 }
 
+func TestRequestedProjectDeleteFinalizesAfterLastAppDelete(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Project Delete Request Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "stack", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
+		CPUMilliCores:    2000,
+		MemoryMebibytes:  4096,
+		StorageGibibytes: 30,
+	}); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
+	}
+
+	appResources := model.DefaultManagedAppResources()
+	app, err := s.CreateApp(tenant.ID, project.ID, "api", "", model.AppSpec{
+		Image:     "ghcr.io/example/api:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		Resources: &appResources,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	service, err := s.CreateBackingService(tenant.ID, project.ID, "main-db", "", model.BackingServiceSpec{
+		Postgres: &model.AppPostgresSpec{
+			Database: "demo",
+			Password: "secret",
+			User:     "demo",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create backing service: %v", err)
+	}
+	if _, err := s.BindBackingService(tenant.ID, app.ID, service.ID, "", nil); err != nil {
+		t.Fatalf("bind backing service: %v", err)
+	}
+
+	if _, alreadyRequested, err := s.MarkProjectDeleteRequested(project.ID); err != nil {
+		t.Fatalf("mark project delete requested: %v", err)
+	} else if alreadyRequested {
+		t.Fatal("expected first project delete request to be new")
+	}
+
+	if _, err := s.CreateApp(tenant.ID, project.ID, "worker", "", model.AppSpec{
+		Image:     "ghcr.io/example/worker:latest",
+		Ports:     []int{8081},
+		Replicas:  1,
+		Resources: &appResources,
+		RuntimeID: "runtime_managed_shared",
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict when creating app in deleting project, got %v", err)
+	}
+
+	if _, err := s.CreateBackingService(tenant.ID, project.ID, "cache", "", model.BackingServiceSpec{
+		Postgres: &model.AppPostgresSpec{
+			Database: "cache",
+			Password: "secret",
+			User:     "cache",
+		},
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict when creating backing service in deleting project, got %v", err)
+	}
+
+	deleteOp, err := s.CreateOperation(model.Operation{
+		TenantID: tenant.ID,
+		Type:     model.OperationTypeDelete,
+		AppID:    app.ID,
+	})
+	if err != nil {
+		t.Fatalf("create delete operation: %v", err)
+	}
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim delete operation: %v", err)
+	} else if !found {
+		t.Fatal("expected pending delete operation")
+	}
+	if _, err := s.CompleteManagedOperation(deleteOp.ID, "/tmp/api-delete.yaml", "deleted"); err != nil {
+		t.Fatalf("complete delete operation: %v", err)
+	}
+
+	if _, err := s.GetProject(project.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected project to be deleted after last app delete, got %v", err)
+	}
+	if _, err := s.GetBackingService(service.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected backing service to be deleted after project cleanup, got %v", err)
+	}
+}
+
 func TestPurgeAppRemovesImportedPlaceholderResources(t *testing.T) {
 	t.Parallel()
 

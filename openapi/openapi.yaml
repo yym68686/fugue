@@ -381,13 +381,25 @@ paths:
         - BearerAuth: []
       parameters:
         - $ref: "#/components/parameters/IdPathParam"
+        - in: query
+          name: cascade
+          required: false
+          description: When true, queue delete operations for every app in the project, remove any remaining unbound backing services, and delete the project automatically once the last resource is gone.
+          schema:
+            type: boolean
       responses:
         '200':
           description: Successful response
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ProjectResponse"
+                $ref: "#/components/schemas/ProjectDeleteResponse"
+        '202':
+          description: Delete requested and cleanup queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectDeleteResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/billing:
@@ -890,6 +902,29 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ClusterNetworkConnectResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/cluster/net/websocket:
+    post:
+      operationId: probeClusterWebSocket
+      summary: Probe Cluster WebSocket
+      tags: [Cluster]
+      x-fugue-handler: handleProbeClusterWebSocket
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClusterWebSocketProbeRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterWebSocketProbeResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/cluster/tls/probe:
@@ -2023,6 +2058,26 @@ paths:
             text/event-stream:
               schema:
                 type: string
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/runtime-pods:
+    get:
+      operationId: getAppRuntimePods
+      summary: Get App Runtime Pod Inventory
+      tags: [Apps]
+      x-fugue-handler: handleGetAppRuntimePods
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/ComponentQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppRuntimePodInventoryResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/env:
@@ -4330,6 +4385,21 @@ components:
       properties:
         project:
           $ref: "#/components/schemas/Project"
+    ProjectDeleteResponse:
+      type: object
+      additionalProperties: false
+      required: [project, deleted, delete_requested]
+      properties:
+        project:
+          $ref: "#/components/schemas/Project"
+        deleted:
+          type: boolean
+        delete_requested:
+          type: boolean
+        operations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Operation"
     ConsoleProjectBadge:
       type: object
       additionalProperties: false
@@ -5145,6 +5215,69 @@ components:
           format: date-time
         error:
           type: string
+    ClusterWebSocketProbeRequest:
+      type: object
+      additionalProperties: false
+      required: [app_id]
+      properties:
+        app_id:
+          type: string
+        path:
+          type: string
+        headers:
+          $ref: "#/components/schemas/StringMap"
+        timeout_ms:
+          type: integer
+          format: int32
+    ClusterWebSocketProbeAttempt:
+      type: object
+      additionalProperties: false
+      required: [target, upgraded, duration_ms]
+      properties:
+        target:
+          type: string
+        url:
+          type: string
+        status:
+          type: string
+        status_code:
+          type: integer
+          format: int32
+        upgraded:
+          type: boolean
+        duration_ms:
+          type: integer
+          format: int64
+        headers:
+          $ref: "#/components/schemas/StringMap"
+        body_preview:
+          type: string
+        error:
+          type: string
+    ClusterWebSocketProbeResponse:
+      type: object
+      additionalProperties: false
+      required: [app_id, app_name, path, route_configured, service, public_route, conclusion_code, conclusion, observed_at]
+      properties:
+        app_id:
+          type: string
+        app_name:
+          type: string
+        path:
+          type: string
+        route_configured:
+          type: boolean
+        service:
+          $ref: "#/components/schemas/ClusterWebSocketProbeAttempt"
+        public_route:
+          $ref: "#/components/schemas/ClusterWebSocketProbeAttempt"
+        conclusion_code:
+          type: string
+        conclusion:
+          type: string
+        observed_at:
+          type: string
+          format: date-time
     ClusterTLSPeerCertificate:
       type: object
       additionalProperties: false
@@ -5629,6 +5762,10 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/TemplateVariable"
+    ServiceEnvMap:
+      type: object
+      additionalProperties:
+        $ref: "#/components/schemas/StringMap"
     InspectGitHubTemplateResponse:
       type: object
       additionalProperties: false
@@ -5719,6 +5856,8 @@ components:
           type: string
         env:
           $ref: "#/components/schemas/StringMap"
+        service_env:
+          $ref: "#/components/schemas/ServiceEnvMap"
         config_content:
           type: string
         files:
@@ -5773,6 +5912,8 @@ components:
           type: string
         env:
           $ref: "#/components/schemas/StringMap"
+        service_env:
+          $ref: "#/components/schemas/ServiceEnvMap"
         config_content:
           type: string
         files:
@@ -6048,6 +6189,67 @@ components:
             type: string
         logs:
           type: string
+        warnings:
+          type: array
+          items:
+            type: string
+    AppRuntimePodGroup:
+      type: object
+      additionalProperties: false
+      required: [owner_kind, owner_name, pods]
+      properties:
+        owner_kind:
+          type: string
+        owner_name:
+          type: string
+        parent:
+          $ref: "#/components/schemas/ClusterPodOwner"
+        revision:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        desired_replicas:
+          type: integer
+          format: int32
+          nullable: true
+        ready_replicas:
+          type: integer
+          format: int32
+          nullable: true
+        available_replicas:
+          type: integer
+          format: int32
+          nullable: true
+        current_replicas:
+          type: integer
+          format: int32
+          nullable: true
+        containers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterWorkloadContainer"
+        pods:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterPod"
+    AppRuntimePodInventoryResponse:
+      type: object
+      additionalProperties: false
+      required: [component, namespace, selector, container, groups, warnings]
+      properties:
+        component:
+          type: string
+        namespace:
+          type: string
+        selector:
+          type: string
+        container:
+          type: string
+        groups:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppRuntimePodGroup"
         warnings:
           type: array
           items:

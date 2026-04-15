@@ -264,6 +264,13 @@ FOR UPDATE
 	if err != nil {
 		return model.Project{}, mapDBErr(err)
 	}
+	deleteRequested, err := s.pgProjectDeleteRequestedTx(ctx, tx, project.ID)
+	if err != nil {
+		return model.Project{}, err
+	}
+	if deleteRequested {
+		return model.Project{}, ErrConflict
+	}
 
 	changed := false
 	if name != nil {
@@ -324,6 +331,49 @@ WHERE id = $1
 	return project, nil
 }
 
+func (s *Store) pgMarkProjectDeleteRequested(id string) (model.Project, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Project{}, false, fmt.Errorf("begin request project delete transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	project, err := scanProject(tx.QueryRowContext(ctx, `
+SELECT id, tenant_id, name, slug, description, created_at, updated_at
+FROM fugue_projects
+WHERE id = $1
+FOR UPDATE
+`, id))
+	if err != nil {
+		return model.Project{}, false, mapDBErr(err)
+	}
+
+	alreadyRequested, err := s.pgProjectDeleteRequestedTx(ctx, tx, project.ID)
+	if err != nil {
+		return model.Project{}, false, err
+	}
+	if !alreadyRequested {
+		now := time.Now().UTC()
+		project.UpdatedAt = now
+		if _, err := tx.ExecContext(ctx, `
+UPDATE fugue_projects
+SET delete_requested_at = $2,
+	updated_at = $2
+WHERE id = $1
+`, project.ID, now); err != nil {
+			return model.Project{}, false, fmt.Errorf("mark project %s for delete: %w", project.ID, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return model.Project{}, false, fmt.Errorf("commit request project delete transaction: %w", err)
+	}
+	return project, alreadyRequested, nil
+}
+
 func (s *Store) pgDeleteProject(id string) (model.Project, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -344,14 +394,8 @@ FOR UPDATE
 		return model.Project{}, mapDBErr(err)
 	}
 
-	if live, err := s.pgProjectHasLiveResourcesTx(ctx, tx, project.ID); err != nil {
+	if err := s.pgDeleteProjectTx(ctx, tx, project); err != nil {
 		return model.Project{}, err
-	} else if live {
-		return model.Project{}, ErrConflict
-	}
-
-	if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_projects WHERE id = $1`, project.ID); err != nil {
-		return model.Project{}, fmt.Errorf("delete project %s: %w", project.ID, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return model.Project{}, fmt.Errorf("commit delete project transaction: %w", err)
@@ -2111,6 +2155,13 @@ func (s *Store) pgCreateApp(tenantID, projectID, name, description string, spec 
 	if !projectOK {
 		return model.App{}, ErrNotFound
 	}
+	deleteRequested, err := s.pgProjectDeleteRequestedTx(ctx, tx, projectID)
+	if err != nil {
+		return model.App{}, err
+	}
+	if deleteRequested {
+		return model.App{}, ErrConflict
+	}
 	if err := normalizeAppSpecResources(&spec); err != nil {
 		return model.App{}, err
 	}
@@ -2420,6 +2471,9 @@ func (s *Store) pgPurgeApp(id string) (model.App, error) {
 		return model.App{}, fmt.Errorf("delete app %s: %w", app.ID, err)
 	}
 	if err := s.pgDeleteAppDomainsByAppTx(ctx, tx, app.ID); err != nil {
+		return model.App{}, err
+	}
+	if err := s.pgTryFinalizeRequestedProjectDeleteTx(ctx, tx, app.ProjectID); err != nil {
 		return model.App{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -3388,6 +3442,9 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string,
 		if err := s.pgDeleteOwnedBackingServicesByAppTx(ctx, tx, app.ID); err != nil {
 			return model.Operation{}, err
 		}
+		if err := s.pgTryFinalizeRequestedProjectDeleteTx(ctx, tx, app.ProjectID); err != nil {
+			return model.Operation{}, err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -3660,6 +3717,33 @@ SELECT EXISTS (
 	return exists, nil
 }
 
+func (s *Store) pgProjectDeleteRequestedTx(ctx context.Context, tx *sql.Tx, projectID string) (bool, error) {
+	var deleteRequestedAt sql.NullTime
+	if err := tx.QueryRowContext(ctx, `
+SELECT delete_requested_at
+FROM fugue_projects
+WHERE id = $1
+`, projectID).Scan(&deleteRequestedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read project delete request for %s: %w", projectID, err)
+	}
+	return deleteRequestedAt.Valid, nil
+}
+
+func (s *Store) pgDeleteProjectTx(ctx context.Context, tx *sql.Tx, project model.Project) error {
+	if live, err := s.pgProjectHasLiveResourcesTx(ctx, tx, project.ID); err != nil {
+		return err
+	} else if live {
+		return ErrConflict
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_projects WHERE id = $1`, project.ID); err != nil {
+		return fmt.Errorf("delete project %s: %w", project.ID, err)
+	}
+	return nil
+}
+
 func (s *Store) pgProjectHasLiveResourcesTx(ctx context.Context, tx *sql.Tx, projectID string) (bool, error) {
 	var hasApps bool
 	if err := tx.QueryRowContext(ctx, `
@@ -3687,6 +3771,69 @@ SELECT EXISTS (
 		return false, fmt.Errorf("check backing services for project %s: %w", projectID, err)
 	}
 	return hasServices, nil
+}
+
+func (s *Store) pgDeleteUnboundBackingServicesByProjectTx(ctx context.Context, tx *sql.Tx, projectID string) error {
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM fugue_backing_services AS service
+WHERE service.project_id = $1
+  AND NOT EXISTS (
+  	SELECT 1
+  	FROM fugue_service_bindings AS binding
+  	WHERE binding.service_id = service.id
+  )
+`, projectID); err != nil {
+		return fmt.Errorf("delete unbound backing services for project %s: %w", projectID, err)
+	}
+	return nil
+}
+
+func (s *Store) pgTryFinalizeRequestedProjectDeleteTx(ctx context.Context, tx *sql.Tx, projectID string) error {
+	project, err := scanProject(tx.QueryRowContext(ctx, `
+SELECT id, tenant_id, name, slug, description, created_at, updated_at
+FROM fugue_projects
+WHERE id = $1
+FOR UPDATE
+`, projectID))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return mapDBErr(err)
+	}
+	deleteRequested, err := s.pgProjectDeleteRequestedTx(ctx, tx, project.ID)
+	if err != nil {
+		return err
+	}
+	if !deleteRequested {
+		return nil
+	}
+
+	var hasLiveApps bool
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+	SELECT 1
+	FROM fugue_apps
+	WHERE project_id = $1
+	  AND lower(COALESCE(status_json->>'phase', '')) <> 'deleted'
+)
+`, project.ID).Scan(&hasLiveApps); err != nil {
+		return fmt.Errorf("check live apps for requested project delete %s: %w", project.ID, err)
+	}
+	if hasLiveApps {
+		return nil
+	}
+
+	if err := s.pgDeleteUnboundBackingServicesByProjectTx(ctx, tx, project.ID); err != nil {
+		return err
+	}
+	if live, err := s.pgProjectHasLiveResourcesTx(ctx, tx, project.ID); err != nil {
+		return err
+	} else if live {
+		return nil
+	}
+
+	return s.pgDeleteProjectTx(ctx, tx, project)
 }
 
 func (s *Store) pgRuntimeVisibleToTenantTx(ctx context.Context, tx *sql.Tx, runtimeID, tenantID string) (bool, error) {

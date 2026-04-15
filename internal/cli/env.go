@@ -123,6 +123,7 @@ Inline values override keys loaded from --file when both are provided.
 					return err
 				}
 				response.Env = latest.Env
+				response.Entries = latest.Entries
 			}
 			return c.renderEnvCommandResult(envCommandResult{
 				AppName:        app.Name,
@@ -175,6 +176,7 @@ func (c *CLI) newEnvRemoveCommand() *cobra.Command {
 					return err
 				}
 				response.Env = latest.Env
+				response.Entries = latest.Entries
 			}
 			return c.renderEnvCommandResult(envCommandResult{
 				AppName:        app.Name,
@@ -314,24 +316,17 @@ func normalizeEnvEntries(values map[string]string, entries []model.AppEnvEntry) 
 
 func writeEnvEntryTable(w io.Writer, entries []model.AppEnvEntry) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "KEY\tVALUE\tSOURCE\tOVERRIDES"); err != nil {
+	if _, err := fmt.Fprintln(tw, "KEY\tVALUE\tSOURCE\tREF\tOVERRIDES"); err != nil {
 		return err
 	}
 	for _, entry := range entries {
-		source := strings.TrimSpace(entry.Source)
-		if sourceRef := strings.TrimSpace(entry.SourceRef); sourceRef != "" {
-			if source == "" {
-				source = sourceRef
-			} else {
-				source = source + ":" + sourceRef
-			}
-		}
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%s\n",
+			"%s\t%s\t%s\t%s\t%s\n",
 			entry.Key,
 			formatInlineTableValue(entry.Value),
-			source,
+			strings.TrimSpace(entry.Source),
+			strings.TrimSpace(entry.SourceRef),
 			strings.Join(entry.Overrides, ", "),
 		); err != nil {
 			return err

@@ -460,6 +460,95 @@ func TestImportResolvedGitHubTopologyAppliesPersistentStorageSeedFileOverrides(t
 	}
 }
 
+func TestImportResolvedGitHubTopologyAppliesServiceEnvOverridesPerService(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Service Env Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	raiseManagedTestCap(t, s, tenant.ID)
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		AppBaseDomain:    "apps.example.com",
+		RegistryPushBase: "registry.internal.example",
+	})
+
+	result, err := server.importResolvedGitHubTopology(
+		model.Principal{ActorType: model.ActorTypeAPIKey, ActorID: "key"},
+		tenant.ID,
+		importGitHubRequest{
+			ProjectID: project.ID,
+			RepoURL:   "https://github.com/example/demo",
+			Env: map[string]string{
+				"SHARED_MODE": "all-services",
+			},
+			ServiceEnv: map[string]map[string]string{
+				"gateway": {
+					"SHARED_MODE":  "gateway-only",
+					"GATEWAY_FLAG": "1",
+				},
+				"runtime": {
+					"RUNTIME_FLAG": "1",
+				},
+			},
+		},
+		"runtime_managed_shared",
+		1,
+		"Imported from GitHub",
+		"demo",
+		sourceimport.NormalizedTopology{Services: []sourceimport.ComposeService{
+			{
+				Name:         "gateway",
+				Kind:         sourceimport.ComposeServiceKindApp,
+				ServiceType:  sourceimport.ServiceTypeApp,
+				Image:        "ghcr.io/example/gateway:latest",
+				InternalPort: 8080,
+				Published:    true,
+			},
+			{
+				Name:        "runtime",
+				Kind:        sourceimport.ComposeServiceKindApp,
+				ServiceType: sourceimport.ServiceTypeApp,
+				Image:       "ghcr.io/example/runtime:latest",
+			},
+		}},
+	)
+	if err != nil {
+		t.Fatalf("import resolved topology: %v", err)
+	}
+
+	appsByService := map[string]model.App{}
+	for _, app := range result.Apps {
+		appsByService[app.Source.ComposeService] = app
+	}
+
+	gateway := appsByService["gateway"]
+	if gateway.Spec.Env["SHARED_MODE"] != "gateway-only" || gateway.Spec.Env["GATEWAY_FLAG"] != "1" {
+		t.Fatalf("expected gateway-specific env overrides, got %+v", gateway.Spec.Env)
+	}
+	if _, ok := gateway.Spec.Env["RUNTIME_FLAG"]; ok {
+		t.Fatalf("expected runtime override to stay off gateway app, got %+v", gateway.Spec.Env)
+	}
+
+	runtimeApp := appsByService["runtime"]
+	if runtimeApp.Spec.Env["SHARED_MODE"] != "all-services" || runtimeApp.Spec.Env["RUNTIME_FLAG"] != "1" {
+		t.Fatalf("expected runtime app to keep global env plus runtime override, got %+v", runtimeApp.Spec.Env)
+	}
+	if _, ok := runtimeApp.Spec.Env["GATEWAY_FLAG"]; ok {
+		t.Fatalf("expected gateway override to stay off runtime app, got %+v", runtimeApp.Spec.Env)
+	}
+}
+
 func stringsContain(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {

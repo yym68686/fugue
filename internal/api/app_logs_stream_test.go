@@ -14,6 +14,8 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
+
+	appsv1 "k8s.io/api/apps/v1"
 )
 
 func TestRuntimeLogsStreamReturnsSSESnapshot(t *testing.T) {
@@ -272,6 +274,7 @@ type fakeAppLogsClient struct {
 	jobsBySelector map[string][]kubeJobInfo
 	jobByName      map[string]kubeJobInfo
 	podsBySelector map[string][]kubePodInfo
+	replicaSets    map[string][]appsv1.ReplicaSet
 	logLines       map[string][]string
 }
 
@@ -280,6 +283,7 @@ func newFakeAppLogsClient() *fakeAppLogsClient {
 		jobsBySelector: map[string][]kubeJobInfo{},
 		jobByName:      map[string]kubeJobInfo{},
 		podsBySelector: map[string][]kubePodInfo{},
+		replicaSets:    map[string][]appsv1.ReplicaSet{},
 		logLines:       map[string][]string{},
 	}
 }
@@ -298,6 +302,12 @@ func (f *fakeAppLogsClient) setPods(selector string, pods []kubePodInfo) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.podsBySelector[selector] = append([]kubePodInfo(nil), pods...)
+}
+
+func (f *fakeAppLogsClient) setReplicaSets(selector string, replicaSets []appsv1.ReplicaSet) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.replicaSets[selector] = append([]appsv1.ReplicaSet(nil), replicaSets...)
 }
 
 func (f *fakeAppLogsClient) setLogLines(namespace, podName, container string, previous bool, lines ...string) {
@@ -326,6 +336,12 @@ func (f *fakeAppLogsClient) listPodsBySelector(ctx context.Context, namespace, s
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]kubePodInfo(nil), f.podsBySelector[selector]...), nil
+}
+
+func (f *fakeAppLogsClient) listReplicaSetsBySelector(ctx context.Context, namespace, selector string) ([]appsv1.ReplicaSet, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]appsv1.ReplicaSet(nil), f.replicaSets[selector]...), nil
 }
 
 func (f *fakeAppLogsClient) readPodLogs(ctx context.Context, namespace, podName string, opts kubeLogOptions) (string, error) {
@@ -376,7 +392,8 @@ func fakePod(name, phase string, createdAt time.Time, container string) kubePodI
 	pod.Metadata.Name = name
 	pod.Metadata.CreationTimestamp = createdAt
 	pod.Spec.Containers = []struct {
-		Name string `json:"name"`
+		Name  string `json:"name"`
+		Image string `json:"image,omitempty"`
 	}{{Name: container}}
 	pod.Status.Phase = phase
 	return pod

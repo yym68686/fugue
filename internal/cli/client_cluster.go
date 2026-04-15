@@ -63,6 +63,13 @@ type clusterExecResponse struct {
 	AttemptCount int      `json:"attempt_count,omitempty"`
 }
 
+type clusterWebSocketProbeRequest struct {
+	AppID     string            `json:"app_id"`
+	Path      string            `json:"path,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
+	TimeoutMS int               `json:"timeout_ms,omitempty"`
+}
+
 func (c *Client) ListClusterPods(opts clusterPodsOptions) ([]model.ClusterPod, error) {
 	query := url.Values{}
 	if value := strings.TrimSpace(opts.Namespace); value != "" {
@@ -185,6 +192,17 @@ func (c *Client) ConnectClusterNetwork(target string, timeout time.Duration) (mo
 	var response model.ClusterNetworkConnectResult
 	if err := c.doJSON(http.MethodGet, "/v1/cluster/net/connect?"+query.Encode(), nil, &response); err != nil {
 		return model.ClusterNetworkConnectResult{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) ProbeClusterWebSocket(req clusterWebSocketProbeRequest, timeout time.Duration) (model.ClusterWebSocketProbeResult, error) {
+	if req.TimeoutMS == 0 && timeout > 0 {
+		req.TimeoutMS = int(timeout.Milliseconds())
+	}
+	var response model.ClusterWebSocketProbeResult
+	if err := c.doJSON(http.MethodPost, "/v1/cluster/net/websocket", req, &response); err != nil {
+		return model.ClusterWebSocketProbeResult{}, err
 	}
 	return response, nil
 }

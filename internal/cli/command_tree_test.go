@@ -73,6 +73,8 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"fugue admin cluster pods --namespace kube-system",
 		"fugue admin cluster workload show kube-system deployment coredns",
 		"fugue admin cluster dns resolve api.github.com --server 10.43.0.10",
+		"fugue admin cluster net websocket my-app --path /ws",
+		"fugue deploy github owner/repo --service-env-file gateway=.env.gateway --service-env-file runtime=.env.runtime",
 		"fugue api request GET /v1/apps",
 		"fugue diagnose timing -- app overview my-app",
 		"fugue admin users ls",
@@ -861,6 +863,14 @@ func TestRunDeployGitHubIncludesIdempotencyAndSeedFiles(t *testing.T) {
 	if err := os.WriteFile(seedPath, []byte("create table demo();\n"), 0o644); err != nil {
 		t.Fatalf("write seed file: %v", err)
 	}
+	gatewayEnvPath := filepath.Join(t.TempDir(), "gateway.env")
+	if err := os.WriteFile(gatewayEnvPath, []byte("GATEWAY_ONLY=1\nSHARED_MODE=gateway\n"), 0o644); err != nil {
+		t.Fatalf("write gateway env file: %v", err)
+	}
+	runtimeEnvPath := filepath.Join(t.TempDir(), "runtime.env")
+	if err := os.WriteFile(runtimeEnvPath, []byte("RUNTIME_ONLY=1\n"), 0o644); err != nil {
+		t.Fatalf("write runtime env file: %v", err)
+	}
 
 	var gotRequest importGitHubRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -891,6 +901,8 @@ func TestRunDeployGitHubIncludesIdempotencyAndSeedFiles(t *testing.T) {
 		"deploy", "github", "example/demo",
 		"--idempotency-key", "import-123",
 		"--seed-file", "web:/workspace/seed.sql=" + seedPath,
+		"--service-env-file", "gateway=" + gatewayEnvPath,
+		"--service-env-file", "runtime=" + runtimeEnvPath,
 		"--wait=false",
 	}, &stdout, &stderr)
 	if err != nil {
@@ -908,6 +920,15 @@ func TestRunDeployGitHubIncludesIdempotencyAndSeedFiles(t *testing.T) {
 	}
 	if gotRequest.PersistentStorageSeedFiles[0].SeedContent != "create table demo();\n" {
 		t.Fatalf("unexpected seed content %+v", gotRequest.PersistentStorageSeedFiles[0])
+	}
+	if got := gotRequest.ServiceEnv["gateway"]["GATEWAY_ONLY"]; got != "1" {
+		t.Fatalf("expected gateway service env override, got %+v", gotRequest.ServiceEnv)
+	}
+	if got := gotRequest.ServiceEnv["gateway"]["SHARED_MODE"]; got != "gateway" {
+		t.Fatalf("expected gateway shared mode override, got %+v", gotRequest.ServiceEnv)
+	}
+	if got := gotRequest.ServiceEnv["runtime"]["RUNTIME_ONLY"]; got != "1" {
+		t.Fatalf("expected runtime service env override, got %+v", gotRequest.ServiceEnv)
 	}
 	out := stdout.String()
 	for _, want := range []string{
@@ -1171,6 +1192,8 @@ func TestRunAppOverviewAggregatesRelatedState(t *testing.T) {
 			_, _ = w.Write([]byte(`{"operations":[{"id":"op_123","tenant_id":"tenant_123","app_id":"app_123","type":"deploy","status":"completed","execution_mode":"managed","requested_by_type":"api-key","requested_by_id":"key_123","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/images":
 			_, _ = w.Write([]byte(`{"app_id":"app_123","registry_configured":true,"summary":{"version_count":1,"current_version_count":1,"stale_version_count":0,"reclaimable_size_bytes":0},"versions":[{"image_ref":"registry.example.com/demo:abc123","status":"ready","current":true,"size_bytes":1048576}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-pods":
+			_, _ = w.Write([]byte(`{"component":"app","namespace":"tenant-123","selector":"app.kubernetes.io/name=demo","container":"demo","groups":[{"owner_kind":"ReplicaSet","owner_name":"demo-8c9f6d74f7","parent":{"kind":"Deployment","name":"demo"},"revision":"13","desired_replicas":1,"current_replicas":1,"ready_replicas":1,"available_replicas":1,"containers":[{"name":"demo","image":"registry.example.com/demo:abc123"}],"pods":[{"namespace":"tenant-123","name":"demo-8c9f6d74f7-abc12","phase":"Running","ready":true,"node_name":"gcp1","containers":[{"name":"demo","image":"registry.example.com/demo:abc123","ready":true,"restart_count":0,"state":"running"}]}],"warnings":[]}]}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -1189,7 +1212,7 @@ func TestRunAppOverviewAggregatesRelatedState(t *testing.T) {
 	}
 
 	out := stdout.String()
-	for _, want := range []string{"app=demo", "project=demo", "runtime=shared", "domains", "www.example.com", "services", "postgres", "images", "versions=1", "operations", "op_123"} {
+	for _, want := range []string{"app=demo", "project=demo", "runtime=shared", "domains", "www.example.com", "services", "postgres", "images", "versions=1", "pods", "demo-8c9f6d74f7", "operations", "op_123"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
@@ -1356,7 +1379,7 @@ func TestRunEnvListTextShowsSources(t *testing.T) {
 	}
 
 	out := stdout.String()
-	for _, want := range []string{"app=demo", "env_count=2", "KEY", "VALUE", "SOURCE", "DB_HOST", "app:spec.env", "binding:postgres"} {
+	for _, want := range []string{"app=demo", "env_count=2", "KEY", "VALUE", "SOURCE", "REF", "DB_HOST", "app", "spec.env", "binding", "postgres"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
@@ -1406,6 +1429,105 @@ func TestRunAppDatabaseQueryByNameUsesSemanticCommand(t *testing.T) {
 	}
 	out := stdout.String()
 	for _, want := range []string{"database=demo", "host=db.internal", "read_only=true", "status", "ok"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAppLogsQueryBuildsStructuredSQL(t *testing.T) {
+	t.Parallel()
+
+	var gotBody struct {
+		SQL       string `json:"sql"`
+		MaxRows   int    `json:"max_rows"`
+		TimeoutMS int    `json:"timeout_ms"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/database/query":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode log query body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"database":"demo","host":"db.internal","user":"demo","columns":[{"name":"created_at","database_type":"TIMESTAMPTZ"},{"name":"status","database_type":"TEXT"}],"rows":[{"created_at":"2026-04-15T01:00:00Z","status":"500"}],"row_count":1,"max_rows":50,"read_only":true,"duration_ms":5}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "logs", "query", "demo",
+		"--table", "gateway_request_logs",
+		"--since", "2026-04-15T00:00:00Z",
+		"--until", "2026-04-15T02:00:00Z",
+		"--match", "status=500",
+		"--contains", "path=/admin",
+		"--column", "created_at",
+		"--column", "status",
+		"--limit", "50",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app logs query: %v", err)
+	}
+
+	for _, want := range []string{
+		`from "gateway_request_logs"`,
+		`"created_at" >= '2026-04-15T00:00:00Z'::timestamptz`,
+		`"created_at" <= '2026-04-15T02:00:00Z'::timestamptz`,
+		`"status" = '500'`,
+		`"path"::text ILIKE '%/admin%'`,
+		`order by "created_at" DESC limit 50`,
+	} {
+		if !strings.Contains(gotBody.SQL, want) {
+			t.Fatalf("expected generated SQL to contain %q, got %q", want, gotBody.SQL)
+		}
+	}
+	if gotBody.MaxRows != 50 || gotBody.TimeoutMS <= 0 {
+		t.Fatalf("expected limit/timeout to be forwarded, got %+v", gotBody)
+	}
+	out := stdout.String()
+	for _, want := range []string{"database=demo", "row_count=1", "created_at", "500"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAppLogsPodsShowsRolloutGroups(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-pods":
+			_, _ = w.Write([]byte(`{"component":"app","namespace":"tenant-123","selector":"app.kubernetes.io/name=demo","container":"demo","groups":[{"owner_kind":"ReplicaSet","owner_name":"demo-8c9f6d74f7","parent":{"kind":"Deployment","name":"demo"},"revision":"13","desired_replicas":1,"current_replicas":1,"ready_replicas":1,"available_replicas":1,"containers":[{"name":"demo","image":"ghcr.io/example/demo:v2"}],"pods":[{"namespace":"tenant-123","name":"demo-8c9f6d74f7-abc12","phase":"Running","ready":true,"node_name":"gcp1","owner":{"kind":"ReplicaSet","name":"demo-8c9f6d74f7"},"containers":[{"name":"demo","image":"ghcr.io/example/demo:v2","ready":true,"restart_count":0,"state":"running"}]}],"warnings":[]},{"owner_kind":"ReplicaSet","owner_name":"demo-7b7d9f8c5d","parent":{"kind":"Deployment","name":"demo"},"revision":"12","desired_replicas":0,"current_replicas":0,"ready_replicas":0,"available_replicas":0,"containers":[{"name":"demo","image":"ghcr.io/example/demo:v1"}],"pods":[],"warnings":[]}]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "logs", "pods", "demo",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app logs pods: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"component=app", "group_count=2", "owner=ReplicaSet/demo-8c9f6d74f7", "revision=13", "demo-8c9f6d74f7-abc12", "owner=ReplicaSet/demo-7b7d9f8c5d", "revision=12"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
@@ -2216,6 +2338,70 @@ func TestRunAdminClusterExecForwardsRetryFlags(t *testing.T) {
 	}
 }
 
+func TestRunAdminClusterNetWebSocketResolvesAppAndForwardsHeaders(t *testing.T) {
+	t.Parallel()
+
+	var gotBody clusterWebSocketProbeRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","route":{"public_url":"https://demo.apps.example.com"},"spec":{"runtime_id":"runtime_managed_shared","replicas":1,"ports":[3000]},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/cluster/net/websocket":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode websocket probe body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{
+  "app_id":"app_123",
+  "app_name":"demo",
+  "path":"/ws",
+  "route_configured":true,
+  "service":{"target":"service","url":"http://demo.svc.cluster.local:3000/ws","status":"101 Switching Protocols","status_code":101,"upgraded":true,"duration_ms":12},
+  "public_route":{"target":"public_route","url":"https://demo.apps.example.com/ws","status":"502 Bad Gateway","status_code":502,"upgraded":false,"duration_ms":18,"body_preview":"upstream app is unavailable"},
+  "conclusion_code":"public_route_502_service_ok",
+  "conclusion":"WebSocket handshake succeeded directly against the app service, but the public route returned 502. The proxy layer is failing before the request reaches the app.",
+  "observed_at":"2026-04-15T00:00:00Z"
+}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"admin", "cluster", "net", "websocket", "demo",
+		"--path", "/ws",
+		"--header", "Cookie=session=abc",
+		"--timeout", "12s",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run admin cluster net websocket: %v", err)
+	}
+
+	if gotBody.AppID != "app_123" || gotBody.Path != "/ws" || gotBody.TimeoutMS != 12000 {
+		t.Fatalf("unexpected websocket probe request %+v", gotBody)
+	}
+	if gotBody.Headers["Cookie"] != "session=abc" {
+		t.Fatalf("expected header to be forwarded, got %+v", gotBody.Headers)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"conclusion_code=public_route_502_service_ok",
+		"service",
+		"status_code=101",
+		"public_route",
+		"status_code=502",
+		"body_preview=upstream app is unavailable",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
 func newAppOverviewSecretFixtureServer(t *testing.T) *httptest.Server {
 	t.Helper()
 
@@ -2233,6 +2419,8 @@ func newAppOverviewSecretFixtureServer(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"operations":[{"id":"op_123","tenant_id":"tenant_123","app_id":"app_123","type":"deploy","status":"completed","execution_mode":"managed","requested_by_type":"api-key","requested_by_id":"key_123","desired_source":{"type":"github-private","repo_url":"https://github.com/acme/demo","repo_auth_token":"operation-repo-token-123"},"desired_spec":{"image":"ghcr.io/acme/demo:next","runtime_id":"runtime_managed_shared","replicas":1,"env":{"OP_SECRET":"operation-secret-123"},"postgres":{"database":"demo","user":"demo","password":"operation-db-password-123"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/images":
 			_, _ = w.Write([]byte(`{"app_id":"app_123","registry_configured":true,"summary":{"version_count":1,"current_version_count":1,"stale_version_count":0,"reclaimable_size_bytes":0},"versions":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-pods":
+			_, _ = w.Write([]byte(`{"component":"app","namespace":"tenant-123","selector":"app.kubernetes.io/name=demo","container":"demo","groups":[{"owner_kind":"ReplicaSet","owner_name":"demo-8c9f6d74f7","parent":{"kind":"Deployment","name":"demo"},"revision":"13","desired_replicas":1,"current_replicas":1,"ready_replicas":1,"available_replicas":1,"containers":[{"name":"demo","image":"ghcr.io/acme/demo:latest"}],"pods":[{"namespace":"tenant-123","name":"demo-8c9f6d74f7-abc12","phase":"Running","ready":true,"node_name":"gcp1","owner":{"kind":"ReplicaSet","name":"demo-8c9f6d74f7"},"containers":[{"name":"demo","image":"ghcr.io/acme/demo:latest","ready":true,"restart_count":0,"state":"running"}]}],"warnings":[]}],"warnings":[]}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}

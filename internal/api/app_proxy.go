@@ -51,18 +51,39 @@ func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) boo
 		http.Error(w, "invalid app target", http.StatusInternalServerError)
 		return true
 	}
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		req.Host = target.Host
-		req.Header.Set("X-Forwarded-Host", host)
-	}
-	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
-		http.Error(rw, "upstream app is unavailable", http.StatusBadGateway)
-	}
+	proxy := s.newAppReverseProxy(host, target, app)
 	proxy.ServeHTTP(w, r)
 	return true
+}
+
+func (s *Server) newAppReverseProxy(host string, target *url.URL, app model.App) *httputil.ReverseProxy {
+	transport := newDefaultAppProxyTransport()
+	if s != nil && s.appProxyTransport != nil {
+		transport = s.appProxyTransport
+	}
+	return &httputil.ReverseProxy{
+		Rewrite: func(req *httputil.ProxyRequest) {
+			req.SetURL(target)
+			req.SetXForwarded()
+			req.Out.Host = target.Host
+			req.Out.Header.Set("X-Forwarded-Host", host)
+		},
+		Transport: transport,
+		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
+			if s != nil && s.log != nil {
+				s.log.Printf(
+					"app proxy failed app=%s host=%s target=%s method=%s path=%s: %v",
+					app.ID,
+					host,
+					target.String(),
+					req.Method,
+					req.URL.RequestURI(),
+					proxyErr,
+				)
+			}
+			http.Error(rw, "upstream app is unavailable", http.StatusBadGateway)
+		},
+	}
 }
 
 func (s *Server) loadAppByHostnameCached(host string) (model.App, error) {
@@ -147,4 +168,21 @@ func appServiceHost(namespace, serviceName string) string {
 		return serviceName
 	}
 	return serviceName + "." + namespace + ".svc.cluster.local"
+}
+
+func newDefaultAppProxyTransport() http.RoundTripper {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return &http.Transport{
+			Proxy:               nil,
+			ForceAttemptHTTP2:   false,
+			MaxIdleConns:        100,
+			IdleConnTimeout:     90 * time.Second,
+			TLSHandshakeTimeout: 10 * time.Second,
+		}
+	}
+	transport := base.Clone()
+	transport.Proxy = nil
+	transport.ForceAttemptHTTP2 = false
+	return transport
 }

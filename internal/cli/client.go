@@ -16,11 +16,13 @@ import (
 )
 
 type Client struct {
-	baseURL    string
-	token      string
-	cookie     string
-	httpClient *http.Client
-	observer   requestObserver
+	baseURL        string
+	token          string
+	cookie         string
+	httpClient     *http.Client
+	observer       requestObserver
+	readRetryCount int
+	readRetryDelay time.Duration
 }
 
 type clientOptions struct {
@@ -28,6 +30,8 @@ type clientOptions struct {
 	Observer       requestObserver
 	RequireToken   bool
 	RequestTimeout time.Duration
+	ReadRetryCount int
+	ReadRetryDelay time.Duration
 }
 
 type importProjectRequest struct {
@@ -66,6 +70,7 @@ type importUploadRequest struct {
 	DockerfilePath    string                          `json:"dockerfile_path,omitempty"`
 	BuildContextDir   string                          `json:"build_context_dir,omitempty"`
 	Env               map[string]string               `json:"env,omitempty"`
+	ServiceEnv        map[string]map[string]string    `json:"service_env,omitempty"`
 	ConfigContent     string                          `json:"config_content,omitempty"`
 	Files             []model.AppFile                 `json:"files,omitempty"`
 	StartupCommand    *string                         `json:"startup_command,omitempty"`
@@ -92,6 +97,7 @@ type importGitHubRequest struct {
 	DockerfilePath             string                                  `json:"dockerfile_path,omitempty"`
 	BuildContextDir            string                                  `json:"build_context_dir,omitempty"`
 	Env                        map[string]string                       `json:"env,omitempty"`
+	ServiceEnv                 map[string]map[string]string            `json:"service_env,omitempty"`
 	ConfigContent              string                                  `json:"config_content,omitempty"`
 	Files                      []model.AppFile                         `json:"files,omitempty"`
 	StartupCommand             *string                                 `json:"startup_command,omitempty"`
@@ -306,6 +312,17 @@ func newClientWithOptions(baseURL, token string, opts clientOptions) (*Client, e
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
+	readRetryCount := opts.ReadRetryCount
+	if readRetryCount == 0 {
+		readRetryCount = 2
+	}
+	if readRetryCount < 0 {
+		readRetryCount = 0
+	}
+	readRetryDelay := opts.ReadRetryDelay
+	if readRetryDelay <= 0 {
+		readRetryDelay = 250 * time.Millisecond
+	}
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
@@ -313,7 +330,9 @@ func newClientWithOptions(baseURL, token string, opts clientOptions) (*Client, e
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
-		observer: opts.Observer,
+		observer:       opts.Observer,
+		readRetryCount: readRetryCount,
+		readRetryDelay: readRetryDelay,
 	}, nil
 }
 

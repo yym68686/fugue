@@ -304,6 +304,9 @@ func (s *Store) UpdateProject(id string, name, description *string) (model.Proje
 		if index < 0 {
 			return ErrNotFound
 		}
+		if projectDeleteRequested(state, id) {
+			return ErrConflict
+		}
 		project = state.Projects[index]
 		changed := false
 
@@ -381,6 +384,37 @@ func (s *Store) CreateProject(tenantID, name, description string) (model.Project
 	return project, err
 }
 
+func (s *Store) MarkProjectDeleteRequested(id string) (model.Project, bool, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.Project{}, false, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgMarkProjectDeleteRequested(id)
+	}
+
+	var (
+		alreadyRequested bool
+		project          model.Project
+	)
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findProject(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		project = state.Projects[index]
+		alreadyRequested = projectDeleteRequested(state, id)
+		if !alreadyRequested {
+			now := time.Now().UTC()
+			markProjectDeleteRequested(state, id, now)
+			project.UpdatedAt = now
+			state.Projects[index] = project
+		}
+		return nil
+	})
+	return project, alreadyRequested, err
+}
+
 func (s *Store) DeleteProject(id string) (model.Project, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -392,21 +426,14 @@ func (s *Store) DeleteProject(id string) (model.Project, error) {
 
 	var project model.Project
 	err := s.withLockedState(true, func(state *model.State) error {
-		index := findProject(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
 		if projectHasLiveResources(state, id) {
 			return ErrConflict
 		}
-
-		project = state.Projects[index]
-		appIDs := appIDsForProject(state.Apps, id)
-		state.Projects = append(state.Projects[:index], state.Projects[index+1:]...)
-		state.Apps = deleteAppsByProject(state.Apps, id)
-		state.ServiceBindings = deleteServiceBindingsByAppIDs(state.ServiceBindings, appIDs)
-		state.BackingServices = deleteBackingServicesByProject(state.BackingServices, id)
-		state.Operations = deleteOperationsByAppIDs(state.Operations, appIDs)
+		deletedProject, err := deleteProjectFromState(state, id)
+		if err != nil {
+			return err
+		}
+		project = deletedProject
 		return nil
 	})
 	return project, err
@@ -2121,7 +2148,7 @@ func (s *Store) PurgeApp(id string) (model.App, error) {
 		state.ServiceBindings = deleteServiceBindingsByApp(state.ServiceBindings, id)
 		state.BackingServices = deleteOwnedBackingServicesByApp(state.BackingServices, id)
 		state.Operations = deleteOperationsByApp(state.Operations, id)
-		return nil
+		return maybeFinalizeRequestedProjectDelete(state, app.ProjectID)
 	})
 	return app, err
 }
@@ -2155,6 +2182,9 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 		}
 		if !projectBelongsToTenant(state, projectID, tenantID) {
 			return ErrNotFound
+		}
+		if projectDeleteRequested(state, projectID) {
+			return ErrConflict
 		}
 		if !runtimeVisibleToTenant(state, spec.RuntimeID, tenantID) {
 			return ErrNotFound
@@ -2733,10 +2763,17 @@ func (s *Store) completeOperation(id, runtimeID, manifestPath, message string, d
 		if err := applyOperationToApp(state, &state.Operations[index]); err != nil {
 			return err
 		}
-		if state.Operations[index].Type == model.OperationTypeDelete {
-			deleteAppDomainsByApp(state, state.Operations[index].AppID)
+		currentOp := state.Operations[index]
+		if currentOp.Type == model.OperationTypeDelete {
+			deleteAppDomainsByApp(state, currentOp.AppID)
+			appIndex := findApp(state, currentOp.AppID)
+			if appIndex >= 0 {
+				if err := maybeFinalizeRequestedProjectDelete(state, state.Apps[appIndex].ProjectID); err != nil {
+					return err
+				}
+			}
 		}
-		op = state.Operations[index]
+		op = currentOp
 		return nil
 	})
 	return op, err
@@ -2928,6 +2965,9 @@ func ensureDefaults(state *model.State) {
 	}
 	if state.Projects == nil {
 		state.Projects = []model.Project{}
+	}
+	if state.ProjectDeleteRequests == nil {
+		state.ProjectDeleteRequests = map[string]time.Time{}
 	}
 	if state.APIKeys == nil {
 		state.APIKeys = []model.APIKey{}
@@ -3945,11 +3985,77 @@ func projectBelongsToTenant(state *model.State, projectID, tenantID string) bool
 	return false
 }
 
-func projectHasLiveResources(state *model.State, projectID string) bool {
+func projectDeleteRequested(state *model.State, projectID string) bool {
+	if state.ProjectDeleteRequests == nil {
+		return false
+	}
+	_, ok := state.ProjectDeleteRequests[strings.TrimSpace(projectID)]
+	return ok
+}
+
+func markProjectDeleteRequested(state *model.State, projectID string, requestedAt time.Time) bool {
+	if state.ProjectDeleteRequests == nil {
+		state.ProjectDeleteRequests = make(map[string]time.Time)
+	}
+	normalizedProjectID := strings.TrimSpace(projectID)
+	_, alreadyRequested := state.ProjectDeleteRequests[normalizedProjectID]
+	state.ProjectDeleteRequests[normalizedProjectID] = requestedAt
+	return alreadyRequested
+}
+
+func clearProjectDeleteRequested(state *model.State, projectID string) {
+	if state.ProjectDeleteRequests == nil {
+		return
+	}
+	delete(state.ProjectDeleteRequests, strings.TrimSpace(projectID))
+	if len(state.ProjectDeleteRequests) == 0 {
+		state.ProjectDeleteRequests = nil
+	}
+}
+
+func projectHasLiveApps(state *model.State, projectID string) bool {
 	for _, app := range state.Apps {
 		if app.ProjectID == projectID && !isDeletedApp(app) {
 			return true
 		}
+	}
+	return false
+}
+
+func deleteProjectFromState(state *model.State, projectID string) (model.Project, error) {
+	index := findProject(state, projectID)
+	if index < 0 {
+		return model.Project{}, ErrNotFound
+	}
+	project := state.Projects[index]
+	appIDs := appIDsForProject(state.Apps, projectID)
+	state.Projects = append(state.Projects[:index], state.Projects[index+1:]...)
+	state.Apps = deleteAppsByProject(state.Apps, projectID)
+	state.ServiceBindings = deleteServiceBindingsByAppIDs(state.ServiceBindings, appIDs)
+	state.BackingServices = deleteBackingServicesByProject(state.BackingServices, projectID)
+	state.Operations = deleteOperationsByAppIDs(state.Operations, appIDs)
+	clearProjectDeleteRequested(state, projectID)
+	return project, nil
+}
+
+func maybeFinalizeRequestedProjectDelete(state *model.State, projectID string) error {
+	if !projectDeleteRequested(state, projectID) {
+		return nil
+	}
+	if projectHasLiveApps(state, projectID) {
+		return nil
+	}
+	deleteUnboundBackingServicesByProject(state, projectID)
+	if projectHasLiveResources(state, projectID) {
+		return nil
+	}
+	_, err := deleteProjectFromState(state, projectID)
+	return err
+}
+
+func projectHasLiveResources(state *model.State, projectID string) bool {
+	if projectHasLiveApps(state, projectID) {
+		return true
 	}
 	for _, service := range state.BackingServices {
 		if service.ProjectID == projectID && !isDeletedBackingService(service) {

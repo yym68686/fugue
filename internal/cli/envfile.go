@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"fugue/internal/model"
 )
 
 func loadDeploymentEnv(workingDir, envFile string, autoDefault bool) (map[string]string, string, error) {
@@ -23,6 +25,66 @@ func loadDeploymentEnv(workingDir, envFile string, autoDefault bool) (map[string
 		return nil, "", err
 	}
 	return env, path, nil
+}
+
+func loadTopologyServiceEnvFiles(workingDir string, specs []string) (map[string]map[string]string, []string, error) {
+	if len(specs) == 0 {
+		return nil, nil, nil
+	}
+
+	serviceEnv := map[string]map[string]string{}
+	loadedPaths := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		serviceName, envPath, err := parseServiceEnvFileSpec(spec)
+		if err != nil {
+			return nil, nil, err
+		}
+		path, err := resolveEnvFilePath(workingDir, envPath, false)
+		if err != nil {
+			return nil, nil, err
+		}
+		env, err := readEnvFile(path)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(env) == 0 {
+			loadedPaths = append(loadedPaths, path)
+			continue
+		}
+		serviceVars := serviceEnv[serviceName]
+		if serviceVars == nil {
+			serviceVars = map[string]string{}
+		}
+		for key, value := range env {
+			serviceVars[key] = value
+		}
+		serviceEnv[serviceName] = serviceVars
+		loadedPaths = append(loadedPaths, path)
+	}
+	if len(serviceEnv) == 0 {
+		return nil, loadedPaths, nil
+	}
+	return serviceEnv, loadedPaths, nil
+}
+
+func parseServiceEnvFileSpec(raw string) (string, string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", fmt.Errorf("service env file spec cannot be empty")
+	}
+	serviceName, envPath, ok := strings.Cut(raw, "=")
+	if !ok {
+		return "", "", fmt.Errorf("service env file spec must be <service>=<path>")
+	}
+	serviceName = model.SlugifyOptional(strings.TrimSpace(serviceName))
+	if serviceName == "" {
+		return "", "", fmt.Errorf("service env file spec requires a service name")
+	}
+	envPath = strings.TrimSpace(envPath)
+	if envPath == "" {
+		return "", "", fmt.Errorf("service env file spec requires a file path")
+	}
+	return serviceName, envPath, nil
 }
 
 func resolveEnvFilePath(workingDir, envFile string, autoDefault bool) (string, error) {
