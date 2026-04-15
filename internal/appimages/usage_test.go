@@ -112,6 +112,20 @@ func TestManagedImageRefForSourceUploadOmitsBlankOptionalSuffix(t *testing.T) {
 	}
 }
 
+func TestManagedImageRefForSourceUploadAvoidsDuplicateServiceSuffix(t *testing.T) {
+	t.Parallel()
+
+	got := ManagedImageRefForSource(model.App{Name: "argus-runtime"}, &model.AppSource{
+		Type:            model.AppSourceTypeUpload,
+		ArchiveSHA256:   "abcdef1234567890",
+		ImageNameSuffix: "runtime",
+	}, "", "registry.push.example", "registry.pull.example")
+	want := "registry.push.example/fugue-apps/argus-runtime:upload-abcdef123456"
+	if got != want {
+		t.Fatalf("expected upload managed image ref %q, got %q", want, got)
+	}
+}
+
 func TestExcessManagedImageRefsIgnoresMissingStaleImages(t *testing.T) {
 	t.Parallel()
 

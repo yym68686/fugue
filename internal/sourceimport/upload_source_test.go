@@ -36,6 +36,22 @@ func TestExtractUploadedArchiveDerivesDefaultAppNameFromArchiveFilenameWhenAppNa
 	}
 }
 
+func TestDefaultUploadedImageRefAvoidsDuplicateServiceSuffix(t *testing.T) {
+	t.Parallel()
+
+	got := defaultUploadedImageRef(
+		"registry.push.example",
+		"fugue-apps",
+		"argus-runtime",
+		"abcdef1234567890",
+		"runtime",
+	)
+	want := "registry.push.example/fugue-apps/argus-runtime:upload-abcdef123456"
+	if got != want {
+		t.Fatalf("expected upload image ref %q, got %q", want, got)
+	}
+}
+
 func mustUploadTestTarGz(t *testing.T, files map[string]string) []byte {
 	t.Helper()
 

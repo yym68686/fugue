@@ -755,13 +755,7 @@ func inferManagedUploadImageRef(registryPushBase, appName string, source *model.
 		return ""
 	}
 
-	repoPath := model.Slugify(strings.TrimSpace(appName))
-	if repoPath == "" {
-		repoPath = "app"
-	}
-	if suffix := model.SlugifyOptional(source.ImageNameSuffix); suffix != "" {
-		repoPath += "-" + suffix
-	}
+	repoPath := sourceimport.UploadImageRepositoryName(appName, source.ImageNameSuffix)
 	return fmt.Sprintf("%s/fugue-apps/%s:upload-%s", strings.Trim(strings.TrimSpace(registryPushBase), "/"), repoPath, shortTag)
 }
 

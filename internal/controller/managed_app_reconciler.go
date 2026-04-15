@@ -136,11 +136,14 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 			if s.Logger != nil {
 				s.Logger.Printf("skip active operation check for managed app %s: %v", app.ID, opErr)
 			}
-			backfillManagedAppSource(&app, storedApp)
+			app, _ = selectManagedAppDesiredApp(app, storedApp, true)
 		case hasActiveOp:
-			backfillManagedAppSource(&app, storedApp)
+			app, _ = selectManagedAppDesiredApp(app, storedApp, true)
 		default:
-			app = storedApp
+			app, useStoredBaseline := selectManagedAppDesiredApp(app, storedApp, false)
+			if !useStoredBaseline {
+				break
+			}
 			if observedApp, changed, syncErr := s.observedManagedPostgresDesiredApp(ctx, storedApp); syncErr != nil {
 				if s.Logger != nil {
 					s.Logger.Printf("skip observed managed postgres sync for app %s: %v", app.ID, syncErr)
@@ -220,6 +223,19 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 		return fmt.Errorf("sync managed app runtime status for %s: %w", app.ID, err)
 	}
 	return nil
+}
+
+func selectManagedAppDesiredApp(managedSnapshot, stored model.App, hasActiveOperation bool) (model.App, bool) {
+	if hasActiveOperation || managedAppBaselineNeedsRecovery(stored) {
+		app := managedSnapshot
+		backfillManagedAppSource(&app, stored)
+		return app, false
+	}
+	return stored, true
+}
+
+func managedAppBaselineNeedsRecovery(app model.App) bool {
+	return strings.TrimSpace(app.Spec.Image) == "" || app.Source == nil
 }
 
 func (s *Service) cleanupOrphanManagedApp(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, reason string) error {

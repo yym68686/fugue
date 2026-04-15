@@ -703,6 +703,62 @@ func TestBackfillManagedAppSourceUsesStoreSourceForLegacyManagedApps(t *testing.
 	}
 }
 
+func TestSelectManagedAppDesiredAppPrefersManagedSnapshotWhenStoredBaselineNeedsRecovery(t *testing.T) {
+	t.Parallel()
+
+	managedSnapshot := model.App{
+		Spec: model.AppSpec{
+			Image: "registry.pull.example/fugue-apps/argus-runtime:upload-abcdef123456",
+		},
+	}
+	stored := model.App{
+		Spec: model.AppSpec{},
+		Source: &model.AppSource{
+			Type:             model.AppSourceTypeUpload,
+			UploadID:         "upload_demo",
+			ResolvedImageRef: "registry.push.example/fugue-apps/argus-runtime:upload-abcdef123456",
+		},
+	}
+
+	got, usedStoredBaseline := selectManagedAppDesiredApp(managedSnapshot, stored, false)
+	if usedStoredBaseline {
+		t.Fatal("expected managed snapshot to win when stored app image is missing")
+	}
+	if got.Spec.Image != managedSnapshot.Spec.Image {
+		t.Fatalf("expected managed snapshot image %q, got %q", managedSnapshot.Spec.Image, got.Spec.Image)
+	}
+	if got.Source == nil || got.Source.ResolvedImageRef != stored.Source.ResolvedImageRef {
+		t.Fatalf("expected store source to backfill managed snapshot, got %+v", got.Source)
+	}
+}
+
+func TestSelectManagedAppDesiredAppUsesStoredBaselineWhenRecoveryIsNotNeeded(t *testing.T) {
+	t.Parallel()
+
+	managedSnapshot := model.App{
+		Spec: model.AppSpec{
+			Image: "registry.pull.example/fugue-apps/demo:old",
+		},
+	}
+	stored := model.App{
+		Spec: model.AppSpec{
+			Image: "registry.pull.example/fugue-apps/demo:new",
+		},
+		Source: &model.AppSource{
+			Type:             model.AppSourceTypeUpload,
+			ResolvedImageRef: "registry.push.example/fugue-apps/demo:new",
+		},
+	}
+
+	got, usedStoredBaseline := selectManagedAppDesiredApp(managedSnapshot, stored, false)
+	if !usedStoredBaseline {
+		t.Fatal("expected stored app baseline to win when it is complete")
+	}
+	if got.Spec.Image != stored.Spec.Image {
+		t.Fatalf("expected stored image %q, got %q", stored.Spec.Image, got.Spec.Image)
+	}
+}
+
 func TestBackfillManagedAppSourceDoesNotOverrideManagedSnapshot(t *testing.T) {
 	t.Parallel()
 

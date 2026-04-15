@@ -410,18 +410,31 @@ func importNixpacksFromExtractedUpload(ctx context.Context, src extractedUploadS
 	}, nil
 }
 
+// UploadImageRepositoryName returns the managed registry repository suffix for an
+// uploaded source build. When the caller already folded the logical service name
+// into appName (for example "argus-runtime"), avoid appending the same suffix a
+// second time.
+func UploadImageRepositoryName(appName, imageNameSuffix string) string {
+	repoPath := model.Slugify(appName)
+	if repoPath == "" {
+		repoPath = "app"
+	}
+	suffix := model.SlugifyOptional(imageNameSuffix)
+	if suffix == "" {
+		return repoPath
+	}
+	if repoPath == suffix || strings.HasSuffix(repoPath, "-"+suffix) {
+		return repoPath
+	}
+	return repoPath + "-" + suffix
+}
+
 func defaultUploadedImageRef(registryPushBase, imageRepository, appName, archiveSHA256, imageNameSuffix string) string {
 	imageRepository = strings.Trim(strings.TrimSpace(imageRepository), "/")
 	if imageRepository == "" {
 		imageRepository = "fugue-apps"
 	}
-	repoPath := model.Slugify(appName)
-	if repoPath == "" {
-		repoPath = "app"
-	}
-	if suffix := model.SlugifyOptional(imageNameSuffix); suffix != "" {
-		repoPath += "-" + suffix
-	}
+	repoPath := UploadImageRepositoryName(appName, imageNameSuffix)
 	tagSeed := strings.TrimSpace(archiveSHA256)
 	if tagSeed == "" {
 		tagSeed = repoPath
