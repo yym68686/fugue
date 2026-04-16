@@ -136,7 +136,7 @@ Common workflows:
 
 `fugue app logs query` is the semantic wrapper for log-style tables stored in the app database. Instead of writing raw SQL for every investigation, you can point it at a table, apply `--since` / `--until`, add exact or substring filters, and let the CLI build the read-only query.
 
-`fugue app logs build` now renders the artifact chain as part of the text output: build, push, publish, deploy, and runtime. Use it when `"import build completed"` alone is too weak and you need to verify whether the image was recorded, published to the registry, linked to deploy, and then observed in runtime pods.
+`fugue app logs build` now renders the artifact chain as part of the text output: build, push, publish, deploy, and runtime. It also tells you whether a builder job was actually observed, whether registry logs showed a manifest `PUT`, and whether the current root cause is "published earlier and later deleted" versus "no publish was observed for this import". Use it when `"import build completed"` alone is too weak and you need to verify whether the image was recorded, published to the registry, linked to deploy, and then observed in runtime pods.
 
 `fugue app logs pods` shows the current pod group plus recent ReplicaSet rollout context, including the revision that replaced an older pod set. This is the CLI path for seeing old rollout context even after `app overview` has moved on to the new revision.
 
@@ -147,6 +147,8 @@ When `fugue app request` fails with a low-level error such as `connection refuse
 `fugue app overview` now includes a diagnosis section that stitches together the latest import, linked deploy, image inventory, and current runtime pod state. This is the single-command path for cases like "import succeeded, deploy ran, but the runtime image never became available".
 
 `fugue tenant ls` is the direct answer to "which workspace can this key see?". It removes the need to fall back to `fugue api request GET /v1/tenants` before choosing `--tenant`.
+
+`fugue source-upload show <upload-id>` is the read-only inspection path for uploaded source archives. It exposes archive metadata plus the import operations and apps that currently reference that upload, so you no longer need to guess from raw `upload_id` values or hit a missing metadata endpoint.
 
 `fugue deploy` now reuses the same app artifact diagnosis path after a waited import finishes. When the current release image is missing from registry inventory, the command prints that root cause directly instead of making you manually chain `app logs build`, `app release ls`, `app overview`, and `operation explain`.
 
@@ -174,7 +176,7 @@ Released CLI builds can upgrade themselves with `fugue upgrade`. When the curren
 
 `fugue admin users resolve <email>` is the direct answer to "which tenant/workspace does this user actually land in?". It resolves one email to the enriched workspace snapshot, including tenant id/name, default project, first app, and whether a workspace admin key is available.
 
-When `FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY` is configured on the API, `fugue admin cluster status` also shows the latest `deploy-control-plane` workflow run so you can correlate control-plane image rollouts with cluster state.
+When `FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY` is configured on the API, `fugue admin cluster status` also shows the latest `deploy-control-plane` workflow run so you can correlate control-plane image rollouts with cluster state. The same command now includes both the desired deployment image and the live observed control-plane pod tags, so you can tell which `fugue-api` / `fugue-controller` images are actually running without dropping to `kubectl`.
 
 `build-cli` packages CLI archives on relevant pushes to `main`, and `release-cli` publishes them as GitHub Release assets when a `v*` tag is pushed.
 

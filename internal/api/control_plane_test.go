@@ -82,6 +82,71 @@ func TestGetControlPlaneStatusReturnsCurrentDeployments(t *testing.T) {
 					},
 				},
 			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/fugue-system/pods":
+			switch r.URL.Query().Get("labelSelector") {
+			case "app.kubernetes.io/component=api,app.kubernetes.io/instance=fugue":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"items": []map[string]any{
+						{
+							"metadata": map[string]any{
+								"name":              "fugue-fugue-api-abc",
+								"creationTimestamp": "2026-04-14T00:00:00Z",
+							},
+							"spec": map[string]any{
+								"nodeName": "gcp2",
+								"containers": []map[string]any{
+									{
+										"name":  "api",
+										"image": "ghcr.io/yym68686/fugue-api:6518ea4fd994ef90cb29c12f2e7a09b69751b158",
+									},
+								},
+							},
+							"status": map[string]any{
+								"phase":     "Running",
+								"startTime": "2026-04-14T00:00:05Z",
+								"containerStatuses": []map[string]any{
+									{
+										"name":  "api",
+										"ready": true,
+									},
+								},
+							},
+						},
+					},
+				})
+			case "app.kubernetes.io/component=controller,app.kubernetes.io/instance=fugue":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"items": []map[string]any{
+						{
+							"metadata": map[string]any{
+								"name":              "fugue-fugue-controller-xyz",
+								"creationTimestamp": "2026-04-14T00:00:00Z",
+							},
+							"spec": map[string]any{
+								"nodeName": "gcp3",
+								"containers": []map[string]any{
+									{
+										"name":  "controller",
+										"image": "ghcr.io/yym68686/fugue-controller:6518ea4fd994ef90cb29c12f2e7a09b69751b158",
+									},
+								},
+							},
+							"status": map[string]any{
+								"phase":     "Running",
+								"startTime": "2026-04-14T00:00:06Z",
+								"containerStatuses": []map[string]any{
+									{
+										"name":  "controller",
+										"ready": true,
+									},
+								},
+							},
+						},
+					},
+				})
+			default:
+				t.Fatalf("unexpected pod selector %q", r.URL.Query().Get("labelSelector"))
+			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -125,11 +190,20 @@ func TestGetControlPlaneStatusReturnsCurrentDeployments(t *testing.T) {
 	if response.ControlPlane.Version != "6518ea4fd994ef90cb29c12f2e7a09b69751b158" {
 		t.Fatalf("expected control plane version tag, got %q", response.ControlPlane.Version)
 	}
+	if response.ControlPlane.LiveVersion != "6518ea4fd994ef90cb29c12f2e7a09b69751b158" {
+		t.Fatalf("expected live control plane version tag, got %q", response.ControlPlane.LiveVersion)
+	}
 	if response.ControlPlane.Status != controlPlaneStatusReady {
 		t.Fatalf("expected control plane status %q, got %q", controlPlaneStatusReady, response.ControlPlane.Status)
 	}
 	if len(response.ControlPlane.Components) != 2 {
 		t.Fatalf("expected 2 components, got %d", len(response.ControlPlane.Components))
+	}
+	if len(response.ControlPlane.Components[0].ObservedImageTags) != 1 {
+		t.Fatalf("expected api observed image tags, got %+v", response.ControlPlane.Components[0].ObservedImageTags)
+	}
+	if len(response.ControlPlane.Components[1].ObservedPods) != 1 {
+		t.Fatalf("expected controller observed pods, got %+v", response.ControlPlane.Components[1].ObservedPods)
 	}
 	if response.ControlPlane.Components[0].Status != controlPlaneStatusReady {
 		t.Fatalf("expected api status %q, got %q", controlPlaneStatusReady, response.ControlPlane.Components[0].Status)

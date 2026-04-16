@@ -911,6 +911,7 @@ func (c *CLI) newAdminClusterStatusCommand() *cobra.Command {
 				kvPair{Key: "namespace", Value: status.Namespace},
 				kvPair{Key: "release_instance", Value: status.ReleaseInstance},
 				kvPair{Key: "version", Value: status.Version},
+				kvPair{Key: "live_version", Value: status.LiveVersion},
 				kvPair{Key: "status", Value: status.Status},
 				kvPair{Key: "observed_at", Value: formatTime(status.ObservedAt)},
 			); err != nil {

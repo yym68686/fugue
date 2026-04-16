@@ -136,7 +136,7 @@ fugue app ls
 
 `fugue app logs query` 是面向业务日志表的语义化封装。如果日志本身存放在应用数据库里，不需要每次都手写 SQL；你可以直接指定表名，加上 `--since` / `--until` 和字段过滤，让 CLI 自动生成只读查询。
 
-`fugue app logs build` 现在会在 text 输出里直接补上构建产物链路：build、push、publish、deploy、runtime。遇到只看到 `"import build completed"` 还不足以判断问题时，可以用它确认镜像是否被记录、是否真正出现在 registry、是否被 deploy 引用、以及最终有没有出现在运行中的 pod 里。
+`fugue app logs build` 现在会在 text 输出里直接补上构建产物链路：build、push、publish、deploy、runtime。它还会告诉你 builder job 到底有没有被观测到、registry 日志里有没有 manifest `PUT`，以及当前更像是“镜像发布过后来被删了”还是“这轮 import 根本没观察到发布”。遇到只看到 `"import build completed"` 还不足以判断问题时，可以用它确认镜像是否被记录、是否真正出现在 registry、是否被 deploy 引用、以及最终有没有出现在运行中的 pod 里。
 
 `fugue app logs pods` 会展示当前 pod 组以及最近的 ReplicaSet rollout 上下文，包括哪一个 revision 替换了旧 pod 组。这个命令适合在 `app overview` 已经切到新 revision 之后，继续查看旧 rollout 的上下文。
 
@@ -147,6 +147,8 @@ fugue app ls
 `fugue app overview` 现在会带一个 diagnosis 段，把最近一次 import、对应 deploy、镜像 inventory 和当前 runtime pod 状态串成一条根因摘要。像“import 成功了、deploy 也跑了，但 runtime 镜像没有真正可用”这类问题，可以直接用一条命令看到。
 
 `fugue tenant ls` 现在直接回答“这个 key 能看到哪些 workspace/tenant”。不需要再退回到 `fugue api request GET /v1/tenants` 再决定 `--tenant`。
+
+`fugue source-upload show <upload-id>` 现在提供上传源码归档的只读检查入口。它会返回 archive 元数据，以及当前引用这个 upload 的 import operation 和 app，不需要再拿着裸 `upload_id` 自己猜，也不需要去打一个原先不存在的 metadata endpoint。
 
 `fugue deploy` 在等待导入完成后，现在会复用同一套 app artifact diagnosis 逻辑。如果当前 release image 在 registry inventory 里是 missing，它会直接把这个根因打印出来，不再要求你手动串 `app logs build`、`app release ls`、`app overview`、`operation explain`。
 
@@ -174,7 +176,7 @@ fugue app ls
 
 `fugue admin users resolve <email>` 则直接回答“这个用户到底映射到哪个 tenant/workspace”。它会返回 enrichment 后的 workspace snapshot，包括 tenant id/name、default project、first app，以及 workspace admin key 是否可用。
 
-当 API 侧配置了 `FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY` 后，`fugue admin cluster status` 还会附带最近一次 `deploy-control-plane` GitHub Actions workflow run，便于把 control plane 升级和当前集群状态对上。
+当 API 侧配置了 `FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY` 后，`fugue admin cluster status` 还会附带最近一次 `deploy-control-plane` GitHub Actions workflow run，便于把 control plane 升级和当前集群状态对上。同一条命令现在也会同时展示 deployment 期望镜像和 live control-plane pod 实际观察到的 tag，不需要再下到 `kubectl` 去确认 `fugue-api` / `fugue-controller` 真实跑的是哪个版本。
 
 `build-cli` 会在 `main` 上的相关变更合入后打包 CLI 压缩包，`release-cli` 会在推送 `v*` tag 时把这些压缩包发布为 GitHub Release 资产。
 

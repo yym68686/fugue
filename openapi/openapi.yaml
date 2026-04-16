@@ -2752,6 +2752,29 @@ paths:
                 format: binary
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/source-uploads/{id}:
+    get:
+      operationId: getSourceUpload
+      summary: Get Source Upload Metadata
+      tags: [Source Uploads]
+      x-fugue-handler: handleGetSourceUpload
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SourceUploadInspectionResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/agent/enroll:
     post:
       operationId: agentEnroll
@@ -5132,6 +5155,14 @@ components:
           type: string
         image_tag:
           type: string
+        observed_image_tags:
+          type: array
+          items:
+            type: string
+        observed_pods:
+          type: array
+          items:
+            $ref: "#/components/schemas/ControlPlanePod"
         status:
           type: string
         desired_replicas:
@@ -5146,6 +5177,28 @@ components:
         available_replicas:
           type: integer
           format: int32
+    ControlPlanePod:
+      type: object
+      additionalProperties: false
+      required: [name, ready]
+      properties:
+        name:
+          type: string
+        node_name:
+          type: string
+        phase:
+          type: string
+        ready:
+          type: boolean
+        image:
+          type: string
+        image_repository:
+          type: string
+        image_tag:
+          type: string
+        start_time:
+          type: string
+          format: date-time
     ControlPlaneStatus:
       type: object
       additionalProperties: false
@@ -5156,6 +5209,8 @@ components:
         release_instance:
           type: string
         version:
+          type: string
+        live_version:
           type: string
         status:
           type: string
@@ -5205,6 +5260,79 @@ components:
         updated_at:
           type: string
           format: date-time
+    SourceUpload:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, sha256, size_bytes, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        filename:
+          type: string
+        content_type:
+          type: string
+        sha256:
+          type: string
+        size_bytes:
+          type: integer
+          format: int64
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    SourceUploadReference:
+      type: object
+      additionalProperties: false
+      required: [operation_id, operation_type, operation_status, created_at, updated_at]
+      properties:
+        operation_id:
+          type: string
+        operation_type:
+          type: string
+        operation_status:
+          type: string
+        app_id:
+          type: string
+        app_name:
+          type: string
+        build_strategy:
+          type: string
+        source_dir:
+          type: string
+        dockerfile_path:
+          type: string
+        build_context_dir:
+          type: string
+        resolved_image_ref:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    SourceUploadInspection:
+      type: object
+      additionalProperties: false
+      required: [upload, references]
+      properties:
+        upload:
+          $ref: "#/components/schemas/SourceUpload"
+        references:
+          type: array
+          items:
+            $ref: "#/components/schemas/SourceUploadReference"
+    SourceUploadInspectionResponse:
+      type: object
+      additionalProperties: false
+      required: [source_upload]
+      properties:
+        source_upload:
+          $ref: "#/components/schemas/SourceUploadInspection"
         observed_at:
           type: string
           format: date-time

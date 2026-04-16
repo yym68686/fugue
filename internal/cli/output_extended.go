@@ -527,16 +527,21 @@ func writeControlPlaneComponentTable(w io.Writer, components []model.ControlPlan
 		return strings.Compare(sorted[i].Component, sorted[j].Component) < 0
 	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "COMPONENT\tSTATUS\tIMAGE\tREADY\tUPDATED"); err != nil {
+	if _, err := fmt.Fprintln(tw, "COMPONENT\tSTATUS\tDESIRED_IMAGE\tLIVE_TAGS\tREADY\tUPDATED"); err != nil {
 		return err
 	}
 	for _, component := range sorted {
+		liveTags := "-"
+		if len(component.ObservedImageTags) > 0 {
+			liveTags = strings.Join(component.ObservedImageTags, ",")
+		}
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%d/%d\t%d\n",
+			"%s\t%s\t%s\t%s\t%d/%d\t%d\n",
 			component.Component,
 			component.Status,
 			component.Image,
+			liveTags,
 			component.ReadyReplicas,
 			component.DesiredReplicas,
 			component.UpdatedReplicas,

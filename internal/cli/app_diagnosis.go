@@ -32,10 +32,13 @@ type appBuildArtifactReport struct {
 	BuilderPods             []string             `json:"builder_pods,omitempty"`
 	BuilderNodes            []string             `json:"builder_nodes,omitempty"`
 	BuilderContainers       []string             `json:"builder_containers,omitempty"`
+	BuilderJobState         string               `json:"builder_job_state,omitempty"`
+	BuilderJobEvidence      []string             `json:"builder_job_evidence,omitempty"`
 	ManagedImageRef         string               `json:"managed_image_ref,omitempty"`
 	RuntimeImageRef         string               `json:"runtime_image_ref,omitempty"`
 	RegistryImageStatus     string               `json:"registry_image_status,omitempty"`
 	RegistryImageCurrent    bool                 `json:"registry_image_current,omitempty"`
+	RegistryPublishEvidence []string             `json:"registry_publish_evidence,omitempty"`
 	RegistryLifecycleState  string               `json:"registry_lifecycle_state,omitempty"`
 	RegistryLifecycleHint   string               `json:"registry_lifecycle_hint,omitempty"`
 	RegistryLifecycleEvents []string             `json:"registry_lifecycle_events,omitempty"`
@@ -118,9 +121,6 @@ func (c *CLI) collectBuildArtifactReport(client *Client, appID string, logs buil
 	}
 
 	enrichBuildArtifactReport(report, importOp, operations, images, podInventory)
-	if report.BuildJobName == "" {
-		report.BuildJobName = firstNonEmptyTrimmed(report.LatestPodGroup, report.LinkedDeployOperationID)
-	}
 	if !buildArtifactReportHasContent(report) {
 		return nil
 	}
@@ -393,6 +393,9 @@ func renderBuildLogsReport(w io.Writer, logs buildLogsResponse) error {
 		if len(artifact.BuilderContainers) > 0 {
 			pairs = append(pairs, kvPair{Key: "builder_containers", Value: strings.Join(artifact.BuilderContainers, ", ")})
 		}
+		if value := strings.TrimSpace(artifact.BuilderJobState); value != "" {
+			pairs = append(pairs, kvPair{Key: "builder_job_state", Value: value})
+		}
 		if value := strings.TrimSpace(artifact.RegistryLifecycleState); value != "" {
 			pairs = append(pairs, kvPair{Key: "registry_lifecycle_state", Value: value})
 		}
@@ -430,8 +433,18 @@ func renderBuildLogsReport(w io.Writer, logs buildLogsResponse) error {
 				return err
 			}
 		}
+		for _, evidence := range logs.ArtifactSummary.BuilderJobEvidence {
+			if _, err := fmt.Fprintf(w, "builder_job_evidence=%s\n", evidence); err != nil {
+				return err
+			}
+		}
 		for _, evidence := range logs.ArtifactSummary.ControllerLogEvidence {
 			if _, err := fmt.Fprintf(w, "controller_evidence=%s\n", evidence); err != nil {
+				return err
+			}
+		}
+		for _, evidence := range logs.ArtifactSummary.RegistryPublishEvidence {
+			if _, err := fmt.Fprintf(w, "registry_publish_evidence=%s\n", evidence); err != nil {
 				return err
 			}
 		}
@@ -494,12 +507,22 @@ func buildArtifactStages(report *appBuildArtifactReport) []buildArtifactStage {
 	if report.ManagedImageRef != "" || report.BuildOperationID != "" {
 		pushStatus := "missing"
 		pushDetail := "no managed image reference was recorded"
+		if state := strings.TrimSpace(report.BuilderJobState); state != "" && state != "not-required" {
+			pushStatus = state
+			if len(report.BuilderJobEvidence) > 0 {
+				pushDetail = report.BuilderJobEvidence[0]
+			}
+		}
 		if report.ManagedImageRef != "" {
 			pushStatus = "recorded"
 			pushDetail = report.ManagedImageRef
 			if normalizeImageInventoryStatus(report.RegistryImageStatus) == "available" {
 				pushStatus = "confirmed"
 			}
+		}
+		if lifecycle := strings.TrimSpace(report.RegistryLifecycleState); lifecycle == "push-not-observed" {
+			pushStatus = "not-observed"
+			pushDetail = firstNonEmptyTrimmed(strings.TrimSpace(report.RegistryLifecycleHint), pushDetail)
 		}
 		stages = append(stages, buildArtifactStage{Name: "push", Status: pushStatus, Detail: pushDetail})
 	}
@@ -515,6 +538,14 @@ func buildArtifactStages(report *appBuildArtifactReport) []buildArtifactStage {
 		}
 		if report.RegistryImageCurrent {
 			detail = strings.TrimSpace(detail + " (current)")
+		}
+		if len(report.RegistryPublishEvidence) > 0 {
+			publishStatus = "confirmed"
+			detail = report.RegistryPublishEvidence[0]
+		}
+		if lifecycle := strings.TrimSpace(report.RegistryLifecycleState); lifecycle == "deleted-after-publish" || lifecycle == "previously-published-now-missing" || lifecycle == "deleted" {
+			publishStatus = lifecycle
+			detail = firstNonEmptyTrimmed(strings.TrimSpace(report.RegistryLifecycleHint), detail)
 		}
 		stages = append(stages, buildArtifactStage{Name: "publish", Status: publishStatus, Detail: detail})
 	}
@@ -673,8 +704,17 @@ func buildArtifactEvidence(report *appBuildArtifactReport, deployDiagnosis *mode
 		if status := strings.TrimSpace(report.RegistryImageStatus); status != "" {
 			evidence = append(evidence, fmt.Sprintf("registry image status=%s", status))
 		}
+		if state := strings.TrimSpace(report.BuilderJobState); state != "" {
+			evidence = appendUniqueString(evidence, "builder job state="+state)
+		}
 		if lifecycle := strings.TrimSpace(report.RegistryLifecycleHint); lifecycle != "" {
 			evidence = appendUniqueString(evidence, "registry lifecycle: "+lifecycle)
+		}
+		for _, detail := range report.BuilderJobEvidence {
+			evidence = appendUniqueString(evidence, "builder: "+detail)
+		}
+		for _, detail := range report.RegistryPublishEvidence {
+			evidence = appendUniqueString(evidence, "registry publish: "+detail)
 		}
 		for _, detail := range report.RegistryLifecycleEvents {
 			evidence = appendUniqueString(evidence, detail)
@@ -884,10 +924,13 @@ func buildArtifactReportHasContent(report *appBuildArtifactReport) bool {
 		report.BuildJobName != "" ||
 		report.BuilderNamespace != "" ||
 		len(report.BuilderPods) > 0 ||
+		report.BuilderJobState != "" ||
+		len(report.BuilderJobEvidence) > 0 ||
 		report.ManagedImageRef != "" ||
 		report.RuntimeImageRef != "" ||
 		report.LinkedDeployOperationID != "" ||
 		report.RegistryImageStatus != "" ||
+		len(report.RegistryPublishEvidence) > 0 ||
 		report.RegistryLifecycleState != "" ||
 		len(report.ControllerLogEvidence) > 0 ||
 		len(report.RegistryLogEvidence) > 0 ||

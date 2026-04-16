@@ -2,6 +2,7 @@ package cli
 
 import (
 	"io"
+	"strconv"
 	"strings"
 
 	"fugue/internal/model"
@@ -57,6 +58,10 @@ func writeAppSource(w io.Writer, appName string, source *model.AppSource, imageM
 	pairs = append(pairs,
 		kvPair{Key: "source_type", Value: strings.TrimSpace(source.Type)},
 		kvPair{Key: "source_ref", Value: sourceRef(source)},
+		kvPair{Key: "upload_id", Value: strings.TrimSpace(source.UploadID)},
+		kvPair{Key: "upload_filename", Value: strings.TrimSpace(source.UploadFilename)},
+		kvPair{Key: "archive_sha256", Value: strings.TrimSpace(source.ArchiveSHA256)},
+		kvPair{Key: "archive_size_bytes", Value: formatBytesCount(source.ArchiveSizeBytes)},
 		kvPair{Key: "repo_branch", Value: strings.TrimSpace(source.RepoBranch)},
 		kvPair{Key: "commit_sha", Value: strings.TrimSpace(source.CommitSHA)},
 		kvPair{Key: "commit_committed_at", Value: strings.TrimSpace(source.CommitCommittedAt)},
@@ -69,4 +74,11 @@ func writeAppSource(w io.Writer, appName string, source *model.AppSource, imageM
 		kvPair{Key: "detected_stack", Value: strings.TrimSpace(source.DetectedStack)},
 	)
 	return writeKeyValues(w, pairs...)
+}
+
+func formatBytesCount(value int64) string {
+	if value <= 0 {
+		return ""
+	}
+	return strconv.FormatInt(value, 10)
 }

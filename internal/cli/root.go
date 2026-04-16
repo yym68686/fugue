@@ -124,6 +124,7 @@ Environment variables:
 	  fugue app status my-app
 	  fugue app overview my-app
 	  fugue app source show my-app
+	  fugue source-upload show upload_123
 	  fugue app rebuild my-app
 	  fugue app redeploy my-app
 	  fugue app failover policy set my-app --app-to runtime-b
@@ -192,6 +193,7 @@ Environment variables:
 	cmd.AddCommand(
 		c.newDeployCommand(),
 		c.newAppCommand(),
+		c.newSourceUploadCommand(),
 		c.newTenantCommand(),
 		c.newProjectCommand(),
 		c.newRuntimeCommand(),

@@ -45,6 +45,7 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"project",
 		"runtime",
 		"service",
+		"source-upload",
 		"version",
 		"upgrade",
 		"api",
@@ -56,6 +57,7 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"deploy github owner/repo",
 		"fugue app overview my-app",
 		"fugue app source show my-app",
+		"fugue source-upload show upload_123",
 		"fugue app failover policy set my-app --app-to runtime-b",
 		"fugue app service attach my-app postgres",
 		"fugue app redeploy my-app",
@@ -1695,9 +1697,9 @@ func TestRunAppBuildLogsShowsBuilderAndRegistryLifecycleEvidence(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/logs":
 			switch r.URL.Query().Get("pod") {
 			case "fugue-fugue-controller-abc":
-				_, _ = w.Write([]byte(`{"namespace":"fugue-system","pod":"fugue-fugue-controller-abc","container":"controller","logs":"2026-04-02T00:01:02Z operation op_import completed import build; managed_image=registry.example.com/fugue-apps/demo-managed:git-abc123 runtime_image=registry.example.com/demo-runtime:git-abc123 deploy=op_deploy"}`))
+				_, _ = w.Write([]byte(`{"namespace":"fugue-system","pod":"fugue-fugue-controller-abc","container":"controller","logs":"2026-04-02T00:00:10Z builder job start kind=dockerfile name=build-demo-abc namespace=fugue-system image=registry.example.com/fugue-apps/demo-managed:git-abc123 operation=op_import app=app_123 placement=node=gcp2\n2026-04-02T00:00:11Z builder job completed kind=dockerfile name=build-demo-abc namespace=fugue-system image=registry.example.com/fugue-apps/demo-managed:git-abc123\n2026-04-02T00:01:02Z operation op_import completed import build; managed_image=registry.example.com/fugue-apps/demo-managed:git-abc123 runtime_image=registry.example.com/demo-runtime:git-abc123 deploy=op_deploy"}`))
 			case "fugue-fugue-registry-abc":
-				_, _ = w.Write([]byte(`{"namespace":"fugue-system","pod":"fugue-fugue-registry-abc","container":"registry","logs":"time=\"2026-04-02T00:08:03Z\" level=info msg=\"DELETE /v2/fugue-apps/demo-managed/manifests/sha256:deadbeef\" http.request.uri=\"/v2/fugue-apps/demo-managed/manifests/sha256:deadbeef\""}`))
+				_, _ = w.Write([]byte(`{"namespace":"fugue-system","pod":"fugue-fugue-registry-abc","container":"registry","logs":"time=\"2026-04-02T00:01:00Z\" level=info msg=\"PUT /v2/fugue-apps/demo-managed/manifests/git-abc123\" http.request.method=PUT http.request.uri=\"/v2/fugue-apps/demo-managed/manifests/git-abc123\"\ntime=\"2026-04-02T00:08:03Z\" level=info msg=\"DELETE /v2/fugue-apps/demo-managed/manifests/sha256:deadbeef\" http.request.uri=\"/v2/fugue-apps/demo-managed/manifests/sha256:deadbeef\""}`))
 			default:
 				t.Fatalf("unexpected cluster logs pod %q", r.URL.Query().Get("pod"))
 			}
@@ -1726,13 +1728,137 @@ func TestRunAppBuildLogsShowsBuilderAndRegistryLifecycleEvidence(t *testing.T) {
 		"builder_pods=build-demo-abc-xyz12",
 		"builder_nodes=gcp2",
 		"builder_containers=builder",
+		"builder_job_state=completed",
 		"registry_lifecycle_state=deleted-after-publish",
 		`summary=managed image "registry.example.com/fugue-apps/demo-managed:git-abc123" was published earlier and later deleted from registry inventory`,
 		"controller_pod=fugue-fugue-controller-abc",
 		"registry_pod=fugue-fugue-registry-abc",
+		"builder_job_evidence=2026-04-02T00:00:10Z builder job start kind=dockerfile name=build-demo-abc namespace=fugue-system image=registry.example.com/fugue-apps/demo-managed:git-abc123 operation=op_import app=app_123 placement=node=gcp2",
 		"controller_evidence=2026-04-02T00:01:02Z operation op_import completed import build; managed_image=registry.example.com/fugue-apps/demo-managed:git-abc123 runtime_image=registry.example.com/demo-runtime:git-abc123 deploy=op_deploy",
+		`registry_publish_evidence=time="2026-04-02T00:01:00Z" level=info msg="PUT /v2/fugue-apps/demo-managed/manifests/git-abc123" http.request.method=PUT http.request.uri="/v2/fugue-apps/demo-managed/manifests/git-abc123"`,
 		`registry_evidence=time="2026-04-02T00:08:03Z" level=info msg="DELETE /v2/fugue-apps/demo-managed/manifests/sha256:deadbeef" http.request.uri="/v2/fugue-apps/demo-managed/manifests/sha256:deadbeef"`,
 		"registry_lifecycle_evidence=audit recorded app.image.delete at 2026-04-02T00:09:00Z",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAppBuildLogsExplainsWhenPushWasNotObserved(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"degraded","current_replicas":0},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/build-logs":
+			_, _ = w.Write([]byte(`{
+				"operation_id":"op_import",
+				"operation_status":"failed",
+				"job_name":"",
+				"available":false,
+				"source":"operation.error_message",
+				"summary":"build failed",
+				"build_strategy":"dockerfile",
+				"error_message":"build failed"
+			}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op_import":
+			_, _ = w.Write([]byte(`{"operation":{
+				"id":"op_import",
+				"tenant_id":"tenant_123",
+				"app_id":"app_123",
+				"type":"import",
+				"status":"failed",
+				"error_message":"build failed",
+				"desired_source":{
+					"type":"github-private",
+					"build_strategy":"dockerfile",
+					"resolved_image_ref":"registry.example.com/fugue-apps/demo-managed:git-def456"
+				},
+				"created_at":"2026-04-02T00:00:00Z",
+				"updated_at":"2026-04-02T00:01:00Z"
+			}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations":
+			if got := r.URL.Query().Get("app_id"); got != "app_123" {
+				t.Fatalf("expected app_id filter app_123, got %q", got)
+			}
+			_, _ = w.Write([]byte(`{"operations":[
+				{
+					"id":"op_import",
+					"tenant_id":"tenant_123",
+					"app_id":"app_123",
+					"type":"import",
+					"status":"failed",
+					"error_message":"build failed",
+					"desired_source":{
+						"type":"github-private",
+						"build_strategy":"dockerfile",
+						"resolved_image_ref":"registry.example.com/fugue-apps/demo-managed:git-def456"
+					},
+					"created_at":"2026-04-02T00:00:00Z",
+					"updated_at":"2026-04-02T00:01:00Z"
+				}
+			]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/images":
+			_, _ = w.Write([]byte(`{"app_id":"app_123","registry_configured":true,"summary":{"version_count":1,"current_version_count":1,"stale_version_count":0,"reclaimable_size_bytes":0},"versions":[{"image_ref":"registry.example.com/fugue-apps/demo-managed:git-def456","runtime_image_ref":"registry.example.com/demo-runtime:git-def456","status":"missing","current":true}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-pods":
+			_, _ = w.Write([]byte(`{"component":"app","namespace":"tenant-123","selector":"app.kubernetes.io/name=demo","container":"demo","groups":[],"warnings":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/control-plane":
+			_, _ = w.Write([]byte(`{"control_plane":{"namespace":"fugue-system","release_instance":"fugue","version":"deadbeef","status":"ready","observed_at":"2026-04-02T00:05:00Z","components":[]}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/pods":
+			namespace := r.URL.Query().Get("namespace")
+			selector := r.URL.Query().Get("label_selector")
+			if namespace != "fugue-system" {
+				t.Fatalf("expected cluster pod namespace fugue-system, got %q", namespace)
+			}
+			switch selector {
+			case "app.kubernetes.io/component=controller":
+				_, _ = w.Write([]byte(`{"cluster_pods":[{"namespace":"fugue-system","name":"fugue-fugue-controller-abc","phase":"Running","ready":true,"node_name":"gcp1","start_time":"2026-04-02T00:00:00Z","containers":[{"name":"controller","image":"ghcr.io/acme/fugue-controller:deadbeef","ready":true,"restart_count":0,"state":"running"}]}]}`))
+			case "job-name=build-demo-def":
+				_, _ = w.Write([]byte(`{"cluster_pods":[]}`))
+			case "fugue.pro/operation-id=op_import":
+				_, _ = w.Write([]byte(`{"cluster_pods":[]}`))
+			case "app.kubernetes.io/component=registry":
+				_, _ = w.Write([]byte(`{"cluster_pods":[{"namespace":"fugue-system","name":"fugue-fugue-registry-abc","phase":"Running","ready":true,"node_name":"gcp1","start_time":"2026-04-02T00:00:00Z","containers":[{"name":"registry","image":"registry:2","ready":true,"restart_count":0,"state":"running"}]}]}`))
+			default:
+				t.Fatalf("unexpected cluster pod selector %q", selector)
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/logs":
+			switch r.URL.Query().Get("pod") {
+			case "fugue-fugue-controller-abc":
+				_, _ = w.Write([]byte(`{"namespace":"fugue-system","pod":"fugue-fugue-controller-abc","container":"controller","logs":"2026-04-02T00:00:10Z builder job failed kind=dockerfile name=build-demo-def namespace=fugue-system image=registry.example.com/fugue-apps/demo-managed:git-def456 operation=op_import err=push denied to registry"}`))
+			case "fugue-fugue-registry-abc":
+				_, _ = w.Write([]byte(`{"namespace":"fugue-system","pod":"fugue-fugue-registry-abc","container":"registry","logs":"time=\"2026-04-02T00:08:03Z\" level=warn msg=\"manifest unknown\" http.request.uri=\"/v2/fugue-apps/demo-managed/manifests/git-def456\""}`))
+			default:
+				t.Fatalf("unexpected cluster logs pod %q", r.URL.Query().Get("pod"))
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/audit-events":
+			_, _ = w.Write([]byte(`{"audit_events":[]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "logs", "build", "demo",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app logs build without publish evidence: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{
+		"job_name=build-demo-def",
+		"builder_job_state=failed",
+		`summary=builder job failed before any registry manifest PUT was observed for managed image "registry.example.com/fugue-apps/demo-managed:git-def456"`,
+		`builder_job_evidence=2026-04-02T00:00:10Z builder job failed kind=dockerfile name=build-demo-def namespace=fugue-system image=registry.example.com/fugue-apps/demo-managed:git-def456 operation=op_import err=push denied to registry`,
+		"registry_lifecycle_state=push-not-observed",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
@@ -3036,6 +3162,7 @@ func TestRunAdminClusterStatusShowsDeployWorkflow(t *testing.T) {
 					"namespace":"fugue-system",
 					"release_instance":"fugue",
 					"version":"deadbeef",
+					"live_version":"deadbeef",
 					"status":"ready",
 					"observed_at":"2026-04-14T00:00:00Z",
 					"deploy_workflow":{
@@ -3049,7 +3176,21 @@ func TestRunAdminClusterStatusShowsDeployWorkflow(t *testing.T) {
 						"html_url":"https://github.com/acme/fugue/actions/runs/42",
 						"observed_at":"2026-04-14T00:00:00Z"
 					},
-					"components":[]
+					"components":[
+						{
+							"component":"api",
+							"deployment_name":"fugue-fugue-api",
+							"image":"ghcr.io/acme/fugue-api:deadbeef",
+							"image_repository":"ghcr.io/acme/fugue-api",
+							"image_tag":"deadbeef",
+							"observed_image_tags":["deadbeef"],
+							"status":"ready",
+							"desired_replicas":2,
+							"ready_replicas":2,
+							"updated_replicas":2,
+							"available_replicas":2
+						}
+					]
 				}
 			}`))
 		default:
@@ -3076,6 +3217,75 @@ func TestRunAdminClusterStatusShowsDeployWorkflow(t *testing.T) {
 		"deploy_workflow_status=completed",
 		"deploy_workflow_run_number=42",
 		"deploy_workflow_head_sha=deadbeef",
+		"live_version=deadbeef",
+		"LIVE_TAGS",
+		"ghcr.io/acme/fugue-api:deadbeef",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunSourceUploadShowDisplaysMetadataAndReferences(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/source-uploads/upload_123":
+			_, _ = w.Write([]byte(`{
+				"source_upload":{
+					"upload":{
+						"id":"upload_123",
+						"tenant_id":"tenant_123",
+						"filename":"demo.tgz",
+						"content_type":"application/gzip",
+						"sha256":"abc123",
+						"size_bytes":12345,
+						"created_at":"2026-04-15T00:00:00Z",
+						"updated_at":"2026-04-15T00:00:00Z"
+					},
+					"references":[
+						{
+							"operation_id":"op_import",
+							"operation_type":"import",
+							"operation_status":"completed",
+							"app_id":"app_123",
+							"app_name":"demo",
+							"build_strategy":"dockerfile",
+							"source_dir":"services/runtime",
+							"resolved_image_ref":"registry.example.com/fugue-apps/demo:git-abc123",
+							"created_at":"2026-04-15T00:01:00Z",
+							"updated_at":"2026-04-15T00:02:00Z"
+						}
+					]
+				}
+			}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"source-upload", "show", "upload_123",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run source-upload show: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{
+		"upload_id=upload_123",
+		"archive_sha256=abc123",
+		"OPERATION",
+		"op_import",
+		"demo",
+		"services/runtime",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)

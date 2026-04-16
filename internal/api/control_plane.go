@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -125,16 +126,27 @@ func (c *clusterNodeClient) readControlPlaneStatus(
 		releaseInstance = readControlPlaneReleaseInstance(apiDeployment, controllerDeployment)
 	}
 
+	apiPods, err := c.listControlPlaneComponentPods(ctx, namespace, controlPlaneComponentAPI, releaseInstance)
+	if err != nil {
+		apiPods = nil
+	}
+	controllerPods, err := c.listControlPlaneComponentPods(ctx, namespace, controlPlaneComponentController, releaseInstance)
+	if err != nil {
+		controllerPods = nil
+	}
+
 	components := []model.ControlPlaneComponent{
-		buildControlPlaneComponent(controlPlaneComponentAPI, apiDeployment),
-		buildControlPlaneComponent(controlPlaneComponentController, controllerDeployment),
+		buildControlPlaneComponent(controlPlaneComponentAPI, apiDeployment, apiPods),
+		buildControlPlaneComponent(controlPlaneComponentController, controllerDeployment, controllerPods),
 	}
 	version := readCommonControlPlaneVersion(components)
+	liveVersion := readCommonObservedControlPlaneVersion(components)
 
 	return model.ControlPlaneStatus{
 		Namespace:       namespace,
 		ReleaseInstance: releaseInstance,
 		Version:         version,
+		LiveVersion:     liveVersion,
 		Status:          readControlPlaneStatus(components, version),
 		ObservedAt:      time.Now().UTC(),
 		Components:      components,
@@ -153,6 +165,50 @@ func (c *clusterNodeClient) listDeployments(ctx context.Context, namespace strin
 		return nil, err
 	}
 	return deploymentList.Items, nil
+}
+
+func (c *clusterNodeClient) listControlPlaneComponentPods(
+	ctx context.Context,
+	namespace string,
+	component string,
+	releaseInstance string,
+) ([]model.ControlPlanePod, error) {
+	namespace = strings.TrimSpace(namespace)
+	component = strings.TrimSpace(component)
+	if namespace == "" || component == "" {
+		return nil, fmt.Errorf("namespace and component are required")
+	}
+
+	query := url.Values{}
+	selector := []string{"app.kubernetes.io/component=" + component}
+	if releaseInstance = strings.TrimSpace(releaseInstance); releaseInstance != "" {
+		selector = append(selector, "app.kubernetes.io/instance="+releaseInstance)
+	}
+	query.Set("labelSelector", strings.Join(selector, ","))
+
+	var podList kubePodList
+	apiPath := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/pods?" + query.Encode()
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, &podList); err != nil {
+		return nil, err
+	}
+
+	pods := make([]model.ControlPlanePod, 0, len(podList.Items))
+	for _, pod := range podList.Items {
+		phase := strings.TrimSpace(pod.Status.Phase)
+		if strings.EqualFold(phase, "Succeeded") || strings.EqualFold(phase, "Failed") {
+			continue
+		}
+		pods = append(pods, controlPlanePodFromKube(component, pod))
+	}
+	sort.Slice(pods, func(i, j int) bool {
+		left := controlPlanePodTimestamp(pods[i])
+		right := controlPlanePodTimestamp(pods[j])
+		if !left.Equal(right) {
+			return left.After(right)
+		}
+		return strings.TrimSpace(pods[i].Name) < strings.TrimSpace(pods[j].Name)
+	})
+	return pods, nil
 }
 
 func findControlPlaneDeployment(
@@ -214,7 +270,7 @@ func readControlPlaneReleaseInstance(
 	return readDeploymentReleaseInstance(controllerDeployment)
 }
 
-func buildControlPlaneComponent(component string, deployment *kubeDeployment) model.ControlPlaneComponent {
+func buildControlPlaneComponent(component string, deployment *kubeDeployment, pods []model.ControlPlanePod) model.ControlPlaneComponent {
 	if deployment == nil {
 		return model.ControlPlaneComponent{
 			Component: component,
@@ -235,6 +291,8 @@ func buildControlPlaneComponent(component string, deployment *kubeDeployment) mo
 		Image:             image,
 		ImageRepository:   imageRepository,
 		ImageTag:          imageTag,
+		ObservedImageTags: observedControlPlaneImageTags(pods),
+		ObservedPods:      append([]model.ControlPlanePod(nil), pods...),
 		DesiredReplicas:   desiredReplicas,
 		ReadyReplicas:     int(deployment.Status.ReadyReplicas),
 		UpdatedReplicas:   int(deployment.Status.UpdatedReplicas),
@@ -315,6 +373,27 @@ func readCommonControlPlaneVersion(components []model.ControlPlaneComponent) str
 	return version
 }
 
+func readCommonObservedControlPlaneVersion(components []model.ControlPlaneComponent) string {
+	version := ""
+	for _, component := range components {
+		if len(component.ObservedImageTags) != 1 {
+			return ""
+		}
+		tag := strings.TrimSpace(component.ObservedImageTags[0])
+		if tag == "" {
+			return ""
+		}
+		if version == "" {
+			version = tag
+			continue
+		}
+		if version != tag {
+			return ""
+		}
+	}
+	return version
+}
+
 func readControlPlaneStatus(components []model.ControlPlaneComponent, commonVersion string) string {
 	hasRolling := false
 	allReady := len(components) > 0
@@ -345,6 +424,73 @@ func readControlPlaneStatus(components []model.ControlPlaneComponent, commonVers
 		return controlPlaneStatusReady
 	}
 	return controlPlaneStatusDegraded
+}
+
+func controlPlanePodFromKube(component string, pod kubePodInfo) model.ControlPlanePod {
+	image := readControlPlanePodImage(component, pod)
+	imageRepository, imageTag := splitImageReference(image)
+	startTime := pod.Status.StartTime
+	return model.ControlPlanePod{
+		Name:            strings.TrimSpace(pod.Metadata.Name),
+		NodeName:        strings.TrimSpace(pod.Spec.NodeName),
+		Phase:           strings.TrimSpace(pod.Status.Phase),
+		Ready:           readControlPlanePodReady(component, pod),
+		Image:           image,
+		ImageRepository: imageRepository,
+		ImageTag:        imageTag,
+		StartTime:       startTime,
+	}
+}
+
+func readControlPlanePodImage(component string, pod kubePodInfo) string {
+	component = strings.TrimSpace(component)
+	for _, container := range pod.Spec.Containers {
+		if strings.EqualFold(strings.TrimSpace(container.Name), component) {
+			return strings.TrimSpace(container.Image)
+		}
+	}
+	if len(pod.Spec.Containers) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(pod.Spec.Containers[0].Image)
+}
+
+func readControlPlanePodReady(component string, pod kubePodInfo) bool {
+	component = strings.TrimSpace(component)
+	for _, status := range pod.Status.ContainerStatuses {
+		if component == "" || strings.EqualFold(strings.TrimSpace(status.Name), component) {
+			return status.Ready
+		}
+	}
+	return false
+}
+
+func observedControlPlaneImageTags(pods []model.ControlPlanePod) []string {
+	if len(pods) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(pods))
+	out := make([]string, 0, len(pods))
+	for _, pod := range pods {
+		tag := strings.TrimSpace(pod.ImageTag)
+		if tag == "" {
+			continue
+		}
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		out = append(out, tag)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func controlPlanePodTimestamp(pod model.ControlPlanePod) time.Time {
+	if pod.StartTime != nil && !pod.StartTime.IsZero() {
+		return pod.StartTime.UTC()
+	}
+	return time.Time{}
 }
 
 func (s *Server) readControlPlaneWorkflowRun(ctx context.Context) *model.ControlPlaneWorkflowRun {

@@ -382,22 +382,36 @@ type ClusterNode struct {
 }
 
 type ControlPlaneComponent struct {
-	Component         string `json:"component"`
-	DeploymentName    string `json:"deployment_name"`
-	Image             string `json:"image"`
-	ImageRepository   string `json:"image_repository"`
-	ImageTag          string `json:"image_tag"`
-	Status            string `json:"status"`
-	DesiredReplicas   int    `json:"desired_replicas"`
-	ReadyReplicas     int    `json:"ready_replicas"`
-	UpdatedReplicas   int    `json:"updated_replicas"`
-	AvailableReplicas int    `json:"available_replicas"`
+	Component         string            `json:"component"`
+	DeploymentName    string            `json:"deployment_name"`
+	Image             string            `json:"image"`
+	ImageRepository   string            `json:"image_repository"`
+	ImageTag          string            `json:"image_tag"`
+	ObservedImageTags []string          `json:"observed_image_tags,omitempty"`
+	ObservedPods      []ControlPlanePod `json:"observed_pods,omitempty"`
+	Status            string            `json:"status"`
+	DesiredReplicas   int               `json:"desired_replicas"`
+	ReadyReplicas     int               `json:"ready_replicas"`
+	UpdatedReplicas   int               `json:"updated_replicas"`
+	AvailableReplicas int               `json:"available_replicas"`
+}
+
+type ControlPlanePod struct {
+	Name            string     `json:"name"`
+	NodeName        string     `json:"node_name,omitempty"`
+	Phase           string     `json:"phase,omitempty"`
+	Ready           bool       `json:"ready"`
+	Image           string     `json:"image,omitempty"`
+	ImageRepository string     `json:"image_repository,omitempty"`
+	ImageTag        string     `json:"image_tag,omitempty"`
+	StartTime       *time.Time `json:"start_time,omitempty"`
 }
 
 type ControlPlaneStatus struct {
 	Namespace       string                   `json:"namespace"`
 	ReleaseInstance string                   `json:"release_instance"`
 	Version         string                   `json:"version"`
+	LiveVersion     string                   `json:"live_version,omitempty"`
 	Status          string                   `json:"status"`
 	ObservedAt      time.Time                `json:"observed_at"`
 	Components      []ControlPlaneComponent  `json:"components"`
@@ -870,6 +884,26 @@ type SourceUpload struct {
 	DownloadToken string    `json:"-"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+type SourceUploadReference struct {
+	OperationID      string    `json:"operation_id"`
+	OperationType    string    `json:"operation_type"`
+	OperationStatus  string    `json:"operation_status"`
+	AppID            string    `json:"app_id,omitempty"`
+	AppName          string    `json:"app_name,omitempty"`
+	BuildStrategy    string    `json:"build_strategy,omitempty"`
+	SourceDir        string    `json:"source_dir,omitempty"`
+	DockerfilePath   string    `json:"dockerfile_path,omitempty"`
+	BuildContextDir  string    `json:"build_context_dir,omitempty"`
+	ResolvedImageRef string    `json:"resolved_image_ref,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+type SourceUploadInspection struct {
+	Upload     SourceUpload            `json:"upload"`
+	References []SourceUploadReference `json:"references"`
 }
 
 type Operation struct {

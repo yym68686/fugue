@@ -308,6 +308,10 @@ type controlPlaneStatusResponse struct {
 	ControlPlane model.ControlPlaneStatus `json:"control_plane"`
 }
 
+type sourceUploadInspectionResponse struct {
+	SourceUpload model.SourceUploadInspection `json:"source_upload"`
+}
+
 type billingResponse struct {
 	Billing model.TenantBillingSummary `json:"billing"`
 }
@@ -967,6 +971,14 @@ func (c *Client) GetControlPlaneStatus() (model.ControlPlaneStatus, error) {
 		return model.ControlPlaneStatus{}, err
 	}
 	return response.ControlPlane, nil
+}
+
+func (c *Client) GetSourceUpload(id string) (model.SourceUploadInspection, error) {
+	var response sourceUploadInspectionResponse
+	if err := c.doJSON(http.MethodGet, path.Join("/v1/source-uploads", strings.TrimSpace(id)), nil, &response); err != nil {
+		return model.SourceUploadInspection{}, err
+	}
+	return response.SourceUpload, nil
 }
 
 func (c *Client) GetBilling(tenantID string) (model.TenantBillingSummary, error) {

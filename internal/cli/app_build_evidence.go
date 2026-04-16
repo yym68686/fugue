@@ -12,7 +12,7 @@ import (
 const (
 	buildEvidenceDefaultControlPlaneNamespace = "fugue-system"
 	buildEvidenceLogTailLines                 = 400
-	buildEvidenceLineLimit                    = 4
+	buildEvidenceLineLimit                    = 8
 )
 
 func (c *CLI) enrichBuildLogsArtifactReport(client *Client, appID string, report *appBuildArtifactReport) {
@@ -47,9 +47,19 @@ func (c *CLI) enrichBuildLogsArtifactReport(client *Client, appID string, report
 		case err == nil:
 			report.ControllerPod = strings.TrimSpace(pod)
 			report.ControllerLogEvidence = append([]string(nil), matches...)
+			summarizeBuilderJobControllerEvidence(report)
+			if strings.TrimSpace(report.BuildJobName) != "" && len(report.BuilderPods) == 0 {
+				if err := c.collectBuilderIdentityEvidence(client, namespace, report.BuildJobName, report); err != nil && !shouldIgnoreOptionalBuildEvidenceError(err) {
+					report.Warnings = appendUniqueString(report.Warnings, fmt.Sprintf("builder identity unavailable: %v", err))
+				}
+			}
 		case !shouldIgnoreOptionalBuildEvidenceError(err):
 			report.Warnings = appendUniqueString(report.Warnings, fmt.Sprintf("controller evidence unavailable: %v", err))
 		}
+	}
+
+	if err := c.collectBuilderOperationEvidence(client, namespace, report); err != nil && !shouldIgnoreOptionalBuildEvidenceError(err) {
+		report.Warnings = appendUniqueString(report.Warnings, fmt.Sprintf("builder pod evidence unavailable: %v", err))
 	}
 
 	registryTerms := buildRegistryEvidenceTerms(report.ManagedImageRef)
@@ -65,6 +75,7 @@ func (c *CLI) enrichBuildLogsArtifactReport(client *Client, appID string, report
 		case err == nil:
 			report.RegistryPod = strings.TrimSpace(pod)
 			report.RegistryLogEvidence = append([]string(nil), matches...)
+			report.RegistryPublishEvidence = append([]string(nil), registryManifestPutEvidence(matches)...)
 		case !shouldIgnoreOptionalBuildEvidenceError(err):
 			report.Warnings = appendUniqueString(report.Warnings, fmt.Sprintf("registry evidence unavailable: %v", err))
 		}
@@ -80,6 +91,7 @@ func (c *CLI) enrichBuildLogsArtifactReport(client *Client, appID string, report
 		report.Warnings = appendUniqueString(report.Warnings, fmt.Sprintf("registry lifecycle audit unavailable: %v", err))
 		summarizeRegistryLifecycleEvidence(appID, report, nil)
 	}
+	finalizeBuilderJobState(report)
 }
 
 func (c *CLI) detectBuildEvidenceControlPlaneNamespace(client *Client) (string, error) {
@@ -100,7 +112,12 @@ func (c *CLI) collectBuilderIdentityEvidence(client *Client, namespace, jobName 
 		return err
 	}
 	if len(pods) == 0 {
-		return fmt.Errorf("no builder pods found for job %q", jobName)
+		if report != nil {
+			report.BuilderNamespace = firstNonEmptyTrimmed(strings.TrimSpace(report.BuilderNamespace), strings.TrimSpace(namespace))
+			report.BuilderJobState = firstNonEmptyTrimmed(strings.TrimSpace(report.BuilderJobState), "created-no-pods-visible")
+			report.BuilderJobEvidence = appendUniqueString(report.BuilderJobEvidence, fmt.Sprintf("builder job %s is recorded, but no builder pods are still visible", strings.TrimSpace(jobName)))
+		}
+		return nil
 	}
 
 	sortClusterPodsForEvidence(pods)
@@ -115,10 +132,64 @@ func (c *CLI) collectBuilderIdentityEvidence(client *Client, namespace, jobName 
 				report.BuilderContainers = appendUniqueString(report.BuilderContainers, name)
 			}
 		}
+		report.BuilderJobEvidence = appendUniqueString(report.BuilderJobEvidence, summarizeBuilderPodEvidence(pod))
 	}
 	sort.Strings(report.BuilderPods)
 	sort.Strings(report.BuilderNodes)
 	sort.Strings(report.BuilderContainers)
+	if strings.TrimSpace(report.BuilderJobState) == "" {
+		report.BuilderJobState = "pod-observed"
+	}
+	return nil
+}
+
+func (c *CLI) collectBuilderOperationEvidence(client *Client, namespace string, report *appBuildArtifactReport) error {
+	if report == nil || !buildArtifactUsesBuilder(report) || strings.TrimSpace(report.BuildOperationID) == "" {
+		return nil
+	}
+	if len(report.BuilderPods) > 0 && strings.TrimSpace(report.BuildJobName) != "" {
+		return nil
+	}
+
+	pods, err := client.ListClusterPods(clusterPodsOptions{
+		Namespace:         strings.TrimSpace(namespace),
+		LabelSelector:     "fugue.pro/operation-id=" + strings.TrimSpace(report.BuildOperationID),
+		IncludeTerminated: true,
+	})
+	if err != nil {
+		return err
+	}
+	if len(pods) == 0 {
+		return nil
+	}
+
+	sortClusterPodsForEvidence(pods)
+	report.BuilderNamespace = firstNonEmptyTrimmed(strings.TrimSpace(report.BuilderNamespace), strings.TrimSpace(namespace))
+	if strings.TrimSpace(report.BuildJobName) == "" {
+		for _, pod := range pods {
+			if pod.Owner != nil && strings.EqualFold(strings.TrimSpace(pod.Owner.Kind), "Job") {
+				report.BuildJobName = firstNonEmptyTrimmed(strings.TrimSpace(report.BuildJobName), strings.TrimSpace(pod.Owner.Name))
+			}
+		}
+	}
+	for _, pod := range pods {
+		report.BuilderPods = appendUniqueString(report.BuilderPods, strings.TrimSpace(pod.Name))
+		if nodeName := strings.TrimSpace(pod.NodeName); nodeName != "" {
+			report.BuilderNodes = appendUniqueString(report.BuilderNodes, nodeName)
+		}
+		for _, container := range pod.Containers {
+			if name := strings.TrimSpace(container.Name); name != "" {
+				report.BuilderContainers = appendUniqueString(report.BuilderContainers, name)
+			}
+		}
+		report.BuilderJobEvidence = appendUniqueString(report.BuilderJobEvidence, summarizeBuilderPodEvidence(pod))
+	}
+	sort.Strings(report.BuilderPods)
+	sort.Strings(report.BuilderNodes)
+	sort.Strings(report.BuilderContainers)
+	if strings.TrimSpace(report.BuilderJobState) == "" {
+		report.BuilderJobState = "pod-observed"
+	}
 	return nil
 }
 
@@ -348,11 +419,16 @@ func summarizeRegistryLifecycleEvidence(appID string, report *appBuildArtifactRe
 	}
 
 	var lifecycleEvents []string
-	publishEvidence := len(report.ControllerLogEvidence) > 0
+	registryPutEvidence := len(report.RegistryPublishEvidence) > 0
+	controllerPublishEvidence := controllerEvidenceSuggestsPublished(report.ControllerLogEvidence)
+	publishEvidence := registryPutEvidence || controllerPublishEvidence
 	deleteEvidence := registryEvidenceSuggestsDelete(report.RegistryLogEvidence)
 	deleteAudit := latestImageDeleteAuditEvent(events, appID, imageRef)
 
-	if publishEvidence {
+	if registryPutEvidence {
+		lifecycleEvents = appendUniqueString(lifecycleEvents, "registry logs include a matching manifest PUT")
+	}
+	if controllerPublishEvidence {
 		lifecycleEvents = appendUniqueString(lifecycleEvents, fmt.Sprintf("controller still records the image as published for build %s", firstNonEmptyTrimmed(report.BuildOperationID, report.BuildJobName, imageRef)))
 	}
 	if deleteEvidence {
@@ -363,6 +439,20 @@ func summarizeRegistryLifecycleEvidence(appID string, report *appBuildArtifactRe
 	}
 
 	if !publishEvidence && !deleteEvidence && deleteAudit == nil {
+		switch strings.TrimSpace(report.BuilderJobState) {
+		case "not-observed":
+			report.RegistryLifecycleState = "push-not-observed"
+			report.RegistryLifecycleHint = fmt.Sprintf("no builder job or registry manifest PUT was observed for managed image %q", imageRef)
+		case "failed":
+			report.RegistryLifecycleState = "push-not-observed"
+			report.RegistryLifecycleHint = fmt.Sprintf("builder job failed before any registry manifest PUT was observed for managed image %q", imageRef)
+		case "started", "applied", "pod-observed", "created-no-pods-visible":
+			report.RegistryLifecycleState = "push-not-observed"
+			report.RegistryLifecycleHint = fmt.Sprintf("builder activity was observed, but no registry manifest PUT was observed for managed image %q", imageRef)
+		}
+		if report.RegistryLifecycleState != "" {
+			report.RegistryLifecycleEvents = append([]string(nil), lifecycleEvents...)
+		}
 		return
 	}
 
@@ -376,6 +466,16 @@ func summarizeRegistryLifecycleEvidence(appID string, report *appBuildArtifactRe
 	case deleteEvidence && publishEvidence:
 		report.RegistryLifecycleState = "deleted-after-publish"
 		report.RegistryLifecycleHint = fmt.Sprintf("managed image %q existed earlier and later disappeared from registry inventory", imageRef)
+	case deleteEvidence:
+		report.RegistryLifecycleState = "push-not-observed"
+		switch strings.TrimSpace(report.BuilderJobState) {
+		case "failed":
+			report.RegistryLifecycleHint = fmt.Sprintf("builder job failed before any registry manifest PUT was observed for managed image %q", imageRef)
+		case "started", "applied", "pod-observed", "created-no-pods-visible":
+			report.RegistryLifecycleHint = fmt.Sprintf("registry reported manifest misses for managed image %q, but no registry manifest PUT was observed for this import", imageRef)
+		default:
+			report.RegistryLifecycleHint = fmt.Sprintf("managed image %q is missing and no publish evidence was observed for this import", imageRef)
+		}
 	case publishEvidence:
 		report.RegistryLifecycleState = "previously-published-now-missing"
 		report.RegistryLifecycleHint = fmt.Sprintf("managed image %q was published earlier but is now missing from registry inventory", imageRef)
@@ -396,6 +496,144 @@ func registryEvidenceSuggestsDelete(lines []string) bool {
 		}
 	}
 	return false
+}
+
+func registryManifestPutEvidence(lines []string) []string {
+	matches := make([]string, 0, len(lines))
+	for _, line := range lines {
+		normalized := strings.ToLower(strings.TrimSpace(line))
+		if strings.Contains(normalized, "/manifests/") && (strings.Contains(normalized, " put ") || strings.HasPrefix(normalized, "put ") || strings.Contains(normalized, "\"put ") || strings.Contains(normalized, "http.request.method=put") || strings.Contains(normalized, "msg=\"put /v2/")) {
+			matches = appendUniqueString(matches, strings.TrimSpace(line))
+		}
+	}
+	return matches
+}
+
+func controllerEvidenceSuggestsPublished(lines []string) bool {
+	for _, line := range lines {
+		normalized := strings.ToLower(strings.TrimSpace(line))
+		if normalized == "" {
+			continue
+		}
+		if strings.Contains(normalized, "completed import build") {
+			return true
+		}
+		if strings.Contains(normalized, "managed_image=") && strings.Contains(normalized, "deploy=") {
+			return true
+		}
+	}
+	return false
+}
+
+func summarizeBuilderJobControllerEvidence(report *appBuildArtifactReport) {
+	if report == nil {
+		return
+	}
+	for _, line := range report.ControllerLogEvidence {
+		normalized := strings.ToLower(strings.TrimSpace(line))
+		if !strings.Contains(normalized, "builder job ") {
+			continue
+		}
+		report.BuilderJobEvidence = appendUniqueString(report.BuilderJobEvidence, strings.TrimSpace(line))
+		if name := logfmtField(line, "name"); name != "" {
+			report.BuildJobName = firstNonEmptyTrimmed(strings.TrimSpace(report.BuildJobName), name)
+		}
+		if namespace := logfmtField(line, "namespace"); namespace != "" {
+			report.BuilderNamespace = firstNonEmptyTrimmed(strings.TrimSpace(report.BuilderNamespace), namespace)
+		}
+		switch {
+		case strings.Contains(normalized, "builder job apply failed"), strings.Contains(normalized, "builder job failed"):
+			report.BuilderJobState = "failed"
+		case strings.Contains(normalized, "builder job completed"):
+			if report.BuilderJobState != "failed" {
+				report.BuilderJobState = "completed"
+			}
+		case strings.Contains(normalized, "builder job applied"):
+			if report.BuilderJobState == "" || report.BuilderJobState == "started" {
+				report.BuilderJobState = "applied"
+			}
+		case strings.Contains(normalized, "builder job start"):
+			if report.BuilderJobState == "" {
+				report.BuilderJobState = "started"
+			}
+		default:
+			if report.BuilderJobState == "" {
+				report.BuilderJobState = "observed"
+			}
+		}
+	}
+}
+
+func finalizeBuilderJobState(report *appBuildArtifactReport) {
+	if report == nil {
+		return
+	}
+	if !buildArtifactUsesBuilder(report) {
+		if report.BuilderJobState == "" {
+			report.BuilderJobState = "not-required"
+		}
+		return
+	}
+	if report.BuilderJobState != "" {
+		return
+	}
+	if strings.TrimSpace(report.BuildJobName) != "" {
+		report.BuilderJobState = "name-recorded"
+		return
+	}
+	report.BuilderJobState = "not-observed"
+	report.BuilderJobEvidence = appendUniqueString(report.BuilderJobEvidence, fmt.Sprintf("no builder job was observed for import %s", strings.TrimSpace(report.BuildOperationID)))
+}
+
+func buildArtifactUsesBuilder(report *appBuildArtifactReport) bool {
+	if report == nil {
+		return false
+	}
+	strategy := strings.TrimSpace(strings.ToLower(report.BuildStrategy))
+	if strategy == strings.ToLower(model.AppSourceTypeDockerImage) {
+		return false
+	}
+	return strategy != "" ||
+		strings.TrimSpace(report.BuildOperationID) != "" ||
+		strings.TrimSpace(report.ManagedImageRef) != "" ||
+		strings.TrimSpace(report.BuildJobName) != "" ||
+		len(report.BuilderPods) > 0
+}
+
+func summarizeBuilderPodEvidence(pod model.ClusterPod) string {
+	if pod.Owner != nil && strings.EqualFold(strings.TrimSpace(pod.Owner.Kind), "Job") && strings.TrimSpace(pod.Owner.Name) != "" {
+		return fmt.Sprintf(
+			"builder pod %s for job %s phase=%s node=%s",
+			strings.TrimSpace(pod.Name),
+			strings.TrimSpace(pod.Owner.Name),
+			firstNonEmptyTrimmed(strings.TrimSpace(pod.Phase), "unknown"),
+			firstNonEmptyTrimmed(strings.TrimSpace(pod.NodeName), "-"),
+		)
+	}
+	return fmt.Sprintf(
+		"builder pod %s phase=%s node=%s",
+		strings.TrimSpace(pod.Name),
+		firstNonEmptyTrimmed(strings.TrimSpace(pod.Phase), "unknown"),
+		firstNonEmptyTrimmed(strings.TrimSpace(pod.NodeName), "-"),
+	)
+}
+
+func logfmtField(line, key string) string {
+	line = strings.TrimSpace(line)
+	key = strings.TrimSpace(key)
+	if line == "" || key == "" {
+		return ""
+	}
+	token := key + "="
+	index := strings.Index(line, token)
+	if index < 0 {
+		return ""
+	}
+	value := line[index+len(token):]
+	if end := strings.IndexAny(value, " \t\r\n"); end >= 0 {
+		value = value[:end]
+	}
+	return strings.Trim(strings.TrimSpace(value), "\"")
 }
 
 func latestImageDeleteAuditEvent(events []model.AuditEvent, appID, imageRef string) *model.AuditEvent {
