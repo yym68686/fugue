@@ -60,3 +60,32 @@ func TestRendererInjectsWorkloadIdentityEnv(t *testing.T) {
 		t.Fatalf("expected project scope project_demo, got %q", claims.ProjectID)
 	}
 }
+
+func TestRendererPrepareAppKeepsWorkloadTokenStableAcrossReconciles(t *testing.T) {
+	t.Parallel()
+
+	renderer := Renderer{
+		WorkloadIdentity: WorkloadIdentityConfig{
+			APIBaseURL: "api.example.com",
+			SigningKey: "signing-secret",
+		},
+	}
+	app := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "demo",
+		Spec: model.AppSpec{
+			RuntimeID: "runtime_hk",
+		},
+	}
+
+	first := renderer.PrepareApp(app)
+	second := renderer.PrepareApp(app)
+	if first.Spec.Env["FUGUE_TOKEN"] == "" {
+		t.Fatal("expected FUGUE_TOKEN to be injected")
+	}
+	if first.Spec.Env["FUGUE_TOKEN"] != second.Spec.Env["FUGUE_TOKEN"] {
+		t.Fatalf("expected stable FUGUE_TOKEN across repeated PrepareApp calls")
+	}
+}

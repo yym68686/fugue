@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
-	"time"
 )
 
 const (
@@ -36,9 +35,6 @@ func Issue(signingKey string, claims Claims) (string, error) {
 		return "", ErrInvalidToken
 	}
 	claims.Version = tokenV1
-	if claims.IssuedAt <= 0 {
-		claims.IssuedAt = time.Now().UTC().Unix()
-	}
 	payload, err := json.Marshal(claims)
 	if err != nil {
 		return "", err
