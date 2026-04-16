@@ -41,8 +41,12 @@ func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) boo
 		return true
 	}
 	app = s.overlayManagedAppStatusCached(app)
-	if app.Spec.Replicas == 0 || app.Status.CurrentReplicas == 0 {
+	if app.Spec.Replicas == 0 {
 		http.Error(w, "app is disabled", http.StatusServiceUnavailable)
+		return true
+	}
+	if app.Status.CurrentReplicas == 0 {
+		http.Error(w, appRouteUnavailableMessage(app), http.StatusServiceUnavailable)
 		return true
 	}
 
@@ -185,4 +189,20 @@ func newDefaultAppProxyTransport() http.RoundTripper {
 	transport.Proxy = nil
 	transport.ForceAttemptHTTP2 = false
 	return transport
+}
+
+func appRouteUnavailableMessage(app model.App) string {
+	phase := strings.TrimSpace(app.Status.Phase)
+	message := strings.TrimSpace(app.Status.LastMessage)
+
+	switch {
+	case phase != "" && message != "" && !strings.EqualFold(phase, message):
+		return "app is unavailable: " + phase + ": " + message
+	case message != "":
+		return "app is unavailable: " + message
+	case phase != "":
+		return "app is unavailable: " + phase
+	default:
+		return "app is unavailable"
+	}
 }

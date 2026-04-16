@@ -287,100 +287,75 @@ func (s *Service) resolveImportedManagedImageRef(
 	importResultImageRef string,
 ) (string, string, error) {
 	seen := make(map[string]struct{})
-	directCandidates := []string{
-		strings.TrimSpace(importResultImageRef),
-		strings.TrimSpace(importedSource.ResolvedImageRef),
-	}
-	for _, candidate := range directCandidates {
+	orderedCandidates := make([]string, 0, 4)
+	appendCandidate := func(candidate string) {
 		candidate = strings.TrimSpace(candidate)
 		if candidate == "" {
-			continue
+			return
 		}
 		if _, ok := seen[candidate]; ok {
-			continue
+			return
 		}
 		seen[candidate] = struct{}{}
-
-		runtimeImageRef, err := rewriteImportedImageRef(candidate, s.registryPushBase, s.registryPullBase)
-		if err == nil {
-			return candidate, runtimeImageRef, nil
-		}
-		if s.Logger != nil {
-			s.Logger.Printf("ignore invalid imported managed image ref for app %s candidate=%s: %v", app.ID, candidate, err)
-		}
+		orderedCandidates = append(orderedCandidates, candidate)
 	}
+	appendCandidate(importResultImageRef)
+	appendCandidate(importedSource.ResolvedImageRef)
 
 	importedForInference := importedSource
 	importedForInference.ResolvedImageRef = ""
 	queuedForInference := queuedSource
 	queuedForInference.ResolvedImageRef = ""
 
-	inferredCandidates := make([]string, 0, 2)
 	appendInferredCandidate := func(source model.AppSource) {
 		candidate := strings.TrimSpace(appimages.ManagedImageRefForSource(app, &source, "", s.registryPushBase, s.registryPullBase))
 		if candidate == "" {
 			return
 		}
-		if _, ok := seen[candidate]; ok {
-			return
-		}
-		seen[candidate] = struct{}{}
-		inferredCandidates = append(inferredCandidates, candidate)
+		appendCandidate(candidate)
 	}
 	appendInferredCandidate(importedForInference)
 	appendInferredCandidate(queuedForInference)
 
-	if len(inferredCandidates) == 0 {
+	if len(orderedCandidates) == 0 {
 		return "", "", fmt.Errorf("import completed without an image reference and no managed image candidate could be inferred")
 	}
 	if s.inspectManagedImage == nil {
-		return s.useInferredManagedImageRef(app, inferredCandidates, "image inspector is not configured")
+		return "", "", fmt.Errorf("import completed but controller image inspection is not configured, so image availability could not be confirmed for: %s", strings.Join(orderedCandidates, ", "))
 	}
 
-	for _, candidate := range inferredCandidates {
-		exists, lastErr := s.inspectInferredManagedImageWithRetry(ctx, candidate)
+	var inspectErr error
+	for _, candidate := range orderedCandidates {
+		runtimeImageRef, err := rewriteImportedImageRef(candidate, s.registryPushBase, s.registryPullBase)
+		if err != nil {
+			if s.Logger != nil {
+				s.Logger.Printf("ignore invalid imported managed image ref for app %s candidate=%s: %v", app.ID, candidate, err)
+			}
+			continue
+		}
+		exists, lastErr := s.inspectManagedImageWithRetry(ctx, candidate)
 		if lastErr != nil && s.Logger != nil {
-			s.Logger.Printf("inspect inferred managed image failed for app %s candidate=%s: %v", app.ID, candidate, lastErr)
+			s.Logger.Printf("inspect imported managed image failed for app %s candidate=%s: %v", app.ID, candidate, lastErr)
+		}
+		if lastErr != nil && inspectErr == nil {
+			inspectErr = fmt.Errorf("inspect image %s: %w", candidate, lastErr)
 		}
 		if !exists {
 			continue
 		}
-		runtimeImageRef, err := rewriteImportedImageRef(candidate, s.registryPushBase, s.registryPullBase)
-		if err != nil {
-			return "", "", err
-		}
-		if s.Logger != nil {
-			s.Logger.Printf("recovered missing import image ref for app %s using inferred managed image %s", app.ID, candidate)
-		}
 		return candidate, runtimeImageRef, nil
 	}
-
-	return s.useInferredManagedImageRef(app, inferredCandidates, "registry did not confirm inferred candidates before deploy")
-}
-
-func (s *Service) useInferredManagedImageRef(app model.App, inferredCandidates []string, reason string) (string, string, error) {
-	for _, candidate := range inferredCandidates {
-		runtimeImageRef, err := rewriteImportedImageRef(candidate, s.registryPushBase, s.registryPullBase)
-		if err != nil {
-			if s.Logger != nil {
-				s.Logger.Printf("ignore invalid inferred managed image ref for app %s candidate=%s: %v", app.ID, candidate, err)
-			}
-			continue
-		}
-		if s.Logger != nil {
-			s.Logger.Printf(
-				"using inferred managed image ref for app %s candidate=%s without registry confirmation: %s",
-				app.ID,
-				candidate,
-				strings.TrimSpace(reason),
-			)
-		}
-		return candidate, runtimeImageRef, nil
+	if inspectErr != nil {
+		return "", "", fmt.Errorf("import completed but managed image availability could not be confirmed: %w", inspectErr)
 	}
-	return "", "", fmt.Errorf("import completed without a usable managed image candidate after trying %s", strings.Join(inferredCandidates, ", "))
+	return "", "", fmt.Errorf(
+		"import completed but managed image candidates were not confirmed in the registry after %d attempts: %s",
+		s.importImageInspectAttempts(),
+		strings.Join(orderedCandidates, ", "),
+	)
 }
 
-func (s *Service) inspectInferredManagedImageWithRetry(ctx context.Context, candidate string) (bool, error) {
+func (s *Service) inspectManagedImageWithRetry(ctx context.Context, candidate string) (bool, error) {
 	attempts := s.importImageInspectAttempts()
 	delay := s.importImageInspectDelay()
 	var lastErr error

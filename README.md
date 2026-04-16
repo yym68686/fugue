@@ -82,6 +82,7 @@ Common workflows:
 - `fugue deploy github owner/repo --service-env-file gateway=.env.gateway --service-env-file runtime=.env.runtime`
 - `fugue deploy github https://github.com/example/app --private --repo-token $GITHUB_TOKEN`
 - `fugue deploy image nginx:1.27`
+- `fugue tenant ls`
 - `fugue app create my-app --github owner/repo --branch main`
 - `fugue app status my-app`
 - `fugue app overview my-app`
@@ -144,6 +145,12 @@ Common workflows:
 When `fugue app request` fails with a low-level error such as `connection refused`, the CLI now also asks the control plane for runtime diagnosis and appends the likely scheduling or storage root cause. This turns a plain transport failure into evidence like "PVC node affinity conflict" or "pod was evicted after disk pressure".
 
 `fugue app overview` now includes a diagnosis section that stitches together the latest import, linked deploy, image inventory, and current runtime pod state. This is the single-command path for cases like "import succeeded, deploy ran, but the runtime image never became available".
+
+`fugue tenant ls` is the direct answer to "which workspace can this key see?". It removes the need to fall back to `fugue api request GET /v1/tenants` before choosing `--tenant`.
+
+`fugue deploy` now reuses the same app artifact diagnosis path after a waited import finishes. When the current release image is missing from registry inventory, the command prints that root cause directly instead of making you manually chain `app logs build`, `app release ls`, `app overview`, and `operation explain`.
+
+`fugue operation explain` now inspects the deploy image reference itself. For pending or running deploys that already point at a missing managed image, the diagnosis says so explicitly instead of falling back to "no blocker detected" or a generic queue summary.
 
 `fugue app diagnose` is the direct root-cause command for managed runtimes. Use it when you need the CLI to say "pod was evicted, node had disk pressure, replacement pod is blocked by volume node affinity" instead of making you reconstruct that chain from logs and events by hand.
 

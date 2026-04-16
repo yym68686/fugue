@@ -82,6 +82,7 @@ fugue app ls
 - `fugue deploy github owner/repo --service-env-file gateway=.env.gateway --service-env-file runtime=.env.runtime`
 - `fugue deploy github https://github.com/example/app --private --repo-token $GITHUB_TOKEN`
 - `fugue deploy image nginx:1.27`
+- `fugue tenant ls`
 - `fugue app create my-app --github owner/repo --branch main`
 - `fugue app status my-app`
 - `fugue app overview my-app`
@@ -144,6 +145,12 @@ fugue app ls
 当 `fugue app request` 只报出 `connection refused` 这类底层连接错误时，CLI 现在会继续向控制面请求 runtime diagnosis，并把更接近根因的调度 / 存储提示拼到报错里，例如 “PVC node affinity conflict” 或 “pod was evicted after disk pressure”。
 
 `fugue app overview` 现在会带一个 diagnosis 段，把最近一次 import、对应 deploy、镜像 inventory 和当前 runtime pod 状态串成一条根因摘要。像“import 成功了、deploy 也跑了，但 runtime 镜像没有真正可用”这类问题，可以直接用一条命令看到。
+
+`fugue tenant ls` 现在直接回答“这个 key 能看到哪些 workspace/tenant”。不需要再退回到 `fugue api request GET /v1/tenants` 再决定 `--tenant`。
+
+`fugue deploy` 在等待导入完成后，现在会复用同一套 app artifact diagnosis 逻辑。如果当前 release image 在 registry inventory 里是 missing，它会直接把这个根因打印出来，不再要求你手动串 `app logs build`、`app release ls`、`app overview`、`operation explain`。
+
+`fugue operation explain` 现在会直接检查 deploy 引用的镜像。如果 pending 或 running 的 deploy 已经指向一个缺失的 managed image，诊断结果会直接说明这一点，而不是继续停留在 “no blocker detected” 或泛化的排队提示。
 
 `fugue app diagnose` 是面向 managed runtime 的直接根因命令。需要 CLI 直接把 “pod 被驱逐、节点有 disk pressure、替换 pod 又被 volume node affinity 卡住” 这条链讲清楚时，用它最直接。
 

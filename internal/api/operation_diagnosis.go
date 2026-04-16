@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -10,6 +12,8 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
+
+var diagnosisQueuedDeployOperationPattern = regexp.MustCompile(`queued deploy operation ([A-Za-z0-9_-]+)`)
 
 func (s *Server) handleGetOperationDiagnosis(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
@@ -22,7 +26,7 @@ func (s *Server) handleGetOperationDiagnosis(w http.ResponseWriter, r *http.Requ
 		httpx.WriteError(w, http.StatusForbidden, "operation is not visible to this tenant")
 		return
 	}
-	diagnosis, err := s.diagnoseOperation(op)
+	diagnosis, err := s.diagnoseOperation(r.Context(), op)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -30,16 +34,26 @@ func (s *Server) handleGetOperationDiagnosis(w http.ResponseWriter, r *http.Requ
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"diagnosis": diagnosis})
 }
 
-func (s *Server) diagnoseOperation(op model.Operation) (model.OperationDiagnosis, error) {
+func (s *Server) diagnoseOperation(ctx context.Context, op model.Operation) (model.OperationDiagnosis, error) {
 	app, appFound, err := s.getDiagnosisApp(op.AppID)
+	if err != nil {
+		return model.OperationDiagnosis{}, err
+	}
+	imageDiagnosis, err := s.diagnoseDeployImageState(ctx, op, app, appFound)
 	if err != nil {
 		return model.OperationDiagnosis{}, err
 	}
 
 	switch strings.TrimSpace(op.Status) {
 	case model.OperationStatusPending:
+		if imageDiagnosis != nil {
+			return *imageDiagnosis, nil
+		}
 		return s.diagnosePendingOperation(op, app, appFound)
 	case model.OperationStatusWaitingAgent:
+		if imageDiagnosis != nil {
+			return *imageDiagnosis, nil
+		}
 		runtimeID := firstNonEmpty(strings.TrimSpace(op.AssignedRuntimeID), strings.TrimSpace(op.TargetRuntimeID))
 		summary := "waiting for an external runtime agent to pick up the task"
 		if runtimeID != "" {
@@ -53,6 +67,9 @@ func (s *Server) diagnoseOperation(op model.Operation) (model.OperationDiagnosis
 			Service:  diagnosisComposeService(op, app, appFound),
 		}, nil
 	case model.OperationStatusRunning:
+		if imageDiagnosis != nil {
+			return *imageDiagnosis, nil
+		}
 		summary := firstNonEmpty(strings.TrimSpace(op.ResultMessage), "operation has been claimed and is running")
 		return model.OperationDiagnosis{
 			Category: "running",
@@ -92,6 +109,66 @@ func (s *Server) diagnoseOperation(op model.Operation) (model.OperationDiagnosis
 			Service:  diagnosisComposeService(op, app, appFound),
 		}, nil
 	}
+}
+
+func (s *Server) diagnoseDeployImageState(ctx context.Context, op model.Operation, app model.App, appFound bool) (*model.OperationDiagnosis, error) {
+	if !appFound || !strings.EqualFold(strings.TrimSpace(op.Type), model.OperationTypeDeploy) || !s.appImageInventoryConfigured() {
+		return nil, nil
+	}
+	if op.DesiredSource == nil {
+		return nil, nil
+	}
+
+	runtimeImageRef := ""
+	if op.DesiredSpec != nil {
+		runtimeImageRef = strings.TrimSpace(op.DesiredSpec.Image)
+	}
+	candidate, ok := s.buildAppImageCandidate(app, op.DesiredSource, runtimeImageRef, false, appImageOperationTimestamp(op))
+	if !ok {
+		return nil, nil
+	}
+
+	inspectResult, err := s.appImageRegistry.InspectImage(ctx, candidate.ImageRef)
+	if err != nil {
+		return nil, nil
+	}
+	if inspectResult.Exists {
+		return nil, nil
+	}
+
+	appOps, err := s.store.ListOperationsByApp(op.TenantID, false, app.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	appRef := firstNonEmpty(strings.TrimSpace(app.Name), strings.TrimSpace(app.ID))
+	hint := ""
+	if appRef != "" {
+		hint = fmt.Sprintf("Inspect build and publish with fugue app logs build %s", appRef)
+		if importOp := diagnosisLinkedImportOperation(op, appOps); importOp != nil {
+			hint += " --operation " + importOp.ID
+		}
+		hint += fmt.Sprintf(" and confirm the release state with fugue app overview %s.", appRef)
+	}
+
+	summary := fmt.Sprintf("deploy is waiting on missing managed image %q", strings.TrimSpace(candidate.ImageRef))
+	if runtime := firstNonEmpty(strings.TrimSpace(candidate.RuntimeImageRef), runtimeImageRef); runtime != "" {
+		summary = fmt.Sprintf("deploy references runtime image %q, but the managed image %q is missing from registry inventory", runtime, strings.TrimSpace(candidate.ImageRef))
+	}
+	if importOp := diagnosisLinkedImportOperation(op, appOps); importOp != nil {
+		summary = fmt.Sprintf("import %s queued this deploy, but the managed image %q is missing from registry inventory", importOp.ID, strings.TrimSpace(candidate.ImageRef))
+		if runtime := firstNonEmpty(strings.TrimSpace(candidate.RuntimeImageRef), runtimeImageRef); runtime != "" {
+			summary = fmt.Sprintf("import %s queued this deploy for runtime image %q, but the managed image %q is missing from registry inventory", importOp.ID, runtime, strings.TrimSpace(candidate.ImageRef))
+		}
+	}
+
+	return &model.OperationDiagnosis{
+		Category: "deploy-image-missing",
+		Summary:  summary,
+		Hint:     hint,
+		AppName:  diagnosisAppName(app, appFound),
+		Service:  diagnosisComposeService(op, app, appFound),
+	}, nil
 }
 
 func (s *Server) diagnosePendingOperation(op model.Operation, app model.App, appFound bool) (model.OperationDiagnosis, error) {
@@ -489,6 +566,72 @@ func diagnosisDetectPendingDependencyCycle(
 type diagnosisPendingService struct {
 	App model.App
 	Op  model.Operation
+}
+
+func diagnosisLinkedImportOperation(deployOp model.Operation, ops []model.Operation) *model.Operation {
+	deployID := strings.TrimSpace(deployOp.ID)
+	if deployID == "" {
+		return nil
+	}
+
+	sorted := append([]model.Operation(nil), ops...)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].CreatedAt.Equal(sorted[j].CreatedAt) {
+			return sorted[i].ID < sorted[j].ID
+		}
+		return sorted[i].CreatedAt.Before(sorted[j].CreatedAt)
+	})
+
+	for i := range sorted {
+		op := &sorted[i]
+		if !strings.EqualFold(strings.TrimSpace(op.Type), model.OperationTypeImport) {
+			continue
+		}
+		if strings.TrimSpace(op.AppID) != strings.TrimSpace(deployOp.AppID) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(diagnosisQueuedDeployOperationID(op.ResultMessage)), deployID) {
+			return op
+		}
+	}
+
+	service := strings.TrimSpace(deployOpComposeService(deployOp))
+	if service == "" {
+		return nil
+	}
+	var candidate *model.Operation
+	for i := range sorted {
+		op := &sorted[i]
+		if !strings.EqualFold(strings.TrimSpace(op.Type), model.OperationTypeImport) {
+			continue
+		}
+		if strings.TrimSpace(op.AppID) != strings.TrimSpace(deployOp.AppID) {
+			continue
+		}
+		if strings.TrimSpace(deployOpComposeService(*op)) != service {
+			continue
+		}
+		if op.CreatedAt.After(deployOp.CreatedAt) {
+			continue
+		}
+		candidate = op
+	}
+	return candidate
+}
+
+func deployOpComposeService(op model.Operation) string {
+	if op.DesiredSource == nil {
+		return ""
+	}
+	return strings.TrimSpace(op.DesiredSource.ComposeService)
+}
+
+func diagnosisQueuedDeployOperationID(resultMessage string) string {
+	match := diagnosisQueuedDeployOperationPattern.FindStringSubmatch(strings.TrimSpace(resultMessage))
+	if len(match) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(match[1])
 }
 
 func diagnosisPendingDeployCandidate(appOps []model.Operation) (model.Operation, bool) {

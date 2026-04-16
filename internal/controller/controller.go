@@ -530,6 +530,11 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	if err != nil {
 		return fmt.Errorf("overlay desired managed postgres state for app %s: %w", app.ID, err)
 	}
+	if op.Type == model.OperationTypeDeploy {
+		if err := s.ensureManagedDeployImageReady(ctx, app); err != nil {
+			return err
+		}
+	}
 	postgresPlacements, err := s.managedPostgresPlacements(ctx, app)
 	if err != nil {
 		return fmt.Errorf("resolve managed postgres placements for app %s: %w", app.ID, err)

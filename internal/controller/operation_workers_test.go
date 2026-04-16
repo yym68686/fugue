@@ -387,11 +387,12 @@ func TestForegroundImportWorkersProcessDifferentAppsInParallel(t *testing.T) {
 
 	importer := newControlledImporter()
 	svc := &Service{
-		Store:            stateStore,
-		Logger:           log.New(io.Discard, "", 0),
-		importer:         importer,
-		registryPushBase: "registry.push.example",
-		registryPullBase: "registry.push.example",
+		Store:               stateStore,
+		Logger:              log.New(io.Discard, "", 0),
+		importer:            importer,
+		registryPushBase:    "registry.push.example",
+		registryPullBase:    "registry.push.example",
+		inspectManagedImage: inspectManagedImageAlwaysExists,
 	}
 
 	doneOne := make(chan error, 1)
@@ -490,11 +491,12 @@ func TestForegroundImportWorkersSerializeOperationsForSameApp(t *testing.T) {
 
 	importer := newControlledImporter()
 	svc := &Service{
-		Store:            stateStore,
-		Logger:           log.New(io.Discard, "", 0),
-		importer:         importer,
-		registryPushBase: "registry.push.example",
-		registryPullBase: "registry.push.example",
+		Store:               stateStore,
+		Logger:              log.New(io.Discard, "", 0),
+		importer:            importer,
+		registryPushBase:    "registry.push.example",
+		registryPullBase:    "registry.push.example",
+		inspectManagedImage: inspectManagedImageAlwaysExists,
 	}
 
 	doneOne := make(chan error, 1)

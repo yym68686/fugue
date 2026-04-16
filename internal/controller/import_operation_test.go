@@ -100,6 +100,10 @@ func (r *recordingImporter) SuggestUploadedComposeServiceEnv(context.Context, so
 	return nil, fmt.Errorf("unexpected upload compose env refresh")
 }
 
+func inspectManagedImageAlwaysExists(context.Context, string) (bool, map[string]int64, error) {
+	return true, nil, nil
+}
+
 func TestExecuteManagedImportOperationImportsDockerImageSource(t *testing.T) {
 	t.Parallel()
 
@@ -149,11 +153,12 @@ func TestExecuteManagedImportOperationImportsDockerImageSource(t *testing.T) {
 
 	importer := &recordingImporter{}
 	svc := &Service{
-		Store:            stateStore,
-		Logger:           log.New(io.Discard, "", 0),
-		importer:         importer,
-		registryPushBase: "registry.push.example",
-		registryPullBase: "registry.pull.example",
+		Store:               stateStore,
+		Logger:              log.New(io.Discard, "", 0),
+		importer:            importer,
+		registryPushBase:    "registry.push.example",
+		registryPullBase:    "registry.pull.example",
+		inspectManagedImage: inspectManagedImageAlwaysExists,
 	}
 
 	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
@@ -259,11 +264,12 @@ func TestExecuteManagedImportOperationRefreshesExistingRestartToken(t *testing.T
 
 	importer := &recordingImporter{}
 	svc := &Service{
-		Store:            stateStore,
-		Logger:           log.New(io.Discard, "", 0),
-		importer:         importer,
-		registryPushBase: "registry.push.example",
-		registryPullBase: "registry.pull.example",
+		Store:               stateStore,
+		Logger:              log.New(io.Discard, "", 0),
+		importer:            importer,
+		registryPushBase:    "registry.push.example",
+		registryPullBase:    "registry.pull.example",
+		inspectManagedImage: inspectManagedImageAlwaysExists,
 	}
 
 	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
@@ -411,7 +417,90 @@ func TestExecuteManagedImportOperationRecoversMissingUploadImageRefFromManagedRe
 	}
 }
 
-func TestExecuteManagedImportOperationFallsBackToInferredUploadImageRefWhenRegistryLags(t *testing.T) {
+func TestExecuteManagedImportOperationFailsWhenDirectManagedImageStaysMissing(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:     model.AppSourceTypeDockerImage,
+		ImageRef: "nginx:1.27",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	specCopy := app.Spec
+	sourceCopy := *app.Source
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		DesiredSource:   &sourceCopy,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+
+	inspectCalls := 0
+	svc := &Service{
+		Store:                         stateStore,
+		Logger:                        log.New(io.Discard, "", 0),
+		importer:                      &recordingImporter{},
+		registryPushBase:              "registry.push.example",
+		registryPullBase:              "registry.pull.example",
+		importImageInspectRetryDelay:  time.Millisecond,
+		importImageInspectMaxAttempts: 3,
+		inspectManagedImage: func(_ context.Context, imageRef string) (bool, map[string]int64, error) {
+			if imageRef != "registry.push.example/fugue-apps/demo:image-abc123" {
+				t.Fatalf("unexpected direct image ref %q", imageRef)
+			}
+			inspectCalls++
+			return false, nil, nil
+		},
+	}
+
+	err = svc.executeManagedImportOperation(context.Background(), op, app)
+	if err == nil {
+		t.Fatal("expected import to fail when the managed image stays missing")
+	}
+	if inspectCalls != 3 {
+		t.Fatalf("expected 3 registry inspect attempts before failing, got %d", inspectCalls)
+	}
+	if !strings.Contains(err.Error(), "were not confirmed in the registry") {
+		t.Fatalf("expected registry confirmation failure, got %v", err)
+	}
+
+	ops, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+	for _, candidate := range ops {
+		if candidate.Type == model.OperationTypeDeploy {
+			t.Fatalf("expected no deploy operation after missing direct image, got %+v", candidate)
+		}
+	}
+}
+
+func TestExecuteManagedImportOperationFailsWhenInferredUploadImageRefStaysMissing(t *testing.T) {
 	t.Parallel()
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -433,7 +522,6 @@ func TestExecuteManagedImportOperationFallsBackToInferredUploadImageRefWhenRegis
 		t.Fatalf("create source upload: %v", err)
 	}
 	expectedManagedImageRef := "registry.push.example/fugue-apps/demo:upload-" + upload.SHA256[:12]
-	expectedRuntimeImageRef := "registry.pull.example/fugue-apps/demo:upload-" + upload.SHA256[:12]
 
 	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
 		Replicas:  1,
@@ -501,34 +589,25 @@ func TestExecuteManagedImportOperationFallsBackToInferredUploadImageRefWhenRegis
 		},
 	}
 
-	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
-		t.Fatalf("execute managed import operation with inferred fallback: %v", err)
+	err = svc.executeManagedImportOperation(context.Background(), op, app)
+	if err == nil {
+		t.Fatal("expected import to fail when inferred image never appears in the registry")
 	}
 	if inspectCalls != 3 {
-		t.Fatalf("expected 3 registry inspect attempts before fallback, got %d", inspectCalls)
+		t.Fatalf("expected 3 registry inspect attempts before failure, got %d", inspectCalls)
+	}
+	if !strings.Contains(err.Error(), "were not confirmed in the registry") {
+		t.Fatalf("expected registry confirmation failure, got %v", err)
 	}
 
 	ops, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
 	if err != nil {
 		t.Fatalf("list app operations: %v", err)
 	}
-	var deployOp model.Operation
 	for _, candidate := range ops {
 		if candidate.Type == model.OperationTypeDeploy {
-			deployOp = candidate
+			t.Fatalf("expected no deploy operation after inferred image confirmation failure, got %+v", candidate)
 		}
-	}
-	if deployOp.ID == "" || deployOp.DesiredSpec == nil {
-		t.Fatalf("expected deploy operation after inferred fallback, got %+v", deployOp)
-	}
-	if got := deployOp.DesiredSpec.Image; got != expectedRuntimeImageRef {
-		t.Fatalf("expected fallback runtime image %q, got %q", expectedRuntimeImageRef, got)
-	}
-	if deployOp.DesiredSource == nil {
-		t.Fatal("expected desired source on fallback deploy operation")
-	}
-	if got := deployOp.DesiredSource.ResolvedImageRef; got != expectedManagedImageRef {
-		t.Fatalf("expected fallback managed image ref %q, got %q", expectedManagedImageRef, got)
 	}
 }
 
@@ -578,11 +657,12 @@ func TestExecuteManagedImportOperationStopsAfterForceDelete(t *testing.T) {
 
 	importer := newControlledImporter()
 	svc := &Service{
-		Store:            stateStore,
-		Logger:           log.New(io.Discard, "", 0),
-		importer:         importer,
-		registryPushBase: "registry.push.example",
-		registryPullBase: "registry.pull.example",
+		Store:               stateStore,
+		Logger:              log.New(io.Discard, "", 0),
+		importer:            importer,
+		registryPushBase:    "registry.push.example",
+		registryPullBase:    "registry.pull.example",
+		inspectManagedImage: inspectManagedImageAlwaysExists,
 	}
 
 	resultCh := make(chan error, 1)
@@ -750,10 +830,11 @@ func TestExecuteManagedImportOperationDoesNotConstrainBuildPlacementByRuntimeLoc
 
 	importer := &recordingImporter{}
 	svc := &Service{
-		Store:            stateStore,
-		Logger:           log.New(io.Discard, "", 0),
-		importer:         importer,
-		registryPushBase: "registry.push.example",
+		Store:               stateStore,
+		Logger:              log.New(io.Discard, "", 0),
+		importer:            importer,
+		registryPushBase:    "registry.push.example",
+		inspectManagedImage: inspectManagedImageAlwaysExists,
 	}
 
 	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
@@ -859,10 +940,11 @@ func TestExecuteManagedImportOperationRefreshesComposeEnvWithoutOverwritingCusto
 		},
 	}
 	svc := &Service{
-		Store:            stateStore,
-		Logger:           log.New(io.Discard, "", 0),
-		importer:         importer,
-		registryPushBase: "registry.push.example",
+		Store:               stateStore,
+		Logger:              log.New(io.Discard, "", 0),
+		importer:            importer,
+		registryPushBase:    "registry.push.example",
+		inspectManagedImage: inspectManagedImageAlwaysExists,
 	}
 
 	if err := svc.executeManagedImportOperation(context.Background(), op, primaryApp); err != nil {
@@ -985,11 +1067,12 @@ func TestExecuteManagedImportOperationAppliesSuggestedStartupCommandWhenMissing(
 		},
 	}
 	svc := &Service{
-		Store:            stateStore,
-		Logger:           log.New(io.Discard, "", 0),
-		importer:         importer,
-		registryPushBase: "registry.push.example",
-		registryPullBase: "registry.pull.example",
+		Store:               stateStore,
+		Logger:              log.New(io.Discard, "", 0),
+		importer:            importer,
+		registryPushBase:    "registry.push.example",
+		registryPullBase:    "registry.pull.example",
+		inspectManagedImage: inspectManagedImageAlwaysExists,
 	}
 
 	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
@@ -1094,11 +1177,12 @@ func TestExecuteManagedImportOperationDoesNotOverrideExplicitStartupCommand(t *t
 		},
 	}
 	svc := &Service{
-		Store:            stateStore,
-		Logger:           log.New(io.Discard, "", 0),
-		importer:         importer,
-		registryPushBase: "registry.push.example",
-		registryPullBase: "registry.pull.example",
+		Store:               stateStore,
+		Logger:              log.New(io.Discard, "", 0),
+		importer:            importer,
+		registryPushBase:    "registry.push.example",
+		registryPullBase:    "registry.pull.example",
+		inspectManagedImage: inspectManagedImageAlwaysExists,
 	}
 
 	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
@@ -1170,11 +1254,12 @@ func TestExecuteManagedImportOperationKeepsBackgroundAppsPortless(t *testing.T) 
 
 	importer := &recordingImporter{}
 	svc := &Service{
-		Store:            stateStore,
-		Logger:           log.New(io.Discard, "", 0),
-		importer:         importer,
-		registryPushBase: "registry.push.example",
-		registryPullBase: "registry.pull.example",
+		Store:               stateStore,
+		Logger:              log.New(io.Discard, "", 0),
+		importer:            importer,
+		registryPushBase:    "registry.push.example",
+		registryPullBase:    "registry.pull.example",
+		inspectManagedImage: inspectManagedImageAlwaysExists,
 	}
 
 	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
@@ -1264,11 +1349,12 @@ func TestExecuteManagedImportOperationAutoBackgroundsDockerImageWithoutPublicSer
 		},
 	}
 	svc := &Service{
-		Store:            stateStore,
-		Logger:           log.New(io.Discard, "", 0),
-		importer:         importer,
-		registryPushBase: "registry.push.example",
-		registryPullBase: "registry.pull.example",
+		Store:               stateStore,
+		Logger:              log.New(io.Discard, "", 0),
+		importer:            importer,
+		registryPushBase:    "registry.push.example",
+		registryPullBase:    "registry.pull.example",
+		inspectManagedImage: inspectManagedImageAlwaysExists,
 	}
 
 	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
@@ -1364,11 +1450,12 @@ func TestExecuteManagedImportOperationAutoBackgroundsSingleAppWithoutPublicServi
 		},
 	}
 	svc := &Service{
-		Store:            stateStore,
-		Logger:           log.New(io.Discard, "", 0),
-		importer:         importer,
-		registryPushBase: "registry.push.example",
-		registryPullBase: "registry.pull.example",
+		Store:               stateStore,
+		Logger:              log.New(io.Discard, "", 0),
+		importer:            importer,
+		registryPushBase:    "registry.push.example",
+		registryPullBase:    "registry.pull.example",
+		inspectManagedImage: inspectManagedImageAlwaysExists,
 	}
 
 	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
@@ -1466,11 +1553,12 @@ func TestExecuteManagedImportOperationKeepsTopologyServicesPublicWithoutPublicSe
 		},
 	}
 	svc := &Service{
-		Store:            stateStore,
-		Logger:           log.New(io.Discard, "", 0),
-		importer:         importer,
-		registryPushBase: "registry.push.example",
-		registryPullBase: "registry.pull.example",
+		Store:               stateStore,
+		Logger:              log.New(io.Discard, "", 0),
+		importer:            importer,
+		registryPushBase:    "registry.push.example",
+		registryPullBase:    "registry.pull.example",
+		inspectManagedImage: inspectManagedImageAlwaysExists,
 	}
 
 	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {

@@ -94,6 +94,7 @@ type importBundleJSON struct {
 	Operation     *model.Operation         `json:"operation,omitempty"`
 	Apps          []model.App              `json:"apps,omitempty"`
 	Operations    []model.Operation        `json:"operations,omitempty"`
+	Diagnosis     *appOverviewDiagnosis    `json:"diagnosis,omitempty"`
 	ComposeStack  map[string]any           `json:"compose_stack,omitempty"`
 	FugueManifest map[string]any           `json:"fugue_manifest,omitempty"`
 	Idempotency   *importGitHubIdempotency `json:"idempotency,omitempty"`
@@ -798,7 +799,7 @@ func (c *CLI) finishImportBundle(client *Client, bundle importBundle, wait bool)
 	}
 
 	if !wait || len(bundle.Operations) == 0 {
-		return c.renderImportBundle(bundle, false)
+		return c.renderImportBundle(bundle, false, nil)
 	}
 
 	finalOps, err := c.waitForOperations(client, bundle.Operations)
@@ -819,14 +820,19 @@ func (c *CLI) finishImportBundle(client *Client, bundle importBundle, wait bool)
 	} else if len(finalApps) > 0 {
 		bundle.PrimaryApp = finalApps[0]
 	}
-	return c.renderImportBundle(bundle, true)
+	diagnosis, err := c.buildImportBundleDiagnosis(client, bundle.PrimaryApp)
+	if err != nil {
+		c.progressf("warning=deploy diagnosis unavailable: %v", err)
+	}
+	return c.renderImportBundle(bundle, true, diagnosis)
 }
 
-func (c *CLI) renderImportBundle(bundle importBundle, waited bool) error {
+func (c *CLI) renderImportBundle(bundle importBundle, waited bool, diagnosis *appOverviewDiagnosis) error {
 	if c.wantsJSON() {
 		payload := importBundleJSON{
 			Apps:          bundle.Apps,
 			Operations:    bundle.Operations,
+			Diagnosis:     diagnosis,
 			ComposeStack:  bundle.ComposeStack,
 			FugueManifest: bundle.FugueManifest,
 			Idempotency:   bundle.Idempotency,
@@ -862,6 +868,17 @@ func (c *CLI) renderImportBundle(bundle importBundle, waited bool) error {
 	if err := writeKeyValues(c.stdout, pairs...); err != nil {
 		return err
 	}
+	if diagnosis != nil {
+		if _, err := fmt.Fprintln(c.stdout); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(c.stdout, "diagnosis"); err != nil {
+			return err
+		}
+		if err := renderAppOverviewDiagnosis(c.stdout, diagnosis); err != nil {
+			return err
+		}
+	}
 	if len(bundle.Apps) > 1 {
 		if _, err := fmt.Fprintln(c.stdout); err != nil {
 			return err
@@ -869,6 +886,43 @@ func (c *CLI) renderImportBundle(bundle importBundle, waited bool) error {
 		return writeMultiAppSummary(c.stdout, bundle.Apps)
 	}
 	return nil
+}
+
+func (c *CLI) buildImportBundleDiagnosis(client *Client, app model.App) (*appOverviewDiagnosis, error) {
+	if strings.TrimSpace(app.ID) == "" {
+		return nil, nil
+	}
+
+	snapshot := appOverviewSnapshot{App: app}
+	operations, err := client.ListOperations(app.ID)
+	if err != nil {
+		return nil, err
+	}
+	snapshot.Operations = operations
+
+	if images, err := client.GetAppImages(app.ID); err == nil {
+		snapshot.Images = &images
+	}
+	if podInventory, err := client.GetAppRuntimePods(app.ID, "app"); err == nil {
+		snapshot.PodInventory = &podInventory
+	}
+
+	diagnosis, err := c.buildAppOverviewDiagnosis(client, snapshot)
+	if err != nil {
+		return nil, err
+	}
+	if diagnosis != nil && !strings.EqualFold(strings.TrimSpace(diagnosis.Category), "state-summary") {
+		return diagnosis, nil
+	}
+
+	runtimeDiagnosis, err := client.TryGetAppDiagnosis(app.ID, "app")
+	if err != nil {
+		return diagnosis, nil
+	}
+	if runtimeDiagnosis != nil && !strings.EqualFold(strings.TrimSpace(runtimeDiagnosis.Category), "available") {
+		return appDiagnosisToOverviewDiagnosis(runtimeDiagnosis), nil
+	}
+	return diagnosis, nil
 }
 
 func (c *CLI) waitForOperations(client *Client, operations []model.Operation) ([]model.Operation, error) {

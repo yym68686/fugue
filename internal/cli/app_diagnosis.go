@@ -107,6 +107,9 @@ func (c *CLI) collectBuildArtifactReport(client *Client, appID string, logs buil
 	}
 
 	enrichBuildArtifactReport(report, importOp, operations, images, podInventory)
+	if report.BuildJobName == "" {
+		report.BuildJobName = firstNonEmptyTrimmed(report.LatestPodGroup, report.LinkedDeployOperationID)
+	}
 	if !buildArtifactReportHasContent(report) {
 		return nil
 	}
@@ -325,14 +328,19 @@ func renderAppOverviewDiagnosis(w io.Writer, diagnosis *appOverviewDiagnosis) er
 }
 
 func renderBuildLogsReport(w io.Writer, logs buildLogsResponse) error {
+	buildMessage := firstNonEmptyTrimmed(strings.TrimSpace(logs.Summary), strings.TrimSpace(logs.ResultMessage), strings.TrimSpace(logs.ErrorMessage))
+	summary := preferredBuildLogsSummary(logs)
 	pairs := []kvPair{
 		{Key: "operation_id", Value: strings.TrimSpace(logs.OperationID)},
 		{Key: "operation_status", Value: strings.TrimSpace(logs.OperationStatus)},
 		{Key: "build_strategy", Value: strings.TrimSpace(logs.BuildStrategy)},
-		{Key: "job_name", Value: strings.TrimSpace(logs.JobName)},
+		{Key: "job_name", Value: firstNonEmptyTrimmed(strings.TrimSpace(logs.JobName), buildLogsFallbackJobName(logs))},
 		{Key: "log_source", Value: strings.TrimSpace(logs.Source)},
 		{Key: "logs_available", Value: formatOptionalBool(boolPtr(logs.Available))},
-		{Key: "summary", Value: firstNonEmptyTrimmed(strings.TrimSpace(logs.Summary), strings.TrimSpace(logs.ResultMessage), strings.TrimSpace(logs.ErrorMessage))},
+		{Key: "summary", Value: summary},
+	}
+	if buildMessage != "" && buildMessage != summary {
+		pairs = append(pairs, kvPair{Key: "build_message", Value: buildMessage})
 	}
 	if logs.ArtifactSummary != nil {
 		artifact := logs.ArtifactSummary
@@ -520,6 +528,32 @@ func summarizeLatestPodState(podInventory *model.AppRuntimePodInventory, expecte
 		state.Issues = appendUniqueString(state.Issues, fmt.Sprintf("latest rollout %s has no live pods", state.Group))
 	}
 	return state
+}
+
+func buildLogsFallbackJobName(logs buildLogsResponse) string {
+	if logs.ArtifactSummary == nil {
+		return ""
+	}
+	return firstNonEmptyTrimmed(
+		strings.TrimSpace(logs.ArtifactSummary.BuildJobName),
+		strings.TrimSpace(logs.ArtifactSummary.LatestPodGroup),
+		strings.TrimSpace(logs.ArtifactSummary.LinkedDeployOperationID),
+	)
+}
+
+func preferredBuildLogsSummary(logs buildLogsResponse) string {
+	if logs.ArtifactSummary != nil {
+		artifact := logs.ArtifactSummary
+		switch {
+		case normalizeImageInventoryStatus(artifact.RegistryImageStatus) == "missing":
+			return runtimeImageMissingSummary(artifact)
+		case hasImagePullPodIssue(artifact.PodIssues):
+			return runtimeImagePullFailureSummary(artifact)
+		case len(artifact.PodIssues) > 0:
+			return strings.TrimSpace(artifact.PodIssues[0])
+		}
+	}
+	return firstNonEmptyTrimmed(strings.TrimSpace(logs.Summary), strings.TrimSpace(logs.ResultMessage), strings.TrimSpace(logs.ErrorMessage))
 }
 
 func describePodIssue(pod model.ClusterPod, expectedImage string) string {

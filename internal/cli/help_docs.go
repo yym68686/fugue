@@ -38,6 +38,24 @@ fugue app logs runtime my-app --follow
 fugue app service attach my-app postgres
 `),
 	},
+	"fugue tenant": {
+		Example: strings.TrimSpace(`
+fugue tenant ls
+fugue tenant ls --output json
+`),
+	},
+	"fugue tenant ls": {
+		Long: strings.TrimSpace(`
+List the visible tenants/workspaces for the current access key.
+
+Use this when a key can see more than one workspace and you want a direct CLI
+answer before choosing --tenant for deploy, project, or app commands.
+`),
+		Example: strings.TrimSpace(`
+fugue tenant ls
+fugue tenant ls --output json
+`),
+	},
 	"fugue app overview": {
 		Long: strings.TrimSpace(`
 Show the app plus related domains, bindings, backing services, operations, image inventory, runtime pod rollout context, and a root-cause diagnosis section in one snapshot.

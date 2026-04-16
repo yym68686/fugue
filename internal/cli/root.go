@@ -119,6 +119,7 @@ Environment variables:
 	  fugue deploy github owner/repo --branch main
 	  fugue deploy github owner/repo --service-env-file gateway=.env.gateway --service-env-file runtime=.env.runtime
 	  fugue deploy image nginx:1.27
+	  fugue tenant ls
 	  fugue app create my-app --github owner/repo --branch main
 	  fugue app status my-app
 	  fugue app overview my-app
@@ -191,6 +192,7 @@ Environment variables:
 	cmd.AddCommand(
 		c.newDeployCommand(),
 		c.newAppCommand(),
+		c.newTenantCommand(),
 		c.newProjectCommand(),
 		c.newRuntimeCommand(),
 		c.newServiceCommand(),

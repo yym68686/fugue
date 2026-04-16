@@ -388,3 +388,75 @@ func TestAppProxyLogsUpstreamProxyErrors(t *testing.T) {
 		t.Fatalf("expected proxy error to be logged, got %q", logged)
 	}
 }
+
+func TestMaybeHandleAppProxyReturnsLiveFailureDetailsWhenReplicasAreUnavailable(t *testing.T) {
+	t.Parallel()
+
+	_, server, _, _, app, _ := setupAppDomainTestServer(t)
+	managedMap := runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{})
+	managed, err := runtime.ManagedAppObjectFromMap(managedMap)
+	if err != nil {
+		t.Fatalf("decode managed app object: %v", err)
+	}
+	managed.Status.Phase = runtime.ManagedAppPhaseError
+	managed.Status.Message = "image pull backoff"
+	managed.Status.ReadyReplicas = 0
+	now := time.Now()
+	server.managedAppStatusCache.setApp(managedAppStatusCacheKey(app), managedAppStatusCacheEntry{
+		managed:     managed,
+		found:       true,
+		ok:          true,
+		refreshedAt: now,
+		expiresAt:   now.Add(time.Minute),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://"+app.Route.Hostname+"/healthz", nil)
+	req.Host = app.Route.Hostname
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "app is unavailable: failed: image pull backoff") {
+		t.Fatalf("expected live failure detail in body, got %q", body)
+	}
+}
+
+func TestMaybeHandleAppProxyReturnsDisabledWhenDesiredReplicasAreZero(t *testing.T) {
+	t.Parallel()
+
+	stateStore, server, _, _, app, _ := setupAppDomainTestServer(t)
+	replicas := 0
+	scaleOp, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        app.TenantID,
+		Type:            model.OperationTypeScale,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredReplicas: &replicas,
+	})
+	if err != nil {
+		t.Fatalf("create disable operation: %v", err)
+	}
+	if _, err := stateStore.CompleteManagedOperation(scaleOp.ID, "", "disabled"); err != nil {
+		t.Fatalf("complete disable operation: %v", err)
+	}
+	app, err = stateStore.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("reload disabled app: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://"+app.Route.Hostname+"/healthz", nil)
+	req.Host = app.Route.Hostname
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "app is disabled") {
+		t.Fatalf("expected disabled message, got %q", recorder.Body.String())
+	}
+}

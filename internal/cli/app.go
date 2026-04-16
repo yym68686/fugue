@@ -543,6 +543,9 @@ func (c *CLI) renderBuildLogs(client *Client, appID string, opts appLogsCommandO
 		return err
 	}
 	logs.ArtifactSummary = c.collectBuildArtifactReport(client, appID, logs)
+	if strings.TrimSpace(logs.JobName) == "" {
+		logs.JobName = buildLogsFallbackJobName(logs)
+	}
 	if c.wantsJSON() {
 		return writeJSON(c.stdout, logs)
 	}

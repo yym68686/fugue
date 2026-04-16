@@ -1126,25 +1126,7 @@ func (c *CLI) newAdminTenantCommand() *cobra.Command {
 }
 
 func (c *CLI) newAdminTenantListCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:     "ls",
-		Aliases: []string{"list"},
-		Short:   "List tenants",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := c.newClient()
-			if err != nil {
-				return err
-			}
-			tenants, err := client.ListTenants()
-			if err != nil {
-				return err
-			}
-			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"tenants": tenants})
-			}
-			return writeTenantTable(c.stdout, tenants)
-		},
-	}
+	return c.newTenantListCommand()
 }
 
 func (c *CLI) newAdminTenantCreateCommand() *cobra.Command {
