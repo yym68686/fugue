@@ -849,12 +849,12 @@ func builderUsedResources(summary *builderKubeNodeSummary, memoryCapacity int64)
 		used.CPUMilli = int64(math.Round(float64(*summary.Node.CPU.UsageNanoCores) / 1_000_000))
 	}
 	switch {
+	case summary.Node.Memory.AvailableBytes != nil && memoryCapacity > 0 && *summary.Node.Memory.AvailableBytes <= uint64(memoryCapacity):
+		used.MemoryBytes = memoryCapacity - int64(*summary.Node.Memory.AvailableBytes)
 	case summary.Node.Memory.WorkingSetBytes != nil:
 		used.MemoryBytes = int64(*summary.Node.Memory.WorkingSetBytes)
 	case summary.Node.Memory.UsageBytes != nil:
 		used.MemoryBytes = int64(*summary.Node.Memory.UsageBytes)
-	case summary.Node.Memory.AvailableBytes != nil && memoryCapacity > 0 && *summary.Node.Memory.AvailableBytes <= uint64(memoryCapacity):
-		used.MemoryBytes = memoryCapacity - int64(*summary.Node.Memory.AvailableBytes)
 	}
 	used.EphemeralBytes = builderPodEphemeralUsageBytes(summary)
 	return used

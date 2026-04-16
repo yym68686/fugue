@@ -443,6 +443,25 @@ func TestBuilderUsedResourcesUsesPodEphemeralUsage(t *testing.T) {
 	}
 }
 
+func TestBuilderUsedResourcesPrefersAvailableBytesForMemoryHeadroom(t *testing.T) {
+	t.Parallel()
+
+	capacity := parseBuilderBytes("4Gi")
+	used := builderUsedResources(&builderKubeNodeSummary{
+		Node: builderKubeSummaryNode{
+			Memory: builderKubeSummaryMem{
+				WorkingSetBytes: builderUint64Ptr(uint64(parseBuilderBytes("3Gi"))),
+				UsageBytes:      builderUint64Ptr(uint64(parseBuilderBytes("3Gi"))),
+				AvailableBytes:  builderUint64Ptr(uint64(parseBuilderBytes("2Gi"))),
+			},
+		},
+	}, capacity)
+
+	if got := used.MemoryBytes; got != parseBuilderBytes("2Gi") {
+		t.Fatalf("expected memory used to be derived from available bytes, got %d", got)
+	}
+}
+
 func TestBuilderNodeFilesystemAvailableBytesUsesNodeSummaryAvailability(t *testing.T) {
 	t.Parallel()
 
