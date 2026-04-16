@@ -39,7 +39,7 @@ const (
 	builderLightEphemeralBufferBytes = int64(2 * 1024 * 1024 * 1024)
 	builderHeavyEphemeralBufferBytes = int64(4 * 1024 * 1024 * 1024)
 	builderLightMemoryBufferBytes    = int64(512 * 1024 * 1024)
-	builderHeavyMemoryBufferBytes    = int64(1024 * 1024 * 1024)
+	builderHeavyMemoryBufferBytes    = int64(512 * 1024 * 1024)
 	builderLightCPUBufferMilli       = int64(250)
 	builderHeavyCPUBufferMilli       = int64(500)
 	builderLightBufferPercent        = 0.10
@@ -564,9 +564,6 @@ func selectBuilderCandidates(policy BuilderPodPolicy, profile builderWorkloadPro
 
 func builderPlacementCandidates(candidates []builderCandidate, profile builderWorkloadProfile, candidateCount int) []builderCandidate {
 	limit := 2
-	if profile == builderWorkloadProfileHeavy {
-		limit = 1
-	}
 	if candidateCount > 0 && candidateCount < limit {
 		limit = candidateCount
 	}

@@ -507,13 +507,36 @@ func TestBuilderPlacementCandidatesCapsFallbackByProfile(t *testing.T) {
 	}
 
 	heavy := builderPlacementCandidates(candidates, builderWorkloadProfileHeavy, 3)
-	if len(heavy) != 1 || heavy[0].Node.Name != "node-a" {
-		t.Fatalf("expected heavy placement to keep only the top candidate, got %+v", heavy)
+	if len(heavy) != 2 || heavy[0].Node.Name != "node-a" || heavy[1].Node.Name != "node-b" {
+		t.Fatalf("expected heavy placement to keep the top two candidates, got %+v", heavy)
 	}
 
 	light := builderPlacementCandidates(candidates, builderWorkloadProfileLight, 3)
 	if len(light) != 2 {
 		t.Fatalf("expected light placement to keep only two fallback candidates, got %d", len(light))
+	}
+}
+
+func TestSelectBuilderCandidatesHeavyAllowsSharedFourGiNodesWithModerateHeadroom(t *testing.T) {
+	t.Parallel()
+
+	policy := defaultBuilderPodPolicy()
+	demand, err := builderDemandForProfile(policy, builderWorkloadProfileHeavy)
+	if err != nil {
+		t.Fatalf("builder demand: %v", err)
+	}
+
+	candidates := selectBuilderCandidates(policy, builderWorkloadProfileHeavy, demand, []builderNodeSnapshot{
+		builderTestNode("fortedrape8", "fortedrape8", policy, policy.LargeNodeLabelValue, "2", "3977116Ki", "40010668616", "162m", "2042691584", "0"),
+		builderTestNode("gcp2", "instance-20260322-112431", policy, policy.MediumNodeLabelValue, "2", "4018884Ki", "29888385001", "608m", "2291592704", "0"),
+		builderTestNode("gcp3", "instance-20260322-112657", policy, policy.MediumNodeLabelValue, "2", "4018892Ki", "9814318482", "298m", "2316939264", "0"),
+	}, nil, nil)
+
+	if len(candidates) < 2 {
+		t.Fatalf("expected at least two eligible heavy builder nodes, got %d", len(candidates))
+	}
+	if got := candidates[0].Node.Name; got != "fortedrape8" {
+		t.Fatalf("expected fortedrape8-like node to rank first, got %q", got)
 	}
 }
 
