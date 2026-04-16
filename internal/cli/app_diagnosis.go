@@ -28,13 +28,24 @@ type appBuildArtifactReport struct {
 	BuildJobName            string               `json:"build_job_name,omitempty"`
 	BuildLogSource          string               `json:"build_log_source,omitempty"`
 	BuildLogsAvailable      *bool                `json:"build_logs_available,omitempty"`
+	BuilderNamespace        string               `json:"builder_namespace,omitempty"`
+	BuilderPods             []string             `json:"builder_pods,omitempty"`
+	BuilderNodes            []string             `json:"builder_nodes,omitempty"`
+	BuilderContainers       []string             `json:"builder_containers,omitempty"`
 	ManagedImageRef         string               `json:"managed_image_ref,omitempty"`
 	RuntimeImageRef         string               `json:"runtime_image_ref,omitempty"`
 	RegistryImageStatus     string               `json:"registry_image_status,omitempty"`
 	RegistryImageCurrent    bool                 `json:"registry_image_current,omitempty"`
+	RegistryLifecycleState  string               `json:"registry_lifecycle_state,omitempty"`
+	RegistryLifecycleHint   string               `json:"registry_lifecycle_hint,omitempty"`
+	RegistryLifecycleEvents []string             `json:"registry_lifecycle_events,omitempty"`
 	LinkedDeployOperationID string               `json:"linked_deploy_operation_id,omitempty"`
 	LinkedDeployStatus      string               `json:"linked_deploy_status,omitempty"`
 	LinkedDeployMessage     string               `json:"linked_deploy_message,omitempty"`
+	ControllerPod           string               `json:"controller_pod,omitempty"`
+	ControllerLogEvidence   []string             `json:"controller_log_evidence,omitempty"`
+	RegistryPod             string               `json:"registry_pod,omitempty"`
+	RegistryLogEvidence     []string             `json:"registry_log_evidence,omitempty"`
 	LatestPodGroup          string               `json:"latest_pod_group,omitempty"`
 	LivePods                int                  `json:"live_pods,omitempty"`
 	ReadyPods               int                  `json:"ready_pods,omitempty"`
@@ -220,6 +231,27 @@ func enrichBuildArtifactReport(report *appBuildArtifactReport, importOp *model.O
 }
 
 func summarizeAppOverviewDiagnosis(app model.App, latestImport, latestDeploy *model.Operation, deployDiagnosis *model.OperationDiagnosis, report *appBuildArtifactReport) *appOverviewDiagnosis {
+	if latestImport != nil {
+		switch strings.TrimSpace(latestImport.Status) {
+		case model.OperationStatusFailed:
+			return &appOverviewDiagnosis{
+				Category:        "import-failed",
+				Summary:         firstNonEmptyTrimmed(operationMessage(latestImport), "latest import operation failed"),
+				Hint:            buildArtifactHint(app, report),
+				Evidence:        buildArtifactEvidence(report, nil),
+				ArtifactSummary: report,
+			}
+		case model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent:
+			return &appOverviewDiagnosis{
+				Category:        "import-" + strings.TrimSpace(latestImport.Status),
+				Summary:         firstNonEmptyTrimmed(operationMessage(latestImport), "latest import operation is still in progress"),
+				Hint:            buildArtifactHint(app, report),
+				Evidence:        buildArtifactEvidence(report, nil),
+				ArtifactSummary: report,
+			}
+		}
+	}
+
 	if report != nil {
 		status := normalizeImageInventoryStatus(report.RegistryImageStatus)
 		switch {
@@ -248,16 +280,6 @@ func summarizeAppOverviewDiagnosis(app model.App, latestImport, latestDeploy *mo
 			Summary:         strings.TrimSpace(deployDiagnosis.Summary),
 			Hint:            strings.TrimSpace(deployDiagnosis.Hint),
 			Evidence:        buildArtifactEvidence(report, deployDiagnosis),
-			ArtifactSummary: report,
-		}
-	}
-
-	if latestImport != nil && !isTerminalOperationStatus(latestImport.Status) {
-		return &appOverviewDiagnosis{
-			Category:        "import-" + strings.TrimSpace(latestImport.Status),
-			Summary:         firstNonEmptyTrimmed(operationMessage(latestImport), "latest import operation is still in progress"),
-			Hint:            buildArtifactHint(app, report),
-			Evidence:        buildArtifactEvidence(report, nil),
 			ArtifactSummary: report,
 		}
 	}
@@ -315,6 +337,12 @@ func renderAppOverviewDiagnosis(w io.Writer, diagnosis *appOverviewDiagnosis) er
 			kvPair{Key: "registry_image_status", Value: strings.TrimSpace(artifact.RegistryImageStatus)},
 			kvPair{Key: "latest_pod_group", Value: strings.TrimSpace(artifact.LatestPodGroup)},
 		)
+		if value := strings.TrimSpace(artifact.RegistryLifecycleState); value != "" {
+			pairs = append(pairs, kvPair{Key: "registry_lifecycle_state", Value: value})
+		}
+		if value := strings.TrimSpace(artifact.RegistryLifecycleHint); value != "" {
+			pairs = append(pairs, kvPair{Key: "registry_lifecycle_hint", Value: value})
+		}
 	}
 	if err := writeKeyValues(w, pairs...); err != nil {
 		return err
@@ -353,6 +381,30 @@ func renderBuildLogsReport(w io.Writer, logs buildLogsResponse) error {
 			kvPair{Key: "deploy_status", Value: strings.TrimSpace(artifact.LinkedDeployStatus)},
 			kvPair{Key: "latest_pod_group", Value: strings.TrimSpace(artifact.LatestPodGroup)},
 		)
+		if value := strings.TrimSpace(artifact.BuilderNamespace); value != "" {
+			pairs = append(pairs, kvPair{Key: "builder_namespace", Value: value})
+		}
+		if len(artifact.BuilderPods) > 0 {
+			pairs = append(pairs, kvPair{Key: "builder_pods", Value: strings.Join(artifact.BuilderPods, ", ")})
+		}
+		if len(artifact.BuilderNodes) > 0 {
+			pairs = append(pairs, kvPair{Key: "builder_nodes", Value: strings.Join(artifact.BuilderNodes, ", ")})
+		}
+		if len(artifact.BuilderContainers) > 0 {
+			pairs = append(pairs, kvPair{Key: "builder_containers", Value: strings.Join(artifact.BuilderContainers, ", ")})
+		}
+		if value := strings.TrimSpace(artifact.RegistryLifecycleState); value != "" {
+			pairs = append(pairs, kvPair{Key: "registry_lifecycle_state", Value: value})
+		}
+		if value := strings.TrimSpace(artifact.RegistryLifecycleHint); value != "" {
+			pairs = append(pairs, kvPair{Key: "registry_lifecycle_hint", Value: value})
+		}
+		if value := strings.TrimSpace(artifact.ControllerPod); value != "" {
+			pairs = append(pairs, kvPair{Key: "controller_pod", Value: value})
+		}
+		if value := strings.TrimSpace(artifact.RegistryPod); value != "" {
+			pairs = append(pairs, kvPair{Key: "registry_pod", Value: value})
+		}
 	}
 	if err := writeKeyValues(w, pairs...); err != nil {
 		return err
@@ -375,6 +427,21 @@ func renderBuildLogsReport(w io.Writer, logs buildLogsResponse) error {
 		}
 		for _, warning := range logs.ArtifactSummary.Warnings {
 			if _, err := fmt.Fprintf(w, "warning=%s\n", warning); err != nil {
+				return err
+			}
+		}
+		for _, evidence := range logs.ArtifactSummary.ControllerLogEvidence {
+			if _, err := fmt.Fprintf(w, "controller_evidence=%s\n", evidence); err != nil {
+				return err
+			}
+		}
+		for _, evidence := range logs.ArtifactSummary.RegistryLogEvidence {
+			if _, err := fmt.Fprintf(w, "registry_evidence=%s\n", evidence); err != nil {
+				return err
+			}
+		}
+		for _, evidence := range logs.ArtifactSummary.RegistryLifecycleEvents {
+			if _, err := fmt.Fprintf(w, "registry_lifecycle_evidence=%s\n", evidence); err != nil {
 				return err
 			}
 		}
@@ -545,6 +612,8 @@ func preferredBuildLogsSummary(logs buildLogsResponse) string {
 	if logs.ArtifactSummary != nil {
 		artifact := logs.ArtifactSummary
 		switch {
+		case strings.TrimSpace(artifact.RegistryLifecycleHint) != "":
+			return strings.TrimSpace(artifact.RegistryLifecycleHint)
 		case normalizeImageInventoryStatus(artifact.RegistryImageStatus) == "missing":
 			return runtimeImageMissingSummary(artifact)
 		case hasImagePullPodIssue(artifact.PodIssues):
@@ -603,6 +672,18 @@ func buildArtifactEvidence(report *appBuildArtifactReport, deployDiagnosis *mode
 		}
 		if status := strings.TrimSpace(report.RegistryImageStatus); status != "" {
 			evidence = append(evidence, fmt.Sprintf("registry image status=%s", status))
+		}
+		if lifecycle := strings.TrimSpace(report.RegistryLifecycleHint); lifecycle != "" {
+			evidence = appendUniqueString(evidence, "registry lifecycle: "+lifecycle)
+		}
+		for _, detail := range report.RegistryLifecycleEvents {
+			evidence = appendUniqueString(evidence, detail)
+		}
+		for _, detail := range report.ControllerLogEvidence {
+			evidence = appendUniqueString(evidence, "controller log: "+detail)
+		}
+		for _, detail := range report.RegistryLogEvidence {
+			evidence = appendUniqueString(evidence, "registry log: "+detail)
 		}
 		for _, issue := range report.PodIssues {
 			evidence = appendUniqueString(evidence, issue)
@@ -801,10 +882,15 @@ func buildArtifactReportHasContent(report *appBuildArtifactReport) bool {
 	}
 	return report.BuildOperationID != "" ||
 		report.BuildJobName != "" ||
+		report.BuilderNamespace != "" ||
+		len(report.BuilderPods) > 0 ||
 		report.ManagedImageRef != "" ||
 		report.RuntimeImageRef != "" ||
 		report.LinkedDeployOperationID != "" ||
 		report.RegistryImageStatus != "" ||
+		report.RegistryLifecycleState != "" ||
+		len(report.ControllerLogEvidence) > 0 ||
+		len(report.RegistryLogEvidence) > 0 ||
 		report.LatestPodGroup != "" ||
 		len(report.PodIssues) > 0 ||
 		len(report.Warnings) > 0
@@ -843,15 +929,6 @@ func operationMessage(op *model.Operation) string {
 		return ""
 	}
 	return firstNonEmptyTrimmed(strings.TrimSpace(op.ErrorMessage), strings.TrimSpace(op.ResultMessage))
-}
-
-func isTerminalOperationStatus(status string) bool {
-	switch strings.TrimSpace(status) {
-	case model.OperationStatusCompleted, model.OperationStatusFailed:
-		return true
-	default:
-		return false
-	}
 }
 
 func appendUniqueString(values []string, value string) []string {

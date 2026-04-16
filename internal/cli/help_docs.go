@@ -92,6 +92,8 @@ fugue app logs pods my-app
 Read build logs and the derived artifact pipeline summary for one app build operation.
 
 Besides the raw log tail, text output shows build, push, publish, deploy, and runtime stages so you can confirm whether the built image was recorded, published to the registry, referenced by deploy, and observed in pods.
+
+When the current key can see cluster diagnostics, the same command also annotates the builder pod identity plus controller and registry evidence so you can distinguish "publish never happened" from "tag existed earlier and later disappeared from registry inventory".
 `),
 		Example: strings.TrimSpace(`
 fugue app logs build my-app

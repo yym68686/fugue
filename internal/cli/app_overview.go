@@ -145,19 +145,32 @@ func (c *CLI) loadAppOverview(client *Client, ref string) (appOverviewSnapshot, 
 	} else {
 		snapshot.PodInventory = &podInventory
 	}
+	if diagnosis, err := c.buildAppOverviewDiagnosis(client, snapshot); err != nil {
+		c.progressf("warning=app diagnosis unavailable: %v", err)
+	} else {
+		snapshot.Diagnosis = diagnosis
+	}
 	if runtimeDiagnosis, err := client.TryGetAppDiagnosis(app.ID, "app"); err != nil {
 		c.progressf("warning=app runtime diagnosis unavailable: %v", err)
 	} else if runtimeDiagnosis != nil && !strings.EqualFold(strings.TrimSpace(runtimeDiagnosis.Category), "available") {
-		snapshot.Diagnosis = appDiagnosisToOverviewDiagnosis(runtimeDiagnosis)
-	}
-	if snapshot.Diagnosis == nil {
-		if diagnosis, err := c.buildAppOverviewDiagnosis(client, snapshot); err != nil {
-			c.progressf("warning=app diagnosis unavailable: %v", err)
-		} else {
-			snapshot.Diagnosis = diagnosis
-		}
+		snapshot.Diagnosis = selectPrimaryOverviewDiagnosis(snapshot.Diagnosis, appDiagnosisToOverviewDiagnosis(runtimeDiagnosis))
 	}
 	return snapshot, nil
+}
+
+func selectPrimaryOverviewDiagnosis(primary, runtime *appOverviewDiagnosis) *appOverviewDiagnosis {
+	switch {
+	case primary == nil:
+		return runtime
+	case runtime == nil:
+		return primary
+	}
+	switch strings.TrimSpace(primary.Category) {
+	case "", "state-summary":
+		return runtime
+	default:
+		return primary
+	}
 }
 
 func (c *CLI) renderAppOverviewSnapshot(client *Client, snapshot appOverviewSnapshot, separate bool, showSecrets bool) error {

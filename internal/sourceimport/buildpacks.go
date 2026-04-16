@@ -142,11 +142,17 @@ func buildAndPushBuildpacksImage(ctx context.Context, req buildpacksBuildRequest
 	}
 
 	jobName := buildJobName(dockerfileBuildRequest{
-		RepoURL:     req.RepoURL,
-		CommitSHA:   req.CommitSHA,
-		SourceLabel: req.SourceLabel,
+		RepoURL:            req.RepoURL,
+		CommitSHA:          req.CommitSHA,
+		SourceLabel:        req.SourceLabel,
+		ArchiveDownloadURL: req.ArchiveDownloadURL,
+		BuildContextDir:    req.SourceDir,
+		ImageRef:           req.ImageRef,
+		JobLabels:          req.JobLabels,
 	})
-	_ = kubectlRun(ctx, nil, "-n", namespace, "delete", "job", jobName, "--ignore-not-found=true", "--wait=false")
+	if err := deleteBuilderJobIfPresent(ctx, namespace, jobName); err != nil {
+		return err
+	}
 	placement, releasePlacement, err := acquireBuilderPlacement(ctx, namespace, jobName, req.PodPolicy, req.WorkloadProfile, req.PlacementNodeSelector)
 	if err != nil {
 		return fmt.Errorf("select builder placement: %w", err)

@@ -543,6 +543,7 @@ func (c *CLI) renderBuildLogs(client *Client, appID string, opts appLogsCommandO
 		return err
 	}
 	logs.ArtifactSummary = c.collectBuildArtifactReport(client, appID, logs)
+	c.enrichBuildLogsArtifactReport(client, appID, logs.ArtifactSummary)
 	if strings.TrimSpace(logs.JobName) == "" {
 		logs.JobName = buildLogsFallbackJobName(logs)
 	}

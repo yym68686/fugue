@@ -222,7 +222,9 @@ func buildAndPushDockerfileImage(ctx context.Context, req dockerfileBuildRequest
 	}
 
 	jobName := buildJobName(req)
-	_ = kubectlRun(ctx, nil, "-n", namespace, "delete", "job", jobName, "--ignore-not-found=true", "--wait=false")
+	if err := deleteBuilderJobIfPresent(ctx, namespace, jobName); err != nil {
+		return err
+	}
 	placement, releasePlacement, err := acquireBuilderPlacement(ctx, namespace, jobName, req.PodPolicy, req.WorkloadProfile, req.PlacementNodeSelector)
 	if err != nil {
 		return fmt.Errorf("select builder placement: %w", err)
@@ -281,22 +283,35 @@ func buildJobName(req dockerfileBuildRequest) string {
 }
 
 func buildJobSalt(req dockerfileBuildRequest) string {
-	seed := strings.TrimSpace(req.ImageRef)
-	if seed == "" {
-		seed = strings.Join([]string{
-			strings.TrimSpace(req.DockerfilePath),
-			strings.TrimSpace(req.BuildContextDir),
-			strings.TrimSpace(req.ArchiveDownloadURL),
-			strings.TrimSpace(req.RepoURL),
-			strings.TrimSpace(req.SourceLabel),
-		}, "\x00")
+	seedParts := make([]string, 0, 3)
+	if opID := strings.TrimSpace(req.JobLabels["fugue.pro/operation-id"]); opID != "" {
+		seedParts = append(seedParts, "op="+opID)
 	}
-	seed = strings.TrimSpace(seed)
-	if seed == "" {
+	if imageRef := strings.TrimSpace(req.ImageRef); imageRef != "" {
+		seedParts = append(seedParts, "image="+imageRef)
+	}
+	fallback := strings.TrimSpace(strings.Join([]string{
+		strings.TrimSpace(req.DockerfilePath),
+		strings.TrimSpace(req.BuildContextDir),
+		strings.TrimSpace(req.ArchiveDownloadURL),
+		strings.TrimSpace(req.RepoURL),
+		strings.TrimSpace(req.SourceLabel),
+	}, "\x00"))
+	if fallback != "" {
+		seedParts = append(seedParts, "fallback="+fallback)
+	}
+	if len(seedParts) == 0 {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(seed))
+	sum := sha256.Sum256([]byte(strings.Join(seedParts, "\x00")))
 	return hex.EncodeToString(sum[:4])
+}
+
+func deleteBuilderJobIfPresent(ctx context.Context, namespace, jobName string) error {
+	if err := kubectlRun(ctx, nil, "-n", namespace, "delete", "job", jobName, "--ignore-not-found=true", "--wait=true", "--timeout=60s"); err != nil {
+		return fmt.Errorf("delete previous builder job %s: %w", jobName, err)
+	}
+	return nil
 }
 
 func buildKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest) (map[string]any, error) {

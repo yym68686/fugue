@@ -1455,6 +1455,9 @@ func TestRunAppBuildLogsShowsArtifactStages(t *testing.T) {
 			_, _ = w.Write([]byte(`{"app_id":"app_123","registry_configured":true,"summary":{"version_count":1,"current_version_count":1,"stale_version_count":0,"reclaimable_size_bytes":0},"versions":[{"image_ref":"registry.example.com/demo-managed:sha256","runtime_image_ref":"registry.example.com/demo-runtime:sha256","status":"ready","current":true,"size_bytes":1048576}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-pods":
 			_, _ = w.Write([]byte(`{"component":"app","namespace":"tenant-123","selector":"app.kubernetes.io/name=demo","container":"demo","groups":[{"owner_kind":"ReplicaSet","owner_name":"demo-8c9f6d74f7","parent":{"kind":"Deployment","name":"demo"},"revision":"13","desired_replicas":1,"current_replicas":1,"ready_replicas":1,"available_replicas":1,"containers":[{"name":"demo","image":"registry.example.com/demo-runtime:sha256"}],"pods":[{"namespace":"tenant-123","name":"demo-8c9f6d74f7-abc12","phase":"Running","ready":true,"node_name":"gcp1","containers":[{"name":"demo","image":"registry.example.com/demo-runtime:sha256","ready":true,"restart_count":0,"state":"running"}]}],"warnings":[]}],"warnings":[]}`))
+		case r.Method == http.MethodGet && (r.URL.Path == "/v1/cluster/control-plane" || r.URL.Path == "/v1/cluster/pods" || r.URL.Path == "/v1/audit-events"):
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not found"}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -1566,6 +1569,9 @@ func TestRunAppBuildLogsFallsBackToArtifactContextWhenJobNameMissing(t *testing.
 			_, _ = w.Write([]byte(`{"app_id":"app_123","registry_configured":true,"summary":{"version_count":1,"current_version_count":1,"stale_version_count":0,"reclaimable_size_bytes":0},"versions":[{"image_ref":"registry.example.com/demo-managed:sha256","runtime_image_ref":"registry.example.com/demo-runtime:sha256","status":"missing","current":true}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-pods":
 			_, _ = w.Write([]byte(`{"component":"app","namespace":"tenant-123","selector":"app.kubernetes.io/name=demo","container":"demo","groups":[{"owner_kind":"ReplicaSet","owner_name":"demo-9f8d7c6b5","parent":{"kind":"Deployment","name":"demo"},"revision":"14","desired_replicas":1,"current_replicas":1,"ready_replicas":0,"available_replicas":0,"containers":[{"name":"demo","image":"registry.example.com/demo-runtime:sha256"}],"pods":[{"namespace":"tenant-123","name":"demo-9f8d7c6b5-abc12","phase":"Pending","ready":false,"node_name":"gcp1","containers":[{"name":"demo","image":"registry.example.com/demo-runtime:sha256","ready":false,"restart_count":0,"state":"waiting","reason":"ErrImagePull","message":"manifest unknown"}]}],"warnings":[]}],"warnings":[]}`))
+		case r.Method == http.MethodGet && (r.URL.Path == "/v1/cluster/control-plane" || r.URL.Path == "/v1/cluster/pods" || r.URL.Path == "/v1/audit-events"):
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not found"}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -1590,6 +1596,143 @@ func TestRunAppBuildLogsFallsBackToArtifactContextWhenJobNameMissing(t *testing.
 		"build_message=import build completed",
 		"latest_pod_group=ReplicaSet/demo-9f8d7c6b5",
 		"pod_issue=pod demo-9f8d7c6b5-abc12 container demo ErrImagePull: manifest unknown",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAppBuildLogsShowsBuilderAndRegistryLifecycleEvidence(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"degraded","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/build-logs":
+			_, _ = w.Write([]byte(`{
+				"operation_id":"op_import",
+				"operation_status":"completed",
+				"job_name":"build-demo-abc",
+				"available":false,
+				"source":"operation.result_message",
+				"summary":"import build completed",
+				"build_strategy":"dockerfile"
+			}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op_import":
+			_, _ = w.Write([]byte(`{"operation":{
+				"id":"op_import",
+				"tenant_id":"tenant_123",
+				"app_id":"app_123",
+				"type":"import",
+				"status":"completed",
+				"result_message":"queued deploy operation op_deploy",
+				"desired_source":{
+					"type":"github-private",
+					"build_strategy":"dockerfile",
+					"compose_service":"runtime",
+					"resolved_image_ref":"registry.example.com/fugue-apps/demo-managed:git-abc123"
+				},
+				"created_at":"2026-04-02T00:00:00Z",
+				"updated_at":"2026-04-02T00:01:00Z"
+			}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations":
+			if got := r.URL.Query().Get("app_id"); got != "app_123" {
+				t.Fatalf("expected app_id filter app_123, got %q", got)
+			}
+			_, _ = w.Write([]byte(`{"operations":[
+				{
+					"id":"op_deploy",
+					"tenant_id":"tenant_123",
+					"app_id":"app_123",
+					"type":"deploy",
+					"status":"completed",
+					"result_message":"deployed revision 19",
+					"desired_spec":{"image":"registry.example.com/demo-runtime:git-abc123","runtime_id":"runtime_managed_shared","replicas":1},
+					"created_at":"2026-04-02T00:02:00Z",
+					"updated_at":"2026-04-02T00:03:00Z"
+				},
+				{
+					"id":"op_import",
+					"tenant_id":"tenant_123",
+					"app_id":"app_123",
+					"type":"import",
+					"status":"completed",
+					"result_message":"queued deploy operation op_deploy",
+					"desired_source":{
+						"type":"github-private",
+						"build_strategy":"dockerfile",
+						"compose_service":"runtime",
+						"resolved_image_ref":"registry.example.com/fugue-apps/demo-managed:git-abc123"
+					},
+					"created_at":"2026-04-02T00:00:00Z",
+					"updated_at":"2026-04-02T00:01:00Z"
+				}
+			]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/images":
+			_, _ = w.Write([]byte(`{"app_id":"app_123","registry_configured":true,"summary":{"version_count":1,"current_version_count":1,"stale_version_count":0,"reclaimable_size_bytes":0},"versions":[{"image_ref":"registry.example.com/fugue-apps/demo-managed:git-abc123","runtime_image_ref":"registry.example.com/demo-runtime:git-abc123","status":"missing","current":true}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-pods":
+			_, _ = w.Write([]byte(`{"component":"app","namespace":"tenant-123","selector":"app.kubernetes.io/name=demo","container":"demo","groups":[{"owner_kind":"ReplicaSet","owner_name":"demo-9f8d7c6b5","parent":{"kind":"Deployment","name":"demo"},"revision":"19","desired_replicas":1,"current_replicas":1,"ready_replicas":0,"available_replicas":0,"containers":[{"name":"demo","image":"registry.example.com/demo-runtime:git-abc123"}],"pods":[{"namespace":"tenant-123","name":"demo-9f8d7c6b5-abc12","phase":"Pending","ready":false,"node_name":"gcp1","containers":[{"name":"demo","image":"registry.example.com/demo-runtime:git-abc123","ready":false,"restart_count":0,"state":"waiting","reason":"ErrImagePull","message":"manifest unknown"}]}],"warnings":[]}],"warnings":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/control-plane":
+			_, _ = w.Write([]byte(`{"control_plane":{"namespace":"fugue-system","release_instance":"fugue","version":"deadbeef","status":"ready","observed_at":"2026-04-02T00:05:00Z","components":[]}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/pods":
+			namespace := r.URL.Query().Get("namespace")
+			selector := r.URL.Query().Get("label_selector")
+			if namespace != "fugue-system" {
+				t.Fatalf("expected cluster pod namespace fugue-system, got %q", namespace)
+			}
+			switch selector {
+			case "job-name=build-demo-abc":
+				_, _ = w.Write([]byte(`{"cluster_pods":[{"namespace":"fugue-system","name":"build-demo-abc-xyz12","phase":"Succeeded","ready":false,"node_name":"gcp2","start_time":"2026-04-02T00:00:05Z","containers":[{"name":"builder","image":"ghcr.io/acme/fugue-builder:deadbeef","ready":false,"restart_count":0,"state":"terminated"}]}]}`))
+			case "app.kubernetes.io/component=controller":
+				_, _ = w.Write([]byte(`{"cluster_pods":[{"namespace":"fugue-system","name":"fugue-fugue-controller-abc","phase":"Running","ready":true,"node_name":"gcp1","start_time":"2026-04-02T00:00:00Z","containers":[{"name":"controller","image":"ghcr.io/acme/fugue-controller:deadbeef","ready":true,"restart_count":0,"state":"running"}]}]}`))
+			case "app.kubernetes.io/component=registry":
+				_, _ = w.Write([]byte(`{"cluster_pods":[{"namespace":"fugue-system","name":"fugue-fugue-registry-abc","phase":"Running","ready":true,"node_name":"gcp1","start_time":"2026-04-02T00:00:00Z","containers":[{"name":"registry","image":"registry:2","ready":true,"restart_count":0,"state":"running"}]}]}`))
+			default:
+				t.Fatalf("unexpected cluster pod selector %q", selector)
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/logs":
+			switch r.URL.Query().Get("pod") {
+			case "fugue-fugue-controller-abc":
+				_, _ = w.Write([]byte(`{"namespace":"fugue-system","pod":"fugue-fugue-controller-abc","container":"controller","logs":"2026-04-02T00:01:02Z operation op_import completed import build; managed_image=registry.example.com/fugue-apps/demo-managed:git-abc123 runtime_image=registry.example.com/demo-runtime:git-abc123 deploy=op_deploy"}`))
+			case "fugue-fugue-registry-abc":
+				_, _ = w.Write([]byte(`{"namespace":"fugue-system","pod":"fugue-fugue-registry-abc","container":"registry","logs":"time=\"2026-04-02T00:08:03Z\" level=info msg=\"DELETE /v2/fugue-apps/demo-managed/manifests/sha256:deadbeef\" http.request.uri=\"/v2/fugue-apps/demo-managed/manifests/sha256:deadbeef\""}`))
+			default:
+				t.Fatalf("unexpected cluster logs pod %q", r.URL.Query().Get("pod"))
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/audit-events":
+			_, _ = w.Write([]byte(`{"audit_events":[{"id":"audit_123","tenant_id":"tenant_123","actor_type":"api-key","actor_id":"key_123","action":"app.image.delete","target_type":"app","target_id":"app_123","metadata":{"image_ref":"registry.example.com/fugue-apps/demo-managed:git-abc123"},"created_at":"2026-04-02T00:09:00Z"}]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "logs", "build", "demo",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app logs build with lifecycle evidence: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{
+		"builder_namespace=fugue-system",
+		"builder_pods=build-demo-abc-xyz12",
+		"builder_nodes=gcp2",
+		"builder_containers=builder",
+		"registry_lifecycle_state=deleted-after-publish",
+		`summary=managed image "registry.example.com/fugue-apps/demo-managed:git-abc123" was published earlier and later deleted from registry inventory`,
+		"controller_pod=fugue-fugue-controller-abc",
+		"registry_pod=fugue-fugue-registry-abc",
+		"controller_evidence=2026-04-02T00:01:02Z operation op_import completed import build; managed_image=registry.example.com/fugue-apps/demo-managed:git-abc123 runtime_image=registry.example.com/demo-runtime:git-abc123 deploy=op_deploy",
+		`registry_evidence=time="2026-04-02T00:08:03Z" level=info msg="DELETE /v2/fugue-apps/demo-managed/manifests/sha256:deadbeef" http.request.uri="/v2/fugue-apps/demo-managed/manifests/sha256:deadbeef"`,
+		"registry_lifecycle_evidence=audit recorded app.image.delete at 2026-04-02T00:09:00Z",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
@@ -1689,6 +1832,97 @@ func TestRunAppOverviewDiagnosisExplainsMissingRuntimeImage(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
+	}
+}
+
+func TestRunAppOverviewPrefersLatestImportFailureOverRuntimeNoise(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"degraded","current_runtime_id":"runtime_managed_shared","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:10:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"degraded","current_runtime_id":"runtime_managed_shared","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:10:00Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
+			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/projects"):
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","tenant_id":"tenant_123","name":"demo","slug":"demo","description":"demo project","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes":
+			_, _ = w.Write([]byte(`{"runtimes":[{"id":"runtime_managed_shared","tenant_id":"tenant_123","name":"shared","type":"managed-shared","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/domains":
+			_, _ = w.Write([]byte(`{"domains":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/bindings":
+			_, _ = w.Write([]byte(`{"bindings":[],"backing_services":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations":
+			if got := r.URL.Query().Get("app_id"); got != "app_123" {
+				t.Fatalf("expected app_id filter app_123, got %q", got)
+			}
+			_, _ = w.Write([]byte(`{"operations":[
+				{
+					"id":"op_import_failed",
+					"tenant_id":"tenant_123",
+					"app_id":"app_123",
+					"type":"import",
+					"status":"failed",
+					"error_message":"push denied to registry",
+					"desired_source":{
+						"type":"github-private",
+						"build_strategy":"dockerfile",
+						"compose_service":"runtime",
+						"resolved_image_ref":"registry.example.com/fugue-apps/demo-managed:git-def456"
+					},
+					"created_at":"2026-04-02T00:05:00Z",
+					"updated_at":"2026-04-02T00:06:00Z"
+				},
+				{
+					"id":"op_deploy_old",
+					"tenant_id":"tenant_123",
+					"app_id":"app_123",
+					"type":"deploy",
+					"status":"completed",
+					"result_message":"deployed revision 17",
+					"desired_spec":{"image":"registry.example.com/demo-runtime:old","runtime_id":"runtime_managed_shared","replicas":1},
+					"created_at":"2026-04-02T00:02:00Z",
+					"updated_at":"2026-04-02T00:03:00Z"
+				}
+			]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/images":
+			_, _ = w.Write([]byte(`{"app_id":"app_123","registry_configured":true,"summary":{"version_count":1,"current_version_count":1,"stale_version_count":0,"reclaimable_size_bytes":0},"versions":[{"image_ref":"registry.example.com/fugue-apps/demo-managed:git-def456","runtime_image_ref":"registry.example.com/demo-runtime:git-def456","status":"missing","current":true}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-pods":
+			_, _ = w.Write([]byte(`{"component":"app","namespace":"tenant-123","selector":"app.kubernetes.io/name=demo","container":"demo","groups":[{"owner_kind":"ReplicaSet","owner_name":"demo-7b6c5d4f3","parent":{"kind":"Deployment","name":"demo"},"revision":"17","desired_replicas":1,"current_replicas":1,"ready_replicas":0,"available_replicas":0,"containers":[{"name":"demo","image":"registry.example.com/demo-runtime:old"}],"pods":[{"namespace":"tenant-123","name":"demo-7b6c5d4f3-abc12","phase":"Pending","ready":false,"node_name":"gcp1","containers":[{"name":"demo","image":"registry.example.com/demo-runtime:old","ready":false,"restart_count":0,"state":"waiting","reason":"ImagePullBackOff","message":"manifest unknown"}]}],"warnings":[]}],"warnings":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/diagnosis":
+			_, _ = w.Write([]byte(`{"diagnosis":{"category":"node-disk-pressure","summary":"old runtime pod was waiting on node disk pressure","hint":"old runtime noise"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "overview", "demo",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app overview with import failure priority: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{
+		"diagnosis",
+		"category=import-failed",
+		"summary=push denied to registry",
+		"build_operation_id=op_import_failed",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+	if strings.Contains(out, "old runtime noise") {
+		t.Fatalf("expected overview to suppress stale runtime diagnosis noise, got %q", out)
 	}
 }
 
