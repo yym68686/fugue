@@ -222,22 +222,29 @@ func secureRepoJoin(repoDir, rel string) (string, error) {
 }
 
 func buildAndPushDockerfileImage(ctx context.Context, req dockerfileBuildRequest) error {
+	logger := effectiveBuilderLogger(req.Logger)
 	namespace, err := currentNamespace()
 	if err != nil {
+		logger.Printf("builder job namespace resolve failed kind=dockerfile image=%s err=%v", strings.TrimSpace(req.ImageRef), err)
 		return err
 	}
 
 	jobName := buildJobName(req)
+	logger.Printf("builder job preflight kind=dockerfile stage=delete-existing name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
 	if err := deleteBuilderJobIfPresent(ctx, namespace, jobName); err != nil {
+		logger.Printf("builder job preflight failed kind=dockerfile stage=delete-existing name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
 		return err
 	}
+	logger.Printf("builder job preflight complete kind=dockerfile stage=delete-existing name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
+	logger.Printf("builder job preflight kind=dockerfile stage=reserve-placement name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
 	placement, releasePlacement, err := acquireBuilderPlacement(ctx, namespace, jobName, req.PodPolicy, req.WorkloadProfile, req.PlacementNodeSelector)
 	if err != nil {
+		logger.Printf("builder job preflight failed kind=dockerfile stage=reserve-placement name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
 		return fmt.Errorf("select builder placement: %w", err)
 	}
 	defer releasePlacement()
 	req.Placement = placement
-	logger := effectiveBuilderLogger(req.Logger)
+	logger.Printf("builder job preflight complete kind=dockerfile stage=reserve-placement name=%s namespace=%s image=%s placement=%s", jobName, namespace, strings.TrimSpace(req.ImageRef), builderPlacementSummary(placement))
 	logger.Printf(
 		"builder job start kind=dockerfile name=%s namespace=%s image=%s operation=%s app=%s placement=%s",
 		jobName,

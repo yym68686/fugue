@@ -150,8 +150,10 @@ func suggestedBuildpacksEnv(port int) map[string]string {
 }
 
 func buildAndPushBuildpacksImage(ctx context.Context, req buildpacksBuildRequest) error {
+	logger := effectiveBuilderLogger(req.Logger)
 	namespace, err := currentNamespace()
 	if err != nil {
+		logger.Printf("builder job namespace resolve failed kind=buildpacks image=%s err=%v", strings.TrimSpace(req.ImageRef), err)
 		return err
 	}
 
@@ -164,16 +166,21 @@ func buildAndPushBuildpacksImage(ctx context.Context, req buildpacksBuildRequest
 		ImageRef:           req.ImageRef,
 		JobLabels:          req.JobLabels,
 	})
+	logger.Printf("builder job preflight kind=buildpacks stage=delete-existing name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
 	if err := deleteBuilderJobIfPresent(ctx, namespace, jobName); err != nil {
+		logger.Printf("builder job preflight failed kind=buildpacks stage=delete-existing name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
 		return err
 	}
+	logger.Printf("builder job preflight complete kind=buildpacks stage=delete-existing name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
+	logger.Printf("builder job preflight kind=buildpacks stage=reserve-placement name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
 	placement, releasePlacement, err := acquireBuilderPlacement(ctx, namespace, jobName, req.PodPolicy, req.WorkloadProfile, req.PlacementNodeSelector)
 	if err != nil {
+		logger.Printf("builder job preflight failed kind=buildpacks stage=reserve-placement name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
 		return fmt.Errorf("select builder placement: %w", err)
 	}
 	defer releasePlacement()
 	req.Placement = placement
-	logger := effectiveBuilderLogger(req.Logger)
+	logger.Printf("builder job preflight complete kind=buildpacks stage=reserve-placement name=%s namespace=%s image=%s placement=%s", jobName, namespace, strings.TrimSpace(req.ImageRef), builderPlacementSummary(placement))
 	logger.Printf(
 		"builder job start kind=buildpacks name=%s namespace=%s image=%s operation=%s app=%s placement=%s",
 		jobName,

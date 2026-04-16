@@ -4,7 +4,10 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"strings"
 	"testing"
+
+	"fugue/internal/model"
 )
 
 func TestExtractUploadedArchiveDerivesDefaultAppNameFromArchiveFilenameWhenAppNameBlank(t *testing.T) {
@@ -49,6 +52,57 @@ func TestDefaultUploadedImageRefAvoidsDuplicateServiceSuffix(t *testing.T) {
 	want := "registry.push.example/fugue-apps/argus-runtime:upload-abcdef123456"
 	if got != want {
 		t.Fatalf("expected upload image ref %q, got %q", want, got)
+	}
+}
+
+func TestValidateUploadedImportOutputRequiresImageRef(t *testing.T) {
+	t.Parallel()
+
+	err := validateUploadedImportOutput(model.AppBuildStrategyDockerfile, UploadSourceImportRequest{
+		UploadID:        "upload_demo",
+		ComposeService:  "gateway",
+		DockerfilePath:  "Dockerfile",
+		BuildContextDir: ".",
+	}, GitHubSourceImportOutput{})
+	if err == nil {
+		t.Fatal("expected empty image ref to be rejected")
+	}
+	if !strings.Contains(err.Error(), "empty image ref") {
+		t.Fatalf("expected empty image ref error, got %v", err)
+	}
+}
+
+func TestValidateUploadedImportOutputRequiresBuilderEvidenceForBuilderStrategies(t *testing.T) {
+	t.Parallel()
+
+	err := validateUploadedImportOutput(model.AppBuildStrategyBuildpacks, UploadSourceImportRequest{
+		UploadID:       "upload_demo",
+		ComposeService: "runtime",
+	}, GitHubSourceImportOutput{
+		ImportResult: GitHubImportResult{
+			ImageRef: "registry.push.example/fugue-apps/demo:upload-abc123",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected missing builder job name to be rejected")
+	}
+	if !strings.Contains(err.Error(), "empty builder job name") {
+		t.Fatalf("expected empty builder job name error, got %v", err)
+	}
+}
+
+func TestValidateUploadedImportOutputAllowsStaticSiteWithoutBuilderEvidence(t *testing.T) {
+	t.Parallel()
+
+	err := validateUploadedImportOutput(model.AppBuildStrategyStaticSite, UploadSourceImportRequest{
+		UploadID: "upload_demo",
+	}, GitHubSourceImportOutput{
+		ImportResult: GitHubImportResult{
+			ImageRef: "registry.push.example/fugue-apps/demo:upload-abc123",
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected static-site import output to be valid, got %v", err)
 	}
 }
 

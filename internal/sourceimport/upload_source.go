@@ -42,18 +42,58 @@ type extractedUploadSource struct {
 }
 
 func (i *Importer) ImportUploadedArchiveSource(ctx context.Context, req UploadSourceImportRequest) (GitHubSourceImportOutput, error) {
+	logger := effectiveBuilderLogger(i.Logger)
+	logUploadImportResult := func(buildStrategy string, output GitHubSourceImportOutput, err error) {
+		logger.Printf(
+			"upload import result upload_id=%s archive=%s strategy=%s compose_service=%s source_dir=%s dockerfile=%s context=%s image=%s build_job=%s provider=%s err=%v",
+			strings.TrimSpace(req.UploadID),
+			strings.TrimSpace(req.ArchiveFilename),
+			strings.TrimSpace(buildStrategy),
+			strings.TrimSpace(req.ComposeService),
+			strings.TrimSpace(req.SourceDir),
+			strings.TrimSpace(req.DockerfilePath),
+			strings.TrimSpace(req.BuildContextDir),
+			strings.TrimSpace(output.ImportResult.ImageRef),
+			strings.TrimSpace(output.ImportResult.BuildJobName),
+			strings.TrimSpace(output.Source.DetectedProvider),
+			err,
+		)
+	}
+	logger.Printf(
+		"upload import start upload_id=%s archive=%s size_bytes=%d app=%s strategy=%s compose_service=%s source_dir=%s dockerfile=%s context=%s",
+		strings.TrimSpace(req.UploadID),
+		strings.TrimSpace(req.ArchiveFilename),
+		req.ArchiveSizeBytes,
+		strings.TrimSpace(req.AppName),
+		strings.TrimSpace(req.BuildStrategy),
+		strings.TrimSpace(req.ComposeService),
+		strings.TrimSpace(req.SourceDir),
+		strings.TrimSpace(req.DockerfilePath),
+		strings.TrimSpace(req.BuildContextDir),
+	)
 	if strings.TrimSpace(req.UploadID) == "" || len(req.ArchiveData) == 0 {
-		return GitHubSourceImportOutput{}, fmt.Errorf("upload archive is required")
+		err := fmt.Errorf("upload archive is required")
+		logUploadImportResult(req.BuildStrategy, GitHubSourceImportOutput{}, err)
+		return GitHubSourceImportOutput{}, err
 	}
 	if strings.TrimSpace(req.RegistryPushBase) == "" {
-		return GitHubSourceImportOutput{}, fmt.Errorf("registry push base is empty")
+		err := fmt.Errorf("registry push base is empty")
+		logUploadImportResult(req.BuildStrategy, GitHubSourceImportOutput{}, err)
+		return GitHubSourceImportOutput{}, err
 	}
 
 	src, err := i.extractUploadedArchive(req)
 	if err != nil {
+		logUploadImportResult(req.BuildStrategy, GitHubSourceImportOutput{}, err)
 		return GitHubSourceImportOutput{}, err
 	}
 	defer releaseExtractedUploadSource(src)
+	logger.Printf(
+		"upload import extracted upload_id=%s root=%s default_app=%s",
+		strings.TrimSpace(req.UploadID),
+		strings.TrimSpace(src.RootDir),
+		strings.TrimSpace(src.DefaultAppName),
+	)
 
 	buildStrategy := normalizeGitHubBuildStrategy(req.BuildStrategy)
 	if buildStrategy == "" {
@@ -64,8 +104,17 @@ func (i *Importer) ImportUploadedArchiveSource(ctx context.Context, req UploadSo
 	case model.AppBuildStrategyAuto:
 		detectedStrategy, sourceDir, dockerfilePath, buildContextDir, err := detectAutoImportInputs(src.RootDir, req.SourceDir, req.DockerfilePath, req.BuildContextDir)
 		if err != nil {
+			logUploadImportResult(buildStrategy, GitHubSourceImportOutput{}, err)
 			return GitHubSourceImportOutput{}, err
 		}
+		logger.Printf(
+			"upload import auto-detected upload_id=%s strategy=%s source_dir=%s dockerfile=%s context=%s",
+			strings.TrimSpace(req.UploadID),
+			strings.TrimSpace(detectedStrategy),
+			strings.TrimSpace(sourceDir),
+			strings.TrimSpace(dockerfilePath),
+			strings.TrimSpace(buildContextDir),
+		)
 		req.BuildStrategy = detectedStrategy
 		req.SourceDir = sourceDir
 		req.DockerfilePath = dockerfilePath
@@ -74,9 +123,10 @@ func (i *Importer) ImportUploadedArchiveSource(ctx context.Context, req UploadSo
 	case model.AppBuildStrategyStaticSite:
 		result, err := importStaticSiteFromExtractedUpload(ctx, src, req.ArchiveDownloadURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful, i.Logger)
 		if err != nil {
+			logUploadImportResult(buildStrategy, GitHubSourceImportOutput{}, err)
 			return GitHubSourceImportOutput{}, err
 		}
-		return GitHubSourceImportOutput{
+		output := GitHubSourceImportOutput{
 			ImportResult: result,
 			Source: model.AppSource{
 				Type:             model.AppSourceTypeUpload,
@@ -93,13 +143,20 @@ func (i *Importer) ImportUploadedArchiveSource(ctx context.Context, req UploadSo
 				DetectedProvider: strings.TrimSpace(result.DetectedProvider),
 				DetectedStack:    strings.TrimSpace(result.DetectedStack),
 			},
-		}, nil
+		}
+		if err := validateUploadedImportOutput(buildStrategy, req, output); err != nil {
+			logUploadImportResult(buildStrategy, output, err)
+			return GitHubSourceImportOutput{}, err
+		}
+		logUploadImportResult(buildStrategy, output, nil)
+		return output, nil
 	case model.AppBuildStrategyDockerfile:
 		result, err := importDockerfileFromExtractedUpload(ctx, src, req.ArchiveDownloadURL, req.DockerfilePath, req.BuildContextDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful, i.Logger)
 		if err != nil {
+			logUploadImportResult(buildStrategy, GitHubSourceImportOutput{}, err)
 			return GitHubSourceImportOutput{}, err
 		}
-		return GitHubSourceImportOutput{
+		output := GitHubSourceImportOutput{
 			ImportResult: result,
 			Source: model.AppSource{
 				Type:             model.AppSourceTypeUpload,
@@ -117,13 +174,20 @@ func (i *Importer) ImportUploadedArchiveSource(ctx context.Context, req UploadSo
 				DetectedProvider: strings.TrimSpace(result.DetectedProvider),
 				DetectedStack:    strings.TrimSpace(result.DetectedStack),
 			},
-		}, nil
+		}
+		if err := validateUploadedImportOutput(buildStrategy, req, output); err != nil {
+			logUploadImportResult(buildStrategy, output, err)
+			return GitHubSourceImportOutput{}, err
+		}
+		logUploadImportResult(buildStrategy, output, nil)
+		return output, nil
 	case model.AppBuildStrategyBuildpacks:
 		result, err := importBuildpacksFromExtractedUpload(ctx, src, req.ArchiveDownloadURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful, i.Logger)
 		if err != nil {
+			logUploadImportResult(buildStrategy, GitHubSourceImportOutput{}, err)
 			return GitHubSourceImportOutput{}, err
 		}
-		return GitHubSourceImportOutput{
+		output := GitHubSourceImportOutput{
 			ImportResult: result,
 			Source: model.AppSource{
 				Type:             model.AppSourceTypeUpload,
@@ -140,13 +204,20 @@ func (i *Importer) ImportUploadedArchiveSource(ctx context.Context, req UploadSo
 				DetectedProvider: strings.TrimSpace(result.DetectedProvider),
 				DetectedStack:    strings.TrimSpace(result.DetectedStack),
 			},
-		}, nil
+		}
+		if err := validateUploadedImportOutput(buildStrategy, req, output); err != nil {
+			logUploadImportResult(buildStrategy, output, err)
+			return GitHubSourceImportOutput{}, err
+		}
+		logUploadImportResult(buildStrategy, output, nil)
+		return output, nil
 	case model.AppBuildStrategyNixpacks:
 		result, err := importNixpacksFromExtractedUpload(ctx, src, req.ArchiveDownloadURL, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful, i.Logger)
 		if err != nil {
+			logUploadImportResult(buildStrategy, GitHubSourceImportOutput{}, err)
 			return GitHubSourceImportOutput{}, err
 		}
-		return GitHubSourceImportOutput{
+		output := GitHubSourceImportOutput{
 			ImportResult: result,
 			Source: model.AppSource{
 				Type:             model.AppSourceTypeUpload,
@@ -163,10 +234,45 @@ func (i *Importer) ImportUploadedArchiveSource(ctx context.Context, req UploadSo
 				DetectedProvider: strings.TrimSpace(result.DetectedProvider),
 				DetectedStack:    strings.TrimSpace(result.DetectedStack),
 			},
-		}, nil
+		}
+		if err := validateUploadedImportOutput(buildStrategy, req, output); err != nil {
+			logUploadImportResult(buildStrategy, output, err)
+			return GitHubSourceImportOutput{}, err
+		}
+		logUploadImportResult(buildStrategy, output, nil)
+		return output, nil
 	default:
-		return GitHubSourceImportOutput{}, fmt.Errorf("unsupported build strategy %q", buildStrategy)
+		err := fmt.Errorf("unsupported build strategy %q", buildStrategy)
+		logUploadImportResult(buildStrategy, GitHubSourceImportOutput{}, err)
+		return GitHubSourceImportOutput{}, err
 	}
+}
+
+func validateUploadedImportOutput(buildStrategy string, req UploadSourceImportRequest, output GitHubSourceImportOutput) error {
+	if strings.TrimSpace(output.ImportResult.ImageRef) == "" {
+		return fmt.Errorf(
+			"upload import produced empty image ref (upload_id=%s strategy=%s compose_service=%s dockerfile=%s context=%s source_dir=%s)",
+			strings.TrimSpace(req.UploadID),
+			strings.TrimSpace(buildStrategy),
+			strings.TrimSpace(req.ComposeService),
+			strings.TrimSpace(req.DockerfilePath),
+			strings.TrimSpace(req.BuildContextDir),
+			strings.TrimSpace(req.SourceDir),
+		)
+	}
+	switch strings.TrimSpace(buildStrategy) {
+	case model.AppBuildStrategyDockerfile, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks:
+		if strings.TrimSpace(output.ImportResult.BuildJobName) == "" {
+			return fmt.Errorf(
+				"upload import produced empty builder job name (upload_id=%s strategy=%s compose_service=%s image=%s)",
+				strings.TrimSpace(req.UploadID),
+				strings.TrimSpace(buildStrategy),
+				strings.TrimSpace(req.ComposeService),
+				strings.TrimSpace(output.ImportResult.ImageRef),
+			)
+		}
+	}
+	return nil
 }
 
 func (i *Importer) extractUploadedArchive(req UploadSourceImportRequest) (extractedUploadSource, error) {
