@@ -13,6 +13,7 @@ type APIConfig struct {
 	StorePath                    string
 	DatabaseURL                  string
 	BootstrapAdminKey            string
+	WorkloadIdentitySigningKey   string
 	ControlPlaneNamespace        string
 	ControlPlaneReleaseInstance  string
 	ControlPlaneGitHubRepository string
@@ -39,6 +40,8 @@ type APIConfig struct {
 type ControllerConfig struct {
 	StorePath                     string
 	DatabaseURL                   string
+	APIPublicDomain               string
+	WorkloadIdentitySigningKey    string
 	RegistryPushBase              string
 	RegistryPullBase              string
 	SourceUploadBaseURL           string
@@ -90,6 +93,7 @@ func APIFromEnv() APIConfig {
 		StorePath:                    getenv("FUGUE_STORE_PATH", "./data/store.json"),
 		DatabaseURL:                  getenv("FUGUE_DATABASE_URL", ""),
 		BootstrapAdminKey:            getenv("FUGUE_BOOTSTRAP_ADMIN_KEY", "fugue_bootstrap_admin_change_me"),
+		WorkloadIdentitySigningKey:   strings.TrimSpace(os.Getenv("FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY")),
 		ControlPlaneNamespace:        getenv("FUGUE_CONTROL_PLANE_NAMESPACE", ""),
 		ControlPlaneReleaseInstance:  getenv("FUGUE_CONTROL_PLANE_RELEASE_INSTANCE", ""),
 		ControlPlaneGitHubRepository: strings.TrimSpace(os.Getenv("FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY")),
@@ -115,6 +119,9 @@ func APIFromEnv() APIConfig {
 	if cfg.RegistryPullBase == "" {
 		cfg.RegistryPullBase = cfg.RegistryPushBase
 	}
+	if cfg.WorkloadIdentitySigningKey == "" {
+		cfg.WorkloadIdentitySigningKey = cfg.BootstrapAdminKey
+	}
 	if cfg.ClusterJoinRegistryEndpoint == "" {
 		cfg.ClusterJoinRegistryEndpoint = cfg.RegistryPullBase
 	}
@@ -125,6 +132,8 @@ func ControllerFromEnv() ControllerConfig {
 	cfg := ControllerConfig{
 		StorePath:                     getenv("FUGUE_STORE_PATH", "./data/store.json"),
 		DatabaseURL:                   getenv("FUGUE_DATABASE_URL", ""),
+		APIPublicDomain:               getenv("FUGUE_API_PUBLIC_DOMAIN", "api.fugue.pro"),
+		WorkloadIdentitySigningKey:    strings.TrimSpace(os.Getenv("FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY")),
 		RegistryPushBase:              getenv("FUGUE_REGISTRY_PUSH_BASE", "127.0.0.1:30500"),
 		RegistryPullBase:              strings.TrimSpace(os.Getenv("FUGUE_REGISTRY_PULL_BASE")),
 		SourceUploadBaseURL:           getenv("FUGUE_SOURCE_UPLOAD_BASE_URL", "http://127.0.0.1:8080"),
@@ -154,6 +163,9 @@ func ControllerFromEnv() ControllerConfig {
 	}
 	if cfg.RegistryPullBase == "" {
 		cfg.RegistryPullBase = cfg.RegistryPushBase
+	}
+	if cfg.WorkloadIdentitySigningKey == "" {
+		cfg.WorkloadIdentitySigningKey = strings.TrimSpace(os.Getenv("FUGUE_BOOTSTRAP_ADMIN_KEY"))
 	}
 	return cfg
 }

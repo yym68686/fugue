@@ -19,6 +19,7 @@ func (s *Service) applyManagedAppDesiredState(ctx context.Context, app model.App
 		return fmt.Errorf("initialize kubernetes managed app client: %w", err)
 	}
 
+	app = s.Renderer.PrepareApp(app)
 	objects := runtime.BuildManagedAppStateObjects(app, scheduling)
 	if err := client.applyObjects(ctx, objects); err != nil {
 		return fmt.Errorf("apply managed app state objects: %w", err)
@@ -164,6 +165,7 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 		return nil
 	}
 
+	app = s.Renderer.PrepareApp(app)
 	ownerRef := runtime.ManagedAppOwnerReference(managed)
 	postgresPlacements, err := s.managedPostgresPlacements(ctx, app)
 	if err != nil {

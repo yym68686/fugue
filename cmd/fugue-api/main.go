@@ -23,7 +23,10 @@ func main() {
 		logger.Fatalf("init store: %v", err)
 	}
 
-	server := api.NewServer(store, auth.New(store, cfg.BootstrapAdminKey), logger, api.ServerConfig{
+	authenticator := auth.New(store, cfg.BootstrapAdminKey)
+	authenticator.WorkloadIdentitySigningKey = cfg.WorkloadIdentitySigningKey
+
+	server := api.NewServer(store, authenticator, logger, api.ServerConfig{
 		ControlPlaneNamespace:        cfg.ControlPlaneNamespace,
 		ControlPlaneReleaseInstance:  cfg.ControlPlaneReleaseInstance,
 		ControlPlaneGitHubRepository: cfg.ControlPlaneGitHubRepository,

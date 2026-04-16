@@ -53,9 +53,15 @@ const (
 
 func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *Service {
 	return &Service{
-		Store:              store,
-		Config:             cfg,
-		Renderer:           runtime.Renderer{BaseDir: cfg.RenderDir},
+		Store:  store,
+		Config: cfg,
+		Renderer: runtime.Renderer{
+			BaseDir: cfg.RenderDir,
+			WorkloadIdentity: runtime.WorkloadIdentityConfig{
+				APIBaseURL: runtimeAPIBaseURL(cfg.APIPublicDomain),
+				SigningKey: strings.TrimSpace(cfg.WorkloadIdentitySigningKey),
+			},
+		},
 		Logger:             logger,
 		importer:           sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
 		registryPushBase:   strings.TrimSpace(cfg.RegistryPushBase),
@@ -64,6 +70,10 @@ func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *S
 		newKubeClient:      newKubeClient,
 		now:                time.Now,
 	}
+}
+
+func runtimeAPIBaseURL(publicDomain string) string {
+	return runtime.NormalizeWorkloadIdentityAPIBaseURL(publicDomain)
 }
 
 func (s *Service) Run(ctx context.Context) error {

@@ -69,6 +69,17 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "project_id and project are mutually exclusive")
 		return
 	}
+	if strings.TrimSpace(principal.ProjectID) != "" {
+		if req.Project != nil {
+			httpx.WriteError(w, http.StatusForbidden, "workload credentials cannot create projects")
+			return
+		}
+		req.ProjectID = projectIDForPrincipal(principal, req.ProjectID)
+		if req.ProjectID != principal.ProjectID {
+			httpx.WriteError(w, http.StatusForbidden, "cannot create app for another project")
+			return
+		}
+	}
 
 	buildStrategy := normalizeBuildStrategy(req.BuildStrategy)
 	networkMode, err := resolveImportNetworkMode(req.NetworkMode)
@@ -92,8 +103,8 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 			s.writeStoreError(w, err)
 			return
 		}
-		if !principal.IsPlatformAdmin() && app.TenantID != principal.TenantID {
-			httpx.WriteError(w, http.StatusForbidden, "cannot deploy app for another tenant")
+		if !principalAllowsApp(principal, app) {
+			httpx.WriteError(w, http.StatusForbidden, "cannot deploy app for another project")
 			return
 		}
 
@@ -226,6 +237,10 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 				s.writeStoreError(w, err)
 				return
 			}
+			if !principalAllowsProject(principal, project) {
+				httpx.WriteError(w, http.StatusForbidden, "cannot create app for another project")
+				return
+			}
 			req.ProjectID = project.ID
 			var cleanupProject *model.Project
 			if created {
@@ -274,6 +289,10 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 	project, _, err := s.resolveImportProjectFields(tenantID, req.ProjectID, req.Project)
 	if err != nil {
 		s.writeStoreError(w, err)
+		return
+	}
+	if !principalAllowsProject(principal, project) {
+		httpx.WriteError(w, http.StatusForbidden, "cannot create app for another project")
 		return
 	}
 

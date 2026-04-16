@@ -9,12 +9,19 @@ import (
 	"strings"
 
 	"fugue/internal/model"
+	"fugue/internal/workloadidentity"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Renderer struct {
-	BaseDir string
+	BaseDir          string
+	WorkloadIdentity WorkloadIdentityConfig
+}
+
+type WorkloadIdentityConfig struct {
+	APIBaseURL string
+	SigningKey string
 }
 
 type Bundle struct {
@@ -40,6 +47,7 @@ func (r Renderer) RenderAppBundle(app model.App, constraints ...SchedulingConstr
 }
 
 func (r Renderer) RenderAppBundleWithPlacements(app model.App, scheduling SchedulingConstraints, postgresPlacements map[string][]SchedulingConstraints) (Bundle, error) {
+	app = r.PrepareApp(app)
 	namespace := NamespaceForTenant(app.TenantID)
 	path := filepath.Join(r.BaseDir, namespace, fmt.Sprintf("%s.yaml", model.Slugify(app.Name)))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -71,6 +79,7 @@ func (r Renderer) RenderManagedAppBundle(app model.App, constraints ...Schedulin
 }
 
 func (r Renderer) RenderManagedAppBundleWithPlacements(app model.App, scheduling SchedulingConstraints, postgresPlacements map[string][]SchedulingConstraints) (Bundle, error) {
+	app = r.PrepareApp(app)
 	namespace := NamespaceForTenant(app.TenantID)
 	path := filepath.Join(r.BaseDir, namespace, fmt.Sprintf("%s-managedapp.yaml", ManagedAppResourceName(app)))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -91,6 +100,61 @@ func (r Renderer) RenderManagedAppBundleWithPlacements(app model.App, scheduling
 		ManifestPath:    path,
 		Manifest:        manifest,
 	}, nil
+}
+
+func (r Renderer) PrepareApp(app model.App) model.App {
+	return r.withWorkloadIdentity(app)
+}
+
+func (r Renderer) withWorkloadIdentity(app model.App) model.App {
+	env := make(map[string]string)
+	for key, value := range app.Spec.Env {
+		env[key] = value
+	}
+	injected := map[string]string{
+		"FUGUE_TENANT_ID":  strings.TrimSpace(app.TenantID),
+		"FUGUE_PROJECT_ID": strings.TrimSpace(app.ProjectID),
+		"FUGUE_APP_ID":     strings.TrimSpace(app.ID),
+		"FUGUE_APP_NAME":   strings.TrimSpace(app.Name),
+		"FUGUE_RUNTIME_ID": strings.TrimSpace(app.Spec.RuntimeID),
+	}
+	if apiBaseURL := NormalizeWorkloadIdentityAPIBaseURL(r.WorkloadIdentity.APIBaseURL); apiBaseURL != "" {
+		injected["FUGUE_API_URL"] = apiBaseURL
+		injected["FUGUE_BASE_URL"] = apiBaseURL
+	}
+	if signingKey := strings.TrimSpace(r.WorkloadIdentity.SigningKey); signingKey != "" &&
+		strings.TrimSpace(app.TenantID) != "" &&
+		strings.TrimSpace(app.ProjectID) != "" {
+		token, err := workloadidentity.Issue(signingKey, workloadidentity.Claims{
+			TenantID:  app.TenantID,
+			ProjectID: app.ProjectID,
+			AppID:     app.ID,
+			Scopes:    []string{"app.write", "app.deploy", "app.delete"},
+		})
+		if err == nil {
+			injected["FUGUE_TOKEN"] = token
+		}
+	}
+	for key, value := range injected {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		env[key] = value
+	}
+	app.Spec.Env = env
+	return app
+}
+
+func NormalizeWorkloadIdentityAPIBaseURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.Contains(raw, "://") {
+		return strings.TrimRight(raw, "/")
+	}
+	return "https://" + strings.TrimRight(raw, "/")
 }
 
 func ApplyKubectl(manifestPath string) error {

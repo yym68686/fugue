@@ -13,6 +13,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
+	"fugue/internal/workloadidentity"
 )
 
 func TestBuildManagedAppStatusKeepsCurrentReleaseDuringRollout(t *testing.T) {
@@ -839,6 +840,163 @@ func TestSelectManagedAppDesiredAppUsesStoredBaselineWhenRecoveryIsNotNeeded(t *
 	}
 }
 
+func TestApplyManagedAppDesiredStateInjectsWorkloadIdentityIntoManagedAndRuntimeObjects(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(t.TempDir() + "/store.json")
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Workload Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "Project A", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "gateway", "", model.AppSpec{
+		Image:     "ghcr.io/example/gateway:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	managedName := runtime.ManagedAppResourceName(app)
+	deploymentName := runtime.RuntimeAppResourceName(app)
+
+	var (
+		recordedManagedApp map[string]any
+		recordedDeployment map[string]any
+	)
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodPatch && strings.HasSuffix(req.URL.Path, "/status"):
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     make(http.Header),
+			}, nil
+		case req.Method == http.MethodPatch:
+			var body map[string]any
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Fatalf("decode apply object %s: %v", req.URL.Path, err)
+			}
+			switch strings.TrimSpace(body["kind"].(string)) {
+			case runtime.ManagedAppKind:
+				recordedManagedApp = body
+			case "Deployment":
+				recordedDeployment = body
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     make(http.Header),
+			}, nil
+		case req.Method == http.MethodGet && req.URL.Path == managedAppAPIPath(namespace, managedName):
+			if recordedManagedApp == nil {
+				t.Fatalf("managed app was requested before apply")
+			}
+			data, err := json.Marshal(recordedManagedApp)
+			if err != nil {
+				t.Fatalf("marshal recorded managed app: %v", err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(string(data))),
+				Header:     make(http.Header),
+			}, nil
+		case req.Method == http.MethodGet && req.URL.Path == "/apis/apps/v1/namespaces/"+namespace+"/deployments/"+deploymentName:
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader(`{"kind":"Status","status":"Failure","message":"not found","reason":"NotFound","code":404}`)),
+				Header:     make(http.Header),
+			}, nil
+		case req.Method == http.MethodGet && req.URL.Path == "/apis/coordination.k8s.io/v1/namespaces/"+namespace+"/leases/"+managedName+"-fence":
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader(`{"kind":"Status","status":"Failure","message":"not found","reason":"NotFound","code":404}`)),
+				Header:     make(http.Header),
+			}, nil
+		case req.Method == http.MethodGet && req.URL.RawQuery != "":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"items":[]}`)),
+				Header:     make(http.Header),
+			}, nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	svc := &Service{
+		Store: stateStore,
+		Renderer: runtime.Renderer{
+			WorkloadIdentity: runtime.WorkloadIdentityConfig{
+				APIBaseURL: "api.example.com",
+				SigningKey: "signing-secret",
+			},
+		},
+		newKubeClient: func(namespace string) (*kubeClient, error) {
+			return &kubeClient{
+				client:      &http.Client{Transport: transport},
+				baseURL:     "http://kube.test",
+				bearerToken: "token",
+				namespace:   namespace,
+			}, nil
+		},
+	}
+
+	if err := svc.applyManagedAppDesiredState(context.Background(), app, runtime.SchedulingConstraints{}); err != nil {
+		t.Fatalf("apply managed app desired state: %v", err)
+	}
+	if recordedManagedApp == nil {
+		t.Fatal("expected managed app object to be applied")
+	}
+	if recordedDeployment == nil {
+		t.Fatal("expected runtime deployment object to be applied")
+	}
+
+	managedEnv := managedAppSpecEnv(recordedManagedApp)
+	if got := managedEnv["FUGUE_PROJECT_ID"]; got != project.ID {
+		t.Fatalf("expected managed app FUGUE_PROJECT_ID %q, got %q", project.ID, got)
+	}
+	if got := managedEnv["FUGUE_RUNTIME_ID"]; got != app.Spec.RuntimeID {
+		t.Fatalf("expected managed app FUGUE_RUNTIME_ID %q, got %q", app.Spec.RuntimeID, got)
+	}
+	if got := managedEnv["FUGUE_API_URL"]; got != "https://api.example.com" {
+		t.Fatalf("expected managed app FUGUE_API_URL to be normalized, got %q", got)
+	}
+	managedClaims, err := workloadidentity.Parse("signing-secret", managedEnv["FUGUE_TOKEN"])
+	if err != nil {
+		t.Fatalf("parse managed app workload token: %v", err)
+	}
+	if managedClaims.ProjectID != project.ID {
+		t.Fatalf("expected managed token project scope %q, got %q", project.ID, managedClaims.ProjectID)
+	}
+
+	deploymentEnv := deploymentContainerEnv(recordedDeployment)
+	if got := deploymentEnv["FUGUE_PROJECT_ID"]; got != project.ID {
+		t.Fatalf("expected deployment FUGUE_PROJECT_ID %q, got %q", project.ID, got)
+	}
+	if got := deploymentEnv["FUGUE_RUNTIME_ID"]; got != app.Spec.RuntimeID {
+		t.Fatalf("expected deployment FUGUE_RUNTIME_ID %q, got %q", app.Spec.RuntimeID, got)
+	}
+	deploymentClaims, err := workloadidentity.Parse("signing-secret", deploymentEnv["FUGUE_TOKEN"])
+	if err != nil {
+		t.Fatalf("parse deployment workload token: %v", err)
+	}
+	if deploymentClaims.ProjectID != project.ID {
+		t.Fatalf("expected deployment token project scope %q, got %q", project.ID, deploymentClaims.ProjectID)
+	}
+}
+
 func TestBackfillManagedAppSourceDoesNotOverrideManagedSnapshot(t *testing.T) {
 	t.Parallel()
 
@@ -861,6 +1019,55 @@ func TestBackfillManagedAppSourceDoesNotOverrideManagedSnapshot(t *testing.T) {
 	if got := app.Source.ComposeService; got != "managed" {
 		t.Fatalf("expected managed snapshot source to win, got %q", got)
 	}
+}
+
+func managedAppSpecEnv(obj map[string]any) map[string]string {
+	spec, _ := obj["spec"].(map[string]any)
+	appSpec, _ := spec["appSpec"].(map[string]any)
+	return stringMapFromAnyMap(appSpec["env"])
+}
+
+func deploymentContainerEnv(obj map[string]any) map[string]string {
+	spec, _ := obj["spec"].(map[string]any)
+	template, _ := spec["template"].(map[string]any)
+	templateSpec, _ := template["spec"].(map[string]any)
+	containers, _ := templateSpec["containers"].([]any)
+	if len(containers) == 0 {
+		return map[string]string{}
+	}
+	container, _ := containers[0].(map[string]any)
+	envList, _ := container["env"].([]any)
+	env := make(map[string]string, len(envList))
+	for _, raw := range envList {
+		item, _ := raw.(map[string]any)
+		name, _ := item["name"].(string)
+		value, _ := item["value"].(string)
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		env[name] = value
+	}
+	return env
+}
+
+func stringMapFromAnyMap(raw any) map[string]string {
+	items, _ := raw.(map[string]any)
+	if len(items) == 0 {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(items))
+	for key, value := range items {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		switch typed := value.(type) {
+		case string:
+			out[key] = typed
+		}
+	}
+	return out
 }
 
 func TestDeleteManagedAppResourcesIgnoresMissingCustomResourceAPIsForStatelessApps(t *testing.T) {

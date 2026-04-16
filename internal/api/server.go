@@ -233,6 +233,7 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	projects = filterProjectsForPrincipal(principal, projects)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"projects": projects})
 }
 
@@ -829,6 +830,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		}
 		visibleApps = append(visibleApps, app)
 	}
+	visibleApps = filterAppsForPrincipal(principal, visibleApps)
 	if includeLiveStatus {
 		liveStatusStartedAt := time.Now()
 		visibleApps = s.overlayManagedAppStatuses(r.Context(), visibleApps)
@@ -849,7 +851,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	if !principal.IsPlatformAdmin() && app.TenantID != principal.TenantID {
+	if !principalAllowsApp(principal, app) {
 		httpx.WriteError(w, http.StatusForbidden, "app is not visible to this tenant")
 		return
 	}
@@ -879,6 +881,24 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	tenantID, ok := s.resolveTenantID(principal, req.TenantID)
 	if !ok {
 		httpx.WriteError(w, http.StatusForbidden, "cannot create app for another tenant")
+		return
+	}
+	req.ProjectID = projectIDForPrincipal(principal, req.ProjectID)
+	if strings.TrimSpace(req.ProjectID) == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "project_id is required")
+		return
+	}
+	if strings.TrimSpace(principal.ProjectID) != "" && req.ProjectID != principal.ProjectID {
+		httpx.WriteError(w, http.StatusForbidden, "cannot create app for another project")
+		return
+	}
+	project, err := s.store.GetProject(req.ProjectID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if !principalAllowsProject(principal, project) {
+		httpx.WriteError(w, http.StatusForbidden, "cannot create app for another project")
 		return
 	}
 
@@ -1388,7 +1408,7 @@ func (s *Server) loadAuthorizedApp(w http.ResponseWriter, r *http.Request, princ
 		s.writeStoreError(w, err)
 		return model.App{}, false
 	}
-	if !principal.IsPlatformAdmin() && app.TenantID != principal.TenantID {
+	if !principalAllowsApp(principal, app) {
 		httpx.WriteError(w, http.StatusForbidden, "app is not visible to this tenant")
 		return model.App{}, false
 	}
@@ -1401,7 +1421,7 @@ func (s *Server) loadAuthorizedAppMetadata(w http.ResponseWriter, r *http.Reques
 		s.writeStoreError(w, err)
 		return model.App{}, false
 	}
-	if !principal.IsPlatformAdmin() && app.TenantID != principal.TenantID {
+	if !principalAllowsApp(principal, app) {
 		httpx.WriteError(w, http.StatusForbidden, "app is not visible to this tenant")
 		return model.App{}, false
 	}
@@ -1414,7 +1434,7 @@ func (s *Server) loadAuthorizedProject(w http.ResponseWriter, r *http.Request, p
 		s.writeStoreError(w, err)
 		return model.Project{}, false
 	}
-	if !principal.IsPlatformAdmin() && project.TenantID != principal.TenantID {
+	if !principalAllowsProject(principal, project) {
 		httpx.WriteError(w, http.StatusForbidden, "project is not visible to this tenant")
 		return model.Project{}, false
 	}

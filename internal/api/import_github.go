@@ -49,6 +49,17 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "project_id and project are mutually exclusive")
 		return
 	}
+	if strings.TrimSpace(principal.ProjectID) != "" {
+		if req.Project != nil {
+			httpx.WriteError(w, http.StatusForbidden, "workload credentials cannot create projects")
+			return
+		}
+		req.ProjectID = projectIDForPrincipal(principal, req.ProjectID)
+		if req.ProjectID != principal.ProjectID {
+			httpx.WriteError(w, http.StatusForbidden, "cannot create app for another project")
+			return
+		}
+	}
 
 	tenantID, ok := s.resolveTenantID(principal, req.TenantID)
 	if !ok {

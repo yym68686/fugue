@@ -266,6 +266,17 @@ fugue operation show op_123
 fugue operation show op_123 --show-secrets --output json
 `),
 	},
+	"fugue operation explain": {
+		Long: strings.TrimSpace(`
+Explain why an operation is pending, waiting, or otherwise not making progress.
+
+For deploy operations, the diagnosis also inspects the target managed image so the CLI can say when the deploy already points at a missing release image instead of only reporting queue state.
+`),
+		Example: strings.TrimSpace(`
+fugue operation explain op_123
+fugue operation explain op_123 --show-secrets --output json
+`),
+	},
 	"fugue operation watch": {
 		Long: strings.TrimSpace(`
 Wait for one operation or the most recent operation for an app until it reaches a terminal state.

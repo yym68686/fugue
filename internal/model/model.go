@@ -79,6 +79,7 @@ const (
 	ActorTypeAPIKey    = "api-key"
 	ActorTypeNodeKey   = "node-key"
 	ActorTypeRuntime   = "runtime"
+	ActorTypeWorkload  = "workload"
 	ActorTypeSystem    = "system"
 
 	OperationRequestedByGitHubSyncController = "fugue-controller/github-sync"
@@ -911,6 +912,8 @@ type Principal struct {
 	ActorType string
 	ActorID   string
 	TenantID  string
+	ProjectID string
+	AppID     string
 	Scopes    map[string]struct{}
 }
 
@@ -927,6 +930,17 @@ func (p Principal) HasScope(scope string) bool {
 
 func (p Principal) IsPlatformAdmin() bool {
 	return p.HasScope("platform.admin")
+}
+
+func (p Principal) AllowsProject(projectID string) bool {
+	if p.IsPlatformAdmin() {
+		return true
+	}
+	projectID = strings.TrimSpace(projectID)
+	if strings.TrimSpace(p.ProjectID) == "" || projectID == "" {
+		return true
+	}
+	return p.ProjectID == projectID
 }
 
 func NormalizeRuntimePoolMode(runtimeType, poolMode string) string {
