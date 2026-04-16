@@ -28,6 +28,7 @@ type recordingImporter struct {
 	githubOutput        *sourceimport.GitHubSourceImportOutput
 	uploadReq           *sourceimport.UploadSourceImportRequest
 	uploadOutput        *sourceimport.GitHubSourceImportOutput
+	uploadErr           error
 }
 
 func (r *recordingImporter) ImportDockerImageSource(_ context.Context, req sourceimport.DockerImageSourceImportRequest) (sourceimport.GitHubSourceImportOutput, error) {
@@ -82,6 +83,9 @@ func (r *recordingImporter) ImportUploadedArchiveSource(_ context.Context, req s
 	req.PlacementNodeSelector = cloneStringMap(req.PlacementNodeSelector)
 	reqCopy := req
 	r.uploadReq = &reqCopy
+	if r.uploadErr != nil {
+		return sourceimport.GitHubSourceImportOutput{}, r.uploadErr
+	}
 	if r.uploadOutput != nil {
 		output := *r.uploadOutput
 		return output, nil
@@ -416,6 +420,91 @@ func TestExecuteManagedImportOperationRecoversUploadManagedImageRefFromImportRes
 	}
 	if got := deployOp.DesiredSource.ArchiveSHA256; got != upload.SHA256 {
 		t.Fatalf("expected upload sha %q, got %q", upload.SHA256, got)
+	}
+}
+
+func TestExecuteManagedImportOperationPropagatesUploadImporterErrors(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	upload, err := stateStore.CreateSourceUpload(tenant.ID, "demo.tgz", "application/gzip", []byte("archive-bytes"))
+	if err != nil {
+		t.Fatalf("create source upload: %v", err)
+	}
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:             model.AppSourceTypeUpload,
+		UploadID:         upload.ID,
+		UploadFilename:   upload.Filename,
+		ArchiveSHA256:    upload.SHA256,
+		ArchiveSizeBytes: upload.SizeBytes,
+		BuildStrategy:    model.AppBuildStrategyDockerfile,
+		DockerfilePath:   "Dockerfile",
+		BuildContextDir:  ".",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	specCopy := app.Spec
+	sourceCopy := *app.Source
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		DesiredSource:   &sourceCopy,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+
+	importerErr := errors.New("select builder placement: no eligible builder nodes for profile heavy")
+	importer := &recordingImporter{uploadErr: importerErr}
+	svc := &Service{
+		Store:               stateStore,
+		Config:              config.ControllerConfig{SourceUploadBaseURL: "http://source.example"},
+		Logger:              log.New(io.Discard, "", 0),
+		importer:            importer,
+		registryPushBase:    "registry.push.example",
+		registryPullBase:    "registry.pull.example",
+		inspectManagedImage: inspectManagedImageAlwaysExists,
+	}
+
+	err = svc.executeManagedImportOperation(context.Background(), op, app)
+	if !errors.Is(err, importerErr) {
+		t.Fatalf("expected importer error %q, got %v", importerErr, err)
+	}
+	if strings.Contains(err.Error(), "did not report a managed image reference") {
+		t.Fatalf("expected upload importer error to be preserved, got %v", err)
+	}
+
+	ops, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+	for _, candidate := range ops {
+		if candidate.Type == model.OperationTypeDeploy {
+			t.Fatalf("did not expect deploy op when upload import fails, got %+v", candidate)
+		}
 	}
 }
 

@@ -17,6 +17,14 @@ func TestBuilderWorkloadProfileForDockerfileIsHeavy(t *testing.T) {
 	}
 }
 
+func TestDefaultBuilderPodPolicyWaitsForQueuedCapacity(t *testing.T) {
+	t.Parallel()
+
+	if got := defaultBuilderPodPolicy().SelectionTimeoutSeconds; got != 600 {
+		t.Fatalf("expected default builder selection timeout 600s, got %d", got)
+	}
+}
+
 func TestBuildArchiveKanikoJobObjectAppliesLightBuilderPolicy(t *testing.T) {
 	t.Parallel()
 

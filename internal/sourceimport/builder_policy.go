@@ -15,7 +15,7 @@ const (
 	defaultBuilderSmallNodeLabelValue     = "small"
 	defaultBuilderPreferredHostnameWeight = 100
 	defaultBuilderCandidateCount          = 3
-	defaultBuilderSelectionTimeoutSec     = 120
+	defaultBuilderSelectionTimeoutSec     = 600
 	defaultBuilderRetryIntervalSec        = 5
 	defaultBuilderReservationLeaseSec     = 120
 )

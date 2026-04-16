@@ -71,16 +71,16 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		if strings.TrimSpace(op.DesiredSource.UploadID) == "" {
 			return fmt.Errorf("import operation %s missing upload_id", op.ID)
 		}
-		upload, archiveBytes, err := s.Store.GetSourceUploadArchive(strings.TrimSpace(op.DesiredSource.UploadID))
-		if err != nil {
-			return fmt.Errorf("load source upload %s: %w", op.DesiredSource.UploadID, err)
+		upload, archiveBytes, loadErr := s.Store.GetSourceUploadArchive(strings.TrimSpace(op.DesiredSource.UploadID))
+		if loadErr != nil {
+			return fmt.Errorf("load source upload %s: %w", op.DesiredSource.UploadID, loadErr)
 		}
 		if upload.TenantID != app.TenantID {
 			return fmt.Errorf("source upload %s is not visible to tenant %s", upload.ID, app.TenantID)
 		}
-		archiveURL, err := sourceUploadDownloadURL(s.Config.SourceUploadBaseURL, upload.ID, upload.DownloadToken)
-		if err != nil {
-			return err
+		archiveURL, archiveURLErr := sourceUploadDownloadURL(s.Config.SourceUploadBaseURL, upload.ID, upload.DownloadToken)
+		if archiveURLErr != nil {
+			return archiveURLErr
 		}
 		output, err = s.importer.ImportUploadedArchiveSource(importCtx, sourceimport.UploadSourceImportRequest{
 			UploadID:           upload.ID,
