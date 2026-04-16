@@ -76,3 +76,35 @@ func TestSummarizeBuilderPodFailureIgnoresCompletedInitContainers(t *testing.T) 
 		t.Fatalf("unexpected summary:\nwant: %s\ngot:  %s", want, got)
 	}
 }
+
+func TestSummarizeBuilderLogTailUsesLastNonEmptyLines(t *testing.T) {
+	got := summarizeBuilderLogTail("\nline one\n\nline two\nline three\nline four\n")
+	want := "line two | line three | line four"
+	if got != want {
+		t.Fatalf("unexpected log tail summary:\nwant: %s\ngot:  %s", want, got)
+	}
+}
+
+func TestFailingBuilderContainerNamePrefersTerminatedFailure(t *testing.T) {
+	var pod builderPod
+	pod.Status.InitContainerStatuses = []builderContainerStatus{
+		{
+			Name: "git-clone",
+			State: builderRuntimeState{
+				Terminated: &builderStateDetail{Reason: "Completed", ExitCode: 0},
+			},
+		},
+	}
+	pod.Status.ContainerStatuses = []builderContainerStatus{
+		{
+			Name: "kaniko",
+			State: builderRuntimeState{
+				Terminated: &builderStateDetail{Reason: "Error", ExitCode: 1},
+			},
+		},
+	}
+
+	if got := failingBuilderContainerName(pod); got != "kaniko" {
+		t.Fatalf("unexpected failing container name: got %q want %q", got, "kaniko")
+	}
+}

@@ -138,6 +138,9 @@ func summarizeBuilderJobFailure(ctx context.Context, namespace, jobName string) 
 	for _, pod := range pods {
 		if summary := summarizeBuilderPodFailure(pod); summary != "" {
 			lines = append(lines, summary)
+			if logTail, containerName := summarizeBuilderPodFailureLogTail(ctx, namespace, pod); logTail != "" {
+				lines = append(lines, formatBuilderPodLogTailLine(pod, containerName, logTail))
+			}
 		}
 	}
 	if len(lines) > 0 {
@@ -172,6 +175,69 @@ func summarizeBuilderPodFailure(pod builderPod) string {
 	phase := strings.TrimSpace(pod.Status.Phase)
 	if phase != "" && !strings.EqualFold(phase, "Running") && !strings.EqualFold(phase, "Succeeded") {
 		return fmt.Sprintf("%s failed with phase %s", prefix, phase)
+	}
+	return ""
+}
+
+func summarizeBuilderPodFailureLogTail(ctx context.Context, namespace string, pod builderPod) (string, string) {
+	containerName := failingBuilderContainerName(pod)
+	if containerName == "" {
+		return "", ""
+	}
+	output, err := kubectlOutput(ctx, nil, "-n", namespace, "logs", pod.Metadata.Name, "-c", containerName, "--tail=20")
+	if err != nil {
+		return "", ""
+	}
+	return summarizeBuilderLogTail(string(output)), containerName
+}
+
+func summarizeBuilderLogTail(output string) string {
+	rawLines := strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n")
+	lines := make([]string, 0, len(rawLines))
+	for _, line := range rawLines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	if len(lines) > 3 {
+		lines = lines[len(lines)-3:]
+	}
+	summary := strings.Join(lines, " | ")
+	const maxLen = 320
+	if len(summary) > maxLen {
+		summary = "..." + summary[len(summary)-maxLen+3:]
+	}
+	return summary
+}
+
+func formatBuilderPodLogTailLine(pod builderPod, containerName, logTail string) string {
+	prefix := "pod " + strings.TrimSpace(pod.Metadata.Name)
+	if node := strings.TrimSpace(pod.Spec.NodeName); node != "" {
+		prefix += " on node " + node
+	}
+	if containerName != "" {
+		prefix += " container " + containerName
+	}
+	return prefix + " log tail: " + strings.TrimSpace(logTail)
+}
+
+func failingBuilderContainerName(pod builderPod) string {
+	statuses := append([]builderContainerStatus(nil), pod.Status.InitContainerStatuses...)
+	statuses = append(statuses, pod.Status.ContainerStatuses...)
+	for _, status := range statuses {
+		if status.State.Terminated != nil && isFailingBuilderContainerTermination(*status.State.Terminated) {
+			return strings.TrimSpace(status.Name)
+		}
+		if status.LastState.Terminated != nil && isFailingBuilderContainerTermination(*status.LastState.Terminated) {
+			return strings.TrimSpace(status.Name)
+		}
+		if status.State.Waiting != nil || status.LastState.Waiting != nil {
+			return strings.TrimSpace(status.Name)
+		}
 	}
 	return ""
 }

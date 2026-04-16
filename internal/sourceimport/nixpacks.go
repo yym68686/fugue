@@ -329,46 +329,50 @@ func buildAndPushNixpacksImage(ctx context.Context, req nixpacksBuildRequest) er
 		ImageRef:           req.ImageRef,
 		JobLabels:          req.JobLabels,
 	})
-	logger.Printf("builder job preflight kind=nixpacks stage=delete-existing name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
-	if err := deleteBuilderJobIfPresent(ctx, namespace, jobName); err != nil {
-		logger.Printf("builder job preflight failed kind=nixpacks stage=delete-existing name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
-		return err
-	}
-	logger.Printf("builder job preflight complete kind=nixpacks stage=delete-existing name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
-	logger.Printf("builder job preflight kind=nixpacks stage=reserve-placement name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
-	placement, releasePlacement, err := acquireBuilderPlacement(ctx, namespace, jobName, req.PodPolicy, req.WorkloadProfile, req.PlacementNodeSelector)
-	if err != nil {
-		logger.Printf("builder job preflight failed kind=nixpacks stage=reserve-placement name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
-		return fmt.Errorf("select builder placement: %w", err)
-	}
-	defer releasePlacement()
-	req.Placement = placement
-	logger.Printf("builder job preflight complete kind=nixpacks stage=reserve-placement name=%s namespace=%s image=%s placement=%s", jobName, namespace, strings.TrimSpace(req.ImageRef), builderPlacementSummary(placement))
-	logger.Printf(
-		"builder job start kind=nixpacks name=%s namespace=%s image=%s operation=%s app=%s placement=%s",
-		jobName,
-		namespace,
-		strings.TrimSpace(req.ImageRef),
-		strings.TrimSpace(req.JobLabels["fugue.pro/operation-id"]),
-		strings.TrimSpace(req.JobLabels["fugue.pro/app-id"]),
-		builderPlacementSummary(placement),
-	)
+	return runBuilderJobWithRetry(ctx, "nixpacks", jobName, req.ImageRef, logger, func(attemptCtx context.Context) error {
+		logger.Printf("builder job preflight kind=nixpacks stage=delete-existing name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
+		if err := deleteBuilderJobIfPresent(attemptCtx, namespace, jobName); err != nil {
+			logger.Printf("builder job preflight failed kind=nixpacks stage=delete-existing name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
+			return err
+		}
+		logger.Printf("builder job preflight complete kind=nixpacks stage=delete-existing name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
+		logger.Printf("builder job preflight kind=nixpacks stage=reserve-placement name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
+		placement, releasePlacement, err := acquireBuilderPlacement(attemptCtx, namespace, jobName, req.PodPolicy, req.WorkloadProfile, req.PlacementNodeSelector)
+		if err != nil {
+			logger.Printf("builder job preflight failed kind=nixpacks stage=reserve-placement name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
+			return fmt.Errorf("select builder placement: %w", err)
+		}
+		defer releasePlacement()
 
-	jobObject, err := buildNixpacksJobObject(namespace, jobName, req)
-	if err != nil {
-		return err
-	}
-	if err := kubectlRun(ctx, jobObject, "-n", namespace, "apply", "-f", "-"); err != nil {
-		logger.Printf("builder job apply failed kind=nixpacks name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
-		return fmt.Errorf("apply nixpacks job: %w", err)
-	}
-	logger.Printf("builder job applied kind=nixpacks name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
-	if err := waitForBuilderJob(ctx, namespace, jobName, 30*time.Minute); err != nil {
-		logger.Printf("builder job failed kind=nixpacks name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
-		return fmt.Errorf("nixpacks job %s: %w", jobName, err)
-	}
-	logger.Printf("builder job completed kind=nixpacks name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
-	return nil
+		attemptReq := req
+		attemptReq.Placement = placement
+		logger.Printf("builder job preflight complete kind=nixpacks stage=reserve-placement name=%s namespace=%s image=%s placement=%s", jobName, namespace, strings.TrimSpace(req.ImageRef), builderPlacementSummary(placement))
+		logger.Printf(
+			"builder job start kind=nixpacks name=%s namespace=%s image=%s operation=%s app=%s placement=%s",
+			jobName,
+			namespace,
+			strings.TrimSpace(req.ImageRef),
+			strings.TrimSpace(req.JobLabels["fugue.pro/operation-id"]),
+			strings.TrimSpace(req.JobLabels["fugue.pro/app-id"]),
+			builderPlacementSummary(placement),
+		)
+
+		jobObject, err := buildNixpacksJobObject(namespace, jobName, attemptReq)
+		if err != nil {
+			return err
+		}
+		if err := kubectlRun(attemptCtx, jobObject, "-n", namespace, "apply", "-f", "-"); err != nil {
+			logger.Printf("builder job apply failed kind=nixpacks name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
+			return fmt.Errorf("apply nixpacks job: %w", err)
+		}
+		logger.Printf("builder job applied kind=nixpacks name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
+		if err := waitForBuilderJob(attemptCtx, namespace, jobName, 30*time.Minute); err != nil {
+			logger.Printf("builder job failed kind=nixpacks name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
+			return fmt.Errorf("nixpacks job %s: %w", jobName, err)
+		}
+		logger.Printf("builder job completed kind=nixpacks name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
+		return nil
+	})
 }
 
 func buildNixpacksJobObject(namespace, jobName string, req nixpacksBuildRequest) (map[string]any, error) {

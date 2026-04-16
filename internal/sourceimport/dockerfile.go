@@ -230,46 +230,50 @@ func buildAndPushDockerfileImage(ctx context.Context, req dockerfileBuildRequest
 	}
 
 	jobName := buildJobName(req)
-	logger.Printf("builder job preflight kind=dockerfile stage=delete-existing name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
-	if err := deleteBuilderJobIfPresent(ctx, namespace, jobName); err != nil {
-		logger.Printf("builder job preflight failed kind=dockerfile stage=delete-existing name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
-		return err
-	}
-	logger.Printf("builder job preflight complete kind=dockerfile stage=delete-existing name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
-	logger.Printf("builder job preflight kind=dockerfile stage=reserve-placement name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
-	placement, releasePlacement, err := acquireBuilderPlacement(ctx, namespace, jobName, req.PodPolicy, req.WorkloadProfile, req.PlacementNodeSelector)
-	if err != nil {
-		logger.Printf("builder job preflight failed kind=dockerfile stage=reserve-placement name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
-		return fmt.Errorf("select builder placement: %w", err)
-	}
-	defer releasePlacement()
-	req.Placement = placement
-	logger.Printf("builder job preflight complete kind=dockerfile stage=reserve-placement name=%s namespace=%s image=%s placement=%s", jobName, namespace, strings.TrimSpace(req.ImageRef), builderPlacementSummary(placement))
-	logger.Printf(
-		"builder job start kind=dockerfile name=%s namespace=%s image=%s operation=%s app=%s placement=%s",
-		jobName,
-		namespace,
-		strings.TrimSpace(req.ImageRef),
-		strings.TrimSpace(req.JobLabels["fugue.pro/operation-id"]),
-		strings.TrimSpace(req.JobLabels["fugue.pro/app-id"]),
-		builderPlacementSummary(placement),
-	)
+	return runBuilderJobWithRetry(ctx, "dockerfile", jobName, req.ImageRef, logger, func(attemptCtx context.Context) error {
+		logger.Printf("builder job preflight kind=dockerfile stage=delete-existing name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
+		if err := deleteBuilderJobIfPresent(attemptCtx, namespace, jobName); err != nil {
+			logger.Printf("builder job preflight failed kind=dockerfile stage=delete-existing name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
+			return err
+		}
+		logger.Printf("builder job preflight complete kind=dockerfile stage=delete-existing name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
+		logger.Printf("builder job preflight kind=dockerfile stage=reserve-placement name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
+		placement, releasePlacement, err := acquireBuilderPlacement(attemptCtx, namespace, jobName, req.PodPolicy, req.WorkloadProfile, req.PlacementNodeSelector)
+		if err != nil {
+			logger.Printf("builder job preflight failed kind=dockerfile stage=reserve-placement name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
+			return fmt.Errorf("select builder placement: %w", err)
+		}
+		defer releasePlacement()
 
-	jobObject, err := buildKanikoJobObject(namespace, jobName, req)
-	if err != nil {
-		return err
-	}
-	if err := kubectlRun(ctx, jobObject, "-n", namespace, "apply", "-f", "-"); err != nil {
-		logger.Printf("builder job apply failed kind=dockerfile name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
-		return fmt.Errorf("apply kaniko job: %w", err)
-	}
-	logger.Printf("builder job applied kind=dockerfile name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
-	if err := waitForBuilderJob(ctx, namespace, jobName, 25*time.Minute); err != nil {
-		logger.Printf("builder job failed kind=dockerfile name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
-		return fmt.Errorf("kaniko job %s: %w", jobName, err)
-	}
-	logger.Printf("builder job completed kind=dockerfile name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
-	return nil
+		attemptReq := req
+		attemptReq.Placement = placement
+		logger.Printf("builder job preflight complete kind=dockerfile stage=reserve-placement name=%s namespace=%s image=%s placement=%s", jobName, namespace, strings.TrimSpace(req.ImageRef), builderPlacementSummary(placement))
+		logger.Printf(
+			"builder job start kind=dockerfile name=%s namespace=%s image=%s operation=%s app=%s placement=%s",
+			jobName,
+			namespace,
+			strings.TrimSpace(req.ImageRef),
+			strings.TrimSpace(req.JobLabels["fugue.pro/operation-id"]),
+			strings.TrimSpace(req.JobLabels["fugue.pro/app-id"]),
+			builderPlacementSummary(placement),
+		)
+
+		jobObject, err := buildKanikoJobObject(namespace, jobName, attemptReq)
+		if err != nil {
+			return err
+		}
+		if err := kubectlRun(attemptCtx, jobObject, "-n", namespace, "apply", "-f", "-"); err != nil {
+			logger.Printf("builder job apply failed kind=dockerfile name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
+			return fmt.Errorf("apply kaniko job: %w", err)
+		}
+		logger.Printf("builder job applied kind=dockerfile name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
+		if err := waitForBuilderJob(attemptCtx, namespace, jobName, 25*time.Minute); err != nil {
+			logger.Printf("builder job failed kind=dockerfile name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
+			return fmt.Errorf("kaniko job %s: %w", jobName, err)
+		}
+		logger.Printf("builder job completed kind=dockerfile name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
+		return nil
+	})
 }
 
 func effectiveBuilderLogger(logger *log.Logger) *log.Logger {
