@@ -49,6 +49,16 @@ spec:
                 secretKeyRef:
                   name: {{ include "fugue.configSecretName" . }}
                   key: FUGUE_DATABASE_URL
+            - name: FUGUE_BOOTSTRAP_ADMIN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: FUGUE_BOOTSTRAP_ADMIN_KEY
+            - name: FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY
             - name: FUGUE_REGISTRY_PUSH_BASE
               value: {{ .Values.api.registryPushBase | quote }}
             - name: FUGUE_REGISTRY_PULL_BASE

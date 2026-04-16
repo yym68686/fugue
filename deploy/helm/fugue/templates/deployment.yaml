@@ -120,6 +120,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "fugue.configSecretName" . }}
                   key: FUGUE_BOOTSTRAP_ADMIN_KEY
+            - name: FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY
             {{- with .Values.api.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -1,5 +1,8 @@
 bootstrapAdminKey: "fugue_bootstrap_admin_change_me"
 
+workloadIdentity:
+  signingKey: ""
+
 configSecret:
   existingSecretName: ""
 
