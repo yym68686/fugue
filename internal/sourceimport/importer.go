@@ -55,6 +55,7 @@ type GitHubImportResult struct {
 	DockerfilePath          string
 	BuildContextDir         string
 	ImageRef                string
+	BuildJobName            string
 	DefaultAppName          string
 	DetectedPort            int
 	ExposesPublicService    bool
@@ -88,7 +89,7 @@ func (i *Importer) ImportGitHubStaticSite(ctx context.Context, req GitHubImportR
 	}
 	defer releaseClonedRepo(repo)
 
-	return importStaticSiteFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
+	return importStaticSiteFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful, i.Logger)
 }
 
 func gitOutput(ctx context.Context, repoDir string, args ...string) (string, error) {
@@ -137,7 +138,7 @@ func parseGitHubRepoURL(raw string) (string, string, error) {
 	return ParseGitHubRepoURL(raw)
 }
 
-func importStaticSiteFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, repoAuthToken, requestedSourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
+func importStaticSiteFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, repoAuthToken, requestedSourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool, logger *log.Logger) (GitHubImportResult, error) {
 	sourceDir, err := detectStaticSiteDir(repo.RepoDir, requestedSourceDir)
 	if err != nil {
 		return GitHubImportResult{}, err
@@ -148,8 +149,9 @@ func importStaticSiteFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 	}
 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
+	buildJobNameValue := ""
 	if len(plan.SourceOverlay) > 0 {
-		if err := buildAndPushDockerfileImage(ctx, dockerfileBuildRequest{
+		buildReq := dockerfileBuildRequest{
 			RepoURL:               repoURL,
 			RepoAuthToken:         repoAuthToken,
 			Branch:                repo.Branch,
@@ -163,7 +165,10 @@ func importStaticSiteFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 			PodPolicy:             builderPolicy,
 			WorkloadProfile:       builderWorkloadProfileFor(model.AppBuildStrategyDockerfile, stateful),
 			SourceOverlayFiles:    plan.SourceOverlay,
-		}); err != nil {
+			Logger:                logger,
+		}
+		buildJobNameValue = buildJobName(buildReq)
+		if err := buildAndPushDockerfileImage(ctx, buildReq); err != nil {
 			return GitHubImportResult{}, err
 		}
 	} else {
@@ -181,6 +186,7 @@ func importStaticSiteFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		SourceDir:            plan.SourceDir,
 		BuildStrategy:        model.AppBuildStrategyStaticSite,
 		ImageRef:             imageRef,
+		BuildJobName:         buildJobNameValue,
 		DefaultAppName:       repo.DefaultAppName,
 		DetectedPort:         80,
 		ExposesPublicService: true,

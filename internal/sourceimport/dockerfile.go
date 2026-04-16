@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -46,7 +47,7 @@ func (i *Importer) ImportGitHubDockerfileImage(ctx context.Context, req GitHubDo
 	}
 	defer releaseClonedRepo(repo)
 
-	return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, req.DockerfilePath, req.BuildContextDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
+	return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, req.DockerfilePath, req.BuildContextDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful, i.Logger)
 }
 
 type dockerfileBuildRequest struct {
@@ -65,6 +66,7 @@ type dockerfileBuildRequest struct {
 	PodPolicy             BuilderPodPolicy
 	WorkloadProfile       builderWorkloadProfile
 	Placement             builderJobPlacement
+	Logger                *log.Logger
 }
 
 func detectDockerBuildInputs(repoDir, dockerfilePath, buildContextDir string) (string, string, error) {
@@ -109,7 +111,7 @@ func detectDockerBuildInputs(repoDir, dockerfilePath, buildContextDir string) (s
 	return relDockerfile, relContext, nil
 }
 
-func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, repoAuthToken, dockerfilePath, buildContextDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
+func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, repoAuthToken, dockerfilePath, buildContextDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool, logger *log.Logger) (GitHubImportResult, error) {
 	dockerfilePath, buildContextDir, err := detectDockerBuildInputs(repo.RepoDir, dockerfilePath, buildContextDir)
 	if err != nil {
 		return GitHubImportResult{}, err
@@ -124,7 +126,7 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 	}
 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
-	if err := buildAndPushDockerfileImage(ctx, dockerfileBuildRequest{
+	buildReq := dockerfileBuildRequest{
 		RepoURL:               repoURL,
 		RepoAuthToken:         repoAuthToken,
 		Branch:                repo.Branch,
@@ -136,7 +138,10 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		PlacementNodeSelector: placementNodeSelector,
 		PodPolicy:             builderPolicy,
 		WorkloadProfile:       builderWorkloadProfileFor(model.AppBuildStrategyDockerfile, stateful),
-	}); err != nil {
+		Logger:                logger,
+	}
+	buildJobNameValue := buildJobName(buildReq)
+	if err := buildAndPushDockerfileImage(ctx, buildReq); err != nil {
 		return GitHubImportResult{}, err
 	}
 
@@ -150,6 +155,7 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		DockerfilePath:       dockerfilePath,
 		BuildContextDir:      buildContextDir,
 		ImageRef:             imageRef,
+		BuildJobName:         buildJobNameValue,
 		DefaultAppName:       repo.DefaultAppName,
 		DetectedPort:         detectedPort,
 		ExposesPublicService: exposesPublicService,
@@ -231,18 +237,53 @@ func buildAndPushDockerfileImage(ctx context.Context, req dockerfileBuildRequest
 	}
 	defer releasePlacement()
 	req.Placement = placement
+	logger := effectiveBuilderLogger(req.Logger)
+	logger.Printf(
+		"builder job start kind=dockerfile name=%s namespace=%s image=%s operation=%s app=%s placement=%s",
+		jobName,
+		namespace,
+		strings.TrimSpace(req.ImageRef),
+		strings.TrimSpace(req.JobLabels["fugue.pro/operation-id"]),
+		strings.TrimSpace(req.JobLabels["fugue.pro/app-id"]),
+		builderPlacementSummary(placement),
+	)
 
 	jobObject, err := buildKanikoJobObject(namespace, jobName, req)
 	if err != nil {
 		return err
 	}
 	if err := kubectlRun(ctx, jobObject, "-n", namespace, "apply", "-f", "-"); err != nil {
+		logger.Printf("builder job apply failed kind=dockerfile name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
 		return fmt.Errorf("apply kaniko job: %w", err)
 	}
+	logger.Printf("builder job applied kind=dockerfile name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
 	if err := waitForBuilderJob(ctx, namespace, jobName, 25*time.Minute); err != nil {
+		logger.Printf("builder job failed kind=dockerfile name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
 		return fmt.Errorf("kaniko job %s: %w", jobName, err)
 	}
+	logger.Printf("builder job completed kind=dockerfile name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
 	return nil
+}
+
+func effectiveBuilderLogger(logger *log.Logger) *log.Logger {
+	if logger != nil {
+		return logger
+	}
+	return log.Default()
+}
+
+func builderPlacementSummary(placement builderJobPlacement) string {
+	parts := make([]string, 0, 2)
+	if preferred := strings.TrimSpace(placement.PreferredHostname); preferred != "" {
+		parts = append(parts, "preferred="+preferred)
+	}
+	if len(placement.CandidateHostnames) > 0 {
+		parts = append(parts, "candidates="+strings.Join(placement.CandidateHostnames, ","))
+	}
+	if len(parts) == 0 {
+		return "unconstrained"
+	}
+	return strings.Join(parts, " ")
 }
 
 func currentNamespace() (string, error) {

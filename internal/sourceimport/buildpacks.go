@@ -3,6 +3,7 @@ package sourceimport
 import (
 	"context"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"time"
@@ -49,6 +50,7 @@ type buildpacksBuildRequest struct {
 	PodPolicy             BuilderPodPolicy
 	WorkloadProfile       builderWorkloadProfile
 	Placement             builderJobPlacement
+	Logger                *log.Logger
 }
 
 func (i *Importer) ImportGitHubBuildpacks(ctx context.Context, req GitHubBuildpacksImportRequest) (GitHubImportResult, error) {
@@ -61,10 +63,10 @@ func (i *Importer) ImportGitHubBuildpacks(ctx context.Context, req GitHubBuildpa
 	}
 	defer releaseClonedRepo(repo)
 
-	return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
+	return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful, i.Logger)
 }
 
-func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, repoAuthToken, sourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
+func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, repoAuthToken, sourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool, logger *log.Logger) (GitHubImportResult, error) {
 	normalizedSourceDir, err := normalizeRepoSourceDir(repo.RepoDir, sourceDir)
 	if err != nil {
 		return GitHubImportResult{}, err
@@ -82,7 +84,7 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 	sourceOverlayFiles = append(sourceOverlayFiles, systemOverlayFiles...)
 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
-	if err := buildAndPushBuildpacksImage(ctx, buildpacksBuildRequest{
+	buildReq := buildpacksBuildRequest{
 		RepoURL:               repoURL,
 		RepoAuthToken:         repoAuthToken,
 		Branch:                repo.Branch,
@@ -99,7 +101,18 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 			model.AppBuildStrategyBuildpacks,
 			stateful,
 		),
-	}); err != nil {
+		Logger: logger,
+	}
+	buildJobNameValue := buildJobName(dockerfileBuildRequest{
+		RepoURL:            buildReq.RepoURL,
+		CommitSHA:          buildReq.CommitSHA,
+		SourceLabel:        buildReq.SourceLabel,
+		ArchiveDownloadURL: buildReq.ArchiveDownloadURL,
+		BuildContextDir:    buildReq.SourceDir,
+		ImageRef:           buildReq.ImageRef,
+		JobLabels:          buildReq.JobLabels,
+	})
+	if err := buildAndPushBuildpacksImage(ctx, buildReq); err != nil {
 		return GitHubImportResult{}, err
 	}
 
@@ -112,6 +125,7 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		SourceDir:               normalizeImportedSourceDirValue(normalizedSourceDir),
 		BuildStrategy:           model.AppBuildStrategyBuildpacks,
 		ImageRef:                imageRef,
+		BuildJobName:            buildJobNameValue,
 		DefaultAppName:          repo.DefaultAppName,
 		DetectedPort:            port,
 		ExposesPublicService:    exposesPublicService,
@@ -159,17 +173,31 @@ func buildAndPushBuildpacksImage(ctx context.Context, req buildpacksBuildRequest
 	}
 	defer releasePlacement()
 	req.Placement = placement
+	logger := effectiveBuilderLogger(req.Logger)
+	logger.Printf(
+		"builder job start kind=buildpacks name=%s namespace=%s image=%s operation=%s app=%s placement=%s",
+		jobName,
+		namespace,
+		strings.TrimSpace(req.ImageRef),
+		strings.TrimSpace(req.JobLabels["fugue.pro/operation-id"]),
+		strings.TrimSpace(req.JobLabels["fugue.pro/app-id"]),
+		builderPlacementSummary(placement),
+	)
 
 	jobObject, err := buildBuildpacksJobObject(namespace, jobName, req)
 	if err != nil {
 		return err
 	}
 	if err := kubectlRun(ctx, jobObject, "-n", namespace, "apply", "-f", "-"); err != nil {
+		logger.Printf("builder job apply failed kind=buildpacks name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
 		return fmt.Errorf("apply buildpacks job: %w", err)
 	}
+	logger.Printf("builder job applied kind=buildpacks name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
 	if err := waitForBuilderJob(ctx, namespace, jobName, 30*time.Minute); err != nil {
+		logger.Printf("builder job failed kind=buildpacks name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
 		return fmt.Errorf("buildpacks job %s: %w", jobName, err)
 	}
+	logger.Printf("builder job completed kind=buildpacks name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
 	return nil
 }
 

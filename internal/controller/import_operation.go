@@ -110,6 +110,22 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	if err := s.ensureOperationStillActive(op.ID); err != nil {
 		return err
 	}
+	if s.Logger != nil {
+		s.Logger.Printf(
+			"import operation %s importer output source_type=%s build_strategy=%s import_image=%s resolved_image=%s build_job=%s compose_service=%s detected_provider=%s",
+			op.ID,
+			importOutputSourceType(output, *op.DesiredSource),
+			importOutputBuildStrategy(output, *op.DesiredSource),
+			strings.TrimSpace(output.ImportResult.ImageRef),
+			strings.TrimSpace(output.Source.ResolvedImageRef),
+			strings.TrimSpace(output.ImportResult.BuildJobName),
+			importOutputComposeService(output, *op.DesiredSource),
+			strings.TrimSpace(output.Source.DetectedProvider),
+		)
+	}
+	if err := validateImportedManagedImageOutput(op, *op.DesiredSource, output); err != nil {
+		return err
+	}
 
 	composeSuggestedEnv, composeEnvErr := s.suggestComposeServiceEnv(importCtx, app, *op.DesiredSource)
 	if composeEnvErr != nil && s.Logger != nil {
@@ -272,6 +288,69 @@ func mergeSuggestedImportEnv(base, override map[string]string) map[string]string
 		return nil
 	}
 	return merged
+}
+
+func validateImportedManagedImageOutput(op model.Operation, queuedSource model.AppSource, output sourceimport.GitHubSourceImportOutput) error {
+	sourceType := importOutputSourceType(output, queuedSource)
+	buildStrategy := importOutputBuildStrategy(output, queuedSource)
+	composeService := importOutputComposeService(output, queuedSource)
+	if strings.TrimSpace(output.ImportResult.ImageRef) != "" || strings.TrimSpace(output.Source.ResolvedImageRef) != "" {
+		if !importRequiresBuilderJobEvidence(sourceType, buildStrategy) || strings.TrimSpace(output.ImportResult.BuildJobName) != "" {
+			return nil
+		}
+		return fmt.Errorf(
+			"import operation %s importer did not report builder job evidence (source_type=%s build_strategy=%s compose_service=%s); refusing to continue with an unverified image build",
+			op.ID,
+			sourceType,
+			buildStrategy,
+			composeService,
+		)
+	}
+	return fmt.Errorf(
+		"import operation %s importer did not report a managed image reference (source_type=%s build_strategy=%s compose_service=%s); refusing to infer one from queued metadata",
+		op.ID,
+		sourceType,
+		buildStrategy,
+		composeService,
+	)
+}
+
+func importRequiresBuilderJobEvidence(sourceType, buildStrategy string) bool {
+	sourceType = strings.TrimSpace(sourceType)
+	buildStrategy = strings.TrimSpace(buildStrategy)
+	if sourceType != model.AppSourceTypeUpload {
+		return false
+	}
+	switch buildStrategy {
+	case model.AppBuildStrategyDockerfile, model.AppBuildStrategyBuildpacks, model.AppBuildStrategyNixpacks:
+		return true
+	default:
+		return false
+	}
+}
+
+func importOutputSourceType(output sourceimport.GitHubSourceImportOutput, queuedSource model.AppSource) string {
+	if sourceType := strings.TrimSpace(output.Source.Type); sourceType != "" {
+		return sourceType
+	}
+	return strings.TrimSpace(queuedSource.Type)
+}
+
+func importOutputBuildStrategy(output sourceimport.GitHubSourceImportOutput, queuedSource model.AppSource) string {
+	if buildStrategy := strings.TrimSpace(output.ImportResult.BuildStrategy); buildStrategy != "" {
+		return buildStrategy
+	}
+	if buildStrategy := strings.TrimSpace(output.Source.BuildStrategy); buildStrategy != "" {
+		return buildStrategy
+	}
+	return strings.TrimSpace(queuedSource.BuildStrategy)
+}
+
+func importOutputComposeService(output sourceimport.GitHubSourceImportOutput, queuedSource model.AppSource) string {
+	if composeService := strings.TrimSpace(output.Source.ComposeService); composeService != "" {
+		return composeService
+	}
+	return strings.TrimSpace(queuedSource.ComposeService)
 }
 
 const (

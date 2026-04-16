@@ -3,6 +3,7 @@ package sourceimport
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -63,6 +64,7 @@ type nixpacksBuildRequest struct {
 	PodPolicy             BuilderPodPolicy
 	WorkloadProfile       builderWorkloadProfile
 	Placement             builderJobPlacement
+	Logger                *log.Logger
 }
 
 func (i *Importer) ImportGitHubAuto(ctx context.Context, req GitHubAutoImportRequest) (GitHubImportResult, error) {
@@ -82,13 +84,13 @@ func (i *Importer) ImportGitHubAuto(ctx context.Context, req GitHubAutoImportReq
 
 	switch buildStrategy {
 	case model.AppBuildStrategyDockerfile:
-		return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, dockerfilePath, buildContextDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
+		return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, dockerfilePath, buildContextDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful, i.Logger)
 	case model.AppBuildStrategyStaticSite:
-		return importStaticSiteFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, sourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
+		return importStaticSiteFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, sourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful, i.Logger)
 	case model.AppBuildStrategyBuildpacks:
-		return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, sourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
+		return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, sourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful, i.Logger)
 	case model.AppBuildStrategyNixpacks:
-		return importNixpacksFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, sourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
+		return importNixpacksFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, sourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful, i.Logger)
 	default:
 		return GitHubImportResult{}, fmt.Errorf("unsupported auto-detected build strategy %q", buildStrategy)
 	}
@@ -104,10 +106,10 @@ func (i *Importer) ImportGitHubNixpacks(ctx context.Context, req GitHubNixpacksI
 	}
 	defer releaseClonedRepo(repo)
 
-	return importNixpacksFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful)
+	return importNixpacksFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful, i.Logger)
 }
 
-func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, repoAuthToken, sourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool) (GitHubImportResult, error) {
+func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, repoAuthToken, sourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool, logger *log.Logger) (GitHubImportResult, error) {
 	normalizedSourceDir, err := normalizeRepoSourceDir(repo.RepoDir, sourceDir)
 	if err != nil {
 		return GitHubImportResult{}, err
@@ -124,7 +126,7 @@ func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, re
 	}
 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
-	if err := buildAndPushNixpacksImage(ctx, nixpacksBuildRequest{
+	buildReq := nixpacksBuildRequest{
 		RepoURL:               repoURL,
 		RepoAuthToken:         repoAuthToken,
 		Branch:                repo.Branch,
@@ -140,7 +142,18 @@ func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, re
 			model.AppBuildStrategyNixpacks,
 			stateful,
 		),
-	}); err != nil {
+		Logger: logger,
+	}
+	buildJobNameValue := buildJobName(dockerfileBuildRequest{
+		RepoURL:            buildReq.RepoURL,
+		CommitSHA:          buildReq.CommitSHA,
+		SourceLabel:        buildReq.SourceLabel,
+		ArchiveDownloadURL: buildReq.ArchiveDownloadURL,
+		BuildContextDir:    buildReq.SourceDir,
+		ImageRef:           buildReq.ImageRef,
+		JobLabels:          buildReq.JobLabels,
+	})
+	if err := buildAndPushNixpacksImage(ctx, buildReq); err != nil {
 		return GitHubImportResult{}, err
 	}
 
@@ -153,6 +166,7 @@ func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, re
 		SourceDir:               normalizeImportedSourceDirValue(normalizedSourceDir),
 		BuildStrategy:           model.AppBuildStrategyNixpacks,
 		ImageRef:                imageRef,
+		BuildJobName:            buildJobNameValue,
 		DefaultAppName:          repo.DefaultAppName,
 		DetectedPort:            port,
 		ExposesPublicService:    exposesPublicService,
@@ -322,17 +336,31 @@ func buildAndPushNixpacksImage(ctx context.Context, req nixpacksBuildRequest) er
 	}
 	defer releasePlacement()
 	req.Placement = placement
+	logger := effectiveBuilderLogger(req.Logger)
+	logger.Printf(
+		"builder job start kind=nixpacks name=%s namespace=%s image=%s operation=%s app=%s placement=%s",
+		jobName,
+		namespace,
+		strings.TrimSpace(req.ImageRef),
+		strings.TrimSpace(req.JobLabels["fugue.pro/operation-id"]),
+		strings.TrimSpace(req.JobLabels["fugue.pro/app-id"]),
+		builderPlacementSummary(placement),
+	)
 
 	jobObject, err := buildNixpacksJobObject(namespace, jobName, req)
 	if err != nil {
 		return err
 	}
 	if err := kubectlRun(ctx, jobObject, "-n", namespace, "apply", "-f", "-"); err != nil {
+		logger.Printf("builder job apply failed kind=nixpacks name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
 		return fmt.Errorf("apply nixpacks job: %w", err)
 	}
+	logger.Printf("builder job applied kind=nixpacks name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
 	if err := waitForBuilderJob(ctx, namespace, jobName, 30*time.Minute); err != nil {
+		logger.Printf("builder job failed kind=nixpacks name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
 		return fmt.Errorf("nixpacks job %s: %w", jobName, err)
 	}
+	logger.Printf("builder job completed kind=nixpacks name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
 	return nil
 }
 

@@ -297,7 +297,7 @@ func TestExecuteManagedImportOperationRefreshesExistingRestartToken(t *testing.T
 	}
 }
 
-func TestExecuteManagedImportOperationRecoversMissingUploadImageRefFromManagedRegistry(t *testing.T) {
+func TestExecuteManagedImportOperationRecoversUploadManagedImageRefFromImportResult(t *testing.T) {
 	t.Parallel()
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -357,6 +357,8 @@ func TestExecuteManagedImportOperationRecoversMissingUploadImageRefFromManagedRe
 		uploadOutput: &sourceimport.GitHubSourceImportOutput{
 			ImportResult: sourceimport.GitHubImportResult{
 				BuildStrategy:        model.AppBuildStrategyDockerfile,
+				ImageRef:             expectedManagedImageRef,
+				BuildJobName:         "fugue-build-demo-upload",
 				DetectedPort:         8080,
 				ExposesPublicService: true,
 			},
@@ -414,6 +416,99 @@ func TestExecuteManagedImportOperationRecoversMissingUploadImageRefFromManagedRe
 	}
 	if got := deployOp.DesiredSource.ArchiveSHA256; got != upload.SHA256 {
 		t.Fatalf("expected upload sha %q, got %q", upload.SHA256, got)
+	}
+}
+
+func TestExecuteManagedImportOperationFailsWhenUploadBuildLacksBuilderEvidence(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	upload, err := stateStore.CreateSourceUpload(tenant.ID, "demo.tgz", "application/gzip", []byte("archive-bytes"))
+	if err != nil {
+		t.Fatalf("create source upload: %v", err)
+	}
+	expectedManagedImageRef := "registry.push.example/fugue-apps/demo:upload-" + upload.SHA256[:12]
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:             model.AppSourceTypeUpload,
+		UploadID:         upload.ID,
+		UploadFilename:   upload.Filename,
+		ArchiveSHA256:    upload.SHA256,
+		ArchiveSizeBytes: upload.SizeBytes,
+		BuildStrategy:    model.AppBuildStrategyDockerfile,
+		DockerfilePath:   "Dockerfile",
+		BuildContextDir:  ".",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	specCopy := app.Spec
+	sourceCopy := *app.Source
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		DesiredSource:   &sourceCopy,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+
+	importer := &recordingImporter{
+		uploadOutput: &sourceimport.GitHubSourceImportOutput{
+			ImportResult: sourceimport.GitHubImportResult{
+				BuildStrategy:        model.AppBuildStrategyDockerfile,
+				ImageRef:             expectedManagedImageRef,
+				DetectedPort:         8080,
+				ExposesPublicService: true,
+			},
+			Source: model.AppSource{
+				Type:            model.AppSourceTypeUpload,
+				BuildStrategy:   model.AppBuildStrategyDockerfile,
+				DockerfilePath:  "Dockerfile",
+				BuildContextDir: ".",
+			},
+		},
+	}
+	svc := &Service{
+		Store:            stateStore,
+		Config:           config.ControllerConfig{SourceUploadBaseURL: "http://source.example"},
+		Logger:           log.New(io.Discard, "", 0),
+		importer:         importer,
+		registryPushBase: "registry.push.example",
+		registryPullBase: "registry.pull.example",
+		inspectManagedImage: func(_ context.Context, imageRef string) (bool, map[string]int64, error) {
+			t.Fatalf("unexpected registry inspection for image %q", imageRef)
+			return false, nil, nil
+		},
+	}
+
+	err = svc.executeManagedImportOperation(context.Background(), op, app)
+	if err == nil {
+		t.Fatal("expected import to fail when upload build omits builder evidence")
+	}
+	if !strings.Contains(err.Error(), "did not report builder job evidence") {
+		t.Fatalf("expected missing builder evidence failure, got %v", err)
 	}
 }
 
@@ -500,7 +595,7 @@ func TestExecuteManagedImportOperationFailsWhenDirectManagedImageStaysMissing(t 
 	}
 }
 
-func TestExecuteManagedImportOperationFailsWhenInferredUploadImageRefStaysMissing(t *testing.T) {
+func TestExecuteManagedImportOperationFailsWhenUploadImportOmitsManagedImageRef(t *testing.T) {
 	t.Parallel()
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -521,7 +616,6 @@ func TestExecuteManagedImportOperationFailsWhenInferredUploadImageRefStaysMissin
 	if err != nil {
 		t.Fatalf("create source upload: %v", err)
 	}
-	expectedManagedImageRef := "registry.push.example/fugue-apps/demo:upload-" + upload.SHA256[:12]
 
 	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
 		Replicas:  1,
@@ -570,7 +664,6 @@ func TestExecuteManagedImportOperationFailsWhenInferredUploadImageRefStaysMissin
 			},
 		},
 	}
-	inspectCalls := 0
 	svc := &Service{
 		Store:                         stateStore,
 		Config:                        config.ControllerConfig{SourceUploadBaseURL: "http://source.example"},
@@ -581,23 +674,17 @@ func TestExecuteManagedImportOperationFailsWhenInferredUploadImageRefStaysMissin
 		importImageInspectRetryDelay:  time.Millisecond,
 		importImageInspectMaxAttempts: 3,
 		inspectManagedImage: func(_ context.Context, imageRef string) (bool, map[string]int64, error) {
-			if imageRef != expectedManagedImageRef {
-				t.Fatalf("unexpected inferred image ref %q", imageRef)
-			}
-			inspectCalls++
+			t.Fatalf("unexpected registry inspection for image %q", imageRef)
 			return false, nil, nil
 		},
 	}
 
 	err = svc.executeManagedImportOperation(context.Background(), op, app)
 	if err == nil {
-		t.Fatal("expected import to fail when inferred image never appears in the registry")
+		t.Fatal("expected import to fail when the importer omits the managed image reference")
 	}
-	if inspectCalls != 3 {
-		t.Fatalf("expected 3 registry inspect attempts before failure, got %d", inspectCalls)
-	}
-	if !strings.Contains(err.Error(), "were not confirmed in the registry") {
-		t.Fatalf("expected registry confirmation failure, got %v", err)
+	if !strings.Contains(err.Error(), "did not report a managed image reference") {
+		t.Fatalf("expected missing importer image failure, got %v", err)
 	}
 
 	ops, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
