@@ -13,6 +13,9 @@ func TestBillingImageStorageRefreshSchedulerDebouncesRapidRequests(t *testing.T)
 	t.Parallel()
 
 	scheduler := newBillingImageStorageRefreshScheduler(20*time.Millisecond, time.Second)
+	t.Cleanup(func() {
+		scheduler.wait()
+	})
 	logger := log.New(io.Discard, "", 0)
 	started := make(chan string, 4)
 	var calls atomic.Int32
@@ -43,6 +46,9 @@ func TestBillingImageStorageRefreshSchedulerRunsTrailingRefreshAfterInFlightRequ
 	t.Parallel()
 
 	scheduler := newBillingImageStorageRefreshScheduler(10*time.Millisecond, time.Second)
+	t.Cleanup(func() {
+		scheduler.wait()
+	})
 	logger := log.New(io.Discard, "", 0)
 	started := make(chan struct{}, 4)
 	release := make(chan struct{})

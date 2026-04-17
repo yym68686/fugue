@@ -22,6 +22,7 @@ type billingImageStorageRefreshScheduler struct {
 	mu          sync.Mutex
 	nextRunByID map[string]time.Time
 	group       singleflight.Group
+	wg          sync.WaitGroup
 }
 
 func newBillingImageStorageRefreshScheduler(debounce, timeout time.Duration) billingImageStorageRefreshScheduler {
@@ -58,7 +59,9 @@ func (s *billingImageStorageRefreshScheduler) schedule(
 	s.nextRunByID[tenantID] = time.Now().Add(s.debounceDuration())
 	s.mu.Unlock()
 
+	s.wg.Add(1)
 	go func() {
+		defer s.wg.Done()
 		_, err, _ := s.group.Do(tenantID, func() (any, error) {
 			return nil, s.run(tenantID, refresh)
 		})
@@ -138,4 +141,11 @@ func (s *billingImageStorageRefreshScheduler) refreshTimeout() time.Duration {
 		return defaultBillingImageStorageRefreshTimeout
 	}
 	return s.timeout
+}
+
+func (s *billingImageStorageRefreshScheduler) wait() {
+	if s == nil {
+		return
+	}
+	s.wg.Wait()
 }

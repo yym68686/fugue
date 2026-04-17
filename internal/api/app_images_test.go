@@ -172,6 +172,9 @@ func TestHandleGetBillingCountsManagedImageInventoryStorage(t *testing.T) {
 
 	stateStore, server, apiKey, tenant, _, _, _, _, _, _ := setupAppImagesTestServer(t)
 	server.billingImageStorageRefresh = newBillingImageStorageRefreshScheduler(5*time.Millisecond, time.Second)
+	t.Cleanup(func() {
+		server.billingImageStorageRefresh.wait()
+	})
 
 	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/billing", apiKey, nil)
 	if recorder.Code != http.StatusOK {
