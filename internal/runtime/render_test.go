@@ -21,6 +21,10 @@ func TestRendererInjectsWorkloadIdentityEnv(t *testing.T) {
 		TenantID:  "tenant_demo",
 		ProjectID: "project_demo",
 		Name:      "demo",
+		Route: &model.AppRoute{
+			Hostname:  "demo.example.com",
+			PublicURL: "https://demo.example.com",
+		},
 		Spec: model.AppSpec{
 			RuntimeID: "runtime_hk",
 			Env: map[string]string{
@@ -47,6 +51,12 @@ func TestRendererInjectsWorkloadIdentityEnv(t *testing.T) {
 	}
 	if got := rendered.Spec.Env["FUGUE_RUNTIME_ID"]; got != "runtime_hk" {
 		t.Fatalf("expected FUGUE_RUNTIME_ID, got %q", got)
+	}
+	if got := rendered.Spec.Env["FUGUE_APP_HOSTNAME"]; got != "demo.example.com" {
+		t.Fatalf("expected FUGUE_APP_HOSTNAME, got %q", got)
+	}
+	if got := rendered.Spec.Env["FUGUE_APP_URL"]; got != "https://demo.example.com" {
+		t.Fatalf("expected FUGUE_APP_URL, got %q", got)
 	}
 	token := rendered.Spec.Env["FUGUE_TOKEN"]
 	if token == "" {

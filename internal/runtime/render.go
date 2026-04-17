@@ -118,6 +118,16 @@ func (r Renderer) withWorkloadIdentity(app model.App) model.App {
 		"FUGUE_APP_NAME":   strings.TrimSpace(app.Name),
 		"FUGUE_RUNTIME_ID": strings.TrimSpace(app.Spec.RuntimeID),
 	}
+	if app.Route != nil {
+		if hostname := strings.TrimSpace(app.Route.Hostname); hostname != "" {
+			injected["FUGUE_APP_HOSTNAME"] = hostname
+			if publicURL := strings.TrimSpace(app.Route.PublicURL); publicURL != "" {
+				injected["FUGUE_APP_URL"] = publicURL
+			} else {
+				injected["FUGUE_APP_URL"] = "https://" + hostname
+			}
+		}
+	}
 	if apiBaseURL := NormalizeWorkloadIdentityAPIBaseURL(r.WorkloadIdentity.APIBaseURL); apiBaseURL != "" {
 		injected["FUGUE_API_URL"] = apiBaseURL
 		injected["FUGUE_BASE_URL"] = apiBaseURL

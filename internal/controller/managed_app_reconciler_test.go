@@ -864,6 +864,10 @@ func TestApplyManagedAppDesiredStateInjectsWorkloadIdentityIntoManagedAndRuntime
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
+	app.Route = &model.AppRoute{
+		Hostname:  "gateway.example.com",
+		PublicURL: "https://gateway.example.com",
+	}
 
 	namespace := runtime.NamespaceForTenant(app.TenantID)
 	managedName := runtime.ManagedAppResourceName(app)
@@ -973,6 +977,9 @@ func TestApplyManagedAppDesiredStateInjectsWorkloadIdentityIntoManagedAndRuntime
 	if got := managedEnv["FUGUE_API_URL"]; got != "https://api.example.com" {
 		t.Fatalf("expected managed app FUGUE_API_URL to be normalized, got %q", got)
 	}
+	if got := managedEnv["FUGUE_APP_URL"]; got != "https://gateway.example.com" {
+		t.Fatalf("expected managed app FUGUE_APP_URL to be injected, got %q", got)
+	}
 	managedClaims, err := workloadidentity.Parse("signing-secret", managedEnv["FUGUE_TOKEN"])
 	if err != nil {
 		t.Fatalf("parse managed app workload token: %v", err)
@@ -987,6 +994,9 @@ func TestApplyManagedAppDesiredStateInjectsWorkloadIdentityIntoManagedAndRuntime
 	}
 	if got := deploymentEnv["FUGUE_RUNTIME_ID"]; got != app.Spec.RuntimeID {
 		t.Fatalf("expected deployment FUGUE_RUNTIME_ID %q, got %q", app.Spec.RuntimeID, got)
+	}
+	if got := deploymentEnv["FUGUE_APP_URL"]; got != "https://gateway.example.com" {
+		t.Fatalf("expected deployment FUGUE_APP_URL to be injected, got %q", got)
 	}
 	deploymentClaims, err := workloadidentity.Parse("signing-secret", deploymentEnv["FUGUE_TOKEN"])
 	if err != nil {
