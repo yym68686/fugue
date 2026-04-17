@@ -365,6 +365,118 @@ func TestSyncGitHubAppsRetriesFailedCommitAfterBackoff(t *testing.T) {
 	}
 }
 
+func TestSyncGitHubAppsSkipsDeletedTombstoneAfterLaterFailure(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.example.com/demo:git-old",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:            model.AppSourceTypeGitHubPublic,
+		RepoURL:         "https://github.com/example/demo",
+		RepoBranch:      "main",
+		BuildStrategy:   model.AppBuildStrategyStaticSite,
+		CommitSHA:       "oldcommit",
+		ImageNameSuffix: "web",
+		ComposeService:  "app",
+	}, model.AppRoute{
+		Hostname:    "demo.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://demo.example.com",
+		ServicePort: 80,
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	deleteOp, err := stateStore.CreateOperation(model.Operation{
+		TenantID: tenant.ID,
+		Type:     model.OperationTypeDelete,
+		AppID:    app.ID,
+	})
+	if err != nil {
+		t.Fatalf("create delete operation: %v", err)
+	}
+	if _, found, err := stateStore.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim delete operation: %v", err)
+	} else if !found {
+		t.Fatal("expected delete operation")
+	}
+	if _, err := stateStore.CompleteManagedOperation(deleteOp.ID, "/tmp/demo-delete.yaml", "deleted"); err != nil {
+		t.Fatalf("complete delete operation: %v", err)
+	}
+
+	deploySpec := model.AppSpec{
+		Image:     "registry.example.com/demo:git-next",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}
+	deploySource := model.AppSource{
+		Type:            model.AppSourceTypeGitHubPublic,
+		RepoURL:         "https://github.com/example/demo",
+		RepoBranch:      "main",
+		BuildStrategy:   model.AppBuildStrategyStaticSite,
+		CommitSHA:       "newcommit",
+		ImageNameSuffix: "web",
+		ComposeService:  "app",
+	}
+	failedDeploy, err := stateStore.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		Type:          model.OperationTypeDeploy,
+		AppID:         app.ID,
+		DesiredSpec:   &deploySpec,
+		DesiredSource: &deploySource,
+	})
+	if err != nil {
+		t.Fatalf("create deploy on tombstone: %v", err)
+	}
+	if _, found, err := stateStore.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim deploy on tombstone: %v", err)
+	} else if !found {
+		t.Fatal("expected deploy on tombstone")
+	}
+	if _, err := stateStore.FailOperation(failedDeploy.ID, "registry missing"); err != nil {
+		t.Fatalf("fail deploy on tombstone: %v", err)
+	}
+
+	svc := &Service{
+		Store:  stateStore,
+		Config: config.ControllerConfig{GitHubSyncTimeout: time.Second},
+		Logger: log.New(io.Discard, "", 0),
+		latestGitHubCommit: func(context.Context, string, string, string) (string, string, error) {
+			return "latestcommit", "main", nil
+		},
+	}
+
+	if err := svc.syncGitHubApps(context.Background()); err != nil {
+		t.Fatalf("sync github apps: %v", err)
+	}
+
+	ops, err := stateStore.ListOperations("", true)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(ops) != 2 {
+		t.Fatalf("expected sync to skip deleted tombstone, got %d operations", len(ops))
+	}
+}
+
 func TestSyncGitHubAppsBacksOffRepeatedFailuresForSameCommit(t *testing.T) {
 	t.Parallel()
 

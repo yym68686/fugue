@@ -48,8 +48,31 @@ func isDeletedPhase(phase string) bool {
 	return strings.EqualFold(strings.TrimSpace(phase), "deleted")
 }
 
+func hasDeletedAppTombstoneName(name string) bool {
+	name = model.SlugifyOptional(name)
+	if name == "" {
+		return false
+	}
+	return strings.HasSuffix(name, "-deleted") || strings.Contains(name, "-deleted-")
+}
+
 func isDeletedApp(app model.App) bool {
-	return isDeletedPhase(app.Status.Phase)
+	if isDeletedPhase(app.Status.Phase) {
+		return true
+	}
+	if !hasDeletedAppTombstoneName(app.Name) {
+		return false
+	}
+	if app.Spec.Replicas > 0 {
+		return false
+	}
+	if app.Status.CurrentReplicas > 0 {
+		return false
+	}
+	if strings.TrimSpace(app.Status.CurrentRuntimeID) != "" {
+		return false
+	}
+	return true
 }
 
 func fallbackLiveAppPhase(app model.App) (string, bool) {

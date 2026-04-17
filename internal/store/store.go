@@ -3371,6 +3371,9 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 	}
 	now := time.Now().UTC()
 	app := &state.Apps[appIndex]
+	if isDeletedApp(*app) && op.Type != model.OperationTypeDelete {
+		return nil
+	}
 	switch op.Type {
 	case model.OperationTypeImport:
 		// Import only prepares the build artifact and queues a follow-up deploy.
@@ -3470,6 +3473,9 @@ func applyInFlightOperationToApp(state *model.State, op *model.Operation) error 
 		return ErrNotFound
 	}
 	if op.Type == model.OperationTypeDatabaseSwitchover {
+		return nil
+	}
+	if isDeletedApp(state.Apps[appIndex]) && op.Type != model.OperationTypeDelete {
 		return nil
 	}
 	phase, err := inFlightOperationPhase(*op)
@@ -3600,6 +3606,9 @@ func applyFailedOperationToApp(state *model.State, op *model.Operation) {
 		return
 	}
 	if op.Type == model.OperationTypeDatabaseSwitchover {
+		return
+	}
+	if isDeletedApp(state.Apps[appIndex]) && op.Type != model.OperationTypeDelete {
 		return
 	}
 	now := time.Now().UTC()

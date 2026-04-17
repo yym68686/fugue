@@ -3751,16 +3751,36 @@ func (s *Store) pgDeleteProjectTx(ctx context.Context, tx *sql.Tx, project model
 	return nil
 }
 
+func (s *Store) pgProjectHasLiveAppsTx(ctx context.Context, tx *sql.Tx, projectID string) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `
+SELECT id, tenant_id, project_id, name, description, source_json, route_json, spec_json, status_json, created_at, updated_at
+FROM fugue_apps
+WHERE project_id = $1
+`, projectID)
+	if err != nil {
+		return false, fmt.Errorf("query apps for project %s: %w", projectID, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		app, err := scanApp(rows)
+		if err != nil {
+			return false, err
+		}
+		normalizeAppStatusForRead(&app)
+		if !isDeletedApp(app) {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate apps for project %s: %w", projectID, err)
+	}
+	return false, nil
+}
+
 func (s *Store) pgProjectHasLiveResourcesTx(ctx context.Context, tx *sql.Tx, projectID string) (bool, error) {
-	var hasApps bool
-	if err := tx.QueryRowContext(ctx, `
-SELECT EXISTS (
-	SELECT 1
-	FROM fugue_apps
-	WHERE project_id = $1
-	  AND lower(COALESCE(status_json->>'phase', '')) <> 'deleted'
-)
-`, projectID).Scan(&hasApps); err != nil {
+	hasApps, err := s.pgProjectHasLiveAppsTx(ctx, tx, projectID)
+	if err != nil {
 		return false, fmt.Errorf("check live apps for project %s: %w", projectID, err)
 	}
 	if hasApps {
@@ -3816,15 +3836,8 @@ FOR UPDATE
 		return nil
 	}
 
-	var hasLiveApps bool
-	if err := tx.QueryRowContext(ctx, `
-SELECT EXISTS (
-	SELECT 1
-	FROM fugue_apps
-	WHERE project_id = $1
-	  AND lower(COALESCE(status_json->>'phase', '')) <> 'deleted'
-)
-`, project.ID).Scan(&hasLiveApps); err != nil {
+	hasLiveApps, err := s.pgProjectHasLiveAppsTx(ctx, tx, project.ID)
+	if err != nil {
 		return fmt.Errorf("check live apps for requested project delete %s: %w", project.ID, err)
 	}
 	if hasLiveApps {
@@ -4605,6 +4618,9 @@ func scanAuditEvent(scanner sqlScanner) (model.AuditEvent, error) {
 
 func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 	now := time.Now().UTC()
+	if isDeletedApp(*app) && op.Type != model.OperationTypeDelete {
+		return nil
+	}
 	switch op.Type {
 	case model.OperationTypeImport:
 		// Import only prepares a build artifact; the deploy operation applies it.
@@ -4684,6 +4700,9 @@ func applyInFlightOperationToAppModel(app *model.App, op *model.Operation) error
 	if op.Type == model.OperationTypeDatabaseSwitchover {
 		return nil
 	}
+	if isDeletedApp(*app) && op.Type != model.OperationTypeDelete {
+		return nil
+	}
 	phase, err := inFlightOperationPhase(*op)
 	if err != nil {
 		return err
@@ -4699,6 +4718,9 @@ func applyInFlightOperationToAppModel(app *model.App, op *model.Operation) error
 
 func applyFailedOperationToAppModel(app *model.App, op *model.Operation) {
 	if op.Type == model.OperationTypeDatabaseSwitchover {
+		return
+	}
+	if isDeletedApp(*app) && op.Type != model.OperationTypeDelete {
 		return
 	}
 	now := time.Now().UTC()

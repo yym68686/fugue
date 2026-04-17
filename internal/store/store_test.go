@@ -4105,6 +4105,107 @@ func TestRequestedProjectDeleteFinalizesAfterLastAppDelete(t *testing.T) {
 	}
 }
 
+func TestDeletedAppRemainsHiddenAfterLaterFailedDeploy(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Delete Tombstone Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	spec := model.AppSpec{
+		Image:     "registry.example.com/demo:latest",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}
+	source := model.AppSource{
+		Type:            model.AppSourceTypeGitHubPublic,
+		RepoURL:         "https://github.com/example/demo",
+		RepoBranch:      "main",
+		BuildStrategy:   model.AppBuildStrategyStaticSite,
+		CommitSHA:       "oldcommit",
+		ComposeService:  "gateway",
+		ImageNameSuffix: "gateway",
+	}
+	route := model.AppRoute{
+		Hostname:    "demo.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://demo.example.com",
+		ServicePort: 80,
+	}
+
+	app, err := s.CreateImportedApp(tenant.ID, project.ID, "demo", "", spec, source, route)
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	deleteOp, err := s.CreateOperation(model.Operation{
+		TenantID: tenant.ID,
+		Type:     model.OperationTypeDelete,
+		AppID:    app.ID,
+	})
+	if err != nil {
+		t.Fatalf("create delete operation: %v", err)
+	}
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim delete operation: %v", err)
+	} else if !found {
+		t.Fatal("expected pending delete operation")
+	}
+	if _, err := s.CompleteManagedOperation(deleteOp.ID, "/tmp/demo-delete.yaml", "deleted"); err != nil {
+		t.Fatalf("complete delete operation: %v", err)
+	}
+
+	deploySpec := spec
+	deploySpec.Image = "registry.example.com/demo:git-next"
+	deploySource := source
+	deploySource.CommitSHA = "newcommit"
+	failedDeploy, err := s.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		Type:          model.OperationTypeDeploy,
+		AppID:         app.ID,
+		DesiredSpec:   &deploySpec,
+		DesiredSource: &deploySource,
+	})
+	if err != nil {
+		t.Fatalf("create failed deploy on tombstone: %v", err)
+	}
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim failed deploy: %v", err)
+	} else if !found {
+		t.Fatal("expected failed deploy on tombstone")
+	}
+	if _, err := s.FailOperation(failedDeploy.ID, "registry missing"); err != nil {
+		t.Fatalf("fail deploy on tombstone: %v", err)
+	}
+
+	if _, err := s.GetApp(app.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected deleted tombstone to stay hidden, got %v", err)
+	}
+
+	apps, err := s.ListAppsMetadataByProjectIDs([]string{project.ID})
+	if err != nil {
+		t.Fatalf("list project app metadata: %v", err)
+	}
+	if len(apps) != 0 {
+		t.Fatalf("expected deleted tombstone to be excluded from project app metadata, got %+v", apps)
+	}
+
+	if _, err := s.DeleteProject(project.ID); err != nil {
+		t.Fatalf("delete project after tombstone deploy failure: %v", err)
+	}
+}
+
 func TestPurgeAppRemovesImportedPlaceholderResources(t *testing.T) {
 	t.Parallel()
 
