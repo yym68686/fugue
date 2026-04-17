@@ -395,6 +395,89 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 	}
 }
 
+func TestImportResolvedGitHubTopologyPreservesBackgroundWorkerNetworkMode(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Background Topology Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	raiseManagedTestCap(t, s, tenant.ID)
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		AppBaseDomain:    "apps.example.com",
+		RegistryPushBase: "registry.internal.example",
+	})
+
+	result, err := server.importResolvedGitHubTopology(
+		model.Principal{ActorType: model.ActorTypeAPIKey, ActorID: "key"},
+		tenant.ID,
+		importGitHubRequest{
+			ProjectID:      project.ID,
+			RepoURL:        "https://github.com/example/demo",
+			RepoVisibility: "public",
+		},
+		"runtime_managed_shared",
+		1,
+		"Imported from GitHub",
+		"demo",
+		sourceimport.NormalizedTopology{
+			PrimaryService: "web",
+			Services: []sourceimport.ComposeService{
+				{
+					Name:         "web",
+					Kind:         sourceimport.ComposeServiceKindApp,
+					ServiceType:  sourceimport.ServiceTypeApp,
+					Image:        "nginx:alpine",
+					InternalPort: 80,
+					Published:    true,
+				},
+				{
+					Name:         "worker",
+					Kind:         sourceimport.ComposeServiceKindApp,
+					ServiceType:  sourceimport.ServiceTypeApp,
+					Image:        "busybox:latest",
+					InternalPort: 80,
+					NetworkMode:  model.AppNetworkModeBackground,
+					Command:      []string{"sh", "-lc", "sleep 3600"},
+				},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("import topology: %v", err)
+	}
+
+	var worker model.App
+	for _, app := range result.Apps {
+		if app.Name == "demo-worker" {
+			worker = app
+			break
+		}
+	}
+	if worker.ID == "" {
+		t.Fatalf("expected worker app in import result, got %+v", result.Apps)
+	}
+	if worker.Spec.NetworkMode != model.AppNetworkModeBackground {
+		t.Fatalf("expected worker network mode %q, got %q", model.AppNetworkModeBackground, worker.Spec.NetworkMode)
+	}
+	if len(worker.Spec.Ports) != 0 {
+		t.Fatalf("expected background worker ports to be cleared, got %v", worker.Spec.Ports)
+	}
+	if worker.Route != nil && worker.Route.Hostname != "" {
+		t.Fatalf("expected background worker to stay unrouted, got %+v", worker.Route)
+	}
+}
+
 func TestImportResolvedGitHubTopologyAppliesPersistentStorageSeedFileOverrides(t *testing.T) {
 	t.Parallel()
 

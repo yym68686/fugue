@@ -365,6 +365,7 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		if err != nil {
 			return importedGitHubTopology{}, invalidComposeImport(err)
 		}
+		applyImportedNetworkMode(&spec, service.NetworkMode)
 		if route != nil {
 			route.ServicePort = firstServicePort(spec)
 		}

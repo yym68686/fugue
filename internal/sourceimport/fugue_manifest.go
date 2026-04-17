@@ -106,6 +106,7 @@ type fugueManifestService struct {
 	Type              string                          `yaml:"type"`
 	ServiceType       string                          `yaml:"service_type"`
 	Public            bool                            `yaml:"public"`
+	NetworkMode       string                          `yaml:"network_mode"`
 	Image             string                          `yaml:"image"`
 	Port              int                             `yaml:"port"`
 	Build             any                             `yaml:"build"`
@@ -304,6 +305,7 @@ func resolveFugueManifestService(repoDir, rawName string, raw fugueManifestServi
 	service := ComposeService{
 		Name:         slugifyOptional(rawName),
 		Image:        strings.TrimSpace(raw.Image),
+		NetworkMode:  model.NormalizeAppNetworkMode(raw.NetworkMode),
 		Environment:  mergeComposeEnvironment(fileEnv, mergeFugueManifestEnvironment(raw.Env, raw.Environment, vars)),
 		DependsOn:    parseComposeDependsOn(raw.DependsOn),
 		Bindings:     parseServiceBindings(raw.Bindings),
@@ -373,9 +375,15 @@ func resolveFugueManifestService(repoDir, rawName string, raw fugueManifestServi
 	}
 	service.ServiceType = firstNonEmptyServiceType(serviceType, ServiceTypeApp)
 	service.BackingService = declaredBacking || (service.ServiceType != ServiceTypeApp && service.ServiceType != ServiceTypeCustom)
+	if raw.Public && service.NetworkMode != "" {
+		return ComposeService{}, fmt.Errorf("fugue service %q cannot set public=true together with network_mode=%q", rawName, service.NetworkMode)
+	}
 
 	switch service.ServiceType {
 	case ServiceTypePostgres:
+		if service.NetworkMode != "" {
+			return ComposeService{}, fmt.Errorf("fugue postgres service %q cannot set network_mode", rawName)
+		}
 		if hasBuild {
 			return ComposeService{}, fmt.Errorf("fugue postgres service %q must not define build", rawName)
 		}
@@ -428,6 +436,9 @@ func resolveFugueManifestService(repoDir, rawName string, raw fugueManifestServi
 			service.DockerfilePath = dockerfilePath
 			service.BuildContextDir = buildContextDir
 			service.InternalPort = detectedPort
+			if service.NetworkMode == model.AppNetworkModeBackground {
+				service.InternalPort = 0
+			}
 			service.Published = raw.Public
 			return service, nil
 		}
@@ -438,6 +449,9 @@ func resolveFugueManifestService(repoDir, rawName string, raw fugueManifestServi
 		service.InternalPort = raw.Port
 		if service.InternalPort <= 0 {
 			service.InternalPort = defaultPortForService(service)
+		}
+		if service.NetworkMode == model.AppNetworkModeBackground {
+			service.InternalPort = 0
 		}
 		service.Published = raw.Public
 		if service.BackingService {
@@ -799,6 +813,9 @@ func resolveFugueManifestPrimaryService(rawPrimary string, services []ComposeSer
 			}
 			if service.Kind != ComposeServiceKindApp || service.BackingService {
 				return "", fmt.Errorf("primary_service %q must point to an app service", rawPrimary)
+			}
+			if service.NetworkMode != "" {
+				return "", fmt.Errorf("primary_service %q must point to a publicly routed app service", rawPrimary)
 			}
 			return primary, nil
 		}

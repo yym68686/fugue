@@ -85,6 +85,7 @@ type ComposeService struct {
 	BuildContextDir            string
 	BuildArgs                  map[string]string
 	BuildTarget                string
+	NetworkMode                string
 	InternalPort               int
 	Published                  bool
 	Environment                map[string]string

@@ -3,6 +3,7 @@ package sourceimport
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -175,6 +176,90 @@ services:
 	}
 	if parsed.PrimaryService != "web" {
 		t.Fatalf("expected inferred primary service web, got %q", parsed.PrimaryService)
+	}
+}
+
+func TestInspectFugueManifestSupportsBackgroundWorkers(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte("FROM scratch\nEXPOSE 3000\n"), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	manifest := `version: 1
+primary_service: web
+services:
+  web:
+    public: true
+    build:
+      context: .
+      dockerfile: Dockerfile
+  worker:
+    network_mode: background
+    build:
+      context: .
+      dockerfile: Dockerfile
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "fugue.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write fugue manifest: %v", err)
+	}
+
+	parsed, err := inspectFugueManifestFromRepo(clonedGitHubRepo{
+		RepoOwner:      "example",
+		RepoName:       "demo",
+		RepoDir:        repoDir,
+		Branch:         "main",
+		CommitSHA:      "abcdef123456",
+		DefaultAppName: "demo",
+	})
+	if err != nil {
+		t.Fatalf("inspect fugue manifest: %v", err)
+	}
+
+	var workerService ComposeService
+	for _, service := range parsed.Services {
+		if service.Name == "worker" {
+			workerService = service
+			break
+		}
+	}
+	if workerService.Name == "" {
+		t.Fatal("expected worker service to be present")
+	}
+	if workerService.NetworkMode != "background" {
+		t.Fatalf("expected worker network mode background, got %q", workerService.NetworkMode)
+	}
+	if workerService.InternalPort != 0 {
+		t.Fatalf("expected worker internal port to be cleared for background mode, got %d", workerService.InternalPort)
+	}
+}
+
+func TestInspectFugueManifestRejectsPublicBackgroundService(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte("FROM scratch\nEXPOSE 3000\n"), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	manifest := `version: 1
+services:
+  web:
+    public: true
+    network_mode: background
+    build:
+      context: .
+      dockerfile: Dockerfile
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "fugue.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write fugue manifest: %v", err)
+	}
+
+	_, err := inspectFugueManifestFromRepo(clonedGitHubRepo{
+		RepoOwner:      "example",
+		RepoName:       "demo",
+		RepoDir:        repoDir,
+		Branch:         "main",
+		CommitSHA:      "abcdef123456",
+		DefaultAppName: "demo",
+	})
+	if err == nil || !strings.Contains(err.Error(), "public=true") {
+		t.Fatalf("expected public/background conflict error, got %v", err)
 	}
 }
 
