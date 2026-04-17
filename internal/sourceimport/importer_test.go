@@ -120,6 +120,20 @@ func TestKanikoDestinationArgsIncludeInsecureFlagsForClusterService(t *testing.T
 	}
 }
 
+func TestKanikoDestinationArgsIncludeDefaultRegistryMirror(t *testing.T) {
+	t.Parallel()
+
+	args := kanikoDestinationArgs(
+		"fugue-fugue-registry.fugue-system.svc.cluster.local:5000/fugue-apps/demo:git-abc123",
+		"--context=dir:///workspace/generated",
+		"--dockerfile=/workspace/generated/Dockerfile",
+	)
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--registry-mirror="+defaultKanikoRegistryMirror) {
+		t.Fatalf("expected default registry mirror in args: %v", args)
+	}
+}
+
 func TestKanikoDockerfilePathRelativeToBuildContext(t *testing.T) {
 	t.Parallel()
 

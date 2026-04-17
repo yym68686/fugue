@@ -2,8 +2,11 @@ package sourceimport
 
 import (
 	"net"
+	"os"
 	"strings"
 )
+
+const defaultKanikoRegistryMirror = "mirror.gcr.io"
 
 func registryHostFromImageRef(imageRef string) string {
 	host := strings.TrimSpace(imageRef)
@@ -32,6 +35,9 @@ func isInsecureRegistryHost(host string) bool {
 func kanikoDestinationArgs(imageRef string, baseArgs ...string) []string {
 	args := append([]string(nil), baseArgs...)
 	args = append(args, "--destination="+imageRef, "--cleanup")
+	for _, mirror := range configuredKanikoRegistryMirrors() {
+		args = append(args, "--registry-mirror="+mirror)
+	}
 	if registryHost := registryHostFromImageRef(imageRef); isInsecureRegistryHost(registryHost) {
 		args = append(args,
 			"--insecure",
@@ -39,4 +45,24 @@ func kanikoDestinationArgs(imageRef string, baseArgs ...string) []string {
 		)
 	}
 	return args
+}
+
+func configuredKanikoRegistryMirrors() []string {
+	raw := strings.TrimSpace(os.Getenv("FUGUE_KANIKO_REGISTRY_MIRROR"))
+	if raw == "" {
+		return []string{defaultKanikoRegistryMirror}
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		out = append(out, part)
+	}
+	if len(out) == 0 {
+		return []string{defaultKanikoRegistryMirror}
+	}
+	return out
 }
