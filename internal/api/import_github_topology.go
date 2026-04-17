@@ -287,7 +287,7 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		return importedGitHubTopology{}, invalidComposeImport(err)
 	}
 
-	appNames, primaryHost, err := s.allocateComposeAppNames(tenantID, options.ProjectID, options.BaseName, topologyPlan.Deployable, topologyPlan.PrimaryService)
+	appNames, routeHosts, err := s.allocateComposeAppNames(tenantID, options.ProjectID, options.BaseName, topologyPlan.Deployable, topologyPlan.PrimaryService)
 	if err != nil {
 		return importedGitHubTopology{}, err
 	}
@@ -326,12 +326,14 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		inferenceReport = append(inferenceReport, envInferences...)
 		var route *model.AppRoute
 		requestedPort := 0
-		if service.Name == topologyPlan.PrimaryService {
-			requestedPort = options.ServicePort
+		if host, ok := routeHosts[service.Name]; ok {
+			if service.Name == topologyPlan.PrimaryService {
+				requestedPort = options.ServicePort
+			}
 			route = &model.AppRoute{
-				Hostname:    primaryHost,
+				Hostname:    host,
 				BaseDomain:  s.appBaseDomain,
-				PublicURL:   "https://" + primaryHost,
+				PublicURL:   "https://" + host,
 				ServicePort: effectiveImportServicePort(requestedPort, service.InternalPort),
 			}
 		}
@@ -498,10 +500,10 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 	}, nil
 }
 
-func (s *Server) allocateComposeAppNames(tenantID, projectID, baseName string, services []sourceimport.ComposeService, primaryService string) (map[string]string, string, error) {
+func (s *Server) allocateComposeAppNames(tenantID, projectID, baseName string, services []sourceimport.ComposeService, primaryService string) (map[string]string, map[string]string, error) {
 	apps, err := s.store.ListApps(tenantID, false)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
 
 	for attempt := 0; attempt < defaultComposeImportNamingStrategy.MaxAttempts; attempt++ {
@@ -533,6 +535,32 @@ func (s *Server) allocateComposeAppNames(tenantID, projectID, baseName string, s
 			continue
 		}
 
+		routeHosts := make(map[string]string)
+		usedHosts := make(map[string]struct{})
+		for _, service := range services {
+			if !service.Published {
+				continue
+			}
+			host := primaryHost
+			if service.Name != primaryService {
+				host = names[service.Name] + "." + s.appBaseDomain
+			}
+			host = strings.TrimSpace(strings.ToLower(host))
+			if host == "" || s.isReservedAppHostname(host) {
+				conflict = true
+				break
+			}
+			if _, exists := usedHosts[host]; exists {
+				conflict = true
+				break
+			}
+			routeHosts[service.Name] = host
+			usedHosts[host] = struct{}{}
+		}
+		if conflict {
+			continue
+		}
+
 		hostConflict := false
 		for _, existing := range apps {
 			if existing.ProjectID != projectID {
@@ -555,23 +583,35 @@ func (s *Server) allocateComposeAppNames(tenantID, projectID, baseName string, s
 			if existing.Route == nil {
 				continue
 			}
-			if strings.EqualFold(strings.TrimSpace(existing.Route.Hostname), primaryHost) {
-				hostConflict = true
+			existingHost := strings.TrimSpace(strings.ToLower(existing.Route.Hostname))
+			for _, plannedHost := range routeHosts {
+				if strings.EqualFold(existingHost, plannedHost) {
+					hostConflict = true
+					break
+				}
+			}
+			if hostConflict {
 				break
 			}
 		}
 		if hostConflict {
 			continue
 		}
-		if _, err := s.store.GetAppByHostname(primaryHost); err == nil {
-			continue
-		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return nil, "", err
+		for _, plannedHost := range routeHosts {
+			if _, err := s.store.GetAppByHostname(plannedHost); err == nil {
+				hostConflict = true
+				break
+			} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return nil, nil, err
+			}
 		}
-		return names, primaryHost, nil
+		if hostConflict {
+			continue
+		}
+		return names, routeHosts, nil
 	}
 
-	return nil, "", store.ErrConflict
+	return nil, nil, store.ErrConflict
 }
 
 func resolveTopologyPrimaryService(services []sourceimport.ComposeService, preferred string) (sourceimport.ComposeService, error) {

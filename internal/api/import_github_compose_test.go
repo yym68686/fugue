@@ -478,6 +478,106 @@ func TestImportResolvedGitHubTopologyPreservesBackgroundWorkerNetworkMode(t *tes
 	}
 }
 
+func TestImportResolvedGitHubTopologyAssignsRoutesToAllPublishedServices(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Published Topology Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	raiseManagedTestCap(t, s, tenant.ID)
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		AppBaseDomain:    "apps.example.com",
+		RegistryPushBase: "registry.internal.example",
+	})
+
+	result, err := server.importResolvedGitHubTopology(
+		model.Principal{ActorType: model.ActorTypeAPIKey, ActorID: "key"},
+		tenant.ID,
+		importGitHubRequest{
+			ProjectID:      project.ID,
+			RepoURL:        "https://github.com/example/demo",
+			RepoVisibility: "public",
+		},
+		"runtime_managed_shared",
+		1,
+		"Imported from https://github.com/example/demo",
+		"demo",
+		sourceimport.NormalizedTopology{
+			PrimaryService: "web",
+			Services: []sourceimport.ComposeService{
+				{
+					Name:         "web",
+					Kind:         sourceimport.ComposeServiceKindApp,
+					ServiceType:  sourceimport.ServiceTypeApp,
+					Published:    true,
+					InternalPort: 3000,
+					Image:        "ghcr.io/example/web:latest",
+					Environment:  map[string]string{"API_URL": "http://gateway:8080"},
+				},
+				{
+					Name:         "gateway",
+					Kind:         sourceimport.ComposeServiceKindApp,
+					ServiceType:  sourceimport.ServiceTypeApp,
+					InternalPort: 8080,
+					Image:        "ghcr.io/example/gateway:latest",
+					NetworkMode:  model.AppNetworkModeInternal,
+				},
+				{
+					Name:         "telegram-bot",
+					Kind:         sourceimport.ComposeServiceKindApp,
+					ServiceType:  sourceimport.ServiceTypeApp,
+					Published:    true,
+					InternalPort: 8080,
+					Image:        "ghcr.io/example/telegram-bot:latest",
+					Environment: map[string]string{
+						"ARGUS_GATEWAY_HTTP_URL": "http://gateway:8080",
+					},
+				},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("import resolved topology: %v", err)
+	}
+
+	appsByService := map[string]model.App{}
+	for _, app := range result.Apps {
+		if app.Source == nil {
+			t.Fatalf("expected app %s to keep source metadata", app.Name)
+		}
+		appsByService[app.Source.ComposeService] = app
+	}
+
+	webApp := appsByService["web"]
+	if webApp.Route == nil || webApp.Route.PublicURL != "https://demo.apps.example.com" {
+		t.Fatalf("expected primary public route for web, got %+v", webApp.Route)
+	}
+
+	gatewayApp := appsByService["gateway"]
+	if gatewayApp.Route != nil && gatewayApp.Route.Hostname != "" {
+		t.Fatalf("expected internal gateway to stay unrouted, got %+v", gatewayApp.Route)
+	}
+
+	botApp := appsByService["telegram-bot"]
+	if botApp.Route == nil || botApp.Route.PublicURL != "https://demo-telegram-bot.apps.example.com" {
+		t.Fatalf("expected secondary public route for telegram-bot, got %+v", botApp.Route)
+	}
+	if botApp.Route.ServicePort != 8080 {
+		t.Fatalf("expected telegram-bot route service port 8080, got %+v", botApp.Route)
+	}
+}
+
 func TestImportResolvedGitHubTopologyAppliesPersistentStorageSeedFileOverrides(t *testing.T) {
 	t.Parallel()
 
