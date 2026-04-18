@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"path"
 	"strconv"
+	"strings"
 
 	"fugue/internal/model"
 )
@@ -85,6 +88,42 @@ func (c *Client) GetConsoleProjectWithLiveStatus(id string, includeLiveStatus bo
 		return consoleProjectDetailResponse{}, err
 	}
 	return response, nil
+}
+
+func (c *Client) TryGetConsoleProjectWithLiveStatus(id string, includeLiveStatus bool) (*consoleProjectDetailResponse, error) {
+	relative := path.Join("/v1/console/projects", id)
+	if includeLiveStatus {
+		relative += "?include_live_status=" + url.QueryEscape(strconv.FormatBool(includeLiveStatus))
+	}
+	httpReq, err := http.NewRequest(http.MethodGet, c.resolveURL(relative), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+c.token)
+
+	result, err := c.doPrepared(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	if result.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if result.StatusCode < 200 || result.StatusCode >= 300 {
+		var apiErr apiError
+		if err := json.Unmarshal(result.Payload, &apiErr); err == nil && strings.TrimSpace(apiErr.Error) != "" {
+			return nil, fmt.Errorf("%s", apiErr.Error)
+		}
+		if trimmed := strings.TrimSpace(string(result.Payload)); trimmed != "" {
+			return nil, fmt.Errorf("request failed: status=%d body=%s", result.StatusCode, trimmed)
+		}
+		return nil, fmt.Errorf("request failed: status=%d", result.StatusCode)
+	}
+
+	var response consoleProjectDetailResponse
+	if err := json.Unmarshal(result.Payload, &response); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &response, nil
 }
 
 func (c *Client) StreamConsoleGallery(includeLiveStatus bool, handler func(sseEvent) error) error {

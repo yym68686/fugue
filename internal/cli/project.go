@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -22,6 +23,7 @@ Pass --tenant only when you are acting across multiple visible tenants.
 		c.newProjectListCommand(),
 		c.newProjectOverviewCommand(),
 		c.newProjectWatchCommand(),
+		c.newProjectVerifyCommand(),
 		c.newProjectAppsCommand(),
 		c.newProjectOpsCommand(),
 		c.newProjectImagesCommand(),
@@ -192,7 +194,13 @@ func (c *CLI) newProjectEditCommand() *cobra.Command {
 }
 
 func (c *CLI) newProjectRemoveCommand() *cobra.Command {
-	return &cobra.Command{
+	opts := struct {
+		Cascade  bool
+		Wait     bool
+		Interval time.Duration
+	}{Cascade: true, Interval: 3 * time.Second}
+
+	cmd := &cobra.Command{
 		Use:     "delete <project>",
 		Aliases: []string{"rm", "remove"},
 		Short:   "Delete a project",
@@ -206,23 +214,35 @@ func (c *CLI) newProjectRemoveCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			project, err = client.DeleteProject(project.ID)
+			response, err := client.DeleteProjectDetailed(project.ID, opts.Cascade)
 			if err != nil {
 				return err
 			}
+			if opts.Wait && response.DeleteRequested {
+				lastDetail, lastStatus, err := c.waitForProjectDelete(client, response.Project, opts.Interval)
+				if err != nil {
+					return err
+				}
+				if c.wantsJSON() {
+					return writeJSON(c.stdout, map[string]any{
+						"delete":      response,
+						"final_state": "deleted",
+						"last_detail": lastDetail,
+						"last_status": lastStatus,
+					})
+				}
+				return c.renderProjectDeleteResult(response, true)
+			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
-					"deleted": true,
-					"project": project,
-				})
+				return writeJSON(c.stdout, response)
 			}
-			if err := c.renderProjectDetail(client, project); err != nil {
-				return err
-			}
-			_, err = fmt.Fprintln(c.stdout, "deleted=true")
-			return err
+			return c.renderProjectDeleteResult(response, false)
 		},
 	}
+	cmd.Flags().BoolVar(&opts.Cascade, "cascade", opts.Cascade, "Queue app deletes for the project and remove remaining backing services")
+	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait until the project is fully removed")
+	cmd.Flags().DurationVar(&opts.Interval, "interval", opts.Interval, "Polling interval while waiting for project deletion")
+	return cmd
 }
 
 func (c *CLI) patchProjectMetadata(projectRef string, name, description *string) error {

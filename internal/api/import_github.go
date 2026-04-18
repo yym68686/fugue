@@ -71,6 +71,10 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "internal registry is not configured")
 		return
 	}
+	if req.DeleteMissing && !req.UpdateExisting {
+		httpx.WriteError(w, http.StatusBadRequest, "delete_missing requires update_existing")
+		return
+	}
 	networkMode, err := resolveImportNetworkMode(req.NetworkMode)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -84,6 +88,9 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if req.DryRun {
+		idempotencyKey = ""
 	}
 
 	replicas := req.Replicas
@@ -185,7 +192,16 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 			return resolvedProject, nil
 		}
 
-		project, created, err := s.resolveImportProject(tenantID, req)
+		var (
+			project model.Project
+			created bool
+			err     error
+		)
+		if req.DryRun {
+			project, err = s.previewImportProjectFields(tenantID, req.ProjectID, req.Project)
+		} else {
+			project, created, err = s.resolveImportProject(tenantID, req)
+		}
 		if err != nil {
 			return model.Project{}, err
 		}
@@ -328,6 +344,10 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if req.UpdateExisting || req.DeleteMissing || req.DryRun {
+		httpx.WriteError(w, http.StatusBadRequest, "update_existing, delete_missing, and dry_run are only supported for topology imports")
+		return
+	}
 	if _, err := ensureImportProject(); err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -435,6 +455,58 @@ func (s *Server) resolveImportProjectFields(tenantID, projectID string, project 
 	default:
 		return s.store.EnsureDefaultProjectWithStatus(tenantID)
 	}
+}
+
+func (s *Server) previewImportProjectFields(tenantID, projectID string, project *importProjectRequest) (model.Project, error) {
+	projectID = strings.TrimSpace(projectID)
+	switch {
+	case projectID != "":
+		existing, err := s.store.GetProject(projectID)
+		if err != nil {
+			return model.Project{}, err
+		}
+		if existing.TenantID != tenantID {
+			return model.Project{}, store.ErrNotFound
+		}
+		return existing, nil
+	case project != nil:
+		existing, ok, err := s.findProjectPreviewByName(tenantID, project.Name)
+		if err != nil {
+			return model.Project{}, err
+		}
+		if ok {
+			return existing, nil
+		}
+		return model.Project{
+			TenantID:    tenantID,
+			Name:        strings.TrimSpace(project.Name),
+			Slug:        model.Slugify(project.Name),
+			Description: strings.TrimSpace(project.Description),
+		}, nil
+	default:
+		existing, ok, err := s.findProjectPreviewByName(tenantID, "default")
+		if err != nil {
+			return model.Project{}, err
+		}
+		if ok {
+			return existing, nil
+		}
+		return model.Project{TenantID: tenantID, Name: "default", Slug: "default"}, nil
+	}
+}
+
+func (s *Server) findProjectPreviewByName(tenantID, raw string) (model.Project, bool, error) {
+	projects, err := s.store.ListProjects(tenantID)
+	if err != nil {
+		return model.Project{}, false, err
+	}
+	want := model.Slugify(strings.TrimSpace(raw))
+	for _, project := range projects {
+		if strings.EqualFold(strings.TrimSpace(project.Name), strings.TrimSpace(raw)) || strings.EqualFold(strings.TrimSpace(project.Slug), want) {
+			return project, true, nil
+		}
+	}
+	return model.Project{}, false, nil
 }
 
 func (s *Server) cleanupImportArtifacts(project *model.Project, apps []model.App) error {

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,6 +45,9 @@ type importUploadRequest struct {
 	StartupCommand           *string                                           `json:"startup_command,omitempty"`
 	PersistentStorage        *model.AppPersistentStorageSpec                   `json:"persistent_storage,omitempty"`
 	Postgres                 *model.AppPostgresSpec                            `json:"postgres"`
+	UpdateExisting           bool                                              `json:"update_existing,omitempty"`
+	DeleteMissing            bool                                              `json:"delete_missing,omitempty"`
+	DryRun                   bool                                              `json:"dry_run,omitempty"`
 }
 
 func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
@@ -63,6 +67,10 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 	req, archiveHeader, archiveBytes, err := decodeImportUploadMultipart(r)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.DeleteMissing && !req.UpdateExisting {
+		httpx.WriteError(w, http.StatusBadRequest, "delete_missing requires update_existing")
 		return
 	}
 	if strings.TrimSpace(req.ProjectID) != "" && req.Project != nil {
@@ -93,6 +101,10 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if strings.TrimSpace(req.AppID) != "" {
+		if req.UpdateExisting || req.DeleteMissing || req.DryRun {
+			httpx.WriteError(w, http.StatusBadRequest, "update_existing, delete_missing, and dry_run are only supported for topology imports")
+			return
+		}
 		if !principal.IsPlatformAdmin() && !principal.HasScope("app.deploy") {
 			httpx.WriteError(w, http.StatusForbidden, "missing app.deploy scope")
 			return
@@ -189,12 +201,6 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upload, err := s.store.CreateSourceUpload(tenantID, sourceFileName, archiveHeader.Header.Get("Content-Type"), archiveBytes)
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-
 	description := strings.TrimSpace(req.Description)
 	if description == "" {
 		description = fmt.Sprintf("Uploaded from %s", sourceFileName)
@@ -210,7 +216,33 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 		runtimeID = "runtime_managed_shared"
 	}
 
-	if shouldInspectUploadTopologyImport(req, buildStrategy) {
+	isTopologyImport := shouldInspectUploadTopologyImport(req, buildStrategy)
+	if req.DryRun && !isTopologyImport {
+		httpx.WriteError(w, http.StatusBadRequest, "dry_run is only supported for topology imports")
+		return
+	}
+
+	var upload model.SourceUpload
+	switch {
+	case req.DryRun && isTopologyImport:
+		sum := sha256.Sum256(archiveBytes)
+		upload = model.SourceUpload{
+			ID:          "source_upload_dry_run",
+			TenantID:    tenantID,
+			Filename:    sourceFileName,
+			ContentType: archiveHeader.Header.Get("Content-Type"),
+			SHA256:      fmt.Sprintf("%x", sum[:]),
+			SizeBytes:   int64(len(archiveBytes)),
+		}
+	default:
+		upload, err = s.store.CreateSourceUpload(tenantID, sourceFileName, archiveHeader.Header.Get("Content-Type"), archiveBytes)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+	}
+
+	if isTopologyImport {
 		topology, inspectErr := s.importer.InspectUploadedImportableTopology(r.Context(), sourceimport.UploadTopologyInspectRequest{
 			ArchiveFilename:  sourceFileName,
 			ArchiveSHA256:    upload.SHA256,
@@ -232,7 +264,15 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 				httpx.WriteError(w, http.StatusBadRequest, "persistent_storage is only supported for single-app imports")
 				return
 			}
-			project, created, err := s.resolveImportProjectFields(tenantID, req.ProjectID, req.Project)
+			var (
+				project model.Project
+				created bool
+			)
+			if req.DryRun {
+				project, err = s.previewImportProjectFields(tenantID, req.ProjectID, req.Project)
+			} else {
+				project, created, err = s.resolveImportProjectFields(tenantID, req.ProjectID, req.Project)
+			}
 			if err != nil {
 				s.writeStoreError(w, err)
 				return
@@ -278,6 +318,11 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusBadRequest, inspectErr.Error())
 			return
 		}
+	}
+
+	if req.UpdateExisting || req.DeleteMissing || req.DryRun {
+		httpx.WriteError(w, http.StatusBadRequest, "update_existing, delete_missing, and dry_run are only supported for topology imports")
+		return
 	}
 
 	source, err := buildQueuedUploadSource(upload, req.SourceDir, req.DockerfilePath, req.BuildContextDir, buildStrategy, "", "")
@@ -383,6 +428,7 @@ func uploadTopologyImportResponse(topology sourceimport.NormalizedTopology, resu
 		"operation":  sanitizeOperationForAPI(result.PrimaryOp),
 		"apps":       sanitizeAppsForAPI(result.Apps),
 		"operations": sanitizeOperationsForAPI(result.Operations),
+		"plan":       result.Plan,
 	}
 	switch strings.TrimSpace(topology.SourceKind) {
 	case sourceimport.TopologySourceKindFugue:

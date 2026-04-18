@@ -79,10 +79,13 @@ func (s *Server) deleteProjectCascade(
 	switch {
 	case err == nil:
 		return http.StatusOK, map[string]any{
-				"delete_requested": false,
-				"deleted":          true,
-				"project":          deletedProject,
-				"operations":       sanitizeOperationsForAPI(queuedOperations),
+				"delete_requested":         false,
+				"deleted":                  true,
+				"project":                  deletedProject,
+				"operations":               sanitizeOperationsForAPI(queuedOperations),
+				"queued_operations":        len(queuedOperations),
+				"already_deleting_apps":    alreadyDeletingApps,
+				"deleted_backing_services": deletedBackingServices,
 			}, map[string]string{
 				"already_deleting_apps":    strconv.Itoa(alreadyDeletingApps),
 				"deleted_backing_services": strconv.Itoa(deletedBackingServices),
@@ -91,10 +94,13 @@ func (s *Server) deleteProjectCascade(
 			}, nil
 	case errors.Is(err, store.ErrNotFound):
 		return http.StatusOK, map[string]any{
-				"delete_requested": false,
-				"deleted":          true,
-				"project":          project,
-				"operations":       sanitizeOperationsForAPI(queuedOperations),
+				"delete_requested":         false,
+				"deleted":                  true,
+				"project":                  project,
+				"operations":               sanitizeOperationsForAPI(queuedOperations),
+				"queued_operations":        len(queuedOperations),
+				"already_deleting_apps":    alreadyDeletingApps,
+				"deleted_backing_services": deletedBackingServices,
 			}, map[string]string{
 				"already_deleting_apps":    strconv.Itoa(alreadyDeletingApps),
 				"deleted_backing_services": strconv.Itoa(deletedBackingServices),
@@ -103,10 +109,13 @@ func (s *Server) deleteProjectCascade(
 			}, nil
 	case errors.Is(err, store.ErrConflict):
 		return http.StatusAccepted, map[string]any{
-				"delete_requested": true,
-				"deleted":          false,
-				"project":          project,
-				"operations":       sanitizeOperationsForAPI(queuedOperations),
+				"delete_requested":         true,
+				"deleted":                  false,
+				"project":                  project,
+				"operations":               sanitizeOperationsForAPI(queuedOperations),
+				"queued_operations":        len(queuedOperations),
+				"already_deleting_apps":    alreadyDeletingApps,
+				"deleted_backing_services": deletedBackingServices,
 			}, map[string]string{
 				"already_deleting_apps":    strconv.Itoa(alreadyDeletingApps),
 				"deleted_backing_services": strconv.Itoa(deletedBackingServices),

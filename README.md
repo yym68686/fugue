@@ -80,6 +80,8 @@ Common workflows:
 
 - `fugue deploy github owner/repo --branch main`
 - `fugue deploy github owner/repo --service-env-file gateway=.env.gateway --service-env-file runtime=.env.runtime`
+- `fugue deploy github owner/repo --project argus --dry-run`
+- `fugue deploy github owner/repo --project argus --replace --wait`
 - `fugue deploy github https://github.com/example/app --private --repo-token $GITHUB_TOKEN`
 - `fugue deploy image nginx:1.27`
 - `fugue tenant ls`
@@ -100,6 +102,10 @@ Common workflows:
 - `fugue app failover run my-app --to runtime-b`
 - `fugue runtime enroll create edge-a`
 - `fugue runtime doctor shared`
+- `fugue project overview marketing`
+- `fugue project watch marketing`
+- `fugue project verify marketing --path /healthz`
+- `fugue project delete marketing --wait`
 - `fugue project images usage marketing`
 - `fugue operation ls --app my-app`
 - `fugue operation ls --project marketing --type deploy --status pending`

@@ -133,6 +133,7 @@ func (c *CLI) collectBuilderIdentityEvidence(client *Client, namespace, jobName 
 			}
 		}
 		report.BuilderJobEvidence = appendUniqueString(report.BuilderJobEvidence, summarizeBuilderPodEvidence(pod))
+		c.collectBuilderSchedulingEvidence(client, namespace, pod, report)
 	}
 	sort.Strings(report.BuilderPods)
 	sort.Strings(report.BuilderNodes)
@@ -183,6 +184,7 @@ func (c *CLI) collectBuilderOperationEvidence(client *Client, namespace string, 
 			}
 		}
 		report.BuilderJobEvidence = appendUniqueString(report.BuilderJobEvidence, summarizeBuilderPodEvidence(pod))
+		c.collectBuilderSchedulingEvidence(client, namespace, pod, report)
 	}
 	sort.Strings(report.BuilderPods)
 	sort.Strings(report.BuilderNodes)
@@ -544,6 +546,8 @@ func summarizeBuilderJobControllerEvidence(report *appBuildArtifactReport) {
 		switch {
 		case strings.Contains(normalized, "builder job apply failed"), strings.Contains(normalized, "builder job failed"):
 			report.BuilderJobState = "failed"
+		case strings.Contains(normalized, "waiting for placement"), strings.Contains(normalized, "failedscheduling"), strings.Contains(normalized, "unschedulable"):
+			report.BuilderJobState = "waiting-placement"
 		case strings.Contains(normalized, "builder job completed"):
 			if report.BuilderJobState != "failed" {
 				report.BuilderJobState = "completed"
@@ -601,21 +605,93 @@ func buildArtifactUsesBuilder(report *appBuildArtifactReport) bool {
 }
 
 func summarizeBuilderPodEvidence(pod model.ClusterPod) string {
+	detail := builderPodDetail(pod)
 	if pod.Owner != nil && strings.EqualFold(strings.TrimSpace(pod.Owner.Kind), "Job") && strings.TrimSpace(pod.Owner.Name) != "" {
-		return fmt.Sprintf(
+		summary := fmt.Sprintf(
 			"builder pod %s for job %s phase=%s node=%s",
 			strings.TrimSpace(pod.Name),
 			strings.TrimSpace(pod.Owner.Name),
 			firstNonEmptyTrimmed(strings.TrimSpace(pod.Phase), "unknown"),
 			firstNonEmptyTrimmed(strings.TrimSpace(pod.NodeName), "-"),
 		)
+		if detail != "" {
+			summary += " " + detail
+		}
+		return summary
 	}
-	return fmt.Sprintf(
+	summary := fmt.Sprintf(
 		"builder pod %s phase=%s node=%s",
 		strings.TrimSpace(pod.Name),
 		firstNonEmptyTrimmed(strings.TrimSpace(pod.Phase), "unknown"),
 		firstNonEmptyTrimmed(strings.TrimSpace(pod.NodeName), "-"),
 	)
+	if detail != "" {
+		summary += " " + detail
+	}
+	return summary
+}
+
+func builderPodDetail(pod model.ClusterPod) string {
+	for _, container := range pod.Containers {
+		detail := strings.TrimSpace(container.Reason)
+		if message := strings.TrimSpace(container.Message); message != "" {
+			if detail != "" {
+				detail += ": "
+			}
+			detail += message
+		}
+		if detail != "" {
+			return detail
+		}
+	}
+	return ""
+}
+
+func (c *CLI) collectBuilderSchedulingEvidence(client *Client, namespace string, pod model.ClusterPod, report *appBuildArtifactReport) {
+	if report == nil || !strings.EqualFold(strings.TrimSpace(pod.Phase), "Pending") {
+		return
+	}
+
+	switch {
+	case strings.TrimSpace(pod.NodeName) == "":
+		switch strings.TrimSpace(report.BuilderJobState) {
+		case "", "pod-observed", "started", "applied", "observed", "name-recorded", "created-no-pods-visible":
+			report.BuilderJobState = "waiting-placement"
+		}
+		report.BuilderJobEvidence = appendUniqueString(report.BuilderJobEvidence, fmt.Sprintf("builder pod %s is pending with no assigned node yet", strings.TrimSpace(pod.Name)))
+	default:
+		if strings.TrimSpace(report.BuilderJobState) == "" || strings.TrimSpace(report.BuilderJobState) == "pod-observed" {
+			report.BuilderJobState = "scheduled-pending"
+		}
+	}
+
+	events, err := client.ListClusterEvents(clusterEventsOptions{
+		Namespace: strings.TrimSpace(namespace),
+		Kind:      "Pod",
+		Name:      strings.TrimSpace(pod.Name),
+		Limit:     6,
+	})
+	if err != nil {
+		if !shouldIgnoreOptionalBuildEvidenceError(err) {
+			report.Warnings = appendUniqueString(report.Warnings, fmt.Sprintf("builder scheduling evidence unavailable: %v", err))
+		}
+		return
+	}
+	for _, event := range events {
+		reason := strings.TrimSpace(event.Reason)
+		message := strings.TrimSpace(event.Message)
+		if reason == "" && message == "" {
+			continue
+		}
+		report.BuilderJobEvidence = appendUniqueString(report.BuilderJobEvidence, fmt.Sprintf("builder pod %s event %s: %s", strings.TrimSpace(pod.Name), firstNonEmptyTrimmed(reason, "Unknown"), message))
+		normalized := strings.ToLower(reason + " " + message)
+		if strings.Contains(normalized, "failedscheduling") ||
+			strings.Contains(normalized, "unschedulable") ||
+			strings.Contains(normalized, "didn't match") ||
+			strings.Contains(normalized, "0/") {
+			report.BuilderJobState = "waiting-placement"
+		}
+	}
 }
 
 func logfmtField(line, key string) string {

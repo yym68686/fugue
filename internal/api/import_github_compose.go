@@ -53,6 +53,7 @@ func (s *Server) importComposeGitHubStack(principal model.Principal, tenantID st
 		"operation":  sanitizeOperationForAPI(result.PrimaryOp),
 		"apps":       sanitizeAppsForAPI(result.Apps),
 		"operations": sanitizeOperationsForAPI(result.Operations),
+		"plan":       result.Plan,
 		"compose_stack": map[string]any{
 			"compose_path":     stack.ComposePath,
 			"primary_service":  result.PrimaryService,

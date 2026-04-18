@@ -77,6 +77,9 @@ type importUploadRequest struct {
 	StartupCommand           *string                                           `json:"startup_command,omitempty"`
 	PersistentStorage        *model.AppPersistentStorageSpec                   `json:"persistent_storage,omitempty"`
 	Postgres                 *model.AppPostgresSpec                            `json:"postgres,omitempty"`
+	UpdateExisting           bool                                              `json:"update_existing,omitempty"`
+	DeleteMissing            bool                                              `json:"delete_missing,omitempty"`
+	DryRun                   bool                                              `json:"dry_run,omitempty"`
 }
 
 type importGitHubRequest struct {
@@ -107,6 +110,9 @@ type importGitHubRequest struct {
 	PersistentStorageSeedFiles []importGitHubPersistentStorageSeedFile           `json:"persistent_storage_seed_files,omitempty"`
 	Postgres                   *model.AppPostgresSpec                            `json:"postgres,omitempty"`
 	IdempotencyKey             string                                            `json:"idempotency_key,omitempty"`
+	UpdateExisting             bool                                              `json:"update_existing,omitempty"`
+	DeleteMissing              bool                                              `json:"delete_missing,omitempty"`
+	DryRun                     bool                                              `json:"dry_run,omitempty"`
 }
 
 type importGitHubIdempotency struct {
@@ -116,23 +122,25 @@ type importGitHubIdempotency struct {
 }
 
 type importGitHubResponse struct {
-	App               *model.App               `json:"app,omitempty"`
-	Operation         *model.Operation         `json:"operation,omitempty"`
-	Apps              []model.App              `json:"apps,omitempty"`
-	Operations        []model.Operation        `json:"operations,omitempty"`
-	ComposeStack      map[string]any           `json:"compose_stack,omitempty"`
-	FugueManifest     map[string]any           `json:"fugue_manifest,omitempty"`
-	Idempotency       *importGitHubIdempotency `json:"idempotency,omitempty"`
-	RequestInProgress bool                     `json:"request_in_progress,omitempty"`
+	App               *model.App                `json:"app,omitempty"`
+	Operation         *model.Operation          `json:"operation,omitempty"`
+	Apps              []model.App               `json:"apps,omitempty"`
+	Operations        []model.Operation         `json:"operations,omitempty"`
+	Plan              *model.TopologyDeployPlan `json:"plan,omitempty"`
+	ComposeStack      map[string]any            `json:"compose_stack,omitempty"`
+	FugueManifest     map[string]any            `json:"fugue_manifest,omitempty"`
+	Idempotency       *importGitHubIdempotency  `json:"idempotency,omitempty"`
+	RequestInProgress bool                      `json:"request_in_progress,omitempty"`
 }
 
 type importUploadResponse struct {
-	App           *model.App        `json:"app,omitempty"`
-	Operation     *model.Operation  `json:"operation,omitempty"`
-	Apps          []model.App       `json:"apps,omitempty"`
-	Operations    []model.Operation `json:"operations,omitempty"`
-	ComposeStack  map[string]any    `json:"compose_stack,omitempty"`
-	FugueManifest map[string]any    `json:"fugue_manifest,omitempty"`
+	App           *model.App                `json:"app,omitempty"`
+	Operation     *model.Operation          `json:"operation,omitempty"`
+	Apps          []model.App               `json:"apps,omitempty"`
+	Operations    []model.Operation         `json:"operations,omitempty"`
+	Plan          *model.TopologyDeployPlan `json:"plan,omitempty"`
+	ComposeStack  map[string]any            `json:"compose_stack,omitempty"`
+	FugueManifest map[string]any            `json:"fugue_manifest,omitempty"`
 }
 
 type importImageRequest struct {
@@ -535,6 +543,40 @@ func (c *Client) GetApp(id string) (model.App, error) {
 		return model.App{}, err
 	}
 	return response.App, nil
+}
+
+func (c *Client) TryGetApp(id string) (*model.App, error) {
+	httpReq, err := http.NewRequest(http.MethodGet, c.resolveURL(path.Join("/v1/apps", strings.TrimSpace(id))), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+c.token)
+
+	result, err := c.doPrepared(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	if result.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if result.StatusCode < 200 || result.StatusCode >= 300 {
+		var apiErr apiError
+		if err := json.Unmarshal(result.Payload, &apiErr); err == nil && strings.TrimSpace(apiErr.Error) != "" {
+			return nil, fmt.Errorf("%s", apiErr.Error)
+		}
+		if trimmed := strings.TrimSpace(string(result.Payload)); trimmed != "" {
+			return nil, fmt.Errorf("request failed: status=%d body=%s", result.StatusCode, trimmed)
+		}
+		return nil, fmt.Errorf("request failed: status=%d", result.StatusCode)
+	}
+
+	var response struct {
+		App model.App `json:"app"`
+	}
+	if err := json.Unmarshal(result.Payload, &response); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &response.App, nil
 }
 
 func (c *Client) RestartApp(id string) (restartAppResponse, error) {

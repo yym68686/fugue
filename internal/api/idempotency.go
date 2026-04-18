@@ -53,6 +53,9 @@ type importGitHubRequest struct {
 	PersistentStorageSeedFiles []importGitHubPersistentStorageSeedFile           `json:"persistent_storage_seed_files"`
 	Postgres                   *model.AppPostgresSpec                            `json:"postgres"`
 	IdempotencyKey             string                                            `json:"idempotency_key"`
+	UpdateExisting             bool                                              `json:"update_existing,omitempty"`
+	DeleteMissing              bool                                              `json:"delete_missing,omitempty"`
+	DryRun                     bool                                              `json:"dry_run,omitempty"`
 }
 
 func resolveIdempotencyKey(r *http.Request, bodyKey string) (string, error) {
@@ -99,6 +102,8 @@ func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID
 		PersistentStorage          *model.AppPersistentStorageSpec                   `json:"persistent_storage,omitempty"`
 		PersistentStorageSeedFiles []importGitHubPersistentStorageSeedFile           `json:"persistent_storage_seed_files"`
 		Postgres                   *model.AppPostgresSpec                            `json:"postgres"`
+		UpdateExisting             bool                                              `json:"update_existing,omitempty"`
+		DeleteMissing              bool                                              `json:"delete_missing,omitempty"`
 	}{
 		TenantID:                   strings.TrimSpace(tenantID),
 		ProjectID:                  strings.TrimSpace(req.ProjectID),
@@ -126,6 +131,8 @@ func hashImportGitHubRequest(tenantID string, req importGitHubRequest, runtimeID
 		PersistentStorage:          req.PersistentStorage,
 		PersistentStorageSeedFiles: normalizedImportGitHubPersistentStorageSeedFiles(req.PersistentStorageSeedFiles),
 		Postgres:                   req.Postgres,
+		UpdateExisting:             req.UpdateExisting,
+		DeleteMissing:              req.DeleteMissing,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {

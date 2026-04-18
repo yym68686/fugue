@@ -643,6 +643,8 @@ func preferredBuildLogsSummary(logs buildLogsResponse) string {
 	if logs.ArtifactSummary != nil {
 		artifact := logs.ArtifactSummary
 		switch {
+		case buildPlacementSummary(artifact) != "":
+			return buildPlacementSummary(artifact)
 		case strings.TrimSpace(artifact.RegistryLifecycleHint) != "":
 			return strings.TrimSpace(artifact.RegistryLifecycleHint)
 		case normalizeImageInventoryStatus(artifact.RegistryImageStatus) == "missing":
@@ -654,6 +656,49 @@ func preferredBuildLogsSummary(logs buildLogsResponse) string {
 		}
 	}
 	return firstNonEmptyTrimmed(strings.TrimSpace(logs.Summary), strings.TrimSpace(logs.ResultMessage), strings.TrimSpace(logs.ErrorMessage))
+}
+
+func buildPlacementSummary(report *appBuildArtifactReport) string {
+	if report == nil {
+		return ""
+	}
+	state := strings.TrimSpace(report.BuilderJobState)
+	switch state {
+	case "waiting-placement":
+		return firstNonEmptyTrimmed(builderPlacementEvidence(report), "builder is still waiting for placement on a runtime node")
+	case "scheduled-pending":
+		return firstNonEmptyTrimmed(builderPlacementEvidence(report), "builder pod was scheduled but is still pending")
+	case "created-no-pods-visible":
+		if strings.EqualFold(strings.TrimSpace(report.BuildOperationStatus), model.OperationStatusPending) ||
+			strings.EqualFold(strings.TrimSpace(report.BuildOperationStatus), model.OperationStatusRunning) ||
+			strings.EqualFold(strings.TrimSpace(report.BuildOperationStatus), model.OperationStatusWaitingAgent) {
+			return "builder job was created, but no builder pod is visible yet; it is likely still waiting for placement"
+		}
+	case "not-observed", "name-recorded":
+		if strings.EqualFold(strings.TrimSpace(report.BuildOperationStatus), model.OperationStatusPending) ||
+			strings.EqualFold(strings.TrimSpace(report.BuildOperationStatus), model.OperationStatusRunning) ||
+			strings.EqualFold(strings.TrimSpace(report.BuildOperationStatus), model.OperationStatusWaitingAgent) {
+			return "import is still in progress and no builder pod has been observed yet"
+		}
+	}
+	return ""
+}
+
+func builderPlacementEvidence(report *appBuildArtifactReport) string {
+	if report == nil {
+		return ""
+	}
+	for _, detail := range report.BuilderJobEvidence {
+		normalized := strings.ToLower(strings.TrimSpace(detail))
+		if strings.Contains(normalized, "pending") ||
+			strings.Contains(normalized, "placement") ||
+			strings.Contains(normalized, "failedscheduling") ||
+			strings.Contains(normalized, "unschedulable") ||
+			strings.Contains(normalized, "assigned node") {
+			return strings.TrimSpace(detail)
+		}
+	}
+	return ""
 }
 
 func describePodIssue(pod model.ClusterPod, expectedImage string) string {

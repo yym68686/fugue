@@ -43,7 +43,7 @@ func (c *CLI) newProjectOverviewCommand() *cobra.Command {
 				return writeConsoleProjectTable(c.stdout, gallery.Projects)
 			}
 
-			summary, detail, err := c.loadConsoleProjectOverview(client, args[0], opts.Live)
+			summary, detail, status, err := c.loadConsoleProjectOverview(client, args[0], opts.Live)
 			if err != nil {
 				return err
 			}
@@ -52,9 +52,12 @@ func (c *CLI) newProjectOverviewCommand() *cobra.Command {
 				if summary != nil {
 					payload["summary"] = summary
 				}
+				if status != nil {
+					payload["status"] = status
+				}
 				return writeJSON(c.stdout, payload)
 			}
-			return renderConsoleProjectOverview(c.stdout, summary, detail)
+			return renderConsoleProjectOverview(c.stdout, summary, detail, status)
 		},
 	}
 	cmd.Flags().BoolVar(&opts.Live, "live", opts.Live, "Include live runtime status in project snapshots")
@@ -71,7 +74,7 @@ func (c *CLI) newProjectAppsCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, detail, err := c.loadConsoleProjectOverview(client, args[0], true)
+			_, detail, _, err := c.loadConsoleProjectOverview(client, args[0], true)
 			if err != nil {
 				return err
 			}
@@ -94,7 +97,7 @@ func (c *CLI) newProjectOpsCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, detail, err := c.loadConsoleProjectOverview(client, args[0], true)
+			_, detail, _, err := c.loadConsoleProjectOverview(client, args[0], true)
 			if err != nil {
 				return err
 			}
@@ -137,6 +140,7 @@ func (c *CLI) newProjectWatchCommand() *cobra.Command {
 
 type projectOverviewSnapshot struct {
 	Summary *consoleProjectSummary       `json:"summary,omitempty"`
+	Status  *projectStatusResponse       `json:"status,omitempty"`
 	Detail  consoleProjectDetailResponse `json:"detail"`
 }
 
@@ -235,7 +239,7 @@ func (c *CLI) renderProjectWatchSnapshot(snapshot any, separate bool) error {
 	case consoleGalleryResponse:
 		return writeConsoleProjectTable(c.stdout, value.Projects)
 	case projectOverviewSnapshot:
-		return renderConsoleProjectOverview(c.stdout, value.Summary, value.Detail)
+		return renderConsoleProjectOverview(c.stdout, value.Summary, value.Detail, value.Status)
 	default:
 		return nil
 	}
@@ -270,11 +274,11 @@ func (c *CLI) loadProjectWatchSnapshot(ctx context.Context, client *Client, args
 		}
 		return gallery, sha256.Sum256(sum), nil
 	}
-	summary, detail, err := c.loadConsoleProjectOverview(client, args[0], includeLiveStatus)
+	summary, detail, status, err := c.loadConsoleProjectOverview(client, args[0], includeLiveStatus)
 	if err != nil {
 		return nil, [32]byte{}, err
 	}
-	snapshot := projectOverviewSnapshot{Summary: summary, Detail: detail}
+	snapshot := projectOverviewSnapshot{Summary: summary, Status: status, Detail: detail}
 	sum, err := json.Marshal(snapshot)
 	if err != nil {
 		return nil, [32]byte{}, err
@@ -287,26 +291,30 @@ func (c *CLI) loadProjectWatchSnapshot(ctx context.Context, client *Client, args
 	return snapshot, sha256.Sum256(sum), nil
 }
 
-func (c *CLI) loadConsoleProjectOverview(client *Client, ref string, includeLiveStatus bool) (*consoleProjectSummary, consoleProjectDetailResponse, error) {
+func (c *CLI) loadConsoleProjectOverview(client *Client, ref string, includeLiveStatus bool) (*consoleProjectSummary, consoleProjectDetailResponse, *projectStatusResponse, error) {
 	project, err := c.resolveNamedProject(client, ref)
 	if err != nil {
-		return nil, consoleProjectDetailResponse{}, err
+		return nil, consoleProjectDetailResponse{}, nil, err
 	}
 	detail, err := client.GetConsoleProjectWithLiveStatus(project.ID, includeLiveStatus)
 	if err != nil {
-		return nil, consoleProjectDetailResponse{}, err
+		return nil, consoleProjectDetailResponse{}, nil, err
+	}
+	status, err := c.loadProjectStatus(client, detail)
+	if err != nil {
+		return nil, consoleProjectDetailResponse{}, nil, err
 	}
 	gallery, err := client.GetConsoleGalleryWithLiveStatus(includeLiveStatus)
 	if err != nil {
-		return nil, detail, nil
+		return nil, detail, status, nil
 	}
 	for _, summary := range gallery.Projects {
 		if strings.EqualFold(strings.TrimSpace(summary.ID), strings.TrimSpace(project.ID)) {
 			summaryCopy := summary
-			return &summaryCopy, detail, nil
+			return &summaryCopy, detail, status, nil
 		}
 	}
-	return nil, detail, nil
+	return nil, detail, status, nil
 }
 
 func writeConsoleProjectTable(w io.Writer, projects []consoleProjectSummary) error {
@@ -336,7 +344,7 @@ func writeConsoleProjectTable(w io.Writer, projects []consoleProjectSummary) err
 	return tw.Flush()
 }
 
-func renderConsoleProjectOverview(w io.Writer, summary *consoleProjectSummary, detail consoleProjectDetailResponse) error {
+func renderConsoleProjectOverview(w io.Writer, summary *consoleProjectSummary, detail consoleProjectDetailResponse, status *projectStatusResponse) error {
 	projectName := strings.TrimSpace(detail.ProjectName)
 	if projectName == "" && detail.Project != nil {
 		projectName = strings.TrimSpace(detail.Project.Name)
@@ -369,6 +377,14 @@ func renderConsoleProjectOverview(w io.Writer, summary *consoleProjectSummary, d
 	}
 	if err := writeKeyValues(w, pairs...); err != nil {
 		return err
+	}
+	if status != nil && (len(status.Services) > 0 || len(status.Deletes) > 0) {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		if err := renderProjectStatus(w, status); err != nil {
+			return err
+		}
 	}
 	if len(detail.Apps) > 0 {
 		if _, err := fmt.Fprintln(w); err != nil {

@@ -452,6 +452,8 @@ func TestRunDeployGitHubSubcommandNormalizesOwnerRepo(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
 			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/templates/inspect-github":
+			_, _ = w.Write([]byte(`{"repository":{"repo_url":"https://github.com/example/demo","repo_visibility":"public","repo_owner":"example","repo_name":"demo","branch":"main","default_app_name":"demo"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/import-github":
 			if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
 				t.Fatalf("decode import github request: %v", err)
@@ -498,6 +500,8 @@ func TestRunDeployGitHubWaitShowsMissingImageDiagnosis(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
 			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/templates/inspect-github":
+			_, _ = w.Write([]byte(`{"repository":{"repo_url":"https://github.com/example/demo","repo_visibility":"public","repo_owner":"example","repo_name":"demo","branch":"main","default_app_name":"demo"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/import-github":
 			w.WriteHeader(http.StatusAccepted)
 			_, _ = w.Write([]byte(`{"app":{"id":"app_123","name":"demo"},"operation":{"id":"op_import","app_id":"app_123","type":"import","status":"pending"}}`))
@@ -583,6 +587,12 @@ func TestRunDeployGitHubWaitShowsMissingImageDiagnosis(t *testing.T) {
 			_, _ = w.Write([]byte(`{"app_id":"app_123","registry_configured":true,"summary":{"version_count":1,"current_version_count":1,"stale_version_count":0,"reclaimable_size_bytes":0},"versions":[{"image_ref":"registry.example.com/demo-managed:sha256","runtime_image_ref":"registry.example.com/demo-runtime:sha256","status":"missing","current":true}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-pods":
 			_, _ = w.Write([]byte(`{"component":"app","namespace":"tenant-123","selector":"app.kubernetes.io/name=demo","container":"demo","groups":[{"owner_kind":"ReplicaSet","owner_name":"demo-9f8d7c6b5","parent":{"kind":"Deployment","name":"demo"},"revision":"14","desired_replicas":1,"current_replicas":1,"ready_replicas":0,"available_replicas":0,"containers":[{"name":"demo","image":"registry.example.com/demo-runtime:sha256"}],"pods":[{"namespace":"tenant-123","name":"demo-9f8d7c6b5-abc12","phase":"Pending","ready":false,"node_name":"gcp1","containers":[{"name":"demo","image":"registry.example.com/demo-runtime:sha256","ready":false,"restart_count":0,"state":"waiting","reason":"ErrImagePull","message":"manifest unknown"}]}],"warnings":[]}],"warnings":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/control-plane":
+			_, _ = w.Write([]byte(`{"control_plane":{"namespace":"fugue-system"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/pods":
+			_, _ = w.Write([]byte(`{"cluster_pods":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/audit-events":
+			_, _ = w.Write([]byte(`{"audit_events":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/diagnosis":
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"error":"not found"}`))
@@ -1041,6 +1051,8 @@ func TestRunDeployGitHubIncludesIdempotencyAndSeedFiles(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
 			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/templates/inspect-github":
+			_, _ = w.Write([]byte(`{"repository":{"repo_url":"https://github.com/example/demo","repo_visibility":"public","repo_owner":"example","repo_name":"demo","branch":"main","default_app_name":"demo"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/import-github":
 			if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
 				t.Fatalf("decode github import request: %v", err)
@@ -1198,7 +1210,110 @@ func TestRunProjectOverviewUsesConsoleEndpoints(t *testing.T) {
 	}
 
 	out := stdout.String()
-	for _, want := range []string{"project=demo", "lifecycle=live", "[apps]", "[operations]", "[cluster_nodes]"} {
+	for _, want := range []string{"project=demo", "lifecycle=live", "[service_status]", "[apps]", "[operations]", "[cluster_nodes]"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunProjectDeleteWaitTracksFinalRemoval(t *testing.T) {
+	t.Parallel()
+
+	var projectPolls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
+			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/projects"):
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","tenant_id":"tenant_123","name":"demo","slug":"demo","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/projects/project_123":
+			_, _ = w.Write([]byte(`{"project":{"id":"project_123","tenant_id":"tenant_123","name":"demo","slug":"demo","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"deleted":false,"delete_requested":true,"queued_operations":1,"already_deleting_apps":0,"deleted_backing_services":1,"operations":[{"id":"op_delete","tenant_id":"tenant_123","app_id":"app_123","type":"delete","status":"pending","execution_mode":"managed","requested_by_type":"api-key","requested_by_id":"key_123","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/console/projects/project_123":
+			projectPolls++
+			if projectPolls >= 2 {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":"not found"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{
+  "project_id":"project_123",
+  "project_name":"demo",
+  "project":{"id":"project_123","tenant_id":"tenant_123","name":"demo","slug":"demo","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},
+  "apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"web","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}],
+  "operations":[{"id":"op_delete","tenant_id":"tenant_123","app_id":"app_123","type":"delete","status":"pending","execution_mode":"managed","requested_by_type":"api-key","requested_by_id":"key_123","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}],
+  "cluster_nodes":[]
+}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"project", "delete", "demo",
+		"--wait",
+		"--interval", "1ms",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run project delete --wait: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"delete_requested=true", "queued_operations=1", "remaining_apps=1", "[delete_operations]", "final_state=deleted"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunProjectVerifyChecksPublicRoutes(t *testing.T) {
+	t.Parallel()
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
+			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/projects"):
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","tenant_id":"tenant_123","name":"demo","slug":"demo","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/console/projects/project_123":
+			_, _ = w.Write([]byte(fmt.Sprintf(`{
+  "project_id":"project_123",
+  "project_name":"demo",
+  "project":{"id":"project_123","tenant_id":"tenant_123","name":"demo","slug":"demo","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},
+  "apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"web","route":{"public_url":"%s","hostname":"demo.example.com"},"spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}],
+  "operations":[],
+  "cluster_nodes":[]
+}`, server.URL)))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/console/gallery":
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","name":"demo","app_count":1,"service_count":1,"lifecycle":{"label":"live","live":true,"sync_mode":"auto","tone":"positive"},"resource_usage_snapshot":{},"service_badges":[]}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/healthz":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`ok`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"project", "verify", "demo",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run project verify: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"checks=1", "passed=1", "SERVICE", "web", "/healthz", "200"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}

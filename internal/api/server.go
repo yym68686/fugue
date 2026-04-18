@@ -331,9 +331,12 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	}
 	s.appendAudit(principal, "project.delete", "project", project.ID, project.TenantID, map[string]string{"name": project.Name})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"delete_requested": false,
-		"deleted":          true,
-		"project":          project,
+		"delete_requested":         false,
+		"deleted":                  true,
+		"project":                  project,
+		"queued_operations":        0,
+		"already_deleting_apps":    0,
+		"deleted_backing_services": 0,
 	})
 }
 

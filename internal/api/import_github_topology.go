@@ -21,6 +21,7 @@ type importedGitHubTopology struct {
 	ServiceDetails  []map[string]any
 	Warnings        []string
 	InferenceReport []sourceimport.TopologyInference
+	Plan            *model.TopologyDeployPlan
 }
 
 type topologySourceBuilder func(service sourceimport.ComposeService, composeDependsOn []string) (model.AppSource, error)
@@ -29,6 +30,7 @@ type topologyAuditMetadataBuilder func(source model.AppSource, route model.AppRo
 
 type topologyImportOptions struct {
 	ProjectID                string
+	ProjectName              string
 	RuntimeID                string
 	Replicas                 int
 	ServicePort              int
@@ -40,6 +42,25 @@ type topologyImportOptions struct {
 	AuditAction              string
 	BuildSource              topologySourceBuilder
 	BuildAuditMetadata       topologyAuditMetadataBuilder
+	UpdateExisting           bool
+	DeleteMissing            bool
+	DryRun                   bool
+	Family                   topologyImportFamily
+}
+
+type topologyImportFamily struct {
+	Kind string
+	Key  string
+}
+
+type plannedTopologyService struct {
+	Service sourceimport.ComposeService
+	AppName string
+	Route   *model.AppRoute
+	Source  model.AppSource
+	Spec    model.AppSpec
+	Action  string
+	Match   *model.App
 }
 
 type composeImportNamingStrategy struct {
@@ -77,6 +98,13 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 			return map[string]string{
 				"repo_url": strings.TrimSpace(req.RepoURL),
 			}
+		},
+		UpdateExisting: req.UpdateExisting,
+		DeleteMissing:  req.DeleteMissing,
+		DryRun:         req.DryRun,
+		Family: topologyImportFamily{
+			Kind: "github",
+			Key:  normalizeTopologyGitHubFamilyKey(req.RepoURL),
 		},
 	}, topology)
 }
@@ -266,6 +294,13 @@ func (s *Server) importResolvedUploadTopology(principal model.Principal, tenantI
 				"archive_sha256": strings.TrimSpace(upload.SHA256),
 			}
 		},
+		UpdateExisting: req.UpdateExisting,
+		DeleteMissing:  req.DeleteMissing,
+		DryRun:         req.DryRun,
+		Family: topologyImportFamily{
+			Kind: model.AppSourceTypeUpload,
+			Key:  strings.TrimSpace(upload.Filename),
+		},
 	}, topology)
 }
 
@@ -287,7 +322,22 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		return importedGitHubTopology{}, invalidComposeImport(err)
 	}
 
-	appNames, routeHosts, err := s.allocateComposeAppNames(tenantID, options.ProjectID, options.BaseName, topologyPlan.Deployable, topologyPlan.PrimaryService)
+	projectName := strings.TrimSpace(options.ProjectName)
+	if projectName == "" && strings.TrimSpace(options.ProjectID) != "" {
+		if project, err := s.store.GetProject(options.ProjectID); err == nil {
+			projectName = strings.TrimSpace(project.Name)
+		}
+	}
+	if options.DeleteMissing && !options.UpdateExisting {
+		return importedGitHubTopology{}, invalidComposeImportf("delete_missing requires update_existing")
+	}
+	projectApps, err := s.store.ListAppsMetadataByProjectIDs([]string{options.ProjectID})
+	if err != nil {
+		return importedGitHubTopology{}, err
+	}
+	existingMatches, familyApps, matchWarnings := matchTopologyExistingApps(projectApps, topologyPlan.Deployable, options.Family, options.UpdateExisting)
+
+	appNames, routeHosts, routeWarnings, err := s.allocateComposeAppNamesWithExisting(tenantID, options.ProjectID, options.BaseName, topologyPlan.Deployable, topologyPlan.PrimaryService, existingMatches)
 	if err != nil {
 		return importedGitHubTopology{}, err
 	}
@@ -316,7 +366,7 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		deployment.ManagedPostgresByOwner[backing.OwnerService] = spec
 	}
 
-	plans := make([]composeAppPlan, 0, len(topologyPlan.Deployable))
+	plans := make([]plannedTopologyService, 0, len(topologyPlan.Deployable))
 	inferenceReport := append([]sourceimport.TopologyInference(nil), topologyPlan.InferenceReport...)
 	for _, service := range topologyPlan.Deployable {
 		suggestedEnv, envInferences, resolveErr := sourceimport.ResolveTopologyServiceEnvironment(topologyPlan, service.Name, deployment)
@@ -372,21 +422,91 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 			route.ServicePort = firstServicePort(spec)
 		}
 
-		plans = append(plans, composeAppPlan{
+		action := "create"
+		var matchedApp *model.App
+		if existing, ok := existingMatches[service.Name]; ok {
+			action = "update"
+			existingCopy := existing
+			matchedApp = &existingCopy
+		}
+		plans = append(plans, plannedTopologyService{
 			Service: service,
 			AppName: appNames[service.Name],
 			Route:   route,
 			Source:  source,
 			Spec:    spec,
+			Action:  action,
+			Match:   matchedApp,
 		})
+	}
+
+	deleteCandidates := topologyDeleteCandidates(familyApps, topologyPlan.Deployable, existingMatches, options.DeleteMissing)
+	planWarnings := append([]string(nil), topologyPlan.Warnings...)
+	planWarnings = append(planWarnings, matchWarnings...)
+	planWarnings = append(planWarnings, routeWarnings...)
+	if !options.UpdateExisting && len(familyApps) > 0 {
+		planWarnings = append(planWarnings, fmt.Sprintf("project %q already has %d imported service app(s) from the same topology family; this deploy will create a second copy unless you rerun with update_existing or replace", firstNonEmpty(strings.TrimSpace(projectName), strings.TrimSpace(options.ProjectID)), len(familyApps)))
+	}
+	if options.DeleteMissing && len(deleteCandidates) == 0 {
+		planWarnings = append(planWarnings, "delete_missing was requested, but no previously managed services are eligible for deletion in this topology family")
+	}
+	deployPlan := buildTopologyDeployPlan(projectName, options, topologyPlan, plans, deleteCandidates, planWarnings)
+
+	serviceDetails := make([]map[string]any, 0, len(plans))
+	for _, planned := range plans {
+		buildStrategy := strings.TrimSpace(planned.Service.BuildStrategy)
+		if buildStrategy == "" && planned.Source.Type == model.AppSourceTypeDockerImage {
+			buildStrategy = model.AppSourceTypeDockerImage
+		}
+		serviceInfo := map[string]any{
+			"service":         planned.Service.Name,
+			"kind":            planned.Service.Kind,
+			"app_name":        planned.AppName,
+			"build_strategy":  buildStrategy,
+			"internal_port":   firstServicePort(planned.Spec),
+			"compose_service": planned.Service.Name,
+			"service_type":    strings.TrimSpace(planned.Service.ServiceType),
+			"action":          planned.Action,
+		}
+		if planned.Match != nil {
+			serviceInfo["existing_app_id"] = planned.Match.ID
+			serviceInfo["existing_app_name"] = planned.Match.Name
+			serviceInfo["app_id"] = planned.Match.ID
+		}
+		if planned.Route != nil && strings.TrimSpace(planned.Route.PublicURL) != "" {
+			serviceInfo["public_url"] = planned.Route.PublicURL
+		}
+		if bindings := topologyPlan.BindingsBySource[planned.Service.Name]; len(bindings) > 0 {
+			targets := make([]string, 0, len(bindings))
+			for _, binding := range bindings {
+				targets = append(targets, binding.Service)
+			}
+			sort.Strings(targets)
+			serviceInfo["binding_targets"] = targets
+		}
+		if _, ok := deployment.ManagedPostgresByOwner[planned.Service.Name]; ok {
+			serviceInfo["owns_postgres"] = true
+		}
+		serviceDetails = append(serviceDetails, serviceInfo)
+	}
+
+	if options.DryRun {
+		return importedGitHubTopology{
+			PrimaryService:  topologyPlan.PrimaryService,
+			ServiceDetails:  serviceDetails,
+			Warnings:        append([]string(nil), planWarnings...),
+			InferenceReport: inferenceReport,
+			Plan:            deployPlan,
+		}, nil
 	}
 
 	apps := make([]model.App, 0, len(plans))
 	ops := make([]model.Operation, 0, len(plans))
 	appsByService := make(map[string]model.App, len(plans))
 	opsByService := make(map[string]model.Operation, len(plans))
+	createdApps := make([]model.App, 0, len(plans))
 	rollback := func(baseErr error) error {
-		if rollbackErr := s.rollbackImportedApps(apps); rollbackErr != nil {
+		if rollbackErr := s.rollbackImportedApps(createdApps); rollbackErr != nil {
 			return errors.Join(baseErr, rollbackErr)
 		}
 		return baseErr
@@ -401,16 +521,22 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		if plan.Route != nil {
 			route = *plan.Route
 		}
-		app, err := s.store.CreateImportedApp(tenantID, options.ProjectID, plan.AppName, appDescription, plan.Spec, plan.Source, route)
-		if err != nil {
-			if err == store.ErrConflict {
-				return importedGitHubTopology{}, rollback(fmt.Errorf("topology import naming conflict for service %q: %w", plan.Service.Name, store.ErrConflict))
+		app := model.App{}
+		if plan.Match != nil {
+			app = *plan.Match
+		} else {
+			app, err = s.store.CreateImportedApp(tenantID, options.ProjectID, plan.AppName, appDescription, plan.Spec, plan.Source, route)
+			if err != nil {
+				if err == store.ErrConflict {
+					return importedGitHubTopology{}, rollback(fmt.Errorf("topology import naming conflict for service %q: %w", plan.Service.Name, store.ErrConflict))
+				}
+				return importedGitHubTopology{}, rollback(err)
 			}
-			return importedGitHubTopology{}, rollback(err)
+			createdApps = append(createdApps, app)
 		}
 		apps = append(apps, app)
 
-		specCopy := cloneAppSpec(app.Spec)
+		specCopy := cloneAppSpec(plan.Spec)
 		sourceCopy := plan.Source
 		op, err := s.store.CreateOperation(model.Operation{
 			TenantID:        app.TenantID,
@@ -428,6 +554,7 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		auditMetadata := map[string]string{
 			"compose_service": sourceCopy.ComposeService,
 			"hostname":        route.Hostname,
+			"action":          plan.Action,
 		}
 		if strings.TrimSpace(sourceCopy.BuildStrategy) != "" {
 			auditMetadata["build_strategy"] = sourceCopy.BuildStrategy
@@ -452,40 +579,46 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		opsByService[plan.Service.Name] = op
 	}
 
-	serviceDetails := make([]map[string]any, 0, len(plans))
-	for _, appPlan := range plans {
-		app := appsByService[appPlan.Service.Name]
-		op := opsByService[appPlan.Service.Name]
-		buildStrategy := strings.TrimSpace(appPlan.Service.BuildStrategy)
-		if buildStrategy == "" && appPlan.Source.Type == model.AppSourceTypeDockerImage {
-			buildStrategy = model.AppSourceTypeDockerImage
-		}
-		serviceInfo := map[string]any{
-			"service":         appPlan.Service.Name,
-			"kind":            appPlan.Service.Kind,
-			"app_id":          app.ID,
-			"app_name":        app.Name,
-			"operation_id":    op.ID,
-			"build_strategy":  buildStrategy,
-			"internal_port":   firstServicePort(app.Spec),
-			"compose_service": appPlan.Service.Name,
-		}
-		if app.Route != nil && strings.TrimSpace(app.Route.PublicURL) != "" {
-			serviceInfo["public_url"] = app.Route.PublicURL
-		}
-		serviceInfo["service_type"] = strings.TrimSpace(appPlan.Service.ServiceType)
-		if bindings := topologyPlan.BindingsBySource[appPlan.Service.Name]; len(bindings) > 0 {
-			targets := make([]string, 0, len(bindings))
-			for _, binding := range bindings {
-				targets = append(targets, binding.Service)
+	for index, planned := range plans {
+		if app, ok := appsByService[planned.Service.Name]; ok {
+			serviceDetails[index]["app_id"] = app.ID
+			serviceDetails[index]["app_name"] = app.Name
+			if app.Route != nil && strings.TrimSpace(app.Route.PublicURL) != "" {
+				serviceDetails[index]["public_url"] = app.Route.PublicURL
 			}
-			sort.Strings(targets)
-			serviceInfo["binding_targets"] = targets
+			serviceDetails[index]["internal_port"] = firstServicePort(app.Spec)
 		}
-		if _, ok := deployment.ManagedPostgresByOwner[appPlan.Service.Name]; ok {
-			serviceInfo["owns_postgres"] = true
+		if op, ok := opsByService[planned.Service.Name]; ok {
+			serviceDetails[index]["operation_id"] = op.ID
 		}
-		serviceDetails = append(serviceDetails, serviceInfo)
+	}
+	for _, candidate := range deleteCandidates {
+		deleteOp, err := s.store.CreateOperation(model.Operation{
+			TenantID:        candidate.TenantID,
+			Type:            model.OperationTypeDelete,
+			RequestedByType: principal.ActorType,
+			RequestedByID:   principal.ActorID,
+			AppID:           candidate.ID,
+		})
+		if err != nil {
+			if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return importedGitHubTopology{}, rollback(err)
+		}
+		ops = append(ops, deleteOp)
+	}
+	if deployPlan != nil {
+		for index, servicePlan := range deployPlan.Services {
+			if app, ok := appsByService[servicePlan.Service]; ok {
+				deployPlan.Services[index].AppID = app.ID
+				deployPlan.Services[index].AppName = app.Name
+				if app.Route != nil {
+					deployPlan.Services[index].Hostname = firstNonEmpty(strings.TrimSpace(app.Route.Hostname), deployPlan.Services[index].Hostname)
+					deployPlan.Services[index].PublicURL = firstNonEmpty(strings.TrimSpace(app.Route.PublicURL), deployPlan.Services[index].PublicURL)
+				}
+			}
+		}
 	}
 
 	return importedGitHubTopology{
@@ -495,15 +628,27 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		Operations:      ops,
 		PrimaryService:  topologyPlan.PrimaryService,
 		ServiceDetails:  serviceDetails,
-		Warnings:        append([]string(nil), topologyPlan.Warnings...),
+		Warnings:        append([]string(nil), planWarnings...),
 		InferenceReport: inferenceReport,
+		Plan:            deployPlan,
 	}, nil
 }
 
-func (s *Server) allocateComposeAppNames(tenantID, projectID, baseName string, services []sourceimport.ComposeService, primaryService string) (map[string]string, map[string]string, error) {
+func (s *Server) allocateComposeAppNamesWithExisting(tenantID, projectID, baseName string, services []sourceimport.ComposeService, primaryService string, existingByService map[string]model.App) (map[string]string, map[string]string, []string, error) {
 	apps, err := s.store.ListApps(tenantID, false)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	fixedAppIDs := make(map[string]struct{}, len(existingByService))
+	warnings := make([]string, 0, len(existingByService))
+	for serviceName, app := range existingByService {
+		fixedAppIDs[strings.TrimSpace(app.ID)] = struct{}{}
+		if !servicePublishedByName(services, serviceName) && app.Route != nil && strings.TrimSpace(app.Route.Hostname) != "" {
+			warnings = append(warnings, fmt.Sprintf("service %q keeps its existing public route %q during update_existing; route removal still requires an explicit route/domain change or delete/recreate", serviceName, app.Route.Hostname))
+		}
+		if servicePublishedByName(services, serviceName) && (app.Route == nil || strings.TrimSpace(app.Route.Hostname) == "") {
+			warnings = append(warnings, fmt.Sprintf("service %q is published in the topology, but existing app %q has no current route; update_existing preserves the current route state", serviceName, app.Name))
+		}
 	}
 
 	for attempt := 0; attempt < defaultComposeImportNamingStrategy.MaxAttempts; attempt++ {
@@ -516,6 +661,20 @@ func (s *Server) allocateComposeAppNames(tenantID, projectID, baseName string, s
 		usedNames := make(map[string]struct{}, len(services))
 		conflict := false
 		for _, service := range services {
+			if existing, ok := existingByService[service.Name]; ok {
+				name := strings.TrimSpace(existing.Name)
+				if name == "" {
+					conflict = true
+					break
+				}
+				if _, exists := usedNames[name]; exists {
+					conflict = true
+					break
+				}
+				names[service.Name] = name
+				usedNames[name] = struct{}{}
+				continue
+			}
 			name := primaryName
 			if service.Name != primaryService {
 				name = truncateSlug(primaryName+"-"+service.Name, defaultComposeImportNamingStrategy.MaxServiceNameLen)
@@ -541,6 +700,20 @@ func (s *Server) allocateComposeAppNames(tenantID, projectID, baseName string, s
 			if !service.Published {
 				continue
 			}
+			if existing, ok := existingByService[service.Name]; ok {
+				if existing.Route != nil {
+					host := strings.TrimSpace(strings.ToLower(existing.Route.Hostname))
+					if host != "" {
+						if _, exists := usedHosts[host]; exists {
+							conflict = true
+							break
+						}
+						routeHosts[service.Name] = host
+						usedHosts[host] = struct{}{}
+					}
+				}
+				continue
+			}
 			host := primaryHost
 			if service.Name != primaryService {
 				host = names[service.Name] + "." + s.appBaseDomain
@@ -563,6 +736,9 @@ func (s *Server) allocateComposeAppNames(tenantID, projectID, baseName string, s
 
 		hostConflict := false
 		for _, existing := range apps {
+			if _, ok := fixedAppIDs[strings.TrimSpace(existing.ID)]; ok {
+				continue
+			}
 			if existing.ProjectID != projectID {
 				continue
 			}
@@ -580,6 +756,9 @@ func (s *Server) allocateComposeAppNames(tenantID, projectID, baseName string, s
 			continue
 		}
 		for _, existing := range apps {
+			if _, ok := fixedAppIDs[strings.TrimSpace(existing.ID)]; ok {
+				continue
+			}
 			if existing.Route == nil {
 				continue
 			}
@@ -599,19 +778,216 @@ func (s *Server) allocateComposeAppNames(tenantID, projectID, baseName string, s
 		}
 		for _, plannedHost := range routeHosts {
 			if _, err := s.store.GetAppByHostname(plannedHost); err == nil {
+				occupiedByFixed := false
+				for _, existing := range existingByService {
+					if existing.Route != nil && strings.EqualFold(strings.TrimSpace(existing.Route.Hostname), plannedHost) {
+						occupiedByFixed = true
+						break
+					}
+				}
+				if occupiedByFixed {
+					continue
+				}
 				hostConflict = true
 				break
 			} else if err != nil && !errors.Is(err, store.ErrNotFound) {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 		}
 		if hostConflict {
 			continue
 		}
-		return names, routeHosts, nil
+		return names, routeHosts, warnings, nil
 	}
 
-	return nil, nil, store.ErrConflict
+	return nil, nil, warnings, store.ErrConflict
+}
+
+func matchTopologyExistingApps(projectApps []model.App, services []sourceimport.ComposeService, family topologyImportFamily, updateExisting bool) (map[string]model.App, map[string]model.App, []string) {
+	candidatesByService := make(map[string][]model.App)
+	familyApps := make(map[string]model.App)
+	for _, app := range projectApps {
+		if !topologyImportFamilyMatchesApp(app, family) || topologyAppIsDeleting(app) {
+			continue
+		}
+		service := strings.TrimSpace(app.Source.ComposeService)
+		if service == "" {
+			continue
+		}
+		candidatesByService[service] = append(candidatesByService[service], app)
+		familyApps[strings.TrimSpace(app.ID)] = app
+	}
+
+	warnings := make([]string, 0)
+	matches := make(map[string]model.App)
+	if !updateExisting {
+		return matches, familyApps, warnings
+	}
+	for serviceName := range serviceNameSet(services) {
+		candidates := candidatesByService[serviceName]
+		if len(candidates) == 0 {
+			continue
+		}
+		sort.Slice(candidates, func(i, j int) bool {
+			if candidates[i].UpdatedAt.Equal(candidates[j].UpdatedAt) {
+				return candidates[i].CreatedAt.After(candidates[j].CreatedAt)
+			}
+			return candidates[i].UpdatedAt.After(candidates[j].UpdatedAt)
+		})
+		matches[serviceName] = candidates[0]
+		if len(candidates) > 1 {
+			warnings = append(warnings, fmt.Sprintf("service %q matched %d existing apps in the project; update_existing will reuse the most recently updated app %q", serviceName, len(candidates), candidates[0].Name))
+		}
+	}
+	return matches, familyApps, warnings
+}
+
+func topologyDeleteCandidates(familyApps map[string]model.App, services []sourceimport.ComposeService, matched map[string]model.App, enabled bool) []model.App {
+	if !enabled || len(familyApps) == 0 {
+		return nil
+	}
+	deployableServices := serviceNameSet(services)
+	matchedIDs := make(map[string]struct{}, len(matched))
+	for _, app := range matched {
+		matchedIDs[strings.TrimSpace(app.ID)] = struct{}{}
+	}
+	candidates := make([]model.App, 0)
+	for _, app := range familyApps {
+		if _, ok := matchedIDs[strings.TrimSpace(app.ID)]; ok {
+			continue
+		}
+		service := strings.TrimSpace(app.Source.ComposeService)
+		if service != "" {
+			if _, ok := deployableServices[service]; ok {
+				continue
+			}
+		}
+		candidates = append(candidates, app)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].Name == candidates[j].Name {
+			return candidates[i].ID < candidates[j].ID
+		}
+		return candidates[i].Name < candidates[j].Name
+	})
+	return candidates
+}
+
+func buildTopologyDeployPlan(projectName string, options topologyImportOptions, topologyPlan sourceimport.TopologyPlan, services []plannedTopologyService, deleteCandidates []model.App, warnings []string) *model.TopologyDeployPlan {
+	plan := &model.TopologyDeployPlan{
+		Mode:           "create",
+		DryRun:         options.DryRun,
+		UpdateExisting: options.UpdateExisting,
+		DeleteMissing:  options.DeleteMissing,
+		ProjectID:      strings.TrimSpace(options.ProjectID),
+		ProjectName:    strings.TrimSpace(projectName),
+		PrimaryService: strings.TrimSpace(topologyPlan.PrimaryService),
+		Warnings:       append([]string(nil), warnings...),
+	}
+	if options.UpdateExisting {
+		plan.Mode = "update-existing"
+	}
+	for _, service := range services {
+		buildStrategy := strings.TrimSpace(service.Service.BuildStrategy)
+		if buildStrategy == "" && service.Source.Type == model.AppSourceTypeDockerImage {
+			buildStrategy = model.AppSourceTypeDockerImage
+		}
+		entry := model.TopologyDeployPlanService{
+			Service:        strings.TrimSpace(service.Service.Name),
+			Kind:           strings.TrimSpace(service.Service.Kind),
+			ServiceType:    strings.TrimSpace(service.Service.ServiceType),
+			ComposeService: strings.TrimSpace(service.Source.ComposeService),
+			BuildStrategy:  buildStrategy,
+			Action:         strings.TrimSpace(service.Action),
+			AppName:        strings.TrimSpace(service.AppName),
+			InternalPort:   firstServicePort(service.Spec),
+		}
+		if service.Match != nil {
+			entry.ExistingAppID = strings.TrimSpace(service.Match.ID)
+			entry.ExistingAppName = strings.TrimSpace(service.Match.Name)
+			entry.AppID = entry.ExistingAppID
+			entry.AppName = firstNonEmpty(strings.TrimSpace(service.Match.Name), entry.AppName)
+			if service.Match.Route != nil {
+				entry.Hostname = strings.TrimSpace(service.Match.Route.Hostname)
+				entry.PublicURL = strings.TrimSpace(service.Match.Route.PublicURL)
+			}
+		}
+		if service.Route != nil {
+			entry.Hostname = firstNonEmpty(strings.TrimSpace(entry.Hostname), strings.TrimSpace(service.Route.Hostname))
+			entry.PublicURL = firstNonEmpty(strings.TrimSpace(entry.PublicURL), strings.TrimSpace(service.Route.PublicURL))
+		}
+		plan.Services = append(plan.Services, entry)
+	}
+	for _, app := range deleteCandidates {
+		plan.DeleteCandidates = append(plan.DeleteCandidates, model.TopologyDeployDeleteTarget{
+			AppID:   strings.TrimSpace(app.ID),
+			AppName: strings.TrimSpace(app.Name),
+			Service: strings.TrimSpace(app.Source.ComposeService),
+			Reason:  "service is no longer present in the imported topology",
+		})
+	}
+	return plan
+}
+
+func serviceNameSet(services []sourceimport.ComposeService) map[string]struct{} {
+	out := make(map[string]struct{}, len(services))
+	for _, service := range services {
+		name := strings.TrimSpace(service.Name)
+		if name == "" {
+			continue
+		}
+		out[name] = struct{}{}
+	}
+	return out
+}
+
+func servicePublishedByName(services []sourceimport.ComposeService, name string) bool {
+	name = strings.TrimSpace(name)
+	for _, service := range services {
+		if strings.EqualFold(strings.TrimSpace(service.Name), name) {
+			return service.Published
+		}
+	}
+	return false
+}
+
+func topologyImportFamilyMatchesApp(app model.App, family topologyImportFamily) bool {
+	if app.Source == nil {
+		return false
+	}
+	switch strings.TrimSpace(family.Kind) {
+	case model.AppSourceTypeGitHubPublic, model.AppSourceTypeGitHubPrivate, "github":
+		kind := strings.TrimSpace(app.Source.Type)
+		if kind != model.AppSourceTypeGitHubPublic && kind != model.AppSourceTypeGitHubPrivate {
+			return false
+		}
+		return strings.EqualFold(normalizeTopologyGitHubFamilyKey(app.Source.RepoURL), normalizeTopologyGitHubFamilyKey(family.Key))
+	case model.AppSourceTypeUpload:
+		return strings.EqualFold(strings.TrimSpace(app.Source.Type), model.AppSourceTypeUpload) &&
+			strings.EqualFold(strings.TrimSpace(app.Source.UploadFilename), strings.TrimSpace(family.Key))
+	default:
+		return false
+	}
+}
+
+func normalizeTopologyGitHubFamilyKey(raw string) string {
+	raw = strings.TrimSpace(strings.TrimSuffix(raw, ".git"))
+	lower := strings.ToLower(raw)
+	lower = strings.TrimPrefix(lower, "https://")
+	lower = strings.TrimPrefix(lower, "http://")
+	lower = strings.TrimPrefix(lower, "ssh://")
+	lower = strings.TrimPrefix(lower, "git@github.com:")
+	lower = strings.TrimPrefix(lower, "github.com/")
+	parts := strings.Split(strings.Trim(lower, "/"), "/")
+	if len(parts) >= 2 {
+		return strings.Join(parts[len(parts)-2:], "/")
+	}
+	return strings.Trim(lower, "/")
+}
+
+func topologyAppIsDeleting(app model.App) bool {
+	phase := strings.TrimSpace(strings.ToLower(app.Status.Phase))
+	return phase != "" && strings.Contains(phase, "deleting")
 }
 
 func resolveTopologyPrimaryService(services []sourceimport.ComposeService, preferred string) (sourceimport.ComposeService, error) {

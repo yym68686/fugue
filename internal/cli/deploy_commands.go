@@ -20,6 +20,10 @@ type deployCommonOptions struct {
 	EnvFile                   string
 	ServiceEnvFiles           []string
 	ServiceStorageSizes       []string
+	UpdateExisting            bool
+	Replace                   bool
+	DeleteMissing             bool
+	DryRun                    bool
 	RuntimeName               string
 	RuntimeID                 string
 	Replicas                  int
@@ -84,20 +88,22 @@ type importBundle struct {
 	PrimaryOp     model.Operation
 	Apps          []model.App
 	Operations    []model.Operation
+	Plan          *model.TopologyDeployPlan
 	ComposeStack  map[string]any
 	FugueManifest map[string]any
 	Idempotency   *importGitHubIdempotency
 }
 
 type importBundleJSON struct {
-	App           *model.App               `json:"app,omitempty"`
-	Operation     *model.Operation         `json:"operation,omitempty"`
-	Apps          []model.App              `json:"apps,omitempty"`
-	Operations    []model.Operation        `json:"operations,omitempty"`
-	Diagnosis     *appOverviewDiagnosis    `json:"diagnosis,omitempty"`
-	ComposeStack  map[string]any           `json:"compose_stack,omitempty"`
-	FugueManifest map[string]any           `json:"fugue_manifest,omitempty"`
-	Idempotency   *importGitHubIdempotency `json:"idempotency,omitempty"`
+	App           *model.App                `json:"app,omitempty"`
+	Operation     *model.Operation          `json:"operation,omitempty"`
+	Apps          []model.App               `json:"apps,omitempty"`
+	Operations    []model.Operation         `json:"operations,omitempty"`
+	Diagnosis     *appOverviewDiagnosis     `json:"diagnosis,omitempty"`
+	Plan          *model.TopologyDeployPlan `json:"plan,omitempty"`
+	ComposeStack  map[string]any            `json:"compose_stack,omitempty"`
+	FugueManifest map[string]any            `json:"fugue_manifest,omitempty"`
+	Idempotency   *importGitHubIdempotency  `json:"idempotency,omitempty"`
 }
 
 func runDeployWithStreams(args []string, stdout, stderr io.Writer) error {
@@ -272,6 +278,10 @@ func bindCommonDeployFlags(cmd *cobra.Command, opts *deployCommonOptions, includ
 	cmd.Flags().StringVar(&opts.EnvFile, "env-file", "", "Local .env file to inject as app env")
 	cmd.Flags().StringArrayVar(&opts.ServiceEnvFiles, "service-env-file", nil, "Service-specific .env override for topology imports: <service>=<path>")
 	cmd.Flags().StringArrayVar(&opts.ServiceStorageSizes, "service-storage-size", nil, "Service-specific persistent storage size override for topology imports: <service>=<size>")
+	cmd.Flags().BoolVar(&opts.UpdateExisting, "update-existing", false, "For topology imports, reuse matching compose_service apps in the target project instead of creating suffixed copies")
+	cmd.Flags().BoolVar(&opts.Replace, "replace", false, "For topology imports, update matching services in place and queue deletes for services removed from the topology")
+	cmd.Flags().BoolVar(&opts.DeleteMissing, "delete-missing", false, "For topology imports with --update-existing, queue deletes for previously managed services that are no longer present")
+	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "Show the topology deploy plan without creating or updating apps")
 	cmd.Flags().StringVar(&opts.RuntimeName, "runtime", "", "Runtime name. Defaults to the shared managed runtime")
 	cmd.Flags().StringVar(&opts.RuntimeID, "runtime-id", "", "Runtime ID")
 	cmd.Flags().IntVar(&opts.Replicas, "replicas", 0, "Desired replica count")
@@ -316,7 +326,24 @@ func bindCommonDeployFlags(cmd *cobra.Command, opts *deployCommonOptions, includ
 	_ = cmd.Flags().MarkHidden("postgres-failover-runtime-id")
 }
 
+func normalizeDeployTopologyFlags(opts *deployCommonOptions) error {
+	if opts == nil {
+		return nil
+	}
+	if opts.Replace {
+		opts.UpdateExisting = true
+		opts.DeleteMissing = true
+	}
+	if opts.DeleteMissing && !opts.UpdateExisting {
+		return fmt.Errorf("--delete-missing requires --update-existing or --replace")
+	}
+	return nil
+}
+
 func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
+	if err := normalizeDeployTopologyFlags(&opts.deployCommonOptions); err != nil {
+		return err
+	}
 	appRef := strings.TrimSpace(opts.AppRef)
 	if strings.TrimSpace(opts.AppID) != "" {
 		if appRef != "" && !strings.EqualFold(appRef, opts.AppID) {
@@ -326,6 +353,9 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 	}
 	if appRef != "" && strings.TrimSpace(opts.Name) != "" {
 		return fmt.Errorf("--name cannot be used with --app")
+	}
+	if appRef != "" && (opts.UpdateExisting || opts.DeleteMissing || opts.Replace || opts.DryRun) {
+		return fmt.Errorf("--update-existing, --replace, --delete-missing, and --dry-run are not supported with --app")
 	}
 
 	workingDir, err := resolveDeployPath(pathArg, opts.Dir)
@@ -455,6 +485,9 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 		StartupCommand:           deployStartupCommandPointer(opts.StartupCommand),
 		PersistentStorage:        persistentStorage,
 		Postgres:                 postgres,
+		UpdateExisting:           opts.UpdateExisting,
+		DeleteMissing:            opts.DeleteMissing,
+		DryRun:                   opts.DryRun,
 	}
 	if request.Name == "" && strings.TrimSpace(targetApp.Name) == "" {
 		request.Name = archiveBaseName
@@ -467,6 +500,23 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 		}
 	}
 
+	if opts.DryRun {
+		inspection, inspectErr := client.InspectUploadTemplate(importUploadRequest{Name: request.Name}, archiveName, archiveBytes)
+		if inspectErr != nil {
+			return inspectErr
+		}
+		if !uploadInspectionHasTopology(inspection) {
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, inspection)
+			}
+			return renderTemplatePlan(c.stdout, inspectViewFromUpload(inspection))
+		}
+	} else if resolvedAppID == "" && !opts.UpdateExisting {
+		if err := c.maybeWarnTopologyCreateModeForUpload(client, request, archiveName, archiveBytes); err != nil {
+			c.progressf("warning=topology preflight unavailable: %v", err)
+		}
+	}
+
 	c.progressf("Uploading %s (%d bytes)", archiveName, len(archiveBytes))
 	response, err := client.ImportUpload(request, archiveName, archiveBytes)
 	if err != nil {
@@ -476,6 +526,9 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 }
 
 func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingDir string) error {
+	if err := normalizeDeployTopologyFlags(&opts.deployCommonOptions); err != nil {
+		return err
+	}
 	if strings.TrimSpace(repoURL) == "" {
 		return fmt.Errorf("repository is required")
 	}
@@ -570,6 +623,9 @@ func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingD
 		PersistentStorageSeedFiles: seedFiles,
 		Postgres:                   postgres,
 		IdempotencyKey:             strings.TrimSpace(opts.IdempotencyKey),
+		UpdateExisting:             opts.UpdateExisting,
+		DeleteMissing:              opts.DeleteMissing,
+		DryRun:                     opts.DryRun,
 	}
 	if opts.Private {
 		request.RepoVisibility = "private"
@@ -578,6 +634,28 @@ func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingD
 		request.ProjectID = projectSel.ID
 	} else if projectSel.Create != nil {
 		request.Project = projectSel.Create
+	}
+
+	if opts.DryRun {
+		inspection, inspectErr := client.InspectGitHubTemplate(inspectGitHubTemplateRequest{
+			RepoURL:        request.RepoURL,
+			RepoVisibility: request.RepoVisibility,
+			RepoAuthToken:  request.RepoAuthToken,
+			Branch:         request.Branch,
+		})
+		if inspectErr != nil {
+			return inspectErr
+		}
+		if !githubInspectionHasTopology(inspection) {
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, inspection)
+			}
+			return renderTemplatePlan(c.stdout, inspectViewFromGitHub(inspection))
+		}
+	} else if !opts.UpdateExisting {
+		if err := c.maybeWarnTopologyCreateModeForGitHub(client, request); err != nil {
+			c.progressf("warning=topology preflight unavailable: %v", err)
+		}
 	}
 
 	c.progressf("Importing %s", request.RepoURL)
@@ -603,9 +681,15 @@ func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingD
 }
 
 func (c *CLI) runDeployImage(imageRef string, opts deployImageOptions) error {
+	if err := normalizeDeployTopologyFlags(&opts.deployCommonOptions); err != nil {
+		return err
+	}
 	imageRef = strings.TrimSpace(imageRef)
 	if imageRef == "" {
 		return fmt.Errorf("image is required")
+	}
+	if opts.UpdateExisting || opts.DeleteMissing || opts.Replace || opts.DryRun {
+		return fmt.Errorf("--update-existing, --replace, --delete-missing, and --dry-run are only supported for source topology imports")
 	}
 	if len(opts.ServiceEnvFiles) > 0 {
 		return fmt.Errorf("--service-env-file is only supported for source imports")
@@ -710,6 +794,7 @@ func bundleFromGitHubResponse(response importGitHubResponse) importBundle {
 	bundle := importBundle{
 		Apps:          dedupeApps(response.Apps, response.App),
 		Operations:    dedupeOperations(response.Operations, response.Operation),
+		Plan:          response.Plan,
 		ComposeStack:  response.ComposeStack,
 		FugueManifest: response.FugueManifest,
 		Idempotency:   response.Idempotency,
@@ -733,6 +818,7 @@ func bundleFromUploadResponse(response importUploadResponse) importBundle {
 	bundle := importBundle{
 		Apps:          dedupeApps(response.Apps, response.App),
 		Operations:    dedupeOperations(response.Operations, response.Operation),
+		Plan:          response.Plan,
 		ComposeStack:  response.ComposeStack,
 		FugueManifest: response.FugueManifest,
 	}
@@ -798,33 +884,19 @@ func (c *CLI) finishImportBundle(client *Client, bundle importBundle, wait bool)
 		c.progressf("Queued %d operation(s)", len(bundle.Operations))
 	}
 
-	if !wait || len(bundle.Operations) == 0 {
+	if len(bundle.Operations) == 0 {
 		return c.renderImportBundle(bundle, false, nil)
 	}
 
-	finalOps, err := c.waitForOperations(client, bundle.Operations)
+	if !wait {
+		return c.renderImportBundle(bundle, false, nil)
+	}
+
+	waitedBundle, diagnosis, err := c.waitForImportBundle(client, bundle)
 	if err != nil {
 		return err
 	}
-	finalApps, err := fetchFinalApps(client, bundle.Apps, finalOps)
-	if err != nil {
-		return err
-	}
-	bundle.Operations = finalOps
-	if op, ok := findOperationByID(finalOps, bundle.PrimaryOp.ID); ok {
-		bundle.PrimaryOp = op
-	}
-	bundle.Apps = finalApps
-	if app, ok := findAppByID(finalApps, bundle.PrimaryApp.ID); ok {
-		bundle.PrimaryApp = app
-	} else if len(finalApps) > 0 {
-		bundle.PrimaryApp = finalApps[0]
-	}
-	diagnosis, err := c.buildImportBundleDiagnosis(client, bundle.PrimaryApp)
-	if err != nil {
-		c.progressf("warning=deploy diagnosis unavailable: %v", err)
-	}
-	return c.renderImportBundle(bundle, true, diagnosis)
+	return c.renderImportBundle(waitedBundle, true, diagnosis)
 }
 
 func (c *CLI) renderImportBundle(bundle importBundle, waited bool, diagnosis *appOverviewDiagnosis) error {
@@ -833,6 +905,7 @@ func (c *CLI) renderImportBundle(bundle importBundle, waited bool, diagnosis *ap
 			Apps:          bundle.Apps,
 			Operations:    bundle.Operations,
 			Diagnosis:     diagnosis,
+			Plan:          bundle.Plan,
 			ComposeStack:  bundle.ComposeStack,
 			FugueManifest: bundle.FugueManifest,
 			Idempotency:   bundle.Idempotency,
@@ -867,6 +940,17 @@ func (c *CLI) renderImportBundle(bundle importBundle, waited bool, diagnosis *ap
 	}
 	if err := writeKeyValues(c.stdout, pairs...); err != nil {
 		return err
+	}
+	if bundle.Plan != nil {
+		if _, err := fmt.Fprintln(c.stdout); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(c.stdout, "plan"); err != nil {
+			return err
+		}
+		if err := renderTopologyDeployPlan(c.stdout, bundle.Plan); err != nil {
+			return err
+		}
 	}
 	if diagnosis != nil {
 		if _, err := fmt.Fprintln(c.stdout); err != nil {
@@ -1040,11 +1124,14 @@ func fetchFinalApps(client *Client, apps []model.App, operations []model.Operati
 
 	finalApps := make([]model.App, 0, len(order))
 	for _, appID := range order {
-		app, err := client.GetApp(appID)
+		app, err := client.TryGetApp(appID)
 		if err != nil {
 			return nil, err
 		}
-		finalApps = append(finalApps, app)
+		if app == nil {
+			continue
+		}
+		finalApps = append(finalApps, *app)
 	}
 	return finalApps, nil
 }

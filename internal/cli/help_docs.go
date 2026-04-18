@@ -18,6 +18,8 @@ var commandHelpDocOverrides = map[string]commandHelpDoc{
 fugue deploy .
 fugue deploy github owner/repo
 fugue deploy github owner/repo --service-env-file gateway=.env.gateway --service-env-file runtime=.env.runtime
+fugue deploy github owner/repo --project argus --dry-run
+fugue deploy github owner/repo --project argus --replace --wait
 `),
 	},
 	"fugue deploy github": {
@@ -25,10 +27,14 @@ fugue deploy github owner/repo --service-env-file gateway=.env.gateway --service
 Import a GitHub repository as an app or topology.
 
 When Fugue detects a compose stack or fugue manifest, you can pass --service-env-file repeatedly to inject different env overrides into different topology services without collapsing everything into one shared env file.
+
+Use --dry-run to see the final service/app naming plan before creating anything. Use --update-existing or --replace when you want an existing project topology to update in place instead of creating suffixed copies.
 `),
 		Example: strings.TrimSpace(`
 fugue deploy github owner/repo
 fugue deploy github owner/repo --branch main --service-env-file gateway=.env.gateway --service-env-file runtime=.env.runtime
+fugue deploy github owner/repo --project argus --dry-run
+fugue deploy github owner/repo --project argus --replace --delete-missing
 `),
 	},
 	"fugue app": {
@@ -294,7 +300,54 @@ fugue operation watch --app my-app --show-secrets --output json
 		Example: strings.TrimSpace(`
 fugue project overview marketing
 fugue project apps marketing
+fugue project watch marketing
+fugue project verify marketing --path /healthz
+fugue project delete marketing --wait
 fugue project images usage marketing
+`),
+	},
+	"fugue project overview": {
+		Long: strings.TrimSpace(`
+Show the project plus a service-level pipeline view that summarizes build, push, publish, deploy, and runtime status for every app in the topology.
+
+Use this when you want one CLI snapshot instead of manually stitching together project apps, project operations, app build logs, image inventory, and runtime pod state.
+`),
+		Example: strings.TrimSpace(`
+fugue project overview marketing
+fugue project overview marketing --output json
+`),
+	},
+	"fugue project watch": {
+		Long: strings.TrimSpace(`
+Watch the same aggregated project snapshot as "project overview" and re-render the service pipeline only when the observed state changes.
+`),
+		Example: strings.TrimSpace(`
+fugue project watch marketing
+fugue project watch marketing --poll --interval 10s
+`),
+	},
+	"fugue project verify": {
+		Long: strings.TrimSpace(`
+Run basic HTTP checks against the public routes in a project.
+
+This is the fast CLI path for smoke-testing the current route set after a deploy. Use repeated --path flags for multiple endpoints, or --service to scope checks to a subset of topology services.
+`),
+		Example: strings.TrimSpace(`
+fugue project verify marketing
+fugue project verify marketing --path / --path /healthz
+fugue project verify marketing --service gateway --path /healthz
+`),
+	},
+	"fugue project delete": {
+		Long: strings.TrimSpace(`
+Delete a project and, by default, cascade cleanup to its apps and remaining backing services.
+
+Use --wait when you want the CLI to keep watching until the project disappears and to show any remaining app/delete-operation cleanup along the way.
+`),
+		Example: strings.TrimSpace(`
+fugue project delete marketing
+fugue project delete marketing --wait
+fugue project delete marketing --cascade=false
 `),
 	},
 	"fugue project images": {

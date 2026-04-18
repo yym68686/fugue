@@ -4634,6 +4634,15 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Operation"
+        queued_operations:
+          type: integer
+          format: int32
+        already_deleting_apps:
+          type: integer
+          format: int32
+        deleted_backing_services:
+          type: integer
+          format: int32
     ConsoleProjectBadge:
       type: object
       additionalProperties: false
@@ -6224,6 +6233,12 @@ components:
           $ref: "#/components/schemas/AppPostgresSpec"
         idempotency_key:
           type: string
+        update_existing:
+          type: boolean
+        delete_missing:
+          type: boolean
+        dry_run:
+          type: boolean
     ImportUploadRequest:
       type: object
       additionalProperties: false
@@ -6276,6 +6291,12 @@ components:
           $ref: "#/components/schemas/AppPersistentStorageSpec"
         postgres:
           $ref: "#/components/schemas/AppPostgresSpec"
+        update_existing:
+          type: boolean
+        delete_missing:
+          type: boolean
+        dry_run:
+          type: boolean
     ImportUploadMultipartRequest:
       type: object
       additionalProperties: false
@@ -6311,6 +6332,8 @@ components:
           $ref: "#/components/schemas/ImportGitHubIdempotency"
         request_in_progress:
           type: boolean
+        plan:
+          $ref: "#/components/schemas/TopologyDeployPlan"
     ImportUploadResponse:
       type: object
       additionalProperties: false
@@ -6331,6 +6354,85 @@ components:
           $ref: "#/components/schemas/ComposeStackSummary"
         fugue_manifest:
           $ref: "#/components/schemas/FugueManifestSummary"
+        plan:
+          $ref: "#/components/schemas/TopologyDeployPlan"
+    TopologyDeployPlan:
+      type: object
+      additionalProperties: false
+      required:
+        [mode, update_existing, delete_missing, dry_run, services, delete_candidates, warnings]
+      properties:
+        mode:
+          type: string
+        project_id:
+          type: string
+        project_name:
+          type: string
+        primary_service:
+          type: string
+        update_existing:
+          type: boolean
+        delete_missing:
+          type: boolean
+        dry_run:
+          type: boolean
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/TopologyDeployPlanService"
+        delete_candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/TopologyDeployDeleteTarget"
+        warnings:
+          type: array
+          items:
+            type: string
+    TopologyDeployPlanService:
+      type: object
+      additionalProperties: false
+      required: [service, action]
+      properties:
+        service:
+          type: string
+        kind:
+          type: string
+        service_type:
+          type: string
+        compose_service:
+          type: string
+        build_strategy:
+          type: string
+        action:
+          type: string
+        app_id:
+          type: string
+        app_name:
+          type: string
+        existing_app_id:
+          type: string
+        existing_app_name:
+          type: string
+        hostname:
+          type: string
+        public_url:
+          type: string
+        internal_port:
+          type: integer
+          format: int32
+    TopologyDeployDeleteTarget:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        app_id:
+          type: string
+        app_name:
+          type: string
+        service:
+          type: string
+        reason:
+          type: string
     ImportImageRequest:
       type: object
       additionalProperties: false

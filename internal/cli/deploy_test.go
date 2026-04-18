@@ -112,6 +112,8 @@ func TestRunDeployWithRepoURLImportsGitHubAndLoadsEnv(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
 			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/templates/inspect-github":
+			_, _ = w.Write([]byte(`{"repository":{"repo_url":"https://github.com/example/demo","repo_visibility":"public","repo_owner":"example","repo_name":"demo","branch":"main","default_app_name":"demo"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/import-github":
 			if got := r.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
 				t.Fatalf("expected application/json content type, got %q", got)

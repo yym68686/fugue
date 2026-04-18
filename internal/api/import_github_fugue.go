@@ -19,6 +19,7 @@ func (s *Server) importFugueManifestGitHubStack(principal model.Principal, tenan
 		"operation":  sanitizeOperationForAPI(result.PrimaryOp),
 		"apps":       sanitizeAppsForAPI(result.Apps),
 		"operations": sanitizeOperationsForAPI(result.Operations),
+		"plan":       result.Plan,
 		"fugue_manifest": map[string]any{
 			"manifest_path":    manifest.ManifestPath,
 			"primary_service":  result.PrimaryService,

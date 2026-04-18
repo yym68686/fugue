@@ -435,6 +435,16 @@ type inspectUploadTemplateResponse struct {
 	ComposeStack  *inspectGitHubTemplateComposeStack `json:"compose_stack,omitempty"`
 }
 
+type projectDeleteResponse struct {
+	Project                model.Project     `json:"project"`
+	Deleted                bool              `json:"deleted"`
+	DeleteRequested        bool              `json:"delete_requested"`
+	Operations             []model.Operation `json:"operations,omitempty"`
+	QueuedOperations       int               `json:"queued_operations,omitempty"`
+	AlreadyDeletingApps    int               `json:"already_deleting_apps,omitempty"`
+	DeletedBackingServices int               `json:"deleted_backing_services,omitempty"`
+}
+
 func (c *Client) CreateTenant(name string) (model.Tenant, error) {
 	var response struct {
 		Tenant model.Tenant `json:"tenant"`
@@ -483,13 +493,23 @@ func (c *Client) PatchProject(id string, name, description *string) (model.Proje
 }
 
 func (c *Client) DeleteProject(id string) (model.Project, error) {
-	var response struct {
-		Project model.Project `json:"project"`
-	}
-	if err := c.doJSON(http.MethodDelete, path.Join("/v1/projects", id), nil, &response); err != nil {
+	response, err := c.DeleteProjectDetailed(id, false)
+	if err != nil {
 		return model.Project{}, err
 	}
 	return response.Project, nil
+}
+
+func (c *Client) DeleteProjectDetailed(id string, cascade bool) (projectDeleteResponse, error) {
+	relative := path.Join("/v1/projects", id)
+	if cascade {
+		relative += "?cascade=true"
+	}
+	var response projectDeleteResponse
+	if err := c.doJSON(http.MethodDelete, relative, nil, &response); err != nil {
+		return projectDeleteResponse{}, err
+	}
+	return response, nil
 }
 
 func (c *Client) ListProjectImageUsage() (projectImageUsageResponse, error) {
