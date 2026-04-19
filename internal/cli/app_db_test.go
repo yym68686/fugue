@@ -1,0 +1,151 @@
+package cli
+
+import (
+	"bytes"
+	"encoding/hex"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"fugue/internal/model"
+)
+
+func TestBuildDeployManagedPostgresGeneratesPasswordWhenOmitted(t *testing.T) {
+	t.Parallel()
+
+	cli := newCLI(io.Discard, io.Discard)
+	spec, err := cli.buildDeployManagedPostgres(nil, "demo", deployCommonOptions{
+		ManagedPostgres:  true,
+		PostgresDatabase: "app",
+		PostgresUser:     "app",
+	})
+	if err != nil {
+		t.Fatalf("build managed postgres spec: %v", err)
+	}
+	if spec == nil {
+		t.Fatal("expected managed postgres spec")
+	}
+	if strings.TrimSpace(spec.Password) == "" {
+		t.Fatal("expected generated managed postgres password")
+	}
+	if len(spec.Password) != 48 {
+		t.Fatalf("expected 48-char hex password, got %q", spec.Password)
+	}
+	if _, err := hex.DecodeString(spec.Password); err != nil {
+		t.Fatalf("expected hex password, got %q: %v", spec.Password, err)
+	}
+}
+
+func TestRunAppDatabaseConfigureGeneratesPasswordAndRedactsJSONByDefault(t *testing.T) {
+	t.Parallel()
+
+	var gotDeploy struct {
+		Spec model.AppSpec `json:"spec"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/deploy":
+			if err := json.NewDecoder(r.Body).Decode(&gotDeploy); err != nil {
+				t.Fatalf("decode deploy body: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_123","app_id":"app_123","type":"deploy","status":"pending"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"-o", "json",
+		"app", "db", "configure", "demo",
+		"--database", "app",
+		"--user", "app",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app db configure: %v", err)
+	}
+
+	password := strings.TrimSpace(gotDeploy.Spec.Postgres.Password)
+	if password == "" {
+		t.Fatal("expected configure request to include generated password")
+	}
+	if len(password) != 48 {
+		t.Fatalf("expected 48-char hex password, got %q", password)
+	}
+	if _, err := hex.DecodeString(password); err != nil {
+		t.Fatalf("expected hex password, got %q: %v", password, err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, `"password": "[redacted]"`) {
+		t.Fatalf("expected redacted password in JSON output, got %q", out)
+	}
+	if strings.Contains(out, password) {
+		t.Fatalf("expected JSON output to redact generated password %q, got %q", password, out)
+	}
+}
+
+func TestRunAppDatabaseShowShowSecretsOptIn(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1,"postgres":{"database":"app","user":"app","password":"service-password-123"}},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var redactedStdout bytes.Buffer
+	var redactedStderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"-o", "json",
+		"app", "db", "show", "demo",
+	}, &redactedStdout, &redactedStderr)
+	if err != nil {
+		t.Fatalf("run app db show: %v", err)
+	}
+	redactedOut := redactedStdout.String()
+	if !strings.Contains(redactedOut, `"password": "[redacted]"`) {
+		t.Fatalf("expected redacted password in default output, got %q", redactedOut)
+	}
+	if strings.Contains(redactedOut, "service-password-123") {
+		t.Fatalf("expected default output to redact password, got %q", redactedOut)
+	}
+
+	var showSecretsStdout bytes.Buffer
+	var showSecretsStderr bytes.Buffer
+	err = runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"-o", "json",
+		"app", "db", "show", "demo",
+		"--show-secrets",
+	}, &showSecretsStdout, &showSecretsStderr)
+	if err != nil {
+		t.Fatalf("run app db show --show-secrets: %v", err)
+	}
+	showSecretsOut := showSecretsStdout.String()
+	if !strings.Contains(showSecretsOut, `"password": "service-password-123"`) {
+		t.Fatalf("expected show-secrets output to contain password, got %q", showSecretsOut)
+	}
+}

@@ -27,7 +27,10 @@ func (c *CLI) newAppDatabaseCommand() *cobra.Command {
 }
 
 func (c *CLI) newAppDatabaseShowCommand() *cobra.Command {
-	return &cobra.Command{
+	opts := struct {
+		ShowSecrets bool
+	}{}
+	cmd := &cobra.Command{
 		Use:     "show <app>",
 		Aliases: []string{"get", "status"},
 		Short:   "Show the app managed Postgres configuration",
@@ -45,9 +48,11 @@ func (c *CLI) newAppDatabaseShowCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return c.renderAppDatabaseState(app, nil, false)
+			return c.renderAppDatabaseState(app, nil, false, opts.ShowSecrets)
 		},
 	}
+	cmd.Flags().BoolVar(&opts.ShowSecrets, "show-secrets", false, "Show passwords and other sensitive fields in JSON output")
+	return cmd
 }
 
 func (c *CLI) newAppDatabaseConfigureCommand() *cobra.Command {
@@ -65,6 +70,7 @@ func (c *CLI) newAppDatabaseConfigureCommand() *cobra.Command {
 		SynchronousReplicas int
 		FailoverRuntimeName string
 		FailoverRuntimeID   string
+		ShowSecrets         bool
 		Wait                bool
 	}{
 		Wait: true,
@@ -75,7 +81,8 @@ func (c *CLI) newAppDatabaseConfigureCommand() *cobra.Command {
 		Short:   "Enable or update the app managed Postgres configuration",
 		Long: strings.TrimSpace(`
 Run without extra flags to enable a managed Postgres database with Fugue
-defaults. Add flags only for the parts you want to customize.
+defaults. When you omit --password, Fugue generates a strong random password
+for the managed database. Add flags only for the parts you want to customize.
 `),
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -138,11 +145,14 @@ defaults. Add flags only for the parts you want to customize.
 			if flagChanged(cmd, "sync-replicas") {
 				spec.Postgres.SynchronousReplicas = opts.SynchronousReplicas
 			}
+			if err := ensureManagedPostgresPassword(spec.Postgres); err != nil {
+				return err
+			}
 			if err := model.ValidateManagedPostgresUser(app.Name, *spec.Postgres); err != nil {
 				return err
 			}
 			if reflect.DeepEqual(before, spec.Postgres) {
-				return c.renderAppDatabaseState(app, nil, true)
+				return c.renderAppDatabaseState(app, nil, true, opts.ShowSecrets)
 			}
 
 			response, err := client.DeployApp(app.ID, &spec)
@@ -161,14 +171,14 @@ defaults. Add flags only for the parts you want to customize.
 			} else {
 				finalApp.Spec = spec
 			}
-			return c.renderAppDatabaseState(finalApp, &response.Operation, false)
+			return c.renderAppDatabaseState(finalApp, &response.Operation, false, opts.ShowSecrets)
 		},
 	}
 	cmd.Flags().StringVar(&opts.RuntimeName, "runtime", "", "Runtime name for managed Postgres")
 	cmd.Flags().StringVar(&opts.RuntimeID, "runtime-id", "", "Runtime ID for managed Postgres")
 	cmd.Flags().StringVar(&opts.Database, "database", "", "Database name")
 	cmd.Flags().StringVar(&opts.User, "user", "", "Database user")
-	cmd.Flags().StringVar(&opts.Password, "password", "", "Database password")
+	cmd.Flags().StringVar(&opts.Password, "password", "", "Database password. Generates a random password when omitted")
 	cmd.Flags().StringVar(&opts.Image, "image", "", "Managed Postgres image override")
 	cmd.Flags().StringVar(&opts.ServiceName, "service-name", "", "Service name override")
 	cmd.Flags().StringVar(&opts.StorageSize, "storage-size", "", "Persistent storage size")
@@ -178,6 +188,7 @@ defaults. Add flags only for the parts you want to customize.
 	cmd.Flags().StringVar(&opts.FailoverRuntimeName, "failover-to", "", "Runtime name for managed Postgres failover")
 	cmd.Flags().StringVar(&opts.FailoverRuntimeID, "failover-runtime-id", "", "Runtime ID for managed Postgres failover")
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for the deploy operation to complete")
+	cmd.Flags().BoolVar(&opts.ShowSecrets, "show-secrets", false, "Show passwords and other sensitive fields in JSON output")
 	_ = cmd.Flags().MarkHidden("runtime-id")
 	_ = cmd.Flags().MarkHidden("failover-runtime-id")
 	return cmd
@@ -206,7 +217,7 @@ func (c *CLI) newAppDatabaseDisableCommand() *cobra.Command {
 				return err
 			}
 			if app.Spec.Postgres == nil {
-				return c.renderAppDatabaseState(app, nil, true)
+				return c.renderAppDatabaseState(app, nil, true, false)
 			}
 
 			spec := cloneAppSpec(app.Spec)
@@ -227,7 +238,7 @@ func (c *CLI) newAppDatabaseDisableCommand() *cobra.Command {
 			} else {
 				finalApp.Spec = spec
 			}
-			return c.renderAppDatabaseState(finalApp, &response.Operation, false)
+			return c.renderAppDatabaseState(finalApp, &response.Operation, false, false)
 		},
 	}
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for the deploy operation to complete")
@@ -315,15 +326,28 @@ func (c *CLI) newAppDatabaseSwitchoverCommand() *cobra.Command {
 	return cmd
 }
 
-func (c *CLI) renderAppDatabaseState(app model.App, operation *model.Operation, alreadyCurrent bool) error {
+func (c *CLI) renderAppDatabaseState(app model.App, operation *model.Operation, alreadyCurrent bool, showSecrets bool) error {
 	if c.wantsJSON() {
+		payloadApp := app
+		var payloadOp *model.Operation
+		if operation != nil {
+			opCopy := *operation
+			payloadOp = &opCopy
+		}
+		if !showSecrets {
+			payloadApp = redactAppForOutput(payloadApp)
+			if payloadOp != nil {
+				redactedOp := redactOperationForOutput(*payloadOp)
+				payloadOp = &redactedOp
+			}
+		}
 		payload := map[string]any{
-			"app":             app,
-			"database":        cloneAppPostgresSpec(app.Spec.Postgres),
+			"app":             payloadApp,
+			"database":        cloneAppPostgresSpec(payloadApp.Spec.Postgres),
 			"already_current": alreadyCurrent,
 		}
-		if operation != nil {
-			payload["operation"] = operation
+		if payloadOp != nil {
+			payload["operation"] = payloadOp
 		}
 		return writeJSON(c.stdout, payload)
 	}

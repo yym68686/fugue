@@ -308,7 +308,7 @@ func bindCommonDeployFlags(cmd *cobra.Command, opts *deployCommonOptions, includ
 	cmd.Flags().StringVar(&opts.PostgresRuntimeID, "postgres-runtime-id", "", "Runtime ID for managed Postgres")
 	cmd.Flags().StringVar(&opts.PostgresDatabase, "postgres-database", "", "Database name for managed Postgres")
 	cmd.Flags().StringVar(&opts.PostgresUser, "postgres-user", "", "Database user for managed Postgres")
-	cmd.Flags().StringVar(&opts.PostgresPassword, "postgres-password", "", "Database password for managed Postgres")
+	cmd.Flags().StringVar(&opts.PostgresPassword, "postgres-password", "", "Database password for managed Postgres. Generates a random password when omitted")
 	cmd.Flags().StringVar(&opts.PostgresImage, "postgres-image", "", "Managed Postgres image override")
 	cmd.Flags().StringVar(&opts.PostgresServiceName, "postgres-service-name", "", "Managed Postgres service name override")
 	cmd.Flags().StringVar(&opts.PostgresStorageSize, "postgres-storage-size", "", "Managed Postgres storage size")
@@ -1337,6 +1337,9 @@ func (c *CLI) buildDeployManagedPostgres(client *Client, appName string, opts de
 		if err := model.ValidateManagedPostgresUser(appName, *spec); err != nil {
 			return nil, err
 		}
+	}
+	if err := ensureManagedPostgresPassword(spec); err != nil {
+		return nil, err
 	}
 	return spec, nil
 }

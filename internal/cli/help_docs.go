@@ -161,7 +161,7 @@ fugue app command clear my-app
 		Example: strings.TrimSpace(`
 fugue app db show my-app
 fugue app db query my-app --sql "select count(*) from gateway_request_logs"
-fugue app db configure my-app --database app --user app --password secret
+fugue app db configure my-app --database app --user app
 fugue app db switchover my-app runtime-b
 `),
 	},
@@ -278,7 +278,7 @@ fugue operation show op_123 --show-secrets --output json
 		Long: strings.TrimSpace(`
 Explain why an operation is pending, waiting, or otherwise not making progress.
 
-For deploy operations, the diagnosis also inspects the target managed image so the CLI can say when the deploy already points at a missing release image instead of only reporting queue state.
+For deploy operations, the diagnosis also inspects the target managed image and the final runtime image so the CLI can say when the deploy already points at a missing release image instead of only reporting queue state.
 `),
 		Example: strings.TrimSpace(`
 fugue operation explain op_123
@@ -1020,7 +1020,7 @@ func sampleFlagsForCommand(cmd *cobra.Command) string {
 	case "fugue api request":
 		return "GET /v1/apps"
 	case "fugue app db configure":
-		return "--database app --user app --password secret"
+		return "--database app --user app"
 	case "fugue app storage set":
 		return "--size 10Gi --mount /data"
 	case "fugue app failover exec":

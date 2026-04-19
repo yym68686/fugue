@@ -3,6 +3,7 @@ package cli
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"strings"
 
 	"fugue/internal/model"
@@ -133,9 +134,29 @@ func trimmedStringPointer(value string) *string {
 }
 
 func randomResetToken() (string, error) {
-	buf := make([]byte, 8)
+	hexValue, err := randomHexString(8)
+	if err != nil {
+		return "", err
+	}
+	return "reset-" + hexValue, nil
+}
+
+func ensureManagedPostgresPassword(spec *model.AppPostgresSpec) error {
+	if spec == nil || strings.TrimSpace(spec.Password) != "" {
+		return nil
+	}
+	password, err := randomHexString(24)
+	if err != nil {
+		return fmt.Errorf("generate managed postgres password: %w", err)
+	}
+	spec.Password = password
+	return nil
+}
+
+func randomHexString(numBytes int) (string, error) {
+	buf := make([]byte, numBytes)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
 	}
-	return "reset-" + hex.EncodeToString(buf), nil
+	return hex.EncodeToString(buf), nil
 }
