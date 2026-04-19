@@ -1,6 +1,8 @@
 package store
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -274,6 +276,9 @@ func applyDesiredSpecBackingServicesState(state *model.State, app *model.App, de
 	if state == nil || app == nil || desiredSpec == nil || desiredSpec.Postgres == nil {
 		return nil
 	}
+	if err := ensureManagedPostgresPassword(desiredSpec.Postgres); err != nil {
+		return err
+	}
 	if err := validateManagedPostgresSpecForAppName(app.Name, desiredSpec.Postgres); err != nil {
 		return err
 	}
@@ -411,6 +416,9 @@ func normalizeBackingServiceForPersist(service *model.BackingService, app *model
 		if service.Spec.Postgres == nil {
 			return ErrInvalidInput
 		}
+		if err := ensureManagedPostgresPassword(service.Spec.Postgres); err != nil {
+			return err
+		}
 		if err := normalizePostgresSpecResources(service.Spec.Postgres); err != nil {
 			return err
 		}
@@ -433,6 +441,29 @@ func normalizeBackingServiceForPersist(service *model.BackingService, app *model
 		return ErrInvalidInput
 	}
 	return nil
+}
+
+func ensureManagedPostgresPassword(spec *model.AppPostgresSpec) error {
+	if spec == nil || strings.TrimSpace(spec.Password) != "" {
+		return nil
+	}
+	password, err := randomHexString(24)
+	if err != nil {
+		return fmt.Errorf("generate managed postgres password: %w", err)
+	}
+	spec.Password = password
+	return nil
+}
+
+func randomHexString(numBytes int) (string, error) {
+	if numBytes <= 0 {
+		numBytes = 16
+	}
+	buf := make([]byte, numBytes)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 func validateManagedPostgresSpecForAppName(appName string, spec *model.AppPostgresSpec) error {

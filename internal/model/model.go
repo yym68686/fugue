@@ -20,6 +20,20 @@ const (
 	MachineConnectionModeAgent   = "agent"
 	MachineConnectionModeCluster = "cluster"
 
+	NodeKeyScopeTenantRuntime = "tenant-runtime"
+	NodeKeyScopePlatformNode  = "platform-node"
+
+	MachineScopeTenantRuntime = "tenant-runtime"
+	MachineScopePlatformNode  = "platform-node"
+
+	MachineBuildTierSmall  = "small"
+	MachineBuildTierMedium = "medium"
+	MachineBuildTierLarge  = "large"
+
+	MachineControlPlaneRoleNone      = "none"
+	MachineControlPlaneRoleCandidate = "candidate"
+	MachineControlPlaneRoleMember    = "member"
+
 	AppSourceTypeGitHubPublic  = "github-public"
 	AppSourceTypeGitHubPrivate = "github-private"
 	AppSourceTypeDockerImage   = "docker-image"
@@ -236,6 +250,7 @@ type NodeKey struct {
 	Label      string     `json:"label"`
 	Prefix     string     `json:"prefix"`
 	Hash       string     `json:"hash"`
+	Scope      string     `json:"scope"`
 	Status     string     `json:"status"`
 	CreatedAt  time.Time  `json:"created_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`
@@ -283,6 +298,7 @@ type Machine struct {
 	ID                string            `json:"id"`
 	TenantID          string            `json:"tenant_id,omitempty"`
 	Name              string            `json:"name"`
+	Scope             string            `json:"scope,omitempty"`
 	ConnectionMode    string            `json:"connection_mode"`
 	Status            string            `json:"status"`
 	Endpoint          string            `json:"endpoint,omitempty"`
@@ -293,9 +309,17 @@ type Machine struct {
 	ClusterNodeName   string            `json:"cluster_node_name,omitempty"`
 	FingerprintPrefix string            `json:"fingerprint_prefix,omitempty"`
 	FingerprintHash   string            `json:"fingerprint_hash,omitempty"`
+	Policy            MachinePolicy     `json:"policy"`
 	LastSeenAt        *time.Time        `json:"last_seen_at,omitempty"`
 	CreatedAt         time.Time         `json:"created_at"`
 	UpdatedAt         time.Time         `json:"updated_at"`
+}
+
+type MachinePolicy struct {
+	AllowBuilds             bool   `json:"allow_builds"`
+	BuildTier               string `json:"build_tier,omitempty"`
+	AllowSharedPool         bool   `json:"allow_shared_pool"`
+	DesiredControlPlaneRole string `json:"desired_control_plane_role,omitempty"`
 }
 
 type RuntimeAccessGrant struct {
@@ -377,8 +401,31 @@ type ClusterNode struct {
 	EphemeralStorage *ClusterNodeStorageStats        `json:"ephemeral_storage,omitempty"`
 	RuntimeID        string                          `json:"runtime_id,omitempty"`
 	TenantID         string                          `json:"tenant_id,omitempty"`
+	Machine          *ClusterNodeMachine             `json:"machine,omitempty"`
+	Policy           *ClusterNodePolicy              `json:"policy,omitempty"`
 	Workloads        []ClusterNodeWorkload           `json:"workloads,omitempty"`
 	CreatedAt        *time.Time                      `json:"created_at,omitempty"`
+}
+
+type ClusterNodeMachine struct {
+	ID             string `json:"id"`
+	Scope          string `json:"scope"`
+	ConnectionMode string `json:"connection_mode"`
+	Status         string `json:"status"`
+	TenantID       string `json:"tenant_id,omitempty"`
+	RuntimeID      string `json:"runtime_id,omitempty"`
+	NodeKeyID      string `json:"node_key_id,omitempty"`
+}
+
+type ClusterNodePolicy struct {
+	AllowBuilds               bool   `json:"allow_builds"`
+	BuildTier                 string `json:"build_tier,omitempty"`
+	AllowSharedPool           bool   `json:"allow_shared_pool"`
+	DesiredControlPlaneRole   string `json:"desired_control_plane_role,omitempty"`
+	EffectiveBuilds           bool   `json:"effective_builds"`
+	EffectiveBuildTier        string `json:"effective_build_tier,omitempty"`
+	EffectiveSharedPool       bool   `json:"effective_shared_pool"`
+	EffectiveControlPlaneRole string `json:"effective_control_plane_role,omitempty"`
 }
 
 type ControlPlaneComponent struct {
@@ -988,6 +1035,54 @@ func NormalizeRuntimePoolMode(runtimeType, poolMode string) string {
 		return RuntimePoolModeDedicated
 	default:
 		return RuntimePoolModeDedicated
+	}
+}
+
+func NormalizeNodeKeyScope(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case NodeKeyScopePlatformNode:
+		return NodeKeyScopePlatformNode
+	case "", NodeKeyScopeTenantRuntime:
+		return NodeKeyScopeTenantRuntime
+	default:
+		return ""
+	}
+}
+
+func NormalizeMachineScope(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case MachineScopePlatformNode:
+		return MachineScopePlatformNode
+	case "", MachineScopeTenantRuntime:
+		return MachineScopeTenantRuntime
+	default:
+		return ""
+	}
+}
+
+func NormalizeMachineBuildTier(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case MachineBuildTierSmall:
+		return MachineBuildTierSmall
+	case MachineBuildTierLarge:
+		return MachineBuildTierLarge
+	case "", MachineBuildTierMedium:
+		return MachineBuildTierMedium
+	default:
+		return ""
+	}
+}
+
+func NormalizeMachineControlPlaneRole(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case MachineControlPlaneRoleCandidate:
+		return MachineControlPlaneRoleCandidate
+	case MachineControlPlaneRoleMember:
+		return MachineControlPlaneRoleMember
+	case "", MachineControlPlaneRoleNone:
+		return MachineControlPlaneRoleNone
+	default:
+		return ""
 	}
 }
 

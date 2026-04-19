@@ -85,20 +85,29 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 	appPodSpec := appTemplate["spec"].(map[string]any)
 	initContainers, ok := appPodSpec["initContainers"].([]map[string]any)
 	if !ok {
-		t.Fatalf("expected wait-postgres init container")
+		t.Fatalf("expected app files and wait-postgres init containers")
+	}
+	if len(initContainers) != 2 {
+		t.Fatalf("expected app files and wait-postgres init containers, got %d", len(initContainers))
 	}
 	containers := appPodSpec["containers"].([]map[string]any)
 	envObjects := containers[0]["env"].([]map[string]any)
 	if got := envValue(envObjects, "DB_HOST"); got != "uni-api-demo-postgres-rw" {
 		t.Fatalf("expected inline postgres DB_HOST to use rw service, got %q", got)
 	}
-	command := initContainers[0]["command"].([]string)
+	if got := initContainers[0]["name"]; got != "init-app-files" {
+		t.Fatalf("expected app files init container first, got %#v", got)
+	}
+	appFilesCommand := initContainers[0]["command"].([]string)
+	if got := appFilesCommand[4]; got != appFilesSourceMountPath {
+		t.Fatalf("expected app files init container source mount %q, got %#v", appFilesSourceMountPath, got)
+	}
+	command := initContainers[1]["command"].([]string)
 	if got := command[2]; got != "until nc -z uni-api-demo-postgres-rw 5432; do sleep 2; done" {
 		t.Fatalf("expected wait-postgres init container to target rw service, got %q", got)
 	}
-	volumeMounts := containers[0]["volumeMounts"].([]map[string]any)
-	if volumeMounts[0]["mountPath"] != "/home/api.yaml" {
-		t.Fatalf("unexpected mount path: %#v", volumeMounts[0]["mountPath"])
+	if _, ok := containers[0]["volumeMounts"]; ok {
+		t.Fatalf("expected declarative app files to be copied by init container instead of mounted into the app container")
 	}
 }
 

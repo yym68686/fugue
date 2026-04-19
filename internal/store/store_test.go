@@ -1218,6 +1218,53 @@ func TestCreateAppConvertsInlinePostgresToBackingService(t *testing.T) {
 	}
 }
 
+func TestCreateAppGeneratesManagedPostgresPasswordWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Stateful Create Password")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.DefaultManagedPostgresBillingResources()); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
+	}
+
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8000},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Postgres: &model.AppPostgresSpec{
+			Database: "demo",
+			User:     "root",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	if len(app.BackingServices) != 1 {
+		t.Fatalf("expected 1 backing service, got %d", len(app.BackingServices))
+	}
+	if app.BackingServices[0].Spec.Postgres == nil {
+		t.Fatal("expected postgres backing service spec")
+	}
+	if got := strings.TrimSpace(app.BackingServices[0].Spec.Postgres.Password); got == "" {
+		t.Fatal("expected managed postgres password to be generated")
+	}
+	if got := strings.TrimSpace(app.Bindings[0].Env["DB_PASSWORD"]); got == "" {
+		t.Fatal("expected binding DB_PASSWORD to be generated")
+	}
+}
+
 func TestCreateAppRejectsReservedCNPGPostgresUser(t *testing.T) {
 	t.Parallel()
 
@@ -1343,6 +1390,59 @@ func TestDeployOperationConvertsInlinePostgresToBackingServiceOnComplete(t *test
 	}
 	if got := persisted.BackingServices[0].Spec.Postgres.Image; got != "" {
 		t.Fatalf("expected official postgres image to be stripped after deploy, got %q", got)
+	}
+}
+
+func TestCreateDeployOperationGeneratesManagedPostgresPasswordWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Stateful Deploy Password")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8000},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.DefaultManagedPostgresBillingResources()); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
+	}
+
+	desiredSpec := app.Spec
+	desiredSpec.Postgres = &model.AppPostgresSpec{
+		Database: "demo",
+		User:     "root",
+	}
+
+	op, err := s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &desiredSpec,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
+		t.Fatalf("expected desired postgres spec on deploy operation, got %+v", op.DesiredSpec)
+	}
+	if got := strings.TrimSpace(op.DesiredSpec.Postgres.Password); got == "" {
+		t.Fatal("expected deploy operation to persist a generated managed postgres password")
 	}
 }
 

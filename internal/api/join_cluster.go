@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -51,7 +52,7 @@ func (s *Server) handleJoinClusterNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key, node, join, err := s.bootstrapJoinClusterNode(
+	key, machine, runtimeObj, join, err := s.bootstrapJoinClusterNode(
 		r.Context(),
 		req.NodeKey,
 		coalesceNodeName(req.NodeName, req.RuntimeName),
@@ -64,18 +65,30 @@ func (s *Server) handleJoinClusterNode(w http.ResponseWriter, r *http.Request) {
 		s.writeJoinClusterError(w, err)
 		return
 	}
+	targetType := "machine"
+	targetID := machine.ID
+	targetTenantID := machine.TenantID
+	auditMetadata := map[string]string{
+		"name":              join.NodeName,
+		"cluster_node_name": join.NodeName,
+		"node_key_id":       key.ID,
+	}
+	if runtimeObj != nil {
+		targetType = "node"
+		targetID = runtimeObj.ID
+		targetTenantID = runtimeObj.TenantID
+		auditMetadata["runtime_id"] = runtimeObj.ID
+	}
 	s.appendAudit(model.Principal{
 		ActorType: model.ActorTypeNodeKey,
 		ActorID:   key.ID,
 		TenantID:  key.TenantID,
-	}, auditActionNodeJoinClusterRequested, "node", node.ID, key.TenantID, map[string]string{
-		"name":        node.Name,
-		"node_key_id": key.ID,
-		"runtime_id":  node.ID,
-	})
+	}, auditActionNodeJoinClusterRequested, targetType, targetID, targetTenantID, auditMetadata)
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
-		"node": node,
-		"join": join,
+		"join":    join,
+		"machine": machine,
+		"node":    joinNodeResponse(machine, runtimeObj),
+		"runtime": runtimeObj,
 	})
 }
 
@@ -90,7 +103,7 @@ func (s *Server) handleJoinClusterNodeEnv(w http.ResponseWriter, r *http.Request
 	}
 
 	labels := parseCSVLabels(r.Form.Get("labels"))
-	key, node, join, err := s.bootstrapJoinClusterNode(
+	key, machine, runtimeObj, join, err := s.bootstrapJoinClusterNode(
 		r.Context(),
 		r.Form.Get("node_key"),
 		coalesceNodeName(r.Form.Get("node_name"), r.Form.Get("runtime_name")),
@@ -104,15 +117,25 @@ func (s *Server) handleJoinClusterNodeEnv(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	targetType := "machine"
+	targetID := machine.ID
+	targetTenantID := machine.TenantID
+	auditMetadata := map[string]string{
+		"name":              join.NodeName,
+		"cluster_node_name": join.NodeName,
+		"node_key_id":       key.ID,
+	}
+	if runtimeObj != nil {
+		targetType = "node"
+		targetID = runtimeObj.ID
+		targetTenantID = runtimeObj.TenantID
+		auditMetadata["runtime_id"] = runtimeObj.ID
+	}
 	s.appendAudit(model.Principal{
 		ActorType: model.ActorTypeNodeKey,
 		ActorID:   key.ID,
 		TenantID:  key.TenantID,
-	}, auditActionNodeJoinClusterRequested, "node", node.ID, key.TenantID, map[string]string{
-		"name":        node.Name,
-		"node_key_id": key.ID,
-		"runtime_id":  node.ID,
-	})
+	}, auditActionNodeJoinClusterRequested, targetType, targetID, targetTenantID, auditMetadata)
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprintf(w, "FUGUE_JOIN_SERVER=%s\n", shellQuote(join.ServerURL))
@@ -173,7 +196,7 @@ func (s *Server) handleJoinClusterCleanup(w http.ResponseWriter, r *http.Request
 	currentNodeSeen := false
 	staleSnapshots := make([]clusterNodeSnapshot, 0)
 	for _, snapshot := range snapshots {
-		if !snapshot.managedOwned || !clusterNodeSnapshotMatchesFingerprint(snapshot, machineFingerprint) {
+		if !clusterNodeSnapshotManaged(snapshot) || !clusterNodeSnapshotMatchesFingerprint(snapshot, machineFingerprint) {
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(snapshot.node.Name), currentNodeName) {
@@ -245,16 +268,16 @@ func (s *Server) handleJoinClusterInstallScript(w http.ResponseWriter, r *http.R
 	_, _ = fmt.Fprint(w, s.joinClusterInstallScript(publicBaseURL(r)))
 }
 
-func (s *Server) bootstrapJoinClusterNode(ctx context.Context, nodeKey, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.NodeKey, model.Runtime, joinClusterPlan, error) {
+func (s *Server) bootstrapJoinClusterNode(ctx context.Context, nodeKey, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.NodeKey, model.Machine, *model.Runtime, joinClusterPlan, error) {
 	nodeKey = strings.TrimSpace(nodeKey)
 	nodeName = strings.TrimSpace(nodeName)
 	if nodeKey == "" {
-		return model.NodeKey{}, model.Runtime{}, joinClusterPlan{}, store.ErrInvalidInput
+		return model.NodeKey{}, model.Machine{}, nil, joinClusterPlan{}, store.ErrInvalidInput
 	}
 
-	key, runtimeObj, err := s.store.BootstrapClusterNode(nodeKey, nodeName, strings.TrimSpace(endpoint), labels, machineName, machineFingerprint)
+	key, machine, runtimeObj, err := s.store.BootstrapClusterAttachment(nodeKey, nodeName, strings.TrimSpace(endpoint), labels, machineName, machineFingerprint)
 	if err != nil {
-		return model.NodeKey{}, model.Runtime{}, joinClusterPlan{}, err
+		return model.NodeKey{}, model.Machine{}, nil, joinClusterPlan{}, err
 	}
 	clientFactory := s.newClusterNodeClient
 	if clientFactory == nil {
@@ -262,27 +285,37 @@ func (s *Server) bootstrapJoinClusterNode(ctx context.Context, nodeKey, nodeName
 	}
 	client, err := clientFactory()
 	if err != nil {
-		return model.NodeKey{}, model.Runtime{}, joinClusterPlan{}, err
+		return model.NodeKey{}, model.Machine{}, nil, joinClusterPlan{}, err
 	}
-	token, bootstrapTokenID, err := client.createBootstrapToken(ctx, key.ID, runtimeObj.ID, s.clusterJoinCAHash, s.clusterJoinBootstrapTokenTTL)
+	runtimeID := ""
+	if runtimeObj != nil {
+		runtimeID = runtimeObj.ID
+	}
+	token, bootstrapTokenID, err := client.createBootstrapToken(ctx, key.ID, runtimeID, s.clusterJoinCAHash, s.clusterJoinBootstrapTokenTTL)
 	if err != nil {
-		return model.NodeKey{}, model.Runtime{}, joinClusterPlan{}, err
+		return model.NodeKey{}, model.Machine{}, nil, joinClusterPlan{}, err
 	}
+	labelMap := joinClusterLabelMap(machine, runtimeObj)
 	join := joinClusterPlan{
 		ServerURL:        s.clusterJoinServer,
 		Token:            token,
 		BootstrapTokenID: bootstrapTokenID,
-		NodeName:         runtimeObj.Name,
-		NodeLabels:       runtime.JoinNodeLabels(runtimeObj),
-		NodeTaints:       runtime.JoinNodeTaints(runtimeObj),
-		RuntimeID:        runtimeObj.ID,
+		NodeName:         firstNonEmpty(machine.ClusterNodeName, nodeName),
+		NodeLabels:       joinClusterLabels(labelMap),
+		RuntimeID:        runtimeID,
 		RegistryBase:     s.registryPullBase,
 		RegistryEndpoint: s.clusterJoinRegistryEndpoint,
 		MeshProvider:     s.clusterJoinMeshProvider,
 		MeshLoginServer:  s.clusterJoinMeshLoginServer,
 		MeshAuthKey:      s.clusterJoinMeshAuthKey,
 	}
-	return key, runtimeObj, join, nil
+	if runtimeObj != nil {
+		join.NodeTaints = runtime.JoinNodeTaints(*runtimeObj)
+		if join.NodeName == "" {
+			join.NodeName = firstNonEmpty(runtimeObj.ClusterNodeName, runtimeObj.Name, nodeName)
+		}
+	}
+	return key, machine, runtimeObj, join, nil
 }
 
 func (s *Server) clusterJoinConfigured() bool {
@@ -312,10 +345,23 @@ func (s *Server) cleanupRevokedNodeKey(ctx context.Context, key model.NodeKey) r
 		result.Warnings = append(result.Warnings, "list runtimes for node key cleanup: "+err.Error())
 		return result
 	}
+	machines, err := s.store.ListMachinesByNodeKey(key.ID, key.TenantID, true)
+	if err != nil {
+		result.Warnings = append(result.Warnings, "list machines for node key cleanup: "+err.Error())
+		return result
+	}
 	needsClusterClient := s.clusterJoinConfigured()
 	if !needsClusterClient {
 		for _, runtimeObj := range runtimes {
 			if runtimeObj.Type == model.RuntimeTypeManagedOwned {
+				needsClusterClient = true
+				break
+			}
+		}
+	}
+	if !needsClusterClient {
+		for _, machine := range machines {
+			if strings.TrimSpace(machine.ClusterNodeName) != "" {
 				needsClusterClient = true
 				break
 			}
@@ -368,7 +414,100 @@ func (s *Server) cleanupRevokedNodeKey(ctx context.Context, key model.NodeKey) r
 		}
 		result.DetachedRuntimeIDs = append(result.DetachedRuntimeIDs, detached.ID)
 	}
+	deletedNodes := make(map[string]struct{}, len(result.DeletedClusterNodes))
+	for _, name := range result.DeletedClusterNodes {
+		deletedNodes[name] = struct{}{}
+	}
+	for _, machine := range machines {
+		if strings.TrimSpace(machine.RuntimeID) != "" {
+			continue
+		}
+		nodeName := strings.TrimSpace(machine.ClusterNodeName)
+		if nodeName == "" {
+			continue
+		}
+		if _, exists := deletedNodes[nodeName]; exists {
+			continue
+		}
+		switch {
+		case clientErr != nil:
+			result.Warnings = append(result.Warnings, "delete cluster node "+nodeName+": kubernetes client unavailable")
+		default:
+			if err := client.deleteNode(ctx, nodeName); err != nil && !isKubernetesNodeNotFound(err) {
+				result.Warnings = append(result.Warnings, "delete cluster node "+nodeName+": "+err.Error())
+			} else {
+				result.DeletedClusterNodes = append(result.DeletedClusterNodes, nodeName)
+				deletedNodes[nodeName] = struct{}{}
+			}
+		}
+	}
 	return result
+}
+
+func joinNodeResponse(machine model.Machine, runtimeObj *model.Runtime) any {
+	if runtimeObj != nil {
+		return *runtimeObj
+	}
+	return machine
+}
+
+func joinClusterLabelMap(machine model.Machine, runtimeObj *model.Runtime) map[string]string {
+	labels := machineJoinLabelMap(machine)
+	if runtimeObj == nil {
+		return labels
+	}
+	for key, value := range runtime.JoinNodeLabelMap(*runtimeObj) {
+		labels[key] = value
+	}
+	return labels
+}
+
+func machineJoinLabelMap(machine model.Machine) map[string]string {
+	labels := map[string]string{
+		runtime.NodeKeyIDLabelKey:    strings.TrimSpace(machine.NodeKeyID),
+		runtime.MachineIDLabelKey:    strings.TrimSpace(machine.ID),
+		runtime.MachineScopeLabelKey: model.NormalizeMachineScope(machine.Scope),
+	}
+	if machine.Policy.AllowBuilds {
+		labels[runtime.BuildNodeLabelKey] = runtime.BuildNodeLabelValue
+		if tier := model.NormalizeMachineBuildTier(machine.Policy.BuildTier); tier != "" {
+			labels[runtime.BuildTierLabelKey] = tier
+		}
+	}
+	if role := model.NormalizeMachineControlPlaneRole(machine.Policy.DesiredControlPlaneRole); role != "" && role != model.MachineControlPlaneRoleNone {
+		labels[runtime.ControlPlaneDesiredRoleKey] = role
+	}
+	if machine.RuntimeID == "" && machine.Policy.AllowSharedPool {
+		labels[runtime.SharedPoolLabelKey] = runtime.SharedPoolLabelValue
+	}
+	for key, value := range labels {
+		if strings.TrimSpace(value) == "" {
+			delete(labels, key)
+		}
+	}
+	return labels
+}
+
+func joinClusterLabels(labels map[string]string) []string {
+	if len(labels) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(labels))
+	for key, value := range labels {
+		if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, key+"="+labels[key])
+	}
+	return out
 }
 
 func coalesceNodeName(values ...string) string {

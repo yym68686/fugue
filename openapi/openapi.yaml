@@ -769,6 +769,35 @@ paths:
                 $ref: "#/components/schemas/ClusterNodeDiagnosisResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/cluster/nodes/{name}/policy:
+    patch:
+      operationId: setClusterNodePolicy
+      summary: Set Cluster Node Policy
+      tags: [Cluster]
+      x-fugue-handler: handleSetClusterNodePolicy
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetClusterNodePolicyRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterNodePolicyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/cluster/control-plane:
     get:
       operationId: getControlPlaneStatus
@@ -3257,7 +3286,7 @@ components:
     NodeKey:
       type: object
       additionalProperties: false
-      required: [id, tenant_id, label, prefix, hash, status, created_at, updated_at]
+      required: [id, tenant_id, label, prefix, hash, scope, status, created_at, updated_at]
       properties:
         id:
           type: string
@@ -3268,6 +3297,8 @@ components:
         prefix:
           type: string
         hash:
+          type: string
+        scope:
           type: string
         status:
           type: string
@@ -4135,6 +4166,10 @@ components:
           type: string
         tenant_id:
           type: string
+        machine:
+          $ref: "#/components/schemas/ClusterNodeMachine"
+        policy:
+          $ref: "#/components/schemas/ClusterNodePolicy"
         workloads:
           type: array
           items:
@@ -4142,6 +4177,56 @@ components:
         created_at:
           type: string
           format: date-time
+    ClusterNodeMachine:
+      type: object
+      additionalProperties: false
+      required: [id, scope, connection_mode, status]
+      properties:
+        id:
+          type: string
+        scope:
+          type: string
+        connection_mode:
+          type: string
+        status:
+          type: string
+        tenant_id:
+          type: string
+        runtime_id:
+          type: string
+        node_key_id:
+          type: string
+    ClusterNodePolicy:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          allow_builds,
+          build_tier,
+          allow_shared_pool,
+          desired_control_plane_role,
+          effective_builds,
+          effective_build_tier,
+          effective_shared_pool,
+          effective_control_plane_role
+        ]
+      properties:
+        allow_builds:
+          type: boolean
+        build_tier:
+          type: string
+        allow_shared_pool:
+          type: boolean
+        desired_control_plane_role:
+          type: string
+        effective_builds:
+          type: boolean
+        effective_build_tier:
+          type: string
+        effective_shared_pool:
+          type: boolean
+        effective_control_plane_role:
+          type: string
     ClusterNodeFilesystemUsage:
       type: object
       additionalProperties: false
@@ -5123,6 +5208,8 @@ components:
           type: string
         label:
           type: string
+        scope:
+          type: string
     RevokeNodeKeyResponse:
       type: object
       additionalProperties: false
@@ -5148,6 +5235,29 @@ components:
       properties:
         diagnosis:
           $ref: "#/components/schemas/ClusterNodeDiagnosis"
+    SetClusterNodePolicyRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        allow_builds:
+          type: boolean
+        build_tier:
+          type: string
+        allow_shared_pool:
+          type: boolean
+        desired_control_plane_role:
+          type: string
+    ClusterNodePolicyResponse:
+      type: object
+      additionalProperties: false
+      required: [cluster_node, node_reconciled]
+      properties:
+        cluster_node:
+          $ref: "#/components/schemas/ClusterNode"
+        node_reconciled:
+          type: boolean
+        reconcile_error:
+          type: string
     ControlPlaneComponent:
       type: object
       additionalProperties: false

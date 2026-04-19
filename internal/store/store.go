@@ -863,12 +863,21 @@ func (s *Store) AuthenticateNodeKey(secret string) (model.NodeKey, error) {
 }
 
 func (s *Store) CreateNodeKey(tenantID, label string) (model.NodeKey, string, error) {
+	return s.CreateScopedNodeKey(tenantID, label, model.NodeKeyScopeTenantRuntime)
+}
+
+func (s *Store) CreateScopedNodeKey(tenantID, label, scope string) (model.NodeKey, string, error) {
 	label = defaultNodeKeyLabel(label)
-	if tenantID == "" {
+	scope = model.NormalizeNodeKeyScope(scope)
+	if scope == "" {
+		return model.NodeKey{}, "", ErrInvalidInput
+	}
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" && scope != model.NodeKeyScopePlatformNode {
 		return model.NodeKey{}, "", ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgCreateNodeKey(tenantID, label)
+		return s.pgCreateScopedNodeKey(tenantID, label, scope)
 	}
 
 	secret := model.NewSecret("fugue_nk")
@@ -879,13 +888,14 @@ func (s *Store) CreateNodeKey(tenantID, label string) (model.NodeKey, string, er
 		Label:     label,
 		Prefix:    model.SecretPrefix(secret),
 		Hash:      model.HashSecret(secret),
+		Scope:     scope,
 		Status:    model.NodeKeyStatusActive,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
 
 	err := s.withLockedState(true, func(state *model.State) error {
-		if findTenant(state, tenantID) < 0 {
+		if tenantID != "" && findTenant(state, tenantID) < 0 {
 			return ErrNotFound
 		}
 		state.NodeKeys = append(state.NodeKeys, key)
@@ -1000,6 +1010,7 @@ func (s *Store) BootstrapNode(secret, runtimeName, endpoint string, labels map[s
 			state.Runtimes[runtimeIndex].UpdatedAt = now
 			applyRuntimeIdentity(&state.Runtimes[runtimeIndex], machineName, machineFingerprint, model.RuntimeTypeExternalOwned, strings.TrimSpace(endpoint), labels, key.ID, now)
 			runtime = state.Runtimes[runtimeIndex]
+			_ = upsertMachineForRuntimeState(state, runtime, now)
 			return nil
 		}
 
@@ -1022,6 +1033,7 @@ func (s *Store) BootstrapNode(secret, runtimeName, endpoint string, labels map[s
 		}
 		applyRuntimeIdentity(&runtime, machineName, machineFingerprint, model.RuntimeTypeExternalOwned, strings.TrimSpace(endpoint), labels, key.ID, now)
 		state.Runtimes = append(state.Runtimes, runtime)
+		_ = upsertMachineForRuntimeState(state, runtime, now)
 		return nil
 	})
 	if err != nil {
@@ -1117,6 +1129,7 @@ func (s *Store) BootstrapClusterNode(secret, runtimeName, endpoint string, label
 			state.Runtimes[runtimeIndex].LastHeartbeatAt = &now
 			applyRuntimeIdentity(&state.Runtimes[runtimeIndex], machineName, machineFingerprint, model.RuntimeTypeManagedOwned, strings.TrimSpace(endpoint), labels, key.ID, now)
 			runtime = state.Runtimes[runtimeIndex]
+			_ = upsertMachineForRuntimeState(state, runtime, now)
 			return nil
 		}
 
@@ -1137,6 +1150,7 @@ func (s *Store) BootstrapClusterNode(secret, runtimeName, endpoint string, label
 		}
 		applyRuntimeIdentity(&runtime, machineName, machineFingerprint, model.RuntimeTypeManagedOwned, strings.TrimSpace(endpoint), labels, key.ID, now)
 		state.Runtimes = append(state.Runtimes, runtime)
+		_ = upsertMachineForRuntimeState(state, runtime, now)
 		return nil
 	})
 	if err != nil {
@@ -1258,6 +1272,7 @@ func (s *Store) ConsumeEnrollmentToken(secret, runtimeName, endpoint string, lab
 			state.Runtimes[runtimeIndex].UpdatedAt = now
 			applyRuntimeIdentity(&state.Runtimes[runtimeIndex], machineName, machineFingerprint, model.RuntimeTypeExternalOwned, strings.TrimSpace(endpoint), labels, state.Runtimes[runtimeIndex].NodeKeyID, now)
 			runtime = state.Runtimes[runtimeIndex]
+			_ = upsertMachineForRuntimeState(state, runtime, now)
 			return nil
 		}
 
@@ -1279,6 +1294,7 @@ func (s *Store) ConsumeEnrollmentToken(secret, runtimeName, endpoint string, lab
 		}
 		applyRuntimeIdentity(&runtime, machineName, machineFingerprint, model.RuntimeTypeExternalOwned, strings.TrimSpace(endpoint), labels, "", now)
 		state.Runtimes = append(state.Runtimes, runtime)
+		_ = upsertMachineForRuntimeState(state, runtime, now)
 		return nil
 	})
 	if err != nil {
@@ -1756,6 +1772,7 @@ func (s *Store) SetRuntimePoolMode(runtimeID, poolMode string) (model.Runtime, e
 	var runtime model.Runtime
 	err := s.withLockedState(true, func(state *model.State) error {
 		ensureRuntimeMetadata(state)
+		now := time.Now().UTC()
 
 		index := findRuntime(state, runtimeID)
 		if index < 0 {
@@ -1765,8 +1782,9 @@ func (s *Store) SetRuntimePoolMode(runtimeID, poolMode string) (model.Runtime, e
 			return ErrInvalidInput
 		}
 		state.Runtimes[index].PoolMode = model.NormalizeRuntimePoolMode(state.Runtimes[index].Type, poolMode)
-		state.Runtimes[index].UpdatedAt = time.Now().UTC()
+		state.Runtimes[index].UpdatedAt = now
 		runtime = state.Runtimes[index]
+		_ = upsertMachineForRuntimeState(state, runtime, now)
 		return nil
 	})
 	return runtime, err
@@ -2168,6 +2186,9 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 	if err := validateAppNetworkMode(spec); err != nil {
 		return model.App{}, err
 	}
+	if err := ensureManagedPostgresPassword(spec.Postgres); err != nil {
+		return model.App{}, err
+	}
 	if err := validateManagedPostgresSpecForAppName(name, spec.Postgres); err != nil {
 		return model.App{}, err
 	}
@@ -2289,6 +2310,11 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			return ErrNotFound
 		}
 		hydrateAppBackingServices(state, &app)
+		if op.DesiredSpec != nil {
+			if err := ensureManagedPostgresPassword(op.DesiredSpec.Postgres); err != nil {
+				return err
+			}
+		}
 
 		switch op.Type {
 		case model.OperationTypeImport:
@@ -2979,8 +3005,14 @@ func ensureDefaults(state *model.State) {
 	if state.NodeKeys == nil {
 		state.NodeKeys = []model.NodeKey{}
 	}
+	for idx := range state.NodeKeys {
+		state.NodeKeys[idx].Scope = model.NormalizeNodeKeyScope(state.NodeKeys[idx].Scope)
+	}
 	if state.Machines == nil {
 		state.Machines = []model.Machine{}
+	}
+	for idx := range state.Machines {
+		normalizeMachineForRead(&state.Machines[idx])
 	}
 	if state.Runtimes == nil {
 		state.Runtimes = []model.Runtime{}
@@ -4204,6 +4236,7 @@ func detachRuntimeOwnership(state *model.State, runtimeIndex int, now time.Time)
 		return
 	}
 	runtime := &state.Runtimes[runtimeIndex]
+	detachMachineOwnershipByRuntime(state, runtime.ID, now)
 	resetRuntimeSharing(state, runtime.ID)
 	runtime.AccessMode = model.RuntimeAccessModePrivate
 	runtime.PublicOffer = nil
@@ -4216,6 +4249,29 @@ func detachRuntimeOwnership(state *model.State, runtimeIndex int, now time.Time)
 	runtime.AgentKeyPrefix = ""
 	runtime.AgentKeyHash = ""
 	runtime.UpdatedAt = now
+}
+
+func detachMachineOwnershipByRuntime(state *model.State, runtimeID string, now time.Time) {
+	if state == nil {
+		return
+	}
+	runtimeID = strings.TrimSpace(runtimeID)
+	if runtimeID == "" {
+		return
+	}
+	for idx := range state.Machines {
+		if strings.TrimSpace(state.Machines[idx].RuntimeID) != runtimeID {
+			continue
+		}
+		machine := state.Machines[idx]
+		machine.RuntimeID = ""
+		machine.RuntimeName = ""
+		machine.NodeKeyID = ""
+		machine.ClusterNodeName = ""
+		machine.Status = model.RuntimeStatusOffline
+		machine.UpdatedAt = now
+		state.Machines[idx] = machine
+	}
 }
 
 func normalizeRuntimeAccessMode(runtimeType, accessMode string) string {

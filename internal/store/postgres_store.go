@@ -796,7 +796,7 @@ func (s *Store) pgListNodeKeys(tenantID string, platformAdmin bool) ([]model.Nod
 	defer cancel()
 
 	query := `
-SELECT id, tenant_id, label, prefix, hash, status, created_at, updated_at, last_used_at, revoked_at
+SELECT id, tenant_id, label, prefix, hash, scope, status, created_at, updated_at, last_used_at, revoked_at
 FROM fugue_node_keys
 `
 	args := make([]any, 0, 1)
@@ -831,7 +831,7 @@ func (s *Store) pgGetNodeKey(id string) (model.NodeKey, error) {
 	defer cancel()
 
 	key, err := scanNodeKey(s.db.QueryRowContext(ctx, `
-SELECT id, tenant_id, label, prefix, hash, status, created_at, updated_at, last_used_at, revoked_at
+SELECT id, tenant_id, label, prefix, hash, scope, status, created_at, updated_at, last_used_at, revoked_at
 FROM fugue_node_keys
 WHERE id = $1
 `, id))
@@ -852,7 +852,7 @@ func (s *Store) pgAuthenticateNodeKey(secret string) (model.NodeKey, error) {
 	defer tx.Rollback()
 
 	key, err := scanNodeKey(tx.QueryRowContext(ctx, `
-SELECT id, tenant_id, label, prefix, hash, status, created_at, updated_at, last_used_at, revoked_at
+SELECT id, tenant_id, label, prefix, hash, scope, status, created_at, updated_at, last_used_at, revoked_at
 FROM fugue_node_keys
 WHERE hash = $1
 FOR UPDATE
@@ -882,7 +882,16 @@ WHERE id = $1
 }
 
 func (s *Store) pgCreateNodeKey(tenantID, label string) (model.NodeKey, string, error) {
+	return s.pgCreateScopedNodeKey(tenantID, label, model.NodeKeyScopeTenantRuntime)
+}
+
+func (s *Store) pgCreateScopedNodeKey(tenantID, label, scope string) (model.NodeKey, string, error) {
 	label = defaultNodeKeyLabel(label)
+	scope = model.NormalizeNodeKeyScope(scope)
+	if scope == "" {
+		return model.NodeKey{}, "", ErrInvalidInput
+	}
+	tenantID = strings.TrimSpace(tenantID)
 	secret := model.NewSecret("fugue_nk")
 	now := time.Now().UTC()
 	key := model.NodeKey{
@@ -891,6 +900,7 @@ func (s *Store) pgCreateNodeKey(tenantID, label string) (model.NodeKey, string, 
 		Label:     label,
 		Prefix:    model.SecretPrefix(secret),
 		Hash:      model.HashSecret(secret),
+		Scope:     scope,
 		Status:    model.NodeKeyStatusActive,
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -905,17 +915,21 @@ func (s *Store) pgCreateNodeKey(tenantID, label string) (model.NodeKey, string, 
 	}
 	defer tx.Rollback()
 
-	exists, err := s.pgTenantExistsTx(ctx, tx, tenantID)
-	if err != nil {
-		return model.NodeKey{}, "", err
-	}
-	if !exists {
-		return model.NodeKey{}, "", ErrNotFound
+	if tenantID != "" {
+		exists, err := s.pgTenantExistsTx(ctx, tx, tenantID)
+		if err != nil {
+			return model.NodeKey{}, "", err
+		}
+		if !exists {
+			return model.NodeKey{}, "", ErrNotFound
+		}
+	} else if scope != model.NodeKeyScopePlatformNode {
+		return model.NodeKey{}, "", ErrInvalidInput
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_node_keys (id, tenant_id, label, prefix, hash, status, created_at, updated_at, last_used_at, revoked_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL)
-`, key.ID, key.TenantID, key.Label, key.Prefix, key.Hash, key.Status, key.CreatedAt, key.UpdatedAt); err != nil {
+INSERT INTO fugue_node_keys (id, tenant_id, label, prefix, hash, scope, status, created_at, updated_at, last_used_at, revoked_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, NULL)
+`, key.ID, nullIfEmpty(key.TenantID), key.Label, key.Prefix, key.Hash, key.Scope, key.Status, key.CreatedAt, key.UpdatedAt); err != nil {
 		return model.NodeKey{}, "", mapDBErr(err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -935,7 +949,7 @@ func (s *Store) pgRevokeNodeKey(id string) (model.NodeKey, error) {
 	defer tx.Rollback()
 
 	key, err := scanNodeKey(tx.QueryRowContext(ctx, `
-SELECT id, tenant_id, label, prefix, hash, status, created_at, updated_at, last_used_at, revoked_at
+SELECT id, tenant_id, label, prefix, hash, scope, status, created_at, updated_at, last_used_at, revoked_at
 FROM fugue_node_keys
 WHERE id = $1
 FOR UPDATE
@@ -975,7 +989,7 @@ func (s *Store) pgBootstrapNode(secret, runtimeName, endpoint string, labels map
 	defer tx.Rollback()
 
 	key, err := scanNodeKey(tx.QueryRowContext(ctx, `
-SELECT id, tenant_id, label, prefix, hash, status, created_at, updated_at, last_used_at, revoked_at
+SELECT id, tenant_id, label, prefix, hash, scope, status, created_at, updated_at, last_used_at, revoked_at
 FROM fugue_node_keys
 WHERE hash = $1
 FOR UPDATE
@@ -1061,6 +1075,9 @@ WHERE id = $1
 		if err := s.pgUpdateRuntimeTx(ctx, tx, runtime); err != nil {
 			return model.NodeKey{}, model.Runtime{}, "", err
 		}
+		if _, err := s.pgUpsertMachineFromRuntimeTx(ctx, tx, runtime); err != nil {
+			return model.NodeKey{}, model.Runtime{}, "", err
+		}
 		if err := tx.Commit(); err != nil {
 			return model.NodeKey{}, model.Runtime{}, "", fmt.Errorf("commit bootstrap node transaction: %w", err)
 		}
@@ -1093,6 +1110,9 @@ WHERE id = $1
 	if err := s.pgInsertRuntimeTx(ctx, tx, runtime); err != nil {
 		return model.NodeKey{}, model.Runtime{}, "", err
 	}
+	if _, err := s.pgUpsertMachineFromRuntimeTx(ctx, tx, runtime); err != nil {
+		return model.NodeKey{}, model.Runtime{}, "", err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return model.NodeKey{}, model.Runtime{}, "", fmt.Errorf("commit bootstrap node transaction: %w", err)
@@ -1111,7 +1131,7 @@ func (s *Store) pgBootstrapClusterNode(secret, runtimeName, endpoint string, lab
 	defer tx.Rollback()
 
 	key, err := scanNodeKey(tx.QueryRowContext(ctx, `
-SELECT id, tenant_id, label, prefix, hash, status, created_at, updated_at, last_used_at, revoked_at
+SELECT id, tenant_id, label, prefix, hash, scope, status, created_at, updated_at, last_used_at, revoked_at
 FROM fugue_node_keys
 WHERE hash = $1
 FOR UPDATE
@@ -1198,6 +1218,9 @@ WHERE id = $1
 		if err := s.pgUpdateRuntimeTx(ctx, tx, runtime); err != nil {
 			return model.NodeKey{}, model.Runtime{}, err
 		}
+		if _, err := s.pgUpsertMachineFromRuntimeTx(ctx, tx, runtime); err != nil {
+			return model.NodeKey{}, model.Runtime{}, err
+		}
 		if err := tx.Commit(); err != nil {
 			return model.NodeKey{}, model.Runtime{}, fmt.Errorf("commit bootstrap cluster node transaction: %w", err)
 		}
@@ -1226,6 +1249,9 @@ WHERE id = $1
 	}
 	applyRuntimeIdentity(&runtime, machineName, machineFingerprint, model.RuntimeTypeManagedOwned, endpoint, labels, key.ID, now)
 	if err := s.pgInsertRuntimeTx(ctx, tx, runtime); err != nil {
+		return model.NodeKey{}, model.Runtime{}, err
+	}
+	if _, err := s.pgUpsertMachineFromRuntimeTx(ctx, tx, runtime); err != nil {
 		return model.NodeKey{}, model.Runtime{}, err
 	}
 
@@ -1351,6 +1377,9 @@ WHERE id = $1
 		if err := s.pgUpdateRuntimeTx(ctx, tx, runtime); err != nil {
 			return model.Runtime{}, "", err
 		}
+		if _, err := s.pgUpsertMachineFromRuntimeTx(ctx, tx, runtime); err != nil {
+			return model.Runtime{}, "", err
+		}
 		if err := tx.Commit(); err != nil {
 			return model.Runtime{}, "", fmt.Errorf("commit consume enrollment token transaction: %w", err)
 		}
@@ -1380,6 +1409,9 @@ WHERE id = $1
 	}
 	applyRuntimeIdentity(&runtime, machineName, machineFingerprint, model.RuntimeTypeExternalOwned, endpoint, labels, "", now)
 	if err := s.pgInsertRuntimeTx(ctx, tx, runtime); err != nil {
+		return model.Runtime{}, "", err
+	}
+	if _, err := s.pgUpsertMachineFromRuntimeTx(ctx, tx, runtime); err != nil {
 		return model.Runtime{}, "", err
 	}
 
@@ -1785,6 +1817,18 @@ func (s *Store) pgDetachRuntimeOwnershipTx(ctx context.Context, tx *sql.Tx, runt
 	if err := s.pgDeleteRuntimeAccessGrantsTx(ctx, tx, runtime.ID); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE fugue_machines
+SET status = $2,
+    node_key_id = '',
+    runtime_id = '',
+    runtime_name = '',
+    cluster_node_name = '',
+    updated_at = $3
+WHERE runtime_id = $1
+`, runtime.ID, model.RuntimeStatusOffline, now); err != nil {
+		return fmt.Errorf("detach machines for runtime %s: %w", runtime.ID, err)
+	}
 	runtime.AccessMode = model.RuntimeAccessModePrivate
 	runtime.PublicOffer = nil
 	runtime.PoolMode = model.RuntimePoolModeDedicated
@@ -2166,6 +2210,9 @@ func (s *Store) pgCreateApp(tenantID, projectID, name, description string, spec 
 		return model.App{}, err
 	}
 	if err := validateAppNetworkMode(spec); err != nil {
+		return model.App{}, err
+	}
+	if err := ensureManagedPostgresPassword(spec.Postgres); err != nil {
 		return model.App{}, err
 	}
 	if err := validateManagedPostgresSpecForAppName(name, spec.Postgres); err != nil {
@@ -2635,6 +2682,11 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 	}
 	if app.TenantID != op.TenantID {
 		return model.Operation{}, ErrNotFound
+	}
+	if op.DesiredSpec != nil {
+		if err := ensureManagedPostgresPassword(op.DesiredSpec.Postgres); err != nil {
+			return model.Operation{}, err
+		}
 	}
 
 	switch op.Type {
@@ -4185,6 +4237,9 @@ func (s *Store) pgSetRuntimePoolMode(runtimeID, poolMode string) (model.Runtime,
 	if err := s.pgUpdateRuntimeTx(ctx, tx, runtimeObj); err != nil {
 		return model.Runtime{}, err
 	}
+	if _, err := s.pgUpsertMachineFromRuntimeTx(ctx, tx, runtimeObj); err != nil {
+		return model.Runtime{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return model.Runtime{}, fmt.Errorf("commit set runtime pool mode transaction: %w", err)
 	}
@@ -4413,10 +4468,11 @@ func scanNodeKey(scanner sqlScanner) (model.NodeKey, error) {
 	var tenantID sql.NullString
 	var lastUsedAt sql.NullTime
 	var revokedAt sql.NullTime
-	if err := scanner.Scan(&key.ID, &tenantID, &key.Label, &key.Prefix, &key.Hash, &key.Status, &key.CreatedAt, &key.UpdatedAt, &lastUsedAt, &revokedAt); err != nil {
+	if err := scanner.Scan(&key.ID, &tenantID, &key.Label, &key.Prefix, &key.Hash, &key.Scope, &key.Status, &key.CreatedAt, &key.UpdatedAt, &lastUsedAt, &revokedAt); err != nil {
 		return model.NodeKey{}, err
 	}
 	key.TenantID = tenantID.String
+	key.Scope = model.NormalizeNodeKeyScope(key.Scope)
 	if lastUsedAt.Valid {
 		key.LastUsedAt = &lastUsedAt.Time
 	}

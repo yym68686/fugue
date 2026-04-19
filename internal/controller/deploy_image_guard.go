@@ -29,6 +29,17 @@ func (s *Service) ensureManagedDeployImageReady(ctx context.Context, app model.A
 	if !exists {
 		return fmt.Errorf("deploy blocked because managed image %s is still missing from the registry", managedImageRef)
 	}
+	runtimeImageRef := strings.TrimSpace(app.Spec.Image)
+	if runtimeImageRef == "" || runtimeImageRef == managedImageRef {
+		return nil
+	}
+	exists, err = s.inspectManagedImageWithRetry(ctx, runtimeImageRef)
+	if err != nil {
+		return fmt.Errorf("inspect runtime image %s before deploy: %w", runtimeImageRef, err)
+	}
+	if !exists {
+		return fmt.Errorf("deploy blocked because runtime image %s is still missing from the registry", runtimeImageRef)
+	}
 	return nil
 }
 

@@ -21,6 +21,8 @@ const (
 	defaultWorkspaceStorage             = "10Gi"
 	defaultWorkspaceReplicationSchedule = "*/5 * * * *"
 	defaultWaitImage                    = "busybox:1.36"
+	appFilesVolumeName                  = "app-files"
+	appFilesSourceMountPath             = "/fugue-app-files"
 	AppWorkspaceContainerName           = "fugue-workspace"
 	workspaceVolumeName                 = "app-workspace"
 	workspaceSidecarName                = AppWorkspaceContainerName
@@ -320,29 +322,21 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		items := make([]map[string]any, 0, len(app.Spec.Files))
 		for index, file := range app.Spec.Files {
 			key := fileKey(index)
-			mode := int32(0o600)
-			if file.Mode > 0 {
-				mode = file.Mode
-			}
+			mode := appFileMode(file)
 			items = append(items, map[string]any{
 				"key":  key,
 				"path": key,
 				"mode": mode,
 			})
-			volumeMounts = append(volumeMounts, map[string]any{
-				"name":      "app-files",
-				"mountPath": strings.TrimSpace(file.Path),
-				"subPath":   key,
-				"readOnly":  true,
-			})
 		}
 		volumes = append(volumes, map[string]any{
-			"name": "app-files",
+			"name": appFilesVolumeName,
 			"secret": map[string]any{
 				"secretName": appFilesSecretName(resourceName),
 				"items":      items,
 			},
 		})
+		initContainers = append(initContainers, buildAppFilesInitContainer(app.Spec.Files))
 	}
 	if workspaceSpec := normalizeRuntimeAppWorkspaceSpec(app); workspaceSpec != nil {
 		volumeMounts = append(volumeMounts, map[string]any{
@@ -433,6 +427,84 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 			},
 		},
 	}
+}
+
+func buildAppFilesInitContainer(files []model.AppFile) map[string]any {
+	return map[string]any{
+		"name":  "init-app-files",
+		"image": defaultWaitImage,
+		"command": []string{
+			"sh",
+			"-lc",
+			appFilesInitScript(),
+			"sh",
+			appFilesSourceMountPath,
+			buildAppFilesPlan(files),
+		},
+		"securityContext": map[string]any{
+			"runAsUser": 0,
+		},
+		"volumeMounts": []map[string]any{
+			{
+				"name":      appFilesVolumeName,
+				"mountPath": appFilesSourceMountPath,
+				"readOnly":  true,
+			},
+		},
+	}
+}
+
+func appFilesInitScript() string {
+	return `set -eu
+
+src_root="$1"
+plan="$2"
+plan_file="$(mktemp)"
+trap 'rm -f "${plan_file}"' EXIT
+printf '%s\n' "${plan}" > "${plan_file}"
+tab="$(printf '\t')"
+
+while IFS="${tab}" read -r key mode target; do
+  if [ -z "${key}" ]; then
+    continue
+  fi
+  src="${src_root}/${key}"
+  if [ ! -f "${src}" ]; then
+    echo "missing app file payload: ${key}" >&2
+    exit 1
+  fi
+  parent="$(dirname "${target}")"
+  mkdir -p "${parent}"
+  if [ -d "${target}" ]; then
+    echo "app file target is a directory: ${target}" >&2
+    exit 1
+  fi
+  rm -f "${target}"
+  cat "${src}" > "${target}"
+  chmod "${mode}" "${target}"
+done < "${plan_file}"`
+}
+
+func buildAppFilesPlan(files []model.AppFile) string {
+	lines := make([]string, 0, len(files))
+	for index, file := range files {
+		lines = append(lines, strings.Join([]string{
+			fileKey(index),
+			strconv.FormatInt(int64(appFileMode(file)), 8),
+			strings.TrimSpace(file.Path),
+		}, "\t"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func appFileMode(file model.AppFile) int32 {
+	if file.Mode > 0 {
+		return file.Mode
+	}
+	if file.Secret {
+		return 0o600
+	}
+	return 0o644
 }
 
 func buildAppTCPReadinessProbe(port int) map[string]any {

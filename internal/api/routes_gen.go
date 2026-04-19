@@ -86,6 +86,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/cluster/net/websocket", s.auth.RequireAPI(http.HandlerFunc(s.handleProbeClusterWebSocket)))
 	mux.Handle("GET /v1/cluster/nodes", s.auth.RequireAPI(http.HandlerFunc(s.handleListClusterNodes)))
 	mux.Handle("GET /v1/cluster/nodes/{name}/diagnosis", s.auth.RequireAPI(http.HandlerFunc(s.handleGetClusterNodeDiagnosis)))
+	mux.Handle("PATCH /v1/cluster/nodes/{name}/policy", s.auth.RequireAPI(http.HandlerFunc(s.handleSetClusterNodePolicy)))
 	mux.Handle("GET /v1/cluster/pods", s.auth.RequireAPI(http.HandlerFunc(s.handleListClusterPods)))
 	mux.Handle("GET /v1/cluster/rollouts/{namespace}/{kind}/{name}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetClusterRolloutStatus)))
 	mux.Handle("GET /v1/cluster/tls/probe", s.auth.RequireAPI(http.HandlerFunc(s.handleProbeClusterTLS)))

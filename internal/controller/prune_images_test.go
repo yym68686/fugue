@@ -100,6 +100,7 @@ func TestExecuteManagedDeployOperationPrunesManagedImageHistoryBeyondLimit(t *te
 	existingRefs := map[string]bool{
 		pushBase + "/fugue-apps/example-demo:git-old":     true,
 		pushBase + "/fugue-apps/example-demo:git-current": true,
+		pullBase + "/fugue-apps/example-demo:git-current": true,
 	}
 	var deletedRefs []string
 	svc := &Service{

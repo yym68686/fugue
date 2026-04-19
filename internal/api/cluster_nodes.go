@@ -78,6 +78,7 @@ type clusterNodeSnapshot struct {
 	sharedPool   bool
 	countryCode  string
 	runtimeID    string
+	labels       map[string]string
 	pods         []clusterNodePod
 	summary      *kubeNodeSummary
 }
@@ -381,6 +382,17 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	machines := []model.Machine(nil)
+	if principal.IsPlatformAdmin() {
+		storeMachinesStartedAt := time.Now()
+		machines, err = s.store.ListMachines(principal.TenantID, true)
+		timings.Add("store_machines", time.Since(storeMachinesStartedAt))
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+	}
+
 	storeAppsStartedAt := time.Now()
 	apps, err := s.store.ListApps(principal.TenantID, principal.IsPlatformAdmin())
 	timings.Add("store_apps", time.Since(storeAppsStartedAt))
@@ -397,18 +409,6 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	runtimeByClusterNode := make(map[string]model.Runtime, len(runtimes))
-	for _, runtimeObj := range runtimes {
-		name := strings.TrimSpace(runtimeObj.ClusterNodeName)
-		if name == "" {
-			continue
-		}
-		if existing, ok := runtimeByClusterNode[name]; ok && existing.UpdatedAt.After(runtimeObj.UpdatedAt) {
-			continue
-		}
-		runtimeByClusterNode[name] = runtimeObj
-	}
-
 	workloadResolver := newClusterWorkloadResolver(apps, services)
 	resolvedSnapshots := make([]resolvedClusterNodeSnapshot, 0, len(snapshots))
 	for _, snapshot := range snapshots {
@@ -417,52 +417,14 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 			workloads: workloadResolver.resolve(snapshot.pods),
 		})
 	}
-	resolvedSnapshots = collapseClusterNodeSnapshots(resolvedSnapshots, runtimeByClusterNode)
-
-	filtered := make([]model.ClusterNode, 0, len(resolvedSnapshots))
-	sharedSnapshots := make([]resolvedClusterNodeSnapshot, 0, len(resolvedSnapshots))
-	for _, resolved := range resolvedSnapshots {
-		snapshot := resolved.snapshot
-		node := snapshot.node
-		workloads := resolved.workloads
-		runtimeObj, ok := runtimeByClusterNode[node.Name]
-		var runtimeForNode *model.Runtime
-		if ok {
-			runtimeForNode = &runtimeObj
-		}
-		node.PublicIP = resolveClusterNodePublicIP(node, runtimeForNode)
-		if ok {
-			node.RuntimeID = runtimeObj.ID
-			node.TenantID = runtimeObj.TenantID
-		} else if snapshot.runtimeID != "" {
-			node.RuntimeID = snapshot.runtimeID
-		}
-		node.Workloads = workloads
-		if principal.IsPlatformAdmin() || ok {
-			filtered = append(filtered, node)
-			continue
-		}
-		if !snapshot.sharedPool && snapshot.runtimeID != "" && !strings.EqualFold(snapshot.runtimeID, tenantSharedRuntimeID) {
-			continue
-		}
-		sharedSnapshots = append(sharedSnapshots, resolvedClusterNodeSnapshot{
-			snapshot:  resolved.snapshot,
-			workloads: workloads,
-		})
-	}
-
-	if !principal.IsPlatformAdmin() {
-		if sharedNode, ok := buildTenantSharedClusterNode(sharedSnapshots, managedSharedRuntime, defaultSharedDisplayRegion); ok {
-			filtered = append(filtered, sharedNode)
-		}
-	}
-
-	sort.Slice(filtered, func(i, j int) bool {
-		if filtered[i].CreatedAt != nil && filtered[j].CreatedAt != nil && !filtered[i].CreatedAt.Equal(*filtered[j].CreatedAt) {
-			return filtered[i].CreatedAt.Before(*filtered[j].CreatedAt)
-		}
-		return filtered[i].Name < filtered[j].Name
-	})
+	filtered := buildVisibleClusterNodesFromResolved(
+		principal,
+		resolvedSnapshots,
+		runtimes,
+		machines,
+		managedSharedRuntime,
+		defaultSharedDisplayRegion,
+	)
 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"cluster_nodes": filtered})
 }
@@ -826,6 +788,7 @@ func (c *clusterNodeClient) listClusterNodeInventory(ctx context.Context) ([]clu
 			sharedPool:   strings.EqualFold(firstNodeLabel(item.Metadata.Labels, runtime.SharedPoolLabelKey), runtime.SharedPoolLabelValue),
 			countryCode:  kubeNodeCountryCode(item.Metadata.Labels),
 			runtimeID:    firstNodeLabel(item.Metadata.Labels, runtime.RuntimeIDLabelKey),
+			labels:       cloneNodeLabels(item.Metadata.Labels),
 			pods:         podsByNode[name],
 			summary:      summariesByNode[name],
 		})
@@ -961,17 +924,20 @@ func (c *clusterNodeClient) createBootstrapToken(ctx context.Context, nodeKeyID,
 	tokenID = strings.ToLower(strings.TrimSpace(tokenID))
 	tokenSecret = strings.ToLower(strings.TrimSpace(tokenSecret))
 	secretName := clusterJoinBootstrapSecretName(tokenID)
+	secretLabels := map[string]string{
+		clusterJoinTokenLabelManaged: clusterJoinTokenLabelValue,
+		clusterJoinTokenLabelNodeKey: strings.TrimSpace(nodeKeyID),
+	}
+	if runtimeID = strings.TrimSpace(runtimeID); runtimeID != "" {
+		secretLabels[clusterJoinTokenLabelRuntime] = runtimeID
+	}
 	payload := map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Secret",
 		"metadata": map[string]any{
 			"name":      secretName,
 			"namespace": clusterJoinTokenNamespace,
-			"labels": map[string]string{
-				clusterJoinTokenLabelManaged: clusterJoinTokenLabelValue,
-				clusterJoinTokenLabelNodeKey: strings.TrimSpace(nodeKeyID),
-				clusterJoinTokenLabelRuntime: strings.TrimSpace(runtimeID),
-			},
+			"labels":    secretLabels,
 		},
 		"type": "bootstrap.kubernetes.io/token",
 		"stringData": map[string]string{
@@ -1116,8 +1082,20 @@ func clusterNodeSnapshotMatchesFingerprint(snapshot clusterNodeSnapshot, machine
 		strings.EqualFold(snapshot.identity.systemUUID, machineFingerprint)
 }
 
+func clusterNodeSnapshotManaged(snapshot clusterNodeSnapshot) bool {
+	if snapshot.managedOwned {
+		return true
+	}
+	return firstNodeLabel(
+		snapshot.labels,
+		runtime.MachineIDLabelKey,
+		runtime.NodeKeyIDLabelKey,
+		runtime.MachineScopeLabelKey,
+	) != ""
+}
+
 func clusterNodeSnapshotIdentityKey(snapshot clusterNodeSnapshot) string {
-	if !snapshot.managedOwned {
+	if !clusterNodeSnapshotManaged(snapshot) {
 		return ""
 	}
 	if value := strings.ToLower(strings.TrimSpace(snapshot.identity.machineID)); value != "" {
@@ -1865,6 +1843,17 @@ func firstNodeLabel(labels map[string]string, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func cloneNodeLabels(labels map[string]string) map[string]string {
+	if len(labels) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(labels))
+	for key, value := range labels {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func firstNodeAnnotation(annotations map[string]string, keys ...string) string {

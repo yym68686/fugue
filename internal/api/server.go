@@ -550,29 +550,40 @@ func (s *Server) handleCreateNodeKey(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TenantID string `json:"tenant_id"`
 		Label    string `json:"label"`
+		Scope    string `json:"scope"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		if errors.Is(err, io.EOF) {
 			req = struct {
 				TenantID string `json:"tenant_id"`
 				Label    string `json:"label"`
+				Scope    string `json:"scope"`
 			}{}
 		} else {
 			httpx.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 	}
+	scope := model.NormalizeNodeKeyScope(req.Scope)
+	if scope == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid scope")
+		return
+	}
 	tenantID, ok := s.resolveTenantID(principal, req.TenantID)
 	if !ok {
 		httpx.WriteError(w, http.StatusForbidden, "cannot create node key for another tenant")
 		return
 	}
-	key, secret, err := s.store.CreateNodeKey(tenantID, req.Label)
+	if scope != model.NodeKeyScopePlatformNode && tenantID == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "tenant_id is required for tenant runtime node keys")
+		return
+	}
+	key, secret, err := s.store.CreateScopedNodeKey(tenantID, req.Label, scope)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	s.appendAudit(principal, "node_key.create", "node_key", key.ID, tenantID, map[string]string{"label": key.Label})
+	s.appendAudit(principal, "node_key.create", "node_key", key.ID, tenantID, map[string]string{"label": key.Label, "scope": key.Scope})
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"node_key": key, "secret": secret})
 }
 
@@ -705,11 +716,23 @@ func (s *Server) handleGetNodeKeyUsages(w http.ResponseWriter, r *http.Request) 
 		s.writeStoreError(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+	usageCount := len(runtimes)
+	response := map[string]any{
 		"node_key":    nodeKey,
-		"usage_count": len(runtimes),
+		"usage_count": usageCount,
 		"runtimes":    runtimes,
-	})
+	}
+	if nodeKey.Scope == model.NodeKeyScopePlatformNode {
+		machines, err := s.store.ListMachinesByNodeKey(nodeKey.ID, principal.TenantID, principal.IsPlatformAdmin())
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		usageCount = len(machines)
+		response["usage_count"] = usageCount
+		response["machines"] = machines
+	}
+	httpx.WriteJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleListRuntimes(w http.ResponseWriter, r *http.Request) {
