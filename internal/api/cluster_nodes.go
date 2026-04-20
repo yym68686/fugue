@@ -374,35 +374,31 @@ func (s *Server) reconcileLegacyBuildTierLabelsFromSnapshots(snapshots []cluster
 		return snapshots, false, nil
 	}
 
-	runtimes, err := s.store.ListNodes("", true)
+	clientFactory := s.newClusterNodeClient
+	if clientFactory == nil {
+		clientFactory = newClusterNodeClient
+	}
+	client, err := clientFactory()
 	if err != nil {
 		return snapshots, false, err
 	}
-	machines, err := s.store.ListMachines("", true)
-	if err != nil {
-		return snapshots, false, err
-	}
-
-	runtimeByClusterNode := buildRuntimeByClusterNodeIndex(runtimes)
-	_, machineByClusterNode := buildMachineIndexes(machines)
 
 	changed := false
 	for nodeName := range legacyNodeNames {
-		machine, ok := machineByClusterNode[nodeName]
-		if !ok {
-			continue
+		patch := map[string]any{
+			"metadata": map[string]any{
+				"labels": map[string]any{
+					legacyBuildTierLabelKey: nil,
+				},
+			},
 		}
-
-		var runtimeObj *model.Runtime
-		if runtimeValue, ok := runtimeByClusterNode[nodeName]; ok {
-			runtimeObj = &runtimeValue
-		}
-
-		reconciled, err := s.reconcileMachineClusterNode(context.Background(), machine, runtimeObj)
-		if err != nil {
+		if err := client.patchNode(context.Background(), nodeName, patch); err != nil {
+			if isKubernetesNodeNotFound(err) {
+				continue
+			}
 			return snapshots, changed, err
 		}
-		if reconciled {
+		if !changed {
 			changed = true
 		}
 	}

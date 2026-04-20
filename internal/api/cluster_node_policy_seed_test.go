@@ -158,6 +158,52 @@ func TestListClusterNodesSeedsBootstrapControlPlaneMachineBuildPolicyFromLiveLab
 	}
 }
 
+func TestReconcileLegacyBuildTierLabelsFromSnapshotsRemovesLabelWithoutMachine(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	kubeServer := newBootstrapControlPlaneKubeServerWithLabels(t, map[string]string{
+		legacyBuildTierLabelKey: "large",
+	})
+	defer kubeServer.Close()
+
+	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	refreshed, changed, err := server.reconcileLegacyBuildTierLabelsFromSnapshots([]clusterNodeSnapshot{
+		{
+			node: model.ClusterNode{
+				Name: "gcp1",
+			},
+			labels: map[string]string{
+				legacyBuildTierLabelKey: "large",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("reconcile legacy build-tier labels: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected legacy build-tier cleanup to report changes")
+	}
+	if len(refreshed) != 1 {
+		t.Fatalf("expected one refreshed snapshot, got %d", len(refreshed))
+	}
+	if got := strings.TrimSpace(firstNodeLabel(refreshed[0].labels, legacyBuildTierLabelKey)); got != "" {
+		t.Fatalf("expected legacy build-tier label removed, got %q", got)
+	}
+}
+
 func TestStartBackgroundWarmersBackfillsLegacyBootstrapControlPlaneMachinePolicy(t *testing.T) {
 	t.Parallel()
 
