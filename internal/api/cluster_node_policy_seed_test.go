@@ -102,6 +102,7 @@ func TestListClusterNodesSeedsBootstrapControlPlaneMachineBuildPolicyFromLiveLab
 
 	kubeServer := newBootstrapControlPlaneKubeServerWithLabels(t, map[string]string{
 		runtimepkg.BuildNodeLabelKey:  runtimepkg.BuildNodeLabelValue,
+		legacyBuildTierLabelKey:       "large",
 		runtimepkg.SharedPoolLabelKey: runtimepkg.SharedPoolLabelValue,
 	})
 	defer kubeServer.Close()
@@ -195,11 +196,17 @@ func TestStartBackgroundWarmersBackfillsLegacyBootstrapControlPlaneMachinePolicy
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		machine, err := stateStore.GetMachineByClusterNodeName("gcp1")
+		snapshots, snapshotErr := server.fetchClusterNodeInventory(context.Background())
+		legacyLabelPresent := true
+		if snapshotErr == nil && len(snapshots) > 0 {
+			legacyLabelPresent = strings.TrimSpace(firstNodeLabel(snapshots[0].labels, legacyBuildTierLabelKey)) != ""
+		}
 		if err == nil &&
 			machine.ID == seeded.ID &&
 			machine.Policy.AllowBuilds &&
 			machine.Policy.AllowSharedPool &&
-			machine.Policy.DesiredControlPlaneRole == model.MachineControlPlaneRoleMember {
+			machine.Policy.DesiredControlPlaneRole == model.MachineControlPlaneRoleMember &&
+			!legacyLabelPresent {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -209,7 +216,15 @@ func TestStartBackgroundWarmersBackfillsLegacyBootstrapControlPlaneMachinePolicy
 	if err != nil {
 		t.Fatalf("load backfilled bootstrap control-plane machine: %v", err)
 	}
-	t.Fatalf("expected background warmers to backfill legacy machine policy, got %#v", machine.Policy)
+	snapshots, snapshotErr := server.fetchClusterNodeInventory(context.Background())
+	if snapshotErr != nil {
+		t.Fatalf("load refreshed cluster node inventory: %v", snapshotErr)
+	}
+	legacyLabel := ""
+	if len(snapshots) > 0 {
+		legacyLabel = strings.TrimSpace(firstNodeLabel(snapshots[0].labels, legacyBuildTierLabelKey))
+	}
+	t.Fatalf("expected background warmers to backfill legacy machine policy and remove build-tier label, got policy=%#v legacy_label=%q", machine.Policy, legacyLabel)
 }
 
 func TestSyncBootstrapControlPlaneMachinesBackfillsAuditlessLegacyControlPlaneRole(t *testing.T) {
