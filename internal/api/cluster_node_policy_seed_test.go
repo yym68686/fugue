@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -69,8 +70,8 @@ func TestListClusterNodesSeedsBootstrapControlPlaneMachineForPlatformAdmin(t *te
 	if node.Policy.AllowSharedPool {
 		t.Fatalf("expected bootstrap control-plane node shared-pool to default disabled, got %#v", node.Policy)
 	}
-	if node.Policy.DesiredControlPlaneRole != model.MachineControlPlaneRoleNone {
-		t.Fatalf("expected desired role %q, got %q", model.MachineControlPlaneRoleNone, node.Policy.DesiredControlPlaneRole)
+	if node.Policy.DesiredControlPlaneRole != model.MachineControlPlaneRoleMember {
+		t.Fatalf("expected desired role %q, got %q", model.MachineControlPlaneRoleMember, node.Policy.DesiredControlPlaneRole)
 	}
 	if node.Policy.EffectiveControlPlaneRole != model.MachineControlPlaneRoleMember {
 		t.Fatalf("expected effective role %q, got %q", model.MachineControlPlaneRoleMember, node.Policy.EffectiveControlPlaneRole)
@@ -85,6 +86,9 @@ func TestListClusterNodesSeedsBootstrapControlPlaneMachineForPlatformAdmin(t *te
 	}
 	if strings.TrimSpace(machine.NodeKeyID) != "" {
 		t.Fatalf("expected persisted bootstrap machine to have no node key id, got %q", machine.NodeKeyID)
+	}
+	if machine.Policy.DesiredControlPlaneRole != model.MachineControlPlaneRoleMember {
+		t.Fatalf("expected stored machine role %q, got %q", model.MachineControlPlaneRoleMember, machine.Policy.DesiredControlPlaneRole)
 	}
 }
 
@@ -158,28 +162,25 @@ func TestListClusterNodesSeedsBootstrapControlPlaneMachineBuildPolicyFromLiveLab
 	if !machine.Policy.AllowSharedPool {
 		t.Fatalf("expected stored machine shared-pool enabled, got %#v", machine.Policy)
 	}
+	if machine.Policy.DesiredControlPlaneRole != model.MachineControlPlaneRoleMember {
+		t.Fatalf("expected stored machine role %q, got %q", model.MachineControlPlaneRoleMember, machine.Policy.DesiredControlPlaneRole)
+	}
 }
 
 func TestStartBackgroundWarmersBackfillsLegacyBootstrapControlPlaneMachinePolicy(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	storePath := filepath.Join(t.TempDir(), "store.json")
+	stateStore := store.New(storePath)
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
 
-	seeded, err := stateStore.EnsurePlatformMachineForClusterNode(
-		"gcp1",
-		"203.0.113.10",
-		map[string]string{"node-role.kubernetes.io/control-plane": ""},
-		"gcp1",
-		"machine-id-gcp1",
-	)
-	if err != nil {
+	seeded := legacyBootstrapControlPlaneMachine()
+	if err := rewriteBootstrapControlPlaneMachine(storePath, func(machine *model.Machine) {
+		*machine = seeded
+	}); err != nil {
 		t.Fatalf("seed legacy bootstrap control-plane machine: %v", err)
-	}
-	if seeded.Policy.AllowBuilds {
-		t.Fatalf("expected seeded builds disabled, got %#v", seeded.Policy)
 	}
 
 	kubeServer := newBootstrapControlPlaneKubeServerWithLabels(t, map[string]string{
@@ -209,7 +210,8 @@ func TestStartBackgroundWarmersBackfillsLegacyBootstrapControlPlaneMachinePolicy
 			machine.ID == seeded.ID &&
 			machine.Policy.AllowBuilds &&
 			machine.Policy.BuildTier == model.MachineBuildTierLarge &&
-			machine.Policy.AllowSharedPool {
+			machine.Policy.AllowSharedPool &&
+			machine.Policy.DesiredControlPlaneRole == model.MachineControlPlaneRoleMember {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -220,6 +222,126 @@ func TestStartBackgroundWarmersBackfillsLegacyBootstrapControlPlaneMachinePolicy
 		t.Fatalf("load backfilled bootstrap control-plane machine: %v", err)
 	}
 	t.Fatalf("expected background warmers to backfill legacy machine policy, got %#v", machine.Policy)
+}
+
+func TestSyncBootstrapControlPlaneMachinesBackfillsAuditlessLegacyControlPlaneRole(t *testing.T) {
+	t.Parallel()
+
+	storePath := filepath.Join(t.TempDir(), "store.json")
+	stateStore := store.New(storePath)
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	updatedAt := time.Date(2026, time.April, 20, 12, 0, 0, 0, time.UTC)
+	if err := rewriteBootstrapControlPlaneMachine(storePath, func(machine *model.Machine) {
+		*machine = legacyBootstrapControlPlaneMachine()
+		machine.Policy.AllowBuilds = true
+		machine.Policy.BuildTier = model.MachineBuildTierLarge
+		machine.Policy.AllowSharedPool = true
+		machine.UpdatedAt = updatedAt
+		machine.LastSeenAt = &updatedAt
+	}); err != nil {
+		t.Fatalf("seed partially backfilled bootstrap control-plane machine: %v", err)
+	}
+
+	kubeServer := newBootstrapControlPlaneKubeServerWithLabels(t, map[string]string{
+		runtimepkg.BuildNodeLabelKey:  runtimepkg.BuildNodeLabelValue,
+		runtimepkg.BuildTierLabelKey:  model.MachineBuildTierLarge,
+		runtimepkg.SharedPoolLabelKey: runtimepkg.SharedPoolLabelValue,
+	})
+	defer kubeServer.Close()
+
+	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	snapshots, err := server.fetchClusterNodeInventory(context.Background())
+	if err != nil {
+		t.Fatalf("fetch cluster node inventory: %v", err)
+	}
+	if err := server.syncBootstrapControlPlaneMachinesFromSnapshots(snapshots); err != nil {
+		t.Fatalf("sync bootstrap control-plane machines: %v", err)
+	}
+
+	machine, err := stateStore.GetMachineByClusterNodeName("gcp1")
+	if err != nil {
+		t.Fatalf("load backfilled bootstrap control-plane machine: %v", err)
+	}
+	if machine.Policy.DesiredControlPlaneRole != model.MachineControlPlaneRoleMember {
+		t.Fatalf("expected control-plane role backfill %q, got %q", model.MachineControlPlaneRoleMember, machine.Policy.DesiredControlPlaneRole)
+	}
+}
+
+func TestSyncBootstrapControlPlaneMachinesPreservesAuditedControlPlaneRole(t *testing.T) {
+	t.Parallel()
+
+	storePath := filepath.Join(t.TempDir(), "store.json")
+	stateStore := store.New(storePath)
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	updatedAt := time.Date(2026, time.April, 20, 12, 0, 0, 0, time.UTC)
+	if err := rewriteBootstrapControlPlaneMachine(storePath, func(machine *model.Machine) {
+		*machine = legacyBootstrapControlPlaneMachine()
+		machine.Policy.AllowBuilds = true
+		machine.Policy.BuildTier = model.MachineBuildTierLarge
+		machine.Policy.AllowSharedPool = true
+		machine.UpdatedAt = updatedAt
+		machine.LastSeenAt = &updatedAt
+	}); err != nil {
+		t.Fatalf("seed audited bootstrap control-plane machine: %v", err)
+	}
+	if err := stateStore.AppendAuditEvent(model.AuditEvent{
+		ID:         model.NewID("audit"),
+		ActorType:  model.ActorTypeSystem,
+		ActorID:    "system",
+		Action:     "cluster.node.policy",
+		TargetType: "cluster_node",
+		TargetID:   "gcp1",
+		Metadata:   map[string]string{"cluster_node_name": "gcp1"},
+		CreatedAt:  updatedAt.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("append cluster node policy audit event: %v", err)
+	}
+
+	kubeServer := newBootstrapControlPlaneKubeServerWithLabels(t, map[string]string{
+		runtimepkg.BuildNodeLabelKey:  runtimepkg.BuildNodeLabelValue,
+		runtimepkg.BuildTierLabelKey:  model.MachineBuildTierLarge,
+		runtimepkg.SharedPoolLabelKey: runtimepkg.SharedPoolLabelValue,
+	})
+	defer kubeServer.Close()
+
+	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	snapshots, err := server.fetchClusterNodeInventory(context.Background())
+	if err != nil {
+		t.Fatalf("fetch cluster node inventory: %v", err)
+	}
+	if err := server.syncBootstrapControlPlaneMachinesFromSnapshots(snapshots); err != nil {
+		t.Fatalf("sync bootstrap control-plane machines: %v", err)
+	}
+
+	machine, err := stateStore.GetMachineByClusterNodeName("gcp1")
+	if err != nil {
+		t.Fatalf("load preserved bootstrap control-plane machine: %v", err)
+	}
+	if machine.Policy.DesiredControlPlaneRole != model.MachineControlPlaneRoleNone {
+		t.Fatalf("expected audited control-plane role to remain %q, got %q", model.MachineControlPlaneRoleNone, machine.Policy.DesiredControlPlaneRole)
+	}
 }
 
 func TestSetClusterNodePolicySeedsBootstrapControlPlaneMachine(t *testing.T) {
@@ -305,6 +427,60 @@ func TestSetClusterNodePolicySeedsBootstrapControlPlaneMachine(t *testing.T) {
 
 func newBootstrapControlPlaneKubeServer(t *testing.T) *httptest.Server {
 	return newBootstrapControlPlaneKubeServerWithLabels(t, nil)
+}
+
+func legacyBootstrapControlPlaneMachine() model.Machine {
+	now := time.Date(2026, time.April, 20, 0, 0, 0, 0, time.UTC)
+	return model.Machine{
+		ID:              model.NewID("machine"),
+		Name:            "gcp1",
+		Scope:           model.MachineScopePlatformNode,
+		ConnectionMode:  model.MachineConnectionModeCluster,
+		Status:          model.RuntimeStatusActive,
+		Endpoint:        "203.0.113.10",
+		Labels:          map[string]string{"node-role.kubernetes.io/control-plane": ""},
+		ClusterNodeName: "gcp1",
+		Policy: model.MachinePolicy{
+			AllowBuilds:             false,
+			BuildTier:               model.MachineBuildTierMedium,
+			AllowSharedPool:         false,
+			DesiredControlPlaneRole: model.MachineControlPlaneRoleNone,
+		},
+		CreatedAt:  now,
+		UpdatedAt:  now,
+		LastSeenAt: &now,
+	}
+}
+
+func rewriteBootstrapControlPlaneMachine(storePath string, mutate func(machine *model.Machine)) error {
+	data, err := os.ReadFile(storePath)
+	if err != nil {
+		return err
+	}
+	var state model.State
+	if err := json.Unmarshal(data, &state); err != nil {
+		return err
+	}
+
+	found := false
+	for idx := range state.Machines {
+		if strings.EqualFold(strings.TrimSpace(state.Machines[idx].ClusterNodeName), "gcp1") {
+			mutate(&state.Machines[idx])
+			found = true
+			break
+		}
+	}
+	if !found {
+		machine := legacyBootstrapControlPlaneMachine()
+		mutate(&machine)
+		state.Machines = append(state.Machines, machine)
+	}
+
+	next, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(storePath, next, 0o600)
 }
 
 func newBootstrapControlPlaneKubeServerWithLabels(t *testing.T, extraLabels map[string]string) *httptest.Server {

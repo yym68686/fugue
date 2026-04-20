@@ -1698,6 +1698,9 @@ func TestEnsurePlatformMachineForClusterNodeReusesSeededBootstrapMachine(t *test
 	if strings.TrimSpace(seeded.NodeKeyID) != "" {
 		t.Fatalf("expected seeded machine to have no node key id, got %q", seeded.NodeKeyID)
 	}
+	if seeded.Policy.DesiredControlPlaneRole != model.MachineControlPlaneRoleMember {
+		t.Fatalf("expected seeded control-plane role %q, got %q", model.MachineControlPlaneRoleMember, seeded.Policy.DesiredControlPlaneRole)
+	}
 
 	key, secret, err := s.CreateScopedNodeKey("", "bootstrap-control-plane", model.NodeKeyScopePlatformNode)
 	if err != nil {
@@ -1748,18 +1751,31 @@ func TestEnsurePlatformMachineForClusterNodeBackfillsLegacySeededPolicyFromLiveL
 		t.Fatalf("init store: %v", err)
 	}
 
-	seeded, err := s.EnsurePlatformMachineForClusterNode(
-		"gcp1",
-		"203.0.113.10",
-		map[string]string{"node-role.kubernetes.io/control-plane": ""},
-		"gcp1",
-		"machine-id-gcp1",
-	)
-	if err != nil {
-		t.Fatalf("seed bootstrap platform machine: %v", err)
+	now := time.Date(2026, time.April, 20, 0, 0, 0, 0, time.UTC)
+	legacy := model.Machine{
+		ID:              model.NewID("machine"),
+		Name:            "gcp1",
+		Scope:           model.MachineScopePlatformNode,
+		ConnectionMode:  model.MachineConnectionModeCluster,
+		Status:          model.RuntimeStatusActive,
+		Endpoint:        "203.0.113.10",
+		Labels:          map[string]string{"node-role.kubernetes.io/control-plane": ""},
+		ClusterNodeName: "gcp1",
+		Policy: model.MachinePolicy{
+			AllowBuilds:             false,
+			BuildTier:               model.MachineBuildTierMedium,
+			AllowSharedPool:         false,
+			DesiredControlPlaneRole: model.MachineControlPlaneRoleNone,
+		},
+		CreatedAt:  now,
+		UpdatedAt:  now,
+		LastSeenAt: &now,
 	}
-	if seeded.Policy.AllowBuilds {
-		t.Fatalf("expected legacy seed builds disabled, got %#v", seeded.Policy)
+	if err := s.withLockedState(true, func(state *model.State) error {
+		state.Machines = append(state.Machines, legacy)
+		return nil
+	}); err != nil {
+		t.Fatalf("insert legacy bootstrap platform machine: %v", err)
 	}
 
 	backfilled, err := s.EnsurePlatformMachineForClusterNode(
@@ -1777,8 +1793,8 @@ func TestEnsurePlatformMachineForClusterNodeBackfillsLegacySeededPolicyFromLiveL
 	if err != nil {
 		t.Fatalf("backfill bootstrap platform machine policy: %v", err)
 	}
-	if backfilled.ID != seeded.ID {
-		t.Fatalf("expected backfill to reuse machine %q, got %q", seeded.ID, backfilled.ID)
+	if backfilled.ID != legacy.ID {
+		t.Fatalf("expected backfill to reuse machine %q, got %q", legacy.ID, backfilled.ID)
 	}
 	if !backfilled.Policy.AllowBuilds {
 		t.Fatalf("expected backfilled builds enabled, got %#v", backfilled.Policy)
@@ -1788,6 +1804,9 @@ func TestEnsurePlatformMachineForClusterNodeBackfillsLegacySeededPolicyFromLiveL
 	}
 	if !backfilled.Policy.AllowSharedPool {
 		t.Fatalf("expected backfilled shared-pool enabled, got %#v", backfilled.Policy)
+	}
+	if backfilled.Policy.DesiredControlPlaneRole != model.MachineControlPlaneRoleMember {
+		t.Fatalf("expected backfilled control-plane role %q, got %q", model.MachineControlPlaneRoleMember, backfilled.Policy.DesiredControlPlaneRole)
 	}
 }
 

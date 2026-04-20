@@ -9,6 +9,8 @@ import (
 	runtimepkg "fugue/internal/runtime"
 )
 
+const kubernetesControlPlaneRoleLabelKey = "node-role.kubernetes.io/control-plane"
+
 func defaultMachinePolicyForScope(scope string) model.MachinePolicy {
 	return model.MachinePolicy{
 		AllowBuilds:             false,
@@ -48,10 +50,14 @@ func seedMachinePolicyFromLabels(scope string, labels map[string]string) model.M
 	) {
 		policy.AllowSharedPool = true
 	}
-	if role := model.NormalizeMachineControlPlaneRole(
-		strings.TrimSpace(labels[runtimepkg.ControlPlaneDesiredRoleKey]),
-	); role != "" {
-		policy.DesiredControlPlaneRole = role
+	if rawRole, ok := labels[runtimepkg.ControlPlaneDesiredRoleKey]; ok {
+		if role := model.NormalizeMachineControlPlaneRole(strings.TrimSpace(rawRole)); role != "" {
+			policy.DesiredControlPlaneRole = role
+		}
+	} else if model.NormalizeMachineScope(scope) == model.MachineScopePlatformNode {
+		if _, ok := labels[kubernetesControlPlaneRoleLabelKey]; ok {
+			policy.DesiredControlPlaneRole = model.MachineControlPlaneRoleMember
+		}
 	}
 	return policy
 }

@@ -1127,6 +1127,47 @@ func needsLegacyBootstrapControlPlaneMachineBackfill(snapshot clusterNodeSnapsho
 	return store.NeedsLegacyPlatformMachinePolicyBackfill(machine, snapshot.labels)
 }
 
+func needsLegacyBootstrapControlPlaneRoleBackfill(snapshot clusterNodeSnapshot, machine model.Machine) bool {
+	if !shouldSeedBootstrapControlPlaneMachine(snapshot) {
+		return false
+	}
+	if model.NormalizeMachineScope(machine.Scope) != model.MachineScopePlatformNode {
+		return false
+	}
+	if strings.TrimSpace(machine.TenantID) != "" || strings.TrimSpace(machine.RuntimeID) != "" {
+		return false
+	}
+	if role := model.NormalizeMachineControlPlaneRole(machine.Policy.DesiredControlPlaneRole); role != "" && role != model.MachineControlPlaneRoleNone {
+		return false
+	}
+	if _, ok := snapshot.labels[runtime.ControlPlaneDesiredRoleKey]; ok {
+		return false
+	}
+	return true
+}
+
+func (s *Server) clusterNodePolicyAuditNodeNames() (map[string]struct{}, error) {
+	events, err := s.store.ListAuditEvents("", true)
+	if err != nil {
+		return nil, err
+	}
+	nodeNames := make(map[string]struct{}, len(events))
+	for _, event := range events {
+		if event.Action != "cluster.node.policy" {
+			continue
+		}
+		nodeName := strings.TrimSpace(event.TargetID)
+		if nodeName == "" {
+			nodeName = strings.TrimSpace(event.Metadata["cluster_node_name"])
+		}
+		if nodeName == "" {
+			continue
+		}
+		nodeNames[nodeName] = struct{}{}
+	}
+	return nodeNames, nil
+}
+
 func bootstrapControlPlaneMachineName(snapshot clusterNodeSnapshot) string {
 	if value := strings.TrimSpace(snapshot.identity.hostname); value != "" {
 		return value
@@ -1167,6 +1208,36 @@ func (s *Server) ensureBootstrapControlPlaneMachines(snapshots []clusterNodeSnap
 	}
 	runtimeByClusterNode := buildRuntimeByClusterNodeIndex(runtimes)
 	_, machineByClusterNode := buildMachineIndexes(machines)
+	roleBackfillCandidates := make(map[string]struct{})
+	for _, snapshot := range snapshots {
+		nodeName := strings.TrimSpace(snapshot.node.Name)
+		if !shouldSeedBootstrapControlPlaneMachine(snapshot) {
+			continue
+		}
+		if _, ok := runtimeByClusterNode[nodeName]; ok {
+			continue
+		}
+		machine, ok := machineByClusterNode[nodeName]
+		if !ok {
+			continue
+		}
+		if needsLegacyBootstrapControlPlaneMachineBackfill(snapshot, machine) {
+			continue
+		}
+		if needsLegacyBootstrapControlPlaneRoleBackfill(snapshot, machine) {
+			roleBackfillCandidates[nodeName] = struct{}{}
+		}
+	}
+
+	policyAuditNodeNames := map[string]struct{}{}
+	if len(roleBackfillCandidates) > 0 {
+		auditedNodeNames, err := s.clusterNodePolicyAuditNodeNames()
+		if err != nil {
+			return nil, err
+		}
+		policyAuditNodeNames = auditedNodeNames
+	}
+
 	changed := false
 	for _, snapshot := range snapshots {
 		nodeName := strings.TrimSpace(snapshot.node.Name)
@@ -1178,6 +1249,16 @@ func (s *Server) ensureBootstrapControlPlaneMachines(snapshots []clusterNodeSnap
 		}
 		if machine, ok := machineByClusterNode[nodeName]; ok {
 			if !needsLegacyBootstrapControlPlaneMachineBackfill(snapshot, machine) {
+				if _, candidate := roleBackfillCandidates[nodeName]; candidate {
+					if _, audited := policyAuditNodeNames[nodeName]; !audited {
+						nextPolicy := machine.Policy
+						nextPolicy.DesiredControlPlaneRole = model.MachineControlPlaneRoleMember
+						if _, err := s.store.SetMachinePolicyByClusterNodeName(nodeName, nextPolicy); err != nil {
+							return nil, err
+						}
+						changed = true
+					}
+				}
 				continue
 			}
 			if _, err := s.store.EnsurePlatformMachineForClusterNode(
