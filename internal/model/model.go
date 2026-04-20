@@ -26,10 +26,6 @@ const (
 	MachineScopeTenantRuntime = "tenant-runtime"
 	MachineScopePlatformNode  = "platform-node"
 
-	MachineBuildTierSmall  = "small"
-	MachineBuildTierMedium = "medium"
-	MachineBuildTierLarge  = "large"
-
 	MachineControlPlaneRoleNone      = "none"
 	MachineControlPlaneRoleCandidate = "candidate"
 	MachineControlPlaneRoleMember    = "member"
@@ -317,7 +313,6 @@ type Machine struct {
 
 type MachinePolicy struct {
 	AllowBuilds             bool   `json:"allow_builds"`
-	BuildTier               string `json:"build_tier,omitempty"`
 	AllowSharedPool         bool   `json:"allow_shared_pool"`
 	DesiredControlPlaneRole string `json:"desired_control_plane_role,omitempty"`
 }
@@ -419,11 +414,9 @@ type ClusterNodeMachine struct {
 
 type ClusterNodePolicy struct {
 	AllowBuilds               bool   `json:"allow_builds"`
-	BuildTier                 string `json:"build_tier,omitempty"`
 	AllowSharedPool           bool   `json:"allow_shared_pool"`
 	DesiredControlPlaneRole   string `json:"desired_control_plane_role,omitempty"`
 	EffectiveBuilds           bool   `json:"effective_builds"`
-	EffectiveBuildTier        string `json:"effective_build_tier,omitempty"`
 	EffectiveSharedPool       bool   `json:"effective_shared_pool"`
 	EffectiveControlPlaneRole string `json:"effective_control_plane_role,omitempty"`
 }
@@ -1055,19 +1048,6 @@ func NormalizeMachineScope(raw string) string {
 		return MachineScopePlatformNode
 	case "", MachineScopeTenantRuntime:
 		return MachineScopeTenantRuntime
-	default:
-		return ""
-	}
-}
-
-func NormalizeMachineBuildTier(raw string) string {
-	switch strings.TrimSpace(strings.ToLower(raw)) {
-	case MachineBuildTierSmall:
-		return MachineBuildTierSmall
-	case MachineBuildTierLarge:
-		return MachineBuildTierLarge
-	case "", MachineBuildTierMedium:
-		return MachineBuildTierMedium
 	default:
 		return ""
 	}

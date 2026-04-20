@@ -1778,7 +1778,7 @@ label_control_plane_node() {
   zone="$(node_zone_for_alias "${host}" || true)"
   region="$(node_region_for_alias "${host}" || true)"
 
-  ssh_root_run "${PRIMARY_ALIAS}" "k3s kubectl label node $(printf '%q' "${node_name}") $(printf '%q' "fugue.install/profile=combined") $(printf '%q' "fugue.install/role=${role}") $(printf '%q' "fugue.io/shared-pool=internal") $(printf '%q' "fugue.io/build=true") $(printf '%q' "fugue.io/build-tier=medium") --overwrite"
+  ssh_root_run "${PRIMARY_ALIAS}" "k3s kubectl label node $(printf '%q' "${node_name}") $(printf '%q' "fugue.install/profile=combined") $(printf '%q' "fugue.install/role=${role}") $(printf '%q' "fugue.io/shared-pool=internal") $(printf '%q' "fugue.io/build=true") $(printf '%q' "fugue.io/build-tier-") --overwrite"
   if [[ -n "${country_code}" ]]; then
     ssh_root_run "${PRIMARY_ALIAS}" "k3s kubectl label node $(printf '%q' "${node_name}") $(printf '%q' "fugue.io/location-country-code=${country_code}") --overwrite"
   fi

@@ -470,9 +470,6 @@ func machineJoinLabelMap(machine model.Machine) map[string]string {
 	}
 	if machine.Policy.AllowBuilds {
 		labels[runtime.BuildNodeLabelKey] = runtime.BuildNodeLabelValue
-		if tier := model.NormalizeMachineBuildTier(machine.Policy.BuildTier); tier != "" {
-			labels[runtime.BuildTierLabelKey] = tier
-		}
 	}
 	if role := model.NormalizeMachineControlPlaneRole(machine.Policy.DesiredControlPlaneRole); role != "" && role != model.MachineControlPlaneRoleNone {
 		labels[runtime.ControlPlaneDesiredRoleKey] = role

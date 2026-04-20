@@ -155,7 +155,6 @@ func buildRuntimeSnapshotMachine(runtimeObj model.Runtime) model.Machine {
 		ClusterNodeName: strings.TrimSpace(runtimeObj.ClusterNodeName),
 		Policy: model.MachinePolicy{
 			AllowBuilds:             false,
-			BuildTier:               model.MachineBuildTierMedium,
 			AllowSharedPool:         model.NormalizeRuntimePoolMode(runtimeObj.Type, runtimeObj.PoolMode) == model.RuntimePoolModeInternalShared,
 			DesiredControlPlaneRole: model.MachineControlPlaneRoleNone,
 		},
@@ -181,51 +180,33 @@ func machineHasSavedPolicy(machine *model.Machine) bool {
 }
 
 func buildClusterNodePolicyView(snapshot clusterNodeSnapshot, machine *model.Machine, runtimeObj *model.Runtime) *model.ClusterNodePolicy {
-	effectiveBuilds, effectiveBuildTier := effectiveBuildPolicy(snapshot)
+	effectiveBuilds := effectiveBuildPolicy(snapshot)
 	effectiveSharedPool := snapshot.sharedPool
 	desiredBuilds := effectiveBuilds
-	desiredBuildTier := effectiveBuildTier
 	desiredSharedPool := effectiveSharedPool
 	desiredRole := desiredControlPlaneRole(snapshot, machine)
 	hasSavedPolicy := machineHasSavedPolicy(machine)
 
 	if hasSavedPolicy {
 		desiredBuilds = machine.Policy.AllowBuilds
-		desiredBuildTier = machine.Policy.BuildTier
 		desiredSharedPool = machine.Policy.AllowSharedPool
 	}
 	if runtimeObj != nil && !hasSavedPolicy {
 		desiredSharedPool = model.NormalizeRuntimePoolMode(runtimeObj.Type, runtimeObj.PoolMode) == model.RuntimePoolModeInternalShared
 	}
-	if desiredBuildTier == "" {
-		desiredBuildTier = model.MachineBuildTierMedium
-	}
-	if effectiveBuildTier == "" {
-		effectiveBuildTier = desiredBuildTier
-	}
 
 	return &model.ClusterNodePolicy{
 		AllowBuilds:               desiredBuilds,
-		BuildTier:                 desiredBuildTier,
 		AllowSharedPool:           desiredSharedPool,
 		DesiredControlPlaneRole:   desiredRole,
 		EffectiveBuilds:           effectiveBuilds,
-		EffectiveBuildTier:        effectiveBuildTier,
 		EffectiveSharedPool:       effectiveSharedPool,
 		EffectiveControlPlaneRole: effectiveControlPlaneRole(snapshot, desiredRole),
 	}
 }
 
-func effectiveBuildPolicy(snapshot clusterNodeSnapshot) (bool, string) {
-	enabled := strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.BuildNodeLabelKey), runtimepkg.BuildNodeLabelValue)
-	tier := model.NormalizeMachineBuildTier(firstNodeLabel(snapshot.labels, runtimepkg.BuildTierLabelKey))
-	if !enabled {
-		return false, tier
-	}
-	if tier == "" {
-		tier = model.MachineBuildTierMedium
-	}
-	return true, tier
+func effectiveBuildPolicy(snapshot clusterNodeSnapshot) bool {
+	return strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.BuildNodeLabelKey), runtimepkg.BuildNodeLabelValue)
 }
 
 func desiredControlPlaneRole(snapshot clusterNodeSnapshot, machine *model.Machine) string {

@@ -9,10 +9,6 @@ import (
 const (
 	defaultBuilderBuildNodeLabelKey       = "fugue.io/build"
 	defaultBuilderBuildNodeLabelValue     = "true"
-	defaultBuilderLargeNodeLabelKey       = "fugue.io/build-tier"
-	defaultBuilderLargeNodeLabelValue     = "large"
-	defaultBuilderMediumNodeLabelValue    = "medium"
-	defaultBuilderSmallNodeLabelValue     = "small"
 	defaultBuilderPreferredHostnameWeight = 100
 	defaultBuilderCandidateCount          = 3
 	defaultBuilderSelectionTimeoutSec     = 600
@@ -48,10 +44,6 @@ type BuilderToleration struct {
 type BuilderPodPolicy struct {
 	BuildNodeLabelKey            string                `json:"buildNodeLabelKey,omitempty"`
 	BuildNodeLabelValue          string                `json:"buildNodeLabelValue,omitempty"`
-	LargeNodeLabelKey            string                `json:"largeNodeLabelKey,omitempty"`
-	LargeNodeLabelValue          string                `json:"largeNodeLabelValue,omitempty"`
-	MediumNodeLabelValue         string                `json:"mediumNodeLabelValue,omitempty"`
-	SmallNodeLabelValue          string                `json:"smallNodeLabelValue,omitempty"`
 	CandidateCount               int                   `json:"candidateCount,omitempty"`
 	SelectionTimeoutSeconds      int                   `json:"selectionTimeoutSeconds,omitempty"`
 	RetryIntervalSeconds         int                   `json:"retryIntervalSeconds,omitempty"`
@@ -65,10 +57,6 @@ func defaultBuilderPodPolicy() BuilderPodPolicy {
 	return BuilderPodPolicy{
 		BuildNodeLabelKey:            defaultBuilderBuildNodeLabelKey,
 		BuildNodeLabelValue:          defaultBuilderBuildNodeLabelValue,
-		LargeNodeLabelKey:            defaultBuilderLargeNodeLabelKey,
-		LargeNodeLabelValue:          defaultBuilderLargeNodeLabelValue,
-		MediumNodeLabelValue:         defaultBuilderMediumNodeLabelValue,
-		SmallNodeLabelValue:          defaultBuilderSmallNodeLabelValue,
 		CandidateCount:               defaultBuilderCandidateCount,
 		SelectionTimeoutSeconds:      defaultBuilderSelectionTimeoutSec,
 		RetryIntervalSeconds:         defaultBuilderRetryIntervalSec,
@@ -115,18 +103,6 @@ func normalizeBuilderPodPolicy(policy BuilderPodPolicy) BuilderPodPolicy {
 	}
 	if strings.TrimSpace(policy.BuildNodeLabelValue) == "" {
 		policy.BuildNodeLabelValue = defaults.BuildNodeLabelValue
-	}
-	if strings.TrimSpace(policy.LargeNodeLabelKey) == "" {
-		policy.LargeNodeLabelKey = defaults.LargeNodeLabelKey
-	}
-	if strings.TrimSpace(policy.LargeNodeLabelValue) == "" {
-		policy.LargeNodeLabelValue = defaults.LargeNodeLabelValue
-	}
-	if strings.TrimSpace(policy.MediumNodeLabelValue) == "" {
-		policy.MediumNodeLabelValue = defaults.MediumNodeLabelValue
-	}
-	if strings.TrimSpace(policy.SmallNodeLabelValue) == "" {
-		policy.SmallNodeLabelValue = defaults.SmallNodeLabelValue
 	}
 	if policy.CandidateCount <= 0 {
 		policy.CandidateCount = defaults.CandidateCount

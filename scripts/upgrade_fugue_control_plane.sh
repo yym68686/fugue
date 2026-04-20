@@ -1096,10 +1096,10 @@ sync_route_a_edge_proxy() {
 }
 
 label_default_builder_nodes() {
-  log "labeling shared control-plane nodes as medium builder candidates"
+  log "labeling shared control-plane nodes as builder candidates"
   ${KUBECTL} label node -l fugue.install/profile=combined \
     fugue.io/build=true \
-    fugue.io/build-tier=medium \
+    fugue.io/build-tier- \
     fugue.io/shared-pool=internal \
     --overwrite >/dev/null
 }

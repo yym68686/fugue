@@ -4202,27 +4202,21 @@ components:
       required:
         [
           allow_builds,
-          build_tier,
           allow_shared_pool,
           desired_control_plane_role,
           effective_builds,
-          effective_build_tier,
           effective_shared_pool,
           effective_control_plane_role
         ]
       properties:
         allow_builds:
           type: boolean
-        build_tier:
-          type: string
         allow_shared_pool:
           type: boolean
         desired_control_plane_role:
           type: string
         effective_builds:
           type: boolean
-        effective_build_tier:
-          type: string
         effective_shared_pool:
           type: boolean
         effective_control_plane_role:
@@ -5241,8 +5235,6 @@ components:
       properties:
         allow_builds:
           type: boolean
-        build_tier:
-          type: string
         allow_shared_pool:
           type: boolean
         desired_control_plane_role:

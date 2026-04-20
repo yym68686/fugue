@@ -18,7 +18,6 @@ const (
 	SharedPoolLabelValue        = "internal"
 	BuildNodeLabelKey           = "fugue.io/build"
 	BuildNodeLabelValue         = "true"
-	BuildTierLabelKey           = "fugue.io/build-tier"
 	ControlPlaneDesiredRoleKey  = "fugue.io/control-plane-desired-role"
 	RegionLabelKey              = "topology.kubernetes.io/region"
 	LegacyRegionLabelKey        = "failure-domain.beta.kubernetes.io/region"

@@ -15,7 +15,6 @@ func TestBuildClusterNodePolicyViewFallsBackToLiveStateForSyntheticRuntimeMachin
 		sharedPool: false,
 		labels: map[string]string{
 			runtimepkg.BuildNodeLabelKey:          runtimepkg.BuildNodeLabelValue,
-			runtimepkg.BuildTierLabelKey:          model.MachineBuildTierLarge,
 			runtimepkg.ControlPlaneDesiredRoleKey: model.MachineControlPlaneRoleCandidate,
 		},
 	}
@@ -41,9 +40,6 @@ func TestBuildClusterNodePolicyViewFallsBackToLiveStateForSyntheticRuntimeMachin
 	}
 	if !policy.AllowBuilds {
 		t.Fatalf("expected desired builds to fall back to live state, got %#v", policy)
-	}
-	if policy.BuildTier != model.MachineBuildTierLarge {
-		t.Fatalf("expected desired build tier %q, got %q", model.MachineBuildTierLarge, policy.BuildTier)
 	}
 	if !policy.AllowSharedPool {
 		t.Fatalf("expected desired shared-pool to follow runtime pool mode, got %#v", policy)

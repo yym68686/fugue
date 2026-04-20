@@ -11,9 +11,10 @@ import (
 	"fugue/internal/store"
 )
 
+const legacyBuildTierLabelKey = "fugue.io/build-tier"
+
 type setClusterNodePolicyRequest struct {
 	AllowBuilds             *bool   `json:"allow_builds"`
-	BuildTier               *string `json:"build_tier"`
 	AllowSharedPool         *bool   `json:"allow_shared_pool"`
 	DesiredControlPlaneRole *string `json:"desired_control_plane_role"`
 }
@@ -110,7 +111,6 @@ func (s *Server) handleSetClusterNodePolicy(w http.ResponseWriter, r *http.Reque
 	metadata := map[string]string{
 		"cluster_node_name":          nodeName,
 		"allow_builds":               boolString(machine.Policy.AllowBuilds),
-		"build_tier":                 machine.Policy.BuildTier,
 		"allow_shared_pool":          boolString(machine.Policy.AllowSharedPool),
 		"desired_control_plane_role": machine.Policy.DesiredControlPlaneRole,
 	}
@@ -137,7 +137,6 @@ func (s *Server) handleSetClusterNodePolicy(w http.ResponseWriter, r *http.Reque
 
 func (req setClusterNodePolicyRequest) hasUpdates() bool {
 	return req.AllowBuilds != nil ||
-		req.BuildTier != nil ||
 		req.AllowSharedPool != nil ||
 		req.DesiredControlPlaneRole != nil
 }
@@ -146,13 +145,6 @@ func (req setClusterNodePolicyRequest) mergeInto(current model.MachinePolicy, ru
 	next := current
 	if req.AllowBuilds != nil {
 		next.AllowBuilds = *req.AllowBuilds
-	}
-	if req.BuildTier != nil {
-		buildTier := model.NormalizeMachineBuildTier(strings.TrimSpace(*req.BuildTier))
-		if buildTier == "" {
-			return model.MachinePolicy{}, store.ErrInvalidInput
-		}
-		next.BuildTier = buildTier
 	}
 	if req.AllowSharedPool != nil && runtimeObj == nil {
 		next.AllowSharedPool = *req.AllowSharedPool
@@ -284,7 +276,7 @@ func buildMachineNodeLabelsPatch(current map[string]string, machine model.Machin
 		runtimepkg.MachineIDLabelKey,
 		runtimepkg.MachineScopeLabelKey,
 		runtimepkg.BuildNodeLabelKey,
-		runtimepkg.BuildTierLabelKey,
+		legacyBuildTierLabelKey,
 		runtimepkg.ControlPlaneDesiredRoleKey,
 	}
 	if runtimeObj == nil {

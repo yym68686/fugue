@@ -62,8 +62,8 @@ func TestSelectBuilderCandidatesLightPrefersLowerAvailableResources(t *testing.T
 	}
 
 	candidates := selectBuilderCandidates(policy, builderWorkloadProfileLight, demand, []builderNodeSnapshot{
-		builderTestNode("lower-available", "lower-available", policy, policy.LargeNodeLabelValue, "4000m", "16Gi", "20Gi", "200m", "12Gi", "2Gi"),
-		builderTestNode("higher-available", "higher-available", policy, policy.SmallNodeLabelValue, "2000m", "8Gi", "10Gi", "200m", "1Gi", "1Gi"),
+		builderTestNode("lower-available", "lower-available", policy, "4000m", "16Gi", "20Gi", "200m", "12Gi", "2Gi"),
+		builderTestNode("higher-available", "higher-available", policy, "2000m", "8Gi", "10Gi", "200m", "1Gi", "1Gi"),
 	}, nil, nil)
 
 	if len(candidates) != 2 {
@@ -84,8 +84,8 @@ func TestSelectBuilderCandidatesHeavyPrefersHigherAvailableResources(t *testing.
 	}
 
 	candidates := selectBuilderCandidates(policy, builderWorkloadProfileHeavy, demand, []builderNodeSnapshot{
-		builderTestNode("lower-available", "lower-available", policy, policy.LargeNodeLabelValue, "4000m", "16Gi", "20Gi", "200m", "11Gi", "2Gi"),
-		builderTestNode("higher-available", "higher-available", policy, policy.SmallNodeLabelValue, "2000m", "8Gi", "10Gi", "200m", "2Gi", "1Gi"),
+		builderTestNode("lower-available", "lower-available", policy, "4000m", "16Gi", "20Gi", "200m", "11Gi", "2Gi"),
+		builderTestNode("higher-available", "higher-available", policy, "2000m", "8Gi", "10Gi", "200m", "2Gi", "1Gi"),
 	}, nil, nil)
 
 	if len(candidates) != 2 {
@@ -140,8 +140,8 @@ func TestSelectBuilderCandidatesReservationsReduceHeadroom(t *testing.T) {
 	}
 
 	candidates := selectBuilderCandidates(policy, builderWorkloadProfileLight, demand, []builderNodeSnapshot{
-		builderTestNode("medium-a", "medium-a", policy, policy.MediumNodeLabelValue, "3000m", "8Gi", "8Gi", "0", "0", "0"),
-		builderTestNode("medium-b", "medium-b", policy, policy.MediumNodeLabelValue, "3000m", "8Gi", "8Gi", "0", "0", "0"),
+		builderTestNode("medium-a", "medium-a", policy, "3000m", "8Gi", "8Gi", "0", "0", "0"),
+		builderTestNode("medium-b", "medium-b", policy, "3000m", "8Gi", "8Gi", "0", "0", "0"),
 	}, []builderReservation{
 		{
 			Name:     "reservation-a",
@@ -173,10 +173,8 @@ func TestSelectBuilderCandidatesFallsBackWhenNoBuildPoolLabelsExist(t *testing.T
 		{
 			Name:     "node-a",
 			Hostname: "node-a",
-			Labels: map[string]string{
-				policy.LargeNodeLabelKey: policy.MediumNodeLabelValue,
-			},
-			Ready: true,
+			Labels:   map[string]string{},
+			Ready:    true,
 			Allocatable: builderResourceDemand{
 				CPUMilli:       parseBuilderCPUMilli("2000m"),
 				MemoryBytes:    parseBuilderBytes("8Gi"),
@@ -186,10 +184,8 @@ func TestSelectBuilderCandidatesFallsBackWhenNoBuildPoolLabelsExist(t *testing.T
 		{
 			Name:     "node-b",
 			Hostname: "node-b",
-			Labels: map[string]string{
-				policy.LargeNodeLabelKey: policy.LargeNodeLabelValue,
-			},
-			Ready: true,
+			Labels:   map[string]string{},
+			Ready:    true,
 			Allocatable: builderResourceDemand{
 				CPUMilli:       parseBuilderCPUMilli("3000m"),
 				MemoryBytes:    parseBuilderBytes("12Gi"),
@@ -214,12 +210,11 @@ func TestSelectBuilderCandidatesFallbackExcludesTenantScopedNodes(t *testing.T) 
 	}
 
 	snapshots := []builderNodeSnapshot{
-		builderTestNodeWithFS("shared-a", "shared-a", policy, policy.MediumNodeLabelValue, "2000m", "8Gi", "10Gi", "18Gi", "0", "0", "0"),
+		builderTestNodeWithFS("shared-a", "shared-a", policy, "2000m", "8Gi", "10Gi", "18Gi", "0", "0", "0"),
 		{
 			Name:     "alicehk2",
 			Hostname: "alicehk2",
 			Labels: map[string]string{
-				policy.LargeNodeLabelKey:  policy.LargeNodeLabelValue,
 				runtime.NodeModeLabelKey:  model.RuntimeTypeManagedOwned,
 				runtime.TenantIDLabelKey:  "tenant_demo",
 				runtime.RuntimeIDLabelKey: "runtime_demo",
@@ -255,8 +250,8 @@ func TestSelectBuilderCandidatesIncludesExplicitBuildPoolTenantScopedNodes(t *te
 		t.Fatalf("builder demand: %v", err)
 	}
 
-	shared := builderTestNode("shared-a", "shared-a", policy, policy.MediumNodeLabelValue, "4000m", "4Gi", "24Gi", "250m", "1536Mi", "3Gi")
-	alicehk2 := builderTestNode("alicehk2", "fortedrape8", policy, policy.LargeNodeLabelValue, "4000m", "4Gi", "30Gi", "250m", "768Mi", "2Gi")
+	shared := builderTestNode("shared-a", "shared-a", policy, "4000m", "4Gi", "24Gi", "250m", "1536Mi", "3Gi")
+	alicehk2 := builderTestNode("alicehk2", "fortedrape8", policy, "4000m", "4Gi", "30Gi", "250m", "768Mi", "2Gi")
 	alicehk2.Labels[runtime.NodeModeLabelKey] = model.RuntimeTypeManagedOwned
 	alicehk2.Labels[runtime.TenantIDLabelKey] = "tenant_demo"
 	alicehk2.Labels[runtime.RuntimeIDLabelKey] = "runtime_demo"
@@ -280,7 +275,7 @@ func TestSelectBuilderCandidatesIncludesInternalSharedPoolManagedOwnedNodesWitho
 		t.Fatalf("builder demand: %v", err)
 	}
 
-	sharedPoolNode := builderTestNode("alicehk2", "fortedrape8", policy, policy.LargeNodeLabelValue, "4000m", "8Gi", "30Gi", "250m", "768Mi", "2Gi")
+	sharedPoolNode := builderTestNode("alicehk2", "fortedrape8", policy, "4000m", "8Gi", "30Gi", "250m", "768Mi", "2Gi")
 	delete(sharedPoolNode.Labels, policy.BuildNodeLabelKey)
 	sharedPoolNode.Labels[runtime.NodeModeLabelKey] = model.RuntimeTypeManagedOwned
 	sharedPoolNode.Labels[runtime.TenantIDLabelKey] = "tenant_demo"
@@ -304,8 +299,8 @@ func TestSelectBuilderCandidatesFallsBackToSharedNodesWhenExplicitBuildPoolIsExh
 		t.Fatalf("builder demand: %v", err)
 	}
 
-	exhaustedBuilder := builderTestNode("alicehk2", "fortedrape8", policy, policy.LargeNodeLabelValue, "2000m", "4Gi", "12Gi", "1800m", "3500Mi", "10Gi")
-	sharedFallback := builderTestNode("gcp2", "instance-20260322-112431", policy, policy.MediumNodeLabelValue, "4000m", "8Gi", "20Gi", "250m", "1Gi", "2Gi")
+	exhaustedBuilder := builderTestNode("alicehk2", "fortedrape8", policy, "2000m", "4Gi", "12Gi", "1800m", "3500Mi", "10Gi")
+	sharedFallback := builderTestNode("gcp2", "instance-20260322-112431", policy, "4000m", "8Gi", "20Gi", "250m", "1Gi", "2Gi")
 	delete(sharedFallback.Labels, policy.BuildNodeLabelKey)
 
 	candidates := selectBuilderCandidates(policy, builderWorkloadProfileHeavy, demand, []builderNodeSnapshot{exhaustedBuilder, sharedFallback}, nil, nil)
@@ -326,9 +321,9 @@ func TestSelectBuilderCandidatesFiltersByRequiredNodeLabels(t *testing.T) {
 		t.Fatalf("builder demand: %v", err)
 	}
 
-	tokyo := builderTestNode("tokyo-a", "tokyo-a", policy, policy.MediumNodeLabelValue, "2000m", "8Gi", "10Gi", "0", "0", "0")
+	tokyo := builderTestNode("tokyo-a", "tokyo-a", policy, "2000m", "8Gi", "10Gi", "0", "0", "0")
 	tokyo.Labels[runtime.RegionLabelKey] = "ap-northeast-1"
-	hk := builderTestNode("hongkong-a", "hongkong-a", policy, policy.MediumNodeLabelValue, "2000m", "8Gi", "10Gi", "0", "0", "0")
+	hk := builderTestNode("hongkong-a", "hongkong-a", policy, "2000m", "8Gi", "10Gi", "0", "0", "0")
 	hk.Labels[runtime.RegionLabelKey] = "ap-east-1"
 
 	candidates := selectBuilderCandidates(
@@ -357,7 +352,7 @@ func TestSelectBuilderCandidatesExcludesUntoleratedNoScheduleTaints(t *testing.T
 		t.Fatalf("builder demand: %v", err)
 	}
 
-	node := builderTestNode("builder-a", "builder-a", policy, policy.MediumNodeLabelValue, "2000m", "8Gi", "10Gi", "0", "0", "0")
+	node := builderTestNode("builder-a", "builder-a", policy, "2000m", "8Gi", "10Gi", "0", "0", "0")
 	node.Taints = []builderKubeNodeTaint{
 		{Key: "dedicated", Value: "builders", Effect: "NoSchedule"},
 	}
@@ -385,7 +380,7 @@ func TestSelectBuilderCandidatesAllowsConfiguredTolerations(t *testing.T) {
 		t.Fatalf("builder demand: %v", err)
 	}
 
-	node := builderTestNode("builder-a", "builder-a", policy, policy.MediumNodeLabelValue, "2000m", "8Gi", "10Gi", "0", "0", "0")
+	node := builderTestNode("builder-a", "builder-a", policy, "2000m", "8Gi", "10Gi", "0", "0", "0")
 	node.Taints = []builderKubeNodeTaint{
 		{Key: "dedicated", Value: "builders", Effect: "NoSchedule"},
 	}
@@ -406,8 +401,8 @@ func TestSelectBuilderCandidatesUsesFilesystemAvailabilityForEphemeralHeadroom(t
 	}
 
 	candidates := selectBuilderCandidates(policy, builderWorkloadProfileLight, demand, []builderNodeSnapshot{
-		builderTestNodeWithFS("gcp1", "gcp1", policy, policy.MediumNodeLabelValue, "2000m", "4Gi", "9140Mi", "18Gi", "484m", "1500Mi", "20Mi"),
-		builderTestNodeWithFS("gcp3", "gcp3", policy, policy.MediumNodeLabelValue, "2000m", "4Gi", "9140Mi", "2500Mi", "103m", "1200Mi", "56Ki"),
+		builderTestNodeWithFS("gcp1", "gcp1", policy, "2000m", "4Gi", "9140Mi", "18Gi", "484m", "1500Mi", "20Mi"),
+		builderTestNodeWithFS("gcp3", "gcp3", policy, "2000m", "4Gi", "9140Mi", "2500Mi", "103m", "1200Mi", "56Ki"),
 	}, nil, nil)
 
 	if len(candidates) != 1 {
@@ -527,9 +522,9 @@ func TestSelectBuilderCandidatesHeavyAllowsSharedFourGiNodesWithModerateHeadroom
 	}
 
 	candidates := selectBuilderCandidates(policy, builderWorkloadProfileHeavy, demand, []builderNodeSnapshot{
-		builderTestNode("fortedrape8", "fortedrape8", policy, policy.LargeNodeLabelValue, "2", "3977116Ki", "40010668616", "162m", "2042691584", "0"),
-		builderTestNode("gcp2", "instance-20260322-112431", policy, policy.MediumNodeLabelValue, "2", "4018884Ki", "29888385001", "608m", "2291592704", "0"),
-		builderTestNode("gcp3", "instance-20260322-112657", policy, policy.MediumNodeLabelValue, "2", "4018892Ki", "9814318482", "298m", "2316939264", "0"),
+		builderTestNode("fortedrape8", "fortedrape8", policy, "2", "3977116Ki", "40010668616", "162m", "2042691584", "0"),
+		builderTestNode("gcp2", "instance-20260322-112431", policy, "2", "4018884Ki", "29888385001", "608m", "2291592704", "0"),
+		builderTestNode("gcp3", "instance-20260322-112657", policy, "2", "4018892Ki", "9814318482", "298m", "2316939264", "0"),
 	}, nil, nil)
 
 	if len(candidates) < 2 {
@@ -766,8 +761,8 @@ func TestUpsertReservationUpdateUsesMicrosecondPrecision(t *testing.T) {
 	assertMicrosecondKubeTimestamp(t, updated.Spec.RenewTime)
 }
 
-func builderTestNode(name, hostname string, policy BuilderPodPolicy, sizeClass, cpu, memory, ephemeral, usedCPU, usedMemory, usedEphemeral string) builderNodeSnapshot {
-	return builderTestNodeWithFS(name, hostname, policy, sizeClass, cpu, memory, ephemeral, ephemeral, usedCPU, usedMemory, usedEphemeral)
+func builderTestNode(name, hostname string, policy BuilderPodPolicy, cpu, memory, ephemeral, usedCPU, usedMemory, usedEphemeral string) builderNodeSnapshot {
+	return builderTestNodeWithFS(name, hostname, policy, cpu, memory, ephemeral, ephemeral, usedCPU, usedMemory, usedEphemeral)
 }
 
 func builderTestKubeNode(name, hostname string, policy BuilderPodPolicy) builderKubeNode {
@@ -776,7 +771,6 @@ func builderTestKubeNode(name, hostname string, policy BuilderPodPolicy) builder
 	node.Metadata.Labels = map[string]string{
 		builderHostnameLabelKey:  hostname,
 		policy.BuildNodeLabelKey: valueOrDefault(policy.BuildNodeLabelValue, "true"),
-		policy.LargeNodeLabelKey: policy.MediumNodeLabelValue,
 	}
 	node.Status.Conditions = []builderKubeNodeCondition{
 		{Type: "Ready", Status: "True"},
@@ -803,13 +797,12 @@ func builderTestNodeSummary(filesystemAvailable string) builderKubeNodeSummary {
 	}
 }
 
-func builderTestNodeWithFS(name, hostname string, policy BuilderPodPolicy, sizeClass, cpu, memory, ephemeral, filesystemAvailable, usedCPU, usedMemory, usedEphemeral string) builderNodeSnapshot {
+func builderTestNodeWithFS(name, hostname string, policy BuilderPodPolicy, cpu, memory, ephemeral, filesystemAvailable, usedCPU, usedMemory, usedEphemeral string) builderNodeSnapshot {
 	return builderNodeSnapshot{
 		Name:     name,
 		Hostname: hostname,
 		Labels: map[string]string{
 			policy.BuildNodeLabelKey: valueOrDefault(policy.BuildNodeLabelValue, "true"),
-			policy.LargeNodeLabelKey: sizeClass,
 		},
 		Ready: true,
 		Allocatable: builderResourceDemand{

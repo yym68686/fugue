@@ -169,7 +169,7 @@ Controller GitHub sync knobs:
 Builder scheduling notes:
 
 - Shared nodes can build imported sources whenever their remaining CPU, memory, and ephemeral storage fit the requested build profile; `fugue.io/build=true` is treated as a preference signal instead of a hard gate.
-- Fresh HA installs and control-plane upgrades label `fugue.install/profile=combined` nodes with `fugue.io/build=true` and `fugue.io/build-tier=medium`, so the internal control-plane nodes remain available as fallback builder capacity even when a dedicated large builder is busy.
+- Fresh HA installs and control-plane upgrades label `fugue.install/profile=combined` nodes with `fugue.io/build=true`, so the internal control-plane nodes remain available as fallback builder capacity whenever their remaining resources can satisfy a build.
 
 Registry and cluster-join notes:
 

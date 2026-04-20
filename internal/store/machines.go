@@ -14,7 +14,6 @@ const kubernetesControlPlaneRoleLabelKey = "node-role.kubernetes.io/control-plan
 func defaultMachinePolicyForScope(scope string) model.MachinePolicy {
 	return model.MachinePolicy{
 		AllowBuilds:             false,
-		BuildTier:               model.MachineBuildTierMedium,
 		AllowSharedPool:         false,
 		DesiredControlPlaneRole: model.MachineControlPlaneRoleNone,
 	}
@@ -22,7 +21,6 @@ func defaultMachinePolicyForScope(scope string) model.MachinePolicy {
 
 func machinePolicyEquals(a, b model.MachinePolicy) bool {
 	return a.AllowBuilds == b.AllowBuilds &&
-		a.BuildTier == b.BuildTier &&
 		a.AllowSharedPool == b.AllowSharedPool &&
 		a.DesiredControlPlaneRole == b.DesiredControlPlaneRole
 }
@@ -38,11 +36,6 @@ func seedMachinePolicyFromLabels(scope string, labels map[string]string) model.M
 		runtimepkg.BuildNodeLabelValue,
 	) {
 		policy.AllowBuilds = true
-	}
-	if rawTier, ok := labels[runtimepkg.BuildTierLabelKey]; ok {
-		if buildTier := model.NormalizeMachineBuildTier(rawTier); buildTier != "" {
-			policy.BuildTier = buildTier
-		}
 	}
 	if strings.EqualFold(
 		strings.TrimSpace(labels[runtimepkg.SharedPoolLabelKey]),
@@ -65,9 +58,6 @@ func seedMachinePolicyFromLabels(scope string, labels map[string]string) model.M
 func normalizeMachinePolicy(scope string, policy model.MachinePolicy) model.MachinePolicy {
 	normalized := defaultMachinePolicyForScope(scope)
 	normalized.AllowBuilds = policy.AllowBuilds
-	if buildTier := model.NormalizeMachineBuildTier(policy.BuildTier); buildTier != "" {
-		normalized.BuildTier = buildTier
-	}
 	normalized.AllowSharedPool = policy.AllowSharedPool
 	if role := model.NormalizeMachineControlPlaneRole(policy.DesiredControlPlaneRole); role != "" {
 		normalized.DesiredControlPlaneRole = role

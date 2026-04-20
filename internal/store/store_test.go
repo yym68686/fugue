@@ -1763,7 +1763,6 @@ func TestEnsurePlatformMachineForClusterNodeBackfillsLegacySeededPolicyFromLiveL
 		ClusterNodeName: "gcp1",
 		Policy: model.MachinePolicy{
 			AllowBuilds:             false,
-			BuildTier:               model.MachineBuildTierMedium,
 			AllowSharedPool:         false,
 			DesiredControlPlaneRole: model.MachineControlPlaneRoleNone,
 		},
@@ -1784,7 +1783,6 @@ func TestEnsurePlatformMachineForClusterNodeBackfillsLegacySeededPolicyFromLiveL
 		map[string]string{
 			"node-role.kubernetes.io/control-plane": "",
 			runtimepkg.BuildNodeLabelKey:            runtimepkg.BuildNodeLabelValue,
-			runtimepkg.BuildTierLabelKey:            model.MachineBuildTierLarge,
 			runtimepkg.SharedPoolLabelKey:           runtimepkg.SharedPoolLabelValue,
 		},
 		"gcp1",
@@ -1798,9 +1796,6 @@ func TestEnsurePlatformMachineForClusterNodeBackfillsLegacySeededPolicyFromLiveL
 	}
 	if !backfilled.Policy.AllowBuilds {
 		t.Fatalf("expected backfilled builds enabled, got %#v", backfilled.Policy)
-	}
-	if backfilled.Policy.BuildTier != model.MachineBuildTierLarge {
-		t.Fatalf("expected backfilled build tier %q, got %q", model.MachineBuildTierLarge, backfilled.Policy.BuildTier)
 	}
 	if !backfilled.Policy.AllowSharedPool {
 		t.Fatalf("expected backfilled shared-pool enabled, got %#v", backfilled.Policy)
@@ -1833,7 +1828,6 @@ func TestEnsurePlatformMachineForClusterNodePreservesEditedDefaultPolicy(t *test
 
 	edited, err := s.SetMachinePolicyByClusterNodeName("gcp1", model.MachinePolicy{
 		AllowBuilds:             false,
-		BuildTier:               model.MachineBuildTierMedium,
 		AllowSharedPool:         false,
 		DesiredControlPlaneRole: model.MachineControlPlaneRoleNone,
 	})
@@ -1850,7 +1844,6 @@ func TestEnsurePlatformMachineForClusterNodePreservesEditedDefaultPolicy(t *test
 		map[string]string{
 			"node-role.kubernetes.io/control-plane": "",
 			runtimepkg.BuildNodeLabelKey:            runtimepkg.BuildNodeLabelValue,
-			runtimepkg.BuildTierLabelKey:            model.MachineBuildTierLarge,
 			runtimepkg.SharedPoolLabelKey:           runtimepkg.SharedPoolLabelValue,
 		},
 		"gcp1",
@@ -1864,9 +1857,6 @@ func TestEnsurePlatformMachineForClusterNodePreservesEditedDefaultPolicy(t *test
 	}
 	if preserved.Policy.AllowBuilds {
 		t.Fatalf("expected edited builds to remain disabled, got %#v", preserved.Policy)
-	}
-	if preserved.Policy.BuildTier != model.MachineBuildTierMedium {
-		t.Fatalf("expected edited build tier %q to remain, got %q", model.MachineBuildTierMedium, preserved.Policy.BuildTier)
 	}
 	if preserved.Policy.AllowSharedPool {
 		t.Fatalf("expected edited shared-pool to remain disabled, got %#v", preserved.Policy)
@@ -1892,7 +1882,6 @@ func TestBootstrapClusterNodeSeedsMachinePolicyFromJoinLabels(t *testing.T) {
 
 	labels := map[string]string{
 		runtimepkg.BuildNodeLabelKey:          runtimepkg.BuildNodeLabelValue,
-		runtimepkg.BuildTierLabelKey:          model.MachineBuildTierLarge,
 		runtimepkg.ControlPlaneDesiredRoleKey: model.MachineControlPlaneRoleCandidate,
 	}
 
@@ -1914,9 +1903,6 @@ func TestBootstrapClusterNodeSeedsMachinePolicyFromJoinLabels(t *testing.T) {
 	}
 	if !machine.Policy.AllowBuilds {
 		t.Fatalf("expected machine builds enabled from join labels, got %#v", machine.Policy)
-	}
-	if machine.Policy.BuildTier != model.MachineBuildTierLarge {
-		t.Fatalf("expected machine build tier %q, got %q", model.MachineBuildTierLarge, machine.Policy.BuildTier)
 	}
 	if machine.Policy.DesiredControlPlaneRole != model.MachineControlPlaneRoleCandidate {
 		t.Fatalf("expected desired control-plane role %q, got %q", model.MachineControlPlaneRoleCandidate, machine.Policy.DesiredControlPlaneRole)

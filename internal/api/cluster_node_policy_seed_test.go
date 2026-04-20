@@ -102,7 +102,6 @@ func TestListClusterNodesSeedsBootstrapControlPlaneMachineBuildPolicyFromLiveLab
 
 	kubeServer := newBootstrapControlPlaneKubeServerWithLabels(t, map[string]string{
 		runtimepkg.BuildNodeLabelKey:  runtimepkg.BuildNodeLabelValue,
-		runtimepkg.BuildTierLabelKey:  model.MachineBuildTierLarge,
 		runtimepkg.SharedPoolLabelKey: runtimepkg.SharedPoolLabelValue,
 	})
 	defer kubeServer.Close()
@@ -136,14 +135,8 @@ func TestListClusterNodesSeedsBootstrapControlPlaneMachineBuildPolicyFromLiveLab
 	if !node.Policy.AllowBuilds {
 		t.Fatalf("expected desired builds to inherit live labels, got %#v", node.Policy)
 	}
-	if node.Policy.BuildTier != model.MachineBuildTierLarge {
-		t.Fatalf("expected desired build tier %q, got %q", model.MachineBuildTierLarge, node.Policy.BuildTier)
-	}
 	if !node.Policy.EffectiveBuilds {
 		t.Fatalf("expected effective builds enabled, got %#v", node.Policy)
-	}
-	if node.Policy.EffectiveBuildTier != model.MachineBuildTierLarge {
-		t.Fatalf("expected effective build tier %q, got %q", model.MachineBuildTierLarge, node.Policy.EffectiveBuildTier)
 	}
 	if !node.Policy.AllowSharedPool {
 		t.Fatalf("expected desired shared-pool to inherit live labels, got %#v", node.Policy)
@@ -155,9 +148,6 @@ func TestListClusterNodesSeedsBootstrapControlPlaneMachineBuildPolicyFromLiveLab
 	}
 	if !machine.Policy.AllowBuilds {
 		t.Fatalf("expected stored machine builds enabled, got %#v", machine.Policy)
-	}
-	if machine.Policy.BuildTier != model.MachineBuildTierLarge {
-		t.Fatalf("expected stored machine build tier %q, got %q", model.MachineBuildTierLarge, machine.Policy.BuildTier)
 	}
 	if !machine.Policy.AllowSharedPool {
 		t.Fatalf("expected stored machine shared-pool enabled, got %#v", machine.Policy)
@@ -185,7 +175,6 @@ func TestStartBackgroundWarmersBackfillsLegacyBootstrapControlPlaneMachinePolicy
 
 	kubeServer := newBootstrapControlPlaneKubeServerWithLabels(t, map[string]string{
 		runtimepkg.BuildNodeLabelKey:  runtimepkg.BuildNodeLabelValue,
-		runtimepkg.BuildTierLabelKey:  model.MachineBuildTierLarge,
 		runtimepkg.SharedPoolLabelKey: runtimepkg.SharedPoolLabelValue,
 	})
 	defer kubeServer.Close()
@@ -209,7 +198,6 @@ func TestStartBackgroundWarmersBackfillsLegacyBootstrapControlPlaneMachinePolicy
 		if err == nil &&
 			machine.ID == seeded.ID &&
 			machine.Policy.AllowBuilds &&
-			machine.Policy.BuildTier == model.MachineBuildTierLarge &&
 			machine.Policy.AllowSharedPool &&
 			machine.Policy.DesiredControlPlaneRole == model.MachineControlPlaneRoleMember {
 			return
@@ -237,7 +225,6 @@ func TestSyncBootstrapControlPlaneMachinesBackfillsAuditlessLegacyControlPlaneRo
 	if err := rewriteBootstrapControlPlaneMachine(storePath, func(machine *model.Machine) {
 		*machine = legacyBootstrapControlPlaneMachine()
 		machine.Policy.AllowBuilds = true
-		machine.Policy.BuildTier = model.MachineBuildTierLarge
 		machine.Policy.AllowSharedPool = true
 		machine.UpdatedAt = updatedAt
 		machine.LastSeenAt = &updatedAt
@@ -247,7 +234,6 @@ func TestSyncBootstrapControlPlaneMachinesBackfillsAuditlessLegacyControlPlaneRo
 
 	kubeServer := newBootstrapControlPlaneKubeServerWithLabels(t, map[string]string{
 		runtimepkg.BuildNodeLabelKey:  runtimepkg.BuildNodeLabelValue,
-		runtimepkg.BuildTierLabelKey:  model.MachineBuildTierLarge,
 		runtimepkg.SharedPoolLabelKey: runtimepkg.SharedPoolLabelValue,
 	})
 	defer kubeServer.Close()
@@ -291,7 +277,6 @@ func TestSyncBootstrapControlPlaneMachinesPreservesAuditedControlPlaneRole(t *te
 	if err := rewriteBootstrapControlPlaneMachine(storePath, func(machine *model.Machine) {
 		*machine = legacyBootstrapControlPlaneMachine()
 		machine.Policy.AllowBuilds = true
-		machine.Policy.BuildTier = model.MachineBuildTierLarge
 		machine.Policy.AllowSharedPool = true
 		machine.UpdatedAt = updatedAt
 		machine.LastSeenAt = &updatedAt
@@ -313,7 +298,6 @@ func TestSyncBootstrapControlPlaneMachinesPreservesAuditedControlPlaneRole(t *te
 
 	kubeServer := newBootstrapControlPlaneKubeServerWithLabels(t, map[string]string{
 		runtimepkg.BuildNodeLabelKey:  runtimepkg.BuildNodeLabelValue,
-		runtimepkg.BuildTierLabelKey:  model.MachineBuildTierLarge,
 		runtimepkg.SharedPoolLabelKey: runtimepkg.SharedPoolLabelValue,
 	})
 	defer kubeServer.Close()
@@ -366,7 +350,6 @@ func TestSetClusterNodePolicySeedsBootstrapControlPlaneMachine(t *testing.T) {
 
 	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/cluster/nodes/gcp1/policy", "bootstrap-secret", map[string]any{
 		"allow_builds":               true,
-		"build_tier":                 model.MachineBuildTierLarge,
 		"allow_shared_pool":          true,
 		"desired_control_plane_role": model.MachineControlPlaneRoleCandidate,
 	})
@@ -391,9 +374,6 @@ func TestSetClusterNodePolicySeedsBootstrapControlPlaneMachine(t *testing.T) {
 	if !response.ClusterNode.Policy.AllowBuilds {
 		t.Fatalf("expected desired builds enabled after patch, got %#v", response.ClusterNode.Policy)
 	}
-	if response.ClusterNode.Policy.BuildTier != model.MachineBuildTierLarge {
-		t.Fatalf("expected desired build tier %q, got %q", model.MachineBuildTierLarge, response.ClusterNode.Policy.BuildTier)
-	}
 	if !response.ClusterNode.Policy.AllowSharedPool {
 		t.Fatalf("expected desired shared-pool enabled after patch, got %#v", response.ClusterNode.Policy)
 	}
@@ -413,9 +393,6 @@ func TestSetClusterNodePolicySeedsBootstrapControlPlaneMachine(t *testing.T) {
 	}
 	if !machine.Policy.AllowBuilds {
 		t.Fatalf("expected stored machine builds enabled, got %#v", machine.Policy)
-	}
-	if machine.Policy.BuildTier != model.MachineBuildTierLarge {
-		t.Fatalf("expected stored machine build tier %q, got %q", model.MachineBuildTierLarge, machine.Policy.BuildTier)
 	}
 	if !machine.Policy.AllowSharedPool {
 		t.Fatalf("expected stored machine shared-pool enabled, got %#v", machine.Policy)
@@ -442,7 +419,6 @@ func legacyBootstrapControlPlaneMachine() model.Machine {
 		ClusterNodeName: "gcp1",
 		Policy: model.MachinePolicy{
 			AllowBuilds:             false,
-			BuildTier:               model.MachineBuildTierMedium,
 			AllowSharedPool:         false,
 			DesiredControlPlaneRole: model.MachineControlPlaneRoleNone,
 		},
