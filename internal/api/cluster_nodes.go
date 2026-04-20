@@ -391,6 +391,11 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 			s.writeStoreError(w, err)
 			return
 		}
+		machines, err = s.ensureBootstrapControlPlaneMachines(snapshots, runtimes, machines)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
 	}
 
 	storeAppsStartedAt := time.Now()
@@ -1071,6 +1076,95 @@ func buildClusterNodeIdentity(node kubeNode) clusterNodeIdentity {
 		systemUUID: strings.TrimSpace(node.Status.NodeInfo.SystemUUID),
 		hostname:   strings.TrimSpace(hostname),
 	}
+}
+
+func clusterNodeHasRole(node model.ClusterNode, role string) bool {
+	role = strings.TrimSpace(role)
+	if role == "" {
+		return false
+	}
+	for _, candidate := range node.Roles {
+		if strings.EqualFold(strings.TrimSpace(candidate), role) {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldSeedBootstrapControlPlaneMachine(snapshot clusterNodeSnapshot) bool {
+	if strings.TrimSpace(snapshot.node.Name) == "" {
+		return false
+	}
+	return clusterNodeHasRole(snapshot.node, "control-plane")
+}
+
+func bootstrapControlPlaneMachineName(snapshot clusterNodeSnapshot) string {
+	if value := strings.TrimSpace(snapshot.identity.hostname); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(snapshot.node.Name); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(bootstrapControlPlaneMachineEndpoint(snapshot)); value != "" {
+		return value
+	}
+	return "node"
+}
+
+func bootstrapControlPlaneMachineEndpoint(snapshot clusterNodeSnapshot) string {
+	return coalesceNodeName(
+		snapshot.node.PublicIP,
+		snapshot.node.ExternalIP,
+		snapshot.node.InternalIP,
+	)
+}
+
+func bootstrapControlPlaneMachineFingerprint(snapshot clusterNodeSnapshot) string {
+	switch {
+	case strings.TrimSpace(snapshot.identity.machineID) != "":
+		return strings.TrimSpace(snapshot.identity.machineID)
+	case strings.TrimSpace(snapshot.identity.systemUUID) != "":
+		return strings.TrimSpace(snapshot.identity.systemUUID)
+	case strings.TrimSpace(snapshot.identity.hostname) != "":
+		return strings.TrimSpace(snapshot.identity.hostname)
+	default:
+		return strings.TrimSpace(snapshot.node.Name)
+	}
+}
+
+func (s *Server) ensureBootstrapControlPlaneMachines(snapshots []clusterNodeSnapshot, runtimes []model.Runtime, machines []model.Machine) ([]model.Machine, error) {
+	if len(snapshots) == 0 {
+		return machines, nil
+	}
+	runtimeByClusterNode := buildRuntimeByClusterNodeIndex(runtimes)
+	_, machineByClusterNode := buildMachineIndexes(machines)
+	changed := false
+	for _, snapshot := range snapshots {
+		nodeName := strings.TrimSpace(snapshot.node.Name)
+		if !shouldSeedBootstrapControlPlaneMachine(snapshot) {
+			continue
+		}
+		if _, ok := runtimeByClusterNode[nodeName]; ok {
+			continue
+		}
+		if _, ok := machineByClusterNode[nodeName]; ok {
+			continue
+		}
+		if _, err := s.store.EnsurePlatformMachineForClusterNode(
+			nodeName,
+			bootstrapControlPlaneMachineEndpoint(snapshot),
+			snapshot.labels,
+			bootstrapControlPlaneMachineName(snapshot),
+			bootstrapControlPlaneMachineFingerprint(snapshot),
+		); err != nil {
+			return nil, err
+		}
+		changed = true
+	}
+	if !changed {
+		return machines, nil
+	}
+	return s.store.ListMachines("", true)
 }
 
 func clusterNodeSnapshotMatchesFingerprint(snapshot clusterNodeSnapshot, machineFingerprint string) bool {

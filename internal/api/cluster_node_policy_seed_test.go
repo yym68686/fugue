@@ -1,0 +1,294 @@
+package api
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+
+	"fugue/internal/auth"
+	"fugue/internal/model"
+	"fugue/internal/store"
+)
+
+func TestListClusterNodesSeedsBootstrapControlPlaneMachineForPlatformAdmin(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	kubeServer := newBootstrapControlPlaneKubeServer(t)
+	defer kubeServer.Close()
+
+	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/cluster/nodes", "bootstrap-secret", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		ClusterNodes []model.ClusterNode `json:"cluster_nodes"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if len(response.ClusterNodes) != 1 {
+		t.Fatalf("expected one cluster node, got %d", len(response.ClusterNodes))
+	}
+
+	node := response.ClusterNodes[0]
+	if node.Machine == nil {
+		t.Fatalf("expected bootstrap control-plane node to expose machine metadata, got %#v", node)
+	}
+	if node.Machine.Scope != model.MachineScopePlatformNode {
+		t.Fatalf("expected machine scope %q, got %q", model.MachineScopePlatformNode, node.Machine.Scope)
+	}
+	if strings.TrimSpace(node.Machine.NodeKeyID) != "" {
+		t.Fatalf("expected bootstrap machine to start without node key id, got %q", node.Machine.NodeKeyID)
+	}
+	if node.Policy == nil {
+		t.Fatalf("expected bootstrap control-plane node policy, got %#v", node)
+	}
+	if node.Policy.AllowBuilds {
+		t.Fatalf("expected bootstrap control-plane node builds to default disabled, got %#v", node.Policy)
+	}
+	if node.Policy.AllowSharedPool {
+		t.Fatalf("expected bootstrap control-plane node shared-pool to default disabled, got %#v", node.Policy)
+	}
+	if node.Policy.DesiredControlPlaneRole != model.MachineControlPlaneRoleNone {
+		t.Fatalf("expected desired role %q, got %q", model.MachineControlPlaneRoleNone, node.Policy.DesiredControlPlaneRole)
+	}
+	if node.Policy.EffectiveControlPlaneRole != model.MachineControlPlaneRoleMember {
+		t.Fatalf("expected effective role %q, got %q", model.MachineControlPlaneRoleMember, node.Policy.EffectiveControlPlaneRole)
+	}
+
+	machine, err := stateStore.GetMachineByClusterNodeName("gcp1")
+	if err != nil {
+		t.Fatalf("expected seeded platform machine in store, got %v", err)
+	}
+	if machine.Scope != model.MachineScopePlatformNode {
+		t.Fatalf("expected persisted machine scope %q, got %q", model.MachineScopePlatformNode, machine.Scope)
+	}
+	if strings.TrimSpace(machine.NodeKeyID) != "" {
+		t.Fatalf("expected persisted bootstrap machine to have no node key id, got %q", machine.NodeKeyID)
+	}
+}
+
+func TestSetClusterNodePolicySeedsBootstrapControlPlaneMachine(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	kubeServer := newBootstrapControlPlaneKubeServer(t)
+	defer kubeServer.Close()
+
+	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/cluster/nodes/gcp1/policy", "bootstrap-secret", map[string]any{
+		"allow_builds":               true,
+		"build_tier":                 model.MachineBuildTierLarge,
+		"allow_shared_pool":          true,
+		"desired_control_plane_role": model.MachineControlPlaneRoleCandidate,
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		ClusterNode    model.ClusterNode `json:"cluster_node"`
+		NodeReconciled bool              `json:"node_reconciled"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if !response.NodeReconciled {
+		t.Fatalf("expected node reconciliation to succeed, got %#v", response)
+	}
+	if response.ClusterNode.Machine == nil {
+		t.Fatalf("expected patched bootstrap control-plane node to expose machine metadata, got %#v", response.ClusterNode)
+	}
+	if response.ClusterNode.Policy == nil {
+		t.Fatalf("expected patched bootstrap control-plane node policy, got %#v", response.ClusterNode)
+	}
+	if !response.ClusterNode.Policy.AllowBuilds {
+		t.Fatalf("expected desired builds enabled after patch, got %#v", response.ClusterNode.Policy)
+	}
+	if response.ClusterNode.Policy.BuildTier != model.MachineBuildTierLarge {
+		t.Fatalf("expected desired build tier %q, got %q", model.MachineBuildTierLarge, response.ClusterNode.Policy.BuildTier)
+	}
+	if !response.ClusterNode.Policy.AllowSharedPool {
+		t.Fatalf("expected desired shared-pool enabled after patch, got %#v", response.ClusterNode.Policy)
+	}
+	if response.ClusterNode.Policy.DesiredControlPlaneRole != model.MachineControlPlaneRoleCandidate {
+		t.Fatalf("expected desired role %q, got %q", model.MachineControlPlaneRoleCandidate, response.ClusterNode.Policy.DesiredControlPlaneRole)
+	}
+	if !response.ClusterNode.Policy.EffectiveBuilds {
+		t.Fatalf("expected effective builds enabled after node reconcile, got %#v", response.ClusterNode.Policy)
+	}
+	if !response.ClusterNode.Policy.EffectiveSharedPool {
+		t.Fatalf("expected effective shared-pool enabled after node reconcile, got %#v", response.ClusterNode.Policy)
+	}
+
+	machine, err := stateStore.GetMachineByClusterNodeName("gcp1")
+	if err != nil {
+		t.Fatalf("expected patched bootstrap control-plane machine in store, got %v", err)
+	}
+	if !machine.Policy.AllowBuilds {
+		t.Fatalf("expected stored machine builds enabled, got %#v", machine.Policy)
+	}
+	if machine.Policy.BuildTier != model.MachineBuildTierLarge {
+		t.Fatalf("expected stored machine build tier %q, got %q", model.MachineBuildTierLarge, machine.Policy.BuildTier)
+	}
+	if !machine.Policy.AllowSharedPool {
+		t.Fatalf("expected stored machine shared-pool enabled, got %#v", machine.Policy)
+	}
+	if machine.Policy.DesiredControlPlaneRole != model.MachineControlPlaneRoleCandidate {
+		t.Fatalf("expected stored machine role %q, got %q", model.MachineControlPlaneRoleCandidate, machine.Policy.DesiredControlPlaneRole)
+	}
+}
+
+func newBootstrapControlPlaneKubeServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	var (
+		mu     = sync.Mutex{}
+		labels = map[string]string{
+			"node-role.kubernetes.io/control-plane": "",
+			"topology.kubernetes.io/region":         "us-central1",
+			"topology.kubernetes.io/zone":           "us-central1-a",
+		}
+	)
+
+	return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Helper()
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes":
+			mu.Lock()
+			node := bootstrapControlPlaneKubeNodeJSON(labels)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{node},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes/gcp1":
+			mu.Lock()
+			node := bootstrapControlPlaneKubeNodeJSON(labels)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(node)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes/gcp1/proxy/stats/summary":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"node": map[string]any{
+					"nodeName": "gcp1",
+					"cpu": map[string]any{
+						"usageNanoCores": 500_000_000,
+					},
+					"memory": map[string]any{
+						"workingSetBytes": 2 * 1024 * 1024 * 1024,
+					},
+					"fs": map[string]any{
+						"capacityBytes": 100 * 1024 * 1024 * 1024,
+						"usedBytes":     25 * 1024 * 1024 * 1024,
+					},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/pods":
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/nodes/gcp1":
+			var payload struct {
+				Metadata struct {
+					Labels map[string]*string `json:"labels"`
+				} `json:"metadata"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode node patch: %v", err)
+			}
+			mu.Lock()
+			for key, value := range payload.Metadata.Labels {
+				if value == nil {
+					delete(labels, key)
+					continue
+				}
+				labels[key] = *value
+			}
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func bootstrapControlPlaneKubeNodeJSON(labels map[string]string) map[string]any {
+	clonedLabels := make(map[string]string, len(labels))
+	for key, value := range labels {
+		clonedLabels[key] = value
+	}
+	return map[string]any{
+		"metadata": map[string]any{
+			"name":              "gcp1",
+			"creationTimestamp": "2026-04-20T00:00:00Z",
+			"labels":            clonedLabels,
+		},
+		"status": map[string]any{
+			"addresses": []map[string]string{
+				{"type": "InternalIP", "address": "10.0.0.10"},
+				{"type": "ExternalIP", "address": "203.0.113.10"},
+				{"type": "Hostname", "address": "gcp1-host"},
+			},
+			"conditions": []map[string]string{
+				{
+					"type":               "Ready",
+					"status":             "True",
+					"reason":             "KubeletReady",
+					"message":            "kubelet is posting ready status",
+					"lastTransitionTime": "2026-04-20T00:01:00Z",
+				},
+				{
+					"type":               "DiskPressure",
+					"status":             "False",
+					"reason":             "KubeletHasNoDiskPressure",
+					"message":            "kubelet has no disk pressure",
+					"lastTransitionTime": "2026-04-20T00:01:00Z",
+				},
+			},
+			"capacity": map[string]string{
+				"cpu":               "4",
+				"memory":            "16Gi",
+				"ephemeral-storage": "100Gi",
+			},
+			"allocatable": map[string]string{
+				"cpu":               "3900m",
+				"memory":            "15Gi",
+				"ephemeral-storage": "90Gi",
+			},
+			"nodeInfo": map[string]string{
+				"kubeletVersion":          "v1.32.2",
+				"osImage":                 "Ubuntu 24.04.1 LTS",
+				"kernelVersion":           "6.8.0",
+				"containerRuntimeVersion": "containerd://2.0.0",
+				"machineID":               "machine-id-gcp1",
+				"systemUUID":              "uuid-gcp1",
+			},
+		},
+	}
+}

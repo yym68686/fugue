@@ -129,6 +129,26 @@ func (s *Store) pgEnsureMachineForRuntime(runtimeID string) (model.Machine, erro
 	return machine, nil
 }
 
+func (s *Store) pgEnsurePlatformMachineForClusterNode(nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.Machine, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Machine{}, fmt.Errorf("begin ensure platform machine transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	machine, err := s.pgUpsertPlatformClusterMachineTx(ctx, tx, "", nodeName, endpoint, labels, machineName, machineFingerprint)
+	if err != nil {
+		return model.Machine{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Machine{}, fmt.Errorf("commit ensure platform machine transaction: %w", err)
+	}
+	return machine, nil
+}
+
 func (s *Store) pgSetMachinePolicyByClusterNodeName(name string, policy model.MachinePolicy) (model.Machine, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -178,7 +198,7 @@ func (s *Store) pgAttachPlatformClusterMachine(key model.NodeKey, nodeName, endp
 	}
 	defer tx.Rollback()
 
-	machine, err := s.pgUpsertPlatformClusterMachineTx(ctx, tx, key, nodeName, endpoint, labels, machineName, machineFingerprint)
+	machine, err := s.pgUpsertPlatformClusterMachineTx(ctx, tx, key.ID, nodeName, endpoint, labels, machineName, machineFingerprint)
 	if err != nil {
 		return model.Machine{}, err
 	}
@@ -311,6 +331,36 @@ WHERE lower(cluster_node_name) = lower($1)
 	return machine, true, nil
 }
 
+func (s *Store) pgFindPlatformMachineByClusterNodeNameTx(ctx context.Context, tx *sql.Tx, name string, forUpdate bool) (model.Machine, bool, error) {
+	query := `
+SELECT id, tenant_id, name, scope, connection_mode, status, endpoint, labels_json, node_key_id, runtime_id, runtime_name, cluster_node_name, fingerprint_prefix, fingerprint_hash, policy_json, last_seen_at, created_at, updated_at
+FROM fugue_machines
+WHERE scope = $1
+  AND lower(cluster_node_name) = lower($2)
+`
+	if forUpdate {
+		query += ` FOR UPDATE`
+	}
+
+	var (
+		machine model.Machine
+		err     error
+	)
+	args := []any{model.MachineScopePlatformNode, name}
+	if tx != nil {
+		machine, err = scanMachine(tx.QueryRowContext(ctx, query, args...))
+	} else {
+		machine, err = scanMachine(s.db.QueryRowContext(ctx, query, args...))
+	}
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.Machine{}, false, nil
+		}
+		return model.Machine{}, false, fmt.Errorf("find platform machine by cluster node name %s: %w", name, err)
+	}
+	return machine, true, nil
+}
+
 func (s *Store) pgFindNodeRuntimeByClusterNodeNameTx(ctx context.Context, tx *sql.Tx, name string, forUpdate bool) (model.Runtime, bool, error) {
 	query := `
 SELECT id, tenant_id, name, machine_name, type, access_mode, public_offer_json, pool_mode, connection_mode, status, endpoint, labels_json, node_key_id, cluster_node_name, fingerprint_prefix, fingerprint_hash, agent_key_prefix, agent_key_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
@@ -366,7 +416,7 @@ func (s *Store) pgUpsertMachineFromRuntimeTx(ctx context.Context, tx *sql.Tx, ru
 	return machine, nil
 }
 
-func (s *Store) pgUpsertPlatformClusterMachineTx(ctx context.Context, tx *sql.Tx, key model.NodeKey, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.Machine, error) {
+func (s *Store) pgUpsertPlatformClusterMachineTx(ctx context.Context, tx *sql.Tx, nodeKeyID, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.Machine, error) {
 	normalizedNodeName, err := normalizeClusterNodeName(nodeName)
 	if err != nil {
 		return model.Machine{}, err
@@ -374,12 +424,18 @@ func (s *Store) pgUpsertPlatformClusterMachineTx(ctx context.Context, tx *sql.Tx
 	machineFingerprint = normalizedMachineFingerprint(machineFingerprint, machineName, normalizedNodeName, endpoint)
 	fingerprintHash := model.HashSecret(machineFingerprint)
 
-	existing, found, err := s.pgFindMachineByFingerprintTx(ctx, tx, "", fingerprintHash, true)
+	existing, found, err := s.pgFindPlatformMachineByClusterNodeNameTx(ctx, tx, normalizedNodeName, true)
 	if err != nil {
 		return model.Machine{}, err
 	}
 	if !found {
-		existing, found, err = s.pgFindMachineByNodeKeyAndClusterNodeNameTx(ctx, tx, key.ID, normalizedNodeName, true)
+		existing, found, err = s.pgFindMachineByFingerprintTx(ctx, tx, "", fingerprintHash, true)
+		if err != nil {
+			return model.Machine{}, err
+		}
+	}
+	if !found && strings.TrimSpace(nodeKeyID) != "" {
+		existing, found, err = s.pgFindMachineByNodeKeyAndClusterNodeNameTx(ctx, tx, nodeKeyID, normalizedNodeName, true)
 		if err != nil {
 			return model.Machine{}, err
 		}
@@ -389,7 +445,7 @@ func (s *Store) pgUpsertPlatformClusterMachineTx(ctx context.Context, tx *sql.Tx
 	if found {
 		existingPtr = &existing
 	}
-	machine, err := buildPlatformMachine(key, normalizedNodeName, endpoint, labels, machineName, machineFingerprint, existingPtr, time.Now().UTC())
+	machine, err := buildPlatformMachineRecord(nodeKeyID, normalizedNodeName, endpoint, labels, machineName, machineFingerprint, existingPtr, time.Now().UTC())
 	if err != nil {
 		return model.Machine{}, err
 	}

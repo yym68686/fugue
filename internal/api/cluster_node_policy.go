@@ -42,6 +42,9 @@ func (s *Server) handleSetClusterNodePolicy(w http.ResponseWriter, r *http.Reque
 	}
 
 	machine, err := s.store.GetMachineByClusterNodeName(nodeName)
+	if err == store.ErrNotFound {
+		machine, err = s.ensureBootstrapControlPlaneMachineByName(r.Context(), nodeName)
+	}
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -90,6 +93,12 @@ func (s *Server) handleSetClusterNodePolicy(w http.ResponseWriter, r *http.Reque
 	nodeReconciled, reconcileErr := s.reconcileClusterNodePolicy(r.Context(), machine, runtimeObj)
 	if req.AllowSharedPool != nil {
 		s.trySyncManagedSharedLocationRuntimes(r.Context())
+	}
+	if nodeReconciled {
+		s.clusterNodeInventoryCache.clear(clusterNodeInventoryCacheKey)
+		if _, err := s.refreshClusterNodeInventory(r.Context()); err != nil && s.log != nil {
+			s.log.Printf("cluster node policy refresh %s: %v", nodeName, err)
+		}
 	}
 
 	clusterNode, err := s.loadManagedClusterNodeView(r.Context(), principal, nodeName)
@@ -318,6 +327,12 @@ func (s *Server) loadManagedClusterNodeView(ctx context.Context, principal model
 	if err != nil {
 		return model.ClusterNode{}, err
 	}
+	if principal.IsPlatformAdmin() {
+		machines, err = s.ensureBootstrapControlPlaneMachines(snapshots, runtimes, machines)
+		if err != nil {
+			return model.ClusterNode{}, err
+		}
+	}
 	apps, err := s.store.ListApps(principal.TenantID, principal.IsPlatformAdmin())
 	if err != nil {
 		return model.ClusterNode{}, err
@@ -354,4 +369,27 @@ func (s *Server) loadManagedClusterNodeView(ctx context.Context, principal model
 		}
 	}
 	return model.ClusterNode{}, store.ErrNotFound
+}
+
+func (s *Server) ensureBootstrapControlPlaneMachineByName(ctx context.Context, nodeName string) (model.Machine, error) {
+	snapshots, err := s.loadClusterNodeInventory(ctx)
+	if err != nil {
+		return model.Machine{}, err
+	}
+	for _, snapshot := range snapshots {
+		if !strings.EqualFold(strings.TrimSpace(snapshot.node.Name), strings.TrimSpace(nodeName)) {
+			continue
+		}
+		if !shouldSeedBootstrapControlPlaneMachine(snapshot) {
+			return model.Machine{}, store.ErrNotFound
+		}
+		return s.store.EnsurePlatformMachineForClusterNode(
+			snapshot.node.Name,
+			bootstrapControlPlaneMachineEndpoint(snapshot),
+			snapshot.labels,
+			bootstrapControlPlaneMachineName(snapshot),
+			bootstrapControlPlaneMachineFingerprint(snapshot),
+		)
+	}
+	return model.Machine{}, store.ErrNotFound
 }

@@ -96,7 +96,7 @@ func machineFromRuntime(runtime model.Runtime, existing *model.Machine, now time
 	return machine
 }
 
-func buildPlatformMachine(key model.NodeKey, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string, existing *model.Machine, now time.Time) (model.Machine, error) {
+func buildPlatformMachineRecord(nodeKeyID, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string, existing *model.Machine, now time.Time) (model.Machine, error) {
 	normalizedNodeName, err := normalizeClusterNodeName(nodeName)
 	if err != nil {
 		return model.Machine{}, err
@@ -112,7 +112,7 @@ func buildPlatformMachine(key model.NodeKey, nodeName, endpoint string, labels m
 		Status:            model.RuntimeStatusActive,
 		Endpoint:          strings.TrimSpace(endpoint),
 		Labels:            cloneMap(labels),
-		NodeKeyID:         key.ID,
+		NodeKeyID:         strings.TrimSpace(nodeKeyID),
 		ClusterNodeName:   normalizedNodeName,
 		FingerprintPrefix: model.SecretPrefix(machineFingerprint),
 		FingerprintHash:   model.HashSecret(machineFingerprint),
@@ -126,10 +126,20 @@ func buildPlatformMachine(key model.NodeKey, nodeName, endpoint string, labels m
 		if !existing.CreatedAt.IsZero() {
 			machine.CreatedAt = existing.CreatedAt
 		}
+		if machine.NodeKeyID == "" {
+			machine.NodeKeyID = strings.TrimSpace(existing.NodeKeyID)
+		}
+		if machine.Endpoint == "" {
+			machine.Endpoint = strings.TrimSpace(existing.Endpoint)
+		}
 		machine.Policy = normalizeMachinePolicy(model.MachineScopePlatformNode, existing.Policy)
 	}
 	normalizeMachineForRead(&machine)
 	return machine, nil
+}
+
+func buildPlatformMachine(key model.NodeKey, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string, existing *model.Machine, now time.Time) (model.Machine, error) {
+	return buildPlatformMachineRecord(key.ID, nodeName, endpoint, labels, machineName, machineFingerprint, existing, now)
 }
 
 func findMachine(state *model.State, id string) int {
@@ -167,6 +177,23 @@ func findMachineByClusterNodeName(state *model.State, nodeName string) int {
 		if strings.EqualFold(strings.TrimSpace(machine.ClusterNodeName), nodeName) {
 			return idx
 		}
+	}
+	return -1
+}
+
+func findPlatformMachineByClusterNodeName(state *model.State, nodeName string) int {
+	nodeName = strings.TrimSpace(nodeName)
+	if nodeName == "" {
+		return -1
+	}
+	for idx, machine := range state.Machines {
+		if model.NormalizeMachineScope(machine.Scope) != model.MachineScopePlatformNode {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(machine.ClusterNodeName), nodeName) {
+			continue
+		}
+		return idx
 	}
 	return -1
 }
@@ -219,7 +246,7 @@ func upsertMachineForRuntimeState(state *model.State, runtime model.Runtime, now
 	return machine
 }
 
-func upsertPlatformMachineState(state *model.State, key model.NodeKey, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string, now time.Time) (model.Machine, error) {
+func upsertPlatformMachineState(state *model.State, nodeKeyID, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string, now time.Time) (model.Machine, error) {
 	normalizedNodeName, err := normalizeClusterNodeName(nodeName)
 	if err != nil {
 		return model.Machine{}, err
@@ -227,10 +254,19 @@ func upsertPlatformMachineState(state *model.State, key model.NodeKey, nodeName,
 	machineFingerprint = normalizedMachineFingerprint(machineFingerprint, machineName, normalizedNodeName, endpoint)
 	fingerprintHash := model.HashSecret(machineFingerprint)
 
-	existingIndex := findMachineByFingerprintHash(state, "", fingerprintHash)
+	existingIndex := findPlatformMachineByClusterNodeName(state, normalizedNodeName)
 	if existingIndex < 0 {
+		existingIndex = findMachineByFingerprintHash(state, "", fingerprintHash)
+	}
+	if existingIndex < 0 && strings.TrimSpace(nodeKeyID) != "" {
 		for idx, machine := range state.Machines {
-			if strings.TrimSpace(machine.NodeKeyID) == key.ID && strings.EqualFold(strings.TrimSpace(machine.ClusterNodeName), normalizedNodeName) {
+			if strings.TrimSpace(machine.NodeKeyID) != strings.TrimSpace(nodeKeyID) {
+				continue
+			}
+			if model.NormalizeMachineScope(machine.Scope) != model.MachineScopePlatformNode {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(machine.ClusterNodeName), normalizedNodeName) {
 				existingIndex = idx
 				break
 			}
@@ -241,7 +277,7 @@ func upsertPlatformMachineState(state *model.State, key model.NodeKey, nodeName,
 	if existingIndex >= 0 {
 		existing = &state.Machines[existingIndex]
 	}
-	machine, err := buildPlatformMachine(key, normalizedNodeName, endpoint, labels, machineName, machineFingerprint, existing, now)
+	machine, err := buildPlatformMachineRecord(nodeKeyID, normalizedNodeName, endpoint, labels, machineName, machineFingerprint, existing, now)
 	if err != nil {
 		return model.Machine{}, err
 	}
@@ -326,6 +362,23 @@ func (s *Store) GetMachineByClusterNodeName(name string) (model.Machine, error) 
 	return machine, err
 }
 
+func (s *Store) EnsurePlatformMachineForClusterNode(nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.Machine, error) {
+	nodeName = strings.TrimSpace(nodeName)
+	if nodeName == "" {
+		return model.Machine{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgEnsurePlatformMachineForClusterNode(nodeName, endpoint, labels, machineName, machineFingerprint)
+	}
+	var machine model.Machine
+	err := s.withLockedState(true, func(state *model.State) error {
+		var err error
+		machine, err = upsertPlatformMachineState(state, "", nodeName, endpoint, labels, machineName, machineFingerprint, time.Now().UTC())
+		return err
+	})
+	return machine, err
+}
+
 func (s *Store) EnsureMachineForRuntime(runtimeID string) (model.Machine, error) {
 	runtimeID = strings.TrimSpace(runtimeID)
 	if runtimeID == "" {
@@ -392,7 +445,7 @@ func (s *Store) attachPlatformClusterMachine(key model.NodeKey, nodeName, endpoi
 	var machine model.Machine
 	err := s.withLockedState(true, func(state *model.State) error {
 		var err error
-		machine, err = upsertPlatformMachineState(state, key, nodeName, endpoint, labels, machineName, machineFingerprint, time.Now().UTC())
+		machine, err = upsertPlatformMachineState(state, key.ID, nodeName, endpoint, labels, machineName, machineFingerprint, time.Now().UTC())
 		return err
 	})
 	return machine, err

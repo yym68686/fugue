@@ -1674,6 +1674,72 @@ func TestListRuntimesByNodeKey(t *testing.T) {
 	}
 }
 
+func TestEnsurePlatformMachineForClusterNodeReusesSeededBootstrapMachine(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	seeded, err := s.EnsurePlatformMachineForClusterNode(
+		"gcp1",
+		"203.0.113.10",
+		map[string]string{"node-role.kubernetes.io/control-plane": ""},
+		"gcp1",
+		"machine-id-gcp1",
+	)
+	if err != nil {
+		t.Fatalf("seed bootstrap platform machine: %v", err)
+	}
+	if seeded.Scope != model.MachineScopePlatformNode {
+		t.Fatalf("expected seeded machine scope %q, got %q", model.MachineScopePlatformNode, seeded.Scope)
+	}
+	if strings.TrimSpace(seeded.NodeKeyID) != "" {
+		t.Fatalf("expected seeded machine to have no node key id, got %q", seeded.NodeKeyID)
+	}
+
+	key, secret, err := s.CreateScopedNodeKey("", "bootstrap-control-plane", model.NodeKeyScopePlatformNode)
+	if err != nil {
+		t.Fatalf("create platform node key: %v", err)
+	}
+
+	returnedKey, attached, runtimeObj, err := s.BootstrapClusterAttachment(
+		secret,
+		"gcp1",
+		"https://gcp1.example.com",
+		map[string]string{"node-role.kubernetes.io/control-plane": ""},
+		"gcp1-renamed",
+		"machine-id-gcp1",
+	)
+	if err != nil {
+		t.Fatalf("attach seeded bootstrap machine: %v", err)
+	}
+	if runtimeObj != nil {
+		t.Fatalf("expected no runtime for platform machine attach, got %#v", runtimeObj)
+	}
+	if returnedKey.ID != key.ID {
+		t.Fatalf("expected returned key id %q, got %q", key.ID, returnedKey.ID)
+	}
+	if attached.ID != seeded.ID {
+		t.Fatalf("expected attach to reuse machine %q, got %q", seeded.ID, attached.ID)
+	}
+	if attached.NodeKeyID != key.ID {
+		t.Fatalf("expected attached machine node key id %q, got %q", key.ID, attached.NodeKeyID)
+	}
+	if attached.Name != "gcp1-renamed" {
+		t.Fatalf("expected attached machine name to update, got %q", attached.Name)
+	}
+
+	machines, err := s.ListMachines("", true)
+	if err != nil {
+		t.Fatalf("list machines: %v", err)
+	}
+	if len(machines) != 1 {
+		t.Fatalf("expected 1 platform machine after attach, got %d", len(machines))
+	}
+}
+
 func TestRuntimeSharingGrantControlsVisibilityAndUsage(t *testing.T) {
 	t.Parallel()
 
