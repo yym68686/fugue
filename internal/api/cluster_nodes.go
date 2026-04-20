@@ -25,6 +25,7 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
+	"fugue/internal/store"
 )
 
 const (
@@ -332,6 +333,10 @@ func (s *Server) refreshClusterNodeInventoryAsync() {
 			return zero, err
 		}
 		s.clusterNodeInventoryCache.set(clusterNodeInventoryCacheKey, value)
+		if err := s.syncBootstrapControlPlaneMachinesFromSnapshots(value); err != nil {
+			var zero []clusterNodeSnapshot
+			return zero, err
+		}
 		return value, nil
 	})
 
@@ -432,6 +437,23 @@ func (s *Server) handleListClusterNodes(w http.ResponseWriter, r *http.Request) 
 	)
 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"cluster_nodes": filtered})
+}
+
+func (s *Server) syncBootstrapControlPlaneMachinesFromSnapshots(snapshots []clusterNodeSnapshot) error {
+	if s == nil || len(snapshots) == 0 {
+		return nil
+	}
+
+	runtimes, err := s.store.ListNodes("", true)
+	if err != nil {
+		return err
+	}
+	machines, err := s.store.ListMachines("", true)
+	if err != nil {
+		return err
+	}
+	_, err = s.ensureBootstrapControlPlaneMachines(snapshots, runtimes, machines)
+	return err
 }
 
 // Tenant responses collapse the shared pool into one synthetic node so the
@@ -1098,6 +1120,13 @@ func shouldSeedBootstrapControlPlaneMachine(snapshot clusterNodeSnapshot) bool {
 	return clusterNodeHasRole(snapshot.node, "control-plane")
 }
 
+func needsLegacyBootstrapControlPlaneMachineBackfill(snapshot clusterNodeSnapshot, machine model.Machine) bool {
+	if !shouldSeedBootstrapControlPlaneMachine(snapshot) {
+		return false
+	}
+	return store.NeedsLegacyPlatformMachinePolicyBackfill(machine, snapshot.labels)
+}
+
 func bootstrapControlPlaneMachineName(snapshot clusterNodeSnapshot) string {
 	if value := strings.TrimSpace(snapshot.identity.hostname); value != "" {
 		return value
@@ -1147,7 +1176,20 @@ func (s *Server) ensureBootstrapControlPlaneMachines(snapshots []clusterNodeSnap
 		if _, ok := runtimeByClusterNode[nodeName]; ok {
 			continue
 		}
-		if _, ok := machineByClusterNode[nodeName]; ok {
+		if machine, ok := machineByClusterNode[nodeName]; ok {
+			if !needsLegacyBootstrapControlPlaneMachineBackfill(snapshot, machine) {
+				continue
+			}
+			if _, err := s.store.EnsurePlatformMachineForClusterNode(
+				nodeName,
+				bootstrapControlPlaneMachineEndpoint(snapshot),
+				snapshot.labels,
+				bootstrapControlPlaneMachineName(snapshot),
+				bootstrapControlPlaneMachineFingerprint(snapshot),
+			); err != nil {
+				return nil, err
+			}
+			changed = true
 			continue
 		}
 		if _, err := s.store.EnsurePlatformMachineForClusterNode(

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
@@ -156,6 +158,68 @@ func TestListClusterNodesSeedsBootstrapControlPlaneMachineBuildPolicyFromLiveLab
 	if !machine.Policy.AllowSharedPool {
 		t.Fatalf("expected stored machine shared-pool enabled, got %#v", machine.Policy)
 	}
+}
+
+func TestStartBackgroundWarmersBackfillsLegacyBootstrapControlPlaneMachinePolicy(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	seeded, err := stateStore.EnsurePlatformMachineForClusterNode(
+		"gcp1",
+		"203.0.113.10",
+		map[string]string{"node-role.kubernetes.io/control-plane": ""},
+		"gcp1",
+		"machine-id-gcp1",
+	)
+	if err != nil {
+		t.Fatalf("seed legacy bootstrap control-plane machine: %v", err)
+	}
+	if seeded.Policy.AllowBuilds {
+		t.Fatalf("expected seeded builds disabled, got %#v", seeded.Policy)
+	}
+
+	kubeServer := newBootstrapControlPlaneKubeServerWithLabels(t, map[string]string{
+		runtimepkg.BuildNodeLabelKey:  runtimepkg.BuildNodeLabelValue,
+		runtimepkg.BuildTierLabelKey:  model.MachineBuildTierLarge,
+		runtimepkg.SharedPoolLabelKey: runtimepkg.SharedPoolLabelValue,
+	})
+	defer kubeServer.Close()
+
+	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server.StartBackgroundWarmers(ctx)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		machine, err := stateStore.GetMachineByClusterNodeName("gcp1")
+		if err == nil &&
+			machine.ID == seeded.ID &&
+			machine.Policy.AllowBuilds &&
+			machine.Policy.BuildTier == model.MachineBuildTierLarge &&
+			machine.Policy.AllowSharedPool {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	machine, err := stateStore.GetMachineByClusterNodeName("gcp1")
+	if err != nil {
+		t.Fatalf("load backfilled bootstrap control-plane machine: %v", err)
+	}
+	t.Fatalf("expected background warmers to backfill legacy machine policy, got %#v", machine.Policy)
 }
 
 func TestSetClusterNodePolicySeedsBootstrapControlPlaneMachine(t *testing.T) {

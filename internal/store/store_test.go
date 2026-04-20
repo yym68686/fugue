@@ -1740,6 +1740,120 @@ func TestEnsurePlatformMachineForClusterNodeReusesSeededBootstrapMachine(t *test
 	}
 }
 
+func TestEnsurePlatformMachineForClusterNodeBackfillsLegacySeededPolicyFromLiveLabels(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	seeded, err := s.EnsurePlatformMachineForClusterNode(
+		"gcp1",
+		"203.0.113.10",
+		map[string]string{"node-role.kubernetes.io/control-plane": ""},
+		"gcp1",
+		"machine-id-gcp1",
+	)
+	if err != nil {
+		t.Fatalf("seed bootstrap platform machine: %v", err)
+	}
+	if seeded.Policy.AllowBuilds {
+		t.Fatalf("expected legacy seed builds disabled, got %#v", seeded.Policy)
+	}
+
+	backfilled, err := s.EnsurePlatformMachineForClusterNode(
+		"gcp1",
+		"203.0.113.10",
+		map[string]string{
+			"node-role.kubernetes.io/control-plane": "",
+			runtimepkg.BuildNodeLabelKey:            runtimepkg.BuildNodeLabelValue,
+			runtimepkg.BuildTierLabelKey:            model.MachineBuildTierLarge,
+			runtimepkg.SharedPoolLabelKey:           runtimepkg.SharedPoolLabelValue,
+		},
+		"gcp1",
+		"machine-id-gcp1",
+	)
+	if err != nil {
+		t.Fatalf("backfill bootstrap platform machine policy: %v", err)
+	}
+	if backfilled.ID != seeded.ID {
+		t.Fatalf("expected backfill to reuse machine %q, got %q", seeded.ID, backfilled.ID)
+	}
+	if !backfilled.Policy.AllowBuilds {
+		t.Fatalf("expected backfilled builds enabled, got %#v", backfilled.Policy)
+	}
+	if backfilled.Policy.BuildTier != model.MachineBuildTierLarge {
+		t.Fatalf("expected backfilled build tier %q, got %q", model.MachineBuildTierLarge, backfilled.Policy.BuildTier)
+	}
+	if !backfilled.Policy.AllowSharedPool {
+		t.Fatalf("expected backfilled shared-pool enabled, got %#v", backfilled.Policy)
+	}
+}
+
+func TestEnsurePlatformMachineForClusterNodePreservesEditedDefaultPolicy(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	seeded, err := s.EnsurePlatformMachineForClusterNode(
+		"gcp1",
+		"203.0.113.10",
+		map[string]string{"node-role.kubernetes.io/control-plane": ""},
+		"gcp1",
+		"machine-id-gcp1",
+	)
+	if err != nil {
+		t.Fatalf("seed bootstrap platform machine: %v", err)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+
+	edited, err := s.SetMachinePolicyByClusterNodeName("gcp1", model.MachinePolicy{
+		AllowBuilds:             false,
+		BuildTier:               model.MachineBuildTierMedium,
+		AllowSharedPool:         false,
+		DesiredControlPlaneRole: model.MachineControlPlaneRoleNone,
+	})
+	if err != nil {
+		t.Fatalf("set bootstrap platform machine policy: %v", err)
+	}
+	if !edited.UpdatedAt.After(seeded.UpdatedAt) {
+		t.Fatalf("expected edited machine updated_at to advance, seeded=%s edited=%s", seeded.UpdatedAt, edited.UpdatedAt)
+	}
+
+	preserved, err := s.EnsurePlatformMachineForClusterNode(
+		"gcp1",
+		"203.0.113.10",
+		map[string]string{
+			"node-role.kubernetes.io/control-plane": "",
+			runtimepkg.BuildNodeLabelKey:            runtimepkg.BuildNodeLabelValue,
+			runtimepkg.BuildTierLabelKey:            model.MachineBuildTierLarge,
+			runtimepkg.SharedPoolLabelKey:           runtimepkg.SharedPoolLabelValue,
+		},
+		"gcp1",
+		"machine-id-gcp1",
+	)
+	if err != nil {
+		t.Fatalf("refresh bootstrap platform machine policy: %v", err)
+	}
+	if preserved.ID != seeded.ID {
+		t.Fatalf("expected refresh to reuse machine %q, got %q", seeded.ID, preserved.ID)
+	}
+	if preserved.Policy.AllowBuilds {
+		t.Fatalf("expected edited builds to remain disabled, got %#v", preserved.Policy)
+	}
+	if preserved.Policy.BuildTier != model.MachineBuildTierMedium {
+		t.Fatalf("expected edited build tier %q to remain, got %q", model.MachineBuildTierMedium, preserved.Policy.BuildTier)
+	}
+	if preserved.Policy.AllowSharedPool {
+		t.Fatalf("expected edited shared-pool to remain disabled, got %#v", preserved.Policy)
+	}
+}
+
 func TestBootstrapClusterNodeSeedsMachinePolicyFromJoinLabels(t *testing.T) {
 	t.Parallel()
 

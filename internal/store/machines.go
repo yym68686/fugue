@@ -18,6 +18,13 @@ func defaultMachinePolicyForScope(scope string) model.MachinePolicy {
 	}
 }
 
+func machinePolicyEquals(a, b model.MachinePolicy) bool {
+	return a.AllowBuilds == b.AllowBuilds &&
+		a.BuildTier == b.BuildTier &&
+		a.AllowSharedPool == b.AllowSharedPool &&
+		a.DesiredControlPlaneRole == b.DesiredControlPlaneRole
+}
+
 func seedMachinePolicyFromLabels(scope string, labels map[string]string) model.MachinePolicy {
 	policy := defaultMachinePolicyForScope(scope)
 	if len(labels) == 0 {
@@ -72,6 +79,33 @@ func normalizeMachineForRead(machine *model.Machine) {
 	}
 	machine.Scope = scope
 	machine.Policy = normalizeMachinePolicy(scope, machine.Policy)
+}
+
+// NeedsLegacyPlatformMachinePolicyBackfill reports whether an existing
+// platform-node machine record still carries the old bootstrap seed defaults
+// and can be safely refreshed from the current live node labels.
+func NeedsLegacyPlatformMachinePolicyBackfill(machine model.Machine, labels map[string]string) bool {
+	if model.NormalizeMachineScope(machine.Scope) != model.MachineScopePlatformNode {
+		return false
+	}
+	if strings.TrimSpace(machine.TenantID) != "" || strings.TrimSpace(machine.RuntimeID) != "" {
+		return false
+	}
+	if strings.TrimSpace(machine.NodeKeyID) != "" {
+		return false
+	}
+	if machine.CreatedAt.IsZero() || machine.UpdatedAt.IsZero() || !machine.CreatedAt.Equal(machine.UpdatedAt) {
+		return false
+	}
+
+	legacyPolicy := normalizeMachinePolicy(model.MachineScopePlatformNode, machine.Policy)
+	defaultPolicy := defaultMachinePolicyForScope(model.MachineScopePlatformNode)
+	if !machinePolicyEquals(legacyPolicy, defaultPolicy) {
+		return false
+	}
+
+	seededPolicy := seedMachinePolicyFromLabels(model.MachineScopePlatformNode, labels)
+	return !machinePolicyEquals(seededPolicy, legacyPolicy)
 }
 
 func machinePolicyFromRuntime(runtime model.Runtime, existing *model.Machine) model.MachinePolicy {
@@ -164,7 +198,11 @@ func buildPlatformMachineRecord(nodeKeyID, nodeName, endpoint string, labels map
 		if machine.Endpoint == "" {
 			machine.Endpoint = strings.TrimSpace(existing.Endpoint)
 		}
-		machine.Policy = normalizeMachinePolicy(model.MachineScopePlatformNode, existing.Policy)
+		if NeedsLegacyPlatformMachinePolicyBackfill(*existing, labels) {
+			machine.Policy = seedMachinePolicyFromLabels(model.MachineScopePlatformNode, labels)
+		} else {
+			machine.Policy = normalizeMachinePolicy(model.MachineScopePlatformNode, existing.Policy)
+		}
 	}
 	normalizeMachineForRead(&machine)
 	return machine, nil
