@@ -123,6 +123,7 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 	if namespace == "" {
 		namespace = runtime.NamespaceForTenant(app.TenantID)
 	}
+	recoverStoredBaseline := false
 	if appID := strings.TrimSpace(app.ID); appID == "" {
 		return s.cleanupOrphanManagedApp(ctx, client, namespace, managed, app, "orphaned managed app: spec.appID is empty")
 	} else if storedApp, err := s.Store.GetApp(appID); err != nil {
@@ -141,6 +142,7 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 		case hasActiveOp:
 			app, _ = selectManagedAppDesiredApp(app, storedApp, true)
 		default:
+			recoverStoredBaseline = managedAppBaselineNeedsRecovery(storedApp)
 			app, useStoredBaseline := selectManagedAppDesiredApp(app, storedApp, false)
 			if !useStoredBaseline {
 				break
@@ -224,6 +226,13 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 	if err := s.Store.SyncManagedAppRuntimeStatus(app.ID, managedStatusTimePointer(status.CurrentReleaseStartedAt), managedStatusTimePointer(status.CurrentReleaseReadyAt), backingServiceRuntimeStatuses(status.BackingServices)); err != nil {
 		return fmt.Errorf("sync managed app runtime status for %s: %w", app.ID, err)
 	}
+	if recoverStoredBaseline && managedAppStatusReady(status, app) {
+		if _, err := s.Store.SyncObservedManagedAppBaseline(app.ID, app.Spec, app.Source); err != nil {
+			if s.Logger != nil {
+				s.Logger.Printf("persist observed managed app baseline for app %s failed: %v", app.ID, err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -237,7 +246,27 @@ func selectManagedAppDesiredApp(managedSnapshot, stored model.App, hasActiveOper
 }
 
 func managedAppBaselineNeedsRecovery(app model.App) bool {
-	return strings.TrimSpace(app.Spec.Image) == "" || app.Source == nil
+	return strings.TrimSpace(app.Spec.Image) == "" || managedAppSourceNeedsRecovery(app.Source)
+}
+
+func managedAppSourceNeedsRecovery(source *model.AppSource) bool {
+	if source == nil {
+		return true
+	}
+	switch strings.TrimSpace(source.Type) {
+	case model.AppSourceTypeGitHubPublic, model.AppSourceTypeGitHubPrivate:
+		return strings.TrimSpace(source.RepoURL) == "" ||
+			strings.TrimSpace(source.CommitSHA) == "" ||
+			strings.TrimSpace(source.ResolvedImageRef) == ""
+	case model.AppSourceTypeUpload:
+		return strings.TrimSpace(source.UploadID) == "" ||
+			strings.TrimSpace(source.ArchiveSHA256) == "" ||
+			strings.TrimSpace(source.ResolvedImageRef) == ""
+	case model.AppSourceTypeDockerImage:
+		return strings.TrimSpace(source.ImageRef) == ""
+	default:
+		return false
+	}
 }
 
 func (s *Service) cleanupOrphanManagedApp(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, reason string) error {
@@ -330,6 +359,12 @@ func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, depl
 	}
 	applyManagedAppReleaseStatus(&status, managed.Status, app, managed.Spec.Scheduling)
 	return status
+}
+
+func managedAppStatusReady(status runtime.ManagedAppStatus, app model.App) bool {
+	return strings.EqualFold(strings.TrimSpace(status.Phase), runtime.ManagedAppPhaseReady) &&
+		status.ReadyReplicas >= app.Spec.Replicas &&
+		app.Spec.Replicas > 0
 }
 
 func managedAppBaseStatus(managed runtime.ManagedAppObject, app model.App) runtime.ManagedAppStatus {

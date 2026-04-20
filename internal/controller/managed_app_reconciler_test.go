@@ -827,6 +827,8 @@ func TestSelectManagedAppDesiredAppUsesStoredBaselineWhenRecoveryIsNotNeeded(t *
 		},
 		Source: &model.AppSource{
 			Type:             model.AppSourceTypeUpload,
+			UploadID:         "upload_demo",
+			ArchiveSHA256:    "archive_demo",
 			ResolvedImageRef: "registry.push.example/fugue-apps/demo:new",
 		},
 	}
@@ -837,6 +839,153 @@ func TestSelectManagedAppDesiredAppUsesStoredBaselineWhenRecoveryIsNotNeeded(t *
 	}
 	if got.Spec.Image != stored.Spec.Image {
 		t.Fatalf("expected stored image %q, got %q", stored.Spec.Image, got.Spec.Image)
+	}
+}
+
+func TestReconcileManagedAppObjectRepairsIncompleteStoredGitHubSourceFromReadyManagedSnapshot(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(t.TempDir() + "/store.json")
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Runtime Recovery")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "Project A", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.pull.example/fugue-apps/demo:git-old",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyDockerfile,
+	}, model.AppRoute{
+		Hostname:    "demo.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://demo.example.com",
+		ServicePort: 8080,
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	managed := runtime.ManagedAppObject{
+		Metadata: runtime.ManagedAppMeta{
+			Name:       runtime.ManagedAppResourceName(app),
+			Namespace:  namespace,
+			Generation: 1,
+		},
+		Spec: runtime.ManagedAppSpec{
+			AppID:     app.ID,
+			TenantID:  app.TenantID,
+			ProjectID: app.ProjectID,
+			Name:      app.Name,
+			Source: &model.AppSource{
+				Type:             model.AppSourceTypeGitHubPublic,
+				RepoURL:          "https://github.com/example/demo",
+				RepoBranch:       "main",
+				BuildStrategy:    model.AppBuildStrategyDockerfile,
+				CommitSHA:        "newcommit",
+				ResolvedImageRef: "registry.push.example/fugue-apps/demo:git-newcommit",
+			},
+			AppSpec: model.AppSpec{
+				Image:     "registry.pull.example/fugue-apps/demo:git-newcommit",
+				Ports:     []int{8080},
+				Replicas:  1,
+				RuntimeID: "runtime_managed_shared",
+			},
+			Scheduling: runtime.SchedulingConstraints{},
+		},
+	}
+
+	deployment := kubeDeployment{}
+	deployment.Metadata.Name = runtime.RuntimeAppResourceName(app)
+	deployment.Metadata.Generation = 1
+	deployment.Status.ObservedGeneration = 1
+	deployment.Status.Replicas = 1
+	deployment.Status.UpdatedReplicas = 1
+	deployment.Status.ReadyReplicas = 1
+	deployment.Status.AvailableReplicas = 1
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodPatch && strings.HasSuffix(req.URL.Path, "/status"):
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     make(http.Header),
+			}, nil
+		case req.Method == http.MethodPatch:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     make(http.Header),
+			}, nil
+		case req.Method == http.MethodGet && req.URL.Path == "/apis/apps/v1/namespaces/"+namespace+"/deployments/"+deployment.Metadata.Name:
+			data, err := json.Marshal(deployment)
+			if err != nil {
+				t.Fatalf("marshal deployment: %v", err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(string(data))),
+				Header:     make(http.Header),
+			}, nil
+		case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/leases/"):
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader(`{"kind":"Status","status":"Failure","message":"not found","reason":"NotFound","code":404}`)),
+				Header:     make(http.Header),
+			}, nil
+		case req.Method == http.MethodGet && req.URL.RawQuery != "":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"items":[]}`)),
+				Header:     make(http.Header),
+			}, nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+	}
+	svc := &Service{
+		Store: stateStore,
+	}
+
+	if err := svc.reconcileManagedAppObject(context.Background(), client, managed); err != nil {
+		t.Fatalf("reconcile managed app: %v", err)
+	}
+
+	updated, err := stateStore.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get updated app: %v", err)
+	}
+	if updated.Source == nil {
+		t.Fatal("expected source to be preserved after reconcile")
+	}
+	if got := updated.Source.CommitSHA; got != "newcommit" {
+		t.Fatalf("expected recovered commit newcommit, got %q", got)
+	}
+	if got := updated.Source.ResolvedImageRef; got != "registry.push.example/fugue-apps/demo:git-newcommit" {
+		t.Fatalf("expected recovered resolved image, got %q", got)
+	}
+	if got := updated.Spec.Image; got != "registry.pull.example/fugue-apps/demo:git-newcommit" {
+		t.Fatalf("expected recovered runtime image, got %q", got)
 	}
 }
 

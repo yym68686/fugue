@@ -103,8 +103,9 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 		return appDiagnosis{}, err
 	}
 	sortPodsByCreation(pods)
-	diagnosis.LivePods = len(pods)
-	diagnosis.ReadyPods = countReadyLogPods(pods)
+	activePods := activeLogPods(pods)
+	diagnosis.LivePods = len(activePods)
+	diagnosis.ReadyPods = countReadyLogPods(activePods)
 
 	clusterClient, clusterErr := s.requireClusterNodeClient()
 	if clusterErr != nil {
@@ -331,6 +332,28 @@ func countReadyLogPods(pods []kubePodInfo) int {
 		}
 	}
 	return count
+}
+
+func activeLogPods(pods []kubePodInfo) []kubePodInfo {
+	if len(pods) == 0 {
+		return []kubePodInfo{}
+	}
+	active := make([]kubePodInfo, 0, len(pods))
+	for _, pod := range pods {
+		if !logPodTerminal(pod) {
+			active = append(active, pod)
+		}
+	}
+	return active
+}
+
+func logPodTerminal(pod kubePodInfo) bool {
+	switch strings.ToLower(strings.TrimSpace(pod.Status.Phase)) {
+	case "failed", "succeeded":
+		return true
+	default:
+		return false
+	}
 }
 
 func containsVolumeAffinityConflict(message string) bool {

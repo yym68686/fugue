@@ -95,6 +95,82 @@ func TestWaitForManagedAppRolloutFailsWhenManagedAppReportsError(t *testing.T) {
 	}
 }
 
+func TestWaitForManagedAppRolloutSucceedsWhenDeploymentIsReadyDespiteManagedAppError(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Replicas: 1,
+		},
+	}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	deploymentName := runtime.RuntimeAppResourceName(app)
+	managedAppName := runtime.ManagedAppResourceName(app)
+
+	deployment := kubeDeployment{}
+	deployment.Metadata.Name = deploymentName
+	deployment.Metadata.Generation = 1
+	deployment.Status.ObservedGeneration = 1
+	deployment.Status.Replicas = 1
+	deployment.Status.UpdatedReplicas = 1
+	deployment.Status.ReadyReplicas = 1
+	deployment.Status.AvailableReplicas = 1
+
+	managedApp := runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{})
+	managedMetadata, _ := managedApp["metadata"].(map[string]any)
+	if managedMetadata == nil {
+		managedMetadata = map[string]any{}
+		managedApp["metadata"] = managedMetadata
+	}
+	managedMetadata["generation"] = 1
+	managedApp["status"] = map[string]any{
+		"phase":              runtime.ManagedAppPhaseError,
+		"message":            "pod demo-abc123 on node gcp3 failed: Evicted: The node had condition: [DiskPressure].",
+		"observedGeneration": 1,
+	}
+
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/apis/apps/v1/namespaces/" + namespace + "/deployments/" + deploymentName:
+			if err := json.NewEncoder(w).Encode(deployment); err != nil {
+				t.Fatalf("encode deployment: %v", err)
+			}
+		case managedAppAPIPath(namespace, managedAppName):
+			if err := json.NewEncoder(w).Encode(managedApp); err != nil {
+				t.Fatalf("encode managed app: %v", err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	svc := &Service{
+		Config: config.ControllerConfig{
+			ManagedAppRolloutTimeout: 2 * time.Second,
+			PollInterval:             10 * time.Millisecond,
+		},
+		Logger: log.New(io.Discard, "", 0),
+		newKubeClient: func(namespace string) (*kubeClient, error) {
+			return &kubeClient{
+				client:      kubeServer.Client(),
+				baseURL:     kubeServer.URL,
+				bearerToken: "test",
+				namespace:   namespace,
+			}, nil
+		},
+	}
+
+	if err := svc.waitForManagedAppRollout(context.Background(), app, ""); err != nil {
+		t.Fatalf("expected rollout wait to succeed once deployment is ready, got %v", err)
+	}
+}
+
 func TestWaitForManagedAppRolloutWaitsForManagedPostgresClusterHealth(t *testing.T) {
 	t.Parallel()
 

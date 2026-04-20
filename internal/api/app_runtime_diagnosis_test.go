@@ -166,3 +166,57 @@ func TestGetAppDiagnosisExplainsEvictionVolumeAffinityChain(t *testing.T) {
 		}
 	}
 }
+
+func TestGetAppDiagnosisCountsOnlyActivePodsWhenReadyReplicaExists(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	selector, containerName, err := runtimeLogTarget(app, "app")
+	if err != nil {
+		t.Fatalf("runtime log target: %v", err)
+	}
+
+	fake := newFakeAppLogsClient()
+	evictedPod := fakePod("demo-old", "Failed", time.Date(2026, 4, 16, 0, 0, 0, 0, time.UTC), containerName)
+	evictedPod.Status.Reason = "Evicted"
+	evictedPod.Status.Message = "The node had condition: [DiskPressure]."
+
+	readyPod := fakePod("demo-new", "Running", time.Date(2026, 4, 16, 0, 1, 0, 0, time.UTC), containerName)
+	readyPod.Status.ContainerStatuses = []kubeContainerStatus{{
+		Name:  containerName,
+		Image: "ghcr.io/example/demo:latest",
+		Ready: true,
+		State: kubeRuntimeState{
+			Running: &struct{}{},
+		},
+	}}
+
+	fake.setPods(selector, []kubePodInfo{evictedPod, readyPod})
+	server.newLogsClient = func(namespace string) (appLogsClient, error) {
+		return fake, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/diagnosis", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Diagnosis appDiagnosis `json:"diagnosis"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Diagnosis.Category != "available" {
+		t.Fatalf("expected available diagnosis, got %+v", response.Diagnosis)
+	}
+	if response.Diagnosis.LivePods != 1 || response.Diagnosis.ReadyPods != 1 {
+		t.Fatalf("expected 1/1 active ready pods, got live=%d ready=%d", response.Diagnosis.LivePods, response.Diagnosis.ReadyPods)
+	}
+	if response.Diagnosis.Summary != "1/1 runtime pods are ready" {
+		t.Fatalf("expected active-only readiness summary, got %q", response.Diagnosis.Summary)
+	}
+}

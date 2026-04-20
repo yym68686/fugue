@@ -3627,6 +3627,66 @@ func TestFailedRebuildKeepsDeployedPhaseWhenLiveVersionExists(t *testing.T) {
 	}
 }
 
+func TestSyncObservedManagedAppBaselineUpdatesSpecAndSource(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Observed Baseline")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.pull.example/fugue-apps/demo:git-old",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyDockerfile,
+	}, model.AppRoute{
+		Hostname:    "demo.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://demo.example.com",
+		ServicePort: 8080,
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	desiredSpec := app.Spec
+	desiredSpec.Image = "registry.pull.example/fugue-apps/demo:git-newcommit"
+	desiredSource := *app.Source
+	desiredSource.CommitSHA = "newcommit"
+	desiredSource.ResolvedImageRef = "registry.push.example/fugue-apps/demo:git-newcommit"
+
+	updated, err := s.SyncObservedManagedAppBaseline(app.ID, desiredSpec, &desiredSource)
+	if err != nil {
+		t.Fatalf("sync observed managed app baseline: %v", err)
+	}
+	if got := updated.Spec.Image; got != desiredSpec.Image {
+		t.Fatalf("expected updated spec image %q, got %q", desiredSpec.Image, got)
+	}
+	if updated.Source == nil {
+		t.Fatal("expected updated source")
+	}
+	if got := updated.Source.CommitSHA; got != "newcommit" {
+		t.Fatalf("expected updated source commit newcommit, got %q", got)
+	}
+	if got := updated.Source.ResolvedImageRef; got != desiredSource.ResolvedImageRef {
+		t.Fatalf("expected updated resolved image ref %q, got %q", desiredSource.ResolvedImageRef, got)
+	}
+}
+
 func TestInitRepairsFailedPhaseForLiveApp(t *testing.T) {
 	t.Parallel()
 

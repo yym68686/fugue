@@ -55,9 +55,6 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, o
 		if err != nil {
 			return fmt.Errorf("read managed app rollout for %s/%s: %w", namespace, managedAppName, err)
 		}
-		if failureMessage := managedAppRolloutFailure(managed, foundManagedApp); failureMessage != "" {
-			return fmt.Errorf("managed app %s/%s rollout failed: %s", namespace, managedAppName, failureMessage)
-		}
 		if ready {
 			backingServicesReady, backingServiceMessage, err := s.managedBackingServicesRolloutReady(waitCtx, client, namespace, backingServices)
 			if err != nil {
@@ -86,6 +83,9 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, o
 				}
 			}
 			return nil
+		}
+		if failureMessage := managedAppRolloutFailure(managed, foundManagedApp); failureMessage != "" {
+			return fmt.Errorf("managed app %s/%s rollout failed: %s", namespace, managedAppName, failureMessage)
 		}
 		if strings.TrimSpace(message) != "" {
 			lastMessage = strings.TrimSpace(message)

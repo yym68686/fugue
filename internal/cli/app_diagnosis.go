@@ -609,14 +609,26 @@ func summarizeLatestPodState(podInventory *model.AppRuntimePodInventory, expecte
 		return latestPodState{}
 	}
 	group := podInventory.Groups[0]
+	activePods := make([]model.ClusterPod, 0, len(group.Pods))
+	for _, pod := range group.Pods {
+		if clusterPodActive(pod) {
+			activePods = append(activePods, pod)
+		}
+	}
+	podsForIssues := activePods
+	if len(podsForIssues) == 0 {
+		podsForIssues = group.Pods
+	}
 	state := latestPodState{
 		Group:    strings.TrimSpace(group.OwnerKind) + "/" + strings.TrimSpace(group.OwnerName),
-		LivePods: len(group.Pods),
+		LivePods: len(activePods),
 	}
-	for _, pod := range group.Pods {
+	for _, pod := range activePods {
 		if pod.Ready {
 			state.ReadyPods++
 		}
+	}
+	for _, pod := range podsForIssues {
 		issue := describePodIssue(pod, expectedImage)
 		if issue != "" {
 			state.Issues = appendUniqueString(state.Issues, issue)
@@ -626,6 +638,15 @@ func summarizeLatestPodState(podInventory *model.AppRuntimePodInventory, expecte
 		state.Issues = appendUniqueString(state.Issues, fmt.Sprintf("latest rollout %s has no live pods", state.Group))
 	}
 	return state
+}
+
+func clusterPodActive(pod model.ClusterPod) bool {
+	switch strings.ToLower(strings.TrimSpace(pod.Phase)) {
+	case "failed", "succeeded":
+		return false
+	default:
+		return true
+	}
 }
 
 func buildLogsFallbackJobName(logs buildLogsResponse) string {
@@ -702,6 +723,16 @@ func builderPlacementEvidence(report *appBuildArtifactReport) string {
 }
 
 func describePodIssue(pod model.ClusterPod, expectedImage string) string {
+	expectedImage = strings.TrimSpace(expectedImage)
+	hasExpectedImage := false
+	if expectedImage != "" {
+		for _, container := range pod.Containers {
+			if strings.EqualFold(strings.TrimSpace(container.Image), expectedImage) {
+				hasExpectedImage = true
+				break
+			}
+		}
+	}
 	if len(pod.Containers) == 0 {
 		if !pod.Ready && !strings.EqualFold(strings.TrimSpace(pod.Phase), "Running") {
 			return fmt.Sprintf("pod %s phase=%s", pod.Name, strings.TrimSpace(pod.Phase))
@@ -709,8 +740,11 @@ func describePodIssue(pod model.ClusterPod, expectedImage string) string {
 		return ""
 	}
 	for _, container := range pod.Containers {
-		if expected := strings.TrimSpace(expectedImage); expected != "" && strings.TrimSpace(container.Image) != "" && strings.TrimSpace(container.Image) != expected {
-			return fmt.Sprintf("pod %s container %s is running image %s, expected %s", pod.Name, container.Name, container.Image, expected)
+		if expectedImage != "" && strings.TrimSpace(container.Image) != "" && !strings.EqualFold(strings.TrimSpace(container.Image), expectedImage) {
+			if hasExpectedImage {
+				continue
+			}
+			return fmt.Sprintf("pod %s container %s is running image %s, expected %s", pod.Name, container.Name, container.Image, expectedImage)
 		}
 		if container.Ready && strings.EqualFold(strings.TrimSpace(container.State), "running") && strings.TrimSpace(container.Reason) == "" && strings.TrimSpace(container.Message) == "" {
 			continue
