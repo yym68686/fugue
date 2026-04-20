@@ -65,14 +65,25 @@ type kubeNode struct {
 		Name   string            `json:"name"`
 		Labels map[string]string `json:"labels,omitempty"`
 	} `json:"metadata"`
+	Spec struct {
+		Unschedulable bool        `json:"unschedulable,omitempty"`
+		Taints        []kubeTaint `json:"taints,omitempty"`
+	} `json:"spec"`
 	Status struct {
-		Conditions []kubeNodeCondition `json:"conditions,omitempty"`
+		Conditions  []kubeNodeCondition `json:"conditions,omitempty"`
+		Allocatable map[string]string   `json:"allocatable,omitempty"`
 	} `json:"status"`
 }
 
 type kubeNodeCondition struct {
 	Type   string `json:"type,omitempty"`
 	Status string `json:"status,omitempty"`
+}
+
+type kubeTaint struct {
+	Key    string `json:"key,omitempty"`
+	Value  string `json:"value,omitempty"`
+	Effect string `json:"effect,omitempty"`
 }
 
 type kubePersistentVolumeClaim struct {

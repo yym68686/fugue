@@ -21,6 +21,12 @@ const (
 	defaultWorkspaceStorage             = "10Gi"
 	defaultWorkspaceReplicationSchedule = "*/5 * * * *"
 	defaultWaitImage                    = "busybox:1.36"
+	defaultHelperCPURequest             = "25m"
+	defaultHelperCPULimit               = "100m"
+	defaultHelperMemoryRequest          = "32Mi"
+	defaultHelperMemoryLimit            = "128Mi"
+	defaultHelperEphemeralRequest       = "32Mi"
+	defaultHelperEphemeralLimit         = "128Mi"
 	appFilesVolumeName                  = "app-files"
 	appFilesSourceMountPath             = "/fugue-app-files"
 	AppWorkspaceContainerName           = "fugue-workspace"
@@ -212,6 +218,9 @@ func buildPostgresClusterObject(namespace, secretName, resourceName string, labe
 	if strings.TrimSpace(spec.Image) != "" {
 		clusterSpec["imageName"] = strings.TrimSpace(spec.Image)
 	}
+	if resources := runtimeResourceRequirements(spec.Resources); resources != nil {
+		clusterSpec["resources"] = resources
+	}
 	if spec.SynchronousReplicas > 0 && spec.Instances > 1 {
 		clusterSpec["minSyncReplicas"] = spec.SynchronousReplicas
 		clusterSpec["maxSyncReplicas"] = spec.SynchronousReplicas
@@ -391,6 +400,7 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 					"-c",
 					"until nc -z " + model.PostgresRWServiceName(postgres.spec.ServiceName) + " 5432; do sleep 2; done",
 				},
+				"resources": runtimeHelperResourceRequirements(),
 			})
 		}
 		initContainers = append(initContainers, postgresInitContainers...)
@@ -444,6 +454,7 @@ func buildAppFilesInitContainer(files []model.AppFile) map[string]any {
 		"securityContext": map[string]any{
 			"runAsUser": 0,
 		},
+		"resources": runtimeHelperResourceRequirements(),
 		"volumeMounts": []map[string]any{
 			{
 				"name":      appFilesVolumeName,
@@ -556,6 +567,51 @@ func runtimeResourceRequirements(spec *model.ResourceSpec) map[string]any {
 		"requests": requests,
 		"limits":   limits,
 	}
+}
+
+func runtimeHelperResourceRequirements() map[string]any {
+	return runtimeStaticResourceRequirements(
+		map[string]string{
+			"cpu":               defaultHelperCPURequest,
+			"memory":            defaultHelperMemoryRequest,
+			"ephemeral-storage": defaultHelperEphemeralRequest,
+		},
+		map[string]string{
+			"cpu":               defaultHelperCPULimit,
+			"memory":            defaultHelperMemoryLimit,
+			"ephemeral-storage": defaultHelperEphemeralLimit,
+		},
+	)
+}
+
+func runtimeStaticResourceRequirements(requests, limits map[string]string) map[string]any {
+	object := map[string]any{}
+	if cloned := cloneRuntimeResourceValues(requests); len(cloned) > 0 {
+		object["requests"] = cloned
+	}
+	if cloned := cloneRuntimeResourceValues(limits); len(cloned) > 0 {
+		object["limits"] = cloned
+	}
+	if len(object) == 0 {
+		return nil
+	}
+	return object
+}
+
+func cloneRuntimeResourceValues(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			cloned[key] = trimmed
+		}
+	}
+	if len(cloned) == 0 {
+		return nil
+	}
+	return cloned
 }
 
 type postgresRuntimeResource struct {
@@ -1208,6 +1264,7 @@ func buildAppWorkspaceInitContainer(spec model.AppWorkspaceSpec) map[string]any 
 		"securityContext": map[string]any{
 			"runAsUser": 0,
 		},
+		"resources": runtimeHelperResourceRequirements(),
 		"volumeMounts": []map[string]any{
 			{
 				"name":      workspaceVolumeName,
@@ -1305,6 +1362,7 @@ func buildAppWorkspaceSidecar(spec model.AppWorkspaceSpec) map[string]any {
 			"-lc",
 			"trap 'exit 0' TERM INT; while :; do sleep 3600; done",
 		},
+		"resources": runtimeHelperResourceRequirements(),
 		"volumeMounts": []map[string]any{
 			{
 				"name":      workspaceVolumeName,
@@ -1342,6 +1400,7 @@ func buildAppPersistentStorageInitContainer(spec model.AppPersistentStorageSpec)
 		"securityContext": map[string]any{
 			"runAsUser": 0,
 		},
+		"resources": runtimeHelperResourceRequirements(),
 		"volumeMounts": []map[string]any{
 			{
 				"name":      workspaceVolumeName,
@@ -1416,6 +1475,7 @@ func buildAppPersistentStorageSidecar(spec model.AppPersistentStorageSpec) map[s
 			"-lc",
 			"trap 'exit 0' TERM INT; while :; do sleep 3600; done",
 		},
+		"resources":    runtimeHelperResourceRequirements(),
 		"volumeMounts": buildPersistentStorageVolumeMounts(spec),
 	}
 }

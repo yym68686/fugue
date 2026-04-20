@@ -8,6 +8,7 @@ import (
 
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func (s *Service) managedPostgresPlacements(ctx context.Context, app model.App) (map[string][]runtimepkg.SchedulingConstraints, error) {
@@ -113,7 +114,7 @@ func (s *Service) managedPostgresPrimaryPlacement(
 	}
 
 	primaryPlacement := runtimepkg.SchedulingForRuntime(runtimeObj)
-	if runtimeObj.Type != model.RuntimeTypeManagedShared || len(targetPlacement.NodeSelector) == 0 {
+	if runtimeObj.Type != model.RuntimeTypeManagedShared {
 		return primaryPlacement, nil
 	}
 
@@ -174,7 +175,7 @@ func (s *Service) managedSharedPostgresPrimaryHostPlacement(
 	}
 	sort.Strings(nodeNames)
 
-	fallbackNodeName := ""
+	candidates := make([]managedSharedNodeCandidate, 0, len(nodeNames))
 	for _, nodeName := range nodeNames {
 		node, found, err := client.getNode(ctx, nodeName)
 		if err != nil {
@@ -183,27 +184,97 @@ func (s *Service) managedSharedPostgresPrimaryHostPlacement(
 		if !found || !nodeLabelsMatchSelector(node.Metadata.Labels, sourceSelector) {
 			continue
 		}
-		if len(targetSelector) > 0 && nodeLabelsMatchSelector(node.Metadata.Labels, targetSelector) {
-			if fallbackNodeName == "" {
-				fallbackNodeName = nodeName
-			}
+		if !managedSharedNodeSchedulable(node) {
 			continue
 		}
-		return runtimepkg.SchedulingConstraints{
-			NodeSelector: map[string]string{
-				kubeHostnameLabelKey: nodeName,
-			},
-		}, true, nil
+		candidates = append(candidates, managedSharedNodeCandidate{
+			nodeName:                 nodeName,
+			overlapsTargetSelector:   len(targetSelector) > 0 && nodeLabelsMatchSelector(node.Metadata.Labels, targetSelector),
+			allocatableEphemeralByte: parseKubeResourceBytes(node.Status.Allocatable["ephemeral-storage"]),
+			allocatableMemoryBytes:   parseKubeResourceBytes(node.Status.Allocatable["memory"]),
+			allocatableCPUMilli:      parseKubeResourceMilli(node.Status.Allocatable["cpu"]),
+		})
 	}
 
-	if fallbackNodeName != "" {
-		return runtimepkg.SchedulingConstraints{
-			NodeSelector: map[string]string{
-				kubeHostnameLabelKey: fallbackNodeName,
-			},
-		}, true, nil
+	if len(candidates) == 0 {
+		return runtimepkg.SchedulingConstraints{}, false, nil
 	}
-	return runtimepkg.SchedulingConstraints{}, false, nil
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left := candidates[i]
+		right := candidates[j]
+		if left.overlapsTargetSelector != right.overlapsTargetSelector {
+			return !left.overlapsTargetSelector && right.overlapsTargetSelector
+		}
+		if left.allocatableEphemeralByte != right.allocatableEphemeralByte {
+			return left.allocatableEphemeralByte > right.allocatableEphemeralByte
+		}
+		if left.allocatableMemoryBytes != right.allocatableMemoryBytes {
+			return left.allocatableMemoryBytes > right.allocatableMemoryBytes
+		}
+		if left.allocatableCPUMilli != right.allocatableCPUMilli {
+			return left.allocatableCPUMilli > right.allocatableCPUMilli
+		}
+		return left.nodeName < right.nodeName
+	})
+
+	return runtimepkg.SchedulingConstraints{
+		NodeSelector: map[string]string{
+			kubeHostnameLabelKey: candidates[0].nodeName,
+		},
+	}, true, nil
+}
+
+type managedSharedNodeCandidate struct {
+	nodeName                 string
+	overlapsTargetSelector   bool
+	allocatableEphemeralByte int64
+	allocatableMemoryBytes   int64
+	allocatableCPUMilli      int64
+}
+
+func managedSharedNodeSchedulable(node kubeNode) bool {
+	if !kubeNodeReady(node) {
+		return false
+	}
+	if node.Spec.Unschedulable {
+		return false
+	}
+	if kubeNodeConditionTrue(node.Status.Conditions, "DiskPressure") {
+		return false
+	}
+	for _, taint := range node.Spec.Taints {
+		switch strings.TrimSpace(taint.Effect) {
+		case "NoSchedule", "NoExecute":
+			return false
+		}
+	}
+	return true
+}
+
+func kubeNodeConditionTrue(conditions []kubeNodeCondition, conditionType string) bool {
+	for _, condition := range conditions {
+		if strings.EqualFold(strings.TrimSpace(condition.Type), strings.TrimSpace(conditionType)) {
+			return strings.EqualFold(strings.TrimSpace(condition.Status), "True")
+		}
+	}
+	return false
+}
+
+func parseKubeResourceMilli(value string) int64 {
+	quantity, err := resource.ParseQuantity(strings.TrimSpace(value))
+	if err != nil {
+		return 0
+	}
+	return quantity.MilliValue()
+}
+
+func parseKubeResourceBytes(value string) int64 {
+	quantity, err := resource.ParseQuantity(strings.TrimSpace(value))
+	if err != nil {
+		return 0
+	}
+	return quantity.Value()
 }
 
 func matchingManagedSharedPostgresPrimaryNode(

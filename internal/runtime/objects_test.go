@@ -32,6 +32,10 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 				User:        "root",
 				Password:    "secret",
 				ServiceName: "uni-api-demo-postgres",
+				Resources: &model.ResourceSpec{
+					CPUMilliCores:   500,
+					MemoryMebibytes: 1024,
+				},
 			},
 		},
 	}
@@ -76,6 +80,17 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 	if got := storage["size"]; got != defaultPostgresStorage {
 		t.Fatalf("expected postgres storage %q, got %#v", defaultPostgresStorage, got)
 	}
+	clusterResources, ok := clusterSpec["resources"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected postgres resources, got %#v", clusterSpec["resources"])
+	}
+	clusterRequests := resourceStringValues(t, clusterResources["requests"])
+	if got := clusterRequests["cpu"]; got != "500m" {
+		t.Fatalf("expected postgres cpu request 500m, got %#v", got)
+	}
+	if got := clusterRequests["memory"]; got != "1024Mi" {
+		t.Fatalf("expected postgres memory request 1024Mi, got %#v", got)
+	}
 	initdb := clusterSpec["bootstrap"].(map[string]any)["initdb"].(map[string]any)
 	if got := initdb["database"]; got != "uniapi" {
 		t.Fatalf("expected initdb database %q, got %#v", "uniapi", got)
@@ -106,6 +121,8 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 	if got := command[2]; got != "until nc -z uni-api-demo-postgres-rw 5432; do sleep 2; done" {
 		t.Fatalf("expected wait-postgres init container to target rw service, got %q", got)
 	}
+	assertHelperResources(t, initContainers[0]["resources"])
+	assertHelperResources(t, initContainers[1]["resources"])
 	if _, ok := containers[0]["volumeMounts"]; ok {
 		t.Fatalf("expected declarative app files to be copied by init container instead of mounted into the app container")
 	}
@@ -770,6 +787,7 @@ func TestBuildAppObjectsIncludesPersistentWorkspaceSidecar(t *testing.T) {
 	if containers[1]["name"] != AppWorkspaceContainerName {
 		t.Fatalf("expected workspace sidecar %q, got %#v", AppWorkspaceContainerName, containers[1]["name"])
 	}
+	assertHelperResources(t, containers[1]["resources"])
 	workspaceMounts := containers[0]["volumeMounts"].([]map[string]any)
 	if workspaceMounts[0]["mountPath"] != "/workspace" {
 		t.Fatalf("unexpected workspace mount path: %#v", workspaceMounts[0]["mountPath"])
@@ -783,6 +801,7 @@ func TestBuildAppObjectsIncludesPersistentWorkspaceSidecar(t *testing.T) {
 	if got := command[len(command)-1]; got != "workspace-reset-1" {
 		t.Fatalf("expected workspace reset token in init container command, got %q", got)
 	}
+	assertHelperResources(t, initContainers[0]["resources"])
 
 	workspacePVC := objects[1]
 	if got := workspacePVC["kind"]; got != "PersistentVolumeClaim" {
@@ -854,6 +873,7 @@ func TestBuildAppObjectsIncludesPersistentStorageMounts(t *testing.T) {
 	if len(containers) != 2 {
 		t.Fatalf("expected app container and storage sidecar, got %d containers", len(containers))
 	}
+	assertHelperResources(t, containers[1]["resources"])
 	appMounts := containers[0]["volumeMounts"].([]map[string]any)
 	if len(appMounts) != 2 {
 		t.Fatalf("expected two persistent storage mounts, got %+v", appMounts)
@@ -879,6 +899,7 @@ func TestBuildAppObjectsIncludesPersistentStorageMounts(t *testing.T) {
 	if got := command[len(command)-1]; !strings.Contains(got, "file\tmount-") {
 		t.Fatalf("expected persistent storage mount plan to include file mount metadata, got %q", got)
 	}
+	assertHelperResources(t, initContainers[0]["resources"])
 
 	persistentPVC := objects[1]
 	if got := persistentPVC["kind"]; got != "PersistentVolumeClaim" {
@@ -1245,4 +1266,42 @@ func envValue(envObjects []map[string]any, name string) string {
 		}
 	}
 	return ""
+}
+
+func assertHelperResources(t *testing.T, value any) {
+	t.Helper()
+
+	resources, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("expected helper resources object, got %#v", value)
+	}
+	requests := resourceStringValues(t, resources["requests"])
+	limits := resourceStringValues(t, resources["limits"])
+	if got := requests["cpu"]; got != defaultHelperCPURequest {
+		t.Fatalf("expected helper cpu request %q, got %#v", defaultHelperCPURequest, got)
+	}
+	if got := requests["memory"]; got != defaultHelperMemoryRequest {
+		t.Fatalf("expected helper memory request %q, got %#v", defaultHelperMemoryRequest, got)
+	}
+	if got := requests["ephemeral-storage"]; got != defaultHelperEphemeralRequest {
+		t.Fatalf("expected helper ephemeral request %q, got %#v", defaultHelperEphemeralRequest, got)
+	}
+	if got := limits["cpu"]; got != defaultHelperCPULimit {
+		t.Fatalf("expected helper cpu limit %q, got %#v", defaultHelperCPULimit, got)
+	}
+	if got := limits["memory"]; got != defaultHelperMemoryLimit {
+		t.Fatalf("expected helper memory limit %q, got %#v", defaultHelperMemoryLimit, got)
+	}
+	if got := limits["ephemeral-storage"]; got != defaultHelperEphemeralLimit {
+		t.Fatalf("expected helper ephemeral limit %q, got %#v", defaultHelperEphemeralLimit, got)
+	}
+}
+
+func resourceStringValues(t *testing.T, value any) map[string]string {
+	t.Helper()
+	values, ok := value.(map[string]string)
+	if !ok {
+		t.Fatalf("expected resource values map, got %#v", value)
+	}
+	return values
 }
