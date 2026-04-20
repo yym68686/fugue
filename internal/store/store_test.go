@@ -1740,6 +1740,56 @@ func TestEnsurePlatformMachineForClusterNodeReusesSeededBootstrapMachine(t *test
 	}
 }
 
+func TestBootstrapClusterNodeSeedsMachinePolicyFromJoinLabels(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Builder Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, secret, err := s.CreateNodeKey(tenant.ID, "builder")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+
+	labels := map[string]string{
+		runtimepkg.BuildNodeLabelKey:          runtimepkg.BuildNodeLabelValue,
+		runtimepkg.BuildTierLabelKey:          model.MachineBuildTierLarge,
+		runtimepkg.ControlPlaneDesiredRoleKey: model.MachineControlPlaneRoleCandidate,
+	}
+
+	_, runtimeObj, err := s.BootstrapClusterNode(
+		secret,
+		"builder-1",
+		"https://builder-1.example.com",
+		labels,
+		"builder-1",
+		"builder-1-fingerprint",
+	)
+	if err != nil {
+		t.Fatalf("bootstrap cluster node: %v", err)
+	}
+
+	machine, err := s.GetMachineByClusterNodeName(runtimeObj.ClusterNodeName)
+	if err != nil {
+		t.Fatalf("get machine by cluster node name: %v", err)
+	}
+	if !machine.Policy.AllowBuilds {
+		t.Fatalf("expected machine builds enabled from join labels, got %#v", machine.Policy)
+	}
+	if machine.Policy.BuildTier != model.MachineBuildTierLarge {
+		t.Fatalf("expected machine build tier %q, got %q", model.MachineBuildTierLarge, machine.Policy.BuildTier)
+	}
+	if machine.Policy.DesiredControlPlaneRole != model.MachineControlPlaneRoleCandidate {
+		t.Fatalf("expected desired control-plane role %q, got %q", model.MachineControlPlaneRoleCandidate, machine.Policy.DesiredControlPlaneRole)
+	}
+}
+
 func TestRuntimeSharingGrantControlsVisibilityAndUsage(t *testing.T) {
 	t.Parallel()
 

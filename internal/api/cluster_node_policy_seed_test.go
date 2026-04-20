@@ -11,6 +11,7 @@ import (
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
+	runtimepkg "fugue/internal/runtime"
 	"fugue/internal/store"
 )
 
@@ -82,6 +83,78 @@ func TestListClusterNodesSeedsBootstrapControlPlaneMachineForPlatformAdmin(t *te
 	}
 	if strings.TrimSpace(machine.NodeKeyID) != "" {
 		t.Fatalf("expected persisted bootstrap machine to have no node key id, got %q", machine.NodeKeyID)
+	}
+}
+
+func TestListClusterNodesSeedsBootstrapControlPlaneMachineBuildPolicyFromLiveLabels(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	kubeServer := newBootstrapControlPlaneKubeServerWithLabels(t, map[string]string{
+		runtimepkg.BuildNodeLabelKey:  runtimepkg.BuildNodeLabelValue,
+		runtimepkg.BuildTierLabelKey:  model.MachineBuildTierLarge,
+		runtimepkg.SharedPoolLabelKey: runtimepkg.SharedPoolLabelValue,
+	})
+	defer kubeServer.Close()
+
+	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/cluster/nodes", "bootstrap-secret", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		ClusterNodes []model.ClusterNode `json:"cluster_nodes"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if len(response.ClusterNodes) != 1 {
+		t.Fatalf("expected one cluster node, got %d", len(response.ClusterNodes))
+	}
+
+	node := response.ClusterNodes[0]
+	if node.Policy == nil {
+		t.Fatalf("expected bootstrap control-plane node policy, got %#v", node)
+	}
+	if !node.Policy.AllowBuilds {
+		t.Fatalf("expected desired builds to inherit live labels, got %#v", node.Policy)
+	}
+	if node.Policy.BuildTier != model.MachineBuildTierLarge {
+		t.Fatalf("expected desired build tier %q, got %q", model.MachineBuildTierLarge, node.Policy.BuildTier)
+	}
+	if !node.Policy.EffectiveBuilds {
+		t.Fatalf("expected effective builds enabled, got %#v", node.Policy)
+	}
+	if node.Policy.EffectiveBuildTier != model.MachineBuildTierLarge {
+		t.Fatalf("expected effective build tier %q, got %q", model.MachineBuildTierLarge, node.Policy.EffectiveBuildTier)
+	}
+	if !node.Policy.AllowSharedPool {
+		t.Fatalf("expected desired shared-pool to inherit live labels, got %#v", node.Policy)
+	}
+
+	machine, err := stateStore.GetMachineByClusterNodeName("gcp1")
+	if err != nil {
+		t.Fatalf("expected seeded platform machine in store, got %v", err)
+	}
+	if !machine.Policy.AllowBuilds {
+		t.Fatalf("expected stored machine builds enabled, got %#v", machine.Policy)
+	}
+	if machine.Policy.BuildTier != model.MachineBuildTierLarge {
+		t.Fatalf("expected stored machine build tier %q, got %q", model.MachineBuildTierLarge, machine.Policy.BuildTier)
+	}
+	if !machine.Policy.AllowSharedPool {
+		t.Fatalf("expected stored machine shared-pool enabled, got %#v", machine.Policy)
 	}
 }
 
@@ -167,6 +240,10 @@ func TestSetClusterNodePolicySeedsBootstrapControlPlaneMachine(t *testing.T) {
 }
 
 func newBootstrapControlPlaneKubeServer(t *testing.T) *httptest.Server {
+	return newBootstrapControlPlaneKubeServerWithLabels(t, nil)
+}
+
+func newBootstrapControlPlaneKubeServerWithLabels(t *testing.T, extraLabels map[string]string) *httptest.Server {
 	t.Helper()
 
 	var (
@@ -177,6 +254,9 @@ func newBootstrapControlPlaneKubeServer(t *testing.T) *httptest.Server {
 			"topology.kubernetes.io/zone":           "us-central1-a",
 		}
 	)
+	for key, value := range extraLabels {
+		labels[key] = value
+	}
 
 	return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Helper()

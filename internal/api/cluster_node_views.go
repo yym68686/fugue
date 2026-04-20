@@ -176,6 +176,10 @@ func buildClusterNodeMachineView(machine model.Machine) *model.ClusterNodeMachin
 	}
 }
 
+func machineHasSavedPolicy(machine *model.Machine) bool {
+	return machine != nil && strings.TrimSpace(machine.ID) != ""
+}
+
 func buildClusterNodePolicyView(snapshot clusterNodeSnapshot, machine *model.Machine, runtimeObj *model.Runtime) *model.ClusterNodePolicy {
 	effectiveBuilds, effectiveBuildTier := effectiveBuildPolicy(snapshot)
 	effectiveSharedPool := snapshot.sharedPool
@@ -183,13 +187,14 @@ func buildClusterNodePolicyView(snapshot clusterNodeSnapshot, machine *model.Mac
 	desiredBuildTier := effectiveBuildTier
 	desiredSharedPool := effectiveSharedPool
 	desiredRole := desiredControlPlaneRole(snapshot, machine)
+	hasSavedPolicy := machineHasSavedPolicy(machine)
 
-	if machine != nil {
+	if hasSavedPolicy {
 		desiredBuilds = machine.Policy.AllowBuilds
 		desiredBuildTier = machine.Policy.BuildTier
 		desiredSharedPool = machine.Policy.AllowSharedPool
 	}
-	if runtimeObj != nil && machine == nil {
+	if runtimeObj != nil && !hasSavedPolicy {
 		desiredSharedPool = model.NormalizeRuntimePoolMode(runtimeObj.Type, runtimeObj.PoolMode) == model.RuntimePoolModeInternalShared
 	}
 	if desiredBuildTier == "" {
@@ -224,7 +229,7 @@ func effectiveBuildPolicy(snapshot clusterNodeSnapshot) (bool, string) {
 }
 
 func desiredControlPlaneRole(snapshot clusterNodeSnapshot, machine *model.Machine) string {
-	if machine != nil {
+	if machineHasSavedPolicy(machine) {
 		if role := model.NormalizeMachineControlPlaneRole(machine.Policy.DesiredControlPlaneRole); role != "" {
 			return role
 		}

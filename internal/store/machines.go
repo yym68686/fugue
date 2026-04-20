@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	runtimepkg "fugue/internal/runtime"
 )
 
 func defaultMachinePolicyForScope(scope string) model.MachinePolicy {
@@ -15,6 +16,37 @@ func defaultMachinePolicyForScope(scope string) model.MachinePolicy {
 		AllowSharedPool:         false,
 		DesiredControlPlaneRole: model.MachineControlPlaneRoleNone,
 	}
+}
+
+func seedMachinePolicyFromLabels(scope string, labels map[string]string) model.MachinePolicy {
+	policy := defaultMachinePolicyForScope(scope)
+	if len(labels) == 0 {
+		return policy
+	}
+
+	if strings.EqualFold(
+		strings.TrimSpace(labels[runtimepkg.BuildNodeLabelKey]),
+		runtimepkg.BuildNodeLabelValue,
+	) {
+		policy.AllowBuilds = true
+	}
+	if rawTier, ok := labels[runtimepkg.BuildTierLabelKey]; ok {
+		if buildTier := model.NormalizeMachineBuildTier(rawTier); buildTier != "" {
+			policy.BuildTier = buildTier
+		}
+	}
+	if strings.EqualFold(
+		strings.TrimSpace(labels[runtimepkg.SharedPoolLabelKey]),
+		runtimepkg.SharedPoolLabelValue,
+	) {
+		policy.AllowSharedPool = true
+	}
+	if role := model.NormalizeMachineControlPlaneRole(
+		strings.TrimSpace(labels[runtimepkg.ControlPlaneDesiredRoleKey]),
+	); role != "" {
+		policy.DesiredControlPlaneRole = role
+	}
+	return policy
 }
 
 func normalizeMachinePolicy(scope string, policy model.MachinePolicy) model.MachinePolicy {
@@ -43,7 +75,7 @@ func normalizeMachineForRead(machine *model.Machine) {
 }
 
 func machinePolicyFromRuntime(runtime model.Runtime, existing *model.Machine) model.MachinePolicy {
-	policy := defaultMachinePolicyForScope(model.MachineScopeTenantRuntime)
+	policy := seedMachinePolicyFromLabels(model.MachineScopeTenantRuntime, runtime.Labels)
 	if existing != nil {
 		policy = existing.Policy
 	}
@@ -116,7 +148,7 @@ func buildPlatformMachineRecord(nodeKeyID, nodeName, endpoint string, labels map
 		ClusterNodeName:   normalizedNodeName,
 		FingerprintPrefix: model.SecretPrefix(machineFingerprint),
 		FingerprintHash:   model.HashSecret(machineFingerprint),
-		Policy:            defaultMachinePolicyForScope(model.MachineScopePlatformNode),
+		Policy:            seedMachinePolicyFromLabels(model.MachineScopePlatformNode, labels),
 		CreatedAt:         now,
 		UpdatedAt:         now,
 		LastSeenAt:        &now,
