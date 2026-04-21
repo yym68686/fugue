@@ -542,9 +542,6 @@ func selectBuilderCandidates(policy BuilderPodPolicy, profile builderWorkloadPro
 			reservedByNode[snapshot.Name],
 			builderSafetyBuffer(snapshot.Allocatable, profile),
 		)
-		if !builderDemandFits(available, demand) {
-			continue
-		}
 		remaining := builderSubtractDemand(available, demand)
 		candidates = append(candidates, builderCandidate{
 			Available: available,
@@ -554,7 +551,7 @@ func selectBuilderCandidates(policy BuilderPodPolicy, profile builderWorkloadPro
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
-		return builderCandidateLess(profile, candidates[i], candidates[j])
+		return builderCandidateLess(demand, candidates[i], candidates[j])
 	})
 	if len(candidates) > policy.CandidateCount {
 		candidates = candidates[:policy.CandidateCount]
@@ -573,15 +570,97 @@ func builderPlacementCandidates(candidates []builderCandidate, profile builderWo
 	return candidates[:limit]
 }
 
-func builderCandidateLess(profile builderWorkloadProfile, left, right builderCandidate) bool {
-	descending := profile == builderWorkloadProfileHeavy
+func builderCandidateLess(demand builderResourceDemand, left, right builderCandidate) bool {
+	if cmp := builderCompareCandidateHeadroom(left.Available, right.Available, demand); cmp != 0 {
+		return cmp > 0
+	}
 	if cmp := builderCompareResources(left.Available, right.Available); cmp != 0 {
-		if descending {
-			return cmp > 0
-		}
-		return cmp < 0
+		return cmp > 0
 	}
 	return left.Node.Name < right.Node.Name
+}
+
+func builderCompareCandidateHeadroom(left, right, demand builderResourceDemand) int {
+	leftScore := builderCandidateHeadroomScore(left, demand)
+	rightScore := builderCandidateHeadroomScore(right, demand)
+	if leftScore.AllPositive != rightScore.AllPositive {
+		if leftScore.AllPositive {
+			return 1
+		}
+		return -1
+	}
+	if leftScore.AllPositive && leftScore.GeoMean != rightScore.GeoMean {
+		if leftScore.GeoMean < rightScore.GeoMean {
+			return -1
+		}
+		return 1
+	}
+	if leftScore.MinRatio != rightScore.MinRatio {
+		if leftScore.MinRatio < rightScore.MinRatio {
+			return -1
+		}
+		return 1
+	}
+	if leftScore.SumRatio != rightScore.SumRatio {
+		if leftScore.SumRatio < rightScore.SumRatio {
+			return -1
+		}
+		return 1
+	}
+	return 0
+}
+
+type builderHeadroomScore struct {
+	MinRatio    float64
+	SumRatio    float64
+	GeoMean     float64
+	AllPositive bool
+}
+
+func builderCandidateHeadroomScore(available, demand builderResourceDemand) builderHeadroomScore {
+	ratios := []float64{
+		builderResourceHeadroomRatio(available.CPUMilli, demand.CPUMilli),
+		builderResourceHeadroomRatio(available.MemoryBytes, demand.MemoryBytes),
+		builderResourceHeadroomRatio(available.EphemeralBytes, demand.EphemeralBytes),
+	}
+	minRatio := ratios[0]
+	sum := 0.0
+	product := 1.0
+	allPositive := true
+	for _, ratio := range ratios {
+		if ratio < minRatio {
+			minRatio = ratio
+		}
+		sum += ratio
+		if ratio <= 0 {
+			allPositive = false
+			continue
+		}
+		product *= ratio
+	}
+	score := builderHeadroomScore{
+		MinRatio:    minRatio,
+		SumRatio:    sum,
+		AllPositive: allPositive,
+	}
+	if allPositive {
+		score.GeoMean = math.Cbrt(product)
+	}
+	return score
+}
+
+func builderResourceHeadroomRatio(available, demand int64) float64 {
+	if demand > 0 {
+		return float64(available) / float64(demand)
+	}
+	switch {
+	case available > 0:
+		return math.Inf(1)
+	case available < 0:
+		return math.Inf(-1)
+	default:
+		return 0
+	}
 }
 
 func builderCompareResources(left, right builderResourceDemand) int {

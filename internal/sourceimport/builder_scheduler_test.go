@@ -52,7 +52,7 @@ func TestNewBuilderLeaseUsesMicrosecondPrecision(t *testing.T) {
 	}
 }
 
-func TestSelectBuilderCandidatesLightPrefersLowerAvailableResources(t *testing.T) {
+func TestSelectBuilderCandidatesLightPrefersHigherOverallHeadroom(t *testing.T) {
 	t.Parallel()
 
 	policy := defaultBuilderPodPolicy()
@@ -62,19 +62,19 @@ func TestSelectBuilderCandidatesLightPrefersLowerAvailableResources(t *testing.T
 	}
 
 	candidates := selectBuilderCandidates(policy, builderWorkloadProfileLight, demand, []builderNodeSnapshot{
-		builderTestNode("lower-available", "lower-available", policy, "4000m", "16Gi", "20Gi", "200m", "12Gi", "2Gi"),
-		builderTestNode("higher-available", "higher-available", policy, "2000m", "8Gi", "10Gi", "200m", "1Gi", "1Gi"),
+		builderTestNode("higher-headroom", "higher-headroom", policy, "4000m", "16Gi", "20Gi", "200m", "12Gi", "2Gi"),
+		builderTestNode("lower-headroom", "lower-headroom", policy, "2000m", "8Gi", "10Gi", "200m", "1Gi", "1Gi"),
 	}, nil, nil)
 
 	if len(candidates) != 2 {
 		t.Fatalf("expected 2 candidates, got %d", len(candidates))
 	}
-	if got := candidates[0].Node.Name; got != "lower-available" {
-		t.Fatalf("expected lowest-available node to rank first for light build, got %q", got)
+	if got := candidates[0].Node.Name; got != "higher-headroom" {
+		t.Fatalf("expected highest-headroom node to rank first for light build, got %q", got)
 	}
 }
 
-func TestSelectBuilderCandidatesHeavyPrefersHigherAvailableResources(t *testing.T) {
+func TestSelectBuilderCandidatesHeavyPrefersHigherOverallHeadroom(t *testing.T) {
 	t.Parallel()
 
 	policy := defaultBuilderPodPolicy()
@@ -84,15 +84,15 @@ func TestSelectBuilderCandidatesHeavyPrefersHigherAvailableResources(t *testing.
 	}
 
 	candidates := selectBuilderCandidates(policy, builderWorkloadProfileHeavy, demand, []builderNodeSnapshot{
-		builderTestNode("lower-available", "lower-available", policy, "4000m", "16Gi", "20Gi", "200m", "11Gi", "2Gi"),
-		builderTestNode("higher-available", "higher-available", policy, "2000m", "8Gi", "10Gi", "200m", "2Gi", "1Gi"),
+		builderTestNode("higher-headroom", "higher-headroom", policy, "4000m", "16Gi", "20Gi", "200m", "11Gi", "2Gi"),
+		builderTestNode("lower-headroom", "lower-headroom", policy, "2000m", "8Gi", "10Gi", "200m", "2Gi", "1Gi"),
 	}, nil, nil)
 
 	if len(candidates) != 2 {
 		t.Fatalf("expected 2 heavy candidates, got %d", len(candidates))
 	}
-	if got := candidates[0].Node.Name; got != "higher-available" {
-		t.Fatalf("expected highest-available node to rank first for heavy build, got %q", got)
+	if got := candidates[0].Node.Name; got != "higher-headroom" {
+		t.Fatalf("expected highest-headroom node to rank first for heavy build, got %q", got)
 	}
 }
 
@@ -152,11 +152,11 @@ func TestSelectBuilderCandidatesReservationsReduceHeadroom(t *testing.T) {
 		},
 	}, nil)
 
-	if len(candidates) != 1 {
-		t.Fatalf("expected reservation to disqualify one node, got %d candidates", len(candidates))
+	if len(candidates) != 2 {
+		t.Fatalf("expected both nodes to remain candidates after reservation, got %d candidates", len(candidates))
 	}
 	if got := candidates[0].Node.Name; got != "medium-b" {
-		t.Fatalf("expected medium-b to remain eligible, got %q", got)
+		t.Fatalf("expected medium-b to rank ahead after reservation reduces medium-a headroom, got %q", got)
 	}
 }
 
@@ -290,7 +290,7 @@ func TestSelectBuilderCandidatesIncludesInternalSharedPoolManagedOwnedNodesWitho
 	}
 }
 
-func TestSelectBuilderCandidatesFallsBackToSharedNodesWhenExplicitBuildPoolIsExhausted(t *testing.T) {
+func TestSelectBuilderCandidatesRanksSharedNodesAheadOfExhaustedBuildPoolNodes(t *testing.T) {
 	t.Parallel()
 
 	policy := defaultBuilderPodPolicy()
@@ -304,11 +304,11 @@ func TestSelectBuilderCandidatesFallsBackToSharedNodesWhenExplicitBuildPoolIsExh
 	delete(sharedFallback.Labels, policy.BuildNodeLabelKey)
 
 	candidates := selectBuilderCandidates(policy, builderWorkloadProfileHeavy, demand, []builderNodeSnapshot{exhaustedBuilder, sharedFallback}, nil, nil)
-	if len(candidates) != 1 {
-		t.Fatalf("expected shared fallback to remain eligible when explicit build node is exhausted, got %d candidates", len(candidates))
+	if len(candidates) != 2 {
+		t.Fatalf("expected exhausted explicit build node to remain in the ranked set, got %d candidates", len(candidates))
 	}
 	if got := candidates[0].Node.Name; got != "gcp2" {
-		t.Fatalf("expected gcp2 shared fallback to be selected, got %q", got)
+		t.Fatalf("expected gcp2 shared fallback to rank ahead of exhausted explicit build node, got %q", got)
 	}
 }
 
@@ -405,11 +405,11 @@ func TestSelectBuilderCandidatesUsesFilesystemAvailabilityForEphemeralHeadroom(t
 		builderTestNodeWithFS("gcp3", "gcp3", policy, "2000m", "4Gi", "9140Mi", "2500Mi", "103m", "1200Mi", "56Ki"),
 	}, nil, nil)
 
-	if len(candidates) != 1 {
-		t.Fatalf("expected filesystem headroom to reject low-disk node, got %d candidates", len(candidates))
+	if len(candidates) != 2 {
+		t.Fatalf("expected low-disk node to stay in ranking instead of being filtered, got %d candidates", len(candidates))
 	}
 	if got := candidates[0].Node.Name; got != "gcp1" {
-		t.Fatalf("expected gcp1-like node to remain eligible, got %q", got)
+		t.Fatalf("expected gcp1-like node to rank ahead once filesystem headroom is accounted for, got %q", got)
 	}
 }
 
