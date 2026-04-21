@@ -423,6 +423,184 @@ func TestExecuteManagedImportOperationRecoversUploadManagedImageRefFromImportRes
 	}
 }
 
+func TestExecuteManagedImportOperationPreservesGitHubSourceAfterUploadOverride(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	upload, err := stateStore.CreateSourceUpload(tenant.ID, "demo.tgz", "application/gzip", []byte("archive-bytes"))
+	if err != nil {
+		t.Fatalf("create source upload: %v", err)
+	}
+	expectedManagedImageRef := "registry.push.example/fugue-apps/demo:upload-" + upload.SHA256[:12]
+	expectedRuntimeImageRef := "registry.pull.example/fugue-apps/demo:upload-" + upload.SHA256[:12]
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:        "registry.pull.example/fugue-apps/demo:git-current",
+		Replicas:     1,
+		RuntimeID:    "runtime_managed_shared",
+		RestartToken: "restart_old",
+	}, model.AppSource{
+		Type:             model.AppSourceTypeGitHubPublic,
+		RepoURL:          "https://github.com/example/demo",
+		RepoBranch:       "main",
+		BuildStrategy:    model.AppBuildStrategyDockerfile,
+		CommitSHA:        "git-current",
+		DockerfilePath:   "Dockerfile",
+		BuildContextDir:  ".",
+		ImageNameSuffix:  "gateway",
+		ComposeService:   "gateway",
+		ComposeDependsOn: []string{"runtime"},
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	specCopy := app.Spec
+	overrideSource := model.AppSource{
+		Type:             model.AppSourceTypeUpload,
+		UploadID:         upload.ID,
+		UploadFilename:   upload.Filename,
+		ArchiveSHA256:    upload.SHA256,
+		ArchiveSizeBytes: upload.SizeBytes,
+		BuildStrategy:    model.AppBuildStrategyDockerfile,
+		DockerfilePath:   "Dockerfile",
+		BuildContextDir:  ".",
+		ImageNameSuffix:  "gateway",
+		ComposeService:   "gateway",
+	}
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		DesiredSource:   &overrideSource,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+
+	importer := &recordingImporter{
+		uploadOutput: &sourceimport.GitHubSourceImportOutput{
+			ImportResult: sourceimport.GitHubImportResult{
+				BuildStrategy:        model.AppBuildStrategyDockerfile,
+				ImageRef:             expectedManagedImageRef,
+				BuildJobName:         "fugue-build-demo-upload",
+				DetectedPort:         8080,
+				ExposesPublicService: true,
+				DetectedProvider:     "dockerfile",
+			},
+			Source: model.AppSource{
+				Type:             model.AppSourceTypeUpload,
+				BuildStrategy:    model.AppBuildStrategyDockerfile,
+				DockerfilePath:   "Dockerfile",
+				BuildContextDir:  ".",
+				ImageNameSuffix:  "gateway",
+				ComposeService:   "gateway",
+				DetectedProvider: "dockerfile",
+			},
+		},
+	}
+	svc := &Service{
+		Store:            stateStore,
+		Config:           config.ControllerConfig{SourceUploadBaseURL: "http://source.example"},
+		Logger:           log.New(io.Discard, "", 0),
+		importer:         importer,
+		registryPushBase: "registry.push.example",
+		registryPullBase: "registry.pull.example",
+		inspectManagedImage: func(_ context.Context, imageRef string) (bool, map[string]int64, error) {
+			return imageRef == expectedManagedImageRef, nil, nil
+		},
+	}
+
+	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
+		t.Fatalf("execute managed import operation: %v", err)
+	}
+
+	ops, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+	var deployOp model.Operation
+	for _, candidate := range ops {
+		if candidate.Type == model.OperationTypeDeploy {
+			deployOp = candidate
+		}
+	}
+	if deployOp.ID == "" || deployOp.DesiredSource == nil {
+		t.Fatalf("expected deploy operation with desired source, got %+v", deployOp)
+	}
+	if got := deployOp.DesiredSpec.Image; got != expectedRuntimeImageRef {
+		t.Fatalf("expected runtime image %q, got %q", expectedRuntimeImageRef, got)
+	}
+	if got := deployOp.DesiredSource.Type; got != model.AppSourceTypeGitHubPublic {
+		t.Fatalf("expected deploy source type %q, got %q", model.AppSourceTypeGitHubPublic, got)
+	}
+	if got := deployOp.DesiredSource.RepoURL; got != "https://github.com/example/demo" {
+		t.Fatalf("expected repo url to be preserved, got %q", got)
+	}
+	if got := deployOp.DesiredSource.CommitSHA; got != "git-current" {
+		t.Fatalf("expected commit sha to be preserved, got %q", got)
+	}
+	if got := deployOp.DesiredSource.ComposeService; got != "gateway" {
+		t.Fatalf("expected compose service to be preserved, got %q", got)
+	}
+	if !reflect.DeepEqual(deployOp.DesiredSource.ComposeDependsOn, []string{"runtime"}) {
+		t.Fatalf("expected compose dependencies to be preserved, got %v", deployOp.DesiredSource.ComposeDependsOn)
+	}
+	if got := deployOp.DesiredSource.ResolvedImageRef; got != expectedManagedImageRef {
+		t.Fatalf("expected managed image ref %q, got %q", expectedManagedImageRef, got)
+	}
+	if got := deployOp.DesiredSource.UploadID; got != "" {
+		t.Fatalf("expected deploy source to drop upload provenance, got upload_id %q", got)
+	}
+
+	completedImport, err := stateStore.GetOperation(op.ID)
+	if err != nil {
+		t.Fatalf("get completed import operation: %v", err)
+	}
+	if completedImport.DesiredSource == nil || completedImport.DesiredSource.Type != model.AppSourceTypeUpload {
+		t.Fatalf("expected import operation to retain upload source history, got %+v", completedImport.DesiredSource)
+	}
+
+	if _, err := stateStore.CompleteManagedOperation(deployOp.ID, "/tmp/demo.yaml", "deployed"); err != nil {
+		t.Fatalf("complete deploy operation: %v", err)
+	}
+	persistedApp, err := stateStore.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app after deploy: %v", err)
+	}
+	if persistedApp.Source == nil {
+		t.Fatal("expected app source after deploy")
+	}
+	if got := persistedApp.Source.Type; got != model.AppSourceTypeGitHubPublic {
+		t.Fatalf("expected app source type %q, got %q", model.AppSourceTypeGitHubPublic, got)
+	}
+	if got := persistedApp.Source.RepoURL; got != "https://github.com/example/demo" {
+		t.Fatalf("expected persisted repo url, got %q", got)
+	}
+	if got := persistedApp.Source.CommitSHA; got != "git-current" {
+		t.Fatalf("expected persisted commit sha, got %q", got)
+	}
+	if got := persistedApp.Source.ResolvedImageRef; got != expectedManagedImageRef {
+		t.Fatalf("expected persisted managed image ref %q, got %q", expectedManagedImageRef, got)
+	}
+}
+
 func TestExecuteManagedImportOperationPropagatesUploadImporterErrors(t *testing.T) {
 	t.Parallel()
 

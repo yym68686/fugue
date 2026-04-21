@@ -135,11 +135,13 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 
 	finalSpec := cloneImportSpec(*op.DesiredSpec)
 	finalSource := restoreQueuedSourceMetadata(output.Source, *op.DesiredSource)
+	deploySource := persistedDeploySourceAfterImport(app.Source, *op.DesiredSource, finalSource)
 	managedImageRef, runtimeImageRef, err := s.resolveImportedManagedImageRef(importCtx, app, *op.DesiredSource, finalSource, strings.TrimSpace(output.ImportResult.ImageRef))
 	if err != nil {
 		return err
 	}
 	finalSource.ResolvedImageRef = managedImageRef
+	deploySource.ResolvedImageRef = managedImageRef
 	finalSpec.Image = runtimeImageRef
 	if finalSpec.Replicas <= 0 {
 		finalSpec.Replicas = 1
@@ -172,7 +174,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		RequestedByID:   op.RequestedByID,
 		AppID:           app.ID,
 		DesiredSpec:     &finalSpec,
-		DesiredSource:   &finalSource,
+		DesiredSource:   &deploySource,
 	})
 	if err != nil {
 		return fmt.Errorf("queue deploy after import: %w", err)
@@ -535,6 +537,45 @@ func restoreQueuedSourceMetadata(imported model.AppSource, queued model.AppSourc
 		imported.ComposeDependsOn = nil
 	}
 	return imported
+}
+
+func persistedDeploySourceAfterImport(existing *model.AppSource, queued model.AppSource, imported model.AppSource) model.AppSource {
+	if !shouldPreserveSourceProvenance(existing, queued) {
+		return imported
+	}
+
+	preserved := cloneAppSourceForImportPersistence(existing)
+	if detected := strings.TrimSpace(imported.DetectedProvider); detected != "" {
+		preserved.DetectedProvider = detected
+	}
+	if stack := strings.TrimSpace(imported.DetectedStack); stack != "" {
+		preserved.DetectedStack = stack
+	}
+	return preserved
+}
+
+func shouldPreserveSourceProvenance(existing *model.AppSource, queued model.AppSource) bool {
+	if existing == nil {
+		return false
+	}
+	existingType := strings.TrimSpace(existing.Type)
+	if existingType == "" || existingType == model.AppSourceTypeUpload {
+		return false
+	}
+	return strings.TrimSpace(queued.Type) == model.AppSourceTypeUpload
+}
+
+func cloneAppSourceForImportPersistence(source *model.AppSource) model.AppSource {
+	if source == nil {
+		return model.AppSource{}
+	}
+	cloned := *source
+	if len(source.ComposeDependsOn) > 0 {
+		cloned.ComposeDependsOn = append([]string(nil), source.ComposeDependsOn...)
+	} else {
+		cloned.ComposeDependsOn = nil
+	}
+	return cloned
 }
 
 func (s *Service) suggestComposeServiceEnv(ctx context.Context, app model.App, source model.AppSource) (map[string]string, error) {
