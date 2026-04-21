@@ -139,6 +139,17 @@ fugue app request my-app /healthz
 fugue app request my-app GET /admin/requests --query page=2 --query status=500 --header-from-env X-Service-Key=SERVICE_KEY
 `),
 	},
+	"fugue app request compare": {
+		Long: strings.TrimSpace(`
+Probe the public route and the internal app service side by side, then let the CLI explain whether the fault lives in public routing, static fallback, auth middleware, or the app itself.
+
+Use --require-env when the endpoint depends on a specific effective app env key and you want Fugue to block early with a concrete missing-key diagnosis instead of returning a bare 4xx/5xx.
+`),
+		Example: strings.TrimSpace(`
+fugue app request compare my-app /healthz
+fugue app request compare my-app POST /api/devices --header-from-env Authorization=DEVICE_BOOTSTRAP_TOKEN --require-env PUBLIC_BASE_URL
+`),
+	},
 	"fugue app diagnose": {
 		Long: strings.TrimSpace(`
 Summarize the most likely runtime root cause for one app by combining pod state, scheduling events, and node pressure signals.
