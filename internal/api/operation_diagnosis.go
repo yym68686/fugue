@@ -10,10 +10,22 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/sourceimport"
 	"fugue/internal/store"
 )
 
 var diagnosisQueuedDeployOperationPattern = regexp.MustCompile(`queued deploy operation ([A-Za-z0-9_-]+)`)
+var diagnosisBuilderPlacementProfilePattern = regexp.MustCompile(`profile ([A-Za-z0-9_-]+)`)
+
+type builderPlacementInspector func(
+	ctx context.Context,
+	namespace string,
+	policy sourceimport.BuilderPodPolicy,
+	profile string,
+	buildStrategy string,
+	stateful bool,
+	requiredNodeLabels map[string]string,
+) (model.BuilderPlacementInspection, error)
 
 func (s *Server) handleGetOperationDiagnosis(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
@@ -90,16 +102,7 @@ func (s *Server) diagnoseOperation(ctx context.Context, op model.Operation) (mod
 			Service:  diagnosisComposeService(op, app, appFound),
 		}, nil
 	case model.OperationStatusFailed:
-		summary := "operation failed"
-		if message := firstNonEmpty(strings.TrimSpace(op.ErrorMessage), strings.TrimSpace(op.ResultMessage)); message != "" {
-			summary = message
-		}
-		return model.OperationDiagnosis{
-			Category: "failed",
-			Summary:  summary,
-			AppName:  diagnosisAppName(app, appFound),
-			Service:  diagnosisComposeService(op, app, appFound),
-		}, nil
+		return s.diagnoseFailedOperation(ctx, op, app, appFound)
 	default:
 		summary := firstNonEmpty(strings.TrimSpace(op.ResultMessage), "operation status is unknown")
 		return model.OperationDiagnosis{
@@ -109,6 +112,152 @@ func (s *Server) diagnoseOperation(ctx context.Context, op model.Operation) (mod
 			Service:  diagnosisComposeService(op, app, appFound),
 		}, nil
 	}
+}
+
+func (s *Server) diagnoseFailedOperation(ctx context.Context, op model.Operation, app model.App, appFound bool) (model.OperationDiagnosis, error) {
+	summary := "operation failed"
+	if message := firstNonEmpty(strings.TrimSpace(op.ErrorMessage), strings.TrimSpace(op.ResultMessage)); message != "" {
+		summary = message
+	}
+	if diagnosis, ok := s.diagnoseFailedBuilderPlacement(ctx, op, app, appFound, summary); ok {
+		return diagnosis, nil
+	}
+	return model.OperationDiagnosis{
+		Category: "failed",
+		Summary:  summary,
+		AppName:  diagnosisAppName(app, appFound),
+		Service:  diagnosisComposeService(op, app, appFound),
+	}, nil
+}
+
+func (s *Server) diagnoseFailedBuilderPlacement(ctx context.Context, op model.Operation, app model.App, appFound bool, message string) (model.OperationDiagnosis, bool) {
+	message = strings.TrimSpace(message)
+	if !strings.Contains(message, "select builder placement:") {
+		return model.OperationDiagnosis{}, false
+	}
+	buildStrategy := ""
+	if op.DesiredSource != nil {
+		buildStrategy = strings.TrimSpace(op.DesiredSource.BuildStrategy)
+	}
+	profile := diagnosisBuilderPlacementProfile(message)
+	category := diagnosisBuilderPlacementCategory(message)
+	diagnosis := model.OperationDiagnosis{
+		Category: category,
+		Summary:  diagnosisBuilderPlacementSummary(category, profile, buildStrategy, message),
+		Hint:     diagnosisBuilderPlacementHint(category),
+		AppName:  diagnosisAppName(app, appFound),
+		Service:  diagnosisComposeService(op, app, appFound),
+	}
+	namespace := firstNonEmpty(strings.TrimSpace(s.controlPlaneNamespace), "fugue-system")
+	inspector := s.inspectBuilderPlacement
+	if inspector == nil {
+		inspector = sourceimport.InspectBuilderPlacementForProfile
+	}
+	inspection, err := inspector(ctx, namespace, s.importer.BuilderPolicy, profile, buildStrategy, false, nil)
+	if err != nil {
+		diagnosis.Evidence = append(diagnosis.Evidence, fmt.Sprintf("builder placement inspection unavailable: %v", err))
+		return diagnosis, true
+	}
+	diagnosis.BuilderPlacement = &inspection
+	diagnosis.Evidence = append(diagnosis.Evidence, diagnosisBuilderPlacementEvidence(inspection)...)
+	return diagnosis, true
+}
+
+func diagnosisBuilderPlacementProfile(message string) string {
+	match := diagnosisBuilderPlacementProfilePattern.FindStringSubmatch(strings.TrimSpace(message))
+	if len(match) < 2 {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(match[1]))
+}
+
+func diagnosisBuilderPlacementCategory(message string) string {
+	message = strings.ToLower(strings.TrimSpace(message))
+	switch {
+	case strings.Contains(message, "after lock contention"):
+		return "builder-lock-contention"
+	case strings.Contains(message, "load builder node stats summaries"):
+		return "builder-node-summary-unavailable"
+	case strings.Contains(message, "no eligible builder nodes"):
+		return "builder-no-eligible-nodes"
+	default:
+		return "builder-placement-failed"
+	}
+}
+
+func diagnosisBuilderPlacementSummary(category, profile, buildStrategy, fallback string) string {
+	target := "builder nodes"
+	if strings.TrimSpace(profile) != "" {
+		target = fmt.Sprintf("%s for profile %q", target, strings.TrimSpace(profile))
+	} else if strings.TrimSpace(buildStrategy) != "" {
+		target = fmt.Sprintf("%s for build strategy %q", target, strings.TrimSpace(buildStrategy))
+	}
+	switch category {
+	case "builder-lock-contention":
+		return fmt.Sprintf("builder candidates were available, but every shortlisted node lost the lock race before reservation for %s", target)
+	case "builder-node-summary-unavailable":
+		return fmt.Sprintf("builder node stats summaries could not be loaded for the eligible %s", target)
+	case "builder-no-eligible-nodes":
+		return fmt.Sprintf("no %s passed readiness, taint, disk-pressure, label, or stats checks", target)
+	default:
+		return firstNonEmpty(strings.TrimSpace(fallback), "builder placement failed")
+	}
+}
+
+func diagnosisBuilderPlacementHint(category string) string {
+	switch category {
+	case "builder-lock-contention":
+		return "Retry after the active builder locks clear. The builder placement snapshot below shows the current locks and reservations."
+	case "builder-node-summary-unavailable":
+		return "Check kubelet summary availability and control-plane access to the node stats endpoints for the builder nodes."
+	case "builder-no-eligible-nodes":
+		return "Check builder node policy, shared-pool membership, taints, readiness, and disk pressure. The builder placement snapshot below shows why each node was excluded."
+	default:
+		return "Inspect the builder placement snapshot below for reservations, locks, and per-node exclusion reasons."
+	}
+}
+
+func diagnosisBuilderPlacementEvidence(report model.BuilderPlacementInspection) []string {
+	evidence := []string{}
+	if len(report.Reservations) > 0 {
+		parts := make([]string, 0, len(report.Reservations))
+		for _, reservation := range report.Reservations {
+			label := strings.TrimSpace(reservation.Name)
+			if nodeName := strings.TrimSpace(reservation.NodeName); nodeName != "" {
+				label += "@" + nodeName
+			}
+			parts = append(parts, label)
+		}
+		evidence = append(evidence, "active builder reservations: "+strings.Join(parts, ", "))
+	}
+	if len(report.Locks) > 0 {
+		parts := make([]string, 0, len(report.Locks))
+		for _, lock := range report.Locks {
+			label := strings.TrimSpace(lock.NodeName)
+			if label == "" {
+				label = strings.TrimSpace(lock.Name)
+			}
+			if holder := strings.TrimSpace(lock.HolderIdentity); holder != "" {
+				label += " held by " + holder
+			}
+			parts = append(parts, label)
+		}
+		evidence = append(evidence, "active builder locks: "+strings.Join(parts, ", "))
+	}
+	excluded := make([]string, 0, len(report.Nodes))
+	for _, node := range report.Nodes {
+		if node.Eligible || len(node.Reasons) == 0 {
+			continue
+		}
+		excluded = append(excluded, fmt.Sprintf("%s: %s", strings.TrimSpace(node.NodeName), strings.Join(node.Reasons, "; ")))
+		if len(excluded) >= 3 {
+			break
+		}
+	}
+	if len(excluded) > 0 {
+		evidence = append(evidence, "excluded nodes: "+strings.Join(excluded, " | "))
+	}
+	return evidence
 }
 
 func (s *Server) diagnoseDeployImageState(ctx context.Context, op model.Operation, app model.App, appFound bool) (*model.OperationDiagnosis, error) {

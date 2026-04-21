@@ -28,7 +28,12 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 	if !allowed {
 		return
 	}
-	spec, baselineSource, err := s.recoverAppDeployBaseline(app)
+	spec, _, err := s.recoverAppDeployBaseline(app)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	baselineSource, err := s.recoverAppOriginSource(app)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -177,13 +182,14 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	op, err := s.store.CreateOperation(model.Operation{
-		TenantID:        app.TenantID,
-		Type:            model.OperationTypeImport,
-		RequestedByType: principal.ActorType,
-		RequestedByID:   principal.ActorID,
-		AppID:           app.ID,
-		DesiredSpec:     &spec,
-		DesiredSource:   &source,
+		TenantID:            app.TenantID,
+		Type:                model.OperationTypeImport,
+		RequestedByType:     principal.ActorType,
+		RequestedByID:       principal.ActorID,
+		AppID:               app.ID,
+		DesiredSpec:         &spec,
+		DesiredSource:       &source,
+		DesiredOriginSource: model.CloneAppSource(&source),
 	})
 	if err != nil {
 		s.writeStoreError(w, err)

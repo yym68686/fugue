@@ -1145,11 +1145,7 @@ func backfillManagedAppSource(app *model.App, stored model.App) {
 	if app == nil || app.Source != nil || stored.Source == nil {
 		return
 	}
-	sourceCopy := *stored.Source
-	if len(stored.Source.ComposeDependsOn) > 0 {
-		sourceCopy.ComposeDependsOn = append([]string(nil), stored.Source.ComposeDependsOn...)
-	}
-	app.Source = &sourceCopy
+	model.SetAppSourceState(app, model.AppOriginSource(stored), model.AppBuildSource(stored))
 }
 
 func managedAppExpectedObjectNamesByKind(app model.App) map[string]map[string]struct{} {

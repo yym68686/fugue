@@ -98,9 +98,7 @@ func applyCompletedMigrateToAppModel(app *model.App, op *model.Operation) error 
 			app.Route = nil
 		}
 	}
-	if op.DesiredSource != nil {
-		app.Source = cloneAppSource(op.DesiredSource)
-	}
+	applyOperationSourceStateToApp(app, *op)
 	app.Status.Phase = "migrated"
 	app.Status.CurrentRuntimeID = op.TargetRuntimeID
 	app.Status.CurrentReplicas = app.Spec.Replicas

@@ -45,6 +45,7 @@ type importUploadRequest struct {
 	StartupCommand           *string                                           `json:"startup_command,omitempty"`
 	PersistentStorage        *model.AppPersistentStorageSpec                   `json:"persistent_storage,omitempty"`
 	Postgres                 *model.AppPostgresSpec                            `json:"postgres"`
+	ReplaceSource            bool                                              `json:"replace_source,omitempty"`
 	UpdateExisting           bool                                              `json:"update_existing,omitempty"`
 	DeleteMissing            bool                                              `json:"delete_missing,omitempty"`
 	DryRun                   bool                                              `json:"dry_run,omitempty"`
@@ -130,6 +131,7 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		inheritAppSourceBuildMetadata(model.AppBuildSource(app), &source)
 
 		spec := cloneAppSpec(app.Spec)
 		if runtimeID := strings.TrimSpace(req.RuntimeID); runtimeID != "" {
@@ -168,6 +170,12 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 			AppID:           app.ID,
 			DesiredSpec:     &spec,
 			DesiredSource:   &source,
+			DesiredOriginSource: func() *model.AppSource {
+				if req.ReplaceSource {
+					return model.CloneAppSource(&source)
+				}
+				return model.AppOriginSource(app)
+			}(),
 		})
 		if err != nil {
 			s.writeStoreError(w, err)
@@ -381,13 +389,14 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 	spec := cloneAppSpec(app.Spec)
 	desiredSource := source
 	op, err := s.store.CreateOperation(model.Operation{
-		TenantID:        app.TenantID,
-		Type:            model.OperationTypeImport,
-		RequestedByType: principal.ActorType,
-		RequestedByID:   principal.ActorID,
-		AppID:           app.ID,
-		DesiredSpec:     &spec,
-		DesiredSource:   &desiredSource,
+		TenantID:            app.TenantID,
+		Type:                model.OperationTypeImport,
+		RequestedByType:     principal.ActorType,
+		RequestedByID:       principal.ActorID,
+		AppID:               app.ID,
+		DesiredSpec:         &spec,
+		DesiredSource:       &desiredSource,
+		DesiredOriginSource: model.CloneAppSource(&desiredSource),
 	})
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -564,6 +573,39 @@ func resolveUploadImportBaseName(requestedName, archiveFilename string) string {
 		return baseName
 	}
 	return "app"
+}
+
+func inheritAppSourceBuildMetadata(current *model.AppSource, next *model.AppSource) {
+	if current == nil || next == nil {
+		return
+	}
+	if strings.TrimSpace(next.SourceDir) == "" {
+		next.SourceDir = strings.TrimSpace(current.SourceDir)
+	}
+	if strings.TrimSpace(next.BuildStrategy) == "" {
+		next.BuildStrategy = strings.TrimSpace(current.BuildStrategy)
+	}
+	if strings.TrimSpace(next.DockerfilePath) == "" {
+		next.DockerfilePath = strings.TrimSpace(current.DockerfilePath)
+	}
+	if strings.TrimSpace(next.BuildContextDir) == "" {
+		next.BuildContextDir = strings.TrimSpace(current.BuildContextDir)
+	}
+	if strings.TrimSpace(next.ImageNameSuffix) == "" {
+		next.ImageNameSuffix = strings.TrimSpace(current.ImageNameSuffix)
+	}
+	if strings.TrimSpace(next.ComposeService) == "" {
+		next.ComposeService = strings.TrimSpace(current.ComposeService)
+	}
+	if len(next.ComposeDependsOn) == 0 && len(current.ComposeDependsOn) > 0 {
+		next.ComposeDependsOn = append([]string(nil), current.ComposeDependsOn...)
+	}
+	if strings.TrimSpace(next.DetectedProvider) == "" {
+		next.DetectedProvider = strings.TrimSpace(current.DetectedProvider)
+	}
+	if strings.TrimSpace(next.DetectedStack) == "" {
+		next.DetectedStack = strings.TrimSpace(current.DetectedStack)
+	}
 }
 
 func normalizeImportBaseNameOptional(raw string) string {

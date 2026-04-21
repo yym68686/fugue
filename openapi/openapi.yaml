@@ -1723,6 +1723,31 @@ paths:
                 $ref: "#/components/schemas/AppDeleteResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/source:
+    patch:
+      operationId: patchAppSource
+      summary: Patch App Source Ownership
+      tags: [Apps]
+      x-fugue-handler: handlePatchAppSource
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchAppSourceRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppPatchResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/images:
     get:
       operationId: getAppImages
@@ -3901,6 +3926,14 @@ components:
         description:
           type: string
         source:
+          description: Current build source for the app. Prefer build_source for new integrations.
+          deprecated: true
+          $ref: "#/components/schemas/AppSource"
+        origin_source:
+          description: Durable source-of-truth used for GitHub sync and source ownership.
+          $ref: "#/components/schemas/AppSource"
+        build_source:
+          description: Last build input applied to the app.
           $ref: "#/components/schemas/AppSource"
         route:
           $ref: "#/components/schemas/AppRoute"
@@ -4213,6 +4246,8 @@ components:
           type: boolean
         allow_shared_pool:
           type: boolean
+        node_mode:
+          type: string
         desired_control_plane_role:
           type: string
         effective_builds:
@@ -4346,6 +4381,10 @@ components:
         desired_spec:
           $ref: "#/components/schemas/AppSpec"
         desired_source:
+          description: Build input requested by the operation.
+          $ref: "#/components/schemas/AppSource"
+        desired_origin_source:
+          description: Durable source ownership that should persist after the operation completes.
           $ref: "#/components/schemas/AppSource"
         result_message:
           type: string
@@ -4384,6 +4423,115 @@ components:
           type: string
         status:
           type: string
+    BuilderResourceSnapshot:
+      type: object
+      additionalProperties: false
+      properties:
+        cpu_milli:
+          type: integer
+          format: int64
+        memory_bytes:
+          type: integer
+          format: int64
+        ephemeral_bytes:
+          type: integer
+          format: int64
+    BuilderPlacementReservationInspection:
+      type: object
+      additionalProperties: false
+      required: [name, demand]
+      properties:
+        name:
+          type: string
+        node_name:
+          type: string
+        renewed_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        demand:
+          $ref: "#/components/schemas/BuilderResourceSnapshot"
+    BuilderPlacementLockInspection:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+        node_name:
+          type: string
+        holder_identity:
+          type: string
+        renewed_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+    BuilderPlacementNodeInspection:
+      type: object
+      additionalProperties: false
+      required: [node_name, ready, disk_pressure, eligible]
+      properties:
+        node_name:
+          type: string
+        hostname:
+          type: string
+        node_mode:
+          type: string
+        ready:
+          type: boolean
+        disk_pressure:
+          type: boolean
+        eligible:
+          type: boolean
+        rank:
+          type: integer
+        reasons:
+          type: array
+          items:
+            type: string
+        allocatable:
+          $ref: "#/components/schemas/BuilderResourceSnapshot"
+        used:
+          $ref: "#/components/schemas/BuilderResourceSnapshot"
+        reserved:
+          $ref: "#/components/schemas/BuilderResourceSnapshot"
+        safety_buffer:
+          $ref: "#/components/schemas/BuilderResourceSnapshot"
+        available:
+          $ref: "#/components/schemas/BuilderResourceSnapshot"
+        remaining:
+          $ref: "#/components/schemas/BuilderResourceSnapshot"
+    BuilderPlacementInspection:
+      type: object
+      additionalProperties: false
+      required: [demand]
+      properties:
+        profile:
+          type: string
+        build_strategy:
+          type: string
+        required_node_labels:
+          type: object
+          additionalProperties:
+            type: string
+        demand:
+          $ref: "#/components/schemas/BuilderResourceSnapshot"
+        reservations:
+          type: array
+          items:
+            $ref: "#/components/schemas/BuilderPlacementReservationInspection"
+        locks:
+          type: array
+          items:
+            $ref: "#/components/schemas/BuilderPlacementLockInspection"
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/BuilderPlacementNodeInspection"
     OperationDiagnosis:
       type: object
       additionalProperties: false
@@ -4399,6 +4547,12 @@ components:
           type: string
         service:
           type: string
+        evidence:
+          type: array
+          items:
+            type: string
+        builder_placement:
+          $ref: "#/components/schemas/BuilderPlacementInspection"
         dependency_chain:
           type: array
           items:
@@ -5062,6 +5216,13 @@ components:
           type: string
         persistent_storage:
           $ref: "#/components/schemas/AppPersistentStorageSpec"
+    PatchAppSourceRequest:
+      type: object
+      additionalProperties: false
+      required: [origin_source]
+      properties:
+        origin_source:
+          $ref: "#/components/schemas/AppSource"
     BillingResponse:
       type: object
       additionalProperties: false
@@ -6393,6 +6554,8 @@ components:
           $ref: "#/components/schemas/AppPersistentStorageSpec"
         postgres:
           $ref: "#/components/schemas/AppPostgresSpec"
+        replace_source:
+          type: boolean
         update_existing:
           type: boolean
         delete_missing:

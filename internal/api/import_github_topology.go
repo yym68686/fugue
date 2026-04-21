@@ -41,6 +41,7 @@ type topologyImportOptions struct {
 	ServicePersistentStorage map[string]model.ServicePersistentStorageOverride
 	AuditAction              string
 	BuildSource              topologySourceBuilder
+	DesiredOriginSource      func(existing *model.App, source model.AppSource) *model.AppSource
 	BuildAuditMetadata       topologyAuditMetadataBuilder
 	UpdateExisting           bool
 	DeleteMissing            bool
@@ -93,6 +94,9 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 		AuditAction:              "app.import_github",
 		BuildSource: func(service sourceimport.ComposeService, composeDependsOn []string) (model.AppSource, error) {
 			return buildQueuedComposeServiceSource(req, service, composeDependsOn)
+		},
+		DesiredOriginSource: func(_ *model.App, source model.AppSource) *model.AppSource {
+			return model.CloneAppSource(&source)
 		},
 		BuildAuditMetadata: func(source model.AppSource, _ model.AppRoute) map[string]string {
 			return map[string]string{
@@ -287,6 +291,12 @@ func (s *Server) importResolvedUploadTopology(principal model.Principal, tenantI
 		AuditAction:              "app.import_upload",
 		BuildSource: func(service sourceimport.ComposeService, composeDependsOn []string) (model.AppSource, error) {
 			return buildQueuedUploadComposeServiceSource(upload, service, composeDependsOn)
+		},
+		DesiredOriginSource: func(existing *model.App, source model.AppSource) *model.AppSource {
+			if req.ReplaceSource || existing == nil {
+				return model.CloneAppSource(&source)
+			}
+			return model.AppOriginSource(*existing)
 		},
 		BuildAuditMetadata: func(source model.AppSource, _ model.AppRoute) map[string]string {
 			return map[string]string{
@@ -538,14 +548,19 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 
 		specCopy := cloneAppSpec(plan.Spec)
 		sourceCopy := plan.Source
+		desiredOriginSource := model.CloneAppSource(&sourceCopy)
+		if options.DesiredOriginSource != nil {
+			desiredOriginSource = options.DesiredOriginSource(plan.Match, sourceCopy)
+		}
 		op, err := s.store.CreateOperation(model.Operation{
-			TenantID:        app.TenantID,
-			Type:            model.OperationTypeImport,
-			RequestedByType: principal.ActorType,
-			RequestedByID:   principal.ActorID,
-			AppID:           app.ID,
-			DesiredSpec:     &specCopy,
-			DesiredSource:   &sourceCopy,
+			TenantID:            app.TenantID,
+			Type:                model.OperationTypeImport,
+			RequestedByType:     principal.ActorType,
+			RequestedByID:       principal.ActorID,
+			AppID:               app.ID,
+			DesiredSpec:         &specCopy,
+			DesiredSource:       &sourceCopy,
+			DesiredOriginSource: desiredOriginSource,
 		})
 		if err != nil {
 			return importedGitHubTopology{}, rollback(err)
@@ -810,7 +825,11 @@ func matchTopologyExistingApps(projectApps []model.App, services []sourceimport.
 		if !topologyImportFamilyMatchesApp(app, family) || topologyAppIsDeleting(app) {
 			continue
 		}
-		service := strings.TrimSpace(app.Source.ComposeService)
+		source := model.AppOriginSource(app)
+		if source == nil {
+			continue
+		}
+		service := strings.TrimSpace(source.ComposeService)
 		if service == "" {
 			continue
 		}
@@ -856,7 +875,11 @@ func topologyDeleteCandidates(familyApps map[string]model.App, services []source
 		if _, ok := matchedIDs[strings.TrimSpace(app.ID)]; ok {
 			continue
 		}
-		service := strings.TrimSpace(app.Source.ComposeService)
+		source := model.AppOriginSource(app)
+		service := ""
+		if source != nil {
+			service = strings.TrimSpace(source.ComposeService)
+		}
 		if service != "" {
 			if _, ok := deployableServices[service]; ok {
 				continue
@@ -919,10 +942,15 @@ func buildTopologyDeployPlan(projectName string, options topologyImportOptions, 
 		plan.Services = append(plan.Services, entry)
 	}
 	for _, app := range deleteCandidates {
+		source := model.AppOriginSource(app)
+		service := ""
+		if source != nil {
+			service = strings.TrimSpace(source.ComposeService)
+		}
 		plan.DeleteCandidates = append(plan.DeleteCandidates, model.TopologyDeployDeleteTarget{
 			AppID:   strings.TrimSpace(app.ID),
 			AppName: strings.TrimSpace(app.Name),
-			Service: strings.TrimSpace(app.Source.ComposeService),
+			Service: service,
 			Reason:  "service is no longer present in the imported topology",
 		})
 	}
@@ -952,19 +980,20 @@ func servicePublishedByName(services []sourceimport.ComposeService, name string)
 }
 
 func topologyImportFamilyMatchesApp(app model.App, family topologyImportFamily) bool {
-	if app.Source == nil {
+	source := model.AppOriginSource(app)
+	if source == nil {
 		return false
 	}
 	switch strings.TrimSpace(family.Kind) {
 	case model.AppSourceTypeGitHubPublic, model.AppSourceTypeGitHubPrivate, "github":
-		kind := strings.TrimSpace(app.Source.Type)
+		kind := strings.TrimSpace(source.Type)
 		if kind != model.AppSourceTypeGitHubPublic && kind != model.AppSourceTypeGitHubPrivate {
 			return false
 		}
-		return strings.EqualFold(normalizeTopologyGitHubFamilyKey(app.Source.RepoURL), normalizeTopologyGitHubFamilyKey(family.Key))
+		return strings.EqualFold(normalizeTopologyGitHubFamilyKey(source.RepoURL), normalizeTopologyGitHubFamilyKey(family.Key))
 	case model.AppSourceTypeUpload:
-		return strings.EqualFold(strings.TrimSpace(app.Source.Type), model.AppSourceTypeUpload) &&
-			strings.EqualFold(strings.TrimSpace(app.Source.UploadFilename), strings.TrimSpace(family.Key))
+		return strings.EqualFold(strings.TrimSpace(source.Type), model.AppSourceTypeUpload) &&
+			strings.EqualFold(strings.TrimSpace(source.UploadFilename), strings.TrimSpace(family.Key))
 	default:
 		return false
 	}

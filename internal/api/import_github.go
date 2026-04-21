@@ -395,13 +395,14 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 	spec := cloneAppSpec(app.Spec)
 	desiredSource := source
 	op, err := s.store.CreateOperation(model.Operation{
-		TenantID:        app.TenantID,
-		Type:            model.OperationTypeImport,
-		RequestedByType: principal.ActorType,
-		RequestedByID:   principal.ActorID,
-		AppID:           app.ID,
-		DesiredSpec:     &spec,
-		DesiredSource:   &desiredSource,
+		TenantID:            app.TenantID,
+		Type:                model.OperationTypeImport,
+		RequestedByType:     principal.ActorType,
+		RequestedByID:       principal.ActorID,
+		AppID:               app.ID,
+		DesiredSpec:         &spec,
+		DesiredSource:       &desiredSource,
+		DesiredOriginSource: model.CloneAppSource(&desiredSource),
 	})
 	if err != nil {
 		s.writeStoreError(w, err)

@@ -7,6 +7,9 @@ const redactedSecretValue = "[redacted]"
 func redactAppForOutput(app model.App) model.App {
 	out := app
 	out.Source = redactAppSourceForOutput(app.Source)
+	out.OriginSource = redactAppSourceForOutput(app.OriginSource)
+	out.BuildSource = redactAppSourceForOutput(app.BuildSource)
+	model.NormalizeAppSourceState(&out)
 	out.Spec = redactAppSpecForOutput(app.Spec)
 	out.Bindings = cloneBindingsForOutput(app.Bindings, true)
 	out.BackingServices = cloneBackingServicesForOutput(app.BackingServices, true)
@@ -20,6 +23,7 @@ func redactOperationForOutput(op model.Operation) model.Operation {
 		out.DesiredSpec = &spec
 	}
 	out.DesiredSource = redactAppSourceForOutput(op.DesiredSource)
+	out.DesiredOriginSource = redactAppSourceForOutput(op.DesiredOriginSource)
 	return out
 }
 

@@ -661,6 +661,101 @@ func TestLoadNodeSnapshotsFailsWhenAllEligibleSummariesAreUnavailable(t *testing
 	}
 }
 
+func TestInspectPlacementReportsReservationsLocksAndNodeReasons(t *testing.T) {
+	t.Parallel()
+
+	policy := defaultBuilderPodPolicy()
+	demand, err := builderDemandForProfile(policy, builderWorkloadProfileHeavy)
+	if err != nil {
+		t.Fatalf("builder demand: %v", err)
+	}
+	nodeA := builderTestKubeNode("node-a", "host-a", policy)
+	nodeB := builderTestKubeNode("node-b", "host-b", policy)
+	delete(nodeB.Metadata.Labels, policy.BuildNodeLabelKey)
+	nodeB.Metadata.Labels[runtime.TenantIDLabelKey] = "tenant_demo"
+	nodeB.Metadata.Labels[runtime.NodeModeLabelKey] = model.RuntimeTypeManagedOwned
+	nodeC := builderTestKubeNode("node-c", "", policy)
+	delete(nodeC.Metadata.Labels, builderHostnameLabelKey)
+	nodeD := builderTestKubeNode("node-d", "host-d", policy)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes":
+			writeBuilderTestJSON(t, w, builderKubeNodeList{
+				Items: []builderKubeNode{nodeA, nodeB, nodeC, nodeD},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes/node-a/proxy/stats/summary":
+			writeBuilderTestJSON(t, w, builderTestNodeSummary("18Gi"))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes/node-c/proxy/stats/summary":
+			writeBuilderTestJSON(t, w, builderTestNodeSummary("12Gi"))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes/node-d/proxy/stats/summary":
+			http.Error(w, `{"message":"stats unavailable"}`, http.StatusServiceUnavailable)
+		case r.Method == http.MethodGet && r.URL.Path == "/apis/coordination.k8s.io/v1/namespaces/fugue-system/leases" && r.URL.Query().Get("labelSelector") == builderReservationLabelSelector:
+			writeBuilderTestJSON(t, w, builderKubeLeaseList{
+				Items: []builderKubeLease{
+					builderTestLease("reservation-a", builderReservationComponentValue, "reservation-a", "node-a", "2026-04-22T10:00:00.000000Z", 120, map[string]string{
+						builderAnnotationCPUMilli:       "750",
+						builderAnnotationMemoryBytes:    "1073741824",
+						builderAnnotationEphemeralBytes: "3221225472",
+					}),
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/apis/coordination.k8s.io/v1/namespaces/fugue-system/leases" && r.URL.Query().Get("labelSelector") == builderNodeLockLabelSelector:
+			writeBuilderTestJSON(t, w, builderKubeLeaseList{
+				Items: []builderKubeLease{
+					builderTestLease("lock-node-a", builderNodeLockComponentValue, "build-demo", "node-a", "2026-04-22T10:00:30.000000Z", 20, nil),
+				},
+			})
+		default:
+			t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+		}
+	}))
+	defer server.Close()
+
+	scheduler := &builderScheduler{
+		client: &builderKubeClient{
+			client:    server.Client(),
+			baseURL:   server.URL,
+			namespace: "fugue-system",
+		},
+		namespace: "fugue-system",
+		policy:    policy,
+		profile:   builderWorkloadProfileHeavy,
+		demand:    demand,
+	}
+
+	report, err := scheduler.inspectPlacement(context.Background(), model.AppBuildStrategyDockerfile)
+	if err != nil {
+		t.Fatalf("inspect placement: %v", err)
+	}
+	if report.Profile != "heavy" {
+		t.Fatalf("expected heavy profile, got %+v", report)
+	}
+	if len(report.Reservations) != 1 {
+		t.Fatalf("expected 1 reservation, got %+v", report.Reservations)
+	}
+	if len(report.Locks) != 1 {
+		t.Fatalf("expected 1 lock, got %+v", report.Locks)
+	}
+
+	nodesByName := make(map[string]model.BuilderPlacementNodeInspection, len(report.Nodes))
+	for _, node := range report.Nodes {
+		nodesByName[node.NodeName] = node
+	}
+	if node := nodesByName["node-a"]; !node.Eligible || node.Rank != 1 {
+		t.Fatalf("expected node-a to be top eligible node, got %+v", node)
+	}
+	if node := nodesByName["node-b"]; node.Eligible || !strings.Contains(strings.Join(node.Reasons, "\n"), runtime.TenantIDLabelKey) {
+		t.Fatalf("expected node-b to be excluded by tenant policy, got %+v", node)
+	}
+	if node := nodesByName["node-c"]; node.Eligible || !strings.Contains(strings.Join(node.Reasons, "\n"), builderHostnameLabelKey) {
+		t.Fatalf("expected node-c to be excluded for missing hostname, got %+v", node)
+	}
+	if node := nodesByName["node-d"]; node.Eligible || !strings.Contains(strings.Join(node.Reasons, "\n"), "stats summary unavailable") {
+		t.Fatalf("expected node-d to report summary failure, got %+v", node)
+	}
+}
+
 func TestTryAcquireNodeLockCreateUsesMicrosecondPrecision(t *testing.T) {
 	t.Parallel()
 
@@ -835,6 +930,27 @@ func assertMicrosecondKubeTimestamp(t *testing.T, value string) {
 	if _, err := time.Parse("2006-01-02T15:04:05.000000Z07:00", value); err != nil {
 		t.Fatalf("parse kube timestamp %q: %v", value, err)
 	}
+}
+
+func builderTestLease(name, component, holder, nodeName, renewTime string, durationSeconds int, annotations map[string]string) builderKubeLease {
+	var lease builderKubeLease
+	lease.Metadata.Name = name
+	lease.Metadata.Namespace = "fugue-system"
+	lease.Metadata.Labels = map[string]string{
+		"app.kubernetes.io/managed-by": "fugue",
+		"app.kubernetes.io/component":  component,
+	}
+	lease.Metadata.Annotations = map[string]string{
+		builderAnnotationNodeName: nodeName,
+	}
+	for key, value := range annotations {
+		lease.Metadata.Annotations[key] = value
+	}
+	lease.Spec.HolderIdentity = holder
+	lease.Spec.LeaseDurationSeconds = durationSeconds
+	lease.Spec.AcquireTime = renewTime
+	lease.Spec.RenewTime = renewTime
+	return lease
 }
 
 func builderUint64Ptr(value uint64) *uint64 {

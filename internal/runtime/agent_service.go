@@ -224,13 +224,15 @@ func (s *AgentService) processTask(ctx context.Context, task AgentTask) error {
 			}
 			app.Spec.RuntimeID = task.Operation.TargetRuntimeID
 		}
+		buildSource := model.AppBuildSource(app)
 		if task.Operation.DesiredSource != nil {
-			source := *task.Operation.DesiredSource
-			if len(task.Operation.DesiredSource.ComposeDependsOn) > 0 {
-				source.ComposeDependsOn = append([]string(nil), task.Operation.DesiredSource.ComposeDependsOn...)
-			}
-			app.Source = &source
+			buildSource = model.CloneAppSource(task.Operation.DesiredSource)
 		}
+		originSource := model.AppOriginSource(app)
+		if task.Operation.DesiredOriginSource != nil {
+			originSource = model.CloneAppSource(task.Operation.DesiredOriginSource)
+		}
+		model.SetAppSourceState(&app, originSource, buildSource)
 	default:
 		return fmt.Errorf("unsupported task type %s", task.Operation.Type)
 	}

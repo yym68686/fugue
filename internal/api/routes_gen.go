@@ -68,6 +68,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/apps/{id}/runtime-logs/stream", s.auth.RequireAPI(http.HandlerFunc(s.handleStreamAppRuntimeLogs)))
 	mux.Handle("GET /v1/apps/{id}/runtime-pods", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppRuntimePods)))
 	mux.Handle("POST /v1/apps/{id}/scale", s.auth.RequireAPI(http.HandlerFunc(s.handleScaleApp)))
+	mux.Handle("PATCH /v1/apps/{id}/source", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchAppSource)))
 	mux.Handle("GET /v1/audit-events", s.auth.RequireAPI(http.HandlerFunc(s.handleListAuditEvents)))
 	mux.Handle("GET /v1/backing-services", s.auth.RequireAPI(http.HandlerFunc(s.handleListBackingServices)))
 	mux.Handle("POST /v1/backing-services", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateBackingService)))

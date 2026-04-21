@@ -656,6 +656,18 @@ func (c *Client) PatchAppPersistentStorage(id string, storage *model.AppPersiste
 	return response, nil
 }
 
+func (c *Client) PatchAppOriginSource(id string, originSource *model.AppSource) (appPatchResponse, error) {
+	request := map[string]any{}
+	if originSource != nil {
+		request["origin_source"] = originSource
+	}
+	var response appPatchResponse
+	if err := c.doJSON(http.MethodPatch, path.Join("/v1/apps", id, "source"), request, &response); err != nil {
+		return appPatchResponse{}, err
+	}
+	return response, nil
+}
+
 func (c *Client) DisableApp(id string) (appDisableResponse, error) {
 	var response appDisableResponse
 	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "disable"), nil, &response); err != nil {

@@ -8,7 +8,7 @@ import (
 
 func (s *Server) recoverAppDeployBaseline(app model.App) (model.AppSpec, *model.AppSource, error) {
 	spec := cloneAppSpec(app.Spec)
-	source := cloneAppSource(app.Source)
+	source := model.AppBuildSource(app)
 	if !appDeployBaselineNeedsRecovery(spec, source) {
 		return spec, source, nil
 	}
@@ -50,6 +50,29 @@ func (s *Server) recoverAppDeployBaseline(app model.App) (model.AppSpec, *model.
 	recoveredSpec.ImageMirrorLimit = app.Spec.ImageMirrorLimit
 	model.ApplyAppSpecDefaults(&recoveredSpec)
 	return recoveredSpec, recoveredSource, nil
+}
+
+func (s *Server) recoverAppOriginSource(app model.App) (*model.AppSource, error) {
+	source := model.AppOriginSource(app)
+	if source != nil {
+		return source, nil
+	}
+
+	ops, err := s.store.ListOperationsByApp(app.TenantID, false, app.ID)
+	if err != nil {
+		return nil, err
+	}
+	for _, op := range ops {
+		if !isRecoverableDeployBaselineOperation(op) {
+			continue
+		}
+		if op.DesiredOriginSource != nil {
+			source = cloneAppSource(op.DesiredOriginSource)
+		} else if op.DesiredSource != nil {
+			source = cloneAppSource(op.DesiredSource)
+		}
+	}
+	return source, nil
 }
 
 func appDeployBaselineNeedsRecovery(spec model.AppSpec, source *model.AppSource) bool {

@@ -220,3 +220,66 @@ func TestGetAppDiagnosisCountsOnlyActivePodsWhenReadyReplicaExists(t *testing.T)
 		t.Fatalf("expected active-only readiness summary, got %q", response.Diagnosis.Summary)
 	}
 }
+
+func TestGetAppDiagnosisIncludesCrashLogSnippetForPodFailure(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	selector, containerName, err := runtimeLogTarget(app, "app")
+	if err != nil {
+		t.Fatalf("runtime log target: %v", err)
+	}
+
+	fake := newFakeAppLogsClient()
+	pod := fakePod("demo-crash", "Running", time.Date(2026, 4, 16, 0, 2, 0, 0, time.UTC), containerName)
+	pod.Metadata.Namespace = namespace
+	pod.Status.ContainerStatuses = []kubeContainerStatus{{
+		Name:  containerName,
+		Image: "ghcr.io/example/demo:latest",
+		Ready: false,
+		State: kubeRuntimeState{
+			Waiting: &kubeStateDetail{
+				Reason:  "CrashLoopBackOff",
+				Message: "back-off restarting failed container",
+			},
+		},
+		LastState: kubeRuntimeState{
+			Terminated: &kubeStateDetail{
+				Reason:   "Error",
+				Message:  "app boot failed",
+				ExitCode: 1,
+			},
+		},
+	}}
+	fake.setPods(selector, []kubePodInfo{pod})
+	fake.setLogLines(namespace, "demo-crash", containerName, true,
+		"INFO booting app",
+		`ERROR: Error loading ASGI app. Attribute "app" not found in module "mecgod_cloud.app".`,
+	)
+	server.newLogsClient = func(namespace string) (appLogsClient, error) {
+		return fake, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/diagnosis", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Diagnosis appDiagnosis `json:"diagnosis"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Diagnosis.Category != "pod-failure" {
+		t.Fatalf("expected pod-failure diagnosis, got %+v", response.Diagnosis)
+	}
+	joinedEvidence := strings.Join(response.Diagnosis.Evidence, "\n")
+	if !strings.Contains(joinedEvidence, `Attribute "app" not found in module "mecgod_cloud.app"`) {
+		t.Fatalf("expected crash log evidence, got %+v", response.Diagnosis.Evidence)
+	}
+}

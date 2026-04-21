@@ -108,13 +108,14 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 
 		if deployChanged {
 			op, err := s.store.CreateOperation(model.Operation{
-				TenantID:        currentApp.TenantID,
-				Type:            model.OperationTypeDeploy,
-				RequestedByType: principal.ActorType,
-				RequestedByID:   principal.ActorID,
-				AppID:           currentApp.ID,
-				DesiredSpec:     &spec,
-				DesiredSource:   source,
+				TenantID:            currentApp.TenantID,
+				Type:                model.OperationTypeDeploy,
+				RequestedByType:     principal.ActorType,
+				RequestedByID:       principal.ActorID,
+				AppID:               currentApp.ID,
+				DesiredSpec:         &spec,
+				DesiredSource:       source,
+				DesiredOriginSource: model.AppOriginSource(currentApp),
 			})
 			if err != nil {
 				s.writeStoreError(w, err)

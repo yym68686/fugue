@@ -492,7 +492,7 @@ func writeClusterNodeTable(w io.Writer, nodes []model.ClusterNode) error {
 		return strings.Compare(sorted[i].Name, sorted[j].Name) < 0
 	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "NODE\tSTATUS\tRUNTIME\tROLES\tREGION\tCPU\tMEMORY"); err != nil {
+	if _, err := fmt.Fprintln(tw, "NODE\tSTATUS\tRUNTIME\tROLES\tREGION\tBUILD\tSHARED\tMODE\tCP\tCPU\tMEMORY"); err != nil {
 		return err
 	}
 	for _, node := range sorted {
@@ -506,19 +506,56 @@ func writeClusterNodeTable(w io.Writer, nodes []model.ClusterNode) error {
 		}
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			node.Name,
-			node.Status,
-			node.RuntimeID,
-			strings.Join(node.Roles, ","),
-			firstNonEmpty(node.Region, node.Zone),
-			cpu,
-			memory,
+			firstNonEmpty(node.Status, "-"),
+			firstNonEmpty(node.RuntimeID, "-"),
+			firstNonEmpty(strings.Join(node.Roles, ","), "-"),
+			firstNonEmpty(node.Region, node.Zone, "-"),
+			firstNonEmpty(formatClusterNodePolicyToggle(node.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowBuilds }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveBuilds }), "-"),
+			firstNonEmpty(formatClusterNodePolicyToggle(node.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowSharedPool }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveSharedPool }), "-"),
+			firstNonEmpty(strings.TrimSpace(clusterNodePolicyMode(node.Policy)), "-"),
+			firstNonEmpty(strings.TrimSpace(clusterNodePolicyControlPlane(node.Policy)), "-"),
+			firstNonEmpty(cpu, "-"),
+			firstNonEmpty(memory, "-"),
 		); err != nil {
 			return err
 		}
 	}
 	return tw.Flush()
+}
+
+func formatClusterNodePolicyToggle(policy *model.ClusterNodePolicy, desired func(*model.ClusterNodePolicy) bool, effective func(*model.ClusterNodePolicy) bool) string {
+	if policy == nil || desired == nil || effective == nil {
+		return ""
+	}
+	return clusterNodeToggleLabel(desired(policy)) + "/" + clusterNodeToggleLabel(effective(policy))
+}
+
+func clusterNodeToggleLabel(value bool) string {
+	if value {
+		return "on"
+	}
+	return "off"
+}
+
+func clusterNodePolicyMode(policy *model.ClusterNodePolicy) string {
+	if policy == nil {
+		return ""
+	}
+	return strings.TrimSpace(policy.NodeMode)
+}
+
+func clusterNodePolicyControlPlane(policy *model.ClusterNodePolicy) string {
+	if policy == nil {
+		return ""
+	}
+	desired := firstNonEmpty(strings.TrimSpace(policy.DesiredControlPlaneRole), "none")
+	effective := firstNonEmpty(strings.TrimSpace(policy.EffectiveControlPlaneRole), "none")
+	if desired == effective {
+		return desired
+	}
+	return desired + "/" + effective
 }
 
 func writeControlPlaneComponentTable(w io.Writer, components []model.ControlPlaneComponent) error {

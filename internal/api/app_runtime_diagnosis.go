@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"sort"
@@ -137,6 +138,12 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 	for _, summary := range podSummaries {
 		diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, summary)
 	}
+	crashLogEvidence := ""
+	if len(podSummaries) > 0 {
+		if pod := newestProblemPod(pods); pod != nil {
+			crashLogEvidence = readAppDiagnosisCrashEvidence(r.Context(), logClient, namespace, *pod)
+		}
+	}
 
 	evictedPod := newestEvictedPod(pods)
 	schedulingEvent := newestFailedSchedulingEvent(rawNamespaceEvents)
@@ -209,6 +216,9 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 		diagnosis.Category = "pod-failure"
 		diagnosis.Summary = podSummaries[0]
 		diagnosis.Hint = fmt.Sprintf("Inspect pod history with fugue app logs pods %s and runtime logs with fugue app logs runtime %s --previous.", strings.TrimSpace(app.Name), strings.TrimSpace(app.Name))
+		if crashLogEvidence != "" {
+			diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, crashLogEvidence)
+		}
 	case len(pods) == 0:
 		diagnosis.Category = "no-pods"
 		diagnosis.Summary = "no runtime pods currently match the app selector"
@@ -322,6 +332,82 @@ func newestProblemPod(pods []kubePodInfo) *kubePodInfo {
 		}
 	}
 	return nil
+}
+
+func readAppDiagnosisCrashEvidence(ctx context.Context, logClient appLogsClient, namespace string, pod kubePodInfo) string {
+	container := appDiagnosisProblemContainerName(pod)
+	if container == "" {
+		return ""
+	}
+	for _, previous := range []bool{true, false} {
+		logs, err := logClient.readPodLogs(ctx, namespace, strings.TrimSpace(pod.Metadata.Name), kubeLogOptions{
+			Container: container,
+			TailLines: 40,
+			Previous:  previous,
+		})
+		if err != nil {
+			continue
+		}
+		snippet := summarizeAppDiagnosisLogSnippet(logs)
+		if snippet == "" {
+			continue
+		}
+		source := "previous"
+		if !previous {
+			source = "current"
+		}
+		return fmt.Sprintf("%s log %s: %s", container, source, snippet)
+	}
+	return ""
+}
+
+func appDiagnosisProblemContainerName(pod kubePodInfo) string {
+	for _, status := range pod.Status.ContainerStatuses {
+		switch {
+		case status.State.Waiting != nil:
+			return strings.TrimSpace(status.Name)
+		case status.State.Terminated != nil:
+			return strings.TrimSpace(status.Name)
+		case status.LastState.Terminated != nil:
+			return strings.TrimSpace(status.Name)
+		case !status.Ready:
+			return strings.TrimSpace(status.Name)
+		}
+	}
+	for _, status := range pod.Status.InitContainerStatuses {
+		switch {
+		case status.State.Waiting != nil:
+			return strings.TrimSpace(status.Name)
+		case status.State.Terminated != nil:
+			return strings.TrimSpace(status.Name)
+		case status.LastState.Terminated != nil:
+			return strings.TrimSpace(status.Name)
+		case !status.Ready:
+			return strings.TrimSpace(status.Name)
+		}
+	}
+	if len(pod.Spec.Containers) > 0 {
+		return strings.TrimSpace(pod.Spec.Containers[0].Name)
+	}
+	if len(pod.Spec.InitContainers) > 0 {
+		return strings.TrimSpace(pod.Spec.InitContainers[0].Name)
+	}
+	return ""
+}
+
+func summarizeAppDiagnosisLogSnippet(logs string) string {
+	lines := strings.Split(logs, "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := strings.TrimSpace(lines[index])
+		if line == "" {
+			continue
+		}
+		if len(line) > 200 {
+			line = strings.TrimSpace(line[:200]) + "..."
+		}
+		return line
+	}
+	return ""
 }
 
 func countReadyLogPods(pods []kubePodInfo) int {

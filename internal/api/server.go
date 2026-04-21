@@ -48,6 +48,7 @@ type Server struct {
 	clusterJoinMeshLoginServer   string
 	clusterJoinMeshAuthKey       string
 	importer                     *sourceimport.Importer
+	inspectBuilderPlacement      builderPlacementInspector
 	appImageRegistry             appImageRegistry
 	projectImageUsageCache       expiringResponseCache[projectImageUsageResponse]
 	clusterNodeInventoryCache    expiringResponseCache[[]clusterNodeSnapshot]
@@ -99,6 +100,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		clusterJoinMeshLoginServer:   strings.TrimSpace(cfg.ClusterJoinMeshLoginServer),
 		clusterJoinMeshAuthKey:       strings.TrimSpace(cfg.ClusterJoinMeshAuthKey),
 		importer:                     sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
+		inspectBuilderPlacement:      sourceimport.InspectBuilderPlacementForProfile,
 		appImageRegistry:             newRemoteAppImageRegistry(),
 		projectImageUsageCache:       newExpiringResponseCache[projectImageUsageResponse](defaultProjectImageUsageCacheTTL),
 		clusterNodeInventoryCache:    newExpiringResponseCache[[]clusterNodeSnapshot](defaultClusterNodeInventoryCacheTTL),
@@ -1011,13 +1013,14 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		spec.Workspace = &workspace
 	}
 	op, err := s.store.CreateOperation(model.Operation{
-		TenantID:        app.TenantID,
-		Type:            model.OperationTypeDeploy,
-		RequestedByType: principal.ActorType,
-		RequestedByID:   principal.ActorID,
-		AppID:           app.ID,
-		DesiredSpec:     &spec,
-		DesiredSource:   source,
+		TenantID:            app.TenantID,
+		Type:                model.OperationTypeDeploy,
+		RequestedByType:     principal.ActorType,
+		RequestedByID:       principal.ActorID,
+		AppID:               app.ID,
+		DesiredSpec:         &spec,
+		DesiredSource:       source,
+		DesiredOriginSource: model.AppOriginSource(app),
 	})
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -1122,14 +1125,15 @@ func (s *Server) handleMigrateApp(w http.ResponseWriter, r *http.Request) {
 	}
 	spec.RuntimeID = strings.TrimSpace(req.TargetRuntimeID)
 	op, err := s.store.CreateOperation(model.Operation{
-		TenantID:        app.TenantID,
-		Type:            model.OperationTypeMigrate,
-		RequestedByType: principal.ActorType,
-		RequestedByID:   principal.ActorID,
-		AppID:           app.ID,
-		TargetRuntimeID: req.TargetRuntimeID,
-		DesiredSpec:     &spec,
-		DesiredSource:   source,
+		TenantID:            app.TenantID,
+		Type:                model.OperationTypeMigrate,
+		RequestedByType:     principal.ActorType,
+		RequestedByID:       principal.ActorID,
+		AppID:               app.ID,
+		TargetRuntimeID:     req.TargetRuntimeID,
+		DesiredSpec:         &spec,
+		DesiredSource:       source,
+		DesiredOriginSource: model.AppOriginSource(app),
 	})
 	if err != nil {
 		s.writeStoreError(w, err)

@@ -2287,7 +2287,6 @@ func (s *Store) pgCreateApp(tenantID, projectID, name, description string, spec 
 		ProjectID:   projectID,
 		Name:        name,
 		Description: strings.TrimSpace(description),
-		Source:      cloneAppSource(source),
 		Route:       cloneAppRoute(route),
 		Spec:        spec,
 		Status: model.AppStatus{
@@ -2298,6 +2297,7 @@ func (s *Store) pgCreateApp(tenantID, projectID, name, description string, spec 
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+	model.SetAppSourceState(&app, source, source)
 	var ownedService *model.BackingService
 	var binding *model.ServiceBinding
 	if app.Spec.Postgres != nil {
@@ -2318,7 +2318,7 @@ func (s *Store) pgCreateApp(tenantID, projectID, name, description string, spec 
 	}); err != nil {
 		return model.App{}, err
 	}
-	sourceJSON, err := marshalNullableJSON(app.Source)
+	sourceJSON, err := marshalAppSourceState(app)
 	if err != nil {
 		return model.App{}, err
 	}
@@ -2443,6 +2443,39 @@ func (s *Store) pgUpdateAppImageMirrorLimit(id string, limit int) (model.App, er
 	return app, nil
 }
 
+func (s *Store) pgUpdateAppOriginSource(id string, source model.AppSource) (model.App, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.App{}, fmt.Errorf("begin update app origin source transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	app, err := s.pgGetAppTx(ctx, tx, id, true)
+	if err != nil {
+		return model.App{}, mapDBErr(err)
+	}
+	if isDeletedApp(app) {
+		return model.App{}, ErrNotFound
+	}
+
+	model.SetAppSourceState(&app, &source, model.AppBuildSource(app))
+	app.UpdatedAt = time.Now().UTC()
+	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+		return model.App{}, mapDBErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return model.App{}, fmt.Errorf("commit update app origin source transaction: %w", err)
+	}
+	normalizeAppStatusForRead(&app)
+	if err := s.pgHydrateAppBackingServices(context.Background(), &app); err != nil {
+		return model.App{}, err
+	}
+	return app, nil
+}
+
 func (s *Store) pgSyncObservedManagedPostgresSpec(id string, desiredSpec model.AppSpec) (model.App, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2509,9 +2542,11 @@ func (s *Store) pgSyncObservedManagedAppBaseline(id string, desiredSpec model.Ap
 		return model.App{}, err
 	}
 	app.Spec = *spec
+	buildSource := model.AppBuildSource(app)
 	if desiredSource != nil {
-		app.Source = cloneAppSource(desiredSource)
+		buildSource = cloneAppSource(desiredSource)
 	}
+	model.SetAppSourceState(&app, model.AppOriginSource(app), buildSource)
 	app.UpdatedAt = time.Now().UTC()
 	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
 		return model.App{}, mapDBErr(err)
@@ -3085,6 +3120,7 @@ WHERE app_id = $1
 	now := time.Now().UTC()
 	op.DesiredSpec = cloneAppSpec(op.DesiredSpec)
 	op.DesiredSource = cloneAppSource(op.DesiredSource)
+	op.DesiredOriginSource = cloneAppSource(op.DesiredOriginSource)
 	billing, billingState, err := s.pgAccrueTenantBillingTx(ctx, tx, app.TenantID, now)
 	if err != nil {
 		return model.Operation{}, err
@@ -3117,7 +3153,7 @@ WHERE app_id = $1
 	if err != nil {
 		return model.Operation{}, err
 	}
-	desiredSourceJSON, err := marshalNullableJSON(op.DesiredSource)
+	desiredSourceJSON, err := marshalOperationSourceState(op)
 	if err != nil {
 		return model.Operation{}, err
 	}
@@ -4374,7 +4410,7 @@ func (s *Store) pgUpdateOperationTx(ctx context.Context, tx *sql.Tx, op model.Op
 	if err != nil {
 		return err
 	}
-	desiredSourceJSON, err := marshalNullableJSON(op.DesiredSource)
+	desiredSourceJSON, err := marshalOperationSourceState(op)
 	if err != nil {
 		return err
 	}
@@ -4408,7 +4444,7 @@ WHERE id = $1
 }
 
 func (s *Store) pgUpdateAppTx(ctx context.Context, tx *sql.Tx, app model.App) error {
-	sourceJSON, err := marshalNullableJSON(app.Source)
+	sourceJSON, err := marshalAppSourceState(app)
 	if err != nil {
 		return err
 	}
@@ -4623,7 +4659,7 @@ func scanApp(scanner sqlScanner) (model.App, error) {
 	if err := scanner.Scan(&app.ID, &app.TenantID, &app.ProjectID, &app.Name, &app.Description, &sourceRaw, &routeRaw, &specRaw, &statusRaw, &app.CreatedAt, &app.UpdatedAt); err != nil {
 		return model.App{}, err
 	}
-	source, err := decodeJSONPointer[model.AppSource](sourceRaw)
+	originSource, buildSource, err := decodeAppSourceState(sourceRaw)
 	if err != nil {
 		return model.App{}, err
 	}
@@ -4639,7 +4675,7 @@ func scanApp(scanner sqlScanner) (model.App, error) {
 	if err != nil {
 		return model.App{}, err
 	}
-	app.Source = source
+	model.SetAppSourceState(&app, originSource, buildSource)
 	app.Route = route
 	app.Spec = spec
 	app.Status = status
@@ -4684,12 +4720,13 @@ func scanOperation(scanner sqlScanner) (model.Operation, error) {
 		return model.Operation{}, err
 	}
 	model.ApplyAppSpecDefaults(desiredSpec)
-	desiredSource, err := decodeJSONPointer[model.AppSource](desiredSourceRaw)
+	desiredSource, desiredOriginSource, err := decodeOperationSourceState(desiredSourceRaw)
 	if err != nil {
 		return model.Operation{}, err
 	}
 	op.DesiredSpec = desiredSpec
 	op.DesiredSource = desiredSource
+	op.DesiredOriginSource = desiredOriginSource
 	if startedAt.Valid {
 		op.StartedAt = &startedAt.Time
 	}
@@ -4735,9 +4772,7 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 				app.Route = nil
 			}
 		}
-		if op.DesiredSource != nil {
-			app.Source = cloneAppSource(op.DesiredSource)
-		}
+		applyOperationSourceStateToApp(app, *op)
 		app.Status.Phase = "deployed"
 		app.Status.CurrentRuntimeID = app.Spec.RuntimeID
 		app.Status.CurrentReplicas = app.Spec.Replicas

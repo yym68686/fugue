@@ -480,15 +480,17 @@ func TestExecuteManagedImportOperationPreservesGitHubSourceAfterUploadOverride(t
 		BuildContextDir:  ".",
 		ImageNameSuffix:  "gateway",
 		ComposeService:   "gateway",
+		ComposeDependsOn: []string{"runtime"},
 	}
 	op, err := stateStore.CreateOperation(model.Operation{
-		TenantID:        tenant.ID,
-		Type:            model.OperationTypeImport,
-		RequestedByType: model.ActorTypeAPIKey,
-		RequestedByID:   "test-key",
-		AppID:           app.ID,
-		DesiredSpec:     &specCopy,
-		DesiredSource:   &overrideSource,
+		TenantID:            tenant.ID,
+		Type:                model.OperationTypeImport,
+		RequestedByType:     model.ActorTypeAPIKey,
+		RequestedByID:       "test-key",
+		AppID:               app.ID,
+		DesiredSpec:         &specCopy,
+		DesiredSource:       &overrideSource,
+		DesiredOriginSource: model.AppOriginSource(app),
 	})
 	if err != nil {
 		t.Fatalf("create import operation: %v", err)
@@ -547,14 +549,11 @@ func TestExecuteManagedImportOperationPreservesGitHubSourceAfterUploadOverride(t
 	if got := deployOp.DesiredSpec.Image; got != expectedRuntimeImageRef {
 		t.Fatalf("expected runtime image %q, got %q", expectedRuntimeImageRef, got)
 	}
-	if got := deployOp.DesiredSource.Type; got != model.AppSourceTypeGitHubPublic {
-		t.Fatalf("expected deploy source type %q, got %q", model.AppSourceTypeGitHubPublic, got)
+	if got := deployOp.DesiredSource.Type; got != model.AppSourceTypeUpload {
+		t.Fatalf("expected deploy build source type %q, got %q", model.AppSourceTypeUpload, got)
 	}
-	if got := deployOp.DesiredSource.RepoURL; got != "https://github.com/example/demo" {
-		t.Fatalf("expected repo url to be preserved, got %q", got)
-	}
-	if got := deployOp.DesiredSource.CommitSHA; got != "git-current" {
-		t.Fatalf("expected commit sha to be preserved, got %q", got)
+	if got := deployOp.DesiredSource.UploadID; got != upload.ID {
+		t.Fatalf("expected upload provenance to be preserved, got upload_id %q", got)
 	}
 	if got := deployOp.DesiredSource.ComposeService; got != "gateway" {
 		t.Fatalf("expected compose service to be preserved, got %q", got)
@@ -563,10 +562,22 @@ func TestExecuteManagedImportOperationPreservesGitHubSourceAfterUploadOverride(t
 		t.Fatalf("expected compose dependencies to be preserved, got %v", deployOp.DesiredSource.ComposeDependsOn)
 	}
 	if got := deployOp.DesiredSource.ResolvedImageRef; got != expectedManagedImageRef {
-		t.Fatalf("expected managed image ref %q, got %q", expectedManagedImageRef, got)
+		t.Fatalf("expected build managed image ref %q, got %q", expectedManagedImageRef, got)
 	}
-	if got := deployOp.DesiredSource.UploadID; got != "" {
-		t.Fatalf("expected deploy source to drop upload provenance, got upload_id %q", got)
+	if deployOp.DesiredOriginSource == nil {
+		t.Fatal("expected deploy operation to preserve origin source ownership")
+	}
+	if got := deployOp.DesiredOriginSource.Type; got != model.AppSourceTypeGitHubPublic {
+		t.Fatalf("expected deploy origin source type %q, got %q", model.AppSourceTypeGitHubPublic, got)
+	}
+	if got := deployOp.DesiredOriginSource.RepoURL; got != "https://github.com/example/demo" {
+		t.Fatalf("expected deploy origin repo url to be preserved, got %q", got)
+	}
+	if got := deployOp.DesiredOriginSource.CommitSHA; got != "git-current" {
+		t.Fatalf("expected deploy origin commit sha to be preserved, got %q", got)
+	}
+	if got := deployOp.DesiredOriginSource.ComposeService; got != "gateway" {
+		t.Fatalf("expected deploy origin compose service to be preserved, got %q", got)
 	}
 
 	completedImport, err := stateStore.GetOperation(op.ID)
@@ -575,6 +586,9 @@ func TestExecuteManagedImportOperationPreservesGitHubSourceAfterUploadOverride(t
 	}
 	if completedImport.DesiredSource == nil || completedImport.DesiredSource.Type != model.AppSourceTypeUpload {
 		t.Fatalf("expected import operation to retain upload source history, got %+v", completedImport.DesiredSource)
+	}
+	if completedImport.DesiredOriginSource == nil || completedImport.DesiredOriginSource.Type != model.AppSourceTypeGitHubPublic {
+		t.Fatalf("expected import operation to retain github ownership metadata, got %+v", completedImport.DesiredOriginSource)
 	}
 
 	if _, err := stateStore.CompleteManagedOperation(deployOp.ID, "/tmp/demo.yaml", "deployed"); err != nil {
@@ -587,17 +601,29 @@ func TestExecuteManagedImportOperationPreservesGitHubSourceAfterUploadOverride(t
 	if persistedApp.Source == nil {
 		t.Fatal("expected app source after deploy")
 	}
-	if got := persistedApp.Source.Type; got != model.AppSourceTypeGitHubPublic {
-		t.Fatalf("expected app source type %q, got %q", model.AppSourceTypeGitHubPublic, got)
+	if got := persistedApp.Source.Type; got != model.AppSourceTypeUpload {
+		t.Fatalf("expected app build source type %q, got %q", model.AppSourceTypeUpload, got)
 	}
-	if got := persistedApp.Source.RepoURL; got != "https://github.com/example/demo" {
-		t.Fatalf("expected persisted repo url, got %q", got)
-	}
-	if got := persistedApp.Source.CommitSHA; got != "git-current" {
-		t.Fatalf("expected persisted commit sha, got %q", got)
+	if got := persistedApp.Source.UploadID; got != upload.ID {
+		t.Fatalf("expected persisted upload provenance, got %q", got)
 	}
 	if got := persistedApp.Source.ResolvedImageRef; got != expectedManagedImageRef {
-		t.Fatalf("expected persisted managed image ref %q, got %q", expectedManagedImageRef, got)
+		t.Fatalf("expected persisted build managed image ref %q, got %q", expectedManagedImageRef, got)
+	}
+	if persistedApp.OriginSource == nil {
+		t.Fatal("expected persisted origin source after deploy")
+	}
+	if got := persistedApp.OriginSource.Type; got != model.AppSourceTypeGitHubPublic {
+		t.Fatalf("expected persisted origin source type %q, got %q", model.AppSourceTypeGitHubPublic, got)
+	}
+	if got := persistedApp.OriginSource.RepoURL; got != "https://github.com/example/demo" {
+		t.Fatalf("expected persisted origin repo url, got %q", got)
+	}
+	if got := persistedApp.OriginSource.CommitSHA; got != "git-current" {
+		t.Fatalf("expected persisted origin commit sha, got %q", got)
+	}
+	if persistedApp.BuildSource == nil || persistedApp.BuildSource.Type != model.AppSourceTypeUpload {
+		t.Fatalf("expected persisted build source to track upload override, got %+v", persistedApp.BuildSource)
 	}
 }
 

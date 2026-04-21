@@ -286,13 +286,14 @@ func (s *Server) handleRedeployAppImage(w http.ResponseWriter, r *http.Request) 
 	}
 
 	op, err := s.store.CreateOperation(model.Operation{
-		TenantID:        app.TenantID,
-		Type:            model.OperationTypeDeploy,
-		RequestedByType: principal.ActorType,
-		RequestedByID:   principal.ActorID,
-		AppID:           app.ID,
-		DesiredSpec:     &spec,
-		DesiredSource:   &source,
+		TenantID:            app.TenantID,
+		Type:                model.OperationTypeDeploy,
+		RequestedByType:     principal.ActorType,
+		RequestedByID:       principal.ActorID,
+		AppID:               app.ID,
+		DesiredSpec:         &spec,
+		DesiredSource:       &source,
+		DesiredOriginSource: model.AppOriginSource(app),
 	})
 	if err != nil {
 		s.writeStoreError(w, err)

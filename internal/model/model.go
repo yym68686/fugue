@@ -415,6 +415,7 @@ type ClusterNodeMachine struct {
 type ClusterNodePolicy struct {
 	AllowBuilds               bool   `json:"allow_builds"`
 	AllowSharedPool           bool   `json:"allow_shared_pool"`
+	NodeMode                  string `json:"node_mode,omitempty"`
 	DesiredControlPlaneRole   string `json:"desired_control_plane_role,omitempty"`
 	EffectiveBuilds           bool   `json:"effective_builds"`
 	EffectiveSharedPool       bool   `json:"effective_shared_pool"`
@@ -688,6 +689,17 @@ type AppSource struct {
 	DetectedStack     string   `json:"detected_stack,omitempty"`
 }
 
+func CloneAppSource(in *AppSource) *AppSource {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if len(in.ComposeDependsOn) > 0 {
+		out.ComposeDependsOn = append([]string(nil), in.ComposeDependsOn...)
+	}
+	return &out
+}
+
 type AppTechnology struct {
 	Kind   string `json:"kind"`
 	Slug   string `json:"slug"`
@@ -890,6 +902,8 @@ type App struct {
 	Name                 string              `json:"name"`
 	Description          string              `json:"description"`
 	Source               *AppSource          `json:"source,omitempty"`
+	OriginSource         *AppSource          `json:"origin_source,omitempty"`
+	BuildSource          *AppSource          `json:"build_source,omitempty"`
 	Route                *AppRoute           `json:"route,omitempty"`
 	InternalService      *AppInternalService `json:"internal_service,omitempty"`
 	Spec                 AppSpec             `json:"spec"`
@@ -947,27 +961,90 @@ type SourceUploadInspection struct {
 }
 
 type Operation struct {
-	ID                string     `json:"id"`
-	TenantID          string     `json:"tenant_id"`
-	Type              string     `json:"type"`
-	Status            string     `json:"status"`
-	ExecutionMode     string     `json:"execution_mode"`
-	RequestedByType   string     `json:"requested_by_type"`
-	RequestedByID     string     `json:"requested_by_id"`
-	AppID             string     `json:"app_id"`
-	SourceRuntimeID   string     `json:"source_runtime_id,omitempty"`
-	TargetRuntimeID   string     `json:"target_runtime_id,omitempty"`
-	DesiredReplicas   *int       `json:"desired_replicas,omitempty"`
-	DesiredSpec       *AppSpec   `json:"desired_spec,omitempty"`
-	DesiredSource     *AppSource `json:"desired_source,omitempty"`
-	ResultMessage     string     `json:"result_message,omitempty"`
-	ManifestPath      string     `json:"manifest_path,omitempty"`
-	AssignedRuntimeID string     `json:"assigned_runtime_id,omitempty"`
-	ErrorMessage      string     `json:"error_message,omitempty"`
-	CreatedAt         time.Time  `json:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
-	StartedAt         *time.Time `json:"started_at,omitempty"`
-	CompletedAt       *time.Time `json:"completed_at,omitempty"`
+	ID                  string     `json:"id"`
+	TenantID            string     `json:"tenant_id"`
+	Type                string     `json:"type"`
+	Status              string     `json:"status"`
+	ExecutionMode       string     `json:"execution_mode"`
+	RequestedByType     string     `json:"requested_by_type"`
+	RequestedByID       string     `json:"requested_by_id"`
+	AppID               string     `json:"app_id"`
+	SourceRuntimeID     string     `json:"source_runtime_id,omitempty"`
+	TargetRuntimeID     string     `json:"target_runtime_id,omitempty"`
+	DesiredReplicas     *int       `json:"desired_replicas,omitempty"`
+	DesiredSpec         *AppSpec   `json:"desired_spec,omitempty"`
+	DesiredSource       *AppSource `json:"desired_source,omitempty"`
+	DesiredOriginSource *AppSource `json:"desired_origin_source,omitempty"`
+	ResultMessage       string     `json:"result_message,omitempty"`
+	ManifestPath        string     `json:"manifest_path,omitempty"`
+	AssignedRuntimeID   string     `json:"assigned_runtime_id,omitempty"`
+	ErrorMessage        string     `json:"error_message,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+	StartedAt           *time.Time `json:"started_at,omitempty"`
+	CompletedAt         *time.Time `json:"completed_at,omitempty"`
+}
+
+func SetAppSourceState(app *App, origin, build *AppSource) {
+	if app == nil {
+		return
+	}
+	app.OriginSource = CloneAppSource(origin)
+	app.BuildSource = CloneAppSource(build)
+	if app.BuildSource == nil && app.OriginSource != nil {
+		app.BuildSource = CloneAppSource(app.OriginSource)
+	}
+	app.Source = CloneAppSource(app.BuildSource)
+}
+
+func NormalizeAppSourceState(app *App) {
+	if app == nil {
+		return
+	}
+	origin := CloneAppSource(app.OriginSource)
+	build := CloneAppSource(app.BuildSource)
+	if build == nil {
+		build = CloneAppSource(app.Source)
+	}
+	if origin == nil {
+		origin = CloneAppSource(app.Source)
+	}
+	if origin == nil {
+		origin = CloneAppSource(build)
+	}
+	SetAppSourceState(app, origin, build)
+}
+
+func AppOriginSource(app App) *AppSource {
+	normalized := app
+	NormalizeAppSourceState(&normalized)
+	return CloneAppSource(normalized.OriginSource)
+}
+
+func AppBuildSource(app App) *AppSource {
+	normalized := app
+	NormalizeAppSourceState(&normalized)
+	return CloneAppSource(normalized.BuildSource)
+}
+
+func SetOperationSourceState(op *Operation, build, origin *AppSource) {
+	if op == nil {
+		return
+	}
+	op.DesiredSource = CloneAppSource(build)
+	op.DesiredOriginSource = CloneAppSource(origin)
+}
+
+func NormalizeOperationSourceState(op *Operation) {
+	if op == nil {
+		return
+	}
+	op.DesiredSource = CloneAppSource(op.DesiredSource)
+	if op.DesiredOriginSource == nil && op.DesiredSource != nil {
+		op.DesiredOriginSource = CloneAppSource(op.DesiredSource)
+		return
+	}
+	op.DesiredOriginSource = CloneAppSource(op.DesiredOriginSource)
 }
 
 type AuditEvent struct {

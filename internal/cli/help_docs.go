@@ -193,7 +193,10 @@ fugue app failover policy clear my-app --db
 		Example: "fugue app failover run my-app --to runtime-b",
 	},
 	"fugue app source": {
-		Example: "fugue app source show my-app",
+		Example: strings.TrimSpace(`
+fugue app source show my-app
+fugue app source bind-github my-app owner/repo --branch main
+`),
 	},
 	"fugue app storage": {
 		Example: strings.TrimSpace(`
@@ -276,9 +279,11 @@ fugue operation show op_123 --show-secrets --output json
 	},
 	"fugue operation explain": {
 		Long: strings.TrimSpace(`
-Explain why an operation is pending, waiting, or otherwise not making progress.
+Explain why an operation is pending, waiting, failed, or otherwise not making progress.
 
 For deploy operations, the diagnosis also inspects the target managed image and the final runtime image so the CLI can say when the deploy already points at a missing release image instead of only reporting queue state.
+
+For builder-placement failures, the diagnosis includes active reservations, active node locks, and a per-node exclusion snapshot so you can see why no builder was chosen without dropping into cluster exec.
 `),
 		Example: strings.TrimSpace(`
 fugue operation explain op_123

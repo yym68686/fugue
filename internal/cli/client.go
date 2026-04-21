@@ -77,6 +77,7 @@ type importUploadRequest struct {
 	StartupCommand           *string                                           `json:"startup_command,omitempty"`
 	PersistentStorage        *model.AppPersistentStorageSpec                   `json:"persistent_storage,omitempty"`
 	Postgres                 *model.AppPostgresSpec                            `json:"postgres,omitempty"`
+	ReplaceSource            bool                                              `json:"replace_source,omitempty"`
 	UpdateExisting           bool                                              `json:"update_existing,omitempty"`
 	DeleteMissing            bool                                              `json:"delete_missing,omitempty"`
 	DryRun                   bool                                              `json:"dry_run,omitempty"`

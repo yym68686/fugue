@@ -10,6 +10,9 @@ import (
 func sanitizeAppForAPI(app model.App) model.App {
 	out := cloneApp(app)
 	out.Source = sanitizeAppSourceForAPI(out.Source)
+	out.OriginSource = sanitizeAppSourceForAPI(out.OriginSource)
+	out.BuildSource = sanitizeAppSourceForAPI(out.BuildSource)
+	model.NormalizeAppSourceState(&out)
 	out.Spec = redactSecretFilesInSpec(out.Spec)
 	out.InternalService = buildAppInternalService(out)
 	out.TechStack = buildAppTechStack(out)
@@ -36,6 +39,9 @@ func sanitizeOperationForAPI(op model.Operation) model.Operation {
 	}
 	if op.DesiredSource != nil {
 		out.DesiredSource = sanitizeAppSourceForAPI(op.DesiredSource)
+	}
+	if op.DesiredOriginSource != nil {
+		out.DesiredOriginSource = sanitizeAppSourceForAPI(op.DesiredOriginSource)
 	}
 	return out
 }
@@ -74,6 +80,9 @@ func redactSecretFilesInSpec(spec model.AppSpec) model.AppSpec {
 func cloneApp(app model.App) model.App {
 	out := app
 	out.Source = cloneAppSource(app.Source)
+	out.OriginSource = cloneAppSource(app.OriginSource)
+	out.BuildSource = cloneAppSource(app.BuildSource)
+	model.NormalizeAppSourceState(&out)
 	if app.Route != nil {
 		route := *app.Route
 		out.Route = &route

@@ -785,6 +785,137 @@ func TestGetSourceUploadArchiveRequiresDownloadToken(t *testing.T) {
 	}
 }
 
+func TestImportUploadExistingAppOriginOwnershipModes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                  string
+		replaceSource         bool
+		expectedOriginType    string
+		expectedOriginRepoURL string
+	}{
+		{
+			name:                  "preserve-origin-by-default",
+			replaceSource:         false,
+			expectedOriginType:    model.AppSourceTypeGitHubPublic,
+			expectedOriginRepoURL: "https://github.com/example/demo",
+		},
+		{
+			name:               "replace-origin-when-requested",
+			replaceSource:      true,
+			expectedOriginType: model.AppSourceTypeUpload,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := store.New(filepath.Join(t.TempDir(), "store.json"))
+			if err := s.Init(); err != nil {
+				t.Fatalf("init store: %v", err)
+			}
+
+			tenant, err := s.CreateTenant("Upload Override Tenant")
+			if err != nil {
+				t.Fatalf("create tenant: %v", err)
+			}
+			project, err := s.CreateProject(tenant.ID, "web", "")
+			if err != nil {
+				t.Fatalf("create project: %v", err)
+			}
+			_, apiKey, err := s.CreateAPIKey(tenant.ID, "uploader", []string{"app.write", "app.deploy"})
+			if err != nil {
+				t.Fatalf("create api key: %v", err)
+			}
+
+			app, err := s.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+				Image:        "registry.pull.example/fugue-apps/demo:git-current",
+				Replicas:     1,
+				RuntimeID:    "runtime_managed_shared",
+				RestartToken: "restart_old",
+			}, model.AppSource{
+				Type:             model.AppSourceTypeGitHubPublic,
+				RepoURL:          "https://github.com/example/demo",
+				RepoBranch:       "main",
+				BuildStrategy:    model.AppBuildStrategyDockerfile,
+				CommitSHA:        "git-current",
+				DockerfilePath:   "Dockerfile",
+				BuildContextDir:  ".",
+				ImageNameSuffix:  "gateway",
+				ComposeService:   "gateway",
+				ComposeDependsOn: []string{"runtime"},
+			}, model.AppRoute{})
+			if err != nil {
+				t.Fatalf("create imported app: %v", err)
+			}
+
+			server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+				AppBaseDomain: "apps.example.com",
+			})
+
+			archiveBytes := mustTarGz(t, map[string]string{
+				"Dockerfile": "FROM nginx:alpine\n",
+			})
+			body, contentType := newImportUploadMultipartBody(t, importUploadRequest{
+				AppID:         app.ID,
+				ReplaceSource: tc.replaceSource,
+			}, "demo-override.tgz", archiveBytes)
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/apps/import-upload", body)
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+			req.Header.Set("Content-Type", contentType)
+			recorder := httptest.NewRecorder()
+
+			server.Handler().ServeHTTP(recorder, req)
+
+			if recorder.Code != http.StatusAccepted {
+				t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+			}
+
+			var response struct {
+				App       model.App       `json:"app"`
+				Operation model.Operation `json:"operation"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+
+			op, err := s.GetOperation(response.Operation.ID)
+			if err != nil {
+				t.Fatalf("get operation: %v", err)
+			}
+			if op.DesiredSource == nil || op.DesiredSource.Type != model.AppSourceTypeUpload {
+				t.Fatalf("expected upload build source on override operation, got %+v", op.DesiredSource)
+			}
+			if got := op.DesiredSource.ComposeService; got != "gateway" {
+				t.Fatalf("expected compose service to be preserved on upload build source, got %q", got)
+			}
+			if got := op.DesiredSource.ImageNameSuffix; got != "gateway" {
+				t.Fatalf("expected image name suffix to be preserved on upload build source, got %q", got)
+			}
+			if len(op.DesiredSource.ComposeDependsOn) != 1 || op.DesiredSource.ComposeDependsOn[0] != "runtime" {
+				t.Fatalf("expected compose dependencies to be preserved on upload build source, got %+v", op.DesiredSource.ComposeDependsOn)
+			}
+
+			if op.DesiredOriginSource == nil {
+				t.Fatal("expected override operation to record origin ownership")
+			}
+			if got := op.DesiredOriginSource.Type; got != tc.expectedOriginType {
+				t.Fatalf("expected origin source type %q, got %q", tc.expectedOriginType, got)
+			}
+			if tc.expectedOriginRepoURL != "" && op.DesiredOriginSource.RepoURL != tc.expectedOriginRepoURL {
+				t.Fatalf("expected origin repo url %q, got %q", tc.expectedOriginRepoURL, op.DesiredOriginSource.RepoURL)
+			}
+			if tc.replaceSource {
+				if got := op.DesiredOriginSource.UploadID; got != op.DesiredSource.UploadID {
+					t.Fatalf("expected replace_source to adopt upload ownership, got %q want %q", got, op.DesiredSource.UploadID)
+				}
+			}
+		})
+	}
+}
+
 func newImportUploadMultipartBody(t *testing.T, req importUploadRequest, archiveName string, archiveBytes []byte) (*bytes.Buffer, string) {
 	t.Helper()
 

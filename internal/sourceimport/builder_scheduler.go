@@ -30,6 +30,7 @@ const (
 	builderHostnameLabelKey          = "kubernetes.io/hostname"
 	builderNodeLockLeaseDuration     = 20 * time.Second
 	builderReservationLabelSelector  = "app.kubernetes.io/managed-by=fugue,app.kubernetes.io/component=builder-reservation"
+	builderNodeLockLabelSelector     = "app.kubernetes.io/managed-by=fugue,app.kubernetes.io/component=builder-node-lock"
 	builderReservationComponentValue = "builder-reservation"
 	builderNodeLockComponentValue    = "builder-node-lock"
 	builderAnnotationNodeName        = "fugue.pro/builder-node-name"
@@ -72,6 +73,7 @@ type builderNodeSnapshot struct {
 	Taints                   []builderKubeNodeTaint
 	Ready                    bool
 	DiskPressure             bool
+	SummaryLoaded            bool
 	Allocatable              builderResourceDemand
 	Used                     builderResourceDemand
 	FilesystemAvailableBytes int64
@@ -81,7 +83,16 @@ type builderReservation struct {
 	Name      string
 	NodeName  string
 	Demand    builderResourceDemand
+	RenewedAt time.Time
 	ExpiresAt time.Time
+}
+
+type builderNodeLock struct {
+	Name           string
+	NodeName       string
+	HolderIdentity string
+	RenewedAt      time.Time
+	ExpiresAt      time.Time
 }
 
 type builderScheduler struct {
@@ -363,6 +374,7 @@ func (s *builderScheduler) loadNodeSnapshots(ctx context.Context) ([]builderNode
 		}
 		snapshot.Used = builderUsedResources(summary, snapshot.Allocatable.MemoryBytes)
 		snapshot.FilesystemAvailableBytes = builderNodeFilesystemAvailableBytes(summary)
+		snapshot.SummaryLoaded = true
 		snapshots = append(snapshots, snapshot)
 	}
 	if eligibleCount > 0 && len(snapshots) == 0 && lastSummaryErr != nil {
@@ -384,9 +396,6 @@ func builderSnapshotFromKubeNode(node builderKubeNode) builderNodeSnapshot {
 			MemoryBytes:    parseBuilderBytes(node.Status.Allocatable["memory"]),
 			EphemeralBytes: parseBuilderBytes(node.Status.Allocatable["ephemeral-storage"]),
 		},
-	}
-	if snapshot.Hostname == "" {
-		snapshot.Hostname = snapshot.Name
 	}
 	return snapshot
 }
@@ -427,10 +436,37 @@ func (s *builderScheduler) listActiveReservations(ctx context.Context, now time.
 				MemoryBytes:    parseBuilderInt64(lease.Metadata.Annotations[builderAnnotationMemoryBytes]),
 				EphemeralBytes: parseBuilderInt64(lease.Metadata.Annotations[builderAnnotationEphemeralBytes]),
 			},
+			RenewedAt: builderLeaseRenewedAt(lease),
 			ExpiresAt: expiresAt,
 		})
 	}
 	return reservations, nil
+}
+
+func (s *builderScheduler) listActiveNodeLocks(ctx context.Context, now time.Time) ([]builderNodeLock, error) {
+	leases, err := s.client.listLeases(ctx, builderNodeLockLabelSelector)
+	if err != nil {
+		return nil, err
+	}
+	locks := make([]builderNodeLock, 0, len(leases))
+	for _, lease := range leases {
+		expiresAt, ok := builderLeaseExpiry(lease, now)
+		if !ok {
+			continue
+		}
+		nodeName := strings.TrimSpace(lease.Metadata.Annotations[builderAnnotationNodeName])
+		if nodeName == "" {
+			continue
+		}
+		locks = append(locks, builderNodeLock{
+			Name:           strings.TrimSpace(lease.Metadata.Name),
+			NodeName:       nodeName,
+			HolderIdentity: strings.TrimSpace(lease.Spec.HolderIdentity),
+			RenewedAt:      builderLeaseRenewedAt(lease),
+			ExpiresAt:      expiresAt,
+		})
+	}
+	return locks, nil
 }
 
 func (s *builderScheduler) tryAcquireNodeLock(ctx context.Context, nodeName, holder string) (bool, error) {
@@ -517,6 +553,15 @@ func (s *builderScheduler) releaseReservation(ctx context.Context, reservationNa
 
 func selectBuilderCandidates(policy BuilderPodPolicy, profile builderWorkloadProfile, demand builderResourceDemand, snapshots []builderNodeSnapshot, reservations []builderReservation, requiredNodeLabels map[string]string) []builderCandidate {
 	policy = normalizeBuilderPodPolicy(policy)
+	candidates := sortedBuilderCandidates(policy, profile, demand, snapshots, reservations, requiredNodeLabels)
+	if len(candidates) > policy.CandidateCount {
+		candidates = candidates[:policy.CandidateCount]
+	}
+	return candidates
+}
+
+func sortedBuilderCandidates(policy BuilderPodPolicy, profile builderWorkloadProfile, demand builderResourceDemand, snapshots []builderNodeSnapshot, reservations []builderReservation, requiredNodeLabels map[string]string) []builderCandidate {
+	policy = normalizeBuilderPodPolicy(policy)
 	reservedByNode := make(map[string]builderResourceDemand)
 	for _, reservation := range reservations {
 		current := reservedByNode[reservation.NodeName]
@@ -553,9 +598,6 @@ func selectBuilderCandidates(policy BuilderPodPolicy, profile builderWorkloadPro
 	sort.Slice(candidates, func(i, j int) bool {
 		return builderCandidateLess(demand, candidates[i], candidates[j])
 	})
-	if len(candidates) > policy.CandidateCount {
-		candidates = candidates[:policy.CandidateCount]
-	}
 	return candidates
 }
 
@@ -1049,18 +1091,19 @@ func builderLeaseIsExpired(lease builderKubeLease, now time.Time) bool {
 }
 
 func builderLeaseExpiry(lease builderKubeLease, now time.Time) (time.Time, bool) {
+	renewedAt := builderLeaseRenewedAt(lease)
+	if renewedAt.IsZero() || lease.Spec.LeaseDurationSeconds <= 0 {
+		return time.Time{}, false
+	}
+	return renewedAt.Add(time.Duration(lease.Spec.LeaseDurationSeconds) * time.Second), true
+}
+
+func builderLeaseRenewedAt(lease builderKubeLease) time.Time {
 	renewedAt := strings.TrimSpace(lease.Spec.RenewTime)
 	if renewedAt == "" {
 		renewedAt = strings.TrimSpace(lease.Spec.AcquireTime)
 	}
-	if renewedAt == "" || lease.Spec.LeaseDurationSeconds <= 0 {
-		return time.Time{}, false
-	}
-	parsed := parseKubeTimestamp(renewedAt)
-	if parsed.IsZero() {
-		return time.Time{}, false
-	}
-	return parsed.Add(time.Duration(lease.Spec.LeaseDurationSeconds) * time.Second), true
+	return parseKubeTimestamp(renewedAt)
 }
 
 func parseKubeTimestamp(value string) time.Time {

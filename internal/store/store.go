@@ -2096,6 +2096,35 @@ func (s *Store) UpdateAppImageMirrorLimit(id string, limit int) (model.App, erro
 	return app, err
 }
 
+func (s *Store) UpdateAppOriginSource(id string, source model.AppSource) (model.App, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.App{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgUpdateAppOriginSource(id, source)
+	}
+
+	var app model.App
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findApp(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		app = state.Apps[index]
+		if isDeletedApp(app) {
+			return ErrNotFound
+		}
+		model.SetAppSourceState(&app, &source, model.AppBuildSource(app))
+		app.UpdatedAt = time.Now().UTC()
+		state.Apps[index] = app
+		normalizeAppStatusForRead(&app)
+		hydrateAppBackingServices(state, &app)
+		return nil
+	})
+	return app, err
+}
+
 func (s *Store) SyncObservedManagedPostgresSpec(id string, desiredSpec model.AppSpec) (model.App, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -2161,9 +2190,11 @@ func (s *Store) SyncObservedManagedAppBaseline(id string, desiredSpec model.AppS
 			return err
 		}
 		app.Spec = *spec
+		buildSource := model.AppBuildSource(app)
 		if desiredSource != nil {
-			app.Source = cloneAppSource(desiredSource)
+			buildSource = cloneAppSource(desiredSource)
 		}
+		model.SetAppSourceState(&app, model.AppOriginSource(app), buildSource)
 		app.UpdatedAt = time.Now().UTC()
 		state.Apps[index] = app
 		normalizeAppStatusForRead(&app)
@@ -2282,7 +2313,6 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 			ProjectID:   projectID,
 			Name:        name,
 			Description: strings.TrimSpace(description),
-			Source:      cloneAppSource(source),
 			Route:       cloneAppRoute(route),
 			Spec:        spec,
 			Status: model.AppStatus{
@@ -2293,6 +2323,7 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
+		model.SetAppSourceState(&app, source, source)
 		var ownedService *model.BackingService
 		var ownedBinding *model.ServiceBinding
 		if app.Spec.Postgres != nil {
@@ -2556,6 +2587,7 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 		now := time.Now().UTC()
 		op.DesiredSpec = cloneAppSpec(op.DesiredSpec)
 		op.DesiredSource = cloneAppSource(op.DesiredSource)
+		op.DesiredOriginSource = cloneAppSource(op.DesiredOriginSource)
 		billing := accrueTenantBillingLedger(state, app.TenantID, now)
 		if billing == nil {
 			return ErrNotFound
@@ -3063,6 +3095,9 @@ func ensureDefaults(state *model.State) {
 	if state.Apps == nil {
 		state.Apps = []model.App{}
 	}
+	for idx := range state.Apps {
+		model.NormalizeAppSourceState(&state.Apps[idx])
+	}
 	if state.AppDomains == nil {
 		state.AppDomains = []model.AppDomain{}
 	}
@@ -3074,6 +3109,9 @@ func ensureDefaults(state *model.State) {
 	}
 	if state.Operations == nil {
 		state.Operations = []model.Operation{}
+	}
+	for idx := range state.Operations {
+		model.NormalizeOperationSourceState(&state.Operations[idx])
 	}
 	if state.AuditEvents == nil {
 		state.AuditEvents = []model.AuditEvent{}
@@ -3369,14 +3407,22 @@ func applyRuntimeIdentity(runtime *model.Runtime, machineName, machineFingerprin
 }
 
 func cloneAppSource(in *model.AppSource) *model.AppSource {
-	if in == nil {
-		return nil
+	return model.CloneAppSource(in)
+}
+
+func applyOperationSourceStateToApp(app *model.App, op model.Operation) {
+	if app == nil {
+		return
 	}
-	out := *in
-	if len(in.ComposeDependsOn) > 0 {
-		out.ComposeDependsOn = append([]string(nil), in.ComposeDependsOn...)
+	build := model.AppBuildSource(*app)
+	if op.DesiredSource != nil {
+		build = cloneAppSource(op.DesiredSource)
 	}
-	return &out
+	origin := model.AppOriginSource(*app)
+	if op.DesiredOriginSource != nil {
+		origin = cloneAppSource(op.DesiredOriginSource)
+	}
+	model.SetAppSourceState(app, origin, build)
 }
 
 func cloneAppSpec(in *model.AppSpec) *model.AppSpec {
@@ -3464,9 +3510,7 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 				app.Route = nil
 			}
 		}
-		if op.DesiredSource != nil {
-			app.Source = cloneAppSource(op.DesiredSource)
-		}
+		applyOperationSourceStateToApp(app, *op)
 		app.Status.Phase = "deployed"
 		app.Status.CurrentRuntimeID = app.Spec.RuntimeID
 		app.Status.CurrentReplicas = app.Spec.Replicas

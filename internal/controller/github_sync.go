@@ -39,6 +39,7 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 	}
 
 	for _, app := range apps {
+		originSource := model.AppOriginSource(app)
 		if !shouldAutoSyncGitHubApp(app) {
 			continue
 		}
@@ -47,20 +48,20 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 		}
 
 		checkCtx, cancel := context.WithTimeout(ctx, s.Config.GitHubSyncTimeout)
-		latestCommit, resolvedBranch, err := s.resolveLatestGitHubCommit(checkCtx, *app.Source)
+		latestCommit, resolvedBranch, err := s.resolveLatestGitHubCommit(checkCtx, *originSource)
 		cancel()
 		if err != nil {
 			s.Logger.Printf(
 				"github sync check failed for app=%s repo=%s branch=%s: %v",
 				app.ID,
-				strings.TrimSpace(app.Source.RepoURL),
-				strings.TrimSpace(app.Source.RepoBranch),
+				strings.TrimSpace(originSource.RepoURL),
+				strings.TrimSpace(originSource.RepoBranch),
 				err,
 			)
 			continue
 		}
 		latestCommit = strings.TrimSpace(latestCommit)
-		if latestCommit == "" || latestCommit == strings.TrimSpace(app.Source.CommitSHA) {
+		if latestCommit == "" || latestCommit == strings.TrimSpace(originSource.CommitSHA) {
 			continue
 		}
 		if state, found := trackedCommitStates[trackedGitHubCommitStateKey(app.ID, latestCommit)]; found &&
@@ -76,7 +77,7 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 			s.Logger.Printf(
 				"github sync queue failed for app=%s repo=%s branch=%s latest_commit=%s: %v",
 				app.ID,
-				strings.TrimSpace(app.Source.RepoURL),
+				strings.TrimSpace(originSource.RepoURL),
 				resolvedBranch,
 				shortCommitSHA(latestCommit),
 				err,
@@ -87,9 +88,9 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 		s.Logger.Printf(
 			"github sync queued rebuild for app=%s repo=%s branch=%s old_commit=%s latest_commit=%s op=%s",
 			app.ID,
-			strings.TrimSpace(app.Source.RepoURL),
+			strings.TrimSpace(originSource.RepoURL),
 			resolvedBranch,
-			shortCommitSHA(app.Source.CommitSHA),
+			shortCommitSHA(originSource.CommitSHA),
 			shortCommitSHA(latestCommit),
 			op.ID,
 		)
@@ -160,30 +161,36 @@ func (s *Service) queueGitHubAutoRebuild(app model.App, branch string, commit st
 		spec.RuntimeID = "runtime_managed_shared"
 	}
 
-	source, err := queueableGitHubSource(*app.Source, branch, commit)
+	originSource := model.AppOriginSource(app)
+	if originSource == nil {
+		return model.Operation{}, fmt.Errorf("app does not have github origin source")
+	}
+	source, err := queueableGitHubSource(*originSource, branch, commit)
 	if err != nil {
 		return model.Operation{}, err
 	}
 
 	return s.Store.CreateOperation(model.Operation{
-		TenantID:        app.TenantID,
-		Type:            model.OperationTypeImport,
-		RequestedByType: model.ActorTypeBootstrap,
-		RequestedByID:   model.OperationRequestedByGitHubSyncController,
-		AppID:           app.ID,
-		DesiredSpec:     &spec,
-		DesiredSource:   &source,
+		TenantID:            app.TenantID,
+		Type:                model.OperationTypeImport,
+		RequestedByType:     model.ActorTypeBootstrap,
+		RequestedByID:       model.OperationRequestedByGitHubSyncController,
+		AppID:               app.ID,
+		DesiredSpec:         &spec,
+		DesiredSource:       &source,
+		DesiredOriginSource: model.CloneAppSource(&source),
 	})
 }
 
 func shouldAutoSyncGitHubApp(app model.App) bool {
-	if app.Source == nil {
+	originSource := model.AppOriginSource(app)
+	if originSource == nil {
 		return false
 	}
-	if !model.IsGitHubAppSourceType(app.Source.Type) {
+	if !model.IsGitHubAppSourceType(originSource.Type) {
 		return false
 	}
-	if strings.TrimSpace(app.Source.RepoURL) == "" {
+	if strings.TrimSpace(originSource.RepoURL) == "" {
 		return false
 	}
 	return app.Spec.Replicas > 0

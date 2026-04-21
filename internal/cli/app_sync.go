@@ -52,22 +52,24 @@ func (c *CLI) newAppSyncStatusCommand() *cobra.Command {
 				}
 				latest = &op
 			}
+			originSource := model.AppOriginSource(app)
 			if c.wantsJSON() {
 				payload := map[string]any{
 					"app":            app,
-					"sync_supported": app.Source != nil,
+					"sync_supported": originSource != nil,
+					"origin_source":  originSource,
 					"latest":         latest,
 				}
 				return writeJSON(c.stdout, payload)
 			}
 			pairs := []kvPair{
 				{Key: "app_id", Value: app.ID},
-				{Key: "sync_supported", Value: fmt.Sprintf("%t", app.Source != nil)},
-				{Key: "source_type", Value: sourceTypeForSync(app.Source)},
-				{Key: "source_ref", Value: sourceRef(app.Source)},
-				{Key: "repo_branch", Value: sourceField(app.Source, func(source *model.AppSource) string { return source.RepoBranch })},
-				{Key: "commit_sha", Value: sourceField(app.Source, func(source *model.AppSource) string { return source.CommitSHA })},
-				{Key: "build_strategy", Value: sourceField(app.Source, func(source *model.AppSource) string { return source.BuildStrategy })},
+				{Key: "sync_supported", Value: fmt.Sprintf("%t", originSource != nil)},
+				{Key: "source_type", Value: sourceTypeForSync(originSource)},
+				{Key: "source_ref", Value: sourceRef(originSource)},
+				{Key: "repo_branch", Value: sourceField(originSource, func(source *model.AppSource) string { return source.RepoBranch })},
+				{Key: "commit_sha", Value: sourceField(originSource, func(source *model.AppSource) string { return source.CommitSHA })},
+				{Key: "build_strategy", Value: sourceField(originSource, func(source *model.AppSource) string { return source.BuildStrategy })},
 			}
 			if latest != nil {
 				pairs = append(pairs,
@@ -110,7 +112,7 @@ func (c *CLI) newAppSyncRunCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if app.Source == nil {
+			if model.AppOriginSource(app) == nil {
 				return fmt.Errorf("app does not have source metadata to sync from")
 			}
 			response, err := client.RebuildApp(app.ID, rebuildPlanRequest{

@@ -62,6 +62,7 @@ type deployLocalOptions struct {
 	AppRef         string
 	AppID          string
 	Dir            string
+	ReplaceSource  bool
 	RepoURLCompat  string
 	Branch         string
 	Private        bool
@@ -174,6 +175,7 @@ Defaults:
 	cmd.Flags().StringVar(&opts.AppRef, "app", "", "Update an existing app by name or ID")
 	cmd.Flags().StringVar(&opts.Dir, "dir", "", "Project directory to upload")
 	cmd.Flags().StringVar(&opts.AppID, "app-id", "", "Existing app ID to redeploy")
+	cmd.Flags().BoolVar(&opts.ReplaceSource, "replace-source", false, "Adopt the uploaded source as the app's durable source-of-truth")
 	cmd.Flags().StringVar(&opts.RepoURLCompat, "repo-url", "", "Compatibility flag for GitHub deploys; prefer 'deploy github'")
 	cmd.Flags().StringVar(&opts.Branch, "branch", "", "Git branch for --repo-url compatibility mode")
 	cmd.Flags().BoolVar(&opts.Private, "private", false, "Treat the repository as private")
@@ -485,6 +487,7 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 		StartupCommand:           deployStartupCommandPointer(opts.StartupCommand),
 		PersistentStorage:        persistentStorage,
 		Postgres:                 postgres,
+		ReplaceSource:            opts.ReplaceSource,
 		UpdateExisting:           opts.UpdateExisting,
 		DeleteMissing:            opts.DeleteMissing,
 		DryRun:                   opts.DryRun,

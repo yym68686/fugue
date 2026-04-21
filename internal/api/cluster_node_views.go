@@ -185,6 +185,7 @@ func buildClusterNodePolicyView(snapshot clusterNodeSnapshot, machine *model.Mac
 	desiredBuilds := effectiveBuilds
 	desiredSharedPool := effectiveSharedPool
 	desiredRole := desiredControlPlaneRole(snapshot, machine)
+	nodeMode := strings.TrimSpace(firstNodeLabel(snapshot.labels, runtimepkg.NodeModeLabelKey))
 	hasSavedPolicy := machineHasSavedPolicy(machine)
 
 	if hasSavedPolicy {
@@ -193,11 +194,15 @@ func buildClusterNodePolicyView(snapshot clusterNodeSnapshot, machine *model.Mac
 	}
 	if runtimeObj != nil && !hasSavedPolicy {
 		desiredSharedPool = model.NormalizeRuntimePoolMode(runtimeObj.Type, runtimeObj.PoolMode) == model.RuntimePoolModeInternalShared
+		if nodeMode == "" {
+			nodeMode = strings.TrimSpace(runtimeObj.Type)
+		}
 	}
 
 	return &model.ClusterNodePolicy{
 		AllowBuilds:               desiredBuilds,
 		AllowSharedPool:           desiredSharedPool,
+		NodeMode:                  nodeMode,
 		DesiredControlPlaneRole:   desiredRole,
 		EffectiveBuilds:           effectiveBuilds,
 		EffectiveSharedPool:       effectiveSharedPool,

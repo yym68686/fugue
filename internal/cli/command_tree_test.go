@@ -728,6 +728,83 @@ func TestRunAppScaleByNameUsesSemanticCommand(t *testing.T) {
 	}
 }
 
+func TestRunAppSourceBindGitHubUsesRepairEndpoint(t *testing.T) {
+	t.Parallel()
+
+	var gotRequest struct {
+		OriginSource *model.AppSource `json:"origin_source"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","source":{"type":"upload","upload_id":"upload_123","build_strategy":"dockerfile","dockerfile_path":"Dockerfile","build_context_dir":".","image_name_suffix":"gateway","compose_service":"gateway","compose_depends_on":["runtime"]},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","source":{"type":"upload","upload_id":"upload_123","build_strategy":"dockerfile","dockerfile_path":"Dockerfile","build_context_dir":".","image_name_suffix":"gateway","compose_service":"gateway","compose_depends_on":["runtime"]},"build_source":{"type":"upload","upload_id":"upload_123","build_strategy":"dockerfile","dockerfile_path":"Dockerfile","build_context_dir":".","image_name_suffix":"gateway","compose_service":"gateway","compose_depends_on":["runtime"]},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/apps/app_123/source":
+			if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
+				t.Fatalf("decode source patch request: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","source":{"type":"upload","upload_id":"upload_123","build_strategy":"dockerfile","dockerfile_path":"Dockerfile","build_context_dir":".","image_name_suffix":"gateway","compose_service":"gateway","compose_depends_on":["runtime"]},"origin_source":{"type":"github-public","repo_url":"https://github.com/example/demo","repo_branch":"main","build_strategy":"dockerfile","dockerfile_path":"Dockerfile","build_context_dir":".","image_name_suffix":"gateway","compose_service":"gateway","compose_depends_on":["runtime"]},"build_source":{"type":"upload","upload_id":"upload_123","build_strategy":"dockerfile","dockerfile_path":"Dockerfile","build_context_dir":".","image_name_suffix":"gateway","compose_service":"gateway","compose_depends_on":["runtime"]},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"already_current":false}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "source", "bind-github", "demo", "example/demo",
+		"--branch", "main",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app source bind-github: %v", err)
+	}
+
+	if gotRequest.OriginSource == nil {
+		t.Fatal("expected origin_source patch payload")
+	}
+	if got := gotRequest.OriginSource.Type; got != model.AppSourceTypeGitHubPublic {
+		t.Fatalf("expected origin source type %q, got %q", model.AppSourceTypeGitHubPublic, got)
+	}
+	if got := gotRequest.OriginSource.RepoURL; got != "https://github.com/example/demo" {
+		t.Fatalf("expected origin repo url to be normalized, got %q", got)
+	}
+	if got := gotRequest.OriginSource.RepoBranch; got != "main" {
+		t.Fatalf("expected origin branch main, got %q", got)
+	}
+	if got := gotRequest.OriginSource.BuildStrategy; got != model.AppBuildStrategyDockerfile {
+		t.Fatalf("expected build strategy to be preserved, got %q", got)
+	}
+	if got := gotRequest.OriginSource.DockerfilePath; got != "Dockerfile" {
+		t.Fatalf("expected dockerfile path to be preserved, got %q", got)
+	}
+	if got := gotRequest.OriginSource.BuildContextDir; got != "." {
+		t.Fatalf("expected build context to be preserved, got %q", got)
+	}
+	if got := gotRequest.OriginSource.ImageNameSuffix; got != "gateway" {
+		t.Fatalf("expected image name suffix to be preserved, got %q", got)
+	}
+	if got := gotRequest.OriginSource.ComposeService; got != "gateway" {
+		t.Fatalf("expected compose service to be preserved, got %q", got)
+	}
+	if len(gotRequest.OriginSource.ComposeDependsOn) != 1 || gotRequest.OriginSource.ComposeDependsOn[0] != "runtime" {
+		t.Fatalf("expected compose dependencies to be preserved, got %+v", gotRequest.OriginSource.ComposeDependsOn)
+	}
+	if got := gotRequest.OriginSource.UploadID; got != "" {
+		t.Fatalf("expected bind-github request to avoid stale upload ownership fields, got upload_id %q", got)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"app=demo", "origin_source_type=github-public", "origin_source_ref=https://github.com/example/demo"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
 func TestRunAppContinuityAuditByNameUsesExplicitCommand(t *testing.T) {
 	t.Parallel()
 
@@ -3224,6 +3301,96 @@ func TestRunOperationShowSecretsOptIn(t *testing.T) {
 	} {
 		if !strings.Contains(out, secret) {
 			t.Fatalf("expected operation output to contain %q, got %q", secret, out)
+		}
+	}
+}
+
+func TestRunOperationExplainRendersBuilderPlacementDetails(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op_123":
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_123","tenant_id":"tenant_123","app_id":"app_123","type":"import","status":"failed","error_message":"select builder placement: no eligible builder nodes for profile heavy","created_at":"2026-04-22T10:00:00Z","updated_at":"2026-04-22T10:10:00Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op_123/diagnosis":
+			_, _ = w.Write([]byte(`{"diagnosis":{
+				"category":"builder-no-eligible-nodes",
+				"summary":"no builder nodes passed readiness, taint, disk-pressure, label, or stats checks for builder nodes profile \"heavy\"",
+				"hint":"Check builder node policy.",
+				"evidence":["active builder reservations: reservation-a@gcp1","active builder locks: gcp1 held by build-demo"],
+				"builder_placement":{
+					"profile":"heavy",
+					"build_strategy":"dockerfile",
+					"demand":{"cpu_milli":750,"memory_bytes":1073741824,"ephemeral_bytes":3221225472},
+					"reservations":[{"name":"reservation-a","node_name":"gcp1","demand":{"cpu_milli":750,"memory_bytes":1073741824,"ephemeral_bytes":3221225472}}],
+					"locks":[{"name":"lock-gcp1","node_name":"gcp1","holder_identity":"build-demo"}],
+					"nodes":[
+						{"node_name":"gcp1","hostname":"host-a","ready":true,"disk_pressure":true,"eligible":false,"reasons":["DiskPressure=True"]},
+						{"node_name":"gcp2","hostname":"host-b","ready":true,"disk_pressure":false,"eligible":true,"rank":1,"available":{"cpu_milli":1240,"memory_bytes":2147483648,"ephemeral_bytes":8589934592},"remaining":{"cpu_milli":490,"memory_bytes":1073741824,"ephemeral_bytes":5368709120}}
+					]
+				}
+			}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"operation", "explain", "op_123",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run operation explain: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{
+		"diagnosis_category=builder-no-eligible-nodes",
+		"evidence=active builder reservations: reservation-a@gcp1",
+		"[builder_reservations]",
+		"reservation-a",
+		"[builder_locks]",
+		"build-demo",
+		"[builder_nodes]",
+		"gcp1",
+		"pressure",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAdminClusterNodesShowsPolicyColumns(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/cluster/nodes" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"cluster_nodes":[{"name":"gcp1","status":"ready","runtime_id":"runtime_managed_shared","roles":["control-plane"],"region":"us-west1","cpu":{"usage_percent":42},"memory":{"usage_percent":67},"policy":{"allow_builds":true,"allow_shared_pool":false,"node_mode":"managed-owned","desired_control_plane_role":"candidate","effective_builds":false,"effective_shared_pool":true,"effective_control_plane_role":"member"},"created_at":"2026-04-02T00:00:00Z"}]}`))
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"admin", "cluster", "nodes",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run admin cluster nodes: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"BUILD", "SHARED", "MODE", "CP", "on/off", "off/on", "managed-owned", "candidate/member"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
 	}
 }

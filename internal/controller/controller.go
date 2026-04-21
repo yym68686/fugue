@@ -491,13 +491,15 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			return fmt.Errorf("deploy operation %s missing desired spec", op.ID)
 		}
 		app.Spec = *op.DesiredSpec
+		buildSource := model.AppBuildSource(app)
 		if op.DesiredSource != nil {
-			source := *op.DesiredSource
-			if len(op.DesiredSource.ComposeDependsOn) > 0 {
-				source.ComposeDependsOn = append([]string(nil), op.DesiredSource.ComposeDependsOn...)
-			}
-			app.Source = &source
+			buildSource = model.CloneAppSource(op.DesiredSource)
 		}
+		originSource := model.AppOriginSource(app)
+		if op.DesiredOriginSource != nil {
+			originSource = model.CloneAppSource(op.DesiredOriginSource)
+		}
+		model.SetAppSourceState(&app, originSource, buildSource)
 		if alignedSpec, changed, err := s.alignManagedPostgresRuntimeToObservedPrimary(ctx, app); err != nil {
 			if s.Logger != nil {
 				s.Logger.Printf("skip managed postgres runtime alignment for app %s: %v", app.ID, err)
@@ -521,13 +523,15 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			}
 			app.Spec.RuntimeID = op.TargetRuntimeID
 		}
+		buildSource := model.AppBuildSource(app)
 		if op.DesiredSource != nil {
-			source := *op.DesiredSource
-			if len(op.DesiredSource.ComposeDependsOn) > 0 {
-				source.ComposeDependsOn = append([]string(nil), op.DesiredSource.ComposeDependsOn...)
-			}
-			app.Source = &source
+			buildSource = model.CloneAppSource(op.DesiredSource)
 		}
+		originSource := model.AppOriginSource(app)
+		if op.DesiredOriginSource != nil {
+			originSource = model.CloneAppSource(op.DesiredOriginSource)
+		}
+		model.SetAppSourceState(&app, originSource, buildSource)
 	default:
 		return fmt.Errorf("unsupported operation type %s", op.Type)
 	}

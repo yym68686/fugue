@@ -185,13 +185,14 @@ func (s *Server) handleImportImageApp(w http.ResponseWriter, r *http.Request) {
 	spec := cloneAppSpec(app.Spec)
 	sourceCopy := *app.Source
 	op, err := s.store.CreateOperation(model.Operation{
-		TenantID:        tenantID,
-		Type:            model.OperationTypeImport,
-		RequestedByType: principal.ActorType,
-		RequestedByID:   principal.ActorID,
-		AppID:           app.ID,
-		DesiredSpec:     &spec,
-		DesiredSource:   &sourceCopy,
+		TenantID:            tenantID,
+		Type:                model.OperationTypeImport,
+		RequestedByType:     principal.ActorType,
+		RequestedByID:       principal.ActorID,
+		AppID:               app.ID,
+		DesiredSpec:         &spec,
+		DesiredSource:       &sourceCopy,
+		DesiredOriginSource: model.CloneAppSource(&sourceCopy),
 	})
 	if err != nil {
 		s.writeStoreError(w, err)

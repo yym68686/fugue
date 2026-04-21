@@ -1276,10 +1276,10 @@ func cloneBillingProjectionState(state *model.State, app model.App) model.State 
 
 func cloneAppForBilling(app model.App) model.App {
 	out := app
-	if app.Source != nil {
-		source := *app.Source
-		out.Source = &source
-	}
+	out.Source = model.CloneAppSource(app.Source)
+	out.OriginSource = model.CloneAppSource(app.OriginSource)
+	out.BuildSource = model.CloneAppSource(app.BuildSource)
+	model.NormalizeAppSourceState(&out)
 	if app.Route != nil {
 		route := *app.Route
 		out.Route = &route

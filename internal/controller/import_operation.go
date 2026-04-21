@@ -135,13 +135,21 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 
 	finalSpec := cloneImportSpec(*op.DesiredSpec)
 	finalSource := restoreQueuedSourceMetadata(output.Source, *op.DesiredSource)
-	deploySource := persistedDeploySourceAfterImport(app.Source, *op.DesiredSource, finalSource)
+	deployOriginSource := persistedOriginSourceAfterImport(op.DesiredOriginSource, *op.DesiredSource, finalSource)
 	managedImageRef, runtimeImageRef, err := s.resolveImportedManagedImageRef(importCtx, app, *op.DesiredSource, finalSource, strings.TrimSpace(output.ImportResult.ImageRef))
 	if err != nil {
 		return err
 	}
 	finalSource.ResolvedImageRef = managedImageRef
-	deploySource.ResolvedImageRef = managedImageRef
+	if deployOriginSource != nil && originSourceShouldAdoptImportedBuild(*deployOriginSource, *op.DesiredSource) {
+		deployOriginSource.ResolvedImageRef = managedImageRef
+		if detected := strings.TrimSpace(finalSource.DetectedProvider); detected != "" {
+			deployOriginSource.DetectedProvider = detected
+		}
+		if stack := strings.TrimSpace(finalSource.DetectedStack); stack != "" {
+			deployOriginSource.DetectedStack = stack
+		}
+	}
 	finalSpec.Image = runtimeImageRef
 	if finalSpec.Replicas <= 0 {
 		finalSpec.Replicas = 1
@@ -168,13 +176,14 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	}
 
 	deployOp, err := s.Store.CreateOperation(model.Operation{
-		TenantID:        app.TenantID,
-		Type:            model.OperationTypeDeploy,
-		RequestedByType: op.RequestedByType,
-		RequestedByID:   op.RequestedByID,
-		AppID:           app.ID,
-		DesiredSpec:     &finalSpec,
-		DesiredSource:   &deploySource,
+		TenantID:            app.TenantID,
+		Type:                model.OperationTypeDeploy,
+		RequestedByType:     op.RequestedByType,
+		RequestedByID:       op.RequestedByID,
+		AppID:               app.ID,
+		DesiredSpec:         &finalSpec,
+		DesiredSource:       &finalSource,
+		DesiredOriginSource: deployOriginSource,
 	})
 	if err != nil {
 		return fmt.Errorf("queue deploy after import: %w", err)
@@ -539,43 +548,46 @@ func restoreQueuedSourceMetadata(imported model.AppSource, queued model.AppSourc
 	return imported
 }
 
-func persistedDeploySourceAfterImport(existing *model.AppSource, queued model.AppSource, imported model.AppSource) model.AppSource {
-	if !shouldPreserveSourceProvenance(existing, queued) {
-		return imported
+func persistedOriginSourceAfterImport(desiredOrigin *model.AppSource, queuedBuild model.AppSource, importedBuild model.AppSource) *model.AppSource {
+	if desiredOrigin == nil {
+		origin := importedBuild
+		return &origin
 	}
-
-	preserved := cloneAppSourceForImportPersistence(existing)
-	if detected := strings.TrimSpace(imported.DetectedProvider); detected != "" {
-		preserved.DetectedProvider = detected
+	if originSourceShouldAdoptImportedBuild(*desiredOrigin, queuedBuild) {
+		origin := restoreQueuedSourceMetadata(importedBuild, *desiredOrigin)
+		return &origin
 	}
-	if stack := strings.TrimSpace(imported.DetectedStack); stack != "" {
-		preserved.DetectedStack = stack
-	}
-	return preserved
+	return model.CloneAppSource(desiredOrigin)
 }
 
-func shouldPreserveSourceProvenance(existing *model.AppSource, queued model.AppSource) bool {
-	if existing == nil {
+func originSourceShouldAdoptImportedBuild(origin model.AppSource, queuedBuild model.AppSource) bool {
+	originType := strings.TrimSpace(origin.Type)
+	queuedType := strings.TrimSpace(queuedBuild.Type)
+	if originType == "" || queuedType == "" || originType != queuedType {
 		return false
 	}
-	existingType := strings.TrimSpace(existing.Type)
-	if existingType == "" || existingType == model.AppSourceTypeUpload {
+	switch originType {
+	case model.AppSourceTypeGitHubPublic, model.AppSourceTypeGitHubPrivate:
+		return strings.EqualFold(normalizeImportSourceRepoURL(origin.RepoURL), normalizeImportSourceRepoURL(queuedBuild.RepoURL))
+	case model.AppSourceTypeUpload:
+		return strings.TrimSpace(origin.UploadID) != "" &&
+			strings.EqualFold(strings.TrimSpace(origin.UploadID), strings.TrimSpace(queuedBuild.UploadID))
+	case model.AppSourceTypeDockerImage:
+		return strings.EqualFold(strings.TrimSpace(origin.ImageRef), strings.TrimSpace(queuedBuild.ImageRef))
+	default:
 		return false
 	}
-	return strings.TrimSpace(queued.Type) == model.AppSourceTypeUpload
 }
 
-func cloneAppSourceForImportPersistence(source *model.AppSource) model.AppSource {
-	if source == nil {
-		return model.AppSource{}
-	}
-	cloned := *source
-	if len(source.ComposeDependsOn) > 0 {
-		cloned.ComposeDependsOn = append([]string(nil), source.ComposeDependsOn...)
-	} else {
-		cloned.ComposeDependsOn = nil
-	}
-	return cloned
+func normalizeImportSourceRepoURL(raw string) string {
+	raw = strings.TrimSpace(strings.TrimSuffix(raw, ".git"))
+	lower := strings.ToLower(raw)
+	lower = strings.TrimPrefix(lower, "https://")
+	lower = strings.TrimPrefix(lower, "http://")
+	lower = strings.TrimPrefix(lower, "ssh://")
+	lower = strings.TrimPrefix(lower, "git@github.com:")
+	lower = strings.TrimPrefix(lower, "github.com/")
+	return lower
 }
 
 func (s *Service) suggestComposeServiceEnv(ctx context.Context, app model.App, source model.AppSource) (map[string]string, error) {

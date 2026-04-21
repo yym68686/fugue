@@ -80,13 +80,14 @@ func (s *Server) handlePatchAppEnv(w http.ResponseWriter, r *http.Request) {
 	}
 
 	op, err := s.store.CreateOperation(model.Operation{
-		TenantID:        app.TenantID,
-		Type:            model.OperationTypeDeploy,
-		RequestedByType: principal.ActorType,
-		RequestedByID:   principal.ActorID,
-		AppID:           app.ID,
-		DesiredSpec:     &spec,
-		DesiredSource:   source,
+		TenantID:            app.TenantID,
+		Type:                model.OperationTypeDeploy,
+		RequestedByType:     principal.ActorType,
+		RequestedByID:       principal.ActorID,
+		AppID:               app.ID,
+		DesiredSpec:         &spec,
+		DesiredSource:       source,
+		DesiredOriginSource: model.AppOriginSource(app),
 	})
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -154,13 +155,14 @@ func (s *Server) handleUpsertAppFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	op, err := s.store.CreateOperation(model.Operation{
-		TenantID:        app.TenantID,
-		Type:            model.OperationTypeDeploy,
-		RequestedByType: principal.ActorType,
-		RequestedByID:   principal.ActorID,
-		AppID:           app.ID,
-		DesiredSpec:     &spec,
-		DesiredSource:   source,
+		TenantID:            app.TenantID,
+		Type:                model.OperationTypeDeploy,
+		RequestedByType:     principal.ActorType,
+		RequestedByID:       principal.ActorID,
+		AppID:               app.ID,
+		DesiredSpec:         &spec,
+		DesiredSource:       source,
+		DesiredOriginSource: model.AppOriginSource(app),
 	})
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -207,13 +209,14 @@ func (s *Server) handleDeleteAppFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	op, err := s.store.CreateOperation(model.Operation{
-		TenantID:        app.TenantID,
-		Type:            model.OperationTypeDeploy,
-		RequestedByType: principal.ActorType,
-		RequestedByID:   principal.ActorID,
-		AppID:           app.ID,
-		DesiredSpec:     &spec,
-		DesiredSource:   source,
+		TenantID:            app.TenantID,
+		Type:                model.OperationTypeDeploy,
+		RequestedByType:     principal.ActorType,
+		RequestedByID:       principal.ActorID,
+		AppID:               app.ID,
+		DesiredSpec:         &spec,
+		DesiredSource:       source,
+		DesiredOriginSource: model.AppOriginSource(app),
 	})
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -253,13 +256,14 @@ func (s *Server) handleRestartApp(w http.ResponseWriter, r *http.Request) {
 	}
 	spec.RestartToken = model.NewID("restart")
 	op, err := s.store.CreateOperation(model.Operation{
-		TenantID:        app.TenantID,
-		Type:            model.OperationTypeDeploy,
-		RequestedByType: principal.ActorType,
-		RequestedByID:   principal.ActorID,
-		AppID:           app.ID,
-		DesiredSpec:     &spec,
-		DesiredSource:   source,
+		TenantID:            app.TenantID,
+		Type:                model.OperationTypeDeploy,
+		RequestedByType:     principal.ActorType,
+		RequestedByID:       principal.ActorID,
+		AppID:               app.ID,
+		DesiredSpec:         &spec,
+		DesiredSource:       source,
+		DesiredOriginSource: model.AppOriginSource(app),
 	})
 	if err != nil {
 		s.writeStoreError(w, err)

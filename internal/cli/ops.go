@@ -5,6 +5,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"text/tabwriter"
 
 	"fugue/internal/model"
 
@@ -190,7 +191,7 @@ func (c *CLI) newOpsExplainCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "explain <operation>",
 		Aliases: []string{"diagnose"},
-		Short:   "Explain why an operation is pending or waiting",
+		Short:   "Explain why an operation is pending, waiting, or failed",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
@@ -372,12 +373,75 @@ func renderOperationWithDiagnosis(w io.Writer, op model.Operation, diagnosis *mo
 			pairs = append(pairs, kvPair{Key: "diagnosis_blocked_by", Value: blockedBy})
 		}
 	}
-	return writeKeyValues(w, pairs...)
+	if err := writeKeyValues(w, pairs...); err != nil {
+		return err
+	}
+	if diagnosis == nil {
+		return nil
+	}
+	for _, evidence := range diagnosis.Evidence {
+		if _, err := fmt.Fprintf(w, "evidence=%s\n", evidence); err != nil {
+			return err
+		}
+	}
+	if diagnosis.BuilderPlacement == nil {
+		return nil
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, "[builder_placement]"); err != nil {
+		return err
+	}
+	if err := writeKeyValues(w,
+		kvPair{Key: "profile", Value: strings.TrimSpace(diagnosis.BuilderPlacement.Profile)},
+		kvPair{Key: "build_strategy", Value: strings.TrimSpace(diagnosis.BuilderPlacement.BuildStrategy)},
+		kvPair{Key: "demand", Value: formatBuilderResourceSnapshot(diagnosis.BuilderPlacement.Demand)},
+		kvPair{Key: "required_node_labels", Value: formatStringMapInline(diagnosis.BuilderPlacement.RequiredNodeLabels)},
+		kvPair{Key: "active_reservations", Value: formatInt(len(diagnosis.BuilderPlacement.Reservations))},
+		kvPair{Key: "active_locks", Value: formatInt(len(diagnosis.BuilderPlacement.Locks))},
+	); err != nil {
+		return err
+	}
+	if len(diagnosis.BuilderPlacement.Reservations) > 0 {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w, "[builder_reservations]"); err != nil {
+			return err
+		}
+		if err := writeBuilderReservationTable(w, diagnosis.BuilderPlacement.Reservations); err != nil {
+			return err
+		}
+	}
+	if len(diagnosis.BuilderPlacement.Locks) > 0 {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w, "[builder_locks]"); err != nil {
+			return err
+		}
+		if err := writeBuilderLockTable(w, diagnosis.BuilderPlacement.Locks); err != nil {
+			return err
+		}
+	}
+	if len(diagnosis.BuilderPlacement.Nodes) > 0 {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w, "[builder_nodes]"); err != nil {
+			return err
+		}
+		if err := writeBuilderNodeInspectionTable(w, diagnosis.BuilderPlacement.Nodes); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *CLI) tryLoadOperationDiagnosis(client *Client, op model.Operation) (*model.OperationDiagnosis, error) {
 	switch strings.TrimSpace(op.Status) {
-	case model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent:
+	case model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent, model.OperationStatusFailed:
 		return client.TryGetOperationDiagnosis(op.ID)
 	default:
 		return nil, nil
@@ -501,4 +565,134 @@ func formatOperationDiagnosisBlockedBy(blockers []model.OperationDiagnosisBlocke
 		parts = append(parts, label)
 	}
 	return strings.Join(parts, "; ")
+}
+
+func formatBuilderResourceSnapshot(value model.BuilderResourceSnapshot) string {
+	parts := []string{}
+	if value.CPUMilli != 0 {
+		parts = append(parts, fmt.Sprintf("%dm CPU", value.CPUMilli))
+	}
+	if value.MemoryBytes != 0 {
+		parts = append(parts, fmt.Sprintf("%s RAM", formatBytes(value.MemoryBytes)))
+	}
+	if value.EphemeralBytes != 0 {
+		parts = append(parts, fmt.Sprintf("%s eph", formatBytes(value.EphemeralBytes)))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func formatStringMapInline(values map[string]string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%s", key, values[key]))
+	}
+	return strings.Join(parts, ",")
+}
+
+func writeBuilderReservationTable(w io.Writer, reservations []model.BuilderPlacementReservationInspection) error {
+	sorted := append([]model.BuilderPlacementReservationInspection(nil), reservations...)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].NodeName != sorted[j].NodeName {
+			return sorted[i].NodeName < sorted[j].NodeName
+		}
+		return sorted[i].Name < sorted[j].Name
+	})
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "NAME\tNODE\tRENEWED\tEXPIRES\tDEMAND"); err != nil {
+		return err
+	}
+	for _, reservation := range sorted {
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\t%s\n",
+			strings.TrimSpace(reservation.Name),
+			firstNonEmpty(strings.TrimSpace(reservation.NodeName), "-"),
+			firstNonEmpty(formatOptionalTimePtr(reservation.RenewedAt), "-"),
+			firstNonEmpty(formatOptionalTimePtr(reservation.ExpiresAt), "-"),
+			firstNonEmpty(formatBuilderResourceSnapshot(reservation.Demand), "-"),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func writeBuilderLockTable(w io.Writer, locks []model.BuilderPlacementLockInspection) error {
+	sorted := append([]model.BuilderPlacementLockInspection(nil), locks...)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].NodeName != sorted[j].NodeName {
+			return sorted[i].NodeName < sorted[j].NodeName
+		}
+		return sorted[i].Name < sorted[j].Name
+	})
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "NAME\tNODE\tHOLDER\tRENEWED\tEXPIRES"); err != nil {
+		return err
+	}
+	for _, lock := range sorted {
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\t%s\n",
+			strings.TrimSpace(lock.Name),
+			firstNonEmpty(strings.TrimSpace(lock.NodeName), "-"),
+			firstNonEmpty(strings.TrimSpace(lock.HolderIdentity), "-"),
+			firstNonEmpty(formatOptionalTimePtr(lock.RenewedAt), "-"),
+			firstNonEmpty(formatOptionalTimePtr(lock.ExpiresAt), "-"),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func writeBuilderNodeInspectionTable(w io.Writer, nodes []model.BuilderPlacementNodeInspection) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "RANK\tNODE\tHOST\tELIGIBLE\tREADY\tDISK\tMODE\tAVAILABLE\tREMAINING\tREASONS"); err != nil {
+		return err
+	}
+	for _, node := range nodes {
+		rank := ""
+		if node.Rank > 0 {
+			rank = formatInt(node.Rank)
+		}
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			rank,
+			strings.TrimSpace(node.NodeName),
+			firstNonEmpty(strings.TrimSpace(node.Hostname), "-"),
+			builderBoolLabel(node.Eligible),
+			builderBoolLabel(node.Ready),
+			builderDiskPressureLabel(node.DiskPressure),
+			firstNonEmpty(strings.TrimSpace(node.NodeMode), "-"),
+			firstNonEmpty(formatBuilderResourceSnapshot(node.Available), "-"),
+			firstNonEmpty(formatBuilderResourceSnapshot(node.Remaining), "-"),
+			firstNonEmpty(strings.Join(node.Reasons, "; "), "-"),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func builderBoolLabel(value bool) string {
+	if value {
+		return "yes"
+	}
+	return "no"
+}
+
+func builderDiskPressureLabel(value bool) string {
+	if value {
+		return "pressure"
+	}
+	return "ok"
 }
