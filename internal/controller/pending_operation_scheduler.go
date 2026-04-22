@@ -15,8 +15,10 @@ func pendingOperationMatchesLane(op model.Operation, lane operationLane) bool {
 		return op.Type == model.OperationTypeImport && !requestedByGitHubSync
 	case operationLaneForegroundActivate:
 		return op.Type != model.OperationTypeImport && !requestedByGitHubSync
-	case operationLaneGitHubSync:
-		return requestedByGitHubSync
+	case operationLaneGitHubSyncImport:
+		return op.Type == model.OperationTypeImport && requestedByGitHubSync
+	case operationLaneGitHubSyncActivate:
+		return op.Type != model.OperationTypeImport && requestedByGitHubSync
 	default:
 		return false
 	}

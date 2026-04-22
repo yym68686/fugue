@@ -48,7 +48,8 @@ type operationLane int
 const (
 	operationLaneForegroundImport operationLane = iota
 	operationLaneForegroundActivate
-	operationLaneGitHubSync
+	operationLaneGitHubSyncImport
+	operationLaneGitHubSyncActivate
 )
 
 func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *Service {
@@ -160,10 +161,15 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 
 	foregroundImports := s.startPendingOperationWorkers(ctx, operationLaneForegroundImport, s.Config.ForegroundImportWorkers)
 	foregroundActivations := s.startPendingOperationWorkers(ctx, operationLaneForegroundActivate, 1)
-	backgroundOps := s.startPendingOperationWorkers(ctx, operationLaneGitHubSync, 1)
+	backgroundImports := s.startPendingOperationWorkers(ctx, operationLaneGitHubSyncImport, 1)
+	backgroundActivations := s.startPendingOperationWorkers(ctx, operationLaneGitHubSyncActivate, 1)
+	triggerBackgroundOps := func() {
+		triggerPendingOperationWorkers(backgroundImports...)
+		triggerPendingOperationWorkers(backgroundActivations...)
+	}
 	triggerPendingOperationWorkers(foregroundImports...)
 	triggerPendingOperationWorkers(foregroundActivations...)
-	triggerPendingOperationWorkers(backgroundOps...)
+	triggerBackgroundOps()
 
 	if !eventDriven {
 		ticker := time.NewTicker(s.Config.PollInterval)
@@ -186,7 +192,7 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 				if err := s.syncGitHubApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
 					s.Logger.Printf("github sync error: %v", err)
 				} else {
-					triggerPendingOperationWorkers(backgroundOps...)
+					triggerBackgroundOps()
 				}
 			case <-ticker.C:
 			}
@@ -200,7 +206,7 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		if err := s.syncGitHubApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			s.Logger.Printf("initial github sync error: %v", err)
 		} else {
-			triggerPendingOperationWorkers(backgroundOps...)
+			triggerBackgroundOps()
 		}
 	}
 
@@ -228,7 +234,7 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			}
 			triggerPendingOperationWorkers(foregroundImports...)
 			triggerPendingOperationWorkers(foregroundActivations...)
-			triggerPendingOperationWorkers(backgroundOps...)
+			triggerBackgroundOps()
 			if s.Config.KubectlApply {
 				if err := s.reconcileManagedApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
 					s.Logger.Printf("managed app reconcile error: %v", err)
@@ -237,7 +243,7 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		case <-fallbackTicker.C:
 			triggerPendingOperationWorkers(foregroundImports...)
 			triggerPendingOperationWorkers(foregroundActivations...)
-			triggerPendingOperationWorkers(backgroundOps...)
+			triggerBackgroundOps()
 			if s.Config.KubectlApply {
 				if err := s.reconcileManagedApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
 					s.Logger.Printf("fallback managed app reconcile error: %v", err)
@@ -253,7 +259,7 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			if err := s.syncGitHubApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				s.Logger.Printf("github sync error: %v", err)
 			} else {
-				triggerPendingOperationWorkers(backgroundOps...)
+				triggerBackgroundOps()
 			}
 		case <-staleTicker.C:
 			if err := s.markRuntimeOfflineStale(); err != nil {
@@ -338,8 +344,10 @@ func (lane operationLane) String() string {
 		return "foreground-import"
 	case operationLaneForegroundActivate:
 		return "foreground-activate"
-	case operationLaneGitHubSync:
-		return "github-sync"
+	case operationLaneGitHubSyncImport:
+		return "github-sync-import"
+	case operationLaneGitHubSyncActivate:
+		return "github-sync-activate"
 	default:
 		return "unknown"
 	}
