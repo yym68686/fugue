@@ -161,6 +161,8 @@ The chart enables an internal PostgreSQL instance by default and also enables co
 Controller GitHub sync knobs:
 
 - `FUGUE_CONTROLLER_GITHUB_SYNC_INTERVAL`: how often the controller checks imported GitHub apps for a newer branch commit. Set `0` to disable the automatic rebuild loop.
+- `FUGUE_CONTROLLER_FOREGROUND_IMPORT_WORKERS`: controller-side concurrency cap for manual import/build operations. Set `0` to remove the cap so every ready import can start immediately; same-app ordering is still preserved.
+- `FUGUE_CONTROLLER_GITHUB_SYNC_IMPORT_WORKERS`: controller-side concurrency cap for auto-triggered GitHub import/build operations. Set `0` to remove the cap so every ready import can start immediately; same-app ordering is still preserved, and compose dependency checks still gate activation/deploy.
 - `FUGUE_CONTROLLER_GITHUB_SYNC_TIMEOUT`: timeout for each upstream GitHub check.
 - `FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_BASE_DELAY`: base retry delay after a tracked commit fails during auto sync. Repeated auto failures for the same commit back off from this value while automatic retries remain available.
 - `FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_MAX_DELAY`: maximum retry delay for repeated auto failures of the same tracked commit.

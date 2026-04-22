@@ -446,6 +446,447 @@ func TestBackgroundGitHubSyncImportDoesNotBlockGitHubSyncDeploysForOtherApps(t *
 	}
 }
 
+func TestBackgroundGitHubSyncImportWorkersProcessDifferentAppsInParallel(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	appOne, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo-one", "", model.AppSpec{
+		Image:     "registry.push.example/fugue-apps/demo-one:git-old",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:           model.AppSourceTypeGitHubPublic,
+		RepoURL:        "https://github.com/example/demo-one",
+		RepoBranch:     "main",
+		BuildStrategy:  model.AppBuildStrategyDockerfile,
+		DockerfilePath: "Dockerfile",
+		CommitSHA:      "oldcommit-one",
+		ComposeService: "app-one",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create first app: %v", err)
+	}
+
+	appTwo, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo-two", "", model.AppSpec{
+		Image:     "registry.push.example/fugue-apps/demo-two:git-old",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:           model.AppSourceTypeGitHubPublic,
+		RepoURL:        "https://github.com/example/demo-two",
+		RepoBranch:     "main",
+		BuildStrategy:  model.AppBuildStrategyDockerfile,
+		DockerfilePath: "Dockerfile",
+		CommitSHA:      "oldcommit-two",
+		ComposeService: "app-two",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create second app: %v", err)
+	}
+
+	specOne := appOne.Spec
+	sourceOne := *appOne.Source
+	opOne, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeBootstrap,
+		RequestedByID:   model.OperationRequestedByGitHubSyncController,
+		AppID:           appOne.ID,
+		DesiredSpec:     &specOne,
+		DesiredSource:   &sourceOne,
+	})
+	if err != nil {
+		t.Fatalf("create first github sync import: %v", err)
+	}
+
+	specTwo := appTwo.Spec
+	sourceTwo := *appTwo.Source
+	opTwo, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeBootstrap,
+		RequestedByID:   model.OperationRequestedByGitHubSyncController,
+		AppID:           appTwo.ID,
+		DesiredSpec:     &specTwo,
+		DesiredSource:   &sourceTwo,
+	})
+	if err != nil {
+		t.Fatalf("create second github sync import: %v", err)
+	}
+
+	importer := newControlledImporter()
+	svc := &Service{
+		Store:               stateStore,
+		Logger:              log.New(io.Discard, "", 0),
+		importer:            importer,
+		registryPushBase:    "registry.push.example",
+		registryPullBase:    "registry.push.example",
+		inspectManagedImage: inspectManagedImageAlwaysExists,
+	}
+
+	doneOne := make(chan error, 1)
+	doneTwo := make(chan error, 1)
+	go func() {
+		doneOne <- svc.drainPendingOperationsInLane(context.Background(), operationLaneGitHubSyncImport)
+	}()
+	go func() {
+		doneTwo <- svc.drainPendingOperationsInLane(context.Background(), operationLaneGitHubSyncImport)
+	}()
+
+	started := map[string]struct{}{
+		waitForStartedImportOperation(t, importer.started): {},
+		waitForStartedImportOperation(t, importer.started): {},
+	}
+	if _, ok := started[opOne.ID]; !ok {
+		t.Fatalf("expected operation %s to start, got %v", opOne.ID, started)
+	}
+	if _, ok := started[opTwo.ID]; !ok {
+		t.Fatalf("expected operation %s to start, got %v", opTwo.ID, started)
+	}
+
+	importer.release(opOne.ID)
+	importer.release(opTwo.ID)
+
+	waitForDrain(t, doneOne, "first parallel github sync import drain")
+	waitForDrain(t, doneTwo, "second parallel github sync import drain")
+
+	assertOperationStatus(t, stateStore, opOne.ID, model.OperationStatusCompleted)
+	assertOperationStatus(t, stateStore, opTwo.ID, model.OperationStatusCompleted)
+}
+
+func TestBackgroundGitHubSyncImportWorkersSerializeOperationsForSameApp(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.push.example/fugue-apps/demo:git-old",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:           model.AppSourceTypeGitHubPublic,
+		RepoURL:        "https://github.com/example/demo",
+		RepoBranch:     "main",
+		BuildStrategy:  model.AppBuildStrategyDockerfile,
+		DockerfilePath: "Dockerfile",
+		CommitSHA:      "oldcommit",
+		ComposeService: "app",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	specOne := app.Spec
+	sourceOne := *app.Source
+	opOne, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeBootstrap,
+		RequestedByID:   model.OperationRequestedByGitHubSyncController,
+		AppID:           app.ID,
+		DesiredSpec:     &specOne,
+		DesiredSource:   &sourceOne,
+	})
+	if err != nil {
+		t.Fatalf("create first github sync import: %v", err)
+	}
+
+	specTwo := app.Spec
+	sourceTwo := *app.Source
+	opTwo, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeBootstrap,
+		RequestedByID:   model.OperationRequestedByGitHubSyncController,
+		AppID:           app.ID,
+		DesiredSpec:     &specTwo,
+		DesiredSource:   &sourceTwo,
+	})
+	if err != nil {
+		t.Fatalf("create second github sync import: %v", err)
+	}
+
+	importer := newControlledImporter()
+	svc := &Service{
+		Store:               stateStore,
+		Logger:              log.New(io.Discard, "", 0),
+		importer:            importer,
+		registryPushBase:    "registry.push.example",
+		registryPullBase:    "registry.push.example",
+		inspectManagedImage: inspectManagedImageAlwaysExists,
+	}
+
+	doneOne := make(chan error, 1)
+	doneTwo := make(chan error, 1)
+	go func() {
+		doneOne <- svc.drainPendingOperationsInLane(context.Background(), operationLaneGitHubSyncImport)
+	}()
+	go func() {
+		doneTwo <- svc.drainPendingOperationsInLane(context.Background(), operationLaneGitHubSyncImport)
+	}()
+
+	if started := waitForStartedImportOperation(t, importer.started); started != opOne.ID {
+		t.Fatalf("expected first started operation %s, got %s", opOne.ID, started)
+	}
+	assertNoStartedImportOperation(t, importer.started, 200*time.Millisecond)
+
+	importer.release(opOne.ID)
+	if started := waitForStartedImportOperation(t, importer.started); started != opTwo.ID {
+		t.Fatalf("expected second started operation %s after release, got %s", opTwo.ID, started)
+	}
+	importer.release(opTwo.ID)
+
+	waitForDrain(t, doneOne, "first same-app github sync import drain")
+	waitForDrain(t, doneTwo, "second same-app github sync import drain")
+
+	assertOperationStatus(t, stateStore, opOne.ID, model.OperationStatusCompleted)
+	assertOperationStatus(t, stateStore, opTwo.ID, model.OperationStatusCompleted)
+}
+
+func TestUnboundedPendingOperationWorkersProcessDifferentAppsInParallel(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	appOne, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo-one", "", model.AppSpec{
+		Image:     "registry.push.example/fugue-apps/demo-one:git-old",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:           model.AppSourceTypeGitHubPublic,
+		RepoURL:        "https://github.com/example/demo-one",
+		RepoBranch:     "main",
+		BuildStrategy:  model.AppBuildStrategyDockerfile,
+		DockerfilePath: "Dockerfile",
+		CommitSHA:      "oldcommit-one",
+		ComposeService: "app-one",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create first app: %v", err)
+	}
+
+	appTwo, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo-two", "", model.AppSpec{
+		Image:     "registry.push.example/fugue-apps/demo-two:git-old",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:           model.AppSourceTypeGitHubPublic,
+		RepoURL:        "https://github.com/example/demo-two",
+		RepoBranch:     "main",
+		BuildStrategy:  model.AppBuildStrategyDockerfile,
+		DockerfilePath: "Dockerfile",
+		CommitSHA:      "oldcommit-two",
+		ComposeService: "app-two",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create second app: %v", err)
+	}
+
+	specOne := appOne.Spec
+	sourceOne := *appOne.Source
+	opOne, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeBootstrap,
+		RequestedByID:   model.OperationRequestedByGitHubSyncController,
+		AppID:           appOne.ID,
+		DesiredSpec:     &specOne,
+		DesiredSource:   &sourceOne,
+	})
+	if err != nil {
+		t.Fatalf("create first github sync import: %v", err)
+	}
+
+	specTwo := appTwo.Spec
+	sourceTwo := *appTwo.Source
+	opTwo, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeBootstrap,
+		RequestedByID:   model.OperationRequestedByGitHubSyncController,
+		AppID:           appTwo.ID,
+		DesiredSpec:     &specTwo,
+		DesiredSource:   &sourceTwo,
+	})
+	if err != nil {
+		t.Fatalf("create second github sync import: %v", err)
+	}
+
+	importer := newControlledImporter()
+	svc := &Service{
+		Store:               stateStore,
+		Logger:              log.New(io.Discard, "", 0),
+		Config:              config.ControllerConfig{PollInterval: time.Hour},
+		importer:            importer,
+		registryPushBase:    "registry.push.example",
+		registryPullBase:    "registry.push.example",
+		inspectManagedImage: inspectManagedImageAlwaysExists,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	workers := svc.startPendingOperationWorkers(ctx, operationLaneGitHubSyncImport, 0)
+	triggerPendingOperationWorkers(workers...)
+
+	started := map[string]struct{}{
+		waitForStartedImportOperation(t, importer.started): {},
+		waitForStartedImportOperation(t, importer.started): {},
+	}
+	if _, ok := started[opOne.ID]; !ok {
+		t.Fatalf("expected operation %s to start, got %v", opOne.ID, started)
+	}
+	if _, ok := started[opTwo.ID]; !ok {
+		t.Fatalf("expected operation %s to start, got %v", opTwo.ID, started)
+	}
+
+	importer.release(opOne.ID)
+	importer.release(opTwo.ID)
+
+	waitForOperationStatus(t, stateStore, opOne.ID, model.OperationStatusCompleted)
+	waitForOperationStatus(t, stateStore, opTwo.ID, model.OperationStatusCompleted)
+}
+
+func TestUnboundedPendingOperationWorkersSerializeOperationsForSameApp(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.push.example/fugue-apps/demo:git-old",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:           model.AppSourceTypeGitHubPublic,
+		RepoURL:        "https://github.com/example/demo",
+		RepoBranch:     "main",
+		BuildStrategy:  model.AppBuildStrategyDockerfile,
+		DockerfilePath: "Dockerfile",
+		CommitSHA:      "oldcommit",
+		ComposeService: "app",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	specOne := app.Spec
+	sourceOne := *app.Source
+	opOne, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeBootstrap,
+		RequestedByID:   model.OperationRequestedByGitHubSyncController,
+		AppID:           app.ID,
+		DesiredSpec:     &specOne,
+		DesiredSource:   &sourceOne,
+	})
+	if err != nil {
+		t.Fatalf("create first github sync import: %v", err)
+	}
+
+	specTwo := app.Spec
+	sourceTwo := *app.Source
+	opTwo, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeBootstrap,
+		RequestedByID:   model.OperationRequestedByGitHubSyncController,
+		AppID:           app.ID,
+		DesiredSpec:     &specTwo,
+		DesiredSource:   &sourceTwo,
+	})
+	if err != nil {
+		t.Fatalf("create second github sync import: %v", err)
+	}
+
+	importer := newControlledImporter()
+	svc := &Service{
+		Store:               stateStore,
+		Logger:              log.New(io.Discard, "", 0),
+		Config:              config.ControllerConfig{PollInterval: time.Hour},
+		importer:            importer,
+		registryPushBase:    "registry.push.example",
+		registryPullBase:    "registry.push.example",
+		inspectManagedImage: inspectManagedImageAlwaysExists,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	workers := svc.startPendingOperationWorkers(ctx, operationLaneGitHubSyncImport, 0)
+	triggerPendingOperationWorkers(workers...)
+
+	if started := waitForStartedImportOperation(t, importer.started); started != opOne.ID {
+		t.Fatalf("expected first started operation %s, got %s", opOne.ID, started)
+	}
+	assertNoStartedImportOperation(t, importer.started, 200*time.Millisecond)
+
+	importer.release(opOne.ID)
+	waitForOperationStatus(t, stateStore, opOne.ID, model.OperationStatusCompleted)
+	triggerPendingOperationWorkers(workers...)
+
+	if started := waitForStartedImportOperation(t, importer.started); started != opTwo.ID {
+		t.Fatalf("expected second started operation %s after release, got %s", opTwo.ID, started)
+	}
+	importer.release(opTwo.ID)
+	waitForOperationStatus(t, stateStore, opTwo.ID, model.OperationStatusCompleted)
+}
+
 func TestForegroundImportWorkersProcessDifferentAppsInParallel(t *testing.T) {
 	t.Parallel()
 
@@ -1137,4 +1578,21 @@ func assertOperationStatus(t *testing.T, stateStore *store.Store, operationID st
 	if op.Status != want {
 		t.Fatalf("expected operation %s status %q, got %q", operationID, want, op.Status)
 	}
+}
+
+func waitForOperationStatus(t *testing.T, stateStore *store.Store, operationID string, want string) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		op, err := stateStore.GetOperation(operationID)
+		if err != nil {
+			t.Fatalf("get operation %s: %v", operationID, err)
+		}
+		if op.Status == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	assertOperationStatus(t, stateStore, operationID, want)
 }

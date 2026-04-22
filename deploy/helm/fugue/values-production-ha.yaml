@@ -28,6 +28,7 @@ api:
 
 controller:
   replicaCount: 3
+  githubSyncImportWorkers: 0
   pollInterval: 5s
   fallbackPollInterval: 30s
   runtimeOfflineAfter: 90s

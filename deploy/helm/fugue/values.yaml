@@ -46,6 +46,7 @@ controller:
     repository: fugue-controller
     tag: latest
     pullPolicy: IfNotPresent
+  githubSyncImportWorkers: 0
   pollInterval: 5s
   fallbackPollInterval: 30s
   runtimeOfflineAfter: 90s

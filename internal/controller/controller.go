@@ -135,11 +135,14 @@ func (s *Service) Run(ctx context.Context) error {
 
 func (s *Service) runActiveLoop(ctx context.Context) error {
 	eventDriven := strings.TrimSpace(s.Config.DatabaseURL) != ""
-	if s.Config.ForegroundImportWorkers <= 0 {
-		s.Config.ForegroundImportWorkers = 1
+	if s.Config.ForegroundImportWorkers < 0 {
+		s.Config.ForegroundImportWorkers = 0
+	}
+	if s.Config.GitHubSyncImportWorkers < 0 {
+		s.Config.GitHubSyncImportWorkers = 0
 	}
 	s.Logger.Printf(
-		"controller active loop started; event_driven=%v poll_interval=%s fallback_poll_interval=%s github_sync_interval=%s render_dir=%s kubectl_apply=%v foreground_import_workers=%d",
+		"controller active loop started; event_driven=%v poll_interval=%s fallback_poll_interval=%s github_sync_interval=%s render_dir=%s kubectl_apply=%v foreground_import_workers=%d github_sync_import_workers=%d import_worker_limit_note=%q",
 		eventDriven,
 		s.Config.PollInterval,
 		s.Config.FallbackPollInterval,
@@ -147,6 +150,8 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		s.Config.RenderDir,
 		s.Config.KubectlApply,
 		s.Config.ForegroundImportWorkers,
+		s.Config.GitHubSyncImportWorkers,
+		"0=unbounded",
 	)
 	requeued, err := s.Store.RequeueInFlightManagedOperations("operation requeued after controller restart")
 	if err != nil {
@@ -161,7 +166,7 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 
 	foregroundImports := s.startPendingOperationWorkers(ctx, operationLaneForegroundImport, s.Config.ForegroundImportWorkers)
 	foregroundActivations := s.startPendingOperationWorkers(ctx, operationLaneForegroundActivate, 1)
-	backgroundImports := s.startPendingOperationWorkers(ctx, operationLaneGitHubSyncImport, 1)
+	backgroundImports := s.startPendingOperationWorkers(ctx, operationLaneGitHubSyncImport, s.Config.GitHubSyncImportWorkers)
 	backgroundActivations := s.startPendingOperationWorkers(ctx, operationLaneGitHubSyncActivate, 1)
 	triggerBackgroundOps := func() {
 		triggerPendingOperationWorkers(backgroundImports...)
@@ -354,8 +359,28 @@ func (lane operationLane) String() string {
 }
 
 func (s *Service) startPendingOperationWorkers(ctx context.Context, lane operationLane, count int) []chan struct{} {
-	if count <= 0 {
-		count = 1
+	if count < 0 {
+		count = 0
+	}
+	if count == 0 {
+		trigger := make(chan struct{}, 1)
+		go func(trigger chan struct{}) {
+			ticker := time.NewTicker(s.Config.PollInterval)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-trigger:
+				case <-ticker.C:
+				}
+				if err := s.dispatchPendingOperationsInLane(ctx, lane); err != nil && !errors.Is(err, context.Canceled) {
+					s.Logger.Printf("dispatch pending operations (%s) error: %v", lane, err)
+				}
+			}
+		}(trigger)
+		return []chan struct{}{trigger}
 	}
 	triggers := make([]chan struct{}, 0, count)
 	for range count {
@@ -379,6 +404,24 @@ func (s *Service) startPendingOperationWorkers(ctx context.Context, lane operati
 		}(trigger)
 	}
 	return triggers
+}
+
+func (s *Service) dispatchPendingOperationsInLane(ctx context.Context, lane operationLane) error {
+	for {
+		op, found, err := s.claimNextPendingOperationInLane(lane)
+		if err != nil {
+			return fmt.Errorf("claim pending operation: %w", err)
+		}
+		if !found {
+			return nil
+		}
+
+		go func(op model.Operation) {
+			if err := s.handleClaimedOperation(ctx, op); err != nil && !errors.Is(err, context.Canceled) && s.Logger != nil {
+				s.Logger.Printf("operation %s async lane %s error: %v", op.ID, lane, err)
+			}
+		}(op)
+	}
 }
 
 func (s *Service) claimNextPendingOperationInLane(lane operationLane) (model.Operation, bool, error) {
