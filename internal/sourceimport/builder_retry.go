@@ -29,6 +29,7 @@ var retriableBuilderFailureSignals = []string{
 	"too many requests",
 	"service unavailable",
 	"gateway timeout",
+	"signal: killed",
 	"resource temporarily unavailable",
 	"no space left on device",
 	"ephemeral-storage",

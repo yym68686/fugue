@@ -61,6 +61,11 @@ func TestShouldRetryBuilderJobFailureSignals(t *testing.T) {
 			retriable: true,
 		},
 		{
+			name:      "kubectl signal killed",
+			message:   "kaniko job build-demo: kubectl -n fugue-system get job build-demo -o json: signal: killed",
+			retriable: true,
+		},
+		{
 			name:      "dockerfile syntax",
 			message:   "kaniko job build-demo: invalid Dockerfile: unknown instruction FROOOM",
 			retriable: false,

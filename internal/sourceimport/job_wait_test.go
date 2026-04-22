@@ -1,6 +1,9 @@
 package sourceimport
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestBuilderJobFailedWithFailedCondition(t *testing.T) {
 	status := builderJobStatus{
@@ -106,5 +109,16 @@ func TestFailingBuilderContainerNamePrefersTerminatedFailure(t *testing.T) {
 
 	if got := failingBuilderContainerName(pod); got != "kaniko" {
 		t.Fatalf("unexpected failing container name: got %q want %q", got, "kaniko")
+	}
+}
+
+func TestIsTransientBuilderObservationError(t *testing.T) {
+	t.Parallel()
+
+	if !isTransientBuilderObservationError(errors.New("kubectl -n fugue-system get job build-demo -o json: signal: killed")) {
+		t.Fatal("expected signal: killed observation error to be treated as transient")
+	}
+	if isTransientBuilderObservationError(errors.New("kubectl -n fugue-system get job build-demo -o json: error: the server doesn't have a resource type")) {
+		t.Fatal("did not expect permanent kubectl errors to be treated as transient")
 	}
 }

@@ -80,6 +80,14 @@ func waitForBuilderJob(ctx context.Context, namespace, jobName string, timeout t
 	for {
 		job, err := getBuilderJob(waitCtx, namespace, jobName)
 		if err != nil {
+			if isTransientBuilderObservationError(err) {
+				select {
+				case <-waitCtx.Done():
+					return fmt.Errorf("wait for builder job %s: %w", jobName, waitCtx.Err())
+				case <-ticker.C:
+					continue
+				}
+			}
 			return err
 		}
 		if builderJobCompleted(job.Status) {
@@ -99,6 +107,11 @@ func waitForBuilderJob(ctx context.Context, namespace, jobName string, timeout t
 		case <-ticker.C:
 		}
 	}
+}
+
+func isTransientBuilderObservationError(err error) bool {
+	retriable, _ := shouldRetryBuilderJobFailure(err)
+	return retriable
 }
 
 func getBuilderJob(ctx context.Context, namespace, jobName string) (builderJob, error) {
