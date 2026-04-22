@@ -677,6 +677,9 @@ func TestInspectPlacementReportsReservationsLocksAndNodeReasons(t *testing.T) {
 	nodeC := builderTestKubeNode("node-c", "", policy)
 	delete(nodeC.Metadata.Labels, builderHostnameLabelKey)
 	nodeD := builderTestKubeNode("node-d", "host-d", policy)
+	now := time.Now().UTC()
+	reservationRenewedAt := formatKubeTimestamp(now.Add(-30 * time.Second))
+	lockRenewedAt := formatKubeTimestamp(now.Add(-10 * time.Second))
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -693,7 +696,7 @@ func TestInspectPlacementReportsReservationsLocksAndNodeReasons(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/apis/coordination.k8s.io/v1/namespaces/fugue-system/leases" && r.URL.Query().Get("labelSelector") == builderReservationLabelSelector:
 			writeBuilderTestJSON(t, w, builderKubeLeaseList{
 				Items: []builderKubeLease{
-					builderTestLease("reservation-a", builderReservationComponentValue, "reservation-a", "node-a", "2026-04-22T10:00:00.000000Z", 120, map[string]string{
+					builderTestLease("reservation-a", builderReservationComponentValue, "reservation-a", "node-a", reservationRenewedAt, 120, map[string]string{
 						builderAnnotationCPUMilli:       "750",
 						builderAnnotationMemoryBytes:    "1073741824",
 						builderAnnotationEphemeralBytes: "3221225472",
@@ -703,7 +706,7 @@ func TestInspectPlacementReportsReservationsLocksAndNodeReasons(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/apis/coordination.k8s.io/v1/namespaces/fugue-system/leases" && r.URL.Query().Get("labelSelector") == builderNodeLockLabelSelector:
 			writeBuilderTestJSON(t, w, builderKubeLeaseList{
 				Items: []builderKubeLease{
-					builderTestLease("lock-node-a", builderNodeLockComponentValue, "build-demo", "node-a", "2026-04-22T10:00:30.000000Z", 20, nil),
+					builderTestLease("lock-node-a", builderNodeLockComponentValue, "build-demo", "node-a", lockRenewedAt, 20, nil),
 				},
 			})
 		default:
