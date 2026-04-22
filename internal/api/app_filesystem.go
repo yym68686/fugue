@@ -29,6 +29,7 @@ import (
 
 const (
 	defaultFilesystemReadMaxBytes = 256 * 1024
+	filesystemExecMaxAttempts     = 3
 
 	filesystemMarkerNotFound      = "__FUGUE_NOT_FOUND__"
 	filesystemMarkerNotDirectory  = "__FUGUE_NOT_DIRECTORY__"
@@ -571,13 +572,16 @@ func (s *Server) resolveAppFilesystemTarget(
 		return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusNotFound, Message: "no running app pods found"}
 	}
 
-	pod := chooseFilesystemPod(pods)
-	if pod.Metadata.Name == "" {
-		return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusNotFound, Message: "no running app pods found"}
-	}
 	containerName := appContainerName
 	if usePersistentStorage {
 		containerName = runtime.AppWorkspaceContainerName
+	}
+	pod, podIssue := chooseFilesystemPod(pods, containerName)
+	if pod.Metadata.Name == "" {
+		if podIssue != "" {
+			return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusConflict, Message: podIssue}
+		}
+		return appFilesystemTarget{}, "", &filesystemAPIError{StatusCode: http.StatusNotFound, Message: "no running app pods found"}
 	}
 	return appFilesystemTarget{
 		namespace:     namespace,
@@ -588,16 +592,105 @@ func (s *Server) resolveAppFilesystemTarget(
 	}, requestPath, nil
 }
 
-func chooseFilesystemPod(pods []kubePodInfo) kubePodInfo {
+func chooseFilesystemPod(pods []kubePodInfo, containerName string) (kubePodInfo, string) {
+	containerName = strings.TrimSpace(containerName)
+	lastIssue := ""
 	for index := len(pods) - 1; index >= 0; index-- {
-		if strings.EqualFold(strings.TrimSpace(pods[index].Status.Phase), "Running") {
-			return pods[index]
+		pod := pods[index]
+		if !strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Running") {
+			continue
 		}
+		if containerName == "" {
+			return pod, ""
+		}
+		present, ready, detail := filesystemContainerAvailability(pod, containerName)
+		if !present {
+			lastIssue = fmt.Sprintf(
+				"pod %s does not include container %s for filesystem access",
+				strings.TrimSpace(pod.Metadata.Name),
+				containerName,
+			)
+			continue
+		}
+		if !ready {
+			if detail == "" {
+				detail = "container is not ready"
+			}
+			lastIssue = fmt.Sprintf(
+				"pod %s container %s is not ready for filesystem access (%s)",
+				strings.TrimSpace(pod.Metadata.Name),
+				containerName,
+				detail,
+			)
+			continue
+		}
+		return pod, ""
 	}
 	if len(pods) == 0 {
-		return kubePodInfo{}
+		return kubePodInfo{}, ""
 	}
-	return pods[len(pods)-1]
+	return kubePodInfo{}, lastIssue
+}
+
+func filesystemContainerAvailability(pod kubePodInfo, containerName string) (bool, bool, string) {
+	containerName = strings.TrimSpace(containerName)
+	if containerName == "" {
+		return false, false, ""
+	}
+	if len(pod.Spec.InitContainers) == 0 &&
+		len(pod.Spec.Containers) == 0 &&
+		len(pod.Status.InitContainerStatuses) == 0 &&
+		len(pod.Status.ContainerStatuses) == 0 {
+		return true, true, ""
+	}
+
+	hasContainer := false
+	for _, container := range pod.Spec.InitContainers {
+		if strings.TrimSpace(container.Name) == containerName {
+			hasContainer = true
+			break
+		}
+	}
+	if !hasContainer {
+		for _, container := range pod.Spec.Containers {
+			if strings.TrimSpace(container.Name) == containerName {
+				hasContainer = true
+				break
+			}
+		}
+	}
+
+	statuses := append([]kubeContainerStatus(nil), pod.Status.InitContainerStatuses...)
+	statuses = append(statuses, pod.Status.ContainerStatuses...)
+	for _, status := range statuses {
+		if strings.TrimSpace(status.Name) != containerName {
+			continue
+		}
+		hasContainer = true
+		if status.Ready {
+			return true, true, ""
+		}
+		state, reason, message := podContainerStateFromLogStatus(status)
+		parts := make([]string, 0, 3)
+		if state != "" {
+			parts = append(parts, "state="+state)
+		}
+		if reason != "" {
+			parts = append(parts, "reason="+reason)
+		}
+		if message != "" {
+			parts = append(parts, "message="+message)
+		}
+		if len(parts) == 0 {
+			return true, false, "container status is not ready"
+		}
+		return true, false, strings.Join(parts, " ")
+	}
+
+	if hasContainer {
+		return true, false, "container status is not available yet"
+	}
+	return false, false, ""
 }
 
 func (s *Server) runAppFilesystemCommand(ctx context.Context, target appFilesystemTarget, stdin []byte, command ...string) ([]byte, error) {
@@ -609,11 +702,26 @@ func (s *Server) runAppFilesystemCommand(ctx context.Context, target appFilesyst
 	commandCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	out, err := runner.Run(commandCtx, target.namespace, target.podName, target.containerName, stdin, command...)
-	if err != nil {
-		return nil, mapFilesystemExecError(err)
+	var lastErr error
+	for attempt := 0; attempt < filesystemExecMaxAttempts; attempt++ {
+		out, err := runner.Run(commandCtx, target.namespace, target.podName, target.containerName, stdin, command...)
+		if err == nil {
+			return out, nil
+		}
+		lastErr = err
+		if !isTransientFilesystemExecError(err) || attempt == filesystemExecMaxAttempts-1 {
+			return nil, mapFilesystemExecError(err)
+		}
+		retryDelay := time.Duration(attempt+1) * 250 * time.Millisecond
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-commandCtx.Done():
+			timer.Stop()
+			return nil, mapFilesystemExecError(lastErr)
+		case <-timer.C:
+		}
 	}
-	return out, nil
+	return nil, mapFilesystemExecError(lastErr)
 }
 
 func writeFilesystemError(w http.ResponseWriter, err error) {
@@ -644,8 +752,46 @@ func mapFilesystemExecError(err error) error {
 		return &filesystemAPIError{StatusCode: http.StatusBadRequest, Message: "path must reference a file", Err: err}
 	case strings.Contains(message, filesystemMarkerParentMissing):
 		return &filesystemAPIError{StatusCode: http.StatusBadRequest, Message: "parent directory does not exist", Err: err}
+	}
+	if statusCode, ok := transientFilesystemExecStatus(message); ok {
+		apiMessage := "filesystem access is temporarily unavailable; retry shortly"
+		if statusCode == http.StatusConflict {
+			apiMessage = "filesystem target is not ready; retry shortly"
+		}
+		return &filesystemAPIError{StatusCode: statusCode, Message: apiMessage, Err: err}
+	}
+	return err
+}
+
+func isTransientFilesystemExecError(err error) bool {
+	if err == nil {
+		return false
+	}
+	_, ok := transientFilesystemExecStatus(err.Error())
+	return ok
+}
+
+func transientFilesystemExecStatus(message string) (int, bool) {
+	lowerMessage := strings.ToLower(strings.TrimSpace(message))
+	switch {
+	case lowerMessage == "":
+		return 0, false
+	case strings.Contains(lowerMessage, "container not found"),
+		strings.Contains(lowerMessage, "pod not found"),
+		strings.Contains(lowerMessage, "containercreating"),
+		strings.Contains(lowerMessage, "is waiting to start"),
+		strings.Contains(lowerMessage, "container status is not available yet"):
+		return http.StatusConflict, true
+	case strings.Contains(lowerMessage, "unexpected eof"),
+		strings.Contains(lowerMessage, "unable to upgrade connection"),
+		strings.Contains(lowerMessage, "apiserver not ready"),
+		strings.Contains(lowerMessage, "connection reset by peer"),
+		strings.Contains(lowerMessage, "connection refused"),
+		strings.Contains(lowerMessage, "i/o timeout"),
+		strings.Contains(lowerMessage, "tls handshake timeout"):
+		return http.StatusServiceUnavailable, true
 	default:
-		return err
+		return 0, false
 	}
 }
 

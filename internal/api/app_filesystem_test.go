@@ -425,6 +425,160 @@ func TestAppFilesystemExecUnavailableReturnsServiceUnavailable(t *testing.T) {
 	}
 }
 
+func TestAppFilesystemPrefersReadyFilesystemContainer(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app := setupAppFilesystemTestServer(t, true)
+
+	olderPod := kubePodInfo{}
+	olderPod.Metadata.Name = "older-ready"
+	olderPod.Metadata.CreationTimestamp = time.Now().UTC().Add(-2 * time.Minute)
+	olderPod.Status.Phase = "Running"
+	olderPod.Status.ContainerStatuses = []kubeContainerStatus{{
+		Name:  runtime.AppWorkspaceContainerName,
+		Ready: true,
+		State: kubeRuntimeState{Running: &struct{}{}},
+	}}
+
+	newerPod := kubePodInfo{}
+	newerPod.Metadata.Name = "newer-pending"
+	newerPod.Metadata.CreationTimestamp = time.Now().UTC().Add(-1 * time.Minute)
+	newerPod.Status.Phase = "Running"
+	newerPod.Status.ContainerStatuses = []kubeContainerStatus{{
+		Name:  runtime.AppWorkspaceContainerName,
+		Ready: false,
+		State: kubeRuntimeState{Waiting: &kubeStateDetail{Reason: "ContainerCreating", Message: "workspace sidecar is starting"}},
+	}}
+
+	server.newFilesystemPodLister = func(string) (filesystemPodLister, error) {
+		return fakeFilesystemPodLister{pods: []kubePodInfo{olderPod, newerPod}}, nil
+	}
+	runner := &fakeFilesystemExecRunner{
+		outputs: [][]byte{
+			[]byte("4\t644\t1700000001\ntest"),
+		},
+	}
+	server.filesystemExecRunner = runner
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/filesystem/file?path=/workspace/file.txt", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("expected 1 filesystem exec call, got %d", len(runner.calls))
+	}
+	if runner.calls[0].podName != olderPod.Metadata.Name {
+		t.Fatalf("expected ready pod %q, got %q", olderPod.Metadata.Name, runner.calls[0].podName)
+	}
+}
+
+func TestAppFilesystemReturnsConflictWhenFilesystemContainerIsNotReady(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app := setupAppFilesystemTestServer(t, true)
+
+	pod := kubePodInfo{}
+	pod.Metadata.Name = "demo-pod"
+	pod.Metadata.CreationTimestamp = time.Now().UTC()
+	pod.Status.Phase = "Running"
+	pod.Status.ContainerStatuses = []kubeContainerStatus{{
+		Name:  runtime.AppWorkspaceContainerName,
+		Ready: false,
+		State: kubeRuntimeState{Waiting: &kubeStateDetail{Reason: "ContainerCreating", Message: "sidecar is booting"}},
+	}}
+
+	server.newFilesystemPodLister = func(string) (filesystemPodLister, error) {
+		return fakeFilesystemPodLister{pods: []kubePodInfo{pod}}, nil
+	}
+	server.filesystemExecRunner = &fakeFilesystemExecRunner{}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/filesystem/file?path=/workspace/file.txt", apiKey, nil)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusConflict, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Error string `json:"error"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if !strings.Contains(strings.ToLower(response.Error), "not ready") {
+		t.Fatalf("expected not ready error, got %q", response.Error)
+	}
+}
+
+func TestRunAppFilesystemCommandRetriesTransientErrors(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeFilesystemExecRunner{
+		errs: []error{
+			errors.New("kubernetes exec pod demo-pod container fugue-workspace failed: unexpected EOF"),
+			errors.New("kubernetes exec pod demo-pod container fugue-workspace failed: apiserver not ready"),
+		},
+		outputs: [][]byte{
+			[]byte("ok"),
+		},
+	}
+	server := &Server{filesystemExecRunner: runner}
+
+	out, err := server.runAppFilesystemCommand(
+		context.Background(),
+		appFilesystemTarget{
+			namespace:     "tenant-demo",
+			podName:       "demo-pod",
+			containerName: runtime.AppWorkspaceContainerName,
+		},
+		nil,
+		"sh",
+		"-lc",
+		"echo ok",
+	)
+	if err != nil {
+		t.Fatalf("expected filesystem command to succeed, got %v", err)
+	}
+	if string(out) != "ok" {
+		t.Fatalf("expected output ok, got %q", string(out))
+	}
+	if len(runner.calls) != 3 {
+		t.Fatalf("expected 3 filesystem exec attempts, got %d", len(runner.calls))
+	}
+}
+
+func TestMapFilesystemExecErrorClassifiesTransientFailures(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		message    string
+		statusCode int
+	}{
+		{
+			name:       "container not found",
+			message:    "kubernetes exec pod demo-pod container fugue-workspace failed: container not found",
+			statusCode: http.StatusConflict,
+		},
+		{
+			name:       "unexpected eof",
+			message:    "kubernetes exec pod demo-pod container fugue-workspace failed: unexpected EOF",
+			statusCode: http.StatusServiceUnavailable,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := mapFilesystemExecError(errors.New(tc.message))
+			var apiErr *filesystemAPIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("expected filesystemAPIError, got %T", err)
+			}
+			if apiErr.StatusCode != tc.statusCode {
+				t.Fatalf("expected status %d, got %d", tc.statusCode, apiErr.StatusCode)
+			}
+		})
+	}
+}
+
 func TestAppFilesystemReadsPersistentStorageFileMountViaSidecar(t *testing.T) {
 	t.Parallel()
 
