@@ -107,6 +107,7 @@ func (c *CLI) newAppRequestCompareCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			result = sanitizeAppRequestCompareResult(result, c.shouldRedact())
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, result)
 			}

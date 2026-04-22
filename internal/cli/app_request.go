@@ -70,6 +70,7 @@ func (c *CLI) newAppRequestCommand() *cobra.Command {
 				}
 				return err
 			}
+			response = sanitizeRawHTTPDiagnostic(response, c.shouldRedact())
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, response)
 			}

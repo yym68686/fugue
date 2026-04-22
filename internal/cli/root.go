@@ -23,13 +23,18 @@ type rootOptions struct {
 	Output      string
 	JSONOutput  bool
 	ShowIDs     bool
+	OutputFile  string
+	Redact      bool
+	ConfirmRaw  bool
 }
 
 type CLI struct {
-	stdout   io.Writer
-	stderr   io.Writer
-	root     rootOptions
-	observer requestObserver
+	stdout      io.Writer
+	stderr      io.Writer
+	root        rootOptions
+	observer    requestObserver
+	outputFile  *os.File
+	outputReady bool
 }
 
 func Run(args []string) error {
@@ -44,6 +49,7 @@ func runWithStreams(args []string, stdout, stderr io.Writer) error {
 	cmd.SetArgs(args)
 	cmd.SilenceErrors = true
 	cmd.SilenceUsage = true
+	defer cli.closeOutputFile()
 	return cmd.Execute()
 }
 
@@ -53,6 +59,7 @@ func newCLI(stdout, stderr io.Writer) *CLI {
 		stderr: stderr,
 		root: rootOptions{
 			Output: "text",
+			Redact: true,
 		},
 	}
 }
@@ -85,6 +92,8 @@ Quick start for most users:
 	  - Tenant is auto-selected when your key only sees one tenant.
 	  - Deploy and create flows default to the "default" project when you do not pass --project.
 	  - App and operation JSON output redacts secrets by default. Pass --show-secrets only when you explicitly need raw values.
+	  - Pass --json as a shortcut for --output json, and use --output-file to mirror stdout into a local file.
+	  - Diagnostic commands redact sensitive values by default. Pass --redact=false together with --confirm-raw-output only when you explicitly need unredacted evidence.
 	  - Prefer names. Use --show-ids when you need internal identifiers in text output.
 	  - ID flags stay hidden as compatibility escape hatches.
 
@@ -162,6 +171,10 @@ Environment variables:
 	  fugue admin cluster net websocket my-app --path /ws
 	  fugue admin cluster tls probe 104.18.32.47:443 --server-name api.github.com
 	  fugue api request GET /v1/apps
+	  fugue workflow run ./signup.yaml --json
+	  fugue diagnose fs my-app --path /workspace/data --json
+	  fugue logs collect my-app --request-id req_123 --since 30m --json
+	  fugue debug bundle my-app --request-id req_123 --archive ./bundle.zip --json
 	  fugue diagnose timing -- app overview my-app
 	  fugue admin users ls
 	  fugue admin users resolve user@example.com
@@ -169,6 +182,12 @@ Environment variables:
 	`),
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			if err := c.validateOutput(); err != nil {
+				return err
+			}
+			if err := c.configureOutputWriter(cmd); err != nil {
+				return err
+			}
+			if err := c.validateRedactionMode(); err != nil {
 				return err
 			}
 			c.maybeWarnAboutCLIUpdate(cmd)
@@ -185,6 +204,9 @@ Environment variables:
 	flags.StringVarP(&c.root.Output, "output", "o", c.root.Output, "Output format: text or json")
 	flags.BoolVar(&c.root.JSONOutput, "json", false, "Shortcut for --output json")
 	flags.BoolVar(&c.root.ShowIDs, "show-ids", false, "Include internal IDs in text output where supported")
+	flags.StringVar(&c.root.OutputFile, "output-file", c.root.OutputFile, "Also write stdout output to a local file")
+	flags.BoolVar(&c.root.Redact, "redact", c.root.Redact, "Redact sensitive values in diagnostic output (pass --redact=false for raw output)")
+	flags.BoolVar(&c.root.ConfirmRaw, "confirm-raw-output", false, "Required together with --redact=false to allow unredacted output")
 	flags.StringVar(&c.root.TenantID, "tenant-id", c.root.TenantID, "Tenant ID")
 	flags.StringVar(&c.root.ProjectID, "project-id", c.root.ProjectID, "Project ID")
 	_ = flags.MarkHidden("tenant-id")
@@ -193,6 +215,9 @@ Environment variables:
 	cmd.AddCommand(
 		c.newDeployCommand(),
 		c.newAppCommand(),
+		c.newWorkflowCommand(),
+		c.newLogsCommand(),
+		c.newDebugCommand(),
 		c.newSourceUploadCommand(),
 		c.newTenantCommand(),
 		c.newProjectCommand(),
@@ -240,8 +265,47 @@ func (c *CLI) wantsJSON() bool {
 	return c.effectiveOutput() == "json"
 }
 
+func (c *CLI) shouldRedact() bool {
+	return c.root.Redact
+}
+
 func (c *CLI) showIDs() bool {
 	return !c.wantsJSON() && c.root.ShowIDs
+}
+
+func (c *CLI) validateRedactionMode() error {
+	if c.root.Redact || c.root.ConfirmRaw {
+		return nil
+	}
+	return fmt.Errorf("refusing unredacted output without --confirm-raw-output")
+}
+
+func (c *CLI) configureOutputWriter(cmd *cobra.Command) error {
+	if c.outputReady {
+		return nil
+	}
+	c.outputReady = true
+	filePath := strings.TrimSpace(c.root.OutputFile)
+	if filePath == "" {
+		return nil
+	}
+	file, err := os.Create(filePath)
+	if err != nil {
+		return fmt.Errorf("open output file %s: %w", filePath, err)
+	}
+	c.outputFile = file
+	writer := io.MultiWriter(c.stdout, file)
+	c.stdout = writer
+	cmd.SetOut(writer)
+	return nil
+}
+
+func (c *CLI) closeOutputFile() {
+	if c == nil || c.outputFile == nil {
+		return
+	}
+	_ = c.outputFile.Close()
+	c.outputFile = nil
 }
 
 func (c *CLI) newClient() (*Client, error) {

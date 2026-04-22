@@ -132,7 +132,7 @@ fugue app logs pods my-app --component postgres
 		Long: strings.TrimSpace(`
 Request an app internal HTTP endpoint directly from the control plane and inspect the upstream status, headers, body, and timings.
 
-Use --header-from-env when the app protects internal admin routes with a key that is already present in the effective app env.
+Use --header-from-env when the app protects internal admin routes with a key that is already present in the effective app env. Use --output-file to keep a shareable local copy of the result. Output is redacted by default; pass --redact=false together with --confirm-raw-output only when you intentionally need raw credentials or response secrets.
 `),
 		Example: strings.TrimSpace(`
 fugue app request my-app /healthz
@@ -143,7 +143,7 @@ fugue app request my-app GET /admin/requests --query page=2 --query status=500 -
 		Long: strings.TrimSpace(`
 Probe the public route and the internal app service side by side, then let the CLI explain whether the fault lives in public routing, static fallback, auth middleware, or the app itself.
 
-Use --require-env when the endpoint depends on a specific effective app env key and you want Fugue to block early with a concrete missing-key diagnosis instead of returning a bare 4xx/5xx.
+Use --require-env when the endpoint depends on a specific effective app env key and you want Fugue to block early with a concrete missing-key diagnosis instead of returning a bare 4xx/5xx. Use --json or --output-file when you want to hand the comparison result to automation or another engineer. Output is redacted by default; pass --redact=false together with --confirm-raw-output only when you intentionally need raw credentials or response secrets.
 `),
 		Example: strings.TrimSpace(`
 fugue app request compare my-app /healthz
@@ -235,12 +235,86 @@ fugue app config delete my-app /app/config.yaml
 Browse either persisted storage mounts or the live runtime filesystem.
 
 Use --source persistent to stay inside the app workspace or persistent storage roots, and use --source live when you want the current container filesystem such as /, /tmp, /etc, or /app.
+
+When filesystem access itself fails, switch to "fugue diagnose fs" so the CLI can classify pod selection, container readiness, exec-path, permission, and missing-path failures for you.
 `),
 		Example: strings.TrimSpace(`
 fugue app fs ls my-app
 fugue app fs ls my-app / --source live
 fugue app fs put my-app notes/hello.txt --from-file hello.txt
 fugue app fs get my-app notes/hello.txt
+`),
+	},
+	"fugue workflow": {
+		Long: strings.TrimSpace(`
+Run declarative HTTP investigation workflows with step-to-step extraction, per-step timing, and stable machine-readable output.
+
+Use this when you need to reproduce a public API or browser-visible flow from the CLI alone. Workflow files support multiple base URLs, JSON/form/multipart bodies, bearer tokens, cookies, header interpolation, and extraction from response bodies, headers, or cookies.
+`),
+		Example: strings.TrimSpace(`
+fugue workflow run ./signup.yaml
+fugue workflow run ./signup.yaml --json
+fugue workflow run ./create-project.yaml --output-file ./workflow-result.json
+`),
+	},
+	"fugue workflow run": {
+		Long: strings.TrimSpace(`
+Execute one YAML or JSON workflow file and emit request summaries, response summaries, extracted variables, status checks, and failure classification for every step.
+
+Use --output-file when you want a shareable local copy of the result. Diagnostic output is redacted by default; pass --redact=false together with --confirm-raw-output only when you intentionally need raw tokens, cookies, or secret-bearing payload fragments.
+`),
+		Example: strings.TrimSpace(`
+fugue workflow run ./signup.yaml
+fugue workflow run ./signup.yaml --json
+fugue workflow run ./signup.yaml --output-file ./signup-run.json
+fugue workflow run ./signup.yaml --redact=false --confirm-raw-output --output-file ./signup-run-raw.json
+`),
+	},
+	"fugue logs": {
+		Long: strings.TrimSpace(`
+Collect correlated investigation evidence without dropping into separate runtime, builder, or control-plane log tools.
+
+Use the subcommands below when you need one CLI path that gathers the relevant log fragments, snapshots, and timeline context around a failing request, resource, or operation.
+`),
+		Example: strings.TrimSpace(`
+fugue logs collect my-app
+fugue logs collect my-app --request-id req_123 --since 30m --json
+fugue logs collect my-app --operation op_deploy_123 --output-file ./evidence.json
+`),
+	},
+	"fugue logs collect": {
+		Long: strings.TrimSpace(`
+Collect workload, build, and control-plane log fragments plus an app/operation timeline into one correlated evidence document.
+
+Use --request-id, --resource-id, or --operation to narrow the evidence set. Pass --workflow-file when you want Fugue to reproduce a failing flow first and then include that workflow result beside the collected logs. Use --output-file when automation also needs a local evidence JSON artifact.
+`),
+		Example: strings.TrimSpace(`
+fugue logs collect my-app
+fugue logs collect my-app --request-id req_123 --since 30m --json
+fugue logs collect my-app --operation op_deploy_123 --workflow-file ./signup.yaml --output-file ./evidence.json
+`),
+	},
+	"fugue debug": {
+		Long: strings.TrimSpace(`
+Export shareable investigation bundles and bundle-friendly evidence manifests.
+
+Use this when another engineer should be able to continue the analysis from one artifact instead of re-running the whole investigation live.
+`),
+		Example: strings.TrimSpace(`
+fugue debug bundle my-app
+fugue debug bundle my-app --request-id req_123 --archive ./bundle.zip --json
+`),
+	},
+	"fugue debug bundle": {
+		Long: strings.TrimSpace(`
+Create a single zip archive that contains the collected evidence JSON, timeline, snapshots, warnings, and per-source log files for one app investigation.
+
+The bundle uses the same redaction rules as terminal output. Use --archive to control the destination path, and pair --json with --output-file when automation also needs the resulting manifest in a separate machine-readable file.
+`),
+		Example: strings.TrimSpace(`
+fugue debug bundle my-app
+fugue debug bundle my-app --request-id req_123 --archive ./bundle.zip --json
+fugue debug bundle my-app --since 1h --workflow-file ./signup.yaml --output-file ./bundle-manifest.json
 `),
 	},
 	"fugue api": {
@@ -250,7 +324,7 @@ fugue app fs get my-app notes/hello.txt
 		Long: strings.TrimSpace(`
 Send a raw HTTP request to the Fugue control-plane API and show the status line, response headers, server-timing, body, and transport timings.
 
-Use this when you need to inspect a response directly instead of going through the semantic command surface.
+Use this when you need to inspect a response directly instead of going through the semantic command surface. Use --output-file to mirror the diagnostic result into a local file. Output is redacted by default; pass --redact=false together with --confirm-raw-output only when you explicitly need raw secrets or tokens.
 `),
 		Example: strings.TrimSpace(`
 fugue api request GET /v1/apps
@@ -706,17 +780,37 @@ fugue admin tenant delete acme
 `),
 	},
 	"fugue diagnose": {
-		Example: "fugue diagnose timing -- app overview my-app",
+		Long: strings.TrimSpace(`
+Run higher-level troubleshooting workflows that combine multiple low-level probes into one diagnosis.
+
+Use "diagnose timing" when a semantic CLI command feels slow and you need transport timings for every underlying API call. Use "diagnose fs" when workspace or filesystem access fails and you need pod, container, exec-path, and log evidence in one report.
+`),
+		Example: strings.TrimSpace(`
+fugue diagnose timing -- app overview my-app
+fugue diagnose fs my-app --path /workspace/data --json
+`),
 	},
 	"fugue diagnose timing": {
 		Long: strings.TrimSpace(`
 Wrap another Fugue CLI command and capture per-request DNS, connect, TLS, TTFB, total, and server-timing metrics for every HTTP call it makes.
 
-Use this when the semantic command surface works but feels unexpectedly slow and you need to see whether latency is in transport, backend timing, or client-side fan-out.
+Use this when the semantic command surface works but feels unexpectedly slow and you need to see whether latency is in transport, backend timing, or client-side fan-out. Use --passthrough when you also want the wrapped command output, and use --output-file when you want to save the timing report for later comparison.
 `),
 		Example: strings.TrimSpace(`
 fugue diagnose timing -- app overview my-app
 fugue diagnose timing --passthrough -- admin users enrich
+`),
+	},
+	"fugue diagnose fs": {
+		Long: strings.TrimSpace(`
+Diagnose app filesystem failures by combining app phase, runtime pod selection, container readiness, raw exec errors, recent events, and related log evidence into one report.
+
+Use this when app fs commands or filesystem APIs fail and you need the CLI to tell you whether the problem is pod selection, missing container, container-not-ready, exec stream failure, API unavailability, permissions, or a missing path. Use --output-file to keep the full diagnosis as a local artifact.
+`),
+		Example: strings.TrimSpace(`
+fugue diagnose fs my-app --path /workspace/data
+fugue diagnose fs my-app --source persistent --path data --json
+fugue diagnose fs my-app --source live --path /tmp --pod web-abc --output-file ./fs-diagnosis.json
 `),
 	},
 	"fugue web": {
@@ -726,7 +820,7 @@ fugue diagnose timing --passthrough -- admin users enrich
 		Long: strings.TrimSpace(`
 Request a fugue-web page snapshot or arbitrary product-layer route and show the raw HTTP response plus transport timings.
 
-Named targets such as admin-users and admin-cluster resolve to the matching fugue-web snapshot routes.
+Named targets such as admin-users and admin-cluster resolve to the matching fugue-web snapshot routes. Use --output-file to mirror the result into a local file. Output is redacted by default; pass --redact=false together with --confirm-raw-output only when you intentionally need raw cookies, tokens, or secret-bearing payload fragments.
 `),
 		Example: strings.TrimSpace(`
 fugue web diagnose admin-users
@@ -794,7 +888,7 @@ func buildDefaultCommandLong(cmd *cobra.Command) string {
 	if cmd.Flags().Lookup("show-secrets") != nil {
 		notes = append(notes, "JSON output redacts sensitive values by default. Pass --show-secrets only when you explicitly need raw values.")
 	}
-	notes = append(notes, "The CLI resolves names where possible and supports --output json for machine-readable output.")
+	notes = append(notes, "The CLI resolves names where possible and supports --output json or --json for machine-readable output.")
 	return strings.TrimSpace(short + "\n\n" + strings.Join(notes, "\n\n"))
 }
 
@@ -927,10 +1021,20 @@ func sampleUseToken(path, token string) string {
 		return "admin-users"
 	case "image-ref":
 		return "ghcr.io/example/demo:abc123"
+	case "workflow-file":
+		return "./signup.yaml"
+	case "upload-id":
+		return "upload_123"
 	case "namespace":
 		return "kube-system"
 	case "kind":
 		return "deployment"
+	case "node":
+		return "gcp1"
+	case "pod":
+		return "demo-abc"
+	case "target":
+		return "api.github.com:443"
 	case "name":
 		return sampleEntityName(path)
 	case "label":
@@ -1087,6 +1191,14 @@ func sampleFlagsForCommand(cmd *cobra.Command) string {
 		return ""
 	case "fugue diagnose timing":
 		return "-- app overview my-app"
+	case "fugue diagnose fs":
+		return "--path /workspace/data --json"
+	case "fugue workflow run":
+		return "--json"
+	case "fugue logs collect":
+		return "--request-id req_123 --since 30m --json"
+	case "fugue debug bundle":
+		return "--archive ./bundle.zip --json"
 	case "fugue web diagnose":
 		return "admin-users"
 	case "fugue operation ls", "fugue operation watch":

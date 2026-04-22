@@ -38,13 +38,22 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"Tenant is auto-selected when your key only sees one tenant.",
 		"Deploy and create flows default to the \"default\" project when you do not pass --project.",
 		"App and operation JSON output redacts secrets by default. Pass --show-secrets only when you explicitly need raw values.",
+		"Pass --json as a shortcut for --output json, and use --output-file to mirror stdout into a local file.",
+		"Diagnostic commands redact sensitive values by default. Pass --redact=false together with --confirm-raw-output only when you explicitly need unredacted evidence.",
 		"FUGUE_SKIP_UPDATE_CHECK",
+		"Shortcut for --output json",
+		"Also write stdout output to a local file",
+		"Redact sensitive values in diagnostic output",
+		"Required together with --redact=false to allow unredacted output",
 		"deploy",
 		"app",
 		"tenant",
 		"project",
 		"runtime",
 		"service",
+		"workflow",
+		"logs",
+		"debug",
 		"source-upload",
 		"version",
 		"upgrade",
@@ -82,6 +91,10 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"fugue deploy github owner/repo --service-env-file gateway=.env.gateway --service-env-file runtime=.env.runtime",
 		"fugue tenant ls",
 		"fugue api request GET /v1/apps",
+		"fugue workflow run ./signup.yaml --json",
+		"fugue diagnose fs my-app --path /workspace/data --json",
+		"fugue logs collect my-app --request-id req_123 --since 30m --json",
+		"fugue debug bundle my-app --request-id req_123 --archive ./bundle.zip --json",
 		"fugue diagnose timing -- app overview my-app",
 		"fugue admin users ls",
 		"fugue web diagnose admin-users",
@@ -101,6 +114,108 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		if strings.Contains(out, unwanted) {
 			t.Fatalf("expected help output to omit %q, got %q", unwanted, out)
 		}
+	}
+}
+
+func TestInvestigationHelpDocsDescribeNewWorkflows(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "workflow group",
+			args: []string{"workflow", "--help"},
+			want: []string{
+				"Run declarative HTTP investigation workflows with step-to-step extraction, per-step timing, and stable machine-readable output.",
+				"fugue workflow run ./signup.yaml --json",
+				"./workflow-result.json",
+			},
+		},
+		{
+			name: "workflow run",
+			args: []string{"workflow", "run", "--help"},
+			want: []string{
+				"Execute one YAML or JSON workflow file and emit request summaries, response summaries, extracted variables, status checks, and failure classification for every step.",
+				"fugue workflow run ./signup.yaml --output-file ./signup-run.json",
+				"--confirm-raw-output",
+			},
+		},
+		{
+			name: "logs group",
+			args: []string{"logs", "--help"},
+			want: []string{
+				"Collect correlated investigation evidence without dropping into separate runtime, builder, or control-plane log tools.",
+				"fugue logs collect my-app --request-id req_123 --since 30m --json",
+				"./evidence.json",
+			},
+		},
+		{
+			name: "logs collect",
+			args: []string{"logs", "collect", "--help"},
+			want: []string{
+				"Collect workload, build, and control-plane log fragments plus an app/operation timeline into one correlated evidence document.",
+				"--workflow-file",
+				"fugue logs collect my-app --operation op_deploy_123 --workflow-file ./signup.yaml --output-file ./evidence.json",
+			},
+		},
+		{
+			name: "debug group",
+			args: []string{"debug", "--help"},
+			want: []string{
+				"Export shareable investigation bundles and bundle-friendly evidence manifests.",
+				"fugue debug bundle my-app --request-id req_123 --archive ./bundle.zip --json",
+			},
+		},
+		{
+			name: "debug bundle",
+			args: []string{"debug", "bundle", "--help"},
+			want: []string{
+				"Create a single zip archive that contains the collected evidence JSON, timeline, snapshots, warnings, and per-source log files for one app investigation.",
+				"--archive",
+				"./bundle-manifest.json",
+			},
+		},
+		{
+			name: "diagnose group",
+			args: []string{"diagnose", "--help"},
+			want: []string{
+				"Run higher-level troubleshooting workflows that combine multiple low-level probes into one diagnosis.",
+				"fugue diagnose timing -- app overview my-app",
+				"fugue diagnose fs my-app --path /workspace/data --json",
+			},
+		},
+		{
+			name: "diagnose fs",
+			args: []string{"diagnose", "fs", "--help"},
+			want: []string{
+				"Diagnose app filesystem failures by combining app phase, runtime pod selection, container readiness, raw exec errors, recent events, and related log evidence into one report.",
+				"--path",
+				"fugue diagnose fs my-app --source persistent --path data --json",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			if err := runWithStreams(tc.args, &stdout, &stderr); err != nil {
+				t.Fatalf("run help %v: %v", tc.args, err)
+			}
+
+			out := stdout.String()
+			for _, want := range tc.want {
+				if !strings.Contains(out, want) {
+					t.Fatalf("expected help output for %v to contain %q, got %q", tc.args, want, out)
+				}
+			}
+		})
 	}
 }
 

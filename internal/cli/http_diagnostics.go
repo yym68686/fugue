@@ -110,6 +110,7 @@ func (c *CLI) newAPIRequestCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			response = sanitizeRawHTTPDiagnostic(response, c.shouldRedact())
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, response)
 			}
@@ -125,7 +126,10 @@ func (c *CLI) newDiagnoseCommand() *cobra.Command {
 		Use:   "diagnose",
 		Short: "Run request-level troubleshooting workflows",
 	}
-	cmd.AddCommand(c.newDiagnoseTimingCommand())
+	cmd.AddCommand(
+		c.newDiagnoseTimingCommand(),
+		c.newDiagnoseFilesystemCommand(),
+	)
 	return cmd
 }
 
@@ -155,6 +159,7 @@ func (c *CLI) newDiagnoseTimingCommand() *cobra.Command {
 
 			child := newCLI(innerStdout, innerStderr)
 			child.root = c.root
+			child.root.OutputFile = ""
 			child.observer = collector.observe
 			childCmd := child.newRootCommand()
 			childCmd.SetOut(innerStdout)
@@ -233,6 +238,7 @@ func (c *CLI) newWebDiagnoseCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			response = sanitizeRawHTTPDiagnostic(response, c.shouldRedact())
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, response)
 			}
