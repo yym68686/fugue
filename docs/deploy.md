@@ -162,8 +162,9 @@ Controller GitHub sync knobs:
 
 - `FUGUE_CONTROLLER_GITHUB_SYNC_INTERVAL`: how often the controller checks imported GitHub apps for a newer branch commit. Set `0` to disable the automatic rebuild loop.
 - `FUGUE_CONTROLLER_GITHUB_SYNC_TIMEOUT`: timeout for each upstream GitHub check.
-- `FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_BASE_DELAY`: base retry delay after a tracked commit fails during auto sync. Repeated failures for the same commit back off from this value.
-- `FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_MAX_DELAY`: maximum retry delay for repeated failures of the same tracked commit.
+- `FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_BASE_DELAY`: base retry delay after a tracked commit fails during auto sync. Repeated auto failures for the same commit back off from this value while automatic retries remain available.
+- `FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_MAX_DELAY`: maximum retry delay for repeated auto failures of the same tracked commit.
+- GitHub sync stops auto retrying a tracked commit after `3` failed auto-triggered import or deploy attempts for the same app and commit. The controller only re-arms that commit after a non-`github-sync` GitHub rebuild or deploy is triggered manually, or after a release for that commit completes successfully.
 - `FUGUE_CONTROLLER_MANAGED_APP_ROLLOUT_TIMEOUT`: maximum time a managed deploy operation waits for the Kubernetes rollout to finish before it is marked failed.
 
 Builder scheduling notes:

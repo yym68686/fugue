@@ -205,9 +205,11 @@ func shortCommitSHA(value string) string {
 }
 
 type trackedGitHubCommitState struct {
-	latest              model.Operation
-	consecutiveFailures int
+	consecutiveAutomaticFailures int
+	lastAutomaticFailure         model.Operation
 }
+
+const gitHubTrackedCommitMaxAutomaticFailures = 3
 
 func collectTrackedGitHubCommitStates(ops []model.Operation) map[string]trackedGitHubCommitState {
 	states := make(map[string]trackedGitHubCommitState)
@@ -220,13 +222,14 @@ func collectTrackedGitHubCommitStates(ops []model.Operation) map[string]trackedG
 
 		key := trackedGitHubCommitStateKey(appID, commit)
 		state := states[key]
-		if op.Status == model.OperationStatusFailed {
-			state.consecutiveFailures++
+		if gitHubTrackedCommitResetOperation(op) {
+			state.consecutiveAutomaticFailures = 0
+			state.lastAutomaticFailure = model.Operation{}
 		}
-		if gitHubReleaseSucceeded(op) {
-			state.consecutiveFailures = 0
+		if gitHubTrackedCommitAutomaticFailure(op) {
+			state.consecutiveAutomaticFailures++
+			state.lastAutomaticFailure = op
 		}
-		state.latest = op
 		states[key] = state
 	}
 	return states
@@ -240,24 +243,47 @@ func gitHubReleaseSucceeded(op model.Operation) bool {
 	return op.Type == model.OperationTypeDeploy && op.Status == model.OperationStatusCompleted
 }
 
+func gitHubTrackedCommitResetOperation(op model.Operation) bool {
+	if trackedGitHubCommitForOperation(op) == "" {
+		return false
+	}
+	if gitHubReleaseSucceeded(op) {
+		return true
+	}
+	return !gitHubTrackedCommitRequestedByGitHubSync(op)
+}
+
+func gitHubTrackedCommitAutomaticFailure(op model.Operation) bool {
+	return trackedGitHubCommitForOperation(op) != "" &&
+		gitHubTrackedCommitRequestedByGitHubSync(op) &&
+		op.Status == model.OperationStatusFailed
+}
+
+func gitHubTrackedCommitRequestedByGitHubSync(op model.Operation) bool {
+	return strings.TrimSpace(op.RequestedByID) == model.OperationRequestedByGitHubSyncController
+}
+
 func gitHubTrackedCommitRetryReady(
 	state trackedGitHubCommitState,
 	now time.Time,
 	baseDelay time.Duration,
 	maxDelay time.Duration,
 ) bool {
-	if state.latest.Status != model.OperationStatusFailed {
+	if state.consecutiveAutomaticFailures >= gitHubTrackedCommitMaxAutomaticFailures {
+		return false
+	}
+	if state.lastAutomaticFailure.ID == "" {
 		return true
 	}
 
-	retryDelay := gitHubTrackedCommitRetryDelay(baseDelay, maxDelay, state.consecutiveFailures)
+	retryDelay := gitHubTrackedCommitRetryDelay(baseDelay, maxDelay, state.consecutiveAutomaticFailures)
 	if retryDelay <= 0 {
 		return true
 	}
 
-	retryAnchor := state.latest.UpdatedAt
-	if state.latest.CompletedAt != nil {
-		retryAnchor = *state.latest.CompletedAt
+	retryAnchor := state.lastAutomaticFailure.UpdatedAt
+	if state.lastAutomaticFailure.CompletedAt != nil {
+		retryAnchor = *state.lastAutomaticFailure.CompletedAt
 	}
 	return !now.Before(retryAnchor.Add(retryDelay))
 }
