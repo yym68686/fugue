@@ -173,3 +173,102 @@ func TestRunDeployWithRepoURLImportsGitHubAndLoadsEnv(t *testing.T) {
 		t.Fatalf("expected stderr to mention loaded env vars, got %q", stderr.String())
 	}
 }
+
+func TestRunDeployLocalDryRunKeepsTopologyModeWhenDefaultNameCollidesWithExistingApp(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := filepath.Join(t.TempDir(), "argus")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("mkdir repo root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, "fugue.yaml"), []byte(strings.TrimSpace(`
+version: 1
+primary_service: web
+
+services:
+  web:
+    public: true
+    port: 80
+    build:
+      strategy: dockerfile
+      context: .
+      dockerfile: Dockerfile
+`)), 0o644); err != nil {
+		t.Fatalf("write fugue manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, "Dockerfile"), []byte("FROM scratch\n"), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+
+	var importRequest importUploadRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
+			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects":
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_default","name":"default","slug":"default"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_existing","tenant_id":"tenant_123","project_id":"project_default","name":"argus"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/templates/inspect-upload":
+			if err := r.ParseMultipartForm(32 << 20); err != nil {
+				t.Fatalf("parse inspect multipart form: %v", err)
+			}
+			var inspectRequest importUploadRequest
+			if err := json.Unmarshal([]byte(r.FormValue("request")), &inspectRequest); err != nil {
+				t.Fatalf("decode inspect request: %v", err)
+			}
+			if strings.TrimSpace(inspectRequest.AppID) != "" {
+				t.Fatalf("inspect request unexpectedly pinned app_id=%q", inspectRequest.AppID)
+			}
+			_, _ = w.Write([]byte(`{"upload":{"default_app_name":"argus","source_kind":"fugue","source_path":"fugue.yaml"},"fugue_manifest":{"manifest_path":"fugue.yaml","primary_service":"web","services":[]}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/import-upload":
+			if err := r.ParseMultipartForm(32 << 20); err != nil {
+				t.Fatalf("parse import multipart form: %v", err)
+			}
+			if err := json.Unmarshal([]byte(r.FormValue("request")), &importRequest); err != nil {
+				t.Fatalf("decode import request: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"plan":{"mode":"update_existing","delete_missing":false,"dry_run":true,"services":[{"service":"web","action":"update","app_name":"argus","build_strategy":"dockerfile"}],"delete_candidates":[],"warnings":[]},"fugue_manifest":{"manifest_path":"fugue.yaml","primary_service":"web","services":[]}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runDeployWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"--project", "default",
+		"--dir", repoRoot,
+		"--update-existing",
+		"--dry-run",
+		"--json",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run local topology deploy dry-run: %v", err)
+	}
+
+	if strings.TrimSpace(importRequest.AppID) != "" {
+		t.Fatalf("expected topology dry-run to avoid app_id pinning, got %q", importRequest.AppID)
+	}
+	if !importRequest.UpdateExisting {
+		t.Fatalf("expected update_existing to be preserved")
+	}
+	if !importRequest.DryRun {
+		t.Fatalf("expected dry_run to be preserved")
+	}
+
+	var payload importBundleJSON
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode stdout json: %v", err)
+	}
+	if payload.Plan == nil || !payload.Plan.DryRun {
+		t.Fatalf("expected dry-run plan in stdout, got %s", stdout.String())
+	}
+	if payload.FugueManifest == nil {
+		t.Fatalf("expected fugue_manifest in stdout, got %s", stdout.String())
+	}
+}

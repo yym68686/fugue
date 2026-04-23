@@ -90,6 +90,7 @@ topologyLabeler:
 nodeJanitor:
   enabled: true
   intervalSeconds: 21600
+  priorityClassName: system-node-critical
   nodeSelector: {}
   tolerations:
     - operator: Exists

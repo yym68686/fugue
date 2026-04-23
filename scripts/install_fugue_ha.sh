@@ -1264,15 +1264,25 @@ with open(dst, "w", encoding="utf-8") as handle:
         handle.write("  tls internal\n")
         handle.write("  @sse header Accept *text/event-stream*\n")
         handle.write("  @stream path /stream */stream\n")
+        handle.write("  @compress method GET HEAD\n")
         handle.write("  handle @sse {\n")
-        handle.write(f"    reverse_proxy {upstream}\n")
+        handle.write(f"    reverse_proxy {upstream} {{\n")
+        handle.write("      flush_interval -1\n")
+        handle.write("    }\n")
         handle.write("  }\n")
         handle.write("  handle @stream {\n")
+        handle.write(f"    reverse_proxy {upstream} {{\n")
+        handle.write("      flush_interval -1\n")
+        handle.write("    }\n")
+        handle.write("  }\n")
+        handle.write("  handle @compress {\n")
+        handle.write("    encode gzip zstd\n")
         handle.write(f"    reverse_proxy {upstream}\n")
         handle.write("  }\n")
         handle.write("  handle {\n")
-        handle.write("    encode gzip zstd\n")
-        handle.write(f"    reverse_proxy {upstream}\n")
+        handle.write(f"    reverse_proxy {upstream} {{\n")
+        handle.write("      flush_interval -1\n")
+        handle.write("    }\n")
         handle.write("  }\n")
         handle.write("}\n")
 
@@ -1377,15 +1387,25 @@ https://${FUGUE_DOMAIN} {
   tls internal
   @sse header Accept *text/event-stream*
   @stream path /stream */stream
+  @compress method GET HEAD
   handle @sse {
-    reverse_proxy ${EDGE_UPSTREAM}
+    reverse_proxy ${EDGE_UPSTREAM} {
+      flush_interval -1
+    }
   }
   handle @stream {
+    reverse_proxy ${EDGE_UPSTREAM} {
+      flush_interval -1
+    }
+  }
+  handle @compress {
+    encode gzip zstd
     reverse_proxy ${EDGE_UPSTREAM}
   }
   handle {
-    encode gzip zstd
-    reverse_proxy ${EDGE_UPSTREAM}
+    reverse_proxy ${EDGE_UPSTREAM} {
+      flush_interval -1
+    }
   }
 }
 
@@ -1401,15 +1421,25 @@ https://*.${FUGUE_APP_BASE_DOMAIN} {
   ${app_host_tls_directive}
   @sse header Accept *text/event-stream*
   @stream path /stream */stream
+  @compress method GET HEAD
   handle @sse {
-    reverse_proxy ${EDGE_UPSTREAM}
+    reverse_proxy ${EDGE_UPSTREAM} {
+      flush_interval -1
+    }
   }
   handle @stream {
+    reverse_proxy ${EDGE_UPSTREAM} {
+      flush_interval -1
+    }
+  }
+  handle @compress {
+    encode gzip zstd
     reverse_proxy ${EDGE_UPSTREAM}
   }
   handle {
-    encode gzip zstd
-    reverse_proxy ${EDGE_UPSTREAM}
+    reverse_proxy ${EDGE_UPSTREAM} {
+      flush_interval -1
+    }
   }
 }
 
@@ -1421,15 +1451,25 @@ https:// {
   }
   @sse header Accept *text/event-stream*
   @stream path /stream */stream
+  @compress method GET HEAD
   handle @sse {
-    reverse_proxy ${EDGE_UPSTREAM}
+    reverse_proxy ${EDGE_UPSTREAM} {
+      flush_interval -1
+    }
   }
   handle @stream {
+    reverse_proxy ${EDGE_UPSTREAM} {
+      flush_interval -1
+    }
+  }
+  handle @compress {
+    encode gzip zstd
     reverse_proxy ${EDGE_UPSTREAM}
   }
   handle {
-    encode gzip zstd
-    reverse_proxy ${EDGE_UPSTREAM}
+    reverse_proxy ${EDGE_UPSTREAM} {
+      flush_interval -1
+    }
   }
 }
 CADDY

@@ -466,6 +466,24 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 	if err != nil {
 		return err
 	}
+	var uploadInspection *inspectUploadTemplateResponse
+	if appRef == "" && strings.TrimSpace(resolvedAppID) != "" {
+		inspection, inspectErr := client.InspectUploadTemplate(
+			importUploadRequest{Name: firstNonEmpty(strings.TrimSpace(opts.Name), strings.TrimSpace(targetApp.Name), archiveBaseName)},
+			archiveName,
+			archiveBytes,
+		)
+		switch {
+		case inspectErr == nil:
+			uploadInspection = &inspection
+			if uploadInspectionHasTopology(inspection) {
+				resolvedAppID = ""
+				targetApp = model.App{}
+			}
+		case !isOptionalTopologyPreflightError(inspectErr):
+			return inspectErr
+		}
+	}
 
 	request := importUploadRequest{
 		AppID:                    resolvedAppID,
@@ -504,9 +522,15 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 	}
 
 	if opts.DryRun {
-		inspection, inspectErr := client.InspectUploadTemplate(importUploadRequest{Name: request.Name}, archiveName, archiveBytes)
-		if inspectErr != nil {
-			return inspectErr
+		inspection := inspectUploadTemplateResponse{}
+		if uploadInspection != nil {
+			inspection = *uploadInspection
+		} else {
+			inspectResult, inspectErr := client.InspectUploadTemplate(importUploadRequest{Name: request.Name}, archiveName, archiveBytes)
+			if inspectErr != nil {
+				return inspectErr
+			}
+			inspection = inspectResult
 		}
 		if !uploadInspectionHasTopology(inspection) {
 			if c.wantsJSON() {

@@ -19,6 +19,10 @@
 {{- if hasKey $nodeJanitor "resources" -}}
 {{- $nodeJanitorResources = (get $nodeJanitor "resources" | default (dict)) -}}
 {{- end -}}
+{{- $nodeJanitorPriorityClassName := "system-node-critical" -}}
+{{- if hasKey $nodeJanitor "priorityClassName" -}}
+{{- $nodeJanitorPriorityClassName = (get $nodeJanitor "priorityClassName" | default "") -}}
+{{- end -}}
 {{- $imagePruneEnabled := true -}}
 {{- if hasKey $nodeJanitor "imagePrune" -}}
   {{- $imagePrune := (get $nodeJanitor "imagePrune" | default (dict)) -}}
@@ -79,6 +83,9 @@ spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $nodeJanitorPriorityClassName }}
+      priorityClassName: {{ $nodeJanitorPriorityClassName | quote }}
       {{- end }}
       containers:
         - name: node-janitor
