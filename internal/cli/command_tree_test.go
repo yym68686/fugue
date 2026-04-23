@@ -94,6 +94,7 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"fugue workflow run ./signup.yaml --json",
 		"fugue diagnose fs my-app --path /workspace/data --json",
 		"fugue logs collect my-app --request-id req_123 --since 30m --json",
+		"fugue logs query my-app --request-id req_123 --since 30m --status 200 --json",
 		"fugue debug bundle my-app --request-id req_123 --archive ./bundle.zip --json",
 		"fugue diagnose timing -- app overview my-app",
 		"fugue admin users ls",
@@ -159,6 +160,15 @@ func TestInvestigationHelpDocsDescribeNewWorkflows(t *testing.T) {
 				"Collect workload, build, and control-plane log fragments plus an app/operation timeline into one correlated evidence document.",
 				"--workflow-file",
 				"fugue logs collect my-app --operation op_deploy_123 --workflow-file ./signup.yaml --output-file ./evidence.json",
+			},
+		},
+		{
+			name: "logs query",
+			args: []string{"logs", "query", "--help"},
+			want: []string{
+				"Query runtime log entries through the app runtime log stream and normalize them into stable machine-readable fields.",
+				"--request-id",
+				"fugue logs query my-app --request-id req_123 --since 30m --json",
 			},
 		},
 		{

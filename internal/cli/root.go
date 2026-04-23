@@ -174,6 +174,7 @@ Environment variables:
 	  fugue workflow run ./signup.yaml --json
 	  fugue diagnose fs my-app --path /workspace/data --json
 	  fugue logs collect my-app --request-id req_123 --since 30m --json
+	  fugue logs query my-app --request-id req_123 --since 30m --status 200 --json
 	  fugue debug bundle my-app --request-id req_123 --archive ./bundle.zip --json
 	  fugue diagnose timing -- app overview my-app
 	  fugue admin users ls

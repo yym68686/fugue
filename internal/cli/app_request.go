@@ -85,7 +85,10 @@ func (c *CLI) newAppRequestCommand() *cobra.Command {
 	cmd.Flags().StringArrayVar(&opts.Query, "query", nil, "Query parameter in 'key=value' form (repeatable)")
 	cmd.Flags().DurationVar(&opts.Timeout, "timeout", opts.Timeout, "Request timeout")
 	cmd.Flags().IntVar(&opts.MaxBodyBytes, "max-body-bytes", opts.MaxBodyBytes, "Maximum response bytes to print")
-	cmd.AddCommand(c.newAppRequestCompareCommand())
+	cmd.AddCommand(
+		c.newAppRequestCompareCommand(),
+		c.newAppRequestStreamCommand(),
+	)
 	return cmd
 }
 

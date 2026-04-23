@@ -47,6 +47,8 @@ Use "workspace" for direct reads and writes inside a persistent runtime workspac
 		c.newFilesReadCommand(),
 		c.newFilesWriteCommand(),
 		c.newFilesRemoveCommand(),
+		c.newFilesVerifyCommand(),
+		c.newFilesReconcileCommand(),
 	)
 	return cmd
 }

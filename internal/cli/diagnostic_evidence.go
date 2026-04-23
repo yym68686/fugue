@@ -16,6 +16,7 @@ const diagnosticEvidenceSchemaVersion = "fugue.logs-collect.v1"
 
 type diagnosticCollectOptions struct {
 	Since        string
+	Until        string
 	RequestID    string
 	ResourceID   string
 	OperationID  string
@@ -44,24 +45,25 @@ type diagnosticCollectedLog struct {
 }
 
 type diagnosticEvidenceResult struct {
-	SchemaVersion     string                       `json:"schema_version"`
-	App               string                       `json:"app"`
-	AppID             string                       `json:"app_id"`
-	ObservedAt        time.Time                    `json:"observed_at"`
-	Since             string                       `json:"since,omitempty"`
-	RequestID         string                       `json:"request_id,omitempty"`
-	ResourceID        string                       `json:"resource_id,omitempty"`
-	OperationID       string                       `json:"operation_id,omitempty"`
-	Summary           string                       `json:"summary"`
-	Redacted          bool                         `json:"redacted"`
-	AppOverview       *appOverviewSnapshot         `json:"app_overview,omitempty"`
-	RuntimeDiagnosis  *appDiagnosis                `json:"runtime_diagnosis,omitempty"`
-	OperationDiagnosis *model.OperationDiagnosis   `json:"operation_diagnosis,omitempty"`
-	PodInventory      *model.AppRuntimePodInventory `json:"pod_inventory,omitempty"`
-	Workflow          *workflowRunResult           `json:"workflow,omitempty"`
-	Timeline          []diagnosticTimelineEntry    `json:"timeline,omitempty"`
-	Logs              []diagnosticCollectedLog     `json:"logs,omitempty"`
-	Warnings          []string                     `json:"warnings,omitempty"`
+	SchemaVersion      string                        `json:"schema_version"`
+	App                string                        `json:"app"`
+	AppID              string                        `json:"app_id"`
+	ObservedAt         time.Time                     `json:"observed_at"`
+	Since              string                        `json:"since,omitempty"`
+	Until              string                        `json:"until,omitempty"`
+	RequestID          string                        `json:"request_id,omitempty"`
+	ResourceID         string                        `json:"resource_id,omitempty"`
+	OperationID        string                        `json:"operation_id,omitempty"`
+	Summary            string                        `json:"summary"`
+	Redacted           bool                          `json:"redacted"`
+	AppOverview        *appOverviewSnapshot          `json:"app_overview,omitempty"`
+	RuntimeDiagnosis   *appDiagnosis                 `json:"runtime_diagnosis,omitempty"`
+	OperationDiagnosis *model.OperationDiagnosis     `json:"operation_diagnosis,omitempty"`
+	PodInventory       *model.AppRuntimePodInventory `json:"pod_inventory,omitempty"`
+	Workflow           *workflowRunResult            `json:"workflow,omitempty"`
+	Timeline           []diagnosticTimelineEntry     `json:"timeline,omitempty"`
+	Logs               []diagnosticCollectedLog      `json:"logs,omitempty"`
+	Warnings           []string                      `json:"warnings,omitempty"`
 }
 
 func (c *CLI) newLogsCommand() *cobra.Command {
@@ -69,7 +71,7 @@ func (c *CLI) newLogsCommand() *cobra.Command {
 		Use:   "logs",
 		Short: "Collect correlated log evidence for investigation workflows",
 	}
-	cmd.AddCommand(c.newLogsCollectCommand())
+	cmd.AddCommand(c.newLogsCollectCommand(), c.newLogsQueryCommand())
 	return cmd
 }
 
@@ -84,6 +86,9 @@ func (c *CLI) newLogsCollectCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if _, err := resolveLogsQueryTimeWindow(opts.Since, opts.Until, time.Now().UTC()); err != nil {
+				return withExitCode(err, ExitCodeUserInput)
+			}
 			app, err := c.resolveWorkspaceApp(client, args[0])
 			if err != nil {
 				return err
@@ -97,6 +102,7 @@ func (c *CLI) newLogsCollectCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&opts.Since, "since", "", "Requested time window label for the investigation, for example 1h")
+	cmd.Flags().StringVar(&opts.Until, "until", "", "Upper time bound for the investigation, for example 15m or an RFC3339 timestamp")
 	cmd.Flags().StringVar(&opts.RequestID, "request-id", "", "Request or trace identifier used to filter log fragments")
 	cmd.Flags().StringVar(&opts.ResourceID, "resource-id", "", "Resource identifier used to filter log fragments")
 	cmd.Flags().StringVar(&opts.OperationID, "operation", "", "Operation identifier to correlate build/deploy evidence")
@@ -112,11 +118,16 @@ func (c *CLI) collectDiagnosticEvidence(client *Client, app model.App, opts diag
 		AppID:         strings.TrimSpace(app.ID),
 		ObservedAt:    time.Now().UTC(),
 		Since:         strings.TrimSpace(opts.Since),
+		Until:         strings.TrimSpace(opts.Until),
 		RequestID:     strings.TrimSpace(opts.RequestID),
 		ResourceID:    strings.TrimSpace(opts.ResourceID),
 		OperationID:   strings.TrimSpace(opts.OperationID),
 		Redacted:      c.shouldRedact(),
 		Summary:       "collected diagnostic evidence",
+	}
+	window, windowErr := resolveLogsQueryTimeWindow(opts.Since, opts.Until, result.ObservedAt)
+	if windowErr != nil {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("time window unavailable: %v", windowErr))
 	}
 
 	snapshot, err := c.loadAppOverview(client, app.ID)
@@ -177,7 +188,7 @@ func (c *CLI) collectDiagnosticEvidence(client *Client, app model.App, opts diag
 	}
 
 	filterTerms := buildDiagnosticFilterTerms(app, selectedOperation, opts)
-	result.Logs = c.collectDiagnosticLogs(client, app, operations, selectedOperation, filterTerms, opts.TailLines, &result)
+	result.Logs = c.collectDiagnosticLogs(client, app, operations, selectedOperation, filterTerms, opts.TailLines, window, &result)
 	result.Timeline = buildDiagnosticTimeline(app, operations, result.PodInventory, result.RuntimeDiagnosis)
 	result.Summary = summarizeDiagnosticEvidence(result, selectedOperation)
 	return result
@@ -244,14 +255,14 @@ func buildDiagnosticFilterTerms(app model.App, selectedOperation *model.Operatio
 	return out
 }
 
-func (c *CLI) collectDiagnosticLogs(client *Client, app model.App, operations []model.Operation, selectedOperation *model.Operation, terms []string, tail int, result *diagnosticEvidenceResult) []diagnosticCollectedLog {
+func (c *CLI) collectDiagnosticLogs(client *Client, app model.App, operations []model.Operation, selectedOperation *model.Operation, terms []string, tail int, window logsQueryTimeWindow, result *diagnosticEvidenceResult) []diagnosticCollectedLog {
 	sources := make([]diagnosticCollectedLog, 0, 5)
-	sources = append(sources, collectRuntimeLogSource(client, app.ID, "app", "runtime-app", terms, tail))
+	sources = append(sources, collectRuntimeLogSource(client, app.ID, "app", "runtime-app", terms, tail, window))
 	if app.Spec.Postgres != nil {
-		sources = append(sources, collectRuntimeLogSource(client, app.ID, "postgres", "runtime-postgres", terms, tail))
+		sources = append(sources, collectRuntimeLogSource(client, app.ID, "postgres", "runtime-postgres", terms, tail, window))
 	}
 	if latestImport := latestOperationOfType(operations, model.OperationTypeImport); latestImport != nil {
-		sources = append(sources, collectBuildLogSource(client, app.ID, latestImport.ID, terms, tail))
+		sources = append(sources, collectBuildLogSource(client, app.ID, latestImport.ID, terms, tail, window))
 	}
 
 	namespace, err := c.detectBuildEvidenceControlPlaneNamespace(client)
@@ -262,8 +273,8 @@ func (c *CLI) collectDiagnosticLogs(client *Client, app model.App, operations []
 		namespace = buildEvidenceDefaultControlPlaneNamespace
 	}
 	sources = append(sources,
-		c.collectClusterComponentLogSource(client, namespace, "app.kubernetes.io/component=api", "api", "control-plane-api", terms, tail),
-		c.collectClusterComponentLogSource(client, namespace, "app.kubernetes.io/component=controller", "controller", "control-plane-controller", terms, tail),
+		c.collectClusterComponentLogSource(client, namespace, "app.kubernetes.io/component=api", "api", "control-plane-api", terms, tail, window),
+		c.collectClusterComponentLogSource(client, namespace, "app.kubernetes.io/component=controller", "controller", "control-plane-controller", terms, tail, window),
 	)
 	out := make([]diagnosticCollectedLog, 0, len(sources))
 	for _, source := range sources {
@@ -272,7 +283,7 @@ func (c *CLI) collectDiagnosticLogs(client *Client, app model.App, operations []
 	return out
 }
 
-func collectRuntimeLogSource(client *Client, appID, component, name string, terms []string, tail int) diagnosticCollectedLog {
+func collectRuntimeLogSource(client *Client, appID, component, name string, terms []string, tail int, window logsQueryTimeWindow) diagnosticCollectedLog {
 	source := diagnosticCollectedLog{
 		Name:     name,
 		Category: "workload",
@@ -290,13 +301,13 @@ func collectRuntimeLogSource(client *Client, appID, component, name string, term
 	source.Namespace = strings.TrimSpace(logs.Namespace)
 	source.Pods = append([]string(nil), logs.Pods...)
 	source.Container = strings.TrimSpace(logs.Container)
-	source.Lines = filterDiagnosticLogLines(logs.Logs, terms, 20)
+	source.Lines = filterDiagnosticLogLinesWithWindow(logs.Logs, terms, 20, window)
 	source.Summary = summarizeCollectedLogSource(source, terms)
 	source.Warnings = append([]string(nil), logs.Warnings...)
 	return source
 }
 
-func collectBuildLogSource(client *Client, appID, operationID string, terms []string, tail int) diagnosticCollectedLog {
+func collectBuildLogSource(client *Client, appID, operationID string, terms []string, tail int, window logsQueryTimeWindow) diagnosticCollectedLog {
 	source := diagnosticCollectedLog{
 		Name:     "build",
 		Category: "operation",
@@ -308,12 +319,12 @@ func collectBuildLogSource(client *Client, appID, operationID string, terms []st
 		return source
 	}
 	source.Status = "ok"
-	source.Lines = filterDiagnosticLogLines(logs.Logs, append(terms, operationID), 20)
+	source.Lines = filterDiagnosticLogLinesWithWindow(logs.Logs, append(terms, operationID), 20, window)
 	source.Summary = firstNonEmptyTrimmed(strings.TrimSpace(logs.Summary), summarizeCollectedLogSource(source, terms))
 	return source
 }
 
-func (c *CLI) collectClusterComponentLogSource(client *Client, namespace, selector, preferredContainer, name string, terms []string, tail int) diagnosticCollectedLog {
+func (c *CLI) collectClusterComponentLogSource(client *Client, namespace, selector, preferredContainer, name string, terms []string, tail int, window logsQueryTimeWindow) diagnosticCollectedLog {
 	source := diagnosticCollectedLog{
 		Name:      name,
 		Category:  "control-plane",
@@ -349,7 +360,7 @@ func (c *CLI) collectClusterComponentLogSource(client *Client, namespace, select
 		}
 		source.Status = "ok"
 		source.Container = container
-		source.Lines = filterDiagnosticLogLines(logs.Logs, terms, 20)
+		source.Lines = filterDiagnosticLogLinesWithWindow(logs.Logs, terms, 20, window)
 		source.Summary = summarizeCollectedLogSource(source, terms)
 		return source
 	}
@@ -379,6 +390,10 @@ func filterDiagnosticLogLines(raw string, terms []string, limit int) []string {
 		}
 	}
 	return tailNonEmptyLines(raw, limit)
+}
+
+func filterDiagnosticLogLinesWithWindow(raw string, terms []string, limit int, window logsQueryTimeWindow) []string {
+	return filterDiagnosticLogLines(filterRawLogTextForTimeWindow(raw, window), terms, limit)
 }
 
 func summarizeCollectedLogSource(source diagnosticCollectedLog, terms []string) string {
@@ -550,6 +565,7 @@ func renderDiagnosticEvidenceResult(w io.Writer, result diagnosticEvidenceResult
 		{Key: "app_id", Value: result.AppID},
 		{Key: "observed_at", Value: formatTime(result.ObservedAt)},
 		{Key: "since", Value: result.Since},
+		{Key: "until", Value: result.Until},
 		{Key: "request_id", Value: result.RequestID},
 		{Key: "resource_id", Value: result.ResourceID},
 		{Key: "operation_id", Value: result.OperationID},

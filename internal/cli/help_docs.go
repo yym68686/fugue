@@ -150,6 +150,17 @@ fugue app request compare my-app /healthz
 fugue app request compare my-app POST /api/devices --header-from-env Authorization=DEVICE_BOOTSTRAP_TOKEN --require-env PUBLIC_BASE_URL
 `),
 	},
+	"fugue app request stream": {
+		Long: strings.TrimSpace(`
+Compare public-route and internal-service streaming behavior for one endpoint, including time-to-headers, first body byte, first SSE event, and the first raw chunks or SSE frames.
+
+Use this when an endpoint returns 200 headers but clients still hang waiting for body bytes or SSE events. The CLI will compare Accept */* and Accept text/event-stream by default, preserve keepalive comment frames, and classify whether the stall is inside the app, the public edge, or an external CDN layer.
+`),
+		Example: strings.TrimSpace(`
+fugue app request stream my-app /events
+fugue app request stream my-app GET /stream --timeout 15s --accept text/event-stream --json
+`),
+	},
 	"fugue app diagnose": {
 		Long: strings.TrimSpace(`
 Summarize the most likely runtime root cause for one app by combining pod state, scheduling events, and node pressure signals.
@@ -279,6 +290,7 @@ Use the subcommands below when you need one CLI path that gathers the relevant l
 		Example: strings.TrimSpace(`
 fugue logs collect my-app
 fugue logs collect my-app --request-id req_123 --since 30m --json
+fugue logs query my-app --request-id req_123 --since 30m --status 200 --json
 fugue logs collect my-app --operation op_deploy_123 --output-file ./evidence.json
 `),
 	},
@@ -286,12 +298,23 @@ fugue logs collect my-app --operation op_deploy_123 --output-file ./evidence.jso
 		Long: strings.TrimSpace(`
 Collect workload, build, and control-plane log fragments plus an app/operation timeline into one correlated evidence document.
 
-Use --request-id, --resource-id, or --operation to narrow the evidence set. Pass --workflow-file when you want Fugue to reproduce a failing flow first and then include that workflow result beside the collected logs. Use --output-file when automation also needs a local evidence JSON artifact.
+Use --since and --until when the investigation has a precise time window. Use --request-id, --resource-id, or --operation to narrow the evidence set. Pass --workflow-file when you want Fugue to reproduce a failing flow first and then include that workflow result beside the collected logs. Use --output-file when automation also needs a local evidence JSON artifact.
 `),
 		Example: strings.TrimSpace(`
 fugue logs collect my-app
 fugue logs collect my-app --request-id req_123 --since 30m --json
 fugue logs collect my-app --operation op_deploy_123 --workflow-file ./signup.yaml --output-file ./evidence.json
+`),
+	},
+	"fugue logs query": {
+		Long: strings.TrimSpace(`
+Query runtime log entries through the app runtime log stream and normalize them into stable machine-readable fields.
+
+Use this when you need request-id, method, path, status, pod, container, and per-request event correlation in one output instead of grepping raw log text by hand.
+`),
+		Example: strings.TrimSpace(`
+fugue logs query my-app --request-id req_123 --since 30m --json
+fugue logs query my-app --method POST --path /chat --status 200 --limit 50
 `),
 	},
 	"fugue debug": {
@@ -1196,6 +1219,8 @@ func sampleFlagsForCommand(cmd *cobra.Command) string {
 	case "fugue workflow run":
 		return "--json"
 	case "fugue logs collect":
+		return "--request-id req_123 --since 30m --json"
+	case "fugue logs query":
 		return "--request-id req_123 --since 30m --json"
 	case "fugue debug bundle":
 		return "--archive ./bundle.zip --json"

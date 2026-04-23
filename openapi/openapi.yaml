@@ -1037,6 +1037,34 @@ paths:
                 $ref: "#/components/schemas/ClusterWorkloadResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/cluster/services/{namespace}/{name}:
+    get:
+      operationId: getClusterService
+      summary: Get Cluster Service
+      tags: [Cluster]
+      x-fugue-handler: handleGetClusterService
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: namespace
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: name
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterServiceResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/cluster/rollouts/{namespace}/{kind}/{name}:
     get:
       operationId: getClusterRolloutStatus
@@ -2248,6 +2276,31 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AppHTTPRequestResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/request-stream:
+    post:
+      operationId: requestAppInternalHTTPStream
+      summary: Diagnose App Internal HTTP Streaming Behavior
+      tags: [Apps]
+      x-fugue-handler: handleRequestAppInternalHTTPStream
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppHTTPRequestStreamRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppHTTPRequestStreamResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/diagnosis:
@@ -6042,6 +6095,75 @@ components:
       properties:
         workload:
           $ref: "#/components/schemas/ClusterWorkloadDetail"
+    ClusterServicePort:
+      type: object
+      additionalProperties: false
+      required: [port]
+      properties:
+        name:
+          type: string
+        port:
+          type: integer
+          format: int32
+        protocol:
+          type: string
+        target_port:
+          type: string
+    ClusterServiceEndpoint:
+      type: object
+      additionalProperties: false
+      required: [ready]
+      properties:
+        ip:
+          type: string
+        node_name:
+          type: string
+        ready:
+          type: boolean
+        target_kind:
+          type: string
+        target_name:
+          type: string
+        target_namespace:
+          type: string
+        pod:
+          type: string
+    ClusterServiceDetail:
+      type: object
+      additionalProperties: false
+      required: [namespace, name]
+      properties:
+        namespace:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+        cluster_ip:
+          type: string
+        external_name:
+          type: string
+        selector:
+          $ref: "#/components/schemas/StringMap"
+        labels:
+          $ref: "#/components/schemas/StringMap"
+        annotations:
+          $ref: "#/components/schemas/StringMap"
+        ports:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterServicePort"
+        endpoints:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterServiceEndpoint"
+    ClusterServiceResponse:
+      type: object
+      additionalProperties: false
+      required: [service]
+      properties:
+        service:
+          $ref: "#/components/schemas/ClusterServiceDetail"
     ClusterRolloutStatus:
       type: object
       additionalProperties: false
@@ -7102,6 +7224,38 @@ components:
         max_body_bytes:
           type: integer
           format: int32
+    AppHTTPRequestStreamRequest:
+      type: object
+      additionalProperties: false
+      required: [method, path]
+      properties:
+        method:
+          type: string
+        path:
+          type: string
+        query:
+          $ref: "#/components/schemas/StringListMap"
+        headers:
+          $ref: "#/components/schemas/StringListMap"
+        headers_from_env:
+          $ref: "#/components/schemas/StringMap"
+        body:
+          type: string
+        body_encoding:
+          type: string
+        timeout_ms:
+          type: integer
+          format: int32
+        max_chunks:
+          type: integer
+          format: int32
+        max_chunk_bytes:
+          type: integer
+          format: int32
+        accepts:
+          type: array
+          items:
+            type: string
     HTTPDiagnosticTiming:
       type: object
       additionalProperties: false
@@ -7148,6 +7302,91 @@ components:
           type: string
         timing:
           $ref: "#/components/schemas/HTTPDiagnosticTiming"
+    HTTPStreamChunkSample:
+      type: object
+      additionalProperties: false
+      required: [index, kind, encoding, payload, size_bytes]
+      properties:
+        index:
+          type: integer
+          format: int32
+        kind:
+          type: string
+        encoding:
+          type: string
+        payload:
+          type: string
+        size_bytes:
+          type: integer
+          format: int32
+        truncated:
+          type: boolean
+    HTTPStreamTiming:
+      type: object
+      additionalProperties: false
+      required: [headers_observed, body_byte_observed, sse_event_observed]
+      properties:
+        headers_observed:
+          type: boolean
+        body_byte_observed:
+          type: boolean
+        sse_event_observed:
+          type: boolean
+        time_to_headers_ms:
+          type: integer
+          format: int64
+        time_to_first_body_byte_ms:
+          type: integer
+          format: int64
+        time_to_first_sse_event_ms:
+          type: integer
+          format: int64
+        total_time_ms:
+          type: integer
+          format: int64
+    HTTPStreamProbe:
+      type: object
+      additionalProperties: false
+      required: [target, accept, url, timing]
+      properties:
+        target:
+          type: string
+        accept:
+          type: string
+        url:
+          type: string
+        status:
+          type: string
+        status_code:
+          type: integer
+          format: int32
+        headers:
+          $ref: "#/components/schemas/StringListMap"
+        error:
+          type: string
+        headers_only_stall:
+          type: boolean
+        body_bytes:
+          type: integer
+          format: int32
+        chunk_count:
+          type: integer
+          format: int32
+        timing:
+          $ref: "#/components/schemas/HTTPStreamTiming"
+        first_chunks:
+          type: array
+          items:
+            $ref: "#/components/schemas/HTTPStreamChunkSample"
+    AppHTTPRequestStreamResponse:
+      type: object
+      additionalProperties: false
+      required: [probes]
+      properties:
+        probes:
+          type: array
+          items:
+            $ref: "#/components/schemas/HTTPStreamProbe"
     AppDiagnosis:
       type: object
       additionalProperties: false

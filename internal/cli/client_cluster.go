@@ -238,6 +238,21 @@ func (c *Client) GetClusterWorkload(namespace, kind, name string) (model.Cluster
 	return response.Workload, nil
 }
 
+func (c *Client) GetClusterService(namespace, name string) (model.ClusterServiceDetail, error) {
+	var response struct {
+		Service model.ClusterServiceDetail `json:"service"`
+	}
+	if err := c.doJSON(
+		http.MethodGet,
+		path.Join("/v1/cluster/services", strings.TrimSpace(namespace), strings.TrimSpace(name)),
+		nil,
+		&response,
+	); err != nil {
+		return model.ClusterServiceDetail{}, err
+	}
+	return response.Service, nil
+}
+
 func (c *Client) GetClusterRolloutStatus(namespace, kind, name string) (model.ClusterRolloutStatus, error) {
 	var response struct {
 		Rollout model.ClusterRolloutStatus `json:"rollout"`

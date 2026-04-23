@@ -40,24 +40,24 @@ func (c *CLI) newAppRouteShowCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			result := c.loadAppRouteShowResult(client, app)
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{
-					"app_id": app.ID,
-					"route":  app.Route,
-				})
-			}
-			pairs := []kvPair{{Key: "app_id", Value: app.ID}}
-			if app.Route != nil {
-				pairs = append(pairs,
-					kvPair{Key: "hostname", Value: app.Route.Hostname},
-					kvPair{Key: "base_domain", Value: app.Route.BaseDomain},
-					kvPair{Key: "public_url", Value: app.Route.PublicURL},
-				)
-				if app.Route.ServicePort > 0 {
-					pairs = append(pairs, kvPair{Key: "service_port", Value: fmt.Sprintf("%d", app.Route.ServicePort)})
+				if err := writeJSON(c.stdout, result); err != nil {
+					return err
+				}
+			} else {
+				if err := renderAppRouteShowResult(c.stdout, result); err != nil {
+					return err
 				}
 			}
-			return writeKeyValues(c.stdout, pairs...)
+			switch strings.TrimSpace(result.ConclusionCode) {
+			case "", "in_sync":
+				return nil
+			case "inconclusive":
+				return withExitCode(fmt.Errorf("%s", result.Conclusion), ExitCodeIndeterminate)
+			default:
+				return withExitCode(fmt.Errorf("%s", result.Conclusion), ExitCodeSystemFault)
+			}
 		},
 	}
 }

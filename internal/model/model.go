@@ -651,6 +651,36 @@ type ClusterWorkloadDetail struct {
 	Manifest          map[string]any             `json:"manifest,omitempty"`
 }
 
+type ClusterServicePort struct {
+	Name       string `json:"name,omitempty"`
+	Port       int32  `json:"port"`
+	Protocol   string `json:"protocol,omitempty"`
+	TargetPort string `json:"target_port,omitempty"`
+}
+
+type ClusterServiceEndpoint struct {
+	IP              string `json:"ip,omitempty"`
+	NodeName        string `json:"node_name,omitempty"`
+	Ready           bool   `json:"ready"`
+	TargetKind      string `json:"target_kind,omitempty"`
+	TargetName      string `json:"target_name,omitempty"`
+	TargetNamespace string `json:"target_namespace,omitempty"`
+	Pod             string `json:"pod,omitempty"`
+}
+
+type ClusterServiceDetail struct {
+	Namespace    string                   `json:"namespace"`
+	Name         string                   `json:"name"`
+	Type         string                   `json:"type,omitempty"`
+	ClusterIP    string                   `json:"cluster_ip,omitempty"`
+	ExternalName string                   `json:"external_name,omitempty"`
+	Selector     map[string]string        `json:"selector,omitempty"`
+	Labels       map[string]string        `json:"labels,omitempty"`
+	Annotations  map[string]string        `json:"annotations,omitempty"`
+	Ports        []ClusterServicePort     `json:"ports,omitempty"`
+	Endpoints    []ClusterServiceEndpoint `json:"endpoints,omitempty"`
+}
+
 type ClusterRolloutStatus struct {
 	Kind              string                     `json:"kind"`
 	Namespace         string                     `json:"namespace"`

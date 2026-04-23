@@ -451,6 +451,32 @@ func (s *Server) handleGetClusterWorkload(w http.ResponseWriter, r *http.Request
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"workload": workload})
 }
 
+func (s *Server) handleGetClusterService(w http.ResponseWriter, r *http.Request) {
+	principal, ok := requirePlatformAdmin(w, r)
+	if !ok {
+		return
+	}
+
+	client, err := s.requireClusterNodeClient()
+	if err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+
+	service, err := client.readClusterServiceDetail(
+		r.Context(),
+		r.PathValue("namespace"),
+		r.PathValue("name"),
+	)
+	if err != nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+
+	s.appendAudit(principal, "cluster.service.read", "service", service.Namespace+"/"+service.Name, principal.TenantID, nil)
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"service": service})
+}
+
 func (s *Server) handleGetClusterRolloutStatus(w http.ResponseWriter, r *http.Request) {
 	principal, ok := requirePlatformAdmin(w, r)
 	if !ok {
@@ -608,6 +634,129 @@ func (c *clusterNodeClient) listClusterEvents(ctx context.Context, namespace str
 		converted = append(converted, coreEventFromEventsV1(event))
 	}
 	return converted, nil
+}
+
+func (c *clusterNodeClient) readCoreService(ctx context.Context, namespace, name string) (corev1.Service, error) {
+	namespace = strings.TrimSpace(namespace)
+	name = strings.TrimSpace(name)
+	if namespace == "" || name == "" {
+		return corev1.Service{}, fmt.Errorf("namespace and name are required")
+	}
+	var service corev1.Service
+	apiPath := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/services/" + url.PathEscape(name)
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, &service); err != nil {
+		return corev1.Service{}, err
+	}
+	return service, nil
+}
+
+func (c *clusterNodeClient) readCoreEndpoints(ctx context.Context, namespace, name string) (corev1.Endpoints, error) {
+	namespace = strings.TrimSpace(namespace)
+	name = strings.TrimSpace(name)
+	if namespace == "" || name == "" {
+		return corev1.Endpoints{}, fmt.Errorf("namespace and name are required")
+	}
+	var endpoints corev1.Endpoints
+	apiPath := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/endpoints/" + url.PathEscape(name)
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, &endpoints); err != nil {
+		return corev1.Endpoints{}, err
+	}
+	return endpoints, nil
+}
+
+func (c *clusterNodeClient) readClusterServiceDetail(ctx context.Context, namespace, name string) (model.ClusterServiceDetail, error) {
+	service, err := c.readCoreService(ctx, namespace, name)
+	if err != nil {
+		return model.ClusterServiceDetail{}, err
+	}
+
+	detail := model.ClusterServiceDetail{
+		Namespace:    strings.TrimSpace(service.Namespace),
+		Name:         strings.TrimSpace(service.Name),
+		Type:         string(service.Spec.Type),
+		ClusterIP:    strings.TrimSpace(service.Spec.ClusterIP),
+		ExternalName: strings.TrimSpace(service.Spec.ExternalName),
+		Selector:     cloneStringMap(service.Spec.Selector),
+		Labels:       cloneStringMap(service.Labels),
+		Annotations:  cloneStringMap(service.Annotations),
+		Ports:        clusterServicePorts(service.Spec.Ports),
+		Endpoints:    []model.ClusterServiceEndpoint{},
+	}
+
+	endpoints, err := c.readCoreEndpoints(ctx, namespace, name)
+	if err != nil {
+		if isKubeNotFound(err) {
+			return detail, nil
+		}
+		return model.ClusterServiceDetail{}, err
+	}
+
+	detail.Endpoints = clusterServiceEndpoints(endpoints.Subsets)
+	return detail, nil
+}
+
+func clusterServicePorts(ports []corev1.ServicePort) []model.ClusterServicePort {
+	if len(ports) == 0 {
+		return nil
+	}
+	out := make([]model.ClusterServicePort, 0, len(ports))
+	for _, port := range ports {
+		out = append(out, model.ClusterServicePort{
+			Name:       strings.TrimSpace(port.Name),
+			Port:       port.Port,
+			Protocol:   string(port.Protocol),
+			TargetPort: strings.TrimSpace(port.TargetPort.String()),
+		})
+	}
+	return out
+}
+
+func clusterServiceEndpoints(subsets []corev1.EndpointSubset) []model.ClusterServiceEndpoint {
+	if len(subsets) == 0 {
+		return nil
+	}
+	out := make([]model.ClusterServiceEndpoint, 0)
+	appendAddress := func(address corev1.EndpointAddress, ready bool) {
+		nodeName := ""
+		if address.NodeName != nil {
+			nodeName = strings.TrimSpace(*address.NodeName)
+		}
+		entry := model.ClusterServiceEndpoint{
+			IP:       strings.TrimSpace(address.IP),
+			NodeName: nodeName,
+			Ready:    ready,
+		}
+		if address.TargetRef != nil {
+			entry.TargetKind = strings.TrimSpace(address.TargetRef.Kind)
+			entry.TargetName = strings.TrimSpace(address.TargetRef.Name)
+			entry.TargetNamespace = strings.TrimSpace(address.TargetRef.Namespace)
+			if strings.EqualFold(entry.TargetKind, "Pod") {
+				entry.Pod = entry.TargetName
+			}
+		}
+		out = append(out, entry)
+	}
+	for _, subset := range subsets {
+		for _, address := range subset.Addresses {
+			appendAddress(address, true)
+		}
+		for _, address := range subset.NotReadyAddresses {
+			appendAddress(address, false)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Ready != out[j].Ready {
+			return out[i].Ready
+		}
+		if out[i].Pod != out[j].Pod {
+			return out[i].Pod < out[j].Pod
+		}
+		if out[i].TargetName != out[j].TargetName {
+			return out[i].TargetName < out[j].TargetName
+		}
+		return out[i].IP < out[j].IP
+	})
+	return out
 }
 
 func (c *clusterNodeClient) readClusterWorkloadDetail(

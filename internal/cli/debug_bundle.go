@@ -69,6 +69,9 @@ func (c *CLI) newDebugBundleCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if _, err := resolveLogsQueryTimeWindow(opts.Since, opts.Until, time.Now().UTC()); err != nil {
+				return withExitCode(err, ExitCodeUserInput)
+			}
 			app, err := c.resolveWorkspaceApp(client, args[0])
 			if err != nil {
 				return err
@@ -89,6 +92,7 @@ func (c *CLI) newDebugBundleCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&opts.Since, "since", "", "Requested time window label for the investigation, for example 1h")
+	cmd.Flags().StringVar(&opts.Until, "until", "", "Upper time bound for the investigation, for example 15m or an RFC3339 timestamp")
 	cmd.Flags().StringVar(&opts.RequestID, "request-id", "", "Request or trace identifier used to filter log fragments")
 	cmd.Flags().StringVar(&opts.ResourceID, "resource-id", "", "Resource identifier used to filter log fragments")
 	cmd.Flags().StringVar(&opts.OperationID, "operation", "", "Operation identifier to correlate build/deploy evidence")

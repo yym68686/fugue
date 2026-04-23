@@ -44,6 +44,17 @@ type buildLogStreamStatusEvent struct {
 	StartedAt       string   `json:"started_at,omitempty"`
 }
 
+type runtimeLogStreamReadyEvent struct {
+	Cursor    string `json:"cursor"`
+	Stream    string `json:"stream"`
+	Follow    bool   `json:"follow"`
+	Component string `json:"component"`
+	Namespace string `json:"namespace"`
+	Selector  string `json:"selector"`
+	Container string `json:"container"`
+	Previous  bool   `json:"previous,omitempty"`
+}
+
 type runtimeLogStreamStateEvent struct {
 	Cursor    string   `json:"cursor"`
 	Component string   `json:"component"`
