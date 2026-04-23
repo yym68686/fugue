@@ -345,7 +345,7 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 				"items":      items,
 			},
 		})
-		initContainers = append(initContainers, buildAppFilesInitContainer(app.Spec.Files))
+		volumeMounts = append(volumeMounts, buildAppFileVolumeMounts(app.Spec.Files)...)
 	}
 	if workspaceSpec := normalizeRuntimeAppWorkspaceSpec(app); workspaceSpec != nil {
 		volumeMounts = append(volumeMounts, map[string]any{
@@ -437,6 +437,23 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 			},
 		},
 	}
+}
+
+func buildAppFileVolumeMounts(files []model.AppFile) []map[string]any {
+	mounts := make([]map[string]any, 0, len(files))
+	for index, file := range files {
+		target := strings.TrimSpace(file.Path)
+		if target == "" {
+			continue
+		}
+		mounts = append(mounts, map[string]any{
+			"name":      appFilesVolumeName,
+			"mountPath": target,
+			"subPath":   fileKey(index),
+			"readOnly":  true,
+		})
+	}
+	return mounts
 }
 
 func buildAppFilesInitContainer(files []model.AppFile) map[string]any {

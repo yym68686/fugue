@@ -100,31 +100,42 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 	appPodSpec := appTemplate["spec"].(map[string]any)
 	initContainers, ok := appPodSpec["initContainers"].([]map[string]any)
 	if !ok {
-		t.Fatalf("expected app files and wait-postgres init containers")
+		t.Fatalf("expected wait-postgres init container")
 	}
-	if len(initContainers) != 2 {
-		t.Fatalf("expected app files and wait-postgres init containers, got %d", len(initContainers))
+	if len(initContainers) != 1 {
+		t.Fatalf("expected only wait-postgres init container, got %d", len(initContainers))
 	}
 	containers := appPodSpec["containers"].([]map[string]any)
 	envObjects := containers[0]["env"].([]map[string]any)
 	if got := envValue(envObjects, "DB_HOST"); got != "uni-api-demo-postgres-rw" {
 		t.Fatalf("expected inline postgres DB_HOST to use rw service, got %q", got)
 	}
-	if got := initContainers[0]["name"]; got != "init-app-files" {
-		t.Fatalf("expected app files init container first, got %#v", got)
+	if got := initContainers[0]["name"]; got != "wait-postgres" {
+		t.Fatalf("expected wait-postgres init container, got %#v", got)
 	}
-	appFilesCommand := initContainers[0]["command"].([]string)
-	if got := appFilesCommand[4]; got != appFilesSourceMountPath {
-		t.Fatalf("expected app files init container source mount %q, got %#v", appFilesSourceMountPath, got)
-	}
-	command := initContainers[1]["command"].([]string)
+	command := initContainers[0]["command"].([]string)
 	if got := command[2]; got != "until nc -z uni-api-demo-postgres-rw 5432; do sleep 2; done" {
 		t.Fatalf("expected wait-postgres init container to target rw service, got %q", got)
 	}
 	assertHelperResources(t, initContainers[0]["resources"])
-	assertHelperResources(t, initContainers[1]["resources"])
-	if _, ok := containers[0]["volumeMounts"]; ok {
-		t.Fatalf("expected declarative app files to be copied by init container instead of mounted into the app container")
+	volumeMounts, ok := containers[0]["volumeMounts"].([]map[string]any)
+	if !ok {
+		t.Fatalf("expected declarative app files to be mounted into the app container")
+	}
+	if len(volumeMounts) != 1 {
+		t.Fatalf("expected one app file volume mount, got %d", len(volumeMounts))
+	}
+	if got := volumeMounts[0]["name"]; got != appFilesVolumeName {
+		t.Fatalf("expected app file volume mount to use %q, got %#v", appFilesVolumeName, got)
+	}
+	if got := volumeMounts[0]["mountPath"]; got != "/home/api.yaml" {
+		t.Fatalf("expected app file mount path %q, got %#v", "/home/api.yaml", got)
+	}
+	if got := volumeMounts[0]["subPath"]; got != "file-0" {
+		t.Fatalf("expected app file subPath %q, got %#v", "file-0", got)
+	}
+	if got := volumeMounts[0]["readOnly"]; got != true {
+		t.Fatalf("expected app file mount to be readOnly, got %#v", got)
 	}
 }
 
