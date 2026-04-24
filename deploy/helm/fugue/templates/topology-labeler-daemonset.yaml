@@ -129,7 +129,8 @@ spec:
                 if [ -n "${country_name}" ]; then
                   annotation_fragment="$(printf ',\"annotations\":{\"fugue.io/location-country\":\"%s\"}' "$(json_escape "${country_name}")")"
                 fi
-                patch="$(printf '{"metadata":{"labels":{"fugue.io/shared-pool":"internal"%s}%s}}' "${country_code_fragment}" "${annotation_fragment}")"
+                # Shared-pool membership is owned by node policy/runtime pool mode.
+                patch="$(printf '{"metadata":{"labels":{%s}%s}}' "${country_code_fragment#,}" "${annotation_fragment}")"
                 curl -fsS --cacert "${ca_file}" -X PATCH \
                   -H "Authorization: Bearer ${token}" \
                   -H "Content-Type: application/merge-patch+json" \

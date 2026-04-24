@@ -337,6 +337,11 @@ func (s *Server) refreshClusterNodeInventoryAsync() {
 			var zero []clusterNodeSnapshot
 			return zero, err
 		}
+		value, _, err = s.reconcileSharedPoolPolicyDriftFromSnapshots(value)
+		if err != nil {
+			var zero []clusterNodeSnapshot
+			return zero, err
+		}
 		value, _, err = s.reconcileLegacyBuildTierLabelsFromSnapshots(value)
 		if err != nil {
 			var zero []clusterNodeSnapshot
@@ -399,6 +404,87 @@ func (s *Server) reconcileLegacyBuildTierLabelsFromSnapshots(snapshots []cluster
 			return snapshots, changed, err
 		}
 		if !changed {
+			changed = true
+		}
+	}
+
+	if !changed {
+		return snapshots, false, nil
+	}
+
+	refreshed, err := s.fetchClusterNodeInventory(context.Background())
+	if err != nil {
+		return snapshots, true, err
+	}
+	s.clusterNodeInventoryCache.set(clusterNodeInventoryCacheKey, refreshed)
+	return refreshed, true, nil
+}
+
+func (s *Server) reconcileSharedPoolPolicyDriftFromSnapshots(snapshots []clusterNodeSnapshot) ([]clusterNodeSnapshot, bool, error) {
+	if s == nil || len(snapshots) == 0 {
+		return snapshots, false, nil
+	}
+
+	runtimes, err := s.store.ListRuntimes("", true)
+	if err != nil {
+		return snapshots, false, err
+	}
+	machines, err := s.store.ListMachines("", true)
+	if err != nil {
+		return snapshots, false, err
+	}
+	runtimeByClusterNode := buildRuntimeByClusterNodeIndex(runtimes)
+	_, machineByClusterNode := buildMachineIndexes(machines)
+
+	clientFactory := s.newClusterNodeClient
+	if clientFactory == nil {
+		clientFactory = newClusterNodeClient
+	}
+	client, err := clientFactory()
+	if err != nil {
+		return snapshots, false, err
+	}
+
+	changed := false
+	for _, snapshot := range snapshots {
+		nodeName := strings.TrimSpace(snapshot.node.Name)
+		if nodeName == "" {
+			continue
+		}
+
+		if runtimeObj, ok := runtimeByClusterNode[nodeName]; ok {
+			desiredSharedPool := model.NormalizeRuntimePoolMode(runtimeObj.Type, runtimeObj.PoolMode) == model.RuntimePoolModeInternalShared
+			if desiredSharedPool == snapshot.sharedPool {
+				continue
+			}
+			reconciled, err := client.reconcileRuntimeNode(context.Background(), runtimeObj)
+			if err != nil {
+				if isKubernetesNodeNotFound(err) {
+					continue
+				}
+				return snapshots, changed, err
+			}
+			if reconciled {
+				changed = true
+			}
+			continue
+		}
+
+		machine, ok := machineByClusterNode[nodeName]
+		if !ok || strings.TrimSpace(machine.RuntimeID) != "" {
+			continue
+		}
+		if machine.Policy.AllowSharedPool == snapshot.sharedPool {
+			continue
+		}
+		reconciled, err := client.reconcileMachineNode(context.Background(), nodeName, machine, nil)
+		if err != nil {
+			if isKubernetesNodeNotFound(err) {
+				continue
+			}
+			return snapshots, changed, err
+		}
+		if reconciled {
 			changed = true
 		}
 	}

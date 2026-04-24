@@ -463,6 +463,102 @@ func TestSetClusterNodePolicySeedsBootstrapControlPlaneMachine(t *testing.T) {
 	}
 }
 
+func TestReconcileSharedPoolPolicyDriftFromSnapshotsRemovesBootstrapControlPlaneLabel(t *testing.T) {
+	t.Parallel()
+
+	storePath := filepath.Join(t.TempDir(), "store.json")
+	stateStore := store.New(storePath)
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	if err := rewriteBootstrapControlPlaneMachine(storePath, func(machine *model.Machine) {
+		*machine = legacyBootstrapControlPlaneMachine()
+		machine.Policy.AllowSharedPool = false
+	}); err != nil {
+		t.Fatalf("seed bootstrap control-plane machine: %v", err)
+	}
+
+	kubeServer := newBootstrapControlPlaneKubeServerWithLabels(t, map[string]string{
+		runtimepkg.SharedPoolLabelKey: runtimepkg.SharedPoolLabelValue,
+	})
+	defer kubeServer.Close()
+
+	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	refreshed, changed, err := server.reconcileSharedPoolPolicyDriftFromSnapshots([]clusterNodeSnapshot{
+		{
+			node:       model.ClusterNode{Name: "gcp1"},
+			sharedPool: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("reconcile shared-pool policy drift: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected shared-pool policy drift reconciliation to report changes")
+	}
+	if len(refreshed) != 1 {
+		t.Fatalf("expected one refreshed snapshot, got %d", len(refreshed))
+	}
+	if got := strings.TrimSpace(firstNodeLabel(refreshed[0].labels, runtimepkg.SharedPoolLabelKey)); got != "" {
+		t.Fatalf("expected shared-pool label removed after reconciliation, got %q", got)
+	}
+}
+
+func TestReconcileSharedPoolPolicyDriftFromSnapshotsAddsBootstrapControlPlaneLabel(t *testing.T) {
+	t.Parallel()
+
+	storePath := filepath.Join(t.TempDir(), "store.json")
+	stateStore := store.New(storePath)
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	if err := rewriteBootstrapControlPlaneMachine(storePath, func(machine *model.Machine) {
+		*machine = legacyBootstrapControlPlaneMachine()
+		machine.Policy.AllowSharedPool = true
+	}); err != nil {
+		t.Fatalf("seed bootstrap control-plane machine: %v", err)
+	}
+
+	kubeServer := newBootstrapControlPlaneKubeServer(t)
+	defer kubeServer.Close()
+
+	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	refreshed, changed, err := server.reconcileSharedPoolPolicyDriftFromSnapshots([]clusterNodeSnapshot{
+		{
+			node:       model.ClusterNode{Name: "gcp1"},
+			sharedPool: false,
+		},
+	})
+	if err != nil {
+		t.Fatalf("reconcile shared-pool policy drift: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected shared-pool policy drift reconciliation to report changes")
+	}
+	if len(refreshed) != 1 {
+		t.Fatalf("expected one refreshed snapshot, got %d", len(refreshed))
+	}
+	if got := strings.TrimSpace(firstNodeLabel(refreshed[0].labels, runtimepkg.SharedPoolLabelKey)); got != runtimepkg.SharedPoolLabelValue {
+		t.Fatalf("expected shared-pool label restored after reconciliation, got %q", got)
+	}
+}
+
 func newBootstrapControlPlaneKubeServer(t *testing.T) *httptest.Server {
 	return newBootstrapControlPlaneKubeServerWithLabels(t, nil)
 }
