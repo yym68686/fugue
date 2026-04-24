@@ -108,6 +108,29 @@ func inspectManagedImageAlwaysExists(context.Context, string) (bool, map[string]
 	return true, nil, nil
 }
 
+func resolveManagedImageDigestRefStub(digests map[string]string) func(context.Context, string) (string, error) {
+	return func(_ context.Context, imageRef string) (string, error) {
+		digest, ok := digests[strings.TrimSpace(imageRef)]
+		if !ok {
+			return "", fmt.Errorf("unexpected image ref %q", imageRef)
+		}
+		return sourceimport.DigestReferenceFromImageRef(imageRef, digest)
+	}
+}
+
+func mustRewriteImportedDigestRef(t *testing.T, imageRef, pushBase, pullBase, digest string) string {
+	t.Helper()
+	digestRef, err := sourceimport.DigestReferenceFromImageRef(imageRef, digest)
+	if err != nil {
+		t.Fatalf("digest reference from image ref: %v", err)
+	}
+	runtimeImageRef, err := rewriteImportedImageRef(digestRef, pushBase, pullBase)
+	if err != nil {
+		t.Fatalf("rewrite imported image ref: %v", err)
+	}
+	return runtimeImageRef
+}
+
 func TestExecuteManagedImportOperationImportsDockerImageSource(t *testing.T) {
 	t.Parallel()
 
@@ -154,15 +177,24 @@ func TestExecuteManagedImportOperationImportsDockerImageSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create import operation: %v", err)
 	}
+	const managedImageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	expectedRuntimeImageRef := mustRewriteImportedDigestRef(
+		t,
+		"registry.push.example/fugue-apps/demo:image-abc123",
+		"registry.push.example",
+		"registry.pull.example",
+		managedImageDigest,
+	)
 
 	importer := &recordingImporter{}
 	svc := &Service{
-		Store:               stateStore,
-		Logger:              log.New(io.Discard, "", 0),
-		importer:            importer,
-		registryPushBase:    "registry.push.example",
-		registryPullBase:    "registry.pull.example",
-		inspectManagedImage: inspectManagedImageAlwaysExists,
+		Store:                        stateStore,
+		Logger:                       log.New(io.Discard, "", 0),
+		importer:                     importer,
+		registryPushBase:             "registry.push.example",
+		registryPullBase:             "registry.pull.example",
+		inspectManagedImage:          inspectManagedImageAlwaysExists,
+		resolveManagedImageDigestRef: resolveManagedImageDigestRefStub(map[string]string{"registry.push.example/fugue-apps/demo:image-abc123": managedImageDigest}),
 	}
 
 	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
@@ -188,7 +220,7 @@ func TestExecuteManagedImportOperationImportsDockerImageSource(t *testing.T) {
 	if deployOp.ID == "" || deployOp.DesiredSpec == nil {
 		t.Fatalf("expected deploy operation with desired spec, got %+v", deployOp)
 	}
-	if got := deployOp.DesiredSpec.Image; got != "registry.pull.example/fugue-apps/demo:image-abc123" {
+	if got := deployOp.DesiredSpec.Image; got != expectedRuntimeImageRef {
 		t.Fatalf("expected runtime image rewrite, got %q", got)
 	}
 	if !reflect.DeepEqual(deployOp.DesiredSpec.Ports, []int{9090}) {
@@ -323,7 +355,13 @@ func TestExecuteManagedImportOperationRecoversUploadManagedImageRefFromImportRes
 		t.Fatalf("create source upload: %v", err)
 	}
 	expectedManagedImageRef := "registry.push.example/fugue-apps/demo:upload-" + upload.SHA256[:12]
-	expectedRuntimeImageRef := "registry.pull.example/fugue-apps/demo:upload-" + upload.SHA256[:12]
+	expectedRuntimeImageRef := mustRewriteImportedDigestRef(
+		t,
+		expectedManagedImageRef,
+		"registry.push.example",
+		"registry.pull.example",
+		"sha256:"+upload.SHA256,
+	)
 
 	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
 		Replicas:  1,
@@ -381,6 +419,9 @@ func TestExecuteManagedImportOperationRecoversUploadManagedImageRefFromImportRes
 		importer:         importer,
 		registryPushBase: "registry.push.example",
 		registryPullBase: "registry.pull.example",
+		resolveManagedImageDigestRef: resolveManagedImageDigestRefStub(map[string]string{
+			expectedManagedImageRef: "sha256:" + upload.SHA256,
+		}),
 		inspectManagedImage: func(_ context.Context, imageRef string) (bool, map[string]int64, error) {
 			return imageRef == expectedManagedImageRef, nil, nil
 		},
@@ -445,7 +486,13 @@ func TestExecuteManagedImportOperationPreservesGitHubSourceAfterUploadOverride(t
 		t.Fatalf("create source upload: %v", err)
 	}
 	expectedManagedImageRef := "registry.push.example/fugue-apps/demo:upload-" + upload.SHA256[:12]
-	expectedRuntimeImageRef := "registry.pull.example/fugue-apps/demo:upload-" + upload.SHA256[:12]
+	expectedRuntimeImageRef := mustRewriteImportedDigestRef(
+		t,
+		expectedManagedImageRef,
+		"registry.push.example",
+		"registry.pull.example",
+		"sha256:"+upload.SHA256,
+	)
 
 	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
 		Image:        "registry.pull.example/fugue-apps/demo:git-current",
@@ -524,6 +571,9 @@ func TestExecuteManagedImportOperationPreservesGitHubSourceAfterUploadOverride(t
 		importer:         importer,
 		registryPushBase: "registry.push.example",
 		registryPullBase: "registry.pull.example",
+		resolveManagedImageDigestRef: resolveManagedImageDigestRefStub(map[string]string{
+			expectedManagedImageRef: "sha256:" + upload.SHA256,
+		}),
 		inspectManagedImage: func(_ context.Context, imageRef string) (bool, map[string]int64, error) {
 			return imageRef == expectedManagedImageRef, nil, nil
 		},

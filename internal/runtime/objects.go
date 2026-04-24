@@ -552,10 +552,32 @@ func imagePullPolicyForImage(image string) string {
 	if image == "" {
 		return ""
 	}
-	if strings.Contains(image, "@") {
+	if strings.Contains(image, "@") || isFugueManagedImmutableTag(image) {
 		return "IfNotPresent"
 	}
 	return "Always"
+}
+
+func isFugueManagedImmutableTag(image string) bool {
+	image = strings.TrimSpace(image)
+	if image == "" || !strings.Contains(image, "/fugue-apps/") {
+		return false
+	}
+	slash := strings.LastIndex(image, "/")
+	colon := strings.LastIndex(image, ":")
+	if colon <= slash {
+		return false
+	}
+	tag := strings.TrimSpace(image[colon+1:])
+	if tag == "" {
+		return false
+	}
+	for _, prefix := range []string{"git-", "upload-", "image-"} {
+		if strings.HasPrefix(tag, prefix) && len(tag) > len(prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func runtimeResourceRequirements(spec *model.ResourceSpec) map[string]any {

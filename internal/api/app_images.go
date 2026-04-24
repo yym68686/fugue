@@ -274,7 +274,9 @@ func (s *Server) handleRedeployAppImage(w http.ResponseWriter, r *http.Request) 
 	source.ResolvedImageRef = strings.TrimSpace(version.Candidate.ImageRef)
 
 	spec := cloneAppSpec(app.Spec)
-	if strings.TrimSpace(version.Candidate.RuntimeImageRef) != "" {
+	if runtimeImageRef := s.runtimeImageRefFromManagedRefWithDigest(version.Candidate.ImageRef, version.Response.Digest); runtimeImageRef != "" {
+		spec.Image = runtimeImageRef
+	} else if strings.TrimSpace(version.Candidate.RuntimeImageRef) != "" {
 		spec.Image = strings.TrimSpace(version.Candidate.RuntimeImageRef)
 	} else if runtimeImageRef := s.runtimeImageRefFromManagedRef(version.Candidate.ImageRef); runtimeImageRef != "" {
 		spec.Image = runtimeImageRef
@@ -806,6 +808,19 @@ func (s *Server) runtimeImageRefFromManagedRef(imageRef string) string {
 		return imageRef
 	}
 	return pullBase + "/" + strings.TrimPrefix(imageRef, prefix)
+}
+
+func (s *Server) runtimeImageRefFromManagedRefWithDigest(imageRef, digest string) string {
+	imageRef = strings.TrimSpace(imageRef)
+	digest = strings.TrimSpace(digest)
+	if imageRef == "" || digest == "" {
+		return ""
+	}
+	digestRef, err := sourceimport.DigestReferenceFromImageRef(imageRef, digest)
+	if err != nil {
+		return ""
+	}
+	return s.runtimeImageRefFromManagedRef(digestRef)
 }
 
 func (s *Server) isManagedRegistryRef(imageRef string) bool {

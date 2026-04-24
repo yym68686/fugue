@@ -13,6 +13,19 @@ import (
 	"fugue/internal/store"
 )
 
+func mustRuntimeDigestRefForAppImagesTest(t *testing.T, pushBase, pullBase, imageRef, digest string) string {
+	t.Helper()
+	server := &Server{
+		registryPushBase: pushBase,
+		registryPullBase: pullBase,
+	}
+	runtimeImageRef := server.runtimeImageRefFromManagedRefWithDigest(imageRef, digest)
+	if runtimeImageRef == "" {
+		t.Fatalf("expected runtime digest ref for %q with digest %q", imageRef, digest)
+	}
+	return runtimeImageRef
+}
+
 func TestHandleGetAppImagesReturnsCurrentAndHistoricalVersions(t *testing.T) {
 	t.Parallel()
 
@@ -411,16 +424,19 @@ func setupAppImagesTestServer(t *testing.T) (*store.Store, *Server, string, mode
 	}
 
 	const (
-		pushBase      = "registry.push.example"
-		pullBase      = "registry.pull.example"
-		oldCommit     = "111111111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-		newCommit     = "222222222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-		imageRepoPath = "example-demo-web"
+		pushBase       = "registry.push.example"
+		pullBase       = "registry.pull.example"
+		oldCommit      = "111111111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		newCommit      = "222222222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		imageRepoPath  = "example-demo-web"
+		oldImageDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+		newImageDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 	)
 	oldImageRef := pushBase + "/fugue-apps/" + imageRepoPath + ":git-111111111111"
 	newImageRef := pushBase + "/fugue-apps/" + imageRepoPath + ":git-222222222222"
 	oldRuntimeImageRef := pullBase + "/fugue-apps/" + imageRepoPath + ":git-111111111111"
 	newRuntimeImageRef := pullBase + "/fugue-apps/" + imageRepoPath + ":git-222222222222"
+	oldPinnedRuntimeImageRef := mustRuntimeDigestRefForAppImagesTest(t, pushBase, pullBase, oldImageRef, oldImageDigest)
 
 	oldSource := model.AppSource{
 		Type:              model.AppSourceTypeGitHubPublic,
@@ -500,7 +516,7 @@ func setupAppImagesTestServer(t *testing.T) (*store.Store, *Server, string, mode
 		images: map[string]appImageRegistryInspectResult{
 			oldImageRef: {
 				ImageRef:  oldImageRef,
-				Digest:    "sha256:oldmanifest",
+				Digest:    oldImageDigest,
 				Exists:    true,
 				SizeBytes: 160,
 				BlobSizes: map[string]int64{
@@ -512,7 +528,7 @@ func setupAppImagesTestServer(t *testing.T) (*store.Store, *Server, string, mode
 			},
 			newImageRef: {
 				ImageRef:  newImageRef,
-				Digest:    "sha256:newmanifest",
+				Digest:    newImageDigest,
 				Exists:    true,
 				SizeBytes: 180,
 				BlobSizes: map[string]int64{
@@ -526,5 +542,5 @@ func setupAppImagesTestServer(t *testing.T) (*store.Store, *Server, string, mode
 	}
 	server.appImageRegistry = fakeRegistry
 
-	return s, server, apiKey, tenant, project, app, fakeRegistry, oldImageRef, newImageRef, oldRuntimeImageRef
+	return s, server, apiKey, tenant, project, app, fakeRegistry, oldImageRef, newImageRef, oldPinnedRuntimeImageRef
 }

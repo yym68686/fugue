@@ -416,7 +416,7 @@ func (s *Service) resolveImportedManagedImageRef(
 
 	var inspectErr error
 	for _, candidate := range orderedCandidates {
-		runtimeImageRef, err := rewriteImportedImageRef(candidate, s.registryPushBase, s.registryPullBase)
+		runtimeImageRef, err := s.rewriteImportedRuntimeImageRef(ctx, candidate)
 		if err != nil {
 			if s.Logger != nil {
 				s.Logger.Printf("ignore invalid imported managed image ref for app %s candidate=%s: %v", app.ID, candidate, err)
@@ -443,6 +443,26 @@ func (s *Service) resolveImportedManagedImageRef(
 		s.importImageInspectAttempts(),
 		strings.Join(orderedCandidates, ", "),
 	)
+}
+
+func (s *Service) rewriteImportedRuntimeImageRef(ctx context.Context, imageRef string) (string, error) {
+	candidate := strings.TrimSpace(imageRef)
+	if candidate == "" {
+		return "", fmt.Errorf("imported image reference is empty")
+	}
+
+	if s != nil && s.resolveManagedImageDigestRef != nil {
+		digestRef, err := s.resolveManagedImageDigestRef(ctx, candidate)
+		if err != nil {
+			if s.Logger != nil {
+				s.Logger.Printf("skip digest pin for imported managed image %s: %v", candidate, err)
+			}
+		} else if strings.TrimSpace(digestRef) != "" {
+			candidate = strings.TrimSpace(digestRef)
+		}
+	}
+
+	return rewriteImportedImageRef(candidate, s.registryPushBase, s.registryPullBase)
 }
 
 func (s *Service) inspectManagedImageWithRetry(ctx context.Context, candidate string) (bool, error) {

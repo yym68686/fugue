@@ -27,6 +27,7 @@ type Service struct {
 	inspectManagedImage           appimages.InspectFunc
 	inspectManagedImageConfig     imageConfigInspector
 	deleteManagedImage            func(context.Context, string) (appimages.DeleteResult, error)
+	resolveManagedImageDigestRef  func(context.Context, string) (string, error)
 	syncBillingImageStorage       bool
 	latestGitHubCommit            func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
 	newKubeClient                 func(namespace string) (*kubeClient, error)
@@ -63,13 +64,14 @@ func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *S
 				SigningKey: strings.TrimSpace(cfg.WorkloadIdentitySigningKey),
 			},
 		},
-		Logger:             logger,
-		importer:           sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
-		registryPushBase:   strings.TrimSpace(cfg.RegistryPushBase),
-		registryPullBase:   strings.TrimSpace(cfg.RegistryPullBase),
-		latestGitHubCommit: sourceimport.LatestGitHubCommit,
-		newKubeClient:      newKubeClient,
-		now:                time.Now,
+		Logger:                       logger,
+		importer:                     sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
+		registryPushBase:             strings.TrimSpace(cfg.RegistryPushBase),
+		registryPullBase:             strings.TrimSpace(cfg.RegistryPullBase),
+		resolveManagedImageDigestRef: sourceimport.ResolveRemoteImageDigestRef,
+		latestGitHubCommit:           sourceimport.LatestGitHubCommit,
+		newKubeClient:                newKubeClient,
+		now:                          time.Now,
 	}
 }
 

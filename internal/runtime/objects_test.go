@@ -625,6 +625,29 @@ func TestBuildAppDeploymentUsesIfNotPresentForDigestPinnedImages(t *testing.T) {
 	}
 }
 
+func TestBuildAppDeploymentUsesIfNotPresentForFugueManagedImmutableTags(t *testing.T) {
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "registry.pull.example/fugue-apps/example-runtime:git-0123456789ab",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	deployment := objects[1]
+	spec := deployment["spec"].(map[string]any)
+	template := spec["template"].(map[string]any)
+	podSpec := template["spec"].(map[string]any)
+	containers := podSpec["containers"].([]map[string]any)
+	if got := containers[0]["imagePullPolicy"]; got != "IfNotPresent" {
+		t.Fatalf("expected fugue-managed immutable tags to use imagePullPolicy IfNotPresent, got %#v", got)
+	}
+}
+
 func TestBuildAppObjectsSkipsServiceForBackgroundApps(t *testing.T) {
 	app := model.App{
 		TenantID: "tenant_demo",

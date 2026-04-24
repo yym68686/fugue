@@ -50,8 +50,32 @@ func TestDefaultMirroredImageRefUsesDigestTagAndSluggedRepoName(t *testing.T) {
 		"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		"",
 	)
-	if !strings.HasPrefix(got, "registry.internal.example/fugue-apps/demo:image-0123456789ab") {
+	if !strings.HasPrefix(got, "registry.internal.example/fugue-apps/ghcr-io-example-demo:image-0123456789ab") {
 		t.Fatalf("unexpected mirrored image ref: %q", got)
+	}
+}
+
+func TestDefaultMirroredImageRefIgnoresAppNameForSameDockerSource(t *testing.T) {
+	t.Parallel()
+
+	left := defaultMirroredImageRef(
+		"registry.internal.example",
+		"fugue-apps",
+		"agent-session-a",
+		"ghcr.io/example/runtime:latest",
+		"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"",
+	)
+	right := defaultMirroredImageRef(
+		"registry.internal.example",
+		"fugue-apps",
+		"agent-session-b",
+		"ghcr.io/example/runtime:latest",
+		"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"",
+	)
+	if left != right {
+		t.Fatalf("expected mirrored ref to stay stable across app names, got %q vs %q", left, right)
 	}
 }
 
@@ -127,6 +151,68 @@ func TestValidateMirroredImageReferenceWithClientsDetectsMissingDigestManifest(t
 	)
 	if err == nil || !strings.Contains(err.Error(), "fetch manifest by digest") {
 		t.Fatalf("expected digest manifest error, got %v", err)
+	}
+}
+
+func TestMirroredImageReferenceMatchesDigestWithClients(t *testing.T) {
+	t.Parallel()
+
+	imageRef := "registry.internal.example/fugue-apps/demo:image-0123456789ab"
+	expectedDigest := "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	matches, err := mirroredImageReferenceMatchesDigestWithClients(
+		imageRef,
+		expectedDigest,
+		func(string, ...crane.Option) (string, error) {
+			return expectedDigest, nil
+		},
+		func(string, ...crane.Option) ([]byte, error) {
+			return []byte("{}"), nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("match mirrored image ref: %v", err)
+	}
+	if !matches {
+		t.Fatal("expected mirrored image ref to match digest")
+	}
+}
+
+func TestMirroredImageReferenceMatchesDigestWithClientsDetectsMismatch(t *testing.T) {
+	t.Parallel()
+
+	imageRef := "registry.internal.example/fugue-apps/demo:image-0123456789ab"
+	expectedDigest := "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	matches, err := mirroredImageReferenceMatchesDigestWithClients(
+		imageRef,
+		expectedDigest,
+		func(string, ...crane.Option) (string, error) {
+			return "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", nil
+		},
+		func(string, ...crane.Option) ([]byte, error) {
+			return []byte("{}"), nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("match mirrored image ref: %v", err)
+	}
+	if matches {
+		t.Fatal("expected mirrored image ref mismatch to return false")
+	}
+}
+
+func TestDigestReferenceFromImageRef(t *testing.T) {
+	t.Parallel()
+
+	got, err := DigestReferenceFromImageRef(
+		"registry.internal.example/fugue-apps/demo:image-0123456789ab",
+		"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	)
+	if err != nil {
+		t.Fatalf("digest reference from image ref: %v", err)
+	}
+	want := "registry.internal.example/fugue-apps/demo@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	if got != want {
+		t.Fatalf("unexpected digest reference %q want %q", got, want)
 	}
 }
 

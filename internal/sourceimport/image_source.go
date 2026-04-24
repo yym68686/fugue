@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 )
 
 type DockerImageSourceImportRequest struct {
@@ -56,17 +58,22 @@ func (i *Importer) ImportDockerImageSource(ctx context.Context, req DockerImageS
 		digest,
 		req.ImageNameSuffix,
 	)
+	destOptions := craneOptionsForImageRef(ctx, destImageRef)
+	alreadyMirrored, err := mirroredImageReferenceMatchesDigest(destImageRef, digest, destOptions...)
+	if err != nil {
+		return GitHubSourceImportOutput{}, fmt.Errorf("check mirrored image in internal registry: %w", err)
+	}
 	copyOptions := append([]crane.Option{}, sourceOptions...)
 	if isInsecureRegistryHost(registryHostFromImageRef(destImageRef)) {
 		copyOptions = append(copyOptions, crane.Insecure)
 	}
-	if err := crane.Copy(sourceImageRef, destImageRef, copyOptions...); err != nil {
-		return GitHubSourceImportOutput{}, fmt.Errorf("mirror image into internal registry: %w", err)
-	}
-
-	destOptions := craneOptionsForImageRef(ctx, destImageRef)
-	if err := validateMirroredImageReference(destImageRef, digest, destOptions...); err != nil {
-		return GitHubSourceImportOutput{}, fmt.Errorf("validate mirrored image in internal registry: %w", err)
+	if !alreadyMirrored {
+		if err := crane.Copy(sourceImageRef, destImageRef, copyOptions...); err != nil {
+			return GitHubSourceImportOutput{}, fmt.Errorf("mirror image into internal registry: %w", err)
+		}
+		if err := validateMirroredImageReference(destImageRef, digest, destOptions...); err != nil {
+			return GitHubSourceImportOutput{}, fmt.Errorf("validate mirrored image in internal registry: %w", err)
+		}
 	}
 	detectedPort := 80
 	exposesPublicService := false
@@ -166,6 +173,55 @@ func validateMirroredImageReference(imageRef, expectedDigest string, options ...
 	return validateMirroredImageReferenceWithClients(imageRef, expectedDigest, crane.Digest, crane.Manifest, options...)
 }
 
+func mirroredImageReferenceMatchesDigest(imageRef, expectedDigest string, options ...crane.Option) (bool, error) {
+	return mirroredImageReferenceMatchesDigestWithClients(imageRef, expectedDigest, crane.Digest, crane.Manifest, options...)
+}
+
+func mirroredImageReferenceMatchesDigestWithClients(
+	imageRef,
+	expectedDigest string,
+	digestFn remoteImageDigestFunc,
+	manifestFn remoteImageManifestFunc,
+	options ...crane.Option,
+) (bool, error) {
+	imageRef = strings.TrimSpace(imageRef)
+	expectedDigest = strings.TrimSpace(expectedDigest)
+	if imageRef == "" {
+		return false, fmt.Errorf("destination image ref is empty")
+	}
+	if expectedDigest == "" {
+		return false, fmt.Errorf("expected digest is empty")
+	}
+
+	if _, err := manifestFn(imageRef, options...); err != nil {
+		if remoteImageReferenceMissing(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("fetch manifest by tag: %w", err)
+	}
+	actualDigest, err := digestFn(imageRef, options...)
+	if err != nil {
+		if remoteImageReferenceMissing(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("resolve mirrored image digest: %w", err)
+	}
+	if actualDigest != expectedDigest {
+		return false, nil
+	}
+	digestRef, err := DigestReferenceFromImageRef(imageRef, actualDigest)
+	if err != nil {
+		return false, err
+	}
+	if _, err := manifestFn(digestRef, options...); err != nil {
+		if remoteImageReferenceMissing(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("fetch manifest by digest: %w", err)
+	}
+	return true, nil
+}
+
 func validateMirroredImageReferenceWithClients(imageRef, expectedDigest string, digestFn remoteImageDigestFunc, manifestFn remoteImageManifestFunc, options ...crane.Option) error {
 	imageRef = strings.TrimSpace(imageRef)
 	expectedDigest = strings.TrimSpace(expectedDigest)
@@ -186,7 +242,7 @@ func validateMirroredImageReferenceWithClients(imageRef, expectedDigest string, 
 	if actualDigest != expectedDigest {
 		return fmt.Errorf("digest mismatch: expected %s, got %s", expectedDigest, actualDigest)
 	}
-	digestRef, err := digestReferenceFromImageRef(imageRef, actualDigest)
+	digestRef, err := DigestReferenceFromImageRef(imageRef, actualDigest)
 	if err != nil {
 		return err
 	}
@@ -196,7 +252,7 @@ func validateMirroredImageReferenceWithClients(imageRef, expectedDigest string, 
 	return nil
 }
 
-func digestReferenceFromImageRef(imageRef, digest string) (string, error) {
+func DigestReferenceFromImageRef(imageRef, digest string) (string, error) {
 	imageRef = strings.TrimSpace(imageRef)
 	digest = strings.TrimSpace(digest)
 	if imageRef == "" {
@@ -214,6 +270,18 @@ func digestReferenceFromImageRef(imageRef, digest string) (string, error) {
 		return "", fmt.Errorf("parse digest reference: %w", err)
 	}
 	return digestRef.Name(), nil
+}
+
+func ResolveRemoteImageDigestRef(ctx context.Context, imageRef string) (string, error) {
+	normalized, err := normalizeContainerImageRef(imageRef)
+	if err != nil {
+		return "", err
+	}
+	digest, err := crane.Digest(normalized, craneOptionsForImageRef(ctx, normalized)...)
+	if err != nil {
+		return "", fmt.Errorf("resolve image digest: %w", err)
+	}
+	return DigestReferenceFromImageRef(normalized, digest)
 }
 
 func detectImageBackgroundOverride(imageRef string, configFile *v1.ConfigFile, options ...crane.Option) (string, bool, error) {
@@ -498,7 +566,7 @@ func defaultMirroredImageRef(registryPushBase, imageRepository, appName, sourceI
 		imageRepository = "fugue-apps"
 	}
 
-	repoPath := defaultImportedImageAppName(appName, sourceImageRef)
+	repoPath := defaultMirroredImageRepositoryName(sourceImageRef, appName)
 	if suffix := model.SlugifyOptional(imageNameSuffix); suffix != "" {
 		repoPath += "-" + suffix
 	}
@@ -521,6 +589,27 @@ func defaultMirroredImageRef(registryPushBase, imageRepository, appName, sourceI
 		repoPath,
 		shortCommit(tagSeed),
 	)
+}
+
+func defaultMirroredImageRepositoryName(sourceImageRef, fallbackName string) string {
+	if normalized, err := normalizeContainerImageRef(sourceImageRef); err == nil {
+		if ref, err := name.ParseReference(normalized, imageReferenceNameOptions(normalized)...); err == nil {
+			if slug := model.Slugify(ref.Context().Name()); slug != "" {
+				return slug
+			}
+		}
+	}
+	if baseName := imageSourceBaseName(sourceImageRef); baseName != "" {
+		if slug := model.Slugify(baseName); slug != "" {
+			return slug
+		}
+	}
+	if fallbackName != "" {
+		if slug := model.Slugify(fallbackName); slug != "" {
+			return slug
+		}
+	}
+	return "image"
 }
 
 func defaultImportedImageAppName(appName, sourceImageRef string) string {
@@ -555,4 +644,23 @@ func imageSourceBaseName(imageRef string) string {
 		lastSegment = lastSegment[:idx]
 	}
 	return lastSegment
+}
+
+func remoteImageReferenceMissing(err error) bool {
+	var transportErr *transport.Error
+	if !errors.As(err, &transportErr) {
+		return false
+	}
+	if transportErr.StatusCode == 404 {
+		return true
+	}
+	for _, diagnostic := range transportErr.Errors {
+		switch diagnostic.Code {
+		case transport.ManifestUnknownErrorCode,
+			transport.NameUnknownErrorCode,
+			transport.BlobUnknownErrorCode:
+			return true
+		}
+	}
+	return false
 }
