@@ -371,18 +371,14 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		initContainers = append(initContainers, buildAppPersistentStorageInitContainer(*storageSpec))
 		sidecars = append(sidecars, buildAppPersistentStorageSidecar(*storageSpec))
 	}
-	if len(volumeMounts) > 0 {
-		container["volumeMounts"] = volumeMounts
-	}
+	container["volumeMounts"] = volumeMounts
 
 	podSpec := map[string]any{
 		"containers": []map[string]any{container},
+		"volumes":    volumes,
 	}
 	if len(sidecars) > 0 {
 		podSpec["containers"] = append(podSpec["containers"].([]map[string]any), sidecars...)
-	}
-	if len(volumes) > 0 {
-		podSpec["volumes"] = volumes
 	}
 
 	if len(postgresResources) > 0 {

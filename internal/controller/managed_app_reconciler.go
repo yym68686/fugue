@@ -341,7 +341,7 @@ func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, depl
 	case !found:
 		status.Phase = runtime.ManagedAppPhasePending
 		status.Message = fmt.Sprintf("waiting for deployment %s", runtime.RuntimeAppResourceName(app))
-	case status.ReadyReplicas >= app.Spec.Replicas:
+	case managedDeploymentStatusReady(deployment, app.Spec.Replicas):
 		status.Phase = runtime.ManagedAppPhaseReady
 		status.Message = fmt.Sprintf("deployment ready (%d/%d replicas)", status.ReadyReplicas, app.Spec.Replicas)
 	case deployment.Status.Replicas == 0:
@@ -355,7 +355,7 @@ func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, depl
 		status.Message = deploymentFailureMessage(deployment.Status.Conditions)
 	default:
 		status.Phase = runtime.ManagedAppPhaseProgressing
-		status.Message = fmt.Sprintf("deployment progressing (%d/%d ready replicas)", status.ReadyReplicas, app.Spec.Replicas)
+		status.Message = managedDeploymentProgressMessage(deployment, app.Spec.Replicas, runtime.RuntimeAppResourceName(app))
 	}
 	applyManagedAppReleaseStatus(&status, managed.Status, app, managed.Spec.Scheduling)
 	return status
@@ -365,6 +365,57 @@ func managedAppStatusReady(status runtime.ManagedAppStatus, app model.App) bool 
 	return strings.EqualFold(strings.TrimSpace(status.Phase), runtime.ManagedAppPhaseReady) &&
 		status.ReadyReplicas >= app.Spec.Replicas &&
 		app.Spec.Replicas > 0
+}
+
+func managedDeploymentStatusReady(deployment kubeDeployment, desiredReplicas int) bool {
+	if desiredReplicas <= 0 {
+		return false
+	}
+	if deployment.Status.ObservedGeneration < deployment.Metadata.Generation {
+		return false
+	}
+	if deployment.Status.UpdatedReplicas < desiredReplicas {
+		return false
+	}
+	if deployment.Status.ReadyReplicas < desiredReplicas {
+		return false
+	}
+	if deployment.Status.AvailableReplicas < desiredReplicas {
+		return false
+	}
+	if deployment.Status.Replicas > desiredReplicas {
+		return false
+	}
+	if deployment.Status.UnavailableReplicas > 0 {
+		return false
+	}
+	return true
+}
+
+func managedDeploymentProgressMessage(deployment kubeDeployment, desiredReplicas int, deploymentName string) string {
+	deploymentName = strings.TrimSpace(deploymentName)
+	if deploymentName == "" {
+		deploymentName = "deployment"
+	}
+	if deployment.Status.ObservedGeneration < deployment.Metadata.Generation {
+		return fmt.Sprintf("waiting for deployment %s observed generation %d/%d", deploymentName, deployment.Status.ObservedGeneration, deployment.Metadata.Generation)
+	}
+	if deployment.Status.UpdatedReplicas < desiredReplicas {
+		return fmt.Sprintf("waiting for deployment %s updated replicas %d/%d", deploymentName, deployment.Status.UpdatedReplicas, desiredReplicas)
+	}
+	if deployment.Status.ReadyReplicas < desiredReplicas {
+		return fmt.Sprintf("waiting for deployment %s ready replicas %d/%d", deploymentName, deployment.Status.ReadyReplicas, desiredReplicas)
+	}
+	if deployment.Status.AvailableReplicas < desiredReplicas {
+		return fmt.Sprintf("waiting for deployment %s available replicas %d/%d", deploymentName, deployment.Status.AvailableReplicas, desiredReplicas)
+	}
+	if deployment.Status.Replicas > desiredReplicas {
+		return fmt.Sprintf("waiting for deployment %s old replicas to terminate (%d total, desired=%d)", deploymentName, deployment.Status.Replicas, desiredReplicas)
+	}
+	if deployment.Status.UnavailableReplicas > 0 {
+		return fmt.Sprintf("waiting for deployment %s unavailable replicas to drain (%d)", deploymentName, deployment.Status.UnavailableReplicas)
+	}
+	return fmt.Sprintf("deployment progressing (%d/%d ready replicas)", maxInt(deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas), desiredReplicas)
 }
 
 func managedAppBaseStatus(managed runtime.ManagedAppObject, app model.App) runtime.ManagedAppStatus {

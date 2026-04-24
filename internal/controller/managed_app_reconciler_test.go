@@ -124,6 +124,45 @@ func TestBuildManagedAppStatusPromotesPendingReleaseWhenReady(t *testing.T) {
 	}
 }
 
+func TestBuildManagedAppStatusWaitsForOldReplicasToTerminate(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:v2",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	managed := runtime.ManagedAppObject{
+		Metadata: runtime.ManagedAppMeta{
+			Generation: 3,
+		},
+		Spec: runtime.ManagedAppSpec{
+			Scheduling: runtime.SchedulingConstraints{},
+		},
+	}
+	deployment := kubeDeployment{}
+	deployment.Metadata.Generation = 3
+	deployment.Status.ObservedGeneration = 3
+	deployment.Status.Replicas = 2
+	deployment.Status.UpdatedReplicas = 1
+	deployment.Status.ReadyReplicas = 1
+	deployment.Status.AvailableReplicas = 1
+
+	status := buildManagedAppStatus(managed, app, deployment, true, nil, nil)
+
+	if status.Phase != runtime.ManagedAppPhaseProgressing {
+		t.Fatalf("expected phase progressing while old replicas exist, got %q", status.Phase)
+	}
+	if !strings.Contains(status.Message, "old replicas to terminate") {
+		t.Fatalf("expected old replica wait message, got %q", status.Message)
+	}
+}
+
 func TestBuildManagedAppStatusMarksCrashLoopingPodsAsError(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",
@@ -566,7 +605,7 @@ func TestBuildManagedAppStatusKeepsContainerCreatingPodsAsProgressing(t *testing
 	if status.Phase != runtime.ManagedAppPhaseProgressing {
 		t.Fatalf("expected phase progressing, got %q", status.Phase)
 	}
-	if !strings.Contains(status.Message, "deployment progressing") {
+	if !strings.Contains(status.Message, "ready replicas 0/1") {
 		t.Fatalf("expected rollout progress message, got %q", status.Message)
 	}
 }

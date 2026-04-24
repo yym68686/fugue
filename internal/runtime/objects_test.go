@@ -188,6 +188,44 @@ func TestBuildAppObjectsUseAppIDScopedRuntimeNames(t *testing.T) {
 	}
 }
 
+func TestBuildAppObjectsExplicitlyClearsVolumeFieldsWhenNoMountsRemain(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo_123",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	if len(objects) < 2 {
+		t.Fatalf("expected deployment object, got %d objects", len(objects))
+	}
+
+	appDeployment := objects[1]
+	appPodSpec := appDeployment["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	volumes, ok := appPodSpec["volumes"].([]map[string]any)
+	if !ok {
+		t.Fatalf("expected empty volumes list to be present, got %#v", appPodSpec["volumes"])
+	}
+	if len(volumes) != 0 {
+		t.Fatalf("expected no volumes, got %#v", volumes)
+	}
+
+	containers := appPodSpec["containers"].([]map[string]any)
+	volumeMounts, ok := containers[0]["volumeMounts"].([]map[string]any)
+	if !ok {
+		t.Fatalf("expected empty volumeMounts list to be present, got %#v", containers[0]["volumeMounts"])
+	}
+	if len(volumeMounts) != 0 {
+		t.Fatalf("expected no volume mounts, got %#v", volumeMounts)
+	}
+}
+
 func TestBuildAppObjectsIncludeComposeServiceAlias(t *testing.T) {
 	app := model.App{
 		ID:        "app_demo_123",
