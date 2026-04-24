@@ -2579,6 +2579,50 @@ func TestRunAppDeployShortcutUsesSemanticCommand(t *testing.T) {
 	}
 }
 
+func TestRunAppRebuildCanClearFiles(t *testing.T) {
+	t.Parallel()
+
+	var gotBody rebuildPlanRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/rebuild":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode rebuild body: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_123","app_id":"app_123"},"build":{"source_type":"github-public","build_strategy":"dockerfile","clear_files":true}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "rebuild", "demo",
+		"--clear-files",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app rebuild: %v", err)
+	}
+
+	if !gotBody.ClearFiles {
+		t.Fatalf("expected clear_files request flag, got %+v", gotBody)
+	}
+	out := stdout.String()
+	for _, want := range []string{"app_id=app_123", "operation_id=op_123", "source_type=github-public"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
 func TestRunEnvSetByNameUsesSemanticCommand(t *testing.T) {
 	t.Parallel()
 

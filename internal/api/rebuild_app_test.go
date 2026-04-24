@@ -94,6 +94,73 @@ func TestRebuildAppQueuesImportForGitHubSource(t *testing.T) {
 	}
 }
 
+func TestRebuildAppCanClearConfiguredFiles(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, tenant, project := setupRebuildAppTestServer(t)
+	app, err := s.CreateImportedApp(tenant.ID, project.ID, "demo-files", "", model.AppSpec{
+		Image:     "registry.example.com/demo-files:current",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Files: []model.AppFile{
+			{
+				Path:    "/app/old.js",
+				Content: "console.log('old')",
+				Mode:    0o644,
+			},
+			{
+				Path:    "/app/config.yaml",
+				Content: "debug: true\n",
+				Secret:  true,
+				Mode:    0o600,
+			},
+		},
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyDockerfile,
+	}, model.AppRoute{
+		Hostname:    "demo-files.apps.example.com",
+		BaseDomain:  "apps.example.com",
+		PublicURL:   "https://demo-files.apps.example.com",
+		ServicePort: 80,
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/rebuild", apiKey, map[string]any{
+		"clear_files": true,
+	})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Operation model.Operation `json:"operation"`
+		Build     struct {
+			ClearFiles bool `json:"clear_files"`
+		} `json:"build"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if !response.Build.ClearFiles {
+		t.Fatal("expected rebuild response to report clear_files=true")
+	}
+
+	op, err := s.GetOperation(response.Operation.ID)
+	if err != nil {
+		t.Fatalf("get operation: %v", err)
+	}
+	if op.DesiredSpec == nil {
+		t.Fatal("expected desired spec on queued operation")
+	}
+	if len(op.DesiredSpec.Files) != 0 {
+		t.Fatalf("expected clear_files to remove configured files from rebuild spec, got %+v", op.DesiredSpec.Files)
+	}
+}
+
 func TestRebuildAppQueuesImportForUploadSource(t *testing.T) {
 	t.Parallel()
 

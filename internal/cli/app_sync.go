@@ -92,6 +92,7 @@ func (c *CLI) newAppSyncRunCommand() *cobra.Command {
 		DockerfilePath  string
 		BuildContextDir string
 		RepoToken       string
+		ClearFiles      bool
 		Wait            bool
 	}{Wait: true}
 	cmd := &cobra.Command{
@@ -122,6 +123,7 @@ func (c *CLI) newAppSyncRunCommand() *cobra.Command {
 				DockerfilePath:  strings.TrimSpace(opts.DockerfilePath),
 				BuildContextDir: strings.TrimSpace(opts.BuildContextDir),
 				RepoAuthToken:   strings.TrimSpace(opts.RepoToken),
+				ClearFiles:      opts.ClearFiles,
 			})
 			if err != nil {
 				return err
@@ -151,6 +153,7 @@ func (c *CLI) newAppSyncRunCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.DockerfilePath, "dockerfile", "", "Override the Dockerfile path")
 	cmd.Flags().StringVar(&opts.BuildContextDir, "context", "", "Override the Docker build context")
 	cmd.Flags().StringVar(&opts.RepoToken, "repo-token", "", "Repository auth token for private Git sources")
+	cmd.Flags().BoolVar(&opts.ClearFiles, "clear-files", false, "Remove declarative app files before syncing")
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for operation completion")
 	return cmd
 }

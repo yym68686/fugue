@@ -99,6 +99,7 @@ type rebuildPlan struct {
 	BuildContextDir  string `json:"build_context_dir,omitempty"`
 	BuildStrategy    string `json:"build_strategy,omitempty"`
 	ComposeService   string `json:"compose_service,omitempty"`
+	ClearFiles       bool   `json:"clear_files,omitempty"`
 }
 
 type rebuildPlanRequest struct {
@@ -108,6 +109,7 @@ type rebuildPlanRequest struct {
 	DockerfilePath  string `json:"dockerfile_path,omitempty"`
 	BuildContextDir string `json:"build_context_dir,omitempty"`
 	RepoAuthToken   string `json:"repo_auth_token,omitempty"`
+	ClearFiles      bool   `json:"clear_files,omitempty"`
 }
 
 type appRebuildResponse struct {

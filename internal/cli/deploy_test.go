@@ -174,6 +174,56 @@ func TestRunDeployWithRepoURLImportsGitHubAndLoadsEnv(t *testing.T) {
 	}
 }
 
+func TestRunDeployExistingAppCanClearFiles(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM nginx:alpine\n"), 0o644); err != nil {
+		t.Fatalf("write dockerfile: %v", err)
+	}
+
+	var gotRequest importUploadRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/import-upload":
+			if err := r.ParseMultipartForm(32 << 20); err != nil {
+				t.Fatalf("parse multipart form: %v", err)
+			}
+			if err := json.Unmarshal([]byte(r.FormValue("request")), &gotRequest); err != nil {
+				t.Fatalf("decode upload import request: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","name":"demo"},"operation":{"id":"op_123","app_id":"app_123"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"deploy", dir,
+		"--app", "demo",
+		"--clear-files",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run deploy existing app: %v", err)
+	}
+
+	if gotRequest.AppID != "app_123" {
+		t.Fatalf("expected app_id app_123, got %+v", gotRequest)
+	}
+	if !gotRequest.ClearFiles {
+		t.Fatalf("expected clear_files to be forwarded, got %+v", gotRequest)
+	}
+}
+
 func TestRunDeployLocalDryRunKeepsTopologyModeWhenDefaultNameCollidesWithExistingApp(t *testing.T) {
 	t.Parallel()
 

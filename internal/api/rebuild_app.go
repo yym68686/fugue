@@ -15,6 +15,7 @@ type rebuildAppRequest struct {
 	DockerfilePath  *string `json:"dockerfile_path"`
 	BuildContextDir *string `json:"build_context_dir"`
 	RepoAuthToken   *string `json:"repo_auth_token"`
+	ClearFiles      bool    `json:"clear_files,omitempty"`
 }
 
 func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
@@ -177,6 +178,9 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(spec.RuntimeID) == "" {
 		spec.RuntimeID = "runtime_managed_shared"
 	}
+	if req.ClearFiles {
+		spec.Files = nil
+	}
 	if spec.Workspace != nil {
 		spec.Workspace.ResetToken = model.NewID("workspace-reset")
 	}
@@ -213,6 +217,9 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(source.ImageRef) != "" {
 		auditMetadata["image_ref"] = source.ImageRef
 	}
+	if req.ClearFiles {
+		auditMetadata["clear_files"] = "true"
+	}
 	s.appendAudit(principal, "app.rebuild", "operation", op.ID, app.TenantID, auditMetadata)
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
 		"operation": sanitizeOperationForAPI(op),
@@ -227,6 +234,7 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 			"build_context_dir":  source.BuildContextDir,
 			"build_strategy":     source.BuildStrategy,
 			"compose_service":    source.ComposeService,
+			"clear_files":        req.ClearFiles,
 		},
 	})
 }

@@ -106,6 +106,7 @@ func (c *CLI) newAppReleaseRebuildCommand() *cobra.Command {
 		DockerfilePath  string
 		BuildContextDir string
 		RepoToken       string
+		ClearFiles      bool
 		Wait            bool
 	}{Wait: true}
 	cmd := &cobra.Command{
@@ -128,6 +129,7 @@ func (c *CLI) newAppReleaseRebuildCommand() *cobra.Command {
 				DockerfilePath:  opts.DockerfilePath,
 				BuildContextDir: opts.BuildContextDir,
 				RepoAuthToken:   opts.RepoToken,
+				ClearFiles:      opts.ClearFiles,
 			})
 			if err != nil {
 				return err
@@ -157,6 +159,7 @@ func (c *CLI) newAppReleaseRebuildCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.DockerfilePath, "dockerfile", "", "Override the Dockerfile path")
 	cmd.Flags().StringVar(&opts.BuildContextDir, "context", "", "Override the Docker build context")
 	cmd.Flags().StringVar(&opts.RepoToken, "repo-token", "", "Repository auth token for private Git sources")
+	cmd.Flags().BoolVar(&opts.ClearFiles, "clear-files", false, "Remove declarative app files before rebuilding")
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for operation completion")
 	return cmd
 }

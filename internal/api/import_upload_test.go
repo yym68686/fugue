@@ -916,6 +916,136 @@ func TestImportUploadExistingAppOriginOwnershipModes(t *testing.T) {
 	}
 }
 
+func TestImportUploadExistingAppCanReplaceDeclarativeFiles(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		request    importUploadRequest
+		wantFiles  []model.AppFile
+		wantStatus int
+	}{
+		{
+			name: "clear-files",
+			request: importUploadRequest{
+				ClearFiles: true,
+			},
+			wantFiles:  nil,
+			wantStatus: http.StatusAccepted,
+		},
+		{
+			name: "replace-files",
+			request: importUploadRequest{
+				Files: []model.AppFile{{
+					Path:    "/app/current.js",
+					Content: "console.log('current')",
+					Mode:    0o644,
+				}},
+			},
+			wantFiles: []model.AppFile{{
+				Path:    "/app/current.js",
+				Content: "console.log('current')",
+				Mode:    0o644,
+			}},
+			wantStatus: http.StatusAccepted,
+		},
+		{
+			name: "clear-and-files-conflict",
+			request: importUploadRequest{
+				ClearFiles: true,
+				Files: []model.AppFile{{
+					Path:    "/app/current.js",
+					Content: "console.log('current')",
+					Mode:    0o644,
+				}},
+			},
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := store.New(filepath.Join(t.TempDir(), "store.json"))
+			if err := s.Init(); err != nil {
+				t.Fatalf("init store: %v", err)
+			}
+			tenant, err := s.CreateTenant("Upload Files Tenant")
+			if err != nil {
+				t.Fatalf("create tenant: %v", err)
+			}
+			project, err := s.CreateProject(tenant.ID, "web", "")
+			if err != nil {
+				t.Fatalf("create project: %v", err)
+			}
+			_, apiKey, err := s.CreateAPIKey(tenant.ID, "uploader", []string{"app.deploy"})
+			if err != nil {
+				t.Fatalf("create api key: %v", err)
+			}
+			app, err := s.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+				Image:     "registry.pull.example/fugue-apps/demo:git-current",
+				Replicas:  1,
+				RuntimeID: "runtime_managed_shared",
+				Files: []model.AppFile{{
+					Path:    "/app/old.js",
+					Content: "console.log('old')",
+					Mode:    0o644,
+				}},
+			}, model.AppSource{
+				Type:          model.AppSourceTypeGitHubPublic,
+				RepoURL:       "https://github.com/example/demo",
+				RepoBranch:    "main",
+				BuildStrategy: model.AppBuildStrategyDockerfile,
+			}, model.AppRoute{})
+			if err != nil {
+				t.Fatalf("create imported app: %v", err)
+			}
+
+			server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+				AppBaseDomain: "apps.example.com",
+			})
+			archiveBytes := mustTarGz(t, map[string]string{
+				"Dockerfile": "FROM nginx:alpine\n",
+			})
+			reqBody := tc.request
+			reqBody.AppID = app.ID
+			body, contentType := newImportUploadMultipartBody(t, reqBody, "demo-override.tgz", archiveBytes)
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/apps/import-upload", body)
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+			req.Header.Set("Content-Type", contentType)
+			recorder := httptest.NewRecorder()
+
+			server.Handler().ServeHTTP(recorder, req)
+
+			if recorder.Code != tc.wantStatus {
+				t.Fatalf("expected status %d, got %d body=%s", tc.wantStatus, recorder.Code, recorder.Body.String())
+			}
+			if tc.wantStatus != http.StatusAccepted {
+				return
+			}
+
+			var response struct {
+				Operation model.Operation `json:"operation"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			op, err := s.GetOperation(response.Operation.ID)
+			if err != nil {
+				t.Fatalf("get operation: %v", err)
+			}
+			if op.DesiredSpec == nil {
+				t.Fatal("expected desired spec on operation")
+			}
+			if !appFilesEqual(op.DesiredSpec.Files, tc.wantFiles) {
+				t.Fatalf("expected desired files %+v, got %+v", tc.wantFiles, op.DesiredSpec.Files)
+			}
+		})
+	}
+}
+
 func newImportUploadMultipartBody(t *testing.T, req importUploadRequest, archiveName string, archiveBytes []byte) (*bytes.Buffer, string) {
 	t.Helper()
 

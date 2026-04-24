@@ -45,6 +45,7 @@ type importUploadRequest struct {
 	StartupCommand           *string                                           `json:"startup_command,omitempty"`
 	PersistentStorage        *model.AppPersistentStorageSpec                   `json:"persistent_storage,omitempty"`
 	Postgres                 *model.AppPostgresSpec                            `json:"postgres"`
+	ClearFiles               bool                                              `json:"clear_files,omitempty"`
 	ReplaceSource            bool                                              `json:"replace_source,omitempty"`
 	UpdateExisting           bool                                              `json:"update_existing,omitempty"`
 	DeleteMissing            bool                                              `json:"delete_missing,omitempty"`
@@ -152,6 +153,20 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 			}
 			spec.Env = env
 		}
+		switch {
+		case req.ClearFiles && len(req.Files) > 0:
+			httpx.WriteError(w, http.StatusBadRequest, "clear_files cannot be combined with files")
+			return
+		case req.ClearFiles:
+			spec.Files = nil
+		case len(req.Files) > 0:
+			files, err := normalizeUploadedFiles(req.Files)
+			if err != nil {
+				httpx.WriteError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			spec.Files = files
+		}
 		if req.PersistentStorage != nil {
 			normalizedPersistentStorage, err := normalizeImportedPersistentStorage(req.PersistentStorage, spec.Files)
 			if err != nil {
@@ -191,6 +206,11 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 			"app":       sanitizeAppForAPI(app),
 			"operation": sanitizeOperationForAPI(op),
 		})
+		return
+	}
+
+	if req.ClearFiles {
+		httpx.WriteError(w, http.StatusBadRequest, "clear_files is only supported when app_id is set")
 		return
 	}
 

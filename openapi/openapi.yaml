@@ -4758,6 +4758,8 @@ components:
           type: string
         compose_service:
           type: string
+        clear_files:
+          type: boolean
     ImportProjectRequest:
       type: object
       additionalProperties: false
@@ -6676,6 +6678,8 @@ components:
           $ref: "#/components/schemas/AppPersistentStorageSpec"
         postgres:
           $ref: "#/components/schemas/AppPostgresSpec"
+        clear_files:
+          type: boolean
         replace_source:
           type: boolean
         update_existing:
@@ -7577,6 +7581,8 @@ components:
           type: string
         repo_auth_token:
           type: string
+        clear_files:
+          type: boolean
     AppRebuildResponse:
       type: object
       additionalProperties: false

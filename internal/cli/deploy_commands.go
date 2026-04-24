@@ -62,6 +62,7 @@ type deployLocalOptions struct {
 	AppRef         string
 	AppID          string
 	Dir            string
+	ClearFiles     bool
 	ReplaceSource  bool
 	RepoURLCompat  string
 	Branch         string
@@ -175,6 +176,7 @@ Defaults:
 	cmd.Flags().StringVar(&opts.AppRef, "app", "", "Update an existing app by name or ID")
 	cmd.Flags().StringVar(&opts.Dir, "dir", "", "Project directory to upload")
 	cmd.Flags().StringVar(&opts.AppID, "app-id", "", "Existing app ID to redeploy")
+	cmd.Flags().BoolVar(&opts.ClearFiles, "clear-files", false, "For --app redeploys, remove declarative app files before importing")
 	cmd.Flags().BoolVar(&opts.ReplaceSource, "replace-source", false, "Adopt the uploaded source as the app's durable source-of-truth")
 	cmd.Flags().StringVar(&opts.RepoURLCompat, "repo-url", "", "Compatibility flag for GitHub deploys; prefer 'deploy github'")
 	cmd.Flags().StringVar(&opts.Branch, "branch", "", "Git branch for --repo-url compatibility mode")
@@ -359,6 +361,9 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 	if appRef != "" && (opts.UpdateExisting || opts.DeleteMissing || opts.Replace || opts.DryRun) {
 		return fmt.Errorf("--update-existing, --replace, --delete-missing, and --dry-run are not supported with --app")
 	}
+	if opts.ClearFiles && appRef == "" {
+		return fmt.Errorf("--clear-files requires --app or --app-id")
+	}
 
 	workingDir, err := resolveDeployPath(pathArg, opts.Dir)
 	if err != nil {
@@ -505,6 +510,7 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 		StartupCommand:           deployStartupCommandPointer(opts.StartupCommand),
 		PersistentStorage:        persistentStorage,
 		Postgres:                 postgres,
+		ClearFiles:               opts.ClearFiles,
 		ReplaceSource:            opts.ReplaceSource,
 		UpdateExisting:           opts.UpdateExisting,
 		DeleteMissing:            opts.DeleteMissing,
