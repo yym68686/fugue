@@ -12,12 +12,17 @@ import (
 	"strings"
 
 	"fugue/internal/model"
+
+	"github.com/moby/patternmatcher"
+	"github.com/moby/patternmatcher/ignorefile"
 )
 
 type projectSelection struct {
 	ID     string
 	Create *importProjectRequest
 }
+
+const maxSourceArchiveUploadBytes = 128 << 20
 
 func resolveTenantSelection(client *Client, tenantID, tenantName string) (string, error) {
 	tenantID = strings.TrimSpace(tenantID)
@@ -222,11 +227,16 @@ func createSourceArchive(rootDir, appName string) ([]byte, string, error) {
 	if rootDir == "" {
 		return nil, "", fmt.Errorf("project directory is required")
 	}
+	archiveIgnore, err := loadSourceArchiveIgnore(rootDir)
+	if err != nil {
+		return nil, "", err
+	}
+
 	buffer := bytes.NewBuffer(nil)
 	gzipWriter := gzip.NewWriter(buffer)
 	tarWriter := tar.NewWriter(gzipWriter)
 
-	err := filepath.WalkDir(rootDir, func(fullPath string, entry fs.DirEntry, walkErr error) error {
+	err = filepath.WalkDir(rootDir, func(fullPath string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -238,7 +248,11 @@ func createSourceArchive(rootDir, appName string) ([]byte, string, error) {
 		if relPath == "." {
 			return nil
 		}
-		if skip, skipDir := shouldSkipArchivePath(relPath, entry); skip {
+		skip, skipDir, err := shouldSkipArchivePath(relPath, entry, archiveIgnore)
+		if err != nil {
+			return err
+		}
+		if skip {
 			if skipDir {
 				return filepath.SkipDir
 			}
@@ -294,23 +308,95 @@ func createSourceArchive(rootDir, appName string) ([]byte, string, error) {
 	if err := gzipWriter.Close(); err != nil {
 		return nil, "", fmt.Errorf("close gzip archive: %w", err)
 	}
-	return buffer.Bytes(), model.Slugify(appName) + ".tgz", nil
+	archiveName := model.Slugify(appName) + ".tgz"
+	if err := validateSourceArchiveSize(archiveName, buffer.Len(), maxSourceArchiveUploadBytes); err != nil {
+		return nil, "", err
+	}
+	return buffer.Bytes(), archiveName, nil
 }
 
-func shouldSkipArchivePath(relPath string, entry fs.DirEntry) (bool, bool) {
+type sourceArchiveIgnore struct {
+	matcher      *patternmatcher.PatternMatcher
+	hasExcludes  bool
+	hasInclusion bool
+}
+
+func loadSourceArchiveIgnore(rootDir string) (sourceArchiveIgnore, error) {
+	ignorePath := filepath.Join(rootDir, ".dockerignore")
+	file, err := os.Open(ignorePath)
+	switch {
+	case os.IsNotExist(err):
+		return sourceArchiveIgnore{}, nil
+	case err != nil:
+		return sourceArchiveIgnore{}, fmt.Errorf("read .dockerignore: %w", err)
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+
+	patterns, err := ignorefile.ReadAll(file)
+	if err != nil {
+		return sourceArchiveIgnore{}, fmt.Errorf("read .dockerignore: %w", err)
+	}
+	matcher, err := patternmatcher.New(patterns)
+	if err != nil {
+		return sourceArchiveIgnore{}, fmt.Errorf("parse .dockerignore: %w", err)
+	}
+	return sourceArchiveIgnore{
+		matcher:      matcher,
+		hasExcludes:  len(patterns) > 0,
+		hasInclusion: matcher.Exclusions(),
+	}, nil
+}
+
+func shouldSkipArchivePath(relPath string, entry fs.DirEntry, archiveIgnore sourceArchiveIgnore) (bool, bool, error) {
 	segments := strings.Split(relPath, "/")
 	for _, segment := range segments {
-		switch segment {
-		case ".git", "node_modules", ".next", ".turbo", ".vercel", ".idea", ".vscode", "__pycache__":
-			return true, entry.IsDir()
+		if shouldSkipArchiveSegment(segment, entry.IsDir()) {
+			return true, entry.IsDir(), nil
 		}
 	}
 	switch filepath.Base(relPath) {
 	case ".DS_Store", "Thumbs.db":
-		return true, false
-	default:
-		return false, false
+		return true, false, nil
 	}
+	if !archiveIgnore.hasExcludes {
+		return false, false, nil
+	}
+	matched, err := archiveIgnore.matcher.MatchesOrParentMatches(relPath)
+	if err != nil {
+		return false, false, err
+	}
+	if !matched {
+		return false, false, nil
+	}
+	return true, entry.IsDir() && !archiveIgnore.hasInclusion, nil
+}
+
+func shouldSkipArchiveSegment(segment string, isDir bool) bool {
+	switch segment {
+	case ".git", "node_modules", ".next", ".turbo", ".vercel", ".idea", ".vscode", "__pycache__",
+		".venv", "venv", ".tox", ".nox", ".pytest_cache", ".mypy_cache", ".ruff_cache":
+		return true
+	}
+	if !isDir {
+		return false
+	}
+	return strings.HasPrefix(segment, ".venv") ||
+		strings.HasSuffix(segment, "-venv") ||
+		strings.HasSuffix(segment, ".egg-info")
+}
+
+func validateSourceArchiveSize(archiveName string, sizeBytes, maxBytes int) error {
+	if maxBytes <= 0 || sizeBytes <= maxBytes {
+		return nil
+	}
+	return fmt.Errorf(
+		"source archive %s is %d bytes, which exceeds the Fugue upload limit of %d bytes; add local-only files such as virtual environments, caches, tests, or build artifacts to .dockerignore",
+		strings.TrimSpace(archiveName),
+		sizeBytes,
+		maxBytes,
+	)
 }
 
 func firstNonEmpty(values ...string) string {

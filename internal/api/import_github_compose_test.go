@@ -112,6 +112,79 @@ func TestBuildQueuedImageSourcePreservesComposeMetadata(t *testing.T) {
 	}
 }
 
+func TestImportResolvedGitHubTopologyHydratesGitHubRevisionMetadata(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Revision Metadata Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	raiseManagedTestCap(t, s, tenant.ID)
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		AppBaseDomain:    "apps.example.com",
+		RegistryPushBase: "registry.internal.example",
+	})
+
+	const commitSHA = "9ebeebfd1234567890abcdef1234567890abcdef"
+	const committedAt = "2026-04-20T12:34:56Z"
+
+	result, err := server.importResolvedGitHubTopology(
+		model.Principal{ActorType: model.ActorTypeAPIKey, ActorID: "key"},
+		tenant.ID,
+		importGitHubRequest{
+			ProjectID:      project.ID,
+			RepoURL:        "https://github.com/example/demo",
+			RepoVisibility: "public",
+		},
+		"runtime_managed_shared",
+		1,
+		"Imported from GitHub",
+		"demo",
+		sourceimport.NormalizedTopology{
+			PrimaryService:    "web",
+			CommitSHA:         commitSHA,
+			CommitCommittedAt: committedAt,
+			Services: []sourceimport.ComposeService{
+				{
+					Name:           "web",
+					Kind:           sourceimport.ComposeServiceKindApp,
+					ServiceType:    sourceimport.ServiceTypeApp,
+					BuildStrategy:  model.AppBuildStrategyDockerfile,
+					DockerfilePath: "Dockerfile",
+					InternalPort:   3000,
+					Published:      true,
+				},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("import resolved topology: %v", err)
+	}
+	if len(result.Operations) != 1 {
+		t.Fatalf("expected one operation, got %d", len(result.Operations))
+	}
+	source := result.Operations[0].DesiredSource
+	if source == nil {
+		t.Fatal("expected operation desired source")
+	}
+	if source.CommitSHA != commitSHA {
+		t.Fatalf("expected desired source commit %q, got %q", commitSHA, source.CommitSHA)
+	}
+	if source.CommitCommittedAt != committedAt {
+		t.Fatalf("expected desired source committed at %q, got %q", committedAt, source.CommitCommittedAt)
+	}
+}
+
 func TestBuildImportedAppSpecAllowsGenericStatefulInputs(t *testing.T) {
 	server := &Server{}
 	spec, err := server.buildImportedAppSpec(

@@ -7,6 +7,7 @@ require (
 	github.com/getkin/kin-openapi v0.134.0
 	github.com/google/go-containerregistry v0.21.3
 	github.com/jackc/pgx/v5 v5.9.1
+	github.com/moby/patternmatcher v0.6.0
 	github.com/spf13/cobra v1.10.2
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.34.1

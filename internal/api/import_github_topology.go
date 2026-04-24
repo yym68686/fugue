@@ -402,6 +402,7 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		if err != nil {
 			return importedGitHubTopology{}, invalidComposeImport(err)
 		}
+		source = hydrateTopologySourceRevision(source, topology)
 
 		var postgres *model.AppPostgresSpec
 		if spec, ok := deployment.ManagedPostgresByOwner[service.Name]; ok {
@@ -1060,6 +1061,19 @@ func composeDeployDependencies(plan sourceimport.TopologyPlan, serviceName strin
 		return nil
 	}
 	return dependencies
+}
+
+func hydrateTopologySourceRevision(source model.AppSource, topology sourceimport.NormalizedTopology) model.AppSource {
+	if !model.IsGitHubAppSourceType(source.Type) {
+		return source
+	}
+	if strings.TrimSpace(source.CommitSHA) == "" {
+		source.CommitSHA = strings.TrimSpace(topology.CommitSHA)
+	}
+	if strings.TrimSpace(source.CommitCommittedAt) == "" {
+		source.CommitCommittedAt = strings.TrimSpace(topology.CommitCommittedAt)
+	}
+	return source
 }
 
 func buildQueuedComposeServiceSource(req importGitHubRequest, service sourceimport.ComposeService, composeDependsOn []string) (model.AppSource, error) {
