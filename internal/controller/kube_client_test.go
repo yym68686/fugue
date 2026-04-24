@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -101,6 +102,139 @@ func TestApplyObjectRecreatesDeploymentAfterImmutableSelectorError(t *testing.T)
 	for i, want := range expected {
 		if requests[i] != want {
 			t.Fatalf("expected request %d to be %q, got %q", i, want, requests[i])
+		}
+	}
+}
+
+func TestApplyObjectRemovesStaleAppFileVolumeReferencesBeforeRetry(t *testing.T) {
+	t.Parallel()
+
+	var requests []string
+	var cleanupPatch []map[string]string
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests = append(requests, req.Method+" "+req.URL.Path)
+		switch {
+		case req.Method == http.MethodPatch && req.URL.Path == "/apis/apps/v1/namespaces/tenant-demo/deployments/demo" && len(requests) == 1:
+			return &http.Response{
+				StatusCode: http.StatusUnprocessableEntity,
+				Body:       io.NopCloser(strings.NewReader(`{"message":"Deployment.apps \"demo\" is invalid: spec.template.spec.containers[0].volumeMounts[0].name: Not found: \"app-files\""}`)),
+				Header:     make(http.Header),
+			}, nil
+		case req.Method == http.MethodGet && req.URL.Path == "/apis/apps/v1/namespaces/tenant-demo/deployments/demo":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(`{
+					"apiVersion":"apps/v1",
+					"kind":"Deployment",
+					"metadata":{"name":"demo","namespace":"tenant-demo"},
+					"spec":{"template":{"spec":{
+						"containers":[
+							{"name":"demo","volumeMounts":[
+								{"name":"app-files","mountPath":"/app/config.yaml"},
+								{"name":"cache","mountPath":"/cache"},
+								{"name":"app-files","mountPath":"/app/secret.yaml"}
+							]},
+							{"name":"sidecar","volumeMounts":[
+								{"name":"app-files","mountPath":"/sidecar/config.yaml"}
+							]}
+						],
+						"initContainers":[
+							{"name":"init","volumeMounts":[
+								{"name":"app-files","mountPath":"/init/config.yaml"}
+							]}
+						],
+						"volumes":[
+							{"name":"app-files","secret":{"secretName":"demo-files"}},
+							{"name":"cache","emptyDir":{}}
+						]
+					}}}
+				}`)),
+				Header: make(http.Header),
+			}, nil
+		case req.Method == http.MethodPatch && req.URL.Path == "/apis/apps/v1/namespaces/tenant-demo/deployments/demo" && len(requests) == 3:
+			if got := req.Header.Get("Content-Type"); got != "application/json-patch+json" {
+				t.Fatalf("expected json patch content type, got %q", got)
+			}
+			if err := json.NewDecoder(req.Body).Decode(&cleanupPatch); err != nil {
+				t.Fatalf("decode cleanup patch: %v", err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     make(http.Header),
+			}, nil
+		case req.Method == http.MethodPatch && req.URL.Path == "/apis/apps/v1/namespaces/tenant-demo/deployments/demo" && len(requests) == 4:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"kind":"Deployment"}`)),
+				Header:     make(http.Header),
+			}, nil
+		default:
+			t.Fatalf("unexpected request %s %s (sequence=%v)", req.Method, req.URL.Path, requests)
+			return nil, nil
+		}
+	})
+
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   "tenant-demo",
+	}
+
+	obj := map[string]any{
+		"apiVersion": "apps/v1",
+		"kind":       "Deployment",
+		"metadata": map[string]any{
+			"name": "demo",
+		},
+		"spec": map[string]any{
+			"template": map[string]any{
+				"spec": map[string]any{
+					"containers": []map[string]any{
+						{
+							"name":         "demo",
+							"volumeMounts": []map[string]any{},
+						},
+					},
+					"volumes": []map[string]any{},
+				},
+			},
+		},
+	}
+
+	if err := client.applyObject(context.Background(), obj, nil); err != nil {
+		t.Fatalf("apply object: %v", err)
+	}
+
+	expectedRequests := []string{
+		"PATCH /apis/apps/v1/namespaces/tenant-demo/deployments/demo",
+		"GET /apis/apps/v1/namespaces/tenant-demo/deployments/demo",
+		"PATCH /apis/apps/v1/namespaces/tenant-demo/deployments/demo",
+		"PATCH /apis/apps/v1/namespaces/tenant-demo/deployments/demo",
+	}
+	if len(requests) != len(expectedRequests) {
+		t.Fatalf("expected request sequence %v, got %v", expectedRequests, requests)
+	}
+	for i, want := range expectedRequests {
+		if requests[i] != want {
+			t.Fatalf("expected request %d to be %q, got %q", i, want, requests[i])
+		}
+	}
+
+	expectedPatch := []map[string]string{
+		{"op": "remove", "path": "/spec/template/spec/containers/0/volumeMounts/2"},
+		{"op": "remove", "path": "/spec/template/spec/containers/0/volumeMounts/0"},
+		{"op": "remove", "path": "/spec/template/spec/containers/1/volumeMounts/0"},
+		{"op": "remove", "path": "/spec/template/spec/initContainers/0/volumeMounts/0"},
+		{"op": "remove", "path": "/spec/template/spec/volumes/0"},
+	}
+	if len(cleanupPatch) != len(expectedPatch) {
+		t.Fatalf("expected cleanup patch %#v, got %#v", expectedPatch, cleanupPatch)
+	}
+	for index, want := range expectedPatch {
+		if cleanupPatch[index]["op"] != want["op"] || cleanupPatch[index]["path"] != want["path"] {
+			t.Fatalf("expected cleanup patch %d to be %#v, got %#v", index, want, cleanupPatch[index])
 		}
 	}
 }

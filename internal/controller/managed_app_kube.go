@@ -64,6 +64,15 @@ func (c *kubeClient) applyObject(ctx context.Context, obj map[string]any, out an
 	}
 	if err := c.applyObjectAtPath(ctx, apiPath, obj, out); err == nil {
 		return nil
+	} else if shouldRetryDeploymentAfterStaleAppFilesVolumeMounts(obj, err) {
+		name, namespace := objectNameAndNamespace(c.namespace, obj)
+		if cleanupErr := c.removeDeploymentVolumeReferencesByName(ctx, namespace, name, runtime.AppFilesVolumeName); cleanupErr != nil {
+			return fmt.Errorf("remove stale app file volume references after deployment apply failure: %w (original apply error: %v)", cleanupErr, err)
+		}
+		if retryErr := c.applyObjectAtPath(ctx, apiPath, obj, out); retryErr != nil {
+			return fmt.Errorf("%w (after removing stale app file volume references)", retryErr)
+		}
+		return nil
 	} else if !shouldRecreateDeploymentAfterImmutableSelector(obj, err) {
 		return err
 	} else {
@@ -202,7 +211,7 @@ func (c *kubeClient) patchCloudNativePGClusterStatus(
 
 func (c *kubeClient) getDeployment(ctx context.Context, namespace, name string) (kubeDeployment, bool, error) {
 	var deployment kubeDeployment
-	status, err := c.doJSON(ctx, http.MethodGet, "/apis/apps/v1/namespaces/"+c.effectiveNamespace(namespace)+"/deployments/"+url.PathEscape(name), nil, &deployment)
+	status, err := c.doJSON(ctx, http.MethodGet, deploymentAPIPath(c.effectiveNamespace(namespace), name), nil, &deployment)
 	if err != nil {
 		if status == http.StatusNotFound {
 			return kubeDeployment{}, false, nil
@@ -273,7 +282,7 @@ func (c *kubeClient) listSecretNamesByLabel(ctx context.Context, namespace, labe
 }
 
 func (c *kubeClient) deleteDeployment(ctx context.Context, namespace, name string) error {
-	_, err := c.doRequest(ctx, http.MethodDelete, "/apis/apps/v1/namespaces/"+c.effectiveNamespace(namespace)+"/deployments/"+url.PathEscape(name), "", nil, nil)
+	_, err := c.doRequest(ctx, http.MethodDelete, deploymentAPIPath(c.effectiveNamespace(namespace), name), "", nil, nil)
 	return normalizeDeleteNotFound(err)
 }
 
@@ -458,6 +467,146 @@ func shouldRecreateDeploymentAfterImmutableSelector(obj map[string]any, err erro
 	return strings.Contains(message, "spec.selector") && strings.Contains(message, "immutable")
 }
 
+func shouldRetryDeploymentAfterStaleAppFilesVolumeMounts(obj map[string]any, err error) bool {
+	if err == nil {
+		return false
+	}
+	apiVersion, _ := obj["apiVersion"].(string)
+	kind, _ := obj["kind"].(string)
+	if apiVersion != "apps/v1" || kind != "Deployment" {
+		return false
+	}
+	if podSpecVolumeNamed(obj, runtime.AppFilesVolumeName) {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "volumemounts") &&
+		strings.Contains(message, "not found") &&
+		strings.Contains(message, strings.ToLower(runtime.AppFilesVolumeName))
+}
+
+func (c *kubeClient) removeDeploymentVolumeReferencesByName(ctx context.Context, namespace, name, volumeName string) error {
+	var deployment map[string]any
+	apiPath := deploymentAPIPath(c.effectiveNamespace(namespace), name)
+	status, err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &deployment)
+	if err != nil {
+		if status == http.StatusNotFound {
+			return nil
+		}
+		return err
+	}
+	ops := deploymentVolumeReferenceRemoveOps(deployment, volumeName)
+	if len(ops) == 0 {
+		return nil
+	}
+	_, err = c.doRequest(ctx, http.MethodPatch, apiPath, "application/json-patch+json", ops, nil)
+	return err
+}
+
+func deploymentVolumeReferenceRemoveOps(deployment map[string]any, volumeName string) []map[string]string {
+	var ops []map[string]string
+	podSpec, ok := nestedMap(deployment, "spec", "template", "spec")
+	if !ok {
+		return nil
+	}
+	ops = append(ops, volumeMountRemoveOps(podSpec, volumeName, "containers")...)
+	ops = append(ops, volumeMountRemoveOps(podSpec, volumeName, "initContainers")...)
+	ops = append(ops, volumeRemoveOps(podSpec, volumeName)...)
+	return ops
+}
+
+func volumeMountRemoveOps(podSpec map[string]any, volumeName, containerField string) []map[string]string {
+	containers := mapSlice(podSpec[containerField])
+	if len(containers) == 0 {
+		return nil
+	}
+	var ops []map[string]string
+	for containerIndex, container := range containers {
+		mounts := mapSlice(container["volumeMounts"])
+		if len(mounts) == 0 {
+			continue
+		}
+		for mountIndex := len(mounts) - 1; mountIndex >= 0; mountIndex-- {
+			mount := mounts[mountIndex]
+			if strings.TrimSpace(fmt.Sprint(mount["name"])) != volumeName {
+				continue
+			}
+			ops = append(ops, map[string]string{
+				"op":   "remove",
+				"path": fmt.Sprintf("/spec/template/spec/%s/%d/volumeMounts/%d", containerField, containerIndex, mountIndex),
+			})
+		}
+	}
+	return ops
+}
+
+func volumeRemoveOps(podSpec map[string]any, volumeName string) []map[string]string {
+	volumes := mapSlice(podSpec["volumes"])
+	if len(volumes) == 0 {
+		return nil
+	}
+	var ops []map[string]string
+	for index := len(volumes) - 1; index >= 0; index-- {
+		volume := volumes[index]
+		if strings.TrimSpace(fmt.Sprint(volume["name"])) != volumeName {
+			continue
+		}
+		ops = append(ops, map[string]string{
+			"op":   "remove",
+			"path": fmt.Sprintf("/spec/template/spec/volumes/%d", index),
+		})
+	}
+	return ops
+}
+
+func podSpecVolumeNamed(obj map[string]any, volumeName string) bool {
+	podSpec, ok := nestedMap(obj, "spec", "template", "spec")
+	if !ok {
+		return false
+	}
+	volumes := mapSlice(podSpec["volumes"])
+	if len(volumes) == 0 {
+		return false
+	}
+	for _, volume := range volumes {
+		if strings.TrimSpace(fmt.Sprint(volume["name"])) == volumeName {
+			return true
+		}
+	}
+	return false
+}
+
+func mapSlice(value any) []map[string]any {
+	switch typed := value.(type) {
+	case []map[string]any:
+		return typed
+	case []any:
+		out := make([]map[string]any, 0, len(typed))
+		for _, item := range typed {
+			mapped, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			out = append(out, mapped)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func nestedMap(obj map[string]any, keys ...string) (map[string]any, bool) {
+	current := obj
+	for _, key := range keys {
+		next, ok := current[key].(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		current = next
+	}
+	return current, true
+}
+
 func objectNameAndNamespace(defaultNamespace string, obj map[string]any) (string, string) {
 	metadata, _ := obj["metadata"].(map[string]any)
 	name, _ := metadata["name"].(string)
@@ -467,4 +616,8 @@ func objectNameAndNamespace(defaultNamespace string, obj map[string]any) (string
 		namespace = strings.TrimSpace(defaultNamespace)
 	}
 	return strings.TrimSpace(name), namespace
+}
+
+func deploymentAPIPath(namespace, name string) string {
+	return "/apis/apps/v1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/deployments/" + url.PathEscape(strings.TrimSpace(name))
 }

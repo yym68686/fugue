@@ -27,7 +27,8 @@ const (
 	defaultHelperMemoryLimit            = "128Mi"
 	defaultHelperEphemeralRequest       = "32Mi"
 	defaultHelperEphemeralLimit         = "128Mi"
-	appFilesVolumeName                  = "app-files"
+	AppFilesVolumeName                  = "app-files"
+	appFilesVolumeName                  = AppFilesVolumeName
 	appFilesSourceMountPath             = "/fugue-app-files"
 	AppWorkspaceContainerName           = "fugue-workspace"
 	workspaceVolumeName                 = "app-workspace"
