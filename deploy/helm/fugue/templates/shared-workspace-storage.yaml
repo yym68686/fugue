@@ -161,8 +161,16 @@ spec:
               value: {{ $nfsServer | quote }}
             - name: NFS_PATH
               value: {{ .Values.sharedWorkspaceStorage.server.sharedDirectory | quote }}
+          volumeMounts:
+            - name: nfs-client-root
+              mountPath: /persistentvolumes
           {{- with .Values.sharedWorkspaceStorage.provisioner.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+      volumes:
+        - name: nfs-client-root
+          nfs:
+            server: {{ $nfsServer | quote }}
+            path: {{ .Values.sharedWorkspaceStorage.server.sharedDirectory | quote }}
 {{- end }}
