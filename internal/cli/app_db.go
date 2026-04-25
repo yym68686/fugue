@@ -6,9 +6,13 @@ import (
 	"strings"
 
 	"fugue/internal/model"
-	"fugue/internal/store"
 
 	"github.com/spf13/cobra"
+)
+
+const (
+	defaultAppDatabaseInstances           = 1
+	defaultAppDatabaseSynchronousReplicas = 1
 )
 
 func (c *CLI) newAppDatabaseCommand() *cobra.Command {
@@ -269,7 +273,7 @@ func (c *CLI) newAppDatabaseSwitchoverCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			database := store.OwnedManagedPostgresSpec(app)
+			database := ownedManagedPostgresSpec(app)
 			if database == nil {
 				return fmt.Errorf("managed postgres is not configured for this app")
 			}
@@ -329,7 +333,7 @@ func (c *CLI) newAppDatabaseSwitchoverCommand() *cobra.Command {
 }
 
 func (c *CLI) renderAppDatabaseState(app model.App, operation *model.Operation, alreadyCurrent bool, showSecrets bool) error {
-	database := store.OwnedManagedPostgresSpec(app)
+	database := ownedManagedPostgresSpec(app)
 	if c.wantsJSON() {
 		payloadApp := app
 		var payloadOp *model.Operation
@@ -339,7 +343,7 @@ func (c *CLI) renderAppDatabaseState(app model.App, operation *model.Operation, 
 		}
 		if !showSecrets {
 			payloadApp = redactAppForOutput(payloadApp)
-			database = store.OwnedManagedPostgresSpec(payloadApp)
+			database = ownedManagedPostgresSpec(payloadApp)
 			if payloadOp != nil {
 				redactedOp := redactOperationForOutput(*payloadOp)
 				payloadOp = &redactedOp
@@ -381,6 +385,130 @@ func (c *CLI) renderAppDatabaseState(app model.App, operation *model.Operation, 
 		)
 	}
 	return writeKeyValues(c.stdout, pairs...)
+}
+
+func ownedManagedPostgresSpec(app model.App) *model.AppPostgresSpec {
+	if app.Spec.Postgres != nil {
+		normalized := normalizeAppDatabasePostgresSpec(app.Name, app.Spec.RuntimeID, *app.Spec.Postgres)
+		return &normalized
+	}
+
+	for _, service := range app.BackingServices {
+		if strings.TrimSpace(service.OwnerAppID) != strings.TrimSpace(app.ID) {
+			continue
+		}
+		if !isManagedPostgresBackingService(service) || service.Spec.Postgres == nil {
+			continue
+		}
+		normalized := normalizeAppDatabasePostgresSpec(appNameForDatabaseService(&service, &app), app.Spec.RuntimeID, *service.Spec.Postgres)
+		return &normalized
+	}
+
+	return nil
+}
+
+func normalizeAppDatabasePostgresSpec(appName, appRuntimeID string, spec model.AppPostgresSpec) model.AppPostgresSpec {
+	out := spec
+	resourceName := postgresServiceNameForApp(appName)
+	out.Image = model.NormalizeManagedPostgresImage(out.Image)
+	if strings.TrimSpace(out.Database) == "" {
+		out.Database = serviceResourceName(appName)
+	}
+	if strings.TrimSpace(out.User) == "" {
+		out.User = model.DefaultManagedPostgresUser(appName)
+	}
+	if strings.TrimSpace(out.ServiceName) == "" {
+		out.ServiceName = resourceName
+	}
+	out.RuntimeID = strings.TrimSpace(out.RuntimeID)
+	if out.RuntimeID == "" {
+		out.RuntimeID = strings.TrimSpace(appRuntimeID)
+	}
+	out.FailoverTargetRuntimeID = strings.TrimSpace(out.FailoverTargetRuntimeID)
+	if strings.TrimSpace(out.StorageSize) == "" {
+		out.StorageSize = model.DefaultManagedPostgresStorageSize
+	}
+	out.StorageClassName = strings.TrimSpace(out.StorageClassName)
+	if out.Instances <= 0 {
+		out.Instances = defaultAppDatabaseInstances
+	}
+	if out.FailoverTargetRuntimeID != "" && out.Instances < 2 {
+		out.Instances = 2
+	}
+	if out.SynchronousReplicas < 0 {
+		out.SynchronousReplicas = 0
+	}
+	if out.FailoverTargetRuntimeID != "" && out.SynchronousReplicas < 1 {
+		out.SynchronousReplicas = 1
+	}
+	if out.SynchronousReplicas == 0 && out.Instances > 1 {
+		out.SynchronousReplicas = defaultAppDatabaseSynchronousReplicas
+	}
+	if out.SynchronousReplicas >= out.Instances {
+		out.SynchronousReplicas = out.Instances - 1
+	}
+	out.Resources = normalizeAppDatabaseResources(out.Resources, model.DefaultManagedPostgresResources())
+	return out
+}
+
+func normalizeAppDatabaseResources(spec *model.ResourceSpec, defaults model.ResourceSpec) *model.ResourceSpec {
+	if spec == nil {
+		value := defaults
+		return &value
+	}
+	out := *spec
+	if out.CPUMilliCores < 0 || out.MemoryMebibytes < 0 {
+		value := defaults
+		return &value
+	}
+	if out.CPUMilliCores == 0 {
+		out.CPUMilliCores = defaults.CPUMilliCores
+	}
+	if out.MemoryMebibytes == 0 {
+		out.MemoryMebibytes = defaults.MemoryMebibytes
+	}
+	if out.CPUMilliCores <= 0 || out.MemoryMebibytes <= 0 {
+		value := defaults
+		return &value
+	}
+	return &out
+}
+
+func isManagedPostgresBackingService(service model.BackingService) bool {
+	if !strings.EqualFold(strings.TrimSpace(service.Type), model.BackingServiceTypePostgres) {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(service.Status), model.BackingServiceStatusDeleted) {
+		return false
+	}
+	provisioner := strings.TrimSpace(strings.ToLower(service.Provisioner))
+	return provisioner == "" || provisioner == model.BackingServiceProvisionerManaged
+}
+
+func appNameForDatabaseService(service *model.BackingService, app *model.App) string {
+	if app != nil {
+		return app.Name
+	}
+	if service != nil && strings.TrimSpace(service.Name) != "" {
+		name := service.Name
+		if strings.HasSuffix(name, "-postgres") {
+			return strings.TrimSuffix(name, "-postgres")
+		}
+		return name
+	}
+	return "service"
+}
+
+func postgresServiceNameForApp(appName string) string {
+	return serviceResourceName(appName) + "-postgres"
+}
+
+func serviceResourceName(name string) string {
+	name = model.Slugify(name)
+	if len(name) > 50 {
+		return name[:50]
+	}
+	return name
 }
 
 func flagChanged(cmd *cobra.Command, name string) bool {
