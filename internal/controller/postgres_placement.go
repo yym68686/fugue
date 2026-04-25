@@ -166,6 +166,15 @@ func (s *Service) managedSharedPostgresPrimaryHostPlacement(
 					},
 				}, true, nil
 			}
+			if nodeName, found, err := matchingManagedSharedPostgresExistingInstanceNode(ctx, client, namespace, serviceName, sourceSelector); err != nil {
+				return runtimepkg.SchedulingConstraints{}, false, err
+			} else if found {
+				return runtimepkg.SchedulingConstraints{
+					NodeSelector: map[string]string{
+						kubeHostnameLabelKey: nodeName,
+					},
+				}, true, nil
+			}
 		}
 	}
 
@@ -297,6 +306,131 @@ func matchingManagedSharedPostgresPrimaryNode(
 	}
 
 	nodeName := strings.TrimSpace(pod.Spec.NodeName)
+	if nodeName == "" {
+		return "", false, nil
+	}
+
+	node, found, err := client.getNode(ctx, nodeName)
+	if err != nil {
+		return "", false, fmt.Errorf("read kubernetes node %s: %w", nodeName, err)
+	}
+	if !found || !nodeLabelsMatchSelector(node.Metadata.Labels, sourceSelector) {
+		return "", false, nil
+	}
+	return nodeName, true, nil
+}
+
+func matchingManagedSharedPostgresExistingInstanceNode(
+	ctx context.Context,
+	client *kubeClient,
+	namespace, clusterName string,
+	sourceSelector map[string]string,
+) (string, bool, error) {
+	clusterName = strings.TrimSpace(clusterName)
+	if clusterName == "" {
+		return "", false, nil
+	}
+
+	pods, err := client.listPodsBySelector(
+		ctx,
+		namespace,
+		fmt.Sprintf(managedPostgresPodSelectorTemplate, clusterName),
+	)
+	if err != nil {
+		return "", false, fmt.Errorf("list postgres pods for cluster %s: %w", clusterName, err)
+	}
+	for _, pod := range pods {
+		if managedPostgresPodFinished(pod) {
+			continue
+		}
+		if nodeName, found, err := managedSharedNodeMatchingSelector(ctx, client, pod.Spec.NodeName, sourceSelector); err != nil {
+			return "", false, err
+		} else if found {
+			return nodeName, true, nil
+		}
+
+		pvcName := managedPostgresPVCNameForPod(pod)
+		if pvcName == "" {
+			pvcName = strings.TrimSpace(pod.Metadata.Name)
+		}
+		if nodeName, found, err := managedSharedPostgresPVCNode(ctx, client, namespace, pvcName, sourceSelector); err != nil {
+			return "", false, err
+		} else if found {
+			return nodeName, true, nil
+		}
+	}
+
+	pvcNames, err := client.listPersistentVolumeClaimNamesByLabel(ctx, namespace, "cnpg.io/cluster="+clusterName)
+	if err != nil {
+		return "", false, fmt.Errorf("list postgres pvcs for cluster %s: %w", clusterName, err)
+	}
+	sort.Strings(pvcNames)
+	for _, pvcName := range pvcNames {
+		if nodeName, found, err := managedSharedPostgresPVCNode(ctx, client, namespace, pvcName, sourceSelector); err != nil {
+			return "", false, err
+		} else if found {
+			return nodeName, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func managedPostgresPodFinished(pod kubePod) bool {
+	phase := strings.TrimSpace(pod.Status.Phase)
+	return strings.EqualFold(phase, "Succeeded") || strings.EqualFold(phase, "Failed")
+}
+
+func managedSharedPostgresPVCNode(
+	ctx context.Context,
+	client *kubeClient,
+	namespace, pvcName string,
+	sourceSelector map[string]string,
+) (string, bool, error) {
+	pvcName = strings.TrimSpace(pvcName)
+	if pvcName == "" {
+		return "", false, nil
+	}
+
+	pvc, found, err := client.getPersistentVolumeClaim(ctx, namespace, pvcName)
+	if err != nil {
+		return "", false, fmt.Errorf("read postgres pvc %s/%s: %w", namespace, pvcName, err)
+	}
+	if !found {
+		return "", false, nil
+	}
+
+	if nodeName := strings.TrimSpace(pvc.Metadata.Annotations[pvcSelectedNodeAnnotation]); nodeName != "" {
+		if nodeName, found, err := managedSharedNodeMatchingSelector(ctx, client, nodeName, sourceSelector); err != nil {
+			return "", false, err
+		} else if found {
+			return nodeName, true, nil
+		}
+	}
+
+	volumeName := strings.TrimSpace(pvc.Spec.VolumeName)
+	if volumeName == "" {
+		return "", false, nil
+	}
+	pv, found, err := client.getPersistentVolume(ctx, volumeName)
+	if err != nil {
+		if strings.Contains(err.Error(), "status=403") {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("read persistent volume %s for pvc %s/%s: %w", volumeName, namespace, pvcName, err)
+	}
+	if !found {
+		return "", false, nil
+	}
+	return managedSharedNodeMatchingSelector(ctx, client, persistentVolumeNodeName(pv), sourceSelector)
+}
+
+func managedSharedNodeMatchingSelector(
+	ctx context.Context,
+	client *kubeClient,
+	nodeName string,
+	sourceSelector map[string]string,
+) (string, bool, error) {
+	nodeName = strings.TrimSpace(nodeName)
 	if nodeName == "" {
 		return "", false, nil
 	}

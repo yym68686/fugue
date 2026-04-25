@@ -245,7 +245,7 @@ func (s *Service) waitForManagedPostgresReplicaOnRuntime(
 				max(cluster.Spec.Instances, 1),
 			)
 		} else {
-			targetPrimary, err := selectManagedPostgresSwitchoverTarget(waitCtx, client, namespace, clusterName, targetRuntimeID, cluster.Status.CurrentPrimary)
+			targetPrimary, err := s.selectManagedPostgresSwitchoverTarget(waitCtx, client, namespace, clusterName, targetRuntimeID, cluster.Status.CurrentPrimary)
 			if err != nil {
 				return "", err
 			}
@@ -322,15 +322,11 @@ func (s *Service) waitForManagedPostgresPrimary(
 	}
 }
 
-func selectManagedPostgresSwitchoverTarget(
+func (s *Service) selectManagedPostgresSwitchoverTarget(
 	ctx context.Context,
 	client *kubeClient,
 	namespace, clusterName, targetRuntimeID, currentPrimary string,
 ) (string, error) {
-	nodeRuntimeIDs, err := client.listNodeRuntimeIDs(ctx)
-	if err != nil {
-		return "", fmt.Errorf("list kubernetes node runtime ids: %w", err)
-	}
 	pods, err := client.listPodsBySelector(
 		ctx,
 		namespace,
@@ -349,7 +345,11 @@ func selectManagedPostgresSwitchoverTarget(
 		if !strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Running") {
 			continue
 		}
-		if strings.TrimSpace(nodeRuntimeIDs[strings.TrimSpace(pod.Spec.NodeName)]) != targetRuntimeID {
+		runtimeID, err := s.runtimeIDForNode(ctx, client, strings.TrimSpace(pod.Spec.NodeName))
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(runtimeID) != targetRuntimeID {
 			continue
 		}
 		return podName, nil

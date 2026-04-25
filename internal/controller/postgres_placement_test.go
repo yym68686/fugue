@@ -314,6 +314,213 @@ func TestManagedPostgresPlacementsChoosesNonOverlappingSharedSourceNode(t *testi
 	}
 }
 
+func TestManagedPostgresPlacementsPinsSharedPrimaryToExistingPVCNode(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Placement Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	if err := stateStore.SyncManagedSharedLocationRuntimes([]map[string]string{
+		{runtimepkg.LocationCountryCodeLabelKey: "us"},
+		{runtimepkg.LocationCountryCodeLabelKey: "hk"},
+	}); err != nil {
+		t.Fatalf("sync shared runtimes: %v", err)
+	}
+
+	sourceRuntimeID := managedSharedRuntimeIDForLabels(t, stateStore, map[string]string{
+		runtimepkg.LocationCountryCodeLabelKey: "us",
+	})
+	targetRuntimeID := managedSharedRuntimeIDForLabels(t, stateStore, map[string]string{
+		runtimepkg.LocationCountryCodeLabelKey: "hk",
+	})
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: tenant.ID,
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			RuntimeID: sourceRuntimeID,
+			Postgres: &model.AppPostgresSpec{
+				Database:                "demo",
+				User:                    "demo",
+				Password:                "secret",
+				ServiceName:             "demo-postgres",
+				RuntimeID:               sourceRuntimeID,
+				FailoverTargetRuntimeID: targetRuntimeID,
+				Instances:               2,
+				SynchronousReplicas:     1,
+			},
+		},
+	}
+
+	namespace := runtimepkg.NamespaceForTenant(app.TenantID)
+	currentPrimary := "demo-postgres-1"
+	standbyPod := "demo-postgres-2"
+	sourceNode := "shared-us-existing-pv"
+	largerSourceNode := "shared-us-larger"
+	targetNode := "shared-hk-primary"
+
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case cloudNativePGClusterAPIPath(namespace, "demo-postgres"):
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{
+					"name": "demo-postgres",
+				},
+				"status": map[string]any{
+					"currentPrimary": currentPrimary,
+				},
+			}); err != nil {
+				t.Fatalf("encode cluster: %v", err)
+			}
+		case "/api/v1/namespaces/" + namespace + "/pods/" + currentPrimary:
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{
+					"name": currentPrimary,
+				},
+				"spec": map[string]any{
+					"nodeName": targetNode,
+				},
+				"status": map[string]any{
+					"phase": "Running",
+				},
+			}); err != nil {
+				t.Fatalf("encode current primary pod: %v", err)
+			}
+		case "/api/v1/namespaces/" + namespace + "/pods":
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{
+							"name":              currentPrimary,
+							"creationTimestamp": "2026-04-07T00:00:00Z",
+						},
+						"spec": map[string]any{
+							"nodeName": targetNode,
+						},
+						"status": map[string]any{
+							"phase": "Running",
+						},
+					},
+					{
+						"metadata": map[string]any{
+							"name":              standbyPod,
+							"creationTimestamp": "2026-04-07T00:01:00Z",
+						},
+						"spec": map[string]any{
+							"volumes": []map[string]any{
+								{
+									"name": "pgdata",
+									"persistentVolumeClaim": map[string]any{
+										"claimName": standbyPod,
+									},
+								},
+							},
+						},
+						"status": map[string]any{
+							"phase": "Pending",
+						},
+					},
+				},
+			}); err != nil {
+				t.Fatalf("encode pod list: %v", err)
+			}
+		case "/api/v1/namespaces/" + namespace + "/persistentvolumeclaims/" + standbyPod:
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{
+					"name": standbyPod,
+				},
+				"spec": map[string]any{
+					"volumeName": "pv-demo-postgres-2",
+				},
+			}); err != nil {
+				t.Fatalf("encode standby pvc: %v", err)
+			}
+		case "/api/v1/persistentvolumes/pv-demo-postgres-2":
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{
+					"name": "pv-demo-postgres-2",
+				},
+				"spec": map[string]any{
+					"nodeAffinity": map[string]any{
+						"required": map[string]any{
+							"nodeSelectorTerms": []map[string]any{
+								{
+									"matchExpressions": []map[string]any{
+										{
+											"key":      kubeHostnameLabelKey,
+											"operator": "In",
+											"values":   []string{sourceNode},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}); err != nil {
+				t.Fatalf("encode standby pv: %v", err)
+			}
+		case "/api/v1/nodes":
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{"metadata": map[string]any{"name": sourceNode}},
+					{"metadata": map[string]any{"name": largerSourceNode}},
+				},
+			}); err != nil {
+				t.Fatalf("encode node list: %v", err)
+			}
+		case "/api/v1/nodes/" + sourceNode:
+			encodeSharedPlacementNode(t, w, sourceNode, "us", "2", "4Gi", "20Gi")
+		case "/api/v1/nodes/" + largerSourceNode:
+			encodeSharedPlacementNode(t, w, largerSourceNode, "us", "8", "16Gi", "80Gi")
+		case "/api/v1/nodes/" + targetNode:
+			encodeSharedPlacementNode(t, w, targetNode, "hk", "2", "4Gi", "20Gi")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	svc := &Service{
+		Store:  stateStore,
+		Logger: log.New(io.Discard, "", 0),
+		newKubeClient: func(namespace string) (*kubeClient, error) {
+			return &kubeClient{
+				client:      kubeServer.Client(),
+				baseURL:     kubeServer.URL,
+				bearerToken: "test",
+				namespace:   namespace,
+			}, nil
+		},
+	}
+
+	placements, err := svc.managedPostgresPlacements(context.Background(), app)
+	if err != nil {
+		t.Fatalf("resolve postgres placements: %v", err)
+	}
+
+	servicePlacements := placements["demo-postgres"]
+	if len(servicePlacements) != 2 {
+		t.Fatalf("expected two placements, got %d", len(servicePlacements))
+	}
+	if got := servicePlacements[0].NodeSelector[kubeHostnameLabelKey]; got != sourceNode {
+		t.Fatalf("expected existing pv node %q, got %q", sourceNode, got)
+	}
+	if got := servicePlacements[1].NodeSelector[runtimepkg.LocationCountryCodeLabelKey]; got != "hk" {
+		t.Fatalf("expected standby country selector %q, got %q", "hk", got)
+	}
+}
+
 func TestManagedPostgresPlacementsChoosesHealthiestSharedSourceNodeWithoutFailoverTarget(t *testing.T) {
 	t.Parallel()
 
@@ -510,6 +717,33 @@ func TestManagedPostgresPlacementsChoosesHealthiestSharedSourceNodeWithoutFailov
 	}
 	if len(servicePlacements[0].NodeSelector) != 1 {
 		t.Fatalf("expected exact primary hostname selector, got %#v", servicePlacements[0].NodeSelector)
+	}
+}
+
+func encodeSharedPlacementNode(t *testing.T, w http.ResponseWriter, name, country, cpu, memory, storage string) {
+	t.Helper()
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"metadata": map[string]any{
+			"name": name,
+			"labels": map[string]any{
+				runtimepkg.SharedPoolLabelKey:          runtimepkg.SharedPoolLabelValue,
+				runtimepkg.LocationCountryCodeLabelKey: country,
+				kubeHostnameLabelKey:                   name,
+			},
+		},
+		"status": map[string]any{
+			"conditions": []map[string]any{
+				{"type": "Ready", "status": "True"},
+				{"type": "DiskPressure", "status": "False"},
+			},
+			"allocatable": map[string]any{
+				"cpu":               cpu,
+				"memory":            memory,
+				"ephemeral-storage": storage,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("encode node %s: %v", name, err)
 	}
 }
 
