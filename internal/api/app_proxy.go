@@ -1,7 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -14,7 +18,12 @@ import (
 	"fugue/internal/store"
 )
 
-const defaultAppProxyLookupCacheTTL = 5 * time.Second
+const (
+	defaultAppProxyLookupCacheTTL  = 5 * time.Second
+	defaultAppProxyMaxAttempts     = 4
+	defaultAppProxyRetryDelay      = 100 * time.Millisecond
+	defaultAppProxyReplayBodyLimit = 8 << 20
+)
 
 func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) bool {
 	host := strings.TrimSpace(strings.ToLower(r.Host))
@@ -53,6 +62,10 @@ func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) boo
 	target, err := url.Parse(s.serviceURLForApp(r.Context(), app))
 	if err != nil {
 		http.Error(w, "invalid app target", http.StatusInternalServerError)
+		return true
+	}
+	if err := prepareAppProxyRequestForRetries(r); err != nil {
+		http.Error(w, "failed to read request body", http.StatusBadRequest)
 		return true
 	}
 	proxy := s.newAppReverseProxy(host, target, app)
@@ -177,18 +190,200 @@ func appServiceHost(namespace, serviceName string) string {
 func newDefaultAppProxyTransport() http.RoundTripper {
 	base, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
-		return &http.Transport{
-			Proxy:               nil,
-			ForceAttemptHTTP2:   false,
-			MaxIdleConns:        100,
-			IdleConnTimeout:     90 * time.Second,
-			TLSHandshakeTimeout: 10 * time.Second,
+		return appProxyRetryTransport{
+			base: &http.Transport{
+				Proxy:               nil,
+				ForceAttemptHTTP2:   false,
+				DisableKeepAlives:   true,
+				TLSHandshakeTimeout: 10 * time.Second,
+			},
+			maxAttempts: defaultAppProxyMaxAttempts,
+			retryDelay:  defaultAppProxyRetryDelay,
 		}
 	}
 	transport := base.Clone()
 	transport.Proxy = nil
 	transport.ForceAttemptHTTP2 = false
-	return transport
+	transport.DisableKeepAlives = true
+	return appProxyRetryTransport{
+		base:        transport,
+		maxAttempts: defaultAppProxyMaxAttempts,
+		retryDelay:  defaultAppProxyRetryDelay,
+	}
+}
+
+type appProxyRetryTransport struct {
+	base        http.RoundTripper
+	maxAttempts int
+	retryDelay  time.Duration
+}
+
+func (t appProxyRetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	maxAttempts := t.maxAttempts
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			if err := resetAppProxyRequestBody(req); err != nil {
+				return nil, lastErr
+			}
+			if err := sleepBeforeAppProxyRetry(req.Context(), appProxyRetryDelayForAttempt(t.retryDelay, attempt)); err != nil {
+				if lastErr != nil {
+					return nil, lastErr
+				}
+				return nil, err
+			}
+		}
+
+		resp, err := base.RoundTrip(req)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if attempt == maxAttempts || !canRetryAppProxyRequest(req) || !isTransientAppProxyRoundTripError(req.Context(), err) {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+func appProxyRetryDelayForAttempt(baseDelay time.Duration, attempt int) time.Duration {
+	if baseDelay <= 0 || attempt <= 1 {
+		return 0
+	}
+	delay := baseDelay
+	for i := 2; i < attempt; i++ {
+		delay *= 2
+	}
+	return delay
+}
+
+func sleepBeforeAppProxyRetry(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func canRetryAppProxyRequest(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	if req.Body == nil || req.Body == http.NoBody {
+		return true
+	}
+	return req.GetBody != nil
+}
+
+func resetAppProxyRequestBody(req *http.Request) error {
+	if req == nil || req.Body == nil || req.Body == http.NoBody {
+		return nil
+	}
+	if req.GetBody == nil {
+		return errors.New("app proxy request body is not replayable")
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return err
+	}
+	req.Body = body
+	return nil
+}
+
+func isTransientAppProxyRoundTripError(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return isTransientAppProxyRoundTripError(ctx, urlErr.Err)
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	for _, marker := range []string{
+		"connect: connection refused",
+		"connection refused",
+		"connection reset by peer",
+		"server closed idle connection",
+		"unexpected eof",
+		"eof",
+		"no such host",
+		"no route to host",
+		"network is unreachable",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func prepareAppProxyRequestForRetries(req *http.Request) error {
+	if req == nil || req.GetBody != nil || req.Body == nil || req.Body == http.NoBody {
+		return nil
+	}
+	if isAppProxyUpgradeRequest(req) {
+		return nil
+	}
+	if req.ContentLength <= 0 || req.ContentLength > defaultAppProxyReplayBodyLimit {
+		return nil
+	}
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return err
+	}
+	if err := req.Body.Close(); err != nil {
+		return err
+	}
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
+	req.ContentLength = int64(len(body))
+	return nil
+}
+
+func isAppProxyUpgradeRequest(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	if strings.TrimSpace(req.Header.Get("Upgrade")) != "" {
+		return true
+	}
+	for _, value := range req.Header.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func appRouteUnavailableMessage(app model.App) string {

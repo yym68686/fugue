@@ -389,6 +389,100 @@ func TestAppProxyLogsUpstreamProxyErrors(t *testing.T) {
 	}
 }
 
+func TestAppProxyRetriesTransientUpstreamErrorsWithReplayableBody(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServer(t)
+	specCopy := app.Spec
+	deployOp, err := storeState.CreateOperation(model.Operation{
+		TenantID:        app.TenantID,
+		Type:            model.OperationTypeDeploy,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		ExecutionMode:   model.ExecutionModeManaged,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if _, err := storeState.CompleteManagedOperationWithResult(deployOp.ID, "", "deployed", &specCopy, nil); err != nil {
+		t.Fatalf("complete deploy operation: %v", err)
+	}
+	app, err = storeState.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("reload deployed app: %v", err)
+	}
+
+	const requestBody = `{"model":"demo","input":"hello"}`
+	attempts := 0
+	server.appProxyTransport = appProxyRetryTransport{
+		base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			attempts++
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("read attempt body: %v", err)
+			}
+			if got := string(body); got != requestBody {
+				t.Fatalf("attempt %d body = %q, want %q", attempts, got, requestBody)
+			}
+			if attempts == 1 {
+				return nil, errors.New("read tcp 10.42.0.1:1234->10.43.0.2:8000: read: connection reset by peer")
+			}
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Status:        "200 OK",
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader("ok")),
+				ContentLength: 2,
+				Request:       req,
+			}, nil
+		}),
+		maxAttempts: 2,
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://"+app.Route.Hostname+"/v1/responses", strings.NewReader(requestBody))
+	req.Host = app.Route.Hostname
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected retry to recover with status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	if attempts != 2 {
+		t.Fatalf("expected two upstream attempts, got %d", attempts)
+	}
+	if got := recorder.Body.String(); got != "ok" {
+		t.Fatalf("expected proxied response body %q, got %q", "ok", got)
+	}
+}
+
+func TestAppProxyRetryTransportDoesNotRetryNonReplayableBody(t *testing.T) {
+	t.Parallel()
+
+	attempts := 0
+	transport := appProxyRetryTransport{
+		base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			attempts++
+			if _, err := io.ReadAll(req.Body); err != nil {
+				t.Fatalf("read attempt body: %v", err)
+			}
+			return nil, errors.New("EOF")
+		}),
+		maxAttempts: 3,
+	}
+	req := httptest.NewRequest(http.MethodPost, "http://app.example/v1/responses", io.NopCloser(strings.NewReader("payload")))
+	req.GetBody = nil
+
+	_, err := transport.RoundTrip(req)
+	if err == nil {
+		t.Fatal("expected transient upstream error")
+	}
+	if attempts != 1 {
+		t.Fatalf("expected non-replayable body to be attempted once, got %d attempts", attempts)
+	}
+}
+
 func TestMaybeHandleAppProxyReturnsLiveFailureDetailsWhenReplicasAreUnavailable(t *testing.T) {
 	t.Parallel()
 
