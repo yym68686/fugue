@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"fugue/internal/model"
+	"fugue/internal/store"
 
 	"github.com/spf13/cobra"
 )
@@ -268,7 +269,8 @@ func (c *CLI) newAppDatabaseSwitchoverCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if app.Spec.Postgres == nil {
+			database := store.OwnedManagedPostgresSpec(app)
+			if database == nil {
 				return fmt.Errorf("managed postgres is not configured for this app")
 			}
 
@@ -279,7 +281,7 @@ func (c *CLI) newAppDatabaseSwitchoverCommand() *cobra.Command {
 				}
 				runtimeName = strings.TrimSpace(args[1])
 			}
-			targetRuntimeID := strings.TrimSpace(app.Spec.Postgres.FailoverTargetRuntimeID)
+			targetRuntimeID := strings.TrimSpace(database.FailoverTargetRuntimeID)
 			switch {
 			case runtimeName != "" || strings.TrimSpace(opts.RuntimeID) != "":
 				targetRuntimeID, err = resolveRuntimeSelection(client, opts.RuntimeID, runtimeName)
@@ -327,6 +329,7 @@ func (c *CLI) newAppDatabaseSwitchoverCommand() *cobra.Command {
 }
 
 func (c *CLI) renderAppDatabaseState(app model.App, operation *model.Operation, alreadyCurrent bool, showSecrets bool) error {
+	database := store.OwnedManagedPostgresSpec(app)
 	if c.wantsJSON() {
 		payloadApp := app
 		var payloadOp *model.Operation
@@ -336,6 +339,7 @@ func (c *CLI) renderAppDatabaseState(app model.App, operation *model.Operation, 
 		}
 		if !showSecrets {
 			payloadApp = redactAppForOutput(payloadApp)
+			database = store.OwnedManagedPostgresSpec(payloadApp)
 			if payloadOp != nil {
 				redactedOp := redactOperationForOutput(*payloadOp)
 				payloadOp = &redactedOp
@@ -343,7 +347,7 @@ func (c *CLI) renderAppDatabaseState(app model.App, operation *model.Operation, 
 		}
 		payload := map[string]any{
 			"app":             payloadApp,
-			"database":        cloneAppPostgresSpec(payloadApp.Spec.Postgres),
+			"database":        cloneAppPostgresSpec(database),
 			"already_current": alreadyCurrent,
 		}
 		if payloadOp != nil {
@@ -353,7 +357,7 @@ func (c *CLI) renderAppDatabaseState(app model.App, operation *model.Operation, 
 	}
 	pairs := []kvPair{
 		{Key: "app_id", Value: app.ID},
-		{Key: "database_enabled", Value: fmt.Sprintf("%t", app.Spec.Postgres != nil)},
+		{Key: "database_enabled", Value: fmt.Sprintf("%t", database != nil)},
 	}
 	if operation != nil {
 		pairs = append(pairs, kvPair{Key: "operation_id", Value: operation.ID})
@@ -361,19 +365,19 @@ func (c *CLI) renderAppDatabaseState(app model.App, operation *model.Operation, 
 	if alreadyCurrent {
 		pairs = append(pairs, kvPair{Key: "already_current", Value: "true"})
 	}
-	if app.Spec.Postgres != nil {
+	if database != nil {
 		pairs = append(pairs,
-			kvPair{Key: "runtime_id", Value: strings.TrimSpace(app.Spec.Postgres.RuntimeID)},
-			kvPair{Key: "database", Value: strings.TrimSpace(app.Spec.Postgres.Database)},
-			kvPair{Key: "user", Value: strings.TrimSpace(app.Spec.Postgres.User)},
-			kvPair{Key: "service_name", Value: strings.TrimSpace(app.Spec.Postgres.ServiceName)},
-			kvPair{Key: "storage_size", Value: strings.TrimSpace(app.Spec.Postgres.StorageSize)},
-			kvPair{Key: "storage_class", Value: strings.TrimSpace(app.Spec.Postgres.StorageClassName)},
-			kvPair{Key: "instances", Value: fmt.Sprintf("%d", app.Spec.Postgres.Instances)},
-			kvPair{Key: "sync_replicas", Value: fmt.Sprintf("%d", app.Spec.Postgres.SynchronousReplicas)},
-			kvPair{Key: "failover_target_runtime_id", Value: strings.TrimSpace(app.Spec.Postgres.FailoverTargetRuntimeID)},
-			kvPair{Key: "pending_rebalance", Value: fmt.Sprintf("%t", app.Spec.Postgres.PrimaryPlacementPendingRebalance)},
-			kvPair{Key: "image", Value: strings.TrimSpace(app.Spec.Postgres.Image)},
+			kvPair{Key: "runtime_id", Value: strings.TrimSpace(database.RuntimeID)},
+			kvPair{Key: "database", Value: strings.TrimSpace(database.Database)},
+			kvPair{Key: "user", Value: strings.TrimSpace(database.User)},
+			kvPair{Key: "service_name", Value: strings.TrimSpace(database.ServiceName)},
+			kvPair{Key: "storage_size", Value: strings.TrimSpace(database.StorageSize)},
+			kvPair{Key: "storage_class", Value: strings.TrimSpace(database.StorageClassName)},
+			kvPair{Key: "instances", Value: fmt.Sprintf("%d", database.Instances)},
+			kvPair{Key: "sync_replicas", Value: fmt.Sprintf("%d", database.SynchronousReplicas)},
+			kvPair{Key: "failover_target_runtime_id", Value: strings.TrimSpace(database.FailoverTargetRuntimeID)},
+			kvPair{Key: "pending_rebalance", Value: fmt.Sprintf("%t", database.PrimaryPlacementPendingRebalance)},
+			kvPair{Key: "image", Value: strings.TrimSpace(database.Image)},
 		)
 	}
 	return writeKeyValues(c.stdout, pairs...)

@@ -149,3 +149,91 @@ func TestRunAppDatabaseShowShowSecretsOptIn(t *testing.T) {
 		t.Fatalf("expected show-secrets output to contain password, got %q", showSecretsOut)
 	}
 }
+
+func TestRunAppDatabaseShowUsesOwnedBackingService(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_a","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_a","replicas":1},"status":{"phase":"ready","current_replicas":1},"backing_services":[{"id":"svc_pg","tenant_id":"tenant_123","project_id":"project_123","owner_app_id":"app_123","name":"demo","type":"postgres","provisioner":"managed","status":"active","spec":{"postgres":{"runtime_id":"runtime_a","database":"app","user":"app","password":"service-password-123","service_name":"demo-postgres","failover_target_runtime_id":"runtime_b"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}],"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"-o", "json",
+		"app", "db", "show", "demo",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app db show: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{
+		`"database": "app"`,
+		`"runtime_id": "runtime_a"`,
+		`"failover_target_runtime_id": "runtime_b"`,
+		`"password": "[redacted]"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected output to contain %q, got %q", want, out)
+		}
+	}
+	if strings.Contains(out, "service-password-123") {
+		t.Fatalf("expected backing service password to be redacted, got %q", out)
+	}
+}
+
+func TestRunAppDatabaseSwitchoverUsesOwnedBackingService(t *testing.T) {
+	t.Parallel()
+
+	var gotBody map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_a","replicas":1},"status":{"phase":"ready","current_runtime_id":"runtime_a","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_a","replicas":1},"status":{"phase":"ready","current_runtime_id":"runtime_a","current_replicas":1},"backing_services":[{"id":"svc_pg","tenant_id":"tenant_123","project_id":"project_123","owner_app_id":"app_123","name":"demo","type":"postgres","provisioner":"managed","status":"active","spec":{"postgres":{"runtime_id":"runtime_a","database":"app","user":"app","service_name":"demo-postgres","failover_target_runtime_id":"runtime_b"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}],"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/database/switchover":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode switchover body: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_123","app_id":"app_123","type":"database-switchover","status":"pending"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "db", "switchover", "demo",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app db switchover: %v", err)
+	}
+
+	if gotBody["target_runtime_id"] != "runtime_b" {
+		t.Fatalf("expected target_runtime_id runtime_b, got %+v", gotBody)
+	}
+	out := stdout.String()
+	for _, want := range []string{"app_id=app_123", "operation_id=op_123", "target_runtime_id=runtime_b"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
