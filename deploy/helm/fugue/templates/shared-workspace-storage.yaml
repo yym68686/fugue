@@ -160,7 +160,7 @@ spec:
             - name: NFS_SERVER
               value: {{ $nfsServer | quote }}
             - name: NFS_PATH
-              value: {{ .Values.sharedWorkspaceStorage.server.sharedDirectory | quote }}
+              value: {{ .Values.sharedWorkspaceStorage.server.nfsPath | quote }}
           volumeMounts:
             - name: nfs-client-root
               mountPath: /persistentvolumes
@@ -172,5 +172,5 @@ spec:
         - name: nfs-client-root
           nfs:
             server: {{ $nfsServer | quote }}
-            path: {{ .Values.sharedWorkspaceStorage.server.sharedDirectory | quote }}
+            path: {{ .Values.sharedWorkspaceStorage.server.nfsPath | quote }}
 {{- end }}

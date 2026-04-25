@@ -128,6 +128,7 @@ sharedWorkspaceStorage:
       tag: "12"
       pullPolicy: IfNotPresent
     sharedDirectory: /exports
+    nfsPath: /
     hostPath: /var/lib/fugue/shared-workspaces
     clusterIP: 10.43.240.17
     nodeSelector:
