@@ -19,6 +19,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/runtime"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -124,7 +125,7 @@ func (s *Server) handleQueryAppDatabase(w http.ResponseWriter, r *http.Request) 
 		spec = recoveredSpec
 	}
 	envDetails := mergedAppEnvDetails(app, spec)
-	connection, err := resolveAppDatabaseConnection(app.Name, spec, envDetails.Env)
+	connection, err := resolveAppDatabaseConnection(app, spec, envDetails.Env)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
@@ -328,7 +329,7 @@ func queryAppDatabase(ctx context.Context, db *sql.DB, connection appDatabaseCon
 	}, nil
 }
 
-func resolveAppDatabaseConnection(appName string, spec model.AppSpec, env map[string]string) (appDatabaseConnection, error) {
+func resolveAppDatabaseConnection(app model.App, spec model.AppSpec, env map[string]string) (appDatabaseConnection, error) {
 	if normalizedURL, ok := normalizePostgresDatabaseURL(firstNonEmptyString(
 		env["DATABASE_URL"],
 		env["DB_URL"],
@@ -354,7 +355,7 @@ func resolveAppDatabaseConnection(appName string, spec model.AppSpec, env map[st
 	password := firstNonEmptyString(env["DB_PASSWORD"], env["PGPASSWORD"], env["POSTGRES_PASSWORD"])
 	database := firstNonEmptyString(env["DB_NAME"], env["DB_DATABASE"], env["PGDATABASE"], env["POSTGRES_DB"])
 	if host == "" && spec.Postgres != nil {
-		defaults := defaultAppManagedPostgresEnv(appName, *spec.Postgres)
+		defaults := defaultAppManagedPostgresEnv(app.Name, *spec.Postgres)
 		host = firstNonEmptyString(host, defaults["DB_HOST"])
 		user = firstNonEmptyString(user, defaults["DB_USER"])
 		password = firstNonEmptyString(password, defaults["DB_PASSWORD"])
@@ -366,6 +367,7 @@ func resolveAppDatabaseConnection(appName string, spec model.AppSpec, env map[st
 			port = parsedPort
 		}
 	}
+	host = qualifyAppDatabaseHostForAPI(host, app, spec)
 	if host == "" || user == "" || database == "" {
 		return appDatabaseConnection{}, fmt.Errorf("app does not expose a queryable postgres connection via DATABASE_URL or DB_* env")
 	}
@@ -390,6 +392,51 @@ func resolveAppDatabaseConnection(appName string, spec model.AppSpec, env map[st
 		Database: database,
 		User:     user,
 	}, nil
+}
+
+func qualifyAppDatabaseHostForAPI(host string, app model.App, spec model.AppSpec) string {
+	host = strings.TrimSpace(host)
+	namespace := strings.TrimSpace(runtime.NamespaceForTenant(app.TenantID))
+	if host == "" || namespace == "" {
+		return host
+	}
+	for _, candidate := range managedPostgresQueryHostCandidates(app, spec) {
+		if strings.EqualFold(host, candidate) {
+			return host + "." + namespace + ".svc.cluster.local"
+		}
+	}
+	return host
+}
+
+func managedPostgresQueryHostCandidates(app model.App, spec model.AppSpec) []string {
+	candidates := make([]string, 0, 2)
+	appendCandidate := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		for _, existing := range candidates {
+			if strings.EqualFold(existing, value) {
+				return
+			}
+		}
+		candidates = append(candidates, value)
+	}
+
+	for _, bound := range appBoundServices(app) {
+		if !strings.EqualFold(strings.TrimSpace(bound.Service.Type), model.BackingServiceTypePostgres) {
+			continue
+		}
+		if !isManagedBackingService(bound.Service) || bound.Service.Spec.Postgres == nil {
+			continue
+		}
+		appendCandidate(model.PostgresRWServiceName(bound.Service.Spec.Postgres.ServiceName))
+	}
+	if len(candidates) == 0 && spec.Postgres != nil {
+		defaults := defaultAppManagedPostgresEnv(app.Name, *spec.Postgres)
+		appendCandidate(defaults["DB_HOST"])
+	}
+	return candidates
 }
 
 func normalizePostgresDatabaseURL(raw string) (string, bool) {

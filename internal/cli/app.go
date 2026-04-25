@@ -152,10 +152,30 @@ func (c *CLI) newAppStatusCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"app": finalApp})
+			activeOps, opsErr := loadActiveAppOperations(client, finalApp.ID)
+			if opsErr != nil {
+				c.progressf("warning=operation inventory unavailable: %v", opsErr)
 			}
-			return c.renderAppStatus(client, finalApp)
+			if c.wantsJSON() {
+				payload := map[string]any{"app": finalApp}
+				if opsErr == nil {
+					payload["active_operations"] = activeOps
+				}
+				return writeJSON(c.stdout, payload)
+			}
+			if err := c.renderAppStatus(client, finalApp); err != nil {
+				return err
+			}
+			if len(activeOps) == 0 {
+				return nil
+			}
+			if _, err := fmt.Fprintln(c.stdout); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(c.stdout, "active_operations"); err != nil {
+				return err
+			}
+			return writeOperationTableWithApps(c.stdout, activeOps, mapAppNames([]model.App{finalApp}))
 		},
 	}
 }
@@ -708,6 +728,22 @@ func (c *CLI) waitForSingleApp(client *Client, appID string, op model.Operation,
 		return nil, err
 	}
 	return &app, nil
+}
+
+func loadActiveAppOperations(client *Client, appID string) ([]model.Operation, error) {
+	operations, err := client.ListOperations(appID)
+	if err != nil {
+		return nil, err
+	}
+	active := make([]model.Operation, 0, len(operations))
+	for _, op := range operations {
+		switch strings.TrimSpace(op.Status) {
+		case model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent:
+			active = append(active, op)
+		}
+	}
+	sortOperationsNewestFirst(active)
+	return active, nil
 }
 
 func (c *CLI) renderAppCommandResult(result appCommandResult) error {

@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"fugue/internal/model"
 
@@ -1061,7 +1060,9 @@ func (c *CLI) waitForOperations(client *Client, operations []model.Operation) ([
 
 	lastStatus := make(map[string]string, len(pending))
 	final := make(map[string]model.Operation, len(pending))
+	transientErrors := deployWaitTransientErrorTracker{}
 	for len(pending) > 0 {
+		pollInterrupted := false
 		for _, id := range order {
 			base, ok := pending[id]
 			if !ok {
@@ -1069,7 +1070,14 @@ func (c *CLI) waitForOperations(client *Client, operations []model.Operation) ([
 			}
 			current, err := client.GetOperation(id)
 			if err != nil {
-				return nil, err
+				retry, retryErr := transientErrors.shouldRetry(c, err)
+				if retryErr != nil {
+					return nil, retryErr
+				}
+				if retry {
+					pollInterrupted = true
+					break
+				}
 			}
 			status := strings.TrimSpace(current.Status)
 			if status != lastStatus[id] {
@@ -1091,10 +1099,15 @@ func (c *CLI) waitForOperations(client *Client, operations []model.Operation) ([
 				pending[id] = base
 			}
 		}
+		if pollInterrupted {
+			sleepDeployWaitPoll()
+			continue
+		}
+		transientErrors.reset()
 		if len(pending) == 0 {
 			break
 		}
-		time.Sleep(2 * time.Second)
+		sleepDeployWaitPoll()
 	}
 
 	out := make([]model.Operation, 0, len(order))

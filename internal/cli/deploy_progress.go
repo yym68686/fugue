@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"fugue/internal/model"
 )
@@ -31,10 +30,12 @@ func (c *CLI) waitForImportBundle(client *Client, bundle importBundle) (importBu
 	lastStatus := make(map[string]string, len(tracked))
 	var lastSnapshotHash [32]byte
 	haveSnapshot := false
+	transientErrors := deployWaitTransientErrorTracker{}
 
 	for {
 		currentOps := make([]model.Operation, 0, len(order))
 		pending := 0
+		pollInterrupted := false
 		for _, id := range order {
 			base, ok := tracked[id]
 			if !ok {
@@ -42,7 +43,14 @@ func (c *CLI) waitForImportBundle(client *Client, bundle importBundle) (importBu
 			}
 			current, err := client.GetOperation(id)
 			if err != nil {
-				return bundle, nil, err
+				retry, retryErr := transientErrors.shouldRetry(c, err)
+				if retryErr != nil {
+					return bundle, nil, retryErr
+				}
+				if retry {
+					pollInterrupted = true
+					break
+				}
 			}
 			tracked[id] = current
 			currentOps = append(currentOps, current)
@@ -79,11 +87,23 @@ func (c *CLI) waitForImportBundle(client *Client, bundle importBundle) (importBu
 				pending++
 			}
 		}
+		if pollInterrupted {
+			sleepDeployWaitPoll()
+			continue
+		}
 
 		currentApps, err := fetchFinalApps(client, bundle.Apps, currentOps)
 		if err != nil {
-			return bundle, nil, err
+			retry, retryErr := transientErrors.shouldRetry(c, err)
+			if retryErr != nil {
+				return bundle, nil, retryErr
+			}
+			if retry {
+				sleepDeployWaitPoll()
+				continue
+			}
 		}
+		transientErrors.reset()
 		if err := c.renderDeployProgressSnapshot(client, currentApps, currentOps, filters, &lastSnapshotHash, &haveSnapshot); err != nil {
 			return bundle, nil, err
 		}
@@ -101,12 +121,17 @@ func (c *CLI) waitForImportBundle(client *Client, bundle importBundle) (importBu
 			}
 			diagnosis, err := c.buildImportBundleDiagnosis(client, bundle.PrimaryApp)
 			if err != nil {
-				return bundle, nil, err
+				if isTransientDeployWaitError(err) {
+					c.progressf("warning=deploy diagnosis unavailable after completion: %v", err)
+					diagnosis = nil
+				} else {
+					return bundle, nil, err
+				}
 			}
 			return bundle, diagnosis, nil
 		}
 
-		time.Sleep(2 * time.Second)
+		sleepDeployWaitPoll()
 	}
 }
 
