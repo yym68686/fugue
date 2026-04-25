@@ -8,7 +8,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"fugue/internal/runtime"
@@ -20,8 +23,9 @@ type kubeObjectList struct {
 
 type kubeDeployment struct {
 	Metadata struct {
-		Name       string `json:"name"`
-		Generation int64  `json:"generation,omitempty"`
+		Name            string `json:"name"`
+		ResourceVersion string `json:"resourceVersion,omitempty"`
+		Generation      int64  `json:"generation,omitempty"`
 	} `json:"metadata"`
 	Spec struct {
 		Replicas *int `json:"replicas,omitempty"`
@@ -39,9 +43,10 @@ type kubeDeployment struct {
 
 type kubeCloudNativePGCluster struct {
 	Metadata struct {
-		Name        string            `json:"name"`
-		Generation  int64             `json:"generation,omitempty"`
-		Annotations map[string]string `json:"annotations,omitempty"`
+		Name            string            `json:"name"`
+		ResourceVersion string            `json:"resourceVersion,omitempty"`
+		Generation      int64             `json:"generation,omitempty"`
+		Annotations     map[string]string `json:"annotations,omitempty"`
 	} `json:"metadata"`
 	Spec struct {
 		Instances int            `json:"instances,omitempty"`
@@ -55,6 +60,17 @@ type kubeCloudNativePGCluster struct {
 		TargetPrimary          string `json:"targetPrimary,omitempty"`
 		TargetPrimaryTimestamp string `json:"targetPrimaryTimestamp,omitempty"`
 	} `json:"status"`
+}
+
+type kubeWatchTarget struct {
+	apiPath         string
+	fieldSelector   string
+	resourceVersion string
+}
+
+type kubeWatchEvent struct {
+	Type   string          `json:"type"`
+	Object json.RawMessage `json:"object,omitempty"`
 }
 
 func (c *kubeClient) applyObject(ctx context.Context, obj map[string]any, out any) error {
@@ -119,12 +135,104 @@ func (c *kubeClient) waitForDeploymentDeleted(ctx context.Context, namespace, na
 }
 
 func (c *kubeClient) applyObjects(ctx context.Context, objects []map[string]any) error {
+	if len(objects) == 0 {
+		return nil
+	}
+
+	objectsByPhase := make(map[int][]map[string]any)
+	phases := make([]int, 0)
 	for _, obj := range objects {
-		if err := c.applyObject(ctx, obj, nil); err != nil {
+		phase := kubeApplyPhase(obj)
+		if _, ok := objectsByPhase[phase]; !ok {
+			phases = append(phases, phase)
+		}
+		objectsByPhase[phase] = append(objectsByPhase[phase], obj)
+	}
+	sort.Ints(phases)
+
+	for _, phase := range phases {
+		if err := c.applyObjectBatch(ctx, objectsByPhase[phase]); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (c *kubeClient) applyObjectBatch(ctx context.Context, objects []map[string]any) error {
+	if len(objects) == 0 {
+		return nil
+	}
+	limit := c.applyConcurrency
+	if limit <= 0 {
+		limit = 1
+	}
+	if limit > len(objects) {
+		limit = len(objects)
+	}
+	if limit <= 1 {
+		for _, obj := range objects {
+			if err := c.applyObject(ctx, obj, nil); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	batchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	sem := make(chan struct{}, limit)
+	var wg sync.WaitGroup
+	var firstErr error
+	var once sync.Once
+launch:
+	for _, obj := range objects {
+		select {
+		case <-batchCtx.Done():
+			break launch
+		case sem <- struct{}{}:
+		}
+		wg.Add(1)
+		obj := obj
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := c.applyObject(batchCtx, obj, nil); err != nil {
+				once.Do(func() {
+					firstErr = err
+					cancel()
+				})
+			}
+		}()
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return firstErr
+	}
+	return ctx.Err()
+}
+
+func kubeApplyPhase(obj map[string]any) int {
+	apiVersion, _ := obj["apiVersion"].(string)
+	kind, _ := obj["kind"].(string)
+	switch {
+	case apiVersion == "v1" && kind == "Namespace":
+		return 0
+	case apiVersion == runtime.ManagedAppAPIVersion && kind == runtime.ManagedAppKind:
+		return 1
+	case apiVersion == "v1" && (kind == "Secret" || kind == "PersistentVolumeClaim" || kind == "Service"):
+		return 1
+	case apiVersion == runtime.VolSyncAPIVersion && kind == runtime.VolSyncReplicationDestinationKind:
+		return 1
+	case apiVersion == runtime.CloudNativePGAPIVersion && kind == runtime.CloudNativePGClusterKind:
+		return 2
+	case apiVersion == runtime.VolSyncAPIVersion && kind == runtime.VolSyncReplicationSourceKind:
+		return 2
+	case apiVersion == "apps/v1" && kind == "Deployment":
+		return 3
+	default:
+		return 2
+	}
 }
 
 func (c *kubeClient) getManagedApp(ctx context.Context, namespace, name string) (runtime.ManagedAppObject, bool, error) {
@@ -231,6 +339,145 @@ func (c *kubeClient) getCloudNativePGCluster(ctx context.Context, namespace, nam
 		return kubeCloudNativePGCluster{}, false, err
 	}
 	return cluster, true, nil
+}
+
+func (c *kubeClient) waitForAnyObjectEvent(ctx context.Context, targets []kubeWatchTarget, fallback time.Duration) error {
+	if fallback <= 0 {
+		fallback = time.Second
+	}
+	targets = uniqueKubeWatchTargets(targets)
+	if len(targets) == 0 {
+		timer := time.NewTimer(fallback)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return nil
+		}
+	}
+
+	watchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type watchResult struct {
+		event bool
+	}
+	results := make(chan watchResult, len(targets))
+	for _, target := range targets {
+		target := target
+		go func() {
+			err := c.waitForObjectWatchEvent(watchCtx, target, fallback)
+			select {
+			case results <- watchResult{event: err == nil}:
+			case <-watchCtx.Done():
+			}
+		}()
+	}
+
+	timer := time.NewTimer(fallback)
+	defer timer.Stop()
+	active := len(targets)
+	for {
+		var resultCh <-chan watchResult
+		if active > 0 {
+			resultCh = results
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case result := <-resultCh:
+			active--
+			if result.event {
+				return nil
+			}
+		case <-timer.C:
+			return nil
+		}
+	}
+}
+
+func uniqueKubeWatchTargets(targets []kubeWatchTarget) []kubeWatchTarget {
+	if len(targets) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(targets))
+	out := make([]kubeWatchTarget, 0, len(targets))
+	for _, target := range targets {
+		target.apiPath = strings.TrimSpace(target.apiPath)
+		target.fieldSelector = strings.TrimSpace(target.fieldSelector)
+		target.resourceVersion = strings.TrimSpace(target.resourceVersion)
+		if target.apiPath == "" {
+			continue
+		}
+		key := target.apiPath + "\x00" + target.fieldSelector + "\x00" + target.resourceVersion
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, target)
+	}
+	return out
+}
+
+func (c *kubeClient) waitForObjectWatchEvent(ctx context.Context, target kubeWatchTarget, fallback time.Duration) error {
+	apiPath := watchObjectAPIPath(target.apiPath, target.fieldSelector, target.resourceVersion, fallback)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+apiPath, nil)
+	if err != nil {
+		return fmt.Errorf("create kubernetes watch request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.bearerToken)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("kubernetes watch %s: %w", target.apiPath, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		responseBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("kubernetes watch %s failed: status=%d body=%s", target.apiPath, resp.StatusCode, strings.TrimSpace(string(responseBody)))
+	}
+
+	decoder := json.NewDecoder(resp.Body)
+	for {
+		var event kubeWatchEvent
+		if err := decoder.Decode(&event); err != nil {
+			return err
+		}
+		switch strings.ToUpper(strings.TrimSpace(event.Type)) {
+		case "", "BOOKMARK":
+			continue
+		case "ERROR":
+			return fmt.Errorf("kubernetes watch %s reported an error", target.apiPath)
+		default:
+			return nil
+		}
+	}
+}
+
+func watchObjectAPIPath(apiPath, fieldSelector, resourceVersion string, timeout time.Duration) string {
+	parsed, err := url.Parse(apiPath)
+	if err != nil {
+		return apiPath
+	}
+	query := parsed.Query()
+	query.Set("watch", "true")
+	query.Set("allowWatchBookmarks", "true")
+	if fieldSelector = strings.TrimSpace(fieldSelector); fieldSelector != "" {
+		query.Set("fieldSelector", fieldSelector)
+	}
+	if resourceVersion = strings.TrimSpace(resourceVersion); resourceVersion != "" {
+		query.Set("resourceVersion", resourceVersion)
+	}
+	timeoutSeconds := int((timeout + time.Second - 1) / time.Second)
+	if timeoutSeconds < 1 {
+		timeoutSeconds = 1
+	}
+	query.Set("timeoutSeconds", strconv.Itoa(timeoutSeconds))
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 func (c *kubeClient) getVolSyncReplicationDestination(ctx context.Context, namespace, name string) (map[string]any, bool, error) {
@@ -408,11 +655,19 @@ func (c *kubeClient) doRequest(ctx context.Context, method, apiPath, contentType
 }
 
 func managedAppAPIPath(namespace, name string) string {
-	return "/apis/" + runtime.ManagedAppAPIGroup + "/v1alpha1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/" + runtime.ManagedAppPlural + "/" + url.PathEscape(strings.TrimSpace(name))
+	return managedAppCollectionAPIPath(namespace) + "/" + url.PathEscape(strings.TrimSpace(name))
+}
+
+func managedAppCollectionAPIPath(namespace string) string {
+	return "/apis/" + runtime.ManagedAppAPIGroup + "/v1alpha1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/" + runtime.ManagedAppPlural
 }
 
 func cloudNativePGClusterAPIPath(namespace, name string) string {
-	return "/apis/postgresql.cnpg.io/v1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/clusters/" + url.PathEscape(strings.TrimSpace(name))
+	return cloudNativePGClusterCollectionAPIPath(namespace) + "/" + url.PathEscape(strings.TrimSpace(name))
+}
+
+func cloudNativePGClusterCollectionAPIPath(namespace string) string {
+	return "/apis/postgresql.cnpg.io/v1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/clusters"
 }
 
 func volSyncReplicationDestinationAPIPath(namespace, name string) string {
@@ -619,5 +874,9 @@ func objectNameAndNamespace(defaultNamespace string, obj map[string]any) (string
 }
 
 func deploymentAPIPath(namespace, name string) string {
-	return "/apis/apps/v1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/deployments/" + url.PathEscape(strings.TrimSpace(name))
+	return deploymentCollectionAPIPath(namespace) + "/" + url.PathEscape(strings.TrimSpace(name))
+}
+
+func deploymentCollectionAPIPath(namespace string) string {
+	return "/apis/apps/v1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/deployments"
 }

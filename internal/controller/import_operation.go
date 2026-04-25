@@ -13,7 +13,12 @@ import (
 	"fugue/internal/sourceimport"
 )
 
-func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Operation, app model.App) error {
+func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Operation, app model.App) (err error) {
+	timer := newControllerOperationTimer(s.now)
+	defer func() {
+		timer.Log(s.Logger, "managed_import_operation", op, err)
+	}()
+
 	if op.DesiredSpec == nil {
 		return fmt.Errorf("import operation %s missing desired spec", op.ID)
 	}
@@ -33,7 +38,6 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		"fugue.pro/tenant-id":    app.TenantID,
 	}
 	stateful := op.DesiredSpec.Workspace != nil || op.DesiredSpec.PersistentStorage != nil || op.DesiredSpec.Postgres != nil
-	var err error
 	var output sourceimport.GitHubSourceImportOutput
 	switch strings.TrimSpace(op.DesiredSource.Type) {
 	case model.AppSourceTypeDockerImage:
@@ -107,6 +111,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	if err != nil {
 		return err
 	}
+	timer.Mark("import_source")
 	if err := s.ensureOperationStillActive(op.ID); err != nil {
 		return err
 	}
@@ -126,12 +131,14 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	if err := validateImportedManagedImageOutput(op, *op.DesiredSource, output); err != nil {
 		return err
 	}
+	timer.Mark("validate_import")
 
 	composeSuggestedEnv, composeEnvErr := s.suggestComposeServiceEnv(importCtx, app, *op.DesiredSource)
 	if composeEnvErr != nil && s.Logger != nil {
 		s.Logger.Printf("skip compose env refresh for app %s source=%s compose_service=%s: %v", app.ID, op.DesiredSource.Type, op.DesiredSource.ComposeService, composeEnvErr)
 	}
 	output.ImportResult.SuggestedEnv = mergeSuggestedImportEnv(output.ImportResult.SuggestedEnv, composeSuggestedEnv)
+	timer.Mark("suggest_env")
 
 	finalSpec := cloneImportSpec(*op.DesiredSpec)
 	finalSource := restoreQueuedSourceMetadata(output.Source, *op.DesiredSource)
@@ -140,6 +147,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	if err != nil {
 		return err
 	}
+	timer.Mark("resolve_image")
 	finalSource.ResolvedImageRef = managedImageRef
 	if deployOriginSource != nil && originSourceShouldAdoptImportedBuild(*deployOriginSource, *op.DesiredSource) {
 		deployOriginSource.ResolvedImageRef = managedImageRef
@@ -188,14 +196,17 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	if err != nil {
 		return fmt.Errorf("queue deploy after import: %w", err)
 	}
+	timer.Mark("queue_deploy")
 
 	message := fmt.Sprintf("import build completed; queued deploy operation %s", deployOp.ID)
 	if _, err := s.Store.CompleteManagedOperationWithResult(op.ID, "", message, &finalSpec, &finalSource); err != nil {
 		return fmt.Errorf("complete import operation %s: %w", op.ID, err)
 	}
+	timer.Mark("complete_import")
 	if err := s.syncTenantBillingImageStorage(ctx, app.TenantID); err != nil && s.Logger != nil {
 		s.Logger.Printf("skip billing image storage sync after import op=%s tenant=%s: %v", op.ID, app.TenantID, err)
 	}
+	timer.Mark("billing_sync")
 
 	s.Logger.Printf("operation %s completed import build; managed_image=%s runtime_image=%s deploy=%s", op.ID, managedImageRef, finalSpec.Image, deployOp.ID)
 	return nil

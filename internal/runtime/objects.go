@@ -395,7 +395,7 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 				"command": []string{
 					"sh",
 					"-c",
-					"until nc -z " + model.PostgresRWServiceName(postgres.spec.ServiceName) + " 5432; do sleep 2; done",
+					"until nc -z " + model.PostgresRWServiceName(postgres.spec.ServiceName) + " 5432; do sleep 1; done",
 				},
 				"resources": runtimeHelperResourceRequirements(),
 			})
@@ -537,10 +537,10 @@ func buildAppTCPReadinessProbe(port int) map[string]any {
 		"tcpSocket": map[string]any{
 			"port": port,
 		},
-		"initialDelaySeconds": 1,
-		"periodSeconds":       2,
+		"initialDelaySeconds": 0,
+		"periodSeconds":       1,
 		"timeoutSeconds":      1,
-		"failureThreshold":    15,
+		"failureThreshold":    30,
 	}
 }
 

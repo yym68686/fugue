@@ -171,6 +171,125 @@ func TestWaitForManagedAppRolloutSucceedsWhenDeploymentIsReadyDespiteManagedAppE
 	}
 }
 
+func TestWaitForManagedAppRolloutUsesWatchEvents(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Replicas: 1,
+		},
+	}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	deploymentName := runtime.RuntimeAppResourceName(app)
+	managedAppName := runtime.ManagedAppResourceName(app)
+
+	deploymentForState := func(ready bool) kubeDeployment {
+		deployment := kubeDeployment{}
+		deployment.Metadata.Name = deploymentName
+		deployment.Metadata.Generation = 1
+		if ready {
+			deployment.Metadata.ResourceVersion = "2"
+			deployment.Status.ObservedGeneration = 1
+			deployment.Status.Replicas = 1
+			deployment.Status.UpdatedReplicas = 1
+			deployment.Status.ReadyReplicas = 1
+			deployment.Status.AvailableReplicas = 1
+		} else {
+			deployment.Metadata.ResourceVersion = "1"
+			deployment.Status.ObservedGeneration = 1
+			deployment.Status.Replicas = 1
+			deployment.Status.UpdatedReplicas = 1
+		}
+		return deployment
+	}
+
+	managedApp := runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{})
+	managedMetadata, _ := managedApp["metadata"].(map[string]any)
+	if managedMetadata == nil {
+		managedMetadata = map[string]any{}
+		managedApp["metadata"] = managedMetadata
+	}
+	managedMetadata["generation"] = 1
+	managedMetadata["resourceVersion"] = "1"
+	managedApp["status"] = map[string]any{
+		"phase":              runtime.ManagedAppPhaseProgressing,
+		"message":            "deployment progressing",
+		"observedGeneration": 1,
+	}
+
+	var ready atomic.Int32
+	var watchSeen atomic.Int32
+	var kubeServer *httptest.Server
+	kubeServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.Method == http.MethodGet &&
+			r.URL.Path == deploymentCollectionAPIPath(namespace) &&
+			r.URL.Query().Get("watch") == "true" &&
+			r.URL.Query().Get("fieldSelector") == "metadata.name="+deploymentName:
+			watchSeen.Store(1)
+			time.Sleep(25 * time.Millisecond)
+			ready.Store(1)
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"type":   "MODIFIED",
+				"object": deploymentForState(true),
+			}); err != nil {
+				t.Fatalf("encode deployment watch event: %v", err)
+			}
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/apis/apps/v1/namespaces/"+namespace+"/deployments/"+deploymentName:
+			if err := json.NewEncoder(w).Encode(deploymentForState(ready.Load() == 1)); err != nil {
+				t.Fatalf("encode deployment: %v", err)
+			}
+		case r.Method == http.MethodGet &&
+			r.URL.Path == managedAppCollectionAPIPath(namespace) &&
+			r.URL.Query().Get("watch") == "true" &&
+			r.URL.Query().Get("fieldSelector") == "metadata.name="+managedAppName:
+			<-r.Context().Done()
+		case r.Method == http.MethodGet && r.URL.Path == managedAppAPIPath(namespace, managedAppName):
+			if err := json.NewEncoder(w).Encode(managedApp); err != nil {
+				t.Fatalf("encode managed app: %v", err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	svc := &Service{
+		Config: config.ControllerConfig{
+			ManagedAppRolloutTimeout: 2 * time.Second,
+			PollInterval:             time.Hour,
+		},
+		Logger: log.New(io.Discard, "", 0),
+		newKubeClient: func(namespace string) (*kubeClient, error) {
+			return &kubeClient{
+				client:      kubeServer.Client(),
+				baseURL:     kubeServer.URL,
+				bearerToken: "test",
+				namespace:   namespace,
+			}, nil
+		},
+	}
+
+	startedAt := time.Now()
+	if err := svc.waitForManagedAppRollout(context.Background(), app, ""); err != nil {
+		t.Fatalf("expected rollout wait to succeed from watch event, got %v", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("expected watch event to avoid waiting for poll interval, elapsed=%s", elapsed)
+	}
+	if watchSeen.Load() == 0 {
+		t.Fatal("expected deployment watch to be opened")
+	}
+}
+
 func TestWaitForManagedAppRolloutWaitsForManagedPostgresClusterHealth(t *testing.T) {
 	t.Parallel()
 

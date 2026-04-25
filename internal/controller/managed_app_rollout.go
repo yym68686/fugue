@@ -23,8 +23,6 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, o
 	if s.Config.PollInterval > interval {
 		interval = s.Config.PollInterval
 	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 
 	namespace := runtime.NamespaceForTenant(app.TenantID)
 	name := runtime.RuntimeAppResourceName(app)
@@ -34,6 +32,15 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, o
 		return fmt.Errorf("resolve backing service rollout targets for %s/%s: %w", namespace, name, err)
 	}
 	lastMessage := ""
+	waitForNextSignal := func(targets []kubeWatchTarget) error {
+		if err := client.waitForAnyObjectEvent(waitCtx, targets, interval); err != nil {
+			if lastMessage != "" {
+				return fmt.Errorf("wait for deployment rollout %s/%s: %w (%s)", namespace, name, err, lastMessage)
+			}
+			return fmt.Errorf("wait for deployment rollout %s/%s: %w", namespace, name, err)
+		}
+		return nil
+	}
 
 	for {
 		if strings.TrimSpace(operationID) != "" {
@@ -51,12 +58,14 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, o
 		if err != nil {
 			return err
 		}
+		watchTargets := rolloutWatchTargets(namespace, name, deployment, found)
 		managed, foundManagedApp, err := client.getManagedApp(waitCtx, namespace, managedAppName)
 		if err != nil {
 			return fmt.Errorf("read managed app rollout for %s/%s: %w", namespace, managedAppName, err)
 		}
+		watchTargets = append(watchTargets, managedAppRolloutWatchTargets(namespace, managedAppName, managed, foundManagedApp)...)
 		if ready {
-			backingServicesReady, backingServiceMessage, err := s.managedBackingServicesRolloutReady(waitCtx, client, namespace, backingServices)
+			backingServicesReady, backingServiceMessage, backingServiceWatchTargets, err := s.managedBackingServicesRolloutReady(waitCtx, client, namespace, backingServices)
 			if err != nil {
 				return err
 			}
@@ -64,15 +73,11 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, o
 				if strings.TrimSpace(backingServiceMessage) != "" {
 					lastMessage = strings.TrimSpace(backingServiceMessage)
 				}
-				select {
-				case <-waitCtx.Done():
-					if lastMessage != "" {
-						return fmt.Errorf("wait for deployment rollout %s/%s: %w (%s)", namespace, name, waitCtx.Err(), lastMessage)
-					}
-					return fmt.Errorf("wait for deployment rollout %s/%s: %w", namespace, name, waitCtx.Err())
-				case <-ticker.C:
-					continue
+				watchTargets = append(watchTargets, backingServiceWatchTargets...)
+				if err := waitForNextSignal(watchTargets); err != nil {
+					return err
 				}
+				continue
 			}
 			if err := s.cleanupStrandedManagedAppPods(waitCtx, client, namespace, app); err != nil && s.Logger != nil {
 				s.Logger.Printf("cleanup stranded managed app pods after rollout failed for %s/%s: %v", namespace, name, err)
@@ -91,13 +96,8 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, o
 			lastMessage = strings.TrimSpace(message)
 		}
 
-		select {
-		case <-waitCtx.Done():
-			if lastMessage != "" {
-				return fmt.Errorf("wait for deployment rollout %s/%s: %w (%s)", namespace, name, waitCtx.Err(), lastMessage)
-			}
-			return fmt.Errorf("wait for deployment rollout %s/%s: %w", namespace, name, waitCtx.Err())
-		case <-ticker.C:
+		if err := waitForNextSignal(watchTargets); err != nil {
+			return err
 		}
 	}
 }
@@ -114,41 +114,86 @@ func (s *Service) managedBackingServiceRolloutTargets(ctx context.Context, app m
 	return runtime.ManagedBackingServiceDeploymentsWithPlacements(app, scheduling, postgresPlacements), nil
 }
 
+func rolloutWatchTargets(namespace, name string, deployment kubeDeployment, found bool) []kubeWatchTarget {
+	if strings.TrimSpace(name) == "" {
+		return nil
+	}
+	target := kubeWatchTarget{
+		apiPath:       deploymentCollectionAPIPath(namespace),
+		fieldSelector: "metadata.name=" + strings.TrimSpace(name),
+	}
+	if found {
+		target.resourceVersion = strings.TrimSpace(deployment.Metadata.ResourceVersion)
+	}
+	return []kubeWatchTarget{target}
+}
+
+func managedAppRolloutWatchTargets(namespace, name string, managed runtime.ManagedAppObject, found bool) []kubeWatchTarget {
+	if strings.TrimSpace(name) == "" {
+		return nil
+	}
+	target := kubeWatchTarget{
+		apiPath:       managedAppCollectionAPIPath(namespace),
+		fieldSelector: "metadata.name=" + strings.TrimSpace(name),
+	}
+	if found {
+		target.resourceVersion = strings.TrimSpace(managed.Metadata.ResourceVersion)
+	}
+	return []kubeWatchTarget{target}
+}
+
+func cloudNativePGClusterRolloutWatchTargets(namespace, name string, cluster kubeCloudNativePGCluster, found bool) []kubeWatchTarget {
+	if strings.TrimSpace(name) == "" {
+		return nil
+	}
+	target := kubeWatchTarget{
+		apiPath:       cloudNativePGClusterCollectionAPIPath(namespace),
+		fieldSelector: "metadata.name=" + strings.TrimSpace(name),
+	}
+	if found {
+		target.resourceVersion = strings.TrimSpace(cluster.Metadata.ResourceVersion)
+	}
+	return []kubeWatchTarget{target}
+}
+
 func (s *Service) managedBackingServicesRolloutReady(
 	ctx context.Context,
 	client *kubeClient,
 	namespace string,
 	deployments []runtime.ManagedBackingServiceDeployment,
-) (bool, string, error) {
+) (bool, string, []kubeWatchTarget, error) {
+	watchTargets := make([]kubeWatchTarget, 0, len(deployments))
 	for _, deployment := range deployments {
 		switch deployment.ResourceKind {
 		case runtime.CloudNativePGClusterKind:
 			cluster, found, err := client.getCloudNativePGCluster(ctx, namespace, deployment.ResourceName)
 			if err != nil {
-				return false, "", fmt.Errorf("read backing service cluster %s/%s: %w", namespace, deployment.ResourceName, err)
+				return false, "", watchTargets, fmt.Errorf("read backing service cluster %s/%s: %w", namespace, deployment.ResourceName, err)
 			}
+			watchTargets = append(watchTargets, cloudNativePGClusterRolloutWatchTargets(namespace, deployment.ResourceName, cluster, found)...)
 			if err := s.cleanupStrandedManagedPostgresPods(ctx, client, namespace, deployment.ResourceName); err != nil && s.Logger != nil {
 				s.Logger.Printf("cleanup stranded managed postgres pods for %s/%s failed: %v", namespace, deployment.ResourceName, err)
 			}
 			ready, message := managedBackingServiceClusterRolloutReady(deployment.ResourceName, cluster, found)
 			if !ready {
-				return false, message, nil
+				return false, message, watchTargets, nil
 			}
 		default:
 			status, found, err := client.getDeployment(ctx, namespace, deployment.ResourceName)
 			if err != nil {
-				return false, "", fmt.Errorf("read backing service deployment %s/%s: %w", namespace, deployment.ResourceName, err)
+				return false, "", watchTargets, fmt.Errorf("read backing service deployment %s/%s: %w", namespace, deployment.ResourceName, err)
 			}
+			watchTargets = append(watchTargets, rolloutWatchTargets(namespace, deployment.ResourceName, status, found)...)
 			ready, message, err := deploymentRolloutReady(status, found, 1, deployment.ResourceName)
 			if err != nil {
-				return false, "", fmt.Errorf("wait for backing service deployment %s/%s: %w", namespace, deployment.ResourceName, err)
+				return false, "", watchTargets, fmt.Errorf("wait for backing service deployment %s/%s: %w", namespace, deployment.ResourceName, err)
 			}
 			if !ready {
-				return false, message, nil
+				return false, message, watchTargets, nil
 			}
 		}
 	}
-	return true, "", nil
+	return true, "", watchTargets, nil
 }
 
 func managedBackingServiceClusterRolloutReady(clusterName string, cluster kubeCloudNativePGCluster, found bool) (bool, string) {

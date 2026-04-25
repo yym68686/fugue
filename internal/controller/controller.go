@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"fugue/internal/appimages"
@@ -31,6 +32,8 @@ type Service struct {
 	syncBillingImageStorage       bool
 	latestGitHubCommit            func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
 	newKubeClient                 func(namespace string) (*kubeClient, error)
+	kubeClientMu                  sync.Mutex
+	kubeClients                   map[string]*kubeClient
 	importImageInspectRetryDelay  time.Duration
 	importImageInspectMaxAttempts int
 	now                           func() time.Time
@@ -525,11 +528,17 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 	return nil
 }
 
-func (s *Service) executeManagedOperation(ctx context.Context, op model.Operation) error {
+func (s *Service) executeManagedOperation(ctx context.Context, op model.Operation) (err error) {
+	timer := newControllerOperationTimer(s.now)
+	defer func() {
+		timer.Log(s.Logger, "managed_operation", op, err)
+	}()
+
 	app, err := s.Store.GetApp(op.AppID)
 	if err != nil {
 		return fmt.Errorf("load app %s: %w", op.AppID, err)
 	}
+	timer.Mark("load_app")
 	var completionDesiredSpec *model.AppSpec
 
 	switch op.Type {
@@ -588,35 +597,42 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	default:
 		return fmt.Errorf("unsupported operation type %s", op.Type)
 	}
+	timer.Mark("prepare_operation")
 
 	if err := s.ensureOperationStillActive(op.ID); err != nil {
 		return err
 	}
+	timer.Mark("operation_active_check")
 
 	app, err = store.OverlayDesiredManagedPostgres(app)
 	if err != nil {
 		return fmt.Errorf("overlay desired managed postgres state for app %s: %w", app.ID, err)
 	}
+	timer.Mark("overlay_postgres")
 	if op.Type == model.OperationTypeDeploy {
 		if err := s.ensureManagedDeployImageReady(ctx, app); err != nil {
 			return err
 		}
+		timer.Mark("image_ready")
 	}
 	postgresPlacements, err := s.managedPostgresPlacements(ctx, app)
 	if err != nil {
 		return fmt.Errorf("resolve managed postgres placements for app %s: %w", app.ID, err)
 	}
+	timer.Mark("postgres_placement")
 
 	scheduling, err := s.managedSchedulingConstraints(app.Spec.RuntimeID)
 	if err != nil {
 		return err
 	}
 	app = s.appWithResolvedLaunchOverride(ctx, app)
+	timer.Mark("scheduling")
 
 	bundle, err := s.Renderer.RenderAppBundleWithPlacements(app, scheduling, postgresPlacements)
 	if err != nil {
 		return fmt.Errorf("render manifest for app %s: %w", app.ID, err)
 	}
+	timer.Mark("render_bundle")
 
 	if s.Config.KubectlApply {
 		switch op.Type {
@@ -624,6 +640,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			if err := s.deleteManagedAppDesiredState(ctx, app); err != nil {
 				return fmt.Errorf("delete managed app desired state %s: %w", app.ID, err)
 			}
+			timer.Mark("delete_desired_state")
 		default:
 			bundle, err = s.Renderer.RenderManagedAppBundle(app, scheduling)
 			if err != nil {
@@ -632,15 +649,18 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			if err := s.applyManagedAppDesiredState(ctx, app, scheduling); err != nil {
 				return fmt.Errorf("apply managed app desired state %s: %w", app.ID, err)
 			}
+			timer.Mark("apply_desired_state")
 			if err := s.waitForManagedAppRollout(ctx, app, op.ID); err != nil {
 				return fmt.Errorf("wait for managed app rollout %s: %w", app.ID, err)
 			}
+			timer.Mark("rollout_wait")
 		}
 	}
 
 	if err := s.ensureOperationStillActive(op.ID); err != nil {
 		return err
 	}
+	timer.Mark("final_active_check")
 
 	message := fmt.Sprintf("managed app reconciled in namespace %s", bundle.TenantNamespace)
 	if op.Type == model.OperationTypeDelete {
@@ -654,6 +674,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	if err != nil {
 		return fmt.Errorf("complete operation %s: %w", op.ID, err)
 	}
+	timer.Mark("complete_operation")
 	if op.Type == model.OperationTypeDeploy {
 		deployedApp, appErr := s.Store.GetApp(app.ID)
 		if appErr != nil {
@@ -668,6 +689,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				s.Logger.Printf("sync billing image storage after deploy for tenant=%s failed: %v", deployedApp.TenantID, err)
 			}
 		}
+		timer.Mark("post_deploy_cleanup")
 	}
 	if op.Type == model.OperationTypeDelete {
 		if err := s.cleanupDeletedAppImages(ctx, app); err != nil && s.Logger != nil {
@@ -676,6 +698,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		if err := s.syncTenantBillingImageStorage(ctx, app.TenantID); err != nil && s.Logger != nil {
 			s.Logger.Printf("sync billing image storage after delete for tenant=%s failed: %v", app.TenantID, err)
 		}
+		timer.Mark("post_delete_cleanup")
 	}
 	s.Logger.Printf("operation %s completed on managed runtime; manifest=%s", op.ID, bundle.ManifestPath)
 	return nil
@@ -697,7 +720,31 @@ func (s *Service) kubeClient() (*kubeClient, error) {
 	if factory == nil {
 		factory = newKubeClient
 	}
-	return factory(s.Config.KubectlNamespace)
+	namespace := strings.TrimSpace(s.Config.KubectlNamespace)
+	s.kubeClientMu.Lock()
+	if s.kubeClients != nil {
+		if cached := s.kubeClients[namespace]; cached != nil {
+			s.kubeClientMu.Unlock()
+			return cached, nil
+		}
+	}
+	s.kubeClientMu.Unlock()
+
+	client, err := factory(namespace)
+	if err != nil {
+		return nil, err
+	}
+
+	s.kubeClientMu.Lock()
+	defer s.kubeClientMu.Unlock()
+	if s.kubeClients == nil {
+		s.kubeClients = make(map[string]*kubeClient)
+	}
+	if cached := s.kubeClients[namespace]; cached != nil {
+		return cached, nil
+	}
+	s.kubeClients[namespace] = client
+	return client, nil
 }
 
 func githubTickerChan(ticker *time.Ticker) <-chan time.Time {

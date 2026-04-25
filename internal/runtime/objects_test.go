@@ -114,7 +114,7 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 		t.Fatalf("expected wait-postgres init container, got %#v", got)
 	}
 	command := initContainers[0]["command"].([]string)
-	if got := command[2]; got != "until nc -z uni-api-demo-postgres-rw 5432; do sleep 2; done" {
+	if got := command[2]; got != "until nc -z uni-api-demo-postgres-rw 5432; do sleep 1; done" {
 		t.Fatalf("expected wait-postgres init container to target rw service, got %q", got)
 	}
 	assertHelperResources(t, initContainers[0]["resources"])
@@ -634,6 +634,12 @@ func TestBuildAppDeploymentUsesRollingUpdateAndReadinessProbe(t *testing.T) {
 	tcpSocket := readinessProbe["tcpSocket"].(map[string]any)
 	if tcpSocket["port"] != 8080 {
 		t.Fatalf("expected readiness probe port 8080, got %#v", tcpSocket["port"])
+	}
+	if readinessProbe["initialDelaySeconds"] != 0 {
+		t.Fatalf("expected readiness probe to start immediately, got initialDelaySeconds=%#v", readinessProbe["initialDelaySeconds"])
+	}
+	if readinessProbe["periodSeconds"] != 1 {
+		t.Fatalf("expected readiness probe period 1s, got %#v", readinessProbe["periodSeconds"])
 	}
 	if got := containers[0]["imagePullPolicy"]; got != "Always" {
 		t.Fatalf("expected tagged images to use imagePullPolicy Always, got %#v", got)

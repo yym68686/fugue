@@ -27,10 +27,11 @@ var (
 )
 
 type kubeClient struct {
-	client      *http.Client
-	baseURL     string
-	bearerToken string
-	namespace   string
+	client           *http.Client
+	baseURL          string
+	bearerToken      string
+	namespace        string
+	applyConcurrency int
 }
 
 type kubeLease struct {
@@ -219,13 +220,18 @@ func newKubeClient(namespace string) (*kubeClient, error) {
 	return &kubeClient{
 		client: &http.Client{
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{RootCAs: rootCAs},
+				TLSClientConfig:     &tls.Config{RootCAs: rootCAs},
+				ForceAttemptHTTP2:   true,
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 32,
+				IdleConnTimeout:     90 * time.Second,
+				TLSHandshakeTimeout: 5 * time.Second,
 			},
-			Timeout: 10 * time.Second,
 		},
-		baseURL:     "https://" + host + ":" + port,
-		bearerToken: strings.TrimSpace(string(token)),
-		namespace:   strings.TrimSpace(namespace),
+		baseURL:          "https://" + host + ":" + port,
+		bearerToken:      strings.TrimSpace(string(token)),
+		namespace:        strings.TrimSpace(namespace),
+		applyConcurrency: 4,
 	}, nil
 }
 

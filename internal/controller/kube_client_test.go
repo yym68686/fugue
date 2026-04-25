@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -31,6 +33,92 @@ func TestFormatKubeTimestampUsesMicrosecondPrecision(t *testing.T) {
 	}
 	if !parsed.UTC().Equal(time.Date(2026, time.March, 24, 12, 34, 56, 123456000, time.UTC)) {
 		t.Fatalf("unexpected parsed time: %s", parsed.UTC().Format(time.RFC3339Nano))
+	}
+}
+
+func TestApplyObjectsAppliesSamePhaseConcurrently(t *testing.T) {
+	t.Parallel()
+
+	entered := make(chan string, 2)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	closeRelease := func() {
+		releaseOnce.Do(func() {
+			close(release)
+		})
+	}
+	defer closeRelease()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Fatalf("unexpected request method %s", r.Method)
+		}
+		switch r.URL.Path {
+		case "/api/v1/namespaces/tenant-demo":
+			_, _ = w.Write([]byte(`{}`))
+		case "/api/v1/namespaces/tenant-demo/secrets/one", "/api/v1/namespaces/tenant-demo/secrets/two":
+			entered <- r.URL.Path
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := &kubeClient{
+		client:           server.Client(),
+		baseURL:          server.URL,
+		bearerToken:      "token",
+		namespace:        "tenant-demo",
+		applyConcurrency: 2,
+	}
+	objects := []map[string]any{
+		{
+			"apiVersion": "v1",
+			"kind":       "Namespace",
+			"metadata": map[string]any{
+				"name": "tenant-demo",
+			},
+		},
+		{
+			"apiVersion": "v1",
+			"kind":       "Secret",
+			"metadata": map[string]any{
+				"name":      "one",
+				"namespace": "tenant-demo",
+			},
+		},
+		{
+			"apiVersion": "v1",
+			"kind":       "Secret",
+			"metadata": map[string]any{
+				"name":      "two",
+				"namespace": "tenant-demo",
+			},
+		},
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.applyObjects(context.Background(), objects)
+	}()
+
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			closeRelease()
+			t.Fatal("expected both same-phase secret applies to start before either was released")
+		}
+	}
+	closeRelease()
+
+	if err := <-done; err != nil {
+		t.Fatalf("apply objects: %v", err)
 	}
 }
 
