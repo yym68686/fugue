@@ -340,10 +340,17 @@ func resolveAppDatabaseConnection(app model.App, spec model.AppSpec, env map[str
 		if err != nil {
 			return appDatabaseConnection{}, fmt.Errorf("parse database URL: %w", err)
 		}
+		host := parsed.Hostname()
+		port := defaultString(parsed.Port(), "5432")
+		qualifiedHost := qualifyAppDatabaseHostForAPI(host, app, spec)
+		connectionURL := *parsed
+		if qualifiedHost != host {
+			connectionURL.Host = net.JoinHostPort(qualifiedHost, port)
+		}
 		return appDatabaseConnection{
-			DSN:      parsed.String(),
-			Host:     parsed.Hostname(),
-			Port:     defaultString(parsed.Port(), "5432"),
+			DSN:      connectionURL.String(),
+			Host:     qualifiedHost,
+			Port:     port,
 			Database: strings.TrimPrefix(parsed.Path, "/"),
 			User:     parsed.User.Username(),
 		}, nil
