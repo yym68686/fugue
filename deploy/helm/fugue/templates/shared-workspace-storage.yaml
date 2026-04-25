@@ -1,0 +1,168 @@
+{{- if .Values.sharedWorkspaceStorage.enabled }}
+{{- $nfsServer := .Values.sharedWorkspaceStorage.server.clusterIP | default (printf "%s.%s.svc.cluster.local" (include "fugue.sharedWorkspaceNFSServiceName" .) .Release.Namespace) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fugue.sharedWorkspaceNFSName" . }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "shared-workspace-nfs") | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "shared-workspace-nfs") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "shared-workspace-nfs") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "fugue.serviceAccountName" . }}
+      {{- with .Values.sharedWorkspaceStorage.server.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.sharedWorkspaceStorage.server.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: nfs
+          image: "{{ .Values.sharedWorkspaceStorage.server.image.repository }}:{{ .Values.sharedWorkspaceStorage.server.image.tag }}"
+          imagePullPolicy: {{ .Values.sharedWorkspaceStorage.server.image.pullPolicy }}
+          securityContext:
+            privileged: true
+          env:
+            - name: SHARED_DIRECTORY
+              value: {{ .Values.sharedWorkspaceStorage.server.sharedDirectory | quote }}
+          ports:
+            - name: nfs
+              containerPort: 2049
+              protocol: TCP
+            - name: nfs-udp
+              containerPort: 2049
+              protocol: UDP
+            - name: rpcbind
+              containerPort: 111
+              protocol: TCP
+            - name: rpcbind-udp
+              containerPort: 111
+              protocol: UDP
+            - name: mountd
+              containerPort: 20048
+              protocol: TCP
+            - name: mountd-udp
+              containerPort: 20048
+              protocol: UDP
+          {{- with .Values.sharedWorkspaceStorage.server.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: exports
+              mountPath: {{ .Values.sharedWorkspaceStorage.server.sharedDirectory | quote }}
+      volumes:
+        - name: exports
+          hostPath:
+            path: {{ .Values.sharedWorkspaceStorage.server.hostPath | quote }}
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fugue.sharedWorkspaceNFSServiceName" . }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "shared-workspace-nfs") | nindent 4 }}
+spec:
+  type: ClusterIP
+  {{- if .Values.sharedWorkspaceStorage.server.clusterIP }}
+  clusterIP: {{ .Values.sharedWorkspaceStorage.server.clusterIP | quote }}
+  {{- end }}
+  selector:
+    {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "shared-workspace-nfs") | nindent 4 }}
+  ports:
+    - name: nfs
+      port: 2049
+      targetPort: nfs
+      protocol: TCP
+    - name: nfs-udp
+      port: 2049
+      targetPort: nfs-udp
+      protocol: UDP
+    - name: rpcbind
+      port: 111
+      targetPort: rpcbind
+      protocol: TCP
+    - name: rpcbind-udp
+      port: 111
+      targetPort: rpcbind-udp
+      protocol: UDP
+    - name: mountd
+      port: 20048
+      targetPort: mountd
+      protocol: TCP
+    - name: mountd-udp
+      port: 20048
+      targetPort: mountd-udp
+      protocol: UDP
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.sharedWorkspaceStorage.storageClassName | quote }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "shared-workspace-storage") | nindent 4 }}
+provisioner: {{ .Values.sharedWorkspaceStorage.provisionerName | quote }}
+reclaimPolicy: {{ .Values.sharedWorkspaceStorage.reclaimPolicy }}
+volumeBindingMode: {{ .Values.sharedWorkspaceStorage.volumeBindingMode }}
+allowVolumeExpansion: {{ .Values.sharedWorkspaceStorage.allowVolumeExpansion }}
+{{- with .Values.sharedWorkspaceStorage.mountOptions }}
+mountOptions:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+parameters:
+  archiveOnDelete: {{ .Values.sharedWorkspaceStorage.archiveOnDelete | quote }}
+  pathPattern: {{ .Values.sharedWorkspaceStorage.pathPattern | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fugue.sharedWorkspaceProvisionerName" . }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "shared-workspace-provisioner") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "shared-workspace-provisioner") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "shared-workspace-provisioner") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "fugue.serviceAccountName" . }}
+      {{- with .Values.sharedWorkspaceStorage.provisioner.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.sharedWorkspaceStorage.provisioner.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: nfs-subdir-external-provisioner
+          image: "{{ .Values.sharedWorkspaceStorage.provisioner.image.repository }}:{{ .Values.sharedWorkspaceStorage.provisioner.image.tag }}"
+          imagePullPolicy: {{ .Values.sharedWorkspaceStorage.provisioner.image.pullPolicy }}
+          env:
+            - name: PROVISIONER_NAME
+              value: {{ .Values.sharedWorkspaceStorage.provisionerName | quote }}
+            - name: NFS_SERVER
+              value: {{ $nfsServer | quote }}
+            - name: NFS_PATH
+              value: {{ .Values.sharedWorkspaceStorage.server.sharedDirectory | quote }}
+          {{- with .Values.sharedWorkspaceStorage.provisioner.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

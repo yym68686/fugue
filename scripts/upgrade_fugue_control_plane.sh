@@ -1162,6 +1162,9 @@ main() {
   FUGUE_COREDNS_NAMESPACE="${FUGUE_COREDNS_NAMESPACE:-kube-system}"
   FUGUE_COREDNS_DEPLOYMENT_NAME="${FUGUE_COREDNS_DEPLOYMENT_NAME:-coredns}"
   FUGUE_COREDNS_TARGET_REPLICAS="${FUGUE_COREDNS_TARGET_REPLICAS:-2}"
+  FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED="${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED:-true}"
+  FUGUE_SHARED_WORKSPACE_STORAGE_CLASS="${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS:-fugue-rwx}"
+  FUGUE_SHARED_WORKSPACE_NFS_CLUSTER_IP="${FUGUE_SHARED_WORKSPACE_NFS_CLUSTER_IP:-10.43.240.17}"
 
   if [[ -z "${FUGUE_REGISTRY_PUSH_BASE:-}" ]]; then
     FUGUE_REGISTRY_PUSH_BASE="${FUGUE_RELEASE_FULLNAME}-registry.${FUGUE_NAMESPACE}.svc.cluster.local:${FUGUE_REGISTRY_SERVICE_PORT}"
@@ -1211,6 +1214,7 @@ main() {
   log "cluster join registry endpoint: ${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}"
   log "app base domain: ${FUGUE_APP_BASE_DOMAIN}"
   log "custom domain base domain: dns.${FUGUE_APP_BASE_DOMAIN}"
+  log "shared workspace storage: enabled=${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED} class=${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS}"
 
   recover_primary_node_if_needed
   relieve_primary_disk_pressure
@@ -1263,7 +1267,10 @@ main() {
     --set-string controller.leaderElection.renewDeadline=10s \
     --set-string controller.leaderElection.retryPeriod=2s \
     --set-string controller.migrationGuard.legacyControllerContainerName=controller \
-    --set-string controller.migrationGuard.checkInterval=2s; then
+    --set-string controller.migrationGuard.checkInterval=2s \
+    --set sharedWorkspaceStorage.enabled="${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED}" \
+    --set-string sharedWorkspaceStorage.storageClassName="${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS}" \
+    --set-string sharedWorkspaceStorage.server.clusterIP="${FUGUE_SHARED_WORKSPACE_NFS_CLUSTER_IP}"; then
     log "helm upgrade failed; attempting rollback"
     rollback_release || true
     fail "helm upgrade failed"

@@ -5189,6 +5189,34 @@ func TestAppEffectiveResourcesIncludePersistentStorage(t *testing.T) {
 	}
 }
 
+func TestAppEffectiveResourcesDoNotChargeSharedProjectRWXPerApp(t *testing.T) {
+	t.Parallel()
+
+	compute := model.DefaultManagedAppResources()
+	got := appEffectiveResources(model.AppSpec{
+		Resources: &compute,
+		PersistentStorage: &model.AppPersistentStorageSpec{
+			Mode:        model.AppPersistentStorageModeSharedProjectRWX,
+			StorageSize: "12Gi",
+			Mounts: []model.AppPersistentStorageMount{
+				{
+					Kind: model.AppPersistentStorageMountKindDirectory,
+					Path: "/workspace",
+				},
+			},
+		},
+	})
+
+	want := model.BillingResourceSpec{
+		CPUMilliCores:    compute.CPUMilliCores,
+		MemoryMebibytes:  compute.MemoryMebibytes,
+		StorageGibibytes: 0,
+	}
+	if got != want {
+		t.Fatalf("expected shared project RWX storage to avoid per-app billing %+v, got %+v", want, got)
+	}
+}
+
 func TestSyncTenantBillingImageStorageContributesToCommittedStorageAndEstimate(t *testing.T) {
 	t.Parallel()
 

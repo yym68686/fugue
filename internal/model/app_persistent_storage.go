@@ -10,6 +10,40 @@ import (
 
 const appPersistentStorageMountRootDirName = "mounts"
 
+func NormalizeAppPersistentStorageMode(raw string) (string, error) {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "", AppPersistentStorageModeDedicatedPVC:
+		return AppPersistentStorageModeDedicatedPVC, nil
+	case AppPersistentStorageModeSharedProjectRWX:
+		return AppPersistentStorageModeSharedProjectRWX, nil
+	default:
+		return "", fmt.Errorf("persistent storage mode must be dedicated_pvc or shared_project_rwx")
+	}
+}
+
+func AppPersistentStorageSpecUsesSharedProjectRWX(spec *AppPersistentStorageSpec) bool {
+	if spec == nil {
+		return false
+	}
+	mode, err := NormalizeAppPersistentStorageMode(spec.Mode)
+	return err == nil && mode == AppPersistentStorageModeSharedProjectRWX
+}
+
+func NormalizeAppPersistentStorageSharedSubPath(raw string) (string, error) {
+	raw = strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	if raw == "" {
+		return "", nil
+	}
+	if path.IsAbs(raw) {
+		return "", fmt.Errorf("persistent storage shared_sub_path must be relative")
+	}
+	cleaned := path.Clean(raw)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
+		return "", fmt.Errorf("persistent storage shared_sub_path must stay within the project volume")
+	}
+	return cleaned, nil
+}
+
 func NormalizeAppPersistentStorageMountKind(raw string) (string, error) {
 	switch strings.TrimSpace(strings.ToLower(raw)) {
 	case "", AppPersistentStorageMountKindDirectory:

@@ -53,6 +53,18 @@ app.kubernetes.io/component: {{ .component }}
 {{- printf "%s-node-janitor" (include "fugue.fullname" .) -}}
 {{- end -}}
 
+{{- define "fugue.sharedWorkspaceNFSName" -}}
+{{- printf "%s-shared-workspace-nfs" (include "fugue.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "fugue.sharedWorkspaceNFSServiceName" -}}
+{{- printf "%s-shared-workspace-nfs" (include "fugue.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "fugue.sharedWorkspaceProvisionerName" -}}
+{{- printf "%s-shared-workspace-provisioner" (include "fugue.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
 {{- define "fugue.registryJanitorName" -}}
 {{- printf "%s-registry-janitor" (include "fugue.fullname" .) -}}
 {{- end -}}

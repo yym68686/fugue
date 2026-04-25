@@ -34,6 +34,7 @@ const (
 	workspaceVolumeName                 = "app-workspace"
 	workspaceSidecarName                = AppWorkspaceContainerName
 	persistentStorageRootPath           = "/fugue-persistent-storage"
+	projectSharedStorageComponent       = "project-shared-persistent-storage"
 
 	CloudNativePGAPIVersion           = "postgresql.cnpg.io/v1"
 	CloudNativePGClusterKind          = "Cluster"
@@ -71,10 +72,14 @@ func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, p
 			buildWorkspaceReplicationDestinationObject(namespace, app, labels, *workspaceSpec),
 		)
 	} else if storageSpec := normalizeRuntimeAppPersistentStorageSpec(app); storageSpec != nil {
-		objects = append(objects,
-			buildAppPersistentStoragePVCObject(namespace, app, labels, *storageSpec),
-			buildPersistentStorageReplicationDestinationObject(namespace, app, labels, *storageSpec),
-		)
+		if model.AppPersistentStorageSpecUsesSharedProjectRWX(storageSpec) {
+			objects = append(objects, buildProjectSharedPersistentStoragePVCObject(namespace, app, *storageSpec))
+		} else {
+			objects = append(objects,
+				buildAppPersistentStoragePVCObject(namespace, app, labels, *storageSpec),
+				buildPersistentStorageReplicationDestinationObject(namespace, app, labels, *storageSpec),
+			)
+		}
 	}
 
 	for _, postgres := range postgresResources {
@@ -113,6 +118,21 @@ func appLabels(app model.App) map[string]string {
 	if id := strings.TrimSpace(app.ID); id != "" {
 		labels[FugueLabelAppID] = id
 		labels[FugueLabelOwnerAppID] = id
+	}
+	if tenantID := strings.TrimSpace(app.TenantID); tenantID != "" {
+		labels[FugueLabelTenantID] = tenantID
+	}
+	if projectID := strings.TrimSpace(app.ProjectID); projectID != "" {
+		labels[FugueLabelProjectID] = projectID
+	}
+	return labels
+}
+
+func projectSharedPersistentStorageLabels(app model.App) map[string]string {
+	labels := map[string]string{
+		FugueLabelName:      ProjectSharedWorkspacePVCName(app),
+		FugueLabelComponent: projectSharedStorageComponent,
+		FugueLabelManagedBy: FugueLabelManagedByValue,
 	}
 	if tenantID := strings.TrimSpace(app.TenantID); tenantID != "" {
 		labels[FugueLabelTenantID] = tenantID
@@ -366,7 +386,7 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		volumes = append(volumes, map[string]any{
 			"name": workspaceVolumeName,
 			"persistentVolumeClaim": map[string]any{
-				"claimName": WorkspacePVCName(app),
+				"claimName": persistentStoragePVCName(app, *storageSpec),
 			},
 		})
 		initContainers = append(initContainers, buildAppPersistentStorageInitContainer(*storageSpec))
@@ -1221,6 +1241,11 @@ func normalizeRuntimeAppPersistentStorageSpec(app model.App) *model.AppPersisten
 		return nil
 	}
 	spec := *app.Spec.PersistentStorage
+	mode, err := model.NormalizeAppPersistentStorageMode(spec.Mode)
+	if err != nil {
+		return nil
+	}
+	spec.Mode = mode
 	storagePath, err := model.NormalizeAppPersistentStoragePath(spec.StoragePath)
 	if err != nil {
 		return nil
@@ -1234,6 +1259,19 @@ func normalizeRuntimeAppPersistentStorageSpec(app model.App) *model.AppPersisten
 		spec.StorageSize = defaultWorkspaceStorage
 	}
 	spec.StorageClassName = strings.TrimSpace(spec.StorageClassName)
+	sharedSubPath, err := model.NormalizeAppPersistentStorageSharedSubPath(spec.SharedSubPath)
+	if err != nil {
+		return nil
+	}
+	if spec.Mode == model.AppPersistentStorageModeSharedProjectRWX {
+		if strings.TrimSpace(app.ProjectID) == "" {
+			return nil
+		}
+		if sharedSubPath == "" {
+			sharedSubPath = path.Join("apps", workspaceStorageBaseName(app))
+		}
+	}
+	spec.SharedSubPath = sharedSubPath
 	if len(spec.Mounts) == 0 {
 		return nil
 	}
@@ -1272,6 +1310,36 @@ func defaultPersistentStorageMountMode(mount model.AppPersistentStorageMount) in
 	default:
 		return 0o644
 	}
+}
+
+func persistentStorageContainerRootPath(spec model.AppPersistentStorageSpec) string {
+	if !model.AppPersistentStorageSpecUsesSharedProjectRWX(&spec) || strings.TrimSpace(spec.SharedSubPath) == "" {
+		return persistentStorageRootPath
+	}
+	return path.Join(persistentStorageRootPath, spec.SharedSubPath)
+}
+
+func persistentStorageMountSubPath(spec model.AppPersistentStorageSpec, mount model.AppPersistentStorageMount) string {
+	subPath := model.AppPersistentStorageMountSubPath(mount)
+	if !model.AppPersistentStorageSpecUsesSharedProjectRWX(&spec) || strings.TrimSpace(spec.SharedSubPath) == "" {
+		return subPath
+	}
+	return path.Join(spec.SharedSubPath, subPath)
+}
+
+func persistentStoragePVCName(app model.App, spec model.AppPersistentStorageSpec) string {
+	if model.AppPersistentStorageSpecUsesSharedProjectRWX(&spec) {
+		return ProjectSharedWorkspacePVCName(app)
+	}
+	return WorkspacePVCName(app)
+}
+
+func AppUsesWorkspaceReplication(app model.App) bool {
+	if normalizeRuntimeAppWorkspaceSpec(app) != nil {
+		return true
+	}
+	storageSpec := normalizeRuntimeAppPersistentStorageSpec(app)
+	return storageSpec != nil && !model.AppPersistentStorageSpecUsesSharedProjectRWX(storageSpec)
 }
 
 func workspaceStorageBaseName(app model.App) string {
@@ -1414,7 +1482,7 @@ func buildPersistentStorageVolumeMounts(spec model.AppPersistentStorageSpec) []m
 		mounts = append(mounts, map[string]any{
 			"name":      workspaceVolumeName,
 			"mountPath": mount.Path,
-			"subPath":   model.AppPersistentStorageMountSubPath(mount),
+			"subPath":   persistentStorageMountSubPath(spec, mount),
 		})
 	}
 	return mounts
@@ -1429,7 +1497,7 @@ func buildAppPersistentStorageInitContainer(spec model.AppPersistentStorageSpec)
 			"-lc",
 			persistentStorageInitScript(),
 			"sh",
-			persistentStorageRootPath,
+			persistentStorageContainerRootPath(spec),
 			strings.TrimSpace(spec.ResetToken),
 			buildPersistentStorageMountPlan(spec),
 		},
@@ -1447,12 +1515,19 @@ func buildAppPersistentStorageInitContainer(spec model.AppPersistentStorageSpec)
 }
 
 func buildAppPersistentStoragePVCObject(namespace string, app model.App, labels map[string]string, spec model.AppPersistentStorageSpec) map[string]any {
-	return buildPersistentStoragePVCObject(namespace, app, labels, spec.StorageSize, spec.StorageClassName)
+	return buildPersistentStoragePVCObject(namespace, WorkspacePVCName(app), labels, []string{"ReadWriteOnce"}, spec.StorageSize, spec.StorageClassName)
 }
 
-func buildPersistentStoragePVCObject(namespace string, app model.App, labels map[string]string, storageSize, storageClassName string) map[string]any {
+func buildProjectSharedPersistentStoragePVCObject(namespace string, app model.App, spec model.AppPersistentStorageSpec) map[string]any {
+	return buildPersistentStoragePVCObject(namespace, ProjectSharedWorkspacePVCName(app), projectSharedPersistentStorageLabels(app), []string{"ReadWriteMany"}, spec.StorageSize, spec.StorageClassName)
+}
+
+func buildPersistentStoragePVCObject(namespace, name string, labels map[string]string, accessModes []string, storageSize, storageClassName string) map[string]any {
+	if len(accessModes) == 0 {
+		accessModes = []string{"ReadWriteOnce"}
+	}
 	pvcSpec := map[string]any{
-		"accessModes": []string{"ReadWriteOnce"},
+		"accessModes": accessModes,
 		"resources": map[string]any{
 			"requests": map[string]any{
 				"storage": storageSize,
@@ -1466,7 +1541,7 @@ func buildPersistentStoragePVCObject(namespace string, app model.App, labels map
 		"apiVersion": "v1",
 		"kind":       "PersistentVolumeClaim",
 		"metadata": map[string]any{
-			"name":      WorkspacePVCName(app),
+			"name":      name,
 			"namespace": namespace,
 			"labels":    labels,
 		},
@@ -1603,6 +1678,17 @@ func appFilesSecretName(appName string) string {
 
 func WorkspacePVCName(app model.App) string {
 	return normalizePostgresAuxiliaryName(workspaceStorageBaseName(app), "workspace")
+}
+
+func ProjectSharedWorkspacePVCName(app model.App) string {
+	base := strings.TrimSpace(app.ProjectID)
+	if base == "" {
+		base = strings.TrimSpace(app.TenantID)
+	}
+	if base == "" {
+		base = "project"
+	}
+	return normalizePostgresAuxiliaryName(base, "shared-workspace")
 }
 
 func WorkspaceReplicationDestinationName(app model.App) string {

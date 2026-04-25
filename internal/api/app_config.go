@@ -451,11 +451,15 @@ func appPersistentStorageEqual(left, right *model.AppPersistentStorageSpec) bool
 	switch {
 	case left == nil || right == nil:
 		return left == nil && right == nil
+	case left.Mode != right.Mode:
+		return false
 	case left.StoragePath != right.StoragePath:
 		return false
 	case left.StorageSize != right.StorageSize:
 		return false
 	case left.StorageClassName != right.StorageClassName:
+		return false
+	case left.SharedSubPath != right.SharedSubPath:
 		return false
 	case left.ResetToken != right.ResetToken:
 		return false

@@ -461,6 +461,10 @@ func attachOwnerReference(objects []map[string]any, ownerRef *OwnerReference) {
 		if metadata == nil {
 			continue
 		}
+		labels, _ := metadata["labels"].(map[string]string)
+		if labels[FugueLabelComponent] == projectSharedStorageComponent {
+			continue
+		}
 		metadata["ownerReferences"] = references
 	}
 }

@@ -3771,11 +3771,16 @@ components:
       type: object
       additionalProperties: false
       properties:
+        mode:
+          type: string
+          enum: [dedicated_pvc, shared_project_rwx]
         storage_path:
           type: string
         storage_size:
           type: string
         storage_class_name:
+          type: string
+        shared_sub_path:
           type: string
         reset_token:
           type: string

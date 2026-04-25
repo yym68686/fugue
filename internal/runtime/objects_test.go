@@ -994,6 +994,92 @@ func TestBuildAppObjectsIncludesPersistentStorageMounts(t *testing.T) {
 	}
 }
 
+func TestBuildManagedAppChildObjectsIncludesSharedProjectRWXPersistentStorage(t *testing.T) {
+	app := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode:          model.AppPersistentStorageModeSharedProjectRWX,
+				StorageSize:   "20Gi",
+				SharedSubPath: "sessions/session-123",
+				Mounts: []model.AppPersistentStorageMount{
+					{
+						Kind: model.AppPersistentStorageMountKindDirectory,
+						Path: "/workspace",
+					},
+				},
+			},
+		},
+	}
+	managed := ManagedAppObject{
+		APIVersion: ManagedAppAPIVersion,
+		Kind:       ManagedAppKind,
+		Metadata: ManagedAppMeta{
+			Name:      "demo",
+			Namespace: NamespaceForTenant(app.TenantID),
+			UID:       "uid-demo",
+		},
+	}
+
+	objects := BuildManagedAppChildObjects(app, SchedulingConstraints{}, ManagedAppOwnerReference(managed))
+	if len(objects) != 3 {
+		t.Fatalf("expected shared pvc, deployment, and service objects, got %d: %#v", len(objects), objects)
+	}
+
+	sharedPVC := objects[0]
+	if got := sharedPVC["kind"]; got != "PersistentVolumeClaim" {
+		t.Fatalf("expected project shared pvc, got %#v", got)
+	}
+	metadata := sharedPVC["metadata"].(map[string]any)
+	if got := metadata["name"]; got != ProjectSharedWorkspacePVCName(app) {
+		t.Fatalf("unexpected project shared pvc name: %#v", got)
+	}
+	if _, ok := metadata["ownerReferences"]; ok {
+		t.Fatalf("project shared pvc must not be owned by one app: %#v", metadata["ownerReferences"])
+	}
+	labels := metadata["labels"].(map[string]string)
+	if got := labels[FugueLabelComponent]; got != projectSharedStorageComponent {
+		t.Fatalf("expected shared storage component label, got %#v", got)
+	}
+	pvcSpec := sharedPVC["spec"].(map[string]any)
+	accessModes := pvcSpec["accessModes"].([]string)
+	if len(accessModes) != 1 || accessModes[0] != "ReadWriteMany" {
+		t.Fatalf("expected RWX access mode, got %#v", accessModes)
+	}
+
+	deployment := objects[1]
+	template := deployment["spec"].(map[string]any)["template"].(map[string]any)
+	podSpec := template["spec"].(map[string]any)
+	volumes := podSpec["volumes"].([]map[string]any)
+	claim := volumes[0]["persistentVolumeClaim"].(map[string]any)
+	if got := claim["claimName"]; got != ProjectSharedWorkspacePVCName(app) {
+		t.Fatalf("expected deployment to mount project shared pvc, got %#v", got)
+	}
+	appMounts := podSpec["containers"].([]map[string]any)[0]["volumeMounts"].([]map[string]any)
+	if got := appMounts[0]["subPath"]; !strings.HasPrefix(got.(string), "sessions/session-123/mounts/mount-") {
+		t.Fatalf("expected app mount to use session subdir, got %#v", got)
+	}
+	initContainers := podSpec["initContainers"].([]map[string]any)
+	command := initContainers[0]["command"].([]string)
+	if got := command[len(command)-3]; got != "/fugue-persistent-storage/sessions/session-123" {
+		t.Fatalf("expected init container to prepare session subdir, got %q", got)
+	}
+
+	for _, obj := range objects[1:] {
+		objMetadata := obj["metadata"].(map[string]any)
+		if _, ok := objMetadata["ownerReferences"]; !ok {
+			t.Fatalf("expected app-owned object %s to have owner reference", objMetadata["name"])
+		}
+	}
+}
+
 func TestBuildAppObjectsUsesBackingServicesWithoutDuplicatingLegacyInlinePostgres(t *testing.T) {
 	app := model.App{
 		ID:        "app_demo",

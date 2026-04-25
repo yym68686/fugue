@@ -111,6 +111,45 @@ nodeJanitor:
     enabled: true
     staleMinAgeHours: 168
 
+sharedWorkspaceStorage:
+  enabled: false
+  storageClassName: fugue-rwx
+  provisionerName: fugue.pro/nfs-rwx
+  reclaimPolicy: Delete
+  volumeBindingMode: Immediate
+  allowVolumeExpansion: true
+  archiveOnDelete: "true"
+  pathPattern: "${.PVC.namespace}/${.PVC.name}"
+  mountOptions:
+    - vers=4.1
+  server:
+    image:
+      repository: itsthenetwork/nfs-server-alpine
+      tag: "12"
+      pullPolicy: IfNotPresent
+    sharedDirectory: /exports
+    hostPath: /var/lib/fugue/shared-workspaces
+    clusterIP: 10.43.240.17
+    nodeSelector:
+      fugue.install/role: primary
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+    resources: {}
+  provisioner:
+    image:
+      repository: registry.k8s.io/sig-storage/nfs-subdir-external-provisioner
+      tag: v4.0.2
+      pullPolicy: IfNotPresent
+    nodeSelector:
+      node-role.kubernetes.io/control-plane: "true"
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+    resources: {}
+
 registryJanitor:
   enabled: true
   schedule: "23 4 * * *"

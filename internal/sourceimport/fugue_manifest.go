@@ -134,9 +134,11 @@ type fugueManifestService struct {
 }
 
 type fugueManifestPersistentStorage struct {
+	Mode             string                                `yaml:"mode"`
 	StoragePath      string                                `yaml:"storage_path"`
 	StorageSize      string                                `yaml:"storage_size"`
 	StorageClassName string                                `yaml:"storage_class_name"`
+	SharedSubPath    string                                `yaml:"shared_sub_path"`
 	ResetToken       string                                `yaml:"reset_token"`
 	Mounts           []fugueManifestPersistentStorageMount `yaml:"mounts"`
 }
@@ -477,11 +479,21 @@ func resolveFugueManifestPersistentStorage(raw *fugueManifestPersistentStorage) 
 	if err != nil {
 		return nil, nil, err
 	}
+	mode, err := model.NormalizeAppPersistentStorageMode(raw.Mode)
+	if err != nil {
+		return nil, nil, err
+	}
+	sharedSubPath, err := model.NormalizeAppPersistentStorageSharedSubPath(raw.SharedSubPath)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	spec := &model.AppPersistentStorageSpec{
+		Mode:             mode,
 		StoragePath:      storagePath,
 		StorageSize:      strings.TrimSpace(raw.StorageSize),
 		StorageClassName: strings.TrimSpace(raw.StorageClassName),
+		SharedSubPath:    sharedSubPath,
 		ResetToken:       strings.TrimSpace(raw.ResetToken),
 	}
 	seedFiles := make([]PersistentStorageSeedFile, 0, len(raw.Mounts))
@@ -571,6 +583,9 @@ func mergePersistentStorageSpecs(base, override *model.AppPersistentStorageSpec)
 	}
 
 	merged := clonePersistentStorageSpec(base)
+	if strings.TrimSpace(override.Mode) != "" {
+		merged.Mode = strings.TrimSpace(override.Mode)
+	}
 	if strings.TrimSpace(override.StoragePath) != "" {
 		merged.StoragePath = strings.TrimSpace(override.StoragePath)
 	}
@@ -579,6 +594,9 @@ func mergePersistentStorageSpecs(base, override *model.AppPersistentStorageSpec)
 	}
 	if strings.TrimSpace(override.StorageClassName) != "" {
 		merged.StorageClassName = strings.TrimSpace(override.StorageClassName)
+	}
+	if strings.TrimSpace(override.SharedSubPath) != "" {
+		merged.SharedSubPath = strings.TrimSpace(override.SharedSubPath)
 	}
 	if strings.TrimSpace(override.ResetToken) != "" {
 		merged.ResetToken = strings.TrimSpace(override.ResetToken)

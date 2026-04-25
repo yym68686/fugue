@@ -195,6 +195,11 @@ func normalizeImportedPersistentStorage(storage *model.AppPersistentStorageSpec,
 	}
 
 	normalized := *storage
+	mode, err := model.NormalizeAppPersistentStorageMode(storage.Mode)
+	if err != nil {
+		return nil, err
+	}
+	normalized.Mode = mode
 	if storagePath, err := model.NormalizeAppPersistentStoragePath(storage.StoragePath); err != nil {
 		return nil, err
 	} else {
@@ -202,6 +207,11 @@ func normalizeImportedPersistentStorage(storage *model.AppPersistentStorageSpec,
 	}
 	normalized.StorageSize = strings.TrimSpace(storage.StorageSize)
 	normalized.StorageClassName = strings.TrimSpace(storage.StorageClassName)
+	if sharedSubPath, err := model.NormalizeAppPersistentStorageSharedSubPath(storage.SharedSubPath); err != nil {
+		return nil, err
+	} else {
+		normalized.SharedSubPath = sharedSubPath
+	}
 	normalized.ResetToken = strings.TrimSpace(storage.ResetToken)
 	normalized.Mounts = nil
 

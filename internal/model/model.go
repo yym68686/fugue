@@ -98,12 +98,14 @@ const (
 	ClusterNodeWorkloadKindApp            = "app"
 	ClusterNodeWorkloadKindBackingService = "backing_service"
 
-	DefaultAppWorkspaceMountPath           = "/workspace"
-	AppWorkspaceInternalDirName            = ".fugue-workspace-state"
-	AppPersistentStorageInternalDirName    = ".fugue-persistent-storage-state"
-	AppPersistentStorageMountKindDirectory = "directory"
-	AppPersistentStorageMountKindFile      = "file"
-	DefaultAppImageMirrorLimit             = 1
+	DefaultAppWorkspaceMountPath             = "/workspace"
+	AppWorkspaceInternalDirName              = ".fugue-workspace-state"
+	AppPersistentStorageInternalDirName      = ".fugue-persistent-storage-state"
+	AppPersistentStorageModeDedicatedPVC     = "dedicated_pvc"
+	AppPersistentStorageModeSharedProjectRWX = "shared_project_rwx"
+	AppPersistentStorageMountKindDirectory   = "directory"
+	AppPersistentStorageMountKindFile        = "file"
+	DefaultAppImageMirrorLimit               = 1
 )
 
 func NormalizeGitHubAppSourceType(raw string) string {
@@ -837,9 +839,11 @@ type AppWorkspaceSpec struct {
 }
 
 type AppPersistentStorageSpec struct {
+	Mode             string                      `json:"mode,omitempty"`
 	StoragePath      string                      `json:"storage_path,omitempty"`
 	StorageSize      string                      `json:"storage_size,omitempty"`
 	StorageClassName string                      `json:"storage_class_name,omitempty"`
+	SharedSubPath    string                      `json:"shared_sub_path,omitempty"`
 	ResetToken       string                      `json:"reset_token,omitempty"`
 	Mounts           []AppPersistentStorageMount `json:"mounts,omitempty"`
 }

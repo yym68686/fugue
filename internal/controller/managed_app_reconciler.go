@@ -1201,7 +1201,7 @@ func backfillManagedAppSource(app *model.App, stored model.App) {
 
 func managedAppExpectedObjectNamesByKind(app model.App) map[string]map[string]struct{} {
 	out := desiredObjectNamesByKind(runtime.BuildManagedAppChildObjects(app, runtime.SchedulingConstraints{}, nil))
-	if app.Spec.Workspace != nil || app.Spec.PersistentStorage != nil {
+	if runtime.AppUsesWorkspaceReplication(app) {
 		if out[runtime.VolSyncReplicationSourceKind] == nil {
 			out[runtime.VolSyncReplicationSourceKind] = make(map[string]struct{})
 		}

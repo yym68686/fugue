@@ -1491,6 +1491,9 @@ func persistentStorageGibibytes(spec *model.AppPersistentStorageSpec) int64 {
 	if spec == nil {
 		return 0
 	}
+	if model.AppPersistentStorageSpecUsesSharedProjectRWX(spec) {
+		return 0
+	}
 	size := strings.TrimSpace(spec.StorageSize)
 	if size == "" {
 		size = model.DefaultManagedWorkspaceStorageSize
