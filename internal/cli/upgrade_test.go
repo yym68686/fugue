@@ -44,6 +44,31 @@ func TestRunVersionCheckLatestShowsAvailableRelease(t *testing.T) {
 	}
 }
 
+func TestRunRootVersionFlagShowsBuildInfo(t *testing.T) {
+	restore := overrideCLITestBuildInfo(t, "v1.2.3", "abc123", "2026-04-15T00:00:00Z")
+	defer restore()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := runWithStreams([]string{"--version"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run --version: %v", err)
+	}
+
+	if got := stderr.String(); got != "" {
+		t.Fatalf("expected --version to keep stderr quiet, got %q", got)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"version=v1.2.3",
+		"commit=abc123",
+		"built_at=2026-04-15T00:00:00Z",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected --version output to contain %q, got %q", want, out)
+		}
+	}
+}
+
 func TestRunUpgradeCheckShowsFromAndToVersions(t *testing.T) {
 	restore := overrideCLITestBuildInfo(t, "v1.2.3", "abc123", "2026-04-15T00:00:00Z")
 	defer restore()

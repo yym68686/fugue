@@ -45,6 +45,7 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"Also write stdout output to a local file",
 		"Redact sensitive values in diagnostic output",
 		"Required together with --redact=false to allow unredacted output",
+		"Show the Fugue CLI build version",
 		"deploy",
 		"app",
 		"tenant",

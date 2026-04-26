@@ -12,6 +12,15 @@ import (
 
 const defaultCloudBaseURL = "https://api.fugue.pro"
 
+const (
+	rootVersionBuildCommitAnnotation = "fugue.buildCommit"
+	rootVersionBuildTimeAnnotation   = "fugue.buildTime"
+	rootVersionTemplate              = `version={{.Version}}
+commit={{index .Annotations "` + rootVersionBuildCommitAnnotation + `"}}
+built_at={{index .Annotations "` + rootVersionBuildTimeAnnotation + `"}}
+`
+)
+
 type rootOptions struct {
 	BaseURL     string
 	WebBaseURL  string
@@ -65,9 +74,15 @@ func newCLI(stdout, stderr io.Writer) *CLI {
 }
 
 func (c *CLI) newRootCommand() *cobra.Command {
+	buildInfo := currentCLIBuildInfo()
 	cmd := &cobra.Command{
-		Use:   "fugue",
-		Short: "Semantic CLI for deploying and managing Fugue apps",
+		Use:     "fugue",
+		Short:   "Semantic CLI for deploying and managing Fugue apps",
+		Version: buildInfo.Version,
+		Annotations: map[string]string{
+			rootVersionBuildCommitAnnotation: buildInfo.Commit,
+			rootVersionBuildTimeAnnotation:   buildInfo.BuiltAt,
+		},
 		Long: strings.TrimSpace(`
 Fugue is a semantic CLI over the Fugue control-plane API.
 
@@ -195,6 +210,8 @@ Environment variables:
 			return nil
 		},
 	}
+	cmd.SetVersionTemplate(rootVersionTemplate)
+	cmd.Flags().Bool("version", false, "Show the Fugue CLI build version")
 
 	flags := cmd.PersistentFlags()
 	flags.StringVar(&c.root.BaseURL, "base-url", c.root.BaseURL, "Optional API base URL. Defaults to FUGUE_BASE_URL, then FUGUE_API_URL, then "+defaultCloudBaseURL)
