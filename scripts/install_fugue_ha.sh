@@ -1333,8 +1333,13 @@ source "\${config_file}"
 tmp_json="\$(mktemp)"
 tmp_caddy="\$(mktemp)"
 tmp_hosts="\$(mktemp)"
+tmp_main="\$(mktemp)"
+previous_custom=""
 cleanup() {
-  rm -f "\${tmp_json}" "\${tmp_caddy}" "\${tmp_hosts}"
+  rm -f "\${tmp_json}" "\${tmp_caddy}" "\${tmp_hosts}" "\${tmp_main}"
+  if [ -n "\${previous_custom}" ]; then
+    rm -f "\${previous_custom}"
+  fi
 }
 trap cleanup EXIT
 
@@ -1427,12 +1432,52 @@ probe_tls_ready() {
   return 1
 }
 
+render_candidate_main_caddyfile() {
+  python3 - "\${EDGE_MAIN_CADDYFILE}" "\${EDGE_CUSTOM_DOMAINS_CADDYFILE}" "\${tmp_caddy}" "\${tmp_main}" <<'PY'
+import sys
+from pathlib import Path
+
+main_path, current_import, candidate_import, out_path = sys.argv[1:5]
+source = Path(main_path).read_text(encoding="utf-8")
+needle = f"import {current_import}"
+replacement = f"import {candidate_import}"
+if needle not in source:
+    sys.stderr.write(f"expected import line not found in {main_path}: {needle}\n")
+    sys.exit(1)
+Path(out_path).write_text(source.replace(needle, replacement, 1), encoding="utf-8")
+PY
+}
+
+reload_caddy_config() {
+  caddy reload --config "\${EDGE_MAIN_CADDYFILE}" --adapter caddyfile
+}
+
 if [ ! -f "\${EDGE_CUSTOM_DOMAINS_CADDYFILE}" ] || ! cmp -s "\${tmp_caddy}" "\${EDGE_CUSTOM_DOMAINS_CADDYFILE}"; then
+  render_candidate_main_caddyfile
+  caddy validate --config "\${tmp_main}"
+  previous_custom="\$(mktemp)"
+  had_previous_custom=false
+  if [ -f "\${EDGE_CUSTOM_DOMAINS_CADDYFILE}" ]; then
+    cp -p "\${EDGE_CUSTOM_DOMAINS_CADDYFILE}" "\${previous_custom}"
+    had_previous_custom=true
+  fi
   install -m 0644 "\${tmp_caddy}" "\${EDGE_CUSTOM_DOMAINS_CADDYFILE}"
   caddy validate --config "\${EDGE_MAIN_CADDYFILE}"
   if systemctl is-active --quiet caddy; then
-    systemctl restart caddy
+    if ! reload_caddy_config; then
+      echo "warning: caddy reload failed after custom-domain update; restoring previous custom-domain config" >&2
+      if [ "\${had_previous_custom}" = "true" ]; then
+        install -m 0644 "\${previous_custom}" "\${EDGE_CUSTOM_DOMAINS_CADDYFILE}"
+      else
+        rm -f "\${EDGE_CUSTOM_DOMAINS_CADDYFILE}"
+      fi
+      caddy validate --config "\${EDGE_MAIN_CADDYFILE}" >/dev/null 2>&1 || true
+      reload_caddy_config >/dev/null 2>&1 || true
+      exit 1
+    fi
   fi
+  rm -f "\${previous_custom}"
+  previous_custom=""
 fi
 
 while IFS= read -r hostname; do
@@ -1474,7 +1519,7 @@ WantedBy=timers.target
 TIMER
 cat >/etc/caddy/Caddyfile <<'CADDY'
 {
-  admin off
+  admin 127.0.0.1:2019
   on_demand_tls {
     ask http://${EDGE_UPSTREAM}/v1/edge/tls/ask?token=${FUGUE_EDGE_TLS_ASK_TOKEN}
   }
@@ -1573,7 +1618,14 @@ CADDY
 caddy validate --config /etc/caddy/Caddyfile
 systemctl daemon-reload
 systemctl enable caddy
-systemctl restart caddy
+if systemctl is-active --quiet caddy; then
+  if ! caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile; then
+    echo "warning: caddy hot reload failed; falling back to a one-time restart" >&2
+    systemctl restart caddy
+  fi
+else
+  systemctl start caddy
+fi
 systemctl is-active --quiet caddy
 systemctl enable fugue-custom-domains-sync.timer
 systemctl restart fugue-custom-domains-sync.timer
