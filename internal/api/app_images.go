@@ -169,8 +169,8 @@ func (s *Server) cachedProjectImageUsageResponse(
 			}
 
 			opsStartedAt := time.Now()
-			ops, err := s.store.ListOperations(principal.TenantID, principal.IsPlatformAdmin())
-			timings.Add("store_operations", time.Since(opsStartedAt))
+			opsByAppID, err := s.loadProjectImageUsageOperations(ctx, principal, apps)
+			timings.Add("store_image_usage_operations", time.Since(opsStartedAt))
 			if err != nil {
 				return projectImageUsageResponse{}, err
 			}
@@ -179,7 +179,7 @@ func (s *Server) cachedProjectImageUsageResponse(
 			response, err := s.buildProjectImageUsageResponse(
 				ctx,
 				visibleAppsForImageInventory(apps),
-				ops,
+				opsByAppID,
 			)
 			timings.Add("project_image_usage", time.Since(buildStartedAt))
 			if err != nil {
@@ -196,6 +196,61 @@ func (s *Server) cachedProjectImageUsageResponse(
 
 func projectImageUsageCacheKey(principal model.Principal) string {
 	return principalVisibilityCacheKey(principal)
+}
+
+func (s *Server) loadProjectImageUsageOperations(
+	ctx context.Context,
+	principal model.Principal,
+	apps []model.App,
+) (map[string][]model.Operation, error) {
+	appIDs := make([]string, 0, len(apps))
+	seen := make(map[string]struct{}, len(apps))
+	for _, app := range visibleAppsForImageInventory(apps) {
+		appID := strings.TrimSpace(app.ID)
+		if appID == "" {
+			continue
+		}
+		if _, ok := seen[appID]; ok {
+			continue
+		}
+		seen[appID] = struct{}{}
+		appIDs = append(appIDs, appID)
+	}
+	sort.Strings(appIDs)
+
+	opsByAppID := make(map[string][]model.Operation, len(appIDs))
+	var mu sync.Mutex
+	group, _ := errgroup.WithContext(ctx)
+	group.SetLimit(6)
+
+	for _, appID := range appIDs {
+		appID := appID
+		group.Go(func() error {
+			startedAt := time.Now()
+			ops, err := s.store.ListOperationsWithDesiredSourceByApp(
+				principal.TenantID,
+				principal.IsPlatformAdmin(),
+				appID,
+			)
+			serverTimingFromContext(ctx).Add("store_image_usage_operations_app", time.Since(startedAt))
+			if err != nil {
+				return err
+			}
+			if len(ops) == 0 {
+				return nil
+			}
+
+			mu.Lock()
+			opsByAppID[appID] = ops
+			mu.Unlock()
+			return nil
+		})
+	}
+
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+	return opsByAppID, nil
 }
 
 func (s *Server) handleGetAppImages(w http.ResponseWriter, r *http.Request) {
@@ -404,21 +459,13 @@ func (s *Server) handleDeleteAppImage(w http.ResponseWriter, r *http.Request) {
 func (s *Server) buildProjectImageUsageResponse(
 	ctx context.Context,
 	apps []model.App,
-	ops []model.Operation,
+	opsByAppID map[string][]model.Operation,
 ) (projectImageUsageResponse, error) {
 	response := projectImageUsageResponse{
 		RegistryConfigured: s.appImageInventoryConfigured(),
 	}
 	if !response.RegistryConfigured {
 		return response, nil
-	}
-
-	opsByAppID := make(map[string][]model.Operation)
-	for _, op := range ops {
-		if strings.TrimSpace(op.AppID) == "" {
-			continue
-		}
-		opsByAppID[op.AppID] = append(opsByAppID[op.AppID], op)
 	}
 
 	projectSummaries := make(map[string]*projectImageUsageAccumulator)

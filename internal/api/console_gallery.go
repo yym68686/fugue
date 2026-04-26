@@ -24,6 +24,7 @@ const (
 	consoleGalleryStreamHeartbeatInterval = 15 * time.Second
 	consoleGalleryStreamRetryMS           = 5000
 	defaultConsoleGalleryCacheTTL         = 5 * time.Second
+	consoleProjectOperationsRecentLimit   = 40
 )
 
 type consoleHTTPError struct {
@@ -1099,7 +1100,7 @@ func (s *Server) handleGetConsoleProject(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	projectOperations, err := s.loadConsoleProjectOperations(principal, appIDs)
+	projectOperations, err := s.loadConsoleProjectOperations(r.Context(), principal, appIDs)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -1132,6 +1133,7 @@ func (s *Server) handleGetConsoleProject(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) loadConsoleProjectOperations(
+	ctx context.Context,
 	principal model.Principal,
 	appIDs map[string]struct{},
 ) ([]model.Operation, error) {
@@ -1161,11 +1163,14 @@ func (s *Server) loadConsoleProjectOperations(
 	for _, appID := range orderedAppIDs {
 		appID := appID
 		group.Go(func() error {
-			result, err := s.store.ListOperationsByApp(
+			startedAt := time.Now()
+			result, err := s.store.ListConsoleOperationsByApp(
 				principal.TenantID,
 				principal.IsPlatformAdmin(),
 				appID,
+				consoleProjectOperationsRecentLimit,
 			)
+			serverTimingFromContext(ctx).Add("store_console_operations_app", time.Since(startedAt))
 			if err != nil {
 				return err
 			}

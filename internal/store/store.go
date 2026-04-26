@@ -2750,6 +2750,95 @@ func (s *Store) ListOperationsByApp(tenantID string, platformAdmin bool, appID s
 	return ops, err
 }
 
+func (s *Store) ListConsoleOperationsByApp(tenantID string, platformAdmin bool, appID string, recentLimit int) ([]model.Operation, error) {
+	appID = strings.TrimSpace(appID)
+	if appID == "" {
+		return []model.Operation{}, nil
+	}
+	if recentLimit < 1 {
+		recentLimit = 1
+	}
+	if s.usingDatabase() {
+		return s.pgListConsoleOperationsByApp(tenantID, platformAdmin, appID, recentLimit)
+	}
+
+	var ops []model.Operation
+	err := s.withLockedState(false, func(state *model.State) error {
+		candidates := make([]model.Operation, 0)
+		for _, op := range state.Operations {
+			if !platformAdmin && op.TenantID != tenantID {
+				continue
+			}
+			if strings.TrimSpace(op.AppID) != appID {
+				continue
+			}
+			candidates = append(candidates, op)
+		}
+		sort.Slice(candidates, func(i, j int) bool {
+			if candidates[i].CreatedAt.Equal(candidates[j].CreatedAt) {
+				return candidates[i].ID > candidates[j].ID
+			}
+			return candidates[i].CreatedAt.After(candidates[j].CreatedAt)
+		})
+
+		seen := make(map[string]struct{}, len(candidates))
+		for _, op := range candidates {
+			if isActiveOperationStatus(op.Status) {
+				ops = append(ops, op)
+				seen[op.ID] = struct{}{}
+			}
+		}
+		recentCount := 0
+		for _, op := range candidates {
+			if recentCount >= recentLimit {
+				break
+			}
+			recentCount++
+			if _, ok := seen[op.ID]; ok {
+				continue
+			}
+			ops = append(ops, op)
+			seen[op.ID] = struct{}{}
+		}
+		sort.Slice(ops, func(i, j int) bool {
+			if ops[i].CreatedAt.Equal(ops[j].CreatedAt) {
+				return ops[i].ID < ops[j].ID
+			}
+			return ops[i].CreatedAt.Before(ops[j].CreatedAt)
+		})
+		return nil
+	})
+	return ops, err
+}
+
+func (s *Store) ListOperationsWithDesiredSourceByApp(tenantID string, platformAdmin bool, appID string) ([]model.Operation, error) {
+	appID = strings.TrimSpace(appID)
+	if appID == "" {
+		return []model.Operation{}, nil
+	}
+	if s.usingDatabase() {
+		return s.pgListOperationsWithDesiredSourceByApp(tenantID, platformAdmin, appID)
+	}
+
+	var ops []model.Operation
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, op := range state.Operations {
+			if !platformAdmin && op.TenantID != tenantID {
+				continue
+			}
+			if strings.TrimSpace(op.AppID) != appID || op.DesiredSource == nil {
+				continue
+			}
+			ops = append(ops, op)
+		}
+		sort.Slice(ops, func(i, j int) bool {
+			return ops[i].CreatedAt.Before(ops[j].CreatedAt)
+		})
+		return nil
+	})
+	return ops, err
+}
+
 func (s *Store) ListActiveOperations() ([]model.Operation, error) {
 	if s.usingDatabase() {
 		return s.pgListActiveOperations()
