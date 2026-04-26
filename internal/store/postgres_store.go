@@ -2009,6 +2009,10 @@ func (s *Store) pgListAppsMetadataByProjectIDs(projectIDs []string) ([]model.App
 	return s.pgListAppsViewByIDs("project_id", projectIDs, false)
 }
 
+func (s *Store) pgListAppsByProjectIDs(projectIDs []string) ([]model.App, error) {
+	return s.pgListAppsViewByIDs("project_id", projectIDs, true)
+}
+
 func (s *Store) pgListAppsView(tenantID string, platformAdmin bool, hydrateBackingServices bool) ([]model.App, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

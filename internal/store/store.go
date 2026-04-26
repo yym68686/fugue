@@ -1884,6 +1884,20 @@ func (s *Store) ListAppsMetadataByProjectIDs(projectIDs []string) ([]model.App, 
 	})
 }
 
+func (s *Store) ListAppsByProjectIDs(projectIDs []string) ([]model.App, error) {
+	projectIDSet := trimmedStringSet(projectIDs)
+	if len(projectIDSet) == 0 {
+		return nil, nil
+	}
+	if s.usingDatabase() {
+		return s.pgListAppsByProjectIDs(sortedTrimmedStringKeys(projectIDSet))
+	}
+	return s.listAppsViewFiltered(true, func(app model.App) bool {
+		_, ok := projectIDSet[strings.TrimSpace(app.ProjectID)]
+		return ok
+	})
+}
+
 func (s *Store) listAppsView(tenantID string, platformAdmin bool, hydrateBackingServices bool) ([]model.App, error) {
 	return s.listAppsViewFiltered(hydrateBackingServices, func(app model.App) bool {
 		return platformAdmin || app.TenantID == tenantID

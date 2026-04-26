@@ -15,6 +15,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/store"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -24,7 +25,7 @@ const (
 	consoleGalleryStreamHeartbeatInterval = 15 * time.Second
 	consoleGalleryStreamRetryMS           = 5000
 	defaultConsoleGalleryCacheTTL         = 5 * time.Second
-	consoleProjectOperationsRecentLimit   = 40
+	consoleProjectOperationsRecentLimit   = 12
 )
 
 type consoleHTTPError struct {
@@ -666,6 +667,40 @@ func (s *Server) loadConsoleApps(ctx context.Context, principal model.Principal,
 	return sanitizeAppsForAPI(visible), nil
 }
 
+func (s *Server) loadConsoleProjectApps(ctx context.Context, principal model.Principal, projectID string, includeLiveStatus bool, includeResourceUsage bool) ([]model.App, error) {
+	var (
+		apps []model.App
+		err  error
+	)
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "unassigned" {
+		apps, err = s.store.ListApps(principal.TenantID, principal.IsPlatformAdmin())
+	} else {
+		apps, err = s.store.ListAppsByProjectIDs([]string{projectID})
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	visible := visibleConsoleApps(filterAppsForPrincipal(principal, apps))
+	if projectID == "unassigned" {
+		unassigned := make([]model.App, 0, len(visible))
+		for _, app := range visible {
+			if strings.TrimSpace(app.ProjectID) == "" {
+				unassigned = append(unassigned, app)
+			}
+		}
+		visible = unassigned
+	}
+	if includeLiveStatus {
+		visible = s.overlayManagedAppStatuses(ctx, visible)
+	}
+	if includeResourceUsage {
+		visible = s.overlayCurrentResourceUsageOnApps(ctx, visible)
+	}
+	return sanitizeAppsForAPI(visible), nil
+}
+
 func (s *Server) buildConsoleGalleryResponse(ctx context.Context, principal model.Principal, includeLiveStatus bool) (consoleGalleryResponse, error) {
 	timings := serverTimingFromContext(ctx)
 
@@ -872,6 +907,7 @@ func (s *Server) loadConsoleProjectClusterNodes(
 	ctx context.Context,
 	principal model.Principal,
 	projectID string,
+	projectApps []model.App,
 	appIDs map[string]struct{},
 	serviceIDs map[string]struct{},
 ) ([]model.ClusterNode, error) {
@@ -904,18 +940,11 @@ func (s *Server) loadConsoleProjectClusterNodes(
 		return nil, err
 	}
 
-	storeAppsStartedAt := time.Now()
-	apps, err := s.store.ListApps(principal.TenantID, principal.IsPlatformAdmin())
-	timings.Add("store_apps", time.Since(storeAppsStartedAt))
-	if err != nil {
-		return nil, err
-	}
-
-	storeServicesStartedAt := time.Now()
-	services, err := s.store.ListBackingServices(principal.TenantID, principal.IsPlatformAdmin())
-	timings.Add("store_services", time.Since(storeServicesStartedAt))
-	if err != nil {
-		return nil, err
+	services := make([]model.BackingService, 0, len(serviceIDs))
+	for _, app := range projectApps {
+		for _, service := range app.BackingServices {
+			services = append(services, service)
+		}
 	}
 
 	runtimeByClusterNode := make(map[string]model.Runtime, len(runtimes))
@@ -930,7 +959,7 @@ func (s *Server) loadConsoleProjectClusterNodes(
 		runtimeByClusterNode[name] = runtimeObj
 	}
 
-	workloadResolver := newClusterWorkloadResolver(apps, services)
+	workloadResolver := newClusterWorkloadResolver(projectApps, services)
 	resolvedSnapshots := make([]resolvedClusterNodeSnapshot, 0, len(snapshots))
 	for _, snapshot := range snapshots {
 		resolvedSnapshots = append(resolvedSnapshots, resolvedClusterNodeSnapshot{
@@ -1061,40 +1090,27 @@ func (s *Server) handleGetConsoleProject(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	projects, err := s.store.ListProjects(principal.TenantID)
-	if err != nil {
-		s.writeStoreError(w, err)
+	project, projectErr := s.store.GetProject(projectID)
+	hasProject := projectErr == nil && principalAllowsProject(principal, project)
+	if projectErr != nil && !errors.Is(projectErr, store.ErrNotFound) {
+		s.writeStoreError(w, projectErr)
 		return
-	}
-	projectByID := make(map[string]model.Project, len(projects))
-	for _, project := range projects {
-		projectByID[project.ID] = project
 	}
 
-	apps, err := s.loadConsoleApps(r.Context(), principal, includeLiveStatus, true)
+	projectApps, err := s.loadConsoleProjectApps(r.Context(), principal, projectID, includeLiveStatus, true)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	projectApps := make([]model.App, 0)
 	appIDs := make(map[string]struct{})
 	serviceIDs := make(map[string]struct{})
-	for _, app := range apps {
-		appProjectID := strings.TrimSpace(app.ProjectID)
-		if appProjectID == "" {
-			appProjectID = "unassigned"
-		}
-		if appProjectID != projectID {
-			continue
-		}
-		projectApps = append(projectApps, app)
+	for _, app := range projectApps {
 		appIDs[app.ID] = struct{}{}
 		for _, service := range app.BackingServices {
 			serviceIDs[service.ID] = struct{}{}
 		}
 	}
 
-	project, hasProject := projectByID[projectID]
 	if !hasProject && len(projectApps) == 0 {
 		httpx.WriteError(w, http.StatusNotFound, "project not found")
 		return
@@ -1106,7 +1122,7 @@ func (s *Server) handleGetConsoleProject(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	clusterNodes, err := s.loadConsoleProjectClusterNodes(r.Context(), principal, projectID, appIDs, serviceIDs)
+	clusterNodes, err := s.loadConsoleProjectClusterNodes(r.Context(), principal, projectID, projectApps, appIDs, serviceIDs)
 	if err != nil {
 		var httpErr consoleHTTPError
 		if errors.As(err, &httpErr) {
