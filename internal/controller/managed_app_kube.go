@@ -73,19 +73,46 @@ type kubeWatchEvent struct {
 	Object json.RawMessage `json:"object,omitempty"`
 }
 
+const (
+	kubernetesApplyMaxAttempts = 4
+	kubernetesApplyBaseDelay   = 250 * time.Millisecond
+)
+
+var retryableKubernetesApplySignals = []string{
+	"status=429",
+	"status=500",
+	"status=502",
+	"status=503",
+	"status=504",
+	"failed calling webhook",
+	"internal error occurred",
+	"eof",
+	"i/o timeout",
+	"timeout awaiting response headers",
+	"tls handshake timeout",
+	"connection reset by peer",
+	"connection refused",
+	"server closed idle connection",
+	"http2: client connection lost",
+	"transport is closing",
+	"too many requests",
+	"service unavailable",
+	"gateway timeout",
+}
+
 func (c *kubeClient) applyObject(ctx context.Context, obj map[string]any, out any) error {
 	apiPath, err := runtime.ObjectAPIPath(c.namespace, obj)
 	if err != nil {
 		return err
 	}
-	if err := c.applyObjectAtPath(ctx, apiPath, obj, out); err == nil {
+	if err := c.applyObjectAtPathWithRetry(ctx, apiPath, obj, out); err == nil {
 		return nil
 	} else if shouldRetryDeploymentAfterStaleAppFilesVolumeMounts(obj, err) {
 		name, namespace := objectNameAndNamespace(c.namespace, obj)
 		if cleanupErr := c.removeDeploymentVolumeReferencesByName(ctx, namespace, name, runtime.AppFilesVolumeName); cleanupErr != nil {
 			return fmt.Errorf("remove stale app file volume references after deployment apply failure: %w (original apply error: %v)", cleanupErr, err)
 		}
-		if retryErr := c.applyObjectAtPath(ctx, apiPath, obj, out); retryErr != nil {
+		if retryErr := c.applyObjectAtPathWithRetry(ctx, apiPath, obj, out); retryErr != nil {
 			return fmt.Errorf("%w (after removing stale app file volume references)", retryErr)
 		}
 		return nil
@@ -99,8 +126,36 @@ func (c *kubeClient) applyObject(ctx context.Context, obj map[string]any, out an
 		if err := c.waitForDeploymentDeleted(ctx, namespace, name); err != nil {
 			return fmt.Errorf("wait for deployment %s/%s deletion after immutable selector apply failure: %w", namespace, name, err)
 		}
-		return c.applyObjectAtPath(ctx, apiPath, obj, out)
+		return c.applyObjectAtPathWithRetry(ctx, apiPath, obj, out)
 	}
+}
+
+func (c *kubeClient) applyObjectAtPathWithRetry(ctx context.Context, apiPath string, obj map[string]any, out any) error {
+	var lastErr error
+	for attempt := 1; attempt <= kubernetesApplyMaxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			if lastErr != nil {
+				return lastErr
+			}
+			return ctx.Err()
+		}
+		err := c.applyObjectAtPath(ctx, apiPath, obj, out)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if attempt >= kubernetesApplyMaxAttempts || !shouldRetryKubernetesApplyError(err) {
+			break
+		}
+		timer := time.NewTimer(kubernetesApplyRetryDelay(attempt))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return lastErr
+		case <-timer.C:
+		}
+	}
+	return lastErr
 }
 
 func (c *kubeClient) applyObjectAtPath(ctx context.Context, apiPath string, obj map[string]any, out any) error {
@@ -112,6 +167,29 @@ func (c *kubeClient) applyObjectAtPath(ctx context.Context, apiPath string, obj 
 	}
 	_, err := c.doRequest(ctx, http.MethodPatch, apiPath, "application/apply-patch+yaml", obj, out)
 	return err
+}
+
+func shouldRetryKubernetesApplyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if message == "" {
+		return false
+	}
+	for _, signal := range retryableKubernetesApplySignals {
+		if strings.Contains(message, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+func kubernetesApplyRetryDelay(attempt int) time.Duration {
+	if attempt <= 1 {
+		return kubernetesApplyBaseDelay
+	}
+	return time.Duration(attempt) * kubernetesApplyBaseDelay
 }
 
 func (c *kubeClient) waitForDeploymentDeleted(ctx context.Context, namespace, name string) error {

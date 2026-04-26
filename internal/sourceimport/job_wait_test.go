@@ -118,6 +118,9 @@ func TestIsTransientBuilderObservationError(t *testing.T) {
 	if !isTransientBuilderObservationError(errors.New("kubectl -n fugue-system get job build-demo -o json: signal: killed")) {
 		t.Fatal("expected signal: killed observation error to be treated as transient")
 	}
+	if !isTransientBuilderObservationError(errors.New("kubectl -n fugue-system get job build-demo -o json: exit status 1")) {
+		t.Fatal("expected empty kubectl get job exit status 1 to be treated as transient")
+	}
 	if isTransientBuilderObservationError(errors.New("kubectl -n fugue-system get job build-demo -o json: error: the server doesn't have a resource type")) {
 		t.Fatal("did not expect permanent kubectl errors to be treated as transient")
 	}

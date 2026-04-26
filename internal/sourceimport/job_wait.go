@@ -111,7 +111,26 @@ func waitForBuilderJob(ctx context.Context, namespace, jobName string, timeout t
 
 func isTransientBuilderObservationError(err error) bool {
 	retriable, _ := shouldRetryBuilderJobFailure(err)
-	return retriable
+	if retriable {
+		return true
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if !strings.Contains(message, " get job ") || !strings.Contains(message, "exit status 1") {
+		return false
+	}
+	for _, permanentSignal := range []string{
+		"notfound",
+		"not found",
+		"forbidden",
+		"unauthorized",
+		"doesn't have a resource type",
+		"the server doesn't have a resource type",
+	} {
+		if strings.Contains(message, permanentSignal) {
+			return false
+		}
+	}
+	return true
 }
 
 func getBuilderJob(ctx context.Context, namespace, jobName string) (builderJob, error) {

@@ -122,6 +122,63 @@ func TestApplyObjectsAppliesSamePhaseConcurrently(t *testing.T) {
 	}
 }
 
+func TestApplyObjectRetriesTransientKubernetesApplyFailure(t *testing.T) {
+	t.Parallel()
+
+	var requests []string
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests = append(requests, req.Method+" "+req.URL.Path)
+		switch len(requests) {
+		case 1:
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Body:       io.NopCloser(strings.NewReader(`{"message":"Internal error occurred: failed calling webhook \"mcluster.cnpg.io\": EOF"}`)),
+				Header:     make(http.Header),
+			}, nil
+		case 2:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"kind":"Cluster"}`)),
+				Header:     make(http.Header),
+			}, nil
+		default:
+			t.Fatalf("unexpected extra request %s %s (sequence=%v)", req.Method, req.URL.Path, requests)
+			return nil, nil
+		}
+	})
+
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   "tenant-demo",
+	}
+	obj := map[string]any{
+		"apiVersion": "postgresql.cnpg.io/v1",
+		"kind":       "Cluster",
+		"metadata": map[string]any{
+			"name": "demo-postgres",
+		},
+	}
+
+	if err := client.applyObject(context.Background(), obj, nil); err != nil {
+		t.Fatalf("apply object: %v", err)
+	}
+
+	expected := []string{
+		"PATCH /apis/postgresql.cnpg.io/v1/namespaces/tenant-demo/clusters/demo-postgres",
+		"PATCH /apis/postgresql.cnpg.io/v1/namespaces/tenant-demo/clusters/demo-postgres",
+	}
+	if len(requests) != len(expected) {
+		t.Fatalf("expected request sequence %v, got %v", expected, requests)
+	}
+	for i, want := range expected {
+		if requests[i] != want {
+			t.Fatalf("expected request %d to be %q, got %q", i, want, requests[i])
+		}
+	}
+}
+
 func TestApplyObjectRecreatesDeploymentAfterImmutableSelectorError(t *testing.T) {
 	t.Parallel()
 
