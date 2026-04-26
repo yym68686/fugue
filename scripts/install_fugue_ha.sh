@@ -1454,7 +1454,7 @@ reload_caddy_config() {
 
 if [ ! -f "\${EDGE_CUSTOM_DOMAINS_CADDYFILE}" ] || ! cmp -s "\${tmp_caddy}" "\${EDGE_CUSTOM_DOMAINS_CADDYFILE}"; then
   render_candidate_main_caddyfile
-  caddy validate --config "\${tmp_main}"
+  caddy validate --config "\${tmp_main}" --adapter caddyfile
   previous_custom="\$(mktemp)"
   had_previous_custom=false
   if [ -f "\${EDGE_CUSTOM_DOMAINS_CADDYFILE}" ]; then
@@ -1462,7 +1462,7 @@ if [ ! -f "\${EDGE_CUSTOM_DOMAINS_CADDYFILE}" ] || ! cmp -s "\${tmp_caddy}" "\${
     had_previous_custom=true
   fi
   install -m 0644 "\${tmp_caddy}" "\${EDGE_CUSTOM_DOMAINS_CADDYFILE}"
-  caddy validate --config "\${EDGE_MAIN_CADDYFILE}"
+  caddy validate --config "\${EDGE_MAIN_CADDYFILE}" --adapter caddyfile
   if systemctl is-active --quiet caddy; then
     if ! reload_caddy_config; then
       echo "warning: caddy reload failed after custom-domain update; restoring previous custom-domain config" >&2
@@ -1471,7 +1471,7 @@ if [ ! -f "\${EDGE_CUSTOM_DOMAINS_CADDYFILE}" ] || ! cmp -s "\${tmp_caddy}" "\${
       else
         rm -f "\${EDGE_CUSTOM_DOMAINS_CADDYFILE}"
       fi
-      caddy validate --config "\${EDGE_MAIN_CADDYFILE}" >/dev/null 2>&1 || true
+      caddy validate --config "\${EDGE_MAIN_CADDYFILE}" --adapter caddyfile >/dev/null 2>&1 || true
       reload_caddy_config >/dev/null 2>&1 || true
       exit 1
     fi
@@ -1615,7 +1615,7 @@ https:// {
   }
 }
 CADDY
-caddy validate --config /etc/caddy/Caddyfile
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 systemctl daemon-reload
 systemctl enable caddy
 if systemctl is-active --quiet caddy; then
