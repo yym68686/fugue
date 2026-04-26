@@ -630,6 +630,42 @@ func TestAppFilesystemReadsPersistentStorageFileMountViaSidecar(t *testing.T) {
 	}
 }
 
+func TestAppFilesystemReadsDirectSharedPersistentStorageDirectoryViaAppContainer(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app := setupAppFilesystemDirectSharedPersistentStorageTestServer(t)
+
+	pod := kubePodInfo{}
+	pod.Metadata.Name = "demo-pod"
+	pod.Metadata.CreationTimestamp = time.Now().UTC()
+	pod.Status.Phase = "Running"
+
+	server.newFilesystemPodLister = func(string) (filesystemPodLister, error) {
+		return fakeFilesystemPodLister{pods: []kubePodInfo{pod}}, nil
+	}
+	runner := &fakeFilesystemExecRunner{
+		outputs: [][]byte{
+			[]byte("5\t644\t1700000001\nhello"),
+		},
+	}
+	server.filesystemExecRunner = runner
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/filesystem/file?path=/workspace/file.txt", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("expected 1 filesystem exec call, got %d", len(runner.calls))
+	}
+	_, appContainerName, err := runtimeLogTarget(app, "app")
+	if err != nil {
+		t.Fatalf("runtime log target: %v", err)
+	}
+	if runner.calls[0].container != appContainerName {
+		t.Fatalf("expected app container %q, got %q", appContainerName, runner.calls[0].container)
+	}
+}
+
 func setupAppFilesystemTestServer(t *testing.T, withWorkspace bool) (*store.Store, *Server, string, model.App) {
 	return setupAppFilesystemTestServerForRuntime(t, withWorkspace, "")
 }
@@ -675,6 +711,54 @@ func setupAppFilesystemPersistentStorageTestServer(t *testing.T) (*store.Store, 
 	})
 	if err != nil {
 		t.Fatalf("create persistent storage app: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	return s, server, apiKey, app
+}
+
+func setupAppFilesystemDirectSharedPersistentStorageTestServer(t *testing.T) (*store.Store, *Server, string, model.App) {
+	t.Helper()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Filesystem Direct Shared Persistent Storage Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	runtimeObj, _, err := s.CreateRuntime(tenant.ID, "worker-1", model.RuntimeTypeManagedOwned, "https://runtime.example.com", nil)
+	if err != nil {
+		t.Fatalf("create runtime: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.write", "app.deploy"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: runtimeObj.ID,
+		PersistentStorage: &model.AppPersistentStorageSpec{
+			Mode:          model.AppPersistentStorageModeSharedProjectRWX,
+			SharedSubPath: "sessions/session-123",
+			Mounts: []model.AppPersistentStorageMount{
+				{
+					Kind: model.AppPersistentStorageMountKindDirectory,
+					Path: "/workspace",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create direct shared persistent storage app: %v", err)
 	}
 
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})

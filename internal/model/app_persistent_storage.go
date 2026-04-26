@@ -29,6 +29,24 @@ func AppPersistentStorageSpecUsesSharedProjectRWX(spec *AppPersistentStorageSpec
 	return err == nil && mode == AppPersistentStorageModeSharedProjectRWX
 }
 
+func AppPersistentStorageSpecUsesDirectSharedProjectDirectoryMount(spec *AppPersistentStorageSpec) bool {
+	if !AppPersistentStorageSpecUsesSharedProjectRWX(spec) {
+		return false
+	}
+	if strings.TrimSpace(spec.ResetToken) != "" || len(spec.Mounts) != 1 {
+		return false
+	}
+	mount := spec.Mounts[0]
+	kind, err := NormalizeAppPersistentStorageMountKind(mount.Kind)
+	if err != nil || kind != AppPersistentStorageMountKindDirectory {
+		return false
+	}
+	if strings.TrimSpace(mount.SeedContent) != "" {
+		return false
+	}
+	return mount.Mode == 0 || mount.Mode == 0o755
+}
+
 func NormalizeAppPersistentStorageSharedSubPath(raw string) (string, error) {
 	raw = strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
 	if raw == "" {

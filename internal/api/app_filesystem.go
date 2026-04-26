@@ -573,7 +573,7 @@ func (s *Server) resolveAppFilesystemTarget(
 	}
 
 	containerName := appContainerName
-	if usePersistentStorage {
+	if usePersistentStorage && !model.AppPersistentStorageSpecUsesDirectSharedProjectDirectoryMount(app.Spec.PersistentStorage) {
 		containerName = runtime.AppWorkspaceContainerName
 	}
 	pod, podIssue := chooseFilesystemPod(pods, containerName)

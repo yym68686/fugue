@@ -1088,13 +1088,17 @@ func TestBuildManagedAppChildObjectsIncludesSharedProjectRWXPersistentStorage(t 
 		t.Fatalf("expected deployment to mount project shared pvc, got %#v", got)
 	}
 	appMounts := podSpec["containers"].([]map[string]any)[0]["volumeMounts"].([]map[string]any)
-	if got := appMounts[0]["subPath"]; !strings.HasPrefix(got.(string), "sessions/session-123/mounts/mount-") {
-		t.Fatalf("expected app mount to use session subdir, got %#v", got)
+	if got := appMounts[0]["mountPath"]; got != "/workspace" {
+		t.Fatalf("expected workspace mount path, got %#v", got)
 	}
-	initContainers := podSpec["initContainers"].([]map[string]any)
-	command := initContainers[0]["command"].([]string)
-	if got := command[len(command)-3]; got != "/fugue-persistent-storage/sessions/session-123" {
-		t.Fatalf("expected init container to prepare session subdir, got %q", got)
+	if got := appMounts[0]["subPath"]; got != "sessions/session-123" {
+		t.Fatalf("expected app mount to use direct session subdir, got %#v", got)
+	}
+	if containers := podSpec["containers"].([]map[string]any); len(containers) != 1 {
+		t.Fatalf("expected direct shared project mount to omit storage sidecar, got %d containers", len(containers))
+	}
+	if _, ok := podSpec["initContainers"]; ok {
+		t.Fatalf("expected direct shared project mount to omit init containers, got %#v", podSpec["initContainers"])
 	}
 
 	for _, obj := range objects[1:] {
@@ -1102,6 +1106,68 @@ func TestBuildManagedAppChildObjectsIncludesSharedProjectRWXPersistentStorage(t 
 		if _, ok := objMetadata["ownerReferences"]; !ok {
 			t.Fatalf("expected app-owned object %s to have owner reference", objMetadata["name"])
 		}
+	}
+}
+
+func TestBuildManagedAppChildObjectsKeepsSharedProjectRWXInitForComplexPersistentStorage(t *testing.T) {
+	app := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode:          model.AppPersistentStorageModeSharedProjectRWX,
+				StorageSize:   "20Gi",
+				SharedSubPath: "sessions/session-123",
+				Mounts: []model.AppPersistentStorageMount{
+					{
+						Kind:        model.AppPersistentStorageMountKindFile,
+						Path:        "/home/api.yaml",
+						SeedContent: "providers: []\n",
+					},
+					{
+						Kind: model.AppPersistentStorageMountKindDirectory,
+						Path: "/workspace",
+					},
+				},
+			},
+		},
+	}
+	managed := ManagedAppObject{
+		APIVersion: ManagedAppAPIVersion,
+		Kind:       ManagedAppKind,
+		Metadata: ManagedAppMeta{
+			Name:      "demo",
+			Namespace: NamespaceForTenant(app.TenantID),
+			UID:       "uid-demo",
+		},
+	}
+
+	objects := BuildManagedAppChildObjects(app, SchedulingConstraints{}, ManagedAppOwnerReference(managed))
+	deployment := objects[1]
+	template := deployment["spec"].(map[string]any)["template"].(map[string]any)
+	podSpec := template["spec"].(map[string]any)
+
+	containers := podSpec["containers"].([]map[string]any)
+	if len(containers) != 2 {
+		t.Fatalf("expected app container and storage sidecar, got %d containers", len(containers))
+	}
+	appMounts := containers[0]["volumeMounts"].([]map[string]any)
+	if got := appMounts[0]["subPath"]; !strings.HasPrefix(got.(string), "sessions/session-123/mounts/mount-") {
+		t.Fatalf("expected complex mount to use initialized mount subdir, got %#v", got)
+	}
+	initContainers := podSpec["initContainers"].([]map[string]any)
+	if len(initContainers) != 1 {
+		t.Fatalf("expected one persistent storage init container, got %d", len(initContainers))
+	}
+	command := initContainers[0]["command"].([]string)
+	if got := command[len(command)-3]; got != "/fugue-persistent-storage/sessions/session-123" {
+		t.Fatalf("expected init container to prepare session subdir, got %q", got)
 	}
 }
 

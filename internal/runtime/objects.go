@@ -386,8 +386,10 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 				"claimName": persistentStoragePVCName(app, *storageSpec),
 			},
 		})
-		initContainers = append(initContainers, buildAppPersistentStorageInitContainer(*storageSpec))
-		sidecars = append(sidecars, buildAppPersistentStorageSidecar(*storageSpec))
+		if !model.AppPersistentStorageSpecUsesDirectSharedProjectDirectoryMount(storageSpec) {
+			initContainers = append(initContainers, buildAppPersistentStorageInitContainer(*storageSpec))
+			sidecars = append(sidecars, buildAppPersistentStorageSidecar(*storageSpec))
+		}
 	}
 	container["volumeMounts"] = volumeMounts
 
@@ -1472,6 +1474,18 @@ func buildAppWorkspaceSidecar(spec model.AppWorkspaceSpec) map[string]any {
 }
 
 func buildPersistentStorageVolumeMounts(spec model.AppPersistentStorageSpec) []map[string]any {
+	if model.AppPersistentStorageSpecUsesDirectSharedProjectDirectoryMount(&spec) {
+		mount := spec.Mounts[0]
+		volumeMount := map[string]any{
+			"name":      workspaceVolumeName,
+			"mountPath": mount.Path,
+		}
+		if strings.TrimSpace(spec.SharedSubPath) != "" {
+			volumeMount["subPath"] = spec.SharedSubPath
+		}
+		return []map[string]any{volumeMount}
+	}
+
 	mounts := make([]map[string]any, 0, len(spec.Mounts))
 	for _, mount := range spec.Mounts {
 		mounts = append(mounts, map[string]any{
