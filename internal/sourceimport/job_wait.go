@@ -115,6 +115,11 @@ func isTransientBuilderObservationError(err error) bool {
 		return true
 	}
 	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return isEmptyKubectlGetJobExitStatusOne(message)
+}
+
+func isEmptyKubectlGetJobExitStatusOne(message string) bool {
+	message = strings.ToLower(strings.TrimSpace(message))
 	if !strings.Contains(message, " get job ") || !strings.Contains(message, "exit status 1") {
 		return false
 	}

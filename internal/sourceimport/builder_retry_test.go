@@ -66,6 +66,16 @@ func TestShouldRetryBuilderJobFailureSignals(t *testing.T) {
 			retriable: true,
 		},
 		{
+			name:      "empty kubectl get job exit status",
+			message:   "kaniko job build-demo: kubectl -n fugue-system get job build-demo -o json: exit status 1",
+			retriable: true,
+		},
+		{
+			name:      "permanent kubectl get job error",
+			message:   "kaniko job build-demo: kubectl -n fugue-system get job build-demo -o json: error: the server doesn't have a resource type job",
+			retriable: false,
+		},
+		{
 			name:      "dockerfile syntax",
 			message:   "kaniko job build-demo: invalid Dockerfile: unknown instruction FROOOM",
 			retriable: false,

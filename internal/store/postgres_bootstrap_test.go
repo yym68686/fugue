@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -121,5 +122,19 @@ func TestIsRetryableBootstrapError(t *testing.T) {
 
 	if isRetryableBootstrapError(sql.ErrNoRows) {
 		t.Fatal("expected non-postgres errors to stay non-retryable")
+	}
+}
+
+func TestPostgresSchemaIncludesOperationLookupIndexes(t *testing.T) {
+	t.Parallel()
+
+	schema := strings.Join(postgresSchemaStatements, "\n")
+	for _, indexName := range []string{
+		"idx_fugue_operations_app_created_at",
+		"idx_fugue_operations_tenant_created_at",
+	} {
+		if !strings.Contains(schema, indexName) {
+			t.Fatalf("postgres schema is missing %s", indexName)
+		}
 	}
 }

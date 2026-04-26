@@ -101,6 +101,9 @@ func shouldRetryBuilderJobFailure(err error) (bool, string) {
 		return false, ""
 	}
 	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if isEmptyKubectlGetJobExitStatusOne(message) {
+		return true, "kubectl get job exit status 1"
+	}
 	for _, signal := range retriableBuilderFailureSignals {
 		if strings.Contains(message, signal) {
 			return true, signal

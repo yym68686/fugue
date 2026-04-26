@@ -319,6 +319,8 @@ var postgresSchemaStatements = []string{
 		)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_status_created_at ON fugue_operations (status, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_assigned_runtime_status_created_at ON fugue_operations (assigned_runtime_id, status, created_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_app_created_at ON fugue_operations (app_id, created_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_tenant_created_at ON fugue_operations (tenant_id, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_tenant_app_created_at ON fugue_operations (tenant_id, app_id, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_import_failed_app_updated_created ON fugue_operations (app_id, updated_at DESC, created_at DESC) WHERE type = 'import' AND status = 'failed'`,
 	`CREATE TABLE IF NOT EXISTS fugue_audit_events (
