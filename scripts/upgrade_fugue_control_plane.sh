@@ -32,6 +32,10 @@ LOCAL_CONTROL_PLANE_AUTOMATION_DIR="${FUGUE_LOCAL_CONTROL_PLANE_AUTOMATION_DIR:-
 LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR="${FUGUE_LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR:-/root/.config/fugue/control-plane-automation}"
 CONTROL_PLANE_HOSTS_ENV_LOADED="false"
 PRIMARY_CONTROL_PLANE_SSH_OPTS=()
+PRIMARY_CONTROL_PLANE_SSH_HOST=""
+PRIMARY_CONTROL_PLANE_SSH_USER=""
+PRIMARY_CONTROL_PLANE_SSH_PORT=""
+PRIMARY_CONTROL_PLANE_SSH_HOST_KEY_ALIAS=""
 PRIMARY_DISK_PRESSURE_CLEAR_POLL_SECONDS="${FUGUE_PRIMARY_DISK_PRESSURE_CLEAR_POLL_SECONDS:-5}"
 # Kubelet delays clearing DiskPressure for evictionPressureTransitionPeriod
 # (5m by default on our k3s nodes), so keep a wider recovery window here.
@@ -311,19 +315,75 @@ load_control_plane_hosts_env() {
 }
 
 primary_control_plane_ssh_login() {
-  load_control_plane_hosts_env
-  local host="${FUGUE_NODE1_HOST:-${FUGUE_NODE1_ALIAS:-}}"
-  local user="${FUGUE_NODE1_USER:-}"
-  [[ -n "${host}" ]] || fail "primary control-plane SSH host is not configured"
-  if [[ -n "${user}" ]]; then
-    printf '%s@%s' "${user}" "${host}"
+  if [[ -z "${PRIMARY_CONTROL_PLANE_SSH_HOST}" ]]; then
+    resolve_primary_control_plane_ssh_target ""
+  fi
+  [[ -n "${PRIMARY_CONTROL_PLANE_SSH_HOST}" ]] || fail "primary control-plane SSH host is not configured"
+  if [[ -n "${PRIMARY_CONTROL_PLANE_SSH_USER}" ]]; then
+    printf '%s@%s' "${PRIMARY_CONTROL_PLANE_SSH_USER}" "${PRIMARY_CONTROL_PLANE_SSH_HOST}"
     return
   fi
-  printf '%s' "${host}"
+  printf '%s' "${PRIMARY_CONTROL_PLANE_SSH_HOST}"
+}
+
+ssh_host_port_is_reachable() {
+  local host="$1"
+  local port="$2"
+
+  [[ -n "${host}" && -n "${port}" ]] || return 1
+  if command_exists nc; then
+    nc -z -w 3 "${host}" "${port}" >/dev/null 2>&1 && return 0
+    nc -z -G 3 "${host}" "${port}" >/dev/null 2>&1 && return 0
+  fi
+  if command_exists timeout; then
+    timeout 3 bash -c ":</dev/tcp/${host}/${port}" >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+primary_node_address_candidates() {
+  local primary_node_name="$1"
+
+  [[ -n "${primary_node_name}" ]] || return 0
+  ${KUBECTL} get node "${primary_node_name}" -o jsonpath='{range .status.addresses[?(@.type=="ExternalIP")]}{.address}{"\n"}{end}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{"\n"}{end}{range .status.addresses[?(@.type=="Hostname")]}{.address}{"\n"}{end}' 2>/dev/null | awk 'NF > 0 && !seen[$0]++'
+}
+
+resolve_primary_control_plane_ssh_target() {
+  local primary_node_name="$1"
+  local configured_host=""
+  local candidate=""
+
+  load_control_plane_hosts_env
+  PRIMARY_CONTROL_PLANE_SSH_HOST="${FUGUE_NODE1_HOST:-${FUGUE_NODE1_ALIAS:-}}"
+  PRIMARY_CONTROL_PLANE_SSH_USER="${FUGUE_NODE1_USER:-}"
+  PRIMARY_CONTROL_PLANE_SSH_PORT="${FUGUE_NODE1_PORT:-22}"
+  PRIMARY_CONTROL_PLANE_SSH_HOST_KEY_ALIAS=""
+  configured_host="${PRIMARY_CONTROL_PLANE_SSH_HOST}"
+
+  [[ -n "${PRIMARY_CONTROL_PLANE_SSH_HOST}" ]] || fail "primary control-plane SSH host is not configured"
+  if [[ "${FUGUE_CONTROL_PLANE_SSH_NODE_ADDRESS_FALLBACK:-true}" != "true" ]]; then
+    return
+  fi
+  if ssh_host_port_is_reachable "${PRIMARY_CONTROL_PLANE_SSH_HOST}" "${PRIMARY_CONTROL_PLANE_SSH_PORT}"; then
+    return
+  fi
+
+  while IFS= read -r candidate; do
+    [[ -n "${candidate}" ]] || continue
+    [[ "${candidate}" != "${configured_host}" ]] || continue
+    if ssh_host_port_is_reachable "${candidate}" "${PRIMARY_CONTROL_PLANE_SSH_PORT}"; then
+      PRIMARY_CONTROL_PLANE_SSH_HOST="${candidate}"
+      PRIMARY_CONTROL_PLANE_SSH_HOST_KEY_ALIAS="${configured_host}"
+      log_stderr "configured primary SSH host ${configured_host}:${PRIMARY_CONTROL_PLANE_SSH_PORT} is not reachable; using Kubernetes node address ${candidate}:${PRIMARY_CONTROL_PLANE_SSH_PORT}"
+      return
+    fi
+  done < <(primary_node_address_candidates "${primary_node_name}")
 }
 
 build_primary_control_plane_ssh_opts() {
-  load_control_plane_hosts_env
+  local primary_node_name="$1"
+
+  resolve_primary_control_plane_ssh_target "${primary_node_name}"
   PRIMARY_CONTROL_PLANE_SSH_OPTS=(
     -o BatchMode=yes
     -o ConnectTimeout=15
@@ -334,8 +394,11 @@ build_primary_control_plane_ssh_opts() {
     -o StrictHostKeyChecking=yes
     -o UserKnownHostsFile="${FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE}"
   )
-  if [[ -n "${FUGUE_NODE1_PORT:-}" ]]; then
-    PRIMARY_CONTROL_PLANE_SSH_OPTS+=(-p "${FUGUE_NODE1_PORT}")
+  if [[ -n "${PRIMARY_CONTROL_PLANE_SSH_HOST_KEY_ALIAS}" ]]; then
+    PRIMARY_CONTROL_PLANE_SSH_OPTS+=(-o "HostKeyAlias=${PRIMARY_CONTROL_PLANE_SSH_HOST_KEY_ALIAS}")
+  fi
+  if [[ -n "${PRIMARY_CONTROL_PLANE_SSH_PORT}" ]]; then
+    PRIMARY_CONTROL_PLANE_SSH_OPTS+=(-p "${PRIMARY_CONTROL_PLANE_SSH_PORT}")
   fi
 }
 
@@ -383,7 +446,7 @@ run_primary_host_root_command() {
   fi
 
   prepare_control_plane_automation_ssh
-  build_primary_control_plane_ssh_opts
+  build_primary_control_plane_ssh_opts "${primary_node_name}"
   ssh -n "${PRIMARY_CONTROL_PLANE_SSH_OPTS[@]}" "$(primary_control_plane_ssh_login)" \
     "sudo -n bash -lc $(printf '%q' "${cmd}")"
 }

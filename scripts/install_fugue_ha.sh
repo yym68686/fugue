@@ -90,10 +90,15 @@ CONTROL_PLANE_HOSTS_ENV_LOADED="false"
 RESOLVED_SSH_HOST=""
 RESOLVED_SSH_USER=""
 RESOLVED_SSH_PORT=""
+RESOLVED_SSH_HOST_KEY_ALIAS=""
 RESOLVED_SSH_OPTS=()
 
 log() {
   printf '[fugue-install] %s\n' "$*"
+}
+
+log_stderr() {
+  printf '[fugue-install] %s\n' "$*" >&2
 }
 
 fail() {
@@ -365,13 +370,99 @@ control_plane_slot_for_host() {
   return 1
 }
 
+control_plane_role_for_slot() {
+  local slot="$1"
+
+  case "${slot}" in
+    1)
+      printf 'primary'
+      ;;
+    2)
+      printf 'secondary-1'
+      ;;
+    3)
+      printf 'secondary-2'
+      ;;
+  esac
+}
+
+detect_kubectl_for_ssh_fallback() {
+  if command -v kubectl >/dev/null 2>&1; then
+    printf 'kubectl'
+    return 0
+  fi
+  if command -v k3s >/dev/null 2>&1; then
+    printf 'k3s kubectl'
+    return 0
+  fi
+  return 1
+}
+
+control_plane_node_address_candidates_for_slot() {
+  local slot="$1"
+  local role=""
+  local kubectl_bin=""
+  local node_name=""
+  local -a kubectl_cmd=()
+
+  role="$(control_plane_role_for_slot "${slot}")"
+  [[ -n "${role}" ]] || return 0
+  kubectl_bin="$(detect_kubectl_for_ssh_fallback || true)"
+  [[ -n "${kubectl_bin}" ]] || return 0
+  read -r -a kubectl_cmd <<<"${kubectl_bin}"
+  node_name="$("${kubectl_cmd[@]}" get nodes -l "fugue.install/role=${role}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  [[ -n "${node_name}" ]] || return 0
+  "${kubectl_cmd[@]}" get node "${node_name}" -o jsonpath='{range .status.addresses[?(@.type=="ExternalIP")]}{.address}{"\n"}{end}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{"\n"}{end}{range .status.addresses[?(@.type=="Hostname")]}{.address}{"\n"}{end}' 2>/dev/null | awk 'NF > 0 && !seen[$0]++'
+}
+
+ssh_host_port_is_reachable() {
+  local host="$1"
+  local port="$2"
+
+  [[ -n "${host}" && -n "${port}" ]] || return 1
+  if command -v nc >/dev/null 2>&1; then
+    nc -z -w 3 "${host}" "${port}" >/dev/null 2>&1 && return 0
+    nc -z -G 3 "${host}" "${port}" >/dev/null 2>&1 && return 0
+  fi
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 3 bash -c ":</dev/tcp/${host}/${port}" >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+apply_control_plane_ssh_node_address_fallback() {
+  local slot="$1"
+  local configured_host="$2"
+  local port="$3"
+  local candidate=""
+
+  if [[ "${FUGUE_CONTROL_PLANE_SSH_NODE_ADDRESS_FALLBACK:-true}" != "true" ]]; then
+    return
+  fi
+  if ssh_host_port_is_reachable "${RESOLVED_SSH_HOST}" "${port}"; then
+    return
+  fi
+
+  while IFS= read -r candidate; do
+    [[ -n "${candidate}" ]] || continue
+    [[ "${candidate}" != "${configured_host}" ]] || continue
+    if ssh_host_port_is_reachable "${candidate}" "${port}"; then
+      RESOLVED_SSH_HOST="${candidate}"
+      RESOLVED_SSH_HOST_KEY_ALIAS="${configured_host}"
+      log_stderr "configured SSH host ${configured_host}:${port} for slot ${slot} is not reachable; using Kubernetes node address ${candidate}:${port}"
+      return
+    fi
+  done < <(control_plane_node_address_candidates_for_slot "${slot}")
+}
+
 resolve_ssh_target() {
   local host="$1"
-  local slot host_var user_var port_var
+  local slot host_var user_var port_var configured_host port
 
   RESOLVED_SSH_HOST="${host}"
   RESOLVED_SSH_USER=""
   RESOLVED_SSH_PORT=""
+  RESOLVED_SSH_HOST_KEY_ALIAS=""
 
   if ! control_plane_bundle_available; then
     return 0
@@ -395,6 +486,9 @@ resolve_ssh_target() {
   fi
   RESOLVED_SSH_USER="${!user_var-}"
   RESOLVED_SSH_PORT="${!port_var-}"
+  configured_host="${RESOLVED_SSH_HOST}"
+  port="${RESOLVED_SSH_PORT:-22}"
+  apply_control_plane_ssh_node_address_fallback "${slot}" "${configured_host}" "${port}"
 }
 
 ssh_target_login() {
@@ -414,6 +508,9 @@ ssh_opts_for_target() {
       -o "StrictHostKeyChecking=yes"
       -o "UserKnownHostsFile=${CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE}"
     )
+  fi
+  if [[ -n "${RESOLVED_SSH_HOST_KEY_ALIAS}" ]]; then
+    RESOLVED_SSH_OPTS+=(-o "HostKeyAlias=${RESOLVED_SSH_HOST_KEY_ALIAS}")
   fi
   if [[ -n "${RESOLVED_SSH_PORT}" ]]; then
     RESOLVED_SSH_OPTS+=(-p "${RESOLVED_SSH_PORT}")
