@@ -293,20 +293,72 @@ func (s *Server) findNodeJanitorPod(ctx context.Context, client *clusterNodeClie
 			lastErr = err
 			continue
 		}
+		var notReadyPod string
 		for _, pod := range pods {
 			if !strings.EqualFold(strings.TrimSpace(pod.Spec.NodeName), strings.TrimSpace(nodeName)) {
 				continue
 			}
-			if strings.EqualFold(strings.TrimSpace(string(pod.Status.Phase)), string(corev1.PodRunning)) ||
-				strings.EqualFold(strings.TrimSpace(string(pod.Status.Phase)), string(corev1.PodPending)) {
+			if nodeJanitorPodCanExec(pod) {
 				return strings.TrimSpace(pod.Namespace), strings.TrimSpace(pod.Name), nil
 			}
+			if notReadyPod == "" {
+				notReadyPod = describeNodeJanitorPodReadiness(pod)
+			}
+		}
+		if notReadyPod != "" {
+			return "", "", fmt.Errorf("node-janitor pod for node %s is not ready (%s)", strings.TrimSpace(nodeName), notReadyPod)
 		}
 	}
 	if lastErr != nil {
 		return "", "", fmt.Errorf("node-janitor pod lookup failed: %v", lastErr)
 	}
 	return "", "", fmt.Errorf("node-janitor pod for node %s was not found", strings.TrimSpace(nodeName))
+}
+
+func nodeJanitorPodCanExec(pod corev1.Pod) bool {
+	if !strings.EqualFold(strings.TrimSpace(string(pod.Status.Phase)), string(corev1.PodRunning)) {
+		return false
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if strings.TrimSpace(status.Name) == clusterNodeJanitorContainer && status.State.Running != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func describeNodeJanitorPodReadiness(pod corev1.Pod) string {
+	parts := []string{}
+	if name := strings.TrimSpace(pod.Name); name != "" {
+		parts = append(parts, "pod="+name)
+	}
+	if namespace := strings.TrimSpace(pod.Namespace); namespace != "" {
+		parts = append(parts, "namespace="+namespace)
+	}
+	if phase := strings.TrimSpace(string(pod.Status.Phase)); phase != "" {
+		parts = append(parts, "phase="+phase)
+	}
+	if reason := strings.TrimSpace(pod.Status.Reason); reason != "" {
+		parts = append(parts, "reason="+reason)
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if strings.TrimSpace(status.Name) != clusterNodeJanitorContainer {
+			continue
+		}
+		switch {
+		case status.State.Waiting != nil && strings.TrimSpace(status.State.Waiting.Reason) != "":
+			parts = append(parts, "container_reason="+strings.TrimSpace(status.State.Waiting.Reason))
+		case status.State.Terminated != nil && strings.TrimSpace(status.State.Terminated.Reason) != "":
+			parts = append(parts, "container_reason="+strings.TrimSpace(status.State.Terminated.Reason))
+		case status.State.Running == nil:
+			parts = append(parts, "container_reason=NotRunning")
+		}
+		break
+	}
+	if len(parts) == 0 {
+		return "pod status unavailable"
+	}
+	return strings.Join(parts, " ")
 }
 
 func (s *Server) runNodeJanitorCommand(ctx context.Context, namespace, podName, script string) ([]byte, error) {

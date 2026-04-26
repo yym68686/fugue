@@ -54,6 +54,17 @@ func TestGetClusterNodeDiagnosisCollectsHostEvidenceWithoutSSH(t *testing.T) {
 						},
 						"status": map[string]any{
 							"phase": "Running",
+							"containerStatuses": []map[string]any{
+								{
+									"name":  "node-janitor",
+									"ready": true,
+									"state": map[string]any{
+										"running": map[string]any{
+											"startedAt": "2026-04-16T00:00:00Z",
+										},
+									},
+								},
+							},
 						},
 					},
 				},
@@ -144,5 +155,82 @@ func TestGetClusterNodeDiagnosisCollectsHostEvidenceWithoutSSH(t *testing.T) {
 	}
 	if len(response.Diagnosis.Events) != 1 || response.Diagnosis.Events[0].Reason != "NodeHasDiskPressure" {
 		t.Fatalf("expected node event evidence, got %+v", response.Diagnosis.Events)
+	}
+}
+
+func TestFindNodeJanitorPodIgnoresPendingPods(t *testing.T) {
+	t.Parallel()
+
+	kubeServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/namespaces/fugue-system/pods", "/api/v1/pods":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{
+							"namespace": "fugue-system",
+							"name":      "fugue-fugue-node-janitor-pending",
+						},
+						"spec": map[string]any{
+							"nodeName": "gcp1",
+						},
+						"status": map[string]any{
+							"phase": "Pending",
+							"containerStatuses": []map[string]any{
+								{
+									"name": "node-janitor",
+									"state": map[string]any{
+										"waiting": map[string]any{
+											"reason": "ContainerCreating",
+										},
+									},
+								},
+							},
+						},
+					},
+					{
+						"metadata": map[string]any{
+							"namespace": "fugue-system",
+							"name":      "fugue-fugue-node-janitor-other",
+						},
+						"spec": map[string]any{
+							"nodeName": "gcp2",
+						},
+						"status": map[string]any{
+							"phase": "Running",
+							"containerStatuses": []map[string]any{
+								{
+									"name": "node-janitor",
+									"state": map[string]any{
+										"running": map[string]any{
+											"startedAt": "2026-04-16T00:00:00Z",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	server := &Server{controlPlaneNamespace: "fugue-system"}
+	client := &clusterNodeClient{
+		client:      kubeServer.Client(),
+		baseURL:     kubeServer.URL,
+		bearerToken: "test-token",
+	}
+
+	namespace, podName, err := server.findNodeJanitorPod(t.Context(), client, "gcp1")
+	if err == nil {
+		t.Fatalf("expected pending janitor pod to be rejected, got namespace=%q pod=%q", namespace, podName)
+	}
+	if !strings.Contains(err.Error(), "is not ready") || !strings.Contains(err.Error(), "ContainerCreating") {
+		t.Fatalf("expected readiness error to explain pending pod, got %v", err)
 	}
 }

@@ -34,7 +34,7 @@ rules:
     resources: ["pods/exec"]
     verbs: ["get", "create"]
   - apiGroups: ["apps"]
-    resources: ["deployments", "replicasets"]
+    resources: ["deployments", "replicasets", "daemonsets", "statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["postgresql.cnpg.io"]
     resources: ["clusters"]
