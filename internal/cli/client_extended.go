@@ -713,6 +713,18 @@ func (c *Client) SwitchoverAppDatabase(id, targetRuntimeID string) (operationRes
 	return response, nil
 }
 
+func (c *Client) LocalizeAppDatabase(id, targetNodeName string) (operationResponse, error) {
+	request := map[string]string{}
+	if strings.TrimSpace(targetNodeName) != "" {
+		request["target_node_name"] = strings.TrimSpace(targetNodeName)
+	}
+	var response operationResponse
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "database", "localize"), request, &response); err != nil {
+		return operationResponse{}, err
+	}
+	return response, nil
+}
+
 func (c *Client) ListBackingServices() ([]model.BackingService, error) {
 	var response struct {
 		BackingServices []model.BackingService `json:"backing_services"`

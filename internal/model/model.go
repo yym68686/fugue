@@ -68,6 +68,7 @@ const (
 	OperationTypeMigrate            = "migrate"
 	OperationTypeFailover           = "failover"
 	OperationTypeDatabaseSwitchover = "database-switchover"
+	OperationTypeDatabaseLocalize   = "database-localize"
 	OperationTypeDelete             = "delete"
 
 	OperationStatusPending      = "pending"
@@ -869,6 +870,7 @@ type AppPostgresSpec struct {
 	ServiceName                      string        `json:"service_name,omitempty"`
 	RuntimeID                        string        `json:"runtime_id,omitempty"`
 	FailoverTargetRuntimeID          string        `json:"failover_target_runtime_id,omitempty"`
+	PrimaryNodeName                  string        `json:"primary_node_name,omitempty"`
 	PrimaryPlacementPendingRebalance bool          `json:"primary_placement_pending_rebalance,omitempty"`
 	StorageSize                      string        `json:"storage_size,omitempty"`
 	StorageClassName                 string        `json:"storage_class_name,omitempty"`

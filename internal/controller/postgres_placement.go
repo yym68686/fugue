@@ -75,7 +75,7 @@ func (s *Service) managedPostgresServicePlacements(
 		}
 	}
 
-	primaryPlacement, err := s.managedPostgresPrimaryPlacement(ctx, app, serviceName, primaryRuntimeID, targetPlacement)
+	primaryPlacement, err := s.managedPostgresPrimaryPlacement(ctx, app, serviceName, primaryRuntimeID, spec, targetPlacement)
 	if err != nil {
 		return nil, err
 	}
@@ -102,6 +102,7 @@ func (s *Service) managedPostgresPrimaryPlacement(
 	ctx context.Context,
 	app model.App,
 	serviceName, primaryRuntimeID string,
+	spec model.AppPostgresSpec,
 	targetPlacement runtimepkg.SchedulingConstraints,
 ) (runtimepkg.SchedulingConstraints, error) {
 	if strings.TrimSpace(primaryRuntimeID) == "" {
@@ -118,7 +119,7 @@ func (s *Service) managedPostgresPrimaryPlacement(
 		return primaryPlacement, nil
 	}
 
-	exactPlacement, found, err := s.managedSharedPostgresPrimaryHostPlacement(ctx, app, serviceName, runtimeObj, targetPlacement.NodeSelector)
+	exactPlacement, found, err := s.managedSharedPostgresPrimaryHostPlacement(ctx, app, serviceName, runtimeObj, spec, targetPlacement.NodeSelector)
 	if err != nil {
 		if s.Logger != nil {
 			s.Logger.Printf(
@@ -142,6 +143,7 @@ func (s *Service) managedSharedPostgresPrimaryHostPlacement(
 	app model.App,
 	serviceName string,
 	sourceRuntime model.Runtime,
+	spec model.AppPostgresSpec,
 	targetSelector map[string]string,
 ) (runtimepkg.SchedulingConstraints, bool, error) {
 	client, err := s.kubeClient()
@@ -151,6 +153,27 @@ func (s *Service) managedSharedPostgresPrimaryHostPlacement(
 
 	sourceSelector := runtimepkg.ManagedSharedNodeSelector(sourceRuntime)
 	namespace := runtimepkg.NamespaceForTenant(app.TenantID)
+	if nodeName := strings.TrimSpace(spec.PrimaryNodeName); nodeName != "" {
+		matchedNode, found, err := managedSharedNodeMatchingSelector(ctx, client, nodeName, sourceSelector)
+		if err != nil {
+			return runtimepkg.SchedulingConstraints{}, false, err
+		}
+		if !found {
+			return runtimepkg.SchedulingConstraints{}, false, fmt.Errorf("postgres primary node %s does not match runtime %s", nodeName, sourceRuntime.ID)
+		}
+		node, found, err := client.getNode(ctx, matchedNode)
+		if err != nil {
+			return runtimepkg.SchedulingConstraints{}, false, fmt.Errorf("read kubernetes node %s: %w", matchedNode, err)
+		}
+		if !found || !managedSharedNodeSchedulable(node) {
+			return runtimepkg.SchedulingConstraints{}, false, fmt.Errorf("postgres primary node %s is not schedulable", matchedNode)
+		}
+		return runtimepkg.SchedulingConstraints{
+			NodeSelector: map[string]string{
+				kubeHostnameLabelKey: matchedNode,
+			},
+		}, true, nil
+	}
 	if namespace != "" && serviceName != "" {
 		cluster, found, err := client.getCloudNativePGCluster(ctx, namespace, serviceName)
 		if err != nil {

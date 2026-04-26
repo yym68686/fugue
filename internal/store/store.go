@@ -2580,6 +2580,84 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			if op.DesiredSpec == nil {
 				op.DesiredSpec = cloneAppSpec(&app.Spec)
 			}
+		case model.OperationTypeDatabaseLocalize:
+			if hasInFlightOperationForApp(state.Operations, app.ID) {
+				return ErrConflict
+			}
+			postgresSpec := OwnedManagedPostgresSpec(app)
+			if postgresSpec == nil {
+				return ErrInvalidInput
+			}
+			sourceRuntimeID := strings.TrimSpace(postgresSpec.RuntimeID)
+			if sourceRuntimeID == "" {
+				sourceRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
+			}
+			targetRuntimeID := strings.TrimSpace(op.TargetRuntimeID)
+			if targetRuntimeID == "" && op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
+				targetRuntimeID = strings.TrimSpace(op.DesiredSpec.Postgres.RuntimeID)
+			}
+			if targetRuntimeID == "" {
+				targetRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
+			}
+			if sourceRuntimeID == "" || targetRuntimeID == "" {
+				return ErrInvalidInput
+			}
+			if !runtimeVisibleToTenant(state, targetRuntimeID, op.TenantID) {
+				return ErrNotFound
+			}
+			targetRuntimeIndex := findRuntime(state, targetRuntimeID)
+			if targetRuntimeIndex < 0 {
+				return ErrNotFound
+			}
+			if err := validateFailoverTargetRuntimeType(state.Runtimes[targetRuntimeIndex].Type); err != nil {
+				return err
+			}
+			sourceRuntimeIndex := findRuntime(state, sourceRuntimeID)
+			if sourceRuntimeIndex < 0 {
+				return ErrNotFound
+			}
+			if err := validateFailoverTargetRuntimeType(state.Runtimes[sourceRuntimeIndex].Type); err != nil {
+				return err
+			}
+			if op.DesiredSpec == nil {
+				op.DesiredSpec = cloneAppSpec(&app.Spec)
+			}
+			if op.DesiredSpec == nil {
+				return ErrInvalidInput
+			}
+			if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
+				return err
+			}
+			if err := validateAppNetworkMode(*op.DesiredSpec); err != nil {
+				return err
+			}
+			if op.DesiredSpec.Postgres == nil {
+				postgresCopy := *postgresSpec
+				if postgresSpec.Resources != nil {
+					resources := *postgresSpec.Resources
+					postgresCopy.Resources = &resources
+				}
+				op.DesiredSpec.Postgres = &postgresCopy
+			}
+			op.DesiredSpec.Postgres.RuntimeID = targetRuntimeID
+			op.DesiredSpec.Postgres.FailoverTargetRuntimeID = ""
+			op.DesiredSpec.Postgres.Instances = 1
+			op.DesiredSpec.Postgres.SynchronousReplicas = 0
+			op.DesiredSpec.Postgres.PrimaryPlacementPendingRebalance = false
+			if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
+				return err
+			}
+			if err := validateWorkspaceRuntimeState(state, op.DesiredSpec.RuntimeID, *op.DesiredSpec); err != nil {
+				return err
+			}
+			if err := validateFailoverRuntimeState(state, op.TenantID, *op.DesiredSpec); err != nil {
+				return err
+			}
+			if err := validateManagedPostgresRuntimeState(state, op.TenantID, op.DesiredSpec.RuntimeID, op.DesiredSpec.Postgres); err != nil {
+				return err
+			}
+			op.SourceRuntimeID = sourceRuntimeID
+			op.TargetRuntimeID = targetRuntimeID
 		default:
 			return ErrInvalidInput
 		}
@@ -3563,7 +3641,7 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 		if err := applyCompletedFailoverToAppModel(app, op); err != nil {
 			return err
 		}
-	case model.OperationTypeDatabaseSwitchover:
+	case model.OperationTypeDatabaseSwitchover, model.OperationTypeDatabaseLocalize:
 		if op.DesiredSpec == nil {
 			return ErrInvalidInput
 		}
@@ -3574,7 +3652,7 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 	default:
 		return ErrInvalidInput
 	}
-	if op.Type != model.OperationTypeDatabaseSwitchover {
+	if op.Type != model.OperationTypeDatabaseSwitchover && op.Type != model.OperationTypeDatabaseLocalize {
 		app.Status.LastOperationID = op.ID
 		app.Status.LastMessage = op.ResultMessage
 	}
@@ -3588,7 +3666,7 @@ func applyInFlightOperationToApp(state *model.State, op *model.Operation) error 
 	if appIndex < 0 {
 		return ErrNotFound
 	}
-	if op.Type == model.OperationTypeDatabaseSwitchover {
+	if op.Type == model.OperationTypeDatabaseSwitchover || op.Type == model.OperationTypeDatabaseLocalize {
 		return nil
 	}
 	if isDeletedApp(state.Apps[appIndex]) && op.Type != model.OperationTypeDelete {
@@ -3657,6 +3735,8 @@ func inFlightOperationPhase(op model.Operation) (string, error) {
 		return "failing-over", nil
 	case model.OperationTypeDatabaseSwitchover:
 		return "database-switchover", nil
+	case model.OperationTypeDatabaseLocalize:
+		return "database-localize", nil
 	default:
 		return "", ErrInvalidInput
 	}
@@ -3702,6 +3782,8 @@ func operationActionLabel(op model.Operation) string {
 		return "failover"
 	case model.OperationTypeDatabaseSwitchover:
 		return "database switchover"
+	case model.OperationTypeDatabaseLocalize:
+		return "database localize"
 	default:
 		return "operation"
 	}
@@ -3721,7 +3803,7 @@ func applyFailedOperationToApp(state *model.State, op *model.Operation) {
 	if appIndex < 0 {
 		return
 	}
-	if op.Type == model.OperationTypeDatabaseSwitchover {
+	if op.Type == model.OperationTypeDatabaseSwitchover || op.Type == model.OperationTypeDatabaseLocalize {
 		return
 	}
 	if isDeletedApp(state.Apps[appIndex]) && op.Type != model.OperationTypeDelete {

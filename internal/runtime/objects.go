@@ -17,7 +17,6 @@ const (
 	defaultPostgresImage                = ""
 	defaultPostgresStorage              = "1Gi"
 	defaultPostgresInstances            = 1
-	defaultPostgresSynchronousReplicas  = 1
 	defaultWorkspaceStorage             = "10Gi"
 	defaultWorkspaceReplicationSchedule = "*/5 * * * *"
 	defaultWaitImage                    = "busybox:1.36"
@@ -242,10 +241,8 @@ func buildPostgresClusterObject(namespace, secretName, resourceName string, labe
 	if resources := runtimeResourceRequirements(spec.Resources); resources != nil {
 		clusterSpec["resources"] = resources
 	}
-	if spec.SynchronousReplicas > 0 && spec.Instances > 1 {
-		clusterSpec["minSyncReplicas"] = spec.SynchronousReplicas
-		clusterSpec["maxSyncReplicas"] = spec.SynchronousReplicas
-	}
+	clusterSpec["minSyncReplicas"] = spec.SynchronousReplicas
+	clusterSpec["maxSyncReplicas"] = spec.SynchronousReplicas
 	if affinity := buildPostgresAffinity(spec, placements); len(affinity) > 0 {
 		clusterSpec["affinity"] = affinity
 	}
@@ -1185,6 +1182,7 @@ func normalizeRuntimePostgresSpec(baseName string, spec model.AppPostgresSpec) m
 	spec.StorageClassName = strings.TrimSpace(spec.StorageClassName)
 	spec.RuntimeID = strings.TrimSpace(spec.RuntimeID)
 	spec.FailoverTargetRuntimeID = strings.TrimSpace(spec.FailoverTargetRuntimeID)
+	spec.PrimaryNodeName = strings.TrimSpace(spec.PrimaryNodeName)
 	if spec.Instances <= 0 {
 		spec.Instances = defaultPostgresInstances
 	}
@@ -1199,9 +1197,6 @@ func normalizeRuntimePostgresSpec(baseName string, spec model.AppPostgresSpec) m
 	}
 	if spec.FailoverTargetRuntimeID != "" && spec.SynchronousReplicas < 1 {
 		spec.SynchronousReplicas = 1
-	}
-	if spec.SynchronousReplicas == 0 && spec.Instances > 1 {
-		spec.SynchronousReplicas = defaultPostgresSynchronousReplicas
 	}
 	if spec.SynchronousReplicas >= spec.Instances {
 		spec.SynchronousReplicas = spec.Instances - 1

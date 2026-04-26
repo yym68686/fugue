@@ -133,6 +133,130 @@ func (s *Service) executeManagedDatabaseSwitchoverOperation(
 	return nil
 }
 
+func (s *Service) executeManagedDatabaseLocalizeOperation(
+	ctx context.Context,
+	op model.Operation,
+	app model.App,
+) error {
+	if !s.Config.KubectlApply {
+		return fmt.Errorf("database localize requires kubernetes apply mode")
+	}
+
+	currentDatabase := store.OwnedManagedPostgresSpec(app)
+	if currentDatabase == nil {
+		return fmt.Errorf("managed postgres is not configured for app %s", app.ID)
+	}
+	sourceRuntimeID := strings.TrimSpace(currentDatabase.RuntimeID)
+	if sourceRuntimeID == "" {
+		sourceRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
+	}
+	targetRuntimeID := strings.TrimSpace(op.TargetRuntimeID)
+	if targetRuntimeID == "" && op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
+		targetRuntimeID = strings.TrimSpace(op.DesiredSpec.Postgres.RuntimeID)
+	}
+	if targetRuntimeID == "" {
+		targetRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
+	}
+	if sourceRuntimeID == "" || targetRuntimeID == "" {
+		return fmt.Errorf("database localize operation %s missing source or target runtime", op.ID)
+	}
+
+	clusterName := strings.TrimSpace(currentDatabase.ServiceName)
+	if clusterName == "" {
+		return fmt.Errorf("managed postgres for app %s is missing a cluster service name", app.ID)
+	}
+
+	client, err := s.kubeClient()
+	if err != nil {
+		return fmt.Errorf("initialize kubernetes client for database localize: %w", err)
+	}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	targetNodeName := ""
+	if op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
+		targetNodeName = strings.TrimSpace(op.DesiredSpec.Postgres.PrimaryNodeName)
+	}
+	targetNodeName, err = s.resolveDatabaseLocalizeTargetNode(ctx, client, app, targetRuntimeID, targetNodeName)
+	if err != nil {
+		return err
+	}
+
+	targetPrimary := ""
+	currentPrimary, alreadyLocalized, err := s.managedPostgresPrimaryMatchesTarget(ctx, client, namespace, clusterName, targetRuntimeID, targetNodeName)
+	if err != nil {
+		return err
+	}
+	if alreadyLocalized {
+		targetPrimary = currentPrimary
+	} else {
+		stageSpec := databaseLocalizeSpec(app.Spec, currentDatabase, targetRuntimeID, targetNodeName, false, true)
+		if _, err := s.applyManagedDesiredAppState(ctx, op.ID, app, stageSpec); err != nil {
+			return fmt.Errorf("prepare localized managed postgres standby on runtime %s: %w", targetRuntimeID, err)
+		}
+		if targetNodeName != "" {
+			targetPrimary, err = s.waitForManagedPostgresReplicaOnNode(ctx, client, namespace, clusterName, targetNodeName, op.ID)
+		} else {
+			targetPrimary, err = s.waitForManagedPostgresReplicaOnRuntime(ctx, client, namespace, clusterName, targetRuntimeID, op.ID)
+		}
+		if err != nil {
+			return fmt.Errorf("wait for localized managed postgres standby on runtime %s: %w", targetRuntimeID, err)
+		}
+		if err := s.ensureOperationStillActive(op.ID); err != nil {
+			return err
+		}
+		if err := client.patchCloudNativePGClusterStatus(
+			ctx,
+			namespace,
+			clusterName,
+			targetPrimary,
+			"Switchover",
+			fmt.Sprintf("Localizing managed postgres primary to %s", targetPrimary),
+		); err != nil {
+			return fmt.Errorf("request managed postgres localize switchover to %s: %w", targetPrimary, err)
+		}
+		if err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID); err != nil {
+			return fmt.Errorf("wait for managed postgres localize switchover to %s: %w", targetPrimary, err)
+		}
+	}
+
+	finalSpec := databaseLocalizeSpec(app.Spec, currentDatabase, targetRuntimeID, targetNodeName, true, false)
+	finalBundle, err := s.applyManagedDesiredAppState(ctx, op.ID, app, finalSpec)
+	if err != nil {
+		return fmt.Errorf("finalize localized managed postgres state: %w", err)
+	}
+	if targetPrimary != "" {
+		if err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID); err != nil {
+			return fmt.Errorf("wait for localized managed postgres to settle: %w", err)
+		}
+	}
+	if err := s.ensureOperationStillActive(op.ID); err != nil {
+		return err
+	}
+
+	message := fmt.Sprintf("managed postgres localized to runtime %s", targetRuntimeID)
+	if targetNodeName != "" {
+		message = fmt.Sprintf("managed postgres localized to runtime %s node %s", targetRuntimeID, targetNodeName)
+	}
+	_, err = s.Store.CompleteManagedOperationWithResult(
+		op.ID,
+		finalBundle.ManifestPath,
+		message,
+		&finalSpec,
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("complete database localize operation %s: %w", op.ID, err)
+	}
+	s.Logger.Printf(
+		"operation %s completed managed postgres localize from runtime %s to %s node=%s; manifest=%s",
+		op.ID,
+		sourceRuntimeID,
+		targetRuntimeID,
+		targetNodeName,
+		finalBundle.ManifestPath,
+	)
+	return nil
+}
+
 func databaseSwitchoverSpec(
 	base model.AppSpec,
 	postgres *model.AppPostgresSpec,
@@ -156,6 +280,35 @@ func databaseSwitchoverSpec(
 		}
 		next.Postgres = &postgresCopy
 	}
+	return next
+}
+
+func databaseLocalizeSpec(
+	base model.AppSpec,
+	postgres *model.AppPostgresSpec,
+	targetRuntimeID, targetNodeName string,
+	singleInstance, holdPrimaryPlacement bool,
+) model.AppSpec {
+	next := base
+	if postgres == nil {
+		return next
+	}
+	postgresCopy := *postgres
+	if postgres.Resources != nil {
+		resources := *postgres.Resources
+		postgresCopy.Resources = &resources
+	}
+	postgresCopy.RuntimeID = strings.TrimSpace(targetRuntimeID)
+	postgresCopy.FailoverTargetRuntimeID = ""
+	postgresCopy.PrimaryNodeName = strings.TrimSpace(targetNodeName)
+	postgresCopy.SynchronousReplicas = 0
+	postgresCopy.PrimaryPlacementPendingRebalance = holdPrimaryPlacement
+	if singleInstance {
+		postgresCopy.Instances = 1
+	} else if postgresCopy.Instances < 2 {
+		postgresCopy.Instances = 2
+	}
+	next.Postgres = &postgresCopy
 	return next
 }
 
@@ -208,6 +361,76 @@ func (s *Service) applyManagedDesiredAppState(
 	return bundle, nil
 }
 
+func (s *Service) resolveDatabaseLocalizeTargetNode(
+	ctx context.Context,
+	client *kubeClient,
+	app model.App,
+	targetRuntimeID, requestedNodeName string,
+) (string, error) {
+	targetRuntime, err := s.Store.GetRuntime(targetRuntimeID)
+	if err != nil {
+		return "", fmt.Errorf("load database localize target runtime %s: %w", targetRuntimeID, err)
+	}
+	if targetRuntime.Type != model.RuntimeTypeManagedShared {
+		return strings.TrimSpace(requestedNodeName), nil
+	}
+
+	sourceSelector := runtime.ManagedSharedNodeSelector(targetRuntime)
+	if nodeName := strings.TrimSpace(requestedNodeName); nodeName != "" {
+		matchedNode, found, err := managedSharedNodeMatchingSelector(ctx, client, nodeName, sourceSelector)
+		if err != nil {
+			return "", err
+		}
+		if !found {
+			return "", fmt.Errorf("database localize target node %s does not match runtime %s", nodeName, targetRuntimeID)
+		}
+		return matchedNode, nil
+	}
+
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	pods, err := client.listPodsBySelector(ctx, namespace, managedAppPodLabelSelector(app))
+	if err != nil {
+		return "", fmt.Errorf("list app pods for database localize: %w", err)
+	}
+	nodes := make(map[string]struct{})
+	for _, pod := range pods {
+		nodeName := strings.TrimSpace(pod.Spec.NodeName)
+		if nodeName == "" || strings.TrimSpace(pod.Metadata.DeletionTimestamp) != "" {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Running") || !kubePodReady(pod) {
+			continue
+		}
+		matchedNode, found, err := managedSharedNodeMatchingSelector(ctx, client, nodeName, sourceSelector)
+		if err != nil {
+			return "", err
+		}
+		if found {
+			nodes[matchedNode] = struct{}{}
+		}
+	}
+	if len(nodes) == 0 {
+		return "", fmt.Errorf("database localize could not find a ready app pod on target runtime %s; pass target_node_name explicitly after confirming placement", targetRuntimeID)
+	}
+	if len(nodes) > 1 {
+		return "", fmt.Errorf("database localize found ready app pods on multiple nodes for runtime %s; pass target_node_name explicitly", targetRuntimeID)
+	}
+	for nodeName := range nodes {
+		return nodeName, nil
+	}
+	return "", fmt.Errorf("database localize could not resolve target node")
+}
+
+func kubePodReady(pod kubePod) bool {
+	for _, condition := range pod.Status.Conditions {
+		if !strings.EqualFold(strings.TrimSpace(condition.Type), "Ready") {
+			continue
+		}
+		return strings.EqualFold(strings.TrimSpace(condition.Status), "True")
+	}
+	return true
+}
+
 func (s *Service) waitForManagedPostgresReplicaOnRuntime(
 	ctx context.Context,
 	client *kubeClient,
@@ -253,6 +476,64 @@ func (s *Service) waitForManagedPostgresReplicaOnRuntime(
 				return targetPrimary, nil
 			}
 			lastMessage = fmt.Sprintf("waiting for a standby on runtime %s for cluster %s", targetRuntimeID, clusterName)
+		}
+
+		select {
+		case <-waitCtx.Done():
+			if lastMessage != "" {
+				return "", fmt.Errorf("%w (%s)", waitCtx.Err(), lastMessage)
+			}
+			return "", waitCtx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *Service) waitForManagedPostgresReplicaOnNode(
+	ctx context.Context,
+	client *kubeClient,
+	namespace, clusterName, targetNodeName, operationID string,
+) (string, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, s.Config.ManagedAppRolloutTimeout)
+	defer cancel()
+
+	interval := 2 * time.Second
+	if s.Config.PollInterval > interval {
+		interval = s.Config.PollInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	lastMessage := ""
+	for {
+		if strings.TrimSpace(operationID) != "" {
+			if err := s.ensureOperationStillActive(operationID); err != nil {
+				return "", err
+			}
+		}
+
+		cluster, found, err := client.getCloudNativePGCluster(waitCtx, namespace, clusterName)
+		if err != nil {
+			return "", fmt.Errorf("read cloudnativepg cluster %s/%s: %w", namespace, clusterName, err)
+		}
+		if !found {
+			lastMessage = fmt.Sprintf("waiting for cluster %s to be created", clusterName)
+		} else if !managedBackingServiceClusterReady(cluster, found) {
+			lastMessage = fmt.Sprintf(
+				"waiting for cluster %s to become ready (%d/%d instances)",
+				clusterName,
+				cluster.Status.ReadyInstances,
+				max(cluster.Spec.Instances, 1),
+			)
+		} else {
+			targetPrimary, err := s.selectManagedPostgresSwitchoverTargetOnNode(waitCtx, client, namespace, clusterName, targetNodeName, cluster.Status.CurrentPrimary)
+			if err != nil {
+				return "", err
+			}
+			if targetPrimary != "" {
+				return targetPrimary, nil
+			}
+			lastMessage = fmt.Sprintf("waiting for a standby on node %s for cluster %s", targetNodeName, clusterName)
 		}
 
 		select {
@@ -355,6 +636,71 @@ func (s *Service) selectManagedPostgresSwitchoverTarget(
 		return podName, nil
 	}
 	return "", nil
+}
+
+func (s *Service) selectManagedPostgresSwitchoverTargetOnNode(
+	ctx context.Context,
+	client *kubeClient,
+	namespace, clusterName, targetNodeName, currentPrimary string,
+) (string, error) {
+	pods, err := client.listPodsBySelector(
+		ctx,
+		namespace,
+		fmt.Sprintf(managedPostgresPodSelectorTemplate, clusterName),
+	)
+	if err != nil {
+		return "", fmt.Errorf("list postgres pods for cluster %s: %w", clusterName, err)
+	}
+
+	currentPrimary = strings.TrimSpace(currentPrimary)
+	targetNodeName = strings.TrimSpace(targetNodeName)
+	for _, pod := range pods {
+		podName := strings.TrimSpace(pod.Metadata.Name)
+		if podName == "" || podName == currentPrimary {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Running") {
+			continue
+		}
+		if strings.TrimSpace(pod.Spec.NodeName) != targetNodeName {
+			continue
+		}
+		return podName, nil
+	}
+	return "", nil
+}
+
+func (s *Service) managedPostgresPrimaryMatchesTarget(
+	ctx context.Context,
+	client *kubeClient,
+	namespace, clusterName, targetRuntimeID, targetNodeName string,
+) (string, bool, error) {
+	cluster, found, err := client.getCloudNativePGCluster(ctx, namespace, clusterName)
+	if err != nil {
+		return "", false, fmt.Errorf("read cloudnativepg cluster %s/%s: %w", namespace, clusterName, err)
+	}
+	if !found {
+		return "", false, nil
+	}
+	currentPrimary := strings.TrimSpace(cluster.Status.CurrentPrimary)
+	if currentPrimary == "" {
+		return "", false, nil
+	}
+	pod, found, err := client.getPod(ctx, namespace, currentPrimary)
+	if err != nil {
+		return "", false, fmt.Errorf("read current postgres primary pod %s/%s: %w", namespace, currentPrimary, err)
+	}
+	if !found {
+		return currentPrimary, false, nil
+	}
+	if targetNodeName != "" {
+		return currentPrimary, strings.TrimSpace(pod.Spec.NodeName) == strings.TrimSpace(targetNodeName), nil
+	}
+	runtimeID, err := s.runtimeIDForNode(ctx, client, strings.TrimSpace(pod.Spec.NodeName))
+	if err != nil {
+		return currentPrimary, false, err
+	}
+	return currentPrimary, strings.TrimSpace(runtimeID) == strings.TrimSpace(targetRuntimeID), nil
 }
 
 func max(left, right int) int {

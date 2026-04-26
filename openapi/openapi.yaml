@@ -2710,6 +2710,31 @@ paths:
                 $ref: "#/components/schemas/OperationResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/database/localize:
+    post:
+      operationId: localizeAppDatabase
+      summary: Localize App Database
+      tags: [Apps]
+      x-fugue-handler: handleLocalizeAppDatabase
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LocalizeAppDatabaseRequest"
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/continuity:
     patch:
       operationId: patchAppContinuity
@@ -3814,6 +3839,8 @@ components:
           type: string
         failover_target_runtime_id:
           type: string
+        primary_node_name:
+          type: string
         primary_placement_pending_rebalance:
           type: boolean
         storage_size:
@@ -4624,6 +4651,12 @@ components:
       additionalProperties: false
       properties:
         target_runtime_id:
+          type: string
+    LocalizeAppDatabaseRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        target_node_name:
           type: string
     AppContinuityAppFailoverRequest:
       type: object

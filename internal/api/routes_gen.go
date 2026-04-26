@@ -34,6 +34,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/apps/{id}/build-logs", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppBuildLogs)))
 	mux.Handle("GET /v1/apps/{id}/build-logs/stream", s.auth.RequireAPI(http.HandlerFunc(s.handleStreamAppBuildLogs)))
 	mux.Handle("PATCH /v1/apps/{id}/continuity", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchAppContinuity)))
+	mux.Handle("POST /v1/apps/{id}/database/localize", s.auth.RequireAPI(http.HandlerFunc(s.handleLocalizeAppDatabase)))
 	mux.Handle("POST /v1/apps/{id}/database/query", s.auth.RequireAPI(http.HandlerFunc(s.handleQueryAppDatabase)))
 	mux.Handle("POST /v1/apps/{id}/database/switchover", s.auth.RequireAPI(http.HandlerFunc(s.handleSwitchoverAppDatabase)))
 	mux.Handle("POST /v1/apps/{id}/deploy", s.auth.RequireAPI(http.HandlerFunc(s.handleDeployApp)))

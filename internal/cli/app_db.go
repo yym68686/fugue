@@ -11,8 +11,7 @@ import (
 )
 
 const (
-	defaultAppDatabaseInstances           = 1
-	defaultAppDatabaseSynchronousReplicas = 1
+	defaultAppDatabaseInstances = 1
 )
 
 func (c *CLI) newAppDatabaseCommand() *cobra.Command {
@@ -27,6 +26,7 @@ func (c *CLI) newAppDatabaseCommand() *cobra.Command {
 		c.newAppDatabaseConfigureCommand(),
 		c.newAppDatabaseDisableCommand(),
 		c.newAppDatabaseSwitchoverCommand(),
+		c.newAppDatabaseLocalizeCommand(),
 	)
 	return cmd
 }
@@ -73,8 +73,10 @@ func (c *CLI) newAppDatabaseConfigureCommand() *cobra.Command {
 		StorageClass        string
 		Instances           int
 		SynchronousReplicas int
+		PrimaryNodeName     string
 		FailoverRuntimeName string
 		FailoverRuntimeID   string
+		ClearFailover       bool
 		ShowSecrets         bool
 		Wait                bool
 	}{
@@ -105,9 +107,14 @@ for the managed database. Add flags only for the parts you want to customize.
 			}
 
 			spec := cloneAppSpec(app.Spec)
-			before := cloneAppPostgresSpec(spec.Postgres)
-			if spec.Postgres == nil {
+			before := cloneAppPostgresSpec(ownedManagedPostgresSpec(app))
+			if before != nil {
+				spec.Postgres = cloneAppPostgresSpec(before)
+			} else if spec.Postgres == nil {
 				spec.Postgres = &model.AppPostgresSpec{}
+			}
+			if opts.ClearFailover && (strings.TrimSpace(opts.FailoverRuntimeName) != "" || strings.TrimSpace(opts.FailoverRuntimeID) != "") {
+				return fmt.Errorf("--clear-failover cannot be combined with --failover-to or --failover-runtime-id")
 			}
 			if strings.TrimSpace(opts.RuntimeName) != "" || strings.TrimSpace(opts.RuntimeID) != "" {
 				runtimeID, err := resolveRuntimeSelection(client, opts.RuntimeID, opts.RuntimeName)
@@ -122,6 +129,9 @@ for the managed database. Add flags only for the parts you want to customize.
 					return err
 				}
 				spec.Postgres.FailoverTargetRuntimeID = runtimeID
+			}
+			if opts.ClearFailover {
+				spec.Postgres.FailoverTargetRuntimeID = ""
 			}
 			if flagChanged(cmd, "database") {
 				spec.Postgres.Database = strings.TrimSpace(opts.Database)
@@ -149,6 +159,9 @@ for the managed database. Add flags only for the parts you want to customize.
 			}
 			if flagChanged(cmd, "sync-replicas") {
 				spec.Postgres.SynchronousReplicas = opts.SynchronousReplicas
+			}
+			if flagChanged(cmd, "primary-node") {
+				spec.Postgres.PrimaryNodeName = strings.TrimSpace(opts.PrimaryNodeName)
 			}
 			if err := ensureManagedPostgresPassword(spec.Postgres); err != nil {
 				return err
@@ -190,8 +203,10 @@ for the managed database. Add flags only for the parts you want to customize.
 	cmd.Flags().StringVar(&opts.StorageClass, "storage-class", "", "Persistent storage class")
 	cmd.Flags().IntVar(&opts.Instances, "instances", 0, "Managed Postgres instance count")
 	cmd.Flags().IntVar(&opts.SynchronousReplicas, "sync-replicas", 0, "Managed Postgres synchronous replica count")
+	cmd.Flags().StringVar(&opts.PrimaryNodeName, "primary-node", "", "Kubernetes node name to pin the managed Postgres primary on shared runtimes")
 	cmd.Flags().StringVar(&opts.FailoverRuntimeName, "failover-to", "", "Runtime name for managed Postgres failover")
 	cmd.Flags().StringVar(&opts.FailoverRuntimeID, "failover-runtime-id", "", "Runtime ID for managed Postgres failover")
+	cmd.Flags().BoolVar(&opts.ClearFailover, "clear-failover", false, "Clear the managed Postgres failover target")
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for the deploy operation to complete")
 	cmd.Flags().BoolVar(&opts.ShowSecrets, "show-secrets", false, "Show passwords and other sensitive fields in JSON output")
 	_ = cmd.Flags().MarkHidden("runtime-id")
@@ -332,6 +347,67 @@ func (c *CLI) newAppDatabaseSwitchoverCommand() *cobra.Command {
 	return cmd
 }
 
+func (c *CLI) newAppDatabaseLocalizeCommand() *cobra.Command {
+	opts := struct {
+		TargetNodeName string
+		Wait           bool
+	}{Wait: true}
+	cmd := &cobra.Command{
+		Use:   "localize <app>",
+		Short: "Move the app managed Postgres primary to the app runtime and keep one local instance",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			app, err = client.GetApp(app.ID)
+			if err != nil {
+				return err
+			}
+			if ownedManagedPostgresSpec(app) == nil {
+				return fmt.Errorf("managed postgres is not configured for this app")
+			}
+
+			response, err := client.LocalizeAppDatabase(app.ID, opts.TargetNodeName)
+			if err != nil {
+				return err
+			}
+			finalApp := app
+			if opts.Wait {
+				waitedApp, err := c.waitForSingleApp(client, app.ID, response.Operation, true)
+				if err != nil {
+					return err
+				}
+				if waitedApp != nil {
+					finalApp = *waitedApp
+				}
+			}
+			if c.wantsJSON() {
+				payload := map[string]any{
+					"app":              finalApp,
+					"operation":        response.Operation,
+					"target_node_name": strings.TrimSpace(opts.TargetNodeName),
+				}
+				return writeJSON(c.stdout, payload)
+			}
+			return writeKeyValues(c.stdout,
+				kvPair{Key: "app_id", Value: app.ID},
+				kvPair{Key: "operation_id", Value: response.Operation.ID},
+				kvPair{Key: "target_runtime_id", Value: strings.TrimSpace(response.Operation.TargetRuntimeID)},
+				kvPair{Key: "target_node_name", Value: strings.TrimSpace(opts.TargetNodeName)},
+			)
+		},
+	}
+	cmd.Flags().StringVar(&opts.TargetNodeName, "node", "", "Explicit Kubernetes node name for the localized Postgres primary")
+	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for operation completion")
+	return cmd
+}
+
 func (c *CLI) renderAppDatabaseState(app model.App, operation *model.Operation, alreadyCurrent bool, showSecrets bool) error {
 	database := ownedManagedPostgresSpec(app)
 	if c.wantsJSON() {
@@ -380,6 +456,7 @@ func (c *CLI) renderAppDatabaseState(app model.App, operation *model.Operation, 
 			kvPair{Key: "instances", Value: fmt.Sprintf("%d", database.Instances)},
 			kvPair{Key: "sync_replicas", Value: fmt.Sprintf("%d", database.SynchronousReplicas)},
 			kvPair{Key: "failover_target_runtime_id", Value: strings.TrimSpace(database.FailoverTargetRuntimeID)},
+			kvPair{Key: "primary_node_name", Value: strings.TrimSpace(database.PrimaryNodeName)},
 			kvPair{Key: "pending_rebalance", Value: fmt.Sprintf("%t", database.PrimaryPlacementPendingRebalance)},
 			kvPair{Key: "image", Value: strings.TrimSpace(database.Image)},
 		)
@@ -425,6 +502,7 @@ func normalizeAppDatabasePostgresSpec(appName, appRuntimeID string, spec model.A
 		out.RuntimeID = strings.TrimSpace(appRuntimeID)
 	}
 	out.FailoverTargetRuntimeID = strings.TrimSpace(out.FailoverTargetRuntimeID)
+	out.PrimaryNodeName = strings.TrimSpace(out.PrimaryNodeName)
 	if strings.TrimSpace(out.StorageSize) == "" {
 		out.StorageSize = model.DefaultManagedPostgresStorageSize
 	}
@@ -440,9 +518,6 @@ func normalizeAppDatabasePostgresSpec(appName, appRuntimeID string, spec model.A
 	}
 	if out.FailoverTargetRuntimeID != "" && out.SynchronousReplicas < 1 {
 		out.SynchronousReplicas = 1
-	}
-	if out.SynchronousReplicas == 0 && out.Instances > 1 {
-		out.SynchronousReplicas = defaultAppDatabaseSynchronousReplicas
 	}
 	if out.SynchronousReplicas >= out.Instances {
 		out.SynchronousReplicas = out.Instances - 1

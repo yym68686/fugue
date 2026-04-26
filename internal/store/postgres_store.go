@@ -3059,7 +3059,7 @@ WHERE app_id = $1
 	case model.OperationTypeDatabaseSwitchover:
 		var inFlightCount int
 		if err := tx.QueryRowContext(ctx, `
-	SELECT COUNT(1)
+		SELECT COUNT(1)
 	FROM fugue_operations
 	WHERE app_id = $1
 	  AND status IN ($2, $3, $4)
@@ -3113,6 +3113,101 @@ WHERE app_id = $1
 		if op.DesiredSpec == nil {
 			op.DesiredSpec = cloneAppSpec(&app.Spec)
 		}
+	case model.OperationTypeDatabaseLocalize:
+		var inFlightCount int
+		if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(1)
+		FROM fugue_operations
+		WHERE app_id = $1
+		  AND status IN ($2, $3, $4)
+		`, app.ID, model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent).Scan(&inFlightCount); err != nil {
+			return model.Operation{}, fmt.Errorf("count in-flight app operations: %w", err)
+		}
+		if inFlightCount > 0 {
+			return model.Operation{}, ErrConflict
+		}
+		postgresSpec := OwnedManagedPostgresSpec(app)
+		if postgresSpec == nil {
+			return model.Operation{}, ErrInvalidInput
+		}
+		sourceRuntimeID := strings.TrimSpace(postgresSpec.RuntimeID)
+		if sourceRuntimeID == "" {
+			sourceRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
+		}
+		targetRuntimeID := strings.TrimSpace(op.TargetRuntimeID)
+		if targetRuntimeID == "" && op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
+			targetRuntimeID = strings.TrimSpace(op.DesiredSpec.Postgres.RuntimeID)
+		}
+		if targetRuntimeID == "" {
+			targetRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
+		}
+		if sourceRuntimeID == "" || targetRuntimeID == "" {
+			return model.Operation{}, ErrInvalidInput
+		}
+		visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, targetRuntimeID, op.TenantID)
+		if err != nil {
+			return model.Operation{}, err
+		}
+		if !visible {
+			return model.Operation{}, ErrNotFound
+		}
+		targetRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, targetRuntimeID)
+		if err != nil {
+			return model.Operation{}, err
+		}
+		if err := validateFailoverTargetRuntimeType(targetRuntimeType); err != nil {
+			return model.Operation{}, err
+		}
+		sourceRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, sourceRuntimeID)
+		if err != nil {
+			return model.Operation{}, err
+		}
+		if err := validateFailoverTargetRuntimeType(sourceRuntimeType); err != nil {
+			return model.Operation{}, err
+		}
+		if op.DesiredSpec == nil {
+			op.DesiredSpec = cloneAppSpec(&app.Spec)
+		}
+		if op.DesiredSpec == nil {
+			return model.Operation{}, ErrInvalidInput
+		}
+		if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
+			return model.Operation{}, err
+		}
+		if err := validateAppNetworkMode(*op.DesiredSpec); err != nil {
+			return model.Operation{}, err
+		}
+		if op.DesiredSpec.Postgres == nil {
+			postgresCopy := *postgresSpec
+			if postgresSpec.Resources != nil {
+				resources := *postgresSpec.Resources
+				postgresCopy.Resources = &resources
+			}
+			op.DesiredSpec.Postgres = &postgresCopy
+		}
+		op.DesiredSpec.Postgres.RuntimeID = targetRuntimeID
+		op.DesiredSpec.Postgres.FailoverTargetRuntimeID = ""
+		op.DesiredSpec.Postgres.Instances = 1
+		op.DesiredSpec.Postgres.SynchronousReplicas = 0
+		op.DesiredSpec.Postgres.PrimaryPlacementPendingRebalance = false
+		if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
+			return model.Operation{}, err
+		}
+		runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.DesiredSpec.RuntimeID)
+		if err != nil {
+			return model.Operation{}, err
+		}
+		if err := validateWorkspaceSpecForRuntime(*op.DesiredSpec, runtimeType); err != nil {
+			return model.Operation{}, err
+		}
+		if err := validateFailoverSpec(*op.DesiredSpec); err != nil {
+			return model.Operation{}, err
+		}
+		if err := validateManagedPostgresRuntimeSpec(op.DesiredSpec.RuntimeID, derefPostgresSpec(op.DesiredSpec.Postgres)); err != nil {
+			return model.Operation{}, err
+		}
+		op.SourceRuntimeID = sourceRuntimeID
+		op.TargetRuntimeID = targetRuntimeID
 	default:
 		return model.Operation{}, ErrInvalidInput
 	}
@@ -4813,7 +4908,7 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 		if err := applyCompletedFailoverToAppModel(app, op); err != nil {
 			return err
 		}
-	case model.OperationTypeDatabaseSwitchover:
+	case model.OperationTypeDatabaseSwitchover, model.OperationTypeDatabaseLocalize:
 		if op.DesiredSpec == nil {
 			return ErrInvalidInput
 		}
@@ -4821,7 +4916,7 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 	default:
 		return ErrInvalidInput
 	}
-	if op.Type != model.OperationTypeDatabaseSwitchover {
+	if op.Type != model.OperationTypeDatabaseSwitchover && op.Type != model.OperationTypeDatabaseLocalize {
 		app.Status.LastOperationID = op.ID
 		app.Status.LastMessage = op.ResultMessage
 	}
@@ -4831,7 +4926,7 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 }
 
 func applyInFlightOperationToAppModel(app *model.App, op *model.Operation) error {
-	if op.Type == model.OperationTypeDatabaseSwitchover {
+	if op.Type == model.OperationTypeDatabaseSwitchover || op.Type == model.OperationTypeDatabaseLocalize {
 		return nil
 	}
 	if isDeletedApp(*app) && op.Type != model.OperationTypeDelete {
@@ -4851,7 +4946,7 @@ func applyInFlightOperationToAppModel(app *model.App, op *model.Operation) error
 }
 
 func applyFailedOperationToAppModel(app *model.App, op *model.Operation) {
-	if op.Type == model.OperationTypeDatabaseSwitchover {
+	if op.Type == model.OperationTypeDatabaseSwitchover || op.Type == model.OperationTypeDatabaseLocalize {
 		return
 	}
 	if isDeletedApp(*app) && op.Type != model.OperationTypeDelete {

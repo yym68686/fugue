@@ -12,10 +12,9 @@ import (
 )
 
 const (
-	defaultManagedBackingPostgresImage               = ""
-	defaultManagedBackingPostgresStorage             = "1Gi"
-	defaultManagedBackingPostgresInstances           = 1
-	defaultManagedBackingPostgresSynchronousReplicas = 1
+	defaultManagedBackingPostgresImage     = ""
+	defaultManagedBackingPostgresStorage   = "1Gi"
+	defaultManagedBackingPostgresInstances = 1
 )
 
 func (s *Store) ListBackingServices(tenantID string, platformAdmin bool) ([]model.BackingService, error) {
@@ -516,6 +515,7 @@ func normalizeManagedPostgresSpec(appName, appRuntimeID string, spec model.AppPo
 		out.RuntimeID = strings.TrimSpace(appRuntimeID)
 	}
 	out.FailoverTargetRuntimeID = strings.TrimSpace(out.FailoverTargetRuntimeID)
+	out.PrimaryNodeName = strings.TrimSpace(out.PrimaryNodeName)
 	if strings.TrimSpace(out.StorageSize) == "" {
 		out.StorageSize = defaultManagedBackingPostgresStorage
 	}
@@ -531,9 +531,6 @@ func normalizeManagedPostgresSpec(appName, appRuntimeID string, spec model.AppPo
 	}
 	if out.FailoverTargetRuntimeID != "" && out.SynchronousReplicas < 1 {
 		out.SynchronousReplicas = 1
-	}
-	if out.SynchronousReplicas == 0 && out.Instances > 1 {
-		out.SynchronousReplicas = defaultManagedBackingPostgresSynchronousReplicas
 	}
 	if out.SynchronousReplicas >= out.Instances {
 		out.SynchronousReplicas = out.Instances - 1

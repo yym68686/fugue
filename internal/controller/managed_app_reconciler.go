@@ -124,6 +124,7 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 		namespace = runtime.NamespaceForTenant(app.TenantID)
 	}
 	recoverStoredBaseline := false
+	syncStoredManagedAppSnapshot := false
 	if appID := strings.TrimSpace(app.ID); appID == "" {
 		return s.cleanupOrphanManagedApp(ctx, client, namespace, managed, app, "orphaned managed app: spec.appID is empty")
 	} else if storedApp, err := s.Store.GetApp(appID); err != nil {
@@ -136,14 +137,15 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 		switch {
 		case opErr != nil:
 			if s.Logger != nil {
-				s.Logger.Printf("skip active operation check for managed app %s: %v", app.ID, opErr)
+				s.Logger.Printf("skip managed app %s reconcile after active operation check failed: %v", app.ID, opErr)
 			}
-			app, _ = selectManagedAppDesiredApp(app, storedApp, true)
+			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("check active app operations: %w", opErr))
 		case hasActiveOp:
 			app, _ = selectManagedAppDesiredApp(app, storedApp, true)
 		default:
 			recoverStoredBaseline = managedAppBaselineNeedsRecovery(storedApp)
 			app, useStoredBaseline := selectManagedAppDesiredApp(app, storedApp, false)
+			syncStoredManagedAppSnapshot = useStoredBaseline
 			if !useStoredBaseline {
 				break
 			}
@@ -165,6 +167,13 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 			return fmt.Errorf("patch deleting status for managed app %s/%s: %w", namespace, managed.Metadata.Name, err)
 		}
 		return nil
+	}
+	if syncStoredManagedAppSnapshot {
+		app = s.Renderer.PrepareApp(app)
+		desiredObjects := runtime.BuildManagedAppStateObjects(app, managed.Spec.Scheduling)
+		if err := client.applyObjects(ctx, desiredObjects); err != nil {
+			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("sync managed app desired snapshot from store: %w", err))
+		}
 	}
 
 	app = s.Renderer.PrepareApp(app)

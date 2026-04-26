@@ -73,8 +73,11 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 	if got := clusterSpec["instances"]; got != defaultPostgresInstances {
 		t.Fatalf("expected postgres instances %d, got %#v", defaultPostgresInstances, got)
 	}
-	if _, ok := clusterSpec["maxSyncReplicas"]; ok {
-		t.Fatalf("expected single-instance postgres to omit maxSyncReplicas, got %#v", clusterSpec["maxSyncReplicas"])
+	if got := clusterSpec["minSyncReplicas"]; got != 0 {
+		t.Fatalf("expected single-instance postgres to set minSyncReplicas 0, got %#v", got)
+	}
+	if got := clusterSpec["maxSyncReplicas"]; got != 0 {
+		t.Fatalf("expected single-instance postgres to set maxSyncReplicas 0, got %#v", got)
 	}
 	storage := clusterSpec["storage"].(map[string]any)
 	if got := storage["size"]; got != defaultPostgresStorage {
@@ -289,6 +292,28 @@ func TestNormalizeRuntimePostgresSpecDefaultsToAppScopedUser(t *testing.T) {
 	}
 	if spec.SynchronousReplicas != 0 {
 		t.Fatalf("expected default synchronous replicas 0 for single-instance postgres, got %d", spec.SynchronousReplicas)
+	}
+}
+
+func TestNormalizeRuntimePostgresSpecAllowsAsyncMultiInstance(t *testing.T) {
+	spec := normalizeRuntimePostgresSpec("fugue-web", model.AppPostgresSpec{
+		Instances:           2,
+		SynchronousReplicas: 0,
+	})
+	if spec.Instances != 2 {
+		t.Fatalf("expected two postgres instances, got %d", spec.Instances)
+	}
+	if spec.SynchronousReplicas != 0 {
+		t.Fatalf("expected async multi-instance postgres to keep sync replicas 0, got %d", spec.SynchronousReplicas)
+	}
+
+	cluster := buildPostgresClusterObject("tenant-demo", "demo-secret", "demo-postgres", nil, spec, nil)
+	clusterSpec := cluster["spec"].(map[string]any)
+	if got := clusterSpec["minSyncReplicas"]; got != 0 {
+		t.Fatalf("expected minSyncReplicas 0, got %#v", got)
+	}
+	if got := clusterSpec["maxSyncReplicas"]; got != 0 {
+		t.Fatalf("expected maxSyncReplicas 0, got %#v", got)
 	}
 }
 
@@ -1277,8 +1302,11 @@ func TestBuildManagedPostgresObjectsUseStableSelectors(t *testing.T) {
 	if got := clusterSpec["instances"]; got != defaultPostgresInstances {
 		t.Fatalf("expected postgres instances %d, got %#v", defaultPostgresInstances, got)
 	}
-	if _, ok := clusterSpec["maxSyncReplicas"]; ok {
-		t.Fatalf("expected single-instance postgres to omit maxSyncReplicas, got %#v", clusterSpec["maxSyncReplicas"])
+	if got := clusterSpec["minSyncReplicas"]; got != 0 {
+		t.Fatalf("expected single-instance postgres to set minSyncReplicas 0, got %#v", got)
+	}
+	if got := clusterSpec["maxSyncReplicas"]; got != 0 {
+		t.Fatalf("expected single-instance postgres to set maxSyncReplicas 0, got %#v", got)
 	}
 }
 

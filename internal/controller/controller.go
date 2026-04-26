@@ -548,6 +548,8 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		return s.executeManagedFailoverOperation(ctx, op, app)
 	case model.OperationTypeDatabaseSwitchover:
 		return s.executeManagedDatabaseSwitchoverOperation(ctx, op, app)
+	case model.OperationTypeDatabaseLocalize:
+		return s.executeManagedDatabaseLocalizeOperation(ctx, op, app)
 	case model.OperationTypeDeploy:
 		if op.DesiredSpec == nil {
 			return fmt.Errorf("deploy operation %s missing desired spec", op.ID)

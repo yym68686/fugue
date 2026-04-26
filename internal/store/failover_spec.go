@@ -54,7 +54,7 @@ func operationAppliesDesiredSpecBackingServices(op model.Operation) bool {
 		return false
 	}
 	switch op.Type {
-	case model.OperationTypeDeploy, model.OperationTypeMigrate, model.OperationTypeDatabaseSwitchover, model.OperationTypeFailover:
+	case model.OperationTypeDeploy, model.OperationTypeMigrate, model.OperationTypeDatabaseSwitchover, model.OperationTypeDatabaseLocalize, model.OperationTypeFailover:
 		return true
 	default:
 		return false

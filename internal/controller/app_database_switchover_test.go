@@ -42,6 +42,41 @@ func TestDatabaseSwitchoverSpecClearsPendingPlacementRebalance(t *testing.T) {
 	}
 }
 
+func TestDatabaseLocalizeSpecClearsFailoverAndPinsTargetNode(t *testing.T) {
+	t.Parallel()
+
+	base := model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		RuntimeID: "runtime_app",
+	}
+	postgres := &model.AppPostgresSpec{
+		Database:                         "demo",
+		User:                             "demo",
+		Password:                         "secret",
+		RuntimeID:                        "runtime_source",
+		FailoverTargetRuntimeID:          "runtime_target",
+		Instances:                        2,
+		SynchronousReplicas:              1,
+		PrimaryPlacementPendingRebalance: true,
+	}
+
+	stage := databaseLocalizeSpec(base, postgres, "runtime_app", "instance-us-1", false, true)
+	if stage.Postgres == nil {
+		t.Fatalf("expected postgres spec, got %+v", stage)
+	}
+	if stage.Postgres.RuntimeID != "runtime_app" || stage.Postgres.FailoverTargetRuntimeID != "" || stage.Postgres.PrimaryNodeName != "instance-us-1" {
+		t.Fatalf("unexpected stage postgres placement: %+v", stage.Postgres)
+	}
+	if stage.Postgres.Instances != 2 || stage.Postgres.SynchronousReplicas != 0 || !stage.Postgres.PrimaryPlacementPendingRebalance {
+		t.Fatalf("unexpected stage postgres lifecycle: %+v", stage.Postgres)
+	}
+
+	final := databaseLocalizeSpec(base, postgres, "runtime_app", "instance-us-1", true, false)
+	if final.Postgres.Instances != 1 || final.Postgres.SynchronousReplicas != 0 || final.Postgres.PrimaryPlacementPendingRebalance {
+		t.Fatalf("unexpected final postgres lifecycle: %+v", final.Postgres)
+	}
+}
+
 func TestSelectManagedPostgresSwitchoverTargetMatchesManagedSharedLocationNode(t *testing.T) {
 	t.Parallel()
 
