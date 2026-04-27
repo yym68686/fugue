@@ -3348,6 +3348,38 @@ WHERE app_id = $1
 	return ops, nil
 }
 
+func (s *Store) pgHasActiveOperationByApp(tenantID string, platformAdmin bool, appID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	query := `
+SELECT EXISTS (
+	SELECT 1
+	FROM fugue_operations
+	WHERE app_id = $1
+	  AND status IN ($2, $3, $4)
+`
+	args := []any{
+		appID,
+		model.OperationStatusPending,
+		model.OperationStatusRunning,
+		model.OperationStatusWaitingAgent,
+	}
+	if !platformAdmin {
+		query += `	  AND tenant_id = $5
+`
+		args = append(args, tenantID)
+	}
+	query += `)
+`
+
+	var found bool
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&found); err != nil {
+		return false, fmt.Errorf("check active operations by app: %w", err)
+	}
+	return found, nil
+}
+
 func (s *Store) pgListConsoleOperationsByApp(tenantID string, platformAdmin bool, appID string, recentLimit int) ([]model.Operation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

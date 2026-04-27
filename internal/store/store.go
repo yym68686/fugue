@@ -2764,6 +2764,34 @@ func (s *Store) ListOperationsByApp(tenantID string, platformAdmin bool, appID s
 	return ops, err
 }
 
+func (s *Store) HasActiveOperationByApp(tenantID string, platformAdmin bool, appID string) (bool, error) {
+	appID = strings.TrimSpace(appID)
+	if appID == "" {
+		return false, nil
+	}
+	if s.usingDatabase() {
+		return s.pgHasActiveOperationByApp(tenantID, platformAdmin, appID)
+	}
+
+	var found bool
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, op := range state.Operations {
+			if !platformAdmin && op.TenantID != tenantID {
+				continue
+			}
+			if strings.TrimSpace(op.AppID) != appID {
+				continue
+			}
+			if isActiveOperationStatus(op.Status) {
+				found = true
+				return nil
+			}
+		}
+		return nil
+	})
+	return found, err
+}
+
 func (s *Store) ListConsoleOperationsByApp(tenantID string, platformAdmin bool, appID string, recentLimit int) ([]model.Operation, error) {
 	appID = strings.TrimSpace(appID)
 	if appID == "" {

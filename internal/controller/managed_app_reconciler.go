@@ -34,7 +34,7 @@ func (s *Service) applyManagedAppDesiredState(ctx context.Context, app model.App
 	if !found {
 		return fmt.Errorf("managed app %s/%s was not found after apply", namespace, name)
 	}
-	return s.reconcileManagedAppObject(ctx, client, managed)
+	return s.reconcileManagedAppResolvedObject(ctx, client, namespace, managed, app, false, false)
 }
 
 func (s *Service) deleteManagedAppDesiredState(ctx context.Context, app model.App) error {
@@ -80,18 +80,7 @@ func (s *Service) appHasActiveOperation(app model.App) (bool, error) {
 	if strings.TrimSpace(app.ID) == "" {
 		return false, nil
 	}
-
-	ops, err := s.Store.ListOperationsByApp(app.TenantID, false, app.ID)
-	if err != nil {
-		return false, err
-	}
-	for _, op := range ops {
-		switch op.Status {
-		case model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent:
-			return true, nil
-		}
-	}
-	return false, nil
+	return s.Store.HasActiveOperationByApp(app.TenantID, false, app.ID)
 }
 
 func (s *Service) observedManagedPostgresDesiredApp(ctx context.Context, app model.App) (model.App, bool, error) {
@@ -139,7 +128,7 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 			if s.Logger != nil {
 				s.Logger.Printf("skip managed app %s reconcile after active operation check failed: %v", app.ID, opErr)
 			}
-			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("check active app operations: %w", opErr))
+			return fmt.Errorf("check active app operations: %w", opErr)
 		case hasActiveOp:
 			app, _ = selectManagedAppDesiredApp(app, storedApp, true)
 		default:
@@ -167,6 +156,10 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 			}
 		}
 	}
+	return s.reconcileManagedAppResolvedObject(ctx, client, namespace, managed, app, recoverStoredBaseline, syncStoredManagedAppSnapshot)
+}
+
+func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, recoverStoredBaseline bool, syncStoredManagedAppSnapshot bool) error {
 	if strings.TrimSpace(managed.Metadata.DeletionTimestamp) != "" {
 		status := managedAppBaseStatus(managed, app)
 		status.Phase = runtime.ManagedAppPhaseDeleting

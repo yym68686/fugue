@@ -365,6 +365,101 @@ func TestSyncGitHubAppsRetriesFailedCommitAfterBackoff(t *testing.T) {
 	}
 }
 
+func TestSyncGitHubAppsRetriesTransientControlPlaneFailureQuickly(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.example.com/demo:git-old",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyStaticSite,
+		CommitSHA:     "oldcommit",
+	}, model.AppRoute{
+		Hostname:    "demo.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://demo.example.com",
+		ServicePort: 80,
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	spec := app.Spec
+	source := *app.Source
+	source.CommitSHA = "newcommit"
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeDeploy,
+		RequestedByType: model.ActorTypeBootstrap,
+		RequestedByID:   model.OperationRequestedByGitHubSyncController,
+		AppID:           app.ID,
+		DesiredSpec:     &spec,
+		DesiredSource:   &source,
+	})
+	if err != nil {
+		t.Fatalf("create failed github sync deploy: %v", err)
+	}
+	if _, found, err := stateStore.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim failed github sync deploy: %v", err)
+	} else if !found {
+		t.Fatal("expected failed github sync deploy")
+	}
+	op, err = stateStore.FailOperation(op.ID, "apply managed app desired state app_123: check active app operations: iterate operations by app: context deadline exceeded")
+	if err != nil {
+		t.Fatalf("fail github sync deploy: %v", err)
+	}
+
+	svc := &Service{
+		Store: stateStore,
+		Config: config.ControllerConfig{
+			GitHubSyncTimeout:        time.Second,
+			GitHubSyncRetryBaseDelay: 5 * time.Minute,
+			GitHubSyncRetryMaxDelay:  time.Hour,
+		},
+		Logger: log.New(io.Discard, "", 0),
+		latestGitHubCommit: func(context.Context, string, string, string) (string, string, error) {
+			return "newcommit", "main", nil
+		},
+		now: func() time.Time {
+			return op.UpdatedAt.Add(45 * time.Second)
+		},
+	}
+
+	if err := svc.syncGitHubApps(context.Background()); err != nil {
+		t.Fatalf("sync github apps: %v", err)
+	}
+
+	ops, err := stateStore.ListOperations("", true)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(ops) != 2 {
+		t.Fatalf("expected transient control-plane failure retry, got %d operations", len(ops))
+	}
+	retry := ops[1]
+	if retry.DesiredSource == nil || retry.DesiredSource.CommitSHA != "newcommit" {
+		t.Fatalf("expected retry for commit newcommit, got %#v", retry.DesiredSource)
+	}
+}
+
 func TestSyncGitHubAppsSkipsDeletedTombstoneAfterLaterFailure(t *testing.T) {
 	t.Parallel()
 

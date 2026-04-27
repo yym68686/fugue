@@ -131,7 +131,9 @@ func TestPostgresSchemaIncludesOperationLookupIndexes(t *testing.T) {
 	schema := strings.Join(postgresSchemaStatements, "\n")
 	for _, indexName := range []string{
 		"idx_fugue_operations_app_created_at",
+		"idx_fugue_operations_app_status",
 		"idx_fugue_operations_tenant_created_at",
+		"idx_fugue_operations_tenant_app_status",
 	} {
 		if !strings.Contains(schema, indexName) {
 			t.Fatalf("postgres schema is missing %s", indexName)

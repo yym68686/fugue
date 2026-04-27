@@ -16,23 +16,7 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list apps for github sync: %w", err)
 	}
-	ops, err := s.Store.ListOperations("", true)
-	if err != nil {
-		return fmt.Errorf("list operations for github sync: %w", err)
-	}
 
-	inFlightApps := make(map[string]struct{})
-	trackedCommitStates := collectTrackedGitHubCommitStates(ops)
-	for _, op := range ops {
-		appID := strings.TrimSpace(op.AppID)
-		if appID == "" {
-			continue
-		}
-		switch op.Status {
-		case model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent:
-			inFlightApps[appID] = struct{}{}
-		}
-	}
 	currentTime := time.Now()
 	if s.now != nil {
 		currentTime = s.now()
@@ -43,7 +27,12 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 		if !shouldAutoSyncGitHubApp(app) {
 			continue
 		}
-		if _, blocked := inFlightApps[strings.TrimSpace(app.ID)]; blocked {
+		hasActiveOp, err := s.Store.HasActiveOperationByApp(app.TenantID, true, app.ID)
+		if err != nil {
+			s.Logger.Printf("github sync active operation check failed for app=%s: %v", app.ID, err)
+			continue
+		}
+		if hasActiveOp {
 			continue
 		}
 
@@ -64,6 +53,12 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 		if latestCommit == "" || latestCommit == strings.TrimSpace(originSource.CommitSHA) {
 			continue
 		}
+		ops, err := s.Store.ListOperationsWithDesiredSourceByApp(app.TenantID, true, app.ID)
+		if err != nil {
+			s.Logger.Printf("github sync tracked commit lookup failed for app=%s latest_commit=%s: %v", app.ID, shortCommitSHA(latestCommit), err)
+			continue
+		}
+		trackedCommitStates := collectTrackedGitHubCommitStates(ops)
 		if state, found := trackedCommitStates[trackedGitHubCommitStateKey(app.ID, latestCommit)]; found &&
 			!gitHubTrackedCommitRetryReady(state, currentTime, s.Config.GitHubSyncRetryBaseDelay, s.Config.GitHubSyncRetryMaxDelay) {
 			continue
@@ -209,7 +204,10 @@ type trackedGitHubCommitState struct {
 	lastAutomaticFailure         model.Operation
 }
 
-const gitHubTrackedCommitMaxAutomaticFailures = 3
+const (
+	gitHubTrackedCommitMaxAutomaticFailures       = 3
+	gitHubTrackedCommitTransientFailureRetryDelay = 30 * time.Second
+)
 
 func collectTrackedGitHubCommitStates(ops []model.Operation) map[string]trackedGitHubCommitState {
 	states := make(map[string]trackedGitHubCommitState)
@@ -277,6 +275,10 @@ func gitHubTrackedCommitRetryReady(
 	}
 
 	retryDelay := gitHubTrackedCommitRetryDelay(baseDelay, maxDelay, state.consecutiveAutomaticFailures)
+	if gitHubTrackedCommitTransientFailure(state.lastAutomaticFailure) &&
+		retryDelay > gitHubTrackedCommitTransientFailureRetryDelay {
+		retryDelay = gitHubTrackedCommitTransientFailureRetryDelay
+	}
 	if retryDelay <= 0 {
 		return true
 	}
@@ -316,4 +318,24 @@ func gitHubTrackedCommitRetryDelay(baseDelay, maxDelay time.Duration, consecutiv
 		return maxDelay
 	}
 	return delay
+}
+
+func gitHubTrackedCommitTransientFailure(op model.Operation) bool {
+	if op.ID == "" {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(op.ErrorMessage + " " + op.ResultMessage))
+	for _, marker := range []string{
+		"check active app operations",
+		"context deadline exceeded",
+		"iterate operations",
+		"store timeout",
+		"connection reset",
+		"connection refused",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
