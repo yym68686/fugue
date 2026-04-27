@@ -119,11 +119,11 @@ func TestBuilderDemandForProfileUsesRequestedResourcesWhenPresent(t *testing.T) 
 	if err != nil {
 		t.Fatalf("heavy builder demand: %v", err)
 	}
-	if heavyDemand.CPUMilli != parseBuilderCPUMilli("750m") {
-		t.Fatalf("expected heavy cpu demand 750m, got %dm", heavyDemand.CPUMilli)
+	if heavyDemand.CPUMilli != parseBuilderCPUMilli("500m") {
+		t.Fatalf("expected heavy cpu demand 500m, got %dm", heavyDemand.CPUMilli)
 	}
-	if heavyDemand.MemoryBytes != parseBuilderBytes("1Gi") {
-		t.Fatalf("expected heavy memory demand 1Gi, got %d", heavyDemand.MemoryBytes)
+	if heavyDemand.MemoryBytes != parseBuilderBytes("512Mi") {
+		t.Fatalf("expected heavy memory demand 512Mi, got %d", heavyDemand.MemoryBytes)
 	}
 	if heavyDemand.EphemeralBytes != parseBuilderBytes("3Gi") {
 		t.Fatalf("expected heavy ephemeral demand 3Gi, got %d", heavyDemand.EphemeralBytes)
