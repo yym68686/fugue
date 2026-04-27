@@ -54,3 +54,35 @@ func TestControlPlaneRBACCoversDiagnosableWorkloads(t *testing.T) {
 		t.Fatalf("control plane RBAC should cover diagnosable apps workloads %s:\n%s", want, manifest)
 	}
 }
+
+func TestCloudNativePGOperatorHasHAAndResources(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	for _, want := range []string{
+		"name: fugue-cloudnative-pg",
+		"replicas: 2",
+		"priorityClassName: system-cluster-critical",
+		"node-role.kubernetes.io/control-plane: \"true\"",
+		"cpu: 100m",
+		"memory: 128Mi",
+		"app.kubernetes.io/name: cloudnative-pg",
+	} {
+		if !strings.Contains(manifest, want) {
+			t.Fatalf("cloudnative-pg operator manifest missing %q:\n%s", want, manifest)
+		}
+	}
+}

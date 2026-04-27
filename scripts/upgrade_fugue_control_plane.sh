@@ -268,6 +268,49 @@ snapshotController:
       operator: Exists
       effect: NoExecute
       tolerationSeconds: 300
+cloudnative-pg:
+  replicaCount: 2
+  priorityClassName: system-cluster-critical
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: "true"
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    - key: node.kubernetes.io/not-ready
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 300
+    - key: node.kubernetes.io/unreachable
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 300
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+              - key: fugue.install/role
+                operator: NotIn
+                values:
+                  - primary
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: cloudnative-pg
+                app.kubernetes.io/instance: fugue
 EOF
   printf '%s' "${UPGRADE_OVERRIDE_VALUES_FILE}"
 }
@@ -1159,8 +1202,15 @@ sync_route_a_edge_proxy() {
 }
 
 label_default_builder_nodes() {
-  log "labeling combined control-plane nodes as builder candidates"
-  ${KUBECTL} label node -l fugue.install/profile=combined \
+  log "keeping primary control-plane node out of the shared runtime and builder pools"
+  ${KUBECTL} label node -l fugue.install/role=primary \
+    fugue.io/shared-pool- \
+    fugue.io/build- \
+    fugue.io/build-tier- \
+    --overwrite >/dev/null || true
+
+  log "labeling non-primary combined nodes as builder candidates"
+  ${KUBECTL} label node -l 'fugue.install/profile=combined,fugue.install/role!=primary' \
     fugue.io/build=true \
     fugue.io/build-tier- \
     --overwrite >/dev/null

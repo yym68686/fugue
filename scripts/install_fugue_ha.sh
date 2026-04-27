@@ -1967,7 +1967,12 @@ label_control_plane_node() {
   zone="$(node_zone_for_alias "${host}" || true)"
   region="$(node_region_for_alias "${host}" || true)"
 
-  ssh_root_run "${PRIMARY_ALIAS}" "k3s kubectl label node $(printf '%q' "${node_name}") $(printf '%q' "fugue.install/profile=combined") $(printf '%q' "fugue.install/role=${role}") $(printf '%q' "fugue.io/shared-pool=internal") $(printf '%q' "fugue.io/build=true") $(printf '%q' "fugue.io/build-tier-") --overwrite"
+  ssh_root_run "${PRIMARY_ALIAS}" "k3s kubectl label node $(printf '%q' "${node_name}") $(printf '%q' "fugue.install/profile=combined") $(printf '%q' "fugue.install/role=${role}") --overwrite"
+  if [[ "${role}" == "primary" ]]; then
+    ssh_root_run "${PRIMARY_ALIAS}" "k3s kubectl label node $(printf '%q' "${node_name}") $(printf '%q' "fugue.io/shared-pool-") $(printf '%q' "fugue.io/build-") $(printf '%q' "fugue.io/build-tier-") --overwrite" || true
+  else
+    ssh_root_run "${PRIMARY_ALIAS}" "k3s kubectl label node $(printf '%q' "${node_name}") $(printf '%q' "fugue.io/shared-pool=internal") $(printf '%q' "fugue.io/build=true") $(printf '%q' "fugue.io/build-tier-") --overwrite"
+  fi
   if [[ -n "${country_code}" ]]; then
     ssh_root_run "${PRIMARY_ALIAS}" "k3s kubectl label node $(printf '%q' "${node_name}") $(printf '%q' "fugue.io/location-country-code=${country_code}") --overwrite"
   fi
@@ -2165,6 +2170,50 @@ snapshotController:
       operator: Exists
       effect: NoExecute
       tolerationSeconds: 300
+
+cloudnative-pg:
+  replicaCount: 2
+  priorityClassName: system-cluster-critical
+  nodeSelector:
+    "node-role.kubernetes.io/control-plane": "true"
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    - key: node.kubernetes.io/not-ready
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 300
+    - key: node.kubernetes.io/unreachable
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 300
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+              - key: fugue.install/role
+                operator: NotIn
+                values:
+                  - primary
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: cloudnative-pg
+                app.kubernetes.io/instance: fugue
 
 service:
   type: NodePort

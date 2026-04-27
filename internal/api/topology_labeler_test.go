@@ -41,4 +41,13 @@ func TestUpgradeScriptDoesNotReapplySharedPoolLabels(t *testing.T) {
 	if strings.Contains(string(data), "fugue.io/shared-pool=internal") {
 		t.Fatalf("expected upgrade script to avoid reapplying shared-pool labels: %s", path)
 	}
+	for _, want := range []string{
+		"fugue.install/role=primary",
+		"fugue.io/shared-pool-",
+		"fugue.io/build-",
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("expected upgrade script to remove primary pool label %q: %s", want, path)
+		}
+	}
 }
