@@ -164,6 +164,10 @@ func cloneAppSpec(spec model.AppSpec) model.AppSpec {
 		storage.Mounts = cloneAppPersistentStorageMounts(spec.PersistentStorage.Mounts)
 		out.PersistentStorage = &storage
 	}
+	if spec.VolumeReplication != nil {
+		replication := *spec.VolumeReplication
+		out.VolumeReplication = &replication
+	}
 	if spec.Failover != nil {
 		failover := *spec.Failover
 		out.Failover = &failover

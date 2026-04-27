@@ -16,6 +16,57 @@ import (
 	"fugue/internal/workloadidentity"
 )
 
+func TestManagedAppExpectedObjectNamesOmitsVolSyncByDefault(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Workspace: &model.AppWorkspaceSpec{
+				MountPath: "/workspace",
+			},
+		},
+	}
+
+	names := managedAppExpectedObjectNamesByKind(app)
+	if len(names[runtime.VolSyncReplicationDestinationKind]) != 0 {
+		t.Fatalf("expected replication destination to be opt-in, got %+v", names[runtime.VolSyncReplicationDestinationKind])
+	}
+	if len(names[runtime.VolSyncReplicationSourceKind]) != 0 {
+		t.Fatalf("expected replication source to be opt-in, got %+v", names[runtime.VolSyncReplicationSourceKind])
+	}
+}
+
+func TestManagedAppExpectedObjectNamesIncludesVolSyncWhenReplicationEnabled(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Workspace: &model.AppWorkspaceSpec{
+				MountPath: "/workspace",
+			},
+			VolumeReplication: &model.AppVolumeReplicationSpec{
+				Mode: model.AppVolumeReplicationModeScheduled,
+			},
+		},
+	}
+
+	names := managedAppExpectedObjectNamesByKind(app)
+	if _, ok := names[runtime.VolSyncReplicationDestinationKind][runtime.WorkspaceReplicationDestinationName(app)]; !ok {
+		t.Fatalf("expected replication destination name, got %+v", names[runtime.VolSyncReplicationDestinationKind])
+	}
+	if _, ok := names[runtime.VolSyncReplicationSourceKind][runtime.WorkspaceReplicationSourceName(app)]; !ok {
+		t.Fatalf("expected replication source name, got %+v", names[runtime.VolSyncReplicationSourceKind])
+	}
+}
+
 func TestBuildManagedAppStatusKeepsCurrentReleaseDuringRollout(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",

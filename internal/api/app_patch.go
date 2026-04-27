@@ -1,7 +1,9 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
+	"strings"
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
@@ -22,13 +24,14 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		ImageMirrorLimit  *int                            `json:"image_mirror_limit"`
 		StartupCommand    *string                         `json:"startup_command,omitempty"`
 		PersistentStorage *model.AppPersistentStorageSpec `json:"persistent_storage,omitempty"`
+		VolumeReplication *model.AppVolumeReplicationSpec `json:"volume_replication,omitempty"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.ImageMirrorLimit == nil && req.StartupCommand == nil && req.PersistentStorage == nil {
-		httpx.WriteError(w, http.StatusBadRequest, "image_mirror_limit, startup_command, or persistent_storage is required")
+	if req.ImageMirrorLimit == nil && req.StartupCommand == nil && req.PersistentStorage == nil && req.VolumeReplication == nil {
+		httpx.WriteError(w, http.StatusBadRequest, "image_mirror_limit, startup_command, persistent_storage, or volume_replication is required")
 		return
 	}
 	if req.ImageMirrorLimit != nil && *req.ImageMirrorLimit < 0 {
@@ -65,7 +68,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var operation *model.Operation
-	if req.StartupCommand != nil || req.PersistentStorage != nil {
+	if req.StartupCommand != nil || req.PersistentStorage != nil || req.VolumeReplication != nil {
 		spec, source, err := s.recoverAppDeployBaseline(currentApp)
 		if err != nil {
 			s.writeStoreError(w, err)
@@ -74,6 +77,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 
 		currentCommand := append([]string(nil), spec.Command...)
 		currentPersistentStorage := cloneAppSpec(spec).PersistentStorage
+		currentVolumeReplication := cloneAppSpec(spec).VolumeReplication
 		spec.ImageMirrorLimit = model.EffectiveAppImageMirrorLimit(currentApp.Spec.ImageMirrorLimit)
 
 		deployChanged := false
@@ -102,6 +106,23 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 					auditMetadata["persistent_storage"] = "cleared"
 				} else {
 					auditMetadata["persistent_storage"] = "set"
+				}
+			}
+		}
+
+		if req.VolumeReplication != nil {
+			normalizedVolumeReplication, err := normalizeAppVolumeReplicationSpec(req.VolumeReplication)
+			if err != nil {
+				httpx.WriteError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			spec.VolumeReplication = normalizedVolumeReplication
+			if !appVolumeReplicationEqual(currentVolumeReplication, spec.VolumeReplication) {
+				deployChanged = true
+				if spec.VolumeReplication == nil {
+					auditMetadata["volume_replication"] = "disabled"
+				} else {
+					auditMetadata["volume_replication"] = spec.VolumeReplication.Mode
 				}
 			}
 		}
@@ -143,4 +164,57 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		response["operation"] = sanitizeOperationForAPI(*operation)
 	}
 	httpx.WriteJSON(w, http.StatusOK, response)
+}
+
+func normalizeAppVolumeReplicationSpec(spec *model.AppVolumeReplicationSpec) (*model.AppVolumeReplicationSpec, error) {
+	if spec == nil {
+		return nil, nil
+	}
+	mode, err := model.NormalizeAppVolumeReplicationMode(spec.Mode)
+	if err != nil {
+		return nil, err
+	}
+	if mode == model.AppVolumeReplicationModeDisabled {
+		return nil, nil
+	}
+	out := &model.AppVolumeReplicationSpec{
+		Mode:     mode,
+		Schedule: strings.TrimSpace(spec.Schedule),
+	}
+	if mode == model.AppVolumeReplicationModeManual && out.Schedule != "" {
+		return nil, fmt.Errorf("volume_replication.schedule is only supported when mode is scheduled")
+	}
+	return out, nil
+}
+
+func appVolumeReplicationEqual(left, right *model.AppVolumeReplicationSpec) bool {
+	leftMode := volumeReplicationSpecMode(left)
+	rightMode := volumeReplicationSpecMode(right)
+	if leftMode != rightMode {
+		return false
+	}
+	if leftMode != model.AppVolumeReplicationModeScheduled {
+		return true
+	}
+	return volumeReplicationSpecSchedule(left) == volumeReplicationSpecSchedule(right)
+}
+
+func volumeReplicationSpecMode(spec *model.AppVolumeReplicationSpec) string {
+	if spec == nil {
+		return model.AppVolumeReplicationModeDisabled
+	}
+	mode, err := model.NormalizeAppVolumeReplicationMode(spec.Mode)
+	if err != nil {
+		return ""
+	}
+	return mode
+}
+
+func volumeReplicationSpecSchedule(spec *model.AppVolumeReplicationSpec) string {
+	if spec != nil {
+		if schedule := strings.TrimSpace(spec.Schedule); schedule != "" {
+			return schedule
+		}
+	}
+	return model.DefaultAppVolumeReplicationSchedule
 }

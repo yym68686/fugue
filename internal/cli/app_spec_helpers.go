@@ -105,6 +105,10 @@ func cloneAppSpec(spec model.AppSpec) model.AppSpec {
 	out.Files = cloneAppFiles(spec.Files)
 	out.Workspace = cloneAppWorkspaceSpec(spec.Workspace)
 	out.PersistentStorage = cloneAppPersistentStorageSpec(spec.PersistentStorage)
+	if spec.VolumeReplication != nil {
+		replication := *spec.VolumeReplication
+		out.VolumeReplication = &replication
+	}
 	if spec.Failover != nil {
 		failover := *spec.Failover
 		out.Failover = &failover

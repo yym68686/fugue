@@ -3058,6 +3058,9 @@ WHERE app_id = $1
 		if strings.TrimSpace(app.Spec.RuntimeID) == targetRuntimeID {
 			return model.Operation{}, ErrInvalidInput
 		}
+		if err := validateFailoverVolumeReplication(app); err != nil {
+			return model.Operation{}, err
+		}
 		op.SourceRuntimeID = app.Spec.RuntimeID
 		op.TargetRuntimeID = targetRuntimeID
 	case model.OperationTypeDatabaseSwitchover:

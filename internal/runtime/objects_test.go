@@ -870,7 +870,7 @@ func TestBuildAppObjectsIncludesPersistentWorkspaceSidecar(t *testing.T) {
 	}
 
 	objects := buildAppObjects(app, SchedulingConstraints{})
-	deployment := objects[3]
+	deployment := firstObjectByKind(t, objects, "Deployment")
 	template := deployment["spec"].(map[string]any)["template"].(map[string]any)
 	podSpec := template["spec"].(map[string]any)
 
@@ -915,19 +915,41 @@ func TestBuildAppObjectsIncludesPersistentWorkspaceSidecar(t *testing.T) {
 		t.Fatalf("expected workspace storage %q, got %#v", defaultWorkspaceStorage, got)
 	}
 
-	replicationDestination := objects[2]
-	if got := replicationDestination["kind"]; got != VolSyncReplicationDestinationKind {
-		t.Fatalf("expected workspace replication destination, got %#v", got)
-	}
-	destinationSpec := replicationDestination["spec"].(map[string]any)
-	destinationRsyncTLS := destinationSpec["rsyncTLS"].(map[string]any)
-	if got := destinationRsyncTLS["copyMethod"]; got != "Direct" {
-		t.Fatalf("expected workspace replication destination copyMethod %q, got %#v", "Direct", got)
+	for _, object := range objects {
+		if got := object["kind"]; got == VolSyncReplicationDestinationKind {
+			t.Fatalf("expected workspace replication destination to be opt-in, got %#v", object)
+		}
 	}
 
 	strategy := deployment["spec"].(map[string]any)["strategy"].(map[string]any)
 	if got := strategy["type"]; got != "Recreate" {
 		t.Fatalf("expected workspace deployment strategy Recreate, got %#v", got)
+	}
+}
+
+func TestBuildAppObjectsIncludesWorkspaceReplicationWhenEnabled(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Workspace: &model.AppWorkspaceSpec{},
+			VolumeReplication: &model.AppVolumeReplicationSpec{
+				Mode: model.AppVolumeReplicationModeScheduled,
+			},
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	replicationDestination := firstObjectByKind(t, objects, VolSyncReplicationDestinationKind)
+	destinationSpec := replicationDestination["spec"].(map[string]any)
+	destinationRsyncTLS := destinationSpec["rsyncTLS"].(map[string]any)
+	if got := destinationRsyncTLS["copyMethod"]; got != "Direct" {
+		t.Fatalf("expected workspace replication destination copyMethod %q, got %#v", "Direct", got)
 	}
 }
 
@@ -959,7 +981,7 @@ func TestBuildAppObjectsIncludesPersistentStorageMounts(t *testing.T) {
 	}
 
 	objects := buildAppObjects(app, SchedulingConstraints{})
-	deployment := objects[3]
+	deployment := firstObjectByKind(t, objects, "Deployment")
 	template := deployment["spec"].(map[string]any)["template"].(map[string]any)
 	podSpec := template["spec"].(map[string]any)
 
@@ -1011,6 +1033,11 @@ func TestBuildAppObjectsIncludesPersistentStorageMounts(t *testing.T) {
 	requests := persistentPVC["spec"].(map[string]any)["resources"].(map[string]any)["requests"].(map[string]any)
 	if got := requests["storage"]; got != defaultWorkspaceStorage {
 		t.Fatalf("expected persistent storage size %q, got %#v", defaultWorkspaceStorage, got)
+	}
+	for _, object := range objects {
+		if got := object["kind"]; got == VolSyncReplicationDestinationKind {
+			t.Fatalf("expected persistent storage replication destination to be opt-in, got %#v", object)
+		}
 	}
 
 	strategy := deployment["spec"].(map[string]any)["strategy"].(map[string]any)
@@ -1437,6 +1464,10 @@ func TestBuildWorkspaceReplicationSourceObject(t *testing.T) {
 		Spec: model.AppSpec{
 			RuntimeID: "runtime_demo",
 			Workspace: &model.AppWorkspaceSpec{},
+			VolumeReplication: &model.AppVolumeReplicationSpec{
+				Mode:     model.AppVolumeReplicationModeScheduled,
+				Schedule: "*/10 * * * *",
+			},
 		},
 	}
 
@@ -1448,6 +1479,10 @@ func TestBuildWorkspaceReplicationSourceObject(t *testing.T) {
 	if got := spec["sourcePVC"]; got != WorkspacePVCName(app) {
 		t.Fatalf("expected source pvc %q, got %#v", WorkspacePVCName(app), got)
 	}
+	trigger := spec["trigger"].(map[string]any)
+	if got := trigger["schedule"]; got != "*/10 * * * *" {
+		t.Fatalf("expected replication source schedule, got %#v", got)
+	}
 	rsyncTLS := spec["rsyncTLS"].(map[string]any)
 	if got := rsyncTLS["address"]; got != "tls://destination.default.svc:8000" {
 		t.Fatalf("expected rsync address, got %#v", got)
@@ -1457,6 +1492,31 @@ func TestBuildWorkspaceReplicationSourceObject(t *testing.T) {
 	}
 	if got := rsyncTLS["copyMethod"]; got != "Direct" {
 		t.Fatalf("expected rsync copyMethod %q, got %#v", "Direct", got)
+	}
+}
+
+func TestBuildWorkspaceReplicationSourceObjectSupportsManualMode(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			RuntimeID: "runtime_demo",
+			Workspace: &model.AppWorkspaceSpec{},
+			VolumeReplication: &model.AppVolumeReplicationSpec{
+				Mode: model.AppVolumeReplicationModeManual,
+			},
+		},
+	}
+
+	object := BuildWorkspaceReplicationSourceObject(app, nil, "tls://destination.default.svc:8000", "workspace-rsync-key")
+	spec := object["spec"].(map[string]any)
+	trigger := spec["trigger"].(map[string]any)
+	if got := trigger["manual"]; got != "bootstrap" {
+		t.Fatalf("expected manual replication trigger, got %#v", got)
+	}
+	if _, ok := trigger["schedule"]; ok {
+		t.Fatalf("expected manual replication source to omit schedule, got %#v", trigger)
 	}
 }
 
@@ -1524,6 +1584,17 @@ func envValue(envObjects []map[string]any, name string) string {
 		}
 	}
 	return ""
+}
+
+func firstObjectByKind(t *testing.T, objects []map[string]any, kind string) map[string]any {
+	t.Helper()
+	for _, object := range objects {
+		if got, _ := object["kind"].(string); got == kind {
+			return object
+		}
+	}
+	t.Fatalf("expected object kind %q in %#v", kind, objects)
+	return nil
 }
 
 func assertHelperResources(t *testing.T, value any) {

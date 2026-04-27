@@ -169,7 +169,7 @@ func normalizeStringMap(raw any) map[string]string {
 }
 
 func (s *Service) reconcileWorkspaceReplicationSource(ctx context.Context, client *kubeClient, app model.App, ownerRef *runtime.OwnerReference) error {
-	if client == nil || !runtime.AppUsesWorkspaceReplication(app) {
+	if client == nil || !runtime.AppVolumeReplicationEnabled(app) {
 		return nil
 	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)
@@ -189,8 +189,11 @@ func (s *Service) reconcileWorkspaceReplicationSource(ctx context.Context, clien
 }
 
 func (s *Service) ensureWorkspaceFinalSync(ctx context.Context, client *kubeClient, app model.App, syncToken string) error {
-	if client == nil || !runtime.AppUsesWorkspaceReplication(app) {
+	if client == nil || !runtime.AppHasReplicableVolume(app) {
 		return nil
+	}
+	if !runtime.AppVolumeReplicationEnabled(app) {
+		return fmt.Errorf("volume replication is disabled for app %s", app.ID)
 	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)
 	sourceName := runtime.WorkspaceReplicationSourceName(app)

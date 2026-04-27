@@ -654,6 +654,94 @@ func TestPatchAppPersistentStorageQueuesCombinedDeployOperation(t *testing.T) {
 	}
 }
 
+func TestPatchAppVolumeReplicationQueuesDeployOperation(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		PersistentStorage: &model.AppPersistentStorageSpec{
+			Mounts: []model.AppPersistentStorageMount{
+				{
+					Kind: model.AppPersistentStorageMountKindDirectory,
+					Path: "/var/lib/data",
+				},
+			},
+		},
+	})
+
+	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID, apiKey, map[string]any{
+		"volume_replication": map[string]any{
+			"mode":     "scheduled",
+			"schedule": "*/15 * * * *",
+		},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var patchResponse struct {
+		AlreadyCurrent bool            `json:"already_current"`
+		Operation      model.Operation `json:"operation"`
+	}
+	mustDecodeJSON(t, recorder, &patchResponse)
+	if patchResponse.AlreadyCurrent {
+		t.Fatal("expected volume replication patch to report a change")
+	}
+	if patchResponse.Operation.ID == "" {
+		t.Fatal("expected deploy operation for volume replication patch")
+	}
+
+	op, err := s.GetOperation(patchResponse.Operation.ID)
+	if err != nil {
+		t.Fatalf("get operation: %v", err)
+	}
+	if op.DesiredSpec == nil || op.DesiredSpec.VolumeReplication == nil {
+		t.Fatalf("expected desired volume replication spec, got %+v", op.DesiredSpec)
+	}
+	if got := op.DesiredSpec.VolumeReplication.Mode; got != model.AppVolumeReplicationModeScheduled {
+		t.Fatalf("expected scheduled volume replication, got %q", got)
+	}
+	if got := op.DesiredSpec.VolumeReplication.Schedule; got != "*/15 * * * *" {
+		t.Fatalf("expected custom replication schedule, got %q", got)
+	}
+
+	completeNextManagedOperation(t, s)
+
+	updatedApp, err := s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get updated app: %v", err)
+	}
+	if updatedApp.Spec.VolumeReplication == nil || updatedApp.Spec.VolumeReplication.Mode != model.AppVolumeReplicationModeScheduled {
+		t.Fatalf("expected stored volume replication spec, got %+v", updatedApp.Spec.VolumeReplication)
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID, apiKey, map[string]any{
+		"volume_replication": map[string]any{
+			"mode": "disabled",
+		},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	mustDecodeJSON(t, recorder, &patchResponse)
+	if patchResponse.AlreadyCurrent {
+		t.Fatal("expected disabling volume replication to report a change")
+	}
+	op, err = s.GetOperation(patchResponse.Operation.ID)
+	if err != nil {
+		t.Fatalf("get disable operation: %v", err)
+	}
+	if op.DesiredSpec == nil {
+		t.Fatal("expected desired spec on disable volume replication operation")
+	}
+	if op.DesiredSpec.VolumeReplication != nil {
+		t.Fatalf("expected desired volume replication to be cleared, got %+v", op.DesiredSpec.VolumeReplication)
+	}
+}
+
 func TestGetAppEnvMergesBindingEnvAndAppEnvOverrides(t *testing.T) {
 	t.Parallel()
 

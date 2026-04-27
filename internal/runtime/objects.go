@@ -14,26 +14,25 @@ import (
 )
 
 const (
-	defaultPostgresImage                = ""
-	defaultPostgresStorage              = "1Gi"
-	defaultPostgresInstances            = 1
-	defaultWorkspaceStorage             = "10Gi"
-	defaultWorkspaceReplicationSchedule = "*/5 * * * *"
-	defaultWaitImage                    = "busybox:1.36"
-	defaultHelperCPURequest             = "25m"
-	defaultHelperCPULimit               = "100m"
-	defaultHelperMemoryRequest          = "32Mi"
-	defaultHelperMemoryLimit            = "128Mi"
-	defaultHelperEphemeralRequest       = "32Mi"
-	defaultHelperEphemeralLimit         = "128Mi"
-	AppFilesVolumeName                  = "app-files"
-	appFilesVolumeName                  = AppFilesVolumeName
-	appFilesSourceMountPath             = "/fugue-app-files"
-	AppWorkspaceContainerName           = "fugue-workspace"
-	workspaceVolumeName                 = "app-workspace"
-	workspaceSidecarName                = AppWorkspaceContainerName
-	persistentStorageRootPath           = "/fugue-persistent-storage"
-	projectSharedStorageComponent       = "project-shared-persistent-storage"
+	defaultPostgresImage          = ""
+	defaultPostgresStorage        = "1Gi"
+	defaultPostgresInstances      = 1
+	defaultWorkspaceStorage       = "10Gi"
+	defaultWaitImage              = "busybox:1.36"
+	defaultHelperCPURequest       = "25m"
+	defaultHelperCPULimit         = "100m"
+	defaultHelperMemoryRequest    = "32Mi"
+	defaultHelperMemoryLimit      = "128Mi"
+	defaultHelperEphemeralRequest = "32Mi"
+	defaultHelperEphemeralLimit   = "128Mi"
+	AppFilesVolumeName            = "app-files"
+	appFilesVolumeName            = AppFilesVolumeName
+	appFilesSourceMountPath       = "/fugue-app-files"
+	AppWorkspaceContainerName     = "fugue-workspace"
+	workspaceVolumeName           = "app-workspace"
+	workspaceSidecarName          = AppWorkspaceContainerName
+	persistentStorageRootPath     = "/fugue-persistent-storage"
+	projectSharedStorageComponent = "project-shared-persistent-storage"
 
 	CloudNativePGAPIVersion           = "postgresql.cnpg.io/v1"
 	CloudNativePGClusterKind          = "Cluster"
@@ -68,16 +67,18 @@ func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, p
 	if workspaceSpec := normalizeRuntimeAppWorkspaceSpec(app); workspaceSpec != nil {
 		objects = append(objects,
 			buildAppWorkspacePVCObject(namespace, app, labels, *workspaceSpec),
-			buildWorkspaceReplicationDestinationObject(namespace, app, labels, *workspaceSpec),
 		)
+		if AppVolumeReplicationEnabled(app) {
+			objects = append(objects, buildWorkspaceReplicationDestinationObject(namespace, app, labels, *workspaceSpec))
+		}
 	} else if storageSpec := normalizeRuntimeAppPersistentStorageSpec(app); storageSpec != nil {
 		if model.AppPersistentStorageSpecUsesSharedProjectRWX(storageSpec) {
 			objects = append(objects, buildProjectSharedPersistentStoragePVCObject(namespace, app, *storageSpec))
 		} else {
-			objects = append(objects,
-				buildAppPersistentStoragePVCObject(namespace, app, labels, *storageSpec),
-				buildPersistentStorageReplicationDestinationObject(namespace, app, labels, *storageSpec),
-			)
+			objects = append(objects, buildAppPersistentStoragePVCObject(namespace, app, labels, *storageSpec))
+			if AppVolumeReplicationEnabled(app) {
+				objects = append(objects, buildPersistentStorageReplicationDestinationObject(namespace, app, labels, *storageSpec))
+			}
 		}
 	}
 
@@ -1331,12 +1332,16 @@ func persistentStoragePVCName(app model.App, spec model.AppPersistentStorageSpec
 	return WorkspacePVCName(app)
 }
 
+func AppHasReplicableVolume(app model.App) bool {
+	return model.AppSpecHasReplicableVolume(app.Spec)
+}
+
+func AppVolumeReplicationEnabled(app model.App) bool {
+	return model.AppSpecVolumeReplicationEnabled(app.Spec)
+}
+
 func AppUsesWorkspaceReplication(app model.App) bool {
-	if normalizeRuntimeAppWorkspaceSpec(app) != nil {
-		return true
-	}
-	storageSpec := normalizeRuntimeAppPersistentStorageSpec(app)
-	return storageSpec != nil && !model.AppPersistentStorageSpecUsesSharedProjectRWX(storageSpec)
+	return AppVolumeReplicationEnabled(app)
 }
 
 func workspaceStorageBaseName(app model.App) string {
@@ -1430,6 +1435,14 @@ func buildWorkspaceReplicationDestinationObject(namespace string, app model.App,
 func BuildWorkspaceReplicationSourceObject(app model.App, ownerRef *OwnerReference, address, keySecret string) map[string]any {
 	namespace := NamespaceForTenant(app.TenantID)
 	labels := appLabels(app)
+	trigger := map[string]any{
+		"schedule": model.EffectiveAppVolumeReplicationSchedule(app.Spec),
+	}
+	if model.EffectiveAppVolumeReplicationMode(app.Spec) == model.AppVolumeReplicationModeManual {
+		trigger = map[string]any{
+			"manual": "bootstrap",
+		}
+	}
 	source := map[string]any{
 		"apiVersion": VolSyncAPIVersion,
 		"kind":       VolSyncReplicationSourceKind,
@@ -1440,9 +1453,7 @@ func BuildWorkspaceReplicationSourceObject(app model.App, ownerRef *OwnerReferen
 		},
 		"spec": map[string]any{
 			"sourcePVC": WorkspacePVCName(app),
-			"trigger": map[string]any{
-				"schedule": defaultWorkspaceReplicationSchedule,
-			},
+			"trigger":   trigger,
 			"rsyncTLS": map[string]any{
 				"address":    strings.TrimSpace(address),
 				"keySecret":  strings.TrimSpace(keySecret),

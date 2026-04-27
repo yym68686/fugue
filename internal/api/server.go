@@ -1168,6 +1168,10 @@ func (s *Server) handleFailoverApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "target_runtime_id is required when app.spec.failover.target_runtime_id is not configured")
 		return
 	}
+	if model.AppSpecHasReplicableVolume(app.Spec) && !model.AppSpecVolumeReplicationEnabled(app.Spec) {
+		httpx.WriteError(w, http.StatusBadRequest, "volume_replication must be enabled before failing over apps with dedicated persistent storage")
+		return
+	}
 	op, err := s.store.CreateOperation(model.Operation{
 		TenantID:        app.TenantID,
 		Type:            model.OperationTypeFailover,

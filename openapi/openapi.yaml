@@ -3813,6 +3813,17 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AppPersistentStorageMount"
+    AppVolumeReplicationSpec:
+      type: object
+      additionalProperties: false
+      properties:
+        mode:
+          type: string
+          enum: [disabled, manual, scheduled]
+          description: Defaults to disabled. Apps with a configured app failover policy and a dedicated volume are treated as scheduled for compatibility.
+        schedule:
+          type: string
+          description: Cron schedule used when mode is scheduled. Defaults to every five minutes.
     AppFailoverSpec:
       type: object
       additionalProperties: false
@@ -3986,6 +3997,8 @@ components:
           $ref: "#/components/schemas/AppWorkspaceSpec"
         persistent_storage:
           $ref: "#/components/schemas/AppPersistentStorageSpec"
+        volume_replication:
+          $ref: "#/components/schemas/AppVolumeReplicationSpec"
         postgres:
           $ref: "#/components/schemas/AppPostgresSpec"
         failover:
@@ -5309,6 +5322,8 @@ components:
           type: string
         persistent_storage:
           $ref: "#/components/schemas/AppPersistentStorageSpec"
+        volume_replication:
+          $ref: "#/components/schemas/AppVolumeReplicationSpec"
     PatchAppSourceRequest:
       type: object
       additionalProperties: false

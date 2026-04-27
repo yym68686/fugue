@@ -23,14 +23,17 @@ func validateWorkspaceSpec(spec model.AppSpec) error {
 	if spec.Workspace != nil && spec.PersistentStorage != nil {
 		return ErrInvalidInput
 	}
+	var err error
 	switch {
 	case spec.Workspace != nil:
-		return validateLegacyWorkspaceSpec(spec)
+		err = validateLegacyWorkspaceSpec(spec)
 	case spec.PersistentStorage != nil:
-		return validatePersistentStorageSpec(spec)
-	default:
-		return nil
+		err = validatePersistentStorageSpec(spec)
 	}
+	if err != nil {
+		return err
+	}
+	return validateVolumeReplicationSpec(spec)
 }
 
 func validateLegacyWorkspaceSpec(spec model.AppSpec) error {
@@ -128,6 +131,32 @@ func validateWorkspaceRuntimeState(state *model.State, runtimeID string, spec mo
 
 func hasPersistentWorkspace(app model.App) bool {
 	return app.Spec.Workspace != nil || app.Spec.PersistentStorage != nil
+}
+
+func validateVolumeReplicationSpec(spec model.AppSpec) error {
+	if spec.VolumeReplication != nil {
+		mode, err := model.NormalizeAppVolumeReplicationMode(spec.VolumeReplication.Mode)
+		if err != nil {
+			return ErrInvalidInput
+		}
+		if mode != model.AppVolumeReplicationModeDisabled && !model.AppSpecHasReplicableVolume(spec) {
+			return ErrInvalidInput
+		}
+		if mode == model.AppVolumeReplicationModeManual && strings.TrimSpace(spec.VolumeReplication.Schedule) != "" {
+			return ErrInvalidInput
+		}
+	}
+	if model.AppSpecHasReplicableVolume(spec) && spec.Failover != nil && !model.AppSpecVolumeReplicationEnabled(spec) {
+		return ErrInvalidInput
+	}
+	return nil
+}
+
+func validateFailoverVolumeReplication(app model.App) error {
+	if model.AppSpecHasReplicableVolume(app.Spec) && !model.AppSpecVolumeReplicationEnabled(app.Spec) {
+		return ErrInvalidInput
+	}
+	return nil
 }
 
 func persistentStorageMountContainsPath(mount model.AppPersistentStorageMount, targetPath string) bool {

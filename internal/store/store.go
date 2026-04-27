@@ -2548,6 +2548,9 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			if strings.TrimSpace(app.Spec.RuntimeID) == targetRuntimeID {
 				return ErrInvalidInput
 			}
+			if err := validateFailoverVolumeReplication(app); err != nil {
+				return err
+			}
 			op.SourceRuntimeID = app.Spec.RuntimeID
 			op.TargetRuntimeID = targetRuntimeID
 		case model.OperationTypeDatabaseSwitchover:
@@ -3662,6 +3665,10 @@ func cloneAppSpec(in *model.AppSpec) *model.AppSpec {
 			storage.Mounts = append([]model.AppPersistentStorageMount(nil), in.PersistentStorage.Mounts...)
 		}
 		out.PersistentStorage = &storage
+	}
+	if in.VolumeReplication != nil {
+		replication := *in.VolumeReplication
+		out.VolumeReplication = &replication
 	}
 	if in.Failover != nil {
 		failover := *in.Failover

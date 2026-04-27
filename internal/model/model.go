@@ -106,6 +106,10 @@ const (
 	AppPersistentStorageModeSharedProjectRWX = "shared_project_rwx"
 	AppPersistentStorageMountKindDirectory   = "directory"
 	AppPersistentStorageMountKindFile        = "file"
+	AppVolumeReplicationModeDisabled         = "disabled"
+	AppVolumeReplicationModeManual           = "manual"
+	AppVolumeReplicationModeScheduled        = "scheduled"
+	DefaultAppVolumeReplicationSchedule      = "*/5 * * * *"
 	DefaultAppImageMirrorLimit               = 1
 )
 
@@ -818,6 +822,7 @@ type AppSpec struct {
 	Files             []AppFile                 `json:"files,omitempty"`
 	Workspace         *AppWorkspaceSpec         `json:"workspace,omitempty"`
 	PersistentStorage *AppPersistentStorageSpec `json:"persistent_storage,omitempty"`
+	VolumeReplication *AppVolumeReplicationSpec `json:"volume_replication,omitempty"`
 	Postgres          *AppPostgresSpec          `json:"postgres,omitempty"`
 	Failover          *AppFailoverSpec          `json:"failover,omitempty"`
 	ImageMirrorLimit  int                       `json:"image_mirror_limit,omitempty"`
@@ -855,6 +860,11 @@ type AppPersistentStorageMount struct {
 	SeedContent string `json:"seed_content,omitempty"`
 	Secret      bool   `json:"secret,omitempty"`
 	Mode        int32  `json:"mode,omitempty"`
+}
+
+type AppVolumeReplicationSpec struct {
+	Mode     string `json:"mode,omitempty"`
+	Schedule string `json:"schedule,omitempty"`
 }
 
 type AppFailoverSpec struct {
