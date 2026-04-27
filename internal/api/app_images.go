@@ -22,7 +22,7 @@ const (
 	appImageStatusMissing            = "missing"
 	defaultProjectImageUsageCacheTTL = 5 * time.Minute
 	projectImageUsageAppBuildLimit   = 8
-	projectImageUsageSoftWait        = 800 * time.Millisecond
+	projectImageUsageSoftWait        = 250 * time.Millisecond
 )
 
 type appImageSummary struct {
