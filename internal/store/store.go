@@ -2884,6 +2884,37 @@ func (s *Store) ListOperationsWithDesiredSourceByApp(tenantID string, platformAd
 	return ops, err
 }
 
+func (s *Store) ListOperationsWithDesiredSourceByApps(tenantID string, platformAdmin bool, appIDs []string) (map[string][]model.Operation, error) {
+	appIDSet := trimmedStringSet(appIDs)
+	if len(appIDSet) == 0 {
+		return map[string][]model.Operation{}, nil
+	}
+	if s.usingDatabase() {
+		return s.pgListOperationsWithDesiredSourceByApps(tenantID, platformAdmin, sortedTrimmedStringKeys(appIDSet))
+	}
+
+	opsByAppID := make(map[string][]model.Operation, len(appIDSet))
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, op := range state.Operations {
+			if !platformAdmin && op.TenantID != tenantID {
+				continue
+			}
+			appID := strings.TrimSpace(op.AppID)
+			if _, ok := appIDSet[appID]; !ok || op.DesiredSource == nil {
+				continue
+			}
+			opsByAppID[appID] = append(opsByAppID[appID], op)
+		}
+		for appID := range opsByAppID {
+			sort.Slice(opsByAppID[appID], func(i, j int) bool {
+				return opsByAppID[appID][i].CreatedAt.Before(opsByAppID[appID][j].CreatedAt)
+			})
+		}
+		return nil
+	})
+	return opsByAppID, err
+}
+
 func (s *Store) ListActiveOperations() ([]model.Operation, error) {
 	if s.usingDatabase() {
 		return s.pgListActiveOperations()

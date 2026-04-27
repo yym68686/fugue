@@ -3483,6 +3483,55 @@ WHERE app_id = $1
 	return ops, nil
 }
 
+func (s *Store) pgListOperationsWithDesiredSourceByApps(tenantID string, platformAdmin bool, appIDs []string) (map[string][]model.Operation, error) {
+	appIDs = sortedTrimmedStringKeys(trimmedStringSet(appIDs))
+	if len(appIDs) == 0 {
+		return map[string][]model.Operation{}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	query := fmt.Sprintf(`
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+FROM fugue_operations
+WHERE app_id IN (%s)
+  AND desired_source_json IS NOT NULL
+`, sqlPlaceholderList(1, len(appIDs)))
+	args := make([]any, 0, len(appIDs)+1)
+	for _, appID := range appIDs {
+		args = append(args, appID)
+	}
+	if !platformAdmin {
+		query += fmt.Sprintf(" AND tenant_id = $%d\n", len(args)+1)
+		args = append(args, tenantID)
+	}
+	query += ` ORDER BY app_id ASC, created_at ASC`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list operations with desired source by apps: %w", err)
+	}
+	defer rows.Close()
+
+	opsByAppID := make(map[string][]model.Operation, len(appIDs))
+	for rows.Next() {
+		op, err := scanOperation(rows)
+		if err != nil {
+			return nil, err
+		}
+		appID := strings.TrimSpace(op.AppID)
+		if appID == "" {
+			continue
+		}
+		opsByAppID[appID] = append(opsByAppID[appID], op)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate operations with desired source by apps: %w", err)
+	}
+	return opsByAppID, nil
+}
+
 func (s *Store) pgListActiveOperations() ([]model.Operation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

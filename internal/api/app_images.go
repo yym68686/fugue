@@ -20,7 +20,8 @@ import (
 const (
 	appImageStatusAvailable          = "available"
 	appImageStatusMissing            = "missing"
-	defaultProjectImageUsageCacheTTL = 15 * time.Second
+	defaultProjectImageUsageCacheTTL = 5 * time.Minute
+	projectImageUsageAppBuildLimit   = 8
 )
 
 type appImageSummary struct {
@@ -217,40 +218,11 @@ func (s *Server) loadProjectImageUsageOperations(
 		appIDs = append(appIDs, appID)
 	}
 	sort.Strings(appIDs)
-
-	opsByAppID := make(map[string][]model.Operation, len(appIDs))
-	var mu sync.Mutex
-	group, _ := errgroup.WithContext(ctx)
-	group.SetLimit(6)
-
-	for _, appID := range appIDs {
-		appID := appID
-		group.Go(func() error {
-			startedAt := time.Now()
-			ops, err := s.store.ListOperationsWithDesiredSourceByApp(
-				principal.TenantID,
-				principal.IsPlatformAdmin(),
-				appID,
-			)
-			serverTimingFromContext(ctx).Add("store_image_usage_operations_app", time.Since(startedAt))
-			if err != nil {
-				return err
-			}
-			if len(ops) == 0 {
-				return nil
-			}
-
-			mu.Lock()
-			opsByAppID[appID] = ops
-			mu.Unlock()
-			return nil
-		})
-	}
-
-	if err := group.Wait(); err != nil {
-		return nil, err
-	}
-	return opsByAppID, nil
+	return s.store.ListOperationsWithDesiredSourceByApps(
+		principal.TenantID,
+		principal.IsPlatformAdmin(),
+		appIDs,
+	)
 }
 
 func (s *Server) handleGetAppImages(w http.ResponseWriter, r *http.Request) {
@@ -468,12 +440,36 @@ func (s *Server) buildProjectImageUsageResponse(
 		return response, nil
 	}
 
+	type appInventoryResult struct {
+		App       model.App
+		Inventory builtAppImageInventory
+	}
+
+	inventoryResults := make([]appInventoryResult, len(apps))
+	inventoryGroup, inventoryCtx := errgroup.WithContext(ctx)
+	inventoryGroup.SetLimit(projectImageUsageAppBuildLimit)
+	for index, app := range apps {
+		index, app := index, app
+		inventoryGroup.Go(func() error {
+			inventory, err := s.buildAppImageInventory(inventoryCtx, app, opsByAppID[app.ID])
+			if err != nil {
+				return err
+			}
+			inventoryResults[index] = appInventoryResult{
+				App:       app,
+				Inventory: inventory,
+			}
+			return nil
+		})
+	}
+	if err := inventoryGroup.Wait(); err != nil {
+		return projectImageUsageResponse{}, err
+	}
+
 	projectSummaries := make(map[string]*projectImageUsageAccumulator)
-	for _, app := range apps {
-		inventory, err := s.buildAppImageInventory(ctx, app, opsByAppID[app.ID])
-		if err != nil {
-			return projectImageUsageResponse{}, err
-		}
+	for _, result := range inventoryResults {
+		app := result.App
+		inventory := result.Inventory
 		if inventory.Response.Summary.VersionCount == 0 {
 			continue
 		}

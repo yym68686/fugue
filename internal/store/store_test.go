@@ -4679,6 +4679,112 @@ func TestPurgeAppRemovesImportedPlaceholderResources(t *testing.T) {
 	}
 }
 
+func TestListOperationsWithDesiredSourceByApps(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Image Usage Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	firstApp, err := s.CreateApp(tenant.ID, project.ID, "first", "", model.AppSpec{
+		Image:     "registry.example.com/first:old",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create first app: %v", err)
+	}
+	secondApp, err := s.CreateApp(tenant.ID, project.ID, "second", "", model.AppSpec{
+		Image:     "registry.example.com/second:old",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create second app: %v", err)
+	}
+	thirdApp, err := s.CreateApp(tenant.ID, project.ID, "third", "", model.AppSpec{
+		Image:     "registry.example.com/third:old",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create third app: %v", err)
+	}
+
+	firstSource := model.AppSource{
+		Type:             model.AppSourceTypeDockerImage,
+		ResolvedImageRef: "registry.example.com/first:new",
+	}
+	firstSpec := firstApp.Spec
+	secondSource := model.AppSource{
+		Type:             model.AppSourceTypeDockerImage,
+		ResolvedImageRef: "registry.example.com/second:new",
+	}
+	secondSpec := secondApp.Spec
+	firstOp, err := s.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		Type:          model.OperationTypeDeploy,
+		AppID:         firstApp.ID,
+		DesiredSpec:   &firstSpec,
+		DesiredSource: &firstSource,
+	})
+	if err != nil {
+		t.Fatalf("create first source operation: %v", err)
+	}
+	secondOp, err := s.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		Type:          model.OperationTypeDeploy,
+		AppID:         secondApp.ID,
+		DesiredSpec:   &secondSpec,
+		DesiredSource: &secondSource,
+	})
+	if err != nil {
+		t.Fatalf("create second source operation: %v", err)
+	}
+	thirdSpec := thirdApp.Spec
+	if _, err := s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       thirdApp.ID,
+		DesiredSpec: &thirdSpec,
+	}); err != nil {
+		t.Fatalf("create operation without source: %v", err)
+	}
+
+	opsByAppID, err := s.ListOperationsWithDesiredSourceByApps(tenant.ID, false, []string{
+		firstApp.ID,
+		secondApp.ID,
+		thirdApp.ID,
+		"",
+		firstApp.ID,
+	})
+	if err != nil {
+		t.Fatalf("list operations with desired source by apps: %v", err)
+	}
+
+	if got := opsByAppID[firstApp.ID]; len(got) != 1 || got[0].ID != firstOp.ID {
+		t.Fatalf("expected first app operation %s, got %#v", firstOp.ID, got)
+	}
+	if got := opsByAppID[secondApp.ID]; len(got) != 1 || got[0].ID != secondOp.ID {
+		t.Fatalf("expected second app operation %s, got %#v", secondOp.ID, got)
+	}
+	if got := opsByAppID[thirdApp.ID]; len(got) != 0 {
+		t.Fatalf("expected no source operations for third app, got %#v", got)
+	}
+}
+
 func TestManagedPostgresBindingIsExclusivePerService(t *testing.T) {
 	t.Parallel()
 
