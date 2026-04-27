@@ -80,7 +80,7 @@ func defaultBuilderPodPolicy() BuilderPodPolicy {
 		Heavy: BuilderWorkloadPolicy{
 			Resources: BuilderResourceRequirements{
 				Requests: map[string]string{
-					"cpu":               "500m",
+					"cpu":               "250m",
 					"memory":            "512Mi",
 					"ephemeral-storage": "3Gi",
 				},

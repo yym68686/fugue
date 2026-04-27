@@ -90,8 +90,8 @@ func TestBuildBuildpacksJobObjectAppliesHeavyBuilderPolicy(t *testing.T) {
 
 	container := podSpec["containers"].([]map[string]any)[0]
 	requests := builderResourceValues(t, container, "requests")
-	if got := requests["cpu"]; got != "500m" {
-		t.Fatalf("expected heavy cpu request 500m, got %q", got)
+	if got := requests["cpu"]; got != "250m" {
+		t.Fatalf("expected heavy cpu request 250m, got %q", got)
 	}
 	if got := requests["memory"]; got != "512Mi" {
 		t.Fatalf("expected heavy memory request 512Mi, got %q", got)
