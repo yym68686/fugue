@@ -700,12 +700,30 @@ func (s *Store) pgAuthenticateAPIKey(secret string) (model.Principal, error) {
 	defer cancel()
 
 	key, err := scanAPIKey(s.db.QueryRowContext(ctx, `
-UPDATE fugue_api_keys
-SET last_used_at = NOW()
-WHERE hash = $1
-  AND status = $2
-RETURNING id, tenant_id, label, prefix, hash, status, scopes_json, created_at, last_used_at, disabled_at
-`, model.HashSecret(secret), model.APIKeyStatusActive))
+WITH matched AS MATERIALIZED (
+	SELECT id, tenant_id, label, prefix, hash, status, scopes_json, created_at, last_used_at, disabled_at
+	FROM fugue_api_keys
+	WHERE hash = $1
+	  AND status = $2
+	LIMIT 1
+),
+touched AS (
+	UPDATE fugue_api_keys
+	SET last_used_at = NOW()
+	WHERE id IN (SELECT id FROM matched)
+	  AND (
+		last_used_at IS NULL
+		OR last_used_at < NOW() - ($3::bigint * INTERVAL '1 millisecond')
+	  )
+	RETURNING id, tenant_id, label, prefix, hash, status, scopes_json, created_at, last_used_at, disabled_at
+)
+SELECT id, tenant_id, label, prefix, hash, status, scopes_json, created_at, last_used_at, disabled_at
+FROM touched
+UNION ALL
+SELECT id, tenant_id, label, prefix, hash, status, scopes_json, created_at, last_used_at, disabled_at
+FROM matched
+WHERE NOT EXISTS (SELECT 1 FROM touched)
+`, model.HashSecret(secret), model.APIKeyStatusActive, int64(time.Minute/time.Millisecond)))
 	if err != nil {
 		return model.Principal{}, mapDBErr(err)
 	}
