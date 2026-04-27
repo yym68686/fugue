@@ -2836,6 +2836,16 @@ paths:
       x-fugue-handler: handleListAuditEvents
       security:
         - BearerAuth: []
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          description: Maximum number of recent audit events to return. Defaults to 200 and cannot exceed 1000.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 200
       responses:
         '200':
           description: Successful response

@@ -3082,7 +3082,7 @@ func TestDeleteTenantRemovesTenantOwnedResources(t *testing.T) {
 		t.Fatalf("expected no operations for deleted tenant, got %+v", ops)
 	}
 
-	events, err := s.ListAuditEvents("", true)
+	events, err := s.ListAuditEvents("", true, 0)
 	if err != nil {
 		t.Fatalf("list audit events: %v", err)
 	}
@@ -4476,7 +4476,7 @@ func TestRequestedProjectDeleteFinalizesAfterLastAppDelete(t *testing.T) {
 	if _, err := s.GetBackingService(service.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected backing service to be deleted after project cleanup, got %v", err)
 	}
-	events, err := s.ListAuditEvents(tenant.ID, false)
+	events, err := s.ListAuditEvents(tenant.ID, false, 0)
 	if err != nil {
 		t.Fatalf("list audit events: %v", err)
 	}

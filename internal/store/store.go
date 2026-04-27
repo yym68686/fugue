@@ -3214,9 +3214,9 @@ func (s *Store) AppendAuditEvent(event model.AuditEvent) error {
 	})
 }
 
-func (s *Store) ListAuditEvents(tenantID string, platformAdmin bool) ([]model.AuditEvent, error) {
+func (s *Store) ListAuditEvents(tenantID string, platformAdmin bool, limit int) ([]model.AuditEvent, error) {
 	if s.usingDatabase() {
-		return s.pgListAuditEvents(tenantID, platformAdmin)
+		return s.pgListAuditEvents(tenantID, platformAdmin, limit)
 	}
 	var events []model.AuditEvent
 	err := s.withLockedState(false, func(state *model.State) error {
@@ -3228,6 +3228,9 @@ func (s *Store) ListAuditEvents(tenantID string, platformAdmin bool) ([]model.Au
 		sort.Slice(events, func(i, j int) bool {
 			return events[i].CreatedAt.After(events[j].CreatedAt)
 		})
+		if limit > 0 && len(events) > limit {
+			events = events[:limit]
+		}
 		return nil
 	})
 	return events, err

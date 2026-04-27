@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -137,6 +138,81 @@ func TestReadyzFailsWhenKubernetesDependencyIsUnavailable(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected readyz response to contain %q, got %s", want, body)
 		}
+	}
+}
+
+func TestListAuditEventsDefaultsToRecentLimit(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Audit Events Limit Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, secret, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.read"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	now := time.Now().UTC()
+	for i := 0; i < defaultAuditEventListLimit+5; i++ {
+		if err := s.AppendAuditEvent(model.AuditEvent{
+			TenantID:   tenant.ID,
+			ActorType:  model.ActorTypeSystem,
+			ActorID:    "test",
+			Action:     "audit.test",
+			TargetType: "event",
+			TargetID:   fmt.Sprintf("event-%03d", i),
+			CreatedAt:  now.Add(time.Duration(i) * time.Second),
+		}); err != nil {
+			t.Fatalf("append audit event %d: %v", i, err)
+		}
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/audit-events", secret, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		AuditEvents []model.AuditEvent `json:"audit_events"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode audit events: %v", err)
+	}
+	if len(response.AuditEvents) != defaultAuditEventListLimit {
+		t.Fatalf("expected default limit %d, got %d", defaultAuditEventListLimit, len(response.AuditEvents))
+	}
+	if got := response.AuditEvents[0].TargetID; got != "event-204" {
+		t.Fatalf("expected newest event first, got %q", got)
+	}
+	if got := response.AuditEvents[len(response.AuditEvents)-1].TargetID; got != "event-005" {
+		t.Fatalf("expected oldest returned event to respect default limit, got %q", got)
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/audit-events?limit=3", secret, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	response.AuditEvents = nil
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode limited audit events: %v", err)
+	}
+	if len(response.AuditEvents) != 3 {
+		t.Fatalf("expected three audit events, got %+v", response.AuditEvents)
+	}
+	if got := response.AuditEvents[2].TargetID; got != "event-202" {
+		t.Fatalf("expected custom limit to keep three newest events, got %q", got)
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/audit-events?limit=1001", secret, nil)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadRequest, recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -327,7 +403,7 @@ func TestJoinClusterEnvNormalizesNodeNameAndWritesRequestedAudit(t *testing.T) {
 		t.Fatalf("expected normalized node name in response body, got %s", body)
 	}
 
-	events, err := s.ListAuditEvents(tenant.ID, false)
+	events, err := s.ListAuditEvents(tenant.ID, false, 0)
 	if err != nil {
 		t.Fatalf("list audit events: %v", err)
 	}
@@ -388,7 +464,7 @@ func TestJoinClusterEnvRejectsInvalidKubernetesNodeName(t *testing.T) {
 		t.Fatalf("expected invalid node name error, got %s", recorder.Body.String())
 	}
 
-	events, err := s.ListAuditEvents(tenant.ID, false)
+	events, err := s.ListAuditEvents(tenant.ID, false, 0)
 	if err != nil {
 		t.Fatalf("list audit events: %v", err)
 	}

@@ -58,7 +58,7 @@ func TestDeleteRuntimeRemovesOwnedOfflineRuntime(t *testing.T) {
 		t.Fatalf("expected runtime to be deleted, got %v", err)
 	}
 
-	events, err := s.ListAuditEvents(tenant.ID, false)
+	events, err := s.ListAuditEvents(tenant.ID, false, 0)
 	if err != nil {
 		t.Fatalf("list audit events: %v", err)
 	}

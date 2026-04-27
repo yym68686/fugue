@@ -1277,9 +1277,28 @@ func (s *Server) handleGetOperation(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"operation": sanitizeOperationForAPI(op)})
 }
 
+const (
+	defaultAuditEventListLimit = 200
+	maxAuditEventListLimit     = 1000
+)
+
 func (s *Server) handleListAuditEvents(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	events, err := s.store.ListAuditEvents(principal.TenantID, principal.IsPlatformAdmin())
+	limit, err := readIntQuery(r, "limit", defaultAuditEventListLimit)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if limit < 1 {
+		httpx.WriteError(w, http.StatusBadRequest, "limit must be greater than zero")
+		return
+	}
+	if limit > maxAuditEventListLimit {
+		httpx.WriteError(w, http.StatusBadRequest, fmt.Sprintf("limit cannot exceed %d", maxAuditEventListLimit))
+		return
+	}
+
+	events, err := s.store.ListAuditEvents(principal.TenantID, principal.IsPlatformAdmin(), limit)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

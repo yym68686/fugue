@@ -4032,7 +4032,7 @@ func (s *Store) pgAppendAuditEventTx(ctx context.Context, exec sqlExecContexter,
 	return nil
 }
 
-func (s *Store) pgListAuditEvents(tenantID string, platformAdmin bool) ([]model.AuditEvent, error) {
+func (s *Store) pgListAuditEvents(tenantID string, platformAdmin bool, limit int) ([]model.AuditEvent, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -4046,6 +4046,10 @@ FROM fugue_audit_events
 		args = append(args, tenantID)
 	}
 	query += ` ORDER BY created_at DESC`
+	if limit > 0 {
+		args = append(args, limit)
+		query += fmt.Sprintf(` LIMIT $%d`, len(args))
+	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {

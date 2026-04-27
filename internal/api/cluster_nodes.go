@@ -1299,7 +1299,7 @@ func needsLegacyBootstrapControlPlaneRoleBackfill(snapshot clusterNodeSnapshot, 
 }
 
 func (s *Server) clusterNodePolicyAuditNodeNames() (map[string]struct{}, error) {
-	events, err := s.store.ListAuditEvents("", true)
+	events, err := s.store.ListAuditEvents("", true, 0)
 	if err != nil {
 		return nil, err
 	}

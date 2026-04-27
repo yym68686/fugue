@@ -155,7 +155,7 @@ func TestDeleteProjectCascadeQueuesDeleteAndFinalizesProject(t *testing.T) {
 		t.Fatalf("expected backing service to be deleted with project cleanup, got %v", err)
 	}
 
-	events, err := s.ListAuditEvents(tenant.ID, false)
+	events, err := s.ListAuditEvents(tenant.ID, false, 0)
 	if err != nil {
 		t.Fatalf("list audit events: %v", err)
 	}
