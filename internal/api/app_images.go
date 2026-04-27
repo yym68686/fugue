@@ -22,7 +22,7 @@ const (
 	appImageStatusMissing            = "missing"
 	defaultProjectImageUsageCacheTTL = 5 * time.Minute
 	projectImageUsageAppBuildLimit   = 8
-	projectImageUsageSoftWait        = 250 * time.Millisecond
+	projectImageUsageSoftWait        = 50 * time.Millisecond
 )
 
 type appImageSummary struct {
@@ -194,15 +194,16 @@ func (s *Server) cachedProjectImageUsageResponse(
 	case <-ctx.Done():
 		return projectImageUsageResponse{}, ctx.Err()
 	case <-timer.C:
-		if entry, ok := s.projectImageUsageCache.getEntry(key); ok {
-			go s.logProjectImageUsageRefreshResult(resultCh)
-			return entry.value, nil
-		}
-		go s.logProjectImageUsageRefreshResult(resultCh)
-		return projectImageUsageResponse{
-			RegistryConfigured: s.appImageInventoryConfigured(),
-		}, nil
 	}
+
+	if entry, ok := s.projectImageUsageCache.getEntry(key); ok {
+		go s.logProjectImageUsageRefreshResult(resultCh)
+		return entry.value, nil
+	}
+	go s.logProjectImageUsageRefreshResult(resultCh)
+	return projectImageUsageResponse{
+		RegistryConfigured: s.appImageInventoryConfigured(),
+	}, nil
 }
 
 func projectImageUsageCacheKey(principal model.Principal) string {
