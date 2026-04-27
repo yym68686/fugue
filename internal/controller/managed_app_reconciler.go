@@ -144,6 +144,15 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 			app, _ = selectManagedAppDesiredApp(app, storedApp, true)
 		default:
 			recoverStoredBaseline = managedAppBaselineNeedsRecovery(storedApp)
+			if recoverStoredBaseline {
+				recoverable, recoverErr := s.managedAppSnapshotRecoverable(ctx, client, namespace, managed, app)
+				if recoverErr != nil {
+					return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("check managed app baseline recovery state: %w", recoverErr))
+				}
+				if !recoverable && managedAppSnapshotTerminalFailure(managed.Status) {
+					return s.disableUnrecoverableManagedAppSnapshot(ctx, client, namespace, managed, app, "managed app has no deployable stored baseline and the live snapshot is not ready")
+				}
+			}
 			app, useStoredBaseline := selectManagedAppDesiredApp(app, storedApp, false)
 			syncStoredManagedAppSnapshot = useStoredBaseline
 			if !useStoredBaseline {
@@ -241,6 +250,51 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 				s.Logger.Printf("persist observed managed app baseline for app %s failed: %v", app.ID, err)
 			}
 		}
+	}
+	return nil
+}
+
+func (s *Service) managedAppSnapshotRecoverable(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App) (bool, error) {
+	if app.Spec.Replicas <= 0 {
+		return true, nil
+	}
+	if strings.TrimSpace(managed.Status.CurrentReleaseReadyAt) != "" && managed.Status.ReadyReplicas > 0 {
+		return true, nil
+	}
+
+	deployment, _, err := client.getDeployment(ctx, namespace, runtime.RuntimeAppResourceName(app))
+	if err != nil {
+		return false, err
+	}
+	return managedDeploymentStatusReady(deployment, app.Spec.Replicas), nil
+}
+
+func managedAppSnapshotTerminalFailure(status runtime.ManagedAppStatus) bool {
+	return strings.EqualFold(strings.TrimSpace(status.Phase), runtime.ManagedAppPhaseError)
+}
+
+func (s *Service) disableUnrecoverableManagedAppSnapshot(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, reason string) error {
+	disabledApp := app
+	disabledApp.Spec.Replicas = 0
+	disabledApp = s.Renderer.PrepareApp(disabledApp)
+
+	objects := runtime.BuildManagedAppStateObjects(disabledApp, managed.Spec.Scheduling)
+	if err := client.applyObjects(ctx, objects); err != nil {
+		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("disable unrecoverable managed app snapshot: %w", err))
+	}
+	if err := client.scaleDeployment(ctx, namespace, runtime.RuntimeAppResourceName(disabledApp), 0); err != nil && !isKubernetesResourceNotFound(err) {
+		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("scale unrecoverable managed app deployment to zero: %w", err))
+	}
+
+	status := managedAppBaseStatus(managed, disabledApp)
+	status.Phase = runtime.ManagedAppPhaseDisabled
+	status.Message = strings.TrimSpace(reason)
+	status.ReadyReplicas = 0
+	if err := client.patchManagedAppStatus(ctx, namespace, managed.Metadata.Name, status); err != nil {
+		return fmt.Errorf("patch disabled status for unrecoverable managed app %s/%s: %w", namespace, managed.Metadata.Name, err)
+	}
+	if s.Logger != nil {
+		s.Logger.Printf("disabled unrecoverable managed app snapshot %s/%s: %s", namespace, managed.Metadata.Name, strings.TrimSpace(reason))
 	}
 	return nil
 }

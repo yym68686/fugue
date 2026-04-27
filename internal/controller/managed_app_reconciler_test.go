@@ -1028,6 +1028,144 @@ func TestReconcileManagedAppObjectRepairsIncompleteStoredGitHubSourceFromReadyMa
 	}
 }
 
+func TestReconcileManagedAppObjectScalesDownUnrecoverableFailedSnapshot(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(t.TempDir() + "/store.json")
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Failed Snapshot")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "Project A", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateImportedAppWithoutRoute(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeUpload,
+		UploadID:      "upload_demo",
+		ArchiveSHA256: "sha256-demo",
+		BuildStrategy: model.AppBuildStrategyDockerfile,
+		CommitSHA:     "sha256-demo",
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	managedName := runtime.ManagedAppResourceName(app)
+	deploymentName := runtime.RuntimeAppResourceName(app)
+	managed := runtime.ManagedAppObject{
+		Metadata: runtime.ManagedAppMeta{
+			Name:       managedName,
+			Namespace:  namespace,
+			Generation: 1,
+		},
+		Spec: runtime.ManagedAppSpec{
+			AppID:     app.ID,
+			TenantID:  app.TenantID,
+			ProjectID: app.ProjectID,
+			Name:      app.Name,
+			Source: &model.AppSource{
+				Type:             model.AppSourceTypeUpload,
+				UploadID:         "upload_demo",
+				ArchiveSHA256:    "sha256-demo",
+				BuildStrategy:    model.AppBuildStrategyDockerfile,
+				CommitSHA:        "sha256-demo",
+				ResolvedImageRef: "registry.push.example/fugue-apps/demo:upload-sha256",
+			},
+			AppSpec: model.AppSpec{
+				Image:     "registry.pull.example/fugue-apps/demo:upload-sha256",
+				Ports:     []int{8080},
+				Replicas:  1,
+				RuntimeID: "runtime_managed_shared",
+			},
+			Scheduling: runtime.SchedulingConstraints{},
+		},
+		Status: runtime.ManagedAppStatus{
+			Phase:           runtime.ManagedAppPhaseError,
+			Message:         "pod demo container demo failed: Error: exit_code=1",
+			DesiredReplicas: 1,
+			ReadyReplicas:   0,
+		},
+	}
+
+	deployment := kubeDeployment{}
+	deployment.Metadata.Name = deploymentName
+	deployment.Metadata.Generation = 1
+	deployment.Status.ObservedGeneration = 1
+	deployment.Status.Replicas = 1
+	deployment.Status.UpdatedReplicas = 1
+	deployment.Status.UnavailableReplicas = 1
+
+	var recordedDisabledManagedApp map[string]any
+	var scaledDeploymentReplicas *int
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == deploymentAPIPath(namespace, deploymentName):
+			data, err := json.Marshal(deployment)
+			if err != nil {
+				t.Fatalf("marshal deployment: %v", err)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(data))), Header: make(http.Header)}, nil
+		case req.Method == http.MethodPatch && strings.HasSuffix(req.URL.Path, "/status"):
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}, nil
+		case req.Method == http.MethodPatch && req.URL.Path == deploymentAPIPath(namespace, deploymentName):
+			var body struct {
+				Spec struct {
+					Replicas int `json:"replicas"`
+				} `json:"spec"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Fatalf("decode deployment scale patch: %v", err)
+			}
+			scaledDeploymentReplicas = &body.Spec.Replicas
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}, nil
+		case req.Method == http.MethodPatch:
+			var body map[string]any
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Fatalf("decode apply object %s: %v", req.URL.Path, err)
+			}
+			if kind, _ := body["kind"].(string); kind == runtime.ManagedAppKind {
+				recordedDisabledManagedApp = body
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}, nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+	}
+	svc := &Service{
+		Store: stateStore,
+	}
+
+	if err := svc.reconcileManagedAppObject(context.Background(), client, managed); err != nil {
+		t.Fatalf("reconcile managed app: %v", err)
+	}
+	if recordedDisabledManagedApp == nil {
+		t.Fatal("expected unrecoverable managed app snapshot to be disabled")
+	}
+	spec, _ := recordedDisabledManagedApp["spec"].(map[string]any)
+	appSpec, _ := spec["appSpec"].(map[string]any)
+	if got := appSpec["replicas"]; got != float64(0) {
+		t.Fatalf("expected managed app desired replicas to be 0, got %#v", got)
+	}
+	if scaledDeploymentReplicas == nil || *scaledDeploymentReplicas != 0 {
+		t.Fatalf("expected deployment to be scaled to 0, got %#v", scaledDeploymentReplicas)
+	}
+}
+
 func TestApplyManagedAppDesiredStateInjectsWorkloadIdentityIntoManagedAndRuntimeObjects(t *testing.T) {
 	t.Parallel()
 

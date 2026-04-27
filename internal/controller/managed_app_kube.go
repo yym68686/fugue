@@ -611,6 +611,16 @@ func (c *kubeClient) deleteDeployment(ctx context.Context, namespace, name strin
 	return normalizeDeleteNotFound(err)
 }
 
+func (c *kubeClient) scaleDeployment(ctx context.Context, namespace, name string, replicas int) error {
+	body := map[string]any{
+		"spec": map[string]any{
+			"replicas": replicas,
+		},
+	}
+	_, err := c.doRequest(ctx, http.MethodPatch, deploymentAPIPath(c.effectiveNamespace(namespace), name), "application/merge-patch+json", body, nil)
+	return err
+}
+
 func (c *kubeClient) deleteCloudNativePGCluster(ctx context.Context, namespace, name string) error {
 	_, err := c.doRequest(ctx, http.MethodDelete, cloudNativePGClusterAPIPath(c.effectiveNamespace(namespace), name), "", nil, nil)
 	return normalizeDeleteNotFound(err)
