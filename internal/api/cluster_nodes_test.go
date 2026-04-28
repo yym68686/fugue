@@ -154,6 +154,18 @@ func TestListClusterNodesIncludesMetricsConditionsAndWorkloads(t *testing.T) {
 						},
 						"spec": map[string]any{
 							"nodeName": "worker-1",
+							"containers": []map[string]any{
+								{
+									"name": "demo",
+									"resources": map[string]any{
+										"requests": map[string]string{
+											"cpu":               "100m",
+											"memory":            "128Mi",
+											"ephemeral-storage": "32Mi",
+										},
+									},
+								},
+							},
 						},
 						"status": map[string]any{
 							"phase": "Running",
@@ -171,6 +183,17 @@ func TestListClusterNodesIncludesMetricsConditionsAndWorkloads(t *testing.T) {
 						},
 						"spec": map[string]any{
 							"nodeName": "worker-1",
+							"containers": []map[string]any{
+								{
+									"name": "postgres",
+									"resources": map[string]any{
+										"requests": map[string]string{
+											"cpu":    "250m",
+											"memory": "512Mi",
+										},
+									},
+								},
+							},
 						},
 						"status": map[string]any{
 							"phase": "Running",
@@ -262,23 +285,41 @@ func TestListClusterNodesIncludesMetricsConditionsAndWorkloads(t *testing.T) {
 	if node.CPU.UsedMilliCores == nil || *node.CPU.UsedMilliCores != 1750 {
 		t.Fatalf("expected cpu used 1750m, got %#v", node.CPU)
 	}
+	gotCPURequests := int64(-1)
+	if node.CPU.RequestedMilliCores != nil {
+		gotCPURequests = *node.CPU.RequestedMilliCores
+	}
+	if gotCPURequests != 350 {
+		t.Fatalf("expected cpu requests 350m, got %dm (%#v)", gotCPURequests, node.CPU)
+	}
+	if node.CPU.SchedulableFreeMilliCores == nil || *node.CPU.SchedulableFreeMilliCores != 3550 {
+		t.Fatalf("expected schedulable cpu free 3550m, got %#v", node.CPU)
+	}
 
 	memoryCapacity := int64(16 * 1024 * 1024 * 1024)
 	memoryUsed := int64(8 * 1024 * 1024 * 1024)
+	memoryRequested := int64(640 * 1024 * 1024)
 	if node.Memory == nil || node.Memory.CapacityBytes == nil || *node.Memory.CapacityBytes != memoryCapacity {
 		t.Fatalf("expected memory capacity %d, got %#v", memoryCapacity, node.Memory)
 	}
 	if node.Memory.UsedBytes == nil || *node.Memory.UsedBytes != memoryUsed {
 		t.Fatalf("expected memory used %d, got %#v", memoryUsed, node.Memory)
 	}
+	if node.Memory.RequestedBytes == nil || *node.Memory.RequestedBytes != memoryRequested {
+		t.Fatalf("expected memory requests %d, got %#v", memoryRequested, node.Memory)
+	}
 
 	storageCapacity := int64(200 * 1024 * 1024 * 1024)
 	storageUsed := int64(50 * 1024 * 1024 * 1024)
+	storageRequested := int64(32 * 1024 * 1024)
 	if node.EphemeralStorage == nil || node.EphemeralStorage.CapacityBytes == nil || *node.EphemeralStorage.CapacityBytes != storageCapacity {
 		t.Fatalf("expected storage capacity %d, got %#v", storageCapacity, node.EphemeralStorage)
 	}
 	if node.EphemeralStorage.UsedBytes == nil || *node.EphemeralStorage.UsedBytes != storageUsed {
 		t.Fatalf("expected storage used %d, got %#v", storageUsed, node.EphemeralStorage)
+	}
+	if node.EphemeralStorage.RequestedBytes == nil || *node.EphemeralStorage.RequestedBytes != storageRequested {
+		t.Fatalf("expected storage requests %d, got %#v", storageRequested, node.EphemeralStorage)
 	}
 
 	if len(node.Workloads) != 2 {
@@ -654,6 +695,38 @@ func TestListClusterNodesIncludesCNPGBackingServiceWorkloads(t *testing.T) {
 			})
 		case "/api/v1/pods":
 			switch r.URL.Query().Get("labelSelector") {
+			case "":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"items": []map[string]any{
+						{
+							"metadata": map[string]any{
+								"name":      service.Spec.Postgres.ServiceName + "-1",
+								"namespace": namespace,
+								"labels": map[string]string{
+									"app.kubernetes.io/managed-by": "cloudnative-pg",
+									"cnpg.io/cluster":              service.Spec.Postgres.ServiceName,
+								},
+							},
+							"spec": map[string]any{
+								"nodeName": "worker-1",
+								"containers": []map[string]any{
+									{
+										"name": "postgres",
+										"resources": map[string]any{
+											"requests": map[string]string{
+												"cpu":    "250m",
+												"memory": "512Mi",
+											},
+										},
+									},
+								},
+							},
+							"status": map[string]any{
+								"phase": "Running",
+							},
+						},
+					},
+				})
 			case clusterNodeManagedPodLabelSelector:
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"items": []map[string]any{
@@ -669,6 +742,18 @@ func TestListClusterNodesIncludesCNPGBackingServiceWorkloads(t *testing.T) {
 							},
 							"spec": map[string]any{
 								"nodeName": "worker-1",
+								"containers": []map[string]any{
+									{
+										"name": "demo",
+										"resources": map[string]any{
+											"requests": map[string]string{
+												"cpu":               "100m",
+												"memory":            "128Mi",
+												"ephemeral-storage": "32Mi",
+											},
+										},
+									},
+								},
 							},
 							"status": map[string]any{
 								"phase": "Running",
@@ -690,6 +775,17 @@ func TestListClusterNodesIncludesCNPGBackingServiceWorkloads(t *testing.T) {
 							},
 							"spec": map[string]any{
 								"nodeName": "worker-1",
+								"containers": []map[string]any{
+									{
+										"name": "postgres",
+										"resources": map[string]any{
+											"requests": map[string]string{
+												"cpu":    "250m",
+												"memory": "512Mi",
+											},
+										},
+									},
+								},
 							},
 							"status": map[string]any{
 								"phase": "Running",
@@ -1393,7 +1489,7 @@ func TestBuildClusterNodeStorageStatsReconcilesStaleNodeCapacity(t *testing.T) {
 				UsedBytes:     &summaryUsed,
 			},
 		},
-	})
+	}, int64Ptr(0))
 	if stats == nil {
 		t.Fatal("expected storage stats")
 	}

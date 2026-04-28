@@ -139,21 +139,7 @@ type kubePod struct {
 		CreationTimestamp time.Time `json:"creationTimestamp"`
 		DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
 	} `json:"metadata"`
-	Spec struct {
-		NodeName string `json:"nodeName,omitempty"`
-		Volumes  []struct {
-			Name                  string `json:"name,omitempty"`
-			PersistentVolumeClaim *struct {
-				ClaimName string `json:"claimName,omitempty"`
-			} `json:"persistentVolumeClaim,omitempty"`
-		} `json:"volumes,omitempty"`
-		InitContainers []struct {
-			Name string `json:"name"`
-		} `json:"initContainers"`
-		Containers []struct {
-			Name string `json:"name"`
-		} `json:"containers"`
-	} `json:"spec"`
+	Spec   kubePodSpec `json:"spec"`
 	Status struct {
 		Phase                 string                `json:"phase"`
 		Reason                string                `json:"reason,omitempty"`
@@ -162,6 +148,32 @@ type kubePod struct {
 		InitContainerStatuses []kubeContainerStatus `json:"initContainerStatuses,omitempty"`
 		ContainerStatuses     []kubeContainerStatus `json:"containerStatuses,omitempty"`
 	} `json:"status"`
+}
+
+type kubePodSpec struct {
+	NodeName string          `json:"nodeName,omitempty"`
+	Volumes  []kubePodVolume `json:"volumes,omitempty"`
+
+	InitContainers []kubeContainerSpec `json:"initContainers"`
+	Containers     []kubeContainerSpec `json:"containers"`
+}
+
+type kubePodVolume struct {
+	Name                  string                   `json:"name,omitempty"`
+	PersistentVolumeClaim *kubePersistentVolumeRef `json:"persistentVolumeClaim,omitempty"`
+}
+
+type kubePersistentVolumeRef struct {
+	ClaimName string `json:"claimName,omitempty"`
+}
+
+type kubeContainerSpec struct {
+	Name      string                   `json:"name"`
+	Resources kubeResourceRequirements `json:"resources,omitempty"`
+}
+
+type kubeResourceRequirements struct {
+	Requests map[string]string `json:"requests,omitempty"`
 }
 
 type kubePodCondition struct {
@@ -443,6 +455,18 @@ func (c *kubeClient) listPodsBySelector(ctx context.Context, namespace, labelSel
 	})
 
 	return podList.Items, nil
+}
+
+func (c *kubeClient) listAllPods(ctx context.Context) ([]kubePod, bool, error) {
+	var podList kubePodList
+	status, err := c.doJSON(ctx, http.MethodGet, "/api/v1/pods", nil, &podList)
+	if err != nil {
+		if status == http.StatusForbidden || status == http.StatusNotFound {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return podList.Items, true, nil
 }
 
 func (c *kubeClient) getPersistentVolumeClaim(ctx context.Context, namespace, name string) (kubePersistentVolumeClaim, bool, error) {

@@ -4191,6 +4191,15 @@ components:
         usage_percent:
           type: number
           format: double
+        requested_millicores:
+          type: integer
+          format: int64
+        request_percent:
+          type: number
+          format: double
+        schedulable_free_millicores:
+          type: integer
+          format: int64
     ClusterNodeMemoryStats:
       type: object
       additionalProperties: false
@@ -4207,6 +4216,15 @@ components:
         usage_percent:
           type: number
           format: double
+        requested_bytes:
+          type: integer
+          format: int64
+        request_percent:
+          type: number
+          format: double
+        schedulable_free_bytes:
+          type: integer
+          format: int64
     ClusterNodeStorageStats:
       type: object
       additionalProperties: false
@@ -4223,6 +4241,15 @@ components:
         usage_percent:
           type: number
           format: double
+        requested_bytes:
+          type: integer
+          format: int64
+        request_percent:
+          type: number
+          format: double
+        schedulable_free_bytes:
+          type: integer
+          format: int64
     ClusterNodeWorkloadPod:
       type: object
       additionalProperties: false

@@ -201,6 +201,21 @@ func (s *Service) managedSharedPostgresPrimaryHostPlacement(
 		}
 	}
 
+	nodeRequestsByName, hasNodeRequests, err := managedSharedNodeRequestsByName(ctx, client)
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf(
+				"resolve shared postgres node request inventory for app=%s service=%s runtime=%s failed, continuing with allocatable-only placement: %v",
+				app.ID,
+				serviceName,
+				sourceRuntime.ID,
+				err,
+			)
+		}
+		hasNodeRequests = false
+	}
+	postgresRequest := managedPostgresPlacementRequest(spec)
+
 	nodeNames, err := client.listNodeNames(ctx)
 	if err != nil {
 		return runtimepkg.SchedulingConstraints{}, false, fmt.Errorf("list kubernetes nodes: %w", err)
@@ -219,17 +234,33 @@ func (s *Service) managedSharedPostgresPrimaryHostPlacement(
 		if !managedSharedNodeSchedulable(node) {
 			continue
 		}
+		requested := nodeRequestsByName[nodeName]
 		candidates = append(candidates, managedSharedNodeCandidate{
 			nodeName:                 nodeName,
 			overlapsTargetSelector:   len(targetSelector) > 0 && nodeLabelsMatchSelector(node.Metadata.Labels, targetSelector),
 			allocatableEphemeralByte: parseKubeResourceBytes(node.Status.Allocatable["ephemeral-storage"]),
 			allocatableMemoryBytes:   parseKubeResourceBytes(node.Status.Allocatable["memory"]),
 			allocatableCPUMilli:      parseKubeResourceMilli(node.Status.Allocatable["cpu"]),
+			requestedCPUMilli:        requested.cpuMilli,
+			requestedMemoryBytes:     requested.memoryBytes,
+			requestedEphemeralBytes:  requested.ephemeralBytes,
 		})
 	}
 
 	if len(candidates) == 0 {
 		return runtimepkg.SchedulingConstraints{}, false, nil
+	}
+	if hasNodeRequests {
+		filtered := candidates[:0]
+		for _, candidate := range candidates {
+			if candidate.fits(postgresRequest) {
+				filtered = append(filtered, candidate.withPostgresRequest(postgresRequest))
+			}
+		}
+		if len(filtered) == 0 {
+			return runtimepkg.SchedulingConstraints{}, false, nil
+		}
+		candidates = filtered
 	}
 
 	sort.SliceStable(candidates, func(i, j int) bool {
@@ -237,6 +268,14 @@ func (s *Service) managedSharedPostgresPrimaryHostPlacement(
 		right := candidates[j]
 		if left.overlapsTargetSelector != right.overlapsTargetSelector {
 			return !left.overlapsTargetSelector && right.overlapsTargetSelector
+		}
+		if hasNodeRequests {
+			if left.remainingMemoryBytes != right.remainingMemoryBytes {
+				return left.remainingMemoryBytes > right.remainingMemoryBytes
+			}
+			if left.remainingCPUMilli != right.remainingCPUMilli {
+				return left.remainingCPUMilli > right.remainingCPUMilli
+			}
 		}
 		if left.allocatableEphemeralByte != right.allocatableEphemeralByte {
 			return left.allocatableEphemeralByte > right.allocatableEphemeralByte
@@ -263,6 +302,36 @@ type managedSharedNodeCandidate struct {
 	allocatableEphemeralByte int64
 	allocatableMemoryBytes   int64
 	allocatableCPUMilli      int64
+	requestedEphemeralBytes  int64
+	requestedMemoryBytes     int64
+	requestedCPUMilli        int64
+	remainingMemoryBytes     int64
+	remainingCPUMilli        int64
+}
+
+type managedSharedNodeRequests struct {
+	cpuMilli       int64
+	memoryBytes    int64
+	ephemeralBytes int64
+}
+
+func (candidate managedSharedNodeCandidate) fits(request managedSharedNodeRequests) bool {
+	if candidate.allocatableCPUMilli > 0 && candidate.requestedCPUMilli+request.cpuMilli > candidate.allocatableCPUMilli {
+		return false
+	}
+	if candidate.allocatableMemoryBytes > 0 && candidate.requestedMemoryBytes+request.memoryBytes > candidate.allocatableMemoryBytes {
+		return false
+	}
+	if candidate.allocatableEphemeralByte > 0 && candidate.requestedEphemeralBytes+request.ephemeralBytes > candidate.allocatableEphemeralByte {
+		return false
+	}
+	return true
+}
+
+func (candidate managedSharedNodeCandidate) withPostgresRequest(request managedSharedNodeRequests) managedSharedNodeCandidate {
+	candidate.remainingCPUMilli = candidate.allocatableCPUMilli - candidate.requestedCPUMilli - request.cpuMilli
+	candidate.remainingMemoryBytes = candidate.allocatableMemoryBytes - candidate.requestedMemoryBytes - request.memoryBytes
+	return candidate
 }
 
 func managedSharedNodeSchedulable(node kubeNode) bool {
@@ -282,6 +351,70 @@ func managedSharedNodeSchedulable(node kubeNode) bool {
 		}
 	}
 	return true
+}
+
+func managedPostgresPlacementRequest(spec model.AppPostgresSpec) managedSharedNodeRequests {
+	resources := model.DefaultManagedPostgresResources()
+	if spec.Resources != nil {
+		resources = *spec.Resources
+	}
+	return managedSharedNodeRequests{
+		cpuMilli:    maxInt64(0, resources.CPUMilliCores),
+		memoryBytes: maxInt64(0, resources.MemoryMebibytes) * 1024 * 1024,
+	}
+}
+
+func managedSharedNodeRequestsByName(ctx context.Context, client *kubeClient) (map[string]managedSharedNodeRequests, bool, error) {
+	pods, found, err := client.listAllPods(ctx)
+	if err != nil || !found {
+		return nil, false, err
+	}
+	out := make(map[string]managedSharedNodeRequests)
+	for _, pod := range pods {
+		nodeName := strings.TrimSpace(pod.Spec.NodeName)
+		if nodeName == "" || managedPostgresPodFinished(pod) {
+			continue
+		}
+		request := kubePodRequests(pod)
+		current := out[nodeName]
+		current.cpuMilli += request.cpuMilli
+		current.memoryBytes += request.memoryBytes
+		current.ephemeralBytes += request.ephemeralBytes
+		out[nodeName] = current
+	}
+	return out, true, nil
+}
+
+func kubePodRequests(pod kubePod) managedSharedNodeRequests {
+	regular := kubeContainerRequests(pod.Spec.Containers)
+	init := kubeMaxContainerRequests(pod.Spec.InitContainers)
+	return managedSharedNodeRequests{
+		cpuMilli:       maxInt64(regular.cpuMilli, init.cpuMilli),
+		memoryBytes:    maxInt64(regular.memoryBytes, init.memoryBytes),
+		ephemeralBytes: maxInt64(regular.ephemeralBytes, init.ephemeralBytes),
+	}
+}
+
+func kubeContainerRequests(containers []kubeContainerSpec) managedSharedNodeRequests {
+	var total managedSharedNodeRequests
+	for _, container := range containers {
+		requests := container.Resources.Requests
+		total.cpuMilli += parseKubeResourceMilli(requests["cpu"])
+		total.memoryBytes += parseKubeResourceBytes(requests["memory"])
+		total.ephemeralBytes += parseKubeResourceBytes(requests["ephemeral-storage"])
+	}
+	return total
+}
+
+func kubeMaxContainerRequests(containers []kubeContainerSpec) managedSharedNodeRequests {
+	var total managedSharedNodeRequests
+	for _, container := range containers {
+		requests := container.Resources.Requests
+		total.cpuMilli = maxInt64(total.cpuMilli, parseKubeResourceMilli(requests["cpu"]))
+		total.memoryBytes = maxInt64(total.memoryBytes, parseKubeResourceBytes(requests["memory"]))
+		total.ephemeralBytes = maxInt64(total.ephemeralBytes, parseKubeResourceBytes(requests["ephemeral-storage"]))
+	}
+	return total
 }
 
 func kubeNodeConditionTrue(conditions []kubeNodeCondition, conditionType string) bool {
@@ -307,6 +440,13 @@ func parseKubeResourceBytes(value string) int64 {
 		return 0
 	}
 	return quantity.Value()
+}
+
+func maxInt64(left, right int64) int64 {
+	if left > right {
+		return left
+	}
+	return right
 }
 
 func matchingManagedSharedPostgresPrimaryNode(

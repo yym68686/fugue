@@ -28,8 +28,8 @@ const (
 	DefaultManagedAppCPUMilliCores         int64 = 250
 	DefaultManagedAppMemoryMebibytes       int64 = 512
 	DefaultManagedAppStorageGibibytes      int64 = 0
-	DefaultManagedPostgresCPUMilliCores    int64 = 500
-	DefaultManagedPostgresMemoryMebibytes  int64 = 1024
+	DefaultManagedPostgresCPUMilliCores    int64 = 250
+	DefaultManagedPostgresMemoryMebibytes  int64 = 512
 	DefaultManagedPostgresStorageGibibytes int64 = 1
 
 	DefaultManagedWorkspaceStorageSize = "10Gi"

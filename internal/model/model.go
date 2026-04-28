@@ -339,24 +339,33 @@ type ClusterNodeCondition struct {
 }
 
 type ClusterNodeCPUStats struct {
-	CapacityMilliCores    *int64   `json:"capacity_millicores,omitempty"`
-	AllocatableMilliCores *int64   `json:"allocatable_millicores,omitempty"`
-	UsedMilliCores        *int64   `json:"used_millicores,omitempty"`
-	UsagePercent          *float64 `json:"usage_percent,omitempty"`
+	CapacityMilliCores        *int64   `json:"capacity_millicores,omitempty"`
+	AllocatableMilliCores     *int64   `json:"allocatable_millicores,omitempty"`
+	UsedMilliCores            *int64   `json:"used_millicores,omitempty"`
+	UsagePercent              *float64 `json:"usage_percent,omitempty"`
+	RequestedMilliCores       *int64   `json:"requested_millicores,omitempty"`
+	RequestPercent            *float64 `json:"request_percent,omitempty"`
+	SchedulableFreeMilliCores *int64   `json:"schedulable_free_millicores,omitempty"`
 }
 
 type ClusterNodeMemoryStats struct {
-	CapacityBytes    *int64   `json:"capacity_bytes,omitempty"`
-	AllocatableBytes *int64   `json:"allocatable_bytes,omitempty"`
-	UsedBytes        *int64   `json:"used_bytes,omitempty"`
-	UsagePercent     *float64 `json:"usage_percent,omitempty"`
+	CapacityBytes        *int64   `json:"capacity_bytes,omitempty"`
+	AllocatableBytes     *int64   `json:"allocatable_bytes,omitempty"`
+	UsedBytes            *int64   `json:"used_bytes,omitempty"`
+	UsagePercent         *float64 `json:"usage_percent,omitempty"`
+	RequestedBytes       *int64   `json:"requested_bytes,omitempty"`
+	RequestPercent       *float64 `json:"request_percent,omitempty"`
+	SchedulableFreeBytes *int64   `json:"schedulable_free_bytes,omitempty"`
 }
 
 type ClusterNodeStorageStats struct {
-	CapacityBytes    *int64   `json:"capacity_bytes,omitempty"`
-	AllocatableBytes *int64   `json:"allocatable_bytes,omitempty"`
-	UsedBytes        *int64   `json:"used_bytes,omitempty"`
-	UsagePercent     *float64 `json:"usage_percent,omitempty"`
+	CapacityBytes        *int64   `json:"capacity_bytes,omitempty"`
+	AllocatableBytes     *int64   `json:"allocatable_bytes,omitempty"`
+	UsedBytes            *int64   `json:"used_bytes,omitempty"`
+	UsagePercent         *float64 `json:"usage_percent,omitempty"`
+	RequestedBytes       *int64   `json:"requested_bytes,omitempty"`
+	RequestPercent       *float64 `json:"request_percent,omitempty"`
+	SchedulableFreeBytes *int64   `json:"schedulable_free_bytes,omitempty"`
 }
 
 type ResourceUsage struct {

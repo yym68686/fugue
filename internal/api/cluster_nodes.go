@@ -177,11 +177,22 @@ type clusterNodePod struct {
 		Labels    map[string]string `json:"labels"`
 	} `json:"metadata"`
 	Spec struct {
-		NodeName string `json:"nodeName,omitempty"`
+		NodeName       string                 `json:"nodeName,omitempty"`
+		InitContainers []clusterNodeContainer `json:"initContainers,omitempty"`
+		Containers     []clusterNodeContainer `json:"containers,omitempty"`
 	} `json:"spec"`
 	Status struct {
 		Phase string `json:"phase,omitempty"`
 	} `json:"status"`
+}
+
+type clusterNodeContainer struct {
+	Name      string                          `json:"name,omitempty"`
+	Resources clusterNodeResourceRequirements `json:"resources,omitempty"`
+}
+
+type clusterNodeResourceRequirements struct {
+	Requests map[string]string `json:"requests,omitempty"`
 }
 
 type kubeNodeSummary struct {
@@ -952,6 +963,11 @@ func (c *clusterNodeClient) listClusterNodeInventory(ctx context.Context) ([]clu
 		return nil, err
 	}
 
+	requestPodsByNode, hasRequestPods, err := c.listActivePodsByNode(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	summariesByNode, err := c.listNodeSummaries(ctx, nodeList.Items)
 	if err != nil {
 		return nil, err
@@ -961,7 +977,7 @@ func (c *clusterNodeClient) listClusterNodeInventory(ctx context.Context) ([]clu
 	for _, item := range nodeList.Items {
 		name := strings.TrimSpace(item.Metadata.Name)
 		snapshots = append(snapshots, clusterNodeSnapshot{
-			node:         buildClusterNode(item, summariesByNode[name]),
+			node:         buildClusterNode(item, summariesByNode[name], requestPodsByNode[name], hasRequestPods),
 			identity:     buildClusterNodeIdentity(item),
 			managedOwned: strings.EqualFold(firstNodeLabel(item.Metadata.Labels, runtime.NodeModeLabelKey), model.RuntimeTypeManagedOwned),
 			sharedPool:   strings.EqualFold(firstNodeLabel(item.Metadata.Labels, runtime.SharedPoolLabelKey), runtime.SharedPoolLabelValue),
@@ -1015,6 +1031,30 @@ func (c *clusterNodeClient) listManagedPodsByNode(ctx context.Context) (map[stri
 	}
 
 	return podsByNode, nil
+}
+
+func (c *clusterNodeClient) listActivePodsByNode(ctx context.Context) (map[string][]clusterNodePod, bool, error) {
+	var podList clusterNodePodList
+	if err := c.doJSON(ctx, http.MethodGet, "/api/v1/pods", &podList); err != nil {
+		if strings.Contains(err.Error(), "status=403") || strings.Contains(err.Error(), "status=404") {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+
+	podsByNode := make(map[string][]clusterNodePod)
+	for _, pod := range podList.Items {
+		nodeName := strings.TrimSpace(pod.Spec.NodeName)
+		if nodeName == "" {
+			continue
+		}
+		phase := strings.TrimSpace(pod.Status.Phase)
+		if strings.EqualFold(phase, "Succeeded") || strings.EqualFold(phase, "Failed") {
+			continue
+		}
+		podsByNode[nodeName] = append(podsByNode[nodeName], pod)
+	}
+	return podsByNode, true, nil
 }
 
 func (c *clusterNodeClient) listNodeSummaries(ctx context.Context, nodes []kubeNode) (map[string]*kubeNodeSummary, error) {
@@ -1215,7 +1255,12 @@ func (c *clusterNodeClient) deleteBootstrapTokensByNodeKey(ctx context.Context, 
 	return deleted, nil
 }
 
-func buildClusterNode(node kubeNode, summary *kubeNodeSummary) model.ClusterNode {
+func buildClusterNode(node kubeNode, summary *kubeNodeSummary, pods []clusterNodePod, hasRequestPods bool) model.ClusterNode {
+	var requests *clusterNodeResourceRequests
+	if hasRequestPods {
+		value := clusterNodePodRequests(pods)
+		requests = &value
+	}
 	out := model.ClusterNode{
 		Name:             strings.TrimSpace(node.Metadata.Name),
 		Status:           kubeNodeReadyStatus(node),
@@ -1230,9 +1275,9 @@ func buildClusterNode(node kubeNode, summary *kubeNodeSummary) model.ClusterNode
 		KernelVersion:    strings.TrimSpace(node.Status.NodeInfo.KernelVersion),
 		ContainerRuntime: strings.TrimSpace(node.Status.NodeInfo.ContainerRuntime),
 		Conditions:       buildClusterNodeConditions(node.Status.Conditions),
-		CPU:              buildClusterNodeCPUStats(node, summary),
-		Memory:           buildClusterNodeMemoryStats(node, summary),
-		EphemeralStorage: buildClusterNodeStorageStats(node, summary),
+		CPU:              buildClusterNodeCPUStats(node, summary, clusterNodeRequestedCPU(requests)),
+		Memory:           buildClusterNodeMemoryStats(node, summary, clusterNodeRequestedMemory(requests)),
+		EphemeralStorage: buildClusterNodeStorageStats(node, summary, clusterNodeRequestedEphemeralStorage(requests)),
 	}
 	if createdAt := parseClusterNodeTimestamp(node.Metadata.CreationTimestamp); createdAt != nil {
 		out.CreatedAt = createdAt
@@ -1250,6 +1295,88 @@ func buildClusterNodeIdentity(node kubeNode) clusterNodeIdentity {
 		systemUUID: strings.TrimSpace(node.Status.NodeInfo.SystemUUID),
 		hostname:   strings.TrimSpace(hostname),
 	}
+}
+
+type clusterNodeResourceRequests struct {
+	cpuMilliCores         int64
+	memoryBytes           int64
+	ephemeralStorageBytes int64
+}
+
+func clusterNodeRequestedCPU(requests *clusterNodeResourceRequests) *int64 {
+	if requests == nil {
+		return nil
+	}
+	return int64Ptr(requests.cpuMilliCores)
+}
+
+func clusterNodeRequestedMemory(requests *clusterNodeResourceRequests) *int64 {
+	if requests == nil {
+		return nil
+	}
+	return int64Ptr(requests.memoryBytes)
+}
+
+func clusterNodeRequestedEphemeralStorage(requests *clusterNodeResourceRequests) *int64 {
+	if requests == nil {
+		return nil
+	}
+	return int64Ptr(requests.ephemeralStorageBytes)
+}
+
+func clusterNodePodRequests(pods []clusterNodePod) clusterNodeResourceRequests {
+	var total clusterNodeResourceRequests
+	for _, pod := range pods {
+		requests := clusterNodeSinglePodRequests(pod)
+		total.cpuMilliCores += requests.cpuMilliCores
+		total.memoryBytes += requests.memoryBytes
+		total.ephemeralStorageBytes += requests.ephemeralStorageBytes
+	}
+	return total
+}
+
+func clusterNodeSinglePodRequests(pod clusterNodePod) clusterNodeResourceRequests {
+	regular := clusterNodeContainerRequests(pod.Spec.Containers)
+	init := clusterNodeMaxContainerRequests(pod.Spec.InitContainers)
+	return clusterNodeResourceRequests{
+		cpuMilliCores:         maxInt64(regular.cpuMilliCores, init.cpuMilliCores),
+		memoryBytes:           maxInt64(regular.memoryBytes, init.memoryBytes),
+		ephemeralStorageBytes: maxInt64(regular.ephemeralStorageBytes, init.ephemeralStorageBytes),
+	}
+}
+
+func clusterNodeContainerRequests(containers []clusterNodeContainer) clusterNodeResourceRequests {
+	var total clusterNodeResourceRequests
+	for _, container := range containers {
+		requests := container.Resources.Requests
+		if value, ok := parseCPUQuantityMilli(requests["cpu"]); ok {
+			total.cpuMilliCores += value
+		}
+		if value, ok := parseBytesQuantity(requests["memory"]); ok {
+			total.memoryBytes += value
+		}
+		if value, ok := parseBytesQuantity(requests["ephemeral-storage"]); ok {
+			total.ephemeralStorageBytes += value
+		}
+	}
+	return total
+}
+
+func clusterNodeMaxContainerRequests(containers []clusterNodeContainer) clusterNodeResourceRequests {
+	var maxRequests clusterNodeResourceRequests
+	for _, container := range containers {
+		requests := container.Resources.Requests
+		if value, ok := parseCPUQuantityMilli(requests["cpu"]); ok && value > maxRequests.cpuMilliCores {
+			maxRequests.cpuMilliCores = value
+		}
+		if value, ok := parseBytesQuantity(requests["memory"]); ok && value > maxRequests.memoryBytes {
+			maxRequests.memoryBytes = value
+		}
+		if value, ok := parseBytesQuantity(requests["ephemeral-storage"]); ok && value > maxRequests.ephemeralStorageBytes {
+			maxRequests.ephemeralStorageBytes = value
+		}
+	}
+	return maxRequests
 }
 
 func clusterNodeHasRole(node model.ClusterNode, role string) bool {
@@ -1604,16 +1731,19 @@ func buildClusterNodeConditions(conditions []kubeNodeCondition) map[string]model
 	return out
 }
 
-func buildClusterNodeCPUStats(node kubeNode, summary *kubeNodeSummary) *model.ClusterNodeCPUStats {
+func buildClusterNodeCPUStats(node kubeNode, summary *kubeNodeSummary, requestedMilliCores *int64) *model.ClusterNodeCPUStats {
 	capacity := int64PointerFromQuantity(node.Status.Capacity["cpu"], parseCPUQuantityMilli)
 	allocatable := int64PointerFromQuantity(node.Status.Allocatable["cpu"], parseCPUQuantityMilli)
 	used := clusterNodeCPUMilliUsage(summary)
 
 	stats := &model.ClusterNodeCPUStats{
-		CapacityMilliCores:    capacity,
-		AllocatableMilliCores: allocatable,
-		UsedMilliCores:        used,
-		UsagePercent:          usagePercent(used, allocatable, capacity),
+		CapacityMilliCores:        capacity,
+		AllocatableMilliCores:     allocatable,
+		UsedMilliCores:            used,
+		UsagePercent:              usagePercent(used, allocatable, capacity),
+		RequestedMilliCores:       requestedMilliCores,
+		RequestPercent:            usagePercent(requestedMilliCores, allocatable, capacity),
+		SchedulableFreeMilliCores: schedulableFree(allocatable, requestedMilliCores),
 	}
 	if isEmptyClusterNodeCPUStats(stats) {
 		return nil
@@ -1621,16 +1751,19 @@ func buildClusterNodeCPUStats(node kubeNode, summary *kubeNodeSummary) *model.Cl
 	return stats
 }
 
-func buildClusterNodeMemoryStats(node kubeNode, summary *kubeNodeSummary) *model.ClusterNodeMemoryStats {
+func buildClusterNodeMemoryStats(node kubeNode, summary *kubeNodeSummary, requestedBytes *int64) *model.ClusterNodeMemoryStats {
 	capacity := int64PointerFromQuantity(node.Status.Capacity["memory"], parseBytesQuantity)
 	allocatable := int64PointerFromQuantity(node.Status.Allocatable["memory"], parseBytesQuantity)
 	used := clusterNodeMemoryUsage(summary, capacity)
 
 	stats := &model.ClusterNodeMemoryStats{
-		CapacityBytes:    capacity,
-		AllocatableBytes: allocatable,
-		UsedBytes:        used,
-		UsagePercent:     usagePercent(used, allocatable, capacity),
+		CapacityBytes:        capacity,
+		AllocatableBytes:     allocatable,
+		UsedBytes:            used,
+		UsagePercent:         usagePercent(used, allocatable, capacity),
+		RequestedBytes:       requestedBytes,
+		RequestPercent:       usagePercent(requestedBytes, allocatable, capacity),
+		SchedulableFreeBytes: schedulableFree(allocatable, requestedBytes),
 	}
 	if isEmptyClusterNodeMemoryStats(stats) {
 		return nil
@@ -1638,7 +1771,7 @@ func buildClusterNodeMemoryStats(node kubeNode, summary *kubeNodeSummary) *model
 	return stats
 }
 
-func buildClusterNodeStorageStats(node kubeNode, summary *kubeNodeSummary) *model.ClusterNodeStorageStats {
+func buildClusterNodeStorageStats(node kubeNode, summary *kubeNodeSummary, requestedBytes *int64) *model.ClusterNodeStorageStats {
 	reportedCapacity := int64PointerFromQuantity(node.Status.Capacity["ephemeral-storage"], parseBytesQuantity)
 	reportedAllocatable := int64PointerFromQuantity(node.Status.Allocatable["ephemeral-storage"], parseBytesQuantity)
 	used, summaryCapacity := clusterNodeStorageUsage(summary)
@@ -1649,10 +1782,13 @@ func buildClusterNodeStorageStats(node kubeNode, summary *kubeNodeSummary) *mode
 	)
 
 	stats := &model.ClusterNodeStorageStats{
-		CapacityBytes:    capacity,
-		AllocatableBytes: allocatable,
-		UsedBytes:        used,
-		UsagePercent:     usagePercent(used, allocatable, capacity),
+		CapacityBytes:        capacity,
+		AllocatableBytes:     allocatable,
+		UsedBytes:            used,
+		UsagePercent:         usagePercent(used, allocatable, capacity),
+		RequestedBytes:       requestedBytes,
+		RequestPercent:       usagePercent(requestedBytes, allocatable, capacity),
+		SchedulableFreeBytes: schedulableFree(allocatable, requestedBytes),
 	}
 	if isEmptyClusterNodeStorageStats(stats) {
 		return nil
@@ -2261,6 +2397,25 @@ func uint64PointerToInt64(value *uint64) *int64 {
 	return &parsed
 }
 
+func int64Ptr(value int64) *int64 {
+	return &value
+}
+
+func schedulableFree(allocatable, requested *int64) *int64 {
+	if allocatable == nil || requested == nil {
+		return nil
+	}
+	value := *allocatable - *requested
+	return &value
+}
+
+func maxInt64(left, right int64) int64 {
+	if left > right {
+		return left
+	}
+	return right
+}
+
 func usagePercent(used *int64, totals ...*int64) *float64 {
 	if used == nil || *used < 0 {
 		return nil
@@ -2280,7 +2435,10 @@ func isEmptyClusterNodeCPUStats(stats *model.ClusterNodeCPUStats) bool {
 		(stats.CapacityMilliCores == nil &&
 			stats.AllocatableMilliCores == nil &&
 			stats.UsedMilliCores == nil &&
-			stats.UsagePercent == nil)
+			stats.UsagePercent == nil &&
+			stats.RequestedMilliCores == nil &&
+			stats.RequestPercent == nil &&
+			stats.SchedulableFreeMilliCores == nil)
 }
 
 func isEmptyClusterNodeMemoryStats(stats *model.ClusterNodeMemoryStats) bool {
@@ -2288,7 +2446,10 @@ func isEmptyClusterNodeMemoryStats(stats *model.ClusterNodeMemoryStats) bool {
 		(stats.CapacityBytes == nil &&
 			stats.AllocatableBytes == nil &&
 			stats.UsedBytes == nil &&
-			stats.UsagePercent == nil)
+			stats.UsagePercent == nil &&
+			stats.RequestedBytes == nil &&
+			stats.RequestPercent == nil &&
+			stats.SchedulableFreeBytes == nil)
 }
 
 func isEmptyClusterNodeStorageStats(stats *model.ClusterNodeStorageStats) bool {
@@ -2296,7 +2457,10 @@ func isEmptyClusterNodeStorageStats(stats *model.ClusterNodeStorageStats) bool {
 		(stats.CapacityBytes == nil &&
 			stats.AllocatableBytes == nil &&
 			stats.UsedBytes == nil &&
-			stats.UsagePercent == nil)
+			stats.UsagePercent == nil &&
+			stats.RequestedBytes == nil &&
+			stats.RequestPercent == nil &&
+			stats.SchedulableFreeBytes == nil)
 }
 
 func parseCPUQuantityMilli(value string) (int64, bool) {

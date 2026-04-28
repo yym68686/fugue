@@ -720,6 +720,130 @@ func TestManagedPostgresPlacementsChoosesHealthiestSharedSourceNodeWithoutFailov
 	}
 }
 
+func TestManagedPostgresPlacementsAvoidsSharedNodeWithoutRequestHeadroom(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Placement Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	if err := stateStore.SyncManagedSharedLocationRuntimes([]map[string]string{{
+		runtimepkg.LocationCountryCodeLabelKey: "us",
+	}}); err != nil {
+		t.Fatalf("sync shared runtimes: %v", err)
+	}
+
+	sourceRuntimeID := managedSharedRuntimeIDForLabels(t, stateStore, map[string]string{
+		runtimepkg.LocationCountryCodeLabelKey: "us",
+	})
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: tenant.ID,
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			RuntimeID: sourceRuntimeID,
+			Postgres: &model.AppPostgresSpec{
+				Database:    "demo",
+				User:        "demo",
+				Password:    "secret",
+				ServiceName: "demo-postgres",
+				RuntimeID:   sourceRuntimeID,
+			},
+		},
+	}
+
+	namespace := runtimepkg.NamespaceForTenant(app.TenantID)
+	sharedLargeFullNode := "shared-large-full"
+	sharedSmallFreeNode := "shared-small-free"
+
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case cloudNativePGClusterAPIPath(namespace, "demo-postgres"):
+			http.NotFound(w, r)
+		case "/api/v1/pods":
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{
+							"name": "existing-postgres-1",
+						},
+						"spec": map[string]any{
+							"nodeName": sharedLargeFullNode,
+							"containers": []map[string]any{
+								{
+									"name": "postgres",
+									"resources": map[string]any{
+										"requests": map[string]string{
+											"cpu":    "3900m",
+											"memory": "7800Mi",
+										},
+									},
+								},
+							},
+						},
+						"status": map[string]any{
+							"phase": "Running",
+						},
+					},
+				},
+			}); err != nil {
+				t.Fatalf("encode pod list: %v", err)
+			}
+		case "/api/v1/nodes":
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{"metadata": map[string]any{"name": sharedLargeFullNode}},
+					{"metadata": map[string]any{"name": sharedSmallFreeNode}},
+				},
+			}); err != nil {
+				t.Fatalf("encode node list: %v", err)
+			}
+		case "/api/v1/nodes/" + sharedLargeFullNode:
+			encodeSharedPlacementNode(t, w, sharedLargeFullNode, "us", "4", "8Gi", "80Gi")
+		case "/api/v1/nodes/" + sharedSmallFreeNode:
+			encodeSharedPlacementNode(t, w, sharedSmallFreeNode, "us", "2", "4Gi", "20Gi")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	svc := &Service{
+		Store:  stateStore,
+		Logger: log.New(io.Discard, "", 0),
+		newKubeClient: func(namespace string) (*kubeClient, error) {
+			return &kubeClient{
+				client:      kubeServer.Client(),
+				baseURL:     kubeServer.URL,
+				bearerToken: "test",
+				namespace:   namespace,
+			}, nil
+		},
+	}
+
+	placements, err := svc.managedPostgresPlacements(context.Background(), app)
+	if err != nil {
+		t.Fatalf("resolve postgres placements: %v", err)
+	}
+
+	servicePlacements := placements["demo-postgres"]
+	if len(servicePlacements) != 1 {
+		t.Fatalf("expected one placement, got %d", len(servicePlacements))
+	}
+	if got := servicePlacements[0].NodeSelector[kubeHostnameLabelKey]; got != sharedSmallFreeNode {
+		t.Fatalf("expected shared node with request headroom %q, got %q", sharedSmallFreeNode, got)
+	}
+}
+
 func encodeSharedPlacementNode(t *testing.T, w http.ResponseWriter, name, country, cpu, memory, storage string) {
 	t.Helper()
 	if err := json.NewEncoder(w).Encode(map[string]any{

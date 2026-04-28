@@ -640,21 +640,7 @@ func TestWaitForManagedAppRolloutAllowsManagedPostgresPrimaryRecoveryAndCleansUp
 							CreationTimestamp: time.Date(2026, time.April, 12, 10, 0, 0, 0, time.UTC),
 							DeletionTimestamp: time.Date(2026, time.April, 12, 11, 0, 0, 0, time.UTC).Format(time.RFC3339),
 						},
-						Spec: struct {
-							NodeName string `json:"nodeName,omitempty"`
-							Volumes  []struct {
-								Name                  string `json:"name,omitempty"`
-								PersistentVolumeClaim *struct {
-									ClaimName string `json:"claimName,omitempty"`
-								} `json:"persistentVolumeClaim,omitempty"`
-							} `json:"volumes,omitempty"`
-							InitContainers []struct {
-								Name string `json:"name"`
-							} `json:"initContainers"`
-							Containers []struct {
-								Name string `json:"name"`
-							} `json:"containers"`
-						}{
+						Spec: kubePodSpec{
 							NodeName: "node-old",
 						},
 					},
@@ -667,21 +653,7 @@ func TestWaitForManagedAppRolloutAllowsManagedPostgresPrimaryRecoveryAndCleansUp
 							Name:              "demo-postgres-4",
 							CreationTimestamp: time.Date(2026, time.April, 12, 11, 10, 0, 0, time.UTC),
 						},
-						Spec: struct {
-							NodeName string `json:"nodeName,omitempty"`
-							Volumes  []struct {
-								Name                  string `json:"name,omitempty"`
-								PersistentVolumeClaim *struct {
-									ClaimName string `json:"claimName,omitempty"`
-								} `json:"persistentVolumeClaim,omitempty"`
-							} `json:"volumes,omitempty"`
-							InitContainers []struct {
-								Name string `json:"name"`
-							} `json:"initContainers"`
-							Containers []struct {
-								Name string `json:"name"`
-							} `json:"containers"`
-						}{
+						Spec: kubePodSpec{
 							NodeName: "node-new",
 						},
 					},

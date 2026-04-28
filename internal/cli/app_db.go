@@ -71,6 +71,8 @@ func (c *CLI) newAppDatabaseConfigureCommand() *cobra.Command {
 		ServiceName         string
 		StorageSize         string
 		StorageClass        string
+		CPUMilliCores       int64
+		MemoryMebibytes     int64
 		Instances           int
 		SynchronousReplicas int
 		PrimaryNodeName     string
@@ -154,6 +156,19 @@ for the managed database. Add flags only for the parts you want to customize.
 			if flagChanged(cmd, "storage-class") {
 				spec.Postgres.StorageClassName = strings.TrimSpace(opts.StorageClass)
 			}
+			if flagChanged(cmd, "cpu-millicores") || flagChanged(cmd, "memory-mebibytes") {
+				resources := model.DefaultManagedPostgresResources()
+				if spec.Postgres.Resources != nil {
+					resources = *spec.Postgres.Resources
+				}
+				if flagChanged(cmd, "cpu-millicores") {
+					resources.CPUMilliCores = opts.CPUMilliCores
+				}
+				if flagChanged(cmd, "memory-mebibytes") {
+					resources.MemoryMebibytes = opts.MemoryMebibytes
+				}
+				spec.Postgres.Resources = &resources
+			}
 			if flagChanged(cmd, "instances") {
 				spec.Postgres.Instances = opts.Instances
 			}
@@ -201,6 +216,8 @@ for the managed database. Add flags only for the parts you want to customize.
 	cmd.Flags().StringVar(&opts.ServiceName, "service-name", "", "Service name override")
 	cmd.Flags().StringVar(&opts.StorageSize, "storage-size", "", "Persistent storage size")
 	cmd.Flags().StringVar(&opts.StorageClass, "storage-class", "", "Persistent storage class")
+	cmd.Flags().Int64Var(&opts.CPUMilliCores, "cpu-millicores", 0, "Managed Postgres CPU request in millicores")
+	cmd.Flags().Int64Var(&opts.MemoryMebibytes, "memory-mebibytes", 0, "Managed Postgres memory request in MiB")
 	cmd.Flags().IntVar(&opts.Instances, "instances", 0, "Managed Postgres instance count")
 	cmd.Flags().IntVar(&opts.SynchronousReplicas, "sync-replicas", 0, "Managed Postgres synchronous replica count")
 	cmd.Flags().StringVar(&opts.PrimaryNodeName, "primary-node", "", "Kubernetes node name to pin the managed Postgres primary on shared runtimes")
@@ -453,6 +470,8 @@ func (c *CLI) renderAppDatabaseState(app model.App, operation *model.Operation, 
 			kvPair{Key: "service_name", Value: strings.TrimSpace(database.ServiceName)},
 			kvPair{Key: "storage_size", Value: strings.TrimSpace(database.StorageSize)},
 			kvPair{Key: "storage_class", Value: strings.TrimSpace(database.StorageClassName)},
+			kvPair{Key: "cpu_millicores", Value: formatAppDatabaseResourceValue(database.Resources, func(resources *model.ResourceSpec) int64 { return resources.CPUMilliCores })},
+			kvPair{Key: "memory_mebibytes", Value: formatAppDatabaseResourceValue(database.Resources, func(resources *model.ResourceSpec) int64 { return resources.MemoryMebibytes })},
 			kvPair{Key: "instances", Value: fmt.Sprintf("%d", database.Instances)},
 			kvPair{Key: "sync_replicas", Value: fmt.Sprintf("%d", database.SynchronousReplicas)},
 			kvPair{Key: "failover_target_runtime_id", Value: strings.TrimSpace(database.FailoverTargetRuntimeID)},
@@ -482,6 +501,17 @@ func ownedManagedPostgresSpec(app model.App) *model.AppPostgresSpec {
 	}
 
 	return nil
+}
+
+func formatAppDatabaseResourceValue(resources *model.ResourceSpec, selectValue func(*model.ResourceSpec) int64) string {
+	if resources == nil || selectValue == nil {
+		return ""
+	}
+	value := selectValue(resources)
+	if value <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d", value)
 }
 
 func normalizeAppDatabasePostgresSpec(appName, appRuntimeID string, spec model.AppPostgresSpec) model.AppPostgresSpec {

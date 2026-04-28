@@ -251,21 +251,7 @@ func TestBuildManagedAppStatusMarksCrashLoopingPodsAsError(t *testing.T) {
 				Name:              "demo-abc123",
 				CreationTimestamp: time.Date(2026, time.March, 26, 10, 0, 0, 0, time.UTC),
 			},
-			Spec: struct {
-				NodeName string `json:"nodeName,omitempty"`
-				Volumes  []struct {
-					Name                  string `json:"name,omitempty"`
-					PersistentVolumeClaim *struct {
-						ClaimName string `json:"claimName,omitempty"`
-					} `json:"persistentVolumeClaim,omitempty"`
-				} `json:"volumes,omitempty"`
-				InitContainers []struct {
-					Name string `json:"name"`
-				} `json:"initContainers"`
-				Containers []struct {
-					Name string `json:"name"`
-				} `json:"containers"`
-			}{
+			Spec: kubePodSpec{
 				NodeName: "gcp1",
 			},
 			Status: struct {
@@ -356,21 +342,7 @@ func TestBuildManagedAppStatusPrefersPodFailureOverDeploymentCondition(t *testin
 				Name:              "demo-abc123",
 				CreationTimestamp: time.Date(2026, time.March, 26, 10, 0, 0, 0, time.UTC),
 			},
-			Spec: struct {
-				NodeName string `json:"nodeName,omitempty"`
-				Volumes  []struct {
-					Name                  string `json:"name,omitempty"`
-					PersistentVolumeClaim *struct {
-						ClaimName string `json:"claimName,omitempty"`
-					} `json:"persistentVolumeClaim,omitempty"`
-				} `json:"volumes,omitempty"`
-				InitContainers []struct {
-					Name string `json:"name"`
-				} `json:"initContainers"`
-				Containers []struct {
-					Name string `json:"name"`
-				} `json:"containers"`
-			}{
+			Spec: kubePodSpec{
 				NodeName: "gcp1",
 			},
 			Status: struct {

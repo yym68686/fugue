@@ -492,7 +492,7 @@ func writeClusterNodeTable(w io.Writer, nodes []model.ClusterNode) error {
 		return strings.Compare(sorted[i].Name, sorted[j].Name) < 0
 	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "NODE\tSTATUS\tRUNTIME\tROLES\tREGION\tBUILD\tSHARED\tMODE\tCP\tCPU\tMEMORY"); err != nil {
+	if _, err := fmt.Fprintln(tw, "NODE\tSTATUS\tRUNTIME\tROLES\tREGION\tBUILD\tSHARED\tMODE\tCP\tCPU\tCPU_REQ\tMEMORY\tMEM_REQ"); err != nil {
 		return err
 	}
 	for _, node := range sorted {
@@ -500,13 +500,21 @@ func writeClusterNodeTable(w io.Writer, nodes []model.ClusterNode) error {
 		if node.CPU != nil && node.CPU.UsagePercent != nil {
 			cpu = fmt.Sprintf("%.0f%%", *node.CPU.UsagePercent)
 		}
+		cpuRequest := ""
+		if node.CPU != nil && node.CPU.RequestPercent != nil {
+			cpuRequest = fmt.Sprintf("%.0f%%", *node.CPU.RequestPercent)
+		}
 		memory := ""
 		if node.Memory != nil && node.Memory.UsagePercent != nil {
 			memory = fmt.Sprintf("%.0f%%", *node.Memory.UsagePercent)
 		}
+		memoryRequest := ""
+		if node.Memory != nil && node.Memory.RequestPercent != nil {
+			memoryRequest = fmt.Sprintf("%.0f%%", *node.Memory.RequestPercent)
+		}
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			node.Name,
 			firstNonEmpty(node.Status, "-"),
 			firstNonEmpty(node.RuntimeID, "-"),
@@ -517,7 +525,9 @@ func writeClusterNodeTable(w io.Writer, nodes []model.ClusterNode) error {
 			firstNonEmpty(strings.TrimSpace(clusterNodePolicyMode(node.Policy)), "-"),
 			firstNonEmpty(strings.TrimSpace(clusterNodePolicyControlPlane(node.Policy)), "-"),
 			firstNonEmpty(cpu, "-"),
+			firstNonEmpty(cpuRequest, "-"),
 			firstNonEmpty(memory, "-"),
+			firstNonEmpty(memoryRequest, "-"),
 		); err != nil {
 			return err
 		}
