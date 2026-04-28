@@ -176,6 +176,10 @@ func cloneAppSpec(spec model.AppSpec) model.AppSpec {
 		resources := *spec.Resources
 		out.Resources = &resources
 	}
+	if spec.RightSizing != nil {
+		rightSizing := *spec.RightSizing
+		out.RightSizing = &rightSizing
+	}
 	if spec.Postgres != nil {
 		postgres := *spec.Postgres
 		if spec.Postgres.Resources != nil {

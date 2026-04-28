@@ -316,10 +316,10 @@ type managedSharedNodeRequests struct {
 }
 
 func (candidate managedSharedNodeCandidate) fits(request managedSharedNodeRequests) bool {
-	if candidate.allocatableCPUMilli > 0 && candidate.requestedCPUMilli+request.cpuMilli > candidate.allocatableCPUMilli {
+	if candidate.allocatableCPUMilli > 0 && candidate.requestedCPUMilli+request.cpuMilli > resourceCapacityWithRatio(candidate.allocatableCPUMilli, 1.5) {
 		return false
 	}
-	if candidate.allocatableMemoryBytes > 0 && candidate.requestedMemoryBytes+request.memoryBytes > candidate.allocatableMemoryBytes {
+	if candidate.allocatableMemoryBytes > 0 && candidate.requestedMemoryBytes+request.memoryBytes > resourceCapacityWithRatio(candidate.allocatableMemoryBytes, 0.9) {
 		return false
 	}
 	if candidate.allocatableEphemeralByte > 0 && candidate.requestedEphemeralBytes+request.ephemeralBytes > candidate.allocatableEphemeralByte {
@@ -329,9 +329,16 @@ func (candidate managedSharedNodeCandidate) fits(request managedSharedNodeReques
 }
 
 func (candidate managedSharedNodeCandidate) withPostgresRequest(request managedSharedNodeRequests) managedSharedNodeCandidate {
-	candidate.remainingCPUMilli = candidate.allocatableCPUMilli - candidate.requestedCPUMilli - request.cpuMilli
-	candidate.remainingMemoryBytes = candidate.allocatableMemoryBytes - candidate.requestedMemoryBytes - request.memoryBytes
+	candidate.remainingCPUMilli = resourceCapacityWithRatio(candidate.allocatableCPUMilli, 1.5) - candidate.requestedCPUMilli - request.cpuMilli
+	candidate.remainingMemoryBytes = resourceCapacityWithRatio(candidate.allocatableMemoryBytes, 0.9) - candidate.requestedMemoryBytes - request.memoryBytes
 	return candidate
+}
+
+func resourceCapacityWithRatio(value int64, ratio float64) int64 {
+	if value <= 0 || ratio <= 0 {
+		return value
+	}
+	return int64(float64(value) * ratio)
 }
 
 func managedSharedNodeSchedulable(node kubeNode) bool {

@@ -349,7 +349,7 @@ func (s *Service) executeManagedFailoverOperation(ctx context.Context, op model.
 		fencedApp := app
 		fencedApp.Spec.RuntimeID = sourceRuntimeID
 		fencedApp.Spec.Replicas = 0
-		scheduling, err := s.managedSchedulingConstraints(fencedApp.Spec.RuntimeID)
+		scheduling, err := s.managedSchedulingConstraintsForApp(ctx, fencedApp)
 		if err != nil {
 			return err
 		}
@@ -378,7 +378,7 @@ func (s *Service) executeManagedFailoverOperation(ctx context.Context, op model.
 	if err != nil {
 		return fmt.Errorf("overlay managed postgres failover state for app %s: %w", app.ID, err)
 	}
-	scheduling, err := s.managedSchedulingConstraints(failedOverApp.Spec.RuntimeID)
+	scheduling, err := s.managedSchedulingConstraintsForApp(ctx, failedOverApp)
 	if err != nil {
 		return err
 	}

@@ -4,8 +4,14 @@ import (
 	"context"
 	"math"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
+)
+
+const (
+	resourceUsageSampleInterval  = 5 * time.Minute
+	resourceUsageSampleRetention = 168 * time.Hour
 )
 
 type currentResourceUsageOverlay struct {
@@ -145,6 +151,103 @@ func buildCurrentResourceUsageOverlay(snapshots []clusterNodeSnapshot, apps []mo
 	}
 
 	return overlay
+}
+
+func (s *Server) startResourceUsageSamplingLoop(ctx context.Context) {
+	if s == nil || ctx == nil || s.store == nil {
+		return
+	}
+	go func() {
+		timer := time.NewTimer(15 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				if err := s.recordCurrentResourceUsageSamples(ctx); err != nil && s.log != nil {
+					s.log.Printf("resource usage sampling failed: %v", err)
+				}
+				timer.Reset(resourceUsageSampleInterval)
+			}
+		}
+	}()
+}
+
+func (s *Server) recordCurrentResourceUsageSamples(ctx context.Context) error {
+	apps, err := s.store.ListApps("", true)
+	if err != nil {
+		return err
+	}
+	services, err := s.store.ListBackingServices("", true)
+	if err != nil {
+		return err
+	}
+	if len(apps) == 0 && len(services) == 0 {
+		return nil
+	}
+	snapshots, err := s.loadClusterNodeInventory(ctx)
+	if err != nil {
+		return err
+	}
+	overlay := buildCurrentResourceUsageOverlay(snapshots, apps, services)
+	now := time.Now().UTC()
+	samples := buildResourceUsageSamples(now, apps, services, overlay)
+	return s.store.RecordResourceUsageSamples(samples, now.Add(-resourceUsageSampleRetention))
+}
+
+func buildResourceUsageSamples(
+	observedAt time.Time,
+	apps []model.App,
+	services []model.BackingService,
+	overlay currentResourceUsageOverlay,
+) []model.ResourceUsageSample {
+	samples := make([]model.ResourceUsageSample, 0, len(overlay.apps)+len(overlay.services))
+	for _, app := range apps {
+		id := strings.TrimSpace(app.ID)
+		usage, ok := overlay.apps[id]
+		if !ok || isEmptyResourceUsage(usage) {
+			continue
+		}
+		samples = append(samples, resourceUsageSampleFromUsage(observedAt, model.ClusterNodeWorkloadKindApp, app.TenantID, app.ProjectID, app.ID, app.Name, "", usage))
+	}
+	for _, service := range services {
+		id := strings.TrimSpace(service.ID)
+		usage, ok := overlay.services[id]
+		if !ok || isEmptyResourceUsage(usage) {
+			continue
+		}
+		samples = append(samples, resourceUsageSampleFromUsage(observedAt, model.ClusterNodeWorkloadKindBackingService, service.TenantID, service.ProjectID, service.ID, service.Name, service.Type, usage))
+	}
+	return samples
+}
+
+func resourceUsageSampleFromUsage(observedAt time.Time, targetKind, tenantID, projectID, targetID, targetName, serviceType string, usage model.ResourceUsage) model.ResourceUsageSample {
+	return model.ResourceUsageSample{
+		ID:                    model.NewID("usage"),
+		TenantID:              strings.TrimSpace(tenantID),
+		ProjectID:             strings.TrimSpace(projectID),
+		TargetKind:            strings.TrimSpace(targetKind),
+		TargetID:              strings.TrimSpace(targetID),
+		TargetName:            strings.TrimSpace(targetName),
+		ServiceType:           strings.TrimSpace(serviceType),
+		ObservedAt:            observedAt,
+		CPUMilliCores:         cloneInt64Pointer(usage.CPUMilliCores),
+		MemoryBytes:           cloneInt64Pointer(usage.MemoryBytes),
+		EphemeralStorageBytes: cloneInt64Pointer(usage.EphemeralStorageBytes),
+	}
+}
+
+func isEmptyResourceUsage(usage model.ResourceUsage) bool {
+	return usage.CPUMilliCores == nil && usage.MemoryBytes == nil && usage.EphemeralStorageBytes == nil
+}
+
+func cloneInt64Pointer(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	out := *value
+	return &out
 }
 
 func collectAppBackingServices(apps []model.App) []model.BackingService {

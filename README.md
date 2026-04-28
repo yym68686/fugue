@@ -21,7 +21,7 @@ Fugue is a multi-tenant application control plane for k3s. It combines an OpenAP
 - Async deploy, rebuild, scale, restart, migrate, failover, and delete operations.
 - App domains/routes, env/config/files/workspace management, runtime/build logs, and operation history.
 - Backing services and service bindings, including managed PostgreSQL flows.
-- Cluster inventory, current resource usage overlays, runtime sharing, and control-plane status inspection.
+- Cluster inventory, current/resource-request capacity overlays, resource right-sizing, runtime sharing, and control-plane status inspection.
 
 ## CLI quick start
 
@@ -98,6 +98,8 @@ Common workflows:
 - `fugue app diagnose my-app`
 - `fugue app logs runtime my-app --follow`
 - `fugue app service attach my-app postgres`
+- `fugue app resources recommend my-app`
+- `fugue app resources auto my-app --mode auto`
 - `fugue app failover status my-app`
 - `fugue app failover run my-app --to runtime-b`
 - `fugue runtime enroll create edge-a`
@@ -145,6 +147,8 @@ Common workflows:
 `fugue app logs build` now renders the artifact chain as part of the text output: build, push, publish, deploy, and runtime. It also tells you whether a builder job was actually observed, whether registry logs showed a manifest `PUT`, and whether the current root cause is "published earlier and later deleted" versus "no publish was observed for this import". Use it when `"import build completed"` alone is too weak and you need to verify whether the image was recorded, published to the registry, linked to deploy, and then observed in runtime pods.
 
 `fugue app logs pods` shows the current pod group plus recent ReplicaSet rollout context, including the revision that replaced an older pod set. This is the CLI path for seeing old rollout context even after `app overview` has moved on to the new revision.
+
+`fugue app resources recommend/apply/auto` uses the control plane's 7-day resource samples to right-size app and managed PostgreSQL requests. The policy keeps memory conservative, leaves CPU limits unset for normal services, and keeps critical workloads such as PostgreSQL pinned to tighter request/limit envelopes.
 
 `fugue app request` lets you call an app's own internal HTTP routes from the control plane side, including admin endpoints that require service keys already present in the app env. Pass `--header-from-env Header=ENV_KEY` to fill auth headers from the effective app env instead of copying secrets into your shell.
 

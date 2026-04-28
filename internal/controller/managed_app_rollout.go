@@ -16,7 +16,7 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, o
 		return fmt.Errorf("initialize kubernetes rollout client: %w", err)
 	}
 	app = s.Renderer.PrepareApp(app)
-	scheduling, err := s.managedSchedulingConstraints(app.Spec.RuntimeID)
+	scheduling, err := s.managedSchedulingConstraintsForApp(ctx, app)
 	if err != nil {
 		return err
 	}
@@ -114,7 +114,7 @@ func (s *Service) managedBackingServiceRolloutTargets(ctx context.Context, app m
 	if err != nil {
 		return nil, fmt.Errorf("resolve postgres placements: %w", err)
 	}
-	scheduling, err := s.managedSchedulingConstraints(app.Spec.RuntimeID)
+	scheduling, err := s.managedSchedulingConstraintsForApp(ctx, app)
 	if err != nil {
 		return nil, err
 	}

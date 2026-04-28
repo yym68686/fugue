@@ -210,7 +210,19 @@ func normalizeAppSpecResources(spec *model.AppSpec) error {
 	if spec.ImageMirrorLimit < 0 {
 		return ErrInvalidInput
 	}
+	if strings.TrimSpace(spec.WorkloadClass) != "" && model.NormalizeWorkloadClass(spec.WorkloadClass) == "" {
+		return ErrInvalidInput
+	}
+	if spec.RightSizing != nil && strings.TrimSpace(spec.RightSizing.Mode) != "" && model.NormalizeAppRightSizingMode(spec.RightSizing.Mode) == "" {
+		return ErrInvalidInput
+	}
 	model.ApplyAppSpecDefaults(spec)
+	if model.NormalizeWorkloadClass(spec.WorkloadClass) == "" {
+		return ErrInvalidInput
+	}
+	if spec.RightSizing != nil && model.NormalizeAppRightSizingMode(spec.RightSizing.Mode) == "" {
+		return ErrInvalidInput
+	}
 	resources, err := normalizeOptionalWorkloadResources(spec.Resources)
 	if err != nil {
 		return err
@@ -229,11 +241,23 @@ func normalizeOptionalWorkloadResources(spec *model.ResourceSpec) (*model.Resour
 		return nil, nil
 	}
 	out := *spec
-	if out.CPUMilliCores < 0 || out.MemoryMebibytes < 0 {
+	if out.CPUMilliCores < 0 || out.MemoryMebibytes < 0 || out.CPULimitMilliCores < 0 || out.MemoryLimitMebibytes < 0 {
 		return nil, ErrInvalidInput
 	}
-	if out.CPUMilliCores == 0 && out.MemoryMebibytes == 0 {
+	if out.CPUMilliCores == 0 && out.MemoryMebibytes == 0 && out.CPULimitMilliCores == 0 && out.MemoryLimitMebibytes == 0 {
 		return nil, nil
+	}
+	if out.CPULimitMilliCores > 0 && out.CPUMilliCores == 0 {
+		return nil, ErrInvalidInput
+	}
+	if out.MemoryLimitMebibytes > 0 && out.MemoryMebibytes == 0 {
+		return nil, ErrInvalidInput
+	}
+	if out.CPULimitMilliCores > 0 && out.CPUMilliCores > 0 && out.CPULimitMilliCores < out.CPUMilliCores {
+		return nil, ErrInvalidInput
+	}
+	if out.MemoryLimitMebibytes > 0 && out.MemoryMebibytes > 0 && out.MemoryLimitMebibytes < out.MemoryMebibytes {
+		return nil, ErrInvalidInput
 	}
 	return &out, nil
 }
@@ -256,7 +280,7 @@ func normalizeWorkloadResources(spec *model.ResourceSpec, defaults model.Resourc
 		return &value, nil
 	}
 	out := *spec
-	if out.CPUMilliCores < 0 || out.MemoryMebibytes < 0 {
+	if out.CPUMilliCores < 0 || out.MemoryMebibytes < 0 || out.CPULimitMilliCores < 0 || out.MemoryLimitMebibytes < 0 {
 		return nil, ErrInvalidInput
 	}
 	if out.CPUMilliCores == 0 {
@@ -264,6 +288,12 @@ func normalizeWorkloadResources(spec *model.ResourceSpec, defaults model.Resourc
 	}
 	if out.MemoryMebibytes == 0 {
 		out.MemoryMebibytes = defaults.MemoryMebibytes
+	}
+	if out.CPULimitMilliCores > 0 && out.CPULimitMilliCores < out.CPUMilliCores {
+		return nil, ErrInvalidInput
+	}
+	if out.MemoryLimitMebibytes > 0 && out.MemoryLimitMebibytes < out.MemoryMebibytes {
+		return nil, ErrInvalidInput
 	}
 	if out.CPUMilliCores <= 0 || out.MemoryMebibytes <= 0 {
 		return nil, ErrInvalidInput

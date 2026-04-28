@@ -25,13 +25,14 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		StartupCommand    *string                         `json:"startup_command,omitempty"`
 		PersistentStorage *model.AppPersistentStorageSpec `json:"persistent_storage,omitempty"`
 		VolumeReplication *model.AppVolumeReplicationSpec `json:"volume_replication,omitempty"`
+		RightSizing       *model.AppRightSizingSpec       `json:"right_sizing,omitempty"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.ImageMirrorLimit == nil && req.StartupCommand == nil && req.PersistentStorage == nil && req.VolumeReplication == nil {
-		httpx.WriteError(w, http.StatusBadRequest, "image_mirror_limit, startup_command, persistent_storage, or volume_replication is required")
+	if req.ImageMirrorLimit == nil && req.StartupCommand == nil && req.PersistentStorage == nil && req.VolumeReplication == nil && req.RightSizing == nil {
+		httpx.WriteError(w, http.StatusBadRequest, "image_mirror_limit, startup_command, persistent_storage, volume_replication, or right_sizing is required")
 		return
 	}
 	if req.ImageMirrorLimit != nil && *req.ImageMirrorLimit < 0 {
@@ -68,7 +69,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var operation *model.Operation
-	if req.StartupCommand != nil || req.PersistentStorage != nil || req.VolumeReplication != nil {
+	if req.StartupCommand != nil || req.PersistentStorage != nil || req.VolumeReplication != nil || req.RightSizing != nil {
 		spec, source, err := s.recoverAppDeployBaseline(currentApp)
 		if err != nil {
 			s.writeStoreError(w, err)
@@ -78,6 +79,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		currentCommand := append([]string(nil), spec.Command...)
 		currentPersistentStorage := cloneAppSpec(spec).PersistentStorage
 		currentVolumeReplication := cloneAppSpec(spec).VolumeReplication
+		currentRightSizing := cloneAppSpec(spec).RightSizing
 		spec.ImageMirrorLimit = model.EffectiveAppImageMirrorLimit(currentApp.Spec.ImageMirrorLimit)
 
 		deployChanged := false
@@ -123,6 +125,27 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 					auditMetadata["volume_replication"] = "disabled"
 				} else {
 					auditMetadata["volume_replication"] = spec.VolumeReplication.Mode
+				}
+			}
+		}
+
+		if req.RightSizing != nil {
+			normalizedRightSizing := model.NormalizeAppRightSizingSpec(*req.RightSizing)
+			if model.NormalizeAppRightSizingMode(req.RightSizing.Mode) == "" {
+				httpx.WriteError(w, http.StatusBadRequest, "right_sizing.mode must be disabled, recommend, or auto")
+				return
+			}
+			if normalizedRightSizing.Mode == model.AppRightSizingModeDisabled {
+				spec.RightSizing = nil
+			} else {
+				spec.RightSizing = &normalizedRightSizing
+			}
+			if !appRightSizingEqual(currentRightSizing, spec.RightSizing) {
+				deployChanged = true
+				if spec.RightSizing == nil {
+					auditMetadata["right_sizing"] = "disabled"
+				} else {
+					auditMetadata["right_sizing"] = spec.RightSizing.Mode
 				}
 			}
 		}
@@ -185,6 +208,15 @@ func normalizeAppVolumeReplicationSpec(spec *model.AppVolumeReplicationSpec) (*m
 		return nil, fmt.Errorf("volume_replication.schedule is only supported when mode is scheduled")
 	}
 	return out, nil
+}
+
+func appRightSizingEqual(left, right *model.AppRightSizingSpec) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Mode == right.Mode &&
+		left.WindowHours == right.WindowHours &&
+		left.MinSamples == right.MinSamples
 }
 
 func appVolumeReplicationEqual(left, right *model.AppVolumeReplicationSpec) bool {

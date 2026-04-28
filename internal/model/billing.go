@@ -37,8 +37,10 @@ const (
 )
 
 type ResourceSpec struct {
-	CPUMilliCores   int64 `json:"cpu_millicores,omitempty"`
-	MemoryMebibytes int64 `json:"memory_mebibytes,omitempty"`
+	CPUMilliCores        int64 `json:"cpu_millicores,omitempty"`
+	MemoryMebibytes      int64 `json:"memory_mebibytes,omitempty"`
+	CPULimitMilliCores   int64 `json:"cpu_limit_millicores,omitempty"`
+	MemoryLimitMebibytes int64 `json:"memory_limit_mebibytes,omitempty"`
 }
 
 type BillingResourceSpec struct {

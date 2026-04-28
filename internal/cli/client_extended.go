@@ -658,6 +658,18 @@ func (c *Client) PatchAppPersistentStorage(id string, storage *model.AppPersiste
 	return response, nil
 }
 
+func (c *Client) PatchAppRightSizing(id string, rightSizing *model.AppRightSizingSpec) (appPatchResponse, error) {
+	request := map[string]any{}
+	if rightSizing != nil {
+		request["right_sizing"] = rightSizing
+	}
+	var response appPatchResponse
+	if err := c.doJSON(http.MethodPatch, path.Join("/v1/apps", id), request, &response); err != nil {
+		return appPatchResponse{}, err
+	}
+	return response, nil
+}
+
 func (c *Client) PatchAppOriginSource(id string, originSource *model.AppSource) (appPatchResponse, error) {
 	request := map[string]any{}
 	if originSource != nil {

@@ -623,7 +623,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	}
 	timer.Mark("postgres_placement")
 
-	scheduling, err := s.managedSchedulingConstraints(app.Spec.RuntimeID)
+	scheduling, err := s.managedSchedulingConstraintsForApp(ctx, app)
 	if err != nil {
 		return err
 	}

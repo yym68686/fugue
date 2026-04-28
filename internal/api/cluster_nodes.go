@@ -268,6 +268,8 @@ func (s *Server) StartBackgroundWarmers(ctx context.Context) {
 		return
 	}
 	s.startClusterNodeInventoryWarmLoop(ctx)
+	s.startResourceUsageSamplingLoop(ctx)
+	s.startRightSizingAutoApplyLoop(ctx)
 }
 
 func (s *Server) shouldWarmClusterNodeInventory() bool {

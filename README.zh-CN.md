@@ -21,7 +21,7 @@ Fugue 是一个面向 k3s 的多租户应用控制平面。它把 OpenAPI-first 
 - 异步 deploy / rebuild / scale / restart / migrate / failover / delete 操作。
 - app 的 domain / route、env / config / files / workspace、运行日志 / 构建日志、operation 历史。
 - backing service 和 service binding，包括托管 PostgreSQL 流程。
-- 集群 inventory、app/service 当前资源使用量叠加、runtime sharing，以及控制面状态检查。
+- 集群 inventory、实时使用量 / requests 承诺容量叠加、资源 right-sizing、runtime sharing，以及控制面状态检查。
 
 ## CLI 快速开始
 
@@ -98,6 +98,8 @@ fugue app ls
 - `fugue app diagnose my-app`
 - `fugue app logs runtime my-app --follow`
 - `fugue app service attach my-app postgres`
+- `fugue app resources recommend my-app`
+- `fugue app resources auto my-app --mode auto`
 - `fugue app failover status my-app`
 - `fugue app failover run my-app --to runtime-b`
 - `fugue runtime enroll create edge-a`
@@ -145,6 +147,8 @@ fugue app ls
 `fugue app logs build` 现在会在 text 输出里直接补上构建产物链路：build、push、publish、deploy、runtime。它还会告诉你 builder job 到底有没有被观测到、registry 日志里有没有 manifest `PUT`，以及当前更像是“镜像发布过后来被删了”还是“这轮 import 根本没观察到发布”。遇到只看到 `"import build completed"` 还不足以判断问题时，可以用它确认镜像是否被记录、是否真正出现在 registry、是否被 deploy 引用、以及最终有没有出现在运行中的 pod 里。
 
 `fugue app logs pods` 会展示当前 pod 组以及最近的 ReplicaSet rollout 上下文，包括哪一个 revision 替换了旧 pod 组。这个命令适合在 `app overview` 已经切到新 revision 之后，继续查看旧 rollout 的上下文。
+
+`fugue app resources recommend/apply/auto` 会基于控制面采集的 7 天资源样本，为 app 和托管 PostgreSQL 推荐或自动应用更合适的 requests。策略上会保守处理内存、普通服务默认不设置 CPU limit，并对 PostgreSQL 这类 critical workload 保持更紧的 request/limit envelope。
 
 `fugue app request` 允许你从控制面侧直接请求应用自己的内部 HTTP 路由，包括那些依赖 app env 里 service key 的管理接口。通过 `--header-from-env Header=ENV_KEY` 可以直接从应用的有效 env 填充认证头，不用把 secret 再复制到本地 shell。
 

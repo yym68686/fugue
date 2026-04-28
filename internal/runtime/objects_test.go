@@ -889,6 +889,45 @@ func TestBuildAppDeploymentIncludesExplicitResources(t *testing.T) {
 	}
 }
 
+func TestBuildAppDeploymentAppliesResourceLimitsByWorkloadClass(t *testing.T) {
+	t.Parallel()
+
+	serviceResources := runtimeAppResourceRequirements(model.AppSpec{
+		WorkloadClass: model.WorkloadClassService,
+		Resources: &model.ResourceSpec{
+			CPUMilliCores:        100,
+			MemoryMebibytes:      256,
+			MemoryLimitMebibytes: 512,
+		},
+	})
+	serviceRequests := resourceStringValues(t, serviceResources["requests"])
+	serviceLimits := resourceStringValues(t, serviceResources["limits"])
+	if got := serviceRequests["cpu"]; got != "100m" {
+		t.Fatalf("expected service cpu request 100m, got %#v", got)
+	}
+	if _, ok := serviceLimits["cpu"]; ok {
+		t.Fatalf("expected service cpu limit to remain unset, got %#v", serviceLimits["cpu"])
+	}
+	if got := serviceLimits["memory"]; got != "512Mi" {
+		t.Fatalf("expected explicit service memory limit 512Mi, got %#v", got)
+	}
+
+	criticalResources := runtimeAppResourceRequirements(model.AppSpec{
+		WorkloadClass: model.WorkloadClassCritical,
+		Resources: &model.ResourceSpec{
+			CPUMilliCores:   250,
+			MemoryMebibytes: 512,
+		},
+	})
+	criticalLimits := resourceStringValues(t, criticalResources["limits"])
+	if got := criticalLimits["cpu"]; got != "250m" {
+		t.Fatalf("expected critical cpu limit to match request, got %#v", got)
+	}
+	if got := criticalLimits["memory"]; got != "512Mi" {
+		t.Fatalf("expected critical memory limit to match request, got %#v", got)
+	}
+}
+
 func TestBuildAppObjectsIncludesPersistentWorkspaceSidecar(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",

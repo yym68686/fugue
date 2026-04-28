@@ -216,6 +216,16 @@ type operationResponse struct {
 	Operation model.Operation `json:"operation"`
 }
 
+type appResourceRecommendationResponse struct {
+	Recommendation model.AppRightSizingRecommendation `json:"recommendation"`
+}
+
+type appResourceRecommendationApplyResponse struct {
+	Recommendation model.AppRightSizingRecommendation `json:"recommendation"`
+	AlreadyCurrent bool                               `json:"already_current"`
+	Operation      *model.Operation                   `json:"operation,omitempty"`
+}
+
 type appEnvResponse struct {
 	Env            map[string]string   `json:"env"`
 	Entries        []model.AppEnvEntry `json:"entries,omitempty"`
@@ -612,6 +622,40 @@ func (c *Client) DeleteApp(id string) (appDeleteResponse, error) {
 
 func (c *Client) DeleteAppForce(id string) (appDeleteResponse, error) {
 	return c.deleteApp(id, true)
+}
+
+func (c *Client) GetAppResourceRecommendation(id string, windowHours, minSamples int) (appResourceRecommendationResponse, error) {
+	query := url.Values{}
+	if windowHours > 0 {
+		query.Set("window_hours", fmt.Sprintf("%d", windowHours))
+	}
+	if minSamples > 0 {
+		query.Set("min_samples", fmt.Sprintf("%d", minSamples))
+	}
+	relative := path.Join("/v1/apps", id, "resources", "recommendation")
+	if encoded := query.Encode(); encoded != "" {
+		relative += "?" + encoded
+	}
+	var response appResourceRecommendationResponse
+	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
+		return appResourceRecommendationResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) ApplyAppResourceRecommendation(id string, windowHours, minSamples int) (appResourceRecommendationApplyResponse, error) {
+	req := map[string]int{}
+	if windowHours > 0 {
+		req["window_hours"] = windowHours
+	}
+	if minSamples > 0 {
+		req["min_samples"] = minSamples
+	}
+	var response appResourceRecommendationApplyResponse
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "resources", "apply-recommendation"), req, &response); err != nil {
+		return appResourceRecommendationApplyResponse{}, err
+	}
+	return response, nil
 }
 
 func (c *Client) deleteApp(id string, force bool) (appDeleteResponse, error) {

@@ -63,6 +63,8 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/apps/{id}/rebuild", s.auth.RequireAPI(http.HandlerFunc(s.handleRebuildApp)))
 	mux.Handle("POST /v1/apps/{id}/request", s.auth.RequireAPI(http.HandlerFunc(s.handleRequestAppInternalHTTP)))
 	mux.Handle("POST /v1/apps/{id}/request-stream", s.auth.RequireAPI(http.HandlerFunc(s.handleRequestAppInternalHTTPStream)))
+	mux.Handle("POST /v1/apps/{id}/resources/apply-recommendation", s.auth.RequireAPI(http.HandlerFunc(s.handleApplyAppResourceRecommendation)))
+	mux.Handle("GET /v1/apps/{id}/resources/recommendation", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppResourceRecommendation)))
 	mux.Handle("POST /v1/apps/{id}/restart", s.auth.RequireAPI(http.HandlerFunc(s.handleRestartApp)))
 	mux.Handle("PATCH /v1/apps/{id}/route", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchAppRoute)))
 	mux.Handle("GET /v1/apps/{id}/route/availability", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppRouteAvailability)))

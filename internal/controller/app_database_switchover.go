@@ -333,7 +333,7 @@ func (s *Service) applyManagedDesiredAppState(
 	if err != nil {
 		return runtime.Bundle{}, fmt.Errorf("resolve managed postgres placements for app %s: %w", app.ID, err)
 	}
-	scheduling, err := s.managedSchedulingConstraints(app.Spec.RuntimeID)
+	scheduling, err := s.managedSchedulingConstraintsForApp(ctx, app)
 	if err != nil {
 		return runtime.Bundle{}, err
 	}

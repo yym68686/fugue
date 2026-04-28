@@ -85,6 +85,7 @@ in more than one visible project or tenant.
 		c.newAppServiceCommand(),
 		hideCompatCommand(c.newAppBindingCompatCommand(), "fugue app service"),
 		c.newAppDatabaseCommand(),
+		c.newAppResourcesCommand(),
 		c.newAppRedeployCommand(),
 		c.newAppRebuildShortcutCommand(),
 		c.newAppRollbackShortcutCommand(),

@@ -2075,6 +2075,68 @@ paths:
                 additionalProperties: true
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/resources/recommendation:
+    get:
+      operationId: getAppResourceRecommendation
+      summary: Get App Resource Recommendation
+      tags: [Apps]
+      x-fugue-handler: handleGetAppResourceRecommendation
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: query
+          name: window_hours
+          required: false
+          schema:
+            type: integer
+            format: int32
+        - in: query
+          name: min_samples
+          required: false
+          schema:
+            type: integer
+            format: int32
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppResourceRecommendationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/resources/apply-recommendation:
+    post:
+      operationId: applyAppResourceRecommendation
+      summary: Apply App Resource Recommendation
+      tags: [Apps]
+      x-fugue-handler: handleApplyAppResourceRecommendation
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApplyAppResourceRecommendationRequest"
+      responses:
+        '200':
+          description: Recommendation was already current
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppResourceRecommendationApplyResponse"
+        '202':
+          description: Deploy operation queued with recommended resources
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppResourceRecommendationApplyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/build-logs:
     get:
       operationId: getAppBuildLogs
@@ -3457,6 +3519,12 @@ components:
         memory_mebibytes:
           type: integer
           format: int64
+        cpu_limit_millicores:
+          type: integer
+          format: int64
+        memory_limit_mebibytes:
+          type: integer
+          format: int64
     BillingResourceSpec:
       type: object
       additionalProperties: false
@@ -3483,6 +3551,91 @@ components:
         ephemeral_storage_bytes:
           type: integer
           format: int64
+    ResourceRightSizingPolicy:
+      type: object
+      additionalProperties: false
+      required: [window_hours, min_samples, cpu_percentile, cpu_multiplier, cpu_floor_millicores, memory_percentile, memory_multiplier, memory_floor_mebibytes]
+      properties:
+        window_hours:
+          type: integer
+          format: int32
+        min_samples:
+          type: integer
+          format: int32
+        cpu_percentile:
+          type: number
+          format: double
+        cpu_multiplier:
+          type: number
+          format: double
+        cpu_floor_millicores:
+          type: integer
+          format: int64
+        memory_percentile:
+          type: number
+          format: double
+        memory_multiplier:
+          type: number
+          format: double
+        memory_floor_mebibytes:
+          type: integer
+          format: int64
+    ResourceRightSizingRecommendation:
+      type: object
+      additionalProperties: false
+      required: [target_kind, target_id, window_hours, sample_count, policy, ready, already_current]
+      properties:
+        target_kind:
+          type: string
+        target_id:
+          type: string
+        target_name:
+          type: string
+        service_type:
+          type: string
+        workload_class:
+          $ref: "#/components/schemas/WorkloadClass"
+        window_hours:
+          type: integer
+          format: int32
+        sample_count:
+          type: integer
+          format: int32
+        current:
+          $ref: "#/components/schemas/ResourceSpec"
+        recommended:
+          $ref: "#/components/schemas/ResourceSpec"
+        policy:
+          $ref: "#/components/schemas/ResourceRightSizingPolicy"
+        ready:
+          type: boolean
+        already_current:
+          type: boolean
+        reason:
+          type: string
+        observed_at:
+          type: string
+          format: date-time
+        last_sample_observed_at:
+          type: string
+          format: date-time
+        peak_cpu_usage_millicores:
+          type: integer
+          format: int64
+        peak_memory_usage_bytes:
+          type: integer
+          format: int64
+    AppRightSizingRecommendation:
+      type: object
+      additionalProperties: false
+      required: [app]
+      properties:
+        app:
+          $ref: "#/components/schemas/ResourceRightSizingRecommendation"
+        backing_services:
+          type: array
+          items:
+            $ref: "#/components/schemas/ResourceRightSizingRecommendation"
     BillingPriceBook:
       type: object
       additionalProperties: false
@@ -3987,6 +4140,8 @@ components:
           $ref: "#/components/schemas/StringMap"
         network_mode:
           $ref: "#/components/schemas/AppNetworkMode"
+        workload_class:
+          $ref: "#/components/schemas/WorkloadClass"
         ports:
           type: array
           items:
@@ -3997,6 +4152,8 @@ components:
           format: int32
         resources:
           $ref: "#/components/schemas/ResourceSpec"
+        right_sizing:
+          $ref: "#/components/schemas/AppRightSizingSpec"
         runtime_id:
           type: string
         files:
@@ -4018,6 +4175,18 @@ components:
           format: int32
         restart_token:
           type: string
+    AppRightSizingSpec:
+      type: object
+      additionalProperties: false
+      properties:
+        mode:
+          $ref: "#/components/schemas/AppRightSizingMode"
+        window_hours:
+          type: integer
+          format: int32
+        min_samples:
+          type: integer
+          format: int32
     App:
       type: object
       additionalProperties: false
@@ -5361,6 +5530,36 @@ components:
           $ref: "#/components/schemas/AppPersistentStorageSpec"
         volume_replication:
           $ref: "#/components/schemas/AppVolumeReplicationSpec"
+        right_sizing:
+          $ref: "#/components/schemas/AppRightSizingSpec"
+    ApplyAppResourceRecommendationRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        window_hours:
+          type: integer
+          format: int32
+        min_samples:
+          type: integer
+          format: int32
+    AppResourceRecommendationResponse:
+      type: object
+      additionalProperties: false
+      required: [recommendation]
+      properties:
+        recommendation:
+          $ref: "#/components/schemas/AppRightSizingRecommendation"
+    AppResourceRecommendationApplyResponse:
+      type: object
+      additionalProperties: false
+      required: [recommendation, already_current]
+      properties:
+        recommendation:
+          $ref: "#/components/schemas/AppRightSizingRecommendation"
+        already_current:
+          type: boolean
+        operation:
+          $ref: "#/components/schemas/Operation"
     PatchAppSourceRequest:
       type: object
       additionalProperties: false
@@ -7037,6 +7236,12 @@ components:
         Set `background` to run the app without a public route, Kubernetes Service,
         or readiness port.
       enum: [background, internal]
+    WorkloadClass:
+      type: string
+      enum: [critical, service, demo, batch]
+    AppRightSizingMode:
+      type: string
+      enum: [disabled, recommend, auto]
     PatchAppRouteRequest:
       type: object
       additionalProperties: false

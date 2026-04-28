@@ -44,6 +44,15 @@ const (
 	AppNetworkModeBackground = "background"
 	AppNetworkModeInternal   = "internal"
 
+	WorkloadClassCritical = "critical"
+	WorkloadClassService  = "service"
+	WorkloadClassDemo     = "demo"
+	WorkloadClassBatch    = "batch"
+
+	AppRightSizingModeDisabled  = "disabled"
+	AppRightSizingModeRecommend = "recommend"
+	AppRightSizingModeAuto      = "auto"
+
 	BackingServiceTypePostgres = "postgres"
 
 	BackingServiceProvisionerManaged  = "managed"
@@ -150,7 +159,69 @@ func ApplyAppSpecDefaults(spec *AppSpec) {
 		return
 	}
 	spec.NetworkMode = NormalizeAppNetworkMode(spec.NetworkMode)
+	spec.WorkloadClass = NormalizeWorkloadClass(spec.WorkloadClass)
+	if spec.RightSizing != nil {
+		normalized := NormalizeAppRightSizingSpec(*spec.RightSizing)
+		spec.RightSizing = &normalized
+	}
 	spec.ImageMirrorLimit = EffectiveAppImageMirrorLimit(spec.ImageMirrorLimit)
+}
+
+func NormalizeWorkloadClass(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case WorkloadClassCritical:
+		return WorkloadClassCritical
+	case WorkloadClassDemo:
+		return WorkloadClassDemo
+	case WorkloadClassBatch:
+		return WorkloadClassBatch
+	case WorkloadClassService, "":
+		return WorkloadClassService
+	default:
+		return ""
+	}
+}
+
+func EffectiveWorkloadClass(spec AppSpec) string {
+	if normalized := NormalizeWorkloadClass(spec.WorkloadClass); normalized != "" {
+		return normalized
+	}
+	if AppUsesBackgroundNetwork(spec) {
+		return WorkloadClassBatch
+	}
+	return WorkloadClassService
+}
+
+func NormalizeAppRightSizingMode(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case AppRightSizingModeAuto:
+		return AppRightSizingModeAuto
+	case AppRightSizingModeRecommend:
+		return AppRightSizingModeRecommend
+	case AppRightSizingModeDisabled, "":
+		return AppRightSizingModeDisabled
+	default:
+		return ""
+	}
+}
+
+func NormalizeAppRightSizingSpec(spec AppRightSizingSpec) AppRightSizingSpec {
+	out := spec
+	rawMode := strings.TrimSpace(out.Mode)
+	out.Mode = NormalizeAppRightSizingMode(out.Mode)
+	if out.Mode == "" && rawMode == "" {
+		out.Mode = AppRightSizingModeDisabled
+	}
+	if out.WindowHours <= 0 {
+		out.WindowHours = 168
+	}
+	if out.WindowHours > 168 {
+		out.WindowHours = 168
+	}
+	if out.MinSamples <= 0 {
+		out.MinSamples = 12
+	}
+	return out
 }
 
 func NormalizeAppNetworkMode(raw string) string {
@@ -372,6 +443,56 @@ type ResourceUsage struct {
 	CPUMilliCores         *int64 `json:"cpu_millicores,omitempty"`
 	MemoryBytes           *int64 `json:"memory_bytes,omitempty"`
 	EphemeralStorageBytes *int64 `json:"ephemeral_storage_bytes,omitempty"`
+}
+
+type ResourceUsageSample struct {
+	ID                    string    `json:"id,omitempty"`
+	TenantID              string    `json:"tenant_id,omitempty"`
+	ProjectID             string    `json:"project_id,omitempty"`
+	TargetKind            string    `json:"target_kind"`
+	TargetID              string    `json:"target_id"`
+	TargetName            string    `json:"target_name,omitempty"`
+	ServiceType           string    `json:"service_type,omitempty"`
+	ObservedAt            time.Time `json:"observed_at"`
+	CPUMilliCores         *int64    `json:"cpu_millicores,omitempty"`
+	MemoryBytes           *int64    `json:"memory_bytes,omitempty"`
+	EphemeralStorageBytes *int64    `json:"ephemeral_storage_bytes,omitempty"`
+}
+
+type ResourceRightSizingPolicy struct {
+	WindowHours      int     `json:"window_hours"`
+	MinSamples       int     `json:"min_samples"`
+	CPUPercentile    float64 `json:"cpu_percentile"`
+	CPUMultiplier    float64 `json:"cpu_multiplier"`
+	CPUFloorMilli    int64   `json:"cpu_floor_millicores"`
+	MemoryPercentile float64 `json:"memory_percentile"`
+	MemoryMultiplier float64 `json:"memory_multiplier"`
+	MemoryFloorMiB   int64   `json:"memory_floor_mebibytes"`
+}
+
+type ResourceRightSizingRecommendation struct {
+	TargetKind           string                    `json:"target_kind"`
+	TargetID             string                    `json:"target_id"`
+	TargetName           string                    `json:"target_name,omitempty"`
+	ServiceType          string                    `json:"service_type,omitempty"`
+	WorkloadClass        string                    `json:"workload_class,omitempty"`
+	WindowHours          int                       `json:"window_hours"`
+	SampleCount          int                       `json:"sample_count"`
+	Current              *ResourceSpec             `json:"current,omitempty"`
+	Recommended          *ResourceSpec             `json:"recommended,omitempty"`
+	Policy               ResourceRightSizingPolicy `json:"policy"`
+	Ready                bool                      `json:"ready"`
+	AlreadyCurrent       bool                      `json:"already_current"`
+	Reason               string                    `json:"reason,omitempty"`
+	ObservedAt           *time.Time                `json:"observed_at,omitempty"`
+	LastSampleObservedAt *time.Time                `json:"last_sample_observed_at,omitempty"`
+	PeakCPUUsageMilli    *int64                    `json:"peak_cpu_usage_millicores,omitempty"`
+	PeakMemoryUsageBytes *int64                    `json:"peak_memory_usage_bytes,omitempty"`
+}
+
+type AppRightSizingRecommendation struct {
+	App             ResourceRightSizingRecommendation   `json:"app"`
+	BackingServices []ResourceRightSizingRecommendation `json:"backing_services,omitempty"`
 }
 
 type ClusterNodeWorkloadPod struct {
@@ -824,9 +945,11 @@ type AppSpec struct {
 	Args              []string                  `json:"args,omitempty"`
 	Env               map[string]string         `json:"env,omitempty"`
 	NetworkMode       string                    `json:"network_mode,omitempty"`
+	WorkloadClass     string                    `json:"workload_class,omitempty"`
 	Ports             []int                     `json:"ports,omitempty"`
 	Replicas          int                       `json:"replicas"`
 	Resources         *ResourceSpec             `json:"resources,omitempty"`
+	RightSizing       *AppRightSizingSpec       `json:"right_sizing,omitempty"`
 	RuntimeID         string                    `json:"runtime_id"`
 	Files             []AppFile                 `json:"files,omitempty"`
 	Workspace         *AppWorkspaceSpec         `json:"workspace,omitempty"`
@@ -836,6 +959,12 @@ type AppSpec struct {
 	Failover          *AppFailoverSpec          `json:"failover,omitempty"`
 	ImageMirrorLimit  int                       `json:"image_mirror_limit,omitempty"`
 	RestartToken      string                    `json:"restart_token,omitempty"`
+}
+
+type AppRightSizingSpec struct {
+	Mode        string `json:"mode,omitempty"`
+	WindowHours int    `json:"window_hours,omitempty"`
+	MinSamples  int    `json:"min_samples,omitempty"`
 }
 
 type AppFile struct {
@@ -1199,23 +1328,24 @@ func NormalizeMachineControlPlaneRole(raw string) string {
 }
 
 type State struct {
-	Version               string               `json:"version"`
-	Tenants               []Tenant             `json:"tenants"`
-	Projects              []Project            `json:"projects"`
-	ProjectDeleteRequests map[string]time.Time `json:"project_delete_requests,omitempty"`
-	APIKeys               []APIKey             `json:"api_keys"`
-	EnrollmentTokens      []EnrollmentToken    `json:"enrollment_tokens"`
-	NodeKeys              []NodeKey            `json:"node_keys"`
-	Machines              []Machine            `json:"machines"`
-	Runtimes              []Runtime            `json:"runtimes"`
-	RuntimeGrants         []RuntimeAccessGrant `json:"runtime_grants"`
-	Apps                  []App                `json:"apps"`
-	AppDomains            []AppDomain          `json:"app_domains"`
-	BackingServices       []BackingService     `json:"backing_services"`
-	ServiceBindings       []ServiceBinding     `json:"service_bindings"`
-	Operations            []Operation          `json:"operations"`
-	AuditEvents           []AuditEvent         `json:"audit_events"`
-	Idempotency           []IdempotencyRecord  `json:"idempotency"`
-	TenantBilling         []TenantBilling      `json:"tenant_billing"`
-	BillingEvents         []TenantBillingEvent `json:"billing_events"`
+	Version               string                `json:"version"`
+	Tenants               []Tenant              `json:"tenants"`
+	Projects              []Project             `json:"projects"`
+	ProjectDeleteRequests map[string]time.Time  `json:"project_delete_requests,omitempty"`
+	APIKeys               []APIKey              `json:"api_keys"`
+	EnrollmentTokens      []EnrollmentToken     `json:"enrollment_tokens"`
+	NodeKeys              []NodeKey             `json:"node_keys"`
+	Machines              []Machine             `json:"machines"`
+	Runtimes              []Runtime             `json:"runtimes"`
+	RuntimeGrants         []RuntimeAccessGrant  `json:"runtime_grants"`
+	Apps                  []App                 `json:"apps"`
+	AppDomains            []AppDomain           `json:"app_domains"`
+	BackingServices       []BackingService      `json:"backing_services"`
+	ServiceBindings       []ServiceBinding      `json:"service_bindings"`
+	Operations            []Operation           `json:"operations"`
+	AuditEvents           []AuditEvent          `json:"audit_events"`
+	Idempotency           []IdempotencyRecord   `json:"idempotency"`
+	TenantBilling         []TenantBilling       `json:"tenant_billing"`
+	BillingEvents         []TenantBillingEvent  `json:"billing_events"`
+	ResourceUsageSamples  []ResourceUsageSample `json:"resource_usage_samples,omitempty"`
 }

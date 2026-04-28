@@ -3795,6 +3795,10 @@ func cloneAppSpec(in *model.AppSpec) *model.AppSpec {
 		resources := *in.Resources
 		out.Resources = &resources
 	}
+	if in.RightSizing != nil {
+		rightSizing := *in.RightSizing
+		out.RightSizing = &rightSizing
+	}
 	if in.Postgres != nil {
 		pg := *in.Postgres
 		if in.Postgres.Resources != nil {

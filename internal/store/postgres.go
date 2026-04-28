@@ -338,6 +338,22 @@ var postgresSchemaStatements = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_audit_events_created_at ON fugue_audit_events (created_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_audit_events_tenant_created_at ON fugue_audit_events (tenant_id, created_at DESC)`,
+	`CREATE TABLE IF NOT EXISTS fugue_resource_usage_samples (
+		id TEXT PRIMARY KEY,
+		tenant_id TEXT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
+		project_id TEXT NULL REFERENCES fugue_projects(id) ON DELETE SET NULL,
+		target_kind TEXT NOT NULL,
+		target_id TEXT NOT NULL,
+		target_name TEXT NOT NULL DEFAULT '',
+		service_type TEXT NOT NULL DEFAULT '',
+		observed_at TIMESTAMPTZ NOT NULL,
+		cpu_millicores BIGINT NULL,
+		memory_bytes BIGINT NULL,
+		ephemeral_storage_bytes BIGINT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_resource_usage_target_observed ON fugue_resource_usage_samples (target_kind, target_id, observed_at ASC)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_resource_usage_tenant_observed ON fugue_resource_usage_samples (tenant_id, observed_at DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_resource_usage_observed ON fugue_resource_usage_samples (observed_at DESC)`,
 }
 
 func (s *Store) ensureDatabaseReady() error {

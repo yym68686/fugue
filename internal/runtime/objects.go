@@ -318,7 +318,7 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 	if pullPolicy := imagePullPolicyForImage(app.Spec.Image); pullPolicy != "" {
 		container["imagePullPolicy"] = pullPolicy
 	}
-	if resources := runtimeResourceRequirements(app.Spec.Resources); resources != nil {
+	if resources := runtimeAppResourceRequirements(app.Spec); resources != nil {
 		container["resources"] = resources
 	}
 	if len(app.Spec.Command) > 0 {
@@ -599,7 +599,15 @@ func isFugueManagedImmutableTag(image string) bool {
 	return false
 }
 
+func runtimeAppResourceRequirements(spec model.AppSpec) map[string]any {
+	return runtimeResourceRequirementsForClass(spec.Resources, model.EffectiveWorkloadClass(spec))
+}
+
 func runtimeResourceRequirements(spec *model.ResourceSpec) map[string]any {
+	return runtimeStaticResourceRequirementsFromSpec(spec, true)
+}
+
+func runtimeResourceRequirementsForClass(spec *model.ResourceSpec, workloadClass string) map[string]any {
 	if spec == nil {
 		return nil
 	}
@@ -610,12 +618,20 @@ func runtimeResourceRequirements(spec *model.ResourceSpec) map[string]any {
 	if spec.CPUMilliCores > 0 {
 		cpu := strconv.FormatInt(spec.CPUMilliCores, 10) + "m"
 		requests["cpu"] = cpu
-		limits["cpu"] = cpu
+		if spec.CPULimitMilliCores > 0 {
+			limits["cpu"] = strconv.FormatInt(spec.CPULimitMilliCores, 10) + "m"
+		} else if model.EffectiveWorkloadClass(model.AppSpec{WorkloadClass: workloadClass}) == model.WorkloadClassCritical {
+			limits["cpu"] = cpu
+		}
 	}
 	if spec.MemoryMebibytes > 0 {
 		memory := strconv.FormatInt(spec.MemoryMebibytes, 10) + "Mi"
 		requests["memory"] = memory
-		limits["memory"] = memory
+		if spec.MemoryLimitMebibytes > 0 {
+			limits["memory"] = strconv.FormatInt(spec.MemoryLimitMebibytes, 10) + "Mi"
+		} else {
+			limits["memory"] = defaultMemoryLimitForWorkloadClass(spec.MemoryMebibytes, workloadClass)
+		}
 	}
 	if len(requests) == 0 {
 		return nil
@@ -624,6 +640,47 @@ func runtimeResourceRequirements(spec *model.ResourceSpec) map[string]any {
 	return map[string]any{
 		"requests": requests,
 		"limits":   limits,
+	}
+}
+
+func runtimeStaticResourceRequirementsFromSpec(spec *model.ResourceSpec, defaultLimits bool) map[string]any {
+	if spec == nil {
+		return nil
+	}
+	requests := map[string]string{}
+	limits := map[string]string{}
+	if spec.CPUMilliCores > 0 {
+		cpu := strconv.FormatInt(spec.CPUMilliCores, 10) + "m"
+		requests["cpu"] = cpu
+		if spec.CPULimitMilliCores > 0 {
+			limits["cpu"] = strconv.FormatInt(spec.CPULimitMilliCores, 10) + "m"
+		} else if defaultLimits {
+			limits["cpu"] = cpu
+		}
+	}
+	if spec.MemoryMebibytes > 0 {
+		memory := strconv.FormatInt(spec.MemoryMebibytes, 10) + "Mi"
+		requests["memory"] = memory
+		if spec.MemoryLimitMebibytes > 0 {
+			limits["memory"] = strconv.FormatInt(spec.MemoryLimitMebibytes, 10) + "Mi"
+		} else if defaultLimits {
+			limits["memory"] = memory
+		}
+	}
+	return runtimeStaticResourceRequirements(requests, limits)
+}
+
+func defaultMemoryLimitForWorkloadClass(requestMiB int64, workloadClass string) string {
+	if requestMiB <= 0 {
+		return ""
+	}
+	switch model.EffectiveWorkloadClass(model.AppSpec{WorkloadClass: workloadClass}) {
+	case model.WorkloadClassDemo, model.WorkloadClassBatch:
+		return strconv.FormatInt(requestMiB, 10) + "Mi"
+	case model.WorkloadClassService:
+		return strconv.FormatInt(requestMiB, 10) + "Mi"
+	default:
+		return strconv.FormatInt(requestMiB, 10) + "Mi"
 	}
 }
 
