@@ -133,7 +133,7 @@ func TestHandleClaimedOperationFailsDeployWhenRuntimeImageIsMissingFromRegistry(
 	}
 
 	desiredSpec := app.Spec
-	desiredSpec.Image = "registry.pull.example/fugue-apps/demo:git-newcommit"
+	desiredSpec.Image = "ghcr.io/example/runtime:missing"
 	desiredSource := *app.Source
 	desiredSource.CommitSHA = "newcommit"
 	desiredSource.ResolvedImageRef = "registry.push.example/fugue-apps/demo:git-newcommit"
@@ -186,5 +186,47 @@ func TestHandleClaimedOperationFailsDeployWhenRuntimeImageIsMissingFromRegistry(
 	}
 	if !strings.Contains(failedOp.ErrorMessage, "runtime image") {
 		t.Fatalf("expected runtime image error, got %q", failedOp.ErrorMessage)
+	}
+}
+
+func TestEnsureManagedDeployImageReadyInspectsPullBaseRuntimeViaPushBase(t *testing.T) {
+	t.Parallel()
+
+	managedRef := "registry.push.example/fugue-apps/demo:git-newcommit"
+	runtimePullRef := "registry.pull.example/fugue-apps/runtime@sha256:abc123"
+	runtimePushRef := "registry.push.example/fugue-apps/runtime@sha256:abc123"
+	app := model.App{
+		Spec: model.AppSpec{
+			Image:    runtimePullRef,
+			Replicas: 1,
+		},
+		Source: &model.AppSource{
+			ResolvedImageRef: managedRef,
+		},
+	}
+
+	inspected := make([]string, 0, 2)
+	svc := &Service{
+		registryPushBase: "registry.push.example",
+		registryPullBase: "registry.pull.example",
+		inspectManagedImage: func(_ context.Context, imageRef string) (bool, map[string]int64, error) {
+			inspected = append(inspected, imageRef)
+			switch imageRef {
+			case managedRef, runtimePushRef:
+				return true, nil, nil
+			case runtimePullRef:
+				t.Fatalf("controller should not inspect node-only registry pull ref %q", imageRef)
+			default:
+				t.Fatalf("unexpected image ref %q", imageRef)
+			}
+			return false, nil, nil
+		},
+	}
+
+	if err := svc.ensureManagedDeployImageReady(context.Background(), app); err != nil {
+		t.Fatalf("ensure deploy image ready: %v", err)
+	}
+	if len(inspected) != 2 || inspected[0] != managedRef || inspected[1] != runtimePushRef {
+		t.Fatalf("expected inspect refs [%q %q], got %v", managedRef, runtimePushRef, inspected)
 	}
 }
