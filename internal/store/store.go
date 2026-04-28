@@ -3124,6 +3124,35 @@ func (s *Store) CompleteAgentOperation(id, runtimeID, manifestPath, message stri
 	return s.completeOperation(id, runtimeID, manifestPath, message, nil, nil)
 }
 
+func (s *Store) UpdateOperationProgress(id, message string) (model.Operation, error) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return model.Operation{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgUpdateOperationProgress(id, message)
+	}
+	var op model.Operation
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findOperation(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		if !operationCanUpdateProgress(state.Operations[index]) {
+			return ErrConflict
+		}
+		now := time.Now().UTC()
+		state.Operations[index].ResultMessage = message
+		state.Operations[index].UpdatedAt = now
+		if err := applyInFlightOperationToApp(state, &state.Operations[index]); err != nil {
+			return err
+		}
+		op = state.Operations[index]
+		return nil
+	})
+	return op, err
+}
+
 func (s *Store) completeOperation(id, runtimeID, manifestPath, message string, desiredSpec *model.AppSpec, desiredSource *model.AppSource) (model.Operation, error) {
 	if s.usingDatabase() {
 		return s.pgCompleteOperation(id, runtimeID, manifestPath, message, desiredSpec, desiredSource)
@@ -3915,6 +3944,15 @@ func applyInFlightOperationToApp(state *model.State, op *model.Operation) error 
 func operationCanTransitionToCompleted(op model.Operation) bool {
 	switch op.Status {
 	case model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent:
+		return true
+	default:
+		return false
+	}
+}
+
+func operationCanUpdateProgress(op model.Operation) bool {
+	switch op.Status {
+	case model.OperationStatusRunning, model.OperationStatusWaitingAgent:
 		return true
 	default:
 		return false

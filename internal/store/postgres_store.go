@@ -3917,6 +3917,48 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string,
 	return op, nil
 }
 
+func (s *Store) pgUpdateOperationProgress(id, message string) (model.Operation, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Operation{}, fmt.Errorf("begin operation progress transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	op, err := s.pgGetOperationTx(ctx, tx, id, true)
+	if err != nil {
+		return model.Operation{}, mapDBErr(err)
+	}
+	if !operationCanUpdateProgress(op) {
+		return model.Operation{}, ErrConflict
+	}
+
+	now := time.Now().UTC()
+	op.ResultMessage = strings.TrimSpace(message)
+	op.UpdatedAt = now
+
+	app, err := s.pgGetAppTx(ctx, tx, op.AppID, true)
+	if err != nil {
+		return model.Operation{}, mapDBErr(err)
+	}
+	if err := applyInFlightOperationToAppModel(&app, &op); err != nil {
+		return model.Operation{}, err
+	}
+
+	if err := s.pgUpdateOperationTx(ctx, tx, op); err != nil {
+		return model.Operation{}, err
+	}
+	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+		return model.Operation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Operation{}, fmt.Errorf("commit operation progress transaction: %w", err)
+	}
+	return op, nil
+}
+
 func (s *Store) pgFailOperation(id, message string) (model.Operation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

@@ -416,6 +416,111 @@ func TestBuildManagedAppStatusPrefersPodFailureOverDeploymentCondition(t *testin
 	}
 }
 
+func TestBuildManagedAppStatusIgnoresSIGTERMAndTerminatingPods(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:v2",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	managed := runtime.ManagedAppObject{
+		Metadata: runtime.ManagedAppMeta{
+			Generation: 2,
+		},
+		Spec: runtime.ManagedAppSpec{
+			Scheduling: runtime.SchedulingConstraints{},
+		},
+	}
+	deployment := kubeDeployment{}
+	deployment.Metadata.Generation = 2
+	deployment.Status.ObservedGeneration = 2
+	deployment.Status.Replicas = 2
+	deployment.Status.UpdatedReplicas = 1
+	deployment.Status.ReadyReplicas = 1
+	deployment.Status.AvailableReplicas = 1
+
+	pods := []kubePod{
+		{
+			Metadata: struct {
+				Name              string    `json:"name"`
+				CreationTimestamp time.Time `json:"creationTimestamp"`
+				DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
+			}{
+				Name:              "demo-old",
+				CreationTimestamp: time.Date(2026, time.March, 26, 9, 0, 0, 0, time.UTC),
+				DeletionTimestamp: time.Date(2026, time.March, 26, 9, 10, 0, 0, time.UTC).Format(time.RFC3339Nano),
+			},
+			Status: struct {
+				Phase                 string                `json:"phase"`
+				Reason                string                `json:"reason,omitempty"`
+				Message               string                `json:"message,omitempty"`
+				Conditions            []kubePodCondition    `json:"conditions,omitempty"`
+				InitContainerStatuses []kubeContainerStatus `json:"initContainerStatuses,omitempty"`
+				ContainerStatuses     []kubeContainerStatus `json:"containerStatuses,omitempty"`
+			}{
+				Phase: "Failed",
+				ContainerStatuses: []kubeContainerStatus{
+					{
+						Name: "demo",
+						State: kubeRuntimeState{
+							Terminated: &kubeStateDetail{
+								Reason:   "Error",
+								ExitCode: 143,
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			Metadata: struct {
+				Name              string    `json:"name"`
+				CreationTimestamp time.Time `json:"creationTimestamp"`
+				DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
+			}{
+				Name:              "demo-new",
+				CreationTimestamp: time.Date(2026, time.March, 26, 9, 11, 0, 0, time.UTC),
+			},
+			Status: struct {
+				Phase                 string                `json:"phase"`
+				Reason                string                `json:"reason,omitempty"`
+				Message               string                `json:"message,omitempty"`
+				Conditions            []kubePodCondition    `json:"conditions,omitempty"`
+				InitContainerStatuses []kubeContainerStatus `json:"initContainerStatuses,omitempty"`
+				ContainerStatuses     []kubeContainerStatus `json:"containerStatuses,omitempty"`
+			}{
+				Phase: "Running",
+				ContainerStatuses: []kubeContainerStatus{
+					{
+						Name: "demo",
+						LastState: kubeRuntimeState{
+							Terminated: &kubeStateDetail{
+								Reason:   "Error",
+								ExitCode: 143,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	status := buildManagedAppStatus(managed, app, deployment, true, pods, nil)
+
+	if status.Phase != runtime.ManagedAppPhaseProgressing {
+		t.Fatalf("expected phase progressing, got %q message=%q", status.Phase, status.Message)
+	}
+	if strings.Contains(status.Message, "exit_code=143") {
+		t.Fatalf("expected SIGTERM to stay out of rollout message, got %q", status.Message)
+	}
+}
+
 func TestBuildManagedAppStatusIgnoresPodFailuresFromPreviousRelease(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",

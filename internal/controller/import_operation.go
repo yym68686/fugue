@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/sourceimport"
+	"fugue/internal/store"
 )
 
 func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Operation, app model.App) (err error) {
@@ -39,6 +41,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	}
 	stateful := op.DesiredSpec.Workspace != nil || op.DesiredSpec.PersistentStorage != nil || op.DesiredSpec.Postgres != nil
 	var output sourceimport.GitHubSourceImportOutput
+	stopImportProgress := s.startImportOperationProgressHeartbeat(importCtx, op.ID)
 	switch strings.TrimSpace(op.DesiredSource.Type) {
 	case model.AppSourceTypeDockerImage:
 		if strings.TrimSpace(op.DesiredSource.ImageRef) == "" {
@@ -108,10 +111,12 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	default:
 		return fmt.Errorf("import operation %s only supports github-backed, image-backed, or upload source", op.ID)
 	}
+	stopImportProgress()
 	if err != nil {
 		return err
 	}
 	timer.Mark("import_source")
+	s.updateOperationProgress(op.ID, "import build completed; validating image output")
 	if err := s.ensureOperationStillActive(op.ID); err != nil {
 		return err
 	}
@@ -132,6 +137,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		return err
 	}
 	timer.Mark("validate_import")
+	s.updateOperationProgress(op.ID, "import image built; preparing deploy spec")
 
 	composeSuggestedEnv, composeEnvErr := s.suggestComposeServiceEnv(importCtx, app, *op.DesiredSource)
 	if composeEnvErr != nil && s.Logger != nil {
@@ -148,6 +154,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		return err
 	}
 	timer.Mark("resolve_image")
+	s.updateOperationProgress(op.ID, "import image resolved; queueing deploy")
 	finalSource.ResolvedImageRef = managedImageRef
 	if deployOriginSource != nil && originSourceShouldAdoptImportedBuild(*deployOriginSource, *op.DesiredSource) {
 		deployOriginSource.ResolvedImageRef = managedImageRef
@@ -197,6 +204,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		return fmt.Errorf("queue deploy after import: %w", err)
 	}
 	timer.Mark("queue_deploy")
+	s.updateOperationProgress(op.ID, fmt.Sprintf("import build completed; queued deploy operation %s", deployOp.ID))
 
 	message := fmt.Sprintf("import build completed; queued deploy operation %s", deployOp.ID)
 	if _, err := s.Store.CompleteManagedOperationWithResult(op.ID, "", message, &finalSpec, &finalSource); err != nil {
@@ -210,6 +218,83 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 
 	s.Logger.Printf("operation %s completed import build; managed_image=%s runtime_image=%s deploy=%s", op.ID, managedImageRef, finalSpec.Image, deployOp.ID)
 	return nil
+}
+
+func (s *Service) startImportOperationProgressHeartbeat(ctx context.Context, operationID string) func() {
+	now := time.Now
+	if s != nil && s.now != nil {
+		now = s.now
+	}
+	startedAt := now()
+	if startedAt.IsZero() {
+		startedAt = time.Now().UTC()
+	}
+	s.updateOperationProgress(operationID, importOperationProgressMessage(0))
+
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				elapsed := now().Sub(startedAt)
+				if elapsed < 0 {
+					elapsed = time.Since(startedAt)
+				}
+				s.updateOperationProgress(operationID, importOperationProgressMessage(elapsed))
+			}
+		}
+	}()
+	return func() {
+		close(done)
+	}
+}
+
+func importOperationProgressMessage(elapsed time.Duration) string {
+	if elapsed < time.Second {
+		return "import started; waiting for source build or image push"
+	}
+	return fmt.Sprintf("import still running (%s); waiting for source build or image push", formatOperationProgressDuration(elapsed))
+}
+
+func formatOperationProgressDuration(value time.Duration) string {
+	value = value.Round(time.Second)
+	if value < time.Minute {
+		return fmt.Sprintf("%ds", int(value.Seconds()))
+	}
+	if value < time.Hour {
+		minutes := int(value / time.Minute)
+		seconds := int((value % time.Minute) / time.Second)
+		if seconds == 0 {
+			return fmt.Sprintf("%dm", minutes)
+		}
+		return fmt.Sprintf("%dm%02ds", minutes, seconds)
+	}
+	hours := int(value / time.Hour)
+	minutes := int((value % time.Hour) / time.Minute)
+	if minutes == 0 {
+		return fmt.Sprintf("%dh", hours)
+	}
+	return fmt.Sprintf("%dh%02dm", hours, minutes)
+}
+
+func (s *Service) updateOperationProgress(operationID, message string) {
+	if s == nil || s.Store == nil {
+		return
+	}
+	if _, err := s.Store.UpdateOperationProgress(operationID, message); err != nil {
+		if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
+			return
+		}
+		if s.Logger != nil {
+			s.Logger.Printf("update operation %s progress failed: %v", operationID, err)
+		}
+	}
 }
 
 func importSourceTimeout() time.Duration {

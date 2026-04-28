@@ -134,6 +134,38 @@ func TestKanikoDestinationArgsIncludeDefaultRegistryMirror(t *testing.T) {
 	}
 }
 
+func TestKanikoDestinationArgsUseRedoSnapshotModeByDefault(t *testing.T) {
+	t.Setenv("FUGUE_KANIKO_SNAPSHOT_MODE", "")
+	t.Setenv("FUGUE_KANIKO_EXTRA_ARGS", "")
+
+	args := kanikoDestinationArgs(
+		"fugue-fugue-registry.fugue-system.svc.cluster.local:5000/fugue-apps/demo:git-abc123",
+		"--context=dir:///workspace/generated",
+		"--dockerfile=/workspace/generated/Dockerfile",
+	)
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--snapshot-mode=redo") {
+		t.Fatalf("expected redo snapshot mode in args: %v", args)
+	}
+}
+
+func TestKanikoDestinationArgsAllowSnapshotModeAndExtraArgsOverrides(t *testing.T) {
+	t.Setenv("FUGUE_KANIKO_SNAPSHOT_MODE", "full")
+	t.Setenv("FUGUE_KANIKO_EXTRA_ARGS", "--cache=true --cache-run-layers")
+
+	args := kanikoDestinationArgs(
+		"fugue-fugue-registry.fugue-system.svc.cluster.local:5000/fugue-apps/demo:git-abc123",
+		"--context=dir:///workspace/generated",
+		"--dockerfile=/workspace/generated/Dockerfile",
+	)
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--snapshot-mode=full", "--cache=true", "--cache-run-layers"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected %s in args: %v", want, args)
+		}
+	}
+}
+
 func TestKanikoDockerfilePathRelativeToBuildContext(t *testing.T) {
 	t.Parallel()
 

@@ -3697,6 +3697,88 @@ func TestFailedOperationMarksAppFailed(t *testing.T) {
 	}
 }
 
+func TestUpdateOperationProgressRefreshesRunningOperationAndApp(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Progress Test")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.example.com/demo:old",
+		Ports:     []int{3000},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyDockerfile,
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	spec := app.Spec
+	source := *app.Source
+	op, err := s.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		Type:          model.OperationTypeImport,
+		AppID:         app.ID,
+		DesiredSpec:   &spec,
+		DesiredSource: &source,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+	claimed, found, err := s.ClaimNextPendingOperation()
+	if err != nil {
+		t.Fatalf("claim operation: %v", err)
+	}
+	if !found {
+		t.Fatal("expected operation to be claimed")
+	}
+
+	progressMessage := "import still running (2m); waiting for source build or image push"
+	progress, err := s.UpdateOperationProgress(op.ID, progressMessage)
+	if err != nil {
+		t.Fatalf("update operation progress: %v", err)
+	}
+	if !progress.UpdatedAt.After(claimed.UpdatedAt) {
+		t.Fatalf("expected progress update to advance updated_at, claimed=%s progress=%s", claimed.UpdatedAt, progress.UpdatedAt)
+	}
+	if progress.ResultMessage != progressMessage {
+		t.Fatalf("unexpected progress message %q", progress.ResultMessage)
+	}
+
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.Status.LastMessage != progressMessage {
+		t.Fatalf("expected app last message to track progress, got %q", app.Status.LastMessage)
+	}
+	if app.Status.Phase != "importing" {
+		t.Fatalf("expected app phase importing, got %q", app.Status.Phase)
+	}
+
+	if _, err := s.CompleteManagedOperation(op.ID, "", "done"); err != nil {
+		t.Fatalf("complete operation: %v", err)
+	}
+	if _, err := s.UpdateOperationProgress(op.ID, "late progress"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict after completion, got %v", err)
+	}
+}
+
 func TestFailedRebuildKeepsDeployedPhaseWhenLiveVersionExists(t *testing.T) {
 	t.Parallel()
 

@@ -7,6 +7,7 @@ import (
 )
 
 const defaultKanikoRegistryMirror = "mirror.gcr.io"
+const defaultKanikoSnapshotMode = "redo"
 
 func registryHostFromImageRef(imageRef string) string {
 	host := strings.TrimSpace(imageRef)
@@ -34,7 +35,9 @@ func isInsecureRegistryHost(host string) bool {
 
 func kanikoDestinationArgs(imageRef string, baseArgs ...string) []string {
 	args := append([]string(nil), baseArgs...)
+	args = append(args, configuredKanikoSnapshotArgs()...)
 	args = append(args, "--destination="+imageRef, "--cleanup")
+	args = append(args, configuredKanikoExtraArgs()...)
 	for _, mirror := range configuredKanikoRegistryMirrors() {
 		args = append(args, "--registry-mirror="+mirror)
 	}
@@ -45,6 +48,27 @@ func kanikoDestinationArgs(imageRef string, baseArgs ...string) []string {
 		)
 	}
 	return args
+}
+
+func configuredKanikoSnapshotArgs() []string {
+	mode := strings.TrimSpace(os.Getenv("FUGUE_KANIKO_SNAPSHOT_MODE"))
+	if mode == "" {
+		mode = defaultKanikoSnapshotMode
+	}
+	switch strings.ToLower(mode) {
+	case "none", "off", "disabled":
+		return nil
+	default:
+		return []string{"--snapshot-mode=" + mode}
+	}
+}
+
+func configuredKanikoExtraArgs() []string {
+	raw := strings.TrimSpace(os.Getenv("FUGUE_KANIKO_EXTRA_ARGS"))
+	if raw == "" {
+		return nil
+	}
+	return strings.Fields(raw)
 }
 
 func configuredKanikoRegistryMirrors() []string {

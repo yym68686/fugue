@@ -584,6 +584,9 @@ func managedAppPodFailureMessage(pods []kubePod, notBefore *time.Time) string {
 		if notBefore != nil && pod.Metadata.CreationTimestamp.Before(notBefore.UTC()) {
 			continue
 		}
+		if strings.TrimSpace(pod.Metadata.DeletionTimestamp) != "" {
+			continue
+		}
 		if summary := summarizeManagedAppPodFailure(pod); summary != "" {
 			return summary
 		}
@@ -730,6 +733,9 @@ func isFailingManagedAppWaitingReason(reason string) bool {
 }
 
 func isFailingManagedAppTermination(detail kubeStateDetail) bool {
+	if detail.ExitCode == 143 {
+		return false
+	}
 	reason := strings.TrimSpace(detail.Reason)
 	if reason == "" {
 		return detail.ExitCode != 0
