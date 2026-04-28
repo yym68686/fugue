@@ -53,6 +53,18 @@ app.kubernetes.io/component: {{ .component }}
 {{- printf "%s-node-janitor" (include "fugue.fullname" .) -}}
 {{- end -}}
 
+{{- define "fugue.imagePrePullName" -}}
+{{- printf "%s-image-prepull" (include "fugue.fullname" .) -}}
+{{- end -}}
+
+{{- define "fugue.registryPushBase" -}}
+{{- if .Values.api.registryPushBase -}}
+{{- .Values.api.registryPushBase -}}
+{{- else -}}
+{{- printf "%s-registry.%s.svc.cluster.local:%v" (include "fugue.fullname" .) .Release.Namespace .Values.registry.service.port -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "fugue.sharedWorkspaceNFSName" -}}
 {{- printf "%s-shared-workspace-nfs" (include "fugue.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}

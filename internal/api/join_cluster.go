@@ -622,6 +622,17 @@ format_duration() {
   printf '%%ss' "${seconds}"
 }
 
+registry_endpoint_url() {
+  case "${1:-}" in
+    http://*|https://*)
+      printf '%%s' "$1"
+      ;;
+    *)
+      printf 'http://%%s' "$1"
+      ;;
+  esac
+}
+
 run_with_heartbeat() {
   local label="$1"
   local expected="$2"
@@ -1489,11 +1500,12 @@ fi
 
 if [ -n "${FUGUE_JOIN_REGISTRY_BASE:-}" ] && [ -n "${FUGUE_JOIN_REGISTRY_ENDPOINT:-}" ]; then
   k3s_registry_tmp="$(mktemp)"
+  registry_endpoint_url_value="$(registry_endpoint_url "${FUGUE_JOIN_REGISTRY_ENDPOINT}")"
   cat >"${k3s_registry_tmp}" <<EOF_REG
 mirrors:
   "${FUGUE_JOIN_REGISTRY_BASE}":
     endpoint:
-      - "http://${FUGUE_JOIN_REGISTRY_ENDPOINT}"
+      - "${registry_endpoint_url_value}"
 configs:
   "${FUGUE_JOIN_REGISTRY_BASE}":
     tls:

@@ -1,0 +1,133 @@
+{{- $imagePrePull := (get .Values "imagePrePull" | default (dict)) -}}
+{{- $enabled := true -}}
+{{- if hasKey $imagePrePull "enabled" -}}
+{{- $enabled = (get $imagePrePull "enabled") -}}
+{{- end -}}
+{{- $images := (get $imagePrePull "images" | default (list)) -}}
+{{- if and $enabled (gt (len $images) 0) }}
+{{- $image := (get $imagePrePull "image" | default (dict)) -}}
+{{- $repository := default .Values.controller.image.repository (get $image "repository") -}}
+{{- $tag := default .Values.controller.image.tag (get $image "tag") -}}
+{{- $pullPolicy := default .Values.controller.image.pullPolicy (get $image "pullPolicy") -}}
+{{- $intervalSeconds := default 900 (get $imagePrePull "intervalSeconds") -}}
+{{- $priorityClassName := default "system-node-critical" (get $imagePrePull "priorityClassName") -}}
+{{- $nodeSelector := (get $imagePrePull "nodeSelector" | default (dict)) -}}
+{{- $tolerations := (get $imagePrePull "tolerations" | default (list (dict "operator" "Exists"))) -}}
+{{- $resources := (get $imagePrePull "resources" | default (dict)) -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "fugue.imagePrePullName" . }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "image-prepull") | nindent 4 }}
+spec:
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "image-prepull") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "image-prepull") | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/images: {{ toJson $images | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- if .Values.rbac.create }}
+      serviceAccountName: {{ include "fugue.serviceAccountName" . }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $priorityClassName }}
+      priorityClassName: {{ $priorityClassName | quote }}
+      {{- end }}
+      containers:
+        - name: image-prepull
+          image: "{{ $repository }}:{{ $tag }}"
+          imagePullPolicy: {{ $pullPolicy }}
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              interval_seconds="{{ $intervalSeconds }}"
+              host_root="/host"
+              images_file="/etc/fugue-prepull/images"
+
+              log() {
+                printf '[image-prepull] %s\n' "$*"
+              }
+
+              pull_warm_images() {
+                if [[ ! -x "${host_root}/usr/local/bin/k3s" ]]; then
+                  log "skip image warmup on ${NODE_NAME}: host k3s binary not found"
+                  return
+                fi
+                while IFS= read -r image; do
+                  image="$(printf '%s' "${image}" | awk '{$1=$1; print}')"
+                  if [[ -z "${image}" ]]; then
+                    continue
+                  fi
+                  if chroot "${host_root}" /bin/sh -lc "k3s crictl pull $(printf '%q' "${image}")" >/dev/null 2>&1; then
+                    log "warmed ${image} on ${NODE_NAME}"
+                  else
+                    log "warm pull failed for ${image} on ${NODE_NAME}; continuing"
+                  fi
+                done < "${images_file}"
+              }
+
+              while true; do
+                pull_warm_images
+                sleep "${interval_seconds}"
+              done
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            {{- toYaml $resources | nindent 12 }}
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+            - name: warm-images
+              mountPath: /etc/fugue-prepull
+              readOnly: true
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        - name: warm-images
+          configMap:
+            name: {{ include "fugue.imagePrePullName" . }}
+      {{- with $nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "fugue.imagePrePullName" . }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "image-prepull") | nindent 4 }}
+data:
+  images: |-
+{{ range $images }}    {{ . }}
+{{ end }}
+{{- end }}

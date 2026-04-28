@@ -51,6 +51,7 @@ func (s *Server) pruneExcessManagedAppImages(ctx context.Context, app model.App)
 		s.registryPushBase,
 		s.registryPullBase,
 	)
+	mergeManagedImageRefSets(remainingRefs, s.liveManagedImageRefSet(ctx, allApps))
 
 	var errs []error
 	gcNeeded := false
@@ -92,4 +93,10 @@ func operationsExcludingAppID(ops []model.Operation, appID string) []model.Opera
 		filtered = append(filtered, candidate)
 	}
 	return filtered
+}
+
+func mergeManagedImageRefSets(target, source map[string]struct{}) {
+	for imageRef := range source {
+		target[imageRef] = struct{}{}
+	}
 }

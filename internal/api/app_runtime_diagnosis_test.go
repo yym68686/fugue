@@ -10,7 +10,57 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+func TestAppPlatformEnvDriftReportsStalePlatformEnv(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		Spec: model.AppSpec{
+			Env: map[string]string{
+				"ARGUS_KEEP": "current",
+				"USER_ENV":   "ignored",
+			},
+		},
+	}
+	deployment := appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "fg-demo",
+			Name:      "demo",
+		},
+		Spec: appsv1.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name: "demo",
+						Env: []corev1.EnvVar{
+							{Name: "ARGUS_KEEP", Value: "current"},
+							{Name: "ARGUS_FUGUE_RUNTIME_IMAGE", Value: "old"},
+							{Name: "FUGUE_TOKEN", Value: "injected"},
+							{Name: "USER_ENV", Value: "live-hotfix"},
+						},
+					}},
+				},
+			},
+		},
+	}
+
+	report := appPlatformEnvDrift(app, deployment)
+	joinedEvidence := strings.Join(report.evidence, "\n")
+	if !strings.Contains(joinedEvidence, "ARGUS_FUGUE_RUNTIME_IMAGE") {
+		t.Fatalf("expected stale ARGUS env evidence, got %#v", report.evidence)
+	}
+	if strings.Contains(joinedEvidence, "FUGUE_TOKEN") || strings.Contains(joinedEvidence, "USER_ENV") {
+		t.Fatalf("expected injected Fugue and user env to be ignored, got %#v", report.evidence)
+	}
+	if len(report.warnings) == 0 {
+		t.Fatalf("expected drift warning, got %#v", report)
+	}
+}
 
 func TestGetAppDiagnosisExplainsEvictionVolumeAffinityChain(t *testing.T) {
 	t.Parallel()

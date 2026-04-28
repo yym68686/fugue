@@ -99,6 +99,22 @@ func TestManagedImageRefForSourceGitHubOmitsBlankOptionalSuffix(t *testing.T) {
 	}
 }
 
+func TestManagedImageRefForSourceMapsLegacyFugueAppsRuntimeHost(t *testing.T) {
+	t.Parallel()
+
+	got := ManagedImageRefForSource(
+		model.App{Name: "demo"},
+		&model.AppSource{Type: model.AppSourceTypeDockerImage},
+		"10.128.0.2:30500/fugue-apps/example-demo@sha256:abc123",
+		"registry.push.example",
+		"registry.fugue.internal:5000",
+	)
+	want := "registry.push.example/fugue-apps/example-demo@sha256:abc123"
+	if got != want {
+		t.Fatalf("expected legacy runtime host to map to managed ref %q, got %q", want, got)
+	}
+}
+
 func TestManagedImageRefForSourceUploadOmitsBlankOptionalSuffix(t *testing.T) {
 	t.Parallel()
 

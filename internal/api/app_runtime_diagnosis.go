@@ -11,6 +11,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -133,6 +134,10 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 			snapshots = inventory
 		}
 	}
+	platformEnvDrift := false
+	if clusterErr == nil && component == "app" {
+		platformEnvDrift = s.appendAppPlatformEnvDrift(r.Context(), clusterClient, app, namespace, &diagnosis)
+	}
 
 	podSummaries := summarizeAppDiagnosisPods(pods)
 	for _, summary := range podSummaries {
@@ -219,6 +224,10 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 		if crashLogEvidence != "" {
 			diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, crashLogEvidence)
 		}
+	case platformEnvDrift:
+		diagnosis.Category = "platform-env-drift"
+		diagnosis.Summary = "live deployment platform env differs from the app spec"
+		diagnosis.Hint = fmt.Sprintf("Inspect the app deployment and trigger a reconcile for %s; stale ARGUS_* or FUGUE_* overrides can point workloads at deleted runtime images.", strings.TrimSpace(app.Name))
 	case len(pods) == 0:
 		diagnosis.Category = "no-pods"
 		diagnosis.Summary = "no runtime pods currently match the app selector"
@@ -233,6 +242,118 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 		diagnosis.Summary = "no single runtime root cause was identified"
 	}
 	return diagnosis, nil
+}
+
+func (s *Server) appendAppPlatformEnvDrift(ctx context.Context, client *clusterNodeClient, app model.App, namespace string, diagnosis *appDiagnosis) bool {
+	if client == nil || diagnosis == nil {
+		return false
+	}
+	deploymentName := runtime.RuntimeAppResourceName(app)
+	deployment, found, err := client.readDeploymentObject(ctx, namespace, deploymentName)
+	if err != nil {
+		diagnosis.Warnings = append(diagnosis.Warnings, fmt.Sprintf("deployment env drift inspection unavailable: %v", err))
+		return false
+	}
+	if !found {
+		return false
+	}
+	drift := appPlatformEnvDrift(app, deployment)
+	for _, evidence := range drift.evidence {
+		diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, evidence)
+	}
+	for _, warning := range drift.warnings {
+		diagnosis.Warnings = appendUniqueString(diagnosis.Warnings, warning)
+	}
+	return len(drift.evidence) > 0 || len(drift.warnings) > 0
+}
+
+type appPlatformEnvDriftReport struct {
+	evidence []string
+	warnings []string
+}
+
+func appPlatformEnvDrift(app model.App, deployment appsv1.Deployment) appPlatformEnvDriftReport {
+	expectedSpecEnv := make(map[string]string)
+	expectedPlatformNames := knownInjectedPlatformEnvNames(app)
+	for key, value := range app.Spec.Env {
+		key = strings.TrimSpace(key)
+		if key == "" || !isManagedPlatformEnvName(key) {
+			continue
+		}
+		expectedSpecEnv[key] = value
+		expectedPlatformNames[key] = struct{}{}
+	}
+
+	liveEnv := make(map[string]string)
+	for _, container := range deployment.Spec.Template.Spec.Containers {
+		for _, env := range container.Env {
+			key := strings.TrimSpace(env.Name)
+			if key == "" || !isManagedPlatformEnvName(key) {
+				continue
+			}
+			liveEnv[key] = env.Value
+		}
+	}
+
+	var extra []string
+	var missing []string
+	var changed []string
+	for key := range liveEnv {
+		if _, expected := expectedPlatformNames[key]; !expected {
+			extra = append(extra, key)
+		}
+	}
+	for key, expectedValue := range expectedSpecEnv {
+		liveValue, ok := liveEnv[key]
+		if !ok {
+			missing = append(missing, key)
+			continue
+		}
+		if liveValue != expectedValue {
+			changed = append(changed, key)
+		}
+	}
+	sort.Strings(extra)
+	sort.Strings(missing)
+	sort.Strings(changed)
+
+	report := appPlatformEnvDriftReport{}
+	if len(extra) > 0 {
+		report.evidence = append(report.evidence, fmt.Sprintf("deployment %s/%s has unmanaged platform env not present in app spec: %s", deployment.Namespace, deployment.Name, strings.Join(extra, ", ")))
+	}
+	if len(missing) > 0 {
+		report.evidence = append(report.evidence, fmt.Sprintf("deployment %s/%s is missing app spec platform env: %s", deployment.Namespace, deployment.Name, strings.Join(missing, ", ")))
+	}
+	if len(changed) > 0 {
+		report.evidence = append(report.evidence, fmt.Sprintf("deployment %s/%s has platform env values that differ from app spec: %s", deployment.Namespace, deployment.Name, strings.Join(changed, ", ")))
+	}
+	if len(report.evidence) > 0 {
+		report.warnings = append(report.warnings, "live deployment platform env drift detected")
+	}
+	return report
+}
+
+func knownInjectedPlatformEnvNames(app model.App) map[string]struct{} {
+	names := map[string]struct{}{
+		"FUGUE_TENANT_ID":  {},
+		"FUGUE_PROJECT_ID": {},
+		"FUGUE_APP_ID":     {},
+		"FUGUE_APP_NAME":   {},
+		"FUGUE_RUNTIME_ID": {},
+		"FUGUE_API_URL":    {},
+		"FUGUE_BASE_URL":   {},
+		"FUGUE_TOKEN":      {},
+	}
+	if app.Route != nil {
+		names["FUGUE_APP_HOSTNAME"] = struct{}{}
+		names["FUGUE_APP_URL"] = struct{}{}
+	}
+	return names
+}
+
+func isManagedPlatformEnvName(name string) bool {
+	name = strings.TrimSpace(name)
+	return strings.HasPrefix(name, "ARGUS_") || strings.HasPrefix(name, "FUGUE_")
 }
 
 type coreEventOrZero struct {

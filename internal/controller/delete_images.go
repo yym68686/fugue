@@ -27,11 +27,17 @@ func (s *Service) cleanupDeletedAppImages(ctx context.Context, app model.App) er
 		return err
 	}
 
-	imageRefs := appimages.DeletableManagedImageRefs(
-		app,
-		targetOps,
+	remainingRefs := appimages.ManagedImageRefSet(
 		remainingApps,
 		remainingOps,
+		s.registryPushBase,
+		s.registryPullBase,
+	)
+	mergeManagedImageRefSets(remainingRefs, s.liveManagedImageRefSet(ctx, append(append([]model.App(nil), remainingApps...), app)))
+
+	imageRefs := appimages.ManagedImageRefs(
+		app,
+		targetOps,
 		s.registryPushBase,
 		s.registryPullBase,
 	)
@@ -46,6 +52,9 @@ func (s *Service) cleanupDeletedAppImages(ctx context.Context, app model.App) er
 
 	var errs []error
 	for _, imageRef := range imageRefs {
+		if _, inUse := remainingRefs[imageRef]; inUse {
+			continue
+		}
 		if _, err := deleteImage(ctx, imageRef); err != nil {
 			errs = append(errs, err)
 		}

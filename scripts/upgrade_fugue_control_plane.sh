@@ -46,6 +46,7 @@ LOCAL_KUBE_API_READY_POLL_SECONDS="${FUGUE_LOCAL_KUBE_API_READY_POLL_SECONDS:-2}
 LOCAL_KUBE_API_READY_TIMEOUT_SECONDS="${FUGUE_LOCAL_KUBE_API_READY_TIMEOUT_SECONDS:-180}"
 PRIMARY_POSTGRES_DATA_ROOT="${FUGUE_PRIMARY_POSTGRES_DATA_ROOT:-/var/lib/fugue/postgres}"
 PRIMARY_POSTGRES_IMAGE="${FUGUE_PRIMARY_POSTGRES_IMAGE:-docker.io/library/postgres:16-alpine}"
+FUGUE_DEFAULT_REGISTRY_PULL_BASE="${FUGUE_DEFAULT_REGISTRY_PULL_BASE:-registry.fugue.internal:5000}"
 
 detect_primary_private_ip() {
   ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}'
@@ -55,7 +56,8 @@ detect_existing_registry_pull_base() {
   if [[ ! -r /etc/rancher/k3s/registries.yaml ]]; then
     return 1
   fi
-  awk '
+  local value=""
+  value="$(awk '
     $1 == "mirrors:" { in_mirrors = 1; next }
     in_mirrors && /^[[:space:]]*"/ {
       value = $1
@@ -64,7 +66,34 @@ detect_existing_registry_pull_base() {
       print value
       exit
     }
-  ' /etc/rancher/k3s/registries.yaml
+  ' /etc/rancher/k3s/registries.yaml)"
+  if [[ -z "${value}" ]]; then
+    return 1
+  fi
+  if is_legacy_nodeport_registry_pull_base "${value}"; then
+    return 1
+  fi
+  printf '%s' "${value}"
+}
+
+is_legacy_nodeport_registry_pull_base() {
+  local value="$1"
+  local host="${value%:*}"
+  local port="${value##*:}"
+  if [[ "${host}" == "${value}" || "${port}" != "${FUGUE_REGISTRY_NODEPORT:-30500}" ]]; then
+    return 1
+  fi
+  case "${host}" in
+    10.*|192.168.*|127.*|100.64.*|100.65.*|100.66.*|100.67.*|100.68.*|100.69.*|100.70.*|100.71.*|100.72.*|100.73.*|100.74.*|100.75.*|100.76.*|100.77.*|100.78.*|100.79.*|100.80.*|100.81.*|100.82.*|100.83.*|100.84.*|100.85.*|100.86.*|100.87.*|100.88.*|100.89.*|100.90.*|100.91.*|100.92.*|100.93.*|100.94.*|100.95.*|100.96.*|100.97.*|100.98.*|100.99.*|100.100.*|100.101.*|100.102.*|100.103.*|100.104.*|100.105.*|100.106.*|100.107.*|100.108.*|100.109.*|100.110.*|100.111.*|100.112.*|100.113.*|100.114.*|100.115.*|100.116.*|100.117.*|100.118.*|100.119.*|100.120.*|100.121.*|100.122.*|100.123.*|100.124.*|100.125.*|100.126.*|100.127.*)
+      return 0
+      ;;
+    172.16.*|172.17.*|172.18.*|172.19.*|172.20.*|172.21.*|172.22.*|172.23.*|172.24.*|172.25.*|172.26.*|172.27.*|172.28.*|172.29.*|172.30.*|172.31.*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 detect_primary_mesh_ip() {
@@ -87,6 +116,74 @@ registry_endpoint_from_join_server() {
   host="${join_server%%:*}"
   if [[ -n "${host}" ]]; then
     printf '%s:%s' "${host}" "${FUGUE_REGISTRY_NODEPORT}"
+  fi
+}
+
+registry_endpoint_url_value() {
+  local endpoint="$1"
+  case "${endpoint}" in
+    http://*|https://*)
+      printf '%s' "${endpoint}"
+      ;;
+    *)
+      printf 'http://%s' "${endpoint}"
+      ;;
+  esac
+}
+
+ensure_local_registry_mirror_config() {
+  local registry_base="$1"
+  local endpoint="$2"
+  local endpoint_url=""
+  local tmp=""
+  local target="/etc/rancher/k3s/registries.yaml"
+
+  registry_base="$(printf '%s' "${registry_base}" | awk '{$1=$1; print}')"
+  endpoint="$(printf '%s' "${endpoint}" | awk '{$1=$1; print}')"
+  if [[ -z "${registry_base}" || -z "${endpoint}" ]]; then
+    return 0
+  fi
+  if [[ "$(id -u)" != "0" ]]; then
+    log "skip local registries.yaml migration because upgrade is not running as root"
+    return 0
+  fi
+  if [[ ! -d /etc/rancher/k3s ]]; then
+    log "skip local registries.yaml migration because /etc/rancher/k3s is absent"
+    return 0
+  fi
+
+  endpoint_url="$(registry_endpoint_url_value "${endpoint}")"
+  tmp="$(mktemp)"
+  cat >"${tmp}" <<EOF
+mirrors:
+  "${registry_base}":
+    endpoint:
+      - "${endpoint_url}"
+configs:
+  "${registry_base}":
+    tls:
+      insecure_skip_verify: true
+EOF
+
+  if [[ -r "${target}" ]] && cmp -s "${tmp}" "${target}"; then
+    rm -f "${tmp}"
+    log "local registries.yaml already points ${registry_base} at ${endpoint_url}"
+    return 0
+  fi
+
+  install -m 0644 "${tmp}" "${target}"
+  rm -f "${tmp}"
+  log "migrated local registries.yaml to mirror ${registry_base} via ${endpoint_url}"
+
+  if command_exists systemctl; then
+    if systemctl is-active --quiet k3s; then
+      log "restarting local k3s so containerd reloads registry mirror configuration"
+      systemctl restart k3s
+      wait_for_local_kube_api_ready
+    elif systemctl is-active --quiet k3s-agent; then
+      log "restarting local k3s-agent so containerd reloads registry mirror configuration"
+      systemctl restart k3s-agent
+    fi
   fi
 }
 
@@ -312,7 +409,29 @@ cloudnative-pg:
                 app.kubernetes.io/name: cloudnative-pg
                 app.kubernetes.io/instance: fugue
 EOF
+  append_upgrade_image_prepull_values
   printf '%s' "${UPGRADE_OVERRIDE_VALUES_FILE}"
+}
+
+append_upgrade_image_prepull_values() {
+  local image
+  if [[ -z "${FUGUE_IMAGE_PREPULL_IMAGES:-}" ]]; then
+    return 0
+  fi
+  cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<'EOF'
+
+imagePrePull:
+  enabled: true
+  images:
+EOF
+  printf '%s' "${FUGUE_IMAGE_PREPULL_IMAGES}" | tr ',' '\n' | while IFS= read -r image; do
+    image="$(printf '%s' "${image}" | awk '{$1=$1; print}')"
+    if [[ -z "${image}" ]]; then
+      continue
+    fi
+    image="${image//\"/\\\"}"
+    printf '    - "%s"\n' "${image}" >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+  done
 }
 
 use_local_control_plane_automation_bundle_from_dir() {
@@ -1286,23 +1405,10 @@ main() {
     FUGUE_REGISTRY_PULL_BASE="$(detect_existing_registry_pull_base || true)"
   fi
   if [[ -z "${FUGUE_REGISTRY_PULL_BASE:-}" ]]; then
-    if [[ -z "${FUGUE_CLUSTER_INTERNAL_IP:-}" ]]; then
-      FUGUE_CLUSTER_INTERNAL_IP="$(detect_primary_private_ip)"
-    fi
-    [[ -n "${FUGUE_CLUSTER_INTERNAL_IP}" ]] || fail "failed to detect cluster internal IP for registry pull base"
-    FUGUE_REGISTRY_PULL_BASE="${FUGUE_CLUSTER_INTERNAL_IP}:${FUGUE_REGISTRY_NODEPORT}"
+    FUGUE_REGISTRY_PULL_BASE="${FUGUE_DEFAULT_REGISTRY_PULL_BASE}"
   fi
   if [[ -z "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT:-}" ]]; then
-    cluster_join_server="$(detect_cluster_join_server)"
-    FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT="$(registry_endpoint_from_join_server "${cluster_join_server}")"
-  fi
-  if [[ -z "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT:-}" ]]; then
-    mesh_ip="$(detect_primary_mesh_ip || true)"
-    if [[ -n "${mesh_ip}" ]]; then
-      FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT="${mesh_ip}:${FUGUE_REGISTRY_NODEPORT}"
-    else
-      FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT="${FUGUE_REGISTRY_PULL_BASE}"
-    fi
+    FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT="${FUGUE_DEFAULT_CLUSTER_JOIN_REGISTRY_ENDPOINT:-127.0.0.1:${FUGUE_REGISTRY_NODEPORT}}"
   fi
 
   if [[ -z "${FUGUE_SMOKE_URL:-}" && -n "${FUGUE_API_PUBLIC_DOMAIN:-}" ]]; then
@@ -1311,6 +1417,7 @@ main() {
   require_env FUGUE_SMOKE_URL
 
   command_exists helm || fail "helm is not installed"
+  ensure_local_registry_mirror_config "${FUGUE_REGISTRY_PULL_BASE}" "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}"
   wait_for_local_kube_api_ready
   ${KUBECTL} version --client >/dev/null
   helm status "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" >/dev/null

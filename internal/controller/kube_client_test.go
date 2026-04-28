@@ -384,6 +384,82 @@ func TestApplyObjectRemovesStaleAppFileVolumeReferencesBeforeRetry(t *testing.T)
 	}
 }
 
+func TestDeploymentPlatformEnvDriftRemoveOpsPrunesOnlyManagedPlatformEnv(t *testing.T) {
+	t.Parallel()
+
+	desired := map[string]any{
+		"apiVersion": "apps/v1",
+		"kind":       "Deployment",
+		"spec": map[string]any{
+			"template": map[string]any{
+				"spec": map[string]any{
+					"containers": []map[string]any{
+						{
+							"name": "app",
+							"env": []map[string]any{
+								{"name": "FUGUE_APP_ID", "value": "app_current"},
+								{"name": "ARGUS_KEEP", "value": "keep"},
+								{"name": "USER_HOTFIX", "value": "desired"},
+							},
+						},
+						{
+							"name": "sidecar",
+						},
+					},
+				},
+			},
+		},
+	}
+	live := map[string]any{
+		"apiVersion": "apps/v1",
+		"kind":       "Deployment",
+		"spec": map[string]any{
+			"template": map[string]any{
+				"spec": map[string]any{
+					"containers": []map[string]any{
+						{
+							"name": "app",
+							"env": []map[string]any{
+								{"name": "FUGUE_APP_ID", "value": "app_current"},
+								{"name": "ARGUS_FUGUE_RUNTIME_IMAGE", "value": "old"},
+								{"name": "USER_HOTFIX", "value": "live"},
+								{"name": "ARGUS_KEEP", "value": "keep"},
+							},
+						},
+						{
+							"name": "sidecar",
+							"env": []map[string]any{
+								{"name": "FUGUE_SIDE", "value": "old"},
+								{"name": "USER_SIDE", "value": "keep"},
+							},
+						},
+						{
+							"name": "externally-added",
+							"env": []map[string]any{
+								{"name": "FUGUE_EXTERNAL", "value": "keep"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ops := deploymentPlatformEnvDriftRemoveOps(desired, live)
+	expected := []map[string]string{
+		{"op": "remove", "path": "/spec/template/spec/containers/0/env/1"},
+		{"op": "remove", "path": "/spec/template/spec/containers/1/env/0"},
+	}
+	if len(ops) != len(expected) {
+		t.Fatalf("expected env drift patch %#v, got %#v", expected, ops)
+	}
+	for index, want := range expected {
+		if ops[index]["op"] != want["op"] || ops[index]["path"] != want["path"] {
+			t.Fatalf("expected env drift patch %d to be %#v, got %#v", index, want, ops[index])
+		}
+	}
+}
+
 func TestCustomResourceListingsIgnoreMissingAPI(t *testing.T) {
 	t.Parallel()
 

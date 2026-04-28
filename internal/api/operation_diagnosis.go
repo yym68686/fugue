@@ -119,6 +119,9 @@ func (s *Server) diagnoseFailedOperation(ctx context.Context, op model.Operation
 	if message := firstNonEmpty(strings.TrimSpace(op.ErrorMessage), strings.TrimSpace(op.ResultMessage)); message != "" {
 		summary = message
 	}
+	if diagnosis, ok := s.diagnoseMissingManifestFailure(ctx, op, app, appFound, summary); ok {
+		return diagnosis, nil
+	}
 	if diagnosis, ok := s.diagnoseFailedBuilderPlacement(ctx, op, app, appFound, summary); ok {
 		return diagnosis, nil
 	}
@@ -128,6 +131,61 @@ func (s *Server) diagnoseFailedOperation(ctx context.Context, op model.Operation
 		AppName:  diagnosisAppName(app, appFound),
 		Service:  diagnosisComposeService(op, app, appFound),
 	}, nil
+}
+
+func (s *Server) diagnoseMissingManifestFailure(ctx context.Context, op model.Operation, app model.App, appFound bool, message string) (model.OperationDiagnosis, bool) {
+	if !containsMissingManifestSignal(message) {
+		return model.OperationDiagnosis{}, false
+	}
+
+	runtimeImageRef := ""
+	if op.DesiredSpec != nil {
+		runtimeImageRef = strings.TrimSpace(op.DesiredSpec.Image)
+	}
+	managedImageRef := ""
+	if op.DesiredSource != nil {
+		managedImageRef = strings.TrimSpace(op.DesiredSource.ResolvedImageRef)
+	}
+	if managedImageRef == "" {
+		managedImageRef = s.managedImageRefFromRuntimeValue(runtimeImageRef)
+	}
+
+	evidence := []string{}
+	if runtimeImageRef != "" {
+		evidence = append(evidence, "operation desired runtime image: "+runtimeImageRef)
+	}
+	if managedImageRef != "" {
+		evidence = append(evidence, "operation desired managed image: "+managedImageRef)
+	}
+	if appFound {
+		if app.Spec.Image != "" {
+			evidence = append(evidence, "app spec image: "+strings.TrimSpace(app.Spec.Image))
+		}
+		for _, reference := range s.liveManagedImageReferences(ctx, []model.App{app}) {
+			if managedImageRef == "" || reference.ImageRef == managedImageRef {
+				evidence = append(evidence, reference.Source+": "+reference.ImageRef)
+			}
+		}
+	}
+
+	target := firstNonEmpty(runtimeImageRef, managedImageRef)
+	summary := "operation references a registry manifest that is missing"
+	if target != "" {
+		summary = fmt.Sprintf("operation references image %q, but that registry manifest is missing", target)
+	}
+	return model.OperationDiagnosis{
+		Category: "image-manifest-missing",
+		Summary:  summary,
+		Hint:     "Inspect app image inventory and live deployment drift; redeploy to an available image before pruning old registry digests.",
+		AppName:  diagnosisAppName(app, appFound),
+		Service:  diagnosisComposeService(op, app, appFound),
+		Evidence: evidence,
+	}, true
+}
+
+func containsMissingManifestSignal(message string) bool {
+	message = strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(message, "manifest_unknown") || strings.Contains(message, "manifest unknown")
 }
 
 func (s *Server) diagnoseFailedBuilderPlacement(ctx context.Context, op model.Operation, app model.App, appFound bool, message string) (model.OperationDiagnosis, bool) {

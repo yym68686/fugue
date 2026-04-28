@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"fugue/internal/appimages"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/sourceimport"
@@ -442,6 +443,13 @@ func (s *Server) handleDeleteAppImage(w http.ResponseWriter, r *http.Request) {
 	}
 	if !version.Response.DeleteSupported {
 		httpx.WriteError(w, http.StatusConflict, "image version is not available in the registry")
+		return
+	}
+	if inUse, evidence, err := s.managedImageStillReferenced(r.Context(), app, version.Candidate.ImageRef); err != nil {
+		httpx.WriteError(w, http.StatusBadGateway, err.Error())
+		return
+	} else if inUse {
+		httpx.WriteError(w, http.StatusConflict, "image version is still referenced by "+evidence)
 		return
 	}
 
@@ -881,14 +889,13 @@ func (s *Server) registryRefFromRuntimeImageRef(runtimeImageRef string) string {
 	if strings.HasPrefix(runtimeImageRef, pushBase+"/") {
 		return runtimeImageRef
 	}
-	if pullBase == "" || pullBase == pushBase {
-		return ""
+	if pullBase != "" && pullBase != pushBase {
+		prefix := pullBase + "/"
+		if strings.HasPrefix(runtimeImageRef, prefix) {
+			return pushBase + "/" + strings.TrimPrefix(runtimeImageRef, prefix)
+		}
 	}
-	prefix := pullBase + "/"
-	if !strings.HasPrefix(runtimeImageRef, prefix) {
-		return ""
-	}
-	return pushBase + "/" + strings.TrimPrefix(runtimeImageRef, prefix)
+	return managedImageRefFromFugueAppsPath(runtimeImageRef, pushBase)
 }
 
 func (s *Server) runtimeImageRefFromManagedRef(imageRef string) string {
@@ -930,8 +937,52 @@ func (s *Server) isManagedRegistryRef(imageRef string) bool {
 	return strings.HasPrefix(imageRef, pushBase+"/")
 }
 
+func managedImageRefFromFugueAppsPath(imageRef, registryPushBase string) string {
+	imageRef = strings.TrimSpace(imageRef)
+	pushBase := strings.Trim(strings.TrimSpace(registryPushBase), "/")
+	if imageRef == "" || pushBase == "" {
+		return ""
+	}
+	const marker = "/fugue-apps/"
+	index := strings.Index(imageRef, marker)
+	if index < 0 {
+		return ""
+	}
+	return pushBase + "/" + strings.TrimPrefix(imageRef[index+1:], "/")
+}
+
 func (s *Server) appImageInventoryConfigured() bool {
 	return strings.TrimSpace(s.registryPushBase) != "" && s.appImageRegistry != nil
+}
+
+func (s *Server) managedImageStillReferenced(ctx context.Context, app model.App, imageRef string) (bool, string, error) {
+	imageRef = strings.TrimSpace(imageRef)
+	if imageRef == "" {
+		return false, "", nil
+	}
+	allApps, err := s.store.ListAppsMetadata("", true)
+	if err != nil {
+		return false, "", err
+	}
+	allOps, err := s.store.ListOperations("", true)
+	if err != nil {
+		return false, "", err
+	}
+	otherRefs := appimages.ManagedImageRefSet(
+		appsExcludingID(allApps, app.ID),
+		operationsExcludingAppID(allOps, app.ID),
+		s.registryPushBase,
+		s.registryPullBase,
+	)
+	if _, ok := otherRefs[imageRef]; ok {
+		return true, "another app or operation desired spec", nil
+	}
+	for _, reference := range s.liveManagedImageReferences(ctx, allApps) {
+		if reference.ImageRef == imageRef {
+			return true, reference.Source, nil
+		}
+	}
+	return false, "", nil
 }
 
 func appImageDeleteAuditState(result appImageRegistryDeleteResult) string {

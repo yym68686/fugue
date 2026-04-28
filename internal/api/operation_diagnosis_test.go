@@ -64,6 +64,52 @@ func TestGetOperationDiagnosisExplainsMissingManagedImage(t *testing.T) {
 	}
 }
 
+func TestDiagnoseFailedOperationExplainsMissingManifest(t *testing.T) {
+	t.Parallel()
+
+	server := &Server{
+		registryPushBase: "registry.push.example",
+		registryPullBase: "registry.fugue.internal:5000",
+	}
+	app := model.App{
+		ID:   "app-demo",
+		Name: "demo",
+		Spec: model.AppSpec{
+			Image: "10.128.0.2:30500/fugue-apps/example-demo@sha256:abc123",
+		},
+	}
+	spec := app.Spec
+	source := model.AppSource{
+		Type:             model.AppSourceTypeDockerImage,
+		ResolvedImageRef: "registry.push.example/fugue-apps/example-demo@sha256:abc123",
+	}
+	op := model.Operation{
+		Type:          model.OperationTypeDeploy,
+		Status:        model.OperationStatusFailed,
+		AppID:         app.ID,
+		DesiredSpec:   &spec,
+		DesiredSource: &source,
+		ErrorMessage:  "resolve image digest: MANIFEST_UNKNOWN: manifest unknown",
+	}
+
+	diagnosis, err := server.diagnoseFailedOperation(context.Background(), op, app, true)
+	if err != nil {
+		t.Fatalf("diagnose failed operation: %v", err)
+	}
+	if diagnosis.Category != "image-manifest-missing" {
+		t.Fatalf("expected image-manifest-missing, got %+v", diagnosis)
+	}
+	joinedEvidence := strings.Join(diagnosis.Evidence, "\n")
+	for _, want := range []string{
+		"10.128.0.2:30500/fugue-apps/example-demo@sha256:abc123",
+		"registry.push.example/fugue-apps/example-demo@sha256:abc123",
+	} {
+		if !strings.Contains(joinedEvidence, want) {
+			t.Fatalf("expected evidence to contain %q, got %+v", want, diagnosis.Evidence)
+		}
+	}
+}
+
 func TestGetOperationDiagnosisExplainsBuilderPlacementFailure(t *testing.T) {
 	stateStore, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
 		Image:     "ghcr.io/example/demo:latest",

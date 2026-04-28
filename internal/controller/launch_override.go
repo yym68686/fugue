@@ -132,12 +132,25 @@ func managedRegistryRefFromRuntimeImageRef(runtimeImageRef, registryPushBase, re
 	if strings.HasPrefix(runtimeImageRef, pushBase+"/") {
 		return runtimeImageRef
 	}
-	if pullBase == "" || pullBase == pushBase {
+	if pullBase != "" && pullBase != pushBase {
+		prefix := pullBase + "/"
+		if strings.HasPrefix(runtimeImageRef, prefix) {
+			return pushBase + "/" + strings.TrimPrefix(runtimeImageRef, prefix)
+		}
+	}
+	return managedImageRefFromFugueAppsPath(runtimeImageRef, pushBase)
+}
+
+func managedImageRefFromFugueAppsPath(imageRef, registryPushBase string) string {
+	imageRef = strings.TrimSpace(imageRef)
+	pushBase := strings.Trim(strings.TrimSpace(registryPushBase), "/")
+	if imageRef == "" || pushBase == "" {
 		return ""
 	}
-	prefix := pullBase + "/"
-	if !strings.HasPrefix(runtimeImageRef, prefix) {
+	const marker = "/fugue-apps/"
+	index := strings.Index(imageRef, marker)
+	if index < 0 {
 		return ""
 	}
-	return pushBase + "/" + strings.TrimPrefix(runtimeImageRef, prefix)
+	return pushBase + "/" + strings.TrimPrefix(imageRef[index+1:], "/")
 }

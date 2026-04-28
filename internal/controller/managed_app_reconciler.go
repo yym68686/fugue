@@ -193,6 +193,9 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	if err := client.applyObjects(ctx, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("apply managed app child objects: %w", err))
 	}
+	if err := s.reconcileManagedAppPlatformEnvDrift(ctx, client, namespace, childObjects); err != nil {
+		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
+	}
 	if err := s.pruneManagedAppStaleObjects(ctx, client, namespace, app, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("prune stale managed app child objects: %w", err))
 	}

@@ -417,6 +417,10 @@ func (c *kubeClient) getDeployment(ctx context.Context, namespace, name string) 
 	return deployment, true, nil
 }
 
+func (c *kubeClient) getRawDeployment(ctx context.Context, namespace, name string) (map[string]any, bool, error) {
+	return c.getRawNamespacedObject(ctx, deploymentAPIPath(c.effectiveNamespace(namespace), name))
+}
+
 func (c *kubeClient) getCloudNativePGCluster(ctx context.Context, namespace, name string) (kubeCloudNativePGCluster, bool, error) {
 	var cluster kubeCloudNativePGCluster
 	status, err := c.doJSON(ctx, http.MethodGet, cloudNativePGClusterAPIPath(c.effectiveNamespace(namespace), name), nil, &cluster)
@@ -628,6 +632,14 @@ func (c *kubeClient) scaleDeployment(ctx context.Context, namespace, name string
 		},
 	}
 	_, err := c.doRequest(ctx, http.MethodPatch, deploymentAPIPath(c.effectiveNamespace(namespace), name), "application/merge-patch+json", body, nil)
+	return err
+}
+
+func (c *kubeClient) patchDeploymentJSONPatch(ctx context.Context, namespace, name string, ops []map[string]string) error {
+	if len(ops) == 0 {
+		return nil
+	}
+	_, err := c.doRequest(ctx, http.MethodPatch, deploymentAPIPath(c.effectiveNamespace(namespace), name), "application/json-patch+json", ops, nil)
 	return err
 }
 
@@ -852,8 +864,7 @@ func (c *kubeClient) removeDeploymentVolumeReferencesByName(ctx context.Context,
 	if len(ops) == 0 {
 		return nil
 	}
-	_, err = c.doRequest(ctx, http.MethodPatch, apiPath, "application/json-patch+json", ops, nil)
-	return err
+	return c.patchDeploymentJSONPatch(ctx, namespace, name, ops)
 }
 
 func deploymentVolumeReferenceRemoveOps(deployment map[string]any, volumeName string) []map[string]string {

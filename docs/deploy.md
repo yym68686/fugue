@@ -150,8 +150,8 @@ helm upgrade --install fugue ./deploy/helm/fugue \
   --set api.apiPublicDomain="api.example.com" \
   --set api.appBaseDomain="apps.example.com" \
   --set api.registryPushBase="fugue-fugue-registry.fugue-system.svc.cluster.local:5000" \
-  --set api.registryPullBase="<node-reachable-ip>:30500" \
-  --set api.clusterJoinRegistryEndpoint="<node-reachable-ip>:30500" \
+  --set api.registryPullBase="registry.fugue.internal:5000" \
+  --set api.clusterJoinRegistryEndpoint="127.0.0.1:30500" \
   --set registry.service.nodePort=30500 \
   --set nodeSelector.nodepool=system
 ```
@@ -177,8 +177,10 @@ Builder scheduling notes:
 Registry and cluster-join notes:
 
 - `api.registryPushBase` should be the in-cluster address builders use to push imported images.
-- `api.registryPullBase` should be reachable from runtime nodes that need to pull those images.
-- `api.clusterJoinRegistryEndpoint` should be reachable from VPS nodes joined through `/install/join-cluster.sh`.
+- `api.registryPullBase` should be a stable logical registry name for runtime image refs, for example `registry.fugue.internal:5000`, not a physical node IP or NodePort.
+- Each node's `/etc/rancher/k3s/registries.yaml` should mirror that logical name to a node-local or regional endpoint such as `http://127.0.0.1:30500` or an HK/GCP registry cache.
+- `api.clusterJoinRegistryEndpoint` is the mirror endpoint written by `/install/join-cluster.sh`; it defaults to the node-local NodePort endpoint and can be overridden for regional mirrors.
+- `imagePrePull.images` can list high-frequency runtime/template image refs that should be warmed on every node by the chart-managed pre-pull DaemonSet.
 - The bundled registry still defaults to a host-path convenience baseline. Do not keep it on the primary node root disk in production.
 - If you must keep the bundled registry, move it to dedicated storage with either `registry.persistence.mode=pvc` or `registry.persistence.mode=existingClaim`.
 - If you want Fugue to expose `/install/join-cluster.sh`, also set `api.clusterJoinServer="https://k3s-api.example.com:6443"` and `api.clusterJoinBootstrapTokenTTL="15m"`. Optional hardening is `api.clusterJoinCAHash="<sha256-of-server-ca>"`. Optional mesh settings are `api.clusterJoinMeshProvider`, `api.clusterJoinMeshLoginServer`, and `api.clusterJoinMeshAuthKey`.
@@ -490,5 +492,5 @@ Flow:
 - The chart now supports `configSecret.existingSecretName` so production deployments can source Fugue credentials from an external secret manager instead of chart-generated literals.
 - A production HA baseline is included in `deploy/helm/fugue/values-production-ha.yaml`.
 - `fugue app continuity audit` uses the same migration blocker rules as the API, so you can audit app-level failover eligibility before an incident.
-- `api.registryPushBase` must be reachable from builder jobs inside the cluster. `api.registryPullBase` and `api.clusterJoinRegistryEndpoint` must be reachable from the runtime nodes that pull images.
+- `api.registryPushBase` must be reachable from builder jobs inside the cluster. `api.registryPullBase` should remain a stable logical name, and `api.clusterJoinRegistryEndpoint` should point each node at its local or regional mirror for that logical registry.
 - If the controller cannot reach the in-cluster Kubernetes API, `managed-shared` and `managed-owned` deploys will stop at the render/apply stage.

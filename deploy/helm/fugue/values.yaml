@@ -16,9 +16,9 @@ api:
   appBaseDomain: fugue.pro
   apiPublicDomain: api.fugue.pro
   edgeTLSAskToken: ""
-  registryPushBase: registry.fugue.pro
-  registryPullBase: ""
-  clusterJoinRegistryEndpoint: ""
+  registryPushBase: ""
+  registryPullBase: registry.fugue.internal:5000
+  clusterJoinRegistryEndpoint: 127.0.0.1:30500
   clusterJoinServer: ""
   clusterJoinCAHash: ""
   clusterJoinBootstrapTokenTTL: 15m
@@ -70,6 +70,27 @@ controller:
     minAvailable: 1
   resources: {}
   extraEnv: []
+
+imagePrePull:
+  enabled: true
+  image:
+    repository: ""
+    tag: ""
+    pullPolicy: ""
+  intervalSeconds: 900
+  images: []
+  priorityClassName: system-node-critical
+  nodeSelector: {}
+  tolerations:
+    - operator: Exists
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+      ephemeral-storage: 16Mi
+    limits:
+      memory: 128Mi
+      ephemeral-storage: 128Mi
 
 topologyLabeler:
   enabled: true

@@ -143,19 +143,48 @@ registry_push_base_value() {
 }
 
 registry_pull_base_value() {
-  printf '%s:%s' "${K3S_API_IP}" "${REGISTRY_NODEPORT}"
+  printf '%s' "${FUGUE_REGISTRY_PULL_BASE:-registry.fugue.internal:5000}"
+}
+
+node_registry_mirror_endpoint_value() {
+  printf '%s' "${FUGUE_REGISTRY_MIRROR_ENDPOINT:-127.0.0.1:${REGISTRY_NODEPORT}}"
+}
+
+registry_endpoint_url_value() {
+  local endpoint="$1"
+  case "${endpoint}" in
+    http://*|https://*)
+      printf '%s' "${endpoint}"
+      ;;
+    *)
+      printf 'http://%s' "${endpoint}"
+      ;;
+  esac
 }
 
 cluster_join_registry_endpoint_value() {
-  local join_host="${K3S_API_IP}"
-  if mesh_enabled; then
-    local primary_mesh_ip=""
-    primary_mesh_ip="$(mesh_ip_for_alias "${PRIMARY_ALIAS}")"
-    if [[ -n "${primary_mesh_ip}" ]]; then
-      join_host="${primary_mesh_ip}"
-    fi
+  printf '%s' "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT:-$(node_registry_mirror_endpoint_value)}"
+}
+
+append_image_prepull_values() {
+  local image
+  if [[ -z "${FUGUE_IMAGE_PREPULL_IMAGES:-}" ]]; then
+    return 0
   fi
-  printf '%s:%s' "${join_host}" "${REGISTRY_NODEPORT}"
+  cat >>"${VALUES_FILE}" <<'EOF'
+
+imagePrePull:
+  enabled: true
+  images:
+EOF
+  printf '%s' "${FUGUE_IMAGE_PREPULL_IMAGES}" | tr ',' '\n' | while IFS= read -r image; do
+    image="$(printf '%s' "${image}" | awk '{$1=$1; print}')"
+    if [[ -z "${image}" ]]; then
+      continue
+    fi
+    image="${image//\"/\\\"}"
+    printf '    - "%s"\n' "${image}" >>"${VALUES_FILE}"
+  done
 }
 
 run_with_retry() {
@@ -1742,6 +1771,10 @@ check_edge_origin_health() {
 }
 
 write_primary_config() {
+  local registry_pull_base registry_mirror_endpoint registry_mirror_endpoint_url
+  registry_pull_base="$(registry_pull_base_value)"
+  registry_mirror_endpoint="$(node_registry_mirror_endpoint_value)"
+  registry_mirror_endpoint_url="$(registry_endpoint_url_value "${registry_mirror_endpoint}")"
   ssh_root "${PRIMARY_ALIAS}" <<EOF
 set -euo pipefail
 mkdir -p /etc/rancher/k3s
@@ -1757,11 +1790,11 @@ $(render_server_node_labels "${PRIMARY_ALIAS}" "primary")
 CFG
 cat >/etc/rancher/k3s/registries.yaml <<'REG'
 mirrors:
-  "${K3S_API_IP}:${REGISTRY_NODEPORT}":
+  "${registry_pull_base}":
     endpoint:
-      - "http://${K3S_API_IP}:${REGISTRY_NODEPORT}"
+      - "${registry_mirror_endpoint_url}"
 configs:
-  "${K3S_API_IP}:${REGISTRY_NODEPORT}":
+  "${registry_pull_base}":
     tls:
       insecure_skip_verify: true
 REG
@@ -1807,6 +1840,10 @@ write_secondary_config() {
   local host="$1"
   local role="$2"
   local token="$3"
+  local registry_pull_base registry_mirror_endpoint registry_mirror_endpoint_url
+  registry_pull_base="$(registry_pull_base_value)"
+  registry_mirror_endpoint="$(node_registry_mirror_endpoint_value)"
+  registry_mirror_endpoint_url="$(registry_endpoint_url_value "${registry_mirror_endpoint}")"
   ssh_root "${host}" <<EOF
 set -euo pipefail
 mkdir -p /etc/rancher/k3s
@@ -1823,11 +1860,11 @@ $(render_server_node_labels "${host}" "${role}")
 CFG
 cat >/etc/rancher/k3s/registries.yaml <<'REG'
 mirrors:
-  "${K3S_API_IP}:${REGISTRY_NODEPORT}":
+  "${registry_pull_base}":
     endpoint:
-      - "http://${K3S_API_IP}:${REGISTRY_NODEPORT}"
+      - "${registry_mirror_endpoint_url}"
 configs:
-  "${K3S_API_IP}:${REGISTRY_NODEPORT}":
+  "${registry_pull_base}":
     tls:
       insecure_skip_verify: true
 REG
@@ -2303,6 +2340,7 @@ persistence:
   mode: hostPath
   hostPath: "${HOSTPATH_DATA_DIR}"
 EOF
+  append_image_prepull_values
 }
 
 copy_chart_and_values() {

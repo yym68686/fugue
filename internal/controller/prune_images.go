@@ -51,6 +51,7 @@ func (s *Service) pruneExcessManagedAppImages(ctx context.Context, app model.App
 		s.registryPushBase,
 		s.registryPullBase,
 	)
+	mergeManagedImageRefSets(remainingRefs, s.liveManagedImageRefSet(ctx, allApps))
 
 	var errs []error
 	for _, imageRef := range imageRefs {
@@ -62,6 +63,12 @@ func (s *Service) pruneExcessManagedAppImages(ctx context.Context, app model.App
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func mergeManagedImageRefSets(target, source map[string]struct{}) {
+	for imageRef := range source {
+		target[imageRef] = struct{}{}
+	}
 }
 
 func appsExcludingID(apps []model.App, appID string) []model.App {

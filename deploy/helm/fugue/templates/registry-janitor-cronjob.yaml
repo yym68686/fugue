@@ -170,13 +170,19 @@ spec:
                     esac
                   done < <(
                     kubectl get deployments --all-namespaces \
-                      -o jsonpath='{range .items[*]}{range .spec.template.spec.containers[*]}{.image}{"\n"}{end}{end}' \
+                      -o jsonpath='{range .items[*]}{range .spec.template.spec.initContainers[*]}{.image}{"\n"}{range .env[*]}{.value}{"\n"}{end}{end}{range .spec.template.spec.containers[*]}{.image}{"\n"}{range .env[*]}{.value}{"\n"}{end}{end}{end}' \
                       2>/dev/null | awk 'NF > 0'
                   )
 
                   deleted_count=0
                   while read -r repo; do
                     [[ -n "${repo}" ]] || continue
+                    case "${repo}" in
+                      fugue-apps/*)
+                        log "skip managed app image repo ${repo}; app/controller image retention owns these references"
+                        continue
+                        ;;
+                    esac
                     while read -r tag; do
                       [[ -n "${tag}" ]] || continue
                       key="${repo}:${tag}"
