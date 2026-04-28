@@ -1318,6 +1318,7 @@ EDGE_TLS_PROBE_ADDR=127.0.0.1:443
 EDGE_CUSTOM_DOMAINS_CADDYFILE=/etc/caddy/fugue-custom-domains.caddy
 EDGE_MAIN_CADDYFILE=/etc/caddy/Caddyfile
 EDGE_CUSTOM_DOMAIN_UPSTREAM=${EDGE_UPSTREAM}
+EDGE_DOMAINS_CACHE_JSON=/var/lib/fugue/edge/domains-cache.json
 EDGEENV
 cat >/usr/local/bin/fugue-sync-custom-domains <<'SYNC'
 #!/usr/bin/env bash
@@ -1343,7 +1344,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-curl -fsS "\${EDGE_DOMAINS_URL}" -o "\${tmp_json}"
+mkdir -p "\$(dirname "\${EDGE_DOMAINS_CACHE_JSON}")"
+if curl -fsS "\${EDGE_DOMAINS_URL}" -o "\${tmp_json}"; then
+  install -m 0644 "\${tmp_json}" "\${EDGE_DOMAINS_CACHE_JSON}"
+elif [ -s "\${EDGE_DOMAINS_CACHE_JSON}" ]; then
+  echo "warning: Fugue edge domains endpoint is unavailable; using cached domain bundle" >&2
+  cp "\${EDGE_DOMAINS_CACHE_JSON}" "\${tmp_json}"
+else
+  echo "Fugue edge domains endpoint is unavailable and no cached domain bundle exists" >&2
+  exit 1
+fi
 python3 - "\${tmp_json}" "\${tmp_caddy}" "\${tmp_hosts}" "\${EDGE_CUSTOM_DOMAIN_UPSTREAM}" <<'PY'
 import json
 import sys

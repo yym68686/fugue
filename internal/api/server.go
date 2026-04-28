@@ -1369,13 +1369,19 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	var req struct {
-		Endpoint string `json:"endpoint"`
+		Endpoint     string               `json:"endpoint"`
+		CellSnapshot runtime.CellSnapshot `json:"cell_snapshot"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	runtimeObj, err := s.store.UpdateRuntimeHeartbeat(principal.ActorID, req.Endpoint)
+	labels := runtime.CellSnapshotRuntimeLabels(req.CellSnapshot)
+	endpoint := strings.TrimSpace(req.Endpoint)
+	if endpoint == "" {
+		endpoint = strings.TrimSpace(req.CellSnapshot.Endpoint)
+	}
+	runtimeObj, err := s.store.UpdateRuntimeHeartbeatWithLabels(principal.ActorID, endpoint, labels)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

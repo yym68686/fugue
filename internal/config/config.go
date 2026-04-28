@@ -3,6 +3,7 @@ package config
 import (
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -82,6 +83,10 @@ type AgentConfig struct {
 	MachineFingerprint string
 	RuntimeEndpoint    string
 	WorkDir            string
+	CellStorePath      string
+	CellListenAddr     string
+	CellPeerProbe      bool
+	CellPeerProbePort  int
 	PollInterval       time.Duration
 	HeartbeatEvery     time.Duration
 	StateFile          string
@@ -173,6 +178,7 @@ func ControllerFromEnv() ControllerConfig {
 }
 
 func AgentFromEnv() AgentConfig {
+	workDir := getenv("FUGUE_AGENT_WORK_DIR", "./data/agent")
 	return AgentConfig{
 		ServerURL:          getenv("FUGUE_AGENT_SERVER", "http://127.0.0.1:8080"),
 		NodeKey:            os.Getenv("FUGUE_AGENT_NODE_KEY"),
@@ -183,7 +189,11 @@ func AgentFromEnv() AgentConfig {
 		MachineName:        getenv("FUGUE_AGENT_MACHINE_NAME", hostnameFallback()),
 		MachineFingerprint: getenv("FUGUE_AGENT_MACHINE_FINGERPRINT", machineFingerprintFallback()),
 		RuntimeEndpoint:    getenv("FUGUE_AGENT_RUNTIME_ENDPOINT", ""),
-		WorkDir:            getenv("FUGUE_AGENT_WORK_DIR", "./data/agent"),
+		WorkDir:            workDir,
+		CellStorePath:      getenv("FUGUE_AGENT_CELL_STORE_PATH", filepath.Join(workDir, "cell-store.json")),
+		CellListenAddr:     getenv("FUGUE_AGENT_CELL_LISTEN_ADDR", ":7831"),
+		CellPeerProbe:      getenvBool("FUGUE_AGENT_CELL_PEER_PROBE", true),
+		CellPeerProbePort:  getenvInt("FUGUE_AGENT_CELL_PEER_PROBE_PORT", 7831),
 		PollInterval:       getenvDuration("FUGUE_AGENT_POLL_INTERVAL", 10*time.Second),
 		HeartbeatEvery:     getenvDuration("FUGUE_AGENT_HEARTBEAT_EVERY", 15*time.Second),
 		StateFile:          getenv("FUGUE_AGENT_STATE_FILE", "./data/agent/state.json"),

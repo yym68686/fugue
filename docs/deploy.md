@@ -409,11 +409,15 @@ sudo env \
   FUGUE_AGENT_RUNTIME_ENDPOINT='https://tenant-vps-1.example.com' \
   FUGUE_AGENT_WORK_DIR=/var/lib/fugue-agent \
   FUGUE_AGENT_STATE_FILE=/var/lib/fugue-agent/state.json \
+  FUGUE_AGENT_CELL_LISTEN_ADDR=':7831' \
   FUGUE_AGENT_APPLY_WITH_KUBECTL=true \
   ./bin/fugue-agent
 ```
 
 This path creates an `external-owned` runtime with `connection_mode=agent`.
+The agent also keeps a local cell store under `FUGUE_AGENT_WORK_DIR`, exposes a
+mesh-restricted cell status API on `FUGUE_AGENT_CELL_LISTEN_ADDR`, and caches
+control-plane completion events for replay after outages.
 
 ### Option C: run the agent in Docker on the VPS
 
@@ -426,7 +430,9 @@ docker run -d --name fugue-agent --restart unless-stopped \
   -e FUGUE_AGENT_RUNTIME_ENDPOINT='https://tenant-vps-1.example.com' \
   -e FUGUE_AGENT_WORK_DIR=/var/lib/fugue-agent \
   -e FUGUE_AGENT_STATE_FILE=/var/lib/fugue-agent/state.json \
+  -e FUGUE_AGENT_CELL_LISTEN_ADDR=':7831' \
   -e FUGUE_AGENT_APPLY_WITH_KUBECTL=true \
+  -p 7831:7831 \
   -v /etc/rancher/k3s/k3s.yaml:/etc/rancher/k3s/k3s.yaml:ro \
   -v /var/lib/fugue-agent:/var/lib/fugue-agent \
   <your-registry>/fugue-agent:${VERSION}

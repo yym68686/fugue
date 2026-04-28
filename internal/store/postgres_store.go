@@ -1503,6 +1503,38 @@ RETURNING id, tenant_id, name, machine_name, type, access_mode, public_offer_jso
 	return runtime, nil
 }
 
+func (s *Store) pgUpdateRuntimeHeartbeatWithLabels(runtimeID, endpoint string, labels map[string]string) (model.Runtime, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Runtime{}, fmt.Errorf("begin update heartbeat labels transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	runtime, err := s.pgGetRuntimeTx(ctx, tx, runtimeID, true)
+	if err != nil {
+		return model.Runtime{}, err
+	}
+	now := time.Now().UTC()
+	runtime.LastHeartbeatAt = &now
+	runtime.LastSeenAt = &now
+	runtime.UpdatedAt = now
+	runtime.Status = model.RuntimeStatusActive
+	if strings.TrimSpace(endpoint) != "" {
+		runtime.Endpoint = strings.TrimSpace(endpoint)
+	}
+	runtime.Labels = mergeRuntimeHeartbeatLabels(runtime.Labels, labels)
+	if err := s.pgUpdateRuntimeTx(ctx, tx, runtime); err != nil {
+		return model.Runtime{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Runtime{}, fmt.Errorf("commit update heartbeat labels transaction: %w", err)
+	}
+	return runtime, nil
+}
+
 func (s *Store) pgMarkRuntimeOfflineStale(after time.Duration) (int, error) {
 	if after <= 0 {
 		return 0, nil

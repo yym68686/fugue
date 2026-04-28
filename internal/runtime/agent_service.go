@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -18,10 +19,12 @@ import (
 )
 
 type AgentService struct {
-	Config     config.AgentConfig
-	HTTPClient *http.Client
-	Renderer   Renderer
-	Logger     *log.Logger
+	Config        config.AgentConfig
+	HTTPClient    *http.Client
+	Renderer      Renderer
+	Logger        *log.Logger
+	CellStore     *CellStore
+	CommandRunner CommandRunner
 }
 
 type agentState struct {
@@ -50,6 +53,9 @@ func (s *AgentService) Run(ctx context.Context) error {
 	if err := os.MkdirAll(s.Config.WorkDir, 0o755); err != nil {
 		return fmt.Errorf("create agent work directory: %w", err)
 	}
+	if err := s.ensureCellStore(); err != nil {
+		return err
+	}
 
 	state, err := s.loadState()
 	if err != nil {
@@ -68,7 +74,21 @@ func (s *AgentService) Run(ctx context.Context) error {
 		}
 	}
 
-	s.Logger.Printf("agent started; runtime_id=%s server=%s kubectl_apply=%v", s.Config.RuntimeID, s.Config.ServerURL, s.Config.ApplyWithKubectl)
+	cellHTTPShutdown, err := s.startCellHTTPServer(ctx)
+	if err != nil {
+		s.Logger.Printf("cell http server unavailable: %v", err)
+	}
+	if cellHTTPShutdown != nil {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), defaultCellHTTPShutdownTimeout)
+			defer cancel()
+			if err := cellHTTPShutdown(shutdownCtx); err != nil {
+				s.Logger.Printf("cell http shutdown failed: %v", err)
+			}
+		}()
+	}
+
+	s.Logger.Printf("agent started; runtime_id=%s server=%s kubectl_apply=%v cell_store=%s cell_listen=%s peer_probe=%v", s.Config.RuntimeID, s.Config.ServerURL, s.Config.ApplyWithKubectl, s.Config.CellStorePath, s.Config.CellListenAddr, s.Config.CellPeerProbe)
 
 	heartbeatTicker := time.NewTicker(s.Config.HeartbeatEvery)
 	defer heartbeatTicker.Stop()
@@ -77,6 +97,9 @@ func (s *AgentService) Run(ctx context.Context) error {
 
 	if err := s.sendHeartbeat(ctx); err != nil {
 		s.Logger.Printf("initial heartbeat failed: %v", err)
+	}
+	if err := s.flushCompletionOutbox(ctx); err != nil {
+		s.Logger.Printf("initial completion outbox flush deferred: %v", err)
 	}
 	if err := s.pollAndProcess(ctx); err != nil {
 		s.Logger.Printf("initial poll failed: %v", err)
@@ -89,6 +112,9 @@ func (s *AgentService) Run(ctx context.Context) error {
 		case <-heartbeatTicker.C:
 			if err := s.sendHeartbeat(ctx); err != nil {
 				s.Logger.Printf("heartbeat failed: %v", err)
+			}
+			if err := s.flushCompletionOutbox(ctx); err != nil {
+				s.Logger.Printf("completion outbox flush deferred: %v", err)
 			}
 		case <-pollTicker.C:
 			if err := s.pollAndProcess(ctx); err != nil {
@@ -170,8 +196,22 @@ func (s *AgentService) enroll() error {
 }
 
 func (s *AgentService) sendHeartbeat(ctx context.Context) error {
+	snapshot, err := s.RefreshCellSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("refresh cell snapshot: %w", err)
+	}
+	if err := s.RefreshCellPeers(ctx, snapshot); err != nil {
+		s.logf("cell peer discovery deferred: %v", err)
+	}
+	if observedPeers, err := s.CellStore.CountPeerObservations(); err == nil && observedPeers != snapshot.ObservedPeerCount {
+		snapshot.ObservedPeerCount = observedPeers
+		if err := s.CellStore.SaveSnapshot(snapshot); err != nil {
+			s.logf("cell snapshot peer count update deferred: %v", err)
+		}
+	}
 	reqBody := map[string]any{
-		"endpoint": s.Config.RuntimeEndpoint,
+		"endpoint":      snapshot.Endpoint,
+		"cell_snapshot": snapshot,
 	}
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
@@ -182,6 +222,12 @@ func (s *AgentService) sendHeartbeat(ctx context.Context) error {
 }
 
 func (s *AgentService) pollAndProcess(ctx context.Context) error {
+	if err := s.ensureCellStore(); err != nil {
+		return err
+	}
+	if err := s.flushCompletionOutbox(ctx); err != nil {
+		s.logf("completion outbox flush before poll deferred: %v", err)
+	}
 	respBody, err := s.doJSONRequest(ctx, http.MethodGet, "/v1/agent/operations", s.Config.RuntimeKey, nil)
 	if err != nil {
 		return err
@@ -194,14 +240,32 @@ func (s *AgentService) pollAndProcess(ctx context.Context) error {
 		return fmt.Errorf("decode operations response: %w", err)
 	}
 	for _, task := range response.Tasks {
+		pending, err := s.CellStore.HasPendingCompletion(task.Operation.ID)
+		if err != nil {
+			return fmt.Errorf("check cell completion outbox for %s: %w", task.Operation.ID, err)
+		}
+		if pending {
+			s.logf("task %s already applied locally; waiting for completion replay", task.Operation.ID)
+			if err := s.flushCompletionOutbox(ctx); err != nil {
+				s.logf("completion outbox flush for task %s deferred: %v", task.Operation.ID, err)
+			}
+			continue
+		}
 		if err := s.processTask(ctx, task); err != nil {
-			s.Logger.Printf("task %s failed locally: %v", task.Operation.ID, err)
+			s.logf("task %s failed locally: %v", task.Operation.ID, err)
 		}
 	}
 	return nil
 }
 
 func (s *AgentService) processTask(ctx context.Context, task AgentTask) error {
+	if err := s.ensureCellStore(); err != nil {
+		return err
+	}
+	if err := s.CellStore.RecordDesiredTask(task); err != nil {
+		return fmt.Errorf("record cell desired task: %w", err)
+	}
+
 	app := task.App
 	switch task.Operation.Type {
 	case model.OperationTypeDeploy:
@@ -258,16 +322,108 @@ func (s *AgentService) processTask(ctx context.Context, task AgentTask) error {
 	if task.Operation.Type == model.OperationTypeDelete {
 		message = fmt.Sprintf("external runtime deleted app resources in namespace %s", bundle.TenantNamespace)
 	}
+	if err := s.CellStore.MarkDesiredTaskApplied(task.Operation.ID, bundle.ManifestPath); err != nil {
+		return fmt.Errorf("mark cell desired task applied: %w", err)
+	}
+	if err := s.CellStore.EnqueueCompletion(task.Operation.ID, bundle.ManifestPath, message); err != nil {
+		return fmt.Errorf("enqueue completion outbox event: %w", err)
+	}
+	if err := s.flushCompletionOutbox(ctx); err != nil {
+		s.logf("completion outbox flush after task %s deferred: %v", task.Operation.ID, err)
+	}
+	return nil
+}
+
+func (s *AgentService) flushCompletionOutbox(ctx context.Context) error {
+	if s.CellStore == nil {
+		return nil
+	}
+	events, err := s.CellStore.ListDueCompletions(time.Now().UTC(), defaultCompletionReplayLimit)
+	if err != nil {
+		return err
+	}
+	for _, event := range events {
+		if err := s.sendCompletion(ctx, event.OperationID, event.ManifestPath, event.Message); err != nil {
+			if agentCompletionErrorTerminal(err) {
+				operationID, markErr := s.CellStore.MarkOutboxDelivered(event.ID)
+				if markErr != nil {
+					return markErr
+				}
+				if operationID != "" {
+					if markErr := s.CellStore.MarkDesiredTaskDiscarded(operationID); markErr != nil {
+						return markErr
+					}
+				}
+				if s.Logger != nil {
+					s.Logger.Printf("discarded terminal completion outbox event for operation %s: %v", event.OperationID, err)
+				}
+				continue
+			}
+			if markErr := s.CellStore.MarkOutboxAttempt(event.ID, err.Error()); markErr != nil {
+				return markErr
+			}
+			return err
+		}
+		operationID, err := s.CellStore.MarkOutboxDelivered(event.ID)
+		if err != nil {
+			return err
+		}
+		if operationID != "" {
+			if err := s.CellStore.MarkDesiredTaskDelivered(operationID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *AgentService) sendCompletion(ctx context.Context, operationID, manifestPath, message string) error {
 	reqBody := map[string]any{
-		"manifest_path": bundle.ManifestPath,
+		"manifest_path": strings.TrimSpace(manifestPath),
 		"message":       message,
 	}
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
 		return fmt.Errorf("marshal completion request: %w", err)
 	}
-	_, err = s.doJSONRequest(ctx, http.MethodPost, "/v1/agent/operations/"+task.Operation.ID+"/complete", s.Config.RuntimeKey, payload)
+	_, err = s.doJSONRequest(ctx, http.MethodPost, "/v1/agent/operations/"+strings.TrimSpace(operationID)+"/complete", s.Config.RuntimeKey, payload)
 	return err
+}
+
+func (s *AgentService) ensureCellStore() error {
+	if s.CellStore != nil {
+		return nil
+	}
+	if strings.TrimSpace(s.Config.CellStorePath) == "" {
+		workDir := strings.TrimSpace(s.Config.WorkDir)
+		if workDir == "" {
+			workDir = "./data/agent"
+		}
+		s.Config.CellStorePath = filepath.Join(workDir, "cell-store.json")
+	}
+	cellStore, err := OpenCellStore(s.Config.CellStorePath)
+	if err != nil {
+		return err
+	}
+	s.CellStore = cellStore
+	return nil
+}
+
+func (s *AgentService) logf(format string, args ...any) {
+	if s.Logger != nil {
+		s.Logger.Printf(format, args...)
+	}
+}
+
+type agentHTTPStatusError struct {
+	Method     string
+	Path       string
+	StatusCode int
+	Body       string
+}
+
+func (e agentHTTPStatusError) Error() string {
+	return fmt.Sprintf("%s %s: status=%d body=%s", e.Method, e.Path, e.StatusCode, strings.TrimSpace(e.Body))
 }
 
 func (s *AgentService) doJSONRequest(ctx context.Context, method, path, bearer string, body []byte) ([]byte, error) {
@@ -293,9 +449,22 @@ func (s *AgentService) doJSONRequest(ctx context.Context, method, path, bearer s
 		return nil, fmt.Errorf("read %s %s response: %w", method, path, err)
 	}
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("%s %s: status=%d body=%s", method, path, resp.StatusCode, strings.TrimSpace(string(data)))
+		return nil, agentHTTPStatusError{Method: method, Path: path, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
 	}
 	return data, nil
+}
+
+func agentCompletionErrorTerminal(err error) bool {
+	var statusErr agentHTTPStatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	switch statusErr.StatusCode {
+	case http.StatusNotFound, http.StatusConflict, http.StatusGone:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *AgentService) loadState() (agentState, error) {

@@ -150,6 +150,13 @@ Current Fugue support is intentionally split between `migrate` and `failover`:
 - `migrate` remains the stateless path. It is still blocked for apps that keep Fugue-managed PostgreSQL or a persistent workspace attached.
 - `failover` is now the controller-orchestrated managed path for apps that declare `app.spec.failover` and run on Fugue-managed runtimes.
 
+This is separate from the runtime cell substrate. Runtime cells keep Fugue's
+system layer alive during control-plane outages: local state, mesh discovery,
+route metadata, heartbeats, and deferred operation reports. They do not
+automatically move apps, promote databases, create replicas, or shift traffic.
+Those actions remain business-continuity policy and require explicit app or
+database configuration.
+
 The managed failover path now includes:
 
 - CloudNativePG-backed managed PostgreSQL instead of the legacy single Deployment + PVC substrate

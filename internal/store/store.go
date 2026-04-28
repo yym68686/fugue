@@ -1369,6 +1369,60 @@ func (s *Store) UpdateRuntimeHeartbeat(runtimeID, endpoint string) (model.Runtim
 	return runtime, err
 }
 
+func (s *Store) UpdateRuntimeHeartbeatWithLabels(runtimeID, endpoint string, labels map[string]string) (model.Runtime, error) {
+	if len(labels) == 0 {
+		return s.UpdateRuntimeHeartbeat(runtimeID, endpoint)
+	}
+	if s.usingDatabase() {
+		return s.pgUpdateRuntimeHeartbeatWithLabels(runtimeID, endpoint, labels)
+	}
+	var runtime model.Runtime
+	err := s.withLockedState(true, func(state *model.State) error {
+		ensureRuntimeMetadata(state)
+
+		index := findRuntime(state, runtimeID)
+		if index < 0 {
+			return ErrNotFound
+		}
+		now := time.Now().UTC()
+		state.Runtimes[index].LastHeartbeatAt = &now
+		state.Runtimes[index].LastSeenAt = &now
+		state.Runtimes[index].UpdatedAt = now
+		state.Runtimes[index].Status = model.RuntimeStatusActive
+		if strings.TrimSpace(endpoint) != "" {
+			state.Runtimes[index].Endpoint = strings.TrimSpace(endpoint)
+		}
+		state.Runtimes[index].Labels = mergeRuntimeHeartbeatLabels(state.Runtimes[index].Labels, labels)
+		runtime = state.Runtimes[index]
+		return nil
+	})
+	return runtime, err
+}
+
+func mergeRuntimeHeartbeatLabels(current, incoming map[string]string) map[string]string {
+	merged := cloneMap(current)
+	if merged == nil {
+		merged = map[string]string{}
+	}
+	for key := range merged {
+		if strings.HasPrefix(key, runtimepkg.CellRuntimeLabelPrefix) {
+			delete(merged, key)
+		}
+	}
+	for key, value := range incoming {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		if !strings.HasPrefix(key, runtimepkg.CellRuntimeLabelPrefix) {
+			continue
+		}
+		merged[key] = value
+	}
+	return merged
+}
+
 func (s *Store) MarkRuntimeOfflineStale(after time.Duration) (int, error) {
 	if s.usingDatabase() {
 		return s.pgMarkRuntimeOfflineStale(after)
