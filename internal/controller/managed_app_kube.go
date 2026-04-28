@@ -23,12 +23,22 @@ type kubeObjectList struct {
 
 type kubeDeployment struct {
 	Metadata struct {
-		Name            string `json:"name"`
-		ResourceVersion string `json:"resourceVersion,omitempty"`
-		Generation      int64  `json:"generation,omitempty"`
+		Name            string            `json:"name"`
+		Namespace       string            `json:"namespace,omitempty"`
+		ResourceVersion string            `json:"resourceVersion,omitempty"`
+		Generation      int64             `json:"generation,omitempty"`
+		Annotations     map[string]string `json:"annotations,omitempty"`
 	} `json:"metadata"`
 	Spec struct {
 		Replicas *int `json:"replicas,omitempty"`
+		Template struct {
+			Spec struct {
+				Containers []struct {
+					Name  string `json:"name,omitempty"`
+					Image string `json:"image,omitempty"`
+				} `json:"containers,omitempty"`
+			} `json:"spec,omitempty"`
+		} `json:"template,omitempty"`
 	} `json:"spec"`
 	Status struct {
 		ObservedGeneration  int64                         `json:"observedGeneration,omitempty"`

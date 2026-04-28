@@ -109,6 +109,62 @@ func TestManagedAppRolloutFailureIgnoresSIGTERMDuringRollingUpdate(t *testing.T)
 	}
 }
 
+func TestDeploymentRolloutReadyRequiresExpectedRelease(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:    "registry.pull.example/fugue-apps/demo:git-new",
+			Replicas: 1,
+		},
+	}
+	oldApp := app
+	oldApp.Spec.Image = "registry.pull.example/fugue-apps/demo:git-old"
+	expectedReleaseKey := runtime.ManagedAppReleaseKey(app, runtime.SchedulingConstraints{})
+	oldReleaseKey := runtime.ManagedAppReleaseKey(oldApp, runtime.SchedulingConstraints{})
+
+	deployment := readyKubeDeployment(runtime.RuntimeAppResourceName(app), 1)
+	setKubeDeploymentPrimaryImage(&deployment, oldApp.Name, oldApp.Spec.Image)
+	deployment.Metadata.Annotations = map[string]string{
+		runtime.FugueAnnotationReleaseKey: oldReleaseKey,
+	}
+
+	ready, message, err := deploymentRolloutReady(deployment, true, 1, runtime.RuntimeAppResourceName(app), expectedReleaseKey, app.Spec.Image)
+	if err != nil {
+		t.Fatalf("unexpected rollout error: %v", err)
+	}
+	if ready {
+		t.Fatal("expected old deployment image to be rejected")
+	}
+	if !strings.Contains(message, "image "+app.Spec.Image) {
+		t.Fatalf("expected image mismatch message, got %q", message)
+	}
+
+	setKubeDeploymentPrimaryImage(&deployment, app.Name, app.Spec.Image)
+	ready, message, err = deploymentRolloutReady(deployment, true, 1, runtime.RuntimeAppResourceName(app), expectedReleaseKey, app.Spec.Image)
+	if err != nil {
+		t.Fatalf("unexpected rollout error: %v", err)
+	}
+	if ready {
+		t.Fatal("expected old deployment release key to be rejected")
+	}
+	if !strings.Contains(message, "release "+expectedReleaseKey) {
+		t.Fatalf("expected release mismatch message, got %q", message)
+	}
+
+	deployment.Metadata.Annotations[runtime.FugueAnnotationReleaseKey] = expectedReleaseKey
+	ready, _, err = deploymentRolloutReady(deployment, true, 1, runtime.RuntimeAppResourceName(app), expectedReleaseKey, app.Spec.Image)
+	if err != nil {
+		t.Fatalf("unexpected rollout error: %v", err)
+	}
+	if !ready {
+		t.Fatal("expected deployment with matching image and release key to be ready")
+	}
+}
+
 func TestWaitForManagedAppRolloutSucceedsWhenDeploymentIsReadyDespiteManagedAppError(t *testing.T) {
 	t.Parallel()
 
@@ -655,5 +711,26 @@ func TestWaitForManagedAppRolloutAllowsManagedPostgresPrimaryRecoveryAndCleansUp
 	}
 	if deletedPod.Load() == 0 {
 		t.Fatal("expected stranded managed postgres pod to be force deleted")
+	}
+}
+
+func readyKubeDeployment(name string, replicas int) kubeDeployment {
+	deployment := kubeDeployment{}
+	deployment.Metadata.Name = name
+	deployment.Metadata.Generation = 1
+	deployment.Status.ObservedGeneration = 1
+	deployment.Status.Replicas = replicas
+	deployment.Status.UpdatedReplicas = replicas
+	deployment.Status.ReadyReplicas = replicas
+	deployment.Status.AvailableReplicas = replicas
+	return deployment
+}
+
+func setKubeDeploymentPrimaryImage(deployment *kubeDeployment, name, image string) {
+	deployment.Spec.Template.Spec.Containers = []struct {
+		Name  string `json:"name,omitempty"`
+		Image string `json:"image,omitempty"`
+	}{
+		{Name: name, Image: image},
 	}
 }

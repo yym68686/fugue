@@ -15,6 +15,13 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, o
 	if err != nil {
 		return fmt.Errorf("initialize kubernetes rollout client: %w", err)
 	}
+	app = s.Renderer.PrepareApp(app)
+	scheduling, err := s.managedSchedulingConstraints(app.Spec.RuntimeID)
+	if err != nil {
+		return err
+	}
+	expectedReleaseKey := expectedManagedAppReleaseKey(app, scheduling)
+	expectedImage := strings.TrimSpace(app.Spec.Image)
 
 	waitCtx, cancel := context.WithTimeout(ctx, s.Config.ManagedAppRolloutTimeout)
 	defer cancel()
@@ -54,7 +61,7 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, o
 			return fmt.Errorf("read deployment rollout for %s/%s: %w", namespace, name, err)
 		}
 
-		ready, message, err := deploymentRolloutReady(deployment, found, app.Spec.Replicas, name)
+		ready, message, err := deploymentRolloutReady(deployment, found, app.Spec.Replicas, name, expectedReleaseKey, expectedImage)
 		if err != nil {
 			return err
 		}
@@ -184,7 +191,7 @@ func (s *Service) managedBackingServicesRolloutReady(
 				return false, "", watchTargets, fmt.Errorf("read backing service deployment %s/%s: %w", namespace, deployment.ResourceName, err)
 			}
 			watchTargets = append(watchTargets, rolloutWatchTargets(namespace, deployment.ResourceName, status, found)...)
-			ready, message, err := deploymentRolloutReady(status, found, 1, deployment.ResourceName)
+			ready, message, err := deploymentRolloutReady(status, found, 1, deployment.ResourceName, "", "")
 			if err != nil {
 				return false, "", watchTargets, fmt.Errorf("wait for backing service deployment %s/%s: %w", namespace, deployment.ResourceName, err)
 			}
@@ -374,11 +381,13 @@ func (s *Service) refreshManagedAppStatus(ctx context.Context, client *kubeClien
 	return s.reconcileManagedAppObject(ctx, client, managed)
 }
 
-func deploymentRolloutReady(deployment kubeDeployment, found bool, desiredReplicas int, deploymentName string) (bool, string, error) {
+func deploymentRolloutReady(deployment kubeDeployment, found bool, desiredReplicas int, deploymentName, expectedReleaseKey, expectedImage string) (bool, string, error) {
 	deploymentName = strings.TrimSpace(deploymentName)
 	if deploymentName == "" {
 		deploymentName = "deployment"
 	}
+	expectedReleaseKey = strings.TrimSpace(expectedReleaseKey)
+	expectedImage = strings.TrimSpace(expectedImage)
 
 	if desiredReplicas <= 0 {
 		if !found {
@@ -398,6 +407,24 @@ func deploymentRolloutReady(deployment kubeDeployment, found bool, desiredReplic
 
 	if !found {
 		return false, fmt.Sprintf("waiting for deployment %s to be created", deploymentName), nil
+	}
+	if expectedImage != "" {
+		currentImage := deploymentPrimaryContainerImage(deployment)
+		if currentImage != expectedImage {
+			if currentImage == "" {
+				return false, fmt.Sprintf("waiting for deployment %s image %s to be applied", deploymentName, expectedImage), nil
+			}
+			return false, fmt.Sprintf("waiting for deployment %s image %s to be applied (current=%s)", deploymentName, expectedImage, currentImage), nil
+		}
+	}
+	if expectedReleaseKey != "" {
+		currentReleaseKey := deploymentReleaseKey(deployment)
+		if currentReleaseKey != expectedReleaseKey {
+			if currentReleaseKey == "" {
+				return false, fmt.Sprintf("waiting for deployment %s release %s to be applied", deploymentName, expectedReleaseKey), nil
+			}
+			return false, fmt.Sprintf("waiting for deployment %s release %s to be applied (current=%s)", deploymentName, expectedReleaseKey, currentReleaseKey), nil
+		}
 	}
 	if hasDeploymentFailureCondition(deployment.Status.Conditions) {
 		return false, "", fmt.Errorf("deployment %s rollout failed: %s", deploymentName, deploymentFailureMessage(deployment.Status.Conditions))
@@ -421,4 +448,24 @@ func deploymentRolloutReady(deployment kubeDeployment, found bool, desiredReplic
 		return false, fmt.Sprintf("waiting for deployment %s unavailable replicas to drain (%d)", deploymentName, deployment.Status.UnavailableReplicas), nil
 	}
 	return true, fmt.Sprintf("deployment %s ready", deploymentName), nil
+}
+
+func expectedManagedAppReleaseKey(app model.App, scheduling runtime.SchedulingConstraints) string {
+	if strings.TrimSpace(app.Spec.Image) == "" {
+		return ""
+	}
+	return strings.TrimSpace(runtime.ManagedAppReleaseKey(app, scheduling))
+}
+
+func deploymentReleaseKey(deployment kubeDeployment) string {
+	return strings.TrimSpace(deployment.Metadata.Annotations[runtime.FugueAnnotationReleaseKey])
+}
+
+func deploymentPrimaryContainerImage(deployment kubeDeployment) string {
+	for _, container := range deployment.Spec.Template.Spec.Containers {
+		if image := strings.TrimSpace(container.Image); image != "" {
+			return image
+		}
+	}
+	return ""
 }

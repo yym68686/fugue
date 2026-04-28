@@ -130,7 +130,7 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 			}
 			return fmt.Errorf("check active app operations: %w", opErr)
 		case hasActiveOp:
-			app, _ = selectManagedAppDesiredApp(app, storedApp, true)
+			return nil
 		default:
 			recoverStoredBaseline = managedAppBaselineNeedsRecovery(storedApp)
 			if recoverStoredBaseline {

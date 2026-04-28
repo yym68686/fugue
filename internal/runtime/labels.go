@@ -13,4 +13,6 @@ const (
 	FugueLabelBackingServiceType = "fugue.pro/backing-service-type"
 	FugueLabelOwnerAppID         = "fugue.pro/owner-app-id"
 	FugueLabelFenceEpoch         = "fugue.pro/fence-epoch"
+
+	FugueAnnotationReleaseKey = "fugue.pro/release-key"
 )

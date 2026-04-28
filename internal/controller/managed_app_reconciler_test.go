@@ -1037,6 +1037,73 @@ func TestSelectManagedAppDesiredAppUsesStoredBaselineWhenRecoveryIsNotNeeded(t *
 	}
 }
 
+func TestReconcileManagedAppObjectSkipsApplyWhileOperationIsActive(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(t.TempDir() + "/store.json")
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Active Operation")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "Project A", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateImportedAppWithoutRoute(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.pull.example/fugue-apps/demo:git-old",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:             model.AppSourceTypeUpload,
+		UploadID:         "upload_demo",
+		ArchiveSHA256:    "sha256-old",
+		BuildStrategy:    model.AppBuildStrategyDockerfile,
+		CommitSHA:        "sha256-old",
+		ResolvedImageRef: "registry.push.example/fugue-apps/demo:git-old",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	desiredSpec := app.Spec
+	desiredSpec.Image = "registry.pull.example/fugue-apps/demo:git-new"
+	if _, err := stateStore.CreateOperation(model.Operation{
+		TenantID:    app.TenantID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &desiredSpec,
+	}); err != nil {
+		t.Fatalf("create active deploy operation: %v", err)
+	}
+
+	managed, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{}))
+	if err != nil {
+		t.Fatalf("build managed app: %v", err)
+	}
+
+	requests := 0
+	client := &kubeClient{
+		client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requests++
+			t.Fatalf("expected active operation reconcile to skip kubernetes writes, got %s %s", req.Method, req.URL.String())
+			return nil, nil
+		})},
+		baseURL: "http://kube.test",
+	}
+	svc := &Service{
+		Store: stateStore,
+	}
+	if err := svc.reconcileManagedAppObject(context.Background(), client, managed); err != nil {
+		t.Fatalf("reconcile managed app: %v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("expected no kubernetes requests while active operation owns apply, got %d", requests)
+	}
+}
+
 func TestReconcileManagedAppObjectRepairsIncompleteStoredGitHubSourceFromReadyManagedSnapshot(t *testing.T) {
 	t.Parallel()
 

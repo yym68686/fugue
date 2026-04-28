@@ -434,7 +434,7 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		templateMetadata["annotations"] = annotations
 	}
 
-	return map[string]any{
+	object := map[string]any{
 		"apiVersion": "apps/v1",
 		"kind":       "Deployment",
 		"metadata": map[string]any{
@@ -454,6 +454,8 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 			},
 		},
 	}
+	annotateManagedDeploymentReleaseKey(object)
+	return object
 }
 
 func buildAppFileVolumeMounts(files []model.AppFile) []map[string]any {
@@ -800,6 +802,32 @@ func managedDeploymentRuntimeKey(obj map[string]any) string {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+func annotateManagedDeploymentReleaseKey(obj map[string]any) {
+	key := managedDeploymentRuntimeKey(obj)
+	if key == "" {
+		return
+	}
+	metadata, _ := obj["metadata"].(map[string]any)
+	if metadata == nil {
+		metadata = map[string]any{}
+		obj["metadata"] = metadata
+	}
+	annotations := map[string]string{}
+	if existing, ok := metadata["annotations"].(map[string]string); ok {
+		for name, value := range existing {
+			annotations[name] = value
+		}
+	} else if existing, ok := metadata["annotations"].(map[string]any); ok {
+		for name, value := range existing {
+			if text, ok := value.(string); ok {
+				annotations[name] = text
+			}
+		}
+	}
+	annotations[FugueAnnotationReleaseKey] = key
+	metadata["annotations"] = annotations
 }
 
 func mergedRuntimeEnv(app model.App) map[string]string {

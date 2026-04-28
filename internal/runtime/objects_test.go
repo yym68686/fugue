@@ -625,6 +625,42 @@ func TestBuildAppDeploymentTemplateAnnotationsTrackFilesAndRestart(t *testing.T)
 	}
 }
 
+func TestBuildAppDeploymentAnnotatesReleaseKey(t *testing.T) {
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:v1",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	deployment := objects[1]
+	metadata := deployment["metadata"].(map[string]any)
+	annotations, ok := metadata["annotations"].(map[string]string)
+	if !ok {
+		t.Fatalf("expected deployment annotations, got %#v", metadata["annotations"])
+	}
+	releaseKey := annotations[FugueAnnotationReleaseKey]
+	if releaseKey == "" {
+		t.Fatal("expected deployment release key annotation")
+	}
+	if expected := ManagedAppReleaseKey(app, SchedulingConstraints{}); releaseKey != expected {
+		t.Fatalf("expected release key %q, got %q", expected, releaseKey)
+	}
+
+	app.Spec.Image = "ghcr.io/example/demo:v2"
+	updatedDeployment := buildAppObjects(app, SchedulingConstraints{})[1]
+	updatedMetadata := updatedDeployment["metadata"].(map[string]any)
+	updatedAnnotations := updatedMetadata["annotations"].(map[string]string)
+	if updatedAnnotations[FugueAnnotationReleaseKey] == releaseKey {
+		t.Fatal("expected release key to change when deployment template changes")
+	}
+}
+
 func TestBuildAppDeploymentUsesRollingUpdateAndReadinessProbe(t *testing.T) {
 	app := model.App{
 		TenantID: "tenant_demo",

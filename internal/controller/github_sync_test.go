@@ -912,7 +912,7 @@ func TestDeploymentRolloutReadyRequiresOldReplicasToTerminate(t *testing.T) {
 	deployment.Status.ReadyReplicas = 1
 	deployment.Status.AvailableReplicas = 1
 
-	ready, message, err := deploymentRolloutReady(deployment, true, 1, "demo")
+	ready, message, err := deploymentRolloutReady(deployment, true, 1, "demo", "", "")
 	if err != nil {
 		t.Fatalf("deployment rollout ready: %v", err)
 	}
@@ -939,7 +939,7 @@ func TestDeploymentRolloutReadyReportsFailureCondition(t *testing.T) {
 		},
 	}
 
-	if _, _, err := deploymentRolloutReady(deployment, true, 1, "demo"); err == nil {
+	if _, _, err := deploymentRolloutReady(deployment, true, 1, "demo", "", ""); err == nil {
 		t.Fatal("expected rollout failure condition to surface as error")
 	}
 }
