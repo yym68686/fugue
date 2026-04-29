@@ -44,6 +44,8 @@ tags:
     description: Source upload archive endpoints.
   - name: Agent
     description: Runtime agent control-plane endpoints.
+  - name: Node Updater
+    description: Host-level updater enrollment, heartbeat, and maintenance task endpoints.
 paths:
   /button.svg:
     get:
@@ -2932,6 +2934,257 @@ paths:
                 type: string
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /install/node-updater.sh:
+    get:
+      operationId: nodeUpdaterInstallScript
+      summary: Node Updater Install Script
+      tags: [System]
+      x-fugue-handler: handleNodeUpdaterInstallScript
+      responses:
+        '200':
+          description: Successful response
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/node-updaters:
+    get:
+      operationId: listNodeUpdaters
+      summary: List Node Updaters
+      tags: [Node Updater]
+      x-fugue-handler: handleListNodeUpdaters
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeUpdaterListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/node-update-tasks:
+    get:
+      operationId: listNodeUpdateTasks
+      summary: List Node Update Tasks
+      tags: [Node Updater]
+      x-fugue-handler: handleListNodeUpdateTasks
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: node_updater_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeUpdateTaskListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createNodeUpdateTask
+      summary: Create Node Update Task
+      tags: [Node Updater]
+      x-fugue-handler: handleCreateNodeUpdateTask
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateNodeUpdateTaskRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeUpdateTaskResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/node-updater/enroll:
+    post:
+      operationId: nodeUpdaterEnroll
+      summary: Node Updater Enroll
+      tags: [Node Updater]
+      x-fugue-handler: handleNodeUpdaterEnroll
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeUpdaterEnrollRequest"
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeUpdaterEnrollResponse"
+            text/plain:
+              schema:
+                type: string
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/node-updater/heartbeat:
+    post:
+      operationId: nodeUpdaterHeartbeat
+      summary: Node Updater Heartbeat
+      tags: [Node Updater]
+      x-fugue-handler: handleNodeUpdaterHeartbeat
+      security:
+        - NodeUpdaterBearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeUpdaterHeartbeatRequest"
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeUpdaterResponse"
+            text/plain:
+              schema:
+                type: string
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/node-updater/tasks:
+    get:
+      operationId: nodeUpdaterTasks
+      summary: Node Updater Tasks
+      tags: [Node Updater]
+      x-fugue-handler: handleNodeUpdaterTasks
+      security:
+        - NodeUpdaterBearerAuth: []
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 10
+        - in: query
+          name: format
+          required: false
+          schema:
+            type: string
+            enum: [json, env]
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeUpdateTaskListResponse"
+            text/plain:
+              schema:
+                type: string
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/node-updater/tasks/{id}/claim:
+    post:
+      operationId: nodeUpdaterClaimTask
+      summary: Node Updater Claim Task
+      tags: [Node Updater]
+      x-fugue-handler: handleNodeUpdaterClaimTask
+      security:
+        - NodeUpdaterBearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeUpdateTaskResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/node-updater/tasks/{id}/log:
+    post:
+      operationId: nodeUpdaterLogTask
+      summary: Node Updater Log Task
+      tags: [Node Updater]
+      x-fugue-handler: handleNodeUpdaterLogTask
+      security:
+        - NodeUpdaterBearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeUpdateTaskLogRequest"
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeUpdateTaskResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/node-updater/tasks/{id}/complete:
+    post:
+      operationId: nodeUpdaterCompleteTask
+      summary: Node Updater Complete Task
+      tags: [Node Updater]
+      x-fugue-handler: handleNodeUpdaterCompleteTask
+      security:
+        - NodeUpdaterBearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeUpdateTaskCompleteRequest"
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeUpdateTaskResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/source-uploads/{id}/archive:
     get:
       operationId: getSourceUploadArchive
@@ -3173,6 +3426,10 @@ components:
       scheme: bearer
       bearerFormat: opaque
     RuntimeBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+    NodeUpdaterBearerAuth:
       type: http
       scheme: bearer
       bearerFormat: opaque
@@ -3511,6 +3768,120 @@ components:
           type: array
           items:
             type: string
+    NodeUpdater:
+      type: object
+      additionalProperties: false
+      required: [id, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        node_key_id:
+          type: string
+        machine_id:
+          type: string
+        runtime_id:
+          type: string
+        cluster_node_name:
+          type: string
+        status:
+          type: string
+        token_prefix:
+          type: string
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+        updater_version:
+          type: string
+        join_script_version:
+          type: string
+        k3s_version:
+          type: string
+        os:
+          type: string
+        arch:
+          type: string
+        last_error:
+          type: string
+        last_seen_at:
+          type: string
+          format: date-time
+        last_heartbeat_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    NodeUpdateTaskLog:
+      type: object
+      additionalProperties: false
+      required: [at, message]
+      properties:
+        at:
+          type: string
+          format: date-time
+        message:
+          type: string
+    NodeUpdateTask:
+      type: object
+      additionalProperties: false
+      required: [id, node_updater_id, type, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        node_updater_id:
+          type: string
+        machine_id:
+          type: string
+        runtime_id:
+          type: string
+        node_key_id:
+          type: string
+        cluster_node_name:
+          type: string
+        type:
+          type: string
+        status:
+          type: string
+        payload:
+          type: object
+          additionalProperties:
+            type: string
+        result_message:
+          type: string
+        error_message:
+          type: string
+        logs:
+          type: array
+          items:
+            $ref: "#/components/schemas/NodeUpdateTaskLog"
+        requested_by_type:
+          type: string
+        requested_by_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        claimed_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
     ResourceSpec:
       type: object
       additionalProperties: false
@@ -5726,6 +6097,134 @@ components:
           $ref: "#/components/schemas/NodeKey"
         cleanup:
           $ref: "#/components/schemas/NodeKeyCleanupResult"
+    NodeUpdaterListResponse:
+      type: object
+      additionalProperties: false
+      required: [node_updaters]
+      properties:
+        node_updaters:
+          type: array
+          items:
+            $ref: "#/components/schemas/NodeUpdater"
+    NodeUpdaterResponse:
+      type: object
+      additionalProperties: false
+      required: [node_updater]
+      properties:
+        node_updater:
+          $ref: "#/components/schemas/NodeUpdater"
+    NodeUpdaterEnrollRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        node_key:
+          type: string
+        node_name:
+          type: string
+        runtime_name:
+          type: string
+        machine_name:
+          type: string
+        machine_fingerprint:
+          type: string
+        endpoint:
+          type: string
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        updater_version:
+          type: string
+        join_script_version:
+          type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+    NodeUpdaterEnrollResponse:
+      type: object
+      additionalProperties: false
+      required: [node_updater, token]
+      properties:
+        node_updater:
+          $ref: "#/components/schemas/NodeUpdater"
+        token:
+          type: string
+    NodeUpdaterHeartbeatRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+        updater_version:
+          type: string
+        join_script_version:
+          type: string
+        k3s_version:
+          type: string
+        os:
+          type: string
+        arch:
+          type: string
+        last_error:
+          type: string
+    CreateNodeUpdateTaskRequest:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        node_updater_id:
+          type: string
+        cluster_node_name:
+          type: string
+        runtime_id:
+          type: string
+        type:
+          type: string
+        payload:
+          type: object
+          additionalProperties:
+            type: string
+    NodeUpdateTaskResponse:
+      type: object
+      additionalProperties: false
+      required: [task]
+      properties:
+        task:
+          $ref: "#/components/schemas/NodeUpdateTask"
+    NodeUpdateTaskListResponse:
+      type: object
+      additionalProperties: false
+      required: [tasks]
+      properties:
+        tasks:
+          type: array
+          items:
+            $ref: "#/components/schemas/NodeUpdateTask"
+    NodeUpdateTaskLogRequest:
+      type: object
+      additionalProperties: false
+      required: [message]
+      properties:
+        message:
+          type: string
+    NodeUpdateTaskCompleteRequest:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+        message:
+          type: string
+        error_message:
+          type: string
     ClusterNodeListResponse:
       type: object
       additionalProperties: false

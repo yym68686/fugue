@@ -5,9 +5,10 @@ package apispec
 type AuthKind string
 
 const (
-	AuthNone    AuthKind = "none"
-	AuthAPI     AuthKind = "api"
-	AuthRuntime AuthKind = "runtime"
+	AuthNone        AuthKind = "none"
+	AuthAPI         AuthKind = "api"
+	AuthRuntime     AuthKind = "runtime"
+	AuthNodeUpdater AuthKind = "node-updater"
 )
 
 type Route struct {

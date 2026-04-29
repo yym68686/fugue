@@ -50,6 +50,10 @@ func (a *Authenticator) RequireAPI(next http.Handler) http.Handler {
 			http.Error(w, "runtime credentials cannot access this endpoint", http.StatusForbidden)
 			return
 		}
+		if principal.ActorType == model.ActorTypeNodeUpdater {
+			http.Error(w, "node updater credentials cannot access this endpoint", http.StatusForbidden)
+			return
+		}
 		if principal.ActorType == model.ActorTypeWorkload && !allowWorkloadAPIRequest(r) {
 			http.Error(w, "workload credentials cannot access this endpoint", http.StatusForbidden)
 			return
@@ -67,6 +71,21 @@ func (a *Authenticator) RequireRuntime(next http.Handler) http.Handler {
 		}
 		if principal.ActorType != model.ActorTypeRuntime {
 			http.Error(w, "runtime credentials required", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalContextKey, principal)))
+	})
+}
+
+func (a *Authenticator) RequireNodeUpdater(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		principal, err := a.authenticateRequest(r)
+		if err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if principal.ActorType != model.ActorTypeNodeUpdater {
+			http.Error(w, "node updater credentials required", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalContextKey, principal)))
@@ -133,6 +152,14 @@ func (a *Authenticator) authenticateRequest(r *http.Request) (model.Principal, e
 	_, runtimePrincipal, err := a.Store.AuthenticateRuntimeKey(secret)
 	if err == nil {
 		return runtimePrincipal, nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return model.Principal{}, err
+	}
+
+	_, nodeUpdaterPrincipal, err := a.Store.AuthenticateNodeUpdater(secret)
+	if err == nil {
+		return nodeUpdaterPrincipal, nil
 	}
 
 	return model.Principal{}, errors.New("invalid credentials")

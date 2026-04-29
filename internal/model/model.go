@@ -73,6 +73,21 @@ const (
 	NodeKeyStatusActive  = "active"
 	NodeKeyStatusRevoked = "revoked"
 
+	NodeUpdaterStatusActive  = "active"
+	NodeUpdaterStatusRevoked = "revoked"
+
+	NodeUpdateTaskTypeRefreshJoinConfig = "refresh-join-config"
+	NodeUpdateTaskTypeUpgradeK3SAgent   = "upgrade-k3s-agent"
+	NodeUpdateTaskTypeUpgradeUpdater    = "upgrade-node-updater"
+	NodeUpdateTaskTypeRestartK3SAgent   = "restart-k3s-agent"
+	NodeUpdateTaskTypeDiagnoseNode      = "diagnose-node"
+
+	NodeUpdateTaskStatusPending   = "pending"
+	NodeUpdateTaskStatusRunning   = "running"
+	NodeUpdateTaskStatusCompleted = "completed"
+	NodeUpdateTaskStatusFailed    = "failed"
+	NodeUpdateTaskStatusCanceled  = "canceled"
+
 	OperationTypeImport             = "import"
 	OperationTypeDeploy             = "deploy"
 	OperationTypeScale              = "scale"
@@ -97,12 +112,13 @@ const (
 	ExecutionModeManaged = "managed"
 	ExecutionModeAgent   = "agent"
 
-	ActorTypeBootstrap = "bootstrap"
-	ActorTypeAPIKey    = "api-key"
-	ActorTypeNodeKey   = "node-key"
-	ActorTypeRuntime   = "runtime"
-	ActorTypeWorkload  = "workload"
-	ActorTypeSystem    = "system"
+	ActorTypeBootstrap   = "bootstrap"
+	ActorTypeAPIKey      = "api-key"
+	ActorTypeNodeKey     = "node-key"
+	ActorTypeNodeUpdater = "node-updater"
+	ActorTypeRuntime     = "runtime"
+	ActorTypeWorkload    = "workload"
+	ActorTypeSystem      = "system"
 
 	OperationRequestedByGitHubSyncController = "fugue-controller/github-sync"
 	OperationRequestedByAutoFailover         = "fugue-controller/auto-failover"
@@ -396,6 +412,57 @@ type MachinePolicy struct {
 	AllowBuilds             bool   `json:"allow_builds"`
 	AllowSharedPool         bool   `json:"allow_shared_pool"`
 	DesiredControlPlaneRole string `json:"desired_control_plane_role,omitempty"`
+}
+
+type NodeUpdater struct {
+	ID                string            `json:"id"`
+	TenantID          string            `json:"tenant_id,omitempty"`
+	NodeKeyID         string            `json:"node_key_id,omitempty"`
+	MachineID         string            `json:"machine_id,omitempty"`
+	RuntimeID         string            `json:"runtime_id,omitempty"`
+	ClusterNodeName   string            `json:"cluster_node_name,omitempty"`
+	Status            string            `json:"status"`
+	TokenPrefix       string            `json:"token_prefix,omitempty"`
+	TokenHash         string            `json:"token_hash,omitempty"`
+	Labels            map[string]string `json:"labels,omitempty"`
+	Capabilities      []string          `json:"capabilities,omitempty"`
+	UpdaterVersion    string            `json:"updater_version,omitempty"`
+	JoinScriptVersion string            `json:"join_script_version,omitempty"`
+	K3SVersion        string            `json:"k3s_version,omitempty"`
+	OS                string            `json:"os,omitempty"`
+	Arch              string            `json:"arch,omitempty"`
+	LastError         string            `json:"last_error,omitempty"`
+	LastSeenAt        *time.Time        `json:"last_seen_at,omitempty"`
+	LastHeartbeatAt   *time.Time        `json:"last_heartbeat_at,omitempty"`
+	CreatedAt         time.Time         `json:"created_at"`
+	UpdatedAt         time.Time         `json:"updated_at"`
+}
+
+type NodeUpdateTask struct {
+	ID              string              `json:"id"`
+	TenantID        string              `json:"tenant_id,omitempty"`
+	NodeUpdaterID   string              `json:"node_updater_id"`
+	MachineID       string              `json:"machine_id,omitempty"`
+	RuntimeID       string              `json:"runtime_id,omitempty"`
+	NodeKeyID       string              `json:"node_key_id,omitempty"`
+	ClusterNodeName string              `json:"cluster_node_name,omitempty"`
+	Type            string              `json:"type"`
+	Status          string              `json:"status"`
+	Payload         map[string]string   `json:"payload,omitempty"`
+	ResultMessage   string              `json:"result_message,omitempty"`
+	ErrorMessage    string              `json:"error_message,omitempty"`
+	Logs            []NodeUpdateTaskLog `json:"logs,omitempty"`
+	RequestedByType string              `json:"requested_by_type,omitempty"`
+	RequestedByID   string              `json:"requested_by_id,omitempty"`
+	CreatedAt       time.Time           `json:"created_at"`
+	UpdatedAt       time.Time           `json:"updated_at"`
+	ClaimedAt       *time.Time          `json:"claimed_at,omitempty"`
+	CompletedAt     *time.Time          `json:"completed_at,omitempty"`
+}
+
+type NodeUpdateTaskLog struct {
+	At      time.Time `json:"at"`
+	Message string    `json:"message"`
 }
 
 type RuntimeAccessGrant struct {
@@ -1339,6 +1406,8 @@ type State struct {
 	EnrollmentTokens      []EnrollmentToken     `json:"enrollment_tokens"`
 	NodeKeys              []NodeKey             `json:"node_keys"`
 	Machines              []Machine             `json:"machines"`
+	NodeUpdaters          []NodeUpdater         `json:"node_updaters,omitempty"`
+	NodeUpdateTasks       []NodeUpdateTask      `json:"node_update_tasks,omitempty"`
 	Runtimes              []Runtime             `json:"runtimes"`
 	RuntimeGrants         []RuntimeAccessGrant  `json:"runtime_grants"`
 	Apps                  []App                 `json:"apps"`

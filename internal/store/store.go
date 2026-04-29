@@ -3452,6 +3452,12 @@ func ensureDefaults(state *model.State) {
 	for idx := range state.Machines {
 		normalizeMachineForRead(&state.Machines[idx])
 	}
+	if state.NodeUpdaters == nil {
+		state.NodeUpdaters = []model.NodeUpdater{}
+	}
+	if state.NodeUpdateTasks == nil {
+		state.NodeUpdateTasks = []model.NodeUpdateTask{}
+	}
 	if state.Runtimes == nil {
 		state.Runtimes = []model.Runtime{}
 	}
@@ -3518,6 +3524,19 @@ func redactEnrollmentToken(token model.EnrollmentToken) model.EnrollmentToken {
 func redactNodeKey(key model.NodeKey) model.NodeKey {
 	key.Hash = ""
 	return key
+}
+
+func redactNodeUpdater(updater model.NodeUpdater) model.NodeUpdater {
+	updater.TokenHash = ""
+	updater.Labels = cloneMap(updater.Labels)
+	updater.Capabilities = append([]string(nil), updater.Capabilities...)
+	return updater
+}
+
+func redactNodeUpdateTask(task model.NodeUpdateTask) model.NodeUpdateTask {
+	task.Payload = cloneMap(task.Payload)
+	task.Logs = append([]model.NodeUpdateTaskLog(nil), task.Logs...)
+	return task
 }
 
 func defaultNodeKeyLabel(label string) string {

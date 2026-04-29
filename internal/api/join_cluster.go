@@ -580,12 +580,15 @@ func (s *Server) joinClusterInstallScript(apiBase string) string {
 set -euo pipefail
 
 FUGUE_API_BASE=${FUGUE_API_BASE:-%s}
+FUGUE_JOIN_SCRIPT_VERSION="${FUGUE_JOIN_SCRIPT_VERSION:-v1}"
 FUGUE_K3S_CHANNEL="${FUGUE_K3S_CHANNEL:-stable}"
 FUGUE_LIMIT_CPU="${FUGUE_LIMIT_CPU:-}"
 FUGUE_LIMIT_MEMORY="${FUGUE_LIMIT_MEMORY:-}"
 FUGUE_LIMIT_DISK="${FUGUE_LIMIT_DISK:-}"
 FUGUE_LIMIT_DISK_PATH="${FUGUE_LIMIT_DISK_PATH:-/}"
 FUGUE_PROGRESS_HEARTBEAT_SECONDS="${FUGUE_PROGRESS_HEARTBEAT_SECONDS:-15}"
+FUGUE_NODE_UPDATER_ENABLED="${FUGUE_NODE_UPDATER_ENABLED:-true}"
+FUGUE_NODE_UPDATER_POLL_INTERVAL="${FUGUE_NODE_UPDATER_POLL_INTERVAL:-5min}"
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -1380,6 +1383,122 @@ install_k3s_agent_binaries() {
   curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL="${FUGUE_K3S_CHANNEL}" INSTALL_K3S_EXEC="agent" INSTALL_K3S_SKIP_START="true" sh -
 }
 
+shell_quote_for_env() {
+  local value="$1"
+  value="${value//\'/\'\\\'\'}"
+  printf "'%%s'" "${value}"
+}
+
+write_env_var() {
+  printf '%%s=' "$1"
+  shell_quote_for_env "$2"
+  printf '\n'
+}
+
+install_fugue_node_updater() {
+  local updater_tmp=""
+  local enroll_env=""
+  local env_tmp=""
+  local unit_tmp=""
+  local timer_tmp=""
+  local systemd_changed=0
+  case "${FUGUE_NODE_UPDATER_ENABLED}" in
+    1|true|TRUE|yes|YES)
+      ;;
+    *)
+      log_step "Fugue node updater installation disabled."
+      return 0
+      ;;
+  esac
+
+  log_step "Installing Fugue node updater..."
+  mkdir -p /etc/fugue /var/lib/fugue-node-updater
+  updater_tmp="$(mktemp)"
+  curl -fsSL --retry 3 --retry-delay 2 "${FUGUE_API_BASE}/install/node-updater.sh" -o "${updater_tmp}"
+  cp "${updater_tmp}" /usr/local/bin/fugue-node-updater
+  chmod 0755 /usr/local/bin/fugue-node-updater
+  rm -f "${updater_tmp}"
+
+  enroll_env="$(mktemp)"
+  curl -fsSL --retry 3 --retry-delay 2 -X POST "${FUGUE_API_BASE}/v1/node-updater/enroll" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    --data-urlencode "node_key=${FUGUE_NODE_KEY}" \
+    --data-urlencode "node_name=${FUGUE_JOIN_NODE_NAME}" \
+    --data-urlencode "machine_name=${machine_name}" \
+    --data-urlencode "machine_fingerprint=${machine_fingerprint}" \
+    --data-urlencode "endpoint=${node_endpoint}" \
+    --data-urlencode "labels=${FUGUE_RUNTIME_LABELS:-}" \
+    --data-urlencode "updater_version=v1" \
+    --data-urlencode "join_script_version=${FUGUE_JOIN_SCRIPT_VERSION}" \
+    --data-urlencode "capabilities=heartbeat,tasks,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node" \
+    >"${enroll_env}"
+  # shellcheck disable=SC1090
+  . "${enroll_env}"
+  rm -f "${enroll_env}"
+
+  env_tmp="$(mktemp)"
+  {
+    write_env_var FUGUE_API_BASE "${FUGUE_API_BASE}"
+    write_env_var FUGUE_NODE_UPDATER_ID "${FUGUE_NODE_UPDATER_ID}"
+    write_env_var FUGUE_NODE_UPDATER_TOKEN "${FUGUE_NODE_UPDATER_TOKEN}"
+    write_env_var FUGUE_NODE_UPDATER_VERSION "v1"
+    write_env_var FUGUE_JOIN_SCRIPT_VERSION "${FUGUE_JOIN_SCRIPT_VERSION}"
+    write_env_var FUGUE_K3S_CHANNEL "${FUGUE_K3S_CHANNEL}"
+    write_env_var FUGUE_NODE_UPDATER_WORK_DIR "/var/lib/fugue-node-updater"
+  } >"${env_tmp}"
+  chmod 0600 "${env_tmp}"
+  if write_file_if_changed "${env_tmp}" /etc/fugue/node-updater.env; then
+    log_step "Updated /etc/fugue/node-updater.env."
+  else
+    log_step "/etc/fugue/node-updater.env is unchanged."
+  fi
+  chmod 0600 /etc/fugue/node-updater.env
+
+  unit_tmp="$(mktemp)"
+  cat >"${unit_tmp}" <<EOF_NODE_UPDATER_SERVICE
+[Unit]
+Description=Fugue node updater
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/fugue/node-updater.env
+ExecStart=/usr/local/bin/fugue-node-updater run-once
+TimeoutStartSec=1800
+EOF_NODE_UPDATER_SERVICE
+  if write_file_if_changed "${unit_tmp}" /etc/systemd/system/fugue-node-updater.service; then
+    systemd_changed=1
+    log_step "Updated fugue-node-updater.service."
+  fi
+
+  timer_tmp="$(mktemp)"
+  cat >"${timer_tmp}" <<EOF_NODE_UPDATER_TIMER
+[Unit]
+Description=Run Fugue node updater
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=${FUGUE_NODE_UPDATER_POLL_INTERVAL}
+RandomizedDelaySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF_NODE_UPDATER_TIMER
+  if write_file_if_changed "${timer_tmp}" /etc/systemd/system/fugue-node-updater.timer; then
+    systemd_changed=1
+    log_step "Updated fugue-node-updater.timer."
+  fi
+
+  if [ "${systemd_changed}" -eq 1 ]; then
+    systemctl daemon-reload
+  fi
+  systemctl enable --now fugue-node-updater.timer >/dev/null
+  systemctl start --no-block fugue-node-updater.service >/dev/null 2>&1 || true
+  log_step "Fugue node updater is installed."
+}
+
 restart_k3s_agent_if_needed() {
   local config_changed="$1"
   local state=""
@@ -1548,6 +1667,9 @@ restart_k3s_agent_if_needed "${k3s_restart_needed}"
 
 systemctl is-active --quiet k3s-agent
 cleanup_stale_cluster_nodes
+if ! install_fugue_node_updater; then
+  log_step "Fugue node updater installation failed; cluster join succeeded but automatic host updates are not active yet."
+fi
 log_step "Cluster node join finished in $(format_duration $(( $(date +%%s) - script_started_at )))."
 
 cat <<EOF

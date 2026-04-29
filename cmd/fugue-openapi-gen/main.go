@@ -178,14 +178,20 @@ func inferAuthKind(doc *openapi3.T, operation *openapi3.Operation) (string, erro
 	auth := "none"
 	for _, requirement := range security {
 		if _, ok := requirement["RuntimeBearerAuth"]; ok {
-			if auth == "api" {
-				return "", errors.New("cannot use BearerAuth and RuntimeBearerAuth on the same operation")
+			if auth != "none" {
+				return "", errors.New("cannot combine bearer auth schemes on the same operation")
 			}
 			auth = "runtime"
 		}
+		if _, ok := requirement["NodeUpdaterBearerAuth"]; ok {
+			if auth != "none" {
+				return "", errors.New("cannot combine bearer auth schemes on the same operation")
+			}
+			auth = "node-updater"
+		}
 		if _, ok := requirement["BearerAuth"]; ok {
-			if auth == "runtime" {
-				return "", errors.New("cannot use BearerAuth and RuntimeBearerAuth on the same operation")
+			if auth != "none" {
+				return "", errors.New("cannot combine bearer auth schemes on the same operation")
 			}
 			auth = "api"
 		}
@@ -209,6 +215,8 @@ func renderRoutesFile(routes []routeDefinition) ([]byte, error) {
 			handlerExpr = "s.auth.RequireAPI(" + handlerExpr + ")"
 		case "runtime":
 			handlerExpr = "s.auth.RequireRuntime(" + handlerExpr + ")"
+		case "node-updater":
+			handlerExpr = "s.auth.RequireNodeUpdater(" + handlerExpr + ")"
 		}
 		fmt.Fprintf(&b, "\tmux.Handle(%q, %s)\n", route.Pattern, handlerExpr)
 	}

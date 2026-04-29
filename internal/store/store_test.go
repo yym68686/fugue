@@ -132,6 +132,138 @@ func TestManagedAndExternalOperationFlow(t *testing.T) {
 	}
 }
 
+func TestNodeUpdaterTaskLifecycle(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Node Updater Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+
+	updater, token, err := s.EnrollNodeUpdater(
+		nodeSecret,
+		"worker-1",
+		"https://worker-1.example.com",
+		map[string]string{"zone": "test-a"},
+		"worker-1",
+		"machine-1",
+		"v1",
+		"join-v1",
+		[]string{"tasks", "heartbeat", "tasks"},
+	)
+	if err != nil {
+		t.Fatalf("enroll node updater: %v", err)
+	}
+	if updater.ID == "" || token == "" {
+		t.Fatalf("expected updater id and token, got updater=%+v token=%q", updater, token)
+	}
+	if updater.TokenHash != "" {
+		t.Fatalf("expected redacted updater token hash, got %q", updater.TokenHash)
+	}
+	if updater.RuntimeID == "" || updater.MachineID == "" {
+		t.Fatalf("expected runtime and machine linkage, got %+v", updater)
+	}
+
+	authenticated, principal, err := s.AuthenticateNodeUpdater(token)
+	if err != nil {
+		t.Fatalf("authenticate node updater: %v", err)
+	}
+	if authenticated.ID != updater.ID || principal.ActorType != model.ActorTypeNodeUpdater || principal.ActorID != updater.ID {
+		t.Fatalf("unexpected authenticated updater=%+v principal=%+v", authenticated, principal)
+	}
+
+	heartbeat, err := s.UpdateNodeUpdaterHeartbeat(updater.ID, model.NodeUpdater{
+		Capabilities:      []string{"diagnose-node", "heartbeat"},
+		UpdaterVersion:    "v2",
+		JoinScriptVersion: "join-v2",
+		K3SVersion:        "k3s version v1.32.0+k3s1",
+		OS:                "linux",
+		Arch:              "amd64",
+		LastError:         "previous task failed",
+	})
+	if err != nil {
+		t.Fatalf("heartbeat node updater: %v", err)
+	}
+	if heartbeat.UpdaterVersion != "v2" || heartbeat.K3SVersion == "" || heartbeat.LastHeartbeatAt == nil {
+		t.Fatalf("unexpected heartbeat updater: %+v", heartbeat)
+	}
+
+	requester := model.Principal{
+		ActorType: model.ActorTypeAPIKey,
+		ActorID:   "apikey_test",
+		TenantID:  tenant.ID,
+	}
+	firstTask, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypeDiagnoseNode, map[string]string{"reason": "first"})
+	if err != nil {
+		t.Fatalf("create first node update task: %v", err)
+	}
+	secondTask, err := s.CreateNodeUpdateTask(requester, "", updater.ClusterNodeName, "", model.NodeUpdateTaskTypeRestartK3SAgent, nil)
+	if err != nil {
+		t.Fatalf("create second node update task by node name: %v", err)
+	}
+
+	pending, err := s.ListPendingNodeUpdateTasks(updater.ID, 1)
+	if err != nil {
+		t.Fatalf("list pending tasks: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != firstTask.ID {
+		t.Fatalf("expected first pending task, got %+v", pending)
+	}
+
+	claimed, err := s.ClaimNodeUpdateTask(firstTask.ID, updater.ID)
+	if err != nil {
+		t.Fatalf("claim task: %v", err)
+	}
+	if claimed.Status != model.NodeUpdateTaskStatusRunning || claimed.ClaimedAt == nil {
+		t.Fatalf("expected running claimed task, got %+v", claimed)
+	}
+
+	logged, err := s.AppendNodeUpdateTaskLog(firstTask.ID, updater.ID, "diagnosis complete")
+	if err != nil {
+		t.Fatalf("append task log: %v", err)
+	}
+	if len(logged.Logs) != 1 || logged.Logs[0].Message != "diagnosis complete" {
+		t.Fatalf("expected task log, got %+v", logged.Logs)
+	}
+
+	completed, err := s.CompleteNodeUpdateTask(firstTask.ID, updater.ID, model.NodeUpdateTaskStatusCompleted, "ok", "")
+	if err != nil {
+		t.Fatalf("complete task: %v", err)
+	}
+	if completed.Status != model.NodeUpdateTaskStatusCompleted || completed.CompletedAt == nil {
+		t.Fatalf("expected completed task, got %+v", completed)
+	}
+
+	pending, err = s.ListPendingNodeUpdateTasks(updater.ID, 10)
+	if err != nil {
+		t.Fatalf("list pending tasks after completion: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != secondTask.ID {
+		t.Fatalf("expected second task to remain pending, got %+v", pending)
+	}
+
+	otherTenant, err := s.CreateTenant("Other Tenant")
+	if err != nil {
+		t.Fatalf("create other tenant: %v", err)
+	}
+	_, err = s.CreateNodeUpdateTask(model.Principal{
+		ActorType: model.ActorTypeAPIKey,
+		ActorID:   "apikey_other",
+		TenantID:  otherTenant.ID,
+	}, updater.ID, "", "", model.NodeUpdateTaskTypeDiagnoseNode, nil)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected cross-tenant task creation to be hidden, got %v", err)
+	}
+}
+
 func TestProjectDefaultRuntimeAppliesToNewAppsAndServices(t *testing.T) {
 	t.Parallel()
 
