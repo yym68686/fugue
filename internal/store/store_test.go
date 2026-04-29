@@ -337,6 +337,159 @@ func TestProjectDefaultRuntimeAppliesToNewAppsAndServices(t *testing.T) {
 	}
 }
 
+func TestProjectRuntimeReservationRestrictsOtherProjects(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Dedicated Runtime Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
+		CPUMilliCores:    4_000,
+		MemoryMebibytes:  8_192,
+		StorageGibibytes: 40,
+	}); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
+	}
+	projectA, err := s.CreateProject(tenant.ID, "alpha", "")
+	if err != nil {
+		t.Fatalf("create alpha project: %v", err)
+	}
+	projectB, err := s.CreateProject(tenant.ID, "beta", "")
+	if err != nil {
+		t.Fatalf("create beta project: %v", err)
+	}
+	dedicatedRuntime, _, err := s.CreateRuntime(tenant.ID, "alpha-vps", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create dedicated runtime: %v", err)
+	}
+	sharedRuntime, _, err := s.CreateRuntime(tenant.ID, "beta-vps", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create shared runtime: %v", err)
+	}
+
+	reservation, err := s.ReserveProjectRuntime(projectA.ID, dedicatedRuntime.ID)
+	if err != nil {
+		t.Fatalf("reserve project runtime: %v", err)
+	}
+	if reservation.ProjectID != projectA.ID || reservation.RuntimeID != dedicatedRuntime.ID {
+		t.Fatalf("unexpected reservation: %+v", reservation)
+	}
+	if _, err := s.ReserveProjectRuntime(projectA.ID, dedicatedRuntime.ID); err != nil {
+		t.Fatalf("repeat reservation should be idempotent: %v", err)
+	}
+
+	if _, err := s.CreateApp(tenant.ID, projectA.ID, "alpha-app", "", model.AppSpec{
+		Image:     "nginx:1.27",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: dedicatedRuntime.ID,
+	}); err != nil {
+		t.Fatalf("create app on reserved runtime for owning project: %v", err)
+	}
+	alphaMovable, err := s.CreateApp(tenant.ID, projectA.ID, "alpha-movable", "", model.AppSpec{
+		Image:     "nginx:1.27",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: sharedRuntime.ID,
+	})
+	if err != nil {
+		t.Fatalf("create movable alpha app: %v", err)
+	}
+	if _, err := s.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeMigrate,
+		AppID:           alphaMovable.ID,
+		TargetRuntimeID: dedicatedRuntime.ID,
+	}); err != nil {
+		t.Fatalf("same-project migrate to dedicated runtime should be allowed: %v", err)
+	}
+	betaApp, err := s.CreateApp(tenant.ID, projectB.ID, "beta-app", "", model.AppSpec{
+		Image:     "nginx:1.27",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: sharedRuntime.ID,
+	})
+	if err != nil {
+		t.Fatalf("create beta app: %v", err)
+	}
+	if _, err := s.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeMigrate,
+		AppID:           betaApp.ID,
+		TargetRuntimeID: dedicatedRuntime.ID,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected beta migrate to dedicated runtime to conflict, got %v", err)
+	}
+	if _, err := s.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeFailover,
+		AppID:           betaApp.ID,
+		TargetRuntimeID: dedicatedRuntime.ID,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected beta failover to dedicated runtime to conflict, got %v", err)
+	}
+	if _, err := s.CreateApp(tenant.ID, projectB.ID, "beta-on-alpha", "", model.AppSpec{
+		Image:     "nginx:1.27",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: dedicatedRuntime.ID,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected beta app on dedicated runtime to conflict, got %v", err)
+	}
+	if _, err := s.UpdateProjectFields(projectB.ID, ProjectUpdate{DefaultRuntimeID: &dedicatedRuntime.ID}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected beta default runtime update to conflict, got %v", err)
+	}
+	if _, err := s.CreateBackingService(tenant.ID, projectB.ID, "beta-db", "", model.BackingServiceSpec{
+		Postgres: &model.AppPostgresSpec{
+			Database:  "app",
+			User:      "app",
+			RuntimeID: dedicatedRuntime.ID,
+		},
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected beta backing service on dedicated runtime to conflict, got %v", err)
+	}
+}
+
+func TestProjectRuntimeReservationRejectsSharedRuntimeAndExistingBlockers(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Dedicated Runtime Blocker Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	projectA, err := s.CreateProject(tenant.ID, "alpha", "")
+	if err != nil {
+		t.Fatalf("create alpha project: %v", err)
+	}
+	projectB, err := s.CreateProject(tenant.ID, "beta", "")
+	if err != nil {
+		t.Fatalf("create beta project: %v", err)
+	}
+	runtimeObj, _, err := s.CreateRuntime(tenant.ID, "used-vps", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create runtime: %v", err)
+	}
+
+	if _, err := s.ReserveProjectRuntime(projectA.ID, model.DefaultManagedRuntimeID); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected managed shared reservation to be invalid, got %v", err)
+	}
+	if _, err := s.UpdateProjectFields(projectB.ID, ProjectUpdate{DefaultRuntimeID: &runtimeObj.ID}); err != nil {
+		t.Fatalf("set beta default runtime: %v", err)
+	}
+	if _, err := s.ReserveProjectRuntime(projectA.ID, runtimeObj.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected runtime with another project default to conflict, got %v", err)
+	}
+}
+
 func TestMigrateOperationAppliesDesiredSpecAndSource(t *testing.T) {
 	t.Parallel()
 

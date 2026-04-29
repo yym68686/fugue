@@ -232,6 +232,9 @@ func (s *Store) pgCreateProject(tenantID, name, description, defaultRuntimeID st
 		if !visible {
 			return model.Project{}, ErrNotFound
 		}
+		if err := pgValidateRuntimeReservedForProjectTx(ctx, tx, "", defaultRuntimeID); err != nil {
+			return model.Project{}, err
+		}
 	}
 
 	now := time.Now().UTC()
@@ -334,6 +337,9 @@ SELECT EXISTS (
 			}
 			if !visible {
 				return model.Project{}, ErrNotFound
+			}
+			if err := pgValidateRuntimeReservedForProjectTx(ctx, tx, project.ID, runtimeID); err != nil {
+				return model.Project{}, err
 			}
 		}
 		if project.DefaultRuntimeID != runtimeID {
@@ -2365,6 +2371,9 @@ WHERE id = $1 AND tenant_id = $2
 			return model.App{}, err
 		}
 	}
+	if err := pgValidateAppSpecRuntimeReservationsTx(ctx, tx, projectID, spec); err != nil {
+		return model.App{}, err
+	}
 
 	now := time.Now().UTC()
 	billing, billingState, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
@@ -3308,6 +3317,9 @@ WHERE app_id = $1
 		op.TargetRuntimeID = targetRuntimeID
 	default:
 		return model.Operation{}, ErrInvalidInput
+	}
+	if err := pgValidateOperationRuntimeReservationsTx(ctx, tx, app.ProjectID, op); err != nil {
+		return model.Operation{}, err
 	}
 
 	now := time.Now().UTC()

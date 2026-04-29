@@ -228,6 +228,17 @@ var postgresSchemaStatements = []string{
 		PRIMARY KEY (runtime_id, tenant_id)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_runtime_access_grants_tenant_id ON fugue_runtime_access_grants (tenant_id, created_at ASC)`,
+	`CREATE TABLE IF NOT EXISTS fugue_project_runtime_reservations (
+		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
+		project_id TEXT NOT NULL REFERENCES fugue_projects(id) ON DELETE CASCADE,
+		runtime_id TEXT NOT NULL REFERENCES fugue_runtimes(id) ON DELETE CASCADE,
+		mode TEXT NOT NULL DEFAULT 'exclusive',
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (project_id, runtime_id),
+		UNIQUE (runtime_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_project_runtime_reservations_project_id ON fugue_project_runtime_reservations (project_id, created_at ASC)`,
 	`CREATE TABLE IF NOT EXISTS fugue_apps (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,

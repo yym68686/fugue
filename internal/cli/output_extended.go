@@ -113,6 +113,37 @@ func writeProjectTableWithContext(w io.Writer, projects []model.Project, tenantN
 	return tw.Flush()
 }
 
+func writeProjectRuntimeReservationTable(w io.Writer, reservations []model.ProjectRuntimeReservation, runtimeNames map[string]string, showIDs bool) error {
+	sorted := append([]model.ProjectRuntimeReservation(nil), reservations...)
+	sortProjectRuntimeReservationsForOutput(sorted)
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "RUNTIME\tMODE\tUPDATED"); err != nil {
+		return err
+	}
+	for _, reservation := range sorted {
+		runtimeName := firstNonEmptyTrimmed(runtimeNames[reservation.RuntimeID], reservation.RuntimeID)
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\n",
+			formatDisplayName(runtimeName, reservation.RuntimeID, showIDs),
+			firstNonEmptyTrimmed(reservation.Mode, model.ProjectRuntimeReservationModeExclusive),
+			formatTime(reservation.UpdatedAt),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func sortProjectRuntimeReservationsForOutput(reservations []model.ProjectRuntimeReservation) {
+	sort.Slice(reservations, func(i, j int) bool {
+		if reservations[i].CreatedAt.Equal(reservations[j].CreatedAt) {
+			return reservations[i].RuntimeID < reservations[j].RuntimeID
+		}
+		return reservations[i].CreatedAt.Before(reservations[j].CreatedAt)
+	})
+}
+
 func writeServiceTable(w io.Writer, services []model.BackingService) error {
 	return writeServiceTableWithContext(w, services, nil, nil, nil, false)
 }

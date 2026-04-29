@@ -127,6 +127,9 @@ WHERE id = $1 AND tenant_id = $2
 	if err := normalizeBackingServiceForPersist(&service, nil); err != nil {
 		return model.BackingService{}, err
 	}
+	if err := pgValidateBackingServiceSpecRuntimeReservationsTx(ctx, tx, projectID, service.Spec); err != nil {
+		return model.BackingService{}, err
+	}
 	service.Name = s.pgNextAvailableBackingServiceNameTx(ctx, tx, tenantID, projectID, service.Name)
 	if err := validateTenantManagedCapacityProjection(&billingState, billing, func(projection *model.State) {
 		projection.BackingServices = append(projection.BackingServices, cloneBackingService(service))

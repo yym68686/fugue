@@ -99,6 +99,9 @@ func (s *Store) CreateBackingService(tenantID, projectID, name, description stri
 		if err := normalizeBackingServiceForPersist(&service, nil); err != nil {
 			return err
 		}
+		if err := validateBackingServiceSpecRuntimeReservationsState(state, projectID, service.Spec); err != nil {
+			return err
+		}
 		if backingServiceNameExists(state, tenantID, projectID, service.Name, "") {
 			return ErrConflict
 		}

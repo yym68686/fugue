@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/model"
+
 	"github.com/spf13/cobra"
 )
 
@@ -31,6 +33,7 @@ Pass --tenant only when you are acting across multiple visible tenants.
 		c.newProjectShowCommand(),
 		c.newProjectCreateCommand(),
 		c.newProjectEditCommand(),
+		c.newProjectRuntimeReservationsCommand(),
 		hideCompatCommand(c.newProjectRenameCommand(), "fugue project edit"),
 		c.newProjectRemoveCommand(),
 		hideCompatCommand(c.newProjectStorageCommand(), "fugue project images usage"),
@@ -67,6 +70,133 @@ func (c *CLI) newProjectMetaCommand() *cobra.Command {
 			return c.renderProjectDetail(client, project)
 		},
 	}
+}
+
+func (c *CLI) newProjectRuntimeReservationsCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "runtime-reservations",
+		Aliases: []string{"dedicated-runtimes", "dedicated-vps"},
+		Short:   "Manage runtimes reserved for a project",
+	}
+	cmd.AddCommand(
+		c.newProjectRuntimeReservationsListCommand(),
+		c.newProjectRuntimeReservationsAddCommand(),
+		c.newProjectRuntimeReservationsRemoveCommand(),
+	)
+	return cmd
+}
+
+func (c *CLI) newProjectRuntimeReservationsListCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list <project>",
+		Short: "List runtimes reserved for a project",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			project, err := c.resolveNamedProject(client, args[0])
+			if err != nil {
+				return err
+			}
+			reservations, err := client.ListProjectRuntimeReservations(project.ID)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"runtime_reservations": reservations})
+			}
+			runtimes, err := client.ListRuntimes()
+			if err != nil {
+				return err
+			}
+			return writeProjectRuntimeReservationTable(c.stdout, reservations, mapRuntimeNames(runtimes), c.showIDs())
+		},
+	}
+}
+
+func (c *CLI) newProjectRuntimeReservationsAddCommand() *cobra.Command {
+	opts := struct {
+		RuntimeName string
+		RuntimeID   string
+	}{}
+	cmd := &cobra.Command{
+		Use:   "add <project>",
+		Short: "Reserve a runtime for a project",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			project, err := c.resolveNamedProject(client, args[0])
+			if err != nil {
+				return err
+			}
+			runtimeID, err := resolveRuntimeSelection(client, opts.RuntimeID, opts.RuntimeName)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(runtimeID) == "" {
+				return fmt.Errorf("runtime is required")
+			}
+			reservation, err := client.ReserveProjectRuntime(project.ID, runtimeID)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"runtime_reservation": reservation})
+			}
+			return writeProjectRuntimeReservationTable(c.stdout, []model.ProjectRuntimeReservation{reservation}, nil, c.showIDs())
+		},
+	}
+	cmd.Flags().StringVar(&opts.RuntimeName, "runtime", "", "Runtime name to reserve")
+	cmd.Flags().StringVar(&opts.RuntimeID, "runtime-id", "", "Runtime ID to reserve")
+	_ = cmd.Flags().MarkHidden("runtime-id")
+	return cmd
+}
+
+func (c *CLI) newProjectRuntimeReservationsRemoveCommand() *cobra.Command {
+	opts := struct {
+		RuntimeName string
+		RuntimeID   string
+	}{}
+	cmd := &cobra.Command{
+		Use:     "remove <project>",
+		Aliases: []string{"delete", "rm"},
+		Short:   "Remove a project runtime reservation",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			project, err := c.resolveNamedProject(client, args[0])
+			if err != nil {
+				return err
+			}
+			runtimeID, err := resolveRuntimeSelection(client, opts.RuntimeID, opts.RuntimeName)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(runtimeID) == "" {
+				return fmt.Errorf("runtime is required")
+			}
+			reservation, err := client.DeleteProjectRuntimeReservation(project.ID, runtimeID)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"deleted": true, "runtime_reservation": reservation})
+			}
+			return writeProjectRuntimeReservationTable(c.stdout, []model.ProjectRuntimeReservation{reservation}, nil, c.showIDs())
+		},
+	}
+	cmd.Flags().StringVar(&opts.RuntimeName, "runtime", "", "Runtime name to unreserve")
+	cmd.Flags().StringVar(&opts.RuntimeID, "runtime-id", "", "Runtime ID to unreserve")
+	_ = cmd.Flags().MarkHidden("runtime-id")
+	return cmd
 }
 
 func (c *CLI) newProjectListCommand() *cobra.Command {

@@ -17,6 +17,8 @@ const (
 	RuntimePoolModeDedicated      = "dedicated"
 	RuntimePoolModeInternalShared = "internal-shared"
 
+	ProjectRuntimeReservationModeExclusive = "exclusive"
+
 	MachineConnectionModeAgent   = "agent"
 	MachineConnectionModeCluster = "cluster"
 
@@ -310,6 +312,15 @@ type Project struct {
 	DefaultRuntimeID string    `json:"default_runtime_id,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+type ProjectRuntimeReservation struct {
+	TenantID  string    `json:"tenant_id"`
+	ProjectID string    `json:"project_id"`
+	RuntimeID string    `json:"runtime_id"`
+	Mode      string    `json:"mode"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type APIKey struct {
@@ -1398,26 +1409,27 @@ func NormalizeMachineControlPlaneRole(raw string) string {
 }
 
 type State struct {
-	Version               string                `json:"version"`
-	Tenants               []Tenant              `json:"tenants"`
-	Projects              []Project             `json:"projects"`
-	ProjectDeleteRequests map[string]time.Time  `json:"project_delete_requests,omitempty"`
-	APIKeys               []APIKey              `json:"api_keys"`
-	EnrollmentTokens      []EnrollmentToken     `json:"enrollment_tokens"`
-	NodeKeys              []NodeKey             `json:"node_keys"`
-	Machines              []Machine             `json:"machines"`
-	NodeUpdaters          []NodeUpdater         `json:"node_updaters,omitempty"`
-	NodeUpdateTasks       []NodeUpdateTask      `json:"node_update_tasks,omitempty"`
-	Runtimes              []Runtime             `json:"runtimes"`
-	RuntimeGrants         []RuntimeAccessGrant  `json:"runtime_grants"`
-	Apps                  []App                 `json:"apps"`
-	AppDomains            []AppDomain           `json:"app_domains"`
-	BackingServices       []BackingService      `json:"backing_services"`
-	ServiceBindings       []ServiceBinding      `json:"service_bindings"`
-	Operations            []Operation           `json:"operations"`
-	AuditEvents           []AuditEvent          `json:"audit_events"`
-	Idempotency           []IdempotencyRecord   `json:"idempotency"`
-	TenantBilling         []TenantBilling       `json:"tenant_billing"`
-	BillingEvents         []TenantBillingEvent  `json:"billing_events"`
-	ResourceUsageSamples  []ResourceUsageSample `json:"resource_usage_samples,omitempty"`
+	Version                    string                      `json:"version"`
+	Tenants                    []Tenant                    `json:"tenants"`
+	Projects                   []Project                   `json:"projects"`
+	ProjectDeleteRequests      map[string]time.Time        `json:"project_delete_requests,omitempty"`
+	ProjectRuntimeReservations []ProjectRuntimeReservation `json:"project_runtime_reservations,omitempty"`
+	APIKeys                    []APIKey                    `json:"api_keys"`
+	EnrollmentTokens           []EnrollmentToken           `json:"enrollment_tokens"`
+	NodeKeys                   []NodeKey                   `json:"node_keys"`
+	Machines                   []Machine                   `json:"machines"`
+	NodeUpdaters               []NodeUpdater               `json:"node_updaters,omitempty"`
+	NodeUpdateTasks            []NodeUpdateTask            `json:"node_update_tasks,omitempty"`
+	Runtimes                   []Runtime                   `json:"runtimes"`
+	RuntimeGrants              []RuntimeAccessGrant        `json:"runtime_grants"`
+	Apps                       []App                       `json:"apps"`
+	AppDomains                 []AppDomain                 `json:"app_domains"`
+	BackingServices            []BackingService            `json:"backing_services"`
+	ServiceBindings            []ServiceBinding            `json:"service_bindings"`
+	Operations                 []Operation                 `json:"operations"`
+	AuditEvents                []AuditEvent                `json:"audit_events"`
+	Idempotency                []IdempotencyRecord         `json:"idempotency"`
+	TenantBilling              []TenantBilling             `json:"tenant_billing"`
+	BillingEvents              []TenantBillingEvent        `json:"billing_events"`
+	ResourceUsageSamples       []ResourceUsageSample       `json:"resource_usage_samples,omitempty"`
 }

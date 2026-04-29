@@ -223,6 +223,7 @@ func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
 		state.Tenants = append(state.Tenants[:index], state.Tenants[index+1:]...)
 
 		state.Projects = deleteProjectsByTenant(state.Projects, id)
+		state.ProjectRuntimeReservations = deleteProjectRuntimeReservationsByTenant(state.ProjectRuntimeReservations, id)
 		state.APIKeys = deleteAPIKeysByTenant(state.APIKeys, id)
 		state.EnrollmentTokens = deleteEnrollmentTokensByTenant(state.EnrollmentTokens, id)
 
@@ -358,6 +359,9 @@ func (s *Store) UpdateProjectFields(id string, update ProjectUpdate) (model.Proj
 			if runtimeID != "" && !runtimeVisibleToTenant(state, runtimeID, project.TenantID) {
 				return ErrNotFound
 			}
+			if err := validateRuntimeReservedForProjectState(state, project.ID, runtimeID); err != nil {
+				return err
+			}
 			if project.DefaultRuntimeID != runtimeID {
 				project.DefaultRuntimeID = runtimeID
 				changed = true
@@ -398,6 +402,9 @@ func (s *Store) CreateProject(tenantID, name, description string, defaultRuntime
 		}
 		if runtimeID != "" && !runtimeVisibleToTenant(state, runtimeID, tenantID) {
 			return ErrNotFound
+		}
+		if err := validateRuntimeReservedForProjectState(state, "", runtimeID); err != nil {
+			return err
 		}
 		slug := model.Slugify(name)
 		for _, existing := range state.Projects {
@@ -1631,6 +1638,10 @@ func (s *Store) DeleteRuntime(runtimeID string) (model.Runtime, error) {
 			state.RuntimeGrants,
 			runtimeID,
 		)
+		state.ProjectRuntimeReservations = deleteProjectRuntimeReservationsByRuntime(
+			state.ProjectRuntimeReservations,
+			runtimeID,
+		)
 		runtime = candidate
 		state.Runtimes = append(state.Runtimes[:index], state.Runtimes[index+1:]...)
 		return nil
@@ -2395,6 +2406,9 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 		if err := validateManagedPostgresRuntimeState(state, tenantID, spec.RuntimeID, spec.Postgres); err != nil {
 			return err
 		}
+		if err := validateAppSpecRuntimeReservationsState(state, projectID, spec); err != nil {
+			return err
+		}
 		for _, existing := range state.Apps {
 			if existing.TenantID == tenantID && existing.ProjectID == projectID && strings.EqualFold(existing.Name, name) {
 				return ErrConflict
@@ -2768,6 +2782,9 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			op.TargetRuntimeID = targetRuntimeID
 		default:
 			return ErrInvalidInput
+		}
+		if err := validateOperationRuntimeReservationsState(state, app.ProjectID, op); err != nil {
+			return err
 		}
 
 		now := time.Now().UTC()
@@ -3432,6 +3449,9 @@ func ensureDefaults(state *model.State) {
 	}
 	if state.ProjectDeleteRequests == nil {
 		state.ProjectDeleteRequests = map[string]time.Time{}
+	}
+	if state.ProjectRuntimeReservations == nil {
+		state.ProjectRuntimeReservations = []model.ProjectRuntimeReservation{}
 	}
 	if state.APIKeys == nil {
 		state.APIKeys = []model.APIKey{}
@@ -4576,6 +4596,7 @@ func deleteProjectFromState(state *model.State, projectID string) (model.Project
 	project := state.Projects[index]
 	appIDs := appIDsForProject(state.Apps, projectID)
 	state.Projects = append(state.Projects[:index], state.Projects[index+1:]...)
+	state.ProjectRuntimeReservations = deleteProjectRuntimeReservationsByProject(state.ProjectRuntimeReservations, projectID)
 	state.Apps = deleteAppsByProject(state.Apps, projectID)
 	state.ServiceBindings = deleteServiceBindingsByAppIDs(state.ServiceBindings, appIDs)
 	state.BackingServices = deleteBackingServicesByProject(state.BackingServices, projectID)

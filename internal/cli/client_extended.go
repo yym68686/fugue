@@ -527,6 +527,37 @@ func (c *Client) DeleteProjectDetailed(id string, cascade bool) (projectDeleteRe
 	return response, nil
 }
 
+func (c *Client) ListProjectRuntimeReservations(projectID string) ([]model.ProjectRuntimeReservation, error) {
+	var response struct {
+		RuntimeReservations []model.ProjectRuntimeReservation `json:"runtime_reservations"`
+	}
+	if err := c.doJSON(http.MethodGet, path.Join("/v1/projects", projectID, "runtime-reservations"), nil, &response); err != nil {
+		return nil, err
+	}
+	return response.RuntimeReservations, nil
+}
+
+func (c *Client) ReserveProjectRuntime(projectID, runtimeID string) (model.ProjectRuntimeReservation, error) {
+	var response struct {
+		RuntimeReservation model.ProjectRuntimeReservation `json:"runtime_reservation"`
+	}
+	request := map[string]string{"runtime_id": strings.TrimSpace(runtimeID)}
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/projects", projectID, "runtime-reservations"), request, &response); err != nil {
+		return model.ProjectRuntimeReservation{}, err
+	}
+	return response.RuntimeReservation, nil
+}
+
+func (c *Client) DeleteProjectRuntimeReservation(projectID, runtimeID string) (model.ProjectRuntimeReservation, error) {
+	var response struct {
+		RuntimeReservation model.ProjectRuntimeReservation `json:"runtime_reservation"`
+	}
+	if err := c.doJSON(http.MethodDelete, path.Join("/v1/projects", projectID, "runtime-reservations", runtimeID), nil, &response); err != nil {
+		return model.ProjectRuntimeReservation{}, err
+	}
+	return response.RuntimeReservation, nil
+}
+
 func (c *Client) ListProjectImageUsage() (projectImageUsageResponse, error) {
 	var response projectImageUsageResponse
 	if err := c.doJSON(http.MethodGet, "/v1/projects/image-usage", nil, &response); err != nil {

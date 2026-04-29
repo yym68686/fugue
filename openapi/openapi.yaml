@@ -404,6 +404,69 @@ paths:
                 $ref: "#/components/schemas/ProjectDeleteResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/projects/{id}/runtime-reservations:
+    get:
+      operationId: listProjectRuntimeReservations
+      summary: List Project Runtime Reservations
+      tags: [Projects]
+      x-fugue-handler: handleListProjectRuntimeReservations
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectRuntimeReservationListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: reserveProjectRuntime
+      summary: Reserve Project Runtime
+      tags: [Projects]
+      x-fugue-handler: handleReserveProjectRuntime
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReserveProjectRuntimeRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectRuntimeReservationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/projects/{id}/runtime-reservations/{runtime_id}:
+    delete:
+      operationId: deleteProjectRuntimeReservation
+      summary: Delete Project Runtime Reservation
+      tags: [Projects]
+      x-fugue-handler: handleDeleteProjectRuntimeReservation
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/RuntimeIdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteProjectRuntimeReservationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/billing:
     get:
       operationId: getBilling
@@ -3454,6 +3517,12 @@ components:
       required: true
       schema:
         type: string
+    RuntimeIdPathParam:
+      in: path
+      name: runtime_id
+      required: true
+      schema:
+        type: string
     TenantIdQueryParam:
       in: query
       name: tenant_id
@@ -3681,6 +3750,26 @@ components:
           type: string
         default_runtime_id:
           type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ProjectRuntimeReservation:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, project_id, runtime_id, mode, created_at, updated_at]
+      properties:
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        runtime_id:
+          type: string
+        mode:
+          type: string
+          enum: [exclusive]
         created_at:
           type: string
           format: date-time
@@ -5537,6 +5626,31 @@ components:
       properties:
         project:
           $ref: "#/components/schemas/Project"
+    ProjectRuntimeReservationListResponse:
+      type: object
+      additionalProperties: false
+      required: [runtime_reservations]
+      properties:
+        runtime_reservations:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProjectRuntimeReservation"
+    ProjectRuntimeReservationResponse:
+      type: object
+      additionalProperties: false
+      required: [runtime_reservation]
+      properties:
+        runtime_reservation:
+          $ref: "#/components/schemas/ProjectRuntimeReservation"
+    DeleteProjectRuntimeReservationResponse:
+      type: object
+      additionalProperties: false
+      required: [deleted, runtime_reservation]
+      properties:
+        deleted:
+          type: boolean
+        runtime_reservation:
+          $ref: "#/components/schemas/ProjectRuntimeReservation"
     ProjectDeleteResponse:
       type: object
       additionalProperties: false
@@ -5896,6 +6010,16 @@ components:
           type: string
         clear_default_runtime_id:
           type: boolean
+    ReserveProjectRuntimeRequest:
+      type: object
+      additionalProperties: false
+      required: [runtime_id]
+      properties:
+        runtime_id:
+          type: string
+        mode:
+          type: string
+          enum: [exclusive]
     PatchAppRequest:
       type: object
       additionalProperties: false
