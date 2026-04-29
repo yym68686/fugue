@@ -41,16 +41,18 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	}
 	stateful := op.DesiredSpec.Workspace != nil || op.DesiredSpec.PersistentStorage != nil || op.DesiredSpec.Postgres != nil
 	var output sourceimport.GitHubSourceImportOutput
+	queuedDockerImageRef := ""
 	stopImportProgress := s.startImportOperationProgressHeartbeat(importCtx, op.ID)
 	switch strings.TrimSpace(op.DesiredSource.Type) {
 	case model.AppSourceTypeDockerImage:
-		if strings.TrimSpace(op.DesiredSource.ImageRef) == "" {
+		queuedDockerImageRef = strings.TrimSpace(op.DesiredSource.ImageRef)
+		if queuedDockerImageRef == "" {
 			return fmt.Errorf("import operation %s missing image_ref", op.ID)
 		}
 		output, err = s.importer.ImportDockerImageSource(importCtx, sourceimport.DockerImageSourceImportRequest{
 			AppName:          app.Name,
 			ImageNameSuffix:  strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
-			ImageRef:         strings.TrimSpace(op.DesiredSource.ImageRef),
+			ImageRef:         controllerReachableImportImageRef(queuedDockerImageRef, s.registryPushBase, s.registryPullBase),
 			RegistryPushBase: s.registryPushBase,
 			ImageRepository:  "fugue-apps",
 		})
@@ -114,6 +116,9 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	stopImportProgress()
 	if err != nil {
 		return err
+	}
+	if queuedDockerImageRef != "" {
+		output.Source.ImageRef = queuedDockerImageRef
 	}
 	timer.Mark("import_source")
 	s.updateOperationProgress(op.ID, "import build completed; validating image output")
@@ -854,4 +859,18 @@ func rewriteImportedImageRef(imageRef, pushBase, pullBase string) (string, error
 		return "", fmt.Errorf("imported image %q does not match configured registry push base %q", imageRef, pushBase)
 	}
 	return pullBase + "/" + strings.TrimPrefix(imageRef, prefix), nil
+}
+
+func controllerReachableImportImageRef(imageRef, pushBase, pullBase string) string {
+	imageRef = strings.TrimSpace(imageRef)
+	pushBase = strings.Trim(strings.TrimSpace(pushBase), "/")
+	pullBase = strings.Trim(strings.TrimSpace(pullBase), "/")
+	if imageRef == "" || pushBase == "" || pullBase == "" || pullBase == pushBase {
+		return imageRef
+	}
+	prefix := pullBase + "/"
+	if !strings.HasPrefix(imageRef, prefix) {
+		return imageRef
+	}
+	return pushBase + "/" + strings.TrimPrefix(imageRef, prefix)
 }

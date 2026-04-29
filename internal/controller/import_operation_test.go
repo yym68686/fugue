@@ -251,6 +251,104 @@ func TestExecuteManagedImportOperationImportsDockerImageSource(t *testing.T) {
 	}
 }
 
+func TestExecuteManagedImportOperationUsesPushBaseForPullBaseDockerImageSource(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	const originalRuntimeImageRef = "registry.pull.example/fugue-apps/template-runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:     model.AppSourceTypeDockerImage,
+		ImageRef: originalRuntimeImageRef,
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	specCopy := app.Spec
+	sourceCopy := *app.Source
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		DesiredSource:   &sourceCopy,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+
+	const managedImageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	expectedRuntimeImageRef := mustRewriteImportedDigestRef(
+		t,
+		"registry.push.example/fugue-apps/demo:image-abc123",
+		"registry.push.example",
+		"registry.pull.example",
+		managedImageDigest,
+	)
+
+	importer := &recordingImporter{}
+	svc := &Service{
+		Store:                        stateStore,
+		Logger:                       log.New(io.Discard, "", 0),
+		importer:                     importer,
+		registryPushBase:             "registry.push.example",
+		registryPullBase:             "registry.pull.example",
+		inspectManagedImage:          inspectManagedImageAlwaysExists,
+		resolveManagedImageDigestRef: resolveManagedImageDigestRefStub(map[string]string{"registry.push.example/fugue-apps/demo:image-abc123": managedImageDigest}),
+	}
+
+	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
+		t.Fatalf("execute managed import operation: %v", err)
+	}
+	if importer.dockerImageReq == nil {
+		t.Fatal("expected importer to receive docker image request")
+	}
+	if got, want := importer.dockerImageReq.ImageRef, "registry.push.example/fugue-apps/template-runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"; got != want {
+		t.Fatalf("expected controller-reachable image ref %q, got %q", want, got)
+	}
+
+	ops, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+	var deployOp model.Operation
+	for _, candidate := range ops {
+		if candidate.Type == model.OperationTypeDeploy {
+			deployOp = candidate
+		}
+	}
+	if deployOp.ID == "" || deployOp.DesiredSpec == nil || deployOp.DesiredSource == nil {
+		t.Fatalf("expected deploy operation with desired spec/source, got %+v", deployOp)
+	}
+	if got := deployOp.DesiredSpec.Image; got != expectedRuntimeImageRef {
+		t.Fatalf("expected runtime image rewrite, got %q", got)
+	}
+	if got := deployOp.DesiredSource.ImageRef; got != originalRuntimeImageRef {
+		t.Fatalf("expected source image ref to preserve requested pull ref, got %q", got)
+	}
+	if got := deployOp.DesiredSource.ResolvedImageRef; got != "registry.push.example/fugue-apps/demo:image-abc123" {
+		t.Fatalf("expected resolved image ref to be persisted, got %q", got)
+	}
+}
+
 func TestExecuteManagedImportOperationRefreshesExistingRestartToken(t *testing.T) {
 	t.Parallel()
 
