@@ -57,6 +57,20 @@ app.kubernetes.io/component: {{ .component }}
 {{- printf "%s-image-prepull" (include "fugue.fullname" .) -}}
 {{- end -}}
 
+{{- define "fugue.internalMaintenanceAffinity" -}}
+nodeAffinity:
+  requiredDuringSchedulingIgnoredDuringExecution:
+    nodeSelectorTerms:
+      - matchExpressions:
+          - key: node-role.kubernetes.io/control-plane
+            operator: Exists
+      - matchExpressions:
+          - key: fugue.io/shared-pool
+            operator: In
+            values:
+              - internal
+{{- end -}}
+
 {{- define "fugue.registryPushBase" -}}
 {{- if .Values.api.registryPushBase -}}
 {{- .Values.api.registryPushBase -}}

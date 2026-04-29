@@ -12,6 +12,10 @@
 {{- $intervalSeconds := default 900 (get $imagePrePull "intervalSeconds") -}}
 {{- $priorityClassName := default "system-node-critical" (get $imagePrePull "priorityClassName") -}}
 {{- $nodeSelector := (get $imagePrePull "nodeSelector" | default (dict)) -}}
+{{- $affinity := (include "fugue.internalMaintenanceAffinity" . | fromYaml) -}}
+{{- if hasKey $imagePrePull "affinity" -}}
+{{- $affinity = (get $imagePrePull "affinity" | default (dict)) -}}
+{{- end -}}
 {{- $tolerations := (get $imagePrePull "tolerations" | default (list (dict "operator" "Exists"))) -}}
 {{- $resources := (get $imagePrePull "resources" | default (dict)) -}}
 apiVersion: apps/v1
@@ -113,6 +117,10 @@ spec:
             name: {{ include "fugue.imagePrePullName" . }}
       {{- with $nodeSelector }}
       nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $affinity }}
+      affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with $tolerations }}

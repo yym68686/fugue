@@ -19,6 +19,10 @@
 {{- if hasKey $topologyLabeler "nodeSelector" -}}
 {{- $topologyLabelerNodeSelector = (get $topologyLabeler "nodeSelector" | default (dict)) -}}
 {{- end -}}
+{{- $topologyLabelerAffinity := (include "fugue.internalMaintenanceAffinity" . | fromYaml) -}}
+{{- if hasKey $topologyLabeler "affinity" -}}
+{{- $topologyLabelerAffinity = (get $topologyLabeler "affinity" | default (dict)) -}}
+{{- end -}}
 {{- $topologyLabelerTolerations := list (dict "operator" "Exists") -}}
 {{- if hasKey $topologyLabeler "tolerations" -}}
 {{- $topologyLabelerTolerations = (get $topologyLabeler "tolerations") -}}
@@ -159,6 +163,10 @@ spec:
             {{- toYaml $topologyLabelerResources | nindent 12 }}
       {{- with $topologyLabelerNodeSelector }}
       nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $topologyLabelerAffinity }}
+      affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with $topologyLabelerTolerations }}

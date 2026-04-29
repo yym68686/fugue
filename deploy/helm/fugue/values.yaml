@@ -81,6 +81,9 @@ imagePrePull:
   images: []
   priorityClassName: system-node-critical
   nodeSelector: {}
+  # Omit affinity to use the chart default: control-plane nodes or
+  # fugue.io/shared-pool=internal nodes. Set affinity: {} to opt into all
+  # tolerated nodes, including tenant-owned nodes.
   tolerations:
     - operator: Exists
   resources:
@@ -97,6 +100,9 @@ topologyLabeler:
   intervalSeconds: 900
   geolocationURL: https://ipapi.co/json/
   nodeSelector: {}
+  # Omit affinity to use the chart default: control-plane nodes or
+  # fugue.io/shared-pool=internal nodes. Set affinity: {} to opt into all
+  # tolerated nodes, including tenant-owned nodes.
   tolerations:
     - operator: Exists
   resources:
@@ -113,6 +119,9 @@ nodeJanitor:
   intervalSeconds: 21600
   priorityClassName: system-node-critical
   nodeSelector: {}
+  # Omit affinity to use the chart default: control-plane nodes or
+  # fugue.io/shared-pool=internal nodes. Set affinity: {} to opt into all
+  # tolerated nodes, including tenant-owned nodes.
   tolerations:
     - operator: Exists
   resources:

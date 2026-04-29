@@ -32,6 +32,55 @@ func TestNodeJanitorDefaultsToSystemNodeCritical(t *testing.T) {
 	}
 }
 
+func TestMaintenanceDaemonSetsDefaultToInternalNodes(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "--set", "imagePrePull.images[0]=busybox:latest")
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	for _, name := range []string{
+		"fugue-fugue-node-janitor",
+		"fugue-fugue-topology-labeler",
+		"fugue-fugue-image-prepull",
+	} {
+		doc := manifestDocumentForName(manifest, name)
+		if doc == "" {
+			t.Fatalf("rendered manifest missing %s:\n%s", name, manifest)
+		}
+		for _, want := range []string{
+			"affinity:",
+			"nodeAffinity:",
+			"node-role.kubernetes.io/control-plane",
+			"fugue.io/shared-pool",
+			"- internal",
+		} {
+			if !strings.Contains(doc, want) {
+				t.Fatalf("%s manifest missing internal-node affinity fragment %q:\n%s", name, want, doc)
+			}
+		}
+	}
+}
+
+func manifestDocumentForName(manifest string, name string) string {
+	for _, doc := range strings.Split(manifest, "\n---") {
+		if strings.Contains(doc, "\n  name: "+name+"\n") || strings.Contains(doc, "\nname: "+name+"\n") {
+			return doc
+		}
+	}
+	return ""
+}
+
 func TestControlPlaneRBACCoversDiagnosableWorkloads(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

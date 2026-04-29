@@ -11,6 +11,10 @@
 {{- if hasKey $nodeJanitor "nodeSelector" -}}
 {{- $nodeJanitorNodeSelector = (get $nodeJanitor "nodeSelector" | default (dict)) -}}
 {{- end -}}
+{{- $nodeJanitorAffinity := (include "fugue.internalMaintenanceAffinity" . | fromYaml) -}}
+{{- if hasKey $nodeJanitor "affinity" -}}
+{{- $nodeJanitorAffinity = (get $nodeJanitor "affinity" | default (dict)) -}}
+{{- end -}}
 {{- $nodeJanitorTolerations := list (dict "operator" "Exists") -}}
 {{- if hasKey $nodeJanitor "tolerations" -}}
 {{- $nodeJanitorTolerations = (get $nodeJanitor "tolerations") -}}
@@ -279,6 +283,10 @@ spec:
             type: Directory
       {{- with $nodeJanitorNodeSelector }}
       nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $nodeJanitorAffinity }}
+      affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with $nodeJanitorTolerations }}
