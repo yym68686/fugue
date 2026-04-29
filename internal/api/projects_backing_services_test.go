@@ -57,6 +57,73 @@ func TestPatchProjectUpdatesNameAndDescription(t *testing.T) {
 	}
 }
 
+func TestPatchProjectDefaultRuntime(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Project Runtime Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	raiseManagedTestCap(t, s, tenant.ID)
+	runtimeObj, _, err := s.CreateRuntime(tenant.ID, "primary-vps", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create runtime: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "project-admin", []string{"project.write", "app.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/projects/"+project.ID, apiKey, map[string]any{
+		"default_runtime_id": runtimeObj.ID,
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Project model.Project `json:"project"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Project.DefaultRuntimeID != runtimeObj.ID {
+		t.Fatalf("expected default runtime %q, got %q", runtimeObj.ID, response.Project.DefaultRuntimeID)
+	}
+
+	app, err := s.CreateApp(tenant.ID, project.ID, "defaulted", "", model.AppSpec{
+		Image:    "nginx:1.27",
+		Ports:    []int{80},
+		Replicas: 1,
+	})
+	if err != nil {
+		t.Fatalf("create defaulted app: %v", err)
+	}
+	if app.Spec.RuntimeID != runtimeObj.ID {
+		t.Fatalf("expected app runtime %q, got %q", runtimeObj.ID, app.Spec.RuntimeID)
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodPatch, "/v1/projects/"+project.ID, apiKey, map[string]any{
+		"clear_default_runtime_id": true,
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected clear status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	response = struct {
+		Project model.Project `json:"project"`
+	}{}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Project.DefaultRuntimeID != "" {
+		t.Fatalf("expected cleared default runtime, got %q", response.Project.DefaultRuntimeID)
+	}
+}
+
 func TestDeleteProjectCascadeQueuesDeleteAndFinalizesProject(t *testing.T) {
 	t.Parallel()
 

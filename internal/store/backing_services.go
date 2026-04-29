@@ -70,12 +70,14 @@ func (s *Store) CreateBackingService(tenantID, projectID, name, description stri
 		if findTenant(state, tenantID) < 0 {
 			return ErrNotFound
 		}
-		if !projectBelongsToTenant(state, projectID, tenantID) {
+		projectIndex := findProject(state, projectID)
+		if projectIndex < 0 || state.Projects[projectIndex].TenantID != tenantID {
 			return ErrNotFound
 		}
 		if projectDeleteRequested(state, projectID) {
 			return ErrConflict
 		}
+		spec = defaultBackingServiceRuntimeForProject(spec, state.Projects[projectIndex])
 		now := time.Now().UTC()
 		billing := accrueTenantBillingLedger(state, tenantID, now)
 		if billing == nil {

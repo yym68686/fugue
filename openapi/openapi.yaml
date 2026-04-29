@@ -3422,6 +3422,8 @@ components:
           type: string
         description:
           type: string
+        default_runtime_id:
+          type: string
         created_at:
           type: string
           format: date-time
@@ -5509,6 +5511,8 @@ components:
           type: string
         description:
           type: string
+        default_runtime_id:
+          type: string
     PatchProjectRequest:
       type: object
       additionalProperties: false
@@ -5517,6 +5521,10 @@ components:
           type: string
         description:
           type: string
+        default_runtime_id:
+          type: string
+        clear_default_runtime_id:
+          type: boolean
     PatchAppRequest:
       type: object
       additionalProperties: false

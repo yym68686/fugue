@@ -139,7 +139,7 @@ func (s *Store) pgListProjects(tenantID string) ([]model.Project, error) {
 	defer cancel()
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, tenant_id, name, slug, description, created_at, updated_at
+SELECT id, tenant_id, name, slug, description, default_runtime_id, created_at, updated_at
 FROM fugue_projects
 WHERE tenant_id = $1
 ORDER BY created_at ASC
@@ -168,7 +168,7 @@ func (s *Store) pgListAllProjects() ([]model.Project, error) {
 	defer cancel()
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, tenant_id, name, slug, description, created_at, updated_at
+SELECT id, tenant_id, name, slug, description, default_runtime_id, created_at, updated_at
 FROM fugue_projects
 ORDER BY created_at ASC
 `)
@@ -196,7 +196,7 @@ func (s *Store) pgGetProject(id string) (model.Project, error) {
 	defer cancel()
 
 	project, err := scanProject(s.db.QueryRowContext(ctx, `
-SELECT id, tenant_id, name, slug, description, created_at, updated_at
+SELECT id, tenant_id, name, slug, description, default_runtime_id, created_at, updated_at
 FROM fugue_projects
 WHERE id = $1
 `, id))
@@ -206,7 +206,7 @@ WHERE id = $1
 	return project, nil
 }
 
-func (s *Store) pgCreateProject(tenantID, name, description string) (model.Project, error) {
+func (s *Store) pgCreateProject(tenantID, name, description, defaultRuntimeID string) (model.Project, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -223,20 +223,32 @@ func (s *Store) pgCreateProject(tenantID, name, description string) (model.Proje
 	if !exists {
 		return model.Project{}, ErrNotFound
 	}
+	defaultRuntimeID = strings.TrimSpace(defaultRuntimeID)
+	if defaultRuntimeID != "" {
+		visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, defaultRuntimeID, tenantID)
+		if err != nil {
+			return model.Project{}, err
+		}
+		if !visible {
+			return model.Project{}, ErrNotFound
+		}
+	}
 
+	now := time.Now().UTC()
 	project := model.Project{
-		ID:          model.NewID("project"),
-		TenantID:    tenantID,
-		Name:        name,
-		Slug:        model.Slugify(name),
-		Description: strings.TrimSpace(description),
-		CreatedAt:   time.Now().UTC(),
-		UpdatedAt:   time.Now().UTC(),
+		ID:               model.NewID("project"),
+		TenantID:         tenantID,
+		Name:             name,
+		Slug:             model.Slugify(name),
+		Description:      strings.TrimSpace(description),
+		DefaultRuntimeID: defaultRuntimeID,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_projects (id, tenant_id, name, slug, description, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-`, project.ID, project.TenantID, project.Name, project.Slug, project.Description, project.CreatedAt, project.UpdatedAt); err != nil {
+INSERT INTO fugue_projects (id, tenant_id, name, slug, description, default_runtime_id, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+`, project.ID, project.TenantID, project.Name, project.Slug, project.Description, nullIfEmpty(project.DefaultRuntimeID), project.CreatedAt, project.UpdatedAt); err != nil {
 		return model.Project{}, mapDBErr(err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -246,6 +258,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)
 }
 
 func (s *Store) pgUpdateProject(id string, name, description *string) (model.Project, error) {
+	return s.pgUpdateProjectFields(id, ProjectUpdate{Name: name, Description: description})
+}
+
+func (s *Store) pgUpdateProjectFields(id string, update ProjectUpdate) (model.Project, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -256,7 +272,7 @@ func (s *Store) pgUpdateProject(id string, name, description *string) (model.Pro
 	defer tx.Rollback()
 
 	project, err := scanProject(tx.QueryRowContext(ctx, `
-SELECT id, tenant_id, name, slug, description, created_at, updated_at
+SELECT id, tenant_id, name, slug, description, default_runtime_id, created_at, updated_at
 FROM fugue_projects
 WHERE id = $1
 FOR UPDATE
@@ -273,8 +289,8 @@ FOR UPDATE
 	}
 
 	changed := false
-	if name != nil {
-		trimmedName := strings.TrimSpace(*name)
+	if update.Name != nil {
+		trimmedName := strings.TrimSpace(*update.Name)
 		if trimmedName == "" {
 			return model.Project{}, ErrInvalidInput
 		}
@@ -301,10 +317,32 @@ SELECT EXISTS (
 		}
 	}
 
-	if description != nil {
-		trimmedDescription := strings.TrimSpace(*description)
+	if update.Description != nil {
+		trimmedDescription := strings.TrimSpace(*update.Description)
 		if project.Description != trimmedDescription {
 			project.Description = trimmedDescription
+			changed = true
+		}
+	}
+
+	if update.DefaultRuntimeID != nil {
+		runtimeID := strings.TrimSpace(*update.DefaultRuntimeID)
+		if runtimeID != "" {
+			visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, runtimeID, project.TenantID)
+			if err != nil {
+				return model.Project{}, err
+			}
+			if !visible {
+				return model.Project{}, ErrNotFound
+			}
+		}
+		if project.DefaultRuntimeID != runtimeID {
+			project.DefaultRuntimeID = runtimeID
+			changed = true
+		}
+	} else if update.ClearDefaultRuntimeID {
+		if project.DefaultRuntimeID != "" {
+			project.DefaultRuntimeID = ""
 			changed = true
 		}
 	}
@@ -317,10 +355,11 @@ SET tenant_id = $2,
 	name = $3,
 	slug = $4,
 	description = $5,
-	created_at = $6,
-	updated_at = $7
+	default_runtime_id = $6,
+	created_at = $7,
+	updated_at = $8
 WHERE id = $1
-`, project.ID, project.TenantID, project.Name, project.Slug, project.Description, project.CreatedAt, project.UpdatedAt); err != nil {
+`, project.ID, project.TenantID, project.Name, project.Slug, project.Description, nullIfEmpty(project.DefaultRuntimeID), project.CreatedAt, project.UpdatedAt); err != nil {
 			return model.Project{}, mapDBErr(err)
 		}
 	}
@@ -342,7 +381,7 @@ func (s *Store) pgMarkProjectDeleteRequested(id string) (model.Project, bool, er
 	defer tx.Rollback()
 
 	project, err := scanProject(tx.QueryRowContext(ctx, `
-SELECT id, tenant_id, name, slug, description, created_at, updated_at
+SELECT id, tenant_id, name, slug, description, default_runtime_id, created_at, updated_at
 FROM fugue_projects
 WHERE id = $1
 FOR UPDATE
@@ -385,7 +424,7 @@ func (s *Store) pgDeleteProject(id string) (model.Project, error) {
 	defer tx.Rollback()
 
 	project, err := scanProject(tx.QueryRowContext(ctx, `
-SELECT id, tenant_id, name, slug, description, created_at, updated_at
+SELECT id, tenant_id, name, slug, description, default_runtime_id, created_at, updated_at
 FROM fugue_projects
 WHERE id = $1
 FOR UPDATE
@@ -422,7 +461,7 @@ func (s *Store) pgEnsureDefaultProject(tenantID string) (model.Project, bool, er
 	}
 
 	project, err := scanProject(tx.QueryRowContext(ctx, `
-SELECT id, tenant_id, name, slug, description, created_at, updated_at
+SELECT id, tenant_id, name, slug, description, default_runtime_id, created_at, updated_at
 FROM fugue_projects
 WHERE tenant_id = $1
   AND slug = 'default'
@@ -441,7 +480,7 @@ WHERE tenant_id = $1
 	project, err = scanProject(tx.QueryRowContext(ctx, `
 INSERT INTO fugue_projects (id, tenant_id, name, slug, description, created_at, updated_at)
 VALUES ($1, $2, 'default', 'default', 'default project', $3, $4)
-RETURNING id, tenant_id, name, slug, description, created_at, updated_at
+RETURNING id, tenant_id, name, slug, description, default_runtime_id, created_at, updated_at
 `, model.NewID("project"), tenantID, now, now))
 	if err != nil {
 		return model.Project{}, false, mapDBErr(err)
@@ -2246,12 +2285,13 @@ func (s *Store) pgCreateApp(tenantID, projectID, name, description string, spec 
 	if !exists {
 		return model.App{}, ErrNotFound
 	}
-	projectOK, err := s.pgProjectBelongsToTenantTx(ctx, tx, projectID, tenantID)
+	project, err := scanProject(tx.QueryRowContext(ctx, `
+SELECT id, tenant_id, name, slug, description, default_runtime_id, created_at, updated_at
+FROM fugue_projects
+WHERE id = $1 AND tenant_id = $2
+`, projectID, tenantID))
 	if err != nil {
-		return model.App{}, err
-	}
-	if !projectOK {
-		return model.App{}, ErrNotFound
+		return model.App{}, mapDBErr(err)
 	}
 	deleteRequested, err := s.pgProjectDeleteRequestedTx(ctx, tx, projectID)
 	if err != nil {
@@ -2272,6 +2312,7 @@ func (s *Store) pgCreateApp(tenantID, projectID, name, description string, spec 
 	if err := validateManagedPostgresSpecForAppName(name, spec.Postgres); err != nil {
 		return model.App{}, err
 	}
+	spec.RuntimeID = resolveProjectRuntimeID(project, spec.RuntimeID)
 	visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, spec.RuntimeID, tenantID)
 	if err != nil {
 		return model.App{}, err
@@ -4327,7 +4368,7 @@ WHERE service.project_id = $1
 
 func (s *Store) pgTryFinalizeRequestedProjectDeleteTx(ctx context.Context, tx *sql.Tx, projectID string) error {
 	project, err := scanProject(tx.QueryRowContext(ctx, `
-SELECT id, tenant_id, name, slug, description, created_at, updated_at
+SELECT id, tenant_id, name, slug, description, default_runtime_id, created_at, updated_at
 FROM fugue_projects
 WHERE id = $1
 FOR UPDATE
@@ -4869,10 +4910,12 @@ func scanTenant(scanner sqlScanner) (model.Tenant, error) {
 func scanProject(scanner sqlScanner) (model.Project, error) {
 	var project model.Project
 	var tenantID sql.NullString
-	if err := scanner.Scan(&project.ID, &tenantID, &project.Name, &project.Slug, &project.Description, &project.CreatedAt, &project.UpdatedAt); err != nil {
+	var defaultRuntimeID sql.NullString
+	if err := scanner.Scan(&project.ID, &tenantID, &project.Name, &project.Slug, &project.Description, &defaultRuntimeID, &project.CreatedAt, &project.UpdatedAt); err != nil {
 		return model.Project{}, err
 	}
 	project.TenantID = tenantID.String
+	project.DefaultRuntimeID = defaultRuntimeID.String
 	return project, nil
 }
 

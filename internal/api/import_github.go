@@ -99,9 +99,6 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 	}
 	servicePort := req.ServicePort
 	runtimeID := strings.TrimSpace(req.RuntimeID)
-	if runtimeID == "" {
-		runtimeID = "runtime_managed_shared"
-	}
 	buildStrategy := normalizeBuildStrategy(req.BuildStrategy)
 	var releaseIdempotency bool
 	if idempotencyKey != "" {

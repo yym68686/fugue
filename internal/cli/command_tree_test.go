@@ -554,12 +554,13 @@ func TestRunProjectEditPatchesMetadata(t *testing.T) {
 		"project", "edit", "demo",
 		"--name", "demo-v2",
 		"--description", "new description",
+		"--default-runtime-id", "runtime_vps",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("run project edit: %v", err)
 	}
 
-	if gotBody["name"] != "demo-v2" || gotBody["description"] != "new description" {
+	if gotBody["name"] != "demo-v2" || gotBody["description"] != "new description" || gotBody["default_runtime_id"] != "runtime_vps" {
 		t.Fatalf("unexpected project patch body %+v", gotBody)
 	}
 	out := stdout.String()

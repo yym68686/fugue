@@ -458,7 +458,7 @@ func (c *Client) CreateTenant(name string) (model.Tenant, error) {
 	return response.Tenant, nil
 }
 
-func (c *Client) CreateProject(tenantID, name, description string) (model.Project, error) {
+func (c *Client) CreateProject(tenantID, name, description string, defaultRuntimeID ...string) (model.Project, error) {
 	var response struct {
 		Project model.Project `json:"project"`
 	}
@@ -471,6 +471,9 @@ func (c *Client) CreateProject(tenantID, name, description string) (model.Projec
 	if strings.TrimSpace(description) != "" {
 		request["description"] = strings.TrimSpace(description)
 	}
+	if len(defaultRuntimeID) > 0 && strings.TrimSpace(defaultRuntimeID[0]) != "" {
+		request["default_runtime_id"] = strings.TrimSpace(defaultRuntimeID[0])
+	}
 	if err := c.doJSON(http.MethodPost, "/v1/projects", request, &response); err != nil {
 		return model.Project{}, err
 	}
@@ -478,12 +481,22 @@ func (c *Client) CreateProject(tenantID, name, description string) (model.Projec
 }
 
 func (c *Client) PatchProject(id string, name, description *string) (model.Project, error) {
+	return c.PatchProjectFields(id, name, description, nil, false)
+}
+
+func (c *Client) PatchProjectFields(id string, name, description, defaultRuntimeID *string, clearDefaultRuntimeID bool) (model.Project, error) {
 	request := map[string]any{}
 	if name != nil {
 		request["name"] = strings.TrimSpace(*name)
 	}
 	if description != nil {
 		request["description"] = *description
+	}
+	if defaultRuntimeID != nil {
+		request["default_runtime_id"] = strings.TrimSpace(*defaultRuntimeID)
+	}
+	if clearDefaultRuntimeID {
+		request["clear_default_runtime_id"] = true
 	}
 	var response struct {
 		Project model.Project `json:"project"`

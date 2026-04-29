@@ -246,9 +246,10 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		TenantID    string `json:"tenant_id"`
-		Name        string `json:"name"`
-		Description string `json:"description"`
+		TenantID         string `json:"tenant_id"`
+		Name             string `json:"name"`
+		Description      string `json:"description"`
+		DefaultRuntimeID string `json:"default_runtime_id"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -259,7 +260,7 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "cannot write project for another tenant")
 		return
 	}
-	project, err := s.store.CreateProject(tenantID, req.Name, req.Description)
+	project, err := s.store.CreateProject(tenantID, req.Name, req.Description, req.DefaultRuntimeID)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -279,14 +280,21 @@ func (s *Server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name        *string `json:"name"`
-		Description *string `json:"description"`
+		Name                  *string `json:"name"`
+		Description           *string `json:"description"`
+		DefaultRuntimeID      *string `json:"default_runtime_id"`
+		ClearDefaultRuntimeID bool    `json:"clear_default_runtime_id"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	project, err := s.store.UpdateProject(project.ID, req.Name, req.Description)
+	project, err := s.store.UpdateProjectFields(project.ID, store.ProjectUpdate{
+		Name:                  req.Name,
+		Description:           req.Description,
+		DefaultRuntimeID:      req.DefaultRuntimeID,
+		ClearDefaultRuntimeID: req.ClearDefaultRuntimeID,
+	})
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

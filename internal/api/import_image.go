@@ -79,9 +79,6 @@ func (s *Server) handleImportImageApp(w http.ResponseWriter, r *http.Request) {
 		replicas = 1
 	}
 	runtimeID := strings.TrimSpace(req.RuntimeID)
-	if runtimeID == "" {
-		runtimeID = "runtime_managed_shared"
-	}
 	networkMode, err := resolveImportNetworkMode(req.NetworkMode)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())

@@ -438,6 +438,9 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		if existing, ok := existingMatches[service.Name]; ok {
 			action = "update"
 			existingCopy := existing
+			if strings.TrimSpace(options.RuntimeID) == "" {
+				spec.RuntimeID = strings.TrimSpace(existingCopy.Spec.RuntimeID)
+			}
 			matchedApp = &existingCopy
 		}
 		plans = append(plans, plannedTopologyService{
@@ -548,6 +551,9 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		apps = append(apps, app)
 
 		specCopy := cloneAppSpec(plan.Spec)
+		if strings.TrimSpace(specCopy.RuntimeID) == "" {
+			specCopy.RuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
+		}
 		sourceCopy := plan.Source
 		desiredOriginSource := model.CloneAppSource(&sourceCopy)
 		if options.DesiredOriginSource != nil {

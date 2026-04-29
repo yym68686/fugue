@@ -16,7 +16,11 @@ func (c *CLI) renderAppStatus(client *Client, app model.App) error {
 }
 
 func (c *CLI) renderProjectDetail(client *Client, project model.Project) error {
-	return renderProjectWithContext(c.stdout, project, c.loadTenantNames(client), c.showIDs())
+	var runtimeNames map[string]string
+	if strings.TrimSpace(project.DefaultRuntimeID) != "" {
+		runtimeNames = c.loadRuntimeNames(client)
+	}
+	return renderProjectWithContext(c.stdout, project, c.loadTenantNames(client), runtimeNames, c.showIDs())
 }
 
 func (c *CLI) renderRuntimeDetail(client *Client, runtimeObj model.Runtime) error {
@@ -72,15 +76,20 @@ func (c *CLI) loadAppNames(client *Client) map[string]string {
 	return mapAppNames(apps)
 }
 
-func renderProjectWithContext(w io.Writer, project model.Project, tenantNames map[string]string, showIDs bool) error {
+func renderProjectWithContext(w io.Writer, project model.Project, tenantNames, runtimeNames map[string]string, showIDs bool) error {
 	tenantName := firstNonEmptyTrimmed(tenantNames[project.TenantID], project.TenantID)
-	return writeKeyValues(w,
+	pairs := []kvPair{
 		kvPair{Key: "project", Value: formatDisplayName(project.Name, project.ID, showIDs)},
 		kvPair{Key: "tenant", Value: formatDisplayName(tenantName, project.TenantID, showIDs)},
 		kvPair{Key: "slug", Value: project.Slug},
 		kvPair{Key: "description", Value: project.Description},
 		kvPair{Key: "updated_at", Value: formatTime(project.UpdatedAt)},
-	)
+	}
+	if runtimeID := strings.TrimSpace(project.DefaultRuntimeID); runtimeID != "" {
+		runtimeName := firstNonEmptyTrimmed(runtimeNames[runtimeID], runtimeID)
+		pairs = append(pairs, kvPair{Key: "default_runtime", Value: formatDisplayName(runtimeName, runtimeID, showIDs)})
+	}
+	return writeKeyValues(w, pairs...)
 }
 
 func renderRuntimeWithContext(w io.Writer, runtimeObj model.Runtime, tenantNames map[string]string, showIDs bool) error {

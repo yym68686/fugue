@@ -132,6 +132,79 @@ func TestManagedAndExternalOperationFlow(t *testing.T) {
 	}
 }
 
+func TestProjectDefaultRuntimeAppliesToNewAppsAndServices(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Default Runtime Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
+		CPUMilliCores:    2_000,
+		MemoryMebibytes:  4_096,
+		StorageGibibytes: 20,
+	}); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
+	}
+	defaultRuntime, _, err := s.CreateRuntime(tenant.ID, "primary-vps", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create default runtime: %v", err)
+	}
+	otherRuntime, _, err := s.CreateRuntime(tenant.ID, "secondary-vps", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create secondary runtime: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "", defaultRuntime.ID)
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if project.DefaultRuntimeID != defaultRuntime.ID {
+		t.Fatalf("expected project default runtime %q, got %q", defaultRuntime.ID, project.DefaultRuntimeID)
+	}
+
+	defaultedApp, err := s.CreateApp(tenant.ID, project.ID, "defaulted", "", model.AppSpec{
+		Image:    "nginx:1.27",
+		Ports:    []int{80},
+		Replicas: 1,
+	})
+	if err != nil {
+		t.Fatalf("create defaulted app: %v", err)
+	}
+	if defaultedApp.Spec.RuntimeID != defaultRuntime.ID {
+		t.Fatalf("expected app runtime %q, got %q", defaultRuntime.ID, defaultedApp.Spec.RuntimeID)
+	}
+
+	movedApp, err := s.CreateApp(tenant.ID, project.ID, "moved", "", model.AppSpec{
+		Image:     "nginx:1.27",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: otherRuntime.ID,
+	})
+	if err != nil {
+		t.Fatalf("create explicitly moved app: %v", err)
+	}
+	if movedApp.Spec.RuntimeID != otherRuntime.ID {
+		t.Fatalf("expected explicit runtime %q, got %q", otherRuntime.ID, movedApp.Spec.RuntimeID)
+	}
+
+	service, err := s.CreateBackingService(tenant.ID, project.ID, "db", "", model.BackingServiceSpec{
+		Postgres: &model.AppPostgresSpec{
+			Database: "app",
+			User:     "app",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create defaulted backing service: %v", err)
+	}
+	if service.Spec.Postgres == nil || service.Spec.Postgres.RuntimeID != defaultRuntime.ID {
+		t.Fatalf("expected service runtime %q, got %+v", defaultRuntime.ID, service.Spec.Postgres)
+	}
+}
+
 func TestMigrateOperationAppliesDesiredSpecAndSource(t *testing.T) {
 	t.Parallel()
 

@@ -65,6 +65,8 @@ const (
 	RuntimeStatusActive  = "active"
 	RuntimeStatusOffline = "offline"
 
+	DefaultManagedRuntimeID = "runtime_managed_shared"
+
 	APIKeyStatusActive   = "active"
 	APIKeyStatusDisabled = "disabled"
 
@@ -284,13 +286,14 @@ type Tenant struct {
 }
 
 type Project struct {
-	ID          string    `json:"id"`
-	TenantID    string    `json:"tenant_id"`
-	Name        string    `json:"name"`
-	Slug        string    `json:"slug"`
-	Description string    `json:"description"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID               string    `json:"id"`
+	TenantID         string    `json:"tenant_id"`
+	Name             string    `json:"name"`
+	Slug             string    `json:"slug"`
+	Description      string    `json:"description"`
+	DefaultRuntimeID string    `json:"default_runtime_id,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type APIKey struct {

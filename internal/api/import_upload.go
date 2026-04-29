@@ -240,9 +240,6 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 		replicas = 1
 	}
 	runtimeID := strings.TrimSpace(req.RuntimeID)
-	if runtimeID == "" {
-		runtimeID = "runtime_managed_shared"
-	}
 
 	isTopologyImport := shouldInspectUploadTopologyImport(req, buildStrategy)
 	if req.DryRun && !isTopologyImport {

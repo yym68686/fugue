@@ -97,7 +97,9 @@ func (c *CLI) newProjectListCommand() *cobra.Command {
 
 func (c *CLI) newProjectCreateCommand() *cobra.Command {
 	opts := struct {
-		Description string
+		Description        string
+		DefaultRuntimeName string
+		DefaultRuntimeID   string
 	}{}
 	cmd := &cobra.Command{
 		Use:   "create <name>",
@@ -112,7 +114,11 @@ func (c *CLI) newProjectCreateCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			project, err := client.CreateProject(tenantID, args[0], opts.Description)
+			defaultRuntimeID, err := resolveRuntimeSelection(client, opts.DefaultRuntimeID, opts.DefaultRuntimeName)
+			if err != nil {
+				return err
+			}
+			project, err := client.CreateProject(tenantID, args[0], opts.Description, defaultRuntimeID)
 			if err != nil {
 				return err
 			}
@@ -123,6 +129,9 @@ func (c *CLI) newProjectCreateCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&opts.Description, "description", "", "Project description")
+	cmd.Flags().StringVar(&opts.DefaultRuntimeName, "default-runtime", "", "Default runtime name for new apps in this project")
+	cmd.Flags().StringVar(&opts.DefaultRuntimeID, "default-runtime-id", "", "Default runtime ID for new apps in this project")
+	_ = cmd.Flags().MarkHidden("default-runtime-id")
 	return cmd
 }
 
@@ -133,16 +142,19 @@ func (c *CLI) newProjectRenameCommand() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			newName := strings.TrimSpace(args[1])
-			return c.patchProjectMetadata(args[0], &newName, nil)
+			return c.patchProjectMetadata(args[0], &newName, nil, "", "", false)
 		},
 	}
 }
 
 func (c *CLI) newProjectEditCommand() *cobra.Command {
 	opts := struct {
-		Name             string
-		Description      string
-		ClearDescription bool
+		Name                string
+		Description         string
+		DefaultRuntimeName  string
+		DefaultRuntimeID    string
+		ClearDescription    bool
+		ClearDefaultRuntime bool
 	}{}
 	cmd := &cobra.Command{
 		Use:   "edit <project> [new-name]",
@@ -154,6 +166,9 @@ func (c *CLI) newProjectEditCommand() *cobra.Command {
 			}
 			if opts.ClearDescription && flagChanged(cmd, "description") {
 				return fmt.Errorf("--description and --clear-description cannot be used together")
+			}
+			if opts.ClearDefaultRuntime && (flagChanged(cmd, "default-runtime") || flagChanged(cmd, "default-runtime-id")) {
+				return fmt.Errorf("--default-runtime, --default-runtime-id, and --clear-default-runtime cannot be used together")
 			}
 			var name *string
 			switch {
@@ -181,15 +196,20 @@ func (c *CLI) newProjectEditCommand() *cobra.Command {
 				description = &value
 			}
 
-			if name == nil && description == nil {
-				return fmt.Errorf("at least one of [new-name], --name, --description, or --clear-description is required")
+			defaultRuntimeChanged := flagChanged(cmd, "default-runtime") || flagChanged(cmd, "default-runtime-id") || opts.ClearDefaultRuntime
+			if name == nil && description == nil && !defaultRuntimeChanged {
+				return fmt.Errorf("at least one of [new-name], --name, --description, --clear-description, --default-runtime, or --clear-default-runtime is required")
 			}
-			return c.patchProjectMetadata(args[0], name, description)
+			return c.patchProjectMetadata(args[0], name, description, opts.DefaultRuntimeName, opts.DefaultRuntimeID, opts.ClearDefaultRuntime)
 		},
 	}
 	cmd.Flags().StringVar(&opts.Name, "name", "", "New project name")
 	cmd.Flags().StringVar(&opts.Description, "description", "", "Project description")
+	cmd.Flags().StringVar(&opts.DefaultRuntimeName, "default-runtime", "", "Default runtime name for new apps in this project")
+	cmd.Flags().StringVar(&opts.DefaultRuntimeID, "default-runtime-id", "", "Default runtime ID for new apps in this project")
 	cmd.Flags().BoolVar(&opts.ClearDescription, "clear-description", false, "Clear the project description")
+	cmd.Flags().BoolVar(&opts.ClearDefaultRuntime, "clear-default-runtime", false, "Clear the project default runtime")
+	_ = cmd.Flags().MarkHidden("default-runtime-id")
 	return cmd
 }
 
@@ -245,7 +265,7 @@ func (c *CLI) newProjectRemoveCommand() *cobra.Command {
 	return cmd
 }
 
-func (c *CLI) patchProjectMetadata(projectRef string, name, description *string) error {
+func (c *CLI) patchProjectMetadata(projectRef string, name, description *string, defaultRuntimeName, defaultRuntimeID string, clearDefaultRuntime bool) error {
 	client, err := c.newClient()
 	if err != nil {
 		return err
@@ -254,7 +274,15 @@ func (c *CLI) patchProjectMetadata(projectRef string, name, description *string)
 	if err != nil {
 		return err
 	}
-	project, err = client.PatchProject(project.ID, name, description)
+	var defaultRuntime *string
+	if strings.TrimSpace(defaultRuntimeName) != "" || strings.TrimSpace(defaultRuntimeID) != "" {
+		runtimeID, err := resolveRuntimeSelection(client, defaultRuntimeID, defaultRuntimeName)
+		if err != nil {
+			return err
+		}
+		defaultRuntime = &runtimeID
+	}
+	project, err = client.PatchProjectFields(project.ID, name, description, defaultRuntime, clearDefaultRuntime)
 	if err != nil {
 		return err
 	}

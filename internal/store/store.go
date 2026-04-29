@@ -34,6 +34,13 @@ type Store struct {
 	dbReady     bool
 }
 
+type ProjectUpdate struct {
+	Name                  *string
+	Description           *string
+	DefaultRuntimeID      *string
+	ClearDefaultRuntimeID bool
+}
+
 func New(path string, databaseURL ...string) *Store {
 	var dsn string
 	if len(databaseURL) > 0 {
@@ -290,12 +297,19 @@ func (s *Store) GetProject(id string) (model.Project, error) {
 }
 
 func (s *Store) UpdateProject(id string, name, description *string) (model.Project, error) {
+	return s.UpdateProjectFields(id, ProjectUpdate{Name: name, Description: description})
+}
+
+func (s *Store) UpdateProjectFields(id string, update ProjectUpdate) (model.Project, error) {
 	id = strings.TrimSpace(id)
-	if id == "" || (name == nil && description == nil) {
+	if id == "" || (update.Name == nil && update.Description == nil && update.DefaultRuntimeID == nil && !update.ClearDefaultRuntimeID) {
+		return model.Project{}, ErrInvalidInput
+	}
+	if update.ClearDefaultRuntimeID && update.DefaultRuntimeID != nil && strings.TrimSpace(*update.DefaultRuntimeID) != "" {
 		return model.Project{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgUpdateProject(id, name, description)
+		return s.pgUpdateProjectFields(id, update)
 	}
 
 	var project model.Project
@@ -310,8 +324,8 @@ func (s *Store) UpdateProject(id string, name, description *string) (model.Proje
 		project = state.Projects[index]
 		changed := false
 
-		if name != nil {
-			trimmedName := strings.TrimSpace(*name)
+		if update.Name != nil {
+			trimmedName := strings.TrimSpace(*update.Name)
 			if trimmedName == "" {
 				return ErrInvalidInput
 			}
@@ -331,10 +345,26 @@ func (s *Store) UpdateProject(id string, name, description *string) (model.Proje
 			}
 		}
 
-		if description != nil {
-			trimmedDescription := strings.TrimSpace(*description)
+		if update.Description != nil {
+			trimmedDescription := strings.TrimSpace(*update.Description)
 			if project.Description != trimmedDescription {
 				project.Description = trimmedDescription
+				changed = true
+			}
+		}
+
+		if update.DefaultRuntimeID != nil {
+			runtimeID := strings.TrimSpace(*update.DefaultRuntimeID)
+			if runtimeID != "" && !runtimeVisibleToTenant(state, runtimeID, project.TenantID) {
+				return ErrNotFound
+			}
+			if project.DefaultRuntimeID != runtimeID {
+				project.DefaultRuntimeID = runtimeID
+				changed = true
+			}
+		} else if update.ClearDefaultRuntimeID {
+			if project.DefaultRuntimeID != "" {
+				project.DefaultRuntimeID = ""
 				changed = true
 			}
 		}
@@ -348,18 +378,25 @@ func (s *Store) UpdateProject(id string, name, description *string) (model.Proje
 	return project, err
 }
 
-func (s *Store) CreateProject(tenantID, name, description string) (model.Project, error) {
+func (s *Store) CreateProject(tenantID, name, description string, defaultRuntimeID ...string) (model.Project, error) {
 	name = strings.TrimSpace(name)
+	runtimeID := ""
+	if len(defaultRuntimeID) > 0 {
+		runtimeID = strings.TrimSpace(defaultRuntimeID[0])
+	}
 	if tenantID == "" || name == "" {
 		return model.Project{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgCreateProject(tenantID, name, description)
+		return s.pgCreateProject(tenantID, name, description, runtimeID)
 	}
 
 	var project model.Project
 	err := s.withLockedState(true, func(state *model.State) error {
 		if findTenant(state, tenantID) < 0 {
+			return ErrNotFound
+		}
+		if runtimeID != "" && !runtimeVisibleToTenant(state, runtimeID, tenantID) {
 			return ErrNotFound
 		}
 		slug := model.Slugify(name)
@@ -370,13 +407,14 @@ func (s *Store) CreateProject(tenantID, name, description string) (model.Project
 		}
 		now := time.Now().UTC()
 		project = model.Project{
-			ID:          model.NewID("project"),
-			TenantID:    tenantID,
-			Name:        name,
-			Slug:        slug,
-			Description: strings.TrimSpace(description),
-			CreatedAt:   now,
-			UpdatedAt:   now,
+			ID:               model.NewID("project"),
+			TenantID:         tenantID,
+			Name:             name,
+			Slug:             slug,
+			Description:      strings.TrimSpace(description),
+			DefaultRuntimeID: runtimeID,
+			CreatedAt:        now,
+			UpdatedAt:        now,
 		}
 		state.Projects = append(state.Projects, project)
 		return nil
@@ -2316,9 +2354,6 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 	if tenantID == "" || projectID == "" || name == "" || (!allowPendingImport && spec.Image == "") || spec.Replicas < 1 {
 		return model.App{}, ErrInvalidInput
 	}
-	if spec.RuntimeID == "" {
-		spec.RuntimeID = "runtime_managed_shared"
-	}
 	if err := normalizeAppSpecResources(&spec); err != nil {
 		return model.App{}, err
 	}
@@ -2340,12 +2375,14 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 		if findTenant(state, tenantID) < 0 {
 			return ErrNotFound
 		}
-		if !projectBelongsToTenant(state, projectID, tenantID) {
+		projectIndex := findProject(state, projectID)
+		if projectIndex < 0 || state.Projects[projectIndex].TenantID != tenantID {
 			return ErrNotFound
 		}
 		if projectDeleteRequested(state, projectID) {
 			return ErrConflict
 		}
+		spec.RuntimeID = resolveProjectRuntimeID(state.Projects[projectIndex], spec.RuntimeID)
 		if !runtimeVisibleToTenant(state, spec.RuntimeID, tenantID) {
 			return ErrNotFound
 		}
@@ -4620,6 +4657,26 @@ func runtimeVisibleToTenant(state *model.State, runtimeID, tenantID string) bool
 		return true
 	}
 	return findRuntimeAccessGrant(state, runtime.ID, tenantID) >= 0
+}
+
+func resolveProjectRuntimeID(project model.Project, requestedRuntimeID string) string {
+	if runtimeID := strings.TrimSpace(requestedRuntimeID); runtimeID != "" {
+		return runtimeID
+	}
+	if runtimeID := strings.TrimSpace(project.DefaultRuntimeID); runtimeID != "" {
+		return runtimeID
+	}
+	return model.DefaultManagedRuntimeID
+}
+
+func defaultBackingServiceRuntimeForProject(spec model.BackingServiceSpec, project model.Project) model.BackingServiceSpec {
+	defaultRuntimeID := strings.TrimSpace(project.DefaultRuntimeID)
+	if defaultRuntimeID == "" || spec.Postgres == nil || strings.TrimSpace(spec.Postgres.RuntimeID) != "" {
+		return spec
+	}
+	out := cloneBackingServiceSpec(spec)
+	out.Postgres.RuntimeID = defaultRuntimeID
+	return out
 }
 
 func findManagedOwnedRuntimeByNodeKeyAndName(state *model.State, nodeKeyID, runtimeName string) int {

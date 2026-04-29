@@ -89,12 +89,13 @@ func (s *Store) pgCreateBackingService(tenantID, projectID, name, description st
 	if !exists {
 		return model.BackingService{}, ErrNotFound
 	}
-	projectOK, err := s.pgProjectBelongsToTenantTx(ctx, tx, projectID, tenantID)
+	project, err := scanProject(tx.QueryRowContext(ctx, `
+SELECT id, tenant_id, name, slug, description, default_runtime_id, created_at, updated_at
+FROM fugue_projects
+WHERE id = $1 AND tenant_id = $2
+`, projectID, tenantID))
 	if err != nil {
-		return model.BackingService{}, err
-	}
-	if !projectOK {
-		return model.BackingService{}, ErrNotFound
+		return model.BackingService{}, mapDBErr(err)
 	}
 	deleteRequested, err := s.pgProjectDeleteRequestedTx(ctx, tx, projectID)
 	if err != nil {
@@ -103,6 +104,7 @@ func (s *Store) pgCreateBackingService(tenantID, projectID, name, description st
 	if deleteRequested {
 		return model.BackingService{}, ErrConflict
 	}
+	spec = defaultBackingServiceRuntimeForProject(spec, project)
 
 	now := time.Now().UTC()
 	billing, billingState, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
