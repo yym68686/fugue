@@ -54,7 +54,7 @@ func TestMaintenanceDaemonSetsDefaultToInternalNodes(t *testing.T) {
 		"fugue-fugue-topology-labeler",
 		"fugue-fugue-image-prepull",
 	} {
-		doc := manifestDocumentForName(manifest, name)
+		doc := manifestDocumentForKindAndName(manifest, "DaemonSet", name)
 		if doc == "" {
 			t.Fatalf("rendered manifest missing %s:\n%s", name, manifest)
 		}
@@ -72,9 +72,11 @@ func TestMaintenanceDaemonSetsDefaultToInternalNodes(t *testing.T) {
 	}
 }
 
-func manifestDocumentForName(manifest string, name string) string {
+func manifestDocumentForKindAndName(manifest string, kind string, name string) string {
 	for _, doc := range strings.Split(manifest, "\n---") {
-		if strings.Contains(doc, "\n  name: "+name+"\n") || strings.Contains(doc, "\nname: "+name+"\n") {
+		hasKind := strings.Contains(doc, "\nkind: "+kind+"\n") || strings.Contains(doc, "kind: "+kind+"\n")
+		hasName := strings.Contains(doc, "\n  name: "+name+"\n") || strings.Contains(doc, "\nname: "+name+"\n")
+		if hasKind && hasName {
 			return doc
 		}
 	}
