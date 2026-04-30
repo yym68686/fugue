@@ -178,11 +178,19 @@ EOF
   if command_exists systemctl; then
     if systemctl is-active --quiet k3s; then
       log "restarting local k3s so containerd reloads registry mirror configuration"
-      systemctl restart k3s
+      if command_exists timeout; then
+        timeout --kill-after=15s 120s systemctl restart k3s
+      else
+        systemctl restart k3s
+      fi
       wait_for_local_kube_api_ready
     elif systemctl is-active --quiet k3s-agent; then
       log "restarting local k3s-agent so containerd reloads registry mirror configuration"
-      systemctl restart k3s-agent
+      if command_exists timeout; then
+        timeout --kill-after=15s 120s systemctl restart k3s-agent
+      else
+        systemctl restart k3s-agent
+      fi
     fi
   fi
 }
@@ -793,11 +801,39 @@ recover_primary_node_if_needed() {
   restart_cmd="$(cat <<'EOF'
 set -euo pipefail
 
+run_bounded_host_command() {
+  local timeout_seconds="$1"
+  local pid=""
+  local state=""
+  local deadline=""
+  shift
+
+  "$@" &
+  pid="$!"
+  deadline=$((SECONDS + timeout_seconds))
+
+  while true; do
+    state="$(awk '{print $3}' "/proc/${pid}/stat" 2>/dev/null || true)"
+    if [[ -z "${state}" || "${state}" == "Z" ]]; then
+      wait "${pid}"
+      return $?
+    fi
+    if (( SECONDS >= deadline )); then
+      printf '[fugue-upgrade][primary-recovery] timed out after %ss: %s\n' "${timeout_seconds}" "$*" >&2
+      kill "${pid}" >/dev/null 2>&1 || true
+      sleep 2
+      kill -KILL "${pid}" >/dev/null 2>&1 || true
+      return 124
+    fi
+    sleep 1
+  done
+}
+
 if command -v k3s >/dev/null 2>&1; then
-  k3s crictl rmi --prune >/tmp/fugue-primary-node-image-prune.log 2>&1 || true
+  run_bounded_host_command 90 k3s crictl rmi --prune >/tmp/fugue-primary-node-image-prune.log 2>&1 || true
 fi
 
-systemctl restart k3s
+run_bounded_host_command 120 systemctl restart k3s
 systemctl is-active --quiet k3s
 EOF
 )"
@@ -1117,7 +1153,11 @@ cp "\${config}" "\${backup}"
 cat >"\${config}" <<'CFG'
 ${patched_config}
 CFG
-systemctl restart k3s
+if command -v timeout >/dev/null 2>&1; then
+  timeout --kill-after=15s 120s systemctl restart k3s
+else
+  systemctl restart k3s
+fi
 systemctl is-active --quiet k3s
 printf '%s\n' "\${backup}"
 EOF
@@ -1226,6 +1266,34 @@ log() {
   printf '[fugue-upgrade][primary-cleanup] %s\n' "$*"
 }
 
+run_bounded_host_command() {
+  local timeout_seconds="$1"
+  local pid=""
+  local state=""
+  local deadline=""
+  shift
+
+  "$@" &
+  pid="$!"
+  deadline=$((SECONDS + timeout_seconds))
+
+  while true; do
+    state="$(awk '{print $3}' "/proc/${pid}/stat" 2>/dev/null || true)"
+    if [[ -z "${state}" || "${state}" == "Z" ]]; then
+      wait "${pid}"
+      return $?
+    fi
+    if (( SECONDS >= deadline )); then
+      log "timed out after ${timeout_seconds}s: $*"
+      kill "${pid}" >/dev/null 2>&1 || true
+      sleep 2
+      kill -KILL "${pid}" >/dev/null 2>&1 || true
+      return 124
+    fi
+    sleep 1
+  done
+}
+
 registry_root="/var/lib/fugue/registry"
 runner_update_root="/home/github-runner/actions-runner-work/_update"
 registry_image="docker.io/library/registry:2.8.3"
@@ -1260,7 +1328,7 @@ df -h /
 du -sh "${registry_root}" 2>/dev/null || true
 
 if command -v k3s >/dev/null 2>&1; then
-  if k3s crictl rmi --prune >/tmp/fugue-primary-image-prune.log 2>&1; then
+  if run_bounded_host_command 90 k3s crictl rmi --prune >/tmp/fugue-primary-image-prune.log 2>&1; then
     log "unused k3s images pruned"
   else
     status=$?

@@ -133,7 +133,7 @@ spec:
                   log "skip image prune on ${NODE_NAME}: host k3s binary not found"
                   return
                 fi
-                if chroot "${host_root}" /bin/sh -lc 'k3s crictl rmi --prune >/tmp/fugue-node-janitor-image-prune.log 2>&1'; then
+                if chroot "${host_root}" /bin/sh -lc 'if command -v timeout >/dev/null 2>&1; then timeout --kill-after=30s 300s k3s crictl rmi --prune >/tmp/fugue-node-janitor-image-prune.log 2>&1; else k3s crictl rmi --prune >/tmp/fugue-node-janitor-image-prune.log 2>&1; fi'; then
                   log "unused container images pruned on ${NODE_NAME}"
                 else
                   status=$?
