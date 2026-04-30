@@ -378,7 +378,7 @@ func (c *CLI) runAppConfigVerify(client *Client, app model.App, rawPath string, 
 		Warnings: []string{},
 	}
 
-	operations, err := client.ListOperations(app.ID)
+	operations, err := client.ListOperationsWithDesiredState(app.ID)
 	if err != nil {
 		result.Warnings = append(result.Warnings, fmt.Sprintf("operations unavailable: %v", err))
 	}

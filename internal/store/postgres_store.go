@@ -3418,6 +3418,41 @@ FROM fugue_operations
 	return ops, nil
 }
 
+func (s *Store) pgListOperationSummaries(tenantID string, platformAdmin bool) ([]model.Operation, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	query := `
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+FROM fugue_operations
+`
+	args := make([]any, 0, 1)
+	if !platformAdmin {
+		query += ` WHERE tenant_id = $1`
+		args = append(args, tenantID)
+	}
+	query += ` ORDER BY created_at ASC`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list operation summaries: %w", err)
+	}
+	defer rows.Close()
+
+	ops := make([]model.Operation, 0)
+	for rows.Next() {
+		op, err := scanOperationSummary(rows)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, op)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate operation summaries: %w", err)
+	}
+	return ops, nil
+}
+
 func (s *Store) pgListOperationsByApp(tenantID string, platformAdmin bool, appID string) ([]model.Operation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -3450,6 +3485,42 @@ WHERE app_id = $1
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate operations by app: %w", err)
+	}
+	return ops, nil
+}
+
+func (s *Store) pgListOperationSummariesByApp(tenantID string, platformAdmin bool, appID string) ([]model.Operation, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	query := `
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+FROM fugue_operations
+WHERE app_id = $1
+`
+	args := []any{appID}
+	if !platformAdmin {
+		query += ` AND tenant_id = $2`
+		args = append(args, tenantID)
+	}
+	query += ` ORDER BY created_at ASC`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list operation summaries by app: %w", err)
+	}
+	defer rows.Close()
+
+	ops := make([]model.Operation, 0)
+	for rows.Next() {
+		op, err := scanOperationSummary(rows)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, op)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate operation summaries by app: %w", err)
 	}
 	return ops, nil
 }
@@ -5161,6 +5232,27 @@ func scanOperation(scanner sqlScanner) (model.Operation, error) {
 	op.DesiredSpec = desiredSpec
 	op.DesiredSource = desiredSource
 	op.DesiredOriginSource = desiredOriginSource
+	if startedAt.Valid {
+		op.StartedAt = &startedAt.Time
+	}
+	if completedAt.Valid {
+		op.CompletedAt = &completedAt.Time
+	}
+	return op, nil
+}
+
+func scanOperationSummary(scanner sqlScanner) (model.Operation, error) {
+	var op model.Operation
+	var desiredReplicas sql.NullInt64
+	var startedAt sql.NullTime
+	var completedAt sql.NullTime
+	if err := scanner.Scan(&op.ID, &op.TenantID, &op.Type, &op.Status, &op.ExecutionMode, &op.RequestedByType, &op.RequestedByID, &op.AppID, &op.SourceRuntimeID, &op.TargetRuntimeID, &desiredReplicas, &op.ResultMessage, &op.ManifestPath, &op.AssignedRuntimeID, &op.ErrorMessage, &op.CreatedAt, &op.UpdatedAt, &startedAt, &completedAt); err != nil {
+		return model.Operation{}, err
+	}
+	if desiredReplicas.Valid {
+		value := int(desiredReplicas.Int64)
+		op.DesiredReplicas = &value
+	}
 	if startedAt.Valid {
 		op.StartedAt = &startedAt.Time
 	}

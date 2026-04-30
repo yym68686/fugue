@@ -95,7 +95,7 @@ func (c *CLI) collectBuildArtifactReport(client *Client, appID string, logs buil
 			importOp = &opCopy
 		}
 	}
-	if ops, err := client.ListOperations(appID); err != nil {
+	if ops, err := client.ListOperationsWithDesiredState(appID); err != nil {
 		report.Warnings = appendUniqueString(report.Warnings, fmt.Sprintf("operation inventory unavailable: %v", err))
 	} else {
 		operations = ops

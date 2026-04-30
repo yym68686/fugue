@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -106,7 +107,7 @@ func TestReadyzReportsHealthyDependencies(t *testing.T) {
 	}
 }
 
-func TestReadyzFailsWhenKubernetesDependencyIsUnavailable(t *testing.T) {
+func TestReadyzReportsKubernetesDependencyAsDegradedWithoutFailingReadiness(t *testing.T) {
 	t.Parallel()
 
 	s := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -126,18 +127,54 @@ func TestReadyzFailsWhenKubernetesDependencyIsUnavailable(t *testing.T) {
 
 	server.Handler().ServeHTTP(recorder, req)
 
-	if recorder.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected status %d, got %d body=%s", http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
 	body := recorder.Body.String()
 	for _, want := range []string{
 		`"status":"degraded"`,
 		`"store":{"status":"ok"}`,
-		`"kubernetes_api":{"status":"error","message":"cluster unavailable"}`,
+		`"kubernetes_api":{"status":"degraded","message":"cluster unavailable"}`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected readyz response to contain %q, got %s", want, body)
 		}
+	}
+}
+
+func TestReadyzCachesKubernetesDependencyDegradation(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		ControlPlaneNamespace: "fugue-system",
+	})
+	var clientFactoryCalls int32
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		atomic.AddInt32(&clientFactoryCalls, 1)
+		return nil, errors.New("cluster unavailable")
+	}
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+		recorder := httptest.NewRecorder()
+
+		server.Handler().ServeHTTP(recorder, req)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+		}
+		if body := recorder.Body.String(); !strings.Contains(body, `"kubernetes_api":{"status":"degraded","message":"cluster unavailable"}`) {
+			t.Fatalf("expected cached degraded kubernetes status, got %s", body)
+		}
+	}
+
+	if got := atomic.LoadInt32(&clientFactoryCalls); got != 1 {
+		t.Fatalf("expected one kubernetes readiness check, got %d", got)
 	}
 }
 

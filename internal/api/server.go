@@ -51,6 +51,7 @@ type Server struct {
 	inspectBuilderPlacement      builderPlacementInspector
 	appImageRegistry             appImageRegistry
 	projectImageUsageCache       expiringResponseCache[projectImageUsageResponse]
+	readinessKubernetesAPICache  expiringResponseCache[readinessCheckResult]
 	clusterNodeInventoryCache    expiringResponseCache[[]clusterNodeSnapshot]
 	appProxyAppCache             expiringResponseCache[model.App]
 	appProxyServiceHostCache     expiringResponseCache[string]
@@ -103,6 +104,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		inspectBuilderPlacement:      sourceimport.InspectBuilderPlacementForProfile,
 		appImageRegistry:             newRemoteAppImageRegistry(),
 		projectImageUsageCache:       newExpiringResponseCache[projectImageUsageResponse](defaultProjectImageUsageCacheTTL),
+		readinessKubernetesAPICache:  newExpiringResponseCache[readinessCheckResult](readinessKubernetesAPICacheTTL),
 		clusterNodeInventoryCache:    newExpiringResponseCache[[]clusterNodeSnapshot](defaultClusterNodeInventoryCacheTTL),
 		appProxyAppCache:             newExpiringResponseCache[model.App](defaultAppProxyLookupCacheTTL),
 		appProxyServiceHostCache:     newExpiringResponseCache[string](defaultAppProxyLookupCacheTTL),
@@ -155,6 +157,8 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	status := "ok"
 	if readinessHasFailure(results) {
 		statusCode = http.StatusServiceUnavailable
+		status = "degraded"
+	} else if readinessHasDegradation(results) {
 		status = "degraded"
 	}
 	httpx.WriteJSON(w, statusCode, map[string]any{
@@ -1253,15 +1257,27 @@ func (s *Server) handleListOperations(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	timings := serverTimingFromContext(r.Context())
 	appID := readOptionalStringQuery(r, "app_id")
+	includeDesired, err := readBoolQuery(r, "include_desired", false)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	storeStartedAt := time.Now()
 	var ops []model.Operation
-	var err error
 	if appID != "" {
-		ops, err = s.store.ListOperationsByApp(principal.TenantID, principal.IsPlatformAdmin(), appID)
+		if includeDesired {
+			ops, err = s.store.ListOperationsByApp(principal.TenantID, principal.IsPlatformAdmin(), appID)
+		} else {
+			ops, err = s.store.ListOperationSummariesByApp(principal.TenantID, principal.IsPlatformAdmin(), appID)
+		}
 		timings.Add("store_operations_app", time.Since(storeStartedAt))
 	} else {
-		ops, err = s.store.ListOperations(principal.TenantID, principal.IsPlatformAdmin())
+		if includeDesired {
+			ops, err = s.store.ListOperations(principal.TenantID, principal.IsPlatformAdmin())
+		} else {
+			ops, err = s.store.ListOperationSummaries(principal.TenantID, principal.IsPlatformAdmin())
+		}
 		timings.Add("store_operations", time.Since(storeStartedAt))
 	}
 	if err != nil {

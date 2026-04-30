@@ -1010,7 +1010,7 @@ func (c *CLI) buildImportBundleDiagnosis(client *Client, app model.App) (*appOve
 	}
 
 	snapshot := appOverviewSnapshot{App: app}
-	operations, err := client.ListOperations(app.ID)
+	operations, err := client.ListOperationsWithDesiredState(app.ID)
 	if err != nil {
 		return nil, err
 	}

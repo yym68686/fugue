@@ -2847,6 +2847,25 @@ func (s *Store) ListOperations(tenantID string, platformAdmin bool) ([]model.Ope
 	return ops, err
 }
 
+func (s *Store) ListOperationSummaries(tenantID string, platformAdmin bool) ([]model.Operation, error) {
+	if s.usingDatabase() {
+		return s.pgListOperationSummaries(tenantID, platformAdmin)
+	}
+	var ops []model.Operation
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, op := range state.Operations {
+			if platformAdmin || op.TenantID == tenantID {
+				ops = append(ops, operationSummary(op))
+			}
+		}
+		sort.Slice(ops, func(i, j int) bool {
+			return ops[i].CreatedAt.Before(ops[j].CreatedAt)
+		})
+		return nil
+	})
+	return ops, err
+}
+
 func (s *Store) ListOperationsByApp(tenantID string, platformAdmin bool, appID string) ([]model.Operation, error) {
 	appID = strings.TrimSpace(appID)
 	if appID == "" {
@@ -2873,6 +2892,41 @@ func (s *Store) ListOperationsByApp(tenantID string, platformAdmin bool, appID s
 		return nil
 	})
 	return ops, err
+}
+
+func (s *Store) ListOperationSummariesByApp(tenantID string, platformAdmin bool, appID string) ([]model.Operation, error) {
+	appID = strings.TrimSpace(appID)
+	if appID == "" {
+		return s.ListOperationSummaries(tenantID, platformAdmin)
+	}
+	if s.usingDatabase() {
+		return s.pgListOperationSummariesByApp(tenantID, platformAdmin, appID)
+	}
+
+	var ops []model.Operation
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, op := range state.Operations {
+			if !platformAdmin && op.TenantID != tenantID {
+				continue
+			}
+			if strings.TrimSpace(op.AppID) != appID {
+				continue
+			}
+			ops = append(ops, operationSummary(op))
+		}
+		sort.Slice(ops, func(i, j int) bool {
+			return ops[i].CreatedAt.Before(ops[j].CreatedAt)
+		})
+		return nil
+	})
+	return ops, err
+}
+
+func operationSummary(op model.Operation) model.Operation {
+	op.DesiredSpec = nil
+	op.DesiredSource = nil
+	op.DesiredOriginSource = nil
+	return op
 }
 
 func (s *Store) HasActiveOperationByApp(tenantID string, platformAdmin bool, appID string) (bool, error) {

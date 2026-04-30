@@ -816,9 +816,24 @@ func (c *Client) DeleteBackingService(id string) (model.BackingService, error) {
 }
 
 func (c *Client) ListOperations(appID string) ([]model.Operation, error) {
+	return c.listOperations(appID, false)
+}
+
+func (c *Client) ListOperationsWithDesiredState(appID string) ([]model.Operation, error) {
+	return c.listOperations(appID, true)
+}
+
+func (c *Client) listOperations(appID string, includeDesired bool) ([]model.Operation, error) {
 	relative := "/v1/operations"
+	query := url.Values{}
 	if strings.TrimSpace(appID) != "" {
-		relative += "?app_id=" + url.QueryEscape(strings.TrimSpace(appID))
+		query.Set("app_id", strings.TrimSpace(appID))
+	}
+	if includeDesired {
+		query.Set("include_desired", "true")
+	}
+	if encoded := query.Encode(); encoded != "" {
+		relative += "?" + encoded
 	}
 	var response struct {
 		Operations []model.Operation `json:"operations"`

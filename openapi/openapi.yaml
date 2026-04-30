@@ -2908,6 +2908,12 @@ paths:
           description: Limit operations to a single app.
           schema:
             type: string
+        - in: query
+          name: include_desired
+          required: false
+          description: When true, include desired_spec and desired_source in each operation. Defaults to false so list responses stay lightweight.
+          schema:
+            type: boolean
       responses:
         '200':
           description: Successful response
@@ -5172,6 +5178,54 @@ components:
         completed_at:
           type: string
           format: date-time
+    OperationSummary:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        type:
+          type: string
+        status:
+          type: string
+        execution_mode:
+          type: string
+        requested_by_type:
+          type: string
+        requested_by_id:
+          type: string
+        app_id:
+          type: string
+        source_runtime_id:
+          type: string
+        target_runtime_id:
+          type: string
+        desired_replicas:
+          type: integer
+          format: int32
+        result_message:
+          type: string
+        manifest_path:
+          type: string
+        assigned_runtime_id:
+          type: string
+        error_message:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
     OperationDiagnosisBlocker:
       type: object
       additionalProperties: false
@@ -5758,7 +5812,9 @@ components:
         operations:
           type: array
           items:
-            $ref: "#/components/schemas/Operation"
+            anyOf:
+              - $ref: "#/components/schemas/OperationSummary"
+              - $ref: "#/components/schemas/Operation"
         cluster_nodes:
           type: array
           items:
@@ -8589,7 +8645,9 @@ components:
         operations:
           type: array
           items:
-            $ref: "#/components/schemas/Operation"
+            anyOf:
+              - $ref: "#/components/schemas/OperationSummary"
+              - $ref: "#/components/schemas/Operation"
     AuditEventListResponse:
       type: object
       additionalProperties: false
