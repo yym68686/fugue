@@ -24,6 +24,9 @@ func (s *Service) applyManagedAppDesiredState(ctx context.Context, app model.App
 	if err := client.applyObjects(ctx, objects); err != nil {
 		return fmt.Errorf("apply managed app state objects: %w", err)
 	}
+	if err := client.replaceObjectSpecsByKind(ctx, objects, runtime.ManagedAppAPIVersion, runtime.ManagedAppKind); err != nil {
+		return fmt.Errorf("replace managed app desired spec: %w", err)
+	}
 
 	namespace := runtime.NamespaceForTenant(app.TenantID)
 	name := runtime.ManagedAppResourceName(app)
@@ -176,6 +179,16 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		if err := client.applyObjects(ctx, desiredObjects); err != nil {
 			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("sync managed app desired snapshot from store: %w", err))
 		}
+		if err := client.replaceObjectSpecsByKind(ctx, desiredObjects, runtime.ManagedAppAPIVersion, runtime.ManagedAppKind); err != nil {
+			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("replace managed app desired snapshot spec from store: %w", err))
+		}
+		updatedManaged, found, err := client.getManagedApp(ctx, namespace, managed.Metadata.Name)
+		if err != nil {
+			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read managed app after desired snapshot sync: %w", err))
+		}
+		if found {
+			managed = updatedManaged
+		}
 	}
 
 	app = s.Renderer.PrepareApp(app)
@@ -192,6 +205,9 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	decorateManagedAppObjectsWithFenceEpoch(childObjects, app, fenceEpoch)
 	if err := client.applyObjects(ctx, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("apply managed app child objects: %w", err))
+	}
+	if err := client.replaceObjectSpecsByKind(ctx, childObjects, runtime.CloudNativePGAPIVersion, runtime.CloudNativePGClusterKind); err != nil {
+		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("replace managed postgres desired spec: %w", err))
 	}
 	if err := s.reconcileManagedAppPlatformEnvDrift(ctx, client, namespace, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)

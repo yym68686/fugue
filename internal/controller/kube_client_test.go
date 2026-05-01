@@ -122,6 +122,76 @@ func TestApplyObjectsAppliesSamePhaseConcurrently(t *testing.T) {
 	}
 }
 
+func TestReplaceObjectSpecsByKindUsesExactJSONPatch(t *testing.T) {
+	t.Parallel()
+
+	var patch []map[string]any
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodPatch {
+			t.Fatalf("unexpected request method %s", req.Method)
+		}
+		if req.URL.Path != "/apis/postgresql.cnpg.io/v1/namespaces/tenant-demo/clusters/demo-postgres" {
+			t.Fatalf("unexpected request path %s", req.URL.Path)
+		}
+		if got := req.Header.Get("Content-Type"); got != "application/json-patch+json" {
+			t.Fatalf("expected json patch content type, got %q", got)
+		}
+		if err := json.NewDecoder(req.Body).Decode(&patch); err != nil {
+			t.Fatalf("decode spec patch: %v", err)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   "tenant-demo",
+	}
+	objects := []map[string]any{
+		{
+			"apiVersion": "v1",
+			"kind":       "Namespace",
+			"metadata": map[string]any{
+				"name": "tenant-demo",
+			},
+		},
+		{
+			"apiVersion": "postgresql.cnpg.io/v1",
+			"kind":       "Cluster",
+			"metadata": map[string]any{
+				"name": "demo-postgres",
+			},
+			"spec": map[string]any{
+				"instances":       1,
+				"minSyncReplicas": 0,
+				"maxSyncReplicas": 0,
+			},
+		},
+	}
+
+	if err := client.replaceObjectSpecsByKind(context.Background(), objects, "postgresql.cnpg.io/v1", "Cluster"); err != nil {
+		t.Fatalf("replace object specs by kind: %v", err)
+	}
+	if len(patch) != 1 {
+		t.Fatalf("expected one patch operation, got %#v", patch)
+	}
+	if patch[0]["op"] != "replace" || patch[0]["path"] != "/spec" {
+		t.Fatalf("expected replace /spec patch, got %#v", patch)
+	}
+	value, ok := patch[0]["value"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected spec map value, got %#v", patch[0]["value"])
+	}
+	if got := value["instances"]; got != float64(1) {
+		t.Fatalf("expected instances 1, got %#v", got)
+	}
+}
+
 func TestApplyObjectRetriesTransientKubernetesApplyFailure(t *testing.T) {
 	t.Parallel()
 

@@ -16,6 +16,17 @@ func redactAppForOutput(app model.App) model.App {
 	return out
 }
 
+func redactAppsForOutput(apps []model.App) []model.App {
+	if len(apps) == 0 {
+		return nil
+	}
+	out := make([]model.App, 0, len(apps))
+	for _, app := range apps {
+		out = append(out, redactAppForOutput(app))
+	}
+	return out
+}
+
 func redactOperationForOutput(op model.Operation) model.Operation {
 	out := op
 	if op.DesiredSpec != nil {
@@ -25,6 +36,14 @@ func redactOperationForOutput(op model.Operation) model.Operation {
 	out.DesiredSource = redactAppSourceForOutput(op.DesiredSource)
 	out.DesiredOriginSource = redactAppSourceForOutput(op.DesiredOriginSource)
 	return out
+}
+
+func redactBackingServiceForOutput(service model.BackingService) model.BackingService {
+	services := cloneBackingServicesForOutput([]model.BackingService{service}, true)
+	if len(services) == 0 {
+		return service
+	}
+	return services[0]
 }
 
 func redactOverviewSnapshotForOutput(snapshot appOverviewSnapshot) appOverviewSnapshot {

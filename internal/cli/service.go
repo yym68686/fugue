@@ -45,6 +45,7 @@ Use "fugue app binding" to attach or detach a backing service from an app.
 		c.newServicePostgresCommand(),
 		hideCompatCommand(c.newServiceCreateCommand(), "fugue service postgres create"),
 		c.newServiceShowCommand(),
+		c.newServiceMoveCommand(),
 		c.newServiceRemoveCommand(),
 	)
 	return cmd
@@ -70,7 +71,7 @@ func (c *CLI) newServiceListCommand() *cobra.Command {
 			}
 			filtered := filterServices(services, tenantID, projectID)
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"backing_services": filtered})
+				return writeJSON(c.stdout, map[string]any{"backing_services": cloneBackingServicesForOutput(filtered, true)})
 			}
 			projectNames := c.loadProjectNames(client, tenantID)
 			var (
@@ -219,7 +220,7 @@ func (c *CLI) createPostgresService(name string, opts postgresServiceCreateOptio
 		return err
 	}
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, map[string]any{"backing_service": service})
+		return writeJSON(c.stdout, map[string]any{"backing_service": redactBackingServiceForOutput(service)})
 	}
 	return c.renderBackingServiceDetail(client, service)
 }
@@ -244,11 +245,60 @@ func (c *CLI) newServiceShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"backing_service": service})
+				return writeJSON(c.stdout, map[string]any{"backing_service": redactBackingServiceForOutput(service)})
 			}
 			return c.renderBackingServiceDetail(client, service)
 		},
 	}
+}
+
+func (c *CLI) newServiceMoveCommand() *cobra.Command {
+	opts := struct {
+		RuntimeName string
+		RuntimeID   string
+	}{}
+	cmd := &cobra.Command{
+		Use:     "move <service>",
+		Aliases: []string{"migrate"},
+		Short:   "Move a backing service to another runtime",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(opts.RuntimeName) == "" && strings.TrimSpace(opts.RuntimeID) == "" {
+				return fmt.Errorf("target runtime is required")
+			}
+			runtimeID, err := resolveRuntimeSelection(client, opts.RuntimeID, opts.RuntimeName)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(runtimeID) == "" {
+				return fmt.Errorf("target runtime is required")
+			}
+			service, err := c.resolveNamedService(client, args[0])
+			if err != nil {
+				return err
+			}
+			service, err = client.GetBackingService(service.ID)
+			if err != nil {
+				return err
+			}
+			service, err = client.MigrateBackingService(service.ID, runtimeID)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"backing_service": redactBackingServiceForOutput(service)})
+			}
+			return c.renderBackingServiceDetail(client, service)
+		},
+	}
+	cmd.Flags().StringVar(&opts.RuntimeName, "to", "", "Target runtime name")
+	cmd.Flags().StringVar(&opts.RuntimeID, "runtime-id", "", "Target runtime ID")
+	_ = cmd.Flags().MarkHidden("runtime-id")
+	return cmd
 }
 
 func (c *CLI) newServiceRemoveCommand() *cobra.Command {
@@ -273,7 +323,7 @@ func (c *CLI) newServiceRemoveCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{
 					"deleted":         true,
-					"backing_service": service,
+					"backing_service": redactBackingServiceForOutput(service),
 				})
 			}
 			if err := c.renderBackingServiceDetail(client, service); err != nil {

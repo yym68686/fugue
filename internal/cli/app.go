@@ -123,7 +123,7 @@ func (c *CLI) newAppListCommand() *cobra.Command {
 			}
 			filtered := filterApps(apps, tenantID, projectID)
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"apps": filtered})
+				return writeJSON(c.stdout, map[string]any{"apps": redactAppsForOutput(filtered)})
 			}
 			runtimes, err := client.ListRuntimes()
 			if err != nil {
@@ -158,9 +158,9 @@ func (c *CLI) newAppStatusCommand() *cobra.Command {
 				c.progressf("warning=operation inventory unavailable: %v", opsErr)
 			}
 			if c.wantsJSON() {
-				payload := map[string]any{"app": finalApp}
+				payload := map[string]any{"app": redactAppForOutput(finalApp)}
 				if opsErr == nil {
-					payload["active_operations"] = activeOps
+					payload["active_operations"] = redactOperationsForOutput(activeOps)
 				}
 				return writeJSON(c.stdout, payload)
 			}
@@ -776,7 +776,16 @@ func loadActiveAppOperations(client *Client, appID string) ([]model.Operation, e
 
 func (c *CLI) renderAppCommandResult(result appCommandResult) error {
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, result)
+		out := result
+		if result.App != nil {
+			app := redactAppForOutput(*result.App)
+			out.App = &app
+		}
+		if result.Operation != nil {
+			operation := redactOperationForOutput(*result.Operation)
+			out.Operation = &operation
+		}
+		return writeJSON(c.stdout, out)
 	}
 	pairs := make([]kvPair, 0, 6)
 	if result.App != nil {

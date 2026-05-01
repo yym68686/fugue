@@ -367,6 +367,41 @@ func (c *kubeClient) deleteManagedApp(ctx context.Context, namespace, name strin
 	return nil
 }
 
+func (c *kubeClient) replaceObjectSpec(ctx context.Context, obj map[string]any) error {
+	if obj == nil {
+		return nil
+	}
+	spec, ok := obj["spec"]
+	if !ok {
+		return nil
+	}
+	apiPath, err := runtime.ObjectAPIPath(c.namespace, obj)
+	if err != nil {
+		return err
+	}
+	ops := []map[string]any{{
+		"op":    "replace",
+		"path":  "/spec",
+		"value": spec,
+	}}
+	_, err = c.doRequest(ctx, http.MethodPatch, apiPath, "application/json-patch+json", ops, nil)
+	return err
+}
+
+func (c *kubeClient) replaceObjectSpecsByKind(ctx context.Context, objects []map[string]any, apiVersion, kind string) error {
+	for _, obj := range objects {
+		if strings.TrimSpace(objectStringField(obj, "apiVersion")) != apiVersion ||
+			strings.TrimSpace(objectStringField(obj, "kind")) != kind {
+			continue
+		}
+		if err := c.replaceObjectSpec(ctx, obj); err != nil {
+			name, namespace := objectNameAndNamespace(c.namespace, obj)
+			return fmt.Errorf("replace %s spec %s/%s: %w", kind, namespace, name, err)
+		}
+	}
+	return nil
+}
+
 func (c *kubeClient) patchManagedAppStatus(ctx context.Context, namespace, name string, status runtime.ManagedAppStatus) error {
 	body := map[string]any{
 		"status": status,
@@ -974,6 +1009,14 @@ func nestedMap(obj map[string]any, keys ...string) (map[string]any, bool) {
 		current = next
 	}
 	return current, true
+}
+
+func objectStringField(obj map[string]any, key string) string {
+	if obj == nil {
+		return ""
+	}
+	value, _ := obj[key].(string)
+	return strings.TrimSpace(value)
 }
 
 func objectNameAndNamespace(defaultNamespace string, obj map[string]any) (string, string) {

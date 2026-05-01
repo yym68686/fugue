@@ -1407,6 +1407,21 @@ func TestApplyManagedAppDesiredStateInjectsWorkloadIdentityIntoManagedAndRuntime
 				Body:       io.NopCloser(strings.NewReader(`{}`)),
 				Header:     make(http.Header),
 			}, nil
+		case req.Method == http.MethodPatch &&
+			req.URL.Path == managedAppAPIPath(namespace, managedName) &&
+			strings.HasPrefix(req.Header.Get("Content-Type"), "application/json-patch+json"):
+			var patch []map[string]any
+			if err := json.NewDecoder(req.Body).Decode(&patch); err != nil {
+				t.Fatalf("decode managed app spec patch: %v", err)
+			}
+			if len(patch) != 1 || patch[0]["op"] != "replace" || patch[0]["path"] != "/spec" {
+				t.Fatalf("expected managed app spec replacement patch, got %#v", patch)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     make(http.Header),
+			}, nil
 		case req.Method == http.MethodPatch:
 			var body map[string]any
 			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
