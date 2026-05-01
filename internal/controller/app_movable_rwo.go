@@ -14,12 +14,13 @@ import (
 const movableRWOCopyPort = 8730
 
 type movableRWOCopyPlan struct {
-	sourceClaimName    string
-	sourceMountSubPath string
-	sourceCopyPath     string
-	targetClaimName    string
-	targetCopyPath     string
-	sourceNodeName     string
+	sourceClaimName     string
+	sourceMountSubPath  string
+	sourceCopyPath      string
+	sourceSharedProject bool
+	targetClaimName     string
+	targetCopyPath      string
+	sourceNodeName      string
 }
 
 func (s *Service) prepareMovableRWOStorageForOperation(
@@ -138,12 +139,13 @@ func (s *Service) buildMovableRWOCopyPlan(ctx context.Context, op model.Operatio
 	}
 
 	return &movableRWOCopyPlan{
-		sourceClaimName:    sourceClaim,
-		sourceMountSubPath: sourceMountSubPath,
-		sourceCopyPath:     sourceCopyPath,
-		targetClaimName:    targetClaim,
-		targetCopyPath:     targetCopyPath,
-		sourceNodeName:     sourceNode,
+		sourceClaimName:     sourceClaim,
+		sourceMountSubPath:  sourceMountSubPath,
+		sourceCopyPath:      sourceCopyPath,
+		sourceSharedProject: model.AppPersistentStorageSpecUsesSharedProjectRWX(sourceStorage),
+		targetClaimName:     targetClaim,
+		targetCopyPath:      targetCopyPath,
+		sourceNodeName:      sourceNode,
 	}, desiredApp, changed, nil
 }
 
@@ -228,7 +230,7 @@ func (s *Service) copyMovableRWOVolume(
 	plan movableRWOCopyPlan,
 ) error {
 	names := movableRWOMigrationResourceNames(desiredApp, plan.targetClaimName)
-	for _, name := range []string{names.sourcePod, names.targetPod} {
+	for _, name := range []string{names.sourcePod, names.targetPod, names.copyPod} {
 		if err := client.deletePod(ctx, namespace, name); err != nil {
 			return err
 		}
@@ -243,6 +245,18 @@ func (s *Service) copyMovableRWOVolume(
 	targetPVC := buildMovableRWOTargetPVC(namespace, desiredApp, plan.targetClaimName)
 	if err := client.applyObject(ctx, targetPVC, nil); err != nil {
 		return fmt.Errorf("apply movable RWO target pvc %s/%s: %w", namespace, plan.targetClaimName, err)
+	}
+	if plan.sourceSharedProject {
+		if err := client.applyObject(ctx, buildMovableRWOCopyPod(namespace, names.copyPod, names.labels, plan, targetScheduling), nil); err != nil {
+			return fmt.Errorf("apply movable RWO copy pod %s/%s: %w", namespace, names.copyPod, err)
+		}
+		if err := waitForMovableRWOPodSucceeded(ctx, client, namespace, names.copyPod, s.movableRWOWaitTimeout()); err != nil {
+			return fmt.Errorf("wait for movable RWO copy pod %s/%s: %w", namespace, names.copyPod, err)
+		}
+		if err := client.deletePod(ctx, namespace, names.copyPod); err != nil {
+			return err
+		}
+		return nil
 	}
 	if err := client.applyObject(ctx, buildMovableRWOTargetService(namespace, names.service, names.labels), nil); err != nil {
 		return fmt.Errorf("apply movable RWO transfer service %s/%s: %w", namespace, names.service, err)
@@ -282,8 +296,8 @@ func (s *Service) copyMovableRWOVolume(
 
 func (s *Service) movableRWOWaitTimeout() time.Duration {
 	timeout := s.Config.ManagedAppRolloutTimeout
-	if timeout < 30*time.Minute {
-		timeout = 30 * time.Minute
+	if timeout < 2*time.Hour {
+		timeout = 2 * time.Hour
 	}
 	return timeout
 }
@@ -291,6 +305,7 @@ func (s *Service) movableRWOWaitTimeout() time.Duration {
 type movableRWOMigrationNames struct {
 	sourcePod string
 	targetPod string
+	copyPod   string
 	service   string
 	labels    map[string]string
 }
@@ -320,6 +335,7 @@ func movableRWOMigrationResourceNames(app model.App, targetClaim string) movable
 	return movableRWOMigrationNames{
 		sourcePod: name("src"),
 		targetPod: name("dst"),
+		copyPod:   name("copy"),
 		service:   name("svc"),
 		labels:    labels,
 	}
@@ -434,6 +450,65 @@ nc -l -p 8730 | tar -xpf - -C "$target"`,
 				"name": "data",
 				"persistentVolumeClaim": map[string]any{
 					"claimName": claimName,
+				},
+			},
+		},
+	}
+	applyMovableRWOScheduling(podSpec, scheduling)
+	return movableRWOPodObject(namespace, name, podLabels, podSpec)
+}
+
+func buildMovableRWOCopyPod(namespace, name string, labels map[string]string, plan movableRWOCopyPlan, scheduling runtimepkg.SchedulingConstraints) map[string]any {
+	podLabels := clonePlacementStringMap(labels)
+	podLabels["fugue.pro/volume-migration-role"] = "copy"
+	sourceMount := map[string]any{
+		"name":      "source",
+		"mountPath": "/src",
+		"readOnly":  true,
+	}
+	if strings.TrimSpace(plan.sourceMountSubPath) != "" {
+		sourceMount["subPath"] = strings.TrimSpace(plan.sourceMountSubPath)
+	}
+	podSpec := map[string]any{
+		"restartPolicy": "Never",
+		"containers": []map[string]any{
+			{
+				"name":  "copy",
+				"image": "busybox:1.36",
+				"command": []string{
+					"sh",
+					"-lc",
+					`set -eu
+source="$1"
+target="$2"
+if [ ! -d "$source" ]; then
+  mkdir -p /tmp/fugue-empty
+  source=/tmp/fugue-empty
+fi
+mkdir -p "$target"
+tar -cpf - -C "$source" . | tar -xpf - -C "$target"`,
+					"sh",
+					path.Join("/src", cleanRelativeCopyPath(plan.sourceCopyPath)),
+					path.Join("/dst", cleanRelativeCopyPath(plan.targetCopyPath)),
+				},
+				"volumeMounts": []map[string]any{
+					sourceMount,
+					{"name": "target", "mountPath": "/dst"},
+				},
+			},
+		},
+		"volumes": []map[string]any{
+			{
+				"name": "source",
+				"persistentVolumeClaim": map[string]any{
+					"claimName": plan.sourceClaimName,
+					"readOnly":  true,
+				},
+			},
+			{
+				"name": "target",
+				"persistentVolumeClaim": map[string]any{
+					"claimName": plan.targetClaimName,
 				},
 			},
 		},

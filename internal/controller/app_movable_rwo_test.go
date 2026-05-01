@@ -59,6 +59,9 @@ func TestBuildMovableRWOCopyPlanConvertsDirectSharedProjectMount(t *testing.T) {
 	if got := plan.targetCopyPath; got == "" || got == "." {
 		t.Fatalf("expected direct shared content to copy into target mount subpath, got %q", got)
 	}
+	if !plan.sourceSharedProject {
+		t.Fatal("expected shared-project source copy plan")
+	}
 	if got := prepared.Spec.PersistentStorage.SharedSubPath; got != "" {
 		t.Fatalf("expected movable RWO target spec to clear shared subpath, got %q", got)
 	}
@@ -120,6 +123,33 @@ func TestDesiredPersistentStorageClaimNameUsesWorkspacePVCWhenClaimNameEmpty(t *
 	}
 	if got, want := desiredPersistentStorageClaimName(app, model.AppPersistentStorageSpec{}), runtimepkg.WorkspacePVCName(app); got != want {
 		t.Fatalf("expected empty claim name to use workspace PVC %q, got %q", want, got)
+	}
+}
+
+func TestBuildMovableRWOCopyPodMountsSharedSourceAndTarget(t *testing.T) {
+	pod := buildMovableRWOCopyPod("tenant-a", "copy", map[string]string{"fugue.pro/volume-migration": "demo"}, movableRWOCopyPlan{
+		sourceClaimName:     "project-shared",
+		sourceMountSubPath:  "sessions/demo",
+		sourceCopyPath:      ".",
+		sourceSharedProject: true,
+		targetClaimName:     "app-workspace",
+		targetCopyPath:      "mounts/mount-demo",
+	}, runtimepkg.SchedulingConstraints{})
+
+	spec := pod["spec"].(map[string]any)
+	containers := spec["containers"].([]map[string]any)
+	mounts := containers[0]["volumeMounts"].([]map[string]any)
+	if got := mounts[0]["subPath"]; got != "sessions/demo" {
+		t.Fatalf("expected source subPath, got %#v", got)
+	}
+	volumes := spec["volumes"].([]map[string]any)
+	sourcePVC := volumes[0]["persistentVolumeClaim"].(map[string]any)
+	if got := sourcePVC["claimName"]; got != "project-shared" {
+		t.Fatalf("expected shared source claim, got %#v", got)
+	}
+	targetPVC := volumes[1]["persistentVolumeClaim"].(map[string]any)
+	if got := targetPVC["claimName"]; got != "app-workspace" {
+		t.Fatalf("expected target claim, got %#v", got)
 	}
 }
 
