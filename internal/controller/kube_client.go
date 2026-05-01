@@ -94,7 +94,8 @@ type kubePersistentVolumeClaim struct {
 		Labels      map[string]string `json:"labels,omitempty"`
 	} `json:"metadata"`
 	Spec struct {
-		VolumeName string `json:"volumeName,omitempty"`
+		VolumeName       string `json:"volumeName,omitempty"`
+		StorageClassName string `json:"storageClassName,omitempty"`
 	} `json:"spec"`
 }
 

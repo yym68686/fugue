@@ -459,6 +459,8 @@ func appPersistentStorageEqual(left, right *model.AppPersistentStorageSpec) bool
 		return false
 	case left.StorageClassName != right.StorageClassName:
 		return false
+	case left.ClaimName != right.ClaimName:
+		return false
 	case left.SharedSubPath != right.SharedSubPath:
 		return false
 	case left.ResetToken != right.ResetToken:

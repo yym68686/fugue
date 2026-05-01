@@ -119,6 +119,8 @@ func ObjectAPIPath(defaultNamespace string, obj map[string]any) (string, error) 
 		return "/api/v1/namespaces/" + namespace + "/secrets/" + name, nil
 	case apiVersion == "v1" && kind == "Service":
 		return "/api/v1/namespaces/" + namespace + "/services/" + name, nil
+	case apiVersion == "v1" && kind == "Pod":
+		return "/api/v1/namespaces/" + namespace + "/pods/" + name, nil
 	case apiVersion == "apps/v1" && kind == "Deployment":
 		return "/apis/apps/v1/namespaces/" + namespace + "/deployments/" + name, nil
 	case apiVersion == CloudNativePGAPIVersion && kind == CloudNativePGClusterKind:

@@ -538,6 +538,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	if err != nil {
 		return fmt.Errorf("load app %s: %w", op.AppID, err)
 	}
+	currentApp := app
 	timer.Mark("load_app")
 	var completionDesiredSpec *model.AppSpec
 
@@ -629,6 +630,20 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	}
 	app = s.appWithResolvedLaunchOverride(ctx, app)
 	timer.Mark("scheduling")
+
+	if s.Config.KubectlApply && (op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate) {
+		preparedApp, changed, err := s.prepareMovableRWOStorageForOperation(ctx, op, currentApp, app, scheduling)
+		if err != nil {
+			return fmt.Errorf("prepare movable RWO storage for app %s: %w", app.ID, err)
+		}
+		if changed {
+			app = preparedApp
+			completionDesiredSpec = cloneControllerAppSpec(&app.Spec)
+		} else {
+			app = preparedApp
+		}
+	}
+	timer.Mark("movable_rwo_storage")
 
 	bundle, err := s.Renderer.RenderAppBundleWithPlacements(app, scheduling, postgresPlacements)
 	if err != nil {

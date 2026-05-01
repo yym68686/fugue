@@ -4477,6 +4477,8 @@ components:
           type: string
         storage_class_name:
           type: string
+        claim_name:
+          type: string
         shared_sub_path:
           type: string
         reset_token:

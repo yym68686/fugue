@@ -1121,6 +1121,39 @@ func TestBuildAppObjectsIncludesPersistentStorageMounts(t *testing.T) {
 	}
 }
 
+func TestBuildAppObjectsUsesPersistentStorageClaimName(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode:      model.AppPersistentStorageModeMovableRWO,
+				ClaimName: "app-demo-workspace-mv-op123",
+				Mounts: []model.AppPersistentStorageMount{
+					{
+						Kind: model.AppPersistentStorageMountKindDirectory,
+						Path: "/workspace",
+					},
+				},
+			},
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	deployment := firstObjectByKind(t, objects, "Deployment")
+	template := deployment["spec"].(map[string]any)["template"].(map[string]any)
+	podSpec := template["spec"].(map[string]any)
+	volumes := podSpec["volumes"].([]map[string]any)
+	claim := volumes[0]["persistentVolumeClaim"].(map[string]any)
+	if got := claim["claimName"]; got != "app-demo-workspace-mv-op123" {
+		t.Fatalf("expected generated movable RWO claim name, got %#v", got)
+	}
+}
+
 func TestBuildManagedAppChildObjectsIncludesSharedProjectRWXPersistentStorage(t *testing.T) {
 	app := model.App{
 		ID:        "app_demo",

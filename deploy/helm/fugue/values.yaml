@@ -181,6 +181,14 @@ sharedWorkspaceStorage:
         effect: NoSchedule
     resources: {}
 
+movableRWOStorage:
+  enabled: true
+  storageClassName: fugue-local-rwo
+  provisionerName: rancher.io/local-path
+  reclaimPolicy: Delete
+  volumeBindingMode: WaitForFirstConsumer
+  allowVolumeExpansion: false
+
 registryJanitor:
   enabled: true
   schedule: "23 4 * * *"

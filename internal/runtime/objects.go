@@ -1342,6 +1342,9 @@ func normalizeRuntimeAppPersistentStorageSpec(app model.App) *model.AppPersisten
 		spec.StorageSize = defaultWorkspaceStorage
 	}
 	spec.StorageClassName = strings.TrimSpace(spec.StorageClassName)
+	if claimName := strings.TrimSpace(spec.ClaimName); claimName != "" {
+		spec.ClaimName = sanitizeName(claimName)
+	}
 	sharedSubPath, err := model.NormalizeAppPersistentStorageSharedSubPath(spec.SharedSubPath)
 	if err != nil {
 		return nil
@@ -1413,6 +1416,9 @@ func persistentStorageMountSubPath(spec model.AppPersistentStorageSpec, mount mo
 func persistentStoragePVCName(app model.App, spec model.AppPersistentStorageSpec) string {
 	if model.AppPersistentStorageSpecUsesSharedProjectRWX(&spec) {
 		return ProjectSharedWorkspacePVCName(app)
+	}
+	if strings.TrimSpace(spec.ClaimName) != "" {
+		return sanitizeName(spec.ClaimName)
 	}
 	return WorkspacePVCName(app)
 }

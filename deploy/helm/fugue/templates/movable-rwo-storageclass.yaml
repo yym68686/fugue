@@ -1,0 +1,13 @@
+{{- if .Values.movableRWOStorage.enabled }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.movableRWOStorage.storageClassName | quote }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "movable-rwo-storage") | nindent 4 }}
+    fugue.pro/movable-rwo: "true"
+provisioner: {{ .Values.movableRWOStorage.provisionerName | quote }}
+reclaimPolicy: {{ .Values.movableRWOStorage.reclaimPolicy }}
+volumeBindingMode: {{ .Values.movableRWOStorage.volumeBindingMode }}
+allowVolumeExpansion: {{ .Values.movableRWOStorage.allowVolumeExpansion }}
+{{- end }}

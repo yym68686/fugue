@@ -653,6 +653,11 @@ func (c *kubeClient) deleteService(ctx context.Context, namespace, name string) 
 	return normalizeDeleteNotFound(err)
 }
 
+func (c *kubeClient) deletePod(ctx context.Context, namespace, name string) error {
+	_, err := c.doRequest(ctx, http.MethodDelete, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/pods/"+url.PathEscape(strings.TrimSpace(name)), "", nil, nil)
+	return normalizeDeleteNotFound(err)
+}
+
 func (c *kubeClient) deletePersistentVolumeClaim(ctx context.Context, namespace, name string) error {
 	_, err := c.doRequest(ctx, http.MethodDelete, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/persistentvolumeclaims/"+url.PathEscape(name), "", nil, nil)
 	return normalizeDeleteNotFound(err)

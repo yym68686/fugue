@@ -1069,6 +1069,7 @@ type AppPersistentStorageSpec struct {
 	StoragePath      string                      `json:"storage_path,omitempty"`
 	StorageSize      string                      `json:"storage_size,omitempty"`
 	StorageClassName string                      `json:"storage_class_name,omitempty"`
+	ClaimName        string                      `json:"claim_name,omitempty"`
 	SharedSubPath    string                      `json:"shared_sub_path,omitempty"`
 	ResetToken       string                      `json:"reset_token,omitempty"`
 	Mounts           []AppPersistentStorageMount `json:"mounts,omitempty"`
