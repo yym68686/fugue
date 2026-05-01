@@ -1626,7 +1626,7 @@ func buildAppPersistentStorageInitContainer(spec model.AppPersistentStorageSpec)
 }
 
 func buildAppPersistentStoragePVCObject(namespace string, app model.App, labels map[string]string, spec model.AppPersistentStorageSpec) map[string]any {
-	return buildPersistentStoragePVCObject(namespace, WorkspacePVCName(app), labels, []string{"ReadWriteOnce"}, spec.StorageSize, spec.StorageClassName)
+	return buildPersistentStoragePVCObject(namespace, persistentStoragePVCName(app, spec), labels, []string{"ReadWriteOnce"}, spec.StorageSize, spec.StorageClassName)
 }
 
 func buildProjectSharedPersistentStoragePVCObject(namespace string, app model.App, spec model.AppPersistentStorageSpec) map[string]any {

@@ -1152,6 +1152,11 @@ func TestBuildAppObjectsUsesPersistentStorageClaimName(t *testing.T) {
 	if got := claim["claimName"]; got != "app-demo-workspace-mv-op123" {
 		t.Fatalf("expected generated movable RWO claim name, got %#v", got)
 	}
+	pvc := firstObjectByKind(t, objects, "PersistentVolumeClaim")
+	metadata := pvc["metadata"].(map[string]any)
+	if got := metadata["name"]; got != "app-demo-workspace-mv-op123" {
+		t.Fatalf("expected persistent storage PVC object name to match claim name, got %#v", got)
+	}
 }
 
 func TestBuildManagedAppChildObjectsIncludesSharedProjectRWXPersistentStorage(t *testing.T) {
