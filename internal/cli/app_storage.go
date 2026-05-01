@@ -120,6 +120,12 @@ the new persistent_storage representation before applying your changes.
 					return err
 				}
 				storage.Mode = mode
+				switch mode {
+				case model.AppPersistentStorageModeSharedProjectRWX:
+					storage.ClaimName = ""
+				default:
+					storage.SharedSubPath = ""
+				}
 			}
 
 			if len(opts.Mounts) > 0 || len(opts.MountFiles) > 0 {

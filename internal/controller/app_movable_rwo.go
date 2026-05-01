@@ -87,9 +87,17 @@ func (s *Service) buildMovableRWOCopyPlan(ctx context.Context, op model.Operatio
 		return nil, desiredApp, false, nil
 	}
 
+	changed := false
+	if strings.TrimSpace(targetStorage.SharedSubPath) != "" {
+		nextStorage := *targetStorage
+		nextStorage.SharedSubPath = ""
+		desiredApp.Spec.PersistentStorage = &nextStorage
+		targetStorage = &nextStorage
+		changed = true
+	}
+
 	sourceClaim := currentPersistentStorageClaimName(currentApp, *sourceStorage)
 	targetClaim := desiredPersistentStorageClaimName(desiredApp, *targetStorage)
-	changed := false
 
 	if strings.TrimSpace(sourceClaim) == strings.TrimSpace(targetClaim) && movableRWONeedsFreshClaim(op, currentApp, desiredApp) {
 		targetClaim = movableRWOTargetClaimName(desiredApp, op.ID)

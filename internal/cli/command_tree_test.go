@@ -433,7 +433,7 @@ func TestRunAppStorageSetBuildsPersistentStorageSpec(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
 			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
-			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1,"persistent_storage":{"mode":"shared_project_rwx","storage_class_name":"fugue-rwx","shared_sub_path":"sessions/demo","mounts":[{"kind":"directory","path":"/workspace","mode":493}]}},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/deploy":
 			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
 				t.Fatalf("decode deploy body: %v", err)
@@ -469,8 +469,11 @@ func TestRunAppStorageSetBuildsPersistentStorageSpec(t *testing.T) {
 	if gotBody.Spec.PersistentStorage == nil || gotBody.Spec.PersistentStorage.Mode != model.AppPersistentStorageModeMovableRWO || gotBody.Spec.PersistentStorage.StorageSize != "20Gi" || gotBody.Spec.PersistentStorage.StorageClassName != "fast" {
 		t.Fatalf("unexpected persistent storage spec %+v", gotBody.Spec.PersistentStorage)
 	}
-	if len(gotBody.Spec.PersistentStorage.Mounts) != 2 {
-		t.Fatalf("expected two mounts, got %+v", gotBody.Spec.PersistentStorage.Mounts)
+	if got := gotBody.Spec.PersistentStorage.SharedSubPath; got != "" {
+		t.Fatalf("expected movable RWO storage set to clear shared subpath, got %q", got)
+	}
+	if len(gotBody.Spec.PersistentStorage.Mounts) != 3 {
+		t.Fatalf("expected three mounts, got %+v", gotBody.Spec.PersistentStorage.Mounts)
 	}
 	out := stdout.String()
 	for _, want := range []string{"app_id=app_123", "operation_id=op_123", "storage_mode=persistent_storage", "persistent_mode=movable_rwo", "storage_size=20Gi"} {
