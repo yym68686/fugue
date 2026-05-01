@@ -159,6 +159,53 @@ func TestRuntimeSharingMutationRequiresOwner(t *testing.T) {
 	}
 }
 
+func TestPlatformAdminCanManageRuntimeSharingAcrossTenants(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	owner, err := s.CreateTenant("Admin Share Owner")
+	if err != nil {
+		t.Fatalf("create owner tenant: %v", err)
+	}
+	grantee, err := s.CreateTenant("Admin Share Grantee")
+	if err != nil {
+		t.Fatalf("create grantee tenant: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(owner.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	_, runtimeObj, err := s.BootstrapClusterNode(nodeSecret, "admin-shared-node", "https://admin-shared-node.example.com", nil, "", "")
+	if err != nil {
+		t.Fatalf("bootstrap cluster node: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, "bootstrap-secret"), nil, ServerConfig{})
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/runtimes/"+runtimeObj.ID+"/sharing/grants", "bootstrap-secret", map[string]any{
+		"tenant_id": grantee.ID,
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d for platform admin grant, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/runtimes/"+runtimeObj.ID+"/sharing", "bootstrap-secret", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d for platform admin sharing view, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodPost, "/v1/runtimes/"+runtimeObj.ID+"/sharing/mode", "bootstrap-secret", map[string]any{
+		"access_mode": model.RuntimeAccessModePublic,
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d for platform admin mode update, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestSetRuntimeAccessModeRequiresPlatformAdmin(t *testing.T) {
 	t.Parallel()
 

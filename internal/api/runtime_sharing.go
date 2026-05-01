@@ -137,7 +137,7 @@ func (s *Server) runtimeOwner(
 		s.writeStoreError(w, err)
 		return model.Runtime{}, false
 	}
-	if runtimeObj.TenantID == "" || runtimeObj.TenantID != principal.TenantID {
+	if runtimeObj.TenantID == "" || (runtimeObj.TenantID != principal.TenantID && !principal.IsPlatformAdmin()) {
 		httpx.WriteError(w, http.StatusForbidden, forbiddenMessage)
 		return model.Runtime{}, false
 	}
