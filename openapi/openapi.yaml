@@ -1643,6 +1643,13 @@ paths:
             schema:
               $ref: "#/components/schemas/ImportGitHubRequest"
       responses:
+        '200':
+          description: Already current response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
         '202':
           description: Successful response
           content:
@@ -2060,6 +2067,40 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AppRoutePatchResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/backing-services/{id}/migrate:
+    post:
+      operationId: migrateBackingService
+      summary: Migrate Backing Service
+      tags: [Backing Services]
+      x-fugue-handler: handleMigrateBackingService
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target_runtime_id]
+              properties:
+                target_runtime_id:
+                  type: string
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/bindings:

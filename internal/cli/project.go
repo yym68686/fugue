@@ -58,13 +58,21 @@ type projectMoveSkippedApp struct {
 	Reason string    `json:"reason"`
 }
 
+type projectMoveSkippedService struct {
+	Service model.BackingService `json:"service"`
+	Reason  string               `json:"reason"`
+}
+
 type projectMoveResult struct {
-	Project         model.Project           `json:"project"`
-	TargetRuntimeID string                  `json:"target_runtime_id"`
-	DryRun          bool                    `json:"dry_run,omitempty"`
-	Apps            []model.App             `json:"apps,omitempty"`
-	Operations      []model.Operation       `json:"operations,omitempty"`
-	Skipped         []projectMoveSkippedApp `json:"skipped,omitempty"`
+	Project         model.Project               `json:"project"`
+	TargetRuntimeID string                      `json:"target_runtime_id"`
+	DryRun          bool                        `json:"dry_run,omitempty"`
+	Apps            []model.App                 `json:"apps,omitempty"`
+	Services        []model.BackingService      `json:"services,omitempty"`
+	UpdatedServices []model.BackingService      `json:"updated_services,omitempty"`
+	Operations      []model.Operation           `json:"operations,omitempty"`
+	Skipped         []projectMoveSkippedApp     `json:"skipped,omitempty"`
+	SkippedServices []projectMoveSkippedService `json:"skipped_services,omitempty"`
 }
 
 func (c *CLI) newProjectMoveCommand() *cobra.Command {
@@ -72,14 +80,16 @@ func (c *CLI) newProjectMoveCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "move <project>",
 		Aliases: []string{"migrate"},
-		Short:   "Move project apps to another runtime",
+		Short:   "Move project apps and backing services to another runtime",
 		Long: strings.TrimSpace(`
-Move every app in a project to a target runtime with one command.
+Move every migratable app and managed backing service in a project to a target
+runtime with one command.
 
-The command preflights all project apps before queueing operations. By default,
-any app that cannot be safely migrated blocks the whole project move so the
-project is not left half-moved. Pass --skip-blocked only when you intentionally
-want to move eligible apps and leave blocked apps behind.
+The command preflights all project apps and backing services before queueing
+operations. By default, any resource that cannot be safely migrated blocks the
+whole project move so the project is not left half-moved. Pass --skip-blocked
+only when you intentionally want to move eligible resources and leave blocked
+resources behind.
 `),
 		Example: strings.TrimSpace(`
 fugue project move marketing --to runtime-b
@@ -115,13 +125,23 @@ fugue project move argus --to v2202605354515455529 --dry-run
 			sort.SliceStable(projectApps, func(i, j int) bool {
 				return strings.TrimSpace(projectApps[i].Name) < strings.TrimSpace(projectApps[j].Name)
 			})
+			services, err := client.ListBackingServices()
+			if err != nil {
+				return err
+			}
+			projectServices := filterProjectMoveServices(services, project.TenantID, project.ID)
+			sort.SliceStable(projectServices, func(i, j int) bool {
+				return strings.TrimSpace(projectServices[i].Name) < strings.TrimSpace(projectServices[j].Name)
+			})
 
 			candidates, skipped := planProjectMove(projectApps, targetRuntimeID)
-			if hasBlockedProjectMoveApps(skipped) && !opts.SkipBlocked && !opts.DryRun {
-				return projectMoveBlockedError(project.Name, skipped)
+			serviceCandidates, skippedServices := planProjectMoveServices(projectServices, targetRuntimeID)
+			if (hasBlockedProjectMoveApps(skipped) || hasBlockedProjectMoveServices(skippedServices)) && !opts.SkipBlocked && !opts.DryRun {
+				return projectMoveBlockedError(project.Name, skipped, skippedServices)
 			}
 			if opts.SkipBlocked {
 				candidates = removeSkippedProjectMoveApps(candidates, skipped)
+				serviceCandidates = removeSkippedProjectMoveServices(serviceCandidates, skippedServices)
 			}
 
 			result := projectMoveResult{
@@ -129,10 +149,21 @@ fugue project move argus --to v2202605354515455529 --dry-run
 				TargetRuntimeID: targetRuntimeID,
 				DryRun:          opts.DryRun,
 				Apps:            candidates,
+				Services:        serviceCandidates,
 				Skipped:         skipped,
+				SkippedServices: skippedServices,
 			}
 			if opts.DryRun {
 				return c.renderProjectMoveResult(result)
+			}
+
+			updatedServices := make([]model.BackingService, 0, len(serviceCandidates))
+			for _, service := range serviceCandidates {
+				updated, err := client.MigrateBackingService(service.ID, targetRuntimeID)
+				if err != nil {
+					return fmt.Errorf("move service %s: %w", formatDisplayName(service.Name, service.ID, c.showIDs()), err)
+				}
+				updatedServices = append(updatedServices, updated)
 			}
 
 			operations := make([]model.Operation, 0, len(candidates))
@@ -150,6 +181,7 @@ fugue project move argus --to v2202605354515455529 --dry-run
 				}
 				operations = finalOps
 			}
+			result.UpdatedServices = updatedServices
 			result.Operations = operations
 			return c.renderProjectMoveResult(result)
 		},
@@ -183,6 +215,46 @@ func planProjectMove(apps []model.App, targetRuntimeID string) ([]model.App, []p
 	return candidates, skipped
 }
 
+func filterProjectMoveServices(services []model.BackingService, tenantID, projectID string) []model.BackingService {
+	out := make([]model.BackingService, 0, len(services))
+	for _, service := range services {
+		if strings.TrimSpace(service.TenantID) != strings.TrimSpace(tenantID) ||
+			strings.TrimSpace(service.ProjectID) != strings.TrimSpace(projectID) {
+			continue
+		}
+		if strings.TrimSpace(service.OwnerAppID) != "" {
+			continue
+		}
+		out = append(out, service)
+	}
+	return out
+}
+
+func planProjectMoveServices(services []model.BackingService, targetRuntimeID string) ([]model.BackingService, []projectMoveSkippedService) {
+	candidates := make([]model.BackingService, 0, len(services))
+	skipped := make([]projectMoveSkippedService, 0)
+	for _, service := range services {
+		if strings.TrimSpace(service.ID) == "" {
+			continue
+		}
+		runtimeID := backingServiceRuntimeID(service)
+		if runtimeID == "" {
+			skipped = append(skipped, projectMoveSkippedService{Service: service, Reason: "blocked by unsupported backing service runtime"})
+			continue
+		}
+		if runtimeID == strings.TrimSpace(targetRuntimeID) {
+			skipped = append(skipped, projectMoveSkippedService{Service: service, Reason: "already on target runtime"})
+			continue
+		}
+		if blockers := backingServiceMigrationBlockers(service); len(blockers) > 0 {
+			skipped = append(skipped, projectMoveSkippedService{Service: service, Reason: "blocked by " + strings.Join(blockers, ", ")})
+			continue
+		}
+		candidates = append(candidates, service)
+	}
+	return candidates, skipped
+}
+
 func removeSkippedProjectMoveApps(apps []model.App, skipped []projectMoveSkippedApp) []model.App {
 	blocked := make(map[string]struct{}, len(skipped))
 	for _, item := range skipped {
@@ -203,7 +275,36 @@ func removeSkippedProjectMoveApps(apps []model.App, skipped []projectMoveSkipped
 	return out
 }
 
+func removeSkippedProjectMoveServices(services []model.BackingService, skipped []projectMoveSkippedService) []model.BackingService {
+	blocked := make(map[string]struct{}, len(skipped))
+	for _, item := range skipped {
+		if strings.HasPrefix(strings.TrimSpace(item.Reason), "blocked by ") {
+			blocked[strings.TrimSpace(item.Service.ID)] = struct{}{}
+		}
+	}
+	if len(blocked) == 0 {
+		return services
+	}
+	out := make([]model.BackingService, 0, len(services))
+	for _, service := range services {
+		if _, ok := blocked[strings.TrimSpace(service.ID)]; ok {
+			continue
+		}
+		out = append(out, service)
+	}
+	return out
+}
+
 func hasBlockedProjectMoveApps(skipped []projectMoveSkippedApp) bool {
+	for _, item := range skipped {
+		if strings.HasPrefix(strings.TrimSpace(item.Reason), "blocked by ") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasBlockedProjectMoveServices(skipped []projectMoveSkippedService) bool {
 	for _, item := range skipped {
 		if strings.HasPrefix(strings.TrimSpace(item.Reason), "blocked by ") {
 			return true
@@ -219,8 +320,29 @@ func appEffectiveRuntimeID(app model.App) string {
 	return strings.TrimSpace(app.Spec.RuntimeID)
 }
 
-func projectMoveBlockedError(projectName string, skipped []projectMoveSkippedApp) error {
-	blocked := make([]string, 0, len(skipped))
+func backingServiceRuntimeID(service model.BackingService) string {
+	if service.Spec.Postgres != nil {
+		return strings.TrimSpace(service.Spec.Postgres.RuntimeID)
+	}
+	return ""
+}
+
+func backingServiceMigrationBlockers(service model.BackingService) []string {
+	if strings.EqualFold(strings.TrimSpace(service.Status), model.BackingServiceStatusDeleted) {
+		return []string{"deleted backing service"}
+	}
+	if !strings.EqualFold(strings.TrimSpace(service.Type), model.BackingServiceTypePostgres) || service.Spec.Postgres == nil {
+		return []string{"unsupported backing service type"}
+	}
+	provisioner := strings.TrimSpace(strings.ToLower(service.Provisioner))
+	if provisioner != "" && provisioner != model.BackingServiceProvisionerManaged {
+		return []string{"external backing service"}
+	}
+	return nil
+}
+
+func projectMoveBlockedError(projectName string, skipped []projectMoveSkippedApp, skippedServices []projectMoveSkippedService) error {
+	blocked := make([]string, 0, len(skipped)+len(skippedServices))
 	for _, item := range skipped {
 		if !strings.HasPrefix(strings.TrimSpace(item.Reason), "blocked by ") {
 			continue
@@ -231,10 +353,20 @@ func projectMoveBlockedError(projectName string, skipped []projectMoveSkippedApp
 		}
 		blocked = append(blocked, fmt.Sprintf("%s (%s)", name, item.Reason))
 	}
+	for _, item := range skippedServices {
+		if !strings.HasPrefix(strings.TrimSpace(item.Reason), "blocked by ") {
+			continue
+		}
+		name := strings.TrimSpace(item.Service.Name)
+		if name == "" {
+			name = strings.TrimSpace(item.Service.ID)
+		}
+		blocked = append(blocked, fmt.Sprintf("%s (%s)", name, item.Reason))
+	}
 	if len(blocked) == 0 {
 		return nil
 	}
-	return fmt.Errorf("project %q has apps that cannot be moved safely: %s; rerun with --skip-blocked to move only eligible apps", strings.TrimSpace(projectName), strings.Join(blocked, "; "))
+	return fmt.Errorf("project %q has resources that cannot be moved safely: %s; rerun with --skip-blocked to move only eligible resources", strings.TrimSpace(projectName), strings.Join(blocked, "; "))
 }
 
 func (c *CLI) renderProjectMoveResult(result projectMoveResult) error {
@@ -246,10 +378,21 @@ func (c *CLI) renderProjectMoveResult(result projectMoveResult) error {
 		kvPair{Key: "target_runtime_id", Value: result.TargetRuntimeID},
 		kvPair{Key: "dry_run", Value: fmt.Sprintf("%t", result.DryRun)},
 		kvPair{Key: "candidate_apps", Value: fmt.Sprintf("%d", len(result.Apps))},
+		kvPair{Key: "candidate_services", Value: fmt.Sprintf("%d", len(result.Services))},
+		kvPair{Key: "updated_services", Value: fmt.Sprintf("%d", len(result.UpdatedServices))},
 		kvPair{Key: "queued_operations", Value: fmt.Sprintf("%d", len(result.Operations))},
 		kvPair{Key: "skipped_apps", Value: fmt.Sprintf("%d", len(result.Skipped))},
+		kvPair{Key: "skipped_services", Value: fmt.Sprintf("%d", len(result.SkippedServices))},
 	); err != nil {
 		return err
+	}
+	if len(result.UpdatedServices) > 0 {
+		if _, err := fmt.Fprintln(c.stdout); err != nil {
+			return err
+		}
+		if err := writeServiceTable(c.stdout, result.UpdatedServices); err != nil {
+			return err
+		}
 	}
 	if len(result.Operations) > 0 {
 		if _, err := fmt.Fprintln(c.stdout); err != nil {
@@ -265,6 +408,16 @@ func (c *CLI) renderProjectMoveResult(result projectMoveResult) error {
 		}
 		for _, item := range result.Skipped {
 			if _, err := fmt.Fprintf(c.stdout, "skipped_app=%s reason=%s\n", formatDisplayName(item.App.Name, item.App.ID, c.showIDs()), item.Reason); err != nil {
+				return err
+			}
+		}
+	}
+	if len(result.SkippedServices) > 0 {
+		if _, err := fmt.Fprintln(c.stdout); err != nil {
+			return err
+		}
+		for _, item := range result.SkippedServices {
+			if _, err := fmt.Fprintf(c.stdout, "skipped_service=%s reason=%s\n", formatDisplayName(item.Service.Name, item.Service.ID, c.showIDs()), item.Reason); err != nil {
 				return err
 			}
 		}

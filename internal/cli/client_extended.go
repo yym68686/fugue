@@ -815,6 +815,15 @@ func (c *Client) DeleteBackingService(id string) (model.BackingService, error) {
 	return response.BackingService, nil
 }
 
+func (c *Client) MigrateBackingService(id, targetRuntimeID string) (model.BackingService, error) {
+	var response backingServiceResponse
+	request := map[string]string{"target_runtime_id": strings.TrimSpace(targetRuntimeID)}
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/backing-services", id, "migrate"), request, &response); err != nil {
+		return model.BackingService{}, err
+	}
+	return response.BackingService, nil
+}
+
 func (c *Client) ListOperations(appID string) ([]model.Operation, error) {
 	return c.listOperations(appID, false)
 }

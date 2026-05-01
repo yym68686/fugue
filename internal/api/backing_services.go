@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
@@ -89,6 +90,52 @@ func (s *Server) handleDeleteBackingService(w http.ResponseWriter, r *http.Reque
 	s.appendAudit(principal, "backing_service.delete", "backing_service", service.ID, service.TenantID, map[string]string{"name": service.Name, "project_id": service.ProjectID})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"backing_service": cloneBackingService(service),
+	})
+}
+
+func (s *Server) handleMigrateBackingService(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("app.write") && !principal.HasScope("project.write") {
+		httpx.WriteError(w, http.StatusForbidden, "missing app.write or project.write scope")
+		return
+	}
+	service, allowed := s.loadAuthorizedBackingService(w, r, principal)
+	if !allowed {
+		return
+	}
+	var req struct {
+		TargetRuntimeID string `json:"target_runtime_id"`
+	}
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	targetRuntimeID := strings.TrimSpace(req.TargetRuntimeID)
+	if targetRuntimeID == "" {
+		s.writeStoreError(w, store.ErrInvalidInput)
+		return
+	}
+	if backingServiceRuntimeID(service) == targetRuntimeID {
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{
+			"backing_service": cloneBackingService(service),
+			"already_current": true,
+		})
+		return
+	}
+	spec, err := prepareMigrateBackingServiceSpec(service, targetRuntimeID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	updated, err := s.store.UpdateBackingServiceSpec(service.ID, spec)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.appendAudit(principal, "backing_service.migrate", "backing_service", updated.ID, updated.TenantID, map[string]string{"name": updated.Name, "project_id": updated.ProjectID, "target_runtime_id": targetRuntimeID})
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
+		"backing_service": cloneBackingService(updated),
+		"already_current": false,
 	})
 }
 
@@ -202,6 +249,32 @@ func (s *Server) loadAuthorizedBackingService(w http.ResponseWriter, r *http.Req
 		return model.BackingService{}, false
 	}
 	return service, true
+}
+
+func prepareMigrateBackingServiceSpec(service model.BackingService, targetRuntimeID string) (model.BackingServiceSpec, error) {
+	if !isMigratableBackingService(service) || service.Spec.Postgres == nil {
+		return model.BackingServiceSpec{}, store.ErrInvalidInput
+	}
+	spec := cloneBackingServiceSpec(service.Spec)
+	spec.Postgres.RuntimeID = strings.TrimSpace(targetRuntimeID)
+	spec.Postgres.FailoverTargetRuntimeID = ""
+	spec.Postgres.PrimaryNodeName = ""
+	spec.Postgres.PrimaryPlacementPendingRebalance = false
+	return spec, nil
+}
+
+func isMigratableBackingService(service model.BackingService) bool {
+	if !strings.EqualFold(strings.TrimSpace(service.Type), model.BackingServiceTypePostgres) {
+		return false
+	}
+	return isManagedBackingService(service) && service.Spec.Postgres != nil
+}
+
+func backingServiceRuntimeID(service model.BackingService) string {
+	if service.Spec.Postgres != nil {
+		return strings.TrimSpace(service.Spec.Postgres.RuntimeID)
+	}
+	return ""
 }
 
 func (s *Server) queueAppDeployOperation(principal model.Principal, app model.App) (model.Operation, error) {

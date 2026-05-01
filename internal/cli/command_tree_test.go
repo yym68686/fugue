@@ -577,6 +577,7 @@ func TestRunProjectMoveQueuesEligibleApps(t *testing.T) {
 	t.Parallel()
 
 	var migrateBodies []map[string]any
+	var serviceMigrateBodies []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
@@ -592,6 +593,18 @@ func TestRunProjectMoveQueuesEligibleApps(t *testing.T) {
 {"id":"app_worker","tenant_id":"tenant_123","project_id":"project_123","name":"worker","spec":{"runtime_id":"runtime_a","replicas":1,"persistent_storage":{"mode":"movable_rwo","storage_size":"1Gi","mounts":[{"kind":"directory","path":"/workspace"}]}},"status":{"current_runtime_id":"runtime_a"},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},
 {"id":"app_data","tenant_id":"tenant_123","project_id":"project_123","name":"data","spec":{"runtime_id":"runtime_a","replicas":1,"persistent_storage":{"storage_size":"1Gi","mounts":[{"kind":"directory","path":"/data"}]}},"status":{"current_runtime_id":"runtime_a"},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}
 ]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/backing-services":
+			_, _ = w.Write([]byte(`{"backing_services":[
+{"id":"service_db","tenant_id":"tenant_123","project_id":"project_123","name":"main-db","type":"postgres","provisioner":"managed","status":"active","spec":{"postgres":{"runtime_id":"runtime_a","database":"demo","user":"demo","service_name":"demo-postgres"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},
+{"id":"service_owned","tenant_id":"tenant_123","project_id":"project_123","owner_app_id":"app_web","name":"web-db","type":"postgres","provisioner":"managed","status":"active","spec":{"postgres":{"runtime_id":"runtime_a","database":"web","user":"web","service_name":"web-postgres"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}
+]}`))
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/backing-services/") && strings.HasSuffix(r.URL.Path, "/migrate"):
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode service migrate body: %v", err)
+			}
+			serviceMigrateBodies = append(serviceMigrateBodies, body)
+			_, _ = w.Write([]byte(`{"backing_service":{"id":"service_db","tenant_id":"tenant_123","project_id":"project_123","name":"main-db","type":"postgres","provisioner":"managed","status":"active","spec":{"postgres":{"runtime_id":"runtime_b","database":"demo","user":"demo","service_name":"demo-postgres"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/apps/") && strings.HasSuffix(r.URL.Path, "/migrate"):
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -623,13 +636,19 @@ func TestRunProjectMoveQueuesEligibleApps(t *testing.T) {
 	if len(migrateBodies) != 3 {
 		t.Fatalf("expected three migrate requests, got %d", len(migrateBodies))
 	}
+	if len(serviceMigrateBodies) != 1 {
+		t.Fatalf("expected one service migrate request, got %d", len(serviceMigrateBodies))
+	}
+	if serviceMigrateBodies[0]["target_runtime_id"] != "runtime_b" {
+		t.Fatalf("expected service target_runtime_id runtime_b, got %+v", serviceMigrateBodies[0])
+	}
 	for _, body := range migrateBodies {
 		if body["target_runtime_id"] != "runtime_b" {
 			t.Fatalf("expected target_runtime_id runtime_b, got %+v", body)
 		}
 	}
 	out := stdout.String()
-	for _, want := range []string{"project=demo", "target_runtime_id=runtime_b", "candidate_apps=3", "queued_operations=3", "skipped_apps=1", "skipped_app=data", "blocked by persistent storage"} {
+	for _, want := range []string{"project=demo", "target_runtime_id=runtime_b", "candidate_apps=3", "candidate_services=1", "updated_services=1", "queued_operations=3", "skipped_apps=1", "skipped_app=data", "blocked by persistent storage"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}

@@ -139,6 +139,44 @@ func (s *Store) DeleteBackingService(id string) (model.BackingService, error) {
 	return service, err
 }
 
+func (s *Store) UpdateBackingServiceSpec(id string, spec model.BackingServiceSpec) (model.BackingService, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.BackingService{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgUpdateBackingServiceSpec(id, spec)
+	}
+	var service model.BackingService
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findBackingService(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		next := cloneBackingService(state.BackingServices[index])
+		if isDeletedBackingService(next) {
+			return ErrNotFound
+		}
+		beforeRuntimeID := backingServiceSpecRuntimeID(next)
+		next.Spec = cloneBackingServiceSpec(spec)
+		next.UpdatedAt = time.Now().UTC()
+		if err := normalizeBackingServiceForPersist(&next, nil); err != nil {
+			return err
+		}
+		if err := validateBackingServiceSpecRuntimeReservationsState(state, next.ProjectID, next.Spec); err != nil {
+			return err
+		}
+		if backingServiceSpecRuntimeID(next) != beforeRuntimeID {
+			next.CurrentRuntimeStartedAt = nil
+			next.CurrentRuntimeReadyAt = nil
+		}
+		state.BackingServices[index] = next
+		service = cloneBackingService(next)
+		return nil
+	})
+	return service, err
+}
+
 func (s *Store) ListServiceBindings(appID string) ([]model.ServiceBinding, error) {
 	if strings.TrimSpace(appID) == "" {
 		return nil, ErrInvalidInput
@@ -381,6 +419,13 @@ func cloneBackingServiceSpec(spec model.BackingServiceSpec) model.BackingService
 		out.Postgres = &postgres
 	}
 	return out
+}
+
+func backingServiceSpecRuntimeID(service model.BackingService) string {
+	if service.Spec.Postgres != nil {
+		return strings.TrimSpace(service.Spec.Postgres.RuntimeID)
+	}
+	return ""
 }
 
 func cloneServiceBinding(binding model.ServiceBinding) model.ServiceBinding {

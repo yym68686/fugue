@@ -182,6 +182,45 @@ func (s *Store) pgDeleteBackingService(id string) (model.BackingService, error) 
 	return service, nil
 }
 
+func (s *Store) pgUpdateBackingServiceSpec(id string, spec model.BackingServiceSpec) (model.BackingService, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.BackingService{}, fmt.Errorf("begin update backing service transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	service, err := s.pgGetBackingServiceTx(ctx, tx, id, true)
+	if err != nil {
+		return model.BackingService{}, mapDBErr(err)
+	}
+	if isDeletedBackingService(service) {
+		return model.BackingService{}, ErrNotFound
+	}
+	beforeRuntimeID := backingServiceSpecRuntimeID(service)
+	service.Spec = cloneBackingServiceSpec(spec)
+	service.UpdatedAt = time.Now().UTC()
+	if err := normalizeBackingServiceForPersist(&service, nil); err != nil {
+		return model.BackingService{}, err
+	}
+	if err := pgValidateBackingServiceSpecRuntimeReservationsTx(ctx, tx, service.ProjectID, service.Spec); err != nil {
+		return model.BackingService{}, err
+	}
+	if backingServiceSpecRuntimeID(service) != beforeRuntimeID {
+		service.CurrentRuntimeStartedAt = nil
+		service.CurrentRuntimeReadyAt = nil
+	}
+	if err := s.pgUpdateBackingServiceTx(ctx, tx, service); err != nil {
+		return model.BackingService{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.BackingService{}, fmt.Errorf("commit update backing service transaction: %w", err)
+	}
+	return service, nil
+}
+
 func (s *Store) pgListServiceBindings(appID string) ([]model.ServiceBinding, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

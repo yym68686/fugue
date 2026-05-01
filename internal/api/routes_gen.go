@@ -79,6 +79,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/backing-services", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateBackingService)))
 	mux.Handle("GET /v1/backing-services/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetBackingService)))
 	mux.Handle("DELETE /v1/backing-services/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteBackingService)))
+	mux.Handle("POST /v1/backing-services/{id}/migrate", s.auth.RequireAPI(http.HandlerFunc(s.handleMigrateBackingService)))
 	mux.Handle("GET /v1/billing", s.auth.RequireAPI(http.HandlerFunc(s.handleGetBilling)))
 	mux.Handle("PATCH /v1/billing", s.auth.RequireAPI(http.HandlerFunc(s.handleUpdateBilling)))
 	mux.Handle("PATCH /v1/billing/balance", s.auth.RequireAPI(http.HandlerFunc(s.handleSetBillingBalance)))

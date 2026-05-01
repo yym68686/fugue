@@ -381,6 +381,79 @@ func TestBackingServiceLifecycleAndBindingsQueueDeploy(t *testing.T) {
 	}
 }
 
+func TestMigrateBackingServiceMovesManagedPostgresRuntime(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Backing Service Move Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	raiseManagedTestCap(t, s, tenant.ID)
+	sourceRuntime, _, err := s.CreateRuntime(tenant.ID, "source-vps", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create source runtime: %v", err)
+	}
+	targetRuntime, _, err := s.CreateRuntime(tenant.ID, "target-vps", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create target runtime: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "project-admin", []string{"project.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	service, err := s.CreateBackingService(tenant.ID, project.ID, "main-db", "", model.BackingServiceSpec{
+		Postgres: &model.AppPostgresSpec{
+			RuntimeID:                        sourceRuntime.ID,
+			FailoverTargetRuntimeID:          targetRuntime.ID,
+			PrimaryNodeName:                  "old-node",
+			PrimaryPlacementPendingRebalance: true,
+			Database:                         "demo",
+			User:                             "demo",
+			Password:                         "secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create backing service: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/backing-services/"+service.ID+"/migrate", apiKey, map[string]any{
+		"target_runtime_id": targetRuntime.ID,
+	})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		BackingService model.BackingService `json:"backing_service"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	postgres := response.BackingService.Spec.Postgres
+	if postgres == nil {
+		t.Fatalf("expected postgres spec, got %+v", response.BackingService)
+	}
+	if postgres.RuntimeID != targetRuntime.ID {
+		t.Fatalf("expected runtime %q, got %q", targetRuntime.ID, postgres.RuntimeID)
+	}
+	if postgres.FailoverTargetRuntimeID != "" || postgres.PrimaryNodeName != "" || postgres.PrimaryPlacementPendingRebalance {
+		t.Fatalf("expected migrate to clear placement/failover state, got %+v", postgres)
+	}
+	persisted, err := s.GetBackingService(service.ID)
+	if err != nil {
+		t.Fatalf("get persisted service: %v", err)
+	}
+	if persisted.Spec.Postgres == nil || persisted.Spec.Postgres.RuntimeID != targetRuntime.ID {
+		t.Fatalf("expected persisted service on target runtime, got %+v", persisted.Spec.Postgres)
+	}
+}
+
 func TestGetAppIncludesStructuredTechStack(t *testing.T) {
 	t.Parallel()
 

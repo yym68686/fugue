@@ -20,6 +20,7 @@ func prepareMigrateDesiredSpec(app model.App, spec *model.AppSpec, targetRuntime
 	}
 	postgres.RuntimeID = targetRuntimeID
 	postgres.FailoverTargetRuntimeID = ""
+	postgres.PrimaryNodeName = ""
 	postgres.PrimaryPlacementPendingRebalance = false
 	spec.Postgres = postgres
 }
