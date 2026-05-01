@@ -153,6 +153,25 @@ func TestBuildMovableRWOCopyPodMountsSharedSourceAndTarget(t *testing.T) {
 	}
 }
 
+func TestSchedulingForPodNodePinsToNFSNode(t *testing.T) {
+	pod := kubePod{}
+	pod.Spec.NodeName = "gcp1"
+	pod.Spec.Tolerations = []runtimepkg.Toleration{
+		{Key: "node-role.kubernetes.io/control-plane", Operator: "Exists", Effect: "NoSchedule"},
+	}
+
+	scheduling, ok := schedulingForPodNode(pod)
+	if !ok {
+		t.Fatal("expected scheduling for pod node")
+	}
+	if got := scheduling.NodeSelector[kubeHostnameLabelKey]; got != "gcp1" {
+		t.Fatalf("expected node selector to pin gcp1, got %q", got)
+	}
+	if len(scheduling.Tolerations) != 1 || scheduling.Tolerations[0].Key != "node-role.kubernetes.io/control-plane" {
+		t.Fatalf("expected NFS pod toleration to be preserved, got %#v", scheduling.Tolerations)
+	}
+}
+
 func TestMovableRWONeedsFreshClaimWhenMigratingRuntime(t *testing.T) {
 	current := model.App{
 		ID: "app_demo",

@@ -11,7 +11,10 @@ import (
 	runtimepkg "fugue/internal/runtime"
 )
 
-const movableRWOCopyPort = 8730
+const (
+	movableRWOCopyPort                  = 8730
+	sharedWorkspaceNFSComponentSelector = "app.kubernetes.io/component=shared-workspace-nfs"
+)
 
 type movableRWOCopyPlan struct {
 	sourceClaimName     string
@@ -247,6 +250,11 @@ func (s *Service) copyMovableRWOVolume(
 		return fmt.Errorf("apply movable RWO target pvc %s/%s: %w", namespace, plan.targetClaimName, err)
 	}
 	if plan.sourceSharedProject {
+		if sourceScheduling, found, err := sharedWorkspaceNFSServerScheduling(ctx, client); err != nil {
+			return fmt.Errorf("resolve shared workspace NFS source node: %w", err)
+		} else if found {
+			return s.copyMovableRWOVolumeViaTransferPods(ctx, client, namespace, names, plan, sourceScheduling, targetScheduling)
+		}
 		if err := client.applyObject(ctx, buildMovableRWOCopyPod(namespace, names.copyPod, names.labels, plan, targetScheduling), nil); err != nil {
 			return fmt.Errorf("apply movable RWO copy pod %s/%s: %w", namespace, names.copyPod, err)
 		}
@@ -258,16 +266,6 @@ func (s *Service) copyMovableRWOVolume(
 		}
 		return nil
 	}
-	if err := client.applyObject(ctx, buildMovableRWOTargetService(namespace, names.service, names.labels), nil); err != nil {
-		return fmt.Errorf("apply movable RWO transfer service %s/%s: %w", namespace, names.service, err)
-	}
-	if err := client.applyObject(ctx, buildMovableRWOTargetPod(namespace, names.targetPod, names.labels, plan.targetClaimName, plan.targetCopyPath, targetScheduling), nil); err != nil {
-		return fmt.Errorf("apply movable RWO target pod %s/%s: %w", namespace, names.targetPod, err)
-	}
-	if err := waitForMovableRWOPodReady(ctx, client, namespace, names.targetPod, s.movableRWOWaitTimeout()); err != nil {
-		return fmt.Errorf("wait for movable RWO target pod %s/%s: %w", namespace, names.targetPod, err)
-	}
-
 	sourceScheduling, err := s.managedSchedulingConstraintsForApp(ctx, currentApp)
 	if err != nil {
 		return err
@@ -278,6 +276,28 @@ func (s *Service) copyMovableRWOVolume(
 		}
 		sourceScheduling.NodeSelector[kubeHostnameLabelKey] = strings.TrimSpace(plan.sourceNodeName)
 	}
+	return s.copyMovableRWOVolumeViaTransferPods(ctx, client, namespace, names, plan, sourceScheduling, targetScheduling)
+}
+
+func (s *Service) copyMovableRWOVolumeViaTransferPods(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	names movableRWOMigrationNames,
+	plan movableRWOCopyPlan,
+	sourceScheduling runtimepkg.SchedulingConstraints,
+	targetScheduling runtimepkg.SchedulingConstraints,
+) error {
+	if err := client.applyObject(ctx, buildMovableRWOTargetService(namespace, names.service, names.labels), nil); err != nil {
+		return fmt.Errorf("apply movable RWO transfer service %s/%s: %w", namespace, names.service, err)
+	}
+	if err := client.applyObject(ctx, buildMovableRWOTargetPod(namespace, names.targetPod, names.labels, plan.targetClaimName, plan.targetCopyPath, targetScheduling), nil); err != nil {
+		return fmt.Errorf("apply movable RWO target pod %s/%s: %w", namespace, names.targetPod, err)
+	}
+	if err := waitForMovableRWOPodReady(ctx, client, namespace, names.targetPod, s.movableRWOWaitTimeout()); err != nil {
+		return fmt.Errorf("wait for movable RWO target pod %s/%s: %w", namespace, names.targetPod, err)
+	}
+
 	if err := client.applyObject(ctx, buildMovableRWOSourcePod(namespace, names.sourcePod, names.labels, plan, names.service, sourceScheduling), nil); err != nil {
 		return fmt.Errorf("apply movable RWO source pod %s/%s: %w", namespace, names.sourcePod, err)
 	}
@@ -292,6 +312,44 @@ func (s *Service) copyMovableRWOVolume(
 	_ = client.deletePod(context.Background(), namespace, names.targetPod)
 	_ = client.deleteService(context.Background(), namespace, names.service)
 	return nil
+}
+
+func sharedWorkspaceNFSServerScheduling(ctx context.Context, client *kubeClient) (runtimepkg.SchedulingConstraints, bool, error) {
+	pods, err := client.listPodsBySelector(ctx, "", sharedWorkspaceNFSComponentSelector)
+	if err != nil {
+		return runtimepkg.SchedulingConstraints{}, false, err
+	}
+	for _, pod := range pods {
+		if !strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Running") || !podConditionTrue(pod, "Ready") {
+			continue
+		}
+		if scheduling, ok := schedulingForPodNode(pod); ok {
+			return scheduling, true, nil
+		}
+	}
+	for _, pod := range pods {
+		if strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Failed") || strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Succeeded") {
+			continue
+		}
+		if scheduling, ok := schedulingForPodNode(pod); ok {
+			return scheduling, true, nil
+		}
+	}
+	return runtimepkg.SchedulingConstraints{}, false, nil
+}
+
+func schedulingForPodNode(pod kubePod) (runtimepkg.SchedulingConstraints, bool) {
+	nodeName := strings.TrimSpace(pod.Spec.NodeName)
+	if nodeName == "" {
+		return runtimepkg.SchedulingConstraints{}, false
+	}
+	scheduling := runtimepkg.SchedulingConstraints{
+		NodeSelector: map[string]string{kubeHostnameLabelKey: nodeName},
+	}
+	if len(pod.Spec.Tolerations) > 0 {
+		scheduling.Tolerations = append([]runtimepkg.Toleration(nil), pod.Spec.Tolerations...)
+	}
+	return scheduling, true
 }
 
 func (s *Service) movableRWOWaitTimeout() time.Duration {

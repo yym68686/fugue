@@ -152,8 +152,9 @@ type kubePod struct {
 }
 
 type kubePodSpec struct {
-	NodeName string          `json:"nodeName,omitempty"`
-	Volumes  []kubePodVolume `json:"volumes,omitempty"`
+	NodeName    string                  `json:"nodeName,omitempty"`
+	Tolerations []runtimepkg.Toleration `json:"tolerations,omitempty"`
+	Volumes     []kubePodVolume         `json:"volumes,omitempty"`
 
 	InitContainers []kubeContainerSpec `json:"initContainers"`
 	Containers     []kubeContainerSpec `json:"containers"`
