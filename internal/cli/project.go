@@ -2,9 +2,11 @@ package cli
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
+	"fugue/internal/failover"
 	"fugue/internal/model"
 
 	"github.com/spf13/cobra"
@@ -33,6 +35,7 @@ Pass --tenant only when you are acting across multiple visible tenants.
 		c.newProjectShowCommand(),
 		c.newProjectCreateCommand(),
 		c.newProjectEditCommand(),
+		c.newProjectMoveCommand(),
 		c.newProjectRuntimeReservationsCommand(),
 		hideCompatCommand(c.newProjectRenameCommand(), "fugue project edit"),
 		c.newProjectRemoveCommand(),
@@ -40,6 +43,233 @@ Pass --tenant only when you are acting across multiple visible tenants.
 		hideCompatCommand(c.newProjectUsageCommand(), "fugue project images usage"),
 	)
 	return cmd
+}
+
+type projectMoveCommandOptions struct {
+	RuntimeName string
+	RuntimeID   string
+	Wait        bool
+	SkipBlocked bool
+	DryRun      bool
+}
+
+type projectMoveSkippedApp struct {
+	App    model.App `json:"app"`
+	Reason string    `json:"reason"`
+}
+
+type projectMoveResult struct {
+	Project         model.Project           `json:"project"`
+	TargetRuntimeID string                  `json:"target_runtime_id"`
+	DryRun          bool                    `json:"dry_run,omitempty"`
+	Apps            []model.App             `json:"apps,omitempty"`
+	Operations      []model.Operation       `json:"operations,omitempty"`
+	Skipped         []projectMoveSkippedApp `json:"skipped,omitempty"`
+}
+
+func (c *CLI) newProjectMoveCommand() *cobra.Command {
+	opts := projectMoveCommandOptions{Wait: true}
+	cmd := &cobra.Command{
+		Use:     "move <project>",
+		Aliases: []string{"migrate"},
+		Short:   "Move project apps to another runtime",
+		Long: strings.TrimSpace(`
+Move every app in a project to a target runtime with one command.
+
+The command preflights all project apps before queueing operations. By default,
+any app that cannot be safely migrated blocks the whole project move so the
+project is not left half-moved. Pass --skip-blocked only when you intentionally
+want to move eligible apps and leave blocked apps behind.
+`),
+		Example: strings.TrimSpace(`
+fugue project move marketing --to runtime-b
+fugue project move argus --to v2202605354515455529 --skip-blocked
+fugue project move argus --to v2202605354515455529 --dry-run
+`),
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			project, err := c.resolveNamedProject(client, args[0])
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(opts.RuntimeName) == "" && strings.TrimSpace(opts.RuntimeID) == "" {
+				return fmt.Errorf("target runtime is required")
+			}
+			targetRuntimeID, err := resolveRuntimeSelection(client, opts.RuntimeID, opts.RuntimeName)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(targetRuntimeID) == "" {
+				return fmt.Errorf("target runtime is required")
+			}
+
+			apps, err := client.ListAppsWithLiveStatus(false)
+			if err != nil {
+				return err
+			}
+			projectApps := filterApps(apps, project.TenantID, project.ID)
+			sort.SliceStable(projectApps, func(i, j int) bool {
+				return strings.TrimSpace(projectApps[i].Name) < strings.TrimSpace(projectApps[j].Name)
+			})
+
+			candidates, skipped := planProjectMove(projectApps, targetRuntimeID)
+			if hasBlockedProjectMoveApps(skipped) && !opts.SkipBlocked && !opts.DryRun {
+				return projectMoveBlockedError(project.Name, skipped)
+			}
+			if opts.SkipBlocked {
+				candidates = removeSkippedProjectMoveApps(candidates, skipped)
+			}
+
+			result := projectMoveResult{
+				Project:         project,
+				TargetRuntimeID: targetRuntimeID,
+				DryRun:          opts.DryRun,
+				Apps:            candidates,
+				Skipped:         skipped,
+			}
+			if opts.DryRun {
+				return c.renderProjectMoveResult(result)
+			}
+
+			operations := make([]model.Operation, 0, len(candidates))
+			for _, app := range candidates {
+				response, err := client.MigrateApp(app.ID, targetRuntimeID)
+				if err != nil {
+					return fmt.Errorf("move app %s: %w", formatDisplayName(app.Name, app.ID, c.showIDs()), err)
+				}
+				operations = append(operations, response.Operation)
+			}
+			if opts.Wait {
+				finalOps, err := c.waitForOperations(client, operations)
+				if err != nil {
+					return err
+				}
+				operations = finalOps
+			}
+			result.Operations = operations
+			return c.renderProjectMoveResult(result)
+		},
+	}
+	cmd.Flags().StringVar(&opts.RuntimeName, "to", "", "Target runtime name")
+	cmd.Flags().StringVar(&opts.RuntimeID, "runtime-id", "", "Target runtime ID")
+	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for operation completion")
+	cmd.Flags().BoolVar(&opts.SkipBlocked, "skip-blocked", false, "Move eligible apps and leave blocked apps on their current runtime")
+	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "Show the project move plan without queueing operations")
+	_ = cmd.Flags().MarkHidden("runtime-id")
+	return cmd
+}
+
+func planProjectMove(apps []model.App, targetRuntimeID string) ([]model.App, []projectMoveSkippedApp) {
+	candidates := make([]model.App, 0, len(apps))
+	skipped := make([]projectMoveSkippedApp, 0)
+	for _, app := range apps {
+		if strings.TrimSpace(app.ID) == "" {
+			continue
+		}
+		if strings.TrimSpace(appEffectiveRuntimeID(app)) == strings.TrimSpace(targetRuntimeID) {
+			skipped = append(skipped, projectMoveSkippedApp{App: app, Reason: "already on target runtime"})
+			continue
+		}
+		if blockers := failover.MigrationBlockers(app); len(blockers) > 0 {
+			skipped = append(skipped, projectMoveSkippedApp{App: app, Reason: "blocked by " + strings.Join(blockers, ", ")})
+			continue
+		}
+		candidates = append(candidates, app)
+	}
+	return candidates, skipped
+}
+
+func removeSkippedProjectMoveApps(apps []model.App, skipped []projectMoveSkippedApp) []model.App {
+	blocked := make(map[string]struct{}, len(skipped))
+	for _, item := range skipped {
+		if strings.HasPrefix(strings.TrimSpace(item.Reason), "blocked by ") {
+			blocked[strings.TrimSpace(item.App.ID)] = struct{}{}
+		}
+	}
+	if len(blocked) == 0 {
+		return apps
+	}
+	out := make([]model.App, 0, len(apps))
+	for _, app := range apps {
+		if _, ok := blocked[strings.TrimSpace(app.ID)]; ok {
+			continue
+		}
+		out = append(out, app)
+	}
+	return out
+}
+
+func hasBlockedProjectMoveApps(skipped []projectMoveSkippedApp) bool {
+	for _, item := range skipped {
+		if strings.HasPrefix(strings.TrimSpace(item.Reason), "blocked by ") {
+			return true
+		}
+	}
+	return false
+}
+
+func appEffectiveRuntimeID(app model.App) string {
+	if runtimeID := strings.TrimSpace(app.Status.CurrentRuntimeID); runtimeID != "" {
+		return runtimeID
+	}
+	return strings.TrimSpace(app.Spec.RuntimeID)
+}
+
+func projectMoveBlockedError(projectName string, skipped []projectMoveSkippedApp) error {
+	blocked := make([]string, 0, len(skipped))
+	for _, item := range skipped {
+		if !strings.HasPrefix(strings.TrimSpace(item.Reason), "blocked by ") {
+			continue
+		}
+		name := strings.TrimSpace(item.App.Name)
+		if name == "" {
+			name = strings.TrimSpace(item.App.ID)
+		}
+		blocked = append(blocked, fmt.Sprintf("%s (%s)", name, item.Reason))
+	}
+	if len(blocked) == 0 {
+		return nil
+	}
+	return fmt.Errorf("project %q has apps that cannot be moved safely: %s; rerun with --skip-blocked to move only eligible apps", strings.TrimSpace(projectName), strings.Join(blocked, "; "))
+}
+
+func (c *CLI) renderProjectMoveResult(result projectMoveResult) error {
+	if c.wantsJSON() {
+		return writeJSON(c.stdout, result)
+	}
+	if err := writeKeyValues(c.stdout,
+		kvPair{Key: "project", Value: formatDisplayName(result.Project.Name, result.Project.ID, c.showIDs())},
+		kvPair{Key: "target_runtime_id", Value: result.TargetRuntimeID},
+		kvPair{Key: "dry_run", Value: fmt.Sprintf("%t", result.DryRun)},
+		kvPair{Key: "candidate_apps", Value: fmt.Sprintf("%d", len(result.Apps))},
+		kvPair{Key: "queued_operations", Value: fmt.Sprintf("%d", len(result.Operations))},
+		kvPair{Key: "skipped_apps", Value: fmt.Sprintf("%d", len(result.Skipped))},
+	); err != nil {
+		return err
+	}
+	if len(result.Operations) > 0 {
+		if _, err := fmt.Fprintln(c.stdout); err != nil {
+			return err
+		}
+		if err := writeOperationTableWithApps(c.stdout, result.Operations, mapAppNames(result.Apps)); err != nil {
+			return err
+		}
+	}
+	if len(result.Skipped) > 0 {
+		if _, err := fmt.Fprintln(c.stdout); err != nil {
+			return err
+		}
+		for _, item := range result.Skipped {
+			if _, err := fmt.Fprintf(c.stdout, "skipped_app=%s reason=%s\n", formatDisplayName(item.App.Name, item.App.ID, c.showIDs()), item.Reason); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (c *CLI) newProjectShowCommand() *cobra.Command {

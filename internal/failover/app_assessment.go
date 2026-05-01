@@ -58,7 +58,10 @@ func AssessApp(app model.App, runtime *model.Runtime) AppAssessment {
 
 func MigrationBlockers(app model.App) []string {
 	blockers := make([]string, 0, 1)
-	if app.Spec.Workspace != nil || app.Spec.PersistentStorage != nil {
+	if app.Spec.Workspace != nil {
+		blockers = append(blockers, "persistent storage")
+	}
+	if app.Spec.PersistentStorage != nil && !model.AppPersistentStorageSpecUsesSharedProjectRWX(app.Spec.PersistentStorage) {
 		blockers = append(blockers, "persistent storage")
 	}
 	return blockers

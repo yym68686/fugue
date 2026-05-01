@@ -129,8 +129,15 @@ func validateWorkspaceRuntimeState(state *model.State, runtimeID string, spec mo
 	return validateWorkspaceSpecForRuntime(spec, state.Runtimes[runtimeIndex].Type)
 }
 
-func hasPersistentWorkspace(app model.App) bool {
-	return app.Spec.Workspace != nil || app.Spec.PersistentStorage != nil
+func hasMigrationBlockingPersistentWorkspace(app model.App) bool {
+	return appSpecHasMigrationBlockingPersistentWorkspace(app.Spec)
+}
+
+func appSpecHasMigrationBlockingPersistentWorkspace(spec model.AppSpec) bool {
+	if spec.Workspace != nil {
+		return true
+	}
+	return spec.PersistentStorage != nil && !model.AppPersistentStorageSpecUsesSharedProjectRWX(spec.PersistentStorage)
 }
 
 func validateVolumeReplicationSpec(spec model.AppSpec) error {

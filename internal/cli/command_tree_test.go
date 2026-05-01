@@ -571,6 +571,68 @@ func TestRunProjectEditPatchesMetadata(t *testing.T) {
 	}
 }
 
+func TestRunProjectMoveQueuesEligibleApps(t *testing.T) {
+	t.Parallel()
+
+	var migrateBodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
+			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/projects"):
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","tenant_id":"tenant_123","name":"demo","slug":"demo","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes":
+			_, _ = w.Write([]byte(`{"runtimes":[{"id":"runtime_b","tenant_id":"tenant_123","name":"runtime-b","type":"managed-owned","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[
+{"id":"app_web","tenant_id":"tenant_123","project_id":"project_123","name":"web","spec":{"runtime_id":"runtime_a","replicas":1},"status":{"current_runtime_id":"runtime_a"},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},
+{"id":"app_session","tenant_id":"tenant_123","project_id":"project_123","name":"session","spec":{"runtime_id":"runtime_a","replicas":1,"persistent_storage":{"mode":"shared_project_rwx","storage_size":"1Gi","mounts":[{"kind":"directory","path":"/workspace"}]}},"status":{"current_runtime_id":"runtime_a"},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},
+{"id":"app_data","tenant_id":"tenant_123","project_id":"project_123","name":"data","spec":{"runtime_id":"runtime_a","replicas":1,"persistent_storage":{"storage_size":"1Gi","mounts":[{"kind":"directory","path":"/data"}]}},"status":{"current_runtime_id":"runtime_a"},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}
+]}`))
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/apps/") && strings.HasSuffix(r.URL.Path, "/migrate"):
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode migrate body: %v", err)
+			}
+			migrateBodies = append(migrateBodies, body)
+			appID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/apps/"), "/migrate")
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"operation":{"id":"op_%s","tenant_id":"tenant_123","app_id":%q,"type":"migrate","status":"pending","target_runtime_id":"runtime_b","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`, appID, appID)))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"project", "move", "demo",
+		"--to", "runtime-b",
+		"--skip-blocked",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run project move: %v", err)
+	}
+
+	if len(migrateBodies) != 2 {
+		t.Fatalf("expected two migrate requests, got %d", len(migrateBodies))
+	}
+	for _, body := range migrateBodies {
+		if body["target_runtime_id"] != "runtime_b" {
+			t.Fatalf("expected target_runtime_id runtime_b, got %+v", body)
+		}
+	}
+	out := stdout.String()
+	for _, want := range []string{"project=demo", "target_runtime_id=runtime_b", "candidate_apps=2", "queued_operations=2", "skipped_apps=1", "skipped_app=data", "blocked by persistent storage"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
 func TestRunDeployGitHubSubcommandNormalizesOwnerRepo(t *testing.T) {
 	t.Parallel()
 

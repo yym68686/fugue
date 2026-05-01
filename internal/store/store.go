@@ -2608,7 +2608,7 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			if targetRuntimeID == "" || !runtimeVisibleToTenant(state, targetRuntimeID, op.TenantID) {
 				return ErrNotFound
 			}
-			if hasPersistentWorkspace(app) || (op.DesiredSpec != nil && (op.DesiredSpec.Workspace != nil || op.DesiredSpec.PersistentStorage != nil)) {
+			if hasMigrationBlockingPersistentWorkspace(app) || (op.DesiredSpec != nil && appSpecHasMigrationBlockingPersistentWorkspace(*op.DesiredSpec)) {
 				return ErrInvalidInput
 			}
 			if appHasManagedPostgresService(app) {

@@ -3100,7 +3100,7 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 		if !visible {
 			return model.Operation{}, ErrNotFound
 		}
-		if hasPersistentWorkspace(app) || (op.DesiredSpec != nil && (op.DesiredSpec.Workspace != nil || op.DesiredSpec.PersistentStorage != nil)) {
+		if hasMigrationBlockingPersistentWorkspace(app) || (op.DesiredSpec != nil && appSpecHasMigrationBlockingPersistentWorkspace(*op.DesiredSpec)) {
 			return model.Operation{}, ErrInvalidInput
 		}
 		if appHasManagedPostgresService(app) {
