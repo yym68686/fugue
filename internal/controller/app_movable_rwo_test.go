@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"fugue/internal/model"
+	runtimepkg "fugue/internal/runtime"
 )
 
 func TestBuildMovableRWOCopyPlanConvertsDirectSharedProjectMount(t *testing.T) {
@@ -107,6 +108,18 @@ func TestBuildMovableRWOCopyPlanClearsStaleSharedSubPath(t *testing.T) {
 	}
 	if got := prepared.Spec.PersistentStorage.SharedSubPath; got != "" {
 		t.Fatalf("expected stale shared subpath to be cleared, got %q", got)
+	}
+}
+
+func TestDesiredPersistentStorageClaimNameUsesWorkspacePVCWhenClaimNameEmpty(t *testing.T) {
+	app := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "demo",
+	}
+	if got, want := desiredPersistentStorageClaimName(app, model.AppPersistentStorageSpec{}), runtimepkg.WorkspacePVCName(app); got != want {
+		t.Fatalf("expected empty claim name to use workspace PVC %q, got %q", want, got)
 	}
 }
 

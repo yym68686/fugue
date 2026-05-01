@@ -158,7 +158,7 @@ func desiredPersistentStorageClaimName(app model.App, storage model.AppPersisten
 	if model.AppPersistentStorageSpecUsesSharedProjectRWX(&storage) {
 		return runtimepkg.ProjectSharedWorkspacePVCName(app)
 	}
-	if claimName := model.Slugify(strings.TrimSpace(storage.ClaimName)); claimName != "" {
+	if claimName := model.SlugifyOptional(strings.TrimSpace(storage.ClaimName)); claimName != "" {
 		if len(claimName) > 63 {
 			return claimName[:63]
 		}
