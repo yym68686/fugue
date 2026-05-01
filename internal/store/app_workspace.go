@@ -69,7 +69,11 @@ func validatePersistentStorageSpec(spec model.AppSpec) error {
 	if spec.Replicas > 1 {
 		return ErrInvalidInput
 	}
-	if _, err := model.NormalizeAppPersistentStorageMode(spec.PersistentStorage.Mode); err != nil {
+	mode, err := model.NormalizeAppPersistentStorageMode(spec.PersistentStorage.Mode)
+	if err != nil {
+		return ErrInvalidInput
+	}
+	if mode == model.AppPersistentStorageModeMovableRWO && strings.TrimSpace(spec.PersistentStorage.StorageClassName) == "" {
 		return ErrInvalidInput
 	}
 	if _, err := model.NormalizeAppPersistentStoragePath(spec.PersistentStorage.StoragePath); err != nil {

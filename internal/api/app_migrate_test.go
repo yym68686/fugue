@@ -220,8 +220,9 @@ func TestMigrateAppAllowsMovableRWOPersistentStorage(t *testing.T) {
 		RuntimeID: sourceRuntime.ID,
 		Replicas:  1,
 		PersistentStorage: &model.AppPersistentStorageSpec{
-			Mode:        model.AppPersistentStorageModeMovableRWO,
-			StorageSize: "1Gi",
+			Mode:             model.AppPersistentStorageModeMovableRWO,
+			StorageClassName: "fast-rwo",
+			StorageSize:      "1Gi",
 			Mounts: []model.AppPersistentStorageMount{
 				{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/workspace"},
 			},
