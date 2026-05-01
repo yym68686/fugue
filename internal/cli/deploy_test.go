@@ -174,6 +174,61 @@ func TestRunDeployWithRepoURLImportsGitHubAndLoadsEnv(t *testing.T) {
 	}
 }
 
+func TestRunDeployWithRepoURLUsesFugueManifestEnvFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "fugue.yaml"), "version: 1\nenv_file: .env.fugue\nservices: {}\n")
+	writeTestFile(t, filepath.Join(dir, ".env"), "APP_ENV=wrong\n")
+	writeTestFile(t, filepath.Join(dir, ".env.fugue"), "APP_ENV=fugue\nFUGUE_ONLY=true\n")
+
+	var gotRequest importGitHubRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
+			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/templates/inspect-github":
+			_, _ = w.Write([]byte(`{"repository":{"repo_url":"https://github.com/example/demo","repo_visibility":"public","repo_owner":"example","repo_name":"demo","branch":"main","default_app_name":"demo"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/import-github":
+			if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
+				t.Fatalf("decode github import request: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123"},"operation":{"id":"op_123"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runDeployWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"--dir", dir,
+		"--repo-url", "https://github.com/example/demo",
+		"--branch", "main",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run deploy: %v", err)
+	}
+
+	if gotRequest.Env["APP_ENV"] != "fugue" {
+		t.Fatalf("expected APP_ENV from .env.fugue, got %q", gotRequest.Env["APP_ENV"])
+	}
+	if gotRequest.Env["FUGUE_ONLY"] != "true" {
+		t.Fatalf("expected FUGUE_ONLY from .env.fugue, got %q", gotRequest.Env["FUGUE_ONLY"])
+	}
+	if strings.Contains(stderr.String(), string(filepath.Separator)+".env\n") {
+		t.Fatalf("expected fugue manifest env file to override .env, got stderr %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), ".env.fugue") {
+		t.Fatalf("expected stderr to mention .env.fugue, got %q", stderr.String())
+	}
+}
+
 func TestRunDeployExistingAppCanClearFiles(t *testing.T) {
 	t.Parallel()
 

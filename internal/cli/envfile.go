@@ -10,7 +10,26 @@ import (
 	"unicode"
 
 	"fugue/internal/model"
+
+	"gopkg.in/yaml.v3"
 )
+
+var deployEnvManifestCandidates = []string{
+	"fugue.yaml",
+	"fugue.yml",
+}
+
+func loadDeploymentEnvWithManifestDefault(workingDir, envFile string, autoDefault bool) (map[string]string, string, error) {
+	effectiveEnvFile := strings.TrimSpace(envFile)
+	if effectiveEnvFile == "" {
+		manifestEnvFile, _, err := readFugueManifestDeployEnvFile(workingDir)
+		if err != nil {
+			return nil, "", err
+		}
+		effectiveEnvFile = manifestEnvFile
+	}
+	return loadDeploymentEnv(workingDir, effectiveEnvFile, autoDefault)
+}
 
 func loadDeploymentEnv(workingDir, envFile string, autoDefault bool) (map[string]string, string, error) {
 	path, err := resolveEnvFilePath(workingDir, envFile, autoDefault)
@@ -25,6 +44,55 @@ func loadDeploymentEnv(workingDir, envFile string, autoDefault bool) (map[string
 		return nil, "", err
 	}
 	return env, path, nil
+}
+
+func readFugueManifestDeployEnvFile(workingDir string) (string, string, error) {
+	workingDir = strings.TrimSpace(workingDir)
+	for _, candidate := range deployEnvManifestCandidates {
+		path := filepath.Join(workingDir, candidate)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return "", "", fmt.Errorf("read %s: %w", path, err)
+		}
+		envFile, err := parseFugueManifestDeployEnvFile(path, data)
+		if err != nil {
+			return "", "", err
+		}
+		return envFile, path, nil
+	}
+	return "", "", nil
+}
+
+func parseFugueManifestDeployEnvFile(path string, data []byte) (string, error) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return "", fmt.Errorf("parse %s: %w", path, err)
+	}
+	if len(doc.Content) == 0 {
+		return "", nil
+	}
+	root := doc.Content[0]
+	if root == nil || root.Kind != yaml.MappingNode {
+		return "", nil
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		key := root.Content[i]
+		if key == nil || key.Value != "env_file" {
+			continue
+		}
+		value := root.Content[i+1]
+		if value == nil || value.Kind == yaml.ScalarNode && value.Tag == "!!null" {
+			return "", nil
+		}
+		if value.Kind != yaml.ScalarNode || value.Tag != "!!str" {
+			return "", fmt.Errorf("top-level env_file in %s must be a string", path)
+		}
+		return strings.TrimSpace(value.Value), nil
+	}
+	return "", nil
 }
 
 func loadTopologyServiceEnvFiles(workingDir string, specs []string) (map[string]map[string]string, []string, error) {

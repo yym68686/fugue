@@ -380,7 +380,7 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 		return err
 	}
 
-	envVars, envPath, err := loadDeploymentEnv(workingDir, opts.EnvFile, false)
+	envVars, envPath, err := loadDeploymentEnvWithManifestDefault(workingDir, opts.EnvFile, false)
 	if err != nil {
 		return err
 	}
@@ -585,7 +585,7 @@ func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingD
 	if err != nil {
 		return err
 	}
-	envVars, envPath, err := loadDeploymentEnv(workingDir, opts.EnvFile, true)
+	envVars, envPath, err := loadDeploymentEnvWithManifestDefault(workingDir, opts.EnvFile, true)
 	if err != nil {
 		return err
 	}
