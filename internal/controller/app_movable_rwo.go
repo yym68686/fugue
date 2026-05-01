@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
@@ -32,7 +33,15 @@ func (s *Service) prepareMovableRWOStorageForOperation(
 	currentApp model.App,
 	desiredApp model.App,
 	targetScheduling runtimepkg.SchedulingConstraints,
-) (model.App, bool, error) {
+) (prepared model.App, changed bool, retErr error) {
+	scaledSourceDown := false
+	defer func() {
+		if retErr == nil || !scaledSourceDown || currentApp.Spec.Replicas <= 0 {
+			return
+		}
+		s.restoreMovableRWOScaledSource(context.Background(), currentApp, desiredApp, retErr)
+	}()
+
 	targetStorage := desiredApp.Spec.PersistentStorage
 	if !model.AppPersistentStorageSpecUsesMovableRWO(targetStorage) {
 		return desiredApp, false, nil
@@ -73,6 +82,7 @@ func (s *Service) prepareMovableRWOStorageForOperation(
 		if err := s.applyManagedAppDesiredState(ctx, fencedApp, sourceScheduling); err != nil {
 			return desiredApp, changed, fmt.Errorf("scale source app to zero before movable RWO copy: %w", err)
 		}
+		scaledSourceDown = true
 		if err := s.waitForManagedAppRollout(ctx, fencedApp, op.ID); err != nil {
 			return desiredApp, changed, fmt.Errorf("wait for source app scale-down before movable RWO copy: %w", err)
 		}
@@ -82,6 +92,33 @@ func (s *Service) prepareMovableRWOStorageForOperation(
 		return desiredApp, changed, err
 	}
 	return desiredApp, changed, nil
+}
+
+func (s *Service) restoreMovableRWOScaledSource(ctx context.Context, currentApp model.App, desiredApp model.App, cause error) {
+	restoreApp := currentApp
+	if errors.Is(cause, errOperationNoLongerActive) {
+		freshApp, err := s.Store.GetApp(desiredApp.ID)
+		if err == nil {
+			restoreApp = freshApp
+		} else {
+			restoreApp = desiredApp
+		}
+	}
+	if restoreApp.Spec.Replicas <= 0 {
+		return
+	}
+	restoreCtx, cancel := context.WithTimeout(ctx, s.movableRWOWaitTimeout())
+	defer cancel()
+	scheduling, err := s.managedSchedulingConstraintsForApp(restoreCtx, restoreApp)
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("restore movable RWO source app scheduling app=%s failed after migration abort: %v", restoreApp.ID, err)
+		}
+		return
+	}
+	if err := s.applyManagedAppDesiredState(restoreCtx, restoreApp, scheduling); err != nil && s.Logger != nil {
+		s.Logger.Printf("restore movable RWO source app app=%s failed after migration abort: %v", restoreApp.ID, err)
+	}
 }
 
 func (s *Service) buildMovableRWOCopyPlan(ctx context.Context, op model.Operation, currentApp model.App, desiredApp model.App) (*movableRWOCopyPlan, model.App, bool, error) {
