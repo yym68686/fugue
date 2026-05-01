@@ -389,6 +389,33 @@ func (c *CLI) newAppMoveCommand() *cobra.Command {
 			if strings.TrimSpace(runtimeID) == "" {
 				return fmt.Errorf("target runtime is required")
 			}
+			app, err = client.GetApp(app.ID)
+			if err != nil {
+				return err
+			}
+			if database := ownedManagedPostgresSpec(app); database != nil {
+				databaseRuntimeID := strings.TrimSpace(database.RuntimeID)
+				if databaseRuntimeID == "" {
+					databaseRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
+				}
+				if databaseRuntimeID != "" && databaseRuntimeID != runtimeID {
+					if !opts.Wait {
+						return fmt.Errorf("app has managed postgres on %s; moving it before the app requires --wait", databaseRuntimeID)
+					}
+					c.progressf("database_operation=switchover target_runtime_id=%s", runtimeID)
+					databaseResponse, err := client.SwitchoverAppDatabase(app.ID, runtimeID)
+					if err != nil {
+						return err
+					}
+					finalApp, err := c.waitForSingleApp(client, app.ID, databaseResponse.Operation, true)
+					if err != nil {
+						return err
+					}
+					if finalApp != nil {
+						app = *finalApp
+					}
+				}
+			}
 			response, err := client.MigrateApp(app.ID, runtimeID)
 			if err != nil {
 				return err

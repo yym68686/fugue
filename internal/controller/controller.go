@@ -581,7 +581,8 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	case model.OperationTypeDelete:
 	case model.OperationTypeMigrate:
 		if op.DesiredSpec != nil {
-			app.Spec = *op.DesiredSpec
+			app.Spec = migrateDesiredSpecForManagedOperation(currentApp, *op.DesiredSpec)
+			completionDesiredSpec = cloneControllerAppSpec(&app.Spec)
 		} else {
 			if op.TargetRuntimeID == "" {
 				return fmt.Errorf("migrate operation %s missing target runtime", op.ID)
@@ -719,6 +720,13 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	}
 	s.Logger.Printf("operation %s completed on managed runtime; manifest=%s", op.ID, bundle.ManifestPath)
 	return nil
+}
+
+func migrateDesiredSpecForManagedOperation(currentApp model.App, desired model.AppSpec) model.AppSpec {
+	if database := store.OwnedManagedPostgresSpec(currentApp); database != nil {
+		desired.Postgres = cloneControllerPostgresSpec(database)
+	}
+	return desired
 }
 
 func (s *Service) managedSchedulingConstraints(runtimeID string) (runtime.SchedulingConstraints, error) {

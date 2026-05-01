@@ -193,3 +193,36 @@ func TestMovableRWONeedsFreshClaimWhenMigratingRuntime(t *testing.T) {
 		t.Fatal("expected runtime migration to allocate a fresh target claim")
 	}
 }
+
+func TestMigrateDesiredSpecPreservesManagedPostgresRuntime(t *testing.T) {
+	current := model.App{
+		ID:   "app_demo",
+		Name: "demo",
+		Spec: model.AppSpec{
+			RuntimeID: "runtime_a",
+			Postgres: &model.AppPostgresSpec{
+				Database:  "demo",
+				User:      "demo",
+				RuntimeID: "runtime_db_source",
+			},
+		},
+	}
+	desired := current.Spec
+	desired.RuntimeID = "runtime_b"
+	desired.Postgres = &model.AppPostgresSpec{
+		Database:  "demo",
+		User:      "demo",
+		RuntimeID: "runtime_b",
+	}
+
+	prepared := migrateDesiredSpecForManagedOperation(current, desired)
+	if got := prepared.RuntimeID; got != "runtime_b" {
+		t.Fatalf("expected app runtime to move to runtime_b, got %q", got)
+	}
+	if prepared.Postgres == nil {
+		t.Fatal("expected managed postgres spec to be preserved")
+	}
+	if got := prepared.Postgres.RuntimeID; got != "runtime_db_source" {
+		t.Fatalf("expected managed postgres runtime to stay on source until database switchover, got %q", got)
+	}
+}

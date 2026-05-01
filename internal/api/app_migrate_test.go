@@ -120,14 +120,14 @@ func TestMigrateAppAllowsManagedPostgresWithoutPersistentStorage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list operations: %v", err)
 	}
-	if len(ops) != 1 || ops[0].DesiredSpec == nil || ops[0].DesiredSpec.Postgres == nil {
-		t.Fatalf("expected migrate operation with desired postgres spec, got %+v", ops)
+	if len(ops) != 1 || ops[0].DesiredSpec == nil {
+		t.Fatalf("expected migrate operation with desired spec, got %+v", ops)
 	}
-	if got := ops[0].DesiredSpec.Postgres.RuntimeID; got != targetRuntime.ID {
-		t.Fatalf("expected desired postgres runtime %q, got %q", targetRuntime.ID, got)
+	if got := ops[0].DesiredSpec.RuntimeID; got != targetRuntime.ID {
+		t.Fatalf("expected desired app runtime %q, got %q", targetRuntime.ID, got)
 	}
-	if got := ops[0].DesiredSpec.Postgres.FailoverTargetRuntimeID; got != "" {
-		t.Fatalf("expected postgres failover target to be cleared, got %q", got)
+	if ops[0].DesiredSpec.Postgres != nil {
+		t.Fatalf("app migrate must not directly move managed postgres; use database switchover, got %+v", ops[0].DesiredSpec.Postgres)
 	}
 }
 
