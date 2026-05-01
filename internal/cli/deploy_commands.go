@@ -36,6 +36,7 @@ type deployCommonOptions struct {
 	StartupCommand            string
 	FileSpecs                 []string
 	SecretFileSpecs           []string
+	StorageMode               string
 	StorageSize               string
 	StorageClass              string
 	StorageMounts             []string
@@ -302,6 +303,7 @@ func bindCommonDeployFlags(cmd *cobra.Command, opts *deployCommonOptions, includ
 	cmd.Flags().StringVar(&opts.StartupCommand, "command", "", "Startup shell command override")
 	cmd.Flags().StringArrayVar(&opts.FileSpecs, "file", nil, "Declarative app file from a local source: <absolute-path>[:mode]=<local-file>")
 	cmd.Flags().StringArrayVar(&opts.SecretFileSpecs, "secret-file", nil, "Secret declarative app file from a local source: <absolute-path>[:mode]=<local-file>")
+	cmd.Flags().StringVar(&opts.StorageMode, "storage-mode", "", "Persistent storage mode: dedicated_pvc, movable_rwo, or shared_project_rwx")
 	cmd.Flags().StringVar(&opts.StorageSize, "storage-size", "", "Persistent storage size, for example 10Gi")
 	cmd.Flags().StringVar(&opts.StorageClass, "storage-class", "", "Persistent storage class")
 	cmd.Flags().StringArrayVar(&opts.StorageMounts, "mount", nil, "Persistent directory mount path, for example /data")
@@ -403,7 +405,7 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 	if err != nil {
 		return err
 	}
-	persistentStorage, err := buildDeployPersistentStorage(workingDir, opts.StorageSize, opts.StorageClass, opts.StorageMounts, opts.StorageFiles)
+	persistentStorage, err := buildDeployPersistentStorage(workingDir, opts.StorageMode, opts.StorageSize, opts.StorageClass, opts.StorageMounts, opts.StorageFiles)
 	if err != nil {
 		return err
 	}
@@ -608,7 +610,7 @@ func (c *CLI) runDeployGitHub(repoURL string, opts deployGitHubOptions, workingD
 	if err != nil {
 		return err
 	}
-	persistentStorage, err := buildDeployPersistentStorage(workingDir, opts.StorageSize, opts.StorageClass, opts.StorageMounts, opts.StorageFiles)
+	persistentStorage, err := buildDeployPersistentStorage(workingDir, opts.StorageMode, opts.StorageSize, opts.StorageClass, opts.StorageMounts, opts.StorageFiles)
 	if err != nil {
 		return err
 	}
@@ -756,7 +758,7 @@ func (c *CLI) runDeployImage(imageRef string, opts deployImageOptions) error {
 	if err != nil {
 		return err
 	}
-	persistentStorage, err := buildDeployPersistentStorage(workingDir, opts.StorageSize, opts.StorageClass, opts.StorageMounts, opts.StorageFiles)
+	persistentStorage, err := buildDeployPersistentStorage(workingDir, opts.StorageMode, opts.StorageSize, opts.StorageClass, opts.StorageMounts, opts.StorageFiles)
 	if err != nil {
 		return err
 	}
@@ -1318,13 +1320,22 @@ func parseDeployAppFileSpec(workingDir, raw string, secret bool) (model.AppFile,
 	}, nil
 }
 
-func buildDeployPersistentStorage(workingDir, storageSize, storageClass string, mounts, mountFiles []string) (*model.AppPersistentStorageSpec, error) {
+func buildDeployPersistentStorage(workingDir, storageMode, storageSize, storageClass string, mounts, mountFiles []string) (*model.AppPersistentStorageSpec, error) {
 	requested := strings.TrimSpace(storageSize) != "" ||
 		strings.TrimSpace(storageClass) != "" ||
+		strings.TrimSpace(storageMode) != "" ||
 		len(mounts) > 0 ||
 		len(mountFiles) > 0
 	if !requested {
 		return nil, nil
+	}
+	mode := ""
+	if strings.TrimSpace(storageMode) != "" {
+		normalized, err := model.NormalizeAppPersistentStorageMode(storageMode)
+		if err != nil {
+			return nil, err
+		}
+		mode = normalized
 	}
 	storageMounts, err := buildUpdatedAppStorageMounts(workingDir, nil, mounts, mountFiles)
 	if err != nil {
@@ -1340,6 +1351,7 @@ func buildDeployPersistentStorage(workingDir, storageSize, storageClass string, 
 		}
 	}
 	return &model.AppPersistentStorageSpec{
+		Mode:             mode,
 		StorageSize:      strings.TrimSpace(storageSize),
 		StorageClassName: strings.TrimSpace(storageClass),
 		Mounts:           storageMounts,

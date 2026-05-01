@@ -65,7 +65,7 @@ to prepare the first release artifact.
 			if err != nil {
 				return err
 			}
-			persistentStorage, err := buildDeployPersistentStorage(workingDir, opts.StorageSize, opts.StorageClass, opts.StorageMounts, opts.StorageFiles)
+			persistentStorage, err := buildDeployPersistentStorage(workingDir, opts.StorageMode, opts.StorageSize, opts.StorageClass, opts.StorageMounts, opts.StorageFiles)
 			if err != nil {
 				return err
 			}

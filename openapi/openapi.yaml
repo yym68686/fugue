@@ -4429,7 +4429,7 @@ components:
       properties:
         mode:
           type: string
-          enum: [dedicated_pvc, shared_project_rwx]
+          enum: [dedicated_pvc, movable_rwo, shared_project_rwx]
         storage_path:
           type: string
         storage_size:

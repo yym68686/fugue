@@ -137,7 +137,7 @@ func appSpecHasMigrationBlockingPersistentWorkspace(spec model.AppSpec) bool {
 	if spec.Workspace != nil {
 		return true
 	}
-	return spec.PersistentStorage != nil && !model.AppPersistentStorageSpecUsesSharedProjectRWX(spec.PersistentStorage)
+	return spec.PersistentStorage != nil && !model.AppPersistentStorageSpecIsMigratable(spec.PersistentStorage)
 }
 
 func validateVolumeReplicationSpec(spec model.AppSpec) error {

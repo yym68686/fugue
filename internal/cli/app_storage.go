@@ -67,6 +67,7 @@ func (c *CLI) newAppStorageSetCommand() *cobra.Command {
 	opts := struct {
 		StorageSize  string
 		StorageClass string
+		StorageMode  string
 		Mounts       []string
 		MountFiles   []string
 		Wait         bool
@@ -113,6 +114,13 @@ the new persistent_storage representation before applying your changes.
 			if strings.TrimSpace(opts.StorageClass) != "" {
 				storage.StorageClassName = strings.TrimSpace(opts.StorageClass)
 			}
+			if strings.TrimSpace(opts.StorageMode) != "" {
+				mode, err := model.NormalizeAppPersistentStorageMode(opts.StorageMode)
+				if err != nil {
+					return err
+				}
+				storage.Mode = mode
+			}
 
 			if len(opts.Mounts) > 0 || len(opts.MountFiles) > 0 {
 				existing := cloneAppPersistentStorageMounts(storage.Mounts)
@@ -156,6 +164,7 @@ the new persistent_storage representation before applying your changes.
 	}
 	cmd.Flags().StringVar(&opts.StorageSize, "size", "", "Persistent storage size, for example 10Gi")
 	cmd.Flags().StringVar(&opts.StorageClass, "class", "", "Persistent storage class")
+	cmd.Flags().StringVar(&opts.StorageMode, "mode", "", "Persistent storage mode: dedicated_pvc, movable_rwo, or shared_project_rwx")
 	cmd.Flags().StringArrayVar(&opts.Mounts, "mount", nil, "Directory mount path to persist, for example /data")
 	cmd.Flags().StringArrayVar(&opts.MountFiles, "mount-file", nil, "Persist one file from a local source: <absolute-path>[:mode]=<local-file>")
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for the deploy operation to complete")
@@ -345,6 +354,7 @@ func (c *CLI) renderAppStorageState(app model.App, operation *model.Operation, r
 	switch view.StorageMode {
 	case "persistent_storage":
 		pairs = append(pairs,
+			kvPair{Key: "persistent_mode", Value: strings.TrimSpace(view.PersistentStorage.Mode)},
 			kvPair{Key: "storage_size", Value: strings.TrimSpace(view.PersistentStorage.StorageSize)},
 			kvPair{Key: "storage_class", Value: strings.TrimSpace(view.PersistentStorage.StorageClassName)},
 			kvPair{Key: "mount_count", Value: fmt.Sprintf("%d", len(view.PersistentStorage.Mounts))},

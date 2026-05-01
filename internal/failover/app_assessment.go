@@ -61,7 +61,7 @@ func MigrationBlockers(app model.App) []string {
 	if app.Spec.Workspace != nil {
 		blockers = append(blockers, "persistent storage")
 	}
-	if app.Spec.PersistentStorage != nil && !model.AppPersistentStorageSpecUsesSharedProjectRWX(app.Spec.PersistentStorage) {
+	if app.Spec.PersistentStorage != nil && !model.AppPersistentStorageSpecIsMigratable(app.Spec.PersistentStorage) {
 		blockers = append(blockers, "persistent storage")
 	}
 	return blockers

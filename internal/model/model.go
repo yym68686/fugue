@@ -132,6 +132,7 @@ const (
 	AppWorkspaceInternalDirName              = ".fugue-workspace-state"
 	AppPersistentStorageInternalDirName      = ".fugue-persistent-storage-state"
 	AppPersistentStorageModeDedicatedPVC     = "dedicated_pvc"
+	AppPersistentStorageModeMovableRWO       = "movable_rwo"
 	AppPersistentStorageModeSharedProjectRWX = "shared_project_rwx"
 	AppPersistentStorageMountKindDirectory   = "directory"
 	AppPersistentStorageMountKindFile        = "file"

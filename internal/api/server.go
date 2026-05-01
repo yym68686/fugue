@@ -1135,7 +1135,7 @@ func (s *Server) handleMigrateApp(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	spec.RuntimeID = strings.TrimSpace(req.TargetRuntimeID)
+	prepareMigrateDesiredSpec(app, &spec, req.TargetRuntimeID)
 	op, err := s.store.CreateOperation(model.Operation{
 		TenantID:            app.TenantID,
 		Type:                model.OperationTypeMigrate,

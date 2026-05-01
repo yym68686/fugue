@@ -314,6 +314,7 @@ func TestRunDeployImageSupportsIntentFlags(t *testing.T) {
 		"--command", "python app.py",
 		"--file", "/app/config.yaml=" + configPath,
 		"--secret-file", "/app/.env:600=" + secretPath,
+		"--storage-mode", "movable_rwo",
 		"--storage-size", "20Gi",
 		"--storage-class", "fast",
 		"--mount", "/data",
@@ -348,7 +349,7 @@ func TestRunDeployImageSupportsIntentFlags(t *testing.T) {
 	if fileByPath["/app/.env"].Content != "TOKEN=secret\n" || !fileByPath["/app/.env"].Secret || fileByPath["/app/.env"].Mode != 0o600 {
 		t.Fatalf("unexpected secret file payload %+v", fileByPath["/app/.env"])
 	}
-	if gotRequest.PersistentStorage == nil || gotRequest.PersistentStorage.StorageSize != "20Gi" || gotRequest.PersistentStorage.StorageClassName != "fast" {
+	if gotRequest.PersistentStorage == nil || gotRequest.PersistentStorage.Mode != model.AppPersistentStorageModeMovableRWO || gotRequest.PersistentStorage.StorageSize != "20Gi" || gotRequest.PersistentStorage.StorageClassName != "fast" {
 		t.Fatalf("unexpected persistent storage payload %+v", gotRequest.PersistentStorage)
 	}
 	if len(gotRequest.PersistentStorage.Mounts) != 2 {
@@ -451,6 +452,7 @@ func TestRunAppStorageSetBuildsPersistentStorageSpec(t *testing.T) {
 		"--base-url", server.URL,
 		"--token", "token",
 		"app", "storage", "set", "demo",
+		"--mode", "movable_rwo",
 		"--size", "20Gi",
 		"--class", "fast",
 		"--mount", "/data",
@@ -464,14 +466,14 @@ func TestRunAppStorageSetBuildsPersistentStorageSpec(t *testing.T) {
 	if gotBody.Spec.Workspace != nil {
 		t.Fatalf("expected workspace to be cleared, got %+v", gotBody.Spec.Workspace)
 	}
-	if gotBody.Spec.PersistentStorage == nil || gotBody.Spec.PersistentStorage.StorageSize != "20Gi" || gotBody.Spec.PersistentStorage.StorageClassName != "fast" {
+	if gotBody.Spec.PersistentStorage == nil || gotBody.Spec.PersistentStorage.Mode != model.AppPersistentStorageModeMovableRWO || gotBody.Spec.PersistentStorage.StorageSize != "20Gi" || gotBody.Spec.PersistentStorage.StorageClassName != "fast" {
 		t.Fatalf("unexpected persistent storage spec %+v", gotBody.Spec.PersistentStorage)
 	}
 	if len(gotBody.Spec.PersistentStorage.Mounts) != 2 {
 		t.Fatalf("expected two mounts, got %+v", gotBody.Spec.PersistentStorage.Mounts)
 	}
 	out := stdout.String()
-	for _, want := range []string{"app_id=app_123", "operation_id=op_123", "storage_mode=persistent_storage", "storage_size=20Gi"} {
+	for _, want := range []string{"app_id=app_123", "operation_id=op_123", "storage_mode=persistent_storage", "persistent_mode=movable_rwo", "storage_size=20Gi"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
@@ -587,6 +589,7 @@ func TestRunProjectMoveQueuesEligibleApps(t *testing.T) {
 			_, _ = w.Write([]byte(`{"apps":[
 {"id":"app_web","tenant_id":"tenant_123","project_id":"project_123","name":"web","spec":{"runtime_id":"runtime_a","replicas":1},"status":{"current_runtime_id":"runtime_a"},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},
 {"id":"app_session","tenant_id":"tenant_123","project_id":"project_123","name":"session","spec":{"runtime_id":"runtime_a","replicas":1,"persistent_storage":{"mode":"shared_project_rwx","storage_size":"1Gi","mounts":[{"kind":"directory","path":"/workspace"}]}},"status":{"current_runtime_id":"runtime_a"},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},
+{"id":"app_worker","tenant_id":"tenant_123","project_id":"project_123","name":"worker","spec":{"runtime_id":"runtime_a","replicas":1,"persistent_storage":{"mode":"movable_rwo","storage_size":"1Gi","mounts":[{"kind":"directory","path":"/workspace"}]}},"status":{"current_runtime_id":"runtime_a"},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},
 {"id":"app_data","tenant_id":"tenant_123","project_id":"project_123","name":"data","spec":{"runtime_id":"runtime_a","replicas":1,"persistent_storage":{"storage_size":"1Gi","mounts":[{"kind":"directory","path":"/data"}]}},"status":{"current_runtime_id":"runtime_a"},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}
 ]}`))
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/apps/") && strings.HasSuffix(r.URL.Path, "/migrate"):
@@ -617,8 +620,8 @@ func TestRunProjectMoveQueuesEligibleApps(t *testing.T) {
 		t.Fatalf("run project move: %v", err)
 	}
 
-	if len(migrateBodies) != 2 {
-		t.Fatalf("expected two migrate requests, got %d", len(migrateBodies))
+	if len(migrateBodies) != 3 {
+		t.Fatalf("expected three migrate requests, got %d", len(migrateBodies))
 	}
 	for _, body := range migrateBodies {
 		if body["target_runtime_id"] != "runtime_b" {
@@ -626,7 +629,7 @@ func TestRunProjectMoveQueuesEligibleApps(t *testing.T) {
 		}
 	}
 	out := stdout.String()
-	for _, want := range []string{"project=demo", "target_runtime_id=runtime_b", "candidate_apps=2", "queued_operations=2", "skipped_apps=1", "skipped_app=data", "blocked by persistent storage"} {
+	for _, want := range []string{"project=demo", "target_runtime_id=runtime_b", "candidate_apps=3", "queued_operations=3", "skipped_apps=1", "skipped_app=data", "blocked by persistent storage"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}

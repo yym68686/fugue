@@ -1211,6 +1211,54 @@ func TestBuildManagedAppChildObjectsIncludesSharedProjectRWXPersistentStorage(t 
 	}
 }
 
+func TestBuildManagedAppChildObjectsIncludesMovableRWOPersistentStorage(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode:             model.AppPersistentStorageModeMovableRWO,
+				StorageSize:      "20Gi",
+				StorageClassName: "fast-rwo",
+				Mounts: []model.AppPersistentStorageMount{
+					{
+						Kind: model.AppPersistentStorageMountKindDirectory,
+						Path: "/workspace",
+					},
+				},
+			},
+		},
+	}
+	managed := ManagedAppObject{
+		APIVersion: ManagedAppAPIVersion,
+		Kind:       ManagedAppKind,
+		Metadata: ManagedAppMeta{
+			Name:      "demo",
+			Namespace: NamespaceForTenant(app.TenantID),
+			UID:       "uid-demo",
+		},
+	}
+
+	objects := BuildManagedAppChildObjects(app, SchedulingConstraints{}, ManagedAppOwnerReference(managed))
+	pvc := firstObjectByKind(t, objects, "PersistentVolumeClaim")
+	metadata := pvc["metadata"].(map[string]any)
+	if got := metadata["name"]; got != WorkspacePVCName(app) {
+		t.Fatalf("expected app-scoped pvc name, got %#v", got)
+	}
+	pvcSpec := pvc["spec"].(map[string]any)
+	accessModes := pvcSpec["accessModes"].([]string)
+	if len(accessModes) != 1 || accessModes[0] != "ReadWriteOnce" {
+		t.Fatalf("expected RWO access mode, got %#v", accessModes)
+	}
+	if got := pvcSpec["storageClassName"]; got != "fast-rwo" {
+		t.Fatalf("expected storage class fast-rwo, got %#v", got)
+	}
+}
+
 func TestBuildManagedAppChildObjectsKeepsSharedProjectRWXInitForComplexPersistentStorage(t *testing.T) {
 	app := model.App{
 		ID:        "app_demo",

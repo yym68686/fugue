@@ -116,6 +116,19 @@ func TestMigrateAppAllowsManagedPostgresWithoutPersistentStorage(t *testing.T) {
 	if !strings.Contains(recorder.Body.String(), "\"operation\"") {
 		t.Fatalf("expected operation response body, got %s", recorder.Body.String())
 	}
+	ops, err := s.ListOperationsByApp(tenant.ID, true, app.ID)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(ops) != 1 || ops[0].DesiredSpec == nil || ops[0].DesiredSpec.Postgres == nil {
+		t.Fatalf("expected migrate operation with desired postgres spec, got %+v", ops)
+	}
+	if got := ops[0].DesiredSpec.Postgres.RuntimeID; got != targetRuntime.ID {
+		t.Fatalf("expected desired postgres runtime %q, got %q", targetRuntime.ID, got)
+	}
+	if got := ops[0].DesiredSpec.Postgres.FailoverTargetRuntimeID; got != "" {
+		t.Fatalf("expected postgres failover target to be cleared, got %q", got)
+	}
 }
 
 func TestMigrateAppAllowsSharedProjectRWXPersistentStorage(t *testing.T) {
@@ -156,6 +169,62 @@ func TestMigrateAppAllowsSharedProjectRWXPersistentStorage(t *testing.T) {
 				{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/workspace"},
 			},
 			SharedSubPath: "argus/sessions/demo",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/migrate", apiKey, map[string]any{
+		"target_runtime_id": targetRuntime.ID,
+	})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "\"operation\"") {
+		t.Fatalf("expected operation response body, got %s", recorder.Body.String())
+	}
+}
+
+func TestMigrateAppAllowsMovableRWOPersistentStorage(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Migrate Test Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	sourceRuntime, _, err := s.CreateRuntime(tenant.ID, "tenant-owned-1", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create source runtime: %v", err)
+	}
+	targetRuntime, _, err := s.CreateRuntime(tenant.ID, "tenant-owned-2", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create target runtime: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.write", "app.migrate"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		RuntimeID: sourceRuntime.ID,
+		Replicas:  1,
+		PersistentStorage: &model.AppPersistentStorageSpec{
+			Mode:        model.AppPersistentStorageModeMovableRWO,
+			StorageSize: "1Gi",
+			Mounts: []model.AppPersistentStorageMount{
+				{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/workspace"},
+			},
 		},
 	})
 	if err != nil {
