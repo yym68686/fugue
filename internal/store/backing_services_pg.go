@@ -493,14 +493,17 @@ func (s *Store) pgApplyDesiredSpecBackingServicesTx(ctx context.Context, tx *sql
 	if app == nil || desiredSpec == nil || desiredSpec.Postgres == nil {
 		return nil
 	}
-	if err := validateManagedPostgresSpecForAppName(app.Name, desiredSpec.Postgres); err != nil {
-		return err
-	}
 
 	if service, found, err := s.pgGetOwnedBackingServiceByAppAndTypeTx(ctx, tx, app.ID, model.BackingServiceTypePostgres, true); err != nil {
 		return err
 	} else if found {
 		now := time.Now().UTC()
+		if err := ensureManagedPostgresPasswordWithExisting(desiredSpec.Postgres, service.Spec.Postgres); err != nil {
+			return err
+		}
+		if err := validateManagedPostgresSpecForAppName(app.Name, desiredSpec.Postgres); err != nil {
+			return err
+		}
 		normalized := normalizeManagedPostgresSpec(appNameForService(&service, app), app.Spec.RuntimeID, *desiredSpec.Postgres)
 		service.Type = model.BackingServiceTypePostgres
 		service.Provisioner = model.BackingServiceProvisionerManaged
@@ -522,6 +525,13 @@ func (s *Store) pgApplyDesiredSpecBackingServicesTx(ctx context.Context, tx *sql
 	} else if bound {
 		desiredSpec.Postgres = nil
 		return nil
+	}
+
+	if err := ensureManagedPostgresPassword(desiredSpec.Postgres); err != nil {
+		return err
+	}
+	if err := validateManagedPostgresSpecForAppName(app.Name, desiredSpec.Postgres); err != nil {
+		return err
 	}
 
 	appCopy := *app

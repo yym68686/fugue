@@ -38,6 +38,7 @@ type importUploadRequest struct {
 	DockerfilePath           string                                            `json:"dockerfile_path"`
 	BuildContextDir          string                                            `json:"build_context_dir"`
 	Env                      map[string]string                                 `json:"env"`
+	GeneratedEnv             map[string]model.AppGeneratedEnvSpec              `json:"generated_env,omitempty"`
 	ServiceEnv               map[string]map[string]string                      `json:"service_env"`
 	ServicePersistentStorage map[string]model.ServicePersistentStorageOverride `json:"service_persistent_storage"`
 	ConfigContent            string                                            `json:"config_content"`
@@ -176,6 +177,7 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 			spec.PersistentStorage = normalizedPersistentStorage
 		}
 		applyStartupCommand(&spec, req.StartupCommand)
+		applyImportedGeneratedEnv(&spec, req.GeneratedEnv)
 
 		op, err := s.store.CreateOperation(model.Operation{
 			TenantID:        app.TenantID,
@@ -380,6 +382,7 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 		}
 		applyStartupCommand(&spec, req.StartupCommand)
 		applyImportedNetworkMode(&spec, networkMode)
+		applyImportedGeneratedEnv(&spec, req.GeneratedEnv)
 		route := model.AppRoute{}
 		if model.AppManagedRouteEnabled(spec) {
 			route = model.AppRoute{

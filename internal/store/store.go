@@ -2266,6 +2266,9 @@ func (s *Store) SyncObservedManagedPostgresSpec(id string, desiredSpec model.App
 		if spec == nil {
 			return ErrInvalidInput
 		}
+		if err := applyGeneratedEnvSpec(spec, &app.Spec); err != nil {
+			return err
+		}
 		if err := applyDesiredSpecBackingServicesState(state, &app, spec); err != nil {
 			return err
 		}
@@ -2302,6 +2305,9 @@ func (s *Store) SyncObservedManagedAppBaseline(id string, desiredSpec model.AppS
 		spec := cloneAppSpec(&desiredSpec)
 		if spec == nil {
 			return ErrInvalidInput
+		}
+		if err := applyGeneratedEnvSpec(spec, &app.Spec); err != nil {
+			return err
 		}
 		if err := applyDesiredSpecBackingServicesState(state, &app, spec); err != nil {
 			return err
@@ -2366,6 +2372,9 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 		return model.App{}, ErrInvalidInput
 	}
 	if err := normalizeAppSpecResources(&spec); err != nil {
+		return model.App{}, err
+	}
+	if err := applyGeneratedEnvSpec(&spec, nil); err != nil {
 		return model.App{}, err
 	}
 	if err := validateAppNetworkMode(spec); err != nil {
@@ -2501,7 +2510,10 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 		}
 		hydrateAppBackingServices(state, &app)
 		if op.DesiredSpec != nil {
-			if err := ensureManagedPostgresPassword(op.DesiredSpec.Postgres); err != nil {
+			if err := applyGeneratedEnvSpec(op.DesiredSpec, &app.Spec); err != nil {
+				return err
+			}
+			if err := ensureManagedPostgresPasswordWithExisting(op.DesiredSpec.Postgres, OwnedManagedPostgresSpec(app)); err != nil {
 				return err
 			}
 		}
@@ -3899,12 +3911,16 @@ func cloneAppSpec(in *model.AppSpec) *model.AppSpec {
 		out.Ports = append([]int(nil), in.Ports...)
 	}
 	out.Env = cloneMap(in.Env)
+	out.GeneratedEnv = cloneAppGeneratedEnv(in.GeneratedEnv)
 	if len(in.Files) > 0 {
 		out.Files = append([]model.AppFile(nil), in.Files...)
 	}
 	if in.Workspace != nil {
 		workspace := *in.Workspace
 		out.Workspace = &workspace
+	}
+	if in.NetworkPolicy != nil {
+		out.NetworkPolicy = cloneAppNetworkPolicy(in.NetworkPolicy)
 	}
 	if in.PersistentStorage != nil {
 		storage := *in.PersistentStorage
@@ -3941,6 +3957,49 @@ func cloneAppSpec(in *model.AppSpec) *model.AppSpec {
 	return &out
 }
 
+func cloneAppNetworkPolicy(in *model.AppNetworkPolicySpec) *model.AppNetworkPolicySpec {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.Egress != nil {
+		egress := *in.Egress
+		egress.AllowApps = cloneAppNetworkPolicyPeers(in.Egress.AllowApps)
+		out.Egress = &egress
+	}
+	if in.Ingress != nil {
+		ingress := *in.Ingress
+		ingress.AllowApps = cloneAppNetworkPolicyPeers(in.Ingress.AllowApps)
+		out.Ingress = &ingress
+	}
+	return &out
+}
+
+func cloneAppNetworkPolicyPeers(in []model.AppNetworkPolicyAppPeer) []model.AppNetworkPolicyAppPeer {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]model.AppNetworkPolicyAppPeer, len(in))
+	for index, peer := range in {
+		out[index] = peer
+		if len(peer.Ports) > 0 {
+			out[index].Ports = append([]int(nil), peer.Ports...)
+		}
+	}
+	return out
+}
+
+func cloneAppGeneratedEnv(in map[string]model.AppGeneratedEnvSpec) map[string]model.AppGeneratedEnvSpec {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]model.AppGeneratedEnvSpec, len(in))
+	for key, spec := range in {
+		out[key] = spec
+	}
+	return out
+}
+
 func cloneAppRoute(in *model.AppRoute) *model.AppRoute {
 	if in == nil {
 		return nil
@@ -3958,6 +4017,11 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 	app := &state.Apps[appIndex]
 	if isDeletedApp(*app) && op.Type != model.OperationTypeDelete {
 		return nil
+	}
+	if op.DesiredSpec != nil {
+		if err := applyGeneratedEnvSpec(op.DesiredSpec, &app.Spec); err != nil {
+			return err
+		}
 	}
 	switch op.Type {
 	case model.OperationTypeImport:

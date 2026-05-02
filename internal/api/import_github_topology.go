@@ -202,6 +202,10 @@ func cloneComposeServicesForImport(services []sourceimport.ComposeService) []sou
 			storage.Mounts = append([]model.AppPersistentStorageMount(nil), service.PersistentStorage.Mounts...)
 			cloned.PersistentStorage = &storage
 		}
+		if service.NetworkPolicy != nil {
+			cloned.NetworkPolicy = cloneAppNetworkPolicy(service.NetworkPolicy)
+		}
+		cloned.GeneratedEnv = cloneAppGeneratedEnv(service.GeneratedEnv)
 
 		cloned.PersistentStorageSeedFiles = append(
 			[]sourceimport.PersistentStorageSeedFile(nil),
@@ -429,6 +433,8 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 			return importedGitHubTopology{}, invalidComposeImport(err)
 		}
 		applyImportedNetworkMode(&spec, service.NetworkMode)
+		applyImportedNetworkPolicy(&spec, service.NetworkPolicy)
+		applyImportedGeneratedEnv(&spec, service.GeneratedEnv)
 		if route != nil {
 			route.ServicePort = firstServicePort(spec)
 		}

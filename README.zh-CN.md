@@ -19,7 +19,7 @@ Fugue 是一个面向 k3s 的多租户应用控制平面。它把 OpenAPI-first 
 - `managed-shared`、`managed-owned`、`external-owned` 三类 runtime，以及通过可复用 node key + `fugue-agent` 接入的自有节点。
 - 从本地上传、GitHub 仓库或容器镜像创建并部署应用。
 - 异步 deploy / rebuild / scale / restart / migrate / failover / delete 操作。
-- app 的 domain / route、env / config / files / workspace、运行日志 / 构建日志、operation 历史。
+- app 的 domain / route、env / config / files / workspace、`fugue.yaml` 生成式 secret env、运行日志 / 构建日志、operation 历史。
 - backing service 和 service binding，包括托管 PostgreSQL 流程。
 - 集群 inventory、实时使用量 / requests 承诺容量叠加、资源 right-sizing、runtime sharing，以及控制面状态检查。
 

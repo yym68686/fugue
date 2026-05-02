@@ -1802,6 +1802,58 @@ func TestCreateDeployOperationGeneratesManagedPostgresPasswordWhenMissing(t *tes
 	if got := strings.TrimSpace(op.DesiredSpec.Postgres.Password); got == "" {
 		t.Fatal("expected deploy operation to persist a generated managed postgres password")
 	}
+	generatedPassword := op.DesiredSpec.Postgres.Password
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim deploy operation: %v", err)
+	} else if !found {
+		t.Fatal("expected deploy operation")
+	}
+	if _, err := s.CompleteManagedOperation(op.ID, "/tmp/demo.yaml", "deployed"); err != nil {
+		t.Fatalf("complete deploy operation: %v", err)
+	}
+
+	persisted, err := s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	redeploySpec := persisted.Spec
+	redeploySpec.Postgres = &model.AppPostgresSpec{
+		Database: "demo",
+		User:     "root",
+	}
+	redeployOp, err := s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &redeploySpec,
+	})
+	if err != nil {
+		t.Fatalf("create redeploy operation: %v", err)
+	}
+	if redeployOp.DesiredSpec == nil || redeployOp.DesiredSpec.Postgres == nil {
+		t.Fatalf("expected desired postgres spec on redeploy operation, got %+v", redeployOp.DesiredSpec)
+	}
+	if got := redeployOp.DesiredSpec.Postgres.Password; got != generatedPassword {
+		t.Fatalf("expected redeploy to reuse generated password %q, got %q", generatedPassword, got)
+	}
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim redeploy operation: %v", err)
+	} else if !found {
+		t.Fatal("expected redeploy operation")
+	}
+	if _, err := s.CompleteManagedOperation(redeployOp.ID, "/tmp/demo.yaml", "redeployed"); err != nil {
+		t.Fatalf("complete redeploy operation: %v", err)
+	}
+	persisted, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app after redeploy: %v", err)
+	}
+	if len(persisted.BackingServices) != 1 || persisted.BackingServices[0].Spec.Postgres == nil {
+		t.Fatalf("expected one postgres backing service after redeploy, got %+v", persisted.BackingServices)
+	}
+	if got := persisted.BackingServices[0].Spec.Postgres.Password; got != generatedPassword {
+		t.Fatalf("expected persisted postgres password %q after redeploy, got %q", generatedPassword, got)
+	}
 }
 
 func TestDeployOperationRejectsReservedCNPGPostgresUser(t *testing.T) {

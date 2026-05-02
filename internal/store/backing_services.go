@@ -318,16 +318,15 @@ func applyDesiredSpecBackingServicesState(state *model.State, app *model.App, de
 	if state == nil || app == nil || desiredSpec == nil || desiredSpec.Postgres == nil {
 		return nil
 	}
-	if err := ensureManagedPostgresPassword(desiredSpec.Postgres); err != nil {
-		return err
-	}
-	if err := validateManagedPostgresSpecForAppName(app.Name, desiredSpec.Postgres); err != nil {
-		return err
-	}
-
 	if serviceIndex := findOwnedBackingServiceByAppAndType(state, app.ID, model.BackingServiceTypePostgres); serviceIndex >= 0 {
 		now := time.Now().UTC()
 		service := cloneBackingService(state.BackingServices[serviceIndex])
+		if err := ensureManagedPostgresPasswordWithExisting(desiredSpec.Postgres, service.Spec.Postgres); err != nil {
+			return err
+		}
+		if err := validateManagedPostgresSpecForAppName(app.Name, desiredSpec.Postgres); err != nil {
+			return err
+		}
 		normalized := normalizeManagedPostgresSpec(appNameForService(&service, app), app.Spec.RuntimeID, *desiredSpec.Postgres)
 		service.Type = model.BackingServiceTypePostgres
 		service.Provisioner = model.BackingServiceProvisionerManaged
@@ -343,6 +342,13 @@ func applyDesiredSpecBackingServicesState(state *model.State, app *model.App, de
 	if appHasBindingToServiceType(state, app.ID, model.BackingServiceTypePostgres) {
 		desiredSpec.Postgres = nil
 		return nil
+	}
+
+	if err := ensureManagedPostgresPassword(desiredSpec.Postgres); err != nil {
+		return err
+	}
+	if err := validateManagedPostgresSpecForAppName(app.Name, desiredSpec.Postgres); err != nil {
+		return err
 	}
 
 	appCopy := *app
@@ -502,6 +508,17 @@ func ensureManagedPostgresPassword(spec *model.AppPostgresSpec) error {
 	}
 	spec.Password = password
 	return nil
+}
+
+func ensureManagedPostgresPasswordWithExisting(spec *model.AppPostgresSpec, existing *model.AppPostgresSpec) error {
+	if spec == nil || strings.TrimSpace(spec.Password) != "" {
+		return nil
+	}
+	if existing != nil && strings.TrimSpace(existing.Password) != "" {
+		spec.Password = existing.Password
+		return nil
+	}
+	return ensureManagedPostgresPassword(spec)
 }
 
 func randomHexString(numBytes int) (string, error) {

@@ -2309,6 +2309,9 @@ WHERE id = $1 AND tenant_id = $2
 	if err := normalizeAppSpecResources(&spec); err != nil {
 		return model.App{}, err
 	}
+	if err := applyGeneratedEnvSpec(&spec, nil); err != nil {
+		return model.App{}, err
+	}
 	if err := validateAppNetworkMode(spec); err != nil {
 		return model.App{}, err
 	}
@@ -2602,6 +2605,9 @@ func (s *Store) pgSyncObservedManagedPostgresSpec(id string, desiredSpec model.A
 	if spec == nil {
 		return model.App{}, ErrInvalidInput
 	}
+	if err := applyGeneratedEnvSpec(spec, &app.Spec); err != nil {
+		return model.App{}, err
+	}
 	if err := s.pgApplyDesiredSpecBackingServicesTx(ctx, tx, &app, spec); err != nil {
 		return model.App{}, err
 	}
@@ -2641,6 +2647,9 @@ func (s *Store) pgSyncObservedManagedAppBaseline(id string, desiredSpec model.Ap
 	spec := cloneAppSpec(&desiredSpec)
 	if spec == nil {
 		return model.App{}, ErrInvalidInput
+	}
+	if err := applyGeneratedEnvSpec(spec, &app.Spec); err != nil {
+		return model.App{}, err
 	}
 	if err := s.pgApplyDesiredSpecBackingServicesTx(ctx, tx, &app, spec); err != nil {
 		return model.App{}, err
@@ -2865,8 +2874,14 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 	if app.TenantID != op.TenantID {
 		return model.Operation{}, ErrNotFound
 	}
+	if err := s.pgHydrateAppBackingServicesWithQueryer(ctx, tx, &app); err != nil {
+		return model.Operation{}, err
+	}
 	if op.DesiredSpec != nil {
-		if err := ensureManagedPostgresPassword(op.DesiredSpec.Postgres); err != nil {
+		if err := applyGeneratedEnvSpec(op.DesiredSpec, &app.Spec); err != nil {
+			return model.Operation{}, err
+		}
+		if err := ensureManagedPostgresPasswordWithExisting(op.DesiredSpec.Postgres, OwnedManagedPostgresSpec(app)); err != nil {
 			return model.Operation{}, err
 		}
 	}
@@ -4004,6 +4019,11 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string,
 	app, err := s.pgGetAppTx(ctx, tx, op.AppID, true)
 	if err != nil {
 		return model.Operation{}, mapDBErr(err)
+	}
+	if op.DesiredSpec != nil {
+		if err := applyGeneratedEnvSpec(op.DesiredSpec, &app.Spec); err != nil {
+			return model.Operation{}, err
+		}
 	}
 	if operationAppliesDesiredSpecBackingServices(op) {
 		if err := s.pgApplyDesiredSpecBackingServicesTx(ctx, tx, &app, op.DesiredSpec); err != nil {
@@ -5282,6 +5302,11 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 	now := time.Now().UTC()
 	if isDeletedApp(*app) && op.Type != model.OperationTypeDelete {
 		return nil
+	}
+	if op.DesiredSpec != nil {
+		if err := applyGeneratedEnvSpec(op.DesiredSpec, &app.Spec); err != nil {
+			return err
+		}
 	}
 	switch op.Type {
 	case model.OperationTypeImport:

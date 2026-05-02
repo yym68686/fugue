@@ -38,6 +38,7 @@ const (
 	CloudNativePGClusterKind          = "Cluster"
 	CloudNativePGReconcilePodSpecAnno = "cnpg.io/reconcilePodSpec"
 	CloudNativePGReconcilePodSpecHold = "disabled"
+	KubernetesNetworkPolicyAPIVersion = "networking.k8s.io/v1"
 	VolSyncAPIVersion                 = "volsync.backube/v1alpha1"
 	VolSyncReplicationSourceKind      = "ReplicationSource"
 	VolSyncReplicationDestinationKind = "ReplicationDestination"
@@ -95,6 +96,9 @@ func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, p
 	}
 	if aliasObject := buildLegacyComposeAppNameAliasObject(namespace, app); aliasObject != nil {
 		objects = append(objects, aliasObject)
+	}
+	if networkPolicyObject := buildAppNetworkPolicyObject(namespace, app, labels); networkPolicyObject != nil {
+		objects = append(objects, networkPolicyObject)
 	}
 	attachOwnerReference(objects, ownerRef)
 	return objects
@@ -959,6 +963,160 @@ func buildAppServiceObject(namespace string, app model.App, labels map[string]st
 			"ports":    servicePorts,
 		},
 	}
+}
+
+func buildAppNetworkPolicyObject(namespace string, app model.App, labels map[string]string) map[string]any {
+	policy := app.Spec.NetworkPolicy
+	if policy == nil {
+		return nil
+	}
+
+	podSelector := labelSubset(labels, FugueLabelAppID)
+	if len(podSelector) == 0 {
+		podSelector = labels
+	}
+
+	spec := map[string]any{
+		"podSelector": map[string]any{
+			"matchLabels": podSelector,
+		},
+	}
+	policyTypes := make([]string, 0, 2)
+	if networkPolicyDirectionRestricted(policy.Ingress) {
+		policyTypes = append(policyTypes, "Ingress")
+		spec["ingress"] = buildNetworkPolicyIngressRules(policy.Ingress)
+	}
+	if networkPolicyDirectionRestricted(policy.Egress) {
+		policyTypes = append(policyTypes, "Egress")
+		spec["egress"] = buildNetworkPolicyEgressRules(policy.Egress)
+	}
+	if len(policyTypes) == 0 {
+		return nil
+	}
+	spec["policyTypes"] = policyTypes
+
+	return map[string]any{
+		"apiVersion": KubernetesNetworkPolicyAPIVersion,
+		"kind":       "NetworkPolicy",
+		"metadata": map[string]any{
+			"name":      networkPolicyName(RuntimeAppResourceName(app)),
+			"namespace": namespace,
+			"labels":    labels,
+		},
+		"spec": spec,
+	}
+}
+
+func networkPolicyDirectionRestricted(direction *model.AppNetworkPolicyDirectionSpec) bool {
+	return direction != nil && model.NormalizeAppNetworkPolicyMode(direction.Mode) == model.AppNetworkPolicyModeRestricted
+}
+
+func buildNetworkPolicyIngressRules(direction *model.AppNetworkPolicyDirectionSpec) []map[string]any {
+	if direction == nil {
+		return nil
+	}
+	rules := make([]map[string]any, 0, len(direction.AllowApps))
+	for _, peer := range direction.AllowApps {
+		rule := map[string]any{
+			"from": []map[string]any{
+				networkPolicyAppPeerSelector(peer.AppID),
+			},
+		}
+		if ports := buildNetworkPolicyPorts(peer.Ports); len(ports) > 0 {
+			rule["ports"] = ports
+		}
+		rules = append(rules, rule)
+	}
+	return rules
+}
+
+func buildNetworkPolicyEgressRules(direction *model.AppNetworkPolicyDirectionSpec) []map[string]any {
+	if direction == nil {
+		return nil
+	}
+	rules := make([]map[string]any, 0, len(direction.AllowApps)+2)
+	if direction.AllowDNS {
+		rules = append(rules, map[string]any{
+			"ports": []map[string]any{
+				{"protocol": "UDP", "port": 53},
+				{"protocol": "TCP", "port": 53},
+			},
+		})
+	}
+	if direction.AllowPublicInternet {
+		rules = append(rules, map[string]any{
+			"to": []map[string]any{
+				{
+					"ipBlock": map[string]any{
+						"cidr":   "0.0.0.0/0",
+						"except": privateEgressCIDRBlocks(),
+					},
+				},
+			},
+		})
+	}
+	for _, peer := range direction.AllowApps {
+		rule := map[string]any{
+			"to": []map[string]any{
+				networkPolicyAppPeerSelector(peer.AppID),
+			},
+		}
+		if ports := buildNetworkPolicyPorts(peer.Ports); len(ports) > 0 {
+			rule["ports"] = ports
+		}
+		rules = append(rules, rule)
+	}
+	return rules
+}
+
+func networkPolicyAppPeerSelector(appID string) map[string]any {
+	return map[string]any{
+		"podSelector": map[string]any{
+			"matchLabels": map[string]string{
+				FugueLabelAppID: strings.TrimSpace(appID),
+			},
+		},
+	}
+}
+
+func buildNetworkPolicyPorts(ports []int) []map[string]any {
+	if len(ports) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(ports))
+	for _, port := range ports {
+		if port <= 0 || port > 65535 {
+			continue
+		}
+		out = append(out, map[string]any{
+			"protocol": "TCP",
+			"port":     port,
+		})
+	}
+	return out
+}
+
+func privateEgressCIDRBlocks() []string {
+	return []string{
+		"10.0.0.0/8",
+		"100.64.0.0/10",
+		"127.0.0.0/8",
+		"169.254.0.0/16",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+	}
+}
+
+func networkPolicyName(appResourceName string) string {
+	name := sanitizeName(appResourceName)
+	if name == "" {
+		name = "app"
+	}
+	const suffix = "-network"
+	if len(name)+len(suffix) > 63 {
+		name = strings.TrimRight(name[:63-len(suffix)], "-")
+	}
+	return name + suffix
 }
 
 func buildComposeServiceAliasObject(namespace string, app model.App) map[string]any {

@@ -12,22 +12,24 @@ import (
 )
 
 type importImageRequest struct {
-	TenantID          string                          `json:"tenant_id"`
-	ProjectID         string                          `json:"project_id"`
-	Project           *importProjectRequest           `json:"project,omitempty"`
-	ImageRef          string                          `json:"image_ref"`
-	Name              string                          `json:"name"`
-	Description       string                          `json:"description"`
-	RuntimeID         string                          `json:"runtime_id"`
-	Replicas          int                             `json:"replicas"`
-	NetworkMode       string                          `json:"network_mode"`
-	ServicePort       int                             `json:"service_port"`
-	Env               map[string]string               `json:"env"`
-	ConfigContent     string                          `json:"config_content"`
-	Files             []model.AppFile                 `json:"files"`
-	StartupCommand    *string                         `json:"startup_command,omitempty"`
-	PersistentStorage *model.AppPersistentStorageSpec `json:"persistent_storage,omitempty"`
-	Postgres          *model.AppPostgresSpec          `json:"postgres"`
+	TenantID          string                               `json:"tenant_id"`
+	ProjectID         string                               `json:"project_id"`
+	Project           *importProjectRequest                `json:"project,omitempty"`
+	ImageRef          string                               `json:"image_ref"`
+	Name              string                               `json:"name"`
+	Description       string                               `json:"description"`
+	RuntimeID         string                               `json:"runtime_id"`
+	Replicas          int                                  `json:"replicas"`
+	NetworkMode       string                               `json:"network_mode"`
+	ServicePort       int                                  `json:"service_port"`
+	Env               map[string]string                    `json:"env"`
+	ConfigContent     string                               `json:"config_content"`
+	Files             []model.AppFile                      `json:"files"`
+	StartupCommand    *string                              `json:"startup_command,omitempty"`
+	NetworkPolicy     *model.AppNetworkPolicySpec          `json:"network_policy,omitempty"`
+	GeneratedEnv      map[string]model.AppGeneratedEnvSpec `json:"generated_env,omitempty"`
+	PersistentStorage *model.AppPersistentStorageSpec      `json:"persistent_storage,omitempty"`
+	Postgres          *model.AppPostgresSpec               `json:"postgres"`
 }
 
 func (s *Server) handleImportImageApp(w http.ResponseWriter, r *http.Request) {
@@ -155,6 +157,8 @@ func (s *Server) handleImportImageApp(w http.ResponseWriter, r *http.Request) {
 		}
 		applyStartupCommand(&spec, req.StartupCommand)
 		applyImportedNetworkMode(&spec, networkMode)
+		applyImportedNetworkPolicy(&spec, req.NetworkPolicy)
+		applyImportedGeneratedEnv(&spec, req.GeneratedEnv)
 		route := model.AppRoute{}
 		if model.AppManagedRouteEnabled(spec) {
 			route = model.AppRoute{

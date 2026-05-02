@@ -107,6 +107,8 @@ type fugueManifestService struct {
 	ServiceType       string                          `yaml:"service_type"`
 	Public            bool                            `yaml:"public"`
 	NetworkMode       string                          `yaml:"network_mode"`
+	NetworkPolicy     *model.AppNetworkPolicySpec     `yaml:"network_policy"`
+	GeneratedEnv      any                             `yaml:"generated_env"`
 	Image             string                          `yaml:"image"`
 	Port              int                             `yaml:"port"`
 	Build             any                             `yaml:"build"`
@@ -299,15 +301,76 @@ func validateFugueManifestVersion(raw any) error {
 	return fmt.Errorf("unsupported version %q", version)
 }
 
+func normalizeFugueManifestNetworkPolicy(raw *model.AppNetworkPolicySpec) *model.AppNetworkPolicySpec {
+	if raw == nil {
+		return nil
+	}
+	normalized := model.NormalizeAppNetworkPolicySpec(*raw)
+	return &normalized
+}
+
+func parseFugueManifestGeneratedEnv(raw any) map[string]model.AppGeneratedEnvSpec {
+	switch value := raw.(type) {
+	case nil:
+		return nil
+	case []any:
+		out := make(map[string]model.AppGeneratedEnvSpec, len(value))
+		for _, item := range value {
+			key := strings.TrimSpace(stringifyComposeValue(item))
+			if key != "" {
+				out[key] = model.NormalizeAppGeneratedEnvSpec(model.AppGeneratedEnvSpec{})
+			}
+		}
+		return model.NormalizeAppGeneratedEnvSpecs(out)
+	case map[string]any:
+		out := make(map[string]model.AppGeneratedEnvSpec, len(value))
+		for key, item := range value {
+			key = strings.TrimSpace(key)
+			if key != "" {
+				out[key] = parseFugueManifestGeneratedEnvSpec(item)
+			}
+		}
+		return model.NormalizeAppGeneratedEnvSpecs(out)
+	default:
+		return nil
+	}
+}
+
+func parseFugueManifestGeneratedEnvSpec(raw any) model.AppGeneratedEnvSpec {
+	switch value := raw.(type) {
+	case nil:
+		return model.NormalizeAppGeneratedEnvSpec(model.AppGeneratedEnvSpec{})
+	case string:
+		return model.NormalizeAppGeneratedEnvSpec(model.AppGeneratedEnvSpec{Generate: value})
+	case map[string]any:
+		spec := model.AppGeneratedEnvSpec{
+			Generate: strings.TrimSpace(stringifyComposeValue(value["generate"])),
+			Encoding: strings.TrimSpace(stringifyComposeValue(value["encoding"])),
+		}
+		if rawLength, ok := value["length"]; ok {
+			if length, err := atoiComposeValue(rawLength); err == nil {
+				spec.Length = length
+			}
+		}
+		return model.NormalizeAppGeneratedEnvSpec(spec)
+	default:
+		return model.NormalizeAppGeneratedEnvSpec(model.AppGeneratedEnvSpec{})
+	}
+}
+
 func resolveFugueManifestService(repoDir, rawName string, raw fugueManifestService, declaredBacking bool, vars map[string]string) (ComposeService, error) {
 	envFiles, fileEnv, missingEnvFiles, err := readComposeServiceEnvFiles(repoDir, raw.EnvFile, vars)
 	if err != nil {
 		return ComposeService{}, fmt.Errorf("load env_file for fugue service %q: %w", rawName, err)
 	}
 	service := ComposeService{
-		Name:         slugifyOptional(rawName),
-		Image:        strings.TrimSpace(raw.Image),
-		NetworkMode:  model.NormalizeAppNetworkMode(raw.NetworkMode),
+		Name:        slugifyOptional(rawName),
+		Image:       strings.TrimSpace(raw.Image),
+		NetworkMode: model.NormalizeAppNetworkMode(raw.NetworkMode),
+		NetworkPolicy: normalizeFugueManifestNetworkPolicy(
+			raw.NetworkPolicy,
+		),
+		GeneratedEnv: parseFugueManifestGeneratedEnv(raw.GeneratedEnv),
 		Environment:  mergeComposeEnvironment(fileEnv, mergeFugueManifestEnvironment(raw.Env, raw.Environment, vars)),
 		DependsOn:    parseComposeDependsOn(raw.DependsOn),
 		Bindings:     parseServiceBindings(raw.Bindings),

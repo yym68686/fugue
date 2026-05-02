@@ -1736,6 +1736,74 @@ func TestMergedRuntimeEnvRepairsLegacyManagedPostgresBindingHost(t *testing.T) {
 	}
 }
 
+func TestBuildAppObjectsIncludesRestrictedNetworkPolicy(t *testing.T) {
+	app := model.App{
+		ID:        "app_session",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "argus-session-demo",
+		Spec: model.AppSpec{
+			Image:     "registry.fugue.pro/fugue-apps/argus-runtime:latest",
+			Ports:     []int{7777},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			NetworkPolicy: &model.AppNetworkPolicySpec{
+				Egress: &model.AppNetworkPolicyDirectionSpec{
+					Mode:                model.AppNetworkPolicyModeRestricted,
+					AllowDNS:            true,
+					AllowPublicInternet: true,
+					AllowApps: []model.AppNetworkPolicyAppPeer{
+						{AppID: "app_gateway", Ports: []int{8080}},
+					},
+				},
+				Ingress: &model.AppNetworkPolicyDirectionSpec{
+					Mode: model.AppNetworkPolicyModeRestricted,
+					AllowApps: []model.AppNetworkPolicyAppPeer{
+						{AppID: "app_gateway", Ports: []int{7777}},
+					},
+				},
+			},
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	networkPolicy := firstObjectByKind(t, objects, "NetworkPolicy")
+	if got := networkPolicy["apiVersion"]; got != KubernetesNetworkPolicyAPIVersion {
+		t.Fatalf("expected NetworkPolicy api version %q, got %#v", KubernetesNetworkPolicyAPIVersion, got)
+	}
+	spec := networkPolicy["spec"].(map[string]any)
+	podSelector := spec["podSelector"].(map[string]any)["matchLabels"].(map[string]string)
+	if got := podSelector[FugueLabelAppID]; got != "app_session" {
+		t.Fatalf("expected policy to select session app id, got %#v", podSelector)
+	}
+
+	egress := spec["egress"].([]map[string]any)
+	if len(egress) != 3 {
+		t.Fatalf("expected dns, public internet, and gateway egress rules, got %#v", egress)
+	}
+	gatewayEgress := egress[2]
+	to := gatewayEgress["to"].([]map[string]any)
+	gatewaySelector := to[0]["podSelector"].(map[string]any)["matchLabels"].(map[string]string)
+	if got := gatewaySelector[FugueLabelAppID]; got != "app_gateway" {
+		t.Fatalf("expected gateway app selector, got %#v", gatewaySelector)
+	}
+	egressPorts := gatewayEgress["ports"].([]map[string]any)
+	if got := egressPorts[0]["port"]; got != 8080 {
+		t.Fatalf("expected gateway egress port 8080, got %#v", got)
+	}
+
+	ingress := spec["ingress"].([]map[string]any)
+	from := ingress[0]["from"].([]map[string]any)
+	ingressSelector := from[0]["podSelector"].(map[string]any)["matchLabels"].(map[string]string)
+	if got := ingressSelector[FugueLabelAppID]; got != "app_gateway" {
+		t.Fatalf("expected gateway ingress selector, got %#v", ingressSelector)
+	}
+	ingressPorts := ingress[0]["ports"].([]map[string]any)
+	if got := ingressPorts[0]["port"]; got != 7777 {
+		t.Fatalf("expected session ingress port 7777, got %#v", got)
+	}
+}
+
 func envValue(envObjects []map[string]any, name string) string {
 	for _, entry := range envObjects {
 		if entry["name"] == name {

@@ -46,6 +46,14 @@ const (
 	AppNetworkModeBackground = "background"
 	AppNetworkModeInternal   = "internal"
 
+	AppNetworkPolicyModeRestricted = "restricted"
+
+	AppGeneratedEnvGenerateRandom    = "random"
+	AppGeneratedEnvEncodingBase64URL = "base64url"
+	AppGeneratedEnvEncodingBase64    = "base64"
+	AppGeneratedEnvEncodingHex       = "hex"
+	DefaultAppGeneratedEnvBytes      = 32
+
 	WorkloadClassCritical = "critical"
 	WorkloadClassService  = "service"
 	WorkloadClassDemo     = "demo"
@@ -180,6 +188,11 @@ func ApplyAppSpecDefaults(spec *AppSpec) {
 		return
 	}
 	spec.NetworkMode = NormalizeAppNetworkMode(spec.NetworkMode)
+	if spec.NetworkPolicy != nil {
+		normalized := NormalizeAppNetworkPolicySpec(*spec.NetworkPolicy)
+		spec.NetworkPolicy = &normalized
+	}
+	spec.GeneratedEnv = NormalizeAppGeneratedEnvSpecs(spec.GeneratedEnv)
 	spec.WorkloadClass = NormalizeWorkloadClass(spec.WorkloadClass)
 	if spec.RightSizing != nil {
 		normalized := NormalizeAppRightSizingSpec(*spec.RightSizing)
@@ -262,6 +275,98 @@ func AppUsesBackgroundNetwork(spec AppSpec) bool {
 
 func AppUsesInternalNetwork(spec AppSpec) bool {
 	return NormalizeAppNetworkMode(spec.NetworkMode) == AppNetworkModeInternal
+}
+
+func NormalizeAppNetworkPolicyMode(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case AppNetworkPolicyModeRestricted:
+		return AppNetworkPolicyModeRestricted
+	default:
+		return ""
+	}
+}
+
+func NormalizeAppNetworkPolicySpec(spec AppNetworkPolicySpec) AppNetworkPolicySpec {
+	if spec.Egress != nil {
+		egress := NormalizeAppNetworkPolicyDirectionSpec(*spec.Egress)
+		spec.Egress = &egress
+	}
+	if spec.Ingress != nil {
+		ingress := NormalizeAppNetworkPolicyDirectionSpec(*spec.Ingress)
+		spec.Ingress = &ingress
+	}
+	return spec
+}
+
+func NormalizeAppNetworkPolicyDirectionSpec(spec AppNetworkPolicyDirectionSpec) AppNetworkPolicyDirectionSpec {
+	spec.Mode = NormalizeAppNetworkPolicyMode(spec.Mode)
+	if len(spec.AllowApps) > 0 {
+		peers := make([]AppNetworkPolicyAppPeer, 0, len(spec.AllowApps))
+		for _, peer := range spec.AllowApps {
+			peer.AppID = strings.TrimSpace(peer.AppID)
+			ports := make([]int, 0, len(peer.Ports))
+			for _, port := range peer.Ports {
+				if port > 0 && port <= 65535 {
+					ports = append(ports, port)
+				}
+			}
+			peer.Ports = ports
+			if peer.AppID != "" {
+				peers = append(peers, peer)
+			}
+		}
+		spec.AllowApps = peers
+	}
+	return spec
+}
+
+func NormalizeAppGeneratedEnvGenerate(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case AppGeneratedEnvGenerateRandom, "":
+		return AppGeneratedEnvGenerateRandom
+	default:
+		return ""
+	}
+}
+
+func NormalizeAppGeneratedEnvEncoding(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case AppGeneratedEnvEncodingBase64URL, "":
+		return AppGeneratedEnvEncodingBase64URL
+	case AppGeneratedEnvEncodingBase64:
+		return AppGeneratedEnvEncodingBase64
+	case AppGeneratedEnvEncodingHex:
+		return AppGeneratedEnvEncodingHex
+	default:
+		return ""
+	}
+}
+
+func NormalizeAppGeneratedEnvSpec(spec AppGeneratedEnvSpec) AppGeneratedEnvSpec {
+	spec.Generate = NormalizeAppGeneratedEnvGenerate(spec.Generate)
+	spec.Encoding = NormalizeAppGeneratedEnvEncoding(spec.Encoding)
+	if spec.Length <= 0 {
+		spec.Length = DefaultAppGeneratedEnvBytes
+	}
+	return spec
+}
+
+func NormalizeAppGeneratedEnvSpecs(in map[string]AppGeneratedEnvSpec) map[string]AppGeneratedEnvSpec {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]AppGeneratedEnvSpec, len(in))
+	for key, spec := range in {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		out[key] = NormalizeAppGeneratedEnvSpec(spec)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func AppManagedRouteEnabled(spec AppSpec) bool {
@@ -1022,25 +1127,50 @@ type AppDomain struct {
 }
 
 type AppSpec struct {
-	Image             string                    `json:"image"`
-	Command           []string                  `json:"command,omitempty"`
-	Args              []string                  `json:"args,omitempty"`
-	Env               map[string]string         `json:"env,omitempty"`
-	NetworkMode       string                    `json:"network_mode,omitempty"`
-	WorkloadClass     string                    `json:"workload_class,omitempty"`
-	Ports             []int                     `json:"ports,omitempty"`
-	Replicas          int                       `json:"replicas"`
-	Resources         *ResourceSpec             `json:"resources,omitempty"`
-	RightSizing       *AppRightSizingSpec       `json:"right_sizing,omitempty"`
-	RuntimeID         string                    `json:"runtime_id"`
-	Files             []AppFile                 `json:"files,omitempty"`
-	Workspace         *AppWorkspaceSpec         `json:"workspace,omitempty"`
-	PersistentStorage *AppPersistentStorageSpec `json:"persistent_storage,omitempty"`
-	VolumeReplication *AppVolumeReplicationSpec `json:"volume_replication,omitempty"`
-	Postgres          *AppPostgresSpec          `json:"postgres,omitempty"`
-	Failover          *AppFailoverSpec          `json:"failover,omitempty"`
-	ImageMirrorLimit  int                       `json:"image_mirror_limit,omitempty"`
-	RestartToken      string                    `json:"restart_token,omitempty"`
+	Image             string                         `json:"image"`
+	Command           []string                       `json:"command,omitempty"`
+	Args              []string                       `json:"args,omitempty"`
+	Env               map[string]string              `json:"env,omitempty"`
+	GeneratedEnv      map[string]AppGeneratedEnvSpec `json:"generated_env,omitempty"`
+	NetworkMode       string                         `json:"network_mode,omitempty"`
+	NetworkPolicy     *AppNetworkPolicySpec          `json:"network_policy,omitempty"`
+	WorkloadClass     string                         `json:"workload_class,omitempty"`
+	Ports             []int                          `json:"ports,omitempty"`
+	Replicas          int                            `json:"replicas"`
+	Resources         *ResourceSpec                  `json:"resources,omitempty"`
+	RightSizing       *AppRightSizingSpec            `json:"right_sizing,omitempty"`
+	RuntimeID         string                         `json:"runtime_id"`
+	Files             []AppFile                      `json:"files,omitempty"`
+	Workspace         *AppWorkspaceSpec              `json:"workspace,omitempty"`
+	PersistentStorage *AppPersistentStorageSpec      `json:"persistent_storage,omitempty"`
+	VolumeReplication *AppVolumeReplicationSpec      `json:"volume_replication,omitempty"`
+	Postgres          *AppPostgresSpec               `json:"postgres,omitempty"`
+	Failover          *AppFailoverSpec               `json:"failover,omitempty"`
+	ImageMirrorLimit  int                            `json:"image_mirror_limit,omitempty"`
+	RestartToken      string                         `json:"restart_token,omitempty"`
+}
+
+type AppNetworkPolicySpec struct {
+	Egress  *AppNetworkPolicyDirectionSpec `json:"egress,omitempty" yaml:"egress,omitempty"`
+	Ingress *AppNetworkPolicyDirectionSpec `json:"ingress,omitempty" yaml:"ingress,omitempty"`
+}
+
+type AppNetworkPolicyDirectionSpec struct {
+	Mode                string                    `json:"mode,omitempty" yaml:"mode,omitempty"`
+	AllowDNS            bool                      `json:"allow_dns,omitempty" yaml:"allow_dns,omitempty"`
+	AllowPublicInternet bool                      `json:"allow_public_internet,omitempty" yaml:"allow_public_internet,omitempty"`
+	AllowApps           []AppNetworkPolicyAppPeer `json:"allow_apps,omitempty" yaml:"allow_apps,omitempty"`
+}
+
+type AppNetworkPolicyAppPeer struct {
+	AppID string `json:"app_id,omitempty" yaml:"app_id,omitempty"`
+	Ports []int  `json:"ports,omitempty" yaml:"ports,omitempty"`
+}
+
+type AppGeneratedEnvSpec struct {
+	Generate string `json:"generate,omitempty" yaml:"generate,omitempty"`
+	Encoding string `json:"encoding,omitempty" yaml:"encoding,omitempty"`
+	Length   int    `json:"length,omitempty" yaml:"length,omitempty"`
 }
 
 type AppRightSizingSpec struct {

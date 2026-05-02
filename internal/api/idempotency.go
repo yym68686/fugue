@@ -44,6 +44,7 @@ type importGitHubRequest struct {
 	DockerfilePath             string                                            `json:"dockerfile_path"`
 	BuildContextDir            string                                            `json:"build_context_dir"`
 	Env                        map[string]string                                 `json:"env"`
+	GeneratedEnv               map[string]model.AppGeneratedEnvSpec              `json:"generated_env,omitempty"`
 	ServiceEnv                 map[string]map[string]string                      `json:"service_env"`
 	ServicePersistentStorage   map[string]model.ServicePersistentStorageOverride `json:"service_persistent_storage"`
 	ConfigContent              string                                            `json:"config_content"`

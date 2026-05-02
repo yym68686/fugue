@@ -4649,8 +4649,12 @@ components:
             type: string
         env:
           $ref: "#/components/schemas/StringMap"
+        generated_env:
+          $ref: "#/components/schemas/AppGeneratedEnvMap"
         network_mode:
           $ref: "#/components/schemas/AppNetworkMode"
+        network_policy:
+          $ref: "#/components/schemas/AppNetworkPolicySpec"
         workload_class:
           $ref: "#/components/schemas/WorkloadClass"
         ports:
@@ -4686,6 +4690,55 @@ components:
           format: int32
         restart_token:
           type: string
+    AppNetworkPolicySpec:
+      type: object
+      additionalProperties: false
+      properties:
+        egress:
+          $ref: "#/components/schemas/AppNetworkPolicyDirectionSpec"
+        ingress:
+          $ref: "#/components/schemas/AppNetworkPolicyDirectionSpec"
+    AppNetworkPolicyDirectionSpec:
+      type: object
+      additionalProperties: false
+      properties:
+        mode:
+          $ref: "#/components/schemas/AppNetworkPolicyMode"
+        allow_dns:
+          type: boolean
+        allow_public_internet:
+          type: boolean
+        allow_apps:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppNetworkPolicyAppPeer"
+    AppNetworkPolicyAppPeer:
+      type: object
+      additionalProperties: false
+      properties:
+        app_id:
+          type: string
+        ports:
+          type: array
+          items:
+            type: integer
+            format: int32
+    AppGeneratedEnvMap:
+      type: object
+      additionalProperties:
+        $ref: "#/components/schemas/AppGeneratedEnvSpec"
+    AppGeneratedEnvSpec:
+      type: object
+      additionalProperties: false
+      properties:
+        generate:
+          $ref: "#/components/schemas/AppGeneratedEnvGenerate"
+        encoding:
+          $ref: "#/components/schemas/AppGeneratedEnvEncoding"
+        length:
+          type: integer
+          format: int32
+          description: Random byte length before encoding. Defaults to 32.
     AppRightSizingSpec:
       type: object
       additionalProperties: false
@@ -7617,6 +7670,8 @@ components:
           type: string
         env:
           $ref: "#/components/schemas/StringMap"
+        generated_env:
+          $ref: "#/components/schemas/AppGeneratedEnvMap"
         service_env:
           $ref: "#/components/schemas/ServiceEnvMap"
         service_persistent_storage:
@@ -7681,6 +7736,8 @@ components:
           type: string
         env:
           $ref: "#/components/schemas/StringMap"
+        generated_env:
+          $ref: "#/components/schemas/AppGeneratedEnvMap"
         service_env:
           $ref: "#/components/schemas/ServiceEnvMap"
         service_persistent_storage:
@@ -7872,10 +7929,14 @@ components:
           format: int32
         env:
           $ref: "#/components/schemas/StringMap"
+        generated_env:
+          $ref: "#/components/schemas/AppGeneratedEnvMap"
         config_content:
           type: string
         startup_command:
           type: string
+        network_policy:
+          $ref: "#/components/schemas/AppNetworkPolicySpec"
         files:
           type: array
           items:
@@ -7966,6 +8027,15 @@ components:
         Set `background` to run the app without a public route, Kubernetes Service,
         or readiness port.
       enum: [background, internal]
+    AppNetworkPolicyMode:
+      type: string
+      enum: [restricted]
+    AppGeneratedEnvGenerate:
+      type: string
+      enum: [random]
+    AppGeneratedEnvEncoding:
+      type: string
+      enum: [base64url, base64, hex]
     WorkloadClass:
       type: string
       enum: [critical, service, demo, batch]

@@ -58,10 +58,15 @@ func sanitizeOperationsForAPI(ops []model.Operation) []model.Operation {
 }
 
 func redactSecretFilesInSpec(spec model.AppSpec) model.AppSpec {
-	if len(spec.Files) == 0 && (spec.PersistentStorage == nil || len(spec.PersistentStorage.Mounts) == 0) {
+	if len(spec.Files) == 0 && len(spec.GeneratedEnv) == 0 && (spec.PersistentStorage == nil || len(spec.PersistentStorage.Mounts) == 0) {
 		return spec
 	}
 	spec = cloneAppSpec(spec)
+	for key := range spec.GeneratedEnv {
+		if spec.Env != nil {
+			spec.Env[key] = ""
+		}
+	}
 	for index := range spec.Files {
 		if spec.Files[index].Secret {
 			spec.Files[index].Content = ""
@@ -154,10 +159,14 @@ func cloneAppSpec(spec model.AppSpec) model.AppSpec {
 		out.Ports = append([]int(nil), spec.Ports...)
 	}
 	out.Env = cloneStringMap(spec.Env)
+	out.GeneratedEnv = cloneAppGeneratedEnv(spec.GeneratedEnv)
 	out.Files = cloneAppFiles(spec.Files)
 	if spec.Workspace != nil {
 		workspace := *spec.Workspace
 		out.Workspace = &workspace
+	}
+	if spec.NetworkPolicy != nil {
+		out.NetworkPolicy = cloneAppNetworkPolicy(spec.NetworkPolicy)
 	}
 	if spec.PersistentStorage != nil {
 		storage := *spec.PersistentStorage
@@ -189,6 +198,49 @@ func cloneAppSpec(spec model.AppSpec) model.AppSpec {
 		out.Postgres = &postgres
 	}
 	model.ApplyAppSpecDefaults(&out)
+	return out
+}
+
+func cloneAppNetworkPolicy(in *model.AppNetworkPolicySpec) *model.AppNetworkPolicySpec {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.Egress != nil {
+		egress := *in.Egress
+		egress.AllowApps = cloneAppNetworkPolicyPeers(in.Egress.AllowApps)
+		out.Egress = &egress
+	}
+	if in.Ingress != nil {
+		ingress := *in.Ingress
+		ingress.AllowApps = cloneAppNetworkPolicyPeers(in.Ingress.AllowApps)
+		out.Ingress = &ingress
+	}
+	return &out
+}
+
+func cloneAppNetworkPolicyPeers(in []model.AppNetworkPolicyAppPeer) []model.AppNetworkPolicyAppPeer {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]model.AppNetworkPolicyAppPeer, len(in))
+	for index, peer := range in {
+		out[index] = peer
+		if len(peer.Ports) > 0 {
+			out[index].Ports = append([]int(nil), peer.Ports...)
+		}
+	}
+	return out
+}
+
+func cloneAppGeneratedEnv(in map[string]model.AppGeneratedEnvSpec) map[string]model.AppGeneratedEnvSpec {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]model.AppGeneratedEnvSpec, len(in))
+	for key, spec := range in {
+		out[key] = spec
+	}
 	return out
 }
 

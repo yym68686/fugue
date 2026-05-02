@@ -107,6 +107,57 @@ services:
 	}
 }
 
+func TestInspectFugueManifestParsesGeneratedEnv(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte("FROM scratch\nEXPOSE 3000\n"), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	manifest := `version: 1
+services:
+  web:
+    public: true
+    port: 3000
+    build:
+      context: .
+      dockerfile: Dockerfile
+    generated_env:
+      APP_SECRET:
+        generate: random
+        encoding: hex
+        length: 16
+      SESSION_KEY: {}
+      TOKEN_FROM_LIST: random
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "fugue.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write fugue manifest: %v", err)
+	}
+
+	parsed, err := inspectFugueManifestFromRepo(clonedGitHubRepo{
+		RepoOwner:      "example",
+		RepoName:       "demo",
+		RepoDir:        repoDir,
+		Branch:         "main",
+		CommitSHA:      "abcdef123456",
+		DefaultAppName: "demo",
+	})
+	if err != nil {
+		t.Fatalf("inspect fugue manifest: %v", err)
+	}
+	if len(parsed.Services) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(parsed.Services))
+	}
+	generated := parsed.Services[0].GeneratedEnv
+	if got := generated["APP_SECRET"]; got.Generate != "random" || got.Encoding != "hex" || got.Length != 16 {
+		t.Fatalf("unexpected APP_SECRET generated env spec: %+v", got)
+	}
+	if got := generated["SESSION_KEY"]; got.Generate != "random" || got.Encoding != "base64url" || got.Length != 32 {
+		t.Fatalf("unexpected SESSION_KEY generated env spec: %+v", got)
+	}
+	if got := generated["TOKEN_FROM_LIST"]; got.Generate != "random" || got.Encoding != "base64url" || got.Length != 32 {
+		t.Fatalf("unexpected TOKEN_FROM_LIST generated env spec: %+v", got)
+	}
+}
+
 func TestInspectFugueManifestRejectsMultiplePublicServicesWithoutPrimary(t *testing.T) {
 	repoDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte("FROM scratch\nEXPOSE 3000\n"), 0o644); err != nil {
@@ -464,5 +515,67 @@ services:
 	}
 	if len(service.PersistentStorage.Mounts) != 1 || service.PersistentStorage.Mounts[0].Path != "/data/argus" {
 		t.Fatalf("expected imported volume mount to remain attached, got %+v", service.PersistentStorage.Mounts)
+	}
+}
+
+func TestInspectFugueManifestParsesNetworkPolicy(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte("FROM scratch\nEXPOSE 7777\n"), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	manifest := `version: 1
+services:
+  runtime:
+    network_mode: internal
+    port: 7777
+    build:
+      context: .
+    network_policy:
+      egress:
+        mode: restricted
+        allow_dns: true
+        allow_public_internet: true
+        allow_apps:
+          - app_id: app_gateway
+            ports: [8080]
+      ingress:
+        mode: restricted
+        allow_apps:
+          - app_id: app_gateway
+            ports: [7777]
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "fugue.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write fugue manifest: %v", err)
+	}
+
+	parsed, err := inspectFugueManifestFromRepo(clonedGitHubRepo{
+		RepoOwner:      "example",
+		RepoName:       "demo",
+		RepoDir:        repoDir,
+		Branch:         "main",
+		CommitSHA:      "abcdef123456",
+		DefaultAppName: "demo",
+	})
+	if err != nil {
+		t.Fatalf("inspect fugue manifest: %v", err)
+	}
+	if len(parsed.Services) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(parsed.Services))
+	}
+	policy := parsed.Services[0].NetworkPolicy
+	if policy == nil || policy.Egress == nil || policy.Ingress == nil {
+		t.Fatalf("expected network policy to be parsed, got %+v", policy)
+	}
+	if got := policy.Egress.Mode; got != "restricted" {
+		t.Fatalf("expected egress mode restricted, got %q", got)
+	}
+	if !policy.Egress.AllowDNS || !policy.Egress.AllowPublicInternet {
+		t.Fatalf("expected DNS and public internet egress, got %+v", *policy.Egress)
+	}
+	if len(policy.Egress.AllowApps) != 1 || policy.Egress.AllowApps[0].AppID != "app_gateway" || len(policy.Egress.AllowApps[0].Ports) != 1 || policy.Egress.AllowApps[0].Ports[0] != 8080 {
+		t.Fatalf("unexpected egress app allow list: %+v", policy.Egress.AllowApps)
+	}
+	if len(policy.Ingress.AllowApps) != 1 || policy.Ingress.AllowApps[0].Ports[0] != 7777 {
+		t.Fatalf("unexpected ingress app allow list: %+v", policy.Ingress.AllowApps)
 	}
 }

@@ -86,6 +86,8 @@ type ComposeService struct {
 	BuildArgs                  map[string]string
 	BuildTarget                string
 	NetworkMode                string
+	NetworkPolicy              *model.AppNetworkPolicySpec
+	GeneratedEnv               map[string]model.AppGeneratedEnvSpec
 	InternalPort               int
 	Published                  bool
 	Environment                map[string]string

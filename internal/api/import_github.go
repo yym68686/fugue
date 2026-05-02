@@ -364,6 +364,7 @@ func (s *Server) handleImportGitHubApp(w http.ResponseWriter, r *http.Request) {
 		}
 		applyStartupCommand(&spec, req.StartupCommand)
 		applyImportedNetworkMode(&spec, networkMode)
+		applyImportedGeneratedEnv(&spec, req.GeneratedEnv)
 
 		route := model.AppRoute{}
 		if model.AppManagedRouteEnabled(spec) {
