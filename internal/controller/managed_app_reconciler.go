@@ -1026,6 +1026,19 @@ func (s *Service) pruneManagedAppStaleObjects(ctx context.Context, client *kubeC
 		}
 	}
 
+	networkPolicies, err := s.listOwnedNetworkPolicyNames(ctx, client, namespace, app.ID)
+	if err != nil {
+		return err
+	}
+	for _, name := range networkPolicies {
+		if _, ok := desiredByKind["NetworkPolicy"][name]; ok {
+			continue
+		}
+		if err := client.deleteNetworkPolicy(ctx, namespace, name); err != nil {
+			return err
+		}
+	}
+
 	replicationDestinations, err := s.listOwnedVolSyncReplicationDestinationNames(ctx, client, namespace, app.ID)
 	if err != nil {
 		return err
@@ -1105,6 +1118,12 @@ func (s *Service) deleteManagedAppResources(ctx context.Context, client *kubeCli
 		}
 	}
 
+	for _, name := range resourceNames["NetworkPolicy"] {
+		if err := client.deleteNetworkPolicy(ctx, namespace, name); err != nil {
+			return err
+		}
+	}
+
 	for _, name := range resourceNames[runtime.VolSyncReplicationDestinationKind] {
 		if err := client.deleteVolSyncReplicationDestination(ctx, namespace, name); err != nil {
 			return err
@@ -1171,6 +1190,12 @@ func (s *Service) managedAppOwnedResourceNames(ctx context.Context, client *kube
 		}
 		addNames("Service", services)
 
+		networkPolicies, err := s.listOwnedNetworkPolicyNames(ctx, client, namespace, app.ID)
+		if err != nil {
+			return nil, err
+		}
+		addNames("NetworkPolicy", networkPolicies)
+
 		pvcs, err := s.listOwnedPersistentVolumeClaimNames(ctx, client, namespace, app.ID)
 		if err != nil {
 			return nil, err
@@ -1218,6 +1243,12 @@ func (s *Service) listOwnedCloudNativePGClusterNames(ctx context.Context, client
 func (s *Service) listOwnedServiceNames(ctx context.Context, client *kubeClient, namespace, appID string) ([]string, error) {
 	return listOwnedNames(ctx, appID, func(selector string) ([]string, error) {
 		return client.listServiceNamesByLabel(ctx, namespace, selector)
+	})
+}
+
+func (s *Service) listOwnedNetworkPolicyNames(ctx context.Context, client *kubeClient, namespace, appID string) ([]string, error) {
+	return listOwnedNames(ctx, appID, func(selector string) ([]string, error) {
+		return client.listNetworkPolicyNamesByLabel(ctx, namespace, selector)
 	})
 }
 

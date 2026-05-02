@@ -100,9 +100,13 @@ func TestControlPlaneRBACCoversDiagnosableWorkloads(t *testing.T) {
 	}
 
 	manifest := string(output)
-	want := `resources: ["deployments", "replicasets", "daemonsets", "statefulsets"]`
-	if !strings.Contains(manifest, want) {
-		t.Fatalf("control plane RBAC should cover diagnosable apps workloads %s:\n%s", want, manifest)
+	for _, want := range []string{
+		`resources: ["deployments", "replicasets", "daemonsets", "statefulsets"]`,
+		`resources: ["networkpolicies"]`,
+	} {
+		if !strings.Contains(manifest, want) {
+			t.Fatalf("control plane RBAC should cover managed app workload resource %s:\n%s", want, manifest)
+		}
 	}
 }
 

@@ -631,6 +631,10 @@ func (c *kubeClient) listServiceNamesByLabel(ctx context.Context, namespace, lab
 	return c.listNamespacedResourceNames(ctx, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/services", labelSelector)
 }
 
+func (c *kubeClient) listNetworkPolicyNamesByLabel(ctx context.Context, namespace, labelSelector string) ([]string, error) {
+	return c.listNamespacedResourceNames(ctx, "/apis/networking.k8s.io/v1/namespaces/"+c.effectiveNamespace(namespace)+"/networkpolicies", labelSelector)
+}
+
 func (c *kubeClient) listPersistentVolumeClaimNamesByLabel(ctx context.Context, namespace, labelSelector string) ([]string, error) {
 	return c.listNamespacedResourceNames(ctx, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/persistentvolumeclaims", labelSelector)
 }
@@ -685,6 +689,11 @@ func (c *kubeClient) deleteCloudNativePGCluster(ctx context.Context, namespace, 
 
 func (c *kubeClient) deleteService(ctx context.Context, namespace, name string) error {
 	_, err := c.doRequest(ctx, http.MethodDelete, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/services/"+url.PathEscape(name), "", nil, nil)
+	return normalizeDeleteNotFound(err)
+}
+
+func (c *kubeClient) deleteNetworkPolicy(ctx context.Context, namespace, name string) error {
+	_, err := c.doRequest(ctx, http.MethodDelete, "/apis/networking.k8s.io/v1/namespaces/"+c.effectiveNamespace(namespace)+"/networkpolicies/"+url.PathEscape(name), "", nil, nil)
 	return normalizeDeleteNotFound(err)
 }
 
