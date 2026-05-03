@@ -35,6 +35,29 @@ func TestNormalizeManagedAppRuntimeImageRefsMapsLegacyManagedImage(t *testing.T)
 	}
 }
 
+func TestNormalizeManagedAppRuntimeImageRefsMapsPrivateLegacyHostWithoutSource(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{
+		registryPushBase: "registry.push.example",
+		registryPullBase: "registry.fugue.internal:5000",
+	}
+	app := model.App{
+		Spec: model.AppSpec{
+			Image: "10.128.0.2:30500/fugue-apps/demo:upload-abcdef123456",
+		},
+	}
+
+	got, changed := svc.normalizeManagedAppRuntimeImageRefs(app)
+	if !changed {
+		t.Fatal("expected private legacy host to be normalized")
+	}
+	want := "registry.fugue.internal:5000/fugue-apps/demo:upload-abcdef123456"
+	if got.Spec.Image != want {
+		t.Fatalf("expected image %q, got %q", want, got.Spec.Image)
+	}
+}
+
 func TestNormalizeManagedAppRuntimeImageRefsKeepsExternalDockerImage(t *testing.T) {
 	t.Parallel()
 

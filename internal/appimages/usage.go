@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"net"
 	"sort"
 	"strings"
 	"time"
@@ -130,6 +131,9 @@ func NormalizeRuntimeImageRefForSource(
 		return runtimeImageRef
 	}
 	if runtimeImageRefUsesConfiguredManagedBase(runtimeImageRef, registryPushBase, registryPullBase) {
+		return normalizedRef
+	}
+	if runtimeImageRefUsesLegacyManagedRegistryHost(runtimeImageRef) {
 		return normalizedRef
 	}
 	if source == nil {
@@ -504,6 +508,43 @@ func runtimeImageRefUsesConfiguredManagedBase(imageRef, registryPushBase, regist
 
 func sourceImageRefUsesConfiguredManagedBase(imageRef, registryPushBase, registryPullBase string) bool {
 	return runtimeImageRefUsesConfiguredManagedBase(imageRef, registryPushBase, registryPullBase)
+}
+
+func runtimeImageRefUsesLegacyManagedRegistryHost(imageRef string) bool {
+	if !strings.Contains(strings.TrimSpace(imageRef), "/fugue-apps/") {
+		return false
+	}
+	host := imageRegistryHost(imageRef)
+	if host == "" {
+		return false
+	}
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
+		return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()
+	}
+	host = strings.ToLower(host)
+	return host == "localhost" ||
+		strings.HasSuffix(host, ".internal") ||
+		strings.HasSuffix(host, ".local") ||
+		strings.Contains(host, ".svc.") ||
+		strings.HasSuffix(host, ".svc")
+}
+
+func imageRegistryHost(imageRef string) string {
+	imageRef = strings.TrimSpace(imageRef)
+	if imageRef == "" {
+		return ""
+	}
+	if index := strings.Index(imageRef, "/"); index >= 0 {
+		first := imageRef[:index]
+		if !strings.Contains(first, ".") && !strings.Contains(first, ":") && first != "localhost" {
+			return ""
+		}
+		if host, _, err := net.SplitHostPort(first); err == nil {
+			return host
+		}
+		return first
+	}
+	return ""
 }
 
 func imageRepositoryName(imageRef string) string {
