@@ -141,6 +141,16 @@ func TestSetRuntimePoolModeRequiresPlatformAdminAndReconcilesNode(t *testing.T) 
 	if len(nodeTaints) != 0 {
 		t.Fatalf("expected tenant taint to be removed from shared-pool node, got %#v", nodeTaints)
 	}
+	machine, err := s.GetMachineByClusterNodeName(runtimeObj.ClusterNodeName)
+	if err != nil {
+		t.Fatalf("load shared-pool machine: %v", err)
+	}
+	if !machine.Policy.AllowBuilds {
+		t.Fatalf("expected shared-pool machine to default builds enabled, got %#v", machine.Policy)
+	}
+	if !machine.Policy.AllowSharedPool {
+		t.Fatalf("expected shared-pool machine workloads enabled, got %#v", machine.Policy)
+	}
 }
 
 func TestListClusterNodesAggregatesContributedSharedPoolNodesForTenant(t *testing.T) {

@@ -3255,6 +3255,16 @@ func TestSetRuntimePoolModeOnlyAllowsManagedOwnedRuntimes(t *testing.T) {
 	if updatedRuntime.PoolMode != model.RuntimePoolModeInternalShared {
 		t.Fatalf("expected managed runtime pool mode %q, got %q", model.RuntimePoolModeInternalShared, updatedRuntime.PoolMode)
 	}
+	machine, err := s.GetMachineByClusterNodeName(managedRuntime.ClusterNodeName)
+	if err != nil {
+		t.Fatalf("get managed runtime machine: %v", err)
+	}
+	if !machine.Policy.AllowBuilds {
+		t.Fatalf("expected shared-pool runtime machine builds enabled, got %#v", machine.Policy)
+	}
+	if !machine.Policy.AllowSharedPool {
+		t.Fatalf("expected shared-pool runtime machine workloads enabled, got %#v", machine.Policy)
+	}
 
 	_, externalSecret, err := s.CreateNodeKey(tenant.ID, "external")
 	if err != nil {

@@ -42,6 +42,7 @@ func seedMachinePolicyFromLabels(scope string, labels map[string]string) model.M
 		runtimepkg.SharedPoolLabelValue,
 	) {
 		policy.AllowSharedPool = true
+		policy.AllowBuilds = true
 	}
 	if rawRole, ok := labels[runtimepkg.ControlPlaneDesiredRoleKey]; ok {
 		if role := model.NormalizeMachineControlPlaneRole(strings.TrimSpace(rawRole)); role != "" {
@@ -59,6 +60,9 @@ func normalizeMachinePolicy(scope string, policy model.MachinePolicy) model.Mach
 	normalized := defaultMachinePolicyForScope(scope)
 	normalized.AllowBuilds = policy.AllowBuilds
 	normalized.AllowSharedPool = policy.AllowSharedPool
+	if normalized.AllowSharedPool {
+		normalized.AllowBuilds = true
+	}
 	if role := model.NormalizeMachineControlPlaneRole(policy.DesiredControlPlaneRole); role != "" {
 		normalized.DesiredControlPlaneRole = role
 	}

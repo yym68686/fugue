@@ -154,7 +154,7 @@ func buildRuntimeSnapshotMachine(runtimeObj model.Runtime) model.Machine {
 		RuntimeName:     runtimeObj.Name,
 		ClusterNodeName: strings.TrimSpace(runtimeObj.ClusterNodeName),
 		Policy: model.MachinePolicy{
-			AllowBuilds:             false,
+			AllowBuilds:             model.NormalizeRuntimePoolMode(runtimeObj.Type, runtimeObj.PoolMode) == model.RuntimePoolModeInternalShared,
 			AllowSharedPool:         model.NormalizeRuntimePoolMode(runtimeObj.Type, runtimeObj.PoolMode) == model.RuntimePoolModeInternalShared,
 			DesiredControlPlaneRole: model.MachineControlPlaneRoleNone,
 		},
@@ -211,7 +211,8 @@ func buildClusterNodePolicyView(snapshot clusterNodeSnapshot, machine *model.Mac
 }
 
 func effectiveBuildPolicy(snapshot clusterNodeSnapshot) bool {
-	return strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.BuildNodeLabelKey), runtimepkg.BuildNodeLabelValue)
+	return snapshot.sharedPool ||
+		strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.BuildNodeLabelKey), runtimepkg.BuildNodeLabelValue)
 }
 
 func desiredControlPlaneRole(snapshot clusterNodeSnapshot, machine *model.Machine) string {
