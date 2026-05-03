@@ -3,12 +3,14 @@ package api
 import (
 	"strings"
 
+	"fugue/internal/appimages"
 	"fugue/internal/model"
 )
 
 func (s *Server) recoverAppDeployBaseline(app model.App) (model.AppSpec, *model.AppSource, error) {
 	spec := cloneAppSpec(app.Spec)
 	source := model.AppBuildSource(app)
+	spec.Image = appimages.NormalizeRuntimeImageRefForSource(spec.Image, source, s.registryPushBase, s.registryPullBase)
 	if !appDeployBaselineNeedsRecovery(spec, source) {
 		return spec, source, nil
 	}
@@ -45,6 +47,7 @@ func (s *Server) recoverAppDeployBaseline(app model.App) (model.AppSpec, *model.
 			recoveredSpec.Image = runtimeImageRef
 		}
 	}
+	recoveredSpec.Image = appimages.NormalizeRuntimeImageRefForSource(recoveredSpec.Image, recoveredSource, s.registryPushBase, s.registryPullBase)
 
 	recoveredSpec.Replicas = app.Spec.Replicas
 	recoveredSpec.ImageMirrorLimit = app.Spec.ImageMirrorLimit

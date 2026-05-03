@@ -19,6 +19,9 @@ func (s *Service) applyManagedAppDesiredState(ctx context.Context, app model.App
 		return fmt.Errorf("initialize kubernetes managed app client: %w", err)
 	}
 
+	if normalizedApp, changed := s.normalizeManagedAppRuntimeImageRefs(app); changed {
+		app = normalizedApp
+	}
 	app = s.Renderer.PrepareApp(app)
 	objects := runtime.BuildManagedAppStateObjects(app, scheduling)
 	if err := client.applyObjects(ctx, objects); err != nil {
@@ -159,10 +162,25 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 			}
 		}
 	}
+	if normalizedApp, changed := s.normalizeManagedAppRuntimeImageRefs(app); changed {
+		app = normalizedApp
+		if syncStoredManagedAppSnapshot {
+			if updatedApp, syncErr := s.Store.SyncObservedManagedAppBaseline(app.ID, app.Spec, app.Source); syncErr != nil {
+				if s.Logger != nil {
+					s.Logger.Printf("persist normalized managed app runtime image for app %s failed: %v", app.ID, syncErr)
+				}
+			} else {
+				app = updatedApp
+			}
+		}
+	}
 	return s.reconcileManagedAppResolvedObject(ctx, client, namespace, managed, app, recoverStoredBaseline, syncStoredManagedAppSnapshot)
 }
 
 func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, recoverStoredBaseline bool, syncStoredManagedAppSnapshot bool) error {
+	if normalizedApp, changed := s.normalizeManagedAppRuntimeImageRefs(app); changed {
+		app = normalizedApp
+	}
 	if strings.TrimSpace(managed.Metadata.DeletionTimestamp) != "" {
 		status := managedAppBaseStatus(managed, app)
 		status.Phase = runtime.ManagedAppPhaseDeleting

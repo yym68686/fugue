@@ -793,6 +793,12 @@ func (s *Server) buildAppImageCandidate(
 	if runtimeImageRef == "" {
 		runtimeImageRef = s.runtimeImageRefFromManagedRef(imageRef)
 	}
+	runtimeImageRef = appimages.NormalizeRuntimeImageRefForSource(
+		runtimeImageRef,
+		&sourceCopy,
+		s.registryPushBase,
+		s.registryPullBase,
+	)
 
 	return appImageCandidate{
 		ImageRef:        imageRef,
@@ -877,42 +883,11 @@ func shortAppImageCommit(value string) string {
 }
 
 func (s *Server) registryRefFromRuntimeImageRef(runtimeImageRef string) string {
-	runtimeImageRef = strings.TrimSpace(runtimeImageRef)
-	if runtimeImageRef == "" {
-		return ""
-	}
-	pushBase := strings.Trim(strings.TrimSpace(s.registryPushBase), "/")
-	pullBase := strings.Trim(strings.TrimSpace(s.registryPullBase), "/")
-	if pushBase == "" {
-		return ""
-	}
-	if strings.HasPrefix(runtimeImageRef, pushBase+"/") {
-		return runtimeImageRef
-	}
-	if pullBase != "" && pullBase != pushBase {
-		prefix := pullBase + "/"
-		if strings.HasPrefix(runtimeImageRef, prefix) {
-			return pushBase + "/" + strings.TrimPrefix(runtimeImageRef, prefix)
-		}
-	}
-	return managedImageRefFromFugueAppsPath(runtimeImageRef, pushBase)
+	return appimages.ManagedRegistryRefFromRuntimeImageRef(runtimeImageRef, s.registryPushBase, s.registryPullBase)
 }
 
 func (s *Server) runtimeImageRefFromManagedRef(imageRef string) string {
-	imageRef = strings.TrimSpace(imageRef)
-	pushBase := strings.Trim(strings.TrimSpace(s.registryPushBase), "/")
-	pullBase := strings.Trim(strings.TrimSpace(s.registryPullBase), "/")
-	if imageRef == "" {
-		return ""
-	}
-	if pullBase == "" || pullBase == pushBase || pushBase == "" {
-		return imageRef
-	}
-	prefix := pushBase + "/"
-	if !strings.HasPrefix(imageRef, prefix) {
-		return imageRef
-	}
-	return pullBase + "/" + strings.TrimPrefix(imageRef, prefix)
+	return appimages.RuntimeImageRefFromManagedRef(imageRef, s.registryPushBase, s.registryPullBase)
 }
 
 func (s *Server) runtimeImageRefFromManagedRefWithDigest(imageRef, digest string) string {

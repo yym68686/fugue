@@ -115,6 +115,42 @@ func TestManagedImageRefForSourceMapsLegacyFugueAppsRuntimeHost(t *testing.T) {
 	}
 }
 
+func TestNormalizeRuntimeImageRefForSourceMapsLegacyFugueAppsRuntimeHost(t *testing.T) {
+	t.Parallel()
+
+	got := NormalizeRuntimeImageRefForSource(
+		"10.128.0.2:30500/fugue-apps/example-demo@sha256:abc123",
+		&model.AppSource{
+			Type:             model.AppSourceTypeUpload,
+			ResolvedImageRef: "registry.push.example/fugue-apps/example-demo:upload-abcdef123456",
+		},
+		"registry.push.example",
+		"registry.fugue.internal:5000",
+	)
+	want := "registry.fugue.internal:5000/fugue-apps/example-demo@sha256:abc123"
+	if got != want {
+		t.Fatalf("expected normalized runtime image ref %q, got %q", want, got)
+	}
+}
+
+func TestNormalizeRuntimeImageRefForSourceDoesNotRewriteExternalDockerImage(t *testing.T) {
+	t.Parallel()
+
+	imageRef := "ghcr.io/example/fugue-apps/demo@sha256:abc123"
+	got := NormalizeRuntimeImageRefForSource(
+		imageRef,
+		&model.AppSource{
+			Type:     model.AppSourceTypeDockerImage,
+			ImageRef: imageRef,
+		},
+		"registry.push.example",
+		"registry.fugue.internal:5000",
+	)
+	if got != imageRef {
+		t.Fatalf("expected external docker image to remain %q, got %q", imageRef, got)
+	}
+}
+
 func TestManagedImageRefForSourceUploadOmitsBlankOptionalSuffix(t *testing.T) {
 	t.Parallel()
 

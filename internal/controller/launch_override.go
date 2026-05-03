@@ -5,6 +5,7 @@ import (
 	"path"
 	"strings"
 
+	"fugue/internal/appimages"
 	"fugue/internal/model"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -119,38 +120,9 @@ func companionLauncherPathForEntrypoint(entrypoint string) (string, bool) {
 }
 
 func managedRegistryRefFromRuntimeImageRef(runtimeImageRef, registryPushBase, registryPullBase string) string {
-	runtimeImageRef = strings.TrimSpace(runtimeImageRef)
-	if runtimeImageRef == "" {
-		return ""
-	}
-
-	pushBase := strings.Trim(strings.TrimSpace(registryPushBase), "/")
-	pullBase := strings.Trim(strings.TrimSpace(registryPullBase), "/")
-	if pushBase == "" {
-		return ""
-	}
-	if strings.HasPrefix(runtimeImageRef, pushBase+"/") {
-		return runtimeImageRef
-	}
-	if pullBase != "" && pullBase != pushBase {
-		prefix := pullBase + "/"
-		if strings.HasPrefix(runtimeImageRef, prefix) {
-			return pushBase + "/" + strings.TrimPrefix(runtimeImageRef, prefix)
-		}
-	}
-	return managedImageRefFromFugueAppsPath(runtimeImageRef, pushBase)
+	return appimages.ManagedRegistryRefFromRuntimeImageRef(runtimeImageRef, registryPushBase, registryPullBase)
 }
 
 func managedImageRefFromFugueAppsPath(imageRef, registryPushBase string) string {
-	imageRef = strings.TrimSpace(imageRef)
-	pushBase := strings.Trim(strings.TrimSpace(registryPushBase), "/")
-	if imageRef == "" || pushBase == "" {
-		return ""
-	}
-	const marker = "/fugue-apps/"
-	index := strings.Index(imageRef, marker)
-	if index < 0 {
-		return ""
-	}
-	return pushBase + "/" + strings.TrimPrefix(imageRef[index+1:], "/")
+	return appimages.ManagedRegistryRefFromRuntimeImageRef(imageRef, registryPushBase, "")
 }

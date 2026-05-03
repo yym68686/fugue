@@ -601,6 +601,19 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	default:
 		return fmt.Errorf("unsupported operation type %s", op.Type)
 	}
+	if op.Type != model.OperationTypeDelete {
+		if normalizedApp, changed := s.normalizeManagedAppRuntimeImageRefs(app); changed {
+			app = normalizedApp
+			switch op.Type {
+			case model.OperationTypeDeploy,
+				model.OperationTypeMigrate,
+				model.OperationTypeFailover,
+				model.OperationTypeDatabaseSwitchover,
+				model.OperationTypeDatabaseLocalize:
+				completionDesiredSpec = cloneControllerAppSpec(&app.Spec)
+			}
+		}
+	}
 	timer.Mark("prepare_operation")
 
 	if err := s.ensureOperationStillActive(op.ID); err != nil {

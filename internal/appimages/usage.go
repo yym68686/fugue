@@ -75,6 +75,87 @@ func ManagedImageRefForSource(
 	return managedImageRefForSource(app, source, runtimeImageRef, registryPushBase, registryPullBase)
 }
 
+func ManagedRegistryRefFromRuntimeImageRef(runtimeImageRef, registryPushBase, registryPullBase string) string {
+	return registryRefFromRuntimeImageRef(runtimeImageRef, registryPushBase, registryPullBase)
+}
+
+func RuntimeImageRefFromManagedRef(imageRef, registryPushBase, registryPullBase string) string {
+	imageRef = strings.TrimSpace(imageRef)
+	pushBase := strings.Trim(strings.TrimSpace(registryPushBase), "/")
+	pullBase := strings.Trim(strings.TrimSpace(registryPullBase), "/")
+	if imageRef == "" {
+		return ""
+	}
+	if pullBase == "" || pullBase == pushBase || pushBase == "" {
+		return imageRef
+	}
+	prefix := pushBase + "/"
+	if !strings.HasPrefix(imageRef, prefix) {
+		return imageRef
+	}
+	return pullBase + "/" + strings.TrimPrefix(imageRef, prefix)
+}
+
+func NormalizeRuntimeImageRef(runtimeImageRef, registryPushBase, registryPullBase string) string {
+	runtimeImageRef = strings.TrimSpace(runtimeImageRef)
+	if runtimeImageRef == "" {
+		return ""
+	}
+	managedRef := registryRefFromRuntimeImageRef(runtimeImageRef, registryPushBase, registryPullBase)
+	if managedRef == "" {
+		return runtimeImageRef
+	}
+	if normalized := RuntimeImageRefFromManagedRef(managedRef, registryPushBase, registryPullBase); normalized != "" {
+		return normalized
+	}
+	return runtimeImageRef
+}
+
+func NormalizeRuntimeImageRefForSource(
+	runtimeImageRef string,
+	source *model.AppSource,
+	registryPushBase string,
+	registryPullBase string,
+) string {
+	runtimeImageRef = strings.TrimSpace(runtimeImageRef)
+	if runtimeImageRef == "" {
+		return ""
+	}
+	managedRef := registryRefFromRuntimeImageRef(runtimeImageRef, registryPushBase, registryPullBase)
+	if managedRef == "" {
+		return runtimeImageRef
+	}
+	normalizedRef := RuntimeImageRefFromManagedRef(managedRef, registryPushBase, registryPullBase)
+	if normalizedRef == "" || normalizedRef == runtimeImageRef {
+		return runtimeImageRef
+	}
+	if runtimeImageRefUsesConfiguredManagedBase(runtimeImageRef, registryPushBase, registryPullBase) {
+		return normalizedRef
+	}
+	if source == nil {
+		return runtimeImageRef
+	}
+	if resolved := strings.TrimSpace(source.ResolvedImageRef); resolved != "" {
+		resolvedManagedRef := registryRefFromRuntimeImageRef(resolved, registryPushBase, registryPullBase)
+		if imageRepositoryName(resolvedManagedRef) == imageRepositoryName(managedRef) {
+			return normalizedRef
+		}
+	}
+	if sourceImageRefUsesConfiguredManagedBase(source.ImageRef, registryPushBase, registryPullBase) {
+		sourceManagedRef := registryRefFromRuntimeImageRef(source.ImageRef, registryPushBase, registryPullBase)
+		if imageRepositoryName(sourceManagedRef) == imageRepositoryName(managedRef) {
+			return normalizedRef
+		}
+	}
+
+	switch strings.TrimSpace(source.Type) {
+	case model.AppSourceTypeGitHubPublic, model.AppSourceTypeGitHubPrivate, model.AppSourceTypeUpload:
+		return normalizedRef
+	default:
+		return runtimeImageRef
+	}
+}
+
 func DeletableManagedImageRefs(
 	deletedApp model.App,
 	deletedAppOps []model.Operation,
@@ -406,6 +487,39 @@ func managedImageRefFromFugueAppsPath(imageRef, registryPushBase string) string 
 		return ""
 	}
 	return pushBase + "/" + strings.TrimPrefix(imageRef[index+1:], "/")
+}
+
+func runtimeImageRefUsesConfiguredManagedBase(imageRef, registryPushBase, registryPullBase string) bool {
+	imageRef = strings.TrimSpace(imageRef)
+	pushBase := strings.Trim(strings.TrimSpace(registryPushBase), "/")
+	pullBase := strings.Trim(strings.TrimSpace(registryPullBase), "/")
+	if imageRef == "" {
+		return false
+	}
+	if pushBase != "" && strings.HasPrefix(imageRef, pushBase+"/") {
+		return true
+	}
+	return pullBase != "" && strings.HasPrefix(imageRef, pullBase+"/")
+}
+
+func sourceImageRefUsesConfiguredManagedBase(imageRef, registryPushBase, registryPullBase string) bool {
+	return runtimeImageRefUsesConfiguredManagedBase(imageRef, registryPushBase, registryPullBase)
+}
+
+func imageRepositoryName(imageRef string) string {
+	imageRef = strings.TrimSpace(imageRef)
+	if imageRef == "" {
+		return ""
+	}
+	if index := strings.Index(imageRef, "@"); index >= 0 {
+		imageRef = imageRef[:index]
+	}
+	lastSlash := strings.LastIndex(imageRef, "/")
+	lastColon := strings.LastIndex(imageRef, ":")
+	if lastColon > lastSlash {
+		imageRef = imageRef[:lastColon]
+	}
+	return imageRef
 }
 
 func isManagedRegistryRef(imageRef, registryPushBase string) bool {
