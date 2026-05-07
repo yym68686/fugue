@@ -37,7 +37,12 @@ func TestRewriteComposeEnvironmentRewritesInternalServiceHosts(t *testing.T) {
 
 func TestApplyManagedPostgresEnvironmentRewritesGeneratedDatabaseURL(t *testing.T) {
 	env := map[string]string{
-		"DATABASE_URL": "postgresql+asyncpg://uniapi:@uni-api-web-api-db-postgres:5432/uniapi",
+		"DATABASE_URL":      "postgresql+asyncpg://uniapi:@uni-api-web-api-db-postgres:5432/uniapi",
+		"DATABASE_HOST":     "uni-api-web-api-db-postgres",
+		"DATABASE_PORT":     "15432",
+		"DATABASE_USER":     "placeholder",
+		"DATABASE_PASSWORD": "",
+		"DATABASE_DBNAME":   "placeholder",
 	}
 
 	got := applyManagedPostgresEnvironment(env, model.AppPostgresSpec{
@@ -49,6 +54,21 @@ func TestApplyManagedPostgresEnvironmentRewritesGeneratedDatabaseURL(t *testing.
 
 	if got["DATABASE_URL"] != "postgresql+asyncpg://uniapi:secret-pass@uni-api-web-api-db-postgres-rw:5432/uniapi" {
 		t.Fatalf("unexpected DATABASE_URL rewrite: %q", got["DATABASE_URL"])
+	}
+	if got["DATABASE_HOST"] != "uni-api-web-api-db-postgres-rw" {
+		t.Fatalf("unexpected DATABASE_HOST rewrite: %q", got["DATABASE_HOST"])
+	}
+	if got["DATABASE_PORT"] != "5432" {
+		t.Fatalf("unexpected DATABASE_PORT rewrite: %q", got["DATABASE_PORT"])
+	}
+	if got["DATABASE_USER"] != "uniapi" {
+		t.Fatalf("unexpected DATABASE_USER rewrite: %q", got["DATABASE_USER"])
+	}
+	if got["DATABASE_PASSWORD"] != "secret-pass" {
+		t.Fatalf("unexpected DATABASE_PASSWORD rewrite: %q", got["DATABASE_PASSWORD"])
+	}
+	if got["DATABASE_DBNAME"] != "uniapi" {
+		t.Fatalf("unexpected DATABASE_DBNAME rewrite: %q", got["DATABASE_DBNAME"])
 	}
 }
 

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -250,6 +251,17 @@ func TestGetAppDiagnosisCountsOnlyActivePodsWhenReadyReplicaExists(t *testing.T)
 	server.newLogsClient = func(namespace string) (appLogsClient, error) {
 		return fake, nil
 	}
+	server.appRequestHTTPClient = &http.Client{
+		Transport: diagnosticRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				Status:     "404 Not Found",
+				StatusCode: http.StatusNotFound,
+				Body:       http.NoBody,
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	}
 
 	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/diagnosis", apiKey, nil)
 	if recorder.Code != http.StatusOK {
@@ -268,6 +280,71 @@ func TestGetAppDiagnosisCountsOnlyActivePodsWhenReadyReplicaExists(t *testing.T)
 	}
 	if response.Diagnosis.Summary != "1/1 runtime pods are ready" {
 		t.Fatalf("expected active-only readiness summary, got %q", response.Diagnosis.Summary)
+	}
+}
+
+func TestGetAppDiagnosisDetectsReadyPodHTTPTimeout(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	selector, containerName, err := runtimeLogTarget(app, "app")
+	if err != nil {
+		t.Fatalf("runtime log target: %v", err)
+	}
+
+	fake := newFakeAppLogsClient()
+	readyPod := fakePod("demo-ready", "Running", time.Date(2026, 4, 16, 0, 1, 0, 0, time.UTC), containerName)
+	readyPod.Status.ContainerStatuses = []kubeContainerStatus{{
+		Name:  containerName,
+		Image: "ghcr.io/example/demo:latest",
+		Ready: true,
+		State: kubeRuntimeState{
+			Running: &struct{}{},
+		},
+	}}
+
+	fake.setPods(selector, []kubePodInfo{readyPod})
+	server.newLogsClient = func(namespace string) (appLogsClient, error) {
+		return fake, nil
+	}
+
+	probedPaths := []string{}
+	server.appRequestHTTPClient = &http.Client{
+		Transport: diagnosticRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			probedPaths = append(probedPaths, req.URL.Path)
+			return nil, context.DeadlineExceeded
+		}),
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/diagnosis", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Diagnosis appDiagnosis `json:"diagnosis"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Diagnosis.Category != "http-timeout" {
+		t.Fatalf("expected http-timeout diagnosis, got %+v", response.Diagnosis)
+	}
+	if response.Diagnosis.LivePods != 1 || response.Diagnosis.ReadyPods != 1 {
+		t.Fatalf("expected 1/1 active ready pods, got live=%d ready=%d", response.Diagnosis.LivePods, response.Diagnosis.ReadyPods)
+	}
+	if !strings.Contains(response.Diagnosis.Summary, "internal HTTP probe timed out") {
+		t.Fatalf("expected timeout summary, got %q", response.Diagnosis.Summary)
+	}
+	if strings.Join(probedPaths, ",") != "/healthz,/" {
+		t.Fatalf("expected /healthz and / probes, got %#v", probedPaths)
+	}
+	joinedEvidence := strings.Join(response.Diagnosis.Evidence, "\n")
+	if !strings.Contains(joinedEvidence, "http probe GET /healthz failed") || !strings.Contains(joinedEvidence, "http probe GET / failed") {
+		t.Fatalf("expected HTTP probe evidence, got %+v", response.Diagnosis.Evidence)
 	}
 }
 

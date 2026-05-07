@@ -28,6 +28,8 @@ var composeFileCandidates = []string{
 const (
 	ComposeServiceKindApp                 = "app"
 	ComposeServiceKindPostgres            = "postgres"
+	composeMissingRequiredEnvPrefix       = "\x00fugue-compose-required:"
+	composeMissingRequiredEnvSuffix       = "\x00"
 	maxComposePersistentSeedBytes         = 1 << 20
 	defaultComposePersistentFileMode      = 0o644
 	defaultComposePersistentDirectoryMode = 0o755
@@ -1295,13 +1297,92 @@ func resolveComposeExpression(expr string, vars map[string]string) string {
 		return fallback
 	case strings.Contains(expr, ":?"):
 		name, _, _ := strings.Cut(expr, ":?")
-		return strings.TrimSpace(vars[strings.TrimSpace(name)])
+		name = strings.TrimSpace(name)
+		if value, ok := vars[name]; ok && strings.TrimSpace(value) != "" {
+			return value
+		}
+		return composeMissingRequiredEnvValue(name)
 	case strings.Contains(expr, "?"):
 		name, _, _ := strings.Cut(expr, "?")
-		return strings.TrimSpace(vars[strings.TrimSpace(name)])
+		name = strings.TrimSpace(name)
+		if value, ok := vars[name]; ok {
+			return value
+		}
+		return composeMissingRequiredEnvValue(name)
 	default:
 		return strings.TrimSpace(vars[strings.TrimSpace(expr)])
 	}
+}
+
+func composeMissingRequiredEnvValue(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "unknown"
+	}
+	return composeMissingRequiredEnvPrefix + name + composeMissingRequiredEnvSuffix
+}
+
+func isComposeMissingRequiredEnvValue(value string) bool {
+	return strings.HasPrefix(value, composeMissingRequiredEnvPrefix) && strings.HasSuffix(value, composeMissingRequiredEnvSuffix)
+}
+
+func composeMissingRequiredEnvName(value string) string {
+	if !isComposeMissingRequiredEnvValue(value) {
+		return ""
+	}
+	value = strings.TrimPrefix(value, composeMissingRequiredEnvPrefix)
+	value = strings.TrimSuffix(value, composeMissingRequiredEnvSuffix)
+	return strings.TrimSpace(value)
+}
+
+func composeMissingRequiredEnvNames(value string) []string {
+	if !strings.Contains(value, composeMissingRequiredEnvPrefix) {
+		return nil
+	}
+	names := []string{}
+	remaining := value
+	for {
+		start := strings.Index(remaining, composeMissingRequiredEnvPrefix)
+		if start < 0 {
+			break
+		}
+		remaining = remaining[start+len(composeMissingRequiredEnvPrefix):]
+		end := strings.Index(remaining, composeMissingRequiredEnvSuffix)
+		if end < 0 {
+			break
+		}
+		name := strings.TrimSpace(remaining[:end])
+		if name != "" {
+			names = append(names, name)
+		}
+		remaining = remaining[end+len(composeMissingRequiredEnvSuffix):]
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return names
+}
+
+func ValidateNoMissingRequiredComposeEnv(serviceName string, env map[string]string) error {
+	if len(env) == 0 {
+		return nil
+	}
+	for key, value := range env {
+		names := composeMissingRequiredEnvNames(value)
+		if len(names) == 0 {
+			continue
+		}
+		name := names[0]
+		if name == "" {
+			name = key
+		}
+		serviceName = strings.TrimSpace(serviceName)
+		if serviceName == "" {
+			return fmt.Errorf("compose env %q requires %s, but it was not provided", key, name)
+		}
+		return fmt.Errorf("compose service %q env %q requires %s, but it was not provided", serviceName, key, name)
+	}
+	return nil
 }
 
 func readComposeEnvDefaults(repoDir string) map[string]string {

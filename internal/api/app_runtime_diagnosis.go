@@ -2,10 +2,13 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
@@ -15,7 +18,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-const appDiagnosisEventLimit = 12
+const (
+	appDiagnosisEventLimit         = 12
+	appDiagnosisHTTPProbeTimeout   = 2 * time.Second
+	appDiagnosisHTTPProbeUserAgent = "fugue-app-diagnosis/1.0"
+)
+
+var appDiagnosisHTTPProbePaths = []string{"/healthz", "/"}
 
 type appDiagnosis struct {
 	Category       string               `json:"category"`
@@ -179,7 +188,24 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 		}
 	}
 
+	httpProbe := appHTTPProbeDiagnosis{}
+	if component == "app" && diagnosis.ReadyPods > 0 {
+		httpProbe = s.diagnoseAppHTTPAvailability(r.Context(), app)
+		for _, evidence := range httpProbe.evidence {
+			diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, evidence)
+		}
+	}
+
 	switch {
+	case diagnosis.ReadyPods > 0 && httpProbe.attempted && !httpProbe.responsive:
+		if httpProbe.timedOut {
+			diagnosis.Category = "http-timeout"
+			diagnosis.Summary = fmt.Sprintf("%d/%d runtime pods are ready, but the internal HTTP probe timed out", diagnosis.ReadyPods, diagnosis.LivePods)
+		} else {
+			diagnosis.Category = "http-unreachable"
+			diagnosis.Summary = fmt.Sprintf("%d/%d runtime pods are ready, but the internal HTTP probe could not reach the app", diagnosis.ReadyPods, diagnosis.LivePods)
+		}
+		diagnosis.Hint = fmt.Sprintf("Probe the internal service with fugue app request %s /healthz and inspect runtime logs with fugue app logs runtime %s --previous.", strings.TrimSpace(app.Name), strings.TrimSpace(app.Name))
 	case diagnosis.ReadyPods > 0:
 		diagnosis.Category = "available"
 		diagnosis.Summary = fmt.Sprintf("%d/%d runtime pods are ready", diagnosis.ReadyPods, diagnosis.LivePods)
@@ -242,6 +268,89 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 		diagnosis.Summary = "no single runtime root cause was identified"
 	}
 	return diagnosis, nil
+}
+
+type appHTTPProbeDiagnosis struct {
+	attempted  bool
+	responsive bool
+	timedOut   bool
+	evidence   []string
+}
+
+func (s *Server) diagnoseAppHTTPAvailability(ctx context.Context, app model.App) appHTTPProbeDiagnosis {
+	diagnosis := appHTTPProbeDiagnosis{}
+	if !model.AppHasClusterService(app.Spec) {
+		return diagnosis
+	}
+
+	client := s.appRequestHTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	for _, requestPath := range appDiagnosisHTTPProbePaths {
+		target, err := s.resolveAppInternalRequestURL(ctx, app, requestPath, nil)
+		if err != nil {
+			diagnosis.attempted = true
+			diagnosis.evidence = append(diagnosis.evidence, fmt.Sprintf("http probe GET %s could not resolve internal service URL: %v", requestPath, err))
+			continue
+		}
+
+		probeCtx, cancel := context.WithTimeout(ctx, appDiagnosisHTTPProbeTimeout)
+		startedAt := time.Now()
+		req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, target, nil)
+		if err != nil {
+			cancel()
+			diagnosis.attempted = true
+			diagnosis.evidence = append(diagnosis.evidence, fmt.Sprintf("http probe GET %s could not create request: %v", requestPath, err))
+			continue
+		}
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("User-Agent", appDiagnosisHTTPProbeUserAgent)
+
+		resp, err := client.Do(req)
+		elapsed := time.Since(startedAt).Round(time.Millisecond)
+		cancel()
+		diagnosis.attempted = true
+		if err != nil {
+			if appDiagnosisHTTPProbeTimedOut(err) {
+				diagnosis.timedOut = true
+			}
+			diagnosis.evidence = append(diagnosis.evidence, fmt.Sprintf("http probe GET %s failed after %s: %v", requestPath, elapsed, err))
+			continue
+		}
+		if resp == nil {
+			diagnosis.evidence = append(diagnosis.evidence, fmt.Sprintf("http probe GET %s failed after %s: empty response", requestPath, elapsed))
+			continue
+		}
+		if resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		status := strings.TrimSpace(resp.Status)
+		if status == "" {
+			status = fmt.Sprintf("status=%d", resp.StatusCode)
+		}
+		diagnosis.responsive = true
+		diagnosis.evidence = append(diagnosis.evidence, fmt.Sprintf("http probe GET %s returned %s after %s", requestPath, status, elapsed))
+		return diagnosis
+	}
+
+	return diagnosis
+}
+
+func appDiagnosisHTTPProbeTimedOut(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	normalized := strings.ToLower(err.Error())
+	return strings.Contains(normalized, "timeout") || strings.Contains(normalized, "deadline exceeded")
 }
 
 func (s *Server) appendAppPlatformEnvDrift(ctx context.Context, client *clusterNodeClient, app model.App, namespace string, diagnosis *appDiagnosis) bool {

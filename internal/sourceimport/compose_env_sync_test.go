@@ -34,6 +34,11 @@ func TestSuggestComposeServiceEnvRewritesCurrentTopologyHosts(t *testing.T) {
     environment:
       DATABASE_URL: postgresql://demo:placeholder@db:5432/demo
       DB_HOST: db
+      DATABASE_HOST: db
+      DATABASE_PORT: 15432
+      DATABASE_USER: placeholder
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      DATABASE_DBNAME: placeholder
     depends_on:
       - db
   db:
@@ -82,7 +87,53 @@ func TestSuggestComposeServiceEnvRewritesCurrentTopologyHosts(t *testing.T) {
 	if got := apiEnv["DB_HOST"]; got != "demo-api-postgres-rw" {
 		t.Fatalf("expected api DB_HOST rewrite, got %q", got)
 	}
+	if got := apiEnv["DATABASE_HOST"]; got != "demo-api-postgres-rw" {
+		t.Fatalf("expected api DATABASE_HOST rewrite, got %q", got)
+	}
+	if got := apiEnv["DATABASE_PORT"]; got != "5432" {
+		t.Fatalf("expected api DATABASE_PORT rewrite, got %q", got)
+	}
+	if got := apiEnv["DATABASE_USER"]; got != "demo" {
+		t.Fatalf("expected api DATABASE_USER rewrite, got %q", got)
+	}
+	if got := apiEnv["DATABASE_PASSWORD"]; got != "secret-pass" {
+		t.Fatalf("expected api DATABASE_PASSWORD rewrite, got %q", got)
+	}
+	if got := apiEnv["DATABASE_DBNAME"]; got != "demo" {
+		t.Fatalf("expected api DATABASE_DBNAME rewrite, got %q", got)
+	}
 	if got := apiEnv["DATABASE_URL"]; got != "postgresql://demo:secret-pass@demo-api-postgres-rw:5432/demo" {
 		t.Fatalf("expected api DATABASE_URL managed postgres rewrite, got %q", got)
+	}
+	if err := ValidateNoMissingRequiredComposeEnv("api", apiEnv); err != nil {
+		t.Fatalf("expected managed postgres rewrite to satisfy required DATABASE_PASSWORD: %v", err)
+	}
+}
+
+func TestValidateNoMissingRequiredComposeEnvRejectsUnresolvedRequiredValue(t *testing.T) {
+	env := parseComposeEnvironment(map[string]any{
+		"API_KEY": "${API_KEY:?API_KEY is required}",
+	}, nil)
+
+	err := ValidateNoMissingRequiredComposeEnv("api", env)
+	if err == nil {
+		t.Fatal("expected missing required env error")
+	}
+	if got := err.Error(); got != `compose service "api" env "API_KEY" requires API_KEY, but it was not provided` {
+		t.Fatalf("unexpected error: %q", got)
+	}
+}
+
+func TestValidateNoMissingRequiredComposeEnvRejectsEmbeddedRequiredValue(t *testing.T) {
+	env := parseComposeEnvironment(map[string]any{
+		"API_URL": "https://${API_HOST:?API_HOST is required}/v1",
+	}, nil)
+
+	err := ValidateNoMissingRequiredComposeEnv("api", env)
+	if err == nil {
+		t.Fatal("expected missing required env error")
+	}
+	if got := err.Error(); got != `compose service "api" env "API_URL" requires API_HOST, but it was not provided` {
+		t.Fatalf("unexpected error: %q", got)
 	}
 }

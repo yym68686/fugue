@@ -107,6 +107,11 @@ It keeps the Fugue Service as `ClusterIP`, assuming an external ingress, cloud l
 
 Fugue's Route A edge currently depends on Caddy because Caddy owns custom-domain TLS automation and wildcard app ingress behavior.
 
+The long-term data-plane split is documented in
+`docs/regional-edge-data-plane.md`. That architecture keeps the control plane
+responsible for route, certificate, state, and policy decisions while moving
+public application traffic to regional edge nodes close to users or runtimes.
+
 Production guidance:
 
 1. Run the Fugue edge Caddy config on multiple edge nodes.

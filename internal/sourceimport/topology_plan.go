@@ -231,6 +231,9 @@ func ManagedPostgresSpec(service ComposeService, ownerAppName string) (model.App
 func firstNonEmptyComposeValue(env map[string]string, keys ...string) string {
 	for _, key := range keys {
 		if value := strings.TrimSpace(env[key]); value != "" {
+			if isComposeMissingRequiredEnvValue(value) {
+				continue
+			}
 			return value
 		}
 	}
@@ -405,15 +408,21 @@ func applyManagedPostgresBindingEnvironment(ownerService string, env map[string]
 	host := model.PostgresRWServiceName(spec.ServiceName)
 	overrideManagedEnvIfPresent(out, "DB_HOST", host)
 	overrideManagedEnvIfPresent(out, "POSTGRES_HOST", host)
+	overrideManagedEnvIfPresent(out, "DATABASE_HOST", host)
 	overrideManagedEnvIfPresent(out, "DB_PORT", "5432")
 	overrideManagedEnvIfPresent(out, "POSTGRES_PORT", "5432")
+	overrideManagedEnvIfPresent(out, "DATABASE_PORT", "5432")
 	overrideManagedEnvIfPresent(out, "DB_NAME", spec.Database)
 	overrideManagedEnvIfPresent(out, "POSTGRES_DB", spec.Database)
 	overrideManagedEnvIfPresent(out, "POSTGRES_DATABASE", spec.Database)
+	overrideManagedEnvIfPresent(out, "DATABASE_DBNAME", spec.Database)
+	overrideManagedEnvIfPresent(out, "DATABASE_NAME", spec.Database)
 	overrideManagedEnvIfPresent(out, "DB_USER", spec.User)
 	overrideManagedEnvIfPresent(out, "POSTGRES_USER", spec.User)
+	overrideManagedEnvIfPresent(out, "DATABASE_USER", spec.User)
 	overrideManagedEnvIfPresent(out, "DB_PASSWORD", spec.Password)
 	overrideManagedEnvIfPresent(out, "POSTGRES_PASSWORD", spec.Password)
+	overrideManagedEnvIfPresent(out, "DATABASE_PASSWORD", spec.Password)
 	for key, value := range out {
 		if rewritten, ok := rewriteManagedPostgresURL(value, spec); ok {
 			out[key] = rewritten

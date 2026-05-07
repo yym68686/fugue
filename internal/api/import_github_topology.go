@@ -415,6 +415,9 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		}
 		suggestedEnv = mergeImportedEnv(suggestedEnv, options.Env)
 		suggestedEnv = mergeImportedEnv(suggestedEnv, options.ServiceEnv[service.Name])
+		if err := sourceimport.ValidateNoMissingRequiredComposeEnv(service.Name, suggestedEnv); err != nil {
+			return importedGitHubTopology{}, invalidComposeImport(err)
+		}
 
 		spec, err := s.buildImportedAppSpec(
 			service.BuildStrategy,
