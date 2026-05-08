@@ -441,7 +441,7 @@ func TestAppProxyRetriesTransientUpstreamErrorsWithReplayableBody(t *testing.T) 
 		maxAttempts: 2,
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "http://"+app.Route.Hostname+"/v1/responses", strings.NewReader(requestBody))
+	req := httptest.NewRequest(http.MethodPost, "http://"+app.Route.Hostname+"/api/small-json", strings.NewReader(requestBody))
 	req.Host = app.Route.Hostname
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, req)
@@ -454,6 +454,112 @@ func TestAppProxyRetriesTransientUpstreamErrorsWithReplayableBody(t *testing.T) 
 	}
 	if got := recorder.Body.String(); got != "ok" {
 		t.Fatalf("expected proxied response body %q, got %q", "ok", got)
+	}
+}
+
+func TestAppProxyDoesNotPrepareReplayBodyForHighRiskRequests(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		path   string
+		accept string
+		body   string
+	}{
+		{
+			name: "responses",
+			path: "/v1/responses",
+			body: `{"model":"demo","input":"hello"}`,
+		},
+		{
+			name: "image generation",
+			path: "/v1/images/generations",
+			body: `{"model":"demo","prompt":"hello"}`,
+		},
+		{
+			name:   "sse accept",
+			path:   "/api/streaming",
+			accept: "text/event-stream",
+			body:   `{"stream":true}`,
+		},
+		{
+			name: "stream path",
+			path: "/events/stream",
+			body: `{"stream":true}`,
+		},
+		{
+			name: "large body",
+			path: "/api/small-json",
+			body: strings.Repeat("x", defaultAppProxyReplayBodyLimit+1),
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequest(http.MethodPost, "http://app.example"+tt.path, strings.NewReader(tt.body))
+			if tt.accept != "" {
+				req.Header.Set("Accept", tt.accept)
+			}
+			if err := prepareAppProxyRequestForRetries(req); err != nil {
+				t.Fatalf("prepare request for retries: %v", err)
+			}
+			if req.GetBody != nil {
+				t.Fatal("expected request body to remain non-replayable")
+			}
+		})
+	}
+}
+
+func TestAppProxyDoesNotRetryResponsesRequestBody(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServer(t)
+	specCopy := app.Spec
+	deployOp, err := storeState.CreateOperation(model.Operation{
+		TenantID:        app.TenantID,
+		Type:            model.OperationTypeDeploy,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		ExecutionMode:   model.ExecutionModeManaged,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if _, err := storeState.CompleteManagedOperationWithResult(deployOp.ID, "", "deployed", &specCopy, nil); err != nil {
+		t.Fatalf("complete deploy operation: %v", err)
+	}
+	app, err = storeState.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("reload deployed app: %v", err)
+	}
+
+	attempts := 0
+	server.appProxyTransport = appProxyRetryTransport{
+		base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			attempts++
+			if _, err := io.ReadAll(req.Body); err != nil {
+				t.Fatalf("read attempt body: %v", err)
+			}
+			return nil, errors.New("read tcp 10.42.0.1:1234->10.43.0.2:8000: read: connection reset by peer")
+		}),
+		maxAttempts: 3,
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://"+app.Route.Hostname+"/v1/responses", strings.NewReader(`{"input":"hello"}`))
+	req.Host = app.Route.Hostname
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadGateway, recorder.Code, recorder.Body.String())
+	}
+	if attempts != 1 {
+		t.Fatalf("expected responses request to be attempted once, got %d attempts", attempts)
 	}
 }
 

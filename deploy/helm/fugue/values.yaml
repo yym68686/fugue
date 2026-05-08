@@ -7,7 +7,7 @@ configSecret:
   existingSecretName: ""
 
 api:
-  replicaCount: 2
+  replicaCount: 3
   image:
     repository: fugue-api
     tag: latest
@@ -36,8 +36,14 @@ api:
   affinity: {}
   podDisruptionBudget:
     enabled: true
-    minAvailable: 1
-  resources: {}
+    minAvailable: 2
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
   extraEnv: []
 
 controller:

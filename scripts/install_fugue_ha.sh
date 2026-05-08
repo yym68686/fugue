@@ -2116,7 +2116,7 @@ write_values_override() {
 bootstrapAdminKey: "${BOOTSTRAP_KEY}"
 
 api:
-  replicaCount: 2
+  replicaCount: 3
   image:
     repository: fugue-api
     tag: "${IMAGE_TAG}"
@@ -2155,11 +2155,14 @@ api:
       tolerationSeconds: 300
   resources:
     requests:
-      cpu: 100m
-      memory: 128Mi
-    limits:
-      cpu: 500m
+      cpu: 250m
       memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
 
 controller:
   replicaCount: 2

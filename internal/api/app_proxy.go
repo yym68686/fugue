@@ -22,7 +22,7 @@ const (
 	defaultAppProxyLookupCacheTTL  = 5 * time.Second
 	defaultAppProxyMaxAttempts     = 4
 	defaultAppProxyRetryDelay      = 100 * time.Millisecond
-	defaultAppProxyReplayBodyLimit = 8 << 20
+	defaultAppProxyReplayBodyLimit = 512 << 10
 )
 
 func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) bool {
@@ -348,10 +348,7 @@ func prepareAppProxyRequestForRetries(req *http.Request) error {
 	if req == nil || req.GetBody != nil || req.Body == nil || req.Body == http.NoBody {
 		return nil
 	}
-	if isAppProxyUpgradeRequest(req) {
-		return nil
-	}
-	if req.ContentLength <= 0 || req.ContentLength > defaultAppProxyReplayBodyLimit {
+	if !shouldReplayAppProxyRequestBody(req) {
 		return nil
 	}
 	body, err := io.ReadAll(req.Body)
@@ -367,6 +364,58 @@ func prepareAppProxyRequestForRetries(req *http.Request) error {
 	}
 	req.ContentLength = int64(len(body))
 	return nil
+}
+
+func shouldReplayAppProxyRequestBody(req *http.Request) bool {
+	if req == nil || req.Body == nil || req.Body == http.NoBody || req.GetBody != nil {
+		return false
+	}
+	if req.ContentLength <= 0 || req.ContentLength > defaultAppProxyReplayBodyLimit {
+		return false
+	}
+	path := ""
+	if req.URL != nil {
+		path = req.URL.Path
+	}
+	if isAppProxyUpgradeRequest(req) || isAppProxyStreamingRequest(req) || isAppProxyNoReplayPath(path) {
+		return false
+	}
+	return true
+}
+
+func isAppProxyStreamingRequest(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	for _, value := range req.Header.Values("Accept") {
+		for _, part := range strings.Split(value, ",") {
+			mediaType := strings.TrimSpace(part)
+			if idx := strings.Index(mediaType, ";"); idx >= 0 {
+				mediaType = strings.TrimSpace(mediaType[:idx])
+			}
+			if strings.EqualFold(mediaType, "text/event-stream") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isAppProxyNoReplayPath(path string) bool {
+	path = strings.TrimSpace(strings.ToLower(path))
+	if path == "" {
+		return false
+	}
+	if path == "/v1/responses" || strings.HasPrefix(path, "/v1/responses/") {
+		return true
+	}
+	if path == "/v1/images" || strings.HasPrefix(path, "/v1/images/") {
+		return true
+	}
+	if path == "/stream" || strings.HasSuffix(path, "/stream") || strings.Contains(path, "/stream/") {
+		return true
+	}
+	return false
 }
 
 func isAppProxyUpgradeRequest(req *http.Request) bool {

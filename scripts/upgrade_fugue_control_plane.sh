@@ -343,6 +343,16 @@ api:
       operator: Exists
       effect: NoExecute
       tolerationSeconds: 300
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
 controller:
   nodeSelector:
     node-role.kubernetes.io/control-plane: "true"
@@ -1452,7 +1462,7 @@ main() {
   FUGUE_ROLLOUT_TIMEOUT="${FUGUE_ROLLOUT_TIMEOUT:-300s}"
   FUGUE_SMOKE_RETRIES="${FUGUE_SMOKE_RETRIES:-12}"
   FUGUE_SMOKE_DELAY_SECONDS="${FUGUE_SMOKE_DELAY_SECONDS:-5}"
-  FUGUE_API_REPLICA_COUNT="${FUGUE_API_REPLICA_COUNT:-2}"
+  FUGUE_API_REPLICA_COUNT="${FUGUE_API_REPLICA_COUNT:-3}"
   FUGUE_CONTROLLER_REPLICA_COUNT="${FUGUE_CONTROLLER_REPLICA_COUNT:-2}"
   FUGUE_REGISTRY_NODEPORT="${FUGUE_REGISTRY_NODEPORT:-30500}"
   FUGUE_REGISTRY_SERVICE_PORT="${FUGUE_REGISTRY_SERVICE_PORT:-5000}"
@@ -1540,7 +1550,7 @@ main() {
     --set api.minReadySeconds=5 \
     --set api.terminationGracePeriodSeconds=40 \
     --set api.podDisruptionBudget.enabled=true \
-    --set api.podDisruptionBudget.minAvailable=1 \
+    --set api.podDisruptionBudget.minAvailable=2 \
     --set-string api.shutdownDrainDelay=5s \
     --set-string api.shutdownTimeout=25s \
     --set controller.replicaCount="${FUGUE_CONTROLLER_REPLICA_COUNT}" \
