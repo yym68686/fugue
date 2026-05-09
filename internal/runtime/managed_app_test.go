@@ -87,6 +87,45 @@ func TestBuildManagedAppStateObjectsEncodesDesiredState(t *testing.T) {
 	}
 }
 
+func TestBuildManagedAppObjectOmitsInjectedFugueEnvFromSnapshot(t *testing.T) {
+	app := model.App{
+		ID:        "app_demo_123",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Env: map[string]string{
+				"APP_ENV":          "prod",
+				"FUGUE_TOKEN":      "injected-token",
+				"FUGUE_PROJECT_ID": "project_demo",
+				"FUGUE_ONLY":       "user-defined",
+			},
+		},
+	}
+
+	managed, err := ManagedAppObjectFromMap(BuildManagedAppObject(app, SchedulingConstraints{}))
+	if err != nil {
+		t.Fatalf("decode managed app object: %v", err)
+	}
+
+	env := managed.Spec.AppSpec.Env
+	if got := env["APP_ENV"]; got != "prod" {
+		t.Fatalf("expected APP_ENV to be preserved, got %q", got)
+	}
+	if got := env["FUGUE_ONLY"]; got != "user-defined" {
+		t.Fatalf("expected non-injected FUGUE_ONLY to be preserved, got %q", got)
+	}
+	for _, key := range []string{"FUGUE_TOKEN", "FUGUE_PROJECT_ID"} {
+		if got := env[key]; got != "" {
+			t.Fatalf("expected injected env %s to be omitted, got %q", key, got)
+		}
+	}
+}
+
 func TestBuildManagedAppChildObjectsAddsOwnerReferences(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",

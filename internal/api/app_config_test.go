@@ -195,6 +195,116 @@ func TestPatchAppEnvAndRestartCreateDeployOperations(t *testing.T) {
 	}
 }
 
+func TestAppEnvReservesFugueInjectedNames(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Env: map[string]string{
+			"APP_ENV":        "prod",
+			"FUGUE_API_URL":  "https://api.internal",
+			"FUGUE_TOKEN":    "runtime-token",
+			"FUGUE_ONLY":     "user-defined",
+			"FUGUE_APP_NAME": "runtime-name",
+		},
+	})
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/env", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var envResponse struct {
+		Env     map[string]string   `json:"env"`
+		Entries []model.AppEnvEntry `json:"entries"`
+	}
+	mustDecodeJSON(t, recorder, &envResponse)
+	if got := envResponse.Env["APP_ENV"]; got != "prod" {
+		t.Fatalf("expected APP_ENV=prod, got %q", got)
+	}
+	if got := envResponse.Env["FUGUE_ONLY"]; got != "user-defined" {
+		t.Fatalf("expected user-defined FUGUE_ONLY to remain visible, got %q", got)
+	}
+	for _, key := range []string{"FUGUE_API_URL", "FUGUE_TOKEN", "FUGUE_APP_NAME"} {
+		if got := envResponse.Env[key]; got != "" {
+			t.Fatalf("expected injected env %s to be hidden, got %q", key, got)
+		}
+		for _, entry := range envResponse.Entries {
+			if entry.Key == key {
+				t.Fatalf("expected injected env %s to be omitted from entries, got %+v", key, entry)
+			}
+		}
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID+"/env", apiKey, map[string]any{
+		"set": map[string]string{"FUGUE_TOKEN": "manual"},
+	})
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadRequest, recorder.Code, recorder.Body.String())
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID+"/env", apiKey, map[string]any{
+		"set": map[string]string{"FUGUE_ONLY": "updated"},
+	})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+	var patchResponse struct {
+		Env       map[string]string `json:"env"`
+		Operation model.Operation   `json:"operation"`
+	}
+	mustDecodeJSON(t, recorder, &patchResponse)
+	if got := patchResponse.Env["FUGUE_ONLY"]; got != "updated" {
+		t.Fatalf("expected FUGUE_ONLY to be updated, got %q", got)
+	}
+	if patchResponse.Operation.DesiredSpec == nil {
+		t.Fatal("expected desired spec")
+	}
+	if got := patchResponse.Operation.DesiredSpec.Env["FUGUE_TOKEN"]; got != "" {
+		t.Fatalf("expected desired spec to omit FUGUE_TOKEN, got %q", got)
+	}
+}
+
+func TestStripFugueInjectedAppEnvDetailsOmitsLegacyEntries(t *testing.T) {
+	t.Parallel()
+
+	details := stripFugueInjectedAppEnvDetails(appEnvDetails{
+		Env: map[string]string{
+			"APP_ENV":        "prod",
+			"FUGUE_API_URL":  "https://api.internal",
+			"FUGUE_TOKEN":    "runtime-token",
+			"FUGUE_ONLY":     "user-defined",
+			"FUGUE_APP_NAME": "demo",
+		},
+		Entries: []model.AppEnvEntry{
+			{Key: "APP_ENV", Value: "prod", Source: "app", SourceRef: "spec.env"},
+			{Key: "FUGUE_API_URL", Value: "https://api.internal", Source: "app", SourceRef: "spec.env"},
+			{Key: "FUGUE_TOKEN", Value: "runtime-token", Source: "app", SourceRef: "spec.env"},
+			{Key: "FUGUE_ONLY", Value: "user-defined", Source: "app", SourceRef: "spec.env"},
+			{Key: "FUGUE_APP_NAME", Value: "demo", Source: "app", SourceRef: "spec.env"},
+		},
+	})
+
+	if got := details.Env["APP_ENV"]; got != "prod" {
+		t.Fatalf("expected APP_ENV=prod, got %q", got)
+	}
+	if got := details.Env["FUGUE_ONLY"]; got != "user-defined" {
+		t.Fatalf("expected FUGUE_ONLY=user-defined, got %q", got)
+	}
+	for _, key := range []string{"FUGUE_API_URL", "FUGUE_TOKEN", "FUGUE_APP_NAME"} {
+		if got := details.Env[key]; got != "" {
+			t.Fatalf("expected injected env %s to be omitted, got %q", key, got)
+		}
+		for _, entry := range details.Entries {
+			if entry.Key == key {
+				t.Fatalf("expected injected env entry %s to be omitted, got %+v", key, entry)
+			}
+		}
+	}
+}
+
 func TestPatchAppEnvAndRestartRecoverFailedImportedAppDesiredState(t *testing.T) {
 	t.Parallel()
 

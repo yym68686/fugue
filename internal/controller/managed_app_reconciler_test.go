@@ -1361,7 +1361,7 @@ func TestReconcileManagedAppObjectScalesDownUnrecoverableFailedSnapshot(t *testi
 	}
 }
 
-func TestApplyManagedAppDesiredStateInjectsWorkloadIdentityIntoManagedAndRuntimeObjects(t *testing.T) {
+func TestApplyManagedAppDesiredStateInjectsWorkloadIdentityOnlyIntoRuntimeObjects(t *testing.T) {
 	t.Parallel()
 
 	stateStore := store.New(t.TempDir() + "/store.json")
@@ -1381,6 +1381,10 @@ func TestApplyManagedAppDesiredStateInjectsWorkloadIdentityIntoManagedAndRuntime
 		Ports:     []int{8080},
 		Replicas:  1,
 		RuntimeID: "runtime_managed_shared",
+		Env: map[string]string{
+			"APP_ENV":    "prod",
+			"FUGUE_ONLY": "user-defined",
+		},
 	})
 	if err != nil {
 		t.Fatalf("create app: %v", err)
@@ -1504,24 +1508,16 @@ func TestApplyManagedAppDesiredStateInjectsWorkloadIdentityIntoManagedAndRuntime
 	}
 
 	managedEnv := managedAppSpecEnv(recordedManagedApp)
-	if got := managedEnv["FUGUE_PROJECT_ID"]; got != project.ID {
-		t.Fatalf("expected managed app FUGUE_PROJECT_ID %q, got %q", project.ID, got)
+	if got := managedEnv["APP_ENV"]; got != "prod" {
+		t.Fatalf("expected managed app user env APP_ENV=prod, got %q", got)
 	}
-	if got := managedEnv["FUGUE_RUNTIME_ID"]; got != app.Spec.RuntimeID {
-		t.Fatalf("expected managed app FUGUE_RUNTIME_ID %q, got %q", app.Spec.RuntimeID, got)
+	if got := managedEnv["FUGUE_ONLY"]; got != "user-defined" {
+		t.Fatalf("expected managed app user env FUGUE_ONLY=user-defined, got %q", got)
 	}
-	if got := managedEnv["FUGUE_API_URL"]; got != "https://api.example.com" {
-		t.Fatalf("expected managed app FUGUE_API_URL to be normalized, got %q", got)
-	}
-	if got := managedEnv["FUGUE_APP_URL"]; got != "https://gateway.example.com" {
-		t.Fatalf("expected managed app FUGUE_APP_URL to be injected, got %q", got)
-	}
-	managedClaims, err := workloadidentity.Parse("signing-secret", managedEnv["FUGUE_TOKEN"])
-	if err != nil {
-		t.Fatalf("parse managed app workload token: %v", err)
-	}
-	if managedClaims.ProjectID != project.ID {
-		t.Fatalf("expected managed token project scope %q, got %q", project.ID, managedClaims.ProjectID)
+	for _, key := range []string{"FUGUE_PROJECT_ID", "FUGUE_RUNTIME_ID", "FUGUE_API_URL", "FUGUE_APP_URL", "FUGUE_TOKEN"} {
+		if got := managedEnv[key]; got != "" {
+			t.Fatalf("expected managed app snapshot to omit injected %s, got %q", key, got)
+		}
 	}
 
 	deploymentEnv := deploymentContainerEnv(recordedDeployment)

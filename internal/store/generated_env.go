@@ -35,6 +35,9 @@ func applyGeneratedEnvSpec(spec *model.AppSpec, previous *model.AppSpec) error {
 		if !validGeneratedEnvName(key) {
 			return fmt.Errorf("%w: generated_env key %q is not a valid environment variable name", ErrInvalidInput, key)
 		}
+		if model.IsFugueInjectedAppEnvName(key) {
+			return fmt.Errorf("%w: generated_env key %q is reserved for Fugue platform injection", ErrInvalidInput, key)
+		}
 		envSpec := generated[key]
 		if envSpec.Generate != model.AppGeneratedEnvGenerateRandom {
 			return fmt.Errorf("%w: generated_env %s has unsupported generator %q", ErrInvalidInput, key, envSpec.Generate)

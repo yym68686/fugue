@@ -31,6 +31,7 @@ func (s *Server) handleGetAppEnv(w http.ResponseWriter, r *http.Request) {
 	} else {
 		envDetails = mergedAppEnvDetails(app, spec)
 	}
+	envDetails = stripFugueInjectedAppEnvDetails(envDetails)
 	s.appendAudit(principal, "app.env.read", "app", app.ID, app.TenantID, nil)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"env":     defaultStringMap(envDetails.Env),
@@ -63,14 +64,35 @@ func (s *Server) handlePatchAppEnv(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	env, changed, err := applyEnvPatch(spec.Env, req.Set, req.Delete)
+	spec, strippedInjectedEnv := model.StripFugueInjectedAppEnvFromSpec(spec)
+	deleteKeys, err := normalizeAppEnvPatchDelete(req.Delete)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if err := validateNoFugueInjectedAppEnvSet(req.Set); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	deleteKeys = filterFugueInjectedAppEnvDelete(deleteKeys)
+	var env map[string]string
+	var changed bool
+	if len(req.Set) > 0 || len(deleteKeys) > 0 {
+		env, changed, err = applyEnvPatch(spec.Env, req.Set, deleteKeys)
+		if err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	} else if len(req.Delete) > 0 {
+		env = spec.Env
+	} else {
+		httpx.WriteError(w, http.StatusBadRequest, "set or delete is required")
+		return
+	}
 	spec.Env = env
+	changed = changed || strippedInjectedEnv
 	if !changed {
-		envDetails := mergedAppEnvDetails(app, spec)
+		envDetails := stripFugueInjectedAppEnvDetails(mergedAppEnvDetails(app, spec))
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{
 			"env":             defaultStringMap(envDetails.Env),
 			"entries":         envDetails.Entries,
@@ -95,7 +117,7 @@ func (s *Server) handlePatchAppEnv(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.appendAudit(principal, "app.env.patch", "operation", op.ID, app.TenantID, map[string]string{"app_id": app.ID})
-	envDetails := mergedAppEnvDetails(app, spec)
+	envDetails := stripFugueInjectedAppEnvDetails(mergedAppEnvDetails(app, spec))
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
 		"env":       defaultStringMap(envDetails.Env),
 		"entries":   envDetails.Entries,
@@ -322,6 +344,66 @@ func applyEnvPatch(current map[string]string, set map[string]string, deleted []s
 		env = nil
 	}
 	return env, changed, nil
+}
+
+func normalizeAppEnvPatchDelete(deleted []string) ([]string, error) {
+	if len(deleted) == 0 {
+		return nil, nil
+	}
+	out := make([]string, 0, len(deleted))
+	for _, rawKey := range deleted {
+		key := strings.TrimSpace(rawKey)
+		if key == "" {
+			return nil, fmt.Errorf("delete contains empty key")
+		}
+		out = append(out, key)
+	}
+	return out, nil
+}
+
+func filterFugueInjectedAppEnvDelete(deleted []string) []string {
+	if len(deleted) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(deleted))
+	for _, key := range deleted {
+		if model.IsFugueInjectedAppEnvName(key) {
+			continue
+		}
+		out = append(out, key)
+	}
+	return out
+}
+
+func validateNoFugueInjectedAppEnvSet(set map[string]string) error {
+	for rawKey := range set {
+		key := strings.TrimSpace(rawKey)
+		if key == "" {
+			continue
+		}
+		if model.IsFugueInjectedAppEnvName(key) {
+			return fmt.Errorf("env key %s is reserved for Fugue platform injection", key)
+		}
+	}
+	return nil
+}
+
+func stripFugueInjectedAppEnvDetails(details appEnvDetails) appEnvDetails {
+	env, _ := model.StripFugueInjectedAppEnv(details.Env)
+	if len(details.Entries) == 0 {
+		details.Env = env
+		return details
+	}
+	entries := make([]model.AppEnvEntry, 0, len(details.Entries))
+	for _, entry := range details.Entries {
+		if model.IsFugueInjectedAppEnvName(entry.Key) {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	details.Env = env
+	details.Entries = entries
+	return details
 }
 
 func normalizeUploadedFiles(files []model.AppFile) ([]model.AppFile, error) {

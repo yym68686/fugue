@@ -289,6 +289,7 @@ func ManagedAppSpecHash(spec ManagedAppSpec) string {
 }
 
 func cloneManagedAppSpec(spec model.AppSpec) model.AppSpec {
+	spec, _ = model.StripFugueInjectedAppEnvFromSpec(spec)
 	out := spec
 	if len(spec.Command) > 0 {
 		out.Command = append([]string(nil), spec.Command...)

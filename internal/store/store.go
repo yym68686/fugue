@@ -2371,6 +2371,7 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 	if tenantID == "" || projectID == "" || name == "" || (!allowPendingImport && spec.Image == "") || spec.Replicas < 1 {
 		return model.App{}, ErrInvalidInput
 	}
+	spec, _ = model.StripFugueInjectedAppEnvFromSpec(spec)
 	if err := normalizeAppSpecResources(&spec); err != nil {
 		return model.App{}, err
 	}
@@ -3900,6 +3901,8 @@ func cloneAppSpec(in *model.AppSpec) *model.AppSpec {
 	if in == nil {
 		return nil
 	}
+	spec, _ := model.StripFugueInjectedAppEnvFromSpec(*in)
+	in = &spec
 	out := *in
 	if len(in.Command) > 0 {
 		out.Command = append([]string(nil), in.Command...)

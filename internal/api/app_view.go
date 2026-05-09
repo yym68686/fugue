@@ -14,6 +14,7 @@ func sanitizeAppForAPI(app model.App) model.App {
 	out.BuildSource = sanitizeAppSourceForAPI(out.BuildSource)
 	model.NormalizeAppSourceState(&out)
 	out.Spec = redactSecretFilesInSpec(out.Spec)
+	out.Spec, _ = model.StripFugueInjectedAppEnvFromSpec(out.Spec)
 	out.InternalService = buildAppInternalService(out)
 	out.TechStack = buildAppTechStack(out)
 	return out
@@ -35,6 +36,7 @@ func sanitizeOperationForAPI(op model.Operation) model.Operation {
 	if op.DesiredSpec != nil {
 		spec := cloneAppSpec(*op.DesiredSpec)
 		spec = redactSecretFilesInSpec(spec)
+		spec, _ = model.StripFugueInjectedAppEnvFromSpec(spec)
 		out.DesiredSpec = &spec
 	}
 	if op.DesiredSource != nil {
@@ -148,6 +150,7 @@ func cloneAppSource(source *model.AppSource) *model.AppSource {
 }
 
 func cloneAppSpec(spec model.AppSpec) model.AppSpec {
+	spec, _ = model.StripFugueInjectedAppEnvFromSpec(spec)
 	out := spec
 	if len(spec.Command) > 0 {
 		out.Command = append([]string(nil), spec.Command...)

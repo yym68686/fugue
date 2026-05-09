@@ -4336,6 +4336,12 @@ func TestSyncObservedManagedAppBaselineUpdatesSpecAndSource(t *testing.T) {
 
 	desiredSpec := app.Spec
 	desiredSpec.Image = "registry.pull.example/fugue-apps/demo:git-newcommit"
+	desiredSpec.Env = map[string]string{
+		"APP_ENV":          "prod",
+		"FUGUE_PROJECT_ID": project.ID,
+		"FUGUE_TOKEN":      "runtime-token",
+		"FUGUE_ONLY":       "user-defined",
+	}
 	desiredSource := *app.Source
 	desiredSource.CommitSHA = "newcommit"
 	desiredSource.ResolvedImageRef = "registry.push.example/fugue-apps/demo:git-newcommit"
@@ -4355,6 +4361,74 @@ func TestSyncObservedManagedAppBaselineUpdatesSpecAndSource(t *testing.T) {
 	}
 	if got := updated.Source.ResolvedImageRef; got != desiredSource.ResolvedImageRef {
 		t.Fatalf("expected updated resolved image ref %q, got %q", desiredSource.ResolvedImageRef, got)
+	}
+	if got := updated.Spec.Env["APP_ENV"]; got != "prod" {
+		t.Fatalf("expected APP_ENV to be synced, got %q", got)
+	}
+	if got := updated.Spec.Env["FUGUE_ONLY"]; got != "user-defined" {
+		t.Fatalf("expected non-injected FUGUE_ONLY to be synced, got %q", got)
+	}
+	for _, key := range []string{"FUGUE_PROJECT_ID", "FUGUE_TOKEN"} {
+		if got := updated.Spec.Env[key]; got != "" {
+			t.Fatalf("expected injected env %s to be stripped from synced baseline, got %q", key, got)
+		}
+	}
+}
+
+func TestCreateOperationStripsInjectedFugueEnvFromDesiredSpec(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Operation Env")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	desiredSpec := app.Spec
+	desiredSpec.Env = map[string]string{
+		"APP_ENV":      "prod",
+		"FUGUE_APP_ID": app.ID,
+		"FUGUE_TOKEN":  "runtime-token",
+		"FUGUE_ONLY":   "user-defined",
+	}
+	op, err := s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &desiredSpec,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if op.DesiredSpec == nil {
+		t.Fatal("expected desired spec")
+	}
+	if got := op.DesiredSpec.Env["APP_ENV"]; got != "prod" {
+		t.Fatalf("expected APP_ENV in operation desired spec, got %q", got)
+	}
+	if got := op.DesiredSpec.Env["FUGUE_ONLY"]; got != "user-defined" {
+		t.Fatalf("expected FUGUE_ONLY in operation desired spec, got %q", got)
+	}
+	for _, key := range []string{"FUGUE_APP_ID", "FUGUE_TOKEN"} {
+		if got := op.DesiredSpec.Env[key]; got != "" {
+			t.Fatalf("expected injected env %s to be stripped from operation desired spec, got %q", key, got)
+		}
 	}
 }
 

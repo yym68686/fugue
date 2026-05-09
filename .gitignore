@@ -6,3 +6,7 @@ bin/
 data/
 secrets/
 *.log
+
+# Local/private architecture notes and production inventory.
+docs/private/
+docs/*.local.md
