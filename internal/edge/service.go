@@ -53,6 +53,7 @@ type Status struct {
 	CachePath           string     `json:"cache_path,omitempty"`
 	CaddyEnabled        bool       `json:"caddy_enabled,omitempty"`
 	CaddyListenAddr     string     `json:"caddy_listen_addr,omitempty"`
+	CaddyTLSMode        string     `json:"caddy_tls_mode,omitempty"`
 	CaddyAppliedVersion string     `json:"caddy_applied_version,omitempty"`
 	CaddyLastApplyAt    *time.Time `json:"caddy_last_apply_at,omitempty"`
 	CaddyLastError      string     `json:"caddy_last_error,omitempty"`
@@ -153,6 +154,7 @@ func NewService(cfg config.EdgeConfig, logger *log.Logger) *Service {
 	}
 	service.snapshot.CaddyEnabled = cfg.CaddyEnabled
 	service.snapshot.CaddyListenAddr = strings.TrimSpace(cfg.CaddyListenAddr)
+	service.snapshot.CaddyTLSMode = strings.TrimSpace(cfg.CaddyTLSMode)
 	return service
 }
 
@@ -203,7 +205,7 @@ func (s *Service) Run(ctx context.Context) error {
 		s.Logger.Printf("edge caddy config apply failed on startup: %v", err)
 	}
 
-	s.Logger.Printf("fugue-edge shadow started; api=%s edge_id=%s edge_group_id=%s cache=%s listen=%s interval=%s caddy_enabled=%t caddy_listen=%s proxy_listen=%s", safeBaseURL(s.Config.APIURL), s.Config.EdgeID, s.Config.EdgeGroupID, s.Config.CachePath, s.Config.ListenAddr, s.syncInterval(), s.Config.CaddyEnabled, s.Config.CaddyListenAddr, s.Config.CaddyProxyListenAddr)
+	s.Logger.Printf("fugue-edge shadow started; api=%s edge_id=%s edge_group_id=%s cache=%s listen=%s interval=%s caddy_enabled=%t caddy_listen=%s caddy_tls_mode=%s proxy_listen=%s", safeBaseURL(s.Config.APIURL), s.Config.EdgeID, s.Config.EdgeGroupID, s.Config.CachePath, s.Config.ListenAddr, s.syncInterval(), s.Config.CaddyEnabled, s.Config.CaddyListenAddr, s.normalizedCaddyTLSMode(), s.Config.CaddyProxyListenAddr)
 	_ = s.SyncOnce(ctx)
 
 	ticker := time.NewTicker(s.syncInterval())
@@ -676,6 +678,11 @@ func (s *Service) validateConfig() error {
 		if strings.TrimSpace(s.Config.CaddyProxyListenAddr) == "" {
 			return fmt.Errorf("FUGUE_EDGE_PROXY_LISTEN_ADDR is required when caddy mode is enabled")
 		}
+		switch s.normalizedCaddyTLSMode() {
+		case caddyTLSModeOff, caddyTLSModeInternal:
+		default:
+			return fmt.Errorf("FUGUE_EDGE_CADDY_TLS_MODE must be off or internal")
+		}
 		if _, err := s.caddyAdminEndpoint("/load"); err != nil {
 			return err
 		}
@@ -824,6 +831,7 @@ func (s *Service) recordCaddyApply(bundleVersion string, routeCount int, err err
 	s.metrics.CaddyLastError = ""
 	s.snapshot.CaddyEnabled = s.Config.CaddyEnabled
 	s.snapshot.CaddyListenAddr = strings.TrimSpace(s.Config.CaddyListenAddr)
+	s.snapshot.CaddyTLSMode = s.normalizedCaddyTLSMode()
 	s.snapshot.CaddyAppliedVersion = s.metrics.CaddyAppliedVersion
 	s.snapshot.CaddyLastApplyAt = &now
 	s.snapshot.CaddyLastError = ""
@@ -899,6 +907,7 @@ func (s *Service) decorateCaddyStatusLocked(out *Status) {
 		return
 	}
 	out.CaddyListenAddr = strings.TrimSpace(s.Config.CaddyListenAddr)
+	out.CaddyTLSMode = s.normalizedCaddyTLSMode()
 	out.CaddyAppliedVersion = strings.TrimSpace(s.metrics.CaddyAppliedVersion)
 	out.CaddyLastApplyAt = s.metrics.CaddyLastApplyAt
 	out.CaddyLastError = strings.TrimSpace(s.metrics.CaddyLastError)

@@ -105,6 +105,7 @@ type EdgeConfig struct {
 	CaddyEnabled         bool
 	CaddyAdminURL        string
 	CaddyListenAddr      string
+	CaddyTLSMode         string
 	CaddyProxyListenAddr string
 }
 
@@ -233,6 +234,7 @@ func EdgeFromEnv() EdgeConfig {
 		CaddyEnabled:         getenvBool("FUGUE_EDGE_CADDY_ENABLED", false),
 		CaddyAdminURL:        getenv("FUGUE_EDGE_CADDY_ADMIN_URL", "http://127.0.0.1:2019"),
 		CaddyListenAddr:      getenv("FUGUE_EDGE_CADDY_LISTEN_ADDR", "127.0.0.1:18080"),
+		CaddyTLSMode:         getenv("FUGUE_EDGE_CADDY_TLS_MODE", "off"),
 		CaddyProxyListenAddr: getenv("FUGUE_EDGE_PROXY_LISTEN_ADDR", "127.0.0.1:7833"),
 	}
 }

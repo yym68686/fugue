@@ -78,6 +78,8 @@ spec:
               value: {{ .Values.edge.caddy.adminURL | quote }}
             - name: FUGUE_EDGE_CADDY_LISTEN_ADDR
               value: {{ .Values.edge.caddy.listenAddr | quote }}
+            - name: FUGUE_EDGE_CADDY_TLS_MODE
+              value: {{ .Values.edge.caddy.tlsMode | quote }}
             - name: FUGUE_EDGE_PROXY_LISTEN_ADDR
               value: {{ .Values.edge.caddy.proxyListenAddr | quote }}
             {{- end }}

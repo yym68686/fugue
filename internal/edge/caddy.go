@@ -15,7 +15,12 @@ import (
 	"fugue/internal/model"
 )
 
-const caddyConfigReapplyInterval = 5 * time.Minute
+const (
+	caddyConfigReapplyInterval = 5 * time.Minute
+
+	caddyTLSModeOff      = "off"
+	caddyTLSModeInternal = "internal"
+)
 
 func (s *Service) applyCurrentCaddyConfig(ctx context.Context) error {
 	if !s.Config.CaddyEnabled {
@@ -70,7 +75,7 @@ func (s *Service) applyCaddyConfig(ctx context.Context, bundle model.EdgeRouteBu
 	}
 	s.recordCaddyApply(version, routeCount, nil)
 	if s.Logger != nil {
-		s.Logger.Printf("edge caddy config applied; version=%s hosts=%d listen=%s proxy=%s", version, routeCount, strings.TrimSpace(s.Config.CaddyListenAddr), caddyProxyDialAddress(s.Config.CaddyProxyListenAddr))
+		s.Logger.Printf("edge caddy config applied; version=%s hosts=%d listen=%s tls_mode=%s proxy=%s", version, routeCount, strings.TrimSpace(s.Config.CaddyListenAddr), s.normalizedCaddyTLSMode(), caddyProxyDialAddress(s.Config.CaddyProxyListenAddr))
 	}
 	return nil
 }
@@ -103,6 +108,7 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 	if proxyDial == "" {
 		return nil, 0, fmt.Errorf("FUGUE_EDGE_PROXY_LISTEN_ADDR is required when caddy mode is enabled")
 	}
+	tlsMode := s.normalizedCaddyTLSMode()
 
 	hosts := uniqueBundleHosts(bundle)
 	routes := make([]any, 0, len(hosts))
@@ -133,23 +139,47 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 		})
 	}
 
+	server := map[string]any{
+		"listen": []string{listenAddr},
+		"routes": routes,
+	}
+	apps := map[string]any{
+		"http": map[string]any{
+			"servers": map[string]any{
+				"fugue_edge": server,
+			},
+		},
+	}
+	switch tlsMode {
+	case caddyTLSModeOff:
+		server["automatic_https"] = map[string]any{
+			"disable": true,
+		}
+	case caddyTLSModeInternal:
+		server["tls_connection_policies"] = []any{map[string]any{}}
+		if len(hosts) > 0 {
+			apps["tls"] = map[string]any{
+				"automation": map[string]any{
+					"policies": []any{
+						map[string]any{
+							"subjects": hosts,
+							"issuers": []any{
+								map[string]any{"module": "internal"},
+							},
+						},
+					},
+				},
+			}
+		}
+	default:
+		return nil, 0, fmt.Errorf("FUGUE_EDGE_CADDY_TLS_MODE must be off or internal")
+	}
+
 	config := map[string]any{
 		"admin": map[string]any{
 			"listen": adminURL.Host,
 		},
-		"apps": map[string]any{
-			"http": map[string]any{
-				"servers": map[string]any{
-					"fugue_edge": map[string]any{
-						"listen": []string{listenAddr},
-						"routes": routes,
-						"automatic_https": map[string]any{
-							"disable": true,
-						},
-					},
-				},
-			},
-		},
+		"apps": apps,
 	}
 	data, err := json.Marshal(config)
 	if err != nil {
@@ -190,6 +220,14 @@ func (s *Service) normalizedCaddyAdminURL() (*url.URL, error) {
 	}
 	parsed.User = nil
 	return parsed, nil
+}
+
+func (s *Service) normalizedCaddyTLSMode() string {
+	mode := strings.ToLower(strings.TrimSpace(s.Config.CaddyTLSMode))
+	if mode == "" {
+		return caddyTLSModeOff
+	}
+	return mode
 }
 
 func uniqueBundleHosts(bundle model.EdgeRouteBundle) []string {

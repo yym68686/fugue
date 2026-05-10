@@ -375,13 +375,74 @@ func TestApplyCaddyConfigBuildsHostRoutesForBundle(t *testing.T) {
 		}
 	}
 	status := service.Status()
-	if status.CaddyAppliedVersion != "routegen_caddy" || status.CaddyLastError != "" {
+	if status.CaddyAppliedVersion != "routegen_caddy" || status.CaddyTLSMode != caddyTLSModeOff || status.CaddyLastError != "" {
 		t.Fatalf("unexpected caddy status: %+v", status)
 	}
 	metrics := renderMetrics(t, service)
 	if !strings.Contains(metrics, `fugue_edge_caddy_config_apply_total{result="success"} 1`) ||
 		!strings.Contains(metrics, `fugue_edge_caddy_routes{bundle_version="routegen_caddy"} 2`) {
 		t.Fatalf("expected caddy apply metrics, got %s", metrics)
+	}
+}
+
+func TestBuildCaddyConfigSupportsInternalTLSCanary(t *testing.T) {
+	t.Parallel()
+
+	bundle := testBundle("routegen_tls")
+	custom := bundle.Routes[0]
+	custom.Hostname = "www.customer.com"
+	custom.RouteKind = model.EdgeRouteKindCustomDomain
+	custom.TLSPolicy = model.EdgeRouteTLSPolicyCustomDomain
+	bundle.Routes = append(bundle.Routes, custom)
+
+	service := NewService(config.EdgeConfig{
+		APIURL:               "https://api.example.invalid",
+		EdgeToken:            "edge-secret",
+		CaddyEnabled:         true,
+		CaddyAdminURL:        "http://127.0.0.1:2019",
+		CaddyListenAddr:      ":18443",
+		CaddyTLSMode:         caddyTLSModeInternal,
+		CaddyProxyListenAddr: "127.0.0.1:7833",
+	}, log.New(ioDiscard{}, "", 0))
+
+	configBody, routeCount, err := service.buildCaddyConfig(bundle)
+	if err != nil {
+		t.Fatalf("build caddy config: %v", err)
+	}
+	if routeCount != 2 {
+		t.Fatalf("expected 2 caddy routes, got %d", routeCount)
+	}
+	if strings.Contains(string(configBody), `"automatic_https":{"disable":true}`) {
+		t.Fatalf("internal tls config should not disable automatic https:\n%s", configBody)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(configBody, &parsed); err != nil {
+		t.Fatalf("decode caddy config: %v", err)
+	}
+	apps := parsed["apps"].(map[string]any)
+	httpApp := apps["http"].(map[string]any)
+	servers := httpApp["servers"].(map[string]any)
+	server := servers["fugue_edge"].(map[string]any)
+	policies := server["tls_connection_policies"].([]any)
+	if len(policies) != 1 {
+		t.Fatalf("expected one TLS connection policy, got %#v", policies)
+	}
+	tlsApp := apps["tls"].(map[string]any)
+	automation := tlsApp["automation"].(map[string]any)
+	automationPolicies := automation["policies"].([]any)
+	if len(automationPolicies) != 1 {
+		t.Fatalf("expected one TLS automation policy, got %#v", automationPolicies)
+	}
+	policy := automationPolicies[0].(map[string]any)
+	subjects := policy["subjects"].([]any)
+	if got := fmt.Sprint(subjects); got != "[demo.fugue.pro www.customer.com]" {
+		t.Fatalf("unexpected TLS subjects: %s", got)
+	}
+	issuers := policy["issuers"].([]any)
+	issuer := issuers[0].(map[string]any)
+	if issuer["module"] != caddyTLSModeInternal {
+		t.Fatalf("unexpected TLS issuer: %#v", issuer)
 	}
 }
 
@@ -400,6 +461,25 @@ func TestCaddyAdminURLMustBeLoopback(t *testing.T) {
 	err := service.validateConfig()
 	if err == nil || !strings.Contains(err.Error(), "localhost") {
 		t.Fatalf("expected non-loopback caddy admin URL to be rejected, got %v", err)
+	}
+}
+
+func TestCaddyTLSModeMustBeKnown(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.EdgeConfig{
+		APIURL:               "https://api.example.invalid",
+		EdgeToken:            "edge-secret",
+		CaddyEnabled:         true,
+		CaddyAdminURL:        "http://127.0.0.1:2019",
+		CaddyListenAddr:      "127.0.0.1:18080",
+		CaddyTLSMode:         "public",
+		CaddyProxyListenAddr: "127.0.0.1:7833",
+	}, log.New(ioDiscard{}, "", 0))
+
+	err := service.validateConfig()
+	if err == nil || !strings.Contains(err.Error(), "FUGUE_EDGE_CADDY_TLS_MODE") {
+		t.Fatalf("expected unknown caddy tls mode to be rejected, got %v", err)
 	}
 }
 

@@ -97,6 +97,7 @@ edge:
     adminAddr: 127.0.0.1:2019
     adminURL: http://127.0.0.1:2019
     listenAddr: 127.0.0.1:18080
+    tlsMode: off
     proxyListenAddr: 127.0.0.1:7833
     resources:
       requests:
