@@ -1,0 +1,114 @@
+{{- if .Values.edge.enabled }}
+{{- $edgeAPIURL := default (printf "http://%s:%v" (include "fugue.fullname" .) .Values.service.port) .Values.edge.apiURL -}}
+{{- $edgeTokenSecretName := default (include "fugue.configSecretName" .) .Values.edge.tokenSecret.name -}}
+{{- $edgeTokenSecretKey := default "FUGUE_EDGE_TLS_ASK_TOKEN" .Values.edge.tokenSecret.key -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "fugue.edgeDaemonSetName" . }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "edge") | nindent 4 }}
+spec:
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "edge") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "edge") | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config-secret: {{ include "fugue.configSecretChecksum" . }}
+        checksum/edge-config: {{ toJson .Values.edge | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: edge
+          image: "{{ .Values.edge.image.repository }}:{{ .Values.edge.image.tag }}"
+          imagePullPolicy: {{ .Values.edge.image.pullPolicy }}
+          {{- with .Values.edge.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.edge.healthPort }}
+              protocol: TCP
+          env:
+            - name: FUGUE_API_URL
+              value: {{ $edgeAPIURL | quote }}
+            - name: FUGUE_EDGE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $edgeTokenSecretName }}
+                  key: {{ $edgeTokenSecretKey }}
+            {{- if .Values.edge.edgeID }}
+            - name: FUGUE_EDGE_ID
+              value: {{ .Values.edge.edgeID | quote }}
+            {{- else }}
+            - name: FUGUE_EDGE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            {{- end }}
+            - name: FUGUE_EDGE_GROUP_ID
+              value: {{ .Values.edge.edgeGroupID | quote }}
+            - name: FUGUE_EDGE_LISTEN_ADDR
+              value: {{ .Values.edge.listenAddr | quote }}
+            - name: FUGUE_EDGE_ROUTES_CACHE_PATH
+              value: {{ .Values.edge.routesCachePath | quote }}
+            - name: FUGUE_EDGE_SYNC_INTERVAL
+              value: {{ .Values.edge.syncInterval | quote }}
+            - name: FUGUE_EDGE_HTTP_TIMEOUT
+              value: {{ .Values.edge.httpTimeout | quote }}
+            {{- with .Values.edge.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: route-cache
+              mountPath: {{ .Values.edge.persistence.mountPath | quote }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 12
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.edge.resources | nindent 12 }}
+      volumes:
+        - name: route-cache
+          hostPath:
+            path: {{ .Values.edge.persistence.hostPath | quote }}
+            type: DirectoryOrCreate
+      {{- with .Values.edge.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.edge.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.edge.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

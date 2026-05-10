@@ -104,6 +104,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/console/projects/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetConsoleProject)))
 	mux.Handle("GET /v1/edge/domains", http.HandlerFunc(s.handleEdgeDomains))
 	mux.Handle("POST /v1/edge/domains/tls-report", http.HandlerFunc(s.handleEdgeDomainTLSReport))
+	mux.Handle("GET /v1/edge/routes", http.HandlerFunc(s.handleEdgeRoutes))
 	mux.Handle("GET /v1/edge/tls/ask", http.HandlerFunc(s.handleEdgeTLSAsk))
 	mux.Handle("GET /v1/node-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleListNodeKeys)))
 	mux.Handle("POST /v1/node-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateNodeKey)))

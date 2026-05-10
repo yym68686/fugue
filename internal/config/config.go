@@ -93,6 +93,17 @@ type AgentConfig struct {
 	ApplyWithKubectl   bool
 }
 
+type EdgeConfig struct {
+	APIURL       string
+	EdgeToken    string
+	EdgeID       string
+	EdgeGroupID  string
+	CachePath    string
+	ListenAddr   string
+	SyncInterval time.Duration
+	HTTPTimeout  time.Duration
+}
+
 func APIFromEnv() APIConfig {
 	cfg := APIConfig{
 		BindAddr:                     getenv("FUGUE_BIND_ADDR", ":8080"),
@@ -198,6 +209,23 @@ func AgentFromEnv() AgentConfig {
 		HeartbeatEvery:     getenvDuration("FUGUE_AGENT_HEARTBEAT_EVERY", 15*time.Second),
 		StateFile:          getenv("FUGUE_AGENT_STATE_FILE", "./data/agent/state.json"),
 		ApplyWithKubectl:   getenvBool("FUGUE_AGENT_APPLY_WITH_KUBECTL", false),
+	}
+}
+
+func EdgeFromEnv() EdgeConfig {
+	edgeToken := strings.TrimSpace(os.Getenv("FUGUE_EDGE_TOKEN"))
+	if edgeToken == "" {
+		edgeToken = strings.TrimSpace(os.Getenv("FUGUE_EDGE_TLS_ASK_TOKEN"))
+	}
+	return EdgeConfig{
+		APIURL:       getenv("FUGUE_API_URL", "https://api.fugue.pro"),
+		EdgeToken:    edgeToken,
+		EdgeID:       strings.TrimSpace(os.Getenv("FUGUE_EDGE_ID")),
+		EdgeGroupID:  strings.TrimSpace(os.Getenv("FUGUE_EDGE_GROUP_ID")),
+		CachePath:    getenv("FUGUE_EDGE_ROUTES_CACHE_PATH", "/var/lib/fugue/edge/routes-cache.json"),
+		ListenAddr:   getenv("FUGUE_EDGE_LISTEN_ADDR", "127.0.0.1:7832"),
+		SyncInterval: getenvDuration("FUGUE_EDGE_SYNC_INTERVAL", 15*time.Second),
+		HTTPTimeout:  getenvDuration("FUGUE_EDGE_HTTP_TIMEOUT", 10*time.Second),
 	}
 }
 

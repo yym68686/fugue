@@ -49,6 +49,11 @@ controller:
     enabled: true
     minAvailable: 2
 
+edge:
+  enabled: true
+  nodeSelector:
+    fugue.io/role.edge: "true"
+
 service:
   type: ClusterIP
   port: 80

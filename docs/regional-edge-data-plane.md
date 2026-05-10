@@ -681,7 +681,7 @@ docs/private/regional-edge-current-state.local.md
 - [x] 确认所有现有 `*.fugue.pro` app hostname 和 custom domain 清单。
 - [x] 确认每个 app 的 runtime、节点区域、route hostname、custom-domain target。
 - [x] 明确当前 `fugue-api` app proxy 作为 legacy fallback 保留，不在早期删除。
-- [ ] 给当前 Route A 增加最小观测：请求量、502、upstream error、WebSocket/SSE 错误。
+- [x] 给当前 Route A 增加最小观测：请求量、502、upstream error、WebSocket/SSE 错误。
 
 ### 1. 统一 join-cluster 节点接入和 NodePolicy
 
@@ -703,29 +703,30 @@ docs/private/regional-edge-current-state.local.md
 
 ### 3. 建立 route binding 派生层
 
-- [ ] 从现有 `AppRoute`、`AppDomain`、runtime 和 app spec 派生只读 route binding。
-- [ ] 不改变现有 app 创建、route patch、custom domain 流程。
-- [ ] 为每个 route binding 计算候选 edge group 和 fallback edge group。
-- [ ] 为每个 route binding 计算 edge 可用的 upstream URL。
-- [ ] 增加测试覆盖：platform route、custom domain、disabled app、internal/background app、runtime missing。
+- [x] 从现有 `AppRoute`、`AppDomain`、runtime 和 app spec 派生只读 route binding。
+- [x] 不改变现有 app 创建、route patch、custom domain 流程。
+- [x] 为每个 route binding 计算候选 edge group 和 fallback edge group。
+- [x] 为每个 route binding 计算 edge 可用的 upstream URL。
+- [x] 增加测试覆盖：platform route、custom domain、disabled app、internal/background app、runtime missing。
 
 ### 4. 新增 edge route bundle API
 
-- [ ] 在 `openapi/openapi.yaml` 新增 `/v1/edge/routes`。
-- [ ] 生成 OpenAPI artifacts。
-- [ ] 实现 route bundle handler，先只读派生 binding。
-- [ ] 支持 `edge_id` / `edge_group_id` 过滤。
-- [ ] 支持 route generation / `ETag` / conditional fetch。
-- [ ] 确保 bundle 不包含 secret。
-- [ ] 增加 handler 和 contract tests。
+- [x] 在 `openapi/openapi.yaml` 新增 `/v1/edge/routes`。
+- [x] 生成 OpenAPI artifacts。
+- [x] 实现 route bundle handler，先只读派生 binding。
+- [x] 支持 `edge_id` / `edge_group_id` 过滤。
+- [x] 支持 route generation / `ETag` / conditional fetch。
+- [x] 确保 bundle 不包含 secret。
+- [x] 增加 handler 和 contract tests。
 
 ### 5. 实现 fugue-edge shadow 模式
 
-- [ ] 新增 `cmd/fugue-edge`。
-- [ ] 实现 edge auth、拉取 route bundle、写本地磁盘 cache。
-- [ ] 实现本地 health endpoint 和 metrics。
-- [ ] 先不接公网流量，只验证 bundle sync。
-- [ ] 支持控制平面不可用时从本地 cache 启动。
+- [x] 新增 `cmd/fugue-edge`。
+- [x] 实现 edge auth、拉取 route bundle、写本地磁盘 cache。
+- [x] 实现本地 health endpoint 和 metrics。
+- [x] 先不接公网流量，只验证 bundle sync。
+- [x] 支持控制平面不可用时从本地 cache 启动。
+- [x] 增加 `fugue-edge` shadow DaemonSet 和发布镜像链路，默认只调度到 `fugue.io/role.edge=true` 节点，不监听公网 80/443，不生成 Caddy config。
 - [ ] 在已 join cluster 且带 `fugue.io/role.edge=true` 的亚洲节点部署 shadow edge，确认能长期拉取 bundle。
 
 ### 6. 接入 Caddy-backed 反代但仍不切 DNS

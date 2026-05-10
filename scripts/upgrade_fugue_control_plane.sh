@@ -1444,6 +1444,14 @@ main() {
   require_env FUGUE_API_IMAGE_TAG
   require_env FUGUE_CONTROLLER_IMAGE_REPOSITORY
   require_env FUGUE_CONTROLLER_IMAGE_TAG
+  FUGUE_EDGE_ENABLED="${FUGUE_EDGE_ENABLED:-true}"
+  if [[ "${FUGUE_EDGE_ENABLED}" == "true" ]]; then
+    require_env FUGUE_EDGE_IMAGE_REPOSITORY
+    require_env FUGUE_EDGE_IMAGE_TAG
+  else
+    FUGUE_EDGE_IMAGE_REPOSITORY="${FUGUE_EDGE_IMAGE_REPOSITORY:-fugue-edge}"
+    FUGUE_EDGE_IMAGE_TAG="${FUGUE_EDGE_IMAGE_TAG:-latest}"
+  fi
 
   export KUBECONFIG="${KUBECONFIG:-${HOME}/.kube/config}"
   KUBECTL="$(detect_kubectl)"
@@ -1506,6 +1514,7 @@ main() {
   log "upgrading ${FUGUE_RELEASE_NAME} in namespace ${FUGUE_NAMESPACE}"
   log "api image: ${FUGUE_API_IMAGE_REPOSITORY}:${FUGUE_API_IMAGE_TAG}"
   log "controller image: ${FUGUE_CONTROLLER_IMAGE_REPOSITORY}:${FUGUE_CONTROLLER_IMAGE_TAG}"
+  log "edge image: ${FUGUE_EDGE_IMAGE_REPOSITORY}:${FUGUE_EDGE_IMAGE_TAG} enabled=${FUGUE_EDGE_ENABLED}"
   log "previous Helm revision: ${PREVIOUS_REVISION}"
   log "registry push base: ${FUGUE_REGISTRY_PUSH_BASE}"
   log "registry pull base: ${FUGUE_REGISTRY_PULL_BASE}"
@@ -1540,6 +1549,9 @@ main() {
     --set-string api.image.tag="${FUGUE_API_IMAGE_TAG}" \
     --set-string controller.image.repository="${FUGUE_CONTROLLER_IMAGE_REPOSITORY}" \
     --set-string controller.image.tag="${FUGUE_CONTROLLER_IMAGE_TAG}" \
+    --set edge.enabled="${FUGUE_EDGE_ENABLED}" \
+    --set-string edge.image.repository="${FUGUE_EDGE_IMAGE_REPOSITORY}" \
+    --set-string edge.image.tag="${FUGUE_EDGE_IMAGE_TAG}" \
     --set-string api.appBaseDomain="${FUGUE_APP_BASE_DOMAIN}" \
     --set-string api.apiPublicDomain="${FUGUE_API_PUBLIC_DOMAIN}" \
     --set-string api.registryPushBase="${FUGUE_REGISTRY_PUSH_BASE}" \

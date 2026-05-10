@@ -1242,7 +1242,8 @@ build_images() {
   prefetch_build_bases
   run_with_retry 3 5 "build fugue-api image" build_image "${REPO_ROOT}/Dockerfile.api" "fugue-api:${IMAGE_TAG}"
   run_with_retry 3 5 "build fugue-controller image" build_image "${REPO_ROOT}/Dockerfile.controller" "fugue-controller:${IMAGE_TAG}"
-  run_with_retry 3 5 "save built images" "${CONTAINER_TOOL}" save -o "${IMAGES_TAR}" "fugue-api:${IMAGE_TAG}" "fugue-controller:${IMAGE_TAG}"
+  run_with_retry 3 5 "build fugue-edge image" build_image "${REPO_ROOT}/Dockerfile.edge" "fugue-edge:${IMAGE_TAG}"
+  run_with_retry 3 5 "save built images" "${CONTAINER_TOOL}" save -o "${IMAGES_TAR}" "fugue-api:${IMAGE_TAG}" "fugue-controller:${IMAGE_TAG}" "fugue-edge:${IMAGE_TAG}"
 }
 
 prefetch_build_bases() {
@@ -1252,6 +1253,7 @@ prefetch_build_bases() {
   fi
 
   run_with_retry 5 5 "pull golang build base image" "${CONTAINER_TOOL}" pull "${platform_args[@]}" golang:1.25-alpine
+  run_with_retry 5 5 "pull alpine runtime base image" "${CONTAINER_TOOL}" pull "${platform_args[@]}" alpine:3.21
 }
 
 build_image() {
@@ -2074,13 +2076,14 @@ push_and_import_images() {
   local host="$1"
   local api_ref="docker.io/library/fugue-api:${IMAGE_TAG}"
   local controller_ref="docker.io/library/fugue-controller:${IMAGE_TAG}"
+  local edge_ref="docker.io/library/fugue-edge:${IMAGE_TAG}"
   log "copying images to ${host}"
   prepare_remote_tmp "${host}"
   scp_to "${IMAGES_TAR}" "${host}" "${REMOTE_TMP_BASE}/fugue-images.tar"
   run_with_retry "${REMOTE_CMD_RETRIES}" "${REMOTE_CMD_RETRY_DELAY}" "import images on ${host}" \
     ssh_root_run "${host}" "k3s ctr images import $(printf '%q' "${REMOTE_TMP_BASE}/fugue-images.tar")"
   run_with_retry "${REMOTE_CMD_RETRIES}" "${REMOTE_CMD_RETRY_DELAY}" "verify imported images on ${host}" \
-    ssh_root_run "${host}" "k3s ctr images ls | grep -F $(printf '%q' "${api_ref}") >/dev/null && k3s ctr images ls | grep -F $(printf '%q' "${controller_ref}") >/dev/null"
+    ssh_root_run "${host}" "k3s ctr images ls | grep -F $(printf '%q' "${api_ref}") >/dev/null && k3s ctr images ls | grep -F $(printf '%q' "${controller_ref}") >/dev/null && k3s ctr images ls | grep -F $(printf '%q' "${edge_ref}") >/dev/null"
 }
 
 install_helm_on_primary() {
@@ -2204,6 +2207,15 @@ controller:
     limits:
       cpu: 500m
       memory: 512Mi
+
+edge:
+  enabled: true
+  image:
+    repository: fugue-edge
+    tag: "${IMAGE_TAG}"
+    pullPolicy: IfNotPresent
+  nodeSelector:
+    "fugue.io/role.edge": "true"
 
 snapshotController:
   nodeSelector:

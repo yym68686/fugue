@@ -130,6 +130,43 @@ paths:
                 additionalProperties: true
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/edge/routes:
+    get:
+      operationId: edgeRoutes
+      summary: Edge Routes
+      tags: [Edge]
+      x-fugue-handler: handleEdgeRoutes
+      security:
+        - EdgeToken: []
+      parameters:
+        - in: query
+          name: edge_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: edge_group_id
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          headers:
+            ETag:
+              schema:
+                type: string
+            X-Fugue-Route-Bundle-Version:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeRouteBundle"
+        '304':
+          description: Route bundle unchanged
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/edge/domains/tls-report:
     post:
       operationId: edgeDomainTLSReport
@@ -4331,6 +4368,107 @@ components:
         service_port:
           type: integer
           format: int32
+    EdgeRouteBundle:
+      type: object
+      additionalProperties: false
+      required: [version, generated_at, routes, tls_allowlist]
+      properties:
+        version:
+          type: string
+        generated_at:
+          type: string
+          format: date-time
+        edge_id:
+          type: string
+        edge_group_id:
+          type: string
+        routes:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeRouteBinding"
+        tls_allowlist:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeTLSAllowlistEntry"
+    EdgeRouteBinding:
+      type: object
+      additionalProperties: false
+      required:
+        - hostname
+        - route_kind
+        - app_id
+        - tenant_id
+        - runtime_id
+        - edge_group_id
+        - route_policy
+        - upstream_kind
+        - service_port
+        - tls_policy
+        - streaming
+        - status
+        - route_generation
+        - created_at
+        - updated_at
+      properties:
+        hostname:
+          type: string
+        route_kind:
+          type: string
+          enum: [platform, custom-domain]
+        app_id:
+          type: string
+        tenant_id:
+          type: string
+        runtime_id:
+          type: string
+        edge_group_id:
+          type: string
+        fallback_edge_group_id:
+          type: string
+        route_policy:
+          type: string
+          enum: [primary]
+        upstream_kind:
+          type: string
+          enum: [kubernetes-service]
+        upstream_url:
+          type: string
+        service_port:
+          type: integer
+          format: int32
+        tls_policy:
+          type: string
+          enum: [platform, custom-domain]
+        streaming:
+          type: boolean
+        status:
+          type: string
+          enum: [active, disabled, unavailable, runtime-missing]
+        status_reason:
+          type: string
+        route_generation:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    EdgeTLSAllowlistEntry:
+      type: object
+      additionalProperties: false
+      required: [hostname, app_id, tenant_id, status]
+      properties:
+        hostname:
+          type: string
+        app_id:
+          type: string
+        tenant_id:
+          type: string
+        status:
+          type: string
+        tls_status:
+          type: string
     AppInternalService:
       type: object
       additionalProperties: false

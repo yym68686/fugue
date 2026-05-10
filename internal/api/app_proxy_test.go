@@ -387,6 +387,12 @@ func TestAppProxyLogsUpstreamProxyErrors(t *testing.T) {
 	if !strings.Contains(logged, "dial upstream exploded") {
 		t.Fatalf("expected proxy error to be logged, got %q", logged)
 	}
+	if !strings.Contains(logged, "route_a_app_proxy_request") {
+		t.Fatalf("expected Route A observation log entry, got %q", logged)
+	}
+	if !strings.Contains(logged, "status=502") || !strings.Contains(logged, "upstream_error=true") {
+		t.Fatalf("expected observed 502 upstream error, got %q", logged)
+	}
 }
 
 func TestAppProxyRetriesTransientUpstreamErrorsWithReplayableBody(t *testing.T) {

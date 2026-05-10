@@ -1,0 +1,17 @@
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /src
+COPY go.mod ./
+COPY go.sum ./
+RUN go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-edge ./cmd/fugue-edge
+
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates
+WORKDIR /app
+COPY --from=build /out/fugue-edge /usr/local/bin/fugue-edge
+ENTRYPOINT ["/usr/local/bin/fugue-edge"]

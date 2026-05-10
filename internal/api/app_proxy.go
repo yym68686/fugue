@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -26,6 +28,7 @@ const (
 )
 
 func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) bool {
+	startedAt := time.Now()
 	host := strings.TrimSpace(strings.ToLower(r.Host))
 	if host == "" {
 		return false
@@ -41,39 +44,94 @@ func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) boo
 	if err != nil {
 		if err == store.ErrNotFound {
 			if s.isAppHostname(host) {
+				s.logAppProxyObservation(appProxyObservation{
+					Host:       host,
+					Method:     r.Method,
+					Path:       safeAppProxyLogPath(r),
+					StatusCode: http.StatusNotFound,
+					Duration:   time.Since(startedAt),
+					WebSocket:  appProxyRequestIsWebSocket(r),
+					SSE:        appProxyRequestWantsSSE(r),
+					RouteState: "missing",
+				})
 				http.NotFound(w, r)
 				return true
 			}
 			return false
 		}
+		s.logAppProxyObservation(appProxyObservation{
+			Host:       host,
+			Method:     r.Method,
+			Path:       safeAppProxyLogPath(r),
+			StatusCode: http.StatusInternalServerError,
+			Duration:   time.Since(startedAt),
+			WebSocket:  appProxyRequestIsWebSocket(r),
+			SSE:        appProxyRequestWantsSSE(r),
+			RouteState: "lookup-error",
+		})
 		http.Error(w, "app lookup failed", http.StatusInternalServerError)
 		return true
 	}
 	app = s.overlayManagedAppStatusCached(app)
+	observed := appProxyObservation{
+		Host:       host,
+		Method:     r.Method,
+		Path:       safeAppProxyLogPath(r),
+		AppID:      app.ID,
+		TenantID:   app.TenantID,
+		RuntimeID:  appProxyRuntimeID(app),
+		WebSocket:  appProxyRequestIsWebSocket(r),
+		SSE:        appProxyRequestWantsSSE(r),
+		RouteState: "active",
+	}
 	if app.Spec.Replicas == 0 {
+		observed.StatusCode = http.StatusServiceUnavailable
+		observed.Duration = time.Since(startedAt)
+		observed.RouteState = "disabled"
+		s.logAppProxyObservation(observed)
 		http.Error(w, "app is disabled", http.StatusServiceUnavailable)
 		return true
 	}
 	if app.Status.CurrentReplicas == 0 {
+		observed.StatusCode = http.StatusServiceUnavailable
+		observed.Duration = time.Since(startedAt)
+		observed.RouteState = "unavailable"
+		s.logAppProxyObservation(observed)
 		http.Error(w, appRouteUnavailableMessage(app), http.StatusServiceUnavailable)
 		return true
 	}
 
 	target, err := url.Parse(s.serviceURLForApp(r.Context(), app))
 	if err != nil {
+		observed.StatusCode = http.StatusInternalServerError
+		observed.Duration = time.Since(startedAt)
+		observed.RouteState = "invalid-target"
+		s.logAppProxyObservation(observed)
 		http.Error(w, "invalid app target", http.StatusInternalServerError)
 		return true
 	}
+	observed.Target = target.String()
 	if err := prepareAppProxyRequestForRetries(r); err != nil {
+		observed.StatusCode = http.StatusBadRequest
+		observed.Duration = time.Since(startedAt)
+		observed.RouteState = "bad-request"
+		s.logAppProxyObservation(observed)
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
 		return true
 	}
-	proxy := s.newAppReverseProxy(host, target, app)
-	proxy.ServeHTTP(w, r)
+	proxy := s.newAppReverseProxy(host, target, app, &observed)
+	observedWriter := newAppProxyObservationResponseWriter(w)
+	proxy.ServeHTTP(observedWriter, r)
+	observed.StatusCode = observedWriter.statusCode()
+	if !observedWriter.wroteHeader && observed.WebSocket && observed.UpstreamError == "" {
+		observed.StatusCode = http.StatusSwitchingProtocols
+	}
+	observed.Duration = time.Since(startedAt)
+	s.logAppProxyObservation(observed)
 	return true
 }
 
-func (s *Server) newAppReverseProxy(host string, target *url.URL, app model.App) *httputil.ReverseProxy {
+func (s *Server) newAppReverseProxy(host string, target *url.URL, app model.App, observed *appProxyObservation) *httputil.ReverseProxy {
 	transport := newDefaultAppProxyTransport()
 	if s != nil && s.appProxyTransport != nil {
 		transport = s.appProxyTransport
@@ -87,6 +145,10 @@ func (s *Server) newAppReverseProxy(host string, target *url.URL, app model.App)
 		},
 		Transport: transport,
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
+			if observed != nil {
+				observed.UpstreamError = strings.TrimSpace(proxyErr.Error())
+				observed.RouteState = "upstream-error"
+			}
 			if s != nil && s.log != nil {
 				s.log.Printf(
 					"app proxy failed app=%s host=%s target=%s method=%s path=%s: %v",
@@ -94,13 +156,181 @@ func (s *Server) newAppReverseProxy(host string, target *url.URL, app model.App)
 					host,
 					target.String(),
 					req.Method,
-					req.URL.RequestURI(),
+					safeAppProxyLogPath(req),
 					proxyErr,
 				)
 			}
 			http.Error(rw, "upstream app is unavailable", http.StatusBadGateway)
 		},
 	}
+}
+
+type appProxyObservation struct {
+	Host          string
+	Method        string
+	Path          string
+	AppID         string
+	TenantID      string
+	RuntimeID     string
+	Target        string
+	StatusCode    int
+	Duration      time.Duration
+	RouteState    string
+	UpstreamError string
+	WebSocket     bool
+	SSE           bool
+}
+
+func (s *Server) logAppProxyObservation(observed appProxyObservation) {
+	if s == nil || s.log == nil {
+		return
+	}
+	if observed.StatusCode == 0 {
+		observed.StatusCode = http.StatusOK
+	}
+	if observed.RouteState == "" {
+		observed.RouteState = "unknown"
+	}
+	s.log.Printf(
+		"route_a_app_proxy_request host=%s app=%s tenant=%s runtime=%s method=%s path=%s status=%d duration_ms=%d target=%s route_state=%s upstream_error=%t websocket=%t sse=%t",
+		observed.Host,
+		observed.AppID,
+		observed.TenantID,
+		observed.RuntimeID,
+		observed.Method,
+		observed.Path,
+		observed.StatusCode,
+		observed.Duration.Milliseconds(),
+		observed.Target,
+		observed.RouteState,
+		strings.TrimSpace(observed.UpstreamError) != "",
+		observed.WebSocket,
+		observed.SSE,
+	)
+}
+
+type appProxyObservationResponseWriter struct {
+	http.ResponseWriter
+	wroteHeader bool
+	status      int
+}
+
+func newAppProxyObservationResponseWriter(w http.ResponseWriter) *appProxyObservationResponseWriter {
+	return &appProxyObservationResponseWriter{ResponseWriter: w}
+}
+
+func (w *appProxyObservationResponseWriter) Header() http.Header {
+	return w.ResponseWriter.Header()
+}
+
+func (w *appProxyObservationResponseWriter) WriteHeader(statusCode int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	w.status = statusCode
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *appProxyObservationResponseWriter) Write(data []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(data)
+}
+
+func (w *appProxyObservationResponseWriter) Flush() {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w *appProxyObservationResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("response writer does not support hijacking")
+	}
+	return hijacker.Hijack()
+}
+
+func (w *appProxyObservationResponseWriter) Push(target string, opts *http.PushOptions) error {
+	pusher, ok := w.ResponseWriter.(http.Pusher)
+	if !ok {
+		return http.ErrNotSupported
+	}
+	return pusher.Push(target, opts)
+}
+
+func (w *appProxyObservationResponseWriter) ReadFrom(reader io.Reader) (int64, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	if readerFrom, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		return readerFrom.ReadFrom(reader)
+	}
+	return io.Copy(w.ResponseWriter, reader)
+}
+
+func (w *appProxyObservationResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func (w *appProxyObservationResponseWriter) statusCode() int {
+	if w.status == 0 {
+		return http.StatusOK
+	}
+	return w.status
+}
+
+func appProxyRuntimeID(app model.App) string {
+	if runtimeID := strings.TrimSpace(app.Status.CurrentRuntimeID); runtimeID != "" {
+		return runtimeID
+	}
+	return strings.TrimSpace(app.Spec.RuntimeID)
+}
+
+func safeAppProxyLogPath(r *http.Request) string {
+	if r == nil || r.URL == nil {
+		return ""
+	}
+	path := strings.TrimSpace(r.URL.EscapedPath())
+	if path == "" {
+		return "/"
+	}
+	return path
+}
+
+func appProxyRequestIsWebSocket(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	return headerContainsToken(r.Header, "Connection", "upgrade") &&
+		strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket")
+}
+
+func appProxyRequestWantsSSE(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	return headerContainsToken(r.Header, "Accept", "text/event-stream")
+}
+
+func headerContainsToken(header http.Header, key, token string) bool {
+	token = strings.ToLower(strings.TrimSpace(token))
+	if token == "" {
+		return false
+	}
+	for _, value := range header.Values(key) {
+		for _, part := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), token) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Server) loadAppByHostnameCached(host string) (model.App, error) {

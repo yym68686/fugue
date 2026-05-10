@@ -72,6 +72,53 @@ func TestMaintenanceDaemonSetsDefaultToInternalNodes(t *testing.T) {
 	}
 }
 
+func TestEdgeShadowDaemonSetDefaultsToNoPublicTraffic(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	doc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-edge")
+	if doc == "" {
+		t.Fatalf("rendered manifest missing edge daemonset:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`image: "fugue-edge:latest"`,
+		`fugue.io/role.edge: "true"`,
+		`path: "/var/lib/fugue/edge"`,
+		`key: FUGUE_EDGE_TLS_ASK_TOKEN`,
+		`path: /healthz`,
+		`containerPort: 7832`,
+		`value: "http://fugue-fugue:80"`,
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("edge daemonset missing %q:\n%s", want, doc)
+		}
+	}
+	for _, unwanted := range []string{
+		"hostNetwork: true",
+		"hostPort:",
+		"containerPort: 80",
+		"containerPort: 443",
+		"caddy",
+	} {
+		if strings.Contains(doc, unwanted) {
+			t.Fatalf("edge daemonset should not contain %q in shadow mode:\n%s", unwanted, doc)
+		}
+	}
+}
+
 func manifestDocumentForKindAndName(manifest string, kind string, name string) string {
 	for _, doc := range strings.Split(manifest, "\n---") {
 		hasKind := strings.Contains(doc, "\nkind: "+kind+"\n") || strings.Contains(doc, "kind: "+kind+"\n")

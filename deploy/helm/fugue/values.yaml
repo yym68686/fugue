@@ -77,6 +77,47 @@ controller:
   resources: {}
   extraEnv: []
 
+edge:
+  enabled: true
+  image:
+    repository: fugue-edge
+    tag: latest
+    pullPolicy: IfNotPresent
+  apiURL: ""
+  edgeID: ""
+  edgeGroupID: ""
+  listenAddr: ":7832"
+  healthPort: 7832
+  syncInterval: 15s
+  httpTimeout: 10s
+  routesCachePath: /var/lib/fugue/edge/routes-cache.json
+  tokenSecret:
+    name: ""
+    key: FUGUE_EDGE_TLS_ASK_TOKEN
+  persistence:
+    hostPath: /var/lib/fugue/edge
+    mountPath: /var/lib/fugue/edge
+  nodeSelector:
+    fugue.io/role.edge: "true"
+  tolerations:
+    - key: fugue.io/dedicated
+      operator: Equal
+      value: edge
+      effect: NoSchedule
+  affinity: {}
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+      ephemeral-storage: 32Mi
+    limits:
+      memory: 256Mi
+      ephemeral-storage: 256Mi
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+  extraEnv: []
+
 imagePrePull:
   enabled: true
   image:
