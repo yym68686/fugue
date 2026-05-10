@@ -121,12 +121,59 @@ func TestEdgeRoutesBundleSupportsGroupFilterAndConditionalFetch(t *testing.T) {
 		t.Fatalf("expected HK edge group, got %+v", bundle.Routes[0])
 	}
 
+	repeated := httptest.NewRecorder()
+	repeatedReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-hk", nil)
+	server.Handler().ServeHTTP(repeated, repeatedReq)
+	if repeated.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, repeated.Code, repeated.Body.String())
+	}
+	var repeatedBundle model.EdgeRouteBundle
+	mustDecodeJSON(t, repeated, &repeatedBundle)
+	if repeatedBundle.Version != bundle.Version {
+		t.Fatalf("expected unchanged route content to keep stable version, first=%s repeated=%s", bundle.Version, repeatedBundle.Version)
+	}
+	if repeated.Header().Get("ETag") != etag {
+		t.Fatalf("expected unchanged route content to keep stable ETag, first=%s repeated=%s", etag, repeated.Header().Get("ETag"))
+	}
+
 	second := httptest.NewRecorder()
 	conditional := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-hk", nil)
 	conditional.Header.Set("If-None-Match", etag)
 	server.Handler().ServeHTTP(second, conditional)
 	if second.Code != http.StatusNotModified {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusNotModified, second.Code, second.Body.String())
+	}
+
+	secondApp, err := storeState.CreateAppWithRoute(app.TenantID, app.ProjectID, "second", "", model.AppSpec{
+		Image:     "ghcr.io/example/second:latest",
+		Ports:     []int{9090},
+		Replicas:  1,
+		RuntimeID: model.DefaultManagedRuntimeID,
+	}, model.AppRoute{
+		Hostname:    "second.fugue.pro",
+		BaseDomain:  "fugue.pro",
+		PublicURL:   "https://second.fugue.pro",
+		ServicePort: 9090,
+	})
+	if err != nil {
+		t.Fatalf("create second app: %v", err)
+	}
+	deployAppForEdgeRouteTest(t, storeState, secondApp)
+
+	changed := httptest.NewRecorder()
+	changedReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-hk", nil)
+	changedReq.Header.Set("If-None-Match", etag)
+	server.Handler().ServeHTTP(changed, changedReq)
+	if changed.Code != http.StatusOK {
+		t.Fatalf("expected route content change to return status %d, got %d body=%s", http.StatusOK, changed.Code, changed.Body.String())
+	}
+	var changedBundle model.EdgeRouteBundle
+	mustDecodeJSON(t, changed, &changedBundle)
+	if changedBundle.Version == bundle.Version {
+		t.Fatalf("expected route content change to update version %s", bundle.Version)
+	}
+	if len(changedBundle.Routes) != 2 {
+		t.Fatalf("expected two routes after content change, got %+v", changedBundle.Routes)
 	}
 }
 
@@ -185,6 +232,86 @@ func TestEdgeRouteBindingDerivesNonActiveStatuses(t *testing.T) {
 	if unavailable.Status != model.EdgeRouteStatusUnavailable || unavailable.UpstreamURL != "" {
 		t.Fatalf("expected unavailable route without upstream, got %+v", unavailable)
 	}
+}
+
+func TestEdgeRouteBundleVersionIgnoresNonContentMetadata(t *testing.T) {
+	t.Parallel()
+
+	createdAt := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	updatedAt := createdAt.Add(5 * time.Minute)
+	bundle := model.EdgeRouteBundle{
+		GeneratedAt: time.Date(2026, 5, 10, 1, 0, 0, 0, time.UTC),
+		EdgeID:      "edge-a",
+		EdgeGroupID: "edge-group-country-hk",
+		Routes: []model.EdgeRouteBinding{
+			{
+				Hostname:            "demo.fugue.pro",
+				RouteKind:           model.EdgeRouteKindPlatform,
+				AppID:               "app_demo",
+				TenantID:            "tenant_demo",
+				RuntimeID:           model.DefaultManagedRuntimeID,
+				EdgeGroupID:         "edge-group-country-hk",
+				FallbackEdgeGroupID: defaultEdgeGroupID,
+				RoutePolicy:         model.EdgeRoutePolicyPrimary,
+				UpstreamKind:        model.EdgeRouteUpstreamKindKubernetesService,
+				UpstreamURL:         "http://app-demo.default.svc.cluster.local:8080",
+				ServicePort:         8080,
+				TLSPolicy:           model.EdgeRouteTLSPolicyPlatform,
+				Streaming:           true,
+				Status:              model.EdgeRouteStatusActive,
+				RouteGeneration:     "routegen_old",
+				CreatedAt:           createdAt,
+				UpdatedAt:           updatedAt,
+			},
+		},
+		TLSAllowlist: []model.EdgeTLSAllowlistEntry{
+			{
+				Hostname:  "www.example.com",
+				AppID:     "app_demo",
+				TenantID:  "tenant_demo",
+				Status:    model.AppDomainStatusVerified,
+				TLSStatus: model.AppDomainTLSStatusReady,
+			},
+		},
+	}
+
+	baseVersion := edgeRouteBundleVersion(bundle)
+	baseRouteGeneration := edgeRouteGeneration(bundle.Routes[0])
+	metadataOnly := cloneEdgeRouteBundleForTest(bundle)
+	metadataOnly.GeneratedAt = bundle.GeneratedAt.Add(10 * time.Minute)
+	metadataOnly.EdgeID = "edge-b"
+	metadataOnly.EdgeGroupID = "edge-group-country-us"
+	metadataOnly.Routes[0].RouteGeneration = "routegen_new"
+	metadataOnly.Routes[0].CreatedAt = createdAt.Add(24 * time.Hour)
+	metadataOnly.Routes[0].UpdatedAt = updatedAt.Add(24 * time.Hour)
+
+	if got := edgeRouteBundleVersion(metadataOnly); got != baseVersion {
+		t.Fatalf("expected non-content metadata changes to keep bundle version stable, base=%s got=%s", baseVersion, got)
+	}
+	if got := edgeRouteGeneration(metadataOnly.Routes[0]); got != baseRouteGeneration {
+		t.Fatalf("expected non-content metadata changes to keep route generation stable, base=%s got=%s", baseRouteGeneration, got)
+	}
+
+	routeContentChanged := cloneEdgeRouteBundleForTest(bundle)
+	routeContentChanged.Routes[0].ServicePort = 9090
+	if got := edgeRouteBundleVersion(routeContentChanged); got == baseVersion {
+		t.Fatalf("expected route content change to update bundle version %s", baseVersion)
+	}
+	if got := edgeRouteGeneration(routeContentChanged.Routes[0]); got == baseRouteGeneration {
+		t.Fatalf("expected route content change to update route generation %s", baseRouteGeneration)
+	}
+
+	tlsContentChanged := cloneEdgeRouteBundleForTest(bundle)
+	tlsContentChanged.TLSAllowlist[0].TLSStatus = model.AppDomainTLSStatusPending
+	if got := edgeRouteBundleVersion(tlsContentChanged); got == baseVersion {
+		t.Fatalf("expected TLS allowlist content change to update bundle version %s", baseVersion)
+	}
+}
+
+func cloneEdgeRouteBundleForTest(bundle model.EdgeRouteBundle) model.EdgeRouteBundle {
+	bundle.Routes = append([]model.EdgeRouteBinding(nil), bundle.Routes...)
+	bundle.TLSAllowlist = append([]model.EdgeTLSAllowlistEntry(nil), bundle.TLSAllowlist...)
+	return bundle
 }
 
 func edgeRouteByHostAndKind(routes []model.EdgeRouteBinding, hostname, kind string) *model.EdgeRouteBinding {

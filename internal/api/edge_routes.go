@@ -254,20 +254,66 @@ func edgeRouteSlug(value string) string {
 }
 
 func edgeRouteGeneration(binding model.EdgeRouteBinding) string {
-	binding.RouteGeneration = ""
-	payload, _ := json.Marshal(binding)
+	payload, _ := json.Marshal(edgeRouteVersionMaterialFromBinding(binding))
 	sum := sha256.Sum256(payload)
 	return "routegen_" + hex.EncodeToString(sum[:])[:16]
 }
 
+type edgeRouteVersionMaterial struct {
+	Hostname            string `json:"hostname"`
+	RouteKind           string `json:"route_kind"`
+	AppID               string `json:"app_id"`
+	TenantID            string `json:"tenant_id"`
+	RuntimeID           string `json:"runtime_id"`
+	EdgeGroupID         string `json:"edge_group_id"`
+	FallbackEdgeGroupID string `json:"fallback_edge_group_id,omitempty"`
+	RoutePolicy         string `json:"route_policy"`
+	UpstreamKind        string `json:"upstream_kind"`
+	UpstreamURL         string `json:"upstream_url,omitempty"`
+	ServicePort         int    `json:"service_port"`
+	TLSPolicy           string `json:"tls_policy"`
+	Streaming           bool   `json:"streaming"`
+	Status              string `json:"status"`
+	StatusReason        string `json:"status_reason,omitempty"`
+}
+
+type edgeRouteBundleVersionMaterial struct {
+	Routes       []edgeRouteVersionMaterial    `json:"routes"`
+	TLSAllowlist []model.EdgeTLSAllowlistEntry `json:"tls_allowlist"`
+}
+
 func edgeRouteBundleVersion(bundle model.EdgeRouteBundle) string {
-	bundle.GeneratedAt = time.Time{}
-	for index := range bundle.Routes {
-		bundle.Routes[index].RouteGeneration = ""
+	routes := make([]edgeRouteVersionMaterial, len(bundle.Routes))
+	for index, route := range bundle.Routes {
+		routes[index] = edgeRouteVersionMaterialFromBinding(route)
 	}
-	payload, _ := json.Marshal(bundle)
+	material := edgeRouteBundleVersionMaterial{
+		Routes:       routes,
+		TLSAllowlist: append([]model.EdgeTLSAllowlistEntry(nil), bundle.TLSAllowlist...),
+	}
+	payload, _ := json.Marshal(material)
 	sum := sha256.Sum256(payload)
 	return "routegen_" + hex.EncodeToString(sum[:])[:16]
+}
+
+func edgeRouteVersionMaterialFromBinding(binding model.EdgeRouteBinding) edgeRouteVersionMaterial {
+	return edgeRouteVersionMaterial{
+		Hostname:            binding.Hostname,
+		RouteKind:           binding.RouteKind,
+		AppID:               binding.AppID,
+		TenantID:            binding.TenantID,
+		RuntimeID:           binding.RuntimeID,
+		EdgeGroupID:         binding.EdgeGroupID,
+		FallbackEdgeGroupID: binding.FallbackEdgeGroupID,
+		RoutePolicy:         binding.RoutePolicy,
+		UpstreamKind:        binding.UpstreamKind,
+		UpstreamURL:         binding.UpstreamURL,
+		ServicePort:         binding.ServicePort,
+		TLSPolicy:           binding.TLSPolicy,
+		Streaming:           binding.Streaming,
+		Status:              binding.Status,
+		StatusReason:        binding.StatusReason,
+	}
 }
 
 func edgeRouteBundleETag(version string) string {
