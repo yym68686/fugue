@@ -1,6 +1,7 @@
 package edge
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,9 +10,11 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -36,18 +39,23 @@ type Service struct {
 }
 
 type Status struct {
-	Status            string     `json:"status"`
-	Healthy           bool       `json:"healthy"`
-	EdgeID            string     `json:"edge_id,omitempty"`
-	EdgeGroupID       string     `json:"edge_group_id,omitempty"`
-	BundleVersion     string     `json:"bundle_version,omitempty"`
-	RouteCount        int        `json:"route_count"`
-	TLSAllowlistCount int        `json:"tls_allowlist_count"`
-	LastSyncAt        *time.Time `json:"last_sync_at,omitempty"`
-	LastSuccessAt     *time.Time `json:"last_success_at,omitempty"`
-	LastError         string     `json:"last_error,omitempty"`
-	StaleCache        bool       `json:"stale_cache"`
-	CachePath         string     `json:"cache_path,omitempty"`
+	Status              string     `json:"status"`
+	Healthy             bool       `json:"healthy"`
+	EdgeID              string     `json:"edge_id,omitempty"`
+	EdgeGroupID         string     `json:"edge_group_id,omitempty"`
+	BundleVersion       string     `json:"bundle_version,omitempty"`
+	RouteCount          int        `json:"route_count"`
+	TLSAllowlistCount   int        `json:"tls_allowlist_count"`
+	LastSyncAt          *time.Time `json:"last_sync_at,omitempty"`
+	LastSuccessAt       *time.Time `json:"last_success_at,omitempty"`
+	LastError           string     `json:"last_error,omitempty"`
+	StaleCache          bool       `json:"stale_cache"`
+	CachePath           string     `json:"cache_path,omitempty"`
+	CaddyEnabled        bool       `json:"caddy_enabled,omitempty"`
+	CaddyListenAddr     string     `json:"caddy_listen_addr,omitempty"`
+	CaddyAppliedVersion string     `json:"caddy_applied_version,omitempty"`
+	CaddyLastApplyAt    *time.Time `json:"caddy_last_apply_at,omitempty"`
+	CaddyLastError      string     `json:"caddy_last_error,omitempty"`
 }
 
 type cacheFile struct {
@@ -67,6 +75,17 @@ type telemetry struct {
 	CacheLoadSuccess      uint64
 	CacheLoadMiss         uint64
 	CacheLoadError        uint64
+	CaddyConfigSuccess    uint64
+	CaddyConfigError      uint64
+	CaddyAppliedVersion   string
+	CaddyRouteCount       int
+	CaddyLastApplyAt      *time.Time
+	CaddyLastError        string
+	RouteRequests         map[routeMetricKey]uint64
+	RouteStatuses         map[routeStatusMetricKey]uint64
+	RouteUpstreamErrors   map[routeMetricKey]uint64
+	RouteLatencyCount     map[routeMetricKey]uint64
+	RouteLatencySum       map[routeMetricKey]float64
 }
 
 type metricSnapshot struct {
@@ -78,6 +97,30 @@ type metricSnapshot struct {
 type statusError struct {
 	StatusCode int
 	Body       string
+}
+
+type routeMetricKey struct {
+	Hostname  string
+	AppID     string
+	RouteKind string
+}
+
+type routeStatusMetricKey struct {
+	RouteMetricKey routeMetricKey
+	StatusCode     int
+}
+
+type edgeProxyObservation struct {
+	Host          string
+	Route         model.EdgeRouteBinding
+	Method        string
+	Path          string
+	StatusCode    int
+	Duration      time.Duration
+	UpstreamError string
+	Proxied       bool
+	WebSocket     bool
+	SSE           bool
 }
 
 func (e statusError) Error() string {
@@ -95,7 +138,7 @@ func NewService(cfg config.EdgeConfig, logger *log.Logger) *Service {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	return &Service{
+	service := &Service{
 		Config: cfg,
 		HTTPClient: &http.Client{
 			Timeout: timeout,
@@ -108,6 +151,9 @@ func NewService(cfg config.EdgeConfig, logger *log.Logger) *Service {
 			CachePath:   strings.TrimSpace(cfg.CachePath),
 		},
 	}
+	service.snapshot.CaddyEnabled = cfg.CaddyEnabled
+	service.snapshot.CaddyListenAddr = strings.TrimSpace(cfg.CaddyListenAddr)
+	return service
 }
 
 func (s *Service) Run(ctx context.Context) error {
@@ -125,6 +171,20 @@ func (s *Service) Run(ctx context.Context) error {
 		s.Logger.Printf("edge route cache unavailable: %v", err)
 	}
 
+	proxyShutdown, err := s.startProxyServer()
+	if err != nil {
+		return err
+	}
+	if proxyShutdown != nil {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := proxyShutdown(shutdownCtx); err != nil && !errors.Is(err, context.Canceled) {
+				s.Logger.Printf("edge data proxy shutdown failed: %v", err)
+			}
+		}()
+	}
+
 	shutdown, err := s.startHTTPServer()
 	if err != nil {
 		return err
@@ -139,7 +199,11 @@ func (s *Service) Run(ctx context.Context) error {
 		}()
 	}
 
-	s.Logger.Printf("fugue-edge shadow started; api=%s edge_id=%s edge_group_id=%s cache=%s listen=%s interval=%s", safeBaseURL(s.Config.APIURL), s.Config.EdgeID, s.Config.EdgeGroupID, s.Config.CachePath, s.Config.ListenAddr, s.syncInterval())
+	if err := s.applyCurrentCaddyConfig(ctx); err != nil {
+		s.Logger.Printf("edge caddy config apply failed on startup: %v", err)
+	}
+
+	s.Logger.Printf("fugue-edge shadow started; api=%s edge_id=%s edge_group_id=%s cache=%s listen=%s interval=%s caddy_enabled=%t caddy_listen=%s proxy_listen=%s", safeBaseURL(s.Config.APIURL), s.Config.EdgeID, s.Config.EdgeGroupID, s.Config.CachePath, s.Config.ListenAddr, s.syncInterval(), s.Config.CaddyEnabled, s.Config.CaddyListenAddr, s.Config.CaddyProxyListenAddr)
 	_ = s.SyncOnce(ctx)
 
 	ticker := time.NewTicker(s.syncInterval())
@@ -215,6 +279,9 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 			return err
 		}
 		s.recordSyncSuccess(bundle, etag, now, false)
+		if err := s.applyCaddyConfig(ctx, bundle); err != nil && s.Logger != nil {
+			s.Logger.Printf("edge caddy config apply failed; version=%s error=%s", bundle.Version, s.redact(err.Error()))
+		}
 		result = "success"
 		return nil
 	case http.StatusNotModified:
@@ -224,6 +291,10 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 			return err
 		}
 		s.recordNotModified(now)
+		if err := s.applyCurrentCaddyConfig(ctx); err != nil && s.Logger != nil {
+			status := s.Status()
+			s.Logger.Printf("edge caddy config apply failed; version=%s error=%s", status.BundleVersion, s.redact(err.Error()))
+		}
 		result = "not_modified"
 		return nil
 	default:
@@ -285,6 +356,10 @@ func (s *Service) Handler() http.Handler {
 	return mux
 }
 
+func (s *Service) ProxyHandler() http.Handler {
+	return http.HandlerFunc(s.handleProxy)
+}
+
 func (s *Service) Status() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -298,6 +373,34 @@ func (s *Service) Bundle() (model.EdgeRouteBundle, bool) {
 		return model.EdgeRouteBundle{}, false
 	}
 	return *s.bundle, true
+}
+
+func (s *Service) routeForHost(host string) (model.EdgeRouteBinding, bool) {
+	host = normalizeRouteHost(host)
+	if host == "" {
+		return model.EdgeRouteBinding{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.bundle == nil {
+		return model.EdgeRouteBinding{}, false
+	}
+	var fallback model.EdgeRouteBinding
+	for _, route := range s.bundle.Routes {
+		if normalizeRouteHost(route.Hostname) != host {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive) {
+			return route, true
+		}
+		if fallback.Hostname == "" {
+			fallback = route
+		}
+	}
+	if fallback.Hostname != "" {
+		return fallback, true
+	}
+	return model.EdgeRouteBinding{}, false
 }
 
 func (s *Service) hasBundle() bool {
@@ -322,6 +425,89 @@ func (s *Service) handleBundle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, bundle)
+}
+
+func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
+	startedAt := time.Now()
+	host := normalizeRouteHost(firstNonEmptyHeader(r, "X-Fugue-Edge-Route-Host", r.Host))
+	route, ok := s.routeForHost(host)
+	observed := edgeProxyObservation{
+		Host:      host,
+		Route:     route,
+		Method:    r.Method,
+		Path:      safeProxyLogPath(r),
+		WebSocket: edgeRequestIsWebSocket(r),
+		SSE:       edgeRequestWantsSSE(r),
+	}
+	defer func() {
+		observed.Duration = time.Since(startedAt)
+		s.recordProxyObservation(observed)
+		s.logProxyObservation(observed)
+	}()
+
+	if !ok {
+		observed.StatusCode = http.StatusNotFound
+		http.Error(w, "edge route not found", http.StatusNotFound)
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive) {
+		observed.StatusCode = http.StatusServiceUnavailable
+		message := strings.TrimSpace(route.StatusReason)
+		if message == "" {
+			message = "edge route is not active"
+		}
+		http.Error(w, message, http.StatusServiceUnavailable)
+		return
+	}
+	target, err := url.Parse(strings.TrimSpace(route.UpstreamURL))
+	if err != nil || target.Scheme == "" || target.Host == "" {
+		observed.StatusCode = http.StatusServiceUnavailable
+		http.Error(w, "edge route upstream is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	observed.Proxied = true
+	proxy := s.newEdgeReverseProxy(host, target, route, &observed)
+	observedWriter := newEdgeProxyObservationResponseWriter(w)
+	proxy.ServeHTTP(observedWriter, r)
+	observed.StatusCode = observedWriter.statusCode()
+	if !observedWriter.wroteHeader && observed.WebSocket && observed.UpstreamError == "" {
+		observed.StatusCode = http.StatusSwitchingProtocols
+	}
+}
+
+func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.EdgeRouteBinding, observed *edgeProxyObservation) *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{
+		Rewrite: func(req *httputil.ProxyRequest) {
+			req.SetURL(target)
+			req.SetXForwarded()
+			req.Out.Host = target.Host
+			req.Out.Header.Set("X-Forwarded-Host", host)
+			req.Out.Header.Set("X-Fugue-Edge-Route", strings.TrimSpace(route.Hostname))
+			req.Out.Header.Set("X-Fugue-Edge-App-ID", strings.TrimSpace(route.AppID))
+		},
+		Transport: newDefaultEdgeProxyTransport(),
+		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
+			if observed != nil {
+				observed.UpstreamError = strings.TrimSpace(proxyErr.Error())
+			}
+			http.Error(rw, "upstream app is unavailable", http.StatusBadGateway)
+		},
+	}
+}
+
+func newDefaultEdgeProxyTransport() http.RoundTripper {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return &http.Transport{
+			Proxy:               nil,
+			ForceAttemptHTTP2:   false,
+			TLSHandshakeTimeout: 10 * time.Second,
+		}
+	}
+	transport := base.Clone()
+	transport.Proxy = nil
+	transport.ForceAttemptHTTP2 = false
+	return transport
 }
 
 func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -366,6 +552,37 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "fugue_edge_cache_load_total{result=\"success\"} %d\n", snapshot.Metrics.CacheLoadSuccess)
 	fmt.Fprintf(w, "fugue_edge_cache_load_total{result=\"miss\"} %d\n", snapshot.Metrics.CacheLoadMiss)
 	fmt.Fprintf(w, "fugue_edge_cache_load_total{result=\"error\"} %d\n", snapshot.Metrics.CacheLoadError)
+	fmt.Fprintln(w, "# HELP fugue_edge_caddy_config_apply_total Caddy dynamic config apply attempts by result.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_caddy_config_apply_total counter")
+	fmt.Fprintf(w, "fugue_edge_caddy_config_apply_total{result=\"success\"} %d\n", snapshot.Metrics.CaddyConfigSuccess)
+	fmt.Fprintf(w, "fugue_edge_caddy_config_apply_total{result=\"error\"} %d\n", snapshot.Metrics.CaddyConfigError)
+	fmt.Fprintln(w, "# HELP fugue_edge_caddy_routes Number of host routes in the last applied Caddy config.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_caddy_routes gauge")
+	fmt.Fprintf(w, "fugue_edge_caddy_routes{bundle_version=\"%s\"} %d\n", prometheusLabelValue(snapshot.Metrics.CaddyAppliedVersion), snapshot.Metrics.CaddyRouteCount)
+	fmt.Fprintln(w, "# HELP fugue_edge_caddy_last_apply_timestamp_seconds Last successful Caddy config apply time.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_caddy_last_apply_timestamp_seconds gauge")
+	fmt.Fprintf(w, "fugue_edge_caddy_last_apply_timestamp_seconds %.0f\n", unixSeconds(snapshot.Metrics.CaddyLastApplyAt))
+	fmt.Fprintln(w, "# HELP fugue_edge_route_requests_total Edge data-plane requests by route.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_route_requests_total counter")
+	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteRequests) {
+		fmt.Fprintf(w, "fugue_edge_route_requests_total{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteRequests[key])
+	}
+	fmt.Fprintln(w, "# HELP fugue_edge_route_status_total Edge data-plane responses by route and status code.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_route_status_total counter")
+	for _, key := range sortedRouteStatusMetricKeys(snapshot.Metrics.RouteStatuses) {
+		fmt.Fprintf(w, "fugue_edge_route_status_total{%s,status=\"%d\"} %d\n", routeMetricLabels(key.RouteMetricKey), key.StatusCode, snapshot.Metrics.RouteStatuses[key])
+	}
+	fmt.Fprintln(w, "# HELP fugue_edge_route_upstream_errors_total Edge data-plane upstream proxy errors by route.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_route_upstream_errors_total counter")
+	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteUpstreamErrors) {
+		fmt.Fprintf(w, "fugue_edge_route_upstream_errors_total{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteUpstreamErrors[key])
+	}
+	fmt.Fprintln(w, "# HELP fugue_edge_route_upstream_latency_seconds Edge data-plane upstream proxy latency by route.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_route_upstream_latency_seconds summary")
+	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteLatencyCount) {
+		fmt.Fprintf(w, "fugue_edge_route_upstream_latency_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteLatencySum[key])
+		fmt.Fprintf(w, "fugue_edge_route_upstream_latency_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteLatencyCount[key])
+	}
 }
 
 func (s *Service) startHTTPServer() (func(context.Context) error, error) {
@@ -384,6 +601,30 @@ func (s *Service) startHTTPServer() (func(context.Context) error, error) {
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			s.Logger.Printf("edge health server failed: %v", err)
+		}
+	}()
+	return server.Shutdown, nil
+}
+
+func (s *Service) startProxyServer() (func(context.Context) error, error) {
+	if !s.Config.CaddyEnabled {
+		return nil, nil
+	}
+	addr := strings.TrimSpace(s.Config.CaddyProxyListenAddr)
+	if addr == "" {
+		return nil, fmt.Errorf("FUGUE_EDGE_PROXY_LISTEN_ADDR is required when caddy mode is enabled")
+	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen edge data proxy on %s: %w", addr, err)
+	}
+	server := &http.Server{
+		Handler:           s.ProxyHandler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			s.Logger.Printf("edge data proxy failed: %v", err)
 		}
 	}()
 	return server.Shutdown, nil
@@ -427,6 +668,17 @@ func (s *Service) validateConfig() error {
 	}
 	if strings.TrimSpace(s.Config.EdgeToken) == "" {
 		return fmt.Errorf("FUGUE_EDGE_TOKEN is required")
+	}
+	if s.Config.CaddyEnabled {
+		if strings.TrimSpace(s.Config.CaddyListenAddr) == "" {
+			return fmt.Errorf("FUGUE_EDGE_CADDY_LISTEN_ADDR is required when caddy mode is enabled")
+		}
+		if strings.TrimSpace(s.Config.CaddyProxyListenAddr) == "" {
+			return fmt.Errorf("FUGUE_EDGE_PROXY_LISTEN_ADDR is required when caddy mode is enabled")
+		}
+		if _, err := s.caddyAdminEndpoint("/load"); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -504,10 +756,12 @@ func (s *Service) recordSyncError(err error) {
 		s.snapshot.StaleCache = true
 		s.snapshot.Status = "stale"
 		s.snapshot.Healthy = true
+		s.decorateCaddyStatusLocked(&s.snapshot)
 		return
 	}
 	s.snapshot.Status = "unhealthy"
 	s.snapshot.Healthy = false
+	s.decorateCaddyStatusLocked(&s.snapshot)
 }
 
 func (s *Service) recordSyncAttempt(result string, duration time.Duration) {
@@ -551,6 +805,72 @@ func (s *Service) recordCacheLoad(result string) {
 	}
 }
 
+func (s *Service) recordCaddyApply(bundleVersion string, routeCount int, err error) {
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err != nil {
+		s.metrics.CaddyConfigError++
+		s.metrics.CaddyLastError = s.redact(err.Error())
+		s.snapshot.CaddyLastError = s.metrics.CaddyLastError
+		s.snapshot.Status = "caddy-error"
+		s.snapshot.Healthy = false
+		return
+	}
+	s.metrics.CaddyConfigSuccess++
+	s.metrics.CaddyAppliedVersion = strings.TrimSpace(bundleVersion)
+	s.metrics.CaddyRouteCount = routeCount
+	s.metrics.CaddyLastApplyAt = &now
+	s.metrics.CaddyLastError = ""
+	s.snapshot.CaddyEnabled = s.Config.CaddyEnabled
+	s.snapshot.CaddyListenAddr = strings.TrimSpace(s.Config.CaddyListenAddr)
+	s.snapshot.CaddyAppliedVersion = s.metrics.CaddyAppliedVersion
+	s.snapshot.CaddyLastApplyAt = &now
+	s.snapshot.CaddyLastError = ""
+	if s.snapshot.Status == "caddy-error" {
+		s.snapshot.Status = "ok"
+		s.snapshot.Healthy = s.bundle != nil
+	}
+}
+
+func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
+	if observed.StatusCode == 0 {
+		observed.StatusCode = http.StatusOK
+	}
+	key := routeMetricKey{
+		Hostname:  firstNonEmpty(strings.TrimSpace(observed.Route.Hostname), observed.Host),
+		AppID:     strings.TrimSpace(observed.Route.AppID),
+		RouteKind: strings.TrimSpace(observed.Route.RouteKind),
+	}
+	statusKey := routeStatusMetricKey{RouteMetricKey: key, StatusCode: observed.StatusCode}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.metrics.RouteRequests == nil {
+		s.metrics.RouteRequests = make(map[routeMetricKey]uint64)
+	}
+	if s.metrics.RouteStatuses == nil {
+		s.metrics.RouteStatuses = make(map[routeStatusMetricKey]uint64)
+	}
+	s.metrics.RouteRequests[key]++
+	s.metrics.RouteStatuses[statusKey]++
+	if strings.TrimSpace(observed.UpstreamError) != "" {
+		if s.metrics.RouteUpstreamErrors == nil {
+			s.metrics.RouteUpstreamErrors = make(map[routeMetricKey]uint64)
+		}
+		s.metrics.RouteUpstreamErrors[key]++
+	}
+	if observed.Proxied {
+		if s.metrics.RouteLatencyCount == nil {
+			s.metrics.RouteLatencyCount = make(map[routeMetricKey]uint64)
+		}
+		if s.metrics.RouteLatencySum == nil {
+			s.metrics.RouteLatencySum = make(map[routeMetricKey]float64)
+		}
+		s.metrics.RouteLatencyCount[key]++
+		s.metrics.RouteLatencySum[key] += durationSeconds(observed.Duration)
+	}
+}
+
 func (s *Service) statusForBundleLocked(bundle model.EdgeRouteBundle, syncAt time.Time, successAt *time.Time, stale bool) Status {
 	status := "ok"
 	if stale {
@@ -569,7 +889,23 @@ func (s *Service) statusForBundleLocked(bundle model.EdgeRouteBundle, syncAt tim
 		StaleCache:        stale,
 		CachePath:         strings.TrimSpace(s.Config.CachePath),
 	}
+	s.decorateCaddyStatusLocked(&out)
 	return out
+}
+
+func (s *Service) decorateCaddyStatusLocked(out *Status) {
+	out.CaddyEnabled = s.Config.CaddyEnabled
+	if !s.Config.CaddyEnabled {
+		return
+	}
+	out.CaddyListenAddr = strings.TrimSpace(s.Config.CaddyListenAddr)
+	out.CaddyAppliedVersion = strings.TrimSpace(s.metrics.CaddyAppliedVersion)
+	out.CaddyLastApplyAt = s.metrics.CaddyLastApplyAt
+	out.CaddyLastError = strings.TrimSpace(s.metrics.CaddyLastError)
+	if out.CaddyLastError != "" {
+		out.Status = "caddy-error"
+		out.Healthy = false
+	}
 }
 
 func (s *Service) metricSnapshot() metricSnapshot {
@@ -579,6 +915,11 @@ func (s *Service) metricSnapshot() metricSnapshot {
 		Status:  s.snapshot,
 		Metrics: s.metrics,
 	}
+	out.Metrics.RouteRequests = cloneRouteCounterMap(s.metrics.RouteRequests)
+	out.Metrics.RouteStatuses = cloneRouteStatusCounterMap(s.metrics.RouteStatuses)
+	out.Metrics.RouteUpstreamErrors = cloneRouteCounterMap(s.metrics.RouteUpstreamErrors)
+	out.Metrics.RouteLatencyCount = cloneRouteCounterMap(s.metrics.RouteLatencyCount)
+	out.Metrics.RouteLatencySum = cloneRouteFloatMap(s.metrics.RouteLatencySum)
 	if s.bundle != nil && !s.bundle.GeneratedAt.IsZero() {
 		generatedAt := s.bundle.GeneratedAt
 		out.BundleGeneratedAt = &generatedAt
@@ -624,6 +965,31 @@ func (s *Service) logSyncFailure(err error) {
 		return
 	}
 	s.Logger.Printf("edge route bundle sync failed; error=%s", s.redact(err.Error()))
+}
+
+func (s *Service) logProxyObservation(observed edgeProxyObservation) {
+	if s.Logger == nil {
+		return
+	}
+	if observed.StatusCode == 0 {
+		observed.StatusCode = http.StatusOK
+	}
+	s.Logger.Printf(
+		"edge_proxy_request host=%s app=%s tenant=%s runtime=%s route_kind=%s method=%s path=%s status=%d duration_ms=%d upstream=%s upstream_error=%t websocket=%t sse=%t",
+		observed.Host,
+		strings.TrimSpace(observed.Route.AppID),
+		strings.TrimSpace(observed.Route.TenantID),
+		strings.TrimSpace(observed.Route.RuntimeID),
+		strings.TrimSpace(observed.Route.RouteKind),
+		observed.Method,
+		observed.Path,
+		observed.StatusCode,
+		observed.Duration.Milliseconds(),
+		strings.TrimSpace(observed.Route.UpstreamURL),
+		strings.TrimSpace(observed.UpstreamError) != "",
+		observed.WebSocket,
+		observed.SSE,
+	)
 }
 
 func (s *Service) syncInterval() time.Duration {
@@ -693,6 +1059,206 @@ func bundleAgeSeconds(generatedAt *time.Time, now time.Time) float64 {
 		return 0
 	}
 	return age.Seconds()
+}
+
+type edgeProxyObservationResponseWriter struct {
+	http.ResponseWriter
+	wroteHeader bool
+	status      int
+}
+
+func newEdgeProxyObservationResponseWriter(w http.ResponseWriter) *edgeProxyObservationResponseWriter {
+	return &edgeProxyObservationResponseWriter{ResponseWriter: w}
+}
+
+func (w *edgeProxyObservationResponseWriter) Header() http.Header {
+	return w.ResponseWriter.Header()
+}
+
+func (w *edgeProxyObservationResponseWriter) WriteHeader(statusCode int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	w.status = statusCode
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *edgeProxyObservationResponseWriter) Write(data []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(data)
+}
+
+func (w *edgeProxyObservationResponseWriter) Flush() {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w *edgeProxyObservationResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("response writer does not support hijacking")
+	}
+	return hijacker.Hijack()
+}
+
+func (w *edgeProxyObservationResponseWriter) statusCode() int {
+	if w.status != 0 {
+		return w.status
+	}
+	return http.StatusOK
+}
+
+func normalizeRouteHost(host string) string {
+	host = strings.TrimSpace(strings.ToLower(host))
+	if host == "" {
+		return ""
+	}
+	if splitHost, _, err := net.SplitHostPort(host); err == nil {
+		host = splitHost
+	} else if idx := strings.Index(host, ":"); idx >= 0 {
+		host = host[:idx]
+	}
+	return strings.Trim(host, "[]")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func firstNonEmptyHeader(r *http.Request, header string, fallback string) string {
+	if r == nil {
+		return fallback
+	}
+	if value := strings.TrimSpace(r.Header.Get(header)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func edgeRequestIsWebSocket(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket")
+}
+
+func edgeRequestWantsSSE(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	for _, part := range strings.Split(r.Header.Get("Accept"), ",") {
+		if strings.EqualFold(strings.TrimSpace(strings.Split(part, ";")[0]), "text/event-stream") {
+			return true
+		}
+	}
+	return false
+}
+
+func safeProxyLogPath(r *http.Request) string {
+	if r == nil || r.URL == nil {
+		return ""
+	}
+	path := r.URL.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	if r.URL.RawQuery != "" {
+		return path + "?..."
+	}
+	return path
+}
+
+func cloneRouteCounterMap(in map[routeMetricKey]uint64) map[routeMetricKey]uint64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[routeMetricKey]uint64, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneRouteStatusCounterMap(in map[routeStatusMetricKey]uint64) map[routeStatusMetricKey]uint64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[routeStatusMetricKey]uint64, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneRouteFloatMap(in map[routeMetricKey]float64) map[routeMetricKey]float64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[routeMetricKey]float64, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func sortedRouteMetricKeys[V any](values map[routeMetricKey]V) []routeMetricKey {
+	keys := make([]routeMetricKey, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].Hostname != keys[j].Hostname {
+			return keys[i].Hostname < keys[j].Hostname
+		}
+		if keys[i].AppID != keys[j].AppID {
+			return keys[i].AppID < keys[j].AppID
+		}
+		return keys[i].RouteKind < keys[j].RouteKind
+	})
+	return keys
+}
+
+func sortedRouteStatusMetricKeys(values map[routeStatusMetricKey]uint64) []routeStatusMetricKey {
+	keys := make([]routeStatusMetricKey, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		left := keys[i].RouteMetricKey
+		right := keys[j].RouteMetricKey
+		if left.Hostname != right.Hostname {
+			return left.Hostname < right.Hostname
+		}
+		if left.AppID != right.AppID {
+			return left.AppID < right.AppID
+		}
+		if left.RouteKind != right.RouteKind {
+			return left.RouteKind < right.RouteKind
+		}
+		return keys[i].StatusCode < keys[j].StatusCode
+	})
+	return keys
+}
+
+func routeMetricLabels(key routeMetricKey) string {
+	return fmt.Sprintf(
+		`hostname="%s",app="%s",route_kind="%s"`,
+		prometheusLabelValue(key.Hostname),
+		prometheusLabelValue(key.AppID),
+		prometheusLabelValue(key.RouteKind),
+	)
 }
 
 func prometheusLabelValue(value string) string {

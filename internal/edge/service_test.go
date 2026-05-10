@@ -5,9 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +20,8 @@ import (
 
 	"fugue/internal/config"
 	"fugue/internal/model"
+
+	"github.com/gorilla/websocket"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -305,6 +311,336 @@ func TestLoadCacheMissAndErrorMetrics(t *testing.T) {
 	metrics = renderMetrics(t, service)
 	if !strings.Contains(metrics, `fugue_edge_cache_load_total{result="error"} 1`) {
 		t.Fatalf("expected cache error metric, got %s", metrics)
+	}
+}
+
+func TestApplyCaddyConfigBuildsHostRoutesForBundle(t *testing.T) {
+	t.Parallel()
+
+	var loads []string
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/load" {
+			t.Fatalf("unexpected caddy admin request %s %s", r.Method, r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read caddy config body: %v", err)
+		}
+		loads = append(loads, string(body))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer admin.Close()
+
+	bundle := testBundle("routegen_caddy")
+	custom := bundle.Routes[0]
+	custom.Hostname = "www.customer.com"
+	custom.RouteKind = model.EdgeRouteKindCustomDomain
+	custom.TLSPolicy = model.EdgeRouteTLSPolicyCustomDomain
+	bundle.Routes = append(bundle.Routes, custom)
+
+	service := NewService(config.EdgeConfig{
+		APIURL:               "https://api.example.invalid",
+		EdgeToken:            "edge-secret",
+		CaddyEnabled:         true,
+		CaddyAdminURL:        admin.URL,
+		CaddyListenAddr:      "127.0.0.1:18080",
+		CaddyProxyListenAddr: ":7833",
+	}, log.New(ioDiscard{}, "", 0))
+
+	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
+		t.Fatalf("apply caddy config: %v", err)
+	}
+	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
+		t.Fatalf("apply unchanged caddy config: %v", err)
+	}
+	if len(loads) != 1 {
+		t.Fatalf("expected unchanged bundle version to be applied once, got %d loads", len(loads))
+	}
+	adminURL, err := url.Parse(admin.URL)
+	if err != nil {
+		t.Fatalf("parse admin url: %v", err)
+	}
+	for _, want := range []string{
+		`"listen":"` + adminURL.Host + `"`,
+		`"listen":["127.0.0.1:18080"]`,
+		`"automatic_https":{"disable":true}`,
+		`"host":["demo.fugue.pro"]`,
+		`"host":["www.customer.com"]`,
+		`"dial":"127.0.0.1:7833"`,
+		`"X-Fugue-Edge-Route-Host":["demo.fugue.pro"]`,
+		`"X-Fugue-Edge-Route-Host":["www.customer.com"]`,
+	} {
+		if !strings.Contains(loads[0], want) {
+			t.Fatalf("caddy config missing %q:\n%s", want, loads[0])
+		}
+	}
+	status := service.Status()
+	if status.CaddyAppliedVersion != "routegen_caddy" || status.CaddyLastError != "" {
+		t.Fatalf("unexpected caddy status: %+v", status)
+	}
+	metrics := renderMetrics(t, service)
+	if !strings.Contains(metrics, `fugue_edge_caddy_config_apply_total{result="success"} 1`) ||
+		!strings.Contains(metrics, `fugue_edge_caddy_routes{bundle_version="routegen_caddy"} 2`) {
+		t.Fatalf("expected caddy apply metrics, got %s", metrics)
+	}
+}
+
+func TestCaddyAdminURLMustBeLoopback(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.EdgeConfig{
+		APIURL:               "https://api.example.invalid",
+		EdgeToken:            "edge-secret",
+		CaddyEnabled:         true,
+		CaddyAdminURL:        "http://10.0.0.10:2019",
+		CaddyListenAddr:      "127.0.0.1:18080",
+		CaddyProxyListenAddr: "127.0.0.1:7833",
+	}, log.New(ioDiscard{}, "", 0))
+
+	err := service.validateConfig()
+	if err == nil || !strings.Contains(err.Error(), "localhost") {
+		t.Fatalf("expected non-loopback caddy admin URL to be rejected, got %v", err)
+	}
+}
+
+func TestProxyHandlerRoutesPlatformAndCustomDomainsWithStreamingMetrics(t *testing.T) {
+	t.Parallel()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Fugue-Edge-App-ID") != "app_demo" {
+			t.Fatalf("expected app id header, got %q", r.Header.Get("X-Fugue-Edge-App-ID"))
+		}
+		switch r.URL.Path {
+		case "/upload":
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read upload body: %v", err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprintf(w, "uploaded:%s:%s", r.Header.Get("X-Forwarded-Host"), body)
+		case "/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w, "data: ready\n\n")
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer backend.Close()
+
+	bundle := testBundle("routegen_proxy")
+	bundle.Routes[0].UpstreamURL = backend.URL
+	custom := bundle.Routes[0]
+	custom.Hostname = "www.customer.com"
+	custom.RouteKind = model.EdgeRouteKindCustomDomain
+	custom.TLSPolicy = model.EdgeRouteTLSPolicyCustomDomain
+	bundle.Routes = append(bundle.Routes, custom)
+
+	service := NewService(config.EdgeConfig{
+		APIURL:    "https://api.example.invalid",
+		EdgeToken: "edge-secret",
+	}, log.New(ioDiscard{}, "", 0))
+	now := time.Now().UTC()
+	service.recordSyncSuccess(bundle, `"routegen_proxy"`, now, false)
+
+	upload := httptest.NewRecorder()
+	uploadReq := httptest.NewRequest(http.MethodPost, "http://demo.fugue.pro/upload", strings.NewReader("payload"))
+	service.ProxyHandler().ServeHTTP(upload, uploadReq)
+	if upload.Code != http.StatusCreated || upload.Body.String() != "uploaded:demo.fugue.pro:payload" {
+		t.Fatalf("unexpected upload response status=%d body=%q", upload.Code, upload.Body.String())
+	}
+
+	events := httptest.NewRecorder()
+	eventsReq := httptest.NewRequest(http.MethodGet, "http://www.customer.com/events", nil)
+	eventsReq.Header.Set("Accept", "text/event-stream")
+	service.ProxyHandler().ServeHTTP(events, eventsReq)
+	if events.Code != http.StatusOK || !strings.Contains(events.Body.String(), "data: ready") {
+		t.Fatalf("unexpected sse response status=%d body=%q", events.Code, events.Body.String())
+	}
+
+	metrics := renderMetrics(t, service)
+	for _, want := range []string{
+		`fugue_edge_route_requests_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 1`,
+		`fugue_edge_route_requests_total{hostname="www.customer.com",app="app_demo",route_kind="custom-domain"} 1`,
+		`fugue_edge_route_status_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",status="201"} 1`,
+		`fugue_edge_route_status_total{hostname="www.customer.com",app="app_demo",route_kind="custom-domain",status="200"} 1`,
+		`fugue_edge_route_upstream_latency_seconds_count{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 1`,
+		`fugue_edge_route_upstream_latency_seconds_count{hostname="www.customer.com",app="app_demo",route_kind="custom-domain"} 1`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("metrics missing %q:\n%s", want, metrics)
+		}
+	}
+}
+
+func TestProxyHandlerReturnsUnavailableForInactiveRoute(t *testing.T) {
+	t.Parallel()
+
+	bundle := testBundle("routegen_disabled")
+	bundle.Routes[0].Status = model.EdgeRouteStatusDisabled
+	bundle.Routes[0].StatusReason = "app is disabled"
+
+	service := NewService(config.EdgeConfig{
+		APIURL:    "https://api.example.invalid",
+		EdgeToken: "edge-secret",
+	}, log.New(ioDiscard{}, "", 0))
+	now := time.Now().UTC()
+	service.recordSyncSuccess(bundle, `"routegen_disabled"`, now, false)
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
+	service.ProxyHandler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected disabled route to return 503, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	metrics := renderMetrics(t, service)
+	if !strings.Contains(metrics, `fugue_edge_route_status_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",status="503"} 1`) {
+		t.Fatalf("expected 503 route metric, got %s", metrics)
+	}
+}
+
+func TestProxyHandlerRecordsUpstreamErrors(t *testing.T) {
+	t.Parallel()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	backendURL := backend.URL
+	backend.Close()
+
+	bundle := testBundle("routegen_upstream_error")
+	bundle.Routes[0].UpstreamURL = backendURL
+
+	service := NewService(config.EdgeConfig{
+		APIURL:    "https://api.example.invalid",
+		EdgeToken: "edge-secret",
+	}, log.New(ioDiscard{}, "", 0))
+	now := time.Now().UTC()
+	service.recordSyncSuccess(bundle, `"routegen_upstream_error"`, now, false)
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
+	service.ProxyHandler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("expected upstream error to return 502, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	metrics := renderMetrics(t, service)
+	for _, want := range []string{
+		`fugue_edge_route_status_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",status="502"} 1`,
+		`fugue_edge_route_upstream_errors_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 1`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("metrics missing %q:\n%s", want, metrics)
+		}
+	}
+}
+
+func TestProxyHandlerSupportsWebSocket(t *testing.T) {
+	t.Parallel()
+
+	backendErrors := make(chan error, 1)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ws" {
+			http.NotFound(w, r)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			backendErrors <- err
+			return
+		}
+		defer conn.Close()
+		if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			backendErrors <- err
+			return
+		}
+		messageType, payload, err := conn.ReadMessage()
+		if err != nil {
+			backendErrors <- err
+			return
+		}
+		if string(payload) != "ping" {
+			backendErrors <- fmt.Errorf("unexpected websocket payload %q", string(payload))
+			return
+		}
+		if err := conn.WriteMessage(messageType, []byte("pong")); err != nil {
+			backendErrors <- err
+			return
+		}
+		backendErrors <- nil
+	}))
+	defer backend.Close()
+
+	bundle := testBundle("routegen_websocket")
+	bundle.Routes[0].UpstreamURL = backend.URL
+	service := NewService(config.EdgeConfig{
+		APIURL:    "https://api.example.invalid",
+		EdgeToken: "edge-secret",
+	}, log.New(ioDiscard{}, "", 0))
+	now := time.Now().UTC()
+	service.recordSyncSuccess(bundle, `"routegen_websocket"`, now, false)
+
+	proxy := httptest.NewServer(service.ProxyHandler())
+	defer proxy.Close()
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatalf("parse proxy url: %v", err)
+	}
+	dialer := websocket.Dialer{
+		NetDialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, proxyURL.Host)
+		},
+	}
+
+	conn, resp, err := dialer.Dial("ws://demo.fugue.pro/ws", nil)
+	if err != nil {
+		responseBody := ""
+		if resp != nil && resp.Body != nil {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			responseBody = string(bodyBytes)
+			resp.Body.Close()
+		}
+		t.Fatalf("dial proxied websocket: %v body=%s", err, responseBody)
+	}
+	defer conn.Close()
+
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("set websocket read deadline: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
+		t.Fatalf("write websocket message: %v", err)
+	}
+	_, payload, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read websocket response: %v", err)
+	}
+	if string(payload) != "pong" {
+		t.Fatalf("expected websocket payload pong, got %q", string(payload))
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close websocket: %v", err)
+	}
+	select {
+	case err := <-backendErrors:
+		if err != nil {
+			t.Fatalf("backend websocket validation failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for backend websocket validation")
+	}
+
+	wantMetric := `fugue_edge_route_status_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",status="101"} 1`
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		metrics := renderMetrics(t, service)
+		if strings.Contains(metrics, wantMetric) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected websocket 101 metric, got %s", metrics)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

@@ -94,14 +94,18 @@ type AgentConfig struct {
 }
 
 type EdgeConfig struct {
-	APIURL       string
-	EdgeToken    string
-	EdgeID       string
-	EdgeGroupID  string
-	CachePath    string
-	ListenAddr   string
-	SyncInterval time.Duration
-	HTTPTimeout  time.Duration
+	APIURL               string
+	EdgeToken            string
+	EdgeID               string
+	EdgeGroupID          string
+	CachePath            string
+	ListenAddr           string
+	SyncInterval         time.Duration
+	HTTPTimeout          time.Duration
+	CaddyEnabled         bool
+	CaddyAdminURL        string
+	CaddyListenAddr      string
+	CaddyProxyListenAddr string
 }
 
 func APIFromEnv() APIConfig {
@@ -218,14 +222,18 @@ func EdgeFromEnv() EdgeConfig {
 		edgeToken = strings.TrimSpace(os.Getenv("FUGUE_EDGE_TLS_ASK_TOKEN"))
 	}
 	return EdgeConfig{
-		APIURL:       getenv("FUGUE_API_URL", "https://api.fugue.pro"),
-		EdgeToken:    edgeToken,
-		EdgeID:       strings.TrimSpace(os.Getenv("FUGUE_EDGE_ID")),
-		EdgeGroupID:  strings.TrimSpace(os.Getenv("FUGUE_EDGE_GROUP_ID")),
-		CachePath:    getenv("FUGUE_EDGE_ROUTES_CACHE_PATH", "/var/lib/fugue/edge/routes-cache.json"),
-		ListenAddr:   getenv("FUGUE_EDGE_LISTEN_ADDR", "127.0.0.1:7832"),
-		SyncInterval: getenvDuration("FUGUE_EDGE_SYNC_INTERVAL", 15*time.Second),
-		HTTPTimeout:  getenvDuration("FUGUE_EDGE_HTTP_TIMEOUT", 10*time.Second),
+		APIURL:               getenv("FUGUE_API_URL", "https://api.fugue.pro"),
+		EdgeToken:            edgeToken,
+		EdgeID:               strings.TrimSpace(os.Getenv("FUGUE_EDGE_ID")),
+		EdgeGroupID:          strings.TrimSpace(os.Getenv("FUGUE_EDGE_GROUP_ID")),
+		CachePath:            getenv("FUGUE_EDGE_ROUTES_CACHE_PATH", "/var/lib/fugue/edge/routes-cache.json"),
+		ListenAddr:           getenv("FUGUE_EDGE_LISTEN_ADDR", "127.0.0.1:7832"),
+		SyncInterval:         getenvDuration("FUGUE_EDGE_SYNC_INTERVAL", 15*time.Second),
+		HTTPTimeout:          getenvDuration("FUGUE_EDGE_HTTP_TIMEOUT", 10*time.Second),
+		CaddyEnabled:         getenvBool("FUGUE_EDGE_CADDY_ENABLED", false),
+		CaddyAdminURL:        getenv("FUGUE_EDGE_CADDY_ADMIN_URL", "http://127.0.0.1:2019"),
+		CaddyListenAddr:      getenv("FUGUE_EDGE_CADDY_LISTEN_ADDR", "127.0.0.1:18080"),
+		CaddyProxyListenAddr: getenv("FUGUE_EDGE_PROXY_LISTEN_ADDR", "127.0.0.1:7833"),
 	}
 }
 

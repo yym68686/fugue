@@ -119,6 +119,58 @@ func TestEdgeShadowDaemonSetDefaultsToNoPublicTraffic(t *testing.T) {
 	}
 }
 
+func TestEdgeCaddyShadowCanBeEnabledWithoutPublicPorts(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "--set", "edge.caddy.enabled=true")
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	doc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-edge")
+	if doc == "" {
+		t.Fatalf("rendered manifest missing edge daemonset:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`name: caddy`,
+		`image: "caddy:2.10.2-alpine"`,
+		`name: FUGUE_EDGE_CADDY_ENABLED`,
+		`value: "true"`,
+		`name: FUGUE_EDGE_CADDY_ADMIN_URL`,
+		`value: "http://127.0.0.1:2019"`,
+		`name: FUGUE_EDGE_CADDY_LISTEN_ADDR`,
+		`value: "127.0.0.1:18080"`,
+		`name: FUGUE_EDGE_PROXY_LISTEN_ADDR`,
+		`value: "127.0.0.1:7833"`,
+		`admin 127.0.0.1:2019`,
+		`name: caddy-config`,
+		`name: caddy-data`,
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("caddy-enabled edge daemonset missing %q:\n%s", want, doc)
+		}
+	}
+	for _, unwanted := range []string{
+		"hostNetwork: true",
+		"hostPort:",
+		"containerPort: 80",
+		"containerPort: 443",
+	} {
+		if strings.Contains(doc, unwanted) {
+			t.Fatalf("caddy-enabled edge daemonset should not expose public traffic with %q:\n%s", unwanted, doc)
+		}
+	}
+}
+
 func manifestDocumentForKindAndName(manifest string, kind string, name string) string {
 	for _, doc := range strings.Split(manifest, "\n---") {
 		hasKind := strings.Contains(doc, "\nkind: "+kind+"\n") || strings.Contains(doc, "kind: "+kind+"\n")

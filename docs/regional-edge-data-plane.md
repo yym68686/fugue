@@ -286,7 +286,7 @@ GET /v1/edge/routes?edge_group_id=<edge-group-id>
 
 ```json
 {
-  "version": "routegen_1770000001",
+  "version": "routegen_db340e63f06e153b",
   "generated_at": "2026-05-06T00:00:00Z",
   "edge_group_id": "edge-group-asia-sg",
   "routes": [
@@ -325,6 +325,7 @@ GET /v1/edge/routes?edge_group_id=<edge-group-id>
 
 - 支持 `ETag` 或等价 route generation token
 - 支持 conditional fetch
+- route generation / `ETag` 只基于稳定的 `routes` 和 `tls_allowlist` 内容计算，不包含 `generated_at` 或随机值
 - 要求 edge 专用认证
 - 每个 edge 将最新成功 bundle 写入本地磁盘
 - 控制平面不可用时从本地磁盘 cache 恢复
@@ -659,9 +660,12 @@ DNS 必须上报：
 本仓库只保留脱敏结论：
 
 - 当前生产仍是 Route A 热路径：公网入口先进入现有 Caddy / control-plane API，再由 `fugue-api` app proxy 反代到业务 Service。
-- 当前还没有独立 `fugue-edge`、`fugue-dns`、route bundle、DNS bundle 或区域化 `d-xxxx.dns.fugue.pro` 解析。
+- 当前已经具备只读 route binding 派生、typed `/v1/edge/routes` route bundle API、稳定 `ETag` / conditional fetch、`fugue-edge` shadow DaemonSet、本地 route cache、health 和 metrics。
+- 当前 `fugue-edge` 默认仍是 shadow workload：不监听公网 80/443，不终止 TLS，不承接生产流量。
+- 代码层已经具备 Caddy-backed shadow 反代开关：根据 route bundle 生成 Caddy dynamic config，Caddy admin / data listen 默认绑定 localhost，Helm 默认关闭。
+- 当前还没有 `fugue-dns`、DNS bundle 或区域化 `d-xxxx.dns.fugue.pro` 解析。
 - `dns.fugue.pro` 的现有公网权威和具体记录属于迁移前 baseline，具体值放在本地私有附录中。
-- 第一阶段不能直接切 DNS，也不能先替换现有入口；应先做只读 route binding 派生、shadow edge 和 shadow DNS。
+- 第一阶段不能直接切 DNS，也不能先替换现有入口。下一步应先做控制面普通业务减负和 Caddy-backed shadow edge，并通过显式 opt-in hostname 做人工 canary。
 
 本地私有附录路径：
 
@@ -670,6 +674,40 @@ docs/private/regional-edge-current-state.local.md
 ```
 
 该路径已通过 `.gitignore` 忽略，只用于本机排障和迁移前后对照。正式提交中不得包含生产 token、IP inventory、完整 app inventory、节点清单或内部 Service 地址。
+
+## 迁移策略补充
+
+当前迁移策略采用双入口并存，而不是一次性切换：
+
+```text
+旧路径:
+  用户
+    -> 现有 Route A / control-plane Caddy
+    -> fugue-api app proxy
+    -> app Service / Pod
+
+新路径:
+  用户或人工 canary
+    -> regional edge / Caddy
+    -> app Service / Pod
+```
+
+迁移期的关键边界：
+
+- `api.fugue.pro`、controller、etcd、control-plane API 和控制平面核心服务不走 regional edge。
+- 普通业务 Pod 可以逐步从 control-plane 节点迁到 agent/runtime 节点，但迁移 Pod 位置不等于自动切 edge。
+- 是否走 edge 必须由 hostname / route policy 显式 opt-in 控制。
+- 现有业务默认继续走 Route A，直到单个 hostname 通过 edge canary。
+- 不全局切 `*.fugue.pro`，不修改 `dns.fugue.pro` 委托作为早期步骤。
+- 任何 canary 失败时，应能删除 exact DNS record 或关闭 route policy，回到 Route A。
+
+因此近期顺序是：
+
+1. 新增或确认美国 agent node，只作为 k3s agent，不加入 control-plane / etcd。
+2. 选择低风险普通业务迁到该 agent，仍走 Route A 验证端到端。
+3. 逐批把普通业务从 control-plane 节点迁出，避免控制面节点混跑业务 workload。
+4. 发布并显式启用 Caddy-backed shadow edge，用 Host header、`curl --resolve` 或 `/etc/hosts` 验证。
+5. 只对通过验证的低风险 hostname 做 exact DNS canary。
 
 ## 平滑重构 TODO List
 
@@ -716,6 +754,7 @@ docs/private/regional-edge-current-state.local.md
 - [x] 实现 route bundle handler，先只读派生 binding。
 - [x] 支持 `edge_id` / `edge_group_id` 过滤。
 - [x] 支持 route generation / `ETag` / conditional fetch。
+- [x] route bundle version / `ETag` 只基于稳定 route / TLS allowlist 内容计算，不随 `generated_at` 或非数据面元数据漂移。
 - [x] 确保 bundle 不包含 secret。
 - [x] 增加 handler 和 contract tests。
 
@@ -728,16 +767,32 @@ docs/private/regional-edge-current-state.local.md
 - [x] 支持控制平面不可用时从本地 cache 启动。
 - [x] 增加 `fugue-edge` shadow DaemonSet 和发布镜像链路，默认只调度到 `fugue.io/role.edge=true` 节点，不监听公网 80/443，不生成 Caddy config。
 - [x] 增强 shadow 自观测：bundle sync/cache load/cache write counters、bundle age、sync duration 和结构化同步日志。
+- [x] 在一台已 join cluster 且带 `fugue.io/role.edge=true` 的美国候选节点部署 shadow edge，确认能稳定拉取 bundle 并大量命中 304。
 - [ ] 在已 join cluster 且带 `fugue.io/role.edge=true` 的亚洲节点部署 shadow edge，确认能长期拉取 bundle。
+- [ ] 完成 12 到 24 小时 shadow 观察：`sync error` 不持续增长，cache write/load error 为 0，edge Pod 不重启。
+
+### 5.5 控制平面减负和 Route A agent canary
+
+- [x] 新增或确认美国 app-runtime agent node `ns101351`，只作为 k3s agent，不加入 control-plane / etcd。
+- [x] 选择低风险普通业务 app `cerebr` 调度到 `ns101351`。
+- [x] `cerebr` canary 仍走现有 Route A：`现有 Caddy -> fugue-api app proxy -> agent node app Pod`。
+- [x] 验证 `cerebr` Pod 位置、Route A 502 / upstream error、重启恢复和回滚路径。
+- [ ] 对静态站 Caddy app 补齐 per-request app access log；本次 `cerebr` canary 的请求级观测主要来自 Route A app proxy 日志。
+- [ ] 逐批将普通业务 workload 从 control-plane 节点迁到 agent/runtime 节点。
+- [ ] 控制面核心服务、etcd、controller 和 `api.fugue.pro` 不迁到单台 agent，也不进入 regional edge 数据面。
+- [ ] 明确业务 Pod 位于 agent 节点不自动代表走 edge；edge 入口必须由 hostname / route policy 显式 opt-in。
 
 ### 6. 接入 Caddy-backed 反代但仍不切 DNS
 
-- [ ] `fugue-edge` 根据 route bundle 生成 Caddy dynamic config。
-- [ ] Caddy admin API 只绑定 localhost 或私有接口。
-- [ ] 支持 platform hostname 和 custom domain Host route。
-- [ ] 支持 WebSocket、SSE、upload、stream response。
-- [ ] 加 edge access log、per-route metrics、upstream latency。
+- [x] `fugue-edge` 根据 route bundle 生成 Caddy dynamic config。
+- [x] Caddy admin API 只绑定 localhost。
+- [x] Caddy sidecar / dynamic config 通过 Helm opt-in 开启，默认关闭；不加 hostNetwork、hostPort 或公网 80/443。
+- [x] Caddy 数据面先只用于 shadow canary，不改 wildcard、不改 `api.fugue.pro`、不改 `dns.fugue.pro`。
+- [x] 支持 platform hostname 和 custom domain Host route。
+- [x] 支持 WebSocket、SSE、upload、stream response。
+- [x] 加 edge access log、per-route request count、status code、upstream latency 和 upstream error metrics。
 - [ ] 用 `/etc/hosts` 或直接指定 Host header 做人工 canary 验证。
+- [ ] 只有显式 opt-in 的 canary hostname 才能进入 edge 路径。
 
 ### 7. 建立 edge 到 runtime 的本地 upstream 路径
 

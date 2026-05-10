@@ -88,6 +88,27 @@ edge:
   edgeGroupID: ""
   listenAddr: ":7832"
   healthPort: 7832
+  caddy:
+    enabled: false
+    image:
+      repository: caddy
+      tag: "2.10.2-alpine"
+      pullPolicy: IfNotPresent
+    adminAddr: 127.0.0.1:2019
+    adminURL: http://127.0.0.1:2019
+    listenAddr: 127.0.0.1:18080
+    proxyListenAddr: 127.0.0.1:7833
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+        ephemeral-storage: 32Mi
+      limits:
+        memory: 256Mi
+        ephemeral-storage: 256Mi
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
   syncInterval: 15s
   httpTimeout: 10s
   routesCachePath: /var/lib/fugue/edge/routes-cache.json
