@@ -727,6 +727,7 @@ docs/private/regional-edge-current-state.local.md
 - [x] 先不接公网流量，只验证 bundle sync。
 - [x] 支持控制平面不可用时从本地 cache 启动。
 - [x] 增加 `fugue-edge` shadow DaemonSet 和发布镜像链路，默认只调度到 `fugue.io/role.edge=true` 节点，不监听公网 80/443，不生成 Caddy config。
+- [x] 增强 shadow 自观测：bundle sync/cache load/cache write counters、bundle age、sync duration 和结构化同步日志。
 - [ ] 在已 join cluster 且带 `fugue.io/role.edge=true` 的亚洲节点部署 shadow edge，确认能长期拉取 bundle。
 
 ### 6. 接入 Caddy-backed 反代但仍不切 DNS

@@ -32,6 +32,7 @@ type Service struct {
 	snapshot Status
 	bundle   *model.EdgeRouteBundle
 	etag     string
+	metrics  telemetry
 }
 
 type Status struct {
@@ -54,6 +55,24 @@ type cacheFile struct {
 	ETag     string                `json:"etag,omitempty"`
 	CachedAt time.Time             `json:"cached_at"`
 	Bundle   model.EdgeRouteBundle `json:"bundle"`
+}
+
+type telemetry struct {
+	BundleSyncSuccess     uint64
+	BundleSyncNotModified uint64
+	BundleSyncError       uint64
+	LastSyncDuration      time.Duration
+	CacheWriteSuccess     uint64
+	CacheWriteError       uint64
+	CacheLoadSuccess      uint64
+	CacheLoadMiss         uint64
+	CacheLoadError        uint64
+}
+
+type metricSnapshot struct {
+	Status            Status
+	Metrics           telemetry
+	BundleGeneratedAt *time.Time
 }
 
 type statusError struct {
@@ -121,9 +140,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.Logger.Printf("fugue-edge shadow started; api=%s edge_id=%s edge_group_id=%s cache=%s listen=%s interval=%s", safeBaseURL(s.Config.APIURL), s.Config.EdgeID, s.Config.EdgeGroupID, s.Config.CachePath, s.Config.ListenAddr, s.syncInterval())
-	if err := s.SyncOnce(ctx); err != nil {
-		s.logSyncFailure(err)
-	}
+	_ = s.SyncOnce(ctx)
 
 	ticker := time.NewTicker(s.syncInterval())
 	defer ticker.Stop()
@@ -132,14 +149,31 @@ func (s *Service) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if err := s.SyncOnce(ctx); err != nil {
-				s.logSyncFailure(err)
-			}
+			_ = s.SyncOnce(ctx)
 		}
 	}
 }
 
-func (s *Service) SyncOnce(ctx context.Context) error {
+func (s *Service) SyncOnce(ctx context.Context) (err error) {
+	started := time.Now()
+	result := "error"
+	defer func() {
+		duration := time.Since(started)
+		s.recordSyncAttempt(result, duration)
+		switch result {
+		case "success":
+			status := s.Status()
+			s.logSyncSuccess(status.BundleVersion, status.RouteCount, status.TLSAllowlistCount, duration)
+		case "not_modified":
+			status := s.Status()
+			s.logSyncNotModified(status.BundleVersion, duration)
+		default:
+			if err != nil {
+				s.logSyncFailure(err)
+			}
+		}
+	}()
+
 	if err := s.validateConfig(); err != nil {
 		s.recordSyncError(err)
 		return err
@@ -181,6 +215,7 @@ func (s *Service) SyncOnce(ctx context.Context) error {
 			return err
 		}
 		s.recordSyncSuccess(bundle, etag, now, false)
+		result = "success"
 		return nil
 	case http.StatusNotModified:
 		if !s.hasBundle() {
@@ -189,6 +224,7 @@ func (s *Service) SyncOnce(ctx context.Context) error {
 			return err
 		}
 		s.recordNotModified(now)
+		result = "not_modified"
 		return nil
 	default:
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -204,26 +240,40 @@ func (s *Service) SyncOnce(ctx context.Context) error {
 func (s *Service) LoadCache() error {
 	path := strings.TrimSpace(s.Config.CachePath)
 	if path == "" {
+		s.recordCacheLoad("miss")
+		s.logCacheMiss("path not configured")
 		return nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			s.recordCacheLoad("miss")
+			s.logCacheMiss(path)
 			return nil
 		}
-		return fmt.Errorf("read edge route cache: %w", err)
+		err = fmt.Errorf("read edge route cache: %w", err)
+		s.recordCacheLoad("error")
+		return err
 	}
 	if len(strings.TrimSpace(string(data))) == 0 {
+		s.recordCacheLoad("miss")
+		s.logCacheMiss(path)
 		return nil
 	}
 	var cached cacheFile
 	if err := json.Unmarshal(data, &cached); err != nil {
-		return fmt.Errorf("decode edge route cache: %w", err)
+		err = fmt.Errorf("decode edge route cache: %w", err)
+		s.recordCacheLoad("error")
+		return err
 	}
 	if cached.Bundle.Version == "" {
-		return fmt.Errorf("edge route cache missing bundle version")
+		err := fmt.Errorf("edge route cache missing bundle version")
+		s.recordCacheLoad("error")
+		return err
 	}
 	s.recordCacheLoaded(cached)
+	s.recordCacheLoad("success")
+	s.logCacheLoaded(cached)
 	return nil
 }
 
@@ -275,7 +325,8 @@ func (s *Service) handleBundle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	status := s.Status()
+	snapshot := s.metricSnapshot()
+	status := snapshot.Status
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	fmt.Fprintln(w, "# HELP fugue_edge_health Whether fugue-edge has a usable route bundle.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_health gauge")
@@ -295,6 +346,26 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "# HELP fugue_edge_last_success_timestamp_seconds Last successful route bundle sync time.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_last_success_timestamp_seconds gauge")
 	fmt.Fprintf(w, "fugue_edge_last_success_timestamp_seconds %.0f\n", unixSeconds(status.LastSuccessAt))
+	fmt.Fprintln(w, "# HELP fugue_edge_bundle_sync_total Route bundle sync attempts by result.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_bundle_sync_total counter")
+	fmt.Fprintf(w, "fugue_edge_bundle_sync_total{result=\"success\"} %d\n", snapshot.Metrics.BundleSyncSuccess)
+	fmt.Fprintf(w, "fugue_edge_bundle_sync_total{result=\"not_modified\"} %d\n", snapshot.Metrics.BundleSyncNotModified)
+	fmt.Fprintf(w, "fugue_edge_bundle_sync_total{result=\"error\"} %d\n", snapshot.Metrics.BundleSyncError)
+	fmt.Fprintln(w, "# HELP fugue_edge_bundle_sync_duration_seconds Duration of the last route bundle sync attempt.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_bundle_sync_duration_seconds gauge")
+	fmt.Fprintf(w, "fugue_edge_bundle_sync_duration_seconds %.6f\n", durationSeconds(snapshot.Metrics.LastSyncDuration))
+	fmt.Fprintln(w, "# HELP fugue_edge_bundle_age_seconds Age of the current route bundle based on generated_at.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_bundle_age_seconds gauge")
+	fmt.Fprintf(w, "fugue_edge_bundle_age_seconds %.0f\n", bundleAgeSeconds(snapshot.BundleGeneratedAt, time.Now().UTC()))
+	fmt.Fprintln(w, "# HELP fugue_edge_cache_write_total Route bundle cache write attempts by result.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_cache_write_total counter")
+	fmt.Fprintf(w, "fugue_edge_cache_write_total{result=\"success\"} %d\n", snapshot.Metrics.CacheWriteSuccess)
+	fmt.Fprintf(w, "fugue_edge_cache_write_total{result=\"error\"} %d\n", snapshot.Metrics.CacheWriteError)
+	fmt.Fprintln(w, "# HELP fugue_edge_cache_load_total Route bundle cache load attempts by result.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_cache_load_total counter")
+	fmt.Fprintf(w, "fugue_edge_cache_load_total{result=\"success\"} %d\n", snapshot.Metrics.CacheLoadSuccess)
+	fmt.Fprintf(w, "fugue_edge_cache_load_total{result=\"miss\"} %d\n", snapshot.Metrics.CacheLoadMiss)
+	fmt.Fprintf(w, "fugue_edge_cache_load_total{result=\"error\"} %d\n", snapshot.Metrics.CacheLoadError)
 }
 
 func (s *Service) startHTTPServer() (func(context.Context) error, error) {
@@ -367,18 +438,23 @@ func (s *Service) writeCache(cached cacheFile) error {
 	}
 	data, err := json.MarshalIndent(cached, "", "  ")
 	if err != nil {
+		s.recordCacheWrite("error")
 		return fmt.Errorf("marshal edge route cache: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		s.recordCacheWrite("error")
 		return fmt.Errorf("create edge route cache directory: %w", err)
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		s.recordCacheWrite("error")
 		return fmt.Errorf("write edge route cache temp file: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
+		s.recordCacheWrite("error")
 		return fmt.Errorf("replace edge route cache: %w", err)
 	}
+	s.recordCacheWrite("success")
 	return nil
 }
 
@@ -434,6 +510,47 @@ func (s *Service) recordSyncError(err error) {
 	s.snapshot.Healthy = false
 }
 
+func (s *Service) recordSyncAttempt(result string, duration time.Duration) {
+	if duration < 0 {
+		duration = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch result {
+	case "success":
+		s.metrics.BundleSyncSuccess++
+	case "not_modified":
+		s.metrics.BundleSyncNotModified++
+	default:
+		s.metrics.BundleSyncError++
+	}
+	s.metrics.LastSyncDuration = duration
+}
+
+func (s *Service) recordCacheWrite(result string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch result {
+	case "success":
+		s.metrics.CacheWriteSuccess++
+	default:
+		s.metrics.CacheWriteError++
+	}
+}
+
+func (s *Service) recordCacheLoad(result string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch result {
+	case "success":
+		s.metrics.CacheLoadSuccess++
+	case "miss":
+		s.metrics.CacheLoadMiss++
+	default:
+		s.metrics.CacheLoadError++
+	}
+}
+
 func (s *Service) statusForBundleLocked(bundle model.EdgeRouteBundle, syncAt time.Time, successAt *time.Time, stale bool) Status {
 	status := "ok"
 	if stale {
@@ -455,11 +572,58 @@ func (s *Service) statusForBundleLocked(bundle model.EdgeRouteBundle, syncAt tim
 	return out
 }
 
+func (s *Service) metricSnapshot() metricSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := metricSnapshot{
+		Status:  s.snapshot,
+		Metrics: s.metrics,
+	}
+	if s.bundle != nil && !s.bundle.GeneratedAt.IsZero() {
+		generatedAt := s.bundle.GeneratedAt
+		out.BundleGeneratedAt = &generatedAt
+	}
+	return out
+}
+
+func (s *Service) logCacheLoaded(cached cacheFile) {
+	if s.Logger == nil {
+		return
+	}
+	s.Logger.Printf("edge route cache loaded; version=%s etag=%s cached_at=%s routes=%d tls_allowlist=%d path=%s", cached.Bundle.Version, cached.ETag, cached.CachedAt.Format(time.RFC3339Nano), len(cached.Bundle.Routes), len(cached.Bundle.TLSAllowlist), strings.TrimSpace(s.Config.CachePath))
+}
+
+func (s *Service) logCacheMiss(path string) {
+	if s.Logger == nil {
+		return
+	}
+	s.Logger.Printf("edge route cache miss; path=%s", path)
+}
+
+func (s *Service) logSyncSuccess(bundleVersion string, routes int, tlsAllowlist int, duration time.Duration) {
+	if s.Logger == nil {
+		return
+	}
+	s.Logger.Printf("edge route bundle sync success; version=%s routes=%d tls_allowlist=%d duration_ms=%d", bundleVersion, routes, tlsAllowlist, duration.Milliseconds())
+}
+
+func (s *Service) logSyncNotModified(bundleVersion string, duration time.Duration) {
+	if s.Logger == nil {
+		return
+	}
+	s.Logger.Printf("edge route bundle sync not_modified; version=%s duration_ms=%d", bundleVersion, duration.Milliseconds())
+}
+
 func (s *Service) logSyncFailure(err error) {
 	if s.Logger == nil || err == nil {
 		return
 	}
-	s.Logger.Printf("edge route bundle sync failed: %s", s.redact(err.Error()))
+	status := s.Status()
+	if status.Healthy && status.StaleCache {
+		s.Logger.Printf("edge route bundle sync failed; using stale cache; version=%s error=%s", status.BundleVersion, s.redact(err.Error()))
+		return
+	}
+	s.Logger.Printf("edge route bundle sync failed; error=%s", s.redact(err.Error()))
 }
 
 func (s *Service) syncInterval() time.Duration {
@@ -511,6 +675,24 @@ func unixSeconds(value *time.Time) float64 {
 		return 0
 	}
 	return float64(value.Unix())
+}
+
+func durationSeconds(value time.Duration) float64 {
+	if value <= 0 {
+		return 0
+	}
+	return value.Seconds()
+}
+
+func bundleAgeSeconds(generatedAt *time.Time, now time.Time) float64 {
+	if generatedAt == nil || generatedAt.IsZero() || now.IsZero() {
+		return 0
+	}
+	age := now.Sub(*generatedAt)
+	if age < 0 {
+		return 0
+	}
+	return age.Seconds()
 }
 
 func prometheusLabelValue(value string) string {

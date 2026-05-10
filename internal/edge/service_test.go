@@ -47,12 +47,13 @@ func TestSyncOnceWritesRouteBundleCache(t *testing.T) {
 	defer server.Close()
 
 	cachePath := filepath.Join(t.TempDir(), "routes-cache.json")
+	var logs bytes.Buffer
 	service := NewService(config.EdgeConfig{
 		APIURL:      server.URL,
 		EdgeToken:   "edge-secret",
 		EdgeGroupID: "edge-group-country-hk",
 		CachePath:   cachePath,
-	}, log.New(ioDiscard{}, "", 0))
+	}, log.New(&logs, "", 0))
 
 	if err := service.SyncOnce(context.Background()); err != nil {
 		t.Fatalf("sync once: %v", err)
@@ -78,6 +79,23 @@ func TestSyncOnceWritesRouteBundleCache(t *testing.T) {
 	status := service.Status()
 	if !status.Healthy || status.Status != "ok" || status.BundleVersion != "routegen_first" || status.RouteCount != 1 {
 		t.Fatalf("unexpected status after sync: %+v", status)
+	}
+	metrics := renderMetrics(t, service)
+	for _, want := range []string{
+		`fugue_edge_bundle_sync_total{result="success"} 1`,
+		`fugue_edge_bundle_sync_total{result="not_modified"} 0`,
+		`fugue_edge_bundle_sync_total{result="error"} 0`,
+		`fugue_edge_cache_write_total{result="success"} 1`,
+		`fugue_edge_cache_write_total{result="error"} 0`,
+		`fugue_edge_bundle_sync_duration_seconds`,
+		`fugue_edge_bundle_age_seconds`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("metrics missing %q:\n%s", want, metrics)
+		}
+	}
+	if !strings.Contains(logs.String(), "edge route bundle sync success; version=routegen_first routes=1 tls_allowlist=1") {
+		t.Fatalf("expected sync success log, got %s", logs.String())
 	}
 }
 
@@ -133,6 +151,17 @@ func TestSyncOnceNotModifiedKeepsExistingCacheFile(t *testing.T) {
 	if !status.Healthy || status.Status != "ok" || status.StaleCache {
 		t.Fatalf("unexpected status after 304: %+v", status)
 	}
+	metrics := renderMetrics(t, service)
+	for _, want := range []string{
+		`fugue_edge_bundle_sync_total{result="success"} 1`,
+		`fugue_edge_bundle_sync_total{result="not_modified"} 1`,
+		`fugue_edge_bundle_sync_total{result="error"} 0`,
+		`fugue_edge_cache_write_total{result="success"} 1`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("metrics missing %q:\n%s", want, metrics)
+		}
+	}
 }
 
 func TestSyncOnceUsesStaleCacheWhenAPIUnavailable(t *testing.T) {
@@ -140,11 +169,12 @@ func TestSyncOnceUsesStaleCacheWhenAPIUnavailable(t *testing.T) {
 
 	cachePath := filepath.Join(t.TempDir(), "routes-cache.json")
 	writeTestCache(t, cachePath, testBundle("routegen_stale"), `"routegen_stale"`)
+	var logs bytes.Buffer
 	service := NewService(config.EdgeConfig{
 		APIURL:    "https://api.example.invalid",
 		EdgeToken: "edge-secret",
 		CachePath: cachePath,
-	}, log.New(ioDiscard{}, "", 0))
+	}, log.New(&logs, "", 0))
 	service.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("control plane unavailable")
 	})}
@@ -174,8 +204,15 @@ func TestSyncOnceUsesStaleCacheWhenAPIUnavailable(t *testing.T) {
 		t.Fatalf("expected metrics status 200, got %d body=%s", metrics.Code, metrics.Body.String())
 	}
 	if !strings.Contains(metrics.Body.String(), `fugue_edge_stale_cache 1`) ||
-		!strings.Contains(metrics.Body.String(), `fugue_edge_routes{bundle_version="routegen_stale"} 1`) {
+		!strings.Contains(metrics.Body.String(), `fugue_edge_routes{bundle_version="routegen_stale"} 1`) ||
+		!strings.Contains(metrics.Body.String(), `fugue_edge_bundle_sync_total{result="error"} 1`) ||
+		!strings.Contains(metrics.Body.String(), `fugue_edge_cache_load_total{result="success"} 1`) {
 		t.Fatalf("expected stale cache metrics, got %s", metrics.Body.String())
+	}
+	logOutput := logs.String()
+	if !strings.Contains(logOutput, "edge route cache loaded; version=routegen_stale") ||
+		!strings.Contains(logOutput, "edge route bundle sync failed; using stale cache; version=routegen_stale") {
+		t.Fatalf("expected cache loaded and stale fallback logs, got %s", logOutput)
 	}
 }
 
@@ -202,6 +239,10 @@ func TestSyncOnceWithoutCacheIsUnhealthyWhenAPIUnavailable(t *testing.T) {
 	service.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected health status %d, got %d body=%s", http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
+	}
+	metrics := renderMetrics(t, service)
+	if !strings.Contains(metrics, `fugue_edge_bundle_sync_total{result="error"} 1`) {
+		t.Fatalf("expected sync error metric, got %s", metrics)
 	}
 }
 
@@ -234,6 +275,36 @@ func TestSyncErrorsAndLogsRedactEdgeToken(t *testing.T) {
 	service.logSyncFailure(err)
 	if strings.Contains(logs.String(), secret) {
 		t.Fatalf("log leaked token: %s", logs.String())
+	}
+}
+
+func TestLoadCacheMissAndErrorMetrics(t *testing.T) {
+	t.Parallel()
+
+	cachePath := filepath.Join(t.TempDir(), "routes-cache.json")
+	service := NewService(config.EdgeConfig{
+		APIURL:    "https://api.example.invalid",
+		EdgeToken: "edge-secret",
+		CachePath: cachePath,
+	}, log.New(ioDiscard{}, "", 0))
+
+	if err := service.LoadCache(); err != nil {
+		t.Fatalf("missing cache should not fail: %v", err)
+	}
+	metrics := renderMetrics(t, service)
+	if !strings.Contains(metrics, `fugue_edge_cache_load_total{result="miss"} 1`) {
+		t.Fatalf("expected cache miss metric, got %s", metrics)
+	}
+
+	if err := os.WriteFile(cachePath, []byte("{"), 0o600); err != nil {
+		t.Fatalf("write invalid cache: %v", err)
+	}
+	if err := service.LoadCache(); err == nil {
+		t.Fatal("expected invalid cache to fail")
+	}
+	metrics = renderMetrics(t, service)
+	if !strings.Contains(metrics, `fugue_edge_cache_load_total{result="error"} 1`) {
+		t.Fatalf("expected cache error metric, got %s", metrics)
 	}
 }
 
@@ -291,6 +362,16 @@ func writeTestCache(t *testing.T, path string, bundle model.EdgeRouteBundle, eta
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatalf("write cache: %v", err)
 	}
+}
+
+func renderMetrics(t *testing.T, service *Service) string {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected metrics status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	return recorder.Body.String()
 }
 
 type ioDiscard struct{}
