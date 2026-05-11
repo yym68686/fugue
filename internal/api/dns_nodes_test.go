@@ -101,7 +101,7 @@ func TestDNSDelegationPreflightPassesWithTwoHealthyNodes(t *testing.T) {
 			Zone:             "dns.fugue.pro",
 			Status:           model.EdgeHealthHealthy,
 			Healthy:          true,
-			DNSBundleVersion: "dnsgen_stable",
+			DNSBundleVersion: "dnsgen_us",
 			RecordCount:      40,
 			CacheStatus:      "ready",
 			UDPAddr:          ":53",
@@ -117,7 +117,7 @@ func TestDNSDelegationPreflightPassesWithTwoHealthyNodes(t *testing.T) {
 			Zone:             "dns.fugue.pro",
 			Status:           model.EdgeHealthHealthy,
 			Healthy:          true,
-			DNSBundleVersion: "dnsgen_stable",
+			DNSBundleVersion: "dnsgen_de",
 			RecordCount:      40,
 			CacheStatus:      "ready",
 			UDPAddr:          ":53",
@@ -158,7 +158,9 @@ func TestDNSDelegationPreflightPassesWithTwoHealthyNodes(t *testing.T) {
 	}
 	var response model.DNSDelegationPreflightResponse
 	mustDecodeJSON(t, recorder, &response)
-	if !response.Pass || response.HealthyNodeCount != 2 || response.DNSBundleVersion != "dnsgen_stable" {
+	if !response.Pass || response.HealthyNodeCount != 2 ||
+		!strings.Contains(response.DNSBundleVersion, "edge-group-country-us=dnsgen_us") ||
+		!strings.Contains(response.DNSBundleVersion, "edge-group-country-de=dnsgen_de") {
 		t.Fatalf("expected passing preflight, got %+v", response)
 	}
 	if len(response.DelegationPlan.PlannedARecords) != 2 || len(response.DelegationPlan.PlannedNSRecords) != 2 {
@@ -167,6 +169,82 @@ func TestDNSDelegationPreflightPassesWithTwoHealthyNodes(t *testing.T) {
 	if !strings.HasPrefix(response.DelegationPlan.PlannedARecords[0].Name, "ns1.") {
 		t.Fatalf("expected ns1 A record first, got %+v", response.DelegationPlan.PlannedARecords)
 	}
+}
+
+func TestDNSDelegationPreflightFailsWhenSameEdgeGroupReportsDifferentBundleVersions(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	now := time.Now().UTC()
+	for _, node := range []model.DNSNode{
+		{
+			ID:               "dns-us-1",
+			EdgeGroupID:      "edge-group-country-us",
+			PublicIPv4:       "203.0.113.10",
+			Zone:             "dns.fugue.pro",
+			Status:           model.EdgeHealthHealthy,
+			Healthy:          true,
+			DNSBundleVersion: "dnsgen_old",
+			RecordCount:      40,
+			CacheStatus:      "ready",
+			UDPAddr:          ":53",
+			TCPAddr:          ":53",
+			UDPListen:        true,
+			TCPListen:        true,
+			LastSeenAt:       &now,
+		},
+		{
+			ID:               "dns-us-2",
+			EdgeGroupID:      "edge-group-country-us",
+			PublicIPv4:       "203.0.113.20",
+			Zone:             "dns.fugue.pro",
+			Status:           model.EdgeHealthHealthy,
+			Healthy:          true,
+			DNSBundleVersion: "dnsgen_new",
+			RecordCount:      40,
+			CacheStatus:      "ready",
+			UDPAddr:          ":53",
+			TCPAddr:          ":53",
+			UDPListen:        true,
+			TCPListen:        true,
+			LastSeenAt:       &now,
+		},
+	} {
+		if _, err := storeState.UpdateDNSHeartbeat(node); err != nil {
+			t.Fatalf("update dns heartbeat fixture: %v", err)
+		}
+	}
+
+	kubeServer := newDNSPreflightKubeServer(t, []string{"dns-us-1", "dns-us-2"})
+	defer kubeServer.Close()
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+	server.dnsDelegationProbe = func(_ context.Context, node model.DNSNode, _, _ string) dnsDelegationProbeResult {
+		return dnsDelegationProbeResult{
+			UDP53Reachable: true,
+			TCP53Reachable: true,
+			ProbeAnswers:   []string{node.PublicIPv4},
+		}
+	}
+	server.dnsParentNSLookup = func(_ context.Context, _ string) ([]string, error) {
+		return []string{"current-parent.example"}, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/dns/delegation/preflight", platformAdminKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response model.DNSDelegationPreflightResponse
+	mustDecodeJSON(t, recorder, &response)
+	if response.Pass {
+		t.Fatalf("expected preflight to fail on same-group bundle version mismatch, got %+v", response)
+	}
+	assertDNSPreflightCheck(t, response.Checks, "dns_bundle_version_stable", false)
 }
 
 func TestScopedEdgeTokenRestrictsDNSHeartbeat(t *testing.T) {
@@ -196,6 +274,19 @@ func TestScopedEdgeTokenRestrictsDNSHeartbeat(t *testing.T) {
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("expected scoped token node mismatch to be forbidden, got %d body=%s", recorder.Code, recorder.Body.String())
 	}
+}
+
+func assertDNSPreflightCheck(t *testing.T, checks []model.DNSDelegationPreflightCheck, name string, pass bool) {
+	t.Helper()
+	for _, check := range checks {
+		if check.Name == name {
+			if check.Pass != pass {
+				t.Fatalf("expected check %s pass=%v, got %+v", name, pass, check)
+			}
+			return
+		}
+	}
+	t.Fatalf("expected check %s in %+v", name, checks)
 }
 
 func newDNSPreflightKubeServer(t *testing.T, nodeNames []string) *httptest.Server {

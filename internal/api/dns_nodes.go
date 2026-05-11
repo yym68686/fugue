@@ -476,28 +476,46 @@ func countPassingDNSNodeChecks(checks []model.DNSDelegationNodeCheck) int {
 }
 
 func stableDNSBundleVersion(checks []model.DNSDelegationNodeCheck) (string, bool) {
-	version := ""
+	if len(checks) == 0 {
+		return "", false
+	}
+	versionsByGroup := map[string]string{}
+	groups := []string{}
 	for _, check := range checks {
 		next := strings.TrimSpace(check.DNSBundleVersion)
 		if next == "" {
 			return "", false
 		}
-		if version == "" {
-			version = next
+		group := strings.TrimSpace(check.EdgeGroupID)
+		if group == "" {
+			group = "default"
+		}
+		version, ok := versionsByGroup[group]
+		if !ok {
+			versionsByGroup[group] = next
+			groups = append(groups, group)
 			continue
 		}
 		if version != next {
 			return "", false
 		}
 	}
-	return version, len(checks) > 0
+	sort.Strings(groups)
+	if len(groups) == 1 {
+		return versionsByGroup[groups[0]], true
+	}
+	parts := make([]string, 0, len(groups))
+	for _, group := range groups {
+		parts = append(parts, fmt.Sprintf("%s=%s", group, versionsByGroup[group]))
+	}
+	return strings.Join(parts, ", "), true
 }
 
 func dnsBundleStableMessage(version string, stable bool) string {
 	if stable {
-		return "all DNS nodes report " + version
+		return "DNS bundle version is consistent per edge group: " + version
 	}
-	return "healthy DNS nodes must report the same non-empty DNS bundle version"
+	return "each DNS node must report a non-empty DNS bundle version, and nodes in the same edge group must agree"
 }
 
 func dnsNodeCacheErrorsZero(checks []model.DNSDelegationNodeCheck) bool {
