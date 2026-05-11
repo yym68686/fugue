@@ -3653,6 +3653,92 @@ func TestRunAdminClusterNodesShowsPolicyColumns(t *testing.T) {
 	}
 }
 
+func TestRunAdminClusterNodePolicyCommands(t *testing.T) {
+	t.Parallel()
+
+	nodePolicyJSON := `{
+		"node_name":"gcp1",
+		"runtime_id":"runtime_us",
+		"machine_id":"machine_gcp1",
+		"ready":true,
+		"disk_pressure":false,
+		"node_schedulable":true,
+		"reconciled":false,
+		"reconcile_reasons":["node policy labels drift from desired policy"],
+		"labels":{"fugue.io/role.edge":"true","fugue.io/schedulable":"true"},
+		"taints":[{"key":"fugue.io/dedicated","value":"edge","effect":"NoSchedule"}],
+		"policy":{
+			"allow_app_runtime":false,
+			"allow_builds":false,
+			"allow_shared_pool":false,
+			"allow_edge":true,
+			"allow_dns":false,
+			"allow_internal_maintenance":false,
+			"node_mode":"managed-owned",
+			"node_health":"ready",
+			"desired_control_plane_role":"none",
+			"effective_app_runtime":false,
+			"effective_builds":false,
+			"effective_shared_pool":false,
+			"effective_edge":true,
+			"effective_dns":false,
+			"effective_internal_maintenance":false,
+			"effective_schedulable":true,
+			"effective_control_plane_role":"none"
+		}
+	}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/node-policies":
+			_, _ = w.Write([]byte(`{"node_policies":[` + nodePolicyJSON + `]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/node-policies/gcp1":
+			_, _ = w.Write([]byte(`{"node_policy":` + nodePolicyJSON + `}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/node-policies/status":
+			_, _ = w.Write([]byte(`{"summary":{"total":1,"reconciled":0,"drifted":1,"ready":1,"disk_pressure":0,"blocked_by_health":0},"node_policies":[` + nodePolicyJSON + `]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "ls",
+			args: []string{"admin", "cluster", "node-policy", "ls"},
+			want: []string{"NODE", "EDGE", "RECONCILED", "gcp1", "on/on", "node policy labels drift"},
+		},
+		{
+			name: "get",
+			args: []string{"admin", "cluster", "node-policy", "get", "gcp1"},
+			want: []string{"node=gcp1", "[policy]", "edge=on/on", "[labels]", "fugue.io/role.edge=true", "[taints]", "fugue.io/dedicated"},
+		},
+		{
+			name: "status",
+			args: []string{"admin", "cluster", "node-policy", "status"},
+			want: []string{"total=1", "drifted=1", "[node_policies]", "gcp1"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			args := append([]string{"--base-url", server.URL, "--token", "token"}, tc.args...)
+			if err := runWithStreams(args, &stdout, &stderr); err != nil {
+				t.Fatalf("run %v: %v", tc.args, err)
+			}
+			out := stdout.String()
+			for _, want := range tc.want {
+				if !strings.Contains(out, want) {
+					t.Fatalf("expected stdout to contain %q, got %q", want, out)
+				}
+			}
+		})
+	}
+}
+
 func TestRunRuntimeDoctorManagedSharedIncludesLocationNodes(t *testing.T) {
 	t.Parallel()
 

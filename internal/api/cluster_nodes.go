@@ -80,6 +80,7 @@ type clusterNodeSnapshot struct {
 	countryCode  string
 	runtimeID    string
 	labels       map[string]string
+	taints       []kubeNodeTaint
 	pods         []clusterNodePod
 	summary      *kubeNodeSummary
 }
@@ -979,6 +980,7 @@ func (c *clusterNodeClient) listClusterNodeInventory(ctx context.Context) ([]clu
 			countryCode:  kubeNodeCountryCode(item.Metadata.Labels),
 			runtimeID:    firstNodeLabel(item.Metadata.Labels, runtime.RuntimeIDLabelKey),
 			labels:       cloneNodeLabels(item.Metadata.Labels),
+			taints:       normalizeKubeNodeTaints(item.Spec.Taints),
 			pods:         podsByNode[name],
 			summary:      summariesByNode[name],
 		})

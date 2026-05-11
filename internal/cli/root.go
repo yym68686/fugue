@@ -178,6 +178,7 @@ Environment variables:
 	  fugue project edit marketing --description "landing pages"
 	  fugue project images usage marketing
 	  fugue admin cluster status
+	  fugue admin cluster node-policy status
 	  fugue admin cluster pods --namespace kube-system
 	  fugue admin cluster node inspect gcp1
 	  fugue admin cluster workload show kube-system deployment coredns

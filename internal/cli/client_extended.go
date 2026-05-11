@@ -306,6 +306,19 @@ type clusterNodeListResponse struct {
 	ClusterNodes []model.ClusterNode `json:"cluster_nodes"`
 }
 
+type clusterNodePolicyListResponse struct {
+	NodePolicies []model.ClusterNodePolicyStatus `json:"node_policies"`
+}
+
+type clusterNodePolicyResponse struct {
+	NodePolicy model.ClusterNodePolicyStatus `json:"node_policy"`
+}
+
+type clusterNodePolicyStatusResponse struct {
+	Summary      model.ClusterNodePolicyStatusSummary `json:"summary"`
+	NodePolicies []model.ClusterNodePolicyStatus      `json:"node_policies"`
+}
+
 type controlPlaneStatusResponse struct {
 	ControlPlane model.ControlPlaneStatus `json:"control_plane"`
 }
@@ -1089,6 +1102,30 @@ func (c *Client) ListClusterNodes() ([]model.ClusterNode, error) {
 		return nil, err
 	}
 	return response.ClusterNodes, nil
+}
+
+func (c *Client) ListClusterNodePolicies() ([]model.ClusterNodePolicyStatus, error) {
+	var response clusterNodePolicyListResponse
+	if err := c.doJSON(http.MethodGet, "/v1/cluster/node-policies", nil, &response); err != nil {
+		return nil, err
+	}
+	return response.NodePolicies, nil
+}
+
+func (c *Client) GetClusterNodePolicy(nodeName string) (model.ClusterNodePolicyStatus, error) {
+	var response clusterNodePolicyResponse
+	if err := c.doJSON(http.MethodGet, path.Join("/v1/cluster/node-policies", strings.TrimSpace(nodeName)), nil, &response); err != nil {
+		return model.ClusterNodePolicyStatus{}, err
+	}
+	return response.NodePolicy, nil
+}
+
+func (c *Client) GetClusterNodePolicyStatus() (model.ClusterNodePolicyStatusSummary, []model.ClusterNodePolicyStatus, error) {
+	var response clusterNodePolicyStatusResponse
+	if err := c.doJSON(http.MethodGet, "/v1/cluster/node-policies/status", nil, &response); err != nil {
+		return model.ClusterNodePolicyStatusSummary{}, nil, err
+	}
+	return response.Summary, response.NodePolicies, nil
 }
 
 func (c *Client) GetControlPlaneStatus() (model.ControlPlaneStatus, error) {

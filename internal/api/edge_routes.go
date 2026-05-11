@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -71,6 +72,10 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	if err != nil {
 		return model.EdgeRouteBundle{}, err
 	}
+	healthyEdgeGroups, err := s.edgeRouteHealthyEdgeGroups()
+	if err != nil {
+		return model.EdgeRouteBundle{}, err
+	}
 
 	runtimeByID := make(map[string]model.Runtime, len(runtimes))
 	for _, runtimeObj := range runtimes {
@@ -89,7 +94,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 			continue
 		}
 		binding := s.deriveEdgeRouteBinding(r, app, strings.TrimSpace(app.Route.Hostname), model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt, runtimeByID)
-		binding = applyEdgeRoutePolicy(binding, policyByHostname)
+		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
 		if edgeRouteMatchesSelector(binding, options) {
 			routes = append(routes, binding)
 		}
@@ -106,7 +111,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 			continue
 		}
 		binding := s.deriveEdgeRouteBinding(r, app, hostname, model.EdgeRouteKindCustomDomain, model.EdgeRouteTLSPolicyCustomDomain, domain.CreatedAt, domain.UpdatedAt, runtimeByID)
-		binding = applyEdgeRoutePolicy(binding, policyByHostname)
+		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
 		if edgeRouteMatchesSelector(binding, options) {
 			routes = append(routes, binding)
 			tlsAllowlist = append(tlsAllowlist, model.EdgeTLSAllowlistEntry{
@@ -150,6 +155,11 @@ func (s *Server) deriveEdgeRouteBinding(r *http.Request, app model.App, hostname
 	}
 	status, reason := edgeRouteStatus(app, runtimeID, runtimeFound)
 	servicePort := edgeServicePortForApp(app)
+	upstream := s.edgeRouteUpstream(r.Context(), app, runtimeObj, runtimeFound)
+	if status == model.EdgeRouteStatusActive && upstream.Status != model.EdgeRouteStatusActive {
+		status = upstream.Status
+		reason = upstream.StatusReason
+	}
 
 	binding := model.EdgeRouteBinding{
 		Hostname:            normalizeExternalAppDomain(hostname),
@@ -157,10 +167,12 @@ func (s *Server) deriveEdgeRouteBinding(r *http.Request, app model.App, hostname
 		AppID:               app.ID,
 		TenantID:            app.TenantID,
 		RuntimeID:           runtimeID,
+		RuntimeEdgeGroupID:  edgeGroupID,
 		EdgeGroupID:         edgeGroupID,
 		FallbackEdgeGroupID: fallbackEdgeGroupID,
 		RoutePolicy:         model.EdgeRoutePolicyRouteAOnly,
-		UpstreamKind:        model.EdgeRouteUpstreamKindKubernetesService,
+		UpstreamKind:        upstream.Kind,
+		UpstreamScope:       upstream.Scope,
 		ServicePort:         servicePort,
 		TLSPolicy:           tlsPolicy,
 		Streaming:           true,
@@ -169,11 +181,49 @@ func (s *Server) deriveEdgeRouteBinding(r *http.Request, app model.App, hostname
 		CreatedAt:           createdAt,
 		UpdatedAt:           updatedAt,
 	}
+	if runtimeFound {
+		binding.RuntimeType = strings.TrimSpace(runtimeObj.Type)
+		binding.RuntimeClusterNode = strings.TrimSpace(runtimeObj.ClusterNodeName)
+	}
 	if binding.Status == model.EdgeRouteStatusActive {
-		binding.UpstreamURL = s.serviceURLForApp(r.Context(), app)
+		binding.UpstreamURL = upstream.URL
 	}
 	binding.RouteGeneration = edgeRouteGeneration(binding)
 	return binding
+}
+
+type edgeRouteUpstream struct {
+	Kind         string
+	Scope        string
+	URL          string
+	Status       string
+	StatusReason string
+}
+
+func (s *Server) edgeRouteUpstream(ctx context.Context, app model.App, runtimeObj model.Runtime, runtimeFound bool) edgeRouteUpstream {
+	out := edgeRouteUpstream{
+		Kind:   model.EdgeRouteUpstreamKindKubernetesService,
+		Scope:  model.EdgeRouteUpstreamScopeLocalService,
+		Status: model.EdgeRouteStatusActive,
+	}
+	if !runtimeFound {
+		return out
+	}
+	switch strings.TrimSpace(runtimeObj.Type) {
+	case "", model.RuntimeTypeManagedShared, model.RuntimeTypeManagedOwned:
+		out.URL = s.serviceURLForApp(ctx, app)
+		return out
+	case model.RuntimeTypeExternalOwned:
+		out.Kind = model.EdgeRouteUpstreamKindMesh
+		out.Scope = model.EdgeRouteUpstreamScopeMesh
+		out.Status = model.EdgeRouteStatusUnavailable
+		out.StatusReason = "external-owned runtime requires mesh upstream"
+		return out
+	default:
+		out.Status = model.EdgeRouteStatusUnavailable
+		out.StatusReason = "runtime type is not supported by edge upstream"
+		return out
+	}
 }
 
 func edgeRouteStatus(app model.App, runtimeID string, runtimeFound bool) (string, string) {
@@ -223,7 +273,7 @@ func edgeRoutePolicyByHostname(policies []model.EdgeRoutePolicy) map[string]mode
 	return out
 }
 
-func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]model.EdgeRoutePolicy) model.EdgeRouteBinding {
+func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]model.EdgeRoutePolicy, healthyEdgeGroups map[string]bool) model.EdgeRouteBinding {
 	if len(policies) == 0 {
 		binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
 		binding.RouteGeneration = edgeRouteGeneration(binding)
@@ -235,18 +285,58 @@ func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]mo
 		binding.RouteGeneration = edgeRouteGeneration(binding)
 		return binding
 	}
+	binding.PolicyEdgeGroupID = strings.TrimSpace(policy.EdgeGroupID)
 	binding.RoutePolicy = model.NormalizeEdgeRoutePolicy(policy.RoutePolicy)
 	if binding.RoutePolicy == "" {
 		binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
 	}
 	if model.EdgeRoutePolicyAllowsTraffic(binding.RoutePolicy) && strings.TrimSpace(policy.EdgeGroupID) != "" {
-		binding.EdgeGroupID = strings.TrimSpace(policy.EdgeGroupID)
+		policyEdgeGroupID := strings.TrimSpace(policy.EdgeGroupID)
+		runtimeEdgeGroupID := strings.TrimSpace(firstNonEmpty(binding.RuntimeEdgeGroupID, binding.EdgeGroupID))
+		if !strings.EqualFold(policyEdgeGroupID, runtimeEdgeGroupID) {
+			binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
+			binding.Status = model.EdgeRouteStatusUnavailable
+			binding.StatusReason = "edge policy target edge group does not match runtime edge group"
+			binding.UpstreamURL = ""
+			binding.RouteGeneration = edgeRouteGeneration(binding)
+			return binding
+		}
+		if !healthyEdgeGroups[policyEdgeGroupID] {
+			binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
+			binding.Status = model.EdgeRouteStatusUnavailable
+			binding.StatusReason = "edge group has no healthy edge nodes"
+			binding.UpstreamURL = ""
+			binding.RouteGeneration = edgeRouteGeneration(binding)
+			return binding
+		}
+		binding.EdgeGroupID = policyEdgeGroupID
+		binding.RuntimeEdgeGroupID = runtimeEdgeGroupID
 		binding.FallbackEdgeGroupID = ""
 	} else {
 		binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
 	}
 	binding.RouteGeneration = edgeRouteGeneration(binding)
 	return binding
+}
+
+func (s *Server) edgeRouteHealthyEdgeGroups() (map[string]bool, error) {
+	nodes, _, err := s.store.ListEdgeNodes("")
+	if err != nil {
+		return nil, err
+	}
+	healthy := make(map[string]bool)
+	for _, node := range nodes {
+		groupID := strings.TrimSpace(node.EdgeGroupID)
+		if groupID == "" {
+			continue
+		}
+		if node.Healthy && !node.Draining && strings.EqualFold(strings.TrimSpace(node.Status), model.EdgeHealthHealthy) {
+			healthy[groupID] = true
+		} else if _, ok := healthy[groupID]; !ok {
+			healthy[groupID] = false
+		}
+	}
+	return healthy, nil
 }
 
 func edgeGroupIDFromEdgeID(edgeID string) string {
@@ -315,10 +405,15 @@ type edgeRouteVersionMaterial struct {
 	AppID               string `json:"app_id"`
 	TenantID            string `json:"tenant_id"`
 	RuntimeID           string `json:"runtime_id"`
+	RuntimeType         string `json:"runtime_type,omitempty"`
+	RuntimeEdgeGroupID  string `json:"runtime_edge_group_id,omitempty"`
+	RuntimeClusterNode  string `json:"runtime_cluster_node,omitempty"`
 	EdgeGroupID         string `json:"edge_group_id"`
 	FallbackEdgeGroupID string `json:"fallback_edge_group_id,omitempty"`
+	PolicyEdgeGroupID   string `json:"policy_edge_group_id,omitempty"`
 	RoutePolicy         string `json:"route_policy"`
 	UpstreamKind        string `json:"upstream_kind"`
+	UpstreamScope       string `json:"upstream_scope,omitempty"`
 	UpstreamURL         string `json:"upstream_url,omitempty"`
 	ServicePort         int    `json:"service_port"`
 	TLSPolicy           string `json:"tls_policy"`
@@ -353,10 +448,15 @@ func edgeRouteVersionMaterialFromBinding(binding model.EdgeRouteBinding) edgeRou
 		AppID:               binding.AppID,
 		TenantID:            binding.TenantID,
 		RuntimeID:           binding.RuntimeID,
+		RuntimeType:         binding.RuntimeType,
+		RuntimeEdgeGroupID:  binding.RuntimeEdgeGroupID,
+		RuntimeClusterNode:  binding.RuntimeClusterNode,
 		EdgeGroupID:         binding.EdgeGroupID,
 		FallbackEdgeGroupID: binding.FallbackEdgeGroupID,
+		PolicyEdgeGroupID:   binding.PolicyEdgeGroupID,
 		RoutePolicy:         binding.RoutePolicy,
 		UpstreamKind:        binding.UpstreamKind,
+		UpstreamScope:       binding.UpstreamScope,
 		UpstreamURL:         binding.UpstreamURL,
 		ServicePort:         binding.ServicePort,
 		TLSPolicy:           binding.TLSPolicy,

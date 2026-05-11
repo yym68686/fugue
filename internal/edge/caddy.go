@@ -143,6 +143,9 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 	server := map[string]any{
 		"listen": []string{listenAddr},
 		"routes": routes,
+		"logs": map[string]any{
+			"default_logger_name": "fugue_edge_access",
+		},
 	}
 	apps := map[string]any{
 		"http": map[string]any{
@@ -198,6 +201,19 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 	config := map[string]any{
 		"admin": map[string]any{
 			"listen": adminURL.Host,
+		},
+		"logging": map[string]any{
+			"logs": map[string]any{
+				"fugue_edge_access": map[string]any{
+					"writer": map[string]any{
+						"output": "stdout",
+					},
+					"encoder": map[string]any{
+						"format": "json",
+					},
+					"include": []string{"http.log.access.fugue_edge_access"},
+				},
+			},
 		},
 		"apps": apps,
 	}

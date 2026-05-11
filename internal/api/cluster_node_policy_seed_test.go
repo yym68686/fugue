@@ -92,6 +92,68 @@ func TestListClusterNodesSeedsBootstrapControlPlaneMachineForPlatformAdmin(t *te
 	}
 }
 
+func TestClusterNodePolicyStatusReportsDesiredActualAndDrift(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	kubeServer := newBootstrapControlPlaneKubeServer(t)
+	defer kubeServer.Close()
+
+	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	statusRecorder := performJSONRequest(t, server, http.MethodGet, "/v1/cluster/node-policies/status", "bootstrap-secret", nil)
+	if statusRecorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, statusRecorder.Code, statusRecorder.Body.String())
+	}
+	var statusResponse struct {
+		Summary      model.ClusterNodePolicyStatusSummary `json:"summary"`
+		NodePolicies []model.ClusterNodePolicyStatus      `json:"node_policies"`
+	}
+	mustDecodeJSON(t, statusRecorder, &statusResponse)
+	if statusResponse.Summary.Total != 1 || statusResponse.Summary.Drifted != 1 || statusResponse.Summary.Ready != 1 || statusResponse.Summary.DiskPressure != 0 {
+		t.Fatalf("unexpected policy status summary: %+v", statusResponse.Summary)
+	}
+	if len(statusResponse.NodePolicies) != 1 {
+		t.Fatalf("expected one node policy status, got %+v", statusResponse.NodePolicies)
+	}
+	nodePolicy := statusResponse.NodePolicies[0]
+	if nodePolicy.NodeName != "gcp1" || nodePolicy.Policy == nil {
+		t.Fatalf("unexpected node policy status: %+v", nodePolicy)
+	}
+	if nodePolicy.Policy.DesiredControlPlaneRole != model.MachineControlPlaneRoleMember {
+		t.Fatalf("expected desired control-plane role backfill, got %+v", nodePolicy.Policy)
+	}
+	if nodePolicy.Reconciled || !strings.Contains(strings.Join(nodePolicy.ReconcileReasons, ";"), "node policy labels drift") {
+		t.Fatalf("expected unreconciled label drift, got %+v", nodePolicy)
+	}
+	if nodePolicy.Labels["node-role.kubernetes.io/control-plane"] != "" {
+		t.Fatalf("expected actual labels to include control-plane label, got %+v", nodePolicy.Labels)
+	}
+
+	getRecorder := performJSONRequest(t, server, http.MethodGet, "/v1/cluster/node-policies/gcp1", "bootstrap-secret", nil)
+	if getRecorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, getRecorder.Code, getRecorder.Body.String())
+	}
+	var getResponse struct {
+		NodePolicy model.ClusterNodePolicyStatus `json:"node_policy"`
+	}
+	mustDecodeJSON(t, getRecorder, &getResponse)
+	if getResponse.NodePolicy.NodeName != "gcp1" {
+		t.Fatalf("unexpected node policy get response: %+v", getResponse.NodePolicy)
+	}
+}
+
 func TestListClusterNodesSeedsBootstrapControlPlaneMachineBuildPolicyFromLiveLabels(t *testing.T) {
 	t.Parallel()
 

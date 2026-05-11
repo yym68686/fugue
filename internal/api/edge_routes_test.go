@@ -242,25 +242,27 @@ func TestEdgeRoutePolicyOptInGatesBundleByHostname(t *testing.T) {
 		t.Fatalf("unexpected stored policy: %+v", putResponse.Policy)
 	}
 
-	changed := httptest.NewRecorder()
-	changedReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret", nil)
-	server.Handler().ServeHTTP(changed, changedReq)
-	if changed.Code != http.StatusOK {
-		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, changed.Code, changed.Body.String())
+	mismatch := httptest.NewRecorder()
+	mismatchReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret", nil)
+	server.Handler().ServeHTTP(mismatch, mismatchReq)
+	if mismatch.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, mismatch.Code, mismatch.Body.String())
 	}
-	var changedBundle model.EdgeRouteBundle
-	mustDecodeJSON(t, changed, &changedBundle)
-	if changedBundle.Version == initialBundle.Version {
+	var mismatchBundle model.EdgeRouteBundle
+	mustDecodeJSON(t, mismatch, &mismatchBundle)
+	if mismatchBundle.Version == initialBundle.Version {
 		t.Fatalf("expected edge route policy change to update bundle version %s", initialBundle.Version)
 	}
-	if len(changedBundle.Routes) != 1 {
-		t.Fatalf("expected one changed route, got %+v", changedBundle.Routes)
+	if len(mismatchBundle.Routes) != 1 {
+		t.Fatalf("expected one mismatched route, got %+v", mismatchBundle.Routes)
 	}
-	changedRoute := changedBundle.Routes[0]
-	if changedRoute.EdgeGroupID != "edge-group-country-us" ||
-		changedRoute.FallbackEdgeGroupID != "" ||
-		changedRoute.RoutePolicy != model.EdgeRoutePolicyCanary {
-		t.Fatalf("expected opt-in route to target US canary group only, got %+v", changedRoute)
+	mismatchedRoute := mismatchBundle.Routes[0]
+	if mismatchedRoute.EdgeGroupID != "edge-group-country-hk" ||
+		mismatchedRoute.PolicyEdgeGroupID != "edge-group-country-us" ||
+		mismatchedRoute.RoutePolicy != model.EdgeRoutePolicyRouteAOnly ||
+		mismatchedRoute.Status != model.EdgeRouteStatusUnavailable ||
+		!strings.Contains(mismatchedRoute.StatusReason, "does not match runtime edge group") {
+		t.Fatalf("expected mismatched policy to stay Route A-only on runtime group, got %+v", mismatchedRoute)
 	}
 
 	hkAfter := httptest.NewRecorder()
@@ -271,8 +273,8 @@ func TestEdgeRoutePolicyOptInGatesBundleByHostname(t *testing.T) {
 	}
 	var hkAfterBundle model.EdgeRouteBundle
 	mustDecodeJSON(t, hkAfter, &hkAfterBundle)
-	if len(hkAfterBundle.Routes) != 0 {
-		t.Fatalf("expected route to leave HK bundle after US opt-in, got %+v", hkAfterBundle.Routes)
+	if len(hkAfterBundle.Routes) != 1 || hkAfterBundle.Routes[0].RoutePolicy != model.EdgeRoutePolicyRouteAOnly {
+		t.Fatalf("expected route to remain HK Route A-only after mismatched US opt-in, got %+v", hkAfterBundle.Routes)
 	}
 
 	usAfter := httptest.NewRecorder()
@@ -283,8 +285,39 @@ func TestEdgeRoutePolicyOptInGatesBundleByHostname(t *testing.T) {
 	}
 	var usBundle model.EdgeRouteBundle
 	mustDecodeJSON(t, usAfter, &usBundle)
-	if len(usBundle.Routes) != 1 || usBundle.Routes[0].RoutePolicy != model.EdgeRoutePolicyCanary {
-		t.Fatalf("expected one US canary route, got %+v", usBundle.Routes)
+	if len(usBundle.Routes) != 0 {
+		t.Fatalf("expected mismatched policy to keep US bundle empty, got %+v", usBundle.Routes)
+	}
+
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+		ID:          "edge-hk-1",
+		EdgeGroupID: "edge-group-country-hk",
+		Status:      model.EdgeHealthHealthy,
+		Healthy:     true,
+	}); err != nil {
+		t.Fatalf("record healthy HK edge node: %v", err)
+	}
+	hkPut := performJSONRequest(t, server, http.MethodPut, "/v1/edge/route-policies/demo.fugue.pro", platformAdminKey, map[string]any{
+		"edge_group_id": "edge-group-country-hk",
+		"route_policy":  model.EdgeRoutePolicyCanary,
+	})
+	if hkPut.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, hkPut.Code, hkPut.Body.String())
+	}
+	hkLocal := httptest.NewRecorder()
+	hkLocalReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-hk", nil)
+	server.Handler().ServeHTTP(hkLocal, hkLocalReq)
+	if hkLocal.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, hkLocal.Code, hkLocal.Body.String())
+	}
+	var hkLocalBundle model.EdgeRouteBundle
+	mustDecodeJSON(t, hkLocal, &hkLocalBundle)
+	if len(hkLocalBundle.Routes) != 1 ||
+		hkLocalBundle.Routes[0].EdgeGroupID != "edge-group-country-hk" ||
+		hkLocalBundle.Routes[0].RuntimeEdgeGroupID != "edge-group-country-hk" ||
+		hkLocalBundle.Routes[0].RoutePolicy != model.EdgeRoutePolicyCanary ||
+		hkLocalBundle.Routes[0].UpstreamScope != model.EdgeRouteUpstreamScopeLocalService {
+		t.Fatalf("expected local HK runtime canary route, got %+v", hkLocalBundle.Routes)
 	}
 
 	deleted := performJSONRequest(t, server, http.MethodDelete, "/v1/edge/route-policies/demo.fugue.pro", platformAdminKey, nil)

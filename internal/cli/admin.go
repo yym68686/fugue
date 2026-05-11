@@ -856,6 +856,7 @@ func (c *CLI) newAdminClusterCommand() *cobra.Command {
 	cmd.AddCommand(
 		c.newAdminClusterNodesCommand(),
 		c.newAdminClusterNodeCommand(),
+		c.newAdminClusterNodePolicyCommand(),
 		c.newAdminClusterStatusCommand(),
 		c.newAdminClusterPodsCommand(),
 		c.newAdminClusterEventsCommand(),
@@ -869,6 +870,100 @@ func (c *CLI) newAdminClusterCommand() *cobra.Command {
 		c.newAdminClusterJoinScriptCommand(),
 	)
 	return cmd
+}
+
+func (c *CLI) newAdminClusterNodePolicyCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "node-policy",
+		Short: "Inspect cluster node policy reconciliation",
+	}
+	cmd.AddCommand(
+		c.newAdminClusterNodePolicyListCommand(),
+		c.newAdminClusterNodePolicyGetCommand(),
+		c.newAdminClusterNodePolicyStatusCommand(),
+	)
+	return cmd
+}
+
+func (c *CLI) newAdminClusterNodePolicyListCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:     "ls",
+		Aliases: []string{"list"},
+		Short:   "List node policy desired and effective state",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			statuses, err := client.ListClusterNodePolicies()
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"node_policies": statuses})
+			}
+			return writeClusterNodePolicyStatusTable(c.stdout, statuses)
+		},
+	}
+}
+
+func (c *CLI) newAdminClusterNodePolicyGetCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "get <node>",
+		Short: "Show one node policy reconciliation detail",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			status, err := client.GetClusterNodePolicy(args[0])
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"node_policy": status})
+			}
+			return writeClusterNodePolicyDetails(c.stdout, status)
+		},
+	}
+}
+
+func (c *CLI) newAdminClusterNodePolicyStatusCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Summarize node policy reconciliation health",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			summary, statuses, err := client.GetClusterNodePolicyStatus()
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"summary": summary, "node_policies": statuses})
+			}
+			if err := writeKeyValues(c.stdout,
+				kvPair{Key: "total", Value: formatInt(summary.Total)},
+				kvPair{Key: "reconciled", Value: formatInt(summary.Reconciled)},
+				kvPair{Key: "drifted", Value: formatInt(summary.Drifted)},
+				kvPair{Key: "ready", Value: formatInt(summary.Ready)},
+				kvPair{Key: "disk_pressure", Value: formatInt(summary.DiskPressure)},
+				kvPair{Key: "blocked_by_health", Value: formatInt(summary.BlockedByHealth)},
+			); err != nil {
+				return err
+			}
+			if len(statuses) == 0 {
+				return nil
+			}
+			if _, err := fmt.Fprintln(c.stdout, "\n[node_policies]"); err != nil {
+				return err
+			}
+			return writeClusterNodePolicyStatusTable(c.stdout, statuses)
+		},
+	}
 }
 
 func (c *CLI) newAdminClusterNodesCommand() *cobra.Command {

@@ -29,6 +29,12 @@ const (
 
 const (
 	EdgeRouteUpstreamKindKubernetesService = "kubernetes-service"
+	EdgeRouteUpstreamKindMesh              = "mesh"
+)
+
+const (
+	EdgeRouteUpstreamScopeLocalService = "local-service"
+	EdgeRouteUpstreamScopeMesh         = "mesh"
 )
 
 const (
@@ -68,10 +74,15 @@ type EdgeRouteBinding struct {
 	AppID               string    `json:"app_id"`
 	TenantID            string    `json:"tenant_id"`
 	RuntimeID           string    `json:"runtime_id"`
+	RuntimeType         string    `json:"runtime_type,omitempty"`
+	RuntimeEdgeGroupID  string    `json:"runtime_edge_group_id,omitempty"`
+	RuntimeClusterNode  string    `json:"runtime_cluster_node,omitempty"`
 	EdgeGroupID         string    `json:"edge_group_id"`
 	FallbackEdgeGroupID string    `json:"fallback_edge_group_id,omitempty"`
+	PolicyEdgeGroupID   string    `json:"policy_edge_group_id,omitempty"`
 	RoutePolicy         string    `json:"route_policy"`
 	UpstreamKind        string    `json:"upstream_kind"`
+	UpstreamScope       string    `json:"upstream_scope,omitempty"`
 	UpstreamURL         string    `json:"upstream_url,omitempty"`
 	ServicePort         int       `json:"service_port"`
 	TLSPolicy           string    `json:"tls_policy"`

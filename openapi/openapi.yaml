@@ -1095,6 +1095,63 @@ paths:
                 $ref: "#/components/schemas/ClusterNodeListResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/cluster/node-policies:
+    get:
+      operationId: listClusterNodePolicies
+      summary: List Cluster Node Policies
+      tags: [Cluster]
+      x-fugue-handler: handleListClusterNodePolicies
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterNodePolicyListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/cluster/node-policies/status:
+    get:
+      operationId: getClusterNodePolicyStatus
+      summary: Get Cluster Node Policy Status
+      tags: [Cluster]
+      x-fugue-handler: handleGetClusterNodePolicyStatus
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterNodePolicyStatusResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/cluster/node-policies/{name}:
+    get:
+      operationId: getClusterNodePolicy
+      summary: Get Cluster Node Policy
+      tags: [Cluster]
+      x-fugue-handler: handleGetClusterNodePolicy
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterNodePolicyStatusItemResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/cluster/nodes/{name}/diagnosis:
     get:
       operationId: getClusterNodeDiagnosis
@@ -4668,16 +4725,27 @@ components:
           type: string
         runtime_id:
           type: string
+        runtime_type:
+          type: string
+        runtime_edge_group_id:
+          type: string
+        runtime_cluster_node:
+          type: string
         edge_group_id:
           type: string
         fallback_edge_group_id:
+          type: string
+        policy_edge_group_id:
           type: string
         route_policy:
           type: string
           enum: [route_a_only, edge_canary, edge_enabled]
         upstream_kind:
           type: string
-          enum: [kubernetes-service]
+          enum: [kubernetes-service, mesh]
+        upstream_scope:
+          type: string
+          enum: [local-service, mesh]
         upstream_url:
           type: string
         service_port:
@@ -5868,6 +5936,108 @@ components:
           type: boolean
         effective_control_plane_role:
           type: string
+    ClusterNodeTaint:
+      type: object
+      additionalProperties: false
+      required: [key]
+      properties:
+        key:
+          type: string
+        value:
+          type: string
+        effect:
+          type: string
+    ClusterNodePolicyStatus:
+      type: object
+      additionalProperties: false
+      required: [node_name, ready, disk_pressure, node_schedulable, reconciled]
+      properties:
+        node_name:
+          type: string
+        runtime_id:
+          type: string
+        tenant_id:
+          type: string
+        machine_id:
+          type: string
+        policy:
+          $ref: "#/components/schemas/ClusterNodePolicy"
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        taints:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterNodeTaint"
+        conditions:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/ClusterNodeCondition"
+        ready:
+          type: boolean
+        disk_pressure:
+          type: boolean
+        node_schedulable:
+          type: boolean
+        reconciled:
+          type: boolean
+        reconcile_reasons:
+          type: array
+          items:
+            type: string
+        reconcile_error:
+          type: string
+    ClusterNodePolicyStatusSummary:
+      type: object
+      additionalProperties: false
+      required: [total, reconciled, drifted, ready, disk_pressure, blocked_by_health]
+      properties:
+        total:
+          type: integer
+          format: int32
+        reconciled:
+          type: integer
+          format: int32
+        drifted:
+          type: integer
+          format: int32
+        ready:
+          type: integer
+          format: int32
+        disk_pressure:
+          type: integer
+          format: int32
+        blocked_by_health:
+          type: integer
+          format: int32
+    ClusterNodePolicyListResponse:
+      type: object
+      additionalProperties: false
+      required: [node_policies]
+      properties:
+        node_policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterNodePolicyStatus"
+    ClusterNodePolicyStatusItemResponse:
+      type: object
+      additionalProperties: false
+      required: [node_policy]
+      properties:
+        node_policy:
+          $ref: "#/components/schemas/ClusterNodePolicyStatus"
+    ClusterNodePolicyStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [summary, node_policies]
+      properties:
+        summary:
+          $ref: "#/components/schemas/ClusterNodePolicyStatusSummary"
+        node_policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClusterNodePolicyStatus"
     ClusterNodeFilesystemUsage:
       type: object
       additionalProperties: false

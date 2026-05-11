@@ -86,6 +86,11 @@ type telemetry struct {
 	RouteRequests         map[routeMetricKey]uint64
 	RouteStatuses         map[routeStatusMetricKey]uint64
 	RouteUpstreamErrors   map[routeMetricKey]uint64
+	RouteFallbackHits     map[routeMetricKey]uint64
+	RouteWebSocketResults map[routeResultMetricKey]uint64
+	RouteSSEResults       map[routeResultMetricKey]uint64
+	RouteStreamingResults map[routeResultMetricKey]uint64
+	RouteUploadRequests   map[routeMetricKey]uint64
 	RouteLatencyCount     map[routeMetricKey]uint64
 	RouteLatencySum       map[routeMetricKey]float64
 }
@@ -112,6 +117,11 @@ type routeStatusMetricKey struct {
 	StatusCode     int
 }
 
+type routeResultMetricKey struct {
+	RouteMetricKey routeMetricKey
+	Result         string
+}
+
 type edgeProxyObservation struct {
 	Host          string
 	Route         model.EdgeRouteBinding
@@ -121,8 +131,11 @@ type edgeProxyObservation struct {
 	Duration      time.Duration
 	UpstreamError string
 	Proxied       bool
+	FallbackHit   bool
 	WebSocket     bool
 	SSE           bool
+	Streaming     bool
+	Upload        bool
 }
 
 func (e statusError) Error() string {
@@ -380,15 +393,15 @@ func (s *Service) Bundle() (model.EdgeRouteBundle, bool) {
 	return *s.bundle, true
 }
 
-func (s *Service) routeForHost(host string) (model.EdgeRouteBinding, bool) {
+func (s *Service) routeForHost(host string) (model.EdgeRouteBinding, bool, bool) {
 	host = normalizeRouteHost(host)
 	if host == "" {
-		return model.EdgeRouteBinding{}, false
+		return model.EdgeRouteBinding{}, false, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.bundle == nil {
-		return model.EdgeRouteBinding{}, false
+		return model.EdgeRouteBinding{}, false, false
 	}
 	var fallback model.EdgeRouteBinding
 	for _, route := range s.bundle.Routes {
@@ -399,16 +412,16 @@ func (s *Service) routeForHost(host string) (model.EdgeRouteBinding, bool) {
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive) {
-			return route, true
+			return route, true, false
 		}
 		if fallback.Hostname == "" {
 			fallback = route
 		}
 	}
 	if fallback.Hostname != "" {
-		return fallback, true
+		return fallback, true, true
 	}
-	return model.EdgeRouteBinding{}, false
+	return model.EdgeRouteBinding{}, false, false
 }
 
 func (s *Service) hasBundle() bool {
@@ -441,7 +454,7 @@ func (s *Service) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "domain is required", http.StatusBadRequest)
 		return
 	}
-	route, ok := s.routeForHost(host)
+	route, ok, _ := s.routeForHost(host)
 	if !ok {
 		http.Error(w, "domain is not in the current route bundle", http.StatusForbidden)
 		return
@@ -456,15 +469,18 @@ func (s *Service) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
 func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	startedAt := time.Now()
 	host := normalizeRouteHost(firstNonEmptyHeader(r, "X-Fugue-Edge-Route-Host", r.Host))
-	route, ok := s.routeForHost(host)
+	route, ok, fallbackHit := s.routeForHost(host)
 	observed := edgeProxyObservation{
-		Host:      host,
-		Route:     route,
-		Method:    r.Method,
-		Path:      safeProxyLogPath(r),
-		WebSocket: edgeRequestIsWebSocket(r),
-		SSE:       edgeRequestWantsSSE(r),
+		Host:        host,
+		Route:       route,
+		Method:      r.Method,
+		Path:        safeProxyLogPath(r),
+		FallbackHit: fallbackHit,
+		WebSocket:   edgeRequestIsWebSocket(r),
+		SSE:         edgeRequestWantsSSE(r),
+		Upload:      edgeRequestHasUpload(r),
 	}
+	observed.Streaming = observed.WebSocket || observed.SSE
 	defer func() {
 		observed.Duration = time.Since(startedAt)
 		s.recordProxyObservation(observed)
@@ -605,6 +621,31 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "# TYPE fugue_edge_route_upstream_errors_total counter")
 	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteUpstreamErrors) {
 		fmt.Fprintf(w, "fugue_edge_route_upstream_errors_total{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteUpstreamErrors[key])
+	}
+	fmt.Fprintln(w, "# HELP fugue_edge_route_fallback_hits_total Edge data-plane requests that matched a non-active fallback route.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_route_fallback_hits_total counter")
+	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteFallbackHits) {
+		fmt.Fprintf(w, "fugue_edge_route_fallback_hits_total{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteFallbackHits[key])
+	}
+	fmt.Fprintln(w, "# HELP fugue_edge_route_websocket_total Edge data-plane websocket requests by route and result.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_route_websocket_total counter")
+	for _, key := range sortedRouteResultMetricKeys(snapshot.Metrics.RouteWebSocketResults) {
+		fmt.Fprintf(w, "fugue_edge_route_websocket_total{%s,result=\"%s\"} %d\n", routeMetricLabels(key.RouteMetricKey), prometheusLabelValue(key.Result), snapshot.Metrics.RouteWebSocketResults[key])
+	}
+	fmt.Fprintln(w, "# HELP fugue_edge_route_sse_total Edge data-plane SSE requests by route and result.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_route_sse_total counter")
+	for _, key := range sortedRouteResultMetricKeys(snapshot.Metrics.RouteSSEResults) {
+		fmt.Fprintf(w, "fugue_edge_route_sse_total{%s,result=\"%s\"} %d\n", routeMetricLabels(key.RouteMetricKey), prometheusLabelValue(key.Result), snapshot.Metrics.RouteSSEResults[key])
+	}
+	fmt.Fprintln(w, "# HELP fugue_edge_route_streaming_total Edge data-plane streaming requests by route and result.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_route_streaming_total counter")
+	for _, key := range sortedRouteResultMetricKeys(snapshot.Metrics.RouteStreamingResults) {
+		fmt.Fprintf(w, "fugue_edge_route_streaming_total{%s,result=\"%s\"} %d\n", routeMetricLabels(key.RouteMetricKey), prometheusLabelValue(key.Result), snapshot.Metrics.RouteStreamingResults[key])
+	}
+	fmt.Fprintln(w, "# HELP fugue_edge_route_upload_requests_total Edge data-plane upload requests by route.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_route_upload_requests_total counter")
+	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteUploadRequests) {
+		fmt.Fprintf(w, "fugue_edge_route_upload_requests_total{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteUploadRequests[key])
 	}
 	fmt.Fprintln(w, "# HELP fugue_edge_route_upstream_latency_seconds Edge data-plane upstream proxy latency by route.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_route_upstream_latency_seconds summary")
@@ -863,7 +904,16 @@ func (s *Service) routeAllowedForThisEdge(route model.EdgeRouteBinding) bool {
 	if edgeGroupID == "" {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(route.EdgeGroupID), edgeGroupID)
+	if !strings.EqualFold(strings.TrimSpace(route.EdgeGroupID), edgeGroupID) {
+		return false
+	}
+	if runtimeEdgeGroupID := strings.TrimSpace(route.RuntimeEdgeGroupID); runtimeEdgeGroupID != "" && !strings.EqualFold(runtimeEdgeGroupID, edgeGroupID) {
+		return false
+	}
+	if policyEdgeGroupID := strings.TrimSpace(route.PolicyEdgeGroupID); policyEdgeGroupID != "" && !strings.EqualFold(policyEdgeGroupID, edgeGroupID) {
+		return false
+	}
+	return true
 }
 
 func (s *Service) writeCache(cached cacheFile) error {
@@ -1037,11 +1087,42 @@ func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 	}
 	s.metrics.RouteRequests[key]++
 	s.metrics.RouteStatuses[statusKey]++
+	if observed.FallbackHit {
+		if s.metrics.RouteFallbackHits == nil {
+			s.metrics.RouteFallbackHits = make(map[routeMetricKey]uint64)
+		}
+		s.metrics.RouteFallbackHits[key]++
+	}
 	if strings.TrimSpace(observed.UpstreamError) != "" {
 		if s.metrics.RouteUpstreamErrors == nil {
 			s.metrics.RouteUpstreamErrors = make(map[routeMetricKey]uint64)
 		}
 		s.metrics.RouteUpstreamErrors[key]++
+	}
+	result := edgeProxyObservationResult(observed)
+	if observed.WebSocket {
+		if s.metrics.RouteWebSocketResults == nil {
+			s.metrics.RouteWebSocketResults = make(map[routeResultMetricKey]uint64)
+		}
+		s.metrics.RouteWebSocketResults[routeResultMetricKey{RouteMetricKey: key, Result: result}]++
+	}
+	if observed.SSE {
+		if s.metrics.RouteSSEResults == nil {
+			s.metrics.RouteSSEResults = make(map[routeResultMetricKey]uint64)
+		}
+		s.metrics.RouteSSEResults[routeResultMetricKey{RouteMetricKey: key, Result: result}]++
+	}
+	if observed.Streaming {
+		if s.metrics.RouteStreamingResults == nil {
+			s.metrics.RouteStreamingResults = make(map[routeResultMetricKey]uint64)
+		}
+		s.metrics.RouteStreamingResults[routeResultMetricKey{RouteMetricKey: key, Result: result}]++
+	}
+	if observed.Upload {
+		if s.metrics.RouteUploadRequests == nil {
+			s.metrics.RouteUploadRequests = make(map[routeMetricKey]uint64)
+		}
+		s.metrics.RouteUploadRequests[key]++
 	}
 	if observed.Proxied {
 		if s.metrics.RouteLatencyCount == nil {
@@ -1053,6 +1134,19 @@ func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 		s.metrics.RouteLatencyCount[key]++
 		s.metrics.RouteLatencySum[key] += durationSeconds(observed.Duration)
 	}
+}
+
+func edgeProxyObservationResult(observed edgeProxyObservation) string {
+	if strings.TrimSpace(observed.UpstreamError) != "" {
+		return "error"
+	}
+	if observed.StatusCode >= 200 && observed.StatusCode < 400 {
+		return "success"
+	}
+	if observed.WebSocket && observed.StatusCode == http.StatusSwitchingProtocols {
+		return "success"
+	}
+	return "error"
 }
 
 func (s *Service) statusForBundleLocked(bundle model.EdgeRouteBundle, syncAt time.Time, successAt *time.Time, stale bool) Status {
@@ -1103,6 +1197,11 @@ func (s *Service) metricSnapshot() metricSnapshot {
 	out.Metrics.RouteRequests = cloneRouteCounterMap(s.metrics.RouteRequests)
 	out.Metrics.RouteStatuses = cloneRouteStatusCounterMap(s.metrics.RouteStatuses)
 	out.Metrics.RouteUpstreamErrors = cloneRouteCounterMap(s.metrics.RouteUpstreamErrors)
+	out.Metrics.RouteFallbackHits = cloneRouteCounterMap(s.metrics.RouteFallbackHits)
+	out.Metrics.RouteWebSocketResults = cloneRouteResultCounterMap(s.metrics.RouteWebSocketResults)
+	out.Metrics.RouteSSEResults = cloneRouteResultCounterMap(s.metrics.RouteSSEResults)
+	out.Metrics.RouteStreamingResults = cloneRouteResultCounterMap(s.metrics.RouteStreamingResults)
+	out.Metrics.RouteUploadRequests = cloneRouteCounterMap(s.metrics.RouteUploadRequests)
 	out.Metrics.RouteLatencyCount = cloneRouteCounterMap(s.metrics.RouteLatencyCount)
 	out.Metrics.RouteLatencySum = cloneRouteFloatMap(s.metrics.RouteLatencySum)
 	if s.bundle != nil && !s.bundle.GeneratedAt.IsZero() {
@@ -1167,7 +1266,7 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 		observed.StatusCode = http.StatusOK
 	}
 	s.Logger.Printf(
-		"edge_proxy_request host=%s app=%s tenant=%s runtime=%s route_kind=%s method=%s path=%s status=%d duration_ms=%d upstream=%s upstream_error=%t websocket=%t sse=%t",
+		"edge_proxy_request host=%s app=%s tenant=%s runtime=%s route_kind=%s method=%s path=%s status=%d duration_ms=%d upstream=%s upstream_error=%t fallback_hit=%t websocket=%t sse=%t streaming=%t upload=%t",
 		observed.Host,
 		strings.TrimSpace(observed.Route.AppID),
 		strings.TrimSpace(observed.Route.TenantID),
@@ -1179,8 +1278,11 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 		observed.Duration.Milliseconds(),
 		strings.TrimSpace(observed.Route.UpstreamURL),
 		strings.TrimSpace(observed.UpstreamError) != "",
+		observed.FallbackHit,
 		observed.WebSocket,
 		observed.SSE,
+		observed.Streaming,
+		observed.Upload,
 	)
 }
 
@@ -1358,6 +1460,18 @@ func edgeRequestWantsSSE(r *http.Request) bool {
 	return false
 }
 
+func edgeRequestHasUpload(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(r.Method)) {
+	case http.MethodPost, http.MethodPut, http.MethodPatch:
+	default:
+		return false
+	}
+	return r.ContentLength != 0 || len(r.TransferEncoding) > 0
+}
+
 func safeProxyLogPath(r *http.Request) string {
 	if r == nil || r.URL == nil {
 		return ""
@@ -1394,6 +1508,17 @@ func cloneRouteStatusCounterMap(in map[routeStatusMetricKey]uint64) map[routeSta
 	return out
 }
 
+func cloneRouteResultCounterMap(in map[routeResultMetricKey]uint64) map[routeResultMetricKey]uint64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[routeResultMetricKey]uint64, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
 func cloneRouteFloatMap(in map[routeMetricKey]float64) map[routeMetricKey]float64 {
 	if len(in) == 0 {
 		return nil
@@ -1403,6 +1528,28 @@ func cloneRouteFloatMap(in map[routeMetricKey]float64) map[routeMetricKey]float6
 		out[key] = value
 	}
 	return out
+}
+
+func sortedRouteResultMetricKeys(values map[routeResultMetricKey]uint64) []routeResultMetricKey {
+	keys := make([]routeResultMetricKey, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		left := keys[i].RouteMetricKey
+		right := keys[j].RouteMetricKey
+		if left.Hostname != right.Hostname {
+			return left.Hostname < right.Hostname
+		}
+		if left.AppID != right.AppID {
+			return left.AppID < right.AppID
+		}
+		if left.RouteKind != right.RouteKind {
+			return left.RouteKind < right.RouteKind
+		}
+		return keys[i].Result < keys[j].Result
+	})
+	return keys
 }
 
 func sortedRouteMetricKeys[V any](values map[routeMetricKey]V) []routeMetricKey {

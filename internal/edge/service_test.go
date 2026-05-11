@@ -434,6 +434,8 @@ func TestApplyCaddyConfigBuildsHostRoutesForBundle(t *testing.T) {
 		`"dial":"127.0.0.1:7833"`,
 		`"X-Fugue-Edge-Route-Host":["demo.fugue.pro"]`,
 		`"X-Fugue-Edge-Route-Host":["www.customer.com"]`,
+		`"default_logger_name":"fugue_edge_access"`,
+		`"include":["http.log.access.fugue_edge_access"]`,
 	} {
 		if !strings.Contains(loads[0], want) {
 			t.Fatalf("caddy config missing %q:\n%s", want, loads[0])
@@ -553,11 +555,20 @@ func TestBuildCaddyConfigSkipsDifferentEdgeGroupRoutes(t *testing.T) {
 
 	bundle := testBundle("routegen_edge_group_caddy")
 	bundle.Routes[0].EdgeGroupID = "edge-group-country-us"
+	bundle.Routes[0].RuntimeEdgeGroupID = "edge-group-country-us"
+	bundle.Routes[0].PolicyEdgeGroupID = "edge-group-country-us"
 	hkRoute := bundle.Routes[0]
 	hkRoute.Hostname = "hk.fugue.pro"
 	hkRoute.EdgeGroupID = "edge-group-country-hk"
+	hkRoute.RuntimeEdgeGroupID = "edge-group-country-hk"
+	hkRoute.PolicyEdgeGroupID = "edge-group-country-hk"
 	hkRoute.RouteGeneration = "routegen_hk"
-	bundle.Routes = append(bundle.Routes, hkRoute)
+	remoteRuntimeRoute := bundle.Routes[0]
+	remoteRuntimeRoute.Hostname = "remote-runtime.fugue.pro"
+	remoteRuntimeRoute.RuntimeEdgeGroupID = "edge-group-country-hk"
+	remoteRuntimeRoute.PolicyEdgeGroupID = "edge-group-country-us"
+	remoteRuntimeRoute.RouteGeneration = "routegen_remote_runtime"
+	bundle.Routes = append(bundle.Routes, hkRoute, remoteRuntimeRoute)
 
 	service := NewService(config.EdgeConfig{
 		APIURL:               "https://api.example.invalid",
@@ -582,6 +593,9 @@ func TestBuildCaddyConfigSkipsDifferentEdgeGroupRoutes(t *testing.T) {
 	}
 	if strings.Contains(configText, "hk.fugue.pro") {
 		t.Fatalf("different edge group host must not be emitted to caddy config:\n%s", configText)
+	}
+	if strings.Contains(configText, "remote-runtime.fugue.pro") {
+		t.Fatalf("remote runtime edge group host must not be emitted to caddy config:\n%s", configText)
 	}
 }
 
@@ -796,6 +810,9 @@ func TestProxyHandlerRoutesPlatformAndCustomDomainsWithStreamingMetrics(t *testi
 		`fugue_edge_route_requests_total{hostname="www.customer.com",app="app_demo",route_kind="custom-domain"} 1`,
 		`fugue_edge_route_status_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",status="201"} 1`,
 		`fugue_edge_route_status_total{hostname="www.customer.com",app="app_demo",route_kind="custom-domain",status="200"} 1`,
+		`fugue_edge_route_upload_requests_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 1`,
+		`fugue_edge_route_sse_total{hostname="www.customer.com",app="app_demo",route_kind="custom-domain",result="success"} 1`,
+		`fugue_edge_route_streaming_total{hostname="www.customer.com",app="app_demo",route_kind="custom-domain",result="success"} 1`,
 		`fugue_edge_route_upstream_latency_seconds_count{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 1`,
 		`fugue_edge_route_upstream_latency_seconds_count{hostname="www.customer.com",app="app_demo",route_kind="custom-domain"} 1`,
 	} {
@@ -852,12 +869,21 @@ func TestProxyHandlerSkipsDifferentEdgeGroupRoutes(t *testing.T) {
 
 	bundle := testBundle("routegen_edge_group_proxy")
 	bundle.Routes[0].EdgeGroupID = "edge-group-country-us"
+	bundle.Routes[0].RuntimeEdgeGroupID = "edge-group-country-us"
+	bundle.Routes[0].PolicyEdgeGroupID = "edge-group-country-us"
 	bundle.Routes[0].UpstreamURL = backend.URL
 	hkRoute := bundle.Routes[0]
 	hkRoute.Hostname = "hk.fugue.pro"
 	hkRoute.EdgeGroupID = "edge-group-country-hk"
+	hkRoute.RuntimeEdgeGroupID = "edge-group-country-hk"
+	hkRoute.PolicyEdgeGroupID = "edge-group-country-hk"
 	hkRoute.RouteGeneration = "routegen_hk"
-	bundle.Routes = append(bundle.Routes, hkRoute)
+	remoteRuntimeRoute := bundle.Routes[0]
+	remoteRuntimeRoute.Hostname = "remote-runtime.fugue.pro"
+	remoteRuntimeRoute.RuntimeEdgeGroupID = "edge-group-country-hk"
+	remoteRuntimeRoute.PolicyEdgeGroupID = "edge-group-country-us"
+	remoteRuntimeRoute.RouteGeneration = "routegen_remote_runtime"
+	bundle.Routes = append(bundle.Routes, hkRoute, remoteRuntimeRoute)
 
 	service := NewService(config.EdgeConfig{
 		APIURL:      "https://api.example.invalid",
@@ -878,6 +904,13 @@ func TestProxyHandlerSkipsDifferentEdgeGroupRoutes(t *testing.T) {
 	service.ProxyHandler().ServeHTTP(otherGroup, otherGroupReq)
 	if otherGroup.Code != http.StatusNotFound {
 		t.Fatalf("expected different edge group route to be ignored by edge proxy, got %d body=%s", otherGroup.Code, otherGroup.Body.String())
+	}
+
+	remoteRuntime := httptest.NewRecorder()
+	remoteRuntimeReq := httptest.NewRequest(http.MethodGet, "http://remote-runtime.fugue.pro/", nil)
+	service.ProxyHandler().ServeHTTP(remoteRuntime, remoteRuntimeReq)
+	if remoteRuntime.Code != http.StatusNotFound {
+		t.Fatalf("expected remote runtime edge group route to be ignored by edge proxy, got %d body=%s", remoteRuntime.Code, remoteRuntime.Body.String())
 	}
 }
 
@@ -902,8 +935,13 @@ func TestProxyHandlerReturnsUnavailableForInactiveRoute(t *testing.T) {
 		t.Fatalf("expected disabled route to return 503, got %d body=%s", recorder.Code, recorder.Body.String())
 	}
 	metrics := renderMetrics(t, service)
-	if !strings.Contains(metrics, `fugue_edge_route_status_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",status="503"} 1`) {
-		t.Fatalf("expected 503 route metric, got %s", metrics)
+	for _, want := range []string{
+		`fugue_edge_route_status_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",status="503"} 1`,
+		`fugue_edge_route_fallback_hits_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 1`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("metrics missing %q:\n%s", want, metrics)
+		}
 	}
 }
 
@@ -1036,7 +1074,7 @@ func TestProxyHandlerSupportsWebSocket(t *testing.T) {
 		t.Fatal("timed out waiting for backend websocket validation")
 	}
 
-	wantMetric := `fugue_edge_route_status_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",status="101"} 1`
+	wantMetric := `fugue_edge_route_websocket_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",result="success"} 1`
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		metrics := renderMetrics(t, service)

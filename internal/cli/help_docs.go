@@ -585,6 +585,7 @@ fugue admin runtime token create edge-a --ttl 3600
 	"fugue admin cluster": {
 		Example: strings.TrimSpace(`
 fugue admin cluster status
+fugue admin cluster node-policy status
 fugue admin cluster pods --namespace kube-system
 fugue admin cluster dns resolve api.github.com --server 10.43.0.10
 fugue admin cluster net websocket my-app --path /ws
@@ -610,6 +611,36 @@ List Kubernetes events for system and managed workloads.
 
 Use --namespace, --kind, --name, --type, and --reason to narrow noisy clusters down to the object you are investigating.
 `),
+	},
+	"fugue admin cluster node-policy": {
+		Long: strings.TrimSpace(`
+Inspect the desired NodePolicy roles alongside the actual Kubernetes labels, taints, health gates, and reconcile drift for joined nodes.
+
+Use this before expanding edge, DNS, or runtime scheduling so node intent and Kubernetes reality are visible from the CLI.
+`),
+		Example: strings.TrimSpace(`
+fugue admin cluster node-policy ls
+fugue admin cluster node-policy get ns101351
+fugue admin cluster node-policy status
+`),
+	},
+	"fugue admin cluster node-policy ls": {
+		Long: strings.TrimSpace(`
+List nodes with desired NodePolicy roles, schedulability, Ready and DiskPressure gates, and reconcile state.
+`),
+		Example: "fugue admin cluster node-policy ls",
+	},
+	"fugue admin cluster node-policy get": {
+		Long: strings.TrimSpace(`
+Show one node's desired roles, actual Kubernetes labels and taints, health gate state, and reconcile drift reasons.
+`),
+		Example: "fugue admin cluster node-policy get ns101351",
+	},
+	"fugue admin cluster node-policy status": {
+		Long: strings.TrimSpace(`
+Summarize NodePolicy convergence across the cluster, including unhealthy and unreconciled nodes.
+`),
+		Example: "fugue admin cluster node-policy status",
 	},
 	"fugue admin cluster logs": {
 		Long: strings.TrimSpace(`

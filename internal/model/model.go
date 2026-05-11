@@ -730,6 +730,12 @@ type ClusterNode struct {
 	CreatedAt        *time.Time                      `json:"created_at,omitempty"`
 }
 
+type ClusterNodeTaint struct {
+	Key    string `json:"key"`
+	Value  string `json:"value,omitempty"`
+	Effect string `json:"effect,omitempty"`
+}
+
 type ClusterNodeMachine struct {
 	ID             string `json:"id"`
 	Scope          string `json:"scope"`
@@ -758,6 +764,32 @@ type ClusterNodePolicy struct {
 	EffectiveInternalMaintenance bool   `json:"effective_internal_maintenance"`
 	EffectiveSchedulable         bool   `json:"effective_schedulable"`
 	EffectiveControlPlaneRole    string `json:"effective_control_plane_role,omitempty"`
+}
+
+type ClusterNodePolicyStatus struct {
+	NodeName         string                          `json:"node_name"`
+	RuntimeID        string                          `json:"runtime_id,omitempty"`
+	TenantID         string                          `json:"tenant_id,omitempty"`
+	MachineID        string                          `json:"machine_id,omitempty"`
+	Policy           *ClusterNodePolicy              `json:"policy,omitempty"`
+	Labels           map[string]string               `json:"labels,omitempty"`
+	Taints           []ClusterNodeTaint              `json:"taints,omitempty"`
+	Conditions       map[string]ClusterNodeCondition `json:"conditions,omitempty"`
+	Ready            bool                            `json:"ready"`
+	DiskPressure     bool                            `json:"disk_pressure"`
+	NodeSchedulable  bool                            `json:"node_schedulable"`
+	Reconciled       bool                            `json:"reconciled"`
+	ReconcileReasons []string                        `json:"reconcile_reasons,omitempty"`
+	ReconcileError   string                          `json:"reconcile_error,omitempty"`
+}
+
+type ClusterNodePolicyStatusSummary struct {
+	Total           int `json:"total"`
+	Reconciled      int `json:"reconciled"`
+	Drifted         int `json:"drifted"`
+	Ready           int `json:"ready"`
+	DiskPressure    int `json:"disk_pressure"`
+	BlockedByHealth int `json:"blocked_by_health"`
 }
 
 type ControlPlaneComponent struct {

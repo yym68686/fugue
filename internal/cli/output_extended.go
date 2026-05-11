@@ -566,6 +566,100 @@ func writeClusterNodeTable(w io.Writer, nodes []model.ClusterNode) error {
 	return tw.Flush()
 }
 
+func writeClusterNodePolicyStatusTable(w io.Writer, statuses []model.ClusterNodePolicyStatus) error {
+	sorted := append([]model.ClusterNodePolicyStatus(nil), statuses...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return strings.Compare(sorted[i].NodeName, sorted[j].NodeName) < 0
+	})
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "NODE\tRUNTIME\tAPP\tBUILD\tSHARED\tEDGE\tDNS\tINTERNAL\tCP\tREADY\tDISK\tHEALTH\tRECONCILED\tREASONS"); err != nil {
+		return err
+	}
+	for _, status := range sorted {
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			status.NodeName,
+			firstNonEmpty(status.RuntimeID, "-"),
+			firstNonEmpty(formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowAppRuntime }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveAppRuntime }), "-"),
+			firstNonEmpty(formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowBuilds }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveBuilds }), "-"),
+			firstNonEmpty(formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowSharedPool }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveSharedPool }), "-"),
+			firstNonEmpty(formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowEdge }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveEdge }), "-"),
+			firstNonEmpty(formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowDNS }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveDNS }), "-"),
+			firstNonEmpty(formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowInternalMaintenance }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveInternalMaintenance }), "-"),
+			firstNonEmpty(clusterNodePolicyControlPlane(status.Policy), "-"),
+			clusterNodeBoolLabel(status.Ready),
+			clusterNodeBoolLabel(status.DiskPressure),
+			firstNonEmpty(clusterNodePolicyHealth(status), "-"),
+			clusterNodeBoolLabel(status.Reconciled),
+			firstNonEmpty(strings.Join(status.ReconcileReasons, "; "), "-"),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func writeClusterNodePolicyDetails(w io.Writer, status model.ClusterNodePolicyStatus) error {
+	if err := writeKeyValues(w,
+		kvPair{Key: "node", Value: status.NodeName},
+		kvPair{Key: "runtime", Value: firstNonEmpty(status.RuntimeID, "-")},
+		kvPair{Key: "tenant", Value: firstNonEmpty(status.TenantID, "-")},
+		kvPair{Key: "machine", Value: firstNonEmpty(status.MachineID, "-")},
+		kvPair{Key: "ready", Value: clusterNodeBoolLabel(status.Ready)},
+		kvPair{Key: "disk_pressure", Value: clusterNodeBoolLabel(status.DiskPressure)},
+		kvPair{Key: "node_schedulable", Value: clusterNodeBoolLabel(status.NodeSchedulable)},
+		kvPair{Key: "reconciled", Value: clusterNodeBoolLabel(status.Reconciled)},
+		kvPair{Key: "reconcile_reasons", Value: firstNonEmpty(strings.Join(status.ReconcileReasons, "; "), "-")},
+	); err != nil {
+		return err
+	}
+	if status.Policy != nil {
+		if _, err := fmt.Fprintln(w, "\n[policy]"); err != nil {
+			return err
+		}
+		if err := writeKeyValues(w,
+			kvPair{Key: "app_runtime", Value: formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowAppRuntime }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveAppRuntime })},
+			kvPair{Key: "builds", Value: formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowBuilds }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveBuilds })},
+			kvPair{Key: "shared_pool", Value: formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowSharedPool }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveSharedPool })},
+			kvPair{Key: "edge", Value: formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowEdge }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveEdge })},
+			kvPair{Key: "dns", Value: formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowDNS }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveDNS })},
+			kvPair{Key: "internal_maintenance", Value: formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowInternalMaintenance }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveInternalMaintenance })},
+			kvPair{Key: "control_plane", Value: clusterNodePolicyControlPlane(status.Policy)},
+			kvPair{Key: "node_mode", Value: firstNonEmpty(status.Policy.NodeMode, "-")},
+			kvPair{Key: "node_health", Value: firstNonEmpty(status.Policy.NodeHealth, "-")},
+		); err != nil {
+			return err
+		}
+	}
+	if len(status.Labels) > 0 {
+		if _, err := fmt.Fprintln(w, "\n[labels]"); err != nil {
+			return err
+		}
+		if err := writeStringMap(w, status.Labels); err != nil {
+			return err
+		}
+	}
+	if len(status.Taints) > 0 {
+		if _, err := fmt.Fprintln(w, "\n[taints]"); err != nil {
+			return err
+		}
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		if _, err := fmt.Fprintln(tw, "KEY\tVALUE\tEFFECT"); err != nil {
+			return err
+		}
+		for _, taint := range status.Taints {
+			if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\n", taint.Key, firstNonEmpty(taint.Value, "-"), firstNonEmpty(taint.Effect, "-")); err != nil {
+				return err
+			}
+		}
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func formatClusterNodePolicyToggle(policy *model.ClusterNodePolicy, desired func(*model.ClusterNodePolicy) bool, effective func(*model.ClusterNodePolicy) bool) string {
 	if policy == nil || desired == nil || effective == nil {
 		return ""
@@ -597,6 +691,23 @@ func clusterNodePolicyControlPlane(policy *model.ClusterNodePolicy) string {
 		return desired
 	}
 	return desired + "/" + effective
+}
+
+func clusterNodeBoolLabel(value bool) string {
+	if value {
+		return "yes"
+	}
+	return "no"
+}
+
+func clusterNodePolicyHealth(status model.ClusterNodePolicyStatus) string {
+	if status.Policy != nil && strings.TrimSpace(status.Policy.NodeHealth) != "" {
+		return strings.TrimSpace(status.Policy.NodeHealth)
+	}
+	if status.NodeSchedulable {
+		return "ready"
+	}
+	return "blocked"
 }
 
 func writeControlPlaneComponentTable(w io.Writer, components []model.ControlPlaneComponent) error {
