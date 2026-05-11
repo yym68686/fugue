@@ -400,6 +400,14 @@ edge:
   nodeSelector:
     fugue.io/role.edge: "true"
     fugue.io/schedulable: "true"
+  tolerations:
+    - key: fugue.io/dedicated
+      operator: Equal
+      value: edge
+      effect: NoSchedule
+    - key: fugue.io/tenant
+      operator: Exists
+      effect: NoSchedule
 cloudnative-pg:
   replicaCount: 2
   priorityClassName: system-cluster-critical
@@ -523,6 +531,18 @@ EOF
     printf '  nodeSelector:\n'
     printf '    fugue.io/role.dns: "true"\n'
     printf '    fugue.io/schedulable: "true"\n'
+    printf '  tolerations:\n'
+    printf '    - key: fugue.io/dedicated\n'
+    printf '      operator: Equal\n'
+    printf '      value: dns\n'
+    printf '      effect: NoSchedule\n'
+    printf '    - key: fugue.io/dedicated\n'
+    printf '      operator: Equal\n'
+    printf '      value: edge\n'
+    printf '      effect: NoSchedule\n'
+    printf '    - key: fugue.io/tenant\n'
+    printf '      operator: Exists\n'
+    printf '      effect: NoSchedule\n'
     printf '  publicHostPorts:\n'
     printf '    enabled: %s\n' "${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED}"
     printf '  udpAddr: %s\n' "$(yaml_quote "${FUGUE_DNS_UDP_ADDR}")"

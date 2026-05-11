@@ -65,9 +65,9 @@ func TestUpgradeScriptPinsTopologyLabelerTolerations(t *testing.T) {
 	if blockStart == -1 {
 		t.Fatalf("expected upgrade script to override topology-labeler tolerations: %s", path)
 	}
-	blockEnd := strings.Index(script[blockStart:], "\ncloudnative-pg:")
+	blockEnd := strings.Index(script[blockStart:], "\nedge:")
 	if blockEnd == -1 {
-		t.Fatalf("expected topology-labeler toleration override before cloudnative-pg block: %s", path)
+		t.Fatalf("expected topology-labeler toleration override before edge block: %s", path)
 	}
 	block := script[blockStart : blockStart+blockEnd]
 	for _, want := range []string{
@@ -103,6 +103,7 @@ func TestUpgradeScriptPinsEdgeDNSHealthyNodeSelectors(t *testing.T) {
 	script := string(data)
 	for _, want := range []string{
 		"edge:\n  nodeSelector:\n    fugue.io/role.edge: \"true\"\n    fugue.io/schedulable: \"true\"",
+		"key: fugue.io/tenant\n      operator: Exists\n      effect: NoSchedule",
 		"fugue.io/role.dns: \"true\"",
 		"fugue.io/schedulable: \"true\"",
 	} {
