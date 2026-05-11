@@ -158,6 +158,7 @@ func clusterNodePolicyReconcileReasons(snapshot clusterNodeSnapshot, machine *mo
 	if machineHasSavedPolicy(machine) {
 		node := kubeNode{}
 		node.Metadata.Labels = snapshot.labels
+		node.Status.Conditions = kubeNodeConditionsFromClusterNodeConditions(snapshot.node.Conditions)
 		if _, changed := buildMachineNodeLabelsPatch(node, *machine, runtimeObj); changed {
 			reasons = append(reasons, "node policy labels drift from desired policy")
 		}
@@ -178,6 +179,26 @@ func clusterNodePolicyTaintViews(taints []kubeNodeTaint) []model.ClusterNodeTain
 			Key:    strings.TrimSpace(taint.Key),
 			Value:  strings.TrimSpace(taint.Value),
 			Effect: strings.TrimSpace(taint.Effect),
+		})
+	}
+	return out
+}
+
+func kubeNodeConditionsFromClusterNodeConditions(in map[string]model.ClusterNodeCondition) []kubeNodeCondition {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]kubeNodeCondition, 0, len(in))
+	for conditionType, condition := range in {
+		conditionType = strings.TrimSpace(conditionType)
+		if conditionType == "" {
+			continue
+		}
+		out = append(out, kubeNodeCondition{
+			Type:    conditionType,
+			Status:  condition.Status,
+			Reason:  condition.Reason,
+			Message: condition.Message,
 		})
 	}
 	return out

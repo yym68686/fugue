@@ -545,6 +545,18 @@ func TestSetClusterNodePolicySeedsBootstrapControlPlaneMachine(t *testing.T) {
 	if machine.Policy.DesiredControlPlaneRole != model.MachineControlPlaneRoleCandidate {
 		t.Fatalf("expected stored machine role %q, got %q", model.MachineControlPlaneRoleCandidate, machine.Policy.DesiredControlPlaneRole)
 	}
+
+	statusRecorder := performJSONRequest(t, server, http.MethodGet, "/v1/cluster/node-policies/gcp1", "bootstrap-secret", nil)
+	if statusRecorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, statusRecorder.Code, statusRecorder.Body.String())
+	}
+	var statusResponse struct {
+		NodePolicy model.ClusterNodePolicyStatus `json:"node_policy"`
+	}
+	mustDecodeJSON(t, statusRecorder, &statusResponse)
+	if !statusResponse.NodePolicy.Reconciled || len(statusResponse.NodePolicy.ReconcileReasons) != 0 {
+		t.Fatalf("expected patched healthy node policy to be reconciled, got %+v", statusResponse.NodePolicy)
+	}
 }
 
 func TestBuildMachineNodeMergePatchAppliesNodePolicyRolesAndHealthGate(t *testing.T) {
@@ -807,6 +819,7 @@ func newBootstrapControlPlaneKubeServerWithLabels(t *testing.T, extraLabels map[
 			"topology.kubernetes.io/region":         "us-central1",
 			"topology.kubernetes.io/zone":           "us-central1-a",
 		}
+		taints []map[string]string
 	)
 	for key, value := range extraLabels {
 		labels[key] = value
@@ -819,14 +832,14 @@ func newBootstrapControlPlaneKubeServerWithLabels(t *testing.T, extraLabels map[
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes":
 			mu.Lock()
-			node := bootstrapControlPlaneKubeNodeJSON(labels)
+			node := bootstrapControlPlaneKubeNodeJSON(labels, taints)
 			mu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"items": []map[string]any{node},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes/gcp1":
 			mu.Lock()
-			node := bootstrapControlPlaneKubeNodeJSON(labels)
+			node := bootstrapControlPlaneKubeNodeJSON(labels, taints)
 			mu.Unlock()
 			_ = json.NewEncoder(w).Encode(node)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes/gcp1/proxy/stats/summary":
@@ -852,6 +865,9 @@ func newBootstrapControlPlaneKubeServerWithLabels(t *testing.T, extraLabels map[
 				Metadata struct {
 					Labels map[string]*string `json:"labels"`
 				} `json:"metadata"`
+				Spec struct {
+					Taints []map[string]string `json:"taints"`
+				} `json:"spec"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Fatalf("decode node patch: %v", err)
@@ -864,6 +880,9 @@ func newBootstrapControlPlaneKubeServerWithLabels(t *testing.T, extraLabels map[
 				}
 				labels[key] = *value
 			}
+			if payload.Spec.Taints != nil {
+				taints = payload.Spec.Taints
+			}
 			mu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
 		default:
@@ -872,12 +891,12 @@ func newBootstrapControlPlaneKubeServerWithLabels(t *testing.T, extraLabels map[
 	}))
 }
 
-func bootstrapControlPlaneKubeNodeJSON(labels map[string]string) map[string]any {
+func bootstrapControlPlaneKubeNodeJSON(labels map[string]string, taints ...[]map[string]string) map[string]any {
 	clonedLabels := make(map[string]string, len(labels))
 	for key, value := range labels {
 		clonedLabels[key] = value
 	}
-	return map[string]any{
+	node := map[string]any{
 		"metadata": map[string]any{
 			"name":              "gcp1",
 			"creationTimestamp": "2026-04-20T00:00:00Z",
@@ -925,4 +944,8 @@ func bootstrapControlPlaneKubeNodeJSON(labels map[string]string) map[string]any 
 			},
 		},
 	}
+	if len(taints) > 0 && taints[0] != nil {
+		node["spec"] = map[string]any{"taints": taints[0]}
+	}
+	return node
 }

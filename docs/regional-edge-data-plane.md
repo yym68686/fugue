@@ -779,7 +779,7 @@ DNS 必须上报：
 - `fugue-edge` 和 `fugue-dns` 现在都要求对应 `fugue.io/role.*=true` 且 `fugue.io/schedulable=true`；edge / DNS 节点默认带 `fugue.io/dedicated` taint，初期允许同一节点同时承担 edge + DNS。为兼容已作为 runtime join 的美国 edge 节点，edge / DNS DaemonSet 也 tolerate 旧的 `fugue.io/tenant` taint，但仍必须先匹配显式 role 和健康 label。
 - `dns.fugue.pro` 尚未从 Google Cloud DNS / Cloudflare 父区委托到 Fugue DNS；单节点 shadow 不作为生产权威 DNS。
 - `dns.fugue.pro` 的现有公网权威和具体记录属于迁移前 baseline，具体值放在本地私有附录中。
-- 第一阶段不能全局切 DNS，也不能替换现有入口。`cerebr.fugue.pro` 已作为第一个 hostname 级 `edge_canary` 进入美国 edge 内部 canary；下一步应发布上述 NodePolicy status / local-upstream guard / canary 观测补丁，确认线上 `fugue admin cluster node-policy` 与 edge metrics 正常，再继续观察并进入单 hostname exact DNS canary。
+- 第一阶段不能全局切 DNS，也不能替换现有入口。`cerebr.fugue.pro` 已作为第一个 hostname 级 `edge_canary` 进入美国 edge 内部 canary；NodePolicy status、local-upstream guard 和 canary 观测补丁已通过正式发布链路上线并完成初始验证。下一步应先处理控制面 `DiskPressure` 风险和 NodePolicy drift，再继续观察 canary 并进入单 hostname exact DNS canary。
 
 本地私有附录路径：
 
@@ -820,9 +820,9 @@ docs/private/regional-edge-current-state.local.md
 
 1. 保持 Route A fallback，继续观察美国 edge / DNS shadow workload 和 edge inventory heartbeat。
 2. 先处理仍有 `DiskPressure=True` 的控制面节点；健康 gate 已阻止普通组件继续调度到该节点，但物理磁盘压力仍会影响集群可靠性。
-3. 发布 NodePolicy status、local-upstream guard 和 canary 观测补丁后，用 `fugue admin cluster node-policy status` 确认 role / health / reconcile 收敛。
+3. 用 `fugue admin cluster node-policy status` 持续确认 desired role / actual labels / health gate / reconcile drift；扩大 edge、DNS 或 runtime 节点前先消除会影响调度边界的 drift。
 4. 逐批把普通业务从 control-plane 节点迁出，避免控制面节点混跑业务 workload。
-5. 观察 `cerebr.fugue.pro` 的 hostname 级 `edge_canary`：route bundle、Caddy host route、edge proxy metrics 和 Route A fallback 都必须稳定。
+5. 继续观察 `cerebr.fugue.pro` 的 hostname 级 `edge_canary`：route bundle、Caddy host route、edge proxy metrics、cache/304 行为和 Route A fallback 都必须稳定。
 6. 对没有本区域 edge 的 runtime，继续保持 Route A，直到该区域部署并观察通过 edge shadow。
 7. 增加第二个 `fugue.io/role.dns=true` 且 `fugue.io/schedulable=true` 节点，验证 `fugue-dns` 双节点 direct query。
 8. 只对通过验证的低风险 hostname 做 exact DNS canary；`dns.fugue.pro` 委托排在双节点 DNS 稳定之后。
@@ -860,7 +860,8 @@ docs/private/regional-edge-current-state.local.md
 - [x] 新增 edge heartbeat，上报 region、public IP、mesh IP、route / DNS bundle version、Caddy apply/cache 状态和健康状态。
 - [x] 增加 admin API 和 CLI 查看 edge 列表和健康状态：`fugue admin edge nodes ls`、`fugue admin edge nodes get <edge-id>`。
 - [x] 发布到控制面并完成初始线上验证：美国 edge 使用 scoped token 上报，`last_seen_at` / `last_heartbeat_at` 持续更新，bundle API 仍保持稳定 `ETag`。
-- [ ] 继续 12-24 小时观察 edge inventory：heartbeat 无中断、scoped token 不越权、route / DNS bundle sync 不持续报错。
+- [x] 完成 edge inventory 初始长时间观察：heartbeat 持续更新，scoped token 生效，route bundle 大量命中 `304 not_modified`，cache write/load error 为 0。
+- [ ] 在每次扩大 canary 前继续做短窗口复查：heartbeat、scoped token、route / DNS bundle sync、Caddy apply 和 Pod restart 都不能出现持续异常。
 - [ ] 后续评估是否补 mTLS / workload identity，减少长期 secret token 暴露面。
 
 ### 3. 建立 route binding 派生层
@@ -892,8 +893,9 @@ docs/private/regional-edge-current-state.local.md
 - [x] 增加 `fugue-edge` shadow DaemonSet 和发布镜像链路，默认只调度到 `fugue.io/role.edge=true` 且 `fugue.io/schedulable=true` 的节点，不监听公网 80/443，不生成 Caddy config。
 - [x] 增强 shadow 自观测：bundle sync/cache load/cache write counters、bundle age、sync duration 和结构化同步日志。
 - [x] 在一台已 join cluster 且带 `fugue.io/role.edge=true` / `fugue.io/schedulable=true` 的美国候选节点部署 shadow edge，确认能稳定拉取 bundle 并大量命中 304。
-- [ ] 在已 join cluster 且带 `fugue.io/role.edge=true` / `fugue.io/schedulable=true` 的亚洲节点部署 shadow edge，确认能长期拉取 bundle。
-- [ ] 完成 12 到 24 小时 shadow 观察：`sync error` 不持续增长，cache write/load error 为 0，edge Pod 不重启。
+- [ ] 在下一个目标 canary 区域的已 join cluster 节点上部署 shadow edge，例如亚洲 canary 前先部署亚洲 edge，并确认能长期拉取 bundle。
+- [x] 完成初始 shadow 观察：`sync error` 未持续增长，cache write/load error 为 0，edge Pod 不重启，内容不变时 cache 不被反复重写。
+- [ ] 扩大 hostname canary 前继续复查 edge `/healthz`、`/metrics`、route cache mtime 和 Caddy apply 结果。
 
 ### 5.5 控制平面减负和 Route A agent canary
 
@@ -974,7 +976,7 @@ docs/private/regional-edge-current-state.local.md
 
 - [ ] 选择一个低风险 `foo.fugue.pro` app hostname。
 - [ ] 保持用户可见 hostname 不变。
-- [ ] 在 Cloudflare 使用 exact DNS record 将该 hostname 指到亚洲 edge。
+- [ ] 在 Cloudflare 使用 exact DNS record 将该 hostname 指到对应 edge group 的健康 edge 节点。
 - [ ] 不改 wildcard `*.fugue.pro` fallback。
 - [ ] 验证 edge route bundle 中该 Host 指向正确 app upstream。
 - [ ] 验证失败时可快速把 exact record 删除，回落到现有 wildcard / Route A。
@@ -1009,7 +1011,7 @@ docs/private/regional-edge-current-state.local.md
 
 需要准备：
 
-- 至少两个 regional edge 节点，第一阶段至少一个在亚洲。
+- 至少两个 regional edge 节点；第一阶段至少要在准备 canary 的区域有一个健康 edge，亚洲 canary 前再准备亚洲 edge。
 - 至少两个 `dns.fugue.pro` authoritative DNS 节点。
 - 新增区域机器默认通过 `join-cluster.sh` 作为 k3s agent node 接入。
 - NodePolicy / labels / taints 控制每台 joined node 的 `edge`、`dns`、`app-runtime` 等角色。
