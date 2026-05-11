@@ -3569,6 +3569,12 @@ func ensureDefaults(state *model.State) {
 	for idx := range state.EdgeNodes {
 		normalizeEdgeNodeForRead(&state.EdgeNodes[idx])
 	}
+	if state.DNSNodes == nil {
+		state.DNSNodes = []model.DNSNode{}
+	}
+	for idx := range state.DNSNodes {
+		normalizeDNSNodeForRead(&state.DNSNodes[idx])
+	}
 	if state.BackingServices == nil {
 		state.BackingServices = []model.BackingService{}
 	}

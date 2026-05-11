@@ -97,6 +97,8 @@ spec:
               value: {{ .Values.dns.cachePath | quote }}
             - name: FUGUE_DNS_SYNC_INTERVAL
               value: {{ .Values.dns.syncInterval | quote }}
+            - name: FUGUE_DNS_HEARTBEAT_INTERVAL
+              value: {{ .Values.dns.heartbeatInterval | quote }}
             - name: FUGUE_DNS_HTTP_TIMEOUT
               value: {{ .Values.dns.httpTimeout | quote }}
             {{- if .Values.dns.nameservers }}

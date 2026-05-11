@@ -12,6 +12,8 @@ tags:
     description: Health checks, install helpers, and contract endpoints.
   - name: Edge
     description: Edge integration and TLS automation endpoints.
+  - name: DNS
+    description: Authoritative DNS inventory, heartbeat, and delegation readiness endpoints.
   - name: Tenants
     description: Tenant lifecycle endpoints.
   - name: Projects
@@ -412,6 +414,118 @@ paths:
                 $ref: "#/components/schemas/EdgeDNSBundle"
         '304':
           description: DNS bundle unchanged
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/dns/nodes:
+    get:
+      operationId: listDNSNodes
+      summary: List DNS Nodes
+      tags: [DNS]
+      x-fugue-handler: handleListDNSNodes
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: edge_group_id
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DNSNodeListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/dns/nodes/{dns_node_id}:
+    get:
+      operationId: getDNSNode
+      summary: Get DNS Node
+      tags: [DNS]
+      x-fugue-handler: handleGetDNSNode
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: dns_node_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DNSNodeResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/dns/heartbeat:
+    post:
+      operationId: dnsHeartbeat
+      summary: DNS Heartbeat
+      tags: [DNS]
+      x-fugue-handler: handleDNSHeartbeat
+      security:
+        - EdgeToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DNSHeartbeatRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DNSHeartbeatResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/dns/delegation/preflight:
+    get:
+      operationId: dnsDelegationPreflight
+      summary: DNS Delegation Preflight
+      tags: [DNS]
+      x-fugue-handler: handleDNSDelegationPreflight
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: zone
+          required: false
+          schema:
+            type: string
+            default: dns.fugue.pro
+        - in: query
+          name: probe_name
+          required: false
+          schema:
+            type: string
+            default: d-test.dns.fugue.pro
+        - in: query
+          name: edge_group_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: min_healthy_nodes
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            default: 2
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DNSDelegationPreflightResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/edge/domains/tls-report:
@@ -5114,6 +5228,366 @@ components:
           type: string
         record_generation:
           type: string
+    DNSNode:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - edge_group_id
+        - zone
+        - status
+        - healthy
+        - record_count
+        - cache_write_errors
+        - cache_load_errors
+        - bundle_sync_errors
+        - query_count
+        - query_error_count
+        - udp_listen
+        - tcp_listen
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+        edge_group_id:
+          type: string
+        public_hostname:
+          type: string
+        public_ipv4:
+          type: string
+        public_ipv6:
+          type: string
+        mesh_ip:
+          type: string
+        zone:
+          type: string
+        status:
+          type: string
+          enum: [unknown, healthy, degraded, unhealthy]
+        healthy:
+          type: boolean
+        dns_bundle_version:
+          type: string
+        record_count:
+          type: integer
+          format: int32
+        cache_status:
+          type: string
+        cache_write_errors:
+          type: integer
+          format: int64
+        cache_load_errors:
+          type: integer
+          format: int64
+        bundle_sync_errors:
+          type: integer
+          format: int64
+        query_count:
+          type: integer
+          format: int64
+        query_error_count:
+          type: integer
+          format: int64
+        query_rcode_counts:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+        query_qtype_counts:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+        listen_addr:
+          type: string
+        udp_addr:
+          type: string
+        tcp_addr:
+          type: string
+        udp_listen:
+          type: boolean
+        tcp_listen:
+          type: boolean
+        last_error:
+          type: string
+        last_seen_at:
+          type: string
+          format: date-time
+        last_heartbeat_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    DNSNodeListResponse:
+      type: object
+      additionalProperties: false
+      required: [nodes]
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/DNSNode"
+    DNSNodeResponse:
+      type: object
+      additionalProperties: false
+      required: [node]
+      properties:
+        node:
+          $ref: "#/components/schemas/DNSNode"
+    DNSHeartbeatRequest:
+      type: object
+      additionalProperties: false
+      required: [dns_node_id, edge_group_id, zone, status, healthy]
+      properties:
+        dns_node_id:
+          type: string
+        edge_group_id:
+          type: string
+        public_hostname:
+          type: string
+        public_ipv4:
+          type: string
+        public_ipv6:
+          type: string
+        mesh_ip:
+          type: string
+        zone:
+          type: string
+        dns_bundle_version:
+          type: string
+        record_count:
+          type: integer
+          format: int32
+        cache_status:
+          type: string
+        cache_write_errors:
+          type: integer
+          format: int64
+        cache_load_errors:
+          type: integer
+          format: int64
+        bundle_sync_errors:
+          type: integer
+          format: int64
+        query_count:
+          type: integer
+          format: int64
+        query_error_count:
+          type: integer
+          format: int64
+        query_rcode_counts:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+        query_qtype_counts:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+        listen_addr:
+          type: string
+        udp_addr:
+          type: string
+        tcp_addr:
+          type: string
+        udp_listen:
+          type: boolean
+        tcp_listen:
+          type: boolean
+        status:
+          type: string
+          enum: [unknown, healthy, degraded, unhealthy]
+        healthy:
+          type: boolean
+        last_error:
+          type: string
+    DNSHeartbeatResponse:
+      type: object
+      additionalProperties: false
+      required: [node, accepted]
+      properties:
+        node:
+          $ref: "#/components/schemas/DNSNode"
+        accepted:
+          type: boolean
+    DNSDelegationRecord:
+      type: object
+      additionalProperties: false
+      required: [name, type, values]
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+        values:
+          type: array
+          items:
+            type: string
+        ttl:
+          type: integer
+          format: int32
+        comment:
+          type: string
+    DNSDelegationPlan:
+      type: object
+      additionalProperties: false
+      required: [current_parent_ns, planned_a_records, planned_ns_records, rollback_delete_records]
+      properties:
+        current_parent_ns:
+          type: array
+          items:
+            type: string
+        planned_a_records:
+          type: array
+          items:
+            $ref: "#/components/schemas/DNSDelegationRecord"
+        planned_ns_records:
+          type: array
+          items:
+            $ref: "#/components/schemas/DNSDelegationRecord"
+        rollback_delete_records:
+          type: array
+          items:
+            $ref: "#/components/schemas/DNSDelegationRecord"
+        notes:
+          type: array
+          items:
+            type: string
+    DNSDelegationPreflightCheck:
+      type: object
+      additionalProperties: false
+      required: [name, pass]
+      properties:
+        name:
+          type: string
+        pass:
+          type: boolean
+        message:
+          type: string
+    DNSDelegationNodeCheck:
+      type: object
+      additionalProperties: false
+      required:
+        - dns_node_id
+        - healthy
+        - record_count
+        - cache_write_errors
+        - cache_load_errors
+        - bundle_sync_errors
+        - query_count
+        - query_error_count
+        - udp_53_reachable
+        - tcp_53_reachable
+        - probe_pass
+        - kubernetes_node_known
+        - node_ready
+        - node_disk_pressure
+        - pass
+      properties:
+        dns_node_id:
+          type: string
+        edge_group_id:
+          type: string
+        public_ip:
+          type: string
+        zone:
+          type: string
+        status:
+          type: string
+        healthy:
+          type: boolean
+        dns_bundle_version:
+          type: string
+        record_count:
+          type: integer
+          format: int32
+        cache_status:
+          type: string
+        cache_write_errors:
+          type: integer
+          format: int64
+        cache_load_errors:
+          type: integer
+          format: int64
+        bundle_sync_errors:
+          type: integer
+          format: int64
+        query_count:
+          type: integer
+          format: int64
+        query_error_count:
+          type: integer
+          format: int64
+        udp_53_reachable:
+          type: boolean
+        tcp_53_reachable:
+          type: boolean
+        probe_pass:
+          type: boolean
+        probe_answers:
+          type: array
+          items:
+            type: string
+        kubernetes_node_known:
+          type: boolean
+        node_ready:
+          type: boolean
+        node_disk_pressure:
+          type: boolean
+        last_seen_at:
+          type: string
+          format: date-time
+        pass:
+          type: boolean
+        message:
+          type: string
+    DNSDelegationPreflightResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - pass
+        - zone
+        - probe_name
+        - min_healthy_nodes
+        - healthy_node_count
+        - generated_at
+        - checks
+        - nodes
+        - delegation_plan
+      properties:
+        pass:
+          type: boolean
+        zone:
+          type: string
+        probe_name:
+          type: string
+        min_healthy_nodes:
+          type: integer
+          format: int32
+        healthy_node_count:
+          type: integer
+          format: int32
+        dns_bundle_version:
+          type: string
+        generated_at:
+          type: string
+          format: date-time
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/DNSDelegationPreflightCheck"
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/DNSDelegationNodeCheck"
+        delegation_plan:
+          $ref: "#/components/schemas/DNSDelegationPlan"
     AppInternalService:
       type: object
       additionalProperties: false

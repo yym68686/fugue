@@ -168,6 +168,7 @@ dns:
   udpAddr: "127.0.0.1:5353"
   tcpAddr: "127.0.0.1:5353"
   syncInterval: 15s
+  heartbeatInterval: 30s
   httpTimeout: 10s
   cachePath: /var/lib/fugue/dns/dns-cache.json
   nameservers: []

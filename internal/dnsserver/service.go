@@ -1,6 +1,7 @@
 package dnsserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -166,6 +167,7 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.Logger.Printf("fugue-dns shadow started; api=%s dns_node_id=%s edge_group_id=%s zone=%s answer_ips=%s cache=%s listen=%s udp=%s tcp=%s interval=%s", safeBaseURL(s.Config.APIURL), s.Config.DNSNodeID, s.Config.EdgeGroupID, normalizeName(s.Config.Zone), strings.Join(s.Config.AnswerIPs, ","), s.Config.CachePath, s.Config.ListenAddr, s.Config.UDPAddr, s.Config.TCPAddr, s.syncInterval())
 	_ = s.SyncOnce(ctx)
+	s.startHeartbeatLoop(ctx)
 
 	ticker := time.NewTicker(s.syncInterval())
 	defer ticker.Stop()
@@ -592,6 +594,13 @@ func (s *Service) logSyncFailure(err error) {
 	s.Logger.Printf("dns bundle sync failed; error=%s", s.redact(err.Error()))
 }
 
+func (s *Service) logHeartbeatFailure(err error) {
+	if err == nil || s.Logger == nil {
+		return
+	}
+	s.Logger.Printf("dns heartbeat failed; error=%s", s.redact(err.Error()))
+}
+
 func (s *Service) newBundleRequest(ctx context.Context) (*http.Request, error) {
 	base, err := url.Parse(strings.TrimRight(strings.TrimSpace(s.Config.APIURL), "/"))
 	if err != nil || base.Scheme == "" || base.Host == "" {
@@ -625,6 +634,198 @@ func (s *Service) newBundleRequest(ctx context.Context) (*http.Request, error) {
 		req.Header.Set("If-None-Match", etag)
 	}
 	return req, nil
+}
+
+func (s *Service) startHeartbeatLoop(ctx context.Context) {
+	if !s.heartbeatEnabled() {
+		if s.Logger != nil {
+			s.Logger.Printf("dns heartbeat disabled; dns_node_id=%t edge_group_id=%t token=%t", strings.TrimSpace(s.Config.DNSNodeID) != "", strings.TrimSpace(s.Config.EdgeGroupID) != "", strings.TrimSpace(s.Config.EdgeToken) != "")
+		}
+		return
+	}
+	go func() {
+		_ = s.HeartbeatOnce(ctx)
+		ticker := time.NewTicker(s.heartbeatInterval())
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = s.HeartbeatOnce(ctx)
+			}
+		}
+	}()
+}
+
+func (s *Service) HeartbeatOnce(ctx context.Context) error {
+	if !s.heartbeatEnabled() {
+		return nil
+	}
+	req, err := s.newHeartbeatRequest(ctx)
+	if err != nil {
+		s.logHeartbeatFailure(err)
+		return err
+	}
+	resp, err := s.HTTPClient.Do(req)
+	if err != nil {
+		err = fmt.Errorf("send dns heartbeat: %s", s.redact(err.Error()))
+		s.logHeartbeatFailure(err)
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		err := statusError{
+			StatusCode: resp.StatusCode,
+			Body:       s.redact(strings.TrimSpace(string(body))),
+		}
+		s.logHeartbeatFailure(err)
+		return err
+	}
+	if s.Logger != nil {
+		status := s.Status()
+		s.Logger.Printf("dns heartbeat success; dns_node_id=%s edge_group_id=%s status=%s bundle=%s records=%d", strings.TrimSpace(s.Config.DNSNodeID), strings.TrimSpace(s.Config.EdgeGroupID), dnsHealthStatus(status), status.BundleVersion, status.RecordCount)
+	}
+	return nil
+}
+
+func (s *Service) newHeartbeatRequest(ctx context.Context) (*http.Request, error) {
+	base, err := url.Parse(strings.TrimRight(strings.TrimSpace(s.Config.APIURL), "/"))
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return nil, fmt.Errorf("invalid FUGUE_API_URL")
+	}
+	base.Path = strings.TrimRight(base.Path, "/") + "/v1/dns/heartbeat"
+	query := base.Query()
+	query.Set("token", strings.TrimSpace(s.Config.EdgeToken))
+	base.RawQuery = query.Encode()
+
+	snapshot := s.metricSnapshot()
+	status := snapshot.Status
+	queryCount, queryErrorCount, rcodeCounts, qtypeCounts := dnsQueryMetricCounters(snapshot.Metrics.QueryTotal)
+	body := map[string]any{
+		"dns_node_id":        strings.TrimSpace(s.Config.DNSNodeID),
+		"edge_group_id":      strings.TrimSpace(s.Config.EdgeGroupID),
+		"public_hostname":    strings.TrimSpace(s.Config.PublicHostname),
+		"public_ipv4":        firstNonEmpty(strings.TrimSpace(s.Config.PublicIPv4), firstAnswerIPByFamily(s.Config.AnswerIPs, true)),
+		"public_ipv6":        firstNonEmpty(strings.TrimSpace(s.Config.PublicIPv6), firstAnswerIPByFamily(s.Config.AnswerIPs, false)),
+		"mesh_ip":            strings.TrimSpace(s.Config.MeshIP),
+		"zone":               normalizeName(firstNonEmpty(status.Zone, s.Config.Zone)),
+		"dns_bundle_version": strings.TrimSpace(status.BundleVersion),
+		"record_count":       status.RecordCount,
+		"cache_status":       dnsCacheStatus(status),
+		"cache_write_errors": snapshot.Metrics.CacheWriteError,
+		"cache_load_errors":  snapshot.Metrics.CacheLoadError,
+		"bundle_sync_errors": snapshot.Metrics.BundleSyncError,
+		"query_count":        queryCount,
+		"query_error_count":  queryErrorCount,
+		"query_rcode_counts": rcodeCounts,
+		"query_qtype_counts": qtypeCounts,
+		"listen_addr":        strings.TrimSpace(s.Config.ListenAddr),
+		"udp_addr":           strings.TrimSpace(s.Config.UDPAddr),
+		"tcp_addr":           strings.TrimSpace(s.Config.TCPAddr),
+		"udp_listen":         strings.TrimSpace(s.Config.UDPAddr) != "",
+		"tcp_listen":         strings.TrimSpace(s.Config.TCPAddr) != "",
+		"status":             dnsHealthStatus(status),
+		"healthy":            status.Healthy,
+		"last_error":         strings.TrimSpace(status.LastError),
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal dns heartbeat: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base.String(), bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("build dns heartbeat request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return req, nil
+}
+
+func (s *Service) heartbeatEnabled() bool {
+	return strings.TrimSpace(s.Config.APIURL) != "" &&
+		strings.TrimSpace(s.Config.EdgeToken) != "" &&
+		strings.TrimSpace(s.Config.DNSNodeID) != "" &&
+		strings.TrimSpace(s.Config.EdgeGroupID) != "" &&
+		normalizeName(s.Config.Zone) != "" &&
+		s.heartbeatInterval() > 0
+}
+
+func (s *Service) heartbeatInterval() time.Duration {
+	if s.Config.HeartbeatInterval > 0 {
+		return s.Config.HeartbeatInterval
+	}
+	return 30 * time.Second
+}
+
+func dnsHealthStatus(status Status) string {
+	switch {
+	case status.Healthy && !status.StaleCache && strings.TrimSpace(status.LastError) == "":
+		return model.EdgeHealthHealthy
+	case status.Healthy:
+		return model.EdgeHealthDegraded
+	default:
+		return model.EdgeHealthUnhealthy
+	}
+}
+
+func dnsCacheStatus(status Status) string {
+	if strings.TrimSpace(status.BundleVersion) == "" {
+		return "missing"
+	}
+	if status.StaleCache {
+		return "stale"
+	}
+	return "ready"
+}
+
+func dnsQueryMetricCounters(metrics map[dnsQueryMetricKey]uint64) (uint64, uint64, map[string]uint64, map[string]uint64) {
+	rcodeCounts := make(map[string]uint64)
+	qtypeCounts := make(map[string]uint64)
+	var queryCount uint64
+	var queryErrorCount uint64
+	for key, count := range metrics {
+		qtype := strings.TrimSpace(key.Type)
+		if qtype == "" {
+			qtype = "unknown"
+		}
+		rcode := strings.TrimSpace(key.RCode)
+		if rcode == "" {
+			rcode = "unknown"
+		}
+		queryCount += count
+		qtypeCounts[qtype] += count
+		rcodeCounts[rcode] += count
+		if !strings.EqualFold(rcode, "NOERROR") {
+			queryErrorCount += count
+		}
+	}
+	return queryCount, queryErrorCount, rcodeCounts, qtypeCounts
+}
+
+func firstAnswerIPByFamily(values []string, ipv4 bool) string {
+	for _, value := range values {
+		ip := net.ParseIP(strings.TrimSpace(value))
+		if ip == nil {
+			continue
+		}
+		if ipv4 && ip.To4() != nil {
+			return ip.String()
+		}
+		if !ipv4 && ip.To4() == nil {
+			return ip.String()
+		}
+	}
+	return ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (s *Service) validateConfig() error {

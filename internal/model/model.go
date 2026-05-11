@@ -1604,6 +1604,7 @@ type State struct {
 	AppDomains                 []AppDomain                 `json:"app_domains"`
 	EdgeGroups                 []EdgeGroup                 `json:"edge_groups,omitempty"`
 	EdgeNodes                  []EdgeNode                  `json:"edge_nodes,omitempty"`
+	DNSNodes                   []DNSNode                   `json:"dns_nodes,omitempty"`
 	EdgeRoutePolicies          []EdgeRoutePolicy           `json:"edge_route_policies,omitempty"`
 	BackingServices            []BackingService            `json:"backing_services"`
 	ServiceBindings            []ServiceBinding            `json:"service_bindings"`

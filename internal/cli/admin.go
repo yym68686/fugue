@@ -27,6 +27,7 @@ Use a bootstrap key or admin API key here only when you are doing setup.
 		hideCompatCommand(c.newAdminRuntimeCommand(), "fugue runtime"),
 		c.newAdminClusterCommand(),
 		c.newAdminEdgeCommand(),
+		c.newAdminDNSCommand(),
 		c.newAdminUsersCommand(),
 		c.newAdminBillingCommand(),
 		c.newAdminTenantCommand(),

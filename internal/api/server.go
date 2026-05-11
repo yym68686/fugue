@@ -68,6 +68,8 @@ type Server struct {
 	appRequestHTTPClient         *http.Client
 	openAppDatabase              func(driverName, dsn string) (*sql.DB, error)
 	dnsResolver                  appDomainDNSResolver
+	dnsDelegationProbe           dnsDelegationProbeFunc
+	dnsParentNSLookup            dnsParentNSLookupFunc
 	logStreamTuning              logStreamTuning
 	ready                        atomic.Bool
 }
@@ -124,6 +126,8 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		appRequestHTTPClient: &http.Client{},
 		openAppDatabase:      sql.Open,
 		dnsResolver:          netAppDomainResolver{},
+		dnsDelegationProbe:   defaultDNSDelegationProbe,
+		dnsParentNSLookup:    defaultDNSParentNSLookup,
 		logStreamTuning:      defaultLogStreamTuning(),
 	}
 	if server.registryPullBase == "" {

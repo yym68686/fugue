@@ -160,9 +160,9 @@ updated_at
 
 `edge_group` 是 DNS 和 route policy 的选择单位，单个 edge node 是该 group 下的健康和容量成员。
 
-每个要切流的区域都应先具备对应 edge group；没有 edge group 的区域继续走 Route A。比如当前只有美国 edge 时，美国 agent/runtime 上的低风险 hostname 可以 opt-in 到 `edge-group-country-us`，德国 runtime 上的 app 仍应继续走控制平面旧入口，除非显式配置跨区 fallback。
+每个要切流的区域都应先具备对应 edge group；没有 edge group 的区域继续走 Route A。例如只有某个区域具备健康 edge 时，只有该区域 runtime 上的低风险 hostname 可以 opt-in 到对应 edge group；其他区域 runtime 上的 app 仍应继续走控制平面旧入口，除非显式配置跨区 fallback。
 
-2026-05-12 线上状态：持久化 edge / edge group 模型、typed edge inventory API、edge heartbeat API、edge-scoped token 和 admin CLI 已随控制平面版本 `48b82de510633f653279d061016e27dd34b77360` 发布。控制面可通过 `GET /v1/edge/nodes`、`GET /v1/edge/nodes/{edge_id}` 查询 edge group 是否有健康成员；`fugue-edge` 会周期性 `POST /v1/edge/heartbeat` 上报 bundle version、Caddy apply/cache 状态和健康状态。美国 edge 节点已切到 scoped token，`last_seen_at` / `last_heartbeat_at` 会持续更新。
+2026-05-12 线上状态：持久化 edge / edge group 模型、typed edge inventory API、edge heartbeat API、edge-scoped token 和 admin CLI 已随控制平面版本 `48b82de510633f653279d061016e27dd34b77360` 发布。控制面可通过 `GET /v1/edge/nodes`、`GET /v1/edge/nodes/{edge_id}` 查询 edge group 是否有健康成员；`fugue-edge` 会周期性 `POST /v1/edge/heartbeat` 上报 bundle version、Caddy apply/cache 状态和健康状态。美国和德国 edge 节点已切到 scoped token，`last_seen_at` / `last_heartbeat_at` 会持续更新。
 
 示例：
 
@@ -295,7 +295,11 @@ fugue-edge / Caddy DaemonSet:
   canary/production: hostPort TCP 80 / TCP 443
 ```
 
-2026-05-12 当前状态：已在美国 joined node `vps-591f4447` 上做单节点直接 DNS shadow 验证，该节点由 NodePolicy 标记为 `fugue.io/role.edge=true`、`fugue.io/role.dns=true` 和 `fugue.io/schedulable=true`。`fugue-dns` 打开 UDP 53 / TCP 53 hostPort，answer IP 为 `15.204.94.71`。这只用于 `dig @15.204.94.71 ...` 直接验证，不代表 `dns.fugue.pro` 已委托，也不满足生产 DNS 至少两个节点的条件。
+2026-05-12 当前状态：已在两个 joined node 上做 edge + DNS shadow / direct query 验证。美国节点 `vps-591f4447` 属于 `edge-group-country-us`，DNS answer IP 为 `15.204.94.71`；德国节点 `vps-84c8f0a9` 属于 `edge-group-country-de`，DNS answer IP 为 `51.38.126.103`。两台节点都由 NodePolicy 标记为 `fugue.io/role.edge=true`、`fugue.io/role.dns=true` 和 `fugue.io/schedulable=true`，并通过 `fugue.io/dedicated=edge:NoSchedule` 隔离普通调度。两台节点的 `fugue-dns` 都打开 UDP 53 / TCP 53 hostPort，`dig @15.204.94.71 ...` 和 `dig @51.38.126.103 ...` 均已直接验证。这仍不代表 `dns.fugue.pro` 已委托；生产委托前还需要双节点持续观察、ns/glue 记录设计和回滚验证。
+
+同一美国 edge 节点也已进入单 hostname public canary：部署变量显式打开 edge Caddy hostPort 80 / 443，Caddy listen 为 `:443`，TLS 为 public on-demand。该能力只服务显式 `edge_canary` / `edge_enabled` 且通过本地 edge group 防线的 hostname；wildcard、`api.fugue.pro` 和 `dns.fugue.pro` 仍不进入 regional edge。
+
+德国 edge 当前只作为 shadow / DNS direct query 节点运行，`edge-group-country-de` 健康但 Caddy route count 为 `0`；尚未给德国 edge 设置任何 hostname exact DNS canary，也未让德国 runtime 默认借用美国 edge。
 
 这让控制平面可以通过 NodePolicy 调整角色，同时让公网 DNS 和 HTTPS 流量直接打到节点公网 IP。
 
@@ -764,22 +768,22 @@ DNS 必须上报：
 
 本仓库只保留脱敏结论：
 
-- 当前生产仍是 Route A 热路径：公网入口先进入现有 Caddy / control-plane API，再由 `fugue-api` app proxy 反代到业务 Service。
+- 当前默认生产热路径仍是 Route A：公网入口先进入现有 Caddy / control-plane API，再由 `fugue-api` app proxy 反代到业务 Service。只有少量显式 opt-in canary hostname 例外。
 - 当前已经具备只读 route binding 派生、typed `/v1/edge/routes` route bundle API、稳定 `ETag` / conditional fetch、`fugue-edge` shadow DaemonSet、本地 route cache、health 和 metrics。
 - 线上已经具备 hostname 级 `EdgeRoutePolicy`、`/v1/edge/route-policies` 管理 API 和 `fugue admin edge route-policy` CLI；默认 `route_a_only`，只有显式 `edge_canary` / `edge_enabled` opt-in 的 hostname 才会进入 edge Caddy / proxy。
-- 当前 `fugue-edge` 仍是 shadow / canary workload：已支持 Caddy-backed dynamic config，但不开放公网 80/443 hostPort，不承接 wildcard 或生产流量。
-- Caddy-backed shadow 已发布到美国 edge 节点，Caddy admin 绑定 localhost，数据面 listen 为内部 canary 端口；当前 edge image 跟随正式发布链路更新，并显式设置 `FUGUE_EDGE_GROUP_ID=edge-group-country-us`。正式切流仍必须通过显式 hostname / route policy opt-in。
-- `fugue-dns` 已具备 typed `/v1/edge/dns` DNS bundle API、本地 DNS cache、authoritative-only DNS responder、health/metrics 和 Helm DNS DaemonSet；已在单个美国 edge 节点上做直接 DNS shadow 验证。
+- 当前 `fugue-edge` 仍是 shadow / canary workload：已支持 Caddy-backed dynamic config，并已在美国 edge 节点对单 hostname public canary 显式开放 80/443 hostPort；它不承接 wildcard 或默认生产流量。
+- Caddy-backed edge 已发布到美国 edge 节点，Caddy admin 绑定 localhost；当前 public canary 使用 `FUGUE_EDGE_GROUP_ID=edge-group-country-us`、Caddy listen `:443` 和 public on-demand TLS。正式切流仍必须通过显式 hostname / route policy opt-in，并且必须通过 runtime edge group 本地防线。
+- `fugue-dns` 已具备 typed `/v1/edge/dns` DNS bundle API、本地 DNS cache、authoritative-only DNS responder、health/metrics 和 Helm DNS DaemonSet；已在美国和德国两个 edge/DNS 节点上做直接 DNS shadow 验证。
 - NodePolicy 最小模型已经上线：控制面持久化 `app-runtime`、`shared-pool`、`edge`、`dns`、`builder`、`internal-maintenance` 等 desired role，并 reconcile 到 Kubernetes Node labels / taints。
 - NodePolicy 可视化接口和 CLI 已补齐：`GET /v1/cluster/node-policies`、`GET /v1/cluster/node-policies/{name}`、`GET /v1/cluster/node-policies/status` 对应 `fugue admin cluster node-policy ls|get|status`，用于查看 desired role、实际 labels / taints、`Ready` / `DiskPressure` gate 和 reconcile drift。
-- edge / edge group 持久模型、`/v1/edge/nodes` inventory API、`/v1/edge/heartbeat`、edge-scoped token 和 `fugue admin edge nodes` CLI 已发布到控制面；当前美国 edge 节点已使用 scoped token 上报健康状态，route bundle、Caddy apply 和 cache 状态均可从 admin CLI 读取。
+- edge / edge group 持久模型、`/v1/edge/nodes` inventory API、`/v1/edge/heartbeat`、edge-scoped token 和 `fugue admin edge nodes` CLI 已发布到控制面；当前美国和德国 edge 节点都已使用 scoped token 上报健康状态，route bundle、Caddy apply 和 cache 状态均可从 admin CLI 读取。
 - route binding 已补本地 upstream 防线：`edge_canary` / `edge_enabled` 只有在 policy 目标 edge group 与 runtime 派生 edge group 一致，且该 group 有健康 edge member 时才会生效；runtime edge group 从 runtime labels 派生，缺失时从绑定 Node labels 派生；managed-shared / managed-owned 使用 `upstream_scope=local-service` 的 in-cluster Service DNS，external-owned 先标记为 mesh upstream 未就绪。
 - `fugue-edge` 观测已扩展：Caddy dynamic config 开启 JSON access log，edge proxy metrics 增加 fallback hit、WebSocket / SSE / streaming 成功率和 upload request 计数。
 - 控制面现在会读取 Kubernetes Node condition，把 `Ready=False` 或 `DiskPressure=True` 的节点标为 `fugue.io/schedulable=false`、`fugue.io/node-health=blocked`，并加 `fugue.io/node-unhealthy=true:NoSchedule`；除 `node-janitor` 这类清理组件外，普通维护组件、edge、dns、runtime workload 都不应继续调度到异常节点。
 - `fugue-edge` 和 `fugue-dns` 现在都要求对应 `fugue.io/role.*=true` 且 `fugue.io/schedulable=true`；edge / DNS 节点默认带 `fugue.io/dedicated` taint，初期允许同一节点同时承担 edge + DNS。为兼容已作为 runtime join 的美国 edge 节点，edge / DNS DaemonSet 也 tolerate 旧的 `fugue.io/tenant` taint，但仍必须先匹配显式 role 和健康 label。
-- `dns.fugue.pro` 尚未从 Google Cloud DNS / Cloudflare 父区委托到 Fugue DNS；单节点 shadow 不作为生产权威 DNS。
+- `dns.fugue.pro` 尚未从 Google Cloud DNS / Cloudflare 父区委托到 Fugue DNS；双节点 direct query 已通过，但仍处于 shadow 验证阶段，不作为生产权威 DNS。
 - `dns.fugue.pro` 的现有公网权威和具体记录属于迁移前 baseline，具体值放在本地私有附录中。
-- 第一阶段不能全局切 DNS，也不能替换现有入口。`cerebr.fugue.pro` 已作为第一个 hostname 级 `edge_canary` 进入美国 edge 内部 canary；NodePolicy status、local-upstream guard 和 canary 观测补丁已通过正式发布链路上线并完成初始验证。下一步应先处理控制面 `DiskPressure` 风险和 NodePolicy drift，再继续观察 canary 并进入单 hostname exact DNS canary。
+- 第一阶段不能全局切 DNS，也不能替换现有入口。`cerebr.fugue.pro` 已作为第一个 hostname 级 `edge_canary` 进入美国 edge 内部 canary；`edge-protocol-canary.fugue.pro` 已作为第一个 public exact DNS canary 指向美国 edge，并验证 HTTPS、Host route、WebSocket、SSE、upload 和 streaming。当前 NodePolicy drift 和 `DiskPressure` 已收敛为 0；下一步应继续观察单 hostname public canary 和双节点 DNS shadow，不扩大 wildcard、默认流量或 `dns.fugue.pro` 委托。
 
 本地私有附录路径：
 
@@ -818,14 +822,14 @@ docs/private/regional-edge-current-state.local.md
 
 因此近期顺序是：
 
-1. 保持 Route A fallback，继续观察美国 edge / DNS shadow workload 和 edge inventory heartbeat。
-2. 先处理仍有 `DiskPressure=True` 的控制面节点；健康 gate 已阻止普通组件继续调度到该节点，但物理磁盘压力仍会影响集群可靠性。
-3. 用 `fugue admin cluster node-policy status` 持续确认 desired role / actual labels / health gate / reconcile drift；扩大 edge、DNS 或 runtime 节点前先消除会影响调度边界的 drift。
+1. 保持 Route A fallback，继续观察美国和德国 edge / DNS shadow workload、edge inventory heartbeat，以及当前单 hostname public canary。
+2. 用 `fugue admin cluster node-policy status` 持续确认 desired role / actual labels / health gate / reconcile drift；当前 `drifted=0`、`disk_pressure=0`，扩大 edge、DNS 或 runtime 节点前仍要短窗口复查。
+3. 继续把控制面节点保持在低业务负载状态；普通业务迁移可以逐批推进，但控制面核心服务和 `api.fugue.pro` 不进入 regional edge 数据面。
 4. 逐批把普通业务从 control-plane 节点迁出，避免控制面节点混跑业务 workload。
-5. 继续观察 `cerebr.fugue.pro` 的 hostname 级 `edge_canary`：route bundle、Caddy host route、edge proxy metrics、cache/304 行为和 Route A fallback 都必须稳定。
-6. 对没有本区域 edge 的 runtime，继续保持 Route A，直到该区域部署并观察通过 edge shadow。
-7. 增加第二个 `fugue.io/role.dns=true` 且 `fugue.io/schedulable=true` 节点，验证 `fugue-dns` 双节点 direct query。
-8. 只对通过验证的低风险 hostname 做 exact DNS canary；`dns.fugue.pro` 委托排在双节点 DNS 稳定之后。
+5. 继续观察 `cerebr.fugue.pro` 的 hostname 级内部 `edge_canary`：route bundle、Caddy host route、edge proxy metrics、cache/304 行为和 Route A fallback 都必须稳定。
+6. 对没有本区域 edge 的 runtime，继续保持 Route A，直到该区域部署并观察通过 edge shadow；已有德国 edge 但尚未给德国 hostname 开 public canary。
+7. 继续观察美国 / 德国两个 `fugue-dns` direct query 节点，确认 bundle sync、cache、UDP/TCP 53、Pod restart 和节点健康长期稳定。
+8. 当前只保留已验证的单 hostname exact DNS canary；扩大到更多 hostname 前必须再次确认 edge health、route bundle、Caddy apply、edge metrics 和回滚路径。`dns.fugue.pro` 委托排在双节点 DNS 稳定观察和 ns/glue 回滚设计之后。
 
 ## 平滑重构 TODO List
 
@@ -861,6 +865,7 @@ docs/private/regional-edge-current-state.local.md
 - [x] 增加 admin API 和 CLI 查看 edge 列表和健康状态：`fugue admin edge nodes ls`、`fugue admin edge nodes get <edge-id>`。
 - [x] 发布到控制面并完成初始线上验证：美国 edge 使用 scoped token 上报，`last_seen_at` / `last_heartbeat_at` 持续更新，bundle API 仍保持稳定 `ETag`。
 - [x] 完成 edge inventory 初始长时间观察：heartbeat 持续更新，scoped token 生效，route bundle 大量命中 `304 not_modified`，cache write/load error 为 0。
+- [x] 第二个 edge group `edge-group-country-de` 已上线：德国 edge 节点 `vps-84c8f0a9` 使用 scoped token 上报 `region=europe`、`country=de`、`public_ipv4=51.38.126.103`，当前 healthy 且 Caddy route count 为 0。
 - [ ] 在每次扩大 canary 前继续做短窗口复查：heartbeat、scoped token、route / DNS bundle sync、Caddy apply 和 Pod restart 都不能出现持续异常。
 - [ ] 后续评估是否补 mTLS / workload identity，减少长期 secret token 暴露面。
 
@@ -893,6 +898,7 @@ docs/private/regional-edge-current-state.local.md
 - [x] 增加 `fugue-edge` shadow DaemonSet 和发布镜像链路，默认只调度到 `fugue.io/role.edge=true` 且 `fugue.io/schedulable=true` 的节点，不监听公网 80/443，不生成 Caddy config。
 - [x] 增强 shadow 自观测：bundle sync/cache load/cache write counters、bundle age、sync duration 和结构化同步日志。
 - [x] 在一台已 join cluster 且带 `fugue.io/role.edge=true` / `fugue.io/schedulable=true` 的美国候选节点部署 shadow edge，确认能稳定拉取 bundle 并大量命中 304。
+- [x] 在德国 joined node `vps-84c8f0a9` 部署第二个 regional edge shadow workload，绑定 `edge-group-country-de`，确认 `/healthz` healthy、route bundle 走 `304 not_modified`、Caddy apply 成功且 route count 为 0。
 - [ ] 在下一个目标 canary 区域的已 join cluster 节点上部署 shadow edge，例如亚洲 canary 前先部署亚洲 edge，并确认能长期拉取 bundle。
 - [x] 完成初始 shadow 观察：`sync error` 未持续增长，cache write/load error 为 0，edge Pod 不重启，内容不变时 cache 不被反复重写。
 - [ ] 扩大 hostname canary 前继续复查 edge `/healthz`、`/metrics`、route cache mtime 和 Caddy apply 结果。
@@ -928,6 +934,9 @@ docs/private/regional-edge-current-state.local.md
 - [x] 确认 `cerebr.fugue.pro` route bundle / Caddy config / proxy gating 的实际 hostname 承接行为。
 - [x] 用 `curl --resolve` 带正确 SNI 验证 Caddy-backed 内部 TLS canary，未 opt-in hostname 不进入 edge proxy。
 - [x] 只有显式 opt-in 的 canary hostname 才能进入 edge 路径。
+- [x] 通过正式发布链路接入 public canary 部署变量：`publicHostPorts.enabled=true`、Caddy listen `:443`、TLS `public-on-demand`。
+- [x] 发布后确认美国 edge `15.204.94.71:443` 可服务，Caddy public on-demand TLS 能成功签发 canary hostname 证书。
+- [x] 对 `edge-protocol-canary.fugue.pro` 做 public canary：Host route、WebSocket、SSE、upload、streaming 和 edge metrics 均已验证。
 
 ### 7. 建立 edge 到 runtime 的本地 upstream 路径
 
@@ -949,10 +958,11 @@ docs/private/regional-edge-current-state.local.md
 - [x] 拒绝 recursive query，只回答 authoritative zone。
 - [x] 增加 `/healthz`、`/metrics`、bundle sync/cache/query counters。
 - [x] 增加 Helm DNS DaemonSet，默认关闭，调度到 `fugue.io/role.dns=true` 且 `fugue.io/schedulable=true`，不默认开放公网 53。
-- [x] 在美国 edge 节点 `vps-591f4447` 上启用 `fugue.io/role.dns=true`，与 edge 同节点运行单节点 DNS shadow，打开 UDP 53 / TCP 53 hostPort。
+- [x] 在美国 edge 节点 `vps-591f4447` 上启用 `fugue.io/role.dns=true`，与 edge 同节点运行首个 DNS shadow，打开 UDP 53 / TCP 53 hostPort。
 - [x] 直接验证 `d-test.dns.fugue.pro A`：从集群外节点查询 `@15.204.94.71` 的 UDP 和 TCP DNS 均返回 `15.204.94.71`。
-- [ ] 在两个已 join cluster 且带 `fugue.io/role.dns=true` / `fugue.io/schedulable=true` 的节点部署 shadow 服务，开放 UDP 53 / TCP 53。
-- [ ] 在第二个 DNS 节点重复直接验证：`dig @<ns2-ip> d-test.dns.fugue.pro A`。
+- [x] 在两个已 join cluster 且带 `fugue.io/role.dns=true` / `fugue.io/schedulable=true` 的节点部署 shadow 服务，开放 UDP 53 / TCP 53。
+- [x] 在第二个 DNS 节点重复直接验证：`dig @51.38.126.103 d-test.dns.fugue.pro A` 和 TCP DNS 均返回 `51.38.126.103`。
+- [ ] 双节点 DNS shadow 继续观察 12-24 小时，确认 bundle sync error、cache write/load error、query error、Pod restart 和节点健康没有持续异常。
 
 ### 9. Cloudflare 委托 dns.fugue.pro
 
@@ -974,12 +984,15 @@ docs/private/regional-edge-current-state.local.md
 
 ### 11. Platform hostname canary
 
-- [ ] 选择一个低风险 `foo.fugue.pro` app hostname。
-- [ ] 保持用户可见 hostname 不变。
-- [ ] 在 Cloudflare 使用 exact DNS record 将该 hostname 指到对应 edge group 的健康 edge 节点。
-- [ ] 不改 wildcard `*.fugue.pro` fallback。
-- [ ] 验证 edge route bundle 中该 Host 指向正确 app upstream。
-- [ ] 验证失败时可快速把 exact record 删除，回落到现有 wildcard / Route A。
+- [x] 选择低风险 `edge-protocol-canary.fugue.pro` app hostname，作为第一个 public exact DNS canary。
+- [x] 保持用户可见 hostname 不变。
+- [x] 在 Cloudflare 使用 DNS-only exact A record 将该 hostname 指到 `edge-group-country-us` 的健康美国 edge 节点。
+- [x] 不改 wildcard `*.fugue.pro` fallback，不改 `api.fugue.pro`，不改 `dns.fugue.pro`。
+- [x] 验证 edge route bundle 中该 Host 指向正确 app upstream。
+- [x] 验证 HTTPS、Host route、WebSocket、SSE、upload、streaming 和 edge request/status/latency metrics。
+- [x] 验证失败时可快速把 exact record 删除，回落到现有 wildcard / Route A。
+- [ ] 观察该单 hostname canary 12-24 小时，确认 bundle sync error、Caddy apply error、upstream error、cache write/load error 和 Pod restart 没有持续异常。
+- [ ] 通过后再选择 `cerebr.fugue.pro` 或另一个低风险 hostname 做第二个 exact DNS canary。
 
 ### 12. 小批量区域切流
 
@@ -1011,8 +1024,8 @@ docs/private/regional-edge-current-state.local.md
 
 需要准备：
 
-- 至少两个 regional edge 节点；第一阶段至少要在准备 canary 的区域有一个健康 edge，亚洲 canary 前再准备亚洲 edge。
-- 至少两个 `dns.fugue.pro` authoritative DNS 节点。
+- 至少两个 regional edge 节点；当前已具备美国 `edge-group-country-us` 和德国 `edge-group-country-de` 两个健康 edge，亚洲 canary 前仍需准备亚洲 edge。
+- 至少两个 `dns.fugue.pro` authoritative DNS 节点；当前美国和德国两个 direct-query shadow 节点已通过，但尚未做父区委托。
 - 新增区域机器默认通过 `join-cluster.sh` 作为 k3s agent node 接入。
 - NodePolicy / labels / taints 控制每台 joined node 的 `edge`、`dns`、`app-runtime` 等角色。
 - 稳定公网 IPv4，最好同时有 IPv6。

@@ -155,6 +155,94 @@ func TestServiceSyncWritesCacheLoadsCacheAndUsesNotModified(t *testing.T) {
 	}
 }
 
+func TestHeartbeatOnceReportsDNSInventory(t *testing.T) {
+	t.Parallel()
+
+	var gotToken string
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/dns/heartbeat" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		gotToken = r.URL.Query().Get("token")
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode heartbeat: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"accepted": true, "node": gotBody})
+	}))
+	defer server.Close()
+
+	service := NewService(config.DNSConfig{
+		APIURL:            server.URL,
+		EdgeToken:         "edge-secret",
+		DNSNodeID:         "dns-us-1",
+		EdgeGroupID:       "edge-group-country-us",
+		PublicIPv4:        "203.0.113.10",
+		MeshIP:            "100.64.0.10",
+		Zone:              "dns.fugue.pro",
+		AnswerIPs:         []string{"203.0.113.10"},
+		ListenAddr:        "127.0.0.1:7834",
+		UDPAddr:           ":53",
+		TCPAddr:           ":53",
+		HeartbeatInterval: time.Minute,
+		TTL:               60,
+	}, log.New(ioDiscard{}, "", 0))
+	service.setBundle(model.EdgeDNSBundle{
+		Version:     "dnsgen_heartbeat",
+		GeneratedAt: time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC),
+		DNSNodeID:   "dns-us-1",
+		EdgeGroupID: "edge-group-country-us",
+		Zone:        "dns.fugue.pro",
+		Records: []model.EdgeDNSRecord{{
+			Name:       "d-test.dns.fugue.pro",
+			Type:       model.EdgeDNSRecordTypeA,
+			Values:     []string{"203.0.113.10"},
+			TTL:        60,
+			RecordKind: model.EdgeDNSRecordKindProbe,
+			Status:     model.EdgeRouteStatusActive,
+		}},
+	}, `"dnsgen_heartbeat"`, false, "")
+	_ = dnsQuery(t, service, "d-test.dns.fugue.pro.", miekgdns.TypeA)
+	_ = dnsQuery(t, service, "missing.dns.fugue.pro.", miekgdns.TypeA)
+	service.recordCacheWrite(false)
+
+	if err := service.HeartbeatOnce(context.Background()); err != nil {
+		t.Fatalf("heartbeat once: %v", err)
+	}
+	if gotToken != "edge-secret" {
+		t.Fatalf("expected edge token, got %q", gotToken)
+	}
+	for key, want := range map[string]any{
+		"dns_node_id":        "dns-us-1",
+		"edge_group_id":      "edge-group-country-us",
+		"public_ipv4":        "203.0.113.10",
+		"mesh_ip":            "100.64.0.10",
+		"zone":               "dns.fugue.pro",
+		"dns_bundle_version": "dnsgen_heartbeat",
+		"cache_status":       "ready",
+		"status":             model.EdgeHealthHealthy,
+		"healthy":            true,
+		"udp_listen":         true,
+		"tcp_listen":         true,
+	} {
+		if got := gotBody[key]; got != want {
+			t.Fatalf("heartbeat field %s: expected %#v, got %#v in %#v", key, want, got, gotBody)
+		}
+	}
+	if got := gotBody["record_count"]; got != float64(1) {
+		t.Fatalf("expected record_count 1, got %#v", got)
+	}
+	if got := gotBody["query_count"]; got != float64(2) {
+		t.Fatalf("expected query_count 2, got %#v", got)
+	}
+	if got := gotBody["query_error_count"]; got != float64(1) {
+		t.Fatalf("expected query_error_count 1, got %#v", got)
+	}
+	if got := gotBody["cache_write_errors"]; got != float64(1) {
+		t.Fatalf("expected cache_write_errors 1, got %#v", got)
+	}
+}
+
 func dnsQuery(t *testing.T, service *Service, name string, qtype uint16) *miekgdns.Msg {
 	t.Helper()
 	req := new(miekgdns.Msg)

@@ -105,6 +105,8 @@ spec:
               value: {{ default $.Values.dns.cachePath $group.cachePath | quote }}
             - name: FUGUE_DNS_SYNC_INTERVAL
               value: {{ default $.Values.dns.syncInterval $group.syncInterval | quote }}
+            - name: FUGUE_DNS_HEARTBEAT_INTERVAL
+              value: {{ default $.Values.dns.heartbeatInterval $group.heartbeatInterval | quote }}
             - name: FUGUE_DNS_HTTP_TIMEOUT
               value: {{ default $.Values.dns.httpTimeout $group.httpTimeout | quote }}
             {{- if $group.nameservers }}
