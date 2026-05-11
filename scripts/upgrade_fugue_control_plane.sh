@@ -384,6 +384,18 @@ snapshotController:
       operator: Exists
       effect: NoExecute
       tolerationSeconds: 300
+topologyLabeler:
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Equal
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/master
+      operator: Equal
+      effect: NoSchedule
+    - key: fugue.io/dedicated
+      operator: Equal
+      value: internal
+      effect: NoSchedule
 cloudnative-pg:
   replicaCount: 2
   priorityClassName: system-cluster-critical
