@@ -79,6 +79,20 @@ nodeAffinity:
               - internal
 {{- end -}}
 
+{{- define "fugue.internalMaintenanceTolerations" -}}
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Equal
+    effect: NoSchedule
+  - key: node-role.kubernetes.io/master
+    operator: Equal
+    effect: NoSchedule
+  - key: fugue.io/dedicated
+    operator: Equal
+    value: internal
+    effect: NoSchedule
+{{- end -}}
+
 {{- define "fugue.registryPushBase" -}}
 {{- if .Values.api.registryPushBase -}}
 {{- .Values.api.registryPushBase -}}

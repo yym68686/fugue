@@ -232,9 +232,19 @@ topologyLabeler:
   nodeSelector: {}
   # Omit affinity to use the chart default: control-plane nodes or
   # fugue.io/shared-pool=internal nodes. Set affinity: {} to opt into all
-  # tolerated nodes, including tenant-owned nodes.
+  # explicitly tolerated nodes. Do not tolerate disk-pressure here; cleanup
+  # workloads such as node-janitor own abnormal-node recovery.
   tolerations:
-    - operator: Exists
+    - key: node-role.kubernetes.io/control-plane
+      operator: Equal
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/master
+      operator: Equal
+      effect: NoSchedule
+    - key: fugue.io/dedicated
+      operator: Equal
+      value: internal
+      effect: NoSchedule
   resources:
     requests:
       cpu: 5m

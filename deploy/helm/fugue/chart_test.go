@@ -72,6 +72,62 @@ func TestMaintenanceDaemonSetsDefaultToInternalNodes(t *testing.T) {
 	}
 }
 
+func TestTopologyLabelerUsesNarrowInternalTolerations(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	doc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-topology-labeler")
+	if doc == "" {
+		t.Fatalf("rendered manifest missing topology-labeler daemonset:\n%s", manifest)
+	}
+	for _, want := range []string{
+		"tolerations:",
+		"key: node-role.kubernetes.io/control-plane",
+		"key: node-role.kubernetes.io/master",
+		"key: fugue.io/dedicated",
+		"value: internal",
+		"operator: Equal",
+		"effect: NoSchedule",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("topology-labeler manifest missing narrow toleration fragment %q:\n%s", want, doc)
+		}
+	}
+	tolerationsBlock := manifestTolerationsBlock(doc)
+	if tolerationsBlock == "" {
+		t.Fatalf("topology-labeler manifest missing tolerations block:\n%s", doc)
+	}
+	for _, unwanted := range []string{
+		"operator: Exists",
+		"node.kubernetes.io/disk-pressure",
+	} {
+		if strings.Contains(tolerationsBlock, unwanted) {
+			t.Fatalf("topology-labeler tolerations should not contain %q:\n%s", unwanted, tolerationsBlock)
+		}
+	}
+
+	nodeJanitorDoc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-node-janitor")
+	if nodeJanitorDoc == "" {
+		t.Fatalf("rendered manifest missing node-janitor daemonset:\n%s", manifest)
+	}
+	if !strings.Contains(nodeJanitorDoc, "- operator: Exists") {
+		t.Fatalf("node-janitor should keep broad abnormal-node cleanup toleration:\n%s", nodeJanitorDoc)
+	}
+}
+
 func TestEdgeShadowDaemonSetDefaultsToNoPublicTraffic(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")
@@ -468,6 +524,20 @@ func manifestDocumentForKindAndName(manifest string, kind string, name string) s
 		}
 	}
 	return ""
+}
+
+func manifestTolerationsBlock(doc string) string {
+	index := strings.LastIndex(doc, "\ntolerations:")
+	if index == -1 {
+		index = strings.LastIndex(doc, "\n              tolerations:")
+	}
+	if index == -1 {
+		index = strings.LastIndex(doc, "\n      tolerations:")
+	}
+	if index == -1 {
+		return ""
+	}
+	return doc[index:]
 }
 
 func TestControlPlaneRBACCoversDiagnosableWorkloads(t *testing.T) {

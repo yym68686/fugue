@@ -23,7 +23,8 @@
 {{- if hasKey $topologyLabeler "affinity" -}}
 {{- $topologyLabelerAffinity = (get $topologyLabeler "affinity" | default (dict)) -}}
 {{- end -}}
-{{- $topologyLabelerTolerations := list (dict "operator" "Exists") -}}
+{{- $defaultTopologyLabelerTolerations := (include "fugue.internalMaintenanceTolerations" . | fromYaml) -}}
+{{- $topologyLabelerTolerations := get $defaultTopologyLabelerTolerations "tolerations" -}}
 {{- if hasKey $topologyLabeler "tolerations" -}}
 {{- $topologyLabelerTolerations = (get $topologyLabeler "tolerations") -}}
 {{- end -}}
