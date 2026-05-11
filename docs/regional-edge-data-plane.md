@@ -727,11 +727,11 @@ DNS 必须上报：
 - 当前已经具备只读 route binding 派生、typed `/v1/edge/routes` route bundle API、稳定 `ETag` / conditional fetch、`fugue-edge` shadow DaemonSet、本地 route cache、health 和 metrics。
 - 线上已经具备 hostname 级 `EdgeRoutePolicy`、`/v1/edge/route-policies` 管理 API 和 `fugue admin edge route-policy` CLI；默认 `route_a_only`，只有显式 `edge_canary` / `edge_enabled` opt-in 的 hostname 才会进入 edge Caddy / proxy。
 - 当前 `fugue-edge` 仍是 shadow / canary workload：已支持 Caddy-backed dynamic config，但不开放公网 80/443 hostPort，不承接 wildcard 或生产流量。
-- Caddy-backed shadow 已发布到美国 edge 节点，Caddy admin 绑定 localhost，数据面 listen 为内部 canary 端口；当前 edge image 为 `ghcr.io/yym68686/fugue-edge:d213572e943980aa4e119ac76788cf74fd3933fc`。正式切流仍必须通过显式 hostname / route policy opt-in。
+- Caddy-backed shadow 已发布到美国 edge 节点，Caddy admin 绑定 localhost，数据面 listen 为内部 canary 端口；当前 edge image 为 `ghcr.io/yym68686/fugue-edge:3c6f807f01389a09bb01c16f99b8f01faaea8610`，并显式设置 `FUGUE_EDGE_GROUP_ID=edge-group-country-us`。正式切流仍必须通过显式 hostname / route policy opt-in。
 - `fugue-dns` 已具备 typed `/v1/edge/dns` DNS bundle API、本地 DNS cache、authoritative-only DNS responder、health/metrics 和 Helm DNS DaemonSet；已在单个美国 edge 节点上做直接 DNS shadow 验证。
 - `dns.fugue.pro` 尚未从 Google Cloud DNS / Cloudflare 父区委托到 Fugue DNS；单节点 shadow 不作为生产权威 DNS。
 - `dns.fugue.pro` 的现有公网权威和具体记录属于迁移前 baseline，具体值放在本地私有附录中。
-- 第一阶段不能全局切 DNS，也不能替换现有入口。下一步应选择低风险 hostname 设置 `edge_canary`，继续做显式 opt-in 的 edge / DNS canary、补第二个 DNS 节点，并保持 Route A fallback。
+- 第一阶段不能全局切 DNS，也不能替换现有入口。`cerebr.fugue.pro` 已作为第一个 hostname 级 `edge_canary` 进入美国 edge 内部 canary；下一步应继续观察该 canary，再做单 hostname exact DNS canary、补第二个 DNS 节点，并保持 Route A fallback。
 
 本地私有附录路径：
 
@@ -772,7 +772,7 @@ docs/private/regional-edge-current-state.local.md
 
 1. 保持 Route A fallback，继续观察美国 edge / DNS shadow workload。
 2. 逐批把普通业务从 control-plane 节点迁出，避免控制面节点混跑业务 workload。
-3. 选择低风险 hostname 设置 `edge_canary` 到对应 `edge_group`，通过 Host header、`curl --resolve` 或 `/etc/hosts` 验证 Caddy-backed edge canary。
+3. 观察 `cerebr.fugue.pro` 的 hostname 级 `edge_canary`：route bundle、Caddy host route、edge proxy metrics 和 Route A fallback 都必须稳定。
 4. 对没有本区域 edge 的 runtime，继续保持 Route A，直到该区域部署并观察通过 edge shadow。
 5. 增加第二个 `fugue.io/role.dns=true` 节点，验证 `fugue-dns` 双节点 direct query。
 6. 只对通过验证的低风险 hostname 做 exact DNS canary；`dns.fugue.pro` 委托排在双节点 DNS 稳定之后。
@@ -863,11 +863,14 @@ docs/private/regional-edge-current-state.local.md
 - [x] 新增 hostname 级 EdgeRoutePolicy，让 route 明确处于 `route_a_only`、`edge_canary` 或 `edge_enabled`。
 - [x] Caddy dynamic config 只生成当前 edge group 被允许承接的 hostname；没有 opt-in 的 route 即使出现在 bundle 中也不能进入 public listener。
 - [x] `fugue-edge` 直接 proxy 跳过 `route_a_only` route，避免绕过 Caddy gating。
+- [x] `fugue-edge` Caddy 模式要求显式 `FUGUE_EDGE_GROUP_ID`，并在 Caddy config 和直接 proxy 两层本地过滤非本 edge group route。
 - [x] 对没有对应 edge group 的 runtime，保持 Route A，不自动经由其他区域 edge 反代。
 - [x] 发布包含 EdgeRoutePolicy 的控制面版本 `d213572e943980aa4e119ac76788cf74fd3933fc`，并在线上确认 `/v1/edge/route-policies` 和 OpenAPI 契约生效。
-- [ ] 在线上设置第一个 `edge_canary` policy 后，确认 route bundle / Caddy config / proxy gating 的实际 hostname 承接行为。
-- [ ] 用 `/etc/hosts` 或直接指定 Host header 做人工 canary 验证。
-- [ ] 只有显式 opt-in 的 canary hostname 才能进入 edge 路径。
+- [x] 发布包含 edge group 本地防线的控制面版本 `3c6f807f01389a09bb01c16f99b8f01faaea8610`，并在线上确认 edge DaemonSet 带 `FUGUE_EDGE_GROUP_ID=edge-group-country-us`。
+- [x] 在线上设置第一个 `edge_canary` policy：`cerebr.fugue.pro -> edge-group-country-us`。
+- [x] 确认 `cerebr.fugue.pro` route bundle / Caddy config / proxy gating 的实际 hostname 承接行为。
+- [x] 用 `curl --resolve` 带正确 SNI 验证 Caddy-backed 内部 TLS canary，未 opt-in hostname 不进入 edge proxy。
+- [x] 只有显式 opt-in 的 canary hostname 才能进入 edge 路径。
 
 ### 7. 建立 edge 到 runtime 的本地 upstream 路径
 
