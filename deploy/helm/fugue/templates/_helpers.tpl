@@ -79,6 +79,28 @@ nodeAffinity:
               - internal
 {{- end -}}
 
+{{- define "fugue.internalMaintenanceHealthyAffinity" -}}
+nodeAffinity:
+  requiredDuringSchedulingIgnoredDuringExecution:
+    nodeSelectorTerms:
+      - matchExpressions:
+          - key: node-role.kubernetes.io/control-plane
+            operator: Exists
+          - key: fugue.io/schedulable
+            operator: In
+            values:
+              - "true"
+      - matchExpressions:
+          - key: fugue.io/shared-pool
+            operator: In
+            values:
+              - internal
+          - key: fugue.io/schedulable
+            operator: In
+            values:
+              - "true"
+{{- end -}}
+
 {{- define "fugue.internalMaintenanceTolerations" -}}
 tolerations:
   - key: node-role.kubernetes.io/control-plane

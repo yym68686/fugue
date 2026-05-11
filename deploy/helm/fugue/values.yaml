@@ -126,6 +126,7 @@ edge:
     mountPath: /var/lib/fugue/edge
   nodeSelector:
     fugue.io/role.edge: "true"
+    fugue.io/schedulable: "true"
   tolerations:
     - key: fugue.io/dedicated
       operator: Equal
@@ -178,6 +179,7 @@ dns:
     tcp: 53
   nodeSelector:
     fugue.io/role.dns: "true"
+    fugue.io/schedulable: "true"
   tolerations:
     - key: fugue.io/dedicated
       operator: Equal

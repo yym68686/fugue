@@ -98,7 +98,9 @@ func TestTopologyLabelerUsesNarrowInternalTolerations(t *testing.T) {
 		"key: node-role.kubernetes.io/control-plane",
 		"key: node-role.kubernetes.io/master",
 		"key: fugue.io/dedicated",
+		"key: fugue.io/schedulable",
 		"value: internal",
+		`- "true"`,
 		"operator: Equal",
 		"effect: NoSchedule",
 	} {
@@ -152,6 +154,7 @@ func TestEdgeShadowDaemonSetDefaultsToNoPublicTraffic(t *testing.T) {
 	for _, want := range []string{
 		`image: "fugue-edge:latest"`,
 		`fugue.io/role.edge: "true"`,
+		`fugue.io/schedulable: "true"`,
 		`path: "/var/lib/fugue/edge"`,
 		`key: FUGUE_EDGE_TLS_ASK_TOKEN`,
 		`path: /healthz`,
@@ -431,6 +434,7 @@ func TestDNSShadowDaemonSetCanBeEnabledWithoutPublicPorts(t *testing.T) {
 		`command:`,
 		`- /usr/local/bin/fugue-dns`,
 		`fugue.io/role.dns: "true"`,
+		`fugue.io/schedulable: "true"`,
 		`path: "/var/lib/fugue/dns"`,
 		`key: FUGUE_EDGE_TLS_ASK_TOKEN`,
 		`name: FUGUE_DNS_ANSWER_IPS`,

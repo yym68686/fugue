@@ -14,9 +14,13 @@ import (
 const legacyBuildTierLabelKey = "fugue.io/build-tier"
 
 type setClusterNodePolicyRequest struct {
-	AllowBuilds             *bool   `json:"allow_builds"`
-	AllowSharedPool         *bool   `json:"allow_shared_pool"`
-	DesiredControlPlaneRole *string `json:"desired_control_plane_role"`
+	AllowAppRuntime          *bool   `json:"allow_app_runtime"`
+	AllowBuilds              *bool   `json:"allow_builds"`
+	AllowSharedPool          *bool   `json:"allow_shared_pool"`
+	AllowEdge                *bool   `json:"allow_edge"`
+	AllowDNS                 *bool   `json:"allow_dns"`
+	AllowInternalMaintenance *bool   `json:"allow_internal_maintenance"`
+	DesiredControlPlaneRole  *string `json:"desired_control_plane_role"`
 }
 
 func (s *Server) handleSetClusterNodePolicy(w http.ResponseWriter, r *http.Request) {
@@ -44,7 +48,7 @@ func (s *Server) handleSetClusterNodePolicy(w http.ResponseWriter, r *http.Reque
 
 	machine, err := s.store.GetMachineByClusterNodeName(nodeName)
 	if err == store.ErrNotFound {
-		machine, err = s.ensureBootstrapControlPlaneMachineByName(r.Context(), nodeName)
+		machine, err = s.ensurePlatformMachineByClusterNodeName(r.Context(), nodeName)
 	}
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -110,8 +114,12 @@ func (s *Server) handleSetClusterNodePolicy(w http.ResponseWriter, r *http.Reque
 
 	metadata := map[string]string{
 		"cluster_node_name":          nodeName,
+		"allow_app_runtime":          boolString(machine.Policy.AllowAppRuntime),
 		"allow_builds":               boolString(machine.Policy.AllowBuilds),
 		"allow_shared_pool":          boolString(machine.Policy.AllowSharedPool),
+		"allow_edge":                 boolString(machine.Policy.AllowEdge),
+		"allow_dns":                  boolString(machine.Policy.AllowDNS),
+		"allow_internal_maintenance": boolString(machine.Policy.AllowInternalMaintenance),
 		"desired_control_plane_role": machine.Policy.DesiredControlPlaneRole,
 	}
 	if clusterNode.Policy != nil {
@@ -136,18 +144,34 @@ func (s *Server) handleSetClusterNodePolicy(w http.ResponseWriter, r *http.Reque
 }
 
 func (req setClusterNodePolicyRequest) hasUpdates() bool {
-	return req.AllowBuilds != nil ||
+	return req.AllowAppRuntime != nil ||
+		req.AllowBuilds != nil ||
 		req.AllowSharedPool != nil ||
+		req.AllowEdge != nil ||
+		req.AllowDNS != nil ||
+		req.AllowInternalMaintenance != nil ||
 		req.DesiredControlPlaneRole != nil
 }
 
 func (req setClusterNodePolicyRequest) mergeInto(current model.MachinePolicy, runtimeObj *model.Runtime) (model.MachinePolicy, error) {
 	next := current
+	if req.AllowAppRuntime != nil {
+		next.AllowAppRuntime = *req.AllowAppRuntime
+	}
 	if req.AllowBuilds != nil {
 		next.AllowBuilds = *req.AllowBuilds
 	}
 	if req.AllowSharedPool != nil && runtimeObj == nil {
 		next.AllowSharedPool = *req.AllowSharedPool
+	}
+	if req.AllowEdge != nil {
+		next.AllowEdge = *req.AllowEdge
+	}
+	if req.AllowDNS != nil {
+		next.AllowDNS = *req.AllowDNS
+	}
+	if req.AllowInternalMaintenance != nil {
+		next.AllowInternalMaintenance = *req.AllowInternalMaintenance
 	}
 	if req.DesiredControlPlaneRole != nil {
 		role := model.MachineControlPlaneRoleNone
@@ -240,9 +264,9 @@ func (c *clusterNodeClient) reconcileMachineNode(ctx context.Context, nodeName s
 		return false, err
 	}
 
-	patch, changed := buildMachineNodeMergePatch(node.Metadata.Labels, machine, runtimeObj)
+	patch, changed := buildMachineNodeMergePatch(node, machine, runtimeObj)
 	if !changed {
-		return true, nil
+		return false, nil
 	}
 	if err := c.patchNode(ctx, nodeName, patch); err != nil {
 		if isKubernetesNodeNotFound(err) {
@@ -253,31 +277,46 @@ func (c *clusterNodeClient) reconcileMachineNode(ctx context.Context, nodeName s
 	return true, nil
 }
 
-func buildMachineNodeMergePatch(current map[string]string, machine model.Machine, runtimeObj *model.Runtime) (map[string]any, bool) {
-	labelsPatch, changed := buildMachineNodeLabelsPatch(current, machine, runtimeObj)
-	if !changed {
+func buildMachineNodeMergePatch(node kubeNode, machine model.Machine, runtimeObj *model.Runtime) (map[string]any, bool) {
+	labelsPatch, labelsChanged := buildMachineNodeLabelsPatch(node, machine, runtimeObj)
+	taints, taintsChanged := buildMachineNodeTaints(node.Spec.Taints, nodeSchedulingHealthy(node), machine)
+	if !labelsChanged && !taintsChanged {
 		return nil, false
 	}
-	return map[string]any{
-		"metadata": map[string]any{
+	patch := map[string]any{}
+	if labelsChanged {
+		patch["metadata"] = map[string]any{
 			"labels": labelsPatch,
-		},
-	}, true
+		}
+	}
+	if taintsChanged {
+		patch["spec"] = map[string]any{"taints": taints}
+	}
+	return patch, true
 }
 
-func buildMachineNodeLabelsPatch(current map[string]string, machine model.Machine, runtimeObj *model.Runtime) (map[string]any, bool) {
+func buildMachineNodeLabelsPatch(node kubeNode, machine model.Machine, runtimeObj *model.Runtime) (map[string]any, bool) {
+	current := node.Metadata.Labels
 	desired := machineJoinLabelMap(machine)
 	if runtimeObj == nil && machine.Policy.AllowSharedPool {
 		desired[runtimepkg.SharedPoolLabelKey] = runtimepkg.SharedPoolLabelValue
 	}
+	applyNodeHealthLabels(desired, nodeSchedulingHealthy(node))
 
 	keys := []string{
 		runtimepkg.NodeKeyIDLabelKey,
 		runtimepkg.MachineIDLabelKey,
 		runtimepkg.MachineScopeLabelKey,
+		runtimepkg.AppRuntimeRoleLabelKey,
+		runtimepkg.BuilderRoleLabelKey,
 		runtimepkg.BuildNodeLabelKey,
+		runtimepkg.EdgeRoleLabelKey,
+		runtimepkg.DNSRoleLabelKey,
+		runtimepkg.InternalMaintenanceLabelKey,
 		legacyBuildTierLabelKey,
 		runtimepkg.ControlPlaneDesiredRoleKey,
+		runtimepkg.NodeSchedulableLabelKey,
+		runtimepkg.NodeHealthLabelKey,
 	}
 	if runtimeObj == nil {
 		keys = append(keys, runtimepkg.SharedPoolLabelKey)
@@ -303,6 +342,103 @@ func buildMachineNodeLabelsPatch(current map[string]string, machine model.Machin
 		}
 	}
 	return patch, changed
+}
+
+func buildMachineNodeTaints(current []kubeNodeTaint, healthy bool, machine model.Machine) ([]kubeNodeTaint, bool) {
+	normalizedCurrent := normalizeKubeNodeTaints(current)
+	desiredDedicatedTaint, hasDesiredDedicatedTaint := desiredMachineDedicatedTaint(machine.Policy)
+	desiredHealthTaint, hasDesiredHealthTaint := desiredNodeHealthTaint(healthy)
+
+	next := make([]kubeNodeTaint, 0, len(normalizedCurrent)+2)
+	dedicatedPresent := false
+	healthPresent := false
+	for _, taint := range normalizedCurrent {
+		switch taint.Key {
+		case runtimepkg.DedicatedTaintKey:
+			if hasDesiredDedicatedTaint && !dedicatedPresent && kubeNodeTaintEqual(taint, desiredDedicatedTaint) {
+				next = append(next, desiredDedicatedTaint)
+				dedicatedPresent = true
+			}
+		case runtimepkg.NodeUnhealthyTaintKey:
+			if hasDesiredHealthTaint && !healthPresent && kubeNodeTaintEqual(taint, desiredHealthTaint) {
+				next = append(next, desiredHealthTaint)
+				healthPresent = true
+			}
+		default:
+			next = append(next, taint)
+		}
+	}
+	if hasDesiredDedicatedTaint && !dedicatedPresent {
+		next = append(next, desiredDedicatedTaint)
+	}
+	if hasDesiredHealthTaint && !healthPresent {
+		next = append(next, desiredHealthTaint)
+	}
+
+	return next, !kubeNodeTaintSlicesEqual(normalizedCurrent, next)
+}
+
+func machineDedicatedTaintValue(policy model.MachinePolicy) (string, bool) {
+	switch {
+	case policy.AllowEdge:
+		return runtimepkg.DedicatedEdgeValue, true
+	case policy.AllowDNS:
+		return runtimepkg.DedicatedDNSValue, true
+	case policy.AllowInternalMaintenance:
+		return runtimepkg.DedicatedInternalValue, true
+	default:
+		return "", false
+	}
+}
+
+func desiredMachineDedicatedTaint(policy model.MachinePolicy) (kubeNodeTaint, bool) {
+	value, ok := machineDedicatedTaintValue(policy)
+	if !ok {
+		return kubeNodeTaint{}, false
+	}
+	return kubeNodeTaint{
+		Key:    runtimepkg.DedicatedTaintKey,
+		Value:  value,
+		Effect: "NoSchedule",
+	}, true
+}
+
+func desiredNodeHealthTaint(healthy bool) (kubeNodeTaint, bool) {
+	if healthy {
+		return kubeNodeTaint{}, false
+	}
+	return kubeNodeTaint{
+		Key:    runtimepkg.NodeUnhealthyTaintKey,
+		Value:  runtimepkg.NodeUnhealthyTaintValue,
+		Effect: "NoSchedule",
+	}, true
+}
+
+func applyNodeHealthLabels(labels map[string]string, healthy bool) {
+	if labels == nil {
+		return
+	}
+	if healthy {
+		labels[runtimepkg.NodeSchedulableLabelKey] = "true"
+		labels[runtimepkg.NodeHealthLabelKey] = runtimepkg.NodeHealthReadyValue
+		return
+	}
+	labels[runtimepkg.NodeSchedulableLabelKey] = "false"
+	labels[runtimepkg.NodeHealthLabelKey] = runtimepkg.NodeHealthBlockedValue
+}
+
+func nodeSchedulingHealthy(node kubeNode) bool {
+	return kubeNodeConditionStatus(node, clusterNodeConditionReady) == "true" &&
+		kubeNodeConditionStatus(node, clusterNodeConditionDisk) != "true"
+}
+
+func kubeNodeConditionStatus(node kubeNode, conditionType string) string {
+	for _, condition := range node.Status.Conditions {
+		if strings.EqualFold(strings.TrimSpace(condition.Type), conditionType) {
+			return normalizeKubeConditionStatus(condition.Status)
+		}
+	}
+	return "unknown"
 }
 
 func (s *Server) loadManagedClusterNodeView(ctx context.Context, principal model.Principal, nodeName string) (model.ClusterNode, error) {
@@ -363,7 +499,7 @@ func (s *Server) loadManagedClusterNodeView(ctx context.Context, principal model
 	return model.ClusterNode{}, store.ErrNotFound
 }
 
-func (s *Server) ensureBootstrapControlPlaneMachineByName(ctx context.Context, nodeName string) (model.Machine, error) {
+func (s *Server) ensurePlatformMachineByClusterNodeName(ctx context.Context, nodeName string) (model.Machine, error) {
 	snapshots, err := s.loadClusterNodeInventory(ctx)
 	if err != nil {
 		return model.Machine{}, err
@@ -371,9 +507,6 @@ func (s *Server) ensureBootstrapControlPlaneMachineByName(ctx context.Context, n
 	for _, snapshot := range snapshots {
 		if !strings.EqualFold(strings.TrimSpace(snapshot.node.Name), strings.TrimSpace(nodeName)) {
 			continue
-		}
-		if !shouldSeedBootstrapControlPlaneMachine(snapshot) {
-			return model.Machine{}, store.ErrNotFound
 		}
 		return s.store.EnsurePlatformMachineForClusterNode(
 			snapshot.node.Name,

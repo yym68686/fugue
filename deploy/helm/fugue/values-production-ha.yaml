@@ -53,6 +53,7 @@ edge:
   enabled: true
   nodeSelector:
     fugue.io/role.edge: "true"
+    fugue.io/schedulable: "true"
 
 service:
   type: ClusterIP

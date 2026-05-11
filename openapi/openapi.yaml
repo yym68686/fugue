@@ -5514,25 +5514,54 @@ components:
       additionalProperties: false
       required:
         [
+          allow_app_runtime,
           allow_builds,
           allow_shared_pool,
+          allow_edge,
+          allow_dns,
+          allow_internal_maintenance,
           desired_control_plane_role,
+          effective_app_runtime,
           effective_builds,
           effective_shared_pool,
+          effective_edge,
+          effective_dns,
+          effective_internal_maintenance,
+          effective_schedulable,
           effective_control_plane_role
         ]
       properties:
+        allow_app_runtime:
+          type: boolean
         allow_builds:
           type: boolean
         allow_shared_pool:
           type: boolean
+        allow_edge:
+          type: boolean
+        allow_dns:
+          type: boolean
+        allow_internal_maintenance:
+          type: boolean
         node_mode:
+          type: string
+        node_health:
           type: string
         desired_control_plane_role:
           type: string
+        effective_app_runtime:
+          type: boolean
         effective_builds:
           type: boolean
         effective_shared_pool:
+          type: boolean
+        effective_edge:
+          type: boolean
+        effective_dns:
+          type: boolean
+        effective_internal_maintenance:
+          type: boolean
+        effective_schedulable:
           type: boolean
         effective_control_plane_role:
           type: string
@@ -6933,9 +6962,17 @@ components:
       type: object
       additionalProperties: false
       properties:
+        allow_app_runtime:
+          type: boolean
         allow_builds:
           type: boolean
         allow_shared_pool:
+          type: boolean
+        allow_edge:
+          type: boolean
+        allow_dns:
+          type: boolean
+        allow_internal_maintenance:
           type: boolean
         desired_control_plane_role:
           type: string

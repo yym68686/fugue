@@ -466,10 +466,6 @@ func (s *Server) reconcileSharedPoolPolicyDriftFromSnapshots(snapshots []cluster
 		}
 
 		if runtimeObj, ok := runtimeByClusterNode[nodeName]; ok {
-			desiredSharedPool := model.NormalizeRuntimePoolMode(runtimeObj.Type, runtimeObj.PoolMode) == model.RuntimePoolModeInternalShared
-			if desiredSharedPool == snapshot.sharedPool {
-				continue
-			}
 			reconciled, err := client.reconcileRuntimeNode(context.Background(), runtimeObj)
 			if err != nil {
 				if isKubernetesNodeNotFound(err) {
@@ -485,9 +481,6 @@ func (s *Server) reconcileSharedPoolPolicyDriftFromSnapshots(snapshots []cluster
 
 		machine, ok := machineByClusterNode[nodeName]
 		if !ok || strings.TrimSpace(machine.RuntimeID) != "" {
-			continue
-		}
-		if machine.Policy.AllowSharedPool == snapshot.sharedPool {
 			continue
 		}
 		reconciled, err := client.reconcileMachineNode(context.Background(), nodeName, machine, nil)
@@ -1398,7 +1391,17 @@ func shouldSeedBootstrapControlPlaneMachine(snapshot clusterNodeSnapshot) bool {
 	if strings.TrimSpace(snapshot.node.Name) == "" {
 		return false
 	}
-	return clusterNodeHasRole(snapshot.node, "control-plane")
+	return clusterNodeHasRole(snapshot.node, "control-plane") || snapshotHasPlatformPolicyLabels(snapshot)
+}
+
+func snapshotHasPlatformPolicyLabels(snapshot clusterNodeSnapshot) bool {
+	return strings.EqualFold(firstNodeLabel(snapshot.labels, runtime.BuildNodeLabelKey), runtime.BuildNodeLabelValue) ||
+		strings.EqualFold(firstNodeLabel(snapshot.labels, runtime.BuilderRoleLabelKey), runtime.NodeRoleLabelValue) ||
+		strings.EqualFold(firstNodeLabel(snapshot.labels, runtime.SharedPoolLabelKey), runtime.SharedPoolLabelValue) ||
+		strings.EqualFold(firstNodeLabel(snapshot.labels, runtime.AppRuntimeRoleLabelKey), runtime.NodeRoleLabelValue) ||
+		strings.EqualFold(firstNodeLabel(snapshot.labels, runtime.EdgeRoleLabelKey), runtime.NodeRoleLabelValue) ||
+		strings.EqualFold(firstNodeLabel(snapshot.labels, runtime.DNSRoleLabelKey), runtime.NodeRoleLabelValue) ||
+		strings.EqualFold(firstNodeLabel(snapshot.labels, runtime.InternalMaintenanceLabelKey), runtime.NodeRoleLabelValue)
 }
 
 func needsLegacyBootstrapControlPlaneMachineBackfill(snapshot clusterNodeSnapshot, machine model.Machine) bool {

@@ -91,3 +91,23 @@ func TestUpgradeScriptPinsTopologyLabelerTolerations(t *testing.T) {
 		}
 	}
 }
+
+func TestUpgradeScriptPinsEdgeDNSHealthyNodeSelectors(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(repoRoot(t), "scripts", "upgrade_fugue_control_plane.sh")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read upgrade script: %v", err)
+	}
+	script := string(data)
+	for _, want := range []string{
+		"edge:\n  nodeSelector:\n    fugue.io/role.edge: \"true\"\n    fugue.io/schedulable: \"true\"",
+		"fugue.io/role.dns: \"true\"",
+		"fugue.io/schedulable: \"true\"",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected upgrade script to pin healthy node selector fragment %q: %s", want, path)
+		}
+	}
+}

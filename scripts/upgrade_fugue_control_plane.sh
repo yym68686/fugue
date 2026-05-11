@@ -396,6 +396,10 @@ topologyLabeler:
       operator: Equal
       value: internal
       effect: NoSchedule
+edge:
+  nodeSelector:
+    fugue.io/role.edge: "true"
+    fugue.io/schedulable: "true"
 cloudnative-pg:
   replicaCount: 2
   priorityClassName: system-cluster-critical
@@ -516,6 +520,9 @@ EOF
   fi
 
   {
+    printf '  nodeSelector:\n'
+    printf '    fugue.io/role.dns: "true"\n'
+    printf '    fugue.io/schedulable: "true"\n'
     printf '  publicHostPorts:\n'
     printf '    enabled: %s\n' "${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED}"
     printf '  udpAddr: %s\n' "$(yaml_quote "${FUGUE_DNS_UDP_ADDR}")"

@@ -410,8 +410,12 @@ func TestSetClusterNodePolicySeedsBootstrapControlPlaneMachine(t *testing.T) {
 	}
 
 	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/cluster/nodes/gcp1/policy", "bootstrap-secret", map[string]any{
+		"allow_app_runtime":          true,
 		"allow_builds":               true,
 		"allow_shared_pool":          true,
+		"allow_edge":                 true,
+		"allow_dns":                  true,
+		"allow_internal_maintenance": true,
 		"desired_control_plane_role": model.MachineControlPlaneRoleCandidate,
 	})
 	if recorder.Code != http.StatusOK {
@@ -435,8 +439,14 @@ func TestSetClusterNodePolicySeedsBootstrapControlPlaneMachine(t *testing.T) {
 	if !response.ClusterNode.Policy.AllowBuilds {
 		t.Fatalf("expected desired builds enabled after patch, got %#v", response.ClusterNode.Policy)
 	}
+	if !response.ClusterNode.Policy.AllowAppRuntime {
+		t.Fatalf("expected desired app-runtime enabled after patch, got %#v", response.ClusterNode.Policy)
+	}
 	if !response.ClusterNode.Policy.AllowSharedPool {
 		t.Fatalf("expected desired shared-pool enabled after patch, got %#v", response.ClusterNode.Policy)
+	}
+	if !response.ClusterNode.Policy.AllowEdge || !response.ClusterNode.Policy.AllowDNS || !response.ClusterNode.Policy.AllowInternalMaintenance {
+		t.Fatalf("expected desired edge/dns/internal maintenance enabled after patch, got %#v", response.ClusterNode.Policy)
 	}
 	if response.ClusterNode.Policy.DesiredControlPlaneRole != model.MachineControlPlaneRoleCandidate {
 		t.Fatalf("expected desired role %q, got %q", model.MachineControlPlaneRoleCandidate, response.ClusterNode.Policy.DesiredControlPlaneRole)
@@ -447,6 +457,12 @@ func TestSetClusterNodePolicySeedsBootstrapControlPlaneMachine(t *testing.T) {
 	if !response.ClusterNode.Policy.EffectiveSharedPool {
 		t.Fatalf("expected effective shared-pool enabled after node reconcile, got %#v", response.ClusterNode.Policy)
 	}
+	if !response.ClusterNode.Policy.EffectiveEdge || !response.ClusterNode.Policy.EffectiveDNS || !response.ClusterNode.Policy.EffectiveInternalMaintenance {
+		t.Fatalf("expected effective edge/dns/internal maintenance enabled after node reconcile, got %#v", response.ClusterNode.Policy)
+	}
+	if !response.ClusterNode.Policy.EffectiveSchedulable {
+		t.Fatalf("expected healthy node to be effectively schedulable, got %#v", response.ClusterNode.Policy)
+	}
 
 	machine, err := stateStore.GetMachineByClusterNodeName("gcp1")
 	if err != nil {
@@ -455,11 +471,114 @@ func TestSetClusterNodePolicySeedsBootstrapControlPlaneMachine(t *testing.T) {
 	if !machine.Policy.AllowBuilds {
 		t.Fatalf("expected stored machine builds enabled, got %#v", machine.Policy)
 	}
+	if !machine.Policy.AllowAppRuntime {
+		t.Fatalf("expected stored machine app-runtime enabled, got %#v", machine.Policy)
+	}
 	if !machine.Policy.AllowSharedPool {
 		t.Fatalf("expected stored machine shared-pool enabled, got %#v", machine.Policy)
 	}
+	if !machine.Policy.AllowEdge || !machine.Policy.AllowDNS || !machine.Policy.AllowInternalMaintenance {
+		t.Fatalf("expected stored machine edge/dns/internal maintenance enabled, got %#v", machine.Policy)
+	}
 	if machine.Policy.DesiredControlPlaneRole != model.MachineControlPlaneRoleCandidate {
 		t.Fatalf("expected stored machine role %q, got %q", model.MachineControlPlaneRoleCandidate, machine.Policy.DesiredControlPlaneRole)
+	}
+}
+
+func TestBuildMachineNodeMergePatchAppliesNodePolicyRolesAndHealthGate(t *testing.T) {
+	t.Parallel()
+
+	node := kubeNode{}
+	node.Metadata.Labels = map[string]string{}
+	node.Status.Conditions = []kubeNodeCondition{
+		{Type: clusterNodeConditionReady, Status: "True"},
+		{Type: clusterNodeConditionDisk, Status: "False"},
+	}
+	machine := model.Machine{
+		ID:              "machine_edge",
+		Scope:           model.MachineScopePlatformNode,
+		ClusterNodeName: "edge-1",
+		Policy: model.MachinePolicy{
+			AllowBuilds: true,
+			AllowEdge:   true,
+			AllowDNS:    true,
+		},
+	}
+
+	patch, changed := buildMachineNodeMergePatch(node, machine, nil)
+	if !changed {
+		t.Fatal("expected node policy patch to change empty node")
+	}
+	metadata := patch["metadata"].(map[string]any)
+	labels := metadata["labels"].(map[string]any)
+	for key, want := range map[string]string{
+		runtimepkg.EdgeRoleLabelKey:        runtimepkg.NodeRoleLabelValue,
+		runtimepkg.DNSRoleLabelKey:         runtimepkg.NodeRoleLabelValue,
+		runtimepkg.BuilderRoleLabelKey:     runtimepkg.NodeRoleLabelValue,
+		runtimepkg.BuildNodeLabelKey:       runtimepkg.BuildNodeLabelValue,
+		runtimepkg.NodeSchedulableLabelKey: "true",
+		runtimepkg.NodeHealthLabelKey:      runtimepkg.NodeHealthReadyValue,
+	} {
+		if got := labels[key]; got != want {
+			t.Fatalf("expected label %s=%q, got %#v in %#v", key, want, got, labels)
+		}
+	}
+	spec := patch["spec"].(map[string]any)
+	taints := spec["taints"].([]kubeNodeTaint)
+	if len(taints) != 1 || taints[0].Key != runtimepkg.DedicatedTaintKey || taints[0].Value != runtimepkg.DedicatedEdgeValue {
+		t.Fatalf("expected edge dedicated taint for edge+dns node, got %#v", taints)
+	}
+}
+
+func TestBuildMachineNodeMergePatchBlocksDiskPressureNodes(t *testing.T) {
+	t.Parallel()
+
+	node := kubeNode{}
+	node.Metadata.Labels = map[string]string{
+		runtimepkg.EdgeRoleLabelKey:        runtimepkg.NodeRoleLabelValue,
+		runtimepkg.NodeSchedulableLabelKey: "true",
+		runtimepkg.NodeHealthLabelKey:      runtimepkg.NodeHealthReadyValue,
+	}
+	node.Spec.Taints = []kubeNodeTaint{{
+		Key:    runtimepkg.DedicatedTaintKey,
+		Value:  runtimepkg.DedicatedEdgeValue,
+		Effect: "NoSchedule",
+	}}
+	node.Status.Conditions = []kubeNodeCondition{
+		{Type: clusterNodeConditionReady, Status: "True"},
+		{Type: clusterNodeConditionDisk, Status: "True"},
+	}
+	machine := model.Machine{
+		ID:              "machine_edge",
+		Scope:           model.MachineScopePlatformNode,
+		ClusterNodeName: "edge-1",
+		Policy: model.MachinePolicy{
+			AllowEdge: true,
+		},
+	}
+
+	patch, changed := buildMachineNodeMergePatch(node, machine, nil)
+	if !changed {
+		t.Fatal("expected disk-pressure node to receive blocked health gate")
+	}
+	metadata := patch["metadata"].(map[string]any)
+	labels := metadata["labels"].(map[string]any)
+	if got := labels[runtimepkg.NodeSchedulableLabelKey]; got != "false" {
+		t.Fatalf("expected schedulable=false, got %#v in %#v", got, labels)
+	}
+	if got := labels[runtimepkg.NodeHealthLabelKey]; got != runtimepkg.NodeHealthBlockedValue {
+		t.Fatalf("expected blocked health, got %#v in %#v", got, labels)
+	}
+	spec := patch["spec"].(map[string]any)
+	taints := spec["taints"].([]kubeNodeTaint)
+	foundHealthTaint := false
+	for _, taint := range taints {
+		if taint.Key == runtimepkg.NodeUnhealthyTaintKey && taint.Value == runtimepkg.NodeUnhealthyTaintValue {
+			foundHealthTaint = true
+		}
+	}
+	if !foundHealthTaint {
+		t.Fatalf("expected node-unhealthy NoSchedule taint, got %#v", taints)
 	}
 }
 

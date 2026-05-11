@@ -314,6 +314,8 @@ func (s *Server) bootstrapJoinClusterNode(ctx context.Context, nodeKey, nodeName
 		if join.NodeName == "" {
 			join.NodeName = firstNonEmpty(runtimeObj.ClusterNodeName, runtimeObj.Name, nodeName)
 		}
+	} else {
+		join.NodeTaints = machineJoinTaints(machine)
 	}
 	return key, machine, runtimeObj, join, nil
 }
@@ -470,6 +472,19 @@ func machineJoinLabelMap(machine model.Machine) map[string]string {
 	}
 	if machine.Policy.AllowBuilds {
 		labels[runtime.BuildNodeLabelKey] = runtime.BuildNodeLabelValue
+		labels[runtime.BuilderRoleLabelKey] = runtime.NodeRoleLabelValue
+	}
+	if machine.Policy.AllowAppRuntime {
+		labels[runtime.AppRuntimeRoleLabelKey] = runtime.NodeRoleLabelValue
+	}
+	if machine.Policy.AllowEdge {
+		labels[runtime.EdgeRoleLabelKey] = runtime.NodeRoleLabelValue
+	}
+	if machine.Policy.AllowDNS {
+		labels[runtime.DNSRoleLabelKey] = runtime.NodeRoleLabelValue
+	}
+	if machine.Policy.AllowInternalMaintenance {
+		labels[runtime.InternalMaintenanceLabelKey] = runtime.NodeRoleLabelValue
 	}
 	if role := model.NormalizeMachineControlPlaneRole(machine.Policy.DesiredControlPlaneRole); role != "" && role != model.MachineControlPlaneRoleNone {
 		labels[runtime.ControlPlaneDesiredRoleKey] = role
@@ -483,6 +498,16 @@ func machineJoinLabelMap(machine model.Machine) map[string]string {
 		}
 	}
 	return labels
+}
+
+func machineJoinTaints(machine model.Machine) []string {
+	dedicatedValue, ok := machineDedicatedTaintValue(machine.Policy)
+	if !ok {
+		return nil
+	}
+	return []string{
+		runtime.DedicatedTaintKey + "=" + dedicatedValue + ":NoSchedule",
+	}
 }
 
 func joinClusterLabels(labels map[string]string) []string {

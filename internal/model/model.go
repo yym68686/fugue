@@ -526,9 +526,13 @@ type Machine struct {
 }
 
 type MachinePolicy struct {
-	AllowBuilds             bool   `json:"allow_builds"`
-	AllowSharedPool         bool   `json:"allow_shared_pool"`
-	DesiredControlPlaneRole string `json:"desired_control_plane_role,omitempty"`
+	AllowAppRuntime          bool   `json:"allow_app_runtime"`
+	AllowBuilds              bool   `json:"allow_builds"`
+	AllowSharedPool          bool   `json:"allow_shared_pool"`
+	AllowEdge                bool   `json:"allow_edge"`
+	AllowDNS                 bool   `json:"allow_dns"`
+	AllowInternalMaintenance bool   `json:"allow_internal_maintenance"`
+	DesiredControlPlaneRole  string `json:"desired_control_plane_role,omitempty"`
 }
 
 type NodeUpdater struct {
@@ -737,13 +741,23 @@ type ClusterNodeMachine struct {
 }
 
 type ClusterNodePolicy struct {
-	AllowBuilds               bool   `json:"allow_builds"`
-	AllowSharedPool           bool   `json:"allow_shared_pool"`
-	NodeMode                  string `json:"node_mode,omitempty"`
-	DesiredControlPlaneRole   string `json:"desired_control_plane_role,omitempty"`
-	EffectiveBuilds           bool   `json:"effective_builds"`
-	EffectiveSharedPool       bool   `json:"effective_shared_pool"`
-	EffectiveControlPlaneRole string `json:"effective_control_plane_role,omitempty"`
+	AllowAppRuntime              bool   `json:"allow_app_runtime"`
+	AllowBuilds                  bool   `json:"allow_builds"`
+	AllowSharedPool              bool   `json:"allow_shared_pool"`
+	AllowEdge                    bool   `json:"allow_edge"`
+	AllowDNS                     bool   `json:"allow_dns"`
+	AllowInternalMaintenance     bool   `json:"allow_internal_maintenance"`
+	NodeMode                     string `json:"node_mode,omitempty"`
+	NodeHealth                   string `json:"node_health,omitempty"`
+	DesiredControlPlaneRole      string `json:"desired_control_plane_role,omitempty"`
+	EffectiveAppRuntime          bool   `json:"effective_app_runtime"`
+	EffectiveBuilds              bool   `json:"effective_builds"`
+	EffectiveSharedPool          bool   `json:"effective_shared_pool"`
+	EffectiveEdge                bool   `json:"effective_edge"`
+	EffectiveDNS                 bool   `json:"effective_dns"`
+	EffectiveInternalMaintenance bool   `json:"effective_internal_maintenance"`
+	EffectiveSchedulable         bool   `json:"effective_schedulable"`
+	EffectiveControlPlaneRole    string `json:"effective_control_plane_role,omitempty"`
 }
 
 type ControlPlaneComponent struct {

@@ -19,7 +19,7 @@
 {{- if hasKey $topologyLabeler "nodeSelector" -}}
 {{- $topologyLabelerNodeSelector = (get $topologyLabeler "nodeSelector" | default (dict)) -}}
 {{- end -}}
-{{- $topologyLabelerAffinity := (include "fugue.internalMaintenanceAffinity" . | fromYaml) -}}
+{{- $topologyLabelerAffinity := (include "fugue.internalMaintenanceHealthyAffinity" . | fromYaml) -}}
 {{- if hasKey $topologyLabeler "affinity" -}}
 {{- $topologyLabelerAffinity = (get $topologyLabeler "affinity" | default (dict)) -}}
 {{- end -}}

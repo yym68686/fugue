@@ -12,7 +12,7 @@
 {{- $intervalSeconds := default 900 (get $imagePrePull "intervalSeconds") -}}
 {{- $priorityClassName := default "system-node-critical" (get $imagePrePull "priorityClassName") -}}
 {{- $nodeSelector := (get $imagePrePull "nodeSelector" | default (dict)) -}}
-{{- $affinity := (include "fugue.internalMaintenanceAffinity" . | fromYaml) -}}
+{{- $affinity := (include "fugue.internalMaintenanceHealthyAffinity" . | fromYaml) -}}
 {{- if hasKey $imagePrePull "affinity" -}}
 {{- $affinity = (get $imagePrePull "affinity" | default (dict)) -}}
 {{- end -}}

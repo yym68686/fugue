@@ -109,7 +109,7 @@ func (c *clusterNodeClient) reconcileRuntimeNode(ctx context.Context, runtimeObj
 
 	patch, changed := buildRuntimeNodeMergePatch(node, runtimeObj)
 	if !changed {
-		return true, nil
+		return false, nil
 	}
 	if err := c.patchNode(ctx, nodeName, patch); err != nil {
 		if isKubernetesNodeNotFound(err) {
@@ -158,8 +158,9 @@ func (c *clusterNodeClient) patchNode(ctx context.Context, nodeName string, patc
 }
 
 func buildRuntimeNodeMergePatch(node kubeNode, runtimeObj model.Runtime) (map[string]any, bool) {
-	labelsPatch, labelsChanged := buildRuntimeNodeLabelsPatch(node.Metadata.Labels, runtimeObj)
-	taints, taintsChanged := buildRuntimeNodeTaints(node.Spec.Taints, runtimeObj)
+	healthy := nodeSchedulingHealthy(node)
+	labelsPatch, labelsChanged := buildRuntimeNodeLabelsPatchForHealth(node.Metadata.Labels, healthy, runtimeObj)
+	taints, taintsChanged := buildRuntimeNodeTaintsForHealth(node.Spec.Taints, healthy, runtimeObj)
 	if !labelsChanged && !taintsChanged {
 		return nil, false
 	}
@@ -175,7 +176,13 @@ func buildRuntimeNodeMergePatch(node kubeNode, runtimeObj model.Runtime) (map[st
 }
 
 func buildRuntimeNodeLabelsPatch(current map[string]string, runtimeObj model.Runtime) (map[string]any, bool) {
+	return buildRuntimeNodeLabelsPatchForHealth(current, true, runtimeObj)
+}
+
+func buildRuntimeNodeLabelsPatchForHealth(current map[string]string, healthy bool, runtimeObj model.Runtime) (map[string]any, bool) {
 	desired := runtimepkg.JoinNodeLabelMap(runtimeObj)
+	desired[runtimepkg.AppRuntimeRoleLabelKey] = runtimepkg.NodeRoleLabelValue
+	applyNodeHealthLabels(desired, healthy)
 	patch := map[string]any{}
 	changed := false
 	for _, key := range managedRuntimeNodeLabelKeys() {
@@ -199,23 +206,38 @@ func buildRuntimeNodeLabelsPatch(current map[string]string, runtimeObj model.Run
 }
 
 func buildRuntimeNodeTaints(current []kubeNodeTaint, runtimeObj model.Runtime) ([]kubeNodeTaint, bool) {
+	return buildRuntimeNodeTaintsForHealth(current, true, runtimeObj)
+}
+
+func buildRuntimeNodeTaintsForHealth(current []kubeNodeTaint, healthy bool, runtimeObj model.Runtime) ([]kubeNodeTaint, bool) {
 	normalizedCurrent := normalizeKubeNodeTaints(current)
 	desiredTenantTaint, hasDesiredTenantTaint := desiredRuntimeNodeTenantTaint(runtimeObj)
+	desiredHealthTaint, hasDesiredHealthTaint := desiredNodeHealthTaint(healthy)
 
 	next := make([]kubeNodeTaint, 0, len(normalizedCurrent)+1)
 	desiredPresent := false
+	healthPresent := false
 	for _, taint := range normalizedCurrent {
-		if taint.Key != runtimepkg.TenantTaintKey {
+		switch taint.Key {
+		case runtimepkg.TenantTaintKey:
+			if hasDesiredTenantTaint && !desiredPresent && kubeNodeTaintEqual(taint, desiredTenantTaint) {
+				next = append(next, desiredTenantTaint)
+				desiredPresent = true
+			}
+		case runtimepkg.NodeUnhealthyTaintKey:
+			if hasDesiredHealthTaint && !healthPresent && kubeNodeTaintEqual(taint, desiredHealthTaint) {
+				next = append(next, desiredHealthTaint)
+				healthPresent = true
+			}
+		default:
 			next = append(next, taint)
-			continue
-		}
-		if hasDesiredTenantTaint && !desiredPresent && kubeNodeTaintEqual(taint, desiredTenantTaint) {
-			next = append(next, desiredTenantTaint)
-			desiredPresent = true
 		}
 	}
 	if hasDesiredTenantTaint && !desiredPresent {
 		next = append(next, desiredTenantTaint)
+	}
+	if hasDesiredHealthTaint && !healthPresent {
+		next = append(next, desiredHealthTaint)
 	}
 
 	return next, !kubeNodeTaintSlicesEqual(normalizedCurrent, next)
@@ -276,6 +298,9 @@ func managedRuntimeNodeLabelKeys() []string {
 		runtimepkg.TenantIDLabelKey,
 		runtimepkg.NodeModeLabelKey,
 		runtimepkg.SharedPoolLabelKey,
+		runtimepkg.AppRuntimeRoleLabelKey,
+		runtimepkg.NodeSchedulableLabelKey,
+		runtimepkg.NodeHealthLabelKey,
 	}
 }
 

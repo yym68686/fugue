@@ -12,16 +12,24 @@ import (
 const kubernetesControlPlaneRoleLabelKey = "node-role.kubernetes.io/control-plane"
 
 func defaultMachinePolicyForScope(scope string) model.MachinePolicy {
-	return model.MachinePolicy{
+	policy := model.MachinePolicy{
 		AllowBuilds:             false,
 		AllowSharedPool:         false,
 		DesiredControlPlaneRole: model.MachineControlPlaneRoleNone,
 	}
+	if model.NormalizeMachineScope(scope) == model.MachineScopeTenantRuntime {
+		policy.AllowAppRuntime = true
+	}
+	return policy
 }
 
 func machinePolicyEquals(a, b model.MachinePolicy) bool {
-	return a.AllowBuilds == b.AllowBuilds &&
+	return a.AllowAppRuntime == b.AllowAppRuntime &&
+		a.AllowBuilds == b.AllowBuilds &&
 		a.AllowSharedPool == b.AllowSharedPool &&
+		a.AllowEdge == b.AllowEdge &&
+		a.AllowDNS == b.AllowDNS &&
+		a.AllowInternalMaintenance == b.AllowInternalMaintenance &&
 		a.DesiredControlPlaneRole == b.DesiredControlPlaneRole
 }
 
@@ -34,6 +42,9 @@ func seedMachinePolicyFromLabels(scope string, labels map[string]string) model.M
 	if strings.EqualFold(
 		strings.TrimSpace(labels[runtimepkg.BuildNodeLabelKey]),
 		runtimepkg.BuildNodeLabelValue,
+	) || strings.EqualFold(
+		strings.TrimSpace(labels[runtimepkg.BuilderRoleLabelKey]),
+		runtimepkg.NodeRoleLabelValue,
 	) {
 		policy.AllowBuilds = true
 	}
@@ -43,6 +54,19 @@ func seedMachinePolicyFromLabels(scope string, labels map[string]string) model.M
 	) {
 		policy.AllowSharedPool = true
 		policy.AllowBuilds = true
+		policy.AllowAppRuntime = true
+	}
+	if strings.EqualFold(strings.TrimSpace(labels[runtimepkg.AppRuntimeRoleLabelKey]), runtimepkg.NodeRoleLabelValue) {
+		policy.AllowAppRuntime = true
+	}
+	if strings.EqualFold(strings.TrimSpace(labels[runtimepkg.EdgeRoleLabelKey]), runtimepkg.NodeRoleLabelValue) {
+		policy.AllowEdge = true
+	}
+	if strings.EqualFold(strings.TrimSpace(labels[runtimepkg.DNSRoleLabelKey]), runtimepkg.NodeRoleLabelValue) {
+		policy.AllowDNS = true
+	}
+	if strings.EqualFold(strings.TrimSpace(labels[runtimepkg.InternalMaintenanceLabelKey]), runtimepkg.NodeRoleLabelValue) {
+		policy.AllowInternalMaintenance = true
 	}
 	if rawRole, ok := labels[runtimepkg.ControlPlaneDesiredRoleKey]; ok {
 		if role := model.NormalizeMachineControlPlaneRole(strings.TrimSpace(rawRole)); role != "" {
@@ -58,9 +82,14 @@ func seedMachinePolicyFromLabels(scope string, labels map[string]string) model.M
 
 func normalizeMachinePolicy(scope string, policy model.MachinePolicy) model.MachinePolicy {
 	normalized := defaultMachinePolicyForScope(scope)
+	normalized.AllowAppRuntime = policy.AllowAppRuntime
 	normalized.AllowBuilds = policy.AllowBuilds
 	normalized.AllowSharedPool = policy.AllowSharedPool
+	normalized.AllowEdge = policy.AllowEdge
+	normalized.AllowDNS = policy.AllowDNS
+	normalized.AllowInternalMaintenance = policy.AllowInternalMaintenance
 	if normalized.AllowSharedPool {
+		normalized.AllowAppRuntime = true
 		normalized.AllowBuilds = true
 	}
 	if role := model.NormalizeMachineControlPlaneRole(policy.DesiredControlPlaneRole); role != "" {
@@ -113,6 +142,7 @@ func machinePolicyFromRuntime(runtime model.Runtime, existing *model.Machine) mo
 	if existing != nil {
 		policy = existing.Policy
 	}
+	policy.AllowAppRuntime = true
 	policy.AllowSharedPool = model.NormalizeRuntimePoolMode(runtime.Type, runtime.PoolMode) == model.RuntimePoolModeInternalShared
 	return normalizeMachinePolicy(model.MachineScopeTenantRuntime, policy)
 }

@@ -154,6 +154,7 @@ func buildRuntimeSnapshotMachine(runtimeObj model.Runtime) model.Machine {
 		RuntimeName:     runtimeObj.Name,
 		ClusterNodeName: strings.TrimSpace(runtimeObj.ClusterNodeName),
 		Policy: model.MachinePolicy{
+			AllowAppRuntime:         true,
 			AllowBuilds:             model.NormalizeRuntimePoolMode(runtimeObj.Type, runtimeObj.PoolMode) == model.RuntimePoolModeInternalShared,
 			AllowSharedPool:         model.NormalizeRuntimePoolMode(runtimeObj.Type, runtimeObj.PoolMode) == model.RuntimePoolModeInternalShared,
 			DesiredControlPlaneRole: model.MachineControlPlaneRoleNone,
@@ -180,39 +181,87 @@ func machineHasSavedPolicy(machine *model.Machine) bool {
 }
 
 func buildClusterNodePolicyView(snapshot clusterNodeSnapshot, machine *model.Machine, runtimeObj *model.Runtime) *model.ClusterNodePolicy {
+	effectiveAppRuntime := effectiveAppRuntimePolicy(snapshot)
 	effectiveBuilds := effectiveBuildPolicy(snapshot)
 	effectiveSharedPool := snapshot.sharedPool
+	effectiveEdge := strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.EdgeRoleLabelKey), runtimepkg.NodeRoleLabelValue)
+	effectiveDNS := strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.DNSRoleLabelKey), runtimepkg.NodeRoleLabelValue)
+	effectiveInternalMaintenance := strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.InternalMaintenanceLabelKey), runtimepkg.NodeRoleLabelValue)
+	effectiveSchedulable := clusterNodeSnapshotSchedulable(snapshot)
 	desiredBuilds := effectiveBuilds
 	desiredSharedPool := effectiveSharedPool
+	desiredAppRuntime := effectiveAppRuntime
+	desiredEdge := effectiveEdge
+	desiredDNS := effectiveDNS
+	desiredInternalMaintenance := effectiveInternalMaintenance
 	desiredRole := desiredControlPlaneRole(snapshot, machine)
 	nodeMode := strings.TrimSpace(firstNodeLabel(snapshot.labels, runtimepkg.NodeModeLabelKey))
+	nodeHealth := strings.TrimSpace(firstNodeLabel(snapshot.labels, runtimepkg.NodeHealthLabelKey))
 	hasSavedPolicy := machineHasSavedPolicy(machine)
 
 	if hasSavedPolicy {
+		desiredAppRuntime = machine.Policy.AllowAppRuntime
 		desiredBuilds = machine.Policy.AllowBuilds
 		desiredSharedPool = machine.Policy.AllowSharedPool
+		desiredEdge = machine.Policy.AllowEdge
+		desiredDNS = machine.Policy.AllowDNS
+		desiredInternalMaintenance = machine.Policy.AllowInternalMaintenance
 	}
 	if runtimeObj != nil && !hasSavedPolicy {
+		desiredAppRuntime = true
 		desiredSharedPool = model.NormalizeRuntimePoolMode(runtimeObj.Type, runtimeObj.PoolMode) == model.RuntimePoolModeInternalShared
 		if nodeMode == "" {
 			nodeMode = strings.TrimSpace(runtimeObj.Type)
 		}
 	}
+	if nodeHealth == "" {
+		if effectiveSchedulable {
+			nodeHealth = runtimepkg.NodeHealthReadyValue
+		} else {
+			nodeHealth = runtimepkg.NodeHealthBlockedValue
+		}
+	}
 
 	return &model.ClusterNodePolicy{
-		AllowBuilds:               desiredBuilds,
-		AllowSharedPool:           desiredSharedPool,
-		NodeMode:                  nodeMode,
-		DesiredControlPlaneRole:   desiredRole,
-		EffectiveBuilds:           effectiveBuilds,
-		EffectiveSharedPool:       effectiveSharedPool,
-		EffectiveControlPlaneRole: effectiveControlPlaneRole(snapshot, desiredRole),
+		AllowAppRuntime:              desiredAppRuntime,
+		AllowBuilds:                  desiredBuilds,
+		AllowSharedPool:              desiredSharedPool,
+		AllowEdge:                    desiredEdge,
+		AllowDNS:                     desiredDNS,
+		AllowInternalMaintenance:     desiredInternalMaintenance,
+		NodeMode:                     nodeMode,
+		NodeHealth:                   nodeHealth,
+		DesiredControlPlaneRole:      desiredRole,
+		EffectiveAppRuntime:          effectiveAppRuntime,
+		EffectiveBuilds:              effectiveBuilds,
+		EffectiveSharedPool:          effectiveSharedPool,
+		EffectiveEdge:                effectiveEdge,
+		EffectiveDNS:                 effectiveDNS,
+		EffectiveInternalMaintenance: effectiveInternalMaintenance,
+		EffectiveSchedulable:         effectiveSchedulable,
+		EffectiveControlPlaneRole:    effectiveControlPlaneRole(snapshot, desiredRole),
 	}
+}
+
+func effectiveAppRuntimePolicy(snapshot clusterNodeSnapshot) bool {
+	return strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.AppRuntimeRoleLabelKey), runtimepkg.NodeRoleLabelValue) ||
+		strings.TrimSpace(firstNodeLabel(snapshot.labels, runtimepkg.RuntimeIDLabelKey, runtimepkg.NodeModeLabelKey)) != "" ||
+		snapshot.sharedPool
 }
 
 func effectiveBuildPolicy(snapshot clusterNodeSnapshot) bool {
 	return snapshot.sharedPool ||
-		strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.BuildNodeLabelKey), runtimepkg.BuildNodeLabelValue)
+		strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.BuildNodeLabelKey), runtimepkg.BuildNodeLabelValue) ||
+		strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.BuilderRoleLabelKey), runtimepkg.NodeRoleLabelValue)
+}
+
+func clusterNodeSnapshotSchedulable(snapshot clusterNodeSnapshot) bool {
+	ready := snapshot.node.Conditions[clusterNodeConditionReady]
+	if ready.Status != "true" {
+		return false
+	}
+	disk := snapshot.node.Conditions[clusterNodeConditionDisk]
+	return disk.Status != "true"
 }
 
 func desiredControlPlaneRole(snapshot clusterNodeSnapshot, machine *model.Machine) string {

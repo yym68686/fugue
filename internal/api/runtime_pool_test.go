@@ -74,6 +74,12 @@ func TestSetRuntimePoolModeRequiresPlatformAdminAndReconcilesNode(t *testing.T) 
 						"spec": map[string]any{
 							"taints": nodeTaints,
 						},
+						"status": map[string]any{
+							"conditions": []map[string]string{
+								{"type": "Ready", "status": "True"},
+								{"type": "DiskPressure", "status": "False"},
+							},
+						},
 					}), nil
 				case req.Method == http.MethodPatch && req.URL.Path == "/api/v1/nodes/"+runtimeObj.ClusterNodeName:
 					var patch struct {
