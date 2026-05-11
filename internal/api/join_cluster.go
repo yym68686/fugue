@@ -881,6 +881,33 @@ EOF_K3S_AGENT_OVERRIDE
   return 1
 }
 
+ensure_k3s_agent_non_stub_resolv_conf() {
+  local current_target=""
+  local backup_path=""
+  if [ ! -L /etc/resolv.conf ]; then
+    log_step "/etc/resolv.conf is not a symlink; leaving resolver configuration unchanged."
+    return 1
+  fi
+  current_target="$(readlink /etc/resolv.conf 2>/dev/null || true)"
+  case "${current_target}" in
+    *stub-resolv.conf)
+      ;;
+    *)
+      log_step "/etc/resolv.conf is not the systemd-resolved stub; leaving resolver configuration unchanged."
+      return 1
+      ;;
+  esac
+  if [ ! -s /run/systemd/resolve/resolv.conf ]; then
+    log_step "systemd-resolved upstream resolv.conf is unavailable; leaving resolver configuration unchanged."
+    return 1
+  fi
+  backup_path="/etc/resolv.conf.fugue-stub-$(date -u +%%Y%%m%%dT%%H%%M%%SZ)"
+  cp -P /etc/resolv.conf "${backup_path}" || true
+  ln -sfn ../run/systemd/resolve/resolv.conf /etc/resolv.conf
+  log_step "Pointed /etc/resolv.conf at /run/systemd/resolve/resolv.conf for k3s/containerd image pulls; backup is ${backup_path}."
+  return 0
+}
+
 trim_whitespace() {
   local value="$1"
   value="${value#"${value%%[![:space:]]*}"}"
@@ -1658,8 +1685,13 @@ if ensure_k3s_agent_service_override; then
   k3s_service_override_changed=1
 fi
 
+host_resolv_conf_changed=0
+if ensure_k3s_agent_non_stub_resolv_conf; then
+  host_resolv_conf_changed=1
+fi
+
 k3s_restart_needed="${k3s_config_changed}"
-if [ "${k3s_installed_now}" -eq 1 ] || [ "${k3s_environment_files_changed}" -eq 1 ] || [ "${k3s_service_override_changed}" -eq 1 ]; then
+if [ "${k3s_installed_now}" -eq 1 ] || [ "${k3s_environment_files_changed}" -eq 1 ] || [ "${k3s_service_override_changed}" -eq 1 ] || [ "${host_resolv_conf_changed}" -eq 1 ]; then
   k3s_restart_needed=1
 fi
 

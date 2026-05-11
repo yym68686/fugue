@@ -598,6 +598,11 @@ func TestJoinClusterInstallScriptAvoidsRedundantRestarts(t *testing.T) {
 		`Environment="K3S_NODE_LABEL="`,
 		`ExecStart=${k3s_binary} agent`,
 		`Updated k3s-agent systemd override to ignore stale installer settings.`,
+		`ensure_k3s_agent_non_stub_resolv_conf() {`,
+		`*stub-resolv.conf)`,
+		`/run/systemd/resolve/resolv.conf`,
+		`Pointed /etc/resolv.conf at /run/systemd/resolve/resolv.conf for k3s/containerd image pulls`,
+		`host_resolv_conf_changed=1`,
 		`k3s_restart_needed=1`,
 	} {
 		if !strings.Contains(script, want) {
