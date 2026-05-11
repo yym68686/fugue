@@ -30,13 +30,18 @@ type edgeDNSBundleOptions struct {
 }
 
 func (s *Server) handleEdgeDNSBundle(w http.ResponseWriter, r *http.Request) {
-	if !s.authorizeEdgeToken(w, r) {
+	authContext, ok := s.authorizeEdgeRequest(w, r)
+	if !ok {
 		return
 	}
 
 	options, err := s.edgeDNSBundleOptionsFromRequest(r)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := authContext.constrain(&options.DNSNodeID, &options.EdgeGroupID); err != nil {
+		httpx.WriteError(w, http.StatusForbidden, err.Error())
 		return
 	}
 	bundle, err := s.deriveEdgeDNSBundle(r, options)

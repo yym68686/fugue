@@ -23,13 +23,18 @@ type edgeRouteBundleOptions struct {
 }
 
 func (s *Server) handleEdgeRoutes(w http.ResponseWriter, r *http.Request) {
-	if !s.authorizeEdgeToken(w, r) {
+	authContext, ok := s.authorizeEdgeRequest(w, r)
+	if !ok {
 		return
 	}
 
 	options := edgeRouteBundleOptions{
 		EdgeID:      strings.TrimSpace(r.URL.Query().Get("edge_id")),
 		EdgeGroupID: strings.TrimSpace(r.URL.Query().Get("edge_group_id")),
+	}
+	if err := authContext.constrain(&options.EdgeID, &options.EdgeGroupID); err != nil {
+		httpx.WriteError(w, http.StatusForbidden, err.Error())
+		return
 	}
 	bundle, err := s.deriveEdgeRouteBundle(r, options)
 	if err != nil {

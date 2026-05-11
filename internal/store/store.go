@@ -3560,6 +3560,15 @@ func ensureDefaults(state *model.State) {
 	if state.AppDomains == nil {
 		state.AppDomains = []model.AppDomain{}
 	}
+	if state.EdgeGroups == nil {
+		state.EdgeGroups = []model.EdgeGroup{}
+	}
+	if state.EdgeNodes == nil {
+		state.EdgeNodes = []model.EdgeNode{}
+	}
+	for idx := range state.EdgeNodes {
+		normalizeEdgeNodeForRead(&state.EdgeNodes[idx])
+	}
 	if state.BackingServices == nil {
 		state.BackingServices = []model.BackingService{}
 	}

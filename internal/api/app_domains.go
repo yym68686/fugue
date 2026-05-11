@@ -654,15 +654,12 @@ func ipListsIntersect(left, right []net.IPAddr) bool {
 }
 
 func (s *Server) authorizeEdgeToken(w http.ResponseWriter, r *http.Request) bool {
-	if strings.TrimSpace(s.edgeTLSAskToken) == "" {
+	if strings.TrimSpace(s.edgeTLSAskToken) == "" && s.store == nil {
 		http.NotFound(w, r)
 		return false
 	}
-	if !subtleConstantCompare(r.URL.Query().Get("token"), s.edgeTLSAskToken) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return false
-	}
-	return true
+	_, ok := s.authorizeEdgeRequest(w, r)
+	return ok
 }
 
 func subtleConstantCompare(left, right string) bool {

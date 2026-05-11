@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 const (
 	EdgeRouteKindPlatform     = "platform"
@@ -41,6 +44,13 @@ const (
 const (
 	EdgeDNSRecordTypeA    = "A"
 	EdgeDNSRecordTypeAAAA = "AAAA"
+)
+
+const (
+	EdgeHealthUnknown   = "unknown"
+	EdgeHealthHealthy   = "healthy"
+	EdgeHealthDegraded  = "degraded"
+	EdgeHealthUnhealthy = "unhealthy"
 )
 
 type EdgeRouteBundle struct {
@@ -135,4 +145,55 @@ type EdgeDNSRecord struct {
 	Status              string   `json:"status"`
 	StatusReason        string   `json:"status_reason,omitempty"`
 	RecordGeneration    string   `json:"record_generation"`
+}
+
+type EdgeNode struct {
+	ID                  string     `json:"id"`
+	EdgeGroupID         string     `json:"edge_group_id"`
+	Region              string     `json:"region,omitempty"`
+	Country             string     `json:"country,omitempty"`
+	PublicHostname      string     `json:"public_hostname,omitempty"`
+	PublicIPv4          string     `json:"public_ipv4,omitempty"`
+	PublicIPv6          string     `json:"public_ipv6,omitempty"`
+	MeshIP              string     `json:"mesh_ip,omitempty"`
+	Status              string     `json:"status"`
+	Healthy             bool       `json:"healthy"`
+	Draining            bool       `json:"draining"`
+	RouteBundleVersion  string     `json:"route_bundle_version,omitempty"`
+	DNSBundleVersion    string     `json:"dns_bundle_version,omitempty"`
+	CaddyRouteCount     int        `json:"caddy_route_count"`
+	CaddyAppliedVersion string     `json:"caddy_applied_version,omitempty"`
+	CaddyLastError      string     `json:"caddy_last_error,omitempty"`
+	CacheStatus         string     `json:"cache_status,omitempty"`
+	LastError           string     `json:"last_error,omitempty"`
+	TokenPrefix         string     `json:"token_prefix,omitempty"`
+	TokenHash           string     `json:"token_hash,omitempty"`
+	LastSeenAt          *time.Time `json:"last_seen_at,omitempty"`
+	LastHeartbeatAt     *time.Time `json:"last_heartbeat_at,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+}
+
+type EdgeGroup struct {
+	ID               string     `json:"id"`
+	Region           string     `json:"region,omitempty"`
+	Country          string     `json:"country,omitempty"`
+	Status           string     `json:"status,omitempty"`
+	NodeCount        int        `json:"node_count"`
+	HealthyNodeCount int        `json:"healthy_node_count"`
+	HasHealthyNodes  bool       `json:"has_healthy_nodes"`
+	LastSeenAt       *time.Time `json:"last_seen_at,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+}
+
+func NormalizeEdgeHealthStatus(status string) string {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case EdgeHealthHealthy, EdgeHealthDegraded, EdgeHealthUnhealthy:
+		return strings.TrimSpace(strings.ToLower(status))
+	case EdgeHealthUnknown, "":
+		return EdgeHealthUnknown
+	default:
+		return ""
+	}
 }

@@ -106,6 +106,69 @@ func TestSyncOnceWritesRouteBundleCache(t *testing.T) {
 	}
 }
 
+func TestHeartbeatOnceReportsEdgeInventory(t *testing.T) {
+	t.Parallel()
+
+	var gotToken string
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/edge/heartbeat" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		gotToken = r.URL.Query().Get("token")
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode heartbeat: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"accepted": true, "node": gotBody})
+	}))
+	defer server.Close()
+
+	service := NewService(config.EdgeConfig{
+		APIURL:            server.URL,
+		EdgeToken:         "edge-secret",
+		EdgeID:            "edge-us-1",
+		EdgeGroupID:       "edge-group-country-us",
+		Region:            "us-east",
+		Country:           "US",
+		PublicIPv4:        "203.0.113.10",
+		MeshIP:            "100.64.0.10",
+		HeartbeatInterval: time.Minute,
+	}, log.New(ioDiscard{}, "", 0))
+	bundle := testBundle("routegen_heartbeat")
+	bundle.EdgeID = "edge-us-1"
+	bundle.EdgeGroupID = "edge-group-country-us"
+	service.recordSyncSuccess(bundle, `"routegen_heartbeat"`, time.Now().UTC(), false)
+	service.recordCaddyApply("routegen_heartbeat", 1, nil)
+
+	if err := service.HeartbeatOnce(context.Background()); err != nil {
+		t.Fatalf("heartbeat once: %v", err)
+	}
+	if gotToken != "edge-secret" {
+		t.Fatalf("expected edge token, got %q", gotToken)
+	}
+	for key, want := range map[string]any{
+		"edge_id":               "edge-us-1",
+		"edge_group_id":         "edge-group-country-us",
+		"region":                "us-east",
+		"country":               "US",
+		"public_ipv4":           "203.0.113.10",
+		"mesh_ip":               "100.64.0.10",
+		"route_bundle_version":  "routegen_heartbeat",
+		"caddy_applied_version": "routegen_heartbeat",
+		"cache_status":          "ready",
+		"status":                model.EdgeHealthHealthy,
+		"healthy":               true,
+		"draining":              false,
+	} {
+		if got := gotBody[key]; got != want {
+			t.Fatalf("heartbeat field %s: expected %#v, got %#v in %#v", key, want, got, gotBody)
+		}
+	}
+	if got := gotBody["caddy_route_count"]; got != float64(1) {
+		t.Fatalf("expected caddy_route_count 1, got %#v", got)
+	}
+}
+
 func TestSyncOnceNotModifiedKeepsExistingCacheFile(t *testing.T) {
 	t.Parallel()
 

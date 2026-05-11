@@ -2,6 +2,7 @@ package edge
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -207,6 +208,7 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.Logger.Printf("fugue-edge shadow started; api=%s edge_id=%s edge_group_id=%s cache=%s listen=%s interval=%s caddy_enabled=%t caddy_listen=%s caddy_tls_mode=%s proxy_listen=%s", safeBaseURL(s.Config.APIURL), s.Config.EdgeID, s.Config.EdgeGroupID, s.Config.CachePath, s.Config.ListenAddr, s.syncInterval(), s.Config.CaddyEnabled, s.Config.CaddyListenAddr, s.normalizedCaddyTLSMode(), s.Config.CaddyProxyListenAddr)
 	_ = s.SyncOnce(ctx)
+	s.startHeartbeatLoop(ctx)
 
 	ticker := time.NewTicker(s.syncInterval())
 	defer ticker.Stop()
@@ -683,6 +685,137 @@ func (s *Service) newRoutesRequest(ctx context.Context) (*http.Request, error) {
 	return req, nil
 }
 
+func (s *Service) startHeartbeatLoop(ctx context.Context) {
+	if !s.heartbeatEnabled() {
+		if s.Logger != nil {
+			s.Logger.Printf("edge heartbeat disabled; edge_id=%t edge_group_id=%t token=%t", strings.TrimSpace(s.Config.EdgeID) != "", strings.TrimSpace(s.Config.EdgeGroupID) != "", strings.TrimSpace(s.Config.EdgeToken) != "")
+		}
+		return
+	}
+	go func() {
+		_ = s.HeartbeatOnce(ctx)
+		ticker := time.NewTicker(s.heartbeatInterval())
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = s.HeartbeatOnce(ctx)
+			}
+		}
+	}()
+}
+
+func (s *Service) HeartbeatOnce(ctx context.Context) error {
+	if !s.heartbeatEnabled() {
+		return nil
+	}
+	req, err := s.newHeartbeatRequest(ctx)
+	if err != nil {
+		s.logHeartbeatFailure(err)
+		return err
+	}
+	resp, err := s.HTTPClient.Do(req)
+	if err != nil {
+		err = fmt.Errorf("send edge heartbeat: %s", s.redact(err.Error()))
+		s.logHeartbeatFailure(err)
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		err := statusError{
+			StatusCode: resp.StatusCode,
+			Body:       s.redact(strings.TrimSpace(string(body))),
+		}
+		s.logHeartbeatFailure(err)
+		return err
+	}
+	if s.Logger != nil {
+		status := s.Status()
+		s.Logger.Printf("edge heartbeat success; edge_id=%s edge_group_id=%s status=%s route_bundle=%s caddy_routes=%d", strings.TrimSpace(s.Config.EdgeID), strings.TrimSpace(s.Config.EdgeGroupID), edgeHealthStatus(status), status.BundleVersion, s.metricSnapshot().Metrics.CaddyRouteCount)
+	}
+	return nil
+}
+
+func (s *Service) newHeartbeatRequest(ctx context.Context) (*http.Request, error) {
+	base, err := url.Parse(strings.TrimRight(strings.TrimSpace(s.Config.APIURL), "/"))
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return nil, fmt.Errorf("invalid FUGUE_API_URL")
+	}
+	base.Path = strings.TrimRight(base.Path, "/") + "/v1/edge/heartbeat"
+	query := base.Query()
+	query.Set("token", strings.TrimSpace(s.Config.EdgeToken))
+	base.RawQuery = query.Encode()
+
+	snapshot := s.metricSnapshot()
+	status := snapshot.Status
+	cacheStatus := "missing"
+	if status.BundleVersion != "" {
+		cacheStatus = "ready"
+	}
+	if status.StaleCache {
+		cacheStatus = "stale"
+	}
+	body := map[string]any{
+		"edge_id":               strings.TrimSpace(s.Config.EdgeID),
+		"edge_group_id":         strings.TrimSpace(s.Config.EdgeGroupID),
+		"region":                strings.TrimSpace(s.Config.Region),
+		"country":               strings.TrimSpace(s.Config.Country),
+		"public_hostname":       strings.TrimSpace(s.Config.PublicHostname),
+		"public_ipv4":           strings.TrimSpace(s.Config.PublicIPv4),
+		"public_ipv6":           strings.TrimSpace(s.Config.PublicIPv6),
+		"mesh_ip":               strings.TrimSpace(s.Config.MeshIP),
+		"route_bundle_version":  strings.TrimSpace(status.BundleVersion),
+		"dns_bundle_version":    "",
+		"caddy_route_count":     snapshot.Metrics.CaddyRouteCount,
+		"caddy_applied_version": strings.TrimSpace(status.CaddyAppliedVersion),
+		"caddy_last_error":      strings.TrimSpace(status.CaddyLastError),
+		"cache_status":          cacheStatus,
+		"status":                edgeHealthStatus(status),
+		"healthy":               status.Healthy,
+		"draining":              s.Config.Draining,
+		"last_error":            firstNonEmpty(strings.TrimSpace(status.LastError), strings.TrimSpace(status.CaddyLastError)),
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal edge heartbeat: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base.String(), bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("build edge heartbeat request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return req, nil
+}
+
+func (s *Service) heartbeatEnabled() bool {
+	return strings.TrimSpace(s.Config.APIURL) != "" &&
+		strings.TrimSpace(s.Config.EdgeToken) != "" &&
+		strings.TrimSpace(s.Config.EdgeID) != "" &&
+		strings.TrimSpace(s.Config.EdgeGroupID) != "" &&
+		s.heartbeatInterval() > 0
+}
+
+func (s *Service) heartbeatInterval() time.Duration {
+	if s.Config.HeartbeatInterval > 0 {
+		return s.Config.HeartbeatInterval
+	}
+	return 30 * time.Second
+}
+
+func edgeHealthStatus(status Status) string {
+	switch {
+	case status.Healthy && !status.StaleCache && strings.TrimSpace(status.CaddyLastError) == "":
+		return model.EdgeHealthHealthy
+	case status.Healthy:
+		return model.EdgeHealthDegraded
+	default:
+		return model.EdgeHealthUnhealthy
+	}
+}
+
 func (s *Service) currentETag() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1017,6 +1150,13 @@ func (s *Service) logSyncFailure(err error) {
 		return
 	}
 	s.Logger.Printf("edge route bundle sync failed; error=%s", s.redact(err.Error()))
+}
+
+func (s *Service) logHeartbeatFailure(err error) {
+	if s.Logger == nil || err == nil {
+		return
+	}
+	s.Logger.Printf("edge heartbeat failed; error=%s", s.redact(err.Error()))
 }
 
 func (s *Service) logProxyObservation(observed edgeProxyObservation) {

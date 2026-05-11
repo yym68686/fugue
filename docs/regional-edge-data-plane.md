@@ -136,10 +136,17 @@ public_ipv4
 public_ipv6
 mesh_ip
 status
+healthy
 draining
 last_seen_at
-route_generation
-supported_zones
+last_heartbeat_at
+route_bundle_version
+dns_bundle_version
+caddy_route_count
+caddy_applied_version
+caddy_last_error
+cache_status
+last_error
 created_at
 updated_at
 ```
@@ -147,6 +154,8 @@ updated_at
 `edge_group` 是 DNS 和 route policy 的选择单位，单个 edge node 是该 group 下的健康和容量成员。
 
 每个要切流的区域都应先具备对应 edge group；没有 edge group 的区域继续走 Route A。比如当前只有美国 edge 时，美国 agent/runtime 上的低风险 hostname 可以 opt-in 到 `edge-group-us`，德国 runtime 上的 app 仍应继续走控制平面旧入口，除非显式配置跨区 fallback。
+
+2026-05-12 代码状态：本仓库已新增持久化 edge / edge group 模型、typed edge inventory API、edge heartbeat API 和 admin CLI。控制面可通过 `GET /v1/edge/nodes`、`GET /v1/edge/nodes/{edge_id}` 查询 edge group 是否有健康成员；`fugue-edge` 会周期性 `POST /v1/edge/heartbeat` 上报 bundle version、Caddy apply/cache 状态和健康状态。该能力仍需要通过正式控制平面发布链路上线并在线上观察。
 
 示例：
 
@@ -199,12 +208,14 @@ Fugue NodePolicy
 edge-hk-1:
   fugue.io/role.edge=true
   fugue.io/role.dns=true
+  fugue.io/schedulable=true
   fugue.io/region=asia-hk
   fugue.io/edge-group=edge-group-asia-hk
   taint: fugue.io/dedicated=edge:NoSchedule
 
 sg-app-1:
   fugue.io/role.app-runtime=true
+  fugue.io/schedulable=true
   fugue.io/region=asia-sg
   fugue.io/runtime-id=runtime_sg_xxx
   taint: fugue.io/tenant=<tenant-id>:NoSchedule
@@ -256,18 +267,18 @@ fugue-edge -> 127.0.0.1 或私网管理端口
 
 ```text
 fugue-dns DaemonSet:
-  nodeSelector: fugue.io/role.dns=true
+  nodeSelector: fugue.io/role.dns=true, fugue.io/schedulable=true
   tolerations: fugue.io/dedicated=dns 或 fugue.io/dedicated=edge
   shadow: UDP/TCP 127.0.0.1:5353
   canary/production: hostPort UDP 53 / TCP 53
 
 fugue-edge / Caddy DaemonSet:
-  nodeSelector: fugue.io/role.edge=true
+  nodeSelector: fugue.io/role.edge=true, fugue.io/schedulable=true
   shadow: localhost Caddy admin/data ports
   canary/production: hostPort TCP 80 / TCP 443
 ```
 
-2026-05-11 当前状态：已在美国 joined node `vps-591f4447` 上做单节点直接 DNS shadow 验证，`fugue-dns` 打开 UDP 53 / TCP 53 hostPort，answer IP 为 `15.204.94.71`。这只用于 `dig @15.204.94.71 ...` 直接验证，不代表 `dns.fugue.pro` 已委托，也不满足生产 DNS 至少两个节点的条件。
+2026-05-12 当前状态：已在美国 joined node `vps-591f4447` 上做单节点直接 DNS shadow 验证，该节点由 NodePolicy 标记为 `fugue.io/role.edge=true`、`fugue.io/role.dns=true` 和 `fugue.io/schedulable=true`。`fugue-dns` 打开 UDP 53 / TCP 53 hostPort，answer IP 为 `15.204.94.71`。这只用于 `dig @15.204.94.71 ...` 直接验证，不代表 `dns.fugue.pro` 已委托，也不满足生产 DNS 至少两个节点的条件。
 
 这让控制平面可以通过 NodePolicy 调整角色，同时让公网 DNS 和 HTTPS 流量直接打到节点公网 IP。
 
@@ -399,9 +410,12 @@ fugue admin edge route-policy delete <hostname>
 
 不要复用 tenant API key。
 
-可选认证方式：
+当前已落地的认证方式：
 
 - 每个 edge 或 edge group 一个 scoped edge token
+
+后续可选增强：
+
 - 每个 edge 一张 mTLS 证书
 - edge 运行在可信集群内时使用 workload identity
 
@@ -727,8 +741,12 @@ DNS 必须上报：
 - 当前已经具备只读 route binding 派生、typed `/v1/edge/routes` route bundle API、稳定 `ETag` / conditional fetch、`fugue-edge` shadow DaemonSet、本地 route cache、health 和 metrics。
 - 线上已经具备 hostname 级 `EdgeRoutePolicy`、`/v1/edge/route-policies` 管理 API 和 `fugue admin edge route-policy` CLI；默认 `route_a_only`，只有显式 `edge_canary` / `edge_enabled` opt-in 的 hostname 才会进入 edge Caddy / proxy。
 - 当前 `fugue-edge` 仍是 shadow / canary workload：已支持 Caddy-backed dynamic config，但不开放公网 80/443 hostPort，不承接 wildcard 或生产流量。
-- Caddy-backed shadow 已发布到美国 edge 节点，Caddy admin 绑定 localhost，数据面 listen 为内部 canary 端口；当前 edge image 为 `ghcr.io/yym68686/fugue-edge:3c6f807f01389a09bb01c16f99b8f01faaea8610`，并显式设置 `FUGUE_EDGE_GROUP_ID=edge-group-country-us`。正式切流仍必须通过显式 hostname / route policy opt-in。
+- Caddy-backed shadow 已发布到美国 edge 节点，Caddy admin 绑定 localhost，数据面 listen 为内部 canary 端口；当前 edge image 跟随正式发布链路更新，并显式设置 `FUGUE_EDGE_GROUP_ID=edge-group-country-us`。正式切流仍必须通过显式 hostname / route policy opt-in。
 - `fugue-dns` 已具备 typed `/v1/edge/dns` DNS bundle API、本地 DNS cache、authoritative-only DNS responder、health/metrics 和 Helm DNS DaemonSet；已在单个美国 edge 节点上做直接 DNS shadow 验证。
+- NodePolicy 最小模型已经上线：控制面持久化 `app-runtime`、`shared-pool`、`edge`、`dns`、`builder`、`internal-maintenance` 等 desired role，并 reconcile 到 Kubernetes Node labels / taints。
+- 本仓库当前代码已新增 edge / edge group 持久模型、`/v1/edge/nodes` inventory API、`/v1/edge/heartbeat`、edge-scoped token 和 `fugue admin edge nodes` CLI；发布前不能视为线上可用。
+- 控制面现在会读取 Kubernetes Node condition，把 `Ready=False` 或 `DiskPressure=True` 的节点标为 `fugue.io/schedulable=false`、`fugue.io/node-health=blocked`，并加 `fugue.io/node-unhealthy=true:NoSchedule`；除 `node-janitor` 这类清理组件外，普通维护组件、edge、dns、runtime workload 都不应继续调度到异常节点。
+- `fugue-edge` 和 `fugue-dns` 现在都要求对应 `fugue.io/role.*=true` 且 `fugue.io/schedulable=true`；edge / DNS 节点默认带 `fugue.io/dedicated` taint，初期允许同一节点同时承担 edge + DNS。为兼容已作为 runtime join 的美国 edge 节点，edge / DNS DaemonSet 也 tolerate 旧的 `fugue.io/tenant` taint，但仍必须先匹配显式 role 和健康 label。
 - `dns.fugue.pro` 尚未从 Google Cloud DNS / Cloudflare 父区委托到 Fugue DNS；单节点 shadow 不作为生产权威 DNS。
 - `dns.fugue.pro` 的现有公网权威和具体记录属于迁移前 baseline，具体值放在本地私有附录中。
 - 第一阶段不能全局切 DNS，也不能替换现有入口。`cerebr.fugue.pro` 已作为第一个 hostname 级 `edge_canary` 进入美国 edge 内部 canary；下一步应继续观察该 canary，再做单 hostname exact DNS canary、补第二个 DNS 节点，并保持 Route A fallback。
@@ -771,11 +789,12 @@ docs/private/regional-edge-current-state.local.md
 因此近期顺序是：
 
 1. 保持 Route A fallback，继续观察美国 edge / DNS shadow workload。
-2. 逐批把普通业务从 control-plane 节点迁出，避免控制面节点混跑业务 workload。
-3. 观察 `cerebr.fugue.pro` 的 hostname 级 `edge_canary`：route bundle、Caddy host route、edge proxy metrics 和 Route A fallback 都必须稳定。
-4. 对没有本区域 edge 的 runtime，继续保持 Route A，直到该区域部署并观察通过 edge shadow。
-5. 增加第二个 `fugue.io/role.dns=true` 节点，验证 `fugue-dns` 双节点 direct query。
-6. 只对通过验证的低风险 hostname 做 exact DNS canary；`dns.fugue.pro` 委托排在双节点 DNS 稳定之后。
+2. 先处理仍有 `DiskPressure=True` 的控制面节点；健康 gate 已阻止普通组件继续调度到该节点，但物理磁盘压力仍会影响集群可靠性。
+3. 逐批把普通业务从 control-plane 节点迁出，避免控制面节点混跑业务 workload。
+4. 观察 `cerebr.fugue.pro` 的 hostname 级 `edge_canary`：route bundle、Caddy host route、edge proxy metrics 和 Route A fallback 都必须稳定。
+5. 对没有本区域 edge 的 runtime，继续保持 Route A，直到该区域部署并观察通过 edge shadow。
+6. 增加第二个 `fugue.io/role.dns=true` 且 `fugue.io/schedulable=true` 节点，验证 `fugue-dns` 双节点 direct query。
+7. 只对通过验证的低风险 hostname 做 exact DNS canary；`dns.fugue.pro` 委托排在双节点 DNS 稳定之后。
 
 ## 平滑重构 TODO List
 
@@ -793,20 +812,24 @@ docs/private/regional-edge-current-state.local.md
 
 - [x] 明确所有新增区域机器默认通过 `join-cluster.sh` 作为 k3s agent node 接入，不默认加入 control-plane / etcd。
 - [x] 修复 Debian / systemd-resolved stub resolver 场景下 k3s/containerd 拉 GHCR 镜像失败的问题：join 脚本会把 `/etc/resolv.conf` 指向 `/run/systemd/resolve/resolv.conf`。
-- [ ] 设计 NodePolicy 数据模型，表达 `app-runtime`、`shared-pool`、`edge`、`dns`、`builder`、`registry-mirror`、`storage` 等角色。
-- [ ] 设计 NodePolicy 到 Kubernetes Node labels / taints 的 reconcile 流程。
-- [ ] 定义 edge / dns 节点的 labels、taints、resource request / limit 和禁止普通租户 app 混跑的默认策略。
-- [ ] 设计 `fugue-edge` / `fugue-dns` 的 hostNetwork DaemonSet 调度规则。
+- [x] 实现 NodePolicy 最小模型，表达 `app-runtime`、`shared-pool`、`edge`、`dns`、`builder`、`internal-maintenance` 等角色。
+- [x] 持久化 desired policy，并 reconcile 到 Kubernetes Node labels / taints。
+- [x] 通过 Node condition 生成 `fugue.io/schedulable`、`fugue.io/node-health` 和 `fugue.io/node-unhealthy` 健康 gate。
+- [x] 定义 edge / dns 节点的 role labels、dedicated taint、resource request / limit 和默认调度边界。
+- [x] 设计并实现 `fugue-edge` / `fugue-dns` Helm DaemonSet 调度规则：必须匹配 role label 和健康 label；edge 默认不开放公网 80/443；DNS 只有显式开启 hostPort 时开放 53。
+- [ ] 后续扩展 NodePolicy 角色：`registry-mirror`、`storage`、区域性网关等长期角色。
 - [ ] 保留 systemd 独立运行 `fugue-edge` / `fugue-dns` 的逃生口，避免 edge / DNS 完全依赖 Kubernetes 才能启动。
 - [ ] 增加 CLI 或 admin endpoint 查看节点角色、实际 labels / taints、角色 reconcile 状态。
 
 ### 2. 建立 edge inventory 和认证模型
 
-- [ ] 在 OpenAPI 里设计 edge 注册、edge heartbeat、edge route pull 的 API 契约。
-- [ ] 新增 edge / edge group 数据模型和存储迁移。
-- [ ] 新增 edge-scoped token 或 mTLS 身份，不复用 tenant API key。
-- [ ] 新增 edge heartbeat，上报 region、public IP、mesh IP、route generation、健康状态。
-- [ ] 增加 CLI 或 admin endpoint 查看 edge 列表和健康状态。
+- [x] 在 OpenAPI 里设计 edge inventory、edge heartbeat、edge route pull 的 API 契约。
+- [x] 新增 edge / edge group 数据模型和存储迁移。
+- [x] 新增 edge-scoped token，不复用 tenant API key。
+- [x] 新增 edge heartbeat，上报 region、public IP、mesh IP、route / DNS bundle version、Caddy apply/cache 状态和健康状态。
+- [x] 增加 admin API 和 CLI 查看 edge 列表和健康状态：`fugue admin edge nodes ls`、`fugue admin edge nodes get <edge-id>`。
+- [ ] 发布到控制面后观察 edge inventory：`last_seen_at` 持续更新、scoped token 不越权、bundle API 仍保持稳定 `ETag`。
+- [ ] 后续评估是否补 mTLS / workload identity，减少长期 secret token 暴露面。
 
 ### 3. 建立 route binding 派生层
 
@@ -834,10 +857,10 @@ docs/private/regional-edge-current-state.local.md
 - [x] 实现本地 health endpoint 和 metrics。
 - [x] 先不接公网流量，只验证 bundle sync。
 - [x] 支持控制平面不可用时从本地 cache 启动。
-- [x] 增加 `fugue-edge` shadow DaemonSet 和发布镜像链路，默认只调度到 `fugue.io/role.edge=true` 节点，不监听公网 80/443，不生成 Caddy config。
+- [x] 增加 `fugue-edge` shadow DaemonSet 和发布镜像链路，默认只调度到 `fugue.io/role.edge=true` 且 `fugue.io/schedulable=true` 的节点，不监听公网 80/443，不生成 Caddy config。
 - [x] 增强 shadow 自观测：bundle sync/cache load/cache write counters、bundle age、sync duration 和结构化同步日志。
-- [x] 在一台已 join cluster 且带 `fugue.io/role.edge=true` 的美国候选节点部署 shadow edge，确认能稳定拉取 bundle 并大量命中 304。
-- [ ] 在已 join cluster 且带 `fugue.io/role.edge=true` 的亚洲节点部署 shadow edge，确认能长期拉取 bundle。
+- [x] 在一台已 join cluster 且带 `fugue.io/role.edge=true` / `fugue.io/schedulable=true` 的美国候选节点部署 shadow edge，确认能稳定拉取 bundle 并大量命中 304。
+- [ ] 在已 join cluster 且带 `fugue.io/role.edge=true` / `fugue.io/schedulable=true` 的亚洲节点部署 shadow edge，确认能长期拉取 bundle。
 - [ ] 完成 12 到 24 小时 shadow 观察：`sync error` 不持续增长，cache write/load error 为 0，edge Pod 不重启。
 
 ### 5.5 控制平面减负和 Route A agent canary
@@ -888,10 +911,10 @@ docs/private/regional-edge-current-state.local.md
 - [x] DNS query 只查内存，不查数据库。
 - [x] 拒绝 recursive query，只回答 authoritative zone。
 - [x] 增加 `/healthz`、`/metrics`、bundle sync/cache/query counters。
-- [x] 增加 Helm DNS DaemonSet，默认关闭，调度到 `fugue.io/role.dns=true`，不默认开放公网 53。
+- [x] 增加 Helm DNS DaemonSet，默认关闭，调度到 `fugue.io/role.dns=true` 且 `fugue.io/schedulable=true`，不默认开放公网 53。
 - [x] 在美国 edge 节点 `vps-591f4447` 上启用 `fugue.io/role.dns=true`，与 edge 同节点运行单节点 DNS shadow，打开 UDP 53 / TCP 53 hostPort。
 - [x] 直接验证 `d-test.dns.fugue.pro A`：从集群外节点查询 `@15.204.94.71` 的 UDP 和 TCP DNS 均返回 `15.204.94.71`。
-- [ ] 在两个已 join cluster 且带 `fugue.io/role.dns=true` 的节点部署 shadow 服务，开放 UDP 53 / TCP 53。
+- [ ] 在两个已 join cluster 且带 `fugue.io/role.dns=true` / `fugue.io/schedulable=true` 的节点部署 shadow 服务，开放 UDP 53 / TCP 53。
 - [ ] 在第二个 DNS 节点重复直接验证：`dig @<ns2-ip> d-test.dns.fugue.pro A`。
 
 ### 9. Cloudflare 委托 dns.fugue.pro

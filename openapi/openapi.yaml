@@ -167,6 +167,104 @@ paths:
           description: Route bundle unchanged
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/edge/nodes:
+    get:
+      operationId: listEdgeNodes
+      summary: List Edge Nodes
+      tags: [Edge]
+      x-fugue-handler: handleListEdgeNodes
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: edge_group_id
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeNodeListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/edge/nodes/{edge_id}:
+    get:
+      operationId: getEdgeNode
+      summary: Get Edge Node
+      tags: [Edge]
+      x-fugue-handler: handleGetEdgeNode
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: edge_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeNodeResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/edge/nodes/{edge_id}/token:
+    post:
+      operationId: createEdgeNodeToken
+      summary: Create Edge Node Token
+      tags: [Edge]
+      x-fugue-handler: handleCreateEdgeNodeToken
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: edge_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateEdgeNodeTokenRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateEdgeNodeTokenResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/edge/heartbeat:
+    post:
+      operationId: edgeHeartbeat
+      summary: Edge Heartbeat
+      tags: [Edge]
+      x-fugue-handler: handleEdgeHeartbeat
+      security:
+        - EdgeToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EdgeHeartbeatRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeHeartbeatResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/edge/route-policies:
     get:
       operationId: listEdgeRoutePolicies
@@ -4645,6 +4743,211 @@ components:
       properties:
         policy:
           $ref: "#/components/schemas/EdgeRoutePolicy"
+    EdgeNode:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - edge_group_id
+        - status
+        - healthy
+        - draining
+        - caddy_route_count
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+        edge_group_id:
+          type: string
+        region:
+          type: string
+        country:
+          type: string
+        public_hostname:
+          type: string
+        public_ipv4:
+          type: string
+        public_ipv6:
+          type: string
+        mesh_ip:
+          type: string
+        status:
+          type: string
+          enum: [unknown, healthy, degraded, unhealthy]
+        healthy:
+          type: boolean
+        draining:
+          type: boolean
+        route_bundle_version:
+          type: string
+        dns_bundle_version:
+          type: string
+        caddy_route_count:
+          type: integer
+          format: int32
+        caddy_applied_version:
+          type: string
+        caddy_last_error:
+          type: string
+        cache_status:
+          type: string
+        last_error:
+          type: string
+        token_prefix:
+          type: string
+        last_seen_at:
+          type: string
+          format: date-time
+        last_heartbeat_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    EdgeGroup:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - node_count
+        - healthy_node_count
+        - has_healthy_nodes
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+        region:
+          type: string
+        country:
+          type: string
+        status:
+          type: string
+        node_count:
+          type: integer
+          format: int32
+        healthy_node_count:
+          type: integer
+          format: int32
+        has_healthy_nodes:
+          type: boolean
+        last_seen_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    EdgeNodeListResponse:
+      type: object
+      additionalProperties: false
+      required: [nodes, groups]
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeNode"
+        groups:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeGroup"
+    EdgeNodeResponse:
+      type: object
+      additionalProperties: false
+      required: [node, group]
+      properties:
+        node:
+          $ref: "#/components/schemas/EdgeNode"
+        group:
+          $ref: "#/components/schemas/EdgeGroup"
+    CreateEdgeNodeTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [edge_group_id]
+      properties:
+        edge_group_id:
+          type: string
+        region:
+          type: string
+        country:
+          type: string
+        public_hostname:
+          type: string
+        public_ipv4:
+          type: string
+        public_ipv6:
+          type: string
+        mesh_ip:
+          type: string
+        draining:
+          type: boolean
+    CreateEdgeNodeTokenResponse:
+      type: object
+      additionalProperties: false
+      required: [node, token]
+      properties:
+        node:
+          $ref: "#/components/schemas/EdgeNode"
+        token:
+          type: string
+    EdgeHeartbeatRequest:
+      type: object
+      additionalProperties: false
+      required: [edge_id, edge_group_id, status, healthy, draining]
+      properties:
+        edge_id:
+          type: string
+        edge_group_id:
+          type: string
+        region:
+          type: string
+        country:
+          type: string
+        public_hostname:
+          type: string
+        public_ipv4:
+          type: string
+        public_ipv6:
+          type: string
+        mesh_ip:
+          type: string
+        route_bundle_version:
+          type: string
+        dns_bundle_version:
+          type: string
+        caddy_route_count:
+          type: integer
+          format: int32
+        caddy_applied_version:
+          type: string
+        caddy_last_error:
+          type: string
+        cache_status:
+          type: string
+        status:
+          type: string
+          enum: [unknown, healthy, degraded, unhealthy]
+        healthy:
+          type: boolean
+        draining:
+          type: boolean
+        last_error:
+          type: string
+    EdgeHeartbeatResponse:
+      type: object
+      additionalProperties: false
+      required: [node, accepted]
+      properties:
+        node:
+          $ref: "#/components/schemas/EdgeNode"
+        accepted:
+          type: boolean
     DeleteEdgeRoutePolicyResponse:
       type: object
       additionalProperties: false
