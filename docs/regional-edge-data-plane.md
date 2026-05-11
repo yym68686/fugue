@@ -125,7 +125,7 @@ route_policy=edge_enabled   允许指定 edge_group 承接生产流量
 
 如果 app 所在区域或 runtime 没有可用 edge group，默认保持 `route_a_only`，不能自动借用其他区域 edge 承接生产流量。跨区域 edge 只适合作为显式配置的应急 fallback 或人工测试路径，不能作为默认迁移行为。
 
-`runtime_edge_group_id` 是由 runtime 位置派生出的本地数据面归属；`policy_edge_group_id` 是 hostname 级 canary policy 的目标。二者必须一致，且目标 edge group 必须有健康 edge 成员，route 才能从 `route_a_only` 进入 `edge_canary` / `edge_enabled`。这条规则防止“入口在美国，upstream 又随机绕到远端 runtime”的伪 canary。
+`runtime_edge_group_id` 是由 runtime 位置派生出的本地数据面归属；优先使用 runtime labels，缺失时使用 runtime 绑定的 Kubernetes Node labels，例如 `fugue.io/location-country-code=us`。`policy_edge_group_id` 是 hostname 级 canary policy 的目标。二者必须一致，且目标 edge group 必须有健康 edge 成员，route 才能从 `route_a_only` 进入 `edge_canary` / `edge_enabled`。这条规则防止“入口在美国，upstream 又随机绕到远端 runtime”的伪 canary。
 
 2026-05-11 线上状态：hostname 级 `EdgeRoutePolicy` 已随控制平面版本 `d213572e943980aa4e119ac76788cf74fd3933fc` 发布。控制面从 `AppRoute` / verified `AppDomain` 派生 route binding 后，会叠加 policy；默认 `route_policy=route_a_only`，只有显式设置为 `edge_canary` 或 `edge_enabled` 且绑定具体 `edge_group_id` 的 hostname 才允许进入 regional edge。`fugue-edge` 的 Caddy dynamic config 和直接 proxy 都会跳过 `route_a_only` route。
 
@@ -773,7 +773,7 @@ DNS 必须上报：
 - NodePolicy 最小模型已经上线：控制面持久化 `app-runtime`、`shared-pool`、`edge`、`dns`、`builder`、`internal-maintenance` 等 desired role，并 reconcile 到 Kubernetes Node labels / taints。
 - NodePolicy 可视化接口和 CLI 已补齐：`GET /v1/cluster/node-policies`、`GET /v1/cluster/node-policies/{name}`、`GET /v1/cluster/node-policies/status` 对应 `fugue admin cluster node-policy ls|get|status`，用于查看 desired role、实际 labels / taints、`Ready` / `DiskPressure` gate 和 reconcile drift。
 - edge / edge group 持久模型、`/v1/edge/nodes` inventory API、`/v1/edge/heartbeat`、edge-scoped token 和 `fugue admin edge nodes` CLI 已发布到控制面；当前美国 edge 节点已使用 scoped token 上报健康状态，route bundle、Caddy apply 和 cache 状态均可从 admin CLI 读取。
-- route binding 已补本地 upstream 防线：`edge_canary` / `edge_enabled` 只有在 policy 目标 edge group 与 runtime 派生 edge group 一致，且该 group 有健康 edge member 时才会生效；managed-shared / managed-owned 使用 `upstream_scope=local-service` 的 in-cluster Service DNS，external-owned 先标记为 mesh upstream 未就绪。
+- route binding 已补本地 upstream 防线：`edge_canary` / `edge_enabled` 只有在 policy 目标 edge group 与 runtime 派生 edge group 一致，且该 group 有健康 edge member 时才会生效；runtime edge group 从 runtime labels 派生，缺失时从绑定 Node labels 派生；managed-shared / managed-owned 使用 `upstream_scope=local-service` 的 in-cluster Service DNS，external-owned 先标记为 mesh upstream 未就绪。
 - `fugue-edge` 观测已扩展：Caddy dynamic config 开启 JSON access log，edge proxy metrics 增加 fallback hit、WebSocket / SSE / streaming 成功率和 upload request 计数。
 - 控制面现在会读取 Kubernetes Node condition，把 `Ready=False` 或 `DiskPressure=True` 的节点标为 `fugue.io/schedulable=false`、`fugue.io/node-health=blocked`，并加 `fugue.io/node-unhealthy=true:NoSchedule`；除 `node-janitor` 这类清理组件外，普通维护组件、edge、dns、runtime workload 都不应继续调度到异常节点。
 - `fugue-edge` 和 `fugue-dns` 现在都要求对应 `fugue.io/role.*=true` 且 `fugue.io/schedulable=true`；edge / DNS 节点默认带 `fugue.io/dedicated` taint，初期允许同一节点同时承担 edge + DNS。为兼容已作为 runtime join 的美国 edge 节点，edge / DNS DaemonSet 也 tolerate 旧的 `fugue.io/tenant` taint，但仍必须先匹配显式 role 和健康 label。
@@ -930,6 +930,7 @@ docs/private/regional-edge-current-state.local.md
 ### 7. 建立 edge 到 runtime 的本地 upstream 路径
 
 - [x] 对 managed-shared / managed-owned，在 route bundle 中明确 `upstream_scope=local-service`，使用 in-cluster Service DNS。
+- [x] runtime edge group 优先从 runtime labels 派生，缺失时从绑定的 Kubernetes Node labels 派生，避免已标记美国节点的 runtime 因自身 labels 为空而被错误归入 default group。
 - [x] route policy 目标 edge group 必须等于 runtime 派生 edge group，且该 edge group 有健康成员；否则 route 保持不可接流，继续 Route A。
 - [x] 在 Caddy config 和 direct proxy 两层继续校验 `edge_group_id`、`runtime_edge_group_id`、`policy_edge_group_id` 与本地 edge group 一致，避免 edge 本地接入远端 runtime。
 - [ ] 对 external-owned，验证 WireGuard / Tailscale / Headscale mesh upstream。

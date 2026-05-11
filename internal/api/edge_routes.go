@@ -81,6 +81,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	for _, runtimeObj := range runtimes {
 		runtimeByID[strings.TrimSpace(runtimeObj.ID)] = runtimeObj
 	}
+	runtimeNodeLabelsByID := s.edgeRouteRuntimeNodeLabels(r.Context())
 	appByID := make(map[string]model.App, len(apps))
 	for _, app := range apps {
 		app = s.overlayManagedAppStatusCached(app)
@@ -93,7 +94,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		if app.Route == nil || strings.TrimSpace(app.Route.Hostname) == "" {
 			continue
 		}
-		binding := s.deriveEdgeRouteBinding(r, app, strings.TrimSpace(app.Route.Hostname), model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt, runtimeByID)
+		binding := s.deriveEdgeRouteBinding(r, app, strings.TrimSpace(app.Route.Hostname), model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
 		if edgeRouteMatchesSelector(binding, options) {
 			routes = append(routes, binding)
@@ -110,7 +111,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		if !ok {
 			continue
 		}
-		binding := s.deriveEdgeRouteBinding(r, app, hostname, model.EdgeRouteKindCustomDomain, model.EdgeRouteTLSPolicyCustomDomain, domain.CreatedAt, domain.UpdatedAt, runtimeByID)
+		binding := s.deriveEdgeRouteBinding(r, app, hostname, model.EdgeRouteKindCustomDomain, model.EdgeRouteTLSPolicyCustomDomain, domain.CreatedAt, domain.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
 		if edgeRouteMatchesSelector(binding, options) {
 			routes = append(routes, binding)
@@ -145,10 +146,10 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	return bundle, nil
 }
 
-func (s *Server) deriveEdgeRouteBinding(r *http.Request, app model.App, hostname, routeKind, tlsPolicy string, createdAt, updatedAt time.Time, runtimeByID map[string]model.Runtime) model.EdgeRouteBinding {
+func (s *Server) deriveEdgeRouteBinding(r *http.Request, app model.App, hostname, routeKind, tlsPolicy string, createdAt, updatedAt time.Time, runtimeByID map[string]model.Runtime, runtimeNodeLabelsByID map[string]map[string]string) model.EdgeRouteBinding {
 	runtimeID := appProxyRuntimeID(app)
 	runtimeObj, runtimeFound := runtimeByID[runtimeID]
-	edgeGroupID := derivedEdgeGroupIDForRuntime(runtimeObj, runtimeFound)
+	edgeGroupID := derivedEdgeGroupIDForRuntime(runtimeObj, runtimeFound, runtimeNodeLabelsByID[runtimeID])
 	fallbackEdgeGroupID := ""
 	if edgeGroupID != defaultEdgeGroupID {
 		fallbackEdgeGroupID = defaultEdgeGroupID
@@ -190,6 +191,25 @@ func (s *Server) deriveEdgeRouteBinding(r *http.Request, app model.App, hostname
 	}
 	binding.RouteGeneration = edgeRouteGeneration(binding)
 	return binding
+}
+
+func (s *Server) edgeRouteRuntimeNodeLabels(ctx context.Context) map[string]map[string]string {
+	snapshots, err := s.loadClusterNodeInventory(ctx)
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("edge route bundle continuing without cluster node location labels: %v", err)
+		}
+		return nil
+	}
+	out := make(map[string]map[string]string)
+	for _, snapshot := range snapshots {
+		runtimeID := strings.TrimSpace(snapshot.runtimeID)
+		if runtimeID == "" {
+			continue
+		}
+		out[runtimeID] = cloneStringMap(snapshot.labels)
+	}
+	return out
 }
 
 type edgeRouteUpstream struct {
@@ -347,16 +367,23 @@ func edgeGroupIDFromEdgeID(edgeID string) string {
 	return ""
 }
 
-func derivedEdgeGroupIDForRuntime(runtimeObj model.Runtime, runtimeFound bool) string {
+func derivedEdgeGroupIDForRuntime(runtimeObj model.Runtime, runtimeFound bool, nodeLabels map[string]string) string {
 	if !runtimeFound {
 		return defaultEdgeGroupID
 	}
-	if country := firstRuntimeLabelValue(runtimeObj.Labels, runtimepkg.LocationCountryCodeLabelKey, "country_code", "countryCode"); country != "" {
+	if edgeGroupID := derivedEdgeGroupIDForLabels(runtimeObj.Labels); edgeGroupID != defaultEdgeGroupID {
+		return edgeGroupID
+	}
+	return derivedEdgeGroupIDForLabels(nodeLabels)
+}
+
+func derivedEdgeGroupIDForLabels(labels map[string]string) string {
+	if country := firstRuntimeLabelValue(labels, runtimepkg.LocationCountryCodeLabelKey, "country_code", "countryCode"); country != "" {
 		if slug := edgeRouteSlug(country); slug != "" {
 			return "edge-group-country-" + slug
 		}
 	}
-	if region := firstRuntimeLabelValue(runtimeObj.Labels, runtimepkg.RegionLabelKey, runtimepkg.LegacyRegionLabelKey, "region"); region != "" {
+	if region := firstRuntimeLabelValue(labels, runtimepkg.RegionLabelKey, runtimepkg.LegacyRegionLabelKey, "region"); region != "" {
 		if slug := edgeRouteSlug(region); slug != "" {
 			return "edge-group-region-" + slug
 		}

@@ -339,6 +339,29 @@ func TestEdgeRoutePolicyOptInGatesBundleByHostname(t *testing.T) {
 	}
 }
 
+func TestDerivedEdgeGroupIDForRuntimeUsesClusterNodeLabelsFallback(t *testing.T) {
+	t.Parallel()
+
+	runtimeObj := model.Runtime{
+		ID:   "runtime_us",
+		Type: model.RuntimeTypeManagedOwned,
+	}
+	edgeGroupID := derivedEdgeGroupIDForRuntime(runtimeObj, true, map[string]string{
+		runtimepkg.LocationCountryCodeLabelKey: "US",
+	})
+	if edgeGroupID != "edge-group-country-us" {
+		t.Fatalf("expected node country label fallback, got %q", edgeGroupID)
+	}
+
+	runtimeObj.Labels = map[string]string{runtimepkg.LocationCountryCodeLabelKey: "HK"}
+	edgeGroupID = derivedEdgeGroupIDForRuntime(runtimeObj, true, map[string]string{
+		runtimepkg.LocationCountryCodeLabelKey: "US",
+	})
+	if edgeGroupID != "edge-group-country-hk" {
+		t.Fatalf("expected runtime labels to take precedence over node labels, got %q", edgeGroupID)
+	}
+}
+
 func TestEdgeRouteBindingDerivesNonActiveStatuses(t *testing.T) {
 	t.Parallel()
 
@@ -360,7 +383,7 @@ func TestEdgeRouteBindingDerivesNonActiveStatuses(t *testing.T) {
 			Replicas:  0,
 			RuntimeID: model.DefaultManagedRuntimeID,
 		},
-	}, "disabled.fugue.pro", model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, time.Time{}, time.Time{}, runtimes)
+	}, "disabled.fugue.pro", model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, time.Time{}, time.Time{}, runtimes, nil)
 	if disabled.Status != model.EdgeRouteStatusDisabled || disabled.UpstreamURL != "" {
 		t.Fatalf("expected disabled route without upstream, got %+v", disabled)
 	}
@@ -375,7 +398,7 @@ func TestEdgeRouteBindingDerivesNonActiveStatuses(t *testing.T) {
 			RuntimeID: "runtime_missing",
 		},
 		Status: model.AppStatus{CurrentReplicas: 1},
-	}, "missing-runtime.fugue.pro", model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, time.Time{}, time.Time{}, runtimes)
+	}, "missing-runtime.fugue.pro", model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, time.Time{}, time.Time{}, runtimes, nil)
 	if missingRuntime.Status != model.EdgeRouteStatusRuntimeMissing || missingRuntime.UpstreamURL != "" {
 		t.Fatalf("expected runtime-missing route without upstream, got %+v", missingRuntime)
 	}
@@ -390,7 +413,7 @@ func TestEdgeRouteBindingDerivesNonActiveStatuses(t *testing.T) {
 			RuntimeID: model.DefaultManagedRuntimeID,
 		},
 		Status: model.AppStatus{CurrentReplicas: 0},
-	}, "unavailable.fugue.pro", model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, time.Time{}, time.Time{}, runtimes)
+	}, "unavailable.fugue.pro", model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, time.Time{}, time.Time{}, runtimes, nil)
 	if unavailable.Status != model.EdgeRouteStatusUnavailable || unavailable.UpstreamURL != "" {
 		t.Fatalf("expected unavailable route without upstream, got %+v", unavailable)
 	}

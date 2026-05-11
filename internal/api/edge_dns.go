@@ -148,6 +148,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	for _, runtimeObj := range runtimes {
 		runtimeByID[strings.TrimSpace(runtimeObj.ID)] = runtimeObj
 	}
+	runtimeNodeLabelsByID := s.edgeRouteRuntimeNodeLabels(r.Context())
 	appByID := make(map[string]model.App, len(apps))
 	for _, app := range apps {
 		app = s.overlayManagedAppStatusCached(app)
@@ -177,7 +178,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		if !ok {
 			continue
 		}
-		binding := s.deriveEdgeRouteBinding(r, app, hostname, model.EdgeRouteKindCustomDomain, model.EdgeRouteTLSPolicyCustomDomain, domain.CreatedAt, domain.UpdatedAt, runtimeByID)
+		binding := s.deriveEdgeRouteBinding(r, app, hostname, model.EdgeRouteKindCustomDomain, model.EdgeRouteTLSPolicyCustomDomain, domain.CreatedAt, domain.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
 		if !edgeRouteMatchesSelector(binding, edgeRouteBundleOptions{EdgeGroupID: options.EdgeGroupID}) {
 			continue
 		}
