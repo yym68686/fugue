@@ -408,6 +408,14 @@ edge:
     - key: fugue.io/tenant
       operator: Exists
       effect: NoSchedule
+  caddy:
+    enabled: ${FUGUE_EDGE_CADDY_ENABLED}
+    listenAddr: $(yaml_quote "${FUGUE_EDGE_CADDY_LISTEN_ADDR}")
+    tlsMode: $(yaml_quote "${FUGUE_EDGE_CADDY_TLS_MODE}")
+    publicHostPorts:
+      enabled: ${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED}
+      http: ${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP}
+      https: ${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS}
 cloudnative-pg:
   replicaCount: 2
   priorityClassName: system-cluster-critical
@@ -1611,6 +1619,12 @@ main() {
   FUGUE_SHARED_WORKSPACE_STORAGE_CLASS="${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS:-fugue-rwx}"
   FUGUE_SHARED_WORKSPACE_NFS_CLUSTER_IP="${FUGUE_SHARED_WORKSPACE_NFS_CLUSTER_IP:-10.43.240.17}"
   FUGUE_EDGE_GROUP_ID="${FUGUE_EDGE_GROUP_ID:-}"
+  FUGUE_EDGE_CADDY_ENABLED="${FUGUE_EDGE_CADDY_ENABLED:-true}"
+  FUGUE_EDGE_CADDY_LISTEN_ADDR="${FUGUE_EDGE_CADDY_LISTEN_ADDR:-:18443}"
+  FUGUE_EDGE_CADDY_TLS_MODE="${FUGUE_EDGE_CADDY_TLS_MODE:-internal}"
+  FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED="${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED:-false}"
+  FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP="${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP:-80}"
+  FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS="${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS:-443}"
   FUGUE_DNS_ENABLED="${FUGUE_DNS_ENABLED:-false}"
   FUGUE_DNS_ANSWER_IPS="${FUGUE_DNS_ANSWER_IPS:-}"
   FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED="${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED:-false}"
@@ -1623,6 +1637,26 @@ main() {
   fi
   FUGUE_DNS_ZONE="${FUGUE_DNS_ZONE:-dns.${FUGUE_APP_BASE_DOMAIN}}"
   FUGUE_DNS_TTL="${FUGUE_DNS_TTL:-60}"
+
+  case "${FUGUE_EDGE_CADDY_TLS_MODE}" in
+    off|internal|public-on-demand) ;;
+    *) fail "FUGUE_EDGE_CADDY_TLS_MODE must be off, internal, or public-on-demand" ;;
+  esac
+  if [[ "${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED}" == "true" && "${FUGUE_EDGE_CADDY_ENABLED}" != "true" ]]; then
+    fail "FUGUE_EDGE_CADDY_ENABLED must be true when FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED=true"
+  fi
+  if [[ "${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED}" == "true" && "${FUGUE_EDGE_CADDY_LISTEN_ADDR}" != ":443" ]]; then
+    fail "FUGUE_EDGE_CADDY_LISTEN_ADDR must be :443 when FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED=true"
+  fi
+  if [[ "${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED}" == "true" && "${FUGUE_EDGE_CADDY_TLS_MODE}" != "public-on-demand" ]]; then
+    fail "FUGUE_EDGE_CADDY_TLS_MODE must be public-on-demand when FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED=true"
+  fi
+  if ! [[ "${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP}" =~ ^[0-9]+$ ]] || (( FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP <= 0 || FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP > 65535 )); then
+    fail "FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP must be an integer between 1 and 65535"
+  fi
+  if ! [[ "${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS}" =~ ^[0-9]+$ ]] || (( FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS <= 0 || FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS > 65535 )); then
+    fail "FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS must be an integer between 1 and 65535"
+  fi
 
   if [[ "${FUGUE_DNS_ENABLED}" == "true" ]]; then
     require_env FUGUE_DNS_ANSWER_IPS
@@ -1665,6 +1699,7 @@ main() {
   log "api image: ${FUGUE_API_IMAGE_REPOSITORY}:${FUGUE_API_IMAGE_TAG}"
   log "controller image: ${FUGUE_CONTROLLER_IMAGE_REPOSITORY}:${FUGUE_CONTROLLER_IMAGE_TAG}"
   log "edge image: ${FUGUE_EDGE_IMAGE_REPOSITORY}:${FUGUE_EDGE_IMAGE_TAG} enabled=${FUGUE_EDGE_ENABLED} edge_group_id=${FUGUE_EDGE_GROUP_ID:-<empty>}"
+  log "edge caddy: enabled=${FUGUE_EDGE_CADDY_ENABLED} listen=${FUGUE_EDGE_CADDY_LISTEN_ADDR} tls_mode=${FUGUE_EDGE_CADDY_TLS_MODE} public_hostports=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED} http=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP} https=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS}"
   log "previous Helm revision: ${PREVIOUS_REVISION}"
   log "registry push base: ${FUGUE_REGISTRY_PUSH_BASE}"
   log "registry pull base: ${FUGUE_REGISTRY_PULL_BASE}"
@@ -1706,6 +1741,12 @@ main() {
     --set-string edge.image.repository="${FUGUE_EDGE_IMAGE_REPOSITORY}" \
     --set-string edge.image.tag="${FUGUE_EDGE_IMAGE_TAG}" \
     --set-string edge.edgeGroupID="${FUGUE_EDGE_GROUP_ID}" \
+    --set edge.caddy.enabled="${FUGUE_EDGE_CADDY_ENABLED}" \
+    --set-string edge.caddy.listenAddr="${FUGUE_EDGE_CADDY_LISTEN_ADDR}" \
+    --set-string edge.caddy.tlsMode="${FUGUE_EDGE_CADDY_TLS_MODE}" \
+    --set edge.caddy.publicHostPorts.enabled="${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED}" \
+    --set edge.caddy.publicHostPorts.http="${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP}" \
+    --set edge.caddy.publicHostPorts.https="${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS}" \
     --set-string api.appBaseDomain="${FUGUE_APP_BASE_DOMAIN}" \
     --set-string api.apiPublicDomain="${FUGUE_API_PUBLIC_DOMAIN}" \
     --set-string api.registryPushBase="${FUGUE_REGISTRY_PUSH_BASE}" \
