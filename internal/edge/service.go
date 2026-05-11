@@ -393,7 +393,7 @@ func (s *Service) routeForHost(host string) (model.EdgeRouteBinding, bool) {
 		if normalizeRouteHost(route.Hostname) != host {
 			continue
 		}
-		if !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) {
+		if !s.routeAllowedForThisEdge(route) {
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive) {
@@ -538,6 +538,9 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	snapshot := s.metricSnapshot()
 	status := snapshot.Status
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	fmt.Fprintln(w, "# HELP fugue_edge_info Static fugue-edge identity labels.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_info gauge")
+	fmt.Fprintf(w, "fugue_edge_info{edge_id=\"%s\",edge_group_id=\"%s\"} 1\n", prometheusLabelValue(status.EdgeID), prometheusLabelValue(status.EdgeGroupID))
 	fmt.Fprintln(w, "# HELP fugue_edge_health Whether fugue-edge has a usable route bundle.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_health gauge")
 	fmt.Fprintf(w, "fugue_edge_health %d\n", boolGauge(status.Healthy))
@@ -694,6 +697,9 @@ func (s *Service) validateConfig() error {
 		return fmt.Errorf("FUGUE_EDGE_TOKEN is required")
 	}
 	if s.Config.CaddyEnabled {
+		if strings.TrimSpace(s.Config.EdgeGroupID) == "" {
+			return fmt.Errorf("FUGUE_EDGE_GROUP_ID is required when caddy mode is enabled")
+		}
 		if strings.TrimSpace(s.Config.CaddyListenAddr) == "" {
 			return fmt.Errorf("FUGUE_EDGE_CADDY_LISTEN_ADDR is required when caddy mode is enabled")
 		}
@@ -714,6 +720,17 @@ func (s *Service) validateConfig() error {
 		}
 	}
 	return nil
+}
+
+func (s *Service) routeAllowedForThisEdge(route model.EdgeRouteBinding) bool {
+	if !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) {
+		return false
+	}
+	edgeGroupID := strings.TrimSpace(s.Config.EdgeGroupID)
+	if edgeGroupID == "" {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(route.EdgeGroupID), edgeGroupID)
 }
 
 func (s *Service) writeCache(cached cacheFile) error {

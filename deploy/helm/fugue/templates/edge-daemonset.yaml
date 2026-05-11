@@ -1,4 +1,7 @@
 {{- if .Values.edge.enabled }}
+{{- if and .Values.edge.caddy.enabled (not (trim .Values.edge.edgeGroupID)) }}
+{{- fail "edge.edgeGroupID is required when edge.caddy.enabled=true" }}
+{{- end }}
 {{- $edgeAPIURL := default (printf "http://%s:%v" (include "fugue.fullname" .) .Values.service.port) .Values.edge.apiURL -}}
 {{- $edgeTokenSecretName := default (include "fugue.configSecretName" .) .Values.edge.tokenSecret.name -}}
 {{- $edgeTokenSecretKey := default "FUGUE_EDGE_TLS_ASK_TOKEN" .Values.edge.tokenSecret.key -}}

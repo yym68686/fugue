@@ -171,6 +171,7 @@ jobs:
           FUGUE_CONTROLLER_IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
           FUGUE_EDGE_IMAGE_REPOSITORY: ${{ needs.build.outputs.edge_image_repository }}
           FUGUE_EDGE_IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+          FUGUE_EDGE_GROUP_ID: ${{ vars.FUGUE_EDGE_GROUP_ID || 'edge-group-country-us' }}
           FUGUE_DNS_ENABLED: ${{ vars.FUGUE_DNS_ENABLED || 'false' }}
           FUGUE_DNS_ANSWER_IPS: ${{ vars.FUGUE_DNS_ANSWER_IPS || '' }}
           FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED: ${{ vars.FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED || 'false' }}

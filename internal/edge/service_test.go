@@ -88,6 +88,7 @@ func TestSyncOnceWritesRouteBundleCache(t *testing.T) {
 	}
 	metrics := renderMetrics(t, service)
 	for _, want := range []string{
+		`fugue_edge_info{edge_id="",edge_group_id="edge-group-country-hk"} 1`,
 		`fugue_edge_bundle_sync_total{result="success"} 1`,
 		`fugue_edge_bundle_sync_total{result="not_modified"} 0`,
 		`fugue_edge_bundle_sync_total{result="error"} 0`,
@@ -341,6 +342,7 @@ func TestApplyCaddyConfigBuildsHostRoutesForBundle(t *testing.T) {
 	service := NewService(config.EdgeConfig{
 		APIURL:               "https://api.example.invalid",
 		EdgeToken:            "edge-secret",
+		EdgeGroupID:          "edge-group-default",
 		CaddyEnabled:         true,
 		CaddyAdminURL:        admin.URL,
 		CaddyListenAddr:      "127.0.0.1:18080",
@@ -398,6 +400,7 @@ func TestBuildCaddyConfigSupportsInternalTLSCanary(t *testing.T) {
 	service := NewService(config.EdgeConfig{
 		APIURL:               "https://api.example.invalid",
 		EdgeToken:            "edge-secret",
+		EdgeGroupID:          "edge-group-default",
 		CaddyEnabled:         true,
 		CaddyAdminURL:        "http://127.0.0.1:2019",
 		CaddyListenAddr:      ":18443",
@@ -459,6 +462,7 @@ func TestBuildCaddyConfigSkipsRouteAOnlyHosts(t *testing.T) {
 	service := NewService(config.EdgeConfig{
 		APIURL:               "https://api.example.invalid",
 		EdgeToken:            "edge-secret",
+		EdgeGroupID:          "edge-group-default",
 		CaddyEnabled:         true,
 		CaddyAdminURL:        "http://127.0.0.1:2019",
 		CaddyListenAddr:      "127.0.0.1:18080",
@@ -481,6 +485,43 @@ func TestBuildCaddyConfigSkipsRouteAOnlyHosts(t *testing.T) {
 	}
 }
 
+func TestBuildCaddyConfigSkipsDifferentEdgeGroupRoutes(t *testing.T) {
+	t.Parallel()
+
+	bundle := testBundle("routegen_edge_group_caddy")
+	bundle.Routes[0].EdgeGroupID = "edge-group-country-us"
+	hkRoute := bundle.Routes[0]
+	hkRoute.Hostname = "hk.fugue.pro"
+	hkRoute.EdgeGroupID = "edge-group-country-hk"
+	hkRoute.RouteGeneration = "routegen_hk"
+	bundle.Routes = append(bundle.Routes, hkRoute)
+
+	service := NewService(config.EdgeConfig{
+		APIURL:               "https://api.example.invalid",
+		EdgeToken:            "edge-secret",
+		EdgeGroupID:          "edge-group-country-us",
+		CaddyEnabled:         true,
+		CaddyAdminURL:        "http://127.0.0.1:2019",
+		CaddyListenAddr:      "127.0.0.1:18080",
+		CaddyProxyListenAddr: "127.0.0.1:7833",
+	}, log.New(ioDiscard{}, "", 0))
+
+	configBody, routeCount, err := service.buildCaddyConfig(bundle)
+	if err != nil {
+		t.Fatalf("build caddy config: %v", err)
+	}
+	if routeCount != 1 {
+		t.Fatalf("expected only the local edge group route to be emitted, got %d", routeCount)
+	}
+	configText := string(configBody)
+	if !strings.Contains(configText, `"host":["demo.fugue.pro"]`) {
+		t.Fatalf("expected local edge group host in caddy config:\n%s", configText)
+	}
+	if strings.Contains(configText, "hk.fugue.pro") {
+		t.Fatalf("different edge group host must not be emitted to caddy config:\n%s", configText)
+	}
+}
+
 func TestBuildCaddyConfigSupportsPublicOnDemandTLSCanary(t *testing.T) {
 	t.Parallel()
 
@@ -488,6 +529,7 @@ func TestBuildCaddyConfigSupportsPublicOnDemandTLSCanary(t *testing.T) {
 	service := NewService(config.EdgeConfig{
 		APIURL:               "https://api.example.invalid",
 		EdgeToken:            "edge-secret",
+		EdgeGroupID:          "edge-group-default",
 		ListenAddr:           ":7832",
 		CaddyEnabled:         true,
 		CaddyAdminURL:        "http://127.0.0.1:2019",
@@ -540,6 +582,7 @@ func TestCaddyAdminURLMustBeLoopback(t *testing.T) {
 	service := NewService(config.EdgeConfig{
 		APIURL:               "https://api.example.invalid",
 		EdgeToken:            "edge-secret",
+		EdgeGroupID:          "edge-group-default",
 		CaddyEnabled:         true,
 		CaddyAdminURL:        "http://10.0.0.10:2019",
 		CaddyListenAddr:      "127.0.0.1:18080",
@@ -549,6 +592,24 @@ func TestCaddyAdminURLMustBeLoopback(t *testing.T) {
 	err := service.validateConfig()
 	if err == nil || !strings.Contains(err.Error(), "localhost") {
 		t.Fatalf("expected non-loopback caddy admin URL to be rejected, got %v", err)
+	}
+}
+
+func TestCaddyModeRequiresEdgeGroupID(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.EdgeConfig{
+		APIURL:               "https://api.example.invalid",
+		EdgeToken:            "edge-secret",
+		CaddyEnabled:         true,
+		CaddyAdminURL:        "http://127.0.0.1:2019",
+		CaddyListenAddr:      "127.0.0.1:18080",
+		CaddyProxyListenAddr: "127.0.0.1:7833",
+	}, log.New(ioDiscard{}, "", 0))
+
+	err := service.validateConfig()
+	if err == nil || !strings.Contains(err.Error(), "FUGUE_EDGE_GROUP_ID") {
+		t.Fatalf("expected caddy mode without edge group to be rejected, got %v", err)
 	}
 }
 
@@ -595,6 +656,7 @@ func TestCaddyTLSModeMustBeKnown(t *testing.T) {
 	service := NewService(config.EdgeConfig{
 		APIURL:               "https://api.example.invalid",
 		EdgeToken:            "edge-secret",
+		EdgeGroupID:          "edge-group-default",
 		CaddyEnabled:         true,
 		CaddyAdminURL:        "http://127.0.0.1:2019",
 		CaddyListenAddr:      "127.0.0.1:18080",
@@ -714,6 +776,45 @@ func TestProxyHandlerIgnoresRouteAOnlyHosts(t *testing.T) {
 	service.ProxyHandler().ServeHTTP(legacy, legacyReq)
 	if legacy.Code != http.StatusNotFound {
 		t.Fatalf("expected Route A-only route to be ignored by edge proxy, got %d body=%s", legacy.Code, legacy.Body.String())
+	}
+}
+
+func TestProxyHandlerSkipsDifferentEdgeGroupRoutes(t *testing.T) {
+	t.Parallel()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer backend.Close()
+
+	bundle := testBundle("routegen_edge_group_proxy")
+	bundle.Routes[0].EdgeGroupID = "edge-group-country-us"
+	bundle.Routes[0].UpstreamURL = backend.URL
+	hkRoute := bundle.Routes[0]
+	hkRoute.Hostname = "hk.fugue.pro"
+	hkRoute.EdgeGroupID = "edge-group-country-hk"
+	hkRoute.RouteGeneration = "routegen_hk"
+	bundle.Routes = append(bundle.Routes, hkRoute)
+
+	service := NewService(config.EdgeConfig{
+		APIURL:      "https://api.example.invalid",
+		EdgeToken:   "edge-secret",
+		EdgeGroupID: "edge-group-country-us",
+	}, log.New(ioDiscard{}, "", 0))
+	service.recordSyncSuccess(bundle, `"routegen_edge_group_proxy"`, time.Now().UTC(), false)
+
+	local := httptest.NewRecorder()
+	localReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
+	service.ProxyHandler().ServeHTTP(local, localReq)
+	if local.Code != http.StatusOK || local.Body.String() != "ok" {
+		t.Fatalf("unexpected local edge group response status=%d body=%q", local.Code, local.Body.String())
+	}
+
+	otherGroup := httptest.NewRecorder()
+	otherGroupReq := httptest.NewRequest(http.MethodGet, "http://hk.fugue.pro/", nil)
+	service.ProxyHandler().ServeHTTP(otherGroup, otherGroupReq)
+	if otherGroup.Code != http.StatusNotFound {
+		t.Fatalf("expected different edge group route to be ignored by edge proxy, got %d body=%s", otherGroup.Code, otherGroup.Body.String())
 	}
 }
 

@@ -111,7 +111,7 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 	}
 	tlsMode := s.normalizedCaddyTLSMode()
 
-	hosts := uniqueBundleHosts(bundle)
+	hosts := s.uniqueBundleHosts(bundle)
 	routes := make([]any, 0, len(hosts))
 	for _, host := range hosts {
 		routes = append(routes, map[string]any{
@@ -268,10 +268,10 @@ func (s *Service) normalizedCaddyTLSAskURL() (string, error) {
 	return parsed.String(), nil
 }
 
-func uniqueBundleHosts(bundle model.EdgeRouteBundle) []string {
+func (s *Service) uniqueBundleHosts(bundle model.EdgeRouteBundle) []string {
 	seen := map[string]struct{}{}
 	for _, route := range bundle.Routes {
-		if !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) {
+		if !s.routeAllowedForThisEdge(route) {
 			continue
 		}
 		host := normalizeRouteHost(route.Hostname)

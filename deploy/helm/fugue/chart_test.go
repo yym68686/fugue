@@ -128,7 +128,16 @@ func TestEdgeCaddyShadowCanBeEnabledWithoutPublicPorts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
-	cmd := exec.Command("helm", "template", "fugue", chartDir, "--set", "edge.caddy.enabled=true")
+	cmd := exec.Command(
+		"helm",
+		"template",
+		"fugue",
+		chartDir,
+		"--set",
+		"edge.caddy.enabled=true",
+		"--set-string",
+		"edge.edgeGroupID=edge-group-country-us",
+	)
 	cmd.Dir = chartDir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -145,6 +154,8 @@ func TestEdgeCaddyShadowCanBeEnabledWithoutPublicPorts(t *testing.T) {
 		`image: "caddy:2.10.2-alpine"`,
 		`name: FUGUE_EDGE_CADDY_ENABLED`,
 		`value: "true"`,
+		`name: FUGUE_EDGE_GROUP_ID`,
+		`value: "edge-group-country-us"`,
 		`name: FUGUE_EDGE_CADDY_ADMIN_URL`,
 		`value: "http://127.0.0.1:2019"`,
 		`name: FUGUE_EDGE_CADDY_LISTEN_ADDR`,
@@ -173,6 +184,26 @@ func TestEdgeCaddyShadowCanBeEnabledWithoutPublicPorts(t *testing.T) {
 	}
 }
 
+func TestEdgeCaddyShadowRequiresEdgeGroupID(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "--set", "edge.caddy.enabled=true")
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("helm template should reject caddy edge without edge group:\n%s", output)
+	}
+	if !strings.Contains(string(output), "edge.edgeGroupID is required when edge.caddy.enabled=true") {
+		t.Fatalf("expected edge group validation error, got: %v\n%s", err, output)
+	}
+}
+
 func TestEdgeCaddyInternalTLSCanaryDoesNotExposePublicPorts(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")
@@ -189,6 +220,8 @@ func TestEdgeCaddyInternalTLSCanaryDoesNotExposePublicPorts(t *testing.T) {
 		chartDir,
 		"--set",
 		"edge.caddy.enabled=true",
+		"--set-string",
+		"edge.edgeGroupID=edge-group-country-us",
 		"--set",
 		"edge.caddy.listenAddr=:18443",
 		"--set",
@@ -243,6 +276,8 @@ func TestEdgeCaddyPublicHostPortsRequireExplicitEnable(t *testing.T) {
 		chartDir,
 		"--set",
 		"edge.caddy.enabled=true",
+		"--set-string",
+		"edge.edgeGroupID=edge-group-country-us",
 		"--set",
 		"edge.caddy.publicHostPorts.enabled=true",
 		"--set",
