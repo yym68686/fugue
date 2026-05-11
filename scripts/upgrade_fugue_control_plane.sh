@@ -47,6 +47,7 @@ LOCAL_KUBE_API_READY_TIMEOUT_SECONDS="${FUGUE_LOCAL_KUBE_API_READY_TIMEOUT_SECON
 PRIMARY_POSTGRES_DATA_ROOT="${FUGUE_PRIMARY_POSTGRES_DATA_ROOT:-/var/lib/fugue/postgres}"
 PRIMARY_POSTGRES_IMAGE="${FUGUE_PRIMARY_POSTGRES_IMAGE:-docker.io/library/postgres:16-alpine}"
 FUGUE_DEFAULT_REGISTRY_PULL_BASE="${FUGUE_DEFAULT_REGISTRY_PULL_BASE:-registry.fugue.internal:5000}"
+DNS_HELM_SET_ARGS=()
 
 detect_primary_private_ip() {
   ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}'
@@ -460,8 +461,26 @@ yaml_quote() {
   printf '"%s"' "${value}"
 }
 
+dns_answer_ips_lines() {
+  local raw="$1"
+  local answer_ip
+  raw="${raw//;/,}"
+
+  printf '%s' "${raw}" | tr ',' '\n' | while IFS= read -r answer_ip; do
+    answer_ip="$(printf '%s' "${answer_ip}" | awk '{$1=$1; print}')"
+    if [[ -n "${answer_ip}" ]]; then
+      printf '%s\n' "${answer_ip}"
+    fi
+  done
+}
+
+dns_answer_ip_count() {
+  dns_answer_ips_lines "$1" | awk 'NF > 0 {count++} END {print count + 0}'
+}
+
 append_upgrade_dns_values() {
   local answer_ip
+  local rendered_answer_ips=0
 
   cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<EOF
 
@@ -476,13 +495,13 @@ EOF
   cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<'EOF'
   answerIPs:
 EOF
-  printf '%s' "${FUGUE_DNS_ANSWER_IPS}" | tr ',' '\n' | while IFS= read -r answer_ip; do
-    answer_ip="$(printf '%s' "${answer_ip}" | awk '{$1=$1; print}')"
-    if [[ -z "${answer_ip}" ]]; then
-      continue
-    fi
+  while IFS= read -r answer_ip; do
     printf '    - %s\n' "$(yaml_quote "${answer_ip}")" >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
-  done
+    rendered_answer_ips=$((rendered_answer_ips + 1))
+  done < <(dns_answer_ips_lines "${FUGUE_DNS_ANSWER_IPS}")
+  if (( rendered_answer_ips == 0 )); then
+    fail "FUGUE_DNS_ANSWER_IPS must contain at least one non-empty IP when FUGUE_DNS_ENABLED=true"
+  fi
 
   {
     printf '  publicHostPorts:\n'
@@ -492,6 +511,33 @@ EOF
     printf '  zone: %s\n' "$(yaml_quote "${FUGUE_DNS_ZONE}")"
     printf '  ttl: %s\n' "${FUGUE_DNS_TTL}"
   } >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+}
+
+build_dns_helm_set_args() {
+  local answer_ip
+  local index=0
+
+  DNS_HELM_SET_ARGS=(
+    --set "dns.enabled=${FUGUE_DNS_ENABLED}"
+  )
+  if [[ "${FUGUE_DNS_ENABLED}" != "true" ]]; then
+    return 0
+  fi
+
+  DNS_HELM_SET_ARGS+=(
+    --set "dns.publicHostPorts.enabled=${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED}"
+    --set-string "dns.udpAddr=${FUGUE_DNS_UDP_ADDR}"
+    --set-string "dns.tcpAddr=${FUGUE_DNS_TCP_ADDR}"
+    --set-string "dns.zone=${FUGUE_DNS_ZONE}"
+    --set "dns.ttl=${FUGUE_DNS_TTL}"
+  )
+  while IFS= read -r answer_ip; do
+    DNS_HELM_SET_ARGS+=(--set-string "dns.answerIPs[${index}]=${answer_ip}")
+    index=$((index + 1))
+  done < <(dns_answer_ips_lines "${FUGUE_DNS_ANSWER_IPS}")
+  if (( index == 0 )); then
+    fail "FUGUE_DNS_ANSWER_IPS must contain at least one non-empty IP when FUGUE_DNS_ENABLED=true"
+  fi
 }
 
 use_local_control_plane_automation_bundle_from_dir() {
@@ -1540,6 +1586,9 @@ main() {
 
   if [[ "${FUGUE_DNS_ENABLED}" == "true" ]]; then
     require_env FUGUE_DNS_ANSWER_IPS
+    if [[ "$(dns_answer_ip_count "${FUGUE_DNS_ANSWER_IPS}")" == "0" ]]; then
+      fail "FUGUE_DNS_ANSWER_IPS must contain at least one non-empty IP when FUGUE_DNS_ENABLED=true"
+    fi
     if ! [[ "${FUGUE_DNS_TTL}" =~ ^[0-9]+$ ]] || (( FUGUE_DNS_TTL <= 0 || FUGUE_DNS_TTL > 3600 )); then
       fail "FUGUE_DNS_TTL must be an integer between 1 and 3600"
     fi
@@ -1594,6 +1643,7 @@ main() {
   apply_chart_crds
 
   upgrade_override_values_file="$(write_upgrade_override_values)"
+  build_dns_helm_set_args
   log "injecting disk-pressure toleration for primary-pinned hostPath control-plane pods"
 
   # Do not use Helm's release-wide --wait here. It waits on every resource in
@@ -1607,6 +1657,7 @@ main() {
     --history-max 20 \
     --timeout "${FUGUE_HELM_TIMEOUT}" \
     -f "${upgrade_override_values_file}" \
+    "${DNS_HELM_SET_ARGS[@]}" \
     --set-string api.image.repository="${FUGUE_API_IMAGE_REPOSITORY}" \
     --set-string api.image.tag="${FUGUE_API_IMAGE_TAG}" \
     --set-string controller.image.repository="${FUGUE_CONTROLLER_IMAGE_REPOSITORY}" \
