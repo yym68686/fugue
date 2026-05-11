@@ -393,6 +393,9 @@ func (s *Service) routeForHost(host string) (model.EdgeRouteBinding, bool) {
 		if normalizeRouteHost(route.Hostname) != host {
 			continue
 		}
+		if !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) {
+			continue
+		}
 		if strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive) {
 			return route, true
 		}

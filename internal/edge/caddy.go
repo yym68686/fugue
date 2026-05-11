@@ -271,6 +271,9 @@ func (s *Service) normalizedCaddyTLSAskURL() (string, error) {
 func uniqueBundleHosts(bundle model.EdgeRouteBundle) []string {
 	seen := map[string]struct{}{}
 	for _, route := range bundle.Routes {
+		if !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) {
+			continue
+		}
 		host := normalizeRouteHost(route.Hostname)
 		if host == "" {
 			continue

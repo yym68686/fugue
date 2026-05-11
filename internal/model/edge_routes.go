@@ -15,6 +15,12 @@ const (
 )
 
 const (
+	EdgeRoutePolicyRouteAOnly = "route_a_only"
+	EdgeRoutePolicyCanary     = "edge_canary"
+	EdgeRoutePolicyEnabled    = "edge_enabled"
+
+	// EdgeRoutePolicyPrimary is a legacy pre-opt-in value kept only so stale
+	// cached bundles decode cleanly. New route bundles must not emit it.
 	EdgeRoutePolicyPrimary = "primary"
 )
 
@@ -65,6 +71,38 @@ type EdgeRouteBinding struct {
 	RouteGeneration     string    `json:"route_generation"`
 	CreatedAt           time.Time `json:"created_at"`
 	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+type EdgeRoutePolicy struct {
+	ID          string    `json:"id"`
+	Hostname    string    `json:"hostname"`
+	AppID       string    `json:"app_id"`
+	TenantID    string    `json:"tenant_id"`
+	EdgeGroupID string    `json:"edge_group_id,omitempty"`
+	RoutePolicy string    `json:"route_policy"`
+	Enabled     bool      `json:"enabled"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+func NormalizeEdgeRoutePolicy(policy string) string {
+	switch policy {
+	case EdgeRoutePolicyCanary, EdgeRoutePolicyEnabled:
+		return policy
+	case EdgeRoutePolicyRouteAOnly, "":
+		return EdgeRoutePolicyRouteAOnly
+	default:
+		return ""
+	}
+}
+
+func EdgeRoutePolicyAllowsTraffic(policy string) bool {
+	switch NormalizeEdgeRoutePolicy(policy) {
+	case EdgeRoutePolicyCanary, EdgeRoutePolicyEnabled:
+		return true
+	default:
+		return false
+	}
 }
 
 type EdgeTLSAllowlistEntry struct {

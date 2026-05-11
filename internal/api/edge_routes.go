@@ -62,6 +62,10 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	if err != nil {
 		return model.EdgeRouteBundle{}, err
 	}
+	policies, err := s.store.ListEdgeRoutePolicies()
+	if err != nil {
+		return model.EdgeRouteBundle{}, err
+	}
 
 	runtimeByID := make(map[string]model.Runtime, len(runtimes))
 	for _, runtimeObj := range runtimes {
@@ -72,6 +76,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		app = s.overlayManagedAppStatusCached(app)
 		appByID[strings.TrimSpace(app.ID)] = app
 	}
+	policyByHostname := edgeRoutePolicyByHostname(policies)
 
 	routes := make([]model.EdgeRouteBinding, 0, len(apps)+len(domains))
 	for _, app := range appByID {
@@ -79,6 +84,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 			continue
 		}
 		binding := s.deriveEdgeRouteBinding(r, app, strings.TrimSpace(app.Route.Hostname), model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt, runtimeByID)
+		binding = applyEdgeRoutePolicy(binding, policyByHostname)
 		if edgeRouteMatchesSelector(binding, options) {
 			routes = append(routes, binding)
 		}
@@ -95,6 +101,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 			continue
 		}
 		binding := s.deriveEdgeRouteBinding(r, app, hostname, model.EdgeRouteKindCustomDomain, model.EdgeRouteTLSPolicyCustomDomain, domain.CreatedAt, domain.UpdatedAt, runtimeByID)
+		binding = applyEdgeRoutePolicy(binding, policyByHostname)
 		if edgeRouteMatchesSelector(binding, options) {
 			routes = append(routes, binding)
 			tlsAllowlist = append(tlsAllowlist, model.EdgeTLSAllowlistEntry{
@@ -147,7 +154,7 @@ func (s *Server) deriveEdgeRouteBinding(r *http.Request, app model.App, hostname
 		RuntimeID:           runtimeID,
 		EdgeGroupID:         edgeGroupID,
 		FallbackEdgeGroupID: fallbackEdgeGroupID,
-		RoutePolicy:         model.EdgeRoutePolicyPrimary,
+		RoutePolicy:         model.EdgeRoutePolicyRouteAOnly,
 		UpstreamKind:        model.EdgeRouteUpstreamKindKubernetesService,
 		ServicePort:         servicePort,
 		TLSPolicy:           tlsPolicy,
@@ -197,6 +204,44 @@ func edgeRouteMatchesSelector(binding model.EdgeRouteBinding, options edgeRouteB
 		return binding.EdgeGroupID == edgeGroupID || binding.FallbackEdgeGroupID == edgeGroupID
 	}
 	return true
+}
+
+func edgeRoutePolicyByHostname(policies []model.EdgeRoutePolicy) map[string]model.EdgeRoutePolicy {
+	out := make(map[string]model.EdgeRoutePolicy, len(policies))
+	for _, policy := range policies {
+		hostname := normalizeExternalAppDomain(policy.Hostname)
+		if hostname == "" {
+			continue
+		}
+		out[hostname] = policy
+	}
+	return out
+}
+
+func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]model.EdgeRoutePolicy) model.EdgeRouteBinding {
+	if len(policies) == 0 {
+		binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
+		binding.RouteGeneration = edgeRouteGeneration(binding)
+		return binding
+	}
+	policy, ok := policies[normalizeExternalAppDomain(binding.Hostname)]
+	if !ok || strings.TrimSpace(policy.AppID) != strings.TrimSpace(binding.AppID) {
+		binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
+		binding.RouteGeneration = edgeRouteGeneration(binding)
+		return binding
+	}
+	binding.RoutePolicy = model.NormalizeEdgeRoutePolicy(policy.RoutePolicy)
+	if binding.RoutePolicy == "" {
+		binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
+	}
+	if model.EdgeRoutePolicyAllowsTraffic(binding.RoutePolicy) && strings.TrimSpace(policy.EdgeGroupID) != "" {
+		binding.EdgeGroupID = strings.TrimSpace(policy.EdgeGroupID)
+		binding.FallbackEdgeGroupID = ""
+	} else {
+		binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
+	}
+	binding.RouteGeneration = edgeRouteGeneration(binding)
+	return binding
 }
 
 func edgeGroupIDFromEdgeID(edgeID string) string {

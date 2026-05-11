@@ -1556,6 +1556,7 @@ type State struct {
 	RuntimeGrants              []RuntimeAccessGrant        `json:"runtime_grants"`
 	Apps                       []App                       `json:"apps"`
 	AppDomains                 []AppDomain                 `json:"app_domains"`
+	EdgeRoutePolicies          []EdgeRoutePolicy           `json:"edge_route_policies,omitempty"`
 	BackingServices            []BackingService            `json:"backing_services"`
 	ServiceBindings            []ServiceBinding            `json:"service_bindings"`
 	Operations                 []Operation                 `json:"operations"`

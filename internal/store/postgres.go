@@ -278,6 +278,20 @@ var postgresSchemaStatements = []string{
 	`ALTER TABLE fugue_app_domains ADD COLUMN IF NOT EXISTS tls_ready_at TIMESTAMPTZ NULL`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_app_domains_hostname_ci ON fugue_app_domains (lower(hostname))`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_app_domains_app_id ON fugue_app_domains (app_id, created_at ASC)`,
+	`CREATE TABLE IF NOT EXISTS fugue_edge_route_policies (
+		id TEXT PRIMARY KEY,
+		hostname TEXT NOT NULL UNIQUE,
+		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
+		app_id TEXT NOT NULL REFERENCES fugue_apps(id) ON DELETE CASCADE,
+		edge_group_id TEXT NOT NULL DEFAULT '',
+		route_policy TEXT NOT NULL,
+		enabled BOOLEAN NOT NULL DEFAULT false,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL
+	)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_edge_route_policies_hostname_ci ON fugue_edge_route_policies (lower(hostname))`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_route_policies_app_id ON fugue_edge_route_policies (app_id, updated_at DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_route_policies_edge_group ON fugue_edge_route_policies (edge_group_id) WHERE enabled`,
 	`CREATE TABLE IF NOT EXISTS fugue_backing_services (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,

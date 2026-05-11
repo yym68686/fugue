@@ -446,6 +446,41 @@ func TestBuildCaddyConfigSupportsInternalTLSCanary(t *testing.T) {
 	}
 }
 
+func TestBuildCaddyConfigSkipsRouteAOnlyHosts(t *testing.T) {
+	t.Parallel()
+
+	bundle := testBundle("routegen_route_a_only_caddy")
+	routeAOnly := bundle.Routes[0]
+	routeAOnly.Hostname = "legacy.fugue.pro"
+	routeAOnly.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
+	routeAOnly.RouteGeneration = "routegen_legacy"
+	bundle.Routes = append(bundle.Routes, routeAOnly)
+
+	service := NewService(config.EdgeConfig{
+		APIURL:               "https://api.example.invalid",
+		EdgeToken:            "edge-secret",
+		CaddyEnabled:         true,
+		CaddyAdminURL:        "http://127.0.0.1:2019",
+		CaddyListenAddr:      "127.0.0.1:18080",
+		CaddyProxyListenAddr: "127.0.0.1:7833",
+	}, log.New(ioDiscard{}, "", 0))
+
+	configBody, routeCount, err := service.buildCaddyConfig(bundle)
+	if err != nil {
+		t.Fatalf("build caddy config: %v", err)
+	}
+	if routeCount != 1 {
+		t.Fatalf("expected only the opt-in route to be emitted, got %d", routeCount)
+	}
+	configText := string(configBody)
+	if !strings.Contains(configText, `"host":["demo.fugue.pro"]`) {
+		t.Fatalf("expected canary host in caddy config:\n%s", configText)
+	}
+	if strings.Contains(configText, "legacy.fugue.pro") {
+		t.Fatalf("Route A-only host must not be emitted to caddy config:\n%s", configText)
+	}
+}
+
 func TestBuildCaddyConfigSupportsPublicOnDemandTLSCanary(t *testing.T) {
 	t.Parallel()
 
@@ -645,6 +680,43 @@ func TestProxyHandlerRoutesPlatformAndCustomDomainsWithStreamingMetrics(t *testi
 	}
 }
 
+func TestProxyHandlerIgnoresRouteAOnlyHosts(t *testing.T) {
+	t.Parallel()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer backend.Close()
+
+	bundle := testBundle("routegen_route_a_only_proxy")
+	bundle.Routes[0].UpstreamURL = backend.URL
+	routeAOnly := bundle.Routes[0]
+	routeAOnly.Hostname = "legacy.fugue.pro"
+	routeAOnly.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
+	routeAOnly.RouteGeneration = "routegen_legacy"
+	bundle.Routes = append(bundle.Routes, routeAOnly)
+
+	service := NewService(config.EdgeConfig{
+		APIURL:    "https://api.example.invalid",
+		EdgeToken: "edge-secret",
+	}, log.New(ioDiscard{}, "", 0))
+	service.recordSyncSuccess(bundle, `"routegen_route_a_only_proxy"`, time.Now().UTC(), false)
+
+	canary := httptest.NewRecorder()
+	canaryReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
+	service.ProxyHandler().ServeHTTP(canary, canaryReq)
+	if canary.Code != http.StatusOK || canary.Body.String() != "ok" {
+		t.Fatalf("unexpected canary response status=%d body=%q", canary.Code, canary.Body.String())
+	}
+
+	legacy := httptest.NewRecorder()
+	legacyReq := httptest.NewRequest(http.MethodGet, "http://legacy.fugue.pro/", nil)
+	service.ProxyHandler().ServeHTTP(legacy, legacyReq)
+	if legacy.Code != http.StatusNotFound {
+		t.Fatalf("expected Route A-only route to be ignored by edge proxy, got %d body=%s", legacy.Code, legacy.Body.String())
+	}
+}
+
 func TestProxyHandlerReturnsUnavailableForInactiveRoute(t *testing.T) {
 	t.Parallel()
 
@@ -827,7 +899,7 @@ func testBundle(version string) model.EdgeRouteBundle {
 				TenantID:        "tenant_demo",
 				RuntimeID:       model.DefaultManagedRuntimeID,
 				EdgeGroupID:     "edge-group-default",
-				RoutePolicy:     model.EdgeRoutePolicyPrimary,
+				RoutePolicy:     model.EdgeRoutePolicyCanary,
 				UpstreamKind:    model.EdgeRouteUpstreamKindKubernetesService,
 				UpstreamURL:     "http://demo.fg-tenant-demo.svc.cluster.local:8080",
 				ServicePort:     8080,
