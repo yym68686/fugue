@@ -18,6 +18,7 @@ func (c *CLI) newAdminDNSCommand() *cobra.Command {
 	}
 	cmd.AddCommand(c.newAdminDNSNodesCommand())
 	cmd.AddCommand(c.newAdminDNSStatusCommand())
+	cmd.AddCommand(c.newAdminDNSDelegationCommand())
 	return cmd
 }
 
