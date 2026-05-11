@@ -1,0 +1,146 @@
+{{- if .Values.dns.enabled }}
+{{- if not .Values.dns.answerIPs }}
+{{- fail "dns.answerIPs must contain at least one authoritative answer IP when dns.enabled=true" }}
+{{- end }}
+{{- $dnsAPIURL := default (printf "http://%s:%v" (include "fugue.fullname" .) .Values.service.port) .Values.dns.apiURL -}}
+{{- $dnsTokenSecretName := default (include "fugue.configSecretName" .) .Values.dns.tokenSecret.name -}}
+{{- $dnsTokenSecretKey := default "FUGUE_EDGE_TLS_ASK_TOKEN" .Values.dns.tokenSecret.key -}}
+{{- $dnsImageRepository := default .Values.edge.image.repository .Values.dns.image.repository -}}
+{{- $dnsImageTag := default .Values.edge.image.tag .Values.dns.image.tag -}}
+{{- $dnsImagePullPolicy := default .Values.edge.image.pullPolicy .Values.dns.image.pullPolicy -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "fugue.dnsDaemonSetName" . }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "dns") | nindent 4 }}
+spec:
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "dns") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "dns") | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config-secret: {{ include "fugue.configSecretChecksum" . }}
+        checksum/dns-config: {{ toJson .Values.dns | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: dns
+          image: "{{ $dnsImageRepository }}:{{ $dnsImageTag }}"
+          imagePullPolicy: {{ $dnsImagePullPolicy }}
+          command:
+            - /usr/local/bin/fugue-dns
+          {{- with .Values.dns.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.dns.healthPort }}
+              protocol: TCP
+            {{- if .Values.dns.publicHostPorts.enabled }}
+            - name: dns-udp
+              containerPort: 53
+              hostPort: {{ .Values.dns.publicHostPorts.udp }}
+              protocol: UDP
+            - name: dns-tcp
+              containerPort: 53
+              hostPort: {{ .Values.dns.publicHostPorts.tcp }}
+              protocol: TCP
+            {{- end }}
+          env:
+            - name: FUGUE_API_URL
+              value: {{ $dnsAPIURL | quote }}
+            - name: FUGUE_DNS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $dnsTokenSecretName }}
+                  key: {{ $dnsTokenSecretKey }}
+            {{- if .Values.dns.dnsNodeID }}
+            - name: FUGUE_DNS_NODE_ID
+              value: {{ .Values.dns.dnsNodeID | quote }}
+            {{- else }}
+            - name: FUGUE_DNS_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            {{- end }}
+            - name: FUGUE_EDGE_GROUP_ID
+              value: {{ default .Values.edge.edgeGroupID .Values.dns.edgeGroupID | quote }}
+            - name: FUGUE_DNS_ZONE
+              value: {{ .Values.dns.zone | quote }}
+            - name: FUGUE_DNS_ANSWER_IPS
+              value: {{ join "," .Values.dns.answerIPs | quote }}
+            - name: FUGUE_DNS_TTL
+              value: {{ printf "%v" .Values.dns.ttl | quote }}
+            - name: FUGUE_DNS_LISTEN_ADDR
+              value: {{ .Values.dns.listenAddr | quote }}
+            - name: FUGUE_DNS_UDP_ADDR
+              value: {{ .Values.dns.udpAddr | quote }}
+            - name: FUGUE_DNS_TCP_ADDR
+              value: {{ .Values.dns.tcpAddr | quote }}
+            - name: FUGUE_DNS_CACHE_PATH
+              value: {{ .Values.dns.cachePath | quote }}
+            - name: FUGUE_DNS_SYNC_INTERVAL
+              value: {{ .Values.dns.syncInterval | quote }}
+            - name: FUGUE_DNS_HTTP_TIMEOUT
+              value: {{ .Values.dns.httpTimeout | quote }}
+            {{- if .Values.dns.nameservers }}
+            - name: FUGUE_DNS_NAMESERVERS
+              value: {{ join "," .Values.dns.nameservers | quote }}
+            {{- end }}
+            {{- with .Values.dns.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: dns-cache
+              mountPath: {{ .Values.dns.persistence.mountPath | quote }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 12
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.dns.resources | nindent 12 }}
+      volumes:
+        - name: dns-cache
+          hostPath:
+            path: {{ .Values.dns.persistence.hostPath | quote }}
+            type: DirectoryOrCreate
+      {{- with .Values.dns.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.dns.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.dns.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

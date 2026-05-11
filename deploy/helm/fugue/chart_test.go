@@ -282,6 +282,148 @@ func TestEdgeCaddyPublicHostPortsRequireExplicitEnable(t *testing.T) {
 	}
 }
 
+func TestDNSShadowDaemonSetDisabledByDefault(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	doc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-dns")
+	if doc != "" {
+		t.Fatalf("dns daemonset should be disabled by default:\n%s", doc)
+	}
+}
+
+func TestDNSShadowDaemonSetCanBeEnabledWithoutPublicPorts(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm",
+		"template",
+		"fugue",
+		chartDir,
+		"--set",
+		"dns.enabled=true",
+		"--set",
+		"dns.answerIPs[0]=203.0.113.10",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	doc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-dns")
+	if doc == "" {
+		t.Fatalf("rendered manifest missing dns daemonset:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`image: "fugue-edge:latest"`,
+		`command:`,
+		`- /usr/local/bin/fugue-dns`,
+		`fugue.io/role.dns: "true"`,
+		`path: "/var/lib/fugue/dns"`,
+		`key: FUGUE_EDGE_TLS_ASK_TOKEN`,
+		`name: FUGUE_DNS_ANSWER_IPS`,
+		`value: "203.0.113.10"`,
+		`name: FUGUE_DNS_UDP_ADDR`,
+		`value: "127.0.0.1:5353"`,
+		`name: FUGUE_DNS_TCP_ADDR`,
+		`value: "127.0.0.1:5353"`,
+		`path: /healthz`,
+		`containerPort: 7834`,
+		`value: "http://fugue-fugue:80"`,
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("dns daemonset missing %q:\n%s", want, doc)
+		}
+	}
+	for _, unwanted := range []string{
+		"hostNetwork: true",
+		"hostPort:",
+		"containerPort: 53",
+	} {
+		if strings.Contains(doc, unwanted) {
+			t.Fatalf("dns daemonset should not expose public DNS traffic with %q:\n%s", unwanted, doc)
+		}
+	}
+}
+
+func TestDNSPublicHostPortsRequireExplicitEnable(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm",
+		"template",
+		"fugue",
+		chartDir,
+		"--set",
+		"dns.enabled=true",
+		"--set",
+		"dns.answerIPs[0]=203.0.113.10",
+		"--set",
+		"dns.publicHostPorts.enabled=true",
+		"--set-string",
+		"dns.udpAddr=:53",
+		"--set-string",
+		"dns.tcpAddr=:53",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	doc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-dns")
+	if doc == "" {
+		t.Fatalf("rendered manifest missing dns daemonset:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`name: dns-udp`,
+		`containerPort: 53`,
+		`hostPort: 53`,
+		`protocol: UDP`,
+		`name: dns-tcp`,
+		`protocol: TCP`,
+		`name: FUGUE_DNS_UDP_ADDR`,
+		`value: ":53"`,
+		`name: FUGUE_DNS_TCP_ADDR`,
+		`value: ":53"`,
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("public-hostport dns daemonset missing %q:\n%s", want, doc)
+		}
+	}
+	if strings.Contains(doc, "hostNetwork: true") {
+		t.Fatalf("public-hostport dns daemonset should not use hostNetwork:\n%s", doc)
+	}
+}
+
 func manifestDocumentForKindAndName(manifest string, kind string, name string) string {
 	for _, doc := range strings.Split(manifest, "\n---") {
 		hasKind := strings.Contains(doc, "\nkind: "+kind+"\n") || strings.Contains(doc, "kind: "+kind+"\n")

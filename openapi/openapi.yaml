@@ -167,6 +167,65 @@ paths:
           description: Route bundle unchanged
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/edge/dns:
+    get:
+      operationId: edgeDNSBundle
+      summary: Edge DNS Bundle
+      tags: [Edge]
+      x-fugue-handler: handleEdgeDNSBundle
+      security:
+        - EdgeToken: []
+      parameters:
+        - in: query
+          name: dns_node_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: edge_group_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: zone
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: answer_ip
+          required: true
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+        - in: query
+          name: ttl
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 3600
+      responses:
+        '200':
+          description: Successful response
+          headers:
+            ETag:
+              schema:
+                type: string
+            X-Fugue-DNS-Bundle-Version:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeDNSBundle"
+        '304':
+          description: DNS bundle unchanged
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/edge/domains/tls-report:
     post:
       operationId: edgeDomainTLSReport
@@ -4468,6 +4527,68 @@ components:
         status:
           type: string
         tls_status:
+          type: string
+    EdgeDNSBundle:
+      type: object
+      additionalProperties: false
+      required: [version, generated_at, zone, records]
+      properties:
+        version:
+          type: string
+        generated_at:
+          type: string
+          format: date-time
+        dns_node_id:
+          type: string
+        edge_group_id:
+          type: string
+        zone:
+          type: string
+        records:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeDNSRecord"
+    EdgeDNSRecord:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - type
+        - values
+        - ttl
+        - record_kind
+        - status
+        - record_generation
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          enum: [A, AAAA]
+        values:
+          type: array
+          items:
+            type: string
+        ttl:
+          type: integer
+          format: int32
+        record_kind:
+          type: string
+          enum: [custom-domain-target, probe]
+        app_id:
+          type: string
+        tenant_id:
+          type: string
+        edge_group_id:
+          type: string
+        fallback_edge_group_id:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled, unavailable, runtime-missing]
+        status_reason:
+          type: string
+        record_generation:
           type: string
     AppInternalService:
       type: object

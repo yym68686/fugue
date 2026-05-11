@@ -27,6 +27,16 @@ const (
 	EdgeRouteTLSPolicyCustomDomain = "custom-domain"
 )
 
+const (
+	EdgeDNSRecordKindCustomDomainTarget = "custom-domain-target"
+	EdgeDNSRecordKindProbe              = "probe"
+)
+
+const (
+	EdgeDNSRecordTypeA    = "A"
+	EdgeDNSRecordTypeAAAA = "AAAA"
+)
+
 type EdgeRouteBundle struct {
 	Version      string                  `json:"version"`
 	GeneratedAt  time.Time               `json:"generated_at"`
@@ -63,4 +73,28 @@ type EdgeTLSAllowlistEntry struct {
 	TenantID  string `json:"tenant_id"`
 	Status    string `json:"status"`
 	TLSStatus string `json:"tls_status,omitempty"`
+}
+
+type EdgeDNSBundle struct {
+	Version     string          `json:"version"`
+	GeneratedAt time.Time       `json:"generated_at"`
+	DNSNodeID   string          `json:"dns_node_id,omitempty"`
+	EdgeGroupID string          `json:"edge_group_id,omitempty"`
+	Zone        string          `json:"zone"`
+	Records     []EdgeDNSRecord `json:"records"`
+}
+
+type EdgeDNSRecord struct {
+	Name                string   `json:"name"`
+	Type                string   `json:"type"`
+	Values              []string `json:"values"`
+	TTL                 int      `json:"ttl"`
+	RecordKind          string   `json:"record_kind"`
+	AppID               string   `json:"app_id,omitempty"`
+	TenantID            string   `json:"tenant_id,omitempty"`
+	EdgeGroupID         string   `json:"edge_group_id,omitempty"`
+	FallbackEdgeGroupID string   `json:"fallback_edge_group_id,omitempty"`
+	Status              string   `json:"status"`
+	StatusReason        string   `json:"status_reason,omitempty"`
+	RecordGeneration    string   `json:"record_generation"`
 }

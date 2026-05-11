@@ -1,7 +1,7 @@
 GOCACHE ?= $(CURDIR)/.gocache
 BIN_DIR ?= $(CURDIR)/bin
 
-.PHONY: test generate-openapi generate-openapi-check build build-api build-controller build-agent build-edge build-cli run-api run-controller run-agent
+.PHONY: test generate-openapi generate-openapi-check build build-api build-controller build-agent build-edge build-dns build-cli run-api run-controller run-agent
 
 test:
 	env GOCACHE=$(GOCACHE) go run ./cmd/fugue-openapi-gen -spec openapi/openapi.yaml -routes-out internal/api/routes_gen.go -spec-out internal/apispec/spec_gen.go -check
@@ -13,7 +13,7 @@ generate-openapi:
 generate-openapi-check:
 	env GOCACHE=$(GOCACHE) go run ./cmd/fugue-openapi-gen -spec openapi/openapi.yaml -routes-out internal/api/routes_gen.go -spec-out internal/apispec/spec_gen.go -check
 
-build: build-api build-controller build-agent build-edge build-cli
+build: build-api build-controller build-agent build-edge build-dns build-cli
 
 build-api:
 	mkdir -p $(BIN_DIR)
@@ -30,6 +30,10 @@ build-agent:
 build-edge:
 	mkdir -p $(BIN_DIR)
 	env GOCACHE=$(GOCACHE) go build -o $(BIN_DIR)/fugue-edge ./cmd/fugue-edge
+
+build-dns:
+	mkdir -p $(BIN_DIR)
+	env GOCACHE=$(GOCACHE) go build -o $(BIN_DIR)/fugue-dns ./cmd/fugue-dns
 
 build-cli:
 	mkdir -p $(BIN_DIR)

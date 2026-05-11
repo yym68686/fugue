@@ -8,10 +8,12 @@ RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 RUN --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-edge ./cmd/fugue-edge
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-edge ./cmd/fugue-edge && \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-dns ./cmd/fugue-dns
 
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates
 WORKDIR /app
 COPY --from=build /out/fugue-edge /usr/local/bin/fugue-edge
+COPY --from=build /out/fugue-dns /usr/local/bin/fugue-dns
 ENTRYPOINT ["/usr/local/bin/fugue-edge"]

@@ -238,18 +238,18 @@ fugue-edge -> 127.0.0.1 或私网管理端口
 
 ### Kubernetes 部署方式
 
-如果 edge / DNS 节点已经 join cluster，优先用 `hostNetwork` 的 DaemonSet 部署角色组件：
+如果 edge / DNS 节点已经 join cluster，优先用 DaemonSet 部署角色组件。默认 shadow 模式不暴露公网端口；只有进入显式 canary 或生产承载时，才打开 hostPort 53 / 80 / 443：
 
 ```text
 fugue-dns DaemonSet:
   nodeSelector: fugue.io/role.dns=true
-  hostNetwork: true
-  ports: UDP 53 / TCP 53
+  shadow: UDP/TCP 127.0.0.1:5353
+  canary/production: hostPort UDP 53 / TCP 53
 
 fugue-edge / Caddy DaemonSet:
   nodeSelector: fugue.io/role.edge=true
-  hostNetwork: true
-  ports: TCP 80 / TCP 443
+  shadow: localhost Caddy admin/data ports
+  canary/production: hostPort TCP 80 / TCP 443
 ```
 
 这让控制平面可以通过 NodePolicy 调整角色，同时让公网 DNS 和 HTTPS 流量直接打到节点公网 IP。
@@ -663,7 +663,7 @@ DNS 必须上报：
 - 当前已经具备只读 route binding 派生、typed `/v1/edge/routes` route bundle API、稳定 `ETag` / conditional fetch、`fugue-edge` shadow DaemonSet、本地 route cache、health 和 metrics。
 - 当前 `fugue-edge` 默认仍是 shadow workload：不监听公网 80/443，不终止 TLS，不承接生产流量。
 - 代码层已经具备 Caddy-backed shadow 反代开关：根据 route bundle 生成 Caddy dynamic config，Caddy admin / data listen 默认绑定 localhost，Helm 默认关闭。
-- 当前还没有 `fugue-dns`、DNS bundle 或区域化 `d-xxxx.dns.fugue.pro` 解析。
+- 代码层已经具备 `fugue-dns` shadow、typed `/v1/edge/dns` DNS bundle API、本地 DNS cache、authoritative-only DNS responder、health/metrics 和 Helm DNS DaemonSet；默认关闭且未委托 `dns.fugue.pro`。
 - `dns.fugue.pro` 的现有公网权威和具体记录属于迁移前 baseline，具体值放在本地私有附录中。
 - 第一阶段不能直接切 DNS，也不能先替换现有入口。下一步应先做控制面普通业务减负和 Caddy-backed shadow edge，并通过显式 opt-in hostname 做人工 canary。
 
@@ -804,11 +804,13 @@ docs/private/regional-edge-current-state.local.md
 
 ### 8. 自建 fugue-dns shadow 模式
 
-- [ ] 新增 `cmd/fugue-dns` 或 CoreDNS Fugue plugin。
-- [ ] 新增 DNS bundle 派生逻辑，先只包含测试 target。
-- [ ] `fugue-dns` 周期性拉 bundle，写本地磁盘 cache。
-- [ ] DNS query 只查内存，不查数据库。
-- [ ] 拒绝 recursive query，只回答 authoritative zone。
+- [x] 新增 `cmd/fugue-dns`。
+- [x] 新增 typed `/v1/edge/dns` DNS bundle API，先输出 `d-test.dns.fugue.pro` probe 和 verified custom domain 的稳定 `d-xxxx.dns.fugue.pro` target。
+- [x] `fugue-dns` 周期性拉 bundle，写本地磁盘 cache。
+- [x] DNS query 只查内存，不查数据库。
+- [x] 拒绝 recursive query，只回答 authoritative zone。
+- [x] 增加 `/healthz`、`/metrics`、bundle sync/cache/query counters。
+- [x] 增加 Helm DNS DaemonSet，默认关闭，调度到 `fugue.io/role.dns=true`，不默认开放公网 53。
 - [ ] 在两个已 join cluster 且带 `fugue.io/role.dns=true` 的节点部署 shadow 服务，开放 UDP 53 / TCP 53。
 - [ ] 直接验证：`dig @<ns1-ip> d-test.dns.fugue.pro A`。
 

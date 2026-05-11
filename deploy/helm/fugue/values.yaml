@@ -145,6 +145,58 @@ edge:
     readOnlyRootFilesystem: true
   extraEnv: []
 
+dns:
+  enabled: false
+  image:
+    # fugue-dns is packaged in the same image as fugue-edge by default.
+    repository: ""
+    tag: ""
+    pullPolicy: ""
+  apiURL: ""
+  dnsNodeID: ""
+  edgeGroupID: ""
+  zone: dns.fugue.pro
+  answerIPs: []
+  ttl: 60
+  listenAddr: ":7834"
+  healthPort: 7834
+  udpAddr: "127.0.0.1:5353"
+  tcpAddr: "127.0.0.1:5353"
+  syncInterval: 15s
+  httpTimeout: 10s
+  cachePath: /var/lib/fugue/dns/dns-cache.json
+  nameservers: []
+  tokenSecret:
+    name: ""
+    key: FUGUE_EDGE_TLS_ASK_TOKEN
+  persistence:
+    hostPath: /var/lib/fugue/dns
+    mountPath: /var/lib/fugue/dns
+  publicHostPorts:
+    enabled: false
+    udp: 53
+    tcp: 53
+  nodeSelector:
+    fugue.io/role.dns: "true"
+  tolerations:
+    - key: fugue.io/dedicated
+      operator: Equal
+      value: dns
+      effect: NoSchedule
+  affinity: {}
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+      ephemeral-storage: 32Mi
+    limits:
+      memory: 256Mi
+      ephemeral-storage: 256Mi
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+  extraEnv: []
+
 imagePrePull:
   enabled: true
   image:

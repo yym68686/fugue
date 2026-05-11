@@ -428,6 +428,7 @@ cloudnative-pg:
                 app.kubernetes.io/instance: fugue
 EOF
   append_upgrade_image_prepull_values
+  append_upgrade_dns_values
   printf '%s' "${UPGRADE_OVERRIDE_VALUES_FILE}"
 }
 
@@ -450,6 +451,47 @@ EOF
     image="${image//\"/\\\"}"
     printf '    - "%s"\n' "${image}" >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
   done
+}
+
+yaml_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "${value}"
+}
+
+append_upgrade_dns_values() {
+  local answer_ip
+
+  cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<EOF
+
+dns:
+  enabled: ${FUGUE_DNS_ENABLED}
+EOF
+
+  if [[ "${FUGUE_DNS_ENABLED}" != "true" ]]; then
+    return 0
+  fi
+
+  cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<'EOF'
+  answerIPs:
+EOF
+  printf '%s' "${FUGUE_DNS_ANSWER_IPS}" | tr ',' '\n' | while IFS= read -r answer_ip; do
+    answer_ip="$(printf '%s' "${answer_ip}" | awk '{$1=$1; print}')"
+    if [[ -z "${answer_ip}" ]]; then
+      continue
+    fi
+    printf '    - %s\n' "$(yaml_quote "${answer_ip}")" >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+  done
+
+  {
+    printf '  publicHostPorts:\n'
+    printf '    enabled: %s\n' "${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED}"
+    printf '  udpAddr: %s\n' "$(yaml_quote "${FUGUE_DNS_UDP_ADDR}")"
+    printf '  tcpAddr: %s\n' "$(yaml_quote "${FUGUE_DNS_TCP_ADDR}")"
+    printf '  zone: %s\n' "$(yaml_quote "${FUGUE_DNS_ZONE}")"
+    printf '  ttl: %s\n' "${FUGUE_DNS_TTL}"
+  } >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
 }
 
 use_local_control_plane_automation_bundle_from_dir() {
@@ -1483,6 +1525,25 @@ main() {
   FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED="${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED:-true}"
   FUGUE_SHARED_WORKSPACE_STORAGE_CLASS="${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS:-fugue-rwx}"
   FUGUE_SHARED_WORKSPACE_NFS_CLUSTER_IP="${FUGUE_SHARED_WORKSPACE_NFS_CLUSTER_IP:-10.43.240.17}"
+  FUGUE_DNS_ENABLED="${FUGUE_DNS_ENABLED:-false}"
+  FUGUE_DNS_ANSWER_IPS="${FUGUE_DNS_ANSWER_IPS:-}"
+  FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED="${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED:-false}"
+  if [[ "${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED}" == "true" ]]; then
+    FUGUE_DNS_UDP_ADDR="${FUGUE_DNS_UDP_ADDR:-:53}"
+    FUGUE_DNS_TCP_ADDR="${FUGUE_DNS_TCP_ADDR:-:53}"
+  else
+    FUGUE_DNS_UDP_ADDR="${FUGUE_DNS_UDP_ADDR:-127.0.0.1:5353}"
+    FUGUE_DNS_TCP_ADDR="${FUGUE_DNS_TCP_ADDR:-127.0.0.1:5353}"
+  fi
+  FUGUE_DNS_ZONE="${FUGUE_DNS_ZONE:-dns.${FUGUE_APP_BASE_DOMAIN}}"
+  FUGUE_DNS_TTL="${FUGUE_DNS_TTL:-60}"
+
+  if [[ "${FUGUE_DNS_ENABLED}" == "true" ]]; then
+    require_env FUGUE_DNS_ANSWER_IPS
+    if ! [[ "${FUGUE_DNS_TTL}" =~ ^[0-9]+$ ]] || (( FUGUE_DNS_TTL <= 0 || FUGUE_DNS_TTL > 3600 )); then
+      fail "FUGUE_DNS_TTL must be an integer between 1 and 3600"
+    fi
+  fi
 
   if [[ -z "${FUGUE_REGISTRY_PUSH_BASE:-}" ]]; then
     FUGUE_REGISTRY_PUSH_BASE="${FUGUE_RELEASE_FULLNAME}-registry.${FUGUE_NAMESPACE}.svc.cluster.local:${FUGUE_REGISTRY_SERVICE_PORT}"
@@ -1521,6 +1582,7 @@ main() {
   log "cluster join registry endpoint: ${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}"
   log "app base domain: ${FUGUE_APP_BASE_DOMAIN}"
   log "custom domain base domain: dns.${FUGUE_APP_BASE_DOMAIN}"
+  log "dns shadow: enabled=${FUGUE_DNS_ENABLED} answer_ips=${FUGUE_DNS_ANSWER_IPS:-<none>} public_hostports=${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED} udp=${FUGUE_DNS_UDP_ADDR} tcp=${FUGUE_DNS_TCP_ADDR}"
   log "shared workspace storage: enabled=${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED} class=${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS}"
 
   recover_primary_node_if_needed

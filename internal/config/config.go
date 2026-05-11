@@ -110,6 +110,23 @@ type EdgeConfig struct {
 	CaddyProxyListenAddr string
 }
 
+type DNSConfig struct {
+	APIURL       string
+	EdgeToken    string
+	DNSNodeID    string
+	EdgeGroupID  string
+	Zone         string
+	AnswerIPs    []string
+	CachePath    string
+	ListenAddr   string
+	UDPAddr      string
+	TCPAddr      string
+	SyncInterval time.Duration
+	HTTPTimeout  time.Duration
+	TTL          int
+	Nameservers  []string
+}
+
 func APIFromEnv() APIConfig {
 	cfg := APIConfig{
 		BindAddr:                     getenv("FUGUE_BIND_ADDR", ":8080"),
@@ -241,11 +258,62 @@ func EdgeFromEnv() EdgeConfig {
 	}
 }
 
+func DNSFromEnv() DNSConfig {
+	edgeToken := strings.TrimSpace(os.Getenv("FUGUE_DNS_TOKEN"))
+	if edgeToken == "" {
+		edgeToken = strings.TrimSpace(os.Getenv("FUGUE_EDGE_TOKEN"))
+	}
+	if edgeToken == "" {
+		edgeToken = strings.TrimSpace(os.Getenv("FUGUE_EDGE_TLS_ASK_TOKEN"))
+	}
+	zone := getenv("FUGUE_DNS_ZONE", "dns.fugue.pro")
+	return DNSConfig{
+		APIURL:       getenv("FUGUE_API_URL", "https://api.fugue.pro"),
+		EdgeToken:    edgeToken,
+		DNSNodeID:    strings.TrimSpace(os.Getenv("FUGUE_DNS_NODE_ID")),
+		EdgeGroupID:  strings.TrimSpace(os.Getenv("FUGUE_EDGE_GROUP_ID")),
+		Zone:         zone,
+		AnswerIPs:    getenvList("FUGUE_DNS_ANSWER_IPS"),
+		CachePath:    getenv("FUGUE_DNS_CACHE_PATH", "/var/lib/fugue/dns/dns-cache.json"),
+		ListenAddr:   getenv("FUGUE_DNS_LISTEN_ADDR", "127.0.0.1:7834"),
+		UDPAddr:      getenv("FUGUE_DNS_UDP_ADDR", "127.0.0.1:5353"),
+		TCPAddr:      getenv("FUGUE_DNS_TCP_ADDR", "127.0.0.1:5353"),
+		SyncInterval: getenvDuration("FUGUE_DNS_SYNC_INTERVAL", 15*time.Second),
+		HTTPTimeout:  getenvDuration("FUGUE_DNS_HTTP_TIMEOUT", 10*time.Second),
+		TTL:          getenvInt("FUGUE_DNS_TTL", 60),
+		Nameservers:  getenvList("FUGUE_DNS_NAMESERVERS"),
+	}
+}
+
 func getenv(key, fallback string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
 	}
 	return fallback
+}
+
+func getenvList(key string) []string {
+	value := os.Getenv(key)
+	if value == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\n' || r == '\t'
+	})
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if _, ok := seen[part]; ok {
+			continue
+		}
+		seen[part] = struct{}{}
+		out = append(out, part)
+	}
+	return out
 }
 
 func getenvBool(key string, fallback bool) bool {

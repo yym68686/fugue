@@ -10,6 +10,7 @@ on:
       - 'cmd/fugue-api/**'
       - 'cmd/fugue-controller/**'
       - 'cmd/fugue-edge/**'
+      - 'cmd/fugue-dns/**'
       - 'internal/**'
       - 'deploy/helm/fugue/charts/**'
       - 'deploy/helm/fugue/crds/**'
@@ -170,4 +171,11 @@ jobs:
           FUGUE_CONTROLLER_IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
           FUGUE_EDGE_IMAGE_REPOSITORY: ${{ needs.build.outputs.edge_image_repository }}
           FUGUE_EDGE_IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+          FUGUE_DNS_ENABLED: ${{ vars.FUGUE_DNS_ENABLED || 'false' }}
+          FUGUE_DNS_ANSWER_IPS: ${{ vars.FUGUE_DNS_ANSWER_IPS || '' }}
+          FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED: ${{ vars.FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED || 'false' }}
+          FUGUE_DNS_UDP_ADDR: ${{ vars.FUGUE_DNS_UDP_ADDR || '' }}
+          FUGUE_DNS_TCP_ADDR: ${{ vars.FUGUE_DNS_TCP_ADDR || '' }}
+          FUGUE_DNS_ZONE: ${{ vars.FUGUE_DNS_ZONE || '' }}
+          FUGUE_DNS_TTL: ${{ vars.FUGUE_DNS_TTL || '' }}
         run: ./scripts/upgrade_fugue_control_plane.sh
