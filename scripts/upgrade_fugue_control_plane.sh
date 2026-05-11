@@ -466,7 +466,7 @@ dns_answer_ips_lines() {
   local answer_ip
   raw="${raw//;/,}"
 
-  printf '%s' "${raw}" | tr ',' '\n' | while IFS= read -r answer_ip; do
+  printf '%s\n' "${raw}" | tr ',' '\n' | while IFS= read -r answer_ip; do
     answer_ip="$(printf '%s' "${answer_ip}" | awk '{$1=$1; print}')"
     if [[ -n "${answer_ip}" ]]; then
       printf '%s\n' "${answer_ip}"
