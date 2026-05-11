@@ -511,7 +511,7 @@ node_selector_country_yaml() {
 
 edge_extra_groups_yaml() {
   local raw="${FUGUE_EDGE_EXTRA_GROUPS:-}"
-  local entry name edge_group country_code token_secret
+  local entry name edge_group country_code token_secret edge_region edge_country edge_public_ipv4 edge_public_ipv6 edge_mesh_ip
 
   raw="${raw//;/$'\n'}"
   if [[ -z "$(trim_field "${raw}")" ]]; then
@@ -524,13 +524,21 @@ edge_extra_groups_yaml() {
     if [[ -z "${entry}" ]]; then
       continue
     fi
-    IFS='|' read -r name edge_group country_code token_secret _ <<<"${entry}"
+    IFS='|' read -r name edge_group country_code token_secret edge_region edge_country edge_public_ipv4 edge_public_ipv6 edge_mesh_ip _ <<<"${entry}"
     name="$(trim_field "${name}")"
     edge_group="$(trim_field "${edge_group}")"
     country_code="$(trim_field "${country_code}")"
     token_secret="$(trim_field "${token_secret}")"
+    edge_region="$(trim_field "${edge_region}")"
+    edge_country="$(trim_field "${edge_country}")"
+    edge_public_ipv4="$(trim_field "${edge_public_ipv4}")"
+    edge_public_ipv6="$(trim_field "${edge_public_ipv6}")"
+    edge_mesh_ip="$(trim_field "${edge_mesh_ip}")"
     if [[ -z "${name}" || -z "${edge_group}" || -z "${country_code}" || -z "${token_secret}" ]]; then
-      fail "FUGUE_EDGE_EXTRA_GROUPS entries must be name|edge_group_id|country_code|token_secret_name"
+      fail "FUGUE_EDGE_EXTRA_GROUPS entries must be name|edge_group_id|country_code|token_secret_name[|region|country|public_ipv4|public_ipv6|mesh_ip]"
+    fi
+    if [[ -z "${edge_country}" ]]; then
+      edge_country="${country_code}"
     fi
     printf '    - name: %s\n' "$(yaml_quote "${name}")"
     printf '      edgeGroupID: %s\n' "$(yaml_quote "${edge_group}")"
@@ -541,6 +549,29 @@ edge_extra_groups_yaml() {
     printf '        fugue.io/role.edge: "true"\n'
     printf '        fugue.io/schedulable: "true"\n'
     printf '        fugue.io/location-country-code: %s\n' "$(yaml_quote "${country_code}")"
+    if [[ -n "${edge_region}" || -n "${edge_country}" || -n "${edge_public_ipv4}" || -n "${edge_public_ipv6}" || -n "${edge_mesh_ip}" ]]; then
+      printf '      extraEnv:\n'
+      if [[ -n "${edge_region}" ]]; then
+        printf '        - name: FUGUE_EDGE_REGION\n'
+        printf '          value: %s\n' "$(yaml_quote "${edge_region}")"
+      fi
+      if [[ -n "${edge_country}" ]]; then
+        printf '        - name: FUGUE_EDGE_COUNTRY\n'
+        printf '          value: %s\n' "$(yaml_quote "${edge_country}")"
+      fi
+      if [[ -n "${edge_public_ipv4}" ]]; then
+        printf '        - name: FUGUE_EDGE_PUBLIC_IPV4\n'
+        printf '          value: %s\n' "$(yaml_quote "${edge_public_ipv4}")"
+      fi
+      if [[ -n "${edge_public_ipv6}" ]]; then
+        printf '        - name: FUGUE_EDGE_PUBLIC_IPV6\n'
+        printf '          value: %s\n' "$(yaml_quote "${edge_public_ipv6}")"
+      fi
+      if [[ -n "${edge_mesh_ip}" ]]; then
+        printf '        - name: FUGUE_EDGE_MESH_IP\n'
+        printf '          value: %s\n' "$(yaml_quote "${edge_mesh_ip}")"
+      fi
+    fi
   done <<<"${raw}"
 }
 
