@@ -148,6 +148,7 @@ edge:
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true
   extraEnv: []
+  groups: []
 
 dns:
   enabled: false
@@ -208,6 +209,7 @@ dns:
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true
   extraEnv: []
+  groups: []
 
 imagePrePull:
   enabled: true

@@ -400,6 +400,7 @@ edge:
   nodeSelector:
     fugue.io/role.edge: "true"
     fugue.io/schedulable: "true"
+$(node_selector_country_yaml "${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE}" "    ")
   tolerations:
     - key: fugue.io/dedicated
       operator: Equal
@@ -416,6 +417,7 @@ edge:
       enabled: ${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED}
       http: ${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP}
       https: ${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS}
+$(edge_extra_groups_yaml)
 cloudnative-pg:
   replicaCount: 2
   priorityClassName: system-cluster-critical
@@ -493,6 +495,99 @@ yaml_quote() {
   printf '"%s"' "${value}"
 }
 
+trim_field() {
+  printf '%s' "$1" | awk '{$1=$1; print}'
+}
+
+node_selector_country_yaml() {
+  local country_code="$1"
+  local indent="$2"
+
+  country_code="$(trim_field "${country_code}")"
+  if [[ -z "${country_code}" ]]; then
+    return 0
+  fi
+  printf '%sfugue.io/location-country-code: %s\n' "${indent}" "$(yaml_quote "${country_code}")"
+}
+
+edge_extra_groups_yaml() {
+  local raw="${FUGUE_EDGE_EXTRA_GROUPS:-}"
+  local entry name edge_group country_code token_secret
+
+  raw="${raw//;/$'\n'}"
+  if [[ -z "$(trim_field "${raw}")" ]]; then
+    return 0
+  fi
+
+  printf '  groups:\n'
+  while IFS= read -r entry; do
+    entry="$(trim_field "${entry}")"
+    if [[ -z "${entry}" ]]; then
+      continue
+    fi
+    IFS='|' read -r name edge_group country_code token_secret _ <<<"${entry}"
+    name="$(trim_field "${name}")"
+    edge_group="$(trim_field "${edge_group}")"
+    country_code="$(trim_field "${country_code}")"
+    token_secret="$(trim_field "${token_secret}")"
+    if [[ -z "${name}" || -z "${edge_group}" || -z "${country_code}" || -z "${token_secret}" ]]; then
+      fail "FUGUE_EDGE_EXTRA_GROUPS entries must be name|edge_group_id|country_code|token_secret_name"
+    fi
+    printf '    - name: %s\n' "$(yaml_quote "${name}")"
+    printf '      edgeGroupID: %s\n' "$(yaml_quote "${edge_group}")"
+    printf '      tokenSecret:\n'
+    printf '        name: %s\n' "$(yaml_quote "${token_secret}")"
+    printf '        key: "FUGUE_EDGE_TOKEN"\n'
+    printf '      nodeSelector:\n'
+    printf '        fugue.io/role.edge: "true"\n'
+    printf '        fugue.io/schedulable: "true"\n'
+    printf '        fugue.io/location-country-code: %s\n' "$(yaml_quote "${country_code}")"
+  done <<<"${raw}"
+}
+
+dns_extra_groups_yaml() {
+  local raw="${FUGUE_DNS_EXTRA_GROUPS:-}"
+  local entry name edge_group country_code answer_ips token_secret answer_ip
+
+  raw="${raw//;/$'\n'}"
+  if [[ -z "$(trim_field "${raw}")" ]]; then
+    return 0
+  fi
+
+  printf '  groups:\n'
+  while IFS= read -r entry; do
+    entry="$(trim_field "${entry}")"
+    if [[ -z "${entry}" ]]; then
+      continue
+    fi
+    IFS='|' read -r name edge_group country_code answer_ips token_secret _ <<<"${entry}"
+    name="$(trim_field "${name}")"
+    edge_group="$(trim_field "${edge_group}")"
+    country_code="$(trim_field "${country_code}")"
+    answer_ips="$(trim_field "${answer_ips}")"
+    token_secret="$(trim_field "${token_secret}")"
+    if [[ -z "${name}" || -z "${edge_group}" || -z "${country_code}" || -z "${answer_ips}" || -z "${token_secret}" ]]; then
+      fail "FUGUE_DNS_EXTRA_GROUPS entries must be name|edge_group_id|country_code|answer_ips|token_secret_name"
+    fi
+    if [[ "$(dns_answer_ip_count "${answer_ips}")" == "0" ]]; then
+      fail "FUGUE_DNS_EXTRA_GROUPS entry ${name} must contain at least one answer IP"
+    fi
+    printf '    - name: %s\n' "$(yaml_quote "${name}")"
+    printf '      edgeGroupID: %s\n' "$(yaml_quote "${edge_group}")"
+    printf '      tokenSecret:\n'
+    printf '        name: %s\n' "$(yaml_quote "${token_secret}")"
+    printf '        key: "FUGUE_EDGE_TOKEN"\n'
+    printf '      nodeSelector:\n'
+    printf '        fugue.io/role.dns: "true"\n'
+    printf '        fugue.io/schedulable: "true"\n'
+    printf '        fugue.io/location-country-code: %s\n' "$(yaml_quote "${country_code}")"
+    printf '      answerIPs:\n'
+    while IFS= read -r answer_ip; do
+      printf '        - %s\n' "$(yaml_quote "${answer_ip}")"
+    done < <(dns_answer_ips_lines "${answer_ips}")
+  done <<<"${raw}"
+}
+
 dns_answer_ips_lines() {
   local raw="$1"
   local answer_ip
@@ -539,6 +634,7 @@ EOF
     printf '  nodeSelector:\n'
     printf '    fugue.io/role.dns: "true"\n'
     printf '    fugue.io/schedulable: "true"\n'
+    node_selector_country_yaml "${FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE}" "    "
     printf '  tolerations:\n'
     printf '    - key: fugue.io/dedicated\n'
     printf '      operator: Equal\n'
@@ -558,6 +654,7 @@ EOF
     printf '  zone: %s\n' "$(yaml_quote "${FUGUE_DNS_ZONE}")"
     printf '  ttl: %s\n' "${FUGUE_DNS_TTL}"
   } >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+  dns_extra_groups_yaml >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
 }
 
 build_dns_helm_set_args() {
@@ -1625,8 +1722,12 @@ main() {
   FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED="${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED:-false}"
   FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP="${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP:-80}"
   FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS="${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS:-443}"
+  FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE="${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE:-}"
+  FUGUE_EDGE_EXTRA_GROUPS="${FUGUE_EDGE_EXTRA_GROUPS:-}"
   FUGUE_DNS_ENABLED="${FUGUE_DNS_ENABLED:-false}"
   FUGUE_DNS_ANSWER_IPS="${FUGUE_DNS_ANSWER_IPS:-}"
+  FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE="${FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE:-}"
+  FUGUE_DNS_EXTRA_GROUPS="${FUGUE_DNS_EXTRA_GROUPS:-}"
   FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED="${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED:-false}"
   if [[ "${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED}" == "true" ]]; then
     FUGUE_DNS_UDP_ADDR="${FUGUE_DNS_UDP_ADDR:-:53}"
@@ -1667,6 +1768,11 @@ main() {
       fail "FUGUE_DNS_TTL must be an integer between 1 and 3600"
     fi
   fi
+  edge_extra_groups_yaml >/dev/null
+  if [[ -n "$(trim_field "${FUGUE_DNS_EXTRA_GROUPS}")" && "${FUGUE_DNS_ENABLED}" != "true" ]]; then
+    fail "FUGUE_DNS_ENABLED must be true when FUGUE_DNS_EXTRA_GROUPS is set"
+  fi
+  dns_extra_groups_yaml >/dev/null
 
   if [[ -z "${FUGUE_REGISTRY_PUSH_BASE:-}" ]]; then
     FUGUE_REGISTRY_PUSH_BASE="${FUGUE_RELEASE_FULLNAME}-registry.${FUGUE_NAMESPACE}.svc.cluster.local:${FUGUE_REGISTRY_SERVICE_PORT}"
@@ -1700,6 +1806,7 @@ main() {
   log "controller image: ${FUGUE_CONTROLLER_IMAGE_REPOSITORY}:${FUGUE_CONTROLLER_IMAGE_TAG}"
   log "edge image: ${FUGUE_EDGE_IMAGE_REPOSITORY}:${FUGUE_EDGE_IMAGE_TAG} enabled=${FUGUE_EDGE_ENABLED} edge_group_id=${FUGUE_EDGE_GROUP_ID:-<empty>}"
   log "edge caddy: enabled=${FUGUE_EDGE_CADDY_ENABLED} listen=${FUGUE_EDGE_CADDY_LISTEN_ADDR} tls_mode=${FUGUE_EDGE_CADDY_TLS_MODE} public_hostports=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED} http=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP} https=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS}"
+  log "edge scheduling: primary_country=${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE:-<none>} extra_groups=${FUGUE_EDGE_EXTRA_GROUPS:-<none>}"
   log "previous Helm revision: ${PREVIOUS_REVISION}"
   log "registry push base: ${FUGUE_REGISTRY_PUSH_BASE}"
   log "registry pull base: ${FUGUE_REGISTRY_PULL_BASE}"
@@ -1707,6 +1814,7 @@ main() {
   log "app base domain: ${FUGUE_APP_BASE_DOMAIN}"
   log "custom domain base domain: dns.${FUGUE_APP_BASE_DOMAIN}"
   log "dns shadow: enabled=${FUGUE_DNS_ENABLED} answer_ips=${FUGUE_DNS_ANSWER_IPS:-<none>} public_hostports=${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED} udp=${FUGUE_DNS_UDP_ADDR} tcp=${FUGUE_DNS_TCP_ADDR}"
+  log "dns scheduling: primary_country=${FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE:-<none>} extra_groups=${FUGUE_DNS_EXTRA_GROUPS:-<none>}"
   log "shared workspace storage: enabled=${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED} class=${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS}"
 
   recover_primary_node_if_needed

@@ -1,0 +1,195 @@
+{{- range $group := .Values.edge.groups }}
+{{- $name := required "edge.groups[].name is required" $group.name | lower | replace "_" "-" | trunc 30 | trimSuffix "-" -}}
+{{- $edgeGroupID := required (printf "edge.groups[%s].edgeGroupID is required" $name) $group.edgeGroupID -}}
+{{- if not $group.nodeSelector }}
+{{- fail (printf "edge.groups[%s].nodeSelector is required" $name) }}
+{{- end }}
+{{- $image := default dict $group.image -}}
+{{- $tokenSecret := default dict $group.tokenSecret -}}
+{{- $caddy := default dict $group.caddy -}}
+{{- $publicHostPorts := default dict $caddy.publicHostPorts -}}
+{{- $caddyEnabled := $.Values.edge.caddy.enabled -}}
+{{- if hasKey $caddy "enabled" }}{{- $caddyEnabled = $caddy.enabled -}}{{- end -}}
+{{- $publicHostPortsEnabled := $.Values.edge.caddy.publicHostPorts.enabled -}}
+{{- if hasKey $publicHostPorts "enabled" }}{{- $publicHostPortsEnabled = $publicHostPorts.enabled -}}{{- end -}}
+{{- $edgeAPIURL := default (default (printf "http://%s:%v" (include "fugue.fullname" $) $.Values.service.port) $.Values.edge.apiURL) $group.apiURL -}}
+{{- $edgeTokenSecretName := default (default (include "fugue.configSecretName" $) $.Values.edge.tokenSecret.name) $tokenSecret.name -}}
+{{- $edgeTokenSecretKey := default (default "FUGUE_EDGE_TLS_ASK_TOKEN" $.Values.edge.tokenSecret.key) $tokenSecret.key -}}
+{{- $edgeImageRepository := default $.Values.edge.image.repository $image.repository -}}
+{{- $edgeImageTag := default $.Values.edge.image.tag $image.tag -}}
+{{- $edgeImagePullPolicy := default $.Values.edge.image.pullPolicy $image.pullPolicy -}}
+{{- $caddyImage := default dict $caddy.image -}}
+{{- $caddyImageRepository := default $.Values.edge.caddy.image.repository $caddyImage.repository -}}
+{{- $caddyImageTag := default $.Values.edge.caddy.image.tag $caddyImage.tag -}}
+{{- $caddyImagePullPolicy := default $.Values.edge.caddy.image.pullPolicy $caddyImage.pullPolicy -}}
+{{- $caddyAdminAddr := default $.Values.edge.caddy.adminAddr $caddy.adminAddr -}}
+{{- $caddyAdminURL := default $.Values.edge.caddy.adminURL $caddy.adminURL -}}
+{{- $caddyListenAddr := default $.Values.edge.caddy.listenAddr $caddy.listenAddr -}}
+{{- $caddyTLSMode := default $.Values.edge.caddy.tlsMode $caddy.tlsMode -}}
+{{- $caddyTLSAskURL := default $.Values.edge.caddy.tlsAskURL $caddy.tlsAskURL -}}
+{{- $caddyProxyListenAddr := default $.Values.edge.caddy.proxyListenAddr $caddy.proxyListenAddr -}}
+{{- $publicHTTP := default $.Values.edge.caddy.publicHostPorts.http $publicHostPorts.http -}}
+{{- $publicHTTPS := default $.Values.edge.caddy.publicHostPorts.https $publicHostPorts.https -}}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "fugue.edgeDaemonSetName" $ }}-{{ $name }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" $ "component" (printf "edge-%s" $name)) | nindent 4 }}
+spec:
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      {{- include "fugue.componentSelectorLabels" (dict "root" $ "component" (printf "edge-%s" $name)) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue.componentSelectorLabels" (dict "root" $ "component" (printf "edge-%s" $name)) | nindent 8 }}
+        {{- with $.Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config-secret: {{ include "fugue.configSecretChecksum" $ }}
+        checksum/edge-group-config: {{ toJson $group | sha256sum }}
+        {{- with $.Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: edge
+          image: "{{ $edgeImageRepository }}:{{ $edgeImageTag }}"
+          imagePullPolicy: {{ $edgeImagePullPolicy }}
+          {{- with $.Values.edge.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ default $.Values.edge.healthPort $group.healthPort }}
+              protocol: TCP
+          env:
+            - name: FUGUE_API_URL
+              value: {{ $edgeAPIURL | quote }}
+            - name: FUGUE_EDGE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $edgeTokenSecretName }}
+                  key: {{ $edgeTokenSecretKey }}
+            - name: FUGUE_EDGE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: FUGUE_EDGE_GROUP_ID
+              value: {{ $edgeGroupID | quote }}
+            - name: FUGUE_EDGE_LISTEN_ADDR
+              value: {{ default $.Values.edge.listenAddr $group.listenAddr | quote }}
+            - name: FUGUE_EDGE_ROUTES_CACHE_PATH
+              value: {{ default $.Values.edge.routesCachePath $group.routesCachePath | quote }}
+            - name: FUGUE_EDGE_SYNC_INTERVAL
+              value: {{ default $.Values.edge.syncInterval $group.syncInterval | quote }}
+            - name: FUGUE_EDGE_HTTP_TIMEOUT
+              value: {{ default $.Values.edge.httpTimeout $group.httpTimeout | quote }}
+            {{- if $caddyEnabled }}
+            - name: FUGUE_EDGE_CADDY_ENABLED
+              value: "true"
+            - name: FUGUE_EDGE_CADDY_ADMIN_URL
+              value: {{ $caddyAdminURL | quote }}
+            - name: FUGUE_EDGE_CADDY_LISTEN_ADDR
+              value: {{ $caddyListenAddr | quote }}
+            - name: FUGUE_EDGE_CADDY_TLS_MODE
+              value: {{ $caddyTLSMode | quote }}
+            {{- if $caddyTLSAskURL }}
+            - name: FUGUE_EDGE_CADDY_TLS_ASK_URL
+              value: {{ $caddyTLSAskURL | quote }}
+            {{- end }}
+            - name: FUGUE_EDGE_PROXY_LISTEN_ADDR
+              value: {{ $caddyProxyListenAddr | quote }}
+            {{- end }}
+            {{- with $.Values.edge.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- with $group.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: route-cache
+              mountPath: {{ $.Values.edge.persistence.mountPath | quote }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 12
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml $.Values.edge.resources | nindent 12 }}
+        {{- if $caddyEnabled }}
+        - name: caddy
+          image: "{{ $caddyImageRepository }}:{{ $caddyImageTag }}"
+          imagePullPolicy: {{ $caddyImagePullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+          args:
+            - |
+              printf '%s\n' '{' '    admin {{ $caddyAdminAddr }}' '}' >/config/Caddyfile
+              exec caddy run --adapter caddyfile --config /config/Caddyfile
+          {{- with $.Values.edge.caddy.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if $publicHostPortsEnabled }}
+          ports:
+            - name: http-canary
+              containerPort: 80
+              hostPort: {{ $publicHTTP }}
+              protocol: TCP
+            - name: https-canary
+              containerPort: 443
+              hostPort: {{ $publicHTTPS }}
+              protocol: TCP
+          {{- end }}
+          volumeMounts:
+            - name: caddy-config
+              mountPath: /config
+            - name: caddy-data
+              mountPath: /data
+          resources:
+            {{- toYaml $.Values.edge.caddy.resources | nindent 12 }}
+        {{- end }}
+      volumes:
+        - name: route-cache
+          hostPath:
+            path: {{ $.Values.edge.persistence.hostPath | quote }}
+            type: DirectoryOrCreate
+        {{- if $caddyEnabled }}
+        - name: caddy-config
+          emptyDir: {}
+        - name: caddy-data
+          emptyDir: {}
+        {{- end }}
+      nodeSelector:
+        {{- toYaml $group.nodeSelector | nindent 8 }}
+      {{- with $group.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.edge.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

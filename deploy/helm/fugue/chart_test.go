@@ -523,6 +523,108 @@ func TestDNSPublicHostPortsRequireExplicitEnable(t *testing.T) {
 	}
 }
 
+func TestRegionalEdgeAndDNSGroupsRenderSeparateDaemonSets(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	valuesPath := t.TempDir() + "/values.yaml"
+	values := `
+edge:
+  edgeGroupID: edge-group-country-us
+  caddy:
+    enabled: true
+    listenAddr: :443
+    tlsMode: public-on-demand
+    publicHostPorts:
+      enabled: true
+  groups:
+    - name: country-de
+      edgeGroupID: edge-group-country-de
+      tokenSecret:
+        name: fugue-edge-de-scoped-token
+        key: FUGUE_EDGE_TOKEN
+      nodeSelector:
+        fugue.io/role.edge: "true"
+        fugue.io/schedulable: "true"
+        fugue.io/location-country-code: de
+dns:
+  enabled: true
+  answerIPs:
+    - 15.204.94.71
+  publicHostPorts:
+    enabled: true
+  udpAddr: :53
+  tcpAddr: :53
+  groups:
+    - name: country-de
+      edgeGroupID: edge-group-country-de
+      answerIPs:
+        - 51.38.126.103
+      tokenSecret:
+        name: fugue-edge-de-scoped-token
+        key: FUGUE_EDGE_TOKEN
+      nodeSelector:
+        fugue.io/role.dns: "true"
+        fugue.io/schedulable: "true"
+        fugue.io/location-country-code: de
+`
+	if err := os.WriteFile(valuesPath, []byte(values), 0o600); err != nil {
+		t.Fatalf("write values: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "-f", valuesPath)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	edgeDoc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-edge-country-de")
+	if edgeDoc == "" {
+		t.Fatalf("rendered manifest missing country-de edge daemonset:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`app.kubernetes.io/component: edge-country-de`,
+		`fugue.io/location-country-code: de`,
+		`name: fugue-edge-de-scoped-token`,
+		`key: FUGUE_EDGE_TOKEN`,
+		`name: FUGUE_EDGE_GROUP_ID`,
+		`value: "edge-group-country-de"`,
+		`name: https-canary`,
+		`hostPort: 443`,
+	} {
+		if !strings.Contains(edgeDoc, want) {
+			t.Fatalf("country-de edge daemonset missing %q:\n%s", want, edgeDoc)
+		}
+	}
+
+	dnsDoc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-dns-country-de")
+	if dnsDoc == "" {
+		t.Fatalf("rendered manifest missing country-de dns daemonset:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`app.kubernetes.io/component: dns-country-de`,
+		`fugue.io/location-country-code: de`,
+		`name: fugue-edge-de-scoped-token`,
+		`key: FUGUE_EDGE_TOKEN`,
+		`name: FUGUE_EDGE_GROUP_ID`,
+		`value: "edge-group-country-de"`,
+		`name: FUGUE_DNS_ANSWER_IPS`,
+		`value: "51.38.126.103"`,
+		`name: dns-udp`,
+		`hostPort: 53`,
+	} {
+		if !strings.Contains(dnsDoc, want) {
+			t.Fatalf("country-de dns daemonset missing %q:\n%s", want, dnsDoc)
+		}
+	}
+}
+
 func manifestDocumentForKindAndName(manifest string, kind string, name string) string {
 	for _, doc := range strings.Split(manifest, "\n---") {
 		hasKind := strings.Contains(doc, "\nkind: "+kind+"\n") || strings.Contains(doc, "kind: "+kind+"\n")
