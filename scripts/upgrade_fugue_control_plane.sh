@@ -400,7 +400,6 @@ edge:
   nodeSelector:
     fugue.io/role.edge: "true"
     fugue.io/schedulable: "true"
-$(node_selector_country_yaml "${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE}" "    ")
   tolerations:
     - key: fugue.io/dedicated
       operator: Equal
@@ -417,7 +416,6 @@ $(node_selector_country_yaml "${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE}" "    ")
       enabled: ${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED}
       http: ${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP}
       https: ${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS}
-$(edge_extra_groups_yaml)
 cloudnative-pg:
   replicaCount: 2
   priorityClassName: system-cluster-critical
@@ -462,6 +460,7 @@ cloudnative-pg:
                 app.kubernetes.io/name: cloudnative-pg
                 app.kubernetes.io/instance: fugue
 EOF
+  append_upgrade_edge_dynamic_values
   append_upgrade_image_prepull_values
   append_upgrade_dns_values
   printf '%s' "${UPGRADE_OVERRIDE_VALUES_FILE}"
@@ -586,6 +585,22 @@ dns_extra_groups_yaml() {
       printf '        - %s\n' "$(yaml_quote "${answer_ip}")"
     done < <(dns_answer_ips_lines "${answer_ips}")
   done <<<"${raw}"
+}
+
+append_upgrade_edge_dynamic_values() {
+  if [[ -z "$(trim_field "${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE:-}")" && -z "$(trim_field "${FUGUE_EDGE_EXTRA_GROUPS:-}")" ]]; then
+    return 0
+  fi
+
+  cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<EOF
+
+edge:
+  nodeSelector:
+    fugue.io/role.edge: "true"
+    fugue.io/schedulable: "true"
+EOF
+  node_selector_country_yaml "${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE}" "    " >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+  edge_extra_groups_yaml >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
 }
 
 dns_answer_ips_lines() {
@@ -1758,6 +1773,9 @@ main() {
   if ! [[ "${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS}" =~ ^[0-9]+$ ]] || (( FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS <= 0 || FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS > 65535 )); then
     fail "FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS must be an integer between 1 and 65535"
   fi
+  if [[ -n "$(trim_field "${FUGUE_EDGE_EXTRA_GROUPS}")" && -z "$(trim_field "${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE}")" ]]; then
+    fail "FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE must be set when FUGUE_EDGE_EXTRA_GROUPS is set"
+  fi
 
   if [[ "${FUGUE_DNS_ENABLED}" == "true" ]]; then
     require_env FUGUE_DNS_ANSWER_IPS
@@ -1771,6 +1789,9 @@ main() {
   edge_extra_groups_yaml >/dev/null
   if [[ -n "$(trim_field "${FUGUE_DNS_EXTRA_GROUPS}")" && "${FUGUE_DNS_ENABLED}" != "true" ]]; then
     fail "FUGUE_DNS_ENABLED must be true when FUGUE_DNS_EXTRA_GROUPS is set"
+  fi
+  if [[ -n "$(trim_field "${FUGUE_DNS_EXTRA_GROUPS}")" && -z "$(trim_field "${FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE}")" ]]; then
+    fail "FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE must be set when FUGUE_DNS_EXTRA_GROUPS is set"
   fi
   dns_extra_groups_yaml >/dev/null
 
