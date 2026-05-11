@@ -243,6 +243,7 @@ fugue-edge -> 127.0.0.1 或私网管理端口
 ```text
 fugue-dns DaemonSet:
   nodeSelector: fugue.io/role.dns=true
+  tolerations: fugue.io/dedicated=dns 或 fugue.io/dedicated=edge
   shadow: UDP/TCP 127.0.0.1:5353
   canary/production: hostPort UDP 53 / TCP 53
 

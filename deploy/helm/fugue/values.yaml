@@ -183,6 +183,10 @@ dns:
       operator: Equal
       value: dns
       effect: NoSchedule
+    - key: fugue.io/dedicated
+      operator: Equal
+      value: edge
+      effect: NoSchedule
   affinity: {}
   resources:
     requests:
