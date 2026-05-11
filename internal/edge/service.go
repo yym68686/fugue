@@ -354,6 +354,7 @@ func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /edge/bundle", s.handleBundle)
+	mux.HandleFunc("GET /edge/tls/ask", s.handleTLSAsk)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	return mux
 }
@@ -427,6 +428,24 @@ func (s *Service) handleBundle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, bundle)
+}
+
+func (s *Service) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
+	host := normalizeRouteHost(r.URL.Query().Get("domain"))
+	if host == "" {
+		http.Error(w, "domain is required", http.StatusBadRequest)
+		return
+	}
+	route, ok := s.routeForHost(host)
+	if !ok {
+		http.Error(w, "domain is not in the current route bundle", http.StatusForbidden)
+		return
+	}
+	if route.Status != model.EdgeRouteStatusActive {
+		http.Error(w, "route is not active", http.StatusForbidden)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
@@ -680,8 +699,12 @@ func (s *Service) validateConfig() error {
 		}
 		switch s.normalizedCaddyTLSMode() {
 		case caddyTLSModeOff, caddyTLSModeInternal:
+		case caddyTLSModePublicOnDemand:
+			if _, err := s.normalizedCaddyTLSAskURL(); err != nil {
+				return err
+			}
 		default:
-			return fmt.Errorf("FUGUE_EDGE_CADDY_TLS_MODE must be off or internal")
+			return fmt.Errorf("FUGUE_EDGE_CADDY_TLS_MODE must be off, internal, or public-on-demand")
 		}
 		if _, err := s.caddyAdminEndpoint("/load"); err != nil {
 			return err

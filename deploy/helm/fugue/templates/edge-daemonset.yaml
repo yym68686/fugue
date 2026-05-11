@@ -80,6 +80,10 @@ spec:
               value: {{ .Values.edge.caddy.listenAddr | quote }}
             - name: FUGUE_EDGE_CADDY_TLS_MODE
               value: {{ .Values.edge.caddy.tlsMode | quote }}
+            {{- if .Values.edge.caddy.tlsAskURL }}
+            - name: FUGUE_EDGE_CADDY_TLS_ASK_URL
+              value: {{ .Values.edge.caddy.tlsAskURL | quote }}
+            {{- end }}
             - name: FUGUE_EDGE_PROXY_LISTEN_ADDR
               value: {{ .Values.edge.caddy.proxyListenAddr | quote }}
             {{- end }}
@@ -120,6 +124,17 @@ spec:
           {{- with .Values.edge.caddy.securityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.edge.caddy.publicHostPorts.enabled }}
+          ports:
+            - name: http-canary
+              containerPort: 80
+              hostPort: {{ .Values.edge.caddy.publicHostPorts.http }}
+              protocol: TCP
+            - name: https-canary
+              containerPort: 443
+              hostPort: {{ .Values.edge.caddy.publicHostPorts.https }}
+              protocol: TCP
           {{- end }}
           volumeMounts:
             - name: caddy-config

@@ -18,8 +18,9 @@ import (
 const (
 	caddyConfigReapplyInterval = 5 * time.Minute
 
-	caddyTLSModeOff      = "off"
-	caddyTLSModeInternal = "internal"
+	caddyTLSModeOff            = "off"
+	caddyTLSModeInternal       = "internal"
+	caddyTLSModePublicOnDemand = "public-on-demand"
 )
 
 func (s *Service) applyCurrentCaddyConfig(ctx context.Context) error {
@@ -171,8 +172,27 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 				},
 			}
 		}
+	case caddyTLSModePublicOnDemand:
+		askURL, err := s.normalizedCaddyTLSAskURL()
+		if err != nil {
+			return nil, 0, err
+		}
+		server["tls_connection_policies"] = []any{map[string]any{}}
+		apps["tls"] = map[string]any{
+			"automation": map[string]any{
+				"policies": []any{
+					map[string]any{"on_demand": true},
+				},
+				"on_demand": map[string]any{
+					"permission": map[string]any{
+						"module":   "http",
+						"endpoint": askURL,
+					},
+				},
+			},
+		}
 	default:
-		return nil, 0, fmt.Errorf("FUGUE_EDGE_CADDY_TLS_MODE must be off or internal")
+		return nil, 0, fmt.Errorf("FUGUE_EDGE_CADDY_TLS_MODE must be off, internal, or public-on-demand")
 	}
 
 	config := map[string]any{
@@ -228,6 +248,24 @@ func (s *Service) normalizedCaddyTLSMode() string {
 		return caddyTLSModeOff
 	}
 	return mode
+}
+
+func (s *Service) normalizedCaddyTLSAskURL() (string, error) {
+	raw := strings.TrimSpace(s.Config.CaddyTLSAskURL)
+	if raw == "" {
+		raw = "http://" + caddyProxyDialAddress(s.Config.ListenAddr) + "/edge/tls/ask"
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid FUGUE_EDGE_CADDY_TLS_ASK_URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("FUGUE_EDGE_CADDY_TLS_ASK_URL must use http or https")
+	}
+	if parsed.RawQuery != "" {
+		return "", fmt.Errorf("FUGUE_EDGE_CADDY_TLS_ASK_URL must not include query parameters")
+	}
+	return parsed.String(), nil
 }
 
 func uniqueBundleHosts(bundle model.EdgeRouteBundle) []string {

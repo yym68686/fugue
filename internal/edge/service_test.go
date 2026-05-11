@@ -446,6 +446,59 @@ func TestBuildCaddyConfigSupportsInternalTLSCanary(t *testing.T) {
 	}
 }
 
+func TestBuildCaddyConfigSupportsPublicOnDemandTLSCanary(t *testing.T) {
+	t.Parallel()
+
+	bundle := testBundle("routegen_public_tls")
+	service := NewService(config.EdgeConfig{
+		APIURL:               "https://api.example.invalid",
+		EdgeToken:            "edge-secret",
+		ListenAddr:           ":7832",
+		CaddyEnabled:         true,
+		CaddyAdminURL:        "http://127.0.0.1:2019",
+		CaddyListenAddr:      ":443",
+		CaddyTLSMode:         caddyTLSModePublicOnDemand,
+		CaddyProxyListenAddr: "127.0.0.1:7833",
+	}, log.New(ioDiscard{}, "", 0))
+
+	configBody, routeCount, err := service.buildCaddyConfig(bundle)
+	if err != nil {
+		t.Fatalf("build caddy config: %v", err)
+	}
+	if routeCount != 1 {
+		t.Fatalf("expected 1 caddy route, got %d", routeCount)
+	}
+	if strings.Contains(string(configBody), "edge-secret") {
+		t.Fatalf("public on-demand caddy config must not contain edge token:\n%s", configBody)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(configBody, &parsed); err != nil {
+		t.Fatalf("decode caddy config: %v", err)
+	}
+	apps := parsed["apps"].(map[string]any)
+	httpApp := apps["http"].(map[string]any)
+	servers := httpApp["servers"].(map[string]any)
+	server := servers["fugue_edge"].(map[string]any)
+	if fmt.Sprint(server["listen"]) != "[:443]" {
+		t.Fatalf("unexpected caddy listen: %#v", server["listen"])
+	}
+	if policies := server["tls_connection_policies"].([]any); len(policies) != 1 {
+		t.Fatalf("expected one TLS connection policy, got %#v", policies)
+	}
+	tlsApp := apps["tls"].(map[string]any)
+	automation := tlsApp["automation"].(map[string]any)
+	automationPolicies := automation["policies"].([]any)
+	if len(automationPolicies) != 1 || automationPolicies[0].(map[string]any)["on_demand"] != true {
+		t.Fatalf("expected on-demand TLS automation policy, got %#v", automationPolicies)
+	}
+	onDemand := automation["on_demand"].(map[string]any)
+	permission := onDemand["permission"].(map[string]any)
+	if permission["module"] != "http" || permission["endpoint"] != "http://127.0.0.1:7832/edge/tls/ask" {
+		t.Fatalf("unexpected on-demand permission: %#v", permission)
+	}
+}
+
 func TestCaddyAdminURLMustBeLoopback(t *testing.T) {
 	t.Parallel()
 
@@ -461,6 +514,43 @@ func TestCaddyAdminURLMustBeLoopback(t *testing.T) {
 	err := service.validateConfig()
 	if err == nil || !strings.Contains(err.Error(), "localhost") {
 		t.Fatalf("expected non-loopback caddy admin URL to be rejected, got %v", err)
+	}
+}
+
+func TestTLSAskOnlyAllowsActiveBundleHosts(t *testing.T) {
+	t.Parallel()
+
+	bundle := testBundle("routegen_tls_ask")
+	disabled := bundle.Routes[0]
+	disabled.Hostname = "disabled.fugue.pro"
+	disabled.Status = model.EdgeRouteStatusDisabled
+	bundle.Routes = append(bundle.Routes, disabled)
+
+	service := NewService(config.EdgeConfig{
+		APIURL:    "https://api.example.invalid",
+		EdgeToken: "edge-secret",
+	}, log.New(ioDiscard{}, "", 0))
+	now := time.Now().UTC()
+	service.recordSyncSuccess(bundle, `"routegen_tls_ask"`, now, false)
+
+	for _, tc := range []struct {
+		name string
+		host string
+		code int
+	}{
+		{name: "active", host: "demo.fugue.pro", code: http.StatusOK},
+		{name: "unknown", host: "unknown.fugue.pro", code: http.StatusForbidden},
+		{name: "disabled", host: "disabled.fugue.pro", code: http.StatusForbidden},
+		{name: "missing", host: "", code: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/edge/tls/ask?domain="+url.QueryEscape(tc.host), nil)
+			recorder := httptest.NewRecorder()
+			service.Handler().ServeHTTP(recorder, req)
+			if recorder.Code != tc.code {
+				t.Fatalf("expected %d, got %d body=%s", tc.code, recorder.Code, recorder.Body.String())
+			}
+		})
 	}
 }
 

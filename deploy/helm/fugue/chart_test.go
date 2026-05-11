@@ -227,6 +227,61 @@ func TestEdgeCaddyInternalTLSCanaryDoesNotExposePublicPorts(t *testing.T) {
 	}
 }
 
+func TestEdgeCaddyPublicHostPortsRequireExplicitEnable(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm",
+		"template",
+		"fugue",
+		chartDir,
+		"--set",
+		"edge.caddy.enabled=true",
+		"--set",
+		"edge.caddy.publicHostPorts.enabled=true",
+		"--set",
+		"edge.caddy.listenAddr=:443",
+		"--set",
+		"edge.caddy.tlsMode=public-on-demand",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	doc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-edge")
+	if doc == "" {
+		t.Fatalf("rendered manifest missing edge daemonset:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`name: FUGUE_EDGE_CADDY_LISTEN_ADDR`,
+		`value: ":443"`,
+		`name: FUGUE_EDGE_CADDY_TLS_MODE`,
+		`value: "public-on-demand"`,
+		`name: http-canary`,
+		`containerPort: 80`,
+		`hostPort: 80`,
+		`name: https-canary`,
+		`containerPort: 443`,
+		`hostPort: 443`,
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("public-hostport canary edge daemonset missing %q:\n%s", want, doc)
+		}
+	}
+	if strings.Contains(doc, "hostNetwork: true") {
+		t.Fatalf("public-hostport canary edge daemonset should not use hostNetwork:\n%s", doc)
+	}
+}
+
 func manifestDocumentForKindAndName(manifest string, kind string, name string) string {
 	for _, doc := range strings.Split(manifest, "\n---") {
 		hasKind := strings.Contains(doc, "\nkind: "+kind+"\n") || strings.Contains(doc, "kind: "+kind+"\n")

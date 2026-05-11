@@ -98,7 +98,12 @@ edge:
     adminURL: http://127.0.0.1:2019
     listenAddr: 127.0.0.1:18080
     tlsMode: "off"
+    tlsAskURL: ""
     proxyListenAddr: 127.0.0.1:7833
+    publicHostPorts:
+      enabled: false
+      http: 80
+      https: 443
     resources:
       requests:
         cpu: 25m
