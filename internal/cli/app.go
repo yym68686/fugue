@@ -397,11 +397,28 @@ func (c *CLI) newAppMoveCommand() *cobra.Command {
 			if needsDatabaseSwitchover && !opts.Wait {
 				return fmt.Errorf("app has managed postgres on %s; moving it with the app requires --wait", databaseRuntimeID)
 			}
+			result := appCommandResult{}
+			if opts.Wait && needsDatabaseSwitchover {
+				c.progressf("database_operation=switchover target_runtime_id=%s", runtimeID)
+				databaseResponse, err := client.SwitchoverAppDatabase(app.ID, runtimeID)
+				if err != nil {
+					return err
+				}
+				result.Operation = &databaseResponse.Operation
+				finalApp, err := c.waitForSingleApp(client, app.ID, databaseResponse.Operation, true)
+				if err != nil {
+					return err
+				}
+				if finalApp != nil {
+					app = *finalApp
+					result.App = finalApp
+				}
+			}
 			response, err := client.MigrateApp(app.ID, runtimeID)
 			if err != nil {
 				return err
 			}
-			result := appCommandResult{Operation: &response.Operation}
+			result.Operation = &response.Operation
 			if opts.Wait {
 				finalApp, err := c.waitForSingleApp(client, app.ID, response.Operation, true)
 				if err != nil {
@@ -410,21 +427,6 @@ func (c *CLI) newAppMoveCommand() *cobra.Command {
 				result.App = finalApp
 			} else {
 				result.App = &app
-			}
-			if opts.Wait && needsDatabaseSwitchover {
-				c.progressf("database_operation=switchover target_runtime_id=%s", runtimeID)
-				databaseResponse, err := client.SwitchoverAppDatabase(app.ID, runtimeID)
-				if err != nil {
-					return err
-				}
-				finalApp, err := c.waitForSingleApp(client, app.ID, databaseResponse.Operation, true)
-				if err != nil {
-					return err
-				}
-				result.Operation = &databaseResponse.Operation
-				if finalApp != nil {
-					result.App = finalApp
-				}
 			}
 			return c.renderAppCommandResult(result)
 		},

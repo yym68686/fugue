@@ -663,7 +663,7 @@ func TestRunProjectMoveQueuesEligibleApps(t *testing.T) {
 	}
 }
 
-func TestRunAppMoveMigratesAppBeforeOwnedManagedPostgresSwitchover(t *testing.T) {
+func TestRunAppMoveSwitchesOwnedManagedPostgresBeforeMigratingApp(t *testing.T) {
 	t.Parallel()
 
 	var calls []string
@@ -674,10 +674,10 @@ func TestRunAppMoveMigratesAppBeforeOwnedManagedPostgresSwitchover(t *testing.T)
 	}
 	currentAppPayload := func() string {
 		switch {
-		case switched:
-			return appPayload("runtime_b", "runtime_b")
 		case migrated:
-			return appPayload("runtime_b", "runtime_a")
+			return appPayload("runtime_b", "runtime_b")
+		case switched:
+			return appPayload("runtime_a", "runtime_b")
 		default:
 			return appPayload("runtime_a", "runtime_a")
 		}
@@ -709,9 +709,6 @@ func TestRunAppMoveMigratesAppBeforeOwnedManagedPostgresSwitchover(t *testing.T)
 			migrated = true
 			_, _ = w.Write([]byte(`{"operation":{"id":"op_migrate","tenant_id":"tenant_123","app_id":"app_web","type":"migrate","status":"completed","target_runtime_id":"runtime_b","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_web/database/switchover":
-			if !migrated {
-				t.Fatalf("database switchover was requested before app migration completed")
-			}
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatalf("decode database switchover body: %v", err)
@@ -743,8 +740,8 @@ func TestRunAppMoveMigratesAppBeforeOwnedManagedPostgresSwitchover(t *testing.T)
 		t.Fatalf("run app move: %v stderr=%s", err, stderr.String())
 	}
 
-	if got := strings.Join(calls, ","); got != "migrate,switchover" {
-		t.Fatalf("expected app migration before database switchover, got %s", got)
+	if got := strings.Join(calls, ","); got != "switchover,migrate" {
+		t.Fatalf("expected database switchover before app migration, got %s", got)
 	}
 	if !strings.Contains(stdout.String(), `"current_runtime_id": "runtime_b"`) {
 		t.Fatalf("expected final app on runtime_b, got %s", stdout.String())
