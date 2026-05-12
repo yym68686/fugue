@@ -182,6 +182,53 @@ func TestCloudflareDelegationApplyAndRollback(t *testing.T) {
 	}
 }
 
+func TestCloudflareDelegationApplyMergesSplitRecordSets(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeCloudflareDNS()
+	server := httptest.NewServer(fake)
+	t.Cleanup(server.Close)
+
+	client := &cloudflareDNSClient{
+		baseURL: server.URL + "/client/v4",
+		token:   "test-token",
+		http:    server.Client(),
+	}
+
+	plan := sampleDNSDelegationPlan()
+	plan.PlannedNSRecords = []model.DNSDelegationRecord{
+		{Name: "dns.fugue.pro", Type: "NS", Values: []string{"ns1.dns.fugue.pro"}, TTL: 300},
+		{Name: "dns.fugue.pro", Type: "NS", Values: []string{"ns2.dns.fugue.pro"}, TTL: 300},
+	}
+	fake.addRecord(cloudflareDNSRecord{
+		ID:      "existing-ns1",
+		Type:    "NS",
+		Name:    "dns.fugue.pro",
+		Content: "ns1.dns.fugue.pro",
+		TTL:     300,
+	})
+	fake.addRecord(cloudflareDNSRecord{
+		ID:      "existing-ns2",
+		Type:    "NS",
+		Name:    "dns.fugue.pro",
+		Content: "ns2.dns.fugue.pro",
+		TTL:     300,
+	})
+
+	actions, err := client.applyDNSDelegationPlan(context.Background(), "fugue.pro", plan)
+	if err != nil {
+		t.Fatalf("apply split delegation plan: %v", err)
+	}
+	if !fake.hasRecord("dns.fugue.pro", "NS", "ns1.dns.fugue.pro") || !fake.hasRecord("dns.fugue.pro", "NS", "ns2.dns.fugue.pro") {
+		t.Fatalf("expected both NS records to remain, got %#v", fake.snapshot())
+	}
+	for _, action := range actions {
+		if action.Operation == "delete" && action.Name == "dns.fugue.pro" && action.Type == "NS" {
+			t.Fatalf("split NS records should not delete sibling values, got %#v", actions)
+		}
+	}
+}
+
 func sampleDNSDelegationPlan() model.DNSDelegationPlan {
 	return model.DNSDelegationPlan{
 		PlannedARecords: []model.DNSDelegationRecord{

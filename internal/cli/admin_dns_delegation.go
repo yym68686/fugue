@@ -399,7 +399,41 @@ func dnsDelegationApplyRecords(plan model.DNSDelegationPlan) []model.DNSDelegati
 	records := make([]model.DNSDelegationRecord, 0, len(plan.PlannedARecords)+len(plan.PlannedNSRecords))
 	records = append(records, plan.PlannedARecords...)
 	records = append(records, plan.PlannedNSRecords...)
-	return records
+	return mergeDNSDelegationRecordSets(records)
+}
+
+func mergeDNSDelegationRecordSets(records []model.DNSDelegationRecord) []model.DNSDelegationRecord {
+	merged := make([]model.DNSDelegationRecord, 0, len(records))
+	byKey := map[string]int{}
+	seenValues := map[string]map[string]bool{}
+	for _, record := range records {
+		name := strings.TrimSpace(record.Name)
+		recordType := strings.ToUpper(strings.TrimSpace(record.Type))
+		values := record.Values
+		key := normalizeDNSName(name) + "\x00" + recordType
+		index, ok := byKey[key]
+		if !ok {
+			record.Name = name
+			record.Type = recordType
+			record.Values = nil
+			byKey[key] = len(merged)
+			seenValues[key] = map[string]bool{}
+			merged = append(merged, record)
+			index = len(merged) - 1
+		}
+		if merged[index].TTL == 0 && record.TTL != 0 {
+			merged[index].TTL = record.TTL
+		}
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			if value == "" || seenValues[key][value] {
+				continue
+			}
+			seenValues[key][value] = true
+			merged[index].Values = append(merged[index].Values, value)
+		}
+	}
+	return merged
 }
 
 func writeDNSDelegationCommandPlan(w io.Writer, operation string, dryRun bool, response model.DNSDelegationPreflightResponse, actions []dnsDelegationCloudflareAction) error {

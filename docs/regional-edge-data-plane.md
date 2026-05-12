@@ -297,7 +297,7 @@ fugue-edge / Caddy DaemonSet:
   canary/production: hostPort TCP 80 / TCP 443
 ```
 
-2026-05-12 当前状态：已在两个 joined node 上做 edge + DNS shadow / direct query 验证。美国节点 `vps-591f4447` 属于 `edge-group-country-us`，DNS answer IP 为 `15.204.94.71`；德国节点 `vps-84c8f0a9` 属于 `edge-group-country-de`，DNS answer IP 为 `51.38.126.103`。两台节点都由 NodePolicy 标记为 `fugue.io/role.edge=true`、`fugue.io/role.dns=true` 和 `fugue.io/schedulable=true`，并通过 `fugue.io/dedicated=edge:NoSchedule` 隔离普通调度。两台节点的 `fugue-dns` 都打开 UDP 53 / TCP 53 hostPort，`dig @15.204.94.71 ...` 和 `dig @51.38.126.103 ...` 均已直接验证。DNS inventory / heartbeat 和 `fugue admin dns status` preflight 已上线，当前 preflight 在两个健康 DNS 节点上通过，并输出 `ns1` / `ns2` A 记录、`dns.fugue.pro` NS 记录和回滚删除计划。CLI 已补 `fugue admin dns delegation plan|apply|rollback`，默认 dry-run，写入前强制 preflight pass；这仍不代表 `dns.fugue.pro` 已委托，生产委托前还需要继续观察双节点并用工具化 rollback 做演练。
+2026-05-12 当前状态：已在两个 joined node 上做 edge + DNS shadow / direct query 验证。美国节点 `vps-591f4447` 属于 `edge-group-country-us`，DNS answer IP 为 `15.204.94.71`；德国节点 `vps-84c8f0a9` 属于 `edge-group-country-de`，DNS answer IP 为 `51.38.126.103`。两台节点都由 NodePolicy 标记为 `fugue.io/role.edge=true`、`fugue.io/role.dns=true` 和 `fugue.io/schedulable=true`，并通过 `fugue.io/dedicated=edge:NoSchedule` 隔离普通调度。两台节点的 `fugue-dns` 都打开 UDP 53 / TCP 53 hostPort，`dig @15.204.94.71 ...` 和 `dig @51.38.126.103 ...` 均已直接验证。DNS inventory / heartbeat 和 `fugue admin dns status` preflight 已上线，当前 preflight 在两个健康 DNS 节点上通过，并输出 `ns1` / `ns2` A 记录、`dns.fugue.pro` NS 记录和回滚删除计划。`964d5f2662769832ddf22fa53115d23aafa579fd` 已通过正式控制平面发布链路上线，并发布 CLI `v0.1.40`，其中包含 `fugue admin dns delegation plan|apply|rollback`；这些命令默认 dry-run，写入前强制 preflight pass。这仍不代表 `dns.fugue.pro` 已委托，生产委托前还需要继续观察双节点并用工具化 rollback 做演练。
 
 同一美国 edge 节点也已进入单 hostname public canary：部署变量显式打开 edge Caddy hostPort 80 / 443，Caddy listen 为 `:443`，TLS 为 public on-demand。该能力只服务显式 `edge_canary` / `edge_enabled` 且通过本地 edge group 防线的 hostname；wildcard、`api.fugue.pro` 和 `dns.fugue.pro` 仍不进入 regional edge。
 
@@ -323,7 +323,7 @@ fugue-edge / Caddy DaemonSet:
 - `fugue-dns` systemd 独立运行逃生口
 - `fugue-edge` systemd 独立运行逃生口
 
-长期设计上，`fugue-edge` 和 `fugue-dns` 必须既能作为 Kubernetes workload 运行，也能脱离 Kubernetes 以 systemd 方式运行。这样某个区域无法或不适合 join 中心 k3s 时，仍可作为独立 regional edge 接入控制平面拉 bundle。当前 `fugue-dns` 已有 `scripts/render_fugue_dns_systemd_unit.sh` 可渲染 `fugue-dns.service` 和不含 token 的环境文件；`fugue-edge` 已补 `scripts/render_fugue_edge_systemd_unit.sh`，可生成 `fugue-edge.service` 和 `fugue-edge.env`，token 仍放在单独 secret env file 中。该脚本支持 route cache、Caddy config/cache 目录、edge group、公网 IP、Caddy listen/TLS mode，并有 shell test 覆盖参数校验和 token 不落盘。
+长期设计上，`fugue-edge` 和 `fugue-dns` 必须既能作为 Kubernetes workload 运行，也能脱离 Kubernetes 以 systemd 方式运行。这样某个区域无法或不适合 join 中心 k3s 时，仍可作为独立 regional edge 接入控制平面拉 bundle。当前 `fugue-dns` 已有 `scripts/render_fugue_dns_systemd_unit.sh` 可渲染 `fugue-dns.service` 和不含 token 的环境文件；`fugue-edge` 已在 `964d5f2662769832ddf22fa53115d23aafa579fd` 补齐并发布 `scripts/render_fugue_edge_systemd_unit.sh`，可生成 `fugue-edge.service` 和 `fugue-edge.env`，token 仍放在单独 secret env file 中。该脚本支持 route cache、Caddy config/cache 目录、edge group、公网 IP、Caddy listen/TLS mode，并有 shell test 覆盖参数校验和 token 不落盘。
 
 ## Route Bundle API
 
@@ -538,7 +538,7 @@ fugue admin dns delegation apply --confirm
 fugue admin dns delegation rollback --confirm
 ```
 
-`fugue-dns` 周期性 heartbeat 会上报 `dns_node_id`、`edge_group_id`、公网 IP、zone、DNS bundle version、record count、cache 状态、UDP/TCP listen 状态、query/error counters 和 `last_seen_at`。`fugue admin dns status` 是只读委托 preflight：检查至少两个 healthy DNS 节点、UDP/TCP 53 可达、`d-test.dns.fugue.pro` 回答预期 IP、bundle version 在同一 edge group 内稳定、cache error 为 0、节点 `Ready=True` 且 `DiskPressure=False`，并输出计划添加和回滚删除的父区记录。`fugue admin dns delegation apply` / `rollback` 默认 dry-run；只有传 `--confirm` 才会调用 Cloudflare API，并且只允许改 `ns1.dns.fugue.pro`、`ns2.dns.fugue.pro` 的 glue A/AAAA 和 `dns.fugue.pro` 的 NS，不触碰 wildcard、`api.fugue.pro` 或其他父区记录。
+`fugue-dns` 周期性 heartbeat 会上报 `dns_node_id`、`edge_group_id`、公网 IP、zone、DNS bundle version、record count、cache 状态、UDP/TCP listen 状态、query/error counters 和 `last_seen_at`。`fugue admin dns status` 是只读委托 preflight：检查至少两个 healthy DNS 节点、UDP/TCP 53 可达、`d-test.dns.fugue.pro` 回答预期 IP、bundle version 在同一 edge group 内稳定、cache error 为 0、节点 `Ready=True` 且 `DiskPressure=False`，并输出计划添加和回滚删除的父区记录。`fugue admin dns delegation apply` / `rollback` 已随 CLI `v0.1.40` 发布，默认 dry-run；只有传 `--confirm` 才会调用 Cloudflare API，并且只允许改 `ns1.dns.fugue.pro`、`ns2.dns.fugue.pro` 的 glue A/AAAA 和 `dns.fugue.pro` 的 NS，不触碰 wildcard、`api.fugue.pro` 或其他父区记录。
 
 查询处理：
 
@@ -810,17 +810,18 @@ DNS 必须上报：
 - Caddy-backed edge 已发布到美国 edge 节点，Caddy admin 绑定 localhost；当前 public canary 使用 `FUGUE_EDGE_GROUP_ID=edge-group-country-us`、Caddy listen `:443` 和 public on-demand TLS。正式切流仍必须通过显式 hostname / route policy opt-in，并且必须通过 runtime edge group 本地防线。
 - `fugue-dns` 已具备 typed `/v1/edge/dns` DNS bundle API、本地 DNS cache、authoritative-only DNS responder、health/metrics 和 Helm DNS DaemonSet；已在美国和德国两个 edge/DNS 节点上做直接 DNS shadow 验证。
 - DNS inventory / heartbeat 已上线：`GET /v1/dns/nodes`、`GET /v1/dns/nodes/{dns_node_id}`、`POST /v1/dns/heartbeat`、`GET /v1/dns/delegation/preflight` 和 `fugue admin dns nodes ls|get|status` 可用于集中查看 DNS 节点健康、bundle/cache/query 状态和委托 preflight。
-- 当前 `fugue admin dns status` 已在美国 / 德国两个 healthy DNS 节点上通过；preflight 会按 edge group 校验 DNS bundle version 稳定性，并输出 `ns1` / `ns2` A 记录、`dns.fugue.pro` NS 记录和回滚删除计划。实际 Cloudflare 父区记录尚未创建。
+- `fugue admin dns delegation plan|apply|rollback` 已随 CLI `v0.1.40` 发布；美国 / 德国两个 healthy DNS 节点 preflight 通过。2026-05-12 已在 Cloudflare `fugue.pro` 父区创建 `ns1` / `ns2` glue A 记录和 `dns.fugue.pro` NS 委托，Google Cloud DNS zone 暂时保留作回滚观察。
 - NodePolicy 最小模型已经上线：控制面持久化 `app-runtime`、`shared-pool`、`edge`、`dns`、`builder`、`internal-maintenance` 等 desired role，并 reconcile 到 Kubernetes Node labels / taints。
 - NodePolicy 可视化接口和 CLI 已补齐：`GET /v1/cluster/node-policies`、`GET /v1/cluster/node-policies/{name}`、`GET /v1/cluster/node-policies/status` 对应 `fugue admin cluster node-policy ls|get|status`，用于查看 desired role、实际 labels / taints、`Ready` / `DiskPressure` gate 和 reconcile drift。
 - edge / edge group 持久模型、`/v1/edge/nodes` inventory API、`/v1/edge/heartbeat`、edge-scoped token 和 `fugue admin edge nodes` CLI 已发布到控制面；当前美国和德国 edge 节点都已使用 scoped token 上报健康状态，route bundle、Caddy apply 和 cache 状态均可从 admin CLI 读取。
+- `fugue-edge` systemd 逃生口已随 `964d5f2662769832ddf22fa53115d23aafa579fd` 发布；它只生成 service/env，不写 token，真正独立 systemd 演练仍需在目标 edge 节点单独执行。
 - route binding 已补本地 upstream 防线：`edge_canary` / `edge_enabled` 只有在 policy 目标 edge group 与 runtime 派生 edge group 一致，且该 group 有健康 edge member 时才会生效；runtime edge group 从 runtime labels 派生，缺失时从绑定 Node labels 派生；managed-shared / managed-owned 使用 `upstream_scope=local-service` 的 in-cluster Service DNS，external-owned 先标记为 mesh upstream 未就绪。
 - `fugue-edge` 观测已扩展：Caddy dynamic config 开启 JSON access log，edge proxy metrics 增加 fallback hit、WebSocket / SSE / streaming 成功率和 upload request 计数。
 - 控制面现在会读取 Kubernetes Node condition，把 `Ready=False` 或 `DiskPressure=True` 的节点标为 `fugue.io/schedulable=false`、`fugue.io/node-health=blocked`，并加 `fugue.io/node-unhealthy=true:NoSchedule`；除 `node-janitor` 这类清理组件外，普通维护组件、edge、dns、runtime workload 都不应继续调度到异常节点。
 - `fugue-edge` 和 `fugue-dns` 现在都要求对应 `fugue.io/role.*=true` 且 `fugue.io/schedulable=true`；edge / DNS 节点默认带 `fugue.io/dedicated` taint，初期允许同一节点同时承担 edge + DNS。为兼容已作为 runtime join 的美国 edge 节点，edge / DNS DaemonSet 也 tolerate 旧的 `fugue.io/tenant` taint，但仍必须先匹配显式 role 和健康 label。
-- `dns.fugue.pro` 尚未从 Google Cloud DNS / Cloudflare 父区委托到 Fugue DNS；双节点 direct query 和只读 preflight 已通过，但仍处于 shadow 验证阶段，不作为生产权威 DNS。
+- `dns.fugue.pro` 已从 Cloudflare 父区委托到 Fugue DNS 的 `ns1.dns.fugue.pro` / `ns2.dns.fugue.pro`；双节点 direct query、Cloudflare authoritative referral 和 DoH 递归验证均已通过。Google Cloud DNS 旧 zone 仍保留作短期回滚观察，不再作为新的事实源。
 - `dns.fugue.pro` 的现有公网权威和具体记录属于迁移前 baseline，具体值放在本地私有附录中。
-- 第一阶段不能全局切 DNS，也不能替换现有入口。`cerebr.fugue.pro` 已作为第一个 hostname 级 `edge_canary` 进入美国 edge 内部 canary；`edge-protocol-canary.fugue.pro` 已作为第一个 public exact DNS canary 指向美国 edge，并验证 HTTPS、Host route、WebSocket、SSE、upload 和 streaming。当前 NodePolicy drift 和 `DiskPressure` 已收敛为 0；下一步应继续观察单 hostname public canary 和双节点 DNS shadow，不扩大 wildcard、默认流量或 `dns.fugue.pro` 委托。
+- 第一阶段不能全局切 DNS，也不能替换现有入口。`cerebr.fugue.pro` 已作为第一个 hostname 级 `edge_canary` 进入美国 edge 内部 canary；`edge-protocol-canary.fugue.pro` 已作为第一个 public exact DNS canary 指向美国 edge，并验证 HTTPS、Host route、WebSocket、SSE、upload 和 streaming。当前 NodePolicy drift 和 `DiskPressure` 已收敛为 0；下一步应继续观察单 hostname public canary 和 `dns.fugue.pro` 双节点生产委托，不扩大 wildcard 或默认流量。
 
 本地私有附录路径：
 
@@ -892,7 +893,7 @@ docs/private/regional-edge-current-state.local.md
 - [x] 增加 CLI 和 admin endpoint 查看节点角色、实际 labels / taints、`Ready` / `DiskPressure` gate 和 reconcile 状态：`fugue admin cluster node-policy ls|get|status`。
 - [ ] 后续扩展 NodePolicy 角色：`registry-mirror`、`storage`、区域性网关等长期角色。
 - [x] 为 `fugue-dns` 提供 systemd 逃生口渲染脚本，生成不含 token 的 env 文件和 `fugue-dns.service`。
-- [x] 为 `fugue-edge` 补齐 systemd 逃生口，避免 edge 完全依赖 Kubernetes 才能启动；脚本生成不含 token 的 env 文件和 `fugue-edge.service`，token 从独立 secret env file 读取。
+- [x] 为 `fugue-edge` 补齐并发布 systemd 逃生口，避免 edge 完全依赖 Kubernetes 才能启动；脚本生成不含 token 的 env 文件和 `fugue-edge.service`，token 从独立 secret env file 读取。
 
 ### 2. 建立 edge inventory 和认证模型
 
@@ -1011,11 +1012,11 @@ docs/private/regional-edge-current-state.local.md
 ### 9. Cloudflare 委托 dns.fugue.pro
 
 - [x] 增加 `fugue admin dns status` 作为委托前只读 preflight 和 runbook 输出；当前美国 / 德国两个 DNS 节点 preflight 已通过。
-- [x] 增加 `fugue admin dns delegation plan|apply|rollback`，默认 dry-run；`apply --confirm` 前强制 preflight pass、双 DNS 节点 healthy、cache error 为 0，并把 Cloudflare 写入限制到 `ns1` / `ns2` glue 和 `dns.fugue.pro` NS。
-- [ ] 在 Cloudflare `fugue.pro` zone 添加 `ns1.dns.fugue.pro` / `ns2.dns.fugue.pro` 的 DNS-only A/AAAA。
-- [ ] 在 Cloudflare 添加 `dns.fugue.pro NS ns1.dns.fugue.pro` 和 `dns.fugue.pro NS ns2.dns.fugue.pro`，必须 DNS-only。
-- [ ] 用 `dig d-test.dns.fugue.pro A +trace` 验证公网递归已进入 Fugue DNS。
-- [ ] 保留 Google Cloud DNS zone 只作观察，不再写新事实。
+- [x] 增加并发布 `fugue admin dns delegation plan|apply|rollback`，默认 dry-run；`apply --confirm` 前强制 preflight pass、双 DNS 节点 healthy、cache error 为 0，并把 Cloudflare 写入限制到 `ns1` / `ns2` glue 和 `dns.fugue.pro` NS。
+- [x] 在 Cloudflare `fugue.pro` zone 添加 `ns1.dns.fugue.pro` / `ns2.dns.fugue.pro` 的 DNS-only glue A 记录。
+- [x] 在 Cloudflare 添加 `dns.fugue.pro NS ns1.dns.fugue.pro` 和 `dns.fugue.pro NS ns2.dns.fugue.pro`，必须 DNS-only。
+- [x] 用 Cloudflare authoritative query 和 Cloudflare / Google DoH 验证公网递归已进入 Fugue DNS；本机 `+trace` 受本地网络路径影响，已至少确认 trace 到 Cloudflare 父区返回 `ns1` / `ns2` 委托。
+- [x] 保留 Google Cloud DNS zone 只作观察，不再写新事实。
 - [ ] 确认 trace 稳定后，退役 Google Cloud DNS 的 `dns.fugue.pro` managed zone。
 
 ### 10. Custom domain canary
