@@ -663,12 +663,12 @@ func TestRunProjectMoveQueuesEligibleApps(t *testing.T) {
 	}
 }
 
-func TestRunAppMoveSwitchesOwnedManagedPostgresBeforeMigratingApp(t *testing.T) {
+func TestRunAppMoveLocalizesOwnedManagedPostgresBeforeMigratingApp(t *testing.T) {
 	t.Parallel()
 
 	var calls []string
 	migrated := false
-	switched := false
+	localized := false
 	appPayload := func(appRuntimeID, databaseRuntimeID string) string {
 		return fmt.Sprintf(`{"app":{"id":"app_web","tenant_id":"tenant_123","project_id":"project_123","name":"web","spec":{"runtime_id":%q,"image":"ghcr.io/example/web:latest","replicas":1},"status":{"phase":"deployed","current_runtime_id":%q,"current_replicas":1},"backing_services":[{"id":"app-postgres-app_web","tenant_id":"tenant_123","project_id":"project_123","owner_app_id":"app_web","name":"web","type":"postgres","provisioner":"managed","status":"active","spec":{"postgres":{"runtime_id":%q,"database":"web","user":"web","service_name":"web-postgres"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}],"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`, appRuntimeID, appRuntimeID, databaseRuntimeID)
 	}
@@ -676,7 +676,7 @@ func TestRunAppMoveSwitchesOwnedManagedPostgresBeforeMigratingApp(t *testing.T) 
 		switch {
 		case migrated:
 			return appPayload("runtime_b", "runtime_b")
-		case switched:
+		case localized:
 			return appPayload("runtime_a", "runtime_b")
 		default:
 			return appPayload("runtime_a", "runtime_a")
@@ -708,19 +708,22 @@ func TestRunAppMoveSwitchesOwnedManagedPostgresBeforeMigratingApp(t *testing.T) 
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op_migrate":
 			migrated = true
 			_, _ = w.Write([]byte(`{"operation":{"id":"op_migrate","tenant_id":"tenant_123","app_id":"app_web","type":"migrate","status":"completed","target_runtime_id":"runtime_b","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_web/database/switchover":
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_web/database/localize":
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Fatalf("decode database switchover body: %v", err)
+				t.Fatalf("decode database localize body: %v", err)
 			}
 			if body["target_runtime_id"] != "runtime_b" {
 				t.Fatalf("expected database target runtime_b, got %+v", body)
 			}
-			calls = append(calls, "switchover")
-			_, _ = w.Write([]byte(`{"operation":{"id":"op_database","tenant_id":"tenant_123","app_id":"app_web","type":"database-switchover","status":"pending","target_runtime_id":"runtime_b","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+			if _, ok := body["target_node_name"]; ok {
+				t.Fatalf("app move should not pin database localize to a node, got %+v", body)
+			}
+			calls = append(calls, "localize")
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_database","tenant_id":"tenant_123","app_id":"app_web","type":"database-localize","status":"pending","target_runtime_id":"runtime_b","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op_database":
-			switched = true
-			_, _ = w.Write([]byte(`{"operation":{"id":"op_database","tenant_id":"tenant_123","app_id":"app_web","type":"database-switchover","status":"completed","target_runtime_id":"runtime_b","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+			localized = true
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_database","tenant_id":"tenant_123","app_id":"app_web","type":"database-localize","status":"completed","target_runtime_id":"runtime_b","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -740,8 +743,8 @@ func TestRunAppMoveSwitchesOwnedManagedPostgresBeforeMigratingApp(t *testing.T) 
 		t.Fatalf("run app move: %v stderr=%s", err, stderr.String())
 	}
 
-	if got := strings.Join(calls, ","); got != "switchover,migrate" {
-		t.Fatalf("expected database switchover before app migration, got %s", got)
+	if got := strings.Join(calls, ","); got != "localize,migrate" {
+		t.Fatalf("expected database localize before app migration, got %s", got)
 	}
 	if !strings.Contains(stdout.String(), `"current_runtime_id": "runtime_b"`) {
 		t.Fatalf("expected final app on runtime_b, got %s", stdout.String())

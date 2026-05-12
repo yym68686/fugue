@@ -166,6 +166,97 @@ func TestLocalizeAppDatabaseCreatesSingleInstanceOperationOnAppRuntime(t *testin
 	}
 }
 
+func TestLocalizeAppDatabaseCanTargetRuntimeBeforeAppMove(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Database Localize Target Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	appRuntime, _, err := s.CreateRuntime(tenant.ID, "app-runtime", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create app runtime: %v", err)
+	}
+	databaseRuntime, _, err := s.CreateRuntime(tenant.ID, "database-runtime", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create database runtime: %v", err)
+	}
+	targetRuntime, _, err := s.CreateRuntime(tenant.ID, "target-runtime", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create target runtime: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		RuntimeID: appRuntime.ID,
+		Replicas:  1,
+		Postgres: &model.AppPostgresSpec{
+			Database:                "demo",
+			RuntimeID:               databaseRuntime.ID,
+			FailoverTargetRuntimeID: appRuntime.ID,
+			Instances:               2,
+			SynchronousReplicas:     1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/database/localize", apiKey, map[string]any{
+		"target_runtime_id": targetRuntime.ID,
+	})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Operation struct {
+			ID string `json:"id"`
+		} `json:"operation"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	op, err := s.GetOperation(response.Operation.ID)
+	if err != nil {
+		t.Fatalf("get operation: %v", err)
+	}
+	if op.Type != model.OperationTypeDatabaseLocalize {
+		t.Fatalf("expected operation type %q, got %q", model.OperationTypeDatabaseLocalize, op.Type)
+	}
+	if op.SourceRuntimeID != databaseRuntime.ID {
+		t.Fatalf("expected source runtime %q, got %q", databaseRuntime.ID, op.SourceRuntimeID)
+	}
+	if op.TargetRuntimeID != targetRuntime.ID {
+		t.Fatalf("expected target runtime %q, got %q", targetRuntime.ID, op.TargetRuntimeID)
+	}
+	if op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
+		t.Fatalf("expected desired postgres spec, got %+v", op.DesiredSpec)
+	}
+	if op.DesiredSpec.RuntimeID != appRuntime.ID {
+		t.Fatalf("expected app runtime to remain %q before app move, got %q", appRuntime.ID, op.DesiredSpec.RuntimeID)
+	}
+	postgres := op.DesiredSpec.Postgres
+	if postgres.RuntimeID != targetRuntime.ID || postgres.FailoverTargetRuntimeID != "" {
+		t.Fatalf("unexpected desired postgres target: %+v", postgres)
+	}
+	if postgres.Instances != 1 || postgres.SynchronousReplicas != 0 {
+		t.Fatalf("expected single async desired postgres, got %+v", postgres)
+	}
+}
+
 func TestSwitchoverAppDatabaseRejectsAppWithoutManagedPostgres(t *testing.T) {
 	t.Parallel()
 

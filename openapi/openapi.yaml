@@ -6896,6 +6896,8 @@ components:
       properties:
         target_node_name:
           type: string
+        target_runtime_id:
+          type: string
     AppContinuityAppFailoverRequest:
       type: object
       additionalProperties: false

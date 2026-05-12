@@ -74,7 +74,8 @@ func (s *Server) handleLocalizeAppDatabase(w http.ResponseWriter, r *http.Reques
 	}
 
 	var req struct {
-		TargetNodeName string `json:"target_node_name"`
+		TargetNodeName  string `json:"target_node_name"`
+		TargetRuntimeID string `json:"target_runtime_id"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -82,8 +83,11 @@ func (s *Server) handleLocalizeAppDatabase(w http.ResponseWriter, r *http.Reques
 	}
 
 	targetRuntimeID := strings.TrimSpace(app.Spec.RuntimeID)
+	if requestedRuntimeID := strings.TrimSpace(req.TargetRuntimeID); requestedRuntimeID != "" {
+		targetRuntimeID = requestedRuntimeID
+	}
 	if targetRuntimeID == "" {
-		httpx.WriteError(w, http.StatusBadRequest, "app runtime_id is required")
+		httpx.WriteError(w, http.StatusBadRequest, "target runtime_id is required")
 		return
 	}
 

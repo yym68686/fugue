@@ -390,7 +390,7 @@ func (c *CLI) newAppDatabaseLocalizeCommand() *cobra.Command {
 				return fmt.Errorf("managed postgres is not configured for this app")
 			}
 
-			response, err := client.LocalizeAppDatabase(app.ID, opts.TargetNodeName)
+			response, err := client.LocalizeAppDatabase(app.ID, opts.TargetNodeName, "")
 			if err != nil {
 				return err
 			}

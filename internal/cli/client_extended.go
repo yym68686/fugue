@@ -788,10 +788,13 @@ func (c *Client) SwitchoverAppDatabase(id, targetRuntimeID string) (operationRes
 	return response, nil
 }
 
-func (c *Client) LocalizeAppDatabase(id, targetNodeName string) (operationResponse, error) {
+func (c *Client) LocalizeAppDatabase(id, targetNodeName, targetRuntimeID string) (operationResponse, error) {
 	request := map[string]string{}
 	if strings.TrimSpace(targetNodeName) != "" {
 		request["target_node_name"] = strings.TrimSpace(targetNodeName)
+	}
+	if strings.TrimSpace(targetRuntimeID) != "" {
+		request["target_runtime_id"] = strings.TrimSpace(targetRuntimeID)
 	}
 	var response operationResponse
 	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "database", "localize"), request, &response); err != nil {

@@ -393,14 +393,14 @@ func (c *CLI) newAppMoveCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			needsDatabaseSwitchover, databaseRuntimeID := appMoveNeedsOwnedManagedPostgresSwitchover(app, runtimeID)
-			if needsDatabaseSwitchover && !opts.Wait {
+			needsDatabaseLocalize, databaseRuntimeID := appMoveNeedsOwnedManagedPostgresLocalize(app, runtimeID)
+			if needsDatabaseLocalize && !opts.Wait {
 				return fmt.Errorf("app has managed postgres on %s; moving it with the app requires --wait", databaseRuntimeID)
 			}
 			result := appCommandResult{}
-			if opts.Wait && needsDatabaseSwitchover {
-				c.progressf("database_operation=switchover target_runtime_id=%s", runtimeID)
-				databaseResponse, err := client.SwitchoverAppDatabase(app.ID, runtimeID)
+			if opts.Wait && needsDatabaseLocalize {
+				c.progressf("database_operation=localize target_runtime_id=%s", runtimeID)
+				databaseResponse, err := client.LocalizeAppDatabase(app.ID, "", runtimeID)
 				if err != nil {
 					return err
 				}
@@ -772,7 +772,7 @@ func loadActiveAppOperations(client *Client, appID string) ([]model.Operation, e
 	return active, nil
 }
 
-func appMoveNeedsOwnedManagedPostgresSwitchover(app model.App, targetRuntimeID string) (bool, string) {
+func appMoveNeedsOwnedManagedPostgresLocalize(app model.App, targetRuntimeID string) (bool, string) {
 	database := ownedManagedPostgresSpec(app)
 	if database == nil {
 		return false, ""
