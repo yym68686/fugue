@@ -37,7 +37,10 @@ func (s *Service) executeManagedDatabaseSwitchoverOperation(
 	if strings.TrimSpace(op.ServiceID) != "" && !target.AppOwned {
 		return s.executeBoundManagedDatabaseSwitchoverOperation(ctx, op, app, *target)
 	}
-	sourceRuntimeID := strings.TrimSpace(currentDatabase.RuntimeID)
+	sourceRuntimeID := strings.TrimSpace(op.SourceRuntimeID)
+	if sourceRuntimeID == "" {
+		sourceRuntimeID = strings.TrimSpace(currentDatabase.RuntimeID)
+	}
 	if sourceRuntimeID == "" {
 		sourceRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
 	}
@@ -281,7 +284,10 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 		return s.executeBoundManagedDatabaseLocalizeOperation(ctx, op, app, *target)
 	}
 	currentDatabase := &target.Postgres
-	sourceRuntimeID := strings.TrimSpace(currentDatabase.RuntimeID)
+	sourceRuntimeID := strings.TrimSpace(op.SourceRuntimeID)
+	if sourceRuntimeID == "" {
+		sourceRuntimeID = strings.TrimSpace(currentDatabase.RuntimeID)
+	}
 	if sourceRuntimeID == "" {
 		sourceRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
 	}
@@ -323,7 +329,7 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 	if alreadyLocalized {
 		targetPrimary = currentPrimary
 	} else {
-		stageSpec := databaseLocalizeSpec(app.Spec, currentDatabase, targetRuntimeID, targetNodeName, false, true)
+		stageSpec := databaseLocalizeStageSpec(app.Spec, currentDatabase, sourceRuntimeID, targetRuntimeID, targetNodeName)
 		if _, err := s.applyManagedDesiredAppState(ctx, op.ID, app, stageSpec); err != nil {
 			return fmt.Errorf("prepare localized managed postgres standby on runtime %s: %w", targetRuntimeID, err)
 		}
@@ -399,7 +405,10 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 	target store.ManagedPostgresOperationTarget,
 ) error {
 	currentDatabase := &target.Postgres
-	sourceRuntimeID := strings.TrimSpace(currentDatabase.RuntimeID)
+	sourceRuntimeID := strings.TrimSpace(op.SourceRuntimeID)
+	if sourceRuntimeID == "" {
+		sourceRuntimeID = strings.TrimSpace(currentDatabase.RuntimeID)
+	}
 	if sourceRuntimeID == "" {
 		sourceRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
 	}
@@ -441,7 +450,7 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 	if alreadyLocalized {
 		targetPrimary = currentPrimary
 	} else {
-		stagePostgres := databaseLocalizePostgresSpec(currentDatabase, targetRuntimeID, targetNodeName, false, true)
+		stagePostgres := databaseLocalizeStagePostgresSpec(currentDatabase, sourceRuntimeID, targetRuntimeID, targetNodeName)
 		stageApp, err := s.updateAppBackingServicePostgres(target.ServiceID, app, stagePostgres)
 		if err != nil {
 			return fmt.Errorf("prepare localized managed postgres service %s state: %w", target.ServiceID, err)
@@ -566,6 +575,34 @@ func databaseLocalizeSpec(
 	postgresCopy := databaseLocalizePostgresSpec(postgres, targetRuntimeID, targetNodeName, singleInstance, holdPrimaryPlacement)
 	next.Postgres = &postgresCopy
 	return next
+}
+
+func databaseLocalizeStageSpec(
+	base model.AppSpec,
+	postgres *model.AppPostgresSpec,
+	sourceRuntimeID, targetRuntimeID, targetNodeName string,
+) model.AppSpec {
+	next := base
+	if postgres == nil {
+		return next
+	}
+	postgresCopy := databaseLocalizeStagePostgresSpec(postgres, sourceRuntimeID, targetRuntimeID, targetNodeName)
+	next.Postgres = &postgresCopy
+	return next
+}
+
+func databaseLocalizeStagePostgresSpec(
+	postgres *model.AppPostgresSpec,
+	sourceRuntimeID, targetRuntimeID, targetNodeName string,
+) model.AppPostgresSpec {
+	sourceRuntimeID = strings.TrimSpace(sourceRuntimeID)
+	targetRuntimeID = strings.TrimSpace(targetRuntimeID)
+	if sourceRuntimeID != "" && targetRuntimeID != "" && sourceRuntimeID != targetRuntimeID {
+		postgresCopy := databaseSwitchoverPostgresSpec(postgres, sourceRuntimeID, targetRuntimeID)
+		postgresCopy.PrimaryNodeName = ""
+		return postgresCopy
+	}
+	return databaseLocalizePostgresSpec(postgres, targetRuntimeID, targetNodeName, false, true)
 }
 
 func databaseLocalizePostgresSpec(
