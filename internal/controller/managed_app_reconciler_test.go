@@ -980,6 +980,149 @@ func TestSelectManagedAppDesiredAppPrefersManagedSnapshotWhenStoredBaselineNeeds
 	}
 }
 
+func TestSelectManagedAppDesiredAppRefreshesStoredBackingServicesDuringBaselineRecovery(t *testing.T) {
+	t.Parallel()
+
+	managedSnapshot := model.App{
+		Spec: model.AppSpec{
+			Image: "registry.pull.example/fugue-apps/demo:live",
+		},
+		BackingServices: []model.BackingService{
+			{
+				ID:   "service_demo",
+				Name: "demo-postgres",
+				Type: model.BackingServiceTypePostgres,
+				Spec: model.BackingServiceSpec{
+					Postgres: &model.AppPostgresSpec{
+						RuntimeID:               "runtime_source",
+						FailoverTargetRuntimeID: "runtime_target",
+						Instances:               2,
+						SynchronousReplicas:     1,
+					},
+				},
+			},
+		},
+	}
+	stored := model.App{
+		Spec: model.AppSpec{},
+		Source: &model.AppSource{
+			Type:             model.AppSourceTypeUpload,
+			UploadID:         "upload_demo",
+			ResolvedImageRef: "registry.push.example/fugue-apps/demo:live",
+		},
+		BackingServices: []model.BackingService{
+			{
+				ID:   "service_demo",
+				Name: "demo-postgres",
+				Type: model.BackingServiceTypePostgres,
+				Spec: model.BackingServiceSpec{
+					Postgres: &model.AppPostgresSpec{
+						RuntimeID:       "runtime_target",
+						PrimaryNodeName: "node-target",
+						Instances:       1,
+					},
+				},
+			},
+		},
+		Bindings: []model.ServiceBinding{
+			{
+				ID:        "binding_demo",
+				AppID:     "app_demo",
+				ServiceID: "service_demo",
+				Env: map[string]string{
+					"DB_HOST": "demo-postgres-rw",
+				},
+			},
+		},
+	}
+
+	got, usedStoredBaseline := selectManagedAppDesiredApp(managedSnapshot, stored, false)
+	if usedStoredBaseline {
+		t.Fatal("expected managed snapshot runtime baseline to win when stored app image is missing")
+	}
+	if got.Spec.Image != managedSnapshot.Spec.Image {
+		t.Fatalf("expected managed snapshot image %q, got %q", managedSnapshot.Spec.Image, got.Spec.Image)
+	}
+	if len(got.BackingServices) != 1 || got.BackingServices[0].Spec.Postgres == nil {
+		t.Fatalf("expected stored backing service to be copied, got %+v", got.BackingServices)
+	}
+	postgres := got.BackingServices[0].Spec.Postgres
+	if postgres.RuntimeID != "runtime_target" || postgres.FailoverTargetRuntimeID != "" || postgres.Instances != 1 || postgres.PrimaryNodeName != "node-target" {
+		t.Fatalf("expected stored finalized postgres spec, got %+v", postgres)
+	}
+	if len(got.Bindings) != 1 || got.Bindings[0].Env["DB_HOST"] != "demo-postgres-rw" {
+		t.Fatalf("expected stored service bindings to be copied, got %+v", got.Bindings)
+	}
+
+	stored.BackingServices[0].Spec.Postgres.RuntimeID = "changed"
+	stored.Bindings[0].Env["DB_HOST"] = "changed"
+	if got.BackingServices[0].Spec.Postgres.RuntimeID != "runtime_target" {
+		t.Fatalf("expected backing service copy to be isolated, got %+v", got.BackingServices[0].Spec.Postgres)
+	}
+	if got.Bindings[0].Env["DB_HOST"] != "demo-postgres-rw" {
+		t.Fatalf("expected binding copy to be isolated, got %+v", got.Bindings[0].Env)
+	}
+}
+
+func TestSelectManagedAppDesiredAppKeepsManagedSnapshotBackingServicesDuringActiveOperation(t *testing.T) {
+	t.Parallel()
+
+	managedSnapshot := model.App{
+		Spec: model.AppSpec{
+			Image: "registry.pull.example/fugue-apps/demo:live",
+		},
+		BackingServices: []model.BackingService{
+			{
+				ID:   "service_demo",
+				Name: "demo-postgres",
+				Type: model.BackingServiceTypePostgres,
+				Spec: model.BackingServiceSpec{
+					Postgres: &model.AppPostgresSpec{
+						RuntimeID:               "runtime_source",
+						FailoverTargetRuntimeID: "runtime_target",
+						Instances:               2,
+						SynchronousReplicas:     1,
+					},
+				},
+			},
+		},
+	}
+	stored := model.App{
+		Spec: model.AppSpec{},
+		Source: &model.AppSource{
+			Type:             model.AppSourceTypeUpload,
+			UploadID:         "upload_demo",
+			ResolvedImageRef: "registry.push.example/fugue-apps/demo:live",
+		},
+		BackingServices: []model.BackingService{
+			{
+				ID:   "service_demo",
+				Name: "demo-postgres",
+				Type: model.BackingServiceTypePostgres,
+				Spec: model.BackingServiceSpec{
+					Postgres: &model.AppPostgresSpec{
+						RuntimeID:       "runtime_target",
+						PrimaryNodeName: "node-target",
+						Instances:       1,
+					},
+				},
+			},
+		},
+	}
+
+	got, usedStoredBaseline := selectManagedAppDesiredApp(managedSnapshot, stored, true)
+	if usedStoredBaseline {
+		t.Fatal("expected active operation to keep managed snapshot")
+	}
+	if len(got.BackingServices) != 1 || got.BackingServices[0].Spec.Postgres == nil {
+		t.Fatalf("expected managed snapshot backing service, got %+v", got.BackingServices)
+	}
+	postgres := got.BackingServices[0].Spec.Postgres
+	if postgres.RuntimeID != "runtime_source" || postgres.FailoverTargetRuntimeID != "runtime_target" || postgres.Instances != 2 {
+		t.Fatalf("expected active operation postgres spec to be preserved, got %+v", postgres)
+	}
+}
+
 func TestSelectManagedAppDesiredAppUsesStoredBaselineWhenRecoveryIsNotNeeded(t *testing.T) {
 	t.Parallel()
 

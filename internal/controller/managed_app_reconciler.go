@@ -339,9 +339,15 @@ func (s *Service) disableUnrecoverableManagedAppSnapshot(ctx context.Context, cl
 }
 
 func selectManagedAppDesiredApp(managedSnapshot, stored model.App, hasActiveOperation bool) (model.App, bool) {
-	if hasActiveOperation || managedAppBaselineNeedsRecovery(stored) {
+	if hasActiveOperation {
 		app := managedSnapshot
 		backfillManagedAppSource(&app, stored)
+		return app, false
+	}
+	if managedAppBaselineNeedsRecovery(stored) {
+		app := managedSnapshot
+		backfillManagedAppSource(&app, stored)
+		backfillManagedAppBackingServices(&app, stored)
 		return app, false
 	}
 	return stored, true
@@ -1350,6 +1356,57 @@ func backfillManagedAppSource(app *model.App, stored model.App) {
 		return
 	}
 	model.SetAppSourceState(app, model.AppOriginSource(stored), model.AppBuildSource(stored))
+}
+
+func backfillManagedAppBackingServices(app *model.App, stored model.App) {
+	if app == nil {
+		return
+	}
+	app.BackingServices = cloneControllerBackingServices(stored.BackingServices)
+	app.Bindings = cloneControllerServiceBindings(stored.Bindings)
+}
+
+func cloneControllerBackingServices(services []model.BackingService) []model.BackingService {
+	if len(services) == 0 {
+		return nil
+	}
+	out := make([]model.BackingService, len(services))
+	for index, service := range services {
+		out[index] = service
+		out[index].Spec = cloneControllerBackingServiceSpec(service.Spec)
+	}
+	return out
+}
+
+func cloneControllerBackingServiceSpec(spec model.BackingServiceSpec) model.BackingServiceSpec {
+	out := spec
+	if spec.Postgres != nil {
+		postgres := *spec.Postgres
+		if spec.Postgres.Resources != nil {
+			resources := *spec.Postgres.Resources
+			postgres.Resources = &resources
+		}
+		out.Postgres = &postgres
+	}
+	return out
+}
+
+func cloneControllerServiceBindings(bindings []model.ServiceBinding) []model.ServiceBinding {
+	if len(bindings) == 0 {
+		return nil
+	}
+	out := make([]model.ServiceBinding, len(bindings))
+	for index, binding := range bindings {
+		out[index] = binding
+		if len(binding.Env) == 0 {
+			continue
+		}
+		out[index].Env = make(map[string]string, len(binding.Env))
+		for key, value := range binding.Env {
+			out[index].Env[key] = value
+		}
+	}
+	return out
 }
 
 func managedAppExpectedObjectNamesByKind(app model.App) map[string]map[string]struct{} {
