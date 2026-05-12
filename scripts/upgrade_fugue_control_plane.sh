@@ -1079,6 +1079,77 @@ prune_terminated_release_pods() {
   prune_release_pods_by_phase Unknown
 }
 
+unhealthy_node_names() {
+  ${KUBECTL} get nodes --no-headers 2>/dev/null | awk '$2 !~ /^Ready/ {print $1}'
+}
+
+is_stateless_release_component() {
+  local component="$1"
+  case "${component}" in
+    api|controller|node-janitor|topology-labeler|edge|dns|edge-*|dns-*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+stateless_release_pod_names_on_node() {
+  local node_name="$1"
+  local line=""
+  local pod_name=""
+  local component=""
+
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
+    -l "$(release_pod_selector)" \
+    --field-selector "spec.nodeName=${node_name}" \
+    -o go-template='{{range .items}}{{.metadata.name}}{{"\t"}}{{index .metadata.labels "app.kubernetes.io/component"}}{{"\n"}}{{end}}' 2>/dev/null |
+    while IFS=$'\t' read -r pod_name component; do
+      [[ -n "${pod_name}" ]] || continue
+      if is_stateless_release_component "${component}"; then
+        printf 'pod/%s\n' "${pod_name}"
+      fi
+    done
+}
+
+force_delete_release_pods_on_unhealthy_nodes() {
+  local node_name=""
+  local names=""
+  local count=""
+  local pod=""
+  local -a batch=()
+
+  while IFS= read -r node_name; do
+    [[ -n "${node_name}" ]] || continue
+    names="$(stateless_release_pod_names_on_node "${node_name}")"
+    count="$(printf '%s\n' "${names}" | awk 'NF > 0 {count++} END {print count + 0}')"
+    [[ "${count}" != "0" ]] || continue
+
+    log "force deleting ${count} stateless Fugue release pods on unhealthy node ${node_name}"
+    batch=()
+    while IFS= read -r pod; do
+      [[ -n "${pod}" ]] || continue
+      batch+=("${pod}")
+      if (( ${#batch[@]} == 50 )); then
+        ${KUBECTL} -n "${FUGUE_NAMESPACE}" delete \
+          --ignore-not-found \
+          --force \
+          --grace-period=0 \
+          --wait=false "${batch[@]}" >/dev/null 2>&1 || true
+        batch=()
+      fi
+    done <<< "${names}"
+    if (( ${#batch[@]} > 0 )); then
+      ${KUBECTL} -n "${FUGUE_NAMESPACE}" delete \
+        --ignore-not-found \
+        --force \
+        --grace-period=0 \
+        --wait=false "${batch[@]}" >/dev/null 2>&1 || true
+    fi
+  done < <(unhealthy_node_names)
+}
+
 recover_primary_node_if_needed() {
   local primary_node_name=""
   local restart_cmd=""
@@ -1091,6 +1162,7 @@ recover_primary_node_if_needed() {
   fi
 
   prune_terminated_release_pods
+  force_delete_release_pods_on_unhealthy_nodes
 
   if primary_node_is_ready "${primary_node_name}"; then
     return 0
@@ -1955,6 +2027,8 @@ main() {
     rollback_release || true
     fail "helm upgrade failed"
   fi
+
+  force_delete_release_pods_on_unhealthy_nodes
 
   if ! rollout_status "${FUGUE_API_DEPLOYMENT_NAME}"; then
     log "api rollout check failed; attempting rollback"

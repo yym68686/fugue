@@ -112,3 +112,45 @@ func TestUpgradeScriptPinsEdgeDNSHealthyNodeSelectors(t *testing.T) {
 		}
 	}
 }
+
+func TestUpgradeScriptPrunesOnlyStatelessReleasePodsOnUnhealthyNodes(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(repoRoot(t), "scripts", "upgrade_fugue_control_plane.sh")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read upgrade script: %v", err)
+	}
+	script := string(data)
+	for _, want := range []string{
+		"force_delete_release_pods_on_unhealthy_nodes()",
+		"force deleting ${count} stateless Fugue release pods on unhealthy node ${node_name}",
+		"force_delete_release_pods_on_unhealthy_nodes",
+		"--force",
+		"--grace-period=0",
+		"api|controller|node-janitor|topology-labeler|edge|dns|edge-*|dns-*",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected upgrade script to contain %q: %s", want, path)
+		}
+	}
+	blockStart := strings.Index(script, "is_stateless_release_component()")
+	if blockStart == -1 {
+		t.Fatalf("expected stateless component helper in upgrade script: %s", path)
+	}
+	blockEnd := strings.Index(script[blockStart:], "\nstateless_release_pod_names_on_node()")
+	if blockEnd == -1 {
+		t.Fatalf("expected stateless component helper before pod listing helper: %s", path)
+	}
+	block := script[blockStart : blockStart+blockEnd]
+	for _, unwanted := range []string{
+		"postgres|",
+		"registry|",
+		"headscale|",
+		"shared-workspace",
+	} {
+		if strings.Contains(block, unwanted) {
+			t.Fatalf("upgrade script stateless prune should not target stateful component %q: %s", unwanted, path)
+		}
+	}
+}
