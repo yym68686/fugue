@@ -165,6 +165,56 @@ func TestDeploymentRolloutReadyRequiresExpectedRelease(t *testing.T) {
 	}
 }
 
+func TestDeploymentSchedulingReadyRequiresRuntimeScheduling(t *testing.T) {
+	t.Parallel()
+
+	deployment := readyKubeDeployment("app-demo", 1)
+	deployment.Spec.Template.Spec.NodeSelector = map[string]string{
+		runtime.SharedPoolLabelKey: runtime.SharedPoolLabelValue,
+	}
+
+	expected := runtime.SchedulingConstraints{
+		NodeSelector: map[string]string{
+			runtime.RuntimeIDLabelKey: "runtime_agent",
+			runtime.TenantIDLabelKey:  "tenant_owner",
+		},
+		Tolerations: []runtime.Toleration{
+			{
+				Key:      runtime.TenantTaintKey,
+				Operator: "Equal",
+				Value:    "tenant_owner",
+				Effect:   "NoSchedule",
+			},
+		},
+	}
+
+	ready, message := deploymentSchedulingReady(deployment, expected)
+	if ready {
+		t.Fatal("expected stale shared-pool nodeSelector to be rejected")
+	}
+	if !strings.Contains(message, "nodeSelector") {
+		t.Fatalf("expected nodeSelector mismatch message, got %q", message)
+	}
+
+	deployment.Spec.Template.Spec.NodeSelector = map[string]string{
+		runtime.RuntimeIDLabelKey: "runtime_agent",
+		runtime.TenantIDLabelKey:  "tenant_owner",
+	}
+	ready, message = deploymentSchedulingReady(deployment, expected)
+	if ready {
+		t.Fatal("expected missing tenant toleration to be rejected")
+	}
+	if !strings.Contains(message, "tolerations") {
+		t.Fatalf("expected toleration mismatch message, got %q", message)
+	}
+
+	deployment.Spec.Template.Spec.Tolerations = expected.Tolerations
+	ready, message = deploymentSchedulingReady(deployment, expected)
+	if !ready {
+		t.Fatalf("expected matching runtime scheduling to be ready, got %q", message)
+	}
+}
+
 func TestWaitForManagedAppRolloutSucceedsWhenDeploymentIsReadyDespiteManagedAppError(t *testing.T) {
 	t.Parallel()
 

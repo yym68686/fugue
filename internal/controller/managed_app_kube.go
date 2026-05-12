@@ -37,6 +37,8 @@ type kubeDeployment struct {
 					Name  string `json:"name,omitempty"`
 					Image string `json:"image,omitempty"`
 				} `json:"containers,omitempty"`
+				NodeSelector map[string]string    `json:"nodeSelector,omitempty"`
+				Tolerations  []runtime.Toleration `json:"tolerations,omitempty"`
 			} `json:"spec,omitempty"`
 		} `json:"template,omitempty"`
 	} `json:"spec"`

@@ -65,6 +65,12 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, o
 		if err != nil {
 			return err
 		}
+		if ready {
+			if schedulingReady, schedulingMessage := deploymentSchedulingReady(deployment, scheduling); !schedulingReady {
+				ready = false
+				message = schedulingMessage
+			}
+		}
 		watchTargets := rolloutWatchTargets(namespace, name, deployment, found)
 		managed, foundManagedApp, err := client.getManagedApp(waitCtx, namespace, managedAppName)
 		if err != nil {
@@ -459,6 +465,60 @@ func expectedManagedAppReleaseKey(app model.App, scheduling runtime.SchedulingCo
 
 func deploymentReleaseKey(deployment kubeDeployment) string {
 	return strings.TrimSpace(deployment.Metadata.Annotations[runtime.FugueAnnotationReleaseKey])
+}
+
+func deploymentSchedulingReady(deployment kubeDeployment, expected runtime.SchedulingConstraints) (bool, string) {
+	actualSelector := deployment.Spec.Template.Spec.NodeSelector
+	if !stringMapsEqual(actualSelector, expected.NodeSelector) {
+		return false, fmt.Sprintf("waiting for deployment %s nodeSelector to match runtime scheduling", strings.TrimSpace(deployment.Metadata.Name))
+	}
+	if !tolerationSetsEqual(deployment.Spec.Template.Spec.Tolerations, expected.Tolerations) {
+		return false, fmt.Sprintf("waiting for deployment %s tolerations to match runtime scheduling", strings.TrimSpace(deployment.Metadata.Name))
+	}
+	return true, ""
+}
+
+func stringMapsEqual(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, leftValue := range left {
+		if strings.TrimSpace(right[key]) != strings.TrimSpace(leftValue) {
+			return false
+		}
+	}
+	return true
+}
+
+func tolerationSetsEqual(left, right []runtime.Toleration) bool {
+	leftSet := tolerationSet(left)
+	rightSet := tolerationSet(right)
+	if len(leftSet) != len(rightSet) {
+		return false
+	}
+	for key := range leftSet {
+		if _, ok := rightSet[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func tolerationSet(in []runtime.Toleration) map[string]struct{} {
+	out := make(map[string]struct{}, len(in))
+	for _, item := range in {
+		key := strings.Join([]string{
+			strings.TrimSpace(item.Key),
+			strings.TrimSpace(item.Operator),
+			strings.TrimSpace(item.Value),
+			strings.TrimSpace(item.Effect),
+		}, "\x00")
+		if key == "\x00\x00\x00" {
+			continue
+		}
+		out[key] = struct{}{}
+	}
+	return out
 }
 
 func deploymentPrimaryContainerImage(deployment kubeDeployment) string {

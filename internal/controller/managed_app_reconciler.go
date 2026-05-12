@@ -224,6 +224,9 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	if err := client.applyObjects(ctx, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("apply managed app child objects: %w", err))
 	}
+	if err := client.replaceObjectSpecsByKind(ctx, childObjects, "apps/v1", "Deployment"); err != nil {
+		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("replace managed app deployment desired spec: %w", err))
+	}
 	if err := client.replaceObjectSpecsByKind(ctx, childObjects, runtime.CloudNativePGAPIVersion, runtime.CloudNativePGClusterKind); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("replace managed postgres desired spec: %w", err))
 	}
