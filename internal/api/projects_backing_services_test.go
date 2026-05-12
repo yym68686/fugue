@@ -473,6 +473,110 @@ func TestMigrateBackingServiceQueuesManagedPostgresSwitchover(t *testing.T) {
 	}
 }
 
+func TestLocalizeBackingServiceQueuesManagedPostgresLocalize(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Backing Service Localize Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	raiseManagedTestCap(t, s, tenant.ID)
+	sourceRuntime, _, err := s.CreateRuntime(tenant.ID, "source-vps", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create source runtime: %v", err)
+	}
+	targetRuntime, _, err := s.CreateRuntime(tenant.ID, "target-vps", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create target runtime: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: sourceRuntime.ID,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "project-admin", []string{"project.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	service, err := s.CreateBackingService(tenant.ID, project.ID, "main-db", "", model.BackingServiceSpec{
+		Postgres: &model.AppPostgresSpec{
+			RuntimeID:                        sourceRuntime.ID,
+			FailoverTargetRuntimeID:          targetRuntime.ID,
+			PrimaryNodeName:                  "old-node",
+			PrimaryPlacementPendingRebalance: true,
+			Instances:                        2,
+			SynchronousReplicas:              1,
+			Database:                         "demo",
+			User:                             "demo",
+			Password:                         "secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create backing service: %v", err)
+	}
+	if _, err := s.BindBackingService(tenant.ID, app.ID, service.ID, "", nil); err != nil {
+		t.Fatalf("bind backing service: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/backing-services/"+service.ID+"/localize", apiKey, map[string]any{
+		"target_runtime_id": targetRuntime.ID,
+		"target_node_name":  "target-node",
+	})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		BackingService model.BackingService `json:"backing_service"`
+		Operation      model.Operation      `json:"operation"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.BackingService.Spec.Postgres == nil || response.BackingService.Spec.Postgres.RuntimeID != sourceRuntime.ID {
+		t.Fatalf("expected response service to remain on source runtime before controller apply, got %+v", response.BackingService.Spec.Postgres)
+	}
+	op := response.Operation
+	if op.Type != model.OperationTypeDatabaseLocalize {
+		t.Fatalf("expected database localize operation, got %+v", op)
+	}
+	if op.AppID != app.ID || op.ServiceID != service.ID {
+		t.Fatalf("expected operation scoped to app %s service %s, got app=%s service=%s", app.ID, service.ID, op.AppID, op.ServiceID)
+	}
+	if op.SourceRuntimeID != sourceRuntime.ID || op.TargetRuntimeID != targetRuntime.ID {
+		t.Fatalf("expected operation runtimes %s -> %s, got %s -> %s", sourceRuntime.ID, targetRuntime.ID, op.SourceRuntimeID, op.TargetRuntimeID)
+	}
+	if op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
+		t.Fatalf("expected desired postgres spec, got %+v", op.DesiredSpec)
+	}
+	postgres := op.DesiredSpec.Postgres
+	if postgres.RuntimeID != targetRuntime.ID || postgres.FailoverTargetRuntimeID != "" || postgres.PrimaryNodeName != "target-node" {
+		t.Fatalf("unexpected desired postgres placement: %+v", postgres)
+	}
+	if postgres.Instances != 1 || postgres.SynchronousReplicas != 0 || postgres.PrimaryPlacementPendingRebalance {
+		t.Fatalf("expected single localized postgres spec, got %+v", postgres)
+	}
+
+	persisted, err := s.GetBackingService(service.ID)
+	if err != nil {
+		t.Fatalf("get persisted service: %v", err)
+	}
+	if persisted.Spec.Postgres == nil || persisted.Spec.Postgres.RuntimeID != sourceRuntime.ID {
+		t.Fatalf("expected persisted service to stay on source runtime until controller localize, got %+v", persisted.Spec.Postgres)
+	}
+}
+
 func TestGetAppIncludesStructuredTechStack(t *testing.T) {
 	t.Parallel()
 

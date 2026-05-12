@@ -153,6 +153,92 @@ func (s *Server) handleMigrateBackingService(w http.ResponseWriter, r *http.Requ
 	})
 }
 
+func (s *Server) handleLocalizeBackingService(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("app.write") && !principal.HasScope("project.write") {
+		httpx.WriteError(w, http.StatusForbidden, "missing app.write or project.write scope")
+		return
+	}
+	service, allowed := s.loadAuthorizedBackingService(w, r, principal)
+	if !allowed {
+		return
+	}
+	if !isMigratableBackingService(service) {
+		s.writeStoreError(w, store.ErrInvalidInput)
+		return
+	}
+	app, err := s.backingServiceSwitchoverApp(service)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+
+	var req struct {
+		TargetRuntimeID string `json:"target_runtime_id"`
+		TargetNodeName  string `json:"target_node_name"`
+	}
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	targetRuntimeID := strings.TrimSpace(req.TargetRuntimeID)
+	if targetRuntimeID == "" {
+		targetRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
+	}
+	if targetRuntimeID == "" {
+		s.writeStoreError(w, store.ErrInvalidInput)
+		return
+	}
+
+	desiredSpec := app.Spec
+	if service.Spec.Postgres != nil {
+		postgresCopy := *service.Spec.Postgres
+		if service.Spec.Postgres.Resources != nil {
+			resources := *service.Spec.Postgres.Resources
+			postgresCopy.Resources = &resources
+		}
+		postgresCopy.RuntimeID = targetRuntimeID
+		postgresCopy.FailoverTargetRuntimeID = ""
+		postgresCopy.PrimaryNodeName = strings.TrimSpace(req.TargetNodeName)
+		postgresCopy.PrimaryPlacementPendingRebalance = false
+		postgresCopy.Instances = 1
+		postgresCopy.SynchronousReplicas = 0
+		desiredSpec.Postgres = &postgresCopy
+	}
+
+	op, err := s.store.CreateOperation(model.Operation{
+		TenantID:        service.TenantID,
+		Type:            model.OperationTypeDatabaseLocalize,
+		RequestedByType: principal.ActorType,
+		RequestedByID:   principal.ActorID,
+		AppID:           app.ID,
+		ServiceID:       service.ID,
+		TargetRuntimeID: targetRuntimeID,
+		DesiredSpec:     &desiredSpec,
+	})
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	metadata := map[string]string{
+		"name":              service.Name,
+		"project_id":        service.ProjectID,
+		"app_id":            app.ID,
+		"service_id":        service.ID,
+		"target_runtime_id": targetRuntimeID,
+	}
+	if nodeName := strings.TrimSpace(req.TargetNodeName); nodeName != "" {
+		metadata["target_node_name"] = nodeName
+	}
+	s.appendAudit(principal, "backing_service.localize", "operation", op.ID, service.TenantID, metadata)
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
+		"backing_service": cloneBackingService(service),
+		"operation":       sanitizeOperationForAPI(op),
+		"already_current": false,
+	})
+}
+
 func (s *Server) handleListAppBindings(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	app, allowed := s.loadAuthorizedApp(w, r, principal)

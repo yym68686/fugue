@@ -2719,7 +2719,7 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			if hasInFlightOperationForApp(state.Operations, app.ID) {
 				return ErrConflict
 			}
-			postgresSpec := OwnedManagedPostgresSpec(app)
+			postgresSpec := ManagedPostgresSpecForOperation(app, op.ServiceID)
 			if postgresSpec == nil {
 				return ErrInvalidInput
 			}

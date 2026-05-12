@@ -3248,7 +3248,7 @@ WHERE app_id = $1
 		if inFlightCount > 0 {
 			return model.Operation{}, ErrConflict
 		}
-		postgresSpec := OwnedManagedPostgresSpec(app)
+		postgresSpec := ManagedPostgresSpecForOperation(app, op.ServiceID)
 		if postgresSpec == nil {
 			return model.Operation{}, ErrInvalidInput
 		}

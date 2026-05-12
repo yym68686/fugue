@@ -2573,6 +2573,35 @@ paths:
                 $ref: "#/components/schemas/BackingServiceMigrateResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/backing-services/{id}/localize:
+    post:
+      operationId: localizeBackingService
+      summary: Localize Backing Service
+      tags: [Backing Services]
+      x-fugue-handler: handleLocalizeBackingService
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LocalizeAppDatabaseRequest"
+      responses:
+        '202':
+          description: Database localize accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackingServiceMigrateResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/bindings:
     get:
       operationId: listAppBindings

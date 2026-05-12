@@ -46,6 +46,7 @@ Use "fugue app binding" to attach or detach a backing service from an app.
 		hideCompatCommand(c.newServiceCreateCommand(), "fugue service postgres create"),
 		c.newServiceShowCommand(),
 		c.newServiceMoveCommand(),
+		c.newServiceLocalizeCommand(),
 		c.newServiceRemoveCommand(),
 	)
 	return cmd
@@ -321,6 +322,93 @@ func (c *CLI) newServiceMoveCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.RuntimeName, "to", "", "Target runtime name")
 	cmd.Flags().StringVar(&opts.RuntimeID, "runtime-id", "", "Target runtime ID")
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for backing service switchover completion")
+	_ = cmd.Flags().MarkHidden("runtime-id")
+	return cmd
+}
+
+func (c *CLI) newServiceLocalizeCommand() *cobra.Command {
+	opts := struct {
+		RuntimeName string
+		RuntimeID   string
+		NodeName    string
+		Wait        bool
+	}{Wait: true}
+	cmd := &cobra.Command{
+		Use:   "localize <service>",
+		Short: "Move a managed Postgres backing service primary to one local instance",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(opts.RuntimeName) == "" && strings.TrimSpace(opts.RuntimeID) == "" {
+				return fmt.Errorf("target runtime is required")
+			}
+			runtimeID, err := resolveRuntimeSelection(client, opts.RuntimeID, opts.RuntimeName)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(runtimeID) == "" {
+				return fmt.Errorf("target runtime is required")
+			}
+			service, err := c.resolveNamedService(client, args[0])
+			if err != nil {
+				return err
+			}
+			service, err = client.GetBackingService(service.ID)
+			if err != nil {
+				return err
+			}
+			response, err := client.LocalizeBackingService(service.ID, runtimeID, opts.NodeName)
+			if err != nil {
+				return err
+			}
+			service = response.BackingService
+			if response.Operation != nil && opts.Wait {
+				if _, err := c.waitForOperations(client, []model.Operation{*response.Operation}); err != nil {
+					return err
+				}
+				service, err = client.GetBackingService(service.ID)
+				if err != nil {
+					return err
+				}
+			}
+			if c.wantsJSON() {
+				payload := map[string]any{
+					"backing_service":  redactBackingServiceForOutput(service),
+					"already_current":  response.AlreadyCurrent,
+					"target_node_name": strings.TrimSpace(opts.NodeName),
+				}
+				if response.Operation != nil {
+					payload["operation"] = response.Operation
+				}
+				return writeJSON(c.stdout, payload)
+			}
+			if response.Operation != nil && !opts.Wait {
+				if _, err := fmt.Fprintf(c.stdout, "operation=%s\n\n", response.Operation.ID); err != nil {
+					return err
+				}
+			}
+			if response.Operation != nil {
+				if err := writeKeyValues(c.stdout,
+					kvPair{Key: "operation_id", Value: response.Operation.ID},
+					kvPair{Key: "target_runtime_id", Value: strings.TrimSpace(response.Operation.TargetRuntimeID)},
+					kvPair{Key: "target_node_name", Value: strings.TrimSpace(opts.NodeName)},
+				); err != nil {
+					return err
+				}
+				if _, err := fmt.Fprintln(c.stdout); err != nil {
+					return err
+				}
+			}
+			return c.renderBackingServiceDetail(client, service)
+		},
+	}
+	cmd.Flags().StringVar(&opts.RuntimeName, "to", "", "Target runtime name")
+	cmd.Flags().StringVar(&opts.RuntimeID, "runtime-id", "", "Target runtime ID")
+	cmd.Flags().StringVar(&opts.NodeName, "node", "", "Explicit Kubernetes node name for the localized Postgres primary")
+	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for backing service localize completion")
 	_ = cmd.Flags().MarkHidden("runtime-id")
 	return cmd
 }

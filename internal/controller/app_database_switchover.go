@@ -270,10 +270,17 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 		return fmt.Errorf("database localize requires kubernetes apply mode")
 	}
 
-	currentDatabase := store.OwnedManagedPostgresSpec(app)
-	if currentDatabase == nil {
+	target, err := store.ManagedPostgresOperationTargetForApp(app, op.ServiceID)
+	if err != nil {
+		return fmt.Errorf("resolve managed postgres target for app %s: %w", app.ID, err)
+	}
+	if target == nil {
 		return fmt.Errorf("managed postgres is not configured for app %s", app.ID)
 	}
+	if strings.TrimSpace(op.ServiceID) != "" && !target.AppOwned {
+		return s.executeBoundManagedDatabaseLocalizeOperation(ctx, op, app, *target)
+	}
+	currentDatabase := &target.Postgres
 	sourceRuntimeID := strings.TrimSpace(currentDatabase.RuntimeID)
 	if sourceRuntimeID == "" {
 		sourceRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
@@ -385,6 +392,133 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 	return nil
 }
 
+func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
+	ctx context.Context,
+	op model.Operation,
+	app model.App,
+	target store.ManagedPostgresOperationTarget,
+) error {
+	currentDatabase := &target.Postgres
+	sourceRuntimeID := strings.TrimSpace(currentDatabase.RuntimeID)
+	if sourceRuntimeID == "" {
+		sourceRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
+	}
+	targetRuntimeID := strings.TrimSpace(op.TargetRuntimeID)
+	if targetRuntimeID == "" && op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
+		targetRuntimeID = strings.TrimSpace(op.DesiredSpec.Postgres.RuntimeID)
+	}
+	if targetRuntimeID == "" {
+		targetRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
+	}
+	if sourceRuntimeID == "" || targetRuntimeID == "" {
+		return fmt.Errorf("database localize operation %s missing source or target runtime", op.ID)
+	}
+
+	clusterName := strings.TrimSpace(currentDatabase.ServiceName)
+	if clusterName == "" {
+		return fmt.Errorf("managed postgres service %s for app %s is missing a cluster service name", target.ServiceID, app.ID)
+	}
+
+	client, err := s.kubeClient()
+	if err != nil {
+		return fmt.Errorf("initialize kubernetes client for database localize: %w", err)
+	}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	targetNodeName := ""
+	if op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
+		targetNodeName = strings.TrimSpace(op.DesiredSpec.Postgres.PrimaryNodeName)
+	}
+	targetNodeName, err = s.resolveDatabaseLocalizeTargetNode(ctx, client, app, targetRuntimeID, targetNodeName)
+	if err != nil {
+		return err
+	}
+
+	targetPrimary := ""
+	currentPrimary, alreadyLocalized, err := s.managedPostgresPrimaryMatchesTarget(ctx, client, namespace, clusterName, targetRuntimeID, targetNodeName)
+	if err != nil {
+		return err
+	}
+	if alreadyLocalized {
+		targetPrimary = currentPrimary
+	} else {
+		stagePostgres := databaseLocalizePostgresSpec(currentDatabase, targetRuntimeID, targetNodeName, false, true)
+		stageApp, err := s.updateAppBackingServicePostgres(target.ServiceID, app, stagePostgres)
+		if err != nil {
+			return fmt.Errorf("prepare localized managed postgres service %s state: %w", target.ServiceID, err)
+		}
+		if _, err := s.applyManagedDesiredAppState(ctx, op.ID, stageApp, stageApp.Spec); err != nil {
+			return fmt.Errorf("prepare localized managed postgres service %s standby on runtime %s: %w", target.ServiceID, targetRuntimeID, err)
+		}
+		if targetNodeName != "" {
+			targetPrimary, err = s.waitForManagedPostgresReplicaOnNode(ctx, client, namespace, clusterName, targetNodeName, op.ID)
+		} else {
+			targetPrimary, err = s.waitForManagedPostgresReplicaOnRuntime(ctx, client, namespace, clusterName, targetRuntimeID, op.ID)
+		}
+		if err != nil {
+			return fmt.Errorf("wait for localized managed postgres service %s standby on runtime %s: %w", target.ServiceID, targetRuntimeID, err)
+		}
+		if err := s.ensureOperationStillActive(op.ID); err != nil {
+			return err
+		}
+		if err := client.patchCloudNativePGClusterStatus(
+			ctx,
+			namespace,
+			clusterName,
+			targetPrimary,
+			"Switchover",
+			fmt.Sprintf("Localizing managed postgres service %s primary to %s", target.ServiceID, targetPrimary),
+		); err != nil {
+			return fmt.Errorf("request managed postgres service %s localize switchover to %s: %w", target.ServiceID, targetPrimary, err)
+		}
+		if err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID); err != nil {
+			return fmt.Errorf("wait for managed postgres service %s localize switchover to %s: %w", target.ServiceID, targetPrimary, err)
+		}
+	}
+
+	finalPostgres := databaseLocalizePostgresSpec(currentDatabase, targetRuntimeID, targetNodeName, true, false)
+	finalApp, err := s.updateAppBackingServicePostgres(target.ServiceID, app, finalPostgres)
+	if err != nil {
+		return fmt.Errorf("finalize localized managed postgres service %s state: %w", target.ServiceID, err)
+	}
+	finalBundle, err := s.applyManagedDesiredAppState(ctx, op.ID, finalApp, finalApp.Spec)
+	if err != nil {
+		return fmt.Errorf("apply finalized managed postgres service %s state: %w", target.ServiceID, err)
+	}
+	if targetPrimary != "" {
+		if err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID); err != nil {
+			return fmt.Errorf("wait for localized managed postgres service %s to settle: %w", target.ServiceID, err)
+		}
+	}
+	if err := s.ensureOperationStillActive(op.ID); err != nil {
+		return err
+	}
+
+	message := fmt.Sprintf("managed postgres service %s localized to runtime %s", target.ServiceID, targetRuntimeID)
+	if targetNodeName != "" {
+		message = fmt.Sprintf("managed postgres service %s localized to runtime %s node %s", target.ServiceID, targetRuntimeID, targetNodeName)
+	}
+	_, err = s.Store.CompleteManagedOperationWithResult(
+		op.ID,
+		finalBundle.ManifestPath,
+		message,
+		&finalApp.Spec,
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("complete database localize operation %s: %w", op.ID, err)
+	}
+	s.Logger.Printf(
+		"operation %s completed managed postgres service %s localize from runtime %s to %s node=%s; manifest=%s",
+		op.ID,
+		target.ServiceID,
+		sourceRuntimeID,
+		targetRuntimeID,
+		targetNodeName,
+		finalBundle.ManifestPath,
+	)
+	return nil
+}
+
 func databaseSwitchoverSpec(
 	base model.AppSpec,
 	postgres *model.AppPostgresSpec,
@@ -429,6 +563,16 @@ func databaseLocalizeSpec(
 	if postgres == nil {
 		return next
 	}
+	postgresCopy := databaseLocalizePostgresSpec(postgres, targetRuntimeID, targetNodeName, singleInstance, holdPrimaryPlacement)
+	next.Postgres = &postgresCopy
+	return next
+}
+
+func databaseLocalizePostgresSpec(
+	postgres *model.AppPostgresSpec,
+	targetRuntimeID, targetNodeName string,
+	singleInstance, holdPrimaryPlacement bool,
+) model.AppPostgresSpec {
 	postgresCopy := *postgres
 	if postgres.Resources != nil {
 		resources := *postgres.Resources
@@ -444,8 +588,7 @@ func databaseLocalizeSpec(
 	} else if postgresCopy.Instances < 2 {
 		postgresCopy.Instances = 2
 	}
-	next.Postgres = &postgresCopy
-	return next
+	return postgresCopy
 }
 
 func (s *Service) applyManagedDesiredAppState(
