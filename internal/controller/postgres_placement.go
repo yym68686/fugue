@@ -542,6 +542,19 @@ func matchingManagedSharedPostgresExistingInstanceNode(
 			return nodeName, true, nil
 		}
 	}
+	for _, pvcName := range pvcNames {
+		if nodeName, found, err := managedPostgresPVCNode(ctx, client, namespace, pvcName); err != nil {
+			return "", false, err
+		} else if found {
+			node, found, err := client.getNode(ctx, nodeName)
+			if err != nil {
+				return "", false, fmt.Errorf("read kubernetes node %s: %w", nodeName, err)
+			}
+			if found && managedSharedNodeSchedulable(node) {
+				return nodeName, true, nil
+			}
+		}
+	}
 	return "", false, nil
 }
 
@@ -561,6 +574,26 @@ func managedSharedPostgresPVCNode(
 		return "", false, nil
 	}
 
+	nodeName, found, err := managedPostgresPVCNode(ctx, client, namespace, pvcName)
+	if err != nil {
+		return "", false, err
+	}
+	if !found {
+		return "", false, nil
+	}
+	return managedSharedNodeMatchingSelector(ctx, client, nodeName, sourceSelector)
+}
+
+func managedPostgresPVCNode(
+	ctx context.Context,
+	client *kubeClient,
+	namespace, pvcName string,
+) (string, bool, error) {
+	pvcName = strings.TrimSpace(pvcName)
+	if pvcName == "" {
+		return "", false, nil
+	}
+
 	pvc, found, err := client.getPersistentVolumeClaim(ctx, namespace, pvcName)
 	if err != nil {
 		return "", false, fmt.Errorf("read postgres pvc %s/%s: %w", namespace, pvcName, err)
@@ -570,11 +603,7 @@ func managedSharedPostgresPVCNode(
 	}
 
 	if nodeName := strings.TrimSpace(pvc.Metadata.Annotations[pvcSelectedNodeAnnotation]); nodeName != "" {
-		if nodeName, found, err := managedSharedNodeMatchingSelector(ctx, client, nodeName, sourceSelector); err != nil {
-			return "", false, err
-		} else if found {
-			return nodeName, true, nil
-		}
+		return nodeName, true, nil
 	}
 
 	volumeName := strings.TrimSpace(pvc.Spec.VolumeName)
@@ -591,7 +620,10 @@ func managedSharedPostgresPVCNode(
 	if !found {
 		return "", false, nil
 	}
-	return managedSharedNodeMatchingSelector(ctx, client, persistentVolumeNodeName(pv), sourceSelector)
+	if nodeName := persistentVolumeNodeName(pv); nodeName != "" {
+		return nodeName, true, nil
+	}
+	return "", false, nil
 }
 
 func managedSharedNodeMatchingSelector(

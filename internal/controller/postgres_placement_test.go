@@ -314,7 +314,7 @@ func TestManagedPostgresPlacementsChoosesNonOverlappingSharedSourceNode(t *testi
 	}
 }
 
-func TestManagedPostgresPlacementsPinsSharedPrimaryToExistingPVCNode(t *testing.T) {
+func TestManagedPostgresPlacementsPinsSharedPrimaryToLegacyPVCNode(t *testing.T) {
 	t.Parallel()
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -363,7 +363,7 @@ func TestManagedPostgresPlacementsPinsSharedPrimaryToExistingPVCNode(t *testing.
 	namespace := runtimepkg.NamespaceForTenant(app.TenantID)
 	currentPrimary := "demo-postgres-1"
 	standbyPod := "demo-postgres-2"
-	sourceNode := "shared-us-existing-pv"
+	sourceNode := "legacy-control-plane-existing-pv"
 	largerSourceNode := "shared-us-larger"
 	targetNode := "shared-hk-primary"
 
@@ -445,6 +445,18 @@ func TestManagedPostgresPlacementsPinsSharedPrimaryToExistingPVCNode(t *testing.
 			}); err != nil {
 				t.Fatalf("encode standby pvc: %v", err)
 			}
+		case "/api/v1/namespaces/" + namespace + "/persistentvolumeclaims":
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{
+							"name": standbyPod,
+						},
+					},
+				},
+			}); err != nil {
+				t.Fatalf("encode pvc list: %v", err)
+			}
 		case "/api/v1/persistentvolumes/pv-demo-postgres-2":
 			if err := json.NewEncoder(w).Encode(map[string]any{
 				"metadata": map[string]any{
@@ -480,7 +492,7 @@ func TestManagedPostgresPlacementsPinsSharedPrimaryToExistingPVCNode(t *testing.
 				t.Fatalf("encode node list: %v", err)
 			}
 		case "/api/v1/nodes/" + sourceNode:
-			encodeSharedPlacementNode(t, w, sourceNode, "us", "2", "4Gi", "20Gi")
+			encodeReadyPlacementNode(t, w, sourceNode, "2", "4Gi", "20Gi")
 		case "/api/v1/nodes/" + largerSourceNode:
 			encodeSharedPlacementNode(t, w, largerSourceNode, "us", "8", "16Gi", "80Gi")
 		case "/api/v1/nodes/" + targetNode:
@@ -514,7 +526,7 @@ func TestManagedPostgresPlacementsPinsSharedPrimaryToExistingPVCNode(t *testing.
 		t.Fatalf("expected two placements, got %d", len(servicePlacements))
 	}
 	if got := servicePlacements[0].NodeSelector[kubeHostnameLabelKey]; got != sourceNode {
-		t.Fatalf("expected existing pv node %q, got %q", sourceNode, got)
+		t.Fatalf("expected existing legacy pv node %q, got %q", sourceNode, got)
 	}
 	if got := servicePlacements[1].NodeSelector[runtimepkg.LocationCountryCodeLabelKey]; got != "hk" {
 		t.Fatalf("expected standby country selector %q, got %q", "hk", got)
@@ -853,6 +865,31 @@ func encodeSharedPlacementNode(t *testing.T, w http.ResponseWriter, name, countr
 				runtimepkg.SharedPoolLabelKey:          runtimepkg.SharedPoolLabelValue,
 				runtimepkg.LocationCountryCodeLabelKey: country,
 				kubeHostnameLabelKey:                   name,
+			},
+		},
+		"status": map[string]any{
+			"conditions": []map[string]any{
+				{"type": "Ready", "status": "True"},
+				{"type": "DiskPressure", "status": "False"},
+			},
+			"allocatable": map[string]any{
+				"cpu":               cpu,
+				"memory":            memory,
+				"ephemeral-storage": storage,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("encode node %s: %v", name, err)
+	}
+}
+
+func encodeReadyPlacementNode(t *testing.T, w http.ResponseWriter, name, cpu, memory, storage string) {
+	t.Helper()
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"metadata": map[string]any{
+			"name": name,
+			"labels": map[string]any{
+				kubeHostnameLabelKey: name,
 			},
 		},
 		"status": map[string]any{
