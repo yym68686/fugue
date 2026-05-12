@@ -491,9 +491,11 @@ func (s *Service) applyManagedDesiredAppState(
 	if err := s.applyManagedAppDesiredState(ctx, app, scheduling); err != nil {
 		return runtime.Bundle{}, fmt.Errorf("apply managed app desired state %s: %w", app.ID, err)
 	}
-	if err := s.waitForManagedAppRollout(ctx, app, operationID); err != nil {
-		return runtime.Bundle{}, fmt.Errorf("wait for managed app rollout %s: %w", app.ID, err)
-	}
+	// Database-only operations mutate CloudNativePG placement and service state.
+	// The app Deployment may be observed during the apply, but app rollout is not
+	// the readiness gate for a database switchover/localize operation. Waiting on
+	// it here can deadlock when a transient app ReplicaSet is held behind the same
+	// database state this operation is preparing.
 	return bundle, nil
 }
 

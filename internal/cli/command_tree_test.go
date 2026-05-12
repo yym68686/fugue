@@ -663,6 +663,94 @@ func TestRunProjectMoveQueuesEligibleApps(t *testing.T) {
 	}
 }
 
+func TestRunAppMoveMigratesAppBeforeOwnedManagedPostgresSwitchover(t *testing.T) {
+	t.Parallel()
+
+	var calls []string
+	migrated := false
+	switched := false
+	appPayload := func(appRuntimeID, databaseRuntimeID string) string {
+		return fmt.Sprintf(`{"app":{"id":"app_web","tenant_id":"tenant_123","project_id":"project_123","name":"web","spec":{"runtime_id":%q,"image":"ghcr.io/example/web:latest","replicas":1},"status":{"phase":"deployed","current_runtime_id":%q,"current_replicas":1},"backing_services":[{"id":"app-postgres-app_web","tenant_id":"tenant_123","project_id":"project_123","owner_app_id":"app_web","name":"web","type":"postgres","provisioner":"managed","status":"active","spec":{"postgres":{"runtime_id":%q,"database":"web","user":"web","service_name":"web-postgres"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}],"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`, appRuntimeID, appRuntimeID, databaseRuntimeID)
+	}
+	currentAppPayload := func() string {
+		switch {
+		case switched:
+			return appPayload("runtime_b", "runtime_b")
+		case migrated:
+			return appPayload("runtime_b", "runtime_a")
+		default:
+			return appPayload("runtime_a", "runtime_a")
+		}
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
+			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme"}]}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/projects"):
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","tenant_id":"tenant_123","name":"demo","slug":"demo","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes":
+			_, _ = w.Write([]byte(`{"runtimes":[{"id":"runtime_a","tenant_id":"tenant_123","name":"runtime-a","type":"managed-owned","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},{"id":"runtime_b","tenant_id":"tenant_123","name":"runtime-b","type":"managed-owned","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_web","tenant_id":"tenant_123","project_id":"project_123","name":"web","spec":{"runtime_id":"runtime_a","image":"ghcr.io/example/web:latest","replicas":1},"status":{"current_runtime_id":"runtime_a"},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_web":
+			_, _ = w.Write([]byte(currentAppPayload()))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_web/migrate":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode migrate body: %v", err)
+			}
+			if body["target_runtime_id"] != "runtime_b" {
+				t.Fatalf("expected migrate target runtime_b, got %+v", body)
+			}
+			calls = append(calls, "migrate")
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_migrate","tenant_id":"tenant_123","app_id":"app_web","type":"migrate","status":"pending","target_runtime_id":"runtime_b","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op_migrate":
+			migrated = true
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_migrate","tenant_id":"tenant_123","app_id":"app_web","type":"migrate","status":"completed","target_runtime_id":"runtime_b","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_web/database/switchover":
+			if !migrated {
+				t.Fatalf("database switchover was requested before app migration completed")
+			}
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode database switchover body: %v", err)
+			}
+			if body["target_runtime_id"] != "runtime_b" {
+				t.Fatalf("expected database target runtime_b, got %+v", body)
+			}
+			calls = append(calls, "switchover")
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_database","tenant_id":"tenant_123","app_id":"app_web","type":"database-switchover","status":"pending","target_runtime_id":"runtime_b","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op_database":
+			switched = true
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_database","tenant_id":"tenant_123","app_id":"app_web","type":"database-switchover","status":"completed","target_runtime_id":"runtime_b","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "move", "web",
+		"--to", "runtime-b",
+		"-o", "json",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app move: %v stderr=%s", err, stderr.String())
+	}
+
+	if got := strings.Join(calls, ","); got != "migrate,switchover" {
+		t.Fatalf("expected app migration before database switchover, got %s", got)
+	}
+	if !strings.Contains(stdout.String(), `"current_runtime_id": "runtime_b"`) {
+		t.Fatalf("expected final app on runtime_b, got %s", stdout.String())
+	}
+}
+
 func TestRunDeployGitHubSubcommandNormalizesOwnerRepo(t *testing.T) {
 	t.Parallel()
 

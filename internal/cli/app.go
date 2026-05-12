@@ -393,28 +393,9 @@ func (c *CLI) newAppMoveCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if database := ownedManagedPostgresSpec(app); database != nil {
-				databaseRuntimeID := strings.TrimSpace(database.RuntimeID)
-				if databaseRuntimeID == "" {
-					databaseRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
-				}
-				if databaseRuntimeID != "" && databaseRuntimeID != runtimeID {
-					if !opts.Wait {
-						return fmt.Errorf("app has managed postgres on %s; moving it before the app requires --wait", databaseRuntimeID)
-					}
-					c.progressf("database_operation=switchover target_runtime_id=%s", runtimeID)
-					databaseResponse, err := client.SwitchoverAppDatabase(app.ID, runtimeID)
-					if err != nil {
-						return err
-					}
-					finalApp, err := c.waitForSingleApp(client, app.ID, databaseResponse.Operation, true)
-					if err != nil {
-						return err
-					}
-					if finalApp != nil {
-						app = *finalApp
-					}
-				}
+			needsDatabaseSwitchover, databaseRuntimeID := appMoveNeedsOwnedManagedPostgresSwitchover(app, runtimeID)
+			if needsDatabaseSwitchover && !opts.Wait {
+				return fmt.Errorf("app has managed postgres on %s; moving it with the app requires --wait", databaseRuntimeID)
 			}
 			response, err := client.MigrateApp(app.ID, runtimeID)
 			if err != nil {
@@ -429,6 +410,21 @@ func (c *CLI) newAppMoveCommand() *cobra.Command {
 				result.App = finalApp
 			} else {
 				result.App = &app
+			}
+			if opts.Wait && needsDatabaseSwitchover {
+				c.progressf("database_operation=switchover target_runtime_id=%s", runtimeID)
+				databaseResponse, err := client.SwitchoverAppDatabase(app.ID, runtimeID)
+				if err != nil {
+					return err
+				}
+				finalApp, err := c.waitForSingleApp(client, app.ID, databaseResponse.Operation, true)
+				if err != nil {
+					return err
+				}
+				result.Operation = &databaseResponse.Operation
+				if finalApp != nil {
+					result.App = finalApp
+				}
 			}
 			return c.renderAppCommandResult(result)
 		},
@@ -772,6 +768,22 @@ func loadActiveAppOperations(client *Client, appID string) ([]model.Operation, e
 	}
 	sortOperationsNewestFirst(active)
 	return active, nil
+}
+
+func appMoveNeedsOwnedManagedPostgresSwitchover(app model.App, targetRuntimeID string) (bool, string) {
+	database := ownedManagedPostgresSpec(app)
+	if database == nil {
+		return false, ""
+	}
+	databaseRuntimeID := strings.TrimSpace(database.RuntimeID)
+	if databaseRuntimeID == "" {
+		databaseRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
+	}
+	targetRuntimeID = strings.TrimSpace(targetRuntimeID)
+	if databaseRuntimeID == "" || targetRuntimeID == "" || databaseRuntimeID == targetRuntimeID {
+		return false, databaseRuntimeID
+	}
+	return true, databaseRuntimeID
 }
 
 func (c *CLI) renderAppCommandResult(result appCommandResult) error {

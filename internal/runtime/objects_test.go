@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -658,6 +659,65 @@ func TestBuildAppDeploymentAnnotatesReleaseKey(t *testing.T) {
 	updatedAnnotations := updatedMetadata["annotations"].(map[string]string)
 	if updatedAnnotations[FugueAnnotationReleaseKey] == releaseKey {
 		t.Fatal("expected release key to change when deployment template changes")
+	}
+}
+
+func TestManagedPostgresFailoverPlacementDoesNotChangeAppPodTemplate(t *testing.T) {
+	app := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_app",
+		},
+		BackingServices: []model.BackingService{
+			{
+				ID:          "service_demo",
+				TenantID:    "tenant_demo",
+				ProjectID:   "project_demo",
+				OwnerAppID:  "app_demo",
+				Name:        "demo",
+				Type:        model.BackingServiceTypePostgres,
+				Provisioner: model.BackingServiceProvisionerManaged,
+				Status:      model.BackingServiceStatusActive,
+				Spec: model.BackingServiceSpec{
+					Postgres: &model.AppPostgresSpec{
+						Database:    "demo",
+						User:        "demo",
+						Password:    "secret",
+						ServiceName: "demo-postgres",
+						RuntimeID:   "runtime_app",
+						Instances:   1,
+					},
+				},
+			},
+		},
+		Bindings: []model.ServiceBinding{
+			{
+				ID:        "binding_demo",
+				TenantID:  "tenant_demo",
+				AppID:     "app_demo",
+				ServiceID: "service_demo",
+				Alias:     "postgres",
+			},
+		},
+	}
+	baseDeployment := buildAppObjects(app, SchedulingConstraints{})[4]
+	baseTemplate := baseDeployment["spec"].(map[string]any)["template"]
+
+	staged := app
+	staged.BackingServices[0].Spec.Postgres.Instances = 2
+	staged.BackingServices[0].Spec.Postgres.SynchronousReplicas = 1
+	staged.BackingServices[0].Spec.Postgres.FailoverTargetRuntimeID = "runtime_target"
+	stagedDeployment := buildAppObjects(staged, SchedulingConstraints{})[4]
+	stagedTemplate := stagedDeployment["spec"].(map[string]any)["template"]
+
+	if !reflect.DeepEqual(baseTemplate, stagedTemplate) {
+		t.Fatalf("expected database failover placement to leave app pod template unchanged\nbase=%#v\nstaged=%#v", baseTemplate, stagedTemplate)
 	}
 }
 
