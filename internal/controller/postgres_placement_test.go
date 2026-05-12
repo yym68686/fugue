@@ -33,9 +33,7 @@ func TestManagedPostgresPlacementsPinsSharedPrimaryToObservedPrimaryNode(t *test
 		t.Fatalf("sync shared runtimes: %v", err)
 	}
 
-	sourceRuntimeID := managedSharedRuntimeIDForLabels(t, stateStore, map[string]string{
-		runtimepkg.LocationCountryCodeLabelKey: "us",
-	})
+	sourceRuntimeID := model.DefaultManagedRuntimeID
 	targetRuntime, _, err := stateStore.CreateRuntime(tenant.ID, "standby-runtime", model.RuntimeTypeManagedOwned, "", nil)
 	if err != nil {
 		t.Fatalf("create standby runtime: %v", err)

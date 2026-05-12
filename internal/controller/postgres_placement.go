@@ -189,7 +189,7 @@ func (s *Service) managedSharedPostgresPrimaryHostPlacement(
 					},
 				}, true, nil
 			}
-			if nodeName, found, err := matchingManagedSharedPostgresExistingInstanceNode(ctx, client, namespace, serviceName, sourceSelector); err != nil {
+			if nodeName, found, err := matchingManagedSharedPostgresExistingInstanceNode(ctx, client, namespace, serviceName, sourceSelector, targetSelector); err != nil {
 				return runtimepkg.SchedulingConstraints{}, false, err
 			} else if found {
 				return runtimepkg.SchedulingConstraints{
@@ -494,7 +494,7 @@ func matchingManagedSharedPostgresExistingInstanceNode(
 	ctx context.Context,
 	client *kubeClient,
 	namespace, clusterName string,
-	sourceSelector map[string]string,
+	sourceSelector, targetSelector map[string]string,
 ) (string, bool, error) {
 	clusterName = strings.TrimSpace(clusterName)
 	if clusterName == "" {
@@ -516,6 +516,11 @@ func matchingManagedSharedPostgresExistingInstanceNode(
 		if nodeName, found, err := managedSharedNodeMatchingSelector(ctx, client, pod.Spec.NodeName, sourceSelector); err != nil {
 			return "", false, err
 		} else if found {
+			if overlaps, err := nodeMatchesSelector(ctx, client, nodeName, targetSelector); err != nil {
+				return "", false, err
+			} else if overlaps {
+				continue
+			}
 			return nodeName, true, nil
 		}
 
@@ -526,6 +531,11 @@ func matchingManagedSharedPostgresExistingInstanceNode(
 		if nodeName, found, err := managedSharedPostgresPVCNode(ctx, client, namespace, pvcName, sourceSelector); err != nil {
 			return "", false, err
 		} else if found {
+			if overlaps, err := nodeMatchesSelector(ctx, client, nodeName, targetSelector); err != nil {
+				return "", false, err
+			} else if overlaps {
+				continue
+			}
 			return nodeName, true, nil
 		}
 	}
@@ -539,6 +549,11 @@ func matchingManagedSharedPostgresExistingInstanceNode(
 		if nodeName, found, err := managedSharedPostgresPVCNode(ctx, client, namespace, pvcName, sourceSelector); err != nil {
 			return "", false, err
 		} else if found {
+			if overlaps, err := nodeMatchesSelector(ctx, client, nodeName, targetSelector); err != nil {
+				return "", false, err
+			} else if overlaps {
+				continue
+			}
 			return nodeName, true, nil
 		}
 	}
@@ -550,7 +565,7 @@ func matchingManagedSharedPostgresExistingInstanceNode(
 			if err != nil {
 				return "", false, fmt.Errorf("read kubernetes node %s: %w", nodeName, err)
 			}
-			if found && managedSharedNodeSchedulable(node) {
+			if found && managedSharedNodeSchedulable(node) && (len(targetSelector) == 0 || !nodeLabelsMatchSelector(node.Metadata.Labels, targetSelector)) {
 				return nodeName, true, nil
 			}
 		}
@@ -645,6 +660,24 @@ func managedSharedNodeMatchingSelector(
 		return "", false, nil
 	}
 	return nodeName, true, nil
+}
+
+func nodeMatchesSelector(ctx context.Context, client *kubeClient, nodeName string, selector map[string]string) (bool, error) {
+	if len(selector) == 0 {
+		return false, nil
+	}
+	nodeName = strings.TrimSpace(nodeName)
+	if nodeName == "" {
+		return false, nil
+	}
+	node, found, err := client.getNode(ctx, nodeName)
+	if err != nil {
+		return false, fmt.Errorf("read kubernetes node %s: %w", nodeName, err)
+	}
+	if !found {
+		return false, nil
+	}
+	return nodeLabelsMatchSelector(node.Metadata.Labels, selector), nil
 }
 
 func schedulingConstraintsEqual(left, right runtimepkg.SchedulingConstraints) bool {
