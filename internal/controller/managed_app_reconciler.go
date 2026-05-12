@@ -40,6 +40,7 @@ func (s *Service) applyManagedAppDesiredState(ctx context.Context, app model.App
 	if !found {
 		return fmt.Errorf("managed app %s/%s was not found after apply", namespace, name)
 	}
+	managed.Spec.Scheduling = cloneControllerSchedulingConstraints(scheduling)
 	return s.reconcileManagedAppResolvedObject(ctx, client, namespace, managed, app, false, false)
 }
 
@@ -193,7 +194,11 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	}
 	if syncStoredManagedAppSnapshot {
 		app = s.Renderer.PrepareApp(app)
-		desiredObjects := runtime.BuildManagedAppStateObjects(app, managed.Spec.Scheduling)
+		desiredScheduling, err := s.managedSchedulingConstraintsForApp(ctx, app)
+		if err != nil {
+			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("resolve stored managed app scheduling: %w", err))
+		}
+		desiredObjects := runtime.BuildManagedAppStateObjects(app, desiredScheduling)
 		if err := client.applyObjects(ctx, desiredObjects); err != nil {
 			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("sync managed app desired snapshot from store: %w", err))
 		}
@@ -207,6 +212,7 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		if found {
 			managed = updatedManaged
 		}
+		managed.Spec.Scheduling = cloneControllerSchedulingConstraints(desiredScheduling)
 	}
 
 	app = s.Renderer.PrepareApp(app)
@@ -363,6 +369,20 @@ func managedAppSourceNeedsRecovery(source *model.AppSource) bool {
 	default:
 		return false
 	}
+}
+
+func cloneControllerSchedulingConstraints(in runtime.SchedulingConstraints) runtime.SchedulingConstraints {
+	out := runtime.SchedulingConstraints{}
+	if len(in.NodeSelector) > 0 {
+		out.NodeSelector = make(map[string]string, len(in.NodeSelector))
+		for key, value := range in.NodeSelector {
+			out.NodeSelector[key] = value
+		}
+	}
+	if len(in.Tolerations) > 0 {
+		out.Tolerations = append([]runtime.Toleration(nil), in.Tolerations...)
+	}
+	return out
 }
 
 func (s *Service) cleanupOrphanManagedApp(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, reason string) error {

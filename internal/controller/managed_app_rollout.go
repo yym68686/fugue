@@ -78,6 +78,12 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, o
 		}
 		watchTargets = append(watchTargets, managedAppRolloutWatchTargets(namespace, managedAppName, managed, foundManagedApp)...)
 		if ready {
+			if managedReady, managedMessage := managedAppRuntimeSchedulingReady(managed, foundManagedApp, app, scheduling); !managedReady {
+				ready = false
+				message = managedMessage
+			}
+		}
+		if ready {
 			backingServicesReady, backingServiceMessage, backingServiceWatchTargets, err := s.managedBackingServicesRolloutReady(waitCtx, client, namespace, backingServices)
 			if err != nil {
 				return err
@@ -474,6 +480,26 @@ func deploymentSchedulingReady(deployment kubeDeployment, expected runtime.Sched
 	}
 	if !tolerationSetsEqual(deployment.Spec.Template.Spec.Tolerations, expected.Tolerations) {
 		return false, fmt.Sprintf("waiting for deployment %s tolerations to match runtime scheduling", strings.TrimSpace(deployment.Metadata.Name))
+	}
+	return true, ""
+}
+
+func managedAppRuntimeSchedulingReady(managed runtime.ManagedAppObject, found bool, app model.App, expected runtime.SchedulingConstraints) (bool, string) {
+	name := strings.TrimSpace(managed.Metadata.Name)
+	if name == "" {
+		name = runtime.ManagedAppResourceName(app)
+	}
+	if !found {
+		return false, fmt.Sprintf("waiting for managed app %s to be created", name)
+	}
+	if currentRuntime := strings.TrimSpace(managed.Spec.AppSpec.RuntimeID); currentRuntime != strings.TrimSpace(app.Spec.RuntimeID) {
+		return false, fmt.Sprintf("waiting for managed app %s runtime %s to be applied (current=%s)", name, strings.TrimSpace(app.Spec.RuntimeID), currentRuntime)
+	}
+	if !stringMapsEqual(managed.Spec.Scheduling.NodeSelector, expected.NodeSelector) {
+		return false, fmt.Sprintf("waiting for managed app %s scheduling nodeSelector to match target runtime", name)
+	}
+	if !tolerationSetsEqual(managed.Spec.Scheduling.Tolerations, expected.Tolerations) {
+		return false, fmt.Sprintf("waiting for managed app %s scheduling tolerations to match target runtime", name)
 	}
 	return true, ""
 }

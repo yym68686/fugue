@@ -215,6 +215,65 @@ func TestDeploymentSchedulingReadyRequiresRuntimeScheduling(t *testing.T) {
 	}
 }
 
+func TestManagedAppRuntimeSchedulingReadyRequiresTargetRuntimeScheduling(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_owner",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			RuntimeID: "runtime_agent",
+		},
+	}
+	expected := runtime.SchedulingConstraints{
+		NodeSelector: map[string]string{
+			runtime.RuntimeIDLabelKey: "runtime_agent",
+			runtime.TenantIDLabelKey:  "tenant_owner",
+		},
+		Tolerations: []runtime.Toleration{
+			{
+				Key:      runtime.TenantTaintKey,
+				Operator: "Equal",
+				Value:    "tenant_owner",
+				Effect:   "NoSchedule",
+			},
+		},
+	}
+	managed, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{
+		NodeSelector: map[string]string{
+			runtime.SharedPoolLabelKey: runtime.SharedPoolLabelValue,
+		},
+	}))
+	if err != nil {
+		t.Fatalf("decode managed app: %v", err)
+	}
+
+	ready, message := managedAppRuntimeSchedulingReady(managed, true, app, expected)
+	if ready {
+		t.Fatal("expected stale managed app scheduling to be rejected")
+	}
+	if !strings.Contains(message, "scheduling nodeSelector") {
+		t.Fatalf("expected scheduling mismatch message, got %q", message)
+	}
+
+	managed.Spec.Scheduling = expected
+	managed.Spec.AppSpec.RuntimeID = "runtime_other"
+	ready, message = managedAppRuntimeSchedulingReady(managed, true, app, expected)
+	if ready {
+		t.Fatal("expected stale managed app runtime to be rejected")
+	}
+	if !strings.Contains(message, "runtime runtime_agent") {
+		t.Fatalf("expected runtime mismatch message, got %q", message)
+	}
+
+	managed.Spec.AppSpec.RuntimeID = app.Spec.RuntimeID
+	ready, message = managedAppRuntimeSchedulingReady(managed, true, app, expected)
+	if !ready {
+		t.Fatalf("expected matching managed app runtime scheduling to be ready, got %q", message)
+	}
+}
+
 func TestWaitForManagedAppRolloutSucceedsWhenDeploymentIsReadyDespiteManagedAppError(t *testing.T) {
 	t.Parallel()
 

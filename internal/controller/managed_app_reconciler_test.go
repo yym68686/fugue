@@ -1554,6 +1554,121 @@ func TestApplyManagedAppDesiredStateInjectsWorkloadIdentityOnlyIntoRuntimeObject
 	}
 }
 
+func TestApplyManagedAppDesiredStateUsesRequestedSchedulingWhenManagedAppReadIsStale(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(t.TempDir() + "/store.json")
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Runtime Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "Project A", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	targetRuntime, _, err := stateStore.CreateRuntime(tenant.ID, "agent", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create runtime: %v", err)
+	}
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: targetRuntime.ID,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	managedName := runtime.ManagedAppResourceName(app)
+	deploymentName := runtime.RuntimeAppResourceName(app)
+	targetScheduling := runtime.SchedulingConstraints{
+		NodeSelector: map[string]string{
+			runtime.RuntimeIDLabelKey: targetRuntime.ID,
+			runtime.TenantIDLabelKey:  tenant.ID,
+		},
+		Tolerations: []runtime.Toleration{
+			{
+				Key:      runtime.TenantTaintKey,
+				Operator: "Equal",
+				Value:    tenant.ID,
+				Effect:   "NoSchedule",
+			},
+		},
+	}
+	staleManagedApp := runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{
+		NodeSelector: map[string]string{
+			runtime.SharedPoolLabelKey: runtime.SharedPoolLabelValue,
+		},
+	})
+
+	var recordedDeployment map[string]any
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodPatch && strings.HasSuffix(req.URL.Path, "/status"):
+			return okJSONResponse(`{}`), nil
+		case req.Method == http.MethodPatch &&
+			req.URL.Path == managedAppAPIPath(namespace, managedName) &&
+			strings.HasPrefix(req.Header.Get("Content-Type"), "application/json-patch+json"):
+			return okJSONResponse(`{}`), nil
+		case req.Method == http.MethodPatch &&
+			req.URL.Path == "/apis/apps/v1/namespaces/"+namespace+"/deployments/"+deploymentName &&
+			strings.HasPrefix(req.Header.Get("Content-Type"), "application/json-patch+json"):
+			return okJSONResponse(`{}`), nil
+		case req.Method == http.MethodPatch:
+			var body map[string]any
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Fatalf("decode apply object %s: %v", req.URL.Path, err)
+			}
+			if strings.TrimSpace(body["kind"].(string)) == "Deployment" {
+				recordedDeployment = body
+			}
+			return okJSONResponse(`{}`), nil
+		case req.Method == http.MethodGet && req.URL.Path == managedAppAPIPath(namespace, managedName):
+			data, err := json.Marshal(staleManagedApp)
+			if err != nil {
+				t.Fatalf("marshal stale managed app: %v", err)
+			}
+			return okJSONResponse(string(data)), nil
+		case req.Method == http.MethodGet && req.URL.Path == "/apis/apps/v1/namespaces/"+namespace+"/deployments/"+deploymentName:
+			return notFoundJSONResponse(), nil
+		case req.Method == http.MethodGet && req.URL.Path == "/apis/coordination.k8s.io/v1/namespaces/"+namespace+"/leases/"+managedName+"-fence":
+			return notFoundJSONResponse(), nil
+		case req.Method == http.MethodGet && req.URL.RawQuery != "":
+			return okJSONResponse(`{"items":[]}`), nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	svc := &Service{
+		Store:    stateStore,
+		Renderer: runtime.Renderer{},
+		newKubeClient: func(namespace string) (*kubeClient, error) {
+			return &kubeClient{
+				client:      &http.Client{Transport: transport},
+				baseURL:     "http://kube.test",
+				bearerToken: "token",
+				namespace:   namespace,
+			}, nil
+		},
+	}
+
+	if err := svc.applyManagedAppDesiredState(context.Background(), app, targetScheduling); err != nil {
+		t.Fatalf("apply managed app desired state: %v", err)
+	}
+	if recordedDeployment == nil {
+		t.Fatal("expected runtime deployment object to be applied")
+	}
+	if got := deploymentTemplateNodeSelector(recordedDeployment); !stringMapsEqual(got, targetScheduling.NodeSelector) {
+		t.Fatalf("expected deployment to use target runtime scheduling, got %#v", got)
+	}
+}
+
 func TestBackfillManagedAppSourceDoesNotOverrideManagedSnapshot(t *testing.T) {
 	t.Parallel()
 
@@ -1606,6 +1721,29 @@ func deploymentContainerEnv(obj map[string]any) map[string]string {
 		env[name] = value
 	}
 	return env
+}
+
+func deploymentTemplateNodeSelector(obj map[string]any) map[string]string {
+	spec, _ := obj["spec"].(map[string]any)
+	template, _ := spec["template"].(map[string]any)
+	templateSpec, _ := template["spec"].(map[string]any)
+	return stringMapFromAnyMap(templateSpec["nodeSelector"])
+}
+
+func okJSONResponse(body string) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     make(http.Header),
+	}
+}
+
+func notFoundJSONResponse() *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusNotFound,
+		Body:       io.NopCloser(strings.NewReader(`{"kind":"Status","status":"Failure","message":"not found","reason":"NotFound","code":404}`)),
+		Header:     make(http.Header),
+	}
 }
 
 func stringMapFromAnyMap(raw any) map[string]string {
