@@ -104,6 +104,8 @@ edge:
       enabled: false
       http: 80
       https: 443
+    persistence:
+      hostPath: /var/lib/fugue/edge/caddy-data
     resources:
       requests:
         cpu: 25m

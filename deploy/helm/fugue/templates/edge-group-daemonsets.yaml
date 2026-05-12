@@ -28,6 +28,9 @@
 {{- $caddyTLSMode := default $.Values.edge.caddy.tlsMode $caddy.tlsMode -}}
 {{- $caddyTLSAskURL := default $.Values.edge.caddy.tlsAskURL $caddy.tlsAskURL -}}
 {{- $caddyProxyListenAddr := default $.Values.edge.caddy.proxyListenAddr $caddy.proxyListenAddr -}}
+{{- $caddyPersistence := default dict $.Values.edge.caddy.persistence -}}
+{{- $groupCaddyPersistence := default dict $caddy.persistence -}}
+{{- $caddyDataHostPath := default (default "/var/lib/fugue/edge/caddy-data" $caddyPersistence.hostPath) $groupCaddyPersistence.hostPath -}}
 {{- $publicHTTP := default $.Values.edge.caddy.publicHostPorts.http $publicHostPorts.http -}}
 {{- $publicHTTPS := default $.Values.edge.caddy.publicHostPorts.https $publicHostPorts.https -}}
 ---
@@ -180,7 +183,9 @@ spec:
         - name: caddy-config
           emptyDir: {}
         - name: caddy-data
-          emptyDir: {}
+          hostPath:
+            path: {{ $caddyDataHostPath | quote }}
+            type: DirectoryOrCreate
         {{- end }}
       nodeSelector:
         {{- toYaml $group.nodeSelector | nindent 8 }}

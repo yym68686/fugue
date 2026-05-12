@@ -228,6 +228,8 @@ func TestEdgeCaddyShadowCanBeEnabledWithoutPublicPorts(t *testing.T) {
 		`admin 127.0.0.1:2019`,
 		`name: caddy-config`,
 		`name: caddy-data`,
+		`path: "/var/lib/fugue/edge/caddy-data"`,
+		`type: DirectoryOrCreate`,
 	} {
 		if !strings.Contains(doc, want) {
 			t.Fatalf("caddy-enabled edge daemonset missing %q:\n%s", want, doc)
@@ -603,6 +605,7 @@ dns:
 		`value: "edge-group-country-de"`,
 		`name: https-canary`,
 		`hostPort: 443`,
+		`path: "/var/lib/fugue/edge/caddy-data"`,
 	} {
 		if !strings.Contains(edgeDoc, want) {
 			t.Fatalf("country-de edge daemonset missing %q:\n%s", want, edgeDoc)

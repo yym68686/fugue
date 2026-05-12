@@ -156,7 +156,9 @@ spec:
         - name: caddy-config
           emptyDir: {}
         - name: caddy-data
-          emptyDir: {}
+          hostPath:
+            path: {{ .Values.edge.caddy.persistence.hostPath | quote }}
+            type: DirectoryOrCreate
         {{- end }}
       {{- with .Values.edge.nodeSelector }}
       nodeSelector:
