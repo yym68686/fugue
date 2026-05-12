@@ -3202,7 +3202,7 @@ WHERE app_id = $1
 		if !visible {
 			return model.Operation{}, ErrNotFound
 		}
-		postgresSpec := OwnedManagedPostgresSpec(app)
+		postgresSpec := ManagedPostgresSpecForOperation(app, op.ServiceID)
 		if postgresSpec == nil {
 			return model.Operation{}, ErrInvalidInput
 		}
@@ -3378,9 +3378,9 @@ WHERE app_id = $1
 		return model.Operation{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_operations (id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, '', '', '', $15, $16, NULL, NULL)
-`, op.ID, op.TenantID, op.Type, op.Status, op.ExecutionMode, op.RequestedByType, op.RequestedByID, op.AppID, op.SourceRuntimeID, op.TargetRuntimeID, intPointerValue(op.DesiredReplicas), desiredSpecJSON, desiredSourceJSON, op.ResultMessage, op.CreatedAt, op.UpdatedAt); err != nil {
+INSERT INTO fugue_operations (id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, '', '', '', $16, $17, NULL, NULL)
+`, op.ID, op.TenantID, op.Type, op.Status, op.ExecutionMode, op.RequestedByType, op.RequestedByID, op.AppID, op.ServiceID, op.SourceRuntimeID, op.TargetRuntimeID, intPointerValue(op.DesiredReplicas), desiredSpecJSON, desiredSourceJSON, op.ResultMessage, op.CreatedAt, op.UpdatedAt); err != nil {
 		return model.Operation{}, mapDBErr(err)
 	}
 	if err := applyInFlightOperationToAppModel(&app, &op); err != nil {
@@ -3403,7 +3403,7 @@ func (s *Store) pgListOperations(tenantID string, platformAdmin bool) ([]model.O
 	defer cancel()
 
 	query := `
-SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
 FROM fugue_operations
 `
 	args := make([]any, 0, 1)
@@ -3438,7 +3438,7 @@ func (s *Store) pgListOperationSummaries(tenantID string, platformAdmin bool) ([
 	defer cancel()
 
 	query := `
-SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
 FROM fugue_operations
 `
 	args := make([]any, 0, 1)
@@ -3473,7 +3473,7 @@ func (s *Store) pgListOperationsByApp(tenantID string, platformAdmin bool, appID
 	defer cancel()
 
 	query := `
-SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
 FROM fugue_operations
 WHERE app_id = $1
 `
@@ -3509,7 +3509,7 @@ func (s *Store) pgListOperationSummariesByApp(tenantID string, platformAdmin boo
 	defer cancel()
 
 	query := `
-SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
 FROM fugue_operations
 WHERE app_id = $1
 `
@@ -3581,7 +3581,7 @@ func (s *Store) pgListConsoleOperationsByApp(tenantID string, platformAdmin bool
 	}
 
 	query := `
-SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
 FROM fugue_operations
 WHERE app_id = $1
   AND (
@@ -3639,7 +3639,7 @@ func (s *Store) pgListOperationsWithDesiredSourceByApp(tenantID string, platform
 	defer cancel()
 
 	query := `
-SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
 FROM fugue_operations
 WHERE app_id = $1
   AND desired_source_json IS NOT NULL
@@ -3682,7 +3682,7 @@ func (s *Store) pgListOperationsWithDesiredSourceByApps(tenantID string, platfor
 	defer cancel()
 
 	query := fmt.Sprintf(`
-SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
 FROM fugue_operations
 WHERE app_id IN (%s)
   AND desired_source_json IS NOT NULL
@@ -3726,7 +3726,7 @@ func (s *Store) pgListActiveOperations() ([]model.Operation, error) {
 	defer cancel()
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
 FROM fugue_operations
 WHERE status IN ($1, $2, $3)
 ORDER BY created_at ASC, id ASC
@@ -3755,7 +3755,7 @@ func (s *Store) pgGetOperation(id string) (model.Operation, error) {
 	defer cancel()
 
 	op, err := scanOperation(s.db.QueryRowContext(ctx, `
-SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
 FROM fugue_operations
 WHERE id = $1
 `, id))
@@ -3776,7 +3776,7 @@ func (s *Store) pgTryClaimPendingOperation(id string) (model.Operation, bool, er
 	defer tx.Rollback()
 
 	op, err := scanOperation(tx.QueryRowContext(ctx, `
-SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
 FROM fugue_operations
 WHERE id = $1
   AND status = $2
@@ -3873,7 +3873,7 @@ WITH next_op AS (
 	FOR UPDATE SKIP LOCKED
 	LIMIT 1
 )
-SELECT o.id, o.tenant_id, o.type, o.status, o.execution_mode, o.requested_by_type, o.requested_by_id, o.app_id, o.source_runtime_id, o.target_runtime_id, o.desired_replicas, o.desired_spec_json, o.desired_source_json, o.result_message, o.manifest_path, o.assigned_runtime_id, o.error_message, o.created_at, o.updated_at, o.started_at, o.completed_at
+SELECT o.id, o.tenant_id, o.type, o.status, o.execution_mode, o.requested_by_type, o.requested_by_id, o.app_id, o.service_id, o.source_runtime_id, o.target_runtime_id, o.desired_replicas, o.desired_spec_json, o.desired_source_json, o.result_message, o.manifest_path, o.assigned_runtime_id, o.error_message, o.created_at, o.updated_at, o.started_at, o.completed_at
 FROM fugue_operations o
 JOIN next_op n ON n.id = o.id
 `
@@ -4150,7 +4150,7 @@ func (s *Store) pgListAssignedOperations(runtimeID string) ([]model.Operation, e
 	defer cancel()
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
 FROM fugue_operations
 WHERE assigned_runtime_id = $1
   AND status = $2
@@ -4914,7 +4914,7 @@ WHERE scope = $1
 
 func (s *Store) pgGetOperationTx(ctx context.Context, tx *sql.Tx, id string, forUpdate bool) (model.Operation, error) {
 	query := `
-SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
 FROM fugue_operations
 WHERE id = $1
 `
@@ -4946,21 +4946,22 @@ SET tenant_id = $2,
 	requested_by_type = $6,
 	requested_by_id = $7,
 	app_id = $8,
-	source_runtime_id = $9,
-	target_runtime_id = $10,
-	desired_replicas = $11,
-	desired_spec_json = $12,
-	desired_source_json = $13,
-	result_message = $14,
-	manifest_path = $15,
-	assigned_runtime_id = $16,
-	error_message = $17,
-	created_at = $18,
-	updated_at = $19,
-	started_at = $20,
-	completed_at = $21
+	service_id = $9,
+	source_runtime_id = $10,
+	target_runtime_id = $11,
+	desired_replicas = $12,
+	desired_spec_json = $13,
+	desired_source_json = $14,
+	result_message = $15,
+	manifest_path = $16,
+	assigned_runtime_id = $17,
+	error_message = $18,
+	created_at = $19,
+	updated_at = $20,
+	started_at = $21,
+	completed_at = $22
 WHERE id = $1
-`, op.ID, op.TenantID, op.Type, op.Status, op.ExecutionMode, op.RequestedByType, op.RequestedByID, op.AppID, op.SourceRuntimeID, op.TargetRuntimeID, intPointerValue(op.DesiredReplicas), desiredSpecJSON, desiredSourceJSON, op.ResultMessage, op.ManifestPath, op.AssignedRuntimeID, op.ErrorMessage, op.CreatedAt, op.UpdatedAt, op.StartedAt, op.CompletedAt); err != nil {
+`, op.ID, op.TenantID, op.Type, op.Status, op.ExecutionMode, op.RequestedByType, op.RequestedByID, op.AppID, op.ServiceID, op.SourceRuntimeID, op.TargetRuntimeID, intPointerValue(op.DesiredReplicas), desiredSpecJSON, desiredSourceJSON, op.ResultMessage, op.ManifestPath, op.AssignedRuntimeID, op.ErrorMessage, op.CreatedAt, op.UpdatedAt, op.StartedAt, op.CompletedAt); err != nil {
 		return fmt.Errorf("update operation %s: %w", op.ID, err)
 	}
 	return nil
@@ -5233,7 +5234,7 @@ func scanOperation(scanner sqlScanner) (model.Operation, error) {
 	var desiredSourceRaw []byte
 	var startedAt sql.NullTime
 	var completedAt sql.NullTime
-	if err := scanner.Scan(&op.ID, &op.TenantID, &op.Type, &op.Status, &op.ExecutionMode, &op.RequestedByType, &op.RequestedByID, &op.AppID, &op.SourceRuntimeID, &op.TargetRuntimeID, &desiredReplicas, &desiredSpecRaw, &desiredSourceRaw, &op.ResultMessage, &op.ManifestPath, &op.AssignedRuntimeID, &op.ErrorMessage, &op.CreatedAt, &op.UpdatedAt, &startedAt, &completedAt); err != nil {
+	if err := scanner.Scan(&op.ID, &op.TenantID, &op.Type, &op.Status, &op.ExecutionMode, &op.RequestedByType, &op.RequestedByID, &op.AppID, &op.ServiceID, &op.SourceRuntimeID, &op.TargetRuntimeID, &desiredReplicas, &desiredSpecRaw, &desiredSourceRaw, &op.ResultMessage, &op.ManifestPath, &op.AssignedRuntimeID, &op.ErrorMessage, &op.CreatedAt, &op.UpdatedAt, &startedAt, &completedAt); err != nil {
 		return model.Operation{}, err
 	}
 	if desiredReplicas.Valid {
@@ -5266,7 +5267,7 @@ func scanOperationSummary(scanner sqlScanner) (model.Operation, error) {
 	var desiredReplicas sql.NullInt64
 	var startedAt sql.NullTime
 	var completedAt sql.NullTime
-	if err := scanner.Scan(&op.ID, &op.TenantID, &op.Type, &op.Status, &op.ExecutionMode, &op.RequestedByType, &op.RequestedByID, &op.AppID, &op.SourceRuntimeID, &op.TargetRuntimeID, &desiredReplicas, &op.ResultMessage, &op.ManifestPath, &op.AssignedRuntimeID, &op.ErrorMessage, &op.CreatedAt, &op.UpdatedAt, &startedAt, &completedAt); err != nil {
+	if err := scanner.Scan(&op.ID, &op.TenantID, &op.Type, &op.Status, &op.ExecutionMode, &op.RequestedByType, &op.RequestedByID, &op.AppID, &op.ServiceID, &op.SourceRuntimeID, &op.TargetRuntimeID, &desiredReplicas, &op.ResultMessage, &op.ManifestPath, &op.AssignedRuntimeID, &op.ErrorMessage, &op.CreatedAt, &op.UpdatedAt, &startedAt, &completedAt); err != nil {
 		return model.Operation{}, err
 	}
 	if desiredReplicas.Valid {

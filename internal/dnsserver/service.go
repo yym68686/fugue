@@ -621,6 +621,9 @@ func (s *Service) newBundleRequest(ctx context.Context) (*http.Request, error) {
 	for _, ip := range s.Config.AnswerIPs {
 		query.Add("answer_ip", strings.TrimSpace(ip))
 	}
+	for _, ip := range s.Config.RouteAAnswerIPs {
+		query.Add("route_a_answer_ip", strings.TrimSpace(ip))
+	}
 	if s.Config.TTL > 0 {
 		query.Set("ttl", fmt.Sprintf("%d", s.Config.TTL))
 	}

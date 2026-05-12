@@ -9,6 +9,7 @@ Usage:
     --dns-node-id <node> \
     --edge-group-id <edge-group> \
     --answer-ips <ip[,ip...]> \
+    [--route-a-answer-ips <ip[,ip...]>] \
     --token-env-file /etc/fugue/fugue-dns-token.env
 
 Renders fugue-dns.service and fugue-dns.env for a systemd escape hatch.
@@ -23,6 +24,7 @@ dns_node_id="${FUGUE_DNS_NODE_ID:-$(hostname -s 2>/dev/null || hostname)}"
 edge_group_id="${FUGUE_EDGE_GROUP_ID:-}"
 zone="${FUGUE_DNS_ZONE:-dns.fugue.pro}"
 answer_ips="${FUGUE_DNS_ANSWER_IPS:-}"
+route_a_answer_ips="${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-}"
 token_env_file="/etc/fugue/fugue-dns-token.env"
 binary_path="/usr/local/bin/fugue-dns"
 cache_path="/var/lib/fugue/dns/dns-cache.json"
@@ -43,6 +45,7 @@ while [[ $# -gt 0 ]]; do
     --edge-group-id) edge_group_id="${2:-}"; shift 2 ;;
     --zone) zone="${2:-}"; shift 2 ;;
     --answer-ips) answer_ips="${2:-}"; shift 2 ;;
+    --route-a-answer-ips) route_a_answer_ips="${2:-}"; shift 2 ;;
     --token-env-file) token_env_file="${2:-}"; shift 2 ;;
     --binary) binary_path="${2:-}"; shift 2 ;;
     --cache-path) cache_path="${2:-}"; shift 2 ;;
@@ -72,6 +75,7 @@ FUGUE_DNS_NODE_ID=${dns_node_id}
 FUGUE_EDGE_GROUP_ID=${edge_group_id}
 FUGUE_DNS_ZONE=${zone}
 FUGUE_DNS_ANSWER_IPS=${answer_ips}
+FUGUE_DNS_ROUTE_A_ANSWER_IPS=${route_a_answer_ips}
 FUGUE_DNS_CACHE_PATH=${cache_path}
 FUGUE_DNS_LISTEN_ADDR=${listen_addr}
 FUGUE_DNS_UDP_ADDR=${udp_addr}

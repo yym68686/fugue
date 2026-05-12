@@ -391,6 +391,16 @@ paths:
           style: form
           explode: true
         - in: query
+          name: route_a_answer_ip
+          required: false
+          description: Route A fallback origin IPs used for route_a_only custom-domain targets.
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+        - in: query
           name: ttl
           required: false
           schema:
@@ -2549,13 +2559,18 @@ paths:
                 target_runtime_id:
                   type: string
       responses:
-        '202':
-          description: Successful response
+        '200':
+          description: Backing service already targets the requested runtime
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/BackingServiceMigrateResponse"
+        '202':
+          description: Database switchover accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackingServiceMigrateResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/bindings:
@@ -6627,6 +6642,8 @@ components:
           type: string
         app_id:
           type: string
+        service_id:
+          type: string
         source_runtime_id:
           type: string
         target_runtime_id:
@@ -6682,6 +6699,8 @@ components:
         requested_by_id:
           type: string
         app_id:
+          type: string
+        service_id:
           type: string
         source_runtime_id:
           type: string
@@ -8788,6 +8807,17 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/BackingService"
+    BackingServiceMigrateResponse:
+      type: object
+      additionalProperties: false
+      required: [backing_service, already_current]
+      properties:
+        backing_service:
+          $ref: "#/components/schemas/BackingService"
+        already_current:
+          type: boolean
+        operation:
+          $ref: "#/components/schemas/Operation"
     AppListResponse:
       type: object
       additionalProperties: false

@@ -181,6 +181,12 @@ type backingServiceResponse struct {
 	BackingService model.BackingService `json:"backing_service"`
 }
 
+type backingServiceMigrateResponse struct {
+	BackingService model.BackingService `json:"backing_service"`
+	Operation      *model.Operation     `json:"operation,omitempty"`
+	AlreadyCurrent bool                 `json:"already_current,omitempty"`
+}
+
 type createBackingServiceRequest struct {
 	TenantID    string                   `json:"tenant_id,omitempty"`
 	ProjectID   string                   `json:"project_id,omitempty"`
@@ -828,13 +834,13 @@ func (c *Client) DeleteBackingService(id string) (model.BackingService, error) {
 	return response.BackingService, nil
 }
 
-func (c *Client) MigrateBackingService(id, targetRuntimeID string) (model.BackingService, error) {
-	var response backingServiceResponse
+func (c *Client) MigrateBackingService(id, targetRuntimeID string) (backingServiceMigrateResponse, error) {
+	var response backingServiceMigrateResponse
 	request := map[string]string{"target_runtime_id": strings.TrimSpace(targetRuntimeID)}
 	if err := c.doJSON(http.MethodPost, path.Join("/v1/backing-services", id, "migrate"), request, &response); err != nil {
-		return model.BackingService{}, err
+		return backingServiceMigrateResponse{}, err
 	}
-	return response.BackingService, nil
+	return response, nil
 }
 
 func (c *Client) ListOperations(appID string) ([]model.Operation, error) {

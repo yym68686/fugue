@@ -136,6 +136,106 @@ func TestEdgeDNSBundleSupportsGroupFilterAndConditionalFetch(t *testing.T) {
 	}
 }
 
+func TestEdgeDNSBundleKeepsRouteAOnlyCustomTargetsGlobal(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	if _, _, err := storeState.EnsureManagedSharedLocationLabels(map[string]string{
+		runtimepkg.LocationCountryCodeLabelKey: "HK",
+	}); err != nil {
+		t.Fatalf("set managed shared location labels: %v", err)
+	}
+	app = deployAppForEdgeRouteTest(t, storeState, app)
+	target := server.primaryCustomDomainTarget(app)
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	if _, err := storeState.PutAppDomain(model.AppDomain{
+		Hostname:    "www.example.com",
+		AppID:       app.ID,
+		TenantID:    app.TenantID,
+		Status:      model.AppDomainStatusVerified,
+		TLSStatus:   model.AppDomainTLSStatusReady,
+		RouteTarget: target,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("put verified app domain: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&edge_group_id=edge-group-country-us&answer_ip=15.204.94.71&route_a_answer_ip=136.112.185.40", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	customTarget := edgeDNSRecordByNameAndType(bundle.Records, target, model.EdgeDNSRecordTypeA)
+	if customTarget == nil {
+		t.Fatalf("expected Route A-only custom-domain target %s in every DNS bundle: %+v", target, bundle.Records)
+	}
+	if strings.Join(customTarget.Values, ",") != "136.112.185.40" {
+		t.Fatalf("expected Route A-only target to use route_a_answer_ip, got %+v", customTarget)
+	}
+}
+
+func TestEdgeDNSBundleUsesHealthyPolicyEdgeGroupIPsForOptInTargets(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	if _, _, err := storeState.EnsureManagedSharedLocationLabels(map[string]string{
+		runtimepkg.LocationCountryCodeLabelKey: "HK",
+	}); err != nil {
+		t.Fatalf("set managed shared location labels: %v", err)
+	}
+	app = deployAppForEdgeRouteTest(t, storeState, app)
+	target := server.primaryCustomDomainTarget(app)
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	if _, err := storeState.PutAppDomain(model.AppDomain{
+		Hostname:    "www.example.com",
+		AppID:       app.ID,
+		TenantID:    app.TenantID,
+		Status:      model.AppDomainStatusVerified,
+		TLSStatus:   model.AppDomainTLSStatusReady,
+		RouteTarget: target,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("put verified app domain: %v", err)
+	}
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+		ID:          "edge-hk-1",
+		EdgeGroupID: "edge-group-country-hk",
+		PublicIPv4:  "203.0.113.20",
+		Status:      model.EdgeHealthHealthy,
+		Healthy:     true,
+	}); err != nil {
+		t.Fatalf("record healthy HK edge node: %v", err)
+	}
+	put := performJSONRequest(t, server, http.MethodPut, "/v1/edge/route-policies/www.example.com", platformAdminKey, map[string]any{
+		"edge_group_id": "edge-group-country-hk",
+		"route_policy":  model.EdgeRoutePolicyCanary,
+	})
+	if put.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, put.Code, put.Body.String())
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&edge_group_id=edge-group-country-de&answer_ip=198.51.100.10&route_a_answer_ip=136.112.185.40", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	customTarget := edgeDNSRecordByNameAndType(bundle.Records, target, model.EdgeDNSRecordTypeA)
+	if customTarget == nil {
+		t.Fatalf("expected opt-in custom-domain target %s in DNS bundle: %+v", target, bundle.Records)
+	}
+	if strings.Join(customTarget.Values, ",") != "203.0.113.20" {
+		t.Fatalf("expected opt-in target to use healthy policy edge IP, got %+v", customTarget)
+	}
+}
+
 func edgeDNSRecordByNameAndType(records []model.EdgeDNSRecord, name, recordType string) *model.EdgeDNSRecord {
 	for index := range records {
 		if records[index].Name == name && records[index].Type == recordType {

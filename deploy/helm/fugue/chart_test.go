@@ -419,6 +419,8 @@ func TestDNSShadowDaemonSetCanBeEnabledWithoutPublicPorts(t *testing.T) {
 		"dns.enabled=true",
 		"--set",
 		"dns.answerIPs[0]=203.0.113.10",
+		"--set",
+		"dns.routeAAnswerIPs[0]=136.112.185.40",
 	)
 	cmd.Dir = chartDir
 	output, err := cmd.CombinedOutput()
@@ -443,6 +445,8 @@ func TestDNSShadowDaemonSetCanBeEnabledWithoutPublicPorts(t *testing.T) {
 		`key: FUGUE_EDGE_TLS_ASK_TOKEN`,
 		`name: FUGUE_DNS_ANSWER_IPS`,
 		`value: "203.0.113.10"`,
+		`name: FUGUE_DNS_ROUTE_A_ANSWER_IPS`,
+		`value: "136.112.185.40"`,
 		`name: FUGUE_DNS_UDP_ADDR`,
 		`value: "127.0.0.1:5353"`,
 		`name: FUGUE_DNS_TCP_ADDR`,
@@ -556,6 +560,8 @@ dns:
   enabled: true
   answerIPs:
     - 15.204.94.71
+  routeAAnswerIPs:
+    - 136.112.185.40
   publicHostPorts:
     enabled: true
   udpAddr: :53
@@ -616,6 +622,8 @@ dns:
 		`value: "edge-group-country-de"`,
 		`name: FUGUE_DNS_ANSWER_IPS`,
 		`value: "51.38.126.103"`,
+		`name: FUGUE_DNS_ROUTE_A_ANSWER_IPS`,
+		`value: "136.112.185.40"`,
 		`name: dns-udp`,
 		`hostPort: 53`,
 	} {

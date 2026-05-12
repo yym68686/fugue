@@ -727,6 +727,93 @@ func OwnedManagedPostgresSpec(app model.App) *model.AppPostgresSpec {
 	return nil
 }
 
+type ManagedPostgresOperationTarget struct {
+	ServiceID string
+	Service   *model.BackingService
+	Postgres  model.AppPostgresSpec
+	AppOwned  bool
+}
+
+func ManagedPostgresOperationTargetForApp(app model.App, serviceID string) (*ManagedPostgresOperationTarget, error) {
+	serviceID = strings.TrimSpace(serviceID)
+	if serviceID == "" {
+		if app.Spec.Postgres != nil {
+			normalized := normalizeManagedPostgresSpec(app.Name, app.Spec.RuntimeID, *app.Spec.Postgres)
+			return &ManagedPostgresOperationTarget{
+				Postgres: normalized,
+				AppOwned: true,
+			}, nil
+		}
+		for _, service := range app.BackingServices {
+			if strings.TrimSpace(service.OwnerAppID) != strings.TrimSpace(app.ID) {
+				continue
+			}
+			if !isManagedPostgresService(service) || service.Spec.Postgres == nil {
+				continue
+			}
+			serviceCopy := cloneBackingService(service)
+			normalized := normalizeManagedPostgresSpec(appNameForService(&serviceCopy, &app), app.Spec.RuntimeID, *serviceCopy.Spec.Postgres)
+			serviceCopy.Spec.Postgres = &normalized
+			return &ManagedPostgresOperationTarget{
+				ServiceID: serviceCopy.ID,
+				Service:   &serviceCopy,
+				Postgres:  normalized,
+				AppOwned:  true,
+			}, nil
+		}
+		return nil, nil
+	}
+
+	for _, service := range app.BackingServices {
+		if strings.TrimSpace(service.ID) != serviceID {
+			continue
+		}
+		if !isManagedPostgresService(service) || service.Spec.Postgres == nil {
+			return nil, ErrInvalidInput
+		}
+		appOwned := strings.TrimSpace(service.OwnerAppID) == strings.TrimSpace(app.ID)
+		if !appOwned && !appHasBindingToServiceID(app, serviceID) {
+			return nil, ErrInvalidInput
+		}
+		serviceCopy := cloneBackingService(service)
+		normalized := normalizeManagedPostgresSpec(appNameForService(&serviceCopy, &app), app.Spec.RuntimeID, *serviceCopy.Spec.Postgres)
+		serviceCopy.Spec.Postgres = &normalized
+		return &ManagedPostgresOperationTarget{
+			ServiceID: serviceCopy.ID,
+			Service:   &serviceCopy,
+			Postgres:  normalized,
+			AppOwned:  appOwned,
+		}, nil
+	}
+	return nil, ErrInvalidInput
+}
+
+func ManagedPostgresSpecForOperation(app model.App, serviceID string) *model.AppPostgresSpec {
+	target, err := ManagedPostgresOperationTargetForApp(app, serviceID)
+	if err != nil || target == nil {
+		return nil
+	}
+	postgres := target.Postgres
+	if target.Postgres.Resources != nil {
+		resources := *target.Postgres.Resources
+		postgres.Resources = &resources
+	}
+	return &postgres
+}
+
+func appHasBindingToServiceID(app model.App, serviceID string) bool {
+	serviceID = strings.TrimSpace(serviceID)
+	if serviceID == "" {
+		return false
+	}
+	for _, binding := range app.Bindings {
+		if strings.TrimSpace(binding.ServiceID) == serviceID {
+			return true
+		}
+	}
+	return false
+}
+
 func ensureBoundPostgresViewBinding(app *model.App, service model.BackingService, spec model.AppPostgresSpec) {
 	if app == nil {
 		return

@@ -162,6 +162,7 @@ dns:
   edgeGroupID: ""
   zone: dns.fugue.pro
   answerIPs: []
+  routeAAnswerIPs: []
   ttl: 60
   listenAddr: ":7834"
   healthPort: 7834

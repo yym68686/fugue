@@ -26,9 +26,16 @@ func (s *Service) executeManagedDatabaseSwitchoverOperation(
 		return fmt.Errorf("database switchover operation %s missing target runtime", op.ID)
 	}
 
-	currentDatabase := store.OwnedManagedPostgresSpec(app)
-	if currentDatabase == nil {
+	target, err := store.ManagedPostgresOperationTargetForApp(app, op.ServiceID)
+	if err != nil {
+		return fmt.Errorf("resolve managed postgres target for app %s: %w", app.ID, err)
+	}
+	if target == nil {
 		return fmt.Errorf("managed postgres is not configured for app %s", app.ID)
+	}
+	currentDatabase := &target.Postgres
+	if strings.TrimSpace(op.ServiceID) != "" && !target.AppOwned {
+		return s.executeBoundManagedDatabaseSwitchoverOperation(ctx, op, app, *target)
 	}
 	sourceRuntimeID := strings.TrimSpace(currentDatabase.RuntimeID)
 	if sourceRuntimeID == "" {
@@ -131,6 +138,127 @@ func (s *Service) executeManagedDatabaseSwitchoverOperation(
 		finalBundle.ManifestPath,
 	)
 	return nil
+}
+
+func (s *Service) executeBoundManagedDatabaseSwitchoverOperation(
+	ctx context.Context,
+	op model.Operation,
+	app model.App,
+	target store.ManagedPostgresOperationTarget,
+) error {
+	currentDatabase := &target.Postgres
+	targetRuntimeID := strings.TrimSpace(op.TargetRuntimeID)
+	sourceRuntimeID := strings.TrimSpace(currentDatabase.RuntimeID)
+	if sourceRuntimeID == "" {
+		sourceRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
+	}
+	if sourceRuntimeID == "" {
+		return fmt.Errorf("managed postgres service %s for app %s is missing a source runtime", target.ServiceID, app.ID)
+	}
+	if sourceRuntimeID == targetRuntimeID {
+		return fmt.Errorf("managed postgres service %s is already on runtime %s", target.ServiceID, targetRuntimeID)
+	}
+
+	clusterName := strings.TrimSpace(currentDatabase.ServiceName)
+	if clusterName == "" {
+		return fmt.Errorf("managed postgres service %s for app %s is missing a cluster service name", target.ServiceID, app.ID)
+	}
+
+	stagePostgres := databaseSwitchoverPostgresSpec(currentDatabase, sourceRuntimeID, targetRuntimeID)
+	stageApp, err := s.updateAppBackingServicePostgres(target.ServiceID, app, stagePostgres)
+	if err != nil {
+		return fmt.Errorf("stage managed postgres service %s standby on %s: %w", target.ServiceID, targetRuntimeID, err)
+	}
+	if _, err := s.applyManagedDesiredAppState(ctx, op.ID, stageApp, stageApp.Spec); err != nil {
+		return fmt.Errorf("prepare managed postgres service %s standby on %s: %w", target.ServiceID, targetRuntimeID, err)
+	}
+
+	client, err := s.kubeClient()
+	if err != nil {
+		return fmt.Errorf("initialize kubernetes client for database switchover: %w", err)
+	}
+
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	targetPrimary, err := s.waitForManagedPostgresReplicaOnRuntime(ctx, client, namespace, clusterName, targetRuntimeID, op.ID)
+	if err != nil {
+		return fmt.Errorf("wait for managed postgres service %s standby on %s: %w", target.ServiceID, targetRuntimeID, err)
+	}
+
+	if err := s.ensureOperationStillActive(op.ID); err != nil {
+		return err
+	}
+	if err := client.patchCloudNativePGClusterStatus(
+		ctx,
+		namespace,
+		clusterName,
+		targetPrimary,
+		"Switchover",
+		fmt.Sprintf("Switching over service %s to %s", target.ServiceID, targetPrimary),
+	); err != nil {
+		return fmt.Errorf("request managed postgres service %s switchover to %s: %w", target.ServiceID, targetPrimary, err)
+	}
+	if err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID); err != nil {
+		return fmt.Errorf("wait for managed postgres service %s switchover to %s: %w", target.ServiceID, targetPrimary, err)
+	}
+
+	finalPostgres := databaseSwitchoverPostgresSpec(currentDatabase, targetRuntimeID, sourceRuntimeID)
+	finalApp, err := s.updateAppBackingServicePostgres(target.ServiceID, app, finalPostgres)
+	if err != nil {
+		return fmt.Errorf("finalize managed postgres service %s runtime assignments: %w", target.ServiceID, err)
+	}
+	finalBundle, err := s.applyManagedDesiredAppState(ctx, op.ID, finalApp, finalApp.Spec)
+	if err != nil {
+		return fmt.Errorf("apply finalized managed postgres service %s state: %w", target.ServiceID, err)
+	}
+	if err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID); err != nil {
+		return fmt.Errorf("wait for managed postgres service %s to settle after switchover: %w", target.ServiceID, err)
+	}
+	if err := s.ensureOperationStillActive(op.ID); err != nil {
+		return err
+	}
+
+	message := fmt.Sprintf("managed postgres service %s switched over from %s to %s", target.ServiceID, sourceRuntimeID, targetRuntimeID)
+	_, err = s.Store.CompleteManagedOperationWithResult(
+		op.ID,
+		finalBundle.ManifestPath,
+		message,
+		&finalApp.Spec,
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("complete database switchover operation %s: %w", op.ID, err)
+	}
+	s.Logger.Printf(
+		"operation %s completed managed postgres service %s switchover from %s to %s; manifest=%s",
+		op.ID,
+		target.ServiceID,
+		sourceRuntimeID,
+		targetRuntimeID,
+		finalBundle.ManifestPath,
+	)
+	return nil
+}
+
+func (s *Service) updateAppBackingServicePostgres(serviceID string, app model.App, postgres model.AppPostgresSpec) (model.App, error) {
+	spec := model.BackingServiceSpec{Postgres: &postgres}
+	updated, err := s.Store.UpdateBackingServiceSpec(serviceID, spec)
+	if err != nil {
+		return model.App{}, err
+	}
+	next := app
+	replaced := false
+	for index, service := range next.BackingServices {
+		if strings.TrimSpace(service.ID) != strings.TrimSpace(serviceID) {
+			continue
+		}
+		next.BackingServices[index] = updated
+		replaced = true
+		break
+	}
+	if !replaced {
+		next.BackingServices = append(next.BackingServices, updated)
+	}
+	return next, nil
 }
 
 func (s *Service) executeManagedDatabaseLocalizeOperation(
@@ -264,23 +392,31 @@ func databaseSwitchoverSpec(
 ) model.AppSpec {
 	next := base
 	if postgres != nil {
-		postgresCopy := *postgres
-		if postgres.Resources != nil {
-			resources := *postgres.Resources
-			postgresCopy.Resources = &resources
-		}
-		postgresCopy.RuntimeID = strings.TrimSpace(primaryRuntimeID)
-		postgresCopy.FailoverTargetRuntimeID = strings.TrimSpace(failoverTargetRuntimeID)
-		postgresCopy.PrimaryPlacementPendingRebalance = false
-		if postgresCopy.Instances < 2 {
-			postgresCopy.Instances = 2
-		}
-		if postgresCopy.SynchronousReplicas < 1 {
-			postgresCopy.SynchronousReplicas = 1
-		}
+		postgresCopy := databaseSwitchoverPostgresSpec(postgres, primaryRuntimeID, failoverTargetRuntimeID)
 		next.Postgres = &postgresCopy
 	}
 	return next
+}
+
+func databaseSwitchoverPostgresSpec(
+	postgres *model.AppPostgresSpec,
+	primaryRuntimeID, failoverTargetRuntimeID string,
+) model.AppPostgresSpec {
+	postgresCopy := *postgres
+	if postgres.Resources != nil {
+		resources := *postgres.Resources
+		postgresCopy.Resources = &resources
+	}
+	postgresCopy.RuntimeID = strings.TrimSpace(primaryRuntimeID)
+	postgresCopy.FailoverTargetRuntimeID = strings.TrimSpace(failoverTargetRuntimeID)
+	postgresCopy.PrimaryPlacementPendingRebalance = false
+	if postgresCopy.Instances < 2 {
+		postgresCopy.Instances = 2
+	}
+	if postgresCopy.SynchronousReplicas < 1 {
+		postgresCopy.SynchronousReplicas = 1
+	}
+	return postgresCopy
 }
 
 func databaseLocalizeSpec(

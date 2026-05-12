@@ -2682,7 +2682,7 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			if !runtimeVisibleToTenant(state, targetRuntimeID, op.TenantID) {
 				return ErrNotFound
 			}
-			postgresSpec := OwnedManagedPostgresSpec(app)
+			postgresSpec := ManagedPostgresSpecForOperation(app, op.ServiceID)
 			if postgresSpec == nil {
 				return ErrInvalidInput
 			}

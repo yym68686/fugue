@@ -256,7 +256,8 @@ func (c *CLI) newServiceMoveCommand() *cobra.Command {
 	opts := struct {
 		RuntimeName string
 		RuntimeID   string
-	}{}
+		Wait        bool
+	}{Wait: true}
 	cmd := &cobra.Command{
 		Use:     "move <service>",
 		Aliases: []string{"migrate"},
@@ -285,18 +286,41 @@ func (c *CLI) newServiceMoveCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			service, err = client.MigrateBackingService(service.ID, runtimeID)
+			response, err := client.MigrateBackingService(service.ID, runtimeID)
 			if err != nil {
 				return err
 			}
+			service = response.BackingService
+			if response.Operation != nil && opts.Wait {
+				if _, err := c.waitForOperations(client, []model.Operation{*response.Operation}); err != nil {
+					return err
+				}
+				service, err = client.GetBackingService(service.ID)
+				if err != nil {
+					return err
+				}
+			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"backing_service": redactBackingServiceForOutput(service)})
+				payload := map[string]any{
+					"backing_service": redactBackingServiceForOutput(service),
+					"already_current": response.AlreadyCurrent,
+				}
+				if response.Operation != nil {
+					payload["operation"] = response.Operation
+				}
+				return writeJSON(c.stdout, payload)
+			}
+			if response.Operation != nil && !opts.Wait {
+				if _, err := fmt.Fprintf(c.stdout, "operation=%s\n\n", response.Operation.ID); err != nil {
+					return err
+				}
 			}
 			return c.renderBackingServiceDetail(client, service)
 		},
 	}
 	cmd.Flags().StringVar(&opts.RuntimeName, "to", "", "Target runtime name")
 	cmd.Flags().StringVar(&opts.RuntimeID, "runtime-id", "", "Target runtime ID")
+	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for backing service switchover completion")
 	_ = cmd.Flags().MarkHidden("runtime-id")
 	return cmd
 }

@@ -129,6 +129,7 @@ type DNSConfig struct {
 	MeshIP            string
 	Zone              string
 	AnswerIPs         []string
+	RouteAAnswerIPs   []string
 	CachePath         string
 	ListenAddr        string
 	UDPAddr           string
@@ -299,6 +300,7 @@ func DNSFromEnv() DNSConfig {
 		MeshIP:            strings.TrimSpace(os.Getenv("FUGUE_DNS_MESH_IP")),
 		Zone:              zone,
 		AnswerIPs:         getenvList("FUGUE_DNS_ANSWER_IPS"),
+		RouteAAnswerIPs:   getenvList("FUGUE_DNS_ROUTE_A_ANSWER_IPS"),
 		CachePath:         getenv("FUGUE_DNS_CACHE_PATH", "/var/lib/fugue/dns/dns-cache.json"),
 		ListenAddr:        getenv("FUGUE_DNS_LISTEN_ADDR", "127.0.0.1:7834"),
 		UDPAddr:           getenv("FUGUE_DNS_UDP_ADDR", "127.0.0.1:5353"),

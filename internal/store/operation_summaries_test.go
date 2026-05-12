@@ -92,7 +92,7 @@ func TestPGListOperationSummariesByAppDoesNotSelectDesiredJSON(t *testing.T) {
 
 	now := time.Date(2026, time.April, 30, 12, 0, 0, 0, time.UTC)
 	mock.ExpectQuery(regexp.QuoteMeta(`
-SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, source_runtime_id, target_runtime_id, desired_replicas, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
 FROM fugue_operations
 WHERE app_id = $1
  AND tenant_id = $2 ORDER BY created_at ASC`)).
@@ -106,6 +106,7 @@ WHERE app_id = $1
 			"requested_by_type",
 			"requested_by_id",
 			"app_id",
+			"service_id",
 			"source_runtime_id",
 			"target_runtime_id",
 			"desired_replicas",
@@ -126,6 +127,7 @@ WHERE app_id = $1
 			model.ActorTypeAPIKey,
 			"key_123",
 			"app_123",
+			"",
 			"",
 			"",
 			2,

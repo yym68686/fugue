@@ -1412,6 +1412,7 @@ type Operation struct {
 	RequestedByType     string     `json:"requested_by_type"`
 	RequestedByID       string     `json:"requested_by_id"`
 	AppID               string     `json:"app_id"`
+	ServiceID           string     `json:"service_id,omitempty"`
 	SourceRuntimeID     string     `json:"source_runtime_id,omitempty"`
 	TargetRuntimeID     string     `json:"target_runtime_id,omitempty"`
 	DesiredReplicas     *int       `json:"desired_replicas,omitempty"`

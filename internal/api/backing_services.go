@@ -122,19 +122,33 @@ func (s *Server) handleMigrateBackingService(w http.ResponseWriter, r *http.Requ
 		})
 		return
 	}
-	spec, err := prepareMigrateBackingServiceSpec(service, targetRuntimeID)
+	if !isMigratableBackingService(service) {
+		s.writeStoreError(w, store.ErrInvalidInput)
+		return
+	}
+
+	app, err := s.backingServiceSwitchoverApp(service)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	updated, err := s.store.UpdateBackingServiceSpec(service.ID, spec)
+	op, err := s.store.CreateOperation(model.Operation{
+		TenantID:        service.TenantID,
+		Type:            model.OperationTypeDatabaseSwitchover,
+		RequestedByType: principal.ActorType,
+		RequestedByID:   principal.ActorID,
+		AppID:           app.ID,
+		ServiceID:       service.ID,
+		TargetRuntimeID: targetRuntimeID,
+	})
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	s.appendAudit(principal, "backing_service.migrate", "backing_service", updated.ID, updated.TenantID, map[string]string{"name": updated.Name, "project_id": updated.ProjectID, "target_runtime_id": targetRuntimeID})
+	s.appendAudit(principal, "backing_service.migrate", "operation", op.ID, service.TenantID, map[string]string{"name": service.Name, "project_id": service.ProjectID, "app_id": app.ID, "service_id": service.ID, "target_runtime_id": targetRuntimeID})
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
-		"backing_service": cloneBackingService(updated),
+		"backing_service": cloneBackingService(service),
+		"operation":       sanitizeOperationForAPI(op),
 		"already_current": false,
 	})
 }
@@ -251,16 +265,50 @@ func (s *Server) loadAuthorizedBackingService(w http.ResponseWriter, r *http.Req
 	return service, true
 }
 
-func prepareMigrateBackingServiceSpec(service model.BackingService, targetRuntimeID string) (model.BackingServiceSpec, error) {
-	if !isMigratableBackingService(service) || service.Spec.Postgres == nil {
-		return model.BackingServiceSpec{}, store.ErrInvalidInput
+func (s *Server) backingServiceSwitchoverApp(service model.BackingService) (model.App, error) {
+	if ownerAppID := strings.TrimSpace(service.OwnerAppID); ownerAppID != "" {
+		app, err := s.store.GetApp(ownerAppID)
+		if err != nil {
+			return model.App{}, err
+		}
+		if strings.TrimSpace(app.TenantID) != strings.TrimSpace(service.TenantID) {
+			return model.App{}, store.ErrNotFound
+		}
+		return app, nil
 	}
-	spec := cloneBackingServiceSpec(service.Spec)
-	spec.Postgres.RuntimeID = strings.TrimSpace(targetRuntimeID)
-	spec.Postgres.FailoverTargetRuntimeID = ""
-	spec.Postgres.PrimaryNodeName = ""
-	spec.Postgres.PrimaryPlacementPendingRebalance = false
-	return spec, nil
+
+	apps, err := s.store.ListApps(service.TenantID, false)
+	if err != nil {
+		return model.App{}, err
+	}
+	var found *model.App
+	for _, app := range apps {
+		if !appHasServiceBinding(app, service.ID) {
+			continue
+		}
+		appCopy := app
+		if found != nil {
+			return model.App{}, store.ErrInvalidInput
+		}
+		found = &appCopy
+	}
+	if found == nil {
+		return model.App{}, store.ErrInvalidInput
+	}
+	return *found, nil
+}
+
+func appHasServiceBinding(app model.App, serviceID string) bool {
+	serviceID = strings.TrimSpace(serviceID)
+	if serviceID == "" {
+		return false
+	}
+	for _, binding := range app.Bindings {
+		if strings.TrimSpace(binding.ServiceID) == serviceID {
+			return true
+		}
+	}
+	return false
 }
 
 func isMigratableBackingService(service model.BackingService) bool {

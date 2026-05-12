@@ -22,11 +22,12 @@ const (
 )
 
 type edgeDNSBundleOptions struct {
-	DNSNodeID   string
-	EdgeGroupID string
-	Zone        string
-	AnswerIPs   []string
-	TTL         int
+	DNSNodeID       string
+	EdgeGroupID     string
+	Zone            string
+	AnswerIPs       []string
+	RouteAAnswerIPs []string
+	TTL             int
 }
 
 func (s *Server) handleEdgeDNSBundle(w http.ResponseWriter, r *http.Request) {
@@ -76,6 +77,10 @@ func (s *Server) edgeDNSBundleOptionsFromRequest(r *http.Request) (edgeDNSBundle
 	if err != nil {
 		return edgeDNSBundleOptions{}, err
 	}
+	routeAAnswerIPs, err := parseOptionalEdgeDNSAnswerIPs(query["route_a_answer_ip"])
+	if err != nil {
+		return edgeDNSBundleOptions{}, err
+	}
 
 	zone := normalizeExternalAppDomain(query.Get("zone"))
 	if zone == "" {
@@ -86,15 +91,27 @@ func (s *Server) edgeDNSBundleOptionsFromRequest(r *http.Request) (edgeDNSBundle
 	}
 
 	return edgeDNSBundleOptions{
-		DNSNodeID:   strings.TrimSpace(query.Get("dns_node_id")),
-		EdgeGroupID: strings.TrimSpace(query.Get("edge_group_id")),
-		Zone:        zone,
-		AnswerIPs:   answerIPs,
-		TTL:         ttl,
+		DNSNodeID:       strings.TrimSpace(query.Get("dns_node_id")),
+		EdgeGroupID:     strings.TrimSpace(query.Get("edge_group_id")),
+		Zone:            zone,
+		AnswerIPs:       answerIPs,
+		RouteAAnswerIPs: routeAAnswerIPs,
+		TTL:             ttl,
 	}, nil
 }
 
 func parseEdgeDNSAnswerIPs(values []string) ([]string, error) {
+	out, err := parseOptionalEdgeDNSAnswerIPs(values)
+	if err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, errInvalidEdgeDNSOption("at least one answer_ip is required")
+	}
+	return out, nil
+}
+
+func parseOptionalEdgeDNSAnswerIPs(values []string) ([]string, error) {
 	out := make([]string, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
@@ -118,9 +135,6 @@ func parseEdgeDNSAnswerIPs(values []string) ([]string, error) {
 			out = append(out, normalized)
 		}
 	}
-	if len(out) == 0 {
-		return nil, errInvalidEdgeDNSOption("at least one answer_ip is required")
-	}
 	return out, nil
 }
 
@@ -143,6 +157,14 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	if err != nil {
 		return model.EdgeDNSBundle{}, err
 	}
+	policies, err := s.store.ListEdgeRoutePolicies()
+	if err != nil {
+		return model.EdgeDNSBundle{}, err
+	}
+	healthyEdgeGroups, err := s.edgeRouteHealthyEdgeGroups()
+	if err != nil {
+		return model.EdgeDNSBundle{}, err
+	}
 
 	runtimeByID := make(map[string]model.Runtime, len(runtimes))
 	for _, runtimeObj := range runtimes {
@@ -153,6 +175,11 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	for _, app := range apps {
 		app = s.overlayManagedAppStatusCached(app)
 		appByID[strings.TrimSpace(app.ID)] = app
+	}
+	policyByHostname := edgeRoutePolicyByHostname(policies)
+	edgeAnswerIPsByGroup, err := s.edgeDNSAnswerIPsByGroup(options)
+	if err != nil {
+		return model.EdgeDNSBundle{}, err
 	}
 
 	records := make([]model.EdgeDNSRecord, 0, len(domains)+1)
@@ -179,9 +206,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			continue
 		}
 		binding := s.deriveEdgeRouteBinding(r, app, hostname, model.EdgeRouteKindCustomDomain, model.EdgeRouteTLSPolicyCustomDomain, domain.CreatedAt, domain.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
-		if !edgeRouteMatchesSelector(binding, edgeRouteBundleOptions{EdgeGroupID: options.EdgeGroupID}) {
-			continue
-		}
+		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
 		target := normalizeExternalAppDomain(domain.RouteTarget)
 		if target == "" {
 			target = normalizeExternalAppDomain(s.primaryCustomDomainTarget(app))
@@ -189,9 +214,13 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		if !edgeDNSTargetWithinZone(target, options.Zone) {
 			continue
 		}
+		answerIPs := edgeDNSAnswerIPsForBinding(binding, options, edgeAnswerIPsByGroup)
+		if len(answerIPs) == 0 {
+			continue
+		}
 		records = append(records, edgeDNSRecordsForTarget(
 			target,
-			options.AnswerIPs,
+			answerIPs,
 			options.TTL,
 			model.EdgeDNSRecordKindCustomDomainTarget,
 			binding.Status,
@@ -213,6 +242,57 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	}
 	bundle.Version = edgeDNSBundleVersion(bundle)
 	return bundle, nil
+}
+
+func (s *Server) edgeDNSAnswerIPsByGroup(options edgeDNSBundleOptions) (map[string][]string, error) {
+	out := map[string][]string{}
+	if s.store != nil {
+		nodes, _, err := s.store.ListEdgeNodes("")
+		if err != nil {
+			return nil, err
+		}
+		for _, node := range nodes {
+			if !node.Healthy || node.Draining || !strings.EqualFold(strings.TrimSpace(node.Status), model.EdgeHealthHealthy) {
+				continue
+			}
+			groupID := strings.TrimSpace(node.EdgeGroupID)
+			if groupID == "" {
+				continue
+			}
+			out[groupID] = appendEdgeDNSUniqueIP(out[groupID], node.PublicIPv4)
+			out[groupID] = appendEdgeDNSUniqueIP(out[groupID], node.PublicIPv6)
+		}
+	}
+	if options.EdgeGroupID != "" && len(out[options.EdgeGroupID]) == 0 {
+		out[options.EdgeGroupID] = append([]string(nil), options.AnswerIPs...)
+	}
+	return out, nil
+}
+
+func appendEdgeDNSUniqueIP(values []string, raw string) []string {
+	ip := net.ParseIP(strings.TrimSpace(raw))
+	if ip == nil {
+		return values
+	}
+	normalized := ip.String()
+	for _, existing := range values {
+		if existing == normalized {
+			return values
+		}
+	}
+	return append(values, normalized)
+}
+
+func edgeDNSAnswerIPsForBinding(binding model.EdgeRouteBinding, options edgeDNSBundleOptions, edgeAnswerIPsByGroup map[string][]string) []string {
+	if binding.Status == model.EdgeRouteStatusActive && model.EdgeRoutePolicyAllowsTraffic(binding.RoutePolicy) {
+		if ips := edgeAnswerIPsByGroup[strings.TrimSpace(binding.EdgeGroupID)]; len(ips) > 0 {
+			return append([]string(nil), ips...)
+		}
+	}
+	if len(options.RouteAAnswerIPs) > 0 {
+		return append([]string(nil), options.RouteAAnswerIPs...)
+	}
+	return append([]string(nil), options.AnswerIPs...)
 }
 
 func edgeDNSTargetWithinZone(target, zone string) bool {

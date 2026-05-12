@@ -675,6 +675,12 @@ EOF
   if (( rendered_answer_ips == 0 )); then
     fail "FUGUE_DNS_ANSWER_IPS must contain at least one non-empty IP when FUGUE_DNS_ENABLED=true"
   fi
+  if [[ -n "$(trim_field "${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-}")" ]]; then
+    printf '  routeAAnswerIPs:\n' >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+    while IFS= read -r answer_ip; do
+      printf '    - %s\n' "$(yaml_quote "${answer_ip}")" >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+    done < <(dns_answer_ips_lines "${FUGUE_DNS_ROUTE_A_ANSWER_IPS}")
+  fi
 
   {
     printf '  nodeSelector:\n'
@@ -728,6 +734,11 @@ build_dns_helm_set_args() {
   if (( index == 0 )); then
     fail "FUGUE_DNS_ANSWER_IPS must contain at least one non-empty IP when FUGUE_DNS_ENABLED=true"
   fi
+  index=0
+  while IFS= read -r answer_ip; do
+    DNS_HELM_SET_ARGS+=(--set-string "dns.routeAAnswerIPs[${index}]=${answer_ip}")
+    index=$((index + 1))
+  done < <(dns_answer_ips_lines "${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-}")
 }
 
 use_local_control_plane_automation_bundle_from_dir() {
@@ -1772,6 +1783,7 @@ main() {
   FUGUE_EDGE_EXTRA_GROUPS="${FUGUE_EDGE_EXTRA_GROUPS:-}"
   FUGUE_DNS_ENABLED="${FUGUE_DNS_ENABLED:-false}"
   FUGUE_DNS_ANSWER_IPS="${FUGUE_DNS_ANSWER_IPS:-}"
+  FUGUE_DNS_ROUTE_A_ANSWER_IPS="${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-}"
   FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE="${FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE:-}"
   FUGUE_DNS_EXTRA_GROUPS="${FUGUE_DNS_EXTRA_GROUPS:-}"
   FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED="${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED:-false}"
@@ -1812,6 +1824,9 @@ main() {
     require_env FUGUE_DNS_ANSWER_IPS
     if [[ "$(dns_answer_ip_count "${FUGUE_DNS_ANSWER_IPS}")" == "0" ]]; then
       fail "FUGUE_DNS_ANSWER_IPS must contain at least one non-empty IP when FUGUE_DNS_ENABLED=true"
+    fi
+    if [[ -n "$(trim_field "${FUGUE_DNS_ROUTE_A_ANSWER_IPS}")" && "$(dns_answer_ip_count "${FUGUE_DNS_ROUTE_A_ANSWER_IPS}")" == "0" ]]; then
+      fail "FUGUE_DNS_ROUTE_A_ANSWER_IPS must contain only non-empty IP entries"
     fi
     if ! [[ "${FUGUE_DNS_TTL}" =~ ^[0-9]+$ ]] || (( FUGUE_DNS_TTL <= 0 || FUGUE_DNS_TTL > 3600 )); then
       fail "FUGUE_DNS_TTL must be an integer between 1 and 3600"
@@ -1865,7 +1880,7 @@ main() {
   log "cluster join registry endpoint: ${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}"
   log "app base domain: ${FUGUE_APP_BASE_DOMAIN}"
   log "custom domain base domain: dns.${FUGUE_APP_BASE_DOMAIN}"
-  log "dns shadow: enabled=${FUGUE_DNS_ENABLED} answer_ips=${FUGUE_DNS_ANSWER_IPS:-<none>} public_hostports=${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED} udp=${FUGUE_DNS_UDP_ADDR} tcp=${FUGUE_DNS_TCP_ADDR}"
+  log "dns shadow: enabled=${FUGUE_DNS_ENABLED} answer_ips=${FUGUE_DNS_ANSWER_IPS:-<none>} route_a_answer_ips=${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-<none>} public_hostports=${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED} udp=${FUGUE_DNS_UDP_ADDR} tcp=${FUGUE_DNS_TCP_ADDR}"
   log "dns scheduling: primary_country=${FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE:-<none>} extra_groups=${FUGUE_DNS_EXTRA_GROUPS:-<none>}"
   log "shared workspace storage: enabled=${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED} class=${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS}"
 

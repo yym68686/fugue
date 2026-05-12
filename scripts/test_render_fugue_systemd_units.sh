@@ -76,4 +76,23 @@ if bash "${REPO_ROOT}/scripts/render_fugue_edge_systemd_unit.sh" \
   fail "expected invalid caddy tls mode to fail"
 fi
 
+bash "${REPO_ROOT}/scripts/render_fugue_dns_systemd_unit.sh" \
+  --output-dir "${tmpdir}" \
+  --api-url "https://api.fugue.pro" \
+  --dns-node-id "dns-us-1" \
+  --edge-group-id "edge-group-country-us" \
+  --answer-ips "203.0.113.10" \
+  --route-a-answer-ips "136.112.185.40" \
+  --token-env-file "/etc/fugue/fugue-dns-token.env" >/dev/null
+
+[[ -f "${tmpdir}/fugue-dns.env" ]] || fail "missing fugue-dns.env"
+[[ -f "${tmpdir}/fugue-dns.service" ]] || fail "missing fugue-dns.service"
+
+assert_contains "${tmpdir}/fugue-dns.env" "FUGUE_DNS_NODE_ID=dns-us-1"
+assert_contains "${tmpdir}/fugue-dns.env" "FUGUE_EDGE_GROUP_ID=edge-group-country-us"
+assert_contains "${tmpdir}/fugue-dns.env" "FUGUE_DNS_ANSWER_IPS=203.0.113.10"
+assert_contains "${tmpdir}/fugue-dns.env" "FUGUE_DNS_ROUTE_A_ANSWER_IPS=136.112.185.40"
+assert_not_contains "${tmpdir}/fugue-dns.env" "FUGUE_DNS_TOKEN="
+assert_contains "${tmpdir}/fugue-dns.service" "EnvironmentFile=-/etc/fugue/fugue-dns-token.env"
+
 printf 'render systemd unit tests passed\n'

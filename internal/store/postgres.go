@@ -449,6 +449,7 @@ var postgresSchemaStatements = []string{
 		requested_by_type TEXT NOT NULL,
 		requested_by_id TEXT NOT NULL,
 		app_id TEXT NOT NULL REFERENCES fugue_apps(id) ON DELETE CASCADE,
+		service_id TEXT NOT NULL DEFAULT '',
 		source_runtime_id TEXT NOT NULL DEFAULT '',
 		target_runtime_id TEXT NOT NULL DEFAULT '',
 		desired_replicas INTEGER NULL,
@@ -463,6 +464,7 @@ var postgresSchemaStatements = []string{
 		started_at TIMESTAMPTZ NULL,
 		completed_at TIMESTAMPTZ NULL
 		)`,
+	`ALTER TABLE fugue_operations ADD COLUMN IF NOT EXISTS service_id TEXT NOT NULL DEFAULT ''`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_status_created_at ON fugue_operations (status, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_assigned_runtime_status_created_at ON fugue_operations (assigned_runtime_id, status, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_app_created_at ON fugue_operations (app_id, created_at)`,

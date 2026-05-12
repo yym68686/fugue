@@ -41,6 +41,7 @@ spec:
         {{- end }}
       annotations:
         checksum/config-secret: {{ include "fugue.configSecretChecksum" $ }}
+        checksum/dns-global-config: {{ toJson (dict "routeAAnswerIPs" $.Values.dns.routeAAnswerIPs "ttl" $.Values.dns.ttl "zone" $.Values.dns.zone "nameservers" $.Values.dns.nameservers) | sha256sum }}
         checksum/dns-group-config: {{ toJson $group | sha256sum }}
         {{- with $.Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
@@ -93,6 +94,10 @@ spec:
               value: {{ default $.Values.dns.zone $group.zone | quote }}
             - name: FUGUE_DNS_ANSWER_IPS
               value: {{ join "," $group.answerIPs | quote }}
+            {{- if $.Values.dns.routeAAnswerIPs }}
+            - name: FUGUE_DNS_ROUTE_A_ANSWER_IPS
+              value: {{ join "," $.Values.dns.routeAAnswerIPs | quote }}
+            {{- end }}
             - name: FUGUE_DNS_TTL
               value: {{ printf "%v" (default $.Values.dns.ttl $group.ttl) | quote }}
             - name: FUGUE_DNS_LISTEN_ADDR

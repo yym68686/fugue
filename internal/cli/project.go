@@ -156,31 +156,49 @@ fugue project move argus --to v2202605354515455529 --dry-run
 			if opts.DryRun {
 				return c.renderProjectMoveResult(result)
 			}
+			if !opts.Wait && len(serviceCandidates) > 0 && len(candidates) > 0 {
+				return fmt.Errorf("project move must wait for backing service switchovers before queueing app moves; rerun without --wait=false or move services and apps separately")
+			}
 
 			updatedServices := make([]model.BackingService, 0, len(serviceCandidates))
+			operations := make([]model.Operation, 0, len(serviceCandidates)+len(candidates))
+			serviceOperations := make([]model.Operation, 0, len(serviceCandidates))
 			for _, service := range serviceCandidates {
-				updated, err := client.MigrateBackingService(service.ID, targetRuntimeID)
+				response, err := client.MigrateBackingService(service.ID, targetRuntimeID)
 				if err != nil {
 					return fmt.Errorf("move service %s: %w", formatDisplayName(service.Name, service.ID, c.showIDs()), err)
 				}
-				updatedServices = append(updatedServices, updated)
+				updatedServices = append(updatedServices, response.BackingService)
+				if response.Operation != nil {
+					serviceOperations = append(serviceOperations, *response.Operation)
+				}
+			}
+			if opts.Wait && len(serviceOperations) > 0 {
+				finalOps, err := c.waitForOperations(client, serviceOperations)
+				if err != nil {
+					return err
+				}
+				operations = append(operations, finalOps...)
+			} else {
+				operations = append(operations, serviceOperations...)
 			}
 
-			operations := make([]model.Operation, 0, len(candidates))
+			appOperations := make([]model.Operation, 0, len(candidates))
 			for _, app := range candidates {
 				response, err := client.MigrateApp(app.ID, targetRuntimeID)
 				if err != nil {
 					return fmt.Errorf("move app %s: %w", formatDisplayName(app.Name, app.ID, c.showIDs()), err)
 				}
-				operations = append(operations, response.Operation)
+				appOperations = append(appOperations, response.Operation)
 			}
 			if opts.Wait {
-				finalOps, err := c.waitForOperations(client, operations)
+				finalOps, err := c.waitForOperations(client, appOperations)
 				if err != nil {
 					return err
 				}
-				operations = finalOps
+				appOperations = finalOps
 			}
+			operations = append(operations, appOperations...)
 			result.UpdatedServices = updatedServices
 			result.Operations = operations
 			return c.renderProjectMoveResult(result)

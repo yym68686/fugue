@@ -381,7 +381,7 @@ func TestBackingServiceLifecycleAndBindingsQueueDeploy(t *testing.T) {
 	}
 }
 
-func TestMigrateBackingServiceMovesManagedPostgresRuntime(t *testing.T) {
+func TestMigrateBackingServiceQueuesManagedPostgresSwitchover(t *testing.T) {
 	t.Parallel()
 
 	s := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -405,6 +405,15 @@ func TestMigrateBackingServiceMovesManagedPostgresRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: sourceRuntime.ID,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
 	_, apiKey, err := s.CreateAPIKey(tenant.ID, "project-admin", []string{"project.write"})
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
@@ -423,6 +432,9 @@ func TestMigrateBackingServiceMovesManagedPostgresRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create backing service: %v", err)
 	}
+	if _, err := s.BindBackingService(tenant.ID, app.ID, service.ID, "", nil); err != nil {
+		t.Fatalf("bind backing service: %v", err)
+	}
 
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
 	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/backing-services/"+service.ID+"/migrate", apiKey, map[string]any{
@@ -433,24 +445,31 @@ func TestMigrateBackingServiceMovesManagedPostgresRuntime(t *testing.T) {
 	}
 	var response struct {
 		BackingService model.BackingService `json:"backing_service"`
+		Operation      model.Operation      `json:"operation"`
 	}
 	mustDecodeJSON(t, recorder, &response)
 	postgres := response.BackingService.Spec.Postgres
 	if postgres == nil {
 		t.Fatalf("expected postgres spec, got %+v", response.BackingService)
 	}
-	if postgres.RuntimeID != targetRuntime.ID {
-		t.Fatalf("expected runtime %q, got %q", targetRuntime.ID, postgres.RuntimeID)
+	if postgres.RuntimeID != sourceRuntime.ID {
+		t.Fatalf("expected service response to remain on source runtime %q before switchover, got %q", sourceRuntime.ID, postgres.RuntimeID)
 	}
-	if postgres.FailoverTargetRuntimeID != "" || postgres.PrimaryNodeName != "" || postgres.PrimaryPlacementPendingRebalance {
-		t.Fatalf("expected migrate to clear placement/failover state, got %+v", postgres)
+	if response.Operation.Type != model.OperationTypeDatabaseSwitchover {
+		t.Fatalf("expected database switchover operation, got %+v", response.Operation)
+	}
+	if response.Operation.AppID != app.ID || response.Operation.ServiceID != service.ID {
+		t.Fatalf("expected operation scoped to app %s service %s, got app=%s service=%s", app.ID, service.ID, response.Operation.AppID, response.Operation.ServiceID)
+	}
+	if response.Operation.SourceRuntimeID != sourceRuntime.ID || response.Operation.TargetRuntimeID != targetRuntime.ID {
+		t.Fatalf("expected operation runtimes %s -> %s, got %s -> %s", sourceRuntime.ID, targetRuntime.ID, response.Operation.SourceRuntimeID, response.Operation.TargetRuntimeID)
 	}
 	persisted, err := s.GetBackingService(service.ID)
 	if err != nil {
 		t.Fatalf("get persisted service: %v", err)
 	}
-	if persisted.Spec.Postgres == nil || persisted.Spec.Postgres.RuntimeID != targetRuntime.ID {
-		t.Fatalf("expected persisted service on target runtime, got %+v", persisted.Spec.Postgres)
+	if persisted.Spec.Postgres == nil || persisted.Spec.Postgres.RuntimeID != sourceRuntime.ID {
+		t.Fatalf("expected persisted service to stay on source runtime until controller switchover, got %+v", persisted.Spec.Postgres)
 	}
 }
 

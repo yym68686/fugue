@@ -87,6 +87,9 @@ func TestServiceSyncWritesCacheLoadsCacheAndUsesNotModified(t *testing.T) {
 		if query.Get("answer_ip") != "203.0.113.10" {
 			t.Fatalf("unexpected answer_ip %q", query.Get("answer_ip"))
 		}
+		if query.Get("route_a_answer_ip") != "136.112.185.40" {
+			t.Fatalf("unexpected route_a_answer_ip %q", query.Get("route_a_answer_ip"))
+		}
 		if requests == 2 {
 			if got := r.Header.Get("If-None-Match"); got != `"dnsgen_test"` {
 				t.Fatalf("expected second sync to send If-None-Match, got %q", got)
@@ -115,17 +118,18 @@ func TestServiceSyncWritesCacheLoadsCacheAndUsesNotModified(t *testing.T) {
 	defer server.Close()
 
 	cfg := config.DNSConfig{
-		APIURL:       server.URL,
-		EdgeToken:    "edge-secret",
-		DNSNodeID:    "dns-node-1",
-		Zone:         "dns.fugue.pro",
-		AnswerIPs:    []string{"203.0.113.10"},
-		CachePath:    cachePath,
-		ListenAddr:   "127.0.0.1:0",
-		UDPAddr:      "127.0.0.1:0",
-		SyncInterval: time.Hour,
-		HTTPTimeout:  time.Second,
-		TTL:          60,
+		APIURL:          server.URL,
+		EdgeToken:       "edge-secret",
+		DNSNodeID:       "dns-node-1",
+		Zone:            "dns.fugue.pro",
+		AnswerIPs:       []string{"203.0.113.10"},
+		RouteAAnswerIPs: []string{"136.112.185.40"},
+		CachePath:       cachePath,
+		ListenAddr:      "127.0.0.1:0",
+		UDPAddr:         "127.0.0.1:0",
+		SyncInterval:    time.Hour,
+		HTTPTimeout:     time.Second,
+		TTL:             60,
 	}
 	service := NewService(cfg, log.New(ioDiscard{}, "", 0))
 	if err := service.SyncOnce(context.Background()); err != nil {
