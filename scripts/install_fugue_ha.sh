@@ -537,6 +537,34 @@ ssh_target_login() {
   printf '%s' "${RESOLVED_SSH_HOST}"
 }
 
+resolved_ssh_target_is_local() {
+  local target="${RESOLVED_SSH_HOST}"
+  local local_name=""
+
+  case "${target}" in
+    localhost|127.0.0.1|::1)
+      return 0
+      ;;
+  esac
+
+  local_name="$(hostname 2>/dev/null || true)"
+  if [[ -n "${local_name}" && "${target}" == "${local_name}" ]]; then
+    return 0
+  fi
+  if command -v hostname >/dev/null 2>&1; then
+    if hostname -f >/dev/null 2>&1 && [[ "${target}" == "$(hostname -f)" ]]; then
+      return 0
+    fi
+    if hostname -I >/dev/null 2>&1 && hostname -I | tr ' ' '\n' | grep -Fx "${target}" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  if command -v ip >/dev/null 2>&1 && ip -o addr show 2>/dev/null | awk '{split($4, a, "/"); print a[1]}' | grep -Fx "${target}" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
 ssh_opts_for_target() {
   RESOLVED_SSH_OPTS=("${SSH_OPTS[@]}")
   if control_plane_bundle_available; then
@@ -600,6 +628,10 @@ ssh_run_raw() {
   local host="$1"
   shift
   resolve_ssh_target "${host}"
+  if resolved_ssh_target_is_local; then
+    bash -lc "$*"
+    return
+  fi
   ssh_opts_for_target
   run_remote_transport ssh -n "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "$@"
 }
@@ -614,6 +646,16 @@ ssh_run() {
 detect_remote_mode_raw() {
   local host="$1"
   resolve_ssh_target "${host}"
+  if resolved_ssh_target_is_local; then
+    if [[ "$(id -u)" -eq 0 ]]; then
+      echo root
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+      echo sudo
+    else
+      echo none
+    fi
+    return
+  fi
   ssh_opts_for_target
   run_remote_transport ssh -n "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" 'if [ "$(id -u)" -eq 0 ]; then echo root; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then echo sudo; else echo none; fi'
 }
@@ -658,13 +700,27 @@ ssh_root_raw() {
   local mode="$2"
   local script="$3"
   resolve_ssh_target "${host}"
+  if resolved_ssh_target_is_local; then
+    case "${mode}" in
+      root)
+        bash -s <<<"${script}"
+        ;;
+      sudo)
+        sudo -n bash -s <<<"${script}"
+        ;;
+      *)
+        fail "${host} needs either a root SSH login or passwordless sudo"
+        ;;
+    esac
+    return
+  fi
   ssh_opts_for_target
   case "${mode}" in
     root)
       printf '%s\n' "${script}" | run_remote_transport ssh "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "bash -s"
       ;;
     sudo)
-      printf '%s\n' "${script}" | run_remote_transport ssh "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "sudo bash -s"
+      printf '%s\n' "${script}" | run_remote_transport ssh "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "sudo -n bash -s"
       ;;
     *)
       fail "${host} needs either a root SSH login or passwordless sudo"
@@ -688,13 +744,27 @@ ssh_root_run_raw() {
   local mode="$2"
   local cmd="$3"
   resolve_ssh_target "${host}"
+  if resolved_ssh_target_is_local; then
+    case "${mode}" in
+      root)
+        bash -lc "${cmd}"
+        ;;
+      sudo)
+        sudo -n bash -lc "${cmd}"
+        ;;
+      *)
+        fail "${host} needs either a root SSH login or passwordless sudo"
+        ;;
+    esac
+    return
+  fi
   ssh_opts_for_target
   case "${mode}" in
     root)
       run_remote_transport ssh -n "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "bash -lc $(printf '%q' "${cmd}")"
       ;;
     sudo)
-      run_remote_transport ssh -n "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "sudo bash -lc $(printf '%q' "${cmd}")"
+      run_remote_transport ssh -n "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "sudo -n bash -lc $(printf '%q' "${cmd}")"
       ;;
     *)
       fail "${host} needs either a root SSH login or passwordless sudo"
@@ -722,6 +792,22 @@ scp_to() {
   local_size="$(local_file_size "${src}")"
   printf -v remote_quoted '%q' "${dst}"
   resolve_ssh_target "${host}"
+  if resolved_ssh_target_is_local; then
+    local dst_dir
+    dst_dir="$(dirname "${dst}")"
+    if [[ "$(id -u)" -eq 0 ]]; then
+      mkdir -p "${dst_dir}"
+      cp "${src}" "${dst}"
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+      sudo -n mkdir -p "${dst_dir}"
+      sudo -n cp "${src}" "${dst}"
+    else
+      fail "${host} needs either a root SSH login or passwordless sudo"
+    fi
+    remote_size="$(local_file_size "${dst}" | tr -d '[:space:]' || true)"
+    [[ -n "${remote_size}" && "${remote_size}" == "${local_size}" ]] || fail "uploaded file size mismatch for ${host}:${dst}; local=${local_size} remote=${remote_size:-missing}"
+    return
+  fi
   ssh_opts_for_target
 
   for attempt in $(seq 1 "${UPLOAD_RETRIES}"); do
