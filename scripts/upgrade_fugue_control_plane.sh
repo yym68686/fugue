@@ -623,13 +623,42 @@ dns_extra_groups_yaml() {
 }
 
 append_upgrade_edge_dynamic_values() {
-  if [[ -z "$(trim_field "${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE:-}")" && -z "$(trim_field "${FUGUE_EDGE_EXTRA_GROUPS:-}")" ]]; then
+  local edge_region edge_country edge_public_hostname edge_public_ipv4 edge_public_ipv6 edge_mesh_ip
+
+  edge_region="$(trim_field "${FUGUE_EDGE_REGION:-}")"
+  edge_country="$(trim_field "${FUGUE_EDGE_COUNTRY:-}")"
+  edge_public_hostname="$(trim_field "${FUGUE_EDGE_PUBLIC_HOSTNAME:-}")"
+  edge_public_ipv4="$(trim_field "${FUGUE_EDGE_PUBLIC_IPV4:-}")"
+  edge_public_ipv6="$(trim_field "${FUGUE_EDGE_PUBLIC_IPV6:-}")"
+  edge_mesh_ip="$(trim_field "${FUGUE_EDGE_MESH_IP:-}")"
+
+  if [[ -z "$(trim_field "${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE:-}")" && -z "$(trim_field "${FUGUE_EDGE_EXTRA_GROUPS:-}")" && -z "${edge_region}${edge_country}${edge_public_hostname}${edge_public_ipv4}${edge_public_ipv6}${edge_mesh_ip}" ]]; then
     return 0
   fi
 
   cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<EOF
 
 edge:
+EOF
+  if [[ -n "${edge_region}" ]]; then
+    printf '  region: %s\n' "$(yaml_quote "${edge_region}")" >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+  fi
+  if [[ -n "${edge_country}" ]]; then
+    printf '  country: %s\n' "$(yaml_quote "${edge_country}")" >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+  fi
+  if [[ -n "${edge_public_hostname}" ]]; then
+    printf '  publicHostname: %s\n' "$(yaml_quote "${edge_public_hostname}")" >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+  fi
+  if [[ -n "${edge_public_ipv4}" ]]; then
+    printf '  publicIPv4: %s\n' "$(yaml_quote "${edge_public_ipv4}")" >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+  fi
+  if [[ -n "${edge_public_ipv6}" ]]; then
+    printf '  publicIPv6: %s\n' "$(yaml_quote "${edge_public_ipv6}")" >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+  fi
+  if [[ -n "${edge_mesh_ip}" ]]; then
+    printf '  meshIP: %s\n' "$(yaml_quote "${edge_mesh_ip}")" >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+  fi
+  cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<EOF
   nodeSelector:
     fugue.io/role.edge: "true"
     fugue.io/schedulable: "true"
@@ -1889,6 +1918,12 @@ main() {
   FUGUE_EDGE_CADDY_STATIC_TLS_MOUNT_PATH="${FUGUE_EDGE_CADDY_STATIC_TLS_MOUNT_PATH:-/etc/caddy/static-tls}"
   FUGUE_EDGE_CADDY_STATIC_TLS_CERTIFICATE_KEY="${FUGUE_EDGE_CADDY_STATIC_TLS_CERTIFICATE_KEY:-tls.crt}"
   FUGUE_EDGE_CADDY_STATIC_TLS_PRIVATE_KEY_KEY="${FUGUE_EDGE_CADDY_STATIC_TLS_PRIVATE_KEY_KEY:-tls.key}"
+  FUGUE_EDGE_REGION="${FUGUE_EDGE_REGION:-}"
+  FUGUE_EDGE_COUNTRY="${FUGUE_EDGE_COUNTRY:-}"
+  FUGUE_EDGE_PUBLIC_HOSTNAME="${FUGUE_EDGE_PUBLIC_HOSTNAME:-}"
+  FUGUE_EDGE_PUBLIC_IPV4="${FUGUE_EDGE_PUBLIC_IPV4:-}"
+  FUGUE_EDGE_PUBLIC_IPV6="${FUGUE_EDGE_PUBLIC_IPV6:-}"
+  FUGUE_EDGE_MESH_IP="${FUGUE_EDGE_MESH_IP:-}"
   FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE="${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE:-}"
   FUGUE_EDGE_EXTRA_GROUPS="${FUGUE_EDGE_EXTRA_GROUPS:-}"
   FUGUE_DNS_ENABLED="${FUGUE_DNS_ENABLED:-false}"
@@ -1998,7 +2033,7 @@ main() {
   log "controller image: ${FUGUE_CONTROLLER_IMAGE_REPOSITORY}:${FUGUE_CONTROLLER_IMAGE_TAG}"
   log "edge image: ${FUGUE_EDGE_IMAGE_REPOSITORY}:${FUGUE_EDGE_IMAGE_TAG} enabled=${FUGUE_EDGE_ENABLED} edge_group_id=${FUGUE_EDGE_GROUP_ID:-<empty>}"
   log "edge caddy: enabled=${FUGUE_EDGE_CADDY_ENABLED} listen=${FUGUE_EDGE_CADDY_LISTEN_ADDR} tls_mode=${FUGUE_EDGE_CADDY_TLS_MODE} public_hostports=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED} http=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP} https=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS} static_tls=${FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED} static_tls_secret=${FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME:-<none>}"
-  log "edge scheduling: primary_country=${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE:-<none>} extra_groups=${FUGUE_EDGE_EXTRA_GROUPS:-<none>}"
+  log "edge scheduling: primary_country=${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE:-<none>} public_ipv4=${FUGUE_EDGE_PUBLIC_IPV4:-<none>} extra_groups=${FUGUE_EDGE_EXTRA_GROUPS:-<none>}"
   log "previous Helm revision: ${PREVIOUS_REVISION}"
   log "registry push base: ${FUGUE_REGISTRY_PUSH_BASE}"
   log "registry pull base: ${FUGUE_REGISTRY_PULL_BASE}"

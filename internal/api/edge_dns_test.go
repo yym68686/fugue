@@ -271,6 +271,22 @@ func TestEdgeDNSBundleDerivesFullZonePlatformAppRecords(t *testing.T) {
 	if platform.RecordKind != model.EdgeDNSRecordKindPlatform || platform.EdgeGroupID != "edge-group-country-us" || strings.Join(platform.Values, ",") != "15.204.94.71" {
 		t.Fatalf("unexpected platform DNS record: %+v", platform)
 	}
+
+	otherGroupRecorder := httptest.NewRecorder()
+	otherGroupReq := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103&route_a_answer_ip=136.112.185.40", nil)
+	server.Handler().ServeHTTP(otherGroupRecorder, otherGroupReq)
+	if otherGroupRecorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, otherGroupRecorder.Code, otherGroupRecorder.Body.String())
+	}
+	var otherGroupBundle model.EdgeDNSBundle
+	mustDecodeJSON(t, otherGroupRecorder, &otherGroupBundle)
+	otherGroupPlatform := edgeDNSRecordByNameAndType(otherGroupBundle.Records, app.Route.Hostname, model.EdgeDNSRecordTypeA)
+	if otherGroupPlatform == nil {
+		t.Fatalf("expected platform app DNS record for %s in other group bundle: %+v", app.Route.Hostname, otherGroupBundle.Records)
+	}
+	if strings.Join(otherGroupPlatform.Values, ",") != "15.204.94.71" {
+		t.Fatalf("expected other DNS node to return target edge IP, got %+v", otherGroupPlatform)
+	}
 }
 
 func TestEdgeDNSBundleKeepsStaticProtectedZoneRecordsAndWildcardFallback(t *testing.T) {

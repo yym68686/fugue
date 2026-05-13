@@ -87,6 +87,12 @@ edge:
   apiURL: ""
   edgeID: ""
   edgeGroupID: ""
+  region: ""
+  country: ""
+  publicHostname: ""
+  publicIPv4: ""
+  publicIPv6: ""
+  meshIP: ""
   listenAddr: ":7832"
   healthPort: 7832
   caddy:

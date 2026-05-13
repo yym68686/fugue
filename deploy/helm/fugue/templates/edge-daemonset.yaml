@@ -75,6 +75,30 @@ spec:
             {{- end }}
             - name: FUGUE_EDGE_GROUP_ID
               value: {{ .Values.edge.edgeGroupID | quote }}
+            {{- if .Values.edge.region }}
+            - name: FUGUE_EDGE_REGION
+              value: {{ .Values.edge.region | quote }}
+            {{- end }}
+            {{- if .Values.edge.country }}
+            - name: FUGUE_EDGE_COUNTRY
+              value: {{ .Values.edge.country | quote }}
+            {{- end }}
+            {{- if .Values.edge.publicHostname }}
+            - name: FUGUE_EDGE_PUBLIC_HOSTNAME
+              value: {{ .Values.edge.publicHostname | quote }}
+            {{- end }}
+            {{- if .Values.edge.publicIPv4 }}
+            - name: FUGUE_EDGE_PUBLIC_IPV4
+              value: {{ .Values.edge.publicIPv4 | quote }}
+            {{- end }}
+            {{- if .Values.edge.publicIPv6 }}
+            - name: FUGUE_EDGE_PUBLIC_IPV6
+              value: {{ .Values.edge.publicIPv6 | quote }}
+            {{- end }}
+            {{- if .Values.edge.meshIP }}
+            - name: FUGUE_EDGE_MESH_IP
+              value: {{ .Values.edge.meshIP | quote }}
+            {{- end }}
             - name: FUGUE_EDGE_LISTEN_ADDR
               value: {{ .Values.edge.listenAddr | quote }}
             - name: FUGUE_EDGE_ROUTES_CACHE_PATH

@@ -180,6 +180,64 @@ func TestEdgeShadowDaemonSetDefaultsToNoPublicTraffic(t *testing.T) {
 	}
 }
 
+func TestEdgeDaemonSetRendersPublicIdentityEnv(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm",
+		"template",
+		"fugue",
+		chartDir,
+		"--set-string",
+		"edge.region=north-america",
+		"--set-string",
+		"edge.country=us",
+		"--set-string",
+		"edge.publicHostname=edge-us.fugue.pro",
+		"--set-string",
+		"edge.publicIPv4=15.204.94.71",
+		"--set-string",
+		"edge.publicIPv6=2001:db8::15",
+		"--set-string",
+		"edge.meshIP=100.64.0.15",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	doc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-edge")
+	if doc == "" {
+		t.Fatalf("rendered manifest missing edge daemonset:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`name: FUGUE_EDGE_REGION`,
+		`value: "north-america"`,
+		`name: FUGUE_EDGE_COUNTRY`,
+		`value: "us"`,
+		`name: FUGUE_EDGE_PUBLIC_HOSTNAME`,
+		`value: "edge-us.fugue.pro"`,
+		`name: FUGUE_EDGE_PUBLIC_IPV4`,
+		`value: "15.204.94.71"`,
+		`name: FUGUE_EDGE_PUBLIC_IPV6`,
+		`value: "2001:db8::15"`,
+		`name: FUGUE_EDGE_MESH_IP`,
+		`value: "100.64.0.15"`,
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("edge daemonset missing public identity env %q:\n%s", want, doc)
+		}
+	}
+}
+
 func TestEdgeCaddyShadowCanBeEnabledWithoutPublicPorts(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")
