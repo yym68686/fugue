@@ -87,7 +87,8 @@ func (c *CLI) newAdminDNSNodesGetCommand() *cobra.Command {
 }
 
 func (c *CLI) newAdminDNSStatusCommand() *cobra.Command {
-	opts := dnsDelegationPreflightOptions{}
+	defaultZone := defaultDNSDelegationZone()
+	opts := dnsDelegationPreflightOptions{Zone: defaultZone}
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Run read-only DNS delegation preflight",
@@ -106,8 +107,8 @@ func (c *CLI) newAdminDNSStatusCommand() *cobra.Command {
 			return writeDNSDelegationPreflight(c.stdout, response)
 		},
 	}
-	cmd.Flags().StringVar(&opts.Zone, "zone", "dns.fugue.pro", "Delegated DNS zone to check")
-	cmd.Flags().StringVar(&opts.ProbeName, "probe-name", "d-test.dns.fugue.pro", "A record each DNS node must answer")
+	cmd.Flags().StringVar(&opts.Zone, "zone", defaultZone, "Delegated DNS zone to check")
+	cmd.Flags().StringVar(&opts.ProbeName, "probe-name", "", "A record each DNS node must answer; defaults to d-test.<zone>")
 	cmd.Flags().StringVar(&opts.EdgeGroupID, "edge-group", "", "Only check DNS nodes in this edge group")
 	cmd.Flags().IntVar(&opts.MinHealthyNodes, "min-healthy-nodes", 2, "Minimum healthy DNS nodes required")
 	return cmd

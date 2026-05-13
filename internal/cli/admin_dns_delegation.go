@@ -196,10 +196,10 @@ func defaultDNSDelegationCommandOptions() dnsDelegationCommandOptions {
 	if apiBase == "" {
 		apiBase = defaultCloudflareAPIBaseURL
 	}
+	zone := defaultDNSDelegationZone()
 	return dnsDelegationCommandOptions{
 		dnsDelegationPreflightOptions: dnsDelegationPreflightOptions{
-			Zone:            "dns.fugue.pro",
-			ProbeName:       "d-test.dns.fugue.pro",
+			Zone:            zone,
 			MinHealthyNodes: 2,
 		},
 		ParentZone:           firstNonEmpty(os.Getenv("CLOUDFLARE_ZONE_NAME"), "fugue.pro"),
@@ -210,9 +210,13 @@ func defaultDNSDelegationCommandOptions() dnsDelegationCommandOptions {
 	}
 }
 
+func defaultDNSDelegationZone() string {
+	return firstNonEmpty(os.Getenv("FUGUE_DNS_ZONE"), os.Getenv("CLOUDFLARE_ZONE_NAME"), "fugue.pro")
+}
+
 func addDNSDelegationPreflightFlags(cmd *cobra.Command, opts *dnsDelegationCommandOptions) {
 	cmd.Flags().StringVar(&opts.Zone, "zone", opts.Zone, "Delegated DNS zone to check")
-	cmd.Flags().StringVar(&opts.ProbeName, "probe-name", opts.ProbeName, "A record each DNS node must answer")
+	cmd.Flags().StringVar(&opts.ProbeName, "probe-name", opts.ProbeName, "A record each DNS node must answer; defaults to d-test.<zone>")
 	cmd.Flags().StringVar(&opts.EdgeGroupID, "edge-group", opts.EdgeGroupID, "Only check DNS nodes in this edge group")
 	cmd.Flags().IntVar(&opts.MinHealthyNodes, "min-healthy-nodes", opts.MinHealthyNodes, "Minimum healthy DNS nodes required")
 }

@@ -166,7 +166,7 @@ func (s *Server) handleDNSDelegationPreflight(w http.ResponseWriter, r *http.Req
 		httpx.WriteError(w, http.StatusForbidden, "only platform admin can run DNS delegation preflight")
 		return
 	}
-	response := s.buildDNSDelegationPreflight(r.Context(), principal, dnsDelegationPreflightOptionsFromRequest(r))
+	response := s.buildDNSDelegationPreflight(r.Context(), principal, s.dnsDelegationPreflightOptionsFromRequest(r))
 	httpx.WriteJSON(w, http.StatusOK, response)
 }
 
@@ -177,11 +177,14 @@ type dnsDelegationPreflightOptions struct {
 	MinHealthyNodes int
 }
 
-func dnsDelegationPreflightOptionsFromRequest(r *http.Request) dnsDelegationPreflightOptions {
+func (s *Server) dnsDelegationPreflightOptionsFromRequest(r *http.Request) dnsDelegationPreflightOptions {
 	query := r.URL.Query()
 	zone := normalizeExternalAppDomain(query.Get("zone"))
 	if zone == "" {
-		zone = "dns.fugue.pro"
+		zone = normalizeExternalAppDomain(s.appBaseDomain)
+	}
+	if zone == "" {
+		zone = "fugue.pro"
 	}
 	probeName := normalizeExternalAppDomain(query.Get("probe_name"))
 	if probeName == "" {
