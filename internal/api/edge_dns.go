@@ -166,6 +166,10 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	if err != nil {
 		return model.EdgeDNSBundle{}, err
 	}
+	acmeChallenges, err := s.store.ListDNSACMEChallenges(options.Zone, false)
+	if err != nil {
+		return model.EdgeDNSBundle{}, err
+	}
 
 	runtimeByID := make(map[string]model.Runtime, len(runtimes))
 	for _, runtimeObj := range runtimes {
@@ -186,8 +190,11 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	staticRecords := edgeDNSStaticRecordsForZone(s.dnsStaticRecords, options.Zone)
 	protectedNames := edgeDNSProtectedRecordNames(staticRecords)
 
-	records := make([]model.EdgeDNSRecord, 0, len(staticRecords)+len(apps)+len(domains)+1)
+	acmeRecords := edgeDNSACMEChallengeRecords(acmeChallenges)
+
+	records := make([]model.EdgeDNSRecord, 0, len(staticRecords)+len(acmeRecords)+len(apps)+len(domains)+1)
 	records = append(records, staticRecords...)
+	records = append(records, acmeRecords...)
 	records = append(records, edgeDNSRecordsForTarget(
 		normalizeExternalAppDomain(defaultEdgeDNSProbeLabel+"."+options.Zone),
 		options.AnswerIPs,
@@ -408,6 +415,30 @@ func edgeDNSProtectedRecordNames(records []model.EdgeDNSRecord) map[string]bool 
 		}
 	}
 	return out
+}
+
+func edgeDNSACMEChallengeRecords(challenges []model.DNSACMEChallenge) []model.EdgeDNSRecord {
+	if len(challenges) == 0 {
+		return nil
+	}
+	records := make([]model.EdgeDNSRecord, 0, len(challenges))
+	for _, challenge := range challenges {
+		record := edgeDNSRecord(
+			challenge.Name,
+			model.EdgeDNSRecordTypeTXT,
+			[]string{challenge.Value},
+			challenge.TTL,
+			model.EdgeDNSRecordKindACMEChallenge,
+			model.EdgeRouteStatusActive,
+			"",
+			"",
+			"",
+			"",
+			"",
+		)
+		records = append(records, record)
+	}
+	return records
 }
 
 func (s *Server) edgeDNSAnswerIPsByGroup(options edgeDNSBundleOptions) (map[string][]string, error) {

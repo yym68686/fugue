@@ -2537,7 +2537,7 @@ check_public_api_reachability() {
   PUBLIC_API_REACHABLE="false"
   if [[ -n "${FUGUE_DOMAIN}" ]]; then
     log "warning: public Route A endpoint $(api_public_base_url) is not reachable from this machine"
-    log "warning: set Cloudflare SSL/TLS mode to Full and allow tcp/443 from Cloudflare IP ranges to ${PUBLIC_ENDPOINT_HOST}"
+    log "warning: allow tcp/443 to ${PUBLIC_ENDPOINT_HOST}; if the domain is still proxied by Cloudflare this can be limited to Cloudflare IP ranges, but direct Fugue DNS needs public tcp/443"
     return
   fi
   log "warning: public Fugue API endpoint is not reachable from this machine"
@@ -2572,7 +2572,7 @@ Cloudflare actions:
   6. Optional but recommended: enable "Always Use HTTPS".
 
 GCP actions:
-  1. Open tcp/443 to ${PUBLIC_ENDPOINT_HOST} from Cloudflare IP ranges.
+  1. Open tcp/443 to ${PUBLIC_ENDPOINT_HOST}. If Cloudflare proxy remains in front, this may be limited to Cloudflare IP ranges; if ${FUGUE_APP_BASE_DOMAIN} is served by Fugue authoritative DNS, tcp/443 must be reachable from the public internet.
   2. Optional: open tcp/6443 only to your own public IP if you want local kubectl access.
   3. Do not expose tcp/${API_NODEPORT} or tcp/${REGISTRY_NODEPORT} publicly for Route A.
 
@@ -2628,7 +2628,7 @@ EOF
 Public access note:
   The Route A edge proxy is configured on ${PRIMARY_ALIAS}, but $(api_public_base_url) is not reachable yet.
   In Cloudflare, set SSL/TLS mode to Full.
-  In GCP, allow tcp/443 to ${PUBLIC_ENDPOINT_HOST} from Cloudflare IP ranges only.
+  In GCP, allow tcp/443 to ${PUBLIC_ENDPOINT_HOST}; direct Fugue DNS requires public tcp/443, while Cloudflare-proxied DNS may restrict this to Cloudflare IP ranges.
   Keep tcp/${API_NODEPORT} closed to the public internet.
 EOF
       return

@@ -17,6 +17,27 @@ type dnsNodeResponse struct {
 	Node model.DNSNode `json:"node"`
 }
 
+type dnsACMEChallengeListResponse struct {
+	Challenges []model.DNSACMEChallenge `json:"challenges"`
+}
+
+type dnsACMEChallengeResponse struct {
+	Challenge model.DNSACMEChallenge `json:"challenge"`
+}
+
+type deleteDNSACMEChallengeResponse struct {
+	Deleted   bool                   `json:"deleted"`
+	Challenge model.DNSACMEChallenge `json:"challenge"`
+}
+
+type upsertDNSACMEChallengeClientRequest struct {
+	Zone             string `json:"zone,omitempty"`
+	Name             string `json:"name"`
+	Value            string `json:"value"`
+	TTL              int    `json:"ttl,omitempty"`
+	ExpiresInSeconds int    `json:"expires_in_seconds,omitempty"`
+}
+
 type dnsDelegationPreflightOptions struct {
 	Zone            string
 	ProbeName       string
@@ -42,6 +63,41 @@ func (c *Client) GetDNSNode(dnsNodeID string) (dnsNodeResponse, error) {
 	var response dnsNodeResponse
 	if err := c.doJSON(http.MethodGet, dnsNodePath(dnsNodeID), nil, &response); err != nil {
 		return dnsNodeResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) ListDNSACMEChallenges(zone string, includeExpired bool) (dnsACMEChallengeListResponse, error) {
+	values := url.Values{}
+	if strings.TrimSpace(zone) != "" {
+		values.Set("zone", strings.TrimSpace(zone))
+	}
+	if includeExpired {
+		values.Set("include_expired", "true")
+	}
+	apiPath := "/v1/dns/acme-challenges"
+	if encoded := values.Encode(); encoded != "" {
+		apiPath += "?" + encoded
+	}
+	var response dnsACMEChallengeListResponse
+	if err := c.doJSON(http.MethodGet, apiPath, nil, &response); err != nil {
+		return dnsACMEChallengeListResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) UpsertDNSACMEChallenge(req upsertDNSACMEChallengeClientRequest) (dnsACMEChallengeResponse, error) {
+	var response dnsACMEChallengeResponse
+	if err := c.doJSON(http.MethodPost, "/v1/dns/acme-challenges", req, &response); err != nil {
+		return dnsACMEChallengeResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) DeleteDNSACMEChallenge(challengeID string) (deleteDNSACMEChallengeResponse, error) {
+	var response deleteDNSACMEChallengeResponse
+	if err := c.doJSON(http.MethodDelete, dnsACMEChallengePath(challengeID), nil, &response); err != nil {
+		return deleteDNSACMEChallengeResponse{}, err
 	}
 	return response, nil
 }
@@ -73,4 +129,8 @@ func (c *Client) DNSDelegationPreflight(opts dnsDelegationPreflightOptions) (mod
 
 func dnsNodePath(dnsNodeID string) string {
 	return "/v1/dns/nodes/" + url.PathEscape(strings.TrimSpace(dnsNodeID))
+}
+
+func dnsACMEChallengePath(challengeID string) string {
+	return "/v1/dns/acme-challenges/" + url.PathEscape(strings.TrimSpace(challengeID))
 }

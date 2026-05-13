@@ -17,6 +17,7 @@ func (c *CLI) newAdminDNSCommand() *cobra.Command {
 		Short: "Inspect fugue-dns inventory and delegation readiness",
 	}
 	cmd.AddCommand(c.newAdminDNSNodesCommand())
+	cmd.AddCommand(c.newAdminDNSACMECommand())
 	cmd.AddCommand(c.newAdminDNSStatusCommand())
 	cmd.AddCommand(c.newAdminDNSDelegationCommand())
 	return cmd

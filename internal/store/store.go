@@ -3575,6 +3575,12 @@ func ensureDefaults(state *model.State) {
 	for idx := range state.DNSNodes {
 		normalizeDNSNodeForRead(&state.DNSNodes[idx])
 	}
+	if state.DNSACMEChallenges == nil {
+		state.DNSACMEChallenges = []model.DNSACMEChallenge{}
+	}
+	for idx := range state.DNSACMEChallenges {
+		normalizeDNSACMEChallengeForRead(&state.DNSACMEChallenges[idx])
+	}
 	if state.BackingServices == nil {
 		state.BackingServices = []model.BackingService{}
 	}

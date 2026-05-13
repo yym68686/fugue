@@ -449,6 +449,79 @@ paths:
                 $ref: "#/components/schemas/DNSNodeListResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/dns/acme-challenges:
+    get:
+      operationId: listDNSACMEChallenges
+      summary: List DNS ACME Challenges
+      tags: [DNS]
+      x-fugue-handler: handleListDNSACMEChallenges
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: zone
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: include_expired
+          required: false
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DNSACMEChallengeListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: upsertDNSACMEChallenge
+      summary: Upsert DNS ACME Challenge
+      tags: [DNS]
+      x-fugue-handler: handleUpsertDNSACMEChallenge
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpsertDNSACMEChallengeRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DNSACMEChallengeResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/dns/acme-challenges/{challenge_id}:
+    delete:
+      operationId: deleteDNSACMEChallenge
+      summary: Delete DNS ACME Challenge
+      tags: [DNS]
+      x-fugue-handler: handleDeleteDNSACMEChallenge
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: challenge_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteDNSACMEChallengeResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/dns/nodes/{dns_node_id}:
     get:
       operationId: getDNSNode
@@ -5256,7 +5329,7 @@ components:
           format: int32
         record_kind:
           type: string
-          enum: [custom-domain-target, platform, probe, protected]
+          enum: [acme-challenge, custom-domain-target, platform, probe, protected]
         app_id:
           type: string
         tenant_id:
@@ -5272,6 +5345,85 @@ components:
           type: string
         record_generation:
           type: string
+    DNSACMEChallenge:
+      type: object
+      additionalProperties: false
+      required: [id, zone, name, value, ttl, expires_at, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        zone:
+          type: string
+        name:
+          type: string
+        value:
+          type: string
+        ttl:
+          type: integer
+          format: int32
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    UpsertDNSACMEChallengeRequest:
+      type: object
+      additionalProperties: false
+      required: [name, value]
+      properties:
+        zone:
+          type: string
+          description: DNS zone containing the challenge name. Defaults to the suffix after _acme-challenge.
+        name:
+          type: string
+          description: Fully-qualified _acme-challenge hostname.
+        value:
+          type: string
+          description: TXT value provided by the ACME client.
+        ttl:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 3600
+          default: 60
+        expires_at:
+          type: string
+          format: date-time
+          description: Absolute expiration time. Overrides expires_in_seconds when present.
+        expires_in_seconds:
+          type: integer
+          format: int32
+          minimum: 1
+          description: Relative expiration in seconds. Defaults to 3600.
+    DNSACMEChallengeResponse:
+      type: object
+      additionalProperties: false
+      required: [challenge]
+      properties:
+        challenge:
+          $ref: "#/components/schemas/DNSACMEChallenge"
+    DNSACMEChallengeListResponse:
+      type: object
+      additionalProperties: false
+      required: [challenges]
+      properties:
+        challenges:
+          type: array
+          items:
+            $ref: "#/components/schemas/DNSACMEChallenge"
+    DeleteDNSACMEChallengeResponse:
+      type: object
+      additionalProperties: false
+      required: [deleted, challenge]
+      properties:
+        deleted:
+          type: boolean
+        challenge:
+          $ref: "#/components/schemas/DNSACMEChallenge"
     DNSNode:
       type: object
       additionalProperties: false

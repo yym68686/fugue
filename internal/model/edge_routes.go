@@ -47,6 +47,7 @@ const (
 	EdgeDNSRecordKindPlatform           = "platform"
 	EdgeDNSRecordKindProbe              = "probe"
 	EdgeDNSRecordKindProtected          = "protected"
+	EdgeDNSRecordKindACMEChallenge      = "acme-challenge"
 )
 
 const (
@@ -163,6 +164,17 @@ type EdgeDNSRecord struct {
 	Status              string   `json:"status"`
 	StatusReason        string   `json:"status_reason,omitempty"`
 	RecordGeneration    string   `json:"record_generation"`
+}
+
+type DNSACMEChallenge struct {
+	ID        string    `json:"id"`
+	Zone      string    `json:"zone"`
+	Name      string    `json:"name"`
+	Value     string    `json:"value"`
+	TTL       int       `json:"ttl"`
+	ExpiresAt time.Time `json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type EdgeNode struct {

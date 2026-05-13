@@ -341,6 +341,90 @@ func TestEdgeDNSBundleKeepsStaticProtectedZoneRecordsAndWildcardFallback(t *test
 	}
 }
 
+func TestDNSACMEChallengeAPIDrivesEdgeDNSBundleTXTRecords(t *testing.T) {
+	t.Parallel()
+
+	_, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	first := performJSONRequest(t, server, http.MethodPost, "/v1/dns/acme-challenges", platformAdminKey, map[string]any{
+		"zone":               "fugue.pro",
+		"name":               "_acme-challenge.fugue.pro",
+		"value":              "token-one",
+		"ttl":                60,
+		"expires_in_seconds": 3600,
+	})
+	if first.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusCreated, first.Code, first.Body.String())
+	}
+	var firstResponse struct {
+		Challenge model.DNSACMEChallenge `json:"challenge"`
+	}
+	mustDecodeJSON(t, first, &firstResponse)
+	if firstResponse.Challenge.ID == "" || firstResponse.Challenge.Name != "_acme-challenge.fugue.pro" || firstResponse.Challenge.Value != "token-one" {
+		t.Fatalf("unexpected first challenge response: %+v", firstResponse.Challenge)
+	}
+
+	second := performJSONRequest(t, server, http.MethodPost, "/v1/dns/acme-challenges", platformAdminKey, map[string]any{
+		"zone":               "fugue.pro",
+		"name":               "_acme-challenge.fugue.pro",
+		"value":              "token-two",
+		"ttl":                60,
+		"expires_in_seconds": 3600,
+	})
+	if second.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusCreated, second.Code, second.Body.String())
+	}
+	var secondResponse struct {
+		Challenge model.DNSACMEChallenge `json:"challenge"`
+	}
+	mustDecodeJSON(t, second, &secondResponse)
+
+	list := performJSONRequest(t, server, http.MethodGet, "/v1/dns/acme-challenges?zone=fugue.pro", platformAdminKey, nil)
+	if list.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, list.Code, list.Body.String())
+	}
+	var listResponse struct {
+		Challenges []model.DNSACMEChallenge `json:"challenges"`
+	}
+	mustDecodeJSON(t, list, &listResponse)
+	if len(listResponse.Challenges) != 2 {
+		t.Fatalf("expected two active challenges, got %+v", listResponse.Challenges)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&answer_ip=203.0.113.10", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	txt := edgeDNSRecordByNameAndType(bundle.Records, "_acme-challenge.fugue.pro", model.EdgeDNSRecordTypeTXT)
+	if txt == nil {
+		t.Fatalf("expected ACME TXT record in bundle: %+v", bundle.Records)
+	}
+	if txt.RecordKind != model.EdgeDNSRecordKindACMEChallenge || txt.TTL != 60 || strings.Join(txt.Values, ",") != "token-one,token-two" {
+		t.Fatalf("unexpected ACME TXT record: %+v", txt)
+	}
+
+	deleted := performJSONRequest(t, server, http.MethodDelete, "/v1/dns/acme-challenges/"+firstResponse.Challenge.ID, platformAdminKey, nil)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, deleted.Code, deleted.Body.String())
+	}
+
+	afterDelete := httptest.NewRecorder()
+	afterDeleteReq := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&answer_ip=203.0.113.10", nil)
+	server.Handler().ServeHTTP(afterDelete, afterDeleteReq)
+	if afterDelete.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, afterDelete.Code, afterDelete.Body.String())
+	}
+	var afterDeleteBundle model.EdgeDNSBundle
+	mustDecodeJSON(t, afterDelete, &afterDeleteBundle)
+	txt = edgeDNSRecordByNameAndType(afterDeleteBundle.Records, "_acme-challenge.fugue.pro", model.EdgeDNSRecordTypeTXT)
+	if txt == nil || strings.Join(txt.Values, ",") != secondResponse.Challenge.Value {
+		t.Fatalf("expected only second ACME TXT value after cleanup, got %+v", txt)
+	}
+}
+
 func edgeDNSRecordByNameAndType(records []model.EdgeDNSRecord, name, recordType string) *model.EdgeDNSRecord {
 	for index := range records {
 		if records[index].Name == name && records[index].Type == recordType {

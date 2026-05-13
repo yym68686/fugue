@@ -1606,6 +1606,7 @@ type State struct {
 	EdgeGroups                 []EdgeGroup                 `json:"edge_groups,omitempty"`
 	EdgeNodes                  []EdgeNode                  `json:"edge_nodes,omitempty"`
 	DNSNodes                   []DNSNode                   `json:"dns_nodes,omitempty"`
+	DNSACMEChallenges          []DNSACMEChallenge          `json:"dns_acme_challenges,omitempty"`
 	EdgeRoutePolicies          []EdgeRoutePolicy           `json:"edge_route_policies,omitempty"`
 	BackingServices            []BackingService            `json:"backing_services"`
 	ServiceBindings            []ServiceBinding            `json:"service_bindings"`

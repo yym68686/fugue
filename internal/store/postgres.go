@@ -362,6 +362,18 @@ var postgresSchemaStatements = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_dns_nodes_edge_group ON fugue_dns_nodes (edge_group_id, updated_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_dns_nodes_last_seen ON fugue_dns_nodes (last_seen_at DESC)`,
+	`CREATE TABLE IF NOT EXISTS fugue_dns_acme_challenges (
+		id TEXT PRIMARY KEY,
+		zone TEXT NOT NULL,
+		name TEXT NOT NULL,
+		value TEXT NOT NULL,
+		ttl INTEGER NOT NULL DEFAULT 60,
+		expires_at TIMESTAMPTZ NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL
+	)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_dns_acme_challenges_name_value_ci ON fugue_dns_acme_challenges (zone, lower(name), value)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_dns_acme_challenges_zone_expires ON fugue_dns_acme_challenges (zone, expires_at ASC)`,
 	`CREATE TABLE IF NOT EXISTS fugue_backing_services (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
