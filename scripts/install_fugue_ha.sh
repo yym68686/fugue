@@ -1693,9 +1693,11 @@ verify_edge_proxy_config_on_primary() {
   local expected_sites=(
     "on_demand_tls {"
     "https:// {"
-    "https://*.${FUGUE_APP_BASE_DOMAIN} {"
     "import /etc/caddy/fugue-custom-domains.caddy"
   )
+  if [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] && remote_app_tls_cert_matches_domain; then
+    expected_sites+=("https://*.${FUGUE_APP_BASE_DOMAIN} {")
+  fi
   local expected_mesh_domain=""
   expected_mesh_domain="$(expected_edge_proxy_mesh_domain || true)"
   if [[ -n "${expected_mesh_domain}" ]]; then
