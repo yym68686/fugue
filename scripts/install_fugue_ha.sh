@@ -61,6 +61,7 @@ CONTAINER_TOOL="${FUGUE_CONTAINER_TOOL:-}"
 SSH_CONNECT_TIMEOUT="${FUGUE_SSH_CONNECT_TIMEOUT:-15}"
 SSH_SERVER_ALIVE_INTERVAL="${FUGUE_SSH_SERVER_ALIVE_INTERVAL:-15}"
 SSH_SERVER_ALIVE_COUNT_MAX="${FUGUE_SSH_SERVER_ALIVE_COUNT_MAX:-3}"
+SSH_COMMAND_TIMEOUT="${FUGUE_SSH_COMMAND_TIMEOUT:-90}"
 UPLOAD_RETRIES="${FUGUE_UPLOAD_RETRIES:-3}"
 UPLOAD_RETRY_DELAY="${FUGUE_UPLOAD_RETRY_DELAY:-3}"
 REMOTE_CMD_RETRIES="${FUGUE_REMOTE_CMD_RETRIES:-3}"
@@ -206,6 +207,14 @@ run_with_retry() {
     fi
   done
   return "${exit_code}"
+}
+
+run_remote_transport() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --foreground "${SSH_COMMAND_TIMEOUT}s" "$@"
+    return
+  fi
+  "$@"
 }
 
 require_cmd() {
@@ -592,7 +601,7 @@ ssh_run_raw() {
   shift
   resolve_ssh_target "${host}"
   ssh_opts_for_target
-  ssh -n "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "$@"
+  run_remote_transport ssh -n "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "$@"
 }
 
 ssh_run() {
@@ -606,7 +615,7 @@ detect_remote_mode_raw() {
   local host="$1"
   resolve_ssh_target "${host}"
   ssh_opts_for_target
-  ssh -n "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" 'if [ "$(id -u)" -eq 0 ]; then echo root; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then echo sudo; else echo none; fi'
+  run_remote_transport ssh -n "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" 'if [ "$(id -u)" -eq 0 ]; then echo root; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then echo sudo; else echo none; fi'
 }
 
 remote_mode_cache_var() {
@@ -652,10 +661,10 @@ ssh_root_raw() {
   ssh_opts_for_target
   case "${mode}" in
     root)
-      printf '%s\n' "${script}" | ssh "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "bash -s"
+      printf '%s\n' "${script}" | run_remote_transport ssh "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "bash -s"
       ;;
     sudo)
-      printf '%s\n' "${script}" | ssh "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "sudo bash -s"
+      printf '%s\n' "${script}" | run_remote_transport ssh "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "sudo bash -s"
       ;;
     *)
       fail "${host} needs either a root SSH login or passwordless sudo"
@@ -682,10 +691,10 @@ ssh_root_run_raw() {
   ssh_opts_for_target
   case "${mode}" in
     root)
-      ssh -n "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "bash -lc $(printf '%q' "${cmd}")"
+      run_remote_transport ssh -n "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "bash -lc $(printf '%q' "${cmd}")"
       ;;
     sudo)
-      ssh -n "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "sudo bash -lc $(printf '%q' "${cmd}")"
+      run_remote_transport ssh -n "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "sudo bash -lc $(printf '%q' "${cmd}")"
       ;;
     *)
       fail "${host} needs either a root SSH login or passwordless sudo"
@@ -716,7 +725,7 @@ scp_to() {
   ssh_opts_for_target
 
   for attempt in $(seq 1 "${UPLOAD_RETRIES}"); do
-    if scp -q "${RESOLVED_SSH_OPTS[@]}" "${src}" "$(ssh_target_login):${dst}"; then
+    if run_remote_transport scp -q "${RESOLVED_SSH_OPTS[@]}" "${src}" "$(ssh_target_login):${dst}"; then
       remote_size="$(run_with_retry "${REMOTE_CMD_RETRIES}" "${REMOTE_CMD_RETRY_DELAY}" "verify uploaded file on ${host}" \
         ssh_run "${host}" "stat -c %s ${remote_quoted}" | tr -d '[:space:]' || true)"
       if [[ -n "${remote_size}" && "${remote_size}" == "${local_size}" ]]; then
@@ -732,7 +741,7 @@ scp_to() {
 
   log "scp upload failed for ${host}:${dst}; falling back to streamed ssh upload"
   for attempt in $(seq 1 "${UPLOAD_RETRIES}"); do
-    if ssh "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "cat > ${remote_quoted}" < "${src}"; then
+    if run_remote_transport ssh "${RESOLVED_SSH_OPTS[@]}" "$(ssh_target_login)" "cat > ${remote_quoted}" < "${src}"; then
       remote_size="$(run_with_retry "${REMOTE_CMD_RETRIES}" "${REMOTE_CMD_RETRY_DELAY}" "verify streamed upload on ${host}" \
         ssh_run "${host}" "stat -c %s ${remote_quoted}" | tr -d '[:space:]' || true)"
       if [[ -n "${remote_size}" && "${remote_size}" == "${local_size}" ]]; then
