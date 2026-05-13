@@ -2076,6 +2076,12 @@ main() {
     --set-string edge.image.repository="${FUGUE_EDGE_IMAGE_REPOSITORY}" \
     --set-string edge.image.tag="${FUGUE_EDGE_IMAGE_TAG}" \
     --set-string edge.edgeGroupID="${FUGUE_EDGE_GROUP_ID}" \
+    --set-string edge.region="${FUGUE_EDGE_REGION}" \
+    --set-string edge.country="${FUGUE_EDGE_COUNTRY}" \
+    --set-string edge.publicHostname="${FUGUE_EDGE_PUBLIC_HOSTNAME}" \
+    --set-string edge.publicIPv4="${FUGUE_EDGE_PUBLIC_IPV4}" \
+    --set-string edge.publicIPv6="${FUGUE_EDGE_PUBLIC_IPV6}" \
+    --set-string edge.meshIP="${FUGUE_EDGE_MESH_IP}" \
     --set edge.caddy.enabled="${FUGUE_EDGE_CADDY_ENABLED}" \
     --set-string edge.caddy.listenAddr="${FUGUE_EDGE_CADDY_LISTEN_ADDR}" \
     --set-string edge.caddy.tlsMode="${FUGUE_EDGE_CADDY_TLS_MODE}" \
