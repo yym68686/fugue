@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,8 @@ import (
 	"time"
 
 	"fugue/internal/model"
+
+	miekgdns "github.com/miekg/dns"
 )
 
 func TestAdminDNSACMEPresentCommandWritesChallenge(t *testing.T) {
@@ -128,5 +131,47 @@ func TestAdminDNSACMECleanupCommandCanDeleteByNameAndValue(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "dnsacme_123") {
 		t.Fatalf("expected deleted challenge table, got %q", stdout.String())
+	}
+}
+
+func TestQueryDNSACMETXTUsesTCP(t *testing.T) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp dns: %v", err)
+	}
+	server := &miekgdns.Server{
+		Listener: listener,
+		Net:      "tcp",
+		Handler: miekgdns.HandlerFunc(func(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
+			response := new(miekgdns.Msg)
+			response.SetReply(r)
+			response.Authoritative = true
+			response.Answer = append(response.Answer, &miekgdns.TXT{
+				Hdr: miekgdns.RR_Header{
+					Name:   miekgdns.Fqdn("_acme-challenge.fugue.pro"),
+					Rrtype: miekgdns.TypeTXT,
+					Class:  miekgdns.ClassINET,
+					Ttl:    60,
+				},
+				Txt: []string{"token-value"},
+			})
+			_ = w.WriteMsg(response)
+		}),
+	}
+	go func() {
+		_ = server.ActivateAndServe()
+	}()
+	t.Cleanup(func() {
+		_ = server.Shutdown()
+	})
+
+	visible, err := queryDNSACMETXT(listener.Addr().String(), "_acme-challenge.fugue.pro", "token-value")
+	if err != nil {
+		t.Fatalf("query ACME TXT: %v", err)
+	}
+	if !visible {
+		t.Fatal("expected ACME TXT to be visible over TCP")
 	}
 }

@@ -1303,12 +1303,47 @@ install_edge_proxy_on_primary() {
   fi
 
   local mesh_site_block=""
+  local control_plane_tls_directive="${FUGUE_CONTROL_PLANE_CADDY_TLS_DIRECTIVE:-}"
+  local registry_tls_directive="${FUGUE_REGISTRY_CADDY_TLS_DIRECTIVE:-tls internal}"
+  local mesh_tls_directive="${FUGUE_MESH_CADDY_TLS_DIRECTIVE:-tls internal}"
   if mesh_enabled; then
     mesh_site_block="$(cat <<EOF
 https://${FUGUE_MESH_DOMAIN} {
-  ${app_host_tls_directive}
+  ${mesh_tls_directive}
   encode gzip zstd
   reverse_proxy ${HEADSCALE_EDGE_UPSTREAM}
+}
+EOF
+)"
+  fi
+
+  local app_wildcard_site_block=""
+  if [[ -n "${FUGUE_APP_BASE_DOMAIN}" && "${app_host_tls_directive}" != "tls internal" ]]; then
+    app_wildcard_site_block="$(cat <<EOF
+https://*.${FUGUE_APP_BASE_DOMAIN} {
+  ${app_host_tls_directive}
+  @sse header Accept *text/event-stream*
+  @stream path /stream */stream
+  @compress method GET HEAD
+  handle @sse {
+    reverse_proxy ${EDGE_UPSTREAM} {
+      flush_interval -1
+    }
+  }
+  handle @stream {
+    reverse_proxy ${EDGE_UPSTREAM} {
+      flush_interval -1
+    }
+  }
+  handle @compress {
+    encode gzip zstd
+    reverse_proxy ${EDGE_UPSTREAM}
+  }
+  handle {
+    reverse_proxy ${EDGE_UPSTREAM} {
+      flush_interval -1
+    }
+  }
 }
 EOF
 )"
@@ -1567,7 +1602,7 @@ cat >/etc/caddy/Caddyfile <<'CADDY'
 }
 
 https://${FUGUE_DOMAIN} {
-  tls internal
+  ${control_plane_tls_directive}
   @sse header Accept *text/event-stream*
   @stream path /stream */stream
   @compress method GET HEAD
@@ -1593,38 +1628,14 @@ https://${FUGUE_DOMAIN} {
 }
 
 https://${FUGUE_REGISTRY_DOMAIN} {
-  tls internal
+  ${registry_tls_directive}
   encode gzip zstd
   reverse_proxy ${REGISTRY_EDGE_UPSTREAM}
 }
 
 ${mesh_site_block}
 
-https://*.${FUGUE_APP_BASE_DOMAIN} {
-  ${app_host_tls_directive}
-  @sse header Accept *text/event-stream*
-  @stream path /stream */stream
-  @compress method GET HEAD
-  handle @sse {
-    reverse_proxy ${EDGE_UPSTREAM} {
-      flush_interval -1
-    }
-  }
-  handle @stream {
-    reverse_proxy ${EDGE_UPSTREAM} {
-      flush_interval -1
-    }
-  }
-  handle @compress {
-    encode gzip zstd
-    reverse_proxy ${EDGE_UPSTREAM}
-  }
-  handle {
-    reverse_proxy ${EDGE_UPSTREAM} {
-      flush_interval -1
-    }
-  }
-}
+${app_wildcard_site_block}
 
 import /etc/caddy/fugue-custom-domains.caddy
 

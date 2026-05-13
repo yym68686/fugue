@@ -297,11 +297,13 @@ func dnsACMEChallengeEndpoints(nodes []model.DNSNode, zone string) []string {
 }
 
 func queryDNSACMETXT(endpoint, name, value string) (bool, error) {
-	address := net.JoinHostPort(strings.TrimSpace(endpoint), "53")
+	address := dnsACMEEndpointAddress(endpoint)
 	msg := new(miekgdns.Msg)
 	msg.SetQuestion(miekgdns.Fqdn(normalizeCLIName(name)), miekgdns.TypeTXT)
 	msg.RecursionDesired = false
-	client := &miekgdns.Client{Net: "udp", Timeout: 2 * time.Second}
+	// Use TCP so local DNS proxies that intercept UDP/53 cannot hide the
+	// authoritative answer from the target fugue-dns node.
+	client := &miekgdns.Client{Net: "tcp", Timeout: 2 * time.Second}
 	response, _, err := client.Exchange(msg, address)
 	if err != nil {
 		return false, err
@@ -323,6 +325,14 @@ func queryDNSACMETXT(endpoint, name, value string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func dnsACMEEndpointAddress(endpoint string) string {
+	endpoint = strings.TrimSpace(endpoint)
+	if _, _, err := net.SplitHostPort(endpoint); err == nil {
+		return endpoint
+	}
+	return net.JoinHostPort(endpoint, "53")
 }
 
 func normalizeCLIName(value string) string {
