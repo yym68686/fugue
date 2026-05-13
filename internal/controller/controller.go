@@ -626,7 +626,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		return fmt.Errorf("overlay desired managed postgres state for app %s: %w", app.ID, err)
 	}
 	timer.Mark("overlay_postgres")
-	if op.Type == model.OperationTypeDeploy {
+	if op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate {
 		if err := s.ensureManagedDeployImageReady(ctx, app); err != nil {
 			return err
 		}
