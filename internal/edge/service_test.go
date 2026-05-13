@@ -584,8 +584,8 @@ func TestBuildCaddyConfigSkipsDifferentEdgeGroupRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build caddy config: %v", err)
 	}
-	if routeCount != 1 {
-		t.Fatalf("expected only the local edge group route to be emitted, got %d", routeCount)
+	if routeCount != 2 {
+		t.Fatalf("expected local serving edge group routes to be emitted, got %d", routeCount)
 	}
 	configText := string(configBody)
 	if !strings.Contains(configText, `"host":["demo.fugue.pro"]`) {
@@ -594,8 +594,8 @@ func TestBuildCaddyConfigSkipsDifferentEdgeGroupRoutes(t *testing.T) {
 	if strings.Contains(configText, "hk.fugue.pro") {
 		t.Fatalf("different edge group host must not be emitted to caddy config:\n%s", configText)
 	}
-	if strings.Contains(configText, "remote-runtime.fugue.pro") {
-		t.Fatalf("remote runtime edge group host must not be emitted to caddy config:\n%s", configText)
+	if !strings.Contains(configText, `"host":["remote-runtime.fugue.pro"]`) {
+		t.Fatalf("expected nearest-edge fallback route to be emitted by serving edge group:\n%s", configText)
 	}
 }
 
@@ -604,15 +604,17 @@ func TestBuildCaddyConfigSupportsPublicOnDemandTLSCanary(t *testing.T) {
 
 	bundle := testBundle("routegen_public_tls")
 	service := NewService(config.EdgeConfig{
-		APIURL:               "https://api.example.invalid",
-		EdgeToken:            "edge-secret",
-		EdgeGroupID:          "edge-group-default",
-		ListenAddr:           ":7832",
-		CaddyEnabled:         true,
-		CaddyAdminURL:        "http://127.0.0.1:2019",
-		CaddyListenAddr:      ":443",
-		CaddyTLSMode:         caddyTLSModePublicOnDemand,
-		CaddyProxyListenAddr: "127.0.0.1:7833",
+		APIURL:                 "https://api.example.invalid",
+		EdgeToken:              "edge-secret",
+		EdgeGroupID:            "edge-group-default",
+		ListenAddr:             ":7832",
+		CaddyEnabled:           true,
+		CaddyAdminURL:          "http://127.0.0.1:2019",
+		CaddyListenAddr:        ":443",
+		CaddyTLSMode:           caddyTLSModePublicOnDemand,
+		CaddyProxyListenAddr:   "127.0.0.1:7833",
+		CaddyStaticTLSCertFile: "/etc/caddy/static-tls/tls.crt",
+		CaddyStaticTLSKeyFile:  "/etc/caddy/static-tls/tls.key",
 	}, log.New(ioDiscard{}, "", 0))
 
 	configBody, routeCount, err := service.buildCaddyConfig(bundle)
@@ -650,6 +652,15 @@ func TestBuildCaddyConfigSupportsPublicOnDemandTLSCanary(t *testing.T) {
 	permission := onDemand["permission"].(map[string]any)
 	if permission["module"] != "http" || permission["endpoint"] != "http://127.0.0.1:7832/edge/tls/ask" {
 		t.Fatalf("unexpected on-demand permission: %#v", permission)
+	}
+	certificates := tlsApp["certificates"].(map[string]any)
+	loadFiles := certificates["load_files"].([]any)
+	if len(loadFiles) != 1 {
+		t.Fatalf("expected one static certificate load file entry, got %#v", loadFiles)
+	}
+	staticCert := loadFiles[0].(map[string]any)
+	if staticCert["certificate"] != "/etc/caddy/static-tls/tls.crt" || staticCert["key"] != "/etc/caddy/static-tls/tls.key" {
+		t.Fatalf("unexpected static certificate config: %#v", staticCert)
 	}
 }
 
@@ -744,6 +755,34 @@ func TestCaddyTLSModeMustBeKnown(t *testing.T) {
 	err := service.validateConfig()
 	if err == nil || !strings.Contains(err.Error(), "FUGUE_EDGE_CADDY_TLS_MODE") {
 		t.Fatalf("expected unknown caddy tls mode to be rejected, got %v", err)
+	}
+}
+
+func TestCaddyStaticTLSFilesMustBePairedAndRequireTLS(t *testing.T) {
+	t.Parallel()
+
+	base := config.EdgeConfig{
+		APIURL:               "https://api.example.invalid",
+		EdgeToken:            "edge-secret",
+		EdgeGroupID:          "edge-group-default",
+		CaddyEnabled:         true,
+		CaddyAdminURL:        "http://127.0.0.1:2019",
+		CaddyListenAddr:      "127.0.0.1:18080",
+		CaddyTLSMode:         caddyTLSModePublicOnDemand,
+		CaddyProxyListenAddr: "127.0.0.1:7833",
+	}
+	onlyCert := base
+	onlyCert.CaddyStaticTLSCertFile = "/etc/caddy/static-tls/tls.crt"
+	if err := NewService(onlyCert, log.New(ioDiscard{}, "", 0)).validateConfig(); err == nil || !strings.Contains(err.Error(), "must be configured together") {
+		t.Fatalf("expected unpaired static TLS file to be rejected, got %v", err)
+	}
+
+	offTLS := base
+	offTLS.CaddyTLSMode = caddyTLSModeOff
+	offTLS.CaddyStaticTLSCertFile = "/etc/caddy/static-tls/tls.crt"
+	offTLS.CaddyStaticTLSKeyFile = "/etc/caddy/static-tls/tls.key"
+	if err := NewService(offTLS, log.New(ioDiscard{}, "", 0)).validateConfig(); err == nil || !strings.Contains(err.Error(), "requires FUGUE_EDGE_CADDY_TLS_MODE") {
+		t.Fatalf("expected static TLS with TLS off to be rejected, got %v", err)
 	}
 }
 
@@ -909,8 +948,8 @@ func TestProxyHandlerSkipsDifferentEdgeGroupRoutes(t *testing.T) {
 	remoteRuntime := httptest.NewRecorder()
 	remoteRuntimeReq := httptest.NewRequest(http.MethodGet, "http://remote-runtime.fugue.pro/", nil)
 	service.ProxyHandler().ServeHTTP(remoteRuntime, remoteRuntimeReq)
-	if remoteRuntime.Code != http.StatusNotFound {
-		t.Fatalf("expected remote runtime edge group route to be ignored by edge proxy, got %d body=%s", remoteRuntime.Code, remoteRuntime.Body.String())
+	if remoteRuntime.Code != http.StatusOK || remoteRuntime.Body.String() != "ok" {
+		t.Fatalf("expected nearest-edge fallback route to be served by local edge group, got %d body=%s", remoteRuntime.Code, remoteRuntime.Body.String())
 	}
 }
 

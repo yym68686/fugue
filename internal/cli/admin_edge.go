@@ -146,9 +146,9 @@ func (c *CLI) newAdminEdgeRoutePolicyCommand() *cobra.Command {
 		Use:   "route-policy",
 		Short: "Manage hostname opt-in for regional edge routing",
 		Long: strings.TrimSpace(`
-Edge route policies are a platform-admin safety gate. Hostnames stay on Route A
-by default and enter regional edge only when explicitly set to edge_canary or
-edge_enabled for one edge group.
+Edge route policies are a platform-admin override. Generated platform hostnames
+use the nearest healthy edge group by default; custom domains stay on Route A
+until explicitly set to edge_canary or edge_enabled for one edge group.
 `),
 	}
 	cmd.AddCommand(

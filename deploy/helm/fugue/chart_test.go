@@ -380,6 +380,77 @@ func TestEdgeCaddyPublicHostPortsRequireExplicitEnable(t *testing.T) {
 	}
 }
 
+func TestEdgeCaddyStaticTLSSecretMountsPrimaryAndGroups(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	valuesPath := t.TempDir() + "/values.yaml"
+	values := `
+edge:
+  edgeGroupID: edge-group-country-us
+  caddy:
+    enabled: true
+    listenAddr: :443
+    tlsMode: public-on-demand
+    staticTLS:
+      enabled: true
+      secretName: fugue-app-wildcard-tls
+      mountPath: /etc/caddy/static-tls
+      certificateKey: tls.crt
+      privateKeyKey: tls.key
+  groups:
+    - name: country-de
+      edgeGroupID: edge-group-country-de
+      tokenSecret:
+        name: fugue-edge-de-scoped-token
+        key: FUGUE_EDGE_TOKEN
+      nodeSelector:
+        fugue.io/role.edge: "true"
+        fugue.io/schedulable: "true"
+        fugue.io/location-country-code: de
+`
+	if err := os.WriteFile(valuesPath, []byte(values), 0o600); err != nil {
+		t.Fatalf("write values: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "-f", valuesPath)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	for _, name := range []string{"fugue-fugue-edge", "fugue-fugue-edge-country-de"} {
+		doc := manifestDocumentForKindAndName(manifest, "DaemonSet", name)
+		if doc == "" {
+			t.Fatalf("rendered manifest missing %s:\n%s", name, manifest)
+		}
+		for _, want := range []string{
+			`name: FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE`,
+			`value: "/etc/caddy/static-tls/tls.crt"`,
+			`name: FUGUE_EDGE_CADDY_STATIC_TLS_KEY_FILE`,
+			`value: "/etc/caddy/static-tls/tls.key"`,
+			`name: caddy-static-tls`,
+			`mountPath: "/etc/caddy/static-tls"`,
+			`readOnly: true`,
+			`secretName: "fugue-app-wildcard-tls"`,
+			`key: "tls.crt"`,
+			`path: "tls.crt"`,
+			`key: "tls.key"`,
+			`path: "tls.key"`,
+		} {
+			if !strings.Contains(doc, want) {
+				t.Fatalf("%s static TLS manifest missing %q:\n%s", name, want, doc)
+			}
+		}
+	}
+}
+
 func TestDNSShadowDaemonSetDisabledByDefault(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

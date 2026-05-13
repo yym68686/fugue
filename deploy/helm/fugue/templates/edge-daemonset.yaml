@@ -2,6 +2,15 @@
 {{- if and .Values.edge.caddy.enabled (not (trim .Values.edge.edgeGroupID)) }}
 {{- fail "edge.edgeGroupID is required when edge.caddy.enabled=true" }}
 {{- end }}
+{{- $edgeCaddyStaticTLS := default dict .Values.edge.caddy.staticTLS -}}
+{{- $edgeCaddyStaticTLSEnabled := and .Values.edge.caddy.enabled $edgeCaddyStaticTLS.enabled -}}
+{{- $edgeCaddyStaticTLSSecretName := default "" $edgeCaddyStaticTLS.secretName -}}
+{{- $edgeCaddyStaticTLSMountPath := default "/etc/caddy/static-tls" $edgeCaddyStaticTLS.mountPath -}}
+{{- $edgeCaddyStaticTLSCertKey := default "tls.crt" $edgeCaddyStaticTLS.certificateKey -}}
+{{- $edgeCaddyStaticTLSPrivateKeyKey := default "tls.key" $edgeCaddyStaticTLS.privateKeyKey -}}
+{{- if and $edgeCaddyStaticTLSEnabled (not (trim $edgeCaddyStaticTLSSecretName)) }}
+{{- fail "edge.caddy.staticTLS.secretName is required when edge.caddy.staticTLS.enabled=true" }}
+{{- end }}
 {{- $edgeAPIURL := default (printf "http://%s:%v" (include "fugue.fullname" .) .Values.service.port) .Values.edge.apiURL -}}
 {{- $edgeTokenSecretName := default (include "fugue.configSecretName" .) .Values.edge.tokenSecret.name -}}
 {{- $edgeTokenSecretKey := default "FUGUE_EDGE_TLS_ASK_TOKEN" .Values.edge.tokenSecret.key -}}
@@ -89,6 +98,12 @@ spec:
             {{- end }}
             - name: FUGUE_EDGE_PROXY_LISTEN_ADDR
               value: {{ .Values.edge.caddy.proxyListenAddr | quote }}
+            {{- if $edgeCaddyStaticTLSEnabled }}
+            - name: FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE
+              value: {{ printf "%s/%s" (trimSuffix "/" $edgeCaddyStaticTLSMountPath) $edgeCaddyStaticTLSCertKey | quote }}
+            - name: FUGUE_EDGE_CADDY_STATIC_TLS_KEY_FILE
+              value: {{ printf "%s/%s" (trimSuffix "/" $edgeCaddyStaticTLSMountPath) $edgeCaddyStaticTLSPrivateKeyKey | quote }}
+            {{- end }}
             {{- end }}
             {{- with .Values.edge.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -144,6 +159,11 @@ spec:
               mountPath: /config
             - name: caddy-data
               mountPath: /data
+            {{- if $edgeCaddyStaticTLSEnabled }}
+            - name: caddy-static-tls
+              mountPath: {{ $edgeCaddyStaticTLSMountPath | quote }}
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml .Values.edge.caddy.resources | nindent 12 }}
         {{- end }}
@@ -159,6 +179,16 @@ spec:
           hostPath:
             path: {{ .Values.edge.caddy.persistence.hostPath | quote }}
             type: DirectoryOrCreate
+        {{- if $edgeCaddyStaticTLSEnabled }}
+        - name: caddy-static-tls
+          secret:
+            secretName: {{ $edgeCaddyStaticTLSSecretName | quote }}
+            items:
+              - key: {{ $edgeCaddyStaticTLSCertKey | quote }}
+                path: {{ $edgeCaddyStaticTLSCertKey | quote }}
+              - key: {{ $edgeCaddyStaticTLSPrivateKeyKey | quote }}
+                path: {{ $edgeCaddyStaticTLSPrivateKeyKey | quote }}
+        {{- end }}
         {{- end }}
       {{- with .Values.edge.nodeSelector }}
       nodeSelector:

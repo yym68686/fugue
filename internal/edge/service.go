@@ -870,6 +870,11 @@ func (s *Service) validateConfig() error {
 	if strings.TrimSpace(s.Config.EdgeToken) == "" {
 		return fmt.Errorf("FUGUE_EDGE_TOKEN is required")
 	}
+	staticTLSCertFile := strings.TrimSpace(s.Config.CaddyStaticTLSCertFile)
+	staticTLSKeyFile := strings.TrimSpace(s.Config.CaddyStaticTLSKeyFile)
+	if (staticTLSCertFile == "") != (staticTLSKeyFile == "") {
+		return fmt.Errorf("FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE and FUGUE_EDGE_CADDY_STATIC_TLS_KEY_FILE must be configured together")
+	}
 	if s.Config.CaddyEnabled {
 		if strings.TrimSpace(s.Config.EdgeGroupID) == "" {
 			return fmt.Errorf("FUGUE_EDGE_GROUP_ID is required when caddy mode is enabled")
@@ -889,9 +894,14 @@ func (s *Service) validateConfig() error {
 		default:
 			return fmt.Errorf("FUGUE_EDGE_CADDY_TLS_MODE must be off, internal, or public-on-demand")
 		}
+		if staticTLSCertFile != "" && s.normalizedCaddyTLSMode() == caddyTLSModeOff {
+			return fmt.Errorf("FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE requires FUGUE_EDGE_CADDY_TLS_MODE to be internal or public-on-demand")
+		}
 		if _, err := s.caddyAdminEndpoint("/load"); err != nil {
 			return err
 		}
+	} else if staticTLSCertFile != "" {
+		return fmt.Errorf("FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE requires FUGUE_EDGE_CADDY_ENABLED=true")
 	}
 	return nil
 }
@@ -905,12 +915,6 @@ func (s *Service) routeAllowedForThisEdge(route model.EdgeRouteBinding) bool {
 		return true
 	}
 	if !strings.EqualFold(strings.TrimSpace(route.EdgeGroupID), edgeGroupID) {
-		return false
-	}
-	if runtimeEdgeGroupID := strings.TrimSpace(route.RuntimeEdgeGroupID); runtimeEdgeGroupID != "" && !strings.EqualFold(runtimeEdgeGroupID, edgeGroupID) {
-		return false
-	}
-	if policyEdgeGroupID := strings.TrimSpace(route.PolicyEdgeGroupID); policyEdgeGroupID != "" && !strings.EqualFold(policyEdgeGroupID, edgeGroupID) {
 		return false
 	}
 	return true

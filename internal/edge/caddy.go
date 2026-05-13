@@ -197,6 +197,23 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 	default:
 		return nil, 0, fmt.Errorf("FUGUE_EDGE_CADDY_TLS_MODE must be off, internal, or public-on-demand")
 	}
+	if certFile, keyFile := strings.TrimSpace(s.Config.CaddyStaticTLSCertFile), strings.TrimSpace(s.Config.CaddyStaticTLSKeyFile); certFile != "" || keyFile != "" {
+		if certFile == "" || keyFile == "" {
+			return nil, 0, fmt.Errorf("FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE and FUGUE_EDGE_CADDY_STATIC_TLS_KEY_FILE must be configured together")
+		}
+		if tlsMode == caddyTLSModeOff {
+			return nil, 0, fmt.Errorf("static Caddy TLS files require TLS mode to be internal or public-on-demand")
+		}
+		tlsApp := ensureCaddyTLSApp(apps)
+		tlsApp["certificates"] = map[string]any{
+			"load_files": []any{
+				map[string]any{
+					"certificate": certFile,
+					"key":         keyFile,
+				},
+			},
+		}
+	}
 
 	config := map[string]any{
 		"admin": map[string]any{
@@ -222,6 +239,15 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 		return nil, 0, fmt.Errorf("marshal caddy config: %w", err)
 	}
 	return data, len(hosts), nil
+}
+
+func ensureCaddyTLSApp(apps map[string]any) map[string]any {
+	if existing, ok := apps["tls"].(map[string]any); ok {
+		return existing
+	}
+	tlsApp := map[string]any{}
+	apps["tls"] = tlsApp
+	return tlsApp
 }
 
 func (s *Service) caddyAdminEndpoint(path string) (string, error) {

@@ -104,6 +104,12 @@ edge:
       enabled: false
       http: 80
       https: 443
+    staticTLS:
+      enabled: false
+      secretName: ""
+      mountPath: /etc/caddy/static-tls
+      certificateKey: tls.crt
+      privateKeyKey: tls.key
     persistence:
       hostPath: /var/lib/fugue/edge/caddy-data
     resources:

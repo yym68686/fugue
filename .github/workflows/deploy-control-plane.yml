@@ -24,6 +24,8 @@ on:
       - 'go.mod'
       - 'go.sum'
       - 'scripts/install_fugue_ha.sh'
+      - 'scripts/issue_fugue_app_wildcard_tls.sh'
+      - 'scripts/render_fugue_edge_systemd_unit.sh'
       - 'scripts/sync_fugue_edge_proxy.sh'
       - 'scripts/upgrade_fugue_control_plane.sh'
   workflow_dispatch:
@@ -178,6 +180,11 @@ jobs:
           FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED: ${{ vars.FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED || 'false' }}
           FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP: ${{ vars.FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP || '80' }}
           FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS: ${{ vars.FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS || '443' }}
+          FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED: ${{ vars.FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED || 'false' }}
+          FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME: ${{ vars.FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME || '' }}
+          FUGUE_EDGE_CADDY_STATIC_TLS_MOUNT_PATH: ${{ vars.FUGUE_EDGE_CADDY_STATIC_TLS_MOUNT_PATH || '/etc/caddy/static-tls' }}
+          FUGUE_EDGE_CADDY_STATIC_TLS_CERTIFICATE_KEY: ${{ vars.FUGUE_EDGE_CADDY_STATIC_TLS_CERTIFICATE_KEY || 'tls.crt' }}
+          FUGUE_EDGE_CADDY_STATIC_TLS_PRIVATE_KEY_KEY: ${{ vars.FUGUE_EDGE_CADDY_STATIC_TLS_PRIVATE_KEY_KEY || 'tls.key' }}
           FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE: ${{ vars.FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE || '' }}
           FUGUE_EDGE_EXTRA_GROUPS: ${{ vars.FUGUE_EDGE_EXTRA_GROUPS || '' }}
           FUGUE_DNS_ENABLED: ${{ vars.FUGUE_DNS_ENABLED || 'false' }}

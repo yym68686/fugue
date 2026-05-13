@@ -294,14 +294,18 @@ func edgeRoutePolicyByHostname(policies []model.EdgeRoutePolicy) map[string]mode
 }
 
 func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]model.EdgeRoutePolicy, healthyEdgeGroups map[string]bool) model.EdgeRouteBinding {
-	if len(policies) == 0 {
-		binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
-		binding.RouteGeneration = edgeRouteGeneration(binding)
-		return binding
-	}
+	runtimeEdgeGroupID := strings.TrimSpace(firstNonEmpty(binding.RuntimeEdgeGroupID, binding.EdgeGroupID))
+	servingEdgeGroupID := nearestHealthyEdgeGroupID(runtimeEdgeGroupID, healthyEdgeGroups)
 	policy, ok := policies[normalizeExternalAppDomain(binding.Hostname)]
 	if !ok || strings.TrimSpace(policy.AppID) != strings.TrimSpace(binding.AppID) {
-		binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
+		if binding.RouteKind == model.EdgeRouteKindPlatform && servingEdgeGroupID != "" {
+			binding.RoutePolicy = model.EdgeRoutePolicyEnabled
+			binding.RuntimeEdgeGroupID = runtimeEdgeGroupID
+			binding.EdgeGroupID = servingEdgeGroupID
+			binding.FallbackEdgeGroupID = ""
+		} else {
+			binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
+		}
 		binding.RouteGeneration = edgeRouteGeneration(binding)
 		return binding
 	}
@@ -312,11 +316,18 @@ func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]mo
 	}
 	if model.EdgeRoutePolicyAllowsTraffic(binding.RoutePolicy) && strings.TrimSpace(policy.EdgeGroupID) != "" {
 		policyEdgeGroupID := strings.TrimSpace(policy.EdgeGroupID)
-		runtimeEdgeGroupID := strings.TrimSpace(firstNonEmpty(binding.RuntimeEdgeGroupID, binding.EdgeGroupID))
-		if !strings.EqualFold(policyEdgeGroupID, runtimeEdgeGroupID) {
+		if servingEdgeGroupID == "" {
 			binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
 			binding.Status = model.EdgeRouteStatusUnavailable
-			binding.StatusReason = "edge policy target edge group does not match runtime edge group"
+			binding.StatusReason = "edge group has no healthy edge nodes"
+			binding.UpstreamURL = ""
+			binding.RouteGeneration = edgeRouteGeneration(binding)
+			return binding
+		}
+		if !strings.EqualFold(policyEdgeGroupID, servingEdgeGroupID) {
+			binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
+			binding.Status = model.EdgeRouteStatusUnavailable
+			binding.StatusReason = "edge policy target edge group is not the nearest healthy edge group for runtime"
 			binding.UpstreamURL = ""
 			binding.RouteGeneration = edgeRouteGeneration(binding)
 			return binding
@@ -337,6 +348,67 @@ func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]mo
 	}
 	binding.RouteGeneration = edgeRouteGeneration(binding)
 	return binding
+}
+
+func nearestHealthyEdgeGroupID(runtimeEdgeGroupID string, healthyEdgeGroups map[string]bool) string {
+	runtimeEdgeGroupID = strings.TrimSpace(runtimeEdgeGroupID)
+	if runtimeEdgeGroupID != "" && healthyEdgeGroups[runtimeEdgeGroupID] {
+		return runtimeEdgeGroupID
+	}
+	for _, candidate := range edgeRouteFallbackEdgeGroupCandidates(runtimeEdgeGroupID) {
+		candidate = strings.TrimSpace(candidate)
+		if candidate != "" && healthyEdgeGroups[candidate] {
+			return candidate
+		}
+	}
+	candidates := make([]string, 0, len(healthyEdgeGroups))
+	for edgeGroupID, healthy := range healthyEdgeGroups {
+		if healthy {
+			candidates = append(candidates, edgeGroupID)
+		}
+	}
+	sort.Strings(candidates)
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0]
+}
+
+func edgeRouteFallbackEdgeGroupCandidates(edgeGroupID string) []string {
+	country := strings.TrimPrefix(strings.TrimSpace(edgeGroupID), "edge-group-country-")
+	if country == edgeGroupID {
+		country = ""
+	}
+	switch country {
+	case "hk", "cn", "tw", "jp", "kr", "sg", "in":
+		return edgeRouteCountryGroups("jp", "sg", "kr", "tw", "us", "de")
+	case "us", "ca", "mx":
+		return edgeRouteCountryGroups("us", "ca", "de")
+	case "de", "fr", "nl", "gb", "uk", "es", "it", "pl":
+		return edgeRouteCountryGroups("de", "fr", "nl", "gb", "us")
+	default:
+		if strings.HasPrefix(strings.TrimSpace(edgeGroupID), "edge-group-region-asia") {
+			return edgeRouteCountryGroups("jp", "sg", "us", "de")
+		}
+		if strings.HasPrefix(strings.TrimSpace(edgeGroupID), "edge-group-region-eu") {
+			return edgeRouteCountryGroups("de", "fr", "nl", "us")
+		}
+		if strings.HasPrefix(strings.TrimSpace(edgeGroupID), "edge-group-region-us") ||
+			strings.HasPrefix(strings.TrimSpace(edgeGroupID), "edge-group-region-na") {
+			return edgeRouteCountryGroups("us", "ca", "de")
+		}
+		return []string{defaultEdgeGroupID}
+	}
+}
+
+func edgeRouteCountryGroups(countries ...string) []string {
+	out := make([]string, 0, len(countries)+1)
+	for _, country := range countries {
+		if slug := edgeRouteSlug(country); slug != "" {
+			out = append(out, "edge-group-country-"+slug)
+		}
+	}
+	return append(out, defaultEdgeGroupID)
 }
 
 func (s *Server) edgeRouteHealthyEdgeGroups() (map[string]bool, error) {

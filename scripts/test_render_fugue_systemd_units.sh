@@ -40,7 +40,9 @@ bash "${REPO_ROOT}/scripts/render_fugue_edge_systemd_unit.sh" \
   --caddy-config-dir "/var/lib/fugue/edge/caddy-config" \
   --caddy-cache-dir "/var/lib/fugue/edge/caddy-cache" \
   --caddy-listen-addr ":443" \
-  --caddy-tls-mode "public-on-demand" >/dev/null
+  --caddy-tls-mode "public-on-demand" \
+  --caddy-static-tls-cert-file "/etc/caddy/static-tls/tls.crt" \
+  --caddy-static-tls-key-file "/etc/caddy/static-tls/tls.key" >/dev/null
 
 [[ -f "${tmpdir}/fugue-edge.env" ]] || fail "missing fugue-edge.env"
 [[ -f "${tmpdir}/fugue-edge.service" ]] || fail "missing fugue-edge.service"
@@ -51,6 +53,8 @@ assert_contains "${tmpdir}/fugue-edge.env" "FUGUE_EDGE_PUBLIC_IPV4=203.0.113.10"
 assert_contains "${tmpdir}/fugue-edge.env" "FUGUE_EDGE_ROUTES_CACHE_PATH=/var/lib/fugue/edge/routes-cache.json"
 assert_contains "${tmpdir}/fugue-edge.env" "FUGUE_EDGE_CADDY_LISTEN_ADDR=:443"
 assert_contains "${tmpdir}/fugue-edge.env" "FUGUE_EDGE_CADDY_TLS_MODE=public-on-demand"
+assert_contains "${tmpdir}/fugue-edge.env" "FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE=/etc/caddy/static-tls/tls.crt"
+assert_contains "${tmpdir}/fugue-edge.env" "FUGUE_EDGE_CADDY_STATIC_TLS_KEY_FILE=/etc/caddy/static-tls/tls.key"
 assert_contains "${tmpdir}/fugue-edge.env" "FUGUE_EDGE_CADDY_CONFIG_DIR=/var/lib/fugue/edge/caddy-config"
 assert_contains "${tmpdir}/fugue-edge.env" "FUGUE_EDGE_CADDY_CACHE_DIR=/var/lib/fugue/edge/caddy-cache"
 assert_not_contains "${tmpdir}/fugue-edge.env" "FUGUE_EDGE_TOKEN="
@@ -74,6 +78,37 @@ if bash "${REPO_ROOT}/scripts/render_fugue_edge_systemd_unit.sh" \
   --public-ipv4 "203.0.113.10" \
   --caddy-tls-mode "invalid" >"${tmpdir}/bad.out" 2>"${tmpdir}/bad.err"; then
   fail "expected invalid caddy tls mode to fail"
+fi
+
+if bash "${REPO_ROOT}/scripts/render_fugue_edge_systemd_unit.sh" \
+  --output-dir "${tmpdir}/bad" \
+  --edge-id "edge-us-1" \
+  --edge-group-id "edge-group-country-us" \
+  --public-ipv4 "203.0.113.10" \
+  --caddy-tls-mode "off" \
+  --caddy-static-tls-cert-file "/etc/caddy/static-tls/tls.crt" \
+  --caddy-static-tls-key-file "/etc/caddy/static-tls/tls.key" >"${tmpdir}/bad.out" 2>"${tmpdir}/bad.err"; then
+  fail "expected static TLS with caddy TLS off to fail"
+fi
+
+cloudflare_env="${tmpdir}/cloudflare.env"
+printf '%s\n' "CLOUDFLARE_DNS_API_TOKEN='test-token-should-not-print'" >"${cloudflare_env}"
+issue_plan="${tmpdir}/issue-plan.out"
+bash "${REPO_ROOT}/scripts/issue_fugue_app_wildcard_tls.sh" \
+  --cloudflare-env-file "${cloudflare_env}" \
+  --domain "fugue.pro" \
+  --namespace "fugue-system" \
+  --secret-name "fugue-app-wildcard-tls" \
+  --dry-run >"${issue_plan}"
+assert_contains "${issue_plan}" "wildcard_domain=*.fugue.pro"
+assert_contains "${issue_plan}" "secret_name=fugue-app-wildcard-tls"
+assert_contains "${issue_plan}" "acme.sh --issue --dns dns_cf -d *.fugue.pro -d fugue.pro --server letsencrypt"
+assert_not_contains "${issue_plan}" "test-token-should-not-print"
+
+if bash "${REPO_ROOT}/scripts/issue_fugue_app_wildcard_tls.sh" \
+  --cloudflare-env-file "${tmpdir}/missing.env" \
+  --dry-run >"${tmpdir}/bad-issue.out" 2>"${tmpdir}/bad-issue.err"; then
+  fail "expected missing Cloudflare env file to fail"
 fi
 
 bash "${REPO_ROOT}/scripts/render_fugue_dns_systemd_unit.sh" \

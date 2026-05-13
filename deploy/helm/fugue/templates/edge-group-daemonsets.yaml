@@ -8,10 +8,14 @@
 {{- $tokenSecret := default dict $group.tokenSecret -}}
 {{- $caddy := default dict $group.caddy -}}
 {{- $publicHostPorts := default dict $caddy.publicHostPorts -}}
+{{- $rootStaticTLS := default dict $.Values.edge.caddy.staticTLS -}}
+{{- $groupStaticTLS := default dict $caddy.staticTLS -}}
 {{- $caddyEnabled := $.Values.edge.caddy.enabled -}}
 {{- if hasKey $caddy "enabled" }}{{- $caddyEnabled = $caddy.enabled -}}{{- end -}}
 {{- $publicHostPortsEnabled := $.Values.edge.caddy.publicHostPorts.enabled -}}
 {{- if hasKey $publicHostPorts "enabled" }}{{- $publicHostPortsEnabled = $publicHostPorts.enabled -}}{{- end -}}
+{{- $staticTLSEnabled := default false $rootStaticTLS.enabled -}}
+{{- if hasKey $groupStaticTLS "enabled" }}{{- $staticTLSEnabled = $groupStaticTLS.enabled -}}{{- end -}}
 {{- $edgeAPIURL := default (default (printf "http://%s:%v" (include "fugue.fullname" $) $.Values.service.port) $.Values.edge.apiURL) $group.apiURL -}}
 {{- $edgeTokenSecretName := default (default (include "fugue.configSecretName" $) $.Values.edge.tokenSecret.name) $tokenSecret.name -}}
 {{- $edgeTokenSecretKey := default (default "FUGUE_EDGE_TLS_ASK_TOKEN" $.Values.edge.tokenSecret.key) $tokenSecret.key -}}
@@ -28,6 +32,13 @@
 {{- $caddyTLSMode := default $.Values.edge.caddy.tlsMode $caddy.tlsMode -}}
 {{- $caddyTLSAskURL := default $.Values.edge.caddy.tlsAskURL $caddy.tlsAskURL -}}
 {{- $caddyProxyListenAddr := default $.Values.edge.caddy.proxyListenAddr $caddy.proxyListenAddr -}}
+{{- $staticTLSSecretName := default (default "" $rootStaticTLS.secretName) $groupStaticTLS.secretName -}}
+{{- $staticTLSMountPath := default (default "/etc/caddy/static-tls" $rootStaticTLS.mountPath) $groupStaticTLS.mountPath -}}
+{{- $staticTLSCertKey := default (default "tls.crt" $rootStaticTLS.certificateKey) $groupStaticTLS.certificateKey -}}
+{{- $staticTLSPrivateKeyKey := default (default "tls.key" $rootStaticTLS.privateKeyKey) $groupStaticTLS.privateKeyKey -}}
+{{- if and $caddyEnabled $staticTLSEnabled (not (trim $staticTLSSecretName)) }}
+{{- fail (printf "edge.groups[%s].caddy.staticTLS.secretName or edge.caddy.staticTLS.secretName is required when staticTLS is enabled" $name) }}
+{{- end }}
 {{- $caddyPersistence := default dict $.Values.edge.caddy.persistence -}}
 {{- $groupCaddyPersistence := default dict $caddy.persistence -}}
 {{- $caddyDataHostPath := default (default "/var/lib/fugue/edge/caddy-data" $caddyPersistence.hostPath) $groupCaddyPersistence.hostPath -}}
@@ -113,6 +124,12 @@ spec:
             {{- end }}
             - name: FUGUE_EDGE_PROXY_LISTEN_ADDR
               value: {{ $caddyProxyListenAddr | quote }}
+            {{- if and $caddyEnabled $staticTLSEnabled }}
+            - name: FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE
+              value: {{ printf "%s/%s" (trimSuffix "/" $staticTLSMountPath) $staticTLSCertKey | quote }}
+            - name: FUGUE_EDGE_CADDY_STATIC_TLS_KEY_FILE
+              value: {{ printf "%s/%s" (trimSuffix "/" $staticTLSMountPath) $staticTLSPrivateKeyKey | quote }}
+            {{- end }}
             {{- end }}
             {{- with $.Values.edge.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -171,6 +188,11 @@ spec:
               mountPath: /config
             - name: caddy-data
               mountPath: /data
+            {{- if and $caddyEnabled $staticTLSEnabled }}
+            - name: caddy-static-tls
+              mountPath: {{ $staticTLSMountPath | quote }}
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml $.Values.edge.caddy.resources | nindent 12 }}
         {{- end }}
@@ -186,6 +208,16 @@ spec:
           hostPath:
             path: {{ $caddyDataHostPath | quote }}
             type: DirectoryOrCreate
+        {{- if and $caddyEnabled $staticTLSEnabled }}
+        - name: caddy-static-tls
+          secret:
+            secretName: {{ $staticTLSSecretName | quote }}
+            items:
+              - key: {{ $staticTLSCertKey | quote }}
+                path: {{ $staticTLSCertKey | quote }}
+              - key: {{ $staticTLSPrivateKeyKey | quote }}
+                path: {{ $staticTLSPrivateKeyKey | quote }}
+        {{- end }}
         {{- end }}
       nodeSelector:
         {{- toYaml $group.nodeSelector | nindent 8 }}

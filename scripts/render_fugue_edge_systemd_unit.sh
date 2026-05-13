@@ -35,6 +35,10 @@ Options:
   --caddy-listen-addr <addr>      Caddy public listen addr. Default: :443.
   --caddy-tls-mode <mode>         Caddy TLS mode: off, internal, public-on-demand. Default: public-on-demand.
   --caddy-tls-ask-url <url>       Caddy on-demand TLS ask URL.
+  --caddy-static-tls-cert-file <path>
+                                  Static certificate path loaded by Caddy JSON config.
+  --caddy-static-tls-key-file <path>
+                                  Static private key path loaded by Caddy JSON config.
   --caddy-enabled <true|false>    Whether fugue-edge manages Caddy config. Default: true.
   --sync-interval <duration>      Bundle sync interval. Default: 15s.
   --heartbeat-interval <duration> Heartbeat interval. Default: 30s.
@@ -81,6 +85,8 @@ caddy_admin_url="${FUGUE_EDGE_CADDY_ADMIN_URL:-http://127.0.0.1:2019}"
 caddy_listen_addr="${FUGUE_EDGE_CADDY_LISTEN_ADDR:-:443}"
 caddy_tls_mode="${FUGUE_EDGE_CADDY_TLS_MODE:-public-on-demand}"
 caddy_tls_ask_url="${FUGUE_EDGE_CADDY_TLS_ASK_URL:-}"
+caddy_static_tls_cert_file="${FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE:-}"
+caddy_static_tls_key_file="${FUGUE_EDGE_CADDY_STATIC_TLS_KEY_FILE:-}"
 caddy_enabled="${FUGUE_EDGE_CADDY_ENABLED:-true}"
 sync_interval="${FUGUE_EDGE_SYNC_INTERVAL:-15s}"
 heartbeat_interval="${FUGUE_EDGE_HEARTBEAT_INTERVAL:-30s}"
@@ -109,6 +115,8 @@ while [[ $# -gt 0 ]]; do
     --caddy-listen-addr) require_value "$1" "${2:-}"; caddy_listen_addr="$2"; shift 2 ;;
     --caddy-tls-mode) require_value "$1" "${2:-}"; caddy_tls_mode="$2"; shift 2 ;;
     --caddy-tls-ask-url) require_value "$1" "${2:-}"; caddy_tls_ask_url="$2"; shift 2 ;;
+    --caddy-static-tls-cert-file) require_value "$1" "${2:-}"; caddy_static_tls_cert_file="$2"; shift 2 ;;
+    --caddy-static-tls-key-file) require_value "$1" "${2:-}"; caddy_static_tls_key_file="$2"; shift 2 ;;
     --caddy-enabled) require_value "$1" "${2:-}"; caddy_enabled="$2"; shift 2 ;;
     --sync-interval) require_value "$1" "${2:-}"; sync_interval="$2"; shift 2 ;;
     --heartbeat-interval) require_value "$1" "${2:-}"; heartbeat_interval="$2"; shift 2 ;;
@@ -132,6 +140,11 @@ case "${caddy_tls_mode}" in
   off|internal|public-on-demand) ;;
   *) fail "--caddy-tls-mode must be one of: off, internal, public-on-demand" ;;
 esac
+if [[ -n "${caddy_static_tls_cert_file}${caddy_static_tls_key_file}" ]]; then
+  [[ -n "${caddy_static_tls_cert_file}" && -n "${caddy_static_tls_key_file}" ]] || fail "--caddy-static-tls-cert-file and --caddy-static-tls-key-file must be set together"
+  [[ "${caddy_enabled}" == "true" ]] || fail "--caddy-enabled must be true when static TLS files are configured"
+  [[ "${caddy_tls_mode}" != "off" ]] || fail "--caddy-tls-mode must not be off when static TLS files are configured"
+fi
 
 for pair in \
   "--api-url=${api_url}" \
@@ -146,6 +159,8 @@ for pair in \
   "--proxy-listen-addr=${proxy_listen_addr}" \
   "--caddy-admin-url=${caddy_admin_url}" \
   "--caddy-listen-addr=${caddy_listen_addr}" \
+  "--caddy-static-tls-cert-file=${caddy_static_tls_cert_file}" \
+  "--caddy-static-tls-key-file=${caddy_static_tls_key_file}" \
   "--sync-interval=${sync_interval}" \
   "--heartbeat-interval=${heartbeat_interval}" \
   "--http-timeout=${http_timeout}"; do
@@ -176,6 +191,8 @@ FUGUE_EDGE_CADDY_LISTEN_ADDR=${caddy_listen_addr}
 FUGUE_EDGE_CADDY_TLS_MODE=${caddy_tls_mode}
 FUGUE_EDGE_CADDY_TLS_ASK_URL=${caddy_tls_ask_url}
 FUGUE_EDGE_PROXY_LISTEN_ADDR=${proxy_listen_addr}
+FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE=${caddy_static_tls_cert_file}
+FUGUE_EDGE_CADDY_STATIC_TLS_KEY_FILE=${caddy_static_tls_key_file}
 FUGUE_EDGE_CADDY_CONFIG_DIR=${caddy_config_dir}
 FUGUE_EDGE_CADDY_CACHE_DIR=${caddy_cache_dir}
 EOF
