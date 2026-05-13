@@ -35,6 +35,7 @@ func main() {
 		ControlPlaneGitHubToken:      cfg.ControlPlaneGitHubToken,
 		AppBaseDomain:                cfg.AppBaseDomain,
 		APIPublicDomain:              cfg.APIPublicDomain,
+		DNSStaticRecordsJSON:         cfg.DNSStaticRecordsJSON,
 		EdgeTLSAskToken:              cfg.EdgeTLSAskToken,
 		RegistryPushBase:             cfg.RegistryPushBase,
 		RegistryPullBase:             cfg.RegistryPullBase,

@@ -5246,7 +5246,7 @@ components:
           type: string
         type:
           type: string
-          enum: [A, AAAA]
+          enum: [A, AAAA, CAA, CNAME, MX, NS, TXT]
         values:
           type: array
           items:
@@ -5256,7 +5256,7 @@ components:
           format: int32
         record_kind:
           type: string
-          enum: [custom-domain-target, probe]
+          enum: [custom-domain-target, platform, probe, protected]
         app_id:
           type: string
         tenant_id:

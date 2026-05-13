@@ -98,6 +98,10 @@ spec:
               value: {{ .Values.api.appBaseDomain | quote }}
             - name: FUGUE_API_PUBLIC_DOMAIN
               value: {{ .Values.api.apiPublicDomain | quote }}
+            {{- if .Values.api.dnsStaticRecordsJSON }}
+            - name: FUGUE_DNS_STATIC_RECORDS_JSON
+              value: {{ .Values.api.dnsStaticRecordsJSON | quote }}
+            {{- end }}
             - name: FUGUE_EDGE_TLS_ASK_TOKEN
               valueFrom:
                 secretKeyRef:

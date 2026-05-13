@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"log"
 	"net"
 	"net/http"
 	"sort"
@@ -182,7 +183,11 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		return model.EdgeDNSBundle{}, err
 	}
 
-	records := make([]model.EdgeDNSRecord, 0, len(domains)+1)
+	staticRecords := edgeDNSStaticRecordsForZone(s.dnsStaticRecords, options.Zone)
+	protectedNames := edgeDNSProtectedRecordNames(staticRecords)
+
+	records := make([]model.EdgeDNSRecord, 0, len(staticRecords)+len(apps)+len(domains)+1)
+	records = append(records, staticRecords...)
 	records = append(records, edgeDNSRecordsForTarget(
 		normalizeExternalAppDomain(defaultEdgeDNSProbeLabel+"."+options.Zone),
 		options.AnswerIPs,
@@ -195,6 +200,34 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		options.EdgeGroupID,
 		"",
 	)...)
+
+	for _, app := range appByID {
+		if app.Route == nil || strings.TrimSpace(app.Route.Hostname) == "" {
+			continue
+		}
+		hostname := normalizeExternalAppDomain(app.Route.Hostname)
+		if !edgeDNSTargetWithinZone(hostname, options.Zone) || protectedNames[hostname] {
+			continue
+		}
+		binding := s.deriveEdgeRouteBinding(r, app, hostname, model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
+		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
+		answerIPs := edgeDNSAnswerIPsForBinding(binding, options, edgeAnswerIPsByGroup)
+		if len(answerIPs) == 0 {
+			continue
+		}
+		records = append(records, edgeDNSRecordsForTarget(
+			hostname,
+			answerIPs,
+			options.TTL,
+			model.EdgeDNSRecordKindPlatform,
+			binding.Status,
+			binding.StatusReason,
+			app.ID,
+			app.TenantID,
+			binding.EdgeGroupID,
+			binding.FallbackEdgeGroupID,
+		)...)
+	}
 
 	for _, domain := range domains {
 		hostname := normalizeExternalAppDomain(domain.Hostname)
@@ -211,7 +244,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		if target == "" {
 			target = normalizeExternalAppDomain(s.primaryCustomDomainTarget(app))
 		}
-		if !edgeDNSTargetWithinZone(target, options.Zone) {
+		if !edgeDNSTargetWithinZone(target, options.Zone) || protectedNames[target] {
 			continue
 		}
 		answerIPs := edgeDNSAnswerIPsForBinding(binding, options, edgeAnswerIPsByGroup)
@@ -242,6 +275,139 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	}
 	bundle.Version = edgeDNSBundleVersion(bundle)
 	return bundle, nil
+}
+
+type edgeDNSStaticRecordsEnvelope struct {
+	Records []model.EdgeDNSRecord `json:"records"`
+}
+
+func parseEdgeDNSStaticRecords(raw string, logger *log.Logger) []model.EdgeDNSRecord {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var records []model.EdgeDNSRecord
+	if err := json.Unmarshal([]byte(raw), &records); err != nil {
+		var envelope edgeDNSStaticRecordsEnvelope
+		if envelopeErr := json.Unmarshal([]byte(raw), &envelope); envelopeErr != nil {
+			if logger != nil {
+				logger.Printf("ignoring FUGUE_DNS_STATIC_RECORDS_JSON: %v", err)
+			}
+			return nil
+		}
+		records = envelope.Records
+	}
+	out := make([]model.EdgeDNSRecord, 0, len(records))
+	for _, record := range records {
+		normalized, ok := normalizeEdgeDNSStaticRecord(record)
+		if ok {
+			out = append(out, normalized)
+		}
+	}
+	return dedupeAndSortEdgeDNSRecords(out)
+}
+
+func normalizeEdgeDNSStaticRecord(record model.EdgeDNSRecord) (model.EdgeDNSRecord, bool) {
+	record.Name = normalizeExternalAppDomain(record.Name)
+	record.Type = strings.ToUpper(strings.TrimSpace(record.Type))
+	if record.Name == "" || !edgeDNSSupportedRecordType(record.Type) {
+		return model.EdgeDNSRecord{}, false
+	}
+	if record.TTL <= 0 {
+		record.TTL = defaultEdgeDNSTTL
+	}
+	if record.RecordKind == "" {
+		record.RecordKind = model.EdgeDNSRecordKindProtected
+	}
+	if record.Status == "" {
+		record.Status = model.EdgeRouteStatusActive
+	}
+	record.AppID = strings.TrimSpace(record.AppID)
+	record.TenantID = strings.TrimSpace(record.TenantID)
+	record.EdgeGroupID = strings.TrimSpace(record.EdgeGroupID)
+	record.FallbackEdgeGroupID = strings.TrimSpace(record.FallbackEdgeGroupID)
+	record.StatusReason = strings.TrimSpace(record.StatusReason)
+
+	values := make([]string, 0, len(record.Values))
+	for _, value := range record.Values {
+		normalized := normalizeEdgeDNSStaticRecordValue(record.Type, value)
+		if normalized == "" {
+			continue
+		}
+		values = append(values, normalized)
+	}
+	record.Values = uniqueSortedStrings(values)
+	if len(record.Values) == 0 {
+		return model.EdgeDNSRecord{}, false
+	}
+	record.RecordGeneration = edgeDNSRecordGeneration(record)
+	return record, true
+}
+
+func edgeDNSSupportedRecordType(recordType string) bool {
+	switch strings.ToUpper(strings.TrimSpace(recordType)) {
+	case model.EdgeDNSRecordTypeA,
+		model.EdgeDNSRecordTypeAAAA,
+		model.EdgeDNSRecordTypeCAA,
+		model.EdgeDNSRecordTypeCNAME,
+		model.EdgeDNSRecordTypeMX,
+		model.EdgeDNSRecordTypeNS,
+		model.EdgeDNSRecordTypeTXT:
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeEdgeDNSStaticRecordValue(recordType, value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	switch strings.ToUpper(strings.TrimSpace(recordType)) {
+	case model.EdgeDNSRecordTypeA:
+		ip := net.ParseIP(value)
+		if ip == nil || ip.To4() == nil {
+			return ""
+		}
+		return ip.To4().String()
+	case model.EdgeDNSRecordTypeAAAA:
+		ip := net.ParseIP(value)
+		if ip == nil || ip.To4() != nil {
+			return ""
+		}
+		return ip.String()
+	case model.EdgeDNSRecordTypeCNAME, model.EdgeDNSRecordTypeNS:
+		return normalizeExternalAppDomain(value)
+	default:
+		return value
+	}
+}
+
+func edgeDNSStaticRecordsForZone(records []model.EdgeDNSRecord, zone string) []model.EdgeDNSRecord {
+	zone = normalizeExternalAppDomain(zone)
+	if zone == "" || len(records) == 0 {
+		return nil
+	}
+	out := make([]model.EdgeDNSRecord, 0, len(records))
+	for _, record := range records {
+		if edgeDNSTargetWithinZone(record.Name, zone) {
+			out = append(out, record)
+		}
+	}
+	return out
+}
+
+func edgeDNSProtectedRecordNames(records []model.EdgeDNSRecord) map[string]bool {
+	out := make(map[string]bool, len(records))
+	for _, record := range records {
+		if record.RecordKind == model.EdgeDNSRecordKindProtected {
+			if name := normalizeExternalAppDomain(record.Name); name != "" && !strings.HasPrefix(name, "*.") {
+				out[name] = true
+			}
+		}
+	}
+	return out
 }
 
 func (s *Server) edgeDNSAnswerIPsByGroup(options edgeDNSBundleOptions) (map[string][]string, error) {

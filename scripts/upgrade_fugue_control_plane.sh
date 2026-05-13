@@ -28,6 +28,7 @@ command_exists() {
 
 CONTROL_PLANE_AUTOMATION_TMP_DIR=""
 UPGRADE_OVERRIDE_VALUES_FILE=""
+DNS_STATIC_RECORDS_FILE=""
 LOCAL_CONTROL_PLANE_AUTOMATION_DIR="${FUGUE_LOCAL_CONTROL_PLANE_AUTOMATION_DIR:-${HOME}/.config/fugue/control-plane-automation}"
 LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR="${FUGUE_LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR:-/root/.config/fugue/control-plane-automation}"
 CONTROL_PLANE_HOSTS_ENV_LOADED="false"
@@ -309,6 +310,9 @@ cleanup_control_plane_automation_tmp() {
 cleanup_upgrade_override_values() {
   if [[ -n "${UPGRADE_OVERRIDE_VALUES_FILE}" && -f "${UPGRADE_OVERRIDE_VALUES_FILE}" ]]; then
     rm -f "${UPGRADE_OVERRIDE_VALUES_FILE}"
+  fi
+  if [[ -n "${DNS_STATIC_RECORDS_FILE}" && -f "${DNS_STATIC_RECORDS_FILE}" ]]; then
+    rm -f "${DNS_STATIC_RECORDS_FILE}"
   fi
 }
 
@@ -651,8 +655,20 @@ dns_answer_ip_count() {
   dns_answer_ips_lines "$1" | awk 'NF > 0 {count++} END {print count + 0}'
 }
 
+csv_lines() {
+  local raw="$1"
+  raw="${raw//;/,}"
+  printf '%s\n' "${raw}" | tr ',' '\n' | while IFS= read -r value; do
+    value="$(trim_field "${value}")"
+    if [[ -n "${value}" ]]; then
+      printf '%s\n' "${value}"
+    fi
+  done
+}
+
 append_upgrade_dns_values() {
   local answer_ip
+  local nameserver
   local rendered_answer_ips=0
 
   cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<EOF
@@ -706,16 +722,28 @@ EOF
     printf '  zone: %s\n' "$(yaml_quote "${FUGUE_DNS_ZONE}")"
     printf '  ttl: %s\n' "${FUGUE_DNS_TTL}"
   } >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+  if [[ -n "$(trim_field "${FUGUE_DNS_NAMESERVERS:-}")" ]]; then
+    printf '  nameservers:\n' >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+    while IFS= read -r nameserver; do
+      printf '    - %s\n' "$(yaml_quote "${nameserver}")" >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+    done < <(csv_lines "${FUGUE_DNS_NAMESERVERS}")
+  fi
   dns_extra_groups_yaml >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
 }
 
 build_dns_helm_set_args() {
   local answer_ip
+  local nameserver
   local index=0
 
   DNS_HELM_SET_ARGS=(
     --set "dns.enabled=${FUGUE_DNS_ENABLED}"
   )
+  if [[ -n "$(trim_field "${FUGUE_DNS_STATIC_RECORDS_JSON:-}")" ]]; then
+    DNS_STATIC_RECORDS_FILE="$(mktemp -t fugue-dns-static-records.XXXXXX.json)"
+    printf '%s' "${FUGUE_DNS_STATIC_RECORDS_JSON}" >"${DNS_STATIC_RECORDS_FILE}"
+    DNS_HELM_SET_ARGS+=(--set-file "api.dnsStaticRecordsJSON=${DNS_STATIC_RECORDS_FILE}")
+  fi
   if [[ "${FUGUE_DNS_ENABLED}" != "true" ]]; then
     return 0
   fi
@@ -739,6 +767,11 @@ build_dns_helm_set_args() {
     DNS_HELM_SET_ARGS+=(--set-string "dns.routeAAnswerIPs[${index}]=${answer_ip}")
     index=$((index + 1))
   done < <(dns_answer_ips_lines "${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-}")
+  index=0
+  while IFS= read -r nameserver; do
+    DNS_HELM_SET_ARGS+=(--set-string "dns.nameservers[${index}]=${nameserver}")
+    index=$((index + 1))
+  done < <(csv_lines "${FUGUE_DNS_NAMESERVERS:-}")
 }
 
 use_local_control_plane_automation_bundle_from_dir() {
@@ -1861,8 +1894,10 @@ main() {
   FUGUE_DNS_ENABLED="${FUGUE_DNS_ENABLED:-false}"
   FUGUE_DNS_ANSWER_IPS="${FUGUE_DNS_ANSWER_IPS:-}"
   FUGUE_DNS_ROUTE_A_ANSWER_IPS="${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-}"
+  FUGUE_DNS_STATIC_RECORDS_JSON="${FUGUE_DNS_STATIC_RECORDS_JSON:-}"
   FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE="${FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE:-}"
   FUGUE_DNS_EXTRA_GROUPS="${FUGUE_DNS_EXTRA_GROUPS:-}"
+  FUGUE_DNS_NAMESERVERS="${FUGUE_DNS_NAMESERVERS:-}"
   FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED="${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED:-false}"
   if [[ "${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED}" == "true" ]]; then
     FUGUE_DNS_UDP_ADDR="${FUGUE_DNS_UDP_ADDR:-:53}"
@@ -1970,7 +2005,7 @@ main() {
   log "cluster join registry endpoint: ${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}"
   log "app base domain: ${FUGUE_APP_BASE_DOMAIN}"
   log "custom domain base domain: dns.${FUGUE_APP_BASE_DOMAIN}"
-  log "dns shadow: enabled=${FUGUE_DNS_ENABLED} answer_ips=${FUGUE_DNS_ANSWER_IPS:-<none>} route_a_answer_ips=${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-<none>} public_hostports=${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED} udp=${FUGUE_DNS_UDP_ADDR} tcp=${FUGUE_DNS_TCP_ADDR}"
+  log "dns shadow: enabled=${FUGUE_DNS_ENABLED} zone=${FUGUE_DNS_ZONE} answer_ips=${FUGUE_DNS_ANSWER_IPS:-<none>} route_a_answer_ips=${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-<none>} nameservers=${FUGUE_DNS_NAMESERVERS:-<none>} static_records=$([[ -n "$(trim_field "${FUGUE_DNS_STATIC_RECORDS_JSON}")" ]] && printf enabled || printf disabled) public_hostports=${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED} udp=${FUGUE_DNS_UDP_ADDR} tcp=${FUGUE_DNS_TCP_ADDR}"
   log "dns scheduling: primary_country=${FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE:-<none>} extra_groups=${FUGUE_DNS_EXTRA_GROUPS:-<none>}"
   log "shared workspace storage: enabled=${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED} class=${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS}"
 

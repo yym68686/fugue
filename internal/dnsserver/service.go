@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -371,12 +372,18 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 			resp.Ns = append(resp.Ns, s.soaRecord(zone))
 		}
 	case miekgdns.TypeNS:
-		if name == zone {
+		records, nameExists := edgeDNSRecordsForQuestion(snapshot, name, question.Qtype)
+		if len(records) > 0 {
+			resp.Answer = append(resp.Answer, records...)
+		} else if name == zone {
 			resp.Answer = append(resp.Answer, s.nsRecords(zone)...)
+		} else if !nameExists {
+			resp.Rcode = miekgdns.RcodeNameError
+			resp.Ns = append(resp.Ns, s.soaRecord(zone))
 		} else {
 			resp.Ns = append(resp.Ns, s.soaRecord(zone))
 		}
-	case miekgdns.TypeA, miekgdns.TypeAAAA:
+	case miekgdns.TypeA, miekgdns.TypeAAAA, miekgdns.TypeCAA, miekgdns.TypeCNAME, miekgdns.TypeMX, miekgdns.TypeTXT:
 		records, nameExists := edgeDNSRecordsForQuestion(snapshot, name, question.Qtype)
 		if len(records) > 0 {
 			resp.Answer = append(resp.Answer, records...)
@@ -1011,53 +1018,145 @@ func edgeDNSRecordsForQuestion(bundle *model.EdgeDNSBundle, name string, qtype u
 	if bundle == nil {
 		return nil, false
 	}
-	recordType := ""
+	recordTypes := []string{}
 	switch qtype {
 	case miekgdns.TypeA:
-		recordType = model.EdgeDNSRecordTypeA
+		recordTypes = []string{model.EdgeDNSRecordTypeA}
 	case miekgdns.TypeAAAA:
-		recordType = model.EdgeDNSRecordTypeAAAA
+		recordTypes = []string{model.EdgeDNSRecordTypeAAAA}
+	case miekgdns.TypeCAA:
+		recordTypes = []string{model.EdgeDNSRecordTypeCAA}
+	case miekgdns.TypeCNAME:
+		recordTypes = []string{model.EdgeDNSRecordTypeCNAME}
+	case miekgdns.TypeMX:
+		recordTypes = []string{model.EdgeDNSRecordTypeMX}
+	case miekgdns.TypeNS:
+		recordTypes = []string{model.EdgeDNSRecordTypeNS}
+	case miekgdns.TypeTXT:
+		recordTypes = []string{model.EdgeDNSRecordTypeTXT}
 	default:
 		return nil, edgeDNSNameExists(bundle, name)
 	}
+	matchingRecords, ownerName := edgeDNSMatchingRecords(bundle, name)
+	nameExists := len(matchingRecords) > 0
 	answers := make([]miekgdns.RR, 0)
-	nameExists := false
-	for _, record := range bundle.Records {
-		if normalizeName(record.Name) != name {
-			continue
+	for _, recordType := range recordTypes {
+		for _, record := range matchingRecords {
+			if strings.EqualFold(record.Type, recordType) {
+				answers = append(answers, rrForEdgeDNSRecord(record, ownerName)...)
+			}
 		}
-		nameExists = true
-		if strings.EqualFold(record.Type, recordType) {
-			answers = append(answers, rrForEdgeDNSRecord(record)...)
+	}
+	if len(answers) == 0 && (qtype == miekgdns.TypeA || qtype == miekgdns.TypeAAAA) {
+		for _, record := range matchingRecords {
+			if strings.EqualFold(record.Type, model.EdgeDNSRecordTypeCNAME) {
+				answers = append(answers, rrForEdgeDNSRecord(record, ownerName)...)
+			}
 		}
 	}
 	return answers, nameExists
 }
 
-func rrForEdgeDNSRecord(record model.EdgeDNSRecord) []miekgdns.RR {
+func edgeDNSMatchingRecords(bundle *model.EdgeDNSBundle, name string) ([]model.EdgeDNSRecord, string) {
+	if bundle == nil {
+		return nil, normalizeName(name)
+	}
+	name = normalizeName(name)
+	exact := make([]model.EdgeDNSRecord, 0)
+	for _, record := range bundle.Records {
+		if normalizeName(record.Name) == name {
+			exact = append(exact, record)
+		}
+	}
+	if len(exact) > 0 {
+		return exact, name
+	}
+	wildcard := edgeDNSWildcardName(name)
+	if wildcard == "" {
+		return nil, name
+	}
+	matches := make([]model.EdgeDNSRecord, 0)
+	for _, record := range bundle.Records {
+		if normalizeName(record.Name) == wildcard {
+			matches = append(matches, record)
+		}
+	}
+	return matches, name
+}
+
+func edgeDNSWildcardName(name string) string {
+	name = normalizeName(name)
+	if name == "" {
+		return ""
+	}
+	if index := strings.IndexByte(name, '.'); index > 0 && index+1 < len(name) {
+		return "*." + name[index+1:]
+	}
+	return ""
+}
+
+func rrForEdgeDNSRecord(record model.EdgeDNSRecord, ownerName string) []miekgdns.RR {
 	ttl := uint32(record.TTL)
 	if ttl == 0 {
 		ttl = 60
 	}
+	ownerName = normalizeName(firstNonEmpty(ownerName, record.Name))
 	rrs := make([]miekgdns.RR, 0, len(record.Values))
 	for _, value := range record.Values {
-		ip := net.ParseIP(value)
-		if ip == nil {
-			continue
-		}
 		switch strings.ToUpper(record.Type) {
 		case model.EdgeDNSRecordTypeA:
+			ip := net.ParseIP(value)
+			if ip == nil {
+				continue
+			}
 			if v4 := ip.To4(); v4 != nil {
 				rrs = append(rrs, &miekgdns.A{
-					Hdr: miekgdns.RR_Header{Name: fqdn(record.Name), Rrtype: miekgdns.TypeA, Class: miekgdns.ClassINET, Ttl: ttl},
+					Hdr: miekgdns.RR_Header{Name: fqdn(ownerName), Rrtype: miekgdns.TypeA, Class: miekgdns.ClassINET, Ttl: ttl},
 					A:   v4,
 				})
 			}
 		case model.EdgeDNSRecordTypeAAAA:
+			ip := net.ParseIP(value)
+			if ip == nil {
+				continue
+			}
 			if ip.To4() == nil {
 				rrs = append(rrs, &miekgdns.AAAA{
-					Hdr:  miekgdns.RR_Header{Name: fqdn(record.Name), Rrtype: miekgdns.TypeAAAA, Class: miekgdns.ClassINET, Ttl: ttl},
+					Hdr:  miekgdns.RR_Header{Name: fqdn(ownerName), Rrtype: miekgdns.TypeAAAA, Class: miekgdns.ClassINET, Ttl: ttl},
 					AAAA: ip,
+				})
+			}
+		case model.EdgeDNSRecordTypeCAA:
+			if caa, ok := parseEdgeDNSCAA(value); ok {
+				caa.Hdr = miekgdns.RR_Header{Name: fqdn(ownerName), Rrtype: miekgdns.TypeCAA, Class: miekgdns.ClassINET, Ttl: ttl}
+				rrs = append(rrs, caa)
+			}
+		case model.EdgeDNSRecordTypeCNAME:
+			target := normalizeName(value)
+			if target != "" {
+				rrs = append(rrs, &miekgdns.CNAME{
+					Hdr:    miekgdns.RR_Header{Name: fqdn(ownerName), Rrtype: miekgdns.TypeCNAME, Class: miekgdns.ClassINET, Ttl: ttl},
+					Target: fqdn(target),
+				})
+			}
+		case model.EdgeDNSRecordTypeMX:
+			if mx, ok := parseEdgeDNSMX(value); ok {
+				mx.Hdr = miekgdns.RR_Header{Name: fqdn(ownerName), Rrtype: miekgdns.TypeMX, Class: miekgdns.ClassINET, Ttl: ttl}
+				rrs = append(rrs, mx)
+			}
+		case model.EdgeDNSRecordTypeNS:
+			target := normalizeName(value)
+			if target != "" {
+				rrs = append(rrs, &miekgdns.NS{
+					Hdr: miekgdns.RR_Header{Name: fqdn(ownerName), Rrtype: miekgdns.TypeNS, Class: miekgdns.ClassINET, Ttl: ttl},
+					Ns:  fqdn(target),
+				})
+			}
+		case model.EdgeDNSRecordTypeTXT:
+			if strings.TrimSpace(value) != "" {
+				rrs = append(rrs, &miekgdns.TXT{
+					Hdr: miekgdns.RR_Header{Name: fqdn(ownerName), Rrtype: miekgdns.TypeTXT, Class: miekgdns.ClassINET, Ttl: ttl},
+					Txt: edgeDNSTXTChunks(value),
 				})
 			}
 		}
@@ -1069,12 +1168,72 @@ func edgeDNSNameExists(bundle *model.EdgeDNSBundle, name string) bool {
 	if bundle == nil {
 		return false
 	}
-	for _, record := range bundle.Records {
-		if normalizeName(record.Name) == name {
-			return true
+	records, _ := edgeDNSMatchingRecords(bundle, name)
+	return len(records) > 0
+}
+
+func parseEdgeDNSMX(value string) (*miekgdns.MX, bool) {
+	fields := strings.Fields(strings.TrimSpace(value))
+	if len(fields) == 0 {
+		return nil, false
+	}
+	preference := uint16(10)
+	exchange := fields[0]
+	if len(fields) > 1 {
+		if parsed, err := strconv.ParseUint(fields[0], 10, 16); err == nil {
+			preference = uint16(parsed)
+			exchange = fields[1]
 		}
 	}
-	return false
+	exchange = normalizeName(exchange)
+	if exchange == "" {
+		return nil, false
+	}
+	return &miekgdns.MX{Preference: preference, Mx: fqdn(exchange)}, true
+}
+
+func parseEdgeDNSCAA(value string) (*miekgdns.CAA, bool) {
+	fields := strings.Fields(strings.TrimSpace(value))
+	if len(fields) < 3 {
+		return nil, false
+	}
+	flag, err := strconv.ParseUint(fields[0], 10, 8)
+	if err != nil {
+		return nil, false
+	}
+	tag := strings.TrimSpace(fields[1])
+	if tag == "" {
+		return nil, false
+	}
+	content := strings.TrimSpace(strings.Join(fields[2:], " "))
+	if unquoted, err := strconv.Unquote(content); err == nil {
+		content = unquoted
+	} else {
+		content = strings.Trim(content, `"`)
+	}
+	if content == "" {
+		return nil, false
+	}
+	return &miekgdns.CAA{Flag: uint8(flag), Tag: tag, Value: content}, true
+}
+
+func edgeDNSTXTChunks(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	if len(value) <= 255 {
+		return []string{value}
+	}
+	chunks := make([]string, 0, (len(value)/255)+1)
+	for len(value) > 255 {
+		chunks = append(chunks, value[:255])
+		value = value[255:]
+	}
+	if value != "" {
+		chunks = append(chunks, value)
+	}
+	return chunks
 }
 
 func nameWithinZone(name, zone string) bool {

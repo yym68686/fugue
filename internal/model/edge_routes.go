@@ -44,12 +44,19 @@ const (
 
 const (
 	EdgeDNSRecordKindCustomDomainTarget = "custom-domain-target"
+	EdgeDNSRecordKindPlatform           = "platform"
 	EdgeDNSRecordKindProbe              = "probe"
+	EdgeDNSRecordKindProtected          = "protected"
 )
 
 const (
-	EdgeDNSRecordTypeA    = "A"
-	EdgeDNSRecordTypeAAAA = "AAAA"
+	EdgeDNSRecordTypeA     = "A"
+	EdgeDNSRecordTypeAAAA  = "AAAA"
+	EdgeDNSRecordTypeCAA   = "CAA"
+	EdgeDNSRecordTypeCNAME = "CNAME"
+	EdgeDNSRecordTypeMX    = "MX"
+	EdgeDNSRecordTypeNS    = "NS"
+	EdgeDNSRecordTypeTXT   = "TXT"
 )
 
 const (

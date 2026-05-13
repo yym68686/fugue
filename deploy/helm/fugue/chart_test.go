@@ -474,6 +474,47 @@ func TestDNSShadowDaemonSetDisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestAPIStaticDNSRecordsEnvRenders(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	valuesPath := t.TempDir() + "/values.yaml"
+	values := `
+api:
+  dnsStaticRecordsJSON: '[{"name":"fugue.pro","type":"MX","values":["10 mail.fugue.pro"],"ttl":300,"record_kind":"protected","status":"active","record_generation":"dnsgen_test"}]'
+`
+	if err := os.WriteFile(valuesPath, []byte(values), 0o600); err != nil {
+		t.Fatalf("write values: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "-f", valuesPath)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	doc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-api")
+	if doc == "" {
+		t.Fatalf("rendered manifest missing api deployment:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`name: FUGUE_DNS_STATIC_RECORDS_JSON`,
+		`fugue.pro`,
+		`mail.fugue.pro`,
+		`protected`,
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("api deployment missing %q:\n%s", want, doc)
+		}
+	}
+}
+
 func TestDNSShadowDaemonSetCanBeEnabledWithoutPublicPorts(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")
@@ -494,6 +535,8 @@ func TestDNSShadowDaemonSetCanBeEnabledWithoutPublicPorts(t *testing.T) {
 		"dns.answerIPs[0]=203.0.113.10",
 		"--set",
 		"dns.routeAAnswerIPs[0]=136.112.185.40",
+		"--set",
+		"dns.nameservers[0]=ns1.dns.fugue.pro",
 	)
 	cmd.Dir = chartDir
 	output, err := cmd.CombinedOutput()
@@ -524,6 +567,8 @@ func TestDNSShadowDaemonSetCanBeEnabledWithoutPublicPorts(t *testing.T) {
 		`value: "127.0.0.1:5353"`,
 		`name: FUGUE_DNS_TCP_ADDR`,
 		`value: "127.0.0.1:5353"`,
+		`name: FUGUE_DNS_NAMESERVERS`,
+		`value: "ns1.dns.fugue.pro"`,
 		`path: /healthz`,
 		`containerPort: 7834`,
 		`value: "http://fugue-fugue:80"`,

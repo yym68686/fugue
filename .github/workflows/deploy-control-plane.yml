@@ -23,6 +23,7 @@ on:
       - 'Dockerfile.edge'
       - 'go.mod'
       - 'go.sum'
+      - 'scripts/export_cloudflare_zone_static_records.sh'
       - 'scripts/install_fugue_ha.sh'
       - 'scripts/issue_fugue_app_wildcard_tls.sh'
       - 'scripts/render_fugue_edge_systemd_unit.sh'
@@ -190,8 +191,10 @@ jobs:
           FUGUE_DNS_ENABLED: ${{ vars.FUGUE_DNS_ENABLED || 'false' }}
           FUGUE_DNS_ANSWER_IPS: ${{ vars.FUGUE_DNS_ANSWER_IPS || '' }}
           FUGUE_DNS_ROUTE_A_ANSWER_IPS: ${{ vars.FUGUE_DNS_ROUTE_A_ANSWER_IPS || '' }}
+          FUGUE_DNS_STATIC_RECORDS_JSON: ${{ vars.FUGUE_DNS_STATIC_RECORDS_JSON || '' }}
           FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE: ${{ vars.FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE || '' }}
           FUGUE_DNS_EXTRA_GROUPS: ${{ vars.FUGUE_DNS_EXTRA_GROUPS || '' }}
+          FUGUE_DNS_NAMESERVERS: ${{ vars.FUGUE_DNS_NAMESERVERS || '' }}
           FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED: ${{ vars.FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED || 'false' }}
           FUGUE_DNS_UDP_ADDR: ${{ vars.FUGUE_DNS_UDP_ADDR || '' }}
           FUGUE_DNS_TCP_ADDR: ${{ vars.FUGUE_DNS_TCP_ADDR || '' }}

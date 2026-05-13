@@ -15,6 +15,7 @@ api:
   databaseURL: ""
   appBaseDomain: fugue.pro
   apiPublicDomain: api.fugue.pro
+  dnsStaticRecordsJSON: ""
   edgeTLSAskToken: ""
   registryPushBase: ""
   registryPullBase: registry.fugue.internal:5000

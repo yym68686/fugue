@@ -23,6 +23,7 @@ type APIConfig struct {
 	ControlPlaneGitHubToken      string
 	AppBaseDomain                string
 	APIPublicDomain              string
+	DNSStaticRecordsJSON         string
 	EdgeTLSAskToken              string
 	RegistryPushBase             string
 	RegistryPullBase             string
@@ -158,6 +159,7 @@ func APIFromEnv() APIConfig {
 		ControlPlaneGitHubToken:      strings.TrimSpace(os.Getenv("FUGUE_CONTROL_PLANE_GITHUB_TOKEN")),
 		AppBaseDomain:                getenv("FUGUE_APP_BASE_DOMAIN", "fugue.pro"),
 		APIPublicDomain:              getenv("FUGUE_API_PUBLIC_DOMAIN", "api.fugue.pro"),
+		DNSStaticRecordsJSON:         strings.TrimSpace(os.Getenv("FUGUE_DNS_STATIC_RECORDS_JSON")),
 		EdgeTLSAskToken:              strings.TrimSpace(os.Getenv("FUGUE_EDGE_TLS_ASK_TOKEN")),
 		RegistryPushBase:             getenv("FUGUE_REGISTRY_PUSH_BASE", "127.0.0.1:30500"),
 		RegistryPullBase:             strings.TrimSpace(os.Getenv("FUGUE_REGISTRY_PULL_BASE")),

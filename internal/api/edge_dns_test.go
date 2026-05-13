@@ -236,6 +236,95 @@ func TestEdgeDNSBundleUsesHealthyPolicyEdgeGroupIPsForOptInTargets(t *testing.T)
 	}
 }
 
+func TestEdgeDNSBundleDerivesFullZonePlatformAppRecords(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	if _, _, err := storeState.EnsureManagedSharedLocationLabels(map[string]string{
+		runtimepkg.LocationCountryCodeLabelKey: "US",
+	}); err != nil {
+		t.Fatalf("set managed shared location labels: %v", err)
+	}
+	app = deployAppForEdgeRouteTest(t, storeState, app)
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+		ID:          "edge-us-1",
+		EdgeGroupID: "edge-group-country-us",
+		PublicIPv4:  "15.204.94.71",
+		Status:      model.EdgeHealthHealthy,
+		Healthy:     true,
+	}); err != nil {
+		t.Fatalf("record healthy US edge node: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&answer_ip=203.0.113.10&route_a_answer_ip=136.112.185.40", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	platform := edgeDNSRecordByNameAndType(bundle.Records, app.Route.Hostname, model.EdgeDNSRecordTypeA)
+	if platform == nil {
+		t.Fatalf("expected platform app DNS record for %s: %+v", app.Route.Hostname, bundle.Records)
+	}
+	if platform.RecordKind != model.EdgeDNSRecordKindPlatform || platform.EdgeGroupID != "edge-group-country-us" || strings.Join(platform.Values, ",") != "15.204.94.71" {
+		t.Fatalf("unexpected platform DNS record: %+v", platform)
+	}
+}
+
+func TestEdgeDNSBundleKeepsStaticProtectedZoneRecordsAndWildcardFallback(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	if _, _, err := storeState.EnsureManagedSharedLocationLabels(map[string]string{
+		runtimepkg.LocationCountryCodeLabelKey: "US",
+	}); err != nil {
+		t.Fatalf("set managed shared location labels: %v", err)
+	}
+	app = deployAppForEdgeRouteTest(t, storeState, app)
+	server.dnsStaticRecords = parseEdgeDNSStaticRecords(`[
+		{"name":"fugue.pro","type":"NS","values":["ns1.dns.fugue.pro","ns2.dns.fugue.pro"],"ttl":300},
+		{"name":"fugue.pro","type":"MX","values":["10 mail.fugue.pro"],"ttl":300},
+		{"name":"fugue.pro","type":"TXT","values":["v=spf1 include:_spf.example.com -all"],"ttl":300},
+		{"name":"fugue.pro","type":"CAA","values":["0 issue \"letsencrypt.org\""],"ttl":300},
+		{"name":"demo.fugue.pro","type":"A","values":["198.51.100.7"],"ttl":300},
+		{"name":"*.fugue.pro","type":"A","values":["198.51.100.9"],"ttl":300}
+	]`, nil)
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&answer_ip=203.0.113.10", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+
+	demoA := edgeDNSRecordByNameAndType(bundle.Records, "demo.fugue.pro", model.EdgeDNSRecordTypeA)
+	if demoA == nil || strings.Join(demoA.Values, ",") != "198.51.100.7" || demoA.RecordKind != model.EdgeDNSRecordKindProtected {
+		t.Fatalf("expected static protected demo record to survive, got %+v", demoA)
+	}
+	if edgeDNSRecordByNameAndType(bundle.Records, "demo.fugue.pro", model.EdgeDNSRecordTypeAAAA) != nil {
+		t.Fatalf("unexpected AAAA record for demo.fugue.pro: %+v", bundle.Records)
+	}
+	if wildcard := edgeDNSRecordByNameAndType(bundle.Records, "*.fugue.pro", model.EdgeDNSRecordTypeA); wildcard == nil || strings.Join(wildcard.Values, ",") != "198.51.100.9" {
+		t.Fatalf("expected wildcard fallback record to be present, got %+v", wildcard)
+	}
+	if got := edgeDNSRecordByNameAndType(bundle.Records, "fugue.pro", model.EdgeDNSRecordTypeNS); got == nil || strings.Join(got.Values, ",") != "ns1.dns.fugue.pro,ns2.dns.fugue.pro" {
+		t.Fatalf("expected static NS records for fugue.pro, got %+v", got)
+	}
+	if got := edgeDNSRecordByNameAndType(bundle.Records, "fugue.pro", model.EdgeDNSRecordTypeMX); got == nil || strings.Join(got.Values, ",") != "10 mail.fugue.pro" {
+		t.Fatalf("expected static MX record for fugue.pro, got %+v", got)
+	}
+	if got := edgeDNSRecordByNameAndType(bundle.Records, "fugue.pro", model.EdgeDNSRecordTypeTXT); got == nil || len(got.Values) == 0 {
+		t.Fatalf("expected static TXT record for fugue.pro, got %+v", got)
+	}
+	if got := edgeDNSRecordByNameAndType(bundle.Records, "fugue.pro", model.EdgeDNSRecordTypeCAA); got == nil || len(got.Values) == 0 {
+		t.Fatalf("expected static CAA record for fugue.pro, got %+v", got)
+	}
+}
+
 func edgeDNSRecordByNameAndType(records []model.EdgeDNSRecord, name, recordType string) *model.EdgeDNSRecord {
 	for index := range records {
 		if records[index].Name == name && records[index].Type == recordType {

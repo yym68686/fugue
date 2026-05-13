@@ -11,6 +11,7 @@ type ServerConfig struct {
 	ControlPlaneGitHubToken      string
 	AppBaseDomain                string
 	APIPublicDomain              string
+	DNSStaticRecordsJSON         string
 	EdgeTLSAskToken              string
 	RegistryPushBase             string
 	RegistryPullBase             string

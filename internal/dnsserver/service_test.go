@@ -67,6 +67,85 @@ func TestServiceAnswersAuthoritativelyAndRefusesOutsideZone(t *testing.T) {
 	}
 }
 
+func TestServiceAnswersFullZoneRecordTypesAndWildcard(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.DNSConfig{
+		Zone:        "fugue.pro",
+		TTL:         60,
+		Nameservers: []string{"fallback-ns.fugue.pro"},
+	}, log.New(ioDiscard{}, "", 0))
+	service.setBundle(model.EdgeDNSBundle{
+		Version: "dnsgen_full_zone",
+		Zone:    "fugue.pro",
+		Records: []model.EdgeDNSRecord{
+			{Name: "fugue.pro", Type: model.EdgeDNSRecordTypeNS, Values: []string{"ns1.dns.fugue.pro", "ns2.dns.fugue.pro"}, TTL: 300, RecordKind: model.EdgeDNSRecordKindProtected, Status: model.EdgeRouteStatusActive},
+			{Name: "fugue.pro", Type: model.EdgeDNSRecordTypeMX, Values: []string{"10 mail.fugue.pro"}, TTL: 300, RecordKind: model.EdgeDNSRecordKindProtected, Status: model.EdgeRouteStatusActive},
+			{Name: "fugue.pro", Type: model.EdgeDNSRecordTypeTXT, Values: []string{"v=spf1 include:_spf.example.com -all"}, TTL: 300, RecordKind: model.EdgeDNSRecordKindProtected, Status: model.EdgeRouteStatusActive},
+			{Name: "fugue.pro", Type: model.EdgeDNSRecordTypeCAA, Values: []string{"0 issue \"letsencrypt.org\""}, TTL: 300, RecordKind: model.EdgeDNSRecordKindProtected, Status: model.EdgeRouteStatusActive},
+			{Name: "alias.fugue.pro", Type: model.EdgeDNSRecordTypeCNAME, Values: []string{"target.example.net"}, TTL: 120, RecordKind: model.EdgeDNSRecordKindProtected, Status: model.EdgeRouteStatusActive},
+			{Name: "*.fugue.pro", Type: model.EdgeDNSRecordTypeA, Values: []string{"198.51.100.9"}, TTL: 60, RecordKind: model.EdgeDNSRecordKindProtected, Status: model.EdgeRouteStatusActive},
+			{Name: "demo.fugue.pro", Type: model.EdgeDNSRecordTypeA, Values: []string{"198.51.100.7"}, TTL: 60, RecordKind: model.EdgeDNSRecordKindPlatform, Status: model.EdgeRouteStatusActive},
+		},
+	}, `"dnsgen_full_zone"`, false, "")
+
+	nsAnswer := dnsQuery(t, service, "fugue.pro.", miekgdns.TypeNS)
+	if len(nsAnswer.Answer) != 2 {
+		t.Fatalf("expected static NS answers, got %+v", nsAnswer.Answer)
+	}
+	if ns, ok := nsAnswer.Answer[0].(*miekgdns.NS); !ok || ns.Ns == "fallback-ns.fugue.pro." {
+		t.Fatalf("expected bundle NS answers to override fallback nameservers, got %+v", nsAnswer.Answer)
+	}
+
+	mxAnswer := dnsQuery(t, service, "fugue.pro.", miekgdns.TypeMX)
+	if len(mxAnswer.Answer) != 1 {
+		t.Fatalf("expected one MX answer, got %+v", mxAnswer.Answer)
+	}
+	if mx, ok := mxAnswer.Answer[0].(*miekgdns.MX); !ok || mx.Preference != 10 || mx.Mx != "mail.fugue.pro." {
+		t.Fatalf("unexpected MX answer: %+v", mxAnswer.Answer[0])
+	}
+
+	txtAnswer := dnsQuery(t, service, "fugue.pro.", miekgdns.TypeTXT)
+	if len(txtAnswer.Answer) != 1 {
+		t.Fatalf("expected one TXT answer, got %+v", txtAnswer.Answer)
+	}
+	if txt, ok := txtAnswer.Answer[0].(*miekgdns.TXT); !ok || len(txt.Txt) == 0 || txt.Txt[0] != "v=spf1 include:_spf.example.com -all" {
+		t.Fatalf("unexpected TXT answer: %+v", txtAnswer.Answer[0])
+	}
+
+	caaAnswer := dnsQuery(t, service, "fugue.pro.", miekgdns.TypeCAA)
+	if len(caaAnswer.Answer) != 1 {
+		t.Fatalf("expected one CAA answer, got %+v", caaAnswer.Answer)
+	}
+	if caa, ok := caaAnswer.Answer[0].(*miekgdns.CAA); !ok || caa.Flag != 0 || caa.Tag != "issue" || caa.Value != "letsencrypt.org" {
+		t.Fatalf("unexpected CAA answer: %+v", caaAnswer.Answer[0])
+	}
+
+	cnameForA := dnsQuery(t, service, "alias.fugue.pro.", miekgdns.TypeA)
+	if len(cnameForA.Answer) != 1 {
+		t.Fatalf("expected CNAME answer for A query, got %+v", cnameForA.Answer)
+	}
+	if cname, ok := cnameForA.Answer[0].(*miekgdns.CNAME); !ok || cname.Target != "target.example.net." {
+		t.Fatalf("unexpected CNAME answer: %+v", cnameForA.Answer[0])
+	}
+
+	exact := dnsQuery(t, service, "demo.fugue.pro.", miekgdns.TypeA)
+	if len(exact.Answer) != 1 {
+		t.Fatalf("expected exact A answer, got %+v", exact.Answer)
+	}
+	if a, ok := exact.Answer[0].(*miekgdns.A); !ok || a.A.String() != "198.51.100.7" {
+		t.Fatalf("unexpected exact A answer: %+v", exact.Answer[0])
+	}
+
+	wildcard := dnsQuery(t, service, "other.fugue.pro.", miekgdns.TypeA)
+	if len(wildcard.Answer) != 1 {
+		t.Fatalf("expected wildcard A answer, got %+v", wildcard.Answer)
+	}
+	if a, ok := wildcard.Answer[0].(*miekgdns.A); !ok || a.A.String() != "198.51.100.9" || a.Hdr.Name != "other.fugue.pro." {
+		t.Fatalf("unexpected wildcard A answer: %+v", wildcard.Answer[0])
+	}
+}
+
 func TestServiceSyncWritesCacheLoadsCacheAndUsesNotModified(t *testing.T) {
 	t.Parallel()
 
