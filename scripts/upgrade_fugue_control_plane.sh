@@ -883,9 +883,23 @@ ssh_host_port_is_reachable() {
 
 primary_node_address_candidates() {
   local primary_node_name="$1"
+  local label_public_ip=""
+  local gcp_public_ip=""
 
   [[ -n "${primary_node_name}" ]] || return 0
-  ${KUBECTL} get node "${primary_node_name}" -o jsonpath='{range .status.addresses[?(@.type=="ExternalIP")]}{.address}{"\n"}{end}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{"\n"}{end}{range .status.addresses[?(@.type=="Hostname")]}{.address}{"\n"}{end}' 2>/dev/null | awk 'NF > 0 && !seen[$0]++'
+  label_public_ip="$(${KUBECTL} get node "${primary_node_name}" -o jsonpath='{.metadata.labels.fugue\.io/public-ip}' 2>/dev/null || true)"
+  if [[ -n "${label_public_ip}" ]]; then
+    printf '%s\n' "${label_public_ip}"
+  fi
+  if command_exists gcloud; then
+    gcp_public_ip="$(gcloud compute instances list \
+      --filter="name=${primary_node_name}" \
+      --format='value(networkInterfaces[0].accessConfigs[0].natIP)' 2>/dev/null | awk 'NF > 0 {print; exit}' || true)"
+    if [[ -n "${gcp_public_ip}" ]]; then
+      printf '%s\n' "${gcp_public_ip}"
+    fi
+  fi
+  ${KUBECTL} get node "${primary_node_name}" -o jsonpath='{range .status.addresses[?(@.type=="ExternalIP")]}{.address}{"\n"}{end}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{"\n"}{end}{range .status.addresses[?(@.type=="Hostname")]}{.address}{"\n"}{end}' 2>/dev/null
 }
 
 resolve_primary_control_plane_ssh_target() {
@@ -917,7 +931,7 @@ resolve_primary_control_plane_ssh_target() {
       log_stderr "configured primary SSH host ${configured_host}:${PRIMARY_CONTROL_PLANE_SSH_PORT} is not reachable; using Kubernetes node address ${candidate}:${PRIMARY_CONTROL_PLANE_SSH_PORT}"
       return
     fi
-  done < <(primary_node_address_candidates "${primary_node_name}")
+  done < <(primary_node_address_candidates "${primary_node_name}" | awk 'NF > 0 && !seen[$0]++')
 }
 
 build_primary_control_plane_ssh_opts() {
