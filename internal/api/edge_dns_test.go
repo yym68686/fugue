@@ -402,7 +402,7 @@ func TestEdgeDNSBundleLetsConfiguredPlatformRouteOverrideStaticAddressRecords(t 
 	server.platformRoutes = parsePlatformRoutes(`{"routes":[{
 		"hostname":"api.fugue.pro",
 		"kind":"control-plane-api",
-		"upstream_url":"http://fugue-fugue-api.fugue-system.svc.cluster.local:8080",
+		"upstream_url":"http://fugue-fugue.fugue-system.svc.cluster.local:80",
 		"edge_group_mode":"region_aware"
 	}]}`, nil)
 	server.dnsStaticRecords = parseEdgeDNSStaticRecords(`[

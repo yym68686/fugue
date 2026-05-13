@@ -451,7 +451,7 @@ func TestConfiguredPlatformRouteFansOutToHealthyEdgeGroups(t *testing.T) {
 	server.platformRoutes = parsePlatformRoutes(`{"routes":[{
 		"hostname":"api.fugue.pro",
 		"kind":"control-plane-api",
-		"upstream_url":"http://fugue-fugue-api.fugue-system.svc.cluster.local:8080",
+		"upstream_url":"http://fugue-fugue.fugue-system.svc.cluster.local:80",
 		"edge_group_mode":"region_aware"
 	}]}`, nil)
 	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
@@ -487,7 +487,7 @@ func TestConfiguredPlatformRouteFansOutToHealthyEdgeGroups(t *testing.T) {
 		if route.RoutePolicy != model.EdgeRoutePolicyEnabled ||
 			route.UpstreamKind != model.EdgeRouteUpstreamKindKubernetesService ||
 			route.UpstreamScope != model.EdgeRouteUpstreamScopeCluster ||
-			route.UpstreamURL != "http://fugue-fugue-api.fugue-system.svc.cluster.local:8080" ||
+			route.UpstreamURL != "http://fugue-fugue.fugue-system.svc.cluster.local:80" ||
 			route.TLSPolicy != model.EdgeRouteTLSPolicyPlatform ||
 			route.Status != model.EdgeRouteStatusActive {
 			t.Fatalf("unexpected configured platform route: %+v", route)
