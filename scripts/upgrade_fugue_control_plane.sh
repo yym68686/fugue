@@ -344,14 +344,6 @@ api:
     - key: node-role.kubernetes.io/control-plane
       operator: Exists
       effect: NoSchedule
-    - key: node.kubernetes.io/not-ready
-      operator: Exists
-      effect: NoExecute
-      tolerationSeconds: 300
-    - key: node.kubernetes.io/unreachable
-      operator: Exists
-      effect: NoExecute
-      tolerationSeconds: 300
   resources:
     requests:
       cpu: 250m
@@ -369,14 +361,6 @@ controller:
     - key: node-role.kubernetes.io/control-plane
       operator: Exists
       effect: NoSchedule
-    - key: node.kubernetes.io/not-ready
-      operator: Exists
-      effect: NoExecute
-      tolerationSeconds: 300
-    - key: node.kubernetes.io/unreachable
-      operator: Exists
-      effect: NoExecute
-      tolerationSeconds: 300
 snapshotController:
   nodeSelector:
     node-role.kubernetes.io/control-plane: "true"
