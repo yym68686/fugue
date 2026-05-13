@@ -33,6 +33,7 @@ api:
   terminationGracePeriodSeconds: 40
   shutdownDrainDelay: 5s
   shutdownTimeout: 25s
+  nodeFailureTolerationSeconds: 30
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -60,6 +61,7 @@ controller:
   runtimeOfflineAfter: 90s
   kubectlApply: true
   terminationGracePeriodSeconds: 30
+  nodeFailureTolerationSeconds: 30
   nodeSelector: {}
   tolerations: []
   affinity: {}

@@ -189,7 +189,15 @@ spec:
                   matchLabels:
                     {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "api") | nindent 20 }}
       {{- end }}
-      {{- with $apiTolerations }}
       tolerations:
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: {{ .Values.api.nodeFailureTolerationSeconds }}
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: {{ .Values.api.nodeFailureTolerationSeconds }}
+        {{- with $apiTolerations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}

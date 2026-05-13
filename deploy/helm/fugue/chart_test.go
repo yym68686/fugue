@@ -130,6 +130,47 @@ func TestTopologyLabelerUsesNarrowInternalTolerations(t *testing.T) {
 	}
 }
 
+func TestAPIAndControllerEvictQuicklyOnNodeFailure(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	for _, tc := range []struct {
+		kind string
+		name string
+	}{
+		{kind: "Deployment", name: "fugue-fugue-api"},
+		{kind: "Deployment", name: "fugue-fugue-controller"},
+	} {
+		doc := manifestDocumentForKindAndName(manifest, tc.kind, tc.name)
+		if doc == "" {
+			t.Fatalf("rendered manifest missing %s %s:\n%s", tc.kind, tc.name, manifest)
+		}
+		for _, want := range []string{
+			"key: node.kubernetes.io/not-ready",
+			"key: node.kubernetes.io/unreachable",
+			"effect: NoExecute",
+			"tolerationSeconds: 30",
+		} {
+			if !strings.Contains(doc, want) {
+				t.Fatalf("%s should evict quickly on node failure; missing %q:\n%s", tc.name, want, doc)
+			}
+		}
+	}
+}
+
 func TestEdgeShadowDaemonSetDefaultsToNoPublicTraffic(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

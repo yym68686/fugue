@@ -141,7 +141,15 @@ spec:
                   matchLabels:
                     {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "controller") | nindent 20 }}
       {{- end }}
-      {{- with $controllerTolerations }}
       tolerations:
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: {{ .Values.controller.nodeFailureTolerationSeconds }}
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: {{ .Values.controller.nodeFailureTolerationSeconds }}
+        {{- with $controllerTolerations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
