@@ -108,6 +108,7 @@ func (s *Server) handleDNSHeartbeat(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "status must be unknown, healthy, degraded, or unhealthy")
 		return
 	}
+	req = s.enrichDNSHeartbeatFromClusterNode(r.Context(), req)
 	node, err := s.store.UpdateDNSHeartbeat(model.DNSNode{
 		ID:               req.DNSNodeID,
 		EdgeGroupID:      req.EdgeGroupID,
@@ -143,6 +144,20 @@ func (s *Server) handleDNSHeartbeat(w http.ResponseWriter, r *http.Request) {
 		"node":     node,
 		"accepted": true,
 	})
+}
+
+func (s *Server) enrichDNSHeartbeatFromClusterNode(ctx context.Context, req dnsHeartbeatRequest) dnsHeartbeatRequest {
+	endpoint := s.discoverClusterNodeEndpoint(ctx, req.DNSNodeID)
+	if strings.TrimSpace(req.PublicIPv4) == "" {
+		req.PublicIPv4 = endpoint.PublicIPv4
+	}
+	if strings.TrimSpace(req.PublicIPv6) == "" {
+		req.PublicIPv6 = endpoint.PublicIPv6
+	}
+	if strings.TrimSpace(req.MeshIP) == "" {
+		req.MeshIP = endpoint.MeshIP
+	}
+	return req
 }
 
 func (s *Server) handleDNSDelegationPreflight(w http.ResponseWriter, r *http.Request) {

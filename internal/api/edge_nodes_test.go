@@ -88,6 +88,53 @@ func TestEdgeHeartbeatRegistersInventoryAndAdminList(t *testing.T) {
 	}
 }
 
+func TestEdgeHeartbeatDiscoversPublicEndpointFromClusterNode(t *testing.T) {
+	t.Parallel()
+
+	_, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	server.clusterNodeInventoryCache.set(clusterNodeInventoryCacheKey, []clusterNodeSnapshot{{
+		node: model.ClusterNode{
+			Name:       "vps-591f4447",
+			Region:     "north-america",
+			InternalIP: "100.64.0.10",
+			ExternalIP: "100.64.0.10",
+			PublicIP:   "15.204.94.71",
+		},
+		countryCode: "US",
+	}})
+
+	heartbeat := httptest.NewRecorder()
+	body := map[string]any{
+		"edge_id":              "vps-591f4447",
+		"edge_group_id":        "edge-group-country-us",
+		"route_bundle_version": "routegen_first",
+		"caddy_route_count":    3,
+		"status":               model.EdgeHealthHealthy,
+		"healthy":              true,
+		"draining":             false,
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal heartbeat: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/edge/heartbeat?token=edge-secret", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	server.Handler().ServeHTTP(heartbeat, req)
+	if heartbeat.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, heartbeat.Code, heartbeat.Body.String())
+	}
+	var heartbeatResponse struct {
+		Node model.EdgeNode `json:"node"`
+	}
+	mustDecodeJSON(t, heartbeat, &heartbeatResponse)
+	if heartbeatResponse.Node.PublicIPv4 != "15.204.94.71" ||
+		heartbeatResponse.Node.Region != "north-america" ||
+		heartbeatResponse.Node.Country != "us" ||
+		heartbeatResponse.Node.MeshIP != "100.64.0.10" {
+		t.Fatalf("expected cluster node endpoint discovery, got %+v", heartbeatResponse.Node)
+	}
+}
+
 func TestScopedEdgeTokenRestrictsEdgeGroupAccess(t *testing.T) {
 	t.Parallel()
 

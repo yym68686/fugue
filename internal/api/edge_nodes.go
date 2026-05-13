@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 
@@ -137,6 +139,7 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "status must be unknown, healthy, degraded, or unhealthy")
 		return
 	}
+	req = s.enrichEdgeHeartbeatFromClusterNode(r.Context(), req)
 	node, _, err := s.store.UpdateEdgeHeartbeat(model.EdgeNode{
 		ID:                  req.EdgeID,
 		EdgeGroupID:         req.EdgeGroupID,
@@ -165,6 +168,76 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 		"node":     node,
 		"accepted": true,
 	})
+}
+
+func (s *Server) enrichEdgeHeartbeatFromClusterNode(ctx context.Context, req edgeHeartbeatRequest) edgeHeartbeatRequest {
+	endpoint := s.discoverClusterNodeEndpoint(ctx, req.EdgeID)
+	if strings.TrimSpace(req.Region) == "" {
+		req.Region = endpoint.Region
+	}
+	if strings.TrimSpace(req.Country) == "" {
+		req.Country = endpoint.Country
+	}
+	if strings.TrimSpace(req.PublicIPv4) == "" {
+		req.PublicIPv4 = endpoint.PublicIPv4
+	}
+	if strings.TrimSpace(req.PublicIPv6) == "" {
+		req.PublicIPv6 = endpoint.PublicIPv6
+	}
+	if strings.TrimSpace(req.MeshIP) == "" {
+		req.MeshIP = endpoint.MeshIP
+	}
+	return req
+}
+
+type discoveredClusterNodeEndpoint struct {
+	Region     string
+	Country    string
+	PublicIPv4 string
+	PublicIPv6 string
+	MeshIP     string
+}
+
+func (s *Server) discoverClusterNodeEndpoint(ctx context.Context, nodeName string) discoveredClusterNodeEndpoint {
+	nodeName = strings.TrimSpace(nodeName)
+	if s == nil || nodeName == "" {
+		return discoveredClusterNodeEndpoint{}
+	}
+	snapshots, err := s.loadClusterNodeInventory(ctx)
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("edge node endpoint discovery skipped; node=%s error=%v", nodeName, err)
+		}
+		return discoveredClusterNodeEndpoint{}
+	}
+	for _, snapshot := range snapshots {
+		if !strings.EqualFold(strings.TrimSpace(snapshot.node.Name), nodeName) {
+			continue
+		}
+		var out discoveredClusterNodeEndpoint
+		out.Region = strings.TrimSpace(snapshot.node.Region)
+		out.Country = strings.ToLower(strings.TrimSpace(snapshot.countryCode))
+		out.MeshIP = strings.TrimSpace(snapshot.node.InternalIP)
+		for _, value := range []string{snapshot.node.PublicIP, snapshot.node.ExternalIP} {
+			ipValue := publicIPLiteral(value)
+			if ipValue == "" {
+				continue
+			}
+			ip := net.ParseIP(ipValue)
+			if ip == nil {
+				continue
+			}
+			if ip.To4() != nil {
+				if out.PublicIPv4 == "" {
+					out.PublicIPv4 = ipValue
+				}
+			} else if out.PublicIPv6 == "" {
+				out.PublicIPv6 = ipValue
+			}
+		}
+		return out
+	}
+	return discoveredClusterNodeEndpoint{}
 }
 
 type edgeAuthContext struct {

@@ -540,7 +540,7 @@ fugue admin dns delegation apply --confirm
 fugue admin dns delegation rollback --confirm
 ```
 
-`fugue-dns` 周期性 heartbeat 会上报 `dns_node_id`、`edge_group_id`、公网 IP、zone、DNS bundle version、record count、cache 状态、UDP/TCP listen 状态、query/error counters 和 `last_seen_at`。`fugue admin dns status` 是只读委托 preflight：检查至少两个 healthy DNS 节点、UDP/TCP 53 可达、`d-test.dns.fugue.pro` 回答预期 IP、bundle version 在同一 edge group 内稳定、cache error 为 0、节点 `Ready=True` 且 `DiskPressure=False`，并输出计划添加和回滚删除的父区记录。`fugue admin dns delegation apply` / `rollback` 默认 dry-run；只有传 `--confirm` 才会调用 Cloudflare API，并且只允许改 `ns1.dns.fugue.pro`、`ns2.dns.fugue.pro` 的 glue A/AAAA 和 `dns.fugue.pro` 的 NS，不触碰 wildcard、`api.fugue.pro` 或其他父区记录。生产委托已用修复后的 `v0.1.41` CLI 复跑 confirm，四条 Cloudflare 记录均为 `unchanged`。
+`fugue-dns` 周期性 heartbeat 会上报 `dns_node_id`、`edge_group_id`、公网 IP、zone、DNS bundle version、record count、cache 状态、UDP/TCP listen 状态、query/error counters 和 `last_seen_at`。edge / DNS heartbeat 的公网 endpoint 以节点自组织为默认路径：当 heartbeat 没有显式 `public_ipv4` / `public_ipv6` 时，控制面会用 `edge_id` / `dns_node_id` 匹配 Kubernetes Node inventory，从 `fugue.io/public-ip` 或 Node `ExternalIP` 补齐公网 IP，并从节点标签补齐 region / country，显式环境变量只作为 bootstrap override。`fugue admin dns status` 是只读委托 preflight：检查至少两个 healthy DNS 节点、UDP/TCP 53 可达、`d-test.dns.fugue.pro` 回答预期 IP、bundle version 在同一 edge group 内稳定、cache error 为 0、节点 `Ready=True` 且 `DiskPressure=False`，并输出计划添加和回滚删除的父区记录。`fugue admin dns delegation apply` / `rollback` 默认 dry-run；只有传 `--confirm` 才会调用 Cloudflare API，并且只允许改 `ns1.dns.fugue.pro`、`ns2.dns.fugue.pro` 的 glue A/AAAA 和 `dns.fugue.pro` 的 NS，不触碰 wildcard、`api.fugue.pro` 或其他父区记录。生产委托已用修复后的 `v0.1.41` CLI 复跑 confirm，四条 Cloudflare 记录均为 `unchanged`。
 
 2026-05-13 full-zone 准备：仓库新增 full-zone `fugue.pro` authoritative 能力，但公网注册商 NS 尚未切换。`/v1/edge/dns?zone=fugue.pro` 会把从 Cloudflare 导出的静态记录作为 `record_kind=protected` 注入 bundle，动态平台 app 记录不能覆盖这些受保护名称；同时会为平台 app hostname 派生 `record_kind=platform` 的 A/AAAA，按 runtime / edge health 选择目标 edge IP。`fugue-dns` authoritative server 已支持 `A`、`AAAA`、`CNAME`、`TXT`、`MX`、`CAA`、`NS` 和 `*.fugue.pro` wildcard fallback。Cloudflare apex CNAME flattening 不能原样迁入 authoritative DNS，因为 zone apex 不能和 NS/SOA 同时为 CNAME；导出脚本会默认把 `fugue.pro` apex CNAME 解析并转换为 A/AAAA protected records。
 
@@ -613,6 +613,8 @@ nameserver: ns2.dns.fugue.pro
 glue / host record: ns1.dns.fugue.pro -> 15.204.94.71
 glue / host record: ns2.dns.fugue.pro -> 51.38.126.103
 ```
+
+Spaceship 的 nameserver / glue 是注册商层面的固定事实，不能由 Fugue 自动发现或用 Cloudflare API 修改；Fugue 自组织只覆盖集群内部的 edge / DNS inventory、健康 gate、bundle 派生和 app hostname 到 edge 的选择。
 
 如果注册商要求 nameserver 直接在 zone apex 下，也可以改用：
 
@@ -1057,6 +1059,7 @@ docs/private/regional-edge-current-state.local.md
 - [x] `/v1/edge/dns?zone=fugue.pro` 合并 protected static records 和平台 app 动态 records；protected 名称不能被 app route 覆盖。
 - [x] `fugue-dns` authoritative server 支持 NS / TXT / MX / CAA / CNAME，并支持 `*.fugue.pro` wildcard fallback。
 - [x] Helm / GitHub Actions 发布变量支持 `FUGUE_DNS_STATIC_RECORDS_JSON` 和 `FUGUE_DNS_NAMESERVERS`。
+- [x] edge / DNS heartbeat 支持从 Kubernetes Node inventory 自发现公网 endpoint；`FUGUE_EDGE_PUBLIC_*` 仅保留为 bootstrap override。
 - [ ] 发布 full-zone 版本后，直接验证双 DNS 节点：`api.fugue.pro`、`oaix.fugue.pro`、`argus.fugue.pro`、`fugue.pro A/MX/TXT/NS` 均返回预期结果。
 - [ ] full-zone preflight 通过后，在 Spaceship 把 `fugue.pro` nameserver 切到 `ns1.dns.fugue.pro` / `ns2.dns.fugue.pro`，并设置 glue：`15.204.94.71` / `51.38.126.103`。
 - [ ] 切后验证 `dig fugue.pro NS +trace`、公共递归 `@1.1.1.1` / `@8.8.8.8`、核心 app HTTPS 和 `fugue admin dns status` / `fugue admin edge nodes ls`。
