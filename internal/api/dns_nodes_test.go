@@ -218,6 +218,56 @@ func TestDNSDelegationPreflightPassesWithTwoHealthyNodes(t *testing.T) {
 	}
 }
 
+func TestDNSDelegationPlanUsesStaticNameserverRecords(t *testing.T) {
+	t.Parallel()
+
+	hint := dnsDelegationPlanHints("fugue.pro", []model.EdgeDNSRecord{
+		{
+			Name:       "fugue.pro",
+			Type:       model.EdgeDNSRecordTypeNS,
+			Values:     []string{"ns2.dns.fugue.pro.", "ns1.dns.fugue.pro."},
+			RecordKind: model.EdgeDNSRecordKindProtected,
+		},
+		{
+			Name:       "ns1.dns.fugue.pro",
+			Type:       model.EdgeDNSRecordTypeA,
+			Values:     []string{"203.0.113.10"},
+			RecordKind: model.EdgeDNSRecordKindProtected,
+		},
+		{
+			Name:       "ns2.dns.fugue.pro",
+			Type:       model.EdgeDNSRecordTypeA,
+			Values:     []string{"203.0.113.20"},
+			RecordKind: model.EdgeDNSRecordKindProtected,
+		},
+	})
+	plan := buildDNSDelegationPlan("fugue.pro", []model.DNSDelegationNodeCheck{
+		{
+			DNSNodeID: "dns-eu-1",
+			Pass:      true,
+			PublicIP:  "203.0.113.20",
+		},
+		{
+			DNSNodeID: "dns-us-1",
+			Pass:      true,
+			PublicIP:  "203.0.113.10",
+		},
+	}, []string{"current-parent.example"}, hint)
+
+	if len(plan.PlannedARecords) != 2 || len(plan.PlannedNSRecords) != 2 {
+		t.Fatalf("expected two planned A and NS records, got %+v", plan)
+	}
+	if got := plan.PlannedARecords[0]; got.Name != "ns1.dns.fugue.pro" || len(got.Values) != 1 || got.Values[0] != "203.0.113.10" {
+		t.Fatalf("expected ns1 to keep the static US glue target, got %+v", got)
+	}
+	if got := plan.PlannedARecords[1]; got.Name != "ns2.dns.fugue.pro" || len(got.Values) != 1 || got.Values[0] != "203.0.113.20" {
+		t.Fatalf("expected ns2 to keep the static EU glue target, got %+v", got)
+	}
+	if plan.PlannedNSRecords[0].Values[0] != "ns1.dns.fugue.pro" || plan.PlannedNSRecords[1].Values[0] != "ns2.dns.fugue.pro" {
+		t.Fatalf("expected static NS hostnames in plan, got %+v", plan.PlannedNSRecords)
+	}
+}
+
 func TestDNSDelegationPreflightFailsWhenSameEdgeGroupReportsDifferentBundleVersions(t *testing.T) {
 	t.Parallel()
 

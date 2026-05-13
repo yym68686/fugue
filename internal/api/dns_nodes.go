@@ -293,7 +293,7 @@ func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal mode
 		GeneratedAt:      time.Now().UTC(),
 		Checks:           checks,
 		Nodes:            nodeChecks,
-		DelegationPlan:   buildDNSDelegationPlan(opts.Zone, nodeChecks, currentParentNS),
+		DelegationPlan:   buildDNSDelegationPlan(opts.Zone, nodeChecks, currentParentNS, dnsDelegationPlanHints(opts.Zone, s.dnsStaticRecords)),
 	}
 }
 
@@ -576,7 +576,50 @@ func dnsNodeReachabilityOK(checks []model.DNSDelegationNodeCheck) bool {
 	return true
 }
 
-func buildDNSDelegationPlan(zone string, nodes []model.DNSDelegationNodeCheck, currentParentNS []string) model.DNSDelegationPlan {
+type dnsDelegationPlanHint struct {
+	Nameservers []string
+	ARecords    map[string][]string
+}
+
+func dnsDelegationPlanHints(zone string, staticRecords []model.EdgeDNSRecord) dnsDelegationPlanHint {
+	zone = normalizeExternalAppDomain(zone)
+	hint := dnsDelegationPlanHint{ARecords: map[string][]string{}}
+	seenNS := map[string]struct{}{}
+	for _, record := range edgeDNSStaticRecordsForZone(staticRecords, zone) {
+		recordName := normalizeExternalAppDomain(record.Name)
+		recordType := strings.ToUpper(strings.TrimSpace(record.Type))
+		switch recordType {
+		case model.EdgeDNSRecordTypeNS:
+			if recordName != zone {
+				continue
+			}
+			for _, value := range record.Values {
+				nsHost := normalizeExternalAppDomain(value)
+				if nsHost == "" {
+					continue
+				}
+				if _, ok := seenNS[nsHost]; ok {
+					continue
+				}
+				seenNS[nsHost] = struct{}{}
+				hint.Nameservers = append(hint.Nameservers, nsHost)
+			}
+		case model.EdgeDNSRecordTypeA:
+			if recordName == "" {
+				continue
+			}
+			for _, value := range record.Values {
+				if ip := net.ParseIP(strings.TrimSpace(value)); ip != nil && ip.To4() != nil {
+					hint.ARecords[recordName] = append(hint.ARecords[recordName], ip.String())
+				}
+			}
+		}
+	}
+	sort.Strings(hint.Nameservers)
+	return hint
+}
+
+func buildDNSDelegationPlan(zone string, nodes []model.DNSDelegationNodeCheck, currentParentNS []string, hint dnsDelegationPlanHint) model.DNSDelegationPlan {
 	zone = normalizeExternalAppDomain(zone)
 	eligible := make([]model.DNSDelegationNodeCheck, 0, len(nodes))
 	for _, node := range nodes {
@@ -592,21 +635,25 @@ func buildDNSDelegationPlan(zone string, nodes []model.DNSDelegationNodeCheck, c
 	rollback := []model.DNSDelegationRecord{}
 	notes := []string{
 		"Run preflight until pass=true before changing parent-zone records.",
-		"Do not delegate dns.fugue.pro until at least two DNS nodes are healthy.",
+		"Do not update registrar or parent-zone delegation until at least two DNS nodes are healthy.",
 	}
 	limit := len(eligible)
 	if limit > 2 {
 		limit = 2
 	}
-	for index := 0; index < limit; index++ {
+	orderedNodes := orderDNSDelegationNodesByNameserverHint(eligible, hint, limit)
+	for index, node := range orderedNodes {
 		nsHost := fmt.Sprintf("ns%d.%s", index+1, zone)
-		ip := strings.TrimSpace(eligible[index].PublicIP)
+		if index < len(hint.Nameservers) {
+			nsHost = hint.Nameservers[index]
+		}
+		ip := strings.TrimSpace(node.PublicIP)
 		plannedA = append(plannedA, model.DNSDelegationRecord{
 			Name:    nsHost,
 			Type:    "A",
 			Values:  []string{ip},
 			TTL:     defaultDNSDelegationPlanTTL,
-			Comment: "authoritative DNS node " + eligible[index].DNSNodeID,
+			Comment: "authoritative DNS node " + node.DNSNodeID,
 		})
 		plannedNS = append(plannedNS, model.DNSDelegationRecord{
 			Name:    zone,
@@ -630,6 +677,52 @@ func buildDNSDelegationPlan(zone string, nodes []model.DNSDelegationNodeCheck, c
 		RollbackDeleteRecords: rollback,
 		Notes:                 notes,
 	}
+}
+
+func orderDNSDelegationNodesByNameserverHint(nodes []model.DNSDelegationNodeCheck, hint dnsDelegationPlanHint, limit int) []model.DNSDelegationNodeCheck {
+	if limit <= 0 {
+		return nil
+	}
+	byIP := map[string]model.DNSDelegationNodeCheck{}
+	for _, node := range nodes {
+		ip := strings.TrimSpace(node.PublicIP)
+		if ip == "" {
+			continue
+		}
+		if _, ok := byIP[ip]; !ok {
+			byIP[ip] = node
+		}
+	}
+	used := map[string]struct{}{}
+	ordered := make([]model.DNSDelegationNodeCheck, 0, limit)
+	for _, nsHost := range hint.Nameservers {
+		if len(ordered) >= limit {
+			break
+		}
+		for _, ip := range hint.ARecords[nsHost] {
+			node, ok := byIP[ip]
+			if !ok {
+				continue
+			}
+			if _, alreadyUsed := used[node.DNSNodeID]; alreadyUsed {
+				continue
+			}
+			ordered = append(ordered, node)
+			used[node.DNSNodeID] = struct{}{}
+			break
+		}
+	}
+	for _, node := range nodes {
+		if len(ordered) >= limit {
+			break
+		}
+		if _, alreadyUsed := used[node.DNSNodeID]; alreadyUsed {
+			continue
+		}
+		ordered = append(ordered, node)
+		used[node.DNSNodeID] = struct{}{}
+	}
+	return ordered
 }
 
 func dnsNodePublicIPv4(node model.DNSNode) string {
