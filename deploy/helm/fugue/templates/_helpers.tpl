@@ -194,6 +194,22 @@ tolerations:
 {{- printf "%s-postgres" (include "fugue.fullname" .) -}}
 {{- end -}}
 
+{{- define "fugue.controlPlanePostgresName" -}}
+{{- default (printf "%s-control-plane-postgres" (include "fugue.fullname" .)) .Values.controlPlanePostgres.name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "fugue.controlPlanePostgresSecretName" -}}
+{{- if .Values.controlPlanePostgres.existingSecretName -}}
+{{- .Values.controlPlanePostgres.existingSecretName -}}
+{{- else -}}
+{{- printf "%s-app" (include "fugue.controlPlanePostgresName" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "fugue.controlPlanePostgresRWServiceName" -}}
+{{- printf "%s-rw" (include "fugue.controlPlanePostgresName" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
 {{- define "fugue.headscaleServiceName" -}}
 {{- printf "%s-headscale" (include "fugue.fullname" .) -}}
 {{- end -}}

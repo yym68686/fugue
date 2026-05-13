@@ -839,6 +839,57 @@ func manifestTolerationsBlock(doc string) string {
 	return doc[index:]
 }
 
+func TestControlPlanePostgresCNPGCanDriveAPI(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm",
+		"template",
+		"fugue",
+		chartDir,
+		"--set", "controlPlanePostgres.enabled=true",
+		"--set", "controlPlanePostgres.useForAPI=true",
+		"--set", "controlPlanePostgres.password=test-password",
+		"--set", "postgres.enabled=false",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	cluster := manifestDocumentForKindAndName(manifest, "Cluster", "fugue-fugue-control-plane-postgres")
+	if cluster == "" {
+		t.Fatalf("rendered manifest missing control-plane CNPG cluster:\n%s", manifest)
+	}
+	for _, want := range []string{
+		"instances: 3",
+		"kind: Cluster",
+		"app.kubernetes.io/component: control-plane-postgres",
+		"name: fugue-fugue-control-plane-postgres-app",
+		"node-role.kubernetes.io/control-plane",
+		"podAntiAffinityType: \"required\"",
+	} {
+		if !strings.Contains(cluster, want) {
+			t.Fatalf("control-plane CNPG cluster missing %q:\n%s", want, cluster)
+		}
+	}
+	if !strings.Contains(manifest, "FUGUE_DATABASE_URL: \"postgres://fugue:") ||
+		!strings.Contains(manifest, "@fugue-fugue-control-plane-postgres-rw.default.svc.cluster.local:5432/fugue?sslmode=disable\"") {
+		t.Fatalf("config secret should point API at control-plane CNPG rw service:\n%s", manifest)
+	}
+	if strings.Contains(manifest, "name: fugue-fugue-postgres\n") {
+		t.Fatalf("legacy postgres deployment should not render when postgres.enabled=false:\n%s", manifest)
+	}
+}
+
 func TestControlPlaneRBACCoversDiagnosableWorkloads(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

@@ -1904,6 +1904,16 @@ main() {
   FUGUE_SMOKE_DELAY_SECONDS="${FUGUE_SMOKE_DELAY_SECONDS:-5}"
   FUGUE_API_REPLICA_COUNT="${FUGUE_API_REPLICA_COUNT:-3}"
   FUGUE_CONTROLLER_REPLICA_COUNT="${FUGUE_CONTROLLER_REPLICA_COUNT:-2}"
+  FUGUE_API_DATABASE_URL="${FUGUE_API_DATABASE_URL:-}"
+  FUGUE_POSTGRES_ENABLED="${FUGUE_POSTGRES_ENABLED:-true}"
+  FUGUE_CONTROL_PLANE_POSTGRES_ENABLED="${FUGUE_CONTROL_PLANE_POSTGRES_ENABLED:-false}"
+  FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API="${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API:-false}"
+  FUGUE_CONTROL_PLANE_POSTGRES_NAME="${FUGUE_CONTROL_PLANE_POSTGRES_NAME:-}"
+  FUGUE_CONTROL_PLANE_POSTGRES_IMAGE_NAME="${FUGUE_CONTROL_PLANE_POSTGRES_IMAGE_NAME:-ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie}"
+  FUGUE_CONTROL_PLANE_POSTGRES_INSTANCES="${FUGUE_CONTROL_PLANE_POSTGRES_INSTANCES:-3}"
+  FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_SIZE="${FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_SIZE:-10Gi}"
+  FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_CLASS="${FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_CLASS:-}"
+  FUGUE_CONTROL_PLANE_POSTGRES_EXISTING_SECRET_NAME="${FUGUE_CONTROL_PLANE_POSTGRES_EXISTING_SECRET_NAME:-}"
   FUGUE_REGISTRY_NODEPORT="${FUGUE_REGISTRY_NODEPORT:-30500}"
   FUGUE_REGISTRY_SERVICE_PORT="${FUGUE_REGISTRY_SERVICE_PORT:-5000}"
   FUGUE_API_PUBLIC_DOMAIN="${FUGUE_API_PUBLIC_DOMAIN:-}"
@@ -1986,6 +1996,27 @@ main() {
   if ! [[ "${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS}" =~ ^[0-9]+$ ]] || (( FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS <= 0 || FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS > 65535 )); then
     fail "FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS must be an integer between 1 and 65535"
   fi
+  case "${FUGUE_POSTGRES_ENABLED}" in
+    true|false) ;;
+    *) fail "FUGUE_POSTGRES_ENABLED must be true or false" ;;
+  esac
+  case "${FUGUE_CONTROL_PLANE_POSTGRES_ENABLED}" in
+    true|false) ;;
+    *) fail "FUGUE_CONTROL_PLANE_POSTGRES_ENABLED must be true or false" ;;
+  esac
+  case "${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" in
+    true|false) ;;
+    *) fail "FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API must be true or false" ;;
+  esac
+  if [[ "${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" == "true" && "${FUGUE_CONTROL_PLANE_POSTGRES_ENABLED}" != "true" ]]; then
+    fail "FUGUE_CONTROL_PLANE_POSTGRES_ENABLED must be true when FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API=true"
+  fi
+  if [[ "${FUGUE_POSTGRES_ENABLED}" != "true" && "${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" != "true" && -z "$(trim_field "${FUGUE_API_DATABASE_URL}")" ]]; then
+    fail "FUGUE_API_DATABASE_URL or FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API=true is required when FUGUE_POSTGRES_ENABLED=false"
+  fi
+  if ! [[ "${FUGUE_CONTROL_PLANE_POSTGRES_INSTANCES}" =~ ^[0-9]+$ ]] || (( FUGUE_CONTROL_PLANE_POSTGRES_INSTANCES < 2 )); then
+    fail "FUGUE_CONTROL_PLANE_POSTGRES_INSTANCES must be an integer >= 2"
+  fi
   if [[ -n "$(trim_field "${FUGUE_EDGE_EXTRA_GROUPS}")" && -z "$(trim_field "${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE}")" ]]; then
     fail "FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE must be set when FUGUE_EDGE_EXTRA_GROUPS is set"
   fi
@@ -2043,6 +2074,7 @@ main() {
   log "controller image: ${FUGUE_CONTROLLER_IMAGE_REPOSITORY}:${FUGUE_CONTROLLER_IMAGE_TAG}"
   log "edge image: ${FUGUE_EDGE_IMAGE_REPOSITORY}:${FUGUE_EDGE_IMAGE_TAG} enabled=${FUGUE_EDGE_ENABLED} edge_group_id=${FUGUE_EDGE_GROUP_ID:-<empty>}"
   log "edge caddy: enabled=${FUGUE_EDGE_CADDY_ENABLED} listen=${FUGUE_EDGE_CADDY_LISTEN_ADDR} tls_mode=${FUGUE_EDGE_CADDY_TLS_MODE} public_hostports=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED} http=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP} https=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS} static_tls=${FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED} static_tls_secret=${FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME:-<none>}"
+  log "control-plane postgres: legacy_enabled=${FUGUE_POSTGRES_ENABLED} cnpg_enabled=${FUGUE_CONTROL_PLANE_POSTGRES_ENABLED} cnpg_use_for_api=${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API} cnpg_instances=${FUGUE_CONTROL_PLANE_POSTGRES_INSTANCES}"
   log "edge scheduling: primary_country=${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE:-<none>} public_ipv4=${FUGUE_EDGE_PUBLIC_IPV4:-<none>} extra_groups=${FUGUE_EDGE_EXTRA_GROUPS:-<none>}"
   log "previous Helm revision: ${PREVIOUS_REVISION}"
   log "registry push base: ${FUGUE_REGISTRY_PUSH_BASE}"
@@ -2105,6 +2137,7 @@ main() {
     --set-string edge.caddy.staticTLS.privateKeyKey="${FUGUE_EDGE_CADDY_STATIC_TLS_PRIVATE_KEY_KEY}" \
     --set-string api.appBaseDomain="${FUGUE_APP_BASE_DOMAIN}" \
     --set-string api.apiPublicDomain="${FUGUE_API_PUBLIC_DOMAIN}" \
+    --set-string api.databaseURL="${FUGUE_API_DATABASE_URL}" \
     --set-string api.registryPushBase="${FUGUE_REGISTRY_PUSH_BASE}" \
     --set-string api.registryPullBase="${FUGUE_REGISTRY_PULL_BASE}" \
     --set-string api.clusterJoinRegistryEndpoint="${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}" \
@@ -2129,6 +2162,15 @@ main() {
     --set-string controller.leaderElection.retryPeriod=2s \
     --set-string controller.migrationGuard.legacyControllerContainerName=controller \
     --set-string controller.migrationGuard.checkInterval=2s \
+    --set postgres.enabled="${FUGUE_POSTGRES_ENABLED}" \
+    --set controlPlanePostgres.enabled="${FUGUE_CONTROL_PLANE_POSTGRES_ENABLED}" \
+    --set controlPlanePostgres.useForAPI="${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" \
+    --set-string controlPlanePostgres.name="${FUGUE_CONTROL_PLANE_POSTGRES_NAME}" \
+    --set-string controlPlanePostgres.imageName="${FUGUE_CONTROL_PLANE_POSTGRES_IMAGE_NAME}" \
+    --set controlPlanePostgres.instances="${FUGUE_CONTROL_PLANE_POSTGRES_INSTANCES}" \
+    --set-string controlPlanePostgres.storage.size="${FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_SIZE}" \
+    --set-string controlPlanePostgres.storage.storageClassName="${FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_CLASS}" \
+    --set-string controlPlanePostgres.existingSecretName="${FUGUE_CONTROL_PLANE_POSTGRES_EXISTING_SECRET_NAME}" \
     --set sharedWorkspaceStorage.enabled="${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED}" \
     --set-string sharedWorkspaceStorage.storageClassName="${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS}" \
     --set-string sharedWorkspaceStorage.server.clusterIP="${FUGUE_SHARED_WORKSPACE_NFS_CLUSTER_IP}"; then

@@ -446,6 +446,41 @@ postgres:
   nodeSelector: {}
   resources: {}
 
+controlPlanePostgres:
+  enabled: false
+  useForAPI: false
+  name: ""
+  imageName: ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie
+  instances: 3
+  database: fugue
+  username: fugue
+  password: ""
+  existingSecretName: ""
+  storage:
+    size: 10Gi
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+  affinity:
+    enablePodAntiAffinity: true
+    podAntiAffinityType: required
+    topologyKey: kubernetes.io/hostname
+    nodeSelectorTerms:
+      - matchExpressions:
+          - key: node-role.kubernetes.io/control-plane
+            operator: Exists
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/master
+      operator: Exists
+      effect: NoSchedule
+
 persistence:
   mode: emptyDir
   accessMode: ReadWriteOnce

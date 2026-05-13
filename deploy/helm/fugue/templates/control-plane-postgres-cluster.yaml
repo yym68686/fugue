@@ -1,0 +1,60 @@
+{{- if .Values.controlPlanePostgres.enabled }}
+{{- if lt (int .Values.controlPlanePostgres.instances) 2 }}
+  {{- fail "controlPlanePostgres.instances must be at least 2 when controlPlanePostgres.enabled=true" -}}
+{{- end }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ include "fugue.controlPlanePostgresName" . }}
+  labels:
+    {{- include "fugue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane-postgres
+spec:
+  instances: {{ .Values.controlPlanePostgres.instances }}
+  imageName: {{ .Values.controlPlanePostgres.imageName | quote }}
+  enablePDB: true
+  primaryUpdateStrategy: unsupervised
+  storage:
+    size: {{ .Values.controlPlanePostgres.storage.size | quote }}
+    resizeInUseVolumes: true
+    {{- if .Values.controlPlanePostgres.storage.storageClassName }}
+    storageClass: {{ .Values.controlPlanePostgres.storage.storageClassName | quote }}
+    {{- end }}
+  bootstrap:
+    initdb:
+      database: {{ .Values.controlPlanePostgres.database | quote }}
+      owner: {{ .Values.controlPlanePostgres.username | quote }}
+      secret:
+        name: {{ include "fugue.controlPlanePostgresSecretName" . }}
+      encoding: UTF8
+      localeCType: C
+      localeCollate: C
+  postgresql:
+    parameters:
+      wal_level: logical
+      wal_log_hints: "on"
+      wal_keep_size: 512MB
+  replicationSlots:
+    highAvailability:
+      enabled: true
+    synchronizeReplicas:
+      enabled: true
+  affinity:
+    enablePodAntiAffinity: {{ .Values.controlPlanePostgres.affinity.enablePodAntiAffinity }}
+    podAntiAffinityType: {{ .Values.controlPlanePostgres.affinity.podAntiAffinityType | quote }}
+    topologyKey: {{ .Values.controlPlanePostgres.affinity.topologyKey | quote }}
+    {{- with .Values.controlPlanePostgres.affinity.nodeSelectorTerms }}
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          {{- toYaml . | nindent 10 }}
+    {{- end }}
+    {{- with .Values.controlPlanePostgres.tolerations }}
+    tolerations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  {{- with .Values.controlPlanePostgres.resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
