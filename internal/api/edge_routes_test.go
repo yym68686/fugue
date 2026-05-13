@@ -341,14 +341,14 @@ func TestEdgeRoutePolicyCanaryUsesNearestHealthyEdgeGroup(t *testing.T) {
 	}
 	var revertedBundle model.EdgeRouteBundle
 	mustDecodeJSON(t, reverted, &revertedBundle)
-	if len(revertedBundle.Routes) != 1 ||
-		revertedBundle.Routes[0].RoutePolicy != model.EdgeRoutePolicyEnabled ||
-		revertedBundle.Routes[0].EdgeGroupID != "edge-group-country-hk" {
+	if len(revertedBundle.Routes) != 2 ||
+		edgeRouteByHostKindAndGroup(revertedBundle.Routes, "demo.fugue.pro", model.EdgeRouteKindPlatform, "edge-group-country-hk") == nil ||
+		edgeRouteByHostKindAndGroup(revertedBundle.Routes, "demo.fugue.pro", model.EdgeRouteKindPlatform, "edge-group-country-us") == nil {
 		t.Fatalf("expected deleted policy to restore default platform edge binding, got %+v", revertedBundle.Routes)
 	}
 }
 
-func TestPlatformRoutesDefaultToNearestHealthyEdgeGroup(t *testing.T) {
+func TestPlatformRoutesDefaultToHealthyEdgeGroups(t *testing.T) {
 	t.Parallel()
 
 	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
@@ -407,6 +407,20 @@ func TestPlatformRoutesDefaultToNearestHealthyEdgeGroup(t *testing.T) {
 	mustDecodeJSON(t, hk, &hkBundle)
 	if len(hkBundle.Routes) != 0 {
 		t.Fatalf("expected no route in HK bundle without a healthy HK edge, got %+v", hkBundle.Routes)
+	}
+
+	de := httptest.NewRecorder()
+	deReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-de", nil)
+	server.Handler().ServeHTTP(de, deReq)
+	if de.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, de.Code, de.Body.String())
+	}
+	var deBundle model.EdgeRouteBundle
+	mustDecodeJSON(t, de, &deBundle)
+	if len(deBundle.Routes) != 1 ||
+		deBundle.Routes[0].RuntimeEdgeGroupID != "edge-group-country-hk" ||
+		deBundle.Routes[0].EdgeGroupID != "edge-group-country-de" {
+		t.Fatalf("expected generated platform hostname to be present on every healthy edge group, got %+v", deBundle.Routes)
 	}
 }
 
@@ -573,6 +587,15 @@ func cloneEdgeRouteBundleForTest(bundle model.EdgeRouteBundle) model.EdgeRouteBu
 func edgeRouteByHostAndKind(routes []model.EdgeRouteBinding, hostname, kind string) *model.EdgeRouteBinding {
 	for index := range routes {
 		if routes[index].Hostname == hostname && routes[index].RouteKind == kind {
+			return &routes[index]
+		}
+	}
+	return nil
+}
+
+func edgeRouteByHostKindAndGroup(routes []model.EdgeRouteBinding, hostname, kind, edgeGroupID string) *model.EdgeRouteBinding {
+	for index := range routes {
+		if routes[index].Hostname == hostname && routes[index].RouteKind == kind && routes[index].EdgeGroupID == edgeGroupID {
 			return &routes[index]
 		}
 	}

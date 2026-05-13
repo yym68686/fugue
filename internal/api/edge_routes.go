@@ -96,8 +96,10 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		}
 		binding := s.deriveEdgeRouteBinding(r, app, strings.TrimSpace(app.Route.Hostname), model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
-		if edgeRouteMatchesSelector(binding, options) {
-			routes = append(routes, binding)
+		for _, platformBinding := range expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups) {
+			if edgeRouteMatchesSelector(platformBinding, options) {
+				routes = append(routes, platformBinding)
+			}
 		}
 	}
 
@@ -350,6 +352,27 @@ func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]mo
 	return binding
 }
 
+func expandDefaultPlatformEdgeBindings(binding model.EdgeRouteBinding, healthyEdgeGroups map[string]bool) []model.EdgeRouteBinding {
+	if binding.RouteKind != model.EdgeRouteKindPlatform ||
+		binding.RoutePolicy != model.EdgeRoutePolicyEnabled ||
+		strings.TrimSpace(binding.PolicyEdgeGroupID) != "" {
+		return []model.EdgeRouteBinding{binding}
+	}
+	groups := sortedHealthyEdgeGroups(healthyEdgeGroups)
+	if len(groups) == 0 {
+		return []model.EdgeRouteBinding{binding}
+	}
+	out := make([]model.EdgeRouteBinding, 0, len(groups))
+	for _, edgeGroupID := range groups {
+		candidate := binding
+		candidate.EdgeGroupID = edgeGroupID
+		candidate.FallbackEdgeGroupID = ""
+		candidate.RouteGeneration = edgeRouteGeneration(candidate)
+		out = append(out, candidate)
+	}
+	return out
+}
+
 func nearestHealthyEdgeGroupID(runtimeEdgeGroupID string, healthyEdgeGroups map[string]bool) string {
 	runtimeEdgeGroupID = strings.TrimSpace(runtimeEdgeGroupID)
 	if runtimeEdgeGroupID != "" && healthyEdgeGroups[runtimeEdgeGroupID] {
@@ -361,6 +384,14 @@ func nearestHealthyEdgeGroupID(runtimeEdgeGroupID string, healthyEdgeGroups map[
 			return candidate
 		}
 	}
+	candidates := sortedHealthyEdgeGroups(healthyEdgeGroups)
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0]
+}
+
+func sortedHealthyEdgeGroups(healthyEdgeGroups map[string]bool) []string {
 	candidates := make([]string, 0, len(healthyEdgeGroups))
 	for edgeGroupID, healthy := range healthyEdgeGroups {
 		if healthy {
@@ -368,10 +399,7 @@ func nearestHealthyEdgeGroupID(runtimeEdgeGroupID string, healthyEdgeGroups map[
 		}
 	}
 	sort.Strings(candidates)
-	if len(candidates) == 0 {
-		return ""
-	}
-	return candidates[0]
+	return candidates
 }
 
 func edgeRouteFallbackEdgeGroupCandidates(edgeGroupID string) []string {
