@@ -106,17 +106,34 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	tlsAllowlist := make([]model.EdgeTLSAllowlistEntry, 0, len(domains))
 	for _, domain := range domains {
 		hostname := normalizeExternalAppDomain(domain.Hostname)
-		if hostname == "" || !s.managedEdgeCustomDomain(hostname) {
+		if hostname == "" {
 			continue
 		}
 		app, ok := appByID[strings.TrimSpace(domain.AppID)]
 		if !ok {
 			continue
 		}
-		binding := s.deriveEdgeRouteBinding(r, app, hostname, model.EdgeRouteKindCustomDomain, model.EdgeRouteTLSPolicyCustomDomain, domain.CreatedAt, domain.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
+		routeKind := model.EdgeRouteKindCustomDomain
+		tlsPolicy := model.EdgeRouteTLSPolicyCustomDomain
+		switch {
+		case s.isPlatformOwnedDomainBinding(hostname):
+			routeKind = model.EdgeRouteKindPlatformDomain
+			tlsPolicy = model.EdgeRouteTLSPolicyPlatform
+		case s.managedEdgeCustomDomain(hostname):
+		default:
+			continue
+		}
+		binding := s.deriveEdgeRouteBinding(r, app, hostname, routeKind, tlsPolicy, domain.CreatedAt, domain.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
-		if edgeRouteMatchesSelector(binding, options) {
-			routes = append(routes, binding)
+		addedRoute := false
+		for _, expandedBinding := range expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups) {
+			if !edgeRouteMatchesSelector(expandedBinding, options) {
+				continue
+			}
+			routes = append(routes, expandedBinding)
+			addedRoute = true
+		}
+		if addedRoute {
 			tlsAllowlist = append(tlsAllowlist, model.EdgeTLSAllowlistEntry{
 				Hostname:  hostname,
 				AppID:     domain.AppID,
@@ -300,7 +317,7 @@ func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]mo
 	servingEdgeGroupID := nearestHealthyEdgeGroupID(runtimeEdgeGroupID, healthyEdgeGroups)
 	policy, ok := policies[normalizeExternalAppDomain(binding.Hostname)]
 	if !ok || strings.TrimSpace(policy.AppID) != strings.TrimSpace(binding.AppID) {
-		if binding.RouteKind == model.EdgeRouteKindPlatform && servingEdgeGroupID != "" {
+		if isDefaultEdgeRouteKind(binding.RouteKind) && servingEdgeGroupID != "" {
 			binding.RoutePolicy = model.EdgeRoutePolicyEnabled
 			binding.RuntimeEdgeGroupID = runtimeEdgeGroupID
 			binding.EdgeGroupID = servingEdgeGroupID
@@ -353,7 +370,7 @@ func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]mo
 }
 
 func expandDefaultPlatformEdgeBindings(binding model.EdgeRouteBinding, healthyEdgeGroups map[string]bool) []model.EdgeRouteBinding {
-	if binding.RouteKind != model.EdgeRouteKindPlatform ||
+	if !isDefaultEdgeRouteKind(binding.RouteKind) ||
 		binding.RoutePolicy != model.EdgeRoutePolicyEnabled ||
 		strings.TrimSpace(binding.PolicyEdgeGroupID) != "" {
 		return []model.EdgeRouteBinding{binding}
@@ -371,6 +388,10 @@ func expandDefaultPlatformEdgeBindings(binding model.EdgeRouteBinding, healthyEd
 		out = append(out, candidate)
 	}
 	return out
+}
+
+func isDefaultEdgeRouteKind(routeKind string) bool {
+	return routeKind == model.EdgeRouteKindPlatform || routeKind == model.EdgeRouteKindPlatformDomain
 }
 
 func nearestHealthyEdgeGroupID(runtimeEdgeGroupID string, healthyEdgeGroups map[string]bool) string {

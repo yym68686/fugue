@@ -29,6 +29,17 @@ func TestEdgeRoutesBundleDerivesPlatformAndCustomDomainRoutes(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("put verified app domain: %v", err)
 	}
+	if _, err := storeState.PutAppDomain(model.AppDomain{
+		Hostname:  "www.fugue.pro",
+		AppID:     app.ID,
+		TenantID:  app.TenantID,
+		Status:    model.AppDomainStatusVerified,
+		TLSStatus: model.AppDomainTLSStatusReady,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("put verified platform domain binding: %v", err)
+	}
 	if _, err := storeState.CreateApp(app.TenantID, app.ProjectID, "internal-only", "", model.AppSpec{
 		Image:       "ghcr.io/example/internal-only:latest",
 		Ports:       []int{8080},
@@ -62,8 +73,8 @@ func TestEdgeRoutesBundleDerivesPlatformAndCustomDomainRoutes(t *testing.T) {
 	if bundle.Version == "" {
 		t.Fatalf("expected bundle version, got %+v", bundle)
 	}
-	if len(bundle.Routes) != 2 {
-		t.Fatalf("expected platform and custom-domain route, got %+v", bundle.Routes)
+	if len(bundle.Routes) != 3 {
+		t.Fatalf("expected platform, platform-domain, and custom-domain route, got %+v", bundle.Routes)
 	}
 	platform := edgeRouteByHostAndKind(bundle.Routes, "demo.fugue.pro", model.EdgeRouteKindPlatform)
 	if platform == nil {
@@ -92,8 +103,17 @@ func TestEdgeRoutesBundleDerivesPlatformAndCustomDomainRoutes(t *testing.T) {
 	if custom.Hostname == server.primaryCustomDomainTarget(app) {
 		t.Fatalf("expected route bundle to contain real Host, not CNAME target: %+v", custom)
 	}
-	if len(bundle.TLSAllowlist) != 1 || bundle.TLSAllowlist[0].Hostname != "www.example.com" {
-		t.Fatalf("expected custom domain TLS allowlist, got %+v", bundle.TLSAllowlist)
+	platformDomain := edgeRouteByHostAndKind(bundle.Routes, "www.fugue.pro", model.EdgeRouteKindPlatformDomain)
+	if platformDomain == nil {
+		t.Fatalf("expected platform-domain route, got %+v", bundle.Routes)
+	}
+	if platformDomain.TLSPolicy != model.EdgeRouteTLSPolicyPlatform || platformDomain.RoutePolicy != model.EdgeRoutePolicyRouteAOnly {
+		t.Fatalf("unexpected platform-domain route: %+v", platformDomain)
+	}
+	if len(bundle.TLSAllowlist) != 2 ||
+		bundle.TLSAllowlist[0].Hostname != "www.example.com" ||
+		bundle.TLSAllowlist[1].Hostname != "www.fugue.pro" {
+		t.Fatalf("expected custom and platform domain TLS allowlist, got %+v", bundle.TLSAllowlist)
 	}
 }
 

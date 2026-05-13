@@ -6,8 +6,9 @@ import (
 )
 
 const (
-	EdgeRouteKindPlatform     = "platform"
-	EdgeRouteKindCustomDomain = "custom-domain"
+	EdgeRouteKindPlatform       = "platform"
+	EdgeRouteKindPlatformDomain = "platform-domain"
+	EdgeRouteKindCustomDomain   = "custom-domain"
 )
 
 const (
@@ -44,6 +45,7 @@ const (
 
 const (
 	EdgeDNSRecordKindCustomDomainTarget = "custom-domain-target"
+	EdgeDNSRecordKindPlatformDomain     = "platform-domain"
 	EdgeDNSRecordKindPlatform           = "platform"
 	EdgeDNSRecordKindProbe              = "probe"
 	EdgeDNSRecordKindProtected          = "protected"
@@ -110,6 +112,22 @@ type EdgeRoutePolicy struct {
 	EdgeGroupID string    `json:"edge_group_id,omitempty"`
 	RoutePolicy string    `json:"route_policy"`
 	Enabled     bool      `json:"enabled"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type PlatformDomainBinding struct {
+	Hostname    string    `json:"hostname"`
+	Zone        string    `json:"zone"`
+	AppID       string    `json:"app_id"`
+	AppName     string    `json:"app_name,omitempty"`
+	ProjectID   string    `json:"project_id,omitempty"`
+	TenantID    string    `json:"tenant_id"`
+	Status      string    `json:"status"`
+	TLSStatus   string    `json:"tls_status,omitempty"`
+	RoutePolicy string    `json:"route_policy"`
+	EdgeGroupID string    `json:"edge_group_id,omitempty"`
+	DNSKind     string    `json:"dns_record_kind"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }

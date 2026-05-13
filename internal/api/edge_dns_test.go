@@ -341,6 +341,60 @@ func TestEdgeDNSBundleKeepsStaticProtectedZoneRecordsAndWildcardFallback(t *test
 	}
 }
 
+func TestEdgeDNSBundleLetsPlatformDomainBindingOverrideStaticAddressRecords(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	if _, _, err := storeState.EnsureManagedSharedLocationLabels(map[string]string{
+		runtimepkg.LocationCountryCodeLabelKey: "US",
+	}); err != nil {
+		t.Fatalf("set managed shared location labels: %v", err)
+	}
+	app = deployAppForEdgeRouteTest(t, storeState, app)
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+		ID:          "edge-us-1",
+		EdgeGroupID: "edge-group-country-us",
+		PublicIPv4:  "15.204.94.71",
+		Status:      model.EdgeHealthHealthy,
+		Healthy:     true,
+	}); err != nil {
+		t.Fatalf("record healthy US edge node: %v", err)
+	}
+	server.dnsStaticRecords = parseEdgeDNSStaticRecords(`[
+		{"name":"fugue.pro","type":"A","values":["136.112.185.40"],"ttl":300},
+		{"name":"fugue.pro","type":"MX","values":["10 mail.fugue.pro"],"ttl":300}
+	]`, nil)
+	if _, err := storeState.PutAppDomain(model.AppDomain{
+		Hostname:  "fugue.pro",
+		AppID:     app.ID,
+		TenantID:  app.TenantID,
+		Status:    model.AppDomainStatusVerified,
+		TLSStatus: model.AppDomainTLSStatusReady,
+	}); err != nil {
+		t.Fatalf("put platform domain binding: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&answer_ip=203.0.113.10&route_a_answer_ip=136.112.185.40", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	rootA := edgeDNSRecordByNameAndType(bundle.Records, "fugue.pro", model.EdgeDNSRecordTypeA)
+	if rootA == nil {
+		t.Fatalf("expected fugue.pro A record: %+v", bundle.Records)
+	}
+	if rootA.RecordKind != model.EdgeDNSRecordKindPlatformDomain || strings.Join(rootA.Values, ",") != "15.204.94.71" {
+		t.Fatalf("expected platform-domain A record to override static Route A address, got %+v", rootA)
+	}
+	rootMX := edgeDNSRecordByNameAndType(bundle.Records, "fugue.pro", model.EdgeDNSRecordTypeMX)
+	if rootMX == nil || rootMX.RecordKind != model.EdgeDNSRecordKindProtected || strings.Join(rootMX.Values, ",") != "10 mail.fugue.pro" {
+		t.Fatalf("expected static protected MX record to survive, got %+v", rootMX)
+	}
+}
+
 func TestDNSACMEChallengeAPIDrivesEdgeDNSBundleTXTRecords(t *testing.T) {
 	t.Parallel()
 

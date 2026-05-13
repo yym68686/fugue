@@ -14,6 +14,8 @@ tags:
     description: Edge integration and TLS automation endpoints.
   - name: DNS
     description: Authoritative DNS inventory, heartbeat, and delegation readiness endpoints.
+  - name: Admin
+    description: Platform administrator control-plane endpoints.
   - name: Tenants
     description: Tenant lifecycle endpoints.
   - name: Projects
@@ -355,6 +357,101 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/DeleteEdgeRoutePolicyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/domains:
+    get:
+      operationId: listPlatformDomainBindings
+      summary: List Platform Domain Bindings
+      tags: [Admin]
+      x-fugue-handler: handleListPlatformDomainBindings
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: zone
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformDomainBindingListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/domains/{hostname}:
+    get:
+      operationId: getPlatformDomainBinding
+      summary: Get Platform Domain Binding
+      tags: [Admin]
+      x-fugue-handler: handleGetPlatformDomainBinding
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: hostname
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformDomainBindingResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      operationId: putPlatformDomainBinding
+      summary: Put Platform Domain Binding
+      tags: [Admin]
+      x-fugue-handler: handlePutPlatformDomainBinding
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: hostname
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PutPlatformDomainBindingRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformDomainBindingResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deletePlatformDomainBinding
+      summary: Delete Platform Domain Binding
+      tags: [Admin]
+      x-fugue-handler: handleDeletePlatformDomainBinding
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: hostname
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeletePlatformDomainBindingResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/edge/dns:
@@ -5042,6 +5139,56 @@ components:
       properties:
         policy:
           $ref: "#/components/schemas/EdgeRoutePolicy"
+    PlatformDomainBinding:
+      type: object
+      additionalProperties: false
+      required: [hostname, zone, app_id, tenant_id, status, route_policy, dns_record_kind, created_at, updated_at]
+      properties:
+        hostname:
+          type: string
+        zone:
+          type: string
+        app_id:
+          type: string
+        app_name:
+          type: string
+        project_id:
+          type: string
+        tenant_id:
+          type: string
+        status:
+          type: string
+        tls_status:
+          type: string
+        route_policy:
+          type: string
+          enum: [route_a_only, edge_canary, edge_enabled]
+        edge_group_id:
+          type: string
+        dns_record_kind:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    PlatformDomainBindingListResponse:
+      type: object
+      additionalProperties: false
+      required: [bindings]
+      properties:
+        bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformDomainBinding"
+    PlatformDomainBindingResponse:
+      type: object
+      additionalProperties: false
+      required: [binding]
+      properties:
+        binding:
+          $ref: "#/components/schemas/PlatformDomainBinding"
     EdgeNode:
       type: object
       additionalProperties: false
@@ -5267,6 +5414,27 @@ components:
           type: string
           enum: [route_a_only, edge_canary, edge_enabled]
         enabled:
+          type: boolean
+    PutPlatformDomainBindingRequest:
+      type: object
+      additionalProperties: false
+      required: [app_id]
+      properties:
+        app_id:
+          type: string
+        route_policy:
+          type: string
+          enum: [route_a_only, edge_canary, edge_enabled]
+        edge_group_id:
+          type: string
+    DeletePlatformDomainBindingResponse:
+      type: object
+      additionalProperties: false
+      required: [binding, deleted]
+      properties:
+        binding:
+          $ref: "#/components/schemas/PlatformDomainBinding"
+        deleted:
           type: boolean
     EdgeTLSAllowlistEntry:
       type: object

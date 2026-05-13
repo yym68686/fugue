@@ -188,6 +188,8 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	}
 
 	staticRecords := edgeDNSStaticRecordsForZone(s.dnsStaticRecords, options.Zone)
+	platformDomainNames := s.edgeDNSPlatformDomainNames(domains, options.Zone)
+	staticRecords = edgeDNSStaticRecordsWithoutPlatformOverrides(staticRecords, platformDomainNames)
 	protectedNames := edgeDNSProtectedRecordNames(staticRecords)
 
 	acmeRecords := edgeDNSACMEChallengeRecords(acmeChallenges)
@@ -238,20 +240,37 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 
 	for _, domain := range domains {
 		hostname := normalizeExternalAppDomain(domain.Hostname)
-		if hostname == "" || !s.managedEdgeCustomDomain(hostname) {
+		if hostname == "" {
 			continue
 		}
 		app, ok := appByID[strings.TrimSpace(domain.AppID)]
 		if !ok {
 			continue
 		}
-		binding := s.deriveEdgeRouteBinding(r, app, hostname, model.EdgeRouteKindCustomDomain, model.EdgeRouteTLSPolicyCustomDomain, domain.CreatedAt, domain.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
+		routeKind := model.EdgeRouteKindCustomDomain
+		tlsPolicy := model.EdgeRouteTLSPolicyCustomDomain
+		recordKind := model.EdgeDNSRecordKindCustomDomainTarget
+		platformDomain := false
+		switch {
+		case s.isPlatformOwnedDomainBinding(hostname):
+			routeKind = model.EdgeRouteKindPlatformDomain
+			tlsPolicy = model.EdgeRouteTLSPolicyPlatform
+			recordKind = model.EdgeDNSRecordKindPlatformDomain
+			platformDomain = true
+		case s.managedEdgeCustomDomain(hostname):
+		default:
+			continue
+		}
+		binding := s.deriveEdgeRouteBinding(r, app, hostname, routeKind, tlsPolicy, domain.CreatedAt, domain.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
-		target := normalizeExternalAppDomain(domain.RouteTarget)
-		if target == "" {
+		target := hostname
+		if !platformDomain {
+			target = normalizeExternalAppDomain(domain.RouteTarget)
+		}
+		if target == "" && !platformDomain {
 			target = normalizeExternalAppDomain(s.primaryCustomDomainTarget(app))
 		}
-		if !edgeDNSTargetWithinZone(target, options.Zone) || protectedNames[target] {
+		if !edgeDNSTargetWithinZone(target, options.Zone) || (!platformDomain && protectedNames[target]) {
 			continue
 		}
 		answerIPs := edgeDNSAnswerIPsForBinding(binding, options, edgeAnswerIPsByGroup)
@@ -262,7 +281,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			target,
 			answerIPs,
 			options.TTL,
-			model.EdgeDNSRecordKindCustomDomainTarget,
+			recordKind,
 			binding.Status,
 			binding.StatusReason,
 			app.ID,
@@ -282,6 +301,22 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	}
 	bundle.Version = edgeDNSBundleVersion(bundle)
 	return bundle, nil
+}
+
+func (s *Server) edgeDNSPlatformDomainNames(domains []model.AppDomain, zone string) map[string]bool {
+	zone = normalizeExternalAppDomain(zone)
+	out := make(map[string]bool)
+	for _, domain := range domains {
+		hostname := normalizeExternalAppDomain(domain.Hostname)
+		if hostname == "" || !s.isPlatformOwnedDomainBinding(hostname) {
+			continue
+		}
+		if zone != "" && !edgeDNSTargetWithinZone(hostname, zone) {
+			continue
+		}
+		out[hostname] = true
+	}
+	return out
 }
 
 type edgeDNSStaticRecordsEnvelope struct {
@@ -401,6 +436,24 @@ func edgeDNSStaticRecordsForZone(records []model.EdgeDNSRecord, zone string) []m
 		if edgeDNSTargetWithinZone(record.Name, zone) {
 			out = append(out, record)
 		}
+	}
+	return out
+}
+
+func edgeDNSStaticRecordsWithoutPlatformOverrides(records []model.EdgeDNSRecord, platformDomainNames map[string]bool) []model.EdgeDNSRecord {
+	if len(records) == 0 || len(platformDomainNames) == 0 {
+		return records
+	}
+	out := make([]model.EdgeDNSRecord, 0, len(records))
+	for _, record := range records {
+		name := normalizeExternalAppDomain(record.Name)
+		if platformDomainNames[name] {
+			switch strings.ToUpper(strings.TrimSpace(record.Type)) {
+			case model.EdgeDNSRecordTypeA, model.EdgeDNSRecordTypeAAAA, model.EdgeDNSRecordTypeCNAME:
+				continue
+			}
+		}
+		out = append(out, record)
 	}
 	return out
 }

@@ -21,6 +21,19 @@ type edgeRoutePolicyDeleteResponse struct {
 	Deleted bool                  `json:"deleted"`
 }
 
+type platformDomainBindingListResponse struct {
+	Bindings []model.PlatformDomainBinding `json:"bindings"`
+}
+
+type platformDomainBindingResponse struct {
+	Binding model.PlatformDomainBinding `json:"binding"`
+}
+
+type platformDomainBindingDeleteResponse struct {
+	Binding model.PlatformDomainBinding `json:"binding"`
+	Deleted bool                        `json:"deleted"`
+}
+
 type edgeNodeListResponse struct {
 	Nodes  []model.EdgeNode  `json:"nodes"`
 	Groups []model.EdgeGroup `json:"groups"`
@@ -52,6 +65,12 @@ type putEdgeRoutePolicyRequest struct {
 	RoutePolicy string `json:"route_policy"`
 }
 
+type putPlatformDomainBindingRequest struct {
+	AppID       string `json:"app_id"`
+	RoutePolicy string `json:"route_policy,omitempty"`
+	EdgeGroupID string `json:"edge_group_id,omitempty"`
+}
+
 func (c *Client) ListEdgeRoutePolicies() ([]model.EdgeRoutePolicy, error) {
 	var response edgeRoutePolicyListResponse
 	if err := c.doJSON(http.MethodGet, "/v1/edge/route-policies", nil, &response); err != nil {
@@ -76,6 +95,44 @@ func (c *Client) DeleteEdgeRoutePolicy(hostname string) (edgeRoutePolicyDeleteRe
 	var response edgeRoutePolicyDeleteResponse
 	if err := c.doJSON(http.MethodDelete, edgeRoutePolicyPath(hostname), nil, &response); err != nil {
 		return edgeRoutePolicyDeleteResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) ListPlatformDomainBindings(zone string) ([]model.PlatformDomainBinding, error) {
+	apiPath := "/v1/admin/domains"
+	if strings.TrimSpace(zone) != "" {
+		values := url.Values{}
+		values.Set("zone", strings.TrimSpace(zone))
+		apiPath += "?" + values.Encode()
+	}
+	var response platformDomainBindingListResponse
+	if err := c.doJSON(http.MethodGet, apiPath, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Bindings, nil
+}
+
+func (c *Client) GetPlatformDomainBinding(hostname string) (model.PlatformDomainBinding, error) {
+	var response platformDomainBindingResponse
+	if err := c.doJSON(http.MethodGet, platformDomainBindingPath(hostname), nil, &response); err != nil {
+		return model.PlatformDomainBinding{}, err
+	}
+	return response.Binding, nil
+}
+
+func (c *Client) PutPlatformDomainBinding(hostname string, request putPlatformDomainBindingRequest) (model.PlatformDomainBinding, error) {
+	var response platformDomainBindingResponse
+	if err := c.doJSON(http.MethodPut, platformDomainBindingPath(hostname), request, &response); err != nil {
+		return model.PlatformDomainBinding{}, err
+	}
+	return response.Binding, nil
+}
+
+func (c *Client) DeletePlatformDomainBinding(hostname string) (platformDomainBindingDeleteResponse, error) {
+	var response platformDomainBindingDeleteResponse
+	if err := c.doJSON(http.MethodDelete, platformDomainBindingPath(hostname), nil, &response); err != nil {
+		return platformDomainBindingDeleteResponse{}, err
 	}
 	return response, nil
 }
@@ -112,6 +169,10 @@ func (c *Client) CreateEdgeNodeToken(edgeID string, request createEdgeNodeTokenR
 
 func edgeRoutePolicyPath(hostname string) string {
 	return "/v1/edge/route-policies/" + url.PathEscape(strings.TrimSpace(hostname))
+}
+
+func platformDomainBindingPath(hostname string) string {
+	return "/v1/admin/domains/" + url.PathEscape(strings.TrimSpace(hostname))
 }
 
 func edgeNodePath(edgeID string) string {
