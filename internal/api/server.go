@@ -37,6 +37,7 @@ type Server struct {
 	customDomainBaseDomain       string
 	apiPublicDomain              string
 	dnsStaticRecords             []model.EdgeDNSRecord
+	platformRoutes               []model.PlatformRoute
 	edgeTLSAskToken              string
 	registryPushBase             string
 	registryPullBase             string
@@ -94,6 +95,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		customDomainBaseDomain:       defaultCustomDomainBaseDomain(cfg.AppBaseDomain),
 		apiPublicDomain:              strings.TrimSpace(strings.ToLower(cfg.APIPublicDomain)),
 		dnsStaticRecords:             parseEdgeDNSStaticRecords(cfg.DNSStaticRecordsJSON, logger),
+		platformRoutes:               parsePlatformRoutes(cfg.PlatformRoutesJSON, logger),
 		edgeTLSAskToken:              strings.TrimSpace(cfg.EdgeTLSAskToken),
 		registryPushBase:             strings.TrimSpace(cfg.RegistryPushBase),
 		registryPullBase:             strings.TrimSpace(cfg.RegistryPullBase),

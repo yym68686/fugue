@@ -6,9 +6,11 @@ import (
 )
 
 const (
-	EdgeRouteKindPlatform       = "platform"
-	EdgeRouteKindPlatformDomain = "platform-domain"
-	EdgeRouteKindCustomDomain   = "custom-domain"
+	EdgeRouteKindPlatform        = "platform"
+	EdgeRouteKindPlatformDomain  = "platform-domain"
+	EdgeRouteKindCustomDomain    = "custom-domain"
+	EdgeRouteKindPlatformRoute   = "platform-route"
+	EdgeRouteKindControlPlaneAPI = "control-plane-api"
 )
 
 const (
@@ -35,6 +37,7 @@ const (
 
 const (
 	EdgeRouteUpstreamScopeLocalService = "local-service"
+	EdgeRouteUpstreamScopeCluster      = "cluster"
 	EdgeRouteUpstreamScopeMesh         = "mesh"
 )
 
@@ -47,9 +50,16 @@ const (
 	EdgeDNSRecordKindCustomDomainTarget = "custom-domain-target"
 	EdgeDNSRecordKindPlatformDomain     = "platform-domain"
 	EdgeDNSRecordKindPlatform           = "platform"
+	EdgeDNSRecordKindPlatformRoute      = "platform-route"
 	EdgeDNSRecordKindProbe              = "probe"
 	EdgeDNSRecordKindProtected          = "protected"
 	EdgeDNSRecordKindACMEChallenge      = "acme-challenge"
+)
+
+const (
+	PlatformRouteEdgeGroupModeAllHealthy  = "all_healthy"
+	PlatformRouteEdgeGroupModeRegionAware = "region_aware"
+	PlatformRouteEdgeGroupModePinned      = "pinned"
 )
 
 const (
@@ -114,6 +124,21 @@ type EdgeRoutePolicy struct {
 	Enabled     bool      `json:"enabled"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type PlatformRoute struct {
+	Hostname      string `json:"hostname"`
+	Kind          string `json:"kind,omitempty"`
+	UpstreamKind  string `json:"upstream_kind,omitempty"`
+	UpstreamScope string `json:"upstream_scope,omitempty"`
+	UpstreamURL   string `json:"upstream_url"`
+	TLSPolicy     string `json:"tls_policy,omitempty"`
+	RoutePolicy   string `json:"route_policy,omitempty"`
+	EdgeGroupMode string `json:"edge_group_mode,omitempty"`
+	EdgeGroupID   string `json:"edge_group_id,omitempty"`
+	Status        string `json:"status,omitempty"`
+	StatusReason  string `json:"status_reason,omitempty"`
+	TTL           int    `json:"ttl,omitempty"`
 }
 
 type PlatformDomainBinding struct {

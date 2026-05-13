@@ -36,6 +36,7 @@ func main() {
 		AppBaseDomain:                cfg.AppBaseDomain,
 		APIPublicDomain:              cfg.APIPublicDomain,
 		DNSStaticRecordsJSON:         cfg.DNSStaticRecordsJSON,
+		PlatformRoutesJSON:           cfg.PlatformRoutesJSON,
 		EdgeTLSAskToken:              cfg.EdgeTLSAskToken,
 		RegistryPushBase:             cfg.RegistryPushBase,
 		RegistryPullBase:             cfg.RegistryPullBase,

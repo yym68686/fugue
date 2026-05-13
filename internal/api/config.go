@@ -12,6 +12,7 @@ type ServerConfig struct {
 	AppBaseDomain                string
 	APIPublicDomain              string
 	DNSStaticRecordsJSON         string
+	PlatformRoutesJSON           string
 	EdgeTLSAskToken              string
 	RegistryPushBase             string
 	RegistryPullBase             string

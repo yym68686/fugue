@@ -444,6 +444,69 @@ func TestPlatformRoutesDefaultToHealthyEdgeGroups(t *testing.T) {
 	}
 }
 
+func TestConfiguredPlatformRouteFansOutToHealthyEdgeGroups(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	server.platformRoutes = parsePlatformRoutes(`{"routes":[{
+		"hostname":"api.fugue.pro",
+		"kind":"control-plane-api",
+		"upstream_url":"http://fugue-fugue-api.fugue-system.svc.cluster.local:8080",
+		"edge_group_mode":"region_aware"
+	}]}`, nil)
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+		ID:          "edge-us-1",
+		EdgeGroupID: "edge-group-country-us",
+		Status:      model.EdgeHealthHealthy,
+		Healthy:     true,
+	}); err != nil {
+		t.Fatalf("record healthy US edge node: %v", err)
+	}
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+		ID:          "edge-de-1",
+		EdgeGroupID: "edge-group-country-de",
+		Status:      model.EdgeHealthHealthy,
+		Healthy:     true,
+	}); err != nil {
+		t.Fatalf("record healthy DE edge node: %v", err)
+	}
+
+	for _, edgeGroupID := range []string{"edge-group-country-us", "edge-group-country-de"} {
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id="+edgeGroupID, nil)
+		server.Handler().ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("expected status %d for %s, got %d body=%s", http.StatusOK, edgeGroupID, recorder.Code, recorder.Body.String())
+		}
+		var bundle model.EdgeRouteBundle
+		mustDecodeJSON(t, recorder, &bundle)
+		route := edgeRouteByHostKindAndGroup(bundle.Routes, "api.fugue.pro", model.EdgeRouteKindControlPlaneAPI, edgeGroupID)
+		if route == nil {
+			t.Fatalf("expected configured platform route in %s bundle: %+v", edgeGroupID, bundle.Routes)
+		}
+		if route.RoutePolicy != model.EdgeRoutePolicyEnabled ||
+			route.UpstreamKind != model.EdgeRouteUpstreamKindKubernetesService ||
+			route.UpstreamScope != model.EdgeRouteUpstreamScopeCluster ||
+			route.UpstreamURL != "http://fugue-fugue-api.fugue-system.svc.cluster.local:8080" ||
+			route.TLSPolicy != model.EdgeRouteTLSPolicyPlatform ||
+			route.Status != model.EdgeRouteStatusActive {
+			t.Fatalf("unexpected configured platform route: %+v", route)
+		}
+	}
+
+	hk := httptest.NewRecorder()
+	hkReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-hk", nil)
+	server.Handler().ServeHTTP(hk, hkReq)
+	if hk.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, hk.Code, hk.Body.String())
+	}
+	var hkBundle model.EdgeRouteBundle
+	mustDecodeJSON(t, hk, &hkBundle)
+	if edgeRouteByHostAndKind(hkBundle.Routes, "api.fugue.pro", model.EdgeRouteKindControlPlaneAPI) != nil {
+		t.Fatalf("configured platform route must not enter an unhealthy edge group bundle: %+v", hkBundle.Routes)
+	}
+}
+
 func TestDerivedEdgeGroupIDForRuntimeUsesClusterNodeLabelsFallback(t *testing.T) {
 	t.Parallel()
 

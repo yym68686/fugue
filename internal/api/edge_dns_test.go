@@ -395,6 +395,73 @@ func TestEdgeDNSBundleLetsPlatformDomainBindingOverrideStaticAddressRecords(t *t
 	}
 }
 
+func TestEdgeDNSBundleLetsConfiguredPlatformRouteOverrideStaticAddressRecords(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	server.platformRoutes = parsePlatformRoutes(`{"routes":[{
+		"hostname":"api.fugue.pro",
+		"kind":"control-plane-api",
+		"upstream_url":"http://fugue-fugue-api.fugue-system.svc.cluster.local:8080",
+		"edge_group_mode":"region_aware"
+	}]}`, nil)
+	server.dnsStaticRecords = parseEdgeDNSStaticRecords(`[
+		{"name":"api.fugue.pro","type":"A","values":["136.112.185.40"],"ttl":300},
+		{"name":"api.fugue.pro","type":"TXT","values":["verification=keep"],"ttl":300}
+	]`, nil)
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+		ID:          "edge-us-1",
+		EdgeGroupID: "edge-group-country-us",
+		PublicIPv4:  "15.204.94.71",
+		Status:      model.EdgeHealthHealthy,
+		Healthy:     true,
+	}); err != nil {
+		t.Fatalf("record healthy US edge node: %v", err)
+	}
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+		ID:          "edge-de-1",
+		EdgeGroupID: "edge-group-country-de",
+		PublicIPv4:  "51.38.126.103",
+		Status:      model.EdgeHealthHealthy,
+		Healthy:     true,
+	}); err != nil {
+		t.Fatalf("record healthy DE edge node: %v", err)
+	}
+
+	us := httptest.NewRecorder()
+	usReq := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-us&answer_ip=15.204.94.71&route_a_answer_ip=136.112.185.40", nil)
+	server.Handler().ServeHTTP(us, usReq)
+	if us.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, us.Code, us.Body.String())
+	}
+	var usBundle model.EdgeDNSBundle
+	mustDecodeJSON(t, us, &usBundle)
+	apiA := edgeDNSRecordByNameAndType(usBundle.Records, "api.fugue.pro", model.EdgeDNSRecordTypeA)
+	if apiA == nil ||
+		apiA.RecordKind != model.EdgeDNSRecordKindPlatformRoute ||
+		strings.Join(apiA.Values, ",") != "15.204.94.71,51.38.126.103" ||
+		apiA.EdgeGroupID != "edge-group-country-us" {
+		t.Fatalf("expected platform route to override static API A on US DNS node, got %+v", apiA)
+	}
+	apiTXT := edgeDNSRecordByNameAndType(usBundle.Records, "api.fugue.pro", model.EdgeDNSRecordTypeTXT)
+	if apiTXT == nil || apiTXT.RecordKind != model.EdgeDNSRecordKindProtected || strings.Join(apiTXT.Values, ",") != "verification=keep" {
+		t.Fatalf("expected same-name protected TXT to survive, got %+v", apiTXT)
+	}
+
+	de := httptest.NewRecorder()
+	deReq := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103&route_a_answer_ip=136.112.185.40", nil)
+	server.Handler().ServeHTTP(de, deReq)
+	if de.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, de.Code, de.Body.String())
+	}
+	var deBundle model.EdgeDNSBundle
+	mustDecodeJSON(t, de, &deBundle)
+	apiA = edgeDNSRecordByNameAndType(deBundle.Records, "api.fugue.pro", model.EdgeDNSRecordTypeA)
+	if apiA == nil || strings.Join(apiA.Values, ",") != "51.38.126.103,15.204.94.71" || apiA.EdgeGroupID != "edge-group-country-de" {
+		t.Fatalf("expected platform route DNS answers to put local edge first on DE DNS node, got %+v", apiA)
+	}
+}
+
 func TestDNSACMEChallengeAPIDrivesEdgeDNSBundleTXTRecords(t *testing.T) {
 	t.Parallel()
 

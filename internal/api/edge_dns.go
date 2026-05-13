@@ -188,13 +188,16 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	}
 
 	staticRecords := edgeDNSStaticRecordsForZone(s.dnsStaticRecords, options.Zone)
-	platformDomainNames := s.edgeDNSPlatformDomainNames(domains, options.Zone)
-	staticRecords = edgeDNSStaticRecordsWithoutPlatformOverrides(staticRecords, platformDomainNames)
+	platformOverrideNames := s.edgeDNSPlatformDomainNames(domains, options.Zone)
+	for hostname := range s.edgeDNSPlatformRouteNames(options.Zone) {
+		platformOverrideNames[hostname] = true
+	}
+	staticRecords = edgeDNSStaticRecordsWithoutPlatformOverrides(staticRecords, platformOverrideNames)
 	protectedNames := edgeDNSProtectedRecordNames(staticRecords)
 
 	acmeRecords := edgeDNSACMEChallengeRecords(acmeChallenges)
 
-	records := make([]model.EdgeDNSRecord, 0, len(staticRecords)+len(acmeRecords)+len(apps)+len(domains)+1)
+	records := make([]model.EdgeDNSRecord, 0, len(staticRecords)+len(acmeRecords)+len(apps)+len(domains)+len(s.platformRoutes)+1)
 	records = append(records, staticRecords...)
 	records = append(records, acmeRecords...)
 	records = append(records, edgeDNSRecordsForTarget(
@@ -209,6 +212,33 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		options.EdgeGroupID,
 		"",
 	)...)
+
+	for _, platformRoute := range s.platformRoutes {
+		hostname := normalizeExternalAppDomain(platformRoute.Hostname)
+		if !edgeDNSTargetWithinZone(hostname, options.Zone) {
+			continue
+		}
+		answerIPs := edgeDNSAnswerIPsForPlatformRoute(platformRoute, options, edgeAnswerIPsByGroup)
+		if len(answerIPs) == 0 {
+			continue
+		}
+		edgeGroupID := strings.TrimSpace(platformRoute.EdgeGroupID)
+		if edgeGroupID == "" {
+			edgeGroupID = strings.TrimSpace(options.EdgeGroupID)
+		}
+		records = append(records, edgeDNSRecordsForTarget(
+			hostname,
+			answerIPs,
+			platformRoute.TTL,
+			model.EdgeDNSRecordKindPlatformRoute,
+			platformRoute.Status,
+			platformRoute.StatusReason,
+			"",
+			"",
+			edgeGroupID,
+			"",
+		)...)
+	}
 
 	for _, app := range appByID {
 		if app.Route == nil || strings.TrimSpace(app.Route.Hostname) == "" {
@@ -309,6 +339,22 @@ func (s *Server) edgeDNSPlatformDomainNames(domains []model.AppDomain, zone stri
 	for _, domain := range domains {
 		hostname := normalizeExternalAppDomain(domain.Hostname)
 		if hostname == "" || !s.isPlatformOwnedDomainBinding(hostname) {
+			continue
+		}
+		if zone != "" && !edgeDNSTargetWithinZone(hostname, zone) {
+			continue
+		}
+		out[hostname] = true
+	}
+	return out
+}
+
+func (s *Server) edgeDNSPlatformRouteNames(zone string) map[string]bool {
+	zone = normalizeExternalAppDomain(zone)
+	out := make(map[string]bool)
+	for _, route := range s.platformRoutes {
+		hostname := normalizeExternalAppDomain(route.Hostname)
+		if hostname == "" {
 			continue
 		}
 		if zone != "" && !edgeDNSTargetWithinZone(hostname, zone) {
@@ -545,6 +591,41 @@ func edgeDNSAnswerIPsForBinding(binding model.EdgeRouteBinding, options edgeDNSB
 	return append([]string(nil), options.AnswerIPs...)
 }
 
+func edgeDNSAnswerIPsForPlatformRoute(route model.PlatformRoute, options edgeDNSBundleOptions, edgeAnswerIPsByGroup map[string][]string) []string {
+	if route.Status != model.EdgeRouteStatusActive || !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) {
+		return nil
+	}
+	switch route.EdgeGroupMode {
+	case model.PlatformRouteEdgeGroupModePinned:
+		return append([]string(nil), edgeAnswerIPsByGroup[strings.TrimSpace(route.EdgeGroupID)]...)
+	default:
+		return edgeDNSAllHealthyAnswerIPs(strings.TrimSpace(options.EdgeGroupID), edgeAnswerIPsByGroup)
+	}
+}
+
+func edgeDNSAllHealthyAnswerIPs(localEdgeGroupID string, edgeAnswerIPsByGroup map[string][]string) []string {
+	out := []string{}
+	if localEdgeGroupID != "" {
+		for _, ip := range edgeAnswerIPsByGroup[localEdgeGroupID] {
+			out = appendEdgeDNSUniqueIP(out, ip)
+		}
+	}
+	groups := make([]string, 0, len(edgeAnswerIPsByGroup))
+	for groupID := range edgeAnswerIPsByGroup {
+		if groupID == localEdgeGroupID {
+			continue
+		}
+		groups = append(groups, groupID)
+	}
+	sort.Strings(groups)
+	for _, groupID := range groups {
+		for _, ip := range edgeAnswerIPsByGroup[groupID] {
+			out = appendEdgeDNSUniqueIP(out, ip)
+		}
+	}
+	return out
+}
+
 func edgeDNSTargetWithinZone(target, zone string) bool {
 	target = normalizeExternalAppDomain(target)
 	zone = normalizeExternalAppDomain(zone)
@@ -590,7 +671,6 @@ func edgeDNSRecord(name, recordType string, values []string, ttl int, kind, stat
 		Status:              strings.TrimSpace(status),
 		StatusReason:        strings.TrimSpace(reason),
 	}
-	sort.Strings(record.Values)
 	record.RecordGeneration = edgeDNSRecordGeneration(record)
 	return record
 }

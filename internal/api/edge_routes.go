@@ -89,7 +89,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	}
 	policyByHostname := edgeRoutePolicyByHostname(policies)
 
-	routes := make([]model.EdgeRouteBinding, 0, len(apps)+len(domains))
+	routes := make([]model.EdgeRouteBinding, 0, len(apps)+len(domains)+len(s.platformRoutes))
 	for _, app := range appByID {
 		if app.Route == nil || strings.TrimSpace(app.Route.Hostname) == "" {
 			continue
@@ -99,6 +99,14 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		for _, platformBinding := range expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups) {
 			if edgeRouteMatchesSelector(platformBinding, options) {
 				routes = append(routes, platformBinding)
+			}
+		}
+	}
+
+	for _, platformRoute := range s.platformRoutes {
+		for _, binding := range edgeRouteBindingsForPlatformRoute(platformRoute, healthyEdgeGroups) {
+			if edgeRouteMatchesSelector(binding, options) {
+				routes = append(routes, binding)
 			}
 		}
 	}
@@ -148,7 +156,10 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		if routes[i].Hostname != routes[j].Hostname {
 			return routes[i].Hostname < routes[j].Hostname
 		}
-		return routes[i].RouteKind < routes[j].RouteKind
+		if routes[i].RouteKind != routes[j].RouteKind {
+			return routes[i].RouteKind < routes[j].RouteKind
+		}
+		return routes[i].EdgeGroupID < routes[j].EdgeGroupID
 	})
 	sort.Slice(tlsAllowlist, func(i, j int) bool {
 		return tlsAllowlist[i].Hostname < tlsAllowlist[j].Hostname
@@ -392,6 +403,53 @@ func expandDefaultPlatformEdgeBindings(binding model.EdgeRouteBinding, healthyEd
 
 func isDefaultEdgeRouteKind(routeKind string) bool {
 	return routeKind == model.EdgeRouteKindPlatform || routeKind == model.EdgeRouteKindPlatformDomain
+}
+
+func edgeRouteBindingsForPlatformRoute(route model.PlatformRoute, healthyEdgeGroups map[string]bool) []model.EdgeRouteBinding {
+	base := model.EdgeRouteBinding{
+		Hostname:      route.Hostname,
+		RouteKind:     route.Kind,
+		RoutePolicy:   route.RoutePolicy,
+		UpstreamKind:  route.UpstreamKind,
+		UpstreamScope: route.UpstreamScope,
+		UpstreamURL:   route.UpstreamURL,
+		TLSPolicy:     route.TLSPolicy,
+		Streaming:     true,
+		Status:        route.Status,
+		StatusReason:  route.StatusReason,
+	}
+	if base.Status != model.EdgeRouteStatusActive || !model.EdgeRoutePolicyAllowsTraffic(base.RoutePolicy) {
+		base.UpstreamURL = ""
+	}
+
+	switch route.EdgeGroupMode {
+	case model.PlatformRouteEdgeGroupModePinned:
+		base.EdgeGroupID = strings.TrimSpace(route.EdgeGroupID)
+		if base.EdgeGroupID == "" || !healthyEdgeGroups[base.EdgeGroupID] {
+			base.Status = model.EdgeRouteStatusUnavailable
+			base.StatusReason = "edge group has no healthy edge nodes"
+			base.UpstreamURL = ""
+		}
+		base.RouteGeneration = edgeRouteGeneration(base)
+		return []model.EdgeRouteBinding{base}
+	default:
+		groups := sortedHealthyEdgeGroups(healthyEdgeGroups)
+		if len(groups) == 0 {
+			base.Status = model.EdgeRouteStatusUnavailable
+			base.StatusReason = "no healthy edge groups"
+			base.UpstreamURL = ""
+			base.RouteGeneration = edgeRouteGeneration(base)
+			return []model.EdgeRouteBinding{base}
+		}
+		out := make([]model.EdgeRouteBinding, 0, len(groups))
+		for _, edgeGroupID := range groups {
+			candidate := base
+			candidate.EdgeGroupID = edgeGroupID
+			candidate.RouteGeneration = edgeRouteGeneration(candidate)
+			out = append(out, candidate)
+		}
+		return out
+	}
 }
 
 func nearestHealthyEdgeGroupID(runtimeEdgeGroupID string, healthyEdgeGroups map[string]bool) string {

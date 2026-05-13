@@ -102,6 +102,10 @@ spec:
             - name: FUGUE_DNS_STATIC_RECORDS_JSON
               value: {{ .Values.api.dnsStaticRecordsJSON | quote }}
             {{- end }}
+            {{- if .Values.api.platformRoutesJSON }}
+            - name: FUGUE_PLATFORM_ROUTES_JSON
+              value: {{ .Values.api.platformRoutesJSON | quote }}
+            {{- end }}
             - name: FUGUE_EDGE_TLS_ASK_TOKEN
               valueFrom:
                 secretKeyRef:
