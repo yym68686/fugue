@@ -451,8 +451,9 @@ control_plane_node_address_candidates_for_slot() {
   node_name="$("${kubectl_cmd[@]}" get nodes -l "fugue.install/role=${role}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
   [[ -n "${node_name}" ]] || return 0
   {
+    "${kubectl_cmd[@]}" get node "${node_name}" -o jsonpath='{range .status.addresses[?(@.type=="InternalIP")]}{.address}{"\n"}{end}' 2>/dev/null || true
     "${kubectl_cmd[@]}" get node "${node_name}" -o jsonpath='{.metadata.labels.fugue\.io/public-ip}{"\n"}' 2>/dev/null || true
-    "${kubectl_cmd[@]}" get node "${node_name}" -o jsonpath='{range .status.addresses[?(@.type=="InternalIP")]}{.address}{"\n"}{end}{range .status.addresses[?(@.type=="ExternalIP")]}{.address}{"\n"}{end}{range .status.addresses[?(@.type=="Hostname")]}{.address}{"\n"}{end}' 2>/dev/null || true
+    "${kubectl_cmd[@]}" get node "${node_name}" -o jsonpath='{range .status.addresses[?(@.type=="ExternalIP")]}{.address}{"\n"}{end}{range .status.addresses[?(@.type=="Hostname")]}{.address}{"\n"}{end}' 2>/dev/null || true
   } | awk 'NF > 0 && !seen[$0]++'
 }
 
