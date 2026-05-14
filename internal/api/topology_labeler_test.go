@@ -168,6 +168,8 @@ func TestUpgradeScriptDoesNotBlockHAUpgradeOnNotReadyPrimary(t *testing.T) {
 		"HA upgrade will continue on remaining Ready control-plane nodes",
 		"skip primary mesh restore because primary node ${primary_node_name} is NotReady",
 		"skip primary disk-pressure recovery because primary node ${primary_node_name} is NotReady",
+		"skip Route A edge proxy sync because primary node ${primary_node_name} is NotReady",
+		"warning: Route A edge proxy sync failed; continuing because edge/API rollout already completed",
 		"force_delete_release_pods_on_unhealthy_nodes",
 	} {
 		if !strings.Contains(script, want) {

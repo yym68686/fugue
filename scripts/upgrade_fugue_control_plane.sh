@@ -1877,6 +1877,8 @@ EOF
 }
 
 sync_route_a_edge_proxy() {
+  local primary_node_name=""
+
   if [[ "${FUGUE_SYNC_EDGE_PROXY:-true}" != "true" ]]; then
     log "skip Route A edge proxy sync because FUGUE_SYNC_EDGE_PROXY=${FUGUE_SYNC_EDGE_PROXY}"
     return
@@ -1884,11 +1886,18 @@ sync_route_a_edge_proxy() {
   if [[ -z "${FUGUE_API_PUBLIC_DOMAIN:-}" ]]; then
     return
   fi
+  primary_node_name="$(detect_primary_node_name)"
+  if [[ -n "${primary_node_name}" ]] && ! primary_node_is_ready "${primary_node_name}"; then
+    log "skip Route A edge proxy sync because primary node ${primary_node_name} is NotReady"
+    return 0
+  fi
 
   prepare_control_plane_automation_ssh
   export FUGUE_DOMAIN="${FUGUE_API_PUBLIC_DOMAIN}"
   log "syncing Route A edge proxy through scripts/sync_fugue_edge_proxy.sh"
-  bash ./scripts/sync_fugue_edge_proxy.sh
+  if ! bash ./scripts/sync_fugue_edge_proxy.sh; then
+    log "warning: Route A edge proxy sync failed; continuing because edge/API rollout already completed"
+  fi
 }
 
 label_default_builder_nodes() {
