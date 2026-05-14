@@ -539,6 +539,67 @@ $(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "      ")
 EOF
 }
 
+selector_json() {
+  local raw="$1"
+  local entry key value first=1
+
+  raw="${raw//;/$'\n'}"
+  raw="${raw//,/$'\n'}"
+  printf '{'
+  while IFS= read -r entry; do
+    entry="$(trim_field "${entry}")"
+    if [[ -z "${entry}" ]]; then
+      continue
+    fi
+    if [[ "${entry}" != *"="* ]]; then
+      fail "node selector entry ${entry} must be key=value"
+    fi
+    key="$(trim_field "${entry%%=*}")"
+    value="$(trim_field "${entry#*=}")"
+    if [[ -z "${key}" || -z "${value}" ]]; then
+      fail "node selector entry ${entry} must be key=value"
+    fi
+    if [[ "${first}" -eq 0 ]]; then
+      printf ','
+    fi
+    first=0
+    printf '%s:%s' "$(yaml_quote "${key}")" "$(yaml_quote "${value}")"
+  done <<<"${raw}"
+  printf '}'
+}
+
+patch_singleton_deployment_node_selector() {
+  local deployment_name="$1"
+  local selector_json_value="${2}"
+  local patch
+
+  if ! ${KUBECTL} -n "${FUGUE_NAMESPACE}" get deploy "${deployment_name}" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  patch="$(printf '[{"op":"replace","path":"/spec/template/spec/nodeSelector","value":%s}]' "${selector_json_value}")"
+  if ${KUBECTL} -n "${FUGUE_NAMESPACE}" patch deploy "${deployment_name}" --type=json -p "${patch}" >/dev/null 2>&1; then
+    log "patched ${deployment_name} singleton nodeSelector"
+    return 0
+  fi
+
+  patch="$(printf '[{"op":"add","path":"/spec/template/spec/nodeSelector","value":%s}]' "${selector_json_value}")"
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" patch deploy "${deployment_name}" --type=json -p "${patch}" >/dev/null
+  log "added ${deployment_name} singleton nodeSelector"
+}
+
+patch_control_plane_singleton_deployments() {
+  if [[ "${FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED}" != "true" ]]; then
+    return 0
+  fi
+
+  local selector_json_value deployment_name
+  selector_json_value="$(selector_json "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}")"
+  for deployment_name in "${FUGUE_REGISTRY_DEPLOYMENT_NAME}" "${FUGUE_HEADSCALE_DEPLOYMENT_NAME}" "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" "${FUGUE_SHARED_WORKSPACE_NFS_DEPLOYMENT_NAME}"; do
+    patch_singleton_deployment_node_selector "${deployment_name}" "${selector_json_value}"
+  done
+}
+
 node_selector_country_yaml() {
   local country_code="$1"
   local indent="$2"
@@ -1978,6 +2039,9 @@ main() {
   FUGUE_API_DEPLOYMENT_NAME="${FUGUE_API_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}-api}"
   FUGUE_LEGACY_API_DEPLOYMENT_NAME="${FUGUE_LEGACY_API_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}}"
   FUGUE_CONTROLLER_DEPLOYMENT_NAME="${FUGUE_CONTROLLER_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}-controller}"
+  FUGUE_REGISTRY_DEPLOYMENT_NAME="${FUGUE_REGISTRY_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}-registry}"
+  FUGUE_HEADSCALE_DEPLOYMENT_NAME="${FUGUE_HEADSCALE_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}-headscale}"
+  FUGUE_SHARED_WORKSPACE_NFS_DEPLOYMENT_NAME="${FUGUE_SHARED_WORKSPACE_NFS_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}-shared-workspace-nfs}"
   FUGUE_POSTGRES_DEPLOYMENT_NAME="${FUGUE_POSTGRES_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}-postgres}"
   FUGUE_HELM_TIMEOUT="${FUGUE_HELM_TIMEOUT:-10m0s}"
   FUGUE_ROLLOUT_TIMEOUT="${FUGUE_ROLLOUT_TIMEOUT:-600s}"
@@ -2267,6 +2331,8 @@ main() {
     rollback_release || true
     fail "helm upgrade failed"
   fi
+
+  patch_control_plane_singleton_deployments
 
   force_delete_release_pods_on_unhealthy_nodes
 
