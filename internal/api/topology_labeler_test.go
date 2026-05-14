@@ -237,11 +237,32 @@ func TestDeployWorkflowDefaultsLegacyPostgresOffWhenCNPGIsAPIStore(t *testing.T)
 		"FUGUE_POSTGRES_ENABLED: ${{ vars.FUGUE_POSTGRES_ENABLED || (vars.FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API == 'true' && 'false' || 'true') }}",
 		"FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED: ${{ vars.FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED || 'false' }}",
 		"FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR: ${{ vars.FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR || '' }}",
+		"FUGUE_CONTROL_PLANE_POSTGRES_BOOTSTRAP_SOURCE_URL: ${{ vars.FUGUE_CONTROL_PLANE_POSTGRES_BOOTSTRAP_SOURCE_URL || '' }}",
 		"FUGUE_CONTROL_PLANE_KUBE_API_FALLBACK_SERVERS: ${{ vars.FUGUE_CONTROL_PLANE_KUBE_API_FALLBACK_SERVERS || 'https://10.128.0.3:6443,https://10.128.0.4:6443,https://100.64.0.2:6443,https://100.64.0.3:6443' }}",
+		"FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS: ${{ vars.FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS || 'https://100.64.0.2:6443,https://100.64.0.3:6443' }}",
 		"FUGUE_SYNC_EDGE_PROXY: ${{ vars.FUGUE_SYNC_EDGE_PROXY || 'false' }}",
 	} {
 		if !strings.Contains(workflow, want) {
 			t.Fatalf("expected deploy workflow to contain %q: %s", want, path)
+		}
+	}
+}
+
+func TestUpgradeScriptRequiresControlPlanePostgresBootstrapSourceForAPIStore(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(repoRoot(t), "scripts", "upgrade_fugue_control_plane.sh")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read upgrade script: %v", err)
+	}
+	script := string(data)
+	for _, want := range []string{
+		"FUGUE_CONTROL_PLANE_POSTGRES_BOOTSTRAP_SOURCE_URL",
+		"FUGUE_CONTROL_PLANE_POSTGRES_BOOTSTRAP_SOURCE_URL is required before first promoting control-plane Postgres to the API store",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected upgrade script to contain %q: %s", want, path)
 		}
 	}
 }

@@ -112,6 +112,46 @@ detect_cluster_join_server() {
   ${KUBECTL} -n "${FUGUE_NAMESPACE}" get secret "${secret_name}" -o jsonpath='{.data.FUGUE_CLUSTER_JOIN_SERVER}' 2>/dev/null | base64 --decode 2>/dev/null || true
 }
 
+detect_cluster_join_server_fallbacks() {
+  local secret_name="${FUGUE_RELEASE_FULLNAME}-config"
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get secret "${secret_name}" -o jsonpath='{.data.FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS}' 2>/dev/null | base64 --decode 2>/dev/null || true
+}
+
+control_plane_postgres_name() {
+  local name=""
+  name="$(trim_field "${FUGUE_CONTROL_PLANE_POSTGRES_NAME:-}")"
+  if [[ -n "${name}" ]]; then
+    printf '%s' "${name}"
+    return
+  fi
+  printf '%s-control-plane-postgres' "${FUGUE_RELEASE_FULLNAME}"
+}
+
+control_plane_postgres_rw_service_host() {
+  printf '%s-rw.%s.svc.cluster.local' "$(control_plane_postgres_name)" "${FUGUE_NAMESPACE}"
+}
+
+detect_existing_api_database_url() {
+  local secret_name="${FUGUE_RELEASE_FULLNAME}-config"
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get secret "${secret_name}" -o jsonpath='{.data.FUGUE_DATABASE_URL}' 2>/dev/null | base64 --decode 2>/dev/null || true
+}
+
+api_database_already_uses_control_plane_postgres() {
+  local current_url=""
+  local target_host=""
+  current_url="$(detect_existing_api_database_url)"
+  [[ -n "${current_url}" ]] || return 1
+  target_host="$(control_plane_postgres_rw_service_host)"
+  case "${current_url}" in
+    *"@${target_host}:"*|*"@${target_host}/"*|*"@${target_host}?"*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 registry_endpoint_from_join_server() {
   local join_server="$1"
   local host=""
@@ -2121,6 +2161,7 @@ main() {
   FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_SIZE="${FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_SIZE:-10Gi}"
   FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_CLASS="${FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_CLASS:-}"
   FUGUE_CONTROL_PLANE_POSTGRES_EXISTING_SECRET_NAME="${FUGUE_CONTROL_PLANE_POSTGRES_EXISTING_SECRET_NAME:-}"
+  FUGUE_CONTROL_PLANE_POSTGRES_BOOTSTRAP_SOURCE_URL="${FUGUE_CONTROL_PLANE_POSTGRES_BOOTSTRAP_SOURCE_URL:-}"
   FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED="${FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED:-false}"
   FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR="${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR:-}"
   FUGUE_REGISTRY_NODEPORT="${FUGUE_REGISTRY_NODEPORT:-30500}"
@@ -2220,6 +2261,11 @@ main() {
   if [[ "${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" == "true" && "${FUGUE_CONTROL_PLANE_POSTGRES_ENABLED}" != "true" ]]; then
     fail "FUGUE_CONTROL_PLANE_POSTGRES_ENABLED must be true when FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API=true"
   fi
+  if [[ "${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" == "true" ]] &&
+    ! api_database_already_uses_control_plane_postgres &&
+    [[ -z "$(trim_field "${FUGUE_CONTROL_PLANE_POSTGRES_BOOTSTRAP_SOURCE_URL}")" ]]; then
+    fail "FUGUE_CONTROL_PLANE_POSTGRES_BOOTSTRAP_SOURCE_URL is required before first promoting control-plane Postgres to the API store"
+  fi
   case "${FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED}" in
     true|false) ;;
     *) fail "FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED must be true or false" ;;
@@ -2267,6 +2313,9 @@ main() {
   if [[ -z "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT:-}" ]]; then
     FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT="${FUGUE_DEFAULT_CLUSTER_JOIN_REGISTRY_ENDPOINT:-127.0.0.1:${FUGUE_REGISTRY_NODEPORT}}"
   fi
+  if [[ -z "${FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS:-}" ]]; then
+    FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS="$(detect_cluster_join_server_fallbacks || true)"
+  fi
 
   if [[ -z "${FUGUE_SMOKE_URL:-}" && -n "${FUGUE_API_PUBLIC_DOMAIN:-}" ]]; then
     FUGUE_SMOKE_URL="https://${FUGUE_API_PUBLIC_DOMAIN}/healthz"
@@ -2295,6 +2344,7 @@ main() {
   log "registry push base: ${FUGUE_REGISTRY_PUSH_BASE}"
   log "registry pull base: ${FUGUE_REGISTRY_PULL_BASE}"
   log "cluster join registry endpoint: ${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}"
+  log "cluster join server fallbacks: ${FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS:-<none>}"
   log "app base domain: ${FUGUE_APP_BASE_DOMAIN}"
   log "custom domain base domain: dns.${FUGUE_APP_BASE_DOMAIN}"
   log "dns shadow: enabled=${FUGUE_DNS_ENABLED} zone=${FUGUE_DNS_ZONE} answer_ips=${FUGUE_DNS_ANSWER_IPS:-<none>} route_a_answer_ips=${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-<none>} nameservers=${FUGUE_DNS_NAMESERVERS:-<none>} static_records=$([[ -n "$(trim_field "${FUGUE_DNS_STATIC_RECORDS_JSON}")" ]] && printf enabled || printf disabled) platform_routes=$([[ -n "$(trim_field "${FUGUE_PLATFORM_ROUTES_JSON}")" ]] && printf enabled || printf disabled) public_hostports=${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED} udp=${FUGUE_DNS_UDP_ADDR} tcp=${FUGUE_DNS_TCP_ADDR}"
@@ -2356,6 +2406,7 @@ main() {
     --set-string api.registryPushBase="${FUGUE_REGISTRY_PUSH_BASE}" \
     --set-string api.registryPullBase="${FUGUE_REGISTRY_PULL_BASE}" \
     --set-string api.clusterJoinRegistryEndpoint="${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}" \
+    --set-string api.clusterJoinServerFallbacks="${FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS}" \
     --set api.replicaCount="${FUGUE_API_REPLICA_COUNT}" \
     --set api.hostNetwork=false \
     --set api.minReadySeconds=5 \
