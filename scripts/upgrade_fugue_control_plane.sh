@@ -1331,8 +1331,6 @@ force_delete_release_pods_on_unhealthy_nodes() {
 
 recover_primary_node_if_needed() {
   local primary_node_name=""
-  local restart_cmd=""
-  local restarted_via_ssh="false"
 
   primary_node_name="$(detect_primary_node_name)"
   if [[ -z "${primary_node_name}" ]]; then
@@ -1347,65 +1345,7 @@ recover_primary_node_if_needed() {
     return 0
   fi
 
-  log "primary node ${primary_node_name} is NotReady; restarting k3s on the primary host"
-  restart_cmd="$(cat <<'EOF'
-set -euo pipefail
-
-run_bounded_host_command() {
-  local timeout_seconds="$1"
-  local pid=""
-  local state=""
-  local deadline=""
-  shift
-
-  "$@" &
-  pid="$!"
-  deadline=$((SECONDS + timeout_seconds))
-
-  while true; do
-    state="$(awk '{print $3}' "/proc/${pid}/stat" 2>/dev/null || true)"
-    if [[ -z "${state}" || "${state}" == "Z" ]]; then
-      wait "${pid}"
-      return $?
-    fi
-    if (( SECONDS >= deadline )); then
-      printf '[fugue-upgrade][primary-recovery] timed out after %ss: %s\n' "${timeout_seconds}" "$*" >&2
-      kill "${pid}" >/dev/null 2>&1 || true
-      sleep 2
-      kill -KILL "${pid}" >/dev/null 2>&1 || true
-      return 124
-    fi
-    sleep 1
-  done
-}
-
-if command -v k3s >/dev/null 2>&1; then
-  run_bounded_host_command 90 k3s crictl rmi --prune >/tmp/fugue-primary-node-image-prune.log 2>&1 || true
-fi
-
-run_bounded_host_command 120 systemctl restart k3s
-systemctl is-active --quiet k3s
-EOF
-)"
-
-  if run_primary_host_root_command "${primary_node_name}" "${restart_cmd}"; then
-    restarted_via_ssh="true"
-  else
-    log "warning: failed to restart k3s on ${primary_node_name} over SSH; waiting to see if cleanup alone restores node readiness"
-  fi
-
-  if [[ "${restarted_via_ssh}" == "true" ]] && ! wait_for_local_kube_api_ready; then
-    fail "local kube-apiserver did not recover after restarting k3s on primary node ${primary_node_name}"
-  fi
-
-  if ! wait_for_primary_node_ready "${primary_node_name}"; then
-    if [[ "${restarted_via_ssh}" == "true" ]]; then
-      fail "primary node ${primary_node_name} remained NotReady after restarting k3s"
-    fi
-    fail "primary node ${primary_node_name} remained NotReady after cleanup and SSH restart fallback"
-  fi
-
-  prune_terminated_release_pods
+  log "skip primary node recovery because primary node ${primary_node_name} is NotReady; HA upgrade will continue on remaining Ready control-plane nodes"
 }
 
 control_plane_postgres_selector() {
@@ -1637,6 +1577,10 @@ restore_primary_mesh_network_if_needed() {
     log "skip primary mesh restore because the primary node could not be identified"
     return 0
   fi
+  if ! primary_node_is_ready "${primary_node_name}"; then
+    log "skip primary mesh restore because primary node ${primary_node_name} is NotReady"
+    return 0
+  fi
 
   primary_mesh_ip="$(run_primary_host_root_command "${primary_node_name}" "if command -v tailscale >/dev/null 2>&1; then tailscale ip -4 2>/dev/null | awk 'NR == 1 {print; exit}'; fi" | tr -d '\r')"
   if [[ -z "${primary_mesh_ip}" ]]; then
@@ -1807,6 +1751,10 @@ relieve_primary_disk_pressure() {
   primary_node_name="$(detect_primary_node_name)"
   if [[ -z "${primary_node_name}" ]]; then
     log "skip primary disk-pressure recovery because the primary node could not be identified"
+    return 0
+  fi
+  if ! primary_node_is_ready "${primary_node_name}"; then
+    log "skip primary disk-pressure recovery because primary node ${primary_node_name} is NotReady"
     return 0
   fi
   if ! primary_node_has_disk_pressure "${primary_node_name}"; then

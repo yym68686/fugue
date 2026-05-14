@@ -155,6 +155,35 @@ func TestUpgradeScriptPrunesOnlyStatelessReleasePodsOnUnhealthyNodes(t *testing.
 	}
 }
 
+func TestUpgradeScriptDoesNotBlockHAUpgradeOnNotReadyPrimary(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(repoRoot(t), "scripts", "upgrade_fugue_control_plane.sh")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read upgrade script: %v", err)
+	}
+	script := string(data)
+	for _, want := range []string{
+		"HA upgrade will continue on remaining Ready control-plane nodes",
+		"skip primary mesh restore because primary node ${primary_node_name} is NotReady",
+		"skip primary disk-pressure recovery because primary node ${primary_node_name} is NotReady",
+		"force_delete_release_pods_on_unhealthy_nodes",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected upgrade script to contain primary-down HA guard %q: %s", want, path)
+		}
+	}
+	for _, unwanted := range []string{
+		"primary node ${primary_node_name} is NotReady; restarting k3s on the primary host",
+		"primary node ${primary_node_name} remained NotReady after cleanup and SSH restart fallback",
+	} {
+		if strings.Contains(script, unwanted) {
+			t.Fatalf("upgrade script should not block HA deploy on %q: %s", unwanted, path)
+		}
+	}
+}
+
 func TestUpgradeScriptSupportsNonControlPlaneSingletonAnchor(t *testing.T) {
 	t.Parallel()
 
