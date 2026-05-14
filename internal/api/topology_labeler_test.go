@@ -154,3 +154,50 @@ func TestUpgradeScriptPrunesOnlyStatelessReleasePodsOnUnhealthyNodes(t *testing.
 		}
 	}
 }
+
+func TestUpgradeScriptSupportsNonControlPlaneSingletonAnchor(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(repoRoot(t), "scripts", "upgrade_fugue_control_plane.sh")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read upgrade script: %v", err)
+	}
+	script := string(data)
+	for _, want := range []string{
+		"append_control_plane_singleton_values()",
+		"FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED",
+		"FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR",
+		"validate_control_plane_singleton_anchor",
+		"must match exactly one node",
+		"must not be a control-plane node",
+		"registry:\n  nodeSelector:",
+		"headscale:\n  nodeSelector:",
+		"postgres:\n  nodeSelector:",
+		"sharedWorkspaceStorage:\n  server:\n    nodeSelector:",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected upgrade script to contain singleton anchor support %q: %s", want, path)
+		}
+	}
+}
+
+func TestDeployWorkflowDefaultsLegacyPostgresOffWhenCNPGIsAPIStore(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(repoRoot(t), ".github", "workflows", "deploy-control-plane.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read deploy workflow: %v", err)
+	}
+	workflow := string(data)
+	for _, want := range []string{
+		"FUGUE_POSTGRES_ENABLED: ${{ vars.FUGUE_POSTGRES_ENABLED || (vars.FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API == 'true' && 'false' || 'true') }}",
+		"FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED: ${{ vars.FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED || 'false' }}",
+		"FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR: ${{ vars.FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR || '' }}",
+	} {
+		if !strings.Contains(workflow, want) {
+			t.Fatalf("expected deploy workflow to contain %q: %s", want, path)
+		}
+	}
+}

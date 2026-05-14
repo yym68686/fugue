@@ -328,6 +328,7 @@ cleanup_tmp_artifacts() {
 write_upgrade_override_values() {
   UPGRADE_OVERRIDE_VALUES_FILE="$(mktemp -t fugue-upgrade-values.XXXXXX.yaml)"
   cat >"${UPGRADE_OVERRIDE_VALUES_FILE}" <<'EOF'
+nodeSelector: {}
 tolerations:
   - key: node.kubernetes.io/disk-pressure
     operator: Exists
@@ -452,6 +453,7 @@ cloudnative-pg:
                 app.kubernetes.io/name: cloudnative-pg
                 app.kubernetes.io/instance: fugue
 EOF
+  append_control_plane_singleton_values
   append_upgrade_edge_dynamic_values
   append_upgrade_image_prepull_values
   append_upgrade_dns_values
@@ -488,6 +490,53 @@ yaml_quote() {
 
 trim_field() {
   printf '%s' "$1" | awk '{$1=$1; print}'
+}
+
+selector_yaml() {
+  local raw="$1"
+  local indent="$2"
+  local entry key value
+
+  raw="${raw//;/$'\n'}"
+  raw="${raw//,/$'\n'}"
+  while IFS= read -r entry; do
+    entry="$(trim_field "${entry}")"
+    if [[ -z "${entry}" ]]; then
+      continue
+    fi
+    if [[ "${entry}" != *"="* ]]; then
+      fail "node selector entry ${entry} must be key=value"
+    fi
+    key="$(trim_field "${entry%%=*}")"
+    value="$(trim_field "${entry#*=}")"
+    if [[ -z "${key}" || -z "${value}" ]]; then
+      fail "node selector entry ${entry} must be key=value"
+    fi
+    printf '%s%s: %s\n' "${indent}" "${key}" "$(yaml_quote "${value}")"
+  done
+}
+
+append_control_plane_singleton_values() {
+  if [[ "${FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED}" != "true" ]]; then
+    return 0
+  fi
+
+  cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<EOF
+
+registry:
+  nodeSelector:
+$(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "    ")
+headscale:
+  nodeSelector:
+$(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "    ")
+postgres:
+  nodeSelector:
+$(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "    ")
+sharedWorkspaceStorage:
+  server:
+    nodeSelector:
+$(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "      ")
+EOF
 }
 
 node_selector_country_yaml() {
@@ -1843,6 +1892,35 @@ label_default_builder_nodes() {
     --overwrite >/dev/null
 }
 
+validate_control_plane_singleton_anchor() {
+  if [[ "${FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED}" != "true" ]]; then
+    return 0
+  fi
+
+  local selector node_count node_name ready control_plane_role
+  selector="$(trim_field "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}")"
+  [[ -n "${selector}" ]] || fail "FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR is required when FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED=true"
+  selector_yaml "${selector}" "" >/dev/null
+
+  node_count="$(${KUBECTL} get nodes -l "${selector}" --no-headers 2>/dev/null | wc -l | awk '{print $1}')"
+  if [[ "${node_count}" != "1" ]]; then
+    fail "FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR must match exactly one node; selector=${selector} matched ${node_count}"
+  fi
+
+  node_name="$(${KUBECTL} get nodes -l "${selector}" -o jsonpath='{.items[0].metadata.name}')"
+  ready="$(${KUBECTL} get node "${node_name}" -o jsonpath='{range .status.conditions[?(@.type=="Ready")]}{.status}{end}')"
+  if [[ "${ready}" != "True" ]]; then
+    fail "control-plane singleton anchor node ${node_name} is not Ready"
+  fi
+
+  control_plane_role="$(${KUBECTL} get node "${node_name}" -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/control-plane}' 2>/dev/null || true)"
+  if [[ -n "${control_plane_role}" ]]; then
+    fail "control-plane singleton anchor node ${node_name} must not be a control-plane node"
+  fi
+
+  log "control-plane singleton anchor: node=${node_name} selector=${selector}"
+}
+
 rollback_release() {
   local rollback_api_deployment="${FUGUE_API_DEPLOYMENT_NAME}"
 
@@ -1912,6 +1990,8 @@ main() {
   FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_SIZE="${FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_SIZE:-10Gi}"
   FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_CLASS="${FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_CLASS:-}"
   FUGUE_CONTROL_PLANE_POSTGRES_EXISTING_SECRET_NAME="${FUGUE_CONTROL_PLANE_POSTGRES_EXISTING_SECRET_NAME:-}"
+  FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED="${FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED:-false}"
+  FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR="${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR:-}"
   FUGUE_REGISTRY_NODEPORT="${FUGUE_REGISTRY_NODEPORT:-30500}"
   FUGUE_REGISTRY_SERVICE_PORT="${FUGUE_REGISTRY_SERVICE_PORT:-5000}"
   FUGUE_API_PUBLIC_DOMAIN="${FUGUE_API_PUBLIC_DOMAIN:-}"
@@ -2009,6 +2089,10 @@ main() {
   if [[ "${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" == "true" && "${FUGUE_CONTROL_PLANE_POSTGRES_ENABLED}" != "true" ]]; then
     fail "FUGUE_CONTROL_PLANE_POSTGRES_ENABLED must be true when FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API=true"
   fi
+  case "${FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED}" in
+    true|false) ;;
+    *) fail "FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED must be true or false" ;;
+  esac
   if [[ "${FUGUE_POSTGRES_ENABLED}" != "true" && "${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" != "true" && -z "$(trim_field "${FUGUE_API_DATABASE_URL}")" ]]; then
     fail "FUGUE_API_DATABASE_URL or FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API=true is required when FUGUE_POSTGRES_ENABLED=false"
   fi
@@ -2063,6 +2147,7 @@ main() {
   wait_for_local_kube_api_ready
   ${KUBECTL} version --client >/dev/null
   helm status "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" >/dev/null
+  validate_control_plane_singleton_anchor
 
   PREVIOUS_REVISION="$(helm_current_revision)"
   [[ -n "${PREVIOUS_REVISION}" ]] || fail "failed to detect current Helm revision"
@@ -2073,6 +2158,7 @@ main() {
   log "edge image: ${FUGUE_EDGE_IMAGE_REPOSITORY}:${FUGUE_EDGE_IMAGE_TAG} enabled=${FUGUE_EDGE_ENABLED} edge_group_id=${FUGUE_EDGE_GROUP_ID:-<empty>}"
   log "edge caddy: enabled=${FUGUE_EDGE_CADDY_ENABLED} listen=${FUGUE_EDGE_CADDY_LISTEN_ADDR} tls_mode=${FUGUE_EDGE_CADDY_TLS_MODE} public_hostports=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED} http=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP} https=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS} static_tls=${FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED} static_tls_secret=${FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME:-<none>}"
   log "control-plane postgres: legacy_enabled=${FUGUE_POSTGRES_ENABLED} cnpg_enabled=${FUGUE_CONTROL_PLANE_POSTGRES_ENABLED} cnpg_use_for_api=${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API} cnpg_instances=${FUGUE_CONTROL_PLANE_POSTGRES_INSTANCES}"
+  log "control-plane singletons: enabled=${FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED} selector=${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR:-<none>}"
   log "edge scheduling: primary_country=${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE:-<none>} public_ipv4=${FUGUE_EDGE_PUBLIC_IPV4:-<none>} extra_groups=${FUGUE_EDGE_EXTRA_GROUPS:-<none>}"
   log "previous Helm revision: ${PREVIOUS_REVISION}"
   log "registry push base: ${FUGUE_REGISTRY_PUSH_BASE}"
