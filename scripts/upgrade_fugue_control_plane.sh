@@ -27,6 +27,7 @@ command_exists() {
 }
 
 CONTROL_PLANE_AUTOMATION_TMP_DIR=""
+KUBECONFIG_FALLBACK_FILE=""
 UPGRADE_OVERRIDE_VALUES_FILE=""
 DNS_STATIC_RECORDS_FILE=""
 PLATFORM_ROUTES_FILE=""
@@ -305,6 +306,9 @@ smoke_test() {
 cleanup_control_plane_automation_tmp() {
   if [[ -n "${CONTROL_PLANE_AUTOMATION_TMP_DIR}" && -d "${CONTROL_PLANE_AUTOMATION_TMP_DIR}" ]]; then
     rm -rf "${CONTROL_PLANE_AUTOMATION_TMP_DIR}"
+  fi
+  if [[ -n "${KUBECONFIG_FALLBACK_FILE}" && -f "${KUBECONFIG_FALLBACK_FILE}" ]]; then
+    rm -f "${KUBECONFIG_FALLBACK_FILE}"
   fi
 }
 
@@ -1132,6 +1136,45 @@ local_kube_api_is_ready() {
     readyz="$(${KUBECTL} get --raw='/readyz' 2>/dev/null || true)"
   fi
   [[ "${readyz}" == *"ok"* ]]
+}
+
+ensure_kube_api_access() {
+  local fallback_servers=""
+  local -a server_list=()
+  local kubeconfig_source=""
+  local server=""
+  local candidate_kubeconfig=""
+
+  if local_kube_api_is_ready; then
+    return 0
+  fi
+
+  fallback_servers="${FUGUE_CONTROL_PLANE_KUBE_API_FALLBACK_SERVERS:-}"
+  [[ -n "${fallback_servers}" ]] || return 1
+
+  kubeconfig_source="${KUBECONFIG:-${HOME}/.kube/config}"
+  [[ -r "${kubeconfig_source}" ]] || return 1
+
+  IFS=',' read -r -a server_list <<< "${fallback_servers}"
+  for server in "${server_list[@]}"; do
+    server="$(trim_field "${server}")"
+    [[ -n "${server}" ]] || continue
+
+    candidate_kubeconfig="$(mktemp -t fugue-kubeconfig-fallback.XXXXXX.yaml)"
+    KUBECONFIG_FALLBACK_FILE="${candidate_kubeconfig}"
+    cp "${kubeconfig_source}" "${candidate_kubeconfig}"
+    sed -i.bak "s#server: .*#server: ${server}#" "${candidate_kubeconfig}"
+    rm -f "${candidate_kubeconfig}.bak"
+    if KUBECONFIG="${candidate_kubeconfig}" ${KUBECTL} get --raw='/readyz' >/dev/null 2>&1; then
+      export KUBECONFIG="${candidate_kubeconfig}"
+      log "using fallback Kubernetes API server ${server}"
+      return 0
+    fi
+    rm -f "${candidate_kubeconfig}"
+    KUBECONFIG_FALLBACK_FILE=""
+  done
+
+  return 1
 }
 
 wait_for_local_kube_api_ready() {
@@ -1988,6 +2031,9 @@ main() {
   KUBECTL="$(detect_kubectl)"
   export KUBECTL
   trap cleanup_tmp_artifacts EXIT
+  if ! ensure_kube_api_access; then
+    log "continuing with the default Kubernetes API endpoint because no fallback server was configured or reachable"
+  fi
 
   FUGUE_RELEASE_NAME="${FUGUE_RELEASE_NAME:-fugue}"
   FUGUE_NAMESPACE="${FUGUE_NAMESPACE:-fugue-system}"
