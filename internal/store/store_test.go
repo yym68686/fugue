@@ -640,6 +640,13 @@ func TestSyncManagedOwnedClusterRuntimeStatuses(t *testing.T) {
 	if notReadyNodeName == "" {
 		notReadyNodeName = runtimeNotReady.Name
 	}
+	beforeSeenAt := runtimeReady.LastSeenAt
+	beforeHeartbeatAt := runtimeReady.LastHeartbeatAt
+	if beforeSeenAt == nil || beforeHeartbeatAt == nil {
+		t.Fatal("expected bootstrap runtime timestamps to be set")
+	}
+
+	time.Sleep(10 * time.Millisecond)
 
 	changed, err := s.SyncManagedOwnedClusterRuntimeStatuses(map[string]bool{
 		readyNodeName:    true,
@@ -648,8 +655,8 @@ func TestSyncManagedOwnedClusterRuntimeStatuses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sync managed-owned cluster runtime statuses: %v", err)
 	}
-	if changed != 1 {
-		t.Fatalf("expected 1 runtime status change, got %d", changed)
+	if changed != 2 {
+		t.Fatalf("expected 2 runtime status changes, got %d", changed)
 	}
 
 	runtimeReady, err = s.GetRuntime(runtimeReady.ID)
@@ -658,6 +665,12 @@ func TestSyncManagedOwnedClusterRuntimeStatuses(t *testing.T) {
 	}
 	if runtimeReady.Status != model.RuntimeStatusActive {
 		t.Fatalf("expected ready runtime active, got %q", runtimeReady.Status)
+	}
+	if runtimeReady.LastSeenAt == nil || !runtimeReady.LastSeenAt.After(*beforeSeenAt) {
+		t.Fatalf("expected ready runtime last_seen_at to advance, got %v <= %v", runtimeReady.LastSeenAt, beforeSeenAt)
+	}
+	if runtimeReady.LastHeartbeatAt == nil || !runtimeReady.LastHeartbeatAt.After(*beforeHeartbeatAt) {
+		t.Fatalf("expected ready runtime last_heartbeat_at to advance, got %v <= %v", runtimeReady.LastHeartbeatAt, beforeHeartbeatAt)
 	}
 	runtimeNotReady, err = s.GetRuntime(runtimeNotReady.ID)
 	if err != nil {

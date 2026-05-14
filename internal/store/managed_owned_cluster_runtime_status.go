@@ -95,13 +95,24 @@ func syncManagedOwnedClusterRuntimeStatus(runtimeObj *model.Runtime, nodeReadyBy
 	if nodeReadyByName[clusterNodeName] {
 		nextStatus = model.RuntimeStatusActive
 	}
-	if runtimeObj.Status == nextStatus {
-		return false
+	changed := runtimeObj.Status != nextStatus
+	if runtimeObj.Status != nextStatus {
+		runtimeObj.Status = nextStatus
 	}
-
-	runtimeObj.Status = nextStatus
-	runtimeObj.UpdatedAt = now
-	return true
+	if nextStatus == model.RuntimeStatusActive {
+		if runtimeObj.LastSeenAt == nil || !runtimeObj.LastSeenAt.Equal(now) {
+			runtimeObj.LastSeenAt = &now
+			changed = true
+		}
+		if runtimeObj.LastHeartbeatAt == nil || !runtimeObj.LastHeartbeatAt.Equal(now) {
+			runtimeObj.LastHeartbeatAt = &now
+			changed = true
+		}
+	}
+	if changed {
+		runtimeObj.UpdatedAt = now
+	}
+	return changed
 }
 
 func managedOwnedClusterRuntimeNodeName(runtimeObj model.Runtime) string {

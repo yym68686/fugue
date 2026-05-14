@@ -60,6 +60,13 @@ func TestMarkRuntimeOfflineStaleSyncsManagedOwnedClusterRuntimeStatuses(t *testi
 	if notReadyNodeName == "" {
 		notReadyNodeName = notReadyRuntime.Name
 	}
+	beforeSeenAt := readyRuntime.LastSeenAt
+	beforeHeartbeatAt := readyRuntime.LastHeartbeatAt
+	if beforeSeenAt == nil || beforeHeartbeatAt == nil {
+		t.Fatal("expected bootstrap runtime timestamps to be set")
+	}
+
+	time.Sleep(10 * time.Millisecond)
 
 	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/nodes" {
@@ -115,6 +122,12 @@ func TestMarkRuntimeOfflineStaleSyncsManagedOwnedClusterRuntimeStatuses(t *testi
 	}
 	if readyRuntime.Status != model.RuntimeStatusActive {
 		t.Fatalf("expected ready runtime active, got %q", readyRuntime.Status)
+	}
+	if readyRuntime.LastSeenAt == nil || !readyRuntime.LastSeenAt.After(*beforeSeenAt) {
+		t.Fatalf("expected ready runtime last_seen_at to advance, got %v <= %v", readyRuntime.LastSeenAt, beforeSeenAt)
+	}
+	if readyRuntime.LastHeartbeatAt == nil || !readyRuntime.LastHeartbeatAt.After(*beforeHeartbeatAt) {
+		t.Fatalf("expected ready runtime last_heartbeat_at to advance, got %v <= %v", readyRuntime.LastHeartbeatAt, beforeHeartbeatAt)
 	}
 	notReadyRuntime, err = stateStore.GetRuntime(notReadyRuntime.ID)
 	if err != nil {
