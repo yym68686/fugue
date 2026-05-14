@@ -171,6 +171,46 @@ func TestAPIAndControllerEvictQuicklyOnNodeFailure(t *testing.T) {
 	}
 }
 
+func TestStatelessControlPlaneTopologySpreadAllowsFailover(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	for _, tc := range []struct {
+		kind string
+		name string
+	}{
+		{kind: "Deployment", name: "fugue-fugue-api"},
+		{kind: "Deployment", name: "fugue-fugue-controller"},
+	} {
+		doc := manifestDocumentForKindAndName(manifest, tc.kind, tc.name)
+		if doc == "" {
+			t.Fatalf("rendered manifest missing %s %s:\n%s", tc.kind, tc.name, manifest)
+		}
+		if !strings.Contains(doc, "topologySpreadConstraints:") {
+			t.Fatalf("%s should keep topology spread preference:\n%s", tc.name, doc)
+		}
+		if !strings.Contains(doc, "whenUnsatisfiable: ScheduleAnyway") {
+			t.Fatalf("%s should allow temporary co-location after a control-plane node failure:\n%s", tc.name, doc)
+		}
+		if strings.Contains(doc, "whenUnsatisfiable: DoNotSchedule") {
+			t.Fatalf("%s should not hard-block failover scheduling:\n%s", tc.name, doc)
+		}
+	}
+}
+
 func TestEdgeShadowDaemonSetDefaultsToNoPublicTraffic(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

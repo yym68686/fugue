@@ -34,6 +34,8 @@ api:
   shutdownDrainDelay: 5s
   shutdownTimeout: 25s
   nodeFailureTolerationSeconds: 30
+  topologySpread:
+    whenUnsatisfiable: ScheduleAnyway
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -62,6 +64,8 @@ controller:
   kubectlApply: true
   terminationGracePeriodSeconds: 30
   nodeFailureTolerationSeconds: 30
+  topologySpread:
+    whenUnsatisfiable: ScheduleAnyway
   nodeSelector: {}
   tolerations: []
   affinity: {}

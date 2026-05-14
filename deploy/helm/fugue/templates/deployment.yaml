@@ -1,6 +1,7 @@
 {{- $apiNodeSelector := .Values.api.nodeSelector -}}
 {{- $apiTolerations := default .Values.tolerations .Values.api.tolerations -}}
 {{- $apiAffinity := default .Values.affinity .Values.api.affinity -}}
+{{- $apiTopologySpread := default (dict) .Values.api.topologySpread -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -167,7 +168,7 @@ spec:
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: DoNotSchedule
+          whenUnsatisfiable: {{ default "ScheduleAnyway" $apiTopologySpread.whenUnsatisfiable }}
           labelSelector:
             matchLabels:
               {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "api") | nindent 14 }}
