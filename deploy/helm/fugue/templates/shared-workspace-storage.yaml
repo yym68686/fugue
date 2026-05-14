@@ -1,9 +1,5 @@
 {{- if .Values.sharedWorkspaceStorage.enabled }}
 {{- $nfsServer := .Values.sharedWorkspaceStorage.server.clusterIP | default (printf "%s.%s.svc.cluster.local" (include "fugue.sharedWorkspaceNFSServiceName" .) .Release.Namespace) }}
-{{- $nfsNodeSelector := .Values.sharedWorkspaceStorage.server.nodeSelector -}}
-{{- with .Values.sharedWorkspaceStorage.server.controlPlaneSingletonNodeSelector }}
-{{- $nfsNodeSelector = . -}}
-{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -23,9 +19,14 @@ spec:
         {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "shared-workspace-nfs") | nindent 8 }}
     spec:
       serviceAccountName: {{ include "fugue.serviceAccountName" . }}
-      {{- with $nfsNodeSelector }}
+      {{- if .Values.sharedWorkspaceStorage.server.controlPlaneSingletonNodeSelector }}
+      nodeSelector:
+        {{- toYaml .Values.sharedWorkspaceStorage.server.controlPlaneSingletonNodeSelector | nindent 8 }}
+      {{- else }}
+      {{- with .Values.sharedWorkspaceStorage.server.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- end }}
       {{- with .Values.sharedWorkspaceStorage.server.tolerations }}
       tolerations:
@@ -146,9 +147,14 @@ spec:
         {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "shared-workspace-provisioner") | nindent 8 }}
     spec:
       serviceAccountName: {{ include "fugue.serviceAccountName" . }}
+      {{- if .Values.sharedWorkspaceStorage.provisioner.controlPlaneSingletonNodeSelector }}
+      nodeSelector:
+        {{- toYaml .Values.sharedWorkspaceStorage.provisioner.controlPlaneSingletonNodeSelector | nindent 8 }}
+      {{- else }}
       {{- with .Values.sharedWorkspaceStorage.provisioner.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- end }}
       {{- with .Values.sharedWorkspaceStorage.provisioner.tolerations }}
       tolerations:

@@ -128,7 +128,7 @@ func TestUpgradeScriptPrunesOnlyStatelessReleasePodsOnUnhealthyNodes(t *testing.
 		"force_delete_release_pods_on_unhealthy_nodes",
 		"--force",
 		"--grace-period=0",
-		"api|controller|node-janitor|topology-labeler|edge|dns|edge-*|dns-*",
+		"api|controller|node-janitor|topology-labeler|shared-workspace-provisioner|edge|dns|edge-*|dns-*",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected upgrade script to contain %q: %s", want, path)
@@ -147,7 +147,7 @@ func TestUpgradeScriptPrunesOnlyStatelessReleasePodsOnUnhealthyNodes(t *testing.
 		"postgres|",
 		"registry|",
 		"headscale|",
-		"shared-workspace",
+		"shared-workspace-nfs",
 	} {
 		if strings.Contains(block, unwanted) {
 			t.Fatalf("upgrade script stateless prune should not target stateful component %q: %s", unwanted, path)
@@ -170,6 +170,10 @@ func TestUpgradeScriptDoesNotBlockHAUpgradeOnNotReadyPrimary(t *testing.T) {
 		"skip primary disk-pressure recovery because primary node ${primary_node_name} is NotReady",
 		"skip Route A edge proxy sync because primary node ${primary_node_name} is NotReady",
 		"warning: Route A edge proxy sync failed; continuing because edge/API rollout already completed",
+		"operator: NotIn",
+		"- primary",
+		"maxUnavailable: 0",
+		"maxSurge: 2",
 		"force_delete_release_pods_on_unhealthy_nodes",
 	} {
 		if !strings.Contains(script, want) {
@@ -207,10 +211,12 @@ func TestUpgradeScriptSupportsNonControlPlaneSingletonAnchor(t *testing.T) {
 		"patch_control_plane_singleton_deployments()",
 		"patch_singleton_deployment_node_selector()",
 		"selector_json()",
+		"nodeSelector: null",
 		"patch deploy",
 		"FUGUE_REGISTRY_DEPLOYMENT_NAME",
 		"FUGUE_HEADSCALE_DEPLOYMENT_NAME",
 		"FUGUE_SHARED_WORKSPACE_NFS_DEPLOYMENT_NAME",
+		"FUGUE_SHARED_WORKSPACE_PROVISIONER_DEPLOYMENT_NAME",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected upgrade script to contain singleton anchor support %q: %s", want, path)

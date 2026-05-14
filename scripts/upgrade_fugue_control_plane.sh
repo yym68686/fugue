@@ -349,6 +349,31 @@ api:
     - key: node-role.kubernetes.io/control-plane
       operator: Exists
       effect: NoSchedule
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 2
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+              - key: fugue.install/role
+                operator: NotIn
+                values:
+                  - primary
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: fugue
+                app.kubernetes.io/instance: fugue
+                app.kubernetes.io/component: api
   resources:
     requests:
       cpu: 250m
@@ -366,6 +391,31 @@ controller:
     - key: node-role.kubernetes.io/control-plane
       operator: Exists
       effect: NoSchedule
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 2
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+              - key: fugue.install/role
+                operator: NotIn
+                values:
+                  - primary
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: fugue
+                app.kubernetes.io/instance: fugue
+                app.kubernetes.io/component: controller
 snapshotController:
   nodeSelector:
     node-role.kubernetes.io/control-plane: "true"
@@ -528,16 +578,24 @@ append_control_plane_singleton_values() {
   cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<EOF
 
 registry:
+  nodeSelector: null
   controlPlaneSingletonNodeSelector:
 $(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "    ")
 headscale:
+  nodeSelector: null
   controlPlaneSingletonNodeSelector:
 $(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "    ")
 postgres:
+  nodeSelector: null
   controlPlaneSingletonNodeSelector:
 $(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "    ")
 sharedWorkspaceStorage:
   server:
+    nodeSelector: null
+    controlPlaneSingletonNodeSelector:
+$(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "      ")
+  provisioner:
+    nodeSelector: null
     controlPlaneSingletonNodeSelector:
 $(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "      ")
 EOF
@@ -599,7 +657,7 @@ patch_control_plane_singleton_deployments() {
 
   local selector_json_value deployment_name
   selector_json_value="$(selector_json "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}")"
-  for deployment_name in "${FUGUE_REGISTRY_DEPLOYMENT_NAME}" "${FUGUE_HEADSCALE_DEPLOYMENT_NAME}" "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" "${FUGUE_SHARED_WORKSPACE_NFS_DEPLOYMENT_NAME}"; do
+  for deployment_name in "${FUGUE_REGISTRY_DEPLOYMENT_NAME}" "${FUGUE_HEADSCALE_DEPLOYMENT_NAME}" "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" "${FUGUE_SHARED_WORKSPACE_NFS_DEPLOYMENT_NAME}" "${FUGUE_SHARED_WORKSPACE_PROVISIONER_DEPLOYMENT_NAME}"; do
     patch_singleton_deployment_node_selector "${deployment_name}" "${selector_json_value}"
   done
 }
@@ -1308,7 +1366,7 @@ unhealthy_node_names() {
 is_stateless_release_component() {
   local component="$1"
   case "${component}" in
-    api|controller|node-janitor|topology-labeler|edge|dns|edge-*|dns-*)
+    api|controller|node-janitor|topology-labeler|shared-workspace-provisioner|edge|dns|edge-*|dns-*)
       return 0
       ;;
     *)
@@ -2045,6 +2103,7 @@ main() {
   FUGUE_REGISTRY_DEPLOYMENT_NAME="${FUGUE_REGISTRY_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}-registry}"
   FUGUE_HEADSCALE_DEPLOYMENT_NAME="${FUGUE_HEADSCALE_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}-headscale}"
   FUGUE_SHARED_WORKSPACE_NFS_DEPLOYMENT_NAME="${FUGUE_SHARED_WORKSPACE_NFS_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}-shared-workspace-nfs}"
+  FUGUE_SHARED_WORKSPACE_PROVISIONER_DEPLOYMENT_NAME="${FUGUE_SHARED_WORKSPACE_PROVISIONER_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}-shared-workspace-provisioner}"
   FUGUE_POSTGRES_DEPLOYMENT_NAME="${FUGUE_POSTGRES_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}-postgres}"
   FUGUE_HELM_TIMEOUT="${FUGUE_HELM_TIMEOUT:-10m0s}"
   FUGUE_ROLLOUT_TIMEOUT="${FUGUE_ROLLOUT_TIMEOUT:-600s}"

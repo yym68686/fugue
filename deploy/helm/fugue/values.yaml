@@ -31,6 +31,10 @@ api:
   hostNetwork: false
   minReadySeconds: 5
   terminationGracePeriodSeconds: 40
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 2
   shutdownDrainDelay: 5s
   shutdownTimeout: 25s
   nodeFailureTolerationSeconds: 30
@@ -63,6 +67,10 @@ controller:
   runtimeOfflineAfter: 90s
   kubectlApply: true
   terminationGracePeriodSeconds: 30
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 2
   nodeFailureTolerationSeconds: 30
   topologySpread:
     whenUnsatisfiable: ScheduleAnyway
@@ -350,6 +358,7 @@ sharedWorkspaceStorage:
       pullPolicy: IfNotPresent
     nodeSelector:
       node-role.kubernetes.io/control-plane: "true"
+    controlPlaneSingletonNodeSelector: {}
     tolerations:
       - key: node-role.kubernetes.io/control-plane
         operator: Exists

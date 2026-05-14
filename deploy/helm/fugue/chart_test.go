@@ -3,6 +3,7 @@ package fuguechart_test
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -207,6 +208,88 @@ func TestStatelessControlPlaneTopologySpreadAllowsFailover(t *testing.T) {
 		}
 		if strings.Contains(doc, "whenUnsatisfiable: DoNotSchedule") {
 			t.Fatalf("%s should not hard-block failover scheduling:\n%s", tc.name, doc)
+		}
+		for _, want := range []string{
+			"maxUnavailable: 0",
+			"maxSurge: 2",
+		} {
+			if !strings.Contains(doc, want) {
+				t.Fatalf("%s should allow surge-first HA rollouts; missing %q:\n%s", tc.name, want, doc)
+			}
+		}
+	}
+}
+
+func TestControlPlaneSingletonSelectorOverridesPrimaryNodeSelector(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	valuesPath := filepath.Join(t.TempDir(), "values.yaml")
+	values := `
+registry:
+  enabled: true
+  nodeSelector:
+    fugue.install/role: primary
+  controlPlaneSingletonNodeSelector:
+    fugue.io/control-plane-singleton: "true"
+headscale:
+  enabled: true
+  nodeSelector:
+    fugue.install/role: primary
+  controlPlaneSingletonNodeSelector:
+    fugue.io/control-plane-singleton: "true"
+postgres:
+  enabled: true
+  nodeSelector:
+    fugue.install/role: primary
+  controlPlaneSingletonNodeSelector:
+    fugue.io/control-plane-singleton: "true"
+sharedWorkspaceStorage:
+  enabled: true
+  server:
+    nodeSelector:
+      fugue.install/role: primary
+    controlPlaneSingletonNodeSelector:
+      fugue.io/control-plane-singleton: "true"
+  provisioner:
+    nodeSelector:
+      node-role.kubernetes.io/control-plane: "true"
+    controlPlaneSingletonNodeSelector:
+      fugue.io/control-plane-singleton: "true"
+`
+	if err := os.WriteFile(valuesPath, []byte(values), 0o600); err != nil {
+		t.Fatalf("write temp values: %v", err)
+	}
+
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "-f", valuesPath)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	for _, name := range []string{
+		"fugue-fugue-registry",
+		"fugue-fugue-headscale",
+		"fugue-fugue-postgres",
+		"fugue-fugue-shared-workspace-nfs",
+		"fugue-fugue-shared-workspace-provisioner",
+	} {
+		doc := manifestDocumentForKindAndName(manifest, "Deployment", name)
+		if doc == "" {
+			t.Fatalf("rendered manifest missing %s:\n%s", name, manifest)
+		}
+		if !strings.Contains(doc, "fugue.io/control-plane-singleton: \"true\"") {
+			t.Fatalf("%s should render singleton anchor selector:\n%s", name, doc)
+		}
+		if strings.Contains(doc, "fugue.install/role: primary") || strings.Contains(doc, "node-role.kubernetes.io/control-plane: \"true\"") {
+			t.Fatalf("%s should not keep legacy primary/control-plane selector with singleton anchor:\n%s", name, doc)
 		}
 	}
 }

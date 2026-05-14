@@ -14,8 +14,8 @@ spec:
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxUnavailable: 1
-      maxSurge: 0
+      maxUnavailable: {{ .Values.controller.strategy.rollingUpdate.maxUnavailable }}
+      maxSurge: {{ .Values.controller.strategy.rollingUpdate.maxSurge }}
   selector:
     matchLabels:
       {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "controller") | nindent 6 }}
