@@ -169,6 +169,7 @@ func TestUpgradeScriptSupportsNonControlPlaneSingletonAnchor(t *testing.T) {
 		"FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED",
 		"FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR",
 		"validate_control_plane_singleton_anchor",
+		"skip legacy postgres recovery because legacy postgres is disabled",
 		"must match exactly one node",
 		"must not be a control-plane node",
 		"registry:\n  nodeSelector:",

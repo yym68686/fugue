@@ -1464,6 +1464,11 @@ recover_primary_postgres_if_needed() {
   local repair_cmd=""
   local detect_status=0
 
+  if [[ "${FUGUE_POSTGRES_ENABLED}" != "true" ]]; then
+    log "skip legacy postgres recovery because legacy postgres is disabled"
+    return 0
+  fi
+
   primary_node_name="$(detect_primary_node_name)"
   if [[ -z "${primary_node_name}" ]]; then
     log "skip primary postgres recovery because the primary node could not be identified"
