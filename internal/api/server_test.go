@@ -539,6 +539,61 @@ func TestJoinClusterInstallScriptAddsTopologyLabels(t *testing.T) {
 	}
 }
 
+func TestInstallScriptsUseConfiguredPublicAPIDomain(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	server := NewServer(stateStore, nil, nil, ServerConfig{
+		APIPublicDomain:              "api.fugue.pro",
+		ClusterJoinServer:            "https://k3s.example.com",
+		ClusterJoinBootstrapTokenTTL: time.Minute,
+		RegistryPushBase:             "registry.fugue.internal:5000",
+		RegistryPullBase:             "registry.fugue.internal:5000",
+		ClusterJoinRegistryEndpoint:  "127.0.0.1:30500",
+	})
+
+	for _, tc := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{
+			name: "join cluster",
+			path: "/install/join-cluster.sh",
+			want: `FUGUE_API_BASE=${FUGUE_API_BASE:-"https://api.fugue.pro"}`,
+		},
+		{
+			name: "node updater",
+			path: "/install/node-updater.sh",
+			want: `FUGUE_API_BASE="${FUGUE_API_BASE:-https://api.fugue.pro}"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			req.Host = "fugue-fugue.fugue-system.svc.cluster.local:80"
+			recorder := httptest.NewRecorder()
+
+			server.Handler().ServeHTTP(recorder, req)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+			}
+			body := recorder.Body.String()
+			if !strings.Contains(body, tc.want) {
+				t.Fatalf("expected script to contain %q, got:\n%s", tc.want, body[:min(len(body), 512)])
+			}
+			if strings.Contains(body, "fugue-fugue.fugue-system.svc.cluster.local") {
+				t.Fatalf("script leaked internal service hostname")
+			}
+		})
+	}
+}
+
 func TestJoinClusterInstallScriptAvoidsRedundantRestarts(t *testing.T) {
 	t.Parallel()
 

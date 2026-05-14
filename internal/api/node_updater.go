@@ -15,7 +15,7 @@ const nodeUpdaterScriptVersion = "v1"
 
 func (s *Server) handleNodeUpdaterInstallScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
-	_, _ = fmt.Fprint(w, s.nodeUpdaterInstallScript(publicBaseURL(r)))
+	_, _ = fmt.Fprint(w, s.nodeUpdaterInstallScript(s.publicInstallAPIBaseURL(r)))
 }
 
 func (s *Server) handleNodeUpdaterEnroll(w http.ResponseWriter, r *http.Request) {

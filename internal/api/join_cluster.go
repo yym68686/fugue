@@ -265,7 +265,7 @@ func (s *Server) handleJoinClusterInstallScript(w http.ResponseWriter, r *http.R
 		return
 	}
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
-	_, _ = fmt.Fprint(w, s.joinClusterInstallScript(publicBaseURL(r)))
+	_, _ = fmt.Fprint(w, s.joinClusterInstallScript(s.publicInstallAPIBaseURL(r)))
 }
 
 func (s *Server) bootstrapJoinClusterNode(ctx context.Context, nodeKey, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.NodeKey, model.Machine, *model.Runtime, joinClusterPlan, error) {
@@ -598,6 +598,17 @@ func publicBaseURL(r *http.Request) string {
 		}
 	}
 	return scheme + "://" + r.Host
+}
+
+func (s *Server) publicInstallAPIBaseURL(r *http.Request) string {
+	domain := strings.TrimRight(strings.TrimSpace(s.apiPublicDomain), "/")
+	if domain == "" {
+		return publicBaseURL(r)
+	}
+	if strings.Contains(domain, "://") {
+		return domain
+	}
+	return "https://" + domain
 }
 
 func (s *Server) joinClusterInstallScript(apiBase string) string {
