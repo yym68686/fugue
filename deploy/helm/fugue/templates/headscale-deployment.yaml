@@ -1,4 +1,8 @@
 {{- if .Values.headscale.enabled }}
+{{- $headscaleNodeSelector := .Values.headscale.nodeSelector -}}
+{{- with .Values.headscale.controlPlaneSingletonNodeSelector }}
+{{- $headscaleNodeSelector = . -}}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -48,7 +52,7 @@ spec:
               mountPath: /var/lib/headscale
             - name: headscale-run
               mountPath: /var/run/headscale
-      {{- with (default .Values.nodeSelector .Values.headscale.nodeSelector) }}
+      {{- with (default .Values.nodeSelector $headscaleNodeSelector) }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}

@@ -1,6 +1,10 @@
 {{- $registry := (.Values.registry | default (dict)) -}}
 {{- $registryPersistence := (get $registry "persistence" | default (dict)) -}}
 {{- $registryPersistenceMode := "hostPath" -}}
+{{- $registryNodeSelector := .Values.registry.nodeSelector -}}
+{{- with .Values.registry.controlPlaneSingletonNodeSelector }}
+{{- $registryNodeSelector = . -}}
+{{- end }}
 {{- if hasKey $registryPersistence "mode" -}}
 {{- $registryPersistenceMode = (get $registryPersistence "mode") -}}
 {{- end -}}
@@ -74,7 +78,7 @@ spec:
           persistentVolumeClaim:
             claimName: {{ required "registry.persistence.existingClaim must be set when registry.persistence.mode=existingClaim" (get $registryPersistence "existingClaim") | quote }}
           {{- end }}
-      {{- with (default .Values.nodeSelector .Values.registry.nodeSelector) }}
+      {{- with (default .Values.nodeSelector $registryNodeSelector) }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}

@@ -1,5 +1,9 @@
 {{- if .Values.sharedWorkspaceStorage.enabled }}
 {{- $nfsServer := .Values.sharedWorkspaceStorage.server.clusterIP | default (printf "%s.%s.svc.cluster.local" (include "fugue.sharedWorkspaceNFSServiceName" .) .Release.Namespace) }}
+{{- $nfsNodeSelector := .Values.sharedWorkspaceStorage.server.nodeSelector -}}
+{{- with .Values.sharedWorkspaceStorage.server.controlPlaneSingletonNodeSelector }}
+{{- $nfsNodeSelector = . -}}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,7 +23,7 @@ spec:
         {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "shared-workspace-nfs") | nindent 8 }}
     spec:
       serviceAccountName: {{ include "fugue.serviceAccountName" . }}
-      {{- with .Values.sharedWorkspaceStorage.server.nodeSelector }}
+      {{- with $nfsNodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}

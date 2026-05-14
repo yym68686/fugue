@@ -333,6 +333,7 @@ sharedWorkspaceStorage:
     clusterIP: 10.43.240.17
     nodeSelector:
       fugue.install/role: primary
+    controlPlaneSingletonNodeSelector: {}
     tolerations:
       - key: node-role.kubernetes.io/control-plane
         operator: Exists
@@ -413,6 +414,7 @@ registry:
       interval: 24h
       dryRun: false
   nodeSelector: {}
+  controlPlaneSingletonNodeSelector: {}
   resources: {}
 
 headscale:
@@ -430,6 +432,7 @@ headscale:
   persistence:
     hostPath: /var/lib/fugue/headscale
   nodeSelector: {}
+  controlPlaneSingletonNodeSelector: {}
   resources: {}
 
 postgres:
@@ -446,6 +449,7 @@ postgres:
   persistence:
     hostPath: /var/lib/fugue/postgres
   nodeSelector: {}
+  controlPlaneSingletonNodeSelector: {}
   resources: {}
 
 controlPlanePostgres:

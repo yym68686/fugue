@@ -1,4 +1,8 @@
 {{- if .Values.postgres.enabled }}
+{{- $postgresNodeSelector := .Values.postgres.nodeSelector -}}
+{{- with .Values.postgres.controlPlaneSingletonNodeSelector }}
+{{- $postgresNodeSelector = . -}}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -61,7 +65,7 @@ spec:
           hostPath:
             path: {{ .Values.postgres.persistence.hostPath | quote }}
             type: DirectoryOrCreate
-      {{- with (default .Values.nodeSelector .Values.postgres.nodeSelector) }}
+      {{- with (default .Values.nodeSelector $postgresNodeSelector) }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}

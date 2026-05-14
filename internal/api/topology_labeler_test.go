@@ -172,14 +172,45 @@ func TestUpgradeScriptSupportsNonControlPlaneSingletonAnchor(t *testing.T) {
 		"skip legacy postgres recovery because legacy postgres is disabled",
 		"must match exactly one node",
 		"must not be a control-plane node",
-		"registry:\n  nodeSelector:",
-		"headscale:\n  nodeSelector:",
-		"postgres:\n  nodeSelector:",
-		"sharedWorkspaceStorage:\n  server:\n    nodeSelector:",
+		"registry:\n  controlPlaneSingletonNodeSelector:",
+		"headscale:\n  controlPlaneSingletonNodeSelector:",
+		"postgres:\n  controlPlaneSingletonNodeSelector:",
+		"sharedWorkspaceStorage:\n  server:\n    controlPlaneSingletonNodeSelector:",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected upgrade script to contain singleton anchor support %q: %s", want, path)
 		}
+	}
+}
+
+func TestSingletonTemplatesUseExactSelectorOverride(t *testing.T) {
+	t.Parallel()
+
+	root := repoRoot(t)
+	files := map[string]string{
+		"deploy/helm/fugue/templates/headscale-deployment.yaml":     "headscale.controlPlaneSingletonNodeSelector",
+		"deploy/helm/fugue/templates/registry-deployment.yaml":      "registry.controlPlaneSingletonNodeSelector",
+		"deploy/helm/fugue/templates/postgres-deployment.yaml":      "postgres.controlPlaneSingletonNodeSelector",
+		"deploy/helm/fugue/templates/shared-workspace-storage.yaml": "sharedWorkspaceStorage.server.controlPlaneSingletonNodeSelector",
+	}
+	for rel, selector := range files {
+		rel, selector := rel, selector
+		t.Run(rel, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(root, rel)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read template: %v", err)
+			}
+			template := string(data)
+			if !strings.Contains(template, selector) {
+				t.Fatalf("expected %s to use exact singleton selector override %q", rel, selector)
+			}
+			if !strings.Contains(template, "nodeSelector:") {
+				t.Fatalf("expected %s to render nodeSelector", rel)
+			}
+		})
 	}
 }
 

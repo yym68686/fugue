@@ -524,17 +524,17 @@ append_control_plane_singleton_values() {
   cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<EOF
 
 registry:
-  nodeSelector:
+  controlPlaneSingletonNodeSelector:
 $(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "    ")
 headscale:
-  nodeSelector:
+  controlPlaneSingletonNodeSelector:
 $(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "    ")
 postgres:
-  nodeSelector:
+  controlPlaneSingletonNodeSelector:
 $(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "    ")
 sharedWorkspaceStorage:
   server:
-    nodeSelector:
+    controlPlaneSingletonNodeSelector:
 $(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "      ")
 EOF
 }
