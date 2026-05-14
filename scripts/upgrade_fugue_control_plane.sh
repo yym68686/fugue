@@ -1879,8 +1879,8 @@ EOF
 sync_route_a_edge_proxy() {
   local primary_node_name=""
 
-  if [[ "${FUGUE_SYNC_EDGE_PROXY:-true}" != "true" ]]; then
-    log "skip Route A edge proxy sync because FUGUE_SYNC_EDGE_PROXY=${FUGUE_SYNC_EDGE_PROXY}"
+  if [[ "${FUGUE_SYNC_EDGE_PROXY:-false}" != "true" ]]; then
+    log "skip Route A edge proxy sync because FUGUE_SYNC_EDGE_PROXY=${FUGUE_SYNC_EDGE_PROXY:-false}"
     return
   fi
   if [[ -z "${FUGUE_API_PUBLIC_DOMAIN:-}" ]]; then

@@ -231,6 +231,7 @@ func TestDeployWorkflowDefaultsLegacyPostgresOffWhenCNPGIsAPIStore(t *testing.T)
 		"FUGUE_POSTGRES_ENABLED: ${{ vars.FUGUE_POSTGRES_ENABLED || (vars.FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API == 'true' && 'false' || 'true') }}",
 		"FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED: ${{ vars.FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED || 'false' }}",
 		"FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR: ${{ vars.FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR || '' }}",
+		"FUGUE_SYNC_EDGE_PROXY: ${{ vars.FUGUE_SYNC_EDGE_PROXY || 'false' }}",
 	} {
 		if !strings.Contains(workflow, want) {
 			t.Fatalf("expected deploy workflow to contain %q: %s", want, path)

@@ -178,7 +178,7 @@ jobs:
           FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED: ${{ vars.FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED || 'false' }}
           FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR: ${{ vars.FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR || '' }}
           FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME: ${{ vars.FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME || '' }}
-          FUGUE_SYNC_EDGE_PROXY: 'true'
+          FUGUE_SYNC_EDGE_PROXY: ${{ vars.FUGUE_SYNC_EDGE_PROXY || 'false' }}
           FUGUE_SMOKE_URL: ${{ vars.FUGUE_SMOKE_URL || '' }}
           FUGUE_API_IMAGE_REPOSITORY: ${{ needs.build.outputs.api_image_repository }}
           FUGUE_API_IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
