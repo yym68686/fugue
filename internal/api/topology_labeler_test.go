@@ -266,3 +266,23 @@ func TestUpgradeScriptRequiresControlPlanePostgresBootstrapSourceForAPIStore(t *
 		}
 	}
 }
+
+func TestUpgradeScriptEscapesCommaSeparatedHelmStringValues(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(repoRoot(t), "scripts", "upgrade_fugue_control_plane.sh")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read upgrade script: %v", err)
+	}
+	script := string(data)
+	for _, want := range []string{
+		"helm_set_string_value()",
+		"value=\"${value//,/\\\\,}\"",
+		"--set-string api.clusterJoinServerFallbacks=\"$(helm_set_string_value \"",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected upgrade script to contain %q: %s", want, path)
+		}
+	}
+}

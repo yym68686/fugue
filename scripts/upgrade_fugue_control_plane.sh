@@ -582,6 +582,13 @@ yaml_quote() {
   printf '"%s"' "${value}"
 }
 
+helm_set_string_value() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//,/\\,}"
+  printf '%s' "${value}"
+}
+
 trim_field() {
   printf '%s' "$1" | awk '{$1=$1; print}'
 }
@@ -2406,7 +2413,7 @@ main() {
     --set-string api.registryPushBase="${FUGUE_REGISTRY_PUSH_BASE}" \
     --set-string api.registryPullBase="${FUGUE_REGISTRY_PULL_BASE}" \
     --set-string api.clusterJoinRegistryEndpoint="${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}" \
-    --set-string api.clusterJoinServerFallbacks="${FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS}" \
+    --set-string api.clusterJoinServerFallbacks="$(helm_set_string_value "${FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS}")" \
     --set api.replicaCount="${FUGUE_API_REPLICA_COUNT}" \
     --set api.hostNetwork=false \
     --set api.minReadySeconds=5 \
