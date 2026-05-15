@@ -38,6 +38,12 @@ func TestBuildManagedAppStateObjectsEncodesDesiredState(t *testing.T) {
 				},
 			},
 		},
+		Route: &model.AppRoute{
+			Hostname:    "demo.example.com",
+			PublicURL:   "https://demo.example.com",
+			BaseDomain:  "example.com",
+			ServicePort: 8080,
+		},
 	}
 
 	objects := BuildManagedAppStateObjects(app, SchedulingConstraints{
@@ -75,6 +81,10 @@ func TestBuildManagedAppStateObjectsEncodesDesiredState(t *testing.T) {
 	source := spec["source"].(map[string]any)
 	if got := source["compose_service"]; got != "api" {
 		t.Fatalf("unexpected compose service: %#v", got)
+	}
+	route := spec["route"].(map[string]any)
+	if got := route["public_url"]; got != "https://demo.example.com" {
+		t.Fatalf("unexpected route public url: %#v", got)
 	}
 	appSpec := spec["appSpec"].(map[string]any)
 	if got := appSpec["image"]; got != "ghcr.io/example/demo:latest" {
@@ -192,6 +202,12 @@ func TestManagedAppRoundTripPreservesSourceForComposeAliases(t *testing.T) {
 			Replicas:  1,
 			RuntimeID: "runtime_demo",
 		},
+		Route: &model.AppRoute{
+			Hostname:    "mongo.example.com",
+			PublicURL:   "https://mongo.example.com",
+			BaseDomain:  "example.com",
+			ServicePort: 27017,
+		},
 	}
 
 	managedMap := BuildManagedAppObject(app, SchedulingConstraints{})
@@ -206,6 +222,9 @@ func TestManagedAppRoundTripPreservesSourceForComposeAliases(t *testing.T) {
 	}
 	if roundTrip.Source.ComposeService != "mongodb" {
 		t.Fatalf("expected compose service mongodb, got %q", roundTrip.Source.ComposeService)
+	}
+	if roundTrip.Route == nil || roundTrip.Route.PublicURL != "https://mongo.example.com" {
+		t.Fatalf("expected route to survive managed app round-trip, got %+v", roundTrip.Route)
 	}
 
 	objects := BuildManagedAppChildObjects(roundTrip, SchedulingConstraints{}, nil)

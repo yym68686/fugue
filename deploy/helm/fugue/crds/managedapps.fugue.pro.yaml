@@ -50,6 +50,9 @@ spec:
                   type: string
                 name:
                   type: string
+                route:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
                 source:
                   type: object
                   x-kubernetes-preserve-unknown-fields: true

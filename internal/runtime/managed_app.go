@@ -57,6 +57,7 @@ type ManagedAppSpec struct {
 	TenantID        string                 `json:"tenantID"`
 	ProjectID       string                 `json:"projectID,omitempty"`
 	Name            string                 `json:"name"`
+	Route           *model.AppRoute        `json:"route,omitempty"`
 	Source          *model.AppSource       `json:"source,omitempty"`
 	AppSpec         model.AppSpec          `json:"appSpec"`
 	Bindings        []model.ServiceBinding `json:"bindings,omitempty"`
@@ -160,6 +161,7 @@ func BuildManagedAppObject(app model.App, scheduling SchedulingConstraints) map[
 			TenantID:        strings.TrimSpace(app.TenantID),
 			ProjectID:       strings.TrimSpace(app.ProjectID),
 			Name:            strings.TrimSpace(app.Name),
+			Route:           cloneManagedAppRoute(app.Route),
 			Source:          cloneManagedAppSource(app.Source),
 			AppSpec:         cloneManagedAppSpec(app.Spec),
 			Bindings:        cloneManagedServiceBindings(app.Bindings),
@@ -225,6 +227,7 @@ func AppFromManagedApp(managed ManagedAppObject) model.App {
 		TenantID:        strings.TrimSpace(managed.Spec.TenantID),
 		ProjectID:       strings.TrimSpace(managed.Spec.ProjectID),
 		Name:            strings.TrimSpace(managed.Spec.Name),
+		Route:           cloneManagedAppRoute(managed.Spec.Route),
 		Source:          cloneManagedAppSource(managed.Spec.Source),
 		Spec:            cloneManagedAppSpec(managed.Spec.AppSpec),
 		Bindings:        cloneManagedServiceBindings(managed.Spec.Bindings),
@@ -329,6 +332,14 @@ func cloneManagedAppSpec(spec model.AppSpec) model.AppSpec {
 		out.Postgres = &postgres
 	}
 	return out
+}
+
+func cloneManagedAppRoute(route *model.AppRoute) *model.AppRoute {
+	if route == nil {
+		return nil
+	}
+	out := *route
+	return &out
 }
 
 func cloneManagedAppSource(source *model.AppSource) *model.AppSource {
