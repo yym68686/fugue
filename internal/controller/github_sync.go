@@ -59,12 +59,17 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 			continue
 		}
 		trackedCommitStates := collectTrackedGitHubCommitStates(ops)
-		if state, found := trackedCommitStates[trackedGitHubCommitStateKey(app.ID, latestCommit)]; found &&
-			!gitHubTrackedCommitRetryReady(state, currentTime, s.Config.GitHubSyncRetryBaseDelay, s.Config.GitHubSyncRetryMaxDelay) {
-			continue
+		var retryBaseOperation *model.Operation
+		if state, found := trackedCommitStates[trackedGitHubCommitStateKey(app.ID, latestCommit)]; found {
+			if !gitHubTrackedCommitRetryReady(state, currentTime, s.Config.GitHubSyncRetryBaseDelay, s.Config.GitHubSyncRetryMaxDelay) {
+				continue
+			}
+			if strings.TrimSpace(state.lastManualOperation.ID) != "" {
+				retryBaseOperation = &state.lastManualOperation
+			}
 		}
 
-		op, err := s.queueGitHubAutoRebuild(app, resolvedBranch, latestCommit)
+		op, err := s.queueGitHubAutoRebuild(app, resolvedBranch, latestCommit, retryBaseOperation)
 		if err != nil {
 			if errors.Is(err, store.ErrConflict) {
 				continue
@@ -150,7 +155,7 @@ func queueableGitHubSource(source model.AppSource, branch string, commit string)
 	}, nil
 }
 
-func (s *Service) queueGitHubAutoRebuild(app model.App, branch string, commit string) (model.Operation, error) {
+func (s *Service) queueGitHubAutoRebuild(app model.App, branch string, commit string, retryBaseOperation *model.Operation) (model.Operation, error) {
 	spec := cloneImportSpec(app.Spec)
 	if strings.TrimSpace(spec.RuntimeID) == "" {
 		spec.RuntimeID = "runtime_managed_shared"
@@ -160,7 +165,19 @@ func (s *Service) queueGitHubAutoRebuild(app model.App, branch string, commit st
 	if originSource == nil {
 		return model.Operation{}, fmt.Errorf("app does not have github origin source")
 	}
-	source, err := queueableGitHubSource(*originSource, branch, commit)
+	sourceBase := *originSource
+	if retryBaseOperation != nil {
+		if retryBaseOperation.DesiredSpec != nil {
+			spec = cloneImportSpec(*retryBaseOperation.DesiredSpec)
+			if strings.TrimSpace(spec.RuntimeID) == "" {
+				spec.RuntimeID = "runtime_managed_shared"
+			}
+		}
+		if retryBaseOperation.DesiredSource != nil && model.IsGitHubAppSourceType(retryBaseOperation.DesiredSource.Type) {
+			sourceBase = *retryBaseOperation.DesiredSource
+		}
+	}
+	source, err := queueableGitHubSource(sourceBase, branch, commit)
 	if err != nil {
 		return model.Operation{}, err
 	}
@@ -202,6 +219,7 @@ func shortCommitSHA(value string) string {
 type trackedGitHubCommitState struct {
 	consecutiveAutomaticFailures int
 	lastAutomaticFailure         model.Operation
+	lastManualOperation          model.Operation
 }
 
 const (
@@ -223,6 +241,9 @@ func collectTrackedGitHubCommitStates(ops []model.Operation) map[string]trackedG
 		if gitHubTrackedCommitResetOperation(op) {
 			state.consecutiveAutomaticFailures = 0
 			state.lastAutomaticFailure = model.Operation{}
+		}
+		if gitHubTrackedCommitManualOperation(op) {
+			state.lastManualOperation = op
 		}
 		if gitHubTrackedCommitAutomaticFailure(op) {
 			state.consecutiveAutomaticFailures++
@@ -255,6 +276,10 @@ func gitHubTrackedCommitAutomaticFailure(op model.Operation) bool {
 	return trackedGitHubCommitForOperation(op) != "" &&
 		gitHubTrackedCommitRequestedByGitHubSync(op) &&
 		op.Status == model.OperationStatusFailed
+}
+
+func gitHubTrackedCommitManualOperation(op model.Operation) bool {
+	return trackedGitHubCommitForOperation(op) != "" && !gitHubTrackedCommitRequestedByGitHubSync(op)
 }
 
 func gitHubTrackedCommitRequestedByGitHubSync(op model.Operation) bool {

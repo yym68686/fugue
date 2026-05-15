@@ -796,10 +796,20 @@ func TestSyncGitHubAppsManualRebuildResetsAutomaticFailureBudget(t *testing.T) {
 		t.Fatalf("create project: %v", err)
 	}
 	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
-		Image:     "registry.example.com/demo:git-old",
+		Image: "registry.example.com/demo:git-old",
+		Env: map[string]string{
+			"STATE_PATH":             "/data/state.json",
+			"TELEGRAM_DELIVERY_MODE": "auto",
+		},
 		Ports:     []int{80},
 		Replicas:  1,
 		RuntimeID: "runtime_managed_shared",
+		PersistentStorage: &model.AppPersistentStorageSpec{
+			StorageSize: "256Mi",
+			Mounts: []model.AppPersistentStorageMount{
+				{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"},
+			},
+		},
 	}, model.AppSource{
 		Type:          model.AppSourceTypeGitHubPublic,
 		RepoURL:       "https://github.com/example/demo",
@@ -843,13 +853,18 @@ func TestSyncGitHubAppsManualRebuildResetsAutomaticFailureBudget(t *testing.T) {
 		}
 	}
 
+	manualSpec := spec
+	manualSpec.Env = map[string]string{
+		"TELEGRAM_DELIVERY_MODE": "webhook",
+	}
+	manualSpec.PersistentStorage = nil
 	manualOp, err := stateStore.CreateOperation(model.Operation{
 		TenantID:        tenant.ID,
 		Type:            model.OperationTypeImport,
 		RequestedByType: model.ActorTypeAPIKey,
 		RequestedByID:   "test-key",
 		AppID:           app.ID,
-		DesiredSpec:     &spec,
+		DesiredSpec:     &manualSpec,
 		DesiredSource:   &source,
 	})
 	if err != nil {
@@ -898,6 +913,18 @@ func TestSyncGitHubAppsManualRebuildResetsAutomaticFailureBudget(t *testing.T) {
 	}
 	if retry.DesiredSource == nil || retry.DesiredSource.CommitSHA != "newcommit" {
 		t.Fatalf("expected re-armed retry for commit newcommit, got %#v", retry.DesiredSource)
+	}
+	if retry.DesiredSpec == nil {
+		t.Fatal("expected retry desired spec")
+	}
+	if retry.DesiredSpec.PersistentStorage != nil {
+		t.Fatalf("expected retry to preserve manual storage removal, got %+v", retry.DesiredSpec.PersistentStorage)
+	}
+	if _, ok := retry.DesiredSpec.Env["STATE_PATH"]; ok {
+		t.Fatalf("expected retry to preserve manual env removal, got %+v", retry.DesiredSpec.Env)
+	}
+	if got := retry.DesiredSpec.Env["TELEGRAM_DELIVERY_MODE"]; got != "webhook" {
+		t.Fatalf("expected retry to use manual env baseline, got %q in %+v", got, retry.DesiredSpec.Env)
 	}
 }
 
