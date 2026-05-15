@@ -34,7 +34,7 @@ func (s *Service) executeManagedDatabaseSwitchoverOperation(
 		return fmt.Errorf("managed postgres is not configured for app %s", app.ID)
 	}
 	currentDatabase := &target.Postgres
-	if strings.TrimSpace(op.ServiceID) != "" && !target.AppOwned {
+	if strings.TrimSpace(target.ServiceID) != "" && !target.AppOwned {
 		return s.executeBoundManagedDatabaseSwitchoverOperation(ctx, op, app, *target)
 	}
 	sourceRuntimeID := strings.TrimSpace(op.SourceRuntimeID)
@@ -280,7 +280,7 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 	if target == nil {
 		return fmt.Errorf("managed postgres is not configured for app %s", app.ID)
 	}
-	if strings.TrimSpace(op.ServiceID) != "" && !target.AppOwned {
+	if strings.TrimSpace(target.ServiceID) != "" && !target.AppOwned {
 		return s.executeBoundManagedDatabaseLocalizeOperation(ctx, op, app, *target)
 	}
 	currentDatabase := &target.Postgres

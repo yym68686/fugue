@@ -1179,6 +1179,61 @@ func TestOwnedManagedPostgresSpecPreservesPendingPlacementWhileFailoverEnabled(t
 	}
 }
 
+func TestOwnedManagedPostgresSpecUsesBoundServiceWhenOwnerMissing(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_123",
+		Name:     "demo",
+		TenantID: "tenant_123",
+		Spec: model.AppSpec{
+			RuntimeID: "runtime_a",
+		},
+		Bindings: []model.ServiceBinding{{
+			ID:        "binding_123",
+			AppID:     "app_123",
+			ServiceID: "svc_pg",
+		}},
+		BackingServices: []model.BackingService{{
+			ID:          "svc_pg",
+			Name:        "demo-db",
+			Type:        model.BackingServiceTypePostgres,
+			Provisioner: model.BackingServiceProvisionerManaged,
+			Status:      model.BackingServiceStatusActive,
+			Spec: model.BackingServiceSpec{
+				Postgres: &model.AppPostgresSpec{
+					Database:    "demo",
+					User:        "demo",
+					ServiceName: "demo-postgres",
+					RuntimeID:   "runtime_a",
+				},
+			},
+		}},
+	}
+
+	currentDatabase := OwnedManagedPostgresSpec(app)
+	if currentDatabase == nil {
+		t.Fatal("expected bound managed postgres spec")
+	}
+	if currentDatabase.Database != "demo" || currentDatabase.User != "demo" || currentDatabase.ServiceName != "demo-postgres" {
+		t.Fatalf("unexpected bound managed postgres spec %+v", currentDatabase)
+	}
+
+	target, err := ManagedPostgresOperationTargetForApp(app, "")
+	if err != nil {
+		t.Fatalf("resolve operation target: %v", err)
+	}
+	if target == nil {
+		t.Fatal("expected operation target for bound managed postgres")
+	}
+	if target.ServiceID != "svc_pg" {
+		t.Fatalf("expected service target svc_pg, got %+v", target)
+	}
+	if target.AppOwned {
+		t.Fatalf("expected missing owner_app_id target to use bound-service operation path, got %+v", target)
+	}
+}
+
 func TestMigrateOperationRejectsExternalRuntimeWhenAppHasBoundManagedPostgres(t *testing.T) {
 	t.Parallel()
 

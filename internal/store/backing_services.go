@@ -724,6 +724,21 @@ func OwnedManagedPostgresSpec(app model.App) *model.AppPostgresSpec {
 		return &normalized
 	}
 
+	for _, service := range app.BackingServices {
+		ownerAppID := strings.TrimSpace(service.OwnerAppID)
+		if ownerAppID != "" && ownerAppID != strings.TrimSpace(app.ID) {
+			continue
+		}
+		if !appHasBindingToServiceID(app, service.ID) {
+			continue
+		}
+		if !isManagedPostgresService(service) || service.Spec.Postgres == nil {
+			continue
+		}
+		normalized := normalizeManagedPostgresSpec(appNameForService(&service, &app), app.Spec.RuntimeID, *service.Spec.Postgres)
+		return &normalized
+	}
+
 	return nil
 }
 
@@ -759,6 +774,27 @@ func ManagedPostgresOperationTargetForApp(app model.App, serviceID string) (*Man
 				Service:   &serviceCopy,
 				Postgres:  normalized,
 				AppOwned:  true,
+			}, nil
+		}
+		for _, service := range app.BackingServices {
+			ownerAppID := strings.TrimSpace(service.OwnerAppID)
+			if ownerAppID != "" && ownerAppID != strings.TrimSpace(app.ID) {
+				continue
+			}
+			if !appHasBindingToServiceID(app, service.ID) {
+				continue
+			}
+			if !isManagedPostgresService(service) || service.Spec.Postgres == nil {
+				continue
+			}
+			serviceCopy := cloneBackingService(service)
+			normalized := normalizeManagedPostgresSpec(appNameForService(&serviceCopy, &app), app.Spec.RuntimeID, *serviceCopy.Spec.Postgres)
+			serviceCopy.Spec.Postgres = &normalized
+			return &ManagedPostgresOperationTarget{
+				ServiceID: serviceCopy.ID,
+				Service:   &serviceCopy,
+				Postgres:  normalized,
+				AppOwned:  strings.TrimSpace(serviceCopy.OwnerAppID) == strings.TrimSpace(app.ID),
 			}, nil
 		}
 		return nil, nil

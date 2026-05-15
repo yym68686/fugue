@@ -517,7 +517,35 @@ func ownedManagedPostgresSpec(app model.App) *model.AppPostgresSpec {
 		return &normalized
 	}
 
+	for _, service := range app.BackingServices {
+		ownerAppID := strings.TrimSpace(service.OwnerAppID)
+		if ownerAppID != "" && ownerAppID != strings.TrimSpace(app.ID) {
+			continue
+		}
+		if !appHasDatabaseServiceBinding(app, service.ID) {
+			continue
+		}
+		if !isManagedPostgresBackingService(service) || service.Spec.Postgres == nil {
+			continue
+		}
+		normalized := normalizeAppDatabasePostgresSpec(appNameForDatabaseService(&service, &app), app.Spec.RuntimeID, *service.Spec.Postgres)
+		return &normalized
+	}
+
 	return nil
+}
+
+func appHasDatabaseServiceBinding(app model.App, serviceID string) bool {
+	serviceID = strings.TrimSpace(serviceID)
+	if serviceID == "" {
+		return false
+	}
+	for _, binding := range app.Bindings {
+		if strings.TrimSpace(binding.ServiceID) == serviceID {
+			return true
+		}
+	}
+	return false
 }
 
 func formatAppDatabaseResourceValue(resources *model.ResourceSpec, selectValue func(*model.ResourceSpec) int64) string {

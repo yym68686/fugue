@@ -219,6 +219,66 @@ func TestQueryAppDatabaseQualifiesManagedPostgresDatabaseURL(t *testing.T) {
 	}
 }
 
+func TestQueryAppDatabaseQualifiesManagedPostgresBaseServiceDatabaseURL(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Postgres: &model.AppPostgresSpec{
+			Database:    "demo",
+			User:        "demo",
+			Password:    "secret",
+			ServiceName: "demo-postgres",
+		},
+		Env: map[string]string{
+			"DATABASE_URL": "postgresql://demo:secret@demo-postgres:5432/demo",
+		},
+	})
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock new: %v", err)
+	}
+	defer db.Close()
+
+	expectedHost := "demo-postgres." + runtime.NamespaceForTenant(app.TenantID) + ".svc.cluster.local"
+	expectedDSN := "postgresql://demo:secret@" + expectedHost + ":5432/demo"
+	server.openAppDatabase = func(driverName, dsn string) (*sql.DB, error) {
+		if driverName != "pgx" {
+			t.Fatalf("expected pgx driver, got %q", driverName)
+		}
+		if dsn != expectedDSN {
+			t.Fatalf("expected dsn %q, got %q", expectedDSN, dsn)
+		}
+		return db, nil
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("select 1").WillReturnRows(sqlmock.NewRows([]string{"one"}).AddRow(1))
+	mock.ExpectCommit()
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/database/query", apiKey, map[string]any{
+		"sql": "select 1",
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Host string `json:"host"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Host != expectedHost {
+		t.Fatalf("expected host %q, got %q", expectedHost, response.Host)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql expectations: %v", err)
+	}
+}
+
 func TestRequestAppInternalHTTPUsesEnvBackedHeader(t *testing.T) {
 	t.Parallel()
 

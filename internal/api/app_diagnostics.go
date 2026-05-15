@@ -437,10 +437,12 @@ func managedPostgresQueryHostCandidates(app model.App, spec model.AppSpec) []str
 		if !isManagedBackingService(bound.Service) || bound.Service.Spec.Postgres == nil {
 			continue
 		}
+		appendCandidate(bound.Service.Spec.Postgres.ServiceName)
 		appendCandidate(model.PostgresRWServiceName(bound.Service.Spec.Postgres.ServiceName))
 	}
 	if len(candidates) == 0 && spec.Postgres != nil {
 		defaults := defaultAppManagedPostgresEnv(app.Name, *spec.Postgres)
+		appendCandidate(strings.TrimSuffix(defaults["DB_HOST"], "-rw"))
 		appendCandidate(defaults["DB_HOST"])
 	}
 	return candidates
