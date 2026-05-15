@@ -11,7 +11,11 @@ check_pattern() {
   local pattern="$2"
   shift 2
   local matches=""
-  matches="$(rg -n --hidden --glob '!scripts/scan_hardcoded_production_facts.sh' "${pattern}" "$@" || true)"
+  if command -v rg >/dev/null 2>&1; then
+    matches="$(rg -n --hidden --glob '!scripts/scan_hardcoded_production_facts.sh' "${pattern}" "$@" || true)"
+  else
+    matches="$(grep -REn --exclude='scan_hardcoded_production_facts.sh' "${pattern}" "$@" 2>/dev/null || true)"
+  fi
   if [[ -n "${matches}" ]]; then
     printf '[hardcoding-scan] %s\n' "${description}" >&2
     printf '%s\n' "${matches}" >&2
