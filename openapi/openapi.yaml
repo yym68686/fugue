@@ -381,6 +381,185 @@ paths:
                 $ref: "#/components/schemas/PlatformDomainBindingListResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/control-plane/store/status:
+    get:
+      operationId: getControlPlaneStoreStatus
+      summary: Get Control Plane Store Status
+      tags: [Admin]
+      x-fugue-handler: handleGetControlPlaneStoreStatus
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ControlPlaneStoreStatusResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/control-plane/store/promote:
+    post:
+      operationId: promoteControlPlaneStore
+      summary: Promote Control Plane Store
+      tags: [Admin]
+      x-fugue-handler: handlePromoteControlPlaneStore
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StorePromoteRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StorePromotionResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/routes:
+    get:
+      operationId: listRouteServingModes
+      summary: List Route Serving Modes
+      tags: [Admin]
+      x-fugue-handler: handleListRouteServingModes
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouteServingModeListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/routes/explain/{hostname}:
+    get:
+      operationId: explainRoute
+      summary: Explain Route
+      tags: [Admin]
+      x-fugue-handler: handleExplainRoute
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: hostname
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouteExplainResponseEnvelope"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/platform/autonomy/status:
+    get:
+      operationId: getPlatformAutonomyStatus
+      summary: Get Platform Autonomy Status
+      tags: [Admin]
+      x-fugue-handler: handlePlatformAutonomyStatus
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformAutonomyStatusResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/platform/failure-drills:
+    post:
+      operationId: runPlatformFailureDrill
+      summary: Run Platform Failure Drill
+      tags: [Admin]
+      x-fugue-handler: handleRunPlatformFailureDrill
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformFailureDrillRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformFailureDrillResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/security/key-rotation:
+    post:
+      operationId: preflightKeyRotation
+      summary: Preflight Bundle Signing Key Rotation
+      tags: [Admin]
+      x-fugue-handler: handlePreflightKeyRotation
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KeyRotationPreflightRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeyRotationPreflightResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/dns/full-zone/preflight:
+    get:
+      operationId: dnsFullZonePreflight
+      summary: DNS Full Zone Preflight
+      tags: [DNS]
+      x-fugue-handler: handleDNSFullZonePreflight
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: zone
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: dnssec_status
+          required: false
+          schema:
+            type: string
+            enum: [disabled, enabling, enabled, drift]
+        - in: query
+          name: min_healthy_nodes
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DNSFullZonePreflightResponseEnvelope"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/domains/{hostname}:
     get:
       operationId: getPlatformDomainBinding
@@ -1513,6 +1692,30 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ControlPlaneStatusResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/discovery/bundle:
+    get:
+      operationId: getDiscoveryBundle
+      summary: Get Discovery Bundle
+      tags: [Cluster]
+      x-fugue-handler: handleDiscoveryBundle
+      responses:
+        '200':
+          description: Successful response
+          headers:
+            ETag:
+              schema:
+                type: string
+            X-Fugue-Discovery-Bundle-Version:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiscoveryBundle"
+        '304':
+          description: Discovery bundle unchanged
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/cluster/pods:
@@ -3485,16 +3688,20 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: true
+              $ref: "#/components/schemas/MigrateAppRequest"
       responses:
+        '200':
+          description: App move dry-run impact report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppMoveDryRunResponse"
         '202':
           description: Successful response
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/OperationResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/failover:
@@ -3545,6 +3752,25 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OperationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/database/status:
+    get:
+      operationId: getAppDatabaseStatus
+      summary: Get App Database Status
+      tags: [Apps]
+      x-fugue-handler: handleGetAppDatabaseStatus
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedPostgresStatusResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/database/localize:
@@ -3851,6 +4077,23 @@ paths:
             text/plain:
               schema:
                 type: string
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/node-updater/desired-state:
+    get:
+      operationId: nodeUpdaterDesiredState
+      summary: Node Updater Desired State
+      tags: [Node Updater]
+      x-fugue-handler: handleGetNodeUpdaterDesiredState
+      security:
+        - NodeUpdaterBearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeUpdaterDesiredStateResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/node-updater/tasks:
@@ -4608,6 +4851,24 @@ components:
           type: string
         k3s_version:
           type: string
+        k3s_server:
+          type: string
+        k3s_fallback_servers:
+          type: string
+        registry_mirror:
+          type: string
+        labels_hash:
+          type: string
+        taints_hash:
+          type: string
+        edge_env_generation:
+          type: string
+        dns_env_generation:
+          type: string
+        config_hash:
+          type: string
+        discovery_generation:
+          type: string
         os:
           type: string
         arch:
@@ -5000,16 +5261,208 @@ components:
         service_port:
           type: integer
           format: int32
+    BundleSignature:
+      type: object
+      additionalProperties: false
+      properties:
+        schema_version:
+          type: string
+        issuer:
+          type: string
+        key_id:
+          type: string
+        signature:
+          type: string
+        generated_at:
+          type: string
+          format: date-time
+        valid_until:
+          type: string
+          format: date-time
+        previous_generation:
+          type: string
+    DiscoveryEndpoint:
+      type: object
+      additionalProperties: false
+      required: [name, url]
+      properties:
+        name:
+          type: string
+        url:
+          type: string
+    DiscoveryRegistryEndpoint:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+        push_base:
+          type: string
+        pull_base:
+          type: string
+        mirror:
+          type: string
+    DiscoveryKubernetesEndpoint:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+        server:
+          type: string
+        fallback_servers:
+          type: array
+          items:
+            type: string
+        ca_hash:
+          type: string
+        registry_endpoint:
+          type: string
+    DiscoveryBundle:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - generation
+        - generated_at
+        - valid_until
+        - issuer
+        - api_endpoints
+        - kubernetes
+        - registry
+        - edge_groups
+        - edge_nodes
+        - dns_nodes
+      properties:
+        schema_version:
+          type: string
+        generation:
+          type: string
+        previous_generation:
+          type: string
+        generated_at:
+          type: string
+          format: date-time
+        valid_until:
+          type: string
+          format: date-time
+        issuer:
+          type: string
+        key_id:
+          type: string
+        signature:
+          type: string
+        signatures:
+          type: array
+          items:
+            $ref: "#/components/schemas/BundleSignature"
+        api_endpoints:
+          type: array
+          items:
+            $ref: "#/components/schemas/DiscoveryEndpoint"
+        kubernetes:
+          type: array
+          items:
+            $ref: "#/components/schemas/DiscoveryKubernetesEndpoint"
+        registry:
+          type: array
+          items:
+            $ref: "#/components/schemas/DiscoveryRegistryEndpoint"
+        edge_groups:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeGroup"
+        edge_nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeNode"
+        dns_nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/DNSNode"
+        platform_routes:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformRoute"
+        public_runtime_env:
+          type: object
+          additionalProperties:
+            type: string
+    EdgeSelectionPolicy:
+      type: object
+      additionalProperties: false
+      required: [runtime_locality, client_locality, edge_health, capacity, latency]
+      properties:
+        runtime_locality:
+          type: boolean
+        client_locality:
+          type: boolean
+        edge_health:
+          type: boolean
+        capacity:
+          type: boolean
+        latency:
+          type: boolean
+        fallback_order:
+          type: array
+          items:
+            type: string
+    PlatformRoute:
+      type: object
+      additionalProperties: false
+      required: [hostname, route_policy, status]
+      properties:
+        hostname:
+          type: string
+        upstream_url:
+          type: string
+        route_policy:
+          type: string
+          enum: [route_a_only, edge_canary, edge_enabled]
+        edge_group_id:
+          type: string
+        edge_group_mode:
+          type: string
+          enum: [all_healthy, region_aware, pinned]
+        status:
+          type: string
+          enum: [active, disabled, unavailable, runtime-missing]
+        status_reason:
+          type: string
+        ttl:
+          type: integer
+          format: int32
     EdgeRouteBundle:
       type: object
       additionalProperties: false
       required: [version, generated_at, routes, tls_allowlist]
       properties:
+        schema_version:
+          type: string
         version:
+          type: string
+        generation:
+          type: string
+        previous_generation:
           type: string
         generated_at:
           type: string
           format: date-time
+        valid_until:
+          type: string
+          format: date-time
+        issuer:
+          type: string
+        key_id:
+          type: string
+        signature:
+          type: string
+        signatures:
+          type: array
+          items:
+            $ref: "#/components/schemas/BundleSignature"
         edge_id:
           type: string
         edge_group_id:
@@ -5046,7 +5499,7 @@ components:
           type: string
         route_kind:
           type: string
-          enum: [platform, custom-domain]
+          enum: [platform, custom-domain, platform-domain, platform-route]
         app_id:
           type: string
         tenant_id:
@@ -5055,9 +5508,13 @@ components:
           type: string
         runtime_type:
           type: string
+        runtime_edge_group:
+          type: string
         runtime_edge_group_id:
           type: string
         runtime_cluster_node:
+          type: string
+        selected_edge_group:
           type: string
         edge_group_id:
           type: string
@@ -5068,6 +5525,10 @@ components:
         route_policy:
           type: string
           enum: [route_a_only, edge_canary, edge_enabled]
+        selection_reason:
+          type: string
+        fallback_reason:
+          type: string
         upstream_kind:
           type: string
           enum: [kubernetes-service, mesh]
@@ -5229,6 +5690,10 @@ components:
           type: string
         dns_bundle_version:
           type: string
+        serving_generation:
+          type: string
+        lkg_generation:
+          type: string
         caddy_route_count:
           type: integer
           format: int32
@@ -5367,6 +5832,10 @@ components:
           type: string
         dns_bundle_version:
           type: string
+        serving_generation:
+          type: string
+        lkg_generation:
+          type: string
         caddy_route_count:
           type: integer
           format: int32
@@ -5456,11 +5925,30 @@ components:
       additionalProperties: false
       required: [version, generated_at, zone, records]
       properties:
+        schema_version:
+          type: string
         version:
+          type: string
+        generation:
+          type: string
+        previous_generation:
           type: string
         generated_at:
           type: string
           format: date-time
+        valid_until:
+          type: string
+          format: date-time
+        issuer:
+          type: string
+        key_id:
+          type: string
+        signature:
+          type: string
+        signatures:
+          type: array
+          items:
+            $ref: "#/components/schemas/BundleSignature"
         dns_node_id:
           type: string
         edge_group_id:
@@ -5497,7 +5985,7 @@ components:
           format: int32
         record_kind:
           type: string
-          enum: [acme-challenge, custom-domain-target, platform, probe, protected]
+          enum: [acme-challenge, custom-domain-target, platform, platform-domain, platform-route, probe, protected]
         app_id:
           type: string
         tenant_id:
@@ -5529,6 +6017,10 @@ components:
         ttl:
           type: integer
           format: int32
+        owner:
+          type: string
+        created_by:
+          type: string
         expires_at:
           type: string
           format: date-time
@@ -5558,6 +6050,9 @@ components:
           minimum: 1
           maximum: 3600
           default: 60
+        owner:
+          type: string
+          description: Logical owner for cleanup and audit attribution.
         expires_at:
           type: string
           format: date-time
@@ -5632,6 +6127,10 @@ components:
         healthy:
           type: boolean
         dns_bundle_version:
+          type: string
+        serving_generation:
+          type: string
+        lkg_generation:
           type: string
         record_count:
           type: integer
@@ -5723,6 +6222,10 @@ components:
         zone:
           type: string
         dns_bundle_version:
+          type: string
+        serving_generation:
+          type: string
+        lkg_generation:
           type: string
         record_count:
           type: integer
@@ -6825,6 +7328,12 @@ components:
           items:
             type: string
         reconcile_error:
+          type: string
+        block_rollout:
+          type: boolean
+        gate_reason:
+          type: string
+        suggested_fix_command:
           type: string
     ClusterNodePolicyStatusSummary:
       type: object
@@ -8147,6 +8656,31 @@ components:
       properties:
         node_updater:
           $ref: "#/components/schemas/NodeUpdater"
+    NodeUpdaterDesiredState:
+      type: object
+      additionalProperties: false
+      required: [generated_at, node_updater, discovery_bundle]
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        node_updater:
+          $ref: "#/components/schemas/NodeUpdater"
+        discovery_bundle:
+          $ref: "#/components/schemas/DiscoveryBundle"
+        node_policy:
+          $ref: "#/components/schemas/ClusterNodePolicyStatus"
+        warnings:
+          type: array
+          items:
+            type: string
+    NodeUpdaterDesiredStateResponse:
+      type: object
+      additionalProperties: false
+      required: [desired_state]
+      properties:
+        desired_state:
+          $ref: "#/components/schemas/NodeUpdaterDesiredState"
     NodeUpdaterEnrollRequest:
       type: object
       additionalProperties: false
@@ -8201,6 +8735,24 @@ components:
         join_script_version:
           type: string
         k3s_version:
+          type: string
+        k3s_server:
+          type: string
+        k3s_fallback_servers:
+          type: string
+        registry_mirror:
+          type: string
+        labels_hash:
+          type: string
+        taints_hash:
+          type: string
+        edge_env_generation:
+          type: string
+        dns_env_generation:
+          type: string
+        config_hash:
+          type: string
+        discovery_generation:
           type: string
         os:
           type: string
@@ -10500,6 +11052,107 @@ components:
       properties:
         operation:
           $ref: "#/components/schemas/Operation"
+    MigrateAppRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        target_runtime_id:
+          type: string
+        dry_run:
+          type: boolean
+    AppMoveVolumeImpact:
+      type: object
+      additionalProperties: false
+      properties:
+        mode:
+          type: string
+        storage_class_name:
+          type: string
+        claim_name:
+          type: string
+        mount_count:
+          type: integer
+          format: int32
+        strategy:
+          type: string
+    AppMoveDatabaseImpact:
+      type: object
+      additionalProperties: false
+      required: [backup_status, restore_status, grant_verification, requires_localization]
+      properties:
+        service_name:
+          type: string
+        current_runtime_id:
+          type: string
+        target_runtime_id:
+          type: string
+        backup_status:
+          type: string
+        restore_status:
+          type: string
+        grant_verification:
+          type: string
+        requires_localization:
+          type: boolean
+    AppMoveImpact:
+      type: object
+      additionalProperties: false
+      required: [app_id, target_runtime_id, dry_run, pass, generated_at]
+      properties:
+        app_id:
+          type: string
+        target_runtime_id:
+          type: string
+        dry_run:
+          type: boolean
+        pass:
+          type: boolean
+        blockers:
+          type: array
+          items:
+            type: string
+        rollback_ref:
+          type: string
+        operation_chain:
+          type: array
+          items:
+            type: string
+        volumes:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppMoveVolumeImpact"
+        databases:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppMoveDatabaseImpact"
+        services:
+          type: array
+          items:
+            type: string
+        routes:
+          type: array
+          items:
+            type: string
+        dns:
+          type: array
+          items:
+            type: string
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/StoreInvariantCheck"
+        generated_at:
+          type: string
+          format: date-time
+    AppMoveDryRunResponse:
+      type: object
+      additionalProperties: false
+      required: [impact, app]
+      properties:
+        impact:
+          $ref: "#/components/schemas/AppMoveImpact"
+        app:
+          $ref: "#/components/schemas/App"
     OperationDiagnosisResponse:
       type: object
       additionalProperties: false
@@ -10547,6 +11200,422 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AuditEvent"
+    StoreInvariantCheck:
+      type: object
+      additionalProperties: false
+      required: [name, pass]
+      properties:
+        name:
+          type: string
+        pass:
+          type: boolean
+        count:
+          type: integer
+          format: int32
+        message:
+          type: string
+    StorePromotion:
+      type: object
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+        source_kind:
+          type: string
+        source_fingerprint:
+          type: string
+        target_store:
+          type: string
+        generation:
+          type: string
+        status:
+          type: string
+        dry_run:
+          type: boolean
+        backup_ref:
+          type: string
+        rollback_ref:
+          type: string
+        restore_manifest_ref:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+    ControlPlaneStoreStatus:
+      type: object
+      additionalProperties: true
+      required: [authoritative_store, store_generation, source_fingerprint, invariants, block_rollout]
+      properties:
+        authoritative_store:
+          type: string
+        store_generation:
+          type: string
+        source_fingerprint:
+          type: string
+        schema_version:
+          type: string
+        last_promotion:
+          $ref: "#/components/schemas/StorePromotion"
+        last_restore:
+          $ref: "#/components/schemas/StorePromotion"
+        last_backup_ref:
+          type: string
+        permission_verification_status:
+          type: string
+        restore_readiness:
+          type: string
+        invariants:
+          type: array
+          items:
+            $ref: "#/components/schemas/StoreInvariantCheck"
+        block_rollout:
+          type: boolean
+        gate_reason:
+          type: string
+    ControlPlaneStoreStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          $ref: "#/components/schemas/ControlPlaneStoreStatus"
+    RestoreManifest:
+      type: object
+      additionalProperties: false
+      properties:
+        dump_ref:
+          type: string
+        target_store:
+          type: string
+        owner:
+          type: string
+        expected_counts:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int32
+        required_grants:
+          type: array
+          items:
+            type: string
+        restore_order:
+          type: array
+          items:
+            type: string
+    StorePromoteRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        source_kind:
+          type: string
+        source_fingerprint:
+          type: string
+        target_store:
+          type: string
+        generation:
+          type: string
+        backup_ref:
+          type: string
+        rollback_ref:
+          type: string
+        restore_manifest_ref:
+          type: string
+        restore_manifest:
+          $ref: "#/components/schemas/RestoreManifest"
+        dry_run:
+          type: boolean
+        confirm:
+          type: boolean
+    StorePromotionResponse:
+      type: object
+      additionalProperties: false
+      required: [promotion, status]
+      properties:
+        promotion:
+          $ref: "#/components/schemas/StorePromotion"
+        status:
+          $ref: "#/components/schemas/ControlPlaneStoreStatus"
+    RouteExplainResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        hostname:
+          type: string
+        serving_mode:
+          type: string
+          enum: [edge, route_a_legacy, unrouted, degraded]
+        route:
+          $ref: "#/components/schemas/EdgeRouteBinding"
+        healthy_edge_groups:
+          type: object
+          additionalProperties:
+            type: boolean
+        fallback_chain:
+          type: array
+          items:
+            type: string
+        reasons:
+          type: array
+          items:
+            type: string
+        generated_at:
+          type: string
+          format: date-time
+    RouteExplainResponseEnvelope:
+      type: object
+      additionalProperties: false
+      required: [explain]
+      properties:
+        explain:
+          $ref: "#/components/schemas/RouteExplainResponse"
+    RouteServingMode:
+      type: object
+      additionalProperties: true
+      properties:
+        hostname:
+          type: string
+        serving_mode:
+          type: string
+          enum: [edge, route_a_legacy, unrouted, degraded]
+        selected_edge_group:
+          type: string
+        runtime_edge_group:
+          type: string
+        route_kind:
+          type: string
+        route_policy:
+          type: string
+        reason:
+          type: string
+        generated_at:
+          type: string
+          format: date-time
+    RouteServingModeListResponse:
+      type: object
+      additionalProperties: false
+      required: [routes, generated_at]
+      properties:
+        routes:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteServingMode"
+        generated_at:
+          type: string
+          format: date-time
+    PlatformAutonomyStatus:
+      type: object
+      additionalProperties: true
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        pass:
+          type: boolean
+        block_rollout:
+          type: boolean
+        control_plane_store:
+          $ref: "#/components/schemas/ControlPlaneStoreStatus"
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/StoreInvariantCheck"
+    PlatformAutonomyStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          $ref: "#/components/schemas/PlatformAutonomyStatus"
+    PlatformFailureDrillRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        dry_run:
+          type: boolean
+        target:
+          type: string
+    PlatformFailureDrillReport:
+      type: object
+      additionalProperties: false
+      required: [id, dry_run, target, generated_at, status, block_rollout, checks, autonomy_state]
+      properties:
+        id:
+          type: string
+        dry_run:
+          type: boolean
+        target:
+          type: string
+        generated_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+        block_rollout:
+          type: boolean
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/StoreInvariantCheck"
+        backlog:
+          type: array
+          items:
+            type: string
+        report_ref:
+          type: string
+        autonomy_state:
+          $ref: "#/components/schemas/PlatformAutonomyStatus"
+    PlatformFailureDrillResponse:
+      type: object
+      additionalProperties: false
+      required: [report]
+      properties:
+        report:
+          $ref: "#/components/schemas/PlatformFailureDrillReport"
+    KeyRotationPreflightRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        dry_run:
+          type: boolean
+        stage:
+          type: boolean
+        confirm_revoke:
+          type: boolean
+        new_key_id:
+          type: string
+        previous_key_id:
+          type: string
+    KeyRotationNodeAcceptance:
+      type: object
+      additionalProperties: false
+      required: [node_kind, node_id, healthy, accepted]
+      properties:
+        node_kind:
+          type: string
+        node_id:
+          type: string
+        healthy:
+          type: boolean
+        serving_generation:
+          type: string
+        lkg_generation:
+          type: string
+        accepted:
+          type: boolean
+        reason:
+          type: string
+    KeyRotationPreflight:
+      type: object
+      additionalProperties: false
+      required: [generated_at, dry_run, stage, confirm_revoke, can_stage, can_revoke_previous, block_rollout, checks, nodes]
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        dry_run:
+          type: boolean
+        stage:
+          type: boolean
+        confirm_revoke:
+          type: boolean
+        current_key_id:
+          type: string
+        new_key_id:
+          type: string
+        previous_key_id:
+          type: string
+        revoked_key_ids:
+          type: array
+          items:
+            type: string
+        can_stage:
+          type: boolean
+        can_revoke_previous:
+          type: boolean
+        block_rollout:
+          type: boolean
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/StoreInvariantCheck"
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/KeyRotationNodeAcceptance"
+    KeyRotationPreflightResponse:
+      type: object
+      additionalProperties: false
+      required: [preflight]
+      properties:
+        preflight:
+          $ref: "#/components/schemas/KeyRotationPreflight"
+    ManagedPostgresStatus:
+      type: object
+      additionalProperties: false
+      required: [app_id, enabled, backup_status, restore_status, grant_verification, generated_at]
+      properties:
+        app_id:
+          type: string
+        enabled:
+          type: boolean
+        service_name:
+          type: string
+        owner:
+          type: string
+        runtime_id:
+          type: string
+        failover_runtime_id:
+          type: string
+        last_backup:
+          type: string
+        last_restore:
+          type: string
+        backup_status:
+          type: string
+        restore_status:
+          type: string
+        grant_verification:
+          type: string
+        generated_at:
+          type: string
+          format: date-time
+    ManagedPostgresStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [status, app]
+      properties:
+        status:
+          $ref: "#/components/schemas/ManagedPostgresStatus"
+        app:
+          $ref: "#/components/schemas/App"
+    DNSFullZonePreflight:
+      type: object
+      additionalProperties: true
+      properties:
+        zone:
+          type: string
+        pass:
+          type: boolean
+        dnssec_status:
+          type: string
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/DNSDelegationPreflightCheck"
+        delegation_plan:
+          $ref: "#/components/schemas/DNSDelegationPlan"
+        rollback_plan:
+          $ref: "#/components/schemas/DNSDelegationPlan"
+    DNSFullZonePreflightResponseEnvelope:
+      type: object
+      additionalProperties: false
+      required: [preflight]
+      properties:
+        preflight:
+          $ref: "#/components/schemas/DNSFullZonePreflight"
   responses:
     ErrorResponse:
       description: Error response

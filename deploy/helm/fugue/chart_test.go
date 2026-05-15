@@ -626,6 +626,15 @@ edge:
       certificateKey: tls.crt
       privateKeyKey: tls.key
   groups:
+    - name: country-us
+      edgeGroupID: edge-group-country-us
+      tokenSecret:
+        name: fugue-edge-us-scoped-token
+        key: FUGUE_EDGE_TOKEN
+      nodeSelector:
+        fugue.io/role.edge: "true"
+        fugue.io/schedulable: "true"
+        fugue.io/location-country-code: us
     - name: country-de
       edgeGroupID: edge-group-country-de
       tokenSecret:
@@ -911,6 +920,17 @@ dns:
   udpAddr: :53
   tcpAddr: :53
   groups:
+    - name: country-us
+      edgeGroupID: edge-group-country-us
+      answerIPs:
+        - 15.204.94.71
+      tokenSecret:
+        name: fugue-edge-us-scoped-token
+        key: FUGUE_EDGE_TOKEN
+      nodeSelector:
+        fugue.io/role.dns: "true"
+        fugue.io/schedulable: "true"
+        fugue.io/location-country-code: us
     - name: country-de
       edgeGroupID: edge-group-country-de
       answerIPs:
@@ -934,6 +954,15 @@ dns:
 	}
 
 	manifest := string(output)
+	if strings.Contains(manifest, "Exists---") {
+		t.Fatalf("rendered manifest has a malformed group document separator:\n%s", manifest)
+	}
+	for _, name := range []string{"fugue-fugue-edge-country-us", "fugue-fugue-dns-country-us"} {
+		if doc := manifestDocumentForKindAndName(manifest, "DaemonSet", name); doc == "" {
+			t.Fatalf("rendered manifest missing %s:\n%s", name, manifest)
+		}
+	}
+
 	edgeDoc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-edge-country-de")
 	if edgeDoc == "" {
 		t.Fatalf("rendered manifest missing country-de edge daemonset:\n%s", manifest)
@@ -1051,6 +1080,79 @@ func TestControlPlanePostgresCNPGCanDriveAPI(t *testing.T) {
 	}
 	if strings.Contains(manifest, "name: fugue-fugue-postgres\n") {
 		t.Fatalf("legacy postgres deployment should not render when postgres.enabled=false:\n%s", manifest)
+	}
+}
+
+func TestControlPlanePostgresBackupAndDrillsRender(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	valuesPath := filepath.Join(t.TempDir(), "values.yaml")
+	values := `
+controlPlanePostgres:
+  enabled: true
+  password: test-password
+  backup:
+    enabled: true
+    destinationPath: s3://fugue-control-plane-pitr
+    endpointURL: https://s3.example.test
+    s3Credentials:
+      existingSecretName: pitr-secret
+    scheduled:
+      enabled: true
+      schedule: "0 0 3 * * *"
+  restoreDrill:
+    enabled: true
+    restoreManifestJSON: '{"dump_ref":"s3://fugue-control-plane-pitr/latest","owner":"restore-drill"}'
+platformFailureDrill:
+  enabled: true
+  target: random-ready-control-plane-node
+`
+	if err := os.WriteFile(valuesPath, []byte(values), 0o600); err != nil {
+		t.Fatalf("write temp values: %v", err)
+	}
+
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "-f", valuesPath)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	cluster := manifestDocumentForKindAndName(manifest, "Cluster", "fugue-fugue-control-plane-postgres")
+	if cluster == "" {
+		t.Fatalf("rendered manifest missing control-plane CNPG cluster:\n%s", manifest)
+	}
+	for _, want := range []string{
+		"barmanObjectStore:",
+		"destinationPath: \"s3://fugue-control-plane-pitr\"",
+		"endpointURL: \"https://s3.example.test\"",
+		"compression: \"gzip\"",
+		"name: \"pitr-secret\"",
+	} {
+		if !strings.Contains(cluster, want) {
+			t.Fatalf("control-plane CNPG cluster missing PITR fragment %q:\n%s", want, cluster)
+		}
+	}
+	if doc := manifestDocumentForKindAndName(manifest, "ScheduledBackup", "fugue-fugue-control-plane-postgres-backup"); doc == "" ||
+		!strings.Contains(doc, "schedule: \"0 0 3 * * *\"") {
+		t.Fatalf("rendered manifest missing scheduled backup:\n%s", manifest)
+	}
+	if doc := manifestDocumentForKindAndName(manifest, "CronJob", "fugue-fugue-control-plane-restore-drill"); doc == "" ||
+		!strings.Contains(doc, "/v1/admin/control-plane/store/promote") ||
+		!strings.Contains(doc, "FUGUE_RESTORE_MANIFEST_JSON") {
+		t.Fatalf("rendered manifest missing control-plane restore drill:\n%s", manifest)
+	}
+	if doc := manifestDocumentForKindAndName(manifest, "CronJob", "fugue-fugue-platform-failure-drill"); doc == "" ||
+		!strings.Contains(doc, "/v1/admin/platform/failure-drills") ||
+		!strings.Contains(doc, "random-ready-control-plane-node") {
+		t.Fatalf("rendered manifest missing platform failure drill:\n%s", manifest)
 	}
 }
 

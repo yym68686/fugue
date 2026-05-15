@@ -39,16 +39,24 @@ type Server struct {
 	dnsStaticRecords             []model.EdgeDNSRecord
 	platformRoutes               []model.PlatformRoute
 	edgeTLSAskToken              string
+	allowLegacyEdgeToken         bool
 	registryPushBase             string
 	registryPullBase             string
 	clusterJoinRegistryEndpoint  string
 	reservedAppHosts             map[string]struct{}
 	clusterJoinServer            string
+	clusterJoinServerFallbacks   []string
 	clusterJoinCAHash            string
 	clusterJoinBootstrapTokenTTL time.Duration
 	clusterJoinMeshProvider      string
 	clusterJoinMeshLoginServer   string
 	clusterJoinMeshAuthKey       string
+	bundleSigningKey             string
+	bundleSigningKeyID           string
+	bundleSigningPreviousKey     string
+	bundleSigningPreviousKeyID   string
+	bundleRevokedKeyIDs          []string
+	bundleValidFor               time.Duration
 	importer                     *sourceimport.Importer
 	inspectBuilderPlacement      builderPlacementInspector
 	appImageRegistry             appImageRegistry
@@ -97,15 +105,23 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		dnsStaticRecords:             parseEdgeDNSStaticRecords(cfg.DNSStaticRecordsJSON, logger),
 		platformRoutes:               parsePlatformRoutes(cfg.PlatformRoutesJSON, logger),
 		edgeTLSAskToken:              strings.TrimSpace(cfg.EdgeTLSAskToken),
+		allowLegacyEdgeToken:         cfg.AllowLegacyEdgeToken,
 		registryPushBase:             strings.TrimSpace(cfg.RegistryPushBase),
 		registryPullBase:             strings.TrimSpace(cfg.RegistryPullBase),
 		clusterJoinRegistryEndpoint:  strings.TrimSpace(cfg.ClusterJoinRegistryEndpoint),
 		clusterJoinServer:            strings.TrimSpace(cfg.ClusterJoinServer),
+		clusterJoinServerFallbacks:   parseCSVValues(cfg.ClusterJoinServerFallbacks),
 		clusterJoinCAHash:            normalizeClusterJoinCAHash(cfg.ClusterJoinCAHash),
 		clusterJoinBootstrapTokenTTL: cfg.ClusterJoinBootstrapTokenTTL,
 		clusterJoinMeshProvider:      strings.TrimSpace(strings.ToLower(cfg.ClusterJoinMeshProvider)),
 		clusterJoinMeshLoginServer:   strings.TrimSpace(cfg.ClusterJoinMeshLoginServer),
 		clusterJoinMeshAuthKey:       strings.TrimSpace(cfg.ClusterJoinMeshAuthKey),
+		bundleSigningKey:             strings.TrimSpace(cfg.BundleSigningKey),
+		bundleSigningKeyID:           strings.TrimSpace(cfg.BundleSigningKeyID),
+		bundleSigningPreviousKey:     strings.TrimSpace(cfg.BundleSigningPreviousKey),
+		bundleSigningPreviousKeyID:   strings.TrimSpace(cfg.BundleSigningPreviousKeyID),
+		bundleRevokedKeyIDs:          append([]string(nil), cfg.BundleRevokedKeyIDs...),
+		bundleValidFor:               cfg.BundleValidFor,
 		importer:                     sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
 		inspectBuilderPlacement:      sourceimport.InspectBuilderPlacementForProfile,
 		appImageRegistry:             newRemoteAppImageRegistry(),
@@ -149,6 +165,23 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 	server.reservedAppHosts = reservedAppHosts(server.apiPublicDomain, server.registryPushBase, server.registryPullBase)
 	server.ready.Store(true)
 	return server
+}
+
+func parseCSVValues(raw string) []string {
+	values := []string{}
+	seen := map[string]struct{}{}
+	for _, part := range strings.Split(raw, ",") {
+		value := strings.TrimSpace(part)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+	}
+	return values
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -1127,15 +1160,31 @@ func (s *Server) handleMigrateApp(w http.ResponseWriter, r *http.Request) {
 	if !allowed {
 		return
 	}
-	if blockerMessage := failover.MigrationBlockerMessage(app); blockerMessage != "" {
-		httpx.WriteError(w, http.StatusBadRequest, blockerMessage)
-		return
-	}
 	var req struct {
 		TargetRuntimeID string `json:"target_runtime_id"`
+		DryRun          bool   `json:"dry_run,omitempty"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !req.DryRun {
+		if blockerMessage := failover.MigrationBlockerMessage(app); blockerMessage != "" {
+			httpx.WriteError(w, http.StatusBadRequest, blockerMessage)
+			return
+		}
+	}
+	targetRuntimeID := strings.TrimSpace(req.TargetRuntimeID)
+	impact := s.buildAppMoveImpact(app, targetRuntimeID)
+	if req.DryRun {
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{
+			"impact": impact,
+			"app":    sanitizeAppForAPI(app),
+		})
+		return
+	}
+	if !impact.Pass {
+		httpx.WriteError(w, http.StatusBadRequest, strings.Join(impact.Blockers, "; "))
 		return
 	}
 	spec, source, err := s.recoverAppDeployBaseline(app)
@@ -1143,14 +1192,14 @@ func (s *Server) handleMigrateApp(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	prepareMigrateDesiredSpec(app, &spec, req.TargetRuntimeID)
+	prepareMigrateDesiredSpec(app, &spec, targetRuntimeID)
 	op, err := s.store.CreateOperation(model.Operation{
 		TenantID:            app.TenantID,
 		Type:                model.OperationTypeMigrate,
 		RequestedByType:     principal.ActorType,
 		RequestedByID:       principal.ActorID,
 		AppID:               app.ID,
-		TargetRuntimeID:     req.TargetRuntimeID,
+		TargetRuntimeID:     targetRuntimeID,
 		DesiredSpec:         &spec,
 		DesiredSource:       source,
 		DesiredOriginSource: model.AppOriginSource(app),
@@ -1159,7 +1208,11 @@ func (s *Server) handleMigrateApp(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	s.appendAudit(principal, "app.migrate", "operation", op.ID, app.TenantID, map[string]string{"app_id": app.ID, "target_runtime_id": req.TargetRuntimeID})
+	s.appendAudit(principal, "app.migrate", "operation", op.ID, app.TenantID, map[string]string{
+		"app_id":            app.ID,
+		"target_runtime_id": targetRuntimeID,
+		"rollback_ref":      impact.RollbackRef,
+	})
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": sanitizeOperationForAPI(op)})
 }
 

@@ -53,7 +53,11 @@ func (c *CLI) newAppDatabaseShowCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return c.renderAppDatabaseState(app, nil, false, opts.ShowSecrets)
+			statusResponse, err := client.GetAppDatabaseStatus(app.ID)
+			if err != nil {
+				return err
+			}
+			return c.renderAppDatabaseState(statusResponse.App, nil, false, opts.ShowSecrets, &statusResponse.Status)
 		},
 	}
 	cmd.Flags().BoolVar(&opts.ShowSecrets, "show-secrets", false, "Show passwords and other sensitive fields in JSON output")
@@ -185,7 +189,7 @@ for the managed database. Add flags only for the parts you want to customize.
 				return err
 			}
 			if reflect.DeepEqual(before, spec.Postgres) {
-				return c.renderAppDatabaseState(app, nil, true, opts.ShowSecrets)
+				return c.renderAppDatabaseState(app, nil, true, opts.ShowSecrets, nil)
 			}
 
 			response, err := client.DeployApp(app.ID, &spec)
@@ -204,7 +208,7 @@ for the managed database. Add flags only for the parts you want to customize.
 			} else {
 				finalApp.Spec = spec
 			}
-			return c.renderAppDatabaseState(finalApp, &response.Operation, false, opts.ShowSecrets)
+			return c.renderAppDatabaseState(finalApp, &response.Operation, false, opts.ShowSecrets, nil)
 		},
 	}
 	cmd.Flags().StringVar(&opts.RuntimeName, "runtime", "", "Runtime name for managed Postgres")
@@ -254,7 +258,7 @@ func (c *CLI) newAppDatabaseDisableCommand() *cobra.Command {
 				return err
 			}
 			if app.Spec.Postgres == nil {
-				return c.renderAppDatabaseState(app, nil, true, false)
+				return c.renderAppDatabaseState(app, nil, true, false, nil)
 			}
 
 			spec := cloneAppSpec(app.Spec)
@@ -275,7 +279,7 @@ func (c *CLI) newAppDatabaseDisableCommand() *cobra.Command {
 			} else {
 				finalApp.Spec = spec
 			}
-			return c.renderAppDatabaseState(finalApp, &response.Operation, false, false)
+			return c.renderAppDatabaseState(finalApp, &response.Operation, false, false, nil)
 		},
 	}
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for the deploy operation to complete")
@@ -425,7 +429,7 @@ func (c *CLI) newAppDatabaseLocalizeCommand() *cobra.Command {
 	return cmd
 }
 
-func (c *CLI) renderAppDatabaseState(app model.App, operation *model.Operation, alreadyCurrent bool, showSecrets bool) error {
+func (c *CLI) renderAppDatabaseState(app model.App, operation *model.Operation, alreadyCurrent bool, showSecrets bool, status *model.ManagedPostgresStatus) error {
 	database := ownedManagedPostgresSpec(app)
 	if c.wantsJSON() {
 		payloadApp := app
@@ -446,6 +450,9 @@ func (c *CLI) renderAppDatabaseState(app model.App, operation *model.Operation, 
 			"app":             payloadApp,
 			"database":        cloneAppPostgresSpec(database),
 			"already_current": alreadyCurrent,
+		}
+		if status != nil {
+			payload["status"] = *status
 		}
 		if payloadOp != nil {
 			payload["operation"] = payloadOp
@@ -478,6 +485,15 @@ func (c *CLI) renderAppDatabaseState(app model.App, operation *model.Operation, 
 			kvPair{Key: "primary_node_name", Value: strings.TrimSpace(database.PrimaryNodeName)},
 			kvPair{Key: "pending_rebalance", Value: fmt.Sprintf("%t", database.PrimaryPlacementPendingRebalance)},
 			kvPair{Key: "image", Value: strings.TrimSpace(database.Image)},
+		)
+	}
+	if status != nil && status.Enabled {
+		pairs = append(pairs,
+			kvPair{Key: "backup_status", Value: status.BackupStatus},
+			kvPair{Key: "last_backup", Value: status.LastBackup},
+			kvPair{Key: "restore_status", Value: status.RestoreStatus},
+			kvPair{Key: "last_restore", Value: status.LastRestore},
+			kvPair{Key: "grant_verification", Value: status.GrantVerification},
 		)
 	}
 	return writeKeyValues(c.stdout, pairs...)

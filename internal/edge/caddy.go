@@ -139,6 +139,16 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 			"terminal": true,
 		})
 	}
+	routes = append(routes, map[string]any{
+		"handle": []any{
+			map[string]any{
+				"handler":     "static_response",
+				"status_code": 404,
+				"body":        "fugue route not found\n",
+			},
+		},
+		"terminal": true,
+	})
 
 	server := map[string]any{
 		"listen": []string{listenAddr},

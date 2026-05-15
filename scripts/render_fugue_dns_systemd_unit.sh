@@ -5,7 +5,7 @@ usage() {
   cat <<'USAGE'
 Usage:
   render_fugue_dns_systemd_unit.sh --output-dir <dir> \
-    --api-url https://api.fugue.pro \
+    --api-url <fugue-api-url> \
     --dns-node-id <node> \
     --edge-group-id <edge-group> \
     --answer-ips <ip[,ip...]> \
@@ -19,10 +19,10 @@ USAGE
 }
 
 output_dir=""
-api_url="${FUGUE_API_URL:-https://api.fugue.pro}"
+api_url="${FUGUE_API_URL:-}"
 dns_node_id="${FUGUE_DNS_NODE_ID:-$(hostname -s 2>/dev/null || hostname)}"
 edge_group_id="${FUGUE_EDGE_GROUP_ID:-}"
-zone="${FUGUE_DNS_ZONE:-dns.fugue.pro}"
+zone="${FUGUE_DNS_ZONE:-}"
 answer_ips="${FUGUE_DNS_ANSWER_IPS:-}"
 route_a_answer_ips="${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-}"
 token_env_file="/etc/fugue/fugue-dns-token.env"

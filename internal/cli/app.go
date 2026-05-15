@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 
 	"fugue/internal/model"
@@ -33,6 +34,7 @@ type appMoveCommandOptions struct {
 	RuntimeName string
 	RuntimeID   string
 	Wait        bool
+	DryRun      bool
 }
 
 type appStartCommandOptions struct {
@@ -393,6 +395,16 @@ func (c *CLI) newAppMoveCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if opts.DryRun {
+				response, err := client.MigrateAppDryRun(app.ID, runtimeID)
+				if err != nil {
+					return err
+				}
+				if c.wantsJSON() {
+					return writeJSON(c.stdout, response)
+				}
+				return writeAppMoveImpact(c.stdout, response.Impact)
+			}
 			needsDatabaseLocalize, databaseRuntimeID := appMoveNeedsOwnedManagedPostgresLocalize(app, runtimeID)
 			if needsDatabaseLocalize && !opts.Wait {
 				return fmt.Errorf("app has managed postgres on %s; moving it with the app requires --wait", databaseRuntimeID)
@@ -434,6 +446,7 @@ func (c *CLI) newAppMoveCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.RuntimeName, "to", "", "Target runtime name")
 	cmd.Flags().StringVar(&opts.RuntimeID, "runtime-id", "", "Target runtime ID")
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for operation completion")
+	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "Show volume, database, service, route, and DNS move impact without queuing work")
 	_ = cmd.Flags().MarkHidden("runtime-id")
 	return cmd
 }
@@ -786,6 +799,22 @@ func appMoveNeedsOwnedManagedPostgresLocalize(app model.App, targetRuntimeID str
 		return false, databaseRuntimeID
 	}
 	return true, databaseRuntimeID
+}
+
+func writeAppMoveImpact(w io.Writer, impact model.AppMoveImpact) error {
+	return writeKeyValues(w,
+		kvPair{Key: "app_id", Value: impact.AppID},
+		kvPair{Key: "target_runtime_id", Value: impact.TargetRuntimeID},
+		kvPair{Key: "pass", Value: fmt.Sprintf("%t", impact.Pass)},
+		kvPair{Key: "rollback_ref", Value: impact.RollbackRef},
+		kvPair{Key: "operation_chain", Value: strings.Join(impact.OperationChain, ",")},
+		kvPair{Key: "volumes", Value: fmt.Sprintf("%d", len(impact.Volumes))},
+		kvPair{Key: "databases", Value: fmt.Sprintf("%d", len(impact.Databases))},
+		kvPair{Key: "services", Value: strings.Join(impact.Services, ",")},
+		kvPair{Key: "routes", Value: strings.Join(impact.Routes, ",")},
+		kvPair{Key: "dns", Value: strings.Join(impact.DNS, ",")},
+		kvPair{Key: "blockers", Value: strings.Join(impact.Blockers, "; ")},
+	)
 }
 
 func (c *CLI) renderAppCommandResult(result appCommandResult) error {

@@ -126,6 +126,10 @@ func buildClusterNodePolicyStatus(snapshot clusterNodeSnapshot, machine *model.M
 		Reconciled:       len(reasons) == 0,
 		ReconcileReasons: reasons,
 	}
+	out.BlockRollout, out.GateReason = clusterNodePolicyRolloutGate(out)
+	if out.BlockRollout {
+		out.SuggestedFixCommand = "fugue admin cluster node-policy get " + out.NodeName
+	}
 	if runtimeObj != nil {
 		out.RuntimeID = runtimeObj.ID
 		out.TenantID = runtimeObj.TenantID
@@ -142,6 +146,21 @@ func buildClusterNodePolicyStatus(snapshot clusterNodeSnapshot, machine *model.M
 		}
 	}
 	return out
+}
+
+func clusterNodePolicyRolloutGate(status model.ClusterNodePolicyStatus) (bool, string) {
+	switch {
+	case !status.Ready:
+		return true, "node is not ready"
+	case status.DiskPressure:
+		return true, "node reports disk pressure"
+	case !status.NodeSchedulable:
+		return true, "node is not schedulable"
+	case !status.Reconciled:
+		return true, strings.Join(status.ReconcileReasons, "; ")
+	default:
+		return false, ""
+	}
 }
 
 func clusterNodePolicyReconcileReasons(snapshot clusterNodeSnapshot, machine *model.Machine, runtimeObj *model.Runtime) []string {

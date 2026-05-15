@@ -68,6 +68,18 @@ func TestNodeUpdaterAPILifecycle(t *testing.T) {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, heartbeatRecorder.Code, heartbeatRecorder.Body.String())
 	}
 
+	desiredRecorder := performFormRequest(t, server, http.MethodGet, "/v1/node-updater/desired-state", updaterToken, nil)
+	if desiredRecorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, desiredRecorder.Code, desiredRecorder.Body.String())
+	}
+	var desired struct {
+		DesiredState model.NodeUpdaterDesiredState `json:"desired_state"`
+	}
+	mustDecodeJSON(t, desiredRecorder, &desired)
+	if desired.DesiredState.NodeUpdater.ID != updaterID || desired.DesiredState.DiscoveryBundle.Generation == "" {
+		t.Fatalf("unexpected desired state: %+v", desired.DesiredState)
+	}
+
 	forbiddenRecorder := performFormRequest(t, server, http.MethodGet, "/v1/node-updaters", updaterToken, nil)
 	if forbiddenRecorder.Code != http.StatusForbidden {
 		t.Fatalf("expected node updater token to be forbidden on API endpoints, got %d body=%s", forbiddenRecorder.Code, forbiddenRecorder.Body.String())
@@ -148,6 +160,20 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 
 	var server Server
 	script := server.nodeUpdaterInstallScript("https://api.fugue.pro")
+	for _, want := range []string{
+		`/v1/discovery/bundle`,
+		`/v1/node-updater/desired-state`,
+		`refresh-join-config`,
+		`/etc/rancher/k3s/config.yaml`,
+		`/etc/rancher/k3s/registries.yaml`,
+		`fugue-edge.env`,
+		`fugue-dns.env`,
+		`discovery_generation=`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected node-updater script to contain %q", want)
+		}
+	}
 	scriptPath := filepath.Join(t.TempDir(), "node-updater.sh")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
 		t.Fatalf("write node-updater script: %v", err)
@@ -170,6 +196,11 @@ func TestJoinClusterInstallScriptIncludesNodeUpdaterInstaller(t *testing.T) {
 		`/v1/node-updater/enroll`,
 		`fugue-node-updater.service`,
 		`fugue-node-updater.timer`,
+		`Installing NFS client tools`,
+		`install-nfs-client-tools`,
+		`/v1/discovery/bundle`,
+		`FUGUE_DISCOVERY_GENERATION`,
+		`refresh-join-config`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected join-cluster install script to contain %q", want)

@@ -1,0 +1,68 @@
+{{- if .Values.platformFailureDrill.enabled }}
+{{- $apiURL := default (printf "http://%s.%s.svc.cluster.local:%v" (include "fugue.fullname" .) .Release.Namespace .Values.service.port) .Values.platformFailureDrill.apiURL -}}
+{{- $secretName := default (include "fugue.configSecretName" .) .Values.platformFailureDrill.existingSecretName -}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "fugue.fullname" . }}-platform-failure-drill
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "platform-failure-drill") | nindent 4 }}
+spec:
+  schedule: {{ .Values.platformFailureDrill.schedule | quote }}
+  concurrencyPolicy: {{ .Values.platformFailureDrill.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ .Values.platformFailureDrill.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.platformFailureDrill.failedJobsHistoryLimit }}
+  startingDeadlineSeconds: {{ .Values.platformFailureDrill.startingDeadlineSeconds }}
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ .Values.platformFailureDrill.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "platform-failure-drill") | nindent 12 }}
+        spec:
+          serviceAccountName: {{ include "fugue.serviceAccountName" . }}
+          restartPolicy: Never
+          containers:
+            - name: platform-failure-drill
+              image: "{{ .Values.platformFailureDrill.image.repository }}:{{ .Values.platformFailureDrill.image.tag }}"
+              imagePullPolicy: {{ .Values.platformFailureDrill.image.pullPolicy }}
+              env:
+                - name: FUGUE_API_URL
+                  value: {{ $apiURL | quote }}
+                - name: FUGUE_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $secretName | quote }}
+                      key: {{ .Values.platformFailureDrill.apiKeySecretKey | quote }}
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  payload='{"dry_run":true{{- if .Values.platformFailureDrill.target }},"target":{{ .Values.platformFailureDrill.target | quote }}{{- end }}}'
+                  curl -fsS \
+                    -H "Authorization: Bearer ${FUGUE_API_KEY}" \
+                    -H "Content-Type: application/json" \
+                    -X POST \
+                    --data "${payload}" \
+                    "${FUGUE_API_URL%/}/v1/admin/platform/failure-drills" >/dev/null
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 65532
+                capabilities:
+                  drop: ["ALL"]
+              {{- with .Values.platformFailureDrill.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+          {{- with .Values.platformFailureDrill.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.platformFailureDrill.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

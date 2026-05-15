@@ -133,6 +133,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		}
 		binding := s.deriveEdgeRouteBinding(r, app, hostname, routeKind, tlsPolicy, domain.CreatedAt, domain.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
+		binding = applyCustomDomainReadiness(binding, domain)
 		addedRoute := false
 		for _, expandedBinding := range expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups) {
 			if !edgeRouteMatchesSelector(expandedBinding, options) {
@@ -173,6 +174,8 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		TLSAllowlist: tlsAllowlist,
 	}
 	bundle.Version = edgeRouteBundleVersion(bundle)
+	bundle.Generation = bundle.Version
+	bundle = signEdgeRouteBundle(bundle, s.bundleKeyring(), s.discoveryBundleTTL())
 	return bundle, nil
 }
 
@@ -199,7 +202,9 @@ func (s *Server) deriveEdgeRouteBinding(r *http.Request, app model.App, hostname
 		TenantID:            app.TenantID,
 		RuntimeID:           runtimeID,
 		RuntimeEdgeGroupID:  edgeGroupID,
+		RuntimeEdgeGroup:    edgeGroupID,
 		EdgeGroupID:         edgeGroupID,
+		SelectedEdgeGroup:   edgeGroupID,
 		FallbackEdgeGroupID: fallbackEdgeGroupID,
 		RoutePolicy:         model.EdgeRoutePolicyRouteAOnly,
 		UpstreamKind:        upstream.Kind,
@@ -325,14 +330,29 @@ func edgeRoutePolicyByHostname(policies []model.EdgeRoutePolicy) map[string]mode
 
 func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]model.EdgeRoutePolicy, healthyEdgeGroups map[string]bool) model.EdgeRouteBinding {
 	runtimeEdgeGroupID := strings.TrimSpace(firstNonEmpty(binding.RuntimeEdgeGroupID, binding.EdgeGroupID))
-	servingEdgeGroupID := nearestHealthyEdgeGroupID(runtimeEdgeGroupID, healthyEdgeGroups)
+	selection := selectEdgeGroupForRoute(runtimeEdgeGroupID, healthyEdgeGroups)
+	servingEdgeGroupID := selection.EdgeGroupID
+	binding.RuntimeEdgeGroupID = runtimeEdgeGroupID
+	binding.RuntimeEdgeGroup = runtimeEdgeGroupID
+	binding.SelectedEdgeGroup = servingEdgeGroupID
+	binding.SelectionReason = selection.Reason
+	binding.FallbackReason = selection.FallbackReason
 	policy, ok := policies[normalizeExternalAppDomain(binding.Hostname)]
 	if !ok || strings.TrimSpace(policy.AppID) != strings.TrimSpace(binding.AppID) {
-		if isDefaultEdgeRouteKind(binding.RouteKind) && servingEdgeGroupID != "" {
+		if isDefaultEdgeRouteKind(binding.RouteKind) {
 			binding.RoutePolicy = model.EdgeRoutePolicyEnabled
-			binding.RuntimeEdgeGroupID = runtimeEdgeGroupID
-			binding.EdgeGroupID = servingEdgeGroupID
-			binding.FallbackEdgeGroupID = ""
+			if servingEdgeGroupID != "" {
+				binding.EdgeGroupID = servingEdgeGroupID
+				binding.FallbackEdgeGroupID = ""
+				if selection.FallbackReason != "" && runtimeEdgeGroupID != "" && servingEdgeGroupID != runtimeEdgeGroupID {
+					binding.FallbackEdgeGroupID = servingEdgeGroupID
+				}
+			} else {
+				binding.Status = model.EdgeRouteStatusUnavailable
+				binding.StatusReason = "edge group has no healthy edge nodes"
+				binding.UpstreamURL = ""
+				binding.FallbackEdgeGroupID = ""
+			}
 		} else {
 			binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
 		}
@@ -350,14 +370,7 @@ func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]mo
 			binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
 			binding.Status = model.EdgeRouteStatusUnavailable
 			binding.StatusReason = "edge group has no healthy edge nodes"
-			binding.UpstreamURL = ""
-			binding.RouteGeneration = edgeRouteGeneration(binding)
-			return binding
-		}
-		if !strings.EqualFold(policyEdgeGroupID, servingEdgeGroupID) {
-			binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
-			binding.Status = model.EdgeRouteStatusUnavailable
-			binding.StatusReason = "edge policy target edge group is not the nearest healthy edge group for runtime"
+			binding.FallbackReason = firstNonEmpty(selection.FallbackReason, "no healthy edge group")
 			binding.UpstreamURL = ""
 			binding.RouteGeneration = edgeRouteGeneration(binding)
 			return binding
@@ -366,12 +379,18 @@ func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]mo
 			binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
 			binding.Status = model.EdgeRouteStatusUnavailable
 			binding.StatusReason = "edge group has no healthy edge nodes"
+			binding.SelectedEdgeGroup = servingEdgeGroupID
+			binding.FallbackReason = firstNonEmpty(selection.FallbackReason, "policy edge group unhealthy")
 			binding.UpstreamURL = ""
 			binding.RouteGeneration = edgeRouteGeneration(binding)
 			return binding
 		}
 		binding.EdgeGroupID = policyEdgeGroupID
-		binding.RuntimeEdgeGroupID = runtimeEdgeGroupID
+		binding.SelectedEdgeGroup = policyEdgeGroupID
+		binding.SelectionReason = "policy edge group is healthy"
+		if runtimeEdgeGroupID != "" && !strings.EqualFold(policyEdgeGroupID, runtimeEdgeGroupID) {
+			binding.FallbackReason = "policy edge group overrides runtime locality"
+		}
 		binding.FallbackEdgeGroupID = ""
 	} else {
 		binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
@@ -402,7 +421,24 @@ func expandDefaultPlatformEdgeBindings(binding model.EdgeRouteBinding, healthyEd
 }
 
 func isDefaultEdgeRouteKind(routeKind string) bool {
-	return routeKind == model.EdgeRouteKindPlatform || routeKind == model.EdgeRouteKindPlatformDomain
+	return routeKind == model.EdgeRouteKindPlatform ||
+		routeKind == model.EdgeRouteKindPlatformDomain ||
+		routeKind == model.EdgeRouteKindCustomDomain
+}
+
+func applyCustomDomainReadiness(binding model.EdgeRouteBinding, domain model.AppDomain) model.EdgeRouteBinding {
+	if binding.RouteKind != model.EdgeRouteKindCustomDomain {
+		return binding
+	}
+	if domain.Status == model.AppDomainStatusVerified && domain.TLSStatus == model.AppDomainTLSStatusReady {
+		return binding
+	}
+	binding.RoutePolicy = model.EdgeRoutePolicyEnabled
+	binding.Status = model.EdgeRouteStatusUnavailable
+	binding.StatusReason = "custom domain ownership or TLS verification is pending"
+	binding.UpstreamURL = ""
+	binding.RouteGeneration = edgeRouteGeneration(binding)
+	return binding
 }
 
 func edgeRouteBindingsForPlatformRoute(route model.PlatformRoute, healthyEdgeGroups map[string]bool) []model.EdgeRouteBinding {
@@ -452,22 +488,36 @@ func edgeRouteBindingsForPlatformRoute(route model.PlatformRoute, healthyEdgeGro
 	}
 }
 
-func nearestHealthyEdgeGroupID(runtimeEdgeGroupID string, healthyEdgeGroups map[string]bool) string {
+type edgeGroupSelection struct {
+	EdgeGroupID    string
+	Reason         string
+	FallbackReason string
+}
+
+func selectEdgeGroupForRoute(runtimeEdgeGroupID string, healthyEdgeGroups map[string]bool) edgeGroupSelection {
 	runtimeEdgeGroupID = strings.TrimSpace(runtimeEdgeGroupID)
 	if runtimeEdgeGroupID != "" && healthyEdgeGroups[runtimeEdgeGroupID] {
-		return runtimeEdgeGroupID
-	}
-	for _, candidate := range edgeRouteFallbackEdgeGroupCandidates(runtimeEdgeGroupID) {
-		candidate = strings.TrimSpace(candidate)
-		if candidate != "" && healthyEdgeGroups[candidate] {
-			return candidate
+		return edgeGroupSelection{
+			EdgeGroupID: runtimeEdgeGroupID,
+			Reason:      "runtime edge group is healthy",
 		}
 	}
 	candidates := sortedHealthyEdgeGroups(healthyEdgeGroups)
 	if len(candidates) == 0 {
-		return ""
+		return edgeGroupSelection{
+			Reason:         "no healthy edge group",
+			FallbackReason: "no healthy edge group",
+		}
 	}
-	return candidates[0]
+	fallbackReason := ""
+	if runtimeEdgeGroupID != "" {
+		fallbackReason = "runtime edge group is not healthy"
+	}
+	return edgeGroupSelection{
+		EdgeGroupID:    candidates[0],
+		Reason:         "first healthy edge group by stable policy order",
+		FallbackReason: fallbackReason,
+	}
 }
 
 func sortedHealthyEdgeGroups(healthyEdgeGroups map[string]bool) []string {
@@ -479,43 +529,6 @@ func sortedHealthyEdgeGroups(healthyEdgeGroups map[string]bool) []string {
 	}
 	sort.Strings(candidates)
 	return candidates
-}
-
-func edgeRouteFallbackEdgeGroupCandidates(edgeGroupID string) []string {
-	country := strings.TrimPrefix(strings.TrimSpace(edgeGroupID), "edge-group-country-")
-	if country == edgeGroupID {
-		country = ""
-	}
-	switch country {
-	case "hk", "cn", "tw", "jp", "kr", "sg", "in":
-		return edgeRouteCountryGroups("jp", "sg", "kr", "tw", "us", "de")
-	case "us", "ca", "mx":
-		return edgeRouteCountryGroups("us", "ca", "de")
-	case "de", "fr", "nl", "gb", "uk", "es", "it", "pl":
-		return edgeRouteCountryGroups("de", "fr", "nl", "gb", "us")
-	default:
-		if strings.HasPrefix(strings.TrimSpace(edgeGroupID), "edge-group-region-asia") {
-			return edgeRouteCountryGroups("jp", "sg", "us", "de")
-		}
-		if strings.HasPrefix(strings.TrimSpace(edgeGroupID), "edge-group-region-eu") {
-			return edgeRouteCountryGroups("de", "fr", "nl", "us")
-		}
-		if strings.HasPrefix(strings.TrimSpace(edgeGroupID), "edge-group-region-us") ||
-			strings.HasPrefix(strings.TrimSpace(edgeGroupID), "edge-group-region-na") {
-			return edgeRouteCountryGroups("us", "ca", "de")
-		}
-		return []string{defaultEdgeGroupID}
-	}
-}
-
-func edgeRouteCountryGroups(countries ...string) []string {
-	out := make([]string, 0, len(countries)+1)
-	for _, country := range countries {
-		if slug := edgeRouteSlug(country); slug != "" {
-			out = append(out, "edge-group-country-"+slug)
-		}
-	}
-	return append(out, defaultEdgeGroupID)
 }
 
 func (s *Server) edgeRouteHealthyEdgeGroups() (map[string]bool, error) {
@@ -614,10 +627,14 @@ type edgeRouteVersionMaterial struct {
 	RuntimeType         string `json:"runtime_type,omitempty"`
 	RuntimeEdgeGroupID  string `json:"runtime_edge_group_id,omitempty"`
 	RuntimeClusterNode  string `json:"runtime_cluster_node,omitempty"`
+	RuntimeEdgeGroup    string `json:"runtime_edge_group,omitempty"`
+	SelectedEdgeGroup   string `json:"selected_edge_group,omitempty"`
 	EdgeGroupID         string `json:"edge_group_id"`
 	FallbackEdgeGroupID string `json:"fallback_edge_group_id,omitempty"`
 	PolicyEdgeGroupID   string `json:"policy_edge_group_id,omitempty"`
 	RoutePolicy         string `json:"route_policy"`
+	SelectionReason     string `json:"selection_reason,omitempty"`
+	FallbackReason      string `json:"fallback_reason,omitempty"`
 	UpstreamKind        string `json:"upstream_kind"`
 	UpstreamScope       string `json:"upstream_scope,omitempty"`
 	UpstreamURL         string `json:"upstream_url,omitempty"`
@@ -657,10 +674,14 @@ func edgeRouteVersionMaterialFromBinding(binding model.EdgeRouteBinding) edgeRou
 		RuntimeType:         binding.RuntimeType,
 		RuntimeEdgeGroupID:  binding.RuntimeEdgeGroupID,
 		RuntimeClusterNode:  binding.RuntimeClusterNode,
+		RuntimeEdgeGroup:    binding.RuntimeEdgeGroup,
+		SelectedEdgeGroup:   binding.SelectedEdgeGroup,
 		EdgeGroupID:         binding.EdgeGroupID,
 		FallbackEdgeGroupID: binding.FallbackEdgeGroupID,
 		PolicyEdgeGroupID:   binding.PolicyEdgeGroupID,
 		RoutePolicy:         binding.RoutePolicy,
+		SelectionReason:     binding.SelectionReason,
+		FallbackReason:      binding.FallbackReason,
 		UpstreamKind:        binding.UpstreamKind,
 		UpstreamScope:       binding.UpstreamScope,
 		UpstreamURL:         binding.UpstreamURL,

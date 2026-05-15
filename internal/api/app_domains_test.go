@@ -511,9 +511,10 @@ func setupAppDomainTestServerWithDomains(t *testing.T, appBaseDomain string) (*s
 	}
 
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
-		AppBaseDomain:   appBaseDomain,
-		APIPublicDomain: "api.example.com",
-		EdgeTLSAskToken: "edge-secret",
+		AppBaseDomain:        appBaseDomain,
+		APIPublicDomain:      "api.example.com",
+		EdgeTLSAskToken:      "edge-secret",
+		AllowLegacyEdgeToken: true,
 	})
 	resolver := &fakeAppDomainResolver{
 		cname: map[string]string{},

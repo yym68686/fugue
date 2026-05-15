@@ -21,6 +21,7 @@ import (
 
 	miekgdns "github.com/miekg/dns"
 
+	"fugue/internal/bundleauth"
 	"fugue/internal/config"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
@@ -41,21 +42,25 @@ type Service struct {
 }
 
 type Status struct {
-	Status        string     `json:"status"`
-	Healthy       bool       `json:"healthy"`
-	DNSNodeID     string     `json:"dns_node_id,omitempty"`
-	EdgeGroupID   string     `json:"edge_group_id,omitempty"`
-	Zone          string     `json:"zone,omitempty"`
-	BundleVersion string     `json:"bundle_version,omitempty"`
-	RecordCount   int        `json:"record_count"`
-	LastSyncAt    *time.Time `json:"last_sync_at,omitempty"`
-	LastSuccessAt *time.Time `json:"last_success_at,omitempty"`
-	LastError     string     `json:"last_error,omitempty"`
-	StaleCache    bool       `json:"stale_cache"`
-	CachePath     string     `json:"cache_path,omitempty"`
-	ListenAddr    string     `json:"listen_addr,omitempty"`
-	UDPAddr       string     `json:"udp_addr,omitempty"`
-	TCPAddr       string     `json:"tcp_addr,omitempty"`
+	Status            string     `json:"status"`
+	Healthy           bool       `json:"healthy"`
+	DNSNodeID         string     `json:"dns_node_id,omitempty"`
+	EdgeGroupID       string     `json:"edge_group_id,omitempty"`
+	Zone              string     `json:"zone,omitempty"`
+	BundleVersion     string     `json:"bundle_version,omitempty"`
+	ServingGeneration string     `json:"serving_generation,omitempty"`
+	LKGGeneration     string     `json:"lkg_generation,omitempty"`
+	BundleValidUntil  *time.Time `json:"bundle_valid_until,omitempty"`
+	RecordCount       int        `json:"record_count"`
+	LastSyncAt        *time.Time `json:"last_sync_at,omitempty"`
+	LastSuccessAt     *time.Time `json:"last_success_at,omitempty"`
+	LastError         string     `json:"last_error,omitempty"`
+	DegradedReason    string     `json:"degraded_reason,omitempty"`
+	StaleCache        bool       `json:"stale_cache"`
+	CachePath         string     `json:"cache_path,omitempty"`
+	ListenAddr        string     `json:"listen_addr,omitempty"`
+	UDPAddr           string     `json:"udp_addr,omitempty"`
+	TCPAddr           string     `json:"tcp_addr,omitempty"`
 }
 
 type cacheFile struct {
@@ -243,6 +248,14 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 		s.recordSyncError(err)
 		return err
 	}
+	if err := s.verifyBundle(bundle, time.Now().UTC()); err != nil {
+		if fallbackErr := s.LoadPreviousCache(); fallbackErr != nil && s.Logger != nil {
+			s.Logger.Printf("dns bundle previous cache fallback failed: %v", fallbackErr)
+		}
+		err := fmt.Errorf("verify dns bundle: %w", err)
+		s.recordSyncError(err)
+		return err
+	}
 	etag := strings.TrimSpace(resp.Header.Get("ETag"))
 	if etag == "" && strings.TrimSpace(bundle.Version) != "" {
 		etag = strconvQuote(strings.TrimSpace(bundle.Version))
@@ -291,6 +304,23 @@ func (s *Service) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintln(w, "fugue_dns_health 1")
 	} else {
 		fmt.Fprintln(w, "fugue_dns_health 0")
+	}
+	fmt.Fprintln(w, "# HELP fugue_dns_stale_cache Whether fugue-dns is serving a last-known-good cached bundle after sync failure.")
+	fmt.Fprintln(w, "# TYPE fugue_dns_stale_cache gauge")
+	fmt.Fprintf(w, "fugue_dns_stale_cache %d\n", dnsBoolGauge(snapshot.Status.StaleCache))
+	fmt.Fprintln(w, "# HELP fugue_dns_last_sync_timestamp_seconds Last DNS bundle sync attempt time.")
+	fmt.Fprintln(w, "# TYPE fugue_dns_last_sync_timestamp_seconds gauge")
+	fmt.Fprintf(w, "fugue_dns_last_sync_timestamp_seconds %.0f\n", dnsUnixSeconds(snapshot.Status.LastSyncAt))
+	fmt.Fprintln(w, "# HELP fugue_dns_last_success_timestamp_seconds Last successful DNS bundle sync time.")
+	fmt.Fprintln(w, "# TYPE fugue_dns_last_success_timestamp_seconds gauge")
+	fmt.Fprintf(w, "fugue_dns_last_success_timestamp_seconds %.0f\n", dnsUnixSeconds(snapshot.Status.LastSuccessAt))
+	fmt.Fprintln(w, "# HELP fugue_dns_stale_age_seconds Seconds since the last successful bundle sync while serving a stale cache.")
+	fmt.Fprintln(w, "# TYPE fugue_dns_stale_age_seconds gauge")
+	fmt.Fprintf(w, "fugue_dns_stale_age_seconds %.0f\n", dnsStaleAgeSeconds(snapshot.Status.StaleCache, snapshot.Status.LastSuccessAt, time.Now().UTC()))
+	if strings.TrimSpace(snapshot.Status.DegradedReason) != "" {
+		fmt.Fprintln(w, "# HELP fugue_dns_degraded_reason Current fugue-dns degraded reason.")
+		fmt.Fprintln(w, "# TYPE fugue_dns_degraded_reason gauge")
+		fmt.Fprintf(w, "fugue_dns_degraded_reason{reason=\"%s\"} 1\n", dnsPrometheusLabelValue(snapshot.Status.DegradedReason))
 	}
 	fmt.Fprintln(w, "# HELP fugue_dns_records Number of records in the current DNS bundle.")
 	fmt.Fprintln(w, "# TYPE fugue_dns_records gauge")
@@ -426,7 +456,17 @@ func (s *Service) LoadCache() error {
 	}
 	if cached.Version != cacheFileVersion {
 		s.recordCacheLoad("error")
+		if fallbackErr := s.LoadPreviousCache(); fallbackErr == nil {
+			return nil
+		}
 		return fmt.Errorf("unsupported dns cache file version %d", cached.Version)
+	}
+	if err := s.verifyBundle(cached.Bundle, time.Now().UTC()); err != nil {
+		s.recordCacheLoad("error")
+		if fallbackErr := s.LoadPreviousCache(); fallbackErr == nil {
+			return nil
+		}
+		return fmt.Errorf("verify dns cache: %w", err)
 	}
 	s.setBundle(cached.Bundle, cached.ETag, true, "")
 	s.recordCacheLoad("success")
@@ -484,22 +524,37 @@ func (s *Service) setBundle(bundle model.EdgeDNSBundle, etag string, stale bool,
 	s.bundle = &bundle
 	s.etag = strings.TrimSpace(etag)
 	now := time.Now().UTC()
+	validUntil := bundle.ValidUntil
+	status := "ok"
+	degradedReason := ""
+	if !validUntil.IsZero() && now.After(validUntil) {
+		status = "degraded"
+		degradedReason = "dns bundle valid_until expired"
+		stale = true
+	}
 	s.snapshot = Status{
-		Status:        "ok",
-		Healthy:       true,
-		DNSNodeID:     strings.TrimSpace(bundle.DNSNodeID),
-		EdgeGroupID:   strings.TrimSpace(bundle.EdgeGroupID),
-		Zone:          normalizeName(bundle.Zone),
-		BundleVersion: strings.TrimSpace(bundle.Version),
-		RecordCount:   len(bundle.Records),
-		LastSyncAt:    &now,
-		LastSuccessAt: &now,
-		LastError:     strings.TrimSpace(lastError),
-		StaleCache:    stale,
-		CachePath:     strings.TrimSpace(s.Config.CachePath),
-		ListenAddr:    strings.TrimSpace(s.Config.ListenAddr),
-		UDPAddr:       strings.TrimSpace(s.Config.UDPAddr),
-		TCPAddr:       strings.TrimSpace(s.Config.TCPAddr),
+		Status:            status,
+		Healthy:           true,
+		DNSNodeID:         strings.TrimSpace(bundle.DNSNodeID),
+		EdgeGroupID:       strings.TrimSpace(bundle.EdgeGroupID),
+		Zone:              normalizeName(bundle.Zone),
+		BundleVersion:     strings.TrimSpace(bundle.Version),
+		ServingGeneration: firstNonEmpty(bundle.Generation, bundle.Version),
+		LKGGeneration:     firstNonEmpty(bundle.Generation, bundle.Version),
+		BundleValidUntil:  &validUntil,
+		RecordCount:       len(bundle.Records),
+		LastSyncAt:        &now,
+		LastSuccessAt:     &now,
+		LastError:         strings.TrimSpace(lastError),
+		DegradedReason:    degradedReason,
+		StaleCache:        stale,
+		CachePath:         strings.TrimSpace(s.Config.CachePath),
+		ListenAddr:        strings.TrimSpace(s.Config.ListenAddr),
+		UDPAddr:           strings.TrimSpace(s.Config.UDPAddr),
+		TCPAddr:           strings.TrimSpace(s.Config.TCPAddr),
+	}
+	if validUntil.IsZero() {
+		s.snapshot.BundleValidUntil = nil
 	}
 }
 
@@ -554,6 +609,12 @@ func (s *Service) recordSyncError(err error) {
 		s.snapshot.Status = "ok"
 		s.snapshot.Healthy = true
 		s.snapshot.StaleCache = true
+		if !s.bundle.ValidUntil.IsZero() && now.After(s.bundle.ValidUntil) {
+			s.snapshot.Status = "degraded"
+			s.snapshot.DegradedReason = "dns bundle valid_until expired"
+		} else if strings.TrimSpace(s.snapshot.DegradedReason) == "" {
+			s.snapshot.DegradedReason = "dns bundle sync failed; serving cache"
+		}
 	}
 }
 
@@ -722,6 +783,8 @@ func (s *Service) newHeartbeatRequest(ctx context.Context) (*http.Request, error
 		"mesh_ip":            strings.TrimSpace(s.Config.MeshIP),
 		"zone":               normalizeName(firstNonEmpty(status.Zone, s.Config.Zone)),
 		"dns_bundle_version": strings.TrimSpace(status.BundleVersion),
+		"serving_generation": strings.TrimSpace(status.ServingGeneration),
+		"lkg_generation":     strings.TrimSpace(status.LKGGeneration),
 		"record_count":       status.RecordCount,
 		"cache_status":       dnsCacheStatus(status),
 		"cache_write_errors": snapshot.Metrics.CacheWriteError,
@@ -955,7 +1018,77 @@ func (s *Service) writeCache(cached cacheFile) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	s.preservePreviousCache(path)
 	return os.Rename(tmpName, path)
+}
+
+func (s *Service) LoadPreviousCache() error {
+	path := previousCachePath(s.Config.CachePath)
+	if path == "" {
+		return fmt.Errorf("previous dns cache path is not configured")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var cached cacheFile
+	if err := json.Unmarshal(data, &cached); err != nil {
+		return err
+	}
+	if cached.Version != cacheFileVersion {
+		return fmt.Errorf("unsupported dns cache file version %d", cached.Version)
+	}
+	if err := s.verifyBundle(cached.Bundle, time.Now().UTC()); err != nil {
+		return err
+	}
+	s.setBundle(cached.Bundle, cached.ETag, true, "")
+	s.recordCacheLoad("success")
+	if s.Logger != nil {
+		s.Logger.Printf("dns previous cache loaded; version=%s etag=%s path=%s", cached.Bundle.Version, cached.ETag, path)
+	}
+	return nil
+}
+
+func (s *Service) preservePreviousCache(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
+		return
+	}
+	var cached cacheFile
+	if err := json.Unmarshal(data, &cached); err != nil || cached.Version != cacheFileVersion {
+		return
+	}
+	if err := s.verifyBundle(cached.Bundle, time.Now().UTC()); err != nil {
+		return
+	}
+	if err := os.WriteFile(previousCachePath(path), data, 0o600); err != nil && s.Logger != nil {
+		s.Logger.Printf("preserve previous dns cache failed: %v", err)
+	}
+}
+
+func previousCachePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	return path + ".previous"
+}
+
+func (s *Service) verifyBundle(bundle model.EdgeDNSBundle, now time.Time) error {
+	keyring := bundleauth.NewKeyring(
+		s.Config.BundleSigningKey,
+		s.Config.BundleSigningKeyID,
+		s.Config.BundleSigningPreviousKey,
+		s.Config.BundleSigningPreviousKeyID,
+		s.Config.BundleRevokedKeyIDs,
+	)
+	if err := bundleauth.VerifyEdgeDNSBundleWithKeyring(bundle, keyring, now); err != nil {
+		return err
+	}
+	if strings.TrimSpace(bundle.Version) == "" {
+		return fmt.Errorf("dns bundle version is required")
+	}
+	return nil
 }
 
 func (s *Service) syncInterval() time.Duration {
@@ -1269,6 +1402,38 @@ func (s *Service) redact(value string) string {
 func strconvQuote(value string) string {
 	data, _ := json.Marshal(value)
 	return string(data)
+}
+
+func dnsBoolGauge(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func dnsUnixSeconds(value *time.Time) float64 {
+	if value == nil || value.IsZero() {
+		return 0
+	}
+	return float64(value.Unix())
+}
+
+func dnsStaleAgeSeconds(stale bool, lastSuccessAt *time.Time, now time.Time) float64 {
+	if !stale || lastSuccessAt == nil || lastSuccessAt.IsZero() || now.IsZero() {
+		return 0
+	}
+	age := now.Sub(*lastSuccessAt)
+	if age < 0 {
+		return 0
+	}
+	return age.Seconds()
+}
+
+func dnsPrometheusLabelValue(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+	value = strings.ReplaceAll(value, "\n", "\\n")
+	return strings.ReplaceAll(value, `"`, `\"`)
 }
 
 func cloneQueryMetrics(in map[dnsQueryMetricKey]uint64) map[dnsQueryMetricKey]uint64 {

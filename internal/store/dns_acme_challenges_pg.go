@@ -13,7 +13,7 @@ func (s *Store) pgListDNSACMEChallenges(zone string, includeExpired bool) ([]mod
 	defer cancel()
 
 	query := `
-SELECT id, zone, name, value, ttl, expires_at, created_at, updated_at
+SELECT id, zone, name, value, ttl, owner, created_by, expires_at, created_at, updated_at
 FROM fugue_dns_acme_challenges`
 	args := []any{}
 	where := []string{}
@@ -64,17 +64,19 @@ func (s *Store) pgUpsertDNSACMEChallenge(challenge model.DNSACMEChallenge) (mode
 	}
 	challenge.UpdatedAt = now
 	row := s.db.QueryRowContext(ctx, `
-INSERT INTO fugue_dns_acme_challenges (id, zone, name, value, ttl, expires_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+INSERT INTO fugue_dns_acme_challenges (id, zone, name, value, ttl, owner, created_by, expires_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 ON CONFLICT (id) DO UPDATE SET
 	zone = EXCLUDED.zone,
 	name = EXCLUDED.name,
 	value = EXCLUDED.value,
 	ttl = EXCLUDED.ttl,
+	owner = EXCLUDED.owner,
+	created_by = EXCLUDED.created_by,
 	expires_at = EXCLUDED.expires_at,
 	updated_at = EXCLUDED.updated_at
-RETURNING id, zone, name, value, ttl, expires_at, created_at, updated_at
-`, challenge.ID, challenge.Zone, challenge.Name, challenge.Value, challenge.TTL, challenge.ExpiresAt, challenge.CreatedAt, challenge.UpdatedAt)
+RETURNING id, zone, name, value, ttl, owner, created_by, expires_at, created_at, updated_at
+`, challenge.ID, challenge.Zone, challenge.Name, challenge.Value, challenge.TTL, challenge.Owner, challenge.CreatedBy, challenge.ExpiresAt, challenge.CreatedAt, challenge.UpdatedAt)
 	stored, err := scanDNSACMEChallenge(row)
 	if err != nil {
 		return model.DNSACMEChallenge{}, mapDBErr(err)
@@ -89,7 +91,7 @@ func (s *Store) pgDeleteDNSACMEChallenge(id string) (model.DNSACMEChallenge, err
 	challenge, err := scanDNSACMEChallenge(s.db.QueryRowContext(ctx, `
 DELETE FROM fugue_dns_acme_challenges
 WHERE id = $1
-RETURNING id, zone, name, value, ttl, expires_at, created_at, updated_at
+RETURNING id, zone, name, value, ttl, owner, created_by, expires_at, created_at, updated_at
 `, id))
 	if err != nil {
 		return model.DNSACMEChallenge{}, mapDBErr(err)
@@ -105,6 +107,8 @@ func scanDNSACMEChallenge(scanner sqlScanner) (model.DNSACMEChallenge, error) {
 		&challenge.Name,
 		&challenge.Value,
 		&challenge.TTL,
+		&challenge.Owner,
+		&challenge.CreatedBy,
 		&challenge.ExpiresAt,
 		&challenge.CreatedAt,
 		&challenge.UpdatedAt,

@@ -73,6 +73,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "fugue.configSecretName" . }}
                   key: FUGUE_CLUSTER_JOIN_SERVER
+            - name: FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS
             - name: FUGUE_CLUSTER_JOIN_CA_HASH
               valueFrom:
                 secretKeyRef:
@@ -112,6 +117,8 @@ spec:
                 secretKeyRef:
                   name: {{ include "fugue.configSecretName" . }}
                   key: FUGUE_EDGE_TLS_ASK_TOKEN
+            - name: FUGUE_ALLOW_LEGACY_EDGE_TOKEN
+              value: {{ .Values.api.allowLegacyEdgeToken | quote }}
             - name: FUGUE_REGISTRY_PUSH_BASE
               value: {{ include "fugue.registryPushBase" . | quote }}
             - name: FUGUE_REGISTRY_PULL_BASE
@@ -134,6 +141,25 @@ spec:
                 secretKeyRef:
                   name: {{ include "fugue.configSecretName" . }}
                   key: FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY
+            - name: FUGUE_BUNDLE_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: FUGUE_BUNDLE_SIGNING_KEY
+            - name: FUGUE_BUNDLE_SIGNING_KEY_ID
+              value: {{ .Values.bundle.signingKeyID | quote }}
+            - name: FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY
+                  optional: true
+            - name: FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID
+              value: {{ .Values.bundle.previousSigningKeyID | quote }}
+            - name: FUGUE_BUNDLE_REVOKED_KEY_IDS
+              value: {{ .Values.bundle.revokedKeyIDs | quote }}
+            - name: FUGUE_BUNDLE_VALID_FOR
+              value: {{ .Values.bundle.validFor | quote }}
             {{- with .Values.api.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

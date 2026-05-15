@@ -48,6 +48,7 @@ func TestWorkloadTokenImportsIntoOwnProjectAndFiltersAppList(t *testing.T) {
 	}
 
 	authenticator := auth.New(s, "signing-secret")
+	authenticator.WorkloadIdentitySigningKey = "signing-secret"
 	server := NewServer(s, authenticator, nil, ServerConfig{
 		AppBaseDomain:    "apps.example.com",
 		RegistryPushBase: "registry.internal.example",
@@ -128,6 +129,7 @@ func TestWorkloadTokenRejectsOtherProjectAndForbiddenEndpoint(t *testing.T) {
 	}
 
 	authenticator := auth.New(s, "signing-secret")
+	authenticator.WorkloadIdentitySigningKey = "signing-secret"
 	server := NewServer(s, authenticator, nil, ServerConfig{
 		AppBaseDomain:    "apps.example.com",
 		RegistryPushBase: "registry.internal.example",

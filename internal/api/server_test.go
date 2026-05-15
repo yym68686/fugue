@@ -287,6 +287,7 @@ func TestJoinClusterEnvIncludesMeshConfig(t *testing.T) {
 
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
 		ClusterJoinServer:            "https://100.64.0.1:6443",
+		ClusterJoinServerFallbacks:   "https://100.64.0.2:6443, https://100.64.0.3:6443",
 		ClusterJoinCAHash:            "deadbeef",
 		ClusterJoinBootstrapTokenTTL: time.Minute,
 		RegistryPullBase:             "10.128.0.2:30500",
@@ -318,6 +319,9 @@ func TestJoinClusterEnvIncludesMeshConfig(t *testing.T) {
 	body := recorder.Body.String()
 	if !strings.Contains(body, "FUGUE_JOIN_SERVER='https://100.64.0.1:6443'") {
 		t.Fatalf("expected join server in response body, got %s", body)
+	}
+	if !strings.Contains(body, "FUGUE_JOIN_SERVER_FALLBACKS='https://100.64.0.2:6443,https://100.64.0.3:6443'") {
+		t.Fatalf("expected join server fallbacks in response body, got %s", body)
 	}
 	if !strings.Contains(body, "FUGUE_JOIN_TOKEN='K10deadbeef::") {
 		t.Fatalf("expected secure bootstrap token in response body, got %s", body)
@@ -632,6 +636,12 @@ func TestJoinClusterInstallScriptAvoidsRedundantRestarts(t *testing.T) {
 		`Heartbeat: long-running steps print progress every ${FUGUE_PROGRESS_HEARTBEAT_SECONDS}s so the install never looks stuck.`,
 		`This is normal on a first install.`,
 		`Downloading and installing k3s agent binaries`,
+		`Installing NFS client tools`,
+		`nfs-common`,
+		`configure_k3s_api_load_balancer() {`,
+		`fugue-k3s-api-lb.service`,
+		`haproxy -Ws -f /etc/fugue/k3s-api-lb.cfg`,
+		`server: "%s"\n' "${FUGUE_JOIN_EFFECTIVE_SERVER:-${FUGUE_JOIN_SERVER}}"`,
 		`Requesting join parameters from control plane...`,
 		`Cluster node join finished in $(format_duration $(( $(date +%s) - script_started_at ))).`,
 		`case "${http_code}" in`,
@@ -658,6 +668,12 @@ func TestJoinClusterInstallScriptAvoidsRedundantRestarts(t *testing.T) {
 		`/run/systemd/resolve/resolv.conf`,
 		`Pointed /etc/resolv.conf at /run/systemd/resolve/resolv.conf for k3s/containerd image pulls`,
 		`host_resolv_conf_changed=1`,
+		`Installing local DNS escape hatch`,
+		`fugue-node-dns-escape-hatch.service`,
+		`fugue-node-dns-escape-hatch.timer`,
+		`render_service_host_records() {`,
+		`detect_kube_dns_service_ip() {`,
+		`Fugue node DNS escape hatch skipping because iptables is unavailable.`,
 		`k3s_restart_needed=1`,
 	} {
 		if !strings.Contains(script, want) {

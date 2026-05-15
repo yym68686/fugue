@@ -91,6 +91,7 @@ const (
 	NodeUpdateTaskTypeUpgradeUpdater    = "upgrade-node-updater"
 	NodeUpdateTaskTypeRestartK3SAgent   = "restart-k3s-agent"
 	NodeUpdateTaskTypeDiagnoseNode      = "diagnose-node"
+	NodeUpdateTaskTypeInstallNFSClient  = "install-nfs-client-tools"
 
 	NodeUpdateTaskStatusPending   = "pending"
 	NodeUpdateTaskStatusRunning   = "running"
@@ -536,27 +537,44 @@ type MachinePolicy struct {
 }
 
 type NodeUpdater struct {
-	ID                string            `json:"id"`
-	TenantID          string            `json:"tenant_id,omitempty"`
-	NodeKeyID         string            `json:"node_key_id,omitempty"`
-	MachineID         string            `json:"machine_id,omitempty"`
-	RuntimeID         string            `json:"runtime_id,omitempty"`
-	ClusterNodeName   string            `json:"cluster_node_name,omitempty"`
-	Status            string            `json:"status"`
-	TokenPrefix       string            `json:"token_prefix,omitempty"`
-	TokenHash         string            `json:"token_hash,omitempty"`
-	Labels            map[string]string `json:"labels,omitempty"`
-	Capabilities      []string          `json:"capabilities,omitempty"`
-	UpdaterVersion    string            `json:"updater_version,omitempty"`
-	JoinScriptVersion string            `json:"join_script_version,omitempty"`
-	K3SVersion        string            `json:"k3s_version,omitempty"`
-	OS                string            `json:"os,omitempty"`
-	Arch              string            `json:"arch,omitempty"`
-	LastError         string            `json:"last_error,omitempty"`
-	LastSeenAt        *time.Time        `json:"last_seen_at,omitempty"`
-	LastHeartbeatAt   *time.Time        `json:"last_heartbeat_at,omitempty"`
-	CreatedAt         time.Time         `json:"created_at"`
-	UpdatedAt         time.Time         `json:"updated_at"`
+	ID                  string            `json:"id"`
+	TenantID            string            `json:"tenant_id,omitempty"`
+	NodeKeyID           string            `json:"node_key_id,omitempty"`
+	MachineID           string            `json:"machine_id,omitempty"`
+	RuntimeID           string            `json:"runtime_id,omitempty"`
+	ClusterNodeName     string            `json:"cluster_node_name,omitempty"`
+	Status              string            `json:"status"`
+	TokenPrefix         string            `json:"token_prefix,omitempty"`
+	TokenHash           string            `json:"token_hash,omitempty"`
+	Labels              map[string]string `json:"labels,omitempty"`
+	Capabilities        []string          `json:"capabilities,omitempty"`
+	UpdaterVersion      string            `json:"updater_version,omitempty"`
+	JoinScriptVersion   string            `json:"join_script_version,omitempty"`
+	K3SVersion          string            `json:"k3s_version,omitempty"`
+	K3SServer           string            `json:"k3s_server,omitempty"`
+	K3SFallbackServers  string            `json:"k3s_fallback_servers,omitempty"`
+	RegistryMirror      string            `json:"registry_mirror,omitempty"`
+	LabelsHash          string            `json:"labels_hash,omitempty"`
+	TaintsHash          string            `json:"taints_hash,omitempty"`
+	EdgeEnvGeneration   string            `json:"edge_env_generation,omitempty"`
+	DNSEnvGeneration    string            `json:"dns_env_generation,omitempty"`
+	ConfigHash          string            `json:"config_hash,omitempty"`
+	DiscoveryGeneration string            `json:"discovery_generation,omitempty"`
+	OS                  string            `json:"os,omitempty"`
+	Arch                string            `json:"arch,omitempty"`
+	LastError           string            `json:"last_error,omitempty"`
+	LastSeenAt          *time.Time        `json:"last_seen_at,omitempty"`
+	LastHeartbeatAt     *time.Time        `json:"last_heartbeat_at,omitempty"`
+	CreatedAt           time.Time         `json:"created_at"`
+	UpdatedAt           time.Time         `json:"updated_at"`
+}
+
+type NodeUpdaterDesiredState struct {
+	GeneratedAt     time.Time                `json:"generated_at"`
+	NodeUpdater     NodeUpdater              `json:"node_updater"`
+	DiscoveryBundle DiscoveryBundle          `json:"discovery_bundle"`
+	NodePolicy      *ClusterNodePolicyStatus `json:"node_policy,omitempty"`
+	Warnings        []string                 `json:"warnings,omitempty"`
 }
 
 type NodeUpdateTask struct {
@@ -767,20 +785,23 @@ type ClusterNodePolicy struct {
 }
 
 type ClusterNodePolicyStatus struct {
-	NodeName         string                          `json:"node_name"`
-	RuntimeID        string                          `json:"runtime_id,omitempty"`
-	TenantID         string                          `json:"tenant_id,omitempty"`
-	MachineID        string                          `json:"machine_id,omitempty"`
-	Policy           *ClusterNodePolicy              `json:"policy,omitempty"`
-	Labels           map[string]string               `json:"labels,omitempty"`
-	Taints           []ClusterNodeTaint              `json:"taints,omitempty"`
-	Conditions       map[string]ClusterNodeCondition `json:"conditions,omitempty"`
-	Ready            bool                            `json:"ready"`
-	DiskPressure     bool                            `json:"disk_pressure"`
-	NodeSchedulable  bool                            `json:"node_schedulable"`
-	Reconciled       bool                            `json:"reconciled"`
-	ReconcileReasons []string                        `json:"reconcile_reasons,omitempty"`
-	ReconcileError   string                          `json:"reconcile_error,omitempty"`
+	NodeName            string                          `json:"node_name"`
+	RuntimeID           string                          `json:"runtime_id,omitempty"`
+	TenantID            string                          `json:"tenant_id,omitempty"`
+	MachineID           string                          `json:"machine_id,omitempty"`
+	Policy              *ClusterNodePolicy              `json:"policy,omitempty"`
+	Labels              map[string]string               `json:"labels,omitempty"`
+	Taints              []ClusterNodeTaint              `json:"taints,omitempty"`
+	Conditions          map[string]ClusterNodeCondition `json:"conditions,omitempty"`
+	Ready               bool                            `json:"ready"`
+	DiskPressure        bool                            `json:"disk_pressure"`
+	NodeSchedulable     bool                            `json:"node_schedulable"`
+	Reconciled          bool                            `json:"reconciled"`
+	ReconcileReasons    []string                        `json:"reconcile_reasons,omitempty"`
+	ReconcileError      string                          `json:"reconcile_error,omitempty"`
+	BlockRollout        bool                            `json:"block_rollout"`
+	GateReason          string                          `json:"gate_reason,omitempty"`
+	SuggestedFixCommand string                          `json:"suggested_fix_command,omitempty"`
 }
 
 type ClusterNodePolicyStatusSummary struct {
@@ -1503,6 +1524,113 @@ type AuditEvent struct {
 	CreatedAt  time.Time         `json:"created_at"`
 }
 
+type StorePromotion struct {
+	ID                           string            `json:"id"`
+	SourceKind                   string            `json:"source_kind"`
+	SourceFingerprint            string            `json:"source_fingerprint"`
+	TargetStore                  string            `json:"target_store"`
+	Generation                   string            `json:"generation"`
+	OperatorType                 string            `json:"operator_type,omitempty"`
+	OperatorID                   string            `json:"operator_id,omitempty"`
+	Status                       string            `json:"status"`
+	DryRun                       bool              `json:"dry_run"`
+	BackupRef                    string            `json:"backup_ref,omitempty"`
+	RollbackRef                  string            `json:"rollback_ref,omitempty"`
+	RestoreManifestRef           string            `json:"restore_manifest_ref,omitempty"`
+	PermissionVerificationStatus string            `json:"permission_verification_status,omitempty"`
+	InvariantStatus              string            `json:"invariant_status,omitempty"`
+	Message                      string            `json:"message,omitempty"`
+	Metadata                     map[string]string `json:"metadata,omitempty"`
+	StartedAt                    time.Time         `json:"started_at"`
+	CompletedAt                  *time.Time        `json:"completed_at,omitempty"`
+	CreatedAt                    time.Time         `json:"created_at"`
+	UpdatedAt                    time.Time         `json:"updated_at"`
+}
+
+type StoreInvariantCheck struct {
+	Name    string `json:"name"`
+	Pass    bool   `json:"pass"`
+	Count   int    `json:"count,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+type ControlPlaneStoreStatus struct {
+	AuthoritativeStore           string                `json:"authoritative_store"`
+	StoreGeneration              string                `json:"store_generation"`
+	SourceFingerprint            string                `json:"source_fingerprint"`
+	SchemaVersion                string                `json:"schema_version,omitempty"`
+	LastPromotion                *StorePromotion       `json:"last_promotion,omitempty"`
+	LastRestore                  *StorePromotion       `json:"last_restore,omitempty"`
+	LastBackupRef                string                `json:"last_backup_ref,omitempty"`
+	PermissionVerificationStatus string                `json:"permission_verification_status"`
+	RestoreReadiness             string                `json:"restore_readiness"`
+	Invariants                   []StoreInvariantCheck `json:"invariants"`
+	BlockRollout                 bool                  `json:"block_rollout"`
+	GateReason                   string                `json:"gate_reason,omitempty"`
+}
+
+type RestoreManifest struct {
+	DumpRef        string            `json:"dump_ref"`
+	TargetStore    string            `json:"target_store"`
+	Owner          string            `json:"owner"`
+	ExpectedCounts map[string]int    `json:"expected_counts,omitempty"`
+	RequiredGrants []string          `json:"required_grants,omitempty"`
+	RestoreOrder   []string          `json:"restore_order,omitempty"`
+	Metadata       map[string]string `json:"metadata,omitempty"`
+}
+
+type RouteExplainResponse struct {
+	Hostname          string            `json:"hostname"`
+	ServingMode       string            `json:"serving_mode"`
+	Route             *EdgeRouteBinding `json:"route,omitempty"`
+	HealthyEdgeGroups map[string]bool   `json:"healthy_edge_groups,omitempty"`
+	FallbackChain     []string          `json:"fallback_chain,omitempty"`
+	Reasons           []string          `json:"reasons,omitempty"`
+	GeneratedAt       time.Time         `json:"generated_at"`
+}
+
+type RouteServingMode struct {
+	Hostname          string    `json:"hostname"`
+	ServingMode       string    `json:"serving_mode"`
+	SelectedEdgeGroup string    `json:"selected_edge_group,omitempty"`
+	RuntimeEdgeGroup  string    `json:"runtime_edge_group,omitempty"`
+	RouteKind         string    `json:"route_kind,omitempty"`
+	RoutePolicy       string    `json:"route_policy,omitempty"`
+	Reason            string    `json:"reason,omitempty"`
+	GeneratedAt       time.Time `json:"generated_at"`
+}
+
+type RouteServingModeListResponse struct {
+	Routes      []RouteServingMode `json:"routes"`
+	GeneratedAt time.Time          `json:"generated_at"`
+}
+
+type PlatformAutonomyStatus struct {
+	GeneratedAt       time.Time               `json:"generated_at"`
+	Pass              bool                    `json:"pass"`
+	BlockRollout      bool                    `json:"block_rollout"`
+	ControlPlaneStore ControlPlaneStoreStatus `json:"control_plane_store"`
+	DiscoveryBundle   string                  `json:"discovery_bundle"`
+	NodePolicy        string                  `json:"node_policy"`
+	Edge              string                  `json:"edge"`
+	DNS               string                  `json:"dns"`
+	Registry          string                  `json:"registry"`
+	Headscale         string                  `json:"headscale"`
+	RouteFallback     string                  `json:"route_fallback"`
+	RestoreReadiness  string                  `json:"restore_readiness"`
+	Checks            []StoreInvariantCheck   `json:"checks"`
+}
+
+type DNSFullZonePreflightResponse struct {
+	Zone           string                        `json:"zone"`
+	Pass           bool                          `json:"pass"`
+	GeneratedAt    time.Time                     `json:"generated_at"`
+	DNSSECStatus   string                        `json:"dnssec_status"`
+	Checks         []DNSDelegationPreflightCheck `json:"checks"`
+	DelegationPlan DNSDelegationPlan             `json:"delegation_plan"`
+	RollbackPlan   DNSDelegationPlan             `json:"rollback_plan"`
+}
+
 type Principal struct {
 	ActorType string
 	ActorID   string
@@ -1608,6 +1736,7 @@ type State struct {
 	DNSNodes                   []DNSNode                   `json:"dns_nodes,omitempty"`
 	DNSACMEChallenges          []DNSACMEChallenge          `json:"dns_acme_challenges,omitempty"`
 	EdgeRoutePolicies          []EdgeRoutePolicy           `json:"edge_route_policies,omitempty"`
+	StorePromotions            []StorePromotion            `json:"store_promotions,omitempty"`
 	BackingServices            []BackingService            `json:"backing_services"`
 	ServiceBindings            []ServiceBinding            `json:"service_bindings"`
 	Operations                 []Operation                 `json:"operations"`

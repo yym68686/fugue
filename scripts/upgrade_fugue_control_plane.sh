@@ -31,6 +31,8 @@ KUBECONFIG_FALLBACK_FILE=""
 UPGRADE_OVERRIDE_VALUES_FILE=""
 DNS_STATIC_RECORDS_FILE=""
 PLATFORM_ROUTES_FILE=""
+DISCOVERY_BUNDLE_FILE=""
+DISCOVERY_BUNDLE_FILE_TEMP=""
 LOCAL_CONTROL_PLANE_AUTOMATION_DIR="${FUGUE_LOCAL_CONTROL_PLANE_AUTOMATION_DIR:-${HOME}/.config/fugue/control-plane-automation}"
 LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR="${FUGUE_LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR:-/root/.config/fugue/control-plane-automation}"
 CONTROL_PLANE_HOSTS_ENV_LOADED="false"
@@ -49,7 +51,7 @@ LOCAL_KUBE_API_READY_POLL_SECONDS="${FUGUE_LOCAL_KUBE_API_READY_POLL_SECONDS:-2}
 LOCAL_KUBE_API_READY_TIMEOUT_SECONDS="${FUGUE_LOCAL_KUBE_API_READY_TIMEOUT_SECONDS:-180}"
 PRIMARY_POSTGRES_DATA_ROOT="${FUGUE_PRIMARY_POSTGRES_DATA_ROOT:-/var/lib/fugue/postgres}"
 PRIMARY_POSTGRES_IMAGE="${FUGUE_PRIMARY_POSTGRES_IMAGE:-docker.io/library/postgres:16-alpine}"
-FUGUE_DEFAULT_REGISTRY_PULL_BASE="${FUGUE_DEFAULT_REGISTRY_PULL_BASE:-registry.fugue.internal:5000}"
+FUGUE_DEFAULT_REGISTRY_PULL_BASE="${FUGUE_DEFAULT_REGISTRY_PULL_BASE:-}"
 DNS_HELM_SET_ARGS=()
 
 detect_primary_private_ip() {
@@ -362,6 +364,9 @@ cleanup_upgrade_override_values() {
   if [[ -n "${PLATFORM_ROUTES_FILE}" && -f "${PLATFORM_ROUTES_FILE}" ]]; then
     rm -f "${PLATFORM_ROUTES_FILE}"
   fi
+  if [[ -n "${DISCOVERY_BUNDLE_FILE_TEMP}" && -f "${DISCOVERY_BUNDLE_FILE_TEMP}" ]]; then
+    rm -f "${DISCOVERY_BUNDLE_FILE_TEMP}"
+  fi
 }
 
 cleanup_tmp_artifacts() {
@@ -591,6 +596,307 @@ helm_set_string_value() {
 
 trim_field() {
   printf '%s' "$1" | awk '{$1=$1; print}'
+}
+
+release_api_base_url() {
+  local base_url=""
+  base_url="$(trim_field "${FUGUE_RELEASE_PREFLIGHT_API_URL:-${FUGUE_API_URL:-${FUGUE_BASE_URL:-}}}")"
+  if [[ -z "${base_url}" && -n "$(trim_field "${FUGUE_API_PUBLIC_DOMAIN:-}")" ]]; then
+    base_url="https://${FUGUE_API_PUBLIC_DOMAIN}"
+  fi
+  if [[ -z "${base_url}" && -n "$(trim_field "${FUGUE_SMOKE_URL:-}")" ]]; then
+    base_url="${FUGUE_SMOKE_URL%/healthz}"
+  fi
+  printf '%s' "${base_url%/}"
+}
+
+release_api_token() {
+  trim_field "${FUGUE_API_KEY:-${FUGUE_TOKEN:-${FUGUE_BOOTSTRAP_KEY:-}}}"
+}
+
+run_release_preflight() {
+  local api_base=""
+  local token=""
+  local discovery_headers=""
+  local discovery_body=""
+  local autonomy_status_file=""
+  local discovery_etag=""
+
+  case "${FUGUE_RELEASE_PREFLIGHT_ENABLED:-true}" in
+    1|true|TRUE|yes|YES)
+      ;;
+    *)
+      log "release preflight disabled"
+      return 0
+      ;;
+  esac
+
+  api_base="$(release_api_base_url)"
+  [[ -n "$(trim_field "${api_base}")" ]] || fail "cannot run release preflight without FUGUE_API_URL, FUGUE_BASE_URL, FUGUE_SMOKE_URL, or FUGUE_API_PUBLIC_DOMAIN"
+  token="$(release_api_token)"
+  [[ -n "$(trim_field "${token}")" ]] || fail "cannot run release preflight without FUGUE_API_KEY, FUGUE_TOKEN, or FUGUE_BOOTSTRAP_KEY"
+  command_exists python3 || fail "python3 is required for release preflight JSON checks"
+
+  discovery_headers="$(mktemp)"
+  discovery_body="$(mktemp)"
+  curl -fsS -D "${discovery_headers}" -H "Authorization: Bearer ${token}" "${api_base}/v1/discovery/bundle" -o "${discovery_body}"
+  discovery_etag="$(awk 'BEGIN {IGNORECASE = 1} $1 == "ETag:" {print $2; exit}' "${discovery_headers}" | tr -d '\r')"
+  [[ -n "$(trim_field "${discovery_etag}")" ]] || fail "DiscoveryBundle preflight did not return an ETag"
+  python3 - "${discovery_body}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as fh:
+    bundle = json.load(fh)
+
+if not str(bundle.get("generation", "")).strip():
+    raise SystemExit("DiscoveryBundle generation is empty")
+if not str(bundle.get("schema_version", "")).strip():
+    raise SystemExit("DiscoveryBundle schema version is empty")
+if str(bundle.get("schema_version", "")).split(".", 1)[0] != "1":
+    raise SystemExit(f"unsupported DiscoveryBundle schema version: {bundle.get('schema_version', '')}")
+if not str(bundle.get("signature", "")).strip():
+    raise SystemExit("DiscoveryBundle signature is empty")
+PY
+
+  autonomy_status_file="$(mktemp)"
+  curl -fsS -H "Authorization: Bearer ${token}" "${api_base}/v1/admin/platform/autonomy/status" -o "${autonomy_status_file}"
+  python3 - "${autonomy_status_file}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+status = payload.get("status") or {}
+if not status.get("pass", False):
+    raise SystemExit("platform autonomy status did not pass")
+if status.get("block_rollout", False):
+    raise SystemExit("platform autonomy status blocks rollout")
+store = status.get("control_plane_store") or {}
+if store.get("block_rollout", False):
+    raise SystemExit("control-plane store promotion gate is blocked")
+if str(store.get("permission_verification_status", "")).strip() != "passed":
+    raise SystemExit("control-plane store permission verification did not pass")
+checks = {str(item.get("name", "")).strip(): item for item in status.get("checks") or [] if isinstance(item, dict)}
+for name in ("discovery_bundle", "node_policy", "edge", "dns", "registry", "headscale", "restore_readiness", "route_fallback"):
+    check = checks.get(name)
+    if not check or not check.get("pass", False):
+        raise SystemExit(f"{name} gate did not pass")
+PY
+
+  log "release preflight passed for ${api_base}; discovery_etag=${discovery_etag}"
+  rm -f "${discovery_headers}" "${discovery_body}" "${autonomy_status_file}"
+}
+
+fetch_discovery_bundle() {
+  local source_file="${FUGUE_DISCOVERY_BUNDLE_FILE:-}"
+  local source_url="${FUGUE_DISCOVERY_BUNDLE_URL:-}"
+  local base_url=""
+  local auth_args=()
+
+  if [[ -n "${DISCOVERY_BUNDLE_FILE}" && -r "${DISCOVERY_BUNDLE_FILE}" ]]; then
+    return 0
+  fi
+
+  if [[ -n "$(trim_field "${source_file}")" ]]; then
+    [[ -r "${source_file}" ]] || fail "FUGUE_DISCOVERY_BUNDLE_FILE is not readable: ${source_file}"
+    DISCOVERY_BUNDLE_FILE="${source_file}"
+    DISCOVERY_BUNDLE_FILE_TEMP=""
+    verify_discovery_bundle_file "${DISCOVERY_BUNDLE_FILE}"
+    log "using DiscoveryBundle from ${DISCOVERY_BUNDLE_FILE}"
+    return 0
+  fi
+
+  if [[ -z "$(trim_field "${source_url}")" ]]; then
+    base_url="$(trim_field "${FUGUE_BASE_URL:-${FUGUE_API_URL:-}}")"
+    if [[ -n "${base_url}" ]]; then
+      source_url="${base_url%/}/v1/discovery/bundle"
+    fi
+  fi
+  if [[ -z "$(trim_field "${source_url}")" ]]; then
+    return 1
+  fi
+
+  DISCOVERY_BUNDLE_FILE="$(mktemp -t fugue-discovery-bundle.XXXXXX.json)"
+  DISCOVERY_BUNDLE_FILE_TEMP="${DISCOVERY_BUNDLE_FILE}"
+  if [[ -n "$(trim_field "${FUGUE_API_KEY:-${FUGUE_TOKEN:-${FUGUE_BOOTSTRAP_KEY:-}}}")" ]]; then
+    auth_args=(-H "Authorization: Bearer ${FUGUE_API_KEY:-${FUGUE_TOKEN:-${FUGUE_BOOTSTRAP_KEY:-}}}")
+  fi
+  curl -fsS "${auth_args[@]}" "${source_url}" -o "${DISCOVERY_BUNDLE_FILE}"
+  verify_discovery_bundle_file "${DISCOVERY_BUNDLE_FILE}"
+  log "fetched DiscoveryBundle from ${source_url}"
+  return 0
+}
+
+verify_discovery_bundle_file() {
+  local bundle_file="$1"
+  [[ -r "${bundle_file}" ]] || fail "DiscoveryBundle is not readable: ${bundle_file}"
+  command_exists python3 || fail "python3 is required to verify DiscoveryBundle"
+  python3 - "${bundle_file}" <<'PY'
+import base64
+import hashlib
+import hmac
+import json
+import os
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as fh:
+    bundle = json.load(fh)
+
+schema_version = str(bundle.get("schema_version", "")).strip()
+if not schema_version:
+    raise SystemExit("DiscoveryBundle schema_version is empty")
+if schema_version.split(".", 1)[0] != "1":
+    raise SystemExit(f"unsupported DiscoveryBundle schema_version: {schema_version}")
+if not str(bundle.get("signature", "")).strip():
+    raise SystemExit("DiscoveryBundle signature is empty")
+
+def payload_for_signature(key_id, valid_until):
+    payload = {}
+    for key in (
+        "schema_version",
+        "generation",
+        "previous_generation",
+        "generated_at",
+        "valid_until",
+        "issuer",
+        "key_id",
+        "api_endpoints",
+        "kubernetes",
+        "registry",
+        "edge_groups",
+        "edge_nodes",
+        "dns_nodes",
+        "platform_routes",
+        "public_runtime_env",
+    ):
+        value = bundle.get(key)
+        if key == "valid_until":
+            value = valid_until
+        elif key == "key_id":
+            value = key_id
+        if value in ("", None, [], {}):
+            continue
+        payload[key] = value
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+keys = {}
+active_key = os.environ.get("FUGUE_BUNDLE_SIGNING_KEY", "").strip()
+active_key_id = os.environ.get("FUGUE_BUNDLE_SIGNING_KEY_ID", bundle.get("key_id", "")).strip()
+previous_key = os.environ.get("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY", "").strip()
+previous_key_id = os.environ.get("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID", "").strip()
+if active_key and active_key_id:
+    keys[active_key_id.lower()] = active_key
+if previous_key and previous_key_id:
+    keys[previous_key_id.lower()] = previous_key
+if not keys:
+    raise SystemExit(0)
+revoked = {item.strip().lower() for item in os.environ.get("FUGUE_BUNDLE_REVOKED_KEY_IDS", "").replace(";", ",").split(",") if item.strip()}
+candidates = [(bundle.get("key_id", ""), bundle.get("signature", ""), bundle.get("valid_until", ""))]
+for item in bundle.get("signatures") or []:
+    candidates.append((item.get("key_id", ""), item.get("signature", ""), item.get("valid_until", bundle.get("valid_until", ""))))
+for key_id, signature, valid_until in candidates:
+    key_id = str(key_id or "").strip()
+    signature = str(signature or "").strip()
+    if not key_id or not signature or key_id.lower() in revoked:
+        continue
+    key = keys.get(key_id.lower())
+    if not key:
+        continue
+    digest = hmac.new(key.encode("utf-8"), payload_for_signature(key_id, valid_until), hashlib.sha256).digest()
+    expected = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    if hmac.compare_digest(signature, expected):
+        raise SystemExit(0)
+raise SystemExit("DiscoveryBundle signature verification failed")
+PY
+}
+
+discovery_bundle_value() {
+  local key="$1"
+  [[ -n "${DISCOVERY_BUNDLE_FILE}" && -r "${DISCOVERY_BUNDLE_FILE}" ]] || return 1
+  command_exists python3 || fail "python3 is required to read DiscoveryBundle; install python3 or pass explicit release variables"
+  python3 - "${DISCOVERY_BUNDLE_FILE}" "${key}" <<'PY'
+import json
+import sys
+
+path, key = sys.argv[1], sys.argv[2]
+with open(path, "r", encoding="utf-8") as fh:
+    bundle = json.load(fh)
+
+def first_named(items, name):
+    for item in items or []:
+        if item.get("name") == name:
+            return item
+    return (items or [{}])[0] if items else {}
+
+runtime = bundle.get("public_runtime_env") or {}
+if key == "api_url":
+    value = runtime.get("FUGUE_API_URL") or first_named(bundle.get("api_endpoints"), "public").get("url", "")
+elif key == "app_base_domain":
+    value = runtime.get("FUGUE_APP_BASE_DOMAIN", "")
+elif key == "registry_push_base":
+    value = runtime.get("FUGUE_REGISTRY_PUSH_BASE") or first_named(bundle.get("registry"), "registry").get("push_base", "")
+elif key == "registry_pull_base":
+    value = runtime.get("FUGUE_REGISTRY_PULL_BASE") or first_named(bundle.get("registry"), "registry").get("pull_base", "")
+elif key == "registry_mirror":
+    value = runtime.get("FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT") or first_named(bundle.get("registry"), "registry").get("mirror", "")
+elif key == "cluster_join_server_fallbacks":
+    value = runtime.get("FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS", "")
+    if not value:
+        value = ",".join(first_named(bundle.get("kubernetes"), "cluster-join").get("fallback_servers") or [])
+else:
+    value = ""
+if isinstance(value, list):
+    value = ",".join(str(item) for item in value if str(item).strip())
+print(str(value).strip())
+PY
+}
+
+apply_discovery_bundle_defaults() {
+  local value=""
+  if ! fetch_discovery_bundle; then
+    return 1
+  fi
+
+  if [[ -z "$(trim_field "${FUGUE_API_PUBLIC_DOMAIN:-}")" ]]; then
+    value="$(discovery_bundle_value api_url || true)"
+    if [[ "${value}" == https://* ]]; then
+      FUGUE_API_PUBLIC_DOMAIN="${value#https://}"
+      FUGUE_API_PUBLIC_DOMAIN="${FUGUE_API_PUBLIC_DOMAIN%%/*}"
+    fi
+  fi
+  if [[ -z "$(trim_field "${FUGUE_APP_BASE_DOMAIN:-}")" ]]; then
+    value="$(discovery_bundle_value app_base_domain || true)"
+    [[ -z "$(trim_field "${value}")" ]] || FUGUE_APP_BASE_DOMAIN="${value}"
+  fi
+  if [[ -z "$(trim_field "${FUGUE_REGISTRY_PUSH_BASE:-}")" ]]; then
+    value="$(discovery_bundle_value registry_push_base || true)"
+    [[ -z "$(trim_field "${value}")" ]] || FUGUE_REGISTRY_PUSH_BASE="${value}"
+  fi
+  if [[ -z "$(trim_field "${FUGUE_REGISTRY_PULL_BASE:-}")" ]]; then
+    value="$(discovery_bundle_value registry_pull_base || true)"
+    [[ -z "$(trim_field "${value}")" ]] || FUGUE_REGISTRY_PULL_BASE="${value}"
+  fi
+  if [[ -z "$(trim_field "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT:-}")" ]]; then
+    value="$(discovery_bundle_value registry_mirror || true)"
+    [[ -z "$(trim_field "${value}")" ]] || FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT="${value}"
+  fi
+  if [[ -z "$(trim_field "${FUGUE_CONTROL_PLANE_KUBE_API_FALLBACK_SERVERS:-}")" ]]; then
+    value="$(discovery_bundle_value cluster_join_server_fallbacks || true)"
+    [[ -z "$(trim_field "${value}")" ]] || FUGUE_CONTROL_PLANE_KUBE_API_FALLBACK_SERVERS="${value}"
+  fi
+  if [[ -z "$(trim_field "${FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS:-}")" ]]; then
+    value="$(discovery_bundle_value cluster_join_server_fallbacks || true)"
+    [[ -z "$(trim_field "${value}")" ]] || FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS="${value}"
+  fi
+  if [[ -z "$(trim_field "${FUGUE_SMOKE_URL:-}")" ]]; then
+    value="$(discovery_bundle_value api_url || true)"
+    [[ -z "$(trim_field "${value}")" ]] || FUGUE_SMOKE_URL="${value%/}/healthz"
+  fi
+  return 0
 }
 
 selector_yaml() {
@@ -2136,6 +2442,7 @@ main() {
   KUBECTL="$(detect_kubectl)"
   export KUBECTL
   trap cleanup_tmp_artifacts EXIT
+  apply_discovery_bundle_defaults || log "DiscoveryBundle not configured; release will require explicit runtime values"
   if ! ensure_kube_api_access; then
     log "continuing with the default Kubernetes API endpoint because no fallback server was configured or reachable"
   fi
@@ -2174,14 +2481,14 @@ main() {
   FUGUE_REGISTRY_NODEPORT="${FUGUE_REGISTRY_NODEPORT:-30500}"
   FUGUE_REGISTRY_SERVICE_PORT="${FUGUE_REGISTRY_SERVICE_PORT:-5000}"
   FUGUE_API_PUBLIC_DOMAIN="${FUGUE_API_PUBLIC_DOMAIN:-}"
-  FUGUE_APP_BASE_DOMAIN="${FUGUE_APP_BASE_DOMAIN:-fugue.pro}"
+  FUGUE_APP_BASE_DOMAIN="${FUGUE_APP_BASE_DOMAIN:-}"
   FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME="${FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME:-${FUGUE_RELEASE_FULLNAME}-control-plane-automation}"
   FUGUE_COREDNS_NAMESPACE="${FUGUE_COREDNS_NAMESPACE:-kube-system}"
   FUGUE_COREDNS_DEPLOYMENT_NAME="${FUGUE_COREDNS_DEPLOYMENT_NAME:-coredns}"
   FUGUE_COREDNS_TARGET_REPLICAS="${FUGUE_COREDNS_TARGET_REPLICAS:-2}"
   FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED="${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED:-true}"
   FUGUE_SHARED_WORKSPACE_STORAGE_CLASS="${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS:-fugue-rwx}"
-  FUGUE_SHARED_WORKSPACE_NFS_CLUSTER_IP="${FUGUE_SHARED_WORKSPACE_NFS_CLUSTER_IP:-10.43.240.17}"
+  FUGUE_SHARED_WORKSPACE_NFS_CLUSTER_IP="${FUGUE_SHARED_WORKSPACE_NFS_CLUSTER_IP:-}"
   FUGUE_EDGE_GROUP_ID="${FUGUE_EDGE_GROUP_ID:-}"
   FUGUE_EDGE_CADDY_ENABLED="${FUGUE_EDGE_CADDY_ENABLED:-true}"
   FUGUE_EDGE_CADDY_LISTEN_ADDR="${FUGUE_EDGE_CADDY_LISTEN_ADDR:-:18443}"
@@ -2218,7 +2525,11 @@ main() {
     FUGUE_DNS_UDP_ADDR="${FUGUE_DNS_UDP_ADDR:-127.0.0.1:5353}"
     FUGUE_DNS_TCP_ADDR="${FUGUE_DNS_TCP_ADDR:-127.0.0.1:5353}"
   fi
-  FUGUE_DNS_ZONE="${FUGUE_DNS_ZONE:-dns.${FUGUE_APP_BASE_DOMAIN}}"
+  if [[ -z "$(trim_field "${FUGUE_DNS_ZONE:-}")" && -n "$(trim_field "${FUGUE_APP_BASE_DOMAIN}")" ]]; then
+    FUGUE_DNS_ZONE="dns.${FUGUE_APP_BASE_DOMAIN}"
+  else
+    FUGUE_DNS_ZONE="${FUGUE_DNS_ZONE:-}"
+  fi
   FUGUE_DNS_TTL="${FUGUE_DNS_TTL:-60}"
 
   case "${FUGUE_EDGE_CADDY_TLS_MODE}" in
@@ -2288,6 +2599,7 @@ main() {
   fi
 
   if [[ "${FUGUE_DNS_ENABLED}" == "true" ]]; then
+    [[ -n "$(trim_field "${FUGUE_DNS_ZONE}")" ]] || fail "FUGUE_DNS_ZONE or FUGUE_APP_BASE_DOMAIN is required when FUGUE_DNS_ENABLED=true"
     require_env FUGUE_DNS_ANSWER_IPS
     if [[ "$(dns_answer_ip_count "${FUGUE_DNS_ANSWER_IPS}")" == "0" ]]; then
       fail "FUGUE_DNS_ANSWER_IPS must contain at least one non-empty IP when FUGUE_DNS_ENABLED=true"
@@ -2317,9 +2629,11 @@ main() {
   if [[ -z "${FUGUE_REGISTRY_PULL_BASE:-}" ]]; then
     FUGUE_REGISTRY_PULL_BASE="${FUGUE_DEFAULT_REGISTRY_PULL_BASE}"
   fi
+  [[ -n "$(trim_field "${FUGUE_REGISTRY_PULL_BASE}")" ]] || fail "FUGUE_REGISTRY_PULL_BASE must come from DiscoveryBundle, an explicit env var, or FUGUE_DEFAULT_REGISTRY_PULL_BASE"
   if [[ -z "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT:-}" ]]; then
-    FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT="${FUGUE_DEFAULT_CLUSTER_JOIN_REGISTRY_ENDPOINT:-127.0.0.1:${FUGUE_REGISTRY_NODEPORT}}"
+    FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT="${FUGUE_DEFAULT_CLUSTER_JOIN_REGISTRY_ENDPOINT:-}"
   fi
+  [[ -n "$(trim_field "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}")" ]] || fail "FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT must come from DiscoveryBundle or an explicit env var"
   if [[ -z "${FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS:-}" ]]; then
     FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS="$(detect_cluster_join_server_fallbacks || true)"
   fi
@@ -2328,6 +2642,7 @@ main() {
     FUGUE_SMOKE_URL="https://${FUGUE_API_PUBLIC_DOMAIN}/healthz"
   fi
   require_env FUGUE_SMOKE_URL
+  run_release_preflight
 
   command_exists helm || fail "helm is not installed"
   ensure_local_registry_mirror_config "${FUGUE_REGISTRY_PULL_BASE}" "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}"

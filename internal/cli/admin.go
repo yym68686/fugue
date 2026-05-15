@@ -24,15 +24,30 @@ Use a bootstrap key or admin API key here only when you are doing setup.
 	}
 	cmd.AddCommand(
 		c.newAdminAccessCommand(),
+		c.newAdminAppsCommand(),
 		c.newAdminDomainsCommand(),
 		hideCompatCommand(c.newAdminRuntimeCommand(), "fugue runtime"),
 		c.newAdminClusterCommand(),
+		c.newAdminControlPlaneCommand(),
 		c.newAdminEdgeCommand(),
 		c.newAdminDNSCommand(),
+		c.newAdminPlatformCommand(),
+		c.newAdminRoutesCommand(),
+		c.newAdminSecurityCommand(),
 		c.newAdminUsersCommand(),
 		c.newAdminBillingCommand(),
 		c.newAdminTenantCommand(),
 	)
+	return cmd
+}
+
+func (c *CLI) newAdminAppsCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "apps",
+		Aliases: []string{"app"},
+		Short:   "Inspect and operate apps with admin credentials",
+	}
+	cmd.AddCommand(c.newAppMoveCommand())
 	return cmd
 }
 

@@ -118,6 +118,15 @@ func (s *Store) UpdateNodeUpdaterHeartbeat(updaterID string, heartbeat model.Nod
 		current.UpdaterVersion = strings.TrimSpace(heartbeat.UpdaterVersion)
 		current.JoinScriptVersion = strings.TrimSpace(heartbeat.JoinScriptVersion)
 		current.K3SVersion = strings.TrimSpace(heartbeat.K3SVersion)
+		current.K3SServer = strings.TrimSpace(heartbeat.K3SServer)
+		current.K3SFallbackServers = strings.TrimSpace(heartbeat.K3SFallbackServers)
+		current.RegistryMirror = strings.TrimSpace(heartbeat.RegistryMirror)
+		current.LabelsHash = strings.TrimSpace(heartbeat.LabelsHash)
+		current.TaintsHash = strings.TrimSpace(heartbeat.TaintsHash)
+		current.EdgeEnvGeneration = strings.TrimSpace(heartbeat.EdgeEnvGeneration)
+		current.DNSEnvGeneration = strings.TrimSpace(heartbeat.DNSEnvGeneration)
+		current.ConfigHash = strings.TrimSpace(heartbeat.ConfigHash)
+		current.DiscoveryGeneration = strings.TrimSpace(heartbeat.DiscoveryGeneration)
 		current.OS = strings.TrimSpace(heartbeat.OS)
 		current.Arch = strings.TrimSpace(heartbeat.Arch)
 		current.LastError = strings.TrimSpace(heartbeat.LastError)
@@ -379,6 +388,8 @@ func normalizeNodeUpdateTaskType(raw string) string {
 		return model.NodeUpdateTaskTypeRestartK3SAgent
 	case model.NodeUpdateTaskTypeDiagnoseNode:
 		return model.NodeUpdateTaskTypeDiagnoseNode
+	case model.NodeUpdateTaskTypeInstallNFSClient:
+		return model.NodeUpdateTaskTypeInstallNFSClient
 	default:
 		return ""
 	}

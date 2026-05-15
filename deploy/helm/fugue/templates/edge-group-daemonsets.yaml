@@ -1,5 +1,5 @@
 {{- range $group := .Values.edge.groups }}
-{{- $name := required "edge.groups[].name is required" $group.name | lower | replace "_" "-" | trunc 30 | trimSuffix "-" -}}
+{{ $name := required "edge.groups[].name is required" $group.name | lower | replace "_" "-" | trunc 30 | trimSuffix "-" -}}
 {{- $edgeGroupID := required (printf "edge.groups[%s].edgeGroupID is required" $name) $group.edgeGroupID -}}
 {{- if not $group.nodeSelector }}
 {{- fail (printf "edge.groups[%s].nodeSelector is required" $name) }}
@@ -95,6 +95,23 @@ spec:
                 secretKeyRef:
                   name: {{ $edgeTokenSecretName }}
                   key: {{ $edgeTokenSecretKey }}
+            - name: FUGUE_BUNDLE_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: FUGUE_BUNDLE_SIGNING_KEY
+            - name: FUGUE_BUNDLE_SIGNING_KEY_ID
+              value: {{ $.Values.bundle.signingKeyID | quote }}
+            - name: FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY
+                  optional: true
+            - name: FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID
+              value: {{ $.Values.bundle.previousSigningKeyID | quote }}
+            - name: FUGUE_BUNDLE_REVOKED_KEY_IDS
+              value: {{ $.Values.bundle.revokedKeyIDs | quote }}
             - name: FUGUE_EDGE_ID
               valueFrom:
                 fieldRef:

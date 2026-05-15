@@ -125,7 +125,7 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 		return s.cleanupOrphanManagedApp(ctx, client, namespace, managed, app, "orphaned managed app: spec.appID is empty")
 	} else if storedApp, err := s.Store.GetApp(appID); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return s.cleanupOrphanManagedApp(ctx, client, namespace, managed, app, "orphaned managed app: app not found in store")
+			return s.markOrphanManagedAppObservedOnly(ctx, client, namespace, managed, app, "observed-only managed app: app not found in store; retaining local workload until explicit delete")
 		}
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read app from store: %w", err))
 	} else {
@@ -423,6 +423,26 @@ func (s *Service) cleanupOrphanManagedApp(ctx context.Context, client *kubeClien
 	}
 	if s.Logger != nil {
 		s.Logger.Printf("deleted orphan managed app %s/%s: %s", namespace, managedName, strings.TrimSpace(reason))
+	}
+	return nil
+}
+
+func (s *Service) markOrphanManagedAppObservedOnly(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, reason string) error {
+	managedName := strings.TrimSpace(managed.Metadata.Name)
+	if managedName == "" {
+		managedName = runtime.ManagedAppResourceName(app)
+	}
+	if managedName == "" {
+		return nil
+	}
+	status := managedAppBaseStatus(managed, app)
+	status.Phase = runtime.ManagedAppPhaseError
+	status.Message = strings.TrimSpace(reason)
+	if err := client.patchManagedAppStatus(ctx, namespace, managedName, status); err != nil && !isKubernetesResourceNotFound(err) {
+		return fmt.Errorf("patch observed-only managed app status %s/%s: %w", namespace, managedName, err)
+	}
+	if s.Logger != nil {
+		s.Logger.Printf("observed-only managed app %s/%s: %s", namespace, managedName, strings.TrimSpace(reason))
 	}
 	return nil
 }

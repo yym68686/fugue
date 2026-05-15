@@ -46,6 +46,15 @@ func (s *Server) handleEdgeDNSBundle(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, err.Error())
 		return
 	}
+	allowed, err := s.enforceScopedDNSNode(authContext, options.DNSNodeID, options.EdgeGroupID, options.Zone)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if !allowed {
+		httpx.WriteError(w, http.StatusForbidden, "dns token cannot access another DNS zone")
+		return
+	}
 	bundle, err := s.deriveEdgeDNSBundle(r, options)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -293,6 +302,10 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		}
 		binding := s.deriveEdgeRouteBinding(r, app, hostname, routeKind, tlsPolicy, domain.CreatedAt, domain.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
+		binding = applyCustomDomainReadiness(binding, domain)
+		if routeKind == model.EdgeRouteKindCustomDomain && binding.Status != model.EdgeRouteStatusActive {
+			continue
+		}
 		target := hostname
 		if !platformDomain {
 			target = normalizeExternalAppDomain(domain.RouteTarget)
@@ -330,6 +343,8 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		Records:     records,
 	}
 	bundle.Version = edgeDNSBundleVersion(bundle)
+	bundle.Generation = bundle.Version
+	bundle = signEdgeDNSBundle(bundle, s.bundleKeyring(), s.discoveryBundleTTL())
 	return bundle, nil
 }
 

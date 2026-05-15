@@ -95,6 +95,7 @@ cloudflare_env="${tmpdir}/cloudflare.env"
 printf '%s\n' "CLOUDFLARE_DNS_API_TOKEN='test-token-should-not-print'" >"${cloudflare_env}"
 issue_plan="${tmpdir}/issue-plan.out"
 bash "${REPO_ROOT}/scripts/issue_fugue_app_wildcard_tls.sh" \
+  --dns-provider cloudflare \
   --cloudflare-env-file "${cloudflare_env}" \
   --domain "fugue.pro" \
   --namespace "fugue-system" \

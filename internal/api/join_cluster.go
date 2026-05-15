@@ -17,6 +17,7 @@ import (
 
 type joinClusterPlan struct {
 	ServerURL        string   `json:"server_url"`
+	ServerFallbacks  []string `json:"server_fallback_urls,omitempty"`
 	Token            string   `json:"token"`
 	BootstrapTokenID string   `json:"bootstrap_token_id,omitempty"`
 	NodeName         string   `json:"node_name"`
@@ -139,6 +140,7 @@ func (s *Server) handleJoinClusterNodeEnv(w http.ResponseWriter, r *http.Request
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprintf(w, "FUGUE_JOIN_SERVER=%s\n", shellQuote(join.ServerURL))
+	fmt.Fprintf(w, "FUGUE_JOIN_SERVER_FALLBACKS=%s\n", shellQuote(strings.Join(join.ServerFallbacks, ",")))
 	fmt.Fprintf(w, "FUGUE_JOIN_TOKEN=%s\n", shellQuote(join.Token))
 	fmt.Fprintf(w, "FUGUE_JOIN_BOOTSTRAP_TOKEN_ID=%s\n", shellQuote(join.BootstrapTokenID))
 	fmt.Fprintf(w, "FUGUE_JOIN_NODE_NAME=%s\n", shellQuote(join.NodeName))
@@ -298,6 +300,7 @@ func (s *Server) bootstrapJoinClusterNode(ctx context.Context, nodeKey, nodeName
 	labelMap := joinClusterLabelMap(machine, runtimeObj)
 	join := joinClusterPlan{
 		ServerURL:        s.clusterJoinServer,
+		ServerFallbacks:  append([]string(nil), s.clusterJoinServerFallbacks...),
 		Token:            token,
 		BootstrapTokenID: bootstrapTokenID,
 		NodeName:         firstNonEmpty(machine.ClusterNodeName, nodeName),
@@ -625,6 +628,10 @@ FUGUE_LIMIT_DISK_PATH="${FUGUE_LIMIT_DISK_PATH:-/}"
 FUGUE_PROGRESS_HEARTBEAT_SECONDS="${FUGUE_PROGRESS_HEARTBEAT_SECONDS:-15}"
 FUGUE_NODE_UPDATER_ENABLED="${FUGUE_NODE_UPDATER_ENABLED:-true}"
 FUGUE_NODE_UPDATER_POLL_INTERVAL="${FUGUE_NODE_UPDATER_POLL_INTERVAL:-5min}"
+FUGUE_DISCOVERY_STATE_DIR="${FUGUE_DISCOVERY_STATE_DIR:-/var/lib/fugue-node-updater}"
+FUGUE_DISCOVERY_BUNDLE_FILE="${FUGUE_DISCOVERY_BUNDLE_FILE:-${FUGUE_DISCOVERY_STATE_DIR}/discovery-bundle.json}"
+FUGUE_DISCOVERY_ENV_FILE="${FUGUE_DISCOVERY_ENV_FILE:-${FUGUE_DISCOVERY_STATE_DIR}/discovery.env}"
+FUGUE_DISCOVERY_STATE_ENV_FILE="${FUGUE_DISCOVERY_STATE_ENV_FILE:-${FUGUE_DISCOVERY_STATE_DIR}/state.env}"
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -670,6 +677,193 @@ registry_endpoint_url() {
       printf 'http://%%s' "$1"
       ;;
   esac
+}
+
+json_quote_env() {
+  local value="$1"
+  value="${value//\'/\'\\\'\'}"
+  printf "'%%s'" "${value}"
+}
+
+render_discovery_env() {
+  local bundle_file="$1"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "${bundle_file}" <<'PY_DISCOVERY'
+import base64
+import hashlib
+import hmac
+import json
+import os
+import shlex
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as fh:
+    bundle = json.load(fh)
+
+schema_version = str(bundle.get("schema_version", "")).strip()
+if not schema_version:
+    raise SystemExit("DiscoveryBundle schema_version is empty")
+if schema_version.split(".", 1)[0] != "1":
+    raise SystemExit(f"unsupported DiscoveryBundle schema_version: {schema_version}")
+if not str(bundle.get("signature", "")).strip():
+    raise SystemExit("DiscoveryBundle signature is empty")
+
+def payload_for_signature(key_id, valid_until):
+    payload = {}
+    for key in (
+        "schema_version",
+        "generation",
+        "previous_generation",
+        "generated_at",
+        "valid_until",
+        "issuer",
+        "key_id",
+        "api_endpoints",
+        "kubernetes",
+        "registry",
+        "edge_groups",
+        "edge_nodes",
+        "dns_nodes",
+        "platform_routes",
+        "public_runtime_env",
+    ):
+        value = bundle.get(key)
+        if key == "valid_until":
+            value = valid_until
+        elif key == "key_id":
+            value = key_id
+        if value in ("", None, [], {}):
+            continue
+        payload[key] = value
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+def verify_signature():
+    keys = {}
+    active_key = os.environ.get("FUGUE_BUNDLE_SIGNING_KEY", "").strip()
+    active_key_id = os.environ.get("FUGUE_BUNDLE_SIGNING_KEY_ID", bundle.get("key_id", "")).strip()
+    previous_key = os.environ.get("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY", "").strip()
+    previous_key_id = os.environ.get("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID", "").strip()
+    if active_key and active_key_id:
+        keys[active_key_id.lower()] = active_key
+    if previous_key and previous_key_id:
+        keys[previous_key_id.lower()] = previous_key
+    if not keys:
+        return
+    revoked = {item.strip().lower() for item in os.environ.get("FUGUE_BUNDLE_REVOKED_KEY_IDS", "").replace(";", ",").split(",") if item.strip()}
+    candidates = [(bundle.get("key_id", ""), bundle.get("signature", ""), bundle.get("valid_until", ""))]
+    for item in bundle.get("signatures") or []:
+        candidates.append((item.get("key_id", ""), item.get("signature", ""), item.get("valid_until", bundle.get("valid_until", ""))))
+    for key_id, signature, valid_until in candidates:
+        key_id = str(key_id or "").strip()
+        signature = str(signature or "").strip()
+        if not key_id or not signature or key_id.lower() in revoked:
+            continue
+        key = keys.get(key_id.lower())
+        if not key:
+            continue
+        digest = hmac.new(key.encode("utf-8"), payload_for_signature(key_id, valid_until), hashlib.sha256).digest()
+        expected = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+        if hmac.compare_digest(signature, expected):
+            return
+    raise SystemExit("DiscoveryBundle signature verification failed")
+
+verify_signature()
+
+def first_named(items, name):
+    for item in items or []:
+        if str(item.get("name", "")).strip() == name:
+            return item
+    return {}
+
+def emit(key, value):
+    if value is None:
+        value = ""
+    if isinstance(value, list):
+        value = ",".join(str(item) for item in value)
+    print(f"{key}={shlex.quote(str(value))}")
+
+runtime = bundle.get("public_runtime_env") or {}
+kube = first_named(bundle.get("kubernetes"), "cluster-join")
+registry = first_named(bundle.get("registry"), "registry")
+emit("FUGUE_DISCOVERY_SCHEMA_VERSION", bundle.get("schema_version", ""))
+emit("FUGUE_DISCOVERY_GENERATION", bundle.get("generation", ""))
+emit("FUGUE_DISCOVERY_VALID_UNTIL", bundle.get("valid_until", ""))
+emit("FUGUE_DISCOVERY_API_URL", runtime.get("FUGUE_API_URL") or first_named(bundle.get("api_endpoints"), "public").get("url", ""))
+emit("FUGUE_DISCOVERY_REGISTRY_PULL_BASE", runtime.get("FUGUE_REGISTRY_PULL_BASE") or registry.get("pull_base", ""))
+emit("FUGUE_DISCOVERY_REGISTRY_MIRROR", runtime.get("FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT") or registry.get("mirror", ""))
+emit("FUGUE_DISCOVERY_K3S_SERVER", kube.get("server", ""))
+emit("FUGUE_DISCOVERY_K3S_FALLBACK_SERVERS", ",".join(kube.get("fallback_servers") or []))
+emit("FUGUE_DISCOVERY_CLUSTER_JOIN_REGISTRY_ENDPOINT", kube.get("registry_endpoint", ""))
+PY_DISCOVERY
+    return 0
+  fi
+  local generation=""
+  local schema_version=""
+  schema_version="$(sed -n 's/.*"schema_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${bundle_file}" | head -n 1)"
+  case "${schema_version}" in
+    1|1.*) ;;
+    *) echo "unsupported DiscoveryBundle schema_version: ${schema_version:-missing}" >&2; return 1 ;;
+  esac
+  generation="$(sed -n 's/.*"generation"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${bundle_file}" | head -n 1)"
+  printf 'FUGUE_DISCOVERY_SCHEMA_VERSION=%%s\n' "$(json_quote_env "${schema_version}")"
+  printf 'FUGUE_DISCOVERY_GENERATION=%%s\n' "$(json_quote_env "${generation}")"
+}
+
+fetch_discovery_bundle() {
+  local tmp=""
+  local env_tmp=""
+  mkdir -p "${FUGUE_DISCOVERY_STATE_DIR}"
+  tmp="$(mktemp)"
+  if ! curl -fsSL --retry 3 --retry-delay 2 "${FUGUE_API_BASE}/v1/discovery/bundle" -o "${tmp}"; then
+    rm -f "${tmp}"
+    return 1
+  fi
+  write_file_if_changed "${tmp}" "${FUGUE_DISCOVERY_BUNDLE_FILE}" || true
+  env_tmp="$(mktemp)"
+  if render_discovery_env "${FUGUE_DISCOVERY_BUNDLE_FILE}" >"${env_tmp}"; then
+    write_file_if_changed "${env_tmp}" "${FUGUE_DISCOVERY_ENV_FILE}" || true
+  else
+    rm -f "${env_tmp}"
+    return 1
+  fi
+}
+
+apply_discovery_join_defaults() {
+  if [ -r "${FUGUE_DISCOVERY_ENV_FILE}" ]; then
+    # shellcheck disable=SC1090
+    . "${FUGUE_DISCOVERY_ENV_FILE}"
+  fi
+  if [ -n "${FUGUE_DISCOVERY_K3S_SERVER:-}" ]; then
+    FUGUE_JOIN_SERVER="${FUGUE_DISCOVERY_K3S_SERVER}"
+  fi
+  if [ -n "${FUGUE_DISCOVERY_K3S_FALLBACK_SERVERS:-}" ]; then
+    FUGUE_JOIN_SERVER_FALLBACKS="${FUGUE_DISCOVERY_K3S_FALLBACK_SERVERS}"
+  fi
+  if [ -n "${FUGUE_DISCOVERY_REGISTRY_PULL_BASE:-}" ]; then
+    FUGUE_JOIN_REGISTRY_BASE="${FUGUE_DISCOVERY_REGISTRY_PULL_BASE}"
+  fi
+  if [ -n "${FUGUE_DISCOVERY_CLUSTER_JOIN_REGISTRY_ENDPOINT:-}" ]; then
+    FUGUE_JOIN_REGISTRY_ENDPOINT="${FUGUE_DISCOVERY_CLUSTER_JOIN_REGISTRY_ENDPOINT}"
+  elif [ -n "${FUGUE_DISCOVERY_REGISTRY_MIRROR:-}" ]; then
+    FUGUE_JOIN_REGISTRY_ENDPOINT="${FUGUE_DISCOVERY_REGISTRY_MIRROR}"
+  fi
+  if [ -n "${FUGUE_DISCOVERY_GENERATION:-}" ]; then
+    FUGUE_JOIN_DISCOVERY_GENERATION="${FUGUE_DISCOVERY_GENERATION}"
+  fi
+}
+
+write_join_discovery_state() {
+  local state_tmp=""
+  mkdir -p "${FUGUE_DISCOVERY_STATE_DIR}"
+  state_tmp="$(mktemp)"
+  {
+    write_env_var FUGUE_DISCOVERY_GENERATION "${FUGUE_DISCOVERY_GENERATION:-}"
+    write_env_var FUGUE_DISCOVERY_BUNDLE_FILE "${FUGUE_DISCOVERY_BUNDLE_FILE}"
+    write_env_var FUGUE_DISCOVERY_ENV_FILE "${FUGUE_DISCOVERY_ENV_FILE}"
+    write_env_var FUGUE_JOIN_DISCOVERY_GENERATION "${FUGUE_JOIN_DISCOVERY_GENERATION:-}"
+  } >"${state_tmp}"
+  write_file_if_changed "${state_tmp}" "${FUGUE_DISCOVERY_STATE_ENV_FILE}" || true
 }
 
 run_with_heartbeat() {
@@ -1446,6 +1640,360 @@ install_k3s_agent_binaries() {
   curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL="${FUGUE_K3S_CHANNEL}" INSTALL_K3S_EXEC="agent" INSTALL_K3S_SKIP_START="true" sh -
 }
 
+install_nfs_client_tools() {
+  if command -v mount.nfs >/dev/null 2>&1; then
+    log_step "NFS client tools are already installed."
+    return 0
+  fi
+  if command -v apt-get >/dev/null 2>&1; then
+    log_step "Installing NFS client tools required by shared-workspace volumes..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends nfs-common
+    return 0
+  fi
+  log_step "Skipping NFS client tools install because apt-get is unavailable; shared-workspace NFS volumes may not mount."
+  return 0
+}
+
+install_dns_escape_hatch_tools() {
+  if command -v dnsmasq >/dev/null 2>&1; then
+    log_step "Local DNS escape hatch tools are already installed."
+    return 0
+  fi
+  if command -v apt-get >/dev/null 2>&1; then
+    log_step "Installing dnsmasq for the local DNS escape hatch..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends dnsmasq
+    return 0
+  fi
+  log_step "Skipping local DNS escape hatch because dnsmasq is unavailable and apt-get is missing."
+  return 1
+}
+
+install_dns_escape_hatch_script() {
+  local helper_tmp=""
+  helper_tmp="$(mktemp)"
+  cat >"${helper_tmp}" <<'EOF_DNS_ESCAPE_HATCH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v iptables-save >/dev/null 2>&1 || ! command -v iptables >/dev/null 2>&1; then
+  echo "Fugue node DNS escape hatch skipping because iptables is unavailable."
+  exit 0
+fi
+
+ensure_rule() {
+  local table="$1"
+  local chain="$2"
+  shift 2
+  if ! iptables -t "${table}" -C "${chain}" "$@" 2>/dev/null; then
+    iptables -t "${table}" -I "${chain}" 1 "$@"
+  fi
+}
+
+detect_cni_bridge_ip() {
+  ip -4 addr show dev cni0 2>/dev/null | awk '/inet / {split($2, parts, "/"); print parts[1]; exit}'
+}
+
+detect_kube_dns_service_ip() {
+  iptables-save 2>/dev/null | awk '
+    /-A KUBE-SERVICES/ && /kube-system\/kube-dns:dns/ && /--dport 53/ {
+      line = $0
+      if (match(line, /-d [0-9.]+\/32/)) {
+        ip = substr(line, RSTART + 3, RLENGTH - 3)
+        sub(/\/32$/, "", ip)
+        print ip
+        exit
+      }
+    }
+    /-A KUBE-SERVICES/ && /kube-system\/coredns:dns/ && /--dport 53/ {
+      line = $0
+      if (match(line, /-d [0-9.]+\/32/)) {
+        ip = substr(line, RSTART + 3, RLENGTH - 3)
+        sub(/\/32$/, "", ip)
+        print ip
+        exit
+      }
+    }
+  '
+}
+
+render_service_host_records() {
+  iptables-save 2>/dev/null | awk '
+    function trim(value) {
+      gsub(/^[[:space:]]+/, "", value)
+      gsub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    function emit(ip, name) {
+      if (ip == "" || name == "") {
+        return
+      }
+      key = ip " " name
+      if (seen[key]++) {
+        return
+      }
+      print key
+    }
+    /-A KUBE-SERVICES/ && /--comment "/ {
+      line = $0
+      ip = ""
+      comment = ""
+      if (match(line, /-d [0-9.]+\/32/)) {
+        ip = substr(line, RSTART + 3, RLENGTH - 3)
+        sub(/\/32$/, "", ip)
+      }
+      if (match(line, /--comment "[^"]+"/)) {
+        comment = substr(line, RSTART + 11, RLENGTH - 12)
+      }
+      if (ip == "" || comment == "") {
+        next
+      }
+      if (split(comment, parts, "/") < 2) {
+        next
+      }
+      namespace = trim(parts[1])
+      service_part = trim(parts[2])
+      split(service_part, service_bits, ":")
+      service = trim(service_bits[1])
+      if (namespace == "" || service == "") {
+        next
+      }
+      emit(ip, service)
+      emit(ip, service "." namespace ".svc.cluster.local")
+    }
+  ' | sort -u
+}
+
+main() {
+  local cni_bridge_ip=""
+  local kube_dns_service_ip=""
+  local hosts_tmp=""
+  local hosts_path="/var/lib/fugue-node-dns/hosts.generated"
+
+  cni_bridge_ip="$(detect_cni_bridge_ip)"
+  kube_dns_service_ip="$(detect_kube_dns_service_ip)"
+  if [ -z "${cni_bridge_ip}" ] || [ -z "${kube_dns_service_ip}" ]; then
+    echo "Fugue node DNS escape hatch waiting for cni0 and kube-dns service endpoints."
+    exit 0
+  fi
+
+  mkdir -p /var/lib/fugue-node-dns
+  hosts_tmp="$(mktemp)"
+  render_service_host_records >"${hosts_tmp}"
+  if ! cmp -s "${hosts_tmp}" "${hosts_path}" 2>/dev/null; then
+    cp "${hosts_tmp}" "${hosts_path}"
+  fi
+  chmod 0644 "${hosts_path}" 2>/dev/null || true
+  rm -f "${hosts_tmp}"
+
+  ensure_rule nat PREROUTING -i cni0 -d "${kube_dns_service_ip}/32" -p udp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
+  ensure_rule nat PREROUTING -i cni0 -d "${kube_dns_service_ip}/32" -p tcp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
+  ensure_rule nat OUTPUT -d "${kube_dns_service_ip}/32" -p udp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
+  ensure_rule nat OUTPUT -d "${kube_dns_service_ip}/32" -p tcp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
+
+  systemctl reload-or-restart dnsmasq.service >/dev/null 2>&1 || systemctl restart dnsmasq.service
+}
+
+main "$@"
+EOF_DNS_ESCAPE_HATCH
+  if write_file_if_changed "${helper_tmp}" /usr/local/sbin/fugue-node-dns-escape-hatch; then
+    log_step "Updated /usr/local/sbin/fugue-node-dns-escape-hatch."
+  else
+    log_step "/usr/local/sbin/fugue-node-dns-escape-hatch is unchanged."
+  fi
+  chmod 0755 /usr/local/sbin/fugue-node-dns-escape-hatch
+  rm -f "${helper_tmp}"
+}
+
+configure_dns_escape_hatch() {
+  local config_tmp=""
+  local unit_tmp=""
+  local timer_tmp=""
+  local config_changed=0
+  case "${FUGUE_JOIN_NODE_DNS_ESCAPE_HATCH_ENABLED:-true}" in
+    1|true|TRUE|yes|YES)
+      ;;
+    *)
+      log_step "Local DNS escape hatch installation disabled."
+      return 0
+      ;;
+  esac
+
+  install_dns_escape_hatch_tools || return 0
+  mkdir -p /etc/dnsmasq.d /var/lib/fugue-node-dns
+  config_tmp="$(mktemp)"
+  cat >"${config_tmp}" <<'EOF_DNSMASQ'
+interface=cni0
+bind-dynamic
+listen-address=127.0.0.1
+no-resolv
+no-hosts
+cache-size=1000
+addn-hosts=/var/lib/fugue-node-dns/hosts.generated
+server=1.1.1.1
+server=8.8.8.8
+EOF_DNSMASQ
+  if write_file_if_changed "${config_tmp}" /etc/dnsmasq.d/fugue-node-dns-escape-hatch.conf; then
+    config_changed=1
+    log_step "Updated /etc/dnsmasq.d/fugue-node-dns-escape-hatch.conf."
+  else
+    log_step "/etc/dnsmasq.d/fugue-node-dns-escape-hatch.conf is unchanged."
+  fi
+
+  install_dns_escape_hatch_script
+
+  unit_tmp="$(mktemp)"
+  cat >"${unit_tmp}" <<'EOF_DNS_ESCAPE_HATCH_UNIT'
+[Unit]
+Description=Fugue node DNS escape hatch
+Wants=network-online.target k3s-agent.service
+After=network-online.target k3s-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/fugue-node-dns-escape-hatch
+EOF_DNS_ESCAPE_HATCH_UNIT
+  if write_file_if_changed "${unit_tmp}" /etc/systemd/system/fugue-node-dns-escape-hatch.service; then
+    config_changed=1
+    log_step "Updated fugue-node-dns-escape-hatch.service."
+  else
+    log_step "fugue-node-dns-escape-hatch.service is unchanged."
+  fi
+
+  timer_tmp="$(mktemp)"
+  cat >"${timer_tmp}" <<'EOF_DNS_ESCAPE_HATCH_TIMER'
+[Unit]
+Description=Refresh Fugue node DNS escape hatch
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF_DNS_ESCAPE_HATCH_TIMER
+  if write_file_if_changed "${timer_tmp}" /etc/systemd/system/fugue-node-dns-escape-hatch.timer; then
+    config_changed=1
+    log_step "Updated fugue-node-dns-escape-hatch.timer."
+  else
+    log_step "fugue-node-dns-escape-hatch.timer is unchanged."
+  fi
+
+  if [ "${config_changed}" -eq 1 ]; then
+    systemctl daemon-reload
+  fi
+  systemctl enable --now dnsmasq.service >/dev/null 2>&1 || true
+  systemctl enable --now fugue-node-dns-escape-hatch.timer >/dev/null 2>&1 || true
+  systemctl start --no-block fugue-node-dns-escape-hatch.service >/dev/null 2>&1 || true
+}
+
+server_endpoint_from_url() {
+  local raw="$1"
+  raw="${raw#https://}"
+  raw="${raw#http://}"
+  raw="${raw%%/*}"
+  printf '%%s' "${raw}"
+}
+
+install_haproxy_if_needed() {
+  if command -v haproxy >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    log_step "Skipping local k3s API load balancer because haproxy is missing and apt-get is unavailable."
+    return 1
+  fi
+  log_step "Installing haproxy for the local k3s API load balancer..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends haproxy
+}
+
+configure_k3s_api_load_balancer() {
+  local fallback_csv="${FUGUE_JOIN_SERVER_FALLBACKS:-}"
+  local endpoint=""
+  local server_url=""
+  local old_ifs="${IFS}"
+  local index=0
+  local lb_tmp=""
+  local unit_tmp=""
+  local config_changed=0
+
+  FUGUE_JOIN_EFFECTIVE_SERVER="${FUGUE_JOIN_SERVER}"
+  [ -n "${fallback_csv}" ] || return 0
+  install_haproxy_if_needed || return 0
+
+  mkdir -p /etc/fugue
+  lb_tmp="$(mktemp)"
+  {
+    echo "global"
+    echo "  log stdout format raw local0"
+    echo "  maxconn 128"
+    echo "defaults"
+    echo "  mode tcp"
+    echo "  timeout connect 3s"
+    echo "  timeout client 1m"
+    echo "  timeout server 1m"
+    echo "frontend k3s_api"
+    echo "  bind 127.0.0.1:16443"
+    echo "  default_backend k3s_servers"
+    echo "backend k3s_servers"
+    echo "  option tcp-check"
+    echo "  balance first"
+    for server_url in "${FUGUE_JOIN_SERVER}" ${fallback_csv//,/ }; do
+      endpoint="$(server_endpoint_from_url "${server_url}")"
+      [ -n "${endpoint}" ] || continue
+      index=$((index + 1))
+      echo "  server cp${index} ${endpoint} check inter 2s fall 2 rise 1"
+    done
+  } >"${lb_tmp}"
+  if [ "${index}" -lt 2 ]; then
+    rm -f "${lb_tmp}"
+    log_step "Skipping local k3s API load balancer because fewer than two server endpoints were configured."
+    return 0
+  fi
+  if write_file_if_changed "${lb_tmp}" /etc/fugue/k3s-api-lb.cfg; then
+    config_changed=1
+    log_step "Updated /etc/fugue/k3s-api-lb.cfg."
+  else
+    log_step "/etc/fugue/k3s-api-lb.cfg is unchanged."
+  fi
+
+  unit_tmp="$(mktemp)"
+  cat >"${unit_tmp}" <<EOF_K3S_API_LB_UNIT
+[Unit]
+Description=Fugue local k3s API load balancer
+Wants=network-online.target tailscaled.service
+After=network-online.target tailscaled.service
+
+[Service]
+ExecStart=/usr/sbin/haproxy -Ws -f /etc/fugue/k3s-api-lb.cfg -p /run/fugue-k3s-api-lb.pid
+ExecReload=/bin/kill -USR2 \$MAINPID
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target
+EOF_K3S_API_LB_UNIT
+  if write_file_if_changed "${unit_tmp}" /etc/systemd/system/fugue-k3s-api-lb.service; then
+    config_changed=1
+    log_step "Updated fugue-k3s-api-lb.service."
+  fi
+  if [ "${config_changed}" -eq 1 ]; then
+    systemctl daemon-reload
+    systemctl restart fugue-k3s-api-lb.service
+  fi
+  systemctl enable --now fugue-k3s-api-lb.service >/dev/null
+  FUGUE_JOIN_EFFECTIVE_SERVER="https://127.0.0.1:16443"
+  IFS="${old_ifs}"
+  log_step "Using local k3s API load balancer at ${FUGUE_JOIN_EFFECTIVE_SERVER}."
+}
+
 shell_quote_for_env() {
   local value="$1"
   value="${value//\'/\'\\\'\'}"
@@ -1493,7 +2041,7 @@ install_fugue_node_updater() {
     --data-urlencode "labels=${FUGUE_RUNTIME_LABELS:-}" \
     --data-urlencode "updater_version=v1" \
     --data-urlencode "join_script_version=${FUGUE_JOIN_SCRIPT_VERSION}" \
-    --data-urlencode "capabilities=heartbeat,tasks,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node" \
+    --data-urlencode "capabilities=heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools" \
     >"${enroll_env}"
   # shellcheck disable=SC1090
   . "${enroll_env}"
@@ -1508,6 +2056,11 @@ install_fugue_node_updater() {
     write_env_var FUGUE_JOIN_SCRIPT_VERSION "${FUGUE_JOIN_SCRIPT_VERSION}"
     write_env_var FUGUE_K3S_CHANNEL "${FUGUE_K3S_CHANNEL}"
     write_env_var FUGUE_NODE_UPDATER_WORK_DIR "/var/lib/fugue-node-updater"
+    write_env_var FUGUE_NODE_UPDATER_STATE_DIR "${FUGUE_DISCOVERY_STATE_DIR}"
+    write_env_var FUGUE_NODE_UPDATER_DISCOVERY_BUNDLE_FILE "${FUGUE_DISCOVERY_BUNDLE_FILE}"
+    write_env_var FUGUE_NODE_UPDATER_DISCOVERY_ENV_FILE "${FUGUE_DISCOVERY_ENV_FILE}"
+    write_env_var FUGUE_NODE_UPDATER_STATE_ENV_FILE "${FUGUE_DISCOVERY_STATE_ENV_FILE}"
+    write_env_var FUGUE_DISCOVERY_GENERATION "${FUGUE_DISCOVERY_GENERATION:-}"
   } >"${env_tmp}"
   chmod 0600 "${env_tmp}"
   if write_file_if_changed "${env_tmp}" /etc/fugue/node-updater.env; then
@@ -1619,6 +2172,11 @@ if [ -n "${node_public_ip}" ] && [ "${node_endpoint}" = "${node_name}" ]; then
 fi
 script_started_at="$(date +%%s)"
 print_install_timeline
+if fetch_discovery_bundle; then
+  log_step "DiscoveryBundle cached before join."
+else
+  log_step "DiscoveryBundle unavailable before join; falling back to join-env values and any cached bundle."
+fi
 
 join_env="$(mktemp)"
 cleanup() {
@@ -1639,8 +2197,10 @@ curl -fsSL --retry 3 --retry-delay 2 -X POST "${FUGUE_API_BASE}/v1/nodes/join-cl
 
 # shellcheck disable=SC1090
 . "${join_env}"
+apply_discovery_join_defaults
+write_join_discovery_state
 FUGUE_JOIN_NODE_LABELS="$(append_location_node_labels)"
-log_step "Join parameters received for node ${FUGUE_JOIN_NODE_NAME}."
+log_step "Join parameters received for node ${FUGUE_JOIN_NODE_NAME} (discovery_generation=${FUGUE_JOIN_DISCOVERY_GENERATION:-none})."
 
 mesh_provider="${FUGUE_JOIN_MESH_PROVIDER:-}"
 flannel_iface=""
@@ -1650,12 +2210,13 @@ if [ -n "${mesh_provider}" ]; then
 fi
 
 configure_resource_limits
+configure_k3s_api_load_balancer
 
 log_step "Preparing k3s agent configuration..."
 mkdir -p /etc/rancher/k3s
 k3s_config_tmp="$(mktemp)"
 {
-  printf 'server: "%%s"\n' "${FUGUE_JOIN_SERVER}"
+  printf 'server: "%%s"\n' "${FUGUE_JOIN_EFFECTIVE_SERVER:-${FUGUE_JOIN_SERVER}}"
   printf 'token: "%%s"\n' "${FUGUE_JOIN_TOKEN}"
   printf 'node-name: "%%s"\n' "${FUGUE_JOIN_NODE_NAME}"
   if [ -n "${node_external_ip}" ]; then
@@ -1731,7 +2292,15 @@ if [ "${k3s_installed_now}" -eq 1 ] || [ "${k3s_environment_files_changed}" -eq 
   k3s_restart_needed=1
 fi
 
+if ! run_with_heartbeat "Installing NFS client tools" "5-30s" install_nfs_client_tools; then
+  log_step "NFS client tools installation failed; shared-workspace NFS mounts may remain unavailable until the host is repaired."
+fi
+
 restart_k3s_agent_if_needed "${k3s_restart_needed}"
+
+if ! run_with_heartbeat "Installing local DNS escape hatch" "5-30s" configure_dns_escape_hatch; then
+  log_step "Local DNS escape hatch installation failed; orphan workloads may still depend on control-plane DNS."
+fi
 
 systemctl is-active --quiet k3s-agent
 cleanup_stale_cluster_nodes
@@ -1744,9 +2313,11 @@ cat <<EOF
 Fugue node joined.
 runtime_id=${FUGUE_JOIN_RUNTIME_ID}
 node_name=${FUGUE_JOIN_NODE_NAME}
-server=${FUGUE_JOIN_SERVER}
+server=${FUGUE_JOIN_EFFECTIVE_SERVER:-${FUGUE_JOIN_SERVER}}
+server_fallbacks=${FUGUE_JOIN_SERVER_FALLBACKS:-}
 registry_base=${FUGUE_JOIN_REGISTRY_BASE:-}
 registry_endpoint=${FUGUE_JOIN_REGISTRY_ENDPOINT:-}
+discovery_generation=${FUGUE_JOIN_DISCOVERY_GENERATION:-}
 labels=${FUGUE_JOIN_NODE_LABELS}
 taints=${FUGUE_JOIN_NODE_TAINTS}
 resource_limit_cpu=${FUGUE_EFFECTIVE_LIMIT_CPU:-}

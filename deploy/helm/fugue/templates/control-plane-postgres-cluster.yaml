@@ -2,6 +2,9 @@
 {{- if lt (int .Values.controlPlanePostgres.instances) 2 }}
   {{- fail "controlPlanePostgres.instances must be at least 2 when controlPlanePostgres.enabled=true" -}}
 {{- end }}
+{{- if and .Values.controlPlanePostgres.backup.enabled (eq .Values.controlPlanePostgres.backup.destinationPath "") }}
+  {{- fail "controlPlanePostgres.backup.destinationPath is required when controlPlanePostgres.backup.enabled=true" -}}
+{{- end }}
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -39,6 +42,25 @@ spec:
       enabled: true
     synchronizeReplicas:
       enabled: true
+  {{- if .Values.controlPlanePostgres.backup.enabled }}
+  backup:
+    barmanObjectStore:
+      destinationPath: {{ .Values.controlPlanePostgres.backup.destinationPath | quote }}
+      {{- if .Values.controlPlanePostgres.backup.endpointURL }}
+      endpointURL: {{ .Values.controlPlanePostgres.backup.endpointURL | quote }}
+      {{- end }}
+      wal:
+        compression: {{ .Values.controlPlanePostgres.backup.wal.compression | quote }}
+      {{- if .Values.controlPlanePostgres.backup.s3Credentials.existingSecretName }}
+      s3Credentials:
+        accessKeyId:
+          name: {{ .Values.controlPlanePostgres.backup.s3Credentials.existingSecretName | quote }}
+          key: {{ .Values.controlPlanePostgres.backup.s3Credentials.accessKeyIdKey | quote }}
+        secretAccessKey:
+          name: {{ .Values.controlPlanePostgres.backup.s3Credentials.existingSecretName | quote }}
+          key: {{ .Values.controlPlanePostgres.backup.s3Credentials.secretAccessKeyKey | quote }}
+      {{- end }}
+  {{- end }}
   affinity:
     enablePodAntiAffinity: {{ .Values.controlPlanePostgres.affinity.enablePodAntiAffinity }}
     podAntiAffinityType: {{ .Values.controlPlanePostgres.affinity.podAntiAffinityType | quote }}

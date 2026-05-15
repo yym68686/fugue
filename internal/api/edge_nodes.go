@@ -34,6 +34,8 @@ type edgeHeartbeatRequest struct {
 	MeshIP              string `json:"mesh_ip,omitempty"`
 	RouteBundleVersion  string `json:"route_bundle_version,omitempty"`
 	DNSBundleVersion    string `json:"dns_bundle_version,omitempty"`
+	ServingGeneration   string `json:"serving_generation,omitempty"`
+	LKGGeneration       string `json:"lkg_generation,omitempty"`
 	CaddyRouteCount     int    `json:"caddy_route_count,omitempty"`
 	CaddyAppliedVersion string `json:"caddy_applied_version,omitempty"`
 	CaddyLastError      string `json:"caddy_last_error,omitempty"`
@@ -151,6 +153,8 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 		MeshIP:              req.MeshIP,
 		RouteBundleVersion:  req.RouteBundleVersion,
 		DNSBundleVersion:    req.DNSBundleVersion,
+		ServingGeneration:   req.ServingGeneration,
+		LKGGeneration:       req.LKGGeneration,
 		CaddyRouteCount:     req.CaddyRouteCount,
 		CaddyAppliedVersion: req.CaddyAppliedVersion,
 		CaddyLastError:      req.CaddyLastError,
@@ -285,7 +289,7 @@ func (s *Server) authorizeEdgeRequest(w http.ResponseWriter, r *http.Request) (e
 			return edgeAuthContext{}, false
 		}
 	}
-	if strings.TrimSpace(s.edgeTLSAskToken) != "" && subtleConstantCompare(token, s.edgeTLSAskToken) {
+	if s.allowLegacyEdgeToken && strings.TrimSpace(s.edgeTLSAskToken) != "" && subtleConstantCompare(token, s.edgeTLSAskToken) {
 		return edgeAuthContext{}, true
 	}
 	http.Error(w, "forbidden", http.StatusForbidden)

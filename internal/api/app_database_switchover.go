@@ -3,11 +3,29 @@ package api
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
+
+func (s *Server) handleGetAppDatabaseStatus(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("app.read") && !principal.HasScope("app.write") && !principal.HasScope("app.migrate") {
+		httpx.WriteError(w, http.StatusForbidden, "missing app.read, app.write, or app.migrate scope")
+		return
+	}
+	app, allowed := s.loadAuthorizedApp(w, r, principal)
+	if !allowed {
+		return
+	}
+	status := s.managedPostgresStatus(app)
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"status": status,
+		"app":    sanitizeAppForAPI(app),
+	})
+}
 
 func (s *Server) handleSwitchoverAppDatabase(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
@@ -55,6 +73,49 @@ func (s *Server) handleSwitchoverAppDatabase(w http.ResponseWriter, r *http.Requ
 		"target_runtime_id": targetRuntimeID,
 	})
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": sanitizeOperationForAPI(op)})
+}
+
+func (s *Server) managedPostgresStatus(app model.App) model.ManagedPostgresStatus {
+	status := model.ManagedPostgresStatus{
+		AppID:             app.ID,
+		BackupStatus:      "not_configured",
+		RestoreStatus:     "not_configured",
+		GrantVerification: "not_configured",
+		GeneratedAt:       time.Now().UTC(),
+	}
+	database := store.OwnedManagedPostgresSpec(app)
+	if database == nil {
+		return status
+	}
+	runtimeID := strings.TrimSpace(database.RuntimeID)
+	if runtimeID == "" {
+		runtimeID = strings.TrimSpace(app.Spec.RuntimeID)
+	}
+	status.Enabled = true
+	status.ServiceName = strings.TrimSpace(database.ServiceName)
+	status.Owner = strings.TrimSpace(database.User)
+	status.RuntimeID = runtimeID
+	status.FailoverRuntimeID = strings.TrimSpace(database.FailoverTargetRuntimeID)
+	status.BackupStatus = "required"
+	status.RestoreStatus = "required"
+	status.GrantVerification = "required"
+	if status.FailoverRuntimeID != "" && database.Instances > 1 {
+		status.BackupStatus = "replicated"
+		status.RestoreStatus = "standby_ready"
+		status.GrantVerification = "pending_after_restore"
+	}
+	for _, service := range app.BackingServices {
+		if strings.TrimSpace(service.OwnerAppID) != strings.TrimSpace(app.ID) {
+			continue
+		}
+		if strings.TrimSpace(service.ID) == "" {
+			continue
+		}
+		status.LastBackup = "managed-postgres://" + strings.TrimSpace(service.ID) + "/last-backup"
+		status.LastRestore = "managed-postgres://" + strings.TrimSpace(service.ID) + "/last-restore"
+		break
+	}
+	return status
 }
 
 func (s *Server) handleLocalizeAppDatabase(w http.ResponseWriter, r *http.Request) {

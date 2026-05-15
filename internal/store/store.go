@@ -52,6 +52,13 @@ func New(path string, databaseURL ...string) *Store {
 	}
 }
 
+func (s *Store) BackendKind() string {
+	if s != nil && s.usingDatabase() {
+		return "postgres"
+	}
+	return "json"
+}
+
 func (s *Store) Init() error {
 	if s.usingDatabase() {
 		if err := s.ensureDatabaseReady(); err != nil {
@@ -3580,6 +3587,9 @@ func ensureDefaults(state *model.State) {
 	}
 	for idx := range state.DNSACMEChallenges {
 		normalizeDNSACMEChallengeForRead(&state.DNSACMEChallenges[idx])
+	}
+	if state.StorePromotions == nil {
+		state.StorePromotions = []model.StorePromotion{}
 	}
 	if state.BackingServices == nil {
 		state.BackingServices = []model.BackingService{}

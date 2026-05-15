@@ -5,8 +5,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-PRIMARY_ALIAS="${FUGUE_NODE1:-gcp1}"
-SECONDARY_ALIASES=("${FUGUE_NODE2:-gcp2}" "${FUGUE_NODE3:-gcp3}")
+PRIMARY_ALIAS="${FUGUE_NODE1:-}"
+SECONDARY_ALIASES=("${FUGUE_NODE2:-}" "${FUGUE_NODE3:-}")
 ALL_ALIASES=("${PRIMARY_ALIAS}" "${SECONDARY_ALIASES[@]}")
 
 RELEASE_NAME="${FUGUE_RELEASE_NAME:-fugue}"
@@ -46,15 +46,15 @@ BOOTSTRAP_KEY="${FUGUE_BOOTSTRAP_KEY:-}"
 K3S_API_IP="${FUGUE_K3S_API_IP:-}"
 PUBLIC_ENDPOINT_HOST="${FUGUE_PUBLIC_ENDPOINT_HOST:-}"
 FUGUE_DOMAIN="${FUGUE_DOMAIN:-}"
-FUGUE_APP_BASE_DOMAIN="${FUGUE_APP_BASE_DOMAIN:-fugue.pro}"
+FUGUE_APP_BASE_DOMAIN="${FUGUE_APP_BASE_DOMAIN:-}"
 FUGUE_REGISTRY_DOMAIN="${FUGUE_REGISTRY_DOMAIN:-registry.${FUGUE_APP_BASE_DOMAIN}}"
 FUGUE_EDGE_TLS_ASK_TOKEN="${FUGUE_EDGE_TLS_ASK_TOKEN:-}"
 FUGUE_MESH_ENABLED="${FUGUE_MESH_ENABLED:-false}"
 FUGUE_MESH_PROVIDER="${FUGUE_MESH_PROVIDER:-tailscale}"
 FUGUE_MESH_DOMAIN="${FUGUE_MESH_DOMAIN:-mesh.${FUGUE_APP_BASE_DOMAIN}}"
 FUGUE_MESH_AUTH_KEY="${FUGUE_MESH_AUTH_KEY:-}"
-FUGUE_APP_TLS_CERT_FILE="${FUGUE_APP_TLS_CERT_FILE:-${REPO_ROOT}/secrets/cloudflare-apps-origin.crt}"
-FUGUE_APP_TLS_KEY_FILE="${FUGUE_APP_TLS_KEY_FILE:-${REPO_ROOT}/secrets/cloudflare-apps-origin.key}"
+FUGUE_APP_TLS_CERT_FILE="${FUGUE_APP_TLS_CERT_FILE:-}"
+FUGUE_APP_TLS_KEY_FILE="${FUGUE_APP_TLS_KEY_FILE:-}"
 RECONCILE_K3S_CLUSTER="${FUGUE_RECONCILE_K3S_CLUSTER:-false}"
 IMAGE_PLATFORM="${FUGUE_IMAGE_PLATFORM:-}"
 CONTAINER_TOOL="${FUGUE_CONTAINER_TOOL:-}"
@@ -107,6 +107,20 @@ fail() {
   exit 1
 }
 
+ensure_legacy_bootstrap_allowed() {
+  if [[ "${FUGUE_LEGACY_BOOTSTRAP:-false}" != "true" ]]; then
+    fail "install_fugue_ha.sh is legacy bootstrap only; set FUGUE_LEGACY_BOOTSTRAP=true for a new experimental/bootstrap cluster, or use the GitHub Actions control-plane deploy path for upgrades"
+  fi
+  [[ -n "${PRIMARY_ALIAS}" ]] || fail "FUGUE_NODE1 is required; legacy bootstrap no longer defaults to a production node alias"
+  [[ -n "${SECONDARY_ALIASES[0]}" ]] || fail "FUGUE_NODE2 is required; legacy bootstrap no longer defaults to a production node alias"
+  [[ -n "${SECONDARY_ALIASES[1]}" ]] || fail "FUGUE_NODE3 is required; legacy bootstrap no longer defaults to a production node alias"
+  [[ -n "${FUGUE_APP_BASE_DOMAIN}" ]] || fail "FUGUE_APP_BASE_DOMAIN is required for legacy bootstrap"
+  [[ -n "$(registry_pull_base_value)" ]] || fail "FUGUE_REGISTRY_PULL_BASE is required for legacy bootstrap"
+  if [[ -n "${FUGUE_APP_TLS_CERT_FILE}${FUGUE_APP_TLS_KEY_FILE}" ]]; then
+    [[ -n "${FUGUE_APP_TLS_CERT_FILE}" && -n "${FUGUE_APP_TLS_KEY_FILE}" ]] || fail "FUGUE_APP_TLS_CERT_FILE and FUGUE_APP_TLS_KEY_FILE must be set together"
+  fi
+}
+
 api_public_base_url() {
   if [[ -n "${FUGUE_DOMAIN}" ]]; then
     printf 'https://%s' "${FUGUE_DOMAIN}"
@@ -144,7 +158,7 @@ registry_push_base_value() {
 }
 
 registry_pull_base_value() {
-  printf '%s' "${FUGUE_REGISTRY_PULL_BASE:-registry.fugue.internal:5000}"
+  printf '%s' "${FUGUE_REGISTRY_PULL_BASE:-}"
 }
 
 node_registry_mirror_endpoint_value() {
@@ -2770,6 +2784,7 @@ EOF
 }
 
 main() {
+  ensure_legacy_bootstrap_allowed
   require_cmd ssh
   require_cmd scp
   require_cmd ssh-keygen
@@ -2795,6 +2810,9 @@ main() {
 
   build_images
   if cluster_is_ready; then
+    if [[ "${FUGUE_LEGACY_ALLOW_EXISTING_CLUSTER:-false}" != "true" ]]; then
+      fail "existing control-plane cluster detected on ${PRIMARY_ALIAS}; legacy bootstrap will not upgrade it. Use the GitHub Actions control-plane deploy workflow instead, or set FUGUE_LEGACY_ALLOW_EXISTING_CLUSTER=true for an explicit lab rerun"
+    fi
     log "existing k3s cluster is healthy; skipping cluster bootstrap"
     if [[ "${RECONCILE_K3S_CLUSTER}" == "true" ]]; then
       log "reconciling k3s server configuration for public worker joins"

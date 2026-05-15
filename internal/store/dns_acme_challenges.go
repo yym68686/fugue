@@ -107,6 +107,8 @@ func normalizeDNSACMEChallengeForStore(challenge model.DNSACMEChallenge) (model.
 	challenge.Zone = normalizeDNSZone(challenge.Zone)
 	challenge.Name = normalizeDNSZone(challenge.Name)
 	challenge.Value = strings.TrimSpace(challenge.Value)
+	challenge.Owner = strings.TrimSpace(challenge.Owner)
+	challenge.CreatedBy = strings.TrimSpace(challenge.CreatedBy)
 	if challenge.Zone == "" && strings.HasPrefix(challenge.Name, "_acme-challenge.") {
 		challenge.Zone = strings.TrimPrefix(challenge.Name, "_acme-challenge.")
 	}
@@ -144,6 +146,8 @@ func normalizeDNSACMEChallengeForRead(challenge *model.DNSACMEChallenge) {
 	challenge.Zone = normalizeDNSZone(challenge.Zone)
 	challenge.Name = normalizeDNSZone(challenge.Name)
 	challenge.Value = strings.TrimSpace(challenge.Value)
+	challenge.Owner = strings.TrimSpace(challenge.Owner)
+	challenge.CreatedBy = strings.TrimSpace(challenge.CreatedBy)
 	if challenge.TTL <= 0 {
 		challenge.TTL = defaultDNSACMEChallengeTTL
 	}

@@ -57,7 +57,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Run tests
-        run: go test ./...
+        run: make test
 
       - name: Compute image metadata
         id: meta
@@ -163,8 +163,8 @@ jobs:
           FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
           FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
           FUGUE_RELEASE_FULLNAME: ${{ vars.FUGUE_RELEASE_FULLNAME || 'fugue-fugue' }}
-          FUGUE_API_PUBLIC_DOMAIN: ${{ vars.FUGUE_API_PUBLIC_DOMAIN || 'api.fugue.pro' }}
-          FUGUE_APP_BASE_DOMAIN: ${{ vars.FUGUE_APP_BASE_DOMAIN || 'fugue.pro' }}
+          FUGUE_API_PUBLIC_DOMAIN: ${{ vars.FUGUE_API_PUBLIC_DOMAIN || '' }}
+          FUGUE_APP_BASE_DOMAIN: ${{ vars.FUGUE_APP_BASE_DOMAIN || '' }}
           FUGUE_API_DATABASE_URL: ${{ secrets.FUGUE_API_DATABASE_URL || '' }}
           FUGUE_POSTGRES_ENABLED: ${{ vars.FUGUE_POSTGRES_ENABLED || (vars.FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API == 'true' && 'false' || 'true') }}
           FUGUE_CONTROL_PLANE_POSTGRES_ENABLED: ${{ vars.FUGUE_CONTROL_PLANE_POSTGRES_ENABLED || 'false' }}
@@ -178,8 +178,8 @@ jobs:
           FUGUE_CONTROL_PLANE_POSTGRES_BOOTSTRAP_SOURCE_URL: ${{ vars.FUGUE_CONTROL_PLANE_POSTGRES_BOOTSTRAP_SOURCE_URL || '' }}
           FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED: ${{ vars.FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED || 'false' }}
           FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR: ${{ vars.FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR || '' }}
-          FUGUE_CONTROL_PLANE_KUBE_API_FALLBACK_SERVERS: ${{ vars.FUGUE_CONTROL_PLANE_KUBE_API_FALLBACK_SERVERS || 'https://10.128.0.3:6443,https://10.128.0.4:6443,https://100.64.0.2:6443,https://100.64.0.3:6443' }}
-          FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS: ${{ vars.FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS || 'https://100.64.0.2:6443,https://100.64.0.3:6443' }}
+          FUGUE_CONTROL_PLANE_KUBE_API_FALLBACK_SERVERS: ${{ vars.FUGUE_CONTROL_PLANE_KUBE_API_FALLBACK_SERVERS || '' }}
+          FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS: ${{ vars.FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS || '' }}
           FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME: ${{ vars.FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME || '' }}
           FUGUE_SYNC_EDGE_PROXY: ${{ vars.FUGUE_SYNC_EDGE_PROXY || 'false' }}
           FUGUE_SMOKE_URL: ${{ vars.FUGUE_SMOKE_URL || '' }}
@@ -189,7 +189,7 @@ jobs:
           FUGUE_CONTROLLER_IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
           FUGUE_EDGE_IMAGE_REPOSITORY: ${{ needs.build.outputs.edge_image_repository }}
           FUGUE_EDGE_IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
-          FUGUE_EDGE_GROUP_ID: ${{ vars.FUGUE_EDGE_GROUP_ID || 'edge-group-country-us' }}
+          FUGUE_EDGE_GROUP_ID: ${{ vars.FUGUE_EDGE_GROUP_ID || '' }}
           FUGUE_EDGE_REGION: ${{ vars.FUGUE_EDGE_REGION || '' }}
           FUGUE_EDGE_COUNTRY: ${{ vars.FUGUE_EDGE_COUNTRY || '' }}
           FUGUE_EDGE_PUBLIC_HOSTNAME: ${{ vars.FUGUE_EDGE_PUBLIC_HOSTNAME || '' }}

@@ -15,7 +15,7 @@ FUGUE_EDGE_TOKEN in the secret env file passed with --token-env-file.
 
 Options:
   --output-dir <dir>              Directory to write fugue-edge.service/env.
-  --api-url <url>                 Fugue API URL. Default: FUGUE_API_URL or https://api.fugue.pro.
+  --api-url <url>                 Fugue API URL. Required unless FUGUE_API_URL is set.
   --edge-id <id>                  Stable edge node ID. Default: FUGUE_EDGE_ID or hostname.
   --edge-group-id <id>            Edge group ID. Required.
   --region <region>               Edge region metadata.
@@ -65,7 +65,7 @@ reject_whitespace() {
 }
 
 output_dir=""
-api_url="${FUGUE_API_URL:-https://api.fugue.pro}"
+api_url="${FUGUE_API_URL:-}"
 edge_id="${FUGUE_EDGE_ID:-$(hostname -s 2>/dev/null || hostname)}"
 edge_group_id="${FUGUE_EDGE_GROUP_ID:-}"
 region="${FUGUE_EDGE_REGION:-}"
@@ -127,6 +127,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "${output_dir}" ]] || fail "--output-dir is required"
+[[ -n "${api_url}" ]] || fail "--api-url or FUGUE_API_URL is required"
 [[ -n "${edge_id}" ]] || fail "--edge-id is required"
 [[ -n "${edge_group_id}" ]] || fail "--edge-group-id is required"
 [[ -n "${public_ipv4}${public_ipv6}" ]] || fail "at least one of --public-ipv4 or --public-ipv6 is required"

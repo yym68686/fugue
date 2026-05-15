@@ -1,0 +1,78 @@
+{{- if .Values.controlPlanePostgres.restoreDrill.enabled }}
+{{- if eq .Values.controlPlanePostgres.restoreDrill.restoreManifestJSON "" }}
+  {{- fail "controlPlanePostgres.restoreDrill.restoreManifestJSON is required when controlPlanePostgres.restoreDrill.enabled=true" -}}
+{{- end }}
+{{- $apiURL := default (printf "http://%s.%s.svc.cluster.local:%v" (include "fugue.fullname" .) .Release.Namespace .Values.service.port) .Values.controlPlanePostgres.restoreDrill.apiURL -}}
+{{- $secretName := default (include "fugue.configSecretName" .) .Values.controlPlanePostgres.restoreDrill.existingSecretName -}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "fugue.fullname" . }}-control-plane-restore-drill
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "control-plane-restore-drill") | nindent 4 }}
+spec:
+  schedule: {{ .Values.controlPlanePostgres.restoreDrill.schedule | quote }}
+  concurrencyPolicy: {{ .Values.controlPlanePostgres.restoreDrill.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ .Values.controlPlanePostgres.restoreDrill.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.controlPlanePostgres.restoreDrill.failedJobsHistoryLimit }}
+  startingDeadlineSeconds: {{ .Values.controlPlanePostgres.restoreDrill.startingDeadlineSeconds }}
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ .Values.controlPlanePostgres.restoreDrill.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "control-plane-restore-drill") | nindent 12 }}
+        spec:
+          serviceAccountName: {{ include "fugue.serviceAccountName" . }}
+          restartPolicy: Never
+          containers:
+            - name: control-plane-restore-drill
+              image: "{{ .Values.controlPlanePostgres.restoreDrill.image.repository }}:{{ .Values.controlPlanePostgres.restoreDrill.image.tag }}"
+              imagePullPolicy: {{ .Values.controlPlanePostgres.restoreDrill.image.pullPolicy }}
+              env:
+                - name: FUGUE_API_URL
+                  value: {{ $apiURL | quote }}
+                - name: FUGUE_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $secretName | quote }}
+                      key: {{ .Values.controlPlanePostgres.restoreDrill.apiKeySecretKey | quote }}
+                - name: FUGUE_TARGET_STORE
+                  value: {{ .Values.controlPlanePostgres.restoreDrill.targetStore | quote }}
+                - name: FUGUE_RESTORE_MANIFEST_JSON
+                  value: {{ .Values.controlPlanePostgres.restoreDrill.restoreManifestJSON | quote }}
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  curl -fsS \
+                    -H "Authorization: Bearer ${FUGUE_API_KEY}" \
+                    "${FUGUE_API_URL%/}/v1/admin/control-plane/store/status" >/dev/null
+                  payload="$(printf '{"dry_run":true,"target_store":"%s","restore_manifest":%s}' "${FUGUE_TARGET_STORE}" "${FUGUE_RESTORE_MANIFEST_JSON}")"
+                  curl -fsS \
+                    -H "Authorization: Bearer ${FUGUE_API_KEY}" \
+                    -H "Content-Type: application/json" \
+                    -X POST \
+                    --data "${payload}" \
+                    "${FUGUE_API_URL%/}/v1/admin/control-plane/store/promote" >/dev/null
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 65532
+                capabilities:
+                  drop: ["ALL"]
+              {{- with .Values.controlPlanePostgres.restoreDrill.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+          {{- with .Values.controlPlanePostgres.restoreDrill.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.controlPlanePostgres.restoreDrill.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

@@ -6,6 +6,11 @@ import (
 )
 
 const (
+	BundleSchemaVersionV1 = "1.0"
+	BundleIssuerFugue     = "fugue-control-plane"
+)
+
+const (
 	EdgeRouteKindPlatform        = "platform"
 	EdgeRouteKindPlatformDomain  = "platform-domain"
 	EdgeRouteKindCustomDomain    = "custom-domain"
@@ -80,12 +85,20 @@ const (
 )
 
 type EdgeRouteBundle struct {
-	Version      string                  `json:"version"`
-	GeneratedAt  time.Time               `json:"generated_at"`
-	EdgeID       string                  `json:"edge_id,omitempty"`
-	EdgeGroupID  string                  `json:"edge_group_id,omitempty"`
-	Routes       []EdgeRouteBinding      `json:"routes"`
-	TLSAllowlist []EdgeTLSAllowlistEntry `json:"tls_allowlist"`
+	SchemaVersion      string                  `json:"schema_version,omitempty"`
+	Version            string                  `json:"version"`
+	Generation         string                  `json:"generation,omitempty"`
+	PreviousGeneration string                  `json:"previous_generation,omitempty"`
+	GeneratedAt        time.Time               `json:"generated_at"`
+	ValidUntil         time.Time               `json:"valid_until,omitempty"`
+	Issuer             string                  `json:"issuer,omitempty"`
+	KeyID              string                  `json:"key_id,omitempty"`
+	Signature          string                  `json:"signature,omitempty"`
+	Signatures         []BundleSignature       `json:"signatures,omitempty"`
+	EdgeID             string                  `json:"edge_id,omitempty"`
+	EdgeGroupID        string                  `json:"edge_group_id,omitempty"`
+	Routes             []EdgeRouteBinding      `json:"routes"`
+	TLSAllowlist       []EdgeTLSAllowlistEntry `json:"tls_allowlist"`
 }
 
 type EdgeRouteBinding struct {
@@ -95,12 +108,16 @@ type EdgeRouteBinding struct {
 	TenantID            string    `json:"tenant_id"`
 	RuntimeID           string    `json:"runtime_id"`
 	RuntimeType         string    `json:"runtime_type,omitempty"`
+	RuntimeEdgeGroup    string    `json:"runtime_edge_group,omitempty"`
 	RuntimeEdgeGroupID  string    `json:"runtime_edge_group_id,omitempty"`
 	RuntimeClusterNode  string    `json:"runtime_cluster_node,omitempty"`
+	SelectedEdgeGroup   string    `json:"selected_edge_group,omitempty"`
 	EdgeGroupID         string    `json:"edge_group_id"`
 	FallbackEdgeGroupID string    `json:"fallback_edge_group_id,omitempty"`
 	PolicyEdgeGroupID   string    `json:"policy_edge_group_id,omitempty"`
 	RoutePolicy         string    `json:"route_policy"`
+	SelectionReason     string    `json:"selection_reason,omitempty"`
+	FallbackReason      string    `json:"fallback_reason,omitempty"`
 	UpstreamKind        string    `json:"upstream_kind"`
 	UpstreamScope       string    `json:"upstream_scope,omitempty"`
 	UpstreamURL         string    `json:"upstream_url,omitempty"`
@@ -139,6 +156,65 @@ type PlatformRoute struct {
 	Status        string `json:"status,omitempty"`
 	StatusReason  string `json:"status_reason,omitempty"`
 	TTL           int    `json:"ttl,omitempty"`
+}
+
+type BundleSignature struct {
+	SchemaVersion      string    `json:"schema_version,omitempty"`
+	Issuer             string    `json:"issuer,omitempty"`
+	KeyID              string    `json:"key_id,omitempty"`
+	Signature          string    `json:"signature,omitempty"`
+	GeneratedAt        time.Time `json:"generated_at,omitempty"`
+	ValidUntil         time.Time `json:"valid_until,omitempty"`
+	PreviousGeneration string    `json:"previous_generation,omitempty"`
+}
+
+type DiscoveryEndpoint struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+type DiscoveryRegistryEndpoint struct {
+	Name     string `json:"name"`
+	PushBase string `json:"push_base,omitempty"`
+	PullBase string `json:"pull_base,omitempty"`
+	Mirror   string `json:"mirror,omitempty"`
+}
+
+type DiscoveryKubernetesEndpoint struct {
+	Name             string   `json:"name"`
+	Server           string   `json:"server,omitempty"`
+	FallbackServers  []string `json:"fallback_servers,omitempty"`
+	CAHash           string   `json:"ca_hash,omitempty"`
+	RegistryEndpoint string   `json:"registry_endpoint,omitempty"`
+}
+
+type DiscoveryBundle struct {
+	SchemaVersion      string                        `json:"schema_version"`
+	Generation         string                        `json:"generation"`
+	PreviousGeneration string                        `json:"previous_generation,omitempty"`
+	GeneratedAt        time.Time                     `json:"generated_at"`
+	ValidUntil         time.Time                     `json:"valid_until"`
+	Issuer             string                        `json:"issuer"`
+	KeyID              string                        `json:"key_id,omitempty"`
+	Signature          string                        `json:"signature,omitempty"`
+	Signatures         []BundleSignature             `json:"signatures,omitempty"`
+	APIEndpoints       []DiscoveryEndpoint           `json:"api_endpoints"`
+	Kubernetes         []DiscoveryKubernetesEndpoint `json:"kubernetes"`
+	Registry           []DiscoveryRegistryEndpoint   `json:"registry"`
+	EdgeGroups         []EdgeGroup                   `json:"edge_groups"`
+	EdgeNodes          []EdgeNode                    `json:"edge_nodes"`
+	DNSNodes           []DNSNode                     `json:"dns_nodes"`
+	PlatformRoutes     []PlatformRoute               `json:"platform_routes,omitempty"`
+	PublicRuntimeEnv   map[string]string             `json:"public_runtime_env,omitempty"`
+}
+
+type EdgeSelectionPolicy struct {
+	RuntimeLocality bool     `json:"runtime_locality"`
+	ClientLocality  bool     `json:"client_locality"`
+	EdgeHealth      bool     `json:"edge_health"`
+	Capacity        bool     `json:"capacity"`
+	Latency         bool     `json:"latency"`
+	FallbackOrder   []string `json:"fallback_order,omitempty"`
 }
 
 type PlatformDomainBinding struct {
@@ -186,12 +262,20 @@ type EdgeTLSAllowlistEntry struct {
 }
 
 type EdgeDNSBundle struct {
-	Version     string          `json:"version"`
-	GeneratedAt time.Time       `json:"generated_at"`
-	DNSNodeID   string          `json:"dns_node_id,omitempty"`
-	EdgeGroupID string          `json:"edge_group_id,omitempty"`
-	Zone        string          `json:"zone"`
-	Records     []EdgeDNSRecord `json:"records"`
+	SchemaVersion      string            `json:"schema_version,omitempty"`
+	Version            string            `json:"version"`
+	Generation         string            `json:"generation,omitempty"`
+	PreviousGeneration string            `json:"previous_generation,omitempty"`
+	GeneratedAt        time.Time         `json:"generated_at"`
+	ValidUntil         time.Time         `json:"valid_until,omitempty"`
+	Issuer             string            `json:"issuer,omitempty"`
+	KeyID              string            `json:"key_id,omitempty"`
+	Signature          string            `json:"signature,omitempty"`
+	Signatures         []BundleSignature `json:"signatures,omitempty"`
+	DNSNodeID          string            `json:"dns_node_id,omitempty"`
+	EdgeGroupID        string            `json:"edge_group_id,omitempty"`
+	Zone               string            `json:"zone"`
+	Records            []EdgeDNSRecord   `json:"records"`
 }
 
 type EdgeDNSRecord struct {
@@ -215,6 +299,8 @@ type DNSACMEChallenge struct {
 	Name      string    `json:"name"`
 	Value     string    `json:"value"`
 	TTL       int       `json:"ttl"`
+	Owner     string    `json:"owner,omitempty"`
+	CreatedBy string    `json:"created_by,omitempty"`
 	ExpiresAt time.Time `json:"expires_at"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -234,6 +320,8 @@ type EdgeNode struct {
 	Draining            bool       `json:"draining"`
 	RouteBundleVersion  string     `json:"route_bundle_version,omitempty"`
 	DNSBundleVersion    string     `json:"dns_bundle_version,omitempty"`
+	ServingGeneration   string     `json:"serving_generation,omitempty"`
+	LKGGeneration       string     `json:"lkg_generation,omitempty"`
 	CaddyRouteCount     int        `json:"caddy_route_count"`
 	CaddyAppliedVersion string     `json:"caddy_applied_version,omitempty"`
 	CaddyLastError      string     `json:"caddy_last_error,omitempty"`
@@ -248,35 +336,37 @@ type EdgeNode struct {
 }
 
 type DNSNode struct {
-	ID               string            `json:"id"`
-	EdgeGroupID      string            `json:"edge_group_id"`
-	PublicHostname   string            `json:"public_hostname,omitempty"`
-	PublicIPv4       string            `json:"public_ipv4,omitempty"`
-	PublicIPv6       string            `json:"public_ipv6,omitempty"`
-	MeshIP           string            `json:"mesh_ip,omitempty"`
-	Zone             string            `json:"zone"`
-	Status           string            `json:"status"`
-	Healthy          bool              `json:"healthy"`
-	DNSBundleVersion string            `json:"dns_bundle_version,omitempty"`
-	RecordCount      int               `json:"record_count"`
-	CacheStatus      string            `json:"cache_status,omitempty"`
-	CacheWriteErrors uint64            `json:"cache_write_errors"`
-	CacheLoadErrors  uint64            `json:"cache_load_errors"`
-	BundleSyncErrors uint64            `json:"bundle_sync_errors"`
-	QueryCount       uint64            `json:"query_count"`
-	QueryErrorCount  uint64            `json:"query_error_count"`
-	QueryRCodeCounts map[string]uint64 `json:"query_rcode_counts,omitempty"`
-	QueryQTypeCounts map[string]uint64 `json:"query_qtype_counts,omitempty"`
-	ListenAddr       string            `json:"listen_addr,omitempty"`
-	UDPAddr          string            `json:"udp_addr,omitempty"`
-	TCPAddr          string            `json:"tcp_addr,omitempty"`
-	UDPListen        bool              `json:"udp_listen"`
-	TCPListen        bool              `json:"tcp_listen"`
-	LastError        string            `json:"last_error,omitempty"`
-	LastSeenAt       *time.Time        `json:"last_seen_at,omitempty"`
-	LastHeartbeatAt  *time.Time        `json:"last_heartbeat_at,omitempty"`
-	CreatedAt        time.Time         `json:"created_at"`
-	UpdatedAt        time.Time         `json:"updated_at"`
+	ID                string            `json:"id"`
+	EdgeGroupID       string            `json:"edge_group_id"`
+	PublicHostname    string            `json:"public_hostname,omitempty"`
+	PublicIPv4        string            `json:"public_ipv4,omitempty"`
+	PublicIPv6        string            `json:"public_ipv6,omitempty"`
+	MeshIP            string            `json:"mesh_ip,omitempty"`
+	Zone              string            `json:"zone"`
+	Status            string            `json:"status"`
+	Healthy           bool              `json:"healthy"`
+	DNSBundleVersion  string            `json:"dns_bundle_version,omitempty"`
+	ServingGeneration string            `json:"serving_generation,omitempty"`
+	LKGGeneration     string            `json:"lkg_generation,omitempty"`
+	RecordCount       int               `json:"record_count"`
+	CacheStatus       string            `json:"cache_status,omitempty"`
+	CacheWriteErrors  uint64            `json:"cache_write_errors"`
+	CacheLoadErrors   uint64            `json:"cache_load_errors"`
+	BundleSyncErrors  uint64            `json:"bundle_sync_errors"`
+	QueryCount        uint64            `json:"query_count"`
+	QueryErrorCount   uint64            `json:"query_error_count"`
+	QueryRCodeCounts  map[string]uint64 `json:"query_rcode_counts,omitempty"`
+	QueryQTypeCounts  map[string]uint64 `json:"query_qtype_counts,omitempty"`
+	ListenAddr        string            `json:"listen_addr,omitempty"`
+	UDPAddr           string            `json:"udp_addr,omitempty"`
+	TCPAddr           string            `json:"tcp_addr,omitempty"`
+	UDPListen         bool              `json:"udp_listen"`
+	TCPListen         bool              `json:"tcp_listen"`
+	LastError         string            `json:"last_error,omitempty"`
+	LastSeenAt        *time.Time        `json:"last_seen_at,omitempty"`
+	LastHeartbeatAt   *time.Time        `json:"last_heartbeat_at,omitempty"`
+	CreatedAt         time.Time         `json:"created_at"`
+	UpdatedAt         time.Time         `json:"updated_at"`
 }
 
 type DNSDelegationRecord struct {

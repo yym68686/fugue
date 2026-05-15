@@ -572,13 +572,13 @@ func writeClusterNodePolicyStatusTable(w io.Writer, statuses []model.ClusterNode
 		return strings.Compare(sorted[i].NodeName, sorted[j].NodeName) < 0
 	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "NODE\tRUNTIME\tAPP\tBUILD\tSHARED\tEDGE\tDNS\tINTERNAL\tCP\tREADY\tDISK\tHEALTH\tRECONCILED\tREASONS"); err != nil {
+	if _, err := fmt.Fprintln(tw, "NODE\tRUNTIME\tAPP\tBUILD\tSHARED\tEDGE\tDNS\tINTERNAL\tCP\tREADY\tDISK\tHEALTH\tRECONCILED\tBLOCK\tGATE\tREASONS"); err != nil {
 		return err
 	}
 	for _, status := range sorted {
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			status.NodeName,
 			firstNonEmpty(status.RuntimeID, "-"),
 			firstNonEmpty(formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowAppRuntime }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveAppRuntime }), "-"),
@@ -592,6 +592,8 @@ func writeClusterNodePolicyStatusTable(w io.Writer, statuses []model.ClusterNode
 			clusterNodeBoolLabel(status.DiskPressure),
 			firstNonEmpty(clusterNodePolicyHealth(status), "-"),
 			clusterNodeBoolLabel(status.Reconciled),
+			clusterNodeBoolLabel(status.BlockRollout),
+			firstNonEmpty(status.GateReason, "-"),
 			firstNonEmpty(strings.Join(status.ReconcileReasons, "; "), "-"),
 		); err != nil {
 			return err
@@ -610,6 +612,9 @@ func writeClusterNodePolicyDetails(w io.Writer, status model.ClusterNodePolicySt
 		kvPair{Key: "disk_pressure", Value: clusterNodeBoolLabel(status.DiskPressure)},
 		kvPair{Key: "node_schedulable", Value: clusterNodeBoolLabel(status.NodeSchedulable)},
 		kvPair{Key: "reconciled", Value: clusterNodeBoolLabel(status.Reconciled)},
+		kvPair{Key: "block_rollout", Value: clusterNodeBoolLabel(status.BlockRollout)},
+		kvPair{Key: "gate_reason", Value: firstNonEmpty(status.GateReason, "-")},
+		kvPair{Key: "suggested_fix_command", Value: firstNonEmpty(status.SuggestedFixCommand, "-")},
 		kvPair{Key: "reconcile_reasons", Value: firstNonEmpty(strings.Join(status.ReconcileReasons, "; "), "-")},
 	); err != nil {
 		return err

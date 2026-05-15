@@ -30,6 +30,7 @@ func TestEdgeDNSBundleDerivesCustomDomainTargetsAndProbe(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("put verified app domain: %v", err)
 	}
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-default-1", defaultEdgeGroupID, "203.0.113.20")
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&answer_ip=203.0.113.10&ttl=120", nil)
@@ -85,6 +86,7 @@ func TestEdgeDNSBundleSupportsGroupFilterAndConditionalFetch(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("put verified app domain: %v", err)
 	}
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-hk-1", "edge-group-country-hk", "203.0.113.10")
 
 	first := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&edge_group_id=edge-group-country-hk&answer_ip=203.0.113.10", nil)
@@ -136,7 +138,7 @@ func TestEdgeDNSBundleSupportsGroupFilterAndConditionalFetch(t *testing.T) {
 	}
 }
 
-func TestEdgeDNSBundleKeepsRouteAOnlyCustomTargetsGlobal(t *testing.T) {
+func TestEdgeDNSBundleUsesDefaultEdgeCustomTargets(t *testing.T) {
 	t.Parallel()
 
 	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
@@ -160,6 +162,7 @@ func TestEdgeDNSBundleKeepsRouteAOnlyCustomTargetsGlobal(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("put verified app domain: %v", err)
 	}
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-us-1", "edge-group-country-us", "15.204.94.71")
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&edge_group_id=edge-group-country-us&answer_ip=15.204.94.71&route_a_answer_ip=136.112.185.40", nil)
@@ -171,10 +174,10 @@ func TestEdgeDNSBundleKeepsRouteAOnlyCustomTargetsGlobal(t *testing.T) {
 	mustDecodeJSON(t, recorder, &bundle)
 	customTarget := edgeDNSRecordByNameAndType(bundle.Records, target, model.EdgeDNSRecordTypeA)
 	if customTarget == nil {
-		t.Fatalf("expected Route A-only custom-domain target %s in every DNS bundle: %+v", target, bundle.Records)
+		t.Fatalf("expected default-edge custom-domain target %s in DNS bundle: %+v", target, bundle.Records)
 	}
-	if strings.Join(customTarget.Values, ",") != "136.112.185.40" {
-		t.Fatalf("expected Route A-only target to use route_a_answer_ip, got %+v", customTarget)
+	if strings.Join(customTarget.Values, ",") != "15.204.94.71" {
+		t.Fatalf("expected default-edge target to use healthy edge IP, got %+v", customTarget)
 	}
 }
 

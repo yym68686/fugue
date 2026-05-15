@@ -616,6 +616,26 @@ func (c *Client) MigrateApp(id, targetRuntimeID string) (operationResponse, erro
 	return response, nil
 }
 
+func (c *Client) MigrateAppDryRun(id, targetRuntimeID string) (model.AppMoveDryRunResponse, error) {
+	var response model.AppMoveDryRunResponse
+	req := map[string]any{
+		"target_runtime_id": strings.TrimSpace(targetRuntimeID),
+		"dry_run":           true,
+	}
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "migrate"), req, &response); err != nil {
+		return model.AppMoveDryRunResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) GetAppDatabaseStatus(id string) (model.ManagedPostgresStatusResponse, error) {
+	var response model.ManagedPostgresStatusResponse
+	if err := c.doJSON(http.MethodGet, path.Join("/v1/apps", id, "database", "status"), nil, &response); err != nil {
+		return model.ManagedPostgresStatusResponse{}, err
+	}
+	return response, nil
+}
+
 func (c *Client) DeleteApp(id string) (appDeleteResponse, error) {
 	return c.deleteApp(id, false)
 }

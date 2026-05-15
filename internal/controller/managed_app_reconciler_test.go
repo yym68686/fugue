@@ -2063,26 +2063,13 @@ func TestReconcileManagedAppObjectDeletesOrphanedManagedApp(t *testing.T) {
 		t.Fatalf("reconcile orphaned managed app: %v", err)
 	}
 
-	if patchedStatus.Phase != runtime.ManagedAppPhaseDeleting {
-		t.Fatalf("expected orphan status phase %q, got %q", runtime.ManagedAppPhaseDeleting, patchedStatus.Phase)
+	if patchedStatus.Phase != runtime.ManagedAppPhaseError {
+		t.Fatalf("expected observed-only orphan status phase %q, got %q", runtime.ManagedAppPhaseError, patchedStatus.Phase)
 	}
-	if !strings.Contains(patchedStatus.Message, "app not found in store") {
+	if !strings.Contains(patchedStatus.Message, "observed-only") || !strings.Contains(patchedStatus.Message, "app not found in store") {
 		t.Fatalf("expected orphan status message to mention missing store app, got %q", patchedStatus.Message)
 	}
-
-	wantDeleted := []string{
-		"DELETE " + managedAppAPIPath(namespace, managedName),
-		"DELETE /api/v1/namespaces/" + namespace + "/services/app-demo",
-		"DELETE /apis/apps/v1/namespaces/" + namespace + "/deployments/app-demo",
-	}
-	sort.Strings(deleted)
-	sort.Strings(wantDeleted)
-	if len(deleted) != len(wantDeleted) {
-		t.Fatalf("expected delete requests %v, got %v", wantDeleted, deleted)
-	}
-	for i := range wantDeleted {
-		if deleted[i] != wantDeleted[i] {
-			t.Fatalf("expected delete request %q, got %q", wantDeleted[i], deleted[i])
-		}
+	if len(deleted) != 0 {
+		t.Fatalf("expected observed-only reconcile to retain local resources, got deletes %v", deleted)
 	}
 }

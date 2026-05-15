@@ -14,14 +14,22 @@ type ServerConfig struct {
 	DNSStaticRecordsJSON         string
 	PlatformRoutesJSON           string
 	EdgeTLSAskToken              string
+	AllowLegacyEdgeToken         bool
 	RegistryPushBase             string
 	RegistryPullBase             string
 	ClusterJoinRegistryEndpoint  string
 	ClusterJoinServer            string
+	ClusterJoinServerFallbacks   string
 	ClusterJoinCAHash            string
 	ClusterJoinBootstrapTokenTTL time.Duration
 	ClusterJoinMeshProvider      string
 	ClusterJoinMeshLoginServer   string
 	ClusterJoinMeshAuthKey       string
+	BundleSigningKey             string
+	BundleSigningKeyID           string
+	BundleSigningPreviousKey     string
+	BundleSigningPreviousKeyID   string
+	BundleRevokedKeyIDs          []string
+	BundleValidFor               time.Duration
 	ImportWorkDir                string
 }

@@ -38,7 +38,7 @@ func (s *Store) pgUpsertNodeUpdater(key model.NodeKey, machine model.Machine, ru
 	}
 
 	existing, err := scanNodeUpdater(s.db.QueryRowContext(ctx, `
-SELECT id, tenant_id, node_key_id, machine_id, runtime_id, cluster_node_name, status, token_prefix, token_hash, labels_json, capabilities_json, updater_version, join_script_version, k3s_version, os, arch, last_error, last_seen_at, last_heartbeat_at, created_at, updated_at
+SELECT id, tenant_id, node_key_id, machine_id, runtime_id, cluster_node_name, status, token_prefix, token_hash, labels_json, capabilities_json, updater_version, join_script_version, k3s_version, k3s_server, k3s_fallback_servers, registry_mirror, labels_hash, taints_hash, edge_env_generation, dns_env_generation, config_hash, discovery_generation, os, arch, last_error, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_node_updaters
 WHERE (machine_id <> '' AND machine_id = $1)
    OR (cluster_node_name <> '' AND cluster_node_name = $2 AND (node_key_id = $3 OR $3 IS NULL))
@@ -65,13 +65,17 @@ LIMIT 1
 INSERT INTO fugue_node_updaters (
 	id, tenant_id, node_key_id, machine_id, runtime_id, cluster_node_name, status,
 	token_prefix, token_hash, labels_json, capabilities_json, updater_version,
-	join_script_version, k3s_version, os, arch, last_error, last_seen_at,
+	join_script_version, k3s_version, k3s_server, k3s_fallback_servers, registry_mirror,
+	labels_hash, taints_hash, edge_env_generation, dns_env_generation, config_hash,
+	discovery_generation, os, arch, last_error, last_seen_at,
 	last_heartbeat_at, created_at, updated_at
 ) VALUES (
 	$1, $2, $3, $4, $5, $6, $7,
 	$8, $9, $10, $11, $12,
-	$13, $14, $15, $16, $17, $18,
-	$19, $20, $21
+	$13, $14, $15, $16, $17,
+	$18, $19, $20, $21, $22,
+	$23, $24, $25, $26, $27,
+	$28, $29, $30
 )
 ON CONFLICT (id) DO UPDATE SET
 	tenant_id = EXCLUDED.tenant_id,
@@ -86,10 +90,23 @@ ON CONFLICT (id) DO UPDATE SET
 	capabilities_json = EXCLUDED.capabilities_json,
 	updater_version = EXCLUDED.updater_version,
 	join_script_version = EXCLUDED.join_script_version,
+	k3s_version = EXCLUDED.k3s_version,
+	k3s_server = EXCLUDED.k3s_server,
+	k3s_fallback_servers = EXCLUDED.k3s_fallback_servers,
+	registry_mirror = EXCLUDED.registry_mirror,
+	labels_hash = EXCLUDED.labels_hash,
+	taints_hash = EXCLUDED.taints_hash,
+	edge_env_generation = EXCLUDED.edge_env_generation,
+	dns_env_generation = EXCLUDED.dns_env_generation,
+	config_hash = EXCLUDED.config_hash,
+	discovery_generation = EXCLUDED.discovery_generation,
+	os = EXCLUDED.os,
+	arch = EXCLUDED.arch,
+	last_error = EXCLUDED.last_error,
 	last_seen_at = EXCLUDED.last_seen_at,
 	last_heartbeat_at = EXCLUDED.last_heartbeat_at,
 	updated_at = EXCLUDED.updated_at
-`, updater.ID, nullIfEmpty(updater.TenantID), nullIfEmpty(updater.NodeKeyID), updater.MachineID, updater.RuntimeID, updater.ClusterNodeName, updater.Status, updater.TokenPrefix, updater.TokenHash, labelsJSON, capabilitiesJSON, updater.UpdaterVersion, updater.JoinScriptVersion, updater.K3SVersion, updater.OS, updater.Arch, updater.LastError, updater.LastSeenAt, updater.LastHeartbeatAt, updater.CreatedAt, updater.UpdatedAt)
+`, updater.ID, nullIfEmpty(updater.TenantID), nullIfEmpty(updater.NodeKeyID), updater.MachineID, updater.RuntimeID, updater.ClusterNodeName, updater.Status, updater.TokenPrefix, updater.TokenHash, labelsJSON, capabilitiesJSON, updater.UpdaterVersion, updater.JoinScriptVersion, updater.K3SVersion, updater.K3SServer, updater.K3SFallbackServers, updater.RegistryMirror, updater.LabelsHash, updater.TaintsHash, updater.EdgeEnvGeneration, updater.DNSEnvGeneration, updater.ConfigHash, updater.DiscoveryGeneration, updater.OS, updater.Arch, updater.LastError, updater.LastSeenAt, updater.LastHeartbeatAt, updater.CreatedAt, updater.UpdatedAt)
 	if err != nil {
 		return model.NodeUpdater{}, "", mapDBErr(err)
 	}
@@ -107,7 +124,7 @@ func (s *Store) pgAuthenticateNodeUpdater(secret string) (model.NodeUpdater, mod
 	defer tx.Rollback()
 
 	updater, err := scanNodeUpdater(tx.QueryRowContext(ctx, `
-SELECT id, tenant_id, node_key_id, machine_id, runtime_id, cluster_node_name, status, token_prefix, token_hash, labels_json, capabilities_json, updater_version, join_script_version, k3s_version, os, arch, last_error, last_seen_at, last_heartbeat_at, created_at, updated_at
+SELECT id, tenant_id, node_key_id, machine_id, runtime_id, cluster_node_name, status, token_prefix, token_hash, labels_json, capabilities_json, updater_version, join_script_version, k3s_version, k3s_server, k3s_fallback_servers, registry_mirror, labels_hash, taints_hash, edge_env_generation, dns_env_generation, config_hash, discovery_generation, os, arch, last_error, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_node_updaters
 WHERE token_hash = $1
 `, model.HashSecret(secret)))
@@ -151,15 +168,24 @@ UPDATE fugue_node_updaters SET
 	updater_version = $4,
 	join_script_version = $5,
 	k3s_version = $6,
-	os = $7,
-	arch = $8,
-	last_error = $9,
-	last_seen_at = $10,
-	last_heartbeat_at = $10,
-	updated_at = $10
+	k3s_server = $7,
+	k3s_fallback_servers = $8,
+	registry_mirror = $9,
+	labels_hash = $10,
+	taints_hash = $11,
+	edge_env_generation = $12,
+	dns_env_generation = $13,
+	config_hash = $14,
+	discovery_generation = $15,
+	os = $16,
+	arch = $17,
+	last_error = $18,
+	last_seen_at = $19,
+	last_heartbeat_at = $19,
+	updated_at = $19
 WHERE id = $1
-RETURNING id, tenant_id, node_key_id, machine_id, runtime_id, cluster_node_name, status, token_prefix, token_hash, labels_json, capabilities_json, updater_version, join_script_version, k3s_version, os, arch, last_error, last_seen_at, last_heartbeat_at, created_at, updated_at
-`, strings.TrimSpace(updaterID), labelsJSON, capabilitiesJSON, strings.TrimSpace(heartbeat.UpdaterVersion), strings.TrimSpace(heartbeat.JoinScriptVersion), strings.TrimSpace(heartbeat.K3SVersion), strings.TrimSpace(heartbeat.OS), strings.TrimSpace(heartbeat.Arch), strings.TrimSpace(heartbeat.LastError), now))
+RETURNING id, tenant_id, node_key_id, machine_id, runtime_id, cluster_node_name, status, token_prefix, token_hash, labels_json, capabilities_json, updater_version, join_script_version, k3s_version, k3s_server, k3s_fallback_servers, registry_mirror, labels_hash, taints_hash, edge_env_generation, dns_env_generation, config_hash, discovery_generation, os, arch, last_error, last_seen_at, last_heartbeat_at, created_at, updated_at
+`, strings.TrimSpace(updaterID), labelsJSON, capabilitiesJSON, strings.TrimSpace(heartbeat.UpdaterVersion), strings.TrimSpace(heartbeat.JoinScriptVersion), strings.TrimSpace(heartbeat.K3SVersion), strings.TrimSpace(heartbeat.K3SServer), strings.TrimSpace(heartbeat.K3SFallbackServers), strings.TrimSpace(heartbeat.RegistryMirror), strings.TrimSpace(heartbeat.LabelsHash), strings.TrimSpace(heartbeat.TaintsHash), strings.TrimSpace(heartbeat.EdgeEnvGeneration), strings.TrimSpace(heartbeat.DNSEnvGeneration), strings.TrimSpace(heartbeat.ConfigHash), strings.TrimSpace(heartbeat.DiscoveryGeneration), strings.TrimSpace(heartbeat.OS), strings.TrimSpace(heartbeat.Arch), strings.TrimSpace(heartbeat.LastError), now))
 	if err != nil {
 		return model.NodeUpdater{}, mapDBErr(err)
 	}
@@ -171,7 +197,7 @@ func (s *Store) pgListNodeUpdaters(tenantID string, platformAdmin bool) ([]model
 	defer cancel()
 
 	query := `
-SELECT id, tenant_id, node_key_id, machine_id, runtime_id, cluster_node_name, status, token_prefix, token_hash, labels_json, capabilities_json, updater_version, join_script_version, k3s_version, os, arch, last_error, last_seen_at, last_heartbeat_at, created_at, updated_at
+SELECT id, tenant_id, node_key_id, machine_id, runtime_id, cluster_node_name, status, token_prefix, token_hash, labels_json, capabilities_json, updater_version, join_script_version, k3s_version, k3s_server, k3s_fallback_servers, registry_mirror, labels_hash, taints_hash, edge_env_generation, dns_env_generation, config_hash, discovery_generation, os, arch, last_error, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_node_updaters`
 	args := []any{}
 	if !platformAdmin {
@@ -383,7 +409,7 @@ func (s *Store) pgFindNodeUpdaterTarget(ctx context.Context, q sqlQueryer, updat
 		return model.NodeUpdater{}, ErrInvalidInput
 	}
 	query := `
-SELECT id, tenant_id, node_key_id, machine_id, runtime_id, cluster_node_name, status, token_prefix, token_hash, labels_json, capabilities_json, updater_version, join_script_version, k3s_version, os, arch, last_error, last_seen_at, last_heartbeat_at, created_at, updated_at
+SELECT id, tenant_id, node_key_id, machine_id, runtime_id, cluster_node_name, status, token_prefix, token_hash, labels_json, capabilities_json, updater_version, join_script_version, k3s_version, k3s_server, k3s_fallback_servers, registry_mirror, labels_hash, taints_hash, edge_env_generation, dns_env_generation, config_hash, discovery_generation, os, arch, last_error, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_node_updaters
 WHERE ` + strings.Join(clauses, " OR ") + `
 ORDER BY updated_at DESC
@@ -445,6 +471,15 @@ func scanNodeUpdater(scanner sqlScanner) (model.NodeUpdater, error) {
 		&updater.UpdaterVersion,
 		&updater.JoinScriptVersion,
 		&updater.K3SVersion,
+		&updater.K3SServer,
+		&updater.K3SFallbackServers,
+		&updater.RegistryMirror,
+		&updater.LabelsHash,
+		&updater.TaintsHash,
+		&updater.EdgeEnvGeneration,
+		&updater.DNSEnvGeneration,
+		&updater.ConfigHash,
+		&updater.DiscoveryGeneration,
 		&updater.OS,
 		&updater.Arch,
 		&updater.LastError,

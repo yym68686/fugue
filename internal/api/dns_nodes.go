@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/store"
 
 	miekgdns "github.com/miekg/dns"
 )
@@ -23,31 +25,33 @@ const (
 )
 
 type dnsHeartbeatRequest struct {
-	DNSNodeID        string            `json:"dns_node_id"`
-	EdgeGroupID      string            `json:"edge_group_id"`
-	PublicHostname   string            `json:"public_hostname,omitempty"`
-	PublicIPv4       string            `json:"public_ipv4,omitempty"`
-	PublicIPv6       string            `json:"public_ipv6,omitempty"`
-	MeshIP           string            `json:"mesh_ip,omitempty"`
-	Zone             string            `json:"zone"`
-	DNSBundleVersion string            `json:"dns_bundle_version,omitempty"`
-	RecordCount      int               `json:"record_count"`
-	CacheStatus      string            `json:"cache_status,omitempty"`
-	CacheWriteErrors uint64            `json:"cache_write_errors,omitempty"`
-	CacheLoadErrors  uint64            `json:"cache_load_errors,omitempty"`
-	BundleSyncErrors uint64            `json:"bundle_sync_errors,omitempty"`
-	QueryCount       uint64            `json:"query_count,omitempty"`
-	QueryErrorCount  uint64            `json:"query_error_count,omitempty"`
-	QueryRCodeCounts map[string]uint64 `json:"query_rcode_counts,omitempty"`
-	QueryQTypeCounts map[string]uint64 `json:"query_qtype_counts,omitempty"`
-	ListenAddr       string            `json:"listen_addr,omitempty"`
-	UDPAddr          string            `json:"udp_addr,omitempty"`
-	TCPAddr          string            `json:"tcp_addr,omitempty"`
-	UDPListen        bool              `json:"udp_listen,omitempty"`
-	TCPListen        bool              `json:"tcp_listen,omitempty"`
-	Status           string            `json:"status"`
-	Healthy          bool              `json:"healthy"`
-	LastError        string            `json:"last_error,omitempty"`
+	DNSNodeID         string            `json:"dns_node_id"`
+	EdgeGroupID       string            `json:"edge_group_id"`
+	PublicHostname    string            `json:"public_hostname,omitempty"`
+	PublicIPv4        string            `json:"public_ipv4,omitempty"`
+	PublicIPv6        string            `json:"public_ipv6,omitempty"`
+	MeshIP            string            `json:"mesh_ip,omitempty"`
+	Zone              string            `json:"zone"`
+	DNSBundleVersion  string            `json:"dns_bundle_version,omitempty"`
+	ServingGeneration string            `json:"serving_generation,omitempty"`
+	LKGGeneration     string            `json:"lkg_generation,omitempty"`
+	RecordCount       int               `json:"record_count"`
+	CacheStatus       string            `json:"cache_status,omitempty"`
+	CacheWriteErrors  uint64            `json:"cache_write_errors,omitempty"`
+	CacheLoadErrors   uint64            `json:"cache_load_errors,omitempty"`
+	BundleSyncErrors  uint64            `json:"bundle_sync_errors,omitempty"`
+	QueryCount        uint64            `json:"query_count,omitempty"`
+	QueryErrorCount   uint64            `json:"query_error_count,omitempty"`
+	QueryRCodeCounts  map[string]uint64 `json:"query_rcode_counts,omitempty"`
+	QueryQTypeCounts  map[string]uint64 `json:"query_qtype_counts,omitempty"`
+	ListenAddr        string            `json:"listen_addr,omitempty"`
+	UDPAddr           string            `json:"udp_addr,omitempty"`
+	TCPAddr           string            `json:"tcp_addr,omitempty"`
+	UDPListen         bool              `json:"udp_listen,omitempty"`
+	TCPListen         bool              `json:"tcp_listen,omitempty"`
+	Status            string            `json:"status"`
+	Healthy           bool              `json:"healthy"`
+	LastError         string            `json:"last_error,omitempty"`
 }
 
 type dnsDelegationProbeFunc func(context.Context, model.DNSNode, string, string) dnsDelegationProbeResult
@@ -103,6 +107,15 @@ func (s *Server) handleDNSHeartbeat(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, err.Error())
 		return
 	}
+	allowed, err := s.enforceScopedDNSNode(authContext, req.DNSNodeID, req.EdgeGroupID, req.Zone)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if !allowed {
+		httpx.WriteError(w, http.StatusForbidden, "dns token cannot access another DNS zone")
+		return
+	}
 	status := model.NormalizeEdgeHealthStatus(req.Status)
 	if status == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "status must be unknown, healthy, degraded, or unhealthy")
@@ -110,31 +123,33 @@ func (s *Server) handleDNSHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	req = s.enrichDNSHeartbeatFromClusterNode(r.Context(), req)
 	node, err := s.store.UpdateDNSHeartbeat(model.DNSNode{
-		ID:               req.DNSNodeID,
-		EdgeGroupID:      req.EdgeGroupID,
-		PublicHostname:   req.PublicHostname,
-		PublicIPv4:       req.PublicIPv4,
-		PublicIPv6:       req.PublicIPv6,
-		MeshIP:           req.MeshIP,
-		Zone:             req.Zone,
-		Status:           status,
-		Healthy:          req.Healthy,
-		DNSBundleVersion: req.DNSBundleVersion,
-		RecordCount:      req.RecordCount,
-		CacheStatus:      req.CacheStatus,
-		CacheWriteErrors: req.CacheWriteErrors,
-		CacheLoadErrors:  req.CacheLoadErrors,
-		BundleSyncErrors: req.BundleSyncErrors,
-		QueryCount:       req.QueryCount,
-		QueryErrorCount:  req.QueryErrorCount,
-		QueryRCodeCounts: req.QueryRCodeCounts,
-		QueryQTypeCounts: req.QueryQTypeCounts,
-		ListenAddr:       req.ListenAddr,
-		UDPAddr:          req.UDPAddr,
-		TCPAddr:          req.TCPAddr,
-		UDPListen:        req.UDPListen,
-		TCPListen:        req.TCPListen,
-		LastError:        req.LastError,
+		ID:                req.DNSNodeID,
+		EdgeGroupID:       req.EdgeGroupID,
+		PublicHostname:    req.PublicHostname,
+		PublicIPv4:        req.PublicIPv4,
+		PublicIPv6:        req.PublicIPv6,
+		MeshIP:            req.MeshIP,
+		Zone:              req.Zone,
+		Status:            status,
+		Healthy:           req.Healthy,
+		DNSBundleVersion:  req.DNSBundleVersion,
+		ServingGeneration: req.ServingGeneration,
+		LKGGeneration:     req.LKGGeneration,
+		RecordCount:       req.RecordCount,
+		CacheStatus:       req.CacheStatus,
+		CacheWriteErrors:  req.CacheWriteErrors,
+		CacheLoadErrors:   req.CacheLoadErrors,
+		BundleSyncErrors:  req.BundleSyncErrors,
+		QueryCount:        req.QueryCount,
+		QueryErrorCount:   req.QueryErrorCount,
+		QueryRCodeCounts:  req.QueryRCodeCounts,
+		QueryQTypeCounts:  req.QueryQTypeCounts,
+		ListenAddr:        req.ListenAddr,
+		UDPAddr:           req.UDPAddr,
+		TCPAddr:           req.TCPAddr,
+		UDPListen:         req.UDPListen,
+		TCPListen:         req.TCPListen,
+		LastError:         req.LastError,
 	})
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -144,6 +159,32 @@ func (s *Server) handleDNSHeartbeat(w http.ResponseWriter, r *http.Request) {
 		"node":     node,
 		"accepted": true,
 	})
+}
+
+func (s *Server) enforceScopedDNSNode(authContext edgeAuthContext, dnsNodeID, edgeGroupID, zone string) (bool, error) {
+	if !authContext.Scoped || s.store == nil {
+		return true, nil
+	}
+	dnsNodeID = strings.TrimSpace(dnsNodeID)
+	if dnsNodeID == "" {
+		return false, nil
+	}
+	node, err := s.store.GetDNSNode(dnsNodeID)
+	if errors.Is(err, store.ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !strings.EqualFold(strings.TrimSpace(node.EdgeGroupID), strings.TrimSpace(edgeGroupID)) {
+		return false, nil
+	}
+	nodeZone := normalizeExternalAppDomain(node.Zone)
+	requestZone := normalizeExternalAppDomain(zone)
+	if nodeZone != "" && requestZone != "" && !strings.EqualFold(nodeZone, requestZone) {
+		return false, nil
+	}
+	return true, nil
 }
 
 func (s *Server) enrichDNSHeartbeatFromClusterNode(ctx context.Context, req dnsHeartbeatRequest) dnsHeartbeatRequest {
@@ -182,9 +223,6 @@ func (s *Server) dnsDelegationPreflightOptionsFromRequest(r *http.Request) dnsDe
 	zone := normalizeExternalAppDomain(query.Get("zone"))
 	if zone == "" {
 		zone = normalizeExternalAppDomain(s.appBaseDomain)
-	}
-	if zone == "" {
-		zone = "fugue.pro"
 	}
 	probeName := normalizeExternalAppDomain(query.Get("probe_name"))
 	if probeName == "" {

@@ -3,6 +3,14 @@ bootstrapAdminKey: "fugue_bootstrap_admin_change_me"
 workloadIdentity:
   signingKey: ""
 
+bundle:
+  signingKey: ""
+  signingKeyID: control-plane
+  previousSigningKey: ""
+  previousSigningKeyID: ""
+  revokedKeyIDs: ""
+  validFor: 15m
+
 configSecret:
   existingSecretName: ""
 
@@ -13,15 +21,17 @@ api:
     tag: latest
     pullPolicy: IfNotPresent
   databaseURL: ""
-  appBaseDomain: fugue.pro
-  apiPublicDomain: api.fugue.pro
+  appBaseDomain: ""
+  apiPublicDomain: ""
   dnsStaticRecordsJSON: ""
   platformRoutesJSON: ""
   edgeTLSAskToken: ""
+  allowLegacyEdgeToken: false
   registryPushBase: ""
-  registryPullBase: registry.fugue.internal:5000
-  clusterJoinRegistryEndpoint: 127.0.0.1:30500
+  registryPullBase: ""
+  clusterJoinRegistryEndpoint: ""
   clusterJoinServer: ""
+  clusterJoinServerFallbacks: ""
   clusterJoinCAHash: ""
   clusterJoinBootstrapTokenTTL: 15m
   clusterJoinMeshProvider: ""
@@ -190,7 +200,7 @@ dns:
   apiURL: ""
   dnsNodeID: ""
   edgeGroupID: ""
-  zone: dns.fugue.pro
+  zone: ""
   answerIPs: []
   routeAAnswerIPs: []
   ttl: 60
@@ -342,7 +352,7 @@ sharedWorkspaceStorage:
     sharedDirectory: /exports
     nfsPath: /
     hostPath: /var/lib/fugue/shared-workspaces
-    clusterIP: 10.43.240.17
+    clusterIP: ""
     nodeSelector:
       fugue.install/role: primary
     controlPlaneSingletonNodeSelector: {}
@@ -396,6 +406,33 @@ registryJanitor:
     enabled: true
     skipWhenActiveJobs: true
 
+platformFailureDrill:
+  enabled: false
+  schedule: "17 */6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 600
+  activeDeadlineSeconds: 900
+  image:
+    repository: curlimages/curl
+    tag: "8.10.1"
+    pullPolicy: IfNotPresent
+  apiURL: ""
+  existingSecretName: ""
+  apiKeySecretKey: FUGUE_BOOTSTRAP_ADMIN_KEY
+  target: ""
+  nodeSelector: {}
+  tolerations: []
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+      ephemeral-storage: 16Mi
+    limits:
+      memory: 128Mi
+      ephemeral-storage: 128Mi
+
 service:
   type: ClusterIP
   port: 80
@@ -436,7 +473,7 @@ headscale:
     repository: headscale/headscale
     tag: "0.26.1"
     pullPolicy: IfNotPresent
-  domain: mesh.fugue.pro
+  domain: ""
   service:
     type: NodePort
     port: 8080
@@ -478,6 +515,48 @@ controlPlanePostgres:
   storage:
     size: 10Gi
     storageClassName: ""
+  backup:
+    enabled: false
+    destinationPath: ""
+    endpointURL: ""
+    wal:
+      compression: gzip
+    s3Credentials:
+      existingSecretName: ""
+      accessKeyIdKey: ACCESS_KEY_ID
+      secretAccessKeyKey: SECRET_ACCESS_KEY
+    scheduled:
+      enabled: false
+      schedule: "0 0 3 * * *"
+      immediate: false
+      backupOwnerReference: self
+  restoreDrill:
+    enabled: false
+    schedule: "37 3 * * 0"
+    concurrencyPolicy: Forbid
+    successfulJobsHistoryLimit: 1
+    failedJobsHistoryLimit: 3
+    startingDeadlineSeconds: 600
+    activeDeadlineSeconds: 900
+    image:
+      repository: curlimages/curl
+      tag: "8.10.1"
+      pullPolicy: IfNotPresent
+    apiURL: ""
+    existingSecretName: ""
+    apiKeySecretKey: FUGUE_BOOTSTRAP_ADMIN_KEY
+    targetStore: postgres
+    restoreManifestJSON: ""
+    nodeSelector: {}
+    tolerations: []
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+        ephemeral-storage: 16Mi
+      limits:
+        memory: 128Mi
+        ephemeral-storage: 128Mi
   resources:
     requests:
       cpu: 250m

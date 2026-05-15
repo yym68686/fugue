@@ -599,6 +599,35 @@ func TestBuildCaddyConfigSkipsDifferentEdgeGroupRoutes(t *testing.T) {
 	}
 }
 
+func TestBuildCaddyConfigAddsNotFoundFallbackForUnmatchedHosts(t *testing.T) {
+	t.Parallel()
+
+	bundle := testBundle("routegen_fallback")
+	service := NewService(config.EdgeConfig{
+		APIURL:               "https://api.example.invalid",
+		EdgeToken:            "edge-secret",
+		EdgeGroupID:          "edge-group-default",
+		CaddyEnabled:         true,
+		CaddyAdminURL:        "http://127.0.0.1:2019",
+		CaddyListenAddr:      "127.0.0.1:18080",
+		CaddyProxyListenAddr: "127.0.0.1:7833",
+	}, log.New(ioDiscard{}, "", 0))
+
+	configBody, routeCount, err := service.buildCaddyConfig(bundle)
+	if err != nil {
+		t.Fatalf("build caddy config: %v", err)
+	}
+	if routeCount != 1 {
+		t.Fatalf("expected one emitted host route, got %d", routeCount)
+	}
+	configText := string(configBody)
+	if !strings.Contains(configText, `"handler":"static_response"`) ||
+		!strings.Contains(configText, `"status_code":404`) ||
+		!strings.Contains(configText, "fugue route not found") {
+		t.Fatalf("expected 404 fallback route in caddy config:\n%s", configText)
+	}
+}
+
 func TestBuildCaddyConfigSupportsPublicOnDemandTLSCanary(t *testing.T) {
 	t.Parallel()
 

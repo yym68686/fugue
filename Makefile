@@ -4,6 +4,7 @@ BIN_DIR ?= $(CURDIR)/bin
 .PHONY: test test-scripts generate-openapi generate-openapi-check build build-api build-controller build-agent build-edge build-dns build-cli run-api run-controller run-agent
 
 test:
+	bash ./scripts/scan_hardcoded_production_facts.sh
 	env GOCACHE=$(GOCACHE) go run ./cmd/fugue-openapi-gen -spec openapi/openapi.yaml -routes-out internal/api/routes_gen.go -spec-out internal/apispec/spec_gen.go -check
 	bash ./scripts/test_render_fugue_systemd_units.sh
 	env GOCACHE=$(GOCACHE) go test ./...

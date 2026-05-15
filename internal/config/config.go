@@ -26,15 +26,23 @@ type APIConfig struct {
 	DNSStaticRecordsJSON         string
 	PlatformRoutesJSON           string
 	EdgeTLSAskToken              string
+	AllowLegacyEdgeToken         bool
 	RegistryPushBase             string
 	RegistryPullBase             string
 	ClusterJoinRegistryEndpoint  string
 	ClusterJoinServer            string
+	ClusterJoinServerFallbacks   string
 	ClusterJoinCAHash            string
 	ClusterJoinBootstrapTokenTTL time.Duration
 	ClusterJoinMeshProvider      string
 	ClusterJoinMeshLoginServer   string
 	ClusterJoinMeshAuthKey       string
+	BundleSigningKey             string
+	BundleSigningKeyID           string
+	BundleSigningPreviousKey     string
+	BundleSigningPreviousKeyID   string
+	BundleRevokedKeyIDs          []string
+	BundleValidFor               time.Duration
 	ImportWorkDir                string
 	ShutdownDrainDelay           time.Duration
 	ShutdownTimeout              time.Duration
@@ -96,53 +104,63 @@ type AgentConfig struct {
 }
 
 type EdgeConfig struct {
-	APIURL                 string
-	EdgeToken              string
-	EdgeID                 string
-	EdgeGroupID            string
-	Region                 string
-	Country                string
-	PublicHostname         string
-	PublicIPv4             string
-	PublicIPv6             string
-	MeshIP                 string
-	Draining               bool
-	CachePath              string
-	ListenAddr             string
-	SyncInterval           time.Duration
-	HeartbeatInterval      time.Duration
-	HTTPTimeout            time.Duration
-	CaddyEnabled           bool
-	CaddyAdminURL          string
-	CaddyListenAddr        string
-	CaddyTLSMode           string
-	CaddyTLSAskURL         string
-	CaddyProxyListenAddr   string
-	CaddyStaticTLSCertFile string
-	CaddyStaticTLSKeyFile  string
+	APIURL                     string
+	EdgeToken                  string
+	EdgeID                     string
+	EdgeGroupID                string
+	Region                     string
+	Country                    string
+	PublicHostname             string
+	PublicIPv4                 string
+	PublicIPv6                 string
+	MeshIP                     string
+	Draining                   bool
+	CachePath                  string
+	ListenAddr                 string
+	SyncInterval               time.Duration
+	HeartbeatInterval          time.Duration
+	HTTPTimeout                time.Duration
+	CaddyEnabled               bool
+	CaddyAdminURL              string
+	CaddyListenAddr            string
+	CaddyTLSMode               string
+	CaddyTLSAskURL             string
+	CaddyProxyListenAddr       string
+	CaddyStaticTLSCertFile     string
+	CaddyStaticTLSKeyFile      string
+	BundleSigningKey           string
+	BundleSigningKeyID         string
+	BundleSigningPreviousKey   string
+	BundleSigningPreviousKeyID string
+	BundleRevokedKeyIDs        []string
 }
 
 type DNSConfig struct {
-	APIURL            string
-	EdgeToken         string
-	DNSNodeID         string
-	EdgeGroupID       string
-	PublicHostname    string
-	PublicIPv4        string
-	PublicIPv6        string
-	MeshIP            string
-	Zone              string
-	AnswerIPs         []string
-	RouteAAnswerIPs   []string
-	CachePath         string
-	ListenAddr        string
-	UDPAddr           string
-	TCPAddr           string
-	SyncInterval      time.Duration
-	HeartbeatInterval time.Duration
-	HTTPTimeout       time.Duration
-	TTL               int
-	Nameservers       []string
+	APIURL                     string
+	EdgeToken                  string
+	DNSNodeID                  string
+	EdgeGroupID                string
+	PublicHostname             string
+	PublicIPv4                 string
+	PublicIPv6                 string
+	MeshIP                     string
+	Zone                       string
+	AnswerIPs                  []string
+	RouteAAnswerIPs            []string
+	CachePath                  string
+	ListenAddr                 string
+	UDPAddr                    string
+	TCPAddr                    string
+	SyncInterval               time.Duration
+	HeartbeatInterval          time.Duration
+	HTTPTimeout                time.Duration
+	TTL                        int
+	Nameservers                []string
+	BundleSigningKey           string
+	BundleSigningKeyID         string
+	BundleSigningPreviousKey   string
+	BundleSigningPreviousKeyID string
+	BundleRevokedKeyIDs        []string
 }
 
 func APIFromEnv() APIConfig {
@@ -158,29 +176,34 @@ func APIFromEnv() APIConfig {
 		ControlPlaneGitHubWorkflow:   getenv("FUGUE_CONTROL_PLANE_GITHUB_WORKFLOW", "deploy-control-plane.yml"),
 		ControlPlaneGitHubAPIURL:     getenv("FUGUE_CONTROL_PLANE_GITHUB_API_URL", "https://api.github.com"),
 		ControlPlaneGitHubToken:      strings.TrimSpace(os.Getenv("FUGUE_CONTROL_PLANE_GITHUB_TOKEN")),
-		AppBaseDomain:                getenv("FUGUE_APP_BASE_DOMAIN", "fugue.pro"),
-		APIPublicDomain:              getenv("FUGUE_API_PUBLIC_DOMAIN", "api.fugue.pro"),
+		AppBaseDomain:                getenv("FUGUE_APP_BASE_DOMAIN", ""),
+		APIPublicDomain:              getenv("FUGUE_API_PUBLIC_DOMAIN", ""),
 		DNSStaticRecordsJSON:         strings.TrimSpace(os.Getenv("FUGUE_DNS_STATIC_RECORDS_JSON")),
 		PlatformRoutesJSON:           strings.TrimSpace(os.Getenv("FUGUE_PLATFORM_ROUTES_JSON")),
 		EdgeTLSAskToken:              strings.TrimSpace(os.Getenv("FUGUE_EDGE_TLS_ASK_TOKEN")),
-		RegistryPushBase:             getenv("FUGUE_REGISTRY_PUSH_BASE", "127.0.0.1:30500"),
+		AllowLegacyEdgeToken:         getenvBool("FUGUE_ALLOW_LEGACY_EDGE_TOKEN", false),
+		RegistryPushBase:             getenv("FUGUE_REGISTRY_PUSH_BASE", ""),
 		RegistryPullBase:             strings.TrimSpace(os.Getenv("FUGUE_REGISTRY_PULL_BASE")),
 		ClusterJoinRegistryEndpoint:  strings.TrimSpace(os.Getenv("FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT")),
 		ClusterJoinServer:            getenv("FUGUE_CLUSTER_JOIN_SERVER", ""),
+		ClusterJoinServerFallbacks:   strings.TrimSpace(os.Getenv("FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS")),
 		ClusterJoinCAHash:            strings.TrimSpace(os.Getenv("FUGUE_CLUSTER_JOIN_CA_HASH")),
 		ClusterJoinBootstrapTokenTTL: getenvDuration("FUGUE_CLUSTER_JOIN_BOOTSTRAP_TOKEN_TTL", 15*time.Minute),
 		ClusterJoinMeshProvider:      getenv("FUGUE_CLUSTER_JOIN_MESH_PROVIDER", ""),
 		ClusterJoinMeshLoginServer:   getenv("FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER", ""),
 		ClusterJoinMeshAuthKey:       getenv("FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY", ""),
+		BundleSigningKey:             strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_KEY")),
+		BundleSigningKeyID:           getenv("FUGUE_BUNDLE_SIGNING_KEY_ID", "control-plane"),
+		BundleSigningPreviousKey:     strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY")),
+		BundleSigningPreviousKeyID:   strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID")),
+		BundleRevokedKeyIDs:          getenvList("FUGUE_BUNDLE_REVOKED_KEY_IDS"),
+		BundleValidFor:               getenvDuration("FUGUE_BUNDLE_VALID_FOR", 15*time.Minute),
 		ImportWorkDir:                getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
 		ShutdownDrainDelay:           getenvDuration("FUGUE_API_SHUTDOWN_DRAIN_DELAY", 5*time.Second),
 		ShutdownTimeout:              getenvDuration("FUGUE_API_SHUTDOWN_TIMEOUT", 25*time.Second),
 	}
 	if cfg.RegistryPullBase == "" {
 		cfg.RegistryPullBase = cfg.RegistryPushBase
-	}
-	if cfg.WorkloadIdentitySigningKey == "" {
-		cfg.WorkloadIdentitySigningKey = cfg.BootstrapAdminKey
 	}
 	if cfg.ClusterJoinRegistryEndpoint == "" {
 		cfg.ClusterJoinRegistryEndpoint = cfg.RegistryPullBase
@@ -192,7 +215,7 @@ func ControllerFromEnv() ControllerConfig {
 	cfg := ControllerConfig{
 		StorePath:                     getenv("FUGUE_STORE_PATH", "./data/store.json"),
 		DatabaseURL:                   getenv("FUGUE_DATABASE_URL", ""),
-		APIPublicDomain:               getenv("FUGUE_API_PUBLIC_DOMAIN", "api.fugue.pro"),
+		APIPublicDomain:               getenv("FUGUE_API_PUBLIC_DOMAIN", ""),
 		WorkloadIdentitySigningKey:    strings.TrimSpace(os.Getenv("FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY")),
 		RegistryPushBase:              getenv("FUGUE_REGISTRY_PUSH_BASE", "127.0.0.1:30500"),
 		RegistryPullBase:              strings.TrimSpace(os.Getenv("FUGUE_REGISTRY_PULL_BASE")),
@@ -225,9 +248,6 @@ func ControllerFromEnv() ControllerConfig {
 	if cfg.RegistryPullBase == "" {
 		cfg.RegistryPullBase = cfg.RegistryPushBase
 	}
-	if cfg.WorkloadIdentitySigningKey == "" {
-		cfg.WorkloadIdentitySigningKey = strings.TrimSpace(os.Getenv("FUGUE_BOOTSTRAP_ADMIN_KEY"))
-	}
 	return cfg
 }
 
@@ -256,68 +276,67 @@ func AgentFromEnv() AgentConfig {
 }
 
 func EdgeFromEnv() EdgeConfig {
-	edgeToken := strings.TrimSpace(os.Getenv("FUGUE_EDGE_TOKEN"))
-	if edgeToken == "" {
-		edgeToken = strings.TrimSpace(os.Getenv("FUGUE_EDGE_TLS_ASK_TOKEN"))
-	}
 	return EdgeConfig{
-		APIURL:                 getenv("FUGUE_API_URL", "https://api.fugue.pro"),
-		EdgeToken:              edgeToken,
-		EdgeID:                 strings.TrimSpace(os.Getenv("FUGUE_EDGE_ID")),
-		EdgeGroupID:            strings.TrimSpace(os.Getenv("FUGUE_EDGE_GROUP_ID")),
-		Region:                 strings.TrimSpace(os.Getenv("FUGUE_EDGE_REGION")),
-		Country:                strings.TrimSpace(os.Getenv("FUGUE_EDGE_COUNTRY")),
-		PublicHostname:         strings.TrimSpace(os.Getenv("FUGUE_EDGE_PUBLIC_HOSTNAME")),
-		PublicIPv4:             strings.TrimSpace(os.Getenv("FUGUE_EDGE_PUBLIC_IPV4")),
-		PublicIPv6:             strings.TrimSpace(os.Getenv("FUGUE_EDGE_PUBLIC_IPV6")),
-		MeshIP:                 strings.TrimSpace(os.Getenv("FUGUE_EDGE_MESH_IP")),
-		Draining:               getenvBool("FUGUE_EDGE_DRAINING", false),
-		CachePath:              getenv("FUGUE_EDGE_ROUTES_CACHE_PATH", "/var/lib/fugue/edge/routes-cache.json"),
-		ListenAddr:             getenv("FUGUE_EDGE_LISTEN_ADDR", "127.0.0.1:7832"),
-		SyncInterval:           getenvDuration("FUGUE_EDGE_SYNC_INTERVAL", 15*time.Second),
-		HeartbeatInterval:      getenvDuration("FUGUE_EDGE_HEARTBEAT_INTERVAL", 30*time.Second),
-		HTTPTimeout:            getenvDuration("FUGUE_EDGE_HTTP_TIMEOUT", 10*time.Second),
-		CaddyEnabled:           getenvBool("FUGUE_EDGE_CADDY_ENABLED", false),
-		CaddyAdminURL:          getenv("FUGUE_EDGE_CADDY_ADMIN_URL", "http://127.0.0.1:2019"),
-		CaddyListenAddr:        getenv("FUGUE_EDGE_CADDY_LISTEN_ADDR", "127.0.0.1:18080"),
-		CaddyTLSMode:           getenv("FUGUE_EDGE_CADDY_TLS_MODE", "off"),
-		CaddyTLSAskURL:         strings.TrimSpace(os.Getenv("FUGUE_EDGE_CADDY_TLS_ASK_URL")),
-		CaddyProxyListenAddr:   getenv("FUGUE_EDGE_PROXY_LISTEN_ADDR", "127.0.0.1:7833"),
-		CaddyStaticTLSCertFile: strings.TrimSpace(os.Getenv("FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE")),
-		CaddyStaticTLSKeyFile:  strings.TrimSpace(os.Getenv("FUGUE_EDGE_CADDY_STATIC_TLS_KEY_FILE")),
+		APIURL:                     getenv("FUGUE_API_URL", ""),
+		EdgeToken:                  strings.TrimSpace(os.Getenv("FUGUE_EDGE_TOKEN")),
+		EdgeID:                     strings.TrimSpace(os.Getenv("FUGUE_EDGE_ID")),
+		EdgeGroupID:                strings.TrimSpace(os.Getenv("FUGUE_EDGE_GROUP_ID")),
+		Region:                     strings.TrimSpace(os.Getenv("FUGUE_EDGE_REGION")),
+		Country:                    strings.TrimSpace(os.Getenv("FUGUE_EDGE_COUNTRY")),
+		PublicHostname:             strings.TrimSpace(os.Getenv("FUGUE_EDGE_PUBLIC_HOSTNAME")),
+		PublicIPv4:                 strings.TrimSpace(os.Getenv("FUGUE_EDGE_PUBLIC_IPV4")),
+		PublicIPv6:                 strings.TrimSpace(os.Getenv("FUGUE_EDGE_PUBLIC_IPV6")),
+		MeshIP:                     strings.TrimSpace(os.Getenv("FUGUE_EDGE_MESH_IP")),
+		Draining:                   getenvBool("FUGUE_EDGE_DRAINING", false),
+		CachePath:                  getenv("FUGUE_EDGE_ROUTES_CACHE_PATH", "/var/lib/fugue/edge/routes-cache.json"),
+		ListenAddr:                 getenv("FUGUE_EDGE_LISTEN_ADDR", "127.0.0.1:7832"),
+		SyncInterval:               getenvDuration("FUGUE_EDGE_SYNC_INTERVAL", 15*time.Second),
+		HeartbeatInterval:          getenvDuration("FUGUE_EDGE_HEARTBEAT_INTERVAL", 30*time.Second),
+		HTTPTimeout:                getenvDuration("FUGUE_EDGE_HTTP_TIMEOUT", 10*time.Second),
+		CaddyEnabled:               getenvBool("FUGUE_EDGE_CADDY_ENABLED", false),
+		CaddyAdminURL:              getenv("FUGUE_EDGE_CADDY_ADMIN_URL", "http://127.0.0.1:2019"),
+		CaddyListenAddr:            getenv("FUGUE_EDGE_CADDY_LISTEN_ADDR", "127.0.0.1:18080"),
+		CaddyTLSMode:               getenv("FUGUE_EDGE_CADDY_TLS_MODE", "off"),
+		CaddyTLSAskURL:             strings.TrimSpace(os.Getenv("FUGUE_EDGE_CADDY_TLS_ASK_URL")),
+		CaddyProxyListenAddr:       getenv("FUGUE_EDGE_PROXY_LISTEN_ADDR", "127.0.0.1:7833"),
+		CaddyStaticTLSCertFile:     strings.TrimSpace(os.Getenv("FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE")),
+		CaddyStaticTLSKeyFile:      strings.TrimSpace(os.Getenv("FUGUE_EDGE_CADDY_STATIC_TLS_KEY_FILE")),
+		BundleSigningKey:           strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_KEY")),
+		BundleSigningKeyID:         getenv("FUGUE_BUNDLE_SIGNING_KEY_ID", "control-plane"),
+		BundleSigningPreviousKey:   strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY")),
+		BundleSigningPreviousKeyID: strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID")),
+		BundleRevokedKeyIDs:        getenvList("FUGUE_BUNDLE_REVOKED_KEY_IDS"),
 	}
 }
 
 func DNSFromEnv() DNSConfig {
-	edgeToken := strings.TrimSpace(os.Getenv("FUGUE_DNS_TOKEN"))
-	if edgeToken == "" {
-		edgeToken = strings.TrimSpace(os.Getenv("FUGUE_EDGE_TOKEN"))
-	}
-	if edgeToken == "" {
-		edgeToken = strings.TrimSpace(os.Getenv("FUGUE_EDGE_TLS_ASK_TOKEN"))
-	}
-	zone := getenv("FUGUE_DNS_ZONE", "dns.fugue.pro")
+	zone := getenv("FUGUE_DNS_ZONE", "")
 	return DNSConfig{
-		APIURL:            getenv("FUGUE_API_URL", "https://api.fugue.pro"),
-		EdgeToken:         edgeToken,
-		DNSNodeID:         strings.TrimSpace(os.Getenv("FUGUE_DNS_NODE_ID")),
-		EdgeGroupID:       strings.TrimSpace(os.Getenv("FUGUE_EDGE_GROUP_ID")),
-		PublicHostname:    strings.TrimSpace(os.Getenv("FUGUE_DNS_PUBLIC_HOSTNAME")),
-		PublicIPv4:        strings.TrimSpace(os.Getenv("FUGUE_DNS_PUBLIC_IPV4")),
-		PublicIPv6:        strings.TrimSpace(os.Getenv("FUGUE_DNS_PUBLIC_IPV6")),
-		MeshIP:            strings.TrimSpace(os.Getenv("FUGUE_DNS_MESH_IP")),
-		Zone:              zone,
-		AnswerIPs:         getenvList("FUGUE_DNS_ANSWER_IPS"),
-		RouteAAnswerIPs:   getenvList("FUGUE_DNS_ROUTE_A_ANSWER_IPS"),
-		CachePath:         getenv("FUGUE_DNS_CACHE_PATH", "/var/lib/fugue/dns/dns-cache.json"),
-		ListenAddr:        getenv("FUGUE_DNS_LISTEN_ADDR", "127.0.0.1:7834"),
-		UDPAddr:           getenv("FUGUE_DNS_UDP_ADDR", "127.0.0.1:5353"),
-		TCPAddr:           getenv("FUGUE_DNS_TCP_ADDR", "127.0.0.1:5353"),
-		SyncInterval:      getenvDuration("FUGUE_DNS_SYNC_INTERVAL", 15*time.Second),
-		HeartbeatInterval: getenvDuration("FUGUE_DNS_HEARTBEAT_INTERVAL", 30*time.Second),
-		HTTPTimeout:       getenvDuration("FUGUE_DNS_HTTP_TIMEOUT", 10*time.Second),
-		TTL:               getenvInt("FUGUE_DNS_TTL", 60),
-		Nameservers:       getenvList("FUGUE_DNS_NAMESERVERS"),
+		APIURL:                     getenv("FUGUE_API_URL", ""),
+		EdgeToken:                  strings.TrimSpace(os.Getenv("FUGUE_DNS_TOKEN")),
+		DNSNodeID:                  strings.TrimSpace(os.Getenv("FUGUE_DNS_NODE_ID")),
+		EdgeGroupID:                strings.TrimSpace(os.Getenv("FUGUE_EDGE_GROUP_ID")),
+		PublicHostname:             strings.TrimSpace(os.Getenv("FUGUE_DNS_PUBLIC_HOSTNAME")),
+		PublicIPv4:                 strings.TrimSpace(os.Getenv("FUGUE_DNS_PUBLIC_IPV4")),
+		PublicIPv6:                 strings.TrimSpace(os.Getenv("FUGUE_DNS_PUBLIC_IPV6")),
+		MeshIP:                     strings.TrimSpace(os.Getenv("FUGUE_DNS_MESH_IP")),
+		Zone:                       zone,
+		AnswerIPs:                  getenvList("FUGUE_DNS_ANSWER_IPS"),
+		RouteAAnswerIPs:            getenvList("FUGUE_DNS_ROUTE_A_ANSWER_IPS"),
+		CachePath:                  getenv("FUGUE_DNS_CACHE_PATH", "/var/lib/fugue/dns/dns-cache.json"),
+		ListenAddr:                 getenv("FUGUE_DNS_LISTEN_ADDR", "127.0.0.1:7834"),
+		UDPAddr:                    getenv("FUGUE_DNS_UDP_ADDR", "127.0.0.1:5353"),
+		TCPAddr:                    getenv("FUGUE_DNS_TCP_ADDR", "127.0.0.1:5353"),
+		SyncInterval:               getenvDuration("FUGUE_DNS_SYNC_INTERVAL", 15*time.Second),
+		HeartbeatInterval:          getenvDuration("FUGUE_DNS_HEARTBEAT_INTERVAL", 30*time.Second),
+		HTTPTimeout:                getenvDuration("FUGUE_DNS_HTTP_TIMEOUT", 10*time.Second),
+		TTL:                        getenvInt("FUGUE_DNS_TTL", 60),
+		Nameservers:                getenvList("FUGUE_DNS_NAMESERVERS"),
+		BundleSigningKey:           strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_KEY")),
+		BundleSigningKeyID:         getenv("FUGUE_BUNDLE_SIGNING_KEY_ID", "control-plane"),
+		BundleSigningPreviousKey:   strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY")),
+		BundleSigningPreviousKeyID: strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID")),
+		BundleRevokedKeyIDs:        getenvList("FUGUE_BUNDLE_REVOKED_KEY_IDS"),
 	}
 }
 

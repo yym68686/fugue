@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"fugue/internal/bundleauth"
 	"fugue/internal/config"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
@@ -45,11 +46,15 @@ type Status struct {
 	EdgeID              string     `json:"edge_id,omitempty"`
 	EdgeGroupID         string     `json:"edge_group_id,omitempty"`
 	BundleVersion       string     `json:"bundle_version,omitempty"`
+	ServingGeneration   string     `json:"serving_generation,omitempty"`
+	LKGGeneration       string     `json:"lkg_generation,omitempty"`
+	BundleValidUntil    *time.Time `json:"bundle_valid_until,omitempty"`
 	RouteCount          int        `json:"route_count"`
 	TLSAllowlistCount   int        `json:"tls_allowlist_count"`
 	LastSyncAt          *time.Time `json:"last_sync_at,omitempty"`
 	LastSuccessAt       *time.Time `json:"last_success_at,omitempty"`
 	LastError           string     `json:"last_error,omitempty"`
+	DegradedReason      string     `json:"degraded_reason,omitempty"`
 	StaleCache          bool       `json:"stale_cache"`
 	CachePath           string     `json:"cache_path,omitempty"`
 	CaddyEnabled        bool       `json:"caddy_enabled,omitempty"`
@@ -282,6 +287,14 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 			s.recordSyncError(err)
 			return err
 		}
+		if err := s.verifyBundle(bundle, now); err != nil {
+			if fallbackErr := s.LoadPreviousCache(); fallbackErr != nil && s.Logger != nil {
+				s.Logger.Printf("edge route previous cache fallback failed: %v", fallbackErr)
+			}
+			err = fmt.Errorf("verify edge route bundle: %w", err)
+			s.recordSyncError(err)
+			return err
+		}
 		etag := strings.TrimSpace(resp.Header.Get("ETag"))
 		if etag == "" {
 			etag = quoteETag(bundle.Version)
@@ -357,6 +370,17 @@ func (s *Service) LoadCache() error {
 	if cached.Bundle.Version == "" {
 		err := fmt.Errorf("edge route cache missing bundle version")
 		s.recordCacheLoad("error")
+		if fallbackErr := s.LoadPreviousCache(); fallbackErr == nil {
+			return nil
+		}
+		return err
+	}
+	if err := s.verifyBundle(cached.Bundle, time.Now().UTC()); err != nil {
+		err = fmt.Errorf("verify edge route cache: %w", err)
+		s.recordCacheLoad("error")
+		if fallbackErr := s.LoadPreviousCache(); fallbackErr == nil {
+			return nil
+		}
 		return err
 	}
 	s.recordCacheLoaded(cached)
@@ -565,6 +589,14 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "# HELP fugue_edge_stale_cache Whether fugue-edge is serving a last-known-good cached bundle after sync failure.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_stale_cache gauge")
 	fmt.Fprintf(w, "fugue_edge_stale_cache %d\n", boolGauge(status.StaleCache))
+	fmt.Fprintln(w, "# HELP fugue_edge_stale_age_seconds Seconds since the last successful bundle sync while serving a stale cache.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_stale_age_seconds gauge")
+	fmt.Fprintf(w, "fugue_edge_stale_age_seconds %.0f\n", staleAgeSeconds(status.StaleCache, status.LastSuccessAt, time.Now().UTC()))
+	if strings.TrimSpace(status.DegradedReason) != "" {
+		fmt.Fprintln(w, "# HELP fugue_edge_degraded_reason Current fugue-edge degraded reason.")
+		fmt.Fprintln(w, "# TYPE fugue_edge_degraded_reason gauge")
+		fmt.Fprintf(w, "fugue_edge_degraded_reason{reason=\"%s\"} 1\n", prometheusLabelValue(status.DegradedReason))
+	}
 	fmt.Fprintln(w, "# HELP fugue_edge_routes Number of routes in the current bundle.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_routes gauge")
 	fmt.Fprintf(w, "fugue_edge_routes{bundle_version=\"%s\"} %d\n", prometheusLabelValue(status.BundleVersion), status.RouteCount)
@@ -810,6 +842,8 @@ func (s *Service) newHeartbeatRequest(ctx context.Context) (*http.Request, error
 		"mesh_ip":               strings.TrimSpace(s.Config.MeshIP),
 		"route_bundle_version":  strings.TrimSpace(status.BundleVersion),
 		"dns_bundle_version":    "",
+		"serving_generation":    strings.TrimSpace(status.ServingGeneration),
+		"lkg_generation":        strings.TrimSpace(status.LKGGeneration),
 		"caddy_route_count":     snapshot.Metrics.CaddyRouteCount,
 		"caddy_applied_version": strings.TrimSpace(status.CaddyAppliedVersion),
 		"caddy_last_error":      strings.TrimSpace(status.CaddyLastError),
@@ -939,11 +973,89 @@ func (s *Service) writeCache(cached cacheFile) error {
 		s.recordCacheWrite("error")
 		return fmt.Errorf("write edge route cache temp file: %w", err)
 	}
+	s.preservePreviousCache(path)
 	if err := os.Rename(tmp, path); err != nil {
 		s.recordCacheWrite("error")
 		return fmt.Errorf("replace edge route cache: %w", err)
 	}
 	s.recordCacheWrite("success")
+	return nil
+}
+
+func (s *Service) LoadPreviousCache() error {
+	path := previousCachePath(s.Config.CachePath)
+	if path == "" {
+		return fmt.Errorf("previous edge route cache path is not configured")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			s.recordCacheLoad("miss")
+			return err
+		}
+		s.recordCacheLoad("error")
+		return fmt.Errorf("read previous edge route cache: %w", err)
+	}
+	var cached cacheFile
+	if err := json.Unmarshal(data, &cached); err != nil {
+		s.recordCacheLoad("error")
+		return fmt.Errorf("decode previous edge route cache: %w", err)
+	}
+	if cached.Bundle.Version == "" {
+		s.recordCacheLoad("error")
+		return fmt.Errorf("previous edge route cache missing bundle version")
+	}
+	if err := s.verifyBundle(cached.Bundle, time.Now().UTC()); err != nil {
+		s.recordCacheLoad("error")
+		return fmt.Errorf("verify previous edge route cache: %w", err)
+	}
+	s.recordCacheLoaded(cached)
+	s.recordCacheLoad("success")
+	if s.Logger != nil {
+		s.Logger.Printf("edge route previous cache loaded; version=%s etag=%s path=%s", cached.Bundle.Version, cached.ETag, path)
+	}
+	return nil
+}
+
+func (s *Service) preservePreviousCache(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
+		return
+	}
+	var cached cacheFile
+	if err := json.Unmarshal(data, &cached); err != nil || cached.Bundle.Version == "" {
+		return
+	}
+	if err := s.verifyBundle(cached.Bundle, time.Now().UTC()); err != nil {
+		return
+	}
+	if err := os.WriteFile(previousCachePath(path), data, 0o600); err != nil && s.Logger != nil {
+		s.Logger.Printf("preserve previous edge route cache failed: %v", err)
+	}
+}
+
+func previousCachePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	return path + ".previous"
+}
+
+func (s *Service) verifyBundle(bundle model.EdgeRouteBundle, now time.Time) error {
+	keyring := bundleauth.NewKeyring(
+		s.Config.BundleSigningKey,
+		s.Config.BundleSigningKeyID,
+		s.Config.BundleSigningPreviousKey,
+		s.Config.BundleSigningPreviousKeyID,
+		s.Config.BundleRevokedKeyIDs,
+	)
+	if err := bundleauth.VerifyEdgeRouteBundleWithKeyring(bundle, keyring, now); err != nil {
+		return err
+	}
+	if strings.TrimSpace(bundle.Version) == "" {
+		return fmt.Errorf("edge route bundle version is required")
+	}
 	return nil
 }
 
@@ -993,6 +1105,12 @@ func (s *Service) recordSyncError(err error) {
 		s.snapshot.StaleCache = true
 		s.snapshot.Status = "stale"
 		s.snapshot.Healthy = true
+		if !s.bundle.ValidUntil.IsZero() && now.After(s.bundle.ValidUntil) {
+			s.snapshot.Status = "degraded"
+			s.snapshot.DegradedReason = "route bundle valid_until expired"
+		} else if strings.TrimSpace(s.snapshot.DegradedReason) == "" {
+			s.snapshot.DegradedReason = "route bundle sync failed; serving cache"
+		}
 		s.decorateCaddyStatusLocked(&s.snapshot)
 		return
 	}
@@ -1158,18 +1276,31 @@ func (s *Service) statusForBundleLocked(bundle model.EdgeRouteBundle, syncAt tim
 	if stale {
 		status = "stale"
 	}
+	validUntil := bundle.ValidUntil
+	degradedReason := ""
+	if !validUntil.IsZero() && time.Now().UTC().After(validUntil) {
+		status = "degraded"
+		degradedReason = "route bundle valid_until expired"
+		stale = true
+	}
 	out := Status{
 		Status:            status,
 		Healthy:           true,
 		EdgeID:            strings.TrimSpace(s.Config.EdgeID),
 		EdgeGroupID:       strings.TrimSpace(s.Config.EdgeGroupID),
 		BundleVersion:     bundle.Version,
+		ServingGeneration: firstNonEmpty(bundle.Generation, bundle.Version),
+		LKGGeneration:     firstNonEmpty(bundle.Generation, bundle.Version),
 		RouteCount:        len(bundle.Routes),
 		TLSAllowlistCount: len(bundle.TLSAllowlist),
 		LastSyncAt:        &syncAt,
 		LastSuccessAt:     successAt,
+		DegradedReason:    degradedReason,
 		StaleCache:        stale,
 		CachePath:         strings.TrimSpace(s.Config.CachePath),
+	}
+	if !validUntil.IsZero() {
+		out.BundleValidUntil = &validUntil
 	}
 	s.decorateCaddyStatusLocked(&out)
 	return out
@@ -1353,6 +1484,17 @@ func bundleAgeSeconds(generatedAt *time.Time, now time.Time) float64 {
 		return 0
 	}
 	age := now.Sub(*generatedAt)
+	if age < 0 {
+		return 0
+	}
+	return age.Seconds()
+}
+
+func staleAgeSeconds(stale bool, lastSuccessAt *time.Time, now time.Time) float64 {
+	if !stale || lastSuccessAt == nil || lastSuccessAt.IsZero() || now.IsZero() {
+		return 0
+	}
+	age := now.Sub(*lastSuccessAt)
 	if age < 0 {
 		return 0
 	}

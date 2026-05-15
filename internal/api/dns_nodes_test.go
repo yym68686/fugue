@@ -373,6 +373,36 @@ func TestScopedEdgeTokenRestrictsDNSHeartbeat(t *testing.T) {
 	}
 }
 
+func TestScopedEdgeTokenRestrictsDNSZone(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	_, token, err := storeState.CreateEdgeNodeToken(model.EdgeNode{
+		ID:          "dns-us-1",
+		EdgeGroupID: "edge-group-country-us",
+		Status:      model.EdgeHealthUnknown,
+	})
+	if err != nil {
+		t.Fatalf("create edge node token: %v", err)
+	}
+	if _, err := storeState.UpdateDNSHeartbeat(model.DNSNode{
+		ID:          "dns-us-1",
+		EdgeGroupID: "edge-group-country-us",
+		Zone:        "dns.fugue.pro",
+		Status:      model.EdgeHealthHealthy,
+		Healthy:     true,
+	}); err != nil {
+		t.Fatalf("seed dns node: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token="+token+"&dns_node_id=dns-us-1&edge_group_id=edge-group-country-us&zone=other.example&answer_ip=203.0.113.10", nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected scoped token zone mismatch to be forbidden, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func assertDNSPreflightCheck(t *testing.T, checks []model.DNSDelegationPreflightCheck, name string, pass bool) {
 	t.Helper()
 	for _, check := range checks {

@@ -57,6 +57,7 @@ func TestEdgeRoutesBundleDerivesPlatformAndCustomDomainRoutes(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create background app: %v", err)
 	}
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-default-1", defaultEdgeGroupID, "203.0.113.20")
 
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret", nil)
@@ -83,8 +84,8 @@ func TestEdgeRoutesBundleDerivesPlatformAndCustomDomainRoutes(t *testing.T) {
 	if platform.Status != model.EdgeRouteStatusActive || platform.TLSPolicy != model.EdgeRouteTLSPolicyPlatform {
 		t.Fatalf("expected active platform route, got %+v", platform)
 	}
-	if platform.RoutePolicy != model.EdgeRoutePolicyRouteAOnly {
-		t.Fatalf("expected platform route to default to Route A only, got %+v", platform)
+	if platform.RoutePolicy != model.EdgeRoutePolicyEnabled {
+		t.Fatalf("expected platform route to default to edge, got %+v", platform)
 	}
 	if !strings.Contains(platform.UpstreamURL, ".svc.cluster.local:8080") {
 		t.Fatalf("expected service DNS upstream, got %+v", platform)
@@ -97,8 +98,8 @@ func TestEdgeRoutesBundleDerivesPlatformAndCustomDomainRoutes(t *testing.T) {
 	if custom.Status != model.EdgeRouteStatusActive || custom.TLSPolicy != model.EdgeRouteTLSPolicyCustomDomain {
 		t.Fatalf("expected active custom-domain route, got %+v", custom)
 	}
-	if custom.RoutePolicy != model.EdgeRoutePolicyRouteAOnly {
-		t.Fatalf("expected custom-domain route to default to Route A only, got %+v", custom)
+	if custom.RoutePolicy != model.EdgeRoutePolicyEnabled {
+		t.Fatalf("expected custom-domain route to default to edge, got %+v", custom)
 	}
 	if custom.Hostname == server.primaryCustomDomainTarget(app) {
 		t.Fatalf("expected route bundle to contain real Host, not CNAME target: %+v", custom)
@@ -107,7 +108,7 @@ func TestEdgeRoutesBundleDerivesPlatformAndCustomDomainRoutes(t *testing.T) {
 	if platformDomain == nil {
 		t.Fatalf("expected platform-domain route, got %+v", bundle.Routes)
 	}
-	if platformDomain.TLSPolicy != model.EdgeRouteTLSPolicyPlatform || platformDomain.RoutePolicy != model.EdgeRoutePolicyRouteAOnly {
+	if platformDomain.TLSPolicy != model.EdgeRouteTLSPolicyPlatform || platformDomain.RoutePolicy != model.EdgeRoutePolicyEnabled {
 		t.Fatalf("unexpected platform-domain route: %+v", platformDomain)
 	}
 	if len(bundle.TLSAllowlist) != 2 ||
@@ -227,9 +228,10 @@ func TestEdgeRoutePolicyCanaryUsesNearestHealthyEdgeGroup(t *testing.T) {
 	}
 	initialRoute := initialBundle.Routes[0]
 	if initialRoute.EdgeGroupID != "edge-group-country-hk" ||
-		initialRoute.FallbackEdgeGroupID != defaultEdgeGroupID ||
-		initialRoute.RoutePolicy != model.EdgeRoutePolicyRouteAOnly {
-		t.Fatalf("expected default HK Route A-only binding, got %+v", initialRoute)
+		initialRoute.RoutePolicy != model.EdgeRoutePolicyEnabled ||
+		initialRoute.Status != model.EdgeRouteStatusUnavailable ||
+		initialRoute.StatusReason != "edge group has no healthy edge nodes" {
+		t.Fatalf("expected default HK edge binding to degrade without healthy edges, got %+v", initialRoute)
 	}
 
 	hkBefore := httptest.NewRecorder()
@@ -715,4 +717,21 @@ type edgeRouteTestStore interface {
 	CreateOperation(model.Operation) (model.Operation, error)
 	CompleteManagedOperationWithResult(string, string, string, *model.AppSpec, *model.AppSource) (model.Operation, error)
 	GetApp(string) (model.App, error)
+}
+
+type edgeRouteHeartbeatStore interface {
+	UpdateEdgeHeartbeat(model.EdgeNode) (model.EdgeNode, model.EdgeGroup, error)
+}
+
+func recordHealthyEdgeForRouteTest(t *testing.T, storeState edgeRouteHeartbeatStore, id, groupID, publicIPv4 string) {
+	t.Helper()
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+		ID:          id,
+		EdgeGroupID: groupID,
+		PublicIPv4:  publicIPv4,
+		Status:      model.EdgeHealthHealthy,
+		Healthy:     true,
+	}); err != nil {
+		t.Fatalf("record healthy edge node: %v", err)
+	}
 }

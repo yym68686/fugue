@@ -1,0 +1,15 @@
+{{- if and .Values.controlPlanePostgres.enabled .Values.controlPlanePostgres.backup.enabled .Values.controlPlanePostgres.backup.scheduled.enabled }}
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: {{ include "fugue.controlPlanePostgresName" . }}-backup
+  labels:
+    {{- include "fugue.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane-postgres-backup
+spec:
+  schedule: {{ .Values.controlPlanePostgres.backup.scheduled.schedule | quote }}
+  immediate: {{ .Values.controlPlanePostgres.backup.scheduled.immediate }}
+  backupOwnerReference: {{ .Values.controlPlanePostgres.backup.scheduled.backupOwnerReference | quote }}
+  cluster:
+    name: {{ include "fugue.controlPlanePostgresName" . }}
+{{- end }}

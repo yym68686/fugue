@@ -23,9 +23,8 @@ type Authenticator struct {
 
 func New(store *store.Store, bootstrapAdminKey string) *Authenticator {
 	return &Authenticator{
-		Store:                      store,
-		BootstrapAdminKey:          bootstrapAdminKey,
-		WorkloadIdentitySigningKey: bootstrapAdminKey,
+		Store:             store,
+		BootstrapAdminKey: bootstrapAdminKey,
 	}
 }
 

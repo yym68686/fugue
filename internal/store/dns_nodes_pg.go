@@ -16,9 +16,10 @@ func (s *Store) pgListDNSNodes(edgeGroupID string) ([]model.DNSNode, error) {
 	query := `
 SELECT id, edge_group_id, public_hostname, public_ipv4, public_ipv6, mesh_ip, zone,
 	status, healthy, dns_bundle_version, record_count, cache_status,
-	cache_write_errors, cache_load_errors, bundle_sync_errors, query_count, query_error_count,
-	query_rcode_counts_json, query_qtype_counts_json, listen_addr, udp_addr, tcp_addr,
-	udp_listen, tcp_listen, last_error, last_seen_at, last_heartbeat_at, created_at, updated_at
+	serving_generation, lkg_generation, cache_write_errors, cache_load_errors, bundle_sync_errors,
+	query_count, query_error_count, query_rcode_counts_json, query_qtype_counts_json, listen_addr,
+	udp_addr, tcp_addr, udp_listen, tcp_listen, last_error, last_seen_at, last_heartbeat_at,
+	created_at, updated_at
 FROM fugue_dns_nodes`
 	args := []any{}
 	if edgeGroupID != "" {
@@ -54,9 +55,10 @@ func (s *Store) pgGetDNSNode(dnsNodeID string) (model.DNSNode, error) {
 	node, err := scanDNSNode(s.db.QueryRowContext(ctx, `
 SELECT id, edge_group_id, public_hostname, public_ipv4, public_ipv6, mesh_ip, zone,
 	status, healthy, dns_bundle_version, record_count, cache_status,
-	cache_write_errors, cache_load_errors, bundle_sync_errors, query_count, query_error_count,
-	query_rcode_counts_json, query_qtype_counts_json, listen_addr, udp_addr, tcp_addr,
-	udp_listen, tcp_listen, last_error, last_seen_at, last_heartbeat_at, created_at, updated_at
+	serving_generation, lkg_generation, cache_write_errors, cache_load_errors, bundle_sync_errors,
+	query_count, query_error_count, query_rcode_counts_json, query_qtype_counts_json, listen_addr,
+	udp_addr, tcp_addr, udp_listen, tcp_listen, last_error, last_seen_at, last_heartbeat_at,
+	created_at, updated_at
 FROM fugue_dns_nodes
 WHERE id = $1
 `, dnsNodeID))
@@ -97,15 +99,17 @@ func pgUpsertDNSNode(ctx context.Context, db dnsNodeDB, node model.DNSNode) (mod
 INSERT INTO fugue_dns_nodes (
 	id, edge_group_id, public_hostname, public_ipv4, public_ipv6, mesh_ip, zone,
 	status, healthy, dns_bundle_version, record_count, cache_status,
-	cache_write_errors, cache_load_errors, bundle_sync_errors, query_count, query_error_count,
-	query_rcode_counts_json, query_qtype_counts_json, listen_addr, udp_addr, tcp_addr,
-	udp_listen, tcp_listen, last_error, last_seen_at, last_heartbeat_at, created_at, updated_at
+	serving_generation, lkg_generation, cache_write_errors, cache_load_errors, bundle_sync_errors,
+	query_count, query_error_count, query_rcode_counts_json, query_qtype_counts_json, listen_addr,
+	udp_addr, tcp_addr, udp_listen, tcp_listen, last_error, last_seen_at, last_heartbeat_at,
+	created_at, updated_at
 ) VALUES (
 	$1, $2, $3, $4, $5, $6, $7,
 	$8, $9, $10, $11, $12,
 	$13, $14, $15, $16, $17,
 	$18, $19, $20, $21, $22,
-	$23, $24, $25, $26, $27, $28, $29
+	$23, $24, $25, $26, $27,
+	$28, $29, $30, $31
 )
 ON CONFLICT (id) DO UPDATE SET
 	edge_group_id = EXCLUDED.edge_group_id,
@@ -117,6 +121,8 @@ ON CONFLICT (id) DO UPDATE SET
 	status = EXCLUDED.status,
 	healthy = EXCLUDED.healthy,
 	dns_bundle_version = EXCLUDED.dns_bundle_version,
+	serving_generation = EXCLUDED.serving_generation,
+	lkg_generation = EXCLUDED.lkg_generation,
 	record_count = EXCLUDED.record_count,
 	cache_status = EXCLUDED.cache_status,
 	cache_write_errors = EXCLUDED.cache_write_errors,
@@ -137,11 +143,13 @@ ON CONFLICT (id) DO UPDATE SET
 	updated_at = EXCLUDED.updated_at
 RETURNING id, edge_group_id, public_hostname, public_ipv4, public_ipv6, mesh_ip, zone,
 	status, healthy, dns_bundle_version, record_count, cache_status,
-	cache_write_errors, cache_load_errors, bundle_sync_errors, query_count, query_error_count,
-	query_rcode_counts_json, query_qtype_counts_json, listen_addr, udp_addr, tcp_addr,
-	udp_listen, tcp_listen, last_error, last_seen_at, last_heartbeat_at, created_at, updated_at
+	serving_generation, lkg_generation, cache_write_errors, cache_load_errors, bundle_sync_errors,
+	query_count, query_error_count, query_rcode_counts_json, query_qtype_counts_json, listen_addr,
+	udp_addr, tcp_addr, udp_listen, tcp_listen, last_error, last_seen_at, last_heartbeat_at,
+	created_at, updated_at
 `, node.ID, node.EdgeGroupID, node.PublicHostname, node.PublicIPv4, node.PublicIPv6, node.MeshIP, node.Zone,
 		node.Status, node.Healthy, node.DNSBundleVersion, node.RecordCount, node.CacheStatus,
+		node.ServingGeneration, node.LKGGeneration,
 		int64(node.CacheWriteErrors), int64(node.CacheLoadErrors), int64(node.BundleSyncErrors), int64(node.QueryCount), int64(node.QueryErrorCount),
 		rcodeCountsJSON, qtypeCountsJSON, node.ListenAddr, node.UDPAddr, node.TCPAddr,
 		node.UDPListen, node.TCPListen, node.LastError, node.LastSeenAt, node.LastHeartbeatAt, node.CreatedAt, node.UpdatedAt)
@@ -176,6 +184,8 @@ func scanDNSNode(scanner sqlScanner) (model.DNSNode, error) {
 		&node.DNSBundleVersion,
 		&node.RecordCount,
 		&node.CacheStatus,
+		&node.ServingGeneration,
+		&node.LKGGeneration,
 		&cacheWriteErrors,
 		&cacheLoadErrors,
 		&bundleSyncErrors,

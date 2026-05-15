@@ -16,6 +16,7 @@ type upsertDNSACMEChallengeRequest struct {
 	Name             string     `json:"name"`
 	Value            string     `json:"value"`
 	TTL              int        `json:"ttl,omitempty"`
+	Owner            string     `json:"owner,omitempty"`
 	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
 	ExpiresInSeconds int        `json:"expires_in_seconds,omitempty"`
 }
@@ -59,6 +60,8 @@ func (s *Server) handleUpsertDNSACMEChallenge(w http.ResponseWriter, r *http.Req
 		Name:      req.Name,
 		Value:     req.Value,
 		TTL:       req.TTL,
+		Owner:     req.Owner,
+		CreatedBy: principal.ActorType + ":" + principal.ActorID,
 		ExpiresAt: expiresAt,
 	})
 	if err != nil {

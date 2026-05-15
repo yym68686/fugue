@@ -20,6 +20,7 @@ func (c *CLI) newAdminDNSCommand() *cobra.Command {
 	cmd.AddCommand(c.newAdminDNSACMECommand())
 	cmd.AddCommand(c.newAdminDNSStatusCommand())
 	cmd.AddCommand(c.newAdminDNSDelegationCommand())
+	cmd.AddCommand(c.newAdminDNSFullZoneCommand())
 	return cmd
 }
 
@@ -114,6 +115,41 @@ func (c *CLI) newAdminDNSStatusCommand() *cobra.Command {
 	return cmd
 }
 
+func (c *CLI) newAdminDNSFullZoneCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "full-zone",
+		Short: "Inspect full-zone delegation and protected-record readiness",
+	}
+	opts := struct {
+		Zone            string
+		DNSSECStatus    string
+		MinHealthyNodes int
+	}{Zone: defaultDNSDelegationZone(), DNSSECStatus: "disabled", MinHealthyNodes: 2}
+	cmd.AddCommand(&cobra.Command{
+		Use:   "preflight",
+		Short: "Run full-zone DNS preflight",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			response, err := client.DNSFullZonePreflight(opts.Zone, opts.DNSSECStatus, opts.MinHealthyNodes)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"preflight": response})
+			}
+			return writeDNSFullZonePreflight(c.stdout, response)
+		},
+	})
+	preflight := cmd.Commands()[0]
+	preflight.Flags().StringVar(&opts.Zone, "zone", opts.Zone, "DNS zone to validate")
+	preflight.Flags().StringVar(&opts.DNSSECStatus, "dnssec-status", opts.DNSSECStatus, "DNSSEC state: disabled, enabling, enabled, drift")
+	preflight.Flags().IntVar(&opts.MinHealthyNodes, "min-healthy-nodes", opts.MinHealthyNodes, "Minimum healthy DNS nodes required")
+	return cmd
+}
+
 func writeDNSNodeTable(w io.Writer, nodes []model.DNSNode) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	if _, err := fmt.Fprintln(tw, "ID\tGROUP\tSTATUS\tHEALTHY\tZONE\tBUNDLE\tRECORDS\tCACHE\tUDP\tTCP\tQUERIES\tERRORS\tLAST_SEEN"); err != nil {
@@ -200,6 +236,21 @@ func writeDNSDelegationPreflight(w io.Writer, response model.DNSDelegationPrefli
 		return err
 	}
 	return writeDNSDelegationPlan(w, response.DelegationPlan)
+}
+
+func writeDNSFullZonePreflight(w io.Writer, response model.DNSFullZonePreflightResponse) error {
+	if err := writeKeyValues(w,
+		kvPair{Key: "pass", Value: fmt.Sprintf("%t", response.Pass)},
+		kvPair{Key: "zone", Value: response.Zone},
+		kvPair{Key: "dnssec_status", Value: response.DNSSECStatus},
+		kvPair{Key: "generated_at", Value: formatTime(response.GeneratedAt)},
+	); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	return writeDNSPreflightCheckTable(w, response.Checks)
 }
 
 func writeDNSPreflightCheckTable(w io.Writer, checks []model.DNSDelegationPreflightCheck) error {
