@@ -638,6 +638,8 @@ func TestJoinClusterInstallScriptAvoidsRedundantRestarts(t *testing.T) {
 		`Downloading and installing k3s agent binaries`,
 		`Installing NFS client tools`,
 		`nfs-common`,
+		`reconcile_cni_bridge_mtu`,
+		`FLANNEL_MTU`,
 		`configure_k3s_api_load_balancer() {`,
 		`fugue-k3s-api-lb.service`,
 		`haproxy -Ws -f /etc/fugue/k3s-api-lb.cfg`,

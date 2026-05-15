@@ -1656,6 +1656,46 @@ install_nfs_client_tools() {
   return 0
 }
 
+flannel_mtu() {
+  local subnet_file="/run/flannel/subnet.env"
+  if [ ! -r "${subnet_file}" ]; then
+    return 1
+  fi
+  awk -F= '$1 == "FLANNEL_MTU" { print $2; exit }' "${subnet_file}"
+}
+
+interface_mtu() {
+  local iface="$1"
+  local path="/sys/class/net/${iface}/mtu"
+  if [ ! -r "${path}" ]; then
+    return 1
+  fi
+  cat "${path}"
+}
+
+reconcile_cni_bridge_mtu() {
+  local target_mtu=""
+  local current_mtu=""
+  local changed=1
+  target_mtu="$(flannel_mtu || true)"
+  case "${target_mtu}" in
+    ""|*[!0-9]*)
+      return 1
+      ;;
+  esac
+  for iface in cni0; do
+    current_mtu="$(interface_mtu "${iface}" || true)"
+    if [ -z "${current_mtu}" ] || [ "${current_mtu}" = "${target_mtu}" ]; then
+      continue
+    fi
+    if ip link set dev "${iface}" mtu "${target_mtu}"; then
+      log_step "Updated ${iface} MTU from ${current_mtu} to ${target_mtu}."
+      changed=0
+    fi
+  done
+  return "${changed}"
+}
+
 install_dns_escape_hatch_tools() {
   if command -v dnsmasq >/dev/null 2>&1; then
     log_step "Local DNS escape hatch tools are already installed."
@@ -2297,6 +2337,10 @@ if ! run_with_heartbeat "Installing NFS client tools" "5-30s" install_nfs_client
 fi
 
 restart_k3s_agent_if_needed "${k3s_restart_needed}"
+
+if ! reconcile_cni_bridge_mtu; then
+  log_step "CNI bridge MTU is already aligned or not ready yet."
+fi
 
 if ! run_with_heartbeat "Installing local DNS escape hatch" "5-30s" configure_dns_escape_hatch; then
   log_step "Local DNS escape hatch installation failed; orphan workloads may still depend on control-plane DNS."

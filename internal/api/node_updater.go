@@ -896,6 +896,46 @@ reconcile_registry_mirror() {
   return 0
 }
 
+flannel_mtu() {
+  local subnet_file="/run/flannel/subnet.env"
+  if [ ! -r "${subnet_file}" ]; then
+    return 1
+  fi
+  awk -F= '$1 == "FLANNEL_MTU" { print $2; exit }' "${subnet_file}"
+}
+
+interface_mtu() {
+  local iface="$1"
+  local path="/sys/class/net/${iface}/mtu"
+  if [ ! -r "${path}" ]; then
+    return 1
+  fi
+  cat "${path}"
+}
+
+reconcile_cni_bridge_mtu() {
+  local target_mtu=""
+  local current_mtu=""
+  local changed=1
+  target_mtu="$(flannel_mtu || true)"
+  case "${target_mtu}" in
+    ""|*[!0-9]*)
+      return 1
+      ;;
+  esac
+  for iface in cni0; do
+    current_mtu="$(interface_mtu "${iface}" || true)"
+    if [ -z "${current_mtu}" ] || [ "${current_mtu}" = "${target_mtu}" ]; then
+      continue
+    fi
+    if ip link set dev "${iface}" mtu "${target_mtu}"; then
+      log "updated ${iface} mtu from ${current_mtu} to ${target_mtu}"
+      changed=0
+    fi
+  done
+  return "${changed}"
+}
+
 render_lkg_service_env() {
   local target="$1"
   local generation_key="$2"
@@ -958,6 +998,9 @@ reconcile_node_state() {
   fi
   if reconcile_k3s_config; then
     log "updated k3s join configuration"
+  fi
+  if reconcile_cni_bridge_mtu; then
+    log "reconciled CNI bridge MTU"
   fi
   if reconcile_lkg_service_envs; then
     log "updated edge/dns non-secret environment generation"
