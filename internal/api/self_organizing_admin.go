@@ -689,7 +689,7 @@ func dnsInventoryHealthy(nodes []model.DNSNode) bool {
 		if strings.TrimSpace(node.LastError) != "" {
 			return false
 		}
-		if node.CacheWriteErrors != 0 || node.CacheLoadErrors != 0 || node.BundleSyncErrors != 0 {
+		if node.CacheWriteErrors != 0 || node.CacheLoadErrors != 0 {
 			return false
 		}
 		if cacheStatus := strings.ToLower(strings.TrimSpace(node.CacheStatus)); cacheStatus != "" && strings.Contains(cacheStatus, "error") {

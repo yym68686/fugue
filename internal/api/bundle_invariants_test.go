@@ -81,3 +81,26 @@ func TestEdgeDNSBundleInvariantRejectsMissingProtectedRecord(t *testing.T) {
 		t.Fatalf("expected protected record invariant failure, got %v", err)
 	}
 }
+
+func TestDNSInventoryHealthyAllowsHistoricalSyncErrors(t *testing.T) {
+	t.Parallel()
+
+	if !dnsInventoryHealthy([]model.DNSNode{{
+		ID:               "dns-us-1",
+		Status:           model.EdgeHealthHealthy,
+		Healthy:          true,
+		CacheStatus:      "ready",
+		BundleSyncErrors: 3,
+	}}) {
+		t.Fatal("historical bundle sync errors should not block currently healthy DNS inventory")
+	}
+	if dnsInventoryHealthy([]model.DNSNode{{
+		ID:               "dns-us-1",
+		Status:           model.EdgeHealthHealthy,
+		Healthy:          true,
+		CacheStatus:      "ready",
+		CacheWriteErrors: 1,
+	}}) {
+		t.Fatal("cache write errors must still block DNS inventory")
+	}
+}
