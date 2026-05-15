@@ -55,6 +55,8 @@ spec:
                 secretKeyRef:
                   name: {{ include "fugue.configSecretName" . }}
                   key: FUGUE_BOOTSTRAP_ADMIN_KEY
+            - name: FUGUE_API_PUBLIC_DOMAIN
+              value: {{ .Values.api.apiPublicDomain | quote }}
             - name: FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY
               valueFrom:
                 secretKeyRef:

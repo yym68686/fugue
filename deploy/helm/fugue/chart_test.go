@@ -172,6 +172,42 @@ func TestAPIAndControllerEvictQuicklyOnNodeFailure(t *testing.T) {
 	}
 }
 
+func TestAPIAndControllerReceivePublicAPIDomain(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "--set", "api.apiPublicDomain=api.example.com")
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	for _, name := range []string{
+		"fugue-fugue-api",
+		"fugue-fugue-controller",
+	} {
+		doc := manifestDocumentForKindAndName(manifest, "Deployment", name)
+		if doc == "" {
+			t.Fatalf("rendered manifest missing Deployment %s:\n%s", name, manifest)
+		}
+		for _, want := range []string{
+			"name: FUGUE_API_PUBLIC_DOMAIN",
+			"value: \"api.example.com\"",
+		} {
+			if !strings.Contains(doc, want) {
+				t.Fatalf("%s should receive API public domain; missing %q:\n%s", name, want, doc)
+			}
+		}
+	}
+}
+
 func TestStatelessControlPlaneTopologySpreadAllowsFailover(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")
