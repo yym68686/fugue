@@ -295,6 +295,8 @@ func TestUpgradeScriptBlocksOnSelfOrganizingPreflight(t *testing.T) {
 		"cleanup_orphaned_regional_daemonsets",
 		"deleting orphaned legacy regional DaemonSet",
 		"rollout_daemonset_status",
+		"FUGUE_EDGE_TOKEN_SECRET_NAME",
+		"dns.tokenSecret.name",
 		"/v1/admin/platform/autonomy/status",
 		"control-plane store promotion gate is blocked",
 		"for name in (\"discovery_bundle\", \"node_policy\", \"edge\", \"dns\", \"registry\", \"headscale\", \"restore_readiness\", \"route_fallback\")",

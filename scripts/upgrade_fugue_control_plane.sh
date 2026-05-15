@@ -1241,6 +1241,13 @@ append_upgrade_edge_dynamic_values() {
 
 edge:
 EOF
+  if [[ -n "$(trim_field "${FUGUE_EDGE_TOKEN_SECRET_NAME:-}")" ]]; then
+    {
+      printf '  tokenSecret:\n'
+      printf '    name: %s\n' "$(yaml_quote "${FUGUE_EDGE_TOKEN_SECRET_NAME}")"
+      printf '    key: %s\n' "$(yaml_quote "${FUGUE_EDGE_TOKEN_SECRET_KEY}")"
+    } >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+  fi
   if [[ -n "${edge_region}" ]]; then
     printf '  region: %s\n' "$(yaml_quote "${edge_region}")" >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
   fi
@@ -1309,6 +1316,14 @@ EOF
 
   if [[ "${FUGUE_DNS_ENABLED}" != "true" ]]; then
     return 0
+  fi
+
+  if [[ -n "$(trim_field "${FUGUE_DNS_TOKEN_SECRET_NAME:-}")" ]]; then
+    {
+      printf '  tokenSecret:\n'
+      printf '    name: %s\n' "$(yaml_quote "${FUGUE_DNS_TOKEN_SECRET_NAME}")"
+      printf '    key: %s\n' "$(yaml_quote "${FUGUE_DNS_TOKEN_SECRET_KEY}")"
+    } >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
   fi
 
   cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<'EOF'
@@ -1390,6 +1405,12 @@ build_dns_helm_set_args() {
     --set-string "dns.zone=${FUGUE_DNS_ZONE}"
     --set "dns.ttl=${FUGUE_DNS_TTL}"
   )
+  if [[ -n "$(trim_field "${FUGUE_DNS_TOKEN_SECRET_NAME:-}")" ]]; then
+    DNS_HELM_SET_ARGS+=(
+      --set-string "dns.tokenSecret.name=${FUGUE_DNS_TOKEN_SECRET_NAME}"
+      --set-string "dns.tokenSecret.key=${FUGUE_DNS_TOKEN_SECRET_KEY}"
+    )
+  fi
   while IFS= read -r answer_ip; do
     DNS_HELM_SET_ARGS+=(--set-string "dns.answerIPs[${index}]=${answer_ip}")
     index=$((index + 1))
@@ -2597,6 +2618,12 @@ main() {
   FUGUE_EDGE_MESH_IP="${FUGUE_EDGE_MESH_IP:-}"
   FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE="${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE:-}"
   FUGUE_EDGE_EXTRA_GROUPS="${FUGUE_EDGE_EXTRA_GROUPS:-}"
+  FUGUE_EDGE_TOKEN_SECRET_NAME="${FUGUE_EDGE_TOKEN_SECRET_NAME:-}"
+  if [[ -n "$(trim_field "${FUGUE_EDGE_TOKEN_SECRET_NAME}")" ]]; then
+    FUGUE_EDGE_TOKEN_SECRET_KEY="${FUGUE_EDGE_TOKEN_SECRET_KEY:-FUGUE_EDGE_TOKEN}"
+  else
+    FUGUE_EDGE_TOKEN_SECRET_KEY="${FUGUE_EDGE_TOKEN_SECRET_KEY:-FUGUE_EDGE_TLS_ASK_TOKEN}"
+  fi
   FUGUE_DNS_ENABLED="${FUGUE_DNS_ENABLED:-false}"
   FUGUE_DNS_ANSWER_IPS="${FUGUE_DNS_ANSWER_IPS:-}"
   FUGUE_DNS_ROUTE_A_ANSWER_IPS="${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-}"
@@ -2604,6 +2631,12 @@ main() {
   FUGUE_PLATFORM_ROUTES_JSON="${FUGUE_PLATFORM_ROUTES_JSON:-}"
   FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE="${FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE:-}"
   FUGUE_DNS_EXTRA_GROUPS="${FUGUE_DNS_EXTRA_GROUPS:-}"
+  FUGUE_DNS_TOKEN_SECRET_NAME="${FUGUE_DNS_TOKEN_SECRET_NAME:-${FUGUE_EDGE_TOKEN_SECRET_NAME}}"
+  if [[ -n "$(trim_field "${FUGUE_DNS_TOKEN_SECRET_NAME}")" ]]; then
+    FUGUE_DNS_TOKEN_SECRET_KEY="${FUGUE_DNS_TOKEN_SECRET_KEY:-FUGUE_DNS_TOKEN}"
+  else
+    FUGUE_DNS_TOKEN_SECRET_KEY="${FUGUE_DNS_TOKEN_SECRET_KEY:-FUGUE_EDGE_TLS_ASK_TOKEN}"
+  fi
   FUGUE_DNS_NAMESERVERS="${FUGUE_DNS_NAMESERVERS:-}"
   FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED="${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED:-false}"
   if [[ "${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED}" == "true" ]]; then
