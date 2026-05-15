@@ -84,18 +84,18 @@ spec:
                 secretKeyRef:
                   name: {{ $dnsTokenSecretName }}
                   key: {{ $dnsTokenSecretKey }}
-	            - name: FUGUE_BUNDLE_SIGNING_KEY
-	              valueFrom:
-	                secretKeyRef:
-	                  name: {{ include "fugue.configSecretName" $ }}
-	                  key: FUGUE_BUNDLE_SIGNING_KEY
+            - name: FUGUE_BUNDLE_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" $ }}
+                  key: FUGUE_BUNDLE_SIGNING_KEY
             - name: FUGUE_BUNDLE_SIGNING_KEY_ID
               value: {{ $.Values.bundle.signingKeyID | quote }}
-	            - name: FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY
-	              valueFrom:
-	                secretKeyRef:
-	                  name: {{ include "fugue.configSecretName" $ }}
-	                  key: FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY
+            - name: FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" $ }}
+                  key: FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY
                   optional: true
             - name: FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID
               value: {{ $.Values.bundle.previousSigningKeyID | quote }}
