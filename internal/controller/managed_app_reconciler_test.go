@@ -67,6 +67,132 @@ func TestManagedAppExpectedObjectNamesIncludesVolSyncWhenReplicationEnabled(t *t
 	}
 }
 
+func TestEnsureManagedPostgresDataSafetyRejectsImplicitInitDBForExistingService(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Status: model.AppStatus{
+			Phase:           "deployed",
+			CurrentReplicas: 1,
+		},
+		BackingServices: []model.BackingService{
+			{
+				ID:         "svc_pg",
+				OwnerAppID: "app_demo",
+				Type:       model.BackingServiceTypePostgres,
+				Status:     model.BackingServiceStatusActive,
+				Spec: model.BackingServiceSpec{
+					Postgres: &model.AppPostgresSpec{
+						ServiceName: "demo-postgres",
+						Database:    "app",
+						User:        "app",
+					},
+				},
+				CreatedAt: time.Date(2026, time.May, 14, 10, 0, 0, 0, time.UTC),
+			},
+		},
+	}
+	desiredObjects := []map[string]any{
+		{
+			"apiVersion": runtime.CloudNativePGAPIVersion,
+			"kind":       runtime.CloudNativePGClusterKind,
+			"metadata": map[string]any{
+				"name": "demo-postgres",
+				"labels": map[string]any{
+					runtime.FugueLabelBackingServiceType: model.BackingServiceTypePostgres,
+					runtime.FugueLabelBackingServiceID:   "svc_pg",
+				},
+			},
+		},
+	}
+	client := &kubeClient{
+		baseURL: "https://kubernetes.example",
+		client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method == http.MethodGet && req.URL.Path == "/apis/postgresql.cnpg.io/v1/namespaces/tenant-demo/clusters/demo-postgres" {
+				return notFoundJSONResponse(), nil
+			}
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
+			return nil, nil
+		})},
+	}
+	svc := &Service{now: func() time.Time {
+		return time.Date(2026, time.May, 15, 10, 0, 0, 0, time.UTC)
+	}}
+
+	err := svc.ensureManagedPostgresDataSafety(context.Background(), client, "tenant-demo", runtime.ManagedAppObject{}, app, desiredObjects)
+	if err == nil {
+		t.Fatal("expected implicit initdb to be rejected")
+	}
+	if !strings.Contains(err.Error(), "refusing to initialize managed postgres cluster") {
+		t.Fatalf("expected managed postgres safety error, got %v", err)
+	}
+}
+
+func TestManagedPostgresMissingClusterShouldBlockOnlyWhenServiceHasRuntimeHistory(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.May, 15, 10, 0, 0, 0, time.UTC)
+	app := model.App{ID: "app_demo"}
+	service := model.BackingService{
+		ID:         "svc_pg",
+		OwnerAppID: "app_demo",
+		Type:       model.BackingServiceTypePostgres,
+		Status:     model.BackingServiceStatusActive,
+		Spec: model.BackingServiceSpec{
+			Postgres: &model.AppPostgresSpec{Database: "app", User: "app"},
+		},
+		CreatedAt: now.Add(-time.Hour),
+	}
+
+	if managedPostgresMissingClusterShouldBlock(app, service, runtime.ManagedBackingServiceStatus{}, now) {
+		t.Fatal("expected old undeployed service without runtime evidence to remain eligible for first initdb")
+	}
+
+	app.Status.Phase = "deployed"
+	if !managedPostgresMissingClusterShouldBlock(app, service, runtime.ManagedBackingServiceStatus{}, now) {
+		t.Fatal("expected deployed app with old postgres service to block missing cluster initdb")
+	}
+
+	freshService := service
+	freshService.CreatedAt = now.Add(-time.Minute)
+	if managedPostgresMissingClusterShouldBlock(app, freshService, runtime.ManagedBackingServiceStatus{}, now) {
+		t.Fatal("expected fresh service inside init grace period not to block")
+	}
+
+	if !managedPostgresMissingClusterShouldBlock(model.App{ID: "app_demo"}, freshService, runtime.ManagedBackingServiceStatus{CurrentRuntimeReadyAt: now.Format(time.RFC3339)}, now) {
+		t.Fatal("expected managed status runtime evidence to block even inside grace period")
+	}
+
+	foreignService := service
+	foreignService.OwnerAppID = "app_other"
+	if managedPostgresMissingClusterShouldBlock(app, foreignService, runtime.ManagedBackingServiceStatus{}, now) {
+		t.Fatal("expected non-owned service not to block this app")
+	}
+}
+
+func TestManagedPostgresStatefulObjectDetectors(t *testing.T) {
+	t.Parallel()
+
+	cluster := kubeCloudNativePGCluster{}
+	cluster.Metadata.Labels = map[string]string{
+		runtime.FugueLabelBackingServiceID: "svc_pg",
+	}
+	if !managedPostgresClusterLooksStateful(cluster) {
+		t.Fatal("expected backing-service labeled CNPG cluster to look stateful")
+	}
+
+	pvc := kubePersistentVolumeClaim{}
+	pvc.Metadata.Labels = map[string]string{
+		"cnpg.io/cluster": "demo-postgres",
+	}
+	if !persistentVolumeClaimLooksLikeManagedPostgresData(pvc) {
+		t.Fatal("expected CNPG PVC to look like managed postgres data")
+	}
+}
+
 func TestBuildManagedAppStatusKeepsCurrentReleaseDuringRollout(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",

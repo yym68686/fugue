@@ -13,6 +13,8 @@ import (
 	"fugue/internal/store"
 )
 
+const managedPostgresExistingServiceInitGracePeriod = 15 * time.Minute
+
 func (s *Service) applyManagedAppDesiredState(ctx context.Context, app model.App, scheduling runtime.SchedulingConstraints) error {
 	client, err := s.kubeClient()
 	if err != nil {
@@ -227,6 +229,9 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read app fence epoch: %w", err))
 	}
 	decorateManagedAppObjectsWithFenceEpoch(childObjects, app, fenceEpoch)
+	if err := s.ensureManagedPostgresDataSafety(ctx, client, namespace, managed, app, childObjects); err != nil {
+		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
+	}
 	if err := client.applyObjects(ctx, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("apply managed app child objects: %w", err))
 	}
@@ -1047,6 +1052,134 @@ func firstNonEmptyString(values ...string) string {
 	return ""
 }
 
+func (s *Service) ensureManagedPostgresDataSafety(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	managed runtime.ManagedAppObject,
+	app model.App,
+	desiredObjects []map[string]any,
+) error {
+	desiredClustersByServiceID := desiredManagedPostgresClustersByServiceID(desiredObjects)
+	if len(desiredClustersByServiceID) == 0 {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	if s != nil && s.now != nil {
+		now = s.now().UTC()
+	}
+	for _, service := range app.BackingServices {
+		serviceID := strings.TrimSpace(service.ID)
+		clusterName := desiredClustersByServiceID[serviceID]
+		if serviceID == "" || clusterName == "" {
+			continue
+		}
+		if !managedPostgresMissingClusterShouldBlock(app, service, managedBackingServiceStatusByID(managed.Status.BackingServices, serviceID), now) {
+			continue
+		}
+		_, found, err := client.getCloudNativePGCluster(ctx, namespace, clusterName)
+		if err != nil {
+			return fmt.Errorf("read managed postgres cluster %s/%s before apply: %w", namespace, clusterName, err)
+		}
+		if found {
+			continue
+		}
+		return fmt.Errorf(
+			"refusing to initialize managed postgres cluster %s/%s for existing backing service %s; "+
+				"the control plane has evidence this database existed before, so recreate requires an explicit database restore or reset operation",
+			namespace,
+			clusterName,
+			serviceID,
+		)
+	}
+	return nil
+}
+
+func desiredManagedPostgresClustersByServiceID(objects []map[string]any) map[string]string {
+	out := make(map[string]string)
+	for _, obj := range objects {
+		if strings.TrimSpace(objectStringField(obj, "apiVersion")) != runtime.CloudNativePGAPIVersion ||
+			strings.TrimSpace(objectStringField(obj, "kind")) != runtime.CloudNativePGClusterKind {
+			continue
+		}
+		metadata, _ := obj["metadata"].(map[string]any)
+		if metadata == nil {
+			continue
+		}
+		name, _ := metadata["name"].(string)
+		labels, _ := metadata["labels"].(map[string]string)
+		if labels == nil {
+			if rawLabels, _ := metadata["labels"].(map[string]any); len(rawLabels) > 0 {
+				labels = make(map[string]string, len(rawLabels))
+				for key, value := range rawLabels {
+					labels[key] = fmt.Sprint(value)
+				}
+			}
+		}
+		if labels[runtime.FugueLabelBackingServiceType] != model.BackingServiceTypePostgres {
+			continue
+		}
+		serviceID := strings.TrimSpace(labels[runtime.FugueLabelBackingServiceID])
+		if serviceID == "" || strings.TrimSpace(name) == "" {
+			continue
+		}
+		out[serviceID] = strings.TrimSpace(name)
+	}
+	return out
+}
+
+func managedPostgresMissingClusterShouldBlock(app model.App, service model.BackingService, status runtime.ManagedBackingServiceStatus, now time.Time) bool {
+	if strings.TrimSpace(service.ID) == "" ||
+		!strings.EqualFold(strings.TrimSpace(service.Type), model.BackingServiceTypePostgres) ||
+		service.Spec.Postgres == nil ||
+		strings.EqualFold(strings.TrimSpace(service.Status), model.BackingServiceStatusDeleted) {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(service.OwnerAppID), strings.TrimSpace(app.ID)) {
+		return false
+	}
+	if service.CurrentRuntimeStartedAt != nil || service.CurrentRuntimeReadyAt != nil ||
+		strings.TrimSpace(status.CurrentRuntimeStartedAt) != "" ||
+		strings.TrimSpace(status.CurrentRuntimeReadyAt) != "" {
+		return true
+	}
+	if !managedAppHasRuntimeHistory(app) || service.CreatedAt.IsZero() {
+		return false
+	}
+	return now.Sub(service.CreatedAt) >= managedPostgresExistingServiceInitGracePeriod
+}
+
+func managedAppHasRuntimeHistory(app model.App) bool {
+	if strings.TrimSpace(app.Status.CurrentRuntimeID) != "" ||
+		app.Status.CurrentReplicas > 0 ||
+		app.Status.CurrentReleaseStartedAt != nil ||
+		app.Status.CurrentReleaseReadyAt != nil {
+		return true
+	}
+	switch strings.TrimSpace(strings.ToLower(app.Status.Phase)) {
+	case "deployed", "scaled", "disabled", "failed", "failed-over":
+		return true
+	default:
+		return false
+	}
+}
+
+func managedPostgresClusterLooksStateful(cluster kubeCloudNativePGCluster) bool {
+	labels := cluster.Metadata.Labels
+	return strings.EqualFold(strings.TrimSpace(labels[runtime.FugueLabelBackingServiceType]), model.BackingServiceTypePostgres) ||
+		strings.TrimSpace(labels[runtime.FugueLabelBackingServiceID]) != ""
+}
+
+func persistentVolumeClaimLooksLikeManagedPostgresData(pvc kubePersistentVolumeClaim) bool {
+	labels := pvc.Metadata.Labels
+	if strings.TrimSpace(labels["cnpg.io/cluster"]) != "" {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(labels[runtime.FugueLabelBackingServiceType]), model.BackingServiceTypePostgres) ||
+		strings.TrimSpace(labels[runtime.FugueLabelBackingServiceID]) != ""
+}
+
 func (s *Service) pruneManagedAppStaleObjects(ctx context.Context, client *kubeClient, namespace string, app model.App, desiredObjects []map[string]any) error {
 	if strings.TrimSpace(app.ID) == "" {
 		return nil
@@ -1074,6 +1207,13 @@ func (s *Service) pruneManagedAppStaleObjects(ctx context.Context, client *kubeC
 	for _, name := range clusters {
 		if _, ok := desiredByKind[runtime.CloudNativePGClusterKind][name]; ok {
 			continue
+		}
+		cluster, found, err := client.getCloudNativePGCluster(ctx, namespace, name)
+		if err != nil {
+			return err
+		}
+		if found && managedPostgresClusterLooksStateful(cluster) {
+			return fmt.Errorf("refusing to prune managed postgres cluster %s/%s outside an explicit database restore or reset operation", namespace, name)
 		}
 		if err := client.deleteCloudNativePGCluster(ctx, namespace, name); err != nil {
 			return err
@@ -1139,6 +1279,13 @@ func (s *Service) pruneManagedAppStaleObjects(ctx context.Context, client *kubeC
 	for _, name := range pvcs {
 		if _, ok := desiredByKind["PersistentVolumeClaim"][name]; ok {
 			continue
+		}
+		pvc, found, err := client.getPersistentVolumeClaim(ctx, namespace, name)
+		if err != nil {
+			return err
+		}
+		if found && persistentVolumeClaimLooksLikeManagedPostgresData(pvc) {
+			return fmt.Errorf("refusing to prune managed postgres pvc %s/%s outside an explicit database restore or reset operation", namespace, name)
 		}
 		if err := client.deletePersistentVolumeClaim(ctx, namespace, name); err != nil {
 			return err

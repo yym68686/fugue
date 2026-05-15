@@ -27,6 +27,7 @@ func (c *CLI) newAppDatabaseCommand() *cobra.Command {
 		c.newAppDatabaseDisableCommand(),
 		c.newAppDatabaseSwitchoverCommand(),
 		c.newAppDatabaseLocalizeCommand(),
+		c.newAppDatabaseRestoreCommand(),
 	)
 	return cmd
 }

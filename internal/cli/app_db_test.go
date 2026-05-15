@@ -197,6 +197,111 @@ func TestRunAppDatabaseShowUsesOwnedBackingService(t *testing.T) {
 	}
 }
 
+func TestRunAppDatabaseRestorePlanOutputsGuardedPlan(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_a","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_a","replicas":1},"status":{"phase":"ready","current_replicas":1},"backing_services":[{"id":"svc_pg","tenant_id":"tenant_123","project_id":"project_123","owner_app_id":"app_123","name":"demo","type":"postgres","provisioner":"managed","status":"active","spec":{"postgres":{"runtime_id":"runtime_a","database":"app","user":"app","service_name":"demo-postgres"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}],"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/database/status":
+			_, _ = w.Write([]byte(`{"status":{"app_id":"app_123","enabled":true,"service_name":"demo-postgres","owner":"app","runtime_id":"runtime_a","backup_status":"required","restore_status":"required","grant_verification":"required","generated_at":"2026-04-02T00:00:00Z"},"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_a","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/database/query":
+			_, _ = w.Write([]byte(`{"database":"app","host":"demo-postgres-rw","user":"app","columns":[{"name":"database","database_type":"text"},{"name":"user","database_type":"text"},{"name":"user_table_count","database_type":"int8"}],"rows":[{"database":"app","user":"app","user_table_count":12}],"row_count":1,"max_rows":1,"read_only":true,"duration_ms":3}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"-o", "json",
+		"app", "db", "restore", "plan", "demo",
+		"--source-node", "node-a",
+		"--source-pgdata", "/var/lib/rancher/k3s/storage/pvc-old/pgdata",
+		"--expected-system-id", "7624486791372800022",
+		"--table-min-rows", "users=1",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app db restore plan: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{
+		`"source_node": "node-a"`,
+		`"source_pgdata": "/var/lib/rancher/k3s/storage/pvc-old/pgdata"`,
+		`"expected_system_id": "7624486791372800022"`,
+		`"restore_mode": "plan_only"`,
+		`"table": "users"`,
+		`"current_probe"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected output to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAppDatabaseRestoreVerifyRunsReadOnlyChecks(t *testing.T) {
+	t.Parallel()
+
+	var tableQuerySeen bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_a","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_a","replicas":1,"postgres":{"database":"app","user":"app","service_name":"demo-postgres"}},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/database/query":
+			var body struct {
+				SQL string `json:"sql"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode query body: %v", err)
+			}
+			switch {
+			case strings.Contains(body.SQL, "current_database()"):
+				_, _ = w.Write([]byte(`{"database":"app","host":"demo-postgres-rw","user":"app","columns":[{"name":"database","database_type":"text"}],"rows":[{"database":"app"}],"row_count":1,"max_rows":1,"read_only":true,"duration_ms":3}`))
+			case strings.Contains(body.SQL, `from "users"`):
+				tableQuerySeen = true
+				_, _ = w.Write([]byte(`{"database":"app","host":"demo-postgres-rw","user":"app","columns":[{"name":"row_count","database_type":"int8"}],"rows":[{"row_count":42}],"row_count":1,"max_rows":1,"read_only":true,"duration_ms":3}`))
+			default:
+				t.Fatalf("unexpected query SQL %q", body.SQL)
+			}
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "db", "restore", "verify", "demo",
+		"--expected-database", "app",
+		"--table-min-rows", "users=1",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app db restore verify: %v", err)
+	}
+	if !tableQuerySeen {
+		t.Fatal("expected restore verify to query table row count")
+	}
+	out := stdout.String()
+	for _, want := range []string{"checks_passed=true", "check=database_name status=pass", "check=table_min_rows:users status=pass"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
 func TestRunAppDatabaseConfigureUsesOwnedBackingServiceAsBaseline(t *testing.T) {
 	t.Parallel()
 

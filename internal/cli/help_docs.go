@@ -185,6 +185,7 @@ fugue app db show my-app
 fugue app db query my-app --sql "select count(*) from gateway_request_logs"
 fugue app db configure my-app --database app --user app
 fugue app db switchover my-app runtime-b
+fugue app db restore plan my-app --source-node node-a --source-pgdata /var/lib/rancher/k3s/storage/pvc-old/pgdata --expected-system-id 7624486791372800022 --table-min-rows users=1
 `),
 	},
 	"fugue app db query": {
@@ -196,6 +197,17 @@ This is the primary CLI path for inspecting business tables and request-log tabl
 		Example: strings.TrimSpace(`
 fugue app db query my-app --sql "select count(*) from users"
 fugue app db query my-app --sql "select * from gateway_request_logs order by created_at desc limit 50"
+`),
+	},
+	"fugue app db restore": {
+		Long: strings.TrimSpace(`
+Plan and verify app-owned managed Postgres restores without guessing at Kubernetes storage state.
+
+The plan command is non-mutating and records the source PGDATA, expected PostgreSQL system identifier, and post-restore table checks. The verify command runs read-only SQL checks against the app database after the restore path has been applied.
+`),
+		Example: strings.TrimSpace(`
+fugue app db restore plan my-app --source-node node-a --source-pgdata /var/lib/rancher/k3s/storage/pvc-old/pgdata --expected-system-id 7624486791372800022 --table-min-rows users=1
+fugue app db restore verify my-app --expected-database app --table-min-rows users=1
 `),
 	},
 	"fugue app failover": {
