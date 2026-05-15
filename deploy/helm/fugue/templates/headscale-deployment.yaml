@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: headscale
-          image: "{{ .Values.headscale.image.repository }}:{{ .Values.headscale.image.tag }}"
+          image: {{ include "fugue.imageRef" (dict "repository" .Values.headscale.image.repository "tag" .Values.headscale.image.tag "digest" .Values.headscale.image.digest) | quote }}
           imagePullPolicy: {{ .Values.headscale.image.pullPolicy }}
           args:
             - serve

@@ -46,7 +46,7 @@ spec:
       {{- end }}
       containers:
         - name: edge
-          image: "{{ .Values.edge.image.repository }}:{{ .Values.edge.image.tag }}"
+          image: {{ include "fugue.imageRef" (dict "repository" .Values.edge.image.repository "tag" .Values.edge.image.tag "digest" .Values.edge.image.digest) | quote }}
           imagePullPolicy: {{ .Values.edge.image.pullPolicy }}
           {{- with .Values.edge.securityContext }}
           securityContext:
@@ -120,6 +120,12 @@ spec:
               value: {{ .Values.edge.listenAddr | quote }}
             - name: FUGUE_EDGE_ROUTES_CACHE_PATH
               value: {{ .Values.edge.routesCachePath | quote }}
+            - name: FUGUE_EDGE_CACHE_ARCHIVE_LIMIT
+              value: {{ printf "%v" .Values.edge.cacheArchiveLimit | quote }}
+            - name: FUGUE_EDGE_MAX_STALE
+              value: {{ .Values.edge.maxStale | quote }}
+            - name: FUGUE_EDGE_PEER_FALLBACK_ENABLED
+              value: {{ printf "%t" .Values.edge.peerFallbackEnabled | quote }}
             - name: FUGUE_EDGE_SYNC_INTERVAL
               value: {{ .Values.edge.syncInterval | quote }}
             - name: FUGUE_EDGE_HTTP_TIMEOUT
@@ -171,7 +177,7 @@ spec:
             {{- toYaml .Values.edge.resources | nindent 12 }}
         {{- if .Values.edge.caddy.enabled }}
         - name: caddy
-          image: "{{ .Values.edge.caddy.image.repository }}:{{ .Values.edge.caddy.image.tag }}"
+          image: {{ include "fugue.imageRef" (dict "repository" .Values.edge.caddy.image.repository "tag" .Values.edge.caddy.image.tag "digest" .Values.edge.caddy.image.digest) | quote }}
           imagePullPolicy: {{ .Values.edge.caddy.image.pullPolicy }}
           command:
             - /bin/sh

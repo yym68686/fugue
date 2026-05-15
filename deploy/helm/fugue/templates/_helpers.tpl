@@ -65,6 +65,16 @@ app.kubernetes.io/component: {{ .component }}
 {{- printf "%s-image-prepull" (include "fugue.fullname" .) -}}
 {{- end -}}
 
+{{- define "fugue.imageRef" -}}
+{{- $repository := required "image repository is required" .repository -}}
+{{- $digest := default "" .digest -}}
+{{- if $digest -}}
+{{- printf "%s@%s" $repository $digest -}}
+{{- else -}}
+{{- printf "%s:%s" $repository (required "image tag is required when image digest is not set" .tag) -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "fugue.internalMaintenanceAffinity" -}}
 nodeAffinity:
   requiredDuringSchedulingIgnoredDuringExecution:

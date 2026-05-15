@@ -175,6 +175,15 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	}
 	bundle.Version = edgeRouteBundleVersion(bundle)
 	bundle.Generation = bundle.Version
+	if err := validateEdgeRouteBundleForPublish(bundle, edgeRouteBundleInvariantInput{
+		Apps:              apps,
+		Domains:           domains,
+		PlatformRoutes:    s.platformRoutes,
+		HealthyEdgeGroups: healthyEdgeGroups,
+		Options:           options,
+	}); err != nil {
+		return model.EdgeRouteBundle{}, err
+	}
 	bundle = signEdgeRouteBundle(bundle, s.bundleKeyring(), s.discoveryBundleTTL())
 	return bundle, nil
 }

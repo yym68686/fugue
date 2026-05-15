@@ -28,7 +28,7 @@ spec:
     spec:
       containers:
         - name: registry
-          image: "{{ .Values.registry.image.repository }}:{{ .Values.registry.image.tag }}"
+          image: {{ include "fugue.imageRef" (dict "repository" .Values.registry.image.repository "tag" .Values.registry.image.tag "digest" .Values.registry.image.digest) | quote }}
           imagePullPolicy: {{ .Values.registry.image.pullPolicy }}
           ports:
             - name: registry

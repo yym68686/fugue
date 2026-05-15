@@ -19,6 +19,7 @@ api:
   image:
     repository: fugue-api
     tag: latest
+    digest: ""
     pullPolicy: IfNotPresent
   databaseURL: ""
   appBaseDomain: ""
@@ -70,6 +71,7 @@ controller:
   image:
     repository: fugue-controller
     tag: latest
+    digest: ""
     pullPolicy: IfNotPresent
   githubSyncImportWorkers: 0
   pollInterval: 5s
@@ -108,6 +110,7 @@ edge:
   image:
     repository: fugue-edge
     tag: latest
+    digest: ""
     pullPolicy: IfNotPresent
   apiURL: ""
   edgeID: ""
@@ -125,6 +128,7 @@ edge:
     image:
       repository: caddy
       tag: "2.10.2-alpine"
+      digest: ""
       pullPolicy: IfNotPresent
     adminAddr: 127.0.0.1:2019
     adminURL: http://127.0.0.1:2019
@@ -158,6 +162,9 @@ edge:
   syncInterval: 15s
   httpTimeout: 10s
   routesCachePath: /var/lib/fugue/edge/routes-cache.json
+  cacheArchiveLimit: 5
+  maxStale: 24h
+  peerFallbackEnabled: true
   tokenSecret:
     name: ""
     key: FUGUE_EDGE_TLS_ASK_TOKEN
@@ -196,6 +203,7 @@ dns:
     # fugue-dns is packaged in the same image as fugue-edge by default.
     repository: ""
     tag: ""
+    digest: ""
     pullPolicy: ""
   apiURL: ""
   dnsNodeID: ""
@@ -212,6 +220,12 @@ dns:
   heartbeatInterval: 30s
   httpTimeout: 10s
   cachePath: /var/lib/fugue/dns/dns-cache.json
+  cacheArchiveLimit: 5
+  maxStale: 24h
+  edgeHealthProbe:
+    enabled: false
+    port: 443
+    timeout: 250ms
   nameservers: []
   tokenSecret:
     name: ""
@@ -258,6 +272,7 @@ imagePrePull:
   image:
     repository: ""
     tag: ""
+    digest: ""
     pullPolicy: ""
   intervalSeconds: 900
   images: []
@@ -444,6 +459,7 @@ registry:
   image:
     repository: registry
     tag: "2.8.3"
+    digest: ""
     pullPolicy: IfNotPresent
   service:
     type: NodePort
@@ -472,6 +488,7 @@ headscale:
   image:
     repository: headscale/headscale
     tag: "0.26.1"
+    digest: ""
     pullPolicy: IfNotPresent
   domain: ""
   service:
@@ -490,6 +507,7 @@ postgres:
   image:
     repository: postgres
     tag: "16-alpine"
+    digest: ""
     pullPolicy: IfNotPresent
   database: fugue
   username: fugue

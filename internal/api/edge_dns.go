@@ -344,6 +344,9 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	}
 	bundle.Version = edgeDNSBundleVersion(bundle)
 	bundle.Generation = bundle.Version
+	if err := validateEdgeDNSBundleForPublish(bundle, options, staticRecords); err != nil {
+		return model.EdgeDNSBundle{}, err
+	}
 	bundle = signEdgeDNSBundle(bundle, s.bundleKeyring(), s.discoveryBundleTTL())
 	return bundle, nil
 }
@@ -596,8 +599,15 @@ func appendEdgeDNSUniqueIP(values []string, raw string) []string {
 
 func edgeDNSAnswerIPsForBinding(binding model.EdgeRouteBinding, options edgeDNSBundleOptions, edgeAnswerIPsByGroup map[string][]string) []string {
 	if binding.Status == model.EdgeRouteStatusActive && model.EdgeRoutePolicyAllowsTraffic(binding.RoutePolicy) {
-		if ips := edgeAnswerIPsByGroup[strings.TrimSpace(binding.EdgeGroupID)]; len(ips) > 0 {
-			return append([]string(nil), ips...)
+		out := []string{}
+		for _, ip := range edgeAnswerIPsByGroup[strings.TrimSpace(binding.EdgeGroupID)] {
+			out = appendEdgeDNSUniqueIP(out, ip)
+		}
+		for _, ip := range edgeAnswerIPsByGroup[strings.TrimSpace(binding.FallbackEdgeGroupID)] {
+			out = appendEdgeDNSUniqueIP(out, ip)
+		}
+		if len(out) > 0 {
+			return out
 		}
 	}
 	if len(options.RouteAAnswerIPs) > 0 {

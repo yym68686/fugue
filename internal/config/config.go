@@ -116,6 +116,9 @@ type EdgeConfig struct {
 	MeshIP                     string
 	Draining                   bool
 	CachePath                  string
+	CacheArchiveLimit          int
+	MaxStale                   time.Duration
+	PeerFallbackEnabled        bool
 	ListenAddr                 string
 	SyncInterval               time.Duration
 	HeartbeatInterval          time.Duration
@@ -148,6 +151,11 @@ type DNSConfig struct {
 	AnswerIPs                  []string
 	RouteAAnswerIPs            []string
 	CachePath                  string
+	CacheArchiveLimit          int
+	MaxStale                   time.Duration
+	EdgeHealthProbeEnabled     bool
+	EdgeHealthProbePort        int
+	EdgeHealthProbeTimeout     time.Duration
 	ListenAddr                 string
 	UDPAddr                    string
 	TCPAddr                    string
@@ -289,6 +297,9 @@ func EdgeFromEnv() EdgeConfig {
 		MeshIP:                     strings.TrimSpace(os.Getenv("FUGUE_EDGE_MESH_IP")),
 		Draining:                   getenvBool("FUGUE_EDGE_DRAINING", false),
 		CachePath:                  getenv("FUGUE_EDGE_ROUTES_CACHE_PATH", "/var/lib/fugue/edge/routes-cache.json"),
+		CacheArchiveLimit:          getenvInt("FUGUE_EDGE_CACHE_ARCHIVE_LIMIT", 5),
+		MaxStale:                   getenvDuration("FUGUE_EDGE_MAX_STALE", 24*time.Hour),
+		PeerFallbackEnabled:        getenvBool("FUGUE_EDGE_PEER_FALLBACK_ENABLED", true),
 		ListenAddr:                 getenv("FUGUE_EDGE_LISTEN_ADDR", "127.0.0.1:7832"),
 		SyncInterval:               getenvDuration("FUGUE_EDGE_SYNC_INTERVAL", 15*time.Second),
 		HeartbeatInterval:          getenvDuration("FUGUE_EDGE_HEARTBEAT_INTERVAL", 30*time.Second),
@@ -324,6 +335,11 @@ func DNSFromEnv() DNSConfig {
 		AnswerIPs:                  getenvList("FUGUE_DNS_ANSWER_IPS"),
 		RouteAAnswerIPs:            getenvList("FUGUE_DNS_ROUTE_A_ANSWER_IPS"),
 		CachePath:                  getenv("FUGUE_DNS_CACHE_PATH", "/var/lib/fugue/dns/dns-cache.json"),
+		CacheArchiveLimit:          getenvInt("FUGUE_DNS_CACHE_ARCHIVE_LIMIT", 5),
+		MaxStale:                   getenvDuration("FUGUE_DNS_MAX_STALE", 24*time.Hour),
+		EdgeHealthProbeEnabled:     getenvBool("FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED", false),
+		EdgeHealthProbePort:        getenvInt("FUGUE_DNS_EDGE_HEALTH_PROBE_PORT", 443),
+		EdgeHealthProbeTimeout:     getenvDuration("FUGUE_DNS_EDGE_HEALTH_PROBE_TIMEOUT", 250*time.Millisecond),
 		ListenAddr:                 getenv("FUGUE_DNS_LISTEN_ADDR", "127.0.0.1:7834"),
 		UDPAddr:                    getenv("FUGUE_DNS_UDP_ADDR", "127.0.0.1:5353"),
 		TCPAddr:                    getenv("FUGUE_DNS_TCP_ADDR", "127.0.0.1:5353"),

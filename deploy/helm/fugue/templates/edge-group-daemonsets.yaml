@@ -21,10 +21,14 @@
 {{- $edgeTokenSecretKey := default (default "FUGUE_EDGE_TLS_ASK_TOKEN" $.Values.edge.tokenSecret.key) $tokenSecret.key -}}
 {{- $edgeImageRepository := default $.Values.edge.image.repository $image.repository -}}
 {{- $edgeImageTag := default $.Values.edge.image.tag $image.tag -}}
+{{- $edgeImageDigest := default $.Values.edge.image.digest $image.digest -}}
 {{- $edgeImagePullPolicy := default $.Values.edge.image.pullPolicy $image.pullPolicy -}}
+{{- $peerFallbackEnabled := $.Values.edge.peerFallbackEnabled -}}
+{{- if hasKey $group "peerFallbackEnabled" }}{{- $peerFallbackEnabled = $group.peerFallbackEnabled -}}{{- end -}}
 {{- $caddyImage := default dict $caddy.image -}}
 {{- $caddyImageRepository := default $.Values.edge.caddy.image.repository $caddyImage.repository -}}
 {{- $caddyImageTag := default $.Values.edge.caddy.image.tag $caddyImage.tag -}}
+{{- $caddyImageDigest := default $.Values.edge.caddy.image.digest $caddyImage.digest -}}
 {{- $caddyImagePullPolicy := default $.Values.edge.caddy.image.pullPolicy $caddyImage.pullPolicy -}}
 {{- $caddyAdminAddr := default $.Values.edge.caddy.adminAddr $caddy.adminAddr -}}
 {{- $caddyAdminURL := default $.Values.edge.caddy.adminURL $caddy.adminURL -}}
@@ -77,7 +81,7 @@ spec:
       {{- end }}
       containers:
         - name: edge
-          image: "{{ $edgeImageRepository }}:{{ $edgeImageTag }}"
+          image: {{ include "fugue.imageRef" (dict "repository" $edgeImageRepository "tag" $edgeImageTag "digest" $edgeImageDigest) | quote }}
           imagePullPolicy: {{ $edgeImagePullPolicy }}
           {{- with $.Values.edge.securityContext }}
           securityContext:
@@ -122,6 +126,12 @@ spec:
               value: {{ default $.Values.edge.listenAddr $group.listenAddr | quote }}
             - name: FUGUE_EDGE_ROUTES_CACHE_PATH
               value: {{ default $.Values.edge.routesCachePath $group.routesCachePath | quote }}
+            - name: FUGUE_EDGE_CACHE_ARCHIVE_LIMIT
+              value: {{ printf "%v" (default $.Values.edge.cacheArchiveLimit $group.cacheArchiveLimit) | quote }}
+            - name: FUGUE_EDGE_MAX_STALE
+              value: {{ default $.Values.edge.maxStale $group.maxStale | quote }}
+            - name: FUGUE_EDGE_PEER_FALLBACK_ENABLED
+              value: {{ printf "%t" $peerFallbackEnabled | quote }}
             - name: FUGUE_EDGE_SYNC_INTERVAL
               value: {{ default $.Values.edge.syncInterval $group.syncInterval | quote }}
             - name: FUGUE_EDGE_HTTP_TIMEOUT
@@ -176,7 +186,7 @@ spec:
             {{- toYaml $.Values.edge.resources | nindent 12 }}
         {{- if $caddyEnabled }}
         - name: caddy
-          image: "{{ $caddyImageRepository }}:{{ $caddyImageTag }}"
+          image: {{ include "fugue.imageRef" (dict "repository" $caddyImageRepository "tag" $caddyImageTag "digest" $caddyImageDigest) | quote }}
           imagePullPolicy: {{ $caddyImagePullPolicy }}
           command:
             - /bin/sh

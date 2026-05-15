@@ -61,7 +61,7 @@ spec:
       {{- end }}
       containers:
         - name: topology-labeler
-          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
+          image: {{ include "fugue.imageRef" (dict "repository" .Values.controller.image.repository "tag" .Values.controller.image.tag "digest" .Values.controller.image.digest) | quote }}
           imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
           command:
             - /bin/bash

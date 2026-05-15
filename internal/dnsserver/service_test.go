@@ -67,6 +67,85 @@ func TestServiceAnswersAuthoritativelyAndRefusesOutsideZone(t *testing.T) {
 	}
 }
 
+func TestServiceSuppressesUnhealthyEdgeAnswerWhenProbeEnabled(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.DNSConfig{
+		Zone:                   "dns.fugue.pro",
+		TTL:                    60,
+		Nameservers:            []string{"ns1.dns.fugue.pro"},
+		EdgeHealthProbeEnabled: true,
+		EdgeHealthProbeTimeout: 10 * time.Millisecond,
+	}, log.New(ioDiscard{}, "", 0))
+	service.edgeProbe = func(ctx context.Context, ip string) bool {
+		return ip == "203.0.113.11"
+	}
+	service.setBundle(model.EdgeDNSBundle{
+		Version: "dnsgen_probe",
+		Zone:    "dns.fugue.pro",
+		Records: []model.EdgeDNSRecord{
+			{
+				Name:       "app.dns.fugue.pro",
+				Type:       model.EdgeDNSRecordTypeA,
+				Values:     []string{"203.0.113.10", "203.0.113.11"},
+				TTL:        60,
+				RecordKind: model.EdgeDNSRecordKindPlatform,
+				Status:     model.EdgeRouteStatusActive,
+			},
+		},
+	}, `"dnsgen_probe"`, false, "")
+
+	answer := dnsQuery(t, service, "app.dns.fugue.pro.", miekgdns.TypeA)
+	if answer.Rcode != miekgdns.RcodeSuccess {
+		t.Fatalf("expected success, got %s", miekgdns.RcodeToString[answer.Rcode])
+	}
+	if len(answer.Answer) != 1 {
+		t.Fatalf("expected only one healthy A answer, got %+v", answer.Answer)
+	}
+	a, ok := answer.Answer[0].(*miekgdns.A)
+	if !ok || a.A.String() != "203.0.113.11" {
+		t.Fatalf("expected healthy fallback edge answer, got %+v", answer.Answer[0])
+	}
+}
+
+func TestLoadCacheFallsBackToPreviousVerifiedDNSGeneration(t *testing.T) {
+	t.Parallel()
+
+	cachePath := filepath.Join(t.TempDir(), "dns-cache.json")
+	service := NewService(config.DNSConfig{
+		Zone:              "dns.fugue.pro",
+		CachePath:         cachePath,
+		CacheArchiveLimit: 3,
+		MaxStale:          time.Hour,
+	}, log.New(ioDiscard{}, "", 0))
+	oldBundle := model.EdgeDNSBundle{
+		Version: "dnsgen_old",
+		Zone:    "dns.fugue.pro",
+		Records: []model.EdgeDNSRecord{
+			{Name: "old.dns.fugue.pro", Type: model.EdgeDNSRecordTypeA, Values: []string{"203.0.113.10"}, Status: model.EdgeRouteStatusActive},
+		},
+	}
+	newBundle := oldBundle
+	newBundle.Version = "dnsgen_new"
+	if err := service.writeCache(cacheFile{Version: cacheFileVersion, ETag: `"dnsgen_old"`, CachedAt: time.Now().UTC(), Bundle: oldBundle}); err != nil {
+		t.Fatalf("write old dns cache: %v", err)
+	}
+	if err := service.writeCache(cacheFile{Version: cacheFileVersion, ETag: `"dnsgen_new"`, CachedAt: time.Now().UTC(), Bundle: newBundle}); err != nil {
+		t.Fatalf("write new dns cache: %v", err)
+	}
+	if err := os.WriteFile(cachePath, []byte("{corrupt"), 0o600); err != nil {
+		t.Fatalf("corrupt current dns cache: %v", err)
+	}
+
+	if err := service.LoadCache(); err != nil {
+		t.Fatalf("load dns cache with fallback: %v", err)
+	}
+	status := service.Status()
+	if status.ServingGeneration != "dnsgen_old" || status.CacheCorruptGeneration != "unknown" {
+		t.Fatalf("expected previous DNS LKG after corrupt current cache, got %+v", status)
+	}
+}
+
 func TestServiceAnswersFullZoneRecordTypesAndWildcard(t *testing.T) {
 	t.Parallel()
 

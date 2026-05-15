@@ -7,6 +7,7 @@
 {{- $dnsTokenSecretKey := default "FUGUE_EDGE_TLS_ASK_TOKEN" .Values.dns.tokenSecret.key -}}
 {{- $dnsImageRepository := default .Values.edge.image.repository .Values.dns.image.repository -}}
 {{- $dnsImageTag := default .Values.edge.image.tag .Values.dns.image.tag -}}
+{{- $dnsImageDigest := default .Values.edge.image.digest .Values.dns.image.digest -}}
 {{- $dnsImagePullPolicy := default .Values.edge.image.pullPolicy .Values.dns.image.pullPolicy -}}
 apiVersion: apps/v1
 kind: DaemonSet
@@ -40,7 +41,7 @@ spec:
       {{- end }}
       containers:
         - name: dns
-          image: "{{ $dnsImageRepository }}:{{ $dnsImageTag }}"
+          image: {{ include "fugue.imageRef" (dict "repository" $dnsImageRepository "tag" $dnsImageTag "digest" $dnsImageDigest) | quote }}
           imagePullPolicy: {{ $dnsImagePullPolicy }}
           command:
             - /usr/local/bin/fugue-dns
@@ -116,6 +117,16 @@ spec:
               value: {{ .Values.dns.tcpAddr | quote }}
             - name: FUGUE_DNS_CACHE_PATH
               value: {{ .Values.dns.cachePath | quote }}
+            - name: FUGUE_DNS_CACHE_ARCHIVE_LIMIT
+              value: {{ printf "%v" .Values.dns.cacheArchiveLimit | quote }}
+            - name: FUGUE_DNS_MAX_STALE
+              value: {{ .Values.dns.maxStale | quote }}
+            - name: FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED
+              value: {{ printf "%t" .Values.dns.edgeHealthProbe.enabled | quote }}
+            - name: FUGUE_DNS_EDGE_HEALTH_PROBE_PORT
+              value: {{ printf "%v" .Values.dns.edgeHealthProbe.port | quote }}
+            - name: FUGUE_DNS_EDGE_HEALTH_PROBE_TIMEOUT
+              value: {{ .Values.dns.edgeHealthProbe.timeout | quote }}
             - name: FUGUE_DNS_SYNC_INTERVAL
               value: {{ .Values.dns.syncInterval | quote }}
             - name: FUGUE_DNS_HEARTBEAT_INTERVAL

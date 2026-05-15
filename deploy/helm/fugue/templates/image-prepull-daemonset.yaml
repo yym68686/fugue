@@ -8,6 +8,7 @@
 {{- $image := (get $imagePrePull "image" | default (dict)) -}}
 {{- $repository := default .Values.controller.image.repository (get $image "repository") -}}
 {{- $tag := default .Values.controller.image.tag (get $image "tag") -}}
+{{- $digest := default .Values.controller.image.digest (get $image "digest") -}}
 {{- $pullPolicy := default .Values.controller.image.pullPolicy (get $image "pullPolicy") -}}
 {{- $intervalSeconds := default 900 (get $imagePrePull "intervalSeconds") -}}
 {{- $priorityClassName := default "system-node-critical" (get $imagePrePull "priorityClassName") -}}
@@ -54,7 +55,7 @@ spec:
       {{- end }}
       containers:
         - name: image-prepull
-          image: "{{ $repository }}:{{ $tag }}"
+          image: {{ include "fugue.imageRef" (dict "repository" $repository "tag" $tag "digest" $digest) | quote }}
           imagePullPolicy: {{ $pullPolicy }}
           securityContext:
             privileged: true

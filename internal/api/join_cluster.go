@@ -2081,7 +2081,7 @@ install_fugue_node_updater() {
     --data-urlencode "labels=${FUGUE_RUNTIME_LABELS:-}" \
     --data-urlencode "updater_version=v1" \
     --data-urlencode "join_script_version=${FUGUE_JOIN_SCRIPT_VERSION}" \
-    --data-urlencode "capabilities=heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools" \
+    --data-urlencode "capabilities=heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,verify-systemd-escape-hatch" \
     >"${enroll_env}"
   # shellcheck disable=SC1090
   . "${enroll_env}"

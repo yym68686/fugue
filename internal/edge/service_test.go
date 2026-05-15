@@ -106,6 +106,44 @@ func TestSyncOnceWritesRouteBundleCache(t *testing.T) {
 	}
 }
 
+func TestLoadCacheFallsBackToPreviousVerifiedGeneration(t *testing.T) {
+	t.Parallel()
+
+	cachePath := filepath.Join(t.TempDir(), "routes-cache.json")
+	service := NewService(config.EdgeConfig{
+		CachePath:         cachePath,
+		CacheArchiveLimit: 3,
+		MaxStale:          time.Hour,
+	}, log.New(ioDiscard{}, "", 0))
+	if err := service.writeCache(cacheFile{
+		Version:  cacheFileVersion,
+		ETag:     `"routegen_old"`,
+		CachedAt: time.Now().UTC(),
+		Bundle:   testBundle("routegen_old"),
+	}); err != nil {
+		t.Fatalf("write old cache: %v", err)
+	}
+	if err := service.writeCache(cacheFile{
+		Version:  cacheFileVersion,
+		ETag:     `"routegen_new"`,
+		CachedAt: time.Now().UTC(),
+		Bundle:   testBundle("routegen_new"),
+	}); err != nil {
+		t.Fatalf("write new cache: %v", err)
+	}
+	if err := os.WriteFile(cachePath, []byte("{corrupt"), 0o600); err != nil {
+		t.Fatalf("corrupt current cache: %v", err)
+	}
+
+	if err := service.LoadCache(); err != nil {
+		t.Fatalf("load cache with fallback: %v", err)
+	}
+	status := service.Status()
+	if status.ServingGeneration != "routegen_old" || status.CacheCorruptGeneration != "unknown" {
+		t.Fatalf("expected previous LKG after corrupt current cache, got %+v", status)
+	}
+}
+
 func TestHeartbeatOnceReportsEdgeInventory(t *testing.T) {
 	t.Parallel()
 

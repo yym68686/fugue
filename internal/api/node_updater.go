@@ -535,6 +535,13 @@ write_file_if_changed() {
   return 0
 }
 
+preserve_rollback_file() {
+  local path="$1"
+  if [ -r "${path}" ]; then
+    cp -p "${path}" "${path}.rollback" 2>/dev/null || true
+  fi
+}
+
 sha256_file() {
   local path="$1"
   if [ ! -r "${path}" ]; then
@@ -713,6 +720,7 @@ kube = first_named(bundle.get("kubernetes"), "cluster-join")
 registry = first_named(bundle.get("registry"), "registry")
 emit("FUGUE_DISCOVERY_SCHEMA_VERSION", bundle.get("schema_version", ""))
 emit("FUGUE_DISCOVERY_GENERATION", bundle.get("generation", ""))
+emit("FUGUE_DISCOVERY_GENERATED_AT", bundle.get("generated_at", ""))
 emit("FUGUE_DISCOVERY_VALID_UNTIL", bundle.get("valid_until", ""))
 emit("FUGUE_DISCOVERY_ISSUER", bundle.get("issuer", ""))
 emit("FUGUE_DISCOVERY_API_URL", runtime.get("FUGUE_API_URL") or first_named(bundle.get("api_endpoints"), "public").get("url", ""))
@@ -729,6 +737,7 @@ PY_DISCOVERY
     return 0
   fi
   local generation=""
+  local generated_at=""
   local schema_version=""
   schema_version="$(sed -n 's/.*"schema_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${bundle_file}" | head -n 1)"
   case "${schema_version}" in
@@ -736,8 +745,32 @@ PY_DISCOVERY
     *) echo "unsupported DiscoveryBundle schema_version: ${schema_version:-missing}" >&2; return 1 ;;
   esac
   generation="$(sed -n 's/.*"generation"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${bundle_file}" | head -n 1)"
+  generated_at="$(sed -n 's/.*"generated_at"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${bundle_file}" | head -n 1)"
   printf 'FUGUE_DISCOVERY_SCHEMA_VERSION=%s\n' "$(json_quote_env "${schema_version}")"
   printf 'FUGUE_DISCOVERY_GENERATION=%s\n' "$(json_quote_env "${generation}")"
+  printf 'FUGUE_DISCOVERY_GENERATED_AT=%s\n' "$(json_quote_env "${generated_at}")"
+}
+
+discovery_bundle_not_older_than_cache() {
+  local candidate="$1"
+  local current="${FUGUE_NODE_UPDATER_DISCOVERY_BUNDLE_FILE}"
+  if [ ! -r "${current}" ] || ! command -v python3 >/dev/null 2>&1; then
+    return 0
+  fi
+  python3 - "${current}" "${candidate}" <<'PY_DISCOVERY_ROLLBACK'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    current = json.load(fh)
+with open(sys.argv[2], "r", encoding="utf-8") as fh:
+    candidate = json.load(fh)
+
+current_generated_at = str(current.get("generated_at", "")).strip()
+candidate_generated_at = str(candidate.get("generated_at", "")).strip()
+if current_generated_at and candidate_generated_at and candidate_generated_at < current_generated_at:
+    raise SystemExit("candidate DiscoveryBundle generated_at is older than cached bundle")
+PY_DISCOVERY_ROLLBACK
 }
 
 fetch_discovery_bundle() {
@@ -749,14 +782,16 @@ fetch_discovery_bundle() {
     rm -f "${tmp}"
     return 1
   fi
-  write_file_if_changed "${tmp}" "${FUGUE_NODE_UPDATER_DISCOVERY_BUNDLE_FILE}" || true
   env_tmp="$(mktemp)"
-  if render_discovery_env "${FUGUE_NODE_UPDATER_DISCOVERY_BUNDLE_FILE}" >"${env_tmp}"; then
+  if discovery_bundle_not_older_than_cache "${tmp}" && render_discovery_env "${tmp}" >"${env_tmp}"; then
+    write_file_if_changed "${tmp}" "${FUGUE_NODE_UPDATER_DISCOVERY_BUNDLE_FILE}" || true
     write_file_if_changed "${env_tmp}" "${FUGUE_NODE_UPDATER_DISCOVERY_ENV_FILE}" || true
   else
+    rm -f "${tmp}"
     rm -f "${env_tmp}"
     return 1
   fi
+  rm -f "${tmp}" "${env_tmp}"
 }
 
 render_node_updater_state_env() {
@@ -798,6 +833,7 @@ yaml_update_scalar() {
     write_file_if_changed "${tmp}" "${file}"
     return $?
   fi
+  preserve_rollback_file "${file}"
   awk -v key="${key}" -v value="${value}" '
     BEGIN { done = 0 }
     $0 ~ "^[[:space:]]*" key ":[[:space:]]*" {
@@ -862,6 +898,7 @@ reconcile_k3s_config() {
         echo "  server cp${index} ${fallback} check inter 2s fall 2 rise 1"
       done
     } >"${lb_cfg}.tmp"
+    preserve_rollback_file "${lb_cfg}"
     write_file_if_changed "${lb_cfg}.tmp" "${lb_cfg}" || true
     server="https://127.0.0.1:16443"
     if systemctl list-unit-files 2>/dev/null | grep -q '^fugue-k3s-api-lb\.service'; then
@@ -892,6 +929,7 @@ reconcile_registry_mirror() {
     printf '    tls:\n'
     printf '      insecure_skip_verify: true\n'
   } >"${tmp}"
+  preserve_rollback_file "${FUGUE_NODE_UPDATER_K3S_REGISTRIES_FILE}"
   write_file_if_changed "${tmp}" "${FUGUE_NODE_UPDATER_K3S_REGISTRIES_FILE}" || true
   return 0
 }
@@ -1221,6 +1259,61 @@ install_nfs_client_tools() {
   log_task "NFS client tools installed: $(command -v mount.nfs 2>/dev/null || true)"
 }
 
+prepull_system_images() {
+  local raw="${FUGUE_NODE_UPDATER_SYSTEM_IMAGES:-${FUGUE_SYSTEM_IMAGES:-}}"
+  local image=""
+  if [ -z "${raw}" ]; then
+    log_task "no system images configured for pre-pull"
+    return 0
+  fi
+  for image in ${raw//,/ }; do
+    [ -n "${image}" ] || continue
+    case "${image}" in
+      *@sha256:*) ;;
+      *)
+        echo "system image ${image} is not digest-pinned; refusing pre-pull" >&2
+        return 2
+        ;;
+    esac
+    if command -v crictl >/dev/null 2>&1; then
+      crictl pull "${image}"
+    elif command -v k3s >/dev/null 2>&1; then
+      k3s ctr images pull "${image}"
+    elif command -v ctr >/dev/null 2>&1; then
+      ctr -n k8s.io images pull "${image}"
+    else
+      echo "no CRI image puller is available" >&2
+      return 2
+    fi
+    log_task "pre-pulled ${image}"
+  done
+}
+
+verify_systemd_escape_hatch() {
+  local checked=0
+  local unit=""
+  for unit in fugue-edge.service fugue-dns.service; do
+    if systemctl list-unit-files "${unit}" >/dev/null 2>&1; then
+      checked=$((checked + 1))
+      log_task "${unit} is installed"
+    fi
+  done
+  for env_file in "${FUGUE_NODE_UPDATER_EDGE_ENV_FILE}" "${FUGUE_NODE_UPDATER_DNS_ENV_FILE}"; do
+    if [ -r "${env_file}" ]; then
+      checked=$((checked + 1))
+      if grep -Eq '^(FUGUE_EDGE_TOKEN|FUGUE_DNS_TOKEN|FUGUE_BUNDLE_SIGNING_KEY)=' "${env_file}"; then
+        log_task "$(basename "${env_file}") keeps secret environment entries locally"
+      fi
+      if grep -Eq '^(FUGUE_API_URL|FUGUE_EDGE_DISCOVERY_GENERATION|FUGUE_DNS_DISCOVERY_GENERATION)=' "${env_file}"; then
+        log_task "$(basename "${env_file}") has non-secret discovery metadata"
+      fi
+    fi
+  done
+  if [ "${checked}" -eq 0 ]; then
+    log_task "no host-level edge/dns escape hatch units or env files detected"
+  fi
+}
+
 run_task() {
   case "${FUGUE_NODE_UPDATE_TASK_TYPE}" in
     refresh-join-config)
@@ -1246,6 +1339,12 @@ run_task() {
     install-nfs-client-tools)
       install_nfs_client_tools
       ;;
+    prepull-system-images)
+      prepull_system_images
+      ;;
+    verify-systemd-escape-hatch)
+      verify_systemd_escape_hatch
+      ;;
     *)
       echo "unsupported node update task type: ${FUGUE_NODE_UPDATE_TASK_TYPE}" >&2
       return 2
@@ -1270,7 +1369,12 @@ run_once() {
   fi
   heartbeat || log "heartbeat failed"
   task_env="$(mktemp)"
-  api_form GET "/v1/node-updater/tasks?format=env&limit=1" >"${task_env}"
+  if ! api_form GET "/v1/node-updater/tasks?format=env&limit=1" >"${task_env}"; then
+    record_last_error "task poll failed; continuing in degraded offline mode"
+    log "task poll failed; continuing in degraded offline mode"
+    rm -f "${task_env}"
+    return 0
+  fi
   # shellcheck disable=SC1090
   . "${task_env}"
   rm -f "${task_env}"

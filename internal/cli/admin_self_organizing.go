@@ -161,8 +161,9 @@ func (c *CLI) newAdminPlatformCommand() *cobra.Command {
 	})
 	drillOpts := model.PlatformFailureDrillRequest{DryRun: true}
 	drill := &cobra.Command{
-		Use:   "failure-drill",
-		Short: "Run a non-destructive self-organizing failure drill",
+		Use:     "failure-drill",
+		Aliases: []string{"drill"},
+		Short:   "Run a non-destructive self-organizing failure drill",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {

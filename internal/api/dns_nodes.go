@@ -25,33 +25,36 @@ const (
 )
 
 type dnsHeartbeatRequest struct {
-	DNSNodeID         string            `json:"dns_node_id"`
-	EdgeGroupID       string            `json:"edge_group_id"`
-	PublicHostname    string            `json:"public_hostname,omitempty"`
-	PublicIPv4        string            `json:"public_ipv4,omitempty"`
-	PublicIPv6        string            `json:"public_ipv6,omitempty"`
-	MeshIP            string            `json:"mesh_ip,omitempty"`
-	Zone              string            `json:"zone"`
-	DNSBundleVersion  string            `json:"dns_bundle_version,omitempty"`
-	ServingGeneration string            `json:"serving_generation,omitempty"`
-	LKGGeneration     string            `json:"lkg_generation,omitempty"`
-	RecordCount       int               `json:"record_count"`
-	CacheStatus       string            `json:"cache_status,omitempty"`
-	CacheWriteErrors  uint64            `json:"cache_write_errors,omitempty"`
-	CacheLoadErrors   uint64            `json:"cache_load_errors,omitempty"`
-	BundleSyncErrors  uint64            `json:"bundle_sync_errors,omitempty"`
-	QueryCount        uint64            `json:"query_count,omitempty"`
-	QueryErrorCount   uint64            `json:"query_error_count,omitempty"`
-	QueryRCodeCounts  map[string]uint64 `json:"query_rcode_counts,omitempty"`
-	QueryQTypeCounts  map[string]uint64 `json:"query_qtype_counts,omitempty"`
-	ListenAddr        string            `json:"listen_addr,omitempty"`
-	UDPAddr           string            `json:"udp_addr,omitempty"`
-	TCPAddr           string            `json:"tcp_addr,omitempty"`
-	UDPListen         bool              `json:"udp_listen,omitempty"`
-	TCPListen         bool              `json:"tcp_listen,omitempty"`
-	Status            string            `json:"status"`
-	Healthy           bool              `json:"healthy"`
-	LastError         string            `json:"last_error,omitempty"`
+	DNSNodeID              string            `json:"dns_node_id"`
+	EdgeGroupID            string            `json:"edge_group_id"`
+	PublicHostname         string            `json:"public_hostname,omitempty"`
+	PublicIPv4             string            `json:"public_ipv4,omitempty"`
+	PublicIPv6             string            `json:"public_ipv6,omitempty"`
+	MeshIP                 string            `json:"mesh_ip,omitempty"`
+	Zone                   string            `json:"zone"`
+	DNSBundleVersion       string            `json:"dns_bundle_version,omitempty"`
+	ServingGeneration      string            `json:"serving_generation,omitempty"`
+	LKGGeneration          string            `json:"lkg_generation,omitempty"`
+	LastGoodGeneration     string            `json:"last_good_generation,omitempty"`
+	CacheCorruptGeneration string            `json:"cache_corrupt_generation,omitempty"`
+	RecordCount            int               `json:"record_count"`
+	CacheStatus            string            `json:"cache_status,omitempty"`
+	MaxStaleExceeded       bool              `json:"max_stale_exceeded,omitempty"`
+	CacheWriteErrors       uint64            `json:"cache_write_errors,omitempty"`
+	CacheLoadErrors        uint64            `json:"cache_load_errors,omitempty"`
+	BundleSyncErrors       uint64            `json:"bundle_sync_errors,omitempty"`
+	QueryCount             uint64            `json:"query_count,omitempty"`
+	QueryErrorCount        uint64            `json:"query_error_count,omitempty"`
+	QueryRCodeCounts       map[string]uint64 `json:"query_rcode_counts,omitempty"`
+	QueryQTypeCounts       map[string]uint64 `json:"query_qtype_counts,omitempty"`
+	ListenAddr             string            `json:"listen_addr,omitempty"`
+	UDPAddr                string            `json:"udp_addr,omitempty"`
+	TCPAddr                string            `json:"tcp_addr,omitempty"`
+	UDPListen              bool              `json:"udp_listen,omitempty"`
+	TCPListen              bool              `json:"tcp_listen,omitempty"`
+	Status                 string            `json:"status"`
+	Healthy                bool              `json:"healthy"`
+	LastError              string            `json:"last_error,omitempty"`
 }
 
 type dnsDelegationProbeFunc func(context.Context, model.DNSNode, string, string) dnsDelegationProbeResult

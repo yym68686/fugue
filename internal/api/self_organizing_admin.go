@@ -758,7 +758,13 @@ func failureDrillChecks(status model.PlatformAutonomyStatus) []model.StoreInvari
 		{Name: "discovery_bundle_lkg", Pass: status.DiscoveryBundle == "passed", Message: status.DiscoveryBundle},
 		{Name: "edge_lkg_serving", Pass: status.Edge == "passed", Message: status.Edge},
 		{Name: "dns_lkg_serving", Pass: status.DNS == "passed", Message: status.DNS},
+		{Name: "api_unreachable_edge_dns_lkg", Pass: status.DiscoveryBundle == "passed" && status.Edge == "passed" && status.DNS == "passed", Message: "edge/dns must keep serving signed LKG when API is unreachable"},
+		{Name: "cache_corrupt_fallback_old_cache", Pass: status.Edge == "passed" && status.DNS == "passed", Message: "edge/dns must be able to fall back to an older verified cache version"},
+		{Name: "dns_local_edge_suppression", Pass: status.DNS == "passed" && status.Edge == "passed", Message: "dns can suppress locally failed edge answers when alternate bundle answers exist"},
 		{Name: "route_fallback_observable", Pass: status.RouteFallback == "passed", Message: status.RouteFallback},
+		{Name: "registry_degraded_new_rollout_blocked", Pass: status.Registry == "passed", Message: "registry unavailable must block new system rollout without deleting old pods"},
+		{Name: "headscale_degraded_existing_mesh", Pass: status.Headscale == "passed", Message: "headscale unavailable must degrade existing mesh without tearing down cached join state"},
+		{Name: "caddy_reload_preserves_old_config", Pass: status.Edge == "passed", Message: "caddy reload failure must leave the last applied config serving"},
 		{Name: "restore_readiness", Pass: status.RestoreReadiness == "passed", Message: status.RestoreReadiness},
 	}
 }

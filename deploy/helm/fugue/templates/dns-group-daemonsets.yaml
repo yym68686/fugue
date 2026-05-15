@@ -10,11 +10,15 @@
 {{- $image := default dict $group.image -}}
 {{- $tokenSecret := default dict $group.tokenSecret -}}
 {{- $publicHostPorts := default dict $group.publicHostPorts -}}
+{{- $edgeHealthProbe := default dict $group.edgeHealthProbe -}}
+{{- $edgeHealthProbeEnabled := $.Values.dns.edgeHealthProbe.enabled -}}
+{{- if hasKey $edgeHealthProbe "enabled" }}{{- $edgeHealthProbeEnabled = $edgeHealthProbe.enabled -}}{{- end -}}
 {{- $dnsAPIURL := default (default (printf "http://%s:%v" (include "fugue.fullname" $) $.Values.service.port) $.Values.dns.apiURL) $group.apiURL -}}
 {{- $dnsTokenSecretName := default (default (include "fugue.configSecretName" $) $.Values.dns.tokenSecret.name) $tokenSecret.name -}}
 {{- $dnsTokenSecretKey := default (default "FUGUE_EDGE_TLS_ASK_TOKEN" $.Values.dns.tokenSecret.key) $tokenSecret.key -}}
 {{- $dnsImageRepository := default (default $.Values.edge.image.repository $.Values.dns.image.repository) $image.repository -}}
 {{- $dnsImageTag := default (default $.Values.edge.image.tag $.Values.dns.image.tag) $image.tag -}}
+{{- $dnsImageDigest := default (default $.Values.edge.image.digest $.Values.dns.image.digest) $image.digest -}}
 {{- $dnsImagePullPolicy := default (default $.Values.edge.image.pullPolicy $.Values.dns.image.pullPolicy) $image.pullPolicy -}}
 {{- $publicHostPortsEnabled := $.Values.dns.publicHostPorts.enabled -}}
 {{- if hasKey $publicHostPorts "enabled" }}{{- $publicHostPortsEnabled = $publicHostPorts.enabled -}}{{- end -}}
@@ -54,7 +58,7 @@ spec:
       {{- end }}
       containers:
         - name: dns
-          image: "{{ $dnsImageRepository }}:{{ $dnsImageTag }}"
+          image: {{ include "fugue.imageRef" (dict "repository" $dnsImageRepository "tag" $dnsImageTag "digest" $dnsImageDigest) | quote }}
           imagePullPolicy: {{ $dnsImagePullPolicy }}
           command:
             - /usr/local/bin/fugue-dns
@@ -125,6 +129,16 @@ spec:
               value: {{ default $.Values.dns.tcpAddr $group.tcpAddr | quote }}
             - name: FUGUE_DNS_CACHE_PATH
               value: {{ default $.Values.dns.cachePath $group.cachePath | quote }}
+            - name: FUGUE_DNS_CACHE_ARCHIVE_LIMIT
+              value: {{ printf "%v" (default $.Values.dns.cacheArchiveLimit $group.cacheArchiveLimit) | quote }}
+            - name: FUGUE_DNS_MAX_STALE
+              value: {{ default $.Values.dns.maxStale $group.maxStale | quote }}
+            - name: FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED
+              value: {{ printf "%t" $edgeHealthProbeEnabled | quote }}
+            - name: FUGUE_DNS_EDGE_HEALTH_PROBE_PORT
+              value: {{ printf "%v" (default $.Values.dns.edgeHealthProbe.port $edgeHealthProbe.port) | quote }}
+            - name: FUGUE_DNS_EDGE_HEALTH_PROBE_TIMEOUT
+              value: {{ default $.Values.dns.edgeHealthProbe.timeout $edgeHealthProbe.timeout | quote }}
             - name: FUGUE_DNS_SYNC_INTERVAL
               value: {{ default $.Values.dns.syncInterval $group.syncInterval | quote }}
             - name: FUGUE_DNS_HEARTBEAT_INTERVAL

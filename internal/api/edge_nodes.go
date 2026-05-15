@@ -24,26 +24,29 @@ type createEdgeNodeTokenRequest struct {
 }
 
 type edgeHeartbeatRequest struct {
-	EdgeID              string `json:"edge_id"`
-	EdgeGroupID         string `json:"edge_group_id"`
-	Region              string `json:"region,omitempty"`
-	Country             string `json:"country,omitempty"`
-	PublicHostname      string `json:"public_hostname,omitempty"`
-	PublicIPv4          string `json:"public_ipv4,omitempty"`
-	PublicIPv6          string `json:"public_ipv6,omitempty"`
-	MeshIP              string `json:"mesh_ip,omitempty"`
-	RouteBundleVersion  string `json:"route_bundle_version,omitempty"`
-	DNSBundleVersion    string `json:"dns_bundle_version,omitempty"`
-	ServingGeneration   string `json:"serving_generation,omitempty"`
-	LKGGeneration       string `json:"lkg_generation,omitempty"`
-	CaddyRouteCount     int    `json:"caddy_route_count,omitempty"`
-	CaddyAppliedVersion string `json:"caddy_applied_version,omitempty"`
-	CaddyLastError      string `json:"caddy_last_error,omitempty"`
-	CacheStatus         string `json:"cache_status,omitempty"`
-	Status              string `json:"status"`
-	Healthy             bool   `json:"healthy"`
-	Draining            bool   `json:"draining"`
-	LastError           string `json:"last_error,omitempty"`
+	EdgeID                 string `json:"edge_id"`
+	EdgeGroupID            string `json:"edge_group_id"`
+	Region                 string `json:"region,omitempty"`
+	Country                string `json:"country,omitempty"`
+	PublicHostname         string `json:"public_hostname,omitempty"`
+	PublicIPv4             string `json:"public_ipv4,omitempty"`
+	PublicIPv6             string `json:"public_ipv6,omitempty"`
+	MeshIP                 string `json:"mesh_ip,omitempty"`
+	RouteBundleVersion     string `json:"route_bundle_version,omitempty"`
+	DNSBundleVersion       string `json:"dns_bundle_version,omitempty"`
+	ServingGeneration      string `json:"serving_generation,omitempty"`
+	LKGGeneration          string `json:"lkg_generation,omitempty"`
+	LastGoodGeneration     string `json:"last_good_generation,omitempty"`
+	CacheCorruptGeneration string `json:"cache_corrupt_generation,omitempty"`
+	CaddyRouteCount        int    `json:"caddy_route_count,omitempty"`
+	CaddyAppliedVersion    string `json:"caddy_applied_version,omitempty"`
+	CaddyLastError         string `json:"caddy_last_error,omitempty"`
+	CacheStatus            string `json:"cache_status,omitempty"`
+	MaxStaleExceeded       bool   `json:"max_stale_exceeded,omitempty"`
+	Status                 string `json:"status"`
+	Healthy                bool   `json:"healthy"`
+	Draining               bool   `json:"draining"`
+	LastError              string `json:"last_error,omitempty"`
 }
 
 func (s *Server) handleListEdgeNodes(w http.ResponseWriter, r *http.Request) {
