@@ -283,6 +283,41 @@ rollout_status() {
   ${KUBECTL} -n "${FUGUE_NAMESPACE}" rollout status "deploy/${deployment_name}" --timeout="${FUGUE_ROLLOUT_TIMEOUT}"
 }
 
+daemonset_exists() {
+  local daemonset_name="$1"
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" >/dev/null 2>&1
+}
+
+rollout_daemonset_status() {
+  local daemonset_name="$1"
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" rollout status "ds/${daemonset_name}" --timeout="${FUGUE_ROLLOUT_TIMEOUT}"
+}
+
+cleanup_orphaned_regional_daemonsets() {
+  local daemonset_name=""
+  local component=""
+  local release_name=""
+  local selector="app.kubernetes.io/instance=${FUGUE_RELEASE_NAME},app.kubernetes.io/name=fugue"
+
+  while IFS=$'\t' read -r daemonset_name component release_name; do
+    if [[ -z "$(trim_field "${daemonset_name}")" ]]; then
+      continue
+    fi
+    case "${component}" in
+      edge-country-*|dns-country-*)
+        ;;
+      *)
+        continue
+        ;;
+    esac
+    if [[ -n "$(trim_field "${release_name}")" ]]; then
+      continue
+    fi
+    log "deleting orphaned legacy regional DaemonSet ${daemonset_name} (${component})"
+    ${KUBECTL} -n "${FUGUE_NAMESPACE}" delete "ds/${daemonset_name}" --wait=true
+  done < <(${KUBECTL} -n "${FUGUE_NAMESPACE}" get ds -l "${selector}" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.app\.kubernetes\.io/component}{"\t"}{.metadata.annotations.meta\.helm\.sh/release-name}{"\n"}{end}')
+}
+
 apply_chart_crds() {
   local crd_dir="${FUGUE_HELM_CHART_PATH}/crds"
   local attempt=0
@@ -2823,6 +2858,7 @@ main() {
   patch_control_plane_singleton_deployments
 
   force_delete_release_pods_on_unhealthy_nodes
+  cleanup_orphaned_regional_daemonsets
 
   if ! rollout_status "${FUGUE_API_DEPLOYMENT_NAME}"; then
     log "api rollout check failed; attempting rollback"
@@ -2834,6 +2870,22 @@ main() {
     log "controller rollout check failed; attempting rollback"
     rollback_release || true
     fail "controller rollout failed"
+  fi
+
+  if [[ "${FUGUE_EDGE_ENABLED}" == "true" ]] && daemonset_exists "${FUGUE_RELEASE_FULLNAME}-edge"; then
+    if ! rollout_daemonset_status "${FUGUE_RELEASE_FULLNAME}-edge"; then
+      log "edge rollout check failed; attempting rollback"
+      rollback_release || true
+      fail "edge rollout failed"
+    fi
+  fi
+
+  if [[ "${FUGUE_DNS_ENABLED}" == "true" ]] && daemonset_exists "${FUGUE_RELEASE_FULLNAME}-dns"; then
+    if ! rollout_daemonset_status "${FUGUE_RELEASE_FULLNAME}-dns"; then
+      log "dns rollout check failed; attempting rollback"
+      rollback_release || true
+      fail "dns rollout failed"
+    fi
   fi
 
   label_default_builder_nodes
