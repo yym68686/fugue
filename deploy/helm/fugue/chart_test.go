@@ -900,6 +900,15 @@ edge:
     publicHostPorts:
       enabled: true
   groups:
+    - name: country-us
+      edgeGroupID: edge-group-country-us
+      tokenSecret:
+        name: fugue-edge-us-scoped-token
+        key: FUGUE_EDGE_TOKEN
+      nodeSelector:
+        fugue.io/role.edge: "true"
+        fugue.io/schedulable: "true"
+        fugue.io/location-country-code: us
     - name: country-de
       edgeGroupID: edge-group-country-de
       tokenSecret:
