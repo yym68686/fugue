@@ -51,6 +51,34 @@ func TestEdgeRouteBundleInvariantRejectsEmptyBundleForStaleEdgeGroup(t *testing.
 	}
 }
 
+func TestEdgeRouteBundleInvariantRejectsNoTrafficBundleForStaleEdgeGroup(t *testing.T) {
+	t.Parallel()
+
+	err := validateEdgeRouteBundleForPublish(model.EdgeRouteBundle{
+		Version:     "routegen_no_traffic",
+		Generation:  "routegen_no_traffic",
+		GeneratedAt: time.Now().UTC(),
+		Routes: []model.EdgeRouteBinding{
+			{
+				Hostname:        "demo.fugue.pro",
+				EdgeGroupID:     "edge-group-country-us",
+				RoutePolicy:     model.EdgeRoutePolicyRouteAOnly,
+				RouteGeneration: "route_demo",
+			},
+		},
+	}, edgeRouteBundleInvariantInput{
+		Apps: []model.App{
+			{ID: "app_demo", Route: &model.AppRoute{Hostname: "demo.fugue.pro"}},
+		},
+		HealthyEdgeGroups:          map[string]bool{"edge-group-country-us": false},
+		ExpectedNonEmptyEdgeGroups: map[string]bool{"edge-group-country-us": true},
+		Options:                    edgeRouteBundleOptions{EdgeGroupID: "edge-group-country-us"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "without traffic routes") {
+		t.Fatalf("expected no-traffic route bundle invariant failure, got %v", err)
+	}
+}
+
 func TestEdgeDNSBundleInvariantRejectsMissingProtectedRecord(t *testing.T) {
 	t.Parallel()
 

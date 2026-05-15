@@ -39,6 +39,11 @@ func validateEdgeRouteBundleForPublish(bundle model.EdgeRouteBundle, input edgeR
 	if len(bundle.Routes) == 0 && edgeRouteBundleExpectedRoutableHosts(input) > 0 && edgeRouteSelectorShouldHaveRoutes(input.Options, input.HealthyEdgeGroups, input.ExpectedNonEmptyEdgeGroups) {
 		return fmt.Errorf("edge route bundle invariant failed: refusing to publish empty route bundle for non-empty routable inventory")
 	}
+	if edgeRouteBundleExpectedRoutableHosts(input) > 0 &&
+		edgeRouteSelectorShouldHaveRoutes(input.Options, input.HealthyEdgeGroups, input.ExpectedNonEmptyEdgeGroups) &&
+		edgeRouteBundleTrafficRouteCount(bundle, input.Options) == 0 {
+		return fmt.Errorf("edge route bundle invariant failed: refusing to publish route bundle without traffic routes for non-empty routable inventory")
+	}
 	return nil
 }
 
@@ -71,6 +76,24 @@ func edgeRouteSelectorShouldHaveRoutes(options edgeRouteBundleOptions, healthyEd
 		edgeGroupID = edgeGroupIDFromEdgeID(options.EdgeID)
 	}
 	return edgeGroupID != "" && (expectedNonEmptyEdgeGroups[edgeGroupID] || healthyEdgeGroups[edgeGroupID])
+}
+
+func edgeRouteBundleTrafficRouteCount(bundle model.EdgeRouteBundle, options edgeRouteBundleOptions) int {
+	edgeGroupID := strings.TrimSpace(options.EdgeGroupID)
+	if edgeGroupID == "" {
+		edgeGroupID = edgeGroupIDFromEdgeID(options.EdgeID)
+	}
+	count := 0
+	for _, route := range bundle.Routes {
+		if !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) {
+			continue
+		}
+		if edgeGroupID != "" && !strings.EqualFold(strings.TrimSpace(route.EdgeGroupID), edgeGroupID) {
+			continue
+		}
+		count++
+	}
+	return count
 }
 
 func validateEdgeDNSBundleForPublish(bundle model.EdgeDNSBundle, options edgeDNSBundleOptions, protectedRecords []model.EdgeDNSRecord) error {
