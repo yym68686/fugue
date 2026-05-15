@@ -713,7 +713,7 @@ run_release_preflight() {
     200|204|304)
       ;;
     *)
-      if release_preflight_missing_discovery_bootstrap_allowed && [[ "${discovery_http_status}" =~ ^(404|405|501)$ ]]; then
+      if release_preflight_missing_discovery_bootstrap_allowed && [[ "${discovery_http_status}" =~ ^(000|404|405|501)$ ]]; then
         log "release preflight bootstrap: DiscoveryBundle endpoint unavailable (HTTP ${discovery_http_status}); continuing with explicit runtime values"
         rm -f "${discovery_headers}" "${discovery_body}"
         return 0
