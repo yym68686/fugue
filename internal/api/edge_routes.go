@@ -72,7 +72,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	if err != nil {
 		return model.EdgeRouteBundle{}, err
 	}
-	healthyEdgeGroups, err := s.edgeRouteHealthyEdgeGroups()
+	healthyEdgeGroups, expectedNonEmptyEdgeGroups, err := s.edgeRouteGroupInventory()
 	if err != nil {
 		return model.EdgeRouteBundle{}, err
 	}
@@ -176,11 +176,12 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	bundle.Version = edgeRouteBundleVersion(bundle)
 	bundle.Generation = bundle.Version
 	if err := validateEdgeRouteBundleForPublish(bundle, edgeRouteBundleInvariantInput{
-		Apps:              apps,
-		Domains:           domains,
-		PlatformRoutes:    s.platformRoutes,
-		HealthyEdgeGroups: healthyEdgeGroups,
-		Options:           options,
+		Apps:                       apps,
+		Domains:                    domains,
+		PlatformRoutes:             s.platformRoutes,
+		HealthyEdgeGroups:          healthyEdgeGroups,
+		ExpectedNonEmptyEdgeGroups: expectedNonEmptyEdgeGroups,
+		Options:                    options,
 	}); err != nil {
 		return model.EdgeRouteBundle{}, err
 	}
@@ -541,15 +542,27 @@ func sortedHealthyEdgeGroups(healthyEdgeGroups map[string]bool) []string {
 }
 
 func (s *Server) edgeRouteHealthyEdgeGroups() (map[string]bool, error) {
+	healthy, _, err := s.edgeRouteGroupInventory()
+	return healthy, err
+}
+
+func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string]bool, error) {
 	nodes, _, err := s.store.ListEdgeNodes("")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	healthy := make(map[string]bool)
+	expectedNonEmpty := make(map[string]bool)
 	for _, node := range nodes {
 		groupID := strings.TrimSpace(node.EdgeGroupID)
 		if groupID == "" {
 			continue
+		}
+		if node.CaddyRouteCount > 0 ||
+			strings.TrimSpace(node.RouteBundleVersion) != "" ||
+			strings.TrimSpace(node.ServingGeneration) != "" ||
+			strings.TrimSpace(node.LKGGeneration) != "" {
+			expectedNonEmpty[groupID] = true
 		}
 		if node.Healthy && !node.Draining && strings.EqualFold(strings.TrimSpace(node.Status), model.EdgeHealthHealthy) {
 			healthy[groupID] = true
@@ -557,7 +570,7 @@ func (s *Server) edgeRouteHealthyEdgeGroups() (map[string]bool, error) {
 			healthy[groupID] = false
 		}
 	}
-	return healthy, nil
+	return healthy, expectedNonEmpty, nil
 }
 
 func edgeGroupIDFromEdgeID(edgeID string) string {

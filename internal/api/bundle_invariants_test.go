@@ -28,6 +28,27 @@ func TestEdgeRouteBundleInvariantRejectsEmptyRoutableBundle(t *testing.T) {
 	}
 }
 
+func TestEdgeRouteBundleInvariantRejectsEmptyBundleForStaleEdgeGroup(t *testing.T) {
+	t.Parallel()
+
+	err := validateEdgeRouteBundleForPublish(model.EdgeRouteBundle{
+		Version:     "routegen_empty",
+		Generation:  "routegen_empty",
+		GeneratedAt: time.Now().UTC(),
+		Routes:      nil,
+	}, edgeRouteBundleInvariantInput{
+		Apps: []model.App{
+			{ID: "app_demo", Route: &model.AppRoute{Hostname: "demo.fugue.pro"}},
+		},
+		HealthyEdgeGroups:          map[string]bool{"edge-group-country-de": false},
+		ExpectedNonEmptyEdgeGroups: map[string]bool{"edge-group-country-de": true},
+		Options:                    edgeRouteBundleOptions{EdgeGroupID: "edge-group-country-de"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing to publish empty route bundle") {
+		t.Fatalf("expected stale edge group empty route bundle invariant failure, got %v", err)
+	}
+}
+
 func TestEdgeDNSBundleInvariantRejectsMissingProtectedRecord(t *testing.T) {
 	t.Parallel()
 

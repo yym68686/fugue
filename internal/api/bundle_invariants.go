@@ -8,11 +8,12 @@ import (
 )
 
 type edgeRouteBundleInvariantInput struct {
-	Apps              []model.App
-	Domains           []model.AppDomain
-	PlatformRoutes    []model.PlatformRoute
-	HealthyEdgeGroups map[string]bool
-	Options           edgeRouteBundleOptions
+	Apps                       []model.App
+	Domains                    []model.AppDomain
+	PlatformRoutes             []model.PlatformRoute
+	HealthyEdgeGroups          map[string]bool
+	ExpectedNonEmptyEdgeGroups map[string]bool
+	Options                    edgeRouteBundleOptions
 }
 
 func validateEdgeRouteBundleForPublish(bundle model.EdgeRouteBundle, input edgeRouteBundleInvariantInput) error {
@@ -35,7 +36,7 @@ func validateEdgeRouteBundleForPublish(bundle model.EdgeRouteBundle, input edgeR
 			}
 		}
 	}
-	if len(bundle.Routes) == 0 && edgeRouteBundleExpectedRoutableHosts(input) > 0 && edgeRouteSelectorShouldHaveRoutes(input.Options, input.HealthyEdgeGroups) {
+	if len(bundle.Routes) == 0 && edgeRouteBundleExpectedRoutableHosts(input) > 0 && edgeRouteSelectorShouldHaveRoutes(input.Options, input.HealthyEdgeGroups, input.ExpectedNonEmptyEdgeGroups) {
 		return fmt.Errorf("edge route bundle invariant failed: refusing to publish empty route bundle for non-empty routable inventory")
 	}
 	return nil
@@ -61,7 +62,7 @@ func edgeRouteBundleExpectedRoutableHosts(input edgeRouteBundleInvariantInput) i
 	return count
 }
 
-func edgeRouteSelectorShouldHaveRoutes(options edgeRouteBundleOptions, healthyEdgeGroups map[string]bool) bool {
+func edgeRouteSelectorShouldHaveRoutes(options edgeRouteBundleOptions, healthyEdgeGroups, expectedNonEmptyEdgeGroups map[string]bool) bool {
 	if strings.TrimSpace(options.EdgeGroupID) == "" && strings.TrimSpace(options.EdgeID) == "" {
 		return true
 	}
@@ -69,10 +70,7 @@ func edgeRouteSelectorShouldHaveRoutes(options edgeRouteBundleOptions, healthyEd
 	if edgeGroupID == "" {
 		edgeGroupID = edgeGroupIDFromEdgeID(options.EdgeID)
 	}
-	if edgeGroupID == "" {
-		return false
-	}
-	return healthyEdgeGroups[edgeGroupID]
+	return edgeGroupID != "" && (expectedNonEmptyEdgeGroups[edgeGroupID] || healthyEdgeGroups[edgeGroupID])
 }
 
 func validateEdgeDNSBundleForPublish(bundle model.EdgeDNSBundle, options edgeDNSBundleOptions, protectedRecords []model.EdgeDNSRecord) error {
