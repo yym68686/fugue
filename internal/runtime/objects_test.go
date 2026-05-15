@@ -61,11 +61,13 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 	}
 	postgresAliasService := objects[3]
 	postgresAliasSpec := postgresAliasService["spec"].(map[string]any)
-	if got := postgresAliasSpec["type"]; got != "ExternalName" {
-		t.Fatalf("expected postgres alias service type ExternalName, got %#v", got)
+	if _, ok := postgresAliasSpec["externalName"]; ok {
+		t.Fatalf("postgres alias service should not use externalName, got %#v", postgresAliasSpec["externalName"])
 	}
-	if got := postgresAliasSpec["externalName"]; got != "uni-api-demo-postgres-rw.fg-tenant-demo.svc.cluster.local" {
-		t.Fatalf("expected postgres alias external name, got %#v", got)
+	if selector, ok := postgresAliasSpec["selector"].(map[string]string); !ok {
+		t.Fatalf("expected postgres alias selector, got %#v", postgresAliasSpec["selector"])
+	} else if got := selector["cnpg.io/cluster"]; got != "uni-api-demo-postgres" {
+		t.Fatalf("expected postgres alias selector cluster %q, got %#v", "uni-api-demo-postgres", got)
 	}
 	if kind, _ := objects[4]["kind"].(string); kind != CloudNativePGClusterKind {
 		t.Fatalf("expected postgres cluster, got %#v", objects[4]["kind"])
@@ -260,11 +262,13 @@ func TestBuildAppObjectsIncludeComposeServiceAlias(t *testing.T) {
 		t.Fatalf("expected compose alias service name %q, got %#v", ComposeServiceAliasName(app.ProjectID, "api"), got)
 	}
 	aliasSpec := aliasService["spec"].(map[string]any)
-	if got := aliasSpec["type"]; got != "ExternalName" {
-		t.Fatalf("expected compose alias service type ExternalName, got %#v", got)
+	if _, ok := aliasSpec["externalName"]; ok {
+		t.Fatalf("compose alias service should not use externalName, got %#v", aliasSpec["externalName"])
 	}
-	if got := aliasSpec["externalName"]; got != "app-demo-123.fg-tenant-demo.svc.cluster.local" {
-		t.Fatalf("expected compose alias external name, got %#v", got)
+	if selector, ok := aliasSpec["selector"].(map[string]string); !ok {
+		t.Fatalf("expected compose alias selector, got %#v", aliasSpec["selector"])
+	} else if got := selector[FugueLabelAppID]; got != app.ID {
+		t.Fatalf("expected compose alias selector app id %q, got %#v", app.ID, got)
 	}
 
 	legacyAliasService := objects[4]
@@ -275,11 +279,13 @@ func TestBuildAppObjectsIncludeComposeServiceAlias(t *testing.T) {
 		t.Fatalf("expected legacy app-name alias service name %q, got %#v", "demo-api", got)
 	}
 	legacyAliasSpec := legacyAliasService["spec"].(map[string]any)
-	if got := legacyAliasSpec["type"]; got != "ExternalName" {
-		t.Fatalf("expected legacy app-name alias service type ExternalName, got %#v", got)
+	if _, ok := legacyAliasSpec["externalName"]; ok {
+		t.Fatalf("legacy app-name alias service should not use externalName, got %#v", legacyAliasSpec["externalName"])
 	}
-	if got := legacyAliasSpec["externalName"]; got != "app-demo-123.fg-tenant-demo.svc.cluster.local" {
-		t.Fatalf("expected legacy app-name alias external name, got %#v", got)
+	if selector, ok := legacyAliasSpec["selector"].(map[string]string); !ok {
+		t.Fatalf("expected legacy app-name alias selector, got %#v", legacyAliasSpec["selector"])
+	} else if got := selector[FugueLabelAppID]; got != app.ID {
+		t.Fatalf("expected legacy app-name alias selector app id %q, got %#v", app.ID, got)
 	}
 }
 
@@ -1596,8 +1602,13 @@ func TestBuildManagedPostgresObjectsUseStableSelectors(t *testing.T) {
 		t.Fatalf("expected postgres service alias, got %#v", got)
 	}
 	aliasSpec := postgresAliasService["spec"].(map[string]any)
-	if got := aliasSpec["externalName"]; got != "uni-api-demo-postgres-rw.fg-tenant-demo.svc.cluster.local" {
-		t.Fatalf("expected postgres alias external name, got %#v", got)
+	if _, ok := aliasSpec["externalName"]; ok {
+		t.Fatalf("postgres alias service should not use externalName, got %#v", aliasSpec["externalName"])
+	}
+	if selector, ok := aliasSpec["selector"].(map[string]string); !ok {
+		t.Fatalf("expected postgres alias selector, got %#v", aliasSpec["selector"])
+	} else if got := selector["cnpg.io/cluster"]; got != "uni-api-demo-postgres" {
+		t.Fatalf("expected postgres alias selector cluster %q, got %#v", "uni-api-demo-postgres", got)
 	}
 
 	postgresCluster := objects[3]

@@ -281,6 +281,10 @@ func buildPostgresClusterAnnotations(spec model.AppPostgresSpec) map[string]stri
 }
 
 func buildPostgresServiceObject(namespace, resourceName string, labels map[string]string, spec model.AppPostgresSpec) map[string]any {
+	clusterName := strings.TrimSpace(spec.ServiceName)
+	if clusterName == "" {
+		clusterName = strings.TrimSpace(resourceName)
+	}
 	return map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Service",
@@ -290,8 +294,10 @@ func buildPostgresServiceObject(namespace, resourceName string, labels map[strin
 			"labels":    labels,
 		},
 		"spec": map[string]any{
-			"type":         "ExternalName",
-			"externalName": postgresRWServiceFQDN(namespace, spec.ServiceName),
+			"selector": map[string]string{
+				"cnpg.io/cluster":      clusterName,
+				"cnpg.io/instanceRole": "primary",
+			},
 			"ports": []map[string]any{
 				{
 					"name":       "tcp-5432",
@@ -941,14 +947,9 @@ func buildAppServiceObject(namespace string, app model.App, labels map[string]st
 		return nil
 	}
 
-	servicePorts := make([]map[string]any, 0, len(app.Spec.Ports))
-	for _, port := range app.Spec.Ports {
-		servicePorts = append(servicePorts, map[string]any{
-			"name":       "tcp-" + strconv.Itoa(port),
-			"port":       port,
-			"targetPort": port,
-			"protocol":   "TCP",
-		})
+	servicePorts := appServicePorts(app.Spec.Ports)
+	if len(servicePorts) == 0 {
+		return nil
 	}
 	return map[string]any{
 		"apiVersion": "v1",
@@ -963,6 +964,22 @@ func buildAppServiceObject(namespace string, app model.App, labels map[string]st
 			"ports":    servicePorts,
 		},
 	}
+}
+
+func appServicePorts(ports []int) []map[string]any {
+	servicePorts := make([]map[string]any, 0, len(ports))
+	for _, port := range ports {
+		if port <= 0 {
+			continue
+		}
+		servicePorts = append(servicePorts, map[string]any{
+			"name":       "tcp-" + strconv.Itoa(port),
+			"port":       port,
+			"targetPort": port,
+			"protocol":   "TCP",
+		})
+	}
+	return servicePorts
 }
 
 func buildAppNetworkPolicyObject(namespace string, app model.App, labels map[string]string) map[string]any {
@@ -1128,23 +1145,7 @@ func buildComposeServiceAliasObject(namespace string, app model.App) map[string]
 	if aliasName == "" || aliasName == RuntimeAppResourceName(app) {
 		return nil
 	}
-	serviceFQDN := serviceFQDN(namespace, RuntimeAppResourceName(app))
-	if serviceFQDN == "" {
-		return nil
-	}
-
-	servicePorts := make([]map[string]any, 0, len(app.Spec.Ports))
-	for _, port := range app.Spec.Ports {
-		if port <= 0 {
-			continue
-		}
-		servicePorts = append(servicePorts, map[string]any{
-			"name":       "tcp-" + strconv.Itoa(port),
-			"port":       port,
-			"targetPort": port,
-			"protocol":   "TCP",
-		})
-	}
+	servicePorts := appServicePorts(app.Spec.Ports)
 	if len(servicePorts) == 0 {
 		return nil
 	}
@@ -1158,9 +1159,8 @@ func buildComposeServiceAliasObject(namespace string, app model.App) map[string]
 			"labels":    composeServiceAliasLabels(app, composeService),
 		},
 		"spec": map[string]any{
-			"type":         "ExternalName",
-			"externalName": serviceFQDN,
-			"ports":        servicePorts,
+			"selector": appLabels(app),
+			"ports":    servicePorts,
 		},
 	}
 }
@@ -1180,23 +1180,7 @@ func buildLegacyComposeAppNameAliasObject(namespace string, app model.App) map[s
 	if aliasName == RuntimeAppResourceName(app) || aliasName == ComposeServiceAliasName(app.ProjectID, composeService) {
 		return nil
 	}
-	serviceFQDN := serviceFQDN(namespace, RuntimeAppResourceName(app))
-	if serviceFQDN == "" {
-		return nil
-	}
-
-	servicePorts := make([]map[string]any, 0, len(app.Spec.Ports))
-	for _, port := range app.Spec.Ports {
-		if port <= 0 {
-			continue
-		}
-		servicePorts = append(servicePorts, map[string]any{
-			"name":       "tcp-" + strconv.Itoa(port),
-			"port":       port,
-			"targetPort": port,
-			"protocol":   "TCP",
-		})
-	}
+	servicePorts := appServicePorts(app.Spec.Ports)
 	if len(servicePorts) == 0 {
 		return nil
 	}
@@ -1210,9 +1194,8 @@ func buildLegacyComposeAppNameAliasObject(namespace string, app model.App) map[s
 			"labels":    legacyComposeAppNameAliasLabels(app),
 		},
 		"spec": map[string]any{
-			"type":         "ExternalName",
-			"externalName": serviceFQDN,
-			"ports":        servicePorts,
+			"selector": appLabels(app),
+			"ports":    servicePorts,
 		},
 	}
 }
