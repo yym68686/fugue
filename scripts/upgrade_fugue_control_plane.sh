@@ -721,7 +721,7 @@ run_release_preflight() {
       fail "DiscoveryBundle preflight failed with HTTP ${discovery_http_status:-unknown}"
       ;;
   esac
-  discovery_etag="$(awk 'BEGIN {IGNORECASE = 1} $1 == "ETag:" {print $2; exit}' "${discovery_headers}" | tr -d '\r')"
+  discovery_etag="$(awk 'tolower($1) == "etag:" {print $2; exit}' "${discovery_headers}" | tr -d '\r')"
   if [[ -z "$(trim_field "${discovery_etag}")" ]]; then
     if release_preflight_missing_discovery_bootstrap_allowed && [[ ! -s "${discovery_body}" ]]; then
       log "release preflight bootstrap: DiscoveryBundle endpoint returned an empty response without an ETag; continuing with explicit runtime values"
