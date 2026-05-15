@@ -659,11 +659,15 @@ func edgeInventoryHealthy(nodes []model.EdgeNode) bool {
 		return false
 	}
 	healthyCount := 0
+	now := time.Now().UTC()
 	for _, node := range nodes {
 		if node.Draining {
 			continue
 		}
 		if !node.Healthy || !strings.EqualFold(strings.TrimSpace(node.Status), model.EdgeHealthHealthy) {
+			return false
+		}
+		if !edgeNodeHeartbeatFresh(node, now) {
 			return false
 		}
 		if strings.TrimSpace(node.LastError) != "" || strings.TrimSpace(node.CaddyLastError) != "" {
@@ -682,8 +686,12 @@ func dnsInventoryHealthy(nodes []model.DNSNode) bool {
 		return false
 	}
 	healthyCount := 0
+	now := time.Now().UTC()
 	for _, node := range nodes {
 		if !node.Healthy || !strings.EqualFold(strings.TrimSpace(node.Status), model.EdgeHealthHealthy) {
+			return false
+		}
+		if !dnsNodeHeartbeatFresh(node, now) {
 			return false
 		}
 		if strings.TrimSpace(node.LastError) != "" {

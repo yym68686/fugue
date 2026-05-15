@@ -553,6 +553,7 @@ func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string]bool, er
 	}
 	healthy := make(map[string]bool)
 	expectedNonEmpty := make(map[string]bool)
+	now := time.Now().UTC()
 	for _, node := range nodes {
 		groupID := strings.TrimSpace(node.EdgeGroupID)
 		if groupID == "" {
@@ -564,7 +565,7 @@ func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string]bool, er
 			strings.TrimSpace(node.LKGGeneration) != "" {
 			expectedNonEmpty[groupID] = true
 		}
-		if node.Healthy && !node.Draining && strings.EqualFold(strings.TrimSpace(node.Status), model.EdgeHealthHealthy) {
+		if node.Healthy && !node.Draining && strings.EqualFold(strings.TrimSpace(node.Status), model.EdgeHealthHealthy) && edgeNodeHeartbeatFresh(node, now) {
 			healthy[groupID] = true
 		} else if _, ok := healthy[groupID]; !ok {
 			healthy[groupID] = false

@@ -1,11 +1,13 @@
 package api
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/store"
 )
 
 func TestEdgeRouteBundleInvariantRejectsEmptyRoutableBundle(t *testing.T) {
@@ -85,12 +87,14 @@ func TestEdgeDNSBundleInvariantRejectsMissingProtectedRecord(t *testing.T) {
 func TestDNSInventoryHealthyAllowsHistoricalSyncErrors(t *testing.T) {
 	t.Parallel()
 
+	now := time.Now().UTC()
 	if !dnsInventoryHealthy([]model.DNSNode{{
 		ID:               "dns-us-1",
 		Status:           model.EdgeHealthHealthy,
 		Healthy:          true,
 		CacheStatus:      "ready",
 		BundleSyncErrors: 3,
+		LastHeartbeatAt:  &now,
 	}}) {
 		t.Fatal("historical bundle sync errors should not block currently healthy DNS inventory")
 	}
@@ -100,7 +104,41 @@ func TestDNSInventoryHealthyAllowsHistoricalSyncErrors(t *testing.T) {
 		Healthy:          true,
 		CacheStatus:      "ready",
 		CacheWriteErrors: 1,
+		LastHeartbeatAt:  &now,
 	}}) {
 		t.Fatal("cache write errors must still block DNS inventory")
+	}
+}
+
+func TestEdgeRouteHealthyGroupsIgnoreStaleHeartbeat(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	stale := now.Add(-(platformNodeHeartbeatStaleAfter + time.Second))
+
+	storeState := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if _, _, err := storeState.CreateEdgeNodeToken(model.EdgeNode{
+		ID:                 "edge-de-1",
+		EdgeGroupID:        "edge-group-country-de",
+		Status:             model.EdgeHealthHealthy,
+		Healthy:            true,
+		CaddyRouteCount:    3,
+		ServingGeneration:  "routegen_previous",
+		LKGGeneration:      "routegen_previous",
+		LastSeenAt:         &stale,
+		LastHeartbeatAt:    &stale,
+		RouteBundleVersion: "routegen_previous",
+	}); err != nil {
+		t.Fatalf("record stale edge node: %v", err)
+	}
+	healthy, expected, err := (&Server{store: storeState}).edgeRouteGroupInventory()
+	if err != nil {
+		t.Fatalf("inventory: %v", err)
+	}
+	if healthy["edge-group-country-de"] {
+		t.Fatalf("stale edge heartbeat must not keep group healthy: %v", healthy)
+	}
+	if !expected["edge-group-country-de"] {
+		t.Fatalf("stale edge with previous route state should remain expected non-empty: %v", expected)
 	}
 }
