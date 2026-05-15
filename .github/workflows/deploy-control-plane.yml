@@ -170,6 +170,7 @@ jobs:
           FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
           FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
           FUGUE_RELEASE_FULLNAME: ${{ vars.FUGUE_RELEASE_FULLNAME || 'fugue-fugue' }}
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY || '' }}
           FUGUE_API_PUBLIC_DOMAIN: ${{ vars.FUGUE_API_PUBLIC_DOMAIN || '' }}
           FUGUE_APP_BASE_DOMAIN: ${{ vars.FUGUE_APP_BASE_DOMAIN || '' }}
           FUGUE_API_DATABASE_URL: ${{ secrets.FUGUE_API_DATABASE_URL || '' }}
