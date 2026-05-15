@@ -36,7 +36,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: fugue-control-plane-production
+  group: fugue-control-plane-production-v2
   cancel-in-progress: false
 
 jobs:
