@@ -289,6 +289,8 @@ func TestUpgradeScriptBlocksOnSelfOrganizingPreflight(t *testing.T) {
 	for _, want := range []string{
 		"run_release_preflight()",
 		"/v1/discovery/bundle",
+		"release_preflight_missing_discovery_bootstrap_allowed()",
+		"release preflight bootstrap: DiscoveryBundle endpoint returned an empty response without an ETag",
 		"DiscoveryBundle preflight did not return an ETag",
 		"/v1/admin/platform/autonomy/status",
 		"control-plane store promotion gate is blocked",

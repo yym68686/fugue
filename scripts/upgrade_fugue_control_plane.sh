@@ -614,11 +614,45 @@ release_api_token() {
   trim_field "${FUGUE_API_KEY:-${FUGUE_TOKEN:-${FUGUE_BOOTSTRAP_KEY:-}}}"
 }
 
+discovery_bundle_source_configured() {
+  if [[ -n "${DISCOVERY_BUNDLE_FILE}" && -r "${DISCOVERY_BUNDLE_FILE}" ]]; then
+    return 0
+  fi
+  if [[ -n "$(trim_field "${FUGUE_DISCOVERY_BUNDLE_FILE:-}")" ]]; then
+    return 0
+  fi
+  if [[ -n "$(trim_field "${FUGUE_DISCOVERY_BUNDLE_URL:-}")" ]]; then
+    return 0
+  fi
+  if [[ -n "$(trim_field "${FUGUE_BASE_URL:-${FUGUE_API_URL:-}}")" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+release_preflight_missing_discovery_bootstrap_allowed() {
+  case "${FUGUE_RELEASE_PREFLIGHT_ALLOW_MISSING_DISCOVERY_BOOTSTRAP:-true}" in
+    1|true|TRUE|yes|YES)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  if discovery_bundle_source_configured; then
+    return 1
+  fi
+  [[ -n "$(trim_field "${FUGUE_REGISTRY_PULL_BASE:-}")" ]] || return 1
+  [[ -n "$(trim_field "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT:-}")" ]] || return 1
+  [[ -n "$(trim_field "${FUGUE_SMOKE_URL:-}")" ]] || return 1
+  return 0
+}
+
 run_release_preflight() {
   local api_base=""
   local token=""
   local discovery_headers=""
   local discovery_body=""
+  local discovery_http_status=""
   local autonomy_status_file=""
   local discovery_etag=""
 
@@ -639,9 +673,28 @@ run_release_preflight() {
 
   discovery_headers="$(mktemp)"
   discovery_body="$(mktemp)"
-  curl -fsS -D "${discovery_headers}" -H "Authorization: Bearer ${token}" "${api_base}/v1/discovery/bundle" -o "${discovery_body}"
+  discovery_http_status="$(curl -sS -D "${discovery_headers}" -H "Authorization: Bearer ${token}" "${api_base}/v1/discovery/bundle" -o "${discovery_body}" -w '%{http_code}' || true)"
+  case "${discovery_http_status}" in
+    200|204|304)
+      ;;
+    *)
+      if release_preflight_missing_discovery_bootstrap_allowed && [[ "${discovery_http_status}" =~ ^(404|405|501)$ ]]; then
+        log "release preflight bootstrap: DiscoveryBundle endpoint unavailable (HTTP ${discovery_http_status}); continuing with explicit runtime values"
+        rm -f "${discovery_headers}" "${discovery_body}"
+        return 0
+      fi
+      fail "DiscoveryBundle preflight failed with HTTP ${discovery_http_status:-unknown}"
+      ;;
+  esac
   discovery_etag="$(awk 'BEGIN {IGNORECASE = 1} $1 == "ETag:" {print $2; exit}' "${discovery_headers}" | tr -d '\r')"
-  [[ -n "$(trim_field "${discovery_etag}")" ]] || fail "DiscoveryBundle preflight did not return an ETag"
+  if [[ -z "$(trim_field "${discovery_etag}")" ]]; then
+    if release_preflight_missing_discovery_bootstrap_allowed && [[ ! -s "${discovery_body}" ]]; then
+      log "release preflight bootstrap: DiscoveryBundle endpoint returned an empty response without an ETag; continuing with explicit runtime values"
+      rm -f "${discovery_headers}" "${discovery_body}"
+      return 0
+    fi
+    fail "DiscoveryBundle preflight did not return an ETag"
+  fi
   python3 - "${discovery_body}" <<'PY'
 import json
 import sys
