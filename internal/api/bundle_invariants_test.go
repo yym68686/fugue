@@ -152,10 +152,12 @@ func TestDNSInventoryHealthyAllowsHistoricalSyncErrors(t *testing.T) {
 		Status:           model.EdgeHealthHealthy,
 		Healthy:          true,
 		CacheStatus:      "ready",
+		DNSBundleVersion: "dnsgen_recovered",
+		CacheLoadErrors:  1,
 		BundleSyncErrors: 3,
 		LastHeartbeatAt:  &now,
 	}}) {
-		t.Fatal("historical bundle sync errors should not block currently healthy DNS inventory")
+		t.Fatal("historical sync/cache load errors should not block currently healthy DNS inventory after LKG recovery")
 	}
 	if dnsInventoryHealthy([]model.DNSNode{{
 		ID:               "dns-us-1",
@@ -166,6 +168,17 @@ func TestDNSInventoryHealthyAllowsHistoricalSyncErrors(t *testing.T) {
 		LastHeartbeatAt:  &now,
 	}}) {
 		t.Fatal("cache write errors must still block DNS inventory")
+	}
+	if dnsInventoryHealthy([]model.DNSNode{{
+		ID:               "dns-us-1",
+		Status:           model.EdgeHealthHealthy,
+		Healthy:          true,
+		CacheStatus:      "error",
+		DNSBundleVersion: "dnsgen_bad",
+		CacheLoadErrors:  1,
+		LastHeartbeatAt:  &now,
+	}}) {
+		t.Fatal("unrecovered cache load errors must block DNS inventory")
 	}
 }
 

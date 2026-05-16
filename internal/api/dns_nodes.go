@@ -305,8 +305,8 @@ func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal mode
 		},
 		model.DNSDelegationPreflightCheck{
 			Name:    "cache_errors_zero",
-			Pass:    dnsNodeCacheErrorsZero(nodeChecks),
-			Message: "cache write/load errors must be zero on every DNS node",
+			Pass:    dnsNodeCacheHealthyAll(nodeChecks),
+			Message: "cache write errors must be zero; cache load errors are allowed after successful LKG recovery",
 		},
 		model.DNSDelegationPreflightCheck{
 			Name:    "kubernetes_health_gate",
@@ -361,7 +361,7 @@ func (s *Server) buildDNSDelegationNodeCheck(ctx context.Context, node model.DNS
 	policy, known := policyByNode[strings.TrimSpace(strings.ToLower(node.ID))]
 	nodeReady := known && policy.Ready
 	nodeDiskPressure := known && policy.DiskPressure
-	cacheOK := node.CacheWriteErrors == 0 && node.CacheLoadErrors == 0
+	cacheOK := dnsNodeCacheHealthy(node.CacheStatus, node.DNSBundleVersion, node.CacheWriteErrors, node.CacheLoadErrors)
 	bundleOK := strings.TrimSpace(node.DNSBundleVersion) != ""
 	healthOK := node.Healthy && node.Status == model.EdgeHealthHealthy
 	kubeOK := policyErr == nil && known && nodeReady && !nodeDiskPressure
@@ -375,7 +375,7 @@ func (s *Server) buildDNSDelegationNodeCheck(ctx context.Context, node model.DNS
 		messageParts = append(messageParts, "DNS bundle version is empty")
 	}
 	if !cacheOK {
-		messageParts = append(messageParts, "cache write/load errors are non-zero")
+		messageParts = append(messageParts, "cache has unrecovered write/load errors")
 	}
 	if policyErr != nil {
 		messageParts = append(messageParts, "Kubernetes node health is unavailable")
@@ -577,16 +577,30 @@ func dnsBundleStableMessage(version string, stable bool) string {
 	return "each DNS node must report a non-empty DNS bundle version, and nodes in the same edge group must agree"
 }
 
-func dnsNodeCacheErrorsZero(checks []model.DNSDelegationNodeCheck) bool {
+func dnsNodeCacheHealthyAll(checks []model.DNSDelegationNodeCheck) bool {
 	if len(checks) == 0 {
 		return false
 	}
 	for _, check := range checks {
-		if check.CacheWriteErrors != 0 || check.CacheLoadErrors != 0 {
+		if !dnsNodeCacheHealthy(check.CacheStatus, check.DNSBundleVersion, check.CacheWriteErrors, check.CacheLoadErrors) {
 			return false
 		}
 	}
 	return true
+}
+
+func dnsNodeCacheHealthy(cacheStatus, bundleVersion string, cacheWriteErrors, cacheLoadErrors uint64) bool {
+	if cacheWriteErrors != 0 {
+		return false
+	}
+	if cacheLoadErrors == 0 {
+		return true
+	}
+	if strings.TrimSpace(bundleVersion) == "" {
+		return false
+	}
+	status := strings.ToLower(strings.TrimSpace(cacheStatus))
+	return status != "" && !strings.Contains(status, "error")
 }
 
 func dnsNodeKubernetesHealthOK(checks []model.DNSDelegationNodeCheck) bool {
