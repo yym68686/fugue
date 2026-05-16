@@ -235,6 +235,71 @@ func TestInvestigationHelpDocsDescribeNewWorkflows(t *testing.T) {
 	}
 }
 
+func TestProjectMoveHelpDocsDescribeNewWorkflows(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "app move-project",
+			args: []string{"app", "move-project", "--help"},
+			want: []string{
+				"Move an app's project ownership without changing its runtime.",
+				"App-owned backing services, including app-managed postgres,",
+				"fugue app move-project dataocean --to dataocean --create-project --dry-run",
+			},
+		},
+		{
+			name: "service move-project",
+			args: []string{"service", "move-project", "--help"},
+			want: []string{
+				"Move an independently-managed backing service's project ownership without",
+				"App-owned services normally move through \"fugue app move-project\"",
+				"fugue service move-project shared-db --to analytics --dry-run",
+			},
+		},
+		{
+			name: "project split",
+			args: []string{"project", "split", "--help"},
+			want: []string{
+				"Move selected apps from one source project into target projects in one",
+				"move with each app by default; independently-created bound services",
+				"fugue project split default --app dataocean=dataocean --app cerebr-snapshot-share=cerebr-snapshot-share --create-projects --confirm",
+			},
+		},
+		{
+			name: "project split plan",
+			args: []string{"project", "split", "plan", "--help"},
+			want: []string{
+				"Preview the apps, backing services, binding rewrites, created projects,",
+				"fugue project split plan default --app api=backend --include-bound-services --on-conflict rename",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			if err := runWithStreams(tc.args, &stdout, &stderr); err != nil {
+				t.Fatalf("run help %v: %v", tc.args, err)
+			}
+			out := stdout.String()
+			for _, want := range tc.want {
+				if !strings.Contains(out, want) {
+					t.Fatalf("expected help output for %v to contain %q, got %q", tc.args, want, out)
+				}
+			}
+		})
+	}
+}
+
 func TestVisibleCommandsHaveLongAndExamples(t *testing.T) {
 	t.Parallel()
 
@@ -933,6 +998,56 @@ func TestRunAppMoveLocalizesOwnedManagedPostgresBeforeMigratingApp(t *testing.T)
 	}
 	if !strings.Contains(stdout.String(), `"current_runtime_id": "runtime_b"`) {
 		t.Fatalf("expected final app on runtime_b, got %s", stdout.String())
+	}
+}
+
+func TestRunAppMoveProjectRequestsAtomicProjectMove(t *testing.T) {
+	t.Parallel()
+
+	var moveBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_dataocean","tenant_id":"tenant_123","project_id":"project_default","name":"dataocean","description":"","spec":{"runtime_id":"runtime_a","replicas":1},"status":{"phase":"deployed","current_runtime_id":"runtime_a","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_dataocean/move-project":
+			if err := json.NewDecoder(r.Body).Decode(&moveBody); err != nil {
+				t.Fatalf("decode move-project body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"plan":{"dry_run":false,"source_project":{"id":"project_default","tenant_id":"tenant_123","name":"default","slug":"default","description":"","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"target_projects":[{"id":"project_dataocean","tenant_id":"tenant_123","name":"dataocean","slug":"dataocean","description":"","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}],"created_projects":[{"id":"project_dataocean","tenant_id":"tenant_123","name":"dataocean","slug":"dataocean","description":"","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}],"apps":[{"id":"app_dataocean","tenant_id":"tenant_123","project_id":"project_dataocean","name":"dataocean","description":"","spec":{"runtime_id":"runtime_a","replicas":1},"status":{"phase":"deployed","current_runtime_id":"runtime_a","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}],"backing_services":[{"id":"service_dataocean","tenant_id":"tenant_123","project_id":"project_dataocean","owner_app_id":"app_dataocean","name":"dataocean","type":"postgres","provisioner":"managed","status":"active","spec":{"postgres":{"runtime_id":"runtime_a","database":"dataocean","user":"dataocean","service_name":"dataocean-postgres"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "move-project", "dataocean",
+		"--to", "dataocean",
+		"--create-project",
+		"--confirm",
+		"-o", "json",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app move-project: %v stderr=%s", err, stderr.String())
+	}
+	if moveBody["target_project_name"] != "dataocean" {
+		t.Fatalf("expected target_project_name dataocean, got %+v", moveBody)
+	}
+	if moveBody["create_project"] != true {
+		t.Fatalf("expected create_project true, got %+v", moveBody)
+	}
+	if moveBody["include_owned_services"] != true {
+		t.Fatalf("expected include_owned_services true, got %+v", moveBody)
+	}
+	if _, ok := moveBody["dry_run"]; ok {
+		t.Fatalf("expected write request to omit dry_run, got %+v", moveBody)
+	}
+	if !strings.Contains(stdout.String(), `"project_id": "project_dataocean"`) {
+		t.Fatalf("expected moved project in JSON output, got %s", stdout.String())
 	}
 }
 

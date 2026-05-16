@@ -5494,6 +5494,99 @@ func TestManagedPostgresBindingIsExclusivePerService(t *testing.T) {
 	}
 }
 
+func TestMoveAppProjectMovesOwnedPostgresAtomically(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Project Move Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	sourceProject, err := s.CreateProject(tenant.ID, "default", "")
+	if err != nil {
+		t.Fatalf("create source project: %v", err)
+	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
+		CPUMilliCores:    1000,
+		MemoryMebibytes:  2048,
+		StorageGibibytes: 2,
+	}); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, sourceProject.ID, "dataocean", "", model.AppSpec{
+		Image:     "ghcr.io/example/dataocean:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Postgres: &model.AppPostgresSpec{
+			Database: "dataocean",
+			User:     "dataocean",
+			Password: "secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if len(app.BackingServices) != 1 || len(app.Bindings) != 1 {
+		t.Fatalf("expected owned postgres and binding, got services=%d bindings=%d", len(app.BackingServices), len(app.Bindings))
+	}
+	ownedServiceID := app.BackingServices[0].ID
+	bindingID := app.Bindings[0].ID
+
+	plan, err := s.MoveAppProject(app.ID, AppProjectMoveOptions{
+		TargetProjectName:    "dataocean",
+		CreateProject:        true,
+		IncludeOwnedServices: true,
+		OnConflict:           ProjectMoveConflictFail,
+	})
+	if err != nil {
+		t.Fatalf("move app project: %v blockers=%v", err, plan.Blockers)
+	}
+	if plan.DryRun {
+		t.Fatal("expected write plan")
+	}
+	if len(plan.CreatedProjects) != 1 || plan.CreatedProjects[0].Slug != "dataocean" {
+		t.Fatalf("expected created dataocean project, got %+v", plan.CreatedProjects)
+	}
+	if len(plan.Apps) != 1 || plan.Apps[0].ProjectID != plan.CreatedProjects[0].ID {
+		t.Fatalf("expected moved app in created project, got %+v", plan.Apps)
+	}
+	if len(plan.BackingServices) != 1 || plan.BackingServices[0].ID != ownedServiceID || plan.BackingServices[0].ProjectID != plan.CreatedProjects[0].ID {
+		t.Fatalf("expected owned service moved with app, got %+v", plan.BackingServices)
+	}
+
+	movedApp, err := s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get moved app: %v", err)
+	}
+	if movedApp.ProjectID != plan.CreatedProjects[0].ID {
+		t.Fatalf("expected app project %s, got %s", plan.CreatedProjects[0].ID, movedApp.ProjectID)
+	}
+	if len(movedApp.BackingServices) != 1 || movedApp.BackingServices[0].ProjectID != movedApp.ProjectID {
+		t.Fatalf("expected hydrated owned service in app target project, got %+v", movedApp.BackingServices)
+	}
+	if len(movedApp.Bindings) != 1 || movedApp.Bindings[0].ID != bindingID || movedApp.Bindings[0].ServiceID != ownedServiceID {
+		t.Fatalf("expected original binding to remain attached, got %+v", movedApp.Bindings)
+	}
+	services, err := s.ListBackingServices(tenant.ID, false)
+	if err != nil {
+		t.Fatalf("list services: %v", err)
+	}
+	for _, service := range services {
+		if service.ID == ownedServiceID && service.ProjectID != movedApp.ProjectID {
+			t.Fatalf("expected service project %s, got %s", movedApp.ProjectID, service.ProjectID)
+		}
+	}
+}
+
 func TestCreateAppAllowsPersistentWorkspaceOnManagedSharedRuntime(t *testing.T) {
 	t.Parallel()
 

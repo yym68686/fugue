@@ -36,6 +36,7 @@ Pass --tenant only when you are acting across multiple visible tenants.
 		c.newProjectCreateCommand(),
 		c.newProjectEditCommand(),
 		c.newProjectMoveCommand(),
+		c.newProjectSplitCommand(),
 		c.newProjectRuntimeReservationsCommand(),
 		hideCompatCommand(c.newProjectRenameCommand(), "fugue project edit"),
 		c.newProjectRemoveCommand(),

@@ -104,6 +104,7 @@ in more than one visible project or tenant.
 		c.newAppStopCommand(),
 		c.newAppRemoveCommand(),
 		c.newAppMoveCommand(),
+		c.newAppMoveProjectCommand(),
 	)
 	return cmd
 }

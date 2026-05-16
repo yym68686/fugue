@@ -713,20 +713,24 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				s.Logger.Printf("reload deployed app %s after completion failed: %v", app.ID, appErr)
 			}
 		} else {
-			if err := s.pruneExcessManagedAppImages(ctx, deployedApp); err != nil && s.Logger != nil {
+			cleanupCtx, cancel := postOperationMaintenanceContext(ctx)
+			defer cancel()
+			if err := s.pruneExcessManagedAppImages(cleanupCtx, deployedApp); err != nil && s.Logger != nil {
 				s.Logger.Printf("prune excess managed app images for app=%s failed: %v", deployedApp.ID, err)
 			}
-			if err := s.syncTenantBillingImageStorage(ctx, deployedApp.TenantID); err != nil && s.Logger != nil {
+			if err := s.syncTenantBillingImageStorage(cleanupCtx, deployedApp.TenantID); err != nil && s.Logger != nil {
 				s.Logger.Printf("sync billing image storage after deploy for tenant=%s failed: %v", deployedApp.TenantID, err)
 			}
 		}
 		timer.Mark("post_deploy_cleanup")
 	}
 	if op.Type == model.OperationTypeDelete {
-		if err := s.cleanupDeletedAppImages(ctx, app); err != nil && s.Logger != nil {
+		cleanupCtx, cancel := postOperationMaintenanceContext(ctx)
+		defer cancel()
+		if err := s.cleanupDeletedAppImages(cleanupCtx, app); err != nil && s.Logger != nil {
 			s.Logger.Printf("cleanup deleted app images for app=%s failed: %v", app.ID, err)
 		}
-		if err := s.syncTenantBillingImageStorage(ctx, app.TenantID); err != nil && s.Logger != nil {
+		if err := s.syncTenantBillingImageStorage(cleanupCtx, app.TenantID); err != nil && s.Logger != nil {
 			s.Logger.Printf("sync billing image storage after delete for tenant=%s failed: %v", app.TenantID, err)
 		}
 		timer.Mark("post_delete_cleanup")

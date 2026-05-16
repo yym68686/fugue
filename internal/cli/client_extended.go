@@ -502,6 +502,56 @@ type projectDeleteResponse struct {
 	DeletedBackingServices int               `json:"deleted_backing_services,omitempty"`
 }
 
+type projectMovePlan struct {
+	DryRun          bool                   `json:"dry_run"`
+	SourceProject   model.Project          `json:"source_project"`
+	TargetProjects  []model.Project        `json:"target_projects"`
+	CreatedProjects []model.Project        `json:"created_projects,omitempty"`
+	Apps            []model.App            `json:"apps,omitempty"`
+	BackingServices []model.BackingService `json:"backing_services,omitempty"`
+	Bindings        []model.ServiceBinding `json:"bindings,omitempty"`
+	Warnings        []string               `json:"warnings,omitempty"`
+	Blockers        []string               `json:"blockers,omitempty"`
+}
+
+type projectMovePlanResponse struct {
+	Plan projectMovePlan `json:"plan"`
+}
+
+type appProjectMoveRequest struct {
+	TargetProjectID      string `json:"target_project_id,omitempty"`
+	TargetProjectName    string `json:"target_project_name,omitempty"`
+	CreateProject        bool   `json:"create_project,omitempty"`
+	IncludeOwnedServices bool   `json:"include_owned_services"`
+	IncludeBoundServices bool   `json:"include_bound_services,omitempty"`
+	OnConflict           string `json:"on_conflict,omitempty"`
+	DryRun               bool   `json:"dry_run,omitempty"`
+}
+
+type serviceProjectMoveRequest struct {
+	TargetProjectID   string `json:"target_project_id,omitempty"`
+	TargetProjectName string `json:"target_project_name,omitempty"`
+	CreateProject     bool   `json:"create_project,omitempty"`
+	OnConflict        string `json:"on_conflict,omitempty"`
+	DryRun            bool   `json:"dry_run,omitempty"`
+}
+
+type projectSplitTargetRequest struct {
+	AppID             string `json:"app_id,omitempty"`
+	AppName           string `json:"app_name,omitempty"`
+	TargetProjectID   string `json:"target_project_id,omitempty"`
+	TargetProjectName string `json:"target_project_name,omitempty"`
+}
+
+type projectSplitRequest struct {
+	Targets              []projectSplitTargetRequest `json:"targets"`
+	CreateProjects       bool                        `json:"create_projects,omitempty"`
+	IncludeOwnedServices bool                        `json:"include_owned_services"`
+	IncludeBoundServices bool                        `json:"include_bound_services,omitempty"`
+	OnConflict           string                      `json:"on_conflict,omitempty"`
+	DryRun               bool                        `json:"dry_run,omitempty"`
+}
+
 func (c *Client) CreateTenant(name string) (model.Tenant, error) {
 	var response struct {
 		Tenant model.Tenant `json:"tenant"`
@@ -580,6 +630,23 @@ func (c *Client) DeleteProjectDetailed(id string, cascade bool) (projectDeleteRe
 		return projectDeleteResponse{}, err
 	}
 	return response, nil
+}
+
+func (c *Client) SplitProject(id string, request projectSplitRequest) (projectMovePlan, error) {
+	var response projectMovePlanResponse
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/projects", id, "split"), request, &response); err != nil {
+		return projectMovePlan{}, err
+	}
+	return response.Plan, nil
+}
+
+func (c *Client) PlanProjectSplit(id string, request projectSplitRequest) (projectMovePlan, error) {
+	request.DryRun = true
+	var response projectMovePlanResponse
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/projects", id, "split-plan"), request, &response); err != nil {
+		return projectMovePlan{}, err
+	}
+	return response.Plan, nil
 }
 
 func (c *Client) ListProjectRuntimeReservations(projectID string) ([]model.ProjectRuntimeReservation, error) {
@@ -803,6 +870,14 @@ func (c *Client) DisableApp(id string) (appDisableResponse, error) {
 	return response, nil
 }
 
+func (c *Client) MoveAppProject(id string, request appProjectMoveRequest) (projectMovePlan, error) {
+	var response projectMovePlanResponse
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "move-project"), request, &response); err != nil {
+		return projectMovePlan{}, err
+	}
+	return response.Plan, nil
+}
+
 func (c *Client) FailoverApp(id, targetRuntimeID string) (operationResponse, error) {
 	request := map[string]any{}
 	if strings.TrimSpace(targetRuntimeID) != "" {
@@ -894,6 +969,14 @@ func (c *Client) MigrateBackingService(id, targetRuntimeID string) (backingServi
 		return backingServiceMigrateResponse{}, err
 	}
 	return response, nil
+}
+
+func (c *Client) MoveBackingServiceProject(id string, request serviceProjectMoveRequest) (projectMovePlan, error) {
+	var response projectMovePlanResponse
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/backing-services", id, "move-project"), request, &response); err != nil {
+		return projectMovePlan{}, err
+	}
+	return response.Plan, nil
 }
 
 func (c *Client) LocalizeBackingService(id, targetRuntimeID, targetNodeName string) (backingServiceMigrateResponse, error) {

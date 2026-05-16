@@ -46,6 +46,7 @@ Use "fugue app binding" to attach or detach a backing service from an app.
 		hideCompatCommand(c.newServiceCreateCommand(), "fugue service postgres create"),
 		c.newServiceShowCommand(),
 		c.newServiceMoveCommand(),
+		c.newServiceMoveProjectCommand(),
 		c.newServiceLocalizeCommand(),
 		c.newServiceRemoveCommand(),
 	)

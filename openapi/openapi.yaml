@@ -1157,6 +1157,56 @@ paths:
                 $ref: "#/components/schemas/ProjectDeleteResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/projects/{id}/split-plan:
+    post:
+      operationId: planProjectSplit
+      summary: Plan Project Split
+      tags: [Projects]
+      x-fugue-handler: handlePlanProjectSplit
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectSplitRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectMovePlanResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/projects/{id}/split:
+    post:
+      operationId: splitProject
+      summary: Split Project
+      tags: [Projects]
+      x-fugue-handler: handleSplitProject
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectSplitRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectMovePlanResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/projects/{id}/runtime-reservations:
     get:
       operationId: listProjectRuntimeReservations
@@ -2942,6 +2992,31 @@ paths:
                 $ref: "#/components/schemas/BackingServiceMigrateResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/backing-services/{id}/move-project:
+    post:
+      operationId: moveBackingServiceProject
+      summary: Move Backing Service To Project
+      tags: [Backing Services]
+      x-fugue-handler: handleMoveBackingServiceProject
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MoveBackingServiceProjectRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectMovePlanResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/backing-services/{id}/localize:
     post:
       operationId: localizeBackingService
@@ -3698,6 +3773,31 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OperationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/move-project:
+    post:
+      operationId: moveAppProject
+      summary: Move App To Project
+      tags: [Apps]
+      x-fugue-handler: handleMoveAppProject
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MoveAppProjectRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectMovePlanResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/failover:
@@ -4964,6 +5064,121 @@ components:
         updated_at:
           type: string
           format: date-time
+    ProjectMoveConflictPolicy:
+      type: string
+      enum: [fail, rename, use-existing]
+      description: How to handle backing service name conflicts in the target project.
+    MoveAppProjectRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        target_project_id:
+          type: string
+          description: Existing target project ID.
+        target_project_name:
+          type: string
+          description: Target project name or slug. Used to resolve or create the project when target_project_id is omitted.
+        create_project:
+          type: boolean
+          description: Create target_project_name when it does not already exist.
+        include_owned_services:
+          type: boolean
+          description: Move app-owned backing services, such as the app-managed postgres service, with the app.
+        include_bound_services:
+          type: boolean
+          description: Move independently-created services bound to the app when they are not bound to apps left behind.
+        on_conflict:
+          $ref: "#/components/schemas/ProjectMoveConflictPolicy"
+        dry_run:
+          type: boolean
+          description: Return the move plan without changing project ownership.
+    MoveBackingServiceProjectRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        target_project_id:
+          type: string
+        target_project_name:
+          type: string
+        create_project:
+          type: boolean
+        on_conflict:
+          $ref: "#/components/schemas/ProjectMoveConflictPolicy"
+        dry_run:
+          type: boolean
+    ProjectSplitTarget:
+      type: object
+      additionalProperties: false
+      properties:
+        app_id:
+          type: string
+        app_name:
+          type: string
+        target_project_id:
+          type: string
+        target_project_name:
+          type: string
+    ProjectSplitRequest:
+      type: object
+      additionalProperties: false
+      required: [targets]
+      properties:
+        targets:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/ProjectSplitTarget"
+        create_projects:
+          type: boolean
+          description: Create target project names that do not already exist.
+        include_owned_services:
+          type: boolean
+          description: Move app-owned backing services with each moved app.
+        include_bound_services:
+          type: boolean
+          description: Move independently-created services only when every bound app moves to the same target project.
+        on_conflict:
+          $ref: "#/components/schemas/ProjectMoveConflictPolicy"
+        dry_run:
+          type: boolean
+          description: Return the split plan without changing project ownership.
+    ProjectMovePlan:
+      type: object
+      additionalProperties: false
+      required: [dry_run, source_project, target_projects]
+      properties:
+        dry_run:
+          type: boolean
+        source_project:
+          $ref: "#/components/schemas/Project"
+        target_projects:
+          type: array
+          items:
+            $ref: "#/components/schemas/Project"
+        created_projects:
+          type: array
+          items:
+            $ref: "#/components/schemas/Project"
+        apps:
+          type: array
+          items:
+            $ref: "#/components/schemas/App"
+        backing_services:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackingService"
+        bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ServiceBinding"
+        warnings:
+          type: array
+          items:
+            type: string
+        blockers:
+          type: array
+          items:
+            type: string
     APIKey:
       type: object
       additionalProperties: false
@@ -8272,6 +8487,13 @@ components:
       properties:
         project:
           $ref: "#/components/schemas/Project"
+    ProjectMovePlanResponse:
+      type: object
+      additionalProperties: false
+      required: [plan]
+      properties:
+        plan:
+          $ref: "#/components/schemas/ProjectMovePlan"
     ProjectRuntimeReservationListResponse:
       type: object
       additionalProperties: false

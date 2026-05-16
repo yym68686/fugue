@@ -227,7 +227,9 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		return fmt.Errorf("complete import operation %s: %w", op.ID, err)
 	}
 	timer.Mark("complete_import")
-	if err := s.syncTenantBillingImageStorage(ctx, app.TenantID); err != nil && s.Logger != nil {
+	cleanupCtx, cancel := postOperationMaintenanceContext(ctx)
+	defer cancel()
+	if err := s.syncTenantBillingImageStorage(cleanupCtx, app.TenantID); err != nil && s.Logger != nil {
 		s.Logger.Printf("skip billing image storage sync after import op=%s tenant=%s: %v", op.ID, app.TenantID, err)
 	}
 	timer.Mark("billing_sync")
