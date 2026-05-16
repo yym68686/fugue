@@ -79,6 +79,37 @@ func TestEdgeRouteBundleInvariantRejectsNoTrafficBundleForStaleEdgeGroup(t *test
 	}
 }
 
+func TestEdgeRouteBundleInvariantRejectsAbnormalTrafficDrop(t *testing.T) {
+	t.Parallel()
+
+	routes := make([]model.EdgeRouteBinding, 0, 4)
+	for _, host := range []string{"a.fugue.pro", "b.fugue.pro", "c.fugue.pro", "d.fugue.pro"} {
+		routes = append(routes, model.EdgeRouteBinding{
+			Hostname:        host,
+			EdgeGroupID:     "edge-group-country-us",
+			RoutePolicy:     model.EdgeRoutePolicyEnabled,
+			RouteGeneration: "route_" + strings.TrimSuffix(host, ".fugue.pro"),
+		})
+	}
+	err := validateEdgeRouteBundleForPublish(model.EdgeRouteBundle{
+		Version:     "routegen_short",
+		Generation:  "routegen_short",
+		GeneratedAt: time.Now().UTC(),
+		Routes:      routes,
+	}, edgeRouteBundleInvariantInput{
+		Apps: []model.App{
+			{ID: "app_demo", Route: &model.AppRoute{Hostname: "demo.fugue.pro"}},
+		},
+		HealthyEdgeGroups:          map[string]bool{"edge-group-country-us": true},
+		ExpectedNonEmptyEdgeGroups: map[string]bool{"edge-group-country-us": true},
+		ExpectedMinTrafficRoutes:   map[string]int{"edge-group-country-us": 10},
+		Options:                    edgeRouteBundleOptions{EdgeGroupID: "edge-group-country-us"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "abnormal traffic route drop") {
+		t.Fatalf("expected abnormal traffic drop invariant failure, got %v", err)
+	}
+}
+
 func TestEdgeDNSBundleInvariantRejectsMissingProtectedRecord(t *testing.T) {
 	t.Parallel()
 
@@ -159,7 +190,7 @@ func TestEdgeRouteHealthyGroupsIgnoreStaleHeartbeat(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("record stale edge node: %v", err)
 	}
-	healthy, expected, err := (&Server{store: storeState}).edgeRouteGroupInventory()
+	healthy, expected, minimum, err := (&Server{store: storeState}).edgeRouteGroupInventory()
 	if err != nil {
 		t.Fatalf("inventory: %v", err)
 	}
@@ -168,5 +199,48 @@ func TestEdgeRouteHealthyGroupsIgnoreStaleHeartbeat(t *testing.T) {
 	}
 	if !expected["edge-group-country-de"] {
 		t.Fatalf("stale edge with previous route state should remain expected non-empty: %v", expected)
+	}
+	if minimum["edge-group-country-de"] != 0 {
+		t.Fatalf("stale edge heartbeat must not preserve a minimum route count, got %v", minimum)
+	}
+}
+
+func TestEdgeRouteHealthyGroupsIncludeDegradedServingCache(t *testing.T) {
+	t.Parallel()
+
+	storeState := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if _, _, err := storeState.CreateEdgeNodeToken(model.EdgeNode{
+		ID:                 "edge-de-1",
+		EdgeGroupID:        "edge-group-country-de",
+		Status:             model.EdgeHealthDegraded,
+		Healthy:            true,
+		CaddyRouteCount:    39,
+		ServingGeneration:  "routegen_lkg",
+		LKGGeneration:      "routegen_lkg",
+		RouteBundleVersion: "routegen_lkg",
+	}); err != nil {
+		t.Fatalf("create edge node: %v", err)
+	}
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+		ID:                 "edge-de-1",
+		EdgeGroupID:        "edge-group-country-de",
+		Status:             model.EdgeHealthDegraded,
+		Healthy:            true,
+		CaddyRouteCount:    39,
+		ServingGeneration:  "routegen_lkg",
+		LKGGeneration:      "routegen_lkg",
+		RouteBundleVersion: "routegen_lkg",
+	}); err != nil {
+		t.Fatalf("record degraded serving heartbeat: %v", err)
+	}
+	healthy, expected, minimum, err := (&Server{store: storeState}).edgeRouteGroupInventory()
+	if err != nil {
+		t.Fatalf("inventory: %v", err)
+	}
+	if !healthy["edge-group-country-de"] {
+		t.Fatalf("degraded edge serving LKG should remain route-capable: %v", healthy)
+	}
+	if !expected["edge-group-country-de"] || minimum["edge-group-country-de"] != 39 {
+		t.Fatalf("expected LKG serving metadata to remain visible, expected=%v minimum=%v", expected, minimum)
 	}
 }

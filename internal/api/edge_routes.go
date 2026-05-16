@@ -72,7 +72,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	if err != nil {
 		return model.EdgeRouteBundle{}, err
 	}
-	healthyEdgeGroups, expectedNonEmptyEdgeGroups, err := s.edgeRouteGroupInventory()
+	healthyEdgeGroups, expectedNonEmptyEdgeGroups, expectedMinTrafficRoutes, err := s.edgeRouteGroupInventory()
 	if err != nil {
 		return model.EdgeRouteBundle{}, err
 	}
@@ -181,6 +181,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		PlatformRoutes:             s.platformRoutes,
 		HealthyEdgeGroups:          healthyEdgeGroups,
 		ExpectedNonEmptyEdgeGroups: expectedNonEmptyEdgeGroups,
+		ExpectedMinTrafficRoutes:   expectedMinTrafficRoutes,
 		Options:                    options,
 	}); err != nil {
 		return model.EdgeRouteBundle{}, err
@@ -542,17 +543,18 @@ func sortedHealthyEdgeGroups(healthyEdgeGroups map[string]bool) []string {
 }
 
 func (s *Server) edgeRouteHealthyEdgeGroups() (map[string]bool, error) {
-	healthy, _, err := s.edgeRouteGroupInventory()
+	healthy, _, _, err := s.edgeRouteGroupInventory()
 	return healthy, err
 }
 
-func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string]bool, error) {
+func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string]bool, map[string]int, error) {
 	nodes, _, err := s.store.ListEdgeNodes("")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	healthy := make(map[string]bool)
 	expectedNonEmpty := make(map[string]bool)
+	expectedMinTrafficRoutes := make(map[string]int)
 	now := time.Now().UTC()
 	for _, node := range nodes {
 		groupID := strings.TrimSpace(node.EdgeGroupID)
@@ -565,13 +567,16 @@ func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string]bool, er
 			strings.TrimSpace(node.LKGGeneration) != "" {
 			expectedNonEmpty[groupID] = true
 		}
-		if node.Healthy && !node.Draining && strings.EqualFold(strings.TrimSpace(node.Status), model.EdgeHealthHealthy) && edgeNodeHeartbeatFresh(node, now) {
+		if node.CaddyRouteCount > expectedMinTrafficRoutes[groupID] && edgeNodeHeartbeatFresh(node, now) {
+			expectedMinTrafficRoutes[groupID] = node.CaddyRouteCount
+		}
+		if edgeNodeRouteServingCapable(node, now) {
 			healthy[groupID] = true
 		} else if _, ok := healthy[groupID]; !ok {
 			healthy[groupID] = false
 		}
 	}
-	return healthy, expectedNonEmpty, nil
+	return healthy, expectedNonEmpty, expectedMinTrafficRoutes, nil
 }
 
 func edgeGroupIDFromEdgeID(edgeID string) string {

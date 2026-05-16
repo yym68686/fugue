@@ -13,6 +13,7 @@ type edgeRouteBundleInvariantInput struct {
 	PlatformRoutes             []model.PlatformRoute
 	HealthyEdgeGroups          map[string]bool
 	ExpectedNonEmptyEdgeGroups map[string]bool
+	ExpectedMinTrafficRoutes   map[string]int
 	Options                    edgeRouteBundleOptions
 }
 
@@ -39,10 +40,17 @@ func validateEdgeRouteBundleForPublish(bundle model.EdgeRouteBundle, input edgeR
 	if len(bundle.Routes) == 0 && edgeRouteBundleExpectedRoutableHosts(input) > 0 && edgeRouteSelectorShouldHaveRoutes(input.Options, input.HealthyEdgeGroups, input.ExpectedNonEmptyEdgeGroups) {
 		return fmt.Errorf("edge route bundle invariant failed: refusing to publish empty route bundle for non-empty routable inventory")
 	}
-	if edgeRouteBundleExpectedRoutableHosts(input) > 0 &&
-		edgeRouteSelectorShouldHaveRoutes(input.Options, input.HealthyEdgeGroups, input.ExpectedNonEmptyEdgeGroups) &&
-		edgeRouteBundleTrafficRouteCount(bundle, input.Options) == 0 {
-		return fmt.Errorf("edge route bundle invariant failed: refusing to publish route bundle without traffic routes for non-empty routable inventory")
+	if edgeRouteBundleExpectedRoutableHosts(input) > 0 && edgeRouteSelectorShouldHaveRoutes(input.Options, input.HealthyEdgeGroups, input.ExpectedNonEmptyEdgeGroups) {
+		trafficRoutes := edgeRouteBundleTrafficRouteCount(bundle, input.Options)
+		if trafficRoutes == 0 {
+			return fmt.Errorf("edge route bundle invariant failed: refusing to publish route bundle without traffic routes for non-empty routable inventory")
+		}
+		if minimum := edgeRouteExpectedMinTrafficRoutes(input.Options, input.ExpectedMinTrafficRoutes); minimum >= 5 {
+			floor := (minimum*8 + 9) / 10
+			if trafficRoutes < floor {
+				return fmt.Errorf("edge route bundle invariant failed: refusing to publish route bundle with abnormal traffic route drop: got %d, previous %d", trafficRoutes, minimum)
+			}
+		}
 	}
 	return nil
 }
@@ -94,6 +102,26 @@ func edgeRouteBundleTrafficRouteCount(bundle model.EdgeRouteBundle, options edge
 		count++
 	}
 	return count
+}
+
+func edgeRouteExpectedMinTrafficRoutes(options edgeRouteBundleOptions, expected map[string]int) int {
+	if len(expected) == 0 {
+		return 0
+	}
+	edgeGroupID := strings.TrimSpace(options.EdgeGroupID)
+	if edgeGroupID == "" {
+		edgeGroupID = edgeGroupIDFromEdgeID(options.EdgeID)
+	}
+	if edgeGroupID == "" {
+		minimum := 0
+		for _, count := range expected {
+			if count > minimum {
+				minimum = count
+			}
+		}
+		return minimum
+	}
+	return expected[edgeGroupID]
 }
 
 func validateEdgeDNSBundleForPublish(bundle model.EdgeDNSBundle, options edgeDNSBundleOptions, protectedRecords []model.EdgeDNSRecord) error {
