@@ -1,11 +1,14 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -461,13 +464,15 @@ func (s *Server) platformAutonomyStatus(r *http.Request) (model.PlatformAutonomy
 	if err != nil {
 		return model.PlatformAutonomyStatus{}, err
 	}
+	registryPass, registryMessage := s.registryReachabilityCheck(r.Context())
+	headscalePass, headscaleMessage := s.headscaleReachabilityCheck(r.Context())
 	checks := []model.StoreInvariantCheck{
 		{Name: "discovery_bundle", Pass: discovery.Generation != "" && discovery.Signature != "", Message: discovery.Generation},
 		{Name: "node_policy", Pass: clusterNodePoliciesConverged(nodePolicies), Count: len(nodePolicies)},
 		{Name: "edge", Pass: edgeInventoryHealthy(edgeNodes), Count: len(edgeNodes)},
 		{Name: "dns", Pass: dnsInventoryHealthy(dnsNodes), Count: len(dnsNodes)},
-		{Name: "registry", Pass: s.registryPullBase != "" && s.clusterJoinRegistryEndpoint != "", Message: s.registryPullBase},
-		{Name: "headscale", Pass: s.clusterJoinMeshProvider == "" || s.clusterJoinMeshLoginServer != "", Message: s.clusterJoinMeshProvider},
+		{Name: "registry", Pass: registryPass, Message: registryMessage},
+		{Name: "headscale", Pass: headscalePass, Message: headscaleMessage},
 		{Name: "route_fallback", Pass: true, Message: "route fallback remains observable"},
 		{Name: "restore_readiness", Pass: !storeStatus.BlockRollout, Message: storeStatus.RestoreReadiness},
 	}
@@ -493,6 +498,82 @@ func (s *Server) platformAutonomyStatus(r *http.Request) (model.PlatformAutonomy
 		RestoreReadiness:  storeStatus.RestoreReadiness,
 		Checks:            append(storeStatus.Invariants, checks...),
 	}, nil
+}
+
+func (s *Server) registryReachabilityCheck(ctx context.Context) (bool, string) {
+	if strings.TrimSpace(s.registryPullBase) == "" || strings.TrimSpace(s.clusterJoinRegistryEndpoint) == "" {
+		return false, "registry pull base or join endpoint is not configured"
+	}
+	healthURL := dependencyHealthURL(s.registryPushBase, "/v2/")
+	if healthURL == "" {
+		return false, "registry push endpoint is not configured"
+	}
+	if ok, message := dependencyHTTPReachable(ctx, healthURL); !ok {
+		return false, fmt.Sprintf("registry unavailable at %s: %s", healthURL, message)
+	}
+	return true, fmt.Sprintf("%s reachable via %s", s.registryPullBase, healthURL)
+}
+
+func (s *Server) headscaleReachabilityCheck(ctx context.Context) (bool, string) {
+	provider := strings.TrimSpace(s.clusterJoinMeshProvider)
+	if provider == "" {
+		return true, "mesh provider not configured"
+	}
+	loginServer := strings.TrimSpace(s.clusterJoinMeshLoginServer)
+	if loginServer == "" {
+		return false, fmt.Sprintf("%s login server is not configured", provider)
+	}
+	healthURL := dependencyHealthURL(loginServer, "/health")
+	if healthURL == "" {
+		return false, fmt.Sprintf("%s login server URL is invalid", provider)
+	}
+	if ok, message := dependencyHTTPReachable(ctx, healthURL); !ok {
+		return false, fmt.Sprintf("%s unavailable at %s: %s", provider, healthURL, message)
+	}
+	return true, fmt.Sprintf("%s reachable via %s", provider, healthURL)
+}
+
+func dependencyHealthURL(raw, healthPath string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if !strings.HasPrefix(raw, "http://") && !strings.HasPrefix(raw, "https://") {
+		raw = "http://" + raw
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	if strings.TrimSpace(healthPath) != "" {
+		cleanPath := strings.TrimSpace(healthPath)
+		if !strings.HasPrefix(cleanPath, "/") {
+			cleanPath = "/" + cleanPath
+		}
+		parsed.Path = cleanPath
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+func dependencyHTTPReachable(ctx context.Context, healthURL string) (bool, string) {
+	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, healthURL, nil)
+	if err != nil {
+		return false, err.Error()
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, err.Error()
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if (resp.StatusCode >= 200 && resp.StatusCode < 400) || resp.StatusCode == http.StatusUnauthorized {
+		return true, fmt.Sprintf("http %d", resp.StatusCode)
+	}
+	return false, fmt.Sprintf("http %d", resp.StatusCode)
 }
 
 func storePromotionHasPassingDryRun(s *Server, targetStore, generation string) bool {
