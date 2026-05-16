@@ -167,8 +167,13 @@ func TestEdgeRoutesBundleSupportsGroupFilterAndConditionalFetch(t *testing.T) {
 	conditional := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-hk", nil)
 	conditional.Header.Set("If-None-Match", etag)
 	server.Handler().ServeHTTP(second, conditional)
-	if second.Code != http.StatusNotModified {
-		t.Fatalf("expected status %d, got %d body=%s", http.StatusNotModified, second.Code, second.Body.String())
+	if second.Code != http.StatusOK {
+		t.Fatalf("expected signed route bundle refresh status %d, got %d body=%s", http.StatusOK, second.Code, second.Body.String())
+	}
+	var secondBundle model.EdgeRouteBundle
+	mustDecodeJSON(t, second, &secondBundle)
+	if secondBundle.Version != bundle.Version {
+		t.Fatalf("expected conditional signed refresh to keep content version %s, got %s", bundle.Version, secondBundle.Version)
 	}
 
 	secondApp, err := storeState.CreateAppWithRoute(app.TenantID, app.ProjectID, "second", "", model.AppSpec{
@@ -201,6 +206,37 @@ func TestEdgeRoutesBundleSupportsGroupFilterAndConditionalFetch(t *testing.T) {
 	}
 	if len(changedBundle.Routes) != 2 {
 		t.Fatalf("expected two routes after content change, got %+v", changedBundle.Routes)
+	}
+}
+
+func TestEdgeRoutePolicyUnhealthyPolicyGroupDoesNotDowngradeToRouteA(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	deployAppForEdgeRouteTest(t, storeState, app)
+
+	put := performJSONRequest(t, server, http.MethodPut, "/v1/edge/route-policies/demo.fugue.pro", platformAdminKey, map[string]any{
+		"edge_group_id": "edge-group-country-hk",
+		"route_policy":  model.EdgeRoutePolicyCanary,
+	})
+	if put.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, put.Code, put.Body.String())
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeRouteBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	route := edgeRouteByHostAndKind(bundle.Routes, "demo.fugue.pro", model.EdgeRouteKindPlatform)
+	if route == nil {
+		t.Fatalf("expected platform route in bundle: %+v", bundle.Routes)
+	}
+	if route.RoutePolicy != model.EdgeRoutePolicyCanary || route.Status != model.EdgeRouteStatusUnavailable {
+		t.Fatalf("expected unavailable canary route to remain edge traffic policy, got %+v", route)
 	}
 }
 

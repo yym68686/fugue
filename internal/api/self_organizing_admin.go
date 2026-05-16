@@ -745,13 +745,10 @@ func edgeInventoryHealthy(nodes []model.EdgeNode) bool {
 		if node.Draining {
 			continue
 		}
-		if !node.Healthy || !strings.EqualFold(strings.TrimSpace(node.Status), model.EdgeHealthHealthy) {
+		if !edgeNodeRouteServingCapable(node, now) {
 			return false
 		}
-		if !edgeNodeHeartbeatFresh(node, now) {
-			return false
-		}
-		if strings.TrimSpace(node.LastError) != "" || strings.TrimSpace(node.CaddyLastError) != "" {
+		if strings.TrimSpace(node.LastError) != "" {
 			return false
 		}
 		if cacheStatus := strings.ToLower(strings.TrimSpace(node.CacheStatus)); cacheStatus != "" && strings.Contains(cacheStatus, "error") {

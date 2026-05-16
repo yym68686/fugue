@@ -167,8 +167,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/EdgeRouteBundle"
-        '304':
-          description: Route bundle unchanged
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/edge/nodes:
@@ -698,8 +696,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/EdgeDNSBundle"
-        '304':
-          description: DNS bundle unchanged
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/dns/nodes:

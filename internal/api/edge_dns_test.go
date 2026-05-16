@@ -120,8 +120,13 @@ func TestEdgeDNSBundleSupportsGroupFilterAndConditionalFetch(t *testing.T) {
 	conditionalReq := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&edge_group_id=edge-group-country-hk&answer_ip=203.0.113.10", nil)
 	conditionalReq.Header.Set("If-None-Match", etag)
 	server.Handler().ServeHTTP(conditional, conditionalReq)
-	if conditional.Code != http.StatusNotModified {
-		t.Fatalf("expected status %d, got %d body=%s", http.StatusNotModified, conditional.Code, conditional.Body.String())
+	if conditional.Code != http.StatusOK {
+		t.Fatalf("expected signed DNS bundle refresh status %d, got %d body=%s", http.StatusOK, conditional.Code, conditional.Body.String())
+	}
+	var conditionalBundle model.EdgeDNSBundle
+	mustDecodeJSON(t, conditional, &conditionalBundle)
+	if conditionalBundle.Version != bundle.Version {
+		t.Fatalf("expected conditional signed refresh to keep content version %s, got %s", bundle.Version, conditionalBundle.Version)
 	}
 
 	changed := httptest.NewRecorder()
@@ -289,6 +294,74 @@ func TestEdgeDNSBundleDerivesFullZonePlatformAppRecords(t *testing.T) {
 	}
 	if strings.Join(otherGroupPlatform.Values, ",") != "15.204.94.71" {
 		t.Fatalf("expected other DNS node to return target edge IP, got %+v", otherGroupPlatform)
+	}
+}
+
+func TestEdgeDNSBundleUsesDegradedServingLKGEdgeIPsForPlatformAppRecords(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	if _, _, err := storeState.EnsureManagedSharedLocationLabels(map[string]string{
+		runtimepkg.LocationCountryCodeLabelKey: "US",
+	}); err != nil {
+		t.Fatalf("set managed shared location labels: %v", err)
+	}
+	app = deployAppForEdgeRouteTest(t, storeState, app)
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+		ID:                 "edge-us-1",
+		EdgeGroupID:        "edge-group-country-us",
+		PublicIPv4:         "15.204.94.71",
+		Status:             model.EdgeHealthDegraded,
+		Healthy:            true,
+		RouteBundleVersion: "routegen_lkg",
+		ServingGeneration:  "routegen_lkg",
+		LKGGeneration:      "routegen_lkg",
+		CaddyRouteCount:    44,
+		CacheStatus:        "stale",
+	}); err != nil {
+		t.Fatalf("record degraded serving US edge node: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103&route_a_answer_ip=136.112.185.40", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	platform := edgeDNSRecordByNameAndType(bundle.Records, app.Route.Hostname, model.EdgeDNSRecordTypeA)
+	if platform == nil {
+		t.Fatalf("expected platform app DNS record for %s: %+v", app.Route.Hostname, bundle.Records)
+	}
+	if strings.Join(platform.Values, ",") != "15.204.94.71" {
+		t.Fatalf("expected degraded serving LKG edge IP instead of Route A fallback, got %+v", platform)
+	}
+}
+
+func TestEdgeDNSBundleDoesNotFallbackToRouteAForUnavailableEdgeTraffic(t *testing.T) {
+	t.Parallel()
+
+	_, server, _, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+
+	put := performJSONRequest(t, server, http.MethodPut, "/v1/edge/route-policies/demo.fugue.pro", platformAdminKey, map[string]any{
+		"edge_group_id": "edge-group-country-hk",
+		"route_policy":  model.EdgeRoutePolicyCanary,
+	})
+	if put.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, put.Code, put.Body.String())
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103&route_a_answer_ip=136.112.185.40", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	if platform := edgeDNSRecordByNameAndType(bundle.Records, app.Route.Hostname, model.EdgeDNSRecordTypeA); platform != nil {
+		t.Fatalf("edge traffic DNS must fail closed instead of publishing Route A fallback, got %+v", platform)
 	}
 }
 

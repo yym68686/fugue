@@ -6,6 +6,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"fugue/internal/model"
 )
 
 func TestRegistryReachabilityCheckFailsWhenRegistryUnavailable(t *testing.T) {
@@ -60,5 +63,24 @@ func TestHeadscaleReachabilityCheckFailsOnBadHealth(t *testing.T) {
 	pass, message := server.headscaleReachabilityCheck(context.Background())
 	if pass {
 		t.Fatalf("expected unhealthy headscale to fail, got %q", message)
+	}
+}
+
+func TestEdgeInventoryHealthyAcceptsDegradedServingLKG(t *testing.T) {
+	now := time.Now().UTC()
+	nodes := []model.EdgeNode{{
+		ID:                 "edge-us-1",
+		EdgeGroupID:        "edge-group-country-us",
+		Status:             model.EdgeHealthDegraded,
+		Healthy:            true,
+		RouteBundleVersion: "routegen_lkg",
+		ServingGeneration:  "routegen_lkg",
+		LKGGeneration:      "routegen_lkg",
+		CaddyRouteCount:    44,
+		CacheStatus:        "stale",
+		LastHeartbeatAt:    &now,
+	}}
+	if !edgeInventoryHealthy(nodes) {
+		t.Fatalf("expected degraded edge serving LKG to satisfy autonomy edge inventory")
 	}
 }

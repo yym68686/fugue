@@ -65,10 +65,9 @@ func (s *Server) handleEdgeDNSBundle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "private, no-cache")
 	w.Header().Set("X-Fugue-DNS-Bundle-Version", bundle.Version)
-	if edgeRouteBundleETagMatches(r.Header.Get("If-None-Match"), bundle.Version) {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
+
+	// DNS bundles carry signed validity windows. Re-send unchanged content so
+	// DNS nodes can refresh valid_until instead of going stale behind a 304.
 	httpx.WriteJSON(w, http.StatusOK, bundle)
 }
 
@@ -565,8 +564,9 @@ func (s *Server) edgeDNSAnswerIPsByGroup(options edgeDNSBundleOptions) (map[stri
 		if err != nil {
 			return nil, err
 		}
+		now := time.Now().UTC()
 		for _, node := range nodes {
-			if !node.Healthy || node.Draining || !strings.EqualFold(strings.TrimSpace(node.Status), model.EdgeHealthHealthy) {
+			if !edgeNodeRouteServingCapable(node, now) {
 				continue
 			}
 			groupID := strings.TrimSpace(node.EdgeGroupID)
@@ -598,7 +598,10 @@ func appendEdgeDNSUniqueIP(values []string, raw string) []string {
 }
 
 func edgeDNSAnswerIPsForBinding(binding model.EdgeRouteBinding, options edgeDNSBundleOptions, edgeAnswerIPsByGroup map[string][]string) []string {
-	if binding.Status == model.EdgeRouteStatusActive && model.EdgeRoutePolicyAllowsTraffic(binding.RoutePolicy) {
+	if model.EdgeRoutePolicyAllowsTraffic(binding.RoutePolicy) {
+		if binding.Status != model.EdgeRouteStatusActive {
+			return nil
+		}
 		out := []string{}
 		for _, ip := range edgeAnswerIPsByGroup[strings.TrimSpace(binding.EdgeGroupID)] {
 			out = appendEdgeDNSUniqueIP(out, ip)
@@ -609,6 +612,7 @@ func edgeDNSAnswerIPsForBinding(binding model.EdgeRouteBinding, options edgeDNSB
 		if len(out) > 0 {
 			return out
 		}
+		return nil
 	}
 	if len(options.RouteAAnswerIPs) > 0 {
 		return append([]string(nil), options.RouteAAnswerIPs...)

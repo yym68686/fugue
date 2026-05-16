@@ -47,11 +47,9 @@ func (s *Server) handleEdgeRoutes(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "private, no-cache")
 	w.Header().Set("X-Fugue-Route-Bundle-Version", bundle.Version)
-	if edgeRouteBundleETagMatches(r.Header.Get("If-None-Match"), bundle.Version) {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
 
+	// Route bundles carry signed validity windows. Re-send unchanged content so
+	// edge nodes can refresh valid_until instead of going stale behind a 304.
 	httpx.WriteJSON(w, http.StatusOK, bundle)
 }
 
@@ -378,7 +376,6 @@ func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]mo
 	if model.EdgeRoutePolicyAllowsTraffic(binding.RoutePolicy) && strings.TrimSpace(policy.EdgeGroupID) != "" {
 		policyEdgeGroupID := strings.TrimSpace(policy.EdgeGroupID)
 		if servingEdgeGroupID == "" {
-			binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
 			binding.Status = model.EdgeRouteStatusUnavailable
 			binding.StatusReason = "edge group has no healthy edge nodes"
 			binding.FallbackReason = firstNonEmpty(selection.FallbackReason, "no healthy edge group")
@@ -387,7 +384,6 @@ func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]mo
 			return binding
 		}
 		if !healthyEdgeGroups[policyEdgeGroupID] {
-			binding.RoutePolicy = model.EdgeRoutePolicyRouteAOnly
 			binding.Status = model.EdgeRouteStatusUnavailable
 			binding.StatusReason = "edge group has no healthy edge nodes"
 			binding.SelectedEdgeGroup = servingEdgeGroupID
