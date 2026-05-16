@@ -4022,6 +4022,46 @@ paths:
           schema:
             type: string
         - in: query
+          name: tenant_id
+          required: false
+          description: Platform-admin only filter for one tenant. Tenant-scoped callers are always limited to their own tenant.
+          schema:
+            type: string
+        - in: query
+          name: project_id
+          required: false
+          description: Limit operations to apps in one project.
+          schema:
+            type: string
+        - in: query
+          name: type
+          required: false
+          description: Limit operations to one or more operation types. May be repeated or comma-separated.
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+        - in: query
+          name: status
+          required: false
+          description: Limit operations to one or more statuses. May be repeated or comma-separated.
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+        - in: query
+          name: limit
+          required: false
+          description: Return only the newest N matching operations.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+        - in: query
           name: include_desired
           required: false
           description: When true, include desired_spec and desired_source in each operation. Defaults to false so list responses stay lightweight.
@@ -7981,6 +8021,10 @@ components:
         completed_at:
           type: string
           format: date-time
+        controller_timing_segments:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperationControllerTimingSegment"
     OperationSummary:
       type: object
       additionalProperties: false
@@ -8031,6 +8075,20 @@ components:
         completed_at:
           type: string
           format: date-time
+        controller_timing_segments:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperationControllerTimingSegment"
+    OperationControllerTimingSegment:
+      type: object
+      additionalProperties: false
+      required: [name, duration_ms]
+      properties:
+        name:
+          type: string
+        duration_ms:
+          type: integer
+          format: int64
     OperationDiagnosisBlocker:
       type: object
       additionalProperties: false
@@ -8186,6 +8244,61 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/OperationDiagnosisBlocker"
+        controller_lane:
+          $ref: "#/components/schemas/OperationControllerLane"
+    OperationControllerLaneOccupant:
+      type: object
+      additionalProperties: false
+      required: [operation_id]
+      properties:
+        operation_id:
+          type: string
+        app_id:
+          type: string
+        app_name:
+          type: string
+        service:
+          type: string
+        type:
+          type: string
+        status:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        elapsed_seconds:
+          type: integer
+          format: int64
+        estimated_seconds_remaining:
+          type: integer
+          format: int32
+        controller_timing_segments:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperationControllerTimingSegment"
+    OperationControllerLane:
+      type: object
+      additionalProperties: false
+      required: [lane]
+      properties:
+        lane:
+          type: string
+        queue_position:
+          type: integer
+          format: int32
+        active:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperationControllerLaneOccupant"
+        estimated_seconds_remaining:
+          type: integer
+          format: int32
+        median_completed_seconds:
+          type: integer
+          format: int32
+        sample_size:
+          type: integer
+          format: int32
     FailoverAppRequest:
       type: object
       additionalProperties: false
@@ -9458,6 +9571,25 @@ components:
         start_time:
           type: string
           format: date-time
+    ControlPlaneWarning:
+      type: object
+      additionalProperties: false
+      required: [severity, name]
+      properties:
+        severity:
+          type: string
+        namespace:
+          type: string
+        kind:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+        reason:
+          type: string
+        message:
+          type: string
     ControlPlaneStatus:
       type: object
       additionalProperties: false
@@ -9480,6 +9612,10 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ControlPlaneComponent"
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ControlPlaneWarning"
         deploy_workflow:
           $ref: "#/components/schemas/ControlPlaneWorkflowRun"
     ControlPlaneStatusResponse:

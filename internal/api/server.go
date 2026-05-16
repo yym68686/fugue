@@ -1318,29 +1318,46 @@ func (s *Server) handleListOperations(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	timings := serverTimingFromContext(r.Context())
 	appID := readOptionalStringQuery(r, "app_id")
+	tenantID := readOptionalStringQuery(r, "tenant_id")
+	projectID := readOptionalStringQuery(r, "project_id")
+	types := readStringListQuery(r, "type")
+	statuses := readStringListQuery(r, "status")
 	includeDesired, err := readBoolQuery(r, "include_desired", false)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	limit, err := readIntQuery(r, "limit", 0)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, present := r.URL.Query()["limit"]; present && limit < 1 {
+		httpx.WriteError(w, http.StatusBadRequest, "limit must be greater than zero")
+		return
+	}
+	if !principal.IsPlatformAdmin() && tenantID != "" && tenantID != principal.TenantID {
+		httpx.WriteError(w, http.StatusForbidden, "tenant_id is not visible to this tenant")
+		return
+	}
+
+	filter := store.OperationListFilter{
+		TenantID:  tenantID,
+		AppID:     appID,
+		ProjectID: projectID,
+		Types:     types,
+		Statuses:  statuses,
+		Limit:     limit,
+	}
 
 	storeStartedAt := time.Now()
 	var ops []model.Operation
-	if appID != "" {
-		if includeDesired {
-			ops, err = s.store.ListOperationsByApp(principal.TenantID, principal.IsPlatformAdmin(), appID)
-		} else {
-			ops, err = s.store.ListOperationSummariesByApp(principal.TenantID, principal.IsPlatformAdmin(), appID)
-		}
-		timings.Add("store_operations_app", time.Since(storeStartedAt))
+	if includeDesired {
+		ops, err = s.store.ListOperationsFiltered(principal.TenantID, principal.IsPlatformAdmin(), filter)
 	} else {
-		if includeDesired {
-			ops, err = s.store.ListOperations(principal.TenantID, principal.IsPlatformAdmin())
-		} else {
-			ops, err = s.store.ListOperationSummaries(principal.TenantID, principal.IsPlatformAdmin())
-		}
-		timings.Add("store_operations", time.Since(storeStartedAt))
+		ops, err = s.store.ListOperationSummariesFiltered(principal.TenantID, principal.IsPlatformAdmin(), filter)
 	}
+	timings.Add("store_operations", time.Since(storeStartedAt))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

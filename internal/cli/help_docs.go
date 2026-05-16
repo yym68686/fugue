@@ -378,6 +378,8 @@ fugue operation watch --app my-app
 		Long: strings.TrimSpace(`
 List operations across all visible apps or narrow the result set to one app, project, operation type, or status.
 
+Tenant, project, type, status, and limit filters are sent to the API so bootstrap/admin keys do not need to download the full operation history before filtering locally. Passing a full project ID avoids tenant/project discovery entirely.
+
 JSON output redacts desired env values, passwords, and repo tokens by default. Pass --show-secrets only when you explicitly need the raw values for debugging.
 `),
 		Example: strings.TrimSpace(`
@@ -402,6 +404,8 @@ fugue operation show op_123 --show-secrets --output json
 Explain why an operation is pending, waiting, failed, or otherwise not making progress.
 
 For deploy operations, the diagnosis also inspects the target managed image and the final runtime image so the CLI can say when the deploy already points at a missing release image instead of only reporting queue state.
+
+The diagnosis includes controller lane occupancy for managed operations, including the running operations currently consuming workers, queue position, and an ETA when recent completed operations provide enough timing history. Operation show/explain also surfaces controller timing segments such as billing sync and post-deploy cleanup when the controller recorded them.
 
 For builder-placement failures, the diagnosis includes active reservations, active node locks, and a per-node exclusion snapshot so you can see why no builder was chosen without dropping into cluster exec.
 `),
@@ -610,6 +614,8 @@ fugue admin cluster net websocket my-app --path /ws
 Show control-plane deployment health, image versions, and component readiness.
 
 When the API is configured with FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY, this view also includes the latest deploy-control-plane GitHub Actions workflow run so you can correlate control-plane rollouts with the current cluster state.
+
+Non-core control-plane pods are reported as warnings when they are Pending, not ready, or otherwise unhealthy, so issues like workspace provisioner or postgres joiner stalls are visible without changing the core ready summary.
 `),
 	},
 	"fugue admin cluster pods": {

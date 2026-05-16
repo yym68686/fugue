@@ -73,7 +73,9 @@ controller:
     tag: latest
     digest: ""
     pullPolicy: IfNotPresent
+  foregroundActivateWorkers: 4
   githubSyncImportWorkers: 0
+  githubSyncActivateWorkers: 4
   pollInterval: 5s
   fallbackPollInterval: 30s
   runtimeOfflineAfter: 90s

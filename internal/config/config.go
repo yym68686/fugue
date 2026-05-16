@@ -58,7 +58,9 @@ type ControllerConfig struct {
 	SourceUploadBaseURL           string
 	ImportWorkDir                 string
 	ForegroundImportWorkers       int
+	ForegroundActivateWorkers     int
 	GitHubSyncImportWorkers       int
+	GitHubSyncActivateWorkers     int
 	GitHubSyncInterval            time.Duration
 	GitHubSyncTimeout             time.Duration
 	GitHubSyncRetryBaseDelay      time.Duration
@@ -230,7 +232,9 @@ func ControllerFromEnv() ControllerConfig {
 		SourceUploadBaseURL:           getenv("FUGUE_SOURCE_UPLOAD_BASE_URL", "http://127.0.0.1:8080"),
 		ImportWorkDir:                 getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
 		ForegroundImportWorkers:       getenvInt("FUGUE_CONTROLLER_FOREGROUND_IMPORT_WORKERS", 0),
+		ForegroundActivateWorkers:     getenvInt("FUGUE_CONTROLLER_FOREGROUND_ACTIVATE_WORKERS", 4),
 		GitHubSyncImportWorkers:       getenvInt("FUGUE_CONTROLLER_GITHUB_SYNC_IMPORT_WORKERS", 0),
+		GitHubSyncActivateWorkers:     getenvInt("FUGUE_CONTROLLER_GITHUB_SYNC_ACTIVATE_WORKERS", 4),
 		GitHubSyncInterval:            getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_INTERVAL", time.Minute),
 		GitHubSyncTimeout:             getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_TIMEOUT", 20*time.Second),
 		GitHubSyncRetryBaseDelay:      getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_BASE_DELAY", 5*time.Minute),

@@ -369,7 +369,6 @@ func (c *CLI) resolveFilterSelections(client *Client) (string, string, error) {
 
 	needsTenant := strings.TrimSpace(tenantIDValue) != "" ||
 		strings.TrimSpace(tenantNameValue) != "" ||
-		strings.TrimSpace(projectIDValue) != "" ||
 		strings.TrimSpace(projectNameValue) != ""
 
 	tenantID := ""

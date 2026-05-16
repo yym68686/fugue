@@ -60,62 +60,51 @@ func (c *CLI) newOpsListCommand() *cobra.Command {
 				projectIDFilter string
 				operations      []model.Operation
 				appInventory    []model.App
-				needInventory   bool
 			)
 			tenantIDFilter, projectIDFilter, err = c.resolveFilterSelections(client)
 			if err != nil {
 				return err
 			}
 			if strings.TrimSpace(opts.Project) != "" {
-				project, err := c.resolveNamedProject(client, opts.Project)
-				if err != nil {
-					return err
+				projectRef := strings.TrimSpace(opts.Project)
+				if isProjectIDReference(projectRef) {
+					projectIDFilter = projectRef
+				} else {
+					project, err := c.resolveNamedProject(client, projectRef)
+					if err != nil {
+						return err
+					}
+					projectIDFilter = project.ID
+					if strings.TrimSpace(tenantIDFilter) == "" {
+						tenantIDFilter = strings.TrimSpace(project.TenantID)
+					}
 				}
-				projectIDFilter = project.ID
 			}
-			needInventory = strings.TrimSpace(projectIDFilter) != "" || !c.wantsJSON()
 			if strings.TrimSpace(opts.App) != "" {
 				app, err := c.resolveNamedApp(client, opts.App)
 				if err != nil {
 					return err
 				}
 				appID = app.ID
-				if needInventory {
+				if !c.wantsJSON() {
 					appInventory = []model.App{app}
 				}
 			}
 
-			operations, err = client.ListOperations(appID)
+			limit := resolveOperationListLimit(opts.Limit, opts.All, c.wantsJSON())
+			operations, err = client.ListOperationsFiltered(listOperationsOptions{
+				AppID:     appID,
+				TenantID:  tenantIDFilter,
+				ProjectID: projectIDFilter,
+				Types:     opts.Types,
+				Statuses:  opts.Statuses,
+				Limit:     limit,
+			})
 			if err != nil {
 				return err
 			}
 
-			if needInventory && len(appInventory) == 0 {
-				appInventory, err = client.ListApps()
-				if err != nil {
-					return err
-				}
-			}
-
-			if strings.TrimSpace(tenantIDFilter) != "" {
-				operations = filterOperationsByTenantID(operations, tenantIDFilter)
-			}
-			if strings.TrimSpace(projectIDFilter) != "" {
-				appIDs := make(map[string]struct{})
-				for _, app := range appInventory {
-					if strings.TrimSpace(app.ProjectID) != strings.TrimSpace(projectIDFilter) {
-						continue
-					}
-					appIDs[strings.TrimSpace(app.ID)] = struct{}{}
-				}
-				operations = filterOperationsByAppIDs(operations, appIDs)
-			}
-			operations = filterOperationsByKinds(operations, opts.Types)
-			operations = filterOperationsByStatuses(operations, opts.Statuses)
-
 			sortOperationsNewestFirst(operations)
-			totalOperations := len(operations)
-			limit := resolveOperationListLimit(opts.Limit, opts.All, c.wantsJSON())
 			if limit > 0 && len(operations) > limit {
 				operations = operations[:limit]
 			}
@@ -128,9 +117,6 @@ func (c *CLI) newOpsListCommand() *cobra.Command {
 			}
 			if err := writeOperationTableWithApps(c.stdout, operations, mapAppNames(appInventory)); err != nil {
 				return err
-			}
-			if limit > 0 && totalOperations > len(operations) {
-				_, _ = fmt.Fprintf(c.stderr, "showing %d of %d operations; use --limit, --all, --app, --project, --type, or --status to narrow\n", len(operations), totalOperations)
 			}
 			return nil
 		},
@@ -311,6 +297,30 @@ func (c *CLI) resolveOpsAppID(client *Client, appRef string) (string, error) {
 	return app.ID, nil
 }
 
+func (c *CLI) loadOperationAppInventory(client *Client, operations []model.Operation) []model.App {
+	if len(operations) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	apps := make([]model.App, 0)
+	for _, op := range operations {
+		appID := strings.TrimSpace(op.AppID)
+		if appID == "" {
+			continue
+		}
+		if _, ok := seen[appID]; ok {
+			continue
+		}
+		seen[appID] = struct{}{}
+		app, err := client.GetApp(appID)
+		if err != nil {
+			continue
+		}
+		apps = append(apps, app)
+	}
+	return apps
+}
+
 func latestOperation(operations []model.Operation) (model.Operation, error) {
 	if len(operations) == 0 {
 		return model.Operation{}, fmt.Errorf("no operations found")
@@ -359,6 +369,9 @@ func renderOperationWithDiagnosis(w io.Writer, op model.Operation, diagnosis *mo
 	if op.DesiredReplicas != nil {
 		pairs = append(pairs, kvPair{Key: "desired_replicas", Value: fmt.Sprintf("%d", *op.DesiredReplicas)})
 	}
+	if timing := formatOperationTimingSegments(op.ControllerTimingSegments); timing != "" {
+		pairs = append(pairs, kvPair{Key: "controller_timing", Value: timing})
+	}
 	if diagnosis != nil {
 		pairs = append(pairs,
 			kvPair{Key: "diagnosis_category", Value: diagnosis.Category},
@@ -381,6 +394,17 @@ func renderOperationWithDiagnosis(w io.Writer, op model.Operation, diagnosis *mo
 	}
 	for _, evidence := range diagnosis.Evidence {
 		if _, err := fmt.Fprintf(w, "evidence=%s\n", evidence); err != nil {
+			return err
+		}
+	}
+	if diagnosis.ControllerLane != nil {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w, "[controller_lane]"); err != nil {
+			return err
+		}
+		if err := writeOperationControllerLane(w, *diagnosis.ControllerLane); err != nil {
 			return err
 		}
 	}
@@ -565,6 +589,95 @@ func formatOperationDiagnosisBlockedBy(blockers []model.OperationDiagnosisBlocke
 		parts = append(parts, label)
 	}
 	return strings.Join(parts, "; ")
+}
+
+func writeOperationControllerLane(w io.Writer, lane model.OperationControllerLane) error {
+	pairs := []kvPair{
+		{Key: "lane", Value: strings.TrimSpace(lane.Lane)},
+	}
+	if lane.QueuePosition > 0 {
+		pairs = append(pairs, kvPair{Key: "queue_position", Value: formatInt(lane.QueuePosition)})
+	}
+	if lane.EstimatedSecondsRemaining != nil {
+		pairs = append(pairs, kvPair{Key: "estimated_remaining", Value: formatDurationSeconds(*lane.EstimatedSecondsRemaining)})
+	}
+	if lane.MedianCompletedSeconds != nil {
+		pairs = append(pairs, kvPair{Key: "median_completed", Value: formatDurationSeconds(*lane.MedianCompletedSeconds)})
+	}
+	if lane.SampleSize > 0 {
+		pairs = append(pairs, kvPair{Key: "sample_size", Value: formatInt(lane.SampleSize)})
+	}
+	if err := writeKeyValues(w, pairs...); err != nil {
+		return err
+	}
+	if len(lane.Active) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "OPERATION\tTYPE\tSTATUS\tAPP\tSERVICE\tELAPSED\tEST_REMAINING"); err != nil {
+		return err
+	}
+	for _, occupant := range lane.Active {
+		remaining := "-"
+		if occupant.EstimatedSecondsRemaining != nil {
+			remaining = formatDurationSeconds(*occupant.EstimatedSecondsRemaining)
+		}
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			strings.TrimSpace(occupant.OperationID),
+			strings.TrimSpace(occupant.Type),
+			strings.TrimSpace(occupant.Status),
+			firstNonEmpty(strings.TrimSpace(occupant.AppName), strings.TrimSpace(occupant.AppID), "-"),
+			firstNonEmpty(strings.TrimSpace(occupant.Service), "-"),
+			formatDurationSeconds(int(occupant.ElapsedSeconds)),
+			remaining,
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func formatOperationTimingSegments(segments []model.OperationControllerTimingSegment) string {
+	if len(segments) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(segments))
+	for _, segment := range segments {
+		name := strings.TrimSpace(segment.Name)
+		if name == "" {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s=%dms", name, segment.DurationMilliseconds))
+	}
+	return strings.Join(parts, ",")
+}
+
+func formatDurationSeconds(seconds int) string {
+	if seconds < 0 {
+		seconds = 0
+	}
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", seconds)
+	}
+	minutes := seconds / 60
+	remainingSeconds := seconds % 60
+	if minutes < 60 {
+		if remainingSeconds == 0 {
+			return fmt.Sprintf("%dm", minutes)
+		}
+		return fmt.Sprintf("%dm%02ds", minutes, remainingSeconds)
+	}
+	hours := minutes / 60
+	remainingMinutes := minutes % 60
+	if remainingMinutes == 0 {
+		return fmt.Sprintf("%dh", hours)
+	}
+	return fmt.Sprintf("%dh%02dm", hours, remainingMinutes)
 }
 
 func formatBuilderResourceSnapshot(value model.BuilderResourceSnapshot) string {

@@ -16,6 +16,7 @@ type OperationDiagnosis struct {
 	BuilderPlacement *BuilderPlacementInspection `json:"builder_placement,omitempty"`
 	DependencyChain  []string                    `json:"dependency_chain,omitempty"`
 	BlockedBy        []OperationDiagnosisBlocker `json:"blocked_by,omitempty"`
+	ControllerLane   *OperationControllerLane    `json:"controller_lane,omitempty"`
 }
 
 type OperationDiagnosisBlocker struct {
@@ -25,6 +26,28 @@ type OperationDiagnosisBlocker struct {
 	Service     string `json:"service,omitempty"`
 	Type        string `json:"type,omitempty"`
 	Status      string `json:"status,omitempty"`
+}
+
+type OperationControllerLane struct {
+	Lane                      string                            `json:"lane"`
+	QueuePosition             int                               `json:"queue_position,omitempty"`
+	Active                    []OperationControllerLaneOccupant `json:"active,omitempty"`
+	EstimatedSecondsRemaining *int                              `json:"estimated_seconds_remaining,omitempty"`
+	MedianCompletedSeconds    *int                              `json:"median_completed_seconds,omitempty"`
+	SampleSize                int                               `json:"sample_size,omitempty"`
+}
+
+type OperationControllerLaneOccupant struct {
+	OperationID               string                             `json:"operation_id"`
+	AppID                     string                             `json:"app_id,omitempty"`
+	AppName                   string                             `json:"app_name,omitempty"`
+	Service                   string                             `json:"service,omitempty"`
+	Type                      string                             `json:"type,omitempty"`
+	Status                    string                             `json:"status,omitempty"`
+	StartedAt                 *time.Time                         `json:"started_at,omitempty"`
+	ElapsedSeconds            int64                              `json:"elapsed_seconds,omitempty"`
+	EstimatedSecondsRemaining *int                               `json:"estimated_seconds_remaining,omitempty"`
+	ControllerTimingSegments  []OperationControllerTimingSegment `json:"controller_timing_segments,omitempty"`
 }
 
 type BuilderResourceSnapshot struct {

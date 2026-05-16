@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
@@ -40,6 +41,10 @@ func (s *Server) handleGetOperationDiagnosis(w http.ResponseWriter, r *http.Requ
 	}
 	diagnosis, err := s.diagnoseOperation(r.Context(), op)
 	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if err := s.attachOperationControllerLaneDiagnosis(op, &diagnosis); err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
@@ -492,6 +497,166 @@ func (s *Server) diagnosePendingOperation(op model.Operation, app model.App, app
 
 	diagnosis.Summary = "no app-local or compose dependency blocker was detected; the controller has not claimed this operation yet"
 	return diagnosis, nil
+}
+
+func (s *Server) attachOperationControllerLaneDiagnosis(op model.Operation, diagnosis *model.OperationDiagnosis) error {
+	if diagnosis == nil {
+		return nil
+	}
+	lane := model.OperationControllerLaneName(op)
+	if lane == "" || lane == model.OperationControllerLaneUnknown {
+		return nil
+	}
+	activeOps, err := s.store.ListActiveOperations()
+	if err != nil {
+		return err
+	}
+	activeOps = diagnosisFilterActiveOperationsByTenant(activeOps, op.TenantID)
+	sameLane := make([]model.Operation, 0, len(activeOps))
+	appIDs := make([]string, 0, len(activeOps)+1)
+	appIDs = append(appIDs, op.AppID)
+	for _, active := range activeOps {
+		if model.OperationControllerLaneName(active) != lane {
+			continue
+		}
+		sameLane = append(sameLane, active)
+		appIDs = append(appIDs, active.AppID)
+	}
+	appsByID, err := s.diagnosisAppsByID(appIDs)
+	if err != nil {
+		return err
+	}
+
+	medianSeconds, sampleSize, err := s.operationLaneMedianCompletedSeconds(op, lane)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	laneDiagnosis := model.OperationControllerLane{
+		Lane:       lane,
+		Active:     make([]model.OperationControllerLaneOccupant, 0),
+		SampleSize: sampleSize,
+	}
+	if medianSeconds != nil {
+		value := *medianSeconds
+		laneDiagnosis.MedianCompletedSeconds = &value
+	}
+
+	activeRemaining := 0
+	for _, active := range sameLane {
+		if !model.OperationOccupiesControllerWorker(active) {
+			continue
+		}
+		occupant := operationLaneOccupant(active, appsByID[strings.TrimSpace(active.AppID)], now, medianSeconds)
+		if occupant.EstimatedSecondsRemaining != nil {
+			activeRemaining += *occupant.EstimatedSecondsRemaining
+		}
+		laneDiagnosis.Active = append(laneDiagnosis.Active, occupant)
+	}
+	sort.Slice(laneDiagnosis.Active, func(i, j int) bool {
+		left := laneDiagnosis.Active[i].StartedAt
+		right := laneDiagnosis.Active[j].StartedAt
+		if left != nil && right != nil && !left.Equal(*right) {
+			return left.Before(*right)
+		}
+		return laneDiagnosis.Active[i].OperationID < laneDiagnosis.Active[j].OperationID
+	})
+
+	if strings.TrimSpace(op.Status) == model.OperationStatusPending {
+		position := 1
+		for _, candidate := range sameLane {
+			if strings.TrimSpace(candidate.Status) != model.OperationStatusPending || candidate.ID == op.ID {
+				continue
+			}
+			if diagnosisOperationCreatedBefore(candidate, op) {
+				position++
+			}
+		}
+		laneDiagnosis.QueuePosition = position
+		if medianSeconds != nil {
+			estimate := activeRemaining + (position-1)*(*medianSeconds)
+			laneDiagnosis.EstimatedSecondsRemaining = &estimate
+		}
+	} else if model.OperationOccupiesControllerWorker(op) {
+		occupant := operationLaneOccupant(op, appsByID[strings.TrimSpace(op.AppID)], now, medianSeconds)
+		laneDiagnosis.EstimatedSecondsRemaining = occupant.EstimatedSecondsRemaining
+	}
+	if len(laneDiagnosis.Active) == 0 {
+		laneDiagnosis.Active = nil
+	}
+	diagnosis.ControllerLane = &laneDiagnosis
+	return nil
+}
+
+func (s *Server) diagnosisAppsByID(appIDs []string) (map[string]model.App, error) {
+	apps, err := s.store.ListAppsMetadataByIDs(appIDs)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]model.App, len(apps))
+	for _, app := range apps {
+		if appID := strings.TrimSpace(app.ID); appID != "" {
+			out[appID] = app
+		}
+	}
+	return out, nil
+}
+
+func (s *Server) operationLaneMedianCompletedSeconds(op model.Operation, lane string) (*int, int, error) {
+	ops, err := s.store.ListOperationSummariesFiltered(op.TenantID, false, store.OperationListFilter{
+		Types:    []string{op.Type},
+		Statuses: []string{model.OperationStatusCompleted},
+		Limit:    100,
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	durations := make([]int, 0, len(ops))
+	for _, candidate := range ops {
+		if model.OperationControllerLaneName(candidate) != lane || candidate.StartedAt == nil || candidate.CompletedAt == nil {
+			continue
+		}
+		seconds := int(candidate.CompletedAt.Sub(*candidate.StartedAt).Seconds())
+		if seconds <= 0 {
+			continue
+		}
+		durations = append(durations, seconds)
+	}
+	if len(durations) == 0 {
+		return nil, 0, nil
+	}
+	sort.Ints(durations)
+	median := durations[len(durations)/2]
+	return &median, len(durations), nil
+}
+
+func operationLaneOccupant(op model.Operation, app model.App, now time.Time, medianSeconds *int) model.OperationControllerLaneOccupant {
+	elapsed := int64(0)
+	if op.StartedAt != nil {
+		elapsed = int64(now.Sub(*op.StartedAt).Seconds())
+		if elapsed < 0 {
+			elapsed = 0
+		}
+	}
+	occupant := model.OperationControllerLaneOccupant{
+		OperationID:              strings.TrimSpace(op.ID),
+		AppID:                    strings.TrimSpace(op.AppID),
+		AppName:                  strings.TrimSpace(app.Name),
+		Service:                  diagnosisComposeService(op, app, strings.TrimSpace(app.ID) != ""),
+		Type:                     strings.TrimSpace(op.Type),
+		Status:                   strings.TrimSpace(op.Status),
+		StartedAt:                op.StartedAt,
+		ElapsedSeconds:           elapsed,
+		ControllerTimingSegments: op.ControllerTimingSegments,
+	}
+	if medianSeconds != nil {
+		remaining := *medianSeconds - int(elapsed)
+		if remaining < 0 {
+			remaining = 0
+		}
+		occupant.EstimatedSecondsRemaining = &remaining
+	}
+	return occupant
 }
 
 func (s *Server) getDiagnosisApp(appID string) (model.App, bool, error) {

@@ -134,6 +134,16 @@ func (c *clusterNodeClient) readControlPlaneStatus(
 	if err != nil {
 		controllerPods = nil
 	}
+	warnings, warningErr := c.readControlPlaneWarnings(ctx, namespace, releaseInstance)
+	if warningErr != nil {
+		warnings = append(warnings, model.ControlPlaneWarning{
+			Severity:  "warning",
+			Namespace: namespace,
+			Name:      "control-plane-pod-scan",
+			Status:    "unavailable",
+			Message:   warningErr.Error(),
+		})
+	}
 
 	components := []model.ControlPlaneComponent{
 		buildControlPlaneComponent(controlPlaneComponentAPI, apiDeployment, apiPods),
@@ -150,6 +160,7 @@ func (c *clusterNodeClient) readControlPlaneStatus(
 		Status:          readControlPlaneStatus(components, version),
 		ObservedAt:      time.Now().UTC(),
 		Components:      components,
+		Warnings:        warnings,
 	}, nil
 }
 
@@ -209,6 +220,121 @@ func (c *clusterNodeClient) listControlPlaneComponentPods(
 		return strings.TrimSpace(pods[i].Name) < strings.TrimSpace(pods[j].Name)
 	})
 	return pods, nil
+}
+
+func (c *clusterNodeClient) readControlPlaneWarnings(ctx context.Context, namespace string, releaseInstance string) ([]model.ControlPlaneWarning, error) {
+	pods, err := c.listControlPlaneNamespacePods(ctx, namespace)
+	if err != nil {
+		return nil, err
+	}
+	warnings := make([]model.ControlPlaneWarning, 0)
+	for _, pod := range pods {
+		if !controlPlanePodMatchesRelease(pod, releaseInstance) {
+			continue
+		}
+		if controlPlanePodIsCoreComponent(pod) {
+			continue
+		}
+		phase := strings.TrimSpace(pod.Status.Phase)
+		if strings.EqualFold(phase, "Succeeded") || strings.EqualFold(phase, "Failed") {
+			continue
+		}
+		if strings.EqualFold(phase, "Running") && allKubePodContainersReady(pod) {
+			continue
+		}
+		warnings = append(warnings, controlPlaneWarningFromPod(namespace, pod))
+	}
+	sort.Slice(warnings, func(i, j int) bool {
+		if warnings[i].Severity != warnings[j].Severity {
+			return warnings[i].Severity < warnings[j].Severity
+		}
+		return warnings[i].Name < warnings[j].Name
+	})
+	return warnings, nil
+}
+
+func (c *clusterNodeClient) listControlPlaneNamespacePods(ctx context.Context, namespace string) ([]kubePodInfo, error) {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return nil, fmt.Errorf("namespace is required")
+	}
+	var podList kubePodList
+	apiPath := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/pods"
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, &podList); err != nil {
+		return nil, err
+	}
+	return podList.Items, nil
+}
+
+func controlPlanePodMatchesRelease(pod kubePodInfo, releaseInstance string) bool {
+	releaseInstance = strings.TrimSpace(releaseInstance)
+	if releaseInstance == "" {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(pod.Metadata.Labels["app.kubernetes.io/instance"]), releaseInstance)
+}
+
+func controlPlanePodIsCoreComponent(pod kubePodInfo) bool {
+	component := strings.TrimSpace(pod.Metadata.Labels["app.kubernetes.io/component"])
+	return strings.EqualFold(component, controlPlaneComponentAPI) ||
+		strings.EqualFold(component, controlPlaneComponentController)
+}
+
+func allKubePodContainersReady(pod kubePodInfo) bool {
+	statuses := append([]kubeContainerStatus(nil), pod.Status.InitContainerStatuses...)
+	statuses = append(statuses, pod.Status.ContainerStatuses...)
+	if len(statuses) == 0 {
+		return false
+	}
+	for _, status := range statuses {
+		if !status.Ready {
+			return false
+		}
+	}
+	return true
+}
+
+func controlPlaneWarningFromPod(namespace string, pod kubePodInfo) model.ControlPlaneWarning {
+	kind := "Pod"
+	name := strings.TrimSpace(pod.Metadata.Name)
+	if len(pod.Metadata.OwnerReferences) > 0 {
+		if ownerKind := strings.TrimSpace(pod.Metadata.OwnerReferences[0].Kind); ownerKind != "" {
+			kind = ownerKind
+		}
+		if ownerName := strings.TrimSpace(pod.Metadata.OwnerReferences[0].Name); ownerName != "" {
+			name = ownerName
+		}
+	}
+	reason, message := controlPlanePodWarningReason(pod)
+	return model.ControlPlaneWarning{
+		Severity:  "warning",
+		Namespace: firstNonEmptyString(strings.TrimSpace(pod.Metadata.Namespace), strings.TrimSpace(namespace)),
+		Kind:      kind,
+		Name:      name,
+		Status:    strings.TrimSpace(pod.Status.Phase),
+		Reason:    reason,
+		Message:   message,
+	}
+}
+
+func controlPlanePodWarningReason(pod kubePodInfo) (string, string) {
+	if reason := strings.TrimSpace(pod.Status.Reason); reason != "" {
+		return reason, strings.TrimSpace(pod.Status.Message)
+	}
+	statuses := append([]kubeContainerStatus(nil), pod.Status.InitContainerStatuses...)
+	statuses = append(statuses, pod.Status.ContainerStatuses...)
+	for _, status := range statuses {
+		if status.Ready {
+			continue
+		}
+		if status.State.Waiting != nil {
+			return strings.TrimSpace(status.State.Waiting.Reason), strings.TrimSpace(status.State.Waiting.Message)
+		}
+		if status.State.Terminated != nil {
+			return strings.TrimSpace(status.State.Terminated.Reason), strings.TrimSpace(status.State.Terminated.Message)
+		}
+	}
+	return "", strings.TrimSpace(pod.Status.Message)
 }
 
 func findControlPlaneDeployment(

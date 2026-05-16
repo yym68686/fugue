@@ -76,8 +76,12 @@ spec:
               value: {{ .Values.controller.pollInterval | quote }}
             - name: FUGUE_CONTROLLER_FALLBACK_POLL_INTERVAL
               value: {{ .Values.controller.fallbackPollInterval | quote }}
+            - name: FUGUE_CONTROLLER_FOREGROUND_ACTIVATE_WORKERS
+              value: {{ .Values.controller.foregroundActivateWorkers | quote }}
             - name: FUGUE_CONTROLLER_GITHUB_SYNC_IMPORT_WORKERS
               value: {{ .Values.controller.githubSyncImportWorkers | quote }}
+            - name: FUGUE_CONTROLLER_GITHUB_SYNC_ACTIVATE_WORKERS
+              value: {{ .Values.controller.githubSyncActivateWorkers | quote }}
             - name: FUGUE_RUNTIME_OFFLINE_AFTER
               value: {{ .Values.controller.runtimeOfflineAfter | quote }}
             - name: FUGUE_CONTROLLER_KUBECTL_APPLY

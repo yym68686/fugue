@@ -3,11 +3,14 @@ package api
 import (
 	"context"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"fugue/internal/auth"
 	"fugue/internal/model"
 	"fugue/internal/sourceimport"
+	"fugue/internal/store"
 )
 
 func TestGetOperationDiagnosisExplainsMissingManagedImage(t *testing.T) {
@@ -107,6 +110,69 @@ func TestDiagnoseFailedOperationExplainsMissingManifest(t *testing.T) {
 		if !strings.Contains(joinedEvidence, want) {
 			t.Fatalf("expected evidence to contain %q, got %+v", want, diagnosis.Evidence)
 		}
+	}
+}
+
+func TestOperationDiagnosisIncludesControllerLaneOccupants(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Lane Diagnosis Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	raiseManagedTestCap(t, stateStore, tenant.ID)
+	project, err := stateStore.CreateProject(tenant.ID, "ops", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	_, apiKey, err := stateStore.CreateAPIKey(tenant.ID, "reader", []string{"app.read"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	appA, err := stateStore.CreateApp(tenant.ID, project.ID, "active", "", model.AppSpec{Image: "ghcr.io/example/active", Replicas: 1, RuntimeID: "runtime_managed_shared"})
+	if err != nil {
+		t.Fatalf("create active app: %v", err)
+	}
+	appB, err := stateStore.CreateApp(tenant.ID, project.ID, "pending", "", model.AppSpec{Image: "ghcr.io/example/pending", Replicas: 1, RuntimeID: "runtime_managed_shared"})
+	if err != nil {
+		t.Fatalf("create pending app: %v", err)
+	}
+	activeSpec := appA.Spec
+	activeOp, err := stateStore.CreateOperation(model.Operation{TenantID: tenant.ID, Type: model.OperationTypeDeploy, AppID: appA.ID, DesiredSpec: &activeSpec})
+	if err != nil {
+		t.Fatalf("create active op: %v", err)
+	}
+	claimed, found, err := stateStore.TryClaimPendingOperation(activeOp.ID)
+	if err != nil || !found {
+		t.Fatalf("claim active op found=%v err=%v", found, err)
+	}
+	pendingSpec := appB.Spec
+	pendingOp, err := stateStore.CreateOperation(model.Operation{TenantID: tenant.ID, Type: model.OperationTypeDeploy, AppID: appB.ID, DesiredSpec: &pendingSpec})
+	if err != nil {
+		t.Fatalf("create pending op: %v", err)
+	}
+
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/operations/"+pendingOp.ID+"/diagnosis", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Diagnosis model.OperationDiagnosis `json:"diagnosis"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Diagnosis.ControllerLane == nil {
+		t.Fatalf("expected controller lane diagnosis, got %+v", response.Diagnosis)
+	}
+	if response.Diagnosis.ControllerLane.Lane != model.OperationControllerLaneForegroundActivate {
+		t.Fatalf("unexpected lane: %+v", response.Diagnosis.ControllerLane)
+	}
+	if len(response.Diagnosis.ControllerLane.Active) != 1 || response.Diagnosis.ControllerLane.Active[0].OperationID != claimed.ID {
+		t.Fatalf("expected active lane occupant %s, got %+v", claimed.ID, response.Diagnosis.ControllerLane.Active)
 	}
 }
 

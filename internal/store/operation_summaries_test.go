@@ -92,11 +92,12 @@ func TestPGListOperationSummariesByAppDoesNotSelectDesiredJSON(t *testing.T) {
 
 	now := time.Date(2026, time.April, 30, 12, 0, 0, 0, time.UTC)
 	mock.ExpectQuery(regexp.QuoteMeta(`
-SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
-FROM fugue_operations
-WHERE app_id = $1
- AND tenant_id = $2 ORDER BY created_at ASC`)).
-		WithArgs("app_123", "tenant_123").
+SELECT o.id, o.tenant_id, o.type, o.status, o.execution_mode, o.requested_by_type, o.requested_by_id, o.app_id, o.service_id, o.source_runtime_id, o.target_runtime_id, o.desired_replicas, o.result_message, o.manifest_path, o.assigned_runtime_id, o.error_message, o.created_at, o.updated_at, o.started_at, o.completed_at
+FROM fugue_operations o
+WHERE o.tenant_id = $1
+  AND o.app_id = $2
+ORDER BY o.created_at ASC, o.id ASC`)).
+		WithArgs("tenant_123", "app_123").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id",
 			"tenant_id",

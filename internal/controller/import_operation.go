@@ -18,6 +18,7 @@ import (
 func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Operation, app model.App) (err error) {
 	timer := newControllerOperationTimer(s.now)
 	defer func() {
+		s.recordOperationControllerTiming(op.ID, timer.modelSegments())
 		timer.Log(s.Logger, "managed_import_operation", op, err)
 	}()
 
@@ -227,11 +228,9 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		return fmt.Errorf("complete import operation %s: %w", op.ID, err)
 	}
 	timer.Mark("complete_import")
-	cleanupCtx, cancel := postOperationMaintenanceContext(ctx)
-	defer cancel()
-	if err := s.syncTenantBillingImageStorage(cleanupCtx, app.TenantID); err != nil && s.Logger != nil {
-		s.Logger.Printf("skip billing image storage sync after import op=%s tenant=%s: %v", op.ID, app.TenantID, err)
-	}
+	runPostOperationMaintenance(s.Logger, fmt.Sprintf("billing image storage sync after import op=%s tenant=%s", op.ID, app.TenantID), func(ctx context.Context) error {
+		return s.syncTenantBillingImageStorage(ctx, app.TenantID)
+	})
 	timer.Mark("billing_sync")
 
 	s.Logger.Printf("operation %s completed import build; managed_image=%s runtime_image=%s deploy=%s", op.ID, managedImageRef, finalSpec.Image, deployOp.ID)

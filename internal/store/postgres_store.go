@@ -3399,19 +3399,59 @@ INSERT INTO fugue_operations (id, tenant_id, type, status, execution_mode, reque
 }
 
 func (s *Store) pgListOperations(tenantID string, platformAdmin bool) ([]model.Operation, error) {
+	return s.pgListOperationsFiltered(tenantID, platformAdmin, OperationListFilter{}, true)
+}
+
+func (s *Store) pgListOperationsFiltered(tenantID string, platformAdmin bool, filter OperationListFilter, includeDesired bool) ([]model.Operation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	query := `
-SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
-FROM fugue_operations
-`
-	args := make([]any, 0, 1)
-	if !platformAdmin {
-		query += ` WHERE tenant_id = $1`
-		args = append(args, tenantID)
+	columns := `o.id, o.tenant_id, o.type, o.status, o.execution_mode, o.requested_by_type, o.requested_by_id, o.app_id, o.service_id, o.source_runtime_id, o.target_runtime_id, o.desired_replicas, o.result_message, o.manifest_path, o.assigned_runtime_id, o.error_message, o.created_at, o.updated_at, o.started_at, o.completed_at`
+	if includeDesired {
+		columns = `o.id, o.tenant_id, o.type, o.status, o.execution_mode, o.requested_by_type, o.requested_by_id, o.app_id, o.service_id, o.source_runtime_id, o.target_runtime_id, o.desired_replicas, o.desired_spec_json, o.desired_source_json, o.result_message, o.manifest_path, o.assigned_runtime_id, o.error_message, o.created_at, o.updated_at, o.started_at, o.completed_at`
 	}
-	query += ` ORDER BY created_at ASC`
+
+	query := "SELECT " + columns + "\nFROM fugue_operations o\n"
+	args := make([]any, 0, 6)
+	where := make([]string, 0, 6)
+	if strings.TrimSpace(filter.ProjectID) != "" {
+		query += "JOIN fugue_apps a ON a.id = o.app_id\n"
+		where = append(where, fmt.Sprintf("a.project_id = $%d", len(args)+1))
+		args = append(args, strings.TrimSpace(filter.ProjectID))
+	}
+	effectiveTenantID := strings.TrimSpace(tenantID)
+	if platformAdmin {
+		effectiveTenantID = strings.TrimSpace(filter.TenantID)
+	}
+	if effectiveTenantID != "" {
+		where = append(where, fmt.Sprintf("o.tenant_id = $%d", len(args)+1))
+		args = append(args, effectiveTenantID)
+	}
+	if appID := strings.TrimSpace(filter.AppID); appID != "" {
+		where = append(where, fmt.Sprintf("o.app_id = $%d", len(args)+1))
+		args = append(args, appID)
+	}
+	if types := normalizedOperationFilterValues(filter.Types); len(types) > 0 {
+		where = append(where, fmt.Sprintf("lower(o.type) IN (%s)", sqlPlaceholderList(len(args)+1, len(types))))
+		for _, value := range types {
+			args = append(args, value)
+		}
+	}
+	if statuses := normalizedOperationFilterValues(filter.Statuses); len(statuses) > 0 {
+		where = append(where, fmt.Sprintf("lower(o.status) IN (%s)", sqlPlaceholderList(len(args)+1, len(statuses))))
+		for _, value := range statuses {
+			args = append(args, value)
+		}
+	}
+	if len(where) > 0 {
+		query += "WHERE " + strings.Join(where, "\n  AND ") + "\n"
+	}
+	if filter.Limit > 0 {
+		query += fmt.Sprintf("ORDER BY o.created_at DESC, o.id DESC\nLIMIT $%d", len(args)+1)
+		args = append(args, filter.Limit)
+	} else {
+		query += "ORDER BY o.created_at ASC, o.id ASC"
+	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -3421,7 +3461,12 @@ FROM fugue_operations
 
 	ops := make([]model.Operation, 0)
 	for rows.Next() {
-		op, err := scanOperation(rows)
+		var op model.Operation
+		if includeDesired {
+			op, err = scanOperation(rows)
+		} else {
+			op, err = scanOperationSummary(rows)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -3430,10 +3475,15 @@ FROM fugue_operations
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate operations: %w", err)
 	}
+	sortOperationsOldestFirst(ops)
 	return ops, nil
 }
 
 func (s *Store) pgListOperationSummaries(tenantID string, platformAdmin bool) ([]model.Operation, error) {
+	return s.pgListOperationsFiltered(tenantID, platformAdmin, OperationListFilter{}, false)
+}
+
+func (s *Store) pgListOperationSummariesLegacy(tenantID string, platformAdmin bool) ([]model.Operation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -3762,7 +3812,56 @@ WHERE id = $1
 	if err != nil {
 		return model.Operation{}, mapDBErr(err)
 	}
+	op.ControllerTimingSegments, err = s.pgOperationControllerTimingSegments(ctx, op.ID)
+	if err != nil {
+		return model.Operation{}, err
+	}
 	return op, nil
+}
+
+func (s *Store) pgSetOperationControllerTiming(id string, segments []model.OperationControllerTimingSegment) (model.Operation, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	op, err := s.pgGetOperation(id)
+	if err != nil {
+		return model.Operation{}, err
+	}
+	segments = cloneOperationControllerTimingSegments(segments)
+	raw, err := marshalJSON(segments)
+	if err != nil {
+		return model.Operation{}, err
+	}
+	if _, err := s.db.ExecContext(ctx, `
+INSERT INTO fugue_operation_controller_timings (operation_id, segments_json, updated_at)
+VALUES ($1, $2, $3)
+ON CONFLICT (operation_id)
+DO UPDATE SET segments_json = EXCLUDED.segments_json, updated_at = EXCLUDED.updated_at
+`, id, raw, time.Now().UTC()); err != nil {
+		return model.Operation{}, fmt.Errorf("set operation controller timing %s: %w", id, err)
+	}
+	op.ControllerTimingSegments = segments
+	return op, nil
+}
+
+func (s *Store) pgOperationControllerTimingSegments(ctx context.Context, id string) ([]model.OperationControllerTimingSegment, error) {
+	var raw []byte
+	err := s.db.QueryRowContext(ctx, `
+SELECT segments_json
+FROM fugue_operation_controller_timings
+WHERE operation_id = $1
+`, id).Scan(&raw)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("load operation controller timing %s: %w", id, err)
+	}
+	segments, err := decodeJSONValue[[]model.OperationControllerTimingSegment](raw)
+	if err != nil {
+		return nil, err
+	}
+	return cloneOperationControllerTimingSegments(segments), nil
 }
 
 func (s *Store) pgTryClaimPendingOperation(id string) (model.Operation, bool, error) {
@@ -5429,4 +5528,27 @@ func sqlPlaceholderList(start, count int) string {
 		placeholders = append(placeholders, fmt.Sprintf("$%d", start+i))
 	}
 	return strings.Join(placeholders, ", ")
+}
+
+func normalizedOperationFilterValues(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, raw := range values {
+		for _, value := range strings.Split(raw, ",") {
+			value = strings.ToLower(strings.TrimSpace(value))
+			if value == "" {
+				continue
+			}
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			out = append(out, value)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

@@ -83,6 +83,23 @@ func (t *controllerOperationTimer) segmentString() string {
 	return strings.Join(parts, ",")
 }
 
+func (t *controllerOperationTimer) modelSegments() []model.OperationControllerTimingSegment {
+	if t == nil || len(t.segments) == 0 {
+		return nil
+	}
+	out := make([]model.OperationControllerTimingSegment, 0, len(t.segments))
+	for _, segment := range t.segments {
+		if segment.name == "" {
+			continue
+		}
+		out = append(out, model.OperationControllerTimingSegment{
+			Name:                 segment.name,
+			DurationMilliseconds: segment.duration.Milliseconds(),
+		})
+	}
+	return out
+}
+
 func normalizeControllerTimingName(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "" {

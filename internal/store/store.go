@@ -2848,39 +2848,58 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 	return op, err
 }
 
+type OperationListFilter struct {
+	TenantID  string
+	AppID     string
+	ProjectID string
+	Types     []string
+	Statuses  []string
+	Limit     int
+}
+
 func (s *Store) ListOperations(tenantID string, platformAdmin bool) ([]model.Operation, error) {
+	return s.ListOperationsFiltered(tenantID, platformAdmin, OperationListFilter{})
+}
+
+func (s *Store) ListOperationsFiltered(tenantID string, platformAdmin bool, filter OperationListFilter) ([]model.Operation, error) {
 	if s.usingDatabase() {
-		return s.pgListOperations(tenantID, platformAdmin)
+		return s.pgListOperationsFiltered(tenantID, platformAdmin, filter, true)
 	}
 	var ops []model.Operation
 	err := s.withLockedState(false, func(state *model.State) error {
+		appProjects := operationAppProjectIndex(state)
 		for _, op := range state.Operations {
-			if platformAdmin || op.TenantID == tenantID {
-				ops = append(ops, op)
+			if !operationMatchesListFilter(op, tenantID, platformAdmin, filter, appProjects) {
+				continue
 			}
+			ops = append(ops, op)
 		}
-		sort.Slice(ops, func(i, j int) bool {
-			return ops[i].CreatedAt.Before(ops[j].CreatedAt)
-		})
+		sortOperationsOldestFirst(ops)
+		ops = limitOperationsToNewest(ops, filter.Limit)
 		return nil
 	})
 	return ops, err
 }
 
 func (s *Store) ListOperationSummaries(tenantID string, platformAdmin bool) ([]model.Operation, error) {
+	return s.ListOperationSummariesFiltered(tenantID, platformAdmin, OperationListFilter{})
+}
+
+func (s *Store) ListOperationSummariesFiltered(tenantID string, platformAdmin bool, filter OperationListFilter) ([]model.Operation, error) {
 	if s.usingDatabase() {
-		return s.pgListOperationSummaries(tenantID, platformAdmin)
+		return s.pgListOperationsFiltered(tenantID, platformAdmin, filter, false)
 	}
 	var ops []model.Operation
 	err := s.withLockedState(false, func(state *model.State) error {
+		appProjects := operationAppProjectIndex(state)
 		for _, op := range state.Operations {
-			if platformAdmin || op.TenantID == tenantID {
-				ops = append(ops, operationSummary(op))
+			if !operationMatchesListFilter(op, tenantID, platformAdmin, filter, appProjects) {
+				continue
 			}
+			ops = append(ops, operationSummary(op))
 		}
-		sort.Slice(ops, func(i, j int) bool {
-			return ops[i].CreatedAt.Before(ops[j].CreatedAt)
-		})
+		sortOperationsOldestFirst(ops)
+		ops = limitOperationsToNewest(ops, filter.Limit)
 		return nil
 	})
 	return ops, err
@@ -2891,27 +2910,7 @@ func (s *Store) ListOperationsByApp(tenantID string, platformAdmin bool, appID s
 	if appID == "" {
 		return s.ListOperations(tenantID, platformAdmin)
 	}
-	if s.usingDatabase() {
-		return s.pgListOperationsByApp(tenantID, platformAdmin, appID)
-	}
-
-	var ops []model.Operation
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, op := range state.Operations {
-			if !platformAdmin && op.TenantID != tenantID {
-				continue
-			}
-			if strings.TrimSpace(op.AppID) != appID {
-				continue
-			}
-			ops = append(ops, op)
-		}
-		sort.Slice(ops, func(i, j int) bool {
-			return ops[i].CreatedAt.Before(ops[j].CreatedAt)
-		})
-		return nil
-	})
-	return ops, err
+	return s.ListOperationsFiltered(tenantID, platformAdmin, OperationListFilter{AppID: appID})
 }
 
 func (s *Store) ListOperationSummariesByApp(tenantID string, platformAdmin bool, appID string) ([]model.Operation, error) {
@@ -2919,27 +2918,7 @@ func (s *Store) ListOperationSummariesByApp(tenantID string, platformAdmin bool,
 	if appID == "" {
 		return s.ListOperationSummaries(tenantID, platformAdmin)
 	}
-	if s.usingDatabase() {
-		return s.pgListOperationSummariesByApp(tenantID, platformAdmin, appID)
-	}
-
-	var ops []model.Operation
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, op := range state.Operations {
-			if !platformAdmin && op.TenantID != tenantID {
-				continue
-			}
-			if strings.TrimSpace(op.AppID) != appID {
-				continue
-			}
-			ops = append(ops, operationSummary(op))
-		}
-		sort.Slice(ops, func(i, j int) bool {
-			return ops[i].CreatedAt.Before(ops[j].CreatedAt)
-		})
-		return nil
-	})
-	return ops, err
+	return s.ListOperationSummariesFiltered(tenantID, platformAdmin, OperationListFilter{AppID: appID})
 }
 
 func operationSummary(op model.Operation) model.Operation {
@@ -2947,6 +2926,91 @@ func operationSummary(op model.Operation) model.Operation {
 	op.DesiredSource = nil
 	op.DesiredOriginSource = nil
 	return op
+}
+
+func operationAppProjectIndex(state *model.State) map[string]string {
+	index := make(map[string]string, len(state.Apps))
+	for _, app := range state.Apps {
+		appID := strings.TrimSpace(app.ID)
+		if appID == "" {
+			continue
+		}
+		index[appID] = strings.TrimSpace(app.ProjectID)
+	}
+	return index
+}
+
+func operationMatchesListFilter(op model.Operation, tenantID string, platformAdmin bool, filter OperationListFilter, appProjects map[string]string) bool {
+	effectiveTenantID := strings.TrimSpace(tenantID)
+	if platformAdmin {
+		effectiveTenantID = strings.TrimSpace(filter.TenantID)
+	}
+	if effectiveTenantID != "" && strings.TrimSpace(op.TenantID) != effectiveTenantID {
+		return false
+	}
+	if appID := strings.TrimSpace(filter.AppID); appID != "" && strings.TrimSpace(op.AppID) != appID {
+		return false
+	}
+	if projectID := strings.TrimSpace(filter.ProjectID); projectID != "" {
+		if appProjects == nil || strings.TrimSpace(appProjects[strings.TrimSpace(op.AppID)]) != projectID {
+			return false
+		}
+	}
+	if !stringInNormalizedSet(op.Type, filter.Types) {
+		return false
+	}
+	if !stringInNormalizedSet(op.Status, filter.Statuses) {
+		return false
+	}
+	return true
+}
+
+func stringInNormalizedSet(value string, requested []string) bool {
+	if len(requested) == 0 {
+		return true
+	}
+	value = strings.ToLower(strings.TrimSpace(value))
+	for _, raw := range requested {
+		for _, candidate := range strings.Split(raw, ",") {
+			if value == strings.ToLower(strings.TrimSpace(candidate)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sortOperationsOldestFirst(ops []model.Operation) {
+	sort.Slice(ops, func(i, j int) bool {
+		if ops[i].CreatedAt.Equal(ops[j].CreatedAt) {
+			return ops[i].ID < ops[j].ID
+		}
+		return ops[i].CreatedAt.Before(ops[j].CreatedAt)
+	})
+}
+
+func limitOperationsToNewest(ops []model.Operation, limit int) []model.Operation {
+	if limit <= 0 || len(ops) <= limit {
+		return ops
+	}
+	return append([]model.Operation(nil), ops[len(ops)-limit:]...)
+}
+
+func cloneOperationControllerTimingSegments(segments []model.OperationControllerTimingSegment) []model.OperationControllerTimingSegment {
+	if len(segments) == 0 {
+		return nil
+	}
+	out := make([]model.OperationControllerTimingSegment, 0, len(segments))
+	for _, segment := range segments {
+		if strings.TrimSpace(segment.Name) == "" {
+			continue
+		}
+		out = append(out, model.OperationControllerTimingSegment{
+			Name:                 strings.TrimSpace(segment.Name),
+			DurationMilliseconds: segment.DurationMilliseconds,
+		})
+	}
+	return out
 }
 
 func (s *Store) HasActiveOperationByApp(tenantID string, platformAdmin bool, appID string) (bool, error) {
@@ -3275,6 +3339,27 @@ func (s *Store) UpdateOperationProgress(id, message string) (model.Operation, er
 		if err := applyInFlightOperationToApp(state, &state.Operations[index]); err != nil {
 			return err
 		}
+		op = state.Operations[index]
+		return nil
+	})
+	return op, err
+}
+
+func (s *Store) SetOperationControllerTiming(id string, segments []model.OperationControllerTimingSegment) (model.Operation, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.Operation{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgSetOperationControllerTiming(id, segments)
+	}
+	var op model.Operation
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findOperation(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		state.Operations[index].ControllerTimingSegments = cloneOperationControllerTimingSegments(segments)
 		op = state.Operations[index]
 		return nil
 	})

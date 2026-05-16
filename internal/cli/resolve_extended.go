@@ -163,6 +163,10 @@ func (c *CLI) resolveNamedProject(client *Client, ref string) (model.Project, er
 	return resolveSingleMatch(ref, matchVisibleProjects(projects, ref), "project", describeProjectMatch)
 }
 
+func isProjectIDReference(ref string) bool {
+	return strings.HasPrefix(strings.TrimSpace(ref), "project_")
+}
+
 func (c *CLI) resolveNamedService(client *Client, ref string) (model.BackingService, error) {
 	tenantID, projectID, err := c.resolveFilterSelections(client)
 	if err != nil {

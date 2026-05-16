@@ -538,6 +538,11 @@ var postgresSchemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_tenant_app_created_at ON fugue_operations (tenant_id, app_id, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_tenant_app_status ON fugue_operations (tenant_id, app_id, status)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operations_import_failed_app_updated_created ON fugue_operations (app_id, updated_at DESC, created_at DESC) WHERE type = 'import' AND status = 'failed'`,
+	`CREATE TABLE IF NOT EXISTS fugue_operation_controller_timings (
+		operation_id TEXT PRIMARY KEY REFERENCES fugue_operations(id) ON DELETE CASCADE,
+		segments_json JSONB NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL
+	)`,
 	`CREATE TABLE IF NOT EXISTS fugue_audit_events (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NULL,

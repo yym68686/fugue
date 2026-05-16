@@ -168,7 +168,7 @@ When `fugue app request` fails with a low-level error such as `connection refuse
 
 `fugue app env ls` text output now renders a table with separate source and reference columns plus override information, so normal terminal output is usable without falling back to `--json`.
 
-`fugue operation ls` defaults to a smaller text-mode window and supports `--project`, `--type`, and `--status`, so single-app or single-project investigations no longer require manual eyeballing of a full operation dump.
+`fugue operation ls` defaults to a smaller text-mode window and sends tenant, project, type, status, and limit filters to the API, so bootstrap/admin keys no longer need to download the full operation history before narrowing it locally.
 
 `fugue api request` shows raw status, headers, server-timing, body, and transport timings for any control-plane endpoint. `fugue diagnose timing -- <command...>` wraps any Fugue CLI command and reports DNS/connect/TLS/TTFB/total timing for each HTTP request it makes.
 
@@ -186,7 +186,9 @@ Released CLI builds can upgrade themselves with `fugue upgrade`. When the curren
 
 `fugue admin users resolve <email>` is the direct answer to "which tenant/workspace does this user actually land in?". It resolves one email to the enriched workspace snapshot, including tenant id/name, default project, first app, and whether a workspace admin key is available.
 
-When `FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY` is configured on the API, `fugue admin cluster status` also shows the latest `deploy-control-plane` workflow run so you can correlate control-plane image rollouts with cluster state. The same command now includes both the desired deployment image and the live observed control-plane pod tags, so you can tell which `fugue-api` / `fugue-controller` images are actually running without dropping to `kubectl`.
+When `FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY` is configured on the API, `fugue admin cluster status` also shows the latest `deploy-control-plane` workflow run so you can correlate control-plane image rollouts with cluster state. The same command now includes both the desired deployment image and the live observed control-plane pod tags, and warns about unhealthy non-core control-plane pods such as workspace provisioners or postgres joiners.
+
+`fugue operation explain` now includes controller lane occupancy for managed operations, including active worker occupants, queue position, and ETA when recent timing history is available. `operation show/explain` also prints controller timing segments such as billing sync and post-deploy cleanup when they were recorded.
 
 `build-cli` packages CLI archives on relevant pushes to `main`, and `release-cli` publishes them as GitHub Release assets when a `v*` tag is pushed.
 

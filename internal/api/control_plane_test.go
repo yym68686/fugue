@@ -84,6 +84,29 @@ func TestGetControlPlaneStatusReturnsCurrentDeployments(t *testing.T) {
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/fugue-system/pods":
 			switch r.URL.Query().Get("labelSelector") {
+			case "":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"items": []map[string]any{
+						{
+							"metadata": map[string]any{
+								"namespace": "fugue-system",
+								"name":      "fugue-shared-workspace-provisioner-abc",
+								"labels": map[string]any{
+									"app.kubernetes.io/component": "shared-workspace-provisioner",
+									"app.kubernetes.io/instance":  "fugue",
+								},
+								"ownerReferences": []map[string]any{
+									{"kind": "ReplicaSet", "name": "fugue-shared-workspace-provisioner"},
+								},
+							},
+							"status": map[string]any{
+								"phase":   "Pending",
+								"reason":  "Unschedulable",
+								"message": "0/3 nodes are available",
+							},
+						},
+					},
+				})
 			case "app.kubernetes.io/component=api,app.kubernetes.io/instance=fugue":
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"items": []map[string]any{
@@ -210,6 +233,9 @@ func TestGetControlPlaneStatusReturnsCurrentDeployments(t *testing.T) {
 	}
 	if response.ControlPlane.Components[1].Status != controlPlaneStatusReady {
 		t.Fatalf("expected controller status %q, got %q", controlPlaneStatusReady, response.ControlPlane.Components[1].Status)
+	}
+	if len(response.ControlPlane.Warnings) != 1 || response.ControlPlane.Warnings[0].Name != "fugue-shared-workspace-provisioner" {
+		t.Fatalf("expected non-core pending pod warning, got %+v", response.ControlPlane.Warnings)
 	}
 }
 

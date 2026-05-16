@@ -102,7 +102,7 @@ func TestExecuteManagedDeployOperationPrunesManagedImageHistoryBeyondLimit(t *te
 		pushBase + "/fugue-apps/example-demo:git-current": true,
 		pullBase + "/fugue-apps/example-demo:git-current": true,
 	}
-	var deletedRefs []string
+	deletedRefs := make(chan string, 4)
 	svc := &Service{
 		Store:            stateStore,
 		Renderer:         runtime.Renderer{BaseDir: t.TempDir()},
@@ -113,7 +113,7 @@ func TestExecuteManagedDeployOperationPrunesManagedImageHistoryBeyondLimit(t *te
 			return existingRefs[imageRef], nil, nil
 		},
 		deleteManagedImage: func(_ context.Context, imageRef string) (appimages.DeleteResult, error) {
-			deletedRefs = append(deletedRefs, imageRef)
+			deletedRefs <- imageRef
 			return appimages.DeleteResult{ImageRef: imageRef, Deleted: true}, nil
 		},
 	}
@@ -125,7 +125,8 @@ func TestExecuteManagedDeployOperationPrunesManagedImageHistoryBeyondLimit(t *te
 	wantDeletedRefs := []string{
 		pushBase + "/fugue-apps/example-demo:git-old",
 	}
-	if !reflect.DeepEqual(deletedRefs, wantDeletedRefs) {
-		t.Fatalf("expected deleted refs %v, got %v", wantDeletedRefs, deletedRefs)
+	gotDeletedRefs := waitForDeletedRefs(t, deletedRefs, len(wantDeletedRefs))
+	if !reflect.DeepEqual(gotDeletedRefs, wantDeletedRefs) {
+		t.Fatalf("expected deleted refs %v, got %v", wantDeletedRefs, gotDeletedRefs)
 	}
 }

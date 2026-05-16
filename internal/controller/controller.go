@@ -143,11 +143,17 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	if s.Config.ForegroundImportWorkers < 0 {
 		s.Config.ForegroundImportWorkers = 0
 	}
+	if s.Config.ForegroundActivateWorkers < 0 {
+		s.Config.ForegroundActivateWorkers = 0
+	}
 	if s.Config.GitHubSyncImportWorkers < 0 {
 		s.Config.GitHubSyncImportWorkers = 0
 	}
+	if s.Config.GitHubSyncActivateWorkers < 0 {
+		s.Config.GitHubSyncActivateWorkers = 0
+	}
 	s.Logger.Printf(
-		"controller active loop started; event_driven=%v poll_interval=%s fallback_poll_interval=%s github_sync_interval=%s render_dir=%s kubectl_apply=%v foreground_import_workers=%d github_sync_import_workers=%d import_worker_limit_note=%q",
+		"controller active loop started; event_driven=%v poll_interval=%s fallback_poll_interval=%s github_sync_interval=%s render_dir=%s kubectl_apply=%v foreground_import_workers=%d foreground_activate_workers=%d github_sync_import_workers=%d github_sync_activate_workers=%d worker_limit_note=%q",
 		eventDriven,
 		s.Config.PollInterval,
 		s.Config.FallbackPollInterval,
@@ -155,7 +161,9 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		s.Config.RenderDir,
 		s.Config.KubectlApply,
 		s.Config.ForegroundImportWorkers,
+		s.Config.ForegroundActivateWorkers,
 		s.Config.GitHubSyncImportWorkers,
+		s.Config.GitHubSyncActivateWorkers,
 		"0=unbounded",
 	)
 	requeued, err := s.Store.RequeueInFlightManagedOperations("operation requeued after controller restart")
@@ -170,9 +178,9 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	}
 
 	foregroundImports := s.startPendingOperationWorkers(ctx, operationLaneForegroundImport, s.Config.ForegroundImportWorkers)
-	foregroundActivations := s.startPendingOperationWorkers(ctx, operationLaneForegroundActivate, 1)
+	foregroundActivations := s.startPendingOperationWorkers(ctx, operationLaneForegroundActivate, s.Config.ForegroundActivateWorkers)
 	backgroundImports := s.startPendingOperationWorkers(ctx, operationLaneGitHubSyncImport, s.Config.GitHubSyncImportWorkers)
-	backgroundActivations := s.startPendingOperationWorkers(ctx, operationLaneGitHubSyncActivate, 1)
+	backgroundActivations := s.startPendingOperationWorkers(ctx, operationLaneGitHubSyncActivate, s.Config.GitHubSyncActivateWorkers)
 	triggerBackgroundOps := func() {
 		triggerPendingOperationWorkers(backgroundImports...)
 		triggerPendingOperationWorkers(backgroundActivations...)
@@ -531,6 +539,9 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 func (s *Service) executeManagedOperation(ctx context.Context, op model.Operation) (err error) {
 	timer := newControllerOperationTimer(s.now)
 	defer func() {
+		if op.Type != model.OperationTypeImport {
+			s.recordOperationControllerTiming(op.ID, timer.modelSegments())
+		}
 		timer.Log(s.Logger, "managed_operation", op, err)
 	}()
 
@@ -713,30 +724,43 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				s.Logger.Printf("reload deployed app %s after completion failed: %v", app.ID, appErr)
 			}
 		} else {
-			cleanupCtx, cancel := postOperationMaintenanceContext(ctx)
-			defer cancel()
-			if err := s.pruneExcessManagedAppImages(cleanupCtx, deployedApp); err != nil && s.Logger != nil {
-				s.Logger.Printf("prune excess managed app images for app=%s failed: %v", deployedApp.ID, err)
-			}
-			if err := s.syncTenantBillingImageStorage(cleanupCtx, deployedApp.TenantID); err != nil && s.Logger != nil {
-				s.Logger.Printf("sync billing image storage after deploy for tenant=%s failed: %v", deployedApp.TenantID, err)
-			}
+			runPostOperationMaintenance(s.Logger, fmt.Sprintf("post-deploy image maintenance for app=%s tenant=%s", deployedApp.ID, deployedApp.TenantID), func(ctx context.Context) error {
+				var errs []error
+				if err := s.pruneExcessManagedAppImages(ctx, deployedApp); err != nil {
+					errs = append(errs, fmt.Errorf("prune excess managed app images: %w", err))
+				}
+				if err := s.syncTenantBillingImageStorage(ctx, deployedApp.TenantID); err != nil {
+					errs = append(errs, fmt.Errorf("sync billing image storage: %w", err))
+				}
+				return errors.Join(errs...)
+			})
 		}
 		timer.Mark("post_deploy_cleanup")
 	}
 	if op.Type == model.OperationTypeDelete {
-		cleanupCtx, cancel := postOperationMaintenanceContext(ctx)
-		defer cancel()
-		if err := s.cleanupDeletedAppImages(cleanupCtx, app); err != nil && s.Logger != nil {
-			s.Logger.Printf("cleanup deleted app images for app=%s failed: %v", app.ID, err)
-		}
-		if err := s.syncTenantBillingImageStorage(cleanupCtx, app.TenantID); err != nil && s.Logger != nil {
-			s.Logger.Printf("sync billing image storage after delete for tenant=%s failed: %v", app.TenantID, err)
-		}
+		runPostOperationMaintenance(s.Logger, fmt.Sprintf("post-delete image maintenance for app=%s tenant=%s", app.ID, app.TenantID), func(ctx context.Context) error {
+			var errs []error
+			if err := s.cleanupDeletedAppImages(ctx, app); err != nil {
+				errs = append(errs, fmt.Errorf("cleanup deleted app images: %w", err))
+			}
+			if err := s.syncTenantBillingImageStorage(ctx, app.TenantID); err != nil {
+				errs = append(errs, fmt.Errorf("sync billing image storage: %w", err))
+			}
+			return errors.Join(errs...)
+		})
 		timer.Mark("post_delete_cleanup")
 	}
 	s.Logger.Printf("operation %s completed on managed runtime; manifest=%s", op.ID, bundle.ManifestPath)
 	return nil
+}
+
+func (s *Service) recordOperationControllerTiming(operationID string, segments []model.OperationControllerTimingSegment) {
+	if s == nil || s.Store == nil || len(segments) == 0 {
+		return
+	}
+	if _, err := s.Store.SetOperationControllerTiming(operationID, segments); err != nil && s.Logger != nil {
+		s.Logger.Printf("operation %s controller timing persist error: %v", operationID, err)
+	}
 }
 
 func migrateDesiredSpecForManagedOperation(currentApp model.App, desired model.AppSpec) model.AppSpec {

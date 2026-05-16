@@ -105,4 +105,94 @@ func TestListOperationsReturnsSummariesAndGetOperationReturnsDesiredState(t *tes
 	if getResponse.Operation.DesiredSource == nil || getResponse.Operation.DesiredSource.ImageRef != desiredSource.ImageRef {
 		t.Fatalf("expected get operation to include desired source, got %+v", getResponse.Operation.DesiredSource)
 	}
+
+	if _, err := s.SetOperationControllerTiming(op.ID, []model.OperationControllerTimingSegment{
+		{Name: "billing_sync", DurationMilliseconds: 1200},
+		{Name: "post_deploy_cleanup", DurationMilliseconds: 3400},
+	}); err != nil {
+		t.Fatalf("set controller timing: %v", err)
+	}
+	timingRecorder := performJSONRequest(t, server, http.MethodGet, "/v1/operations/"+op.ID, apiKey, nil)
+	if timingRecorder.Code != http.StatusOK {
+		t.Fatalf("expected timing get status 200, got %d body=%s", timingRecorder.Code, timingRecorder.Body.String())
+	}
+	var timingResponse struct {
+		Operation model.Operation `json:"operation"`
+	}
+	mustDecodeJSON(t, timingRecorder, &timingResponse)
+	if len(timingResponse.Operation.ControllerTimingSegments) != 2 || timingResponse.Operation.ControllerTimingSegments[0].Name != "billing_sync" {
+		t.Fatalf("expected controller timing segments in operation API, got %+v", timingResponse.Operation.ControllerTimingSegments)
+	}
+}
+
+func TestListOperationsAppliesServerSideFilters(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Filtered Operations Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	raiseManagedTestCap(t, s, tenant.ID)
+	project, err := s.CreateProject(tenant.ID, "target", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	otherProject, err := s.CreateProject(tenant.ID, "other", "")
+	if err != nil {
+		t.Fatalf("create other project: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "reader", []string{"app.read"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{Image: "ghcr.io/example/demo", Replicas: 1, RuntimeID: "runtime_managed_shared"})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	otherApp, err := s.CreateApp(tenant.ID, otherProject.ID, "other", "", model.AppSpec{Image: "ghcr.io/example/other", Replicas: 1, RuntimeID: "runtime_managed_shared"})
+	if err != nil {
+		t.Fatalf("create other app: %v", err)
+	}
+
+	appSpec := app.Spec
+	older, err := s.CreateOperation(model.Operation{TenantID: tenant.ID, Type: model.OperationTypeDeploy, AppID: app.ID, DesiredSpec: &appSpec})
+	if err != nil {
+		t.Fatalf("create older operation: %v", err)
+	}
+	replicas := 2
+	_, err = s.CreateOperation(model.Operation{TenantID: tenant.ID, Type: model.OperationTypeScale, AppID: app.ID, DesiredReplicas: &replicas})
+	if err != nil {
+		t.Fatalf("create type-mismatched operation: %v", err)
+	}
+	otherSpec := otherApp.Spec
+	otherProjectOp, err := s.CreateOperation(model.Operation{TenantID: tenant.ID, Type: model.OperationTypeDeploy, AppID: otherApp.ID, DesiredSpec: &otherSpec})
+	if err != nil {
+		t.Fatalf("create other project operation: %v", err)
+	}
+	if _, err := s.FailOperation(otherProjectOp.ID, "not relevant"); err != nil {
+		t.Fatalf("fail other project operation: %v", err)
+	}
+	newerSpec := app.Spec
+	newer, err := s.CreateOperation(model.Operation{TenantID: tenant.ID, Type: model.OperationTypeDeploy, AppID: app.ID, DesiredSpec: &newerSpec})
+	if err != nil {
+		t.Fatalf("create newer operation: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	url := "/v1/operations?tenant_id=" + tenant.ID + "&project_id=" + project.ID + "&type=deploy&status=pending&limit=1"
+	recorder := performJSONRequest(t, server, http.MethodGet, url, apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Operations []model.Operation `json:"operations"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if len(response.Operations) != 1 || response.Operations[0].ID != newer.ID {
+		t.Fatalf("expected newest matching operation %s, got %+v; older=%s", newer.ID, response.Operations, older.ID)
+	}
 }

@@ -1101,6 +1101,17 @@ func (c *CLI) newAdminClusterStatusCommand() *cobra.Command {
 					return err
 				}
 			}
+			if len(status.Warnings) > 0 {
+				if _, err := fmt.Fprintln(c.stdout); err != nil {
+					return err
+				}
+				if _, err := fmt.Fprintln(c.stdout, "[warnings]"); err != nil {
+					return err
+				}
+				if err := writeControlPlaneWarningTable(c.stdout, status.Warnings); err != nil {
+					return err
+				}
+			}
 			if len(status.Components) == 0 {
 				return nil
 			}

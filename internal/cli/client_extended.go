@@ -992,20 +992,49 @@ func (c *Client) LocalizeBackingService(id, targetRuntimeID, targetNodeName stri
 }
 
 func (c *Client) ListOperations(appID string) ([]model.Operation, error) {
-	return c.listOperations(appID, false)
+	return c.ListOperationsFiltered(listOperationsOptions{AppID: appID})
 }
 
 func (c *Client) ListOperationsWithDesiredState(appID string) ([]model.Operation, error) {
-	return c.listOperations(appID, true)
+	return c.ListOperationsFiltered(listOperationsOptions{AppID: appID, IncludeDesired: true})
 }
 
-func (c *Client) listOperations(appID string, includeDesired bool) ([]model.Operation, error) {
+type listOperationsOptions struct {
+	AppID          string
+	TenantID       string
+	ProjectID      string
+	Types          []string
+	Statuses       []string
+	Limit          int
+	IncludeDesired bool
+}
+
+func (c *Client) ListOperationsFiltered(opts listOperationsOptions) ([]model.Operation, error) {
 	relative := "/v1/operations"
 	query := url.Values{}
-	if strings.TrimSpace(appID) != "" {
-		query.Set("app_id", strings.TrimSpace(appID))
+	if strings.TrimSpace(opts.AppID) != "" {
+		query.Set("app_id", strings.TrimSpace(opts.AppID))
 	}
-	if includeDesired {
+	if strings.TrimSpace(opts.TenantID) != "" {
+		query.Set("tenant_id", strings.TrimSpace(opts.TenantID))
+	}
+	if strings.TrimSpace(opts.ProjectID) != "" {
+		query.Set("project_id", strings.TrimSpace(opts.ProjectID))
+	}
+	for _, value := range opts.Types {
+		if strings.TrimSpace(value) != "" {
+			query.Add("type", strings.TrimSpace(value))
+		}
+	}
+	for _, value := range opts.Statuses {
+		if strings.TrimSpace(value) != "" {
+			query.Add("status", strings.TrimSpace(value))
+		}
+	}
+	if opts.Limit > 0 {
+		query.Set("limit", fmt.Sprintf("%d", opts.Limit))
+	}
+	if opts.IncludeDesired {
 		query.Set("include_desired", "true")
 	}
 	if encoded := query.Encode(); encoded != "" {

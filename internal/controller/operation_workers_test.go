@@ -789,6 +789,125 @@ func TestUnboundedPendingOperationWorkersProcessDifferentAppsInParallel(t *testi
 	waitForOperationStatus(t, stateStore, opTwo.ID, model.OperationStatusCompleted)
 }
 
+func TestGitHubSyncActivateWorkersProcessDifferentAppsInParallel(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	appOne, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo-one", "", model.AppSpec{
+		Image:     "registry.pull.example/fugue-apps/demo-one@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:             model.AppSourceTypeGitHubPublic,
+		RepoURL:          "https://github.com/example/demo-one",
+		RepoBranch:       "main",
+		BuildStrategy:    model.AppBuildStrategyDockerfile,
+		ResolvedImageRef: "registry.push.example/fugue-apps/demo-one:git-new",
+		ComposeService:   "web-one",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create first app: %v", err)
+	}
+	appTwo, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo-two", "", model.AppSpec{
+		Image:     "registry.pull.example/fugue-apps/demo-two@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:             model.AppSourceTypeGitHubPublic,
+		RepoURL:          "https://github.com/example/demo-two",
+		RepoBranch:       "main",
+		BuildStrategy:    model.AppBuildStrategyDockerfile,
+		ResolvedImageRef: "registry.push.example/fugue-apps/demo-two:git-new",
+		ComposeService:   "web-two",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create second app: %v", err)
+	}
+
+	specOne := appOne.Spec
+	sourceOne := *appOne.Source
+	opOne, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeDeploy,
+		RequestedByType: model.ActorTypeBootstrap,
+		RequestedByID:   model.OperationRequestedByGitHubSyncController,
+		AppID:           appOne.ID,
+		DesiredSpec:     &specOne,
+		DesiredSource:   &sourceOne,
+	})
+	if err != nil {
+		t.Fatalf("create first deploy operation: %v", err)
+	}
+	specTwo := appTwo.Spec
+	sourceTwo := *appTwo.Source
+	opTwo, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeDeploy,
+		RequestedByType: model.ActorTypeBootstrap,
+		RequestedByID:   model.OperationRequestedByGitHubSyncController,
+		AppID:           appTwo.ID,
+		DesiredSpec:     &specTwo,
+		DesiredSource:   &sourceTwo,
+	})
+	if err != nil {
+		t.Fatalf("create second deploy operation: %v", err)
+	}
+
+	started := make(chan string, 1)
+	release := make(chan struct{})
+	svc := New(stateStore, config.ControllerConfig{
+		PollInterval: time.Hour,
+		RenderDir:    filepath.Join(t.TempDir(), "render"),
+	}, log.New(io.Discard, "", 0))
+	svc.registryPushBase = "registry.push.example"
+	svc.registryPullBase = "registry.pull.example"
+	svc.inspectManagedImage = func(ctx context.Context, imageRef string) (bool, map[string]int64, error) {
+		if strings.Contains(imageRef, "demo-one") {
+			select {
+			case started <- imageRef:
+			default:
+			}
+			select {
+			case <-ctx.Done():
+				return false, nil, ctx.Err()
+			case <-release:
+			}
+		}
+		return true, nil, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	workers := svc.startPendingOperationWorkers(ctx, operationLaneGitHubSyncActivate, 2)
+	triggerPendingOperationWorkers(workers...)
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first deploy did not start")
+	}
+	waitForOperationStatus(t, stateStore, opTwo.ID, model.OperationStatusCompleted)
+	assertOperationStatus(t, stateStore, opOne.ID, model.OperationStatusRunning)
+
+	close(release)
+	waitForOperationStatus(t, stateStore, opOne.ID, model.OperationStatusCompleted)
+}
+
 func TestUnboundedPendingOperationWorkersSerializeOperationsForSameApp(t *testing.T) {
 	t.Parallel()
 

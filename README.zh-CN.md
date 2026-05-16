@@ -168,7 +168,7 @@ fugue app ls
 
 `fugue app env ls` 的 text 输出现在会直接渲染成带 `source`、`ref` 和覆盖信息的表格，正常终端使用时不再必须依赖 `--json`。
 
-`fugue operation ls` 现在默认会把 text 输出限制在较小窗口里，并支持 `--project`、`--type`、`--status` 过滤。排查单个 project 或单类 operation 时，不需要再先把整页输出打出来再人工筛选。
+`fugue operation ls` 现在默认会把 text 输出限制在较小窗口里，并把 tenant、project、type、status、limit 过滤下推到 API。bootstrap/admin key 不再需要先下载全量 operation 历史再在本地过滤。
 
 `fugue api request` 会直接展示任意控制面接口的 status、headers、server-timing、body 和传输层耗时。`fugue diagnose timing -- <command...>` 则会包装任意 Fugue CLI 命令，输出它发出的每个 HTTP 请求的 DNS / connect / TLS / TTFB / total timing。
 
@@ -186,7 +186,9 @@ fugue app ls
 
 `fugue admin users resolve <email>` 则直接回答“这个用户到底映射到哪个 tenant/workspace”。它会返回 enrichment 后的 workspace snapshot，包括 tenant id/name、default project、first app，以及 workspace admin key 是否可用。
 
-当 API 侧配置了 `FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY` 后，`fugue admin cluster status` 还会附带最近一次 `deploy-control-plane` GitHub Actions workflow run，便于把 control plane 升级和当前集群状态对上。同一条命令现在也会同时展示 deployment 期望镜像和 live control-plane pod 实际观察到的 tag，不需要再下到 `kubectl` 去确认 `fugue-api` / `fugue-controller` 真实跑的是哪个版本。
+当 API 侧配置了 `FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY` 后，`fugue admin cluster status` 还会附带最近一次 `deploy-control-plane` GitHub Actions workflow run，便于把 control plane 升级和当前集群状态对上。同一条命令现在也会同时展示 deployment 期望镜像和 live control-plane pod 实际观察到的 tag，并把 workspace provisioner、postgres joiner 这类非核心 control-plane pod 的 Pending/NotReady 状态作为 warning 打出来。
+
+`fugue operation explain` 现在会展示 managed operation 的 controller lane 占用情况，包括当前占 worker 的 operation、队列位置，以及在有近期历史样本时给出的 ETA。`operation show/explain` 也会打印 controller 记录到的 timing segments，例如 billing sync 和 post-deploy cleanup。
 
 `build-cli` 会在 `main` 上的相关变更合入后打包 CLI 压缩包，`release-cli` 会在推送 `v*` tag 时把这些压缩包发布为 GitHub Release 资产。
 

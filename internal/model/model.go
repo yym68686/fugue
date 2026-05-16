@@ -848,6 +848,16 @@ type ControlPlanePod struct {
 	StartTime       *time.Time `json:"start_time,omitempty"`
 }
 
+type ControlPlaneWarning struct {
+	Severity  string `json:"severity"`
+	Namespace string `json:"namespace,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+	Name      string `json:"name"`
+	Status    string `json:"status,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	Message   string `json:"message,omitempty"`
+}
+
 type ControlPlaneStatus struct {
 	Namespace       string                   `json:"namespace"`
 	ReleaseInstance string                   `json:"release_instance"`
@@ -856,6 +866,7 @@ type ControlPlaneStatus struct {
 	Status          string                   `json:"status"`
 	ObservedAt      time.Time                `json:"observed_at"`
 	Components      []ControlPlaneComponent  `json:"components"`
+	Warnings        []ControlPlaneWarning    `json:"warnings,omitempty"`
 	DeployWorkflow  *ControlPlaneWorkflowRun `json:"deploy_workflow,omitempty"`
 }
 
@@ -1465,29 +1476,35 @@ type SourceUploadInspection struct {
 }
 
 type Operation struct {
-	ID                  string     `json:"id"`
-	TenantID            string     `json:"tenant_id"`
-	Type                string     `json:"type"`
-	Status              string     `json:"status"`
-	ExecutionMode       string     `json:"execution_mode"`
-	RequestedByType     string     `json:"requested_by_type"`
-	RequestedByID       string     `json:"requested_by_id"`
-	AppID               string     `json:"app_id"`
-	ServiceID           string     `json:"service_id,omitempty"`
-	SourceRuntimeID     string     `json:"source_runtime_id,omitempty"`
-	TargetRuntimeID     string     `json:"target_runtime_id,omitempty"`
-	DesiredReplicas     *int       `json:"desired_replicas,omitempty"`
-	DesiredSpec         *AppSpec   `json:"desired_spec,omitempty"`
-	DesiredSource       *AppSource `json:"desired_source,omitempty"`
-	DesiredOriginSource *AppSource `json:"desired_origin_source,omitempty"`
-	ResultMessage       string     `json:"result_message,omitempty"`
-	ManifestPath        string     `json:"manifest_path,omitempty"`
-	AssignedRuntimeID   string     `json:"assigned_runtime_id,omitempty"`
-	ErrorMessage        string     `json:"error_message,omitempty"`
-	CreatedAt           time.Time  `json:"created_at"`
-	UpdatedAt           time.Time  `json:"updated_at"`
-	StartedAt           *time.Time `json:"started_at,omitempty"`
-	CompletedAt         *time.Time `json:"completed_at,omitempty"`
+	ID                       string                             `json:"id"`
+	TenantID                 string                             `json:"tenant_id"`
+	Type                     string                             `json:"type"`
+	Status                   string                             `json:"status"`
+	ExecutionMode            string                             `json:"execution_mode"`
+	RequestedByType          string                             `json:"requested_by_type"`
+	RequestedByID            string                             `json:"requested_by_id"`
+	AppID                    string                             `json:"app_id"`
+	ServiceID                string                             `json:"service_id,omitempty"`
+	SourceRuntimeID          string                             `json:"source_runtime_id,omitempty"`
+	TargetRuntimeID          string                             `json:"target_runtime_id,omitempty"`
+	DesiredReplicas          *int                               `json:"desired_replicas,omitempty"`
+	DesiredSpec              *AppSpec                           `json:"desired_spec,omitempty"`
+	DesiredSource            *AppSource                         `json:"desired_source,omitempty"`
+	DesiredOriginSource      *AppSource                         `json:"desired_origin_source,omitempty"`
+	ResultMessage            string                             `json:"result_message,omitempty"`
+	ManifestPath             string                             `json:"manifest_path,omitempty"`
+	AssignedRuntimeID        string                             `json:"assigned_runtime_id,omitempty"`
+	ErrorMessage             string                             `json:"error_message,omitempty"`
+	ControllerTimingSegments []OperationControllerTimingSegment `json:"controller_timing_segments,omitempty"`
+	CreatedAt                time.Time                          `json:"created_at"`
+	UpdatedAt                time.Time                          `json:"updated_at"`
+	StartedAt                *time.Time                         `json:"started_at,omitempty"`
+	CompletedAt              *time.Time                         `json:"completed_at,omitempty"`
+}
+
+type OperationControllerTimingSegment struct {
+	Name                 string `json:"name"`
+	DurationMilliseconds int64  `json:"duration_ms"`
 }
 
 func SetAppSourceState(app *App, origin, build *AppSource) {

@@ -1289,12 +1289,20 @@ func TestExecuteManagedImportOperationSyncsBillingImageStorage(t *testing.T) {
 		t.Fatalf("execute managed import operation: %v", err)
 	}
 
-	summary, err := stateStore.GetTenantBillingSummary(tenant.ID)
-	if err != nil {
-		t.Fatalf("get billing summary: %v", err)
-	}
-	if got := summary.ManagedCommitted.StorageGibibytes; got != 1 {
-		t.Fatalf("expected billing summary to include 1 GiB synced image storage, got %d", got)
+	deadline := time.After(2 * time.Second)
+	for {
+		summary, err := stateStore.GetTenantBillingSummary(tenant.ID)
+		if err != nil {
+			t.Fatalf("get billing summary: %v", err)
+		}
+		if got := summary.ManagedCommitted.StorageGibibytes; got == 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("expected billing summary to include 1 GiB synced image storage, got %d", summary.ManagedCommitted.StorageGibibytes)
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
 

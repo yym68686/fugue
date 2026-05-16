@@ -746,6 +746,39 @@ func writeControlPlaneComponentTable(w io.Writer, components []model.ControlPlan
 	return tw.Flush()
 }
 
+func writeControlPlaneWarningTable(w io.Writer, warnings []model.ControlPlaneWarning) error {
+	sorted := append([]model.ControlPlaneWarning(nil), warnings...)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Severity != sorted[j].Severity {
+			return sorted[i].Severity < sorted[j].Severity
+		}
+		if sorted[i].Namespace != sorted[j].Namespace {
+			return sorted[i].Namespace < sorted[j].Namespace
+		}
+		return sorted[i].Name < sorted[j].Name
+	})
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "SEVERITY\tNAMESPACE\tKIND\tNAME\tSTATUS\tREASON\tMESSAGE"); err != nil {
+		return err
+	}
+	for _, warning := range sorted {
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			firstNonEmpty(strings.TrimSpace(warning.Severity), "-"),
+			firstNonEmpty(strings.TrimSpace(warning.Namespace), "-"),
+			firstNonEmpty(strings.TrimSpace(warning.Kind), "-"),
+			firstNonEmpty(strings.TrimSpace(warning.Name), "-"),
+			firstNonEmpty(strings.TrimSpace(warning.Status), "-"),
+			firstNonEmpty(strings.TrimSpace(warning.Reason), "-"),
+			firstNonEmpty(strings.TrimSpace(warning.Message), "-"),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
 func writeTenantTable(w io.Writer, tenants []model.Tenant) error {
 	sorted := append([]model.Tenant(nil), tenants...)
 	sort.Slice(sorted, func(i, j int) bool {

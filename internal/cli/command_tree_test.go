@@ -2864,19 +2864,20 @@ func TestRunOperationListFiltersProjectTypeAndStatus(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","tenant_id":"tenant_123","name":"demo","slug":"demo","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations":
-			if got := r.URL.Query().Get("app_id"); got != "" {
-				t.Fatalf("expected operation ls project filter to stay client-side, got app_id=%q", got)
+			if got := r.URL.Query().Get("tenant_id"); got != "tenant_123" {
+				t.Fatalf("expected operation tenant_id filter tenant_123, got %q", got)
+			}
+			if got := r.URL.Query().Get("project_id"); got != "project_123" {
+				t.Fatalf("expected operation project_id filter project_123, got %q", got)
+			}
+			if got := r.URL.Query()["type"]; len(got) != 1 || got[0] != "deploy" {
+				t.Fatalf("expected operation type filter deploy, got %v", got)
+			}
+			if got := r.URL.Query()["status"]; len(got) != 1 || got[0] != "pending" {
+				t.Fatalf("expected operation status filter pending, got %v", got)
 			}
 			_, _ = w.Write([]byte(`{"operations":[
-				{"id":"op_keep","tenant_id":"tenant_123","app_id":"app_123","type":"deploy","status":"pending","created_at":"2026-04-02T00:03:00Z","updated_at":"2026-04-02T00:03:00Z"},
-				{"id":"op_other_status","tenant_id":"tenant_123","app_id":"app_123","type":"deploy","status":"completed","created_at":"2026-04-02T00:02:00Z","updated_at":"2026-04-02T00:02:00Z"},
-				{"id":"op_other_type","tenant_id":"tenant_123","app_id":"app_123","type":"import","status":"pending","created_at":"2026-04-02T00:01:00Z","updated_at":"2026-04-02T00:01:00Z"},
-				{"id":"op_other_project","tenant_id":"tenant_123","app_id":"app_999","type":"deploy","status":"pending","created_at":"2026-04-02T00:04:00Z","updated_at":"2026-04-02T00:04:00Z"}
-			]}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
-			_, _ = w.Write([]byte(`{"apps":[
-				{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},
-				{"id":"app_999","tenant_id":"tenant_123","project_id":"project_999","name":"other","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}
+				{"id":"op_keep","tenant_id":"tenant_123","app_id":"app_123","type":"deploy","status":"pending","created_at":"2026-04-02T00:03:00Z","updated_at":"2026-04-02T00:03:00Z"}
 			]}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -2910,6 +2911,49 @@ func TestRunOperationListFiltersProjectTypeAndStatus(t *testing.T) {
 	}
 }
 
+func TestRunOperationListSkipsDiscoveryForProjectID(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations":
+			if got := r.URL.Query().Get("project_id"); got != "project_123" {
+				t.Fatalf("expected operation project_id filter project_123, got %q", got)
+			}
+			if _, present := r.URL.Query()["tenant_id"]; present {
+				t.Fatalf("did not expect tenant_id query when project id is already known: %v", r.URL.Query())
+			}
+			_, _ = w.Write([]byte(`{"operations":[{"id":"op_keep","tenant_id":"tenant_123","app_id":"app_123","type":"deploy","status":"pending","created_at":"2026-04-02T00:03:00Z","updated_at":"2026-04-02T00:03:00Z"}]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"operation", "ls",
+		"--project", "project_123",
+		"-o", "json",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run operation ls with project id: %v", err)
+	}
+
+	var payload struct {
+		Operations []model.Operation `json:"operations"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode operation ls output: %v", err)
+	}
+	if len(payload.Operations) != 1 || payload.Operations[0].ID != "op_keep" {
+		t.Fatalf("expected only op_keep, got %+v", payload.Operations)
+	}
+}
+
 func TestRunOperationListTextDefaultsToTwentyRows(t *testing.T) {
 	t.Parallel()
 
@@ -2930,21 +2974,11 @@ func TestRunOperationListTextDefaultsToTwentyRows(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations":
+			if got := r.URL.Query().Get("limit"); got != "20" {
+				t.Fatalf("expected operation ls default limit 20, got %q", got)
+			}
 			if err := json.NewEncoder(w).Encode(map[string]any{"operations": operations}); err != nil {
 				t.Fatalf("encode operations: %v", err)
-			}
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
-			if err := json.NewEncoder(w).Encode(map[string]any{
-				"apps": []model.App{{
-					ID:        "app_123",
-					TenantID:  "tenant_123",
-					ProjectID: "project_123",
-					Name:      "demo",
-					CreatedAt: time.Date(2026, time.April, 2, 0, 0, 0, 0, time.UTC),
-					UpdatedAt: time.Date(2026, time.April, 2, 0, 0, 0, 0, time.UTC),
-				}},
-			}); err != nil {
-				t.Fatalf("encode apps: %v", err)
 			}
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -2974,8 +3008,8 @@ func TestRunOperationListTextDefaultsToTwentyRows(t *testing.T) {
 			t.Fatalf("expected stdout to omit %q under default limit, got %q", unwanted, out)
 		}
 	}
-	if !strings.Contains(stderr.String(), "showing 20 of 25 operations; use --limit, --all, --app, --project, --type, or --status to narrow") {
-		t.Fatalf("expected narrowing hint on stderr, got %q", stderr.String())
+	if stderr.String() != "" {
+		t.Fatalf("expected no stderr when the limit is pushed to the server, got %q", stderr.String())
 	}
 }
 
@@ -4269,6 +4303,17 @@ func TestRunAdminClusterStatusShowsDeployWorkflow(t *testing.T) {
 					"live_version":"deadbeef",
 					"status":"ready",
 					"observed_at":"2026-04-14T00:00:00Z",
+					"warnings":[
+						{
+							"severity":"warning",
+							"namespace":"fugue-system",
+							"kind":"ReplicaSet",
+							"name":"fugue-shared-workspace-provisioner",
+							"status":"Pending",
+							"reason":"Unschedulable",
+							"message":"0/3 nodes are available"
+						}
+					],
 					"deploy_workflow":{
 						"repository":"acme/fugue",
 						"workflow":"deploy-control-plane.yml",
@@ -4322,6 +4367,9 @@ func TestRunAdminClusterStatusShowsDeployWorkflow(t *testing.T) {
 		"deploy_workflow_run_number=42",
 		"deploy_workflow_head_sha=deadbeef",
 		"live_version=deadbeef",
+		"[warnings]",
+		"fugue-shared-workspace-provisioner",
+		"Unschedulable",
 		"LIVE_TAGS",
 		"ghcr.io/acme/fugue-api:deadbeef",
 	} {

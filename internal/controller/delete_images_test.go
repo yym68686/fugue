@@ -124,7 +124,7 @@ func TestExecuteManagedDeleteOperationDeletesOnlyExclusiveManagedImages(t *testi
 		t.Fatalf("expected claimed delete operation %s, got %s", deleteOp.ID, claimed.ID)
 	}
 
-	var deletedRefs []string
+	deletedRefs := make(chan string, 4)
 	svc := &Service{
 		Store:            stateStore,
 		Renderer:         runtime.Renderer{BaseDir: t.TempDir()},
@@ -132,7 +132,7 @@ func TestExecuteManagedDeleteOperationDeletesOnlyExclusiveManagedImages(t *testi
 		registryPushBase: pushBase,
 		registryPullBase: pullBase,
 		deleteManagedImage: func(_ context.Context, imageRef string) (appimages.DeleteResult, error) {
-			deletedRefs = append(deletedRefs, imageRef)
+			deletedRefs <- imageRef
 			return appimages.DeleteResult{ImageRef: imageRef, Deleted: true}, nil
 		},
 	}
@@ -144,7 +144,8 @@ func TestExecuteManagedDeleteOperationDeletesOnlyExclusiveManagedImages(t *testi
 	wantDeletedRefs := []string{
 		pushBase + "/fugue-apps/example-demo:git-old",
 	}
-	if !reflect.DeepEqual(deletedRefs, wantDeletedRefs) {
-		t.Fatalf("expected deleted refs %v, got %v", wantDeletedRefs, deletedRefs)
+	gotDeletedRefs := waitForDeletedRefs(t, deletedRefs, len(wantDeletedRefs))
+	if !reflect.DeepEqual(gotDeletedRefs, wantDeletedRefs) {
+		t.Fatalf("expected deleted refs %v, got %v", wantDeletedRefs, gotDeletedRefs)
 	}
 }
