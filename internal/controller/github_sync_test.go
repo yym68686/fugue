@@ -109,6 +109,116 @@ func TestSyncGitHubAppsQueuesImportWhenCommitChanges(t *testing.T) {
 	}
 }
 
+func TestSyncGitHubAppsQueuesImportWhenCurrentRuntimeIsHiddenInternalShared(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	runtimeOwner, err := stateStore.CreateTenant("Runtime Owner")
+	if err != nil {
+		t.Fatalf("create runtime owner tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	_, nodeSecret, err := stateStore.CreateNodeKey(runtimeOwner.ID, "worker")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	_, hiddenRuntime, err := stateStore.BootstrapClusterNode(
+		nodeSecret,
+		"worker",
+		"https://worker.example.com",
+		map[string]string{"region": "test"},
+		"worker-a",
+		"worker-a-fingerprint",
+	)
+	if err != nil {
+		t.Fatalf("bootstrap runtime: %v", err)
+	}
+	hiddenRuntime, err = stateStore.SetRuntimePoolMode(hiddenRuntime.ID, model.RuntimePoolModeInternalShared)
+	if err != nil {
+		t.Fatalf("set runtime pool mode: %v", err)
+	}
+	visible, err := stateStore.RuntimeVisibleToTenant(hiddenRuntime.ID, tenant.ID, false)
+	if err != nil {
+		t.Fatalf("check runtime visibility: %v", err)
+	}
+	if visible {
+		t.Fatal("expected internal shared runtime to remain hidden from the app tenant")
+	}
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.example.com/demo:git-old",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyStaticSite,
+		CommitSHA:     "oldcommit",
+	}, model.AppRoute{
+		Hostname:    "demo.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://demo.example.com",
+		ServicePort: 80,
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	liveSpec := app.Spec
+	liveSpec.RuntimeID = hiddenRuntime.ID
+	app, err = stateStore.SyncObservedManagedAppBaseline(app.ID, liveSpec, app.Source)
+	if err != nil {
+		t.Fatalf("sync hidden runtime baseline: %v", err)
+	}
+	if app.Spec.RuntimeID != hiddenRuntime.ID {
+		t.Fatalf("expected app runtime %q, got %q", hiddenRuntime.ID, app.Spec.RuntimeID)
+	}
+
+	svc := &Service{
+		Store:  stateStore,
+		Config: config.ControllerConfig{GitHubSyncTimeout: time.Second},
+		Logger: log.New(io.Discard, "", 0),
+		latestGitHubCommit: func(context.Context, string, string, string) (string, string, error) {
+			return "newcommit", "main", nil
+		},
+	}
+
+	if err := svc.syncGitHubApps(context.Background()); err != nil {
+		t.Fatalf("sync github apps: %v", err)
+	}
+
+	ops, err := stateStore.ListOperations("", true)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected 1 queued operation, got %d", len(ops))
+	}
+	op := ops[0]
+	if op.DesiredSpec == nil {
+		t.Fatal("expected desired spec on queued operation")
+	}
+	if op.DesiredSpec.RuntimeID != hiddenRuntime.ID {
+		t.Fatalf("expected queued import to preserve runtime %q, got %q", hiddenRuntime.ID, op.DesiredSpec.RuntimeID)
+	}
+	if op.DesiredSource == nil || op.DesiredSource.CommitSHA != "newcommit" {
+		t.Fatalf("expected queued source commit newcommit, got %#v", op.DesiredSource)
+	}
+}
+
 func TestSyncGitHubAppsSkipsAppsWithInFlightOperations(t *testing.T) {
 	t.Parallel()
 

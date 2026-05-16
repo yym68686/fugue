@@ -2903,11 +2903,11 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 		if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
 			return model.Operation{}, err
 		}
-		visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, op.DesiredSpec.RuntimeID, op.TenantID)
+		runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, op.DesiredSpec.RuntimeID, op.TenantID)
 		if err != nil {
 			return model.Operation{}, err
 		}
-		if !visible {
+		if !runtimeUsable {
 			return model.Operation{}, ErrNotFound
 		}
 		runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.DesiredSpec.RuntimeID)
@@ -2924,11 +2924,11 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 			return model.Operation{}, err
 		}
 		if op.DesiredSpec.Failover != nil {
-			visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, op.DesiredSpec.Failover.TargetRuntimeID, op.TenantID)
+			runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, op.DesiredSpec.Failover.TargetRuntimeID, op.TenantID)
 			if err != nil {
 				return model.Operation{}, err
 			}
-			if !visible {
+			if !runtimeUsable {
 				return model.Operation{}, ErrNotFound
 			}
 			targetRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.DesiredSpec.Failover.TargetRuntimeID)
@@ -2940,11 +2940,11 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 			}
 		}
 		for _, runtimeID := range managedPostgresReferencedRuntimeIDs(op.DesiredSpec.RuntimeID, derefPostgresSpec(op.DesiredSpec.Postgres)) {
-			visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, runtimeID, op.TenantID)
+			runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, runtimeID, op.TenantID)
 			if err != nil {
 				return model.Operation{}, err
 			}
-			if !visible {
+			if !runtimeUsable {
 				return model.Operation{}, ErrNotFound
 			}
 			runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, runtimeID)
@@ -2969,11 +2969,11 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 		if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
 			return model.Operation{}, err
 		}
-		visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, op.DesiredSpec.RuntimeID, op.TenantID)
+		runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, op.DesiredSpec.RuntimeID, op.TenantID)
 		if err != nil {
 			return model.Operation{}, err
 		}
-		if !visible {
+		if !runtimeUsable {
 			return model.Operation{}, ErrNotFound
 		}
 		runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.DesiredSpec.RuntimeID)
@@ -2990,11 +2990,11 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 			return model.Operation{}, err
 		}
 		if op.DesiredSpec.Failover != nil {
-			visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, op.DesiredSpec.Failover.TargetRuntimeID, op.TenantID)
+			runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, op.DesiredSpec.Failover.TargetRuntimeID, op.TenantID)
 			if err != nil {
 				return model.Operation{}, err
 			}
-			if !visible {
+			if !runtimeUsable {
 				return model.Operation{}, ErrNotFound
 			}
 			targetRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.DesiredSpec.Failover.TargetRuntimeID)
@@ -3006,11 +3006,11 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 			}
 		}
 		for _, runtimeID := range managedPostgresReferencedRuntimeIDs(op.DesiredSpec.RuntimeID, derefPostgresSpec(op.DesiredSpec.Postgres)) {
-			visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, runtimeID, op.TenantID)
+			runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, runtimeID, op.TenantID)
 			if err != nil {
 				return model.Operation{}, err
 			}
-			if !visible {
+			if !runtimeUsable {
 				return model.Operation{}, ErrNotFound
 			}
 			runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, runtimeID)
@@ -3051,11 +3051,11 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 			if strings.TrimSpace(op.DesiredSpec.RuntimeID) != targetRuntimeID {
 				return model.Operation{}, ErrInvalidInput
 			}
-			visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, op.DesiredSpec.RuntimeID, op.TenantID)
+			runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, op.DesiredSpec.RuntimeID, op.TenantID)
 			if err != nil {
 				return model.Operation{}, err
 			}
-			if !visible {
+			if !runtimeUsable {
 				return model.Operation{}, ErrNotFound
 			}
 			runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.DesiredSpec.RuntimeID)
@@ -3072,11 +3072,11 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 				return model.Operation{}, err
 			}
 			if op.DesiredSpec.Failover != nil {
-				visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, op.DesiredSpec.Failover.TargetRuntimeID, op.TenantID)
+				runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, op.DesiredSpec.Failover.TargetRuntimeID, op.TenantID)
 				if err != nil {
 					return model.Operation{}, err
 				}
-				if !visible {
+				if !runtimeUsable {
 					return model.Operation{}, ErrNotFound
 				}
 				targetRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.DesiredSpec.Failover.TargetRuntimeID)
@@ -3088,11 +3088,11 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 				}
 			}
 			for _, runtimeID := range managedPostgresReferencedRuntimeIDs(op.DesiredSpec.RuntimeID, derefPostgresSpec(op.DesiredSpec.Postgres)) {
-				visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, runtimeID, op.TenantID)
+				runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, runtimeID, op.TenantID)
 				if err != nil {
 					return model.Operation{}, err
 				}
-				if !visible {
+				if !runtimeUsable {
 					return model.Operation{}, ErrNotFound
 				}
 				runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, runtimeID)
@@ -4656,6 +4656,35 @@ SELECT EXISTS (
 		return false, fmt.Errorf("query runtime %s grant for tenant %s: %w", runtimeID, tenantID, err)
 	}
 	return granted, nil
+}
+
+func (s *Store) pgRuntimeUsableForAppOperationTx(ctx context.Context, tx *sql.Tx, app model.App, runtimeID, tenantID string) (bool, error) {
+	runtimeID = strings.TrimSpace(runtimeID)
+	if runtimeID == "" {
+		return false, nil
+	}
+	visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, runtimeID, tenantID)
+	if err != nil {
+		return false, err
+	}
+	if visible {
+		return true, nil
+	}
+	if !appReferencesRuntime(app, runtimeID) {
+		return false, nil
+	}
+
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+	SELECT 1
+	FROM fugue_runtimes
+	WHERE id = $1
+)
+`, runtimeID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("query runtime %s existence: %w", runtimeID, err)
+	}
+	return exists, nil
 }
 
 func (s *Store) pgRuntimeTypeTx(ctx context.Context, tx *sql.Tx, runtimeID string) (string, error) {

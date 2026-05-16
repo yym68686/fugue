@@ -75,3 +75,26 @@ func validateManagedPostgresRuntimeState(state *model.State, tenantID, appRuntim
 	}
 	return nil
 }
+
+func validateManagedPostgresRuntimeStateForAppOperation(state *model.State, app model.App, tenantID, appRuntimeID string, spec *model.AppPostgresSpec) error {
+	if spec == nil {
+		return nil
+	}
+	if err := validateManagedPostgresRuntimeSpec(appRuntimeID, *spec); err != nil {
+		return err
+	}
+
+	for _, runtimeID := range managedPostgresReferencedRuntimeIDs(appRuntimeID, *spec) {
+		if !runtimeUsableForAppOperation(state, app, runtimeID, tenantID) {
+			return ErrNotFound
+		}
+		runtimeIndex := findRuntime(state, runtimeID)
+		if runtimeIndex < 0 {
+			return ErrNotFound
+		}
+		if err := validateFailoverTargetRuntimeType(state.Runtimes[runtimeIndex].Type); err != nil {
+			return err
+		}
+	}
+	return nil
+}

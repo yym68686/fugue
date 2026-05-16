@@ -2543,16 +2543,16 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
 				return err
 			}
-			if !runtimeVisibleToTenant(state, op.DesiredSpec.RuntimeID, op.TenantID) {
+			if !runtimeUsableForAppOperation(state, app, op.DesiredSpec.RuntimeID, op.TenantID) {
 				return ErrNotFound
 			}
 			if err := validateWorkspaceRuntimeState(state, op.DesiredSpec.RuntimeID, *op.DesiredSpec); err != nil {
 				return err
 			}
-			if err := validateFailoverRuntimeState(state, op.TenantID, *op.DesiredSpec); err != nil {
+			if err := validateFailoverRuntimeStateForAppOperation(state, app, op.TenantID, *op.DesiredSpec); err != nil {
 				return err
 			}
-			if err := validateManagedPostgresRuntimeState(state, op.TenantID, op.DesiredSpec.RuntimeID, op.DesiredSpec.Postgres); err != nil {
+			if err := validateManagedPostgresRuntimeStateForAppOperation(state, app, op.TenantID, op.DesiredSpec.RuntimeID, op.DesiredSpec.Postgres); err != nil {
 				return err
 			}
 			op.TargetRuntimeID = op.DesiredSpec.RuntimeID
@@ -2569,16 +2569,16 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
 				return err
 			}
-			if !runtimeVisibleToTenant(state, op.DesiredSpec.RuntimeID, op.TenantID) {
+			if !runtimeUsableForAppOperation(state, app, op.DesiredSpec.RuntimeID, op.TenantID) {
 				return ErrNotFound
 			}
 			if err := validateWorkspaceRuntimeState(state, op.DesiredSpec.RuntimeID, *op.DesiredSpec); err != nil {
 				return err
 			}
-			if err := validateFailoverRuntimeState(state, op.TenantID, *op.DesiredSpec); err != nil {
+			if err := validateFailoverRuntimeStateForAppOperation(state, app, op.TenantID, *op.DesiredSpec); err != nil {
 				return err
 			}
-			if err := validateManagedPostgresRuntimeState(state, op.TenantID, op.DesiredSpec.RuntimeID, op.DesiredSpec.Postgres); err != nil {
+			if err := validateManagedPostgresRuntimeStateForAppOperation(state, app, op.TenantID, op.DesiredSpec.RuntimeID, op.DesiredSpec.Postgres); err != nil {
 				return err
 			}
 			op.TargetRuntimeID = op.DesiredSpec.RuntimeID
@@ -2611,16 +2611,16 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 				if strings.TrimSpace(op.DesiredSpec.RuntimeID) != targetRuntimeID {
 					return ErrInvalidInput
 				}
-				if !runtimeVisibleToTenant(state, op.DesiredSpec.RuntimeID, op.TenantID) {
+				if !runtimeUsableForAppOperation(state, app, op.DesiredSpec.RuntimeID, op.TenantID) {
 					return ErrNotFound
 				}
 				if err := validateWorkspaceRuntimeState(state, op.DesiredSpec.RuntimeID, *op.DesiredSpec); err != nil {
 					return err
 				}
-				if err := validateFailoverRuntimeState(state, op.TenantID, *op.DesiredSpec); err != nil {
+				if err := validateFailoverRuntimeStateForAppOperation(state, app, op.TenantID, *op.DesiredSpec); err != nil {
 					return err
 				}
-				if err := validateManagedPostgresRuntimeState(state, op.TenantID, op.DesiredSpec.RuntimeID, op.DesiredSpec.Postgres); err != nil {
+				if err := validateManagedPostgresRuntimeStateForAppOperation(state, app, op.TenantID, op.DesiredSpec.RuntimeID, op.DesiredSpec.Postgres); err != nil {
 					return err
 				}
 				targetRuntimeID = op.DesiredSpec.RuntimeID
@@ -4937,6 +4937,20 @@ func runtimeVisibleToTenant(state *model.State, runtimeID, tenantID string) bool
 		return true
 	}
 	return findRuntimeAccessGrant(state, runtime.ID, tenantID) >= 0
+}
+
+func runtimeUsableForAppOperation(state *model.State, app model.App, runtimeID, tenantID string) bool {
+	runtimeID = strings.TrimSpace(runtimeID)
+	if runtimeID == "" {
+		return false
+	}
+	if runtimeVisibleToTenant(state, runtimeID, tenantID) {
+		return true
+	}
+	if !appReferencesRuntime(app, runtimeID) {
+		return false
+	}
+	return findRuntime(state, runtimeID) >= 0
 }
 
 func resolveProjectRuntimeID(project model.Project, requestedRuntimeID string) string {

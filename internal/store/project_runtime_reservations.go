@@ -306,6 +306,16 @@ func appReferencesRuntime(app model.App, runtimeID string) bool {
 			}
 		}
 	}
+	for _, service := range app.BackingServices {
+		if service.Spec.Postgres == nil {
+			continue
+		}
+		for _, postgresRuntimeID := range managedPostgresReferencedRuntimeIDs(app.Spec.RuntimeID, *service.Spec.Postgres) {
+			if postgresRuntimeID == runtimeID {
+				return true
+			}
+		}
+	}
 	return strings.TrimSpace(app.Status.CurrentRuntimeID) == runtimeID
 }
 

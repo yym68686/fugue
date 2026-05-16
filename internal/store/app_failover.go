@@ -38,6 +38,24 @@ func validateFailoverRuntimeState(state *model.State, tenantID string, spec mode
 	return validateFailoverTargetRuntimeType(state.Runtimes[runtimeIndex].Type)
 }
 
+func validateFailoverRuntimeStateForAppOperation(state *model.State, app model.App, tenantID string, spec model.AppSpec) error {
+	if err := validateFailoverSpec(spec); err != nil {
+		return err
+	}
+	if spec.Failover == nil {
+		return nil
+	}
+	targetRuntimeID := strings.TrimSpace(spec.Failover.TargetRuntimeID)
+	if !runtimeUsableForAppOperation(state, app, targetRuntimeID, tenantID) {
+		return ErrNotFound
+	}
+	runtimeIndex := findRuntime(state, targetRuntimeID)
+	if runtimeIndex < 0 {
+		return ErrNotFound
+	}
+	return validateFailoverTargetRuntimeType(state.Runtimes[runtimeIndex].Type)
+}
+
 func validateFailoverTargetRuntimeType(runtimeType string) error {
 	switch strings.TrimSpace(runtimeType) {
 	case model.RuntimeTypeManagedOwned, model.RuntimeTypeManagedShared:
