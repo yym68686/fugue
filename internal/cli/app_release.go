@@ -19,11 +19,11 @@ func (c *CLI) newAppReleaseCommand() *cobra.Command {
 	}
 	cmd.AddCommand(
 		c.newAppReleaseListCommand(),
-		c.newAppReleaseRebuildCommand(),
-		c.newAppReleaseDeployCommand(),
-		c.newAppReleaseRollbackCommand(),
 		c.newAppReleasePruneCommand(),
 		c.newAppReleasePolicyCommand(),
+		hideCompatCommand(c.newAppReleaseDeployCommand(), "fugue app deploy"),
+		hideCompatCommand(c.newAppReleaseRebuildCommand(), "fugue app build"),
+		hideCompatCommand(c.newAppReleaseRollbackCommand(), "fugue app rollback"),
 	)
 	return cmd
 }
@@ -72,7 +72,7 @@ func (c *CLI) newAppReleaseListCommand() *cobra.Command {
 func (c *CLI) newAppDeployShortcutCommand() *cobra.Command {
 	cmd := c.newAppReleaseDeployCommand()
 	cmd.Use = "deploy <app>"
-	cmd.Short = "Compatibility alias for app redeploy"
+	cmd.Short = "Deploy the app's current desired spec"
 	return cmd
 }
 
@@ -80,14 +80,14 @@ func (c *CLI) newAppRedeployCommand() *cobra.Command {
 	cmd := c.newAppReleaseDeployCommand()
 	cmd.Use = "redeploy <app>"
 	cmd.Aliases = []string{"apply"}
-	cmd.Short = "Deploy the app's current desired spec"
+	cmd.Short = "Compatibility alias for app deploy"
 	return cmd
 }
 
 func (c *CLI) newAppRebuildShortcutCommand() *cobra.Command {
 	cmd := c.newAppReleaseRebuildCommand()
-	cmd.Use = "rebuild <app>"
-	cmd.Short = "Rebuild an app from its source definition"
+	cmd.Use = "build <app>"
+	cmd.Short = "Build an app from its source definition"
 	return cmd
 }
 

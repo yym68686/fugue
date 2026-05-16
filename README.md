@@ -92,7 +92,7 @@ Common workflows:
 - `fugue app env ls my-app`
 - `fugue app fs ls my-app / --source live`
 - `fugue app db query my-app --sql "select * from gateway_request_logs order by created_at desc limit 50"`
-- `fugue app logs query my-app --table gateway_request_logs --since 1h --match status=500`
+- `fugue app logs table my-app --table gateway_request_logs --since 1h --match status=500`
 - `fugue app logs pods my-app`
 - `fugue app request my-app GET /admin/requests --query page=2 --query status=500 --header-from-env X-Service-Key=SERVICE_KEY`
 - `fugue app diagnose my-app`
@@ -142,7 +142,7 @@ Common workflows:
 
 `fugue app db query` lets you run read-only SQL against an app's effective PostgreSQL connection without first dropping into `cluster exec`. It is intended for direct business-table inspection such as `users`, `gateway_request_logs`, or request audit tables, and caps rows by default so routine diagnostics stay safe.
 
-`fugue app logs query` is the semantic wrapper for log-style tables stored in the app database. Instead of writing raw SQL for every investigation, you can point it at a table, apply `--since` / `--until`, add exact or substring filters, and let the CLI build the read-only query.
+`fugue app logs table` is the semantic wrapper for log-style tables stored in the app database. Instead of writing raw SQL for every investigation, you can point it at a table, apply `--since` / `--until`, add exact or substring filters, and let the CLI build the read-only query.
 
 `fugue app logs build` now renders the artifact chain as part of the text output: build, push, publish, deploy, and runtime. It also tells you whether a builder job was actually observed, whether registry logs showed a manifest `PUT`, and whether the current root cause is "published earlier and later deleted" versus "no publish was observed for this import". Use it when `"import build completed"` alone is too weak and you need to verify whether the image was recorded, published to the registry, linked to deploy, and then observed in runtime pods.
 

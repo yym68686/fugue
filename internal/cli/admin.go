@@ -26,7 +26,9 @@ Use a bootstrap key or admin API key here only when you are doing setup.
 		c.newAdminAccessCommand(),
 		c.newAdminAppsCommand(),
 		c.newAdminDomainsCommand(),
-		hideCompatCommand(c.newAdminRuntimeCommand(), "fugue runtime"),
+		c.newAdminRuntimeCommand(),
+		c.newAdminDiscoveryCommand(),
+		c.newAdminNodeUpdaterCommand(),
 		c.newAdminClusterCommand(),
 		c.newAdminControlPlaneCommand(),
 		c.newAdminEdgeCommand(),
@@ -490,13 +492,16 @@ func (c *CLI) newAdminRuntimeCommand() *cobra.Command {
 	cmd.AddCommand(
 		c.newAdminRuntimeListCommand(),
 		c.newAdminRuntimeShowCommand(),
-		c.newAdminRuntimeAccessCommand(),
+		c.newRuntimeAccessCommand(),
+		c.newRuntimePoolCommand(),
+		c.newRuntimeOfferCommand(),
 		c.newAdminRuntimeCreateCommand(),
-		c.newAdminRuntimeShareCommand(),
-		c.newAdminRuntimeUnshareCommand(),
-		c.newAdminRuntimeShareModeCommand(),
-		c.newAdminRuntimePoolModeCommand(),
+		c.newRuntimeDeleteCommand(),
 		c.newAdminRuntimeTokenCommand(),
+		hideCompatCommand(c.newAdminRuntimeShareCommand(), "fugue admin runtime access grant"),
+		hideCompatCommand(c.newAdminRuntimeUnshareCommand(), "fugue admin runtime access revoke"),
+		hideCompatCommand(c.newAdminRuntimeShareModeCommand(), "fugue admin runtime access set"),
+		hideCompatCommand(c.newAdminRuntimePoolModeCommand(), "fugue admin runtime pool set"),
 	)
 	return cmd
 }
@@ -874,6 +879,7 @@ func (c *CLI) newAdminClusterCommand() *cobra.Command {
 		c.newAdminClusterNodesCommand(),
 		c.newAdminClusterNodeCommand(),
 		c.newAdminClusterNodePolicyCommand(),
+		c.newAdminClusterServiceCommand(),
 		c.newAdminClusterStatusCommand(),
 		c.newAdminClusterPodsCommand(),
 		c.newAdminClusterEventsCommand(),
@@ -898,6 +904,7 @@ func (c *CLI) newAdminClusterNodePolicyCommand() *cobra.Command {
 		c.newAdminClusterNodePolicyListCommand(),
 		c.newAdminClusterNodePolicyGetCommand(),
 		c.newAdminClusterNodePolicyStatusCommand(),
+		c.newAdminClusterNodePolicySetCommand(),
 	)
 	return cmd
 }
@@ -981,6 +988,55 @@ func (c *CLI) newAdminClusterNodePolicyStatusCommand() *cobra.Command {
 			return writeClusterNodePolicyStatusTable(c.stdout, statuses)
 		},
 	}
+}
+
+func (c *CLI) newAdminClusterNodePolicySetCommand() *cobra.Command {
+	opts := struct {
+		AppRuntime          string
+		Builds              string
+		SharedPool          string
+		Edge                string
+		DNS                 string
+		InternalMaintenance string
+		ControlPlaneRole    string
+	}{}
+	cmd := &cobra.Command{
+		Use:   "set <node>",
+		Short: "Update cluster node policy toggles",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			request, err := buildClusterNodePolicySetRequest(opts)
+			if err != nil {
+				return err
+			}
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			response, err := client.SetClusterNodePolicy(args[0], request)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"cluster_node": response.ClusterNode, "node_reconciled": response.NodeReconciled, "reconcile_error": response.ReconcileError})
+			}
+			if err := writeClusterNodeTable(c.stdout, []model.ClusterNode{response.ClusterNode}); err != nil {
+				return err
+			}
+			return writeKeyValues(c.stdout,
+				kvPair{Key: "node_reconciled", Value: fmt.Sprintf("%t", response.NodeReconciled)},
+				kvPair{Key: "reconcile_error", Value: firstNonEmpty(response.ReconcileError, "-")},
+			)
+		},
+	}
+	cmd.Flags().StringVar(&opts.AppRuntime, "app-runtime", "", "Set app runtime allowance: on or off")
+	cmd.Flags().StringVar(&opts.Builds, "builds", "", "Set build allowance: on or off")
+	cmd.Flags().StringVar(&opts.SharedPool, "shared-pool", "", "Set shared pool allowance: on or off")
+	cmd.Flags().StringVar(&opts.Edge, "edge", "", "Set edge allowance: on or off")
+	cmd.Flags().StringVar(&opts.DNS, "dns", "", "Set DNS allowance: on or off")
+	cmd.Flags().StringVar(&opts.InternalMaintenance, "internal-maintenance", "", "Set internal maintenance allowance: on or off")
+	cmd.Flags().StringVar(&opts.ControlPlaneRole, "control-plane-role", "", "Set desired control-plane role: none, candidate, or member")
+	return cmd
 }
 
 func (c *CLI) newAdminClusterNodesCommand() *cobra.Command {
@@ -1075,6 +1131,70 @@ func (c *CLI) newAdminClusterJoinScriptCommand() *cobra.Command {
 			_, err = fmt.Fprint(c.stdout, script)
 			return err
 		},
+	}
+}
+
+func buildClusterNodePolicySetRequest(opts struct {
+	AppRuntime          string
+	Builds              string
+	SharedPool          string
+	Edge                string
+	DNS                 string
+	InternalMaintenance string
+	ControlPlaneRole    string
+}) (setClusterNodePolicyRequest, error) {
+	request := setClusterNodePolicyRequest{}
+	var err error
+	if request.AllowAppRuntime, err = parseOptionalSemanticBool(opts.AppRuntime); err != nil {
+		return setClusterNodePolicyRequest{}, err
+	}
+	if request.AllowBuilds, err = parseOptionalSemanticBool(opts.Builds); err != nil {
+		return setClusterNodePolicyRequest{}, err
+	}
+	if request.AllowSharedPool, err = parseOptionalSemanticBool(opts.SharedPool); err != nil {
+		return setClusterNodePolicyRequest{}, err
+	}
+	if request.AllowEdge, err = parseOptionalSemanticBool(opts.Edge); err != nil {
+		return setClusterNodePolicyRequest{}, err
+	}
+	if request.AllowDNS, err = parseOptionalSemanticBool(opts.DNS); err != nil {
+		return setClusterNodePolicyRequest{}, err
+	}
+	if request.AllowInternalMaintenance, err = parseOptionalSemanticBool(opts.InternalMaintenance); err != nil {
+		return setClusterNodePolicyRequest{}, err
+	}
+	if trimmed := strings.TrimSpace(opts.ControlPlaneRole); trimmed != "" {
+		role := model.NormalizeMachineControlPlaneRole(trimmed)
+		if role == "" {
+			return setClusterNodePolicyRequest{}, fmt.Errorf("invalid control-plane role %q", opts.ControlPlaneRole)
+		}
+		request.DesiredControlPlaneRole = &role
+	}
+	if request.AllowAppRuntime == nil &&
+		request.AllowBuilds == nil &&
+		request.AllowSharedPool == nil &&
+		request.AllowEdge == nil &&
+		request.AllowDNS == nil &&
+		request.AllowInternalMaintenance == nil &&
+		request.DesiredControlPlaneRole == nil {
+		return setClusterNodePolicyRequest{}, fmt.Errorf("at least one policy flag must be provided")
+	}
+	return request, nil
+}
+
+func parseOptionalSemanticBool(raw string) (*bool, error) {
+	trimmed := strings.TrimSpace(strings.ToLower(raw))
+	switch trimmed {
+	case "":
+		return nil, nil
+	case "on", "true", "yes", "enabled", "enable":
+		value := true
+		return &value, nil
+	case "off", "false", "no", "disabled", "disable":
+		value := false
+		return &value, nil
+	default:
+		return nil, fmt.Errorf("expected on or off, got %q", raw)
 	}
 }
 

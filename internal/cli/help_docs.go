@@ -89,7 +89,7 @@ fugue app watch my-app --interval 10s --show-secrets --output json
 		Example: strings.TrimSpace(`
 fugue app logs runtime my-app --follow
 fugue app logs build my-app --tail 200
-fugue app logs query my-app --table gateway_request_logs --since 1h --match status=500
+fugue app logs table my-app --table gateway_request_logs --since 1h --match status=500
 fugue app logs pods my-app
 `),
 	},
@@ -106,15 +106,15 @@ fugue app logs build my-app
 fugue app logs build my-app --operation op_import_123 --tail 500
 `),
 	},
-	"fugue app logs query": {
+	"fugue app logs table": {
 		Long: strings.TrimSpace(`
 Query a business log table through the app effective Postgres connection with semantic time-window and field filters.
 
 Use this when request logs, gateway logs, or audit rows live in the app database and plain runtime log tailing is not enough.
 `),
 		Example: strings.TrimSpace(`
-fugue app logs query my-app --table gateway_request_logs --since 1h --match status=500 --contains path=/admin
-fugue app logs query my-app --table request_audit --column created_at --column method --column path --limit 100
+fugue app logs table my-app --table gateway_request_logs --since 1h --match status=500 --contains path=/admin
+fugue app logs table my-app --table request_audit --column created_at --column method --column path --limit 100
 `),
 	},
 	"fugue app logs pods": {
@@ -481,27 +481,28 @@ fugue project delete marketing --cascade=false
 	"fugue runtime": {
 		Example: strings.TrimSpace(`
 fugue runtime ls
-fugue runtime access show shared
+fugue runtime show shared
+fugue runtime enroll create edge-a
 fugue runtime doctor shared
 `),
 	},
-	"fugue runtime access": {
+	"fugue admin runtime access": {
 		Example: strings.TrimSpace(`
-fugue runtime access show shared
-fugue runtime access set edge-a public
-fugue runtime access grant edge-a acme
+fugue admin runtime access show shared
+fugue admin runtime access set edge-a public
+fugue admin runtime access grant edge-a acme
 `),
 	},
-	"fugue runtime pool": {
+	"fugue admin runtime pool": {
 		Example: strings.TrimSpace(`
-fugue runtime pool show shared
-fugue runtime pool set edge-a dedicated
+fugue admin runtime pool show shared
+fugue admin runtime pool set edge-a dedicated
 `),
 	},
-	"fugue runtime offer": {
+	"fugue admin runtime offer": {
 		Example: strings.TrimSpace(`
-fugue runtime offer show edge-a
-fugue runtime offer set edge-a --cpu 2000 --memory 4096 --storage 50 --monthly-usd 19.99
+fugue admin runtime offer show edge-a
+fugue admin runtime offer set edge-a --cpu 2000 --memory 4096 --storage 50 --monthly-usd 19.99
 `),
 	},
 	"fugue runtime enroll": {
@@ -585,7 +586,8 @@ fugue admin access node-key usage edge-a
 		Example: strings.TrimSpace(`
 fugue admin runtime ls
 fugue admin runtime create edge-a --type external-owned --endpoint https://edge.example.com
-fugue admin runtime access runtime-b
+fugue admin runtime access show runtime-b
+fugue admin runtime pool set runtime-b dedicated
 `),
 	},
 	"fugue admin runtime token": {
@@ -1221,7 +1223,7 @@ func sampleFlagsForCommand(cmd *cobra.Command) string {
 		return "--description \"Landing pages\""
 	case "fugue service postgres create":
 		return "--runtime shared --database app --user app"
-	case "fugue runtime offer set":
+	case "fugue runtime offer set", "fugue admin runtime offer set":
 		return "--cpu 2000 --memory 4096 --storage 50 --monthly-usd 19.99"
 	case "fugue runtime attach", "fugue runtime enroll create":
 		return "--ttl 3600"

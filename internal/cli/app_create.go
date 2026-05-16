@@ -12,11 +12,13 @@ import (
 
 type appCreateOptions struct {
 	deployCommonOptions
-	ImageRef  string
-	RepoURL   string
-	Private   bool
-	RepoToken string
-	Branch    string
+	ImageRef      string
+	RepoURL       string
+	Private       bool
+	RepoToken     string
+	Branch        string
+	Args          []string
+	WorkloadClass string
 }
 
 func (c *CLI) newAppCreateCommand() *cobra.Command {
@@ -33,7 +35,7 @@ func (c *CLI) newAppCreateCommand() *cobra.Command {
 Create is the staged workflow entrypoint.
 
 Use "deploy" when you want Fugue to import and deploy immediately. Use "app create"
-when you want to register the app first, then run "app rebuild" when you are ready
+when you want to register the app first, then run "app build" when you are ready
 to prepare the first release artifact.
 `),
 		Args: cobra.ExactArgs(1),
@@ -80,15 +82,20 @@ to prepare the first release artifact.
 			if source == nil {
 				return fmt.Errorf("one of --github or --image is required")
 			}
+			if strings.TrimSpace(opts.WorkloadClass) != "" && model.NormalizeWorkloadClass(opts.WorkloadClass) == "" {
+				return fmt.Errorf("--workload-class must be critical, service, demo, or batch")
+			}
 
 			spec := model.AppSpec{
 				Env:               envVars,
+				Args:              append([]string(nil), opts.Args...),
 				Replicas:          opts.Replicas,
 				RuntimeID:         strings.TrimSpace(runtimeID),
 				Files:             files,
 				PersistentStorage: persistentStorage,
 				Postgres:          postgres,
 				NetworkMode:       deployNetworkMode(opts.Background),
+				WorkloadClass:     strings.TrimSpace(opts.WorkloadClass),
 			}
 			if port := appCreateServicePort(*source, opts.ServicePort, opts.Background); port > 0 {
 				spec.Ports = []int{port}
@@ -116,7 +123,7 @@ to prepare the first release artifact.
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{
 					"app":       app,
-					"next_step": fmt.Sprintf("fugue app rebuild %s", app.Name),
+					"next_step": fmt.Sprintf("fugue app build %s", app.Name),
 				})
 			}
 			return c.renderAppCreateResult(app)
@@ -144,6 +151,8 @@ func bindAppCreateFlags(cmd *cobra.Command, opts *appCreateOptions) {
 	cmd.Flags().StringVar(&opts.BuildContextDir, "context", "", "Docker build context relative to the source root")
 	cmd.Flags().BoolVar(&opts.Background, "background", false, "Create the app as a background worker with no public ingress")
 	cmd.Flags().StringVar(&opts.StartupCommand, "command", "", "Startup shell command override")
+	cmd.Flags().StringArrayVar(&opts.Args, "arg", nil, "Container argument to append to the startup command (repeatable)")
+	cmd.Flags().StringVar(&opts.WorkloadClass, "workload-class", "", "Workload class: critical, service, demo, or batch")
 	cmd.Flags().StringArrayVar(&opts.FileSpecs, "file", nil, "Declarative app file from a local source: <absolute-path>[:mode]=<local-file>")
 	cmd.Flags().StringArrayVar(&opts.SecretFileSpecs, "secret-file", nil, "Secret declarative app file from a local source: <absolute-path>[:mode]=<local-file>")
 	cmd.Flags().StringVar(&opts.StorageSize, "storage-size", "", "Persistent storage size, for example 10Gi")
@@ -240,7 +249,7 @@ func (c *CLI) renderAppCreateResult(app model.App) error {
 		{Key: "phase", Value: strings.TrimSpace(app.Status.Phase)},
 		{Key: "source", Value: sourceTypeForSync(app.Source)},
 		{Key: "source_ref", Value: sourceRef(app.Source)},
-		{Key: "next_step", Value: fmt.Sprintf("fugue app rebuild %s", app.Name)},
+		{Key: "next_step", Value: fmt.Sprintf("fugue app build %s", app.Name)},
 	}
 	if c.showIDs() {
 		pairs = append(pairs,

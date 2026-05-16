@@ -39,9 +39,10 @@ func (c *CLI) newAppLogsQueryCommand() *cobra.Command {
 		Timeout:    10 * time.Second,
 	}
 	cmd := &cobra.Command{
-		Use:   "query <app>",
-		Short: "Query business log tables with time-window filters",
-		Args:  cobra.ExactArgs(1),
+		Use:     "table <app>",
+		Aliases: []string{"query"},
+		Short:   "Query business log tables with time-window filters",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			statement, err := buildAppLogQueryStatement(opts, time.Now().UTC())
 			if err != nil {

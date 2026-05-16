@@ -3,6 +3,8 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -17,7 +19,10 @@ func (c *CLI) newSourceUploadCommand() *cobra.Command {
 		Use:   "source-upload",
 		Short: "Inspect uploaded source archives and their import references",
 	}
-	cmd.AddCommand(c.newSourceUploadShowCommand())
+	cmd.AddCommand(
+		c.newSourceUploadShowCommand(),
+		c.newSourceUploadDownloadCommand(),
+	)
 	return cmd
 }
 
@@ -42,6 +47,67 @@ func (c *CLI) newSourceUploadShowCommand() *cobra.Command {
 			return renderSourceUploadInspection(c.stdout, inspection)
 		},
 	}
+}
+
+func (c *CLI) newSourceUploadDownloadCommand() *cobra.Command {
+	opts := struct {
+		Output        string
+		DownloadToken string
+	}{}
+	cmd := &cobra.Command{
+		Use:   "download <upload-id>",
+		Short: "Download an uploaded source archive by download token",
+		Long: strings.TrimSpace(`
+Download the immutable source archive behind a source upload.
+
+The archive endpoint is protected by the per-upload download token. Metadata
+inspection still uses the current API key, but the archive bytes require
+--download-token so the CLI does not bypass the control-plane sharing model.
+`),
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(opts.DownloadToken) == "" {
+				return fmt.Errorf("--download-token is required")
+			}
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			upload, archiveBytes, err := client.DownloadSourceUploadArchive(args[0], opts.DownloadToken)
+			if err != nil {
+				return err
+			}
+			outputPath := strings.TrimSpace(opts.Output)
+			if outputPath == "" {
+				outputPath = strings.TrimSpace(upload.Filename)
+			}
+			if outputPath == "" {
+				outputPath = strings.TrimSpace(args[0]) + ".tgz"
+			}
+			if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil && filepath.Dir(outputPath) != "." {
+				return fmt.Errorf("create output directory: %w", err)
+			}
+			if err := os.WriteFile(outputPath, archiveBytes, 0o600); err != nil {
+				return fmt.Errorf("write archive %s: %w", outputPath, err)
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{
+					"source_upload": upload,
+					"archive":       outputPath,
+					"bytes":         len(archiveBytes),
+				})
+			}
+			return writeKeyValues(c.stdout,
+				kvPair{Key: "upload_id", Value: strings.TrimSpace(upload.ID)},
+				kvPair{Key: "archive", Value: outputPath},
+				kvPair{Key: "bytes", Value: fmt.Sprintf("%d", len(archiveBytes))},
+				kvPair{Key: "archive_sha256", Value: strings.TrimSpace(upload.SHA256)},
+			)
+		},
+	}
+	cmd.Flags().StringVarP(&opts.Output, "output", "o", "", "Output archive path. Defaults to the uploaded filename")
+	cmd.Flags().StringVar(&opts.DownloadToken, "download-token", "", "Per-upload archive download token")
+	return cmd
 }
 
 func renderSourceUploadInspection(w io.Writer, inspection model.SourceUploadInspection) error {

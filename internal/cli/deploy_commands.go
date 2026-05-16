@@ -176,7 +176,7 @@ Defaults:
 	cmd.Flags().StringVar(&opts.AppRef, "app", "", "Update an existing app by name or ID")
 	cmd.Flags().StringVar(&opts.Dir, "dir", "", "Project directory to upload")
 	cmd.Flags().StringVar(&opts.AppID, "app-id", "", "Existing app ID to redeploy")
-	cmd.Flags().BoolVar(&opts.ClearFiles, "clear-files", false, "For --app redeploys, remove declarative app files before importing")
+	cmd.Flags().BoolVar(&opts.ClearFiles, "clear-files", false, "For --app updates, remove declarative app files before importing")
 	cmd.Flags().BoolVar(&opts.ReplaceSource, "replace-source", false, "Adopt the uploaded source as the app's durable source-of-truth")
 	cmd.Flags().StringVar(&opts.RepoURLCompat, "repo-url", "", "Compatibility flag for GitHub deploys; prefer 'deploy github'")
 	cmd.Flags().StringVar(&opts.Branch, "branch", "", "Git branch for --repo-url compatibility mode")

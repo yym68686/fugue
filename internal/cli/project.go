@@ -475,8 +475,8 @@ func (c *CLI) newProjectMetaCommand() *cobra.Command {
 
 func (c *CLI) newProjectRuntimeReservationsCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "runtime-reservations",
-		Aliases: []string{"dedicated-runtimes", "dedicated-vps"},
+		Use:     "runtimes",
+		Aliases: []string{"runtime-reservations", "dedicated-runtimes", "dedicated-vps", "capacity"},
 		Short:   "Manage runtimes reserved for a project",
 	}
 	cmd.AddCommand(
@@ -489,9 +489,10 @@ func (c *CLI) newProjectRuntimeReservationsCommand() *cobra.Command {
 
 func (c *CLI) newProjectRuntimeReservationsListCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list <project>",
-		Short: "List runtimes reserved for a project",
-		Args:  cobra.ExactArgs(1),
+		Use:     "ls <project>",
+		Aliases: []string{"list"},
+		Short:   "List runtimes reserved for a project",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {

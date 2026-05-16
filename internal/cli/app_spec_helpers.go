@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"fugue/internal/model"
@@ -55,6 +56,39 @@ func cloneAppPersistentStorageSpec(spec *model.AppPersistentStorageSpec) *model.
 	return &out
 }
 
+func cloneAppNetworkPolicySpec(spec *model.AppNetworkPolicySpec) *model.AppNetworkPolicySpec {
+	if spec == nil {
+		return nil
+	}
+	out := *spec
+	if spec.Egress != nil {
+		egress := *spec.Egress
+		if len(egress.AllowApps) > 0 {
+			egress.AllowApps = append([]model.AppNetworkPolicyAppPeer(nil), egress.AllowApps...)
+		}
+		out.Egress = &egress
+	}
+	if spec.Ingress != nil {
+		ingress := *spec.Ingress
+		if len(ingress.AllowApps) > 0 {
+			ingress.AllowApps = append([]model.AppNetworkPolicyAppPeer(nil), ingress.AllowApps...)
+		}
+		out.Ingress = &ingress
+	}
+	return &out
+}
+
+func cloneAppGeneratedEnvSpecMap(in map[string]model.AppGeneratedEnvSpec) map[string]model.AppGeneratedEnvSpec {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]model.AppGeneratedEnvSpec, len(in))
+	for key, spec := range in {
+		out[key] = spec
+	}
+	return out
+}
+
 func cloneAppPostgresSpec(spec *model.AppPostgresSpec) *model.AppPostgresSpec {
 	if spec == nil {
 		return nil
@@ -102,6 +136,8 @@ func cloneAppSpec(spec model.AppSpec) model.AppSpec {
 		out.Ports = append([]int(nil), spec.Ports...)
 	}
 	out.Env = cloneStringMap(spec.Env)
+	out.GeneratedEnv = cloneAppGeneratedEnvSpecMap(spec.GeneratedEnv)
+	out.NetworkPolicy = cloneAppNetworkPolicySpec(spec.NetworkPolicy)
 	out.Files = cloneAppFiles(spec.Files)
 	out.Workspace = cloneAppWorkspaceSpec(spec.Workspace)
 	out.PersistentStorage = cloneAppPersistentStorageSpec(spec.PersistentStorage)
@@ -120,6 +156,44 @@ func cloneAppSpec(spec model.AppSpec) model.AppSpec {
 	out.Postgres = cloneAppPostgresSpec(spec.Postgres)
 	model.ApplyAppSpecDefaults(&out)
 	return out
+}
+
+func deployUpdatedAppSpec(client *Client, appID string, mutate func(*model.AppSpec) error) (appPatchResponse, bool, error) {
+	app, err := client.GetApp(appID)
+	if err != nil {
+		return appPatchResponse{}, false, err
+	}
+	spec := cloneAppSpec(app.Spec)
+	before := cloneAppSpec(spec)
+	if mutate != nil {
+		if err := mutate(&spec); err != nil {
+			return appPatchResponse{}, false, err
+		}
+	}
+	model.ApplyAppSpecDefaults(&spec)
+	if reflect.DeepEqual(before, spec) {
+		return appPatchResponse{App: app, AlreadyCurrent: true}, true, nil
+	}
+	response, err := client.DeployApp(appID, &spec)
+	if err != nil {
+		return appPatchResponse{}, false, err
+	}
+	app.Spec = spec
+	return appPatchResponse{App: app, Operation: &response.Operation}, false, nil
+}
+
+func (c *CLI) waitForAppSpecMutation(client *Client, appID string, response appPatchResponse, wait bool) (appPatchResponse, error) {
+	if !wait || response.Operation == nil {
+		return response, nil
+	}
+	finalApp, err := c.waitForSingleApp(client, appID, *response.Operation, true)
+	if err != nil {
+		return appPatchResponse{}, err
+	}
+	if finalApp != nil {
+		response.App = *finalApp
+	}
+	return response, nil
 }
 
 func startupCommandValue(spec model.AppSpec) string {

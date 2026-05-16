@@ -79,6 +79,14 @@ func (c *Client) ListEdgeRoutePolicies() ([]model.EdgeRoutePolicy, error) {
 	return response.Policies, nil
 }
 
+func (c *Client) GetEdgeRoutePolicy(hostname string) (model.EdgeRoutePolicy, error) {
+	var response edgeRoutePolicyResponse
+	if err := c.doJSON(http.MethodGet, edgeRoutePolicyPath(hostname), nil, &response); err != nil {
+		return model.EdgeRoutePolicy{}, err
+	}
+	return response.Policy, nil
+}
+
 func (c *Client) PutEdgeRoutePolicy(hostname, edgeGroupID, routePolicy string) (model.EdgeRoutePolicy, error) {
 	request := putEdgeRoutePolicyRequest{
 		EdgeGroupID: strings.TrimSpace(edgeGroupID),

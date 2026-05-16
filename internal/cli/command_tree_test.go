@@ -70,7 +70,8 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"fugue source-upload show upload_123",
 		"fugue app failover policy set my-app --app-to runtime-b",
 		"fugue app service attach my-app postgres",
-		"fugue app redeploy my-app",
+		"fugue app deploy my-app",
+		"fugue app build my-app",
 		"fugue app command set my-app --command \"python app.py\"",
 		"fugue app config put my-app /app/config.yaml --from-file config.yaml",
 		"fugue app storage set my-app --size 10Gi --mount /data",
@@ -80,8 +81,10 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 		"fugue upgrade",
 		"fugue operation ls --app my-app",
 		"fugue operation show op_123 --show-secrets",
-		"fugue runtime access show shared",
 		"fugue runtime doctor shared",
+		"fugue admin runtime access show shared",
+		"fugue admin node-updater task ls --status pending",
+		"fugue admin discovery bundle show",
 		"fugue project overview",
 		"fugue project images usage",
 		"fugue admin cluster status",
@@ -109,7 +112,7 @@ func TestRootHelpListsSemanticCommands(t *testing.T) {
 	for _, unwanted := range []string{
 		"\n  template      ",
 		"fugue app continuity enable my-app --app-to runtime-b",
-		"fugue app deploy my-app",
+		"fugue app redeploy my-app",
 		"fugue admin runtime access shared",
 		"fugue project usage",
 	} {
@@ -414,6 +417,160 @@ func TestRunAppCommandSetUsesStartupCommandPatch(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
+	}
+}
+
+func TestRunAppCommandSetArgsUsesDeploySpec(t *testing.T) {
+	t.Parallel()
+
+	var gotBody struct {
+		Spec model.AppSpec `json:"spec"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/deploy":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode deploy body: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_123","app_id":"app_123"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "command", "set", "demo",
+		"--command", "python app.py",
+		"--arg=--reload",
+		"--arg", "8080",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app command set args: %v", err)
+	}
+
+	if strings.Join(gotBody.Spec.Command, " ") != "sh -lc python app.py" {
+		t.Fatalf("expected startup command in deploy spec, got %+v", gotBody.Spec.Command)
+	}
+	if strings.Join(gotBody.Spec.Args, " ") != "--reload 8080" {
+		t.Fatalf("expected args in deploy spec, got %+v", gotBody.Spec.Args)
+	}
+	if out := stdout.String(); !strings.Contains(out, "args=--reload 8080") {
+		t.Fatalf("expected stdout to include args, got %q", out)
+	}
+}
+
+func TestRunAppNetworkSetResolvesPeerAppNames(t *testing.T) {
+	t.Parallel()
+
+	var gotBody struct {
+		Spec model.AppSpec `json:"spec"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[
+				{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},
+				{"id":"app_api","tenant_id":"tenant_123","project_id":"project_123","name":"api","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}
+			]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/deploy":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode deploy body: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_123","app_id":"app_123"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "network", "set", "demo",
+		"--mode", "internal",
+		"--egress-dns", "off",
+		"--egress-allow-app", "api:443",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app network set: %v", err)
+	}
+
+	if gotBody.Spec.NetworkMode != model.AppNetworkModeInternal {
+		t.Fatalf("expected internal network mode, got %q", gotBody.Spec.NetworkMode)
+	}
+	if gotBody.Spec.NetworkPolicy == nil || gotBody.Spec.NetworkPolicy.Egress == nil {
+		t.Fatalf("expected egress policy, got %+v", gotBody.Spec.NetworkPolicy)
+	}
+	egress := gotBody.Spec.NetworkPolicy.Egress
+	if egress.AllowDNS {
+		t.Fatalf("expected egress DNS disabled, got %+v", egress)
+	}
+	if len(egress.AllowApps) != 1 || egress.AllowApps[0].AppID != "app_api" || len(egress.AllowApps[0].Ports) != 1 || egress.AllowApps[0].Ports[0] != 443 {
+		t.Fatalf("expected resolved peer app id and port, got %+v", egress.AllowApps)
+	}
+}
+
+func TestRunEnvGeneratedSetUsesDeploySpec(t *testing.T) {
+	t.Parallel()
+
+	var gotBody struct {
+		Spec model.AppSpec `json:"spec"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/deploy":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode deploy body: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_123","app_id":"app_123"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "env", "generated", "set", "demo", "SESSION_SECRET",
+		"--encoding", "hex",
+		"--length", "48",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run env generated set: %v", err)
+	}
+
+	spec, ok := gotBody.Spec.GeneratedEnv["SESSION_SECRET"]
+	if !ok {
+		t.Fatalf("expected generated env spec, got %+v", gotBody.Spec.GeneratedEnv)
+	}
+	if spec.Generate != model.AppGeneratedEnvGenerateRandom || spec.Encoding != model.AppGeneratedEnvEncodingHex || spec.Length != 48 {
+		t.Fatalf("unexpected generated env spec %+v", spec)
 	}
 }
 
@@ -983,7 +1140,7 @@ func TestRunAppCreateStagesGitHubSource(t *testing.T) {
 		t.Fatalf("expected service port 8080, got %+v", gotRequest.Spec.Ports)
 	}
 	out := stdout.String()
-	for _, want := range []string{"app=demo", "phase=importing", "source=github-public", "next_step=fugue app rebuild demo"} {
+	for _, want := range []string{"app=demo", "phase=importing", "source=github-public", "next_step=fugue app build demo"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
@@ -2786,12 +2943,12 @@ func TestRunAppRebuildCanClearFiles(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"app", "rebuild", "demo",
+		"app", "build", "demo",
 		"--clear-files",
 		"--wait=false",
 	}, &stdout, &stderr)
 	if err != nil {
-		t.Fatalf("run app rebuild: %v", err)
+		t.Fatalf("run app build: %v", err)
 	}
 
 	if !gotBody.ClearFiles {
@@ -2967,7 +3124,7 @@ func TestRunAppLogsQueryBuildsStructuredSQL(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"app", "logs", "query", "demo",
+		"app", "logs", "table", "demo",
 		"--table", "gateway_request_logs",
 		"--since", "2026-04-15T00:00:00Z",
 		"--until", "2026-04-15T02:00:00Z",
@@ -2978,7 +3135,7 @@ func TestRunAppLogsQueryBuildsStructuredSQL(t *testing.T) {
 		"--limit", "50",
 	}, &stdout, &stderr)
 	if err != nil {
-		t.Fatalf("run app logs query: %v", err)
+		t.Fatalf("run app logs table: %v", err)
 	}
 
 	for _, want := range []string{
@@ -3489,14 +3646,99 @@ func TestRunAdminRuntimeAccessShowsSharingGrants(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"admin", "runtime", "access", "runtime-b",
+		"admin", "runtime", "access", "show", "runtime-b",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("run admin runtime access: %v", err)
 	}
 
 	out := stdout.String()
-	for _, want := range []string{"runtime_id=runtime_b", "access_mode=shared", "grants=1", "Acme", "tenant_999"} {
+	for _, want := range []string{"runtime=runtime-b", "access_mode=shared", "grants=1", "Acme", "tenant_999"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAdminNodeUpdaterTaskCreateTargetsRuntime(t *testing.T) {
+	t.Parallel()
+
+	var gotBody nodeUpdateTaskCreateRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes":
+			_, _ = w.Write([]byte(`{"runtimes":[{"id":"runtime_b","tenant_id":"tenant_123","name":"runtime-b","type":"external-owned","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes/runtime_b":
+			_, _ = w.Write([]byte(`{"runtime":{"id":"runtime_b","tenant_id":"tenant_123","name":"runtime-b","type":"external-owned","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/node-update-tasks":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode node update task body: %v", err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"task":{"id":"task_123","node_updater_id":"updater_123","runtime_id":"runtime_b","type":"diagnose-node","status":"pending","payload":{"reason":"manual"},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"admin", "node-updater", "task", "create",
+		"--runtime", "runtime-b",
+		"--type", "diagnose-node",
+		"--payload", "reason=manual",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run node-updater task create: %v", err)
+	}
+
+	if gotBody.RuntimeID != "runtime_b" || gotBody.Type != model.NodeUpdateTaskTypeDiagnoseNode || gotBody.Payload["reason"] != "manual" {
+		t.Fatalf("unexpected node update task request %+v", gotBody)
+	}
+	for _, want := range []string{"task=task_123", "runtime=runtime_b", "type=diagnose-node", "status=pending"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, stdout.String())
+		}
+	}
+}
+
+func TestRunAdminDiscoveryBundleShow(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/discovery/bundle" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{
+			"schema_version":"v1",
+			"generation":"gen_123",
+			"generated_at":"2026-04-02T00:00:00Z",
+			"valid_until":"2026-04-02T01:00:00Z",
+			"issuer":"fugue",
+			"api_endpoints":[{"name":"api","url":"https://api.example.com"}],
+			"kubernetes":[{"name":"main","server":"https://k8s.example.com"}],
+			"registry":[{"name":"registry","push_base":"registry.example.com/fugue"}]
+		}`))
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"admin", "discovery", "bundle", "show",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run discovery bundle show: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"generation=gen_123", "[api_endpoints]", "https://api.example.com", "[kubernetes]", "https://k8s.example.com"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}

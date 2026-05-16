@@ -36,6 +36,7 @@ func (c *CLI) newEnvCommand() *cobra.Command {
 		c.newEnvListCommand(),
 		c.newEnvSetCommand(),
 		c.newEnvRemoveCommand(),
+		c.newEnvGeneratedCommand(),
 	)
 	return cmd
 }
@@ -192,6 +193,169 @@ func (c *CLI) newEnvRemoveCommand() *cobra.Command {
 	return cmd
 }
 
+func (c *CLI) newEnvGeneratedCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "generated",
+		Short: "Inspect and update generated app env vars",
+		Long: strings.TrimSpace(`
+Generated env vars are secret values Fugue creates and injects from app spec.
+Use them for reusable secrets such as signing keys when the exact value should
+not be committed to source or passed by hand.
+`),
+	}
+	cmd.AddCommand(
+		c.newEnvGeneratedShowCommand(),
+		c.newEnvGeneratedSetCommand(),
+		c.newEnvGeneratedUnsetCommand(),
+	)
+	return cmd
+}
+
+func (c *CLI) newEnvGeneratedShowCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:     "show <app>",
+		Aliases: []string{"ls", "list", "get"},
+		Short:   "Show generated env var specs for an app",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			app, err = client.GetApp(app.ID)
+			if err != nil {
+				return err
+			}
+			return c.renderGeneratedEnvState(app, nil, false)
+		},
+	}
+}
+
+func (c *CLI) newEnvGeneratedSetCommand() *cobra.Command {
+	opts := struct {
+		Generate string
+		Encoding string
+		Length   int
+		Wait     bool
+	}{
+		Generate: model.AppGeneratedEnvGenerateRandom,
+		Encoding: model.AppGeneratedEnvEncodingBase64URL,
+		Length:   model.DefaultAppGeneratedEnvBytes,
+		Wait:     true,
+	}
+	cmd := &cobra.Command{
+		Use:   "set <app> <KEY...>",
+		Short: "Set generated env var specs for an app",
+		Args:  cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			keys, err := normalizeEnvKeys(args[1:])
+			if err != nil {
+				return err
+			}
+			if flagChanged(cmd, "length") && opts.Length <= 0 {
+				return fmt.Errorf("--length must be greater than zero")
+			}
+			spec := model.NormalizeAppGeneratedEnvSpec(model.AppGeneratedEnvSpec{
+				Generate: opts.Generate,
+				Encoding: opts.Encoding,
+				Length:   opts.Length,
+			})
+			if spec.Generate == "" {
+				return fmt.Errorf("--generate must be random")
+			}
+			if spec.Encoding == "" {
+				return fmt.Errorf("--encoding must be base64url, base64, or hex")
+			}
+			if spec.Length <= 0 {
+				return fmt.Errorf("--length must be greater than zero")
+			}
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			response, alreadyCurrent, err := deployUpdatedAppSpec(client, app.ID, func(appSpec *model.AppSpec) error {
+				generated := cloneAppGeneratedEnvSpecMap(appSpec.GeneratedEnv)
+				if generated == nil {
+					generated = map[string]model.AppGeneratedEnvSpec{}
+				}
+				for _, key := range keys {
+					generated[key] = spec
+				}
+				appSpec.GeneratedEnv = generated
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+			response, err = c.waitForAppSpecMutation(client, app.ID, response, opts.Wait)
+			if err != nil {
+				return err
+			}
+			return c.renderGeneratedEnvState(response.App, response.Operation, alreadyCurrent)
+		},
+	}
+	cmd.Flags().StringVar(&opts.Generate, "generate", opts.Generate, "Generation strategy: random")
+	cmd.Flags().StringVar(&opts.Encoding, "encoding", opts.Encoding, "Generated value encoding: base64url, base64, or hex")
+	cmd.Flags().IntVar(&opts.Length, "length", opts.Length, "Random byte length before encoding")
+	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for the deploy operation to complete")
+	return cmd
+}
+
+func (c *CLI) newEnvGeneratedUnsetCommand() *cobra.Command {
+	opts := struct {
+		Wait bool
+	}{Wait: true}
+	cmd := &cobra.Command{
+		Use:     "unset <app> <KEY...>",
+		Aliases: []string{"delete", "remove", "rm"},
+		Short:   "Remove generated env var specs from an app",
+		Args:    cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			keys, err := normalizeEnvKeys(args[1:])
+			if err != nil {
+				return err
+			}
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			response, alreadyCurrent, err := deployUpdatedAppSpec(client, app.ID, func(appSpec *model.AppSpec) error {
+				generated := cloneAppGeneratedEnvSpecMap(appSpec.GeneratedEnv)
+				for _, key := range keys {
+					delete(generated, key)
+				}
+				if len(generated) == 0 {
+					generated = nil
+				}
+				appSpec.GeneratedEnv = generated
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+			response, err = c.waitForAppSpecMutation(client, app.ID, response, opts.Wait)
+			if err != nil {
+				return err
+			}
+			return c.renderGeneratedEnvState(response.App, response.Operation, alreadyCurrent)
+		},
+	}
+	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for the deploy operation to complete")
+	return cmd
+}
+
 func parseEnvAssignments(args []string) (map[string]string, error) {
 	if len(args) == 0 {
 		return nil, nil
@@ -288,6 +452,57 @@ func (c *CLI) renderEnvCommandResult(result envCommandResult) error {
 		}
 	}
 	return writeEnvEntryTable(c.stdout, entries)
+}
+
+func (c *CLI) renderGeneratedEnvState(app model.App, operation *model.Operation, alreadyCurrent bool) error {
+	generated := model.NormalizeAppGeneratedEnvSpecs(app.Spec.GeneratedEnv)
+	if c.wantsJSON() {
+		return writeJSON(c.stdout, map[string]any{
+			"app":             app,
+			"generated_env":   generated,
+			"operation":       operation,
+			"already_current": alreadyCurrent,
+		})
+	}
+	pairs := []kvPair{
+		{Key: "app", Value: formatDisplayName(app.Name, app.ID, c.showIDs())},
+		{Key: "generated_env_count", Value: fmt.Sprintf("%d", len(generated))},
+	}
+	if operation != nil {
+		pairs = append(pairs, kvPair{Key: "operation_id", Value: operation.ID})
+	}
+	if alreadyCurrent {
+		pairs = append(pairs, kvPair{Key: "already_current", Value: "true"})
+	}
+	if err := writeKeyValues(c.stdout, pairs...); err != nil {
+		return err
+	}
+	if len(generated) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(c.stdout); err != nil {
+		return err
+	}
+	return writeGeneratedEnvTable(c.stdout, generated)
+}
+
+func writeGeneratedEnvTable(w io.Writer, generated map[string]model.AppGeneratedEnvSpec) error {
+	keys := make([]string, 0, len(generated))
+	for key := range generated {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "KEY\tGENERATE\tENCODING\tLENGTH"); err != nil {
+		return err
+	}
+	for _, key := range keys {
+		spec := model.NormalizeAppGeneratedEnvSpec(generated[key])
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%d\n", key, spec.Generate, spec.Encoding, spec.Length); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
 }
 
 func normalizeEnvEntries(values map[string]string, entries []model.AppEnvEntry) []model.AppEnvEntry {

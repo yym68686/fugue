@@ -246,6 +246,42 @@ type nodeKeyCleanup struct {
 	Warnings                 []string `json:"warnings,omitempty"`
 }
 
+type setClusterNodePolicyRequest struct {
+	AllowAppRuntime          *bool   `json:"allow_app_runtime,omitempty"`
+	AllowBuilds              *bool   `json:"allow_builds,omitempty"`
+	AllowSharedPool          *bool   `json:"allow_shared_pool,omitempty"`
+	AllowEdge                *bool   `json:"allow_edge,omitempty"`
+	AllowDNS                 *bool   `json:"allow_dns,omitempty"`
+	AllowInternalMaintenance *bool   `json:"allow_internal_maintenance,omitempty"`
+	DesiredControlPlaneRole  *string `json:"desired_control_plane_role,omitempty"`
+}
+
+type setClusterNodePolicyResponse struct {
+	ClusterNode    model.ClusterNode `json:"cluster_node"`
+	NodeReconciled bool              `json:"node_reconciled"`
+	ReconcileError string            `json:"reconcile_error,omitempty"`
+}
+
+type nodeUpdaterListResponse struct {
+	NodeUpdaters []model.NodeUpdater `json:"node_updaters"`
+}
+
+type nodeUpdateTaskListResponse struct {
+	Tasks []model.NodeUpdateTask `json:"tasks"`
+}
+
+type nodeUpdateTaskCreateRequest struct {
+	NodeUpdaterID   string            `json:"node_updater_id,omitempty"`
+	ClusterNodeName string            `json:"cluster_node_name,omitempty"`
+	RuntimeID       string            `json:"runtime_id,omitempty"`
+	Type            string            `json:"type"`
+	Payload         map[string]string `json:"payload,omitempty"`
+}
+
+type nodeUpdateTaskCreateResponse struct {
+	Task model.NodeUpdateTask `json:"task"`
+}
+
 type runtimeResponse struct {
 	Runtime model.Runtime `json:"runtime"`
 }
@@ -721,6 +757,20 @@ func (c *Client) PatchAppPersistentStorage(id string, storage *model.AppPersiste
 	return response, nil
 }
 
+func (c *Client) PatchAppVolumeReplication(id string, replication *model.AppVolumeReplicationSpec) (appPatchResponse, error) {
+	request := map[string]any{}
+	if replication != nil {
+		request["volume_replication"] = replication
+	} else {
+		request["volume_replication"] = &model.AppVolumeReplicationSpec{Mode: model.AppVolumeReplicationModeDisabled}
+	}
+	var response appPatchResponse
+	if err := c.doJSON(http.MethodPatch, path.Join("/v1/apps", id), request, &response); err != nil {
+		return appPatchResponse{}, err
+	}
+	return response, nil
+}
+
 func (c *Client) PatchAppRightSizing(id string, rightSizing *model.AppRightSizingSpec) (appPatchResponse, error) {
 	request := map[string]any{}
 	if rightSizing != nil {
@@ -1149,6 +1199,14 @@ func (c *Client) GetClusterNodePolicyStatus() (model.ClusterNodePolicyStatusSumm
 	return response.Summary, response.NodePolicies, nil
 }
 
+func (c *Client) SetClusterNodePolicy(nodeName string, request setClusterNodePolicyRequest) (setClusterNodePolicyResponse, error) {
+	var response setClusterNodePolicyResponse
+	if err := c.doJSON(http.MethodPatch, path.Join("/v1/cluster/nodes", strings.TrimSpace(nodeName), "policy"), request, &response); err != nil {
+		return setClusterNodePolicyResponse{}, err
+	}
+	return response, nil
+}
+
 func (c *Client) GetControlPlaneStatus() (model.ControlPlaneStatus, error) {
 	var response controlPlaneStatusResponse
 	if err := c.doJSON(http.MethodGet, "/v1/cluster/control-plane", nil, &response); err != nil {
@@ -1163,6 +1221,65 @@ func (c *Client) GetSourceUpload(id string) (model.SourceUploadInspection, error
 		return model.SourceUploadInspection{}, err
 	}
 	return response.SourceUpload, nil
+}
+
+func (c *Client) DownloadSourceUploadArchive(id, downloadToken string) (model.SourceUpload, []byte, error) {
+	inspection, err := c.GetSourceUpload(id)
+	if err != nil {
+		return model.SourceUpload{}, nil, err
+	}
+	relative := path.Join("/v1/source-uploads", strings.TrimSpace(id), "archive")
+	if strings.TrimSpace(downloadToken) != "" {
+		relative += "?download_token=" + url.QueryEscape(strings.TrimSpace(downloadToken))
+	}
+	payload, err := c.doJSONRaw(http.MethodGet, relative, nil)
+	if err != nil {
+		return model.SourceUpload{}, nil, err
+	}
+	return inspection.Upload, payload, nil
+}
+
+func (c *Client) GetDiscoveryBundle() (model.DiscoveryBundle, error) {
+	var response model.DiscoveryBundle
+	if err := c.doJSON(http.MethodGet, "/v1/discovery/bundle", nil, &response); err != nil {
+		return model.DiscoveryBundle{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) ListNodeUpdaters() ([]model.NodeUpdater, error) {
+	var response nodeUpdaterListResponse
+	if err := c.doJSON(http.MethodGet, "/v1/node-updaters", nil, &response); err != nil {
+		return nil, err
+	}
+	return response.NodeUpdaters, nil
+}
+
+func (c *Client) ListNodeUpdateTasks(nodeUpdaterID, status string) ([]model.NodeUpdateTask, error) {
+	query := url.Values{}
+	if strings.TrimSpace(nodeUpdaterID) != "" {
+		query.Set("node_updater_id", strings.TrimSpace(nodeUpdaterID))
+	}
+	if strings.TrimSpace(status) != "" {
+		query.Set("status", strings.TrimSpace(status))
+	}
+	relative := "/v1/node-update-tasks"
+	if encoded := query.Encode(); encoded != "" {
+		relative += "?" + encoded
+	}
+	var response nodeUpdateTaskListResponse
+	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Tasks, nil
+}
+
+func (c *Client) CreateNodeUpdateTask(request nodeUpdateTaskCreateRequest) (model.NodeUpdateTask, error) {
+	var response nodeUpdateTaskCreateResponse
+	if err := c.doJSON(http.MethodPost, "/v1/node-update-tasks", request, &response); err != nil {
+		return model.NodeUpdateTask{}, err
+	}
+	return response.Task, nil
 }
 
 func (c *Client) GetBilling(tenantID string) (model.TenantBillingSummary, error) {

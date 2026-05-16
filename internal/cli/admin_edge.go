@@ -153,6 +153,7 @@ until explicitly set to edge_canary or edge_enabled for one edge group.
 	}
 	cmd.AddCommand(
 		c.newAdminEdgeRoutePolicyListCommand(),
+		c.newAdminEdgeRoutePolicyShowCommand(),
 		c.newAdminEdgeRoutePolicySetCommand(),
 		c.newAdminEdgeRoutePolicyDeleteCommand(),
 	)
@@ -177,6 +178,29 @@ func (c *CLI) newAdminEdgeRoutePolicyListCommand() *cobra.Command {
 				return writeJSON(c.stdout, map[string]any{"policies": policies})
 			}
 			return writeEdgeRoutePolicyTable(c.stdout, policies)
+		},
+	}
+}
+
+func (c *CLI) newAdminEdgeRoutePolicyShowCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:     "show <hostname>",
+		Aliases: []string{"get", "status"},
+		Short:   "Show one hostname edge route policy",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			policy, err := client.GetEdgeRoutePolicy(args[0])
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"policy": policy})
+			}
+			return writeEdgeRoutePolicy(c.stdout, policy)
 		},
 	}
 }

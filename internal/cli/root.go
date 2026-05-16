@@ -149,8 +149,8 @@ Environment variables:
 	  fugue app overview my-app
 	  fugue app source show my-app
 	  fugue source-upload show upload_123
-	  fugue app rebuild my-app
-	  fugue app redeploy my-app
+	  fugue app build my-app
+	  fugue app deploy my-app
 	  fugue app failover policy set my-app --app-to runtime-b
 	  fugue app logs runtime my-app --follow
 	  fugue app logs build my-app --operation op_import_123
@@ -160,7 +160,7 @@ Environment variables:
 	  fugue app storage set my-app --size 10Gi --mount /data
 	  fugue app db configure my-app --database app --user app
 	  fugue app db query my-app --sql "select count(*) from users"
-	  fugue app logs query my-app --table gateway_request_logs --since 1h --match status=500
+	  fugue app logs table my-app --table gateway_request_logs --since 1h --match status=500
 	  fugue app logs pods my-app
 	  fugue app request my-app /healthz
 	  fugue app diagnose my-app
@@ -171,8 +171,10 @@ Environment variables:
 	  fugue operation ls --project marketing --type deploy --status pending
 	  fugue operation show op_123 --show-secrets
 	  fugue runtime enroll create edge-a
-	  fugue runtime access show shared
 	  fugue runtime doctor shared
+	  fugue admin runtime access show shared
+	  fugue admin node-updater task ls --status pending
+	  fugue admin discovery bundle show
 	  fugue project overview
 	  fugue project watch marketing
 	  fugue project edit marketing --description "landing pages"

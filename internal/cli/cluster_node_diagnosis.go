@@ -7,6 +7,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"fugue/internal/model"
+
 	"github.com/spf13/cobra"
 )
 
@@ -22,6 +24,37 @@ func (c *CLI) newAdminClusterNodeCommand() *cobra.Command {
 		c.newAdminClusterNodeMetricsCommand(),
 	)
 	return cmd
+}
+
+func (c *CLI) newAdminClusterServiceCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "service",
+		Short: "Inspect cluster services",
+	}
+	cmd.AddCommand(c.newAdminClusterServiceShowCommand())
+	return cmd
+}
+
+func (c *CLI) newAdminClusterServiceShowCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show <namespace> <name>",
+		Short: "Show one cluster service",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			service, err := client.GetClusterService(args[0], args[1])
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"service": service})
+			}
+			return writeClusterServiceDetail(c.stdout, service)
+		},
+	}
 }
 
 func (c *CLI) newAdminClusterNodeInspectCommand() *cobra.Command {
@@ -260,6 +293,62 @@ func renderClusterNodeJournalDiagnosis(w io.Writer, diagnosis clusterNodeDiagnos
 			prefix = formatTime(entry.Timestamp.UTC()) + " "
 		}
 		if _, err := fmt.Fprintln(w, strings.TrimSpace(prefix+entry.Message)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeClusterServiceDetail(w io.Writer, service model.ClusterServiceDetail) error {
+	if err := writeKeyValues(w,
+		kvPair{Key: "namespace", Value: service.Namespace},
+		kvPair{Key: "name", Value: service.Name},
+		kvPair{Key: "type", Value: firstNonEmpty(service.Type, "-")},
+		kvPair{Key: "cluster_ip", Value: firstNonEmpty(service.ClusterIP, "-")},
+		kvPair{Key: "external_name", Value: firstNonEmpty(service.ExternalName, "-")},
+	); err != nil {
+		return err
+	}
+	if len(service.Ports) > 0 {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		if _, err := fmt.Fprintln(tw, "NAME\tPORT\tPROTO\tTARGET"); err != nil {
+			return err
+		}
+		for _, port := range service.Ports {
+			if _, err := fmt.Fprintf(tw, "%s\t%d\t%s\t%s\n", port.Name, port.Port, port.Protocol, port.TargetPort); err != nil {
+				return err
+			}
+		}
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+	}
+	if len(service.Endpoints) > 0 {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		if _, err := fmt.Fprintln(tw, "IP\tNODE\tREADY\tTARGET\tPOD"); err != nil {
+			return err
+		}
+		for _, endpoint := range service.Endpoints {
+			if _, err := fmt.Fprintf(
+				tw,
+				"%s\t%s\t%t\t%s/%s\t%s\n",
+				firstNonEmpty(endpoint.IP, "-"),
+				firstNonEmpty(endpoint.NodeName, "-"),
+				endpoint.Ready,
+				firstNonEmpty(endpoint.TargetNamespace, "-"),
+				firstNonEmpty(endpoint.TargetName, "-"),
+				firstNonEmpty(endpoint.Pod, "-"),
+			); err != nil {
+				return err
+			}
+		}
+		if err := tw.Flush(); err != nil {
 			return err
 		}
 	}

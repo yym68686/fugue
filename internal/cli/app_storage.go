@@ -33,9 +33,136 @@ func (c *CLI) newAppStorageCommand() *cobra.Command {
 	cmd.AddCommand(
 		c.newAppStorageShowCommand(),
 		c.newAppStorageSetCommand(),
+		c.newAppStorageReplicationCommand(),
 		c.newAppStorageResetCommand(),
 		c.newAppStorageDisableCommand(),
 	)
+	return cmd
+}
+
+func (c *CLI) newAppStorageReplicationCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "replication",
+		Short: "Inspect and update persistent volume replication",
+		Long: strings.TrimSpace(`
+Volume replication is the storage-level continuity policy for an app's
+persistent volume. It is separate from app/database failover targets.
+`),
+	}
+	cmd.AddCommand(
+		c.newAppStorageReplicationShowCommand(),
+		c.newAppStorageReplicationSetCommand(),
+		c.newAppStorageReplicationDisableCommand(),
+	)
+	return cmd
+}
+
+func (c *CLI) newAppStorageReplicationShowCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:     "show <app>",
+		Aliases: []string{"get", "status"},
+		Short:   "Show persistent volume replication policy",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			app, err = client.GetApp(app.ID)
+			if err != nil {
+				return err
+			}
+			return c.renderAppStorageReplicationState(app, nil, false)
+		},
+	}
+}
+
+func (c *CLI) newAppStorageReplicationSetCommand() *cobra.Command {
+	opts := struct {
+		Mode     string
+		Schedule string
+		Wait     bool
+	}{Mode: model.AppVolumeReplicationModeManual, Wait: true}
+	cmd := &cobra.Command{
+		Use:   "set <app>",
+		Short: "Set persistent volume replication policy",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			mode, err := model.NormalizeAppVolumeReplicationMode(opts.Mode)
+			if err != nil {
+				return err
+			}
+			if mode == model.AppVolumeReplicationModeDisabled {
+				return fmt.Errorf("use 'app storage replication disable' to disable replication")
+			}
+			if mode == model.AppVolumeReplicationModeManual && strings.TrimSpace(opts.Schedule) != "" {
+				return fmt.Errorf("--schedule is only valid with --mode scheduled")
+			}
+			if mode == model.AppVolumeReplicationModeScheduled && strings.TrimSpace(opts.Schedule) == "" {
+				opts.Schedule = model.DefaultAppVolumeReplicationSchedule
+			}
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			response, err := client.PatchAppVolumeReplication(app.ID, &model.AppVolumeReplicationSpec{
+				Mode:     mode,
+				Schedule: strings.TrimSpace(opts.Schedule),
+			})
+			if err != nil {
+				return err
+			}
+			response, err = c.waitForAppSpecMutation(client, app.ID, response, opts.Wait)
+			if err != nil {
+				return err
+			}
+			return c.renderAppStorageReplicationState(response.App, response.Operation, response.AlreadyCurrent)
+		},
+	}
+	cmd.Flags().StringVar(&opts.Mode, "mode", opts.Mode, "Replication mode: manual or scheduled")
+	cmd.Flags().StringVar(&opts.Schedule, "schedule", "", "Cron schedule for scheduled replication")
+	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for the deploy operation to complete")
+	return cmd
+}
+
+func (c *CLI) newAppStorageReplicationDisableCommand() *cobra.Command {
+	opts := struct {
+		Wait bool
+	}{Wait: true}
+	cmd := &cobra.Command{
+		Use:     "disable <app>",
+		Aliases: []string{"clear", "off"},
+		Short:   "Disable persistent volume replication",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			response, err := client.PatchAppVolumeReplication(app.ID, nil)
+			if err != nil {
+				return err
+			}
+			response, err = c.waitForAppSpecMutation(client, app.ID, response, opts.Wait)
+			if err != nil {
+				return err
+			}
+			return c.renderAppStorageReplicationState(response.App, response.Operation, response.AlreadyCurrent)
+		},
+	}
+	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for the deploy operation to complete")
 	return cmd
 }
 
@@ -388,6 +515,43 @@ func (c *CLI) renderAppStorageState(app model.App, operation *model.Operation, r
 		return err
 	}
 	return writeAppStorageMountTable(c.stdout, view.Mounts)
+}
+
+func (c *CLI) renderAppStorageReplicationState(app model.App, operation *model.Operation, alreadyCurrent bool) error {
+	replication := app.Spec.VolumeReplication
+	mode := model.AppVolumeReplicationModeDisabled
+	schedule := ""
+	if replication != nil {
+		if normalized, err := model.NormalizeAppVolumeReplicationMode(replication.Mode); err == nil && normalized != "" {
+			mode = normalized
+		}
+		schedule = strings.TrimSpace(replication.Schedule)
+		if mode == model.AppVolumeReplicationModeScheduled && schedule == "" {
+			schedule = model.DefaultAppVolumeReplicationSchedule
+		}
+	}
+	if c.wantsJSON() {
+		return writeJSON(c.stdout, map[string]any{
+			"app":                app,
+			"volume_replication": replication,
+			"mode":               mode,
+			"schedule":           schedule,
+			"operation":          operation,
+			"already_current":    alreadyCurrent,
+		})
+	}
+	pairs := []kvPair{
+		{Key: "app", Value: formatDisplayName(app.Name, app.ID, c.showIDs())},
+		{Key: "volume_replication_mode", Value: mode},
+		{Key: "schedule", Value: firstNonEmpty(schedule, "-")},
+	}
+	if operation != nil {
+		pairs = append(pairs, kvPair{Key: "operation_id", Value: operation.ID})
+	}
+	if alreadyCurrent {
+		pairs = append(pairs, kvPair{Key: "already_current", Value: "true"})
+	}
+	return writeKeyValues(c.stdout, pairs...)
 }
 
 func writeAppStorageMountTable(w io.Writer, mounts []model.AppPersistentStorageMount) error {
