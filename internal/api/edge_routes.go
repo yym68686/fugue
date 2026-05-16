@@ -561,13 +561,10 @@ func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string]bool, ma
 		if groupID == "" {
 			continue
 		}
-		if node.CaddyRouteCount > 0 ||
-			strings.TrimSpace(node.RouteBundleVersion) != "" ||
-			strings.TrimSpace(node.ServingGeneration) != "" ||
-			strings.TrimSpace(node.LKGGeneration) != "" {
+		if edgeNodeHasRouteState(node) {
 			expectedNonEmpty[groupID] = true
 		}
-		if node.CaddyRouteCount > expectedMinTrafficRoutes[groupID] && edgeNodeHeartbeatFresh(node, now) {
+		if node.CaddyRouteCount > expectedMinTrafficRoutes[groupID] && edgeNodeHasRouteState(node) {
 			expectedMinTrafficRoutes[groupID] = node.CaddyRouteCount
 		}
 		if edgeNodeRouteServingCapable(node, now) {
@@ -577,6 +574,13 @@ func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string]bool, ma
 		}
 	}
 	return healthy, expectedNonEmpty, expectedMinTrafficRoutes, nil
+}
+
+func edgeNodeHasRouteState(node model.EdgeNode) bool {
+	return node.CaddyRouteCount > 0 ||
+		strings.TrimSpace(node.RouteBundleVersion) != "" ||
+		strings.TrimSpace(node.ServingGeneration) != "" ||
+		strings.TrimSpace(node.LKGGeneration) != ""
 }
 
 func edgeGroupIDFromEdgeID(edgeID string) string {

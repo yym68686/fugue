@@ -213,8 +213,73 @@ func TestEdgeRouteHealthyGroupsIgnoreStaleHeartbeat(t *testing.T) {
 	if !expected["edge-group-country-de"] {
 		t.Fatalf("stale edge with previous route state should remain expected non-empty: %v", expected)
 	}
-	if minimum["edge-group-country-de"] != 0 {
-		t.Fatalf("stale edge heartbeat must not preserve a minimum route count, got %v", minimum)
+	if minimum["edge-group-country-de"] != 3 {
+		t.Fatalf("stale edge LKG route state must preserve a minimum route count, got %v", minimum)
+	}
+}
+
+func TestEdgeRouteBundleInvariantRejectsShortRecoveryBundleFromStaleLKG(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	stale := now.Add(-(platformNodeHeartbeatStaleAfter + time.Second))
+	storeState := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if _, _, err := storeState.CreateEdgeNodeToken(model.EdgeNode{
+		ID:                 "edge-de-1",
+		EdgeGroupID:        "edge-group-country-de",
+		Status:             model.EdgeHealthHealthy,
+		Healthy:            true,
+		CaddyRouteCount:    39,
+		ServingGeneration:  "routegen_previous",
+		LKGGeneration:      "routegen_previous",
+		LastSeenAt:         &stale,
+		LastHeartbeatAt:    &stale,
+		RouteBundleVersion: "routegen_previous",
+	}); err != nil {
+		t.Fatalf("record stale edge node: %v", err)
+	}
+	healthy, expected, minimum, err := (&Server{store: storeState}).edgeRouteGroupInventory()
+	if err != nil {
+		t.Fatalf("inventory: %v", err)
+	}
+
+	err = validateEdgeRouteBundleForPublish(model.EdgeRouteBundle{
+		Version:     "routegen_short_recovery",
+		Generation:  "routegen_short_recovery",
+		GeneratedAt: now,
+		Routes: []model.EdgeRouteBinding{
+			{
+				Hostname:        "api.fugue.pro",
+				EdgeGroupID:     "edge-group-country-de",
+				RoutePolicy:     model.EdgeRoutePolicyEnabled,
+				UpstreamURL:     "http://fugue-fugue.fugue-system.svc.cluster.local:80",
+				Status:          model.EdgeRouteStatusActive,
+				RouteGeneration: "route_api",
+			},
+			{
+				Hostname:        "mesh.fugue.pro",
+				EdgeGroupID:     "edge-group-country-de",
+				RoutePolicy:     model.EdgeRoutePolicyEnabled,
+				UpstreamURL:     "http://fugue-fugue-headscale.fugue-system.svc.cluster.local:8080",
+				Status:          model.EdgeRouteStatusActive,
+				RouteGeneration: "route_mesh",
+			},
+		},
+	}, edgeRouteBundleInvariantInput{
+		Apps: []model.App{
+			{ID: "app_demo", Route: &model.AppRoute{Hostname: "demo.fugue.pro"}},
+		},
+		PlatformRoutes: []model.PlatformRoute{
+			{Hostname: "api.fugue.pro"},
+			{Hostname: "mesh.fugue.pro"},
+		},
+		HealthyEdgeGroups:          healthy,
+		ExpectedNonEmptyEdgeGroups: expected,
+		ExpectedMinTrafficRoutes:   minimum,
+		Options:                    edgeRouteBundleOptions{EdgeGroupID: "edge-group-country-de"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "abnormal traffic route drop") {
+		t.Fatalf("expected stale LKG route count to block short recovery bundle, got %v", err)
 	}
 }
 
