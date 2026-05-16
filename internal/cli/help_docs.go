@@ -928,7 +928,7 @@ func walkHelpCommands(cmd *cobra.Command, visit func(*cobra.Command)) {
 }
 
 func shouldSkipHelpDoc(cmd *cobra.Command) bool {
-	if cmd == nil || cmd.Hidden {
+	if cmd == nil || cmd.Hidden || hasHiddenParent(cmd) {
 		return true
 	}
 	path := cmd.CommandPath()
@@ -937,6 +937,15 @@ func shouldSkipHelpDoc(cmd *cobra.Command) bool {
 	}
 	if cmd.Name() == "help" || path == "fugue completion" || strings.HasPrefix(path, "fugue completion ") {
 		return true
+	}
+	return false
+}
+
+func hasHiddenParent(cmd *cobra.Command) bool {
+	for parent := cmd.Parent(); parent != nil; parent = parent.Parent() {
+		if parent.Hidden {
+			return true
+		}
 	}
 	return false
 }
@@ -1223,7 +1232,7 @@ func sampleFlagsForCommand(cmd *cobra.Command) string {
 		return "--description \"Landing pages\""
 	case "fugue service postgres create":
 		return "--runtime shared --database app --user app"
-	case "fugue runtime offer set", "fugue admin runtime offer set":
+	case "fugue admin runtime offer set":
 		return "--cpu 2000 --memory 4096 --storage 50 --monthly-usd 19.99"
 	case "fugue runtime attach", "fugue runtime enroll create":
 		return "--ttl 3600"
@@ -1233,10 +1242,6 @@ func sampleFlagsForCommand(cmd *cobra.Command) string {
 		return "--scope app.read --scope app.write"
 	case "fugue admin runtime create":
 		return "--type external-owned --endpoint https://edge.example.com"
-	case "fugue admin runtime share-mode":
-		return ""
-	case "fugue admin runtime pool-mode":
-		return ""
 	case "fugue admin runtime token create":
 		return "--ttl 3600"
 	case "fugue admin billing cap":

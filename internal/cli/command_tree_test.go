@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"fugue/internal/model"
+
+	"github.com/spf13/cobra"
 )
 
 func TestRootHelpListsSemanticCommands(t *testing.T) {
@@ -241,6 +243,32 @@ func TestVisibleCommandsHaveLongAndExamples(t *testing.T) {
 	if len(missing) != 0 {
 		t.Fatalf("expected help docs for all visible commands:\n%s", strings.Join(missing, "\n"))
 	}
+}
+
+func TestVisibleHelpDocsDoNotMentionDeprecatedPrimaryCommands(t *testing.T) {
+	t.Parallel()
+
+	root := newCLI(io.Discard, io.Discard).newRootCommand()
+	unwanted := []string{
+		"fugue app rebuild ",
+		"fugue app redeploy ",
+		"fugue app logs query ",
+		"fugue runtime access ",
+		"fugue runtime pool ",
+		"fugue runtime offer ",
+		"fugue project runtime-reservations",
+	}
+	walkHelpCommands(root, func(cmd *cobra.Command) {
+		if shouldSkipHelpDoc(cmd) {
+			return
+		}
+		text := strings.Join([]string{cmd.Short, cmd.Long, cmd.Example}, "\n")
+		for _, phrase := range unwanted {
+			if strings.Contains(text, phrase) {
+				t.Fatalf("visible help for %s contains deprecated phrase %q:\n%s", cmd.CommandPath(), phrase, text)
+			}
+		}
+	})
 }
 
 func TestRunTenantListShowsVisibleTenants(t *testing.T) {
