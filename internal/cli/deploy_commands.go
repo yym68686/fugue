@@ -19,6 +19,7 @@ type deployCommonOptions struct {
 	EnvFile                   string
 	ServiceEnvFiles           []string
 	ServiceStorageSizes       []string
+	CreateProject             bool
 	UpdateExisting            bool
 	Replace                   bool
 	DeleteMissing             bool
@@ -282,6 +283,7 @@ func bindCommonDeployFlags(cmd *cobra.Command, opts *deployCommonOptions, includ
 	cmd.Flags().StringVar(&opts.EnvFile, "env-file", "", "Local .env file to inject as app env")
 	cmd.Flags().StringArrayVar(&opts.ServiceEnvFiles, "service-env-file", nil, "Service-specific .env override for topology imports: <service>=<path>")
 	cmd.Flags().StringArrayVar(&opts.ServiceStorageSizes, "service-storage-size", nil, "Service-specific persistent storage size override for topology imports: <service>=<size>")
+	cmd.Flags().BoolVar(&opts.CreateProject, "create-project", false, "Create the named project if it does not exist")
 	cmd.Flags().BoolVar(&opts.UpdateExisting, "update-existing", false, "For topology imports, reuse matching compose_service apps in the target project instead of creating suffixed copies")
 	cmd.Flags().BoolVar(&opts.Replace, "replace", false, "For topology imports, update matching services in place and queue deletes for services removed from the topology")
 	cmd.Flags().BoolVar(&opts.DeleteMissing, "delete-missing", false, "For topology imports with --update-existing, queue deletes for previously managed services that are no longer present")
@@ -368,6 +370,9 @@ func (c *CLI) runDeployLocal(pathArg string, opts deployLocalOptions) error {
 
 	workingDir, err := resolveDeployPath(pathArg, opts.Dir)
 	if err != nil {
+		return err
+	}
+	if err := validateLocalDeployPreflight(workingDir, opts.deployCommonOptions); err != nil {
 		return err
 	}
 	client, err := c.newClient()

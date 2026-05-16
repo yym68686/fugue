@@ -152,7 +152,7 @@ func resolveSingleMatch[T any](ref string, matches []T, kind string, describe fu
 }
 
 func (c *CLI) resolveNamedProject(client *Client, ref string) (model.Project, error) {
-	tenantID, err := resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+	tenantID, err := c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
 	if err != nil {
 		return model.Project{}, err
 	}
@@ -192,9 +192,9 @@ func (c *CLI) resolveNamedRuntime(client *Client, ref string) (model.Runtime, er
 
 func (c *CLI) resolveNamedAPIKey(client *Client, ref string) (model.APIKey, error) {
 	tenantID := c.effectiveTenantID()
-	if strings.TrimSpace(tenantID) == "" && strings.TrimSpace(c.effectiveTenantName()) != "" {
+	if strings.TrimSpace(tenantID) == "" && (strings.TrimSpace(c.effectiveTenantName()) != "" || strings.TrimSpace(c.effectiveAccount()) != "") {
 		var err error
-		tenantID, err = resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+		tenantID, err = c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
 		if err != nil {
 			return model.APIKey{}, err
 		}
@@ -208,9 +208,9 @@ func (c *CLI) resolveNamedAPIKey(client *Client, ref string) (model.APIKey, erro
 
 func (c *CLI) resolveNamedNodeKey(client *Client, ref string) (model.NodeKey, error) {
 	tenantID := c.effectiveTenantID()
-	if strings.TrimSpace(tenantID) == "" && strings.TrimSpace(c.effectiveTenantName()) != "" {
+	if strings.TrimSpace(tenantID) == "" && (strings.TrimSpace(c.effectiveTenantName()) != "" || strings.TrimSpace(c.effectiveAccount()) != "") {
 		var err error
-		tenantID, err = resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+		tenantID, err = c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
 		if err != nil {
 			return model.NodeKey{}, err
 		}

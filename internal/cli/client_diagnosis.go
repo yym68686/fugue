@@ -122,7 +122,7 @@ func (c *Client) TryGetAppDiagnosis(id, component string) (*appDiagnosis, error)
 	if result.StatusCode < 200 || result.StatusCode >= 300 {
 		var apiErr apiError
 		if err := json.Unmarshal(result.Payload, &apiErr); err == nil && strings.TrimSpace(apiErr.Error) != "" {
-			return nil, fmt.Errorf("%s", apiErr.Error)
+			return nil, &apiServerError{StatusCode: result.StatusCode, Response: apiErr}
 		}
 		if trimmed := strings.TrimSpace(string(result.Payload)); trimmed != "" {
 			return nil, fmt.Errorf("request failed: status=%d body=%s", result.StatusCode, trimmed)

@@ -63,7 +63,7 @@ func resolveTenantSelection(client *Client, tenantID, tenantName string) (string
 	if len(tenants) == 1 {
 		return tenants[0].ID, nil
 	}
-	return "", visibleMatchesError("multiple tenants are visible; rerun with --tenant <name>:", tenants, describeTenantMatch)
+	return "", visibleMatchesError("multiple tenants are visible; rerun with --account <email>, --tenant <name>, or --tenant-id <id>:", tenants, describeTenantMatch)
 }
 
 func resolveProjectCreationSelection(client *Client, tenantID, projectID, projectName string) (projectSelection, error) {

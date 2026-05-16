@@ -175,7 +175,7 @@ func (c *CLI) createPostgresService(name string, opts postgresServiceCreateOptio
 	if err != nil {
 		return err
 	}
-	tenantID, err := resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+	tenantID, err := c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
 	if err != nil {
 		return err
 	}

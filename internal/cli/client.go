@@ -309,7 +309,44 @@ type appDeleteResponse struct {
 }
 
 type apiError struct {
-	Error string `json:"error"`
+	Error     string         `json:"error"`
+	Code      string         `json:"code,omitempty"`
+	Category  string         `json:"category,omitempty"`
+	Retryable bool           `json:"retryable,omitempty"`
+	Details   map[string]any `json:"details,omitempty"`
+}
+
+type apiServerError struct {
+	StatusCode int
+	Response   apiError
+}
+
+func (e *apiServerError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if message := strings.TrimSpace(e.Response.Error); message != "" {
+		return message
+	}
+	return fmt.Sprintf("request failed: status=%d", e.StatusCode)
+}
+
+func (e *apiServerError) IsRetryable() bool {
+	return e != nil && e.Response.Retryable
+}
+
+type authContextResponse struct {
+	Principal authPrincipalContext `json:"principal"`
+}
+
+type authPrincipalContext struct {
+	ActorType     string   `json:"actor_type"`
+	ActorID       string   `json:"actor_id"`
+	TenantID      string   `json:"tenant_id,omitempty"`
+	ProjectID     string   `json:"project_id,omitempty"`
+	AppID         string   `json:"app_id,omitempty"`
+	Scopes        []string `json:"scopes"`
+	PlatformAdmin bool     `json:"platform_admin"`
 }
 
 func NewClient(baseURL, token string) (*Client, error) {
@@ -367,6 +404,14 @@ func (c *Client) ListTenants() ([]model.Tenant, error) {
 		return nil, err
 	}
 	return response.Tenants, nil
+}
+
+func (c *Client) GetAuthContext() (authContextResponse, error) {
+	var response authContextResponse
+	if err := c.doJSON(http.MethodGet, "/v1/auth/context", nil, &response); err != nil {
+		return authContextResponse{}, err
+	}
+	return response, nil
 }
 
 func (c *Client) ListProjects(tenantID string) ([]model.Project, error) {
@@ -530,7 +575,7 @@ func (c *Client) TryGetOperationDiagnosis(id string) (*model.OperationDiagnosis,
 	if result.StatusCode < 200 || result.StatusCode >= 300 {
 		var apiErr apiError
 		if err := json.Unmarshal(result.Payload, &apiErr); err == nil && strings.TrimSpace(apiErr.Error) != "" {
-			return nil, fmt.Errorf("%s", apiErr.Error)
+			return nil, &apiServerError{StatusCode: result.StatusCode, Response: apiErr}
 		}
 		if trimmed := strings.TrimSpace(string(result.Payload)); trimmed != "" {
 			return nil, fmt.Errorf("request failed: status=%d body=%s", result.StatusCode, trimmed)
@@ -574,7 +619,7 @@ func (c *Client) TryGetApp(id string) (*model.App, error) {
 	if result.StatusCode < 200 || result.StatusCode >= 300 {
 		var apiErr apiError
 		if err := json.Unmarshal(result.Payload, &apiErr); err == nil && strings.TrimSpace(apiErr.Error) != "" {
-			return nil, fmt.Errorf("%s", apiErr.Error)
+			return nil, &apiServerError{StatusCode: result.StatusCode, Response: apiErr}
 		}
 		if trimmed := strings.TrimSpace(string(result.Payload)); trimmed != "" {
 			return nil, fmt.Errorf("request failed: status=%d body=%s", result.StatusCode, trimmed)
@@ -1025,7 +1070,7 @@ func (c *Client) do(httpReq *http.Request) ([]byte, error) {
 	if result.StatusCode < 200 || result.StatusCode >= 300 {
 		var apiErr apiError
 		if err := json.Unmarshal(result.Payload, &apiErr); err == nil && strings.TrimSpace(apiErr.Error) != "" {
-			return nil, fmt.Errorf("%s", apiErr.Error)
+			return nil, &apiServerError{StatusCode: result.StatusCode, Response: apiErr}
 		}
 		if trimmed := strings.TrimSpace(string(result.Payload)); trimmed != "" {
 			return nil, fmt.Errorf("request failed: status=%d body=%s", result.StatusCode, trimmed)

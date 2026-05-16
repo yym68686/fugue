@@ -98,6 +98,23 @@ paths:
                 additionalProperties: true
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/auth/context:
+    get:
+      operationId: getAuthContext
+      summary: Get Auth Context
+      tags: [System]
+      x-fugue-handler: handleGetAuthContext
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthContextResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/edge/tls/ask:
     get:
       operationId: edgeTLSAsk
@@ -5032,6 +5049,43 @@ components:
       properties:
         error:
           type: string
+        code:
+          type: string
+        category:
+          type: string
+        retryable:
+          type: boolean
+        details:
+          type: object
+          additionalProperties: true
+    AuthPrincipalContext:
+      type: object
+      additionalProperties: false
+      required: [actor_type, actor_id, scopes, platform_admin]
+      properties:
+        actor_type:
+          type: string
+        actor_id:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        app_id:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+        platform_admin:
+          type: boolean
+    AuthContextResponse:
+      type: object
+      additionalProperties: false
+      required: [principal]
+      properties:
+        principal:
+          $ref: "#/components/schemas/AuthPrincipalContext"
     StringMap:
       type: object
       additionalProperties:

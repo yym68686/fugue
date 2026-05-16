@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -210,6 +211,35 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) SetReady(ready bool) {
 	s.ready.Store(ready)
+}
+
+func (s *Server) handleGetAuthContext(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"principal": authContextFromPrincipal(principal),
+	})
+}
+
+func authContextFromPrincipal(principal model.Principal) map[string]any {
+	scopes := make([]string, 0, len(principal.Scopes))
+	for scope := range principal.Scopes {
+		scope = strings.TrimSpace(scope)
+		if scope == "" {
+			continue
+		}
+		scopes = append(scopes, scope)
+	}
+	sort.Strings(scopes)
+
+	return map[string]any{
+		"actor_type":     strings.TrimSpace(principal.ActorType),
+		"actor_id":       strings.TrimSpace(principal.ActorID),
+		"tenant_id":      strings.TrimSpace(principal.TenantID),
+		"project_id":     strings.TrimSpace(principal.ProjectID),
+		"app_id":         strings.TrimSpace(principal.AppID),
+		"scopes":         scopes,
+		"platform_admin": principal.IsPlatformAdmin(),
+	}
 }
 
 func (s *Server) handleListTenants(w http.ResponseWriter, r *http.Request) {

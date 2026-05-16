@@ -612,7 +612,7 @@ func (c *CLI) newProjectListCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			tenantID, err := resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+			tenantID, err := c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
 			if err != nil {
 				return err
 			}
@@ -643,7 +643,7 @@ func (c *CLI) newProjectCreateCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			tenantID, err := resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+			tenantID, err := c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
 			if err != nil {
 				return err
 			}

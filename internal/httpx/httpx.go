@@ -4,10 +4,15 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 )
 
 type ErrorResponse struct {
-	Error string `json:"error"`
+	Error     string         `json:"error"`
+	Code      string         `json:"code,omitempty"`
+	Category  string         `json:"category,omitempty"`
+	Retryable bool           `json:"retryable,omitempty"`
+	Details   map[string]any `json:"details,omitempty"`
 }
 
 func WriteJSON(w http.ResponseWriter, status int, payload any) {
@@ -32,5 +37,39 @@ func DecodeJSON(r *http.Request, dst any) error {
 }
 
 func WriteError(w http.ResponseWriter, status int, message string) {
-	WriteJSON(w, status, ErrorResponse{Error: message})
+	code, category, retryable := classifyError(status, message)
+	WriteJSON(w, status, ErrorResponse{
+		Error:     message,
+		Code:      code,
+		Category:  category,
+		Retryable: retryable,
+	})
+}
+
+func classifyError(status int, message string) (string, string, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(message))
+	switch {
+	case status == http.StatusUnauthorized:
+		return "auth_required", "auth", false
+	case status == http.StatusForbidden:
+		return "permission_denied", "auth", false
+	case status == http.StatusNotFound:
+		return "not_found", "not_found", false
+	case status == http.StatusConflict:
+		return "conflict", "conflict", false
+	case status == http.StatusPaymentRequired:
+		return "billing_required", "billing", false
+	case status == http.StatusBadRequest && (strings.Contains(normalized, "unexpected eof") || strings.Contains(normalized, "connection reset")):
+		return "upload_retryable", "transport", true
+	case status == http.StatusBadRequest && strings.Contains(normalized, "parse multipart form"):
+		return "invalid_upload", "validation", false
+	case status == http.StatusBadRequest:
+		return "invalid_request", "validation", false
+	case status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout:
+		return "temporarily_unavailable", "transport", true
+	case status >= 500:
+		return "server_error", "system", true
+	default:
+		return "request_failed", "request", false
+	}
 }

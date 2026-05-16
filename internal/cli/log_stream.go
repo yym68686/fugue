@@ -138,7 +138,7 @@ func (c *Client) streamSSE(relative string, handler func(sseEvent) error) error 
 		}
 		var apiErr apiError
 		if err := json.Unmarshal(payload, &apiErr); err == nil && strings.TrimSpace(apiErr.Error) != "" {
-			return fmt.Errorf("%s", apiErr.Error)
+			return &apiServerError{StatusCode: resp.StatusCode, Response: apiErr}
 		}
 		if trimmed := strings.TrimSpace(string(payload)); trimmed != "" {
 			return fmt.Errorf("request failed: status=%d body=%s", resp.StatusCode, trimmed)

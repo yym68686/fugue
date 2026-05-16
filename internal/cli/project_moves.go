@@ -22,6 +22,9 @@ type projectOwnershipMoveOptions struct {
 
 type projectSplitCommandOptions struct {
 	Apps                 []string
+	AppList              string
+	TargetProjectName    string
+	TargetProjectID      string
 	CreateProjects       bool
 	IncludeOwnedServices bool
 	IncludeBoundServices bool
@@ -150,6 +153,7 @@ same target project.
 `),
 		Example: strings.TrimSpace(`
 fugue project split plan default --app dataocean=dataocean --app cerebr-snapshot-share=cerebr-snapshot-share --create-projects
+fugue project split default --apps api,worker --to backend --confirm
 fugue project split default --app dataocean=dataocean --app cerebr-snapshot-share=cerebr-snapshot-share --create-projects --confirm
 fugue project split default --app api=backend --include-bound-services --on-conflict rename --confirm
 `),
@@ -177,6 +181,7 @@ warnings, and blockers for a project split without writing changes.
 `),
 		Example: strings.TrimSpace(`
 fugue project split plan default --app dataocean=dataocean --app cerebr-snapshot-share=cerebr-snapshot-share --create-projects
+fugue project split plan default --apps api,worker --to backend
 fugue project split plan default --app api=backend --include-bound-services --on-conflict rename
 `),
 		Args: cobra.ExactArgs(1),
@@ -198,7 +203,7 @@ func (c *CLI) runProjectSplit(projectRef string, opts projectSplitCommandOptions
 	if err != nil {
 		return err
 	}
-	targets, err := c.parseProjectSplitTargets(client, opts.Apps, opts.CreateProjects)
+	targets, err := c.parseProjectSplitTargets(client, opts)
 	if err != nil {
 		return err
 	}
@@ -236,12 +241,15 @@ func addProjectOwnershipMoveFlags(cmd *cobra.Command, opts *projectOwnershipMove
 
 func addProjectSplitFlags(cmd *cobra.Command, opts *projectSplitCommandOptions) {
 	cmd.Flags().StringArrayVar(&opts.Apps, "app", nil, "App-to-project mapping in app=project form; repeat for multiple apps")
+	cmd.Flags().StringVar(&opts.AppList, "apps", "", "Comma-separated app names or IDs to move to --to")
+	cmd.Flags().StringVar(&opts.TargetProjectName, "to", "", "Target project name or slug for --apps")
+	cmd.Flags().StringVar(&opts.TargetProjectID, "to-project-id", "", "Target project ID for --apps")
 	cmd.Flags().BoolVar(&opts.CreateProjects, "create-projects", false, "Create target projects that do not exist")
 	cmd.Flags().BoolVar(&opts.IncludeOwnedServices, "include-owned-services", opts.IncludeOwnedServices, "Move app-owned backing services with each app")
 	cmd.Flags().BoolVar(&opts.IncludeBoundServices, "include-bound-services", false, "Move independently-created bound services when every bound app moves to the same target")
 	cmd.Flags().StringVar(&opts.OnConflict, "on-conflict", opts.OnConflict, "Backing service name conflict policy: fail, rename, or use-existing")
 	cmd.Flags().BoolVar(&opts.Confirm, "confirm", false, "Confirm project ownership changes")
-	_ = cmd.MarkFlagRequired("app")
+	_ = cmd.Flags().MarkHidden("to-project-id")
 }
 
 func (c *CLI) resolveProjectMoveTarget(client *Client, projectID, projectName string, create bool) (string, string, error) {
@@ -263,9 +271,22 @@ func (c *CLI) resolveProjectMoveTarget(client *Client, projectID, projectName st
 	return project.ID, "", nil
 }
 
-func (c *CLI) parseProjectSplitTargets(client *Client, raw []string, createProjects bool) ([]projectSplitTargetRequest, error) {
+func (c *CLI) parseProjectSplitTargets(client *Client, opts projectSplitCommandOptions) ([]projectSplitTargetRequest, error) {
+	raw := append([]string(nil), opts.Apps...)
+	if strings.TrimSpace(opts.AppList) != "" {
+		if strings.TrimSpace(opts.TargetProjectName) == "" && strings.TrimSpace(opts.TargetProjectID) == "" {
+			return nil, fmt.Errorf("--apps requires --to or --to-project-id")
+		}
+		for _, appRef := range splitCommaList(opts.AppList) {
+			if strings.TrimSpace(appRef) == "" {
+				continue
+			}
+			target := firstNonEmptyTrimmed(opts.TargetProjectID, opts.TargetProjectName)
+			raw = append(raw, strings.TrimSpace(appRef)+"="+target)
+		}
+	}
 	if len(raw) == 0 {
-		return nil, fmt.Errorf("at least one --app app=project mapping is required")
+		return nil, fmt.Errorf("at least one --app app=project mapping or --apps app1,app2 --to project target is required")
 	}
 	targets := make([]projectSplitTargetRequest, 0, len(raw))
 	for _, item := range raw {
@@ -281,7 +302,9 @@ func (c *CLI) parseProjectSplitTargets(client *Client, raw []string, createProje
 		} else {
 			target.AppName = left
 		}
-		if createProjects {
+		if strings.EqualFold(right, strings.TrimSpace(opts.TargetProjectID)) && strings.TrimSpace(opts.TargetProjectID) != "" {
+			target.TargetProjectID = strings.TrimSpace(opts.TargetProjectID)
+		} else if opts.CreateProjects {
 			target.TargetProjectName = right
 		} else {
 			project, err := c.resolveNamedProject(client, right)
@@ -293,6 +316,19 @@ func (c *CLI) parseProjectSplitTargets(client *Client, raw []string, createProje
 		targets = append(targets, target)
 	}
 	return targets, nil
+}
+
+func splitCommaList(raw string) []string {
+	items := strings.Split(raw, ",")
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 func requireConfirmedProjectMove(dryRun, confirm bool, command string) error {

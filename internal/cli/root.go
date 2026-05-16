@@ -25,6 +25,7 @@ type rootOptions struct {
 	BaseURL     string
 	WebBaseURL  string
 	Token       string
+	Account     string
 	TenantID    string
 	TenantName  string
 	ProjectID   string
@@ -44,6 +45,7 @@ type CLI struct {
 	observer    requestObserver
 	outputFile  *os.File
 	outputReady bool
+	account     *adminWorkspaceResolveResponse
 }
 
 func Run(args []string) error {
@@ -121,6 +123,7 @@ Environment variables:
   FUGUE_API_KEY / FUGUE_TOKEN / FUGUE_BOOTSTRAP_KEY
   FUGUE_BASE_URL / FUGUE_API_URL
   FUGUE_WEB_BASE_URL / APP_BASE_URL
+  FUGUE_ACCOUNT
   FUGUE_TENANT / FUGUE_TENANT_NAME / FUGUE_TENANT_ID
   FUGUE_PROJECT / FUGUE_PROJECT_NAME / FUGUE_PROJECT_ID
   FUGUE_SKIP_UPDATE_CHECK
@@ -129,6 +132,7 @@ Environment variables:
 	  curl -fsSL https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.sh | sh
 	  export FUGUE_API_KEY=<copied-access-key>
 	  fugue deploy .
+	  fugue deploy . --account user@example.com --project production --create-project
 	  fugue app ls
 	  fugue version --check-latest
 	  fugue upgrade
@@ -220,6 +224,7 @@ Environment variables:
 	flags.StringVar(&c.root.BaseURL, "base-url", c.root.BaseURL, "Optional API base URL. Defaults to FUGUE_BASE_URL, then FUGUE_API_URL, then "+defaultCloudBaseURL)
 	flags.StringVar(&c.root.WebBaseURL, "web-base-url", c.root.WebBaseURL, "Optional web base URL. Defaults to FUGUE_WEB_BASE_URL, then APP_BASE_URL, then a best-effort guess from --base-url")
 	flags.StringVar(&c.root.Token, "token", c.root.Token, "API key or bootstrap key. Reads FUGUE_API_KEY, FUGUE_TOKEN, or FUGUE_BOOTSTRAP_KEY")
+	flags.StringVar(&c.root.Account, "account", c.root.Account, "Admin-only account email to resolve through fugue-web for workspace targeting")
 	flags.StringVar(&c.root.TenantName, "tenant", c.root.TenantName, "Optional tenant name or slug. Needed only when your key can see multiple tenants")
 	flags.StringVar(&c.root.ProjectName, "project", c.root.ProjectName, "Optional project name. Deploy/create defaults to the default project when omitted")
 	flags.StringVarP(&c.root.Output, "output", "o", c.root.Output, "Output format: text or json")
@@ -373,8 +378,15 @@ func (c *CLI) resolveFilterSelections(client *Client) (string, string, error) {
 
 	tenantID := ""
 	var err error
-	if needsTenant {
-		tenantID, err = resolveTenantSelection(client, tenantIDValue, tenantNameValue)
+	if account, ok, accountErr := c.resolveAccountWorkspaceTarget(client); accountErr != nil {
+		return "", "", accountErr
+	} else if ok {
+		tenantID = account.Workspace.TenantID
+		if projectIDValue == "" && projectNameValue == "" {
+			projectIDValue = account.Workspace.DefaultProjectID
+		}
+	} else if needsTenant {
+		tenantID, err = c.resolveTenantSelection(client, tenantIDValue, tenantNameValue)
 		if err != nil {
 			return "", "", err
 		}
@@ -388,12 +400,26 @@ func (c *CLI) resolveFilterSelections(client *Client) (string, string, error) {
 }
 
 func (c *CLI) resolveCreateSelections(client *Client) (string, projectSelection, string, error) {
-	tenantID, err := resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
-	if err != nil {
+	tenantID := ""
+	projectID := c.effectiveProjectID()
+	projectName := c.effectiveProjectName()
+
+	if account, ok, err := c.resolveAccountWorkspaceTarget(client); err != nil {
 		return "", projectSelection{}, "", err
+	} else if ok {
+		tenantID = account.Workspace.TenantID
+		if projectID == "" && projectName == "" {
+			projectID = account.Workspace.DefaultProjectID
+		}
+	} else {
+		var err error
+		tenantID, err = c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+		if err != nil {
+			return "", projectSelection{}, "", err
+		}
 	}
 
-	projectSel, err := resolveProjectCreationSelection(client, tenantID, c.effectiveProjectID(), c.effectiveProjectName())
+	projectSel, err := resolveProjectCreationSelection(client, tenantID, projectID, projectName)
 	if err != nil {
 		return "", projectSelection{}, "", err
 	}
@@ -411,6 +437,10 @@ func (c *CLI) effectiveWebBaseURL() string {
 
 func (c *CLI) effectiveToken() string {
 	return firstNonEmpty(c.root.Token, os.Getenv("FUGUE_TOKEN"), os.Getenv("FUGUE_API_KEY"), os.Getenv("FUGUE_BOOTSTRAP_KEY"))
+}
+
+func (c *CLI) effectiveAccount() string {
+	return firstNonEmpty(c.root.Account, os.Getenv("FUGUE_ACCOUNT"))
 }
 
 func (c *CLI) effectiveTenantID() string {

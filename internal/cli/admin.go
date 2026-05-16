@@ -111,7 +111,7 @@ func (c *CLI) newAdminAPIKeyListCommand() *cobra.Command {
 			}
 			tenantID := c.effectiveTenantID()
 			if strings.TrimSpace(tenantID) == "" && strings.TrimSpace(c.effectiveTenantName()) != "" {
-				tenantID, err = resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+				tenantID, err = c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
 				if err != nil {
 					return err
 				}
@@ -151,7 +151,7 @@ secret to the user or automation and have them export it as FUGUE_API_KEY.
 			if err != nil {
 				return err
 			}
-			tenantID, err := resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+			tenantID, err := c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
 			if err != nil {
 				return err
 			}
@@ -368,7 +368,7 @@ func (c *CLI) newAdminNodeKeyListCommand() *cobra.Command {
 			}
 			tenantID := c.effectiveTenantID()
 			if strings.TrimSpace(tenantID) == "" && strings.TrimSpace(c.effectiveTenantName()) != "" {
-				tenantID, err = resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+				tenantID, err = c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
 				if err != nil {
 					return err
 				}
@@ -392,7 +392,7 @@ func (c *CLI) newAdminNodeKeyCreateCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			tenantID, err := resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+			tenantID, err := c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
 			if err != nil {
 				return err
 			}
@@ -522,7 +522,7 @@ func (c *CLI) newAdminRuntimeListCommand() *cobra.Command {
 			}
 			tenantID := c.effectiveTenantID()
 			if strings.TrimSpace(tenantID) == "" && strings.TrimSpace(c.effectiveTenantName()) != "" {
-				tenantID, err = resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+				tenantID, err = c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
 				if err != nil {
 					return err
 				}
@@ -627,7 +627,7 @@ func (c *CLI) newAdminRuntimeCreateCommand() *cobra.Command {
 			}
 			var tenantID string
 			if !strings.EqualFold(strings.TrimSpace(opts.Type), model.RuntimeTypeManagedShared) {
-				tenantID, err = resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+				tenantID, err = c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
 				if err != nil {
 					return err
 				}
@@ -814,7 +814,7 @@ func (c *CLI) newAdminRuntimeTokenListCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			tenantID, err := resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+			tenantID, err := c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
 			if err != nil {
 				return err
 			}
@@ -843,7 +843,7 @@ func (c *CLI) newAdminRuntimeTokenCreateCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			tenantID, err := resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+			tenantID, err := c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
 			if err != nil {
 				return err
 			}
@@ -1233,7 +1233,7 @@ func (c *CLI) newAdminBillingShowCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			tenantID, err := resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+			tenantID, err := c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
 			if err != nil {
 				return err
 			}
@@ -1263,7 +1263,7 @@ func (c *CLI) newAdminBillingCapCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			tenantID, err := resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+			tenantID, err := c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
 			if err != nil {
 				return err
 			}
@@ -1300,7 +1300,7 @@ func (c *CLI) newAdminBillingTopUpCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			tenantID, err := resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+			tenantID, err := c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
 			if err != nil {
 				return err
 			}
@@ -1335,7 +1335,7 @@ func (c *CLI) newAdminBillingSetBalanceCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			tenantID, err := resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+			tenantID, err := c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
 			if err != nil {
 				return err
 			}

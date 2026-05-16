@@ -91,6 +91,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/apps/{id}/scale", s.auth.RequireAPI(http.HandlerFunc(s.handleScaleApp)))
 	mux.Handle("PATCH /v1/apps/{id}/source", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchAppSource)))
 	mux.Handle("GET /v1/audit-events", s.auth.RequireAPI(http.HandlerFunc(s.handleListAuditEvents)))
+	mux.Handle("GET /v1/auth/context", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAuthContext)))
 	mux.Handle("GET /v1/backing-services", s.auth.RequireAPI(http.HandlerFunc(s.handleListBackingServices)))
 	mux.Handle("POST /v1/backing-services", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateBackingService)))
 	mux.Handle("GET /v1/backing-services/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetBackingService)))

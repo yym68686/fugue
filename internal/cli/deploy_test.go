@@ -69,6 +69,33 @@ func TestResolveTenantSelectionAutoSelectsSingleVisibleTenant(t *testing.T) {
 	}
 }
 
+func TestResolveTenantSelectionMultipleTenantsSuggestsAccount(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/tenants" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_a","name":"Acme","slug":"acme"},{"id":"tenant_b","name":"Beta","slug":"beta"}]}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "token")
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	_, err = resolveTenantSelection(client, "", "")
+	if err == nil {
+		t.Fatalf("expected multiple tenant error")
+	}
+	for _, want := range []string{"multiple tenants are visible", "--account <email>", "--tenant <name>", "--tenant-id <id>"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected error %q to contain %q", err.Error(), want)
+		}
+	}
+}
+
 func TestResolveProjectSelectionSkipsLookupForDefaultProject(t *testing.T) {
 	t.Parallel()
 
@@ -92,6 +119,207 @@ func TestResolveProjectSelectionSkipsLookupForDefaultProject(t *testing.T) {
 	if projectRequest != nil {
 		t.Fatalf("expected no project creation request, got %+v", projectRequest)
 	}
+}
+
+func TestRunDeployLocalWithAccountResolvesWorkspaceThroughWeb(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "Dockerfile"), "FROM scratch\n")
+
+	var importRequest importUploadRequest
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer admin-token" {
+			t.Fatalf("unexpected api auth header %q", got)
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/auth/context":
+			_, _ = w.Write([]byte(`{"principal":{"actor_type":"bootstrap","actor_id":"bootstrap","scopes":["platform.admin"],"platform_admin":true}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects":
+			if got := r.URL.Query().Get("tenant_id"); got != "tenant_acct" {
+				t.Fatalf("expected tenant_acct project lookup, got %q", got)
+			}
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_target","tenant_id":"tenant_acct","name":"uni-api-web","slug":"uni-api-web"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/templates/inspect-upload":
+			if err := r.ParseMultipartForm(32 << 20); err != nil {
+				t.Fatalf("parse inspect multipart form: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"upload":{"default_app_name":"demo","source_kind":"archive","source_path":"."}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/import-upload":
+			if err := r.ParseMultipartForm(32 << 20); err != nil {
+				t.Fatalf("parse import multipart form: %v", err)
+			}
+			if err := json.Unmarshal([]byte(r.FormValue("request")), &importRequest); err != nil {
+				t.Fatalf("decode import request: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"app":{"id":"app_created","name":"demo"},"operation":{"id":"op_created","app_id":"app_created"}}`))
+		default:
+			t.Fatalf("unexpected api request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer apiServer.Close()
+
+	webServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/admin/workspaces/resolve" {
+			t.Fatalf("unexpected web request %s %s", r.Method, r.URL.String())
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer admin-token" {
+			t.Fatalf("unexpected web auth header %q", got)
+		}
+		if got := r.URL.Query().Get("email"); got != "user@example.com" {
+			t.Fatalf("unexpected account query %q", got)
+		}
+		_, _ = w.Write([]byte(`{"email":"user@example.com","workspace":{"tenantId":"tenant_acct","tenantName":"User workspace","defaultProjectId":"project_default","defaultProjectName":"default"}}`))
+	}))
+	defer webServer.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runDeployWithStreams([]string{
+		"--base-url", apiServer.URL,
+		"--web-base-url", webServer.URL,
+		"--token", "admin-token",
+		"--account", "user@example.com",
+		"--project", "uni-api-web",
+		"--dir", dir,
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run account deploy: %v", err)
+	}
+
+	if importRequest.TenantID != "tenant_acct" {
+		t.Fatalf("expected tenant from workspace resolver, got %+v", importRequest)
+	}
+	if importRequest.ProjectID != "project_target" {
+		t.Fatalf("expected resolved project id, got %+v", importRequest)
+	}
+	if importRequest.Project != nil {
+		t.Fatalf("expected no project creation request, got %+v", importRequest.Project)
+	}
+	if strings.Contains(string(mustMarshalJSON(t, importRequest)), "user@example.com") {
+		t.Fatalf("account email leaked into control-plane request: %+v", importRequest)
+	}
+}
+
+func TestRunDeployLocalWithAccountRequiresAdminKey(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "Dockerfile"), "FROM scratch\n")
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/auth/context":
+			_, _ = w.Write([]byte(`{"principal":{"actor_type":"tenant_key","actor_id":"key_123","tenant_id":"tenant_user","scopes":["tenant.deploy"],"platform_admin":false}}`))
+		default:
+			t.Fatalf("unexpected api request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer apiServer.Close()
+
+	webServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("web resolver should not be called for non-admin key")
+	}))
+	defer webServer.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runDeployWithStreams([]string{
+		"--base-url", apiServer.URL,
+		"--web-base-url", webServer.URL,
+		"--token", "user-token",
+		"--account", "user@example.com",
+		"--dir", dir,
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err == nil {
+		t.Fatalf("expected non-admin account error")
+	}
+	if !strings.Contains(err.Error(), "--account requires a platform-admin or bootstrap key") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunDeployLocalOrdinaryUserAutoSelectsSingleWorkspace(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "Dockerfile"), "FROM scratch\n")
+
+	var importRequest importUploadRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
+			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_user","name":"User workspace","slug":"user-workspace"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects":
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_default","tenant_id":"tenant_user","name":"default","slug":"default"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/templates/inspect-upload":
+			if err := r.ParseMultipartForm(32 << 20); err != nil {
+				t.Fatalf("parse inspect multipart form: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"upload":{"default_app_name":"demo","source_kind":"archive","source_path":"."}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/import-upload":
+			if err := r.ParseMultipartForm(32 << 20); err != nil {
+				t.Fatalf("parse import multipart form: %v", err)
+			}
+			if err := json.Unmarshal([]byte(r.FormValue("request")), &importRequest); err != nil {
+				t.Fatalf("decode import request: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"app":{"id":"app_user","name":"demo"},"operation":{"id":"op_user","app_id":"app_user"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runDeployWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "user-token",
+		"--dir", dir,
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run ordinary deploy: %v", err)
+	}
+	if importRequest.TenantID != "tenant_user" {
+		t.Fatalf("expected auto-selected tenant_user, got %+v", importRequest)
+	}
+}
+
+func TestValidateLocalDeployPreflightRejectsIgnoredDockerfile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "Dockerfile"), "FROM scratch\n")
+	writeTestFile(t, filepath.Join(dir, ".dockerignore"), "Dockerfile\n")
+
+	err := validateLocalDeployPreflight(dir, deployCommonOptions{BuildStrategy: "dockerfile"})
+	if err == nil {
+		t.Fatalf("expected preflight error")
+	}
+	for _, want := range []string{"deploy preflight failed", "dockerfile_path", "excluded from the upload archive"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected error %q to contain %q", err.Error(), want)
+		}
+	}
+}
+
+func mustMarshalJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal json: %v", err)
+	}
+	return raw
 }
 
 func TestRunDeployWithRepoURLImportsGitHubAndLoadsEnv(t *testing.T) {

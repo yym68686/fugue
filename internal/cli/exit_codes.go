@@ -65,6 +65,10 @@ func ExitCodeForError(err error) int {
 			return code
 		}
 	}
+	var apiErr *apiServerError
+	if errors.As(err, &apiErr) && apiErr.IsRetryable() {
+		return ExitCodeSystemFault
+	}
 	message := strings.ToLower(strings.TrimSpace(err.Error()))
 	switch {
 	case looksPermissionError(message):

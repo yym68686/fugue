@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -47,6 +48,10 @@ func (t *deployWaitTransientErrorTracker) shouldRetry(c *CLI, err error) (bool, 
 func isTransientDeployWaitError(err error) bool {
 	if err == nil {
 		return false
+	}
+	var apiErr *apiServerError
+	if errors.As(err, &apiErr) && apiErr.IsRetryable() {
+		return true
 	}
 	if isRetryableHTTPClientError(err) {
 		return true
