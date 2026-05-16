@@ -93,6 +93,7 @@ const (
 	NodeUpdateTaskTypeDiagnoseNode        = "diagnose-node"
 	NodeUpdateTaskTypeInstallNFSClient    = "install-nfs-client-tools"
 	NodeUpdateTaskTypePrepullSystemImages = "prepull-system-images"
+	NodeUpdateTaskTypePrepullAppImages    = "prepull-app-images"
 	NodeUpdateTaskTypeVerifySystemdEscape = "verify-systemd-escape-hatch"
 
 	NodeUpdateTaskStatusPending   = "pending"
@@ -116,6 +117,11 @@ const (
 	OperationStatusCompleted    = "completed"
 	OperationStatusFailed       = "failed"
 
+	ImageLocationStatusPresent = "present"
+	ImageLocationStatusMissing = "missing"
+	ImageLocationStatusPulling = "pulling"
+	ImageLocationStatusFailed  = "failed"
+
 	IdempotencyScopeAppImportGitHub = "app.import_github"
 	IdempotencyScopeAppImportImage  = "app.import_image"
 
@@ -135,6 +141,7 @@ const (
 
 	OperationRequestedByGitHubSyncController = "fugue-controller/github-sync"
 	OperationRequestedByAutoFailover         = "fugue-controller/auto-failover"
+	OperationRequestedByImageRebuild         = "fugue-controller/image-rebuild"
 
 	ClusterNodeWorkloadKindApp            = "app"
 	ClusterNodeWorkloadKindBackingService = "backing_service"
@@ -1382,6 +1389,37 @@ type App struct {
 	UpdatedAt            time.Time           `json:"updated_at"`
 }
 
+type ImageLocation struct {
+	ID                string     `json:"id"`
+	TenantID          string     `json:"tenant_id,omitempty"`
+	AppID             string     `json:"app_id,omitempty"`
+	ImageRef          string     `json:"image_ref"`
+	Digest            string     `json:"digest,omitempty"`
+	SourceOperationID string     `json:"source_operation_id,omitempty"`
+	NodeID            string     `json:"node_id,omitempty"`
+	RuntimeID         string     `json:"runtime_id,omitempty"`
+	ClusterNodeName   string     `json:"cluster_node_name,omitempty"`
+	CacheEndpoint     string     `json:"cache_endpoint,omitempty"`
+	Status            string     `json:"status"`
+	LastSeenAt        *time.Time `json:"last_seen_at,omitempty"`
+	SizeBytes         int64      `json:"size_bytes,omitempty"`
+	LastError         string     `json:"last_error,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+}
+
+type ImageLocationFilter struct {
+	TenantID        string
+	AppID           string
+	ImageRef        string
+	Digest          string
+	Status          string
+	NodeID          string
+	RuntimeID       string
+	ClusterNodeName string
+	PlatformAdmin   bool
+}
+
 type IdempotencyRecord struct {
 	Scope       string    `json:"scope"`
 	TenantID    string    `json:"tenant_id"`
@@ -1729,6 +1767,7 @@ type State struct {
 	Machines                   []Machine                   `json:"machines"`
 	NodeUpdaters               []NodeUpdater               `json:"node_updaters,omitempty"`
 	NodeUpdateTasks            []NodeUpdateTask            `json:"node_update_tasks,omitempty"`
+	ImageLocations             []ImageLocation             `json:"image_locations,omitempty"`
 	Runtimes                   []Runtime                   `json:"runtimes"`
 	RuntimeGrants              []RuntimeAccessGrant        `json:"runtime_grants"`
 	Apps                       []App                       `json:"apps"`

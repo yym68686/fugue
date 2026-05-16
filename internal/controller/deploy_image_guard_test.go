@@ -92,8 +92,22 @@ func TestHandleClaimedOperationFailsDeployWhenManagedImageIsMissingFromRegistry(
 	if failedOp.Status != model.OperationStatusFailed {
 		t.Fatalf("expected failed deploy status, got %q", failedOp.Status)
 	}
-	if !strings.Contains(failedOp.ErrorMessage, "still missing from the registry") {
-		t.Fatalf("expected missing registry image error, got %q", failedOp.ErrorMessage)
+	if !strings.Contains(failedOp.ErrorMessage, "queued image rebuild") {
+		t.Fatalf("expected queued rebuild message, got %q", failedOp.ErrorMessage)
+	}
+	ops, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+	foundRebuild := false
+	for _, candidate := range ops {
+		if candidate.Type == model.OperationTypeImport && candidate.RequestedByID == model.OperationRequestedByImageRebuild {
+			foundRebuild = true
+			break
+		}
+	}
+	if !foundRebuild {
+		t.Fatal("expected missing image to queue an import rebuild")
 	}
 }
 
@@ -271,8 +285,22 @@ func TestHandleClaimedOperationFailsMigrateWhenManagedImageIsMissingFromRegistry
 	if failedOp.Status != model.OperationStatusFailed {
 		t.Fatalf("expected failed migrate status, got %q", failedOp.Status)
 	}
-	if !strings.Contains(failedOp.ErrorMessage, "still missing from the registry") {
-		t.Fatalf("expected missing registry image error, got %q", failedOp.ErrorMessage)
+	if !strings.Contains(failedOp.ErrorMessage, "queued image rebuild") {
+		t.Fatalf("expected queued rebuild message, got %q", failedOp.ErrorMessage)
+	}
+	ops, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+	foundRebuild := false
+	for _, candidate := range ops {
+		if candidate.Type == model.OperationTypeImport && candidate.RequestedByID == model.OperationRequestedByImageRebuild {
+			foundRebuild = true
+			break
+		}
+	}
+	if !foundRebuild {
+		t.Fatal("expected missing image to queue an import rebuild")
 	}
 	gotApp, err := stateStore.GetApp(app.ID)
 	if err != nil {

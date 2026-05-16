@@ -3552,6 +3552,9 @@ func ensureDefaults(state *model.State) {
 	if state.NodeUpdateTasks == nil {
 		state.NodeUpdateTasks = []model.NodeUpdateTask{}
 	}
+	if state.ImageLocations == nil {
+		state.ImageLocations = []model.ImageLocation{}
+	}
 	if state.Runtimes == nil {
 		state.Runtimes = []model.Runtime{}
 	}

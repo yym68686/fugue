@@ -9,6 +9,7 @@ on:
       - 'assets/**'
       - 'cmd/fugue-api/**'
       - 'cmd/fugue-controller/**'
+      - 'cmd/fugue-image-cache/**'
       - 'cmd/fugue-edge/**'
       - 'cmd/fugue-dns/**'
       - 'internal/**'
@@ -20,6 +21,7 @@ on:
       - 'deploy/helm/fugue/templates/**'
       - 'Dockerfile.api'
       - 'Dockerfile.controller'
+      - 'Dockerfile.image-cache'
       - 'Dockerfile.edge'
       - 'go.mod'
       - 'go.sum'
@@ -52,6 +54,7 @@ jobs:
       image_tag: ${{ steps.meta.outputs.image_tag }}
       api_image_repository: ${{ steps.meta.outputs.api_image_repository }}
       controller_image_repository: ${{ steps.meta.outputs.controller_image_repository }}
+      image_cache_image_repository: ${{ steps.meta.outputs.image_cache_image_repository }}
       edge_image_repository: ${{ steps.meta.outputs.edge_image_repository }}
     steps:
       - name: Checkout
@@ -72,6 +75,7 @@ jobs:
           echo "image_tag=${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
           echo "api_image_repository=ghcr.io/${owner_lc}/fugue-api" >> "${GITHUB_OUTPUT}"
           echo "controller_image_repository=ghcr.io/${owner_lc}/fugue-controller" >> "${GITHUB_OUTPUT}"
+          echo "image_cache_image_repository=ghcr.io/${owner_lc}/fugue-image-cache" >> "${GITHUB_OUTPUT}"
           echo "edge_image_repository=ghcr.io/${owner_lc}/fugue-edge" >> "${GITHUB_OUTPUT}"
 
       - name: Setup Docker Buildx
@@ -103,6 +107,17 @@ jobs:
           push: true
           tags: |
             ${{ steps.meta.outputs.controller_image_repository }}:${{ steps.meta.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push fugue-image-cache
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.image-cache
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image_cache_image_repository }}:${{ steps.meta.outputs.image_tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -197,6 +212,8 @@ jobs:
           FUGUE_API_IMAGE_TAG: ${{ inputs.existing_image_tag || needs.build.outputs.image_tag }}
           FUGUE_CONTROLLER_IMAGE_REPOSITORY: ${{ (github.event_name == 'workflow_dispatch' && inputs.existing_image_tag != '' && format('ghcr.io/{0}/fugue-controller', github.repository_owner)) || needs.build.outputs.controller_image_repository }}
           FUGUE_CONTROLLER_IMAGE_TAG: ${{ inputs.existing_image_tag || needs.build.outputs.image_tag }}
+          FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY: ${{ (github.event_name == 'workflow_dispatch' && inputs.existing_image_tag != '' && format('ghcr.io/{0}/fugue-image-cache', github.repository_owner)) || needs.build.outputs.image_cache_image_repository }}
+          FUGUE_IMAGE_CACHE_IMAGE_TAG: ${{ inputs.existing_image_tag || needs.build.outputs.image_tag }}
           FUGUE_EDGE_IMAGE_REPOSITORY: ${{ (github.event_name == 'workflow_dispatch' && inputs.existing_image_tag != '' && format('ghcr.io/{0}/fugue-edge', github.repository_owner)) || needs.build.outputs.edge_image_repository }}
           FUGUE_EDGE_IMAGE_TAG: ${{ inputs.existing_image_tag || needs.build.outputs.image_tag }}
           FUGUE_EDGE_GROUP_ID: ${{ vars.FUGUE_EDGE_GROUP_ID || '' }}

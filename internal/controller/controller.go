@@ -626,12 +626,6 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		return fmt.Errorf("overlay desired managed postgres state for app %s: %w", app.ID, err)
 	}
 	timer.Mark("overlay_postgres")
-	if op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate {
-		if err := s.ensureManagedDeployImageReady(ctx, app); err != nil {
-			return err
-		}
-		timer.Mark("image_ready")
-	}
 	postgresPlacements, err := s.managedPostgresPlacements(ctx, app)
 	if err != nil {
 		return fmt.Errorf("resolve managed postgres placements for app %s: %w", app.ID, err)
@@ -644,6 +638,12 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	}
 	app = s.appWithResolvedLaunchOverride(ctx, app)
 	timer.Mark("scheduling")
+	if op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate {
+		if err := s.ensureDeployableImage(ctx, op, app, scheduling); err != nil {
+			return err
+		}
+		timer.Mark("image_ready")
+	}
 
 	if s.Config.KubectlApply && (op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate) {
 		preparedApp, changed, err := s.prepareMovableRWOStorageForOperation(ctx, op, currentApp, app, scheduling)

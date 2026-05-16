@@ -122,9 +122,9 @@ spec:
             - name: FUGUE_REGISTRY_PUSH_BASE
               value: {{ include "fugue.registryPushBase" . | quote }}
             - name: FUGUE_REGISTRY_PULL_BASE
-              value: {{ default (include "fugue.registryPushBase" .) .Values.api.registryPullBase | quote }}
+              value: {{ include "fugue.registryPullBase" . | quote }}
             - name: FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT
-              value: {{ default (default (include "fugue.registryPushBase" .) .Values.api.registryPullBase) .Values.api.clusterJoinRegistryEndpoint | quote }}
+              value: {{ include "fugue.clusterJoinRegistryEndpoint" . | quote }}
             - name: FUGUE_IMPORT_WORK_DIR
               value: {{ .Values.api.importWorkDir | quote }}
             - name: FUGUE_API_SHUTDOWN_DRAIN_DELAY

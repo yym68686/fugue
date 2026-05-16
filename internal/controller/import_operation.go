@@ -40,6 +40,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		"fugue.pro/tenant-id":    app.TenantID,
 	}
 	stateful := op.DesiredSpec.Workspace != nil || op.DesiredSpec.PersistentStorage != nil || op.DesiredSpec.Postgres != nil
+	placementNodeSelector := s.importBuildPlacementNodeSelector(ctx, app, op)
 	var output sourceimport.GitHubSourceImportOutput
 	queuedDockerImageRef := ""
 	stopImportProgress := s.startImportOperationProgressHeartbeat(importCtx, op.ID)
@@ -61,20 +62,21 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 			return fmt.Errorf("import operation %s missing repo_url", op.ID)
 		}
 		output, err = s.importer.ImportGitHubSource(importCtx, sourceimport.GitHubSourceImportRequest{
-			SourceType:       strings.TrimSpace(op.DesiredSource.Type),
-			RepoURL:          strings.TrimSpace(op.DesiredSource.RepoURL),
-			RepoAuthToken:    strings.TrimSpace(op.DesiredSource.RepoAuthToken),
-			Branch:           strings.TrimSpace(op.DesiredSource.RepoBranch),
-			SourceDir:        strings.TrimSpace(op.DesiredSource.SourceDir),
-			DockerfilePath:   strings.TrimSpace(op.DesiredSource.DockerfilePath),
-			BuildContextDir:  strings.TrimSpace(op.DesiredSource.BuildContextDir),
-			BuildStrategy:    strings.TrimSpace(op.DesiredSource.BuildStrategy),
-			RegistryPushBase: s.registryPushBase,
-			ImageRepository:  "fugue-apps",
-			ImageNameSuffix:  strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
-			ComposeService:   strings.TrimSpace(op.DesiredSource.ComposeService),
-			JobLabels:        jobLabels,
-			Stateful:         stateful,
+			SourceType:            strings.TrimSpace(op.DesiredSource.Type),
+			RepoURL:               strings.TrimSpace(op.DesiredSource.RepoURL),
+			RepoAuthToken:         strings.TrimSpace(op.DesiredSource.RepoAuthToken),
+			Branch:                strings.TrimSpace(op.DesiredSource.RepoBranch),
+			SourceDir:             strings.TrimSpace(op.DesiredSource.SourceDir),
+			DockerfilePath:        strings.TrimSpace(op.DesiredSource.DockerfilePath),
+			BuildContextDir:       strings.TrimSpace(op.DesiredSource.BuildContextDir),
+			BuildStrategy:         strings.TrimSpace(op.DesiredSource.BuildStrategy),
+			RegistryPushBase:      s.registryPushBase,
+			ImageRepository:       "fugue-apps",
+			ImageNameSuffix:       strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
+			ComposeService:        strings.TrimSpace(op.DesiredSource.ComposeService),
+			JobLabels:             jobLabels,
+			PlacementNodeSelector: placementNodeSelector,
+			Stateful:              stateful,
 		})
 	case model.AppSourceTypeUpload:
 		if strings.TrimSpace(op.DesiredSource.UploadID) == "" {
@@ -92,23 +94,24 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 			return archiveURLErr
 		}
 		output, err = s.importer.ImportUploadedArchiveSource(importCtx, sourceimport.UploadSourceImportRequest{
-			UploadID:           upload.ID,
-			ArchiveFilename:    upload.Filename,
-			ArchiveSHA256:      upload.SHA256,
-			ArchiveSizeBytes:   upload.SizeBytes,
-			ArchiveData:        archiveBytes,
-			ArchiveDownloadURL: archiveURL,
-			AppName:            app.Name,
-			SourceDir:          strings.TrimSpace(op.DesiredSource.SourceDir),
-			DockerfilePath:     strings.TrimSpace(op.DesiredSource.DockerfilePath),
-			BuildContextDir:    strings.TrimSpace(op.DesiredSource.BuildContextDir),
-			BuildStrategy:      strings.TrimSpace(op.DesiredSource.BuildStrategy),
-			RegistryPushBase:   s.registryPushBase,
-			ImageRepository:    "fugue-apps",
-			ImageNameSuffix:    strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
-			ComposeService:     strings.TrimSpace(op.DesiredSource.ComposeService),
-			JobLabels:          jobLabels,
-			Stateful:           stateful,
+			UploadID:              upload.ID,
+			ArchiveFilename:       upload.Filename,
+			ArchiveSHA256:         upload.SHA256,
+			ArchiveSizeBytes:      upload.SizeBytes,
+			ArchiveData:           archiveBytes,
+			ArchiveDownloadURL:    archiveURL,
+			AppName:               app.Name,
+			SourceDir:             strings.TrimSpace(op.DesiredSource.SourceDir),
+			DockerfilePath:        strings.TrimSpace(op.DesiredSource.DockerfilePath),
+			BuildContextDir:       strings.TrimSpace(op.DesiredSource.BuildContextDir),
+			BuildStrategy:         strings.TrimSpace(op.DesiredSource.BuildStrategy),
+			RegistryPushBase:      s.registryPushBase,
+			ImageRepository:       "fugue-apps",
+			ImageNameSuffix:       strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
+			ComposeService:        strings.TrimSpace(op.DesiredSource.ComposeService),
+			JobLabels:             jobLabels,
+			PlacementNodeSelector: placementNodeSelector,
+			Stateful:              stateful,
 		})
 	default:
 		return fmt.Errorf("import operation %s only supports github-backed, image-backed, or upload source", op.ID)
@@ -190,6 +193,14 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	finalSpec.Env = mergeImportEnv(finalSpec.Env, output.ImportResult.SuggestedEnv)
 	finalSpec.Command = mergeImportCommand(finalSpec.Command, finalSpec.Args, output.ImportResult.SuggestedStartupCommand)
 	finalSpec.RestartToken = model.NewID("restart")
+	s.recordImportedImageLocation(app, op, managedImageRef, runtimeImageRef)
+	hydrateApp := app
+	hydrateApp.Spec = finalSpec
+	if scheduling, scheduleErr := s.managedSchedulingConstraintsForApp(ctx, hydrateApp); scheduleErr == nil {
+		s.scheduleImageHydration(ctx, hydrateApp, s.deployImageTarget(hydrateApp, scheduling), runtimeImageRef)
+	} else if s.Logger != nil {
+		s.Logger.Printf("skip post-import image hydration app=%s op=%s image=%s: %v", app.ID, op.ID, runtimeImageRef, scheduleErr)
+	}
 
 	if err := s.ensureOperationStillActive(op.ID); err != nil {
 		return err
@@ -223,6 +234,25 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 
 	s.Logger.Printf("operation %s completed import build; managed_image=%s runtime_image=%s deploy=%s", op.ID, managedImageRef, finalSpec.Image, deployOp.ID)
 	return nil
+}
+
+func (s *Service) importBuildPlacementNodeSelector(ctx context.Context, app model.App, op model.Operation) map[string]string {
+	if s == nil || op.DesiredSpec == nil {
+		return nil
+	}
+	buildApp := app
+	buildApp.Spec = *op.DesiredSpec
+	if op.DesiredSource != nil {
+		model.SetAppSourceState(&buildApp, op.DesiredOriginSource, op.DesiredSource)
+	}
+	scheduling, err := s.managedSchedulingConstraintsForApp(ctx, buildApp)
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("skip import build placement app=%s op=%s: %v", app.ID, op.ID, err)
+		}
+		return nil
+	}
+	return clonePlacementStringMap(scheduling.NodeSelector)
 }
 
 func (s *Service) startImportOperationProgressHeartbeat(ctx context.Context, operationID string) func() {

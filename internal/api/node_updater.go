@@ -1259,6 +1259,33 @@ install_nfs_client_tools() {
   log_task "NFS client tools installed: $(command -v mount.nfs 2>/dev/null || true)"
 }
 
+pull_container_image() {
+  local image="$1"
+  if command -v crictl >/dev/null 2>&1; then
+    crictl pull "${image}"
+  elif command -v k3s >/dev/null 2>&1; then
+    k3s ctr images pull "${image}"
+  elif command -v ctr >/dev/null 2>&1; then
+    ctr -n k8s.io images pull "${image}"
+  else
+    echo "no CRI image puller is available" >&2
+    return 2
+  fi
+}
+
+report_image_location() {
+  local image="$1"
+  local status="$2"
+  local message="${3:-}"
+  api_form POST /v1/node-updater/image-locations \
+    --data-urlencode "image_ref=${image}" \
+    --data-urlencode "status=${status}" \
+    --data-urlencode "app_id=${FUGUE_NODE_UPDATE_TASK_APP_ID:-}" \
+    --data-urlencode "source_operation_id=${FUGUE_NODE_UPDATE_TASK_OPERATION_ID:-}" \
+    --data-urlencode "last_error=${message}" \
+    >/dev/null || true
+}
+
 prepull_system_images() {
   local raw="${FUGUE_NODE_UPDATER_SYSTEM_IMAGES:-${FUGUE_SYSTEM_IMAGES:-}}"
   local image=""
@@ -1275,17 +1302,30 @@ prepull_system_images() {
         return 2
         ;;
     esac
-    if command -v crictl >/dev/null 2>&1; then
-      crictl pull "${image}"
-    elif command -v k3s >/dev/null 2>&1; then
-      k3s ctr images pull "${image}"
-    elif command -v ctr >/dev/null 2>&1; then
-      ctr -n k8s.io images pull "${image}"
-    else
-      echo "no CRI image puller is available" >&2
-      return 2
-    fi
+    pull_container_image "${image}"
     log_task "pre-pulled ${image}"
+  done
+}
+
+prepull_app_images() {
+  local raw="${FUGUE_NODE_UPDATE_TASK_IMAGES:-${FUGUE_NODE_UPDATE_TASK_IMAGE_REF:-}}"
+  local image=""
+  local pull_output=""
+  if [ -z "${raw}" ]; then
+    log_task "no app images requested for pre-pull"
+    return 0
+  fi
+  for image in ${raw//,/ }; do
+    [ -n "${image}" ] || continue
+    report_image_location "${image}" pulling ""
+    if pull_output="$(pull_container_image "${image}" 2>&1)"; then
+      log_task "pre-pulled app image ${image}"
+      report_image_location "${image}" present ""
+    else
+      log_task "failed to pre-pull app image ${image}: ${pull_output}"
+      report_image_location "${image}" failed "${pull_output}"
+      return 1
+    fi
   done
 }
 
@@ -1341,6 +1381,9 @@ run_task() {
       ;;
     prepull-system-images)
       prepull_system_images
+      ;;
+    prepull-app-images)
+      prepull_app_images
       ;;
     verify-systemd-escape-hatch)
       verify_systemd_escape_hatch

@@ -3825,6 +3825,87 @@ paths:
                 $ref: "#/components/schemas/AppContinuityResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/image-locations:
+    get:
+      operationId: listImageLocations
+      summary: List Image Locations
+      tags: [Apps]
+      x-fugue-handler: handleListImageLocations
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: tenant_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: app_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: image_ref
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: digest
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+            enum: [present, missing, pulling, failed]
+        - in: query
+          name: node_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: runtime_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: cluster_node_name
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageLocationListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: reportImageLocation
+      summary: Report Image Location
+      tags: [Apps]
+      x-fugue-handler: handleReportImageLocation
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImageLocationReportRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageLocationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/operations:
     get:
       operationId: listOperations
@@ -4090,6 +4171,82 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NodeUpdaterDesiredStateResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/node-updater/image-locations:
+    get:
+      operationId: nodeUpdaterImageLocations
+      summary: Node Updater Image Locations
+      tags: [Node Updater]
+      x-fugue-handler: handleNodeUpdaterListImageLocations
+      security:
+        - NodeUpdaterBearerAuth: []
+      parameters:
+        - in: query
+          name: app_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: image_ref
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: digest
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+            enum: [present, missing, pulling, failed]
+        - in: query
+          name: node_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: runtime_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: cluster_node_name
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageLocationListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: nodeUpdaterReportImageLocation
+      summary: Node Updater Report Image Location
+      tags: [Node Updater]
+      x-fugue-handler: handleNodeUpdaterReportImageLocation
+      security:
+        - NodeUpdaterBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImageLocationReportRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageLocationResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/node-updater/tasks:
@@ -4404,6 +4561,82 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/agent/image-locations:
+    get:
+      operationId: agentImageLocations
+      summary: Agent Image Locations
+      tags: [Agent]
+      x-fugue-handler: handleAgentListImageLocations
+      security:
+        - RuntimeBearerAuth: []
+      parameters:
+        - in: query
+          name: app_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: image_ref
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: digest
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+            enum: [present, missing, pulling, failed]
+        - in: query
+          name: node_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: runtime_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: cluster_node_name
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageLocationListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: agentReportImageLocation
+      summary: Agent Report Image Location
+      tags: [Agent]
+      x-fugue-handler: handleAgentReportImageLocation
+      security:
+        - RuntimeBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImageLocationReportRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageLocationResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/agent/operations/{id}/complete:
@@ -8636,6 +8869,97 @@ components:
           $ref: "#/components/schemas/NodeKey"
         cleanup:
           $ref: "#/components/schemas/NodeKeyCleanupResult"
+    ImageLocation:
+      type: object
+      additionalProperties: false
+      required: [id, image_ref, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        app_id:
+          type: string
+        image_ref:
+          type: string
+        digest:
+          type: string
+        source_operation_id:
+          type: string
+        node_id:
+          type: string
+        runtime_id:
+          type: string
+        cluster_node_name:
+          type: string
+        cache_endpoint:
+          type: string
+        status:
+          type: string
+          enum: [present, missing, pulling, failed]
+        last_seen_at:
+          type: string
+          format: date-time
+        size_bytes:
+          type: integer
+          format: int64
+        last_error:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ImageLocationReportRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        tenant_id:
+          type: string
+        app_id:
+          type: string
+        image_ref:
+          type: string
+        digest:
+          type: string
+        source_operation_id:
+          type: string
+        node_id:
+          type: string
+        runtime_id:
+          type: string
+        cluster_node_name:
+          type: string
+        cache_endpoint:
+          type: string
+        status:
+          type: string
+          enum: [present, missing, pulling, failed]
+        last_seen_at:
+          type: string
+          format: date-time
+        size_bytes:
+          type: integer
+          format: int64
+        last_error:
+          type: string
+    ImageLocationResponse:
+      type: object
+      additionalProperties: false
+      required: [image_location]
+      properties:
+        image_location:
+          $ref: "#/components/schemas/ImageLocation"
+    ImageLocationListResponse:
+      type: object
+      additionalProperties: false
+      required: [image_locations]
+      properties:
+        image_locations:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageLocation"
     NodeUpdaterListResponse:
       type: object
       additionalProperties: false

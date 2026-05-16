@@ -392,6 +392,8 @@ func normalizeNodeUpdateTaskType(raw string) string {
 		return model.NodeUpdateTaskTypeInstallNFSClient
 	case model.NodeUpdateTaskTypePrepullSystemImages:
 		return model.NodeUpdateTaskTypePrepullSystemImages
+	case model.NodeUpdateTaskTypePrepullAppImages:
+		return model.NodeUpdateTaskTypePrepullAppImages
 	case model.NodeUpdateTaskTypeVerifySystemdEscape:
 		return model.NodeUpdateTaskTypeVerifySystemdEscape
 	default:

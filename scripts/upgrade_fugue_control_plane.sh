@@ -2538,6 +2538,14 @@ main() {
   require_env FUGUE_API_IMAGE_TAG
   require_env FUGUE_CONTROLLER_IMAGE_REPOSITORY
   require_env FUGUE_CONTROLLER_IMAGE_TAG
+  FUGUE_IMAGE_CACHE_ENABLED="${FUGUE_IMAGE_CACHE_ENABLED:-true}"
+  if [[ "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]]; then
+    require_env FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY
+    require_env FUGUE_IMAGE_CACHE_IMAGE_TAG
+  else
+    FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY="${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY:-fugue-image-cache}"
+    FUGUE_IMAGE_CACHE_IMAGE_TAG="${FUGUE_IMAGE_CACHE_IMAGE_TAG:-latest}"
+  fi
   FUGUE_EDGE_ENABLED="${FUGUE_EDGE_ENABLED:-true}"
   if [[ "${FUGUE_EDGE_ENABLED}" == "true" ]]; then
     require_env FUGUE_EDGE_IMAGE_REPOSITORY
@@ -2766,7 +2774,11 @@ main() {
   run_release_preflight
 
   command_exists helm || fail "helm is not installed"
-  ensure_local_registry_mirror_config "${FUGUE_REGISTRY_PULL_BASE}" "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}"
+  effective_cluster_join_registry_endpoint="${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}"
+  if [[ -z "${effective_cluster_join_registry_endpoint}" && "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]]; then
+    effective_cluster_join_registry_endpoint="http://127.0.0.1:5000"
+  fi
+  ensure_local_registry_mirror_config "${FUGUE_REGISTRY_PULL_BASE}" "${effective_cluster_join_registry_endpoint}"
   wait_for_local_kube_api_ready
   ${KUBECTL} version --client >/dev/null
   helm status "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" >/dev/null
@@ -2778,6 +2790,7 @@ main() {
   log "upgrading ${FUGUE_RELEASE_NAME} in namespace ${FUGUE_NAMESPACE}"
   log "api image: ${FUGUE_API_IMAGE_REPOSITORY}:${FUGUE_API_IMAGE_TAG}"
   log "controller image: ${FUGUE_CONTROLLER_IMAGE_REPOSITORY}:${FUGUE_CONTROLLER_IMAGE_TAG}"
+  log "image cache image: ${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY}:${FUGUE_IMAGE_CACHE_IMAGE_TAG} enabled=${FUGUE_IMAGE_CACHE_ENABLED}"
   log "edge image: ${FUGUE_EDGE_IMAGE_REPOSITORY}:${FUGUE_EDGE_IMAGE_TAG} enabled=${FUGUE_EDGE_ENABLED} edge_group_id=${FUGUE_EDGE_GROUP_ID:-<empty>}"
   log "edge caddy: enabled=${FUGUE_EDGE_CADDY_ENABLED} listen=${FUGUE_EDGE_CADDY_LISTEN_ADDR} tls_mode=${FUGUE_EDGE_CADDY_TLS_MODE} public_hostports=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED} http=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP} https=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS} static_tls=${FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED} static_tls_secret=${FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME:-<none>}"
   log "control-plane postgres: legacy_enabled=${FUGUE_POSTGRES_ENABLED} cnpg_enabled=${FUGUE_CONTROL_PLANE_POSTGRES_ENABLED} cnpg_use_for_api=${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API} cnpg_instances=${FUGUE_CONTROL_PLANE_POSTGRES_INSTANCES}"
@@ -2822,6 +2835,9 @@ main() {
     --set-string api.image.tag="${FUGUE_API_IMAGE_TAG}" \
     --set-string controller.image.repository="${FUGUE_CONTROLLER_IMAGE_REPOSITORY}" \
     --set-string controller.image.tag="${FUGUE_CONTROLLER_IMAGE_TAG}" \
+    --set imageCache.enabled="${FUGUE_IMAGE_CACHE_ENABLED}" \
+    --set-string imageCache.image.repository="${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY}" \
+    --set-string imageCache.image.tag="${FUGUE_IMAGE_CACHE_IMAGE_TAG}" \
     --set edge.enabled="${FUGUE_EDGE_ENABLED}" \
     --set-string edge.image.repository="${FUGUE_EDGE_IMAGE_REPOSITORY}" \
     --set-string edge.image.tag="${FUGUE_EDGE_IMAGE_TAG}" \

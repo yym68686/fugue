@@ -292,6 +292,31 @@ imagePrePull:
       memory: 128Mi
       ephemeral-storage: 128Mi
 
+imageCache:
+  enabled: true
+  image:
+    repository: fugue-image-cache
+    tag: latest
+    digest: ""
+    pullPolicy: IfNotPresent
+  port: 5000
+  registryBase: ""
+  upstreamBase: ""
+  hostPath: /var/lib/fugue/image-cache
+  priorityClassName: system-node-critical
+  nodeSelector: {}
+  affinity: {}
+  tolerations:
+    - operator: Exists
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+      ephemeral-storage: 128Mi
+    limits:
+      memory: 512Mi
+      ephemeral-storage: 4Gi
+
 topologyLabeler:
   enabled: true
   intervalSeconds: 900

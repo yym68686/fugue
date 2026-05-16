@@ -65,6 +65,10 @@ app.kubernetes.io/component: {{ .component }}
 {{- printf "%s-image-prepull" (include "fugue.fullname" .) -}}
 {{- end -}}
 
+{{- define "fugue.imageCacheName" -}}
+{{- printf "%s-image-cache" (include "fugue.fullname" .) -}}
+{{- end -}}
+
 {{- define "fugue.imageRef" -}}
 {{- $repository := required "image repository is required" .repository -}}
 {{- $digest := default "" .digest -}}
@@ -130,6 +134,20 @@ tolerations:
 {{- .Values.api.registryPushBase -}}
 {{- else -}}
 {{- printf "%s-registry.%s.svc.cluster.local:%v" (include "fugue.fullname" .) .Release.Namespace .Values.registry.service.port -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "fugue.registryPullBase" -}}
+{{- default (include "fugue.registryPushBase" .) .Values.api.registryPullBase -}}
+{{- end -}}
+
+{{- define "fugue.clusterJoinRegistryEndpoint" -}}
+{{- if .Values.api.clusterJoinRegistryEndpoint -}}
+{{- .Values.api.clusterJoinRegistryEndpoint -}}
+{{- else if and .Values.imageCache.enabled .Values.imageCache.port -}}
+{{- printf "http://127.0.0.1:%v" .Values.imageCache.port -}}
+{{- else -}}
+{{- include "fugue.registryPullBase" . -}}
 {{- end -}}
 {{- end -}}
 

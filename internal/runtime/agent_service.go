@@ -312,6 +312,9 @@ func (s *AgentService) processTask(ctx context.Context, task AgentTask) error {
 				return fmt.Errorf("kubectl delete: %w", err)
 			}
 		default:
+			if err := s.ensureAgentImagePresent(ctx, app); err != nil {
+				return err
+			}
 			if err := ApplyKubectl(bundle.ManifestPath); err != nil {
 				return fmt.Errorf("kubectl apply: %w", err)
 			}
@@ -332,6 +335,56 @@ func (s *AgentService) processTask(ctx context.Context, task AgentTask) error {
 		s.logf("completion outbox flush after task %s deferred: %v", task.Operation.ID, err)
 	}
 	return nil
+}
+
+func (s *AgentService) ensureAgentImagePresent(ctx context.Context, app model.App) error {
+	imageRef := strings.TrimSpace(app.Spec.Image)
+	if imageRef == "" || app.Spec.Replicas <= 0 {
+		return nil
+	}
+	_ = s.reportAgentImageLocation(ctx, app, imageRef, model.ImageLocationStatusPulling, "")
+	runner := s.CommandRunner
+	if runner == nil {
+		runner = defaultCommandRunner
+	}
+	pullCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	if output, err := runner(pullCtx, "crictl", "pull", imageRef); err == nil {
+		_ = output
+		_ = s.reportAgentImageLocation(ctx, app, imageRef, model.ImageLocationStatusPresent, "")
+		return nil
+	}
+	if output, err := runner(pullCtx, "k3s", "ctr", "images", "pull", imageRef); err == nil {
+		_ = output
+		_ = s.reportAgentImageLocation(ctx, app, imageRef, model.ImageLocationStatusPresent, "")
+		return nil
+	}
+	output, err := runner(pullCtx, "ctr", "-n", "k8s.io", "images", "pull", imageRef)
+	if err == nil {
+		_ = output
+		_ = s.reportAgentImageLocation(ctx, app, imageRef, model.ImageLocationStatusPresent, "")
+		return nil
+	}
+	message := strings.TrimSpace(string(output))
+	if message == "" {
+		message = err.Error()
+	}
+	_ = s.reportAgentImageLocation(ctx, app, imageRef, model.ImageLocationStatusFailed, message)
+	return fmt.Errorf("pre-pull app image %s: %w", imageRef, err)
+}
+
+func (s *AgentService) reportAgentImageLocation(ctx context.Context, app model.App, imageRef, status, lastError string) error {
+	payload, err := json.Marshal(map[string]any{
+		"app_id":     strings.TrimSpace(app.ID),
+		"image_ref":  strings.TrimSpace(imageRef),
+		"status":     strings.TrimSpace(status),
+		"last_error": strings.TrimSpace(lastError),
+	})
+	if err != nil {
+		return err
+	}
+	_, err = s.doJSONRequest(ctx, http.MethodPost, "/v1/agent/image-locations", s.Config.RuntimeKey, payload)
+	return err
 }
 
 func (s *AgentService) flushCompletionOutbox(ctx context.Context) error {
