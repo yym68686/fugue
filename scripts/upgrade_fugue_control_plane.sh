@@ -633,6 +633,25 @@ trim_field() {
   printf '%s' "$1" | awk '{$1=$1; print}'
 }
 
+is_legacy_local_cluster_join_registry_endpoint() {
+  local value=""
+  local host=""
+  local port=""
+
+  value="$(trim_field "$1")"
+  value="${value#http://}"
+  value="${value#https://}"
+  value="${value%%/*}"
+  host="${value%:*}"
+  port="${value##*:}"
+  [[ -n "${host}" && "${host}" != "${value}" ]] || return 1
+  [[ "${port}" == "${FUGUE_REGISTRY_NODEPORT:-30500}" ]] || return 1
+  case "${host}" in
+    127.0.0.1|localhost) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 release_api_base_url() {
   local base_url=""
   base_url="$(trim_field "${FUGUE_RELEASE_PREFLIGHT_API_URL:-${FUGUE_API_URL:-${FUGUE_BASE_URL:-}}}")"
@@ -2539,6 +2558,7 @@ main() {
   require_env FUGUE_CONTROLLER_IMAGE_REPOSITORY
   require_env FUGUE_CONTROLLER_IMAGE_TAG
   FUGUE_IMAGE_CACHE_ENABLED="${FUGUE_IMAGE_CACHE_ENABLED:-true}"
+  FUGUE_IMAGE_CACHE_PORT="${FUGUE_IMAGE_CACHE_PORT:-5000}"
   if [[ "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]]; then
     require_env FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY
     require_env FUGUE_IMAGE_CACHE_IMAGE_TAG
@@ -2762,6 +2782,14 @@ main() {
   if [[ -z "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT:-}" ]]; then
     FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT="${FUGUE_DEFAULT_CLUSTER_JOIN_REGISTRY_ENDPOINT:-}"
   fi
+  if [[ "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]] &&
+    { [[ -z "$(trim_field "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}")" ]] ||
+      is_legacy_local_cluster_join_registry_endpoint "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}"; }; then
+    if [[ -n "$(trim_field "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}")" ]]; then
+      log "replacing legacy local registry endpoint ${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT} with image cache endpoint"
+    fi
+    FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT="http://127.0.0.1:${FUGUE_IMAGE_CACHE_PORT}"
+  fi
   [[ -n "$(trim_field "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}")" ]] || fail "FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT must come from DiscoveryBundle or an explicit env var"
   if [[ -z "${FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS:-}" ]]; then
     FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS="$(detect_cluster_join_server_fallbacks || true)"
@@ -2836,6 +2864,7 @@ main() {
     --set-string controller.image.repository="${FUGUE_CONTROLLER_IMAGE_REPOSITORY}" \
     --set-string controller.image.tag="${FUGUE_CONTROLLER_IMAGE_TAG}" \
     --set imageCache.enabled="${FUGUE_IMAGE_CACHE_ENABLED}" \
+    --set imageCache.port="${FUGUE_IMAGE_CACHE_PORT}" \
     --set-string imageCache.image.repository="${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY}" \
     --set-string imageCache.image.tag="${FUGUE_IMAGE_CACHE_IMAGE_TAG}" \
     --set edge.enabled="${FUGUE_EDGE_ENABLED}" \
