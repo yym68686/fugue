@@ -11,19 +11,28 @@ const (
 )
 
 func OperationControllerLaneName(op Operation) string {
-	requestedByGitHubSync := strings.TrimSpace(op.RequestedByID) == OperationRequestedByGitHubSyncController
+	requestedByBackgroundController := operationRequestedByBackgroundController(op.RequestedByID)
 	opType := strings.TrimSpace(op.Type)
 	switch {
-	case opType == OperationTypeImport && !requestedByGitHubSync:
+	case opType == OperationTypeImport && !requestedByBackgroundController:
 		return OperationControllerLaneForegroundImport
-	case opType != OperationTypeImport && !requestedByGitHubSync:
+	case opType != OperationTypeImport && !requestedByBackgroundController:
 		return OperationControllerLaneForegroundActivate
-	case opType == OperationTypeImport && requestedByGitHubSync:
+	case opType == OperationTypeImport && requestedByBackgroundController:
 		return OperationControllerLaneGitHubSyncImport
-	case opType != OperationTypeImport && requestedByGitHubSync:
+	case opType != OperationTypeImport && requestedByBackgroundController:
 		return OperationControllerLaneGitHubSyncActivate
 	default:
 		return OperationControllerLaneUnknown
+	}
+}
+
+func operationRequestedByBackgroundController(requestedByID string) bool {
+	switch strings.TrimSpace(requestedByID) {
+	case OperationRequestedByGitHubSyncController, OperationRequestedByImageTracking:
+		return true
+	default:
+		return false
 	}
 }
 

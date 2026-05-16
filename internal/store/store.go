@@ -241,6 +241,7 @@ func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
 		state.Runtimes = deleteRuntimesByTenant(state.Runtimes, id, deletedNodeKeyIDs, deletedRuntimeIDs)
 		state.RuntimeGrants = deleteRuntimeAccessGrants(state.RuntimeGrants, id, deletedRuntimeIDs)
 		state.Apps = deleteAppsByTenant(state.Apps, id)
+		state.AppImageTrackings = deleteAppImageTrackingsByTenant(state.AppImageTrackings, id)
 		state.BackingServices = deleteBackingServicesByTenant(state.BackingServices, id)
 		state.ServiceBindings = deleteServiceBindingsByTenant(state.ServiceBindings, id)
 		state.Operations = deleteOperationsByTenant(state.Operations, id)
@@ -2364,6 +2365,7 @@ func (s *Store) PurgeApp(id string) (model.App, error) {
 
 		state.Apps = append(state.Apps[:index], state.Apps[index+1:]...)
 		deleteAppDomainsByApp(state, id)
+		state.AppImageTrackings = deleteAppImageTrackingsByApp(state.AppImageTrackings, id)
 		state.ServiceBindings = deleteServiceBindingsByApp(state.ServiceBindings, id)
 		state.BackingServices = deleteOwnedBackingServicesByApp(state.BackingServices, id)
 		state.Operations = deleteOperationsByApp(state.Operations, id)
@@ -2491,12 +2493,20 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 	return app, err
 }
 
-func isGitHubSyncImportOperation(op model.Operation) bool {
-	return op.Type == model.OperationTypeImport && strings.TrimSpace(op.RequestedByID) == model.OperationRequestedByGitHubSyncController
+func isBackgroundControllerImportOperation(op model.Operation) bool {
+	if op.Type != model.OperationTypeImport {
+		return false
+	}
+	switch strings.TrimSpace(op.RequestedByID) {
+	case model.OperationRequestedByGitHubSyncController, model.OperationRequestedByImageTracking:
+		return true
+	default:
+		return false
+	}
 }
 
 func isForegroundPendingOperation(op model.Operation) bool {
-	return !isGitHubSyncImportOperation(op)
+	return !isBackgroundControllerImportOperation(op)
 }
 
 func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
@@ -3242,7 +3252,7 @@ func (s *Store) ClaimNextPendingGitHubSyncImportOperation() (model.Operation, bo
 	if s.usingDatabase() {
 		return s.pgClaimNextPendingGitHubSyncImportOperation()
 	}
-	return s.claimNextPendingOperationMatching(isGitHubSyncImportOperation)
+	return s.claimNextPendingOperationMatching(isBackgroundControllerImportOperation)
 }
 
 func (s *Store) claimNextPendingOperationMatching(match func(model.Operation) bool) (model.Operation, bool, error) {
@@ -3401,6 +3411,7 @@ func (s *Store) completeOperation(id, runtimeID, manifestPath, message string, d
 			return err
 		}
 		currentOp := state.Operations[index]
+		updateAppImageTrackingDeployedInState(state, currentOp, now)
 		if currentOp.Type == model.OperationTypeDelete {
 			deleteAppDomainsByApp(state, currentOp.AppID)
 			appIndex := findApp(state, currentOp.AppID)
@@ -3639,6 +3650,9 @@ func ensureDefaults(state *model.State) {
 	}
 	if state.ImageLocations == nil {
 		state.ImageLocations = []model.ImageLocation{}
+	}
+	if state.AppImageTrackings == nil {
+		state.AppImageTrackings = []model.AppImageTracking{}
 	}
 	if state.Runtimes == nil {
 		state.Runtimes = []model.Runtime{}
@@ -4604,6 +4618,28 @@ func deleteAppsByTenant(apps []model.App, tenantID string) []model.App {
 			continue
 		}
 		filtered = append(filtered, app)
+	}
+	return filtered
+}
+
+func deleteAppImageTrackingsByTenant(trackings []model.AppImageTracking, tenantID string) []model.AppImageTracking {
+	filtered := trackings[:0]
+	for _, tracking := range trackings {
+		if tracking.TenantID == tenantID {
+			continue
+		}
+		filtered = append(filtered, tracking)
+	}
+	return filtered
+}
+
+func deleteAppImageTrackingsByApp(trackings []model.AppImageTracking, appID string) []model.AppImageTracking {
+	filtered := trackings[:0]
+	for _, tracking := range trackings {
+		if tracking.AppID == appID {
+			continue
+		}
+		filtered = append(filtered, tracking)
 	}
 	return filtered
 }

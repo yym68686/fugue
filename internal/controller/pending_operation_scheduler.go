@@ -9,16 +9,25 @@ import (
 )
 
 func pendingOperationMatchesLane(op model.Operation, lane operationLane) bool {
-	requestedByGitHubSync := strings.TrimSpace(op.RequestedByID) == model.OperationRequestedByGitHubSyncController
+	requestedByBackgroundController := operationRequestedByBackgroundController(op.RequestedByID)
 	switch lane {
 	case operationLaneForegroundImport:
-		return op.Type == model.OperationTypeImport && !requestedByGitHubSync
+		return op.Type == model.OperationTypeImport && !requestedByBackgroundController
 	case operationLaneForegroundActivate:
-		return op.Type != model.OperationTypeImport && !requestedByGitHubSync
+		return op.Type != model.OperationTypeImport && !requestedByBackgroundController
 	case operationLaneGitHubSyncImport:
-		return op.Type == model.OperationTypeImport && requestedByGitHubSync
+		return op.Type == model.OperationTypeImport && requestedByBackgroundController
 	case operationLaneGitHubSyncActivate:
-		return op.Type != model.OperationTypeImport && requestedByGitHubSync
+		return op.Type != model.OperationTypeImport && requestedByBackgroundController
+	default:
+		return false
+	}
+}
+
+func operationRequestedByBackgroundController(requestedByID string) bool {
+	switch strings.TrimSpace(requestedByID) {
+	case model.OperationRequestedByGitHubSyncController, model.OperationRequestedByImageTracking:
+		return true
 	default:
 		return false
 	}

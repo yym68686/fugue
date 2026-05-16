@@ -284,6 +284,18 @@ func ResolveRemoteImageDigestRef(ctx context.Context, imageRef string) (string, 
 	return DigestReferenceFromImageRef(normalized, digest)
 }
 
+func ResolveRemoteImageDigest(ctx context.Context, imageRef string) (string, error) {
+	normalized, err := normalizeContainerImageRef(imageRef)
+	if err != nil {
+		return "", err
+	}
+	digest, err := crane.Digest(normalized, craneOptionsForImageRef(ctx, normalized)...)
+	if err != nil {
+		return "", fmt.Errorf("resolve image digest: %w", err)
+	}
+	return digest, nil
+}
+
 func detectImageBackgroundOverride(imageRef string, configFile *v1.ConfigFile, options ...crane.Option) (string, bool, error) {
 	img, err := crane.Pull(imageRef, options...)
 	if err != nil {

@@ -19,12 +19,175 @@ func (c *CLI) newAppReleaseCommand() *cobra.Command {
 	}
 	cmd.AddCommand(
 		c.newAppReleaseListCommand(),
+		c.newAppReleaseTrackingCommand(),
 		c.newAppReleasePruneCommand(),
 		c.newAppReleasePolicyCommand(),
 		hideCompatCommand(c.newAppReleaseDeployCommand(), "fugue app deploy"),
 		hideCompatCommand(c.newAppReleaseRebuildCommand(), "fugue app build"),
 		hideCompatCommand(c.newAppReleaseRollbackCommand(), "fugue app rollback"),
 	)
+	return cmd
+}
+
+func (c *CLI) newAppReleaseTrackingCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "tracking <app>",
+		Aliases: []string{"track", "auto-update"},
+		Short:   "Inspect and configure external image tracking",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			response, err := client.GetAppImageTracking(app.ID)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			if response.Tracking == nil {
+				return writeKeyValues(c.stdout,
+					kvPair{Key: "app_id", Value: app.ID},
+					kvPair{Key: "enabled", Value: "false"},
+				)
+			}
+			return writeAppImageTrackingSummary(c.stdout, *response.Tracking)
+		},
+	}
+	cmd.AddCommand(
+		c.newAppReleaseTrackingSetCommand(),
+		c.newAppReleaseTrackingDisableCommand(),
+		c.newAppReleaseTrackingSyncCommand(),
+	)
+	return cmd
+}
+
+func (c *CLI) newAppReleaseTrackingSetCommand() *cobra.Command {
+	opts := struct {
+		ImageRef string
+		Disabled bool
+	}{}
+	cmd := &cobra.Command{
+		Use:   "set <app>",
+		Short: "Track an external image ref for automatic updates",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(opts.ImageRef) == "" {
+				return fmt.Errorf("--image is required")
+			}
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			response, err := client.PutAppImageTracking(app.ID, opts.ImageRef, !opts.Disabled)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			if response.Tracking == nil {
+				return writeKeyValues(c.stdout, kvPair{Key: "app_id", Value: app.ID}, kvPair{Key: "enabled", Value: "false"})
+			}
+			return writeAppImageTrackingSummary(c.stdout, *response.Tracking)
+		},
+	}
+	cmd.Flags().StringVar(&opts.ImageRef, "image", "", "External image ref to track, for example ghcr.io/owner/app:latest")
+	cmd.Flags().BoolVar(&opts.Disabled, "disabled", false, "Create or update the tracking record disabled")
+	return cmd
+}
+
+func (c *CLI) newAppReleaseTrackingDisableCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "disable <app>",
+		Short: "Disable external image tracking",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			current, err := client.GetAppImageTracking(app.ID)
+			if err != nil {
+				return err
+			}
+			if current.Tracking == nil {
+				return fmt.Errorf("app image tracking is not configured")
+			}
+			response, err := client.PutAppImageTracking(app.ID, current.Tracking.ImageRef, false)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			if response.Tracking == nil {
+				return writeKeyValues(c.stdout, kvPair{Key: "app_id", Value: app.ID}, kvPair{Key: "enabled", Value: "false"})
+			}
+			return writeAppImageTrackingSummary(c.stdout, *response.Tracking)
+		},
+	}
+}
+
+func (c *CLI) newAppReleaseTrackingSyncCommand() *cobra.Command {
+	opts := struct {
+		Wait bool
+	}{Wait: true}
+	cmd := &cobra.Command{
+		Use:   "sync <app>",
+		Short: "Check the tracked image digest and queue an update when it changed",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			response, err := client.SyncAppImage(app.ID, "", "manual", "")
+			if err != nil {
+				return err
+			}
+			if response.Operation != nil {
+				if err := c.waitForOptionalOperation(client, response.Operation, opts.Wait); err != nil {
+					return err
+				}
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			pairs := []kvPair{
+				{Key: "app_id", Value: app.ID},
+				{Key: "digest", Value: response.Digest},
+				{Key: "changed", Value: fmt.Sprintf("%t", response.Changed)},
+				{Key: "already_current", Value: fmt.Sprintf("%t", response.AlreadyCurrent)},
+			}
+			if response.Operation != nil {
+				pairs = append(pairs, kvPair{Key: "operation_id", Value: response.Operation.ID})
+			}
+			if strings.TrimSpace(response.Message) != "" {
+				pairs = append(pairs, kvPair{Key: "message", Value: response.Message})
+			}
+			return writeKeyValues(c.stdout, pairs...)
+		},
+	}
+	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for queued operation completion")
 	return cmd
 }
 

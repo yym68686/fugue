@@ -751,6 +751,44 @@ func (c *Client) GetAppImages(id string) (appImageInventoryResponse, error) {
 	return response, nil
 }
 
+func (c *Client) GetAppImageTracking(id string) (appImageTrackingResponse, error) {
+	var response appImageTrackingResponse
+	if err := c.doJSON(http.MethodGet, path.Join("/v1/apps", id, "image-tracking"), nil, &response); err != nil {
+		return appImageTrackingResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) PutAppImageTracking(id, imageRef string, enabled bool) (appImageTrackingResponse, error) {
+	var response appImageTrackingResponse
+	request := map[string]any{
+		"image_ref": strings.TrimSpace(imageRef),
+		"enabled":   enabled,
+	}
+	if err := c.doJSON(http.MethodPut, path.Join("/v1/apps", id, "image-tracking"), request, &response); err != nil {
+		return appImageTrackingResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) SyncAppImage(id, imageRef, event, deliveryID string) (appImageSyncResponse, error) {
+	var response appImageSyncResponse
+	request := map[string]string{}
+	if strings.TrimSpace(imageRef) != "" {
+		request["image_ref"] = strings.TrimSpace(imageRef)
+	}
+	if strings.TrimSpace(event) != "" {
+		request["event"] = strings.TrimSpace(event)
+	}
+	if strings.TrimSpace(deliveryID) != "" {
+		request["delivery_id"] = strings.TrimSpace(deliveryID)
+	}
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "image-sync"), request, &response); err != nil {
+		return appImageSyncResponse{}, err
+	}
+	return response, nil
+}
+
 func (c *Client) RedeployAppImage(id, imageRef string) (appImageRedeployResponse, error) {
 	var response appImageRedeployResponse
 	request := map[string]string{"image_ref": strings.TrimSpace(imageRef)}

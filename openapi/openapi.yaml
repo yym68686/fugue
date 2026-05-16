@@ -2768,6 +2768,80 @@ paths:
                 $ref: "#/components/schemas/AppImageInventoryResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/image-tracking:
+    get:
+      operationId: getAppImageTracking
+      summary: Get App Image Tracking
+      tags: [Apps]
+      x-fugue-handler: handleGetAppImageTracking
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppImageTrackingResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      operationId: putAppImageTracking
+      summary: Put App Image Tracking
+      tags: [Apps]
+      x-fugue-handler: handlePutAppImageTracking
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppImageTrackingRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppImageTrackingResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/image-sync:
+    post:
+      operationId: syncAppImage
+      summary: Sync App Image
+      tags: [Apps]
+      x-fugue-handler: handleSyncAppImage
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppImageSyncRequest"
+      responses:
+        '200':
+          description: Tracked image already current
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppImageSyncResponse"
+        '202':
+          description: Image sync queued or deferred
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppImageSyncResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/images/redeploy:
     post:
       operationId: redeployAppImage
@@ -8872,6 +8946,95 @@ components:
       required: [image_ref]
       properties:
         image_ref:
+          type: string
+    AppImageTracking:
+      type: object
+      additionalProperties: false
+      required:
+        [id, tenant_id, app_id, image_ref, enabled, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        app_id:
+          type: string
+        image_ref:
+          type: string
+        enabled:
+          type: boolean
+        last_seen_digest:
+          type: string
+        last_queued_digest:
+          type: string
+        last_deployed_digest:
+          type: string
+        last_operation_id:
+          type: string
+        last_delivery_id:
+          type: string
+        last_event:
+          type: string
+        last_error:
+          type: string
+        last_checked_at:
+          type: string
+          format: date-time
+        last_triggered_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    AppImageTrackingRequest:
+      type: object
+      additionalProperties: false
+      required: [image_ref]
+      properties:
+        image_ref:
+          type: string
+        enabled:
+          type: boolean
+    AppImageTrackingResponse:
+      type: object
+      additionalProperties: false
+      required: [app_id]
+      properties:
+        app_id:
+          type: string
+        tracking:
+          $ref: "#/components/schemas/AppImageTracking"
+    AppImageSyncRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        image_ref:
+          type: string
+        event:
+          type: string
+        delivery_id:
+          type: string
+    AppImageSyncResponse:
+      type: object
+      additionalProperties: false
+      required: [app_id, changed, already_current]
+      properties:
+        app_id:
+          type: string
+        tracking:
+          $ref: "#/components/schemas/AppImageTracking"
+        operation:
+          $ref: "#/components/schemas/Operation"
+        digest:
+          type: string
+        changed:
+          type: boolean
+        already_current:
+          type: boolean
+        message:
           type: string
     AppImageInventoryResponse:
       type: object

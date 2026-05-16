@@ -29,6 +29,7 @@ type Service struct {
 	inspectManagedImageConfig     imageConfigInspector
 	deleteManagedImage            func(context.Context, string) (appimages.DeleteResult, error)
 	resolveManagedImageDigestRef  func(context.Context, string) (string, error)
+	resolveRemoteImageDigest      func(context.Context, string) (string, error)
 	syncBillingImageStorage       bool
 	latestGitHubCommit            func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
 	newKubeClient                 func(namespace string) (*kubeClient, error)
@@ -72,6 +73,7 @@ func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *S
 		registryPushBase:             strings.TrimSpace(cfg.RegistryPushBase),
 		registryPullBase:             strings.TrimSpace(cfg.RegistryPullBase),
 		resolveManagedImageDigestRef: sourceimport.ResolveRemoteImageDigestRef,
+		resolveRemoteImageDigest:     sourceimport.ResolveRemoteImageDigest,
 		latestGitHubCommit:           sourceimport.LatestGitHubCommit,
 		newKubeClient:                newKubeClient,
 		now:                          time.Now,
@@ -97,6 +99,9 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	if s.Config.GitHubSyncTimeout <= 0 {
 		s.Config.GitHubSyncTimeout = 20 * time.Second
+	}
+	if s.Config.ImageTrackingTimeout <= 0 {
+		s.Config.ImageTrackingTimeout = 20 * time.Second
 	}
 	if s.Config.GitHubSyncRetryBaseDelay <= 0 {
 		s.Config.GitHubSyncRetryBaseDelay = 5 * time.Minute
@@ -131,6 +136,9 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.deleteManagedImage == nil {
 		s.deleteManagedImage = appimages.DeleteRemoteImage
 	}
+	if s.resolveRemoteImageDigest == nil {
+		s.resolveRemoteImageDigest = sourceimport.ResolveRemoteImageDigest
+	}
 	s.syncBillingImageStorage = true
 	if s.Config.LeaderElectionEnabled {
 		return s.runWithLeaderElection(ctx)
@@ -153,11 +161,12 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		s.Config.GitHubSyncActivateWorkers = 0
 	}
 	s.Logger.Printf(
-		"controller active loop started; event_driven=%v poll_interval=%s fallback_poll_interval=%s github_sync_interval=%s render_dir=%s kubectl_apply=%v foreground_import_workers=%d foreground_activate_workers=%d github_sync_import_workers=%d github_sync_activate_workers=%d worker_limit_note=%q",
+		"controller active loop started; event_driven=%v poll_interval=%s fallback_poll_interval=%s github_sync_interval=%s image_tracking_interval=%s render_dir=%s kubectl_apply=%v foreground_import_workers=%d foreground_activate_workers=%d github_sync_import_workers=%d github_sync_activate_workers=%d worker_limit_note=%q",
 		eventDriven,
 		s.Config.PollInterval,
 		s.Config.FallbackPollInterval,
 		s.Config.GitHubSyncInterval,
+		s.Config.ImageTrackingInterval,
 		s.Config.RenderDir,
 		s.Config.KubectlApply,
 		s.Config.ForegroundImportWorkers,
@@ -197,6 +206,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			githubTicker = time.NewTicker(s.Config.GitHubSyncInterval)
 			defer githubTicker.Stop()
 		}
+		var imageTrackingTicker *time.Ticker
+		if s.Config.ImageTrackingInterval > 0 {
+			imageTrackingTicker = time.NewTicker(s.Config.ImageTrackingInterval)
+			defer imageTrackingTicker.Stop()
+		}
 
 		for {
 			if err := s.reconcileOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -209,6 +223,12 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			case <-githubTickerChan(githubTicker):
 				if err := s.syncGitHubApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
 					s.Logger.Printf("github sync error: %v", err)
+				} else {
+					triggerBackgroundOps()
+				}
+			case <-githubTickerChan(imageTrackingTicker):
+				if err := s.syncTrackedAppImages(ctx); err != nil && !errors.Is(err, context.Canceled) {
+					s.Logger.Printf("image tracking sync error: %v", err)
 				} else {
 					triggerBackgroundOps()
 				}
@@ -227,6 +247,13 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			triggerBackgroundOps()
 		}
 	}
+	if s.Config.ImageTrackingInterval > 0 {
+		if err := s.syncTrackedAppImages(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			s.Logger.Printf("initial image tracking sync error: %v", err)
+		} else {
+			triggerBackgroundOps()
+		}
+	}
 
 	staleTicker := time.NewTicker(s.Config.PollInterval)
 	defer staleTicker.Stop()
@@ -238,6 +265,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	if s.Config.GitHubSyncInterval > 0 {
 		githubTicker = time.NewTicker(s.Config.GitHubSyncInterval)
 		defer githubTicker.Stop()
+	}
+	var imageTrackingTicker *time.Ticker
+	if s.Config.ImageTrackingInterval > 0 {
+		imageTrackingTicker = time.NewTicker(s.Config.ImageTrackingInterval)
+		defer imageTrackingTicker.Stop()
 	}
 	operationEvents := listenForOperationEvents(ctx, s.Logger, s.Config.DatabaseURL)
 
@@ -276,6 +308,12 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		case <-githubTickerChan(githubTicker):
 			if err := s.syncGitHubApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				s.Logger.Printf("github sync error: %v", err)
+			} else {
+				triggerBackgroundOps()
+			}
+		case <-githubTickerChan(imageTrackingTicker):
+			if err := s.syncTrackedAppImages(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				s.Logger.Printf("image tracking sync error: %v", err)
 			} else {
 				triggerBackgroundOps()
 			}

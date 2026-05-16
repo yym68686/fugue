@@ -2,6 +2,7 @@ package api
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -59,6 +60,7 @@ type Server struct {
 	bundleRevokedKeyIDs          []string
 	bundleValidFor               time.Duration
 	importer                     *sourceimport.Importer
+	resolveRemoteImageDigest     func(context.Context, string) (string, error)
 	inspectBuilderPlacement      builderPlacementInspector
 	appImageRegistry             appImageRegistry
 	projectImageUsageCache       expiringResponseCache[projectImageUsageResponse]
@@ -124,6 +126,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		bundleRevokedKeyIDs:          append([]string(nil), cfg.BundleRevokedKeyIDs...),
 		bundleValidFor:               cfg.BundleValidFor,
 		importer:                     sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
+		resolveRemoteImageDigest:     sourceimport.ResolveRemoteImageDigest,
 		inspectBuilderPlacement:      sourceimport.InspectBuilderPlacementForProfile,
 		appImageRegistry:             newRemoteAppImageRegistry(),
 		projectImageUsageCache:       newExpiringResponseCache[projectImageUsageResponse](defaultProjectImageUsageCacheTTL),

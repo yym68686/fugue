@@ -283,6 +283,21 @@ func writeAppImageTable(w io.Writer, versions []appImageVersion) error {
 	return tw.Flush()
 }
 
+func writeAppImageTrackingSummary(w io.Writer, tracking model.AppImageTracking) error {
+	return writeKeyValues(w,
+		kvPair{Key: "app_id", Value: tracking.AppID},
+		kvPair{Key: "image_ref", Value: tracking.ImageRef},
+		kvPair{Key: "enabled", Value: fmt.Sprintf("%t", tracking.Enabled)},
+		kvPair{Key: "last_seen_digest", Value: tracking.LastSeenDigest},
+		kvPair{Key: "last_queued_digest", Value: tracking.LastQueuedDigest},
+		kvPair{Key: "last_deployed_digest", Value: tracking.LastDeployedDigest},
+		kvPair{Key: "last_operation_id", Value: tracking.LastOperationID},
+		kvPair{Key: "last_checked_at", Value: formatOptionalTimePtr(tracking.LastCheckedAt)},
+		kvPair{Key: "last_triggered_at", Value: formatOptionalTimePtr(tracking.LastTriggeredAt)},
+		kvPair{Key: "last_error", Value: tracking.LastError},
+	)
+}
+
 func writeProjectUsageTable(w io.Writer, projects []projectImageUsageSummary) error {
 	return writeProjectUsageTableWithContext(w, projects, nil, false)
 }

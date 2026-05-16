@@ -3940,15 +3940,15 @@ func (s *Store) pgClaimNextPendingOperation() (model.Operation, bool, error) {
 
 func (s *Store) pgClaimNextPendingForegroundOperation() (model.Operation, bool, error) {
 	return s.pgClaimNextPendingOperationWithFilter(`
-  AND NOT (type = $2 AND requested_by_id = $3)
-`, model.OperationTypeImport, model.OperationRequestedByGitHubSyncController)
+  AND NOT (type = $2 AND requested_by_id IN ($3, $4))
+`, model.OperationTypeImport, model.OperationRequestedByGitHubSyncController, model.OperationRequestedByImageTracking)
 }
 
 func (s *Store) pgClaimNextPendingGitHubSyncImportOperation() (model.Operation, bool, error) {
 	return s.pgClaimNextPendingOperationWithFilter(`
   AND type = $2
-  AND requested_by_id = $3
-`, model.OperationTypeImport, model.OperationRequestedByGitHubSyncController)
+  AND requested_by_id IN ($3, $4)
+`, model.OperationTypeImport, model.OperationRequestedByGitHubSyncController, model.OperationRequestedByImageTracking)
 }
 
 func (s *Store) pgClaimNextPendingOperationWithFilter(extraWhere string, args ...any) (model.Operation, bool, error) {
@@ -4137,6 +4137,9 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string,
 		return model.Operation{}, err
 	}
 	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+		return model.Operation{}, err
+	}
+	if err := s.pgUpdateAppImageTrackingDeployedTx(ctx, tx, op, now); err != nil {
 		return model.Operation{}, err
 	}
 	if op.Type == model.OperationTypeDelete {

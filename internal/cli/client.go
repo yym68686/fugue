@@ -239,6 +239,21 @@ type appFilesResponse struct {
 	Operation      *model.Operation `json:"operation,omitempty"`
 }
 
+type appImageTrackingResponse struct {
+	AppID    string                  `json:"app_id"`
+	Tracking *model.AppImageTracking `json:"tracking,omitempty"`
+}
+
+type appImageSyncResponse struct {
+	AppID          string                  `json:"app_id"`
+	Tracking       *model.AppImageTracking `json:"tracking,omitempty"`
+	Operation      *model.Operation        `json:"operation,omitempty"`
+	Digest         string                  `json:"digest,omitempty"`
+	Changed        bool                    `json:"changed"`
+	AlreadyCurrent bool                    `json:"already_current"`
+	Message        string                  `json:"message,omitempty"`
+}
+
 type appDomainAvailability struct {
 	Input     string `json:"input,omitempty"`
 	Hostname  string `json:"hostname,omitempty"`

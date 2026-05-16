@@ -140,6 +140,7 @@ const (
 	ActorTypeSystem      = "system"
 
 	OperationRequestedByGitHubSyncController = "fugue-controller/github-sync"
+	OperationRequestedByImageTracking        = "fugue-controller/image-tracking"
 	OperationRequestedByAutoFailover         = "fugue-controller/auto-failover"
 	OperationRequestedByImageRebuild         = "fugue-controller/image-rebuild"
 
@@ -1475,6 +1476,33 @@ type SourceUploadInspection struct {
 	References []SourceUploadReference `json:"references"`
 }
 
+type AppImageTracking struct {
+	ID                 string     `json:"id"`
+	TenantID           string     `json:"tenant_id"`
+	AppID              string     `json:"app_id"`
+	ImageRef           string     `json:"image_ref"`
+	Enabled            bool       `json:"enabled"`
+	LastSeenDigest     string     `json:"last_seen_digest,omitempty"`
+	LastQueuedDigest   string     `json:"last_queued_digest,omitempty"`
+	LastDeployedDigest string     `json:"last_deployed_digest,omitempty"`
+	LastOperationID    string     `json:"last_operation_id,omitempty"`
+	LastDeliveryID     string     `json:"last_delivery_id,omitempty"`
+	LastEvent          string     `json:"last_event,omitempty"`
+	LastError          string     `json:"last_error,omitempty"`
+	LastCheckedAt      *time.Time `json:"last_checked_at,omitempty"`
+	LastTriggeredAt    *time.Time `json:"last_triggered_at,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+type AppImageTrackingFilter struct {
+	TenantID      string
+	PlatformAdmin bool
+	AppID         string
+	ImageRef      string
+	Enabled       *bool
+}
+
 type Operation struct {
 	ID                       string                             `json:"id"`
 	TenantID                 string                             `json:"tenant_id"`
@@ -1785,6 +1813,7 @@ type State struct {
 	NodeUpdaters               []NodeUpdater               `json:"node_updaters,omitempty"`
 	NodeUpdateTasks            []NodeUpdateTask            `json:"node_update_tasks,omitempty"`
 	ImageLocations             []ImageLocation             `json:"image_locations,omitempty"`
+	AppImageTrackings          []AppImageTracking          `json:"app_image_trackings,omitempty"`
 	Runtimes                   []Runtime                   `json:"runtimes"`
 	RuntimeGrants              []RuntimeAccessGrant        `json:"runtime_grants"`
 	Apps                       []App                       `json:"apps"`
