@@ -262,6 +262,7 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 		default:
 			if err != nil {
 				s.logSyncFailure(err)
+				s.retryCurrentCaddyConfig(ctx, "route sync failed")
 			}
 		}
 	}()
@@ -341,6 +342,18 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 		}
 		s.recordSyncError(err)
 		return err
+	}
+}
+
+func (s *Service) retryCurrentCaddyConfig(ctx context.Context, reason string) {
+	if !s.Config.CaddyEnabled || !s.hasBundle() {
+		return
+	}
+	if err := s.applyCurrentCaddyConfig(ctx); err != nil {
+		if s.Logger != nil {
+			status := s.Status()
+			s.Logger.Printf("edge caddy cached config reapply failed; reason=%s version=%s error=%s", strings.TrimSpace(reason), status.BundleVersion, s.redact(err.Error()))
+		}
 	}
 }
 

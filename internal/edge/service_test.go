@@ -490,6 +490,49 @@ func TestApplyCaddyConfigBuildsHostRoutesForBundle(t *testing.T) {
 	}
 }
 
+func TestSyncFailureReappliesCachedCaddyConfig(t *testing.T) {
+	t.Parallel()
+
+	var loads int
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/load" {
+			t.Fatalf("unexpected caddy admin request %s %s", r.Method, r.URL.Path)
+		}
+		loads++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer admin.Close()
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "invariant failed", http.StatusInternalServerError)
+	}))
+	defer api.Close()
+
+	bundle := testBundle("routegen_cached_reapply")
+	service := NewService(config.EdgeConfig{
+		APIURL:               api.URL,
+		EdgeToken:            "edge-secret",
+		EdgeGroupID:          "edge-group-default",
+		CaddyEnabled:         true,
+		CaddyAdminURL:        admin.URL,
+		CaddyListenAddr:      "127.0.0.1:18080",
+		CaddyProxyListenAddr: ":7833",
+	}, log.New(ioDiscard{}, "", 0))
+	service.recordSyncSuccess(bundle, `"routegen_cached_reapply"`, time.Now().UTC(), false)
+	service.recordCaddyApply(bundle.Version, 0, errors.New("apply caddy config: connect: connection refused"))
+
+	if err := service.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected route sync failure")
+	}
+	if loads != 1 {
+		t.Fatalf("expected cached Caddy config to be replayed once, got %d loads", loads)
+	}
+	status := service.Status()
+	if status.CaddyLastError != "" || status.CaddyAppliedVersion != bundle.Version {
+		t.Fatalf("expected Caddy config to recover from cached bundle, got %+v", status)
+	}
+}
+
 func TestBuildCaddyConfigSupportsInternalTLSCanary(t *testing.T) {
 	t.Parallel()
 
