@@ -37,15 +37,16 @@ func (s *Store) GetTenantBillingSummary(tenantID string) (model.TenantBillingSum
 
 	var summary model.TenantBillingSummary
 	err := s.withLockedState(true, func(state *model.State) error {
+		index := newBillingStateIndex(state)
 		if findTenant(state, tenantID) < 0 {
 			return ErrNotFound
 		}
 		now := time.Now().UTC()
-		billing := accrueTenantBillingLedger(state, tenantID, now)
+		billing := accrueTenantBillingLedgerWithIndex(state, index, tenantID, now)
 		if billing == nil {
 			return ErrNotFound
 		}
-		summary = buildTenantBillingSummary(state, *billing)
+		summary = buildTenantBillingSummaryWithIndex(state, index, *billing)
 		return nil
 	})
 	return summary, err
@@ -67,15 +68,16 @@ func (s *Store) UpdateTenantBilling(tenantID string, managedCap model.BillingRes
 
 	var summary model.TenantBillingSummary
 	err = s.withLockedState(true, func(state *model.State) error {
+		index := newBillingStateIndex(state)
 		if findTenant(state, tenantID) < 0 {
 			return ErrNotFound
 		}
 		now := time.Now().UTC()
-		billing := accrueTenantBillingLedger(state, tenantID, now)
+		billing := accrueTenantBillingLedgerWithIndex(state, index, tenantID, now)
 		if billing == nil {
 			return ErrNotFound
 		}
-		committed := tenantManagedCommittedResourcesForBilling(state, *billing)
+		committed := tenantManagedCommittedResourcesForBillingWithIndex(state, index, *billing)
 		if err := validateCommittedManagedCapacity(normalizedCap, committed); err != nil {
 			return err
 		}
@@ -88,7 +90,7 @@ func (s *Store) UpdateTenantBilling(tenantID string, managedCap model.BillingRes
 			now,
 			nil,
 		))
-		summary = buildTenantBillingSummary(state, *billing)
+		summary = buildTenantBillingSummaryWithIndex(state, index, *billing)
 		return nil
 	})
 	return summary, err
@@ -106,11 +108,12 @@ func (s *Store) TopUpTenantBilling(tenantID string, amountCents int64, note stri
 
 	var summary model.TenantBillingSummary
 	err := s.withLockedState(true, func(state *model.State) error {
+		index := newBillingStateIndex(state)
 		if findTenant(state, tenantID) < 0 {
 			return ErrNotFound
 		}
 		now := time.Now().UTC()
-		billing := accrueTenantBillingLedger(state, tenantID, now)
+		billing := accrueTenantBillingLedgerWithIndex(state, index, tenantID, now)
 		if billing == nil {
 			return ErrNotFound
 		}
@@ -130,7 +133,7 @@ func (s *Store) TopUpTenantBilling(tenantID string, amountCents int64, note stri
 			Metadata:               metadata,
 			CreatedAt:              now,
 		})
-		summary = buildTenantBillingSummary(state, *billing)
+		summary = buildTenantBillingSummaryWithIndex(state, index, *billing)
 		return nil
 	})
 	return summary, err
@@ -148,11 +151,12 @@ func (s *Store) SetTenantBillingBalance(tenantID string, balanceCents int64, met
 	targetBalanceMicroCents := balanceCents * microCentsPerCent
 	var summary model.TenantBillingSummary
 	err := s.withLockedState(true, func(state *model.State) error {
+		index := newBillingStateIndex(state)
 		if findTenant(state, tenantID) < 0 {
 			return ErrNotFound
 		}
 		now := time.Now().UTC()
-		billing := accrueTenantBillingLedger(state, tenantID, now)
+		billing := accrueTenantBillingLedgerWithIndex(state, index, tenantID, now)
 		if billing == nil {
 			return ErrNotFound
 		}
@@ -168,7 +172,7 @@ func (s *Store) SetTenantBillingBalance(tenantID string, balanceCents int64, met
 				metadata,
 			))
 		}
-		summary = buildTenantBillingSummary(state, *billing)
+		summary = buildTenantBillingSummaryWithIndex(state, index, *billing)
 		return nil
 	})
 	return summary, err
@@ -185,11 +189,12 @@ func (s *Store) SyncTenantBillingImageStorage(tenantID string, storageGibibytes 
 
 	var summary model.TenantBillingSummary
 	err := s.withLockedState(true, func(state *model.State) error {
+		index := newBillingStateIndex(state)
 		if findTenant(state, tenantID) < 0 {
 			return ErrNotFound
 		}
 		now := time.Now().UTC()
-		billing := accrueTenantBillingLedger(state, tenantID, now)
+		billing := accrueTenantBillingLedgerWithIndex(state, index, tenantID, now)
 		if billing == nil {
 			return ErrNotFound
 		}
@@ -197,7 +202,7 @@ func (s *Store) SyncTenantBillingImageStorage(tenantID string, storageGibibytes 
 			billing.ManagedImageStorageGibibytes = storageGibibytes
 			billing.UpdatedAt = now
 		}
-		summary = buildTenantBillingSummary(state, *billing)
+		summary = buildTenantBillingSummaryWithIndex(state, index, *billing)
 		return nil
 	})
 	return summary, err
@@ -718,6 +723,10 @@ func accrueTenantBillingWithCommittedResources(
 }
 
 func accrueTenantBillingLedger(state *model.State, tenantID string, now time.Time) *model.TenantBilling {
+	return accrueTenantBillingLedgerWithIndex(state, newBillingStateIndex(state), tenantID, now)
+}
+
+func accrueTenantBillingLedgerWithIndex(state *model.State, index billingStateIndex, tenantID string, now time.Time) *model.TenantBilling {
 	if state == nil || strings.TrimSpace(tenantID) == "" {
 		return nil
 	}
@@ -727,7 +736,7 @@ func accrueTenantBillingLedger(state *model.State, tenantID string, now time.Tim
 	}
 
 	lastAccruedAt := record.LastAccruedAt
-	committed := tenantManagedCommittedResourcesForBilling(state, *record)
+	committed := tenantManagedCommittedResourcesForBillingWithIndex(state, index, *record)
 	accrueTenantBillingWithCommittedResources(record, committed, now)
 	if !now.After(lastAccruedAt) {
 		return record
@@ -738,7 +747,7 @@ func accrueTenantBillingLedger(state *model.State, tenantID string, now time.Tim
 		return record
 	}
 
-	for _, component := range tenantPublicRuntimeChargeComponents(state, tenantID) {
+	for _, component := range tenantPublicRuntimeChargeComponentsWithIndex(state, index, tenantID) {
 		if component.HourlyRateMicroCents <= 0 {
 			continue
 		}
@@ -783,11 +792,11 @@ func accrueTenantBillingLedger(state *model.State, tenantID string, now time.Tim
 		))
 	}
 
-	index := findTenantBillingRecord(state, tenantID)
-	if index < 0 {
+	recordIndex := findTenantBillingRecord(state, tenantID)
+	if recordIndex < 0 {
 		return nil
 	}
-	return &state.TenantBilling[index]
+	return &state.TenantBilling[recordIndex]
 }
 
 func publicRuntimeOfferHourlyRateMicroCents(offer model.RuntimePublicOffer, resources model.BillingResourceSpec) int64 {
@@ -801,35 +810,7 @@ func publicRuntimeOfferHourlyRateMicroCents(offer model.RuntimePublicOffer, reso
 }
 
 func publicRuntimeChargeComponentForResources(state *model.State, consumerTenantID, runtimeID string, resources model.BillingResourceSpec) (publicRuntimeChargeComponent, bool) {
-	if state == nil || strings.TrimSpace(runtimeID) == "" {
-		return publicRuntimeChargeComponent{}, false
-	}
-	if resources.CPUMilliCores <= 0 && resources.MemoryMebibytes <= 0 && resources.StorageGibibytes <= 0 {
-		return publicRuntimeChargeComponent{}, false
-	}
-
-	index := findRuntime(state, runtimeID)
-	if index < 0 {
-		return publicRuntimeChargeComponent{}, false
-	}
-	runtime := state.Runtimes[index]
-	if strings.TrimSpace(runtime.TenantID) == "" || runtime.TenantID == consumerTenantID {
-		return publicRuntimeChargeComponent{}, false
-	}
-	if normalizeRuntimeAccessMode(runtime.Type, runtime.AccessMode) != model.RuntimeAccessModePublic || runtime.PublicOffer == nil {
-		return publicRuntimeChargeComponent{}, false
-	}
-
-	hourlyRate := publicRuntimeOfferHourlyRateMicroCents(*runtime.PublicOffer, resources)
-	if hourlyRate <= 0 {
-		return publicRuntimeChargeComponent{}, false
-	}
-	return publicRuntimeChargeComponent{
-		OwnerTenantID:        runtime.TenantID,
-		RuntimeID:            runtime.ID,
-		RuntimeName:          runtime.Name,
-		HourlyRateMicroCents: hourlyRate,
-	}, true
+	return publicRuntimeChargeComponentForResourcesWithIndex(newBillingStateIndex(state), consumerTenantID, runtimeID, resources)
 }
 
 func mergePublicRuntimeChargeComponent(components map[string]publicRuntimeChargeComponent, component publicRuntimeChargeComponent) {
@@ -846,58 +827,11 @@ func mergePublicRuntimeChargeComponent(components map[string]publicRuntimeCharge
 }
 
 func tenantPublicRuntimeChargeComponents(state *model.State, tenantID string) []publicRuntimeChargeComponent {
-	if state == nil || strings.TrimSpace(tenantID) == "" {
-		return nil
-	}
-	aggregated := make(map[string]publicRuntimeChargeComponent)
-	for _, app := range state.Apps {
-		if app.TenantID != tenantID || isDeletedApp(app) {
-			continue
-		}
-		if app.Status.CurrentReplicas <= 0 || strings.TrimSpace(app.Status.CurrentRuntimeID) == "" {
-			continue
-		}
-		if component, ok := publicRuntimeChargeComponentForResources(
-			state,
-			tenantID,
-			app.Status.CurrentRuntimeID,
-			multiplyResourceSpec(appEffectiveResources(app.Spec), int64(app.Status.CurrentReplicas)),
-		); ok {
-			mergePublicRuntimeChargeComponent(aggregated, component)
-		}
-		for _, service := range boundManagedServicesForApp(state, app.ID) {
-			if component, ok := publicRuntimeChargeComponentForResources(
-				state,
-				tenantID,
-				backingServiceRuntimeID(service, app.Status.CurrentRuntimeID),
-				backingServiceResources(service),
-			); ok {
-				mergePublicRuntimeChargeComponent(aggregated, component)
-			}
-		}
-	}
-	components := make([]publicRuntimeChargeComponent, 0, len(aggregated))
-	for _, component := range aggregated {
-		components = append(components, component)
-	}
-	sort.Slice(components, func(i, j int) bool {
-		if components[i].OwnerTenantID == components[j].OwnerTenantID {
-			if components[i].RuntimeID == components[j].RuntimeID {
-				return components[i].RuntimeName < components[j].RuntimeName
-			}
-			return components[i].RuntimeID < components[j].RuntimeID
-		}
-		return components[i].OwnerTenantID < components[j].OwnerTenantID
-	})
-	return components
+	return tenantPublicRuntimeChargeComponentsWithIndex(state, newBillingStateIndex(state), tenantID)
 }
 
 func tenantPublicRuntimeOutgoingHourlyRateMicroCents(state *model.State, tenantID string) int64 {
-	total := int64(0)
-	for _, component := range tenantPublicRuntimeChargeComponents(state, tenantID) {
-		total += component.HourlyRateMicroCents
-	}
-	return total
+	return tenantPublicRuntimeOutgoingHourlyRateMicroCentsWithIndex(state, newBillingStateIndex(state), tenantID)
 }
 
 func hasBillableManagedEnvelope(spec model.BillingResourceSpec) bool {
@@ -971,6 +905,10 @@ func billingBalanceRestrictedWithCommittedStorage(record model.TenantBilling, co
 
 func billingRunwayHoursWithCommittedStorage(record model.TenantBilling, committedStorageGibibytes int64) *float64 {
 	hourlyRate := billingHourlyRateMicroCentsWithCommittedStorage(record, committedStorageGibibytes)
+	return billingRunwayHoursForHourlyRate(record, hourlyRate)
+}
+
+func billingRunwayHoursForHourlyRate(record model.TenantBilling, hourlyRate int64) *float64 {
 	if hourlyRate <= 0 || record.BalanceMicroCents <= 0 {
 		return nil
 	}
@@ -1001,13 +939,21 @@ func activatedOutgoingRunwayHours(
 }
 
 func buildTenantBillingSummary(state *model.State, record model.TenantBilling) model.TenantBillingSummary {
-	committed := tenantManagedCommittedResourcesForBilling(state, record)
+	return buildTenantBillingSummaryWithIndex(state, newBillingStateIndex(state), record)
+}
+
+func buildTenantBillingSummaryWithIndex(state *model.State, index billingStateIndex, record model.TenantBilling) model.TenantBillingSummary {
+	committed := tenantManagedCommittedResourcesForBillingWithIndex(state, index, record)
 	available := clampResourceSpecSub(record.ManagedCap, committed)
-	billingActive := activatedOutgoingHourlyRateMicroCents(state, record, committed) > 0
+	managedHourlyRate := activatedManagedHourlyRateMicroCents(record, committed)
+	publicHourlyRate := tenantPublicRuntimeOutgoingHourlyRateMicroCentsWithIndex(state, index, record.TenantID)
+	outgoingHourlyRate := managedHourlyRate + publicHourlyRate
+	billingActive := outgoingHourlyRate > 0
 	overCap := billingActive && resourceSpecExceeds(committed, record.ManagedCap)
-	balanceRestricted := activatedOutgoingBalanceRestricted(state, record, committed)
-	status, reason := tenantBillingStatus(state, record, committed)
+	balanceRestricted := outgoingHourlyRate > 0 && record.BalanceMicroCents <= 0
+	status, reason := tenantBillingStatus(record, committed, managedHourlyRate, publicHourlyRate)
 	events := recentTenantBillingEvents(state, record.TenantID)
+	priceBook := normalizeBillingPriceBook(record.PriceBook)
 
 	return model.TenantBillingSummary{
 		TenantID:                  record.TenantID,
@@ -1021,27 +967,25 @@ func buildTenantBillingSummary(state *model.State, record model.TenantBilling) m
 		ManagedAvailable:          available,
 		DefaultAppResources:       model.BillingResourceSpec{},
 		DefaultPostgresResources:  model.DefaultManagedPostgresBillingResources(),
-		PriceBook:                 normalizeBillingPriceBook(record.PriceBook),
-		HourlyRateMicroCents:      activatedOutgoingHourlyRateMicroCents(state, record, committed),
-		MonthlyEstimateMicroCents: activatedOutgoingMonthlyEstimateMicroCents(state, record, committed),
+		PriceBook:                 priceBook,
+		HourlyRateMicroCents:      outgoingHourlyRate,
+		MonthlyEstimateMicroCents: outgoingHourlyRate * priceBook.HoursPerMonth,
 		BalanceMicroCents:         record.BalanceMicroCents,
-		RunwayHours:               activatedOutgoingRunwayHours(state, record, committed),
+		RunwayHours:               billingRunwayHoursForHourlyRate(record, outgoingHourlyRate),
 		LastAccruedAt:             record.LastAccruedAt,
 		UpdatedAt:                 record.UpdatedAt,
 		Events:                    events,
 	}
 }
 
-func tenantBillingStatus(state *model.State, record model.TenantBilling, committed model.BillingResourceSpec) (string, string) {
-	managedHourlyRate := activatedManagedHourlyRateMicroCents(record, committed)
-	publicHourlyRate := tenantPublicRuntimeOutgoingHourlyRateMicroCents(state, record.TenantID)
+func tenantBillingStatus(record model.TenantBilling, committed model.BillingResourceSpec, managedHourlyRate, publicHourlyRate int64) (string, string) {
 	totalHourlyRate := managedHourlyRate + publicHourlyRate
 	switch {
 	case totalHourlyRate <= 0:
 		return model.BillingStatusInactive, "Billing is inactive until any managed resource, retained managed image inventory, or paid public server usage becomes active. Your own attached servers remain free unless you publish them for others."
 	case resourceSpecExceeds(committed, record.ManagedCap):
 		return model.BillingStatusOverCap, "Current live managed capacity is above the saved envelope. Save a higher cap to match what is already committed before adding more managed capacity."
-	case activatedOutgoingBalanceRestricted(state, record, committed):
+	case totalHourlyRate > 0 && record.BalanceMicroCents <= 0:
 		return model.BillingStatusRestricted, "Balance is depleted. Top up before increasing managed capacity or deploying onto paid public servers."
 	case publicHourlyRate > 0 && managedHourlyRate <= 0:
 		return model.BillingStatusActive, "Deployments placed on paid public servers are metered hourly from your balance. Your own attached servers remain free unless you publish them for others."
@@ -1074,40 +1018,11 @@ func recentTenantBillingEvents(state *model.State, tenantID string) []model.Tena
 }
 
 func tenantManagedCommittedResources(state *model.State, tenantID string) model.BillingResourceSpec {
-	total := model.BillingResourceSpec{}
-	if state == nil {
-		return total
-	}
-	countedServices := make(map[string]struct{})
-	for _, app := range state.Apps {
-		if app.TenantID != tenantID || isDeletedApp(app) {
-			continue
-		}
-		total = addResourceSpec(total, appManagedBundleCommitment(state, app, app.Status.CurrentRuntimeID, app.Status.CurrentReplicas))
-		for _, service := range boundManagedServicesForApp(state, app.ID) {
-			countedServices[service.ID] = struct{}{}
-		}
-	}
-	for _, service := range state.BackingServices {
-		if service.TenantID != tenantID || isDeletedBackingService(service) {
-			continue
-		}
-		if _, counted := countedServices[service.ID]; counted {
-			continue
-		}
-		if !isBillableManagedBackingService(service) {
-			continue
-		}
-		if !isBillableManagedRuntimeType(runtimeTypeForState(state, backingServiceRuntimeID(service, ""))) {
-			continue
-		}
-		total = addResourceSpec(total, backingServiceResources(service))
-	}
-	return total
+	return tenantManagedCommittedResourcesWithIndex(state, newBillingStateIndex(state), tenantID)
 }
 
 func tenantManagedCommittedResourcesForBilling(state *model.State, record model.TenantBilling) model.BillingResourceSpec {
-	return addManagedImageStorageCommitment(tenantManagedCommittedResources(state, record.TenantID), record.ManagedImageStorageGibibytes)
+	return tenantManagedCommittedResourcesForBillingWithIndex(state, newBillingStateIndex(state), record)
 }
 
 func addManagedImageStorageCommitment(spec model.BillingResourceSpec, imageStorageGibibytes int64) model.BillingResourceSpec {
@@ -1116,45 +1031,11 @@ func addManagedImageStorageCommitment(spec model.BillingResourceSpec, imageStora
 }
 
 func appManagedBundleCommitment(state *model.State, app model.App, runtimeID string, replicas int) model.BillingResourceSpec {
-	total := model.BillingResourceSpec{}
-	if replicas > 0 && isBillableManagedRuntimeType(runtimeTypeForState(state, runtimeID)) {
-		total = multiplyResourceSpec(appEffectiveResources(app.Spec), int64(replicas))
-	}
-	services := boundManagedServicesForApp(state, app.ID)
-	for _, service := range services {
-		if !isBillableManagedRuntimeType(runtimeTypeForState(state, backingServiceRuntimeID(service, runtimeID))) {
-			continue
-		}
-		total = addResourceSpec(total, backingServiceResources(service))
-	}
-	return total
+	return appManagedBundleCommitmentWithIndex(newBillingStateIndex(state), app, runtimeID, replicas)
 }
 
 func boundManagedServicesForApp(state *model.State, appID string) []model.BackingService {
-	if state == nil {
-		return nil
-	}
-	seen := map[string]struct{}{}
-	services := make([]model.BackingService, 0)
-	for _, binding := range state.ServiceBindings {
-		if binding.AppID != appID {
-			continue
-		}
-		index := findBackingService(state, binding.ServiceID)
-		if index < 0 {
-			continue
-		}
-		service := state.BackingServices[index]
-		if !isBillableManagedBackingService(service) {
-			continue
-		}
-		if _, ok := seen[service.ID]; ok {
-			continue
-		}
-		seen[service.ID] = struct{}{}
-		services = append(services, service)
-	}
-	return services
+	return newBillingStateIndex(state).managedServicesForApp(appID)
 }
 
 func isBillableManagedBackingService(service model.BackingService) bool {
@@ -1209,14 +1090,7 @@ func postgresEffectiveResources(spec model.AppPostgresSpec) model.BillingResourc
 }
 
 func runtimeTypeForState(state *model.State, runtimeID string) string {
-	if state == nil || strings.TrimSpace(runtimeID) == "" {
-		return ""
-	}
-	index := findRuntime(state, runtimeID)
-	if index < 0 {
-		return ""
-	}
-	return state.Runtimes[index].Type
+	return newBillingStateIndex(state).runtimeType(runtimeID)
 }
 
 func isBillableManagedRuntimeType(runtimeType string) bool {
@@ -1253,7 +1127,8 @@ func validateTenantOperationBilling(
 }
 
 func projectedAppManagedBundleCommitment(state *model.State, app model.App, op model.Operation) (model.BillingResourceSpec, model.BillingResourceSpec, error) {
-	current := appManagedBundleCommitment(state, app, app.Status.CurrentRuntimeID, app.Status.CurrentReplicas)
+	index := newBillingStateIndex(state)
+	current := appManagedBundleCommitmentWithIndex(index, app, app.Status.CurrentRuntimeID, app.Status.CurrentReplicas)
 	projection := cloneBillingProjectionState(state, app)
 	opCopy := op
 	opCopy.DesiredSpec = cloneAppSpec(op.DesiredSpec)
@@ -1268,11 +1143,12 @@ func projectedAppManagedBundleCommitment(state *model.State, app model.App, op m
 		return current, model.BillingResourceSpec{}, nil
 	}
 	projectedApp := projection.Apps[0]
-	next := appManagedBundleCommitment(&projection, projectedApp, projectedApp.Status.CurrentRuntimeID, projectedApp.Status.CurrentReplicas)
+	next := appManagedBundleCommitmentWithIndex(newBillingStateIndex(&projection), projectedApp, projectedApp.Status.CurrentRuntimeID, projectedApp.Status.CurrentReplicas)
 	return current, next, nil
 }
 
 func cloneBillingProjectionState(state *model.State, app model.App) model.State {
+	index := newBillingStateIndex(state)
 	projection := model.State{
 		Apps:            []model.App{cloneAppForBilling(app)},
 		BackingServices: []model.BackingService{},
@@ -1287,19 +1163,24 @@ func cloneBillingProjectionState(state *model.State, app model.App) model.State 
 			continue
 		}
 		projection.ServiceBindings = append(projection.ServiceBindings, cloneServiceBinding(binding))
-		index := findBackingService(state, binding.ServiceID)
-		if index >= 0 {
-			projection.BackingServices = append(projection.BackingServices, cloneBackingService(state.BackingServices[index]))
+		service, found := index.service(binding.ServiceID)
+		if found {
+			projection.BackingServices = append(projection.BackingServices, cloneBackingService(service))
 		}
+	}
+	copiedServiceIDs := make(map[string]struct{}, len(projection.BackingServices))
+	for _, service := range projection.BackingServices {
+		copiedServiceIDs[service.ID] = struct{}{}
 	}
 	for _, service := range state.BackingServices {
 		if service.OwnerAppID != app.ID {
 			continue
 		}
-		if findBackingService(&projection, service.ID) >= 0 {
+		if _, exists := copiedServiceIDs[service.ID]; exists {
 			continue
 		}
 		projection.BackingServices = append(projection.BackingServices, cloneBackingService(service))
+		copiedServiceIDs[service.ID] = struct{}{}
 	}
 	return projection
 }
@@ -1398,7 +1279,8 @@ func validateCommittedManagedCapacity(managedCap, committed model.BillingResourc
 }
 
 func projectedTenantManagedTotals(state *model.State, app model.App, op model.Operation) (model.BillingResourceSpec, model.BillingResourceSpec, error) {
-	currentTotal := tenantManagedCommittedResources(state, app.TenantID)
+	index := newBillingStateIndex(state)
+	currentTotal := tenantManagedCommittedResourcesWithIndex(state, index, app.TenantID)
 	currentBundle, nextBundle, err := projectedAppManagedBundleCommitment(state, app, op)
 	if err != nil {
 		return model.BillingResourceSpec{}, model.BillingResourceSpec{}, err
@@ -1450,15 +1332,15 @@ func validateTenantManagedCapacityProjection(
 	record model.TenantBilling,
 	apply func(*model.State),
 ) error {
-	currentTotal := tenantManagedCommittedResourcesForBilling(state, record)
+	currentTotal := tenantManagedCommittedResourcesForBillingWithIndex(state, newBillingStateIndex(state), record)
 	projection := cloneTenantBillingState(state)
 	apply(&projection)
-	nextTotal := tenantManagedCommittedResourcesForBilling(&projection, record)
+	nextTotal := tenantManagedCommittedResourcesForBillingWithIndex(&projection, newBillingStateIndex(&projection), record)
 	return validateTenantManagedCapacityIncrease(record, currentTotal, nextTotal)
 }
 
 func projectedTenantPublicRuntimeHourlyRates(state *model.State, app model.App, op model.Operation) (int64, int64, error) {
-	currentRate := tenantPublicRuntimeOutgoingHourlyRateMicroCents(state, app.TenantID)
+	currentRate := tenantPublicRuntimeOutgoingHourlyRateMicroCentsWithIndex(state, newBillingStateIndex(state), app.TenantID)
 	projection := cloneTenantBillingState(state)
 	opCopy := op
 	opCopy.DesiredSpec = cloneAppSpec(op.DesiredSpec)
@@ -1469,7 +1351,7 @@ func projectedTenantPublicRuntimeHourlyRates(state *model.State, app model.App, 
 	if err := applyOperationToApp(&projection, &opCopy); err != nil {
 		return 0, 0, err
 	}
-	nextRate := tenantPublicRuntimeOutgoingHourlyRateMicroCents(&projection, app.TenantID)
+	nextRate := tenantPublicRuntimeOutgoingHourlyRateMicroCentsWithIndex(&projection, newBillingStateIndex(&projection), app.TenantID)
 	return currentRate, nextRate, nil
 }
 

@@ -282,36 +282,7 @@ func (s *Store) UnbindBackingService(bindingID string) (model.ServiceBinding, er
 }
 
 func hydrateAppBackingServices(state *model.State, app *model.App) {
-	if app == nil {
-		return
-	}
-	bindings := make([]model.ServiceBinding, 0)
-	servicesByID := make(map[string]model.BackingService)
-	for _, binding := range state.ServiceBindings {
-		if binding.AppID != app.ID {
-			continue
-		}
-		serviceIndex := findBackingService(state, binding.ServiceID)
-		if serviceIndex < 0 {
-			continue
-		}
-		service := state.BackingServices[serviceIndex]
-		if isDeletedBackingService(service) {
-			continue
-		}
-		bindings = append(bindings, cloneServiceBinding(binding))
-		servicesByID[service.ID] = cloneBackingService(service)
-	}
-	sortServiceBindings(bindings)
-
-	services := make([]model.BackingService, 0, len(servicesByID))
-	for _, service := range servicesByID {
-		services = append(services, service)
-	}
-	sortBackingServices(services)
-
-	app.Bindings = bindings
-	app.BackingServices = services
+	hydrateAppBackingServicesWithIndex(newAppBackingServiceIndex(state), app)
 }
 
 func applyDesiredSpecBackingServicesState(state *model.State, app *model.App, desiredSpec *model.AppSpec) error {

@@ -30,11 +30,11 @@ func (s *Store) pgGetTenantBillingSummary(tenantID string) (model.TenantBillingS
 	}
 
 	now := time.Now().UTC()
-	record, state, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
+	record, state, index, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
 	if err != nil {
 		return model.TenantBillingSummary{}, err
 	}
-	summary := buildTenantBillingSummary(&state, record)
+	summary := buildTenantBillingSummaryWithIndex(&state, index, record)
 
 	if err := tx.Commit(); err != nil {
 		return model.TenantBillingSummary{}, fmt.Errorf("commit billing summary transaction: %w", err)
@@ -66,11 +66,11 @@ func (s *Store) pgUpdateTenantBilling(tenantID string, managedCap model.BillingR
 	}
 
 	now := time.Now().UTC()
-	record, state, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
+	record, state, index, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
 	if err != nil {
 		return model.TenantBillingSummary{}, err
 	}
-	committed := tenantManagedCommittedResourcesForBilling(&state, record)
+	committed := tenantManagedCommittedResourcesForBillingWithIndex(&state, index, record)
 	if err := validateCommittedManagedCapacity(normalizedCap, committed); err != nil {
 		return model.TenantBillingSummary{}, err
 	}
@@ -89,7 +89,7 @@ func (s *Store) pgUpdateTenantBilling(tenantID string, managedCap model.BillingR
 		return model.TenantBillingSummary{}, err
 	}
 
-	summary := buildTenantBillingSummary(&state, record)
+	summary := buildTenantBillingSummaryWithIndex(&state, index, record)
 
 	if err := tx.Commit(); err != nil {
 		return model.TenantBillingSummary{}, fmt.Errorf("commit billing update transaction: %w", err)
@@ -120,7 +120,7 @@ func (s *Store) pgTopUpTenantBilling(tenantID string, amountCents int64, note st
 	}
 
 	now := time.Now().UTC()
-	record, state, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
+	record, state, index, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
 	if err != nil {
 		return model.TenantBillingSummary{}, err
 	}
@@ -146,7 +146,7 @@ func (s *Store) pgTopUpTenantBilling(tenantID string, amountCents int64, note st
 		return model.TenantBillingSummary{}, err
 	}
 
-	summary := buildTenantBillingSummary(&state, record)
+	summary := buildTenantBillingSummaryWithIndex(&state, index, record)
 
 	if err := tx.Commit(); err != nil {
 		return model.TenantBillingSummary{}, fmt.Errorf("commit billing top-up transaction: %w", err)
@@ -177,7 +177,7 @@ func (s *Store) pgSetTenantBillingBalance(tenantID string, balanceCents int64, m
 	}
 
 	now := time.Now().UTC()
-	record, state, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
+	record, state, index, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
 	if err != nil {
 		return model.TenantBillingSummary{}, err
 	}
@@ -202,7 +202,7 @@ func (s *Store) pgSetTenantBillingBalance(tenantID string, balanceCents int64, m
 		}
 	}
 
-	summary := buildTenantBillingSummary(&state, record)
+	summary := buildTenantBillingSummaryWithIndex(&state, index, record)
 
 	if err := tx.Commit(); err != nil {
 		return model.TenantBillingSummary{}, fmt.Errorf("commit billing balance transaction: %w", err)
@@ -229,7 +229,7 @@ func (s *Store) pgSyncTenantBillingImageStorage(tenantID string, storageGibibyte
 	}
 
 	now := time.Now().UTC()
-	record, state, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
+	record, state, index, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
 	if err != nil {
 		return model.TenantBillingSummary{}, err
 	}
@@ -240,7 +240,7 @@ func (s *Store) pgSyncTenantBillingImageStorage(tenantID string, storageGibibyte
 	if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, record); err != nil {
 		return model.TenantBillingSummary{}, err
 	}
-	summary := buildTenantBillingSummary(&state, record)
+	summary := buildTenantBillingSummaryWithIndex(&state, index, record)
 
 	if err := tx.Commit(); err != nil {
 		return model.TenantBillingSummary{}, fmt.Errorf("commit billing image sync transaction: %w", err)
@@ -397,32 +397,33 @@ LIMIT $2
 	}, nil
 }
 
-func (s *Store) pgAccrueTenantBillingTx(ctx context.Context, tx *sql.Tx, tenantID string, now time.Time) (model.TenantBilling, model.State, error) {
+func (s *Store) pgAccrueTenantBillingTx(ctx context.Context, tx *sql.Tx, tenantID string, now time.Time) (model.TenantBilling, model.State, billingStateIndex, error) {
 	record, err := s.pgEnsureTenantBillingRecordTx(ctx, tx, tenantID, true, now)
 	if err != nil {
-		return model.TenantBilling{}, model.State{}, err
+		return model.TenantBilling{}, model.State{}, billingStateIndex{}, err
 	}
 	state, err := s.pgLoadTenantBillingStateTx(ctx, tx, tenantID)
 	if err != nil {
-		return model.TenantBilling{}, model.State{}, err
+		return model.TenantBilling{}, model.State{}, billingStateIndex{}, err
 	}
+	index := newBillingStateIndex(&state)
 
 	lastAccruedAt := record.LastAccruedAt
-	committed := tenantManagedCommittedResourcesForBilling(&state, record)
+	committed := tenantManagedCommittedResourcesForBillingWithIndex(&state, index, record)
 	accrueTenantBillingWithCommittedResources(&record, committed, now)
 	if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, record); err != nil {
-		return model.TenantBilling{}, model.State{}, err
+		return model.TenantBilling{}, model.State{}, billingStateIndex{}, err
 	}
 	if !now.After(lastAccruedAt) {
-		return record, state, nil
+		return record, state, index, nil
 	}
 
 	elapsedNanos := now.Sub(lastAccruedAt).Nanoseconds()
 	if elapsedNanos <= 0 {
-		return record, state, nil
+		return record, state, index, nil
 	}
 
-	for _, component := range tenantPublicRuntimeChargeComponents(&state, tenantID) {
+	for _, component := range tenantPublicRuntimeChargeComponentsWithIndex(&state, index, tenantID) {
 		if component.HourlyRateMicroCents <= 0 {
 			continue
 		}
@@ -434,7 +435,7 @@ func (s *Store) pgAccrueTenantBillingTx(ctx context.Context, tx *sql.Tx, tenantI
 		record.BalanceMicroCents -= amountMicroCents
 		record.UpdatedAt = now
 		if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, record); err != nil {
-			return model.TenantBilling{}, model.State{}, err
+			return model.TenantBilling{}, model.State{}, billingStateIndex{}, err
 		}
 		debitEvent := newTenantBillingPublicRuntimeEvent(
 			tenantID,
@@ -449,18 +450,18 @@ func (s *Store) pgAccrueTenantBillingTx(ctx context.Context, tx *sql.Tx, tenantI
 			},
 		)
 		if err := s.pgInsertTenantBillingEventTx(ctx, tx, debitEvent); err != nil {
-			return model.TenantBilling{}, model.State{}, err
+			return model.TenantBilling{}, model.State{}, billingStateIndex{}, err
 		}
 		state.BillingEvents = append(state.BillingEvents, debitEvent)
 
 		ownerRecord, err := s.pgEnsureTenantBillingRecordTx(ctx, tx, component.OwnerTenantID, true, now)
 		if err != nil {
-			return model.TenantBilling{}, model.State{}, err
+			return model.TenantBilling{}, model.State{}, billingStateIndex{}, err
 		}
 		ownerRecord.BalanceMicroCents += amountMicroCents
 		ownerRecord.UpdatedAt = now
 		if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, ownerRecord); err != nil {
-			return model.TenantBilling{}, model.State{}, err
+			return model.TenantBilling{}, model.State{}, billingStateIndex{}, err
 		}
 		creditEvent := newTenantBillingPublicRuntimeEvent(
 			component.OwnerTenantID,
@@ -475,11 +476,11 @@ func (s *Store) pgAccrueTenantBillingTx(ctx context.Context, tx *sql.Tx, tenantI
 			},
 		)
 		if err := s.pgInsertTenantBillingEventTx(ctx, tx, creditEvent); err != nil {
-			return model.TenantBilling{}, model.State{}, err
+			return model.TenantBilling{}, model.State{}, billingStateIndex{}, err
 		}
 	}
 
-	return record, state, nil
+	return record, state, index, nil
 }
 
 func (s *Store) pgEnsureTenantBillingRecordTx(ctx context.Context, tx *sql.Tx, tenantID string, forUpdate bool, now time.Time) (model.TenantBilling, error) {

@@ -107,7 +107,7 @@ WHERE id = $1 AND tenant_id = $2
 	spec = defaultBackingServiceRuntimeForProject(spec, project)
 
 	now := time.Now().UTC()
-	billing, billingState, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
+	billing, billingState, _, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
 	if err != nil {
 		return model.BackingService{}, err
 	}
@@ -305,7 +305,7 @@ func (s *Store) pgBindBackingService(tenantID, appID, serviceID, alias string, e
 	if err := normalizeBindingForPersist(&binding, service); err != nil {
 		return model.ServiceBinding{}, err
 	}
-	billing, billingState, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
+	billing, billingState, _, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
 	if err != nil {
 		return model.ServiceBinding{}, err
 	}

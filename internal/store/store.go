@@ -2018,13 +2018,17 @@ func (s *Store) listAppsView(tenantID string, platformAdmin bool, hydrateBacking
 func (s *Store) listAppsViewFiltered(hydrateBackingServices bool, include func(model.App) bool) ([]model.App, error) {
 	var apps []model.App
 	err := s.withLockedState(false, func(state *model.State) error {
+		var backingServiceIndex appBackingServiceIndex
+		if hydrateBackingServices {
+			backingServiceIndex = newAppBackingServiceIndex(state)
+		}
 		for _, app := range state.Apps {
 			if isDeletedApp(app) {
 				continue
 			}
 			normalizeAppStatusForRead(&app)
 			if hydrateBackingServices {
-				hydrateAppBackingServices(state, &app)
+				hydrateAppBackingServicesWithIndex(backingServiceIndex, &app)
 			} else {
 				app.Bindings = nil
 				app.BackingServices = nil

@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/registry"
+	"golang.org/x/sync/singleflight"
 )
 
 type imageCache struct {
@@ -30,6 +31,8 @@ type imageCache struct {
 	httpClient     *http.Client
 	registry       http.Handler
 	hydrateTimeout time.Duration
+	copyImageFn    func(context.Context, string, string) error
+	hydrateGroup   singleflight.Group
 }
 
 type imageLocation struct {
@@ -113,6 +116,20 @@ func (c *imageCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *imageCache) hydrate(parent context.Context, repo, target string) error {
+	key := repo + "\x00" + target
+	result := c.hydrateGroup.DoChan(key, func() (any, error) {
+		// Keep the shared copy independent from one waiting request's cancellation.
+		return nil, c.hydrateOnce(context.Background(), repo, target)
+	})
+	select {
+	case res := <-result:
+		return res.Err
+	case <-parent.Done():
+		return parent.Err()
+	}
+}
+
+func (c *imageCache) hydrateOnce(parent context.Context, repo, target string) error {
 	ctx, cancel := context.WithTimeout(parent, c.hydrateTimeout)
 	defer cancel()
 	logicalRef, digest := imageRef(c.registryBase, repo, target)
@@ -127,7 +144,7 @@ func (c *imageCache) hydrate(parent context.Context, repo, target string) error 
 		}
 		peerBase := trimRegistryBase(location.CacheEndpoint)
 		peerRef, _ := imageRef(peerBase, repo, target)
-		if err := copyImage(ctx, peerRef, localRef); err == nil {
+		if err := c.copyImage(ctx, peerRef, localRef); err == nil {
 			log.Printf("hydrated %s from peer %s", logicalRef, peerBase)
 			_ = c.report(ctx, logicalRef, digest, "present", "")
 			return nil
@@ -137,7 +154,7 @@ func (c *imageCache) hydrate(parent context.Context, repo, target string) error 
 	}
 	if c.upstreamBase != "" {
 		upstreamRef, _ := imageRef(c.upstreamBase, repo, target)
-		if err := copyImage(ctx, upstreamRef, localRef); err == nil {
+		if err := c.copyImage(ctx, upstreamRef, localRef); err == nil {
 			log.Printf("hydrated %s from upstream %s", logicalRef, c.upstreamBase)
 			_ = c.report(ctx, logicalRef, digest, "present", "")
 			return nil
@@ -148,6 +165,13 @@ func (c *imageCache) hydrate(parent context.Context, repo, target string) error 
 	}
 	_ = c.report(ctx, logicalRef, digest, "missing", "")
 	return fmt.Errorf("no peer or upstream location for %s", logicalRef)
+}
+
+func (c *imageCache) copyImage(ctx context.Context, src, dst string) error {
+	if c.copyImageFn != nil {
+		return c.copyImageFn(ctx, src, dst)
+	}
+	return copyImage(ctx, src, dst)
 }
 
 func (c *imageCache) lookup(ctx context.Context, imageRef, digest string) []imageLocation {

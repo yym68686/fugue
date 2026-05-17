@@ -2379,7 +2379,7 @@ WHERE id = $1 AND tenant_id = $2
 	}
 
 	now := time.Now().UTC()
-	billing, billingState, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
+	billing, billingState, _, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
 	if err != nil {
 		return model.App{}, err
 	}
@@ -3341,7 +3341,7 @@ WHERE app_id = $1
 	op.DesiredSpec = cloneAppSpec(op.DesiredSpec)
 	op.DesiredSource = cloneAppSource(op.DesiredSource)
 	op.DesiredOriginSource = cloneAppSource(op.DesiredOriginSource)
-	billing, billingState, err := s.pgAccrueTenantBillingTx(ctx, tx, app.TenantID, now)
+	billing, billingState, _, err := s.pgAccrueTenantBillingTx(ctx, tx, app.TenantID, now)
 	if err != nil {
 		return model.Operation{}, err
 	}
