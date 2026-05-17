@@ -256,7 +256,7 @@ func scanAppImageTracking(scanner sqlScanner) (model.AppImageTracking, error) {
 		&tracking.CreatedAt,
 		&tracking.UpdatedAt,
 	); err != nil {
-		return model.AppImageTracking{}, mapDBErr(err)
+		return model.AppImageTracking{}, err
 	}
 	if lastCheckedAt.Valid {
 		tracking.LastCheckedAt = &lastCheckedAt.Time
