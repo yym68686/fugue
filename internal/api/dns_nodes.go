@@ -304,6 +304,7 @@ func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal mode
 			Message: dnsBundleStableMessage(bundleVersion, bundleStable),
 		},
 		s.buildRouteDNSInvariantPreflightCheck(ctx, opts),
+		s.buildEdgeTLSReadinessPreflightCheck(),
 		model.DNSDelegationPreflightCheck{
 			Name:    "cache_errors_zero",
 			Pass:    dnsNodeCacheHealthyAll(nodeChecks),
@@ -383,6 +384,69 @@ func (s *Server) buildRouteDNSInvariantPreflightCheck(ctx context.Context, opts 
 		Name:    "route_dns_invariant",
 		Pass:    true,
 		Message: fmt.Sprintf("validated %d DNS records against route-ready edge answers", len(bundle.Records)),
+	}
+}
+
+func (s *Server) buildEdgeTLSReadinessPreflightCheck() model.DNSDelegationPreflightCheck {
+	nodes, _, err := s.store.ListEdgeNodes("")
+	if err != nil {
+		return model.DNSDelegationPreflightCheck{
+			Name:    "edge_tls_ready",
+			Pass:    false,
+			Message: fmt.Sprintf("cannot load edge node inventory: %v", err),
+		}
+	}
+	checked := 0
+	for _, node := range nodes {
+		if node.CaddyRouteCount <= 0 &&
+			strings.TrimSpace(node.RouteBundleVersion) == "" &&
+			strings.TrimSpace(node.ServingGeneration) == "" {
+			continue
+		}
+		checked++
+		if !edgeTLSReadyForPreflight(node) {
+			message := fmt.Sprintf("edge node %s in %s reports tls_status=%s", node.ID, node.EdgeGroupID, firstNonEmpty(strings.TrimSpace(node.TLSStatus), "unknown"))
+			if strings.TrimSpace(node.TLSLastMessage) != "" {
+				message += ": " + strings.TrimSpace(node.TLSLastMessage)
+			}
+			return model.DNSDelegationPreflightCheck{
+				Name:    "edge_tls_ready",
+				Pass:    false,
+				Message: message,
+			}
+		}
+	}
+	if checked == 0 {
+		return model.DNSDelegationPreflightCheck{
+			Name:    "edge_tls_ready",
+			Pass:    true,
+			Message: "skipped TLS readiness check because no route-publishable edge nodes are registered",
+		}
+	}
+	return model.DNSDelegationPreflightCheck{
+		Name:    "edge_tls_ready",
+		Pass:    true,
+		Message: fmt.Sprintf("validated TLS readiness for %d route-publishable edge nodes", checked),
+	}
+}
+
+func edgeTLSReadyForPreflight(node model.EdgeNode) bool {
+	switch model.NormalizeEdgeTLSStatus(node.TLSStatus) {
+	case model.EdgeTLSStatusReady:
+		return true
+	case model.EdgeTLSStatusPending, model.EdgeTLSStatusError:
+		return false
+	default:
+		if node.CaddyRouteCount <= 0 {
+			return false
+		}
+		if strings.Contains(strings.ToLower(strings.TrimSpace(node.CaddyLastError)), "error") {
+			return false
+		}
+		if strings.Contains(strings.ToLower(strings.TrimSpace(node.CacheStatus)), "error") {
+			return false
+		}
+		return true
 	}
 }
 

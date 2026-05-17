@@ -194,6 +194,8 @@ func TestHeartbeatOnceReportsEdgeInventory(t *testing.T) {
 		"route_bundle_version":  "routegen_heartbeat",
 		"caddy_applied_version": "routegen_heartbeat",
 		"cache_status":          "ready",
+		"tls_status":            "",
+		"tls_last_message":      "",
 		"status":                model.EdgeHealthHealthy,
 		"healthy":               true,
 		"draining":              false,
@@ -201,6 +203,9 @@ func TestHeartbeatOnceReportsEdgeInventory(t *testing.T) {
 		if got := gotBody[key]; got != want {
 			t.Fatalf("heartbeat field %s: expected %#v, got %#v in %#v", key, want, got, gotBody)
 		}
+	}
+	if got := gotBody["tls_ready_at"]; got != nil {
+		t.Fatalf("expected nil tls_ready_at for non-Caddy heartbeat, got %#v", got)
 	}
 	if got := gotBody["caddy_route_count"]; got != float64(1) {
 		t.Fatalf("expected caddy_route_count 1, got %#v", got)

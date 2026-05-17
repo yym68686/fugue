@@ -84,6 +84,25 @@ const (
 	EdgeHealthUnhealthy = "unhealthy"
 )
 
+const (
+	EdgeTLSStatusPending = "pending"
+	EdgeTLSStatusReady   = "ready"
+	EdgeTLSStatusError   = "error"
+)
+
+func NormalizeEdgeTLSStatus(status string) string {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case EdgeTLSStatusPending:
+		return EdgeTLSStatusPending
+	case EdgeTLSStatusReady:
+		return EdgeTLSStatusReady
+	case EdgeTLSStatusError:
+		return EdgeTLSStatusError
+	default:
+		return ""
+	}
+}
+
 type EdgeRouteBundle struct {
 	SchemaVersion      string                  `json:"schema_version,omitempty"`
 	Version            string                  `json:"version"`
@@ -326,6 +345,9 @@ type EdgeNode struct {
 	CaddyAppliedVersion string     `json:"caddy_applied_version,omitempty"`
 	CaddyLastError      string     `json:"caddy_last_error,omitempty"`
 	CacheStatus         string     `json:"cache_status,omitempty"`
+	TLSStatus           string     `json:"tls_status,omitempty"`
+	TLSLastMessage      string     `json:"tls_last_message,omitempty"`
+	TLSReadyAt          *time.Time `json:"tls_ready_at,omitempty"`
 	LastError           string     `json:"last_error,omitempty"`
 	TokenPrefix         string     `json:"token_prefix,omitempty"`
 	TokenHash           string     `json:"token_hash,omitempty"`

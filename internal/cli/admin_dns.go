@@ -301,6 +301,7 @@ type dnsAnswerCheckNode struct {
 	PublicIP   string   `json:"public_ip,omitempty"`
 	Status     string   `json:"status"`
 	Healthy    bool     `json:"healthy"`
+	TLSStatus  string   `json:"tls_status,omitempty"`
 	Answers    []string `json:"answers,omitempty"`
 	EdgeGroups []string `json:"edge_groups,omitempty"`
 	RouteReady bool     `json:"route_ready"`
@@ -323,6 +324,7 @@ func (c *CLI) checkDNSAnswers(client *Client, hostname string) (dnsAnswerCheckRe
 		return dnsAnswerCheckReport{}, err
 	}
 	edgeGroupsByIP := edgeGroupsByIPFromEdgeNodes(edgeNodes.Nodes)
+	edgeNodesByIP := edgeNodesByIPFromEdgeNodes(edgeNodes.Nodes)
 
 	nodes := make([]dnsAnswerCheckNode, 0, len(dnsNodes.Nodes))
 	pass := len(routeReady) > 0
@@ -353,6 +355,7 @@ func (c *CLI) checkDNSAnswers(client *Client, hostname string) (dnsAnswerCheckRe
 		nodePass := true
 		for _, answer := range answers {
 			groups := edgeGroupsByIP[strings.TrimSpace(answer)]
+			edgeNode, hasNode := edgeNodesByIP[strings.TrimSpace(answer)]
 			for _, groupID := range groups {
 				if groupID != "" {
 					seenGroups[groupID] = struct{}{}
@@ -372,6 +375,16 @@ func (c *CLI) checkDNSAnswers(client *Client, hostname string) (dnsAnswerCheckRe
 				nodePass = false
 				pass = false
 				nodeReport.Message = appendMessage(nodeReport.Message, fmt.Sprintf("answer %s is mapped to edge groups %s but none are route-ready", answer, strings.Join(groups, ", ")))
+			}
+			if hasNode {
+				if nodeReport.TLSStatus == "" {
+					nodeReport.TLSStatus = firstNonEmpty(strings.TrimSpace(edgeNode.TLSStatus), "-")
+				}
+				if !edgeNodeTLSReady(edgeNode) {
+					nodePass = false
+					pass = false
+					nodeReport.Message = appendMessage(nodeReport.Message, fmt.Sprintf("answer %s is mapped to edge node %s with tls_status=%s", answer, edgeNode.ID, firstNonEmpty(strings.TrimSpace(edgeNode.TLSStatus), "unknown")))
+				}
 			}
 		}
 		if len(seenGroups) > 0 {
@@ -425,15 +438,16 @@ func writeDNSAnswerCheck(w io.Writer, report dnsAnswerCheckReport) error {
 
 func writeDNSAnswerCheckTable(w io.Writer, nodes []dnsAnswerCheckNode) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "DNS_NODE\tZONE\tSTATUS\tHEALTHY\tANSWERS\tEDGE_GROUPS\tPASS\tMESSAGE"); err != nil {
+	if _, err := fmt.Fprintln(tw, "DNS_NODE\tZONE\tSTATUS\tHEALTHY\tTLS\tANSWERS\tEDGE_GROUPS\tPASS\tMESSAGE"); err != nil {
 		return err
 	}
 	for _, node := range nodes {
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%s\t%s\t%t\t%s\n",
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%s\t%s\t%s\t%t\t%s\n",
 			node.DNSNodeID,
 			node.Zone,
 			node.Status,
 			node.Healthy,
+			firstNonEmpty(node.TLSStatus, "-"),
 			strings.Join(node.Answers, ", "),
 			strings.Join(node.EdgeGroups, ", "),
 			node.Pass,
@@ -559,6 +573,42 @@ func edgeGroupsByIPFromEdgeNodes(nodes []model.EdgeNode) map[string][]string {
 		sort.Strings(out[ip])
 	}
 	return out
+}
+
+func edgeNodesByIPFromEdgeNodes(nodes []model.EdgeNode) map[string]model.EdgeNode {
+	out := map[string]model.EdgeNode{}
+	for _, node := range nodes {
+		for _, raw := range []string{node.PublicIPv4, node.PublicIPv6} {
+			ip := strings.TrimSpace(raw)
+			if ip == "" {
+				continue
+			}
+			if _, ok := out[ip]; !ok {
+				out[ip] = node
+			}
+		}
+	}
+	return out
+}
+
+func edgeNodeTLSReady(node model.EdgeNode) bool {
+	switch model.NormalizeEdgeTLSStatus(node.TLSStatus) {
+	case model.EdgeTLSStatusReady:
+		return true
+	case model.EdgeTLSStatusPending, model.EdgeTLSStatusError:
+		return false
+	default:
+		if node.CaddyRouteCount <= 0 {
+			return false
+		}
+		if strings.Contains(strings.ToLower(strings.TrimSpace(node.CaddyLastError)), "error") {
+			return false
+		}
+		if strings.Contains(strings.ToLower(strings.TrimSpace(node.CacheStatus)), "error") {
+			return false
+		}
+		return true
+	}
 }
 
 func dnsNodeServesHostname(node model.DNSNode, hostname string) bool {

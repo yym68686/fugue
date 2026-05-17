@@ -350,6 +350,9 @@ func writeEdgeNode(w io.Writer, node model.EdgeNode) error {
 		kvPair{Key: "caddy_routes", Value: fmt.Sprintf("%d", node.CaddyRouteCount)},
 		kvPair{Key: "caddy_applied", Value: strings.TrimSpace(node.CaddyAppliedVersion)},
 		kvPair{Key: "cache_status", Value: strings.TrimSpace(node.CacheStatus)},
+		kvPair{Key: "tls_status", Value: strings.TrimSpace(node.TLSStatus)},
+		kvPair{Key: "tls_last_message", Value: strings.TrimSpace(node.TLSLastMessage)},
+		kvPair{Key: "tls_ready", Value: formatOptionalEdgeTime(node.TLSReadyAt)},
 		kvPair{Key: "last_seen", Value: formatOptionalEdgeTime(node.LastSeenAt)},
 		kvPair{Key: "last_heartbeat", Value: formatOptionalEdgeTime(node.LastHeartbeatAt)},
 		kvPair{Key: "updated", Value: formatTime(node.UpdatedAt)},
@@ -378,13 +381,13 @@ func writeEdgeNodeTable(w io.Writer, nodes []model.EdgeNode) error {
 		return sorted[i].ID < sorted[j].ID
 	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "EDGE_ID\tGROUP\tSTATUS\tHEALTHY\tDRAINING\tROUTE_BUNDLE\tDNS_BUNDLE\tCADDY_ROUTES\tLAST_SEEN"); err != nil {
+	if _, err := fmt.Fprintln(tw, "EDGE_ID\tGROUP\tSTATUS\tHEALTHY\tDRAINING\tROUTE_BUNDLE\tDNS_BUNDLE\tTLS\tCADDY_ROUTES\tLAST_SEEN"); err != nil {
 		return err
 	}
 	for _, node := range sorted {
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%t\t%t\t%s\t%s\t%d\t%s\n",
+			"%s\t%s\t%s\t%t\t%t\t%s\t%s\t%s\t%d\t%s\n",
 			strings.TrimSpace(node.ID),
 			strings.TrimSpace(node.EdgeGroupID),
 			strings.TrimSpace(node.Status),
@@ -392,6 +395,7 @@ func writeEdgeNodeTable(w io.Writer, nodes []model.EdgeNode) error {
 			node.Draining,
 			strings.TrimSpace(node.RouteBundleVersion),
 			strings.TrimSpace(node.DNSBundleVersion),
+			strings.TrimSpace(node.TLSStatus),
 			node.CaddyRouteCount,
 			formatOptionalEdgeTime(node.LastSeenAt),
 		); err != nil {

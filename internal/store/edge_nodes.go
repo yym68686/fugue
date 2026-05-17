@@ -192,6 +192,8 @@ func normalizeEdgeNodeForStore(node model.EdgeNode) (model.EdgeNode, error) {
 	node.CaddyAppliedVersion = strings.TrimSpace(node.CaddyAppliedVersion)
 	node.CaddyLastError = strings.TrimSpace(node.CaddyLastError)
 	node.CacheStatus = strings.TrimSpace(node.CacheStatus)
+	node.TLSStatus = model.NormalizeEdgeTLSStatus(strings.TrimSpace(node.TLSStatus))
+	node.TLSLastMessage = strings.TrimSpace(node.TLSLastMessage)
 	node.LastError = strings.TrimSpace(node.LastError)
 	node.TokenPrefix = strings.TrimSpace(node.TokenPrefix)
 	node.TokenHash = strings.TrimSpace(node.TokenHash)

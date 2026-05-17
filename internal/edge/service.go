@@ -913,6 +913,7 @@ func (s *Service) newHeartbeatRequest(ctx context.Context) (*http.Request, error
 	if status.StaleCache {
 		cacheStatus = "stale"
 	}
+	tlsStatus, tlsLastMessage, tlsReadyAt := s.edgeTLSHeartbeatStatus(status)
 	body := map[string]any{
 		"edge_id":                  strings.TrimSpace(s.Config.EdgeID),
 		"edge_group_id":            strings.TrimSpace(s.Config.EdgeGroupID),
@@ -932,6 +933,9 @@ func (s *Service) newHeartbeatRequest(ctx context.Context) (*http.Request, error
 		"caddy_applied_version":    strings.TrimSpace(status.CaddyAppliedVersion),
 		"caddy_last_error":         strings.TrimSpace(status.CaddyLastError),
 		"cache_status":             cacheStatus,
+		"tls_status":               tlsStatus,
+		"tls_last_message":         tlsLastMessage,
+		"tls_ready_at":             tlsReadyAt,
 		"max_stale_exceeded":       status.MaxStaleExceeded,
 		"status":                   edgeHealthStatus(status),
 		"healthy":                  status.Healthy,
@@ -948,6 +952,30 @@ func (s *Service) newHeartbeatRequest(ctx context.Context) (*http.Request, error
 	}
 	req.Header.Set("Content-Type", "application/json")
 	return req, nil
+}
+
+func (s *Service) edgeTLSHeartbeatStatus(status Status) (string, string, *time.Time) {
+	if !status.CaddyEnabled {
+		return "", "", nil
+	}
+	if lastError := strings.TrimSpace(status.CaddyLastError); lastError != "" {
+		return model.EdgeTLSStatusError, lastError, nil
+	}
+	if strings.TrimSpace(s.Config.CaddyStaticTLSCertFile) != "" && strings.TrimSpace(s.Config.CaddyStaticTLSKeyFile) != "" {
+		now := time.Now().UTC()
+		return model.EdgeTLSStatusReady, "static platform certificate loaded", &now
+	}
+	switch s.normalizedCaddyTLSMode() {
+	case caddyTLSModeInternal:
+		now := time.Now().UTC()
+		return model.EdgeTLSStatusReady, "caddy internal certificate cache", &now
+	case caddyTLSModePublicOnDemand:
+		return model.EdgeTLSStatusPending, "public on-demand TLS configured; active hostnames still require warmup", nil
+	case caddyTLSModeOff:
+		return model.EdgeTLSStatusPending, "TLS is disabled", nil
+	default:
+		return model.EdgeTLSStatusError, "unknown Caddy TLS mode", nil
+	}
 }
 
 func (s *Service) heartbeatEnabled() bool {

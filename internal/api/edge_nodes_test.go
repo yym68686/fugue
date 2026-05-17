@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"fugue/internal/model"
 )
@@ -26,6 +27,9 @@ func TestEdgeHeartbeatRegistersInventoryAndAdminList(t *testing.T) {
 		"route_bundle_version": "routegen_first",
 		"dns_bundle_version":   "dnsgen_first",
 		"caddy_route_count":    3,
+		"tls_status":           model.EdgeTLSStatusReady,
+		"tls_last_message":     "static platform certificate loaded",
+		"tls_ready_at":         time.Now().UTC(),
 		"status":               model.EdgeHealthHealthy,
 		"healthy":              true,
 		"draining":             false,
@@ -51,6 +55,9 @@ func TestEdgeHeartbeatRegistersInventoryAndAdminList(t *testing.T) {
 		heartbeatResponse.Node.RouteBundleVersion != "routegen_first" ||
 		heartbeatResponse.Node.DNSBundleVersion != "dnsgen_first" ||
 		heartbeatResponse.Node.CaddyRouteCount != 3 ||
+		heartbeatResponse.Node.TLSStatus != model.EdgeTLSStatusReady ||
+		heartbeatResponse.Node.TLSLastMessage != "static platform certificate loaded" ||
+		heartbeatResponse.Node.TLSReadyAt == nil ||
 		heartbeatResponse.Node.LastHeartbeatAt == nil {
 		t.Fatalf("unexpected heartbeat response: %+v", heartbeatResponse)
 	}

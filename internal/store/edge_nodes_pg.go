@@ -18,7 +18,7 @@ func (s *Store) pgListEdgeNodes(edgeGroupID string) ([]model.EdgeNode, []model.E
 SELECT id, edge_group_id, region, country, public_hostname, public_ipv4, public_ipv6, mesh_ip,
 	status, healthy, draining, route_bundle_version, dns_bundle_version, caddy_route_count,
 	serving_generation, lkg_generation, caddy_applied_version, caddy_last_error, cache_status,
-	last_error, token_prefix, token_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+	tls_status, tls_last_message, tls_ready_at, last_error, token_prefix, token_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_edge_nodes`
 	args := []any{}
 	if edgeGroupID != "" {
@@ -59,7 +59,7 @@ func (s *Store) pgGetEdgeNode(edgeID string) (model.EdgeNode, model.EdgeGroup, e
 SELECT id, edge_group_id, region, country, public_hostname, public_ipv4, public_ipv6, mesh_ip,
 	status, healthy, draining, route_bundle_version, dns_bundle_version, caddy_route_count,
 	serving_generation, lkg_generation, caddy_applied_version, caddy_last_error, cache_status,
-	last_error, token_prefix, token_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+	tls_status, tls_last_message, tls_ready_at, last_error, token_prefix, token_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_edge_nodes
 WHERE id = $1
 `, edgeID))
@@ -123,7 +123,7 @@ func (s *Store) pgAuthenticateEdgeNode(secret string) (model.EdgeNode, error) {
 SELECT id, edge_group_id, region, country, public_hostname, public_ipv4, public_ipv6, mesh_ip,
 	status, healthy, draining, route_bundle_version, dns_bundle_version, caddy_route_count,
 	serving_generation, lkg_generation, caddy_applied_version, caddy_last_error, cache_status,
-	last_error, token_prefix, token_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+	tls_status, tls_last_message, tls_ready_at, last_error, token_prefix, token_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 FROM fugue_edge_nodes
 WHERE token_hash = $1 AND token_hash <> ''
 `, model.HashSecret(secret)))
@@ -203,12 +203,12 @@ INSERT INTO fugue_edge_nodes (
 	id, edge_group_id, region, country, public_hostname, public_ipv4, public_ipv6, mesh_ip,
 	status, healthy, draining, route_bundle_version, dns_bundle_version, caddy_route_count,
 	serving_generation, lkg_generation, caddy_applied_version, caddy_last_error, cache_status,
-	last_error, token_prefix, token_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+	tls_status, tls_last_message, tls_ready_at, last_error, token_prefix, token_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 ) VALUES (
 	$1, $2, $3, $4, $5, $6, $7, $8,
 	$9, $10, $11, $12, $13, $14,
-	$15, $16, $17, $18, $19, $20,
-	$21, $22, $23, $24, $25, $26
+	$15, $16, $17, $18, $19, $20, $21,
+	$22, $23, $24, $25, $26, $27, $28, $29
 )
 ON CONFLICT (id) DO UPDATE SET
 	edge_group_id = EXCLUDED.edge_group_id,
@@ -229,20 +229,23 @@ ON CONFLICT (id) DO UPDATE SET
 	caddy_applied_version = EXCLUDED.caddy_applied_version,
 	caddy_last_error = EXCLUDED.caddy_last_error,
 	cache_status = EXCLUDED.cache_status,
+	tls_status = EXCLUDED.tls_status,
+	tls_last_message = EXCLUDED.tls_last_message,
+	tls_ready_at = EXCLUDED.tls_ready_at,
 	last_error = EXCLUDED.last_error,
-	token_prefix = CASE WHEN $27 THEN EXCLUDED.token_prefix ELSE fugue_edge_nodes.token_prefix END,
-	token_hash = CASE WHEN $27 THEN EXCLUDED.token_hash ELSE fugue_edge_nodes.token_hash END,
+	token_prefix = CASE WHEN $30 THEN EXCLUDED.token_prefix ELSE fugue_edge_nodes.token_prefix END,
+	token_hash = CASE WHEN $30 THEN EXCLUDED.token_hash ELSE fugue_edge_nodes.token_hash END,
 	last_seen_at = EXCLUDED.last_seen_at,
 	last_heartbeat_at = EXCLUDED.last_heartbeat_at,
 	updated_at = EXCLUDED.updated_at
 RETURNING id, edge_group_id, region, country, public_hostname, public_ipv4, public_ipv6, mesh_ip,
 	status, healthy, draining, route_bundle_version, dns_bundle_version, caddy_route_count,
 	serving_generation, lkg_generation, caddy_applied_version, caddy_last_error, cache_status,
-	last_error, token_prefix, token_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
+	tls_status, tls_last_message, tls_ready_at, last_error, token_prefix, token_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 `, node.ID, node.EdgeGroupID, node.Region, node.Country, node.PublicHostname, node.PublicIPv4, node.PublicIPv6, node.MeshIP,
 		node.Status, node.Healthy, node.Draining, node.RouteBundleVersion, node.DNSBundleVersion, node.CaddyRouteCount,
 		node.ServingGeneration, node.LKGGeneration, node.CaddyAppliedVersion, node.CaddyLastError, node.CacheStatus,
-		node.LastError, node.TokenPrefix, node.TokenHash, node.LastSeenAt, node.LastHeartbeatAt, node.CreatedAt, node.UpdatedAt, replaceToken)
+		node.TLSStatus, node.TLSLastMessage, node.TLSReadyAt, node.LastError, node.TokenPrefix, node.TokenHash, node.LastSeenAt, node.LastHeartbeatAt, node.CreatedAt, node.UpdatedAt, replaceToken)
 	stored, err := scanEdgeNode(row)
 	if err != nil {
 		return model.EdgeNode{}, mapDBErr(err)
@@ -303,6 +306,7 @@ func scanEdgeNode(scanner sqlScanner) (model.EdgeNode, error) {
 	var node model.EdgeNode
 	var lastSeenAt sql.NullTime
 	var lastHeartbeatAt sql.NullTime
+	var tlsReadyAt sql.NullTime
 	if err := scanner.Scan(
 		&node.ID,
 		&node.EdgeGroupID,
@@ -323,6 +327,9 @@ func scanEdgeNode(scanner sqlScanner) (model.EdgeNode, error) {
 		&node.CaddyAppliedVersion,
 		&node.CaddyLastError,
 		&node.CacheStatus,
+		&node.TLSStatus,
+		&node.TLSLastMessage,
+		&tlsReadyAt,
 		&node.LastError,
 		&node.TokenPrefix,
 		&node.TokenHash,
@@ -338,6 +345,9 @@ func scanEdgeNode(scanner sqlScanner) (model.EdgeNode, error) {
 	}
 	if lastHeartbeatAt.Valid {
 		node.LastHeartbeatAt = &lastHeartbeatAt.Time
+	}
+	if tlsReadyAt.Valid {
+		node.TLSReadyAt = &tlsReadyAt.Time
 	}
 	normalizeEdgeNodeForRead(&node)
 	return node, nil

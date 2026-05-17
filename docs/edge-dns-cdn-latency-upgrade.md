@@ -669,22 +669,22 @@ sampled_at
 
 ### P1：Public route 全 edge 兜底
 
-- [ ] 明确 public platform app route 默认下发到所有 public edge group。
-- [ ] 保留 selective route，但限制在 custom domain canary、私有 route、合规隔离和灰度场景。
-- [ ] 为 selective route 增加 DNS 发布保护：DNS answer set 必须是 selective route-ready set 的子集。
-- [ ] 在 route bundle 中显式区分 `runtime_edge_group_id` 和当前下发的 `edge_group_id`。
-- [ ] 对跨区域 upstream 增加观测字段和告警阈值，避免“能兜底”被误认为“最优路径”。
-- [ ] 给 `oaix.fugue.pro` 这类真实 hostname 建立回归用例，验证任意 public DNS-answerable edge 都不会因 route 缺失返回 `404`。
+- [x] 明确 public platform app route 默认下发到所有 public edge group。
+- [x] 保留 selective route，但限制在 custom domain canary、私有 route、合规隔离和灰度场景。
+- [x] 为 selective route 增加 DNS 发布保护：DNS answer set 必须是 selective route-ready set 的子集。
+- [x] 在 route bundle 中显式区分 `runtime_edge_group_id` 和当前下发的 `edge_group_id`。
+- [x] 对跨区域 upstream 增加观测字段和告警阈值，避免“能兜底”被误认为“最优路径”。
+- [x] 给 `oaix.fugue.pro` 这类真实 hostname 建立回归用例，验证任意 public DNS-answerable edge 都不会因 route 缺失返回 `404`。
 
 ### P1：TLS 预热和证书闭环
 
-- [ ] 把平台 wildcard 证书续期正式切到 Fugue ACME DNS-01 hook。
-- [ ] 为 custom domain 建立 certificate intent / activation 状态机。
-- [ ] 在 DNS 发布前确认 hostname 在目标 edge 上 `tls_status=ready`，否则不进入普通 answer set。
-- [ ] 为每个活跃 hostname 和每个 DNS-answerable edge 执行 SNI warmup。
-- [ ] 在 warmup 中记录 `tls_handshake_ms`、certificate fingerprint、expiry 和 last error。
-- [ ] 让 edge heartbeat 上报平台证书、custom domain 证书和 Caddy certificate cache 状态。
-- [ ] 增加 TLS cold-path 告警：活跃 hostname 出现 on-demand 签发或冷加载时必须可见。
+- [x] 把平台 wildcard 证书续期正式切到 Fugue ACME DNS-01 hook。
+- [x] 为 custom domain 建立 certificate intent / activation 状态机。
+- [x] 在 DNS 发布前确认 hostname 在目标 edge 上 `tls_status=ready`，否则不进入普通 answer set。
+- [x] 为每个活跃 hostname 和每个 DNS-answerable edge 执行 SNI warmup。
+- [x] 在 warmup 中记录 `tls_handshake_ms`、certificate fingerprint、expiry 和 last error。
+- [x] 让 edge heartbeat 上报平台证书、custom domain 证书和 Caddy certificate cache 状态。
+- [x] 增加 TLS cold-path 告警：活跃 hostname 出现 on-demand 签发或冷加载时必须可见。
 
 ### P2：第一版 CDN / Edge cache
 
