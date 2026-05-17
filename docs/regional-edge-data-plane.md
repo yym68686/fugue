@@ -4,6 +4,8 @@
 
 当前 Route A 实现适合作为早期启动路径，但它把公共应用流量和控制平面入口耦合在一起。现在一个公共应用域名请求会先到 Caddy edge，再进入 `fugue-api`，然后由 `fugue-api` 反向代理到应用的 Kubernetes Service。如果用户在中国，控制平面在美国，应用运行在新加坡，请求路径可能变成：
 
+下一阶段的 GeoDNS、CDN 边缘缓存、TLS 预热和 route/DNS 一致性方案见 `docs/edge-dns-cdn-latency-upgrade.md`。
+
 ```text
 中国用户
   -> 美国 Route A edge / fugue-api

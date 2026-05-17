@@ -194,6 +194,8 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	if err != nil {
 		return model.EdgeDNSBundle{}, err
 	}
+	routeReadyByHostnameEdgeGroup := map[string]map[string]bool{}
+	recordRouteHostByName := map[string]string{}
 
 	staticRecords := edgeDNSStaticRecordsForZone(s.dnsStaticRecords, options.Zone)
 	platformOverrideNames := s.edgeDNSPlatformDomainNames(domains, options.Zone)
@@ -226,6 +228,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		if !edgeDNSTargetWithinZone(hostname, options.Zone) {
 			continue
 		}
+		registerEdgeDNSRouteReadyBindings(routeReadyByHostnameEdgeGroup, edgeRouteBindingsForPlatformRoute(platformRoute, healthyEdgeGroups))
 		answerIPs := edgeDNSAnswerIPsForPlatformRoute(platformRoute, options, edgeAnswerIPsByGroup)
 		if len(answerIPs) == 0 {
 			continue
@@ -235,6 +238,18 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			edgeGroupID = strings.TrimSpace(options.EdgeGroupID)
 		}
 		records = append(records, edgeDNSRecordsForTarget(
+			hostname,
+			answerIPs,
+			platformRoute.TTL,
+			model.EdgeDNSRecordKindPlatformRoute,
+			platformRoute.Status,
+			platformRoute.StatusReason,
+			"",
+			"",
+			edgeGroupID,
+			"",
+		)...)
+		registerEdgeDNSRecordRouteHost(recordRouteHostByName, hostname, edgeDNSRecordsForTarget(
 			hostname,
 			answerIPs,
 			platformRoute.TTL,
@@ -258,11 +273,24 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		}
 		binding := s.deriveEdgeRouteBinding(r, app, hostname, model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
+		registerEdgeDNSRouteReadyBinding(routeReadyByHostnameEdgeGroup, binding)
 		answerIPs := edgeDNSAnswerIPsForBinding(binding, options, edgeAnswerIPsByGroup)
 		if len(answerIPs) == 0 {
 			continue
 		}
 		records = append(records, edgeDNSRecordsForTarget(
+			hostname,
+			answerIPs,
+			options.TTL,
+			model.EdgeDNSRecordKindPlatform,
+			binding.Status,
+			binding.StatusReason,
+			app.ID,
+			app.TenantID,
+			binding.EdgeGroupID,
+			binding.FallbackEdgeGroupID,
+		)...)
+		registerEdgeDNSRecordRouteHost(recordRouteHostByName, hostname, edgeDNSRecordsForTarget(
 			hostname,
 			answerIPs,
 			options.TTL,
@@ -302,6 +330,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		binding := s.deriveEdgeRouteBinding(r, app, hostname, routeKind, tlsPolicy, domain.CreatedAt, domain.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
 		binding = applyCustomDomainReadiness(binding, domain)
+		registerEdgeDNSRouteReadyBinding(routeReadyByHostnameEdgeGroup, binding)
 		if routeKind == model.EdgeRouteKindCustomDomain && binding.Status != model.EdgeRouteStatusActive {
 			continue
 		}
@@ -331,6 +360,18 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			binding.EdgeGroupID,
 			binding.FallbackEdgeGroupID,
 		)...)
+		registerEdgeDNSRecordRouteHost(recordRouteHostByName, hostname, edgeDNSRecordsForTarget(
+			target,
+			answerIPs,
+			options.TTL,
+			recordKind,
+			binding.Status,
+			binding.StatusReason,
+			app.ID,
+			app.TenantID,
+			binding.EdgeGroupID,
+			binding.FallbackEdgeGroupID,
+		)...)
 	}
 
 	records = dedupeAndSortEdgeDNSRecords(records)
@@ -343,7 +384,14 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	}
 	bundle.Version = edgeDNSBundleVersion(bundle)
 	bundle.Generation = bundle.Version
-	if err := validateEdgeDNSBundleForPublish(bundle, options, staticRecords); err != nil {
+	answerEdgeGroupsByIP := edgeDNSAnswerGroupsByIP(edgeAnswerIPsByGroup)
+	if err := validateEdgeDNSBundleForPublish(bundle, edgeDNSBundleInvariantInput{
+		Options:                       options,
+		ProtectedRecords:              staticRecords,
+		AnswerEdgeGroupsByIP:          answerEdgeGroupsByIP,
+		RouteReadyByHostnameEdgeGroup: routeReadyByHostnameEdgeGroup,
+		RecordRouteHostByName:         recordRouteHostByName,
+	}); err != nil {
 		return model.EdgeDNSBundle{}, err
 	}
 	bundle = signEdgeDNSBundle(bundle, s.bundleKeyring(), s.discoveryBundleTTL())
@@ -581,6 +629,72 @@ func (s *Server) edgeDNSAnswerIPsByGroup(options edgeDNSBundleOptions) (map[stri
 		out[options.EdgeGroupID] = append([]string(nil), options.AnswerIPs...)
 	}
 	return out, nil
+}
+
+func edgeDNSAnswerGroupsByIP(edgeAnswerIPsByGroup map[string][]string) map[string][]string {
+	out := make(map[string][]string)
+	for groupID, ips := range edgeAnswerIPsByGroup {
+		groupID = strings.TrimSpace(groupID)
+		if groupID == "" {
+			continue
+		}
+		for _, ip := range ips {
+			ip = strings.TrimSpace(ip)
+			if ip == "" {
+				continue
+			}
+			if !stringSliceContains(out[ip], groupID) {
+				out[ip] = append(out[ip], groupID)
+			}
+		}
+	}
+	for ip := range out {
+		sort.Strings(out[ip])
+	}
+	return out
+}
+
+func registerEdgeDNSRouteReadyBindings(routeReady map[string]map[string]bool, bindings []model.EdgeRouteBinding) {
+	for _, binding := range bindings {
+		registerEdgeDNSRouteReadyBinding(routeReady, binding)
+	}
+}
+
+func registerEdgeDNSRouteReadyBinding(routeReady map[string]map[string]bool, binding model.EdgeRouteBinding) {
+	hostname := normalizeExternalAppDomain(binding.Hostname)
+	if hostname == "" {
+		return
+	}
+	if strings.EqualFold(binding.Status, model.EdgeRouteStatusActive) && model.EdgeRoutePolicyAllowsTraffic(binding.RoutePolicy) && strings.TrimSpace(binding.UpstreamURL) != "" {
+		registerEdgeDNSRouteReady(routeReady, hostname, binding.EdgeGroupID)
+		registerEdgeDNSRouteReady(routeReady, hostname, binding.FallbackEdgeGroupID)
+	}
+}
+
+func registerEdgeDNSRouteReady(routeReady map[string]map[string]bool, hostname, edgeGroupID string) {
+	hostname = normalizeExternalAppDomain(hostname)
+	edgeGroupID = strings.TrimSpace(edgeGroupID)
+	if hostname == "" || edgeGroupID == "" {
+		return
+	}
+	if _, ok := routeReady[hostname]; !ok {
+		routeReady[hostname] = make(map[string]bool)
+	}
+	routeReady[hostname][edgeGroupID] = true
+}
+
+func registerEdgeDNSRecordRouteHost(recordRouteHostByName map[string]string, routeHost string, records ...model.EdgeDNSRecord) {
+	routeHost = normalizeExternalAppDomain(routeHost)
+	if routeHost == "" {
+		return
+	}
+	for _, record := range records {
+		name := normalizeExternalAppDomain(record.Name)
+		if name == "" {
+			continue
+		}
+		recordRouteHostByName[name] = routeHost
+	}
 }
 
 func appendEdgeDNSUniqueIP(values []string, raw string) []string {

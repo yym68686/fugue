@@ -1544,13 +1544,20 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 	if observed.StatusCode == 0 {
 		observed.StatusCode = http.StatusOK
 	}
+	edgeGroupID := firstNonEmpty(observed.Route.EdgeGroupID, s.Config.EdgeGroupID)
+	runtimeEdgeGroupID := firstNonEmpty(observed.Route.RuntimeEdgeGroupID, observed.Route.RuntimeEdgeGroup)
 	s.Logger.Printf(
-		"edge_proxy_request host=%s app=%s tenant=%s runtime=%s route_kind=%s method=%s path=%s status=%d duration_ms=%d upstream=%s upstream_error=%t fallback_hit=%t websocket=%t sse=%t streaming=%t upload=%t",
+		"edge_proxy_request host=%s app=%s tenant=%s runtime=%s route_kind=%s edge_group_id=%s runtime_region=%s runtime_edge_group_id=%s route_generation=%s fallback_reason=%s method=%s path=%s status=%d duration_ms=%d upstream=%s upstream_error=%t fallback_hit=%t websocket=%t sse=%t streaming=%t upload=%t",
 		observed.Host,
 		strings.TrimSpace(observed.Route.AppID),
 		strings.TrimSpace(observed.Route.TenantID),
 		strings.TrimSpace(observed.Route.RuntimeID),
 		strings.TrimSpace(observed.Route.RouteKind),
+		edgeGroupID,
+		edgeGroupRegion(runtimeEdgeGroupID),
+		runtimeEdgeGroupID,
+		strings.TrimSpace(observed.Route.RouteGeneration),
+		strings.TrimSpace(observed.Route.FallbackReason),
 		observed.Method,
 		observed.Path,
 		observed.StatusCode,
@@ -1719,6 +1726,20 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func edgeGroupRegion(edgeGroupID string) string {
+	edgeGroupID = strings.TrimSpace(edgeGroupID)
+	if edgeGroupID == "" {
+		return ""
+	}
+	if strings.HasPrefix(edgeGroupID, "edge-group-country-") {
+		return strings.TrimPrefix(edgeGroupID, "edge-group-country-")
+	}
+	if strings.HasPrefix(edgeGroupID, "edge-group-") {
+		return strings.TrimPrefix(edgeGroupID, "edge-group-")
+	}
+	return edgeGroupID
 }
 
 func firstNonEmptyHeader(r *http.Request, header string, fallback string) string {

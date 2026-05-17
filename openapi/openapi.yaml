@@ -12244,6 +12244,10 @@ components:
           enum: [edge, route_a_legacy, unrouted, degraded]
         route:
           $ref: "#/components/schemas/EdgeRouteBinding"
+        routes:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeRouteBinding"
         healthy_edge_groups:
           type: object
           additionalProperties:

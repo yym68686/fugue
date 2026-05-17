@@ -1665,13 +1665,14 @@ type RestoreManifest struct {
 }
 
 type RouteExplainResponse struct {
-	Hostname          string            `json:"hostname"`
-	ServingMode       string            `json:"serving_mode"`
-	Route             *EdgeRouteBinding `json:"route,omitempty"`
-	HealthyEdgeGroups map[string]bool   `json:"healthy_edge_groups,omitempty"`
-	FallbackChain     []string          `json:"fallback_chain,omitempty"`
-	Reasons           []string          `json:"reasons,omitempty"`
-	GeneratedAt       time.Time         `json:"generated_at"`
+	Hostname          string             `json:"hostname"`
+	ServingMode       string             `json:"serving_mode"`
+	Route             *EdgeRouteBinding  `json:"route,omitempty"`
+	Routes            []EdgeRouteBinding `json:"routes,omitempty"`
+	HealthyEdgeGroups map[string]bool    `json:"healthy_edge_groups,omitempty"`
+	FallbackChain     []string           `json:"fallback_chain,omitempty"`
+	Reasons           []string           `json:"reasons,omitempty"`
+	GeneratedAt       time.Time          `json:"generated_at"`
 }
 
 type RouteServingMode struct {

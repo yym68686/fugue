@@ -303,6 +303,7 @@ func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal mode
 			Pass:    bundleStable,
 			Message: dnsBundleStableMessage(bundleVersion, bundleStable),
 		},
+		s.buildRouteDNSInvariantPreflightCheck(ctx, opts),
 		model.DNSDelegationPreflightCheck{
 			Name:    "cache_errors_zero",
 			Pass:    dnsNodeCacheHealthyAll(nodeChecks),
@@ -338,6 +339,50 @@ func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal mode
 		Checks:           checks,
 		Nodes:            nodeChecks,
 		DelegationPlan:   buildDNSDelegationPlan(opts.Zone, nodeChecks, currentParentNS, dnsDelegationPlanHints(opts.Zone, s.dnsStaticRecords)),
+	}
+}
+
+func (s *Server) buildRouteDNSInvariantPreflightCheck(ctx context.Context, opts dnsDelegationPreflightOptions) model.DNSDelegationPreflightCheck {
+	edgeAnswerIPsByGroup, err := s.edgeDNSAnswerIPsByGroup(edgeDNSBundleOptions{Zone: opts.Zone})
+	if err != nil {
+		return model.DNSDelegationPreflightCheck{
+			Name:    "route_dns_invariant",
+			Pass:    false,
+			Message: fmt.Sprintf("cannot load edge answer inventory: %v", err),
+		}
+	}
+	answerIPs := edgeDNSAllHealthyAnswerIPs("", edgeAnswerIPsByGroup)
+	if len(answerIPs) == 0 {
+		return model.DNSDelegationPreflightCheck{
+			Name:    "route_dns_invariant",
+			Pass:    true,
+			Message: "skipped route/DNS invariant bundle simulation because no route-publishable edge IPs are registered",
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "/v1/dns/delegation/preflight", nil)
+	if err != nil {
+		return model.DNSDelegationPreflightCheck{
+			Name:    "route_dns_invariant",
+			Pass:    false,
+			Message: fmt.Sprintf("cannot build invariant request context: %v", err),
+		}
+	}
+	bundle, err := s.deriveEdgeDNSBundle(req, edgeDNSBundleOptions{
+		Zone:      opts.Zone,
+		AnswerIPs: answerIPs,
+		TTL:       defaultEdgeDNSTTL,
+	})
+	if err != nil {
+		return model.DNSDelegationPreflightCheck{
+			Name:    "route_dns_invariant",
+			Pass:    false,
+			Message: fmt.Sprintf("route/DNS invariant failed: %v", err),
+		}
+	}
+	return model.DNSDelegationPreflightCheck{
+		Name:    "route_dns_invariant",
+		Pass:    true,
+		Message: fmt.Sprintf("validated %d DNS records against route-ready edge answers", len(bundle.Records)),
 	}
 }
 

@@ -2,13 +2,16 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +24,9 @@ type appRequestCompareOptions struct {
 	appRequestCommandOptions
 	RequireEnv []string
 	Insecure   bool
+	EdgeIP     string
+	EdgeGroup  string
+	Resolve    []string
 }
 
 type appRequestCompareResult struct {
@@ -42,6 +48,9 @@ type appRequestPlan struct {
 	Query            map[string][]string         `json:"query,omitempty"`
 	HeaderNames      []string                    `json:"header_names,omitempty"`
 	HeaderInjections []appRequestHeaderInjection `json:"header_injections,omitempty"`
+	EdgeIP           string                      `json:"edge_ip,omitempty"`
+	EdgeGroup        string                      `json:"edge_group,omitempty"`
+	Resolve          []string                    `json:"resolve,omitempty"`
 	BodyBytes        int                         `json:"body_bytes,omitempty"`
 	ContentType      string                      `json:"content_type,omitempty"`
 	Timeout          string                      `json:"timeout,omitempty"`
@@ -72,6 +81,13 @@ type appHTTPProbe struct {
 	Target string `json:"target"`
 	Error  string `json:"error,omitempty"`
 	rawHTTPDiagnostic
+}
+
+type appRequestEdgeOverride struct {
+	Host      string
+	Port      string
+	ConnectIP string
+	Source    string
 }
 
 func (c *CLI) newAppRequestCompareCommand() *cobra.Command {
@@ -124,6 +140,9 @@ func (c *CLI) newAppRequestCompareCommand() *cobra.Command {
 	cmd.Flags().IntVar(&opts.MaxBodyBytes, "max-body-bytes", opts.MaxBodyBytes, "Maximum response bytes to print")
 	cmd.Flags().StringArrayVar(&opts.RequireEnv, "require-env", nil, "Effective app env key that must be present before the probe runs (repeatable)")
 	cmd.Flags().BoolVar(&opts.Insecure, "insecure", false, "Skip TLS certificate verification on the public-route probe")
+	cmd.Flags().StringVar(&opts.EdgeIP, "edge-ip", "", "Force the public-route probe to connect to this edge IP while preserving Host/SNI")
+	cmd.Flags().StringVar(&opts.EdgeGroup, "edge-group", "", "Force the public-route probe through one healthy edge in this edge group")
+	cmd.Flags().StringArrayVar(&opts.Resolve, "resolve", nil, "curl-style host:port:ip override for the public-route probe (repeatable)")
 	return cmd
 }
 
@@ -168,6 +187,9 @@ func (c *CLI) compareAppRequest(client *Client, app model.App, method, requestPa
 			Query:            cloneStringSliceMap(query),
 			HeaderNames:      collectAppRequestHeaderNames(requestHeaders, headerFromEnv),
 			HeaderInjections: buildAppRequestHeaderInjections(headerFromEnv),
+			EdgeIP:           strings.TrimSpace(opts.EdgeIP),
+			EdgeGroup:        strings.TrimSpace(opts.EdgeGroup),
+			Resolve:          append([]string(nil), opts.Resolve...),
 			BodyBytes:        len(body),
 			ContentType:      contentType,
 			Timeout:          opts.Timeout.String(),
@@ -213,7 +235,11 @@ func (c *CLI) compareAppRequest(client *Client, app model.App, method, requestPa
 	result.Internal = internalProbe
 	runtimeDiagnosis = diagnosis
 
-	publicProbe := c.probePublicAppHTTP(app, method, requestPath, query, requestHeaders, headerFromEnv, envValues, body, opts)
+	edgeOverride, err := c.resolveAppRequestEdgeOverride(client, app, requestPath, query, opts)
+	if err != nil {
+		return appRequestCompareResult{}, err
+	}
+	publicProbe := c.probePublicAppHTTP(app, method, requestPath, query, requestHeaders, headerFromEnv, envValues, body, opts, edgeOverride)
 	result.Public = publicProbe
 
 	finalizeAppRequestCompareResult(&result, app, runtimeDiagnosis)
@@ -254,7 +280,7 @@ func (c *CLI) probeInternalAppHTTP(client *Client, app model.App, method, reques
 	return probe, nil
 }
 
-func (c *CLI) probePublicAppHTTP(app model.App, method, requestPath string, query map[string][]string, headers http.Header, headerFromEnv map[string]string, envValues map[string]string, body []byte, opts appRequestCompareOptions) appHTTPProbe {
+func (c *CLI) probePublicAppHTTP(app model.App, method, requestPath string, query map[string][]string, headers http.Header, headerFromEnv map[string]string, envValues map[string]string, body []byte, opts appRequestCompareOptions, edgeOverride *appRequestEdgeOverride) appHTTPProbe {
 	probe := appHTTPProbe{
 		Target: "public_route",
 		rawHTTPDiagnostic: rawHTTPDiagnostic{
@@ -267,6 +293,9 @@ func (c *CLI) probePublicAppHTTP(app model.App, method, requestPath string, quer
 		return probe
 	}
 	probe.URL = publicURL
+	if edgeOverride != nil && strings.TrimSpace(edgeOverride.ConnectIP) != "" {
+		probe.Target = "public_route:" + strings.TrimSpace(edgeOverride.Source)
+	}
 
 	httpClient := &http.Client{
 		Timeout: opts.Timeout,
@@ -277,6 +306,9 @@ func (c *CLI) probePublicAppHTTP(app model.App, method, requestPath string, quer
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if opts.Insecure {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+	if edgeOverride != nil {
+		installAppRequestEdgeDialOverride(transport, *edgeOverride)
 	}
 	httpClient.Transport = transport
 
@@ -331,6 +363,172 @@ func (c *CLI) probePublicAppHTTP(app model.App, method, requestPath string, quer
 	return probe
 }
 
+func (c *CLI) resolveAppRequestEdgeOverride(client *Client, app model.App, requestPath string, query map[string][]string, opts appRequestCompareOptions) (*appRequestEdgeOverride, error) {
+	modeCount := 0
+	if strings.TrimSpace(opts.EdgeIP) != "" {
+		modeCount++
+	}
+	if strings.TrimSpace(opts.EdgeGroup) != "" {
+		modeCount++
+	}
+	if len(opts.Resolve) > 0 {
+		modeCount++
+	}
+	if modeCount == 0 {
+		return nil, nil
+	}
+	if modeCount > 1 {
+		return nil, fmt.Errorf("set only one of --edge-ip, --edge-group, or --resolve")
+	}
+	publicURL, err := buildAppPublicRequestURL(app, requestPath, query)
+	if err != nil {
+		return nil, err
+	}
+	parsedURL, err := url.Parse(publicURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse public route URL: %w", err)
+	}
+	host := strings.TrimSpace(parsedURL.Hostname())
+	port := defaultURLPort(parsedURL)
+	if host == "" || port == "" {
+		return nil, fmt.Errorf("public route URL must include a host")
+	}
+	if ip := strings.TrimSpace(opts.EdgeIP); ip != "" {
+		if net.ParseIP(ip) == nil {
+			return nil, fmt.Errorf("--edge-ip must be an IP address")
+		}
+		return &appRequestEdgeOverride{
+			Host:      host,
+			Port:      port,
+			ConnectIP: ip,
+			Source:    "edge_ip",
+		}, nil
+	}
+	if groupID := strings.TrimSpace(opts.EdgeGroup); groupID != "" {
+		response, err := client.ListEdgeNodes(groupID)
+		if err != nil {
+			return nil, err
+		}
+		node, ip, ok := selectAppRequestCompareEdgeNode(response.Nodes)
+		if !ok {
+			return nil, fmt.Errorf("no healthy edge node with a public IP found for edge group %s", groupID)
+		}
+		return &appRequestEdgeOverride{
+			Host:      host,
+			Port:      port,
+			ConnectIP: ip,
+			Source:    "edge_group:" + strings.TrimSpace(node.EdgeGroupID),
+		}, nil
+	}
+	override, err := appRequestResolveOverrideForURL(opts.Resolve, parsedURL)
+	if err != nil {
+		return nil, err
+	}
+	return override, nil
+}
+
+func selectAppRequestCompareEdgeNode(nodes []model.EdgeNode) (model.EdgeNode, string, bool) {
+	sorted := append([]model.EdgeNode(nil), nodes...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return strings.TrimSpace(sorted[i].ID) < strings.TrimSpace(sorted[j].ID)
+	})
+	for _, node := range sorted {
+		if !node.Healthy || !strings.EqualFold(strings.TrimSpace(node.Status), model.EdgeHealthHealthy) {
+			continue
+		}
+		if ip := firstNonEmptyTrimmed(node.PublicIPv4, node.PublicIPv6); ip != "" {
+			return node, ip, true
+		}
+	}
+	return model.EdgeNode{}, "", false
+}
+
+func appRequestResolveOverrideForURL(values []string, targetURL *url.URL) (*appRequestEdgeOverride, error) {
+	if targetURL == nil {
+		return nil, fmt.Errorf("public route URL is required")
+	}
+	targetHost := strings.TrimSpace(targetURL.Hostname())
+	targetPort := defaultURLPort(targetURL)
+	for _, raw := range values {
+		host, port, ip, err := parseAppRequestResolveOverride(raw)
+		if err != nil {
+			return nil, err
+		}
+		if strings.EqualFold(host, targetHost) && port == targetPort {
+			return &appRequestEdgeOverride{
+				Host:      targetHost,
+				Port:      targetPort,
+				ConnectIP: ip,
+				Source:    "resolve",
+			}, nil
+		}
+	}
+	return nil, fmt.Errorf("--resolve did not include an entry for %s:%s", targetHost, targetPort)
+}
+
+func parseAppRequestResolveOverride(raw string) (string, string, string, error) {
+	parts := strings.SplitN(strings.TrimSpace(raw), ":", 3)
+	if len(parts) != 3 {
+		return "", "", "", fmt.Errorf("--resolve must use host:port:ip")
+	}
+	host := strings.Trim(strings.TrimSpace(parts[0]), ".")
+	port := strings.TrimSpace(parts[1])
+	ip := strings.Trim(strings.TrimSpace(parts[2]), "[]")
+	if host == "" || port == "" || ip == "" {
+		return "", "", "", fmt.Errorf("--resolve must use host:port:ip")
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber <= 0 || portNumber > 65535 {
+		return "", "", "", fmt.Errorf("--resolve port must be between 1 and 65535")
+	}
+	if net.ParseIP(ip) == nil {
+		return "", "", "", fmt.Errorf("--resolve IP must be an IP address")
+	}
+	return host, strconv.Itoa(portNumber), ip, nil
+}
+
+func defaultURLPort(targetURL *url.URL) string {
+	if targetURL == nil {
+		return ""
+	}
+	if port := strings.TrimSpace(targetURL.Port()); port != "" {
+		return port
+	}
+	switch strings.ToLower(strings.TrimSpace(targetURL.Scheme)) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
+}
+
+func installAppRequestEdgeDialOverride(transport *http.Transport, override appRequestEdgeOverride) {
+	if transport == nil {
+		return
+	}
+	targetHost := strings.Trim(strings.TrimSpace(strings.ToLower(override.Host)), "[]")
+	targetPort := strings.TrimSpace(override.Port)
+	connectIP := strings.TrimSpace(override.ConnectIP)
+	if targetHost == "" || targetPort == "" || connectIP == "" {
+		return
+	}
+	connectAddr := net.JoinHostPort(connectIP, targetPort)
+	baseDial := transport.DialContext
+	if baseDial == nil {
+		dialer := &net.Dialer{}
+		baseDial = dialer.DialContext
+	}
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err == nil && strings.Trim(strings.ToLower(host), "[]") == targetHost && port == targetPort {
+			return baseDial(ctx, network, connectAddr)
+		}
+		return baseDial(ctx, network, addr)
+	}
+}
+
 func renderAppRequestCompareResult(w io.Writer, result appRequestCompareResult) error {
 	requestQuery := encodeAppRequestQuery(result.Request.Query)
 	pairs := []kvPair{
@@ -344,6 +542,15 @@ func renderAppRequestCompareResult(w io.Writer, result appRequestCompareResult) 
 		{Key: "request_content_type", Value: strings.TrimSpace(result.Request.ContentType)},
 		{Key: "request_timeout", Value: strings.TrimSpace(result.Request.Timeout)},
 		{Key: "request_headers", Value: strings.Join(result.Request.HeaderNames, ", ")},
+	}
+	if strings.TrimSpace(result.Request.EdgeIP) != "" {
+		pairs = append(pairs, kvPair{Key: "request_edge_ip", Value: strings.TrimSpace(result.Request.EdgeIP)})
+	}
+	if strings.TrimSpace(result.Request.EdgeGroup) != "" {
+		pairs = append(pairs, kvPair{Key: "request_edge_group", Value: strings.TrimSpace(result.Request.EdgeGroup)})
+	}
+	if len(result.Request.Resolve) > 0 {
+		pairs = append(pairs, kvPair{Key: "request_resolve", Value: strings.Join(result.Request.Resolve, ", ")})
 	}
 	if err := writeKeyValues(w, pairs...); err != nil {
 		return err

@@ -378,6 +378,86 @@ deployment_exists() {
 smoke_test() {
   require_env FUGUE_SMOKE_URL
   curl -fsS --max-time 10 "${FUGUE_SMOKE_URL}" >/dev/null
+  smoke_test_resolve_edges
+}
+
+smoke_test_resolve_edges() {
+  local url="${FUGUE_SMOKE_URL:-}"
+  local scheme=""
+  local hostport=""
+  local host=""
+  local port=""
+  local ip=""
+  local -a ips=()
+
+  if [[ -z "$(trim_field "${url}")" ]]; then
+    return 0
+  fi
+
+  scheme="${url%%://*}"
+  hostport="${url#*://}"
+  hostport="${hostport%%/*}"
+  host="${hostport}"
+  if [[ "${hostport}" == *:* && "${hostport}" != *:*:* ]]; then
+    host="${hostport%:*}"
+    port="${hostport##*:}"
+  fi
+  host="${host#\[}"
+  host="${host%\]}"
+  if [[ -z "${port}" ]]; then
+    case "${scheme}" in
+      https)
+        port="443"
+        ;;
+      *)
+        port="80"
+        ;;
+    esac
+  fi
+
+  mapfile -t ips < <(smoke_resolve_edge_ips)
+  if (( ${#ips[@]} == 0 )); then
+    log "smoke resolve check skipped because no edge IPs were discovered from DNS/env inputs"
+    return 0
+  fi
+
+  for ip in "${ips[@]}"; do
+    log "smoke resolve check host=${host} port=${port} ip=${ip}"
+    curl -fsS --max-time 10 --resolve "${host}:${port}:${ip}" "${url}" >/dev/null
+  done
+}
+
+smoke_resolve_edge_ips() {
+  declare -A seen=()
+  local ip=""
+
+  smoke_resolve_ips_from_value "${FUGUE_DNS_ANSWER_IPS:-}" seen
+  smoke_resolve_ips_from_value "${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-}" seen
+  if [[ -n "$(trim_field "${FUGUE_DNS_EXTRA_GROUPS:-}")" ]]; then
+    while IFS= read -r entry; do
+      local answer_ips=""
+      IFS='|' read -r _ _ _ answer_ips _ _ <<<"${entry}"
+      smoke_resolve_ips_from_value "${answer_ips}" seen
+    done < <(csv_lines "${FUGUE_DNS_EXTRA_GROUPS}")
+  fi
+  smoke_resolve_ips_from_value "${FUGUE_EDGE_PUBLIC_IPV4:-}" seen
+  smoke_resolve_ips_from_value "${FUGUE_EDGE_PUBLIC_IPV6:-}" seen
+
+  for ip in "${!seen[@]}"; do
+    printf '%s\n' "${ip}"
+  done | sort -V
+}
+
+smoke_resolve_ips_from_value() {
+  local raw="$1"
+  local -n seen_ref="$2"
+  local value=""
+  while IFS= read -r value; do
+    value="$(trim_field "${value}")"
+    if [[ -n "${value}" ]]; then
+      seen_ref["${value}"]=1
+    fi
+  done < <(dns_answer_ips_lines "${raw}")
 }
 
 cleanup_control_plane_automation_tmp() {

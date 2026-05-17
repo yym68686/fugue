@@ -17,6 +17,14 @@ type edgeRouteBundleInvariantInput struct {
 	Options                    edgeRouteBundleOptions
 }
 
+type edgeDNSBundleInvariantInput struct {
+	Options                       edgeDNSBundleOptions
+	ProtectedRecords              []model.EdgeDNSRecord
+	AnswerEdgeGroupsByIP          map[string][]string
+	RouteReadyByHostnameEdgeGroup map[string]map[string]bool
+	RecordRouteHostByName         map[string]string
+}
+
 func validateEdgeRouteBundleForPublish(bundle model.EdgeRouteBundle, input edgeRouteBundleInvariantInput) error {
 	if strings.TrimSpace(bundle.Version) == "" || strings.TrimSpace(bundle.Generation) == "" {
 		return fmt.Errorf("edge route bundle invariant failed: generation is required")
@@ -124,7 +132,7 @@ func edgeRouteExpectedMinTrafficRoutes(options edgeRouteBundleOptions, expected 
 	return expected[edgeGroupID]
 }
 
-func validateEdgeDNSBundleForPublish(bundle model.EdgeDNSBundle, options edgeDNSBundleOptions, protectedRecords []model.EdgeDNSRecord) error {
+func validateEdgeDNSBundleForPublish(bundle model.EdgeDNSBundle, input edgeDNSBundleInvariantInput) error {
 	if strings.TrimSpace(bundle.Version) == "" || strings.TrimSpace(bundle.Generation) == "" {
 		return fmt.Errorf("edge dns bundle invariant failed: generation is required")
 	}
@@ -134,12 +142,12 @@ func validateEdgeDNSBundleForPublish(bundle model.EdgeDNSBundle, options edgeDNS
 	if len(bundle.Records) == 0 {
 		return fmt.Errorf("edge dns bundle invariant failed: refusing to publish empty dns record bundle")
 	}
-	probeName := normalizeExternalAppDomain(defaultEdgeDNSProbeLabel + "." + options.Zone)
+	probeName := normalizeExternalAppDomain(defaultEdgeDNSProbeLabel + "." + input.Options.Zone)
 	if !edgeDNSBundleHasRecordValue(bundle.Records, probeName, model.EdgeDNSRecordTypeA, "") &&
 		!edgeDNSBundleHasRecordValue(bundle.Records, probeName, model.EdgeDNSRecordTypeAAAA, "") {
 		return fmt.Errorf("edge dns bundle invariant failed: probe record %s is missing", probeName)
 	}
-	for _, record := range protectedRecords {
+	for _, record := range input.ProtectedRecords {
 		if record.RecordKind != model.EdgeDNSRecordKindProtected {
 			continue
 		}
@@ -154,7 +162,80 @@ func validateEdgeDNSBundleForPublish(bundle model.EdgeDNSBundle, options edgeDNS
 			}
 		}
 	}
+	if err := validateEdgeDNSRouteReadyAnswers(bundle, input); err != nil {
+		return err
+	}
 	return nil
+}
+
+func validateEdgeDNSRouteReadyAnswers(bundle model.EdgeDNSBundle, input edgeDNSBundleInvariantInput) error {
+	if len(input.AnswerEdgeGroupsByIP) == 0 {
+		return nil
+	}
+	for _, record := range bundle.Records {
+		if !edgeDNSRecordRequiresRouteReady(record) {
+			continue
+		}
+		routeHost := edgeDNSRecordRouteHost(record, input)
+		for _, value := range record.Values {
+			answerIP := normalizeEdgeDNSStaticRecordValue(record.Type, value)
+			if answerIP == "" {
+				continue
+			}
+			edgeGroups := input.AnswerEdgeGroupsByIP[answerIP]
+			if len(edgeGroups) == 0 {
+				continue
+			}
+			if routeHost == "" {
+				return fmt.Errorf("edge dns bundle invariant failed: %s %s answer %s maps to edge groups %s but no route hostname is known", record.Name, record.Type, answerIP, strings.Join(edgeGroups, ","))
+			}
+			for _, edgeGroupID := range edgeGroups {
+				if !edgeDNSRouteReadyForGroup(input.RouteReadyByHostnameEdgeGroup, routeHost, edgeGroupID) {
+					return fmt.Errorf("edge dns bundle invariant failed: %s %s answer %s points at edge group %s without active route for %s", record.Name, record.Type, answerIP, edgeGroupID, routeHost)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func edgeDNSRecordRequiresRouteReady(record model.EdgeDNSRecord) bool {
+	recordType := strings.ToUpper(strings.TrimSpace(record.Type))
+	if recordType != model.EdgeDNSRecordTypeA && recordType != model.EdgeDNSRecordTypeAAAA {
+		return false
+	}
+	switch strings.TrimSpace(record.RecordKind) {
+	case model.EdgeDNSRecordKindPlatform,
+		model.EdgeDNSRecordKindPlatformDomain,
+		model.EdgeDNSRecordKindPlatformRoute,
+		model.EdgeDNSRecordKindCustomDomainTarget:
+		return true
+	default:
+		return false
+	}
+}
+
+func edgeDNSRecordRouteHost(record model.EdgeDNSRecord, input edgeDNSBundleInvariantInput) string {
+	name := normalizeExternalAppDomain(record.Name)
+	if name == "" {
+		return ""
+	}
+	if host := normalizeExternalAppDomain(input.RecordRouteHostByName[name]); host != "" {
+		return host
+	}
+	if record.RecordKind == model.EdgeDNSRecordKindCustomDomainTarget {
+		return ""
+	}
+	return name
+}
+
+func edgeDNSRouteReadyForGroup(routeReady map[string]map[string]bool, hostname, edgeGroupID string) bool {
+	hostname = normalizeExternalAppDomain(hostname)
+	edgeGroupID = strings.TrimSpace(edgeGroupID)
+	if hostname == "" || edgeGroupID == "" {
+		return false
+	}
+	return routeReady[hostname][edgeGroupID]
 }
 
 func edgeDNSBundleHasRecordValue(records []model.EdgeDNSRecord, name, recordType, value string) bool {

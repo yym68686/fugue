@@ -260,7 +260,52 @@ func writeRouteExplain(w io.Writer, explain model.RouteExplainResponse) error {
 			kvPair{Key: "fallback_reason", Value: firstNonEmpty(explain.Route.FallbackReason, "-")},
 		)
 	}
-	return writeKeyValues(w, pairs...)
+	if err := writeKeyValues(w, pairs...); err != nil {
+		return err
+	}
+	if len(explain.Routes) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	return writeEdgeRouteBindingTable(w, explain.Routes)
+}
+
+func writeEdgeRouteBindingTable(w io.Writer, routes []model.EdgeRouteBinding) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "EDGE_GROUP\tRUNTIME_GROUP\tKIND\tPOLICY\tSTATUS\tTLS\tUPSTREAM\tREASON"); err != nil {
+		return err
+	}
+	for _, route := range routes {
+		reason := strings.Join(routeExplainRouteReasons(route), "; ")
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			firstNonEmpty(route.EdgeGroupID, "-"),
+			firstNonEmpty(route.RuntimeEdgeGroupID, route.RuntimeEdgeGroup, "-"),
+			firstNonEmpty(route.RouteKind, "-"),
+			firstNonEmpty(route.RoutePolicy, "-"),
+			firstNonEmpty(route.Status, "-"),
+			firstNonEmpty(route.TLSPolicy, "-"),
+			firstNonEmpty(route.UpstreamURL, "-"),
+			firstNonEmpty(reason, "-"),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func routeExplainRouteReasons(route model.EdgeRouteBinding) []string {
+	out := []string{}
+	for _, value := range []string{route.SelectionReason, route.FallbackReason, route.StatusReason} {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func writePlatformAutonomyStatus(w io.Writer, status model.PlatformAutonomyStatus) error {

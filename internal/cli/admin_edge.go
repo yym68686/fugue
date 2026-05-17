@@ -19,8 +19,31 @@ func (c *CLI) newAdminEdgeCommand() *cobra.Command {
 		Short: "Manage edge data-plane canary policy",
 	}
 	cmd.AddCommand(c.newAdminEdgeRoutePolicyCommand())
+	cmd.AddCommand(c.newAdminEdgeRouteCheckCommand())
 	cmd.AddCommand(c.newAdminEdgeNodesCommand())
 	return cmd
+}
+
+func (c *CLI) newAdminEdgeRouteCheckCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "route-check <hostname>",
+		Short: "Explain edge readiness for a hostname",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			explain, err := client.ExplainRoute(args[0])
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"explain": explain})
+			}
+			return writeRouteExplain(c.stdout, explain)
+		},
+	}
 }
 
 func (c *CLI) newAdminEdgeNodesCommand() *cobra.Command {

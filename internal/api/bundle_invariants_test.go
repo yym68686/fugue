@@ -137,9 +137,52 @@ func TestEdgeDNSBundleInvariantRejectsMissingProtectedRecord(t *testing.T) {
 			},
 		},
 	}
-	err := validateEdgeDNSBundleForPublish(bundle, edgeDNSBundleOptions{Zone: "fugue.pro"}, protected)
+	err := validateEdgeDNSBundleForPublish(bundle, edgeDNSBundleInvariantInput{
+		Options:          edgeDNSBundleOptions{Zone: "fugue.pro"},
+		ProtectedRecords: protected,
+	})
 	if err == nil || !strings.Contains(err.Error(), "protected fugue.pro NS value is missing") {
 		t.Fatalf("expected protected record invariant failure, got %v", err)
+	}
+}
+
+func TestEdgeDNSBundleInvariantRejectsRouteReadyMismatch(t *testing.T) {
+	t.Parallel()
+
+	bundle := model.EdgeDNSBundle{
+		Version:     "dnsgen_route_ready_mismatch",
+		Generation:  "dnsgen_route_ready_mismatch",
+		GeneratedAt: time.Now().UTC(),
+		Zone:        "fugue.pro",
+		Records: []model.EdgeDNSRecord{
+			{
+				Name:       "d-test.fugue.pro",
+				Type:       model.EdgeDNSRecordTypeA,
+				Values:     []string{"203.0.113.20"},
+				RecordKind: model.EdgeDNSRecordKindProbe,
+				Status:     model.EdgeRouteStatusActive,
+			},
+			{
+				Name:       "demo.fugue.pro",
+				Type:       model.EdgeDNSRecordTypeA,
+				Values:     []string{"203.0.113.10"},
+				RecordKind: model.EdgeDNSRecordKindPlatform,
+				Status:     model.EdgeRouteStatusActive,
+			},
+		},
+	}
+	err := validateEdgeDNSBundleForPublish(bundle, edgeDNSBundleInvariantInput{
+		Options: edgeDNSBundleOptions{Zone: "fugue.pro"},
+		AnswerEdgeGroupsByIP: map[string][]string{
+			"203.0.113.10": []string{"edge-group-country-us"},
+		},
+		RouteReadyByHostnameEdgeGroup: map[string]map[string]bool{},
+		RecordRouteHostByName: map[string]string{
+			"demo.fugue.pro": "demo.fugue.pro",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "without active route for demo.fugue.pro") {
+		t.Fatalf("expected route-ready mismatch failure, got %v", err)
 	}
 }
 

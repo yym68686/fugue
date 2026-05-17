@@ -1,13 +1,18 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"net"
+	"sort"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"fugue/internal/model"
 
+	miekgdns "github.com/miekg/dns"
 	"github.com/spf13/cobra"
 )
 
@@ -19,6 +24,7 @@ func (c *CLI) newAdminDNSCommand() *cobra.Command {
 	cmd.AddCommand(c.newAdminDNSNodesCommand())
 	cmd.AddCommand(c.newAdminDNSACMECommand())
 	cmd.AddCommand(c.newAdminDNSStatusCommand())
+	cmd.AddCommand(c.newAdminDNSAnswerCheckCommand())
 	cmd.AddCommand(c.newAdminDNSDelegationCommand())
 	cmd.AddCommand(c.newAdminDNSFullZoneCommand())
 	return cmd
@@ -112,6 +118,33 @@ func (c *CLI) newAdminDNSStatusCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.ProbeName, "probe-name", "", "A record each DNS node must answer; defaults to d-test.<zone>")
 	cmd.Flags().StringVar(&opts.EdgeGroupID, "edge-group", "", "Only check DNS nodes in this edge group")
 	cmd.Flags().IntVar(&opts.MinHealthyNodes, "min-healthy-nodes", 2, "Minimum healthy DNS nodes required")
+	return cmd
+}
+
+func (c *CLI) newAdminDNSAnswerCheckCommand() *cobra.Command {
+	opts := struct {
+		Hostname string
+	}{}
+	cmd := &cobra.Command{
+		Use:   "answer-check <hostname>",
+		Short: "Check whether DNS answers point at route-ready edges",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			opts.Hostname = strings.TrimSpace(args[0])
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			report, err := c.checkDNSAnswers(client, opts.Hostname)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, report)
+			}
+			return writeDNSAnswerCheck(c.stdout, report)
+		},
+	}
 	return cmd
 }
 
@@ -251,6 +284,322 @@ func writeDNSFullZonePreflight(w io.Writer, response model.DNSFullZonePreflightR
 		return err
 	}
 	return writeDNSPreflightCheckTable(w, response.Checks)
+}
+
+type dnsAnswerCheckReport struct {
+	Hostname             string                     `json:"hostname"`
+	GeneratedAt          time.Time                  `json:"generated_at"`
+	Pass                 bool                       `json:"pass"`
+	RouteExplain         model.RouteExplainResponse `json:"route_explain"`
+	RouteReadyEdgeGroups []string                   `json:"route_ready_edge_groups,omitempty"`
+	Nodes                []dnsAnswerCheckNode       `json:"nodes"`
+}
+
+type dnsAnswerCheckNode struct {
+	DNSNodeID  string   `json:"dns_node_id"`
+	Zone       string   `json:"zone"`
+	PublicIP   string   `json:"public_ip,omitempty"`
+	Status     string   `json:"status"`
+	Healthy    bool     `json:"healthy"`
+	Answers    []string `json:"answers,omitempty"`
+	EdgeGroups []string `json:"edge_groups,omitempty"`
+	RouteReady bool     `json:"route_ready"`
+	Pass       bool     `json:"pass"`
+	Message    string   `json:"message,omitempty"`
+}
+
+func (c *CLI) checkDNSAnswers(client *Client, hostname string) (dnsAnswerCheckReport, error) {
+	explain, err := client.ExplainRoute(hostname)
+	if err != nil {
+		return dnsAnswerCheckReport{}, err
+	}
+	routeReady := routeReadyEdgeGroups(explain)
+	dnsNodes, err := client.ListDNSNodes("")
+	if err != nil {
+		return dnsAnswerCheckReport{}, err
+	}
+	edgeNodes, err := client.ListEdgeNodes("")
+	if err != nil {
+		return dnsAnswerCheckReport{}, err
+	}
+	edgeGroupsByIP := edgeGroupsByIPFromEdgeNodes(edgeNodes.Nodes)
+
+	nodes := make([]dnsAnswerCheckNode, 0, len(dnsNodes.Nodes))
+	pass := len(routeReady) > 0
+	for _, node := range dnsNodes.Nodes {
+		if !dnsNodeServesHostname(node, hostname) {
+			continue
+		}
+		nodeReport := dnsAnswerCheckNode{
+			DNSNodeID: strings.TrimSpace(node.ID),
+			Zone:      strings.TrimSpace(node.Zone),
+			PublicIP:  firstNonEmpty(strings.TrimSpace(node.PublicIPv4), strings.TrimSpace(node.PublicIPv6)),
+			Status:    strings.TrimSpace(node.Status),
+			Healthy:   node.Healthy,
+		}
+		answers, err := queryDNSNodeAnswers(hostname, node)
+		if err != nil {
+			nodeReport.Pass = false
+			nodeReport.Message = err.Error()
+			pass = false
+			nodes = append(nodes, nodeReport)
+			continue
+		}
+		nodeReport.Answers = answers
+		seenGroups := map[string]struct{}{}
+		nodePass := true
+		for _, answer := range answers {
+			groups := edgeGroupsByIP[strings.TrimSpace(answer)]
+			for _, groupID := range groups {
+				if groupID != "" {
+					seenGroups[groupID] = struct{}{}
+				}
+			}
+			if len(groups) == 0 {
+				continue
+			}
+			edgeReady := false
+			for _, groupID := range groups {
+				if routeReady[groupID] {
+					edgeReady = true
+					break
+				}
+			}
+			if !edgeReady {
+				nodePass = false
+				pass = false
+				nodeReport.Message = appendMessage(nodeReport.Message, fmt.Sprintf("answer %s is mapped to edge groups %s but none are route-ready", answer, strings.Join(groups, ", ")))
+			}
+		}
+		if len(seenGroups) > 0 {
+			nodeReport.EdgeGroups = sortedStringSetKeys(seenGroups)
+		}
+		nodeReport.RouteReady = nodePass
+		nodeReport.Pass = nodePass
+		if nodeReport.Message == "" && len(nodeReport.Answers) == 0 {
+			nodeReport.Message = "no A/AAAA answers"
+			nodeReport.Pass = false
+			pass = false
+		}
+		nodes = append(nodes, nodeReport)
+	}
+	if len(nodes) == 0 {
+		pass = false
+	}
+	return dnsAnswerCheckReport{
+		Hostname:             hostname,
+		GeneratedAt:          time.Now().UTC(),
+		Pass:                 pass,
+		RouteExplain:         explain,
+		RouteReadyEdgeGroups: sortedBoolSetKeys(routeReady),
+		Nodes:                nodes,
+	}, nil
+}
+
+func writeDNSAnswerCheck(w io.Writer, report dnsAnswerCheckReport) error {
+	if err := writeKeyValues(w,
+		kvPair{Key: "hostname", Value: report.Hostname},
+		kvPair{Key: "pass", Value: fmt.Sprintf("%t", report.Pass)},
+		kvPair{Key: "route_ready_edge_groups", Value: strings.Join(report.RouteReadyEdgeGroups, ", ")},
+		kvPair{Key: "generated_at", Value: formatTime(report.GeneratedAt)},
+	); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	if err := writeRouteExplain(w, report.RouteExplain); err != nil {
+		return err
+	}
+	if len(report.Nodes) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	return writeDNSAnswerCheckTable(w, report.Nodes)
+}
+
+func writeDNSAnswerCheckTable(w io.Writer, nodes []dnsAnswerCheckNode) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "DNS_NODE\tZONE\tSTATUS\tHEALTHY\tANSWERS\tEDGE_GROUPS\tPASS\tMESSAGE"); err != nil {
+		return err
+	}
+	for _, node := range nodes {
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%s\t%s\t%t\t%s\n",
+			node.DNSNodeID,
+			node.Zone,
+			node.Status,
+			node.Healthy,
+			strings.Join(node.Answers, ", "),
+			strings.Join(node.EdgeGroups, ", "),
+			node.Pass,
+			firstNonEmpty(node.Message, "-"),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func queryDNSNodeAnswers(hostname string, node model.DNSNode) ([]string, error) {
+	address := ""
+	if ip := strings.TrimSpace(node.PublicIPv4); ip != "" {
+		address = net.JoinHostPort(ip, "53")
+	} else if ip := strings.TrimSpace(node.PublicIPv6); ip != "" {
+		address = net.JoinHostPort(ip, "53")
+	}
+	if address == "" {
+		return nil, fmt.Errorf("dns node has no public IP")
+	}
+	answers := []string{}
+	if udpAnswers, err := queryAuthoritativeDNSRecord(hostname, address, "udp", miekgdns.TypeA); err == nil {
+		answers = append(answers, udpAnswers...)
+	} else {
+		return nil, fmt.Errorf("udp A query failed: %w", err)
+	}
+	if tcpAnswers, err := queryAuthoritativeDNSRecord(hostname, address, "tcp", miekgdns.TypeA); err == nil {
+		answers = append(answers, tcpAnswers...)
+	} else {
+		return nil, fmt.Errorf("tcp A query failed: %w", err)
+	}
+	if udpAAAA, err := queryAuthoritativeDNSRecord(hostname, address, "udp", miekgdns.TypeAAAA); err == nil {
+		answers = append(answers, udpAAAA...)
+	} else {
+		return nil, fmt.Errorf("udp AAAA query failed: %w", err)
+	}
+	if tcpAAAA, err := queryAuthoritativeDNSRecord(hostname, address, "tcp", miekgdns.TypeAAAA); err == nil {
+		answers = append(answers, tcpAAAA...)
+	} else {
+		return nil, fmt.Errorf("tcp AAAA query failed: %w", err)
+	}
+	return uniqueSortedStrings(answers), nil
+}
+
+func queryAuthoritativeDNSRecord(hostname, address, network string, qtype uint16) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	msg := new(miekgdns.Msg)
+	msg.SetQuestion(miekgdns.Fqdn(hostname), qtype)
+	client := &miekgdns.Client{Net: network, Timeout: 3 * time.Second}
+	resp, _, err := client.ExchangeContext(ctx, msg, address)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil {
+		return nil, fmt.Errorf("empty DNS response")
+	}
+	if resp.Rcode != miekgdns.RcodeSuccess {
+		return nil, fmt.Errorf("rcode=%s", miekgdns.RcodeToString[resp.Rcode])
+	}
+	answers := []string{}
+	for _, answer := range resp.Answer {
+		switch rr := answer.(type) {
+		case *miekgdns.A:
+			if rr.A != nil {
+				answers = append(answers, rr.A.String())
+			}
+		case *miekgdns.AAAA:
+			if rr.AAAA != nil {
+				answers = append(answers, rr.AAAA.String())
+			}
+		}
+	}
+	return uniqueSortedStrings(answers), nil
+}
+
+func routeReadyEdgeGroups(explain model.RouteExplainResponse) map[string]bool {
+	out := map[string]bool{}
+	add := func(route model.EdgeRouteBinding) {
+		if strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive) &&
+			model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) &&
+			strings.TrimSpace(route.EdgeGroupID) != "" &&
+			strings.TrimSpace(route.UpstreamURL) != "" {
+			out[strings.TrimSpace(route.EdgeGroupID)] = true
+		}
+	}
+	for _, route := range explain.Routes {
+		add(route)
+	}
+	if len(out) == 0 && explain.Route != nil {
+		add(*explain.Route)
+	}
+	return out
+}
+
+func edgeGroupsByIPFromEdgeNodes(nodes []model.EdgeNode) map[string][]string {
+	out := map[string][]string{}
+	for _, node := range nodes {
+		groupID := strings.TrimSpace(node.EdgeGroupID)
+		if groupID == "" {
+			continue
+		}
+		for _, raw := range []string{node.PublicIPv4, node.PublicIPv6} {
+			ip := strings.TrimSpace(raw)
+			if ip == "" {
+				continue
+			}
+			if !stringSliceContains(out[ip], groupID) {
+				out[ip] = append(out[ip], groupID)
+			}
+		}
+	}
+	for ip := range out {
+		sort.Strings(out[ip])
+	}
+	return out
+}
+
+func dnsNodeServesHostname(node model.DNSNode, hostname string) bool {
+	host := normalizeDNSHostname(hostname)
+	zone := normalizeDNSHostname(node.Zone)
+	return host != "" && zone != "" && (host == zone || strings.HasSuffix(host, "."+zone))
+}
+
+func appendMessage(current, addition string) string {
+	current = strings.TrimSpace(current)
+	addition = strings.TrimSpace(addition)
+	if addition == "" {
+		return current
+	}
+	if current == "" {
+		return addition
+	}
+	return current + "; " + addition
+}
+
+func sortedBoolSetKeys(values map[string]bool) []string {
+	keys := make([]string, 0, len(values))
+	for key, ok := range values {
+		if ok {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedStringSetKeys(values map[string]struct{}) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func normalizeDNSHostname(raw string) string {
+	return strings.Trim(strings.TrimSpace(strings.ToLower(raw)), ".")
+}
+
+func stringSliceContains(values []string, want string) bool {
+	want = strings.TrimSpace(want)
+	for _, value := range values {
+		if strings.TrimSpace(value) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func writeDNSPreflightCheckTable(w io.Writer, checks []model.DNSDelegationPreflightCheck) error {

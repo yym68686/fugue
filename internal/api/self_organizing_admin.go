@@ -184,11 +184,13 @@ func (s *Server) handleExplainRoute(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		routeCopy := route
-		response.Route = &routeCopy
-		response.ServingMode = routeServingMode(route)
-		response.FallbackChain = routeFallbackChain(route)
-		response.Reasons = routeExplainReasons(route)
-		break
+		response.Routes = append(response.Routes, routeCopy)
+		if response.Route == nil {
+			response.Route = &routeCopy
+			response.ServingMode = routeServingMode(route)
+			response.FallbackChain = routeFallbackChain(route)
+			response.Reasons = routeExplainReasons(route)
+		}
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"explain": response})
 }
