@@ -813,6 +813,7 @@ run_release_preflight() {
   local discovery_body=""
   local discovery_http_status=""
   local autonomy_status_file=""
+  local edge_nodes_file=""
   local discovery_etag=""
 
   case "${FUGUE_RELEASE_PREFLIGHT_ENABLED:-true}" in
@@ -874,32 +875,127 @@ PY
 
   autonomy_status_file="$(mktemp)"
   curl -fsS -H "Authorization: Bearer ${token}" "${api_base}/v1/admin/platform/autonomy/status" -o "${autonomy_status_file}"
-  python3 - "${autonomy_status_file}" <<'PY'
+  edge_nodes_file="$(mktemp)"
+  curl -fsS -H "Authorization: Bearer ${token}" "${api_base}/v1/edge/nodes" -o "${edge_nodes_file}"
+  local autonomy_override_message=""
+  if ! autonomy_override_message="$(python3 - "${autonomy_status_file}" "${edge_nodes_file}" <<'PY'
 import json
+from datetime import datetime, timedelta, timezone
 import sys
 
-path = sys.argv[1]
-with open(path, "r", encoding="utf-8") as fh:
+def trim(value):
+    return str(value or "").strip()
+
+def heartbeat_fresh(node, now):
+    seen = node.get("last_heartbeat_at") or node.get("last_seen_at")
+    if not seen:
+        return False
+    try:
+      seen_at = datetime.fromisoformat(str(seen).replace("Z", "+00:00"))
+    except ValueError as exc:
+      raise SystemExit(f"invalid edge node timestamp: {seen}") from exc
+    if seen_at.tzinfo is None:
+        seen_at = seen_at.replace(tzinfo=timezone.utc)
+    now = now.astimezone(timezone.utc)
+    if seen_at > now:
+        return True
+    return now - seen_at <= timedelta(seconds=90)
+
+def edge_node_bootstrap_pending(node, now):
+    if heartbeat_fresh(node, now):
+        return False
+    if trim(node.get("status")).lower() != "unknown":
+        return False
+    if trim(node.get("last_error")):
+        return False
+    if trim(node.get("route_bundle_version")):
+        return False
+    if trim(node.get("serving_generation")):
+        return False
+    if int(node.get("caddy_route_count") or 0) != 0:
+        return False
+    if trim(node.get("cache_status")):
+        return False
+    return True
+
+def edge_node_route_serving_capable(node, now):
+    if node.get("draining"):
+        return False
+    if not node.get("healthy"):
+        return False
+    if not heartbeat_fresh(node, now):
+        return False
+    status = trim(node.get("status")).lower()
+    if status == "healthy":
+        return True
+    if status == "degraded":
+        return trim(node.get("caddy_last_error")) == "" and int(node.get("caddy_route_count") or 0) > 0
+    return False
+
+def edge_inventory_healthy(nodes):
+    if not nodes:
+        return False, []
+    healthy_count = 0
+    now = datetime.now(timezone.utc)
+    bootstrap_pending = []
+    for node in nodes:
+        if node.get("draining"):
+            continue
+        if edge_node_bootstrap_pending(node, now):
+            bootstrap_pending.append(trim(node.get("id")))
+            continue
+        if not edge_node_route_serving_capable(node, now):
+            return False, bootstrap_pending
+        if trim(node.get("last_error")):
+            return False, bootstrap_pending
+        cache_status = trim(node.get("cache_status")).lower()
+        if cache_status and "error" in cache_status:
+            return False, bootstrap_pending
+        healthy_count += 1
+    return healthy_count > 0, bootstrap_pending
+
+status_path = sys.argv[1]
+nodes_path = sys.argv[2]
+with open(status_path, "r", encoding="utf-8") as fh:
     payload = json.load(fh)
 status = payload.get("status") or {}
-if not status.get("pass", False):
-    raise SystemExit("platform autonomy status did not pass")
-if status.get("block_rollout", False):
-    raise SystemExit("platform autonomy status blocks rollout")
+with open(nodes_path, "r", encoding="utf-8") as fh:
+    nodes_payload = json.load(fh)
+nodes = nodes_payload.get("nodes") or []
+checks = {str(item.get("name", "")).strip(): item for item in status.get("checks") or [] if isinstance(item, dict)}
+failing_checks = [name for name, check in checks.items() if not check.get("pass", False)]
+bootstrap_override, bootstrap_pending = edge_inventory_healthy(nodes)
 store = status.get("control_plane_store") or {}
 if store.get("block_rollout", False):
     raise SystemExit("control-plane store promotion gate is blocked")
 if str(store.get("permission_verification_status", "")).strip() != "passed":
     raise SystemExit("control-plane store permission verification did not pass")
-checks = {str(item.get("name", "")).strip(): item for item in status.get("checks") or [] if isinstance(item, dict)}
-for name in ("discovery_bundle", "node_policy", "edge", "dns", "registry", "headscale", "restore_readiness", "route_fallback"):
-    check = checks.get(name)
-    if not check or not check.get("pass", False):
-        raise SystemExit(f"{name} gate did not pass")
+if set(failing_checks) == {"edge"} and bootstrap_override:
+    pending = ", ".join(sorted(filter(None, bootstrap_pending))) or "<unknown>"
+    print(f"release preflight bootstrap: edge inventory is blocked only by bootstrap-pending nodes {pending}; continuing with explicit rollout to bring them online")
+else:
+    if not status.get("pass", False):
+        raise SystemExit("platform autonomy status did not pass")
+    if status.get("block_rollout", False):
+        raise SystemExit("platform autonomy status blocks rollout")
+    for name in ("discovery_bundle", "node_policy", "edge", "dns", "registry", "headscale", "restore_readiness", "route_fallback"):
+        check = checks.get(name)
+        if not check or not check.get("pass", False):
+            raise SystemExit(f"{name} gate did not pass")
+    if failing_checks:
+        raise SystemExit("platform autonomy status did not pass")
 PY
+  )"; then
+    rm -f "${autonomy_status_file}" "${edge_nodes_file}"
+    return 1
+  fi
+  if [[ -n "$(trim_field "${autonomy_override_message}")" ]]; then
+    log "${autonomy_override_message}"
+  fi
 
   log "release preflight passed for ${api_base}; discovery_etag=${discovery_etag}"
   rm -f "${discovery_headers}" "${discovery_body}" "${autonomy_status_file}"
+  rm -f "${edge_nodes_file}"
 }
 
 fetch_discovery_bundle() {
