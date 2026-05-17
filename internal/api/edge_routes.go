@@ -76,6 +76,23 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	if err != nil {
 		return model.EdgeRouteBundle{}, err
 	}
+	requestedEdgeGroupID := strings.TrimSpace(options.EdgeGroupID)
+	if requestedEdgeGroupID == "" {
+		requestedEdgeGroupID = edgeGroupIDFromEdgeID(options.EdgeID)
+	}
+	if requestedEdgeGroupID != "" && !healthyEdgeGroups[requestedEdgeGroupID] {
+		nodes, _, err := s.store.ListEdgeNodes(requestedEdgeGroupID)
+		if err != nil {
+			return model.EdgeRouteBundle{}, err
+		}
+		now := time.Now().UTC()
+		for _, node := range nodes {
+			if edgeNodeRouteBootstrapCapable(node, now) {
+				healthyEdgeGroups[requestedEdgeGroupID] = true
+				break
+			}
+		}
+	}
 
 	runtimeByID := make(map[string]model.Runtime, len(runtimes))
 	for _, runtimeObj := range runtimes {

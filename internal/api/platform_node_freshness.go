@@ -28,6 +28,16 @@ func edgeNodeRouteServingCapable(node model.EdgeNode, now time.Time) bool {
 	}
 }
 
+func edgeNodeRouteBootstrapCapable(node model.EdgeNode, now time.Time) bool {
+	if node.Draining || !node.Healthy || !edgeNodeHeartbeatFresh(node, now) {
+		return false
+	}
+	if edgeNodeRouteServingCapable(node, now) {
+		return false
+	}
+	return edgeNodeHasRouteState(node)
+}
+
 func dnsNodeHeartbeatFresh(node model.DNSNode, now time.Time) bool {
 	return nodeHeartbeatFresh(node.LastHeartbeatAt, node.LastSeenAt, now)
 }

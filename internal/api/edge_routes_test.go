@@ -488,6 +488,51 @@ func TestPlatformRoutesDefaultToHealthyEdgeGroups(t *testing.T) {
 	}
 }
 
+func TestPlatformRoutesBootstrapPendingEdgeGroupReceivesBundle(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	if _, _, err := storeState.EnsureManagedSharedLocationLabels(map[string]string{
+		runtimepkg.LocationCountryCodeLabelKey: "HK",
+	}); err != nil {
+		t.Fatalf("set managed shared location labels: %v", err)
+	}
+	deployAppForEdgeRouteTest(t, storeState, app)
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+		ID:                 "edge-hk-1",
+		EdgeGroupID:        "edge-group-country-hk",
+		Status:             model.EdgeHealthDegraded,
+		Healthy:            true,
+		ServingGeneration:  "routegen_bootstrap",
+		LKGGeneration:      "routegen_bootstrap",
+		RouteBundleVersion: "routegen_bootstrap",
+	}); err != nil {
+		t.Fatalf("record bootstrap-capable HK edge node: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_group_id=edge-group-country-hk", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeRouteBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	if len(bundle.Routes) != 1 {
+		t.Fatalf("expected bootstrap-capable HK bundle to receive the public route, got %+v", bundle.Routes)
+	}
+	route := bundle.Routes[0]
+	if route.Hostname != "demo.fugue.pro" ||
+		route.RouteKind != model.EdgeRouteKindPlatform ||
+		route.RoutePolicy != model.EdgeRoutePolicyEnabled ||
+		route.RuntimeEdgeGroupID != "edge-group-country-hk" ||
+		route.EdgeGroupID != "edge-group-country-hk" ||
+		route.PolicyEdgeGroupID != "" ||
+		route.FallbackEdgeGroupID != "" {
+		t.Fatalf("unexpected bootstrap route bundle: %+v", route)
+	}
+}
+
 func TestConfiguredPlatformRouteFansOutToHealthyEdgeGroups(t *testing.T) {
 	t.Parallel()
 
