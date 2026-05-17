@@ -708,12 +708,12 @@ sampled_at
 
 ### P3：APAC / HK edge 上线
 
-- [ ] 选择 APAC/HK 节点并通过 NodePolicy 标记 edge + DNS 角色。
-- [ ] 验证 UDP/TCP 53、TCP 80、TCP 443 可达。
-- [ ] 验证 APAC/HK edge route bundle、DNS bundle、Caddy config、certificate cache 和 last-known-good cache。
-- [ ] 把 APAC/HK edge 加入 DNS answer policy，先低风险 canary，再扩大到默认平台入口。
-- [ ] 对亚洲探测点验证 TLS handshake、TTFB、static asset cache hit 和 upstream latency。
-- [ ] 明确 APAC/HK edge 跨区回源的告警阈值，避免长期把跨洋 upstream 当作正常状态。
+- [x] 选择 APAC/HK 节点并通过 NodePolicy 标记 edge + DNS 角色。
+- [x] 验证 UDP/TCP 53、TCP 80、TCP 443 可达。
+- [x] 验证 APAC/HK edge route bundle、DNS bundle、Caddy config、certificate cache 和 last-known-good cache。
+- [x] 把 APAC/HK edge 加入 DNS answer policy，先低风险 canary，再扩大到默认平台入口。
+- [x] 对亚洲探测点验证 TLS handshake、TTFB、static asset cache hit 和 upstream latency。
+- [x] 明确 APAC/HK edge 跨区回源的告警阈值，避免长期把跨洋 upstream 当作正常状态。
 
 ### P3：Latency-aware steering
 
@@ -726,11 +726,22 @@ sampled_at
 
 ### P4：发布和回滚
 
-- [ ] 给每个阶段补 release checklist，明确发布前 smoke、发布后观测和回滚动作。
-- [ ] 所有 control plane / edge / DNS 改动必须通过 GitHub Actions 控制平面发布链路。
-- [ ] 禁止把手工 SSH patch Caddy、手工改 DNS bundle、手工 patch Deployment 当成正式修复。
-- [ ] 对每个新 policy 增加 dry-run / plan 输出，先展示 DNS answer 和 route bundle 变化再应用。
-- [ ] 维护一组真实域名 smoke：`oaix.fugue.pro`、`argus.fugue.pro`、一个 custom domain、一个 streaming app。
+- [x] 给每个阶段补 release checklist，明确发布前 smoke、发布后观测和回滚动作。
+- [x] 所有 control plane / edge / DNS 改动必须通过 GitHub Actions 控制平面发布链路。
+- [x] 禁止把手工 SSH patch Caddy、手工改 DNS bundle、手工 patch Deployment 当成正式修复。
+- [x] 对每个新 policy 增加 dry-run / plan 输出，先展示 DNS answer 和 route bundle 变化再应用。
+- [x] 维护一组真实域名 smoke：`oaix.fugue.pro`、`argus.fugue.pro`、一个 custom domain、一个 streaming app。
+
+## 发布检查
+
+每次发布遵循同一组检查，不再依赖临时手工流程：
+
+1. 发布前先看 `fugue admin cluster node-policy status`、`fugue admin edge nodes ls`、`fugue admin dns status`。
+2. 对所有 DNS 可能返回的 edge IP 跑 `curl --resolve`，确认没有 route 缺失和 Caddy `404`。
+3. 对活跃 hostname 跑 TLS / cache smoke，确认 `oaix.fugue.pro`、`argus.fugue.pro`、一个 custom domain 和一个 streaming app 都在预期路径上。
+4. 发布后确认 edge / DNS 节点的 bundle version、cache 状态和 heartbeat 都回到稳定状态。
+5. 回滚优先走 GitHub Actions 的正式发布链路；父区委托回滚只在需要时使用 `fugue admin dns delegation rollback --confirm`。
+6. 手工 SSH 修复只允许作为紧急止血，完成后必须回写到仓库并重新走正式发布链路。
 
 ## 验收清单
 
