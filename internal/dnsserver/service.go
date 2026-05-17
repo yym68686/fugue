@@ -1634,16 +1634,16 @@ func edgeDNSCandidateEligible(candidate model.EdgeDNSAnswerCandidate, policy mod
 func edgeDNSCandidateSortScore(candidate model.EdgeDNSAnswerCandidate, hint dnsGeoHint) int {
 	score := candidate.Priority * 100
 	if hint.EdgeGroupID != "" && strings.EqualFold(candidate.EdgeGroupID, hint.EdgeGroupID) {
-		score -= 40
+		score -= 10000
 	}
 	if hint.Country != "" && strings.EqualFold(candidate.Country, hint.Country) {
-		score -= 20
+		score -= 5000
 	}
 	if hint.Region != "" && strings.EqualFold(candidate.Region, hint.Region) {
-		score -= 10
+		score -= 2500
 	}
 	if strings.EqualFold(candidate.Reason, "same_region") {
-		score -= 5
+		score -= 250
 	}
 	return score
 }

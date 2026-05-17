@@ -168,6 +168,50 @@ func TestServiceOrdersGeoDNSCandidatesFromECS(t *testing.T) {
 	}
 }
 
+func TestServicePrefersLocalEdgeGroupWhenNoGeoIPOverrideExists(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.DNSConfig{
+		Zone:        "dns.fugue.pro",
+		TTL:         60,
+		Nameservers: []string{"ns1.dns.fugue.pro"},
+	}, log.New(ioDiscard{}, "", 0))
+	service.Config.EdgeGroupID = "edge-group-country-us"
+	service.setBundle(model.EdgeDNSBundle{
+		Version: "dnsgen_local",
+		Zone:    "dns.fugue.pro",
+		Records: []model.EdgeDNSRecord{
+			{
+				Name:       "app.dns.fugue.pro",
+				Type:       model.EdgeDNSRecordTypeA,
+				Values:     []string{"15.204.94.71", "51.38.126.103"},
+				TTL:        60,
+				RecordKind: model.EdgeDNSRecordKindPlatform,
+				Status:     model.EdgeRouteStatusActive,
+				AnswerPolicy: model.DNSAnswerPolicy{
+					PolicyKind:         model.DNSAnswerPolicyKindGeo,
+					ECSEnabled:         true,
+					HealthRequired:     true,
+					RouteReadyRequired: true,
+				},
+				Candidates: []model.EdgeDNSAnswerCandidate{
+					{IP: "51.38.126.103", EdgeGroupID: "edge-group-country-de", Country: "de", Priority: 0, Weight: 100, Healthy: true, RouteReady: true, TLSReady: true},
+					{IP: "15.204.94.71", EdgeGroupID: "edge-group-country-us", Country: "us", Priority: 50, Weight: 100, Healthy: true, RouteReady: true, TLSReady: true},
+				},
+			},
+		},
+	}, `"dnsgen_local"`, false, "")
+
+	answer := dnsQuery(t, service, "app.dns.fugue.pro.", miekgdns.TypeA)
+	if answer.Rcode != miekgdns.RcodeSuccess || len(answer.Answer) != 2 {
+		t.Fatalf("expected two successful answers, got rcode=%s answers=%+v", miekgdns.RcodeToString[answer.Rcode], answer.Answer)
+	}
+	first, ok := answer.Answer[0].(*miekgdns.A)
+	if !ok || first.A.String() != "15.204.94.71" {
+		t.Fatalf("expected local edge group to win without GeoIP override, got %+v", answer.Answer)
+	}
+}
+
 func TestLoadCacheFallsBackToPreviousVerifiedDNSGeneration(t *testing.T) {
 	t.Parallel()
 
