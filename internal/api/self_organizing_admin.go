@@ -747,6 +747,9 @@ func edgeInventoryHealthy(nodes []model.EdgeNode) bool {
 		if node.Draining {
 			continue
 		}
+		if edgeNodeBootstrapPending(node, now) {
+			continue
+		}
 		if !edgeNodeRouteServingCapable(node, now) {
 			return false
 		}
@@ -759,6 +762,31 @@ func edgeInventoryHealthy(nodes []model.EdgeNode) bool {
 		healthyCount++
 	}
 	return healthyCount > 0
+}
+
+func edgeNodeBootstrapPending(node model.EdgeNode, now time.Time) bool {
+	if edgeNodeHeartbeatFresh(node, now) {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(node.Status), model.EdgeHealthUnknown) {
+		return false
+	}
+	if strings.TrimSpace(node.LastError) != "" {
+		return false
+	}
+	if strings.TrimSpace(node.RouteBundleVersion) != "" {
+		return false
+	}
+	if strings.TrimSpace(node.ServingGeneration) != "" {
+		return false
+	}
+	if node.CaddyRouteCount != 0 {
+		return false
+	}
+	if strings.TrimSpace(node.CacheStatus) != "" {
+		return false
+	}
+	return true
 }
 
 func dnsInventoryHealthy(nodes []model.DNSNode) bool {

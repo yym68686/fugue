@@ -84,3 +84,31 @@ func TestEdgeInventoryHealthyAcceptsDegradedServingLKG(t *testing.T) {
 		t.Fatalf("expected degraded edge serving LKG to satisfy autonomy edge inventory")
 	}
 }
+
+func TestEdgeInventoryHealthyIgnoresBootstrapPendingEdgeNodes(t *testing.T) {
+	now := time.Now().UTC()
+	nodes := []model.EdgeNode{
+		{
+			ID:                 "edge-us-1",
+			EdgeGroupID:        "edge-group-country-us",
+			Status:             model.EdgeHealthHealthy,
+			Healthy:            true,
+			RouteBundleVersion: "routegen_live",
+			ServingGeneration:  "routegen_live",
+			LKGGeneration:      "routegen_live",
+			CaddyRouteCount:    46,
+			CacheStatus:        "ready",
+			LastHeartbeatAt:    &now,
+		},
+		{
+			ID:              "edge-hk-1",
+			EdgeGroupID:     "edge-group-country-hk",
+			Status:          model.EdgeHealthUnknown,
+			Healthy:         false,
+			CaddyRouteCount: 0,
+		},
+	}
+	if !edgeInventoryHealthy(nodes) {
+		t.Fatalf("expected bootstrap pending edge node to be ignored while healthy edge remains serving")
+	}
+}
