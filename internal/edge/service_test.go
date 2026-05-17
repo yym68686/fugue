@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -969,6 +970,78 @@ func TestProxyHandlerRoutesPlatformAndCustomDomainsWithStreamingMetrics(t *testi
 		`fugue_edge_route_streaming_total{hostname="www.customer.com",app="app_demo",route_kind="custom-domain",result="success"} 1`,
 		`fugue_edge_route_upstream_latency_seconds_count{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 1`,
 		`fugue_edge_route_upstream_latency_seconds_count{hostname="www.customer.com",app="app_demo",route_kind="custom-domain"} 1`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("metrics missing %q:\n%s", want, metrics)
+		}
+	}
+}
+
+func TestProxyHandlerCachesStaticAssets(t *testing.T) {
+	t.Parallel()
+
+	var upstreamHits atomic.Int64
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		if r.URL.Path != "/_next/static/chunks/app.js" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/javascript")
+		_, _ = fmt.Fprintf(w, "console.log(%d)", upstreamHits.Load())
+	}))
+	defer backend.Close()
+
+	bundle := testBundle("routegen_cache")
+	bundle.Routes[0].UpstreamURL = backend.URL
+	bundle.Routes[0].CachePolicyID = "static-assets-immutable-v1"
+	bundle.Routes[0].CacheNamespace = "app_demo_deploy_1"
+	bundle.CachePolicies = []model.CachePolicy{
+		{
+			ID:                    "static-assets-immutable-v1",
+			Kind:                  model.CachePolicyKindStaticAssets,
+			PathPatterns:          []string{"/_next/static/*", "*.js"},
+			MethodAllowlist:       []string{http.MethodGet, http.MethodHead},
+			StatusAllowlist:       []int{http.StatusOK},
+			TTLSeconds:            31536000,
+			EdgeCacheControl:      "public, max-age=31536000, immutable",
+			BypassOnAuthorization: true,
+			VaryAllowlist:         []string{"Accept-Encoding"},
+			PurgeMode:             model.CachePolicyPurgeModeGeneration,
+		},
+	}
+
+	service := NewService(config.EdgeConfig{
+		APIURL:             "https://api.example.invalid",
+		EdgeToken:          "edge-secret",
+		AssetCachePath:     filepath.Join(t.TempDir(), "http-cache"),
+		AssetCacheMaxBytes: 1024 * 1024,
+	}, log.New(ioDiscard{}, "", 0))
+	service.recordSyncSuccess(bundle, `"routegen_cache"`, time.Now().UTC(), false)
+
+	first := httptest.NewRecorder()
+	firstReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/_next/static/chunks/app.js", nil)
+	service.ProxyHandler().ServeHTTP(first, firstReq)
+	if first.Code != http.StatusOK || first.Header().Get("X-Fugue-Cache") != "miss" {
+		t.Fatalf("expected first request to miss cache, got status=%d cache=%q body=%q", first.Code, first.Header().Get("X-Fugue-Cache"), first.Body.String())
+	}
+
+	second := httptest.NewRecorder()
+	secondReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/_next/static/chunks/app.js", nil)
+	service.ProxyHandler().ServeHTTP(second, secondReq)
+	if second.Code != http.StatusOK || second.Header().Get("X-Fugue-Cache") != "hit" {
+		t.Fatalf("expected second request to hit cache, got status=%d cache=%q body=%q", second.Code, second.Header().Get("X-Fugue-Cache"), second.Body.String())
+	}
+	if upstreamHits.Load() != 1 {
+		t.Fatalf("expected one upstream hit after cache hit, got %d", upstreamHits.Load())
+	}
+	if first.Body.String() != second.Body.String() {
+		t.Fatalf("cached response body changed: first=%q second=%q", first.Body.String(), second.Body.String())
+	}
+
+	metrics := renderMetrics(t, service)
+	for _, want := range []string{
+		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",cache_status="hit",cache_policy_id="static-assets-immutable-v1",asset_class="next_static"} 1`,
+		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",cache_status="miss",cache_policy_id="static-assets-immutable-v1",asset_class="next_static"} 1`,
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, metrics)

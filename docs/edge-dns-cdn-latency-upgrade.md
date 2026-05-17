@@ -688,23 +688,23 @@ sampled_at
 
 ### P2：第一版 CDN / Edge cache
 
-- [ ] 定义 `CachePolicy` 内部模型，覆盖 path pattern、method、status、TTL、bypass 条件和 purge mode。
-- [ ] 在 route bundle 或独立 cache bundle 中下发 cache policy。
-- [ ] 对 `/_next/static/*`、hashed JS/CSS、font 和常见静态图片启用 immutable edge cache。
-- [ ] 默认 bypass HTML、API、SSE、WebSocket、上传、流式响应和带 `Authorization` 的请求。
-- [ ] 定义 cache key：scheme、host、normalized path、normalized query、accept-encoding bucket。
-- [ ] 引入 app deployment generation / cache namespace，避免非 hashed asset 在新旧部署之间互相污染。
-- [ ] 在 edge access log 和 metrics 中输出 `cache_status=hit|miss|bypass|stale|revalidated|error`。
-- [ ] 针对 `argus.fugue.pro` 建立验收用例：`/_next/static/*` 第二次访问必须命中 edge cache。
+- [x] 定义 `CachePolicy` 内部模型，覆盖 path pattern、method、status、TTL、bypass 条件和 purge mode。
+- [x] 在 route bundle 或独立 cache bundle 中下发 cache policy。
+- [x] 对 `/_next/static/*`、hashed JS/CSS、font 和常见静态图片启用 immutable edge cache。
+- [x] 默认 bypass HTML、API、SSE、WebSocket、上传、流式响应和带 `Authorization` 的请求。
+- [x] 定义 cache key：scheme、host、normalized path、normalized query、accept-encoding bucket。
+- [x] 引入 app deployment generation / cache namespace，避免非 hashed asset 在新旧部署之间互相污染。
+- [x] 在 edge access log 和 metrics 中输出 `cache_status=hit|miss|bypass|stale|revalidated|error`。
+- [x] 针对 `argus.fugue.pro` 建立验收用例：`/_next/static/*` 第二次访问必须命中 edge cache。
 
 ### P2：GeoDNS 健康感知选路
 
-- [ ] 在 DNS answer policy 中引入 region、country、priority、weight 和 TTL。
-- [ ] 接入 GeoIP 和 EDNS Client Subnet，缺失 ECS 时退回 recursive resolver GeoIP。
-- [ ] DNS answer 输出 policy reason，例如 `same_region`、`nearest_region`、`fallback_healthy`。
-- [ ] 对 unhealthy / draining edge 自动从 answer set 移除，除非进入显式 emergency fallback。
-- [ ] 初期 TTL 使用 `60s - 120s`，便于策略回滚和故障切换。
-- [ ] 建立地区探测脚本，验证亚洲、欧洲、美国 client 得到预期 answer。
+- [x] 在 DNS answer policy 中引入 region、country、priority、weight 和 TTL。
+- [x] 接入 GeoIP 和 EDNS Client Subnet，缺失 ECS 时退回 recursive resolver GeoIP。
+- [x] DNS answer 输出 policy reason，例如 `same_region`、`nearest_region`、`fallback_healthy`。
+- [x] 对 unhealthy / draining edge 自动从 answer set 移除，除非进入显式 emergency fallback。
+- [x] 初期 TTL 使用 `60s - 120s`，便于策略回滚和故障切换。
+- [x] 建立地区探测脚本，验证亚洲、欧洲、美国 client 得到预期 answer。
 
 ### P3：APAC / HK edge 上线
 

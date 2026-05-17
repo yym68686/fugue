@@ -108,6 +108,66 @@ func TestServiceSuppressesUnhealthyEdgeAnswerWhenProbeEnabled(t *testing.T) {
 	}
 }
 
+func TestServiceOrdersGeoDNSCandidatesFromECS(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.DNSConfig{
+		Zone:        "dns.fugue.pro",
+		TTL:         60,
+		Nameservers: []string{"ns1.dns.fugue.pro"},
+		GeoIPOverrides: []config.DNSGeoIPOverride{
+			{CIDR: "198.51.100.0/24", Country: "hk", EdgeGroupID: "edge-group-country-hk"},
+		},
+	}, log.New(ioDiscard{}, "", 0))
+	service.setBundle(model.EdgeDNSBundle{
+		Version: "dnsgen_geo",
+		Zone:    "dns.fugue.pro",
+		Records: []model.EdgeDNSRecord{
+			{
+				Name:       "app.dns.fugue.pro",
+				Type:       model.EdgeDNSRecordTypeA,
+				Values:     []string{"15.204.94.71", "5.102.124.125"},
+				TTL:        60,
+				RecordKind: model.EdgeDNSRecordKindPlatform,
+				Status:     model.EdgeRouteStatusActive,
+				AnswerPolicy: model.DNSAnswerPolicy{
+					PolicyKind:         model.DNSAnswerPolicyKindGeo,
+					ECSEnabled:         true,
+					HealthRequired:     true,
+					RouteReadyRequired: true,
+				},
+				Candidates: []model.EdgeDNSAnswerCandidate{
+					{IP: "15.204.94.71", EdgeGroupID: "edge-group-country-us", Country: "us", Priority: 50, Weight: 100, Healthy: true, RouteReady: true, TLSReady: true},
+					{IP: "5.102.124.125", EdgeGroupID: "edge-group-country-hk", Country: "hk", Priority: 50, Weight: 100, Healthy: true, RouteReady: true, TLSReady: true},
+				},
+			},
+		},
+	}, `"dnsgen_geo"`, false, "")
+
+	req := new(miekgdns.Msg)
+	req.SetQuestion("app.dns.fugue.pro.", miekgdns.TypeA)
+	req.RecursionDesired = true
+	opt := new(miekgdns.OPT)
+	opt.Hdr.Name = "."
+	opt.Hdr.Rrtype = miekgdns.TypeOPT
+	opt.Option = append(opt.Option, &miekgdns.EDNS0_SUBNET{
+		Code:          miekgdns.EDNS0SUBNET,
+		Family:        1,
+		SourceNetmask: 24,
+		Address:       net.ParseIP("198.51.100.25").To4(),
+	})
+	req.Extra = append(req.Extra, opt)
+
+	answer := dnsQueryMsg(t, service, req)
+	if answer.Rcode != miekgdns.RcodeSuccess || len(answer.Answer) != 2 {
+		t.Fatalf("expected two successful answers, got rcode=%s answers=%+v", miekgdns.RcodeToString[answer.Rcode], answer.Answer)
+	}
+	first, ok := answer.Answer[0].(*miekgdns.A)
+	if !ok || first.A.String() != "5.102.124.125" {
+		t.Fatalf("expected ECS HK hint to order HK edge first, got %+v", answer.Answer)
+	}
+}
+
 func TestLoadCacheFallsBackToPreviousVerifiedDNSGeneration(t *testing.T) {
 	t.Parallel()
 
@@ -410,6 +470,11 @@ func dnsQuery(t *testing.T, service *Service, name string, qtype uint16) *miekgd
 	req := new(miekgdns.Msg)
 	req.SetQuestion(name, qtype)
 	req.RecursionDesired = true
+	return dnsQueryMsg(t, service, req)
+}
+
+func dnsQueryMsg(t *testing.T, service *Service, req *miekgdns.Msg) *miekgdns.Msg {
+	t.Helper()
 	writer := &captureDNSResponseWriter{}
 	service.ServeDNS(writer, req)
 	if writer.msg == nil {

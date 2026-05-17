@@ -419,7 +419,7 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 			resp.Ns = append(resp.Ns, s.soaRecord(zone))
 		}
 	case miekgdns.TypeNS:
-		records, nameExists := s.edgeDNSRecordsForQuestion(context.Background(), snapshot, name, question.Qtype)
+		records, nameExists := s.edgeDNSRecordsForQuestion(context.Background(), snapshot, name, question.Qtype, r, w)
 		if len(records) > 0 {
 			resp.Answer = append(resp.Answer, records...)
 		} else if name == zone {
@@ -431,7 +431,7 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 			resp.Ns = append(resp.Ns, s.soaRecord(zone))
 		}
 	case miekgdns.TypeA, miekgdns.TypeAAAA, miekgdns.TypeCAA, miekgdns.TypeCNAME, miekgdns.TypeMX, miekgdns.TypeTXT:
-		records, nameExists := s.edgeDNSRecordsForQuestion(context.Background(), snapshot, name, question.Qtype)
+		records, nameExists := s.edgeDNSRecordsForQuestion(context.Background(), snapshot, name, question.Qtype, r, w)
 		if len(records) > 0 {
 			resp.Answer = append(resp.Answer, records...)
 		} else if !nameExists {
@@ -1225,8 +1225,8 @@ func (s *Service) ttl() int {
 	return s.Config.TTL
 }
 
-func (s *Service) edgeDNSRecordsForQuestion(ctx context.Context, bundle *model.EdgeDNSBundle, name string, qtype uint16) ([]miekgdns.RR, bool) {
-	answers, nameExists := edgeDNSRecordsForQuestion(bundle, name, qtype)
+func (s *Service) edgeDNSRecordsForQuestion(ctx context.Context, bundle *model.EdgeDNSBundle, name string, qtype uint16, msg *miekgdns.Msg, writer miekgdns.ResponseWriter) ([]miekgdns.RR, bool) {
+	answers, nameExists := edgeDNSRecordsForQuestion(bundle, name, qtype, s.geoHintForQuery(msg, writer))
 	if qtype != miekgdns.TypeA && qtype != miekgdns.TypeAAAA {
 		return answers, nameExists
 	}
@@ -1308,7 +1308,7 @@ func (s *Service) dialEdgeIP(ctx context.Context, ip string) bool {
 	return true
 }
 
-func edgeDNSRecordsForQuestion(bundle *model.EdgeDNSBundle, name string, qtype uint16) ([]miekgdns.RR, bool) {
+func edgeDNSRecordsForQuestion(bundle *model.EdgeDNSBundle, name string, qtype uint16, hint dnsGeoHint) ([]miekgdns.RR, bool) {
 	if bundle == nil {
 		return nil, false
 	}
@@ -1337,7 +1337,7 @@ func edgeDNSRecordsForQuestion(bundle *model.EdgeDNSBundle, name string, qtype u
 	for _, recordType := range recordTypes {
 		for _, record := range matchingRecords {
 			if strings.EqualFold(record.Type, recordType) {
-				answers = append(answers, rrForEdgeDNSRecord(record, ownerName)...)
+				answers = append(answers, rrForEdgeDNSRecordWithGeo(record, ownerName, qtype, hint)...)
 			}
 		}
 	}
@@ -1456,6 +1456,196 @@ func rrForEdgeDNSRecord(record model.EdgeDNSRecord, ownerName string) []miekgdns
 		}
 	}
 	return rrs
+}
+
+type dnsGeoHint struct {
+	IP          string
+	Country     string
+	Region      string
+	EdgeGroupID string
+	Source      string
+}
+
+func (s *Service) geoHintForQuery(msg *miekgdns.Msg, writer miekgdns.ResponseWriter) dnsGeoHint {
+	if hint := s.geoHintFromEDNS(msg); hint.IP != "" {
+		return s.geoHintForIP(hint.IP, "ecs")
+	}
+	if writer != nil {
+		if host, _, err := net.SplitHostPort(writer.RemoteAddr().String()); err == nil && host != "" {
+			if hint := s.geoHintForIP(host, "remote_addr"); hint.IP != "" {
+				return hint
+			}
+		}
+	}
+	return dnsGeoHint{
+		EdgeGroupID: strings.TrimSpace(s.Config.EdgeGroupID),
+		Country:     edgeGroupCountry(strings.TrimSpace(s.Config.EdgeGroupID)),
+		Source:      "local_edge_group",
+	}
+}
+
+func (s *Service) geoHintFromEDNS(msg *miekgdns.Msg) dnsGeoHint {
+	if msg == nil {
+		return dnsGeoHint{}
+	}
+	opt := msg.IsEdns0()
+	if opt == nil {
+		return dnsGeoHint{}
+	}
+	for _, extra := range opt.Option {
+		subnet, ok := extra.(*miekgdns.EDNS0_SUBNET)
+		if !ok || subnet == nil {
+			continue
+		}
+		ip := net.IP(subnet.Address)
+		if ip == nil {
+			continue
+		}
+		return dnsGeoHint{IP: ip.String()}
+	}
+	return dnsGeoHint{}
+}
+
+func (s *Service) geoHintForIP(raw, source string) dnsGeoHint {
+	ip := net.ParseIP(strings.TrimSpace(raw))
+	if ip == nil {
+		return dnsGeoHint{}
+	}
+	if hint, ok := s.geoHintForOverride(ip, source); ok {
+		return hint
+	}
+	return dnsGeoHint{
+		IP:          ip.String(),
+		EdgeGroupID: strings.TrimSpace(s.Config.EdgeGroupID),
+		Country:     edgeGroupCountry(strings.TrimSpace(s.Config.EdgeGroupID)),
+		Source:      source,
+	}
+}
+
+func (s *Service) geoHintForOverride(ip net.IP, source string) (dnsGeoHint, bool) {
+	for _, override := range s.Config.GeoIPOverrides {
+		_, cidr, err := net.ParseCIDR(strings.TrimSpace(override.CIDR))
+		if err != nil || cidr == nil {
+			continue
+		}
+		if !cidr.Contains(ip) {
+			continue
+		}
+		return dnsGeoHint{
+			IP:          ip.String(),
+			Country:     strings.ToLower(strings.TrimSpace(override.Country)),
+			Region:      strings.TrimSpace(override.Region),
+			EdgeGroupID: strings.TrimSpace(override.EdgeGroupID),
+			Source:      source,
+		}, true
+	}
+	return dnsGeoHint{}, false
+}
+
+func edgeGroupCountry(edgeGroupID string) string {
+	edgeGroupID = strings.ToLower(strings.TrimSpace(edgeGroupID))
+	switch {
+	case strings.Contains(edgeGroupID, "-country-"):
+		return edgeGroupID[strings.Index(edgeGroupID, "-country-")+len("-country-"):]
+	default:
+		return ""
+	}
+}
+
+func rrForEdgeDNSRecordWithGeo(record model.EdgeDNSRecord, ownerName string, qtype uint16, hint dnsGeoHint) []miekgdns.RR {
+	if len(record.Candidates) == 0 || (qtype != miekgdns.TypeA && qtype != miekgdns.TypeAAAA) {
+		return rrForEdgeDNSRecord(record, ownerName)
+	}
+	ordered := edgeDNSOrderedCandidates(record, hint)
+	if len(ordered) == 0 {
+		return nil
+	}
+	ttl := uint32(record.TTL)
+	if ttl == 0 {
+		ttl = 60
+	}
+	ownerName = normalizeName(firstNonEmpty(ownerName, record.Name))
+	rrs := make([]miekgdns.RR, 0, len(ordered))
+	for _, candidate := range ordered {
+		ip := net.ParseIP(strings.TrimSpace(candidate.IP))
+		if ip == nil {
+			continue
+		}
+		switch qtype {
+		case miekgdns.TypeA:
+			if v4 := ip.To4(); v4 != nil {
+				rrs = append(rrs, &miekgdns.A{Hdr: miekgdns.RR_Header{Name: fqdn(ownerName), Rrtype: miekgdns.TypeA, Class: miekgdns.ClassINET, Ttl: ttl}, A: v4})
+			}
+		case miekgdns.TypeAAAA:
+			if ip.To4() == nil {
+				rrs = append(rrs, &miekgdns.AAAA{Hdr: miekgdns.RR_Header{Name: fqdn(ownerName), Rrtype: miekgdns.TypeAAAA, Class: miekgdns.ClassINET, Ttl: ttl}, AAAA: ip})
+			}
+		}
+	}
+	if len(rrs) == 0 {
+		return nil
+	}
+	return rrs
+}
+
+func edgeDNSOrderedCandidates(record model.EdgeDNSRecord, hint dnsGeoHint) []model.EdgeDNSAnswerCandidate {
+	candidates := make([]model.EdgeDNSAnswerCandidate, 0, len(record.Candidates))
+	for _, candidate := range record.Candidates {
+		if !edgeDNSCandidateEligible(candidate, record.AnswerPolicy) {
+			continue
+		}
+		candidates = append(candidates, candidate)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		ai := edgeDNSCandidateSortScore(candidates[i], hint)
+		aj := edgeDNSCandidateSortScore(candidates[j], hint)
+		if ai != aj {
+			return ai < aj
+		}
+		if candidates[i].Priority != candidates[j].Priority {
+			return candidates[i].Priority < candidates[j].Priority
+		}
+		if candidates[i].Weight != candidates[j].Weight {
+			return candidates[i].Weight > candidates[j].Weight
+		}
+		if candidates[i].EdgeGroupID != candidates[j].EdgeGroupID {
+			return candidates[i].EdgeGroupID < candidates[j].EdgeGroupID
+		}
+		return candidates[i].IP < candidates[j].IP
+	})
+	return candidates
+}
+
+func edgeDNSCandidateEligible(candidate model.EdgeDNSAnswerCandidate, policy model.DNSAnswerPolicy) bool {
+	if policy.HealthRequired && !candidate.Healthy {
+		return false
+	}
+	if policy.RouteReadyRequired && !candidate.RouteReady {
+		return false
+	}
+	if policy.PolicyKind != model.DNSAnswerPolicyKindDisabled && policy.PolicyKind != model.DNSAnswerPolicyKindWeighted {
+		if !candidate.TLSReady {
+			return false
+		}
+	}
+	return true
+}
+
+func edgeDNSCandidateSortScore(candidate model.EdgeDNSAnswerCandidate, hint dnsGeoHint) int {
+	score := candidate.Priority * 100
+	if hint.EdgeGroupID != "" && strings.EqualFold(candidate.EdgeGroupID, hint.EdgeGroupID) {
+		score -= 40
+	}
+	if hint.Country != "" && strings.EqualFold(candidate.Country, hint.Country) {
+		score -= 20
+	}
+	if hint.Region != "" && strings.EqualFold(candidate.Region, hint.Region) {
+		score -= 10
+	}
+	if strings.EqualFold(candidate.Reason, "same_region") {
+		score -= 5
+	}
+	return score
 }
 
 func edgeDNSNameExists(bundle *model.EdgeDNSBundle, name string) bool {

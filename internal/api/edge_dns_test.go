@@ -255,11 +255,15 @@ func TestEdgeDNSBundleDerivesFullZonePlatformAppRecords(t *testing.T) {
 	}
 	app = deployAppForEdgeRouteTest(t, storeState, app)
 	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
-		ID:          "edge-us-1",
-		EdgeGroupID: "edge-group-country-us",
-		PublicIPv4:  "15.204.94.71",
-		Status:      model.EdgeHealthHealthy,
-		Healthy:     true,
+		ID:              "edge-us-1",
+		EdgeGroupID:     "edge-group-country-us",
+		Region:          "us",
+		Country:         "us",
+		PublicIPv4:      "15.204.94.71",
+		Status:          model.EdgeHealthHealthy,
+		Healthy:         true,
+		CaddyRouteCount: 1,
+		TLSStatus:       model.EdgeTLSStatusReady,
 	}); err != nil {
 		t.Fatalf("record healthy US edge node: %v", err)
 	}
@@ -278,6 +282,12 @@ func TestEdgeDNSBundleDerivesFullZonePlatformAppRecords(t *testing.T) {
 	}
 	if platform.RecordKind != model.EdgeDNSRecordKindPlatform || platform.EdgeGroupID != "edge-group-country-us" || strings.Join(platform.Values, ",") != "15.204.94.71" {
 		t.Fatalf("unexpected platform DNS record: %+v", platform)
+	}
+	if platform.AnswerPolicy.PolicyKind != model.DNSAnswerPolicyKindGeo || !platform.AnswerPolicy.ECSEnabled || len(platform.Candidates) != 1 {
+		t.Fatalf("expected geo answer policy and edge candidate metadata, got %+v", platform)
+	}
+	if platform.Candidates[0].EdgeGroupID != "edge-group-country-us" || platform.Candidates[0].Country != "us" || !platform.Candidates[0].TLSReady {
+		t.Fatalf("unexpected DNS answer candidate metadata: %+v", platform.Candidates)
 	}
 
 	otherGroupRecorder := httptest.NewRecorder()

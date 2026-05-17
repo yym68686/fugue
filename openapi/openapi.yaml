@@ -6087,6 +6087,10 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/EdgeTLSAllowlistEntry"
+        cache_policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/CachePolicy"
     EdgeRouteBinding:
       type: object
       additionalProperties: false
@@ -6155,6 +6159,12 @@ components:
         tls_policy:
           type: string
           enum: [platform, custom-domain]
+        cache_policy_id:
+          type: string
+        cache_namespace:
+          type: string
+        deployment_generation:
+          type: string
         streaming:
           type: boolean
         status:
@@ -6546,6 +6556,52 @@ components:
           type: string
         tls_status:
           type: string
+    CachePolicy:
+      type: object
+      additionalProperties: false
+      required: [id, kind]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [static-assets, disabled]
+        hostname_scope:
+          type: string
+        path_patterns:
+          type: array
+          items:
+            type: string
+        method_allowlist:
+          type: array
+          items:
+            type: string
+        status_allowlist:
+          type: array
+          items:
+            type: integer
+            format: int32
+        ttl_seconds:
+          type: integer
+          format: int32
+        stale_while_revalidate_seconds:
+          type: integer
+          format: int32
+        browser_cache_control:
+          type: string
+        edge_cache_control:
+          type: string
+        bypass_on_authorization:
+          type: boolean
+        bypass_on_cookie:
+          type: boolean
+        vary_allowlist:
+          type: array
+          items:
+            type: string
+        purge_mode:
+          type: string
+          enum: [generation, none]
     EdgeDNSBundle:
       type: object
       additionalProperties: false
@@ -6627,6 +6683,80 @@ components:
           type: string
         record_generation:
           type: string
+        answer_policy:
+          $ref: "#/components/schemas/DNSAnswerPolicy"
+        candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeDNSAnswerCandidate"
+    DNSAnswerPolicy:
+      type: object
+      additionalProperties: false
+      required: [policy_kind]
+      properties:
+        policy_kind:
+          type: string
+          enum: [global, geo, weighted, latency_aware, pinned, disabled]
+        allowed_edge_groups:
+          type: array
+          items:
+            type: string
+        preferred_edge_groups:
+          type: array
+          items:
+            type: string
+        fallback_edge_groups:
+          type: array
+          items:
+            type: string
+        ttl_seconds:
+          type: integer
+          format: int32
+        ecs_enabled:
+          type: boolean
+        health_required:
+          type: boolean
+        route_ready_required:
+          type: boolean
+        region:
+          type: string
+        country:
+          type: string
+        priority:
+          type: integer
+          format: int32
+        weight:
+          type: integer
+          format: int32
+        reason:
+          type: string
+    EdgeDNSAnswerCandidate:
+      type: object
+      additionalProperties: false
+      required: [ip]
+      properties:
+        ip:
+          type: string
+        edge_group_id:
+          type: string
+        region:
+          type: string
+        country:
+          type: string
+        priority:
+          type: integer
+          format: int32
+        weight:
+          type: integer
+          format: int32
+        reason:
+          type: string
+        healthy:
+          type: boolean
+        route_ready:
+          type: boolean
+        tls_ready:
+          type: boolean
     DNSACMEChallenge:
       type: object
       additionalProperties: false

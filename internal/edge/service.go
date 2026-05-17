@@ -103,6 +103,7 @@ type telemetry struct {
 	RouteUploadRequests   map[routeMetricKey]uint64
 	RouteLatencyCount     map[routeMetricKey]uint64
 	RouteLatencySum       map[routeMetricKey]float64
+	RouteCacheStatus      map[routeCacheMetricKey]uint64
 }
 
 type metricSnapshot struct {
@@ -132,6 +133,13 @@ type routeResultMetricKey struct {
 	Result         string
 }
 
+type routeCacheMetricKey struct {
+	RouteMetricKey routeMetricKey
+	CacheStatus    string
+	CachePolicyID  string
+	AssetClass     string
+}
+
 type edgeProxyObservation struct {
 	Host          string
 	Route         model.EdgeRouteBinding
@@ -147,6 +155,11 @@ type edgeProxyObservation struct {
 	Streaming     bool
 	Upload        bool
 	PeerFallback  bool
+	CacheStatus   string
+	CachePolicyID string
+	CacheKeyHash  string
+	AssetClass    string
+	ResponseBytes int64
 }
 
 func (e statusError) Error() string {
@@ -530,6 +543,11 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		Upload:      edgeRequestHasUpload(r),
 	}
 	observed.Streaming = observed.WebSocket || observed.SSE
+	cacheDecision := s.edgeCacheDecision(r, route)
+	observed.CacheStatus = cacheDecision.Status
+	observed.CachePolicyID = cacheDecision.PolicyID
+	observed.CacheKeyHash = cacheDecision.KeyHash
+	observed.AssetClass = cacheDecision.AssetClass
 	defer func() {
 		observed.Duration = time.Since(startedAt)
 		s.recordProxyObservation(observed)
@@ -557,9 +575,28 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	observed.Proxied = true
+	if cacheDecision.Enabled {
+		if entry, ok := s.edgeCacheLoad(cacheDecision); ok {
+			if served, status, cacheStatus := s.edgeCacheServeIfFresh(w, cacheDecision, entry); served {
+				observed.Proxied = false
+				observed.StatusCode = status
+				observed.CacheStatus = cacheStatus
+				observed.ResponseBytes = entry.BodySize
+				return
+			}
+		}
+	}
 	peerFallbackAllowed := s.peerFallbackAllowed(r, observed)
-	proxy := s.newEdgeReverseProxy(host, target, route, &observed, peerFallbackAllowed)
+	proxy := s.newEdgeReverseProxy(host, target, route, &observed, peerFallbackAllowed, &cacheDecision)
 	observedWriter := newEdgeProxyObservationResponseWriter(w)
+	if cacheDecision.Enabled {
+		observedWriter.cacheDecision = &cacheDecision
+		maxBytes := s.Config.AssetCacheMaxBytes
+		if maxBytes <= 0 {
+			maxBytes = 32 * 1024 * 1024
+		}
+		observedWriter.maxBytes = int64(maxBytes)
+	}
 	proxy.ServeHTTP(observedWriter, r)
 	if observed.UpstreamError != "" && !observedWriter.wroteHeader && peerFallbackAllowed {
 		if s.proxyPeerFallback(w, r, host, route, &observed) {
@@ -572,12 +609,30 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	observed.StatusCode = observedWriter.statusCode()
+	observed.ResponseBytes = observedWriter.bytesWritten
+	if cacheDecision.Enabled {
+		if s.edgeCacheShouldStore(cacheDecision, observedWriter) {
+			if err := s.edgeCacheStore(cacheDecision, edgeHTTPCacheEntry{
+				Header:     cloneHTTPHeader(observedWriter.headerSnapshot),
+				StatusCode: observedWriter.statusCode(),
+				Body:       append([]byte(nil), observedWriter.body...),
+				BodySize:   observedWriter.bytesWritten,
+			}); err != nil && s.Logger != nil {
+				s.Logger.Printf("edge http cache store failed; host=%s policy=%s key=%s error=%v", host, cacheDecision.PolicyID, cacheDecision.KeyHash, err)
+				observed.CacheStatus = edgeCacheStatusError
+			} else if observed.CacheStatus != edgeCacheStatusStale {
+				observed.CacheStatus = edgeCacheStatusMiss
+			}
+		} else if observed.CacheStatus == "" || observed.CacheStatus == edgeCacheStatusMiss {
+			observed.CacheStatus = edgeCacheStatusBypass
+		}
+	}
 	if !observedWriter.wroteHeader && observed.WebSocket && observed.UpstreamError == "" {
 		observed.StatusCode = http.StatusSwitchingProtocols
 	}
 }
 
-func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.EdgeRouteBinding, observed *edgeProxyObservation, suppressErrorResponse bool) *httputil.ReverseProxy {
+func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.EdgeRouteBinding, observed *edgeProxyObservation, suppressErrorResponse bool, cacheDecision *edgeHTTPCacheDecision) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Rewrite: func(req *httputil.ProxyRequest) {
 			req.SetURL(target)
@@ -596,6 +651,19 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 				return
 			}
 			http.Error(rw, "upstream app is unavailable", http.StatusBadGateway)
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			if resp == nil || cacheDecision == nil || !cacheDecision.Enabled {
+				return nil
+			}
+			resp.Header.Set("X-Fugue-Cache", cacheDecision.Status)
+			if control := strings.TrimSpace(cacheDecision.Policy.EdgeCacheControl); control != "" {
+				resp.Header.Set("Cache-Control", control)
+			}
+			if resp.StatusCode == http.StatusNotModified {
+				resp.Header.Set("X-Fugue-Cache", edgeCacheStatusRevalidated)
+			}
+			return nil
 		},
 	}
 }
@@ -634,7 +702,7 @@ func (s *Service) proxyPeerFallback(w http.ResponseWriter, r *http.Request, host
 	peerRequest.Header = r.Header.Clone()
 	peerRequest.Header.Set(edgePeerFallbackHeader, "1")
 	peerRequest.Header.Set("X-Fugue-Edge-Route-Host", host)
-	proxy := s.newEdgeReverseProxy(host, target, peerRoute, observed, false)
+	proxy := s.newEdgeReverseProxy(host, target, peerRoute, observed, false, nil)
 	writer := newEdgeProxyObservationResponseWriter(w)
 	proxy.ServeHTTP(writer, peerRequest)
 	if observed != nil {
@@ -766,6 +834,17 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteLatencyCount) {
 		fmt.Fprintf(w, "fugue_edge_route_upstream_latency_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteLatencySum[key])
 		fmt.Fprintf(w, "fugue_edge_route_upstream_latency_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteLatencyCount[key])
+	}
+	fmt.Fprintln(w, "# HELP fugue_edge_route_cache_total Edge data-plane cache decisions by route and cache status.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_route_cache_total counter")
+	for _, key := range sortedRouteCacheMetricKeys(snapshot.Metrics.RouteCacheStatus) {
+		fmt.Fprintf(w, "fugue_edge_route_cache_total{%s,cache_status=\"%s\",cache_policy_id=\"%s\",asset_class=\"%s\"} %d\n",
+			routeMetricLabels(key.RouteMetricKey),
+			prometheusLabelValue(key.CacheStatus),
+			prometheusLabelValue(key.CachePolicyID),
+			prometheusLabelValue(key.AssetClass),
+			snapshot.Metrics.RouteCacheStatus[key],
+		)
 	}
 }
 
@@ -1403,6 +1482,15 @@ func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 		s.metrics.RouteLatencyCount[key]++
 		s.metrics.RouteLatencySum[key] += durationSeconds(observed.Duration)
 	}
+	if s.metrics.RouteCacheStatus == nil {
+		s.metrics.RouteCacheStatus = make(map[routeCacheMetricKey]uint64)
+	}
+	s.metrics.RouteCacheStatus[routeCacheMetricKey{
+		RouteMetricKey: key,
+		CacheStatus:    firstNonEmpty(strings.TrimSpace(observed.CacheStatus), "bypass"),
+		CachePolicyID:  strings.TrimSpace(observed.CachePolicyID),
+		AssetClass:     strings.TrimSpace(observed.AssetClass),
+	}]++
 }
 
 func edgeProxyObservationResult(observed edgeProxyObservation) string {
@@ -1511,6 +1599,7 @@ func (s *Service) metricSnapshot() metricSnapshot {
 	out.Metrics.RouteUploadRequests = cloneRouteCounterMap(s.metrics.RouteUploadRequests)
 	out.Metrics.RouteLatencyCount = cloneRouteCounterMap(s.metrics.RouteLatencyCount)
 	out.Metrics.RouteLatencySum = cloneRouteFloatMap(s.metrics.RouteLatencySum)
+	out.Metrics.RouteCacheStatus = cloneRouteCacheCounterMap(s.metrics.RouteCacheStatus)
 	if s.bundle != nil && !s.bundle.GeneratedAt.IsZero() {
 		generatedAt := s.bundle.GeneratedAt
 		out.BundleGeneratedAt = &generatedAt
@@ -1575,7 +1664,7 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 	edgeGroupID := firstNonEmpty(observed.Route.EdgeGroupID, s.Config.EdgeGroupID)
 	runtimeEdgeGroupID := firstNonEmpty(observed.Route.RuntimeEdgeGroupID, observed.Route.RuntimeEdgeGroup)
 	s.Logger.Printf(
-		"edge_proxy_request host=%s app=%s tenant=%s runtime=%s route_kind=%s edge_group_id=%s runtime_region=%s runtime_edge_group_id=%s route_generation=%s fallback_reason=%s method=%s path=%s status=%d duration_ms=%d upstream=%s upstream_error=%t fallback_hit=%t websocket=%t sse=%t streaming=%t upload=%t",
+		"edge_proxy_request host=%s app=%s tenant=%s runtime=%s route_kind=%s edge_group_id=%s runtime_region=%s runtime_edge_group_id=%s route_generation=%s fallback_reason=%s method=%s path=%s status=%d duration_ms=%d response_bytes=%d cache_status=%s cache_policy_id=%s cache_key_hash=%s asset_class=%s upstream=%s upstream_error=%t fallback_hit=%t websocket=%t sse=%t streaming=%t upload=%t",
 		observed.Host,
 		strings.TrimSpace(observed.Route.AppID),
 		strings.TrimSpace(observed.Route.TenantID),
@@ -1590,6 +1679,11 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 		observed.Path,
 		observed.StatusCode,
 		observed.Duration.Milliseconds(),
+		observed.ResponseBytes,
+		strings.TrimSpace(observed.CacheStatus),
+		strings.TrimSpace(observed.CachePolicyID),
+		strings.TrimSpace(observed.CacheKeyHash),
+		strings.TrimSpace(observed.AssetClass),
 		strings.TrimSpace(observed.Route.UpstreamURL),
 		strings.TrimSpace(observed.UpstreamError) != "",
 		observed.FallbackHit,
@@ -1682,12 +1776,18 @@ func staleAgeSeconds(stale bool, lastSuccessAt *time.Time, now time.Time) float6
 
 type edgeProxyObservationResponseWriter struct {
 	http.ResponseWriter
-	wroteHeader bool
-	status      int
+	wroteHeader    bool
+	status         int
+	headerSnapshot http.Header
+	body           []byte
+	bytesWritten   int64
+	maxBytes       int64
+	overflow       bool
+	cacheDecision  *edgeHTTPCacheDecision
 }
 
 func newEdgeProxyObservationResponseWriter(w http.ResponseWriter) *edgeProxyObservationResponseWriter {
-	return &edgeProxyObservationResponseWriter{ResponseWriter: w}
+	return &edgeProxyObservationResponseWriter{ResponseWriter: w, maxBytes: int64(32 * 1024 * 1024)}
 }
 
 func (w *edgeProxyObservationResponseWriter) Header() http.Header {
@@ -1700,6 +1800,7 @@ func (w *edgeProxyObservationResponseWriter) WriteHeader(statusCode int) {
 	}
 	w.wroteHeader = true
 	w.status = statusCode
+	w.headerSnapshot = cloneHTTPHeader(w.ResponseWriter.Header())
 	w.ResponseWriter.WriteHeader(statusCode)
 }
 
@@ -1707,6 +1808,20 @@ func (w *edgeProxyObservationResponseWriter) Write(data []byte) (int, error) {
 	if !w.wroteHeader {
 		w.WriteHeader(http.StatusOK)
 	}
+	if w.maxBytes > 0 && !w.overflow {
+		remaining := w.maxBytes - int64(len(w.body))
+		if remaining > 0 {
+			chunk := data
+			if int64(len(chunk)) > remaining {
+				chunk = chunk[:remaining]
+				w.overflow = true
+			}
+			w.body = append(w.body, chunk...)
+		} else {
+			w.overflow = true
+		}
+	}
+	w.bytesWritten += int64(len(data))
 	return w.ResponseWriter.Write(data)
 }
 
@@ -1869,6 +1984,17 @@ func cloneRouteFloatMap(in map[routeMetricKey]float64) map[routeMetricKey]float6
 	return out
 }
 
+func cloneRouteCacheCounterMap(in map[routeCacheMetricKey]uint64) map[routeCacheMetricKey]uint64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[routeCacheMetricKey]uint64, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
 func sortedRouteResultMetricKeys(values map[routeResultMetricKey]uint64) []routeResultMetricKey {
 	keys := make([]routeResultMetricKey, 0, len(values))
 	for key := range values {
@@ -1926,6 +2052,34 @@ func sortedRouteStatusMetricKeys(values map[routeStatusMetricKey]uint64) []route
 			return left.RouteKind < right.RouteKind
 		}
 		return keys[i].StatusCode < keys[j].StatusCode
+	})
+	return keys
+}
+
+func sortedRouteCacheMetricKeys(values map[routeCacheMetricKey]uint64) []routeCacheMetricKey {
+	keys := make([]routeCacheMetricKey, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		left := keys[i].RouteMetricKey
+		right := keys[j].RouteMetricKey
+		if left.Hostname != right.Hostname {
+			return left.Hostname < right.Hostname
+		}
+		if left.AppID != right.AppID {
+			return left.AppID < right.AppID
+		}
+		if left.RouteKind != right.RouteKind {
+			return left.RouteKind < right.RouteKind
+		}
+		if keys[i].CacheStatus != keys[j].CacheStatus {
+			return keys[i].CacheStatus < keys[j].CacheStatus
+		}
+		if keys[i].CachePolicyID != keys[j].CachePolicyID {
+			return keys[i].CachePolicyID < keys[j].CachePolicyID
+		}
+		return keys[i].AssetClass < keys[j].AssetClass
 	})
 	return keys
 }

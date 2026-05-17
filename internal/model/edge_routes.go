@@ -52,6 +52,23 @@ const (
 )
 
 const (
+	CachePolicyKindStaticAssets = "static-assets"
+	CachePolicyKindDisabled     = "disabled"
+
+	CachePolicyPurgeModeGeneration = "generation"
+	CachePolicyPurgeModeNone       = "none"
+)
+
+const (
+	DNSAnswerPolicyKindGlobal       = "global"
+	DNSAnswerPolicyKindGeo          = "geo"
+	DNSAnswerPolicyKindWeighted     = "weighted"
+	DNSAnswerPolicyKindLatencyAware = "latency_aware"
+	DNSAnswerPolicyKindPinned       = "pinned"
+	DNSAnswerPolicyKindDisabled     = "disabled"
+)
+
+const (
 	EdgeDNSRecordKindCustomDomainTarget = "custom-domain-target"
 	EdgeDNSRecordKindPlatformDomain     = "platform-domain"
 	EdgeDNSRecordKindPlatform           = "platform"
@@ -118,36 +135,40 @@ type EdgeRouteBundle struct {
 	EdgeGroupID        string                  `json:"edge_group_id,omitempty"`
 	Routes             []EdgeRouteBinding      `json:"routes"`
 	TLSAllowlist       []EdgeTLSAllowlistEntry `json:"tls_allowlist"`
+	CachePolicies      []CachePolicy           `json:"cache_policies,omitempty"`
 }
 
 type EdgeRouteBinding struct {
-	Hostname            string    `json:"hostname"`
-	RouteKind           string    `json:"route_kind"`
-	AppID               string    `json:"app_id"`
-	TenantID            string    `json:"tenant_id"`
-	RuntimeID           string    `json:"runtime_id"`
-	RuntimeType         string    `json:"runtime_type,omitempty"`
-	RuntimeEdgeGroup    string    `json:"runtime_edge_group,omitempty"`
-	RuntimeEdgeGroupID  string    `json:"runtime_edge_group_id,omitempty"`
-	RuntimeClusterNode  string    `json:"runtime_cluster_node,omitempty"`
-	SelectedEdgeGroup   string    `json:"selected_edge_group,omitempty"`
-	EdgeGroupID         string    `json:"edge_group_id"`
-	FallbackEdgeGroupID string    `json:"fallback_edge_group_id,omitempty"`
-	PolicyEdgeGroupID   string    `json:"policy_edge_group_id,omitempty"`
-	RoutePolicy         string    `json:"route_policy"`
-	SelectionReason     string    `json:"selection_reason,omitempty"`
-	FallbackReason      string    `json:"fallback_reason,omitempty"`
-	UpstreamKind        string    `json:"upstream_kind"`
-	UpstreamScope       string    `json:"upstream_scope,omitempty"`
-	UpstreamURL         string    `json:"upstream_url,omitempty"`
-	ServicePort         int       `json:"service_port"`
-	TLSPolicy           string    `json:"tls_policy"`
-	Streaming           bool      `json:"streaming"`
-	Status              string    `json:"status"`
-	StatusReason        string    `json:"status_reason,omitempty"`
-	RouteGeneration     string    `json:"route_generation"`
-	CreatedAt           time.Time `json:"created_at"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	Hostname             string    `json:"hostname"`
+	RouteKind            string    `json:"route_kind"`
+	AppID                string    `json:"app_id"`
+	TenantID             string    `json:"tenant_id"`
+	RuntimeID            string    `json:"runtime_id"`
+	RuntimeType          string    `json:"runtime_type,omitempty"`
+	RuntimeEdgeGroup     string    `json:"runtime_edge_group,omitempty"`
+	RuntimeEdgeGroupID   string    `json:"runtime_edge_group_id,omitempty"`
+	RuntimeClusterNode   string    `json:"runtime_cluster_node,omitempty"`
+	SelectedEdgeGroup    string    `json:"selected_edge_group,omitempty"`
+	EdgeGroupID          string    `json:"edge_group_id"`
+	FallbackEdgeGroupID  string    `json:"fallback_edge_group_id,omitempty"`
+	PolicyEdgeGroupID    string    `json:"policy_edge_group_id,omitempty"`
+	RoutePolicy          string    `json:"route_policy"`
+	SelectionReason      string    `json:"selection_reason,omitempty"`
+	FallbackReason       string    `json:"fallback_reason,omitempty"`
+	UpstreamKind         string    `json:"upstream_kind"`
+	UpstreamScope        string    `json:"upstream_scope,omitempty"`
+	UpstreamURL          string    `json:"upstream_url,omitempty"`
+	ServicePort          int       `json:"service_port"`
+	TLSPolicy            string    `json:"tls_policy"`
+	CachePolicyID        string    `json:"cache_policy_id,omitempty"`
+	CacheNamespace       string    `json:"cache_namespace,omitempty"`
+	DeploymentGeneration string    `json:"deployment_generation,omitempty"`
+	Streaming            bool      `json:"streaming"`
+	Status               string    `json:"status"`
+	StatusReason         string    `json:"status_reason,omitempty"`
+	RouteGeneration      string    `json:"route_generation"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 type EdgeRoutePolicy struct {
@@ -280,6 +301,52 @@ type EdgeTLSAllowlistEntry struct {
 	TLSStatus string `json:"tls_status,omitempty"`
 }
 
+type CachePolicy struct {
+	ID                          string   `json:"id"`
+	Kind                        string   `json:"kind"`
+	HostnameScope               string   `json:"hostname_scope,omitempty"`
+	PathPatterns                []string `json:"path_patterns,omitempty"`
+	MethodAllowlist             []string `json:"method_allowlist,omitempty"`
+	StatusAllowlist             []int    `json:"status_allowlist,omitempty"`
+	TTLSeconds                  int      `json:"ttl_seconds,omitempty"`
+	StaleWhileRevalidateSeconds int      `json:"stale_while_revalidate_seconds,omitempty"`
+	BrowserCacheControl         string   `json:"browser_cache_control,omitempty"`
+	EdgeCacheControl            string   `json:"edge_cache_control,omitempty"`
+	BypassOnAuthorization       bool     `json:"bypass_on_authorization,omitempty"`
+	BypassOnCookie              bool     `json:"bypass_on_cookie,omitempty"`
+	VaryAllowlist               []string `json:"vary_allowlist,omitempty"`
+	PurgeMode                   string   `json:"purge_mode,omitempty"`
+}
+
+type DNSAnswerPolicy struct {
+	PolicyKind          string   `json:"policy_kind"`
+	AllowedEdgeGroups   []string `json:"allowed_edge_groups,omitempty"`
+	PreferredEdgeGroups []string `json:"preferred_edge_groups,omitempty"`
+	FallbackEdgeGroups  []string `json:"fallback_edge_groups,omitempty"`
+	TTLSeconds          int      `json:"ttl_seconds,omitempty"`
+	ECSEnabled          bool     `json:"ecs_enabled,omitempty"`
+	HealthRequired      bool     `json:"health_required,omitempty"`
+	RouteReadyRequired  bool     `json:"route_ready_required,omitempty"`
+	Region              string   `json:"region,omitempty"`
+	Country             string   `json:"country,omitempty"`
+	Priority            int      `json:"priority,omitempty"`
+	Weight              int      `json:"weight,omitempty"`
+	Reason              string   `json:"reason,omitempty"`
+}
+
+type EdgeDNSAnswerCandidate struct {
+	IP          string `json:"ip"`
+	EdgeGroupID string `json:"edge_group_id,omitempty"`
+	Region      string `json:"region,omitempty"`
+	Country     string `json:"country,omitempty"`
+	Priority    int    `json:"priority,omitempty"`
+	Weight      int    `json:"weight,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	Healthy     bool   `json:"healthy,omitempty"`
+	RouteReady  bool   `json:"route_ready,omitempty"`
+	TLSReady    bool   `json:"tls_ready,omitempty"`
+}
+
 type EdgeDNSBundle struct {
 	SchemaVersion      string            `json:"schema_version,omitempty"`
 	Version            string            `json:"version"`
@@ -298,18 +365,20 @@ type EdgeDNSBundle struct {
 }
 
 type EdgeDNSRecord struct {
-	Name                string   `json:"name"`
-	Type                string   `json:"type"`
-	Values              []string `json:"values"`
-	TTL                 int      `json:"ttl"`
-	RecordKind          string   `json:"record_kind"`
-	AppID               string   `json:"app_id,omitempty"`
-	TenantID            string   `json:"tenant_id,omitempty"`
-	EdgeGroupID         string   `json:"edge_group_id,omitempty"`
-	FallbackEdgeGroupID string   `json:"fallback_edge_group_id,omitempty"`
-	Status              string   `json:"status"`
-	StatusReason        string   `json:"status_reason,omitempty"`
-	RecordGeneration    string   `json:"record_generation"`
+	Name                string                   `json:"name"`
+	Type                string                   `json:"type"`
+	Values              []string                 `json:"values"`
+	TTL                 int                      `json:"ttl"`
+	RecordKind          string                   `json:"record_kind"`
+	AppID               string                   `json:"app_id,omitempty"`
+	TenantID            string                   `json:"tenant_id,omitempty"`
+	EdgeGroupID         string                   `json:"edge_group_id,omitempty"`
+	FallbackEdgeGroupID string                   `json:"fallback_edge_group_id,omitempty"`
+	Status              string                   `json:"status"`
+	StatusReason        string                   `json:"status_reason,omitempty"`
+	RecordGeneration    string                   `json:"record_generation"`
+	AnswerPolicy        DNSAnswerPolicy          `json:"answer_policy,omitempty"`
+	Candidates          []EdgeDNSAnswerCandidate `json:"candidates,omitempty"`
 }
 
 type DNSACMEChallenge struct {

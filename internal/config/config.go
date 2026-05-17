@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"log"
 	"os"
 	"path/filepath"
@@ -121,6 +122,8 @@ type EdgeConfig struct {
 	Draining                   bool
 	CachePath                  string
 	CacheArchiveLimit          int
+	AssetCachePath             string
+	AssetCacheMaxBytes         int
 	MaxStale                   time.Duration
 	PeerFallbackEnabled        bool
 	ListenAddr                 string
@@ -168,11 +171,19 @@ type DNSConfig struct {
 	HTTPTimeout                time.Duration
 	TTL                        int
 	Nameservers                []string
+	GeoIPOverrides             []DNSGeoIPOverride
 	BundleSigningKey           string
 	BundleSigningKeyID         string
 	BundleSigningPreviousKey   string
 	BundleSigningPreviousKeyID string
 	BundleRevokedKeyIDs        []string
+}
+
+type DNSGeoIPOverride struct {
+	CIDR        string `json:"cidr"`
+	Country     string `json:"country,omitempty"`
+	Region      string `json:"region,omitempty"`
+	EdgeGroupID string `json:"edge_group_id,omitempty"`
 }
 
 func APIFromEnv() APIConfig {
@@ -306,6 +317,8 @@ func EdgeFromEnv() EdgeConfig {
 		Draining:                   getenvBool("FUGUE_EDGE_DRAINING", false),
 		CachePath:                  getenv("FUGUE_EDGE_ROUTES_CACHE_PATH", "/var/lib/fugue/edge/routes-cache.json"),
 		CacheArchiveLimit:          getenvInt("FUGUE_EDGE_CACHE_ARCHIVE_LIMIT", 5),
+		AssetCachePath:             getenv("FUGUE_EDGE_ASSET_CACHE_PATH", "/var/lib/fugue/edge/http-cache"),
+		AssetCacheMaxBytes:         getenvInt("FUGUE_EDGE_ASSET_CACHE_MAX_BYTES", 32*1024*1024),
 		MaxStale:                   getenvDuration("FUGUE_EDGE_MAX_STALE", 24*time.Hour),
 		PeerFallbackEnabled:        getenvBool("FUGUE_EDGE_PEER_FALLBACK_ENABLED", true),
 		ListenAddr:                 getenv("FUGUE_EDGE_LISTEN_ADDR", "127.0.0.1:7832"),
@@ -356,12 +369,35 @@ func DNSFromEnv() DNSConfig {
 		HTTPTimeout:                getenvDuration("FUGUE_DNS_HTTP_TIMEOUT", 10*time.Second),
 		TTL:                        getenvInt("FUGUE_DNS_TTL", 60),
 		Nameservers:                getenvList("FUGUE_DNS_NAMESERVERS"),
+		GeoIPOverrides:             parseDNSGeoIPOverrides(os.Getenv("FUGUE_DNS_GEOIP_OVERRIDES_JSON")),
 		BundleSigningKey:           strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_KEY")),
 		BundleSigningKeyID:         getenv("FUGUE_BUNDLE_SIGNING_KEY_ID", "control-plane"),
 		BundleSigningPreviousKey:   strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY")),
 		BundleSigningPreviousKeyID: strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID")),
 		BundleRevokedKeyIDs:        getenvList("FUGUE_BUNDLE_REVOKED_KEY_IDS"),
 	}
+}
+
+func parseDNSGeoIPOverrides(raw string) []DNSGeoIPOverride {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var overrides []DNSGeoIPOverride
+	if err := json.Unmarshal([]byte(raw), &overrides); err != nil {
+		return nil
+	}
+	out := make([]DNSGeoIPOverride, 0, len(overrides))
+	for _, override := range overrides {
+		override.CIDR = strings.TrimSpace(override.CIDR)
+		override.Country = strings.ToLower(strings.TrimSpace(override.Country))
+		override.Region = strings.TrimSpace(override.Region)
+		override.EdgeGroupID = strings.TrimSpace(override.EdgeGroupID)
+		if override.CIDR != "" {
+			out = append(out, override)
+		}
+	}
+	return out
 }
 
 func getenv(key, fallback string) string {

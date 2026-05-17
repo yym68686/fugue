@@ -20,6 +20,7 @@ func (c *CLI) newAdminEdgeCommand() *cobra.Command {
 	}
 	cmd.AddCommand(c.newAdminEdgeRoutePolicyCommand())
 	cmd.AddCommand(c.newAdminEdgeRouteCheckCommand())
+	cmd.AddCommand(c.newAdminEdgeCacheCheckCommand())
 	cmd.AddCommand(c.newAdminEdgeNodesCommand())
 	return cmd
 }

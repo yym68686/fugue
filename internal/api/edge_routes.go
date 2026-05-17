@@ -18,6 +18,8 @@ import (
 
 const defaultEdgeGroupID = "edge-group-default"
 
+const defaultStaticAssetCachePolicyID = "static-assets-immutable-v1"
+
 type edgeRouteBundleOptions struct {
 	EdgeID      string
 	EdgeGroupID string
@@ -171,6 +173,9 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		Routes:       routes,
 		TLSAllowlist: tlsAllowlist,
 	}
+	if edgeRouteBundleUsesCachePolicies(routes) {
+		bundle.CachePolicies = defaultEdgeCachePolicies()
+	}
 	bundle.Version = edgeRouteBundleVersion(bundle)
 	bundle.Generation = bundle.Version
 	if err := validateEdgeRouteBundleForPublish(bundle, edgeRouteBundleInvariantInput{
@@ -205,26 +210,31 @@ func (s *Server) deriveEdgeRouteBinding(r *http.Request, app model.App, hostname
 	}
 
 	binding := model.EdgeRouteBinding{
-		Hostname:            normalizeExternalAppDomain(hostname),
-		RouteKind:           routeKind,
-		AppID:               app.ID,
-		TenantID:            app.TenantID,
-		RuntimeID:           runtimeID,
-		RuntimeEdgeGroupID:  edgeGroupID,
-		RuntimeEdgeGroup:    edgeGroupID,
-		EdgeGroupID:         edgeGroupID,
-		SelectedEdgeGroup:   edgeGroupID,
-		FallbackEdgeGroupID: fallbackEdgeGroupID,
-		RoutePolicy:         model.EdgeRoutePolicyRouteAOnly,
-		UpstreamKind:        upstream.Kind,
-		UpstreamScope:       upstream.Scope,
-		ServicePort:         servicePort,
-		TLSPolicy:           tlsPolicy,
-		Streaming:           true,
-		Status:              status,
-		StatusReason:        reason,
-		CreatedAt:           createdAt,
-		UpdatedAt:           updatedAt,
+		Hostname:             normalizeExternalAppDomain(hostname),
+		RouteKind:            routeKind,
+		AppID:                app.ID,
+		TenantID:             app.TenantID,
+		RuntimeID:            runtimeID,
+		RuntimeEdgeGroupID:   edgeGroupID,
+		RuntimeEdgeGroup:     edgeGroupID,
+		EdgeGroupID:          edgeGroupID,
+		SelectedEdgeGroup:    edgeGroupID,
+		FallbackEdgeGroupID:  fallbackEdgeGroupID,
+		RoutePolicy:          model.EdgeRoutePolicyRouteAOnly,
+		UpstreamKind:         upstream.Kind,
+		UpstreamScope:        upstream.Scope,
+		ServicePort:          servicePort,
+		TLSPolicy:            tlsPolicy,
+		CachePolicyID:        edgeRouteCachePolicyIDForKind(routeKind),
+		DeploymentGeneration: edgeRouteDeploymentGeneration(app),
+		Streaming:            true,
+		Status:               status,
+		StatusReason:         reason,
+		CreatedAt:            createdAt,
+		UpdatedAt:            updatedAt,
+	}
+	if binding.CachePolicyID != "" {
+		binding.CacheNamespace = edgeRouteCacheNamespace(app.ID, binding.DeploymentGeneration)
 	}
 	if runtimeFound {
 		binding.RuntimeType = strings.TrimSpace(runtimeObj.Type)
@@ -647,35 +657,39 @@ func edgeRouteGeneration(binding model.EdgeRouteBinding) string {
 }
 
 type edgeRouteVersionMaterial struct {
-	Hostname            string `json:"hostname"`
-	RouteKind           string `json:"route_kind"`
-	AppID               string `json:"app_id"`
-	TenantID            string `json:"tenant_id"`
-	RuntimeID           string `json:"runtime_id"`
-	RuntimeType         string `json:"runtime_type,omitempty"`
-	RuntimeEdgeGroupID  string `json:"runtime_edge_group_id,omitempty"`
-	RuntimeClusterNode  string `json:"runtime_cluster_node,omitempty"`
-	RuntimeEdgeGroup    string `json:"runtime_edge_group,omitempty"`
-	SelectedEdgeGroup   string `json:"selected_edge_group,omitempty"`
-	EdgeGroupID         string `json:"edge_group_id"`
-	FallbackEdgeGroupID string `json:"fallback_edge_group_id,omitempty"`
-	PolicyEdgeGroupID   string `json:"policy_edge_group_id,omitempty"`
-	RoutePolicy         string `json:"route_policy"`
-	SelectionReason     string `json:"selection_reason,omitempty"`
-	FallbackReason      string `json:"fallback_reason,omitempty"`
-	UpstreamKind        string `json:"upstream_kind"`
-	UpstreamScope       string `json:"upstream_scope,omitempty"`
-	UpstreamURL         string `json:"upstream_url,omitempty"`
-	ServicePort         int    `json:"service_port"`
-	TLSPolicy           string `json:"tls_policy"`
-	Streaming           bool   `json:"streaming"`
-	Status              string `json:"status"`
-	StatusReason        string `json:"status_reason,omitempty"`
+	Hostname             string `json:"hostname"`
+	RouteKind            string `json:"route_kind"`
+	AppID                string `json:"app_id"`
+	TenantID             string `json:"tenant_id"`
+	RuntimeID            string `json:"runtime_id"`
+	RuntimeType          string `json:"runtime_type,omitempty"`
+	RuntimeEdgeGroupID   string `json:"runtime_edge_group_id,omitempty"`
+	RuntimeClusterNode   string `json:"runtime_cluster_node,omitempty"`
+	RuntimeEdgeGroup     string `json:"runtime_edge_group,omitempty"`
+	SelectedEdgeGroup    string `json:"selected_edge_group,omitempty"`
+	EdgeGroupID          string `json:"edge_group_id"`
+	FallbackEdgeGroupID  string `json:"fallback_edge_group_id,omitempty"`
+	PolicyEdgeGroupID    string `json:"policy_edge_group_id,omitempty"`
+	RoutePolicy          string `json:"route_policy"`
+	SelectionReason      string `json:"selection_reason,omitempty"`
+	FallbackReason       string `json:"fallback_reason,omitempty"`
+	UpstreamKind         string `json:"upstream_kind"`
+	UpstreamScope        string `json:"upstream_scope,omitempty"`
+	UpstreamURL          string `json:"upstream_url,omitempty"`
+	ServicePort          int    `json:"service_port"`
+	TLSPolicy            string `json:"tls_policy"`
+	CachePolicyID        string `json:"cache_policy_id,omitempty"`
+	CacheNamespace       string `json:"cache_namespace,omitempty"`
+	DeploymentGeneration string `json:"deployment_generation,omitempty"`
+	Streaming            bool   `json:"streaming"`
+	Status               string `json:"status"`
+	StatusReason         string `json:"status_reason,omitempty"`
 }
 
 type edgeRouteBundleVersionMaterial struct {
-	Routes       []edgeRouteVersionMaterial    `json:"routes"`
-	TLSAllowlist []model.EdgeTLSAllowlistEntry `json:"tls_allowlist"`
+	Routes        []edgeRouteVersionMaterial    `json:"routes"`
+	TLSAllowlist  []model.EdgeTLSAllowlistEntry `json:"tls_allowlist"`
+	CachePolicies []model.CachePolicy           `json:"cache_policies,omitempty"`
 }
 
 func edgeRouteBundleVersion(bundle model.EdgeRouteBundle) string {
@@ -684,8 +698,9 @@ func edgeRouteBundleVersion(bundle model.EdgeRouteBundle) string {
 		routes[index] = edgeRouteVersionMaterialFromBinding(route)
 	}
 	material := edgeRouteBundleVersionMaterial{
-		Routes:       routes,
-		TLSAllowlist: append([]model.EdgeTLSAllowlistEntry(nil), bundle.TLSAllowlist...),
+		Routes:        routes,
+		TLSAllowlist:  append([]model.EdgeTLSAllowlistEntry(nil), bundle.TLSAllowlist...),
+		CachePolicies: append([]model.CachePolicy(nil), bundle.CachePolicies...),
 	}
 	payload, _ := json.Marshal(material)
 	sum := sha256.Sum256(payload)
@@ -694,30 +709,100 @@ func edgeRouteBundleVersion(bundle model.EdgeRouteBundle) string {
 
 func edgeRouteVersionMaterialFromBinding(binding model.EdgeRouteBinding) edgeRouteVersionMaterial {
 	return edgeRouteVersionMaterial{
-		Hostname:            binding.Hostname,
-		RouteKind:           binding.RouteKind,
-		AppID:               binding.AppID,
-		TenantID:            binding.TenantID,
-		RuntimeID:           binding.RuntimeID,
-		RuntimeType:         binding.RuntimeType,
-		RuntimeEdgeGroupID:  binding.RuntimeEdgeGroupID,
-		RuntimeClusterNode:  binding.RuntimeClusterNode,
-		RuntimeEdgeGroup:    binding.RuntimeEdgeGroup,
-		SelectedEdgeGroup:   binding.SelectedEdgeGroup,
-		EdgeGroupID:         binding.EdgeGroupID,
-		FallbackEdgeGroupID: binding.FallbackEdgeGroupID,
-		PolicyEdgeGroupID:   binding.PolicyEdgeGroupID,
-		RoutePolicy:         binding.RoutePolicy,
-		SelectionReason:     binding.SelectionReason,
-		FallbackReason:      binding.FallbackReason,
-		UpstreamKind:        binding.UpstreamKind,
-		UpstreamScope:       binding.UpstreamScope,
-		UpstreamURL:         binding.UpstreamURL,
-		ServicePort:         binding.ServicePort,
-		TLSPolicy:           binding.TLSPolicy,
-		Streaming:           binding.Streaming,
-		Status:              binding.Status,
-		StatusReason:        binding.StatusReason,
+		Hostname:             binding.Hostname,
+		RouteKind:            binding.RouteKind,
+		AppID:                binding.AppID,
+		TenantID:             binding.TenantID,
+		RuntimeID:            binding.RuntimeID,
+		RuntimeType:          binding.RuntimeType,
+		RuntimeEdgeGroupID:   binding.RuntimeEdgeGroupID,
+		RuntimeClusterNode:   binding.RuntimeClusterNode,
+		RuntimeEdgeGroup:     binding.RuntimeEdgeGroup,
+		SelectedEdgeGroup:    binding.SelectedEdgeGroup,
+		EdgeGroupID:          binding.EdgeGroupID,
+		FallbackEdgeGroupID:  binding.FallbackEdgeGroupID,
+		PolicyEdgeGroupID:    binding.PolicyEdgeGroupID,
+		RoutePolicy:          binding.RoutePolicy,
+		SelectionReason:      binding.SelectionReason,
+		FallbackReason:       binding.FallbackReason,
+		UpstreamKind:         binding.UpstreamKind,
+		UpstreamScope:        binding.UpstreamScope,
+		UpstreamURL:          binding.UpstreamURL,
+		ServicePort:          binding.ServicePort,
+		TLSPolicy:            binding.TLSPolicy,
+		CachePolicyID:        binding.CachePolicyID,
+		CacheNamespace:       binding.CacheNamespace,
+		DeploymentGeneration: binding.DeploymentGeneration,
+		Streaming:            binding.Streaming,
+		Status:               binding.Status,
+		StatusReason:         binding.StatusReason,
+	}
+}
+
+func edgeRouteBundleUsesCachePolicies(routes []model.EdgeRouteBinding) bool {
+	for _, route := range routes {
+		if strings.TrimSpace(route.CachePolicyID) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func edgeRouteCachePolicyIDForKind(routeKind string) string {
+	if isDefaultEdgeRouteKind(routeKind) {
+		return defaultStaticAssetCachePolicyID
+	}
+	return ""
+}
+
+func edgeRouteDeploymentGeneration(app model.App) string {
+	if value := strings.TrimSpace(app.Status.LastOperationID); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(app.Spec.Image); value != "" {
+		sum := sha256.Sum256([]byte(value))
+		return "image_" + hex.EncodeToString(sum[:])[:16]
+	}
+	if app.Status.CurrentReleaseReadyAt != nil && !app.Status.CurrentReleaseReadyAt.IsZero() {
+		return "release_" + app.Status.CurrentReleaseReadyAt.UTC().Format("20060102T150405Z")
+	}
+	if !app.Status.UpdatedAt.IsZero() {
+		return "status_" + app.Status.UpdatedAt.UTC().Format("20060102T150405Z")
+	}
+	if !app.UpdatedAt.IsZero() {
+		return "app_" + app.UpdatedAt.UTC().Format("20060102T150405Z")
+	}
+	return "app_" + strings.TrimSpace(app.ID)
+}
+
+func edgeRouteCacheNamespace(appID, deploymentGeneration string) string {
+	appID = strings.TrimSpace(appID)
+	deploymentGeneration = strings.TrimSpace(deploymentGeneration)
+	switch {
+	case appID != "" && deploymentGeneration != "":
+		return appID + "_" + deploymentGeneration
+	case appID != "":
+		return appID
+	default:
+		return deploymentGeneration
+	}
+}
+
+func defaultEdgeCachePolicies() []model.CachePolicy {
+	return []model.CachePolicy{
+		{
+			ID:                    defaultStaticAssetCachePolicyID,
+			Kind:                  model.CachePolicyKindStaticAssets,
+			PathPatterns:          []string{"/_next/static/*", "/assets/*", "/static/*", "*.js", "*.css", "*.woff", "*.woff2", "*.ttf", "*.otf", "*.png", "*.jpg", "*.jpeg", "*.webp", "*.svg", "*.ico"},
+			MethodAllowlist:       []string{http.MethodGet, http.MethodHead},
+			StatusAllowlist:       []int{http.StatusOK},
+			TTLSeconds:            31536000,
+			BrowserCacheControl:   "public, max-age=31536000, immutable",
+			EdgeCacheControl:      "public, max-age=31536000, immutable",
+			BypassOnAuthorization: true,
+			VaryAllowlist:         []string{"Accept-Encoding"},
+			PurgeMode:             model.CachePolicyPurgeModeGeneration,
+		},
 	}
 }
 

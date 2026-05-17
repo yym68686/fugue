@@ -194,6 +194,10 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	if err != nil {
 		return model.EdgeDNSBundle{}, err
 	}
+	edgeCandidateByIP, err := s.edgeDNSAnswerCandidateByIP(options)
+	if err != nil {
+		return model.EdgeDNSBundle{}, err
+	}
 	routeReadyByHostnameEdgeGroup := map[string]map[string]bool{}
 	recordRouteHostByName := map[string]string{}
 
@@ -237,10 +241,10 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		if edgeGroupID == "" {
 			edgeGroupID = strings.TrimSpace(options.EdgeGroupID)
 		}
-		records = append(records, edgeDNSRecordsForTarget(
+		targetRecords := edgeDNSRecordsForTargetWithPolicy(
 			hostname,
 			answerIPs,
-			platformRoute.TTL,
+			edgeDNSPolicyTTL(platformRoute.TTL),
 			model.EdgeDNSRecordKindPlatformRoute,
 			platformRoute.Status,
 			platformRoute.StatusReason,
@@ -248,19 +252,11 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			"",
 			edgeGroupID,
 			"",
-		)...)
-		registerEdgeDNSRecordRouteHost(recordRouteHostByName, hostname, edgeDNSRecordsForTarget(
-			hostname,
-			answerIPs,
-			platformRoute.TTL,
-			model.EdgeDNSRecordKindPlatformRoute,
-			platformRoute.Status,
-			platformRoute.StatusReason,
-			"",
-			"",
-			edgeGroupID,
-			"",
-		)...)
+			edgeDNSAnswerPolicy(options, edgeGroupID, "", answerIPs, edgeCandidateByIP, platformRoute.TTL),
+			edgeDNSCandidatesForAnswerIPs(answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], edgeGroupID, ""),
+		)
+		records = append(records, targetRecords...)
+		registerEdgeDNSRecordRouteHost(recordRouteHostByName, hostname, targetRecords...)
 	}
 
 	for _, app := range appByID {
@@ -278,10 +274,10 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		if len(answerIPs) == 0 {
 			continue
 		}
-		records = append(records, edgeDNSRecordsForTarget(
+		targetRecords := edgeDNSRecordsForTargetWithPolicy(
 			hostname,
 			answerIPs,
-			options.TTL,
+			edgeDNSPolicyTTL(options.TTL),
 			model.EdgeDNSRecordKindPlatform,
 			binding.Status,
 			binding.StatusReason,
@@ -289,19 +285,11 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			app.TenantID,
 			binding.EdgeGroupID,
 			binding.FallbackEdgeGroupID,
-		)...)
-		registerEdgeDNSRecordRouteHost(recordRouteHostByName, hostname, edgeDNSRecordsForTarget(
-			hostname,
-			answerIPs,
-			options.TTL,
-			model.EdgeDNSRecordKindPlatform,
-			binding.Status,
-			binding.StatusReason,
-			app.ID,
-			app.TenantID,
-			binding.EdgeGroupID,
-			binding.FallbackEdgeGroupID,
-		)...)
+			edgeDNSAnswerPolicy(options, binding.EdgeGroupID, binding.FallbackEdgeGroupID, answerIPs, edgeCandidateByIP, options.TTL),
+			edgeDNSCandidatesForAnswerIPs(answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID),
+		)
+		records = append(records, targetRecords...)
+		registerEdgeDNSRecordRouteHost(recordRouteHostByName, hostname, targetRecords...)
 	}
 
 	for _, domain := range domains {
@@ -348,10 +336,10 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		if len(answerIPs) == 0 {
 			continue
 		}
-		records = append(records, edgeDNSRecordsForTarget(
+		targetRecords := edgeDNSRecordsForTargetWithPolicy(
 			target,
 			answerIPs,
-			options.TTL,
+			edgeDNSPolicyTTL(options.TTL),
 			recordKind,
 			binding.Status,
 			binding.StatusReason,
@@ -359,19 +347,11 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			app.TenantID,
 			binding.EdgeGroupID,
 			binding.FallbackEdgeGroupID,
-		)...)
-		registerEdgeDNSRecordRouteHost(recordRouteHostByName, hostname, edgeDNSRecordsForTarget(
-			target,
-			answerIPs,
-			options.TTL,
-			recordKind,
-			binding.Status,
-			binding.StatusReason,
-			app.ID,
-			app.TenantID,
-			binding.EdgeGroupID,
-			binding.FallbackEdgeGroupID,
-		)...)
+			edgeDNSAnswerPolicy(options, binding.EdgeGroupID, binding.FallbackEdgeGroupID, answerIPs, edgeCandidateByIP, options.TTL),
+			edgeDNSCandidatesForAnswerIPs(answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID),
+		)
+		records = append(records, targetRecords...)
+		registerEdgeDNSRecordRouteHost(recordRouteHostByName, hostname, targetRecords...)
 	}
 
 	records = dedupeAndSortEdgeDNSRecords(records)
@@ -631,6 +611,82 @@ func (s *Server) edgeDNSAnswerIPsByGroup(options edgeDNSBundleOptions) (map[stri
 	return out, nil
 }
 
+func (s *Server) edgeDNSAnswerCandidateByIP(options edgeDNSBundleOptions) (map[string]model.EdgeDNSAnswerCandidate, error) {
+	out := map[string]model.EdgeDNSAnswerCandidate{}
+	if s.store != nil {
+		nodes, _, err := s.store.ListEdgeNodes("")
+		if err != nil {
+			return nil, err
+		}
+		now := time.Now().UTC()
+		for _, node := range nodes {
+			if !edgeNodeRouteServingCapable(node, now) {
+				continue
+			}
+			for _, ip := range []string{node.PublicIPv4, node.PublicIPv6} {
+				normalized := normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeA, ip)
+				if normalized == "" {
+					normalized = normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeAAAA, ip)
+				}
+				if normalized == "" {
+					continue
+				}
+				out[normalized] = edgeDNSAnswerCandidateForNode(normalized, node, options.EdgeGroupID)
+			}
+		}
+	}
+	for _, ip := range options.AnswerIPs {
+		normalized := normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeA, ip)
+		if normalized == "" {
+			normalized = normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeAAAA, ip)
+		}
+		if normalized == "" {
+			continue
+		}
+		if _, ok := out[normalized]; ok {
+			continue
+		}
+		out[normalized] = model.EdgeDNSAnswerCandidate{
+			IP:          normalized,
+			EdgeGroupID: strings.TrimSpace(options.EdgeGroupID),
+			Priority:    edgeDNSCandidatePriority(strings.TrimSpace(options.EdgeGroupID), strings.TrimSpace(options.EdgeGroupID), ""),
+			Weight:      100,
+			Reason:      "local_dns_node_answer",
+			Healthy:     true,
+			RouteReady:  true,
+			TLSReady:    true,
+		}
+	}
+	return out, nil
+}
+
+func edgeDNSAnswerCandidateForNode(ip string, node model.EdgeNode, localEdgeGroupID string) model.EdgeDNSAnswerCandidate {
+	groupID := strings.TrimSpace(node.EdgeGroupID)
+	return model.EdgeDNSAnswerCandidate{
+		IP:          strings.TrimSpace(ip),
+		EdgeGroupID: groupID,
+		Region:      strings.TrimSpace(node.Region),
+		Country:     strings.ToLower(strings.TrimSpace(node.Country)),
+		Priority:    edgeDNSCandidatePriority(groupID, strings.TrimSpace(localEdgeGroupID), ""),
+		Weight:      100,
+		Reason:      edgeDNSCandidateReason(groupID, strings.TrimSpace(localEdgeGroupID), ""),
+		Healthy:     node.Healthy && !node.Draining,
+		RouteReady:  edgeNodeHasRouteState(node),
+		TLSReady:    edgeNodeTLSReadyForDNS(node),
+	}
+}
+
+func edgeNodeTLSReadyForDNS(node model.EdgeNode) bool {
+	switch model.NormalizeEdgeTLSStatus(node.TLSStatus) {
+	case model.EdgeTLSStatusReady:
+		return true
+	case model.EdgeTLSStatusPending, model.EdgeTLSStatusError:
+		return false
+	default:
+		return edgeNodeHasRouteState(node) && strings.TrimSpace(node.CaddyLastError) == ""
+	}
+}
+
 func edgeDNSAnswerGroupsByIP(edgeAnswerIPsByGroup map[string][]string) map[string][]string {
 	out := make(map[string][]string)
 	for groupID, ips := range edgeAnswerIPsByGroup {
@@ -800,6 +856,162 @@ func edgeDNSRecordsForTarget(name string, answerIPs []string, ttl int, kind, sta
 	return records
 }
 
+func edgeDNSRecordsForTargetWithPolicy(name string, answerIPs []string, ttl int, kind, status, reason, appID, tenantID, edgeGroupID, fallbackEdgeGroupID string, policy model.DNSAnswerPolicy, candidates []model.EdgeDNSAnswerCandidate) []model.EdgeDNSRecord {
+	records := edgeDNSRecordsForTarget(name, answerIPs, ttl, kind, status, reason, appID, tenantID, edgeGroupID, fallbackEdgeGroupID)
+	for index := range records {
+		records[index].AnswerPolicy = policy
+		records[index].Candidates = edgeDNSCandidatesForRecordType(records[index].Type, candidates)
+		records[index].RecordGeneration = edgeDNSRecordGeneration(records[index])
+	}
+	return records
+}
+
+func edgeDNSCandidatesForRecordType(recordType string, candidates []model.EdgeDNSAnswerCandidate) []model.EdgeDNSAnswerCandidate {
+	recordType = strings.ToUpper(strings.TrimSpace(recordType))
+	out := make([]model.EdgeDNSAnswerCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		ip := net.ParseIP(strings.TrimSpace(candidate.IP))
+		if ip == nil {
+			continue
+		}
+		if recordType == model.EdgeDNSRecordTypeA && ip.To4() == nil {
+			continue
+		}
+		if recordType == model.EdgeDNSRecordTypeAAAA && ip.To4() != nil {
+			continue
+		}
+		out = append(out, candidate)
+	}
+	return out
+}
+
+func edgeDNSCandidatesForAnswerIPs(answerIPs []string, candidateByIP map[string]model.EdgeDNSAnswerCandidate, routeReady map[string]bool, preferredEdgeGroupID, fallbackEdgeGroupID string) []model.EdgeDNSAnswerCandidate {
+	out := make([]model.EdgeDNSAnswerCandidate, 0, len(answerIPs))
+	seen := map[string]bool{}
+	for _, raw := range answerIPs {
+		ip := normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeA, raw)
+		if ip == "" {
+			ip = normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeAAAA, raw)
+		}
+		if ip == "" || seen[ip] {
+			continue
+		}
+		seen[ip] = true
+		candidate, ok := candidateByIP[ip]
+		if !ok {
+			candidate = model.EdgeDNSAnswerCandidate{IP: ip, Healthy: true, RouteReady: true, TLSReady: true}
+		}
+		groupID := strings.TrimSpace(candidate.EdgeGroupID)
+		if routeReady != nil {
+			candidate.RouteReady = routeReady[groupID]
+		}
+		candidate.Priority = edgeDNSCandidatePriority(groupID, preferredEdgeGroupID, fallbackEdgeGroupID)
+		candidate.Reason = edgeDNSCandidateReason(groupID, preferredEdgeGroupID, fallbackEdgeGroupID)
+		if candidate.Weight <= 0 {
+			candidate.Weight = 100
+		}
+		out = append(out, candidate)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Priority != out[j].Priority {
+			return out[i].Priority < out[j].Priority
+		}
+		if out[i].Weight != out[j].Weight {
+			return out[i].Weight > out[j].Weight
+		}
+		if out[i].EdgeGroupID != out[j].EdgeGroupID {
+			return out[i].EdgeGroupID < out[j].EdgeGroupID
+		}
+		return out[i].IP < out[j].IP
+	})
+	return out
+}
+
+func edgeDNSAnswerPolicy(options edgeDNSBundleOptions, preferredEdgeGroupID, fallbackEdgeGroupID string, answerIPs []string, candidateByIP map[string]model.EdgeDNSAnswerCandidate, ttl int) model.DNSAnswerPolicy {
+	allowed := make([]string, 0, len(answerIPs))
+	for _, ip := range answerIPs {
+		normalized := normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeA, ip)
+		if normalized == "" {
+			normalized = normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeAAAA, ip)
+		}
+		candidate, ok := candidateByIP[normalized]
+		if !ok {
+			continue
+		}
+		if groupID := strings.TrimSpace(candidate.EdgeGroupID); groupID != "" && !stringSliceContains(allowed, groupID) {
+			allowed = append(allowed, groupID)
+		}
+	}
+	sort.Strings(allowed)
+	preferred := uniqueSortedNonEmptyStrings(preferredEdgeGroupID, strings.TrimSpace(options.EdgeGroupID))
+	fallback := uniqueSortedNonEmptyStrings(fallbackEdgeGroupID)
+	return model.DNSAnswerPolicy{
+		PolicyKind:          model.DNSAnswerPolicyKindGeo,
+		AllowedEdgeGroups:   allowed,
+		PreferredEdgeGroups: preferred,
+		FallbackEdgeGroups:  fallback,
+		TTLSeconds:          edgeDNSPolicyTTL(ttl),
+		ECSEnabled:          true,
+		HealthRequired:      true,
+		RouteReadyRequired:  true,
+		Reason:              "geo_healthy_route_ready",
+	}
+}
+
+func edgeDNSCandidatePriority(groupID, preferredEdgeGroupID, fallbackEdgeGroupID string) int {
+	groupID = strings.TrimSpace(groupID)
+	preferredEdgeGroupID = strings.TrimSpace(preferredEdgeGroupID)
+	fallbackEdgeGroupID = strings.TrimSpace(fallbackEdgeGroupID)
+	switch {
+	case groupID != "" && preferredEdgeGroupID != "" && groupID == preferredEdgeGroupID:
+		return 0
+	case groupID != "" && fallbackEdgeGroupID != "" && groupID == fallbackEdgeGroupID:
+		return 100
+	default:
+		return 50
+	}
+}
+
+func edgeDNSCandidateReason(groupID, preferredEdgeGroupID, fallbackEdgeGroupID string) string {
+	groupID = strings.TrimSpace(groupID)
+	preferredEdgeGroupID = strings.TrimSpace(preferredEdgeGroupID)
+	fallbackEdgeGroupID = strings.TrimSpace(fallbackEdgeGroupID)
+	switch {
+	case groupID != "" && preferredEdgeGroupID != "" && groupID == preferredEdgeGroupID:
+		return "same_region"
+	case groupID != "" && fallbackEdgeGroupID != "" && groupID == fallbackEdgeGroupID:
+		return "fallback_healthy"
+	default:
+		return "global_route_ready"
+	}
+}
+
+func edgeDNSPolicyTTL(ttl int) int {
+	if ttl <= 0 {
+		return defaultEdgeDNSTTL
+	}
+	if ttl < 60 {
+		return 60
+	}
+	if ttl > 120 {
+		return 120
+	}
+	return ttl
+}
+
+func uniqueSortedNonEmptyStrings(values ...string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || stringSliceContains(out, value) {
+			continue
+		}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func edgeDNSRecord(name, recordType string, values []string, ttl int, kind, status, reason, appID, tenantID, edgeGroupID, fallbackEdgeGroupID string) model.EdgeDNSRecord {
 	record := model.EdgeDNSRecord{
 		Name:                normalizeExternalAppDomain(name),
@@ -824,6 +1036,10 @@ func dedupeAndSortEdgeDNSRecords(records []model.EdgeDNSRecord) []model.EdgeDNSR
 		key := record.Name + "\x00" + record.Type
 		if existing, ok := byKey[key]; ok {
 			record.Values = uniqueSortedStrings(append(existing.Values, record.Values...))
+			record.Candidates = mergeEdgeDNSAnswerCandidates(existing.Candidates, record.Candidates)
+			if record.AnswerPolicy.PolicyKind == "" {
+				record.AnswerPolicy = existing.AnswerPolicy
+			}
 			record.RecordGeneration = edgeDNSRecordGeneration(record)
 		}
 		byKey[key] = record
@@ -837,6 +1053,34 @@ func dedupeAndSortEdgeDNSRecords(records []model.EdgeDNSRecord) []model.EdgeDNSR
 			return out[i].Name < out[j].Name
 		}
 		return out[i].Type < out[j].Type
+	})
+	return out
+}
+
+func mergeEdgeDNSAnswerCandidates(left, right []model.EdgeDNSAnswerCandidate) []model.EdgeDNSAnswerCandidate {
+	out := make([]model.EdgeDNSAnswerCandidate, 0, len(left)+len(right))
+	seen := map[string]bool{}
+	for _, candidates := range [][]model.EdgeDNSAnswerCandidate{left, right} {
+		for _, candidate := range candidates {
+			key := strings.TrimSpace(candidate.IP) + "\x00" + strings.TrimSpace(candidate.EdgeGroupID)
+			if key == "\x00" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, candidate)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Priority != out[j].Priority {
+			return out[i].Priority < out[j].Priority
+		}
+		if out[i].Weight != out[j].Weight {
+			return out[i].Weight > out[j].Weight
+		}
+		if out[i].EdgeGroupID != out[j].EdgeGroupID {
+			return out[i].EdgeGroupID < out[j].EdgeGroupID
+		}
+		return out[i].IP < out[j].IP
 	})
 	return out
 }
@@ -860,17 +1104,19 @@ func uniqueSortedStrings(values []string) []string {
 }
 
 type edgeDNSRecordVersionMaterial struct {
-	Name                string   `json:"name"`
-	Type                string   `json:"type"`
-	Values              []string `json:"values"`
-	TTL                 int      `json:"ttl"`
-	RecordKind          string   `json:"record_kind"`
-	AppID               string   `json:"app_id,omitempty"`
-	TenantID            string   `json:"tenant_id,omitempty"`
-	EdgeGroupID         string   `json:"edge_group_id,omitempty"`
-	FallbackEdgeGroupID string   `json:"fallback_edge_group_id,omitempty"`
-	Status              string   `json:"status"`
-	StatusReason        string   `json:"status_reason,omitempty"`
+	Name                string                         `json:"name"`
+	Type                string                         `json:"type"`
+	Values              []string                       `json:"values"`
+	TTL                 int                            `json:"ttl"`
+	RecordKind          string                         `json:"record_kind"`
+	AppID               string                         `json:"app_id,omitempty"`
+	TenantID            string                         `json:"tenant_id,omitempty"`
+	EdgeGroupID         string                         `json:"edge_group_id,omitempty"`
+	FallbackEdgeGroupID string                         `json:"fallback_edge_group_id,omitempty"`
+	Status              string                         `json:"status"`
+	StatusReason        string                         `json:"status_reason,omitempty"`
+	AnswerPolicy        model.DNSAnswerPolicy          `json:"answer_policy,omitempty"`
+	Candidates          []model.EdgeDNSAnswerCandidate `json:"candidates,omitempty"`
 }
 
 type edgeDNSBundleVersionMaterial struct {
@@ -911,5 +1157,7 @@ func edgeDNSRecordVersionMaterialFromRecord(record model.EdgeDNSRecord) edgeDNSR
 		FallbackEdgeGroupID: record.FallbackEdgeGroupID,
 		Status:              record.Status,
 		StatusReason:        record.StatusReason,
+		AnswerPolicy:        record.AnswerPolicy,
+		Candidates:          append([]model.EdgeDNSAnswerCandidate(nil), record.Candidates...),
 	}
 }

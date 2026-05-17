@@ -376,13 +376,38 @@ deployment_exists() {
 }
 
 smoke_test() {
-  require_env FUGUE_SMOKE_URL
-  curl -fsS --max-time 10 "${FUGUE_SMOKE_URL}" >/dev/null
-  smoke_test_resolve_edges
+  local saw_url="false"
+  while IFS= read -r url; do
+    url="$(trim_field "${url}")"
+    if [[ -z "${url}" ]]; then
+      continue
+    fi
+    saw_url="true"
+    smoke_test_url "${url}"
+  done < <(smoke_test_urls)
+  if [[ "${saw_url}" != "true" ]]; then
+    fail "missing required smoke URLs; set FUGUE_SMOKE_URL or FUGUE_SMOKE_URLS"
+  fi
+}
+
+smoke_test_url() {
+  local url="$1"
+  curl -fsS --max-time 10 "${url}" >/dev/null
+  smoke_test_resolve_edges "${url}"
+}
+
+smoke_test_urls() {
+  local raw="${FUGUE_SMOKE_URLS:-}"
+  if [[ -z "$(trim_field "${raw}")" ]]; then
+    raw="${FUGUE_SMOKE_URL:-}"
+  fi
+  raw="${raw//;/$'\n'}"
+  raw="${raw//,/$'\n'}"
+  printf '%s\n' "${raw}"
 }
 
 smoke_test_resolve_edges() {
-  local url="${FUGUE_SMOKE_URL:-}"
+  local url="$1"
   local scheme=""
   local hostport=""
   local host=""
@@ -1323,7 +1348,7 @@ dns_extra_groups_yaml() {
 }
 
 append_upgrade_edge_dynamic_values() {
-  local edge_region edge_country edge_public_hostname edge_public_ipv4 edge_public_ipv6 edge_mesh_ip
+  local edge_region edge_country edge_public_hostname edge_public_ipv4 edge_public_ipv6 edge_mesh_ip edge_asset_cache_path edge_asset_cache_max_bytes
 
   edge_region="$(trim_field "${FUGUE_EDGE_REGION:-}")"
   edge_country="$(trim_field "${FUGUE_EDGE_COUNTRY:-}")"
@@ -1331,8 +1356,10 @@ append_upgrade_edge_dynamic_values() {
   edge_public_ipv4="$(trim_field "${FUGUE_EDGE_PUBLIC_IPV4:-}")"
   edge_public_ipv6="$(trim_field "${FUGUE_EDGE_PUBLIC_IPV6:-}")"
   edge_mesh_ip="$(trim_field "${FUGUE_EDGE_MESH_IP:-}")"
+  edge_asset_cache_path="$(trim_field "${FUGUE_EDGE_ASSET_CACHE_PATH:-}")"
+  edge_asset_cache_max_bytes="$(trim_field "${FUGUE_EDGE_ASSET_CACHE_MAX_BYTES:-}")"
 
-  if [[ -z "$(trim_field "${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE:-}")" && -z "$(trim_field "${FUGUE_EDGE_EXTRA_GROUPS:-}")" && -z "${edge_region}${edge_country}${edge_public_hostname}${edge_public_ipv4}${edge_public_ipv6}${edge_mesh_ip}" ]]; then
+  if [[ -z "$(trim_field "${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE:-}")" && -z "$(trim_field "${FUGUE_EDGE_EXTRA_GROUPS:-}")" && -z "${edge_region}${edge_country}${edge_public_hostname}${edge_public_ipv4}${edge_public_ipv6}${edge_mesh_ip}${edge_asset_cache_path}${edge_asset_cache_max_bytes}" ]]; then
     return 0
   fi
 
@@ -1364,6 +1391,17 @@ EOF
   fi
   if [[ -n "${edge_mesh_ip}" ]]; then
     printf '  meshIP: %s\n' "$(yaml_quote "${edge_mesh_ip}")" >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+  fi
+  if [[ -n "${edge_asset_cache_path}${edge_asset_cache_max_bytes}" ]]; then
+    printf '  extraEnv:\n' >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+    if [[ -n "${edge_asset_cache_path}" ]]; then
+      printf '    - name: FUGUE_EDGE_ASSET_CACHE_PATH\n' >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+      printf '      value: %s\n' "$(yaml_quote "${edge_asset_cache_path}")" >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+    fi
+    if [[ -n "${edge_asset_cache_max_bytes}" ]]; then
+      printf '    - name: FUGUE_EDGE_ASSET_CACHE_MAX_BYTES\n' >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+      printf '      value: %s\n' "$(yaml_quote "${edge_asset_cache_max_bytes}")" >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+    fi
   fi
   cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<EOF
   nodeSelector:
@@ -1440,6 +1478,11 @@ EOF
     while IFS= read -r answer_ip; do
       printf '    - %s\n' "$(yaml_quote "${answer_ip}")" >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
     done < <(dns_answer_ips_lines "${FUGUE_DNS_ROUTE_A_ANSWER_IPS}")
+  fi
+  if [[ -n "$(trim_field "${FUGUE_DNS_GEOIP_OVERRIDES_JSON:-}")" ]]; then
+    printf '  extraEnv:\n' >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+    printf '    - name: FUGUE_DNS_GEOIP_OVERRIDES_JSON\n' >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+    printf '      value: %s\n' "$(yaml_quote "${FUGUE_DNS_GEOIP_OVERRIDES_JSON}")" >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
   fi
 
   {
@@ -2724,6 +2767,8 @@ main() {
   FUGUE_EDGE_PUBLIC_IPV4="${FUGUE_EDGE_PUBLIC_IPV4:-}"
   FUGUE_EDGE_PUBLIC_IPV6="${FUGUE_EDGE_PUBLIC_IPV6:-}"
   FUGUE_EDGE_MESH_IP="${FUGUE_EDGE_MESH_IP:-}"
+  FUGUE_EDGE_ASSET_CACHE_PATH="${FUGUE_EDGE_ASSET_CACHE_PATH:-}"
+  FUGUE_EDGE_ASSET_CACHE_MAX_BYTES="${FUGUE_EDGE_ASSET_CACHE_MAX_BYTES:-}"
   FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE="${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE:-}"
   FUGUE_EDGE_EXTRA_GROUPS="${FUGUE_EDGE_EXTRA_GROUPS:-}"
   FUGUE_EDGE_TOKEN_SECRET_NAME="${FUGUE_EDGE_TOKEN_SECRET_NAME:-}"
@@ -2739,6 +2784,7 @@ main() {
   FUGUE_PLATFORM_ROUTES_JSON="${FUGUE_PLATFORM_ROUTES_JSON:-}"
   FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE="${FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE:-}"
   FUGUE_DNS_EXTRA_GROUPS="${FUGUE_DNS_EXTRA_GROUPS:-}"
+  FUGUE_DNS_GEOIP_OVERRIDES_JSON="${FUGUE_DNS_GEOIP_OVERRIDES_JSON:-}"
   FUGUE_DNS_TOKEN_SECRET_NAME="${FUGUE_DNS_TOKEN_SECRET_NAME:-${FUGUE_EDGE_TOKEN_SECRET_NAME}}"
   if [[ -n "$(trim_field "${FUGUE_DNS_TOKEN_SECRET_NAME}")" ]]; then
     FUGUE_DNS_TOKEN_SECRET_KEY="${FUGUE_DNS_TOKEN_SECRET_KEY:-FUGUE_DNS_TOKEN}"
@@ -2846,6 +2892,24 @@ main() {
   fi
   if [[ -n "$(trim_field "${FUGUE_DNS_EXTRA_GROUPS}")" && -z "$(trim_field "${FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE}")" ]]; then
     fail "FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE must be set when FUGUE_DNS_EXTRA_GROUPS is set"
+  fi
+  if [[ -n "$(trim_field "${FUGUE_DNS_GEOIP_OVERRIDES_JSON}")" ]]; then
+    command_exists python3 || fail "python3 is required to validate FUGUE_DNS_GEOIP_OVERRIDES_JSON"
+    FUGUE_DNS_GEOIP_OVERRIDES_JSON="${FUGUE_DNS_GEOIP_OVERRIDES_JSON}" python3 - <<'PY' >/dev/null
+import json
+import os
+import sys
+
+raw = os.environ.get("FUGUE_DNS_GEOIP_OVERRIDES_JSON", "")
+try:
+    json.loads(raw)
+except Exception as exc:
+    print(f"FUGUE_DNS_GEOIP_OVERRIDES_JSON must be valid JSON: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+  fi
+  if [[ -n "$(trim_field "${FUGUE_EDGE_ASSET_CACHE_MAX_BYTES}")" ]] && ! [[ "${FUGUE_EDGE_ASSET_CACHE_MAX_BYTES}" =~ ^[0-9]+$ ]]; then
+    fail "FUGUE_EDGE_ASSET_CACHE_MAX_BYTES must be an integer"
   fi
   dns_extra_groups_yaml >/dev/null
 

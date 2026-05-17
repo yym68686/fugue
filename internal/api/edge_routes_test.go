@@ -87,6 +87,12 @@ func TestEdgeRoutesBundleDerivesPlatformAndCustomDomainRoutes(t *testing.T) {
 	if platform.RoutePolicy != model.EdgeRoutePolicyEnabled {
 		t.Fatalf("expected platform route to default to edge, got %+v", platform)
 	}
+	if platform.CachePolicyID != defaultStaticAssetCachePolicyID || platform.CacheNamespace == "" || platform.DeploymentGeneration == "" {
+		t.Fatalf("expected platform route to carry static asset cache policy, got %+v", platform)
+	}
+	if len(bundle.CachePolicies) != 1 || bundle.CachePolicies[0].ID != defaultStaticAssetCachePolicyID {
+		t.Fatalf("expected route bundle to include default cache policy, got %+v", bundle.CachePolicies)
+	}
 	if !strings.Contains(platform.UpstreamURL, ".svc.cluster.local:8080") {
 		t.Fatalf("expected service DNS upstream, got %+v", platform)
 	}
