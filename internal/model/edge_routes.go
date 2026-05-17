@@ -347,6 +347,30 @@ type EdgeDNSAnswerCandidate struct {
 	TLSReady    bool   `json:"tls_ready,omitempty"`
 }
 
+type EdgePerformanceSample struct {
+	ID                    string    `json:"id,omitempty"`
+	EdgeID                string    `json:"edge_id,omitempty"`
+	EdgeGroupID           string    `json:"edge_group_id"`
+	Hostname              string    `json:"hostname"`
+	ClientCountry         string    `json:"client_country,omitempty"`
+	ClientRegion          string    `json:"client_region,omitempty"`
+	ClientASN             string    `json:"client_asn,omitempty"`
+	RuntimeRegion         string    `json:"runtime_region,omitempty"`
+	RouteGeneration       string    `json:"route_generation,omitempty"`
+	CacheStatus           string    `json:"cache_status,omitempty"`
+	DNSPolicy             string    `json:"dns_policy,omitempty"`
+	TLSHandshakeMS        int64     `json:"tls_handshake_ms,omitempty"`
+	TTFBMS                int64     `json:"ttfb_ms,omitempty"`
+	UpstreamMS            int64     `json:"upstream_ms,omitempty"`
+	TotalMS               int64     `json:"total_ms,omitempty"`
+	StatusCode            int       `json:"status_code,omitempty"`
+	SampleCount           int       `json:"sample_count,omitempty"`
+	CacheHitCount         int       `json:"cache_hit_count,omitempty"`
+	CacheObservationCount int       `json:"cache_observation_count,omitempty"`
+	ErrorCount            int       `json:"error_count,omitempty"`
+	SampledAt             time.Time `json:"sampled_at"`
+}
+
 type EdgeDNSBundle struct {
 	SchemaVersion      string            `json:"schema_version,omitempty"`
 	Version            string            `json:"version"`

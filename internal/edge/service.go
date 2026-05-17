@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,11 +37,12 @@ type Service struct {
 	HTTPClient *http.Client
 	Logger     *log.Logger
 
-	mu       sync.Mutex
-	snapshot Status
-	bundle   *model.EdgeRouteBundle
-	etag     string
-	metrics  telemetry
+	mu                  sync.Mutex
+	snapshot            Status
+	bundle              *model.EdgeRouteBundle
+	etag                string
+	metrics             telemetry
+	performanceBaseline telemetry
 }
 
 type Status struct {
@@ -101,8 +104,12 @@ type telemetry struct {
 	RouteSSEResults       map[routeResultMetricKey]uint64
 	RouteStreamingResults map[routeResultMetricKey]uint64
 	RouteUploadRequests   map[routeMetricKey]uint64
+	RouteDurationCount    map[routeMetricKey]uint64
+	RouteDurationSum      map[routeMetricKey]float64
 	RouteLatencyCount     map[routeMetricKey]uint64
 	RouteLatencySum       map[routeMetricKey]float64
+	RouteTTFBCount        map[routeMetricKey]uint64
+	RouteTTFBSum          map[routeMetricKey]float64
 	RouteCacheStatus      map[routeCacheMetricKey]uint64
 }
 
@@ -147,6 +154,8 @@ type edgeProxyObservation struct {
 	Path          string
 	StatusCode    int
 	Duration      time.Duration
+	TTFB          time.Duration
+	Upstream      time.Duration
 	UpstreamError string
 	Proxied       bool
 	FallbackHit   bool
@@ -588,7 +597,7 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	peerFallbackAllowed := s.peerFallbackAllowed(r, observed)
 	proxy := s.newEdgeReverseProxy(host, target, route, &observed, peerFallbackAllowed, &cacheDecision)
-	observedWriter := newEdgeProxyObservationResponseWriter(w)
+	observedWriter := newEdgeProxyObservationResponseWriter(w, startedAt, &observed)
 	if cacheDecision.Enabled {
 		observedWriter.cacheDecision = &cacheDecision
 		maxBytes := s.Config.AssetCacheMaxBytes
@@ -642,7 +651,7 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 			req.Out.Header.Set("X-Fugue-Edge-Route", strings.TrimSpace(route.Hostname))
 			req.Out.Header.Set("X-Fugue-Edge-App-ID", strings.TrimSpace(route.AppID))
 		},
-		Transport: newDefaultEdgeProxyTransport(),
+		Transport: newEdgeProxyTransport(observed),
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
 			if observed != nil {
 				observed.UpstreamError = strings.TrimSpace(proxyErr.Error())
@@ -666,6 +675,30 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 			return nil
 		},
 	}
+}
+
+type edgeProxyTransport struct {
+	base        http.RoundTripper
+	observation *edgeProxyObservation
+}
+
+func newEdgeProxyTransport(observation *edgeProxyObservation) http.RoundTripper {
+	return &edgeProxyTransport{
+		base:        newDefaultEdgeProxyTransport(),
+		observation: observation,
+	}
+}
+
+func (t *edgeProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t == nil || t.base == nil {
+		return nil, fmt.Errorf("edge proxy transport is unavailable")
+	}
+	started := time.Now()
+	resp, err := t.base.RoundTrip(req)
+	if t.observation != nil {
+		t.observation.Upstream = time.Since(started)
+	}
+	return resp, err
 }
 
 func (s *Service) peerFallbackAllowed(r *http.Request, observed edgeProxyObservation) bool {
@@ -703,7 +736,7 @@ func (s *Service) proxyPeerFallback(w http.ResponseWriter, r *http.Request, host
 	peerRequest.Header.Set(edgePeerFallbackHeader, "1")
 	peerRequest.Header.Set("X-Fugue-Edge-Route-Host", host)
 	proxy := s.newEdgeReverseProxy(host, target, peerRoute, observed, false, nil)
-	writer := newEdgeProxyObservationResponseWriter(w)
+	writer := newEdgeProxyObservationResponseWriter(w, time.Now(), observed)
 	proxy.ServeHTTP(writer, peerRequest)
 	if observed != nil {
 		observed.StatusCode = writer.statusCode()
@@ -829,11 +862,23 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteUploadRequests) {
 		fmt.Fprintf(w, "fugue_edge_route_upload_requests_total{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteUploadRequests[key])
 	}
+	fmt.Fprintln(w, "# HELP fugue_edge_route_total_duration_seconds Edge data-plane request duration by route.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_route_total_duration_seconds summary")
+	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteDurationCount) {
+		fmt.Fprintf(w, "fugue_edge_route_total_duration_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteDurationSum[key])
+		fmt.Fprintf(w, "fugue_edge_route_total_duration_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteDurationCount[key])
+	}
 	fmt.Fprintln(w, "# HELP fugue_edge_route_upstream_latency_seconds Edge data-plane upstream proxy latency by route.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_route_upstream_latency_seconds summary")
 	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteLatencyCount) {
 		fmt.Fprintf(w, "fugue_edge_route_upstream_latency_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteLatencySum[key])
 		fmt.Fprintf(w, "fugue_edge_route_upstream_latency_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteLatencyCount[key])
+	}
+	fmt.Fprintln(w, "# HELP fugue_edge_route_ttfb_seconds Edge data-plane proxy time-to-first-byte by route.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_route_ttfb_seconds summary")
+	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteTTFBCount) {
+		fmt.Fprintf(w, "fugue_edge_route_ttfb_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteTTFBSum[key])
+		fmt.Fprintf(w, "fugue_edge_route_ttfb_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteTTFBCount[key])
 	}
 	fmt.Fprintln(w, "# HELP fugue_edge_route_cache_total Edge data-plane cache decisions by route and cache status.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_route_cache_total counter")
@@ -945,7 +990,7 @@ func (s *Service) HeartbeatOnce(ctx context.Context) error {
 	if !s.heartbeatEnabled() {
 		return nil
 	}
-	req, err := s.newHeartbeatRequest(ctx)
+	req, performanceMetrics, err := s.newHeartbeatRequest(ctx)
 	if err != nil {
 		s.logHeartbeatFailure(err)
 		return err
@@ -966,6 +1011,7 @@ func (s *Service) HeartbeatOnce(ctx context.Context) error {
 		s.logHeartbeatFailure(err)
 		return err
 	}
+	s.commitHeartbeatPerformanceBaseline(performanceMetrics)
 	if s.Logger != nil {
 		status := s.Status()
 		s.Logger.Printf("edge heartbeat success; edge_id=%s edge_group_id=%s status=%s route_bundle=%s caddy_routes=%d", strings.TrimSpace(s.Config.EdgeID), strings.TrimSpace(s.Config.EdgeGroupID), edgeHealthStatus(status), status.BundleVersion, s.metricSnapshot().Metrics.CaddyRouteCount)
@@ -973,10 +1019,10 @@ func (s *Service) HeartbeatOnce(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) newHeartbeatRequest(ctx context.Context) (*http.Request, error) {
+func (s *Service) newHeartbeatRequest(ctx context.Context) (*http.Request, telemetry, error) {
 	base, err := url.Parse(strings.TrimRight(strings.TrimSpace(s.Config.APIURL), "/"))
 	if err != nil || base.Scheme == "" || base.Host == "" {
-		return nil, fmt.Errorf("invalid FUGUE_API_URL")
+		return nil, telemetry{}, fmt.Errorf("invalid FUGUE_API_URL")
 	}
 	base.Path = strings.TrimRight(base.Path, "/") + "/v1/edge/heartbeat"
 	query := base.Query()
@@ -984,6 +1030,7 @@ func (s *Service) newHeartbeatRequest(ctx context.Context) (*http.Request, error
 	base.RawQuery = query.Encode()
 
 	snapshot := s.metricSnapshot()
+	performanceSamples := s.edgePerformanceSamplesForHeartbeat(snapshot)
 	status := snapshot.Status
 	cacheStatus := "missing"
 	if status.BundleVersion != "" {
@@ -1021,17 +1068,269 @@ func (s *Service) newHeartbeatRequest(ctx context.Context) (*http.Request, error
 		"draining":                 s.Config.Draining,
 		"last_error":               firstNonEmpty(strings.TrimSpace(status.LastError), strings.TrimSpace(status.CaddyLastError)),
 	}
+	if len(performanceSamples) > 0 {
+		body["performance_samples"] = performanceSamples
+	}
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("marshal edge heartbeat: %w", err)
+		return nil, telemetry{}, fmt.Errorf("marshal edge heartbeat: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base.String(), bytes.NewReader(payload))
 	if err != nil {
-		return nil, fmt.Errorf("build edge heartbeat request: %w", err)
+		return nil, telemetry{}, fmt.Errorf("build edge heartbeat request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	return req, nil
+	return req, snapshot.Metrics, nil
 }
+
+func (s *Service) commitHeartbeatPerformanceBaseline(metrics telemetry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.performanceBaseline = metrics
+}
+
+func (s *Service) edgePerformanceSamplesForHeartbeat(snapshot metricSnapshot) []model.EdgePerformanceSample {
+	now := time.Now().UTC()
+	s.mu.Lock()
+	baseline := cloneTelemetryForEdgePerformanceHeartbeat(s.performanceBaseline)
+	bundle := s.bundle
+	edgeID := strings.TrimSpace(s.Config.EdgeID)
+	edgeGroupID := strings.TrimSpace(s.Config.EdgeGroupID)
+	clientCountry := strings.ToLower(strings.TrimSpace(s.Config.Country))
+	clientRegion := strings.TrimSpace(s.Config.Region)
+	s.mu.Unlock()
+
+	if bundle == nil {
+		return nil
+	}
+
+	routesByKey := make(map[routeMetricKey]model.EdgeRouteBinding, len(bundle.Routes))
+	for _, route := range bundle.Routes {
+		if strings.TrimSpace(route.EdgeGroupID) != edgeGroupID {
+			continue
+		}
+		key := routeMetricKey{
+			Hostname:  normalizeRouteHost(route.Hostname),
+			AppID:     strings.TrimSpace(route.AppID),
+			RouteKind: strings.TrimSpace(route.RouteKind),
+		}
+		if key.Hostname == "" {
+			continue
+		}
+		routesByKey[key] = route
+	}
+
+	samples := buildEdgePerformanceSamples(snapshot.Metrics, baseline, routesByKey, edgeID, edgeGroupID, clientCountry, clientRegion, now)
+	if len(samples) > edgePerformanceSampleHeartbeatLimit {
+		samples = samples[:edgePerformanceSampleHeartbeatLimit]
+	}
+	return samples
+}
+
+func buildEdgePerformanceSamples(current, baseline telemetry, routesByKey map[routeMetricKey]model.EdgeRouteBinding, edgeID, edgeGroupID, clientCountry, clientRegion string, sampledAt time.Time) []model.EdgePerformanceSample {
+	keys := sortedRouteMetricKeys(current.RouteRequests)
+	if len(keys) == 0 {
+		return nil
+	}
+	samples := make([]model.EdgePerformanceSample, 0, len(keys))
+	for _, key := range keys {
+		requestCount := int(deltaUint64(current.RouteRequests[key], baseline.RouteRequests[key]))
+		if requestCount <= 0 {
+			continue
+		}
+		totalCount := int(deltaUint64(current.RouteDurationCount[key], baseline.RouteDurationCount[key]))
+		totalSum := deltaFloat64(current.RouteDurationSum[key], baseline.RouteDurationSum[key])
+		ttfbCount := int(deltaUint64(current.RouteTTFBCount[key], baseline.RouteTTFBCount[key]))
+		ttfbSum := deltaFloat64(current.RouteTTFBSum[key], baseline.RouteTTFBSum[key])
+		upstreamCount := int(deltaUint64(current.RouteLatencyCount[key], baseline.RouteLatencyCount[key]))
+		upstreamSum := deltaFloat64(current.RouteLatencySum[key], baseline.RouteLatencySum[key])
+
+		if totalCount <= 0 {
+			totalCount = requestCount
+		}
+		totalAvg := edgePerformanceAverageMilliseconds(totalSum, totalCount)
+		ttfbAvg := edgePerformanceAverageMilliseconds(ttfbSum, ttfbCount)
+		upstreamAvg := edgePerformanceAverageMilliseconds(upstreamSum, upstreamCount)
+		if ttfbCount == 0 {
+			ttfbAvg = totalAvg
+		}
+		if upstreamCount == 0 {
+			upstreamAvg = 0
+		}
+		if totalAvg < ttfbAvg {
+			totalAvg = ttfbAvg
+		}
+
+		cacheHitCount, cacheObservationCount, dominantCacheStatus := edgePerformanceCacheSummary(current.RouteCacheStatus, baseline.RouteCacheStatus, key)
+		errorCount, dominantStatusCode := edgePerformanceStatusSummary(current.RouteStatuses, baseline.RouteStatuses, current.RouteUpstreamErrors, baseline.RouteUpstreamErrors, key)
+		route := routesByKey[key]
+		runtimeRegion := firstNonEmpty(edgeGroupRegion(firstNonEmpty(route.RuntimeEdgeGroupID, route.RuntimeEdgeGroup)), edgeGroupRegion(strings.TrimSpace(route.EdgeGroupID)))
+		sample := model.EdgePerformanceSample{
+			ID:                    edgePerformanceSampleID(edgeID, edgeGroupID, key, sampledAt),
+			EdgeID:                edgeID,
+			EdgeGroupID:           edgeGroupID,
+			Hostname:              key.Hostname,
+			ClientCountry:         clientCountry,
+			ClientRegion:          clientRegion,
+			RuntimeRegion:         runtimeRegion,
+			RouteGeneration:       strings.TrimSpace(route.RouteGeneration),
+			CacheStatus:           dominantCacheStatus,
+			TTFBMS:                ttfbAvg,
+			UpstreamMS:            upstreamAvg,
+			TotalMS:               totalAvg,
+			StatusCode:            dominantStatusCode,
+			SampleCount:           requestCount,
+			CacheHitCount:         cacheHitCount,
+			CacheObservationCount: cacheObservationCount,
+			ErrorCount:            errorCount,
+			SampledAt:             sampledAt,
+		}
+		samples = append(samples, sample)
+	}
+	return samples
+}
+
+func cloneTelemetryForEdgePerformanceHeartbeat(in telemetry) telemetry {
+	out := in
+	out.RouteRequests = cloneRouteCounterMap(in.RouteRequests)
+	out.RouteStatuses = cloneRouteStatusCounterMap(in.RouteStatuses)
+	out.RouteUpstreamErrors = cloneRouteCounterMap(in.RouteUpstreamErrors)
+	out.RouteFallbackHits = cloneRouteCounterMap(in.RouteFallbackHits)
+	out.RouteWebSocketResults = cloneRouteResultCounterMap(in.RouteWebSocketResults)
+	out.RouteSSEResults = cloneRouteResultCounterMap(in.RouteSSEResults)
+	out.RouteStreamingResults = cloneRouteResultCounterMap(in.RouteStreamingResults)
+	out.RouteUploadRequests = cloneRouteCounterMap(in.RouteUploadRequests)
+	out.RouteDurationCount = cloneRouteCounterMap(in.RouteDurationCount)
+	out.RouteDurationSum = cloneRouteFloatMap(in.RouteDurationSum)
+	out.RouteLatencyCount = cloneRouteCounterMap(in.RouteLatencyCount)
+	out.RouteLatencySum = cloneRouteFloatMap(in.RouteLatencySum)
+	out.RouteTTFBCount = cloneRouteCounterMap(in.RouteTTFBCount)
+	out.RouteTTFBSum = cloneRouteFloatMap(in.RouteTTFBSum)
+	out.RouteCacheStatus = cloneRouteCacheCounterMap(in.RouteCacheStatus)
+	return out
+}
+
+func edgePerformanceSampleID(edgeID, edgeGroupID string, key routeMetricKey, sampledAt time.Time) string {
+	payload := fmt.Sprintf("%s|%s|%s|%s|%s|%d", strings.TrimSpace(edgeID), strings.TrimSpace(edgeGroupID), key.Hostname, key.AppID, key.RouteKind, sampledAt.UnixNano())
+	sum := sha256.Sum256([]byte(payload))
+	return "edge_perf_" + hex.EncodeToString(sum[:])[:16]
+}
+
+func edgePerformanceAverageMilliseconds(sum float64, count int) int64 {
+	if count <= 0 || sum <= 0 {
+		return 0
+	}
+	return int64((sum * 1000) / float64(count))
+}
+
+func deltaUint64(current, baseline uint64) uint64 {
+	if current < baseline {
+		return current
+	}
+	if current == baseline {
+		return 0
+	}
+	return current - baseline
+}
+
+func deltaFloat64(current, baseline float64) float64 {
+	if current < baseline {
+		return current
+	}
+	if current == baseline {
+		return 0
+	}
+	return current - baseline
+}
+
+func edgePerformanceCacheSummary(current, baseline map[routeCacheMetricKey]uint64, key routeMetricKey) (int, int, string) {
+	counts := make(map[string]int)
+	merged := deltaCacheStatusCounts(current, baseline, key)
+	order := make([]string, 0, len(merged))
+	for status := range merged {
+		order = append(order, status)
+	}
+	sort.Strings(order)
+	cacheHitCount := 0
+	cacheObservationCount := 0
+	for _, status := range order {
+		count := merged[status]
+		cacheObservationCount += count
+		counts[status] = count
+		if status == edgeCacheStatusHit || status == edgeCacheStatusRevalidated {
+			cacheHitCount += count
+		}
+	}
+	return cacheHitCount, cacheObservationCount, dominantStringCount(counts, "bypass")
+}
+
+func deltaCacheStatusCounts(current, baseline map[routeCacheMetricKey]uint64, key routeMetricKey) map[string]int {
+	out := make(map[string]int)
+	for metricKey, currentValue := range current {
+		if metricKey.RouteMetricKey != key {
+			continue
+		}
+		baselineValue := baseline[metricKey]
+		delta := int(deltaUint64(currentValue, baselineValue))
+		if delta <= 0 {
+			continue
+		}
+		status := strings.TrimSpace(metricKey.CacheStatus)
+		if status == "" {
+			status = edgeCacheStatusBypass
+		}
+		out[status] += delta
+	}
+	return out
+}
+
+func edgePerformanceStatusSummary(current, baseline map[routeStatusMetricKey]uint64, upstreamCurrent, upstreamBaseline map[routeMetricKey]uint64, key routeMetricKey) (int, int) {
+	statusCounts := make(map[int]int)
+	errorCount := 0
+	for metricKey, currentValue := range current {
+		if metricKey.RouteMetricKey != key {
+			continue
+		}
+		delta := int(deltaUint64(currentValue, baseline[metricKey]))
+		if delta <= 0 {
+			continue
+		}
+		statusCounts[metricKey.StatusCode] += delta
+		if metricKey.StatusCode >= 400 {
+			errorCount += delta
+		}
+	}
+	return errorCount, dominantStatusCodeCount(statusCounts)
+}
+
+func dominantStringCount(counts map[string]int, fallback string) string {
+	bestKey := strings.TrimSpace(fallback)
+	bestCount := -1
+	for key, count := range counts {
+		if count > bestCount || (count == bestCount && key < bestKey) {
+			bestKey = key
+			bestCount = count
+		}
+	}
+	if bestKey == "" {
+		return fallback
+	}
+	return bestKey
+}
+
+func dominantStatusCodeCount(counts map[int]int) int {
+	bestCode := 0
+	bestCount := -1
+	for code, count := range counts {
+		if count > bestCount || (count == bestCount && code < bestCode) {
+			bestCode = code
+			bestCount = count
+		}
+	}
+	return bestCode
+}
+
+const edgePerformanceSampleHeartbeatLimit = 128
 
 func (s *Service) edgeTLSHeartbeatStatus(status Status) (string, string, *time.Time) {
 	if !status.CaddyEnabled {
@@ -1419,6 +1718,12 @@ func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 	if observed.StatusCode == 0 {
 		observed.StatusCode = http.StatusOK
 	}
+	if observed.TTFB <= 0 {
+		observed.TTFB = observed.Duration
+	}
+	if observed.Upstream <= 0 && observed.Proxied {
+		observed.Upstream = observed.Duration
+	}
 	key := routeMetricKey{
 		Hostname:  firstNonEmpty(strings.TrimSpace(observed.Route.Hostname), observed.Host),
 		AppID:     strings.TrimSpace(observed.Route.AppID),
@@ -1472,6 +1777,14 @@ func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 		}
 		s.metrics.RouteUploadRequests[key]++
 	}
+	if s.metrics.RouteDurationCount == nil {
+		s.metrics.RouteDurationCount = make(map[routeMetricKey]uint64)
+	}
+	if s.metrics.RouteDurationSum == nil {
+		s.metrics.RouteDurationSum = make(map[routeMetricKey]float64)
+	}
+	s.metrics.RouteDurationCount[key]++
+	s.metrics.RouteDurationSum[key] += durationSeconds(observed.Duration)
 	if observed.Proxied {
 		if s.metrics.RouteLatencyCount == nil {
 			s.metrics.RouteLatencyCount = make(map[routeMetricKey]uint64)
@@ -1480,7 +1793,15 @@ func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 			s.metrics.RouteLatencySum = make(map[routeMetricKey]float64)
 		}
 		s.metrics.RouteLatencyCount[key]++
-		s.metrics.RouteLatencySum[key] += durationSeconds(observed.Duration)
+		s.metrics.RouteLatencySum[key] += durationSeconds(observed.Upstream)
+		if s.metrics.RouteTTFBCount == nil {
+			s.metrics.RouteTTFBCount = make(map[routeMetricKey]uint64)
+		}
+		if s.metrics.RouteTTFBSum == nil {
+			s.metrics.RouteTTFBSum = make(map[routeMetricKey]float64)
+		}
+		s.metrics.RouteTTFBCount[key]++
+		s.metrics.RouteTTFBSum[key] += durationSeconds(observed.TTFB)
 	}
 	if s.metrics.RouteCacheStatus == nil {
 		s.metrics.RouteCacheStatus = make(map[routeCacheMetricKey]uint64)
@@ -1597,8 +1918,12 @@ func (s *Service) metricSnapshot() metricSnapshot {
 	out.Metrics.RouteSSEResults = cloneRouteResultCounterMap(s.metrics.RouteSSEResults)
 	out.Metrics.RouteStreamingResults = cloneRouteResultCounterMap(s.metrics.RouteStreamingResults)
 	out.Metrics.RouteUploadRequests = cloneRouteCounterMap(s.metrics.RouteUploadRequests)
+	out.Metrics.RouteDurationCount = cloneRouteCounterMap(s.metrics.RouteDurationCount)
+	out.Metrics.RouteDurationSum = cloneRouteFloatMap(s.metrics.RouteDurationSum)
 	out.Metrics.RouteLatencyCount = cloneRouteCounterMap(s.metrics.RouteLatencyCount)
 	out.Metrics.RouteLatencySum = cloneRouteFloatMap(s.metrics.RouteLatencySum)
+	out.Metrics.RouteTTFBCount = cloneRouteCounterMap(s.metrics.RouteTTFBCount)
+	out.Metrics.RouteTTFBSum = cloneRouteFloatMap(s.metrics.RouteTTFBSum)
 	out.Metrics.RouteCacheStatus = cloneRouteCacheCounterMap(s.metrics.RouteCacheStatus)
 	if s.bundle != nil && !s.bundle.GeneratedAt.IsZero() {
 		generatedAt := s.bundle.GeneratedAt
@@ -1776,6 +2101,8 @@ func staleAgeSeconds(stale bool, lastSuccessAt *time.Time, now time.Time) float6
 
 type edgeProxyObservationResponseWriter struct {
 	http.ResponseWriter
+	startedAt      time.Time
+	observation    *edgeProxyObservation
 	wroteHeader    bool
 	status         int
 	headerSnapshot http.Header
@@ -1786,8 +2113,13 @@ type edgeProxyObservationResponseWriter struct {
 	cacheDecision  *edgeHTTPCacheDecision
 }
 
-func newEdgeProxyObservationResponseWriter(w http.ResponseWriter) *edgeProxyObservationResponseWriter {
-	return &edgeProxyObservationResponseWriter{ResponseWriter: w, maxBytes: int64(32 * 1024 * 1024)}
+func newEdgeProxyObservationResponseWriter(w http.ResponseWriter, startedAt time.Time, observation *edgeProxyObservation) *edgeProxyObservationResponseWriter {
+	return &edgeProxyObservationResponseWriter{
+		ResponseWriter: w,
+		startedAt:      startedAt,
+		observation:    observation,
+		maxBytes:       int64(32 * 1024 * 1024),
+	}
 }
 
 func (w *edgeProxyObservationResponseWriter) Header() http.Header {
@@ -1801,6 +2133,9 @@ func (w *edgeProxyObservationResponseWriter) WriteHeader(statusCode int) {
 	w.wroteHeader = true
 	w.status = statusCode
 	w.headerSnapshot = cloneHTTPHeader(w.ResponseWriter.Header())
+	if w.observation != nil && w.observation.TTFB == 0 && !w.startedAt.IsZero() {
+		w.observation.TTFB = time.Since(w.startedAt)
+	}
 	w.ResponseWriter.WriteHeader(statusCode)
 }
 

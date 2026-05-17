@@ -25,32 +25,33 @@ type createEdgeNodeTokenRequest struct {
 }
 
 type edgeHeartbeatRequest struct {
-	EdgeID                 string     `json:"edge_id"`
-	EdgeGroupID            string     `json:"edge_group_id"`
-	Region                 string     `json:"region,omitempty"`
-	Country                string     `json:"country,omitempty"`
-	PublicHostname         string     `json:"public_hostname,omitempty"`
-	PublicIPv4             string     `json:"public_ipv4,omitempty"`
-	PublicIPv6             string     `json:"public_ipv6,omitempty"`
-	MeshIP                 string     `json:"mesh_ip,omitempty"`
-	RouteBundleVersion     string     `json:"route_bundle_version,omitempty"`
-	DNSBundleVersion       string     `json:"dns_bundle_version,omitempty"`
-	ServingGeneration      string     `json:"serving_generation,omitempty"`
-	LKGGeneration          string     `json:"lkg_generation,omitempty"`
-	LastGoodGeneration     string     `json:"last_good_generation,omitempty"`
-	CacheCorruptGeneration string     `json:"cache_corrupt_generation,omitempty"`
-	CaddyRouteCount        int        `json:"caddy_route_count,omitempty"`
-	CaddyAppliedVersion    string     `json:"caddy_applied_version,omitempty"`
-	CaddyLastError         string     `json:"caddy_last_error,omitempty"`
-	CacheStatus            string     `json:"cache_status,omitempty"`
-	TLSStatus              string     `json:"tls_status,omitempty"`
-	TLSLastMessage         string     `json:"tls_last_message,omitempty"`
-	TLSReadyAt             *time.Time `json:"tls_ready_at,omitempty"`
-	MaxStaleExceeded       bool       `json:"max_stale_exceeded,omitempty"`
-	Status                 string     `json:"status"`
-	Healthy                bool       `json:"healthy"`
-	Draining               bool       `json:"draining"`
-	LastError              string     `json:"last_error,omitempty"`
+	EdgeID                 string                        `json:"edge_id"`
+	EdgeGroupID            string                        `json:"edge_group_id"`
+	Region                 string                        `json:"region,omitempty"`
+	Country                string                        `json:"country,omitempty"`
+	PublicHostname         string                        `json:"public_hostname,omitempty"`
+	PublicIPv4             string                        `json:"public_ipv4,omitempty"`
+	PublicIPv6             string                        `json:"public_ipv6,omitempty"`
+	MeshIP                 string                        `json:"mesh_ip,omitempty"`
+	RouteBundleVersion     string                        `json:"route_bundle_version,omitempty"`
+	DNSBundleVersion       string                        `json:"dns_bundle_version,omitempty"`
+	ServingGeneration      string                        `json:"serving_generation,omitempty"`
+	LKGGeneration          string                        `json:"lkg_generation,omitempty"`
+	LastGoodGeneration     string                        `json:"last_good_generation,omitempty"`
+	CacheCorruptGeneration string                        `json:"cache_corrupt_generation,omitempty"`
+	CaddyRouteCount        int                           `json:"caddy_route_count,omitempty"`
+	CaddyAppliedVersion    string                        `json:"caddy_applied_version,omitempty"`
+	CaddyLastError         string                        `json:"caddy_last_error,omitempty"`
+	CacheStatus            string                        `json:"cache_status,omitempty"`
+	TLSStatus              string                        `json:"tls_status,omitempty"`
+	TLSLastMessage         string                        `json:"tls_last_message,omitempty"`
+	TLSReadyAt             *time.Time                    `json:"tls_ready_at,omitempty"`
+	MaxStaleExceeded       bool                          `json:"max_stale_exceeded,omitempty"`
+	Status                 string                        `json:"status"`
+	Healthy                bool                          `json:"healthy"`
+	Draining               bool                          `json:"draining"`
+	LastError              string                        `json:"last_error,omitempty"`
+	PerformanceSamples     []model.EdgePerformanceSample `json:"performance_samples,omitempty"`
 }
 
 func (s *Server) handleListEdgeNodes(w http.ResponseWriter, r *http.Request) {
@@ -134,6 +135,7 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	now := time.Now().UTC()
 	var req edgeHeartbeatRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -178,10 +180,53 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	if samples := sanitizeEdgeHeartbeatPerformanceSamples(req, now); len(samples) > 0 {
+		if err := s.store.RecordEdgePerformanceSamples(samples, now.Add(-edgePerformanceSampleRetention)); err != nil && s.log != nil {
+			s.log.Printf("edge performance sample ingest failed; edge_id=%s edge_group_id=%s error=%v", req.EdgeID, req.EdgeGroupID, err)
+		}
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"node":     node,
 		"accepted": true,
 	})
+}
+
+const edgePerformanceSampleRetention = 7 * 24 * time.Hour
+
+func sanitizeEdgeHeartbeatPerformanceSamples(req edgeHeartbeatRequest, now time.Time) []model.EdgePerformanceSample {
+	if len(req.PerformanceSamples) == 0 {
+		return nil
+	}
+	out := make([]model.EdgePerformanceSample, 0, len(req.PerformanceSamples))
+	for _, sample := range req.PerformanceSamples {
+		sample.ID = strings.TrimSpace(sample.ID)
+		sample.EdgeID = strings.TrimSpace(req.EdgeID)
+		sample.EdgeGroupID = strings.TrimSpace(req.EdgeGroupID)
+		sample.Hostname = normalizeExternalAppDomain(sample.Hostname)
+		sample.ClientCountry = strings.ToLower(strings.TrimSpace(sample.ClientCountry))
+		sample.ClientRegion = strings.TrimSpace(sample.ClientRegion)
+		sample.ClientASN = strings.TrimSpace(sample.ClientASN)
+		if sample.ClientCountry == "" {
+			sample.ClientCountry = strings.ToLower(strings.TrimSpace(req.Country))
+		}
+		if sample.ClientRegion == "" {
+			sample.ClientRegion = strings.TrimSpace(req.Region)
+		}
+		sample.RuntimeRegion = strings.TrimSpace(sample.RuntimeRegion)
+		sample.RouteGeneration = strings.TrimSpace(sample.RouteGeneration)
+		sample.CacheStatus = strings.ToLower(strings.TrimSpace(sample.CacheStatus))
+		sample.DNSPolicy = strings.ToLower(strings.TrimSpace(sample.DNSPolicy))
+		if sample.ID == "" {
+			sample.ID = model.NewID("edge_perf")
+		}
+		if sample.SampledAt.IsZero() {
+			sample.SampledAt = now
+		} else if sample.SampledAt.After(now.Add(5 * time.Minute)) {
+			sample.SampledAt = now
+		}
+		out = append(out, sample)
+	}
+	return out
 }
 
 func (s *Server) enrichEdgeHeartbeatFromClusterNode(ctx context.Context, req edgeHeartbeatRequest) edgeHeartbeatRequest {

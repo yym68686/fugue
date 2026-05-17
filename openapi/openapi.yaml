@@ -6490,6 +6490,10 @@ components:
           type: boolean
         last_error:
           type: string
+        performance_samples:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgePerformanceSample"
     EdgeHeartbeatResponse:
       type: object
       additionalProperties: false
@@ -6499,6 +6503,63 @@ components:
           $ref: "#/components/schemas/EdgeNode"
         accepted:
           type: boolean
+    EdgePerformanceSample:
+      type: object
+      additionalProperties: false
+      required: [edge_group_id, hostname, sampled_at]
+      properties:
+        id:
+          type: string
+        edge_id:
+          type: string
+        edge_group_id:
+          type: string
+        hostname:
+          type: string
+        client_country:
+          type: string
+        client_region:
+          type: string
+        client_asn:
+          type: string
+        runtime_region:
+          type: string
+        route_generation:
+          type: string
+        cache_status:
+          type: string
+        dns_policy:
+          type: string
+        tls_handshake_ms:
+          type: integer
+          format: int64
+        ttfb_ms:
+          type: integer
+          format: int64
+        upstream_ms:
+          type: integer
+          format: int64
+        total_ms:
+          type: integer
+          format: int64
+        status_code:
+          type: integer
+          format: int32
+        sample_count:
+          type: integer
+          format: int32
+        cache_hit_count:
+          type: integer
+          format: int32
+        cache_observation_count:
+          type: integer
+          format: int32
+        error_count:
+          type: integer
+          format: int32
+        sampled_at:
+          type: string
+          format: date-time
     DeleteEdgeRoutePolicyResponse:
       type: object
       additionalProperties: false

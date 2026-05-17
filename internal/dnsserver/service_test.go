@@ -212,6 +212,58 @@ func TestServicePrefersLocalEdgeGroupWhenNoGeoIPOverrideExists(t *testing.T) {
 	}
 }
 
+func TestServiceLatencyAwareWeightsOverrideGeoButRespectGates(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.DNSConfig{
+		Zone:        "dns.fugue.pro",
+		TTL:         60,
+		Nameservers: []string{"ns1.dns.fugue.pro"},
+	}, log.New(ioDiscard{}, "", 0))
+	service.Config.EdgeGroupID = "edge-group-country-de"
+	service.setBundle(model.EdgeDNSBundle{
+		Version: "dnsgen_latency",
+		Zone:    "dns.fugue.pro",
+		Records: []model.EdgeDNSRecord{
+			{
+				Name:       "app.dns.fugue.pro",
+				Type:       model.EdgeDNSRecordTypeA,
+				Values:     []string{"51.38.126.103", "15.204.94.71", "5.102.124.125"},
+				TTL:        60,
+				Status:     model.EdgeRouteStatusActive,
+				RecordKind: model.EdgeDNSRecordKindPlatform,
+				AnswerPolicy: model.DNSAnswerPolicy{
+					PolicyKind:         model.DNSAnswerPolicyKindLatencyAware,
+					ECSEnabled:         true,
+					HealthRequired:     true,
+					RouteReadyRequired: true,
+				},
+				Candidates: []model.EdgeDNSAnswerCandidate{
+					{IP: "51.38.126.103", EdgeGroupID: "edge-group-country-de", Country: "de", Priority: 0, Weight: 20, Healthy: true, RouteReady: true, TLSReady: true},
+					{IP: "15.204.94.71", EdgeGroupID: "edge-group-country-us", Country: "us", Priority: 50, Weight: 200, Healthy: true, RouteReady: true, TLSReady: true},
+					{IP: "5.102.124.125", EdgeGroupID: "edge-group-country-hk", Country: "hk", Priority: 50, Weight: 240, Healthy: false, RouteReady: true, TLSReady: true},
+				},
+			},
+		},
+	}, `"dnsgen_latency"`, false, "")
+
+	answer := dnsQuery(t, service, "app.dns.fugue.pro.", miekgdns.TypeA)
+	if answer.Rcode != miekgdns.RcodeSuccess {
+		t.Fatalf("expected success, got %s", miekgdns.RcodeToString[answer.Rcode])
+	}
+	if len(answer.Answer) != 2 {
+		t.Fatalf("expected only eligible answers, got %+v", answer.Answer)
+	}
+	first, ok := answer.Answer[0].(*miekgdns.A)
+	if !ok || first.A.String() != "15.204.94.71" {
+		t.Fatalf("expected latency weight to beat local geo hint, got %+v", answer.Answer)
+	}
+	second, ok := answer.Answer[1].(*miekgdns.A)
+	if !ok || second.A.String() != "51.38.126.103" {
+		t.Fatalf("expected local edge to remain second and unhealthy edge to be filtered, got %+v", answer.Answer)
+	}
+}
+
 func TestLoadCacheFallsBackToPreviousVerifiedDNSGeneration(t *testing.T) {
 	t.Parallel()
 

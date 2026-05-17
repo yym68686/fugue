@@ -213,6 +213,80 @@ func TestHeartbeatOnceReportsEdgeInventory(t *testing.T) {
 	}
 }
 
+func TestHeartbeatOnceReportsPerformanceSamples(t *testing.T) {
+	t.Parallel()
+
+	var gotBody struct {
+		PerformanceSamples []model.EdgePerformanceSample `json:"performance_samples"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/edge/heartbeat" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode heartbeat: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"accepted": true})
+	}))
+	defer server.Close()
+
+	service := NewService(config.EdgeConfig{
+		APIURL:            server.URL,
+		EdgeToken:         "edge-secret",
+		EdgeID:            "edge-us-1",
+		EdgeGroupID:       "edge-group-country-us",
+		Region:            "us-east",
+		Country:           "US",
+		HeartbeatInterval: time.Minute,
+	}, log.New(ioDiscard{}, "", 0))
+	bundle := testBundle("routegen_perf")
+	bundle.EdgeID = "edge-us-1"
+	bundle.EdgeGroupID = "edge-group-country-us"
+	bundle.Routes[0].EdgeGroupID = "edge-group-country-us"
+	bundle.Routes[0].RuntimeEdgeGroupID = "edge-group-country-us"
+	service.recordSyncSuccess(bundle, `"routegen_perf"`, time.Now().UTC(), false)
+	service.recordProxyObservation(edgeProxyObservation{
+		Host:        "demo.fugue.pro",
+		Route:       bundle.Routes[0],
+		StatusCode:  http.StatusOK,
+		Duration:    120 * time.Millisecond,
+		TTFB:        80 * time.Millisecond,
+		Upstream:    70 * time.Millisecond,
+		Proxied:     true,
+		CacheStatus: edgeCacheStatusMiss,
+	})
+	service.recordProxyObservation(edgeProxyObservation{
+		Host:        "demo.fugue.pro",
+		Route:       bundle.Routes[0],
+		StatusCode:  http.StatusOK,
+		Duration:    10 * time.Millisecond,
+		TTFB:        10 * time.Millisecond,
+		CacheStatus: edgeCacheStatusHit,
+	})
+
+	if err := service.HeartbeatOnce(context.Background()); err != nil {
+		t.Fatalf("heartbeat once: %v", err)
+	}
+	if len(gotBody.PerformanceSamples) != 1 {
+		t.Fatalf("expected one performance sample, got %+v", gotBody.PerformanceSamples)
+	}
+	sample := gotBody.PerformanceSamples[0]
+	if sample.EdgeID != "edge-us-1" ||
+		sample.EdgeGroupID != "edge-group-country-us" ||
+		sample.Hostname != "demo.fugue.pro" ||
+		sample.ClientCountry != "us" ||
+		sample.ClientRegion != "us-east" ||
+		sample.RuntimeRegion != "us" ||
+		sample.SampleCount != 2 ||
+		sample.CacheHitCount != 1 ||
+		sample.CacheObservationCount != 2 ||
+		sample.TTFBMS != 80 ||
+		sample.UpstreamMS != 70 ||
+		sample.TotalMS != 80 {
+		t.Fatalf("unexpected performance sample: %+v", sample)
+	}
+}
+
 func TestSyncOnceNotModifiedKeepsExistingCacheFile(t *testing.T) {
 	t.Parallel()
 

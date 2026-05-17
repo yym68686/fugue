@@ -1597,8 +1597,8 @@ func edgeDNSOrderedCandidates(record model.EdgeDNSRecord, hint dnsGeoHint) []mod
 		candidates = append(candidates, candidate)
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
-		ai := edgeDNSCandidateSortScore(candidates[i], hint)
-		aj := edgeDNSCandidateSortScore(candidates[j], hint)
+		ai := edgeDNSCandidateSortScore(candidates[i], record.AnswerPolicy, hint)
+		aj := edgeDNSCandidateSortScore(candidates[j], record.AnswerPolicy, hint)
 		if ai != aj {
 			return ai < aj
 		}
@@ -1631,8 +1631,12 @@ func edgeDNSCandidateEligible(candidate model.EdgeDNSAnswerCandidate, policy mod
 	return true
 }
 
-func edgeDNSCandidateSortScore(candidate model.EdgeDNSAnswerCandidate, hint dnsGeoHint) int {
+func edgeDNSCandidateSortScore(candidate model.EdgeDNSAnswerCandidate, policy model.DNSAnswerPolicy, hint dnsGeoHint) int {
 	score := candidate.Priority * 100
+	switch policy.PolicyKind {
+	case model.DNSAnswerPolicyKindLatencyAware, model.DNSAnswerPolicyKindWeighted:
+		score -= candidate.Weight * 200
+	}
 	if hint.EdgeGroupID != "" && strings.EqualFold(candidate.EdgeGroupID, hint.EdgeGroupID) {
 		score -= 10000
 	}

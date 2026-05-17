@@ -95,6 +95,62 @@ func TestEdgeHeartbeatRegistersInventoryAndAdminList(t *testing.T) {
 	}
 }
 
+func TestEdgeHeartbeatStoresPerformanceSamples(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	now := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/edge/heartbeat?token=edge-secret", "", map[string]any{
+		"edge_id":       "edge-us-1",
+		"edge_group_id": "edge-group-country-us",
+		"region":        "us-east",
+		"country":       "US",
+		"status":        model.EdgeHealthHealthy,
+		"healthy":       true,
+		"draining":      false,
+		"performance_samples": []map[string]any{
+			{
+				"id":                      "sample-1",
+				"hostname":                "Demo.Fugue.Pro.",
+				"client_asn":              "AS123",
+				"runtime_region":          "us",
+				"ttfb_ms":                 120,
+				"upstream_ms":             80,
+				"total_ms":                140,
+				"status_code":             200,
+				"sample_count":            4,
+				"cache_hit_count":         3,
+				"cache_observation_count": 4,
+				"sampled_at":              now,
+			},
+		},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	samples, err := storeState.ListEdgePerformanceSamples("demo.fugue.pro", time.Time{})
+	if err != nil {
+		t.Fatalf("list edge performance samples: %v", err)
+	}
+	if len(samples) != 1 {
+		t.Fatalf("expected one performance sample, got %+v", samples)
+	}
+	sample := samples[0]
+	if sample.ID != "sample-1" ||
+		sample.EdgeID != "edge-us-1" ||
+		sample.EdgeGroupID != "edge-group-country-us" ||
+		sample.Hostname != "demo.fugue.pro" ||
+		sample.ClientCountry != "us" ||
+		sample.ClientRegion != "us-east" ||
+		sample.ClientASN != "as123" ||
+		sample.SampleCount != 4 ||
+		sample.CacheHitCount != 3 ||
+		sample.CacheObservationCount != 4 {
+		t.Fatalf("unexpected persisted sample: %+v", sample)
+	}
+}
+
 func TestEdgeHeartbeatDiscoversPublicEndpointFromClusterNode(t *testing.T) {
 	t.Parallel()
 

@@ -548,6 +548,125 @@ func TestEdgeDNSBundleLetsConfiguredPlatformRouteOverrideStaticAddressRecords(t 
 	}
 }
 
+func TestEdgeDNSBundleAppliesLatencyAwareWeights(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	server.platformRoutes = []model.PlatformRoute{
+		{
+			Hostname:      "api.fugue.pro",
+			Kind:          model.EdgeRouteKindControlPlaneAPI,
+			UpstreamKind:  model.EdgeRouteUpstreamKindMesh,
+			UpstreamScope: model.EdgeRouteUpstreamScopeMesh,
+			UpstreamURL:   "http://api.fugue.internal",
+			TLSPolicy:     model.EdgeRouteTLSPolicyPlatform,
+			RoutePolicy:   model.EdgeRoutePolicyEnabled,
+			EdgeGroupMode: model.PlatformRouteEdgeGroupModeAllHealthy,
+			Status:        model.EdgeRouteStatusActive,
+			TTL:           60,
+		},
+	}
+	for _, node := range []model.EdgeNode{
+		{
+			ID:              "edge-us-1",
+			EdgeGroupID:     "edge-group-country-us",
+			Country:         "us",
+			Region:          "us-east",
+			PublicIPv4:      "15.204.94.71",
+			Status:          model.EdgeHealthHealthy,
+			Healthy:         true,
+			CaddyRouteCount: 1,
+			TLSStatus:       model.EdgeTLSStatusReady,
+		},
+		{
+			ID:              "edge-de-1",
+			EdgeGroupID:     "edge-group-country-de",
+			Country:         "de",
+			Region:          "eu-central",
+			PublicIPv4:      "51.38.126.103",
+			Status:          model.EdgeHealthHealthy,
+			Healthy:         true,
+			CaddyRouteCount: 1,
+			TLSStatus:       model.EdgeTLSStatusReady,
+		},
+	} {
+		if _, _, err := storeState.UpdateEdgeHeartbeat(node); err != nil {
+			t.Fatalf("record edge heartbeat: %v", err)
+		}
+	}
+	now := time.Now().UTC()
+	if err := storeState.RecordEdgePerformanceSamples([]model.EdgePerformanceSample{
+		{
+			ID:                    "api-us-fast",
+			EdgeGroupID:           "edge-group-country-us",
+			Hostname:              "api.fugue.pro",
+			ClientCountry:         "de",
+			ClientRegion:          "eu-central",
+			TTFBMS:                120,
+			UpstreamMS:            80,
+			TotalMS:               140,
+			StatusCode:            200,
+			SampleCount:           12,
+			CacheHitCount:         10,
+			CacheObservationCount: 12,
+			SampledAt:             now.Add(-10 * time.Minute),
+		},
+		{
+			ID:                    "api-de-slow",
+			EdgeGroupID:           "edge-group-country-de",
+			Hostname:              "api.fugue.pro",
+			ClientCountry:         "de",
+			ClientRegion:          "eu-central",
+			TTFBMS:                650,
+			UpstreamMS:            520,
+			TotalMS:               700,
+			StatusCode:            200,
+			SampleCount:           12,
+			CacheHitCount:         1,
+			CacheObservationCount: 12,
+			SampledAt:             now.Add(-10 * time.Minute),
+		},
+	}, time.Time{}); err != nil {
+		t.Fatalf("record performance samples: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	apiA := edgeDNSRecordByNameAndType(bundle.Records, "api.fugue.pro", model.EdgeDNSRecordTypeA)
+	if apiA == nil {
+		t.Fatalf("expected api.fugue.pro A record, got %+v", bundle.Records)
+	}
+	if apiA.AnswerPolicy.PolicyKind != model.DNSAnswerPolicyKindLatencyAware ||
+		apiA.AnswerPolicy.Reason != "latency_aware_geo_close_but_slow" ||
+		!apiA.AnswerPolicy.HealthRequired ||
+		!apiA.AnswerPolicy.RouteReadyRequired {
+		t.Fatalf("expected latency-aware policy with safety gates, got %+v", apiA.AnswerPolicy)
+	}
+	var usCandidate, deCandidate *model.EdgeDNSAnswerCandidate
+	for index := range apiA.Candidates {
+		switch apiA.Candidates[index].EdgeGroupID {
+		case "edge-group-country-us":
+			usCandidate = &apiA.Candidates[index]
+		case "edge-group-country-de":
+			deCandidate = &apiA.Candidates[index]
+		}
+	}
+	if usCandidate == nil || deCandidate == nil {
+		t.Fatalf("expected US and DE candidates, got %+v", apiA.Candidates)
+	}
+	if usCandidate.Weight <= deCandidate.Weight ||
+		!strings.Contains(usCandidate.Reason, "latency_fast") ||
+		!strings.Contains(deCandidate.Reason, "geo_close_but_slow") {
+		t.Fatalf("expected latency weights and geo-close explanation, us=%+v de=%+v", usCandidate, deCandidate)
+	}
+}
+
 func TestDNSACMEChallengeAPIDrivesEdgeDNSBundleTXTRecords(t *testing.T) {
 	t.Parallel()
 

@@ -502,9 +502,11 @@ last_error
 ### EdgePerformanceSample
 
 ```text
+id
 edge_id
 edge_group_id
 hostname
+client_country
 client_region
 client_asn
 runtime_region
@@ -516,6 +518,10 @@ ttfb_ms
 upstream_ms
 total_ms
 status_code
+sample_count
+cache_hit_count
+cache_observation_count
+error_count
 sampled_at
 ```
 
@@ -717,12 +723,12 @@ sampled_at
 
 ### P3：Latency-aware steering
 
-- [ ] 定义 `EdgePerformanceSample` 采集格式。
-- [ ] 按 country / region / ASN 聚合 edge latency、TTFB、upstream latency、cache hit ratio 和 error rate。
-- [ ] 建立稳定评分窗口，避免短时抖动导致 DNS answer 频繁切换。
-- [ ] 允许 DNS policy 用权重修正纯 GeoDNS 的错误判断。
-- [ ] 对“地理近但真实慢”的路径输出解释字段，方便排障。
-- [ ] 保证 latency-aware steering 永远不能绕过 route-ready、TLS-ready 和 health gate。
+- [x] 定义 `EdgePerformanceSample` 采集格式，并通过 edge heartbeat 进入内部 store。
+- [x] 按 country / region / ASN 聚合 edge latency、TTFB、upstream latency、cache hit ratio 和 error rate。
+- [x] 建立稳定评分窗口，避免短时抖动导致 DNS answer 频繁切换。
+- [x] 允许 DNS policy 用权重修正纯 GeoDNS 的错误判断。
+- [x] 对“地理近但真实慢”的路径输出解释字段，方便排障。
+- [x] 保证 latency-aware steering 永远不能绕过 route-ready、TLS-ready 和 health gate。
 
 ### P4：发布和回滚
 

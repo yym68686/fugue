@@ -3694,6 +3694,9 @@ func ensureDefaults(state *model.State) {
 	for idx := range state.DNSACMEChallenges {
 		normalizeDNSACMEChallengeForRead(&state.DNSACMEChallenges[idx])
 	}
+	if state.EdgePerformanceSamples == nil {
+		state.EdgePerformanceSamples = []model.EdgePerformanceSample{}
+	}
 	if state.StorePromotions == nil {
 		state.StorePromotions = []model.StorePromotion{}
 	}

@@ -198,6 +198,10 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	if err != nil {
 		return model.EdgeDNSBundle{}, err
 	}
+	latencyProfiles, err := s.edgeDNSLatencyProfiles()
+	if err != nil {
+		return model.EdgeDNSBundle{}, err
+	}
 	routeReadyByHostnameEdgeGroup := map[string]map[string]bool{}
 	recordRouteHostByName := map[string]string{}
 
@@ -232,6 +236,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		if !edgeDNSTargetWithinZone(hostname, options.Zone) {
 			continue
 		}
+		latencyProfile := latencyProfiles[hostname]
 		registerEdgeDNSRouteReadyBindings(routeReadyByHostnameEdgeGroup, edgeRouteBindingsForPlatformRoute(platformRoute, healthyEdgeGroups))
 		answerIPs := edgeDNSAnswerIPsForPlatformRoute(platformRoute, options, edgeAnswerIPsByGroup)
 		if len(answerIPs) == 0 {
@@ -252,8 +257,8 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			"",
 			edgeGroupID,
 			"",
-			edgeDNSAnswerPolicy(options, edgeGroupID, "", answerIPs, edgeCandidateByIP, platformRoute.TTL),
-			edgeDNSCandidatesForAnswerIPs(answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], edgeGroupID, ""),
+			edgeDNSAnswerPolicy(options, edgeGroupID, "", answerIPs, edgeCandidateByIP, latencyProfile, platformRoute.TTL),
+			edgeDNSCandidatesForAnswerIPs(answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], edgeGroupID, "", latencyProfile),
 		)
 		records = append(records, targetRecords...)
 		registerEdgeDNSRecordRouteHost(recordRouteHostByName, hostname, targetRecords...)
@@ -274,6 +279,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		if len(answerIPs) == 0 {
 			continue
 		}
+		latencyProfile := latencyProfiles[hostname]
 		targetRecords := edgeDNSRecordsForTargetWithPolicy(
 			hostname,
 			answerIPs,
@@ -285,8 +291,8 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			app.TenantID,
 			binding.EdgeGroupID,
 			binding.FallbackEdgeGroupID,
-			edgeDNSAnswerPolicy(options, binding.EdgeGroupID, binding.FallbackEdgeGroupID, answerIPs, edgeCandidateByIP, options.TTL),
-			edgeDNSCandidatesForAnswerIPs(answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID),
+			edgeDNSAnswerPolicy(options, binding.EdgeGroupID, binding.FallbackEdgeGroupID, answerIPs, edgeCandidateByIP, latencyProfile, options.TTL),
+			edgeDNSCandidatesForAnswerIPs(answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID, latencyProfile),
 		)
 		records = append(records, targetRecords...)
 		registerEdgeDNSRecordRouteHost(recordRouteHostByName, hostname, targetRecords...)
@@ -336,6 +342,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		if len(answerIPs) == 0 {
 			continue
 		}
+		latencyProfile := latencyProfiles[hostname]
 		targetRecords := edgeDNSRecordsForTargetWithPolicy(
 			target,
 			answerIPs,
@@ -347,8 +354,8 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			app.TenantID,
 			binding.EdgeGroupID,
 			binding.FallbackEdgeGroupID,
-			edgeDNSAnswerPolicy(options, binding.EdgeGroupID, binding.FallbackEdgeGroupID, answerIPs, edgeCandidateByIP, options.TTL),
-			edgeDNSCandidatesForAnswerIPs(answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID),
+			edgeDNSAnswerPolicy(options, binding.EdgeGroupID, binding.FallbackEdgeGroupID, answerIPs, edgeCandidateByIP, latencyProfile, options.TTL),
+			edgeDNSCandidatesForAnswerIPs(answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID, latencyProfile),
 		)
 		records = append(records, targetRecords...)
 		registerEdgeDNSRecordRouteHost(recordRouteHostByName, hostname, targetRecords...)
@@ -885,7 +892,276 @@ func edgeDNSCandidatesForRecordType(recordType string, candidates []model.EdgeDN
 	return out
 }
 
-func edgeDNSCandidatesForAnswerIPs(answerIPs []string, candidateByIP map[string]model.EdgeDNSAnswerCandidate, routeReady map[string]bool, preferredEdgeGroupID, fallbackEdgeGroupID string) []model.EdgeDNSAnswerCandidate {
+const (
+	edgeDNSLatencyWindow          = 24 * time.Hour
+	edgeDNSLatencyMinGroupSamples = 3
+	edgeDNSLatencyMinGroups       = 2
+	edgeDNSLatencyMinScoreDelta   = 75.0
+	edgeDNSLatencyMinScoreRatio   = 0.20
+	edgeDNSLatencyWeightMin       = 20
+	edgeDNSLatencyWeightMax       = 200
+)
+
+type edgeDNSLatencyProfile struct {
+	Hostname        string
+	Enabled         bool
+	Reason          string
+	Weight          int
+	BestEdgeGroupID string
+	Candidates      map[string]edgeDNSLatencyCandidateProfile
+}
+
+type edgeDNSLatencyCandidateProfile struct {
+	EdgeGroupID string
+	Weight      int
+	Reason      string
+	Score       float64
+	TTFBMS      float64
+	UpstreamMS  float64
+	TotalMS     float64
+	HitRatio    float64
+	ErrorRate   float64
+	SampleCount int
+	Country     string
+	Region      string
+	ASN         string
+}
+
+type edgeDNSLatencyGroupAccumulator struct {
+	EdgeGroupID           string
+	SampleCount           int
+	TTFBWeightedMS        float64
+	UpstreamWeightedMS    float64
+	TotalWeightedMS       float64
+	CacheHitCount         int
+	CacheObservationCount int
+	ErrorCount            int
+	CountryCounts         map[string]int
+	RegionCounts          map[string]int
+	ASNCounts             map[string]int
+}
+
+func (s *Server) edgeDNSLatencyProfiles() (map[string]*edgeDNSLatencyProfile, error) {
+	if s.store == nil {
+		return nil, nil
+	}
+	samples, err := s.store.ListEdgePerformanceSamples("", time.Now().UTC().Add(-edgeDNSLatencyWindow))
+	if err != nil {
+		return nil, err
+	}
+	return edgeDNSLatencyProfilesByHostname(samples), nil
+}
+
+func edgeDNSLatencyProfilesByHostname(samples []model.EdgePerformanceSample) map[string]*edgeDNSLatencyProfile {
+	byHostname := make(map[string]map[string]*edgeDNSLatencyGroupAccumulator)
+	for _, sample := range samples {
+		hostname := normalizeExternalAppDomain(sample.Hostname)
+		edgeGroupID := strings.TrimSpace(sample.EdgeGroupID)
+		if hostname == "" || edgeGroupID == "" {
+			continue
+		}
+		if _, ok := byHostname[hostname]; !ok {
+			byHostname[hostname] = make(map[string]*edgeDNSLatencyGroupAccumulator)
+		}
+		accumulator := byHostname[hostname][edgeGroupID]
+		if accumulator == nil {
+			accumulator = &edgeDNSLatencyGroupAccumulator{
+				EdgeGroupID:   edgeGroupID,
+				CountryCounts: make(map[string]int),
+				RegionCounts:  make(map[string]int),
+				ASNCounts:     make(map[string]int),
+			}
+			byHostname[hostname][edgeGroupID] = accumulator
+		}
+		sampleCount := sample.SampleCount
+		if sampleCount <= 0 {
+			sampleCount = 1
+		}
+		accumulator.SampleCount += sampleCount
+		accumulator.TTFBWeightedMS += float64(sample.TTFBMS) * float64(sampleCount)
+		accumulator.UpstreamWeightedMS += float64(sample.UpstreamMS) * float64(sampleCount)
+		accumulator.TotalWeightedMS += float64(sample.TotalMS) * float64(sampleCount)
+		accumulator.CacheHitCount += sample.CacheHitCount
+		accumulator.CacheObservationCount += sample.CacheObservationCount
+		accumulator.ErrorCount += sample.ErrorCount
+		if value := strings.ToLower(strings.TrimSpace(sample.ClientCountry)); value != "" {
+			accumulator.CountryCounts[value] += sampleCount
+		}
+		if value := strings.TrimSpace(sample.ClientRegion); value != "" {
+			accumulator.RegionCounts[value] += sampleCount
+		}
+		if value := strings.TrimSpace(sample.ClientASN); value != "" {
+			accumulator.ASNCounts[value] += sampleCount
+		}
+	}
+
+	profiles := make(map[string]*edgeDNSLatencyProfile, len(byHostname))
+	for hostname, groups := range byHostname {
+		if profile := buildEdgeDNSLatencyProfile(hostname, groups); profile != nil && profile.Enabled {
+			profiles[hostname] = profile
+		}
+	}
+	return profiles
+}
+
+func buildEdgeDNSLatencyProfile(hostname string, groups map[string]*edgeDNSLatencyGroupAccumulator) *edgeDNSLatencyProfile {
+	candidates := make([]edgeDNSLatencyCandidateProfile, 0, len(groups))
+	for _, accumulator := range groups {
+		if accumulator == nil || accumulator.SampleCount < edgeDNSLatencyMinGroupSamples {
+			continue
+		}
+		candidate := edgeDNSLatencyCandidateProfile{
+			EdgeGroupID: strings.TrimSpace(accumulator.EdgeGroupID),
+			SampleCount: accumulator.SampleCount,
+			TTFBMS:      edgeDNSLatencyAverage(accumulator.TTFBWeightedMS, accumulator.SampleCount),
+			UpstreamMS:  edgeDNSLatencyAverage(accumulator.UpstreamWeightedMS, accumulator.SampleCount),
+			TotalMS:     edgeDNSLatencyAverage(accumulator.TotalWeightedMS, accumulator.SampleCount),
+			Country:     edgeDNSDominantStringCount(accumulator.CountryCounts, ""),
+			Region:      edgeDNSDominantStringCount(accumulator.RegionCounts, ""),
+			ASN:         edgeDNSDominantStringCount(accumulator.ASNCounts, ""),
+		}
+		if candidate.TotalMS <= 0 {
+			candidate.TotalMS = candidate.TTFBMS
+		}
+		if candidate.TTFBMS <= 0 {
+			candidate.TTFBMS = candidate.TotalMS
+		}
+		if accumulator.CacheObservationCount > 0 {
+			candidate.HitRatio = float64(accumulator.CacheHitCount) / float64(accumulator.CacheObservationCount)
+		}
+		if accumulator.SampleCount > 0 {
+			candidate.ErrorRate = float64(accumulator.ErrorCount) / float64(accumulator.SampleCount)
+		}
+		candidate.Score = edgeDNSLatencyScore(candidate)
+		candidates = append(candidates, candidate)
+	}
+	if len(candidates) < edgeDNSLatencyMinGroups {
+		return nil
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].Score != candidates[j].Score {
+			return candidates[i].Score < candidates[j].Score
+		}
+		return candidates[i].EdgeGroupID < candidates[j].EdgeGroupID
+	})
+	best := candidates[0]
+	second := candidates[1]
+	scoreDelta := second.Score - best.Score
+	minDelta := edgeDNSLatencyMinScoreDelta
+	if ratioDelta := best.Score * edgeDNSLatencyMinScoreRatio; ratioDelta > minDelta {
+		minDelta = ratioDelta
+	}
+	if scoreDelta < minDelta {
+		return nil
+	}
+	worstScore := candidates[len(candidates)-1].Score
+	scoreSpan := worstScore - best.Score
+	if scoreSpan <= 0 {
+		scoreSpan = minDelta
+	}
+
+	profile := &edgeDNSLatencyProfile{
+		Hostname:        normalizeExternalAppDomain(hostname),
+		Enabled:         true,
+		Reason:          "latency_aware_stable_window_24h",
+		BestEdgeGroupID: best.EdgeGroupID,
+		Candidates:      make(map[string]edgeDNSLatencyCandidateProfile, len(candidates)),
+	}
+	for _, candidate := range candidates {
+		penalty := candidate.Score - best.Score
+		weight := edgeDNSClampLatencyWeight(edgeDNSLatencyWeightMax - int((penalty/scoreSpan)*float64(edgeDNSLatencyWeightMax-edgeDNSLatencyWeightMin)))
+		if candidate.EdgeGroupID == best.EdgeGroupID {
+			weight = edgeDNSLatencyWeightMax
+			candidate.Reason = edgeDNSLatencyReason("latency_fast", candidate)
+		} else {
+			candidate.Reason = edgeDNSLatencyReason("latency_penalized", candidate)
+		}
+		candidate.Weight = weight
+		profile.Candidates[candidate.EdgeGroupID] = candidate
+	}
+	if bestCandidate, ok := profile.Candidates[profile.BestEdgeGroupID]; ok {
+		profile.Weight = bestCandidate.Weight
+	}
+	return profile
+}
+
+func edgeDNSLatencyScore(candidate edgeDNSLatencyCandidateProfile) float64 {
+	cacheMissPenalty := 0.0
+	if candidate.HitRatio > 0 && candidate.HitRatio < 1 {
+		cacheMissPenalty = (1 - candidate.HitRatio) * 200
+	} else if candidate.HitRatio == 0 {
+		cacheMissPenalty = 200
+	}
+	return candidate.TTFBMS*0.45 + candidate.UpstreamMS*0.35 + candidate.TotalMS*0.20 + cacheMissPenalty + candidate.ErrorRate*500
+}
+
+func edgeDNSLatencyAverage(sum float64, count int) float64 {
+	if count <= 0 || sum <= 0 {
+		return 0
+	}
+	return sum / float64(count)
+}
+
+func edgeDNSDominantStringCount(counts map[string]int, fallback string) string {
+	bestKey := strings.TrimSpace(fallback)
+	bestCount := -1
+	for key, count := range counts {
+		if count > bestCount || (count == bestCount && key < bestKey) {
+			bestKey = key
+			bestCount = count
+		}
+	}
+	if bestKey == "" {
+		return fallback
+	}
+	return bestKey
+}
+
+func edgeDNSClampLatencyWeight(weight int) int {
+	if weight < edgeDNSLatencyWeightMin {
+		return edgeDNSLatencyWeightMin
+	}
+	if weight > edgeDNSLatencyWeightMax {
+		return edgeDNSLatencyWeightMax
+	}
+	return weight
+}
+
+func edgeDNSLatencyReason(prefix string, candidate edgeDNSLatencyCandidateProfile) string {
+	parts := []string{
+		prefix,
+		"ttfb_" + strconv.Itoa(int(candidate.TTFBMS+0.5)) + "ms",
+		"upstream_" + strconv.Itoa(int(candidate.UpstreamMS+0.5)) + "ms",
+		"hit_" + strconv.Itoa(int(candidate.HitRatio*100+0.5)) + "pct",
+		"error_" + strconv.Itoa(int(candidate.ErrorRate*100+0.5)) + "pct",
+	}
+	if candidate.Country != "" {
+		parts = append(parts, "country_"+candidate.Country)
+	}
+	if candidate.Region != "" {
+		parts = append(parts, "region_"+candidate.Region)
+	}
+	if candidate.ASN != "" {
+		parts = append(parts, "asn_"+candidate.ASN)
+	}
+	return strings.Join(parts, "_")
+}
+
+func edgeDNSLatencyCandidateReason(profile *edgeDNSLatencyProfile, candidate edgeDNSLatencyCandidateProfile, groupID, preferredEdgeGroupID string) string {
+	reason := strings.TrimSpace(candidate.Reason)
+	if profile == nil || !profile.Enabled {
+		return reason
+	}
+	if groupID == profile.BestEdgeGroupID {
+		return reason
+	}
+	if preferredEdgeGroupID != "" && groupID == preferredEdgeGroupID {
+		return strings.Replace(reason, "latency_penalized", "geo_close_but_slow", 1)
+	}
+	return reason
+}
+
+func edgeDNSCandidatesForAnswerIPs(answerIPs []string, candidateByIP map[string]model.EdgeDNSAnswerCandidate, routeReady map[string]bool, preferredEdgeGroupID, fallbackEdgeGroupID string, latencyProfile *edgeDNSLatencyProfile) []model.EdgeDNSAnswerCandidate {
 	out := make([]model.EdgeDNSAnswerCandidate, 0, len(answerIPs))
 	seen := map[string]bool{}
 	for _, raw := range answerIPs {
@@ -907,6 +1183,12 @@ func edgeDNSCandidatesForAnswerIPs(answerIPs []string, candidateByIP map[string]
 		}
 		candidate.Priority = edgeDNSCandidatePriority(groupID, preferredEdgeGroupID, fallbackEdgeGroupID)
 		candidate.Reason = edgeDNSCandidateReason(groupID, preferredEdgeGroupID, fallbackEdgeGroupID)
+		if latencyProfile != nil && latencyProfile.Enabled {
+			if latencyCandidate, ok := latencyProfile.Candidates[groupID]; ok {
+				candidate.Weight = latencyCandidate.Weight
+				candidate.Reason = edgeDNSLatencyCandidateReason(latencyProfile, latencyCandidate, groupID, preferredEdgeGroupID)
+			}
+		}
 		if candidate.Weight <= 0 {
 			candidate.Weight = 100
 		}
@@ -927,7 +1209,7 @@ func edgeDNSCandidatesForAnswerIPs(answerIPs []string, candidateByIP map[string]
 	return out
 }
 
-func edgeDNSAnswerPolicy(options edgeDNSBundleOptions, preferredEdgeGroupID, fallbackEdgeGroupID string, answerIPs []string, candidateByIP map[string]model.EdgeDNSAnswerCandidate, ttl int) model.DNSAnswerPolicy {
+func edgeDNSAnswerPolicy(options edgeDNSBundleOptions, preferredEdgeGroupID, fallbackEdgeGroupID string, answerIPs []string, candidateByIP map[string]model.EdgeDNSAnswerCandidate, latencyProfile *edgeDNSLatencyProfile, ttl int) model.DNSAnswerPolicy {
 	allowed := make([]string, 0, len(answerIPs))
 	for _, ip := range answerIPs {
 		normalized := normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeA, ip)
@@ -945,8 +1227,19 @@ func edgeDNSAnswerPolicy(options edgeDNSBundleOptions, preferredEdgeGroupID, fal
 	sort.Strings(allowed)
 	preferred := uniqueSortedNonEmptyStrings(preferredEdgeGroupID, strings.TrimSpace(options.EdgeGroupID))
 	fallback := uniqueSortedNonEmptyStrings(fallbackEdgeGroupID)
+	policyKind := model.DNSAnswerPolicyKindGeo
+	reason := "geo_healthy_route_ready"
+	weight := 0
+	if latencyProfile != nil && latencyProfile.Enabled {
+		policyKind = model.DNSAnswerPolicyKindLatencyAware
+		reason = latencyProfile.Reason
+		weight = latencyProfile.Weight
+		if preferredEdgeGroupID != "" && latencyProfile.BestEdgeGroupID != "" && preferredEdgeGroupID != latencyProfile.BestEdgeGroupID {
+			reason = "latency_aware_geo_close_but_slow"
+		}
+	}
 	return model.DNSAnswerPolicy{
-		PolicyKind:          model.DNSAnswerPolicyKindGeo,
+		PolicyKind:          policyKind,
 		AllowedEdgeGroups:   allowed,
 		PreferredEdgeGroups: preferred,
 		FallbackEdgeGroups:  fallback,
@@ -954,7 +1247,8 @@ func edgeDNSAnswerPolicy(options edgeDNSBundleOptions, preferredEdgeGroupID, fal
 		ECSEnabled:          true,
 		HealthRequired:      true,
 		RouteReadyRequired:  true,
-		Reason:              "geo_healthy_route_ready",
+		Weight:              weight,
+		Reason:              reason,
 	}
 }
 
