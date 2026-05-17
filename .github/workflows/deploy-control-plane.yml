@@ -208,6 +208,7 @@ jobs:
           FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME: ${{ vars.FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME || '' }}
           FUGUE_SYNC_EDGE_PROXY: ${{ vars.FUGUE_SYNC_EDGE_PROXY || 'false' }}
           FUGUE_SMOKE_URL: ${{ vars.FUGUE_SMOKE_URL || '' }}
+          FUGUE_SMOKE_URLS: ${{ vars.FUGUE_SMOKE_URLS || '' }}
           FUGUE_API_IMAGE_REPOSITORY: ${{ (github.event_name == 'workflow_dispatch' && inputs.existing_image_tag != '' && format('ghcr.io/{0}/fugue-api', github.repository_owner)) || needs.build.outputs.api_image_repository }}
           FUGUE_API_IMAGE_TAG: ${{ inputs.existing_image_tag || needs.build.outputs.image_tag }}
           FUGUE_CONTROLLER_IMAGE_REPOSITORY: ${{ (github.event_name == 'workflow_dispatch' && inputs.existing_image_tag != '' && format('ghcr.io/{0}/fugue-controller', github.repository_owner)) || needs.build.outputs.controller_image_repository }}
@@ -236,6 +237,8 @@ jobs:
           FUGUE_EDGE_CADDY_STATIC_TLS_MOUNT_PATH: ${{ vars.FUGUE_EDGE_CADDY_STATIC_TLS_MOUNT_PATH || '/etc/caddy/static-tls' }}
           FUGUE_EDGE_CADDY_STATIC_TLS_CERTIFICATE_KEY: ${{ vars.FUGUE_EDGE_CADDY_STATIC_TLS_CERTIFICATE_KEY || 'tls.crt' }}
           FUGUE_EDGE_CADDY_STATIC_TLS_PRIVATE_KEY_KEY: ${{ vars.FUGUE_EDGE_CADDY_STATIC_TLS_PRIVATE_KEY_KEY || 'tls.key' }}
+          FUGUE_EDGE_ASSET_CACHE_PATH: ${{ vars.FUGUE_EDGE_ASSET_CACHE_PATH || '' }}
+          FUGUE_EDGE_ASSET_CACHE_MAX_BYTES: ${{ vars.FUGUE_EDGE_ASSET_CACHE_MAX_BYTES || '' }}
           FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE: ${{ vars.FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE || '' }}
           FUGUE_EDGE_EXTRA_GROUPS: ${{ vars.FUGUE_EDGE_EXTRA_GROUPS || '' }}
           FUGUE_DNS_ENABLED: ${{ vars.FUGUE_DNS_ENABLED || 'false' }}
@@ -243,6 +246,7 @@ jobs:
           FUGUE_DNS_ROUTE_A_ANSWER_IPS: ${{ vars.FUGUE_DNS_ROUTE_A_ANSWER_IPS || '' }}
           FUGUE_DNS_STATIC_RECORDS_JSON: ${{ vars.FUGUE_DNS_STATIC_RECORDS_JSON || '' }}
           FUGUE_PLATFORM_ROUTES_JSON: ${{ vars.FUGUE_PLATFORM_ROUTES_JSON || '' }}
+          FUGUE_DNS_GEOIP_OVERRIDES_JSON: ${{ vars.FUGUE_DNS_GEOIP_OVERRIDES_JSON || '' }}
           FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE: ${{ vars.FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE || '' }}
           FUGUE_DNS_EXTRA_GROUPS: ${{ vars.FUGUE_DNS_EXTRA_GROUPS || '' }}
           FUGUE_DNS_TOKEN_SECRET_NAME: ${{ vars.FUGUE_DNS_TOKEN_SECRET_NAME || '' }}
