@@ -814,6 +814,7 @@ run_release_preflight() {
   local discovery_http_status=""
   local autonomy_status_file=""
   local edge_nodes_file=""
+  local dns_nodes_file=""
   local discovery_etag=""
 
   case "${FUGUE_RELEASE_PREFLIGHT_ENABLED:-true}" in
@@ -877,8 +878,10 @@ PY
   curl -fsS -H "Authorization: Bearer ${token}" "${api_base}/v1/admin/platform/autonomy/status" -o "${autonomy_status_file}"
   edge_nodes_file="$(mktemp)"
   curl -fsS -H "Authorization: Bearer ${token}" "${api_base}/v1/edge/nodes" -o "${edge_nodes_file}"
+  dns_nodes_file="$(mktemp)"
+  curl -fsS -H "Authorization: Bearer ${token}" "${api_base}/v1/dns/nodes" -o "${dns_nodes_file}"
   local autonomy_override_message=""
-  if ! autonomy_override_message="$(python3 - "${autonomy_status_file}" "${edge_nodes_file}" <<'PY'
+  if ! autonomy_override_message="$(python3 - "${autonomy_status_file}" "${edge_nodes_file}" "${dns_nodes_file}" <<'PY'
 import json
 from datetime import datetime, timedelta, timezone
 import sys
@@ -918,6 +921,9 @@ def edge_node_bootstrap_pending(node, now):
         return False
     return True
 
+def edge_node_has_route_state(node):
+    return int(node.get("caddy_route_count") or 0) > 0 or bool(trim(node.get("route_bundle_version"))) or bool(trim(node.get("serving_generation"))) or bool(trim(node.get("lkg_generation")))
+
 def edge_node_route_serving_capable(node, now):
     if node.get("draining"):
         return False
@@ -932,47 +938,99 @@ def edge_node_route_serving_capable(node, now):
         return trim(node.get("caddy_last_error")) == "" and int(node.get("caddy_route_count") or 0) > 0
     return False
 
+def edge_node_route_bootstrap_capable(node, now):
+    if node.get("draining") or not node.get("healthy") or not heartbeat_fresh(node, now):
+        return False
+    if edge_node_route_serving_capable(node, now):
+        return False
+    return edge_node_has_route_state(node)
+
 def edge_inventory_healthy(nodes):
     if not nodes:
-        return False, []
+        return False, [], [], []
     healthy_count = 0
     now = datetime.now(timezone.utc)
     bootstrap_pending = []
+    route_bootstrap_pending = []
+    route_bootstrap_groups = []
     for node in nodes:
         if node.get("draining"):
             continue
         if edge_node_bootstrap_pending(node, now):
             bootstrap_pending.append(trim(node.get("id")))
+            group_id = trim(node.get("edge_group_id"))
+            if group_id:
+                route_bootstrap_groups.append(group_id)
+            continue
+        if edge_node_route_bootstrap_capable(node, now):
+            route_bootstrap_pending.append(trim(node.get("id")))
+            group_id = trim(node.get("edge_group_id"))
+            if group_id:
+                route_bootstrap_groups.append(group_id)
             continue
         if not edge_node_route_serving_capable(node, now):
-            return False, bootstrap_pending
+            return False, bootstrap_pending, route_bootstrap_pending, route_bootstrap_groups
         if trim(node.get("last_error")):
-            return False, bootstrap_pending
+            return False, bootstrap_pending, route_bootstrap_pending, route_bootstrap_groups
         cache_status = trim(node.get("cache_status")).lower()
         if cache_status and "error" in cache_status:
-            return False, bootstrap_pending
+            return False, bootstrap_pending, route_bootstrap_pending, route_bootstrap_groups
         healthy_count += 1
+    return healthy_count > 0, bootstrap_pending, route_bootstrap_pending, route_bootstrap_groups
+
+def dns_node_route_bootstrap_capable(node, route_bootstrap_groups):
+    group_id = trim(node.get("edge_group_id"))
+    if group_id == "" or group_id not in route_bootstrap_groups:
+        return False
+    if node.get("healthy") and trim(node.get("status")).lower() == "healthy":
+        return False
+    last_error = trim(node.get("last_error")).lower()
+    if "edge dns bundle invariant failed" in last_error or "without active route" in last_error or "no active route" in last_error:
+        return True
+    return False
+
+def dns_inventory_bootstrap_healthy(nodes, route_bootstrap_groups):
+    if not nodes:
+        return False, []
+    healthy_count = 0
+    bootstrap_pending = []
+    for node in nodes:
+        if node.get("healthy") and trim(node.get("status")).lower() == "healthy" and trim(node.get("last_error")) == "" and trim(node.get("cache_status")).lower() not in {"", "error", "missing"}:
+            healthy_count += 1
+            continue
+        if dns_node_route_bootstrap_capable(node, route_bootstrap_groups):
+            bootstrap_pending.append(trim(node.get("id")))
+            continue
+        return False, bootstrap_pending
     return healthy_count > 0, bootstrap_pending
 
 status_path = sys.argv[1]
 nodes_path = sys.argv[2]
+dns_nodes_path = sys.argv[3]
 with open(status_path, "r", encoding="utf-8") as fh:
     payload = json.load(fh)
 status = payload.get("status") or {}
 with open(nodes_path, "r", encoding="utf-8") as fh:
     nodes_payload = json.load(fh)
 nodes = nodes_payload.get("nodes") or []
+with open(dns_nodes_path, "r", encoding="utf-8") as fh:
+    dns_nodes_payload = json.load(fh)
+dns_nodes = dns_nodes_payload.get("nodes") or []
 checks = {str(item.get("name", "")).strip(): item for item in status.get("checks") or [] if isinstance(item, dict)}
 failing_checks = [name for name, check in checks.items() if not check.get("pass", False)]
-bootstrap_override, bootstrap_pending = edge_inventory_healthy(nodes)
+bootstrap_override, bootstrap_pending, route_bootstrap_pending, route_bootstrap_groups = edge_inventory_healthy(nodes)
+dns_bootstrap_override, dns_bootstrap_pending = dns_inventory_bootstrap_healthy(dns_nodes, set(filter(None, route_bootstrap_groups)))
 store = status.get("control_plane_store") or {}
 if store.get("block_rollout", False):
     raise SystemExit("control-plane store promotion gate is blocked")
 if str(store.get("permission_verification_status", "")).strip() != "passed":
     raise SystemExit("control-plane store permission verification did not pass")
-if set(failing_checks) == {"edge"} and bootstrap_override:
-    pending = ", ".join(sorted(filter(None, bootstrap_pending))) or "<unknown>"
-    print(f"release preflight bootstrap: edge inventory is blocked only by bootstrap-pending nodes {pending}; continuing with explicit rollout to bring them online")
+allowed_checks = {"edge", "dns"}
+if set(failing_checks).issubset(allowed_checks) and bootstrap_override and (not any(name == "dns" for name in failing_checks) or dns_bootstrap_override):
+    pending = ", ".join(sorted(filter(None, bootstrap_pending))) or "<none>"
+    route_pending = ", ".join(sorted(filter(None, route_bootstrap_pending))) or "<none>"
+    dns_pending = ", ".join(sorted(filter(None, dns_bootstrap_pending))) or "<none>"
+    print(f"release preflight bootstrap: edge inventory is blocked only by bootstrap-pending nodes {pending} and route-bootstrap nodes {route_pending}; dns bootstrap nodes {dns_pending}; continuing with explicit rollout to bring them online")
 else:
     if not status.get("pass", False):
         raise SystemExit("platform autonomy status did not pass")

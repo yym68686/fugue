@@ -112,3 +112,36 @@ func TestEdgeInventoryHealthyIgnoresBootstrapPendingEdgeNodes(t *testing.T) {
 		t.Fatalf("expected bootstrap pending edge node to be ignored while healthy edge remains serving")
 	}
 }
+
+func TestEdgeInventoryHealthyIgnoresRouteBootstrapEdgeNodes(t *testing.T) {
+	now := time.Now().UTC()
+	nodes := []model.EdgeNode{
+		{
+			ID:                 "edge-us-1",
+			EdgeGroupID:        "edge-group-country-us",
+			Status:             model.EdgeHealthHealthy,
+			Healthy:            true,
+			RouteBundleVersion: "routegen_live",
+			ServingGeneration:  "routegen_live",
+			LKGGeneration:      "routegen_live",
+			CaddyRouteCount:    46,
+			CacheStatus:        "ready",
+			LastHeartbeatAt:    &now,
+		},
+		{
+			ID:                 "edge-hk-1",
+			EdgeGroupID:        "edge-group-country-hk",
+			Status:             model.EdgeHealthDegraded,
+			Healthy:            true,
+			RouteBundleVersion: "routegen_bootstrap",
+			ServingGeneration:  "routegen_bootstrap",
+			LKGGeneration:      "routegen_bootstrap",
+			CacheStatus:        "stale",
+			LastError:          "edge routes returned status 500: bundle bootstrap in progress",
+			LastHeartbeatAt:    &now,
+		},
+	}
+	if !edgeInventoryHealthy(nodes) {
+		t.Fatalf("expected route bootstrap edge node to be ignored while healthy edge remains serving")
+	}
+}

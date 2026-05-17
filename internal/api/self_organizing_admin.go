@@ -750,6 +750,9 @@ func edgeInventoryHealthy(nodes []model.EdgeNode) bool {
 		if edgeNodeBootstrapPending(node, now) {
 			continue
 		}
+		if edgeNodeRouteBootstrapCapable(node, now) {
+			continue
+		}
 		if !edgeNodeRouteServingCapable(node, now) {
 			return false
 		}
