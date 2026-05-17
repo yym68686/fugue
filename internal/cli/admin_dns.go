@@ -337,7 +337,7 @@ func (c *CLI) checkDNSAnswers(client *Client, hostname string) (dnsAnswerCheckRe
 			Status:    strings.TrimSpace(node.Status),
 			Healthy:   node.Healthy,
 		}
-		answers, err := queryDNSNodeAnswers(hostname, node)
+		answers, warnings, err := queryDNSNodeAnswers(hostname, node)
 		if err != nil {
 			nodeReport.Pass = false
 			nodeReport.Message = err.Error()
@@ -346,6 +346,9 @@ func (c *CLI) checkDNSAnswers(client *Client, hostname string) (dnsAnswerCheckRe
 			continue
 		}
 		nodeReport.Answers = answers
+		if len(warnings) > 0 {
+			nodeReport.Message = appendMessage(nodeReport.Message, strings.Join(warnings, "; "))
+		}
 		seenGroups := map[string]struct{}{}
 		nodePass := true
 		for _, answer := range answers {
@@ -442,7 +445,7 @@ func writeDNSAnswerCheckTable(w io.Writer, nodes []dnsAnswerCheckNode) error {
 	return tw.Flush()
 }
 
-func queryDNSNodeAnswers(hostname string, node model.DNSNode) ([]string, error) {
+func queryDNSNodeAnswers(hostname string, node model.DNSNode) ([]string, []string, error) {
 	address := ""
 	if ip := strings.TrimSpace(node.PublicIPv4); ip != "" {
 		address = net.JoinHostPort(ip, "53")
@@ -450,30 +453,38 @@ func queryDNSNodeAnswers(hostname string, node model.DNSNode) ([]string, error) 
 		address = net.JoinHostPort(ip, "53")
 	}
 	if address == "" {
-		return nil, fmt.Errorf("dns node has no public IP")
+		return nil, nil, fmt.Errorf("dns node has no public IP")
 	}
 	answers := []string{}
+	warnings := []string{}
 	if udpAnswers, err := queryAuthoritativeDNSRecord(hostname, address, "udp", miekgdns.TypeA); err == nil {
 		answers = append(answers, udpAnswers...)
 	} else {
-		return nil, fmt.Errorf("udp A query failed: %w", err)
+		warnings = append(warnings, fmt.Sprintf("udp A query failed: %v", err))
 	}
 	if tcpAnswers, err := queryAuthoritativeDNSRecord(hostname, address, "tcp", miekgdns.TypeA); err == nil {
 		answers = append(answers, tcpAnswers...)
 	} else {
-		return nil, fmt.Errorf("tcp A query failed: %w", err)
+		warnings = append(warnings, fmt.Sprintf("tcp A query failed: %v", err))
 	}
 	if udpAAAA, err := queryAuthoritativeDNSRecord(hostname, address, "udp", miekgdns.TypeAAAA); err == nil {
 		answers = append(answers, udpAAAA...)
 	} else {
-		return nil, fmt.Errorf("udp AAAA query failed: %w", err)
+		warnings = append(warnings, fmt.Sprintf("udp AAAA query failed: %v", err))
 	}
 	if tcpAAAA, err := queryAuthoritativeDNSRecord(hostname, address, "tcp", miekgdns.TypeAAAA); err == nil {
 		answers = append(answers, tcpAAAA...)
 	} else {
-		return nil, fmt.Errorf("tcp AAAA query failed: %w", err)
+		warnings = append(warnings, fmt.Sprintf("tcp AAAA query failed: %v", err))
 	}
-	return uniqueSortedStrings(answers), nil
+	answers = uniqueSortedStrings(answers)
+	if len(answers) == 0 {
+		if len(warnings) == 0 {
+			warnings = append(warnings, "no A/AAAA answers")
+		}
+		return nil, warnings, fmt.Errorf("%s", strings.Join(warnings, "; "))
+	}
+	return answers, warnings, nil
 }
 
 func queryAuthoritativeDNSRecord(hostname, address, network string, qtype uint16) ([]string, error) {
