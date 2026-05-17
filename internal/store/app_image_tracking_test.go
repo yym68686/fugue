@@ -46,6 +46,76 @@ func TestAppImageTrackingQueuesAsBackgroundImport(t *testing.T) {
 	}
 }
 
+func TestAppImageTrackingImportPreservesComposeMetadataFromUploadSource(t *testing.T) {
+	t.Parallel()
+
+	s, _, _, app := newAppImageTrackingTestStore(t)
+	upload, err := s.CreateSourceUpload(app.TenantID, "demo.tgz", "application/gzip", []byte("archive"))
+	if err != nil {
+		t.Fatalf("create source upload: %v", err)
+	}
+	uploadSource := model.AppSource{
+		Type:             model.AppSourceTypeUpload,
+		UploadID:         upload.ID,
+		UploadFilename:   upload.Filename,
+		ArchiveSHA256:    upload.SHA256,
+		ArchiveSizeBytes: upload.SizeBytes,
+		BuildStrategy:    model.AppBuildStrategyDockerfile,
+		DockerfilePath:   "Dockerfile",
+		BuildContextDir:  ".",
+		ImageNameSuffix:  "web",
+		ComposeService:   "web",
+		ComposeDependsOn: []string{"api"},
+		DetectedProvider: "dockerfile",
+		DetectedStack:    "nextjs",
+	}
+	if _, err := s.UpdateAppOriginSource(app.ID, uploadSource); err != nil {
+		t.Fatalf("update source: %v", err)
+	}
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+
+	tracking, err := s.UpsertAppImageTracking(model.AppImageTracking{
+		AppID:    app.ID,
+		ImageRef: "ghcr.io/acme/frontend:main",
+		Enabled:  true,
+	})
+	if err != nil {
+		t.Fatalf("upsert tracking: %v", err)
+	}
+
+	op, err := s.QueueAppImageTrackingImport(app, tracking, model.ActorTypeBootstrap, model.OperationRequestedByImageTracking)
+	if err != nil {
+		t.Fatalf("queue image tracking import: %v", err)
+	}
+	if op.DesiredSource == nil {
+		t.Fatal("expected desired source")
+	}
+	if op.DesiredSource.Type != model.AppSourceTypeDockerImage {
+		t.Fatalf("expected docker image source, got %q", op.DesiredSource.Type)
+	}
+	if op.DesiredSource.ImageRef != tracking.ImageRef {
+		t.Fatalf("expected tracked image ref %q, got %q", tracking.ImageRef, op.DesiredSource.ImageRef)
+	}
+	if op.DesiredSource.ImageNameSuffix != "web" {
+		t.Fatalf("expected image suffix web, got %q", op.DesiredSource.ImageNameSuffix)
+	}
+	if op.DesiredSource.ComposeService != "web" {
+		t.Fatalf("expected compose service web, got %q", op.DesiredSource.ComposeService)
+	}
+	if len(op.DesiredSource.ComposeDependsOn) != 1 || op.DesiredSource.ComposeDependsOn[0] != "api" {
+		t.Fatalf("expected compose dependency [api], got %v", op.DesiredSource.ComposeDependsOn)
+	}
+	if op.DesiredSource.DetectedProvider != "dockerfile" {
+		t.Fatalf("expected detected provider dockerfile, got %q", op.DesiredSource.DetectedProvider)
+	}
+	if op.DesiredSource.DetectedStack != "nextjs" {
+		t.Fatalf("expected detected stack nextjs, got %q", op.DesiredSource.DetectedStack)
+	}
+}
+
 func TestAppImageTrackingRecordsDeployDigest(t *testing.T) {
 	t.Parallel()
 

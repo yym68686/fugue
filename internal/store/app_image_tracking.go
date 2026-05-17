@@ -177,18 +177,7 @@ func (s *Store) QueueAppImageTrackingImport(app model.App, tracking model.AppIma
 		Type:     model.AppSourceTypeDockerImage,
 		ImageRef: tracking.ImageRef,
 	}
-	for _, candidate := range []*model.AppSource{model.AppOriginSource(app), model.AppBuildSource(app), app.Source} {
-		if candidate == nil || strings.TrimSpace(candidate.Type) != model.AppSourceTypeDockerImage {
-			continue
-		}
-		if strings.TrimSpace(candidate.ImageRef) != tracking.ImageRef {
-			continue
-		}
-		source.ImageNameSuffix = strings.TrimSpace(candidate.ImageNameSuffix)
-		source.ComposeService = strings.TrimSpace(candidate.ComposeService)
-		source.ComposeDependsOn = append([]string(nil), candidate.ComposeDependsOn...)
-		break
-	}
+	inheritImageTrackingSourceMetadata(&source, app, tracking.ImageRef)
 
 	return s.CreateOperation(model.Operation{
 		TenantID:            app.TenantID,
@@ -200,6 +189,71 @@ func (s *Store) QueueAppImageTrackingImport(app model.App, tracking model.AppIma
 		DesiredSource:       &source,
 		DesiredOriginSource: model.CloneAppSource(&source),
 	})
+}
+
+func inheritImageTrackingSourceMetadata(source *model.AppSource, app model.App, imageRef string) {
+	if source == nil {
+		return
+	}
+	for _, candidate := range imageTrackingSourceMetadataCandidates(app, imageRef) {
+		if candidate == nil {
+			continue
+		}
+		if strings.TrimSpace(source.ImageNameSuffix) == "" {
+			source.ImageNameSuffix = strings.TrimSpace(candidate.ImageNameSuffix)
+		}
+		if strings.TrimSpace(source.ComposeService) == "" {
+			source.ComposeService = strings.TrimSpace(candidate.ComposeService)
+		}
+		if len(source.ComposeDependsOn) == 0 && len(candidate.ComposeDependsOn) > 0 {
+			source.ComposeDependsOn = append([]string(nil), candidate.ComposeDependsOn...)
+		}
+		if strings.TrimSpace(source.DetectedProvider) == "" {
+			source.DetectedProvider = strings.TrimSpace(candidate.DetectedProvider)
+		}
+		if strings.TrimSpace(source.DetectedStack) == "" {
+			source.DetectedStack = strings.TrimSpace(candidate.DetectedStack)
+		}
+		if imageTrackingSourceMetadataComplete(source) {
+			return
+		}
+	}
+}
+
+func imageTrackingSourceMetadataCandidates(app model.App, imageRef string) []*model.AppSource {
+	base := []*model.AppSource{model.AppOriginSource(app), model.AppBuildSource(app), app.Source}
+	out := make([]*model.AppSource, 0, len(base)*2)
+	seen := make(map[*model.AppSource]struct{}, len(base))
+	for _, candidate := range base {
+		if candidate == nil {
+			continue
+		}
+		if strings.TrimSpace(candidate.Type) != model.AppSourceTypeDockerImage {
+			continue
+		}
+		if strings.TrimSpace(candidate.ImageRef) != strings.TrimSpace(imageRef) {
+			continue
+		}
+		out = append(out, candidate)
+		seen[candidate] = struct{}{}
+	}
+	for _, candidate := range base {
+		if candidate == nil {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		out = append(out, candidate)
+	}
+	return out
+}
+
+func imageTrackingSourceMetadataComplete(source *model.AppSource) bool {
+	return strings.TrimSpace(source.ImageNameSuffix) != "" &&
+		strings.TrimSpace(source.ComposeService) != "" &&
+		strings.TrimSpace(source.DetectedProvider) != "" &&
+		strings.TrimSpace(source.DetectedStack) != ""
 }
 
 func normalizeAppImageTracking(tracking model.AppImageTracking) model.AppImageTracking {
