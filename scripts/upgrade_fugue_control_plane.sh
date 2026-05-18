@@ -880,14 +880,49 @@ PY
   curl -fsS -H "Authorization: Bearer ${token}" "${api_base}/v1/edge/nodes" -o "${edge_nodes_file}"
   dns_nodes_file="$(mktemp)"
   curl -fsS -H "Authorization: Bearer ${token}" "${api_base}/v1/dns/nodes" -o "${dns_nodes_file}"
+  node_policies_file="$(mktemp)"
+  if ! curl -fsS -H "Authorization: Bearer ${token}" "${api_base}/v1/cluster/node-policies/status" -o "${node_policies_file}"; then
+    log "release preflight: node policy status endpoint unavailable; evaluating raw edge and DNS inventory"
+    : >"${node_policies_file}"
+  fi
   local autonomy_override_message=""
-  if ! autonomy_override_message="$(python3 - "${autonomy_status_file}" "${edge_nodes_file}" "${dns_nodes_file}" <<'PY'
+  if ! autonomy_override_message="$(python3 - "${autonomy_status_file}" "${edge_nodes_file}" "${dns_nodes_file}" "${node_policies_file}" <<'PY'
 import json
 from datetime import datetime, timedelta, timezone
 import sys
 
 def trim(value):
     return str(value or "").strip()
+
+def load_node_policy_statuses(path):
+    if not trim(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    statuses = payload.get("node_policies") or []
+    return [status for status in statuses if isinstance(status, dict)]
+
+def filter_nodes_for_effective_policy(nodes, statuses, role_key):
+    disabled = set()
+    for status in statuses:
+        node_name = trim(status.get("node_name"))
+        policy = status.get("policy") or {}
+        if node_name and isinstance(policy, dict) and policy.get(role_key) is False:
+            disabled.add(node_name)
+    if not disabled:
+        return nodes, []
+    out = []
+    retired = []
+    for node in nodes:
+        node_id = trim(node.get("id"))
+        if node_id and node_id in disabled:
+            retired.append(node_id)
+            continue
+        out.append(node)
+    return out, retired
 
 def heartbeat_fresh(node, now):
     seen = node.get("last_heartbeat_at") or node.get("last_seen_at")
@@ -1007,6 +1042,7 @@ def dns_inventory_bootstrap_healthy(nodes, route_bootstrap_groups):
 status_path = sys.argv[1]
 nodes_path = sys.argv[2]
 dns_nodes_path = sys.argv[3]
+node_policies_path = sys.argv[4]
 with open(status_path, "r", encoding="utf-8") as fh:
     payload = json.load(fh)
 status = payload.get("status") or {}
@@ -1016,6 +1052,9 @@ nodes = nodes_payload.get("nodes") or []
 with open(dns_nodes_path, "r", encoding="utf-8") as fh:
     dns_nodes_payload = json.load(fh)
 dns_nodes = dns_nodes_payload.get("nodes") or []
+node_policy_statuses = load_node_policy_statuses(node_policies_path)
+nodes, retired_edge_nodes = filter_nodes_for_effective_policy(nodes, node_policy_statuses, "effective_edge")
+dns_nodes, retired_dns_nodes = filter_nodes_for_effective_policy(dns_nodes, node_policy_statuses, "effective_dns")
 checks = {str(item.get("name", "")).strip(): item for item in status.get("checks") or [] if isinstance(item, dict)}
 failing_checks = [name for name, check in checks.items() if not check.get("pass", False)]
 bootstrap_override, bootstrap_pending, route_bootstrap_pending, route_bootstrap_groups = edge_inventory_healthy(nodes)
@@ -1030,7 +1069,12 @@ if set(failing_checks).issubset(allowed_checks) and bootstrap_override and (not 
     pending = ", ".join(sorted(filter(None, bootstrap_pending))) or "<none>"
     route_pending = ", ".join(sorted(filter(None, route_bootstrap_pending))) or "<none>"
     dns_pending = ", ".join(sorted(filter(None, dns_bootstrap_pending))) or "<none>"
-    print(f"release preflight bootstrap: edge inventory is blocked only by bootstrap-pending nodes {pending} and route-bootstrap nodes {route_pending}; dns bootstrap nodes {dns_pending}; continuing with explicit rollout to bring them online")
+    retired_note = ""
+    if retired_edge_nodes or retired_dns_nodes:
+        retired_edge = ", ".join(sorted(set(filter(None, retired_edge_nodes)))) or "<none>"
+        retired_dns = ", ".join(sorted(set(filter(None, retired_dns_nodes)))) or "<none>"
+        retired_note = f"; node-policy-retired edge nodes ignored: {retired_edge}; node-policy-retired DNS nodes ignored: {retired_dns}"
+    print(f"release preflight bootstrap: edge inventory is blocked only by bootstrap-pending nodes {pending} and route-bootstrap nodes {route_pending}; dns bootstrap nodes {dns_pending}{retired_note}; continuing with explicit rollout to bring them online")
 else:
     if not status.get("pass", False):
         raise SystemExit("platform autonomy status did not pass")
@@ -1044,7 +1088,7 @@ else:
         raise SystemExit("platform autonomy status did not pass")
 PY
   )"; then
-    rm -f "${autonomy_status_file}" "${edge_nodes_file}"
+    rm -f "${autonomy_status_file}" "${edge_nodes_file}" "${dns_nodes_file}" "${node_policies_file}"
     return 1
   fi
   if [[ -n "$(trim_field "${autonomy_override_message}")" ]]; then
@@ -1053,7 +1097,7 @@ PY
 
   log "release preflight passed for ${api_base}; discovery_etag=${discovery_etag}"
   rm -f "${discovery_headers}" "${discovery_body}" "${autonomy_status_file}"
-  rm -f "${edge_nodes_file}"
+  rm -f "${edge_nodes_file}" "${dns_nodes_file}" "${node_policies_file}"
 }
 
 fetch_discovery_bundle() {

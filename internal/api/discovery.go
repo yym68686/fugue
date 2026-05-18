@@ -48,6 +48,9 @@ func (s *Server) deriveDiscoveryBundle(r *http.Request, principal model.Principa
 		}
 		nodePolicies = nil
 	}
+	edgeNodes = activeEdgeNodesForPolicy(edgeNodes, nodePolicies)
+	dnsNodes = activeDNSNodesForPolicy(dnsNodes, nodePolicies)
+	edgeGroups = activeEdgeGroupsForInventory(edgeGroups, edgeNodes, dnsNodes)
 	edgeRoutes, err := s.store.ListEdgeRoutePolicies()
 	if err != nil {
 		return model.DiscoveryBundle{}, err

@@ -466,13 +466,15 @@ func (s *Server) platformAutonomyStatus(r *http.Request) (model.PlatformAutonomy
 	if err != nil {
 		return model.PlatformAutonomyStatus{}, err
 	}
+	edgeNodesForAutonomy := activeEdgeNodesForPolicy(edgeNodes, nodePolicies)
+	dnsNodesForAutonomy := activeDNSNodesForPolicy(dnsNodes, nodePolicies)
 	registryPass, registryMessage := s.registryReachabilityCheck(r.Context())
 	headscalePass, headscaleMessage := s.headscaleReachabilityCheck(r.Context())
 	checks := []model.StoreInvariantCheck{
 		{Name: "discovery_bundle", Pass: discovery.Generation != "" && discovery.Signature != "", Message: discovery.Generation},
 		{Name: "node_policy", Pass: clusterNodePoliciesConverged(nodePolicies), Count: len(nodePolicies)},
-		{Name: "edge", Pass: edgeInventoryHealthy(edgeNodes), Count: len(edgeNodes)},
-		{Name: "dns", Pass: dnsInventoryHealthy(dnsNodes), Count: len(dnsNodes)},
+		{Name: "edge", Pass: edgeInventoryHealthy(edgeNodesForAutonomy), Count: len(edgeNodesForAutonomy), Message: activeInventoryMessage(len(edgeNodesForAutonomy), len(edgeNodes))},
+		{Name: "dns", Pass: dnsInventoryHealthy(dnsNodesForAutonomy), Count: len(dnsNodesForAutonomy), Message: activeInventoryMessage(len(dnsNodesForAutonomy), len(dnsNodes))},
 		{Name: "registry", Pass: registryPass, Message: registryMessage},
 		{Name: "headscale", Pass: headscalePass, Message: headscaleMessage},
 		{Name: "route_fallback", Pass: true, Message: "route fallback remains observable"},
@@ -735,6 +737,87 @@ func clusterNodePoliciesConverged(statuses []model.ClusterNodePolicyStatus) bool
 		}
 	}
 	return len(statuses) > 0
+}
+
+func activeEdgeNodesForPolicy(nodes []model.EdgeNode, statuses []model.ClusterNodePolicyStatus) []model.EdgeNode {
+	if len(nodes) == 0 || len(statuses) == 0 {
+		return nodes
+	}
+	statusByName := clusterNodePolicyStatusByName(statuses)
+	if len(statusByName) == 0 {
+		return nodes
+	}
+	out := make([]model.EdgeNode, 0, len(nodes))
+	for _, node := range nodes {
+		status, ok := statusByName[strings.TrimSpace(node.ID)]
+		if ok && status.Policy != nil && !status.Policy.EffectiveEdge {
+			continue
+		}
+		out = append(out, node)
+	}
+	return out
+}
+
+func activeDNSNodesForPolicy(nodes []model.DNSNode, statuses []model.ClusterNodePolicyStatus) []model.DNSNode {
+	if len(nodes) == 0 || len(statuses) == 0 {
+		return nodes
+	}
+	statusByName := clusterNodePolicyStatusByName(statuses)
+	if len(statusByName) == 0 {
+		return nodes
+	}
+	out := make([]model.DNSNode, 0, len(nodes))
+	for _, node := range nodes {
+		status, ok := statusByName[strings.TrimSpace(node.ID)]
+		if ok && status.Policy != nil && !status.Policy.EffectiveDNS {
+			continue
+		}
+		out = append(out, node)
+	}
+	return out
+}
+
+func activeEdgeGroupsForInventory(groups []model.EdgeGroup, edgeNodes []model.EdgeNode, dnsNodes []model.DNSNode) []model.EdgeGroup {
+	if len(groups) == 0 {
+		return groups
+	}
+	activeGroupIDs := make(map[string]struct{}, len(edgeNodes)+len(dnsNodes))
+	for _, node := range edgeNodes {
+		if groupID := strings.TrimSpace(node.EdgeGroupID); groupID != "" {
+			activeGroupIDs[groupID] = struct{}{}
+		}
+	}
+	for _, node := range dnsNodes {
+		if groupID := strings.TrimSpace(node.EdgeGroupID); groupID != "" {
+			activeGroupIDs[groupID] = struct{}{}
+		}
+	}
+	out := make([]model.EdgeGroup, 0, len(groups))
+	for _, group := range groups {
+		if _, ok := activeGroupIDs[strings.TrimSpace(group.ID)]; ok {
+			out = append(out, group)
+		}
+	}
+	return out
+}
+
+func clusterNodePolicyStatusByName(statuses []model.ClusterNodePolicyStatus) map[string]model.ClusterNodePolicyStatus {
+	out := make(map[string]model.ClusterNodePolicyStatus, len(statuses))
+	for _, status := range statuses {
+		name := strings.TrimSpace(status.NodeName)
+		if name == "" {
+			continue
+		}
+		out[name] = status
+	}
+	return out
+}
+
+func activeInventoryMessage(activeCount, totalCount int) string {
+	if activeCount == totalCount {
+		return ""
+	}
+	return fmt.Sprintf("active=%d total=%d; retired nodes excluded by node policy", activeCount, totalCount)
 }
 
 func edgeInventoryHealthy(nodes []model.EdgeNode) bool {

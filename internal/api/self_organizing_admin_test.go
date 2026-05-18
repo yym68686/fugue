@@ -145,3 +145,91 @@ func TestEdgeInventoryHealthyIgnoresRouteBootstrapEdgeNodes(t *testing.T) {
 		t.Fatalf("expected route bootstrap edge node to be ignored while healthy edge remains serving")
 	}
 }
+
+func TestActiveInventoryFiltersNodesRetiredByNodePolicy(t *testing.T) {
+	now := time.Now().UTC()
+	stale := now.Add(-1 * time.Hour)
+	policies := []model.ClusterNodePolicyStatus{
+		{
+			NodeName: "edge-us-1",
+			Policy: &model.ClusterNodePolicy{
+				EffectiveEdge: true,
+				EffectiveDNS:  true,
+			},
+		},
+		{
+			NodeName: "fortedrape8",
+			Policy: &model.ClusterNodePolicy{
+				EffectiveEdge: false,
+				EffectiveDNS:  false,
+			},
+		},
+	}
+
+	edgeNodes := []model.EdgeNode{
+		{
+			ID:                 "edge-us-1",
+			EdgeGroupID:        "edge-group-country-us",
+			Status:             model.EdgeHealthHealthy,
+			Healthy:            true,
+			RouteBundleVersion: "routegen_live",
+			ServingGeneration:  "routegen_live",
+			CaddyRouteCount:    40,
+			LastHeartbeatAt:    &now,
+		},
+		{
+			ID:                 "fortedrape8",
+			EdgeGroupID:        "edge-group-country-hk",
+			Status:             model.EdgeHealthHealthy,
+			Healthy:            true,
+			RouteBundleVersion: "routegen_old",
+			ServingGeneration:  "routegen_old",
+			CaddyRouteCount:    40,
+			LastHeartbeatAt:    &stale,
+		},
+	}
+	dnsNodes := []model.DNSNode{
+		{
+			ID:                "edge-us-1",
+			EdgeGroupID:       "edge-group-country-us",
+			Status:            model.EdgeHealthHealthy,
+			Healthy:           true,
+			DNSBundleVersion:  "dnsgen_live",
+			ServingGeneration: "dnsgen_live",
+			LastHeartbeatAt:   &now,
+		},
+		{
+			ID:                "fortedrape8",
+			EdgeGroupID:       "edge-group-country-hk",
+			Status:            model.EdgeHealthHealthy,
+			Healthy:           true,
+			DNSBundleVersion:  "dnsgen_old",
+			ServingGeneration: "dnsgen_old",
+			LastHeartbeatAt:   &stale,
+		},
+	}
+
+	activeEdges := activeEdgeNodesForPolicy(edgeNodes, policies)
+	if len(activeEdges) != 1 || activeEdges[0].ID != "edge-us-1" {
+		t.Fatalf("expected only active edge policy node, got %#v", activeEdges)
+	}
+	if !edgeInventoryHealthy(activeEdges) {
+		t.Fatalf("expected active edge inventory to ignore retired stale edge node")
+	}
+
+	activeDNS := activeDNSNodesForPolicy(dnsNodes, policies)
+	if len(activeDNS) != 1 || activeDNS[0].ID != "edge-us-1" {
+		t.Fatalf("expected only active DNS policy node, got %#v", activeDNS)
+	}
+	if !dnsInventoryHealthy(activeDNS) {
+		t.Fatalf("expected active DNS inventory to ignore retired stale DNS node")
+	}
+
+	groups := activeEdgeGroupsForInventory([]model.EdgeGroup{
+		{ID: "edge-group-country-us"},
+		{ID: "edge-group-country-hk"},
+	}, activeEdges, activeDNS)
+	if len(groups) != 1 || groups[0].ID != "edge-group-country-us" {
+		t.Fatalf("expected discovery groups to keep only active inventory groups, got %#v", groups)
+	}
+}
