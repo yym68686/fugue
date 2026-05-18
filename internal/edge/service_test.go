@@ -1183,6 +1183,7 @@ func TestProxyHandlerCachesStaticAssets(t *testing.T) {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/javascript")
+		time.Sleep(10 * time.Millisecond)
 		_, _ = fmt.Fprintf(w, "console.log(%d)", upstreamHits.Load())
 	}))
 	defer backend.Close()
@@ -1220,12 +1221,18 @@ func TestProxyHandlerCachesStaticAssets(t *testing.T) {
 	if first.Code != http.StatusOK || first.Header().Get("X-Fugue-Cache") != "miss" {
 		t.Fatalf("expected first request to miss cache, got status=%d cache=%q body=%q", first.Code, first.Header().Get("X-Fugue-Cache"), first.Body.String())
 	}
+	if timing := strings.Join(first.Header().Values("Server-Timing"), ","); !strings.Contains(timing, "fugue_cache_lookup") || !strings.Contains(timing, "fugue_origin_connect") || !strings.Contains(timing, "fugue_origin_ttfb") {
+		t.Fatalf("expected first response to expose cache and origin timing, got %q", timing)
+	}
 
 	second := httptest.NewRecorder()
 	secondReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/_next/static/chunks/app.js", nil)
 	service.ProxyHandler().ServeHTTP(second, secondReq)
 	if second.Code != http.StatusOK || second.Header().Get("X-Fugue-Cache") != "hit" {
 		t.Fatalf("expected second request to hit cache, got status=%d cache=%q body=%q", second.Code, second.Header().Get("X-Fugue-Cache"), second.Body.String())
+	}
+	if timing := strings.Join(second.Header().Values("Server-Timing"), ","); !strings.Contains(timing, "fugue_cache_lookup") || strings.Contains(timing, "fugue_origin_connect") || strings.Contains(timing, "fugue_origin_ttfb") {
+		t.Fatalf("expected cached response to expose only cache timing, got %q", timing)
 	}
 	if upstreamHits.Load() != 1 {
 		t.Fatalf("expected one upstream hit after cache hit, got %d", upstreamHits.Load())
@@ -1238,6 +1245,11 @@ func TestProxyHandlerCachesStaticAssets(t *testing.T) {
 	for _, want := range []string{
 		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",cache_status="hit",cache_policy_id="static-assets-immutable-v1",asset_class="next_static"} 1`,
 		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",cache_status="miss",cache_policy_id="static-assets-immutable-v1",asset_class="next_static"} 1`,
+		`fugue_edge_route_cache_lookup_duration_seconds_count{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 2`,
+		`fugue_edge_route_origin_connect_duration_seconds_count{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 1`,
+		`fugue_edge_route_origin_ttfb_seconds_count{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 1`,
+		`fugue_edge_route_origin_total_duration_seconds_count{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 1`,
+		`fugue_edge_route_response_write_duration_seconds_count{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 2`,
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, metrics)

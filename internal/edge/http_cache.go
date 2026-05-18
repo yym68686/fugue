@@ -370,6 +370,10 @@ func (s *Service) edgeCacheStore(decision edgeHTTPCacheDecision, entry edgeHTTPC
 	if path == "" {
 		return nil
 	}
+	entry.Header = cloneHTTPHeader(entry.Header)
+	if entry.Header != nil {
+		entry.Header.Del("Server-Timing")
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -393,7 +397,7 @@ func (s *Service) edgeCacheStore(decision edgeHTTPCacheDecision, entry edgeHTTPC
 	return os.Rename(tmp, path)
 }
 
-func (s *Service) edgeCacheServeIfFresh(w http.ResponseWriter, decision edgeHTTPCacheDecision, entry edgeHTTPCacheEntry) (bool, int, string) {
+func (s *Service) edgeCacheServeIfFresh(w http.ResponseWriter, decision edgeHTTPCacheDecision, entry edgeHTTPCacheEntry, serverTiming string) (bool, int, string) {
 	status := edgeCacheStatusHit
 	now := time.Now().UTC()
 	if !entry.ExpiresAt.IsZero() && now.After(entry.ExpiresAt) {
@@ -403,13 +407,13 @@ func (s *Service) edgeCacheServeIfFresh(w http.ResponseWriter, decision edgeHTTP
 		}
 		status = edgeCacheStatusStale
 	}
-	if s.edgeCacheServeWithStatus(w, decision, entry, status) {
+	if s.edgeCacheServeWithStatus(w, decision, entry, status, serverTiming) {
 		return true, entry.StatusCode, status
 	}
 	return false, 0, ""
 }
 
-func (s *Service) edgeCacheServeWithStatus(w http.ResponseWriter, decision edgeHTTPCacheDecision, entry edgeHTTPCacheEntry, cacheStatus string) bool {
+func (s *Service) edgeCacheServeWithStatus(w http.ResponseWriter, decision edgeHTTPCacheDecision, entry edgeHTTPCacheEntry, cacheStatus, serverTiming string) bool {
 	if entry.StatusCode == 0 {
 		return false
 	}
@@ -417,6 +421,7 @@ func (s *Service) edgeCacheServeWithStatus(w http.ResponseWriter, decision edgeH
 	if headers == nil {
 		headers = make(http.Header)
 	}
+	headers.Del("Server-Timing")
 	headers.Set("X-Fugue-Cache", cacheStatus)
 	if control := strings.TrimSpace(decision.Policy.EdgeCacheControl); control != "" {
 		headers.Set("Cache-Control", control)
@@ -425,6 +430,9 @@ func (s *Service) edgeCacheServeWithStatus(w http.ResponseWriter, decision edgeH
 		headers.Set("Age", fmt.Sprintf("%d", int(time.Since(entry.StoredAt).Seconds())))
 	}
 	copyHeader(w.Header(), headers)
+	if strings.TrimSpace(serverTiming) != "" {
+		w.Header().Add("Server-Timing", serverTiming)
+	}
 	w.WriteHeader(entry.StatusCode)
 	if len(entry.Body) > 0 {
 		_, _ = w.Write(entry.Body)

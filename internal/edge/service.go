@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/http/httputil"
 	"net/url"
 	"os"
@@ -119,6 +120,16 @@ type telemetry struct {
 	RouteLatencySum       map[routeMetricKey]float64
 	RouteTTFBCount        map[routeMetricKey]uint64
 	RouteTTFBSum          map[routeMetricKey]float64
+	RouteCacheLookupCount map[routeMetricKey]uint64
+	RouteCacheLookupSum   map[routeMetricKey]float64
+	RouteOriginConnCount  map[routeMetricKey]uint64
+	RouteOriginConnSum    map[routeMetricKey]float64
+	RouteOriginTTFBCount  map[routeMetricKey]uint64
+	RouteOriginTTFBSum    map[routeMetricKey]float64
+	RouteOriginTotalCount map[routeMetricKey]uint64
+	RouteOriginTotalSum   map[routeMetricKey]float64
+	RouteWriteCount       map[routeMetricKey]uint64
+	RouteWriteSum         map[routeMetricKey]float64
 	RouteCacheStatus      map[routeCacheMetricKey]uint64
 }
 
@@ -157,27 +168,34 @@ type routeCacheMetricKey struct {
 }
 
 type edgeProxyObservation struct {
-	Host          string
-	Route         model.EdgeRouteBinding
-	Method        string
-	Path          string
-	StatusCode    int
-	Duration      time.Duration
-	TTFB          time.Duration
-	Upstream      time.Duration
-	UpstreamError string
-	Proxied       bool
-	FallbackHit   bool
-	WebSocket     bool
-	SSE           bool
-	Streaming     bool
-	Upload        bool
-	PeerFallback  bool
-	CacheStatus   string
-	CachePolicyID string
-	CacheKeyHash  string
-	AssetClass    string
-	ResponseBytes int64
+	ReceivedAt             time.Time
+	Host                   string
+	Route                  model.EdgeRouteBinding
+	Method                 string
+	Path                   string
+	StatusCode             int
+	Duration               time.Duration
+	TTFB                   time.Duration
+	Upstream               time.Duration
+	CacheLookup            time.Duration
+	OriginConnect          time.Duration
+	OriginConnectionReused bool
+	OriginTTFB             time.Duration
+	OriginTotal            time.Duration
+	ResponseWrite          time.Duration
+	UpstreamError          string
+	Proxied                bool
+	FallbackHit            bool
+	WebSocket              bool
+	SSE                    bool
+	Streaming              bool
+	Upload                 bool
+	PeerFallback           bool
+	CacheStatus            string
+	CachePolicyID          string
+	CacheKeyHash           string
+	AssetClass             string
+	ResponseBytes          int64
 }
 
 func (e statusError) Error() string {
@@ -569,6 +587,7 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	host := normalizeRouteHost(firstNonEmptyHeader(r, "X-Fugue-Edge-Route-Host", r.Host))
 	route, ok, fallbackHit := s.routeForHost(host)
 	observed := edgeProxyObservation{
+		ReceivedAt:  startedAt.UTC(),
 		Host:        host,
 		Route:       route,
 		Method:      r.Method,
@@ -610,10 +629,22 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "edge route upstream is unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	observedWriter := newEdgeProxyObservationResponseWriter(w, startedAt, &observed)
+	if cacheDecision.Enabled {
+		observedWriter.cacheDecision = &cacheDecision
+		maxBytes := s.Config.AssetCacheMaxBytes
+		if maxBytes <= 0 {
+			maxBytes = 32 * 1024 * 1024
+		}
+		observedWriter.maxBytes = int64(maxBytes)
+	}
 	observed.Proxied = true
 	if cacheDecision.Enabled {
-		if entry, ok := s.edgeCacheLoad(cacheDecision); ok {
-			if served, status, cacheStatus := s.edgeCacheServeIfFresh(w, cacheDecision, entry); served {
+		cacheLookupStarted := time.Now()
+		entry, ok := s.edgeCacheLoad(cacheDecision)
+		observed.CacheLookup = time.Since(cacheLookupStarted)
+		if ok {
+			if served, status, cacheStatus := s.edgeCacheServeIfFresh(observedWriter, cacheDecision, entry, edgeProxyServerTiming(observed, false)); served {
 				observed.Proxied = false
 				observed.StatusCode = status
 				observed.CacheStatus = cacheStatus
@@ -624,15 +655,6 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	peerFallbackAllowed := s.peerFallbackAllowed(r, observed)
 	proxy := s.newEdgeReverseProxy(host, target, route, &observed, peerFallbackAllowed, &cacheDecision)
-	observedWriter := newEdgeProxyObservationResponseWriter(w, startedAt, &observed)
-	if cacheDecision.Enabled {
-		observedWriter.cacheDecision = &cacheDecision
-		maxBytes := s.Config.AssetCacheMaxBytes
-		if maxBytes <= 0 {
-			maxBytes = 32 * 1024 * 1024
-		}
-		observedWriter.maxBytes = int64(maxBytes)
-	}
 	proxy.ServeHTTP(observedWriter, r)
 	if observed.UpstreamError != "" && !observedWriter.wroteHeader && peerFallbackAllowed {
 		if s.proxyPeerFallback(w, r, host, route, &observed) {
@@ -689,6 +711,9 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 			http.Error(rw, "upstream app is unavailable", http.StatusBadGateway)
 		},
 		ModifyResponse: func(resp *http.Response) error {
+			if observed != nil && resp != nil {
+				addEdgeServerTiming(resp.Header, edgeProxyServerTiming(*observed, true))
+			}
 			if resp == nil || cacheDecision == nil || !cacheDecision.Enabled {
 				return nil
 			}
@@ -721,11 +746,73 @@ func (t *edgeProxyTransport) RoundTrip(req *http.Request) (*http.Response, error
 		return nil, fmt.Errorf("edge proxy transport is unavailable")
 	}
 	started := time.Now()
+	if t.observation != nil {
+		var connectStarted time.Time
+		trace := &httptrace.ClientTrace{
+			GotConn: func(info httptrace.GotConnInfo) {
+				t.observation.OriginConnectionReused = info.Reused
+			},
+			ConnectStart: func(_, _ string) {
+				connectStarted = time.Now()
+			},
+			ConnectDone: func(_, _ string, _ error) {
+				if !connectStarted.IsZero() {
+					t.observation.OriginConnect = time.Since(connectStarted)
+				}
+			},
+			GotFirstResponseByte: func() {
+				if t.observation.OriginTTFB <= 0 {
+					t.observation.OriginTTFB = time.Since(started)
+				}
+			},
+		}
+		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+	}
 	resp, err := t.base.RoundTrip(req)
 	if t.observation != nil {
 		t.observation.Upstream = time.Since(started)
+		if resp != nil && t.observation.OriginTTFB <= 0 {
+			t.observation.OriginTTFB = t.observation.Upstream
+		}
+		if resp != nil && resp.StatusCode != http.StatusSwitchingProtocols && resp.Body != nil {
+			resp.Body = &edgeOriginTimingBody{
+				ReadCloser:  resp.Body,
+				observation: t.observation,
+				startedAt:   started,
+			}
+		}
 	}
 	return resp, err
+}
+
+type edgeOriginTimingBody struct {
+	io.ReadCloser
+	observation *edgeProxyObservation
+	startedAt   time.Time
+	once        sync.Once
+}
+
+func (b *edgeOriginTimingBody) Read(data []byte) (int, error) {
+	n, err := b.ReadCloser.Read(data)
+	if errors.Is(err, io.EOF) {
+		b.finish()
+	}
+	return n, err
+}
+
+func (b *edgeOriginTimingBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.finish()
+	return err
+}
+
+func (b *edgeOriginTimingBody) finish() {
+	if b == nil || b.observation == nil || b.startedAt.IsZero() {
+		return
+	}
+	b.once.Do(func() {
+		b.observation.OriginTotal = time.Since(b.startedAt)
+	})
 }
 
 func (s *Service) peerFallbackAllowed(r *http.Request, observed edgeProxyObservation) bool {
@@ -913,6 +1000,36 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteTTFBCount) {
 		fmt.Fprintf(w, "fugue_edge_route_ttfb_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteTTFBSum[key])
 		fmt.Fprintf(w, "fugue_edge_route_ttfb_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteTTFBCount[key])
+	}
+	fmt.Fprintln(w, "# HELP fugue_edge_route_cache_lookup_duration_seconds Edge data-plane local HTTP cache lookup duration by route.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_route_cache_lookup_duration_seconds summary")
+	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteCacheLookupCount) {
+		fmt.Fprintf(w, "fugue_edge_route_cache_lookup_duration_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteCacheLookupSum[key])
+		fmt.Fprintf(w, "fugue_edge_route_cache_lookup_duration_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteCacheLookupCount[key])
+	}
+	fmt.Fprintln(w, "# HELP fugue_edge_route_origin_connect_duration_seconds Edge data-plane origin TCP connect duration by route for non-reused upstream connections.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_route_origin_connect_duration_seconds summary")
+	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteOriginConnCount) {
+		fmt.Fprintf(w, "fugue_edge_route_origin_connect_duration_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginConnSum[key])
+		fmt.Fprintf(w, "fugue_edge_route_origin_connect_duration_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginConnCount[key])
+	}
+	fmt.Fprintln(w, "# HELP fugue_edge_route_origin_ttfb_seconds Edge data-plane origin time-to-first-byte by route.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_route_origin_ttfb_seconds summary")
+	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteOriginTTFBCount) {
+		fmt.Fprintf(w, "fugue_edge_route_origin_ttfb_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginTTFBSum[key])
+		fmt.Fprintf(w, "fugue_edge_route_origin_ttfb_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginTTFBCount[key])
+	}
+	fmt.Fprintln(w, "# HELP fugue_edge_route_origin_total_duration_seconds Edge data-plane origin response read duration by route.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_route_origin_total_duration_seconds summary")
+	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteOriginTotalCount) {
+		fmt.Fprintf(w, "fugue_edge_route_origin_total_duration_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginTotalSum[key])
+		fmt.Fprintf(w, "fugue_edge_route_origin_total_duration_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginTotalCount[key])
+	}
+	fmt.Fprintln(w, "# HELP fugue_edge_route_response_write_duration_seconds Edge data-plane time spent writing response bytes by route.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_route_response_write_duration_seconds summary")
+	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteWriteCount) {
+		fmt.Fprintf(w, "fugue_edge_route_response_write_duration_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteWriteSum[key])
+		fmt.Fprintf(w, "fugue_edge_route_response_write_duration_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteWriteCount[key])
 	}
 	fmt.Fprintln(w, "# HELP fugue_edge_route_cache_total Edge data-plane cache decisions by route and cache status.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_route_cache_total counter")
@@ -1249,6 +1366,16 @@ func cloneTelemetryForEdgePerformanceHeartbeat(in telemetry) telemetry {
 	out.RouteLatencySum = cloneRouteFloatMap(in.RouteLatencySum)
 	out.RouteTTFBCount = cloneRouteCounterMap(in.RouteTTFBCount)
 	out.RouteTTFBSum = cloneRouteFloatMap(in.RouteTTFBSum)
+	out.RouteCacheLookupCount = cloneRouteCounterMap(in.RouteCacheLookupCount)
+	out.RouteCacheLookupSum = cloneRouteFloatMap(in.RouteCacheLookupSum)
+	out.RouteOriginConnCount = cloneRouteCounterMap(in.RouteOriginConnCount)
+	out.RouteOriginConnSum = cloneRouteFloatMap(in.RouteOriginConnSum)
+	out.RouteOriginTTFBCount = cloneRouteCounterMap(in.RouteOriginTTFBCount)
+	out.RouteOriginTTFBSum = cloneRouteFloatMap(in.RouteOriginTTFBSum)
+	out.RouteOriginTotalCount = cloneRouteCounterMap(in.RouteOriginTotalCount)
+	out.RouteOriginTotalSum = cloneRouteFloatMap(in.RouteOriginTotalSum)
+	out.RouteWriteCount = cloneRouteCounterMap(in.RouteWriteCount)
+	out.RouteWriteSum = cloneRouteFloatMap(in.RouteWriteSum)
 	out.RouteCacheStatus = cloneRouteCacheCounterMap(in.RouteCacheStatus)
 	return out
 }
@@ -1867,6 +1994,16 @@ func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 	}
 	s.metrics.RouteDurationCount[key]++
 	s.metrics.RouteDurationSum[key] += durationSeconds(observed.Duration)
+	if observed.CacheLookup > 0 {
+		if s.metrics.RouteCacheLookupCount == nil {
+			s.metrics.RouteCacheLookupCount = make(map[routeMetricKey]uint64)
+		}
+		if s.metrics.RouteCacheLookupSum == nil {
+			s.metrics.RouteCacheLookupSum = make(map[routeMetricKey]float64)
+		}
+		s.metrics.RouteCacheLookupCount[key]++
+		s.metrics.RouteCacheLookupSum[key] += durationSeconds(observed.CacheLookup)
+	}
 	if observed.Proxied {
 		if s.metrics.RouteLatencyCount == nil {
 			s.metrics.RouteLatencyCount = make(map[routeMetricKey]uint64)
@@ -1884,6 +2021,46 @@ func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 		}
 		s.metrics.RouteTTFBCount[key]++
 		s.metrics.RouteTTFBSum[key] += durationSeconds(observed.TTFB)
+	}
+	if observed.OriginConnect > 0 {
+		if s.metrics.RouteOriginConnCount == nil {
+			s.metrics.RouteOriginConnCount = make(map[routeMetricKey]uint64)
+		}
+		if s.metrics.RouteOriginConnSum == nil {
+			s.metrics.RouteOriginConnSum = make(map[routeMetricKey]float64)
+		}
+		s.metrics.RouteOriginConnCount[key]++
+		s.metrics.RouteOriginConnSum[key] += durationSeconds(observed.OriginConnect)
+	}
+	if observed.OriginTTFB > 0 {
+		if s.metrics.RouteOriginTTFBCount == nil {
+			s.metrics.RouteOriginTTFBCount = make(map[routeMetricKey]uint64)
+		}
+		if s.metrics.RouteOriginTTFBSum == nil {
+			s.metrics.RouteOriginTTFBSum = make(map[routeMetricKey]float64)
+		}
+		s.metrics.RouteOriginTTFBCount[key]++
+		s.metrics.RouteOriginTTFBSum[key] += durationSeconds(observed.OriginTTFB)
+	}
+	if observed.OriginTotal > 0 {
+		if s.metrics.RouteOriginTotalCount == nil {
+			s.metrics.RouteOriginTotalCount = make(map[routeMetricKey]uint64)
+		}
+		if s.metrics.RouteOriginTotalSum == nil {
+			s.metrics.RouteOriginTotalSum = make(map[routeMetricKey]float64)
+		}
+		s.metrics.RouteOriginTotalCount[key]++
+		s.metrics.RouteOriginTotalSum[key] += durationSeconds(observed.OriginTotal)
+	}
+	if observed.ResponseWrite > 0 {
+		if s.metrics.RouteWriteCount == nil {
+			s.metrics.RouteWriteCount = make(map[routeMetricKey]uint64)
+		}
+		if s.metrics.RouteWriteSum == nil {
+			s.metrics.RouteWriteSum = make(map[routeMetricKey]float64)
+		}
+		s.metrics.RouteWriteCount[key]++
+		s.metrics.RouteWriteSum[key] += durationSeconds(observed.ResponseWrite)
 	}
 	if s.metrics.RouteCacheStatus == nil {
 		s.metrics.RouteCacheStatus = make(map[routeCacheMetricKey]uint64)
@@ -2006,6 +2183,16 @@ func (s *Service) metricSnapshot() metricSnapshot {
 	out.Metrics.RouteLatencySum = cloneRouteFloatMap(s.metrics.RouteLatencySum)
 	out.Metrics.RouteTTFBCount = cloneRouteCounterMap(s.metrics.RouteTTFBCount)
 	out.Metrics.RouteTTFBSum = cloneRouteFloatMap(s.metrics.RouteTTFBSum)
+	out.Metrics.RouteCacheLookupCount = cloneRouteCounterMap(s.metrics.RouteCacheLookupCount)
+	out.Metrics.RouteCacheLookupSum = cloneRouteFloatMap(s.metrics.RouteCacheLookupSum)
+	out.Metrics.RouteOriginConnCount = cloneRouteCounterMap(s.metrics.RouteOriginConnCount)
+	out.Metrics.RouteOriginConnSum = cloneRouteFloatMap(s.metrics.RouteOriginConnSum)
+	out.Metrics.RouteOriginTTFBCount = cloneRouteCounterMap(s.metrics.RouteOriginTTFBCount)
+	out.Metrics.RouteOriginTTFBSum = cloneRouteFloatMap(s.metrics.RouteOriginTTFBSum)
+	out.Metrics.RouteOriginTotalCount = cloneRouteCounterMap(s.metrics.RouteOriginTotalCount)
+	out.Metrics.RouteOriginTotalSum = cloneRouteFloatMap(s.metrics.RouteOriginTotalSum)
+	out.Metrics.RouteWriteCount = cloneRouteCounterMap(s.metrics.RouteWriteCount)
+	out.Metrics.RouteWriteSum = cloneRouteFloatMap(s.metrics.RouteWriteSum)
 	out.Metrics.RouteCacheStatus = cloneRouteCacheCounterMap(s.metrics.RouteCacheStatus)
 	if s.bundle != nil && !s.bundle.GeneratedAt.IsZero() {
 		generatedAt := s.bundle.GeneratedAt
@@ -2071,7 +2258,8 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 	edgeGroupID := firstNonEmpty(observed.Route.EdgeGroupID, s.Config.EdgeGroupID)
 	runtimeEdgeGroupID := firstNonEmpty(observed.Route.RuntimeEdgeGroupID, observed.Route.RuntimeEdgeGroup)
 	s.Logger.Printf(
-		"edge_proxy_request host=%s app=%s tenant=%s runtime=%s route_kind=%s edge_group_id=%s runtime_region=%s runtime_edge_group_id=%s route_generation=%s fallback_reason=%s method=%s path=%s status=%d duration_ms=%d response_bytes=%d cache_status=%s cache_policy_id=%s cache_key_hash=%s asset_class=%s upstream=%s upstream_error=%t fallback_hit=%t websocket=%t sse=%t streaming=%t upload=%t",
+		"edge_proxy_request received_at=%s host=%s app=%s tenant=%s runtime=%s route_kind=%s edge_group_id=%s runtime_region=%s runtime_edge_group_id=%s route_generation=%s fallback_reason=%s method=%s path=%s status=%d duration_ms=%d response_bytes=%d cache_status=%s cache_policy_id=%s cache_key_hash=%s asset_class=%s cache_lookup_ms=%d origin_connect_ms=%d origin_conn_reused=%t origin_ttfb_ms=%d origin_total_ms=%d response_write_ms=%d upstream=%s upstream_error=%t fallback_hit=%t websocket=%t sse=%t streaming=%t upload=%t",
+		observed.ReceivedAt.Format(time.RFC3339Nano),
 		observed.Host,
 		strings.TrimSpace(observed.Route.AppID),
 		strings.TrimSpace(observed.Route.TenantID),
@@ -2091,6 +2279,12 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 		strings.TrimSpace(observed.CachePolicyID),
 		strings.TrimSpace(observed.CacheKeyHash),
 		strings.TrimSpace(observed.AssetClass),
+		observed.CacheLookup.Milliseconds(),
+		observed.OriginConnect.Milliseconds(),
+		observed.OriginConnectionReused,
+		observed.OriginTTFB.Milliseconds(),
+		observed.OriginTotal.Milliseconds(),
+		observed.ResponseWrite.Milliseconds(),
 		strings.TrimSpace(observed.Route.UpstreamURL),
 		strings.TrimSpace(observed.UpstreamError) != "",
 		observed.FallbackHit,
@@ -2159,6 +2353,36 @@ func durationSeconds(value time.Duration) float64 {
 	return value.Seconds()
 }
 
+func edgeProxyServerTiming(observed edgeProxyObservation, proxied bool) string {
+	parts := make([]string, 0, 4)
+	if observed.CacheLookup > 0 {
+		parts = append(parts, edgeServerTimingMetric("fugue_cache_lookup", observed.CacheLookup))
+	}
+	if proxied {
+		if observed.OriginConnect > 0 {
+			parts = append(parts, edgeServerTimingMetric("fugue_origin_connect", observed.OriginConnect))
+		}
+		if observed.OriginTTFB > 0 {
+			parts = append(parts, edgeServerTimingMetric("fugue_origin_ttfb", observed.OriginTTFB))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+func edgeServerTimingMetric(name string, duration time.Duration) string {
+	if duration < 0 {
+		duration = 0
+	}
+	return fmt.Sprintf("%s;dur=%.3f", name, duration.Seconds()*1000)
+}
+
+func addEdgeServerTiming(header http.Header, value string) {
+	if header == nil || strings.TrimSpace(value) == "" {
+		return
+	}
+	header.Add("Server-Timing", value)
+}
+
 func bundleAgeSeconds(generatedAt *time.Time, now time.Time) float64 {
 	if generatedAt == nil || generatedAt.IsZero() || now.IsZero() {
 		return 0
@@ -2212,6 +2436,7 @@ func (w *edgeProxyObservationResponseWriter) WriteHeader(statusCode int) {
 	if w.wroteHeader {
 		return
 	}
+	writeStarted := time.Now()
 	w.wroteHeader = true
 	w.status = statusCode
 	w.headerSnapshot = cloneHTTPHeader(w.ResponseWriter.Header())
@@ -2219,6 +2444,7 @@ func (w *edgeProxyObservationResponseWriter) WriteHeader(statusCode int) {
 		w.observation.TTFB = time.Since(w.startedAt)
 	}
 	w.ResponseWriter.WriteHeader(statusCode)
+	w.addResponseWriteDuration(time.Since(writeStarted))
 }
 
 func (w *edgeProxyObservationResponseWriter) Write(data []byte) (int, error) {
@@ -2239,7 +2465,10 @@ func (w *edgeProxyObservationResponseWriter) Write(data []byte) (int, error) {
 		}
 	}
 	w.bytesWritten += int64(len(data))
-	return w.ResponseWriter.Write(data)
+	writeStarted := time.Now()
+	n, err := w.ResponseWriter.Write(data)
+	w.addResponseWriteDuration(time.Since(writeStarted))
+	return n, err
 }
 
 func (w *edgeProxyObservationResponseWriter) Flush() {
@@ -2264,6 +2493,13 @@ func (w *edgeProxyObservationResponseWriter) statusCode() int {
 		return w.status
 	}
 	return http.StatusOK
+}
+
+func (w *edgeProxyObservationResponseWriter) addResponseWriteDuration(duration time.Duration) {
+	if w == nil || w.observation == nil || duration <= 0 {
+		return
+	}
+	w.observation.ResponseWrite += duration
 }
 
 func normalizeRouteHost(host string) string {
