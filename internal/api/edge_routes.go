@@ -106,6 +106,9 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	}
 	policyByHostname := edgeRoutePolicyByHostname(policies)
 
+	// Route publication is intentionally global. Edge group IDs steer DNS,
+	// policy, and telemetry, but every edge must retain host routes for every
+	// edge-enabled public service so stale or alternate DNS answers do not 404.
 	routes := make([]model.EdgeRouteBinding, 0, len(apps)+len(domains)+len(s.platformRoutes))
 	for _, app := range appByID {
 		if app.Route == nil || strings.TrimSpace(app.Route.Hostname) == "" {
@@ -114,17 +117,13 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		binding := s.deriveEdgeRouteBinding(r, app, strings.TrimSpace(app.Route.Hostname), model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
 		for _, platformBinding := range expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups) {
-			if edgeRouteMatchesSelector(platformBinding, options) {
-				routes = append(routes, platformBinding)
-			}
+			routes = append(routes, platformBinding)
 		}
 	}
 
 	for _, platformRoute := range s.platformRoutes {
 		for _, binding := range edgeRouteBindingsForPlatformRoute(platformRoute, healthyEdgeGroups) {
-			if edgeRouteMatchesSelector(binding, options) {
-				routes = append(routes, binding)
-			}
+			routes = append(routes, binding)
 		}
 	}
 
@@ -153,9 +152,6 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		binding = applyCustomDomainReadiness(binding, domain)
 		addedRoute := false
 		for _, expandedBinding := range expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups) {
-			if !edgeRouteMatchesSelector(expandedBinding, options) {
-				continue
-			}
 			routes = append(routes, expandedBinding)
 			addedRoute = true
 		}
@@ -340,16 +336,6 @@ func edgeServicePortForApp(app model.App) int {
 		return app.Spec.Ports[0]
 	}
 	return 80
-}
-
-func edgeRouteMatchesSelector(binding model.EdgeRouteBinding, options edgeRouteBundleOptions) bool {
-	if options.EdgeGroupID != "" {
-		return binding.EdgeGroupID == options.EdgeGroupID || binding.FallbackEdgeGroupID == options.EdgeGroupID
-	}
-	if edgeGroupID := edgeGroupIDFromEdgeID(options.EdgeID); edgeGroupID != "" {
-		return binding.EdgeGroupID == edgeGroupID || binding.FallbackEdgeGroupID == edgeGroupID
-	}
-	return true
 }
 
 func edgeRoutePolicyByHostname(policies []model.EdgeRoutePolicy) map[string]model.EdgeRoutePolicy {

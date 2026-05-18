@@ -833,7 +833,7 @@ func TestBuildCaddyConfigSkipsRouteAOnlyHosts(t *testing.T) {
 	}
 }
 
-func TestBuildCaddyConfigSkipsDifferentEdgeGroupRoutes(t *testing.T) {
+func TestBuildCaddyConfigIncludesDifferentEdgeGroupRoutes(t *testing.T) {
 	t.Parallel()
 
 	bundle := testBundle("routegen_edge_group_caddy")
@@ -867,15 +867,15 @@ func TestBuildCaddyConfigSkipsDifferentEdgeGroupRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build caddy config: %v", err)
 	}
-	if routeCount != 2 {
-		t.Fatalf("expected local serving edge group routes to be emitted, got %d", routeCount)
+	if routeCount != 3 {
+		t.Fatalf("expected all active host routes to be emitted, got %d", routeCount)
 	}
 	configText := string(configBody)
 	if !strings.Contains(configText, `"host":["demo.fugue.pro"]`) {
 		t.Fatalf("expected local edge group host in caddy config:\n%s", configText)
 	}
-	if strings.Contains(configText, "hk.fugue.pro") {
-		t.Fatalf("different edge group host must not be emitted to caddy config:\n%s", configText)
+	if !strings.Contains(configText, "hk.fugue.pro") {
+		t.Fatalf("expected different edge group host in caddy config:\n%s", configText)
 	}
 	if !strings.Contains(configText, `"host":["remote-runtime.fugue.pro"]`) {
 		t.Fatalf("expected nearest-edge fallback route to be emitted by serving edge group:\n%s", configText)
@@ -1282,7 +1282,7 @@ func TestProxyHandlerIgnoresRouteAOnlyHosts(t *testing.T) {
 	}
 }
 
-func TestProxyHandlerSkipsDifferentEdgeGroupRoutes(t *testing.T) {
+func TestProxyHandlerServesDifferentEdgeGroupRoutes(t *testing.T) {
 	t.Parallel()
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1325,8 +1325,8 @@ func TestProxyHandlerSkipsDifferentEdgeGroupRoutes(t *testing.T) {
 	otherGroup := httptest.NewRecorder()
 	otherGroupReq := httptest.NewRequest(http.MethodGet, "http://hk.fugue.pro/", nil)
 	service.ProxyHandler().ServeHTTP(otherGroup, otherGroupReq)
-	if otherGroup.Code != http.StatusNotFound {
-		t.Fatalf("expected different edge group route to be ignored by edge proxy, got %d body=%s", otherGroup.Code, otherGroup.Body.String())
+	if otherGroup.Code != http.StatusOK || otherGroup.Body.String() != "ok" {
+		t.Fatalf("expected different edge group route to be served as fallback, got %d body=%q", otherGroup.Code, otherGroup.Body.String())
 	}
 
 	remoteRuntime := httptest.NewRecorder()

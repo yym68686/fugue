@@ -346,8 +346,13 @@ func TestEdgeRoutePolicyCanaryUsesNearestHealthyEdgeGroup(t *testing.T) {
 	}
 	var hkAfterBundle model.EdgeRouteBundle
 	mustDecodeJSON(t, hkAfter, &hkAfterBundle)
-	if len(hkAfterBundle.Routes) != 0 {
-		t.Fatalf("expected HK bundle to be empty while nearest healthy edge is US, got %+v", hkAfterBundle.Routes)
+	if len(hkAfterBundle.Routes) != 1 {
+		t.Fatalf("expected HK bundle to keep the fallback route for global serving, got %+v", hkAfterBundle.Routes)
+	}
+	if hkAfterBundle.Routes[0].EdgeGroupID != "edge-group-country-us" ||
+		hkAfterBundle.Routes[0].PolicyEdgeGroupID != "edge-group-country-us" ||
+		hkAfterBundle.Routes[0].RoutePolicy != model.EdgeRoutePolicyCanary {
+		t.Fatalf("expected HK bundle to carry the active US fallback route, got %+v", hkAfterBundle.Routes[0])
 	}
 
 	usAfter := httptest.NewRecorder()
@@ -447,18 +452,20 @@ func TestPlatformRoutesDefaultToHealthyEdgeGroups(t *testing.T) {
 	}
 	var bundle model.EdgeRouteBundle
 	mustDecodeJSON(t, recorder, &bundle)
-	if len(bundle.Routes) != 1 {
-		t.Fatalf("expected generated platform hostname to enter nearest US edge bundle, got %+v", bundle.Routes)
+	if len(bundle.Routes) != 2 {
+		t.Fatalf("expected generated platform hostname to be published to all healthy edge groups, got %+v", bundle.Routes)
 	}
-	route := bundle.Routes[0]
-	if route.Hostname != "demo.fugue.pro" ||
-		route.RouteKind != model.EdgeRouteKindPlatform ||
-		route.RoutePolicy != model.EdgeRoutePolicyEnabled ||
-		route.RuntimeEdgeGroupID != "edge-group-country-hk" ||
-		route.EdgeGroupID != "edge-group-country-us" ||
-		route.PolicyEdgeGroupID != "" ||
-		route.FallbackEdgeGroupID != "" {
-		t.Fatalf("unexpected nearest-edge default route: %+v", route)
+	for _, edgeGroupID := range []string{"edge-group-country-us", "edge-group-country-de"} {
+		route := edgeRouteByHostKindAndGroup(bundle.Routes, "demo.fugue.pro", model.EdgeRouteKindPlatform, edgeGroupID)
+		if route == nil {
+			t.Fatalf("expected generated platform hostname in %s bundle: %+v", edgeGroupID, bundle.Routes)
+		}
+		if route.Hostname != "demo.fugue.pro" ||
+			route.RouteKind != model.EdgeRouteKindPlatform ||
+			route.RoutePolicy != model.EdgeRoutePolicyEnabled ||
+			route.RuntimeEdgeGroupID != "edge-group-country-hk" {
+			t.Fatalf("unexpected global platform route in %s bundle: %+v", edgeGroupID, route)
+		}
 	}
 
 	hk := httptest.NewRecorder()
@@ -469,8 +476,13 @@ func TestPlatformRoutesDefaultToHealthyEdgeGroups(t *testing.T) {
 	}
 	var hkBundle model.EdgeRouteBundle
 	mustDecodeJSON(t, hk, &hkBundle)
-	if len(hkBundle.Routes) != 0 {
-		t.Fatalf("expected no route in HK bundle without a healthy HK edge, got %+v", hkBundle.Routes)
+	if len(hkBundle.Routes) != 2 {
+		t.Fatalf("expected HK bundle to receive the global platform route set, got %+v", hkBundle.Routes)
+	}
+	for _, edgeGroupID := range []string{"edge-group-country-us", "edge-group-country-de"} {
+		if edgeRouteByHostKindAndGroup(hkBundle.Routes, "demo.fugue.pro", model.EdgeRouteKindPlatform, edgeGroupID) == nil {
+			t.Fatalf("expected HK bundle to include %s route copy, got %+v", edgeGroupID, hkBundle.Routes)
+		}
 	}
 
 	de := httptest.NewRecorder()
@@ -481,10 +493,14 @@ func TestPlatformRoutesDefaultToHealthyEdgeGroups(t *testing.T) {
 	}
 	var deBundle model.EdgeRouteBundle
 	mustDecodeJSON(t, de, &deBundle)
-	if len(deBundle.Routes) != 1 ||
-		deBundle.Routes[0].RuntimeEdgeGroupID != "edge-group-country-hk" ||
-		deBundle.Routes[0].EdgeGroupID != "edge-group-country-de" {
-		t.Fatalf("expected generated platform hostname to be present on every healthy edge group, got %+v", deBundle.Routes)
+	if len(deBundle.Routes) != 2 {
+		t.Fatalf("expected DE bundle to receive the global platform route set, got %+v", deBundle.Routes)
+	}
+	for _, edgeGroupID := range []string{"edge-group-country-us", "edge-group-country-de"} {
+		route := edgeRouteByHostKindAndGroup(deBundle.Routes, "demo.fugue.pro", model.EdgeRouteKindPlatform, edgeGroupID)
+		if route == nil || route.RuntimeEdgeGroupID != "edge-group-country-hk" {
+			t.Fatalf("expected DE bundle to include %s route copy, got %+v", edgeGroupID, deBundle.Routes)
+		}
 	}
 }
 
@@ -591,8 +607,8 @@ func TestConfiguredPlatformRouteFansOutToHealthyEdgeGroups(t *testing.T) {
 	}
 	var hkBundle model.EdgeRouteBundle
 	mustDecodeJSON(t, hk, &hkBundle)
-	if edgeRouteByHostAndKind(hkBundle.Routes, "api.fugue.pro", model.EdgeRouteKindControlPlaneAPI) != nil {
-		t.Fatalf("configured platform route must not enter an unhealthy edge group bundle: %+v", hkBundle.Routes)
+	if edgeRouteByHostAndKind(hkBundle.Routes, "api.fugue.pro", model.EdgeRouteKindControlPlaneAPI) == nil {
+		t.Fatalf("configured platform route must be present on fallback bundles too: %+v", hkBundle.Routes)
 	}
 }
 

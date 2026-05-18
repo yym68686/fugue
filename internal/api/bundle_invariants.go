@@ -94,17 +94,10 @@ func edgeRouteSelectorShouldHaveRoutes(options edgeRouteBundleOptions, healthyEd
 	return edgeGroupID != "" && (expectedNonEmptyEdgeGroups[edgeGroupID] || healthyEdgeGroups[edgeGroupID])
 }
 
-func edgeRouteBundleTrafficRouteCount(bundle model.EdgeRouteBundle, options edgeRouteBundleOptions) int {
-	edgeGroupID := strings.TrimSpace(options.EdgeGroupID)
-	if edgeGroupID == "" {
-		edgeGroupID = edgeGroupIDFromEdgeID(options.EdgeID)
-	}
+func edgeRouteBundleTrafficRouteCount(bundle model.EdgeRouteBundle, _ edgeRouteBundleOptions) int {
 	count := 0
 	for _, route := range bundle.Routes {
 		if !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) {
-			continue
-		}
-		if edgeGroupID != "" && !strings.EqualFold(strings.TrimSpace(route.EdgeGroupID), edgeGroupID) {
 			continue
 		}
 		count++
@@ -112,24 +105,17 @@ func edgeRouteBundleTrafficRouteCount(bundle model.EdgeRouteBundle, options edge
 	return count
 }
 
-func edgeRouteExpectedMinTrafficRoutes(options edgeRouteBundleOptions, expected map[string]int) int {
+func edgeRouteExpectedMinTrafficRoutes(_ edgeRouteBundleOptions, expected map[string]int) int {
 	if len(expected) == 0 {
 		return 0
 	}
-	edgeGroupID := strings.TrimSpace(options.EdgeGroupID)
-	if edgeGroupID == "" {
-		edgeGroupID = edgeGroupIDFromEdgeID(options.EdgeID)
-	}
-	if edgeGroupID == "" {
-		minimum := 0
-		for _, count := range expected {
-			if count > minimum {
-				minimum = count
-			}
+	minimum := 0
+	for _, count := range expected {
+		if count > minimum {
+			minimum = count
 		}
-		return minimum
 	}
-	return expected[edgeGroupID]
+	return minimum
 }
 
 func validateEdgeDNSBundleForPublish(bundle model.EdgeDNSBundle, input edgeDNSBundleInvariantInput) error {

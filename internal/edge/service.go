@@ -484,7 +484,9 @@ func (s *Service) routeForHost(host string) (model.EdgeRouteBinding, bool, bool)
 	if s.bundle == nil {
 		return model.EdgeRouteBinding{}, false, false
 	}
-	var fallback model.EdgeRouteBinding
+	localEdgeGroupID := strings.TrimSpace(s.Config.EdgeGroupID)
+	var fallbackActive model.EdgeRouteBinding
+	var fallbackInactive model.EdgeRouteBinding
 	for _, route := range s.bundle.Routes {
 		if normalizeRouteHost(route.Hostname) != host {
 			continue
@@ -492,15 +494,30 @@ func (s *Service) routeForHost(host string) (model.EdgeRouteBinding, bool, bool)
 		if !s.routeAllowedForThisEdge(route) {
 			continue
 		}
-		if strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive) {
-			return route, true, false
+		if routeMatchesCurrentEdgeGroup(route, localEdgeGroupID) {
+			if strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive) {
+				return route, true, false
+			}
+			if fallbackInactive.Hostname == "" {
+				fallbackInactive = route
+			}
+			continue
 		}
-		if fallback.Hostname == "" {
-			fallback = route
+		if strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive) {
+			if fallbackActive.Hostname == "" {
+				fallbackActive = route
+			}
+			continue
+		}
+		if fallbackInactive.Hostname == "" {
+			fallbackInactive = route
 		}
 	}
-	if fallback.Hostname != "" {
-		return fallback, true, true
+	if fallbackActive.Hostname != "" {
+		return fallbackActive, true, true
+	}
+	if fallbackInactive.Hostname != "" {
+		return fallbackInactive, true, true
 	}
 	return model.EdgeRouteBinding{}, false, false
 }
@@ -1122,10 +1139,8 @@ func (s *Service) edgePerformanceSamplesForHeartbeat(snapshot metricSnapshot) []
 	}
 
 	routesByKey := make(map[routeMetricKey]model.EdgeRouteBinding, len(bundle.Routes))
+	fallbackRoutesByKey := make(map[routeMetricKey]model.EdgeRouteBinding, len(bundle.Routes))
 	for _, route := range bundle.Routes {
-		if strings.TrimSpace(route.EdgeGroupID) != edgeGroupID {
-			continue
-		}
 		key := routeMetricKey{
 			Hostname:  normalizeRouteHost(route.Hostname),
 			AppID:     strings.TrimSpace(route.AppID),
@@ -1134,7 +1149,18 @@ func (s *Service) edgePerformanceSamplesForHeartbeat(snapshot metricSnapshot) []
 		if key.Hostname == "" {
 			continue
 		}
-		routesByKey[key] = route
+		if strings.TrimSpace(route.EdgeGroupID) == edgeGroupID || strings.TrimSpace(route.FallbackEdgeGroupID) == edgeGroupID {
+			routesByKey[key] = route
+			continue
+		}
+		if _, ok := fallbackRoutesByKey[key]; !ok {
+			fallbackRoutesByKey[key] = route
+		}
+	}
+	for key, route := range fallbackRoutesByKey {
+		if _, ok := routesByKey[key]; !ok {
+			routesByKey[key] = route
+		}
 	}
 
 	samples := buildEdgePerformanceSamples(snapshot.Metrics, baseline, routesByKey, edgeID, edgeGroupID, clientCountry, clientRegion, now)
@@ -1449,17 +1475,19 @@ func (s *Service) validateConfig() error {
 }
 
 func (s *Service) routeAllowedForThisEdge(route model.EdgeRouteBinding) bool {
-	if !model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) {
-		return false
-	}
-	edgeGroupID := strings.TrimSpace(s.Config.EdgeGroupID)
+	// Edge group IDs steer DNS and telemetry. They are not a data-plane
+	// authorization boundary; every edge should be able to serve every
+	// edge-enabled public route when traffic lands there.
+	return model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy)
+}
+
+func routeMatchesCurrentEdgeGroup(route model.EdgeRouteBinding, edgeGroupID string) bool {
+	edgeGroupID = strings.TrimSpace(edgeGroupID)
 	if edgeGroupID == "" {
 		return true
 	}
-	if !strings.EqualFold(strings.TrimSpace(route.EdgeGroupID), edgeGroupID) {
-		return false
-	}
-	return true
+	return strings.EqualFold(strings.TrimSpace(route.EdgeGroupID), edgeGroupID) ||
+		strings.EqualFold(strings.TrimSpace(route.FallbackEdgeGroupID), edgeGroupID)
 }
 
 func (s *Service) writeCache(cached cacheFile) error {
