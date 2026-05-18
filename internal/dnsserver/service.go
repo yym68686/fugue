@@ -1226,7 +1226,7 @@ func (s *Service) ttl() int {
 }
 
 func (s *Service) edgeDNSRecordsForQuestion(ctx context.Context, bundle *model.EdgeDNSBundle, name string, qtype uint16, msg *miekgdns.Msg, writer miekgdns.ResponseWriter) ([]miekgdns.RR, bool) {
-	answers, nameExists := edgeDNSRecordsForQuestion(bundle, name, qtype, s.geoHintForQuery(msg, writer))
+	answers, nameExists := edgeDNSRecordsForQuestion(bundle, name, qtype, s.geoHintForQuery(msg, writer), s.Config.EdgeHealthProbeEnabled)
 	if qtype != miekgdns.TypeA && qtype != miekgdns.TypeAAAA {
 		return answers, nameExists
 	}
@@ -1308,7 +1308,7 @@ func (s *Service) dialEdgeIP(ctx context.Context, ip string) bool {
 	return true
 }
 
-func edgeDNSRecordsForQuestion(bundle *model.EdgeDNSBundle, name string, qtype uint16, hint dnsGeoHint) ([]miekgdns.RR, bool) {
+func edgeDNSRecordsForQuestion(bundle *model.EdgeDNSBundle, name string, qtype uint16, hint dnsGeoHint, edgeHealthProbeEnabled bool) ([]miekgdns.RR, bool) {
 	if bundle == nil {
 		return nil, false
 	}
@@ -1337,7 +1337,7 @@ func edgeDNSRecordsForQuestion(bundle *model.EdgeDNSBundle, name string, qtype u
 	for _, recordType := range recordTypes {
 		for _, record := range matchingRecords {
 			if strings.EqualFold(record.Type, recordType) {
-				answers = append(answers, rrForEdgeDNSRecordWithGeo(record, ownerName, qtype, hint)...)
+				answers = append(answers, rrForEdgeDNSRecordWithGeo(record, ownerName, qtype, hint, edgeHealthProbeEnabled)...)
 			}
 		}
 	}
@@ -1552,13 +1552,16 @@ func edgeGroupCountry(edgeGroupID string) string {
 	}
 }
 
-func rrForEdgeDNSRecordWithGeo(record model.EdgeDNSRecord, ownerName string, qtype uint16, hint dnsGeoHint) []miekgdns.RR {
+func rrForEdgeDNSRecordWithGeo(record model.EdgeDNSRecord, ownerName string, qtype uint16, hint dnsGeoHint, edgeHealthProbeEnabled bool) []miekgdns.RR {
 	if len(record.Candidates) == 0 || (qtype != miekgdns.TypeA && qtype != miekgdns.TypeAAAA) {
 		return rrForEdgeDNSRecord(record, ownerName)
 	}
 	ordered := edgeDNSOrderedCandidates(record, hint)
 	if len(ordered) == 0 {
 		return nil
+	}
+	if limit := edgeDNSAnswerCandidateLimit(record.AnswerPolicy, ordered, edgeHealthProbeEnabled); limit > 0 && len(ordered) > limit {
+		ordered = ordered[:limit]
 	}
 	ttl := uint32(record.TTL)
 	if ttl == 0 {
@@ -1586,6 +1589,45 @@ func rrForEdgeDNSRecordWithGeo(record model.EdgeDNSRecord, ownerName string, qty
 		return nil
 	}
 	return rrs
+}
+
+func edgeDNSAnswerCandidateLimit(policy model.DNSAnswerPolicy, ordered []model.EdgeDNSAnswerCandidate, edgeHealthProbeEnabled bool) int {
+	if len(ordered) <= 1 {
+		return len(ordered)
+	}
+	switch strings.TrimSpace(policy.PolicyKind) {
+	case model.DNSAnswerPolicyKindPinned:
+		return 1
+	case model.DNSAnswerPolicyKindLatencyAware:
+		if edgeHealthProbeEnabled {
+			return 2
+		}
+		if edgeDNSCandidateWeightGap(ordered) >= edgeDNSLatencyAwareSingleAnswerMinGap(ordered[0].Weight) {
+			return 1
+		}
+		return 2
+	case model.DNSAnswerPolicyKindGeo, model.DNSAnswerPolicyKindWeighted, model.DNSAnswerPolicyKindGlobal, "":
+		return 2
+	case model.DNSAnswerPolicyKindDisabled:
+		return len(ordered)
+	default:
+		return 2
+	}
+}
+
+func edgeDNSCandidateWeightGap(ordered []model.EdgeDNSAnswerCandidate) int {
+	if len(ordered) < 2 {
+		return 0
+	}
+	return ordered[0].Weight - ordered[1].Weight
+}
+
+func edgeDNSLatencyAwareSingleAnswerMinGap(topWeight int) int {
+	threshold := topWeight / 5
+	if threshold < 40 {
+		return 40
+	}
+	return threshold
 }
 
 func edgeDNSOrderedCandidates(record model.EdgeDNSRecord, hint dnsGeoHint) []model.EdgeDNSAnswerCandidate {
