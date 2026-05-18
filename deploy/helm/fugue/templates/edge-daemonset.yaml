@@ -158,6 +158,11 @@ spec:
           volumeMounts:
             - name: route-cache
               mountPath: {{ .Values.edge.persistence.mountPath | quote }}
+            {{- if $edgeCaddyStaticTLSEnabled }}
+            - name: caddy-static-tls
+              mountPath: {{ $edgeCaddyStaticTLSMountPath | quote }}
+              readOnly: true
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /healthz
