@@ -52,8 +52,9 @@ const (
 )
 
 const (
-	CachePolicyKindStaticAssets = "static-assets"
-	CachePolicyKindDisabled     = "disabled"
+	CachePolicyKindStaticAssets  = "static-assets"
+	CachePolicyKindHTMLDocuments = "html-documents"
+	CachePolicyKindDisabled      = "disabled"
 
 	CachePolicyPurgeModeGeneration = "generation"
 	CachePolicyPurgeModeNone       = "none"

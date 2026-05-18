@@ -584,6 +584,11 @@ func TestApplyCaddyConfigWarmsPlatformHost(t *testing.T) {
 	defer admin.Close()
 
 	bundle := testBundle("routegen_caddy_warmup")
+	platformDomain := bundle.Routes[0]
+	platformDomain.Hostname = "www.fugue.pro"
+	platformDomain.RouteKind = model.EdgeRouteKindPlatformDomain
+	platformDomain.RouteGeneration = "routegen_platform_domain"
+	bundle.Routes = append(bundle.Routes, platformDomain)
 	custom := bundle.Routes[0]
 	custom.Hostname = "www.customer.com"
 	custom.RouteKind = model.EdgeRouteKindCustomDomain
@@ -613,13 +618,13 @@ func TestApplyCaddyConfigWarmsPlatformHost(t *testing.T) {
 	if loads != 1 {
 		t.Fatalf("expected one caddy config load, got %d", loads)
 	}
-	if got, want := fmt.Sprint(warmups), "[127.0.0.1:18443|demo.fugue.pro]"; got != want {
+	if got, want := fmt.Sprint(warmups), "[127.0.0.1:18443|demo.fugue.pro 127.0.0.1:18443|www.fugue.pro]"; got != want {
 		t.Fatalf("unexpected warmups: got %s want %s", got, want)
 	}
 	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
 		t.Fatalf("apply unchanged caddy config: %v", err)
 	}
-	if loads != 1 || len(warmups) != 1 {
+	if loads != 1 || len(warmups) != 2 {
 		t.Fatalf("expected unchanged config not to reload or rewarm, got loads=%d warmups=%v", loads, warmups)
 	}
 	metrics := renderMetrics(t, service)
@@ -1254,6 +1259,222 @@ func TestProxyHandlerCachesStaticAssets(t *testing.T) {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, metrics)
 		}
+	}
+}
+
+func TestProxyHandlerReusesOriginConnections(t *testing.T) {
+	t.Parallel()
+
+	var upstreamHits atomic.Int64
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer backend.Close()
+
+	bundle := testBundle("routegen_reuse")
+	bundle.Routes[0].UpstreamURL = backend.URL
+
+	service := NewService(config.EdgeConfig{
+		APIURL:    "https://api.example.invalid",
+		EdgeToken: "edge-secret",
+	}, log.New(ioDiscard{}, "", 0))
+	service.recordSyncSuccess(bundle, `"routegen_reuse"`, time.Now().UTC(), false)
+
+	first := httptest.NewRecorder()
+	firstReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
+	service.ProxyHandler().ServeHTTP(first, firstReq)
+	if first.Code != http.StatusOK || first.Body.String() != "ok" {
+		t.Fatalf("unexpected first response status=%d body=%q", first.Code, first.Body.String())
+	}
+	if timing := strings.Join(first.Header().Values("Server-Timing"), ","); !strings.Contains(timing, "fugue_origin_connect") || !strings.Contains(timing, "fugue_origin_ttfb") {
+		t.Fatalf("expected first response to include origin connect and TTFB timing, got %q", timing)
+	}
+
+	second := httptest.NewRecorder()
+	secondReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
+	service.ProxyHandler().ServeHTTP(second, secondReq)
+	if second.Code != http.StatusOK || second.Body.String() != "ok" {
+		t.Fatalf("unexpected second response status=%d body=%q", second.Code, second.Body.String())
+	}
+	if timing := strings.Join(second.Header().Values("Server-Timing"), ","); strings.Contains(timing, "fugue_origin_connect") || !strings.Contains(timing, "fugue_origin_ttfb") {
+		t.Fatalf("expected reused origin connection to skip connect timing and keep TTFB timing, got %q", timing)
+	}
+	if upstreamHits.Load() != 2 {
+		t.Fatalf("expected both uncached requests to reach upstream, got %d", upstreamHits.Load())
+	}
+
+	metrics := renderMetrics(t, service)
+	for _, want := range []string{
+		`fugue_edge_route_origin_connect_duration_seconds_count{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 1`,
+		`fugue_edge_route_origin_ttfb_seconds_count{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 2`,
+		`fugue_edge_route_origin_total_duration_seconds_count{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 2`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("metrics missing %q:\n%s", want, metrics)
+		}
+	}
+}
+
+func TestProxyHandlerCachesHTMLDocumentsWithShortTTL(t *testing.T) {
+	t.Parallel()
+
+	var upstreamHits atomic.Int64
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = fmt.Fprintf(w, "<!doctype html><title>shell %d</title>", upstreamHits.Add(1))
+	}))
+	defer backend.Close()
+
+	bundle := testBundle("routegen_html_cache")
+	bundle.Routes[0].UpstreamURL = backend.URL
+	bundle.Routes[0].CachePolicyID = "static-assets-immutable-v1"
+	bundle.Routes[0].CacheNamespace = "app_demo_deploy_1"
+	bundle.CachePolicies = []model.CachePolicy{
+		{
+			ID:                    "static-assets-immutable-v1",
+			Kind:                  model.CachePolicyKindStaticAssets,
+			PathPatterns:          []string{"/_next/static/*", "*.js"},
+			MethodAllowlist:       []string{http.MethodGet, http.MethodHead},
+			StatusAllowlist:       []int{http.StatusOK},
+			TTLSeconds:            31536000,
+			EdgeCacheControl:      "public, max-age=31536000, immutable",
+			BypassOnAuthorization: true,
+			VaryAllowlist:         []string{"Accept-Encoding"},
+			PurgeMode:             model.CachePolicyPurgeModeGeneration,
+		},
+		{
+			ID:                          "html-documents-short-v1",
+			Kind:                        model.CachePolicyKindHTMLDocuments,
+			PathPatterns:                []string{"/", "/index.html", "*.html"},
+			MethodAllowlist:             []string{http.MethodGet, http.MethodHead},
+			StatusAllowlist:             []int{http.StatusOK},
+			TTLSeconds:                  60,
+			StaleWhileRevalidateSeconds: 300,
+			EdgeCacheControl:            "public, max-age=60, stale-while-revalidate=300",
+			BypassOnAuthorization:       true,
+			BypassOnCookie:              true,
+			VaryAllowlist:               []string{"Accept-Encoding"},
+			PurgeMode:                   model.CachePolicyPurgeModeGeneration,
+		},
+	}
+
+	service := NewService(config.EdgeConfig{
+		APIURL:             "https://api.example.invalid",
+		EdgeToken:          "edge-secret",
+		AssetCachePath:     filepath.Join(t.TempDir(), "http-cache"),
+		AssetCacheMaxBytes: 1024 * 1024,
+	}, log.New(ioDiscard{}, "", 0))
+	service.recordSyncSuccess(bundle, `"routegen_html_cache"`, time.Now().UTC(), false)
+
+	first := httptest.NewRecorder()
+	firstReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
+	service.ProxyHandler().ServeHTTP(first, firstReq)
+	if first.Code != http.StatusOK || first.Header().Get("X-Fugue-Cache") != "miss" {
+		t.Fatalf("expected first HTML request to miss cache, got status=%d cache=%q body=%q", first.Code, first.Header().Get("X-Fugue-Cache"), first.Body.String())
+	}
+
+	second := httptest.NewRecorder()
+	secondReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
+	service.ProxyHandler().ServeHTTP(second, secondReq)
+	if second.Code != http.StatusOK || second.Header().Get("X-Fugue-Cache") != "hit" {
+		t.Fatalf("expected second HTML request to hit cache, got status=%d cache=%q body=%q", second.Code, second.Header().Get("X-Fugue-Cache"), second.Body.String())
+	}
+	if first.Body.String() != second.Body.String() || upstreamHits.Load() != 1 {
+		t.Fatalf("expected cached HTML shell, hits=%d first=%q second=%q", upstreamHits.Load(), first.Body.String(), second.Body.String())
+	}
+	if timing := strings.Join(second.Header().Values("Server-Timing"), ","); !strings.Contains(timing, "fugue_cache_lookup") || strings.Contains(timing, "fugue_origin_ttfb") {
+		t.Fatalf("expected HTML cache hit to expose only cache timing, got %q", timing)
+	}
+
+	cookie := httptest.NewRecorder()
+	cookieReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
+	cookieReq.Header.Set("Cookie", "session=abc")
+	service.ProxyHandler().ServeHTTP(cookie, cookieReq)
+	if cookie.Code != http.StatusOK || cookie.Header().Get("X-Fugue-Cache") != "" || upstreamHits.Load() != 2 {
+		t.Fatalf("expected cookie request to bypass HTML cache, status=%d cache=%q hits=%d body=%q", cookie.Code, cookie.Header().Get("X-Fugue-Cache"), upstreamHits.Load(), cookie.Body.String())
+	}
+
+	metrics := renderMetrics(t, service)
+	for _, want := range []string{
+		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",cache_status="hit",cache_policy_id="html-documents-short-v1",asset_class="html_document"} 1`,
+		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",cache_status="miss",cache_policy_id="html-documents-short-v1",asset_class="html_document"} 1`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("metrics missing %q:\n%s", want, metrics)
+		}
+	}
+}
+
+func TestProxyHandlerDoesNotCacheNoStoreHTMLDocuments(t *testing.T) {
+	t.Parallel()
+
+	var upstreamHits atomic.Int64
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = fmt.Fprintf(w, "<!doctype html><title>dynamic %d</title>", upstreamHits.Add(1))
+	}))
+	defer backend.Close()
+
+	bundle := testBundle("routegen_html_no_store")
+	bundle.Routes[0].UpstreamURL = backend.URL
+	bundle.Routes[0].CachePolicyID = "static-assets-immutable-v1"
+	bundle.Routes[0].CacheNamespace = "app_demo_deploy_1"
+	bundle.CachePolicies = []model.CachePolicy{
+		{
+			ID:                    "static-assets-immutable-v1",
+			Kind:                  model.CachePolicyKindStaticAssets,
+			PathPatterns:          []string{"/_next/static/*"},
+			MethodAllowlist:       []string{http.MethodGet, http.MethodHead},
+			StatusAllowlist:       []int{http.StatusOK},
+			TTLSeconds:            31536000,
+			BypassOnAuthorization: true,
+			VaryAllowlist:         []string{"Accept-Encoding"},
+			PurgeMode:             model.CachePolicyPurgeModeGeneration,
+		},
+		{
+			ID:                    "html-documents-short-v1",
+			Kind:                  model.CachePolicyKindHTMLDocuments,
+			PathPatterns:          []string{"/"},
+			MethodAllowlist:       []string{http.MethodGet, http.MethodHead},
+			StatusAllowlist:       []int{http.StatusOK},
+			TTLSeconds:            60,
+			EdgeCacheControl:      "public, max-age=60, stale-while-revalidate=300",
+			BypassOnAuthorization: true,
+			BypassOnCookie:        true,
+			VaryAllowlist:         []string{"Accept-Encoding"},
+			PurgeMode:             model.CachePolicyPurgeModeGeneration,
+		},
+	}
+
+	service := NewService(config.EdgeConfig{
+		APIURL:             "https://api.example.invalid",
+		EdgeToken:          "edge-secret",
+		AssetCachePath:     filepath.Join(t.TempDir(), "http-cache"),
+		AssetCacheMaxBytes: 1024 * 1024,
+	}, log.New(ioDiscard{}, "", 0))
+	service.recordSyncSuccess(bundle, `"routegen_html_no_store"`, time.Now().UTC(), false)
+
+	first := httptest.NewRecorder()
+	firstReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
+	service.ProxyHandler().ServeHTTP(first, firstReq)
+	second := httptest.NewRecorder()
+	secondReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
+	service.ProxyHandler().ServeHTTP(second, secondReq)
+
+	if upstreamHits.Load() != 2 || first.Header().Get("X-Fugue-Cache") != "bypass" || second.Header().Get("X-Fugue-Cache") != "bypass" {
+		t.Fatalf("expected no-store HTML to bypass cache twice, hits=%d firstCache=%q secondCache=%q", upstreamHits.Load(), first.Header().Get("X-Fugue-Cache"), second.Header().Get("X-Fugue-Cache"))
+	}
+	if first.Header().Get("Cache-Control") != "no-store" || second.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("expected origin no-store cache-control to survive, first=%q second=%q", first.Header().Get("Cache-Control"), second.Header().Get("Cache-Control"))
+	}
+	if first.Body.String() == second.Body.String() {
+		t.Fatalf("expected dynamic no-store HTML to be fetched twice, first=%q second=%q", first.Body.String(), second.Body.String())
 	}
 }
 

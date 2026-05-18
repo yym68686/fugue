@@ -18,7 +18,10 @@ import (
 
 const defaultEdgeGroupID = "edge-group-default"
 
-const defaultStaticAssetCachePolicyID = "static-assets-immutable-v1"
+const (
+	defaultStaticAssetCachePolicyID  = "static-assets-immutable-v1"
+	defaultHTMLDocumentCachePolicyID = "html-documents-short-v1"
+)
 
 type edgeRouteBundleOptions struct {
 	EdgeID      string
@@ -805,6 +808,21 @@ func defaultEdgeCachePolicies() []model.CachePolicy {
 			BypassOnAuthorization: true,
 			VaryAllowlist:         []string{"Accept-Encoding"},
 			PurgeMode:             model.CachePolicyPurgeModeGeneration,
+		},
+		{
+			ID:                          defaultHTMLDocumentCachePolicyID,
+			Kind:                        model.CachePolicyKindHTMLDocuments,
+			PathPatterns:                []string{"/", "/index.html", "*.html"},
+			MethodAllowlist:             []string{http.MethodGet, http.MethodHead},
+			StatusAllowlist:             []int{http.StatusOK},
+			TTLSeconds:                  60,
+			StaleWhileRevalidateSeconds: 300,
+			BrowserCacheControl:         "public, max-age=30, stale-while-revalidate=300",
+			EdgeCacheControl:            "public, max-age=60, stale-while-revalidate=300",
+			BypassOnAuthorization:       true,
+			BypassOnCookie:              true,
+			VaryAllowlist:               []string{"Accept-Encoding"},
+			PurgeMode:                   model.CachePolicyPurgeModeGeneration,
 		},
 	}
 }

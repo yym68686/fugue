@@ -90,7 +90,9 @@ func TestEdgeRoutesBundleDerivesPlatformAndCustomDomainRoutes(t *testing.T) {
 	if platform.CachePolicyID != defaultStaticAssetCachePolicyID || platform.CacheNamespace == "" || platform.DeploymentGeneration == "" {
 		t.Fatalf("expected platform route to carry static asset cache policy, got %+v", platform)
 	}
-	if len(bundle.CachePolicies) != 1 || bundle.CachePolicies[0].ID != defaultStaticAssetCachePolicyID {
+	if len(bundle.CachePolicies) != 2 ||
+		bundle.CachePolicies[0].ID != defaultStaticAssetCachePolicyID ||
+		bundle.CachePolicies[1].ID != defaultHTMLDocumentCachePolicyID {
 		t.Fatalf("expected route bundle to include default cache policy, got %+v", bundle.CachePolicies)
 	}
 	if !strings.Contains(platform.UpstreamURL, ".svc.cluster.local:8080") {

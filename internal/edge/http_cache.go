@@ -28,17 +28,21 @@ const (
 )
 
 type edgeHTTPCacheDecision struct {
-	Enabled    bool
-	Policy     model.CachePolicy
-	PolicyID   string
-	Namespace  string
-	Key        string
-	KeyHash    string
-	AssetClass string
-	Status     string
-	Reason     string
-	TTL        time.Duration
-	Cacheable  bool
+	Enabled            bool
+	Policy             model.CachePolicy
+	PolicyID           string
+	Namespace          string
+	Key                string
+	KeyHash            string
+	AssetClass         string
+	Status             string
+	Reason             string
+	TTL                time.Duration
+	Cacheable          bool
+	OriginContentType  string
+	OriginCacheControl string
+	OriginVary         []string
+	OriginSetCookie    bool
 }
 
 type edgeHTTPCacheEntry struct {
@@ -135,8 +139,8 @@ func (s *Service) edgeCacheDecision(r *http.Request, route model.EdgeRouteBindin
 		decision.Reason = "authorization present"
 		return decision
 	}
-	policy, ok := s.edgeCachePolicyForRoute(route)
-	if !ok {
+	policies := s.edgeCachePoliciesForRoute(route)
+	if len(policies) == 0 {
 		decision.Reason = "route has no cache policy"
 		return decision
 	}
@@ -144,55 +148,79 @@ func (s *Service) edgeCacheDecision(r *http.Request, route model.EdgeRouteBindin
 		decision.Reason = "asset cache path not configured"
 		return decision
 	}
-	if !edgeCachePathMatches(policy.PathPatterns, r.URL.Path) {
-		decision.Reason = "path not covered by cache policy"
+	for _, policy := range policies {
+		if strings.TrimSpace(policy.ID) == "" {
+			continue
+		}
+		if !edgeCachePathMatches(policy.PathPatterns, r.URL.Path) {
+			if decision.Reason == "no cache policy" {
+				decision.Reason = "path not covered by cache policy"
+			}
+			continue
+		}
+		if len(policy.MethodAllowlist) > 0 && !stringSliceContainsFold(policy.MethodAllowlist, r.Method) {
+			decision.Reason = "method not allowed by cache policy"
+			continue
+		}
+		if strings.TrimSpace(r.Header.Get("Authorization")) != "" && policy.BypassOnAuthorization {
+			decision.Reason = "authorization present"
+			continue
+		}
+		if policy.BypassOnCookie && strings.TrimSpace(r.Header.Get("Cookie")) != "" {
+			decision.Reason = "cookie present"
+			continue
+		}
+		decision.Enabled = true
+		decision.Policy = policy
+		decision.PolicyID = strings.TrimSpace(policy.ID)
+		decision.Namespace = edgeCacheNamespace(route)
+		decision.Key = edgeCacheKey(r, decision.Namespace, decision.PolicyID)
+		sum := sha256.Sum256([]byte(decision.Key))
+		decision.KeyHash = hex.EncodeToString(sum[:])
+		decision.Cacheable = true
+		decision.Status = edgeCacheStatusMiss
+		decision.Reason = "cacheable edge response"
+		if ttl := time.Duration(policy.TTLSeconds) * time.Second; ttl > 0 {
+			decision.TTL = ttl
+		} else {
+			decision.TTL = 24 * time.Hour
+		}
 		return decision
-	}
-	if len(policy.MethodAllowlist) > 0 && !stringSliceContainsFold(policy.MethodAllowlist, r.Method) {
-		decision.Reason = "method not allowed by cache policy"
-		return decision
-	}
-	if strings.TrimSpace(r.Header.Get("Authorization")) != "" && policy.BypassOnAuthorization {
-		decision.Reason = "authorization present"
-		return decision
-	}
-	if policy.BypassOnCookie && strings.TrimSpace(r.Header.Get("Cookie")) != "" {
-		decision.Reason = "cookie present"
-		return decision
-	}
-	decision.Enabled = true
-	decision.Policy = policy
-	decision.PolicyID = strings.TrimSpace(policy.ID)
-	decision.Namespace = edgeCacheNamespace(route)
-	decision.Key = edgeCacheKey(r, decision.Namespace, decision.PolicyID)
-	sum := sha256.Sum256([]byte(decision.Key))
-	decision.KeyHash = hex.EncodeToString(sum[:])
-	decision.Cacheable = true
-	decision.Status = edgeCacheStatusMiss
-	decision.Reason = "cacheable static asset"
-	if ttl := time.Duration(policy.TTLSeconds) * time.Second; ttl > 0 {
-		decision.TTL = ttl
-	} else {
-		decision.TTL = 24 * time.Hour
 	}
 	return decision
 }
 
-func (s *Service) edgeCachePolicyForRoute(route model.EdgeRouteBinding) (model.CachePolicy, bool) {
+func (s *Service) edgeCachePoliciesForRoute(route model.EdgeRouteBinding) []model.CachePolicy {
 	policyID := strings.TrimSpace(route.CachePolicyID)
 	if policyID == "" {
-		return model.CachePolicy{}, false
+		return nil
 	}
 	bundle, ok := s.Bundle()
 	if !ok {
-		return model.CachePolicy{}, false
+		return nil
+	}
+	policies := make([]model.CachePolicy, 0, len(bundle.CachePolicies))
+	var routePolicy model.CachePolicy
+	for _, policy := range bundle.CachePolicies {
+		if strings.EqualFold(strings.TrimSpace(policy.ID), policyID) {
+			policies = append(policies, policy)
+			routePolicy = policy
+			break
+		}
+	}
+	if strings.TrimSpace(routePolicy.ID) == "" || !strings.EqualFold(strings.TrimSpace(routePolicy.Kind), model.CachePolicyKindStaticAssets) {
+		return policies
 	}
 	for _, policy := range bundle.CachePolicies {
 		if strings.EqualFold(strings.TrimSpace(policy.ID), policyID) {
-			return policy, true
+			continue
 		}
+		if strings.TrimSpace(policy.ID) == "" || !strings.EqualFold(strings.TrimSpace(policy.Kind), model.CachePolicyKindHTMLDocuments) {
+			continue
+		}
+		policies = append(policies, policy)
 	}
-	return model.CachePolicy{}, false
+	return policies
 }
 
 func edgeCacheNamespace(route model.EdgeRouteBinding) string {
@@ -325,6 +353,8 @@ func edgeAssetClassForRequest(r *http.Request) string {
 	}
 	path := edgeCacheNormalizePath(r.URL.Path)
 	switch {
+	case path == "/" || strings.EqualFold(path, "/index.html") || strings.HasSuffix(strings.ToLower(path), ".html"):
+		return "html_document"
 	case strings.HasPrefix(path, "/_next/static/"):
 		return "next_static"
 	case strings.HasPrefix(path, "/assets/"), strings.HasPrefix(path, "/static/"):
@@ -397,6 +427,38 @@ func (s *Service) edgeCacheStore(decision edgeHTTPCacheDecision, entry edgeHTTPC
 	return os.Rename(tmp, path)
 }
 
+func (d *edgeHTTPCacheDecision) observeOriginResponse(resp *http.Response) {
+	if d == nil || resp == nil {
+		return
+	}
+	d.OriginContentType = strings.TrimSpace(resp.Header.Get("Content-Type"))
+	d.OriginCacheControl = strings.ToLower(strings.Join(resp.Header.Values("Cache-Control"), ","))
+	d.OriginVary = append([]string(nil), resp.Header.Values("Vary")...)
+	d.OriginSetCookie = len(resp.Header.Values("Set-Cookie")) > 0
+}
+
+func (d *edgeHTTPCacheDecision) originResponseAllowsStore(statusCode int) bool {
+	if d == nil || !d.Enabled || !d.Cacheable || strings.TrimSpace(d.PolicyID) == "" {
+		return false
+	}
+	if statusCode != http.StatusOK {
+		return false
+	}
+	if len(d.Policy.StatusAllowlist) > 0 && !intSliceContains(d.Policy.StatusAllowlist, statusCode) {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(d.Policy.Kind), model.CachePolicyKindHTMLDocuments) && !edgeCacheContentTypeIsHTML(d.OriginContentType, nil) {
+		return false
+	}
+	if d.OriginSetCookie {
+		return false
+	}
+	if edgeCacheControlDisallowsStore(d.OriginCacheControl) {
+		return false
+	}
+	return edgeCacheVaryAllowed(d.OriginVary, d.Policy.VaryAllowlist)
+}
+
 func (s *Service) edgeCacheServeIfFresh(w http.ResponseWriter, decision edgeHTTPCacheDecision, entry edgeHTTPCacheEntry, serverTiming string) (bool, int, string) {
 	status := edgeCacheStatusHit
 	now := time.Now().UTC()
@@ -441,7 +503,7 @@ func (s *Service) edgeCacheServeWithStatus(w http.ResponseWriter, decision edgeH
 }
 
 func (s *Service) edgeCacheShouldStore(decision edgeHTTPCacheDecision, capture *edgeProxyObservationResponseWriter) bool {
-	if decision.PolicyID == "" || capture == nil || capture.overflow {
+	if decision.PolicyID == "" || !decision.Cacheable || capture == nil || capture.overflow {
 		return false
 	}
 	if capture.statusCode() != http.StatusOK {
@@ -450,13 +512,63 @@ func (s *Service) edgeCacheShouldStore(decision edgeHTTPCacheDecision, capture *
 	if len(decision.Policy.StatusAllowlist) > 0 && !intSliceContains(decision.Policy.StatusAllowlist, capture.statusCode()) {
 		return false
 	}
+	if strings.EqualFold(strings.TrimSpace(decision.Policy.Kind), model.CachePolicyKindHTMLDocuments) && !edgeCacheContentTypeIsHTML(decision.OriginContentType, capture.headerSnapshot) {
+		return false
+	}
+	if decision.OriginSetCookie {
+		return false
+	}
+	if edgeCacheControlDisallowsStore(decision.OriginCacheControl) {
+		return false
+	}
+	if !edgeCacheVaryAllowed(decision.OriginVary, decision.Policy.VaryAllowlist) {
+		return false
+	}
 	if capture.headerSnapshot != nil && len(capture.headerSnapshot.Values("Set-Cookie")) > 0 {
 		return false
 	}
 	if capture.headerSnapshot != nil {
 		cacheControl := strings.ToLower(strings.Join(capture.headerSnapshot.Values("Cache-Control"), ","))
-		if strings.Contains(cacheControl, "no-store") || strings.Contains(cacheControl, "private") {
+		if edgeCacheControlDisallowsStore(cacheControl) {
 			return false
+		}
+	}
+	return true
+}
+
+func edgeCacheContentTypeIsHTML(originContentType string, fallback http.Header) bool {
+	contentType := strings.ToLower(strings.TrimSpace(originContentType))
+	if contentType == "" && fallback != nil {
+		contentType = strings.ToLower(strings.TrimSpace(fallback.Get("Content-Type")))
+	}
+	return strings.HasPrefix(contentType, "text/html") || strings.HasPrefix(contentType, "application/xhtml+xml")
+}
+
+func edgeCacheControlDisallowsStore(cacheControl string) bool {
+	cacheControl = strings.ToLower(strings.TrimSpace(cacheControl))
+	return strings.Contains(cacheControl, "no-store") || strings.Contains(cacheControl, "private")
+}
+
+func edgeCacheVaryAllowed(varyValues, allowlist []string) bool {
+	allowed := make(map[string]struct{}, len(allowlist))
+	for _, value := range allowlist {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value != "" {
+			allowed[value] = struct{}{}
+		}
+	}
+	for _, raw := range varyValues {
+		for _, part := range strings.Split(raw, ",") {
+			value := strings.ToLower(strings.TrimSpace(part))
+			if value == "" {
+				continue
+			}
+			if value == "*" {
+				return false
+			}
+			if _, ok := allowed[value]; !ok {
+				return false
+			}
 		}
 	}
 	return true

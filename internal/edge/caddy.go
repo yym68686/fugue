@@ -405,15 +405,15 @@ func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.E
 	if s.normalizedCaddyTLSMode() != caddyTLSModePublicOnDemand {
 		return nil
 	}
-	host := s.caddyWarmupHost(bundle)
-	if host == "" {
+	hosts := s.caddyWarmupHosts(bundle)
+	if len(hosts) == 0 {
 		return nil
 	}
 	dialAddress := caddyProxyDialAddress(s.Config.CaddyListenAddr)
 	if dialAddress == "" {
 		return nil
 	}
-	warmupSignature := configSignature + ":" + host
+	warmupSignature := configSignature + ":" + strings.Join(hosts, ",")
 	if !s.needsCaddyWarmup(warmupSignature) {
 		return nil
 	}
@@ -422,19 +422,24 @@ func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.E
 		warmup = warmupCaddyTLS
 	}
 	started := time.Now()
-	err := warmup(ctx, dialAddress, host)
+	var firstErr error
+	for _, host := range hosts {
+		if err := warmup(ctx, dialAddress, host); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	duration := time.Since(started)
-	s.recordCaddyWarmup(warmupSignature, host, duration, err)
-	if err != nil {
-		return err
+	s.recordCaddyWarmup(warmupSignature, strings.Join(hosts, ","), duration, firstErr)
+	if firstErr != nil {
+		return firstErr
 	}
 	if s.Logger != nil {
-		s.Logger.Printf("edge caddy TLS warmup complete; host=%s listen=%s duration=%s", host, dialAddress, duration)
+		s.Logger.Printf("edge caddy TLS warmup complete; hosts=%d listen=%s duration=%s", len(hosts), dialAddress, duration)
 	}
 	return nil
 }
 
-func (s *Service) caddyWarmupHost(bundle model.EdgeRouteBundle) string {
+func (s *Service) caddyWarmupHosts(bundle model.EdgeRouteBundle) []string {
 	seen := map[string]struct{}{}
 	for _, route := range bundle.Routes {
 		if !s.routeAllowedForThisEdge(route) {
@@ -453,14 +458,14 @@ func (s *Service) caddyWarmupHost(bundle model.EdgeRouteBundle) string {
 		seen[host] = struct{}{}
 	}
 	if len(seen) == 0 {
-		return ""
+		return nil
 	}
 	hosts := make([]string, 0, len(seen))
 	for host := range seen {
 		hosts = append(hosts, host)
 	}
 	sort.Strings(hosts)
-	return hosts[0]
+	return hosts
 }
 
 func warmupCaddyTLS(ctx context.Context, dialAddress, host string) error {

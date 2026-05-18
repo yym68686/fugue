@@ -38,6 +38,7 @@ type Service struct {
 	HTTPClient  *http.Client
 	Logger      *log.Logger
 	caddyWarmup func(context.Context, string, string) error
+	proxyBase   http.RoundTripper
 
 	mu                  sync.Mutex
 	snapshot            Status
@@ -220,6 +221,7 @@ func NewService(cfg config.EdgeConfig, logger *log.Logger) *Service {
 		},
 		Logger:      logger,
 		caddyWarmup: warmupCaddyTLS,
+		proxyBase:   newDefaultEdgeProxyTransport(),
 		snapshot: Status{
 			Status:      "unhealthy",
 			EdgeID:      strings.TrimSpace(cfg.EdgeID),
@@ -242,6 +244,9 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	if s.HTTPClient == nil {
 		s.HTTPClient = &http.Client{Timeout: s.Config.HTTPTimeout}
+	}
+	if s.proxyBase == nil {
+		s.proxyBase = newDefaultEdgeProxyTransport()
 	}
 
 	if err := s.LoadCache(); err != nil {
@@ -700,7 +705,7 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 			req.Out.Header.Set("X-Fugue-Edge-Route", strings.TrimSpace(route.Hostname))
 			req.Out.Header.Set("X-Fugue-Edge-App-ID", strings.TrimSpace(route.AppID))
 		},
-		Transport: newEdgeProxyTransport(observed),
+		Transport: s.newEdgeProxyTransport(observed),
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
 			if observed != nil {
 				observed.UpstreamError = strings.TrimSpace(proxyErr.Error())
@@ -715,6 +720,13 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 				addEdgeServerTiming(resp.Header, edgeProxyServerTiming(*observed, true))
 			}
 			if resp == nil || cacheDecision == nil || !cacheDecision.Enabled {
+				return nil
+			}
+			cacheDecision.observeOriginResponse(resp)
+			if !cacheDecision.originResponseAllowsStore(resp.StatusCode) {
+				cacheDecision.Cacheable = false
+				cacheDecision.Status = edgeCacheStatusBypass
+				resp.Header.Set("X-Fugue-Cache", cacheDecision.Status)
 				return nil
 			}
 			resp.Header.Set("X-Fugue-Cache", cacheDecision.Status)
@@ -734,9 +746,16 @@ type edgeProxyTransport struct {
 	observation *edgeProxyObservation
 }
 
-func newEdgeProxyTransport(observation *edgeProxyObservation) http.RoundTripper {
+func (s *Service) newEdgeProxyTransport(observation *edgeProxyObservation) http.RoundTripper {
+	base := http.RoundTripper(nil)
+	if s != nil {
+		base = s.proxyBase
+	}
+	if base == nil {
+		base = newDefaultEdgeProxyTransport()
+	}
 	return &edgeProxyTransport{
-		base:        newDefaultEdgeProxyTransport(),
+		base:        base,
 		observation: observation,
 	}
 }
