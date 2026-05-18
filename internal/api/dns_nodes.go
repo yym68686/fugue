@@ -79,6 +79,12 @@ func (s *Server) handleListDNSNodes(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	if nodePolicies, err := s.loadClusterNodePolicyStatuses(r.Context(), principal); err == nil {
+		nodes = activeDNSNodesForPolicy(nodes, nodePolicies)
+	} else if s.log != nil {
+		s.log.Printf("dns node inventory continuing without node policy filter: %v", err)
+	}
+	nodes = freshDNSNodes(nodes, time.Now().UTC())
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"nodes": nodes})
 }
 
@@ -264,7 +270,13 @@ func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal mode
 	}
 	nodes = dnsNodesForZone(nodes, opts.Zone)
 
-	policyByNode, policyErr := s.dnsNodePolicyStatusByName(ctx, principal)
+	nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(ctx, principal)
+	policyByNode := map[string]model.ClusterNodePolicyStatus{}
+	if policyErr == nil {
+		policyByNode = clusterNodePolicyStatusByName(nodePolicies)
+		nodes = activeDNSNodesForPolicy(nodes, nodePolicies)
+	}
+	nodes = freshDNSNodes(nodes, time.Now().UTC())
 	nodeChecks := make([]model.DNSDelegationNodeCheck, 0, len(nodes))
 	for _, node := range nodes {
 		nodeChecks = append(nodeChecks, s.buildDNSDelegationNodeCheck(ctx, node, opts, policyByNode, policyErr))
@@ -304,7 +316,7 @@ func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal mode
 			Message: dnsBundleStableMessage(bundleVersion, bundleStable),
 		},
 		s.buildRouteDNSInvariantPreflightCheck(ctx, opts),
-		s.buildEdgeTLSReadinessPreflightCheck(),
+		s.buildEdgeTLSReadinessPreflightCheck(ctx, principal),
 		model.DNSDelegationPreflightCheck{
 			Name:    "cache_errors_zero",
 			Pass:    dnsNodeCacheHealthyAll(nodeChecks),
@@ -387,7 +399,7 @@ func (s *Server) buildRouteDNSInvariantPreflightCheck(ctx context.Context, opts 
 	}
 }
 
-func (s *Server) buildEdgeTLSReadinessPreflightCheck() model.DNSDelegationPreflightCheck {
+func (s *Server) buildEdgeTLSReadinessPreflightCheck(ctx context.Context, principal model.Principal) model.DNSDelegationPreflightCheck {
 	nodes, _, err := s.store.ListEdgeNodes("")
 	if err != nil {
 		return model.DNSDelegationPreflightCheck{
@@ -396,6 +408,12 @@ func (s *Server) buildEdgeTLSReadinessPreflightCheck() model.DNSDelegationPrefli
 			Message: fmt.Sprintf("cannot load edge node inventory: %v", err),
 		}
 	}
+	if nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(ctx, principal); policyErr == nil {
+		nodes = activeEdgeNodesForPolicy(nodes, nodePolicies)
+	} else if s.log != nil {
+		s.log.Printf("edge TLS readiness preflight continuing without node policy filter: %v", policyErr)
+	}
+	nodes = freshEdgeNodes(nodes, time.Now().UTC())
 	checked := 0
 	for _, node := range nodes {
 		if node.CaddyRouteCount <= 0 &&

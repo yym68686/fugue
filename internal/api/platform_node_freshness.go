@@ -42,6 +42,32 @@ func dnsNodeHeartbeatFresh(node model.DNSNode, now time.Time) bool {
 	return nodeHeartbeatFresh(node.LastHeartbeatAt, node.LastSeenAt, now)
 }
 
+func freshEdgeNodes(nodes []model.EdgeNode, now time.Time) []model.EdgeNode {
+	if len(nodes) == 0 {
+		return nodes
+	}
+	out := make([]model.EdgeNode, 0, len(nodes))
+	for _, node := range nodes {
+		if edgeNodeHeartbeatFresh(node, now) {
+			out = append(out, node)
+		}
+	}
+	return out
+}
+
+func freshDNSNodes(nodes []model.DNSNode, now time.Time) []model.DNSNode {
+	if len(nodes) == 0 {
+		return nodes
+	}
+	out := make([]model.DNSNode, 0, len(nodes))
+	for _, node := range nodes {
+		if dnsNodeHeartbeatFresh(node, now) {
+			out = append(out, node)
+		}
+	}
+	return out
+}
+
 func nodeHeartbeatFresh(lastHeartbeatAt, lastSeenAt *time.Time, now time.Time) bool {
 	if now.IsZero() {
 		now = time.Now().UTC()

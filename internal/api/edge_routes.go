@@ -581,8 +581,10 @@ func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string]bool, ma
 		}
 		if edgeNodeRouteServingCapable(node, now) {
 			healthy[groupID] = true
-		} else if _, ok := healthy[groupID]; !ok {
-			healthy[groupID] = false
+		} else if edgeNodeHeartbeatFresh(node, now) {
+			if _, ok := healthy[groupID]; !ok {
+				healthy[groupID] = false
+			}
 		}
 	}
 	return healthy, expectedNonEmpty, expectedMinTrafficRoutes, nil

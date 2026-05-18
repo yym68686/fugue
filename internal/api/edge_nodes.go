@@ -65,6 +65,13 @@ func (s *Server) handleListEdgeNodes(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	if nodePolicies, err := s.loadClusterNodePolicyStatuses(r.Context(), principal); err == nil {
+		nodes = activeEdgeNodesForPolicy(nodes, nodePolicies)
+	} else if s.log != nil {
+		s.log.Printf("edge node inventory continuing without node policy filter: %v", err)
+	}
+	nodes = freshEdgeNodes(nodes, time.Now().UTC())
+	groups = activeEdgeGroupsForInventory(groups, nodes, nil)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"nodes":  nodes,
 		"groups": groups,

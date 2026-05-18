@@ -307,6 +307,55 @@ func TestEdgeDNSBundleDerivesFullZonePlatformAppRecords(t *testing.T) {
 	}
 }
 
+func TestEdgeDNSBundleUsesAllRouteReadyEdgesForDefaultPlatformDomain(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	if _, _, err := storeState.EnsureManagedSharedLocationLabels(map[string]string{
+		runtimepkg.LocationCountryCodeLabelKey: "HK",
+	}); err != nil {
+		t.Fatalf("set managed shared location labels: %v", err)
+	}
+	app = deployAppForEdgeRouteTest(t, storeState, app)
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-us-1", "edge-group-country-us", "15.204.94.71")
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-de-1", "edge-group-country-de", "51.38.126.103")
+	if _, err := storeState.PutAppDomain(model.AppDomain{
+		Hostname:  "fugue.pro",
+		AppID:     app.ID,
+		TenantID:  app.TenantID,
+		Status:    model.AppDomainStatusVerified,
+		TLSStatus: model.AppDomainTLSStatusReady,
+	}); err != nil {
+		t.Fatalf("put platform domain binding: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103&route_a_answer_ip=136.112.185.40", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	rootA := edgeDNSRecordByNameAndType(bundle.Records, "fugue.pro", model.EdgeDNSRecordTypeA)
+	if rootA == nil {
+		t.Fatalf("expected fugue.pro A record: %+v", bundle.Records)
+	}
+	if len(rootA.Values) != 2 ||
+		!stringSliceContains(rootA.Values, "15.204.94.71") ||
+		!stringSliceContains(rootA.Values, "51.38.126.103") {
+		t.Fatalf("expected DNS answer set to include all route-ready public edges, got %+v", rootA)
+	}
+	if len(rootA.AnswerPolicy.AllowedEdgeGroups) != 2 ||
+		!stringSliceContains(rootA.AnswerPolicy.AllowedEdgeGroups, "edge-group-country-us") ||
+		!stringSliceContains(rootA.AnswerPolicy.AllowedEdgeGroups, "edge-group-country-de") {
+		t.Fatalf("expected answer policy to allow both route-ready edge groups, got %+v", rootA.AnswerPolicy)
+	}
+	if len(rootA.Candidates) != 2 {
+		t.Fatalf("expected two DNS candidates, got %+v", rootA.Candidates)
+	}
+}
+
 func TestEdgeDNSBundleUsesDegradedServingLKGEdgeIPsForPlatformAppRecords(t *testing.T) {
 	t.Parallel()
 
