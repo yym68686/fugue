@@ -168,6 +168,92 @@ func TestAppImageTrackingRecordsDeployDigest(t *testing.T) {
 	}
 }
 
+func TestAppImageTrackingClearsDeployDigestWhenDifferentSourceDeploys(t *testing.T) {
+	t.Parallel()
+
+	s, tenant, _, app := newAppImageTrackingTestStore(t)
+	tracking, err := s.UpsertAppImageTracking(model.AppImageTracking{
+		AppID:    app.ID,
+		ImageRef: "ghcr.io/acme/web:latest",
+		Enabled:  true,
+	})
+	if err != nil {
+		t.Fatalf("upsert tracking: %v", err)
+	}
+
+	trackedSpec := app.Spec
+	trackedSpec.Image = "registry.fugue.local/acme/web@sha256:abc123"
+	trackedSource := model.AppSource{
+		Type:             model.AppSourceTypeDockerImage,
+		ImageRef:         tracking.ImageRef,
+		ResolvedImageRef: "registry.fugue.local/acme/web@sha256:abc123",
+	}
+	trackedDeployOp, err := s.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		Type:          model.OperationTypeDeploy,
+		RequestedByID: model.OperationRequestedByImageTracking,
+		AppID:         app.ID,
+		DesiredSpec:   &trackedSpec,
+		DesiredSource: &trackedSource,
+	})
+	if err != nil {
+		t.Fatalf("create tracked deploy operation: %v", err)
+	}
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim tracked deploy operation: %v", err)
+	} else if !found {
+		t.Fatal("expected tracked deploy operation")
+	}
+	if _, err := s.CompleteManagedOperation(trackedDeployOp.ID, "/tmp/web.yaml", "deployed"); err != nil {
+		t.Fatalf("complete tracked deploy operation: %v", err)
+	}
+
+	uploadSpec := trackedSpec
+	uploadSpec.Image = "registry.fugue.local/acme/web:upload-abc123"
+	uploadSource := model.AppSource{
+		Type:             model.AppSourceTypeUpload,
+		UploadID:         "upload_123",
+		UploadFilename:   "web.tgz",
+		ArchiveSHA256:    "abc123",
+		ArchiveSizeBytes: 128,
+		BuildStrategy:    model.AppBuildStrategyDockerfile,
+		DockerfilePath:   "Dockerfile",
+		BuildContextDir:  ".",
+		ImageNameSuffix:  "web",
+		ComposeService:   "web",
+	}
+	uploadDeployOp, err := s.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		Type:          model.OperationTypeDeploy,
+		RequestedByID: "manual-upload",
+		AppID:         app.ID,
+		DesiredSpec:   &uploadSpec,
+		DesiredSource: &uploadSource,
+	})
+	if err != nil {
+		t.Fatalf("create upload deploy operation: %v", err)
+	}
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim upload deploy operation: %v", err)
+	} else if !found {
+		t.Fatal("expected upload deploy operation")
+	}
+	if _, err := s.CompleteManagedOperation(uploadDeployOp.ID, "/tmp/web-upload.yaml", "deployed"); err != nil {
+		t.Fatalf("complete upload deploy operation: %v", err)
+	}
+
+	updated, err := s.GetAppImageTracking(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("get tracking: %v", err)
+	}
+	if updated.LastDeployedDigest != "" {
+		t.Fatalf("expected deployed digest to be cleared after upload deploy, got %q", updated.LastDeployedDigest)
+	}
+	if updated.LastOperationID != uploadDeployOp.ID {
+		t.Fatalf("expected last operation %s, got %s", uploadDeployOp.ID, updated.LastOperationID)
+	}
+}
+
 func newAppImageTrackingTestStore(t *testing.T) (*Store, model.Tenant, model.Project, model.App) {
 	t.Helper()
 

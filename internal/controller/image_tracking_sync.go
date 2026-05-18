@@ -53,7 +53,7 @@ func (s *Service) syncTrackedAppImages(ctx context.Context) error {
 			}
 			continue
 		}
-		if strings.TrimSpace(digest) == strings.TrimSpace(tracking.LastDeployedDigest) {
+		if strings.TrimSpace(model.AppTrackedImageDigest(app, tracking.ImageRef)) == strings.TrimSpace(digest) {
 			if _, err := s.Store.RecordAppImageTrackingCheck(tracking.ID, digest, "", "poll", ""); err != nil && s.Logger != nil {
 				s.Logger.Printf("image tracking no-op record failed app=%s image=%s digest=%s: %v", app.ID, tracking.ImageRef, digest, err)
 			}

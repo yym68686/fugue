@@ -366,42 +366,29 @@ func applyAppImageTrackingQueued(tracking *model.AppImageTracking, digest, opera
 }
 
 func updateAppImageTrackingDeployedInState(state *model.State, op model.Operation, now time.Time) {
-	if op.Type != model.OperationTypeDeploy || op.DesiredSource == nil || strings.TrimSpace(op.DesiredSource.Type) != model.AppSourceTypeDockerImage {
+	if op.Type != model.OperationTypeDeploy || op.DesiredSource == nil {
 		return
 	}
 	imageRef := strings.TrimSpace(op.DesiredSource.ImageRef)
-	if imageRef == "" {
-		return
-	}
-	digest := digestFromImageReference(op.DesiredSource.ResolvedImageRef)
+	digest := model.ImageDigestFromReference(op.DesiredSource.ResolvedImageRef)
 	if digest == "" && op.DesiredSpec != nil {
-		digest = digestFromImageReference(op.DesiredSpec.Image)
-	}
-	if digest == "" {
-		return
+		digest = model.ImageDigestFromReference(op.DesiredSpec.Image)
 	}
 	for idx := range state.AppImageTrackings {
 		tracking := &state.AppImageTrackings[idx]
-		if strings.TrimSpace(tracking.AppID) != op.AppID || strings.TrimSpace(tracking.ImageRef) != imageRef {
+		if strings.TrimSpace(tracking.AppID) != op.AppID {
 			continue
 		}
-		tracking.LastDeployedDigest = digest
+		if strings.TrimSpace(op.DesiredSource.Type) != model.AppSourceTypeDockerImage ||
+			strings.TrimSpace(tracking.ImageRef) != imageRef ||
+			imageRef == "" ||
+			digest == "" {
+			tracking.LastDeployedDigest = ""
+		} else {
+			tracking.LastDeployedDigest = digest
+		}
 		tracking.LastOperationID = op.ID
 		tracking.LastError = ""
 		tracking.UpdatedAt = now
 	}
-}
-
-func digestFromImageReference(imageRef string) string {
-	imageRef = strings.TrimSpace(imageRef)
-	if imageRef == "" {
-		return ""
-	}
-	if strings.HasPrefix(imageRef, "sha256:") {
-		return imageRef
-	}
-	if idx := strings.Index(imageRef, "@sha256:"); idx >= 0 {
-		return imageRef[idx+1:]
-	}
-	return ""
 }

@@ -193,29 +193,29 @@ RETURNING id, tenant_id, app_id, image_ref, enabled, last_seen_digest, last_queu
 }
 
 func (s *Store) pgUpdateAppImageTrackingDeployedTx(ctx context.Context, tx *sql.Tx, op model.Operation, now time.Time) error {
-	if op.Type != model.OperationTypeDeploy || op.DesiredSource == nil || strings.TrimSpace(op.DesiredSource.Type) != model.AppSourceTypeDockerImage {
+	if op.Type != model.OperationTypeDeploy || op.DesiredSource == nil {
 		return nil
 	}
 	imageRef := strings.TrimSpace(op.DesiredSource.ImageRef)
-	if imageRef == "" {
-		return nil
-	}
-	digest := digestFromImageReference(op.DesiredSource.ResolvedImageRef)
+	digest := model.ImageDigestFromReference(op.DesiredSource.ResolvedImageRef)
 	if digest == "" && op.DesiredSpec != nil {
-		digest = digestFromImageReference(op.DesiredSpec.Image)
-	}
-	if digest == "" {
-		return nil
+		digest = model.ImageDigestFromReference(op.DesiredSpec.Image)
 	}
 	_, err := tx.ExecContext(ctx, `
 UPDATE fugue_app_image_trackings
-SET last_deployed_digest = $3,
+SET last_deployed_digest = CASE
+		WHEN $2 <> ''
+		 AND image_ref = $2
+		 AND $3 <> ''
+		 AND $6 = $7
+		THEN $3
+		ELSE ''
+	END,
 	last_operation_id = $4,
 	last_error = '',
 	updated_at = $5
 WHERE app_id = $1
-  AND image_ref = $2
-`, op.AppID, imageRef, digest, op.ID, now)
+`, op.AppID, imageRef, digest, op.ID, now, strings.TrimSpace(op.DesiredSource.Type), model.AppSourceTypeDockerImage)
 	return mapDBErr(err)
 }
 

@@ -149,7 +149,7 @@ func (s *Server) handleSyncAppImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if strings.TrimSpace(digest) == strings.TrimSpace(tracking.LastDeployedDigest) {
+	if strings.TrimSpace(model.AppTrackedImageDigest(app, tracking.ImageRef)) == strings.TrimSpace(digest) {
 		if updated, err := s.store.RecordAppImageTrackingCheck(tracking.ID, digest, req.DeliveryID, eventNameOrDefault(req.Event), ""); err == nil {
 			tracking = updated
 		}

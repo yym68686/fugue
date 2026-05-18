@@ -1584,6 +1584,37 @@ func AppBuildSource(app App) *AppSource {
 	return CloneAppSource(normalized.BuildSource)
 }
 
+func AppTrackedImageDigest(app App, imageRef string) string {
+	imageRef = strings.TrimSpace(imageRef)
+	if imageRef == "" {
+		return ""
+	}
+	source := AppBuildSource(app)
+	if source == nil ||
+		strings.TrimSpace(source.Type) != AppSourceTypeDockerImage ||
+		strings.TrimSpace(source.ImageRef) != imageRef {
+		return ""
+	}
+	if digest := ImageDigestFromReference(source.ResolvedImageRef); digest != "" {
+		return digest
+	}
+	return ImageDigestFromReference(app.Spec.Image)
+}
+
+func ImageDigestFromReference(imageRef string) string {
+	imageRef = strings.TrimSpace(imageRef)
+	if imageRef == "" {
+		return ""
+	}
+	if strings.HasPrefix(imageRef, "sha256:") {
+		return imageRef
+	}
+	if idx := strings.Index(imageRef, "@sha256:"); idx >= 0 {
+		return imageRef[idx+1:]
+	}
+	return ""
+}
+
 func SetOperationSourceState(op *Operation, build, origin *AppSource) {
 	if op == nil {
 		return
