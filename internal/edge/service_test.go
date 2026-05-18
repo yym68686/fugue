@@ -177,7 +177,7 @@ func TestHeartbeatOnceReportsEdgeInventory(t *testing.T) {
 	bundle.EdgeID = "edge-us-1"
 	bundle.EdgeGroupID = "edge-group-country-us"
 	service.recordSyncSuccess(bundle, `"routegen_heartbeat"`, time.Now().UTC(), false)
-	service.recordCaddyApply("routegen_heartbeat", 1, nil)
+	service.recordCaddyApply("routegen_heartbeat", 1, "routegen_heartbeat", nil)
 
 	if err := service.HeartbeatOnce(context.Background()); err != nil {
 		t.Fatalf("heartbeat once: %v", err)
@@ -570,6 +570,128 @@ func TestApplyCaddyConfigBuildsHostRoutesForBundle(t *testing.T) {
 	}
 }
 
+func TestApplyCaddyConfigWarmsPlatformHost(t *testing.T) {
+	t.Parallel()
+
+	var loads int
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/load" {
+			t.Fatalf("unexpected caddy admin request %s %s", r.Method, r.URL.Path)
+		}
+		loads++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer admin.Close()
+
+	bundle := testBundle("routegen_caddy_warmup")
+	custom := bundle.Routes[0]
+	custom.Hostname = "www.customer.com"
+	custom.RouteKind = model.EdgeRouteKindCustomDomain
+	custom.TLSPolicy = model.EdgeRouteTLSPolicyCustomDomain
+	bundle.Routes = append(bundle.Routes, custom)
+
+	var warmups []string
+	service := NewService(config.EdgeConfig{
+		APIURL:               "https://api.example.invalid",
+		EdgeToken:            "edge-secret",
+		EdgeGroupID:          "edge-group-default",
+		ListenAddr:           "127.0.0.1:7832",
+		CaddyEnabled:         true,
+		CaddyAdminURL:        admin.URL,
+		CaddyListenAddr:      ":18443",
+		CaddyTLSMode:         caddyTLSModePublicOnDemand,
+		CaddyProxyListenAddr: ":7833",
+	}, log.New(ioDiscard{}, "", 0))
+	service.caddyWarmup = func(_ context.Context, addr, host string) error {
+		warmups = append(warmups, addr+"|"+host)
+		return nil
+	}
+
+	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
+		t.Fatalf("apply caddy config: %v", err)
+	}
+	if loads != 1 {
+		t.Fatalf("expected one caddy config load, got %d", loads)
+	}
+	if got, want := fmt.Sprint(warmups), "[127.0.0.1:18443|demo.fugue.pro]"; got != want {
+		t.Fatalf("unexpected warmups: got %s want %s", got, want)
+	}
+	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
+		t.Fatalf("apply unchanged caddy config: %v", err)
+	}
+	if loads != 1 || len(warmups) != 1 {
+		t.Fatalf("expected unchanged config not to reload or rewarm, got loads=%d warmups=%v", loads, warmups)
+	}
+	metrics := renderMetrics(t, service)
+	if !strings.Contains(metrics, `fugue_edge_caddy_tls_warmup_total{result="success"} 1`) ||
+		!strings.Contains(metrics, `fugue_edge_caddy_tls_warmup_total{result="error"} 0`) {
+		t.Fatalf("expected caddy warmup metrics, got %s", metrics)
+	}
+}
+
+func TestApplyCaddyConfigReappliesWhenStaticTLSFilesChange(t *testing.T) {
+	t.Parallel()
+
+	var loads int
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/load" {
+			t.Fatalf("unexpected caddy admin request %s %s", r.Method, r.URL.Path)
+		}
+		loads++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer admin.Close()
+
+	tmpdir := t.TempDir()
+	certFile := filepath.Join(tmpdir, "tls.crt")
+	keyFile := filepath.Join(tmpdir, "tls.key")
+	if err := os.WriteFile(certFile, []byte("cert-one"), 0o600); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	if err := os.WriteFile(keyFile, []byte("key-one"), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	var warmups int
+	service := NewService(config.EdgeConfig{
+		APIURL:                 "https://api.example.invalid",
+		EdgeToken:              "edge-secret",
+		EdgeGroupID:            "edge-group-default",
+		ListenAddr:             "127.0.0.1:7832",
+		CaddyEnabled:           true,
+		CaddyAdminURL:          admin.URL,
+		CaddyListenAddr:        ":18443",
+		CaddyTLSMode:           caddyTLSModePublicOnDemand,
+		CaddyProxyListenAddr:   ":7833",
+		CaddyStaticTLSCertFile: certFile,
+		CaddyStaticTLSKeyFile:  keyFile,
+	}, log.New(ioDiscard{}, "", 0))
+	service.caddyWarmup = func(_ context.Context, _, _ string) error {
+		warmups++
+		return nil
+	}
+
+	bundle := testBundle("routegen_caddy_static_tls_reload")
+	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
+		t.Fatalf("apply caddy config: %v", err)
+	}
+	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
+		t.Fatalf("apply unchanged caddy config: %v", err)
+	}
+	if loads != 1 || warmups != 1 {
+		t.Fatalf("expected unchanged static TLS files not to reload or rewarm, got loads=%d warmups=%d", loads, warmups)
+	}
+	if err := os.WriteFile(certFile, []byte("cert-two"), 0o600); err != nil {
+		t.Fatalf("rewrite cert: %v", err)
+	}
+	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
+		t.Fatalf("apply caddy config after cert update: %v", err)
+	}
+	if loads != 2 || warmups != 2 {
+		t.Fatalf("expected static TLS file change to reload and rewarm, got loads=%d warmups=%d", loads, warmups)
+	}
+}
+
 func TestSyncFailureReappliesCachedCaddyConfig(t *testing.T) {
 	t.Parallel()
 
@@ -599,7 +721,7 @@ func TestSyncFailureReappliesCachedCaddyConfig(t *testing.T) {
 		CaddyProxyListenAddr: ":7833",
 	}, log.New(ioDiscard{}, "", 0))
 	service.recordSyncSuccess(bundle, `"routegen_cached_reapply"`, time.Now().UTC(), false)
-	service.recordCaddyApply(bundle.Version, 0, errors.New("apply caddy config: connect: connection refused"))
+	service.recordCaddyApply(bundle.Version, 0, "", errors.New("apply caddy config: connect: connection refused"))
 
 	if err := service.SyncOnce(context.Background()); err == nil {
 		t.Fatal("expected route sync failure")

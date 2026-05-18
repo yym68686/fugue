@@ -33,9 +33,10 @@ const cacheFileVersion = 1
 const edgePeerFallbackHeader = "X-Fugue-Edge-Peer-Fallback"
 
 type Service struct {
-	Config     config.EdgeConfig
-	HTTPClient *http.Client
-	Logger     *log.Logger
+	Config      config.EdgeConfig
+	HTTPClient  *http.Client
+	Logger      *log.Logger
+	caddyWarmup func(context.Context, string, string) error
 
 	mu                  sync.Mutex
 	snapshot            Status
@@ -93,9 +94,17 @@ type telemetry struct {
 	CaddyConfigSuccess    uint64
 	CaddyConfigError      uint64
 	CaddyAppliedVersion   string
+	CaddyAppliedSignature string
 	CaddyRouteCount       int
 	CaddyLastApplyAt      *time.Time
 	CaddyLastError        string
+	CaddyWarmupSuccess    uint64
+	CaddyWarmupError      uint64
+	CaddyWarmupSignature  string
+	CaddyWarmupHost       string
+	CaddyWarmupDuration   time.Duration
+	CaddyWarmupAt         *time.Time
+	CaddyWarmupLastError  string
 	RouteRequests         map[routeMetricKey]uint64
 	RouteStatuses         map[routeStatusMetricKey]uint64
 	RouteUpstreamErrors   map[routeMetricKey]uint64
@@ -191,7 +200,8 @@ func NewService(cfg config.EdgeConfig, logger *log.Logger) *Service {
 		HTTPClient: &http.Client{
 			Timeout: timeout,
 		},
-		Logger: logger,
+		Logger:      logger,
+		caddyWarmup: warmupCaddyTLS,
 		snapshot: Status{
 			Status:      "unhealthy",
 			EdgeID:      strings.TrimSpace(cfg.EdgeID),
@@ -816,6 +826,13 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "# TYPE fugue_edge_caddy_config_apply_total counter")
 	fmt.Fprintf(w, "fugue_edge_caddy_config_apply_total{result=\"success\"} %d\n", snapshot.Metrics.CaddyConfigSuccess)
 	fmt.Fprintf(w, "fugue_edge_caddy_config_apply_total{result=\"error\"} %d\n", snapshot.Metrics.CaddyConfigError)
+	fmt.Fprintln(w, "# HELP fugue_edge_caddy_tls_warmup_total Caddy local SNI TLS warmup attempts by result.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_caddy_tls_warmup_total counter")
+	fmt.Fprintf(w, "fugue_edge_caddy_tls_warmup_total{result=\"success\"} %d\n", snapshot.Metrics.CaddyWarmupSuccess)
+	fmt.Fprintf(w, "fugue_edge_caddy_tls_warmup_total{result=\"error\"} %d\n", snapshot.Metrics.CaddyWarmupError)
+	fmt.Fprintln(w, "# HELP fugue_edge_caddy_tls_warmup_duration_seconds Duration of the last local SNI TLS warmup.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_caddy_tls_warmup_duration_seconds gauge")
+	fmt.Fprintf(w, "fugue_edge_caddy_tls_warmup_duration_seconds %.6f\n", durationSeconds(snapshot.Metrics.CaddyWarmupDuration))
 	fmt.Fprintln(w, "# HELP fugue_edge_caddy_routes Number of host routes in the last applied Caddy config.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_caddy_routes gauge")
 	fmt.Fprintf(w, "fugue_edge_caddy_routes{bundle_version=\"%s\"} %d\n", prometheusLabelValue(snapshot.Metrics.CaddyAppliedVersion), snapshot.Metrics.CaddyRouteCount)
@@ -1685,7 +1702,7 @@ func (s *Service) recordCacheLoad(result string) {
 	}
 }
 
-func (s *Service) recordCaddyApply(bundleVersion string, routeCount int, err error) {
+func (s *Service) recordCaddyApply(bundleVersion string, routeCount int, configSignature string, err error) {
 	now := time.Now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1699,6 +1716,7 @@ func (s *Service) recordCaddyApply(bundleVersion string, routeCount int, err err
 	}
 	s.metrics.CaddyConfigSuccess++
 	s.metrics.CaddyAppliedVersion = strings.TrimSpace(bundleVersion)
+	s.metrics.CaddyAppliedSignature = strings.TrimSpace(configSignature)
 	s.metrics.CaddyRouteCount = routeCount
 	s.metrics.CaddyLastApplyAt = &now
 	s.metrics.CaddyLastError = ""
@@ -1712,6 +1730,42 @@ func (s *Service) recordCaddyApply(bundleVersion string, routeCount int, err err
 		s.snapshot.Status = "ok"
 		s.snapshot.Healthy = s.bundle != nil
 	}
+}
+
+func (s *Service) needsCaddyWarmup(signature string) bool {
+	signature = strings.TrimSpace(signature)
+	if signature == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if strings.TrimSpace(s.metrics.CaddyWarmupSignature) != signature {
+		return true
+	}
+	if strings.TrimSpace(s.metrics.CaddyWarmupLastError) != "" {
+		return true
+	}
+	return s.metrics.CaddyWarmupAt == nil
+}
+
+func (s *Service) recordCaddyWarmup(signature, host string, duration time.Duration, err error) {
+	if duration < 0 {
+		duration = 0
+	}
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.metrics.CaddyWarmupSignature = strings.TrimSpace(signature)
+	s.metrics.CaddyWarmupHost = strings.TrimSpace(host)
+	s.metrics.CaddyWarmupDuration = duration
+	s.metrics.CaddyWarmupAt = &now
+	if err != nil {
+		s.metrics.CaddyWarmupError++
+		s.metrics.CaddyWarmupLastError = s.redact(err.Error())
+		return
+	}
+	s.metrics.CaddyWarmupSuccess++
+	s.metrics.CaddyWarmupLastError = ""
 }
 
 func (s *Service) recordProxyObservation(observed edgeProxyObservation) {

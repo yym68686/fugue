@@ -22,6 +22,7 @@ Options:
   --acme-home <dir>             Optional acme.sh home directory.
   --acme <path>                 acme.sh executable. Default: acme.sh.
   --kubectl <path>              kubectl executable. Default: kubectl.
+  --renew-before-days <days>    Skip ACME if the current Secret cert is valid for at least this many days. Default: 0.
   --dry-run                     Print the planned commands without issuing or writing.
   -h, --help                    Show this help.
 EOF
@@ -67,6 +68,21 @@ read_env_value() {
   ' "${path}"
 }
 
+current_secret_cert_is_fresh() {
+  local days="$1"
+  local seconds encoded cert_path
+  (( days > 0 )) || return 1
+  seconds=$((days * 86400))
+  encoded="$("${kubectl_cmd}" -n "${namespace}" get secret "${secret_name}" -o 'jsonpath={.data.tls\.crt}' 2>/dev/null || true)"
+  encoded="$(printf '%s' "${encoded}" | tr -d '[:space:]')"
+  [[ -n "${encoded}" ]] || return 1
+  cert_path="${tmpdir}/current-secret-tls.crt"
+  if ! printf '%s' "${encoded}" | openssl base64 -d -A >"${cert_path}" 2>/dev/null; then
+    return 1
+  fi
+  openssl x509 -in "${cert_path}" -noout -checkend "${seconds}" >/dev/null 2>&1
+}
+
 namespace="${FUGUE_NAMESPACE:-fugue-system}"
 secret_name="${FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME:-fugue-app-wildcard-tls}"
 domain="${FUGUE_APP_BASE_DOMAIN:-}"
@@ -80,6 +96,7 @@ acme_cmd="${ACME_SH:-acme.sh}"
 kubectl_cmd="${KUBECTL:-kubectl}"
 challenge_ttl="${FUGUE_ACME_CHALLENGE_TTL:-60}"
 challenge_expires_in_seconds="${FUGUE_ACME_CHALLENGE_EXPIRES_IN_SECONDS:-3600}"
+renew_before_days="${FUGUE_APP_WILDCARD_TLS_RENEW_BEFORE_DAYS:-0}"
 dry_run="false"
 
 while [[ $# -gt 0 ]]; do
@@ -95,6 +112,7 @@ while [[ $# -gt 0 ]]; do
     --acme-home) require_value "$1" "${2:-}"; acme_home="$2"; shift 2 ;;
     --acme) require_value "$1" "${2:-}"; acme_cmd="$2"; shift 2 ;;
     --kubectl) require_value "$1" "${2:-}"; kubectl_cmd="$2"; shift 2 ;;
+    --renew-before-days) require_value "$1" "${2:-}"; renew_before_days="$2"; shift 2 ;;
     --dry-run) dry_run="true"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
@@ -105,6 +123,7 @@ done
 [[ -n "${secret_name}" ]] || fail "--secret-name is required"
 [[ -n "${domain}" ]] || fail "--domain is required"
 [[ "${domain}" != "*."* ]] || fail "--domain must be the base domain, not a wildcard"
+[[ "${renew_before_days}" =~ ^[0-9]+$ ]] || fail "--renew-before-days must be a non-negative integer"
 case "${dns_provider}" in
   fugue|cloudflare) ;;
   *) fail "--dns-provider must be fugue or cloudflare" ;;
@@ -140,6 +159,7 @@ if [[ "${dry_run}" == "true" ]]; then
   printf 'namespace=%s\n' "${namespace}"
   printf 'secret_name=%s\n' "${secret_name}"
   printf 'dns_provider=%s\n' "${dns_provider}"
+  printf 'renew_before_days=%s\n' "${renew_before_days}"
   if [[ "${dns_provider}" == "cloudflare" ]]; then
     printf 'acme_issue=acme.sh --issue --dns dns_cf -d %s -d %s --server %s\n' "${wildcard_domain}" "${domain}" "${server}"
   else
@@ -149,13 +169,21 @@ if [[ "${dry_run}" == "true" ]]; then
   exit 0
 fi
 
-command -v "${acme_cmd}" >/dev/null 2>&1 || fail "acme.sh executable not found: ${acme_cmd}"
-command -v "${kubectl_cmd}" >/dev/null 2>&1 || fail "kubectl executable not found: ${kubectl_cmd}"
-
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "${tmpdir}"' EXIT
 cert_file="${tmpdir}/tls.crt"
 key_file="${tmpdir}/tls.key"
+
+if (( renew_before_days > 0 )); then
+  command -v openssl >/dev/null 2>&1 || fail "openssl is required when --renew-before-days is set"
+fi
+if current_secret_cert_is_fresh "${renew_before_days}"; then
+  printf 'skipping renewal; Kubernetes TLS Secret %s/%s is valid for at least %s days\n' "${namespace}" "${secret_name}" "${renew_before_days}"
+  exit 0
+fi
+
+command -v "${acme_cmd}" >/dev/null 2>&1 || fail "acme.sh executable not found: ${acme_cmd}"
+command -v "${kubectl_cmd}" >/dev/null 2>&1 || fail "kubectl executable not found: ${kubectl_cmd}"
 
 if [[ "${dns_provider}" == "cloudflare" ]]; then
   export CF_Token="${cloudflare_token}"

@@ -2984,6 +2984,9 @@ main() {
   if [[ "${FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED}" == "true" && "${FUGUE_EDGE_CADDY_TLS_MODE}" == "off" ]]; then
     fail "FUGUE_EDGE_CADDY_TLS_MODE must not be off when FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED=true"
   fi
+  if [[ "${FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED}" == "true" && -z "$(trim_field "${FUGUE_APP_BASE_DOMAIN}")" ]]; then
+    fail "FUGUE_APP_BASE_DOMAIN is required when FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED=true"
+  fi
   if [[ "${FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED}" == "true" && -z "$(trim_field "${FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME}")" ]]; then
     fail "FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME is required when FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED=true"
   fi
@@ -3140,6 +3143,20 @@ PY
   ensure_coredns_multinode_scheduling
 
   apply_chart_crds
+
+  if [[ "${FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED}" == "true" ]]; then
+    log "renewing edge static TLS secret ${FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME} if needed"
+    if ! bash ./scripts/issue_fugue_app_wildcard_tls.sh \
+      --dns-provider fugue \
+      --api-url "$(release_api_base_url)" \
+      --api-key "$(release_api_token)" \
+      --namespace "${FUGUE_NAMESPACE}" \
+      --secret-name "${FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME}" \
+      --domain "${FUGUE_APP_BASE_DOMAIN}" \
+      --renew-before-days 30; then
+      fail "edge static TLS renewal failed"
+    fi
+  fi
 
   upgrade_override_values_file="$(write_upgrade_override_values)"
   build_dns_helm_set_args

@@ -106,6 +106,42 @@ assert_contains "${issue_plan}" "secret_name=fugue-app-wildcard-tls"
 assert_contains "${issue_plan}" "acme.sh --issue --dns dns_cf -d *.fugue.pro -d fugue.pro --server letsencrypt"
 assert_not_contains "${issue_plan}" "test-token-should-not-print"
 
+renewal_bin_dir="${tmpdir}/renewal-bin"
+mkdir -p "${renewal_bin_dir}"
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -subj "/CN=*.fugue.pro" \
+  -keyout "${tmpdir}/fresh-tls.key" \
+  -out "${tmpdir}/fresh-tls.crt" >/dev/null 2>&1
+fresh_cert_b64="$(base64 <"${tmpdir}/fresh-tls.crt" | tr -d '\n')"
+cat >"${renewal_bin_dir}/kubectl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == "-n" && "$2" == "fugue-system" && "$3" == "get" && "$4" == "secret" && "$5" == "fugue-app-wildcard-tls" && "$6" == "-o" && "$7" == "jsonpath={.data.tls\\.crt}" ]]; then
+  printf '%s' "${FRESH_CERT_B64}"
+  exit 0
+fi
+printf 'unexpected kubectl args: %s\n' "$*" >&2
+exit 1
+EOF
+chmod 0755 "${renewal_bin_dir}/kubectl"
+cat >"${renewal_bin_dir}/acme.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'acme.sh should not be called for a fresh existing cert\n' >&2
+exit 99
+EOF
+chmod 0755 "${renewal_bin_dir}/acme.sh"
+renew_skip="${tmpdir}/renew-skip.out"
+PATH="${renewal_bin_dir}:${PATH}" FRESH_CERT_B64="${fresh_cert_b64}" \
+  bash "${REPO_ROOT}/scripts/issue_fugue_app_wildcard_tls.sh" \
+    --dns-provider fugue \
+    --api-url "https://api.example.test" \
+    --api-key "test-api-key" \
+    --domain "fugue.pro" \
+    --namespace "fugue-system" \
+    --secret-name "fugue-app-wildcard-tls" \
+    --renew-before-days 30 >"${renew_skip}"
+assert_contains "${renew_skip}" "skipping renewal; Kubernetes TLS Secret fugue-system/fugue-app-wildcard-tls is valid for at least 30 days"
+
 if bash "${REPO_ROOT}/scripts/issue_fugue_app_wildcard_tls.sh" \
   --cloudflare-env-file "${tmpdir}/missing.env" \
   --dry-run >"${tmpdir}/bad-issue.out" 2>"${tmpdir}/bad-issue.err"; then
