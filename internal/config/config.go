@@ -124,6 +124,10 @@ type EdgeConfig struct {
 	CacheArchiveLimit          int
 	AssetCachePath             string
 	AssetCacheMaxBytes         int
+	CacheWarmupEnabled         bool
+	CacheWarmupTimeout         time.Duration
+	CacheWarmupMaxTargets      int
+	CacheWarmupMaxDepth        int
 	MaxStale                   time.Duration
 	PeerFallbackEnabled        bool
 	ListenAddr                 string
@@ -319,6 +323,10 @@ func EdgeFromEnv() EdgeConfig {
 		CacheArchiveLimit:          getenvInt("FUGUE_EDGE_CACHE_ARCHIVE_LIMIT", 5),
 		AssetCachePath:             getenv("FUGUE_EDGE_ASSET_CACHE_PATH", "/var/lib/fugue/edge/http-cache"),
 		AssetCacheMaxBytes:         getenvInt("FUGUE_EDGE_ASSET_CACHE_MAX_BYTES", 32*1024*1024),
+		CacheWarmupEnabled:         getenvBool("FUGUE_EDGE_CACHE_WARMUP_ENABLED", true),
+		CacheWarmupTimeout:         getenvDuration("FUGUE_EDGE_CACHE_WARMUP_TIMEOUT", 15*time.Second),
+		CacheWarmupMaxTargets:      getenvInt("FUGUE_EDGE_CACHE_WARMUP_MAX_TARGETS", 24),
+		CacheWarmupMaxDepth:        getenvInt("FUGUE_EDGE_CACHE_WARMUP_MAX_DEPTH", 2),
 		MaxStale:                   getenvDuration("FUGUE_EDGE_MAX_STALE", 24*time.Hour),
 		PeerFallbackEnabled:        getenvBool("FUGUE_EDGE_PEER_FALLBACK_ENABLED", true),
 		ListenAddr:                 getenv("FUGUE_EDGE_LISTEN_ADDR", "127.0.0.1:7832"),

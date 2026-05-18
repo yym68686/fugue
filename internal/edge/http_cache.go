@@ -27,6 +27,8 @@ const (
 	edgeCacheStatusError       = "error"
 )
 
+const edgeCacheWarmupDiscoveryHeader = "X-Fugue-Cache-Warmup-Discovery"
+
 type edgeHTTPCacheDecision struct {
 	Enabled            bool
 	Policy             model.CachePolicy
@@ -129,6 +131,10 @@ func (s *Service) edgeCacheDecision(r *http.Request, route model.EdgeRouteBindin
 	}
 	if r == nil || !strings.EqualFold(r.Method, http.MethodGet) && !strings.EqualFold(r.Method, http.MethodHead) {
 		decision.Reason = "method not cacheable"
+		return decision
+	}
+	if strings.TrimSpace(r.Header.Get(edgeCacheWarmupDiscoveryHeader)) != "" {
+		decision.Reason = "warmup discovery request"
 		return decision
 	}
 	if edgeRequestIsWebSocket(r) || edgeRequestWantsSSE(r) || edgeRequestHasUpload(r) {

@@ -634,6 +634,96 @@ func TestApplyCaddyConfigWarmsPlatformHost(t *testing.T) {
 	}
 }
 
+func TestApplyCaddyConfigWarmsHTTPAssetCache(t *testing.T) {
+	t.Parallel()
+
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/load" {
+			t.Fatalf("unexpected caddy admin request %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer admin.Close()
+
+	bundle := testBundle("routegen_cache_warmup")
+	bundle.Routes[0].CachePolicyID = "static-assets-immutable-v1"
+	bundle.Routes[0].CacheNamespace = "app_demo_deploy_1"
+
+	var requests []string
+	service := NewService(config.EdgeConfig{
+		APIURL:                "https://api.example.invalid",
+		EdgeToken:             "edge-secret",
+		EdgeGroupID:           "edge-group-default",
+		ListenAddr:            "127.0.0.1:7832",
+		CaddyEnabled:          true,
+		CaddyAdminURL:         admin.URL,
+		CaddyListenAddr:       "127.0.0.1:18080",
+		CaddyTLSMode:          caddyTLSModeOff,
+		CaddyProxyListenAddr:  "127.0.0.1:7833",
+		CacheWarmupEnabled:    true,
+		CacheWarmupTimeout:    time.Second,
+		CacheWarmupMaxTargets: 16,
+		CacheWarmupMaxDepth:   2,
+		AssetCacheMaxBytes:    1024 * 1024,
+	}, log.New(ioDiscard{}, "", 0))
+	service.cacheWarmupClientFactory = func(_, _ string) *http.Client {
+		return &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				requests = append(requests, req.URL.Path+"|"+req.Header.Get("Accept-Encoding")+"|"+req.Header.Get(edgeCacheWarmupDiscoveryHeader))
+				switch req.URL.Path {
+				case "/":
+					return warmupTestResponse(http.StatusOK, "text/html; charset=utf-8", `<!doctype html>
+<link rel="stylesheet" href="/_next/static/chunks/app.css">
+<script src="/_next/static/chunks/app.js"></script>
+<link rel="preload" as="font" href="/_next/static/media/font.woff2">`), nil
+				case "/_next/static/chunks/app.css":
+					return warmupTestResponse(http.StatusOK, "text/css", `@font-face{font-family:test;src:url("../media/font2.woff2") format("woff2")}`), nil
+				case "/_next/static/chunks/app.js":
+					return warmupTestResponse(http.StatusOK, "application/javascript", `console.log("ok")`), nil
+				case "/_next/static/media/font.woff2", "/_next/static/media/font2.woff2":
+					return warmupTestResponse(http.StatusOK, "font/woff2", "font"), nil
+				default:
+					return warmupTestResponse(http.StatusNotFound, "text/plain", "missing"), nil
+				}
+			}),
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+	}
+
+	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
+		t.Fatalf("apply caddy config: %v", err)
+	}
+	wantRequests := []string{
+		"/|identity|1",
+		"/_next/static/chunks/app.css|identity|1",
+		"/|br, gzip|",
+		"/_next/static/chunks/app.css|br, gzip|",
+		"/_next/static/chunks/app.js|br, gzip|",
+		"/_next/static/media/font.woff2|br, gzip|",
+		"/_next/static/media/font2.woff2|br, gzip|",
+	}
+	for _, want := range wantRequests {
+		if countString(requests, want) == 0 {
+			t.Fatalf("expected warmup request %q in %v", want, requests)
+		}
+	}
+
+	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
+		t.Fatalf("apply unchanged caddy config: %v", err)
+	}
+	if count := countString(requests, "/|identity|1"); count != 1 {
+		t.Fatalf("expected unchanged config not to rerun cache warmup, root discovery count=%d requests=%v", count, requests)
+	}
+
+	metrics := renderMetrics(t, service)
+	if !strings.Contains(metrics, `fugue_edge_http_cache_warmup_total{result="success"} 1`) ||
+		!strings.Contains(metrics, `fugue_edge_http_cache_warmup_total{result="error"} 0`) {
+		t.Fatalf("expected cache warmup metrics, got %s", metrics)
+	}
+}
+
 func TestApplyCaddyConfigReappliesWhenStaticTLSFilesChange(t *testing.T) {
 	t.Parallel()
 
@@ -1808,6 +1898,26 @@ func renderMetrics(t *testing.T, service *Service) string {
 		t.Fatalf("expected metrics status 200, got %d body=%s", recorder.Code, recorder.Body.String())
 	}
 	return recorder.Body.String()
+}
+
+func warmupTestResponse(status int, contentType, body string) *http.Response {
+	resp := &http.Response{
+		StatusCode: status,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+	resp.Header.Set("Content-Type", contentType)
+	return resp
+}
+
+func countString(values []string, want string) int {
+	count := 0
+	for _, value := range values {
+		if value == want {
+			count++
+		}
+	}
+	return count
 }
 
 type ioDiscard struct{}

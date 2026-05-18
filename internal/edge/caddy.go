@@ -89,6 +89,9 @@ func (s *Service) applyCaddyConfig(ctx context.Context, bundle model.EdgeRouteBu
 	if err := s.maybeWarmupCurrentCaddyTLS(ctx, bundle, configSignature); err != nil && s.Logger != nil {
 		s.Logger.Printf("edge caddy TLS warmup failed; version=%s error=%s", version, s.redact(err.Error()))
 	}
+	if err := s.maybeWarmupCurrentEdgeCache(ctx, bundle, configSignature); err != nil && s.Logger != nil {
+		s.Logger.Printf("edge cache warmup failed; version=%s error=%s", version, s.redact(err.Error()))
+	}
 	return nil
 }
 

@@ -34,11 +34,12 @@ const cacheFileVersion = 1
 const edgePeerFallbackHeader = "X-Fugue-Edge-Peer-Fallback"
 
 type Service struct {
-	Config      config.EdgeConfig
-	HTTPClient  *http.Client
-	Logger      *log.Logger
-	caddyWarmup func(context.Context, string, string) error
-	proxyBase   http.RoundTripper
+	Config                   config.EdgeConfig
+	HTTPClient               *http.Client
+	Logger                   *log.Logger
+	caddyWarmup              func(context.Context, string, string) error
+	cacheWarmupClientFactory func(string, string) *http.Client
+	proxyBase                http.RoundTripper
 
 	mu                  sync.Mutex
 	snapshot            Status
@@ -107,6 +108,13 @@ type telemetry struct {
 	CaddyWarmupDuration   time.Duration
 	CaddyWarmupAt         *time.Time
 	CaddyWarmupLastError  string
+	CacheWarmupSuccess    uint64
+	CacheWarmupError      uint64
+	CacheWarmupSignature  string
+	CacheWarmupTargets    string
+	CacheWarmupDuration   time.Duration
+	CacheWarmupAt         *time.Time
+	CacheWarmupLastError  string
 	RouteRequests         map[routeMetricKey]uint64
 	RouteStatuses         map[routeStatusMetricKey]uint64
 	RouteUpstreamErrors   map[routeMetricKey]uint64
@@ -219,9 +227,10 @@ func NewService(cfg config.EdgeConfig, logger *log.Logger) *Service {
 		HTTPClient: &http.Client{
 			Timeout: timeout,
 		},
-		Logger:      logger,
-		caddyWarmup: warmupCaddyTLS,
-		proxyBase:   newDefaultEdgeProxyTransport(),
+		Logger:                   logger,
+		caddyWarmup:              warmupCaddyTLS,
+		cacheWarmupClientFactory: newEdgeCacheWarmupClient,
+		proxyBase:                newDefaultEdgeProxyTransport(),
 		snapshot: Status{
 			Status:      "unhealthy",
 			EdgeID:      strings.TrimSpace(cfg.EdgeID),
@@ -956,6 +965,13 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "# HELP fugue_edge_caddy_tls_warmup_duration_seconds Duration of the last local SNI TLS warmup.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_caddy_tls_warmup_duration_seconds gauge")
 	fmt.Fprintf(w, "fugue_edge_caddy_tls_warmup_duration_seconds %.6f\n", durationSeconds(snapshot.Metrics.CaddyWarmupDuration))
+	fmt.Fprintln(w, "# HELP fugue_edge_http_cache_warmup_total HTTP edge cache warmup attempts by result.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_http_cache_warmup_total counter")
+	fmt.Fprintf(w, "fugue_edge_http_cache_warmup_total{result=\"success\"} %d\n", snapshot.Metrics.CacheWarmupSuccess)
+	fmt.Fprintf(w, "fugue_edge_http_cache_warmup_total{result=\"error\"} %d\n", snapshot.Metrics.CacheWarmupError)
+	fmt.Fprintln(w, "# HELP fugue_edge_http_cache_warmup_duration_seconds Duration of the last HTTP edge cache warmup.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_http_cache_warmup_duration_seconds gauge")
+	fmt.Fprintf(w, "fugue_edge_http_cache_warmup_duration_seconds %.6f\n", durationSeconds(snapshot.Metrics.CacheWarmupDuration))
 	fmt.Fprintln(w, "# HELP fugue_edge_caddy_routes Number of host routes in the last applied Caddy config.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_caddy_routes gauge")
 	fmt.Fprintf(w, "fugue_edge_caddy_routes{bundle_version=\"%s\"} %d\n", prometheusLabelValue(snapshot.Metrics.CaddyAppliedVersion), snapshot.Metrics.CaddyRouteCount)
