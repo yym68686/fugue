@@ -120,10 +120,12 @@ func (s *Server) handleSetClusterNodePolicy(w http.ResponseWriter, r *http.Reque
 		"allow_edge":                 boolString(machine.Policy.AllowEdge),
 		"allow_dns":                  boolString(machine.Policy.AllowDNS),
 		"allow_internal_maintenance": boolString(machine.Policy.AllowInternalMaintenance),
+		"dedicated_mode":             model.MachinePolicyDedicatedMode(machine.Policy),
 		"desired_control_plane_role": machine.Policy.DesiredControlPlaneRole,
 	}
 	if clusterNode.Policy != nil {
 		metadata["effective_control_plane_role"] = clusterNode.Policy.EffectiveControlPlaneRole
+		metadata["effective_dedicated_mode"] = clusterNode.Policy.EffectiveDedicatedMode
 	}
 	if runtimeObj != nil {
 		metadata["runtime_id"] = runtimeObj.ID
@@ -379,12 +381,12 @@ func buildMachineNodeTaints(current []kubeNodeTaint, healthy bool, machine model
 }
 
 func machineDedicatedTaintValue(policy model.MachinePolicy) (string, bool) {
-	switch {
-	case policy.AllowEdge:
+	switch model.MachinePolicyDedicatedMode(policy) {
+	case model.MachineDedicatedModeEdge:
 		return runtimepkg.DedicatedEdgeValue, true
-	case policy.AllowDNS:
+	case model.MachineDedicatedModeDNS:
 		return runtimepkg.DedicatedDNSValue, true
-	case policy.AllowInternalMaintenance:
+	case model.MachineDedicatedModeInternal:
 		return runtimepkg.DedicatedInternalValue, true
 	default:
 		return "", false

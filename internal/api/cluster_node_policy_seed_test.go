@@ -510,6 +510,9 @@ func TestSetClusterNodePolicySeedsBootstrapControlPlaneMachine(t *testing.T) {
 	if !response.ClusterNode.Policy.AllowEdge || !response.ClusterNode.Policy.AllowDNS || !response.ClusterNode.Policy.AllowInternalMaintenance {
 		t.Fatalf("expected desired edge/dns/internal maintenance enabled after patch, got %#v", response.ClusterNode.Policy)
 	}
+	if response.ClusterNode.Policy.DedicatedMode != model.MachineDedicatedModeNone {
+		t.Fatalf("expected mixed app/build/edge policy to be non-dedicated, got %#v", response.ClusterNode.Policy)
+	}
 	if response.ClusterNode.Policy.DesiredControlPlaneRole != model.MachineControlPlaneRoleCandidate {
 		t.Fatalf("expected desired role %q, got %q", model.MachineControlPlaneRoleCandidate, response.ClusterNode.Policy.DesiredControlPlaneRole)
 	}
@@ -597,10 +600,95 @@ func TestBuildMachineNodeMergePatchAppliesNodePolicyRolesAndHealthGate(t *testin
 			t.Fatalf("expected label %s=%q, got %#v in %#v", key, want, got, labels)
 		}
 	}
+	if spec, ok := patch["spec"]; ok {
+		t.Fatalf("expected mixed build+edge node to skip dedicated taint, got spec patch %#v", spec)
+	}
+}
+
+func TestBuildMachineNodeMergePatchAppliesDedicatedEdgeTaintForPureEdgeNode(t *testing.T) {
+	t.Parallel()
+
+	node := kubeNode{}
+	node.Metadata.Labels = map[string]string{}
+	node.Status.Conditions = []kubeNodeCondition{
+		{Type: clusterNodeConditionReady, Status: "True"},
+		{Type: clusterNodeConditionDisk, Status: "False"},
+	}
+	machine := model.Machine{
+		ID:              "machine_edge",
+		Scope:           model.MachineScopePlatformNode,
+		ClusterNodeName: "edge-1",
+		Policy: model.MachinePolicy{
+			AllowEdge: true,
+			AllowDNS:  true,
+		},
+	}
+
+	patch, changed := buildMachineNodeMergePatch(node, machine, nil)
+	if !changed {
+		t.Fatal("expected node policy patch to change empty node")
+	}
 	spec := patch["spec"].(map[string]any)
 	taints := spec["taints"].([]kubeNodeTaint)
 	if len(taints) != 1 || taints[0].Key != runtimepkg.DedicatedTaintKey || taints[0].Value != runtimepkg.DedicatedEdgeValue {
-		t.Fatalf("expected edge dedicated taint for edge+dns node, got %#v", taints)
+		t.Fatalf("expected edge dedicated taint for pure edge+dns node, got %#v", taints)
+	}
+}
+
+func TestBuildMachineNodeMergePatchRemovesDedicatedTaintFromMixedEdgeNode(t *testing.T) {
+	t.Parallel()
+
+	node := kubeNode{}
+	node.Metadata.Labels = map[string]string{}
+	node.Spec.Taints = []kubeNodeTaint{{
+		Key:    runtimepkg.DedicatedTaintKey,
+		Value:  runtimepkg.DedicatedEdgeValue,
+		Effect: "NoSchedule",
+	}}
+	node.Status.Conditions = []kubeNodeCondition{
+		{Type: clusterNodeConditionReady, Status: "True"},
+		{Type: clusterNodeConditionDisk, Status: "False"},
+	}
+	machine := model.Machine{
+		ID:              "machine_mixed_edge",
+		Scope:           model.MachineScopePlatformNode,
+		ClusterNodeName: "edge-1",
+		Policy: model.MachinePolicy{
+			AllowAppRuntime: true,
+			AllowEdge:       true,
+			AllowDNS:        true,
+		},
+	}
+
+	patch, changed := buildMachineNodeMergePatch(node, machine, nil)
+	if !changed {
+		t.Fatal("expected mixed edge policy to remove stale dedicated taint")
+	}
+	spec := patch["spec"].(map[string]any)
+	taints := spec["taints"].([]kubeNodeTaint)
+	if len(taints) != 0 {
+		t.Fatalf("expected stale dedicated taint to be removed, got %#v", taints)
+	}
+}
+
+func TestMachineJoinTaintsSkipMixedEdgeNode(t *testing.T) {
+	t.Parallel()
+
+	mixed := model.Machine{Policy: model.MachinePolicy{
+		AllowAppRuntime: true,
+		AllowEdge:       true,
+		AllowDNS:        true,
+	}}
+	if got := machineJoinTaints(mixed); len(got) != 0 {
+		t.Fatalf("expected mixed app+edge join to avoid dedicated taints, got %#v", got)
+	}
+
+	dedicated := model.Machine{Policy: model.MachinePolicy{
+		AllowEdge: true,
+		AllowDNS:  true,
+	}}
+	if got := machineJoinTaints(dedicated); len(got) != 1 || got[0] != runtimepkg.DedicatedTaintKey+"="+runtimepkg.DedicatedEdgeValue+":NoSchedule" {
+		t.Fatalf("expected pure edge join to keep dedicated edge taint, got %#v", got)
 	}
 }
 

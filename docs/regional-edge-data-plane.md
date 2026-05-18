@@ -236,6 +236,9 @@ edge-hk-1:
   fugue.io/edge-group=edge-group-asia-hk
   taint: fugue.io/dedicated=edge:NoSchedule
 
+# 只有纯 edge / DNS / internal-maintenance 节点才应带 dedicated taint。
+# 同时允许 app-runtime / shared-pool / build 的 mixed 节点必须是 dedicated_mode=none。
+
 sg-app-1:
   fugue.io/role.app-runtime=true
   fugue.io/schedulable=true
@@ -856,7 +859,7 @@ DNS 必须上报：
 - route binding 已补本地 upstream 防线：runtime edge group 从 runtime labels 派生，缺失时从绑定 Node labels 派生；显式 route policy 仍要求目标 edge group 有健康成员并优先匹配 runtime 区域；平台 wildcard 默认 route 会展开到健康 edge group，避免单 wildcard 入口下远端 runtime hostname 404；managed-shared / managed-owned 使用 `upstream_scope=local-service` 的 in-cluster Service DNS，external-owned 先标记为 mesh upstream 未就绪。
 - `fugue-edge` 观测已扩展：Caddy dynamic config 开启 JSON access log，edge proxy metrics 增加 fallback hit、WebSocket / SSE / streaming 成功率和 upload request 计数。
 - 控制面现在会读取 Kubernetes Node condition，把 `Ready=False` 或 `DiskPressure=True` 的节点标为 `fugue.io/schedulable=false`、`fugue.io/node-health=blocked`，并加 `fugue.io/node-unhealthy=true:NoSchedule`；除 `node-janitor` 这类清理组件外，普通维护组件、edge、dns、runtime workload 都不应继续调度到异常节点。
-- `fugue-edge` 和 `fugue-dns` 现在都要求对应 `fugue.io/role.*=true` 且 `fugue.io/schedulable=true`；edge / DNS 节点默认带 `fugue.io/dedicated` taint，初期允许同一节点同时承担 edge + DNS。为兼容已作为 runtime join 的美国 edge 节点，edge / DNS DaemonSet 也 tolerate 旧的 `fugue.io/tenant` taint，但仍必须先匹配显式 role 和健康 label。
+- `fugue-edge` 和 `fugue-dns` 现在都要求对应 `fugue.io/role.*=true` 且 `fugue.io/schedulable=true`；纯 edge / DNS / internal-maintenance 节点才带 `fugue.io/dedicated` taint。APP / SHARED / BUILD 与 EDGE / DNS 混合的过渡节点会被视为 `dedicated_mode=none`，reconcile 会移除误加的 dedicated taint，避免 app rollout 被自己的 edge role 挡住。为兼容已作为 runtime join 的美国 edge 节点，edge / DNS DaemonSet 也 tolerate 旧的 `fugue.io/tenant` taint，但仍必须先匹配显式 role 和健康 label。
 - `dns.fugue.pro` 已从 Cloudflare 父区委托到 Fugue DNS 的 `ns1.dns.fugue.pro` / `ns2.dns.fugue.pro`；双节点 direct query、Cloudflare authoritative referral 和 DoH 递归验证均已通过。Google Cloud DNS 旧 zone 仍保留作短期回滚观察，不再作为新的事实源。
 - `dns.fugue.pro` 的迁移前 Google Cloud DNS baseline 和具体旧记录放在本地私有附录中；当前公网权威事实源已经是 Fugue DNS 的 `ns1.dns.fugue.pro` / `ns2.dns.fugue.pro`。
 - 平台 wildcard 已切到 edge，`api.fugue.pro` 和控制面核心服务继续保留 Route A 记录，full-zone Fugue DNS 会把 `api.fugue.pro` 作为 protected static record 指向 Route A；custom domain 仍保持独立验证和 TLS 策略。`edge-protocol-canary.fugue.pro` 已完成 HTTPS、Host route、WebSocket、SSE、upload 和 streaming 验证；当前重点转为观察 wildcard edge 默认路径、双 edge/DNS heartbeat、route bundle 304、Caddy route、edge metrics、公共递归缓存收敛、registrar nameserver 回滚能力，以及把 wildcard 证书续期正式切到 Fugue ACME DNS-01 hook。
@@ -927,7 +930,7 @@ docs/private/regional-edge-current-state.local.md
 - [x] 实现 NodePolicy 最小模型，表达 `app-runtime`、`shared-pool`、`edge`、`dns`、`builder`、`internal-maintenance` 等角色。
 - [x] 持久化 desired policy，并 reconcile 到 Kubernetes Node labels / taints。
 - [x] 通过 Node condition 生成 `fugue.io/schedulable`、`fugue.io/node-health` 和 `fugue.io/node-unhealthy` 健康 gate。
-- [x] 定义 edge / dns 节点的 role labels、dedicated taint、resource request / limit 和默认调度边界。
+- [x] 定义 edge / dns 节点的 role labels、纯专用节点 dedicated taint、mixed 节点 non-dedicated 规则、resource request / limit 和默认调度边界。
 - [x] 设计并实现 `fugue-edge` / `fugue-dns` Helm DaemonSet 调度规则：必须匹配 role label 和健康 label；edge 默认不开放公网 80/443；DNS 只有显式开启 hostPort 时开放 53。
 - [x] 增加 CLI 和 admin endpoint 查看节点角色、实际 labels / taints、`Ready` / `DiskPressure` gate 和 reconcile 状态：`fugue admin cluster node-policy ls|get|status`。
 - [ ] 后续扩展 NodePolicy 角色：`registry-mirror`、`storage`、区域性网关等长期角色。

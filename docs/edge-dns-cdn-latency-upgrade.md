@@ -442,6 +442,7 @@ edge-group-region-apac
 接入要求：
 
 - 节点由 NodePolicy 标记 `fugue.io/role.edge=true` 和 `fugue.io/role.dns=true`。
+- 生产 edge / DNS 节点不应同时承载 app-runtime、shared-pool 或 build；如果短期 mixed 共置，NodePolicy 必须保持 `dedicated_mode=none`，不得加 `fugue.io/dedicated=edge|dns:NoSchedule`。
 - edge / DNS DaemonSet 或 systemd 逃生口都能运行。
 - UDP/TCP 53、TCP 80、TCP 443 可达。
 - route bundle、DNS bundle、certificate cache 都有本地 last-known-good。
@@ -714,7 +715,7 @@ sampled_at
 
 ### P3：APAC / HK edge 上线
 
-- [x] 选择 APAC/HK 节点并通过 NodePolicy 标记 edge + DNS 角色。
+- [x] 选择 APAC/HK 节点并通过 NodePolicy 标记 edge + DNS 角色，确认 mixed app/build/shared 节点不会被误加 dedicated taint。
 - [x] 验证 UDP/TCP 53、TCP 80、TCP 443 可达。
 - [x] 验证 APAC/HK edge route bundle、DNS bundle、Caddy config、certificate cache 和 last-known-good cache。
 - [x] 把 APAC/HK edge 加入 DNS answer policy，先低风险 canary，再扩大到默认平台入口。

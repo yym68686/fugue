@@ -32,6 +32,11 @@ const (
 	MachineControlPlaneRoleCandidate = "candidate"
 	MachineControlPlaneRoleMember    = "member"
 
+	MachineDedicatedModeNone     = "none"
+	MachineDedicatedModeEdge     = "edge"
+	MachineDedicatedModeDNS      = "dns"
+	MachineDedicatedModeInternal = "internal"
+
 	AppSourceTypeGitHubPublic  = "github-public"
 	AppSourceTypeGitHubPrivate = "github-private"
 	AppSourceTypeDockerImage   = "docker-image"
@@ -781,6 +786,7 @@ type ClusterNodePolicy struct {
 	AllowEdge                    bool   `json:"allow_edge"`
 	AllowDNS                     bool   `json:"allow_dns"`
 	AllowInternalMaintenance     bool   `json:"allow_internal_maintenance"`
+	DedicatedMode                string `json:"dedicated_mode"`
 	NodeMode                     string `json:"node_mode,omitempty"`
 	NodeHealth                   string `json:"node_health,omitempty"`
 	DesiredControlPlaneRole      string `json:"desired_control_plane_role,omitempty"`
@@ -790,6 +796,7 @@ type ClusterNodePolicy struct {
 	EffectiveEdge                bool   `json:"effective_edge"`
 	EffectiveDNS                 bool   `json:"effective_dns"`
 	EffectiveInternalMaintenance bool   `json:"effective_internal_maintenance"`
+	EffectiveDedicatedMode       string `json:"effective_dedicated_mode"`
 	EffectiveSchedulable         bool   `json:"effective_schedulable"`
 	EffectiveControlPlaneRole    string `json:"effective_control_plane_role,omitempty"`
 }
@@ -1798,6 +1805,37 @@ func NormalizeMachineControlPlaneRole(raw string) string {
 		return MachineControlPlaneRoleNone
 	default:
 		return ""
+	}
+}
+
+func NormalizeMachineDedicatedMode(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case MachineDedicatedModeEdge:
+		return MachineDedicatedModeEdge
+	case MachineDedicatedModeDNS:
+		return MachineDedicatedModeDNS
+	case MachineDedicatedModeInternal:
+		return MachineDedicatedModeInternal
+	case "", MachineDedicatedModeNone:
+		return MachineDedicatedModeNone
+	default:
+		return ""
+	}
+}
+
+func MachinePolicyDedicatedMode(policy MachinePolicy) string {
+	if policy.AllowAppRuntime || policy.AllowBuilds || policy.AllowSharedPool {
+		return MachineDedicatedModeNone
+	}
+	switch {
+	case policy.AllowEdge:
+		return MachineDedicatedModeEdge
+	case policy.AllowDNS:
+		return MachineDedicatedModeDNS
+	case policy.AllowInternalMaintenance:
+		return MachineDedicatedModeInternal
+	default:
+		return MachineDedicatedModeNone
 	}
 }
 

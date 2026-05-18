@@ -187,6 +187,7 @@ func buildClusterNodePolicyView(snapshot clusterNodeSnapshot, machine *model.Mac
 	effectiveEdge := strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.EdgeRoleLabelKey), runtimepkg.NodeRoleLabelValue)
 	effectiveDNS := strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.DNSRoleLabelKey), runtimepkg.NodeRoleLabelValue)
 	effectiveInternalMaintenance := strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.InternalMaintenanceLabelKey), runtimepkg.NodeRoleLabelValue)
+	effectiveDedicatedMode := clusterNodeDedicatedMode(snapshot)
 	effectiveSchedulable := clusterNodeSnapshotSchedulable(snapshot)
 	desiredBuilds := effectiveBuilds
 	desiredSharedPool := effectiveSharedPool
@@ -222,6 +223,15 @@ func buildClusterNodePolicyView(snapshot clusterNodeSnapshot, machine *model.Mac
 		}
 	}
 
+	desiredDedicatedMode := model.MachinePolicyDedicatedMode(model.MachinePolicy{
+		AllowAppRuntime:          desiredAppRuntime,
+		AllowBuilds:              desiredBuilds,
+		AllowSharedPool:          desiredSharedPool,
+		AllowEdge:                desiredEdge,
+		AllowDNS:                 desiredDNS,
+		AllowInternalMaintenance: desiredInternalMaintenance,
+	})
+
 	return &model.ClusterNodePolicy{
 		AllowAppRuntime:              desiredAppRuntime,
 		AllowBuilds:                  desiredBuilds,
@@ -229,6 +239,7 @@ func buildClusterNodePolicyView(snapshot clusterNodeSnapshot, machine *model.Mac
 		AllowEdge:                    desiredEdge,
 		AllowDNS:                     desiredDNS,
 		AllowInternalMaintenance:     desiredInternalMaintenance,
+		DedicatedMode:                desiredDedicatedMode,
 		NodeMode:                     nodeMode,
 		NodeHealth:                   nodeHealth,
 		DesiredControlPlaneRole:      desiredRole,
@@ -238,6 +249,7 @@ func buildClusterNodePolicyView(snapshot clusterNodeSnapshot, machine *model.Mac
 		EffectiveEdge:                effectiveEdge,
 		EffectiveDNS:                 effectiveDNS,
 		EffectiveInternalMaintenance: effectiveInternalMaintenance,
+		EffectiveDedicatedMode:       effectiveDedicatedMode,
 		EffectiveSchedulable:         effectiveSchedulable,
 		EffectiveControlPlaneRole:    effectiveControlPlaneRole(snapshot, desiredRole),
 	}
@@ -253,6 +265,18 @@ func effectiveBuildPolicy(snapshot clusterNodeSnapshot) bool {
 	return snapshot.sharedPool ||
 		strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.BuildNodeLabelKey), runtimepkg.BuildNodeLabelValue) ||
 		strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.BuilderRoleLabelKey), runtimepkg.NodeRoleLabelValue)
+}
+
+func clusterNodeDedicatedMode(snapshot clusterNodeSnapshot) string {
+	for _, taint := range snapshot.taints {
+		if taint.Key != runtimepkg.DedicatedTaintKey {
+			continue
+		}
+		if mode := model.NormalizeMachineDedicatedMode(taint.Value); mode != "" {
+			return mode
+		}
+	}
+	return model.MachineDedicatedModeNone
 }
 
 func clusterNodeSnapshotSchedulable(snapshot clusterNodeSnapshot) bool {

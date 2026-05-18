@@ -8049,6 +8049,7 @@ components:
           allow_edge,
           allow_dns,
           allow_internal_maintenance,
+          dedicated_mode,
           desired_control_plane_role,
           effective_app_runtime,
           effective_builds,
@@ -8056,6 +8057,7 @@ components:
           effective_edge,
           effective_dns,
           effective_internal_maintenance,
+          effective_dedicated_mode,
           effective_schedulable,
           effective_control_plane_role
         ]
@@ -8072,6 +8074,8 @@ components:
           type: boolean
         allow_internal_maintenance:
           type: boolean
+        dedicated_mode:
+          type: string
         node_mode:
           type: string
         node_health:
@@ -8090,6 +8094,8 @@ components:
           type: boolean
         effective_internal_maintenance:
           type: boolean
+        effective_dedicated_mode:
+          type: string
         effective_schedulable:
           type: boolean
         effective_control_plane_role:

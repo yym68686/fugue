@@ -587,13 +587,13 @@ func writeClusterNodePolicyStatusTable(w io.Writer, statuses []model.ClusterNode
 		return strings.Compare(sorted[i].NodeName, sorted[j].NodeName) < 0
 	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "NODE\tRUNTIME\tAPP\tBUILD\tSHARED\tEDGE\tDNS\tINTERNAL\tCP\tREADY\tDISK\tHEALTH\tRECONCILED\tBLOCK\tGATE\tREASONS"); err != nil {
+	if _, err := fmt.Fprintln(tw, "NODE\tRUNTIME\tAPP\tBUILD\tSHARED\tEDGE\tDNS\tINTERNAL\tDEDICATED\tCP\tREADY\tDISK\tHEALTH\tRECONCILED\tBLOCK\tGATE\tREASONS"); err != nil {
 		return err
 	}
 	for _, status := range sorted {
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			status.NodeName,
 			firstNonEmpty(status.RuntimeID, "-"),
 			firstNonEmpty(formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowAppRuntime }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveAppRuntime }), "-"),
@@ -602,6 +602,7 @@ func writeClusterNodePolicyStatusTable(w io.Writer, statuses []model.ClusterNode
 			firstNonEmpty(formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowEdge }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveEdge }), "-"),
 			firstNonEmpty(formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowDNS }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveDNS }), "-"),
 			firstNonEmpty(formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowInternalMaintenance }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveInternalMaintenance }), "-"),
+			firstNonEmpty(clusterNodePolicyDedicatedMode(status.Policy), "-"),
 			firstNonEmpty(clusterNodePolicyControlPlane(status.Policy), "-"),
 			clusterNodeBoolLabel(status.Ready),
 			clusterNodeBoolLabel(status.DiskPressure),
@@ -645,6 +646,8 @@ func writeClusterNodePolicyDetails(w io.Writer, status model.ClusterNodePolicySt
 			kvPair{Key: "edge", Value: formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowEdge }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveEdge })},
 			kvPair{Key: "dns", Value: formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowDNS }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveDNS })},
 			kvPair{Key: "internal_maintenance", Value: formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowInternalMaintenance }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveInternalMaintenance })},
+			kvPair{Key: "dedicated_mode", Value: firstNonEmpty(clusterNodePolicyDedicatedMode(status.Policy), "-")},
+			kvPair{Key: "effective_dedicated_mode", Value: firstNonEmpty(strings.TrimSpace(status.Policy.EffectiveDedicatedMode), "-")},
 			kvPair{Key: "control_plane", Value: clusterNodePolicyControlPlane(status.Policy)},
 			kvPair{Key: "node_mode", Value: firstNonEmpty(status.Policy.NodeMode, "-")},
 			kvPair{Key: "node_health", Value: firstNonEmpty(status.Policy.NodeHealth, "-")},
@@ -699,6 +702,27 @@ func clusterNodePolicyMode(policy *model.ClusterNodePolicy) string {
 		return ""
 	}
 	return strings.TrimSpace(policy.NodeMode)
+}
+
+func clusterNodePolicyDedicatedMode(policy *model.ClusterNodePolicy) string {
+	if policy == nil {
+		return ""
+	}
+	desired := strings.TrimSpace(policy.DedicatedMode)
+	effective := strings.TrimSpace(policy.EffectiveDedicatedMode)
+	if desired == "" && effective == "" {
+		return ""
+	}
+	if desired == "" {
+		desired = model.MachineDedicatedModeNone
+	}
+	if effective == "" {
+		effective = model.MachineDedicatedModeNone
+	}
+	if desired == effective {
+		return desired
+	}
+	return desired + "/" + effective
 }
 
 func clusterNodePolicyControlPlane(policy *model.ClusterNodePolicy) string {

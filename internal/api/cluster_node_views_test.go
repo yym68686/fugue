@@ -48,3 +48,45 @@ func TestBuildClusterNodePolicyViewFallsBackToLiveStateForSyntheticRuntimeMachin
 		t.Fatalf("expected desired control-plane role %q, got %q", model.MachineControlPlaneRoleCandidate, policy.DesiredControlPlaneRole)
 	}
 }
+
+func TestBuildClusterNodePolicyViewReportsDedicatedModeDrift(t *testing.T) {
+	t.Parallel()
+
+	snapshot := clusterNodeSnapshot{
+		labels: map[string]string{
+			runtimepkg.AppRuntimeRoleLabelKey: runtimepkg.NodeRoleLabelValue,
+			runtimepkg.EdgeRoleLabelKey:       runtimepkg.NodeRoleLabelValue,
+			runtimepkg.DNSRoleLabelKey:        runtimepkg.NodeRoleLabelValue,
+		},
+		taints: []kubeNodeTaint{{
+			Key:    runtimepkg.DedicatedTaintKey,
+			Value:  runtimepkg.DedicatedEdgeValue,
+			Effect: "NoSchedule",
+		}},
+		node: model.ClusterNode{
+			Conditions: map[string]model.ClusterNodeCondition{
+				clusterNodeConditionReady: {Status: "true"},
+				clusterNodeConditionDisk:  {Status: "false"},
+			},
+		},
+	}
+	machine := model.Machine{
+		ID: "machine_mixed_edge",
+		Policy: model.MachinePolicy{
+			AllowAppRuntime: true,
+			AllowEdge:       true,
+			AllowDNS:        true,
+		},
+	}
+
+	policy := buildClusterNodePolicyView(snapshot, &machine, nil)
+	if policy == nil {
+		t.Fatal("expected cluster node policy")
+	}
+	if policy.DedicatedMode != model.MachineDedicatedModeNone {
+		t.Fatalf("expected mixed desired policy to be non-dedicated, got %#v", policy)
+	}
+	if policy.EffectiveDedicatedMode != model.MachineDedicatedModeEdge {
+		t.Fatalf("expected live taint to report dedicated edge drift, got %#v", policy)
+	}
+}
