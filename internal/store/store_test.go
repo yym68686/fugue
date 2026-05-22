@@ -181,7 +181,7 @@ func TestNodeUpdaterTaskLifecycle(t *testing.T) {
 	}
 
 	heartbeat, err := s.UpdateNodeUpdaterHeartbeat(updater.ID, model.NodeUpdater{
-		Capabilities:      []string{"diagnose-node", "heartbeat"},
+		Capabilities:      []string{"diagnose-node", "heartbeat", "restart-k3s-agent"},
 		UpdaterVersion:    "v2",
 		JoinScriptVersion: "join-v2",
 		K3SVersion:        "k3s version v1.32.0+k3s1",
@@ -261,6 +261,58 @@ func TestNodeUpdaterTaskLifecycle(t *testing.T) {
 	}, updater.ID, "", "", model.NodeUpdateTaskTypeDiagnoseNode, nil)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected cross-tenant task creation to be hidden, got %v", err)
+	}
+}
+
+func TestCreateNodeUpdateTaskRejectsUnsupportedUpdaterCapabilities(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Node Updater Capability Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	updater, _, err := s.EnrollNodeUpdater(
+		nodeSecret,
+		"worker-1",
+		"https://worker-1.example.com",
+		nil,
+		"worker-1",
+		"machine-1",
+		"v1",
+		"join-v1",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("enroll node updater: %v", err)
+	}
+	requester := model.Principal{
+		ActorType: model.ActorTypeAPIKey,
+		ActorID:   "apikey_test",
+		TenantID:  tenant.ID,
+	}
+	if _, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypePrepullAppImages, nil); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected prepull-app-images to be rejected for legacy updater, got %v", err)
+	}
+	if _, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypeUpgradeUpdater, nil); err != nil {
+		t.Fatalf("expected upgrade-node-updater to remain allowed for legacy updater: %v", err)
+	}
+	updater, err = s.UpdateNodeUpdaterHeartbeat(updater.ID, model.NodeUpdater{
+		Capabilities:   []string{"heartbeat", "tasks", model.NodeUpdateTaskTypePrepullAppImages},
+		UpdaterVersion: "v2",
+	})
+	if err != nil {
+		t.Fatalf("heartbeat node updater: %v", err)
+	}
+	if _, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypePrepullAppImages, map[string]string{"images": "registry.example/app@sha256:abc"}); err != nil {
+		t.Fatalf("expected prepull-app-images to be allowed after capability heartbeat: %v", err)
 	}
 }
 

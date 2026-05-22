@@ -232,6 +232,9 @@ func (s *Store) pgCreateNodeUpdateTask(principal model.Principal, updaterID, clu
 	if !principal.IsPlatformAdmin() && strings.TrimSpace(updater.TenantID) != strings.TrimSpace(principal.TenantID) {
 		return model.NodeUpdateTask{}, ErrNotFound
 	}
+	if !nodeUpdaterSupportsTask(updater, taskType) {
+		return model.NodeUpdateTask{}, fmt.Errorf("%w: node updater %s does not support task type %q", ErrInvalidInput, updater.ID, taskType)
+	}
 	now := time.Now().UTC()
 	task := model.NodeUpdateTask{
 		ID:              model.NewID("nodeupdate"),

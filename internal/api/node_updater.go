@@ -483,7 +483,9 @@ func (s *Server) nodeUpdaterInstallScript(apiBase string) string {
 set -euo pipefail
 
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
-FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_VERSION:-v1}"
+FUGUE_NODE_UPDATER_SCRIPT_VERSION="v2"
+FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
+FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,verify-systemd-escape-hatch"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
 FUGUE_NODE_UPDATER_LAST_ERROR_FILE="${FUGUE_NODE_UPDATER_LAST_ERROR_FILE:-${FUGUE_NODE_UPDATER_WORK_DIR}/last-error}"
 FUGUE_NODE_UPDATER_STATE_DIR="${FUGUE_NODE_UPDATER_STATE_DIR:-${FUGUE_NODE_UPDATER_WORK_DIR}}"
@@ -1152,6 +1154,7 @@ heartbeat() {
   api_form POST /v1/node-updater/heartbeat \
     --data-urlencode "updater_version=${FUGUE_NODE_UPDATER_VERSION}" \
     --data-urlencode "join_script_version=${FUGUE_JOIN_SCRIPT_VERSION:-}" \
+    --data-urlencode "capabilities=${FUGUE_NODE_UPDATER_CAPABILITIES}" \
     --data-urlencode "k3s_version=${current_k3s}" \
     --data-urlencode "k3s_server=$(current_k3s_server)" \
     --data-urlencode "k3s_fallback_servers=$(current_k3s_fallback_servers)" \
@@ -1457,8 +1460,11 @@ case "${1:-run-once}" in
   version)
     printf '%s\n' "${FUGUE_NODE_UPDATER_VERSION}"
     ;;
+  capabilities)
+    printf '%s\n' "${FUGUE_NODE_UPDATER_CAPABILITIES}"
+    ;;
   *)
-    echo "usage: fugue-node-updater [run-once|heartbeat|version]" >&2
+    echo "usage: fugue-node-updater [run-once|heartbeat|version|capabilities]" >&2
     exit 2
     ;;
 esac

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -184,6 +185,9 @@ func (s *Store) CreateNodeUpdateTask(principal model.Principal, updaterID, clust
 		}
 		if !principal.IsPlatformAdmin() && strings.TrimSpace(updater.TenantID) != strings.TrimSpace(principal.TenantID) {
 			return ErrNotFound
+		}
+		if !nodeUpdaterSupportsTask(updater, taskType) {
+			return fmt.Errorf("%w: node updater %s does not support task type %q", ErrInvalidInput, updater.ID, taskType)
 		}
 		now := time.Now().UTC()
 		task = model.NodeUpdateTask{
@@ -398,6 +402,38 @@ func normalizeNodeUpdateTaskType(raw string) string {
 		return model.NodeUpdateTaskTypeVerifySystemdEscape
 	default:
 		return ""
+	}
+}
+
+func nodeUpdaterSupportsTask(updater model.NodeUpdater, taskType string) bool {
+	taskType = normalizeNodeUpdateTaskType(taskType)
+	if taskType == "" {
+		return false
+	}
+	if taskType == model.NodeUpdateTaskTypeUpgradeUpdater {
+		return true
+	}
+	capabilities := normalizeStringList(updater.Capabilities)
+	if len(capabilities) == 0 {
+		return legacyNodeUpdaterSupportsTask(taskType)
+	}
+	for _, capability := range capabilities {
+		if capability == taskType {
+			return true
+		}
+	}
+	return false
+}
+
+func legacyNodeUpdaterSupportsTask(taskType string) bool {
+	switch taskType {
+	case model.NodeUpdateTaskTypeRestartK3SAgent,
+		model.NodeUpdateTaskTypeUpgradeK3SAgent,
+		model.NodeUpdateTaskTypeUpgradeUpdater,
+		model.NodeUpdateTaskTypeDiagnoseNode:
+		return true
+	default:
+		return false
 	}
 }
 

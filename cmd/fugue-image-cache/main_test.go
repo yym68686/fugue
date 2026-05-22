@@ -2,9 +2,14 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/google/go-containerregistry/pkg/registry"
 )
 
 func TestHydrateDeduplicatesConcurrentRequests(t *testing.T) {
@@ -66,5 +71,59 @@ func TestHydrateDeduplicatesConcurrentRequests(t *testing.T) {
 	}
 	if got := copies.Load(); got != 1 {
 		t.Fatalf("expected concurrent hydrates to share one copy, got %d", got)
+	}
+}
+
+func TestImageCacheRejectsNonRegistryPathsWithoutPanic(t *testing.T) {
+	cache := &imageCache{registry: registry.New()}
+	for _, path := range []string{"", "*", "v2", "/", "/sitemap.xml", "/.well-known/security.txt"} {
+		t.Run(path, func(t *testing.T) {
+			req := &http.Request{
+				Method: http.MethodGet,
+				URL:    &url.URL{Path: path},
+				Header: http.Header{},
+			}
+			rec := httptest.NewRecorder()
+
+			cache.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+			}
+		})
+	}
+}
+
+func TestImageCacheStillServesRegistryAPIBase(t *testing.T) {
+	cache := &imageCache{registry: registry.New()}
+	req := httptest.NewRequest(http.MethodGet, "http://image-cache.test/v2/", nil)
+	rec := httptest.NewRecorder()
+
+	cache.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if got := rec.Header().Get("Docker-Distribution-API-Version"); got != "registry/2.0" {
+		t.Fatalf("Docker-Distribution-API-Version = %q, want registry/2.0", got)
+	}
+}
+
+func TestIsRegistryAPIPath(t *testing.T) {
+	tests := map[string]bool{
+		"":             false,
+		"*":            false,
+		"/":            false,
+		"/v1":          false,
+		"/v2":          true,
+		"/v2/":         true,
+		"/v2/repo":     true,
+		"/v2something": false,
+		"v2":           false,
+	}
+	for path, want := range tests {
+		if got := isRegistryAPIPath(path); got != want {
+			t.Fatalf("isRegistryAPIPath(%q) = %v, want %v", path, got, want)
+		}
 	}
 }

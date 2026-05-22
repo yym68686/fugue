@@ -202,6 +202,7 @@ fugue app ls
 
 - [一体化 / 自托管部署指南](docs/deploy.md)
 - [生产 HA / DR 指南](docs/ha-dr.md)
+- [应用生命周期平台愿景](docs/app-lifecycle-platform-vision.md)
 - [默认 Helm values](deploy/helm/fugue/values.yaml)
 - [生产 HA values](deploy/helm/fugue/values-production-ha.yaml)
 
@@ -257,5 +258,5 @@ internal/runtime           托管运行时渲染与应用逻辑
 internal/sourceimport      源码导入与构建识别
 internal/store             PostgreSQL 状态存储
 deploy/helm/fugue          控制面 Helm Chart
-docs/                      部署与 HA/DR 文档
+docs/                      部署、HA/DR 与产品战略文档
 ```

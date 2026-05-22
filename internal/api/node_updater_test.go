@@ -60,6 +60,7 @@ func TestNodeUpdaterAPILifecycle(t *testing.T) {
 	heartbeatForm := url.Values{}
 	heartbeatForm.Set("updater_version", "v2")
 	heartbeatForm.Set("join_script_version", "join-v2")
+	heartbeatForm.Set("capabilities", "heartbeat,tasks,upgrade-k3s-agent")
 	heartbeatForm.Set("k3s_version", "k3s version v1.32.0+k3s1")
 	heartbeatForm.Set("os", "linux")
 	heartbeatForm.Set("arch", "amd64")
@@ -164,6 +165,11 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`/v1/discovery/bundle`,
 		`/v1/node-updater/desired-state`,
 		`refresh-join-config`,
+		`prepull-app-images`,
+		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v2"`,
+		`FUGUE_NODE_UPDATER_CAPABILITIES=`,
+		`--data-urlencode "capabilities=${FUGUE_NODE_UPDATER_CAPABILITIES}"`,
+		`capabilities)`,
 		`/etc/rancher/k3s/config.yaml`,
 		`/etc/rancher/k3s/registries.yaml`,
 		`reconcile_cni_bridge_mtu`,
@@ -205,6 +211,7 @@ func TestJoinClusterInstallScriptIncludesNodeUpdaterInstaller(t *testing.T) {
 		`/v1/discovery/bundle`,
 		`FUGUE_DISCOVERY_GENERATION`,
 		`refresh-join-config`,
+		`updater_capabilities="$(/usr/local/bin/fugue-node-updater capabilities`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected join-cluster install script to contain %q", want)

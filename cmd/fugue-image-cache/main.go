@@ -87,9 +87,17 @@ func main() {
 }
 
 func (c *imageCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
+	path := ""
+	if r.URL != nil {
+		path = r.URL.Path
+	}
+	if path == "/healthz" || path == "/readyz" {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
+		return
+	}
+	if !isRegistryAPIPath(path) {
+		http.NotFound(w, r)
 		return
 	}
 	if !isRegistryPull(r) {
@@ -243,10 +251,17 @@ func copyImage(ctx context.Context, src, dst string) error {
 }
 
 func isRegistryPull(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
 	}
 	return strings.Contains(r.URL.Path, "/manifests/") || strings.Contains(r.URL.Path, "/blobs/")
+}
+
+func isRegistryAPIPath(path string) bool {
+	return path == "/v2" || strings.HasPrefix(path, "/v2/")
 }
 
 func parseRegistryTarget(path string) (string, string, bool) {

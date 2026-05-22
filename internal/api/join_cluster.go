@@ -2064,11 +2064,15 @@ install_fugue_node_updater() {
 
   log_step "Installing Fugue node updater..."
   mkdir -p /etc/fugue /var/lib/fugue-node-updater
+  local updater_version="v2"
+  local updater_capabilities="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,verify-systemd-escape-hatch"
   updater_tmp="$(mktemp)"
   curl -fsSL --retry 3 --retry-delay 2 "${FUGUE_API_BASE}/install/node-updater.sh" -o "${updater_tmp}"
   cp "${updater_tmp}" /usr/local/bin/fugue-node-updater
   chmod 0755 /usr/local/bin/fugue-node-updater
   rm -f "${updater_tmp}"
+  updater_version="$(/usr/local/bin/fugue-node-updater version 2>/dev/null || printf '%%s\n' "${updater_version}")"
+  updater_capabilities="$(/usr/local/bin/fugue-node-updater capabilities 2>/dev/null || printf '%%s\n' "${updater_capabilities}")"
 
   enroll_env="$(mktemp)"
   curl -fsSL --retry 3 --retry-delay 2 -X POST "${FUGUE_API_BASE}/v1/node-updater/enroll" \
@@ -2079,9 +2083,9 @@ install_fugue_node_updater() {
     --data-urlencode "machine_fingerprint=${machine_fingerprint}" \
     --data-urlencode "endpoint=${node_endpoint}" \
     --data-urlencode "labels=${FUGUE_RUNTIME_LABELS:-}" \
-    --data-urlencode "updater_version=v1" \
+    --data-urlencode "updater_version=${updater_version}" \
     --data-urlencode "join_script_version=${FUGUE_JOIN_SCRIPT_VERSION}" \
-    --data-urlencode "capabilities=heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,verify-systemd-escape-hatch" \
+    --data-urlencode "capabilities=${updater_capabilities}" \
     >"${enroll_env}"
   # shellcheck disable=SC1090
   . "${enroll_env}"
@@ -2092,7 +2096,6 @@ install_fugue_node_updater() {
     write_env_var FUGUE_API_BASE "${FUGUE_API_BASE}"
     write_env_var FUGUE_NODE_UPDATER_ID "${FUGUE_NODE_UPDATER_ID}"
     write_env_var FUGUE_NODE_UPDATER_TOKEN "${FUGUE_NODE_UPDATER_TOKEN}"
-    write_env_var FUGUE_NODE_UPDATER_VERSION "v1"
     write_env_var FUGUE_JOIN_SCRIPT_VERSION "${FUGUE_JOIN_SCRIPT_VERSION}"
     write_env_var FUGUE_K3S_CHANNEL "${FUGUE_K3S_CHANNEL}"
     write_env_var FUGUE_NODE_UPDATER_WORK_DIR "/var/lib/fugue-node-updater"

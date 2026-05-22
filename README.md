@@ -202,6 +202,7 @@ Further deployment docs:
 
 - [Bundled/self-hosted deploy guide](docs/deploy.md)
 - [Production HA / DR guide](docs/ha-dr.md)
+- [Application lifecycle platform vision](docs/app-lifecycle-platform-vision.md)
 - [Default Helm values](deploy/helm/fugue/values.yaml)
 - [Production HA values](deploy/helm/fugue/values-production-ha.yaml)
 
@@ -257,5 +258,5 @@ internal/runtime           Managed-runtime rendering/apply logic
 internal/sourceimport      Source import and build detection
 internal/store             PostgreSQL-backed state store
 deploy/helm/fugue          Control-plane Helm chart
-docs/                      Deployment and HA/DR guides
+docs/                      Deployment, HA/DR, and strategy docs
 ```
