@@ -352,7 +352,7 @@ func TestRegistryDefaultsToPVCStorage(t *testing.T) {
 		t.Fatalf("rendered manifest missing registry PVC:\n%s", manifest)
 	}
 	for _, want := range []string{
-		"storageClassName: fugue-local-rwo",
+		`storageClassName: "fugue-local-rwo"`,
 		"storage: 200Gi",
 	} {
 		if !strings.Contains(pvcDoc, want) {
