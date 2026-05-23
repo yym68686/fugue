@@ -3263,6 +3263,7 @@ PY
     --set-string api.shutdownDrainDelay=5s \
     --set-string api.shutdownTimeout=25s \
     --set controller.replicaCount="${FUGUE_CONTROLLER_REPLICA_COUNT}" \
+    --set-string controller.pollInterval=15s \
     --set-string controller.fallbackPollInterval=30s \
     --set controller.terminationGracePeriodSeconds=30 \
     --set controller.podDisruptionBudget.enabled=true \

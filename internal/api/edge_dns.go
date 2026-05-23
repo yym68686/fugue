@@ -184,9 +184,9 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		runtimeByID[strings.TrimSpace(runtimeObj.ID)] = runtimeObj
 	}
 	runtimeNodeLabelsByID := s.edgeRouteRuntimeNodeLabels(r.Context())
+	apps = s.overlayManagedAppStatusesCached(apps)
 	appByID := make(map[string]model.App, len(apps))
 	for _, app := range apps {
-		app = s.overlayManagedAppStatusCached(app)
 		appByID[strings.TrimSpace(app.ID)] = app
 	}
 	policyByHostname := edgeRoutePolicyByHostname(policies)

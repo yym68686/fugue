@@ -440,16 +440,25 @@ func (s *Service) markOrphanManagedAppObservedOnly(ctx context.Context, client *
 	if managedName == "" {
 		return nil
 	}
+	reason = strings.TrimSpace(reason)
+	if managedAppObservedOnlyStatusCurrent(managed.Status, reason) {
+		return nil
+	}
 	status := managedAppBaseStatus(managed, app)
 	status.Phase = runtime.ManagedAppPhaseError
-	status.Message = strings.TrimSpace(reason)
+	status.Message = reason
 	if err := client.patchManagedAppStatus(ctx, namespace, managedName, status); err != nil && !isKubernetesResourceNotFound(err) {
 		return fmt.Errorf("patch observed-only managed app status %s/%s: %w", namespace, managedName, err)
 	}
 	if s.Logger != nil {
-		s.Logger.Printf("observed-only managed app %s/%s: %s", namespace, managedName, strings.TrimSpace(reason))
+		s.Logger.Printf("observed-only managed app %s/%s: %s", namespace, managedName, reason)
 	}
 	return nil
+}
+
+func managedAppObservedOnlyStatusCurrent(status runtime.ManagedAppStatus, reason string) bool {
+	return strings.EqualFold(strings.TrimSpace(status.Phase), runtime.ManagedAppPhaseError) &&
+		strings.TrimSpace(status.Message) == strings.TrimSpace(reason)
 }
 
 func patchManagedAppErrorStatus(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, cause error) error {

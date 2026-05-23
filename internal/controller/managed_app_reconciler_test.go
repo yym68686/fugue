@@ -2116,11 +2116,13 @@ func TestReconcileManagedAppObjectDeletesOrphanedManagedApp(t *testing.T) {
 	namespace := runtime.NamespaceForTenant("tenant_demo")
 	managedName := "app-demo"
 	var patchedStatus runtime.ManagedAppStatus
+	patches := 0
 	var deleted []string
 
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch {
 		case req.Method == http.MethodPatch && req.URL.Path == managedAppAPIPath(namespace, managedName)+"/status":
+			patches++
 			var body struct {
 				Status runtime.ManagedAppStatus `json:"status"`
 			}
@@ -2197,5 +2199,16 @@ func TestReconcileManagedAppObjectDeletesOrphanedManagedApp(t *testing.T) {
 	}
 	if len(deleted) != 0 {
 		t.Fatalf("expected observed-only reconcile to retain local resources, got deletes %v", deleted)
+	}
+	if patches != 1 {
+		t.Fatalf("expected one observed-only status patch, got %d", patches)
+	}
+
+	managed.Status = patchedStatus
+	if err := svc.reconcileManagedAppObject(context.Background(), client, managed); err != nil {
+		t.Fatalf("reconcile unchanged observed-only managed app: %v", err)
+	}
+	if patches != 1 {
+		t.Fatalf("expected unchanged observed-only status to skip patch, got %d patches", patches)
 	}
 }

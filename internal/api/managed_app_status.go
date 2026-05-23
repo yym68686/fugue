@@ -23,10 +23,14 @@ import (
 const (
 	defaultManagedAppStatusCacheTTL       = 15 * time.Second
 	defaultManagedAppStatusRefreshTimeout = 5 * time.Second
+	defaultManagedAppStatusRefreshBackoff = 15 * time.Second
 	managedAppStatusListRefreshKey        = "list"
 )
 
-var errManagedAppStatusClientUnavailable = errors.New("managed app status client unavailable")
+var (
+	errManagedAppStatusClientUnavailable = errors.New("managed app status client unavailable")
+	errManagedAppStatusRefreshBackoff    = errors.New("managed app status refresh backoff active")
+)
 
 type managedAppStatusClient struct {
 	client      *http.Client
@@ -35,12 +39,14 @@ type managedAppStatusClient struct {
 }
 
 type managedAppStatusCache struct {
-	ttl            time.Duration
-	refreshTimeout time.Duration
-	mu             sync.RWMutex
-	byApp          map[string]managedAppStatusCacheEntry
-	list           managedAppStatusListCacheEntry
-	group          singleflight.Group
+	ttl                  time.Duration
+	refreshTimeout       time.Duration
+	refreshBackoff       time.Duration
+	mu                   sync.RWMutex
+	byApp                map[string]managedAppStatusCacheEntry
+	list                 managedAppStatusListCacheEntry
+	listRefreshNotBefore time.Time
+	group                singleflight.Group
 }
 
 type managedAppStatusCacheEntry struct {
@@ -72,6 +78,7 @@ func newManagedAppStatusCache(ttl, refreshTimeout time.Duration) managedAppStatu
 	return managedAppStatusCache{
 		ttl:            ttl,
 		refreshTimeout: refreshTimeout,
+		refreshBackoff: defaultManagedAppStatusRefreshBackoff,
 		byApp:          make(map[string]managedAppStatusCacheEntry),
 	}
 }
@@ -90,6 +97,13 @@ func (c *managedAppStatusCache) refreshTimeoutDuration() time.Duration {
 	return c.refreshTimeout
 }
 
+func (c *managedAppStatusCache) refreshBackoffDuration() time.Duration {
+	if c == nil || c.refreshBackoff <= 0 {
+		return defaultManagedAppStatusRefreshBackoff
+	}
+	return c.refreshBackoff
+}
+
 func (c *managedAppStatusCache) getApp(key string) (managedAppStatusCacheEntry, bool, bool) {
 	if c == nil {
 		return managedAppStatusCacheEntry{}, false, false
@@ -101,6 +115,32 @@ func (c *managedAppStatusCache) getApp(key string) (managedAppStatusCacheEntry, 
 		return managedAppStatusCacheEntry{}, false, false
 	}
 	return entry, true, time.Now().After(entry.expiresAt)
+}
+
+func (c *managedAppStatusCache) listRefreshAllowed(now time.Time) bool {
+	if c == nil {
+		return true
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	c.mu.RLock()
+	notBefore := c.listRefreshNotBefore
+	c.mu.RUnlock()
+	return notBefore.IsZero() || !now.Before(notBefore)
+}
+
+func (c *managedAppStatusCache) recordListRefreshResult(err error) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	if err != nil {
+		c.listRefreshNotBefore = time.Now().Add(c.refreshBackoffDuration())
+	} else {
+		c.listRefreshNotBefore = time.Time{}
+	}
+	c.mu.Unlock()
 }
 
 func (c *managedAppStatusCache) setApp(key string, entry managedAppStatusCacheEntry) {
@@ -316,12 +356,40 @@ func (s *Server) overlayManagedAppStatusCached(app model.App) model.App {
 	cached, ok, expired := s.managedAppStatusCache.getApp(managedAppStatusCacheKey(app))
 	if ok {
 		if expired {
-			s.refreshManagedAppStatusAsync(app)
+			s.refreshManagedAppStatusesAsync()
 		}
 		return applyManagedAppStatusCacheEntry(app, cached)
 	}
-	s.refreshManagedAppStatusAsync(app)
+
+	list, listOK, listExpired := s.managedAppStatusCache.getList()
+	if listOK {
+		if listExpired {
+			s.refreshManagedAppStatusesAsync()
+		}
+		managed, found := list.items[strings.TrimSpace(app.ID)]
+		if found {
+			return runtime.OverlayAppStatusFromManagedApp(app, managed)
+		}
+		return app
+	}
+
+	s.refreshManagedAppStatusesAsync()
 	return app
+}
+
+func (s *Server) overlayManagedAppStatusesCached(apps []model.App) []model.App {
+	if len(apps) == 0 {
+		return apps
+	}
+	cached, ok, expired := s.managedAppStatusCache.getList()
+	if ok {
+		if expired {
+			s.refreshManagedAppStatusesAsync()
+		}
+		return overlayAppsWithManagedStatuses(apps, cached.items)
+	}
+	s.refreshManagedAppStatusesAsync()
+	return apps
 }
 
 func overlayAppsWithManagedStatuses(apps []model.App, managedByAppID map[string]runtime.ManagedAppObject) []model.App {
@@ -376,7 +444,7 @@ func (s *Server) managedAppStatusRefreshContext(parent context.Context) (context
 }
 
 func (s *Server) shouldLogManagedAppStatusError(err error) bool {
-	return err != nil && !errors.Is(err, errManagedAppStatusClientUnavailable)
+	return err != nil && !errors.Is(err, errManagedAppStatusClientUnavailable) && !errors.Is(err, errManagedAppStatusRefreshBackoff)
 }
 
 func (s *Server) fetchManagedAppStatus(ctx context.Context, app model.App) (managedAppStatusCacheEntry, error) {
@@ -422,20 +490,6 @@ func (s *Server) refreshManagedAppStatus(ctx context.Context, app model.App) (ma
 	return entry, nil
 }
 
-func (s *Server) refreshManagedAppStatusAsync(app model.App) {
-	key := managedAppStatusCacheKey(app)
-	if key == "" {
-		return
-	}
-	s.managedAppStatusCache.group.DoChan("app:"+key, func() (any, error) {
-		entry, err := s.fetchManagedAppStatus(context.Background(), app)
-		if err != nil && s.shouldLogManagedAppStatusError(err) && s.log != nil {
-			s.log.Printf("managed app status background refresh error for app %s: %v", app.ID, err)
-		}
-		return entry, err
-	})
-}
-
 func (s *Server) fetchManagedAppStatuses(ctx context.Context) (managedAppStatusListCacheEntry, error) {
 	client, err := s.managedAppStatusClient()
 	if err != nil {
@@ -462,8 +516,16 @@ func (s *Server) fetchManagedAppStatuses(ctx context.Context) (managedAppStatusL
 }
 
 func (s *Server) refreshManagedAppStatuses(ctx context.Context) (managedAppStatusListCacheEntry, error) {
+	if !s.managedAppStatusCache.listRefreshAllowed(time.Now()) {
+		return managedAppStatusListCacheEntry{}, errManagedAppStatusRefreshBackoff
+	}
 	value, err, _ := s.managedAppStatusCache.group.Do(managedAppStatusListRefreshKey, func() (any, error) {
-		return s.fetchManagedAppStatuses(ctx)
+		if !s.managedAppStatusCache.listRefreshAllowed(time.Now()) {
+			return managedAppStatusListCacheEntry{}, errManagedAppStatusRefreshBackoff
+		}
+		entry, err := s.fetchManagedAppStatuses(ctx)
+		s.managedAppStatusCache.recordListRefreshResult(err)
+		return entry, err
 	})
 	if err != nil {
 		return managedAppStatusListCacheEntry{}, err
@@ -471,4 +533,21 @@ func (s *Server) refreshManagedAppStatuses(ctx context.Context) (managedAppStatu
 
 	entry, _ := value.(managedAppStatusListCacheEntry)
 	return entry, nil
+}
+
+func (s *Server) refreshManagedAppStatusesAsync() {
+	if !s.managedAppStatusCache.listRefreshAllowed(time.Now()) {
+		return
+	}
+	s.managedAppStatusCache.group.DoChan(managedAppStatusListRefreshKey, func() (any, error) {
+		if !s.managedAppStatusCache.listRefreshAllowed(time.Now()) {
+			return managedAppStatusListCacheEntry{}, errManagedAppStatusRefreshBackoff
+		}
+		entry, err := s.fetchManagedAppStatuses(context.Background())
+		s.managedAppStatusCache.recordListRefreshResult(err)
+		if err != nil && s.shouldLogManagedAppStatusError(err) && s.log != nil {
+			s.log.Printf("managed app status background list refresh error: %v", err)
+		}
+		return entry, err
+	})
 }

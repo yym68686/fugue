@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -387,9 +388,14 @@ func TestOverlayManagedAppStatusCachedReturnsImmediatelyAndRefreshesInBackground
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
+		if want := "/apis/" + runtime.ManagedAppAPIGroup + "/v1alpha1/" + runtime.ManagedAppPlural; r.URL.Path != want {
+			t.Fatalf("expected background refresh to list managed apps at %s, got %s", want, r.URL.Path)
+		}
 		time.Sleep(150 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(managed)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{managed},
+		})
 	}))
 	defer server.Close()
 
@@ -440,6 +446,156 @@ func TestOverlayManagedAppStatusCachedReturnsImmediatelyAndRefreshesInBackground
 	}
 	if second.Status.LastMessage != "background refresh" {
 		t.Fatalf("expected refreshed cache message, got %q", second.Status.LastMessage)
+	}
+}
+
+func TestOverlayManagedAppStatusCachedCoalescesBackgroundListRefresh(t *testing.T) {
+	t.Parallel()
+
+	apps := []model.App{
+		{ID: "app_demo_1", TenantID: "tenant_demo", Name: "demo-1", Status: model.AppStatus{Phase: "deployed"}},
+		{ID: "app_demo_2", TenantID: "tenant_demo", Name: "demo-2", Status: model.AppStatus{Phase: "deployed"}},
+		{ID: "app_demo_3", TenantID: "tenant_demo", Name: "demo-3", Status: model.AppStatus{Phase: "deployed"}},
+	}
+	var managedItems []map[string]any
+	for i, app := range apps {
+		managed := runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{})
+		managed["status"] = map[string]any{
+			"phase":         runtime.ManagedAppPhaseReady,
+			"message":       "ready " + app.ID,
+			"readyReplicas": i + 1,
+		}
+		managedItems = append(managedItems, managed)
+	}
+
+	var listCalls atomic.Int32
+	var getCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/apis/"+runtime.ManagedAppAPIGroup+"/v1alpha1/"+runtime.ManagedAppPlural:
+			listCalls.Add(1)
+			time.Sleep(150 * time.Millisecond)
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": managedItems})
+		case strings.Contains(r.URL.Path, "/namespaces/"):
+			getCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		default:
+			t.Fatalf("unexpected Kubernetes API path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	apiServer := &Server{
+		log:                   log.New(io.Discard, "", 0),
+		managedAppStatusCache: newManagedAppStatusCache(time.Minute, time.Second),
+		newManagedAppStatusClient: func() (*managedAppStatusClient, error) {
+			return &managedAppStatusClient{
+				client:      server.Client(),
+				baseURL:     server.URL,
+				bearerToken: "test",
+			}, nil
+		},
+	}
+
+	for _, app := range apps {
+		first := apiServer.overlayManagedAppStatusCached(app)
+		if first.Status.LastMessage != "" {
+			t.Fatalf("expected first hot-path read to use store state, got %q", first.Status.LastMessage)
+		}
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if listCalls.Load() == 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := listCalls.Load(); got != 1 {
+		t.Fatalf("expected one coalesced list refresh, got %d", got)
+	}
+	if got := getCalls.Load(); got != 0 {
+		t.Fatalf("expected no per-app managed app GETs, got %d", got)
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		cached, ok, _ := apiServer.managedAppStatusCache.getList()
+		if ok && len(cached.items) == len(apps) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	updated := apiServer.overlayManagedAppStatusesCached(apps)
+	if len(updated) != len(apps) {
+		t.Fatalf("expected %d apps, got %d", len(apps), len(updated))
+	}
+	for i, app := range updated {
+		if app.Status.Phase != "deployed" {
+			t.Fatalf("expected app %d phase deployed from managed status, got %q", i, app.Status.Phase)
+		}
+		if app.Status.LastMessage != "ready "+apps[i].ID {
+			t.Fatalf("expected app %d cached message, got %q", i, app.Status.LastMessage)
+		}
+	}
+	if got := listCalls.Load(); got != 1 {
+		t.Fatalf("expected cached list to be reused, got %d list refreshes", got)
+	}
+}
+
+func TestOverlayManagedAppStatusCachedBacksOffAfterBackgroundListError(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Status: model.AppStatus{
+			Phase: "deployed",
+		},
+	}
+
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Error(w, "api server unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	apiServer := &Server{
+		log:                   log.New(io.Discard, "", 0),
+		managedAppStatusCache: newManagedAppStatusCache(time.Minute, time.Second),
+		newManagedAppStatusClient: func() (*managedAppStatusClient, error) {
+			return &managedAppStatusClient{
+				client:      server.Client(),
+				baseURL:     server.URL,
+				bearerToken: "test",
+			}, nil
+		},
+	}
+
+	_ = apiServer.overlayManagedAppStatusCached(app)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		apiServer.managedAppStatusCache.mu.RLock()
+		blocked := time.Now().Before(apiServer.managedAppStatusCache.listRefreshNotBefore)
+		apiServer.managedAppStatusCache.mu.RUnlock()
+		if blocked {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected one failed background refresh, got %d", got)
+	}
+
+	_ = apiServer.overlayManagedAppStatusCached(app)
+	time.Sleep(50 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected refresh backoff to suppress immediate retry, got %d calls", got)
 	}
 }
 

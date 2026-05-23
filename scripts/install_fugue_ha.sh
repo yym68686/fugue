@@ -2314,6 +2314,7 @@ controller:
     repository: fugue-controller
     tag: "${IMAGE_TAG}"
     pullPolicy: IfNotPresent
+  pollInterval: "15s"
   fallbackPollInterval: "30s"
   kubectlApply: true
   terminationGracePeriodSeconds: 30

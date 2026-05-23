@@ -40,7 +40,7 @@ controller:
   githubSyncActivateWorkers: 4
   imageRetentionSweepInterval: 6h
   imageRetentionSweepTimeout: 5m
-  pollInterval: 5s
+  pollInterval: 15s
   fallbackPollInterval: 30s
   runtimeOfflineAfter: 90s
   kubectlApply: true
