@@ -170,6 +170,8 @@ Controller GitHub sync knobs:
 - `FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_MAX_DELAY`: maximum retry delay for repeated auto failures of the same tracked commit.
 - GitHub sync stops auto retrying a tracked commit after `3` failed auto-triggered import or deploy attempts for the same app and commit. The controller only re-arms that commit after a non-`github-sync` GitHub rebuild or deploy is triggered manually, or after a release for that commit completes successfully.
 - `FUGUE_CONTROLLER_MANAGED_APP_ROLLOUT_TIMEOUT`: maximum time a managed deploy operation waits for the Kubernetes rollout to finish before it is marked failed.
+- `FUGUE_CONTROLLER_IMAGE_RETENTION_SWEEP_INTERVAL`: how often the controller reapplies managed app image retention across all apps. Set `0` to disable the periodic sweep; deploy/delete operations still run their own post-operation image maintenance.
+- `FUGUE_CONTROLLER_IMAGE_RETENTION_SWEEP_TIMEOUT`: timeout for one managed app image retention sweep.
 
 Builder scheduling notes:
 
@@ -183,8 +185,10 @@ Registry and cluster-join notes:
 - Each node's `/etc/rancher/k3s/registries.yaml` should mirror that logical name to a node-local or regional endpoint such as `http://127.0.0.1:30500` or an HK/GCP registry cache.
 - `api.clusterJoinRegistryEndpoint` is the mirror endpoint written by `/install/join-cluster.sh`; it defaults to the node-local NodePort endpoint and can be overridden for regional mirrors.
 - `imagePrePull.images` can list high-frequency runtime/template image refs that should be warmed on every node by the chart-managed pre-pull DaemonSet.
-- The bundled registry still defaults to a host-path convenience baseline. Do not keep it on the primary node root disk in production.
-- If you must keep the bundled registry, move it to dedicated storage with either `registry.persistence.mode=pvc` or `registry.persistence.mode=existingClaim`.
+- The bundled registry defaults to a `ReadWriteOnce` PVC (`registry.persistence.mode=pvc`, `200Gi`, `fugue-local-rwo`). This avoids the old naked `hostPath` behavior where the singleton registry pod could drift to another node and leave an orphaned registry store behind.
+- For production, prefer an external registry and set `api.registryPushBase`, `api.registryPullBase`, and `api.clusterJoinRegistryEndpoint` to that registry or its regional mirrors.
+- `registry.persistence.mode=hostPath` is blocked by default. It is only for explicit single-node development or emergency lab setups, and requires both `registry.unsafeHostPath.enabled=true` and a non-empty `registry.unsafeHostPath.reason`.
+- To migrate an existing hostPath-backed bundled registry to a PVC without deleting the old hostPath data, run `scripts/migrate_fugue_registry_hostpath_to_pvc.sh` during a maintenance window, then deploy the PVC-backed chart values through the normal control-plane release path.
 - If you want Fugue to expose `/install/join-cluster.sh`, also set `api.clusterJoinServer="https://k3s-api.example.com:6443"` and `api.clusterJoinBootstrapTokenTTL="15m"`. Optional hardening is `api.clusterJoinCAHash="<sha256-of-server-ca>"`. Optional mesh settings are `api.clusterJoinMeshProvider`, `api.clusterJoinMeshLoginServer`, and `api.clusterJoinMeshAuthKey`.
 
 Example bundled-registry PVC override:
@@ -206,7 +210,7 @@ registry:
     existingClaim: fugue-registry-data
 ```
 
-The bundled registry now enables Docker Distribution upload purging by default. For emergency host-level cleanup on a control-plane node, use:
+The bundled registry now enables Docker Distribution upload purging by default. For destructive emergency host-level cleanup on a control-plane node, use:
 
 ```bash
 sudo ./scripts/cleanup_fugue_registry_host.sh
@@ -490,7 +494,7 @@ Flow:
 
 - `fugue-api` and `fugue-controller` now run as separate Deployments. The chart defaults both to 2 replicas and enables controller leader election.
 - Authoritative control-plane state now lives in PostgreSQL. The API and controller still keep local scratch data under `/var/lib/fugue` for import / render work.
-- The bundled chart keeps PostgreSQL, the internal registry, and optional `headscale` in-cluster with `hostPath` storage. For production, externalize or harden those stateful dependencies and their placement.
+- The bundled chart keeps PostgreSQL and optional `headscale` in-cluster with `hostPath` storage, while the internal registry now defaults to PVC-backed storage. For production, externalize or harden these stateful dependencies and their placement.
 - The chart now supports `configSecret.existingSecretName` so production deployments can source Fugue credentials from an external secret manager instead of chart-generated literals.
 - A production HA baseline is included in `deploy/helm/fugue/values-production-ha.yaml`.
 - `fugue app continuity audit` uses the same migration blocker rules as the API, so you can audit app-level failover eligibility before an incident.

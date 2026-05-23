@@ -38,6 +38,8 @@ controller:
   foregroundActivateWorkers: 4
   githubSyncImportWorkers: 0
   githubSyncActivateWorkers: 4
+  imageRetentionSweepInterval: 6h
+  imageRetentionSweepTimeout: 5m
   pollInterval: 5s
   fallbackPollInterval: 30s
   runtimeOfflineAfter: 90s

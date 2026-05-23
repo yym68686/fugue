@@ -103,6 +103,9 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.Config.ImageTrackingTimeout <= 0 {
 		s.Config.ImageTrackingTimeout = 20 * time.Second
 	}
+	if s.Config.ImageRetentionSweepTimeout <= 0 {
+		s.Config.ImageRetentionSweepTimeout = 5 * time.Minute
+	}
 	if s.Config.GitHubSyncRetryBaseDelay <= 0 {
 		s.Config.GitHubSyncRetryBaseDelay = 5 * time.Minute
 	}
@@ -161,12 +164,13 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		s.Config.GitHubSyncActivateWorkers = 0
 	}
 	s.Logger.Printf(
-		"controller active loop started; event_driven=%v poll_interval=%s fallback_poll_interval=%s github_sync_interval=%s image_tracking_interval=%s render_dir=%s kubectl_apply=%v foreground_import_workers=%d foreground_activate_workers=%d github_sync_import_workers=%d github_sync_activate_workers=%d worker_limit_note=%q",
+		"controller active loop started; event_driven=%v poll_interval=%s fallback_poll_interval=%s github_sync_interval=%s image_tracking_interval=%s image_retention_sweep_interval=%s render_dir=%s kubectl_apply=%v foreground_import_workers=%d foreground_activate_workers=%d github_sync_import_workers=%d github_sync_activate_workers=%d worker_limit_note=%q",
 		eventDriven,
 		s.Config.PollInterval,
 		s.Config.FallbackPollInterval,
 		s.Config.GitHubSyncInterval,
 		s.Config.ImageTrackingInterval,
+		s.Config.ImageRetentionSweepInterval,
 		s.Config.RenderDir,
 		s.Config.KubectlApply,
 		s.Config.ForegroundImportWorkers,
@@ -211,6 +215,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			imageTrackingTicker = time.NewTicker(s.Config.ImageTrackingInterval)
 			defer imageTrackingTicker.Stop()
 		}
+		var imageRetentionSweepTicker *time.Ticker
+		if s.Config.ImageRetentionSweepInterval > 0 {
+			imageRetentionSweepTicker = time.NewTicker(s.Config.ImageRetentionSweepInterval)
+			defer imageRetentionSweepTicker.Stop()
+		}
 
 		for {
 			if err := s.reconcileOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -231,6 +240,10 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 					s.Logger.Printf("image tracking sync error: %v", err)
 				} else {
 					triggerBackgroundOps()
+				}
+			case <-githubTickerChan(imageRetentionSweepTicker):
+				if err := s.runManagedAppImageRetentionSweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
+					s.Logger.Printf("managed app image retention sweep error: %v", err)
 				}
 			case <-ticker.C:
 			}
@@ -254,6 +267,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			triggerBackgroundOps()
 		}
 	}
+	if s.Config.ImageRetentionSweepInterval > 0 {
+		if err := s.runManagedAppImageRetentionSweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			s.Logger.Printf("initial managed app image retention sweep error: %v", err)
+		}
+	}
 
 	staleTicker := time.NewTicker(s.Config.PollInterval)
 	defer staleTicker.Stop()
@@ -270,6 +288,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	if s.Config.ImageTrackingInterval > 0 {
 		imageTrackingTicker = time.NewTicker(s.Config.ImageTrackingInterval)
 		defer imageTrackingTicker.Stop()
+	}
+	var imageRetentionSweepTicker *time.Ticker
+	if s.Config.ImageRetentionSweepInterval > 0 {
+		imageRetentionSweepTicker = time.NewTicker(s.Config.ImageRetentionSweepInterval)
+		defer imageRetentionSweepTicker.Stop()
 	}
 	operationEvents := listenForOperationEvents(ctx, s.Logger, s.Config.DatabaseURL)
 
@@ -316,6 +339,10 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 				s.Logger.Printf("image tracking sync error: %v", err)
 			} else {
 				triggerBackgroundOps()
+			}
+		case <-githubTickerChan(imageRetentionSweepTicker):
+			if err := s.runManagedAppImageRetentionSweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				s.Logger.Printf("managed app image retention sweep error: %v", err)
 			}
 		case <-staleTicker.C:
 			if err := s.markRuntimeOfflineStale(); err != nil {

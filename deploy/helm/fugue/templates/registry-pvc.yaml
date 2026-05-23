@@ -1,9 +1,10 @@
 {{- $registry := (.Values.registry | default (dict)) -}}
 {{- $registryPersistence := (get $registry "persistence" | default (dict)) -}}
-{{- $registryPersistenceMode := "hostPath" -}}
+{{- $registryPersistenceMode := "pvc" -}}
 {{- if hasKey $registryPersistence "mode" -}}
 {{- $registryPersistenceMode = (get $registryPersistence "mode") -}}
 {{- end -}}
+{{- $registryStorageClassName := default .Values.movableRWOStorage.storageClassName (get $registryPersistence "storageClassName") -}}
 {{- if and .Values.registry.enabled (eq $registryPersistenceMode "pvc") }}
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -17,7 +18,7 @@ spec:
   resources:
     requests:
       storage: {{ default "50Gi" (get $registryPersistence "size") }}
-  {{- if (get $registryPersistence "storageClassName") }}
-  storageClassName: {{ (get $registryPersistence "storageClassName") | quote }}
+  {{- if $registryStorageClassName }}
+  storageClassName: {{ $registryStorageClassName | quote }}
   {{- end }}
 {{- end }}

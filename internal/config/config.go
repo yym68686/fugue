@@ -68,6 +68,8 @@ type ControllerConfig struct {
 	GitHubSyncRetryMaxDelay       time.Duration
 	ImageTrackingInterval         time.Duration
 	ImageTrackingTimeout          time.Duration
+	ImageRetentionSweepInterval   time.Duration
+	ImageRetentionSweepTimeout    time.Duration
 	ManagedAppRolloutTimeout      time.Duration
 	PollInterval                  time.Duration
 	FallbackPollInterval          time.Duration
@@ -258,6 +260,8 @@ func ControllerFromEnv() ControllerConfig {
 		GitHubSyncRetryMaxDelay:       getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_MAX_DELAY", time.Hour),
 		ImageTrackingInterval:         getenvDuration("FUGUE_CONTROLLER_IMAGE_TRACKING_INTERVAL", time.Minute),
 		ImageTrackingTimeout:          getenvDuration("FUGUE_CONTROLLER_IMAGE_TRACKING_TIMEOUT", 20*time.Second),
+		ImageRetentionSweepInterval:   getenvDuration("FUGUE_CONTROLLER_IMAGE_RETENTION_SWEEP_INTERVAL", 6*time.Hour),
+		ImageRetentionSweepTimeout:    getenvDuration("FUGUE_CONTROLLER_IMAGE_RETENTION_SWEEP_TIMEOUT", 5*time.Minute),
 		ManagedAppRolloutTimeout:      getenvDuration("FUGUE_CONTROLLER_MANAGED_APP_ROLLOUT_TIMEOUT", 10*time.Minute),
 		PollInterval:                  getenvDuration("FUGUE_CONTROLLER_POLL_INTERVAL", 5*time.Second),
 		FallbackPollInterval:          getenvDuration("FUGUE_CONTROLLER_FALLBACK_POLL_INTERVAL", 30*time.Second),

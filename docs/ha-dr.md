@@ -14,7 +14,7 @@ Recommended production topology:
 - Materialize Fugue runtime secrets from an external secret manager into a Kubernetes `Secret`.
 - Run multiple synchronized Fugue edge nodes and place a health-checked load balancer or VIP in front of them.
 
-If you temporarily keep the bundled registry, do not leave it on the primary node root disk. At minimum, switch `registry.persistence.mode` to `pvc` or `existingClaim` so the registry data lands on dedicated storage instead of `/var/lib/fugue/registry` on the root filesystem.
+If you temporarily keep the bundled registry, keep it PVC-backed or bind it to an existing claim. The chart defaults to `registry.persistence.mode=pvc` and blocks naked `hostPath` registry storage unless the operator explicitly opts into `registry.unsafeHostPath.enabled=true` with a reason. For an existing hostPath install, use `scripts/migrate_fugue_registry_hostpath_to_pvc.sh` during a maintenance window to copy the active store into a PVC; the script does not delete the old hostPath data.
 
 The chart now includes a production baseline file at `deploy/helm/fugue/values-production-ha.yaml`.
 

@@ -14,11 +14,6 @@ func (s *Service) pruneExcessManagedAppImages(ctx context.Context, app model.App
 		return nil
 	}
 
-	deleteImage := s.deleteManagedImage
-	if deleteImage == nil {
-		deleteImage = appimages.DeleteRemoteImage
-	}
-
 	targetOps, err := s.Store.ListOperationsByApp(app.TenantID, true, app.ID)
 	if err != nil {
 		return err
@@ -30,6 +25,24 @@ func (s *Service) pruneExcessManagedAppImages(ctx context.Context, app model.App
 	allOps, err := s.Store.ListOperations("", true)
 	if err != nil {
 		return err
+	}
+	return s.pruneExcessManagedAppImagesWithSnapshot(ctx, app, targetOps, allApps, allOps, s.liveManagedImageRefSet(ctx, allApps))
+}
+
+func (s *Service) pruneExcessManagedAppImagesWithSnapshot(
+	ctx context.Context,
+	app model.App,
+	targetOps []model.Operation,
+	allApps []model.App,
+	allOps []model.Operation,
+	liveRefs map[string]struct{},
+) error {
+	if s == nil || s.inspectManagedImage == nil || strings.TrimSpace(s.registryPushBase) == "" {
+		return nil
+	}
+	deleteImage := s.deleteManagedImage
+	if deleteImage == nil {
+		deleteImage = appimages.DeleteRemoteImage
 	}
 
 	imageRefs, err := appimages.ExcessManagedImageRefs(
@@ -51,7 +64,7 @@ func (s *Service) pruneExcessManagedAppImages(ctx context.Context, app model.App
 		s.registryPushBase,
 		s.registryPullBase,
 	)
-	mergeManagedImageRefSets(remainingRefs, s.liveManagedImageRefSet(ctx, allApps))
+	mergeManagedImageRefSets(remainingRefs, liveRefs)
 
 	var errs []error
 	for _, imageRef := range imageRefs {

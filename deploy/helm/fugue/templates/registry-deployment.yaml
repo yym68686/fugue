@@ -1,11 +1,26 @@
 {{- $registry := (.Values.registry | default (dict)) -}}
 {{- $registryPersistence := (get $registry "persistence" | default (dict)) -}}
-{{- $registryPersistenceMode := "hostPath" -}}
+{{- $registryPersistenceMode := "pvc" -}}
 {{- if hasKey $registryPersistence "mode" -}}
 {{- $registryPersistenceMode = (get $registryPersistence "mode") -}}
 {{- end -}}
+{{- $unsafeHostPath := (get $registry "unsafeHostPath" | default (dict)) -}}
+{{- $unsafeHostPathEnabled := false -}}
+{{- if hasKey $unsafeHostPath "enabled" -}}
+{{- $unsafeHostPathEnabled = (get $unsafeHostPath "enabled") -}}
+{{- end -}}
+{{- $unsafeHostPathReason := "" -}}
+{{- if hasKey $unsafeHostPath "reason" -}}
+{{- $unsafeHostPathReason = (get $unsafeHostPath "reason") -}}
+{{- end -}}
 {{- if and .Values.registry.enabled (ne $registryPersistenceMode "hostPath") (ne $registryPersistenceMode "pvc") (ne $registryPersistenceMode "existingClaim") -}}
 {{- fail (printf "unsupported registry.persistence.mode %q (expected hostPath, pvc, or existingClaim)" $registryPersistenceMode) -}}
+{{- end -}}
+{{- if and .Values.registry.enabled (eq $registryPersistenceMode "hostPath") (not $unsafeHostPathEnabled) -}}
+{{- fail "registry.persistence.mode=hostPath is unsafe for the bundled registry because the single registry pod can drift across nodes and create orphaned registry stores. Use pvc or existingClaim, or set registry.unsafeHostPath.enabled=true with registry.unsafeHostPath.reason for dev-only installs." -}}
+{{- end -}}
+{{- if and .Values.registry.enabled (eq $registryPersistenceMode "hostPath") $unsafeHostPathEnabled (eq (trim $unsafeHostPathReason) "") -}}
+{{- fail "registry.unsafeHostPath.reason must be set when registry.persistence.mode=hostPath and registry.unsafeHostPath.enabled=true" -}}
 {{- end -}}
 {{- if .Values.registry.enabled }}
 apiVersion: apps/v1

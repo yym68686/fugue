@@ -330,6 +330,94 @@ sharedWorkspaceStorage:
 	}
 }
 
+func TestRegistryDefaultsToPVCStorage(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	pvcDoc := manifestDocumentForKindAndName(manifest, "PersistentVolumeClaim", "fugue-fugue-registry")
+	if pvcDoc == "" {
+		t.Fatalf("rendered manifest missing registry PVC:\n%s", manifest)
+	}
+	for _, want := range []string{
+		"storageClassName: fugue-local-rwo",
+		"storage: 200Gi",
+	} {
+		if !strings.Contains(pvcDoc, want) {
+			t.Fatalf("registry PVC missing %q:\n%s", want, pvcDoc)
+		}
+	}
+
+	deploymentDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-registry")
+	if deploymentDoc == "" {
+		t.Fatalf("rendered manifest missing registry deployment:\n%s", manifest)
+	}
+	if !strings.Contains(deploymentDoc, "persistentVolumeClaim:") || !strings.Contains(deploymentDoc, "claimName: fugue-fugue-registry") {
+		t.Fatalf("registry deployment should mount the registry PVC:\n%s", deploymentDoc)
+	}
+	if strings.Contains(deploymentDoc, "hostPath:") {
+		t.Fatalf("registry deployment should not render hostPath by default:\n%s", deploymentDoc)
+	}
+}
+
+func TestRegistryHostPathRequiresUnsafeOptIn(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "--set", "registry.persistence.mode=hostPath")
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected unsafe hostPath registry render to fail:\n%s", output)
+	}
+	if !strings.Contains(string(output), "registry.persistence.mode=hostPath is unsafe") {
+		t.Fatalf("hostPath failure should explain the unsafe mode:\n%s", output)
+	}
+
+	cmd = exec.Command(
+		"helm",
+		"template",
+		"fugue",
+		chartDir,
+		"--set",
+		"registry.persistence.mode=hostPath",
+		"--set",
+		"registry.unsafeHostPath.enabled=true",
+		"--set",
+		"registry.unsafeHostPath.reason=single-node development",
+	)
+	cmd.Dir = chartDir
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("unsafe hostPath opt-in should render: %v\n%s", err, output)
+	}
+	manifest := string(output)
+	doc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-registry")
+	if doc == "" {
+		t.Fatalf("rendered manifest missing registry deployment:\n%s", manifest)
+	}
+	if !strings.Contains(doc, "hostPath:") || !strings.Contains(doc, "path: /var/lib/fugue/registry") {
+		t.Fatalf("unsafe hostPath opt-in should render hostPath volume:\n%s", doc)
+	}
+}
+
 func TestEdgeShadowDaemonSetDefaultsToNoPublicTraffic(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")
