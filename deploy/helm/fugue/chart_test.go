@@ -364,7 +364,7 @@ func TestRegistryDefaultsToPVCStorage(t *testing.T) {
 	if deploymentDoc == "" {
 		t.Fatalf("rendered manifest missing registry deployment:\n%s", manifest)
 	}
-	if !strings.Contains(deploymentDoc, "persistentVolumeClaim:") || !strings.Contains(deploymentDoc, "claimName: fugue-fugue-registry") {
+	if !strings.Contains(deploymentDoc, "persistentVolumeClaim:") || !strings.Contains(deploymentDoc, `claimName: "fugue-fugue-registry-data"`) {
 		t.Fatalf("registry deployment should mount the registry PVC:\n%s", deploymentDoc)
 	}
 	if strings.Contains(deploymentDoc, "hostPath:") {
