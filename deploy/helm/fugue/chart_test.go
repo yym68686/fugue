@@ -347,7 +347,7 @@ func TestRegistryDefaultsToPVCStorage(t *testing.T) {
 	}
 
 	manifest := string(output)
-	pvcDoc := manifestDocumentForKindAndName(manifest, "PersistentVolumeClaim", "fugue-fugue-registry")
+	pvcDoc := manifestDocumentForKindAndName(manifest, "PersistentVolumeClaim", "fugue-fugue-registry-data")
 	if pvcDoc == "" {
 		t.Fatalf("rendered manifest missing registry PVC:\n%s", manifest)
 	}
@@ -413,7 +413,7 @@ func TestRegistryHostPathRequiresUnsafeOptIn(t *testing.T) {
 	if doc == "" {
 		t.Fatalf("rendered manifest missing registry deployment:\n%s", manifest)
 	}
-	if !strings.Contains(doc, "hostPath:") || !strings.Contains(doc, "path: /var/lib/fugue/registry") {
+	if !strings.Contains(doc, "hostPath:") || !strings.Contains(doc, `path: "/var/lib/fugue/registry"`) {
 		t.Fatalf("unsafe hostPath opt-in should render hostPath volume:\n%s", doc)
 	}
 }
