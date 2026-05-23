@@ -4,7 +4,14 @@
 {{- if hasKey $registryPersistence "mode" -}}
 {{- $registryPersistenceMode = (get $registryPersistence "mode") -}}
 {{- end -}}
-{{- $registryStorageClassName := default .Values.movableRWOStorage.storageClassName (get $registryPersistence "storageClassName") -}}
+{{- $movableRWOStorage := (get .Values "movableRWOStorage" | default (dict)) -}}
+{{- $registryStorageClassName := "" -}}
+{{- if hasKey $registryPersistence "storageClassName" -}}
+{{- $registryStorageClassName = (get $registryPersistence "storageClassName" | default "") -}}
+{{- end -}}
+{{- if eq (trim $registryStorageClassName) "" -}}
+{{- $registryStorageClassName = (get $movableRWOStorage "storageClassName" | default "") -}}
+{{- end -}}
 {{- if and .Values.registry.enabled (eq $registryPersistenceMode "pvc") }}
 apiVersion: v1
 kind: PersistentVolumeClaim
