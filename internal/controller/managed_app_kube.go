@@ -122,6 +122,17 @@ type kubeWriteStats struct {
 	counts map[string]int
 }
 
+type skipExistingCloudNativePGWritesContextKey struct{}
+
+func withSkipExistingCloudNativePGWrites(ctx context.Context) context.Context {
+	return context.WithValue(ctx, skipExistingCloudNativePGWritesContextKey{}, true)
+}
+
+func skipExistingCloudNativePGWrites(ctx context.Context) bool {
+	value, _ := ctx.Value(skipExistingCloudNativePGWritesContextKey{}).(bool)
+	return value
+}
+
 func (s *kubeWriteStats) record(action string, obj map[string]any) {
 	if s == nil {
 		return
@@ -187,10 +198,10 @@ func (c *kubeClient) applyObject(ctx context.Context, obj map[string]any, out an
 	if err != nil {
 		return err
 	}
-	if skip, err := c.shouldSkipNoopApply(ctx, apiPath, obj); err != nil {
+	if action, skip, err := c.shouldSkipApply(ctx, apiPath, obj); err != nil {
 		return err
 	} else if skip {
-		c.writeStats.record("apply_skipped_noop", obj)
+		c.writeStats.record(action, obj)
 		return nil
 	}
 	c.writeStats.record("apply_attempted", obj)
@@ -219,15 +230,21 @@ func (c *kubeClient) applyObject(ctx context.Context, obj map[string]any, out an
 	}
 }
 
-func (c *kubeClient) shouldSkipNoopApply(ctx context.Context, apiPath string, obj map[string]any) (bool, error) {
+func (c *kubeClient) shouldSkipApply(ctx context.Context, apiPath string, obj map[string]any) (string, bool, error) {
 	if !guardKubernetesNoopObject(obj) {
-		return false, nil
+		return "", false, nil
 	}
 	current, found, err := c.getRawObject(ctx, apiPath)
 	if err != nil || !found {
-		return false, err
+		return "", false, err
 	}
-	return desiredObjectAlreadyApplied(current, obj), nil
+	if skipExistingCloudNativePGWrites(ctx) {
+		return "apply_skipped_existing", true, nil
+	}
+	if desiredObjectAlreadyApplied(current, obj) {
+		return "apply_skipped_noop", true, nil
+	}
+	return "", false, nil
 }
 
 func (c *kubeClient) applyObjectAtPathWithRetry(ctx context.Context, apiPath string, obj map[string]any, out any) error {
@@ -717,9 +734,15 @@ func (c *kubeClient) replaceObjectSpec(ctx context.Context, obj map[string]any) 
 		if err != nil {
 			return err
 		}
-		if found && desiredSpecAlreadyApplied(current, obj) {
-			c.writeStats.record("replace_spec_skipped_noop", obj)
-			return nil
+		if found {
+			if skipExistingCloudNativePGWrites(ctx) {
+				c.writeStats.record("replace_spec_skipped_existing", obj)
+				return nil
+			}
+			if desiredSpecAlreadyApplied(current, obj) {
+				c.writeStats.record("replace_spec_skipped_noop", obj)
+				return nil
+			}
 		}
 	}
 	ops := []map[string]any{{

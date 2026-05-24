@@ -69,6 +69,7 @@ func (s *Service) reconcileManagedApps(ctx context.Context) error {
 		return fmt.Errorf("initialize kubernetes managed app client: %w", err)
 	}
 	client.writeStats.reset()
+	ctx = withSkipExistingCloudNativePGWrites(ctx)
 
 	managedApps, err := client.listManagedApps(ctx)
 	if err != nil {

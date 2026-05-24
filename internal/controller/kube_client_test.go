@@ -424,6 +424,108 @@ func TestReplaceObjectSpecsByKindSkipsNoopCloudNativePGCluster(t *testing.T) {
 	}
 }
 
+func TestApplyObjectSkipsExistingCloudNativePGClusterWhenContextRequestsIt(t *testing.T) {
+	t.Parallel()
+
+	var requests []string
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests = append(requests, req.Method+" "+req.URL.Path)
+		if req.Method != http.MethodGet {
+			t.Fatalf("expected only GET request, got %s %s", req.Method, req.URL.Path)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`{
+				"apiVersion":"postgresql.cnpg.io/v1",
+				"kind":"Cluster",
+				"metadata":{"name":"demo-postgres","namespace":"tenant-demo"},
+				"spec":{"instances":1}
+			}`)),
+			Header: make(http.Header),
+		}, nil
+	})
+
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   "tenant-demo",
+	}
+	obj := map[string]any{
+		"apiVersion": "postgresql.cnpg.io/v1",
+		"kind":       "Cluster",
+		"metadata": map[string]any{
+			"name": "demo-postgres",
+		},
+		"spec": map[string]any{
+			"instances": 2,
+		},
+	}
+
+	ctx := withSkipExistingCloudNativePGWrites(context.Background())
+	if err := client.applyObject(ctx, obj, nil); err != nil {
+		t.Fatalf("apply object: %v", err)
+	}
+	expected := []string{"GET /apis/postgresql.cnpg.io/v1/namespaces/tenant-demo/clusters/demo-postgres"}
+	if strings.Join(requests, "\n") != strings.Join(expected, "\n") {
+		t.Fatalf("expected request sequence %v, got %v", expected, requests)
+	}
+	if summary := client.writeStats.summary(); !strings.Contains(summary, "apply_skipped_existing[postgresql.cnpg.io/v1/Cluster]=1") {
+		t.Fatalf("expected existing skip in write summary, got %q", summary)
+	}
+}
+
+func TestReplaceObjectSpecsByKindSkipsExistingCloudNativePGClusterWhenContextRequestsIt(t *testing.T) {
+	t.Parallel()
+
+	var requests []string
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests = append(requests, req.Method+" "+req.URL.Path)
+		if req.Method != http.MethodGet {
+			t.Fatalf("expected only GET request, got %s %s", req.Method, req.URL.Path)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`{
+				"apiVersion":"postgresql.cnpg.io/v1",
+				"kind":"Cluster",
+				"metadata":{"name":"demo-postgres","namespace":"tenant-demo"},
+				"spec":{"instances":1}
+			}`)),
+			Header: make(http.Header),
+		}, nil
+	})
+
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   "tenant-demo",
+	}
+	objects := []map[string]any{{
+		"apiVersion": "postgresql.cnpg.io/v1",
+		"kind":       "Cluster",
+		"metadata": map[string]any{
+			"name": "demo-postgres",
+		},
+		"spec": map[string]any{
+			"instances": 2,
+		},
+	}}
+
+	ctx := withSkipExistingCloudNativePGWrites(context.Background())
+	if err := client.replaceObjectSpecsByKind(ctx, objects, "postgresql.cnpg.io/v1", "Cluster"); err != nil {
+		t.Fatalf("replace object specs by kind: %v", err)
+	}
+	expected := []string{"GET /apis/postgresql.cnpg.io/v1/namespaces/tenant-demo/clusters/demo-postgres"}
+	if strings.Join(requests, "\n") != strings.Join(expected, "\n") {
+		t.Fatalf("expected request sequence %v, got %v", expected, requests)
+	}
+	if summary := client.writeStats.summary(); !strings.Contains(summary, "replace_spec_skipped_existing[postgresql.cnpg.io/v1/Cluster]=1") {
+		t.Fatalf("expected existing replace skip in write summary, got %q", summary)
+	}
+}
+
 func TestReplaceObjectSpecsByKindDoesNotSkipRemovedOptionalCloudNativePGFields(t *testing.T) {
 	t.Parallel()
 
