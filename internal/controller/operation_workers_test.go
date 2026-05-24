@@ -906,6 +906,8 @@ func TestGitHubSyncActivateWorkersProcessDifferentAppsInParallel(t *testing.T) {
 
 	close(release)
 	waitForOperationStatus(t, stateStore, opOne.ID, model.OperationStatusCompleted)
+	cancel()
+	time.Sleep(200 * time.Millisecond)
 }
 
 func TestUnboundedPendingOperationWorkersSerializeOperationsForSameApp(t *testing.T) {
