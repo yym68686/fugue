@@ -289,7 +289,61 @@ func desiredSpecAlreadyApplied(current, desired map[string]any) bool {
 	if !ok {
 		return false
 	}
+	if guardKubernetesNoopObject(desired) {
+		return desiredCloudNativePGSpecAlreadyApplied(currentSpec, desiredSpec)
+	}
 	return normalizedKubeValueEqual(currentSpec, desiredSpec)
+}
+
+func desiredCloudNativePGSpecAlreadyApplied(current, desired any) bool {
+	currentMap := normalizeKubeMap(current)
+	desiredMap := normalizeKubeMap(desired)
+	if desiredMap == nil || currentMap == nil {
+		return normalizedKubeValueEqual(current, desired)
+	}
+	for key, desiredValue := range desiredMap {
+		currentValue, ok := currentMap[key]
+		if !ok || !desiredKubeValueSubset(currentValue, desiredValue) {
+			return false
+		}
+	}
+	for _, key := range []string{"affinity", "imageName", "resources"} {
+		if _, desiredKeepsKey := desiredMap[key]; !desiredKeepsKey {
+			if _, currentHasKey := currentMap[key]; currentHasKey {
+				return false
+			}
+		}
+	}
+	currentStorage := normalizeKubeMap(currentMap["storage"])
+	desiredStorage := normalizeKubeMap(desiredMap["storage"])
+	if desiredStorage != nil {
+		if _, desiredKeepsStorageClass := desiredStorage["storageClass"]; !desiredKeepsStorageClass {
+			if _, currentHasStorageClass := currentStorage["storageClass"]; currentHasStorageClass {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func desiredKubeValueSubset(current, desired any) bool {
+	normalizedDesired := normalizeKubeValue(desired)
+	normalizedCurrent := normalizeKubeValue(current)
+	desiredMap, desiredIsMap := normalizedDesired.(map[string]any)
+	if !desiredIsMap {
+		return reflect.DeepEqual(normalizedCurrent, normalizedDesired)
+	}
+	currentMap, currentIsMap := normalizedCurrent.(map[string]any)
+	if !currentIsMap {
+		return false
+	}
+	for key, desiredValue := range desiredMap {
+		currentValue, ok := currentMap[key]
+		if !ok || !desiredKubeValueSubset(currentValue, desiredValue) {
+			return false
+		}
+	}
+	return true
 }
 
 func desiredMetadataAlreadyApplied(current, desired map[string]any) bool {
@@ -363,6 +417,17 @@ func normalizeKubeStringMap(value any) map[string]string {
 	default:
 		return nil
 	}
+}
+
+func normalizeKubeMap(value any) map[string]any {
+	if value == nil {
+		return nil
+	}
+	normalized, ok := normalizeKubeValue(value).(map[string]any)
+	if !ok {
+		return nil
+	}
+	return normalized
 }
 
 func normalizedKubeValueEqual(left, right any) bool {

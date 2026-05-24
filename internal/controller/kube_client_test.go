@@ -237,7 +237,14 @@ func TestApplyObjectSkipsNoopCloudNativePGCluster(t *testing.T) {
 					"namespace":"tenant-demo",
 					"labels":{"app.kubernetes.io/managed-by":"fugue","extra":"kept"}
 				},
-				"spec":{"instances":1,"minSyncReplicas":0,"maxSyncReplicas":0}
+				"spec":{
+					"instances":1,
+					"minSyncReplicas":0,
+					"maxSyncReplicas":0,
+					"bootstrap":{"initdb":{"database":"demo","owner":"demo_user","secret":{"name":"demo-secret"},"encoding":"UTF8","localeCollate":"C","localeCType":"C"}},
+					"storage":{"size":"1Gi","resizeInUseVolumes":true},
+					"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"fugue.io/runtime-id","operator":"In","values":["runtime-demo"]}]}]}},"podAntiAffinityType":"preferred"}
+				}
 			}`)),
 			Header: make(http.Header),
 		}, nil
@@ -263,6 +270,35 @@ func TestApplyObjectSkipsNoopCloudNativePGCluster(t *testing.T) {
 			"instances":       1,
 			"minSyncReplicas": 0,
 			"maxSyncReplicas": 0,
+			"bootstrap": map[string]any{
+				"initdb": map[string]any{
+					"database": "demo",
+					"owner":    "demo_user",
+					"secret": map[string]any{
+						"name": "demo-secret",
+					},
+				},
+			},
+			"storage": map[string]any{
+				"size": "1Gi",
+			},
+			"affinity": map[string]any{
+				"nodeAffinity": map[string]any{
+					"requiredDuringSchedulingIgnoredDuringExecution": map[string]any{
+						"nodeSelectorTerms": []map[string]any{
+							{
+								"matchExpressions": []map[string]any{
+									{
+										"key":      "fugue.io/runtime-id",
+										"operator": "In",
+										"values":   []string{"runtime-demo"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
 		},
 	}
 
@@ -293,7 +329,14 @@ func TestReplaceObjectSpecsByKindSkipsNoopCloudNativePGCluster(t *testing.T) {
 				"apiVersion":"postgresql.cnpg.io/v1",
 				"kind":"Cluster",
 				"metadata":{"name":"demo-postgres","namespace":"tenant-demo"},
-				"spec":{"instances":1,"minSyncReplicas":0,"maxSyncReplicas":0}
+				"spec":{
+					"instances":1,
+					"minSyncReplicas":0,
+					"maxSyncReplicas":0,
+					"bootstrap":{"initdb":{"database":"demo","owner":"demo_user","secret":{"name":"demo-secret"},"encoding":"UTF8","localeCollate":"C","localeCType":"C"}},
+					"storage":{"size":"1Gi","resizeInUseVolumes":true},
+					"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"fugue.io/runtime-id","operator":"In","values":["runtime-demo"]}]}]}},"podAntiAffinityType":"preferred"}
+				}
 			}`)),
 			Header: make(http.Header),
 		}, nil
@@ -315,6 +358,35 @@ func TestReplaceObjectSpecsByKindSkipsNoopCloudNativePGCluster(t *testing.T) {
 			"instances":       1,
 			"minSyncReplicas": 0,
 			"maxSyncReplicas": 0,
+			"bootstrap": map[string]any{
+				"initdb": map[string]any{
+					"database": "demo",
+					"owner":    "demo_user",
+					"secret": map[string]any{
+						"name": "demo-secret",
+					},
+				},
+			},
+			"storage": map[string]any{
+				"size": "1Gi",
+			},
+			"affinity": map[string]any{
+				"nodeAffinity": map[string]any{
+					"requiredDuringSchedulingIgnoredDuringExecution": map[string]any{
+						"nodeSelectorTerms": []map[string]any{
+							{
+								"matchExpressions": []map[string]any{
+									{
+										"key":      "fugue.io/runtime-id",
+										"operator": "In",
+										"values":   []string{"runtime-demo"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
 		},
 	}}
 
@@ -327,6 +399,80 @@ func TestReplaceObjectSpecsByKindSkipsNoopCloudNativePGCluster(t *testing.T) {
 	}
 	if summary := client.writeStats.summary(); !strings.Contains(summary, "replace_spec_skipped_noop[postgresql.cnpg.io/v1/Cluster]=1") {
 		t.Fatalf("expected no-op replace skip in write summary, got %q", summary)
+	}
+}
+
+func TestReplaceObjectSpecsByKindDoesNotSkipRemovedOptionalCloudNativePGFields(t *testing.T) {
+	t.Parallel()
+
+	var patch []map[string]any
+	var requests []string
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests = append(requests, req.Method+" "+req.URL.Path)
+		switch req.Method {
+		case http.MethodGet:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(`{
+					"apiVersion":"postgresql.cnpg.io/v1",
+					"kind":"Cluster",
+					"metadata":{"name":"demo-postgres","namespace":"tenant-demo"},
+					"spec":{"instances":1,"minSyncReplicas":0,"maxSyncReplicas":0,"imageName":"postgres:18","storage":{"size":"1Gi","storageClass":"fast","resizeInUseVolumes":true}}
+				}`)),
+				Header: make(http.Header),
+			}, nil
+		case http.MethodPatch:
+			if err := json.NewDecoder(req.Body).Decode(&patch); err != nil {
+				t.Fatalf("decode spec patch: %v", err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     make(http.Header),
+			}, nil
+		default:
+			t.Fatalf("unexpected request method %s", req.Method)
+			return nil, nil
+		}
+	})
+
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   "tenant-demo",
+	}
+	objects := []map[string]any{{
+		"apiVersion": "postgresql.cnpg.io/v1",
+		"kind":       "Cluster",
+		"metadata": map[string]any{
+			"name": "demo-postgres",
+		},
+		"spec": map[string]any{
+			"instances":       1,
+			"minSyncReplicas": 0,
+			"maxSyncReplicas": 0,
+			"storage": map[string]any{
+				"size": "1Gi",
+			},
+		},
+	}}
+
+	if err := client.replaceObjectSpecsByKind(context.Background(), objects, "postgresql.cnpg.io/v1", "Cluster"); err != nil {
+		t.Fatalf("replace object specs by kind: %v", err)
+	}
+	expectedRequests := []string{
+		"GET /apis/postgresql.cnpg.io/v1/namespaces/tenant-demo/clusters/demo-postgres",
+		"PATCH /apis/postgresql.cnpg.io/v1/namespaces/tenant-demo/clusters/demo-postgres",
+	}
+	if strings.Join(requests, "\n") != strings.Join(expectedRequests, "\n") {
+		t.Fatalf("expected request sequence %v, got %v", expectedRequests, requests)
+	}
+	if len(patch) != 1 {
+		t.Fatalf("expected one patch operation, got %#v", patch)
+	}
+	if summary := client.writeStats.summary(); !strings.Contains(summary, "replace_spec_attempted[postgresql.cnpg.io/v1/Cluster]=1") {
+		t.Fatalf("expected replace attempt in write summary, got %q", summary)
 	}
 }
 
