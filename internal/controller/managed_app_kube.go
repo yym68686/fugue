@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"fugue/internal/runtime"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 type kubeObjectList struct {
@@ -135,6 +137,15 @@ func (s *kubeWriteStats) record(action string, obj map[string]any) {
 		s.counts = make(map[string]int)
 	}
 	s.counts[key]++
+}
+
+func (s *kubeWriteStats) reset() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.counts = nil
 }
 
 func (s *kubeWriteStats) summary() string {
@@ -303,7 +314,7 @@ func desiredCloudNativePGSpecAlreadyApplied(current, desired any) bool {
 	}
 	for key, desiredValue := range desiredMap {
 		currentValue, ok := currentMap[key]
-		if !ok || !desiredKubeValueSubset(currentValue, desiredValue) {
+		if !ok || !desiredKubeValueSubset(key, currentValue, desiredValue) {
 			return false
 		}
 	}
@@ -326,11 +337,14 @@ func desiredCloudNativePGSpecAlreadyApplied(current, desired any) bool {
 	return true
 }
 
-func desiredKubeValueSubset(current, desired any) bool {
+func desiredKubeValueSubset(path string, current, desired any) bool {
 	normalizedDesired := normalizeKubeValue(desired)
 	normalizedCurrent := normalizeKubeValue(current)
 	desiredMap, desiredIsMap := normalizedDesired.(map[string]any)
 	if !desiredIsMap {
+		if kubeQuantityPath(path) && kubeQuantityValueEqual(normalizedCurrent, normalizedDesired) {
+			return true
+		}
 		return reflect.DeepEqual(normalizedCurrent, normalizedDesired)
 	}
 	currentMap, currentIsMap := normalizedCurrent.(map[string]any)
@@ -339,11 +353,52 @@ func desiredKubeValueSubset(current, desired any) bool {
 	}
 	for key, desiredValue := range desiredMap {
 		currentValue, ok := currentMap[key]
-		if !ok || !desiredKubeValueSubset(currentValue, desiredValue) {
+		if !ok || !desiredKubeValueSubset(joinKubePath(path, key), currentValue, desiredValue) {
 			return false
 		}
 	}
 	return true
+}
+
+func joinKubePath(parent, key string) string {
+	key = strings.TrimSpace(key)
+	if parent == "" {
+		return key
+	}
+	if key == "" {
+		return parent
+	}
+	return parent + "." + key
+}
+
+func kubeQuantityPath(path string) bool {
+	switch path {
+	case "resources.requests.cpu",
+		"resources.requests.memory",
+		"resources.limits.cpu",
+		"resources.limits.memory",
+		"storage.size":
+		return true
+	default:
+		return false
+	}
+}
+
+func kubeQuantityValueEqual(current, desired any) bool {
+	currentValue, currentOK := current.(string)
+	desiredValue, desiredOK := desired.(string)
+	if !currentOK || !desiredOK {
+		return false
+	}
+	currentQuantity, err := resource.ParseQuantity(strings.TrimSpace(currentValue))
+	if err != nil {
+		return false
+	}
+	desiredQuantity, err := resource.ParseQuantity(strings.TrimSpace(desiredValue))
+	if err != nil {
+		return false
+	}
+	return currentQuantity.Cmp(desiredQuantity) == 0
 }
 
 func desiredMetadataAlreadyApplied(current, desired map[string]any) bool {

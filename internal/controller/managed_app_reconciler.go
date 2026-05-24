@@ -68,6 +68,7 @@ func (s *Service) reconcileManagedApps(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("initialize kubernetes managed app client: %w", err)
 	}
+	client.writeStats.reset()
 
 	managedApps, err := client.listManagedApps(ctx)
 	if err != nil {

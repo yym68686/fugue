@@ -243,6 +243,7 @@ func TestApplyObjectSkipsNoopCloudNativePGCluster(t *testing.T) {
 					"maxSyncReplicas":0,
 					"bootstrap":{"initdb":{"database":"demo","owner":"demo_user","secret":{"name":"demo-secret"},"encoding":"UTF8","localeCollate":"C","localeCType":"C"}},
 					"storage":{"size":"1Gi","resizeInUseVolumes":true},
+					"resources":{"requests":{"cpu":"500m","memory":"1Gi"},"limits":{"cpu":"500m","memory":"1Gi"}},
 					"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"fugue.io/runtime-id","operator":"In","values":["runtime-demo"]}]}]}},"podAntiAffinityType":"preferred"}
 				}
 			}`)),
@@ -281,6 +282,16 @@ func TestApplyObjectSkipsNoopCloudNativePGCluster(t *testing.T) {
 			},
 			"storage": map[string]any{
 				"size": "1Gi",
+			},
+			"resources": map[string]any{
+				"requests": map[string]string{
+					"cpu":    "500m",
+					"memory": "1024Mi",
+				},
+				"limits": map[string]string{
+					"cpu":    "500m",
+					"memory": "1024Mi",
+				},
 			},
 			"affinity": map[string]any{
 				"nodeAffinity": map[string]any{
@@ -335,6 +346,7 @@ func TestReplaceObjectSpecsByKindSkipsNoopCloudNativePGCluster(t *testing.T) {
 					"maxSyncReplicas":0,
 					"bootstrap":{"initdb":{"database":"demo","owner":"demo_user","secret":{"name":"demo-secret"},"encoding":"UTF8","localeCollate":"C","localeCType":"C"}},
 					"storage":{"size":"1Gi","resizeInUseVolumes":true},
+					"resources":{"requests":{"cpu":"500m","memory":"1Gi"},"limits":{"cpu":"500m","memory":"1Gi"}},
 					"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"fugue.io/runtime-id","operator":"In","values":["runtime-demo"]}]}]}},"podAntiAffinityType":"preferred"}
 				}
 			}`)),
@@ -369,6 +381,16 @@ func TestReplaceObjectSpecsByKindSkipsNoopCloudNativePGCluster(t *testing.T) {
 			},
 			"storage": map[string]any{
 				"size": "1Gi",
+			},
+			"resources": map[string]any{
+				"requests": map[string]string{
+					"cpu":    "500m",
+					"memory": "1024Mi",
+				},
+				"limits": map[string]string{
+					"cpu":    "500m",
+					"memory": "1024Mi",
+				},
 			},
 			"affinity": map[string]any{
 				"nodeAffinity": map[string]any{
