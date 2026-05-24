@@ -288,6 +288,7 @@ postgres:
 sharedWorkspaceStorage:
   enabled: true
   server:
+    clusterIP: 10.43.253.99
     nodeSelector:
       fugue.install/role: primary
     controlPlaneSingletonNodeSelector:
@@ -327,6 +328,35 @@ sharedWorkspaceStorage:
 		if strings.Contains(doc, "fugue.install/role: primary") || strings.Contains(doc, "node-role.kubernetes.io/control-plane: \"true\"") {
 			t.Fatalf("%s should not keep legacy primary/control-plane selector with singleton anchor:\n%s", name, doc)
 		}
+	}
+}
+
+func TestSharedWorkspaceStorageRequiresClusterIP(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	valuesPath := filepath.Join(t.TempDir(), "values.yaml")
+	values := `
+sharedWorkspaceStorage:
+  enabled: true
+`
+	if err := os.WriteFile(valuesPath, []byte(values), 0o600); err != nil {
+		t.Fatalf("write temp values: %v", err)
+	}
+
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "-f", valuesPath)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected helm template to fail without shared workspace NFS clusterIP:\n%s", output)
+	}
+	if !strings.Contains(string(output), "sharedWorkspaceStorage.server.clusterIP is required") {
+		t.Fatalf("expected clusterIP requirement failure, got:\n%s", output)
 	}
 }
 

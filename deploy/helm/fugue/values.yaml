@@ -396,6 +396,7 @@ sharedWorkspaceStorage:
     sharedDirectory: /exports
     nfsPath: /
     hostPath: /var/lib/fugue/shared-workspaces
+    # Required when sharedWorkspaceStorage.enabled is true; kubelet-side NFS mounts need an IP, not the service FQDN.
     clusterIP: ""
     nodeSelector:
       fugue.install/role: primary

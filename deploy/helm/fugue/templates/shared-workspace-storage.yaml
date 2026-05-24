@@ -1,5 +1,13 @@
 {{- if .Values.sharedWorkspaceStorage.enabled }}
-{{- $nfsServer := .Values.sharedWorkspaceStorage.server.clusterIP | default (printf "%s.%s.svc.cluster.local" (include "fugue.sharedWorkspaceNFSServiceName" .) .Release.Namespace) }}
+{{- $nfsServer := trim .Values.sharedWorkspaceStorage.server.clusterIP -}}
+{{- if eq $nfsServer "" -}}
+{{- with lookup "v1" "Service" .Release.Namespace (include "fugue.sharedWorkspaceNFSServiceName" .) -}}
+{{- $nfsServer = trim .spec.clusterIP -}}
+{{- end -}}
+{{- end -}}
+{{- if eq $nfsServer "" -}}
+{{- fail "sharedWorkspaceStorage.server.clusterIP is required so node-side NFS mounts use a routable IP" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -116,20 +116,20 @@ func TestAppWithResolvedLaunchOverridePrefersManagedRegistryRef(t *testing.T) {
 	}
 }
 
-func TestAppWithResolvedLaunchOverrideFallsBackToRuntimeRef(t *testing.T) {
+func TestAppWithResolvedLaunchOverrideFallsBackToExternalRuntimeRef(t *testing.T) {
 	const (
-		pushRef    = "registry.internal.example/fugue-apps/demo:git-abc123"
-		runtimeRef = "10.128.0.2:30500/fugue-apps/demo:git-abc123"
+		sourceRef  = "registry.internal.example/fugue-apps/demo:git-abc123"
+		runtimeRef = "ghcr.io/example/runtime:latest"
 	)
 
 	var inspected []string
 	svc := &Service{
 		registryPushBase: "registry.internal.example",
-		registryPullBase: "10.128.0.2:30500",
+		registryPullBase: "registry.fugue.internal:5000",
 		inspectManagedImageConfig: func(ctx context.Context, imageRef string) (*v1.ConfigFile, error) {
 			inspected = append(inspected, imageRef)
 			switch imageRef {
-			case pushRef:
+			case sourceRef:
 				return nil, errors.New("dial tcp: i/o timeout")
 			case runtimeRef:
 				return &v1.ConfigFile{
@@ -149,13 +149,56 @@ func TestAppWithResolvedLaunchOverrideFallsBackToRuntimeRef(t *testing.T) {
 			Image:   runtimeRef,
 			Command: []string{"sh", "-lc", "python app.py"},
 		},
+		Source: &model.AppSource{
+			ResolvedImageRef: sourceRef,
+		},
 	}
 
 	resolved := svc.appWithResolvedLaunchOverride(context.Background(), app)
-	if len(inspected) != 2 || inspected[0] != pushRef || inspected[1] != runtimeRef {
+	if len(inspected) != 2 || inspected[0] != sourceRef || inspected[1] != runtimeRef {
 		t.Fatalf("expected managed ref fallback order, got %#v", inspected)
 	}
 	if len(resolved.Spec.Command) != 1 || resolved.Spec.Command[0] != "/cnb/lifecycle/launcher" {
 		t.Fatalf("expected launcher command after fallback, got %#v", resolved.Spec.Command)
+	}
+}
+
+func TestAppWithResolvedLaunchOverrideSkipsPullBaseRuntimeFallback(t *testing.T) {
+	const (
+		pushRef    = "registry.internal.example/fugue-apps/demo:git-abc123"
+		runtimeRef = "registry.fugue.internal:5000/fugue-apps/demo:git-abc123"
+	)
+
+	var inspected []string
+	svc := &Service{
+		registryPushBase: "registry.internal.example",
+		registryPullBase: "registry.fugue.internal:5000",
+		inspectManagedImageConfig: func(ctx context.Context, imageRef string) (*v1.ConfigFile, error) {
+			inspected = append(inspected, imageRef)
+			switch imageRef {
+			case pushRef:
+				return nil, errors.New("manifest unknown")
+			case runtimeRef:
+				t.Fatalf("controller should not inspect node-only registry pull ref %q", imageRef)
+			default:
+				t.Fatalf("unexpected inspect ref %q", imageRef)
+			}
+			return nil, nil
+		},
+	}
+
+	app := model.App{
+		Spec: model.AppSpec{
+			Image:   runtimeRef,
+			Command: []string{"sh", "-lc", "python app.py"},
+		},
+	}
+
+	resolved := svc.appWithResolvedLaunchOverride(context.Background(), app)
+	if len(inspected) != 1 || inspected[0] != pushRef {
+		t.Fatalf("expected only managed registry ref to be inspected, got %#v", inspected)
+	}
+	if len(resolved.Spec.Command) != 3 || resolved.Spec.Command[0] != "sh" {
+		t.Fatalf("expected command to remain unchanged, got %#v", resolved.Spec.Command)
 	}
 }

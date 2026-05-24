@@ -85,7 +85,9 @@ func (s *Service) launchOverrideInspectionImageRefs(app model.App) []string {
 	if app.Source != nil {
 		appendUnique(app.Source.ResolvedImageRef)
 	}
-	appendUnique(app.Spec.Image)
+	if s.shouldInspectControllerImageRef(app.Spec.Image) {
+		appendUnique(app.Spec.Image)
+	}
 	return refs
 }
 

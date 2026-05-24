@@ -67,6 +67,9 @@ func (s *Service) deployImageRefAvailable(ctx context.Context, app model.App, ta
 	}
 	if s.inspectManagedImage != nil {
 		for _, ref := range refs {
+			if !s.shouldInspectControllerImageRef(ref) {
+				continue
+			}
 			exists, err := s.inspectManagedImageWithRetry(ctx, ref)
 			if err != nil {
 				return false, err
@@ -89,6 +92,22 @@ func (s *Service) deployImageRefAvailable(ctx context.Context, app model.App, ta
 	}
 	s.scheduleImageHydration(ctx, app, target, refs[0])
 	return true, nil
+}
+
+func (s *Service) shouldInspectControllerImageRef(imageRef string) bool {
+	imageRef = strings.TrimSpace(imageRef)
+	if imageRef == "" {
+		return false
+	}
+	if s == nil {
+		return true
+	}
+	pushBase := strings.Trim(strings.TrimSpace(s.registryPushBase), "/")
+	pullBase := strings.Trim(strings.TrimSpace(s.registryPullBase), "/")
+	if pushBase != "" && pullBase != "" && pullBase != pushBase && strings.HasPrefix(imageRef, pullBase+"/") {
+		return false
+	}
+	return true
 }
 
 func (s *Service) presentImageLocations(app model.App, refs ...string) ([]model.ImageLocation, error) {
