@@ -32,6 +32,7 @@ type kubeClient struct {
 	bearerToken      string
 	namespace        string
 	applyConcurrency int
+	writeStats       kubeWriteStats
 }
 
 type kubeLease struct {

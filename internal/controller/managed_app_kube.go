@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -114,11 +115,74 @@ var retryableKubernetesApplySignals = []string{
 	"gateway timeout",
 }
 
+type kubeWriteStats struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+func (s *kubeWriteStats) record(action string, obj map[string]any) {
+	if s == nil {
+		return
+	}
+	action = strings.TrimSpace(action)
+	if action == "" {
+		return
+	}
+	key := action + ":" + kubeObjectKindKey(obj)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.counts == nil {
+		s.counts = make(map[string]int)
+	}
+	s.counts[key]++
+}
+
+func (s *kubeWriteStats) summary() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.counts) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(s.counts))
+	for key := range s.counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		action, kind, _ := strings.Cut(key, ":")
+		parts = append(parts, fmt.Sprintf("%s[%s]=%d", action, kind, s.counts[key]))
+	}
+	return strings.Join(parts, " ")
+}
+
+func kubeObjectKindKey(obj map[string]any) string {
+	apiVersion := strings.TrimSpace(objectStringField(obj, "apiVersion"))
+	kind := strings.TrimSpace(objectStringField(obj, "kind"))
+	if apiVersion == "" {
+		apiVersion = "unknown"
+	}
+	if kind == "" {
+		kind = "unknown"
+	}
+	return apiVersion + "/" + kind
+}
+
 func (c *kubeClient) applyObject(ctx context.Context, obj map[string]any, out any) error {
 	apiPath, err := runtime.ObjectAPIPath(c.namespace, obj)
 	if err != nil {
 		return err
 	}
+	if skip, err := c.shouldSkipNoopApply(ctx, apiPath, obj); err != nil {
+		return err
+	} else if skip {
+		c.writeStats.record("apply_skipped_noop", obj)
+		return nil
+	}
+	c.writeStats.record("apply_attempted", obj)
 	if err := c.applyObjectAtPathWithRetry(ctx, apiPath, obj, out); err == nil {
 		return nil
 	} else if shouldRetryDeploymentAfterStaleAppFilesVolumeMounts(obj, err) {
@@ -142,6 +206,17 @@ func (c *kubeClient) applyObject(ctx context.Context, obj map[string]any, out an
 		}
 		return c.applyObjectAtPathWithRetry(ctx, apiPath, obj, out)
 	}
+}
+
+func (c *kubeClient) shouldSkipNoopApply(ctx context.Context, apiPath string, obj map[string]any) (bool, error) {
+	if !guardKubernetesNoopObject(obj) {
+		return false, nil
+	}
+	current, found, err := c.getRawObject(ctx, apiPath)
+	if err != nil || !found {
+		return false, err
+	}
+	return desiredObjectAlreadyApplied(current, obj), nil
 }
 
 func (c *kubeClient) applyObjectAtPathWithRetry(ctx context.Context, apiPath string, obj map[string]any, out any) error {
@@ -170,6 +245,140 @@ func (c *kubeClient) applyObjectAtPathWithRetry(ctx context.Context, apiPath str
 		}
 	}
 	return lastErr
+}
+
+func (c *kubeClient) getRawObject(ctx context.Context, apiPath string) (map[string]any, bool, error) {
+	var raw map[string]any
+	status, err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &raw)
+	if err != nil {
+		if status == http.StatusNotFound {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return raw, true, nil
+}
+
+func guardKubernetesNoopObject(obj map[string]any) bool {
+	if _, ok := obj["spec"]; !ok {
+		return false
+	}
+	return strings.TrimSpace(objectStringField(obj, "apiVersion")) == runtime.CloudNativePGAPIVersion &&
+		strings.TrimSpace(objectStringField(obj, "kind")) == runtime.CloudNativePGClusterKind
+}
+
+func desiredObjectAlreadyApplied(current, desired map[string]any) bool {
+	if current == nil || desired == nil {
+		return false
+	}
+	if !desiredSpecAlreadyApplied(current, desired) {
+		return false
+	}
+	if !desiredMetadataAlreadyApplied(current, desired) {
+		return false
+	}
+	return true
+}
+
+func desiredSpecAlreadyApplied(current, desired map[string]any) bool {
+	desiredSpec, ok := desired["spec"]
+	if !ok {
+		return true
+	}
+	currentSpec, ok := current["spec"]
+	if !ok {
+		return false
+	}
+	return normalizedKubeValueEqual(currentSpec, desiredSpec)
+}
+
+func desiredMetadataAlreadyApplied(current, desired map[string]any) bool {
+	desiredMetadata := objectMapField(desired, "metadata")
+	if len(desiredMetadata) == 0 {
+		return true
+	}
+	currentMetadata := objectMapField(current, "metadata")
+	if len(currentMetadata) == 0 {
+		return false
+	}
+	if !desiredStringMapSubset(currentMetadata["labels"], desiredMetadata["labels"]) {
+		return false
+	}
+	if !desiredStringMapSubset(currentMetadata["annotations"], desiredMetadata["annotations"]) {
+		return false
+	}
+	if cloudNativePGReconcileAnnotationNeedsRemoval(currentMetadata["annotations"], desiredMetadata["annotations"]) {
+		return false
+	}
+	if desiredOwnerRefs, ok := desiredMetadata["ownerReferences"]; ok {
+		currentOwnerRefs, ok := currentMetadata["ownerReferences"]
+		if !ok || !normalizedKubeValueEqual(currentOwnerRefs, desiredOwnerRefs) {
+			return false
+		}
+	}
+	return true
+}
+
+func cloudNativePGReconcileAnnotationNeedsRemoval(current, desired any) bool {
+	currentAnnotations := normalizeKubeStringMap(current)
+	if _, ok := currentAnnotations[runtime.CloudNativePGReconcilePodSpecAnno]; !ok {
+		return false
+	}
+	desiredAnnotations := normalizeKubeStringMap(desired)
+	_, desiredKeepsHold := desiredAnnotations[runtime.CloudNativePGReconcilePodSpecAnno]
+	return !desiredKeepsHold
+}
+
+func desiredStringMapSubset(current, desired any) bool {
+	desiredMap := normalizeKubeStringMap(desired)
+	if len(desiredMap) == 0 {
+		return true
+	}
+	currentMap := normalizeKubeStringMap(current)
+	for key, desiredValue := range desiredMap {
+		if currentMap[key] != desiredValue {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeKubeStringMap(value any) map[string]string {
+	if value == nil {
+		return nil
+	}
+	switch typed := value.(type) {
+	case map[string]string:
+		out := make(map[string]string, len(typed))
+		for key, val := range typed {
+			out[key] = val
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]string, len(typed))
+		for key, val := range typed {
+			out[key] = fmt.Sprint(val)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func normalizedKubeValueEqual(left, right any) bool {
+	return reflect.DeepEqual(normalizeKubeValue(left), normalizeKubeValue(right))
+}
+
+func normalizeKubeValue(value any) any {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return value
+	}
+	var out any
+	if err := json.Unmarshal(data, &out); err != nil {
+		return value
+	}
+	return out
 }
 
 func (c *kubeClient) applyObjectAtPath(ctx context.Context, apiPath string, obj map[string]any, out any) error {
@@ -383,11 +592,22 @@ func (c *kubeClient) replaceObjectSpec(ctx context.Context, obj map[string]any) 
 	if err != nil {
 		return err
 	}
+	if guardKubernetesNoopObject(obj) {
+		current, found, err := c.getRawObject(ctx, apiPath)
+		if err != nil {
+			return err
+		}
+		if found && desiredSpecAlreadyApplied(current, obj) {
+			c.writeStats.record("replace_spec_skipped_noop", obj)
+			return nil
+		}
+	}
 	ops := []map[string]any{{
 		"op":    "replace",
 		"path":  "/spec",
 		"value": spec,
 	}}
+	c.writeStats.record("replace_spec_attempted", obj)
 	_, err = c.doRequest(ctx, http.MethodPatch, apiPath, "application/json-patch+json", ops, nil)
 	return err
 }
@@ -1030,6 +1250,16 @@ func objectStringField(obj map[string]any, key string) string {
 	}
 	value, _ := obj[key].(string)
 	return strings.TrimSpace(value)
+}
+
+func objectMapField(obj map[string]any, key string) map[string]any {
+	if obj == nil {
+		return nil
+	}
+	if value, ok := obj[key].(map[string]any); ok {
+		return value
+	}
+	return nil
 }
 
 func objectNameAndNamespace(defaultNamespace string, obj map[string]any) (string, string) {

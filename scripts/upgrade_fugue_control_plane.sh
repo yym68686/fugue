@@ -54,6 +54,210 @@ PRIMARY_POSTGRES_IMAGE="${FUGUE_PRIMARY_POSTGRES_IMAGE:-docker.io/library/postgr
 FUGUE_DEFAULT_REGISTRY_PULL_BASE="${FUGUE_DEFAULT_REGISTRY_PULL_BASE:-}"
 DNS_HELM_SET_ARGS=()
 
+ensure_control_plane_observability() {
+  if [[ "${FUGUE_CONTROL_PLANE_OBSERVABILITY_ENABLED:-true}" != "true" ]]; then
+    log "control-plane observability bootstrap disabled"
+    return 0
+  fi
+  if [[ "$(id -u)" != "0" ]]; then
+    log "skip control-plane host observability bootstrap because upgrade is not running as root"
+    return 0
+  fi
+
+  mkdir -p /var/log/fugue/incidents /var/log/journal /etc/systemd/system/k3s.service.d
+  ensure_local_k3s_audit_and_metrics_config
+
+  install -m 0755 /dev/stdin /usr/local/bin/fugue-k3s-incident-snapshot <<'EOF'
+#!/usr/bin/env bash
+set -u
+
+unit="${1:-k3s.service}"
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+root="/var/log/fugue/incidents/k3s-${timestamp}"
+mkdir -p "${root}"
+
+run_capture() {
+  local name="$1"
+  shift
+  {
+    printf '$'
+    printf ' %q' "$@"
+    printf '\n\n'
+    timeout --kill-after=2s 30s "$@" 2>&1 || true
+  } >"${root}/${name}.log"
+}
+
+{
+  printf 'timestamp_utc=%s\n' "${timestamp}"
+  printf 'unit=%s\n' "${unit}"
+  hostnamectl 2>/dev/null || hostname
+  uptime
+} >"${root}/host.txt" 2>&1 || true
+
+run_capture systemctl-status systemctl status "${unit}" --no-pager -l
+run_capture k3s-journal journalctl -u "${unit}" --since "20 minutes ago" --no-pager -o short-iso -l
+run_capture kernel-journal journalctl -k --since "20 minutes ago" --no-pager -o short-iso -l
+run_capture memory free -h
+run_capture filesystems df -h
+run_capture processes sh -c 'ps -eo pid,ppid,stat,pcpu,pmem,rss,comm,args --sort=-pcpu | head -80'
+run_capture sockets sh -c 'ss -s; ss -tanp | head -120'
+run_capture pressure sh -c 'for f in /proc/pressure/*; do echo "===== $f ====="; cat "$f"; done'
+run_capture loadavg cat /proc/loadavg
+run_capture meminfo cat /proc/meminfo
+run_capture etcd-size sh -c 'du -sh /var/lib/rancher/k3s/server/db/etcd 2>/dev/null || true; find /var/lib/rancher/k3s/server/db/etcd -maxdepth 3 -type f -printf "%s %p\n" 2>/dev/null | sort -nr | head -40'
+
+if command -v vmstat >/dev/null 2>&1; then
+  run_capture vmstat vmstat 1 10
+fi
+if command -v iostat >/dev/null 2>&1; then
+  run_capture iostat iostat -xz 1 10
+fi
+if command -v sar >/dev/null 2>&1; then
+  run_capture sar-cpu sar -u -r -q -b -d -S -W -n DEV 1 5
+fi
+if command -v k3s >/dev/null 2>&1; then
+  run_capture kube-readyz k3s kubectl get --raw=/readyz?verbose
+  run_capture kube-metrics k3s kubectl get --raw=/metrics
+  run_capture kube-events k3s kubectl get events -A --sort-by=.lastTimestamp
+fi
+if command -v curl >/dev/null 2>&1; then
+  run_capture etcd-metrics curl -fsS --max-time 15 http://127.0.0.1:2381/metrics
+fi
+
+tar -C "$(dirname "${root}")" -czf "${root}.tar.gz" "$(basename "${root}")" 2>/dev/null || true
+EOF
+
+  cat >/etc/systemd/system/fugue-k3s-failure@.service <<'EOF'
+[Unit]
+Description=Capture Fugue k3s incident snapshot for %i
+Documentation=https://github.com/yym68686/fugue
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fugue-k3s-incident-snapshot %i
+EOF
+
+  cat >/etc/systemd/system/k3s.service.d/90-fugue-observability.conf <<'EOF'
+[Unit]
+OnFailure=fugue-k3s-failure@%n.service
+EOF
+
+  if command_exists systemctl; then
+    systemctl daemon-reload || true
+  fi
+
+  if command_exists apt-get && ! command_exists sar; then
+    log "installing sysstat for host-level control-plane history"
+    DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1 &&
+      DEBIAN_FRONTEND=noninteractive apt-get install -y sysstat >/dev/null 2>&1 ||
+      log "sysstat install failed; continuing without host history package"
+  fi
+  if [[ -f /etc/default/sysstat ]]; then
+    sed -i 's/^ENABLED=.*/ENABLED="true"/' /etc/default/sysstat || true
+  fi
+  if command_exists systemctl; then
+    for unit in sysstat.service sysstat-collect.timer sysstat-summary.timer; do
+      if systemctl list-unit-files "${unit}" >/dev/null 2>&1; then
+        systemctl enable --now "${unit}" >/dev/null 2>&1 || true
+      fi
+    done
+  fi
+
+  log "control-plane observability bootstrap complete"
+}
+
+ensure_local_k3s_audit_and_metrics_config() {
+  local config="/etc/rancher/k3s/config.yaml"
+  local audit_policy="/etc/rancher/k3s/audit-policy.yaml"
+  local tmp=""
+  local filtered=""
+  local changed="false"
+
+  mkdir -p /etc/rancher/k3s /var/log/fugue/kubernetes
+  tmp="$(mktemp)"
+  cat >"${tmp}" <<'EOF'
+apiVersion: audit.k8s.io/v1
+kind: Policy
+omitStages:
+  - RequestReceived
+rules:
+  - level: Metadata
+    verbs:
+      - create
+      - update
+      - patch
+      - delete
+  - level: Metadata
+    resources:
+      - group: coordination.k8s.io
+        resources:
+          - leases
+  - level: None
+EOF
+  if [[ ! -f "${audit_policy}" ]] || ! cmp -s "${tmp}" "${audit_policy}"; then
+    install -m 0644 "${tmp}" "${audit_policy}"
+    changed="true"
+  fi
+  rm -f "${tmp}"
+
+  if [[ -f "${config}" ]]; then
+    filtered="$(awk '
+      /^# BEGIN FUGUE CONTROL PLANE OBSERVABILITY$/ {skip=1; next}
+      /^# END FUGUE CONTROL PLANE OBSERVABILITY$/ {skip=0; next}
+      !skip {print}
+    ' "${config}")"
+  else
+    log "creating ${config} for Fugue control-plane observability settings"
+    filtered=""
+  fi
+
+  tmp="$(mktemp)"
+  {
+    printf '%s\n' "${filtered}" | sed '${/^$/d;}'
+    cat <<'EOF'
+# BEGIN FUGUE CONTROL PLANE OBSERVABILITY
+etcd-expose-metrics: true
+kube-apiserver-arg:
+  - "audit-policy-file=/etc/rancher/k3s/audit-policy.yaml"
+  - "audit-log-path=/var/log/fugue/kubernetes/audit.log"
+  - "audit-log-maxage=14"
+  - "audit-log-maxbackup=10"
+  - "audit-log-maxsize=100"
+  - "profiling=true"
+# END FUGUE CONTROL PLANE OBSERVABILITY
+EOF
+  } >"${tmp}"
+
+  if ! cmp -s "${tmp}" "${config}"; then
+    if [[ -f "${config}" ]]; then
+      cp "${config}" "${config}.fugue-observability-$(date -u +%Y%m%d%H%M%S).bak"
+    fi
+    install -m 0644 "${tmp}" "${config}"
+    changed="true"
+  fi
+  rm -f "${tmp}"
+
+  if [[ "${changed}" != "true" ]]; then
+    log "local k3s audit/metrics config already current"
+    return 0
+  fi
+
+  log "updated local k3s audit log and etcd metrics config"
+  if [[ "${FUGUE_CONTROL_PLANE_OBSERVABILITY_RESTART_K3S:-true}" != "true" ]]; then
+    log "k3s restart for observability config disabled; changes apply on the next k3s restart"
+    return 0
+  fi
+  if command_exists systemctl && systemctl is-active --quiet k3s; then
+    log "restarting local k3s once so audit/metrics config takes effect"
+    if command_exists timeout; then
+      timeout --kill-after=15s 120s systemctl restart k3s
+    else
+      systemctl restart k3s
+    fi
+    wait_for_local_kube_api_ready
+  fi
+}
+
 detect_primary_private_ip() {
   ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}'
 }
@@ -3144,6 +3348,7 @@ PY
     FUGUE_SMOKE_URL="https://${FUGUE_API_PUBLIC_DOMAIN}/healthz"
   fi
   require_env FUGUE_SMOKE_URL
+  ensure_control_plane_observability
   run_release_preflight
 
   command_exists helm || fail "helm is not installed"

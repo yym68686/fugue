@@ -126,24 +126,40 @@ func TestReplaceObjectSpecsByKindUsesExactJSONPatch(t *testing.T) {
 	t.Parallel()
 
 	var patch []map[string]any
+	var requests []string
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.Method != http.MethodPatch {
-			t.Fatalf("unexpected request method %s", req.Method)
-		}
+		requests = append(requests, req.Method+" "+req.URL.Path)
 		if req.URL.Path != "/apis/postgresql.cnpg.io/v1/namespaces/tenant-demo/clusters/demo-postgres" {
 			t.Fatalf("unexpected request path %s", req.URL.Path)
 		}
-		if got := req.Header.Get("Content-Type"); got != "application/json-patch+json" {
-			t.Fatalf("expected json patch content type, got %q", got)
+		switch req.Method {
+		case http.MethodGet:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(`{
+					"apiVersion":"postgresql.cnpg.io/v1",
+					"kind":"Cluster",
+					"metadata":{"name":"demo-postgres","namespace":"tenant-demo"},
+					"spec":{"instances":2,"minSyncReplicas":0,"maxSyncReplicas":0}
+				}`)),
+				Header: make(http.Header),
+			}, nil
+		case http.MethodPatch:
+			if got := req.Header.Get("Content-Type"); got != "application/json-patch+json" {
+				t.Fatalf("expected json patch content type, got %q", got)
+			}
+			if err := json.NewDecoder(req.Body).Decode(&patch); err != nil {
+				t.Fatalf("decode spec patch: %v", err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     make(http.Header),
+			}, nil
+		default:
+			t.Fatalf("unexpected request method %s", req.Method)
+			return nil, nil
 		}
-		if err := json.NewDecoder(req.Body).Decode(&patch); err != nil {
-			t.Fatalf("decode spec patch: %v", err)
-		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(`{}`)),
-			Header:     make(http.Header),
-		}, nil
 	})
 
 	client := &kubeClient{
@@ -177,6 +193,13 @@ func TestReplaceObjectSpecsByKindUsesExactJSONPatch(t *testing.T) {
 	if err := client.replaceObjectSpecsByKind(context.Background(), objects, "postgresql.cnpg.io/v1", "Cluster"); err != nil {
 		t.Fatalf("replace object specs by kind: %v", err)
 	}
+	expectedRequests := []string{
+		"GET /apis/postgresql.cnpg.io/v1/namespaces/tenant-demo/clusters/demo-postgres",
+		"PATCH /apis/postgresql.cnpg.io/v1/namespaces/tenant-demo/clusters/demo-postgres",
+	}
+	if strings.Join(requests, "\n") != strings.Join(expectedRequests, "\n") {
+		t.Fatalf("expected request sequence %v, got %v", expectedRequests, requests)
+	}
 	if len(patch) != 1 {
 		t.Fatalf("expected one patch operation, got %#v", patch)
 	}
@@ -189,6 +212,121 @@ func TestReplaceObjectSpecsByKindUsesExactJSONPatch(t *testing.T) {
 	}
 	if got := value["instances"]; got != float64(1) {
 		t.Fatalf("expected instances 1, got %#v", got)
+	}
+}
+
+func TestApplyObjectSkipsNoopCloudNativePGCluster(t *testing.T) {
+	t.Parallel()
+
+	var requests []string
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests = append(requests, req.Method+" "+req.URL.Path)
+		if req.Method != http.MethodGet {
+			t.Fatalf("expected only GET request, got %s %s", req.Method, req.URL.Path)
+		}
+		if req.URL.Path != "/apis/postgresql.cnpg.io/v1/namespaces/tenant-demo/clusters/demo-postgres" {
+			t.Fatalf("unexpected request path %s", req.URL.Path)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`{
+				"apiVersion":"postgresql.cnpg.io/v1",
+				"kind":"Cluster",
+				"metadata":{
+					"name":"demo-postgres",
+					"namespace":"tenant-demo",
+					"labels":{"app.kubernetes.io/managed-by":"fugue","extra":"kept"}
+				},
+				"spec":{"instances":1,"minSyncReplicas":0,"maxSyncReplicas":0}
+			}`)),
+			Header: make(http.Header),
+		}, nil
+	})
+
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   "tenant-demo",
+	}
+	obj := map[string]any{
+		"apiVersion": "postgresql.cnpg.io/v1",
+		"kind":       "Cluster",
+		"metadata": map[string]any{
+			"name":      "demo-postgres",
+			"namespace": "tenant-demo",
+			"labels": map[string]string{
+				"app.kubernetes.io/managed-by": "fugue",
+			},
+		},
+		"spec": map[string]any{
+			"instances":       1,
+			"minSyncReplicas": 0,
+			"maxSyncReplicas": 0,
+		},
+	}
+
+	if err := client.applyObject(context.Background(), obj, nil); err != nil {
+		t.Fatalf("apply object: %v", err)
+	}
+	expected := []string{"GET /apis/postgresql.cnpg.io/v1/namespaces/tenant-demo/clusters/demo-postgres"}
+	if strings.Join(requests, "\n") != strings.Join(expected, "\n") {
+		t.Fatalf("expected request sequence %v, got %v", expected, requests)
+	}
+	if summary := client.writeStats.summary(); !strings.Contains(summary, "apply_skipped_noop[postgresql.cnpg.io/v1/Cluster]=1") {
+		t.Fatalf("expected no-op skip in write summary, got %q", summary)
+	}
+}
+
+func TestReplaceObjectSpecsByKindSkipsNoopCloudNativePGCluster(t *testing.T) {
+	t.Parallel()
+
+	var requests []string
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests = append(requests, req.Method+" "+req.URL.Path)
+		if req.Method != http.MethodGet {
+			t.Fatalf("expected only GET request, got %s %s", req.Method, req.URL.Path)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`{
+				"apiVersion":"postgresql.cnpg.io/v1",
+				"kind":"Cluster",
+				"metadata":{"name":"demo-postgres","namespace":"tenant-demo"},
+				"spec":{"instances":1,"minSyncReplicas":0,"maxSyncReplicas":0}
+			}`)),
+			Header: make(http.Header),
+		}, nil
+	})
+
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   "tenant-demo",
+	}
+	objects := []map[string]any{{
+		"apiVersion": "postgresql.cnpg.io/v1",
+		"kind":       "Cluster",
+		"metadata": map[string]any{
+			"name": "demo-postgres",
+		},
+		"spec": map[string]any{
+			"instances":       1,
+			"minSyncReplicas": 0,
+			"maxSyncReplicas": 0,
+		},
+	}}
+
+	if err := client.replaceObjectSpecsByKind(context.Background(), objects, "postgresql.cnpg.io/v1", "Cluster"); err != nil {
+		t.Fatalf("replace object specs by kind: %v", err)
+	}
+	expected := []string{"GET /apis/postgresql.cnpg.io/v1/namespaces/tenant-demo/clusters/demo-postgres"}
+	if strings.Join(requests, "\n") != strings.Join(expected, "\n") {
+		t.Fatalf("expected request sequence %v, got %v", expected, requests)
+	}
+	if summary := client.writeStats.summary(); !strings.Contains(summary, "replace_spec_skipped_noop[postgresql.cnpg.io/v1/Cluster]=1") {
+		t.Fatalf("expected no-op replace skip in write summary, got %q", summary)
 	}
 }
 

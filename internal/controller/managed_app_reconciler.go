@@ -63,6 +63,7 @@ func (s *Service) deleteManagedAppDesiredState(ctx context.Context, app model.Ap
 }
 
 func (s *Service) reconcileManagedApps(ctx context.Context) error {
+	startedAt := time.Now()
 	client, err := s.kubeClient()
 	if err != nil {
 		return fmt.Errorf("initialize kubernetes managed app client: %w", err)
@@ -80,6 +81,16 @@ func (s *Service) reconcileManagedApps(ctx context.Context) error {
 				firstErr = err
 			}
 			s.Logger.Printf("managed app %s/%s reconcile error: %v", managed.Metadata.Namespace, managed.Metadata.Name, err)
+		}
+	}
+	if s.Logger != nil {
+		if summary := client.writeStats.summary(); summary != "" {
+			s.Logger.Printf(
+				"managed app reconcile kubernetes write summary managed_apps=%d duration_ms=%d %s",
+				len(managedApps),
+				time.Since(startedAt).Milliseconds(),
+				summary,
+			)
 		}
 	}
 	return firstErr
