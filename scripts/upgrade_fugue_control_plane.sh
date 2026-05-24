@@ -60,7 +60,19 @@ ensure_control_plane_observability() {
     return 0
   fi
   if [[ "$(id -u)" != "0" ]]; then
-    log "skip control-plane host observability bootstrap because upgrade is not running as root"
+    if command_exists sudo && sudo -n true >/dev/null 2>&1; then
+      log "running control-plane host observability bootstrap with sudo"
+      sudo -n env \
+        FUGUE_CONTROL_PLANE_OBSERVABILITY_ONLY=true \
+        "FUGUE_CONTROL_PLANE_OBSERVABILITY_ENABLED=${FUGUE_CONTROL_PLANE_OBSERVABILITY_ENABLED:-true}" \
+        "FUGUE_CONTROL_PLANE_OBSERVABILITY_RESTART_K3S=${FUGUE_CONTROL_PLANE_OBSERVABILITY_RESTART_K3S:-true}" \
+        "FUGUE_LOCAL_KUBE_API_READY_POLL_SECONDS=${LOCAL_KUBE_API_READY_POLL_SECONDS}" \
+        "FUGUE_LOCAL_KUBE_API_READY_TIMEOUT_SECONDS=${LOCAL_KUBE_API_READY_TIMEOUT_SECONDS}" \
+        KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
+        bash "${BASH_SOURCE[0]}"
+      return 0
+    fi
+    log "skip control-plane host observability bootstrap because upgrade is not running as root and passwordless sudo is unavailable"
     return 0
   fi
 
@@ -3545,5 +3557,13 @@ PY
   current_revision="$(helm_current_revision)"
   log "upgrade complete; current Helm revision=${current_revision}"
 }
+
+if [[ "${FUGUE_CONTROL_PLANE_OBSERVABILITY_ONLY:-false}" == "true" ]]; then
+  export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+  KUBECTL="${KUBECTL:-$(detect_kubectl)}"
+  export KUBECTL
+  ensure_control_plane_observability
+  exit 0
+fi
 
 main "$@"
