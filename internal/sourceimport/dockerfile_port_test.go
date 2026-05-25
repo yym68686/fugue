@@ -40,6 +40,50 @@ func TestDetectDockerfilePortSignalFallsBackWithoutExpose(t *testing.T) {
 	}
 }
 
+func TestDetectDockerfilePortSignalResolvesEnvExpose(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	dockerfile := `FROM python:3.12-slim
+ENV LOG_LEVEL="INFO" \
+    PORT="8032" \
+    SERVICE_NAME="api"
+EXPOSE ${PORT}
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte(dockerfile), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+
+	port, exposesPublicService, err := detectDockerfilePortSignal(repoDir, "Dockerfile")
+	if err != nil {
+		t.Fatalf("detect dockerfile port signal: %v", err)
+	}
+	if port != 8032 || !exposesPublicService {
+		t.Fatalf("unexpected dockerfile port signal: got %d/%t want 8032/true", port, exposesPublicService)
+	}
+}
+
+func TestDetectDockerfilePortSignalResolvesArgExpose(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	dockerfile := `FROM scratch
+ARG SERVICE_PORT=9090
+EXPOSE $SERVICE_PORT/tcp
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte(dockerfile), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+
+	port, exposesPublicService, err := detectDockerfilePortSignal(repoDir, "Dockerfile")
+	if err != nil {
+		t.Fatalf("detect dockerfile port signal: %v", err)
+	}
+	if port != 9090 || !exposesPublicService {
+		t.Fatalf("unexpected dockerfile port signal: got %d/%t want 9090/true", port, exposesPublicService)
+	}
+}
+
 func TestShouldSuppressDetectedPublicServiceForDualModePythonProject(t *testing.T) {
 	t.Parallel()
 

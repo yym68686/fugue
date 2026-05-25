@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"fugue/internal/model"
 )
@@ -180,18 +181,25 @@ func detectDockerfilePortSignal(repoDir, dockerfilePath string) (int, bool, erro
 	}
 
 	detected := 0
-	for _, rawLine := range strings.Split(string(data), "\n") {
-		line := strings.TrimSpace(rawLine)
-		if line == "" || strings.HasPrefix(line, "#") {
+	variables := make(map[string]string)
+	for _, line := range dockerfileLogicalInstructions(string(data)) {
+		if strings.HasPrefix(line, "#") {
 			continue
 		}
-		upper := strings.ToUpper(line)
-		if !strings.HasPrefix(upper, "EXPOSE ") {
+		instruction, rest := splitDockerfileInstruction(line)
+		switch instruction {
+		case "ARG":
+			applyDockerfileArg(variables, rest)
+			continue
+		case "ENV":
+			applyDockerfileEnv(variables, rest)
+			continue
+		case "EXPOSE":
+		default:
 			continue
 		}
-		fields := strings.Fields(line)
-		for _, field := range fields[1:] {
-			value := strings.TrimSpace(field)
+		for _, field := range splitDockerfileFields(rest) {
+			value := expandDockerfileValue(field, variables)
 			if idx := strings.Index(value, "/"); idx >= 0 {
 				value = value[:idx]
 			}
@@ -207,6 +215,132 @@ func detectDockerfilePortSignal(repoDir, dockerfilePath string) (int, bool, erro
 		return detected, true, nil
 	}
 	return 80, false, nil
+}
+
+func dockerfileLogicalInstructions(content string) []string {
+	lines := strings.Split(content, "\n")
+	instructions := make([]string, 0, len(lines))
+	var pending strings.Builder
+	for _, rawLine := range lines {
+		line := strings.TrimRight(rawLine, "\r")
+		line = strings.TrimRightFunc(line, unicode.IsSpace)
+		continued := strings.HasSuffix(line, "\\")
+		if continued {
+			line = strings.TrimSuffix(line, "\\")
+		}
+		line = strings.TrimSpace(line)
+		if pending.Len() > 0 && line != "" {
+			pending.WriteByte(' ')
+		}
+		pending.WriteString(line)
+		if continued {
+			continue
+		}
+		if instruction := strings.TrimSpace(pending.String()); instruction != "" {
+			instructions = append(instructions, instruction)
+		}
+		pending.Reset()
+	}
+	if instruction := strings.TrimSpace(pending.String()); instruction != "" {
+		instructions = append(instructions, instruction)
+	}
+	return instructions
+}
+
+func splitDockerfileInstruction(line string) (string, string) {
+	index := strings.IndexFunc(line, unicode.IsSpace)
+	if index < 0 {
+		return strings.ToUpper(strings.TrimSpace(line)), ""
+	}
+	return strings.ToUpper(strings.TrimSpace(line[:index])), strings.TrimSpace(line[index:])
+}
+
+func applyDockerfileArg(variables map[string]string, raw string) {
+	fields := splitDockerfileFields(raw)
+	if len(fields) == 0 {
+		return
+	}
+	name, value, ok := strings.Cut(fields[0], "=")
+	if !ok || strings.TrimSpace(name) == "" {
+		return
+	}
+	variables[strings.TrimSpace(name)] = expandDockerfileValue(value, variables)
+}
+
+func applyDockerfileEnv(variables map[string]string, raw string) {
+	fields := splitDockerfileFields(raw)
+	if len(fields) == 0 {
+		return
+	}
+	if !strings.Contains(fields[0], "=") {
+		if len(fields) > 1 {
+			variables[fields[0]] = expandDockerfileValue(strings.Join(fields[1:], " "), variables)
+		}
+		return
+	}
+	for _, field := range fields {
+		name, value, ok := strings.Cut(field, "=")
+		if !ok || strings.TrimSpace(name) == "" {
+			continue
+		}
+		variables[strings.TrimSpace(name)] = expandDockerfileValue(value, variables)
+	}
+}
+
+func expandDockerfileValue(value string, variables map[string]string) string {
+	return os.Expand(value, func(name string) string {
+		return variables[name]
+	})
+}
+
+func splitDockerfileFields(raw string) []string {
+	fields := make([]string, 0)
+	var field strings.Builder
+	var quote rune
+	escaped := false
+	hasValue := false
+	flush := func() {
+		if !hasValue {
+			return
+		}
+		fields = append(fields, field.String())
+		field.Reset()
+		hasValue = false
+	}
+	for _, character := range raw {
+		switch {
+		case escaped:
+			field.WriteRune(character)
+			hasValue = true
+			escaped = false
+		case quote != 0:
+			if character == quote {
+				quote = 0
+				hasValue = true
+			} else if character == '\\' && quote == '"' {
+				escaped = true
+			} else {
+				field.WriteRune(character)
+				hasValue = true
+			}
+		case character == '\'' || character == '"':
+			quote = character
+			hasValue = true
+		case character == '\\':
+			escaped = true
+			hasValue = true
+		case unicode.IsSpace(character):
+			flush()
+		default:
+			field.WriteRune(character)
+			hasValue = true
+		}
+	}
+	if escaped {
+		field.WriteRune('\\')
+	}
+	flush()
+	return fields
 }
 
 func secureRepoJoin(repoDir, rel string) (string, error) {
