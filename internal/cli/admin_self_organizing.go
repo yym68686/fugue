@@ -119,14 +119,15 @@ func (c *CLI) newAdminRoutesCommand() *cobra.Command {
 
 func writeRouteServingModes(w io.Writer, routes []model.RouteServingMode) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "HOSTNAME\tMODE\tEDGE_GROUP\tRUNTIME_GROUP\tREASON"); err != nil {
+	if _, err := fmt.Fprintln(tw, "HOSTNAME\tPATH_PREFIX\tMODE\tEDGE_GROUP\tRUNTIME_GROUP\tREASON"); err != nil {
 		return err
 	}
 	for _, route := range routes {
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%s\t%s\n",
+			"%s\t%s\t%s\t%s\t%s\t%s\n",
 			route.Hostname,
+			model.NormalizeAppRoutePathPrefix(route.PathPrefix),
 			route.ServingMode,
 			firstNonEmpty(route.SelectedEdgeGroup, "-"),
 			firstNonEmpty(route.RuntimeEdgeGroup, "-"),
@@ -274,14 +275,15 @@ func writeRouteExplain(w io.Writer, explain model.RouteExplainResponse) error {
 
 func writeEdgeRouteBindingTable(w io.Writer, routes []model.EdgeRouteBinding) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "EDGE_GROUP\tRUNTIME_GROUP\tKIND\tPOLICY\tSTATUS\tTLS\tUPSTREAM\tREASON"); err != nil {
+	if _, err := fmt.Fprintln(tw, "PATH_PREFIX\tEDGE_GROUP\tRUNTIME_GROUP\tKIND\tPOLICY\tSTATUS\tTLS\tUPSTREAM\tREASON"); err != nil {
 		return err
 	}
 	for _, route := range routes {
 		reason := strings.Join(routeExplainRouteReasons(route), "; ")
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			model.NormalizeAppRoutePathPrefix(route.PathPrefix),
 			firstNonEmpty(route.EdgeGroupID, "-"),
 			firstNonEmpty(route.RuntimeEdgeGroupID, route.RuntimeEdgeGroup, "-"),
 			firstNonEmpty(route.RouteKind, "-"),

@@ -156,6 +156,9 @@ func writeTopologyDeployPlanTable(w io.Writer, services []model.TopologyDeployPl
 	for _, service := range sorted {
 		appName := firstNonEmpty(strings.TrimSpace(service.AppName), strings.TrimSpace(service.ExistingAppName))
 		route := firstNonEmpty(strings.TrimSpace(service.PublicURL), strings.TrimSpace(service.Hostname))
+		if strings.TrimSpace(service.PublicURL) == "" && strings.TrimSpace(service.Hostname) != "" {
+			route = model.AppRoutePublicURL(service.Hostname, service.PathPrefix)
+		}
 		if _, err := fmt.Fprintf(
 			tw,
 			"%s\t%s\t%s\t%s\t%s\n",

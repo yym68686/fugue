@@ -513,6 +513,89 @@ func TestRunAppCommandSetUsesStartupCommandPatch(t *testing.T) {
 	}
 }
 
+func TestRunAppRouteCheckUsesPathPrefix(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/route/availability":
+			if got := r.URL.Query().Get("hostname"); got != "api" {
+				t.Fatalf("expected hostname api, got %q", got)
+			}
+			if got := r.URL.Query().Get("path_prefix"); got != "/v1" {
+				t.Fatalf("expected path_prefix /v1, got %q", got)
+			}
+			_, _ = w.Write([]byte(`{"availability":{"input":"api","label":"api","hostname":"api.example.com","path_prefix":"/v1","base_domain":"example.com","public_url":"https://api.example.com/v1","valid":true,"available":true,"current":false}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "route", "check", "demo", "api",
+		"--path-prefix", "/v1",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app route check: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"path_prefix=/v1", "public_url=https://api.example.com/v1"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAppRouteSetUsesPathPrefix(t *testing.T) {
+	t.Parallel()
+
+	var gotBody map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/apps/app_123/route":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode route patch body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","route":{"hostname":"api.example.com","path_prefix":"/v1","public_url":"https://api.example.com/v1"},"spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"availability":{"input":"api","label":"api","hostname":"api.example.com","path_prefix":"/v1","base_domain":"example.com","public_url":"https://api.example.com/v1","valid":true,"available":true,"current":true},"already_current":false}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "route", "set", "demo", "api",
+		"--path-prefix", "/v1",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app route set: %v", err)
+	}
+
+	if gotBody["hostname"] != "api" || gotBody["path_prefix"] != "/v1" {
+		t.Fatalf("unexpected route patch body %+v", gotBody)
+	}
+	out := stdout.String()
+	for _, want := range []string{"path_prefix=/v1", "public_url=https://api.example.com/v1"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
 func TestRunAppCommandSetArgsUsesDeploySpec(t *testing.T) {
 	t.Parallel()
 
@@ -1678,6 +1761,8 @@ func TestRunDeployInspectGitHubOwnerRepoUsesParentFlags(t *testing.T) {
   "fugue_manifest":{
     "manifest_path":"fugue.yaml",
     "primary_service":"web",
+    "domains":[{"name":"api","host":"prod.example.com","tls":"auto","owner_service":"web"}],
+    "entrypoints":[{"name":"api","domain":"api","routes":[{"path_prefix":"/api","service":"web","strip_prefix":false,"rewrite":""}]}],
     "warnings":[],
     "inference_report":[],
     "services":[{"service":"web","kind":"app","service_type":"web","build_strategy":"dockerfile","internal_port":3000,"compose_service":"web","published":true,"source_dir":"web","dockerfile_path":"web/Dockerfile","build_context_dir":"web","binding_targets":[],"persistent_storage_seed_files":[]}]
@@ -1707,7 +1792,19 @@ func TestRunDeployInspectGitHubOwnerRepoUsesParentFlags(t *testing.T) {
 		t.Fatalf("unexpected inspect github request %+v", gotRequest)
 	}
 	out := stdout.String()
-	for _, want := range []string{"source=github", "repo_url=https://github.com/example/demo", "topology=fugue_manifest", "topology_path=fugue.yaml"} {
+	for _, want := range []string{
+		"source=github",
+		"repo_url=https://github.com/example/demo",
+		"topology=fugue_manifest",
+		"topology_path=fugue.yaml",
+		"domain_count=1",
+		"entrypoint_count=1",
+		"route_count=1",
+		"[domains]",
+		"prod.example.com",
+		"[entrypoints]",
+		"/api",
+	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}

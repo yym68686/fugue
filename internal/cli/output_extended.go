@@ -865,6 +865,89 @@ func writeTemplateServiceTable(w io.Writer, services []inspectGitHubTemplateMani
 	return tw.Flush()
 }
 
+func writeTemplateDomainTable(w io.Writer, domains []templateTopologyDomain) error {
+	sorted := append([]templateTopologyDomain(nil), domains...)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Name == sorted[j].Name {
+			return strings.Compare(sorted[i].Host, sorted[j].Host) < 0
+		}
+		return strings.Compare(sorted[i].Name, sorted[j].Name) < 0
+	})
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "NAME\tHOST\tTLS\tOWNER_SERVICE"); err != nil {
+		return err
+	}
+	for _, domain := range sorted {
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\n",
+			domain.Name,
+			domain.Host,
+			firstNonEmpty(domain.TLS, "-"),
+			firstNonEmpty(domain.OwnerService, "-"),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func writeTemplateEntrypointTable(w io.Writer, entrypoints []templateTopologyEntrypoint) error {
+	type row struct {
+		Name        string
+		Domain      string
+		PathPrefix  string
+		Service     string
+		Rewrite     string
+		StripPrefix bool
+	}
+	rows := make([]row, 0)
+	for _, entrypoint := range entrypoints {
+		if len(entrypoint.Routes) == 0 {
+			rows = append(rows, row{Name: entrypoint.Name, Domain: entrypoint.Domain})
+			continue
+		}
+		for _, route := range entrypoint.Routes {
+			rows = append(rows, row{
+				Name:        entrypoint.Name,
+				Domain:      entrypoint.Domain,
+				PathPrefix:  firstNonEmpty(route.PathPrefix, route.Path),
+				Service:     route.Service,
+				Rewrite:     route.Rewrite,
+				StripPrefix: route.StripPrefix,
+			})
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Name == rows[j].Name {
+			if rows[i].PathPrefix == rows[j].PathPrefix {
+				return strings.Compare(rows[i].Service, rows[j].Service) < 0
+			}
+			return strings.Compare(rows[i].PathPrefix, rows[j].PathPrefix) < 0
+		}
+		return strings.Compare(rows[i].Name, rows[j].Name) < 0
+	})
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "NAME\tDOMAIN\tPATH_PREFIX\tSERVICE\tREWRITE\tSTRIP_PREFIX"); err != nil {
+		return err
+	}
+	for _, route := range rows {
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\t%s\t%t\n",
+			route.Name,
+			firstNonEmpty(route.Domain, "-"),
+			firstNonEmpty(route.PathPrefix, "-"),
+			firstNonEmpty(route.Service, "-"),
+			firstNonEmpty(route.Rewrite, "-"),
+			route.StripPrefix,
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
 func writeTemplateVariableTable(w io.Writer, variables []templateVariable) error {
 	sorted := append([]templateVariable(nil), variables...)
 	sort.Slice(sorted, func(i, j int) bool {

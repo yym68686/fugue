@@ -101,8 +101,11 @@ func renderAppRouteShowResult(w io.Writer, result appRouteShowResult) error {
 	if result.Route != nil {
 		pairs = append(pairs,
 			kvPair{Key: "hostname", Value: result.Route.Hostname},
+			kvPair{Key: "path_prefix", Value: model.NormalizeAppRoutePathPrefix(result.Route.PathPrefix)},
 			kvPair{Key: "base_domain", Value: result.Route.BaseDomain},
 			kvPair{Key: "public_url", Value: result.Route.PublicURL},
+			kvPair{Key: "domain_name", Value: result.Route.DomainName},
+			kvPair{Key: "entrypoint_name", Value: result.Route.EntrypointName},
 		)
 		if result.Route.ServicePort > 0 {
 			pairs = append(pairs, kvPair{Key: "service_port", Value: fmt.Sprintf("%d", result.Route.ServicePort)})

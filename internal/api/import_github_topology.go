@@ -1069,12 +1069,18 @@ func buildTopologyDeployPlan(projectName string, options topologyImportOptions, 
 			entry.AppName = firstNonEmpty(strings.TrimSpace(service.Match.Name), entry.AppName)
 			if service.Match.Route != nil {
 				entry.Hostname = strings.TrimSpace(service.Match.Route.Hostname)
+				entry.PathPrefix = model.NormalizeAppRoutePathPrefix(service.Match.Route.PathPrefix)
 				entry.PublicURL = strings.TrimSpace(service.Match.Route.PublicURL)
+				entry.DomainName = strings.TrimSpace(service.Match.Route.DomainName)
+				entry.EntrypointName = strings.TrimSpace(service.Match.Route.EntrypointName)
 			}
 		}
 		if service.Route != nil {
 			entry.Hostname = firstNonEmpty(strings.TrimSpace(entry.Hostname), strings.TrimSpace(service.Route.Hostname))
+			entry.PathPrefix = firstNonEmpty(strings.TrimSpace(entry.PathPrefix), model.NormalizeAppRoutePathPrefix(service.Route.PathPrefix))
 			entry.PublicURL = firstNonEmpty(strings.TrimSpace(entry.PublicURL), strings.TrimSpace(service.Route.PublicURL))
+			entry.DomainName = firstNonEmpty(strings.TrimSpace(entry.DomainName), strings.TrimSpace(service.Route.DomainName))
+			entry.EntrypointName = firstNonEmpty(strings.TrimSpace(entry.EntrypointName), strings.TrimSpace(service.Route.EntrypointName))
 		}
 		plan.Services = append(plan.Services, entry)
 	}

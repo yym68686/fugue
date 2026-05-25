@@ -239,7 +239,11 @@ func writeAppStatusWithContext(w io.Writer, app model.App, tenantNames, projectN
 	if app.Route != nil {
 		pairs = append(pairs,
 			kvPair{Key: "route_hostname", Value: strings.TrimSpace(app.Route.Hostname)},
+			kvPair{Key: "route_path_prefix", Value: model.NormalizeAppRoutePathPrefix(app.Route.PathPrefix)},
 			kvPair{Key: "route_base_domain", Value: strings.TrimSpace(app.Route.BaseDomain)},
+			kvPair{Key: "route_public_url", Value: strings.TrimSpace(app.Route.PublicURL)},
+			kvPair{Key: "route_domain_name", Value: strings.TrimSpace(app.Route.DomainName)},
+			kvPair{Key: "route_entrypoint_name", Value: strings.TrimSpace(app.Route.EntrypointName)},
 		)
 	}
 	if app.Source != nil {

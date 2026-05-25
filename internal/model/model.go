@@ -1768,6 +1768,7 @@ type RouteExplainResponse struct {
 
 type RouteServingMode struct {
 	Hostname          string    `json:"hostname"`
+	PathPrefix        string    `json:"path_prefix,omitempty"`
 	ServingMode       string    `json:"serving_mode"`
 	SelectedEdgeGroup string    `json:"selected_edge_group,omitempty"`
 	RuntimeEdgeGroup  string    `json:"runtime_edge_group,omitempty"`

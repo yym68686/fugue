@@ -94,8 +94,11 @@ func (c *CLI) newDomainPrimaryShowCommand() *cobra.Command {
 			if app.Route != nil {
 				pairs = append(pairs,
 					kvPair{Key: "hostname", Value: app.Route.Hostname},
+					kvPair{Key: "path_prefix", Value: model.NormalizeAppRoutePathPrefix(app.Route.PathPrefix)},
 					kvPair{Key: "base_domain", Value: app.Route.BaseDomain},
 					kvPair{Key: "public_url", Value: app.Route.PublicURL},
+					kvPair{Key: "domain_name", Value: app.Route.DomainName},
+					kvPair{Key: "entrypoint_name", Value: app.Route.EntrypointName},
 				)
 				if app.Route.ServicePort > 0 {
 					pairs = append(pairs, kvPair{Key: "service_port", Value: fmt.Sprintf("%d", app.Route.ServicePort)})
@@ -120,7 +123,7 @@ func (c *CLI) newDomainPrimaryCheckCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			availability, err := client.GetAppRouteAvailability(app.ID, args[1])
+			availability, err := client.GetAppRouteAvailability(app.ID, args[1], "")
 			if err != nil {
 				return err
 			}
@@ -135,6 +138,7 @@ func (c *CLI) newDomainPrimaryCheckCommand() *cobra.Command {
 				kvPair{Key: "input", Value: availability.Input},
 				kvPair{Key: "label", Value: availability.Label},
 				kvPair{Key: "hostname", Value: availability.Hostname},
+				kvPair{Key: "path_prefix", Value: availability.PathPrefix},
 				kvPair{Key: "base_domain", Value: availability.BaseDomain},
 				kvPair{Key: "public_url", Value: availability.PublicURL},
 				kvPair{Key: "valid", Value: fmt.Sprintf("%t", availability.Valid)},
@@ -160,7 +164,7 @@ func (c *CLI) newDomainPrimarySetCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			response, err := client.PatchAppRoute(app.ID, args[1])
+			response, err := client.PatchAppRoute(app.ID, args[1], "")
 			if err != nil {
 				return err
 			}
@@ -176,6 +180,7 @@ func (c *CLI) newDomainPrimarySetCommand() *cobra.Command {
 				{Key: "app", Value: response.App.Name},
 				{Key: "app_id", Value: response.App.ID},
 				{Key: "hostname", Value: response.Availability.Hostname},
+				{Key: "path_prefix", Value: response.Availability.PathPrefix},
 				{Key: "public_url", Value: response.Availability.PublicURL},
 				{Key: "available", Value: fmt.Sprintf("%t", response.Availability.Available)},
 				{Key: "current", Value: fmt.Sprintf("%t", response.Availability.Current)},

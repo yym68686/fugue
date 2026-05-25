@@ -47,6 +47,41 @@ func TestRegistryReachabilityCheckPassesOnRegistryV2Endpoint(t *testing.T) {
 	}
 }
 
+func TestRouteServingModesKeepPathPrefixRoutesSeparate(t *testing.T) {
+	generatedAt := time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC)
+	routes := []model.EdgeRouteBinding{
+		{
+			Hostname:          "api.example.com",
+			PathPrefix:        "/",
+			Status:            model.EdgeRouteStatusActive,
+			RoutePolicy:       model.EdgeRoutePolicyEnabled,
+			SelectedEdgeGroup: "edge-a",
+			RuntimeEdgeGroup:  "edge-a",
+			RouteKind:         model.EdgeRouteKindPlatform,
+		},
+		{
+			Hostname:          "api.example.com",
+			PathPrefix:        "/v1",
+			Status:            model.EdgeRouteStatusActive,
+			RoutePolicy:       model.EdgeRoutePolicyEnabled,
+			SelectedEdgeGroup: "edge-b",
+			RuntimeEdgeGroup:  "edge-b",
+			RouteKind:         model.EdgeRouteKindPlatform,
+		},
+	}
+
+	modes := routeServingModes(routes, generatedAt)
+	if len(modes) != 2 {
+		t.Fatalf("expected two serving modes, got %+v", modes)
+	}
+	if modes[0].Hostname != "api.example.com" || modes[0].PathPrefix != "/" {
+		t.Fatalf("expected root route first, got %+v", modes[0])
+	}
+	if modes[1].Hostname != "api.example.com" || modes[1].PathPrefix != "/v1" {
+		t.Fatalf("expected /v1 route second, got %+v", modes[1])
+	}
+}
+
 func TestHeadscaleReachabilityCheckFailsOnBadHealth(t *testing.T) {
 	probe := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/health" {

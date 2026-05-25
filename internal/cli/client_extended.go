@@ -15,6 +15,7 @@ type appRouteAvailability struct {
 	Input      string `json:"input,omitempty"`
 	Label      string `json:"label,omitempty"`
 	Hostname   string `json:"hostname,omitempty"`
+	PathPrefix string `json:"path_prefix,omitempty"`
 	BaseDomain string `json:"base_domain,omitempty"`
 	PublicURL  string `json:"public_url,omitempty"`
 	Valid      bool   `json:"valid"`
@@ -417,6 +418,27 @@ type persistentStorageSeedFile struct {
 	SeedContent string `json:"seed_content"`
 }
 
+type templateTopologyDomain struct {
+	Name         string `json:"name,omitempty"`
+	Host         string `json:"host,omitempty"`
+	TLS          string `json:"tls,omitempty"`
+	OwnerService string `json:"owner_service,omitempty"`
+}
+
+type templateTopologyEntrypointRoute struct {
+	Path        string `json:"path,omitempty"`
+	PathPrefix  string `json:"path_prefix,omitempty"`
+	Service     string `json:"service,omitempty"`
+	StripPrefix bool   `json:"strip_prefix,omitempty"`
+	Rewrite     string `json:"rewrite,omitempty"`
+}
+
+type templateTopologyEntrypoint struct {
+	Name   string                            `json:"name,omitempty"`
+	Domain string                            `json:"domain,omitempty"`
+	Routes []templateTopologyEntrypointRoute `json:"routes,omitempty"`
+}
+
 type inspectGitHubTemplateManifestService struct {
 	Service                    string                      `json:"service"`
 	Kind                       string                      `json:"kind"`
@@ -436,6 +458,8 @@ type inspectGitHubTemplateManifestService struct {
 type inspectGitHubTemplateManifest struct {
 	ManifestPath    string                                 `json:"manifest_path"`
 	PrimaryService  string                                 `json:"primary_service"`
+	Domains         []templateTopologyDomain               `json:"domains,omitempty"`
+	Entrypoints     []templateTopologyEntrypoint           `json:"entrypoints,omitempty"`
 	Services        []inspectGitHubTemplateManifestService `json:"services"`
 	Warnings        []string                               `json:"warnings"`
 	InferenceReport []templateTopologyInference            `json:"inference_report"`
@@ -688,9 +712,12 @@ func (c *Client) ListProjectImageUsage() (projectImageUsageResponse, error) {
 	return response, nil
 }
 
-func (c *Client) GetAppRouteAvailability(id, hostname string) (appRouteAvailability, error) {
+func (c *Client) GetAppRouteAvailability(id, hostname, pathPrefix string) (appRouteAvailability, error) {
 	query := url.Values{}
 	query.Set("hostname", strings.TrimSpace(hostname))
+	if strings.TrimSpace(pathPrefix) != "" {
+		query.Set("path_prefix", strings.TrimSpace(pathPrefix))
+	}
 	relative := path.Join("/v1/apps", id, "route", "availability") + "?" + query.Encode()
 	var response struct {
 		Availability appRouteAvailability `json:"availability"`
@@ -701,9 +728,12 @@ func (c *Client) GetAppRouteAvailability(id, hostname string) (appRouteAvailabil
 	return response.Availability, nil
 }
 
-func (c *Client) PatchAppRoute(id, hostname string) (appRoutePatchResponse, error) {
+func (c *Client) PatchAppRoute(id, hostname, pathPrefix string) (appRoutePatchResponse, error) {
 	var response appRoutePatchResponse
 	request := map[string]string{"hostname": strings.TrimSpace(hostname)}
+	if strings.TrimSpace(pathPrefix) != "" {
+		request["path_prefix"] = strings.TrimSpace(pathPrefix)
+	}
 	if err := c.doJSON(http.MethodPatch, path.Join("/v1/apps", id, "route"), request, &response); err != nil {
 		return appRoutePatchResponse{}, err
 	}

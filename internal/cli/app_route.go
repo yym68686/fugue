@@ -63,9 +63,12 @@ func (c *CLI) newAppRouteShowCommand() *cobra.Command {
 }
 
 func (c *CLI) newAppRouteCheckCommand() *cobra.Command {
-	return &cobra.Command{
+	opts := struct {
+		PathPrefix string
+	}{}
+	cmd := &cobra.Command{
 		Use:   "check <app> <hostname>",
-		Short: "Check whether a primary route hostname is available",
+		Short: "Check whether a primary route hostname and path prefix are available",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
@@ -76,7 +79,7 @@ func (c *CLI) newAppRouteCheckCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			availability, err := client.GetAppRouteAvailability(app.ID, args[1])
+			availability, err := client.GetAppRouteAvailability(app.ID, args[1], opts.PathPrefix)
 			if err != nil {
 				return err
 			}
@@ -91,6 +94,7 @@ func (c *CLI) newAppRouteCheckCommand() *cobra.Command {
 				kvPair{Key: "input", Value: availability.Input},
 				kvPair{Key: "label", Value: availability.Label},
 				kvPair{Key: "hostname", Value: availability.Hostname},
+				kvPair{Key: "path_prefix", Value: availability.PathPrefix},
 				kvPair{Key: "base_domain", Value: availability.BaseDomain},
 				kvPair{Key: "public_url", Value: availability.PublicURL},
 				kvPair{Key: "valid", Value: fmt.Sprintf("%t", availability.Valid)},
@@ -100,12 +104,17 @@ func (c *CLI) newAppRouteCheckCommand() *cobra.Command {
 			)
 		},
 	}
+	cmd.Flags().StringVar(&opts.PathPrefix, "path-prefix", "", "Route path prefix to check (default /)")
+	return cmd
 }
 
 func (c *CLI) newAppRouteSetCommand() *cobra.Command {
-	return &cobra.Command{
+	opts := struct {
+		PathPrefix string
+	}{}
+	cmd := &cobra.Command{
 		Use:   "set <app> <hostname>",
-		Short: "Update the app's primary route hostname",
+		Short: "Update the app's primary route hostname and path prefix",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
@@ -116,7 +125,7 @@ func (c *CLI) newAppRouteSetCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			response, err := client.PatchAppRoute(app.ID, args[1])
+			response, err := client.PatchAppRoute(app.ID, args[1], opts.PathPrefix)
 			if err != nil {
 				return err
 			}
@@ -131,6 +140,7 @@ func (c *CLI) newAppRouteSetCommand() *cobra.Command {
 			pairs := []kvPair{
 				{Key: "app_id", Value: response.App.ID},
 				{Key: "hostname", Value: response.Availability.Hostname},
+				{Key: "path_prefix", Value: response.Availability.PathPrefix},
 				{Key: "public_url", Value: response.Availability.PublicURL},
 				{Key: "available", Value: fmt.Sprintf("%t", response.Availability.Available)},
 				{Key: "current", Value: fmt.Sprintf("%t", response.Availability.Current)},
@@ -144,4 +154,6 @@ func (c *CLI) newAppRouteSetCommand() *cobra.Command {
 			return writeKeyValues(c.stdout, pairs...)
 		},
 	}
+	cmd.Flags().StringVar(&opts.PathPrefix, "path-prefix", "", "Route path prefix to assign (default /)")
+	return cmd
 }

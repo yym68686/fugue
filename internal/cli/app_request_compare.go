@@ -950,7 +950,7 @@ func appPublicBaseURL(app model.App) string {
 		return value
 	}
 	if value := strings.TrimSpace(app.Route.Hostname); value != "" {
-		return "https://" + value
+		return model.AppRoutePublicURL(value, app.Route.PathPrefix)
 	}
 	return ""
 }

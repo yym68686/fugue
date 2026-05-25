@@ -25,7 +25,10 @@ type TopologyDeployPlanService struct {
 	ExistingAppID   string `json:"existing_app_id,omitempty"`
 	ExistingAppName string `json:"existing_app_name,omitempty"`
 	Hostname        string `json:"hostname,omitempty"`
+	PathPrefix      string `json:"path_prefix,omitempty"`
 	PublicURL       string `json:"public_url,omitempty"`
+	DomainName      string `json:"domain_name,omitempty"`
+	EntrypointName  string `json:"entrypoint_name,omitempty"`
 	InternalPort    int    `json:"internal_port,omitempty"`
 }
 

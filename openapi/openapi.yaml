@@ -11423,7 +11423,13 @@ components:
           type: string
         hostname:
           type: string
+        path_prefix:
+          type: string
         public_url:
+          type: string
+        domain_name:
+          type: string
+        entrypoint_name:
           type: string
         internal_port:
           type: integer
@@ -12594,6 +12600,8 @@ components:
       additionalProperties: true
       properties:
         hostname:
+          type: string
+        path_prefix:
           type: string
         serving_mode:
           type: string

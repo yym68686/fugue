@@ -223,6 +223,9 @@ func renderTemplateView(w io.Writer, view templateInspectionView, mode string) e
 		{Key: "topology", Value: view.topologyKind()},
 		{Key: "topology_path", Value: view.topologyPath()},
 		{Key: "primary_service", Value: view.primaryService()},
+		{Key: "domain_count", Value: fmt.Sprintf("%d", len(view.domains()))},
+		{Key: "entrypoint_count", Value: fmt.Sprintf("%d", len(view.entrypoints()))},
+		{Key: "route_count", Value: fmt.Sprintf("%d", view.routeCount())},
 		{Key: "service_count", Value: fmt.Sprintf("%d", len(view.services()))},
 		{Key: "warning_count", Value: fmt.Sprintf("%d", len(view.warnings()))},
 		{Key: "inference_count", Value: fmt.Sprintf("%d", len(view.inferenceReport()))},
@@ -262,6 +265,28 @@ func renderTemplateView(w io.Writer, view templateInspectionView, mode string) e
 		return err
 	}
 
+	if domains := view.domains(); len(domains) > 0 {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w, "[domains]"); err != nil {
+			return err
+		}
+		if err := writeTemplateDomainTable(w, domains); err != nil {
+			return err
+		}
+	}
+	if entrypoints := view.entrypoints(); len(entrypoints) > 0 {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w, "[entrypoints]"); err != nil {
+			return err
+		}
+		if err := writeTemplateEntrypointTable(w, entrypoints); err != nil {
+			return err
+		}
+	}
 	if services := view.services(); len(services) > 0 {
 		if _, err := fmt.Fprintln(w); err != nil {
 			return err
@@ -383,6 +408,28 @@ func (view templateInspectionView) services() []inspectGitHubTemplateManifestSer
 		return view.ComposeStack.Services
 	}
 	return nil
+}
+
+func (view templateInspectionView) domains() []templateTopologyDomain {
+	if view.FugueManifest != nil {
+		return view.FugueManifest.Domains
+	}
+	return nil
+}
+
+func (view templateInspectionView) entrypoints() []templateTopologyEntrypoint {
+	if view.FugueManifest != nil {
+		return view.FugueManifest.Entrypoints
+	}
+	return nil
+}
+
+func (view templateInspectionView) routeCount() int {
+	count := 0
+	for _, entrypoint := range view.entrypoints() {
+		count += len(entrypoint.Routes)
+	}
+	return count
 }
 
 func (view templateInspectionView) warnings() []string {

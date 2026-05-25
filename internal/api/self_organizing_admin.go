@@ -740,14 +740,17 @@ func routeExplainReasons(route model.EdgeRouteBinding) []string {
 }
 
 func routeServingModes(routes []model.EdgeRouteBinding, generatedAt time.Time) []model.RouteServingMode {
-	byHostname := make(map[string]model.RouteServingMode)
+	byRoute := make(map[string]model.RouteServingMode)
 	for _, route := range routes {
 		hostname := normalizeExternalAppDomain(route.Hostname)
 		if hostname == "" {
 			continue
 		}
+		pathPrefix := model.NormalizeAppRoutePathPrefix(route.PathPrefix)
+		key := hostname + "\x00" + pathPrefix
 		candidate := model.RouteServingMode{
 			Hostname:          hostname,
+			PathPrefix:        pathPrefix,
 			ServingMode:       routeServingMode(route),
 			SelectedEdgeGroup: strings.TrimSpace(route.SelectedEdgeGroup),
 			RuntimeEdgeGroup:  strings.TrimSpace(route.RuntimeEdgeGroup),
@@ -756,16 +759,19 @@ func routeServingModes(routes []model.EdgeRouteBinding, generatedAt time.Time) [
 			Reason:            strings.Join(routeExplainReasons(route), "; "),
 			GeneratedAt:       generatedAt,
 		}
-		if existing, ok := byHostname[hostname]; ok && routeServingModeRank(existing.ServingMode) >= routeServingModeRank(candidate.ServingMode) {
+		if existing, ok := byRoute[key]; ok && routeServingModeRank(existing.ServingMode) >= routeServingModeRank(candidate.ServingMode) {
 			continue
 		}
-		byHostname[hostname] = candidate
+		byRoute[key] = candidate
 	}
-	out := make([]model.RouteServingMode, 0, len(byHostname))
-	for _, route := range byHostname {
+	out := make([]model.RouteServingMode, 0, len(byRoute))
+	for _, route := range byRoute {
 		out = append(out, route)
 	}
 	sort.Slice(out, func(i, j int) bool {
+		if out[i].Hostname == out[j].Hostname {
+			return out[i].PathPrefix < out[j].PathPrefix
+		}
 		return out[i].Hostname < out[j].Hostname
 	})
 	return out
