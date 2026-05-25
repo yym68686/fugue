@@ -1266,7 +1266,6 @@ EOF
   append_upgrade_edge_dynamic_values
   append_upgrade_image_prepull_values
   append_upgrade_dns_values
-  printf '%s' "${UPGRADE_OVERRIDE_VALUES_FILE}"
 }
 
 append_upgrade_image_prepull_values() {
@@ -1946,6 +1945,7 @@ deployment_host_path_volume_path() {
 append_headscale_upgrade_values() {
   local existing_host_path=""
   local existing_selector=""
+  local selector_summary=""
   local wrote_block="false"
 
   existing_host_path="$(trim_field "$(deployment_host_path_volume_path "${FUGUE_HEADSCALE_DEPLOYMENT_NAME}" "headscale-data")")"
@@ -1981,6 +1981,14 @@ EOF
 
   if [[ "${wrote_block}" == "true" && -n "${existing_host_path}" && "${FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED}" != "true" && -z "$(trim_field "${existing_selector}")" ]]; then
     fail "existing ${FUGUE_HEADSCALE_DEPLOYMENT_NAME} uses hostPath storage at ${existing_host_path} but has no nodeSelector; set FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED=true with FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR or add a stable headscale.nodeSelector before upgrading"
+  fi
+
+  if [[ -n "${existing_host_path}" ]]; then
+    selector_summary="$(printf '%s' "${existing_selector}" | tr '\n' ',' | sed 's/,$//')"
+    if [[ "${FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED}" == "true" ]]; then
+      selector_summary="${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}"
+    fi
+    log "preserving headscale hostPath storage at ${existing_host_path} with nodeSelector ${selector_summary}"
   fi
 }
 
@@ -3823,7 +3831,8 @@ PY
     fi
   fi
 
-  upgrade_override_values_file="$(write_upgrade_override_values)"
+  write_upgrade_override_values
+  upgrade_override_values_file="${UPGRADE_OVERRIDE_VALUES_FILE}"
   build_dns_helm_set_args
   log "injecting disk-pressure toleration for primary-pinned hostPath control-plane pods"
 
