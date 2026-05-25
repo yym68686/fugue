@@ -54,9 +54,9 @@ func (s *Server) buildAppMoveImpact(app model.App, targetRuntimeID string) model
 			appendCheck("persistent_storage_class", strings.TrimSpace(storage.StorageClassName) != "", "movable RWO storage requires storage_class_name before move")
 		case model.AppPersistentStorageModeSharedProjectRWX:
 			strategy = "shared_rwx_no_copy"
-			appendCheck("persistent_storage_shared", true, "shared project RWX can be remounted on target runtime")
+			appendCheck("persistent_storage_shared", true, "legacy shared project RWX can be remounted on target runtime")
 		default:
-			appendCheck("persistent_storage_migration", false, "persistent storage must be movable_rwo or shared_project_rwx before app move")
+			appendCheck("persistent_storage_migration", false, "persistent storage must be movable_rwo before app move")
 		}
 		impact.Volumes = append(impact.Volumes, model.AppMoveVolumeImpact{
 			Mode:             mode,

@@ -297,7 +297,7 @@ the new persistent_storage representation before applying your changes.
 	}
 	cmd.Flags().StringVar(&opts.StorageSize, "size", "", "Persistent storage size, for example 10Gi")
 	cmd.Flags().StringVar(&opts.StorageClass, "class", "", "Persistent storage class")
-	cmd.Flags().StringVar(&opts.StorageMode, "mode", "", "Persistent storage mode: dedicated_pvc, movable_rwo, or shared_project_rwx")
+	cmd.Flags().StringVar(&opts.StorageMode, "mode", "", "Persistent storage mode: dedicated_pvc or movable_rwo")
 	cmd.Flags().StringArrayVar(&opts.Mounts, "mount", nil, "Directory mount path to persist, for example /data")
 	cmd.Flags().StringArrayVar(&opts.MountFiles, "mount-file", nil, "Persist one file from a local source: <absolute-path>[:mode]=<local-file>")
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for the deploy operation to complete")

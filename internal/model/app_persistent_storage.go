@@ -16,10 +16,8 @@ func NormalizeAppPersistentStorageMode(raw string) (string, error) {
 		return AppPersistentStorageModeDedicatedPVC, nil
 	case AppPersistentStorageModeMovableRWO:
 		return AppPersistentStorageModeMovableRWO, nil
-	case AppPersistentStorageModeSharedProjectRWX:
-		return AppPersistentStorageModeSharedProjectRWX, nil
 	default:
-		return "", fmt.Errorf("persistent storage mode must be dedicated_pvc, movable_rwo, or shared_project_rwx")
+		return "", fmt.Errorf("persistent storage mode must be dedicated_pvc or movable_rwo")
 	}
 }
 
@@ -27,8 +25,7 @@ func AppPersistentStorageSpecUsesSharedProjectRWX(spec *AppPersistentStorageSpec
 	if spec == nil {
 		return false
 	}
-	mode, err := NormalizeAppPersistentStorageMode(spec.Mode)
-	return err == nil && mode == AppPersistentStorageModeSharedProjectRWX
+	return strings.TrimSpace(strings.ToLower(spec.Mode)) == AppPersistentStorageModeSharedProjectRWX
 }
 
 func AppPersistentStorageSpecUsesMovableRWO(spec *AppPersistentStorageSpec) bool {

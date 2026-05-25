@@ -1467,7 +1467,11 @@ func normalizeRuntimeAppPersistentStorageSpec(app model.App) *model.AppPersisten
 	spec := *app.Spec.PersistentStorage
 	mode, err := model.NormalizeAppPersistentStorageMode(spec.Mode)
 	if err != nil {
-		return nil
+		if model.AppPersistentStorageSpecUsesSharedProjectRWX(&spec) {
+			mode = model.AppPersistentStorageModeSharedProjectRWX
+		} else {
+			return nil
+		}
 	}
 	spec.Mode = mode
 	storagePath, err := model.NormalizeAppPersistentStoragePath(spec.StoragePath)

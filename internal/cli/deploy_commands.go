@@ -305,7 +305,7 @@ func bindCommonDeployFlags(cmd *cobra.Command, opts *deployCommonOptions, includ
 	cmd.Flags().StringVar(&opts.StartupCommand, "command", "", "Startup shell command override")
 	cmd.Flags().StringArrayVar(&opts.FileSpecs, "file", nil, "Declarative app file from a local source: <absolute-path>[:mode]=<local-file>")
 	cmd.Flags().StringArrayVar(&opts.SecretFileSpecs, "secret-file", nil, "Secret declarative app file from a local source: <absolute-path>[:mode]=<local-file>")
-	cmd.Flags().StringVar(&opts.StorageMode, "storage-mode", "", "Persistent storage mode: dedicated_pvc, movable_rwo, or shared_project_rwx")
+	cmd.Flags().StringVar(&opts.StorageMode, "storage-mode", "", "Persistent storage mode: dedicated_pvc or movable_rwo")
 	cmd.Flags().StringVar(&opts.StorageSize, "storage-size", "", "Persistent storage size, for example 10Gi")
 	cmd.Flags().StringVar(&opts.StorageClass, "storage-class", "", "Persistent storage class")
 	cmd.Flags().StringArrayVar(&opts.StorageMounts, "mount", nil, "Persistent directory mount path, for example /data")

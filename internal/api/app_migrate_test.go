@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -131,7 +132,7 @@ func TestMigrateAppAllowsManagedPostgresWithoutPersistentStorage(t *testing.T) {
 	}
 }
 
-func TestMigrateAppAllowsSharedProjectRWXPersistentStorage(t *testing.T) {
+func TestCreateAppRejectsSharedProjectRWXPersistentStorage(t *testing.T) {
 	t.Parallel()
 
 	s := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -150,15 +151,7 @@ func TestMigrateAppAllowsSharedProjectRWXPersistentStorage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create source runtime: %v", err)
 	}
-	targetRuntime, _, err := s.CreateRuntime(tenant.ID, "tenant-owned-2", model.RuntimeTypeManagedOwned, "", nil)
-	if err != nil {
-		t.Fatalf("create target runtime: %v", err)
-	}
-	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.write", "app.migrate"})
-	if err != nil {
-		t.Fatalf("create api key: %v", err)
-	}
-	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+	_, err = s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
 		Image:     "ghcr.io/example/demo:latest",
 		RuntimeID: sourceRuntime.ID,
 		Replicas:  1,
@@ -171,20 +164,8 @@ func TestMigrateAppAllowsSharedProjectRWXPersistentStorage(t *testing.T) {
 			SharedSubPath: "argus/sessions/demo",
 		},
 	})
-	if err != nil {
-		t.Fatalf("create app: %v", err)
-	}
-
-	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
-
-	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/migrate", apiKey, map[string]any{
-		"target_runtime_id": targetRuntime.ID,
-	})
-	if recorder.Code != http.StatusAccepted {
-		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
-	}
-	if !strings.Contains(recorder.Body.String(), "\"operation\"") {
-		t.Fatalf("expected operation response body, got %s", recorder.Body.String())
+	if !errors.Is(err, store.ErrInvalidInput) {
+		t.Fatalf("expected invalid input for disabled shared_project_rwx, got %v", err)
 	}
 }
 
