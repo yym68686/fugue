@@ -53,6 +53,7 @@ PRIMARY_POSTGRES_DATA_ROOT="${FUGUE_PRIMARY_POSTGRES_DATA_ROOT:-/var/lib/fugue/p
 PRIMARY_POSTGRES_IMAGE="${FUGUE_PRIMARY_POSTGRES_IMAGE:-docker.io/library/postgres:16-alpine}"
 FUGUE_DEFAULT_REGISTRY_PULL_BASE="${FUGUE_DEFAULT_REGISTRY_PULL_BASE:-}"
 DNS_HELM_SET_ARGS=()
+HEADSCALE_HELM_SET_ARGS=()
 
 ensure_control_plane_observability_via_node_janitor() {
   if [[ -z "${KUBECTL:-}" ]]; then
@@ -1948,6 +1949,7 @@ append_headscale_upgrade_values() {
   local selector_summary=""
   local wrote_block="false"
 
+  HEADSCALE_HELM_SET_ARGS=()
   existing_host_path="$(trim_field "$(deployment_host_path_volume_path "${FUGUE_HEADSCALE_DEPLOYMENT_NAME}" "headscale-data")")"
   existing_selector="$(deployment_node_selector_pairs "${FUGUE_HEADSCALE_DEPLOYMENT_NAME}")"
 
@@ -1964,6 +1966,10 @@ append_headscale_upgrade_values() {
     mode: hostPath
     hostPath: $(yaml_quote "${existing_host_path}")
 EOF
+    HEADSCALE_HELM_SET_ARGS+=(
+      --set-string "headscale.persistence.mode=hostPath"
+      --set-string "headscale.persistence.hostPath=${existing_host_path}"
+    )
   fi
 
   if [[ "${FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED}" == "true" ]]; then
@@ -1972,11 +1978,17 @@ EOF
   controlPlaneSingletonNodeSelector:
 $(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "    ")
 EOF
+    HEADSCALE_HELM_SET_ARGS+=(
+      --set-json "headscale.controlPlaneSingletonNodeSelector=$(selector_json "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}")"
+    )
   elif [[ -n "$(trim_field "${existing_selector}")" ]]; then
     cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<EOF
   nodeSelector:
 $(selector_yaml "${existing_selector}" "    ")
 EOF
+    HEADSCALE_HELM_SET_ARGS+=(
+      --set-json "headscale.nodeSelector=$(selector_json "${existing_selector}")"
+    )
   fi
 
   if [[ "${wrote_block}" == "true" && -n "${existing_host_path}" && "${FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED}" != "true" && -z "$(trim_field "${existing_selector}")" ]]; then
@@ -3847,6 +3859,7 @@ PY
     --history-max 20 \
     --timeout "${FUGUE_HELM_TIMEOUT}" \
     -f "${upgrade_override_values_file}" \
+    "${HEADSCALE_HELM_SET_ARGS[@]}" \
     "${DNS_HELM_SET_ARGS[@]}" \
     --set-string api.image.repository="${FUGUE_API_IMAGE_REPOSITORY}" \
     --set-string api.image.tag="${FUGUE_API_IMAGE_TAG}" \
