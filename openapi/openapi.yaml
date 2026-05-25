@@ -8267,6 +8267,39 @@ components:
           type: array
           items:
             type: string
+    ClusterNodeControlPlaneIncident:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        path:
+          type: string
+        archive_path:
+          type: string
+        primary_failure_signal:
+          type: string
+        root_cause_status:
+          type: string
+        evidence_counts:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int32
+        baseline_first:
+          type: string
+        baseline_last:
+          type: string
+        selected_evidence:
+          type: array
+          items:
+            type: string
+        next_checks:
+          type: array
+          items:
+            type: string
+        diagnosis_text:
+          type: string
     ClusterNodeDiagnosis:
       type: object
       additionalProperties: false
@@ -8298,6 +8331,8 @@ components:
             $ref: "#/components/schemas/ClusterEvent"
         metrics:
           $ref: "#/components/schemas/ClusterNodeMetricsDiagnosis"
+        control_plane_incident:
+          $ref: "#/components/schemas/ClusterNodeControlPlaneIncident"
         warnings:
           type: array
           items:

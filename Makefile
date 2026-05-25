@@ -7,10 +7,12 @@ test:
 	bash ./scripts/scan_hardcoded_production_facts.sh
 	env GOCACHE=$(GOCACHE) go run ./cmd/fugue-openapi-gen -spec openapi/openapi.yaml -routes-out internal/api/routes_gen.go -spec-out internal/apispec/spec_gen.go -check
 	bash ./scripts/test_render_fugue_systemd_units.sh
+	bash ./scripts/test_control_plane_observability_assets.sh
 	env GOCACHE=$(GOCACHE) go test ./...
 
 test-scripts:
 	bash ./scripts/test_render_fugue_systemd_units.sh
+	bash ./scripts/test_control_plane_observability_assets.sh
 
 generate-openapi:
 	env GOCACHE=$(GOCACHE) go generate ./internal/apispec

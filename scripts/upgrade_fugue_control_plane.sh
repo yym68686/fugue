@@ -76,8 +76,124 @@ ensure_control_plane_observability() {
     return 0
   fi
 
-  mkdir -p /var/log/fugue/incidents /var/log/journal /etc/systemd/system/k3s.service.d
-  ensure_local_k3s_audit_and_metrics_config
+  mkdir -p /var/log/fugue/incidents /var/log/fugue/control-plane-baseline /var/log/journal /etc/systemd/system/k3s.service.d
+
+  install -m 0755 /dev/stdin /usr/local/bin/fugue-control-plane-baseline-sample <<'EOF'
+#!/usr/bin/env bash
+set -u
+
+out_dir="/var/log/fugue/control-plane-baseline"
+out="${out_dir}/samples.log"
+lock="${out_dir}/samples.lock"
+max_lines="${FUGUE_CONTROL_PLANE_BASELINE_MAX_LINES:-14400}"
+mkdir -p "${out_dir}"
+
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"${lock}"
+  flock -n 9 || exit 0
+fi
+
+field_from_meminfo() {
+  local name="$1"
+  awk -v name="${name}" '$1 == name ":" {print $2; exit}' /proc/meminfo 2>/dev/null || true
+}
+
+df_available_kb() {
+  local path="$1"
+  df -Pk "${path}" 2>/dev/null | awk 'NR == 2 {print $4; exit}' || true
+}
+
+dir_size_bytes() {
+  local path="$1"
+  if [[ -d "${path}" ]]; then
+    du -sb "${path}" 2>/dev/null | awk '{print $1; exit}' || true
+  fi
+}
+
+psi_avg10() {
+  local path="$1"
+  local class="$2"
+  awk -v class="${class}" '$1 == class {
+    for (i = 2; i <= NF; i++) {
+      if ($i ~ /^avg10=/) {
+        sub(/^avg10=/, "", $i)
+        print $i
+        exit
+      }
+    }
+  }' "${path}" 2>/dev/null || true
+}
+
+systemd_show_flat() {
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl show k3s.service \
+      -p ActiveState \
+      -p SubState \
+      -p Result \
+      -p NRestarts \
+      -p ExecMainStatus \
+      -p MemoryCurrent \
+      -p MemoryPeak \
+      -p TasksCurrent \
+      -p CPUUsageNSec 2>/dev/null |
+      tr '\n' ' ' |
+      sed 's/[[:space:]]*$//'
+  fi
+}
+
+cgroup_flat() {
+  local file="$1"
+  if [[ -r "${file}" ]]; then
+    tr '\n' ',' <"${file}" | sed 's/,$//'
+  fi
+}
+
+timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+boot_id="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+uptime_seconds="$(awk '{print int($1); exit}' /proc/uptime 2>/dev/null || true)"
+loadavg="$(cat /proc/loadavg 2>/dev/null || true)"
+mem_available_kb="$(field_from_meminfo MemAvailable)"
+swap_free_kb="$(field_from_meminfo SwapFree)"
+root_avail_kb="$(df_available_kb /)"
+rancher_avail_kb="$(df_available_kb /var/lib/rancher)"
+etcd_dir_bytes="$(dir_size_bytes /var/lib/rancher/k3s/server/db/etcd)"
+cpu_psi_some_avg10="$(psi_avg10 /proc/pressure/cpu some)"
+io_psi_some_avg10="$(psi_avg10 /proc/pressure/io some)"
+io_psi_full_avg10="$(psi_avg10 /proc/pressure/io full)"
+mem_psi_some_avg10="$(psi_avg10 /proc/pressure/memory some)"
+mem_psi_full_avg10="$(psi_avg10 /proc/pressure/memory full)"
+cgroup_dir="/sys/fs/cgroup/system.slice/k3s.service"
+k3s_memory_current_bytes="$(cat "${cgroup_dir}/memory.current" 2>/dev/null || true)"
+k3s_memory_peak_bytes="$(cat "${cgroup_dir}/memory.peak" 2>/dev/null || true)"
+k3s_pids_current="$(cat "${cgroup_dir}/pids.current" 2>/dev/null || true)"
+k3s_memory_events="$(cgroup_flat "${cgroup_dir}/memory.events")"
+k3s_cpu_stat="$(cgroup_flat "${cgroup_dir}/cpu.stat")"
+k3s_io_stat="$(cgroup_flat "${cgroup_dir}/io.stat")"
+k3s_systemd="$(systemd_show_flat)"
+
+{
+  printf 'timestamp_utc=%s ' "${timestamp}"
+  printf 'boot_id=%s ' "${boot_id}"
+  printf 'uptime_seconds=%s ' "${uptime_seconds}"
+  printf 'loadavg="%s" ' "${loadavg}"
+  printf 'mem_available_kb=%s swap_free_kb=%s ' "${mem_available_kb}" "${swap_free_kb}"
+  printf 'root_avail_kb=%s rancher_avail_kb=%s etcd_dir_bytes=%s ' "${root_avail_kb}" "${rancher_avail_kb}" "${etcd_dir_bytes}"
+  printf 'cpu_psi_some_avg10=%s io_psi_some_avg10=%s io_psi_full_avg10=%s mem_psi_some_avg10=%s mem_psi_full_avg10=%s ' \
+    "${cpu_psi_some_avg10}" "${io_psi_some_avg10}" "${io_psi_full_avg10}" "${mem_psi_some_avg10}" "${mem_psi_full_avg10}"
+  printf 'k3s_memory_current_bytes=%s k3s_memory_peak_bytes=%s k3s_pids_current=%s ' \
+    "${k3s_memory_current_bytes}" "${k3s_memory_peak_bytes}" "${k3s_pids_current}"
+  printf 'k3s_memory_events="%s" k3s_cpu_stat="%s" k3s_io_stat="%s" k3s_systemd="%s"\n' \
+    "${k3s_memory_events}" "${k3s_cpu_stat}" "${k3s_io_stat}" "${k3s_systemd}"
+} >>"${out}"
+
+if [[ "${max_lines}" =~ ^[0-9]+$ ]] && (( max_lines > 0 )); then
+  line_count="$(wc -l <"${out}" 2>/dev/null || printf '0')"
+  if [[ "${line_count}" =~ ^[0-9]+$ ]] && (( line_count > max_lines )); then
+    tmp="${out}.tmp"
+    tail -n "${max_lines}" "${out}" >"${tmp}" && mv "${tmp}" "${out}"
+  fi
+fi
+EOF
 
   install -m 0755 /dev/stdin /usr/local/bin/fugue-k3s-incident-snapshot <<'EOF'
 #!/usr/bin/env bash
@@ -88,6 +204,16 @@ timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 root="/var/log/fugue/incidents/k3s-${timestamp}"
 mkdir -p "${root}"
 
+run_with_timeout() {
+  local duration="$1"
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --kill-after=5s "${duration}" "$@"
+  else
+    "$@"
+  fi
+}
+
 run_capture() {
   local name="$1"
   shift
@@ -95,28 +221,164 @@ run_capture() {
     printf '$'
     printf ' %q' "$@"
     printf '\n\n'
-    timeout --kill-after=2s 30s "$@" 2>&1 || true
+    run_with_timeout 45s "$@" 2>&1 || true
   } >"${root}/${name}.log"
+}
+
+count_matches() {
+  local pattern="$1"
+  shift
+  grep -Eih "${pattern}" "$@" 2>/dev/null | wc -l | awk '{print $1}'
+}
+
+first_matches() {
+  local label="$1"
+  local pattern="$2"
+  shift 2
+  printf '  %s:\n' "${label}"
+  grep -Eih "${pattern}" "$@" 2>/dev/null | head -8 | sed 's/^/    /' || true
+}
+
+write_diagnosis() {
+  local k3s_log="${root}/k3s-journal.log"
+  local kernel_log="${root}/kernel-journal.log"
+  local systemd_log="${root}/systemctl-status.log"
+  local cgroup_log="${root}/k3s-cgroup.log"
+  local baseline_log="${root}/baseline-samples.log"
+  local primary="no_single_failure_signal_identified"
+  local systemd_failure leader_lost lease_timeout apiserver_timeout etcd_slow runtime_errors oom_memory disk_io kernel_fatal hung_task disk_pressure
+
+  systemd_failure="$(count_matches 'Main process exited|Failed with result|status=[0-9]+/FAILURE|Result=exit-code|ExecMainStatus=[1-9]' "${k3s_log}" "${systemd_log}")"
+  leader_lost="$(count_matches 'leaderelection lost|lost lease|failed to renew lease|Failed to update lock|error retrieving resource lock' "${k3s_log}")"
+  lease_timeout="$(count_matches 'leader lease|Lease.*timeout|context deadline exceeded.*lease|timed out waiting for.*lease|Operation cannot be fulfilled.*Lease' "${k3s_log}")"
+  apiserver_timeout="$(count_matches 'http: Handler timeout|apiserver.*timeout|context deadline exceeded|Trace\\[.*total time|too old resource version|client rate limiter Wait returned an error' "${k3s_log}")"
+  etcd_slow="$(count_matches 'apply request took too long|etcdserver: request timed out|waiting for ReadIndex response took too long|slow fdatasync|slow apply|leader changed|database space exceeded|etcdserver: too many requests' "${k3s_log}")"
+  runtime_errors="$(count_matches 'containerd|failed to create container|shim disconnected|PLEG|CRI|runtime service' "${k3s_log}")"
+  oom_memory="$(count_matches 'Out of memory|Killed process|oom-kill|memory allocation failure|oom [1-9]|oom_kill [1-9]' "${kernel_log}" "${cgroup_log}")"
+  disk_io="$(count_matches 'I/O error|Buffer I/O|blk_update_request|EXT4-fs error|nvme.*timeout|ata[0-9].*failed|read-only file system|No space left on device' "${kernel_log}" "${k3s_log}")"
+  kernel_fatal="$(count_matches 'Kernel panic|kernel BUG|BUG:|Oops:|general protection fault|segfault' "${kernel_log}")"
+  hung_task="$(count_matches 'blocked for more than|hung task|soft lockup|watchdog: BUG|RCU stall' "${kernel_log}")"
+  disk_pressure="$(count_matches 'DiskPressure|eviction manager|image garbage collection failed|nodefs|imagefs' "${k3s_log}")"
+
+  if (( kernel_fatal > 0 )); then
+    primary="kernel_fatal_signal_evidence"
+  elif (( oom_memory > 0 )); then
+    primary="kernel_or_cgroup_oom_evidence"
+  elif (( disk_io > 0 )); then
+    primary="kernel_or_disk_io_error_evidence"
+  elif (( leader_lost > 0 && (apiserver_timeout > 0 || etcd_slow > 0 || lease_timeout > 0) )); then
+    primary="leader_election_lost_after_apiserver_or_etcd_timeouts"
+  elif (( etcd_slow > 0 )); then
+    primary="etcd_slow_request_evidence"
+  elif (( apiserver_timeout > 0 )); then
+    primary="apiserver_timeout_evidence"
+  elif (( hung_task > 0 )); then
+    primary="kernel_scheduler_or_lockup_evidence"
+  elif (( systemd_failure > 0 )); then
+    primary="systemd_recorded_k3s_process_failure"
+  fi
+
+  {
+    printf 'timestamp_utc=%s\n' "${timestamp}"
+    printf 'unit=%s\n' "${unit}"
+    printf 'primary_failure_signal=%s\n' "${primary}"
+    printf 'root_cause_status=evidence_summary_only_not_a_root_cause_claim\n'
+    printf '\n'
+    printf 'evidence_counts:\n'
+    printf '  systemd_failure=%s\n' "${systemd_failure}"
+    printf '  leader_election_lost=%s\n' "${leader_lost}"
+    printf '  lease_timeout=%s\n' "${lease_timeout}"
+    printf '  apiserver_timeout=%s\n' "${apiserver_timeout}"
+    printf '  etcd_slow_or_timeout=%s\n' "${etcd_slow}"
+    printf '  container_runtime_errors=%s\n' "${runtime_errors}"
+    printf '  oom_or_memory_pressure=%s\n' "${oom_memory}"
+    printf '  disk_or_io_errors=%s\n' "${disk_io}"
+    printf '  kernel_fatal=%s\n' "${kernel_fatal}"
+    printf '  hung_task_or_watchdog=%s\n' "${hung_task}"
+    printf '  disk_pressure_or_eviction=%s\n' "${disk_pressure}"
+    printf '\n'
+    if [[ -s "${baseline_log}" ]]; then
+      printf 'baseline_samples=%s\n' "$(wc -l <"${baseline_log}" 2>/dev/null || printf '0')"
+      printf 'baseline_first=%s\n' "$(head -1 "${baseline_log}" 2>/dev/null || true)"
+      printf 'baseline_last=%s\n' "$(tail -1 "${baseline_log}" 2>/dev/null || true)"
+      printf '\n'
+    fi
+    printf 'selected_evidence:\n'
+    first_matches 'systemd failure' 'Main process exited|Failed with result|status=[0-9]+/FAILURE|Result=exit-code|ExecMainStatus=[1-9]' "${k3s_log}" "${systemd_log}"
+    first_matches 'leader lease' 'leaderelection lost|lost lease|failed to renew lease|Failed to update lock|error retrieving resource lock|leader lease' "${k3s_log}"
+    first_matches 'apiserver or client timeout' 'http: Handler timeout|apiserver.*timeout|context deadline exceeded|Trace\\[.*total time|client rate limiter Wait returned an error' "${k3s_log}"
+    first_matches 'etcd slow path' 'apply request took too long|etcdserver: request timed out|waiting for ReadIndex response took too long|slow fdatasync|slow apply|etcdserver: too many requests' "${k3s_log}"
+    first_matches 'kernel memory or disk' 'Out of memory|Killed process|oom-kill|I/O error|Buffer I/O|EXT4-fs error|nvme.*timeout|No space left on device|read-only file system' "${kernel_log}" "${k3s_log}"
+    printf '\n'
+    printf 'next_checks:\n'
+    case "${primary}" in
+      leader_election_lost_after_apiserver_or_etcd_timeouts|etcd_slow_request_evidence|apiserver_timeout_evidence)
+        printf '  - Compare baseline_last CPU/IO/memory pressure with k3s-cgroup.log and etcd-metrics-key.log.\n'
+        printf '  - Inspect kube-metrics-key.log for apiserver request latency and etcd request latency near the restart.\n'
+        printf '  - Inspect k3s-journal-key-events.log for the first timeout before leader election was lost.\n'
+        ;;
+      kernel_or_cgroup_oom_evidence)
+        printf '  - Inspect kernel-key-events.log and k3s-cgroup.log memory.events for the killed process and cgroup OOM counters.\n'
+        ;;
+      kernel_or_disk_io_error_evidence)
+        printf '  - Inspect kernel-key-events.log, filesystems.log, iostat.log, and k3s-cgroup.log io.stat for disk failure or saturation evidence.\n'
+        ;;
+      *)
+        printf '  - Inspect k3s-journal-key-events.log first; then compare baseline-samples.log with pressure.log and systemctl-show.log.\n'
+        ;;
+    esac
+  } >"${root}/diagnosis.txt"
 }
 
 {
   printf 'timestamp_utc=%s\n' "${timestamp}"
   printf 'unit=%s\n' "${unit}"
+  printf 'boot_id=%s\n' "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
   hostnamectl 2>/dev/null || hostname
   uptime
 } >"${root}/host.txt" 2>&1 || true
 
 run_capture systemctl-status systemctl status "${unit}" --no-pager -l
-run_capture k3s-journal journalctl -u "${unit}" --since "20 minutes ago" --no-pager -o short-iso -l
-run_capture kernel-journal journalctl -k --since "20 minutes ago" --no-pager -o short-iso -l
+run_capture systemctl-show systemctl show "${unit}" \
+  -p Id \
+  -p ActiveState \
+  -p SubState \
+  -p Result \
+  -p NRestarts \
+  -p ExecMainStartTimestamp \
+  -p ExecMainExitTimestamp \
+  -p ExecMainCode \
+  -p ExecMainStatus \
+  -p MemoryCurrent \
+  -p MemoryPeak \
+  -p TasksCurrent \
+  -p CPUUsageNSec
+run_capture systemd-critical-chain systemd-analyze critical-chain "${unit}"
+run_capture k3s-journal journalctl -u "${unit}" --since "90 minutes ago" --no-pager -o short-iso -l
+run_capture k3s-journal-key-events sh -c 'journalctl -u "$1" --since "90 minutes ago" --no-pager -o short-iso -l | grep -Ei "Main process exited|Failed with result|status=[0-9]+/FAILURE|leaderelection lost|lost lease|failed to renew lease|leader lease|apply request took too long|http: Handler timeout|context deadline exceeded|Trace\\[|etcdserver|ReadIndex|slow fdatasync|slow apply|too many requests|panic|fatal|No space left|DiskPressure|eviction|containerd|PLEG" || true' sh "${unit}"
+run_capture container-runtime-journal journalctl -u k3s -u containerd --since "90 minutes ago" --no-pager -o short-iso -l
+run_capture warning-journal journalctl -p warning --since "90 minutes ago" --no-pager -o short-iso -l
+run_capture kernel-journal journalctl -k --since "90 minutes ago" --no-pager -o short-iso -l
+run_capture kernel-key-events sh -c 'journalctl -k --since "90 minutes ago" --no-pager -o short-iso -l | grep -Ei "oom|out of memory|killed process|blocked for more than|hung task|watchdog|RCU stall|panic|BUG:|Oops:|segfault|I/O error|Buffer I/O|EXT4-fs error|nvme.*timeout|ata[0-9].*failed|read-only file system|No space left" || true'
+run_capture dmesg-tail sh -c 'dmesg --ctime --color=never 2>/dev/null | tail -400'
 run_capture memory free -h
 run_capture filesystems df -h
 run_capture processes sh -c 'ps -eo pid,ppid,stat,pcpu,pmem,rss,comm,args --sort=-pcpu | head -80'
 run_capture sockets sh -c 'ss -s; ss -tanp | head -120'
+run_capture network sh -c 'ip -s link; echo; ip route; echo; command -v nstat >/dev/null 2>&1 && nstat -az || true; command -v conntrack >/dev/null 2>&1 && conntrack -S || true'
 run_capture pressure sh -c 'for f in /proc/pressure/*; do echo "===== $f ====="; cat "$f"; done'
 run_capture loadavg cat /proc/loadavg
 run_capture meminfo cat /proc/meminfo
+run_capture k3s-cgroup sh -c 'cg=/sys/fs/cgroup/system.slice/k3s.service; if [ -d "$cg" ]; then for f in memory.current memory.peak memory.events memory.events.local cpu.stat io.stat pids.current pids.max; do echo "===== $cg/$f ====="; cat "$cg/$f" 2>/dev/null || true; done; fi'
 run_capture etcd-size sh -c 'du -sh /var/lib/rancher/k3s/server/db/etcd 2>/dev/null || true; find /var/lib/rancher/k3s/server/db/etcd -maxdepth 3 -type f -printf "%s %p\n" 2>/dev/null | sort -nr | head -40'
+run_capture k3s-config-redacted sh -c 'if [ -r /etc/rancher/k3s/config.yaml ]; then sed -E "s/^([[:space:]]*[^#[:space:]]*(token|secret|password|key)[^:]*:).*/\\1 <redacted>/I" /etc/rancher/k3s/config.yaml | tail -200; fi'
+run_capture k3s-token-stat sh -c 'if [ -e /var/lib/rancher/k3s/server/token ]; then stat -c "%n mode=%a owner=%U:%G size=%s mtime=%y" /var/lib/rancher/k3s/server/token 2>/dev/null || ls -l /var/lib/rancher/k3s/server/token; fi'
+if [[ -f /var/log/fugue/control-plane-baseline/samples.log ]]; then
+  tail -n 720 /var/log/fugue/control-plane-baseline/samples.log >"${root}/baseline-samples.log" 2>/dev/null || true
+fi
+if compgen -G "/var/log/fugue/kubernetes/audit.log*" >/dev/null 2>&1; then
+  run_capture kube-audit-tail sh -c 'for f in /var/log/fugue/kubernetes/audit.log*; do echo "===== $f ====="; case "$f" in *.gz) gzip -dc "$f" 2>/dev/null | tail -400 ;; *) tail -n 400 "$f" 2>/dev/null ;; esac; done'
+fi
 
 if command -v vmstat >/dev/null 2>&1; then
   run_capture vmstat vmstat 1 10
@@ -126,17 +388,61 @@ if command -v iostat >/dev/null 2>&1; then
 fi
 if command -v sar >/dev/null 2>&1; then
   run_capture sar-cpu sar -u -r -q -b -d -S -W -n DEV 1 5
+  run_capture sar-recent sh -c 'sar -A 2>/dev/null | tail -500'
 fi
 if command -v k3s >/dev/null 2>&1; then
+  run_capture crictl-info k3s crictl info
+  run_capture crictl-ps k3s crictl ps -a
+  run_capture crictl-stats k3s crictl stats
+  run_capture kubectl-nodes k3s kubectl get nodes -o wide
+  run_capture kubectl-pods k3s kubectl get pods -A -o wide
+  run_capture kubectl-leases k3s kubectl get leases -A
   run_capture kube-readyz k3s kubectl get --raw=/readyz?verbose
+  run_capture kube-livez k3s kubectl get --raw=/livez?verbose
   run_capture kube-metrics k3s kubectl get --raw=/metrics
+  run_capture kube-metrics-key sh -c 'k3s kubectl get --raw=/metrics | grep -E "^(apiserver_request_duration_seconds|apiserver_storage_objects|etcd_request_duration_seconds|etcd_db_total_size|rest_client_request_duration_seconds|workqueue_|process_|go_)" | head -5000'
   run_capture kube-events k3s kubectl get events -A --sort-by=.lastTimestamp
 fi
 if command -v curl >/dev/null 2>&1; then
   run_capture etcd-metrics curl -fsS --max-time 15 http://127.0.0.1:2381/metrics
+  run_capture etcd-metrics-key sh -c 'curl -fsS --max-time 15 http://127.0.0.1:2381/metrics | grep -E "^(etcd_disk_wal_fsync_duration_seconds|etcd_disk_backend_commit_duration_seconds|etcd_server_leader_changes_seen_total|etcd_server_proposals|etcd_mvcc_db_total_size_in_bytes|grpc_server_handled_total|process_|go_)" | head -5000'
 fi
 
+write_diagnosis
 tar -C "$(dirname "${root}")" -czf "${root}.tar.gz" "$(basename "${root}")" 2>/dev/null || true
+ln -sfn "$(basename "${root}")" /var/log/fugue/incidents/latest-k3s 2>/dev/null || true
+ln -sfn "$(basename "${root}.tar.gz")" /var/log/fugue/incidents/latest-k3s.tar.gz 2>/dev/null || true
+find /var/log/fugue/incidents -maxdepth 1 -type f -name 'k3s-*.tar.gz' -mtime +14 -delete 2>/dev/null || true
+find /var/log/fugue/incidents -maxdepth 1 -type d -name 'k3s-*' -mtime +14 -exec rm -rf {} + 2>/dev/null || true
+EOF
+
+  cat >/etc/systemd/system/fugue-control-plane-baseline.service <<'EOF'
+[Unit]
+Description=Record Fugue control-plane host baseline sample
+Documentation=https://github.com/yym68686/fugue
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fugue-control-plane-baseline-sample
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+EOF
+
+  cat >/etc/systemd/system/fugue-control-plane-baseline.timer <<'EOF'
+[Unit]
+Description=Record Fugue control-plane host baseline samples
+Documentation=https://github.com/yym68686/fugue
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Persistent=false
+Unit=fugue-control-plane-baseline.service
+
+[Install]
+WantedBy=timers.target
 EOF
 
   cat >/etc/systemd/system/fugue-k3s-failure@.service <<'EOF'
@@ -156,7 +462,10 @@ EOF
 
   if command_exists systemctl; then
     systemctl daemon-reload || true
+    systemctl enable --now fugue-control-plane-baseline.timer >/dev/null 2>&1 || true
   fi
+  # The k3s config step can restart k3s, so the failure hook must already exist.
+  ensure_local_k3s_audit_and_metrics_config
 
   if command_exists apt-get && ! command_exists sar; then
     log "installing sysstat for host-level control-plane history"

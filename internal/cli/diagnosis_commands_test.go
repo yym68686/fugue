@@ -174,6 +174,23 @@ func TestRunAdminClusterNodeInspectShowsHostEvidence(t *testing.T) {
 					"fresh node summary unavailable: service unavailable"
 				]
 			},
+			"control_plane_incident":{
+				"name":"k3s-20260525T022353Z",
+				"archive_path":"/var/log/fugue/incidents/k3s-20260525T022353Z.tar.gz",
+				"primary_failure_signal":"leader_election_lost_after_apiserver_or_etcd_timeouts",
+				"root_cause_status":"evidence_summary_only_not_a_root_cause_claim",
+				"evidence_counts":{
+					"leader_election_lost":1,
+					"etcd_slow_or_timeout":3
+				},
+				"selected_evidence":[
+					"leader lease:",
+					"leaderelection lost"
+				],
+				"next_checks":[
+					"Inspect k3s-journal-key-events.log for the first timeout before leader election was lost."
+				]
+			},
 			"warnings":[
 				"cluster events history is partial"
 			]
@@ -203,6 +220,10 @@ func TestRunAdminClusterNodeInspectShowsHostEvidence(t *testing.T) {
 		"metrics",
 		"status=missing",
 		"metrics-server scrape missing for node gcp1",
+		"control_plane_incident",
+		"primary_failure_signal=leader_election_lost_after_apiserver_or_etcd_timeouts",
+		"etcd_slow_or_timeout=3",
+		"next_check=Inspect k3s-journal-key-events.log for the first timeout before leader election was lost.",
 		"events",
 		"DiskPressure",
 	} {

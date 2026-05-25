@@ -187,6 +187,17 @@ func renderClusterNodeDiagnosis(w io.Writer, diagnosis clusterNodeDiagnosis) err
 			return err
 		}
 	}
+	if diagnosis.ControlPlaneIncident != nil {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w, "control_plane_incident"); err != nil {
+			return err
+		}
+		if err := renderClusterNodeControlPlaneIncident(w, diagnosis.ControlPlaneIncident); err != nil {
+			return err
+		}
+	}
 	if len(diagnosis.Journal) > 0 {
 		if _, err := fmt.Fprintln(w); err != nil {
 			return err
@@ -281,6 +292,49 @@ func renderClusterNodeDiskDiagnosis(w io.Writer, diagnosis clusterNodeDiagnosis)
 		}
 	}
 	return tw.Flush()
+}
+
+func renderClusterNodeControlPlaneIncident(w io.Writer, incident *clusterNodeControlPlaneIncident) error {
+	if incident == nil {
+		return nil
+	}
+	if err := writeKeyValues(w,
+		kvPair{Key: "name", Value: strings.TrimSpace(incident.Name)},
+		kvPair{Key: "primary_failure_signal", Value: strings.TrimSpace(incident.PrimaryFailureSignal)},
+		kvPair{Key: "root_cause_status", Value: strings.TrimSpace(incident.RootCauseStatus)},
+		kvPair{Key: "archive_path", Value: strings.TrimSpace(incident.ArchivePath)},
+		kvPair{Key: "path", Value: strings.TrimSpace(incident.Path)},
+		kvPair{Key: "baseline_first", Value: strings.TrimSpace(incident.BaselineFirst)},
+		kvPair{Key: "baseline_last", Value: strings.TrimSpace(incident.BaselineLast)},
+	); err != nil {
+		return err
+	}
+	if len(incident.EvidenceCounts) > 0 {
+		if _, err := fmt.Fprintln(w, "evidence_counts"); err != nil {
+			return err
+		}
+		keys := make([]string, 0, len(incident.EvidenceCounts))
+		for key := range incident.EvidenceCounts {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if _, err := fmt.Fprintf(w, "%s=%d\n", key, incident.EvidenceCounts[key]); err != nil {
+				return err
+			}
+		}
+	}
+	for _, evidence := range incident.SelectedEvidence {
+		if _, err := fmt.Fprintf(w, "evidence=%s\n", strings.TrimSpace(evidence)); err != nil {
+			return err
+		}
+	}
+	for _, check := range incident.NextChecks {
+		if _, err := fmt.Fprintf(w, "next_check=%s\n", strings.TrimSpace(check)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func renderClusterNodeJournalDiagnosis(w io.Writer, diagnosis clusterNodeDiagnosis) error {

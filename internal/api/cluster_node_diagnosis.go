@@ -49,6 +49,34 @@ if chroot /host /bin/sh -lc 'command -v journalctl >/dev/null 2>&1'; then
 fi
 `
 
+const clusterNodeControlPlaneIncidentScript = `
+set -euo pipefail
+chroot /host /bin/sh -lc '
+base=/var/log/fugue/incidents
+[ -d "$base" ] || exit 0
+latest=""
+if [ -e "$base/latest-k3s" ]; then
+  latest="$base/latest-k3s"
+elif command -v find >/dev/null 2>&1; then
+  latest="$(find "$base" -maxdepth 1 -type d -name "k3s-*" -printf "%T@ %p\n" 2>/dev/null | sort -nr | awk "NR == 1 {print \$2}")"
+fi
+[ -n "$latest" ] && [ -d "$latest" ] || exit 0
+if command -v readlink >/dev/null 2>&1; then
+  resolved="$(readlink -f "$latest" 2>/dev/null || true)"
+  [ -n "$resolved" ] && latest="$resolved"
+fi
+name="$(basename "$latest")"
+archive="$base/${name}.tar.gz"
+printf "__FUGUE_FIELD__\tname\t%s\n" "$name"
+printf "__FUGUE_FIELD__\tpath\t%s\n" "$latest"
+[ -f "$archive" ] && printf "__FUGUE_FIELD__\tarchive_path\t%s\n" "$archive"
+if [ -f "$latest/diagnosis.txt" ]; then
+  printf "__FUGUE_DIAGNOSIS_BEGIN__\n"
+  sed "s/\r$//" "$latest/diagnosis.txt" | head -200
+fi
+'
+`
+
 type clusterNodeFilesystemUsage struct {
 	Filesystem     string   `json:"filesystem,omitempty"`
 	MountPath      string   `json:"mount_path"`
@@ -76,17 +104,32 @@ type clusterNodeMetricsDiagnosis struct {
 	Warnings []string `json:"warnings"`
 }
 
+type clusterNodeControlPlaneIncident struct {
+	Name                 string         `json:"name,omitempty"`
+	Path                 string         `json:"path,omitempty"`
+	ArchivePath          string         `json:"archive_path,omitempty"`
+	PrimaryFailureSignal string         `json:"primary_failure_signal,omitempty"`
+	RootCauseStatus      string         `json:"root_cause_status,omitempty"`
+	EvidenceCounts       map[string]int `json:"evidence_counts,omitempty"`
+	BaselineFirst        string         `json:"baseline_first,omitempty"`
+	BaselineLast         string         `json:"baseline_last,omitempty"`
+	SelectedEvidence     []string       `json:"selected_evidence,omitempty"`
+	NextChecks           []string       `json:"next_checks,omitempty"`
+	DiagnosisText        string         `json:"diagnosis_text,omitempty"`
+}
+
 type clusterNodeDiagnosis struct {
-	Node             *model.ClusterNode           `json:"node,omitempty"`
-	Summary          string                       `json:"summary"`
-	JanitorNamespace string                       `json:"janitor_namespace,omitempty"`
-	JanitorPod       string                       `json:"janitor_pod,omitempty"`
-	Filesystems      []clusterNodeFilesystemUsage `json:"filesystems"`
-	HotPaths         []clusterNodePathUsage       `json:"hot_paths"`
-	Journal          []clusterNodeJournalEntry    `json:"journal"`
-	Events           []model.ClusterEvent         `json:"events"`
-	Metrics          *clusterNodeMetricsDiagnosis `json:"metrics,omitempty"`
-	Warnings         []string                     `json:"warnings"`
+	Node                 *model.ClusterNode               `json:"node,omitempty"`
+	Summary              string                           `json:"summary"`
+	JanitorNamespace     string                           `json:"janitor_namespace,omitempty"`
+	JanitorPod           string                           `json:"janitor_pod,omitempty"`
+	Filesystems          []clusterNodeFilesystemUsage     `json:"filesystems"`
+	HotPaths             []clusterNodePathUsage           `json:"hot_paths"`
+	Journal              []clusterNodeJournalEntry        `json:"journal"`
+	Events               []model.ClusterEvent             `json:"events"`
+	Metrics              *clusterNodeMetricsDiagnosis     `json:"metrics,omitempty"`
+	ControlPlaneIncident *clusterNodeControlPlaneIncident `json:"control_plane_incident,omitempty"`
+	Warnings             []string                         `json:"warnings"`
 }
 
 func (s *Server) handleGetClusterNodeDiagnosis(w http.ResponseWriter, r *http.Request) {
@@ -193,6 +236,11 @@ func (s *Server) diagnoseClusterNode(ctx context.Context, client *clusterNodeCli
 		if diagnosis.Metrics != nil {
 			diagnosis.Metrics.Evidence = append(diagnosis.Metrics.Evidence, selectMetricsEvidence(diagnosis.Journal)...)
 		}
+	}
+	if output, err := s.runNodeJanitorCommand(commandCtx, janitorNamespace, janitorPod, clusterNodeControlPlaneIncidentScript); err != nil {
+		diagnosis.Warnings = append(diagnosis.Warnings, fmt.Sprintf("control-plane incident summary unavailable: %v", err))
+	} else {
+		diagnosis.ControlPlaneIncident = parseClusterNodeControlPlaneIncident(output)
 	}
 
 	diagnosis.Summary = buildClusterNodeDiagnosisSummary(snapshot.node, diagnosis.Metrics)
@@ -474,6 +522,105 @@ func parseClusterNodeJournalEntries(raw []byte, limit int) []clusterNodeJournalE
 		out = out[len(out)-limit:]
 	}
 	return out
+}
+
+func parseClusterNodeControlPlaneIncident(raw []byte) *clusterNodeControlPlaneIncident {
+	text := strings.TrimSpace(string(raw))
+	if text == "" {
+		return nil
+	}
+	incident := &clusterNodeControlPlaneIncident{
+		EvidenceCounts: map[string]int{},
+	}
+	diagnosisLines := []string{}
+	section := ""
+	inDiagnosis := false
+
+	for _, rawLine := range strings.Split(text, "\n") {
+		line := strings.TrimRight(rawLine, "\r")
+		if strings.HasPrefix(line, "__FUGUE_FIELD__\t") {
+			fields := strings.SplitN(strings.TrimPrefix(line, "__FUGUE_FIELD__\t"), "\t", 2)
+			if len(fields) != 2 {
+				continue
+			}
+			switch strings.TrimSpace(fields[0]) {
+			case "name":
+				incident.Name = strings.TrimSpace(fields[1])
+			case "path":
+				incident.Path = strings.TrimSpace(fields[1])
+			case "archive_path":
+				incident.ArchivePath = strings.TrimSpace(fields[1])
+			}
+			continue
+		}
+		if line == "__FUGUE_DIAGNOSIS_BEGIN__" {
+			inDiagnosis = true
+			continue
+		}
+		if !inDiagnosis {
+			continue
+		}
+		diagnosisLines = append(diagnosisLines, line)
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		switch trimmed {
+		case "evidence_counts:":
+			section = "evidence_counts"
+			continue
+		case "selected_evidence:":
+			section = "selected_evidence"
+			continue
+		case "next_checks:":
+			section = "next_checks"
+			continue
+		}
+		if key, value, ok := strings.Cut(trimmed, "="); ok {
+			key = strings.TrimSpace(key)
+			value = strings.TrimSpace(value)
+			switch key {
+			case "primary_failure_signal":
+				incident.PrimaryFailureSignal = value
+			case "root_cause_status":
+				incident.RootCauseStatus = value
+			case "baseline_first":
+				incident.BaselineFirst = value
+			case "baseline_last":
+				incident.BaselineLast = value
+			default:
+				if section == "evidence_counts" {
+					if count, err := strconv.Atoi(value); err == nil {
+						incident.EvidenceCounts[key] = count
+					}
+				}
+			}
+			continue
+		}
+		switch section {
+		case "selected_evidence":
+			if len(incident.SelectedEvidence) < 40 {
+				incident.SelectedEvidence = append(incident.SelectedEvidence, trimmed)
+			}
+		case "next_checks":
+			if len(incident.NextChecks) < 12 {
+				incident.NextChecks = append(incident.NextChecks, strings.TrimSpace(strings.TrimPrefix(trimmed, "- ")))
+			}
+		}
+	}
+
+	incident.DiagnosisText = strings.TrimSpace(strings.Join(diagnosisLines, "\n"))
+	if len(incident.EvidenceCounts) == 0 {
+		incident.EvidenceCounts = nil
+	}
+	if incident.Name == "" &&
+		incident.Path == "" &&
+		incident.ArchivePath == "" &&
+		incident.PrimaryFailureSignal == "" &&
+		incident.DiagnosisText == "" {
+		return nil
+	}
+	return incident
 }
 
 func parseJournalTimestampPrefix(line string) (time.Time, string, bool) {

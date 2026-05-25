@@ -39,17 +39,32 @@ type clusterNodeMetricsDiagnosis struct {
 	Warnings []string `json:"warnings"`
 }
 
+type clusterNodeControlPlaneIncident struct {
+	Name                 string         `json:"name,omitempty"`
+	Path                 string         `json:"path,omitempty"`
+	ArchivePath          string         `json:"archive_path,omitempty"`
+	PrimaryFailureSignal string         `json:"primary_failure_signal,omitempty"`
+	RootCauseStatus      string         `json:"root_cause_status,omitempty"`
+	EvidenceCounts       map[string]int `json:"evidence_counts,omitempty"`
+	BaselineFirst        string         `json:"baseline_first,omitempty"`
+	BaselineLast         string         `json:"baseline_last,omitempty"`
+	SelectedEvidence     []string       `json:"selected_evidence,omitempty"`
+	NextChecks           []string       `json:"next_checks,omitempty"`
+	DiagnosisText        string         `json:"diagnosis_text,omitempty"`
+}
+
 type clusterNodeDiagnosis struct {
-	Node             *model.ClusterNode           `json:"node,omitempty"`
-	Summary          string                       `json:"summary"`
-	JanitorNamespace string                       `json:"janitor_namespace,omitempty"`
-	JanitorPod       string                       `json:"janitor_pod,omitempty"`
-	Filesystems      []clusterNodeFilesystemUsage `json:"filesystems"`
-	HotPaths         []clusterNodePathUsage       `json:"hot_paths"`
-	Journal          []clusterNodeJournalEntry    `json:"journal"`
-	Events           []model.ClusterEvent         `json:"events"`
-	Metrics          *clusterNodeMetricsDiagnosis `json:"metrics,omitempty"`
-	Warnings         []string                     `json:"warnings"`
+	Node                 *model.ClusterNode               `json:"node,omitempty"`
+	Summary              string                           `json:"summary"`
+	JanitorNamespace     string                           `json:"janitor_namespace,omitempty"`
+	JanitorPod           string                           `json:"janitor_pod,omitempty"`
+	Filesystems          []clusterNodeFilesystemUsage     `json:"filesystems"`
+	HotPaths             []clusterNodePathUsage           `json:"hot_paths"`
+	Journal              []clusterNodeJournalEntry        `json:"journal"`
+	Events               []model.ClusterEvent             `json:"events"`
+	Metrics              *clusterNodeMetricsDiagnosis     `json:"metrics,omitempty"`
+	ControlPlaneIncident *clusterNodeControlPlaneIncident `json:"control_plane_incident,omitempty"`
+	Warnings             []string                         `json:"warnings"`
 }
 
 type appDiagnosis struct {

@@ -126,6 +126,7 @@ func TestGetClusterNodeDiagnosisCollectsHostEvidenceWithoutSSH(t *testing.T) {
 			[]byte("/dev/sda1\t10000000000\t9000000000\t1000000000\t90%\t/var/lib\n"),
 			[]byte("7000000000\t/var/lib/containerd\n"),
 			[]byte("2026-04-16T00:00:00Z eviction manager: attempting to reclaim ephemeral-storage\n"),
+			[]byte("__FUGUE_FIELD__\tname\tk3s-20260525T022353Z\n__FUGUE_FIELD__\tarchive_path\t/var/log/fugue/incidents/k3s-20260525T022353Z.tar.gz\n__FUGUE_DIAGNOSIS_BEGIN__\nprimary_failure_signal=leader_election_lost_after_apiserver_or_etcd_timeouts\nroot_cause_status=evidence_summary_only_not_a_root_cause_claim\n\nevidence_counts:\n  leader_election_lost=1\n  etcd_slow_or_timeout=3\n\nselected_evidence:\n  leader lease:\n    leaderelection lost\n\nnext_checks:\n  - Inspect k3s-journal-key-events.log for the first timeout before leader election was lost.\n"),
 		},
 	}
 
@@ -155,6 +156,15 @@ func TestGetClusterNodeDiagnosisCollectsHostEvidenceWithoutSSH(t *testing.T) {
 	}
 	if len(response.Diagnosis.Events) != 1 || response.Diagnosis.Events[0].Reason != "NodeHasDiskPressure" {
 		t.Fatalf("expected node event evidence, got %+v", response.Diagnosis.Events)
+	}
+	if response.Diagnosis.ControlPlaneIncident == nil {
+		t.Fatal("expected control-plane incident summary")
+	}
+	if response.Diagnosis.ControlPlaneIncident.PrimaryFailureSignal != "leader_election_lost_after_apiserver_or_etcd_timeouts" {
+		t.Fatalf("expected incident failure signal, got %+v", response.Diagnosis.ControlPlaneIncident)
+	}
+	if response.Diagnosis.ControlPlaneIncident.EvidenceCounts["etcd_slow_or_timeout"] != 3 {
+		t.Fatalf("expected incident evidence counts, got %+v", response.Diagnosis.ControlPlaneIncident.EvidenceCounts)
 	}
 }
 
