@@ -534,7 +534,97 @@ func (s *Server) headscaleReachabilityCheck(ctx context.Context) (bool, string) 
 	if ok, message := dependencyHTTPReachable(ctx, healthURL); !ok {
 		return false, fmt.Sprintf("%s unavailable at %s: %s", provider, healthURL, message)
 	}
+	keyURL := dependencyHealthURL(loginServer, "/key")
+	if keyURL != "" {
+		if ok, message := dependencyHTTPReachable(ctx, keyURL); !ok {
+			return false, fmt.Sprintf("%s key endpoint unavailable at %s: %s", provider, keyURL, message)
+		}
+	}
+	kubePass, kubeMessage := s.headscaleKubernetesStateCheck(ctx)
+	if !kubePass {
+		return false, kubeMessage
+	}
+	if strings.TrimSpace(kubeMessage) != "" {
+		return true, fmt.Sprintf("%s reachable via %s; %s", provider, healthURL, kubeMessage)
+	}
 	return true, fmt.Sprintf("%s reachable via %s", provider, healthURL)
+}
+
+func (s *Server) headscaleKubernetesStateCheck(ctx context.Context) (bool, string) {
+	namespace := strings.TrimSpace(s.controlPlaneNamespace)
+	if namespace == "" {
+		return true, ""
+	}
+	clientFactory := s.newClusterNodeClient
+	if clientFactory == nil {
+		clientFactory = newClusterNodeClient
+	}
+	client, err := clientFactory()
+	if err != nil {
+		return true, "headscale kubernetes state skipped: " + err.Error()
+	}
+	deployments, err := client.listDeployments(ctx, namespace)
+	if err != nil {
+		return false, "headscale kubernetes state unavailable: " + err.Error()
+	}
+	deployment := findControlPlaneDeployment(deployments, controlPlaneComponentHeadscale, strings.TrimSpace(s.controlPlaneReleaseInstance))
+	if deployment == nil {
+		return false, "headscale deployment is missing"
+	}
+	desiredReplicas := int32(1)
+	if deployment.Spec.Replicas != nil {
+		desiredReplicas = *deployment.Spec.Replicas
+	}
+	if desiredReplicas <= 0 {
+		return false, "headscale deployment has zero desired replicas"
+	}
+	if deployment.Status.ReadyReplicas < desiredReplicas || deployment.Status.AvailableReplicas < desiredReplicas {
+		return false, fmt.Sprintf("headscale deployment not ready: ready=%d available=%d desired=%d", deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas, desiredReplicas)
+	}
+	if headscaleDeploymentUsesHostPath(deployment) && len(deployment.Spec.Template.Spec.NodeSelector) == 0 {
+		return false, "headscale hostPath storage is not pinned by nodeSelector"
+	}
+	pods, err := client.listControlPlaneNamespacePods(ctx, namespace)
+	if err != nil {
+		return false, "headscale pod state unavailable: " + err.Error()
+	}
+	readyPods := 0
+	nodes := map[string]struct{}{}
+	for _, pod := range pods {
+		if !podMatchesComponentAndRelease(pod, controlPlaneComponentHeadscale, strings.TrimSpace(s.controlPlaneReleaseInstance)) {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Running") || !allKubePodContainersReady(pod) {
+			continue
+		}
+		readyPods++
+		if node := strings.TrimSpace(pod.Spec.NodeName); node != "" {
+			nodes[node] = struct{}{}
+		}
+	}
+	if readyPods == 0 {
+		return false, "headscale has no ready pod"
+	}
+	return true, fmt.Sprintf("headscale kubernetes state ready: pods=%d nodes=%d", readyPods, len(nodes))
+}
+
+func podMatchesComponentAndRelease(pod kubePodInfo, component string, releaseInstance string) bool {
+	if !strings.EqualFold(strings.TrimSpace(pod.Metadata.Labels["app.kubernetes.io/component"]), strings.TrimSpace(component)) {
+		return false
+	}
+	return controlPlanePodMatchesRelease(pod, releaseInstance)
+}
+
+func headscaleDeploymentUsesHostPath(deployment *kubeDeployment) bool {
+	if deployment == nil {
+		return false
+	}
+	for _, volume := range deployment.Spec.Template.Spec.Volumes {
+		if strings.TrimSpace(volume.Name) == "headscale-data" && volume.HostPath != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func dependencyHealthURL(raw, healthPath string) string {

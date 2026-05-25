@@ -2464,6 +2464,7 @@ headscale:
     targetPort: 8080
     nodePort: ${HEADSCALE_NODEPORT}
   persistence:
+    mode: hostPath
     hostPath: "${HOSTPATH_DATA_DIR}/headscale"
   nodeSelector:
     "fugue.install/role": primary

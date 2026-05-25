@@ -250,7 +250,16 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 						"output": "stdout",
 					},
 					"encoder": map[string]any{
-						"format": "json",
+						"format": "filter",
+						"wrap": map[string]any{
+							"format": "json",
+						},
+						"fields": map[string]any{
+							"request>headers>Authorization":         map[string]string{"filter": "delete"},
+							"request>headers>Cookie":                map[string]string{"filter": "delete"},
+							"request>headers>Proxy-Authorization":   map[string]string{"filter": "delete"},
+							"request>headers>X-Tailscale-Handshake": map[string]string{"filter": "delete"},
+						},
 					},
 					"include": []string{"http.log.access.fugue_edge_access"},
 				},

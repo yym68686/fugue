@@ -448,6 +448,112 @@ func TestRegistryHostPathRequiresUnsafeOptIn(t *testing.T) {
 	}
 }
 
+func TestHeadscaleDefaultsToPVCStorage(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "--set", "headscale.enabled=true", "--set-string", "headscale.domain=mesh.example.com")
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	pvcDoc := manifestDocumentForKindAndName(manifest, "PersistentVolumeClaim", "fugue-fugue-headscale-data")
+	if pvcDoc == "" {
+		t.Fatalf("rendered manifest missing headscale PVC:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`storageClassName: "fugue-local-rwo"`,
+		"storage: 1Gi",
+	} {
+		if !strings.Contains(pvcDoc, want) {
+			t.Fatalf("headscale PVC missing %q:\n%s", want, pvcDoc)
+		}
+	}
+
+	deploymentDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-headscale")
+	if deploymentDoc == "" {
+		t.Fatalf("rendered manifest missing headscale deployment:\n%s", manifest)
+	}
+	if !strings.Contains(deploymentDoc, "persistentVolumeClaim:") || !strings.Contains(deploymentDoc, `claimName: "fugue-fugue-headscale-data"`) {
+		t.Fatalf("headscale deployment should mount the headscale PVC:\n%s", deploymentDoc)
+	}
+	if strings.Contains(deploymentDoc, "hostPath:") {
+		t.Fatalf("headscale deployment should not render hostPath by default:\n%s", deploymentDoc)
+	}
+}
+
+func TestHeadscaleHostPathRequiresStableNodeSelector(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm",
+		"template",
+		"fugue",
+		chartDir,
+		"--set",
+		"headscale.enabled=true",
+		"--set-string",
+		"headscale.domain=mesh.example.com",
+		"--set",
+		"headscale.persistence.mode=hostPath",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected headscale hostPath render to fail without selector:\n%s", output)
+	}
+	if !strings.Contains(string(output), "headscale.persistence.mode=hostPath requires") {
+		t.Fatalf("hostPath failure should explain the missing selector:\n%s", output)
+	}
+
+	cmd = exec.Command(
+		"helm",
+		"template",
+		"fugue",
+		chartDir,
+		"--set",
+		"headscale.enabled=true",
+		"--set-string",
+		"headscale.domain=mesh.example.com",
+		"--set",
+		"headscale.persistence.mode=hostPath",
+		"--set-string",
+		"headscale.nodeSelector.kubernetes\\.io/hostname=control-1",
+	)
+	cmd.Dir = chartDir
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("headscale hostPath with selector should render: %v\n%s", err, output)
+	}
+	doc := manifestDocumentForKindAndName(string(output), "Deployment", "fugue-fugue-headscale")
+	if doc == "" {
+		t.Fatalf("rendered manifest missing headscale deployment:\n%s", output)
+	}
+	for _, want := range []string{
+		"hostPath:",
+		`path: "/var/lib/fugue/headscale"`,
+		"kubernetes.io/hostname: control-1",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("headscale hostPath deployment missing %q:\n%s", want, doc)
+		}
+	}
+}
+
 func TestEdgeShadowDaemonSetDefaultsToNoPublicTraffic(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

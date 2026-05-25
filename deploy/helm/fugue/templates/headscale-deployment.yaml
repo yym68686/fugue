@@ -1,3 +1,17 @@
+{{- $headscale := (.Values.headscale | default (dict)) -}}
+{{- $headscalePersistence := (get $headscale "persistence" | default (dict)) -}}
+{{- $headscalePersistenceMode := "pvc" -}}
+{{- if hasKey $headscalePersistence "mode" -}}
+{{- $headscalePersistenceMode = (get $headscalePersistence "mode") -}}
+{{- end -}}
+{{- $headscaleNodeSelector := (default .Values.nodeSelector .Values.headscale.nodeSelector) -}}
+{{- $headscaleSingletonSelector := .Values.headscale.controlPlaneSingletonNodeSelector -}}
+{{- if and .Values.headscale.enabled (ne $headscalePersistenceMode "hostPath") (ne $headscalePersistenceMode "pvc") (ne $headscalePersistenceMode "existingClaim") -}}
+{{- fail (printf "unsupported headscale.persistence.mode %q (expected hostPath, pvc, or existingClaim)" $headscalePersistenceMode) -}}
+{{- end -}}
+{{- if and .Values.headscale.enabled (eq $headscalePersistenceMode "hostPath") (empty $headscaleNodeSelector) (empty $headscaleSingletonSelector) -}}
+{{- fail "headscale.persistence.mode=hostPath requires headscale.nodeSelector, headscale.controlPlaneSingletonNodeSelector, or a global nodeSelector so the Headscale database and noise key cannot drift across nodes. Use pvc/existingClaim for movable storage." -}}
+{{- end -}}
 {{- if .Values.headscale.enabled }}
 apiVersion: apps/v1
 kind: Deployment
@@ -62,9 +76,17 @@ spec:
           configMap:
             name: {{ include "fugue.headscaleConfigName" . }}
         - name: headscale-data
+          {{- if eq $headscalePersistenceMode "hostPath" }}
           hostPath:
-            path: {{ .Values.headscale.persistence.hostPath | quote }}
+            path: {{ default "/var/lib/fugue/headscale" (get $headscalePersistence "hostPath") | quote }}
             type: DirectoryOrCreate
+          {{- else if eq $headscalePersistenceMode "pvc" }}
+          persistentVolumeClaim:
+            claimName: {{ printf "%s-headscale-data" (include "fugue.fullname" .) | quote }}
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ required "headscale.persistence.existingClaim must be set when headscale.persistence.mode=existingClaim" (get $headscalePersistence "existingClaim") | quote }}
+          {{- end }}
         - name: headscale-run
           emptyDir: {}
 {{- end }}

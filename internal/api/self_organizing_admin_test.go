@@ -66,6 +66,95 @@ func TestHeadscaleReachabilityCheckFailsOnBadHealth(t *testing.T) {
 	}
 }
 
+func TestHeadscaleReachabilityCheckFailsOnUnpinnedHostPathDeployment(t *testing.T) {
+	probe := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health", "/key":
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected headscale probe path %q", r.URL.Path)
+		}
+	}))
+	defer probe.Close()
+
+	kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/apis/apps/v1/namespaces/fugue-system/deployments":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"items": [{
+					"metadata": {
+						"name": "fugue-fugue-headscale",
+						"labels": {
+							"app.kubernetes.io/component": "headscale",
+							"app.kubernetes.io/instance": "fugue"
+						}
+					},
+					"spec": {
+						"replicas": 1,
+						"template": {
+							"spec": {
+								"containers": [{"name": "headscale", "image": "headscale/headscale:0.26.1"}],
+								"volumes": [{
+									"name": "headscale-data",
+									"hostPath": {"path": "/var/lib/fugue/headscale", "type": "DirectoryOrCreate"}
+								}]
+							}
+						}
+					},
+					"status": {"readyReplicas": 1, "availableReplicas": 1, "updatedReplicas": 1}
+				}]
+			}`))
+		case "/api/v1/namespaces/fugue-system/pods":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"items": [{
+					"metadata": {
+						"name": "fugue-fugue-headscale-abc",
+						"creationTimestamp": "2026-05-25T00:00:00Z",
+						"labels": {
+							"app.kubernetes.io/component": "headscale",
+							"app.kubernetes.io/instance": "fugue"
+						}
+					},
+					"spec": {
+						"nodeName": "runtime-1",
+						"containers": [{"name": "headscale", "image": "headscale/headscale:0.26.1"}]
+					},
+					"status": {
+						"phase": "Running",
+						"containerStatuses": [{"name": "headscale", "ready": true}]
+					}
+				}]
+			}`))
+		default:
+			t.Fatalf("unexpected kubernetes path %q", r.URL.String())
+		}
+	}))
+	defer kube.Close()
+
+	server := &Server{
+		clusterJoinMeshProvider:     "tailscale",
+		clusterJoinMeshLoginServer:  probe.URL,
+		controlPlaneNamespace:       "fugue-system",
+		controlPlaneReleaseInstance: "fugue",
+		newClusterNodeClient: func() (*clusterNodeClient, error) {
+			return &clusterNodeClient{
+				client:      kube.Client(),
+				baseURL:     kube.URL,
+				bearerToken: "test-token",
+			}, nil
+		},
+	}
+	pass, message := server.headscaleReachabilityCheck(context.Background())
+	if pass {
+		t.Fatalf("expected unpinned headscale hostPath to fail, got %q", message)
+	}
+	if !strings.Contains(message, "hostPath storage is not pinned") {
+		t.Fatalf("expected hostPath pinning failure, got %q", message)
+	}
+}
+
 func TestEdgeInventoryHealthyAcceptsDegradedServingLKG(t *testing.T) {
 	now := time.Now().UTC()
 	nodes := []model.EdgeNode{{

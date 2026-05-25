@@ -530,7 +530,12 @@ headscale:
     targetPort: 8080
     nodePort: 30443
   persistence:
+    mode: pvc
     hostPath: /var/lib/fugue/headscale
+    existingClaim: ""
+    accessMode: ReadWriteOnce
+    size: 1Gi
+    storageClassName: ""
   nodeSelector: {}
   controlPlaneSingletonNodeSelector: {}
   resources: {}

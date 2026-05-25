@@ -1,0 +1,31 @@
+{{- $headscale := (.Values.headscale | default (dict)) -}}
+{{- $headscalePersistence := (get $headscale "persistence" | default (dict)) -}}
+{{- $headscalePersistenceMode := "pvc" -}}
+{{- if hasKey $headscalePersistence "mode" -}}
+{{- $headscalePersistenceMode = (get $headscalePersistence "mode") -}}
+{{- end -}}
+{{- $movableRWOStorage := (get .Values "movableRWOStorage" | default (dict)) -}}
+{{- $headscaleStorageClassName := "" -}}
+{{- if hasKey $headscalePersistence "storageClassName" -}}
+{{- $headscaleStorageClassName = (get $headscalePersistence "storageClassName" | default "") -}}
+{{- end -}}
+{{- if eq (trim $headscaleStorageClassName) "" -}}
+{{- $headscaleStorageClassName = (get $movableRWOStorage "storageClassName" | default "") -}}
+{{- end -}}
+{{- if and .Values.headscale.enabled (eq $headscalePersistenceMode "pvc") }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "fugue.fullname" . }}-headscale-data
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "headscale") | nindent 4 }}
+spec:
+  accessModes:
+    - {{ default "ReadWriteOnce" (get $headscalePersistence "accessMode") }}
+  resources:
+    requests:
+      storage: {{ default "1Gi" (get $headscalePersistence "size") }}
+  {{- if $headscaleStorageClassName }}
+  storageClassName: {{ $headscaleStorageClassName | quote }}
+  {{- end }}
+{{- end }}

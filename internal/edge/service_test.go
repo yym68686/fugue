@@ -570,6 +570,48 @@ func TestApplyCaddyConfigBuildsHostRoutesForBundle(t *testing.T) {
 	}
 }
 
+func TestBuildCaddyConfigRedactsSensitiveAccessLogHeaders(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.EdgeConfig{
+		APIURL:               "https://api.example.invalid",
+		EdgeToken:            "edge-secret",
+		EdgeGroupID:          "edge-group-default",
+		CaddyEnabled:         true,
+		CaddyAdminURL:        "http://127.0.0.1:2019",
+		CaddyListenAddr:      "127.0.0.1:18080",
+		CaddyProxyListenAddr: "127.0.0.1:7833",
+	}, log.New(ioDiscard{}, "", 0))
+
+	configBody, _, err := service.buildCaddyConfig(testBundle("routegen_caddy_redact"))
+	if err != nil {
+		t.Fatalf("build caddy config: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(configBody, &parsed); err != nil {
+		t.Fatalf("decode caddy config: %v", err)
+	}
+	logging := parsed["logging"].(map[string]any)
+	logs := logging["logs"].(map[string]any)
+	access := logs["fugue_edge_access"].(map[string]any)
+	encoder := access["encoder"].(map[string]any)
+	if encoder["format"] != "filter" {
+		t.Fatalf("expected filter encoder, got %#v", encoder)
+	}
+	fields := encoder["fields"].(map[string]any)
+	for _, header := range []string{
+		"request>headers>Authorization",
+		"request>headers>Cookie",
+		"request>headers>Proxy-Authorization",
+		"request>headers>X-Tailscale-Handshake",
+	} {
+		filter, ok := fields[header].(map[string]any)
+		if !ok || filter["filter"] != "delete" {
+			t.Fatalf("expected %s to be deleted by access log filter, got %#v", header, fields[header])
+		}
+	}
+}
+
 func TestApplyCaddyConfigWarmsPlatformHost(t *testing.T) {
 	t.Parallel()
 

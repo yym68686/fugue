@@ -1262,6 +1262,7 @@ cloudnative-pg:
                 app.kubernetes.io/instance: fugue
 EOF
   append_control_plane_singleton_values
+  append_headscale_upgrade_values
   append_upgrade_edge_dynamic_values
   append_upgrade_image_prepull_values
   append_upgrade_dns_values
@@ -1913,10 +1914,6 @@ registry:
   nodeSelector: null
   controlPlaneSingletonNodeSelector:
 $(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "    ")
-headscale:
-  nodeSelector: null
-  controlPlaneSingletonNodeSelector:
-$(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "    ")
 postgres:
   nodeSelector: null
   controlPlaneSingletonNodeSelector:
@@ -1931,6 +1928,60 @@ $(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "      ")
     controlPlaneSingletonNodeSelector:
 $(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "      ")
 EOF
+}
+
+deployment_node_selector_pairs() {
+  local deployment_name="$1"
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get deploy "${deployment_name}" \
+    -o go-template='{{range $key, $value := .spec.template.spec.nodeSelector}}{{printf "%s=%s\n" $key $value}}{{end}}' 2>/dev/null || true
+}
+
+deployment_host_path_volume_path() {
+  local deployment_name="$1"
+  local volume_name="$2"
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get deploy "${deployment_name}" \
+    -o go-template='{{range .spec.template.spec.volumes}}{{if eq .name "'"${volume_name}"'"}}{{if .hostPath}}{{.hostPath.path}}{{end}}{{end}}{{end}}' 2>/dev/null || true
+}
+
+append_headscale_upgrade_values() {
+  local existing_host_path=""
+  local existing_selector=""
+  local wrote_block="false"
+
+  existing_host_path="$(trim_field "$(deployment_host_path_volume_path "${FUGUE_HEADSCALE_DEPLOYMENT_NAME}" "headscale-data")")"
+  existing_selector="$(deployment_node_selector_pairs "${FUGUE_HEADSCALE_DEPLOYMENT_NAME}")"
+
+  if [[ -z "${existing_host_path}" && "${FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED}" != "true" && -z "$(trim_field "${existing_selector}")" ]]; then
+    return 0
+  fi
+
+  printf '\nheadscale:\n' >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+  wrote_block="true"
+
+  if [[ -n "${existing_host_path}" ]]; then
+    cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<EOF
+  persistence:
+    mode: hostPath
+    hostPath: $(yaml_quote "${existing_host_path}")
+EOF
+  fi
+
+  if [[ "${FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED}" == "true" ]]; then
+    cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<EOF
+  nodeSelector: null
+  controlPlaneSingletonNodeSelector:
+$(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "    ")
+EOF
+  elif [[ -n "$(trim_field "${existing_selector}")" ]]; then
+    cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<EOF
+  nodeSelector:
+$(selector_yaml "${existing_selector}" "    ")
+EOF
+  fi
+
+  if [[ "${wrote_block}" == "true" && -n "${existing_host_path}" && "${FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED}" != "true" && -z "$(trim_field "${existing_selector}")" ]]; then
+    fail "existing ${FUGUE_HEADSCALE_DEPLOYMENT_NAME} uses hostPath storage at ${existing_host_path} but has no nodeSelector; set FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED=true with FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR or add a stable headscale.nodeSelector before upgrading"
+  fi
 }
 
 selector_json() {

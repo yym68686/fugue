@@ -18,6 +18,7 @@ import (
 const (
 	controlPlaneComponentAPI        = "api"
 	controlPlaneComponentController = "controller"
+	controlPlaneComponentHeadscale  = "headscale"
 
 	controlPlaneStatusReady    = "ready"
 	controlPlaneStatusRolling  = "rolling"
@@ -39,7 +40,9 @@ type kubeDeployment struct {
 		Replicas *int32 `json:"replicas,omitempty"`
 		Template struct {
 			Spec struct {
-				Containers []kubeContainer `json:"containers"`
+				Containers   []kubeContainer        `json:"containers"`
+				NodeSelector map[string]string      `json:"nodeSelector,omitempty"`
+				Volumes      []kubeDeploymentVolume `json:"volumes,omitempty"`
 			} `json:"spec"`
 		} `json:"template"`
 	} `json:"spec"`
@@ -53,6 +56,17 @@ type kubeDeployment struct {
 type kubeContainer struct {
 	Name  string `json:"name"`
 	Image string `json:"image"`
+}
+
+type kubeDeploymentVolume struct {
+	Name     string `json:"name"`
+	HostPath *struct {
+		Path string `json:"path,omitempty"`
+		Type string `json:"type,omitempty"`
+	} `json:"hostPath,omitempty"`
+	PersistentVolumeClaim *struct {
+		ClaimName string `json:"claimName,omitempty"`
+	} `json:"persistentVolumeClaim,omitempty"`
 }
 
 type githubWorkflowRunsResponse struct {
