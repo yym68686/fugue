@@ -69,7 +69,12 @@ func TestHeadscaleReachabilityCheckFailsOnBadHealth(t *testing.T) {
 func TestHeadscaleReachabilityCheckFailsOnUnpinnedHostPathDeployment(t *testing.T) {
 	probe := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/health", "/key":
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+		case "/key":
+			if r.URL.Query().Get("v") == "" {
+				t.Fatalf("expected headscale key probe to include client version query")
+			}
 			w.WriteHeader(http.StatusOK)
 		default:
 			t.Fatalf("unexpected headscale probe path %q", r.URL.Path)

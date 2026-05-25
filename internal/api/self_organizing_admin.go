@@ -536,6 +536,12 @@ func (s *Server) headscaleReachabilityCheck(ctx context.Context) (bool, string) 
 	}
 	keyURL := dependencyHealthURL(loginServer, "/key")
 	if keyURL != "" {
+		if parsed, err := url.Parse(keyURL); err == nil {
+			query := parsed.Query()
+			query.Set("v", "1")
+			parsed.RawQuery = query.Encode()
+			keyURL = parsed.String()
+		}
 		if ok, message := dependencyHTTPReachable(ctx, keyURL); !ok {
 			return false, fmt.Sprintf("%s key endpoint unavailable at %s: %s", provider, keyURL, message)
 		}
