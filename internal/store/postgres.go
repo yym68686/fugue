@@ -271,7 +271,9 @@ var postgresSchemaStatements = []string{
 		updated_at TIMESTAMPTZ NOT NULL
 	)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_apps_tenant_project_name_ci ON fugue_apps (tenant_id, project_id, lower(name))`,
-	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_apps_route_hostname_ci ON fugue_apps (lower((route_json->>'hostname'))) WHERE route_json IS NOT NULL AND COALESCE(route_json->>'hostname', '') <> ''`,
+	`DROP INDEX IF EXISTS idx_fugue_apps_route_hostname_ci`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_apps_route_hostname_lookup_ci ON fugue_apps (lower((route_json->>'hostname'))) WHERE route_json IS NOT NULL AND COALESCE(route_json->>'hostname', '') <> ''`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_apps_route_host_path_ci ON fugue_apps (lower((route_json->>'hostname')), lower(COALESCE(NULLIF(route_json->>'path_prefix', ''), '/'))) WHERE route_json IS NOT NULL AND COALESCE(route_json->>'hostname', '') <> ''`,
 	`CREATE TABLE IF NOT EXISTS fugue_app_image_trackings (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
@@ -406,6 +408,7 @@ var postgresSchemaStatements = []string{
 		edge_id TEXT NOT NULL DEFAULT '',
 		edge_group_id TEXT NOT NULL DEFAULT '',
 		hostname TEXT NOT NULL DEFAULT '',
+		path_prefix TEXT NOT NULL DEFAULT '/',
 		client_country TEXT NOT NULL DEFAULT '',
 		client_region TEXT NOT NULL DEFAULT '',
 		client_asn TEXT NOT NULL DEFAULT '',
@@ -424,8 +427,10 @@ var postgresSchemaStatements = []string{
 		error_count INTEGER NOT NULL DEFAULT 0,
 		sampled_at TIMESTAMPTZ NOT NULL
 	)`,
+	`ALTER TABLE fugue_edge_performance_samples ADD COLUMN IF NOT EXISTS path_prefix TEXT NOT NULL DEFAULT '/'`,
 	`ALTER TABLE fugue_edge_performance_samples ADD COLUMN IF NOT EXISTS client_country TEXT NOT NULL DEFAULT ''`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_performance_hostname_sampled ON fugue_edge_performance_samples (hostname, sampled_at DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_performance_route_sampled ON fugue_edge_performance_samples (hostname, path_prefix, sampled_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_performance_edge_group_sampled ON fugue_edge_performance_samples (edge_group_id, sampled_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_performance_client_scope ON fugue_edge_performance_samples (client_country, client_region, client_asn, sampled_at DESC)`,
 	`CREATE TABLE IF NOT EXISTS fugue_dns_nodes (

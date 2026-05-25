@@ -23,6 +23,8 @@ func (s *Server) importFugueManifestGitHubStack(principal model.Principal, tenan
 		"fugue_manifest": map[string]any{
 			"manifest_path":    manifest.ManifestPath,
 			"primary_service":  result.PrimaryService,
+			"domains":          sanitizeTopologyDomains(manifest.Domains),
+			"entrypoints":      sanitizeTopologyEntrypoints(manifest.Entrypoints),
 			"services":         result.ServiceDetails,
 			"warnings":         result.Warnings,
 			"inference_report": result.InferenceReport,

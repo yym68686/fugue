@@ -671,6 +671,113 @@ func TestImportResolvedGitHubTopologyAssignsRoutesToAllPublishedServices(t *test
 	}
 }
 
+func TestImportResolvedGitHubTopologyCompilesDomainsAndEntrypoints(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Entrypoint Import Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	raiseManagedTestCap(t, s, tenant.ID)
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		AppBaseDomain:    "apps.example.com",
+		RegistryPushBase: "registry.internal.example",
+	})
+
+	result, err := server.importResolvedGitHubTopology(
+		model.Principal{ActorType: model.ActorTypeAPIKey, ActorID: "key"},
+		tenant.ID,
+		importGitHubRequest{
+			ProjectID:      project.ID,
+			RepoURL:        "https://github.com/example/demo",
+			RepoVisibility: "public",
+		},
+		"runtime_managed_shared",
+		1,
+		"Imported from GitHub",
+		"demo",
+		sourceimport.NormalizedTopology{
+			PrimaryService: "web",
+			Domains: []sourceimport.TopologyDomain{{
+				Name:         "api",
+				Host:         "api.apps.example.com",
+				TLS:          "managed",
+				OwnerService: "api",
+			}},
+			Entrypoints: []sourceimport.TopologyEntrypoint{{
+				Name:   "api",
+				Domain: "api",
+				Routes: []sourceimport.TopologyEntrypointRoute{{
+					Path:       "/api/*",
+					PathPrefix: "/api",
+					Service:    "api",
+				}},
+			}},
+			Services: []sourceimport.ComposeService{
+				{
+					Name:         "web",
+					Kind:         sourceimport.ComposeServiceKindApp,
+					ServiceType:  sourceimport.ServiceTypeApp,
+					Published:    true,
+					InternalPort: 3000,
+					Image:        "ghcr.io/example/web:latest",
+				},
+				{
+					Name:         "api",
+					Kind:         sourceimport.ComposeServiceKindApp,
+					ServiceType:  sourceimport.ServiceTypeApp,
+					InternalPort: 8080,
+					NetworkMode:  model.AppNetworkModeInternal,
+					Image:        "ghcr.io/example/api:latest",
+				},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("import resolved topology: %v", err)
+	}
+
+	appsByService := map[string]model.App{}
+	for _, app := range result.Apps {
+		if app.Source == nil {
+			t.Fatalf("expected app %s to keep source metadata", app.Name)
+		}
+		appsByService[app.Source.ComposeService] = app
+	}
+
+	webApp := appsByService["web"]
+	if webApp.Route == nil || webApp.Route.Hostname != "demo.apps.example.com" || webApp.Route.PathPrefix != "/" {
+		t.Fatalf("expected compatibility route for web, got %+v", webApp.Route)
+	}
+
+	apiApp := appsByService["api"]
+	if apiApp.Route == nil {
+		t.Fatal("expected explicit entrypoint route for api")
+	}
+	if apiApp.Route.Hostname != "api.apps.example.com" || apiApp.Route.PathPrefix != "/api" {
+		t.Fatalf("unexpected api route target: %+v", apiApp.Route)
+	}
+	if apiApp.Route.PublicURL != "https://api.apps.example.com/api" {
+		t.Fatalf("unexpected api public URL: %+v", apiApp.Route)
+	}
+	if apiApp.Route.ServicePort != 8080 {
+		t.Fatalf("expected api route service port 8080, got %+v", apiApp.Route)
+	}
+	if apiApp.Route.DomainName != "api" || apiApp.Route.EntrypointName != "api" {
+		t.Fatalf("expected route provenance from domain/entrypoint, got %+v", apiApp.Route)
+	}
+}
+
 func TestImportResolvedGitHubTopologyAppliesPersistentStorageSeedFileOverrides(t *testing.T) {
 	t.Parallel()
 

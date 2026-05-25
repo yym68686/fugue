@@ -104,7 +104,7 @@ func (s *Store) pgRecordEdgePerformanceSamples(samples []model.EdgePerformanceSa
 		}
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO fugue_edge_performance_samples (
-	id, edge_id, edge_group_id, hostname, client_country, client_region, client_asn, runtime_region,
+	id, edge_id, edge_group_id, hostname, path_prefix, client_country, client_region, client_asn, runtime_region,
 	route_generation, cache_status, dns_policy, tls_handshake_ms, ttfb_ms, upstream_ms,
 	total_ms, status_code, sample_count, cache_hit_count, cache_observation_count,
 	error_count, sampled_at
@@ -112,12 +112,13 @@ INSERT INTO fugue_edge_performance_samples (
 	$1, $2, $3, $4, $5, $6, $7, $8,
 	$9, $10, $11, $12, $13, $14,
 	$15, $16, $17, $18, $19,
-	$20, $21
+	$20, $21, $22
 )
 ON CONFLICT (id) DO UPDATE SET
 	edge_id = EXCLUDED.edge_id,
 	edge_group_id = EXCLUDED.edge_group_id,
 	hostname = EXCLUDED.hostname,
+	path_prefix = EXCLUDED.path_prefix,
 	client_country = EXCLUDED.client_country,
 	client_region = EXCLUDED.client_region,
 	client_asn = EXCLUDED.client_asn,
@@ -140,6 +141,7 @@ ON CONFLICT (id) DO UPDATE SET
 			normalized.EdgeID,
 			normalized.EdgeGroupID,
 			normalized.Hostname,
+			normalized.PathPrefix,
 			normalized.ClientCountry,
 			normalized.ClientRegion,
 			normalized.ClientASN,
@@ -173,6 +175,7 @@ func (s *Store) pgListEdgePerformanceSamples(hostname string, since time.Time) (
 	}
 	query := `
 SELECT id, edge_id, edge_group_id, hostname, client_country, client_region, client_asn, runtime_region,
+	path_prefix,
 	route_generation, cache_status, dns_policy, tls_handshake_ms, ttfb_ms, upstream_ms,
 	total_ms, status_code, sample_count, cache_hit_count, cache_observation_count,
 	error_count, sampled_at
@@ -210,6 +213,7 @@ WHERE 1=1
 			&sample.ClientRegion,
 			&sample.ClientASN,
 			&sample.RuntimeRegion,
+			&sample.PathPrefix,
 			&sample.RouteGeneration,
 			&sample.CacheStatus,
 			&sample.DNSPolicy,
@@ -255,6 +259,7 @@ func normalizeEdgePerformanceSampleForStore(sample model.EdgePerformanceSample, 
 	sample.EdgeID = normalizeEdgeID(sample.EdgeID)
 	sample.EdgeGroupID = normalizeEdgeGroupID(sample.EdgeGroupID)
 	sample.Hostname = normalizeEdgePerformanceHostname(sample.Hostname)
+	sample.PathPrefix = model.NormalizeAppRoutePathPrefix(sample.PathPrefix)
 	sample.ClientCountry = normalizeEdgeMetadataValue(sample.ClientCountry)
 	sample.ClientRegion = normalizeEdgeMetadataValue(sample.ClientRegion)
 	sample.ClientASN = normalizeEdgeMetadataValue(sample.ClientASN)

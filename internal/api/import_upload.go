@@ -464,6 +464,8 @@ func uploadTopologyImportResponse(topology sourceimport.NormalizedTopology, resu
 		response["fugue_manifest"] = map[string]any{
 			"manifest_path":    topology.SourcePath,
 			"primary_service":  result.PrimaryService,
+			"domains":          sanitizeTopologyDomains(topology.Domains),
+			"entrypoints":      sanitizeTopologyEntrypoints(topology.Entrypoints),
 			"services":         result.ServiceDetails,
 			"warnings":         result.Warnings,
 			"inference_report": result.InferenceReport,

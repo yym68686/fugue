@@ -1,6 +1,7 @@
 package model
 
 import (
+	"path"
 	"strings"
 	"time"
 )
@@ -1157,10 +1158,62 @@ type AppTechnology struct {
 }
 
 type AppRoute struct {
-	Hostname    string `json:"hostname,omitempty"`
-	BaseDomain  string `json:"base_domain,omitempty"`
-	PublicURL   string `json:"public_url,omitempty"`
-	ServicePort int    `json:"service_port,omitempty"`
+	Hostname       string `json:"hostname,omitempty"`
+	PathPrefix     string `json:"path_prefix,omitempty"`
+	BaseDomain     string `json:"base_domain,omitempty"`
+	PublicURL      string `json:"public_url,omitempty"`
+	ServicePort    int    `json:"service_port,omitempty"`
+	DomainName     string `json:"domain_name,omitempty"`
+	EntrypointName string `json:"entrypoint_name,omitempty"`
+}
+
+func NormalizeAppRoutePathPrefix(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "/"
+	}
+	if idx := strings.IndexAny(raw, "?#"); idx >= 0 {
+		raw = raw[:idx]
+	}
+	if !strings.HasPrefix(raw, "/") {
+		raw = "/" + raw
+	}
+	if strings.HasSuffix(raw, "/*") {
+		raw = strings.TrimSuffix(raw, "/*")
+		if raw == "" {
+			return "/"
+		}
+	}
+	cleaned := path.Clean(raw)
+	if cleaned == "." || cleaned == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(cleaned, "/") {
+		cleaned = "/" + cleaned
+	}
+	return cleaned
+}
+
+func NormalizeAppRoute(route AppRoute) AppRoute {
+	route.Hostname = strings.TrimSpace(strings.ToLower(route.Hostname))
+	route.PathPrefix = NormalizeAppRoutePathPrefix(route.PathPrefix)
+	route.BaseDomain = strings.TrimSpace(strings.ToLower(route.BaseDomain))
+	route.PublicURL = strings.TrimSpace(route.PublicURL)
+	route.DomainName = strings.TrimSpace(route.DomainName)
+	route.EntrypointName = strings.TrimSpace(route.EntrypointName)
+	return route
+}
+
+func AppRoutePublicURL(hostname, pathPrefix string) string {
+	hostname = strings.TrimSpace(strings.ToLower(hostname))
+	if hostname == "" {
+		return ""
+	}
+	pathPrefix = NormalizeAppRoutePathPrefix(pathPrefix)
+	if pathPrefix == "/" {
+		return "https://" + hostname
+	}
+	return "https://" + hostname + pathPrefix
 }
 
 type AppInternalService struct {

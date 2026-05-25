@@ -2125,6 +2125,73 @@ func (s *Store) GetAppByHostname(hostname string) (model.App, error) {
 	return app, err
 }
 
+func (s *Store) GetAppByRoutePrefix(hostname, pathPrefix string) (model.App, error) {
+	hostname = normalizeAppDomainHostname(hostname)
+	pathPrefix = model.NormalizeAppRoutePathPrefix(pathPrefix)
+	if s.usingDatabase() {
+		return s.pgGetAppByRoutePrefix(hostname, pathPrefix)
+	}
+	var app model.App
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, candidate := range state.Apps {
+			if isDeletedApp(candidate) || candidate.Route == nil {
+				continue
+			}
+			if !strings.EqualFold(strings.TrimSpace(candidate.Route.Hostname), hostname) {
+				continue
+			}
+			if model.NormalizeAppRoutePathPrefix(candidate.Route.PathPrefix) != pathPrefix {
+				continue
+			}
+			app = candidate
+			normalizeAppStatusForRead(&app)
+			hydrateAppBackingServices(state, &app)
+			return nil
+		}
+		return ErrNotFound
+	})
+	return app, err
+}
+
+func (s *Store) GetAppByRoute(hostname, requestPath string) (model.App, error) {
+	hostname = normalizeAppDomainHostname(hostname)
+	requestPath = model.NormalizeAppRoutePathPrefix(requestPath)
+	if s.usingDatabase() {
+		return s.pgGetAppByRoute(hostname, requestPath)
+	}
+	var (
+		app     model.App
+		bestLen int
+		matched bool
+	)
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, candidate := range state.Apps {
+			if isDeletedApp(candidate) || candidate.Route == nil {
+				continue
+			}
+			if !strings.EqualFold(strings.TrimSpace(candidate.Route.Hostname), hostname) {
+				continue
+			}
+			prefix := model.NormalizeAppRoutePathPrefix(candidate.Route.PathPrefix)
+			if !routePathPrefixMatches(prefix, requestPath) {
+				continue
+			}
+			if !matched || len(prefix) > bestLen || (len(prefix) == bestLen && candidate.UpdatedAt.After(app.UpdatedAt)) {
+				app = candidate
+				bestLen = len(prefix)
+				matched = true
+			}
+		}
+		if !matched {
+			return ErrNotFound
+		}
+		normalizeAppStatusForRead(&app)
+		hydrateAppBackingServices(state, &app)
+		return nil
+	})
+	return app, err
+}
+
 func (s *Store) CreateApp(tenantID, projectID, name, description string, spec model.AppSpec) (model.App, error) {
 	return s.createApp(tenantID, projectID, name, description, spec, nil, nil)
 }
@@ -2143,9 +2210,7 @@ func (s *Store) CreateImportedAppWithoutRoute(tenantID, projectID, name, descrip
 
 func (s *Store) UpdateAppRoute(id string, route model.AppRoute) (model.App, error) {
 	id = strings.TrimSpace(id)
-	route.Hostname = strings.TrimSpace(strings.ToLower(route.Hostname))
-	route.BaseDomain = strings.TrimSpace(strings.ToLower(route.BaseDomain))
-	route.PublicURL = strings.TrimSpace(route.PublicURL)
+	route = model.NormalizeAppRoute(route)
 	if id == "" || route.Hostname == "" {
 		return model.App{}, ErrInvalidInput
 	}
@@ -2167,7 +2232,7 @@ func (s *Store) UpdateAppRoute(id string, route model.AppRoute) (model.App, erro
 			if existing.ID == app.ID || isDeletedApp(existing) || existing.Route == nil {
 				continue
 			}
-			if strings.EqualFold(strings.TrimSpace(existing.Route.Hostname), route.Hostname) {
+			if appRouteConflictKey(existing.Route) == appRouteConflictKey(&route) {
 				return ErrConflict
 			}
 		}
@@ -2175,7 +2240,7 @@ func (s *Store) UpdateAppRoute(id string, route model.AppRoute) (model.App, erro
 			route.BaseDomain = strings.TrimSpace(strings.ToLower(app.Route.BaseDomain))
 		}
 		if route.PublicURL == "" {
-			route.PublicURL = "https://" + route.Hostname
+			route.PublicURL = model.AppRoutePublicURL(route.Hostname, route.PathPrefix)
 		}
 		if route.ServicePort <= 0 {
 			if app.Route != nil && app.Route.ServicePort > 0 {
@@ -2380,6 +2445,7 @@ func (s *Store) PurgeApp(id string) (model.App, error) {
 
 func (s *Store) createApp(tenantID, projectID, name, description string, spec model.AppSpec, source *model.AppSource, route *model.AppRoute) (model.App, error) {
 	name = strings.TrimSpace(name)
+	route = normalizeAppRouteForStore(route)
 	allowPendingImport := source != nil && isQueuedImportSourceType(source.Type) && strings.TrimSpace(spec.Image) == ""
 	if tenantID == "" || projectID == "" || name == "" || (!allowPendingImport && spec.Image == "") || spec.Replicas < 1 {
 		return model.App{}, ErrInvalidInput
@@ -2432,11 +2498,12 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 		if err := validateAppSpecRuntimeReservationsState(state, projectID, spec); err != nil {
 			return err
 		}
+		routeKey := appRouteConflictKey(route)
 		for _, existing := range state.Apps {
 			if existing.TenantID == tenantID && existing.ProjectID == projectID && strings.EqualFold(existing.Name, name) {
 				return ErrConflict
 			}
-			if route != nil && route.Hostname != "" && existing.Route != nil && strings.EqualFold(existing.Route.Hostname, route.Hostname) {
+			if routeKey != "" && existing.Route != nil && appRouteConflictKey(existing.Route) == routeKey {
 				return ErrConflict
 			}
 		}
@@ -4149,6 +4216,37 @@ func cloneAppRoute(in *model.AppRoute) *model.AppRoute {
 	}
 	out := *in
 	return &out
+}
+
+func normalizeAppRouteForStore(in *model.AppRoute) *model.AppRoute {
+	if in == nil {
+		return nil
+	}
+	out := model.NormalizeAppRoute(*in)
+	if out.PublicURL == "" {
+		out.PublicURL = model.AppRoutePublicURL(out.Hostname, out.PathPrefix)
+	}
+	return &out
+}
+
+func appRouteConflictKey(route *model.AppRoute) string {
+	if route == nil {
+		return ""
+	}
+	normalized := model.NormalizeAppRoute(*route)
+	if normalized.Hostname == "" {
+		return ""
+	}
+	return normalized.Hostname + "\x00" + normalized.PathPrefix
+}
+
+func routePathPrefixMatches(prefix, requestPath string) bool {
+	prefix = model.NormalizeAppRoutePathPrefix(prefix)
+	requestPath = model.NormalizeAppRoutePathPrefix(requestPath)
+	if prefix == "/" {
+		return true
+	}
+	return requestPath == prefix || strings.HasPrefix(requestPath, prefix+"/")
 }
 
 func applyOperationToApp(state *model.State, op *model.Operation) error {

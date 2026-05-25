@@ -19,6 +19,7 @@ type appRouteAvailability struct {
 	Input      string `json:"input,omitempty"`
 	Label      string `json:"label,omitempty"`
 	Hostname   string `json:"hostname,omitempty"`
+	PathPrefix string `json:"path_prefix,omitempty"`
 	BaseDomain string `json:"base_domain,omitempty"`
 	PublicURL  string `json:"public_url,omitempty"`
 	Valid      bool   `json:"valid"`
@@ -63,8 +64,9 @@ func (s *Server) createAppWithAutoRoute(tenantID, projectID, name, description s
 
 		route := model.AppRoute{
 			Hostname:    candidateHost,
+			PathPrefix:  "/",
 			BaseDomain:  s.appBaseDomain,
-			PublicURL:   "https://" + candidateHost,
+			PublicURL:   model.AppRoutePublicURL(candidateHost, "/"),
 			ServicePort: firstServicePort(spec),
 		}
 		var (
@@ -98,7 +100,7 @@ func (s *Server) handleGetAppRouteAvailability(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	availability, err := s.inspectAppRouteAvailability(app, r.URL.Query().Get("hostname"))
+	availability, err := s.inspectAppRouteAvailability(app, r.URL.Query().Get("hostname"), r.URL.Query().Get("path_prefix"))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -124,14 +126,15 @@ func (s *Server) handlePatchAppRoute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Hostname string `json:"hostname"`
+		Hostname   string `json:"hostname"`
+		PathPrefix string `json:"path_prefix"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	availability, err := s.inspectAppRouteAvailability(app, req.Hostname)
+	availability, err := s.inspectAppRouteAvailability(app, req.Hostname, req.PathPrefix)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -153,12 +156,12 @@ func (s *Server) handlePatchAppRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updatedApp, err := s.store.UpdateAppRoute(app.ID, s.buildManagedAppRoute(app, availability.Hostname))
+	updatedApp, err := s.store.UpdateAppRoute(app.ID, s.buildManagedAppRoute(app, availability.Hostname, availability.PathPrefix))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	s.appendAudit(principal, "app.route.patch", "app", updatedApp.ID, updatedApp.TenantID, map[string]string{"hostname": availability.Hostname})
+	s.appendAudit(principal, "app.route.patch", "app", updatedApp.ID, updatedApp.TenantID, map[string]string{"hostname": availability.Hostname, "path_prefix": availability.PathPrefix})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"app":             sanitizeAppForAPI(updatedApp),
 		"availability":    availability,
@@ -179,9 +182,10 @@ func (s *Server) ensureAppNameAvailable(tenantID, projectID, appName string) err
 	return nil
 }
 
-func (s *Server) inspectAppRouteAvailability(app model.App, raw string) (appRouteAvailability, error) {
+func (s *Server) inspectAppRouteAvailability(app model.App, rawHostname, rawPathPrefix string) (appRouteAvailability, error) {
 	availability := appRouteAvailability{
-		Input:      strings.TrimSpace(raw),
+		Input:      strings.TrimSpace(rawHostname),
+		PathPrefix: normalizeRequestedAppPathPrefix(rawPathPrefix),
 		BaseDomain: s.appBaseDomain,
 	}
 	if strings.TrimSpace(s.appBaseDomain) == "" {
@@ -189,11 +193,11 @@ func (s *Server) inspectAppRouteAvailability(app model.App, raw string) (appRout
 		return availability, nil
 	}
 
-	host, label, reason := normalizeRequestedAppHostname(raw, s.appBaseDomain)
+	host, label, reason := normalizeRequestedAppHostname(rawHostname, s.appBaseDomain)
 	availability.Label = label
 	availability.Hostname = host
 	if host != "" {
-		availability.PublicURL = "https://" + host
+		availability.PublicURL = model.AppRoutePublicURL(host, availability.PathPrefix)
 	}
 	if reason != "" {
 		availability.Reason = reason
@@ -206,16 +210,18 @@ func (s *Server) inspectAppRouteAvailability(app model.App, raw string) (appRout
 
 	availability.Valid = true
 	currentHost := ""
+	currentPathPrefix := "/"
 	if app.Route != nil {
 		currentHost = strings.TrimSpace(strings.ToLower(app.Route.Hostname))
+		currentPathPrefix = model.NormalizeAppRoutePathPrefix(app.Route.PathPrefix)
 	}
-	if currentHost == host {
+	if currentHost == host && currentPathPrefix == availability.PathPrefix {
 		availability.Available = true
 		availability.Current = true
 		return availability, nil
 	}
 
-	owner, err := s.store.GetAppByHostname(host)
+	owner, err := s.store.GetAppByRoutePrefix(host, availability.PathPrefix)
 	switch {
 	case err == nil:
 		if owner.ID == app.ID {
@@ -259,6 +265,10 @@ func normalizeRequestedAppHostname(raw, baseDomain string) (hostname, label, rea
 	return label + "." + baseDomain, label, ""
 }
 
+func normalizeRequestedAppPathPrefix(raw string) string {
+	return model.NormalizeAppRoutePathPrefix(raw)
+}
+
 func buildAutoRouteHostname(baseName, baseDomain string, attempt int) string {
 	hostBase := baseName
 	if attempt > 0 {
@@ -272,11 +282,13 @@ func buildAutoRouteHostname(baseName, baseDomain string, attempt int) string {
 	return hostBase + "." + strings.TrimSpace(strings.ToLower(baseDomain))
 }
 
-func (s *Server) buildManagedAppRoute(app model.App, hostname string) model.AppRoute {
+func (s *Server) buildManagedAppRoute(app model.App, hostname, pathPrefix string) model.AppRoute {
+	pathPrefix = model.NormalizeAppRoutePathPrefix(pathPrefix)
 	return model.AppRoute{
 		Hostname:    hostname,
+		PathPrefix:  pathPrefix,
 		BaseDomain:  s.appBaseDomain,
-		PublicURL:   "https://" + hostname,
+		PublicURL:   model.AppRoutePublicURL(hostname, pathPrefix),
 		ServicePort: firstServicePort(app.Spec),
 	}
 }

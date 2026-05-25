@@ -158,6 +158,81 @@ services:
 	}
 }
 
+func TestInspectFugueManifestParsesDomainsAndEntrypoints(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, "api"), 0o755); err != nil {
+		t.Fatalf("mkdir api dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte("FROM scratch\nEXPOSE 3000\n"), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "api", "Dockerfile"), []byte("FROM scratch\nEXPOSE 8080\n"), 0o644); err != nil {
+		t.Fatalf("write api Dockerfile: %v", err)
+	}
+	manifest := `version: 1
+primary_service: web
+domains:
+  - name: app
+    host: https://App.Example.COM/
+    tls: managed
+    owner_service: api
+entrypoints:
+  - name: api
+    path: /api/*
+    backend: api
+services:
+  web:
+    public: true
+    build:
+      context: .
+      dockerfile: Dockerfile
+  api:
+    build:
+      context: api
+      dockerfile: Dockerfile
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "fugue.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write fugue manifest: %v", err)
+	}
+
+	parsed, err := inspectFugueManifestFromRepo(clonedGitHubRepo{
+		RepoOwner:      "example",
+		RepoName:       "demo",
+		RepoDir:        repoDir,
+		Branch:         "main",
+		CommitSHA:      "abcdef123456",
+		DefaultAppName: "demo",
+	})
+	if err != nil {
+		t.Fatalf("inspect fugue manifest: %v", err)
+	}
+	if len(parsed.Domains) != 1 {
+		t.Fatalf("expected one domain, got %+v", parsed.Domains)
+	}
+	domain := parsed.Domains[0]
+	if domain.Name != "app" || domain.Host != "app.example.com" || domain.TLS != "managed" || domain.OwnerService != "api" {
+		t.Fatalf("unexpected domain: %+v", domain)
+	}
+	if len(parsed.Entrypoints) != 1 || len(parsed.Entrypoints[0].Routes) != 1 {
+		t.Fatalf("expected one entrypoint route, got %+v", parsed.Entrypoints)
+	}
+	entrypoint := parsed.Entrypoints[0]
+	route := entrypoint.Routes[0]
+	if entrypoint.Name != "api" || entrypoint.Domain != "app" {
+		t.Fatalf("unexpected entrypoint header: %+v", entrypoint)
+	}
+	if route.Path != "/api" || route.PathPrefix != "/api" || route.Service != "api" {
+		t.Fatalf("unexpected entrypoint route: %+v", route)
+	}
+	topology := parsed.Topology()
+	if len(topology.Domains) != 1 || topology.Domains[0].OwnerService != "api" {
+		t.Fatalf("expected topology to carry domains, got %+v", topology.Domains)
+	}
+	if len(topology.Entrypoints) != 1 || topology.Entrypoints[0].Routes[0].PathPrefix != "/api" {
+		t.Fatalf("expected topology to carry entrypoints, got %+v", topology.Entrypoints)
+	}
+}
+
 func TestInspectFugueManifestRejectsMultiplePublicServicesWithoutPrimary(t *testing.T) {
 	repoDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte("FROM scratch\nEXPOSE 3000\n"), 0o644); err != nil {

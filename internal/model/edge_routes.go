@@ -141,6 +141,7 @@ type EdgeRouteBundle struct {
 
 type EdgeRouteBinding struct {
 	Hostname             string    `json:"hostname"`
+	PathPrefix           string    `json:"path_prefix,omitempty"`
 	RouteKind            string    `json:"route_kind"`
 	AppID                string    `json:"app_id"`
 	TenantID             string    `json:"tenant_id"`
@@ -353,6 +354,7 @@ type EdgePerformanceSample struct {
 	EdgeID                string    `json:"edge_id,omitempty"`
 	EdgeGroupID           string    `json:"edge_group_id"`
 	Hostname              string    `json:"hostname"`
+	PathPrefix            string    `json:"path_prefix,omitempty"`
 	ClientCountry         string    `json:"client_country,omitempty"`
 	ClientRegion          string    `json:"client_region,omitempty"`
 	ClientASN             string    `json:"client_asn,omitempty"`

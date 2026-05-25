@@ -1048,6 +1048,39 @@ func TestBuildCaddyConfigAddsNotFoundFallbackForUnmatchedHosts(t *testing.T) {
 	}
 }
 
+func TestRouteForRequestPrefersLongestPathPrefix(t *testing.T) {
+	t.Parallel()
+
+	bundle := testBundle("routegen_path_prefix")
+	apiRoute := bundle.Routes[0]
+	apiRoute.PathPrefix = "/api"
+	apiRoute.AppID = "app_api"
+	apiRoute.UpstreamURL = "http://api.fg-tenant-demo.svc.cluster.local:8080"
+	bundle.Routes = append(bundle.Routes, apiRoute)
+
+	service := NewService(config.EdgeConfig{
+		APIURL:    "https://api.example.invalid",
+		EdgeToken: "edge-secret",
+	}, log.New(ioDiscard{}, "", 0))
+	service.recordSyncSuccess(bundle, `"routegen_path_prefix"`, time.Now().UTC(), false)
+
+	route, ok, fallbackHit := service.routeForRequest("demo.fugue.pro", "/api/users")
+	if !ok || fallbackHit {
+		t.Fatalf("expected path-prefixed route without fallback, ok=%t fallback=%t route=%+v", ok, fallbackHit, route)
+	}
+	if route.AppID != "app_api" || route.PathPrefix != "/api" {
+		t.Fatalf("expected /api route, got %+v", route)
+	}
+
+	rootRoute, ok, fallbackHit := service.routeForRequest("demo.fugue.pro", "/")
+	if !ok || fallbackHit {
+		t.Fatalf("expected root route without fallback, ok=%t fallback=%t route=%+v", ok, fallbackHit, rootRoute)
+	}
+	if rootRoute.AppID != "app_demo" || model.NormalizeAppRoutePathPrefix(rootRoute.PathPrefix) != "/" {
+		t.Fatalf("expected root route, got %+v", rootRoute)
+	}
+}
+
 func TestBuildCaddyConfigSupportsPublicOnDemandTLSCanary(t *testing.T) {
 	t.Parallel()
 
@@ -1294,15 +1327,15 @@ func TestProxyHandlerRoutesPlatformAndCustomDomainsWithStreamingMetrics(t *testi
 
 	metrics := renderMetrics(t, service)
 	for _, want := range []string{
-		`fugue_edge_route_requests_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 1`,
-		`fugue_edge_route_requests_total{hostname="www.customer.com",app="app_demo",route_kind="custom-domain"} 1`,
-		`fugue_edge_route_status_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",status="201"} 1`,
-		`fugue_edge_route_status_total{hostname="www.customer.com",app="app_demo",route_kind="custom-domain",status="200"} 1`,
-		`fugue_edge_route_upload_requests_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 1`,
-		`fugue_edge_route_sse_total{hostname="www.customer.com",app="app_demo",route_kind="custom-domain",result="success"} 1`,
-		`fugue_edge_route_streaming_total{hostname="www.customer.com",app="app_demo",route_kind="custom-domain",result="success"} 1`,
-		`fugue_edge_route_upstream_latency_seconds_count{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 1`,
-		`fugue_edge_route_upstream_latency_seconds_count{hostname="www.customer.com",app="app_demo",route_kind="custom-domain"} 1`,
+		`fugue_edge_route_requests_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform"} 1`,
+		`fugue_edge_route_requests_total{hostname="www.customer.com",path_prefix="/",app="app_demo",route_kind="custom-domain"} 1`,
+		`fugue_edge_route_status_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform",status="201"} 1`,
+		`fugue_edge_route_status_total{hostname="www.customer.com",path_prefix="/",app="app_demo",route_kind="custom-domain",status="200"} 1`,
+		`fugue_edge_route_upload_requests_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform"} 1`,
+		`fugue_edge_route_sse_total{hostname="www.customer.com",path_prefix="/",app="app_demo",route_kind="custom-domain",result="success"} 1`,
+		`fugue_edge_route_streaming_total{hostname="www.customer.com",path_prefix="/",app="app_demo",route_kind="custom-domain",result="success"} 1`,
+		`fugue_edge_route_upstream_latency_seconds_count{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform"} 1`,
+		`fugue_edge_route_upstream_latency_seconds_count{hostname="www.customer.com",path_prefix="/",app="app_demo",route_kind="custom-domain"} 1`,
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, metrics)
@@ -1380,13 +1413,13 @@ func TestProxyHandlerCachesStaticAssets(t *testing.T) {
 
 	metrics := renderMetrics(t, service)
 	for _, want := range []string{
-		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",cache_status="hit",cache_policy_id="static-assets-immutable-v1",asset_class="next_static"} 1`,
-		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",cache_status="miss",cache_policy_id="static-assets-immutable-v1",asset_class="next_static"} 1`,
-		`fugue_edge_route_cache_lookup_duration_seconds_count{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 2`,
-		`fugue_edge_route_origin_connect_duration_seconds_count{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 1`,
-		`fugue_edge_route_origin_ttfb_seconds_count{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 1`,
-		`fugue_edge_route_origin_total_duration_seconds_count{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 1`,
-		`fugue_edge_route_response_write_duration_seconds_count{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 2`,
+		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform",cache_status="hit",cache_policy_id="static-assets-immutable-v1",asset_class="next_static"} 1`,
+		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform",cache_status="miss",cache_policy_id="static-assets-immutable-v1",asset_class="next_static"} 1`,
+		`fugue_edge_route_cache_lookup_duration_seconds_count{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform"} 2`,
+		`fugue_edge_route_origin_connect_duration_seconds_count{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform"} 1`,
+		`fugue_edge_route_origin_ttfb_seconds_count{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform"} 1`,
+		`fugue_edge_route_origin_total_duration_seconds_count{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform"} 1`,
+		`fugue_edge_route_response_write_duration_seconds_count{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform"} 2`,
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, metrics)
@@ -1439,9 +1472,9 @@ func TestProxyHandlerReusesOriginConnections(t *testing.T) {
 
 	metrics := renderMetrics(t, service)
 	for _, want := range []string{
-		`fugue_edge_route_origin_connect_duration_seconds_count{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 1`,
-		`fugue_edge_route_origin_ttfb_seconds_count{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 2`,
-		`fugue_edge_route_origin_total_duration_seconds_count{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 2`,
+		`fugue_edge_route_origin_connect_duration_seconds_count{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform"} 1`,
+		`fugue_edge_route_origin_ttfb_seconds_count{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform"} 2`,
+		`fugue_edge_route_origin_total_duration_seconds_count{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform"} 2`,
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, metrics)
@@ -1533,8 +1566,8 @@ func TestProxyHandlerCachesHTMLDocumentsWithShortTTL(t *testing.T) {
 
 	metrics := renderMetrics(t, service)
 	for _, want := range []string{
-		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",cache_status="hit",cache_policy_id="html-documents-short-v1",asset_class="html_document"} 1`,
-		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",cache_status="miss",cache_policy_id="html-documents-short-v1",asset_class="html_document"} 1`,
+		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform",cache_status="hit",cache_policy_id="html-documents-short-v1",asset_class="html_document"} 1`,
+		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform",cache_status="miss",cache_policy_id="html-documents-short-v1",asset_class="html_document"} 1`,
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, metrics)
@@ -1724,8 +1757,8 @@ func TestProxyHandlerReturnsUnavailableForInactiveRoute(t *testing.T) {
 	}
 	metrics := renderMetrics(t, service)
 	for _, want := range []string{
-		`fugue_edge_route_status_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",status="503"} 1`,
-		`fugue_edge_route_fallback_hits_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 1`,
+		`fugue_edge_route_status_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform",status="503"} 1`,
+		`fugue_edge_route_fallback_hits_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform"} 1`,
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, metrics)
@@ -1758,8 +1791,8 @@ func TestProxyHandlerRecordsUpstreamErrors(t *testing.T) {
 	}
 	metrics := renderMetrics(t, service)
 	for _, want := range []string{
-		`fugue_edge_route_status_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",status="502"} 1`,
-		`fugue_edge_route_upstream_errors_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform"} 1`,
+		`fugue_edge_route_status_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform",status="502"} 1`,
+		`fugue_edge_route_upstream_errors_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform"} 1`,
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, metrics)
@@ -1862,7 +1895,7 @@ func TestProxyHandlerSupportsWebSocket(t *testing.T) {
 		t.Fatal("timed out waiting for backend websocket validation")
 	}
 
-	wantMetric := `fugue_edge_route_websocket_total{hostname="demo.fugue.pro",app="app_demo",route_kind="platform",result="success"} 1`
+	wantMetric := `fugue_edge_route_websocket_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform",result="success"} 1`
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		metrics := renderMetrics(t, service)

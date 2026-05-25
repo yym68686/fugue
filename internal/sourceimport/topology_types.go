@@ -49,19 +49,42 @@ type ServiceHealthcheck struct {
 	Disable       bool     `json:"disable,omitempty"`
 }
 
+type TopologyDomain struct {
+	Name         string `json:"name,omitempty"`
+	Host         string `json:"host,omitempty"`
+	TLS          string `json:"tls,omitempty"`
+	OwnerService string `json:"owner_service,omitempty"`
+}
+
+type TopologyEntrypointRoute struct {
+	Path        string `json:"path,omitempty"`
+	PathPrefix  string `json:"path_prefix,omitempty"`
+	Service     string `json:"service,omitempty"`
+	StripPrefix bool   `json:"strip_prefix,omitempty"`
+	Rewrite     string `json:"rewrite,omitempty"`
+}
+
+type TopologyEntrypoint struct {
+	Name   string                    `json:"name,omitempty"`
+	Domain string                    `json:"domain,omitempty"`
+	Routes []TopologyEntrypointRoute `json:"routes,omitempty"`
+}
+
 type NormalizedTopology struct {
-	SourceKind        string              `json:"source_kind,omitempty"`
-	SourcePath        string              `json:"source_path,omitempty"`
-	RepoOwner         string              `json:"repo_owner,omitempty"`
-	RepoName          string              `json:"repo_name,omitempty"`
-	Branch            string              `json:"branch,omitempty"`
-	CommitSHA         string              `json:"commit_sha,omitempty"`
-	CommitCommittedAt string              `json:"commit_committed_at,omitempty"`
-	DefaultAppName    string              `json:"default_app_name,omitempty"`
-	PrimaryService    string              `json:"primary_service,omitempty"`
-	Services          []ComposeService    `json:"services,omitempty"`
-	Warnings          []string            `json:"warnings,omitempty"`
-	InferenceReport   []TopologyInference `json:"inference_report,omitempty"`
+	SourceKind        string               `json:"source_kind,omitempty"`
+	SourcePath        string               `json:"source_path,omitempty"`
+	RepoOwner         string               `json:"repo_owner,omitempty"`
+	RepoName          string               `json:"repo_name,omitempty"`
+	Branch            string               `json:"branch,omitempty"`
+	CommitSHA         string               `json:"commit_sha,omitempty"`
+	CommitCommittedAt string               `json:"commit_committed_at,omitempty"`
+	DefaultAppName    string               `json:"default_app_name,omitempty"`
+	PrimaryService    string               `json:"primary_service,omitempty"`
+	Domains           []TopologyDomain     `json:"domains,omitempty"`
+	Entrypoints       []TopologyEntrypoint `json:"entrypoints,omitempty"`
+	Services          []ComposeService     `json:"services,omitempty"`
+	Warnings          []string             `json:"warnings,omitempty"`
+	InferenceReport   []TopologyInference  `json:"inference_report,omitempty"`
 }
 
 type ManagedBackingPlan struct {
@@ -210,6 +233,8 @@ func buildNormalizedTopology(sourceKind, sourcePath string, repo clonedGitHubRep
 		CommitCommittedAt: strings.TrimSpace(repo.CommitCommittedAt),
 		DefaultAppName:    strings.TrimSpace(repo.DefaultAppName),
 		PrimaryService:    strings.TrimSpace(primaryService),
+		Domains:           nil,
+		Entrypoints:       nil,
 		Services:          append([]ComposeService(nil), services...),
 		Warnings:          append([]string(nil), warnings...),
 		InferenceReport:   append([]TopologyInference(nil), inferences...),

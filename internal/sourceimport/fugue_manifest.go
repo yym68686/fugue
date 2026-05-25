@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -36,6 +37,8 @@ type GitHubFugueManifest struct {
 	DefaultAppName    string
 	ManifestPath      string
 	PrimaryService    string
+	Domains           []TopologyDomain
+	Entrypoints       []TopologyEntrypoint
 	Services          []ComposeService
 	Template          *GitHubTemplateMetadata
 	Warnings          []string
@@ -45,6 +48,8 @@ type GitHubFugueManifest struct {
 type fugueManifestFile struct {
 	Version         any                             `yaml:"version"`
 	PrimaryService  string                          `yaml:"primary_service"`
+	Domains         []fugueManifestDomain           `yaml:"domains"`
+	Entrypoints     []fugueManifestEntrypoint       `yaml:"entrypoints"`
 	Template        *fugueManifestTemplate          `yaml:"template"`
 	Services        map[string]fugueManifestService `yaml:"services"`
 	BackingServices map[string]fugueManifestService `yaml:"backing_services"`
@@ -133,6 +138,24 @@ type fugueManifestService struct {
 	Networks          any                             `yaml:"networks"`
 	Labels            any                             `yaml:"labels"`
 	Deploy            any                             `yaml:"deploy"`
+}
+
+type fugueManifestDomain struct {
+	Name         string `yaml:"name"`
+	Host         string `yaml:"host"`
+	TLS          string `yaml:"tls"`
+	OwnerService string `yaml:"owner_service"`
+}
+
+type fugueManifestEntrypoint struct {
+	Name        string `yaml:"name"`
+	Domain      string `yaml:"domain"`
+	Path        string `yaml:"path"`
+	PathPrefix  string `yaml:"path_prefix"`
+	Backend     string `yaml:"backend"`
+	Service     string `yaml:"service"`
+	StripPrefix bool   `yaml:"strip_prefix"`
+	Rewrite     string `yaml:"rewrite"`
 }
 
 type fugueManifestPersistentStorage struct {
@@ -276,6 +299,18 @@ func inspectFugueManifestFromRepo(repo clonedGitHubRepo) (GitHubFugueManifest, e
 		return GitHubFugueManifest{}, fmt.Errorf("invalid fugue manifest %q: %w", manifestPath, err)
 	}
 	manifest.PrimaryService = primaryService
+	domains, domainWarnings, err := resolveFugueManifestDomains(file.Domains, manifest.Services)
+	if err != nil {
+		return GitHubFugueManifest{}, fmt.Errorf("invalid fugue manifest %q: %w", manifestPath, err)
+	}
+	manifest.Domains = domains
+	manifest.Warnings = append(manifest.Warnings, domainWarnings...)
+	entrypoints, entrypointWarnings, err := resolveFugueManifestEntrypoints(file.Entrypoints, manifest.Services, manifest.Domains, manifest.PrimaryService)
+	if err != nil {
+		return GitHubFugueManifest{}, fmt.Errorf("invalid fugue manifest %q: %w", manifestPath, err)
+	}
+	manifest.Entrypoints = entrypoints
+	manifest.Warnings = append(manifest.Warnings, entrypointWarnings...)
 	template, err := resolveFugueManifestTemplate(repo, file.Template)
 	if err != nil {
 		return GitHubFugueManifest{}, fmt.Errorf("invalid fugue manifest %q: %w", manifestPath, err)
@@ -307,6 +342,61 @@ func normalizeFugueManifestNetworkPolicy(raw *model.AppNetworkPolicySpec) *model
 	}
 	normalized := model.NormalizeAppNetworkPolicySpec(*raw)
 	return &normalized
+}
+
+func normalizeFugueManifestHostname(raw string) string {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	raw = strings.ReplaceAll(raw, "。", ".")
+	raw = strings.ReplaceAll(raw, "．", ".")
+	raw = strings.ReplaceAll(raw, "｡", ".")
+	if raw == "" {
+		return ""
+	}
+	if strings.Contains(raw, "://") {
+		if parsed, err := url.Parse(raw); err == nil && parsed.Hostname() != "" {
+			raw = parsed.Hostname()
+		}
+	}
+	raw = strings.SplitN(raw, "/", 2)[0]
+	raw = strings.Trim(raw, ".")
+	return raw
+}
+
+func normalizeFugueManifestPathPrefix(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "/"
+	}
+	if idx := strings.IndexAny(raw, "?#"); idx >= 0 {
+		raw = raw[:idx]
+	}
+	if !strings.HasPrefix(raw, "/") {
+		raw = "/" + raw
+	}
+	if strings.HasSuffix(raw, "/*") {
+		raw = strings.TrimSuffix(raw, "/*")
+		if raw == "" {
+			return "/"
+		}
+	}
+	for strings.Contains(raw, "//") {
+		raw = strings.ReplaceAll(raw, "//", "/")
+	}
+	if raw != "/" {
+		raw = strings.TrimRight(raw, "/")
+		if raw == "" {
+			return "/"
+		}
+	}
+	return raw
+}
+
+func normalizeFugueManifestTLSPolicy(raw string) string {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	if raw == "" {
+		return "managed"
+	}
+	return raw
 }
 
 func parseFugueManifestGeneratedEnv(raw any) map[string]model.AppGeneratedEnvSpec {
@@ -918,6 +1008,132 @@ func resolveFugueManifestPrimaryService(rawPrimary string, services []ComposeSer
 		sort.Strings(publicServices)
 		return "", fmt.Errorf("multiple public services declared (%s); set primary_service explicitly", strings.Join(publicServices, ", "))
 	}
+}
+
+func resolveFugueManifestDomains(raw []fugueManifestDomain, services []ComposeService) ([]TopologyDomain, []string, error) {
+	if len(raw) == 0 {
+		return nil, nil, nil
+	}
+	serviceNames := make(map[string]struct{}, len(services))
+	for _, service := range services {
+		name := strings.TrimSpace(service.Name)
+		if name != "" {
+			serviceNames[name] = struct{}{}
+		}
+	}
+	out := make([]TopologyDomain, 0, len(raw))
+	warnings := make([]string, 0)
+	seen := map[string]struct{}{}
+	for index, item := range raw {
+		host := normalizeFugueManifestHostname(item.Host)
+		if host == "" {
+			return nil, nil, fmt.Errorf("domains[%d].host is required", index)
+		}
+		name := slugifyOptional(item.Name)
+		if name == "" {
+			name = slugifyOptional(host)
+		}
+		if name == "" {
+			name = fmt.Sprintf("domain-%d", index+1)
+		}
+		ownerService := slugifyOptional(item.OwnerService)
+		if ownerService != "" {
+			if _, ok := serviceNames[ownerService]; !ok {
+				return nil, nil, fmt.Errorf("domains[%d].owner_service references unknown service %q", index, item.OwnerService)
+			}
+		}
+		key := name + "\x00" + host
+		if _, ok := seen[key]; ok {
+			warnings = append(warnings, fmt.Sprintf("domains[%d] duplicates domain %q for host %q", index, name, host))
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, TopologyDomain{
+			Name:         name,
+			Host:         host,
+			TLS:          normalizeFugueManifestTLSPolicy(item.TLS),
+			OwnerService: ownerService,
+		})
+	}
+	return out, warnings, nil
+}
+
+func resolveFugueManifestEntrypoints(raw []fugueManifestEntrypoint, services []ComposeService, domains []TopologyDomain, primaryService string) ([]TopologyEntrypoint, []string, error) {
+	if len(raw) == 0 {
+		return nil, nil, nil
+	}
+	serviceNames := make(map[string]struct{}, len(services))
+	for _, service := range services {
+		name := strings.TrimSpace(service.Name)
+		if name == "" {
+			continue
+		}
+		serviceNames[name] = struct{}{}
+	}
+	domainNames := make(map[string]TopologyDomain, len(domains))
+	domainHosts := make(map[string]TopologyDomain, len(domains))
+	for _, domain := range domains {
+		if domain.Name != "" {
+			domainNames[domain.Name] = domain
+		}
+		if domain.Host != "" {
+			domainHosts[domain.Host] = domain
+		}
+	}
+	out := make([]TopologyEntrypoint, 0, len(raw))
+	warnings := make([]string, 0)
+	seen := map[string]struct{}{}
+	for index, item := range raw {
+		name := slugifyOptional(item.Name)
+		if name == "" {
+			name = fmt.Sprintf("entrypoint-%d", index+1)
+		}
+		domainRef := firstNonEmptyString(item.Domain)
+		path := normalizeFugueManifestPathPrefix(firstNonEmptyString(item.PathPrefix, item.Path))
+		backend := slugifyOptional(firstNonEmptyString(item.Backend, item.Service))
+		if backend == "" {
+			backend = slugifyOptional(primaryService)
+		}
+		if backend == "" {
+			return nil, nil, fmt.Errorf("entrypoints[%d].backend is required", index)
+		}
+		if _, ok := serviceNames[backend]; !ok {
+			return nil, nil, fmt.Errorf("entrypoints[%d].backend references unknown service %q", index, backend)
+		}
+		if domainRef == "" && len(domains) == 1 {
+			domainRef = domains[0].Name
+		}
+		if domainRef == "" && len(domainHosts) == 1 {
+			for _, domain := range domainHosts {
+				domainRef = domain.Name
+			}
+		}
+		key := name + "\x00" + domainRef + "\x00" + path + "\x00" + backend
+		if _, ok := seen[key]; ok {
+			warnings = append(warnings, fmt.Sprintf("entrypoints[%d] duplicates entrypoint %q for backend %q", index, name, backend))
+			continue
+		}
+		seen[key] = struct{}{}
+		if domainRef != "" {
+			if _, ok := domainNames[domainRef]; !ok {
+				if _, ok := domainHosts[normalizeFugueManifestHostname(domainRef)]; !ok {
+					warnings = append(warnings, fmt.Sprintf("entrypoints[%d] references unknown domain %q", index, item.Domain))
+				}
+			}
+		}
+		out = append(out, TopologyEntrypoint{
+			Name:   name,
+			Domain: domainRef,
+			Routes: []TopologyEntrypointRoute{{
+				Path:        path,
+				PathPrefix:  path,
+				Service:     backend,
+				StripPrefix: item.StripPrefix,
+				Rewrite:     strings.TrimSpace(item.Rewrite),
+			}},
+		})
+	}
+	return out, warnings, nil
 }
 
 func firstNonEmptyString(values ...string) string {

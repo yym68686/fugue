@@ -28,6 +28,8 @@ func (manifest GitHubFugueManifest) Topology() NormalizedTopology {
 		CommitCommittedAt: strings.TrimSpace(manifest.CommitCommittedAt),
 		DefaultAppName:    strings.TrimSpace(manifest.DefaultAppName),
 		PrimaryService:    strings.TrimSpace(manifest.PrimaryService),
+		Domains:           append([]TopologyDomain(nil), manifest.Domains...),
+		Entrypoints:       append([]TopologyEntrypoint(nil), manifest.Entrypoints...),
 		Services:          append([]ComposeService(nil), manifest.Services...),
 		Warnings:          append([]string(nil), manifest.Warnings...),
 		InferenceReport:   append([]TopologyInference(nil), manifest.InferenceReport...),

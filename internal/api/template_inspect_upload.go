@@ -86,6 +86,8 @@ func sanitizeUploadTemplateManifest(topology sourceimport.NormalizedTopology) ma
 	return map[string]any{
 		"manifest_path":    topology.SourcePath,
 		"primary_service":  resolveUploadTopologyPrimaryService(topology),
+		"domains":          sanitizeTopologyDomains(topology.Domains),
+		"entrypoints":      sanitizeTopologyEntrypoints(topology.Entrypoints),
 		"services":         sanitizeUploadTemplateServices(topology.Services),
 		"warnings":         append([]string(nil), topology.Warnings...),
 		"inference_report": append([]sourceimport.TopologyInference(nil), topology.InferenceReport...),

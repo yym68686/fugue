@@ -2257,6 +2257,10 @@ func (s *Store) pgGetAppByHostname(hostname string) (model.App, error) {
 SELECT id, tenant_id, project_id, name, description, source_json, route_json, spec_json, status_json, created_at, updated_at
 FROM fugue_apps
 WHERE lower(route_json->>'hostname') = lower($1)
+ORDER BY CASE WHEN COALESCE(NULLIF(route_json->>'path_prefix', ''), '/') = '/' THEN 0 ELSE 1 END,
+	length(COALESCE(NULLIF(route_json->>'path_prefix', ''), '/')) ASC,
+	updated_at DESC
+LIMIT 1
 `, hostname))
 	if err != nil {
 		if !errors.Is(mapDBErr(err), ErrNotFound) {
@@ -2266,6 +2270,55 @@ WHERE lower(route_json->>'hostname') = lower($1)
 		if err != nil {
 			return model.App{}, err
 		}
+	}
+	normalizeAppStatusForRead(&app)
+	if err := s.pgHydrateAppBackingServices(ctx, &app); err != nil {
+		return model.App{}, err
+	}
+	return app, nil
+}
+
+func (s *Store) pgGetAppByRoutePrefix(hostname, pathPrefix string) (model.App, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pathPrefix = model.NormalizeAppRoutePathPrefix(pathPrefix)
+	app, err := scanApp(s.db.QueryRowContext(ctx, `
+SELECT id, tenant_id, project_id, name, description, source_json, route_json, spec_json, status_json, created_at, updated_at
+FROM fugue_apps
+WHERE lower(route_json->>'hostname') = lower($1)
+  AND lower(COALESCE(NULLIF(route_json->>'path_prefix', ''), '/')) = lower($2)
+`, hostname, pathPrefix))
+	if err != nil {
+		return model.App{}, mapDBErr(err)
+	}
+	normalizeAppStatusForRead(&app)
+	if err := s.pgHydrateAppBackingServices(ctx, &app); err != nil {
+		return model.App{}, err
+	}
+	return app, nil
+}
+
+func (s *Store) pgGetAppByRoute(hostname, requestPath string) (model.App, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	requestPath = model.NormalizeAppRoutePathPrefix(requestPath)
+	app, err := scanApp(s.db.QueryRowContext(ctx, `
+SELECT id, tenant_id, project_id, name, description, source_json, route_json, spec_json, status_json, created_at, updated_at
+FROM fugue_apps
+WHERE lower(route_json->>'hostname') = lower($1)
+  AND (
+    COALESCE(NULLIF(route_json->>'path_prefix', ''), '/') = '/'
+    OR lower($2) = lower(COALESCE(NULLIF(route_json->>'path_prefix', ''), '/'))
+    OR lower($2) LIKE lower(COALESCE(NULLIF(route_json->>'path_prefix', ''), '/')) || '/%'
+  )
+ORDER BY length(COALESCE(NULLIF(route_json->>'path_prefix', ''), '/')) DESC,
+	updated_at DESC
+LIMIT 1
+`, hostname, requestPath))
+	if err != nil {
+		return model.App{}, mapDBErr(err)
 	}
 	normalizeAppStatusForRead(&app)
 	if err := s.pgHydrateAppBackingServices(ctx, &app); err != nil {
@@ -2378,6 +2431,7 @@ WHERE id = $1 AND tenant_id = $2
 		return model.App{}, err
 	}
 
+	route = normalizeAppRouteForStore(route)
 	now := time.Now().UTC()
 	billing, billingState, _, err := s.pgAccrueTenantBillingTx(ctx, tx, tenantID, now)
 	if err != nil {
@@ -2481,9 +2535,7 @@ func (s *Store) pgUpdateAppRoute(id string, route model.AppRoute) (model.App, er
 		return model.App{}, ErrNotFound
 	}
 
-	route.Hostname = strings.TrimSpace(strings.ToLower(route.Hostname))
-	route.BaseDomain = strings.TrimSpace(strings.ToLower(route.BaseDomain))
-	route.PublicURL = strings.TrimSpace(route.PublicURL)
+	route = model.NormalizeAppRoute(route)
 	if route.Hostname == "" {
 		return model.App{}, ErrInvalidInput
 	}
@@ -2491,7 +2543,7 @@ func (s *Store) pgUpdateAppRoute(id string, route model.AppRoute) (model.App, er
 		route.BaseDomain = strings.TrimSpace(strings.ToLower(app.Route.BaseDomain))
 	}
 	if route.PublicURL == "" {
-		route.PublicURL = "https://" + route.Hostname
+		route.PublicURL = model.AppRoutePublicURL(route.Hostname, route.PathPrefix)
 	}
 	if route.ServicePort <= 0 {
 		if app.Route != nil && app.Route.ServicePort > 0 {
@@ -5333,7 +5385,7 @@ func scanApp(scanner sqlScanner) (model.App, error) {
 		return model.App{}, err
 	}
 	model.SetAppSourceState(&app, originSource, buildSource)
-	app.Route = route
+	app.Route = normalizeAppRouteForStore(route)
 	app.Spec = spec
 	app.Status = status
 	model.ApplyAppSpecDefaults(&app.Spec)

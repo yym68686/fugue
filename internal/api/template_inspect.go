@@ -138,10 +138,56 @@ func sanitizeGitHubTemplateManifest(manifest *sourceimport.GitHubFugueManifest) 
 	return map[string]any{
 		"manifest_path":    manifest.ManifestPath,
 		"primary_service":  manifest.PrimaryService,
+		"domains":          sanitizeTopologyDomains(manifest.Domains),
+		"entrypoints":      sanitizeTopologyEntrypoints(manifest.Entrypoints),
 		"services":         services,
 		"warnings":         append([]string(nil), manifest.Warnings...),
 		"inference_report": append([]sourceimport.TopologyInference(nil), manifest.InferenceReport...),
 	}
+}
+
+func sanitizeTopologyDomains(domains []sourceimport.TopologyDomain) []map[string]any {
+	items := make([]map[string]any, 0, len(domains))
+	for _, domain := range domains {
+		if strings.TrimSpace(domain.Name) == "" && strings.TrimSpace(domain.Host) == "" {
+			continue
+		}
+		items = append(items, map[string]any{
+			"name":          domain.Name,
+			"host":          domain.Host,
+			"tls":           domain.TLS,
+			"owner_service": domain.OwnerService,
+		})
+	}
+	return items
+}
+
+func sanitizeTopologyEntrypoints(entrypoints []sourceimport.TopologyEntrypoint) []map[string]any {
+	items := make([]map[string]any, 0, len(entrypoints))
+	for _, entrypoint := range entrypoints {
+		routes := make([]map[string]any, 0, len(entrypoint.Routes))
+		for _, route := range entrypoint.Routes {
+			if strings.TrimSpace(route.Service) == "" {
+				continue
+			}
+			routes = append(routes, map[string]any{
+				"path":         route.Path,
+				"path_prefix":  route.PathPrefix,
+				"service":      route.Service,
+				"strip_prefix": route.StripPrefix,
+				"rewrite":      route.Rewrite,
+			})
+		}
+		if strings.TrimSpace(entrypoint.Name) == "" && strings.TrimSpace(entrypoint.Domain) == "" && len(routes) == 0 {
+			continue
+		}
+		items = append(items, map[string]any{
+			"name":   entrypoint.Name,
+			"domain": entrypoint.Domain,
+			"routes": routes,
+		})
+	}
+	return items
 }
 
 func sanitizeGitHubTemplateComposeStack(stack *sourceimport.GitHubComposeStack) map[string]any {

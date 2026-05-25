@@ -8,7 +8,7 @@ Fugue 现在的 `fugue.yaml` 更像“导入拓扑 manifest”，还不是完整
 
 - `fugue.yaml` 只描述期望状态，不描述运行时瞬时状态。
 - 路由、域名、服务、存储、秘钥、观测、发布计划都应能从同一份文件重建。
-- `domain_routes` 不建议做成单独文件，路由应该挂在 `domains[].routes[]` 下。
+- `domain_routes` 不建议做成单独文件，但也不应被揉进 `domains` 的附属字段里；`domains` 只负责 host / TLS / 归属，HTTP 路由应作为一等入口表存在，再由 `domains` 绑定到入口表。
 - `version: 1` 继续兼容，`version: 2` 才承载完整项目能力。
 
 ## 1. 现有支持的字段
@@ -107,11 +107,24 @@ project:
   name: uni-api-web
   description: App lifecycle project for 0-0.pro
 
+domains:
+  - name: production
+    host: 0-0.pro
+    tls: managed
+
+entrypoints:
+  - name: public
+    domain: production
+    routes:
+      - path: /
+        service: web
+      - path: /v1/*
+        service: api
+
 services:
   web:
     image: yym68686/uni-api-frontend:main
     port: 3000
-    public: true
     env:
       NEXT_PUBLIC_API_BASE_URL: /v1
 
@@ -144,15 +157,6 @@ backing_services:
       mode: movable_rwo
       storage_size: 20Gi
 
-domains:
-  - host: 0-0.pro
-    tls: managed
-    routes:
-      - path: /
-        service: web
-      - path: /v1/*
-        service: api
-
 observability:
   dataocean:
     enabled: true
@@ -178,30 +182,35 @@ intent:
 ### 设计上应该新增的能力
 
 - `project`：项目身份、描述、默认策略、复制导出入口。
-- `domains`：域名 + 路由的唯一归属地。
-- `routes`：`path`、`service`、`strip_prefix`、`rewrite`、`fallback` 这类 path-level 路由信息。
+- `domains`：域名、TLS、所有权与验证状态的唯一归属地。
+- `entrypoints` / `http_routes`：`path`、`service`、`strip_prefix`、`rewrite`、`weight`、`mirror` 这类 HTTP 匹配与转发规则。
 - `secrets`：真正的 secret 值和 secret 引用统一进这一层，而不是继续混在普通 `env` 里。
 - `observability`：DataOcean、日志、指标、回放、转化事件都从这里接。
-- `release`：预检、影子流量、比较、回滚、canary。
+- `release`：预检、影子流量、比较、回滚、canary 和 weighted traffic。
 - `intent`：延迟、预算、可用性、区域偏好、合规偏好。
 
 ## 3. 详细方案
 
-### 3.1 不要把路由拆成单独的 `domain_routes`
+### 3.1 不要把路由揉成域名属性
 
-路由不是一个独立资源，它属于“域名 + path + service”这个组合对象。
+路由不是 domain 的附属字段，也不是 release 的附属字段。
 
-如果把它拆成单独文件，会出现三个问题：
+如果把它们揉在一起，会出现三个问题：
 
-- 域名和路由容易脱节。
-- 复制 manifest 时要跨多个文件拼装。
-- UI / diff / export 会多一层同步成本。
+- 域名、路由和发布策略的生命周期被绑死，后续很难独立演进。
+- path 匹配、backend 切换、shadow compare、回滚会被迫共用一套字段。
+- UI / diff / export 会把“入口定义”和“切流策略”混成一个对象。
 
 所以更好的方式是：
 
-- `domains` 负责域名和 TLS。
-- `routes` 作为 `domains` 的子项。
-- 当前 `public: true` 只是兼容旧模型的快捷入口，最终会被编译成 `domains[].routes[]`。
+- `domains` 只负责 host、TLS、所有权、验证与 DNS 归属。
+- `entrypoints` / `http_routes` 负责 path matching、backend mapping、rewrite 和 strip prefix。
+- `release` 负责同一路由的版本切流、影子流量、比较和回滚。
+- `intent` 负责区域偏好、容量偏好和故障切换意图。
+- 当前 `public: true` 只是兼容旧模型的快捷入口，最终会被编译成默认入口和默认路由表。
+- 服务是否默认拥有公网 hostname，和是否能被 `entrypoints` 引用，是两件事；`public` 只应该决定是否生成默认入口，而不是唯一曝光开关。
+
+换句话说，`domains` 可以承载 route table 的绑定关系，但不应该成为 route table 本身。
 
 ### 3.2 secret 可以有真实值，但必须有独立通道
 
@@ -276,8 +285,8 @@ intent:
 
 ## 5. TODO list
 
-1. **先支持 `domains`。**  
-   目标是把 hostname、path、TLS、service routing 放进同一个对象里，并把当前 `public` / `primary_service` 兼容编译进去。  
+1. **先支持 `domains` + `entrypoints`。**  
+   目标是把 hostname、TLS、path routing、backend 归属分层放进同一个项目合同里，并把当前 `public` / `primary_service` 兼容编译进去。  
    交付物应包括 parser、schema、导入器、route 生成器，以及前端可视化编辑入口。
 
 2. **再支持 `secrets`。**  
@@ -286,7 +295,7 @@ intent:
 3. **补 `project`、`intent`、`observability`。**  
    让 manifest 能表达项目身份、预算、区域偏好、DataOcean 之类的业务观测配置。
 
-4. **补 `release`、预检、影子流量和回滚。**  
+4. **补 `release`、预检、影子流量、权重切流和回滚。**  
    让 `fugue.yaml` 不只是“怎么跑”，还包括“怎么安全发布”。
 
 5. **做 `fugue.yaml` 的复制 / 导出 / Diff。**  
@@ -302,6 +311,6 @@ intent:
 
 `fugue.yaml` 最终应该是 Fugue 的项目合同。
 
-`domain_routes` 不应该单独飞出去，而应该成为 `domains` 的一部分。  
+`domains` 应该只承担 host / TLS / 归属；HTTP 路由应该是独立入口表。  
 secret 值可以存在，但要走独立安全通道。  
 前端一键复制当前项目配置也应该成为核心能力，而不是附加功能。

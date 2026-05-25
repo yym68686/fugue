@@ -210,6 +210,7 @@ func sanitizeEdgeHeartbeatPerformanceSamples(req edgeHeartbeatRequest, now time.
 		sample.EdgeID = strings.TrimSpace(req.EdgeID)
 		sample.EdgeGroupID = strings.TrimSpace(req.EdgeGroupID)
 		sample.Hostname = normalizeExternalAppDomain(sample.Hostname)
+		sample.PathPrefix = model.NormalizeAppRoutePathPrefix(sample.PathPrefix)
 		sample.ClientCountry = strings.ToLower(strings.TrimSpace(sample.ClientCountry))
 		sample.ClientRegion = strings.TrimSpace(sample.ClientRegion)
 		sample.ClientASN = strings.TrimSpace(sample.ClientASN)

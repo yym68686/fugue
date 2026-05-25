@@ -351,7 +351,8 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 	}
 	existingMatches, familyApps, matchWarnings := matchTopologyExistingApps(projectApps, topologyPlan.Deployable, options.Family, options.UpdateExisting)
 
-	appNames, routeHosts, routeWarnings, err := s.allocateComposeAppNamesWithExisting(tenantID, options.ProjectID, options.BaseName, topologyPlan.Deployable, topologyPlan.PrimaryService, existingMatches)
+	explicitRoutes, routeWarnings := buildTopologyRouteRequests(topologyPlan.Topology)
+	appNames, routeAssignments, routeWarnings, err := s.allocateComposeAppNamesWithExisting(tenantID, options.ProjectID, options.BaseName, topologyPlan, existingMatches, explicitRoutes, routeWarnings)
 	if err != nil {
 		return importedGitHubTopology{}, err
 	}
@@ -390,16 +391,13 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		inferenceReport = append(inferenceReport, envInferences...)
 		var route *model.AppRoute
 		requestedPort := 0
-		if host, ok := routeHosts[service.Name]; ok {
+		if assignment, ok := routeAssignments[service.Name]; ok {
 			if service.Name == topologyPlan.PrimaryService {
 				requestedPort = options.ServicePort
 			}
-			route = &model.AppRoute{
-				Hostname:    host,
-				BaseDomain:  s.appBaseDomain,
-				PublicURL:   "https://" + host,
-				ServicePort: effectiveImportServicePort(requestedPort, service.InternalPort),
-			}
+			routeCopy := assignment
+			routeCopy.ServicePort = effectiveImportServicePort(requestedPort, service.InternalPort)
+			route = &routeCopy
 		}
 
 		source, err := options.BuildSource(service, composeDeployDependencies(topologyPlan, service.Name))
@@ -439,7 +437,7 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		applyImportedNetworkPolicy(&spec, service.NetworkPolicy)
 		applyImportedGeneratedEnv(&spec, service.GeneratedEnv)
 		if route != nil {
-			route.ServicePort = firstServicePort(spec)
+			route.ServicePort = model.AppServicePort(spec)
 		}
 
 		action := "create"
@@ -665,19 +663,51 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 	}, nil
 }
 
-func (s *Server) allocateComposeAppNamesWithExisting(tenantID, projectID, baseName string, services []sourceimport.ComposeService, primaryService string, existingByService map[string]model.App) (map[string]string, map[string]string, []string, error) {
+type topologyRouteRequest struct {
+	Hostname       string
+	PathPrefix     string
+	DomainName     string
+	EntrypointName string
+}
+
+func normalizeTopologyImportRoute(in *model.AppRoute) *model.AppRoute {
+	if in == nil {
+		return nil
+	}
+	out := model.NormalizeAppRoute(*in)
+	if out.PublicURL == "" {
+		out.PublicURL = model.AppRoutePublicURL(out.Hostname, out.PathPrefix)
+	}
+	return &out
+}
+
+func topologyImportRouteConflictKey(route *model.AppRoute) string {
+	if route == nil {
+		return ""
+	}
+	normalized := model.NormalizeAppRoute(*route)
+	if normalized.Hostname == "" {
+		return ""
+	}
+	return normalized.Hostname + "\x00" + normalized.PathPrefix
+}
+
+func (s *Server) allocateComposeAppNamesWithExisting(tenantID, projectID, baseName string, topologyPlan sourceimport.TopologyPlan, existingByService map[string]model.App, explicitRoutes map[string]topologyRouteRequest, warnings []string) (map[string]string, map[string]model.AppRoute, []string, error) {
+	services := topologyPlan.Deployable
+	primaryService := strings.TrimSpace(topologyPlan.PrimaryService)
 	apps, err := s.store.ListApps(tenantID, false)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	fixedAppIDs := make(map[string]struct{}, len(existingByService))
-	warnings := make([]string, 0, len(existingByService))
 	for serviceName, app := range existingByService {
 		fixedAppIDs[strings.TrimSpace(app.ID)] = struct{}{}
-		if !servicePublishedByName(services, serviceName) && app.Route != nil && strings.TrimSpace(app.Route.Hostname) != "" {
-			warnings = append(warnings, fmt.Sprintf("service %q keeps its existing public route %q during update_existing; route removal still requires an explicit route/domain change or delete/recreate", serviceName, app.Route.Hostname))
+		if app.Route != nil && strings.TrimSpace(app.Route.Hostname) != "" {
+			if _, requested := explicitRoutes[serviceName]; !requested && !servicePublishedByName(services, serviceName) && !serviceIsPrimaryRequested(topologyPlan.Topology.PrimaryService, serviceName) {
+				warnings = append(warnings, fmt.Sprintf("service %q keeps its existing public route %q during update_existing; route removal still requires an explicit route/domain change or delete/recreate", serviceName, app.Route.Hostname))
+			}
 		}
-		if servicePublishedByName(services, serviceName) && (app.Route == nil || strings.TrimSpace(app.Route.Hostname) == "") {
+		if (servicePublishedByName(services, serviceName) || serviceIsPrimaryRequested(topologyPlan.Topology.PrimaryService, serviceName) || explicitRoutes[serviceName].Hostname != "") && (app.Route == nil || strings.TrimSpace(app.Route.Hostname) == "") {
 			warnings = append(warnings, fmt.Sprintf("service %q is published in the topology, but existing app %q has no current route; update_existing preserves the current route state", serviceName, app.Name))
 		}
 	}
@@ -725,41 +755,39 @@ func (s *Server) allocateComposeAppNamesWithExisting(tenantID, projectID, baseNa
 			continue
 		}
 
-		routeHosts := make(map[string]string)
-		usedHosts := make(map[string]struct{})
+		routeAssignments := make(map[string]model.AppRoute)
+		usedRouteKeys := make(map[string]struct{})
 		for _, service := range services {
-			if !service.Published {
-				continue
-			}
 			if existing, ok := existingByService[service.Name]; ok {
 				if existing.Route != nil {
-					host := strings.TrimSpace(strings.ToLower(existing.Route.Hostname))
-					if host != "" {
-						if _, exists := usedHosts[host]; exists {
-							conflict = true
-							break
-						}
-						routeHosts[service.Name] = host
-						usedHosts[host] = struct{}{}
-					}
+					route := *normalizeTopologyImportRoute(existing.Route)
+					routeAssignments[service.Name] = route
+					usedRouteKeys[topologyImportRouteConflictKey(&route)] = struct{}{}
 				}
 				continue
 			}
-			host := primaryHost
-			if service.Name != primaryService {
-				host = names[service.Name] + "." + s.appBaseDomain
+			route, hasRoute, routeErr := s.topologyRouteAssignmentForService(topologyPlan, service, names, primaryHost, explicitRoutes)
+			if routeErr != nil {
+				if errors.Is(routeErr, store.ErrConflict) {
+					conflict = true
+					break
+				}
+				return nil, nil, nil, routeErr
 			}
-			host = strings.TrimSpace(strings.ToLower(host))
-			if host == "" || s.isReservedAppHostname(host) {
+			if !hasRoute {
+				continue
+			}
+			routeKey := topologyImportRouteConflictKey(&route)
+			if routeKey == "" {
 				conflict = true
 				break
 			}
-			if _, exists := usedHosts[host]; exists {
+			if _, exists := usedRouteKeys[routeKey]; exists {
 				conflict = true
 				break
 			}
-			routeHosts[service.Name] = host
-			usedHosts[host] = struct{}{}
+			routeAssignments[service.Name] = route
+			usedRouteKeys[routeKey] = struct{}{}
 		}
 		if conflict {
 			continue
@@ -786,32 +814,14 @@ func (s *Server) allocateComposeAppNamesWithExisting(tenantID, projectID, baseNa
 		if hostConflict {
 			continue
 		}
-		for _, existing := range apps {
-			if _, ok := fixedAppIDs[strings.TrimSpace(existing.ID)]; ok {
+		for _, route := range routeAssignments {
+			if strings.TrimSpace(route.Hostname) == "" {
 				continue
 			}
-			if existing.Route == nil {
-				continue
-			}
-			existingHost := strings.TrimSpace(strings.ToLower(existing.Route.Hostname))
-			for _, plannedHost := range routeHosts {
-				if strings.EqualFold(existingHost, plannedHost) {
-					hostConflict = true
-					break
-				}
-			}
-			if hostConflict {
-				break
-			}
-		}
-		if hostConflict {
-			continue
-		}
-		for _, plannedHost := range routeHosts {
-			if _, err := s.store.GetAppByHostname(plannedHost); err == nil {
+			if _, err := s.store.GetAppByRoutePrefix(route.Hostname, route.PathPrefix); err == nil {
 				occupiedByFixed := false
 				for _, existing := range existingByService {
-					if existing.Route != nil && strings.EqualFold(strings.TrimSpace(existing.Route.Hostname), plannedHost) {
+					if existing.Route != nil && topologyImportRouteConflictKey(existing.Route) == topologyImportRouteConflictKey(&route) {
 						occupiedByFixed = true
 						break
 					}
@@ -828,10 +838,121 @@ func (s *Server) allocateComposeAppNamesWithExisting(tenantID, projectID, baseNa
 		if hostConflict {
 			continue
 		}
-		return names, routeHosts, warnings, nil
+		return names, routeAssignments, warnings, nil
 	}
 
 	return nil, nil, warnings, store.ErrConflict
+}
+
+func buildTopologyRouteRequests(topology sourceimport.NormalizedTopology) (map[string]topologyRouteRequest, []string) {
+	byService := make(map[string]topologyRouteRequest)
+	warnings := make([]string, 0)
+	domainsByName := make(map[string]sourceimport.TopologyDomain, len(topology.Domains))
+	domainsByHost := make(map[string]sourceimport.TopologyDomain, len(topology.Domains))
+	domainsByOwner := make(map[string]sourceimport.TopologyDomain, len(topology.Domains))
+	for _, domain := range topology.Domains {
+		if domain.Name != "" {
+			domainsByName[domain.Name] = domain
+		}
+		if domain.Host != "" {
+			domainsByHost[domain.Host] = domain
+		}
+		if domain.OwnerService != "" {
+			domainsByOwner[domain.OwnerService] = domain
+		}
+	}
+	for _, entrypoint := range topology.Entrypoints {
+		for _, route := range entrypoint.Routes {
+			serviceName := strings.TrimSpace(route.Service)
+			if serviceName == "" {
+				continue
+			}
+			if _, exists := byService[serviceName]; exists {
+				warnings = append(warnings, fmt.Sprintf("service %q has multiple entrypoint routes; keeping the first declared route", serviceName))
+				continue
+			}
+			hostname, domainName := resolveTopologyEntrypointDomain(topology.Domains, domainsByName, domainsByHost, domainsByOwner, entrypoint.Domain, serviceName)
+			if hostname == "" {
+				warnings = append(warnings, fmt.Sprintf("entrypoint %q for service %q does not resolve to a hostname", entrypoint.Name, serviceName))
+				continue
+			}
+			byService[serviceName] = topologyRouteRequest{
+				Hostname:       hostname,
+				PathPrefix:     model.NormalizeAppRoutePathPrefix(firstNonEmpty(route.PathPrefix, route.Path)),
+				DomainName:     domainName,
+				EntrypointName: entrypoint.Name,
+			}
+		}
+	}
+	return byService, warnings
+}
+
+func resolveTopologyEntrypointDomain(domains []sourceimport.TopologyDomain, domainsByName, domainsByHost, domainsByOwner map[string]sourceimport.TopologyDomain, rawDomain, serviceName string) (string, string) {
+	rawDomain = strings.TrimSpace(rawDomain)
+	if rawDomain != "" {
+		if domain, ok := domainsByName[rawDomain]; ok {
+			return domain.Host, domain.Name
+		}
+		normalizedHost := normalizeExternalAppDomain(rawDomain)
+		if normalizedHost != "" {
+			if domain, ok := domainsByHost[normalizedHost]; ok {
+				return domain.Host, domain.Name
+			}
+			return normalizedHost, ""
+		}
+	}
+	if domain, ok := domainsByOwner[strings.TrimSpace(serviceName)]; ok {
+		return domain.Host, domain.Name
+	}
+	if len(domains) == 1 {
+		domain := domains[0]
+		return domain.Host, domain.Name
+	}
+	return "", ""
+}
+
+func serviceIsPrimaryRequested(primaryService, serviceName string) bool {
+	return strings.TrimSpace(primaryService) != "" && strings.EqualFold(strings.TrimSpace(primaryService), strings.TrimSpace(serviceName))
+}
+
+func (s *Server) topologyRouteAssignmentForService(topologyPlan sourceimport.TopologyPlan, service sourceimport.ComposeService, names map[string]string, primaryHost string, explicitRoutes map[string]topologyRouteRequest) (model.AppRoute, bool, error) {
+	serviceName := strings.TrimSpace(service.Name)
+	if serviceName == "" {
+		return model.AppRoute{}, false, nil
+	}
+	if request, ok := explicitRoutes[serviceName]; ok {
+		route := model.NormalizeAppRoute(model.AppRoute{
+			Hostname:       request.Hostname,
+			PathPrefix:     request.PathPrefix,
+			BaseDomain:     s.appBaseDomain,
+			DomainName:     request.DomainName,
+			EntrypointName: request.EntrypointName,
+			PublicURL:      model.AppRoutePublicURL(request.Hostname, request.PathPrefix),
+		})
+		if route.Hostname == "" || s.isReservedAppHostname(route.Hostname) {
+			return model.AppRoute{}, false, store.ErrConflict
+		}
+		return route, true, nil
+	}
+	if !servicePublishedByName(topologyPlan.Deployable, serviceName) && !serviceIsPrimaryRequested(topologyPlan.Topology.PrimaryService, serviceName) {
+		return model.AppRoute{}, false, nil
+	}
+	host := primaryHost
+	if serviceName != topologyPlan.PrimaryService {
+		host = names[serviceName] + "." + s.appBaseDomain
+	}
+	host = strings.TrimSpace(strings.ToLower(host))
+	if host == "" || s.isReservedAppHostname(host) {
+		return model.AppRoute{}, false, store.ErrConflict
+	}
+	route := model.NormalizeAppRoute(model.AppRoute{
+		Hostname:    host,
+		PathPrefix:  "/",
+		BaseDomain:  s.appBaseDomain,
+		PublicURL:   model.AppRoutePublicURL(host, "/"),
+		ServicePort: 0,
+	})
+	return route, true, nil
 }
 
 func matchTopologyExistingApps(projectApps []model.App, services []sourceimport.ComposeService, family topologyImportFamily, updateExisting bool) (map[string]model.App, map[string]model.App, []string) {

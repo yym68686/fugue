@@ -173,6 +173,9 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		if routes[i].Hostname != routes[j].Hostname {
 			return routes[i].Hostname < routes[j].Hostname
 		}
+		if routes[i].PathPrefix != routes[j].PathPrefix {
+			return routes[i].PathPrefix < routes[j].PathPrefix
+		}
 		if routes[i].RouteKind != routes[j].RouteKind {
 			return routes[i].RouteKind < routes[j].RouteKind
 		}
@@ -227,6 +230,7 @@ func (s *Server) deriveEdgeRouteBinding(r *http.Request, app model.App, hostname
 
 	binding := model.EdgeRouteBinding{
 		Hostname:             normalizeExternalAppDomain(hostname),
+		PathPrefix:           "/",
 		RouteKind:            routeKind,
 		AppID:                app.ID,
 		TenantID:             app.TenantID,
@@ -248,6 +252,9 @@ func (s *Server) deriveEdgeRouteBinding(r *http.Request, app model.App, hostname
 		StatusReason:         reason,
 		CreatedAt:            createdAt,
 		UpdatedAt:            updatedAt,
+	}
+	if routeKind == model.EdgeRouteKindPlatform && app.Route != nil {
+		binding.PathPrefix = model.NormalizeAppRoutePathPrefix(app.Route.PathPrefix)
 	}
 	if binding.CachePolicyID != "" {
 		binding.CacheNamespace = edgeRouteCacheNamespace(app.ID, binding.DeploymentGeneration)
@@ -467,6 +474,7 @@ func applyCustomDomainReadiness(binding model.EdgeRouteBinding, domain model.App
 func edgeRouteBindingsForPlatformRoute(route model.PlatformRoute, healthyEdgeGroups map[string]bool) []model.EdgeRouteBinding {
 	base := model.EdgeRouteBinding{
 		Hostname:      route.Hostname,
+		PathPrefix:    "/",
 		RouteKind:     route.Kind,
 		RoutePolicy:   route.RoutePolicy,
 		UpstreamKind:  route.UpstreamKind,
@@ -666,6 +674,7 @@ func edgeRouteGeneration(binding model.EdgeRouteBinding) string {
 
 type edgeRouteVersionMaterial struct {
 	Hostname             string `json:"hostname"`
+	PathPrefix           string `json:"path_prefix,omitempty"`
 	RouteKind            string `json:"route_kind"`
 	AppID                string `json:"app_id"`
 	TenantID             string `json:"tenant_id"`
@@ -718,6 +727,7 @@ func edgeRouteBundleVersion(bundle model.EdgeRouteBundle) string {
 func edgeRouteVersionMaterialFromBinding(binding model.EdgeRouteBinding) edgeRouteVersionMaterial {
 	return edgeRouteVersionMaterial{
 		Hostname:             binding.Hostname,
+		PathPrefix:           model.NormalizeAppRoutePathPrefix(binding.PathPrefix),
 		RouteKind:            binding.RouteKind,
 		AppID:                binding.AppID,
 		TenantID:             binding.TenantID,

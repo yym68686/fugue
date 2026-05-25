@@ -154,9 +154,10 @@ type statusError struct {
 }
 
 type routeMetricKey struct {
-	Hostname  string
-	AppID     string
-	RouteKind string
+	Hostname   string
+	PathPrefix string
+	AppID      string
+	RouteKind  string
 }
 
 type routeStatusMetricKey struct {
@@ -554,6 +555,75 @@ func (s *Service) routeForHost(host string) (model.EdgeRouteBinding, bool, bool)
 	return model.EdgeRouteBinding{}, false, false
 }
 
+func (s *Service) routeForRequest(host, requestPath string) (model.EdgeRouteBinding, bool, bool) {
+	host = normalizeRouteHost(host)
+	requestPath = model.NormalizeAppRoutePathPrefix(requestPath)
+	if host == "" {
+		return model.EdgeRouteBinding{}, false, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.bundle == nil {
+		return model.EdgeRouteBinding{}, false, false
+	}
+
+	localEdgeGroupID := strings.TrimSpace(s.Config.EdgeGroupID)
+	bestPrefixLen := -1
+	var currentActive model.EdgeRouteBinding
+	var fallbackActive model.EdgeRouteBinding
+	var inactive model.EdgeRouteBinding
+	inactiveFallbackHit := false
+	for _, route := range s.bundle.Routes {
+		if normalizeRouteHost(route.Hostname) != host {
+			continue
+		}
+		if !s.routeAllowedForThisEdge(route) {
+			continue
+		}
+		prefix := model.NormalizeAppRoutePathPrefix(route.PathPrefix)
+		if !routePathPrefixMatches(prefix, requestPath) {
+			continue
+		}
+		prefixLen := len(prefix)
+		if prefixLen > bestPrefixLen {
+			bestPrefixLen = prefixLen
+			currentActive = model.EdgeRouteBinding{}
+			fallbackActive = model.EdgeRouteBinding{}
+			inactive = model.EdgeRouteBinding{}
+			inactiveFallbackHit = false
+		}
+		if prefixLen < bestPrefixLen {
+			continue
+		}
+
+		currentEdgeGroup := routeMatchesCurrentEdgeGroup(route, localEdgeGroupID)
+		active := strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive)
+		switch {
+		case currentEdgeGroup && active:
+			if currentActive.Hostname == "" {
+				currentActive = route
+			}
+		case active:
+			if fallbackActive.Hostname == "" {
+				fallbackActive = route
+			}
+		case inactive.Hostname == "":
+			inactive = route
+			inactiveFallbackHit = true
+		}
+	}
+	if currentActive.Hostname != "" {
+		return currentActive, true, false
+	}
+	if fallbackActive.Hostname != "" {
+		return fallbackActive, true, true
+	}
+	if inactive.Hostname != "" {
+		return inactive, true, inactiveFallbackHit
+	}
+	return model.EdgeRouteBinding{}, false, false
+}
+
 func (s *Service) hasBundle() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -599,7 +669,7 @@ func (s *Service) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
 func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	startedAt := time.Now()
 	host := normalizeRouteHost(firstNonEmptyHeader(r, "X-Fugue-Edge-Route-Host", r.Host))
-	route, ok, fallbackHit := s.routeForHost(host)
+	route, ok, fallbackHit := s.routeForRequest(host, r.URL.Path)
 	observed := edgeProxyObservation{
 		ReceivedAt:  startedAt.UTC(),
 		Host:        host,
@@ -1294,9 +1364,10 @@ func (s *Service) edgePerformanceSamplesForHeartbeat(snapshot metricSnapshot) []
 	fallbackRoutesByKey := make(map[routeMetricKey]model.EdgeRouteBinding, len(bundle.Routes))
 	for _, route := range bundle.Routes {
 		key := routeMetricKey{
-			Hostname:  normalizeRouteHost(route.Hostname),
-			AppID:     strings.TrimSpace(route.AppID),
-			RouteKind: strings.TrimSpace(route.RouteKind),
+			Hostname:   normalizeRouteHost(route.Hostname),
+			PathPrefix: model.NormalizeAppRoutePathPrefix(route.PathPrefix),
+			AppID:      strings.TrimSpace(route.AppID),
+			RouteKind:  strings.TrimSpace(route.RouteKind),
 		}
 		if key.Hostname == "" {
 			continue
@@ -1365,6 +1436,7 @@ func buildEdgePerformanceSamples(current, baseline telemetry, routesByKey map[ro
 			EdgeID:                edgeID,
 			EdgeGroupID:           edgeGroupID,
 			Hostname:              key.Hostname,
+			PathPrefix:            model.NormalizeAppRoutePathPrefix(key.PathPrefix),
 			ClientCountry:         clientCountry,
 			ClientRegion:          clientRegion,
 			RuntimeRegion:         runtimeRegion,
@@ -1416,7 +1488,7 @@ func cloneTelemetryForEdgePerformanceHeartbeat(in telemetry) telemetry {
 }
 
 func edgePerformanceSampleID(edgeID, edgeGroupID string, key routeMetricKey, sampledAt time.Time) string {
-	payload := fmt.Sprintf("%s|%s|%s|%s|%s|%d", strings.TrimSpace(edgeID), strings.TrimSpace(edgeGroupID), key.Hostname, key.AppID, key.RouteKind, sampledAt.UnixNano())
+	payload := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d", strings.TrimSpace(edgeID), strings.TrimSpace(edgeGroupID), key.Hostname, key.PathPrefix, key.AppID, key.RouteKind, sampledAt.UnixNano())
 	sum := sha256.Sum256([]byte(payload))
 	return "edge_perf_" + hex.EncodeToString(sum[:])[:16]
 }
@@ -1969,9 +2041,10 @@ func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 		observed.Upstream = observed.Duration
 	}
 	key := routeMetricKey{
-		Hostname:  firstNonEmpty(strings.TrimSpace(observed.Route.Hostname), observed.Host),
-		AppID:     strings.TrimSpace(observed.Route.AppID),
-		RouteKind: strings.TrimSpace(observed.Route.RouteKind),
+		Hostname:   firstNonEmpty(strings.TrimSpace(observed.Route.Hostname), observed.Host),
+		PathPrefix: model.NormalizeAppRoutePathPrefix(observed.Route.PathPrefix),
+		AppID:      strings.TrimSpace(observed.Route.AppID),
+		RouteKind:  strings.TrimSpace(observed.Route.RouteKind),
 	}
 	statusKey := routeStatusMetricKey{RouteMetricKey: key, StatusCode: observed.StatusCode}
 	s.mu.Lock()
@@ -2550,6 +2623,15 @@ func normalizeRouteHost(host string) string {
 	return strings.Trim(host, "[]")
 }
 
+func routePathPrefixMatches(prefix, requestPath string) bool {
+	prefix = model.NormalizeAppRoutePathPrefix(prefix)
+	requestPath = model.NormalizeAppRoutePathPrefix(requestPath)
+	if prefix == "/" {
+		return true
+	}
+	return requestPath == prefix || strings.HasPrefix(requestPath, prefix+"/")
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
@@ -2694,6 +2776,9 @@ func sortedRouteResultMetricKeys(values map[routeResultMetricKey]uint64) []route
 		if left.Hostname != right.Hostname {
 			return left.Hostname < right.Hostname
 		}
+		if left.PathPrefix != right.PathPrefix {
+			return left.PathPrefix < right.PathPrefix
+		}
 		if left.AppID != right.AppID {
 			return left.AppID < right.AppID
 		}
@@ -2714,6 +2799,9 @@ func sortedRouteMetricKeys[V any](values map[routeMetricKey]V) []routeMetricKey 
 		if keys[i].Hostname != keys[j].Hostname {
 			return keys[i].Hostname < keys[j].Hostname
 		}
+		if keys[i].PathPrefix != keys[j].PathPrefix {
+			return keys[i].PathPrefix < keys[j].PathPrefix
+		}
 		if keys[i].AppID != keys[j].AppID {
 			return keys[i].AppID < keys[j].AppID
 		}
@@ -2732,6 +2820,9 @@ func sortedRouteStatusMetricKeys(values map[routeStatusMetricKey]uint64) []route
 		right := keys[j].RouteMetricKey
 		if left.Hostname != right.Hostname {
 			return left.Hostname < right.Hostname
+		}
+		if left.PathPrefix != right.PathPrefix {
+			return left.PathPrefix < right.PathPrefix
 		}
 		if left.AppID != right.AppID {
 			return left.AppID < right.AppID
@@ -2755,6 +2846,9 @@ func sortedRouteCacheMetricKeys(values map[routeCacheMetricKey]uint64) []routeCa
 		if left.Hostname != right.Hostname {
 			return left.Hostname < right.Hostname
 		}
+		if left.PathPrefix != right.PathPrefix {
+			return left.PathPrefix < right.PathPrefix
+		}
 		if left.AppID != right.AppID {
 			return left.AppID < right.AppID
 		}
@@ -2774,8 +2868,9 @@ func sortedRouteCacheMetricKeys(values map[routeCacheMetricKey]uint64) []routeCa
 
 func routeMetricLabels(key routeMetricKey) string {
 	return fmt.Sprintf(
-		`hostname="%s",app="%s",route_kind="%s"`,
+		`hostname="%s",path_prefix="%s",app="%s",route_kind="%s"`,
 		prometheusLabelValue(key.Hostname),
+		prometheusLabelValue(model.NormalizeAppRoutePathPrefix(key.PathPrefix)),
 		prometheusLabelValue(key.AppID),
 		prometheusLabelValue(key.RouteKind),
 	)

@@ -3010,6 +3010,7 @@ paths:
       parameters:
         - $ref: "#/components/parameters/IdPathParam"
         - $ref: "#/components/parameters/HostnameQueryParam"
+        - $ref: "#/components/parameters/PathPrefixQueryParam"
       responses:
         '200':
           description: Successful response
@@ -4954,6 +4955,12 @@ components:
       required: false
       schema:
         type: string
+    PathPrefixQueryParam:
+      in: query
+      name: path_prefix
+      required: false
+      schema:
+        type: string
     OperationIdQueryParam:
       in: query
       name: operation_id
@@ -5866,6 +5873,8 @@ components:
       properties:
         hostname:
           type: string
+        path_prefix:
+          type: string
         base_domain:
           type: string
         public_url:
@@ -5873,6 +5882,10 @@ components:
         service_port:
           type: integer
           format: int32
+        domain_name:
+          type: string
+        entrypoint_name:
+          type: string
     BundleSignature:
       type: object
       additionalProperties: false
@@ -6515,6 +6528,8 @@ components:
         edge_group_id:
           type: string
         hostname:
+          type: string
+        path_prefix:
           type: string
         client_country:
           type: string
@@ -8750,6 +8765,8 @@ components:
           type: string
         hostname:
           type: string
+        path_prefix:
+          type: string
         base_domain:
           type: string
         public_url:
@@ -8849,6 +8866,44 @@ components:
           type: string
         message:
           type: string
+    TopologyDomain:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        host:
+          type: string
+        tls:
+          type: string
+        owner_service:
+          type: string
+    TopologyEntrypointRoute:
+      type: object
+      additionalProperties: false
+      properties:
+        path:
+          type: string
+        path_prefix:
+          type: string
+        service:
+          type: string
+        strip_prefix:
+          type: boolean
+        rewrite:
+          type: string
+    TopologyEntrypoint:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        domain:
+          type: string
+        routes:
+          type: array
+          items:
+            $ref: "#/components/schemas/TopologyEntrypointRoute"
     ImportServiceDetail:
       type: object
       additionalProperties: false
@@ -8912,6 +8967,14 @@ components:
           type: string
         primary_service:
           type: string
+        domains:
+          type: array
+          items:
+            $ref: "#/components/schemas/TopologyDomain"
+        entrypoints:
+          type: array
+          items:
+            $ref: "#/components/schemas/TopologyEntrypoint"
         services:
           type: array
           items:
@@ -10970,6 +11033,14 @@ components:
           type: string
         primary_service:
           type: string
+        domains:
+          type: array
+          items:
+            $ref: "#/components/schemas/TopologyDomain"
+        entrypoints:
+          type: array
+          items:
+            $ref: "#/components/schemas/TopologyEntrypoint"
         services:
           type: array
           items:
@@ -11518,6 +11589,8 @@ components:
       required: [hostname]
       properties:
         hostname:
+          type: string
+        path_prefix:
           type: string
     AppRoutePatchResponse:
       type: object

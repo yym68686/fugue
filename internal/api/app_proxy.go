@@ -40,7 +40,7 @@ func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) boo
 		return false
 	}
 
-	app, err := s.loadAppByHostnameCached(host)
+	app, err := s.loadAppByRouteCached(host, r.URL.Path)
 	if err != nil {
 		if err == store.ErrNotFound {
 			if s.isAppHostname(host) {
@@ -341,6 +341,19 @@ func (s *Server) loadAppByHostnameCached(host string) (model.App, error) {
 
 	return s.appProxyAppCache.do(host, func() (model.App, error) {
 		return s.store.GetAppByHostname(host)
+	})
+}
+
+func (s *Server) loadAppByRouteCached(host, requestPath string) (model.App, error) {
+	host = strings.TrimSpace(strings.ToLower(host))
+	requestPath = model.NormalizeAppRoutePathPrefix(requestPath)
+	if host == "" || s == nil || s.store == nil {
+		return model.App{}, store.ErrNotFound
+	}
+
+	cacheKey := host + "\x00" + requestPath
+	return s.appProxyAppCache.do(cacheKey, func() (model.App, error) {
+		return s.store.GetAppByRoute(host, requestPath)
 	})
 }
 
