@@ -12,6 +12,8 @@ type RecoveryConfig struct {
 	ListenAddr         string
 	StatePath          string
 	SeedPath           string
+	TLSCertFile        string
+	TLSKeyFile         string
 	Generation         string
 	PreviousGeneration string
 	Mode               string
@@ -28,20 +30,22 @@ type RecoveryConfig struct {
 }
 
 type MeshAgentConfig struct {
-	Endpoints      []string
-	Token          string
-	SigningKey     string
-	SigningKeyID   string
-	StatePath      string
-	DirectoryPath  string
-	GenerationPath string
-	PollInterval   time.Duration
-	HTTPTimeout    time.Duration
-	RejoinEnabled  bool
-	TailscaleBin   string
-	TailscaleArgs  []string
-	LoginServer    string
-	Node           MeshNode
+	Endpoints             []string
+	Token                 string
+	SigningKey            string
+	SigningKeyID          string
+	CACertFile            string
+	TLSInsecureSkipVerify bool
+	StatePath             string
+	DirectoryPath         string
+	GenerationPath        string
+	PollInterval          time.Duration
+	HTTPTimeout           time.Duration
+	RejoinEnabled         bool
+	TailscaleBin          string
+	TailscaleArgs         []string
+	LoginServer           string
+	Node                  MeshNode
 }
 
 func RecoveryFromEnv() RecoveryConfig {
@@ -49,6 +53,8 @@ func RecoveryFromEnv() RecoveryConfig {
 		ListenAddr:         envString("FUGUE_MESH_RECOVERY_LISTEN_ADDR", "127.0.0.1:7840"),
 		StatePath:          envString("FUGUE_MESH_RECOVERY_STATE_PATH", "/var/lib/fugue/mesh-recovery/state.json"),
 		SeedPath:           strings.TrimSpace(os.Getenv("FUGUE_MESH_RECOVERY_SEED_PATH")),
+		TLSCertFile:        strings.TrimSpace(os.Getenv("FUGUE_MESH_RECOVERY_TLS_CERT_FILE")),
+		TLSKeyFile:         strings.TrimSpace(os.Getenv("FUGUE_MESH_RECOVERY_TLS_KEY_FILE")),
 		Generation:         envString("FUGUE_MESH_RECOVERY_GENERATION", "meshgen-initial"),
 		PreviousGeneration: strings.TrimSpace(os.Getenv("FUGUE_MESH_RECOVERY_PREVIOUS_GENERATION")),
 		Mode:               envString("FUGUE_MESH_RECOVERY_MODE", GenerationModeNormal),
@@ -68,19 +74,21 @@ func RecoveryFromEnv() RecoveryConfig {
 func MeshAgentFromEnv() MeshAgentConfig {
 	nodeID := envString("FUGUE_MESH_AGENT_NODE_ID", hostname())
 	return MeshAgentConfig{
-		Endpoints:      envList("FUGUE_MESH_AGENT_ENDPOINTS"),
-		Token:          envFirst("FUGUE_MESH_AGENT_TOKEN", "FUGUE_MESH_RECOVERY_TOKEN"),
-		SigningKey:     envFirst("FUGUE_MESH_AGENT_SIGNING_KEY", "FUGUE_MESH_RECOVERY_SIGNING_KEY"),
-		SigningKeyID:   envString("FUGUE_MESH_AGENT_SIGNING_KEY_ID", envString("FUGUE_MESH_RECOVERY_SIGNING_KEY_ID", "mesh-recovery")),
-		StatePath:      envString("FUGUE_MESH_AGENT_STATE_PATH", "/var/lib/fugue/mesh-agent/state.json"),
-		DirectoryPath:  envString("FUGUE_MESH_AGENT_DIRECTORY_PATH", "/var/lib/fugue/mesh-agent/peer-directory.json"),
-		GenerationPath: envString("FUGUE_MESH_AGENT_GENERATION_PATH", "/var/lib/fugue/mesh-agent/generation.json"),
-		PollInterval:   envDuration("FUGUE_MESH_AGENT_POLL_INTERVAL", 15*time.Second),
-		HTTPTimeout:    envDuration("FUGUE_MESH_AGENT_HTTP_TIMEOUT", 10*time.Second),
-		RejoinEnabled:  envBool("FUGUE_MESH_AGENT_REJOIN_ENABLED", false),
-		TailscaleBin:   envString("FUGUE_MESH_AGENT_TAILSCALE_BIN", "tailscale"),
-		TailscaleArgs:  envList("FUGUE_MESH_AGENT_TAILSCALE_ARGS"),
-		LoginServer:    strings.TrimSpace(os.Getenv("FUGUE_MESH_AGENT_LOGIN_SERVER")),
+		Endpoints:             envList("FUGUE_MESH_AGENT_ENDPOINTS"),
+		Token:                 envFirst("FUGUE_MESH_AGENT_TOKEN", "FUGUE_MESH_RECOVERY_TOKEN"),
+		SigningKey:            envFirst("FUGUE_MESH_AGENT_SIGNING_KEY", "FUGUE_MESH_RECOVERY_SIGNING_KEY"),
+		SigningKeyID:          envString("FUGUE_MESH_AGENT_SIGNING_KEY_ID", envString("FUGUE_MESH_RECOVERY_SIGNING_KEY_ID", "mesh-recovery")),
+		CACertFile:            strings.TrimSpace(os.Getenv("FUGUE_MESH_AGENT_CA_CERT_FILE")),
+		TLSInsecureSkipVerify: envBool("FUGUE_MESH_AGENT_TLS_INSECURE_SKIP_VERIFY", false),
+		StatePath:             envString("FUGUE_MESH_AGENT_STATE_PATH", "/var/lib/fugue/mesh-agent/state.json"),
+		DirectoryPath:         envString("FUGUE_MESH_AGENT_DIRECTORY_PATH", "/var/lib/fugue/mesh-agent/peer-directory.json"),
+		GenerationPath:        envString("FUGUE_MESH_AGENT_GENERATION_PATH", "/var/lib/fugue/mesh-agent/generation.json"),
+		PollInterval:          envDuration("FUGUE_MESH_AGENT_POLL_INTERVAL", 15*time.Second),
+		HTTPTimeout:           envDuration("FUGUE_MESH_AGENT_HTTP_TIMEOUT", 10*time.Second),
+		RejoinEnabled:         envBool("FUGUE_MESH_AGENT_REJOIN_ENABLED", false),
+		TailscaleBin:          envString("FUGUE_MESH_AGENT_TAILSCALE_BIN", "tailscale"),
+		TailscaleArgs:         envList("FUGUE_MESH_AGENT_TAILSCALE_ARGS"),
+		LoginServer:           strings.TrimSpace(os.Getenv("FUGUE_MESH_AGENT_LOGIN_SERVER")),
 		Node: MeshNode{
 			NodeID:            nodeID,
 			Hostname:          envString("FUGUE_MESH_AGENT_HOSTNAME", hostname()),

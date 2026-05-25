@@ -43,7 +43,9 @@ scripts/render_fugue_mesh_recovery_systemd_unit.sh \
   --output-dir /tmp/fugue-mesh-recovery \
   --listen-addr 0.0.0.0:7840 \
   --generation meshgen-$(date +%Y%m%d%H%M%S) \
-  --login-server https://mesh.fugue.pro
+  --login-server https://mesh.fugue.pro \
+  --tls-cert-file /etc/fugue/mesh-recovery/tls.crt \
+  --tls-key-file /etc/fugue/mesh-recovery/tls.key
 ```
 
 Install `/tmp/fugue-mesh-recovery/fugue-mesh-recovery.env` and
@@ -63,7 +65,8 @@ scripts/render_fugue_mesh_agent_systemd_unit.sh \
   --endpoints https://mesh-recovery-us.example,https://mesh-recovery-eu.example \
   --node-id "$(hostname -s)" \
   --roles control-plane \
-  --login-server https://mesh.fugue.pro
+  --login-server https://mesh.fugue.pro \
+  --ca-cert-file /etc/fugue/mesh-recovery/ca.crt
 ```
 
 The agent secret env file must define:
@@ -76,6 +79,11 @@ FUGUE_MESH_AGENT_SIGNING_KEY=...
 Keep `FUGUE_MESH_AGENT_REJOIN_ENABLED=false` until the recovery endpoints,
 signing key distribution, and Headscale recovery auth key have been validated.
 Turn it on only after confirming a signed reset generation is intentional.
+
+Do not run the public recovery endpoints over plain HTTP. Use a public CA
+certificate or distribute a private CA file with `FUGUE_MESH_AGENT_CA_CERT_FILE`.
+`FUGUE_MESH_AGENT_TLS_INSECURE_SKIP_VERIFY=true` exists only for isolated lab
+validation and must not be used in production.
 
 ## Helm Path
 

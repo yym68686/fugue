@@ -3,6 +3,8 @@ package meshrecovery
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -72,10 +74,14 @@ func NewMeshAgent(cfg MeshAgentConfig, logger *log.Logger) (*MeshAgent, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
+	httpClient, err := meshAgentHTTPClient(cfg)
+	if err != nil {
+		return nil, err
+	}
 	return &MeshAgent{
 		cfg:      cfg,
 		logger:   logger,
-		client:   &http.Client{Timeout: cfg.HTTPTimeout},
+		client:   httpClient,
 		executor: OSCommandExecutor{},
 		now:      func() time.Time { return time.Now().UTC() },
 	}, nil
@@ -289,4 +295,32 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func meshAgentHTTPClient(cfg MeshAgentConfig) (*http.Client, error) {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if strings.TrimSpace(cfg.CACertFile) != "" || cfg.TLSInsecureSkipVerify {
+		tlsConfig := &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+		if cfg.TLSInsecureSkipVerify {
+			tlsConfig.InsecureSkipVerify = true
+		}
+		if strings.TrimSpace(cfg.CACertFile) != "" {
+			certPool, err := x509.SystemCertPool()
+			if err != nil || certPool == nil {
+				certPool = x509.NewCertPool()
+			}
+			certPEM, err := os.ReadFile(cfg.CACertFile)
+			if err != nil {
+				return nil, fmt.Errorf("read mesh agent CA cert file: %w", err)
+			}
+			if !certPool.AppendCertsFromPEM(certPEM) {
+				return nil, fmt.Errorf("mesh agent CA cert file did not contain a valid PEM certificate")
+			}
+			tlsConfig.RootCAs = certPool
+		}
+		transport.TLSClientConfig = tlsConfig
+	}
+	return &http.Client{Timeout: cfg.HTTPTimeout, Transport: transport}, nil
 }

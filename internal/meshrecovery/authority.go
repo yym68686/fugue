@@ -40,6 +40,11 @@ func NewRecoveryAuthority(cfg RecoveryConfig, logger *log.Logger) (*RecoveryAuth
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = "127.0.0.1:7840"
 	}
+	cfg.TLSCertFile = strings.TrimSpace(cfg.TLSCertFile)
+	cfg.TLSKeyFile = strings.TrimSpace(cfg.TLSKeyFile)
+	if (cfg.TLSCertFile == "") != (cfg.TLSKeyFile == "") {
+		return nil, fmt.Errorf("FUGUE_MESH_RECOVERY_TLS_CERT_FILE and FUGUE_MESH_RECOVERY_TLS_KEY_FILE must be configured together")
+	}
 	cfg.Generation = strings.TrimSpace(cfg.Generation)
 	if cfg.Generation == "" {
 		cfg.Generation = "meshgen-initial"
@@ -82,7 +87,13 @@ func (a *RecoveryAuthority) Run(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() {
 		a.logger.Printf("mesh recovery authority listening on %s", a.cfg.ListenAddr)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		var err error
+		if a.cfg.TLSCertFile != "" {
+			err = server.ListenAndServeTLS(a.cfg.TLSCertFile, a.cfg.TLSKeyFile)
+		} else {
+			err = server.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
 		}

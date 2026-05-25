@@ -36,6 +36,8 @@ output_dir=""
 listen_addr="${FUGUE_MESH_RECOVERY_LISTEN_ADDR:-127.0.0.1:7840}"
 state_path="${FUGUE_MESH_RECOVERY_STATE_PATH:-/var/lib/fugue/mesh-recovery/state.json}"
 seed_path="${FUGUE_MESH_RECOVERY_SEED_PATH:-}"
+tls_cert_file="${FUGUE_MESH_RECOVERY_TLS_CERT_FILE:-}"
+tls_key_file="${FUGUE_MESH_RECOVERY_TLS_KEY_FILE:-}"
 generation="${FUGUE_MESH_RECOVERY_GENERATION:-}"
 previous_generation="${FUGUE_MESH_RECOVERY_PREVIOUS_GENERATION:-}"
 mode="${FUGUE_MESH_RECOVERY_MODE:-normal}"
@@ -54,6 +56,8 @@ while [[ $# -gt 0 ]]; do
     --listen-addr) require_value "$1" "${2:-}"; listen_addr="$2"; shift 2 ;;
     --state-path) require_value "$1" "${2:-}"; state_path="$2"; shift 2 ;;
     --seed-path) require_value "$1" "${2:-}"; seed_path="$2"; shift 2 ;;
+    --tls-cert-file) require_value "$1" "${2:-}"; tls_cert_file="$2"; shift 2 ;;
+    --tls-key-file) require_value "$1" "${2:-}"; tls_key_file="$2"; shift 2 ;;
     --generation) require_value "$1" "${2:-}"; generation="$2"; shift 2 ;;
     --previous-generation) require_value "$1" "${2:-}"; previous_generation="$2"; shift 2 ;;
     --mode) require_value "$1" "${2:-}"; mode="$2"; shift 2 ;;
@@ -73,6 +77,9 @@ done
 [[ -n "${output_dir}" ]] || fail "--output-dir is required"
 [[ -n "${generation}" ]] || fail "--generation is required"
 [[ -n "${login_server}" ]] || fail "--login-server is required"
+if [[ -n "${tls_cert_file}${tls_key_file}" ]]; then
+  [[ -n "${tls_cert_file}" && -n "${tls_key_file}" ]] || fail "--tls-cert-file and --tls-key-file must be set together"
+fi
 case "${mode}" in
   normal|reset) ;;
   *) fail "--mode must be normal or reset" ;;
@@ -81,6 +88,8 @@ for pair in \
   "--listen-addr=${listen_addr}" \
   "--state-path=${state_path}" \
   "--seed-path=${seed_path}" \
+  "--tls-cert-file=${tls_cert_file}" \
+  "--tls-key-file=${tls_key_file}" \
   "--generation=${generation}" \
   "--previous-generation=${previous_generation}" \
   "--login-server=${login_server}" \
@@ -100,6 +109,8 @@ cat >"${output_dir}/fugue-mesh-recovery.env" <<EOF
 FUGUE_MESH_RECOVERY_LISTEN_ADDR=${listen_addr}
 FUGUE_MESH_RECOVERY_STATE_PATH=${state_path}
 FUGUE_MESH_RECOVERY_SEED_PATH=${seed_path}
+FUGUE_MESH_RECOVERY_TLS_CERT_FILE=${tls_cert_file}
+FUGUE_MESH_RECOVERY_TLS_KEY_FILE=${tls_key_file}
 FUGUE_MESH_RECOVERY_GENERATION=${generation}
 FUGUE_MESH_RECOVERY_PREVIOUS_GENERATION=${previous_generation}
 FUGUE_MESH_RECOVERY_MODE=${mode}

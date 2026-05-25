@@ -172,6 +172,8 @@ bash "${REPO_ROOT}/scripts/render_fugue_mesh_recovery_systemd_unit.sh" \
   --listen-addr "0.0.0.0:7840" \
   --generation "meshgen-20260525" \
   --login-server "https://mesh.fugue.pro" \
+  --tls-cert-file "/etc/fugue/mesh-recovery/tls.crt" \
+  --tls-key-file "/etc/fugue/mesh-recovery/tls.key" \
   --secret-env-file "/etc/fugue/fugue-mesh-recovery-secret.env" >/dev/null
 
 [[ -f "${tmpdir}/mesh-recovery/fugue-mesh-recovery.env" ]] || fail "missing fugue-mesh-recovery.env"
@@ -180,6 +182,8 @@ bash "${REPO_ROOT}/scripts/render_fugue_mesh_recovery_systemd_unit.sh" \
 assert_contains "${tmpdir}/mesh-recovery/fugue-mesh-recovery.env" "FUGUE_MESH_RECOVERY_LISTEN_ADDR=0.0.0.0:7840"
 assert_contains "${tmpdir}/mesh-recovery/fugue-mesh-recovery.env" "FUGUE_MESH_RECOVERY_GENERATION=meshgen-20260525"
 assert_contains "${tmpdir}/mesh-recovery/fugue-mesh-recovery.env" "FUGUE_MESH_RECOVERY_LOGIN_SERVER=https://mesh.fugue.pro"
+assert_contains "${tmpdir}/mesh-recovery/fugue-mesh-recovery.env" "FUGUE_MESH_RECOVERY_TLS_CERT_FILE=/etc/fugue/mesh-recovery/tls.crt"
+assert_contains "${tmpdir}/mesh-recovery/fugue-mesh-recovery.env" "FUGUE_MESH_RECOVERY_TLS_KEY_FILE=/etc/fugue/mesh-recovery/tls.key"
 assert_contains "${tmpdir}/mesh-recovery/fugue-mesh-recovery.env" "FUGUE_MESH_RECOVERY_SIGNING_KEY_ID=mesh-recovery"
 assert_not_contains "${tmpdir}/mesh-recovery/fugue-mesh-recovery.env" "FUGUE_MESH_RECOVERY_TOKEN="
 assert_not_contains "${tmpdir}/mesh-recovery/fugue-mesh-recovery.env" "FUGUE_MESH_RECOVERY_SIGNING_KEY="
@@ -202,6 +206,7 @@ bash "${REPO_ROOT}/scripts/render_fugue_mesh_agent_systemd_unit.sh" \
   --roles "control-plane,edge" \
   --mesh-ip "100.64.0.20" \
   --login-server "https://mesh.fugue.pro" \
+  --ca-cert-file "/etc/fugue/mesh-recovery/ca.crt" \
   --rejoin-enabled "true" \
   --secret-env-file "/etc/fugue/fugue-mesh-agent-secret.env" >/dev/null
 
@@ -212,6 +217,8 @@ assert_contains "${tmpdir}/mesh-agent/fugue-mesh-agent.env" "FUGUE_MESH_AGENT_EN
 assert_contains "${tmpdir}/mesh-agent/fugue-mesh-agent.env" "FUGUE_MESH_AGENT_NODE_ID=node-us-1"
 assert_contains "${tmpdir}/mesh-agent/fugue-mesh-agent.env" "FUGUE_MESH_AGENT_ROLES=control-plane,edge"
 assert_contains "${tmpdir}/mesh-agent/fugue-mesh-agent.env" "FUGUE_MESH_AGENT_REJOIN_ENABLED=true"
+assert_contains "${tmpdir}/mesh-agent/fugue-mesh-agent.env" "FUGUE_MESH_AGENT_CA_CERT_FILE=/etc/fugue/mesh-recovery/ca.crt"
+assert_contains "${tmpdir}/mesh-agent/fugue-mesh-agent.env" "FUGUE_MESH_AGENT_TLS_INSECURE_SKIP_VERIFY=false"
 assert_not_contains "${tmpdir}/mesh-agent/fugue-mesh-agent.env" "FUGUE_MESH_AGENT_TOKEN="
 assert_not_contains "${tmpdir}/mesh-agent/fugue-mesh-agent.env" "FUGUE_MESH_AGENT_SIGNING_KEY="
 assert_contains "${tmpdir}/mesh-agent/fugue-mesh-agent.service" "EnvironmentFile=-/etc/fugue/fugue-mesh-agent-secret.env"

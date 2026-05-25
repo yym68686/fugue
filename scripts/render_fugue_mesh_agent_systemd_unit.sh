@@ -53,6 +53,8 @@ http_timeout="${FUGUE_MESH_AGENT_HTTP_TIMEOUT:-10s}"
 rejoin_enabled="${FUGUE_MESH_AGENT_REJOIN_ENABLED:-false}"
 login_server="${FUGUE_MESH_AGENT_LOGIN_SERVER:-}"
 signing_key_id="${FUGUE_MESH_AGENT_SIGNING_KEY_ID:-mesh-recovery}"
+ca_cert_file="${FUGUE_MESH_AGENT_CA_CERT_FILE:-}"
+tls_insecure_skip_verify="${FUGUE_MESH_AGENT_TLS_INSECURE_SKIP_VERIFY:-false}"
 secret_env_file="${FUGUE_MESH_AGENT_SECRET_ENV_FILE:-/etc/fugue/fugue-mesh-agent-secret.env}"
 binary_path="${FUGUE_MESH_AGENT_BINARY:-/usr/local/bin/fugue-mesh-agent}"
 tailscale_bin="${FUGUE_MESH_AGENT_TAILSCALE_BIN:-/usr/bin/tailscale}"
@@ -82,6 +84,8 @@ while [[ $# -gt 0 ]]; do
     --rejoin-enabled) require_value "$1" "${2:-}"; rejoin_enabled="$2"; shift 2 ;;
     --login-server) require_value "$1" "${2:-}"; login_server="$2"; shift 2 ;;
     --signing-key-id) require_value "$1" "${2:-}"; signing_key_id="$2"; shift 2 ;;
+    --ca-cert-file) require_value "$1" "${2:-}"; ca_cert_file="$2"; shift 2 ;;
+    --tls-insecure-skip-verify) require_value "$1" "${2:-}"; tls_insecure_skip_verify="$2"; shift 2 ;;
     --secret-env-file) require_value "$1" "${2:-}"; secret_env_file="$2"; shift 2 ;;
     --binary-path) require_value "$1" "${2:-}"; binary_path="$2"; shift 2 ;;
     --tailscale-bin) require_value "$1" "${2:-}"; tailscale_bin="$2"; shift 2 ;;
@@ -98,6 +102,10 @@ case "${rejoin_enabled}" in
   true|false) ;;
   *) fail "--rejoin-enabled must be true or false" ;;
 esac
+case "${tls_insecure_skip_verify}" in
+  true|false) ;;
+  *) fail "--tls-insecure-skip-verify must be true or false" ;;
+esac
 for pair in \
   "--endpoints=${endpoints}" \
   "--node-id=${node_id}" \
@@ -109,6 +117,7 @@ for pair in \
   "--http-timeout=${http_timeout}" \
   "--login-server=${login_server}" \
   "--signing-key-id=${signing_key_id}" \
+  "--ca-cert-file=${ca_cert_file}" \
   "--secret-env-file=${secret_env_file}" \
   "--binary-path=${binary_path}" \
   "--tailscale-bin=${tailscale_bin}"; do
@@ -140,6 +149,8 @@ FUGUE_MESH_AGENT_HTTP_TIMEOUT=${http_timeout}
 FUGUE_MESH_AGENT_REJOIN_ENABLED=${rejoin_enabled}
 FUGUE_MESH_AGENT_LOGIN_SERVER=${login_server}
 FUGUE_MESH_AGENT_SIGNING_KEY_ID=${signing_key_id}
+FUGUE_MESH_AGENT_CA_CERT_FILE=${ca_cert_file}
+FUGUE_MESH_AGENT_TLS_INSECURE_SKIP_VERIFY=${tls_insecure_skip_verify}
 FUGUE_MESH_AGENT_TAILSCALE_BIN=${tailscale_bin}
 FUGUE_MESH_AGENT_TAILSCALE_ARGS=${tailscale_args}
 EOF
