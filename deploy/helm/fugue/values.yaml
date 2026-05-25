@@ -271,6 +271,64 @@ dns:
   extraEnv: []
   groups: []
 
+meshRecovery:
+  enabled: false
+  image:
+    # fugue-mesh-recovery is packaged in the same image as fugue-edge by default.
+    repository: ""
+    tag: ""
+    digest: ""
+    pullPolicy: ""
+  listenAddr: ":7840"
+  healthPort: 7840
+  generation: meshgen-initial
+  previousGeneration: ""
+  mode: normal
+  loginServer: ""
+  message: ""
+  statePath: /var/lib/fugue/mesh-recovery/state.json
+  directoryValidFor: 2m
+  manifestValidFor: 2m
+  nodeTTL: 2m
+  signingKeyID: mesh-recovery
+  tokenSecret:
+    name: ""
+    key: FUGUE_MESH_RECOVERY_TOKEN
+  signingKeySecret:
+    name: ""
+    key: FUGUE_MESH_RECOVERY_SIGNING_KEY
+  rejoinAuthKeySecret:
+    name: ""
+    key: FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY
+    optional: true
+  persistence:
+    hostPath: /var/lib/fugue/mesh-recovery
+    mountPath: /var/lib/fugue/mesh-recovery
+  nodeSelector:
+    fugue.io/role.edge: "true"
+    fugue.io/schedulable: "true"
+  tolerations:
+    - key: fugue.io/dedicated
+      operator: Equal
+      value: edge
+      effect: NoSchedule
+    - key: fugue.io/tenant
+      operator: Exists
+      effect: NoSchedule
+  affinity: {}
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+      ephemeral-storage: 32Mi
+    limits:
+      memory: 256Mi
+      ephemeral-storage: 256Mi
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+  extraEnv: []
+
 imagePrePull:
   enabled: true
   image:

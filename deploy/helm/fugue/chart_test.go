@@ -963,6 +963,94 @@ func TestDNSShadowDaemonSetDisabledByDefault(t *testing.T) {
 	if doc != "" {
 		t.Fatalf("dns daemonset should be disabled by default:\n%s", doc)
 	}
+	if doc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-mesh-recovery"); doc != "" {
+		t.Fatalf("mesh recovery daemonset should be disabled by default:\n%s", doc)
+	}
+}
+
+func TestMeshRecoveryDaemonSetCanBeEnabled(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm",
+		"template",
+		"fugue",
+		chartDir,
+		"--set",
+		"meshRecovery.enabled=true",
+		"--set",
+		"meshRecovery.tokenSecret.name=fugue-mesh-recovery-secret",
+		"--set",
+		"meshRecovery.signingKeySecret.name=fugue-mesh-recovery-secret",
+		"--set",
+		"meshRecovery.generation=meshgen-20260525",
+		"--set",
+		"meshRecovery.loginServer=https://mesh.fugue.pro",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	doc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-mesh-recovery")
+	if doc == "" {
+		t.Fatalf("rendered manifest missing mesh recovery daemonset:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`image: "fugue-edge:latest"`,
+		`- /usr/local/bin/fugue-mesh-recovery`,
+		`name: FUGUE_MESH_RECOVERY_GENERATION`,
+		`value: "meshgen-20260525"`,
+		`name: FUGUE_MESH_RECOVERY_LOGIN_SERVER`,
+		`value: "https://mesh.fugue.pro"`,
+		`name: FUGUE_MESH_RECOVERY_TOKEN`,
+		`name: "fugue-mesh-recovery-secret"`,
+		`key: "FUGUE_MESH_RECOVERY_TOKEN"`,
+		`name: FUGUE_MESH_RECOVERY_SIGNING_KEY`,
+		`key: "FUGUE_MESH_RECOVERY_SIGNING_KEY"`,
+		`path: "/var/lib/fugue/mesh-recovery"`,
+		`path: /healthz`,
+		`containerPort: 7840`,
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("mesh recovery daemonset missing %q:\n%s", want, doc)
+		}
+	}
+}
+
+func TestMeshRecoveryDaemonSetRequiresExplicitSecrets(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm",
+		"template",
+		"fugue",
+		chartDir,
+		"--set",
+		"meshRecovery.enabled=true",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected helm template to fail without mesh recovery secrets:\n%s", output)
+	}
+	if !strings.Contains(string(output), "meshRecovery.tokenSecret.name is required") {
+		t.Fatalf("unexpected helm error:\n%s", output)
+	}
 }
 
 func TestAPIStaticDNSRecordsEnvRenders(t *testing.T) {

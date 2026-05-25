@@ -33,6 +33,8 @@ release_surfaces=(
   scripts/upgrade_fugue_control_plane.sh
   scripts/render_fugue_edge_systemd_unit.sh
   scripts/render_fugue_dns_systemd_unit.sh
+  scripts/render_fugue_mesh_recovery_systemd_unit.sh
+  scripts/render_fugue_mesh_agent_systemd_unit.sh
   scripts/issue_fugue_app_wildcard_tls.sh
 )
 

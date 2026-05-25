@@ -12,6 +12,8 @@ on:
       - 'cmd/fugue-image-cache/**'
       - 'cmd/fugue-edge/**'
       - 'cmd/fugue-dns/**'
+      - 'cmd/fugue-mesh-agent/**'
+      - 'cmd/fugue-mesh-recovery/**'
       - 'internal/**'
       - 'deploy/helm/fugue/charts/**'
       - 'deploy/helm/fugue/crds/**'
@@ -29,6 +31,9 @@ on:
       - 'scripts/install_fugue_ha.sh'
       - 'scripts/issue_fugue_app_wildcard_tls.sh'
       - 'scripts/render_fugue_edge_systemd_unit.sh'
+      - 'scripts/render_fugue_dns_systemd_unit.sh'
+      - 'scripts/render_fugue_mesh_agent_systemd_unit.sh'
+      - 'scripts/render_fugue_mesh_recovery_systemd_unit.sh'
       - 'scripts/sync_fugue_edge_proxy.sh'
       - 'scripts/upgrade_fugue_control_plane.sh'
   workflow_dispatch:
@@ -260,4 +265,22 @@ jobs:
           FUGUE_DNS_TCP_ADDR: ${{ vars.FUGUE_DNS_TCP_ADDR || '' }}
           FUGUE_DNS_ZONE: ${{ vars.FUGUE_DNS_ZONE || '' }}
           FUGUE_DNS_TTL: ${{ vars.FUGUE_DNS_TTL || '' }}
+          FUGUE_MESH_RECOVERY_ENABLED: ${{ vars.FUGUE_MESH_RECOVERY_ENABLED || 'false' }}
+          FUGUE_MESH_RECOVERY_LISTEN_ADDR: ${{ vars.FUGUE_MESH_RECOVERY_LISTEN_ADDR || '' }}
+          FUGUE_MESH_RECOVERY_GENERATION: ${{ vars.FUGUE_MESH_RECOVERY_GENERATION || '' }}
+          FUGUE_MESH_RECOVERY_PREVIOUS_GENERATION: ${{ vars.FUGUE_MESH_RECOVERY_PREVIOUS_GENERATION || '' }}
+          FUGUE_MESH_RECOVERY_MODE: ${{ vars.FUGUE_MESH_RECOVERY_MODE || '' }}
+          FUGUE_MESH_RECOVERY_LOGIN_SERVER: ${{ vars.FUGUE_MESH_RECOVERY_LOGIN_SERVER || '' }}
+          FUGUE_MESH_RECOVERY_MESSAGE: ${{ vars.FUGUE_MESH_RECOVERY_MESSAGE || '' }}
+          FUGUE_MESH_RECOVERY_DIRECTORY_VALID_FOR: ${{ vars.FUGUE_MESH_RECOVERY_DIRECTORY_VALID_FOR || '' }}
+          FUGUE_MESH_RECOVERY_MANIFEST_VALID_FOR: ${{ vars.FUGUE_MESH_RECOVERY_MANIFEST_VALID_FOR || '' }}
+          FUGUE_MESH_RECOVERY_NODE_TTL: ${{ vars.FUGUE_MESH_RECOVERY_NODE_TTL || '' }}
+          FUGUE_MESH_RECOVERY_SIGNING_KEY_ID: ${{ vars.FUGUE_MESH_RECOVERY_SIGNING_KEY_ID || '' }}
+          FUGUE_MESH_RECOVERY_TOKEN_SECRET_NAME: ${{ vars.FUGUE_MESH_RECOVERY_TOKEN_SECRET_NAME || '' }}
+          FUGUE_MESH_RECOVERY_TOKEN_SECRET_KEY: ${{ vars.FUGUE_MESH_RECOVERY_TOKEN_SECRET_KEY || '' }}
+          FUGUE_MESH_RECOVERY_SIGNING_KEY_SECRET_NAME: ${{ vars.FUGUE_MESH_RECOVERY_SIGNING_KEY_SECRET_NAME || '' }}
+          FUGUE_MESH_RECOVERY_SIGNING_KEY_SECRET_KEY: ${{ vars.FUGUE_MESH_RECOVERY_SIGNING_KEY_SECRET_KEY || '' }}
+          FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_NAME: ${{ vars.FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_NAME || '' }}
+          FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_KEY: ${{ vars.FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_KEY || '' }}
+          FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_OPTIONAL: ${{ vars.FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_OPTIONAL || '' }}
         run: ./scripts/upgrade_fugue_control_plane.sh

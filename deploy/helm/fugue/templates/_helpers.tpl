@@ -53,6 +53,10 @@ app.kubernetes.io/component: {{ .component }}
 {{- printf "%s-dns" (include "fugue.fullname" .) -}}
 {{- end -}}
 
+{{- define "fugue.meshRecoveryDaemonSetName" -}}
+{{- printf "%s-mesh-recovery" (include "fugue.fullname" .) -}}
+{{- end -}}
+
 {{- define "fugue.topologyLabelerName" -}}
 {{- printf "%s-topology-labeler" (include "fugue.fullname" .) -}}
 {{- end -}}

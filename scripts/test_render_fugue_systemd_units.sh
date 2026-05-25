@@ -167,4 +167,60 @@ assert_contains "${tmpdir}/fugue-dns.env" "FUGUE_DNS_ROUTE_A_ANSWER_IPS=136.112.
 assert_not_contains "${tmpdir}/fugue-dns.env" "FUGUE_DNS_TOKEN="
 assert_contains "${tmpdir}/fugue-dns.service" "EnvironmentFile=-/etc/fugue/fugue-dns-token.env"
 
+bash "${REPO_ROOT}/scripts/render_fugue_mesh_recovery_systemd_unit.sh" \
+  --output-dir "${tmpdir}/mesh-recovery" \
+  --listen-addr "0.0.0.0:7840" \
+  --generation "meshgen-20260525" \
+  --login-server "https://mesh.fugue.pro" \
+  --secret-env-file "/etc/fugue/fugue-mesh-recovery-secret.env" >/dev/null
+
+[[ -f "${tmpdir}/mesh-recovery/fugue-mesh-recovery.env" ]] || fail "missing fugue-mesh-recovery.env"
+[[ -f "${tmpdir}/mesh-recovery/fugue-mesh-recovery.service" ]] || fail "missing fugue-mesh-recovery.service"
+
+assert_contains "${tmpdir}/mesh-recovery/fugue-mesh-recovery.env" "FUGUE_MESH_RECOVERY_LISTEN_ADDR=0.0.0.0:7840"
+assert_contains "${tmpdir}/mesh-recovery/fugue-mesh-recovery.env" "FUGUE_MESH_RECOVERY_GENERATION=meshgen-20260525"
+assert_contains "${tmpdir}/mesh-recovery/fugue-mesh-recovery.env" "FUGUE_MESH_RECOVERY_LOGIN_SERVER=https://mesh.fugue.pro"
+assert_contains "${tmpdir}/mesh-recovery/fugue-mesh-recovery.env" "FUGUE_MESH_RECOVERY_SIGNING_KEY_ID=mesh-recovery"
+assert_not_contains "${tmpdir}/mesh-recovery/fugue-mesh-recovery.env" "FUGUE_MESH_RECOVERY_TOKEN="
+assert_not_contains "${tmpdir}/mesh-recovery/fugue-mesh-recovery.env" "FUGUE_MESH_RECOVERY_SIGNING_KEY="
+assert_not_contains "${tmpdir}/mesh-recovery/fugue-mesh-recovery.env" "FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY="
+assert_contains "${tmpdir}/mesh-recovery/fugue-mesh-recovery.service" "EnvironmentFile=-/etc/fugue/fugue-mesh-recovery-secret.env"
+assert_contains "${tmpdir}/mesh-recovery/fugue-mesh-recovery.service" "ExecStart=/usr/local/bin/fugue-mesh-recovery"
+
+if bash "${REPO_ROOT}/scripts/render_fugue_mesh_recovery_systemd_unit.sh" \
+  --output-dir "${tmpdir}/bad-mesh-recovery" \
+  --generation "meshgen-20260525" \
+  --login-server "https://mesh.fugue.pro" \
+  --mode "invalid" >"${tmpdir}/bad-mesh-recovery.out" 2>"${tmpdir}/bad-mesh-recovery.err"; then
+  fail "expected invalid mesh recovery mode to fail"
+fi
+
+bash "${REPO_ROOT}/scripts/render_fugue_mesh_agent_systemd_unit.sh" \
+  --output-dir "${tmpdir}/mesh-agent" \
+  --endpoints "https://mesh-recovery-us.example.test,https://mesh-recovery-eu.example.test" \
+  --node-id "node-us-1" \
+  --roles "control-plane,edge" \
+  --mesh-ip "100.64.0.20" \
+  --login-server "https://mesh.fugue.pro" \
+  --rejoin-enabled "true" \
+  --secret-env-file "/etc/fugue/fugue-mesh-agent-secret.env" >/dev/null
+
+[[ -f "${tmpdir}/mesh-agent/fugue-mesh-agent.env" ]] || fail "missing fugue-mesh-agent.env"
+[[ -f "${tmpdir}/mesh-agent/fugue-mesh-agent.service" ]] || fail "missing fugue-mesh-agent.service"
+
+assert_contains "${tmpdir}/mesh-agent/fugue-mesh-agent.env" "FUGUE_MESH_AGENT_ENDPOINTS=https://mesh-recovery-us.example.test,https://mesh-recovery-eu.example.test"
+assert_contains "${tmpdir}/mesh-agent/fugue-mesh-agent.env" "FUGUE_MESH_AGENT_NODE_ID=node-us-1"
+assert_contains "${tmpdir}/mesh-agent/fugue-mesh-agent.env" "FUGUE_MESH_AGENT_ROLES=control-plane,edge"
+assert_contains "${tmpdir}/mesh-agent/fugue-mesh-agent.env" "FUGUE_MESH_AGENT_REJOIN_ENABLED=true"
+assert_not_contains "${tmpdir}/mesh-agent/fugue-mesh-agent.env" "FUGUE_MESH_AGENT_TOKEN="
+assert_not_contains "${tmpdir}/mesh-agent/fugue-mesh-agent.env" "FUGUE_MESH_AGENT_SIGNING_KEY="
+assert_contains "${tmpdir}/mesh-agent/fugue-mesh-agent.service" "EnvironmentFile=-/etc/fugue/fugue-mesh-agent-secret.env"
+assert_contains "${tmpdir}/mesh-agent/fugue-mesh-agent.service" "ExecStart=/usr/local/bin/fugue-mesh-agent"
+
+if bash "${REPO_ROOT}/scripts/render_fugue_mesh_agent_systemd_unit.sh" \
+  --output-dir "${tmpdir}/bad-mesh-agent" \
+  --node-id "node-us-1" >"${tmpdir}/bad-mesh-agent.out" 2>"${tmpdir}/bad-mesh-agent.err"; then
+  fail "expected missing mesh agent endpoints to fail"
+fi
+
 printf 'render systemd unit tests passed\n'

@@ -1,0 +1,137 @@
+{{- if .Values.meshRecovery.enabled }}
+{{- $edgeImage := .Values.edge.image -}}
+{{- $meshImage := .Values.meshRecovery.image -}}
+{{- $imageRepository := default $edgeImage.repository $meshImage.repository -}}
+{{- $imageTag := default $edgeImage.tag $meshImage.tag -}}
+{{- $imageDigest := default $edgeImage.digest $meshImage.digest -}}
+{{- $imagePullPolicy := default $edgeImage.pullPolicy $meshImage.pullPolicy -}}
+{{- $tokenSecretName := required "meshRecovery.tokenSecret.name is required when meshRecovery.enabled=true" .Values.meshRecovery.tokenSecret.name -}}
+{{- $signingKeySecretName := required "meshRecovery.signingKeySecret.name is required when meshRecovery.enabled=true" .Values.meshRecovery.signingKeySecret.name -}}
+{{- if and (ne .Values.meshRecovery.mode "normal") (ne .Values.meshRecovery.mode "reset") -}}
+{{- fail "meshRecovery.mode must be normal or reset" -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "fugue.meshRecoveryDaemonSetName" . }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "mesh-recovery") | nindent 4 }}
+spec:
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "mesh-recovery") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "mesh-recovery") | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/mesh-recovery-config: {{ toJson .Values.meshRecovery | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: mesh-recovery
+          image: {{ include "fugue.imageRef" (dict "repository" $imageRepository "tag" $imageTag "digest" $imageDigest) | quote }}
+          imagePullPolicy: {{ $imagePullPolicy }}
+          command:
+            - /usr/local/bin/fugue-mesh-recovery
+          {{- with .Values.meshRecovery.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.meshRecovery.healthPort }}
+              protocol: TCP
+          env:
+            - name: FUGUE_MESH_RECOVERY_LISTEN_ADDR
+              value: {{ .Values.meshRecovery.listenAddr | quote }}
+            - name: FUGUE_MESH_RECOVERY_STATE_PATH
+              value: {{ .Values.meshRecovery.statePath | quote }}
+            - name: FUGUE_MESH_RECOVERY_GENERATION
+              value: {{ .Values.meshRecovery.generation | quote }}
+            - name: FUGUE_MESH_RECOVERY_PREVIOUS_GENERATION
+              value: {{ .Values.meshRecovery.previousGeneration | quote }}
+            - name: FUGUE_MESH_RECOVERY_MODE
+              value: {{ .Values.meshRecovery.mode | quote }}
+            - name: FUGUE_MESH_RECOVERY_LOGIN_SERVER
+              value: {{ .Values.meshRecovery.loginServer | quote }}
+            - name: FUGUE_MESH_RECOVERY_MESSAGE
+              value: {{ .Values.meshRecovery.message | quote }}
+            - name: FUGUE_MESH_RECOVERY_DIRECTORY_VALID_FOR
+              value: {{ .Values.meshRecovery.directoryValidFor | quote }}
+            - name: FUGUE_MESH_RECOVERY_MANIFEST_VALID_FOR
+              value: {{ .Values.meshRecovery.manifestValidFor | quote }}
+            - name: FUGUE_MESH_RECOVERY_NODE_TTL
+              value: {{ .Values.meshRecovery.nodeTTL | quote }}
+            - name: FUGUE_MESH_RECOVERY_SIGNING_KEY_ID
+              value: {{ .Values.meshRecovery.signingKeyID | quote }}
+            - name: FUGUE_MESH_RECOVERY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $tokenSecretName | quote }}
+                  key: {{ .Values.meshRecovery.tokenSecret.key | quote }}
+            - name: FUGUE_MESH_RECOVERY_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $signingKeySecretName | quote }}
+                  key: {{ .Values.meshRecovery.signingKeySecret.key | quote }}
+            {{- if .Values.meshRecovery.rejoinAuthKeySecret.name }}
+            - name: FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.meshRecovery.rejoinAuthKeySecret.name | quote }}
+                  key: {{ .Values.meshRecovery.rejoinAuthKeySecret.key | quote }}
+                  optional: {{ .Values.meshRecovery.rejoinAuthKeySecret.optional }}
+            {{- end }}
+            {{- with .Values.meshRecovery.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: state
+              mountPath: {{ .Values.meshRecovery.persistence.mountPath | quote }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 12
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.meshRecovery.resources | nindent 12 }}
+      volumes:
+        - name: state
+          hostPath:
+            path: {{ .Values.meshRecovery.persistence.hostPath | quote }}
+            type: DirectoryOrCreate
+      {{- with .Values.meshRecovery.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.meshRecovery.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.meshRecovery.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

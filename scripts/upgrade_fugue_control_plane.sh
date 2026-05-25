@@ -1267,6 +1267,7 @@ EOF
   append_upgrade_edge_dynamic_values
   append_upgrade_image_prepull_values
   append_upgrade_dns_values
+  append_upgrade_mesh_recovery_values
 }
 
 append_upgrade_image_prepull_values() {
@@ -2354,6 +2355,41 @@ EOF
     done < <(csv_lines "${FUGUE_DNS_NAMESERVERS}")
   fi
   dns_extra_groups_yaml >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+}
+
+append_upgrade_mesh_recovery_values() {
+  cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<EOF
+
+meshRecovery:
+  enabled: ${FUGUE_MESH_RECOVERY_ENABLED}
+EOF
+
+  if [[ "${FUGUE_MESH_RECOVERY_ENABLED}" != "true" ]]; then
+    return 0
+  fi
+
+  cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<EOF
+  listenAddr: $(yaml_quote "${FUGUE_MESH_RECOVERY_LISTEN_ADDR}")
+  generation: $(yaml_quote "${FUGUE_MESH_RECOVERY_GENERATION}")
+  previousGeneration: $(yaml_quote "${FUGUE_MESH_RECOVERY_PREVIOUS_GENERATION}")
+  mode: $(yaml_quote "${FUGUE_MESH_RECOVERY_MODE}")
+  loginServer: $(yaml_quote "${FUGUE_MESH_RECOVERY_LOGIN_SERVER}")
+  message: $(yaml_quote "${FUGUE_MESH_RECOVERY_MESSAGE}")
+  directoryValidFor: $(yaml_quote "${FUGUE_MESH_RECOVERY_DIRECTORY_VALID_FOR}")
+  manifestValidFor: $(yaml_quote "${FUGUE_MESH_RECOVERY_MANIFEST_VALID_FOR}")
+  nodeTTL: $(yaml_quote "${FUGUE_MESH_RECOVERY_NODE_TTL}")
+  signingKeyID: $(yaml_quote "${FUGUE_MESH_RECOVERY_SIGNING_KEY_ID}")
+  tokenSecret:
+    name: $(yaml_quote "${FUGUE_MESH_RECOVERY_TOKEN_SECRET_NAME}")
+    key: $(yaml_quote "${FUGUE_MESH_RECOVERY_TOKEN_SECRET_KEY}")
+  signingKeySecret:
+    name: $(yaml_quote "${FUGUE_MESH_RECOVERY_SIGNING_KEY_SECRET_NAME}")
+    key: $(yaml_quote "${FUGUE_MESH_RECOVERY_SIGNING_KEY_SECRET_KEY}")
+  rejoinAuthKeySecret:
+    name: $(yaml_quote "${FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_NAME}")
+    key: $(yaml_quote "${FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_KEY}")
+    optional: ${FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_OPTIONAL}
+EOF
 }
 
 build_dns_helm_set_args() {
@@ -3644,6 +3680,24 @@ main() {
     FUGUE_DNS_ZONE="${FUGUE_DNS_ZONE:-}"
   fi
   FUGUE_DNS_TTL="${FUGUE_DNS_TTL:-60}"
+  FUGUE_MESH_RECOVERY_ENABLED="${FUGUE_MESH_RECOVERY_ENABLED:-false}"
+  FUGUE_MESH_RECOVERY_LISTEN_ADDR="${FUGUE_MESH_RECOVERY_LISTEN_ADDR:-:7840}"
+  FUGUE_MESH_RECOVERY_GENERATION="${FUGUE_MESH_RECOVERY_GENERATION:-meshgen-initial}"
+  FUGUE_MESH_RECOVERY_PREVIOUS_GENERATION="${FUGUE_MESH_RECOVERY_PREVIOUS_GENERATION:-}"
+  FUGUE_MESH_RECOVERY_MODE="${FUGUE_MESH_RECOVERY_MODE:-normal}"
+  FUGUE_MESH_RECOVERY_LOGIN_SERVER="${FUGUE_MESH_RECOVERY_LOGIN_SERVER:-${FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER:-}}"
+  FUGUE_MESH_RECOVERY_MESSAGE="${FUGUE_MESH_RECOVERY_MESSAGE:-}"
+  FUGUE_MESH_RECOVERY_DIRECTORY_VALID_FOR="${FUGUE_MESH_RECOVERY_DIRECTORY_VALID_FOR:-2m}"
+  FUGUE_MESH_RECOVERY_MANIFEST_VALID_FOR="${FUGUE_MESH_RECOVERY_MANIFEST_VALID_FOR:-2m}"
+  FUGUE_MESH_RECOVERY_NODE_TTL="${FUGUE_MESH_RECOVERY_NODE_TTL:-2m}"
+  FUGUE_MESH_RECOVERY_SIGNING_KEY_ID="${FUGUE_MESH_RECOVERY_SIGNING_KEY_ID:-mesh-recovery}"
+  FUGUE_MESH_RECOVERY_TOKEN_SECRET_NAME="${FUGUE_MESH_RECOVERY_TOKEN_SECRET_NAME:-}"
+  FUGUE_MESH_RECOVERY_TOKEN_SECRET_KEY="${FUGUE_MESH_RECOVERY_TOKEN_SECRET_KEY:-FUGUE_MESH_RECOVERY_TOKEN}"
+  FUGUE_MESH_RECOVERY_SIGNING_KEY_SECRET_NAME="${FUGUE_MESH_RECOVERY_SIGNING_KEY_SECRET_NAME:-}"
+  FUGUE_MESH_RECOVERY_SIGNING_KEY_SECRET_KEY="${FUGUE_MESH_RECOVERY_SIGNING_KEY_SECRET_KEY:-FUGUE_MESH_RECOVERY_SIGNING_KEY}"
+  FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_NAME="${FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_NAME:-}"
+  FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_KEY="${FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_KEY:-FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY}"
+  FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_OPTIONAL="${FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_OPTIONAL:-true}"
 
   case "${FUGUE_EDGE_CADDY_TLS_MODE}" in
     off|internal|public-on-demand) ;;
@@ -3753,6 +3807,27 @@ PY
     fail "FUGUE_EDGE_ASSET_CACHE_MAX_BYTES must be an integer"
   fi
   dns_extra_groups_yaml >/dev/null
+  case "${FUGUE_MESH_RECOVERY_ENABLED}" in
+    true|false) ;;
+    *) fail "FUGUE_MESH_RECOVERY_ENABLED must be true or false" ;;
+  esac
+  case "${FUGUE_MESH_RECOVERY_MODE}" in
+    normal|reset) ;;
+    *) fail "FUGUE_MESH_RECOVERY_MODE must be normal or reset" ;;
+  esac
+  case "${FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_OPTIONAL}" in
+    true|false) ;;
+    *) fail "FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_OPTIONAL must be true or false" ;;
+  esac
+  if [[ "${FUGUE_MESH_RECOVERY_ENABLED}" == "true" ]]; then
+    [[ -n "$(trim_field "${FUGUE_MESH_RECOVERY_TOKEN_SECRET_NAME}")" ]] || fail "FUGUE_MESH_RECOVERY_TOKEN_SECRET_NAME is required when FUGUE_MESH_RECOVERY_ENABLED=true"
+    [[ -n "$(trim_field "${FUGUE_MESH_RECOVERY_SIGNING_KEY_SECRET_NAME}")" ]] || fail "FUGUE_MESH_RECOVERY_SIGNING_KEY_SECRET_NAME is required when FUGUE_MESH_RECOVERY_ENABLED=true"
+    [[ -n "$(trim_field "${FUGUE_MESH_RECOVERY_GENERATION}")" ]] || fail "FUGUE_MESH_RECOVERY_GENERATION is required when FUGUE_MESH_RECOVERY_ENABLED=true"
+    [[ -n "$(trim_field "${FUGUE_MESH_RECOVERY_LOGIN_SERVER}")" ]] || fail "FUGUE_MESH_RECOVERY_LOGIN_SERVER or FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER is required when FUGUE_MESH_RECOVERY_ENABLED=true"
+  fi
+  if [[ "${FUGUE_MESH_RECOVERY_ENABLED}" == "true" && "${FUGUE_MESH_RECOVERY_MODE}" == "reset" && -z "$(trim_field "${FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_NAME}")" ]]; then
+    fail "FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_NAME is required when FUGUE_MESH_RECOVERY_MODE=reset"
+  fi
 
   if [[ -z "${FUGUE_REGISTRY_PUSH_BASE:-}" ]]; then
     FUGUE_REGISTRY_PUSH_BASE="${FUGUE_RELEASE_FULLNAME}-registry.${FUGUE_NAMESPACE}.svc.cluster.local:${FUGUE_REGISTRY_SERVICE_PORT}"
@@ -3819,6 +3894,7 @@ PY
   log "custom domain base domain: dns.${FUGUE_APP_BASE_DOMAIN}"
   log "dns shadow: enabled=${FUGUE_DNS_ENABLED} zone=${FUGUE_DNS_ZONE} answer_ips=${FUGUE_DNS_ANSWER_IPS:-<none>} route_a_answer_ips=${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-<none>} nameservers=${FUGUE_DNS_NAMESERVERS:-<none>} static_records=$([[ -n "$(trim_field "${FUGUE_DNS_STATIC_RECORDS_JSON}")" ]] && printf enabled || printf disabled) platform_routes=$([[ -n "$(trim_field "${FUGUE_PLATFORM_ROUTES_JSON}")" ]] && printf enabled || printf disabled) public_hostports=${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED} udp=${FUGUE_DNS_UDP_ADDR} tcp=${FUGUE_DNS_TCP_ADDR}"
   log "dns scheduling: primary_country=${FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE:-<none>} extra_groups=${FUGUE_DNS_EXTRA_GROUPS:-<none>}"
+  log "mesh recovery: enabled=${FUGUE_MESH_RECOVERY_ENABLED} generation=${FUGUE_MESH_RECOVERY_GENERATION} mode=${FUGUE_MESH_RECOVERY_MODE} login_server=${FUGUE_MESH_RECOVERY_LOGIN_SERVER:-<none>}"
   log "shared workspace storage: enabled=${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED} class=${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS}"
 
   recover_primary_node_if_needed
@@ -3966,6 +4042,14 @@ PY
       log "dns rollout check failed; attempting rollback"
       rollback_release || true
       fail "dns rollout failed"
+    fi
+  fi
+
+  if [[ "${FUGUE_MESH_RECOVERY_ENABLED}" == "true" ]] && daemonset_exists "${FUGUE_RELEASE_FULLNAME}-mesh-recovery"; then
+    if ! rollout_daemonset_status "${FUGUE_RELEASE_FULLNAME}-mesh-recovery"; then
+      log "mesh recovery rollout check failed; attempting rollback"
+      rollback_release || true
+      fail "mesh recovery rollout failed"
     fi
   fi
 
