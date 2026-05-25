@@ -11,7 +11,8 @@ Usage:
 Renders fugue-mesh-recovery.service and fugue-mesh-recovery.env.
 Secrets are intentionally not written to the public env file; put
 FUGUE_MESH_RECOVERY_TOKEN, FUGUE_MESH_RECOVERY_SIGNING_KEY, and optionally
-FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY in the secret env file.
+FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY in the secret env file. Prefer an
+ed25519-private:<base64raw-private-key> signing key.
 EOF
 }
 

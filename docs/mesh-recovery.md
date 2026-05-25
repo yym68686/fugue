@@ -57,6 +57,10 @@ FUGUE_MESH_RECOVERY_SIGNING_KEY=...
 FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY=...
 ```
 
+Use `ed25519-private:<base64raw-private-key>` for
+`FUGUE_MESH_RECOVERY_SIGNING_KEY`. The matching public value
+`ed25519-public:<base64raw-public-key>` is distributed to agents.
+
 Render an agent unit on every infrastructure node:
 
 ```bash
@@ -75,6 +79,10 @@ The agent secret env file must define:
 FUGUE_MESH_AGENT_TOKEN=...
 FUGUE_MESH_AGENT_SIGNING_KEY=...
 ```
+
+Agents should receive only the Ed25519 public verification key. The legacy HMAC
+format is still accepted for compatibility, but it is not the production
+security model because a node with the HMAC key can forge recovery bundles.
 
 Keep `FUGUE_MESH_AGENT_REJOIN_ENABLED=false` until the recovery endpoints,
 signing key distribution, and Headscale recovery auth key have been validated.

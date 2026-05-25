@@ -11,6 +11,7 @@ Usage:
 Renders fugue-mesh-agent.service and fugue-mesh-agent.env.
 Secrets are intentionally not written to the public env file; put
 FUGUE_MESH_AGENT_TOKEN and FUGUE_MESH_AGENT_SIGNING_KEY in the secret env file.
+Prefer an ed25519-public:<base64raw-public-key> verification key on agents.
 EOF
 }
 
