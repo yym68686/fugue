@@ -54,6 +54,47 @@ PRIMARY_POSTGRES_IMAGE="${FUGUE_PRIMARY_POSTGRES_IMAGE:-docker.io/library/postgr
 FUGUE_DEFAULT_REGISTRY_PULL_BASE="${FUGUE_DEFAULT_REGISTRY_PULL_BASE:-}"
 DNS_HELM_SET_ARGS=()
 
+ensure_control_plane_observability_via_node_janitor() {
+  if [[ -z "${KUBECTL:-}" ]]; then
+    return 1
+  fi
+  if [[ ! -r "${BASH_SOURCE[0]}" ]]; then
+    log "control-plane host observability node-janitor fallback unavailable because ${BASH_SOURCE[0]} is not readable"
+    return 1
+  fi
+
+  local namespace="${FUGUE_NAMESPACE:-fugue-system}"
+  local node_name="${FUGUE_CONTROL_PLANE_OBSERVABILITY_NODE_NAME:-}"
+  local pod_name=""
+
+  if [[ -z "$(trim_field "${node_name}")" ]]; then
+    node_name="$(hostname 2>/dev/null || true)"
+  fi
+  if [[ -z "$(trim_field "${node_name}")" ]]; then
+    return 1
+  fi
+
+  pod_name="$(${KUBECTL} -n "${namespace}" get pods \
+    -l app.kubernetes.io/component=node-janitor \
+    -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase \
+    --no-headers 2>/dev/null |
+    awk -v node="${node_name}" '$2 == node && $3 == "Running" {print $1; exit}')"
+  if [[ -z "$(trim_field "${pod_name}")" ]]; then
+    log "control-plane host observability node-janitor fallback unavailable because no running node-janitor pod was found on ${node_name}"
+    return 1
+  fi
+
+  log "running control-plane host observability bootstrap through node-janitor pod ${namespace}/${pod_name} on ${node_name}"
+  ${KUBECTL} -n "${namespace}" exec "${pod_name}" -c node-janitor -- /bin/bash -lc '
+set -euo pipefail
+target=/host/tmp/fugue-control-plane-observability-bootstrap.sh
+cat >"${target}"
+chmod 0700 "${target}"
+chroot /host /bin/bash -lc "FUGUE_CONTROL_PLANE_OBSERVABILITY_ONLY=true FUGUE_CONTROL_PLANE_OBSERVABILITY_RESTART_K3S=false KUBECONFIG=/etc/rancher/k3s/k3s.yaml /tmp/fugue-control-plane-observability-bootstrap.sh"
+rm -f "${target}"
+' <"${BASH_SOURCE[0]}"
+}
+
 ensure_control_plane_observability() {
   if [[ "${FUGUE_CONTROL_PLANE_OBSERVABILITY_ENABLED:-true}" != "true" ]]; then
     log "control-plane observability bootstrap disabled"
@@ -70,6 +111,9 @@ ensure_control_plane_observability() {
         "FUGUE_LOCAL_KUBE_API_READY_TIMEOUT_SECONDS=${LOCAL_KUBE_API_READY_TIMEOUT_SECONDS}" \
         KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
         bash "${BASH_SOURCE[0]}"
+      return 0
+    fi
+    if ensure_control_plane_observability_via_node_janitor; then
       return 0
     fi
     log "skip control-plane host observability bootstrap because upgrade is not running as root and passwordless sudo is unavailable"
