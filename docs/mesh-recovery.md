@@ -13,10 +13,10 @@ ability to coordinate a rejoin.
   persists a last-known peer directory, signs `/mesh/directory` and
   `/mesh/generation`, and can expose a rejoin auth key during an explicit reset
   generation.
-- `fugue-mesh-agent` runs on every infrastructure node. It sends heartbeat
-  metadata to multiple recovery authorities, verifies signed bundles, writes
-  last-known-good files under `/var/lib/fugue/mesh-agent`, and can rejoin
-  Tailscale when `FUGUE_MESH_AGENT_REJOIN_ENABLED=true`.
+- `fugue-mesh-agent` runs on every infrastructure node. It fans heartbeat
+  metadata out to every configured recovery authority, verifies signed bundles,
+  writes last-known-good files under `/var/lib/fugue/mesh-agent`, and can
+  rejoin Tailscale when `FUGUE_MESH_AGENT_REJOIN_ENABLED=true`.
 - Headscale remains the Tailscale coordination server at the login server URL,
   normally `https://mesh.fugue.pro`. Recovery authorities only publish signed
   recovery intent and peer state; they do not mutate the main Fugue API.
@@ -31,8 +31,9 @@ ability to coordinate a rejoin.
   the recovery auth key.
 - If the main control plane is down, edge or DNS hosted recovery authorities can
   still serve signed directory and generation data.
-- If one recovery authority is down, agents try the next endpoint in
-  `FUGUE_MESH_AGENT_ENDPOINTS`.
+- If one recovery authority is down, agents keep syncing through the remaining
+  endpoints. Healthy authorities stay warm because agents normally heartbeat to
+  all of them on every poll.
 
 ## Systemd Path
 

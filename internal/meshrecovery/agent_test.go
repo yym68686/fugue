@@ -85,6 +85,64 @@ func TestMeshAgentSyncPersistsSignedBundles(t *testing.T) {
 	}
 }
 
+func TestMeshAgentHeartbeatsAllRecoveryEndpoints(t *testing.T) {
+	now := time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC)
+	newAuthority := func(t *testing.T) (*RecoveryAuthority, *httptest.Server) {
+		t.Helper()
+		authority, err := NewRecoveryAuthority(RecoveryConfig{
+			StatePath:         filepath.Join(t.TempDir(), "authority-state.json"),
+			Generation:        "meshgen-1",
+			LoginServer:       "https://mesh.example.test",
+			SigningKey:        "signing-key",
+			SigningKeyID:      "key-1",
+			Token:             "token",
+			DirectoryValidFor: time.Minute,
+			ManifestValidFor:  time.Minute,
+			NodeTTL:           time.Minute,
+		}, nil)
+		if err != nil {
+			t.Fatalf("new recovery authority: %v", err)
+		}
+		authority.now = func() time.Time { return now }
+		return authority, httptest.NewServer(authority.Handler())
+	}
+	authorityA, serverA := newAuthority(t)
+	defer serverA.Close()
+	authorityB, serverB := newAuthority(t)
+	defer serverB.Close()
+
+	agent, err := NewMeshAgent(MeshAgentConfig{
+		Endpoints:    []string{serverA.URL, serverB.URL},
+		Token:        "token",
+		SigningKey:   "signing-key",
+		SigningKeyID: "key-1",
+		StatePath:    filepath.Join(t.TempDir(), "state.json"),
+		Node: MeshNode{
+			NodeID:   "node-a",
+			Hostname: "node-a",
+			Roles:    []string{"agent"},
+			MeshIP:   "100.64.0.10",
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("new mesh agent: %v", err)
+	}
+	agent.now = func() time.Time { return now }
+
+	if err := agent.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync once: %v", err)
+	}
+	for name, authority := range map[string]*RecoveryAuthority{"a": authorityA, "b": authorityB} {
+		directory, err := authority.Directory()
+		if err != nil {
+			t.Fatalf("directory %s: %v", name, err)
+		}
+		if len(directory.Nodes) != 1 || directory.Nodes[0].NodeID != "node-a" {
+			t.Fatalf("authority %s did not receive heartbeat: %#v", name, directory.Nodes)
+		}
+	}
+}
+
 func TestMeshAgentResetGenerationRunsTailscaleRejoin(t *testing.T) {
 	now := time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC)
 	mux := http.NewServeMux()

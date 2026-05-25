@@ -39,6 +39,11 @@ type MeshAgent struct {
 	now      func() time.Time
 }
 
+type heartbeatResult struct {
+	endpoint string
+	response HeartbeatResponse
+}
+
 type agentState struct {
 	Generation        string    `json:"generation,omitempty"`
 	LastSyncAt        time.Time `json:"last_sync_at,omitempty"`
@@ -116,31 +121,40 @@ func (a *MeshAgent) SyncOnce(ctx context.Context) error {
 	state, _ := a.loadState()
 	req := HeartbeatRequest{Node: a.cfg.Node}
 	var lastErr error
+	successes := make([]heartbeatResult, 0, len(a.cfg.Endpoints))
 	for _, endpoint := range a.cfg.Endpoints {
 		heartbeat, err := a.heartbeat(ctx, endpoint, req)
 		if err != nil {
-			lastErr = err
+			lastErr = fmt.Errorf("%s: %w", endpoint, err)
+			a.logger.Printf("mesh recovery endpoint %s sync failed: %v", endpoint, err)
 			continue
 		}
 		if err := VerifyPeerDirectory(heartbeat.Directory, a.cfg.SigningKey, a.cfg.SigningKeyID, a.now()); err != nil {
 			lastErr = fmt.Errorf("verify peer directory from %s: %w", endpoint, err)
+			a.logger.Printf("mesh recovery endpoint %s returned invalid peer directory: %v", endpoint, err)
 			continue
 		}
 		if err := VerifyGenerationManifest(heartbeat.Generation, a.cfg.SigningKey, a.cfg.SigningKeyID, a.now()); err != nil {
 			lastErr = fmt.Errorf("verify generation manifest from %s: %w", endpoint, err)
+			a.logger.Printf("mesh recovery endpoint %s returned invalid generation manifest: %v", endpoint, err)
 			continue
 		}
-		if err := a.persistBundles(heartbeat.Directory, heartbeat.Generation); err != nil {
+		successes = append(successes, heartbeatResult{endpoint: endpoint, response: heartbeat})
+	}
+	if len(successes) > 0 {
+		chosen := chooseHeartbeatResult(successes)
+		a.logGenerationMismatches(successes, chosen)
+		if err := a.persistBundles(chosen.response.Directory, chosen.response.Generation); err != nil {
 			return err
 		}
 		state.LastSyncAt = a.now()
-		state.LastEndpoint = endpoint
-		if heartbeat.Generation.RejoinRequired && state.Generation != heartbeat.Generation.Generation {
-			if err := a.rejoin(ctx, endpoint, heartbeat.Generation, &state); err != nil {
+		state.LastEndpoint = chosen.endpoint
+		if chosen.response.Generation.RejoinRequired && state.Generation != chosen.response.Generation.Generation {
+			if err := a.rejoin(ctx, chosen.endpoint, chosen.response.Generation, &state); err != nil {
 				return err
 			}
-		} else if !heartbeat.Generation.RejoinRequired {
-			state.Generation = heartbeat.Generation.Generation
+		} else if !chosen.response.Generation.RejoinRequired {
+			state.Generation = chosen.response.Generation.Generation
 		}
 		return a.saveState(state)
 	}
@@ -148,6 +162,45 @@ func (a *MeshAgent) SyncOnce(ctx context.Context) error {
 		lastErr = fmt.Errorf("no mesh recovery endpoint succeeded")
 	}
 	return lastErr
+}
+
+func chooseHeartbeatResult(results []heartbeatResult) heartbeatResult {
+	chosen := results[0]
+	for _, result := range results[1:] {
+		chosenNodeCount := len(chosen.response.Directory.Nodes)
+		resultNodeCount := len(result.response.Directory.Nodes)
+		if resultNodeCount > chosenNodeCount {
+			chosen = result
+			continue
+		}
+		if resultNodeCount == chosenNodeCount && result.response.Directory.GeneratedAt.After(chosen.response.Directory.GeneratedAt) {
+			chosen = result
+		}
+	}
+	return chosen
+}
+
+func (a *MeshAgent) logGenerationMismatches(results []heartbeatResult, chosen heartbeatResult) {
+	chosenGeneration := chosen.response.Generation
+	for _, result := range results {
+		generation := result.response.Generation
+		if generation.Generation == chosenGeneration.Generation &&
+			generation.Mode == chosenGeneration.Mode &&
+			generation.RejoinRequired == chosenGeneration.RejoinRequired {
+			continue
+		}
+		a.logger.Printf(
+			"mesh recovery endpoint %s generation mismatch: got generation=%s mode=%s rejoin_required=%t; using endpoint %s generation=%s mode=%s rejoin_required=%t",
+			result.endpoint,
+			generation.Generation,
+			generation.Mode,
+			generation.RejoinRequired,
+			chosen.endpoint,
+			chosenGeneration.Generation,
+			chosenGeneration.Mode,
+			chosenGeneration.RejoinRequired,
+		)
+	}
 }
 
 func (a *MeshAgent) heartbeat(ctx context.Context, endpoint string, req HeartbeatRequest) (HeartbeatResponse, error) {
