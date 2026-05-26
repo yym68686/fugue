@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,8 @@ import (
 	"testing"
 
 	"fugue/internal/model"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestBuildDeployManagedPostgresGeneratesPasswordWhenOmitted(t *testing.T) {
@@ -167,6 +170,26 @@ func TestRunAppDatabaseImportUploadsDumpField(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "dbimport_123") {
 		t.Fatalf("expected import job in output, got %q", stdout.String())
+	}
+}
+
+func TestIsExpectedAppDatabaseTunnelCloseClassifiesConnectionTeardown(t *testing.T) {
+	t.Parallel()
+
+	for _, err := range []error{
+		io.EOF,
+		&websocket.CloseError{Code: websocket.CloseAbnormalClosure, Text: "abnormal closure"},
+		&websocket.CloseError{Code: websocket.CloseNormalClosure, Text: "normal closure"},
+		errors.New("read tcp 127.0.0.1:15432->127.0.0.1:53122: use of closed network connection"),
+		errors.New("write tcp 127.0.0.1:15432->127.0.0.1:53122: broken pipe"),
+		errors.New("read tcp 127.0.0.1:15432->127.0.0.1:53122: connection reset by peer"),
+	} {
+		if !isExpectedAppDatabaseTunnelClose(err) {
+			t.Fatalf("expected %v to be treated as normal tunnel connection teardown", err)
+		}
+	}
+	if isExpectedAppDatabaseTunnelClose(errors.New("websocket: bad handshake")) {
+		t.Fatal("expected bad handshake to remain a connection failure")
 	}
 }
 

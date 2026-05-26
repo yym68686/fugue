@@ -405,7 +405,6 @@ func (c *CLI) serveAppDatabaseTunnel(ctx context.Context, client *Client, appID,
 	if !c.wantsJSON() {
 		_, _ = fmt.Fprintf(c.stderr, "database tunnel listening on %s\n", listen)
 	}
-	errCh := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
 		_ = listener.Close()
@@ -424,28 +423,17 @@ func (c *CLI) serveAppDatabaseTunnel(ctx context.Context, client *Client, appID,
 		go func(localConn net.Conn) {
 			defer wg.Done()
 			defer localConn.Close()
-			if err := c.proxyAppDatabaseConnection(ctx, client, appID, grantID, token, localConn); err != nil && !errors.Is(err, io.EOF) && ctx.Err() == nil {
-				select {
-				case errCh <- err:
-				default:
+			if err := c.proxyAppDatabaseConnection(ctx, client, appID, grantID, token, localConn); err != nil && ctx.Err() == nil && !c.wantsJSON() {
+				if isExpectedAppDatabaseTunnelClose(err) {
+					c.progressf("warning=database tunnel connection closed: %v", err)
+				} else {
+					c.progressf("warning=database tunnel connection failed: %v", err)
 				}
 			}
 		}(conn)
-		select {
-		case err := <-errCh:
-			_ = listener.Close()
-			wg.Wait()
-			return err
-		default:
-		}
 	}
 	wg.Wait()
-	select {
-	case err := <-errCh:
-		return err
-	default:
-		return nil
-	}
+	return nil
 }
 
 func (c *CLI) proxyAppDatabaseConnection(ctx context.Context, client *Client, appID, grantID, token string, localConn net.Conn) error {
@@ -499,6 +487,29 @@ func (c *CLI) proxyAppDatabaseConnection(ctx context.Context, client *Client, ap
 	_ = localConn.SetDeadline(time.Now())
 	_ = wsConn.Close()
 	return err
+}
+
+func isExpectedAppDatabaseTunnelClose(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		switch closeErr.Code {
+		case websocket.CloseNormalClosure,
+			websocket.CloseGoingAway,
+			websocket.CloseNoStatusReceived,
+			websocket.CloseAbnormalClosure:
+			return true
+		}
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "use of closed network connection") ||
+		strings.Contains(message, "connection reset by peer") ||
+		strings.Contains(message, "broken pipe")
 }
 
 func normalizeCLIAppDatabaseImportFormat(raw string) string {
