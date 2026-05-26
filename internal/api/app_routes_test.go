@@ -65,6 +65,98 @@ func TestGetAppRouteAvailabilityReportsCurrentConflictAndInvalid(t *testing.T) {
 	}
 }
 
+func TestAppRouteAvailabilityAllowsVerifiedCustomDomainPathSplit(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, app, occupiedApp := setupAppRouteTestServer(t)
+
+	domainHostname := "api2.example.com"
+	domain, err := s.PutAppDomain(model.AppDomain{
+		Hostname:    domainHostname,
+		AppID:       app.ID,
+		TenantID:    app.TenantID,
+		Status:      model.AppDomainStatusVerified,
+		DNSStatus:   model.AppDomainDNSStatusReady,
+		TLSStatus:   model.AppDomainTLSStatusReady,
+		RouteTarget: "demo.apps.example.com",
+	})
+	if err != nil {
+		t.Fatalf("put custom domain: %v", err)
+	}
+	if domain.Status != model.AppDomainStatusVerified {
+		t.Fatalf("expected verified custom domain, got %+v", domain)
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+occupiedApp.ID+"/route/availability?hostname="+domainHostname+"&path_prefix=/v1", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var splitResponse struct {
+		Availability appRouteAvailability `json:"availability"`
+	}
+	mustDecodeJSON(t, recorder, &splitResponse)
+	if !splitResponse.Availability.Valid || !splitResponse.Availability.Available || splitResponse.Availability.Current {
+		t.Fatalf("expected split route to be valid and available, got %+v", splitResponse.Availability)
+	}
+	if splitResponse.Availability.Hostname != domainHostname {
+		t.Fatalf("expected hostname %q, got %q", domainHostname, splitResponse.Availability.Hostname)
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+occupiedApp.ID+"/route/availability?hostname="+domainHostname+"&path_prefix=/", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	mustDecodeJSON(t, recorder, &splitResponse)
+	if splitResponse.Availability.Valid || splitResponse.Availability.Available {
+		t.Fatalf("expected root custom-domain route to be rejected for a different app, got %+v", splitResponse.Availability)
+	}
+	if splitResponse.Availability.Reason == "" {
+		t.Fatal("expected root custom-domain route rejection reason")
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+occupiedApp.ID+"/route", apiKey, map[string]any{
+		"hostname":    domainHostname,
+		"path_prefix": "/v1",
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var patchResponse struct {
+		App            model.App            `json:"app"`
+		Availability   appRouteAvailability `json:"availability"`
+		AlreadyCurrent bool                 `json:"already_current"`
+	}
+	mustDecodeJSON(t, recorder, &patchResponse)
+	if patchResponse.AlreadyCurrent {
+		t.Fatal("expected first split route patch to change hostname")
+	}
+	if patchResponse.App.Route == nil {
+		t.Fatal("expected app route in patch response")
+	}
+	if got := patchResponse.App.Route.Hostname; got != domainHostname {
+		t.Fatalf("expected split route hostname %q, got %q", domainHostname, got)
+	}
+	if got := patchResponse.App.Route.PathPrefix; got != "/v1" {
+		t.Fatalf("expected split route path prefix /v1, got %q", got)
+	}
+
+	found, err := s.GetAppByRoutePrefix(domainHostname, "/v1")
+	if err != nil {
+		t.Fatalf("lookup split route: %v", err)
+	}
+	if found.ID != occupiedApp.ID {
+		t.Fatalf("expected split route to resolve to app %s, got %s", occupiedApp.ID, found.ID)
+	}
+
+	persistedDomain, err := s.GetAppDomain(domainHostname)
+	if err != nil {
+		t.Fatalf("lookup custom domain: %v", err)
+	}
+	if persistedDomain.AppID != app.ID {
+		t.Fatalf("expected custom domain to remain attached to frontend app %s, got %s", app.ID, persistedDomain.AppID)
+	}
+}
+
 func TestPatchAppRouteUpdatesHostnameAndIsIdempotent(t *testing.T) {
 	t.Parallel()
 

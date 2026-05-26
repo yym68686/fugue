@@ -188,12 +188,10 @@ func (s *Server) inspectAppRouteAvailability(app model.App, rawHostname, rawPath
 		PathPrefix: normalizeRequestedAppPathPrefix(rawPathPrefix),
 		BaseDomain: s.appBaseDomain,
 	}
-	if strings.TrimSpace(s.appBaseDomain) == "" {
-		availability.Reason = "app base domain is not configured"
-		return availability, nil
+	host, label, reason, err := s.resolveRequestedAppRouteHostname(app, rawHostname, availability.PathPrefix)
+	if err != nil {
+		return availability, err
 	}
-
-	host, label, reason := normalizeRequestedAppHostname(rawHostname, s.appBaseDomain)
 	availability.Label = label
 	availability.Hostname = host
 	if host != "" {
@@ -237,6 +235,61 @@ func (s *Server) inspectAppRouteAvailability(app model.App, rawHostname, rawPath
 	default:
 		return availability, err
 	}
+}
+
+func (s *Server) resolveRequestedAppRouteHostname(app model.App, rawHostname, pathPrefix string) (hostname, label, reason string, err error) {
+	rawHostname = strings.TrimSpace(strings.ToLower(rawHostname))
+	pathPrefix = model.NormalizeAppRoutePathPrefix(pathPrefix)
+	if rawHostname == "" {
+		return "", "", "hostname is required", nil
+	}
+
+	baseDomain := strings.TrimSpace(strings.ToLower(s.appBaseDomain))
+	if baseDomain != "" {
+		if rawHostname == baseDomain || strings.HasSuffix(rawHostname, "."+baseDomain) || !strings.Contains(rawHostname, ".") {
+			hostname, label, reason := normalizeRequestedAppHostname(rawHostname, baseDomain)
+			return hostname, label, reason, nil
+		}
+	}
+
+	if !strings.Contains(rawHostname, ".") {
+		if baseDomain == "" {
+			return "", "", "app base domain is not configured", nil
+		}
+		return "", "", "hostname must include a subdomain", nil
+	}
+
+	hostname, reason = s.normalizeRequestedCustomDomain(rawHostname, false)
+	if reason != "" {
+		return "", "", reason, nil
+	}
+
+	var domain model.AppDomain
+	domain, err = s.store.GetAppDomain(hostname)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "", "", "custom domain must be attached to an app before it can receive a route", nil
+		}
+		return "", "", "", err
+	}
+	if domain.Status != model.AppDomainStatusVerified {
+		return "", "", "custom domain must be verified before it can receive a route", nil
+	}
+
+	owner, err := s.store.GetApp(domain.AppID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "", "", "custom domain owner app was not found", nil
+		}
+		return "", "", "", err
+	}
+	if owner.TenantID != app.TenantID || owner.ProjectID != app.ProjectID {
+		return "", "", "custom domain belongs to another project", nil
+	}
+	if domain.AppID != app.ID && pathPrefix == "/" {
+		return "", "", "custom domain root is owned by another app; choose a non-root path prefix", nil
+	}
+	return hostname, "", "", nil
 }
 
 func normalizeRequestedAppHostname(raw, baseDomain string) (hostname, label, reason string) {
