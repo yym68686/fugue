@@ -771,6 +771,160 @@ func TestApplyCaddyConfigWarmsPendingCustomDomainAndReportsReady(t *testing.T) {
 	}
 }
 
+func TestApplyCaddyConfigBackfillsSharedCertificateForReadyCustomDomain(t *testing.T) {
+	t.Parallel()
+
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/load" {
+			t.Fatalf("unexpected caddy admin request %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer admin.Close()
+
+	dataDir := t.TempDir()
+	writeLocalCaddyTLSBundle(t, dataDir, "www.customer.com", "ready-cert-pem", "ready-key-pem", `{"issuer":"test"}`)
+
+	var reports []map[string]string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/edge/domains/www.customer.com/tls-bundle":
+			w.WriteHeader(http.StatusNotFound)
+			return
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/edge/domains/tls-report":
+		default:
+			t.Fatalf("unexpected API request %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.URL.Query().Get("token"); got != "edge-secret" {
+			t.Fatalf("unexpected edge token %q", got)
+		}
+		var report map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&report); err != nil {
+			t.Fatalf("decode TLS report: %v", err)
+		}
+		reports = append(reports, report)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer api.Close()
+
+	bundle := testBundle("routegen_custom_tls_backfill")
+	custom := bundle.Routes[0]
+	custom.Hostname = "www.customer.com"
+	custom.RouteKind = model.EdgeRouteKindCustomDomain
+	custom.TLSPolicy = model.EdgeRouteTLSPolicyCustomDomain
+	custom.RouteGeneration = "routegen_custom_domain"
+	bundle.Routes = []model.EdgeRouteBinding{custom}
+	bundle.TLSAllowlist = []model.EdgeTLSAllowlistEntry{
+		{
+			Hostname:  "www.customer.com",
+			AppID:     "app_demo",
+			TenantID:  "tenant_demo",
+			Status:    model.AppDomainStatusVerified,
+			TLSStatus: model.AppDomainTLSStatusReady,
+		},
+	}
+
+	var warmups []string
+	service := NewService(config.EdgeConfig{
+		APIURL:                api.URL,
+		EdgeToken:             "edge-secret",
+		EdgeGroupID:           "edge-group-default",
+		ListenAddr:            "127.0.0.1:7832",
+		CaddyEnabled:          true,
+		CaddyAdminURL:         admin.URL,
+		CaddyListenAddr:       ":18443",
+		CaddyTLSMode:          caddyTLSModePublicOnDemand,
+		CaddyProxyListenAddr:  ":7833",
+		CaddyDataDir:          dataDir,
+		CaddySharedTLSEnabled: true,
+	}, log.New(ioDiscard{}, "", 0))
+	service.caddyWarmup = func(_ context.Context, addr, host string) error {
+		warmups = append(warmups, addr+"|"+host)
+		return nil
+	}
+
+	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
+		t.Fatalf("apply caddy config: %v", err)
+	}
+	if got, want := fmt.Sprint(warmups), "[127.0.0.1:18443|www.customer.com]"; got != want {
+		t.Fatalf("unexpected warmups: got %s want %s", got, want)
+	}
+	if len(reports) != 1 {
+		t.Fatalf("expected one TLS report, got %d reports=%v", len(reports), reports)
+	}
+	if reports[0]["hostname"] != "www.customer.com" || reports[0]["tls_status"] != model.AppDomainTLSStatusReady || reports[0]["tls_last_message"] != "" {
+		t.Fatalf("unexpected TLS report: %+v", reports[0])
+	}
+	if reports[0]["certificate_pem"] != "ready-cert-pem" || reports[0]["private_key_pem"] != "ready-key-pem" {
+		t.Fatalf("expected TLS report to include local Caddy certificate bundle, got %+v", reports[0])
+	}
+}
+
+func TestApplyCaddyConfigDoesNotDowngradeReadyCustomDomainOnWarmupFailure(t *testing.T) {
+	t.Parallel()
+
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/load" {
+			t.Fatalf("unexpected caddy admin request %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer admin.Close()
+
+	var reports []map[string]string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/edge/domains/tls-report" {
+			t.Fatalf("unexpected API request %s %s", r.Method, r.URL.Path)
+		}
+		var report map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&report); err != nil {
+			t.Fatalf("decode TLS report: %v", err)
+		}
+		reports = append(reports, report)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer api.Close()
+
+	bundle := testBundle("routegen_custom_tls_no_downgrade")
+	custom := bundle.Routes[0]
+	custom.Hostname = "www.customer.com"
+	custom.RouteKind = model.EdgeRouteKindCustomDomain
+	custom.TLSPolicy = model.EdgeRouteTLSPolicyCustomDomain
+	custom.RouteGeneration = "routegen_custom_domain"
+	bundle.Routes = []model.EdgeRouteBinding{custom}
+	bundle.TLSAllowlist = []model.EdgeTLSAllowlistEntry{
+		{
+			Hostname:  "www.customer.com",
+			AppID:     "app_demo",
+			TenantID:  "tenant_demo",
+			Status:    model.AppDomainStatusVerified,
+			TLSStatus: model.AppDomainTLSStatusReady,
+		},
+	}
+
+	service := NewService(config.EdgeConfig{
+		APIURL:               api.URL,
+		EdgeToken:            "edge-secret",
+		EdgeGroupID:          "edge-group-default",
+		ListenAddr:           "127.0.0.1:7832",
+		CaddyEnabled:         true,
+		CaddyAdminURL:        admin.URL,
+		CaddyListenAddr:      ":18443",
+		CaddyTLSMode:         caddyTLSModePublicOnDemand,
+		CaddyProxyListenAddr: ":7833",
+	}, log.New(ioDiscard{}, "", 0))
+	service.caddyWarmup = func(context.Context, string, string) error {
+		return errors.New("warmup failed")
+	}
+
+	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
+		t.Fatalf("apply caddy config: %v", err)
+	}
+	if len(reports) != 0 {
+		t.Fatalf("expected ready custom domain not to be downgraded on warmup failure, got reports=%v", reports)
+	}
+}
+
 func TestApplyCaddyConfigInstallsSharedCustomDomainCertificate(t *testing.T) {
 	t.Parallel()
 

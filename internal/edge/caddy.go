@@ -449,7 +449,11 @@ func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.E
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
-		if _, ok := reportHosts[host]; ok {
+		if currentTLSStatus, ok := reportHosts[host]; ok {
+			currentReady := strings.EqualFold(strings.TrimSpace(currentTLSStatus), model.AppDomainTLSStatusReady)
+			if err != nil && currentReady {
+				continue
+			}
 			status := model.AppDomainTLSStatusReady
 			message := ""
 			if err != nil {
@@ -460,6 +464,9 @@ func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.E
 			if err == nil && s.caddySharedTLSEnabled() {
 				localBundle, certErr := s.readLocalCaddyTLSCertificate(host)
 				if certErr != nil {
+					if currentReady {
+						continue
+					}
 					status = model.AppDomainTLSStatusPending
 					message = fmt.Sprintf("certificate issued locally but shared bundle export failed: %v", certErr)
 				} else {
@@ -524,8 +531,8 @@ func (s *Service) caddyWarmupHosts(bundle model.EdgeRouteBundle) []string {
 	return hosts
 }
 
-func (s *Service) customDomainTLSReportHosts(bundle model.EdgeRouteBundle) map[string]struct{} {
-	pendingAllowlist := map[string]struct{}{}
+func (s *Service) customDomainTLSReportHosts(bundle model.EdgeRouteBundle) map[string]string {
+	allowlist := map[string]string{}
 	for _, entry := range bundle.TLSAllowlist {
 		host := normalizeRouteHost(entry.Hostname)
 		if host == "" {
@@ -534,15 +541,12 @@ func (s *Service) customDomainTLSReportHosts(bundle model.EdgeRouteBundle) map[s
 		if !strings.EqualFold(strings.TrimSpace(entry.Status), model.AppDomainStatusVerified) {
 			continue
 		}
-		if strings.EqualFold(strings.TrimSpace(entry.TLSStatus), model.AppDomainTLSStatusReady) {
-			continue
-		}
-		pendingAllowlist[host] = struct{}{}
+		allowlist[host] = model.NormalizeAppDomainTLSStatus(entry.TLSStatus)
 	}
-	if len(pendingAllowlist) == 0 {
+	if len(allowlist) == 0 {
 		return nil
 	}
-	out := map[string]struct{}{}
+	out := map[string]string{}
 	for _, route := range bundle.Routes {
 		if !s.routeAllowedForThisEdge(route) {
 			continue
@@ -551,7 +555,8 @@ func (s *Service) customDomainTLSReportHosts(bundle model.EdgeRouteBundle) map[s
 		if host == "" {
 			continue
 		}
-		if _, ok := pendingAllowlist[host]; !ok {
+		tlsStatus, ok := allowlist[host]
+		if !ok {
 			continue
 		}
 		if !strings.EqualFold(strings.TrimSpace(route.RouteKind), model.EdgeRouteKindCustomDomain) {
@@ -560,7 +565,7 @@ func (s *Service) customDomainTLSReportHosts(bundle model.EdgeRouteBundle) map[s
 		if !strings.EqualFold(strings.TrimSpace(route.TLSPolicy), model.EdgeRouteTLSPolicyCustomDomain) {
 			continue
 		}
-		out[host] = struct{}{}
+		out[host] = tlsStatus
 	}
 	if len(out) == 0 {
 		return nil
