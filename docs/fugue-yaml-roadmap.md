@@ -285,27 +285,78 @@ intent:
 
 ## 5. TODO list
 
-1. **先支持 `domains` + `entrypoints`。**  
-   目标是把 hostname、TLS、path routing、backend 归属分层放进同一个项目合同里，并把当前 `public` / `primary_service` 兼容编译进去。  
-   交付物应包括 parser、schema、导入器、route 生成器，以及前端可视化编辑入口。
+- [x] **阶段：先支持 `domains` + `entrypoints`。**  
+  目标是把 hostname、TLS、path routing、backend 归属分层放进同一个项目合同里，并把当前 `public` / `primary_service` 兼容编译进去。
+  - [x] Parser：`fugue.yaml` 能解析 `domains[]`、`entrypoints[]`、`routes[]`、`path` / `path_prefix`、`strip_prefix`、`rewrite`。
+  - [x] Schema：OpenAPI 暴露 `TopologyDomain`、`TopologyEntrypoint`、`TopologyEntrypointRoute`，并在 template inspect 响应里保留这些字段。
+  - [x] 导入器：GitHub / upload topology import 能把 entrypoint route 编译成 app route。
+  - [x] 路由归属：app route 持久化 `path_prefix`、`domain_name`、`entrypoint_name`，方便导出和 diff 找回来源。
+  - [x] 兼容编译：旧的 `public: true` / `primary_service` 继续生成默认 `/` route。
+  - [x] Route 生成器：edge route bundle 按 hostname + path prefix 输出，edge 侧能做 path-level routing。
+  - [x] 控制平面发布：变更已通过 GitHub Actions 控制平面链路发布到线上。
+  - [x] 前端入口：Console 已提供 route `path_prefix` 的可视化编辑入口。
+  - [ ] 前端完整编辑器：补完整 `domains` / `entrypoints` / route table 的结构化编辑、排序、冲突提示和删除确认。
 
-2. **再支持 `secrets`。**  
-   把真实 secret 值、`from_env`、`from_secret`、`generate` 收敛到统一模型里，同时实现默认脱敏导出。
+- [x] **阶段：补齐 Fugue CLI 对 `domains` + `entrypoints` 的适配。**  
+  目标是让 CLI 与 parser、schema、导入器、route 生成器看到同一份项目合同。
+  - [x] `fugue app route check <app> <hostname> --path-prefix <path>` 支持检查 hostname + path prefix 组合。
+  - [x] `fugue app route set <app> <hostname> --path-prefix <path>` 支持设置非根路径 route。
+  - [x] `fugue app route show` 显示 `path_prefix`、`domain_name`、`entrypoint_name`。
+  - [x] `fugue app domain primary ...` 兼容旧命令，并在输出里显示默认 `/` path prefix。
+  - [x] `fugue app status` 输出补充 route provenance，包含 `route_path_prefix`、`route_domain_name`、`route_entrypoint_name`。
+  - [x] `fugue deploy inspect` / `fugue template inspect` 展示 `domains`、`entrypoints`、route count。
+  - [x] `fugue deploy --dry-run` plan service 行携带 `path_prefix`、`domain_name`、`entrypoint_name`，文本表格能显示带 path 的 public URL。
+  - [x] `fugue admin routes ls` 按 hostname + path prefix 分组，避免同 hostname 的不同 path route 被折叠。
+  - [x] `fugue admin routes explain` 的 route binding 表显示 path prefix。
+  - [x] CLI 相关 OpenAPI 派生产物和 `fugue-web` contract snapshot 已同步。
 
-3. **补 `project`、`intent`、`observability`。**  
-   让 manifest 能表达项目身份、预算、区域偏好、DataOcean 之类的业务观测配置。
+- [ ] **阶段：支持 `secrets`。**  
+  把真实 secret 值、`from_env`、`from_secret`、`generate` 收敛到统一模型里，同时实现默认脱敏导出。
+  - [ ] 设计顶层 `secrets` schema，区分明文配置、敏感值、引用和生成规则。
+  - [ ] 支持 `value`、`from_env`、`from_secret`、`generate`、`encoding`、`length`。
+  - [ ] 导入时把 `secrets` 编译到 app files / env / secret storage 的正式通道。
+  - [ ] 导出时默认脱敏，私密导出才保留真实值。
+  - [ ] 兼容 `generated_env`，提供迁移提示而不是立即删除旧字段。
 
-4. **补 `release`、预检、影子流量、权重切流和回滚。**  
-   让 `fugue.yaml` 不只是“怎么跑”，还包括“怎么安全发布”。
+- [ ] **阶段：补 `project`、`intent`、`observability`。**  
+  让 manifest 能表达项目身份、预算、区域偏好、DataOcean 之类的业务观测配置。
+  - [ ] `project` 支持 name、description、默认 runtime / region 策略。
+  - [ ] `intent` 支持 availability、region preference、budget、合规偏好。
+  - [ ] `observability` 支持 DataOcean 接入、日志策略、指标开关和事件采集配置。
+  - [ ] 导入器能把这些字段映射到 project / app / integration 的期望状态。
+  - [ ] 前端在项目设置里展示这些字段，并能参与 diff。
 
-5. **做 `fugue.yaml` 的复制 / 导出 / Diff。**  
-   前端直接从当前项目状态生成可复制 manifest，并提供安全导出和私密导出两种版本。
+- [ ] **阶段：补 `release`、预检、影子流量、权重切流和回滚。**  
+  让 `fugue.yaml` 不只是“怎么跑”，还包括“怎么安全发布”。
+  - [ ] `release.preflight` 表达部署前检查、健康门禁和阻断条件。
+  - [ ] `release.shadow` 表达影子流量、比较窗口和采样策略。
+  - [ ] `release.canary` / route weights 表达渐进式切流。
+  - [ ] `release.rollback` 表达自动回滚条件和人工确认策略。
+  - [ ] Route 生成器能把 release 策略和 entrypoint route 解耦编译。
 
-6. **做 v1 -> v2 转换器。**  
-   让老 manifest 可以一键升级，不要求用户手写迁移。
+- [ ] **阶段：做 `fugue.yaml` 的复制 / 导出 / Diff。**  
+  前端直接从当前项目状态生成可复制 manifest，并提供安全导出和私密导出两种版本。
+  - [ ] 从 project、apps、routes、domains、backing services、storage、env、observability 组装当前期望状态。
+  - [ ] 安全导出：默认脱敏，适合提交 Git。
+  - [ ] 私密导出：保留真实 secret，适合用户本地迁移或私密上传。
+  - [ ] Legacy 导出：只导出 `version: 1` 可识别子集。
+  - [ ] Diff：比较当前 live desired state 与给定 `fugue.yaml`，突出 route、secret、storage、release 差异。
+  - [ ] CLI 补 `fugue project export` / `fugue app export` 或等价命令，输出安全 / 私密 / legacy 模式。
 
-7. **最后再收紧旧字段。**  
-   等 v2 稳定以后，再逐步收敛 `public`、`generated_env`、`env_file` 这些历史兼容入口。
+- [ ] **阶段：做 v1 -> v2 转换器。**  
+  让老 manifest 可以一键升级，不要求用户手写迁移。
+  - [ ] 把 `public: true` / `primary_service` 转换成默认 `domains` + `entrypoints`。
+  - [ ] 把 `generated_env` 转换成 `secrets.generate`。
+  - [ ] 把 service-level `env_file` 保留为兼容字段或转换为明确的 import-only 输入。
+  - [ ] 输出迁移报告，说明无法无损转换的字段。
+  - [ ] CLI 补 `fugue yaml convert --to-version 2` 或等价命令。
+
+- [ ] **阶段：最后再收紧旧字段。**  
+  等 v2 稳定以后，再逐步收敛 `public`、`generated_env`、`env_file` 这些历史兼容入口。
+  - [ ] 为旧字段增加 warning 和替代建议。
+  - [ ] 文档明确 v1 shim 的支持窗口。
+  - [ ] 新项目默认生成 `version: 2`。
+  - [ ] 控制台新建 / 导出默认使用 v2，legacy 只作为显式选项。
 
 ## 结论
 

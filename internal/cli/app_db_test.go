@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -95,6 +97,76 @@ func TestRunAppDatabaseConfigureGeneratesPasswordAndRedactsJSONByDefault(t *test
 	}
 	if strings.Contains(out, password) {
 		t.Fatalf("expected JSON output to redact generated password %q, got %q", password, out)
+	}
+}
+
+func TestRunAppDatabaseImportUploadsDumpField(t *testing.T) {
+	t.Parallel()
+
+	dumpPath := filepath.Join(t.TempDir(), "dump.sql")
+	if err := os.WriteFile(dumpPath, []byte("select 1;"), 0o600); err != nil {
+		t.Fatalf("write dump: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/database/import":
+			reader, err := r.MultipartReader()
+			if err != nil {
+				t.Fatalf("multipart reader: %v", err)
+			}
+			var gotRequest model.AppDatabaseImportRequest
+			var gotDump string
+			for {
+				part, err := reader.NextPart()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					t.Fatalf("next multipart part: %v", err)
+				}
+				switch part.FormName() {
+				case "request":
+					if err := json.NewDecoder(part).Decode(&gotRequest); err != nil {
+						t.Fatalf("decode request part: %v", err)
+					}
+				case "dump":
+					raw, err := io.ReadAll(part)
+					if err != nil {
+						t.Fatalf("read dump part: %v", err)
+					}
+					gotDump = string(raw)
+				}
+			}
+			if gotRequest.Format != "sql" || !gotRequest.Clean || gotDump != "select 1;" {
+				t.Fatalf("unexpected multipart request=%+v dump=%q", gotRequest, gotDump)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"job":{"id":"dbimport_123","app_id":"app_123","tenant_id":"tenant_123","source_upload_id":"upload_123","format":"sql","status":"pending","retry_count":0,"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"-o", "json",
+		"app", "db", "import", "demo",
+		"--dump", dumpPath,
+		"--format", "sql",
+		"--clean",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app db import: %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "dbimport_123") {
+		t.Fatalf("expected import job in output, got %q", stdout.String())
 	}
 }
 

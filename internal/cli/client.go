@@ -561,6 +561,10 @@ func (c *Client) InspectUploadTemplate(req importUploadRequest, archiveName stri
 }
 
 func (c *Client) doMultipartJSON(relativePath string, requestBody any, archiveName string, archiveBytes []byte, responseBody any) error {
+	return c.doMultipartJSONWithFileField(relativePath, requestBody, "archive", archiveName, archiveBytes, responseBody)
+}
+
+func (c *Client) doMultipartJSONWithFileField(relativePath string, requestBody any, fileFieldName, fileName string, fileBytes []byte, responseBody any) error {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
@@ -571,12 +575,12 @@ func (c *Client) doMultipartJSON(relativePath string, requestBody any, archiveNa
 	if err := writer.WriteField("request", string(requestJSON)); err != nil {
 		return fmt.Errorf("write request field: %w", err)
 	}
-	part, err := writer.CreateFormFile("archive", archiveName)
+	part, err := writer.CreateFormFile(strings.TrimSpace(fileFieldName), fileName)
 	if err != nil {
-		return fmt.Errorf("create archive field: %w", err)
+		return fmt.Errorf("create %s field: %w", strings.TrimSpace(fileFieldName), err)
 	}
-	if _, err := part.Write(archiveBytes); err != nil {
-		return fmt.Errorf("write archive field: %w", err)
+	if _, err := part.Write(fileBytes); err != nil {
+		return fmt.Errorf("write %s field: %w", strings.TrimSpace(fileFieldName), err)
 	}
 	if err := writer.Close(); err != nil {
 		return fmt.Errorf("close multipart writer: %w", err)

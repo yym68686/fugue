@@ -60,6 +60,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	server.StartBackgroundWarmers(ctx)
+	go server.StartBackgroundAppDatabaseImports(ctx)
 
 	httpServer := &http.Server{
 		Addr:              cfg.BindAddr,

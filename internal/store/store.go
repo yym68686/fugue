@@ -242,6 +242,8 @@ func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
 		state.RuntimeGrants = deleteRuntimeAccessGrants(state.RuntimeGrants, id, deletedRuntimeIDs)
 		state.Apps = deleteAppsByTenant(state.Apps, id)
 		state.AppImageTrackings = deleteAppImageTrackingsByTenant(state.AppImageTrackings, id)
+		state.AppDatabaseImportJobs = deleteAppDatabaseImportJobsByTenant(state.AppDatabaseImportJobs, id)
+		state.AppDatabaseAccessGrants = deleteAppDatabaseAccessGrantsByTenant(state.AppDatabaseAccessGrants, id)
 		state.BackingServices = deleteBackingServicesByTenant(state.BackingServices, id)
 		state.ServiceBindings = deleteServiceBindingsByTenant(state.ServiceBindings, id)
 		state.Operations = deleteOperationsByTenant(state.Operations, id)
@@ -2435,6 +2437,8 @@ func (s *Store) PurgeApp(id string) (model.App, error) {
 		state.Apps = append(state.Apps[:index], state.Apps[index+1:]...)
 		deleteAppDomainsByApp(state, id)
 		state.AppImageTrackings = deleteAppImageTrackingsByApp(state.AppImageTrackings, id)
+		state.AppDatabaseImportJobs = deleteAppDatabaseImportJobsByApp(state.AppDatabaseImportJobs, id)
+		state.AppDatabaseAccessGrants = deleteAppDatabaseAccessGrantsByApp(state.AppDatabaseAccessGrants, id)
 		state.ServiceBindings = deleteServiceBindingsByApp(state.ServiceBindings, id)
 		state.BackingServices = deleteOwnedBackingServicesByApp(state.BackingServices, id)
 		state.Operations = deleteOperationsByApp(state.Operations, id)
@@ -3731,6 +3735,12 @@ func ensureDefaults(state *model.State) {
 	if state.RuntimeGrants == nil {
 		state.RuntimeGrants = []model.RuntimeAccessGrant{}
 	}
+	if state.AppDatabaseImportJobs == nil {
+		state.AppDatabaseImportJobs = []model.AppDatabaseImportJob{}
+	}
+	if state.AppDatabaseAccessGrants == nil {
+		state.AppDatabaseAccessGrants = []model.AppDatabaseAccessGrant{}
+	}
 	if state.Apps == nil {
 		state.Apps = []model.App{}
 	}
@@ -4980,6 +4990,8 @@ func deleteProjectFromState(state *model.State, projectID string) (model.Project
 	state.ProjectRuntimeReservations = deleteProjectRuntimeReservationsByProject(state.ProjectRuntimeReservations, projectID)
 	state.Apps = deleteAppsByProject(state.Apps, projectID)
 	state.ServiceBindings = deleteServiceBindingsByAppIDs(state.ServiceBindings, appIDs)
+	state.AppDatabaseImportJobs = deleteAppDatabaseImportJobsByAppIDs(state.AppDatabaseImportJobs, appIDs)
+	state.AppDatabaseAccessGrants = deleteAppDatabaseAccessGrantsByAppIDs(state.AppDatabaseAccessGrants, appIDs)
 	state.BackingServices = deleteBackingServicesByProject(state.BackingServices, projectID)
 	state.Operations = deleteOperationsByAppIDs(state.Operations, appIDs)
 	clearProjectDeleteRequested(state, projectID)

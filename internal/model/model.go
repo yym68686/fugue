@@ -86,6 +86,17 @@ const (
 	APIKeyStatusActive   = "active"
 	APIKeyStatusDisabled = "disabled"
 
+	AppDatabaseAccessModeReadWrite = "read-write"
+	AppDatabaseAccessModeReadOnly  = "read-only"
+
+	AppDatabaseAccessGrantStatusActive  = "active"
+	AppDatabaseAccessGrantStatusRevoked = "revoked"
+	AppDatabaseAccessGrantStatusExpired = "expired"
+
+	AppDatabaseImportFormatAuto   = "auto"
+	AppDatabaseImportFormatSQL    = "sql"
+	AppDatabaseImportFormatCustom = "custom"
+
 	NodeKeyStatusActive  = "active"
 	NodeKeyStatusRevoked = "revoked"
 
@@ -1998,6 +2009,8 @@ type State struct {
 	AppImageTrackings          []AppImageTracking          `json:"app_image_trackings,omitempty"`
 	Runtimes                   []Runtime                   `json:"runtimes"`
 	RuntimeGrants              []RuntimeAccessGrant        `json:"runtime_grants"`
+	AppDatabaseImportJobs      []AppDatabaseImportJob      `json:"app_database_import_jobs,omitempty"`
+	AppDatabaseAccessGrants    []AppDatabaseAccessGrant    `json:"app_database_access_grants,omitempty"`
 	Apps                       []App                       `json:"apps"`
 	AppDomains                 []AppDomain                 `json:"app_domains"`
 	EdgeTLSCertificates        []EdgeTLSCertificate        `json:"edge_tls_certificates,omitempty"`

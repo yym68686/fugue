@@ -80,6 +80,8 @@ type Server struct {
 	appProxyTransport            http.RoundTripper
 	appRequestHTTPClient         *http.Client
 	openAppDatabase              func(driverName, dsn string) (*sql.DB, error)
+	appDatabaseImportRunner      func(context.Context, model.AppDatabaseImportJob) (string, error)
+	dialAppDatabaseTunnel        func(context.Context, string, string) (net.Conn, error)
 	dnsResolver                  appDomainDNSResolver
 	dnsDelegationProbe           dnsDelegationProbeFunc
 	dnsParentNSLookup            dnsParentNSLookupFunc

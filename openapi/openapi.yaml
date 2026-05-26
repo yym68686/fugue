@@ -3542,6 +3542,167 @@ paths:
                 $ref: "#/components/schemas/AppDatabaseQueryResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/database/import:
+    get:
+      operationId: getAppDatabaseImport
+      summary: Get App Database Import Status
+      tags: [Apps]
+      x-fugue-handler: handleGetAppDatabaseImport
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDatabaseImportResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: importAppDatabase
+      summary: Import App Database
+      tags: [Apps]
+      x-fugue-handler: handleImportAppDatabase
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/AppDatabaseImportMultipartRequest"
+            encoding:
+              request:
+                contentType: application/json
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDatabaseImportResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/database/import/retry:
+    post:
+      operationId: retryAppDatabaseImport
+      summary: Retry App Database Import
+      tags: [Apps]
+      x-fugue-handler: handleRetryAppDatabaseImport
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppDatabaseImportRetryRequest"
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDatabaseImportResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/database/access:
+    get:
+      operationId: listAppDatabaseAccessGrants
+      summary: List App Database Access Grants
+      tags: [Apps]
+      x-fugue-handler: handleListAppDatabaseAccessGrants
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDatabaseAccessResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createAppDatabaseAccessGrant
+      summary: Create App Database Access Grant
+      tags: [Apps]
+      x-fugue-handler: handleCreateAppDatabaseAccessGrant
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppDatabaseAccessGrantCreateRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDatabaseAccessGrantCreateResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/database/access/{grant_id}:
+    delete:
+      operationId: revokeAppDatabaseAccessGrant
+      summary: Revoke App Database Access Grant
+      tags: [Apps]
+      x-fugue-handler: handleRevokeAppDatabaseAccessGrant
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: path
+          name: grant_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDatabaseAccessRevokeResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/database/access/{grant_id}/tunnel:
+    get:
+      operationId: connectAppDatabaseAccessTunnel
+      summary: Connect App Database Access Tunnel
+      tags: [Apps]
+      x-fugue-handler: handleAppDatabaseAccessTunnel
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: path
+          name: grant_id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: token
+          required: true
+          schema:
+            type: string
+      responses:
+        '101':
+          description: Switching Protocols
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/request:
     post:
       operationId: requestAppInternalHTTP
@@ -13113,6 +13274,186 @@ components:
           $ref: "#/components/schemas/ManagedPostgresStatus"
         app:
           $ref: "#/components/schemas/App"
+    AppDatabaseImportMultipartRequest:
+      type: object
+      additionalProperties: false
+      required: [request, dump]
+      properties:
+        request:
+          $ref: "#/components/schemas/AppDatabaseImportRequest"
+        dump:
+          description: PostgreSQL dump file to import. Fugue accepts plain SQL, custom-format dumps, and gzip-compressed variants.
+          type: string
+          format: binary
+    AppDatabaseImportRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        label:
+          type: string
+        clean:
+          type: boolean
+        format:
+          type: string
+          enum: [auto, sql, custom]
+    AppDatabaseImportJobLog:
+      type: object
+      additionalProperties: false
+      required: [at, message]
+      properties:
+        at:
+          type: string
+          format: date-time
+        message:
+          type: string
+    AppDatabaseImportJob:
+      type: object
+      additionalProperties: false
+      required:
+        [id, app_id, tenant_id, source_upload_id, status, retry_count, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        app_id:
+          type: string
+        tenant_id:
+          type: string
+        source_upload_id:
+          type: string
+        source_upload_filename:
+          type: string
+        source_upload_sha256:
+          type: string
+        label:
+          type: string
+        format:
+          type: string
+        clean:
+          type: boolean
+        status:
+          type: string
+        result_message:
+          type: string
+        error_message:
+          type: string
+        retry_count:
+          type: integer
+          format: int32
+        retry_of_job_id:
+          type: string
+        requested_by_type:
+          type: string
+        requested_by_id:
+          type: string
+        logs:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppDatabaseImportJobLog"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+    AppDatabaseImportResponse:
+      type: object
+      additionalProperties: false
+      required: [app]
+      properties:
+        app:
+          $ref: "#/components/schemas/App"
+        job:
+          $ref: "#/components/schemas/AppDatabaseImportJob"
+    AppDatabaseImportRetryRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        job_id:
+          type: string
+    AppDatabaseAccessGrant:
+      type: object
+      additionalProperties: false
+      required:
+        [id, app_id, tenant_id, label, mode, status, token_prefix, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        app_id:
+          type: string
+        tenant_id:
+          type: string
+        label:
+          type: string
+        mode:
+          type: string
+        status:
+          type: string
+        token_prefix:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+        requested_by_type:
+          type: string
+        requested_by_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    AppDatabaseAccessGrantCreateRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        label:
+          type: string
+        mode:
+          type: string
+          enum: [read-write]
+        expires_in_minutes:
+          type: integer
+          format: int32
+    AppDatabaseAccessGrantCreateResponse:
+      type: object
+      additionalProperties: false
+      required: [grant, secret]
+      properties:
+        grant:
+          $ref: "#/components/schemas/AppDatabaseAccessGrant"
+        secret:
+          type: string
+    AppDatabaseAccessResponse:
+      type: object
+      additionalProperties: false
+      required: [app, grants]
+      properties:
+        app:
+          $ref: "#/components/schemas/App"
+        grants:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppDatabaseAccessGrant"
+    AppDatabaseAccessRevokeResponse:
+      type: object
+      additionalProperties: false
+      required: [removed]
+      properties:
+        removed:
+          type: boolean
     DNSFullZonePreflight:
       type: object
       additionalProperties: true

@@ -264,6 +264,112 @@ func TestNodeUpdaterTaskLifecycle(t *testing.T) {
 	}
 }
 
+func TestAppDatabaseImportJobAndAccessGrantLifecycle(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Database Import Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Postgres: &model.AppPostgresSpec{
+			Database: "demo",
+			User:     "demo",
+			Password: "secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	upload, err := s.CreateSourceUpload(tenant.ID, "dump.sql", "application/sql", []byte("select 1;"))
+	if err != nil {
+		t.Fatalf("create source upload: %v", err)
+	}
+	job, err := s.CreateAppDatabaseImportJob(model.AppDatabaseImportJob{
+		AppID:                app.ID,
+		TenantID:             tenant.ID,
+		SourceUploadID:       upload.ID,
+		SourceUploadFilename: upload.Filename,
+		SourceUploadSHA256:   upload.SHA256,
+		Format:               model.AppDatabaseImportFormatSQL,
+		Status:               model.OperationStatusPending,
+	})
+	if err != nil {
+		t.Fatalf("create import job: %v", err)
+	}
+	pending, err := s.ListPendingAppDatabaseImportJobs(10)
+	if err != nil {
+		t.Fatalf("list pending jobs: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != job.ID {
+		t.Fatalf("expected pending import job, got %+v", pending)
+	}
+	claimed, err := s.ClaimAppDatabaseImportJob(job.ID)
+	if err != nil {
+		t.Fatalf("claim import job: %v", err)
+	}
+	if claimed.Status != model.OperationStatusRunning || claimed.StartedAt == nil {
+		t.Fatalf("unexpected claimed job: %+v", claimed)
+	}
+	logged, err := s.AppendAppDatabaseImportJobLog(job.ID, "loaded dump")
+	if err != nil {
+		t.Fatalf("append job log: %v", err)
+	}
+	if len(logged.Logs) != 1 || logged.Logs[0].Message != "loaded dump" {
+		t.Fatalf("unexpected job logs: %+v", logged.Logs)
+	}
+	completed, err := s.CompleteAppDatabaseImportJob(job.ID, model.OperationStatusCompleted, "done", "")
+	if err != nil {
+		t.Fatalf("complete import job: %v", err)
+	}
+	if completed.Status != model.OperationStatusCompleted || completed.CompletedAt == nil || completed.ResultMessage != "done" {
+		t.Fatalf("unexpected completed job: %+v", completed)
+	}
+
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	grant, secret, err := s.CreateAppDatabaseAccessGrant(model.AppDatabaseAccessGrant{
+		AppID:     app.ID,
+		TenantID:  tenant.ID,
+		Label:     "legacy-vps",
+		Mode:      model.AppDatabaseAccessModeReadWrite,
+		ExpiresAt: &expiresAt,
+	})
+	if err != nil {
+		t.Fatalf("create access grant: %v", err)
+	}
+	if secret == "" || grant.TokenHash != "" || grant.TokenPrefix == "" {
+		t.Fatalf("expected one-time secret and redacted grant, got grant=%+v secret=%q", grant, secret)
+	}
+	authenticated, err := s.AuthenticateAppDatabaseAccessGrant(app.ID, grant.ID, secret)
+	if err != nil {
+		t.Fatalf("authenticate access grant: %v", err)
+	}
+	if authenticated.ID != grant.ID || authenticated.LastUsedAt == nil {
+		t.Fatalf("unexpected authenticated grant: %+v", authenticated)
+	}
+	removed, err := s.RevokeAppDatabaseAccessGrant(app.ID, grant.ID)
+	if err != nil {
+		t.Fatalf("revoke access grant: %v", err)
+	}
+	if !removed {
+		t.Fatal("expected access grant to be revoked")
+	}
+	if _, err := s.AuthenticateAppDatabaseAccessGrant(app.ID, grant.ID, secret); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected revoked grant conflict, got %v", err)
+	}
+}
+
 func TestCreateNodeUpdateTaskRejectsUnsupportedUpdaterCapabilities(t *testing.T) {
 	t.Parallel()
 

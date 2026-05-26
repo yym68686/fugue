@@ -62,6 +62,93 @@ type ManagedPostgresStatusResponse struct {
 	App    App                   `json:"app"`
 }
 
+type AppDatabaseImportRequest struct {
+	Label  string `json:"label,omitempty"`
+	Clean  bool   `json:"clean,omitempty"`
+	Format string `json:"format,omitempty"`
+}
+
+type AppDatabaseImportMultipartRequest struct {
+	Request AppDatabaseImportRequest `json:"request"`
+	Dump    string                   `json:"dump"`
+}
+
+type AppDatabaseImportJobLog struct {
+	At      time.Time `json:"at"`
+	Message string    `json:"message"`
+}
+
+type AppDatabaseImportJob struct {
+	ID                   string                    `json:"id"`
+	AppID                string                    `json:"app_id"`
+	TenantID             string                    `json:"tenant_id"`
+	SourceUploadID       string                    `json:"source_upload_id"`
+	SourceUploadFilename string                    `json:"source_upload_filename,omitempty"`
+	SourceUploadSHA256   string                    `json:"source_upload_sha256,omitempty"`
+	Label                string                    `json:"label,omitempty"`
+	Format               string                    `json:"format,omitempty"`
+	Clean                bool                      `json:"clean,omitempty"`
+	Status               string                    `json:"status"`
+	ResultMessage        string                    `json:"result_message,omitempty"`
+	ErrorMessage         string                    `json:"error_message,omitempty"`
+	RetryCount           int                       `json:"retry_count"`
+	RetryOfJobID         string                    `json:"retry_of_job_id,omitempty"`
+	RequestedByType      string                    `json:"requested_by_type,omitempty"`
+	RequestedByID        string                    `json:"requested_by_id,omitempty"`
+	Logs                 []AppDatabaseImportJobLog `json:"logs,omitempty"`
+	CreatedAt            time.Time                 `json:"created_at"`
+	UpdatedAt            time.Time                 `json:"updated_at"`
+	StartedAt            *time.Time                `json:"started_at,omitempty"`
+	CompletedAt          *time.Time                `json:"completed_at,omitempty"`
+}
+
+type AppDatabaseImportResponse struct {
+	App App                   `json:"app"`
+	Job *AppDatabaseImportJob `json:"job,omitempty"`
+}
+
+type AppDatabaseImportRetryRequest struct {
+	JobID string `json:"job_id,omitempty"`
+}
+
+type AppDatabaseAccessGrant struct {
+	ID              string     `json:"id"`
+	AppID           string     `json:"app_id"`
+	TenantID        string     `json:"tenant_id"`
+	Label           string     `json:"label,omitempty"`
+	Mode            string     `json:"mode"`
+	Status          string     `json:"status"`
+	TokenPrefix     string     `json:"token_prefix,omitempty"`
+	TokenHash       string     `json:"token_hash,omitempty"`
+	RequestedByType string     `json:"requested_by_type,omitempty"`
+	RequestedByID   string     `json:"requested_by_id,omitempty"`
+	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
+	RevokedAt       *time.Time `json:"revoked_at,omitempty"`
+	LastUsedAt      *time.Time `json:"last_used_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+type AppDatabaseAccessGrantCreateRequest struct {
+	Label            string `json:"label,omitempty"`
+	Mode             string `json:"mode,omitempty"`
+	ExpiresInMinutes int    `json:"expires_in_minutes,omitempty"`
+}
+
+type AppDatabaseAccessGrantCreateResponse struct {
+	Grant  AppDatabaseAccessGrant `json:"grant"`
+	Secret string                 `json:"secret"`
+}
+
+type AppDatabaseAccessResponse struct {
+	App    App                      `json:"app"`
+	Grants []AppDatabaseAccessGrant `json:"grants"`
+}
+
+type AppDatabaseAccessRevokeResponse struct {
+	Removed bool `json:"removed"`
+}
+
 type PlatformFailureDrillRequest struct {
 	DryRun bool   `json:"dry_run,omitempty"`
 	Target string `json:"target,omitempty"`

@@ -184,8 +184,35 @@ fugue app command clear my-app
 fugue app db show my-app
 fugue app db query my-app --sql "select count(*) from gateway_request_logs"
 fugue app db configure my-app --database app --user app
+fugue app db import my-app --dump ./dump.sql.gz --wait
+fugue app db access create my-app --label legacy-vps
+fugue app db access tunnel my-app --grant-id grant_123 --token secret --listen 127.0.0.1:15432
 fugue app db switchover my-app runtime-b
 fugue app db restore plan my-app --source-node node-a --source-pgdata /var/lib/rancher/k3s/storage/pvc-old/pgdata --expected-system-id 7624486791372800022 --table-min-rows users=1
+`),
+	},
+	"fugue app db import": {
+		Long: strings.TrimSpace(`
+Import a PostgreSQL dump into the app-owned managed Postgres database.
+
+The importer stores the dump as a source upload, tracks a dedicated import job, and can be polled with status or retried after a failure.
+`),
+		Example: strings.TrimSpace(`
+fugue app db import my-app --dump ./dump.sql.gz --wait
+fugue app db import status my-app
+fugue app db import retry my-app
+fugue app db import verify my-app
+`),
+	},
+	"fugue app db access": {
+		Long: strings.TrimSpace(`
+Manage short-lived external access grants for the app database and launch a local tunnel that forwards Postgres traffic through Fugue.
+`),
+		Example: strings.TrimSpace(`
+fugue app db access show my-app
+fugue app db access create my-app --label legacy-vps --expires-in-minutes 60
+fugue app db access tunnel my-app --grant-id grant_123 --token secret --listen 127.0.0.1:15432
+fugue app db access revoke my-app grant_123
 `),
 	},
 	"fugue app db query": {
@@ -1224,6 +1251,12 @@ func sampleFlagsForCommand(cmd *cobra.Command) string {
 		return "GET /v1/apps"
 	case "fugue app db configure":
 		return "--database app --user app"
+	case "fugue app db import":
+		return "--dump ./dump.sql.gz --wait"
+	case "fugue app db access create":
+		return "--label legacy-vps --expires-in-minutes 60"
+	case "fugue app db access tunnel":
+		return "--grant-id grant_123 --token secret --listen 127.0.0.1:15432"
 	case "fugue app storage set":
 		return "--size 10Gi --mount /data"
 	case "fugue app failover exec":
