@@ -37,7 +37,9 @@
 {{- $caddyTLSAskURL := default $.Values.edge.caddy.tlsAskURL $caddy.tlsAskURL -}}
 {{- $caddyProxyListenAddr := default $.Values.edge.caddy.proxyListenAddr $caddy.proxyListenAddr -}}
 {{- $caddyDataDir := default $.Values.edge.caddy.dataDir $caddy.dataDir -}}
-{{- $sharedTLSEnabled := default $.Values.edge.caddy.sharedTLS.enabled $caddy.sharedTLS.enabled -}}
+{{- $rootSharedTLS := default dict $.Values.edge.caddy.sharedTLS -}}
+{{- $groupSharedTLS := default dict $caddy.sharedTLS -}}
+{{- $sharedTLSEnabled := default (default true $rootSharedTLS.enabled) $groupSharedTLS.enabled -}}
 {{- $staticTLSSecretName := default (default "" $rootStaticTLS.secretName) $groupStaticTLS.secretName -}}
 {{- $staticTLSMountPath := default (default "/etc/caddy/static-tls" $rootStaticTLS.mountPath) $groupStaticTLS.mountPath -}}
 {{- $staticTLSCertKey := default (default "tls.crt" $rootStaticTLS.certificateKey) $groupStaticTLS.certificateKey -}}
@@ -175,7 +177,7 @@ spec:
               mountPath: {{ $.Values.edge.persistence.mountPath | quote }}
             {{- if $caddyEnabled }}
             - name: caddy-data
-              mountPath: /data
+              mountPath: {{ "/data" | quote }}
             {{- end }}
             {{- if and $caddyEnabled $staticTLSEnabled }}
             - name: caddy-static-tls
@@ -229,7 +231,7 @@ spec:
             - name: caddy-config
               mountPath: /config
             - name: caddy-data
-              mountPath: /data
+              mountPath: {{ "/data" | quote }}
             {{- if and $caddyEnabled $staticTLSEnabled }}
             - name: caddy-static-tls
               mountPath: {{ $staticTLSMountPath | quote }}

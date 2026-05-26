@@ -166,7 +166,7 @@ spec:
               mountPath: {{ .Values.edge.persistence.mountPath | quote }}
             {{- if .Values.edge.caddy.enabled }}
             - name: caddy-data
-              mountPath: /data
+              mountPath: {{ "/data" | quote }}
             {{- end }}
             {{- if $edgeCaddyStaticTLSEnabled }}
             - name: caddy-static-tls
@@ -220,7 +220,7 @@ spec:
             - name: caddy-config
               mountPath: /config
             - name: caddy-data
-              mountPath: /data
+              mountPath: {{ "/data" | quote }}
             {{- if $edgeCaddyStaticTLSEnabled }}
             - name: caddy-static-tls
               mountPath: {{ $edgeCaddyStaticTLSMountPath | quote }}
