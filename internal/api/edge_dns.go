@@ -299,6 +299,45 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		registerEdgeDNSRecordRouteHost(recordRouteHostByName, hostname, targetRecords...)
 	}
 
+	for _, app := range appByID {
+		if app.Route == nil || strings.TrimSpace(app.Route.Hostname) == "" {
+			continue
+		}
+		target := s.primaryCustomDomainTarget(app)
+		if target == "" {
+			continue
+		}
+		hostname := normalizeExternalAppDomain(app.Route.Hostname)
+		if hostname == "" || !edgeDNSTargetWithinZone(target, options.Zone) || protectedNames[target] {
+			continue
+		}
+		binding := s.deriveEdgeRouteBinding(r, app, hostname, model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
+		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
+		dnsBindings := expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups)
+		registerEdgeDNSRouteReadyBindings(routeReadyByHostnameEdgeGroup, dnsBindings)
+		answerIPs := edgeDNSAnswerIPsForBindings(dnsBindings, options, edgeAnswerIPsByGroup)
+		if len(answerIPs) == 0 {
+			continue
+		}
+		latencyProfile := latencyProfiles[hostname]
+		targetRecords := edgeDNSRecordsForTargetWithPolicy(
+			target,
+			answerIPs,
+			edgeDNSPolicyTTL(options.TTL),
+			model.EdgeDNSRecordKindCustomDomainTarget,
+			binding.Status,
+			binding.StatusReason,
+			app.ID,
+			app.TenantID,
+			binding.EdgeGroupID,
+			binding.FallbackEdgeGroupID,
+			edgeDNSAnswerPolicy(options, binding.EdgeGroupID, binding.FallbackEdgeGroupID, answerIPs, edgeCandidateByIP, latencyProfile, options.TTL),
+			edgeDNSCandidatesForAnswerIPs(answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID, latencyProfile),
+		)
+		records = append(records, targetRecords...)
+		registerEdgeDNSRecordRouteHost(recordRouteHostByName, hostname, targetRecords...)
+	}
+
 	for _, domain := range domains {
 		hostname := normalizeExternalAppDomain(domain.Hostname)
 		if hostname == "" {

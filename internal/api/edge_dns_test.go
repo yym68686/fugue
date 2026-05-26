@@ -63,6 +63,32 @@ func TestEdgeDNSBundleDerivesCustomDomainTargetsAndProbe(t *testing.T) {
 	}
 }
 
+func TestEdgeDNSBundlePublishesCustomDomainTargetsBeforeVerification(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	app = deployAppForEdgeRouteTest(t, storeState, app)
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-default-1", defaultEdgeGroupID, "203.0.113.20")
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&answer_ip=203.0.113.10&ttl=120", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	target := server.primaryCustomDomainTarget(app)
+	customTarget := edgeDNSRecordByNameAndType(bundle.Records, target, model.EdgeDNSRecordTypeA)
+	if customTarget == nil {
+		t.Fatalf("expected custom-domain target %s in bundle: %+v", target, bundle.Records)
+	}
+	if customTarget.RecordKind != model.EdgeDNSRecordKindCustomDomainTarget || customTarget.AppID != app.ID {
+		t.Fatalf("unexpected custom-domain DNS record: %+v", customTarget)
+	}
+}
+
 func TestEdgeDNSBundleSupportsGroupFilterAndConditionalFetch(t *testing.T) {
 	t.Parallel()
 
