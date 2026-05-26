@@ -300,6 +300,52 @@ func TestEdgeDNSBundleUsesHealthyPolicyEdgeGroupIPsForOptInTargets(t *testing.T)
 	}
 }
 
+func TestEdgeDNSBundleVerifiedCustomDomainOwnsStableTarget(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	app = deployAppForEdgeRouteTest(t, storeState, app)
+	target := server.primaryCustomDomainTarget(app)
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	if _, err := storeState.PutAppDomain(model.AppDomain{
+		Hostname:    "music.chikai.de",
+		AppID:       app.ID,
+		TenantID:    app.TenantID,
+		Status:      model.AppDomainStatusVerified,
+		TLSStatus:   model.AppDomainTLSStatusReady,
+		RouteTarget: target,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("put verified app domain: %v", err)
+	}
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-us-1", "edge-group-country-us", "15.204.94.71")
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-de-1", "edge-group-country-de", "51.38.126.103")
+	put := performJSONRequest(t, server, http.MethodPut, "/v1/edge/route-policies/music.chikai.de", platformAdminKey, map[string]any{
+		"edge_group_id": "edge-group-country-de",
+		"route_policy":  model.EdgeRoutePolicyEnabled,
+	})
+	if put.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, put.Code, put.Body.String())
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&answer_ip=15.204.94.71", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	customTarget := edgeDNSRecordByNameAndType(bundle.Records, target, model.EdgeDNSRecordTypeA)
+	if customTarget == nil {
+		t.Fatalf("expected verified custom-domain target %s in DNS bundle: %+v", target, bundle.Records)
+	}
+	if strings.Join(customTarget.Values, ",") != "51.38.126.103" {
+		t.Fatalf("expected verified custom-domain target to avoid app pre-verification merge, got %+v", customTarget)
+	}
+}
+
 func TestEdgeDNSBundleDerivesFullZonePlatformAppRecords(t *testing.T) {
 	t.Parallel()
 

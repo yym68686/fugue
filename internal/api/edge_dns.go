@@ -212,6 +212,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	}
 	staticRecords = edgeDNSStaticRecordsWithoutPlatformOverrides(staticRecords, platformOverrideNames)
 	protectedNames := edgeDNSProtectedRecordNames(staticRecords)
+	verifiedCustomDomainTargets := s.edgeDNSVerifiedCustomDomainTargetNames(domains, appByID, options.Zone)
 
 	acmeRecords := edgeDNSACMEChallengeRecords(acmeChallenges)
 
@@ -311,6 +312,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		if hostname == "" ||
 			!edgeDNSTargetWithinZone(hostname, s.appBaseDomain) ||
 			!edgeDNSTargetWithinZone(target, options.Zone) ||
+			verifiedCustomDomainTargets[target] ||
 			protectedNames[target] {
 			continue
 		}
@@ -457,6 +459,33 @@ func (s *Server) edgeDNSPlatformRouteNames(zone string) map[string]bool {
 			continue
 		}
 		out[hostname] = true
+	}
+	return out
+}
+
+func (s *Server) edgeDNSVerifiedCustomDomainTargetNames(domains []model.AppDomain, appByID map[string]model.App, zone string) map[string]bool {
+	zone = normalizeExternalAppDomain(zone)
+	out := make(map[string]bool)
+	for _, domain := range domains {
+		hostname := normalizeExternalAppDomain(domain.Hostname)
+		if hostname == "" || s.isPlatformOwnedDomainBinding(hostname) || !s.managedEdgeCustomDomain(hostname) {
+			continue
+		}
+		app, ok := appByID[strings.TrimSpace(domain.AppID)]
+		if !ok {
+			continue
+		}
+		target := normalizeExternalAppDomain(domain.RouteTarget)
+		if target == "" {
+			target = normalizeExternalAppDomain(s.primaryCustomDomainTarget(app))
+		}
+		if target == "" {
+			continue
+		}
+		if zone != "" && !edgeDNSTargetWithinZone(target, zone) {
+			continue
+		}
+		out[target] = true
 	}
 	return out
 }
