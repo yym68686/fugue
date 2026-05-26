@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -433,11 +434,24 @@ func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.E
 	if warmup == nil {
 		warmup = warmupCaddyTLS
 	}
+	reportHosts := s.customDomainTLSReportHosts(bundle)
 	started := time.Now()
 	var firstErr error
 	for _, host := range hosts {
-		if err := warmup(ctx, dialAddress, host); err != nil && firstErr == nil {
+		err := warmup(ctx, dialAddress, host)
+		if err != nil && firstErr == nil {
 			firstErr = err
+		}
+		if _, ok := reportHosts[host]; ok {
+			status := model.AppDomainTLSStatusReady
+			message := ""
+			if err != nil {
+				status = model.AppDomainTLSStatusPending
+				message = fmt.Sprintf("waiting for edge certificate issuance: %v", err)
+			}
+			if reportErr := s.reportCustomDomainTLSStatus(ctx, host, status, message); reportErr != nil && firstErr == nil {
+				firstErr = reportErr
+			}
 		}
 	}
 	duration := time.Since(started)
@@ -469,6 +483,9 @@ func (s *Service) caddyWarmupHosts(bundle model.EdgeRouteBundle) []string {
 		}
 		seen[host] = struct{}{}
 	}
+	for host := range s.customDomainTLSReportHosts(bundle) {
+		seen[host] = struct{}{}
+	}
 	if len(seen) == 0 {
 		return nil
 	}
@@ -478,6 +495,97 @@ func (s *Service) caddyWarmupHosts(bundle model.EdgeRouteBundle) []string {
 	}
 	sort.Strings(hosts)
 	return hosts
+}
+
+func (s *Service) customDomainTLSReportHosts(bundle model.EdgeRouteBundle) map[string]struct{} {
+	pendingAllowlist := map[string]struct{}{}
+	for _, entry := range bundle.TLSAllowlist {
+		host := normalizeRouteHost(entry.Hostname)
+		if host == "" {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(entry.Status), model.AppDomainStatusVerified) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(entry.TLSStatus), model.AppDomainTLSStatusReady) {
+			continue
+		}
+		pendingAllowlist[host] = struct{}{}
+	}
+	if len(pendingAllowlist) == 0 {
+		return nil
+	}
+	out := map[string]struct{}{}
+	for _, route := range bundle.Routes {
+		if !s.routeAllowedForThisEdge(route) {
+			continue
+		}
+		host := normalizeRouteHost(route.Hostname)
+		if host == "" {
+			continue
+		}
+		if _, ok := pendingAllowlist[host]; !ok {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(route.RouteKind), model.EdgeRouteKindCustomDomain) {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(route.TLSPolicy), model.EdgeRouteTLSPolicyCustomDomain) {
+			continue
+		}
+		out[host] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (s *Service) reportCustomDomainTLSStatus(ctx context.Context, hostname, tlsStatus, tlsLastMessage string) error {
+	hostname = normalizeRouteHost(hostname)
+	tlsStatus = model.NormalizeAppDomainTLSStatus(tlsStatus)
+	if hostname == "" || tlsStatus == "" {
+		return nil
+	}
+	base, err := url.Parse(strings.TrimRight(strings.TrimSpace(s.Config.APIURL), "/"))
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return fmt.Errorf("invalid FUGUE_API_URL")
+	}
+	token := strings.TrimSpace(s.Config.EdgeToken)
+	if token == "" {
+		return fmt.Errorf("FUGUE_EDGE_TOKEN is required to report custom-domain TLS status")
+	}
+	base.Path = strings.TrimRight(base.Path, "/") + "/v1/edge/domains/tls-report"
+	query := base.Query()
+	query.Set("token", token)
+	base.RawQuery = query.Encode()
+
+	payload, err := json.Marshal(map[string]string{
+		"hostname":         hostname,
+		"tls_status":       tlsStatus,
+		"tls_last_message": strings.TrimSpace(tlsLastMessage),
+	})
+	if err != nil {
+		return fmt.Errorf("marshal custom-domain TLS report: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base.String(), bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("build custom-domain TLS report request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("send custom-domain TLS report for %s: %w", hostname, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return statusError{
+			StatusCode: resp.StatusCode,
+			Body:       s.redact(strings.TrimSpace(string(body))),
+		}
+	}
+	return nil
 }
 
 func warmupCaddyTLS(ctx context.Context, dialAddress, host string) error {

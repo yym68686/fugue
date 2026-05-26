@@ -676,6 +676,85 @@ func TestApplyCaddyConfigWarmsPlatformHost(t *testing.T) {
 	}
 }
 
+func TestApplyCaddyConfigWarmsPendingCustomDomainAndReportsReady(t *testing.T) {
+	t.Parallel()
+
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/load" {
+			t.Fatalf("unexpected caddy admin request %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer admin.Close()
+
+	var reports []map[string]string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/edge/domains/tls-report" {
+			t.Fatalf("unexpected API request %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.URL.Query().Get("token"); got != "edge-secret" {
+			t.Fatalf("unexpected edge token %q", got)
+		}
+		var report map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&report); err != nil {
+			t.Fatalf("decode TLS report: %v", err)
+		}
+		reports = append(reports, report)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer api.Close()
+
+	bundle := testBundle("routegen_custom_tls_warmup")
+	custom := bundle.Routes[0]
+	custom.Hostname = "www.customer.com"
+	custom.RouteKind = model.EdgeRouteKindCustomDomain
+	custom.TLSPolicy = model.EdgeRouteTLSPolicyCustomDomain
+	custom.Status = model.EdgeRouteStatusUnavailable
+	custom.StatusReason = "custom domain ownership or TLS verification is pending"
+	custom.UpstreamURL = ""
+	custom.RouteGeneration = "routegen_custom_domain"
+	bundle.Routes = []model.EdgeRouteBinding{custom}
+	bundle.TLSAllowlist = []model.EdgeTLSAllowlistEntry{
+		{
+			Hostname:  "www.customer.com",
+			AppID:     "app_demo",
+			TenantID:  "tenant_demo",
+			Status:    model.AppDomainStatusVerified,
+			TLSStatus: model.AppDomainTLSStatusPending,
+		},
+	}
+
+	var warmups []string
+	service := NewService(config.EdgeConfig{
+		APIURL:               api.URL,
+		EdgeToken:            "edge-secret",
+		EdgeGroupID:          "edge-group-default",
+		ListenAddr:           "127.0.0.1:7832",
+		CaddyEnabled:         true,
+		CaddyAdminURL:        admin.URL,
+		CaddyListenAddr:      ":18443",
+		CaddyTLSMode:         caddyTLSModePublicOnDemand,
+		CaddyProxyListenAddr: ":7833",
+	}, log.New(ioDiscard{}, "", 0))
+	service.caddyWarmup = func(_ context.Context, addr, host string) error {
+		warmups = append(warmups, addr+"|"+host)
+		return nil
+	}
+
+	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
+		t.Fatalf("apply caddy config: %v", err)
+	}
+	if got, want := fmt.Sprint(warmups), "[127.0.0.1:18443|www.customer.com]"; got != want {
+		t.Fatalf("unexpected warmups: got %s want %s", got, want)
+	}
+	if len(reports) != 1 {
+		t.Fatalf("expected one TLS report, got %d reports=%v", len(reports), reports)
+	}
+	if reports[0]["hostname"] != "www.customer.com" || reports[0]["tls_status"] != model.AppDomainTLSStatusReady || reports[0]["tls_last_message"] != "" {
+		t.Fatalf("unexpected TLS report: %+v", reports[0])
+	}
+}
+
 func TestApplyCaddyConfigWarmsHTTPAssetCache(t *testing.T) {
 	t.Parallel()
 
