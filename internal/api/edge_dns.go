@@ -308,7 +308,10 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			continue
 		}
 		hostname := normalizeExternalAppDomain(app.Route.Hostname)
-		if hostname == "" || !edgeDNSTargetWithinZone(target, options.Zone) || protectedNames[target] {
+		if hostname == "" ||
+			!edgeDNSTargetWithinZone(hostname, s.appBaseDomain) ||
+			!edgeDNSTargetWithinZone(target, options.Zone) ||
+			protectedNames[target] {
 			continue
 		}
 		binding := s.deriveEdgeRouteBinding(r, app, hostname, model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)

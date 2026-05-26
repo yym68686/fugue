@@ -89,6 +89,36 @@ func TestEdgeDNSBundlePublishesCustomDomainTargetsBeforeVerification(t *testing.
 	}
 }
 
+func TestEdgeDNSBundleSkipsPreVerificationTargetsForExternalAppRoutes(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	externalRoute := *app.Route
+	externalRoute.Hostname = "music.chikai.de"
+	externalRoute.BaseDomain = "chikai.de"
+	externalRoute.PublicURL = "https://music.chikai.de"
+	app, err := storeState.UpdateAppRoute(app.ID, externalRoute)
+	if err != nil {
+		t.Fatalf("update app route: %v", err)
+	}
+	app = deployAppForEdgeRouteTest(t, storeState, app)
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-default-1", defaultEdgeGroupID, "203.0.113.20")
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&answer_ip=203.0.113.10&ttl=120", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	target := server.primaryCustomDomainTarget(app)
+	if customTarget := edgeDNSRecordByNameAndType(bundle.Records, target, model.EdgeDNSRecordTypeA); customTarget != nil {
+		t.Fatalf("expected external route custom-domain target %s to be skipped, got %+v", target, customTarget)
+	}
+}
+
 func TestEdgeDNSBundleSupportsGroupFilterAndConditionalFetch(t *testing.T) {
 	t.Parallel()
 
