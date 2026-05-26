@@ -2463,6 +2463,58 @@ use_local_control_plane_automation_bundle_from_dir() {
   return 0
 }
 
+restore_local_control_plane_automation_bundle_from_secret() {
+  local bundle_dir="$1"
+  local private_key_b64=""
+  local known_hosts_b64=""
+  local hosts_env_b64=""
+  local tmp_dir=""
+
+  if [[ -z "${FUGUE_NAMESPACE:-}" || -z "${FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME:-}" ]]; then
+    return 1
+  fi
+
+  if ! private_key_b64="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get secret "${FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME}" -o go-template='{{index .data "ssh-private-key"}}' 2>/dev/null | tr -d '\r\n')"; then
+    return 1
+  fi
+  if ! known_hosts_b64="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get secret "${FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME}" -o go-template='{{index .data "ssh-known-hosts"}}' 2>/dev/null | tr -d '\r\n')"; then
+    return 1
+  fi
+  if ! hosts_env_b64="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get secret "${FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME}" -o go-template='{{index .data "hosts.env"}}' 2>/dev/null | tr -d '\r\n')"; then
+    return 1
+  fi
+
+  if [[ -z "${private_key_b64}" || -z "${known_hosts_b64}" || -z "${hosts_env_b64}" ]]; then
+    return 1
+  fi
+
+  tmp_dir="$(mktemp -d)" || return 1
+  if ! printf '%s' "${private_key_b64}" | base64 --decode >"${tmp_dir}/id_ed25519"; then
+    rm -rf "${tmp_dir}"
+    return 1
+  fi
+  if ! printf '%s' "${known_hosts_b64}" | base64 --decode >"${tmp_dir}/known_hosts"; then
+    rm -rf "${tmp_dir}"
+    return 1
+  fi
+  if ! printf '%s' "${hosts_env_b64}" | base64 --decode >"${tmp_dir}/hosts.env"; then
+    rm -rf "${tmp_dir}"
+    return 1
+  fi
+
+  mkdir -p "${bundle_dir}"
+  chmod 0700 "${bundle_dir}" 2>/dev/null || true
+  mv "${tmp_dir}/id_ed25519" "${bundle_dir}/id_ed25519"
+  mv "${tmp_dir}/known_hosts" "${bundle_dir}/known_hosts"
+  mv "${tmp_dir}/hosts.env" "${bundle_dir}/hosts.env"
+  rm -rf "${tmp_dir}"
+  chmod 0600 "${bundle_dir}/id_ed25519"
+  chmod 0644 "${bundle_dir}/known_hosts"
+  chmod 0644 "${bundle_dir}/hosts.env"
+  log_stderr "recovered control-plane automation SSH bundle from ${FUGUE_NAMESPACE}/${FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME}"
+  return 0
+}
+
 prepare_control_plane_automation_ssh() {
   if [[ -n "${FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE:-}" && -r "${FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE}" ]] && \
      [[ -n "${FUGUE_CONTROL_PLANE_SSH_KEY_FILE:-}" && -r "${FUGUE_CONTROL_PLANE_SSH_KEY_FILE}" ]] && \
@@ -2475,6 +2527,15 @@ prepare_control_plane_automation_ssh() {
     return
   fi
   if [[ "${LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR}" != "${LOCAL_CONTROL_PLANE_AUTOMATION_DIR}" ]] && \
+     use_local_control_plane_automation_bundle_from_dir "${LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR}"; then
+    return
+  fi
+  if restore_local_control_plane_automation_bundle_from_secret "${LOCAL_CONTROL_PLANE_AUTOMATION_DIR}" && \
+     use_local_control_plane_automation_bundle_from_dir "${LOCAL_CONTROL_PLANE_AUTOMATION_DIR}"; then
+    return
+  fi
+  if [[ "${LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR}" != "${LOCAL_CONTROL_PLANE_AUTOMATION_DIR}" ]] && \
+     restore_local_control_plane_automation_bundle_from_secret "${LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR}" && \
      use_local_control_plane_automation_bundle_from_dir "${LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR}"; then
     return
   fi
