@@ -1339,7 +1339,7 @@ dns:
 		`name: https-canary`,
 		`hostPort: 443`,
 		`path: "/var/lib/fugue/edge/caddy-data"`,
-		`mountPath: /data`,
+		`mountPath: "/data"`,
 		`name: FUGUE_EDGE_CADDY_DATA_DIR`,
 		`value: "/data/caddy"`,
 		`name: FUGUE_EDGE_CADDY_SHARED_TLS_ENABLED`,
