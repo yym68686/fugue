@@ -659,11 +659,26 @@ func (s *Service) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "domain is not in the current route bundle", http.StatusForbidden)
 		return
 	}
-	if route.Status != model.EdgeRouteStatusActive {
+	if !s.routeCanIssueTLS(route) {
 		http.Error(w, "route is not active", http.StatusForbidden)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Service) routeCanIssueTLS(route model.EdgeRouteBinding) bool {
+	if strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive) {
+		return true
+	}
+	// Custom domains need a certificate before their route can become active.
+	// Allow on-demand TLS permission for those routes while they are still
+	// warming up so certificate issuance can complete and the readiness report
+	// can advance the route to active.
+	if strings.EqualFold(strings.TrimSpace(route.RouteKind), model.EdgeRouteKindCustomDomain) &&
+		!strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusDisabled) {
+		return true
+	}
+	return false
 }
 
 func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {

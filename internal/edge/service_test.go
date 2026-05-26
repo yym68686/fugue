@@ -1187,6 +1187,16 @@ func TestTLSAskOnlyAllowsActiveBundleHosts(t *testing.T) {
 	t.Parallel()
 
 	bundle := testBundle("routegen_tls_ask")
+	custom := bundle.Routes[0]
+	custom.Hostname = "pending.customer.com"
+	custom.RouteKind = model.EdgeRouteKindCustomDomain
+	custom.TLSPolicy = model.EdgeRouteTLSPolicyCustomDomain
+	custom.Status = model.EdgeRouteStatusUnavailable
+	custom.StatusReason = "custom domain ownership or TLS verification is pending"
+	custom.UpstreamURL = ""
+	custom.RouteGeneration = "routegen_tls_ask_custom"
+	bundle.Routes = append(bundle.Routes, custom)
+
 	disabled := bundle.Routes[0]
 	disabled.Hostname = "disabled.fugue.pro"
 	disabled.Status = model.EdgeRouteStatusDisabled
@@ -1205,6 +1215,7 @@ func TestTLSAskOnlyAllowsActiveBundleHosts(t *testing.T) {
 		code int
 	}{
 		{name: "active", host: "demo.fugue.pro", code: http.StatusOK},
+		{name: "pending custom domain", host: "pending.customer.com", code: http.StatusOK},
 		{name: "unknown", host: "unknown.fugue.pro", code: http.StatusForbidden},
 		{name: "disabled", host: "disabled.fugue.pro", code: http.StatusForbidden},
 		{name: "missing", host: "", code: http.StatusBadRequest},
