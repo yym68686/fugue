@@ -1237,6 +1237,18 @@ const (
 )
 
 const (
+	AppDomainDNSStatusPending = "pending"
+	AppDomainDNSStatusReady   = "ready"
+	AppDomainDNSStatusError   = "error"
+)
+
+const (
+	AppDomainDNSRecordKindNone      = "none"
+	AppDomainDNSRecordKindCNAME     = "cname"
+	AppDomainDNSRecordKindFlattened = "flattened"
+)
+
+const (
 	AppDomainTLSStatusPending = "pending"
 	AppDomainTLSStatusReady   = "ready"
 	AppDomainTLSStatusError   = "error"
@@ -1255,23 +1267,69 @@ func NormalizeAppDomainTLSStatus(status string) string {
 	}
 }
 
+func NormalizeAppDomainDNSStatus(status string) string {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case AppDomainDNSStatusPending:
+		return AppDomainDNSStatusPending
+	case AppDomainDNSStatusReady:
+		return AppDomainDNSStatusReady
+	case AppDomainDNSStatusError:
+		return AppDomainDNSStatusError
+	default:
+		return ""
+	}
+}
+
+func NormalizeAppDomainDNSRecordKind(kind string) string {
+	switch strings.TrimSpace(strings.ToLower(kind)) {
+	case AppDomainDNSRecordKindCNAME:
+		return AppDomainDNSRecordKindCNAME
+	case AppDomainDNSRecordKindFlattened:
+		return AppDomainDNSRecordKindFlattened
+	case AppDomainDNSRecordKindNone:
+		return AppDomainDNSRecordKindNone
+	default:
+		return ""
+	}
+}
+
 type AppDomain struct {
 	Hostname             string     `json:"hostname"`
 	AppID                string     `json:"app_id,omitempty"`
 	TenantID             string     `json:"tenant_id,omitempty"`
 	Status               string     `json:"status"`
+	DNSStatus            string     `json:"dns_status,omitempty"`
+	DNSRecordKind        string     `json:"dns_record_kind,omitempty"`
 	TLSStatus            string     `json:"tls_status,omitempty"`
 	VerificationTXTName  string     `json:"verification_txt_name,omitempty"`
 	VerificationTXTValue string     `json:"verification_txt_value,omitempty"`
 	RouteTarget          string     `json:"route_target,omitempty"`
 	LastMessage          string     `json:"last_message,omitempty"`
+	DNSLastMessage       string     `json:"dns_last_message,omitempty"`
 	TLSLastMessage       string     `json:"tls_last_message,omitempty"`
 	LastCheckedAt        *time.Time `json:"last_checked_at,omitempty"`
+	DNSLastCheckedAt     *time.Time `json:"dns_last_checked_at,omitempty"`
 	VerifiedAt           *time.Time `json:"verified_at,omitempty"`
 	TLSLastCheckedAt     *time.Time `json:"tls_last_checked_at,omitempty"`
 	TLSReadyAt           *time.Time `json:"tls_ready_at,omitempty"`
 	CreatedAt            time.Time  `json:"created_at"`
 	UpdatedAt            time.Time  `json:"updated_at"`
+}
+
+type EdgeTLSCertificate struct {
+	Hostname              string     `json:"hostname"`
+	TenantID              string     `json:"tenant_id,omitempty"`
+	AppID                 string     `json:"app_id,omitempty"`
+	CertificatePEM        string     `json:"certificate_pem,omitempty"`
+	PrivateKeyPEM         string     `json:"private_key_pem,omitempty"`
+	MetadataJSON          string     `json:"metadata_json,omitempty"`
+	IssuerStorage         string     `json:"issuer_storage,omitempty"`
+	CertificateSHA256     string     `json:"certificate_sha256,omitempty"`
+	NotAfter              *time.Time `json:"not_after,omitempty"`
+	UploadedByEdgeID      string     `json:"uploaded_by_edge_id,omitempty"`
+	UploadedByEdgeGroupID string     `json:"uploaded_by_edge_group_id,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
 }
 
 type AppSpec struct {
@@ -1942,6 +2000,7 @@ type State struct {
 	RuntimeGrants              []RuntimeAccessGrant        `json:"runtime_grants"`
 	Apps                       []App                       `json:"apps"`
 	AppDomains                 []AppDomain                 `json:"app_domains"`
+	EdgeTLSCertificates        []EdgeTLSCertificate        `json:"edge_tls_certificates,omitempty"`
 	EdgeGroups                 []EdgeGroup                 `json:"edge_groups,omitempty"`
 	EdgeNodes                  []EdgeNode                  `json:"edge_nodes,omitempty"`
 	DNSNodes                   []DNSNode                   `json:"dns_nodes,omitempty"`

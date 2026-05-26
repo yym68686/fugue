@@ -660,13 +660,13 @@ func TestApplyCaddyConfigWarmsPlatformHost(t *testing.T) {
 	if loads != 1 {
 		t.Fatalf("expected one caddy config load, got %d", loads)
 	}
-	if got, want := fmt.Sprint(warmups), "[127.0.0.1:18443|demo.fugue.pro 127.0.0.1:18443|www.fugue.pro]"; got != want {
+	if got, want := fmt.Sprint(warmups), "[127.0.0.1:18443|demo.fugue.pro 127.0.0.1:18443|www.customer.com 127.0.0.1:18443|www.fugue.pro]"; got != want {
 		t.Fatalf("unexpected warmups: got %s want %s", got, want)
 	}
 	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
 		t.Fatalf("apply unchanged caddy config: %v", err)
 	}
-	if loads != 1 || len(warmups) != 2 {
+	if loads != 1 || len(warmups) != 3 {
 		t.Fatalf("expected unchanged config not to reload or rewarm, got loads=%d warmups=%v", loads, warmups)
 	}
 	metrics := renderMetrics(t, service)
@@ -687,9 +687,17 @@ func TestApplyCaddyConfigWarmsPendingCustomDomainAndReportsReady(t *testing.T) {
 	}))
 	defer admin.Close()
 
+	dataDir := t.TempDir()
+	writeLocalCaddyTLSBundle(t, dataDir, "www.customer.com", "local-cert-pem", "local-key-pem", `{"issuer":"test"}`)
+
 	var reports []map[string]string
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/edge/domains/tls-report" {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/edge/domains/www.customer.com/tls-bundle":
+			w.WriteHeader(http.StatusNotFound)
+			return
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/edge/domains/tls-report":
+		default:
 			t.Fatalf("unexpected API request %s %s", r.Method, r.URL.Path)
 		}
 		if got := r.URL.Query().Get("token"); got != "edge-secret" {
@@ -726,15 +734,17 @@ func TestApplyCaddyConfigWarmsPendingCustomDomainAndReportsReady(t *testing.T) {
 
 	var warmups []string
 	service := NewService(config.EdgeConfig{
-		APIURL:               api.URL,
-		EdgeToken:            "edge-secret",
-		EdgeGroupID:          "edge-group-default",
-		ListenAddr:           "127.0.0.1:7832",
-		CaddyEnabled:         true,
-		CaddyAdminURL:        admin.URL,
-		CaddyListenAddr:      ":18443",
-		CaddyTLSMode:         caddyTLSModePublicOnDemand,
-		CaddyProxyListenAddr: ":7833",
+		APIURL:                api.URL,
+		EdgeToken:             "edge-secret",
+		EdgeGroupID:           "edge-group-default",
+		ListenAddr:            "127.0.0.1:7832",
+		CaddyEnabled:          true,
+		CaddyAdminURL:         admin.URL,
+		CaddyListenAddr:       ":18443",
+		CaddyTLSMode:          caddyTLSModePublicOnDemand,
+		CaddyProxyListenAddr:  ":7833",
+		CaddyDataDir:          dataDir,
+		CaddySharedTLSEnabled: true,
 	}, log.New(ioDiscard{}, "", 0))
 	service.caddyWarmup = func(_ context.Context, addr, host string) error {
 		warmups = append(warmups, addr+"|"+host)
@@ -752,6 +762,97 @@ func TestApplyCaddyConfigWarmsPendingCustomDomainAndReportsReady(t *testing.T) {
 	}
 	if reports[0]["hostname"] != "www.customer.com" || reports[0]["tls_status"] != model.AppDomainTLSStatusReady || reports[0]["tls_last_message"] != "" {
 		t.Fatalf("unexpected TLS report: %+v", reports[0])
+	}
+	if reports[0]["certificate_pem"] != "local-cert-pem" || reports[0]["private_key_pem"] != "local-key-pem" {
+		t.Fatalf("expected TLS report to include local Caddy certificate bundle, got %+v", reports[0])
+	}
+	if reports[0]["issuer_storage"] != defaultCaddyIssuerStorage {
+		t.Fatalf("expected TLS report issuer storage %q, got %+v", defaultCaddyIssuerStorage, reports[0])
+	}
+}
+
+func TestApplyCaddyConfigInstallsSharedCustomDomainCertificate(t *testing.T) {
+	t.Parallel()
+
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/load" {
+			t.Fatalf("unexpected caddy admin request %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer admin.Close()
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/edge/domains/www.customer.com/tls-bundle" {
+			t.Fatalf("unexpected API request %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.URL.Query().Get("token"); got != "edge-secret" {
+			t.Fatalf("unexpected edge token %q", got)
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"certificate": caddyTLSCertificateBundle{
+				CertificatePEM: "shared-cert-pem",
+				PrivateKeyPEM:  "shared-key-pem",
+				MetadataJSON:   `{"issuer":"shared"}`,
+				IssuerStorage:  defaultCaddyIssuerStorage,
+			},
+		}); err != nil {
+			t.Fatalf("encode shared TLS bundle: %v", err)
+		}
+	}))
+	defer api.Close()
+
+	bundle := testBundle("routegen_custom_tls_sync")
+	custom := bundle.Routes[0]
+	custom.Hostname = "www.customer.com"
+	custom.RouteKind = model.EdgeRouteKindCustomDomain
+	custom.TLSPolicy = model.EdgeRouteTLSPolicyCustomDomain
+	custom.RouteGeneration = "routegen_custom_domain"
+	bundle.Routes = []model.EdgeRouteBinding{custom}
+	bundle.TLSAllowlist = nil
+
+	dataDir := t.TempDir()
+	var warmups []string
+	service := NewService(config.EdgeConfig{
+		APIURL:                api.URL,
+		EdgeToken:             "edge-secret",
+		EdgeGroupID:           "edge-group-default",
+		ListenAddr:            "127.0.0.1:7832",
+		CaddyEnabled:          true,
+		CaddyAdminURL:         admin.URL,
+		CaddyListenAddr:       ":18443",
+		CaddyTLSMode:          caddyTLSModePublicOnDemand,
+		CaddyProxyListenAddr:  ":7833",
+		CaddyDataDir:          dataDir,
+		CaddySharedTLSEnabled: true,
+	}, log.New(ioDiscard{}, "", 0))
+	service.caddyWarmup = func(_ context.Context, addr, host string) error {
+		warmups = append(warmups, addr+"|"+host)
+		return nil
+	}
+
+	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
+		t.Fatalf("apply caddy config: %v", err)
+	}
+	if got, want := fmt.Sprint(warmups), "[127.0.0.1:18443|www.customer.com]"; got != want {
+		t.Fatalf("unexpected warmups: got %s want %s", got, want)
+	}
+	hostDir := filepath.Join(dataDir, "certificates", defaultCaddyIssuerStorage, "www.customer.com")
+	for _, item := range []struct {
+		Path string
+		Want string
+	}{
+		{Path: filepath.Join(hostDir, "www.customer.com.crt"), Want: "shared-cert-pem\n"},
+		{Path: filepath.Join(hostDir, "www.customer.com.key"), Want: "shared-key-pem\n"},
+		{Path: filepath.Join(hostDir, "www.customer.com.json"), Want: `{"issuer":"shared"}` + "\n"},
+	} {
+		data, err := os.ReadFile(item.Path)
+		if err != nil {
+			t.Fatalf("read installed cert file %s: %v", item.Path, err)
+		}
+		if string(data) != item.Want {
+			t.Fatalf("unexpected installed file %s content %q", item.Path, string(data))
+		}
 	}
 }
 
@@ -2032,6 +2133,23 @@ func testBundle(version string) model.EdgeRouteBundle {
 				Status:   model.AppDomainStatusVerified,
 			},
 		},
+	}
+}
+
+func writeLocalCaddyTLSBundle(t *testing.T, dataDir, hostname, certPEM, keyPEM, metadataJSON string) {
+	t.Helper()
+	hostDir := filepath.Join(dataDir, "certificates", defaultCaddyIssuerStorage, hostname)
+	if err := os.MkdirAll(hostDir, 0o700); err != nil {
+		t.Fatalf("create local caddy cert dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hostDir, hostname+".crt"), []byte(certPEM+"\n"), 0o644); err != nil {
+		t.Fatalf("write local caddy cert: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hostDir, hostname+".key"), []byte(keyPEM+"\n"), 0o600); err != nil {
+		t.Fatalf("write local caddy key: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hostDir, hostname+".json"), []byte(metadataJSON+"\n"), 0o644); err != nil {
+		t.Fatalf("write local caddy metadata: %v", err)
 	}
 }
 

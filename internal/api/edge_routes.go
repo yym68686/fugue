@@ -460,12 +460,12 @@ func applyCustomDomainReadiness(binding model.EdgeRouteBinding, domain model.App
 	if binding.RouteKind != model.EdgeRouteKindCustomDomain {
 		return binding
 	}
-	if domain.Status == model.AppDomainStatusVerified && domain.TLSStatus == model.AppDomainTLSStatusReady {
+	if domain.Status == model.AppDomainStatusVerified && domain.DNSStatus == model.AppDomainDNSStatusReady && domain.TLSStatus == model.AppDomainTLSStatusReady {
 		return binding
 	}
 	binding.RoutePolicy = model.EdgeRoutePolicyEnabled
 	binding.Status = model.EdgeRouteStatusUnavailable
-	binding.StatusReason = "custom domain ownership or TLS verification is pending"
+	binding.StatusReason = "custom domain ownership, DNS, or TLS verification is pending"
 	binding.UpstreamURL = ""
 	binding.RouteGeneration = edgeRouteGeneration(binding)
 	return binding

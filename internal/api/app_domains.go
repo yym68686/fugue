@@ -3,7 +3,10 @@ package api
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -42,6 +45,53 @@ type edgeDomainTLSReportRequest struct {
 	Hostname       string `json:"hostname"`
 	TLSStatus      string `json:"tls_status"`
 	TLSLastMessage string `json:"tls_last_message,omitempty"`
+	CertificatePEM string `json:"certificate_pem,omitempty"`
+	PrivateKeyPEM  string `json:"private_key_pem,omitempty"`
+	MetadataJSON   string `json:"metadata_json,omitempty"`
+	IssuerStorage  string `json:"issuer_storage,omitempty"`
+}
+
+type edgeTLSCertificateBundleRequest struct {
+	CertificatePEM string `json:"certificate_pem"`
+	PrivateKeyPEM  string `json:"private_key_pem"`
+	MetadataJSON   string `json:"metadata_json,omitempty"`
+	IssuerStorage  string `json:"issuer_storage,omitempty"`
+}
+
+type appDomainDNSObservation struct {
+	Verified      bool     `json:"verified"`
+	RecordKind    string   `json:"record_kind,omitempty"`
+	CNAME         string   `json:"cname,omitempty"`
+	MatchedTarget string   `json:"matched_target,omitempty"`
+	HostIPs       []string `json:"host_ips,omitempty"`
+	TargetIPs     []string `json:"target_ips,omitempty"`
+	Message       string   `json:"message,omitempty"`
+}
+
+type appDomainDiagnosticCheck struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Message    string `json:"message,omitempty"`
+	Repairable bool   `json:"repairable,omitempty"`
+}
+
+type appDomainTLSCertificateSummary struct {
+	Present               bool       `json:"present"`
+	CertificateSHA256     string     `json:"certificate_sha256,omitempty"`
+	NotAfter              *time.Time `json:"not_after,omitempty"`
+	IssuerStorage         string     `json:"issuer_storage,omitempty"`
+	UploadedByEdgeID      string     `json:"uploaded_by_edge_id,omitempty"`
+	UploadedByEdgeGroupID string     `json:"uploaded_by_edge_group_id,omitempty"`
+	UpdatedAt             *time.Time `json:"updated_at,omitempty"`
+}
+
+type appDomainDiagnosis struct {
+	Domain               model.AppDomain                `json:"domain"`
+	DNSTargets           []string                       `json:"dns_targets"`
+	DNSObservation       appDomainDNSObservation        `json:"dns_observation"`
+	SharedTLSCertificate appDomainTLSCertificateSummary `json:"shared_tls_certificate"`
+	Checks               []appDomainDiagnosticCheck     `json:"checks"`
+	RecommendedActions   []string                       `json:"recommended_actions,omitempty"`
 }
 
 func (s *Server) handleListAppDomains(w http.ResponseWriter, r *http.Request) {
@@ -210,6 +260,106 @@ func (s *Server) handleVerifyAppDomain(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleGetAppDomainDiagnosis(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
+	if !allowed {
+		return
+	}
+	hostname := normalizeExternalAppDomain(r.URL.Query().Get("hostname"))
+	if hostname == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "hostname is required")
+		return
+	}
+	domain, err := s.store.GetAppDomain(hostname)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if domain.AppID != app.ID {
+		s.writeStoreError(w, store.ErrNotFound)
+		return
+	}
+	diagnosis := s.buildAppDomainDiagnosis(r.Context(), app, domain)
+	s.appendAudit(principal, "app.domain.diagnose", "app", app.ID, app.TenantID, map[string]string{"hostname": domain.Hostname})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"diagnosis": diagnosis})
+}
+
+func (s *Server) handleRepairAppDomain(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("app.write") {
+		httpx.WriteError(w, http.StatusForbidden, "missing app.write scope")
+		return
+	}
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
+	if !allowed {
+		return
+	}
+	var req struct {
+		Hostname string `json:"hostname"`
+	}
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	hostname := normalizeExternalAppDomain(req.Hostname)
+	if hostname == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "hostname is required")
+		return
+	}
+	domain, err := s.store.GetAppDomain(hostname)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if domain.AppID != app.ID {
+		s.writeStoreError(w, store.ErrNotFound)
+		return
+	}
+
+	domain, verified, err := s.verifyAndPersistAppDomain(r.Context(), app, domain)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if verified && domain.Status == model.AppDomainStatusVerified {
+		now := time.Now().UTC()
+		if _, certErr := s.store.GetEdgeTLSCertificate(domain.Hostname); certErr == nil {
+			domain.TLSStatus = model.AppDomainTLSStatusReady
+			domain.TLSLastMessage = ""
+			domain.TLSLastCheckedAt = &now
+			domain.TLSReadyAt = &now
+			if stored, putErr := s.store.PutAppDomain(domain); putErr == nil {
+				domain = stored
+			} else {
+				s.writeStoreError(w, putErr)
+				return
+			}
+		} else if certErr == store.ErrNotFound {
+			domain.TLSStatus = model.AppDomainTLSStatusPending
+			domain.TLSLastMessage = "waiting for shared edge certificate bundle"
+			domain.TLSLastCheckedAt = &now
+			domain.TLSReadyAt = nil
+			if stored, putErr := s.store.PutAppDomain(domain); putErr == nil {
+				domain = stored
+			} else {
+				s.writeStoreError(w, putErr)
+				return
+			}
+		} else {
+			s.writeStoreError(w, certErr)
+			return
+		}
+	}
+
+	diagnosis := s.buildAppDomainDiagnosis(r.Context(), app, domain)
+	s.appendAudit(principal, "app.domain.repair", "app", app.ID, app.TenantID, map[string]string{"hostname": domain.Hostname})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"domain":    domain,
+		"diagnosis": diagnosis,
+	})
+}
+
 func (s *Server) handleDeleteAppDomain(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	if !principal.IsPlatformAdmin() && !principal.HasScope("app.write") {
@@ -252,7 +402,7 @@ func (s *Server) handleEdgeTLSAsk(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "domain lookup failed", http.StatusInternalServerError)
 		return
 	}
-	if domain.Status == model.AppDomainStatusVerified {
+	if domain.Status == model.AppDomainStatusVerified && domain.DNSStatus == model.AppDomainDNSStatusReady {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 		return
@@ -301,8 +451,94 @@ func (s *Server) handleEdgeDomains(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"domains": filtered})
 }
 
-func (s *Server) handleEdgeDomainTLSReport(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleGetEdgeTLSCertificateBundle(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeEdgeToken(w, r) {
+		return
+	}
+	hostname := normalizeExternalAppDomain(r.PathValue("hostname"))
+	if hostname == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "hostname is required")
+		return
+	}
+	if !s.managedEdgeCustomDomain(hostname) {
+		httpx.WriteError(w, http.StatusBadRequest, "hostname is not a managed edge custom domain")
+		return
+	}
+	domain, err := s.store.GetAppDomain(hostname)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if domain.Status != model.AppDomainStatusVerified {
+		httpx.WriteError(w, http.StatusConflict, "domain is not verified")
+		return
+	}
+	cert, err := s.store.GetEdgeTLSCertificate(hostname)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"certificate": cert})
+}
+
+func (s *Server) handlePutEdgeTLSCertificateBundle(w http.ResponseWriter, r *http.Request) {
+	authContext, ok := s.authorizeEdgeRequest(w, r)
+	if !ok {
+		return
+	}
+	hostname := normalizeExternalAppDomain(r.PathValue("hostname"))
+	if hostname == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "hostname is required")
+		return
+	}
+	if !s.managedEdgeCustomDomain(hostname) {
+		httpx.WriteError(w, http.StatusBadRequest, "hostname is not a managed edge custom domain")
+		return
+	}
+	var req edgeTLSCertificateBundleRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	domain, err := s.store.GetAppDomain(hostname)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if domain.Status != model.AppDomainStatusVerified {
+		httpx.WriteError(w, http.StatusConflict, "domain is not verified")
+		return
+	}
+	cert, err := s.validateEdgeTLSCertificateBundle(hostname, domain, authContext, req)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	cert, err = s.store.PutEdgeTLSCertificate(cert)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+
+	now := time.Now().UTC()
+	domain.TLSStatus = model.AppDomainTLSStatusReady
+	domain.TLSLastMessage = ""
+	domain.TLSLastCheckedAt = &now
+	domain.TLSReadyAt = &now
+	domain, err = s.store.PutAppDomain(domain)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"certificate": cert,
+		"domain":      domain,
+	})
+}
+
+func (s *Server) handleEdgeDomainTLSReport(w http.ResponseWriter, r *http.Request) {
+	authContext, ok := s.authorizeEdgeRequest(w, r)
+	if !ok {
 		return
 	}
 
@@ -338,6 +574,34 @@ func (s *Server) handleEdgeDomainTLSReport(w http.ResponseWriter, r *http.Reques
 	}
 
 	now := time.Now().UTC()
+	if tlsStatus == model.AppDomainTLSStatusReady {
+		if strings.TrimSpace(req.CertificatePEM) != "" || strings.TrimSpace(req.PrivateKeyPEM) != "" {
+			cert, certErr := s.validateEdgeTLSCertificateBundle(hostname, domain, authContext, edgeTLSCertificateBundleRequest{
+				CertificatePEM: req.CertificatePEM,
+				PrivateKeyPEM:  req.PrivateKeyPEM,
+				MetadataJSON:   req.MetadataJSON,
+				IssuerStorage:  req.IssuerStorage,
+			})
+			if certErr != nil {
+				httpx.WriteError(w, http.StatusBadRequest, certErr.Error())
+				return
+			}
+			if _, certErr = s.store.PutEdgeTLSCertificate(cert); certErr != nil {
+				s.writeStoreError(w, certErr)
+				return
+			}
+		}
+		if _, certErr := s.store.GetEdgeTLSCertificate(hostname); certErr != nil {
+			if certErr != store.ErrNotFound {
+				s.writeStoreError(w, certErr)
+				return
+			}
+			tlsStatus = model.AppDomainTLSStatusPending
+			if strings.TrimSpace(req.TLSLastMessage) == "" {
+				req.TLSLastMessage = "waiting for shared edge certificate bundle"
+			}
+		}
+	}
 	domain.TLSStatus = tlsStatus
 	domain.TLSLastMessage = strings.TrimSpace(req.TLSLastMessage)
 	domain.TLSLastCheckedAt = &now
@@ -466,14 +730,19 @@ func (s *Server) evaluateAppDomainVerification(ctx context.Context, app model.Ap
 	updated.VerificationTXTName = ""
 	updated.VerificationTXTValue = ""
 	updated.LastCheckedAt = &now
+	updated.DNSLastCheckedAt = &now
 
-	verified, message, err := s.customDomainVerificationResult(ctx, app, updated, legacyTarget)
+	observation, err := s.inspectCustomDomainDNS(ctx, updated.Hostname, s.customDomainTargets(app, legacyTarget))
 	if err != nil {
 		return domain, false, err
 	}
+	verified := observation.Verified
 	if verified {
 		updated.Status = model.AppDomainStatusVerified
 		updated.LastMessage = ""
+		updated.DNSStatus = model.AppDomainDNSStatusReady
+		updated.DNSRecordKind = observation.RecordKind
+		updated.DNSLastMessage = ""
 		if updated.VerifiedAt == nil {
 			updated.VerifiedAt = &now
 		}
@@ -487,7 +756,10 @@ func (s *Server) evaluateAppDomainVerification(ctx context.Context, app model.Ap
 		if updated.Status != model.AppDomainStatusVerified {
 			updated.Status = model.AppDomainStatusPending
 		}
-		updated.LastMessage = message
+		updated.DNSStatus = model.AppDomainDNSStatusPending
+		updated.DNSRecordKind = model.AppDomainDNSRecordKindNone
+		updated.DNSLastMessage = observation.Message
+		updated.LastMessage = observation.Message
 	}
 	return updated, verified, nil
 }
@@ -505,41 +777,202 @@ func (s *Server) verifyAndPersistAppDomain(ctx context.Context, app model.App, d
 }
 
 func (s *Server) customDomainVerificationResult(ctx context.Context, app model.App, domain model.AppDomain, legacyTarget string) (bool, string, error) {
-	targets := s.customDomainTargets(app, legacyTarget)
-	if len(targets) == 0 {
-		return false, "custom domain CNAME target is not configured", nil
+	observation, err := s.inspectCustomDomainDNS(ctx, domain.Hostname, s.customDomainTargets(app, legacyTarget))
+	if err != nil {
+		return false, "", err
 	}
-	if !s.customDomainRoutesToAnyTarget(ctx, domain.Hostname, targets) {
-		return false, "create a CNAME record for " + domain.Hostname + " pointing to " + targets[0], nil
-	}
-	return true, "", nil
+	return observation.Verified, observation.Message, nil
 }
 
-func (s *Server) customDomainRoutesToAnyTarget(ctx context.Context, hostname string, targets []string) bool {
-	cname, err := s.dnsResolver.LookupCNAME(ctx, hostname)
-	if err == nil {
-		cname = normalizeExternalAppDomain(cname)
+func (s *Server) inspectCustomDomainDNS(ctx context.Context, hostname string, targets []string) (appDomainDNSObservation, error) {
+	hostname = normalizeExternalAppDomain(hostname)
+	targets = uniqueNormalizedAppDomainHosts(targets...)
+	observation := appDomainDNSObservation{}
+	if hostname == "" {
+		observation.Message = "hostname is required"
+		return observation, nil
+	}
+	if len(targets) == 0 {
+		observation.Message = "custom domain CNAME target is not configured"
+		return observation, nil
+	}
+	cname, cnameErr := s.dnsResolver.LookupCNAME(ctx, hostname)
+	if cnameErr == nil {
+		observation.CNAME = normalizeExternalAppDomain(cname)
 		for _, target := range targets {
-			if cname == normalizeExternalAppDomain(target) {
-				return true
+			if observation.CNAME == normalizeExternalAppDomain(target) {
+				observation.Verified = true
+				observation.RecordKind = model.AppDomainDNSRecordKindCNAME
+				observation.MatchedTarget = target
+				return observation, nil
 			}
 		}
 	}
 
-	hostIPs, err := s.dnsResolver.LookupIPAddr(ctx, hostname)
-	if err != nil || len(hostIPs) == 0 {
-		return false
+	hostIPs, hostErr := s.dnsResolver.LookupIPAddr(ctx, hostname)
+	if hostErr == nil {
+		observation.HostIPs = ipAddrStrings(hostIPs)
 	}
 	for _, target := range targets {
 		targetIPs, targetErr := s.dnsResolver.LookupIPAddr(ctx, target)
 		if targetErr != nil || len(targetIPs) == 0 {
 			continue
 		}
+		if len(observation.TargetIPs) == 0 {
+			observation.TargetIPs = ipAddrStrings(targetIPs)
+		}
 		if ipListsIntersect(hostIPs, targetIPs) {
-			return true
+			observation.Verified = true
+			observation.RecordKind = model.AppDomainDNSRecordKindFlattened
+			observation.MatchedTarget = target
+			return observation, nil
 		}
 	}
-	return false
+
+	if observation.CNAME != "" {
+		observation.Message = fmt.Sprintf("CNAME for %s points to %s; expected %s", hostname, observation.CNAME, targets[0])
+		return observation, nil
+	}
+	if hostErr == nil && len(hostIPs) > 0 {
+		observation.Message = fmt.Sprintf("DNS for %s resolves, but not to %s", hostname, targets[0])
+		return observation, nil
+	}
+	observation.Message = "create a CNAME record for " + hostname + " pointing to " + targets[0]
+	return observation, nil
+}
+
+func (s *Server) customDomainRoutesToAnyTarget(ctx context.Context, hostname string, targets []string) bool {
+	observation, err := s.inspectCustomDomainDNS(ctx, hostname, targets)
+	if err != nil {
+		return false
+	}
+	return observation.Verified
+}
+
+func (s *Server) validateEdgeTLSCertificateBundle(hostname string, domain model.AppDomain, authContext edgeAuthContext, req edgeTLSCertificateBundleRequest) (model.EdgeTLSCertificate, error) {
+	hostname = normalizeExternalAppDomain(hostname)
+	certPEM := strings.TrimSpace(req.CertificatePEM)
+	keyPEM := strings.TrimSpace(req.PrivateKeyPEM)
+	if hostname == "" || certPEM == "" || keyPEM == "" {
+		return model.EdgeTLSCertificate{}, fmt.Errorf("hostname, certificate_pem, and private_key_pem are required")
+	}
+	keyPair, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	if err != nil {
+		return model.EdgeTLSCertificate{}, fmt.Errorf("invalid certificate/key pair: %w", err)
+	}
+	if keyPair.Leaf == nil {
+		if len(keyPair.Certificate) == 0 {
+			return model.EdgeTLSCertificate{}, fmt.Errorf("certificate chain is empty")
+		}
+		keyPair.Leaf, err = x509.ParseCertificate(keyPair.Certificate[0])
+		if err != nil {
+			return model.EdgeTLSCertificate{}, fmt.Errorf("parse leaf certificate: %w", err)
+		}
+	}
+	if err := keyPair.Leaf.VerifyHostname(hostname); err != nil {
+		return model.EdgeTLSCertificate{}, fmt.Errorf("certificate does not cover %s: %w", hostname, err)
+	}
+	notAfter := keyPair.Leaf.NotAfter.UTC()
+	sum := sha256.Sum256(keyPair.Leaf.Raw)
+	cert := model.EdgeTLSCertificate{
+		Hostname:              hostname,
+		TenantID:              domain.TenantID,
+		AppID:                 domain.AppID,
+		CertificatePEM:        certPEM,
+		PrivateKeyPEM:         keyPEM,
+		MetadataJSON:          strings.TrimSpace(req.MetadataJSON),
+		IssuerStorage:         strings.Trim(strings.TrimSpace(req.IssuerStorage), "/"),
+		CertificateSHA256:     hex.EncodeToString(sum[:]),
+		NotAfter:              &notAfter,
+		UploadedByEdgeID:      authContext.EdgeID,
+		UploadedByEdgeGroupID: authContext.EdgeGroupID,
+	}
+	return cert, nil
+}
+
+func (s *Server) buildAppDomainDiagnosis(ctx context.Context, app model.App, domain model.AppDomain) appDomainDiagnosis {
+	targets := s.customDomainTargets(app, domain.RouteTarget)
+	observation, err := s.inspectCustomDomainDNS(ctx, domain.Hostname, targets)
+	if err != nil {
+		observation = appDomainDNSObservation{Message: err.Error()}
+	}
+	certSummary := appDomainTLSCertificateSummary{}
+	if cert, certErr := s.store.GetEdgeTLSCertificate(domain.Hostname); certErr == nil {
+		updatedAt := cert.UpdatedAt
+		certSummary = appDomainTLSCertificateSummary{
+			Present:               true,
+			CertificateSHA256:     cert.CertificateSHA256,
+			NotAfter:              cert.NotAfter,
+			IssuerStorage:         cert.IssuerStorage,
+			UploadedByEdgeID:      cert.UploadedByEdgeID,
+			UploadedByEdgeGroupID: cert.UploadedByEdgeGroupID,
+			UpdatedAt:             &updatedAt,
+		}
+	}
+
+	checks := []appDomainDiagnosticCheck{
+		{
+			Name:    "dns_record",
+			Status:  appDomainCheckStatus(observation.Verified),
+			Message: observation.Message,
+		},
+		{
+			Name:       "domain_verified",
+			Status:     appDomainCheckStatus(domain.Status == model.AppDomainStatusVerified),
+			Message:    domain.LastMessage,
+			Repairable: domain.Status != model.AppDomainStatusVerified,
+		},
+		{
+			Name:    "shared_tls_certificate",
+			Status:  appDomainCheckStatus(certSummary.Present),
+			Message: missingMessage(certSummary.Present, "waiting for an edge node to upload the shared certificate bundle"),
+		},
+		{
+			Name:       "tls_ready",
+			Status:     appDomainCheckStatus(domain.TLSStatus == model.AppDomainTLSStatusReady),
+			Message:    domain.TLSLastMessage,
+			Repairable: domain.Status == model.AppDomainStatusVerified && certSummary.Present && domain.TLSStatus != model.AppDomainTLSStatusReady,
+		},
+		{
+			Name: "route_active",
+			Status: appDomainCheckStatus(domain.Status == model.AppDomainStatusVerified &&
+				domain.DNSStatus == model.AppDomainDNSStatusReady &&
+				domain.TLSStatus == model.AppDomainTLSStatusReady),
+		},
+	}
+
+	actions := make([]string, 0, 3)
+	if !observation.Verified && observation.Message != "" {
+		actions = append(actions, observation.Message)
+	}
+	if domain.Status == model.AppDomainStatusVerified && !certSummary.Present {
+		actions = append(actions, "wait for an edge node to complete TLS issuance and upload the shared certificate bundle")
+	}
+	if domain.Status == model.AppDomainStatusVerified && certSummary.Present && domain.TLSStatus != model.AppDomainTLSStatusReady {
+		actions = append(actions, "run domain repair to promote the verified shared certificate to ready")
+	}
+	return appDomainDiagnosis{
+		Domain:               domain,
+		DNSTargets:           targets,
+		DNSObservation:       observation,
+		SharedTLSCertificate: certSummary,
+		Checks:               checks,
+		RecommendedActions:   actions,
+	}
+}
+
+func appDomainCheckStatus(ok bool) string {
+	if ok {
+		return "pass"
+	}
+	return "fail"
+}
+
+func missingMessage(present bool, message string) string {
+	if present {
+		return ""
+	}
+	return message
 }
 
 func (s *Server) customDomainTargets(app model.App, legacyTargets ...string) []string {
@@ -651,6 +1084,26 @@ func ipListsIntersect(left, right []net.IPAddr) bool {
 		}
 	}
 	return false
+}
+
+func ipAddrStrings(addrs []net.IPAddr) []string {
+	if len(addrs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(addrs))
+	seen := make(map[string]struct{}, len(addrs))
+	for _, addr := range addrs {
+		value := addr.IP.String()
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func (s *Server) authorizeEdgeToken(w http.ResponseWriter, r *http.Request) bool {

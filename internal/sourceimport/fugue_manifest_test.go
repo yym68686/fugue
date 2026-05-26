@@ -233,6 +233,61 @@ services:
 	}
 }
 
+func TestInspectFugueManifestParsesNestedEntrypointRoutes(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte("FROM scratch\nEXPOSE 3000\n"), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	manifest := `version: 1
+primary_service: api
+entrypoints:
+  - name: api
+    routes:
+      - path_prefix: /api
+        service: api
+      - path: /metrics
+        service: metrics
+services:
+  api:
+    public: true
+    build:
+      context: .
+      dockerfile: Dockerfile
+  metrics:
+    build:
+      context: .
+      dockerfile: Dockerfile
+`
+	if err := os.WriteFile(filepath.Join(repoDir, "fugue.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write fugue manifest: %v", err)
+	}
+
+	parsed, err := inspectFugueManifestFromRepo(clonedGitHubRepo{
+		RepoOwner:      "example",
+		RepoName:       "demo",
+		RepoDir:        repoDir,
+		Branch:         "main",
+		CommitSHA:      "abcdef123456",
+		DefaultAppName: "demo",
+	})
+	if err != nil {
+		t.Fatalf("inspect fugue manifest: %v", err)
+	}
+	if len(parsed.Entrypoints) != 1 {
+		t.Fatalf("expected one entrypoint, got %+v", parsed.Entrypoints)
+	}
+	entrypoint := parsed.Entrypoints[0]
+	if len(entrypoint.Routes) != 2 {
+		t.Fatalf("expected two nested routes, got %+v", entrypoint.Routes)
+	}
+	if entrypoint.Routes[0].PathPrefix != "/api" || entrypoint.Routes[0].Service != "api" {
+		t.Fatalf("unexpected first nested route: %+v", entrypoint.Routes[0])
+	}
+	if entrypoint.Routes[1].PathPrefix != "/metrics" || entrypoint.Routes[1].Service != "metrics" {
+		t.Fatalf("unexpected second nested route: %+v", entrypoint.Routes[1])
+	}
+}
+
 func TestInspectFugueManifestRejectsMultiplePublicServicesWithoutPrimary(t *testing.T) {
 	repoDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte("FROM scratch\nEXPOSE 3000\n"), 0o644); err != nil {

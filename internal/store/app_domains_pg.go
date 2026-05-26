@@ -15,7 +15,7 @@ func (s *Store) pgListAppDomains(appID string) ([]model.AppDomain, error) {
 	defer cancel()
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT hostname, tenant_id, app_id, status, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, tls_last_message, last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at
+SELECT hostname, tenant_id, app_id, status, dns_status, dns_record_kind, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, dns_last_message, tls_last_message, last_checked_at, dns_last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at
 FROM fugue_app_domains
 WHERE app_id = $1
 ORDER BY created_at ASC, hostname ASC
@@ -44,7 +44,7 @@ func (s *Store) pgListVerifiedAppDomains() ([]model.AppDomain, error) {
 	defer cancel()
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT hostname, tenant_id, app_id, status, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, tls_last_message, last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at
+SELECT hostname, tenant_id, app_id, status, dns_status, dns_record_kind, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, dns_last_message, tls_last_message, last_checked_at, dns_last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at
 FROM fugue_app_domains
 WHERE status = $1
 ORDER BY hostname ASC
@@ -73,7 +73,7 @@ func (s *Store) pgGetAppDomain(hostname string) (model.AppDomain, error) {
 	defer cancel()
 
 	domain, err := scanAppDomain(s.db.QueryRowContext(ctx, `
-SELECT hostname, tenant_id, app_id, status, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, tls_last_message, last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at
+SELECT hostname, tenant_id, app_id, status, dns_status, dns_record_kind, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, dns_last_message, tls_last_message, last_checked_at, dns_last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at
 FROM fugue_app_domains
 WHERE lower(hostname) = lower($1)
 `, hostname))
@@ -122,7 +122,7 @@ LIMIT 1
 	}
 
 	existing, err := scanAppDomain(tx.QueryRowContext(ctx, `
-SELECT hostname, tenant_id, app_id, status, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, tls_last_message, last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at
+SELECT hostname, tenant_id, app_id, status, dns_status, dns_record_kind, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, dns_last_message, tls_last_message, last_checked_at, dns_last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at
 FROM fugue_app_domains
 WHERE lower(hostname) = lower($1)
 FOR UPDATE
@@ -149,6 +149,12 @@ FOR UPDATE
 		domain.VerifiedAt = &verifiedAt
 	}
 	if domain.Status == model.AppDomainStatusVerified {
+		if domain.DNSStatus == "" {
+			domain.DNSStatus = model.AppDomainDNSStatusReady
+		}
+		if domain.DNSRecordKind == "" {
+			domain.DNSRecordKind = model.AppDomainDNSRecordKindCNAME
+		}
 		if domain.TLSStatus == "" {
 			domain.TLSStatus = model.AppDomainTLSStatusPending
 		}
@@ -161,6 +167,12 @@ FOR UPDATE
 			domain.TLSReadyAt = nil
 		}
 	} else {
+		if domain.DNSStatus == "" {
+			domain.DNSStatus = model.AppDomainDNSStatusPending
+		}
+		if domain.DNSRecordKind == "" {
+			domain.DNSRecordKind = model.AppDomainDNSRecordKindNone
+		}
 		domain.TLSStatus = ""
 		domain.TLSLastMessage = ""
 		domain.TLSLastCheckedAt = nil
@@ -173,27 +185,31 @@ UPDATE fugue_app_domains
 SET tenant_id = $2,
 	app_id = $3,
 	status = $4,
-	tls_status = $5,
-	verification_txt_name = $6,
-	verification_txt_value = $7,
-	route_target = $8,
-	last_message = $9,
-	tls_last_message = $10,
-	last_checked_at = $11,
-	verified_at = $12,
-	tls_last_checked_at = $13,
-	tls_ready_at = $14,
-	created_at = $15,
-	updated_at = $16
+	dns_status = $5,
+	dns_record_kind = $6,
+	tls_status = $7,
+	verification_txt_name = $8,
+	verification_txt_value = $9,
+	route_target = $10,
+	last_message = $11,
+	dns_last_message = $12,
+	tls_last_message = $13,
+	last_checked_at = $14,
+	dns_last_checked_at = $15,
+	verified_at = $16,
+	tls_last_checked_at = $17,
+	tls_ready_at = $18,
+	created_at = $19,
+	updated_at = $20
 WHERE lower(hostname) = lower($1)
-`, domain.Hostname, domain.TenantID, domain.AppID, domain.Status, domain.TLSStatus, domain.VerificationTXTName, domain.VerificationTXTValue, domain.RouteTarget, domain.LastMessage, domain.TLSLastMessage, domain.LastCheckedAt, domain.VerifiedAt, domain.TLSLastCheckedAt, domain.TLSReadyAt, domain.CreatedAt, domain.UpdatedAt); err != nil {
+`, domain.Hostname, domain.TenantID, domain.AppID, domain.Status, domain.DNSStatus, domain.DNSRecordKind, domain.TLSStatus, domain.VerificationTXTName, domain.VerificationTXTValue, domain.RouteTarget, domain.LastMessage, domain.DNSLastMessage, domain.TLSLastMessage, domain.LastCheckedAt, domain.DNSLastCheckedAt, domain.VerifiedAt, domain.TLSLastCheckedAt, domain.TLSReadyAt, domain.CreatedAt, domain.UpdatedAt); err != nil {
 			return model.AppDomain{}, mapDBErr(err)
 		}
 	} else {
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO fugue_app_domains (hostname, tenant_id, app_id, status, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, tls_last_message, last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-`, domain.Hostname, domain.TenantID, domain.AppID, domain.Status, domain.TLSStatus, domain.VerificationTXTName, domain.VerificationTXTValue, domain.RouteTarget, domain.LastMessage, domain.TLSLastMessage, domain.LastCheckedAt, domain.VerifiedAt, domain.TLSLastCheckedAt, domain.TLSReadyAt, domain.CreatedAt, domain.UpdatedAt); err != nil {
+INSERT INTO fugue_app_domains (hostname, tenant_id, app_id, status, dns_status, dns_record_kind, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, dns_last_message, tls_last_message, last_checked_at, dns_last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+`, domain.Hostname, domain.TenantID, domain.AppID, domain.Status, domain.DNSStatus, domain.DNSRecordKind, domain.TLSStatus, domain.VerificationTXTName, domain.VerificationTXTValue, domain.RouteTarget, domain.LastMessage, domain.DNSLastMessage, domain.TLSLastMessage, domain.LastCheckedAt, domain.DNSLastCheckedAt, domain.VerifiedAt, domain.TLSLastCheckedAt, domain.TLSReadyAt, domain.CreatedAt, domain.UpdatedAt); err != nil {
 			return model.AppDomain{}, mapDBErr(err)
 		}
 	}
@@ -215,7 +231,7 @@ func (s *Store) pgDeleteAppDomain(appID, hostname string) (model.AppDomain, erro
 	defer tx.Rollback()
 
 	domain, err := scanAppDomain(tx.QueryRowContext(ctx, `
-SELECT hostname, tenant_id, app_id, status, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, tls_last_message, last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at
+SELECT hostname, tenant_id, app_id, status, dns_status, dns_record_kind, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, dns_last_message, tls_last_message, last_checked_at, dns_last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at
 FROM fugue_app_domains
 WHERE lower(hostname) = lower($1)
 FOR UPDATE
@@ -225,6 +241,9 @@ FOR UPDATE
 	}
 	if domain.AppID != appID {
 		return model.AppDomain{}, ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_edge_tls_certificates WHERE lower(hostname) = lower($1)`, hostname); err != nil {
+		return model.AppDomain{}, fmt.Errorf("delete edge TLS certificate for app domain %s: %w", hostname, err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_app_domains WHERE lower(hostname) = lower($1)`, hostname); err != nil {
 		return model.AppDomain{}, fmt.Errorf("delete app domain %s: %w", hostname, err)
@@ -236,6 +255,9 @@ FOR UPDATE
 }
 
 func (s *Store) pgDeleteAppDomainsByAppTx(ctx context.Context, tx *sql.Tx, appID string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_edge_tls_certificates WHERE app_id = $1 OR hostname IN (SELECT hostname FROM fugue_app_domains WHERE app_id = $1)`, appID); err != nil {
+		return fmt.Errorf("delete edge TLS certificates for app %s: %w", appID, err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_app_domains WHERE app_id = $1`, appID); err != nil {
 		return fmt.Errorf("delete app domains for %s: %w", appID, err)
 	}
@@ -259,8 +281,12 @@ LIMIT 1
 
 func scanAppDomain(scanner sqlScanner) (model.AppDomain, error) {
 	var domain model.AppDomain
+	var dnsStatus sql.NullString
+	var dnsRecordKind sql.NullString
 	var tlsStatus sql.NullString
+	var dnsLastMessage sql.NullString
 	var lastCheckedAt sql.NullTime
+	var dnsLastCheckedAt sql.NullTime
 	var verifiedAt sql.NullTime
 	var tlsLastCheckedAt sql.NullTime
 	var tlsReadyAt sql.NullTime
@@ -269,13 +295,17 @@ func scanAppDomain(scanner sqlScanner) (model.AppDomain, error) {
 		&domain.TenantID,
 		&domain.AppID,
 		&domain.Status,
+		&dnsStatus,
+		&dnsRecordKind,
 		&tlsStatus,
 		&domain.VerificationTXTName,
 		&domain.VerificationTXTValue,
 		&domain.RouteTarget,
 		&domain.LastMessage,
+		&dnsLastMessage,
 		&domain.TLSLastMessage,
 		&lastCheckedAt,
+		&dnsLastCheckedAt,
 		&verifiedAt,
 		&tlsLastCheckedAt,
 		&tlsReadyAt,
@@ -289,15 +319,36 @@ func scanAppDomain(scanner sqlScanner) (model.AppDomain, error) {
 	domain.VerificationTXTName = normalizeTXTRecordName(domain.VerificationTXTName)
 	domain.VerificationTXTValue = strings.TrimSpace(domain.VerificationTXTValue)
 	domain.Status = normalizeAppDomainStatus(domain.Status)
+	domain.DNSStatus = model.NormalizeAppDomainDNSStatus(dnsStatus.String)
+	domain.DNSRecordKind = model.NormalizeAppDomainDNSRecordKind(dnsRecordKind.String)
 	domain.TLSStatus = model.NormalizeAppDomainTLSStatus(tlsStatus.String)
 	domain.LastMessage = strings.TrimSpace(domain.LastMessage)
+	domain.DNSLastMessage = strings.TrimSpace(dnsLastMessage.String)
 	domain.TLSLastMessage = strings.TrimSpace(domain.TLSLastMessage)
+	if domain.DNSStatus == "" {
+		if domain.Status == model.AppDomainStatusVerified {
+			domain.DNSStatus = model.AppDomainDNSStatusReady
+		} else {
+			domain.DNSStatus = model.AppDomainDNSStatusPending
+		}
+	}
+	if domain.DNSRecordKind == "" {
+		if domain.Status == model.AppDomainStatusVerified {
+			domain.DNSRecordKind = model.AppDomainDNSRecordKindCNAME
+		} else {
+			domain.DNSRecordKind = model.AppDomainDNSRecordKindNone
+		}
+	}
 	if domain.Status == model.AppDomainStatusVerified && domain.TLSStatus == "" {
 		domain.TLSStatus = model.AppDomainTLSStatusPending
 	}
 	if lastCheckedAt.Valid {
 		value := lastCheckedAt.Time.UTC()
 		domain.LastCheckedAt = &value
+	}
+	if dnsLastCheckedAt.Valid {
+		value := dnsLastCheckedAt.Time.UTC()
+		domain.DNSLastCheckedAt = &value
 	}
 	if verifiedAt.Valid {
 		value := verifiedAt.Time.UTC()

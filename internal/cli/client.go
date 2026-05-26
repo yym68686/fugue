@@ -274,6 +274,71 @@ type appDomainVerifyResponse struct {
 	Verified bool            `json:"verified"`
 }
 
+type appDomainDNSObservation struct {
+	Verified      bool     `json:"verified"`
+	RecordKind    string   `json:"record_kind,omitempty"`
+	CNAME         string   `json:"cname,omitempty"`
+	MatchedTarget string   `json:"matched_target,omitempty"`
+	HostIPs       []string `json:"host_ips,omitempty"`
+	TargetIPs     []string `json:"target_ips,omitempty"`
+	Message       string   `json:"message,omitempty"`
+}
+
+type appDomainTLSCertificateSummary struct {
+	Present               bool       `json:"present"`
+	CertificateSHA256     string     `json:"certificate_sha256,omitempty"`
+	NotAfter              *time.Time `json:"not_after,omitempty"`
+	IssuerStorage         string     `json:"issuer_storage,omitempty"`
+	UploadedByEdgeID      string     `json:"uploaded_by_edge_id,omitempty"`
+	UploadedByEdgeGroupID string     `json:"uploaded_by_edge_group_id,omitempty"`
+	UpdatedAt             *time.Time `json:"updated_at,omitempty"`
+}
+
+type appDomainDiagnosticCheck struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Message    string `json:"message,omitempty"`
+	Repairable bool   `json:"repairable,omitempty"`
+}
+
+type appDomainDiagnosis struct {
+	Domain               model.AppDomain                `json:"domain"`
+	DNSTargets           []string                       `json:"dns_targets"`
+	DNSObservation       appDomainDNSObservation        `json:"dns_observation"`
+	SharedTLSCertificate appDomainTLSCertificateSummary `json:"shared_tls_certificate"`
+	Checks               []appDomainDiagnosticCheck     `json:"checks"`
+	RecommendedActions   []string                       `json:"recommended_actions,omitempty"`
+}
+
+type appDomainDiagnosisResponse struct {
+	Diagnosis appDomainDiagnosis `json:"diagnosis"`
+}
+
+type appDomainRepairResponse struct {
+	Domain    model.AppDomain    `json:"domain"`
+	Diagnosis appDomainDiagnosis `json:"diagnosis"`
+}
+
+type appDomainRepairRequest struct {
+	Hostname string `json:"hostname"`
+}
+
+type edgeTLSCertificateBundleInput struct {
+	CertificatePEM string `json:"certificate_pem"`
+	PrivateKeyPEM  string `json:"private_key_pem"`
+	MetadataJSON   string `json:"metadata_json,omitempty"`
+	IssuerStorage  string `json:"issuer_storage,omitempty"`
+}
+
+type edgeTLSCertificateBundleResponse struct {
+	Certificate model.EdgeTLSCertificate `json:"certificate"`
+}
+
+type edgeTLSCertificateBundlePutResponse struct {
+	Certificate model.EdgeTLSCertificate `json:"certificate"`
+	Domain      model.AppDomain          `json:"domain"`
+}
+
 type appFilesystemEntry struct {
 	Name        string    `json:"name"`
 	Path        string    `json:"path"`
@@ -853,6 +918,26 @@ func (c *Client) VerifyAppDomain(id, hostname string) (appDomainVerifyResponse, 
 	return response, nil
 }
 
+func (c *Client) GetAppDomainDiagnosis(id, hostname string) (appDomainDiagnosisResponse, error) {
+	query := url.Values{}
+	query.Set("hostname", strings.TrimSpace(hostname))
+	relative := path.Join("/v1/apps", id, "domains", "diagnosis") + "?" + query.Encode()
+	var response appDomainDiagnosisResponse
+	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
+		return appDomainDiagnosisResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) RepairAppDomain(id, hostname string) (appDomainRepairResponse, error) {
+	var response appDomainRepairResponse
+	req := appDomainRepairRequest{Hostname: strings.TrimSpace(hostname)}
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "domains", "repair"), req, &response); err != nil {
+		return appDomainRepairResponse{}, err
+	}
+	return response, nil
+}
+
 func (c *Client) DeleteAppDomain(id, hostname string) (model.AppDomain, error) {
 	query := url.Values{}
 	query.Set("hostname", strings.TrimSpace(hostname))
@@ -864,6 +949,34 @@ func (c *Client) DeleteAppDomain(id, hostname string) (model.AppDomain, error) {
 		return model.AppDomain{}, err
 	}
 	return response.Domain, nil
+}
+
+func (c *Client) GetEdgeTLSCertificateBundle(hostname string) (edgeTLSCertificateBundleResponse, error) {
+	query := url.Values{}
+	query.Set("token", c.token)
+	relative := path.Join("/v1/edge/domains", strings.TrimSpace(hostname), "tls-bundle")
+	if encoded := query.Encode(); encoded != "" {
+		relative += "?" + encoded
+	}
+	var response edgeTLSCertificateBundleResponse
+	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
+		return edgeTLSCertificateBundleResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) PutEdgeTLSCertificateBundle(hostname string, bundle edgeTLSCertificateBundleInput) (edgeTLSCertificateBundlePutResponse, error) {
+	query := url.Values{}
+	query.Set("token", c.token)
+	relative := path.Join("/v1/edge/domains", strings.TrimSpace(hostname), "tls-bundle")
+	if encoded := query.Encode(); encoded != "" {
+		relative += "?" + encoded
+	}
+	var response edgeTLSCertificateBundlePutResponse
+	if err := c.doJSON(http.MethodPut, relative, bundle, &response); err != nil {
+		return edgeTLSCertificateBundlePutResponse{}, err
+	}
+	return response, nil
 }
 
 func (c *Client) GetAppFilesystemTree(id, component, requestPath, pod string) (appFilesystemTreeResponse, error) {

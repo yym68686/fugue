@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -22,6 +23,8 @@ import (
 
 const (
 	caddyConfigReapplyInterval = 5 * time.Minute
+	defaultCaddyDataDir        = "/data/caddy"
+	defaultCaddyIssuerStorage  = "acme-v02.api.letsencrypt.org-directory"
 
 	caddyTLSModeOff            = "off"
 	caddyTLSModeInternal       = "internal"
@@ -419,6 +422,10 @@ func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.E
 		return nil
 	}
 	hosts := s.caddyWarmupHosts(bundle)
+	customDomainHosts := s.customDomainTLSHosts(bundle)
+	if syncErr := s.syncSharedCaddyTLSCertificates(ctx, customDomainHosts); syncErr != nil && s.Logger != nil {
+		s.Logger.Printf("edge caddy shared TLS sync failed; hosts=%d error=%s", len(customDomainHosts), s.redact(syncErr.Error()))
+	}
 	if len(hosts) == 0 {
 		return nil
 	}
@@ -449,7 +456,17 @@ func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.E
 				status = model.AppDomainTLSStatusPending
 				message = fmt.Sprintf("waiting for edge certificate issuance: %v", err)
 			}
-			if reportErr := s.reportCustomDomainTLSStatus(ctx, host, status, message); reportErr != nil && firstErr == nil {
+			var certBundle *caddyTLSCertificateBundle
+			if err == nil && s.caddySharedTLSEnabled() {
+				localBundle, certErr := s.readLocalCaddyTLSCertificate(host)
+				if certErr != nil {
+					status = model.AppDomainTLSStatusPending
+					message = fmt.Sprintf("certificate issued locally but shared bundle export failed: %v", certErr)
+				} else {
+					certBundle = &localBundle
+				}
+			}
+			if reportErr := s.reportCustomDomainTLSStatus(ctx, host, status, message, certBundle); reportErr != nil && firstErr == nil {
 				firstErr = reportErr
 			}
 		}
@@ -463,6 +480,13 @@ func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.E
 		s.Logger.Printf("edge caddy TLS warmup complete; hosts=%d listen=%s duration=%s", len(hosts), dialAddress, duration)
 	}
 	return nil
+}
+
+type caddyTLSCertificateBundle struct {
+	CertificatePEM string `json:"certificate_pem"`
+	PrivateKeyPEM  string `json:"private_key_pem"`
+	MetadataJSON   string `json:"metadata_json,omitempty"`
+	IssuerStorage  string `json:"issuer_storage,omitempty"`
 }
 
 func (s *Service) caddyWarmupHosts(bundle model.EdgeRouteBundle) []string {
@@ -484,6 +508,9 @@ func (s *Service) caddyWarmupHosts(bundle model.EdgeRouteBundle) []string {
 		seen[host] = struct{}{}
 	}
 	for host := range s.customDomainTLSReportHosts(bundle) {
+		seen[host] = struct{}{}
+	}
+	for _, host := range s.customDomainTLSHosts(bundle) {
 		seen[host] = struct{}{}
 	}
 	if len(seen) == 0 {
@@ -541,7 +568,192 @@ func (s *Service) customDomainTLSReportHosts(bundle model.EdgeRouteBundle) map[s
 	return out
 }
 
-func (s *Service) reportCustomDomainTLSStatus(ctx context.Context, hostname, tlsStatus, tlsLastMessage string) error {
+func (s *Service) customDomainTLSHosts(bundle model.EdgeRouteBundle) []string {
+	seen := map[string]struct{}{}
+	for host := range s.customDomainTLSReportHosts(bundle) {
+		seen[host] = struct{}{}
+	}
+	for _, route := range bundle.Routes {
+		if !s.routeAllowedForThisEdge(route) {
+			continue
+		}
+		host := normalizeRouteHost(route.Hostname)
+		if host == "" {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(route.RouteKind), model.EdgeRouteKindCustomDomain) {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(route.TLSPolicy), model.EdgeRouteTLSPolicyCustomDomain) {
+			continue
+		}
+		seen[host] = struct{}{}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	hosts := make([]string, 0, len(seen))
+	for host := range seen {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	return hosts
+}
+
+func (s *Service) syncSharedCaddyTLSCertificates(ctx context.Context, hosts []string) error {
+	if !s.caddySharedTLSEnabled() || len(hosts) == 0 {
+		return nil
+	}
+	var firstErr error
+	for _, host := range hosts {
+		bundle, err := s.fetchSharedCaddyTLSCertificate(ctx, host)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if bundle == nil {
+			continue
+		}
+		if err := s.installSharedCaddyTLSCertificate(host, *bundle); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if s.Logger != nil {
+			s.Logger.Printf("edge caddy shared TLS certificate installed; host=%s issuer_storage=%s", host, strings.TrimSpace(bundle.IssuerStorage))
+		}
+	}
+	return firstErr
+}
+
+func (s *Service) fetchSharedCaddyTLSCertificate(ctx context.Context, hostname string) (*caddyTLSCertificateBundle, error) {
+	hostname = normalizeRouteHost(hostname)
+	if hostname == "" {
+		return nil, nil
+	}
+	base, err := url.Parse(strings.TrimRight(strings.TrimSpace(s.Config.APIURL), "/"))
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return nil, fmt.Errorf("invalid FUGUE_API_URL")
+	}
+	token := strings.TrimSpace(s.Config.EdgeToken)
+	if token == "" {
+		return nil, fmt.Errorf("FUGUE_EDGE_TOKEN is required to fetch shared TLS certificates")
+	}
+	base.Path = strings.TrimRight(base.Path, "/") + "/v1/edge/domains/" + url.PathEscape(hostname) + "/tls-bundle"
+	query := base.Query()
+	query.Set("token", token)
+	base.RawQuery = query.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build shared TLS certificate request: %w", err)
+	}
+	resp, err := s.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch shared TLS certificate for %s: %w", hostname, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, statusError{
+			StatusCode: resp.StatusCode,
+			Body:       s.redact(strings.TrimSpace(string(body))),
+		}
+	}
+	var out struct {
+		Certificate caddyTLSCertificateBundle `json:"certificate"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode shared TLS certificate for %s: %w", hostname, err)
+	}
+	if strings.TrimSpace(out.Certificate.CertificatePEM) == "" || strings.TrimSpace(out.Certificate.PrivateKeyPEM) == "" {
+		return nil, fmt.Errorf("shared TLS certificate for %s is incomplete", hostname)
+	}
+	return &out.Certificate, nil
+}
+
+func (s *Service) installSharedCaddyTLSCertificate(hostname string, bundle caddyTLSCertificateBundle) error {
+	hostname = normalizeRouteHost(hostname)
+	if hostname == "" {
+		return nil
+	}
+	issuerStorage := strings.Trim(strings.TrimSpace(bundle.IssuerStorage), "/")
+	if issuerStorage == "" {
+		issuerStorage = defaultCaddyIssuerStorage
+	}
+	hostDir := filepath.Join(s.caddyDataDir(), "certificates", issuerStorage, hostname)
+	if err := os.MkdirAll(hostDir, 0o700); err != nil {
+		return fmt.Errorf("create Caddy certificate directory for %s: %w", hostname, err)
+	}
+	if err := os.WriteFile(filepath.Join(hostDir, hostname+".crt"), []byte(strings.TrimSpace(bundle.CertificatePEM)+"\n"), 0o644); err != nil {
+		return fmt.Errorf("write Caddy certificate for %s: %w", hostname, err)
+	}
+	if err := os.WriteFile(filepath.Join(hostDir, hostname+".key"), []byte(strings.TrimSpace(bundle.PrivateKeyPEM)+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write Caddy private key for %s: %w", hostname, err)
+	}
+	metadata := strings.TrimSpace(bundle.MetadataJSON)
+	if metadata == "" {
+		metadata = "{}"
+	}
+	if err := os.WriteFile(filepath.Join(hostDir, hostname+".json"), []byte(metadata+"\n"), 0o644); err != nil {
+		return fmt.Errorf("write Caddy certificate metadata for %s: %w", hostname, err)
+	}
+	return nil
+}
+
+func (s *Service) readLocalCaddyTLSCertificate(hostname string) (caddyTLSCertificateBundle, error) {
+	hostname = normalizeRouteHost(hostname)
+	if hostname == "" {
+		return caddyTLSCertificateBundle{}, fmt.Errorf("hostname is required")
+	}
+	pattern := filepath.Join(s.caddyDataDir(), "certificates", "*", hostname, hostname+".crt")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return caddyTLSCertificateBundle{}, fmt.Errorf("search Caddy certificate for %s: %w", hostname, err)
+	}
+	sort.Strings(matches)
+	for _, certPath := range matches {
+		hostDir := filepath.Dir(certPath)
+		keyPath := filepath.Join(hostDir, hostname+".key")
+		certPEM, certErr := os.ReadFile(certPath)
+		if certErr != nil {
+			continue
+		}
+		keyPEM, keyErr := os.ReadFile(keyPath)
+		if keyErr != nil {
+			continue
+		}
+		metadataPath := filepath.Join(hostDir, hostname+".json")
+		metadata, _ := os.ReadFile(metadataPath)
+		issuerStorage := filepath.Base(filepath.Dir(hostDir))
+		return caddyTLSCertificateBundle{
+			CertificatePEM: strings.TrimSpace(string(certPEM)),
+			PrivateKeyPEM:  strings.TrimSpace(string(keyPEM)),
+			MetadataJSON:   strings.TrimSpace(string(metadata)),
+			IssuerStorage:  strings.Trim(strings.TrimSpace(issuerStorage), "/"),
+		}, nil
+	}
+	return caddyTLSCertificateBundle{}, fmt.Errorf("Caddy certificate files for %s were not found under %s", hostname, filepath.Join(s.caddyDataDir(), "certificates"))
+}
+
+func (s *Service) caddySharedTLSEnabled() bool {
+	return s.Config.CaddySharedTLSEnabled && strings.TrimSpace(s.caddyDataDir()) != ""
+}
+
+func (s *Service) caddyDataDir() string {
+	if value := strings.TrimSpace(s.Config.CaddyDataDir); value != "" {
+		return value
+	}
+	return defaultCaddyDataDir
+}
+
+func (s *Service) reportCustomDomainTLSStatus(ctx context.Context, hostname, tlsStatus, tlsLastMessage string, certBundle *caddyTLSCertificateBundle) error {
 	hostname = normalizeRouteHost(hostname)
 	tlsStatus = model.NormalizeAppDomainTLSStatus(tlsStatus)
 	if hostname == "" || tlsStatus == "" {
@@ -560,11 +772,18 @@ func (s *Service) reportCustomDomainTLSStatus(ctx context.Context, hostname, tls
 	query.Set("token", token)
 	base.RawQuery = query.Encode()
 
-	payload, err := json.Marshal(map[string]string{
+	payloadMap := map[string]string{
 		"hostname":         hostname,
 		"tls_status":       tlsStatus,
 		"tls_last_message": strings.TrimSpace(tlsLastMessage),
-	})
+	}
+	if certBundle != nil {
+		payloadMap["certificate_pem"] = strings.TrimSpace(certBundle.CertificatePEM)
+		payloadMap["private_key_pem"] = strings.TrimSpace(certBundle.PrivateKeyPEM)
+		payloadMap["metadata_json"] = strings.TrimSpace(certBundle.MetadataJSON)
+		payloadMap["issuer_storage"] = strings.Trim(strings.TrimSpace(certBundle.IssuerStorage), "/")
+	}
+	payload, err := json.Marshal(payloadMap)
 	if err != nil {
 		return fmt.Errorf("marshal custom-domain TLS report: %w", err)
 	}

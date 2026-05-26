@@ -2,7 +2,14 @@ package api
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -396,6 +403,7 @@ func TestEdgeDomainTLSReportUpdatesVerifiedDomainStatus(t *testing.T) {
 		t.Fatalf("expected TLS ready timestamp to stay empty on error, got %+v", domain)
 	}
 
+	certPEM, keyPEM, metadataJSON := generateTestTLSCertificateBundle(t, "www.example.com")
 	readyReport := performJSONRequest(t, server, http.MethodPost, "/v1/edge/domains/tls-report?token=edge-secret", "", map[string]any{
 		"hostname":         "www.example.com",
 		"tls_status":       model.AppDomainTLSStatusReady,
@@ -409,8 +417,34 @@ func TestEdgeDomainTLSReportUpdatesVerifiedDomainStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get app domain after ready report: %v", err)
 	}
+	if domain.TLSStatus != model.AppDomainTLSStatusPending {
+		t.Fatalf("expected pending TLS status without a shared certificate, got %+v", domain)
+	}
+	if domain.TLSLastMessage != "ignored" {
+		t.Fatalf("expected pending report to keep the TLS last message, got %+v", domain)
+	}
+	if domain.TLSLastCheckedAt == nil || domain.TLSReadyAt != nil {
+		t.Fatalf("expected pending report timestamps to reflect the missing certificate, got %+v", domain)
+	}
+
+	readyWithCert := performJSONRequest(t, server, http.MethodPost, "/v1/edge/domains/tls-report?token=edge-secret", "", map[string]any{
+		"hostname":        "www.example.com",
+		"tls_status":      model.AppDomainTLSStatusReady,
+		"certificate_pem": certPEM,
+		"private_key_pem": keyPEM,
+		"metadata_json":   metadataJSON,
+		"issuer_storage":  "acme-v02.api.letsencrypt.org-directory",
+	})
+	if readyWithCert.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, readyWithCert.Code, readyWithCert.Body.String())
+	}
+
+	domain, err = s.GetAppDomain("www.example.com")
+	if err != nil {
+		t.Fatalf("get app domain after ready report with cert: %v", err)
+	}
 	if domain.TLSStatus != model.AppDomainTLSStatusReady {
-		t.Fatalf("expected ready TLS status, got %+v", domain)
+		t.Fatalf("expected ready TLS status after shared certificate upload, got %+v", domain)
 	}
 	if domain.TLSLastMessage != "" {
 		t.Fatalf("expected ready report to clear TLS last message, got %+v", domain)
@@ -434,9 +468,14 @@ func TestEdgeDomainTLSReportAcceptsPlatformRootCustomDomain(t *testing.T) {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
 
+	certPEM, keyPEM, metadataJSON := generateTestTLSCertificateBundle(t, "fugue.pro")
 	report := performJSONRequest(t, server, http.MethodPost, "/v1/edge/domains/tls-report?token=edge-secret", "", map[string]any{
-		"hostname":   "fugue.pro",
-		"tls_status": model.AppDomainTLSStatusReady,
+		"hostname":        "fugue.pro",
+		"tls_status":      model.AppDomainTLSStatusReady,
+		"certificate_pem": certPEM,
+		"private_key_pem": keyPEM,
+		"metadata_json":   metadataJSON,
+		"issuer_storage":  "acme-v02.api.letsencrypt.org-directory",
 	})
 	if report.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, report.Code, report.Body.String())
@@ -454,6 +493,97 @@ func TestEdgeDomainTLSReportAcceptsPlatformRootCustomDomain(t *testing.T) {
 	}
 }
 
+func TestAppDomainDiagnosisAndRepairUseSharedTLSCertificate(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, _, app, resolver := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	expectedTarget := server.primaryCustomDomainTarget(app)
+	resolver.cname["www.example.com"] = expectedTarget + "."
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/domains", apiKey, map[string]any{
+		"hostname": "www.example.com",
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	diagnosisResponse := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/domains/diagnosis?hostname=www.example.com", apiKey, nil)
+	if diagnosisResponse.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, diagnosisResponse.Code, diagnosisResponse.Body.String())
+	}
+	var diagnosisEnvelope struct {
+		Diagnosis appDomainDiagnosis `json:"diagnosis"`
+	}
+	mustDecodeJSON(t, diagnosisResponse, &diagnosisEnvelope)
+	if diagnosisEnvelope.Diagnosis.DNSObservation.Verified != true {
+		t.Fatalf("expected DNS to verify, got %+v", diagnosisEnvelope.Diagnosis)
+	}
+	if diagnosisEnvelope.Diagnosis.SharedTLSCertificate.Present {
+		t.Fatalf("expected no shared certificate before upload, got %+v", diagnosisEnvelope.Diagnosis)
+	}
+
+	certPEM, keyPEM, metadataJSON := generateTestTLSCertificateBundle(t, "www.example.com")
+	putBundle := performJSONRequest(t, server, http.MethodPut, "/v1/edge/domains/www.example.com/tls-bundle?token=edge-secret", "", map[string]any{
+		"certificate_pem": certPEM,
+		"private_key_pem": keyPEM,
+		"metadata_json":   metadataJSON,
+		"issuer_storage":  "acme-v02.api.letsencrypt.org-directory",
+	})
+	if putBundle.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, putBundle.Code, putBundle.Body.String())
+	}
+	var putBundleEnvelope struct {
+		Certificate model.EdgeTLSCertificate `json:"certificate"`
+		Domain      model.AppDomain          `json:"domain"`
+	}
+	mustDecodeJSON(t, putBundle, &putBundleEnvelope)
+	if putBundleEnvelope.Domain.TLSStatus != model.AppDomainTLSStatusReady {
+		t.Fatalf("expected shared bundle upload to mark TLS ready, got %+v", putBundleEnvelope.Domain)
+	}
+
+	getBundle := performJSONRequest(t, server, http.MethodGet, "/v1/edge/domains/www.example.com/tls-bundle?token=edge-secret", "", nil)
+	if getBundle.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, getBundle.Code, getBundle.Body.String())
+	}
+	var getBundleEnvelope struct {
+		Certificate model.EdgeTLSCertificate `json:"certificate"`
+	}
+	mustDecodeJSON(t, getBundle, &getBundleEnvelope)
+	if getBundleEnvelope.Certificate.CertificateSHA256 == "" {
+		t.Fatalf("expected stored certificate sha, got %+v", getBundleEnvelope.Certificate)
+	}
+
+	domain, err := s.GetAppDomain("www.example.com")
+	if err != nil {
+		t.Fatalf("get app domain after bundle upload: %v", err)
+	}
+	domain.TLSStatus = model.AppDomainTLSStatusPending
+	domain.TLSReadyAt = nil
+	domain.TLSLastCheckedAt = nil
+	domain.TLSLastMessage = "stale"
+	if _, err := s.PutAppDomain(domain); err != nil {
+		t.Fatalf("make domain pending for repair: %v", err)
+	}
+
+	repairResponse := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/domains/repair", apiKey, map[string]any{
+		"hostname": "www.example.com",
+	})
+	if repairResponse.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, repairResponse.Code, repairResponse.Body.String())
+	}
+	var repairEnvelope struct {
+		Domain    model.AppDomain    `json:"domain"`
+		Diagnosis appDomainDiagnosis `json:"diagnosis"`
+	}
+	mustDecodeJSON(t, repairResponse, &repairEnvelope)
+	if repairEnvelope.Domain.TLSStatus != model.AppDomainTLSStatusReady {
+		t.Fatalf("expected repair to restore TLS ready, got %+v", repairEnvelope.Domain)
+	}
+	if !repairEnvelope.Diagnosis.SharedTLSCertificate.Present {
+		t.Fatalf("expected repair diagnosis to report shared certificate, got %+v", repairEnvelope.Diagnosis)
+	}
+}
+
 func TestPrimaryCustomDomainTargetDefaultsToDNSNamespace(t *testing.T) {
 	t.Parallel()
 
@@ -463,6 +593,44 @@ func TestPrimaryCustomDomainTargetDefaultsToDNSNamespace(t *testing.T) {
 	if got := server.primaryCustomDomainTarget(app); got != expectedTarget {
 		t.Fatalf("expected primary custom-domain target %q, got %q", expectedTarget, got)
 	}
+}
+
+func generateTestTLSCertificateBundle(t *testing.T, hostname string) (string, string, string) {
+	t.Helper()
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	serialLimit := new(big.Int).Lsh(big.NewInt(1), 62)
+	serialNumber, err := rand.Int(rand.Reader, serialLimit)
+	if err != nil {
+		t.Fatalf("generate serial: %v", err)
+	}
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName: hostname,
+		},
+		DNSNames:              []string{hostname},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyBytes, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		t.Fatalf("marshal private key: %v", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
+	metadata := `{"issuer_storage":"acme-v02.api.letsencrypt.org-directory"}`
+	return strings.TrimSpace(string(certPEM)), strings.TrimSpace(string(keyPEM)), metadata
 }
 
 func setupAppDomainTestServer(t *testing.T) (*store.Store, *Server, string, string, model.App, *fakeAppDomainResolver) {

@@ -170,7 +170,70 @@ func TestPutVerifiedAppDomainDefaultsTLSPending(t *testing.T) {
 	if domain.TLSStatus != model.AppDomainTLSStatusPending {
 		t.Fatalf("expected pending TLS status, got %+v", domain)
 	}
+	if domain.DNSStatus != model.AppDomainDNSStatusReady {
+		t.Fatalf("expected DNS status ready for a verified domain, got %+v", domain)
+	}
+	if domain.DNSRecordKind != model.AppDomainDNSRecordKindCNAME {
+		t.Fatalf("expected default DNS record kind cname, got %+v", domain)
+	}
 	if domain.TLSReadyAt != nil {
 		t.Fatalf("expected TLS ready timestamp to be empty, got %+v", domain)
+	}
+}
+
+func TestDeleteAppDomainReleasesEdgeTLSCertificate(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("TLS Domains")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateAppWithRoute(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppRoute{
+		Hostname:    "demo.apps.example.com",
+		BaseDomain:  "apps.example.com",
+		PublicURL:   "https://demo.apps.example.com",
+		ServicePort: 8080,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	if _, err := s.PutAppDomain(model.AppDomain{
+		Hostname:    "www.example.com",
+		AppID:       app.ID,
+		TenantID:    tenant.ID,
+		Status:      model.AppDomainStatusVerified,
+		RouteTarget: "d-123.dns.fugue.pro",
+	}); err != nil {
+		t.Fatalf("put verified app domain: %v", err)
+	}
+	if _, err := s.PutEdgeTLSCertificate(model.EdgeTLSCertificate{
+		Hostname:       "www.example.com",
+		TenantID:       tenant.ID,
+		AppID:          app.ID,
+		CertificatePEM: "cert",
+		PrivateKeyPEM:  "key",
+	}); err != nil {
+		t.Fatalf("put edge tls certificate: %v", err)
+	}
+
+	if _, err := s.DeleteAppDomain(app.ID, "www.example.com"); err != nil {
+		t.Fatalf("delete app domain: %v", err)
+	}
+	if _, err := s.GetEdgeTLSCertificate("www.example.com"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected edge tls certificate to be deleted, got %v", err)
 	}
 }

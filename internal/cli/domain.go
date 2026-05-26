@@ -28,6 +28,17 @@ type domainMutationResult struct {
 	Removed        bool                   `json:"removed,omitempty"`
 }
 
+type domainDiagnosisResult struct {
+	AppID     string             `json:"app_id,omitempty"`
+	Diagnosis appDomainDiagnosis `json:"diagnosis"`
+}
+
+type domainRepairResult struct {
+	AppID     string             `json:"app_id,omitempty"`
+	Domain    *model.AppDomain   `json:"domain,omitempty"`
+	Diagnosis appDomainDiagnosis `json:"diagnosis"`
+}
+
 func (c *CLI) newDomainCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "domain",
@@ -40,6 +51,8 @@ func (c *CLI) newDomainCommand() *cobra.Command {
 		c.newDomainCheckCommand(),
 		c.newDomainAddCommand(),
 		c.newDomainVerifyCommand(),
+		c.newDomainDiagnoseCommand(),
+		c.newDomainRepairCommand(),
 		c.newDomainRemoveCommand(),
 	)
 	return cmd
@@ -320,6 +333,60 @@ func (c *CLI) newDomainVerifyCommand() *cobra.Command {
 	}
 }
 
+func (c *CLI) newDomainDiagnoseCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:     "diagnose <app> <hostname>",
+		Aliases: []string{"diagnosis"},
+		Short:   "Show DNS, TLS, and shared certificate health for a custom domain",
+		Args:    cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			response, err := client.GetAppDomainDiagnosis(app.ID, args[1])
+			if err != nil {
+				return err
+			}
+			return c.renderDomainDiagnosis(domainDiagnosisResult{
+				AppID:     app.ID,
+				Diagnosis: response.Diagnosis,
+			})
+		},
+	}
+}
+
+func (c *CLI) newDomainRepairCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "repair <app> <hostname>",
+		Short: "Re-verify and repair a custom domain's DNS and shared TLS state",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			response, err := client.RepairAppDomain(app.ID, args[1])
+			if err != nil {
+				return err
+			}
+			return c.renderDomainRepair(domainRepairResult{
+				AppID:     app.ID,
+				Domain:    &response.Domain,
+				Diagnosis: response.Diagnosis,
+			})
+		},
+	}
+}
+
 func (c *CLI) newDomainRemoveCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:     "delete <app> <hostname>",
@@ -362,6 +429,12 @@ func (c *CLI) renderDomainMutation(result domainMutationResult) error {
 		if value := strings.TrimSpace(result.Domain.Status); value != "" {
 			pairs = append(pairs, kvPair{Key: "status", Value: value})
 		}
+		if value := strings.TrimSpace(result.Domain.DNSStatus); value != "" {
+			pairs = append(pairs, kvPair{Key: "dns_status", Value: value})
+		}
+		if value := strings.TrimSpace(result.Domain.DNSRecordKind); value != "" {
+			pairs = append(pairs, kvPair{Key: "dns_record_kind", Value: value})
+		}
 		if value := strings.TrimSpace(result.Domain.TLSStatus); value != "" {
 			pairs = append(pairs, kvPair{Key: "tls_status", Value: value})
 		}
@@ -391,4 +464,64 @@ func (c *CLI) renderDomainMutation(result domainMutationResult) error {
 		pairs = append(pairs, kvPair{Key: "removed", Value: "true"})
 	}
 	return writeKeyValues(c.stdout, pairs...)
+}
+
+func (c *CLI) renderDomainDiagnosis(result domainDiagnosisResult) error {
+	if c.wantsJSON() {
+		return writeJSON(c.stdout, result)
+	}
+	pairs := []kvPair{
+		{Key: "app_id", Value: result.AppID},
+		{Key: "hostname", Value: result.Diagnosis.Domain.Hostname},
+		{Key: "status", Value: strings.TrimSpace(result.Diagnosis.Domain.Status)},
+		{Key: "dns_status", Value: strings.TrimSpace(result.Diagnosis.Domain.DNSStatus)},
+		{Key: "dns_record_kind", Value: strings.TrimSpace(result.Diagnosis.Domain.DNSRecordKind)},
+		{Key: "tls_status", Value: strings.TrimSpace(result.Diagnosis.Domain.TLSStatus)},
+		{Key: "route_target", Value: strings.TrimSpace(result.Diagnosis.Domain.RouteTarget)},
+		{Key: "dns_verified", Value: fmt.Sprintf("%t", result.Diagnosis.DNSObservation.Verified)},
+		{Key: "dns_record_kind_observed", Value: strings.TrimSpace(result.Diagnosis.DNSObservation.RecordKind)},
+		{Key: "dns_cname", Value: strings.TrimSpace(result.Diagnosis.DNSObservation.CNAME)},
+		{Key: "dns_matched_target", Value: strings.TrimSpace(result.Diagnosis.DNSObservation.MatchedTarget)},
+		{Key: "dns_message", Value: strings.TrimSpace(result.Diagnosis.DNSObservation.Message)},
+		{Key: "shared_tls_certificate_present", Value: fmt.Sprintf("%t", result.Diagnosis.SharedTLSCertificate.Present)},
+		{Key: "shared_tls_certificate_sha256", Value: strings.TrimSpace(result.Diagnosis.SharedTLSCertificate.CertificateSHA256)},
+		{Key: "shared_tls_issuer_storage", Value: strings.TrimSpace(result.Diagnosis.SharedTLSCertificate.IssuerStorage)},
+	}
+	if len(result.Diagnosis.DNSTargets) > 0 {
+		pairs = append(pairs, kvPair{Key: "dns_targets", Value: strings.Join(result.Diagnosis.DNSTargets, ", ")})
+	}
+	for _, check := range result.Diagnosis.Checks {
+		name := strings.TrimSpace(check.Name)
+		if name == "" {
+			continue
+		}
+		value := strings.TrimSpace(check.Status)
+		if msg := strings.TrimSpace(check.Message); msg != "" {
+			value += " (" + msg + ")"
+		}
+		pairs = append(pairs, kvPair{Key: "check_" + name, Value: value})
+	}
+	if len(result.Diagnosis.RecommendedActions) > 0 {
+		pairs = append(pairs, kvPair{Key: "recommended_actions", Value: strings.Join(result.Diagnosis.RecommendedActions, " | ")})
+	}
+	return writeKeyValues(c.stdout, pairs...)
+}
+
+func (c *CLI) renderDomainRepair(result domainRepairResult) error {
+	if c.wantsJSON() {
+		return writeJSON(c.stdout, result)
+	}
+	if err := c.renderDomainMutation(domainMutationResult{
+		AppID:  result.AppID,
+		Domain: result.Domain,
+	}); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(c.stdout); err != nil {
+		return err
+	}
+	return c.renderDomainDiagnosis(domainDiagnosisResult{
+		AppID:     result.AppID,
+		Diagnosis: result.Diagnosis,
+	})
 }

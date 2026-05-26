@@ -140,6 +140,9 @@ edge:
     tlsMode: "off"
     tlsAskURL: ""
     proxyListenAddr: 127.0.0.1:7833
+    dataDir: /data/caddy
+    sharedTLS:
+      enabled: true
     publicHostPorts:
       enabled: false
       http: 80

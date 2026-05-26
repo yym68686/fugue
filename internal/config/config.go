@@ -142,6 +142,8 @@ type EdgeConfig struct {
 	CaddyTLSMode               string
 	CaddyTLSAskURL             string
 	CaddyProxyListenAddr       string
+	CaddyDataDir               string
+	CaddySharedTLSEnabled      bool
 	CaddyStaticTLSCertFile     string
 	CaddyStaticTLSKeyFile      string
 	BundleSigningKey           string
@@ -343,6 +345,8 @@ func EdgeFromEnv() EdgeConfig {
 		CaddyTLSMode:               getenv("FUGUE_EDGE_CADDY_TLS_MODE", "off"),
 		CaddyTLSAskURL:             strings.TrimSpace(os.Getenv("FUGUE_EDGE_CADDY_TLS_ASK_URL")),
 		CaddyProxyListenAddr:       getenv("FUGUE_EDGE_PROXY_LISTEN_ADDR", "127.0.0.1:7833"),
+		CaddyDataDir:               getenv("FUGUE_EDGE_CADDY_DATA_DIR", "/data/caddy"),
+		CaddySharedTLSEnabled:      getenvBool("FUGUE_EDGE_CADDY_SHARED_TLS_ENABLED", true),
 		CaddyStaticTLSCertFile:     strings.TrimSpace(os.Getenv("FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE")),
 		CaddyStaticTLSKeyFile:      strings.TrimSpace(os.Getenv("FUGUE_EDGE_CADDY_STATIC_TLS_KEY_FILE")),
 		BundleSigningKey:           strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_KEY")),

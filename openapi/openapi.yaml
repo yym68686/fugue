@@ -900,6 +900,49 @@ paths:
                 $ref: "#/components/schemas/DNSDelegationPreflightResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/edge/domains/{hostname}/tls-bundle:
+    get:
+      operationId: getEdgeTLSCertificateBundle
+      summary: Get Edge TLS Certificate Bundle
+      tags: [Edge]
+      x-fugue-handler: handleGetEdgeTLSCertificateBundle
+      security:
+        - EdgeToken: []
+      parameters:
+        - $ref: "#/components/parameters/HostnamePathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeTLSCertificateBundleResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      operationId: putEdgeTLSCertificateBundle
+      summary: Put Edge TLS Certificate Bundle
+      tags: [Edge]
+      x-fugue-handler: handlePutEdgeTLSCertificateBundle
+      security:
+        - EdgeToken: []
+      parameters:
+        - $ref: "#/components/parameters/HostnamePathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EdgeTLSCertificateBundleInput"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeTLSCertificateBundlePutResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/edge/domains/tls-report:
     post:
       operationId: edgeDomainTLSReport
@@ -909,20 +952,18 @@ paths:
       security:
         - EdgeToken: []
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: true
+              $ref: "#/components/schemas/EdgeDomainTLSReportRequest"
       responses:
         '200':
           description: Successful response
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/EdgeDomainTLSReportResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/tenants:
@@ -2999,6 +3040,51 @@ paths:
                 $ref: "#/components/schemas/AppDomainVerifyResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/domains/diagnosis:
+    get:
+      operationId: getAppDomainDiagnosis
+      summary: Get App Domain Diagnosis
+      tags: [Apps]
+      x-fugue-handler: handleGetAppDomainDiagnosis
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/HostnameQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDomainDiagnosisResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/domains/repair:
+    post:
+      operationId: repairAppDomain
+      summary: Repair App Domain
+      tags: [Apps]
+      x-fugue-handler: handleRepairAppDomain
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppDomainRepairRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppDomainRepairResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/route/availability:
     get:
       operationId: getAppRouteAvailability
@@ -4953,6 +5039,12 @@ components:
       in: query
       name: hostname
       required: false
+      schema:
+        type: string
+    HostnamePathParam:
+      in: path
+      name: hostname
+      required: true
       schema:
         type: string
     PathPrefixQueryParam:
@@ -7313,6 +7405,12 @@ components:
           type: string
         status:
           type: string
+        dns_status:
+          type: string
+          enum: [pending, ready, error]
+        dns_record_kind:
+          type: string
+          enum: [none, cname, flattened]
         tls_status:
           type: string
         verification_txt_name:
@@ -7323,9 +7421,14 @@ components:
           type: string
         last_message:
           type: string
+        dns_last_message:
+          type: string
         tls_last_message:
           type: string
         last_checked_at:
+          type: string
+          format: date-time
+        dns_last_checked_at:
           type: string
           format: date-time
         verified_at:
@@ -11551,6 +11654,29 @@ components:
           $ref: "#/components/schemas/AppDomain"
         verified:
           type: boolean
+    AppDomainDiagnosisResponse:
+      type: object
+      additionalProperties: false
+      required: [diagnosis]
+      properties:
+        diagnosis:
+          $ref: "#/components/schemas/AppDomainDiagnosis"
+    AppDomainRepairRequest:
+      type: object
+      additionalProperties: false
+      required: [hostname]
+      properties:
+        hostname:
+          type: string
+    AppDomainRepairResponse:
+      type: object
+      additionalProperties: false
+      required: [domain, diagnosis]
+      properties:
+        domain:
+          $ref: "#/components/schemas/AppDomain"
+        diagnosis:
+          $ref: "#/components/schemas/AppDomainDiagnosis"
     AppDomainAvailabilityResponse:
       type: object
       additionalProperties: false
@@ -11565,6 +11691,176 @@ components:
       properties:
         availability:
           $ref: "#/components/schemas/AppRouteAvailability"
+    EdgeDomainTLSReportRequest:
+      type: object
+      additionalProperties: false
+      required: [hostname, tls_status]
+      properties:
+        hostname:
+          type: string
+        tls_status:
+          type: string
+          enum: [pending, ready, error]
+        tls_last_message:
+          type: string
+        certificate_pem:
+          type: string
+        private_key_pem:
+          type: string
+        metadata_json:
+          type: string
+        issuer_storage:
+          type: string
+    EdgeDomainTLSReportResponse:
+      type: object
+      additionalProperties: false
+      required: [domain]
+      properties:
+        domain:
+          $ref: "#/components/schemas/AppDomain"
+    EdgeTLSCertificateBundleInput:
+      type: object
+      additionalProperties: false
+      required: [certificate_pem, private_key_pem]
+      properties:
+        certificate_pem:
+          type: string
+        private_key_pem:
+          type: string
+        metadata_json:
+          type: string
+        issuer_storage:
+          type: string
+    EdgeTLSCertificateBundleResponse:
+      type: object
+      additionalProperties: false
+      required: [certificate]
+      properties:
+        certificate:
+          $ref: "#/components/schemas/EdgeTLSCertificate"
+    EdgeTLSCertificateBundlePutResponse:
+      type: object
+      additionalProperties: false
+      required: [certificate, domain]
+      properties:
+        certificate:
+          $ref: "#/components/schemas/EdgeTLSCertificate"
+        domain:
+          $ref: "#/components/schemas/AppDomain"
+    EdgeTLSCertificateSummary:
+      type: object
+      additionalProperties: false
+      required: [present]
+      properties:
+        present:
+          type: boolean
+        certificate_sha256:
+          type: string
+        not_after:
+          type: string
+          format: date-time
+        issuer_storage:
+          type: string
+        uploaded_by_edge_id:
+          type: string
+        uploaded_by_edge_group_id:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+    AppDomainDNSObservation:
+      type: object
+      additionalProperties: false
+      required: [verified]
+      properties:
+        verified:
+          type: boolean
+        record_kind:
+          type: string
+        cname:
+          type: string
+        matched_target:
+          type: string
+        host_ips:
+          type: array
+          items:
+            type: string
+        target_ips:
+          type: array
+          items:
+            type: string
+        message:
+          type: string
+    AppDomainDiagnosticCheck:
+      type: object
+      additionalProperties: false
+      required: [name, status]
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+        message:
+          type: string
+        repairable:
+          type: boolean
+    AppDomainDiagnosis:
+      type: object
+      additionalProperties: false
+      required: [domain, dns_targets, dns_observation, shared_tls_certificate, checks]
+      properties:
+        domain:
+          $ref: "#/components/schemas/AppDomain"
+        dns_targets:
+          type: array
+          items:
+            type: string
+        dns_observation:
+          $ref: "#/components/schemas/AppDomainDNSObservation"
+        shared_tls_certificate:
+          $ref: "#/components/schemas/EdgeTLSCertificateSummary"
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppDomainDiagnosticCheck"
+        recommended_actions:
+          type: array
+          items:
+            type: string
+    EdgeTLSCertificate:
+      type: object
+      additionalProperties: false
+      required: [hostname, certificate_pem, private_key_pem, created_at, updated_at]
+      properties:
+        hostname:
+          type: string
+        tenant_id:
+          type: string
+        app_id:
+          type: string
+        certificate_pem:
+          type: string
+        private_key_pem:
+          type: string
+        metadata_json:
+          type: string
+        issuer_storage:
+          type: string
+        certificate_sha256:
+          type: string
+        not_after:
+          type: string
+          format: date-time
+        uploaded_by_edge_id:
+          type: string
+        uploaded_by_edge_group_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
     AppNetworkMode:
       type: string
       description: |

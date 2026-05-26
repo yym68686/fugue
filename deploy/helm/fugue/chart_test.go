@@ -707,10 +707,15 @@ func TestEdgeCaddyShadowCanBeEnabledWithoutPublicPorts(t *testing.T) {
 		`value: "off"`,
 		`name: FUGUE_EDGE_PROXY_LISTEN_ADDR`,
 		`value: "127.0.0.1:7833"`,
+		`name: FUGUE_EDGE_CADDY_DATA_DIR`,
+		`value: "/data/caddy"`,
+		`name: FUGUE_EDGE_CADDY_SHARED_TLS_ENABLED`,
+		`value: "true"`,
 		`admin 127.0.0.1:2019`,
 		`name: caddy-config`,
 		`name: caddy-data`,
 		`path: "/var/lib/fugue/edge/caddy-data"`,
+		`mountPath: "/data"`,
 		`type: DirectoryOrCreate`,
 	} {
 		if !strings.Contains(doc, want) {
@@ -1334,6 +1339,11 @@ dns:
 		`name: https-canary`,
 		`hostPort: 443`,
 		`path: "/var/lib/fugue/edge/caddy-data"`,
+		`mountPath: /data`,
+		`name: FUGUE_EDGE_CADDY_DATA_DIR`,
+		`value: "/data/caddy"`,
+		`name: FUGUE_EDGE_CADDY_SHARED_TLS_ENABLED`,
+		`value: "true"`,
 	} {
 		if !strings.Contains(edgeDoc, want) {
 			t.Fatalf("country-de edge daemonset missing %q:\n%s", want, edgeDoc)

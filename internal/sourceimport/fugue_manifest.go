@@ -148,8 +148,18 @@ type fugueManifestDomain struct {
 }
 
 type fugueManifestEntrypoint struct {
-	Name        string `yaml:"name"`
-	Domain      string `yaml:"domain"`
+	Name        string                         `yaml:"name"`
+	Domain      string                         `yaml:"domain"`
+	Path        string                         `yaml:"path"`
+	PathPrefix  string                         `yaml:"path_prefix"`
+	Backend     string                         `yaml:"backend"`
+	Service     string                         `yaml:"service"`
+	StripPrefix bool                           `yaml:"strip_prefix"`
+	Rewrite     string                         `yaml:"rewrite"`
+	Routes      []fugueManifestEntrypointRoute `yaml:"routes"`
+}
+
+type fugueManifestEntrypointRoute struct {
 	Path        string `yaml:"path"`
 	PathPrefix  string `yaml:"path_prefix"`
 	Backend     string `yaml:"backend"`
@@ -1089,17 +1099,6 @@ func resolveFugueManifestEntrypoints(raw []fugueManifestEntrypoint, services []C
 			name = fmt.Sprintf("entrypoint-%d", index+1)
 		}
 		domainRef := firstNonEmptyString(item.Domain)
-		path := normalizeFugueManifestPathPrefix(firstNonEmptyString(item.PathPrefix, item.Path))
-		backend := slugifyOptional(firstNonEmptyString(item.Backend, item.Service))
-		if backend == "" {
-			backend = slugifyOptional(primaryService)
-		}
-		if backend == "" {
-			return nil, nil, fmt.Errorf("entrypoints[%d].backend is required", index)
-		}
-		if _, ok := serviceNames[backend]; !ok {
-			return nil, nil, fmt.Errorf("entrypoints[%d].backend references unknown service %q", index, backend)
-		}
 		if domainRef == "" && len(domains) == 1 {
 			domainRef = domains[0].Name
 		}
@@ -1108,12 +1107,6 @@ func resolveFugueManifestEntrypoints(raw []fugueManifestEntrypoint, services []C
 				domainRef = domain.Name
 			}
 		}
-		key := name + "\x00" + domainRef + "\x00" + path + "\x00" + backend
-		if _, ok := seen[key]; ok {
-			warnings = append(warnings, fmt.Sprintf("entrypoints[%d] duplicates entrypoint %q for backend %q", index, name, backend))
-			continue
-		}
-		seen[key] = struct{}{}
 		if domainRef != "" {
 			if _, ok := domainNames[domainRef]; !ok {
 				if _, ok := domainHosts[normalizeFugueManifestHostname(domainRef)]; !ok {
@@ -1121,16 +1114,51 @@ func resolveFugueManifestEntrypoints(raw []fugueManifestEntrypoint, services []C
 				}
 			}
 		}
-		out = append(out, TopologyEntrypoint{
-			Name:   name,
-			Domain: domainRef,
-			Routes: []TopologyEntrypointRoute{{
+		routes := item.Routes
+		if len(routes) == 0 {
+			routes = []fugueManifestEntrypointRoute{{
+				Path:        item.Path,
+				PathPrefix:  item.PathPrefix,
+				Backend:     item.Backend,
+				Service:     item.Service,
+				StripPrefix: item.StripPrefix,
+				Rewrite:     item.Rewrite,
+			}}
+		}
+		normalizedRoutes := make([]TopologyEntrypointRoute, 0, len(routes))
+		for routeIndex, route := range routes {
+			path := normalizeFugueManifestPathPrefix(firstNonEmptyString(route.PathPrefix, route.Path))
+			backend := slugifyOptional(firstNonEmptyString(route.Backend, route.Service))
+			if backend == "" {
+				backend = slugifyOptional(primaryService)
+			}
+			if backend == "" {
+				return nil, nil, fmt.Errorf("entrypoints[%d].routes[%d].backend is required", index, routeIndex)
+			}
+			if _, ok := serviceNames[backend]; !ok {
+				return nil, nil, fmt.Errorf("entrypoints[%d].routes[%d].backend references unknown service %q", index, routeIndex, backend)
+			}
+			key := name + "\x00" + domainRef + "\x00" + path + "\x00" + backend
+			if _, ok := seen[key]; ok {
+				warnings = append(warnings, fmt.Sprintf("entrypoints[%d] duplicates entrypoint %q for backend %q", index, name, backend))
+				continue
+			}
+			seen[key] = struct{}{}
+			normalizedRoutes = append(normalizedRoutes, TopologyEntrypointRoute{
 				Path:        path,
 				PathPrefix:  path,
 				Service:     backend,
-				StripPrefix: item.StripPrefix,
-				Rewrite:     strings.TrimSpace(item.Rewrite),
-			}},
+				StripPrefix: route.StripPrefix,
+				Rewrite:     strings.TrimSpace(route.Rewrite),
+			})
+		}
+		if len(normalizedRoutes) == 0 {
+			continue
+		}
+		out = append(out, TopologyEntrypoint{
+			Name:   name,
+			Domain: domainRef,
+			Routes: normalizedRoutes,
 		})
 	}
 	return out, warnings, nil
