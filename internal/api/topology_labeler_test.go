@@ -299,6 +299,8 @@ func TestUpgradeScriptBlocksOnSelfOrganizingPreflight(t *testing.T) {
 		"dns.tokenSecret.name",
 		"/v1/admin/platform/autonomy/status",
 		"control-plane store promotion gate is blocked",
+		"if route_bootstrap_groups and group_id not in route_bootstrap_groups:",
+		"return healthy_count > 0 or len(bootstrap_pending) > 0, bootstrap_pending",
 		"for name in (\"discovery_bundle\", \"node_policy\", \"edge\", \"dns\", \"registry\", \"headscale\", \"restore_readiness\", \"route_fallback\")",
 		"run_release_preflight",
 	} {

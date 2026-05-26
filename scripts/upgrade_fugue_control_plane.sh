@@ -1586,14 +1586,16 @@ def edge_inventory_healthy(nodes):
 
 def dns_node_route_bootstrap_capable(node, route_bootstrap_groups):
     group_id = trim(node.get("edge_group_id"))
-    if group_id == "" or group_id not in route_bootstrap_groups:
-        return False
-    if node.get("healthy") and trim(node.get("status")).lower() == "healthy":
+    if not node.get("healthy"):
         return False
     last_error = trim(node.get("last_error")).lower()
-    if "edge dns bundle invariant failed" in last_error or "without active route" in last_error or "no active route" in last_error:
-        return True
-    return False
+    if not ("edge dns bundle invariant failed" in last_error or "without active route" in last_error or "no active route" in last_error):
+        return False
+    if group_id == "":
+        return False
+    if route_bootstrap_groups and group_id not in route_bootstrap_groups:
+        return False
+    return True
 
 def dns_inventory_bootstrap_healthy(nodes, route_bootstrap_groups):
     if not nodes:
@@ -1608,7 +1610,7 @@ def dns_inventory_bootstrap_healthy(nodes, route_bootstrap_groups):
             bootstrap_pending.append(trim(node.get("id")))
             continue
         return False, bootstrap_pending
-    return healthy_count > 0, bootstrap_pending
+    return healthy_count > 0 or len(bootstrap_pending) > 0, bootstrap_pending
 
 status_path = sys.argv[1]
 nodes_path = sys.argv[2]
