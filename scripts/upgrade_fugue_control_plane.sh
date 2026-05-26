@@ -2552,7 +2552,8 @@ prepare_control_plane_automation_ssh() {
      use_local_control_plane_automation_bundle_from_dir "${LOCAL_CONTROL_PLANE_AUTOMATION_DIR}"; then
     return
   fi
-  fail "missing local control-plane automation bundle on this server; run scripts/bootstrap_control_plane_automation.sh or scripts/install_fugue_ha.sh to install it"
+  log_stderr "missing local control-plane automation bundle on this server; run scripts/bootstrap_control_plane_automation.sh or scripts/install_fugue_ha.sh to install it"
+  return 1
 }
 
 load_control_plane_hosts_env() {
@@ -2709,7 +2710,9 @@ run_primary_host_root_command() {
     log_stderr "local primary host ${primary_node_name} requires interactive sudo; falling back to automation SSH"
   fi
 
-  prepare_control_plane_automation_ssh
+  if ! prepare_control_plane_automation_ssh; then
+    fail "missing local control-plane automation bundle on this server; run scripts/bootstrap_control_plane_automation.sh or scripts/install_fugue_ha.sh to install it"
+  fi
   build_primary_control_plane_ssh_opts "${primary_node_name}"
   ssh -n "${PRIMARY_CONTROL_PLANE_SSH_OPTS[@]}" "$(primary_control_plane_ssh_login)" \
     "sudo -n bash -lc $(printf '%q' "${cmd}")"
@@ -3547,7 +3550,10 @@ sync_route_a_edge_proxy() {
     return 0
   fi
 
-  prepare_control_plane_automation_ssh
+  if ! prepare_control_plane_automation_ssh; then
+    log "warning: Route A edge proxy sync skipped because local control-plane automation SSH is unavailable"
+    return 0
+  fi
   export FUGUE_DOMAIN="${FUGUE_API_PUBLIC_DOMAIN}"
   log "syncing Route A edge proxy through scripts/sync_fugue_edge_proxy.sh"
   if ! bash ./scripts/sync_fugue_edge_proxy.sh; then
