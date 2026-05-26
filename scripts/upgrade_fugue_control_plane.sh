@@ -2515,6 +2515,15 @@ restore_local_control_plane_automation_bundle_from_secret() {
   return 0
 }
 
+bootstrap_local_control_plane_automation_bundle() {
+  if [[ ! -x "./scripts/bootstrap_control_plane_automation.sh" ]]; then
+    return 1
+  fi
+
+  log_stderr "bootstrapping control-plane automation SSH bundle on this server"
+  bash ./scripts/bootstrap_control_plane_automation.sh
+}
+
 prepare_control_plane_automation_ssh() {
   if [[ -n "${FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE:-}" && -r "${FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE}" ]] && \
      [[ -n "${FUGUE_CONTROL_PLANE_SSH_KEY_FILE:-}" && -r "${FUGUE_CONTROL_PLANE_SSH_KEY_FILE}" ]] && \
@@ -2537,6 +2546,10 @@ prepare_control_plane_automation_ssh() {
   if [[ "${LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR}" != "${LOCAL_CONTROL_PLANE_AUTOMATION_DIR}" ]] && \
      restore_local_control_plane_automation_bundle_from_secret "${LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR}" && \
      use_local_control_plane_automation_bundle_from_dir "${LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR}"; then
+    return
+  fi
+  if bootstrap_local_control_plane_automation_bundle && \
+     use_local_control_plane_automation_bundle_from_dir "${LOCAL_CONTROL_PLANE_AUTOMATION_DIR}"; then
     return
   fi
   fail "missing local control-plane automation bundle on this server; run scripts/bootstrap_control_plane_automation.sh or scripts/install_fugue_ha.sh to install it"
