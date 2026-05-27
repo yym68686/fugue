@@ -1215,6 +1215,67 @@ paths:
                 $ref: "#/components/schemas/ProjectDeleteResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/projects/{id}/routes:
+    get:
+      operationId: getProjectRoutes
+      summary: Get Project Route Table
+      tags: [Projects]
+      x-fugue-handler: handleGetProjectRoutes
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectRouteTableResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      operationId: putProjectRoutes
+      summary: Replace Project Route Table
+      tags: [Projects]
+      x-fugue-handler: handlePutProjectRoutes
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PutProjectRouteTableRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectRouteTableResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deleteProjectRoutes
+      summary: Delete Project Route Table
+      tags: [Projects]
+      x-fugue-handler: handleDeleteProjectRoutes
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectRouteTableDeleteResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/projects/{id}/split-plan:
     post:
       operationId: planProjectSplit
@@ -9168,6 +9229,108 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/TopologyEntrypointRoute"
+    ProjectRouteDomain:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        hostname:
+          type: string
+        host:
+          type: string
+        tls:
+          type: string
+        owner_service:
+          type: string
+        owner_app_id:
+          type: string
+    ProjectRouteEntrypointRoute:
+      type: object
+      additionalProperties: false
+      properties:
+        path:
+          type: string
+        path_prefix:
+          type: string
+        service:
+          type: string
+        app_id:
+          type: string
+        strip_prefix:
+          type: boolean
+        rewrite:
+          type: string
+    ProjectRouteEntrypoint:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        domain:
+          type: string
+        routes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProjectRouteEntrypointRoute"
+    ProjectRouteBinding:
+      type: object
+      additionalProperties: false
+      properties:
+        hostname:
+          type: string
+        path_prefix:
+          type: string
+        public_url:
+          type: string
+        domain_name:
+          type: string
+        entrypoint_name:
+          type: string
+        service:
+          type: string
+        app_id:
+          type: string
+        app_name:
+          type: string
+        service_port:
+          type: integer
+          format: int32
+        tls:
+          type: string
+        strip_prefix:
+          type: boolean
+        rewrite:
+          type: string
+    ProjectRouteTable:
+      type: object
+      additionalProperties: false
+      required: [project_id, tenant_id, domains, entrypoints, bindings]
+      properties:
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        domains:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProjectRouteDomain"
+        entrypoints:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProjectRouteEntrypoint"
+        bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProjectRouteBinding"
+        legacy:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
     ImportServiceDetail:
       type: object
       additionalProperties: false
@@ -9301,6 +9464,38 @@ components:
       properties:
         project:
           $ref: "#/components/schemas/Project"
+    PutProjectRouteTableRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        domains:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProjectRouteDomain"
+        entrypoints:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProjectRouteEntrypoint"
+    ProjectRouteTableResponse:
+      type: object
+      additionalProperties: false
+      required: [project, route_table]
+      properties:
+        project:
+          $ref: "#/components/schemas/Project"
+        route_table:
+          $ref: "#/components/schemas/ProjectRouteTable"
+    ProjectRouteTableDeleteResponse:
+      type: object
+      additionalProperties: false
+      required: [project, route_table, deleted]
+      properties:
+        project:
+          $ref: "#/components/schemas/Project"
+        route_table:
+          $ref: "#/components/schemas/ProjectRouteTable"
+        deleted:
+          type: boolean
     ProjectMovePlanResponse:
       type: object
       additionalProperties: false

@@ -19,8 +19,13 @@ metadata:
   name: {{ include "fugue.headscaleServiceName" . }}
   labels:
     {{- include "fugue.componentLabels" (dict "root" . "component" "headscale") | nindent 4 }}
+    fugue.io/rollout-subsystem: mesh-control
+    fugue.io/rollout-mode: isolated-singleton
+    fugue.io/downtime-class: join-plane-gate
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "headscale") | nindent 6 }}
@@ -28,6 +33,9 @@ spec:
     metadata:
       labels:
         {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "headscale") | nindent 8 }}
+        fugue.io/rollout-subsystem: mesh-control
+        fugue.io/rollout-mode: isolated-singleton
+        fugue.io/downtime-class: join-plane-gate
       annotations:
         checksum/headscale-config: {{ include (print $.Template.BasePath "/headscale-config.yaml") . | sha256sum }}
     spec:

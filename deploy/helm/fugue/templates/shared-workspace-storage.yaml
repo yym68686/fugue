@@ -14,6 +14,9 @@ metadata:
   name: {{ include "fugue.sharedWorkspaceNFSName" . }}
   labels:
     {{- include "fugue.componentLabels" (dict "root" . "component" "shared-workspace-nfs") | nindent 4 }}
+    fugue.io/rollout-subsystem: shared-workspace-storage
+    fugue.io/rollout-mode: isolated-singleton
+    fugue.io/downtime-class: downtime-required
 spec:
   replicas: 1
   strategy:
@@ -25,6 +28,9 @@ spec:
     metadata:
       labels:
         {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "shared-workspace-nfs") | nindent 8 }}
+        fugue.io/rollout-subsystem: shared-workspace-storage
+        fugue.io/rollout-mode: isolated-singleton
+        fugue.io/downtime-class: downtime-required
     spec:
       serviceAccountName: {{ include "fugue.serviceAccountName" . }}
       {{- if .Values.sharedWorkspaceStorage.server.controlPlaneSingletonNodeSelector }}
@@ -144,8 +150,13 @@ metadata:
   name: {{ include "fugue.sharedWorkspaceProvisionerName" . }}
   labels:
     {{- include "fugue.componentLabels" (dict "root" . "component" "shared-workspace-provisioner") | nindent 4 }}
+    fugue.io/rollout-subsystem: shared-workspace-storage
+    fugue.io/rollout-mode: isolated-singleton
+    fugue.io/downtime-class: provisioner-gate
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "shared-workspace-provisioner") | nindent 6 }}
@@ -153,6 +164,9 @@ spec:
     metadata:
       labels:
         {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "shared-workspace-provisioner") | nindent 8 }}
+        fugue.io/rollout-subsystem: shared-workspace-storage
+        fugue.io/rollout-mode: isolated-singleton
+        fugue.io/downtime-class: provisioner-gate
     spec:
       serviceAccountName: {{ include "fugue.serviceAccountName" . }}
       {{- if .Values.sharedWorkspaceStorage.provisioner.controlPlaneSingletonNodeSelector }}

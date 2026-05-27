@@ -863,6 +863,31 @@ rollout_daemonset_status() {
   ${KUBECTL} -n "${FUGUE_NAMESPACE}" rollout status "ds/${daemonset_name}" --timeout="${FUGUE_ROLLOUT_TIMEOUT}"
 }
 
+daemonset_names_by_component_prefix() {
+  local component_prefix="$1"
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get ds \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.app\.kubernetes\.io/component}{"\n"}{end}' 2>/dev/null |
+    awk -v prefix="${component_prefix}" '($2 == prefix || index($2, prefix "-") == 1) { print $1 }' |
+    sort
+}
+
+rollout_daemonsets_by_component_prefix() {
+  local component_prefix="$1"
+  local display_name="$2"
+  local daemonsets
+  daemonsets="$(daemonset_names_by_component_prefix "${component_prefix}")"
+  if [[ -z "${daemonsets}" ]]; then
+    log "${display_name} rollout check skipped; no matching daemonsets"
+    return 0
+  fi
+  local daemonset_name
+  while IFS= read -r daemonset_name; do
+    [[ -n "${daemonset_name}" ]] || continue
+    log "waiting for ${display_name} daemonset ${daemonset_name}"
+    rollout_daemonset_status "${daemonset_name}" || return 1
+  done <<<"${daemonsets}"
+}
+
 cleanup_orphaned_regional_daemonsets() {
   local daemonset_name=""
   local component=""
@@ -4111,19 +4136,42 @@ PY
     fail "controller rollout failed"
   fi
 
-  if [[ "${FUGUE_EDGE_ENABLED}" == "true" ]] && daemonset_exists "${FUGUE_RELEASE_FULLNAME}-edge"; then
-    if ! rollout_daemonset_status "${FUGUE_RELEASE_FULLNAME}-edge"; then
+  for singleton in \
+    "${FUGUE_REGISTRY_DEPLOYMENT_NAME}" \
+    "${FUGUE_HEADSCALE_DEPLOYMENT_NAME}" \
+    "${FUGUE_SHARED_WORKSPACE_NFS_DEPLOYMENT_NAME}" \
+    "${FUGUE_SHARED_WORKSPACE_PROVISIONER_DEPLOYMENT_NAME}"; do
+    if deployment_exists "${singleton}"; then
+      log "waiting for isolated singleton dependency ${singleton}"
+      if ! rollout_status "${singleton}"; then
+        log "${singleton} rollout check failed; attempting rollback"
+        rollback_release || true
+        fail "${singleton} rollout failed"
+      fi
+    fi
+  done
+
+  if [[ "${FUGUE_EDGE_ENABLED}" == "true" ]]; then
+    if ! rollout_daemonsets_by_component_prefix "edge" "edge"; then
       log "edge rollout check failed; attempting rollback"
       rollback_release || true
       fail "edge rollout failed"
     fi
   fi
 
-  if [[ "${FUGUE_DNS_ENABLED}" == "true" ]] && daemonset_exists "${FUGUE_RELEASE_FULLNAME}-dns"; then
-    if ! rollout_daemonset_status "${FUGUE_RELEASE_FULLNAME}-dns"; then
+  if [[ "${FUGUE_DNS_ENABLED}" == "true" ]]; then
+    if ! rollout_daemonsets_by_component_prefix "dns" "dns"; then
       log "dns rollout check failed; attempting rollback"
       rollback_release || true
       fail "dns rollout failed"
+    fi
+  fi
+
+  if [[ "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]] && daemonset_exists "${FUGUE_RELEASE_FULLNAME}-image-cache"; then
+    if ! rollout_daemonset_status "${FUGUE_RELEASE_FULLNAME}-image-cache"; then
+      log "image cache rollout check failed; attempting rollback"
+      rollback_release || true
+      fail "image cache rollout failed"
     fi
   fi
 

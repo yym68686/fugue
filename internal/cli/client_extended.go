@@ -178,6 +178,12 @@ type projectImageUsageResponse struct {
 	Projects           []projectImageUsageSummary `json:"projects"`
 }
 
+type projectRouteTableResponse struct {
+	Project    model.Project           `json:"project"`
+	RouteTable model.ProjectRouteTable `json:"route_table"`
+	Deleted    bool                    `json:"deleted,omitempty"`
+}
+
 type backingServiceResponse struct {
 	BackingService model.BackingService `json:"backing_service"`
 }
@@ -708,6 +714,34 @@ func (c *Client) ListProjectImageUsage() (projectImageUsageResponse, error) {
 	var response projectImageUsageResponse
 	if err := c.doJSON(http.MethodGet, "/v1/projects/image-usage", nil, &response); err != nil {
 		return projectImageUsageResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) GetProjectRouteTable(projectID string) (projectRouteTableResponse, error) {
+	var response projectRouteTableResponse
+	if err := c.doJSON(http.MethodGet, path.Join("/v1/projects", projectID, "routes"), nil, &response); err != nil {
+		return projectRouteTableResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) PutProjectRouteTable(projectID string, table model.ProjectRouteTable) (projectRouteTableResponse, error) {
+	var response projectRouteTableResponse
+	request := map[string]any{
+		"domains":     table.Domains,
+		"entrypoints": table.Entrypoints,
+	}
+	if err := c.doJSON(http.MethodPut, path.Join("/v1/projects", projectID, "routes"), request, &response); err != nil {
+		return projectRouteTableResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) DeleteProjectRouteTable(projectID string) (projectRouteTableResponse, error) {
+	var response projectRouteTableResponse
+	if err := c.doJSON(http.MethodDelete, path.Join("/v1/projects", projectID, "routes"), nil, &response); err != nil {
+		return projectRouteTableResponse{}, err
 	}
 	return response, nil
 }

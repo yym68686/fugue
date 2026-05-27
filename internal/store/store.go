@@ -240,6 +240,7 @@ func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
 		state.Machines = deleteLegacyMachinesByTenant(state.Machines, id, deletedNodeKeyIDs)
 		state.Runtimes = deleteRuntimesByTenant(state.Runtimes, id, deletedNodeKeyIDs, deletedRuntimeIDs)
 		state.RuntimeGrants = deleteRuntimeAccessGrants(state.RuntimeGrants, id, deletedRuntimeIDs)
+		state.ProjectRouteTables = deleteProjectRouteTablesByTenant(state.ProjectRouteTables, id)
 		state.Apps = deleteAppsByTenant(state.Apps, id)
 		state.AppImageTrackings = deleteAppImageTrackingsByTenant(state.AppImageTrackings, id)
 		state.AppDatabaseImportJobs = deleteAppDatabaseImportJobsByTenant(state.AppDatabaseImportJobs, id)
@@ -2131,7 +2132,11 @@ func (s *Store) GetAppByRoutePrefix(hostname, pathPrefix string) (model.App, err
 	hostname = normalizeAppDomainHostname(hostname)
 	pathPrefix = model.NormalizeAppRoutePathPrefix(pathPrefix)
 	if s.usingDatabase() {
-		return s.pgGetAppByRoutePrefix(hostname, pathPrefix)
+		app, err := s.pgGetAppByRoutePrefix(hostname, pathPrefix)
+		if !errors.Is(err, ErrNotFound) {
+			return app, err
+		}
+		return s.pgGetAppByProjectRoute(hostname, pathPrefix, true)
 	}
 	var app model.App
 	err := s.withLockedState(false, func(state *model.State) error {
@@ -2150,6 +2155,12 @@ func (s *Store) GetAppByRoutePrefix(hostname, pathPrefix string) (model.App, err
 			hydrateAppBackingServices(state, &app)
 			return nil
 		}
+		if matched, ok := findAppByProjectRouteTables(state.Apps, state.ProjectRouteTables, hostname, pathPrefix, true); ok {
+			app = matched
+			normalizeAppStatusForRead(&app)
+			hydrateAppBackingServices(state, &app)
+			return nil
+		}
 		return ErrNotFound
 	})
 	return app, err
@@ -2159,7 +2170,11 @@ func (s *Store) GetAppByRoute(hostname, requestPath string) (model.App, error) {
 	hostname = normalizeAppDomainHostname(hostname)
 	requestPath = model.NormalizeAppRoutePathPrefix(requestPath)
 	if s.usingDatabase() {
-		return s.pgGetAppByRoute(hostname, requestPath)
+		app, err := s.pgGetAppByRoute(hostname, requestPath)
+		if !errors.Is(err, ErrNotFound) {
+			return app, err
+		}
+		return s.pgGetAppByProjectRoute(hostname, requestPath, false)
 	}
 	var (
 		app     model.App
@@ -2185,6 +2200,12 @@ func (s *Store) GetAppByRoute(hostname, requestPath string) (model.App, error) {
 			}
 		}
 		if !matched {
+			if matchedApp, ok := findAppByProjectRouteTables(state.Apps, state.ProjectRouteTables, hostname, requestPath, false); ok {
+				app = matchedApp
+				normalizeAppStatusForRead(&app)
+				hydrateAppBackingServices(state, &app)
+				return nil
+			}
 			return ErrNotFound
 		}
 		normalizeAppStatusForRead(&app)
@@ -4542,6 +4563,28 @@ func deleteProjectsByTenant(projects []model.Project, tenantID string) []model.P
 	return filtered
 }
 
+func deleteProjectRouteTablesByTenant(tables []model.ProjectRouteTable, tenantID string) []model.ProjectRouteTable {
+	filtered := tables[:0]
+	for _, table := range tables {
+		if table.TenantID == tenantID {
+			continue
+		}
+		filtered = append(filtered, table)
+	}
+	return filtered
+}
+
+func deleteProjectRouteTablesByProject(tables []model.ProjectRouteTable, projectID string) []model.ProjectRouteTable {
+	filtered := tables[:0]
+	for _, table := range tables {
+		if table.ProjectID == projectID {
+			continue
+		}
+		filtered = append(filtered, table)
+	}
+	return filtered
+}
+
 func deleteAppsByProject(apps []model.App, projectID string) []model.App {
 	filtered := apps[:0]
 	for _, app := range apps {
@@ -4988,6 +5031,7 @@ func deleteProjectFromState(state *model.State, projectID string) (model.Project
 	appIDs := appIDsForProject(state.Apps, projectID)
 	state.Projects = append(state.Projects[:index], state.Projects[index+1:]...)
 	state.ProjectRuntimeReservations = deleteProjectRuntimeReservationsByProject(state.ProjectRuntimeReservations, projectID)
+	state.ProjectRouteTables = deleteProjectRouteTablesByProject(state.ProjectRouteTables, projectID)
 	state.Apps = deleteAppsByProject(state.Apps, projectID)
 	state.ServiceBindings = deleteServiceBindingsByAppIDs(state.ServiceBindings, appIDs)
 	state.AppDatabaseImportJobs = deleteAppDatabaseImportJobsByAppIDs(state.AppDatabaseImportJobs, appIDs)

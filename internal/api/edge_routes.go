@@ -14,6 +14,7 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
+	"fugue/internal/store"
 )
 
 const defaultEdgeGroupID = "edge-group-default"
@@ -67,6 +68,10 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	if err != nil {
 		return model.EdgeRouteBundle{}, err
 	}
+	projectRouteTables, err := s.store.ListProjectRouteTables("", true)
+	if err != nil {
+		return model.EdgeRouteBundle{}, err
+	}
 	runtimes, err := s.store.ListRuntimes("", true)
 	if err != nil {
 		return model.EdgeRouteBundle{}, err
@@ -106,6 +111,16 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	appByID := make(map[string]model.App, len(apps))
 	for _, app := range apps {
 		appByID[strings.TrimSpace(app.ID)] = app
+	}
+	appsByProjectID := make(map[string][]model.App)
+	for _, app := range apps {
+		appsByProjectID[strings.TrimSpace(app.ProjectID)] = append(appsByProjectID[strings.TrimSpace(app.ProjectID)], app)
+	}
+	domainByHostname := make(map[string]model.AppDomain, len(domains))
+	for _, domain := range domains {
+		if hostname := normalizeExternalAppDomain(domain.Hostname); hostname != "" {
+			domainByHostname[hostname] = domain
+		}
 	}
 	policyByHostname := edgeRoutePolicyByHostname(policies)
 
@@ -169,6 +184,31 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		}
 	}
 
+	for _, table := range projectRouteTables {
+		bindings := store.TryCompileProjectRouteTableBindings(table, appsByProjectID[strings.TrimSpace(table.ProjectID)])
+		for _, routeBinding := range bindings {
+			app, ok := appByID[strings.TrimSpace(routeBinding.AppID)]
+			if !ok {
+				continue
+			}
+			hostname := normalizeExternalAppDomain(routeBinding.Hostname)
+			if hostname == "" {
+				continue
+			}
+			routeKind, tlsPolicy, domain, ok := s.projectRouteEdgePolicy(hostname, domainByHostname)
+			if !ok {
+				continue
+			}
+			binding := s.deriveEdgeRouteBindingForRoute(r, app, hostname, routeBinding.PathPrefix, routeBinding.ServicePort, routeKind, tlsPolicy, table.CreatedAt, table.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
+			binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
+			if domain != nil {
+				binding = applyCustomDomainReadiness(binding, *domain)
+			}
+			routes = append(routes, expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups)...)
+		}
+	}
+	routes = dedupeEdgeRouteBindings(routes)
+
 	sort.Slice(routes, func(i, j int) bool {
 		if routes[i].Hostname != routes[j].Hostname {
 			return routes[i].Hostname < routes[j].Hostname
@@ -213,6 +253,14 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 }
 
 func (s *Server) deriveEdgeRouteBinding(r *http.Request, app model.App, hostname, routeKind, tlsPolicy string, createdAt, updatedAt time.Time, runtimeByID map[string]model.Runtime, runtimeNodeLabelsByID map[string]map[string]string) model.EdgeRouteBinding {
+	pathPrefix := "/"
+	if routeKind == model.EdgeRouteKindPlatform && app.Route != nil {
+		pathPrefix = model.NormalizeAppRoutePathPrefix(app.Route.PathPrefix)
+	}
+	return s.deriveEdgeRouteBindingForRoute(r, app, hostname, pathPrefix, 0, routeKind, tlsPolicy, createdAt, updatedAt, runtimeByID, runtimeNodeLabelsByID)
+}
+
+func (s *Server) deriveEdgeRouteBindingForRoute(r *http.Request, app model.App, hostname, pathPrefix string, servicePort int, routeKind, tlsPolicy string, createdAt, updatedAt time.Time, runtimeByID map[string]model.Runtime, runtimeNodeLabelsByID map[string]map[string]string) model.EdgeRouteBinding {
 	runtimeID := appProxyRuntimeID(app)
 	runtimeObj, runtimeFound := runtimeByID[runtimeID]
 	edgeGroupID := derivedEdgeGroupIDForRuntime(runtimeObj, runtimeFound, runtimeNodeLabelsByID[runtimeID])
@@ -221,7 +269,9 @@ func (s *Server) deriveEdgeRouteBinding(r *http.Request, app model.App, hostname
 		fallbackEdgeGroupID = defaultEdgeGroupID
 	}
 	status, reason := edgeRouteStatus(app, runtimeID, runtimeFound)
-	servicePort := edgeServicePortForApp(app)
+	if servicePort <= 0 {
+		servicePort = edgeServicePortForApp(app)
+	}
 	upstream := s.edgeRouteUpstream(r.Context(), app, runtimeObj, runtimeFound)
 	if status == model.EdgeRouteStatusActive && upstream.Status != model.EdgeRouteStatusActive {
 		status = upstream.Status
@@ -230,7 +280,7 @@ func (s *Server) deriveEdgeRouteBinding(r *http.Request, app model.App, hostname
 
 	binding := model.EdgeRouteBinding{
 		Hostname:             normalizeExternalAppDomain(hostname),
-		PathPrefix:           "/",
+		PathPrefix:           model.NormalizeAppRoutePathPrefix(pathPrefix),
 		RouteKind:            routeKind,
 		AppID:                app.ID,
 		TenantID:             app.TenantID,
@@ -253,9 +303,6 @@ func (s *Server) deriveEdgeRouteBinding(r *http.Request, app model.App, hostname
 		CreatedAt:            createdAt,
 		UpdatedAt:            updatedAt,
 	}
-	if routeKind == model.EdgeRouteKindPlatform && app.Route != nil {
-		binding.PathPrefix = model.NormalizeAppRoutePathPrefix(app.Route.PathPrefix)
-	}
 	if binding.CachePolicyID != "" {
 		binding.CacheNamespace = edgeRouteCacheNamespace(app.ID, binding.DeploymentGeneration)
 	}
@@ -268,6 +315,42 @@ func (s *Server) deriveEdgeRouteBinding(r *http.Request, app model.App, hostname
 	}
 	binding.RouteGeneration = edgeRouteGeneration(binding)
 	return binding
+}
+
+func (s *Server) projectRouteEdgePolicy(hostname string, domainByHostname map[string]model.AppDomain) (string, string, *model.AppDomain, bool) {
+	hostname = normalizeExternalAppDomain(hostname)
+	if hostname == "" {
+		return "", "", nil, false
+	}
+	if s.projectRouteHostnameUsesPlatformTLS(hostname) {
+		if s.isPlatformOwnedDomainBinding(hostname) {
+			return model.EdgeRouteKindPlatformDomain, model.EdgeRouteTLSPolicyPlatform, nil, true
+		}
+		return model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, nil, true
+	}
+	domain, ok := domainByHostname[hostname]
+	if !ok || !s.managedEdgeCustomDomain(hostname) {
+		return "", "", nil, false
+	}
+	return model.EdgeRouteKindCustomDomain, model.EdgeRouteTLSPolicyCustomDomain, &domain, true
+}
+
+func dedupeEdgeRouteBindings(routes []model.EdgeRouteBinding) []model.EdgeRouteBinding {
+	if len(routes) < 2 {
+		return routes
+	}
+	indexByKey := make(map[string]int, len(routes))
+	out := make([]model.EdgeRouteBinding, 0, len(routes))
+	for _, route := range routes {
+		key := normalizeExternalAppDomain(route.Hostname) + "\x00" + model.NormalizeAppRoutePathPrefix(route.PathPrefix) + "\x00" + strings.TrimSpace(route.EdgeGroupID)
+		if index, exists := indexByKey[key]; exists {
+			out[index] = route
+			continue
+		}
+		indexByKey[key] = len(out)
+		out = append(out, route)
+	}
+	return out
 }
 
 func (s *Server) edgeRouteRuntimeNodeLabels(ctx context.Context) map[string]map[string]string {

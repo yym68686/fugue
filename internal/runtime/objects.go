@@ -440,18 +440,23 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 	templateMetadata := map[string]any{
 		"labels": labels,
 	}
-	if annotations := buildAppTemplateAnnotations(app.Spec); len(annotations) > 0 {
+	rolloutAnnotations := appRolloutAnnotations(app)
+	if annotations := mergeStringMaps(rolloutAnnotations, buildAppTemplateAnnotations(app.Spec)); len(annotations) > 0 {
 		templateMetadata["annotations"] = annotations
+	}
+	deploymentMetadata := map[string]any{
+		"name":      resourceName,
+		"namespace": namespace,
+		"labels":    labels,
+	}
+	if len(rolloutAnnotations) > 0 {
+		deploymentMetadata["annotations"] = rolloutAnnotations
 	}
 
 	object := map[string]any{
 		"apiVersion": "apps/v1",
 		"kind":       "Deployment",
-		"metadata": map[string]any{
-			"name":      resourceName,
-			"namespace": namespace,
-			"labels":    labels,
-		},
+		"metadata":   deploymentMetadata,
 		"spec": map[string]any{
 			"replicas": app.Spec.Replicas,
 			"strategy": deploymentStrategy(app),
@@ -1229,6 +1234,38 @@ func deploymentStrategy(app model.App) map[string]any {
 			"maxSurge":       1,
 		},
 	}
+}
+
+func appRolloutAnnotations(app model.App) map[string]string {
+	if normalizeRuntimeAppWorkspaceSpec(app) != nil || normalizeRuntimeAppPersistentStorageSpec(app) != nil {
+		return map[string]string{
+			"fugue.io/rollout-mode":    "isolated-singleton",
+			"fugue.io/downtime-class":  "downtime-required",
+			"fugue.io/rollout-reason":  "single-writer-storage",
+			"fugue.io/rollout-surface": "tenant-app",
+		}
+	}
+	return map[string]string{
+		"fugue.io/rollout-mode":    "rolling-update",
+		"fugue.io/downtime-class":  "online-required",
+		"fugue.io/rollout-surface": "tenant-app",
+	}
+}
+
+func mergeStringMaps(maps ...map[string]string) map[string]string {
+	merged := map[string]string{}
+	for _, values := range maps {
+		for key, value := range values {
+			if strings.TrimSpace(key) == "" {
+				continue
+			}
+			merged[key] = value
+		}
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
 }
 
 func buildEnvObjects(env map[string]string) []map[string]any {

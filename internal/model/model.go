@@ -1178,6 +1178,119 @@ type AppRoute struct {
 	EntrypointName string `json:"entrypoint_name,omitempty"`
 }
 
+type ProjectRouteDomain struct {
+	Name         string `json:"name,omitempty"`
+	Hostname     string `json:"hostname,omitempty"`
+	Host         string `json:"host,omitempty"`
+	TLS          string `json:"tls,omitempty"`
+	OwnerService string `json:"owner_service,omitempty"`
+	OwnerAppID   string `json:"owner_app_id,omitempty"`
+}
+
+type ProjectRouteEntrypointRoute struct {
+	Path        string `json:"path,omitempty"`
+	PathPrefix  string `json:"path_prefix,omitempty"`
+	Service     string `json:"service,omitempty"`
+	AppID       string `json:"app_id,omitempty"`
+	StripPrefix bool   `json:"strip_prefix,omitempty"`
+	Rewrite     string `json:"rewrite,omitempty"`
+}
+
+type ProjectRouteEntrypoint struct {
+	Name   string                        `json:"name,omitempty"`
+	Domain string                        `json:"domain,omitempty"`
+	Routes []ProjectRouteEntrypointRoute `json:"routes,omitempty"`
+}
+
+type ProjectRouteBinding struct {
+	Hostname       string `json:"hostname,omitempty"`
+	PathPrefix     string `json:"path_prefix,omitempty"`
+	PublicURL      string `json:"public_url,omitempty"`
+	DomainName     string `json:"domain_name,omitempty"`
+	EntrypointName string `json:"entrypoint_name,omitempty"`
+	Service        string `json:"service,omitempty"`
+	AppID          string `json:"app_id,omitempty"`
+	AppName        string `json:"app_name,omitempty"`
+	ServicePort    int    `json:"service_port,omitempty"`
+	TLS            string `json:"tls,omitempty"`
+	StripPrefix    bool   `json:"strip_prefix,omitempty"`
+	Rewrite        string `json:"rewrite,omitempty"`
+}
+
+type ProjectRouteTable struct {
+	TenantID    string                   `json:"tenant_id,omitempty"`
+	ProjectID   string                   `json:"project_id,omitempty"`
+	Domains     []ProjectRouteDomain     `json:"domains,omitempty"`
+	Entrypoints []ProjectRouteEntrypoint `json:"entrypoints,omitempty"`
+	Bindings    []ProjectRouteBinding    `json:"bindings,omitempty"`
+	Legacy      bool                     `json:"legacy,omitempty"`
+	CreatedAt   time.Time                `json:"created_at,omitempty"`
+	UpdatedAt   time.Time                `json:"updated_at,omitempty"`
+}
+
+func NormalizeProjectRouteDomain(domain ProjectRouteDomain) ProjectRouteDomain {
+	domain.Name = strings.TrimSpace(domain.Name)
+	domain.Hostname = strings.TrimSpace(strings.ToLower(firstNonEmptyString(domain.Hostname, domain.Host)))
+	domain.Host = domain.Hostname
+	domain.TLS = strings.TrimSpace(strings.ToLower(domain.TLS))
+	domain.OwnerService = strings.TrimSpace(domain.OwnerService)
+	domain.OwnerAppID = strings.TrimSpace(domain.OwnerAppID)
+	return domain
+}
+
+func NormalizeProjectRouteEntrypoint(entrypoint ProjectRouteEntrypoint) ProjectRouteEntrypoint {
+	entrypoint.Name = strings.TrimSpace(entrypoint.Name)
+	entrypoint.Domain = strings.TrimSpace(entrypoint.Domain)
+	routes := make([]ProjectRouteEntrypointRoute, 0, len(entrypoint.Routes))
+	for _, route := range entrypoint.Routes {
+		route.Service = strings.TrimSpace(route.Service)
+		route.AppID = strings.TrimSpace(route.AppID)
+		route.PathPrefix = NormalizeAppRoutePathPrefix(firstNonEmptyString(route.PathPrefix, route.Path))
+		route.Path = route.PathPrefix
+		route.Rewrite = strings.TrimSpace(route.Rewrite)
+		if route.Service == "" && route.AppID == "" {
+			continue
+		}
+		routes = append(routes, route)
+	}
+	entrypoint.Routes = routes
+	return entrypoint
+}
+
+func NormalizeProjectRouteTable(table ProjectRouteTable) ProjectRouteTable {
+	table.TenantID = strings.TrimSpace(table.TenantID)
+	table.ProjectID = strings.TrimSpace(table.ProjectID)
+	domains := make([]ProjectRouteDomain, 0, len(table.Domains))
+	for _, domain := range table.Domains {
+		normalized := NormalizeProjectRouteDomain(domain)
+		if normalized.Name == "" && normalized.Hostname == "" {
+			continue
+		}
+		domains = append(domains, normalized)
+	}
+	entrypoints := make([]ProjectRouteEntrypoint, 0, len(table.Entrypoints))
+	for _, entrypoint := range table.Entrypoints {
+		normalized := NormalizeProjectRouteEntrypoint(entrypoint)
+		if normalized.Name == "" && normalized.Domain == "" && len(normalized.Routes) == 0 {
+			continue
+		}
+		entrypoints = append(entrypoints, normalized)
+	}
+	table.Domains = domains
+	table.Entrypoints = entrypoints
+	table.Bindings = nil
+	return table
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 func NormalizeAppRoutePathPrefix(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -2012,6 +2125,7 @@ type State struct {
 	AppDatabaseImportJobs      []AppDatabaseImportJob      `json:"app_database_import_jobs,omitempty"`
 	AppDatabaseAccessGrants    []AppDatabaseAccessGrant    `json:"app_database_access_grants,omitempty"`
 	Apps                       []App                       `json:"apps"`
+	ProjectRouteTables         []ProjectRouteTable         `json:"project_route_tables,omitempty"`
 	AppDomains                 []AppDomain                 `json:"app_domains"`
 	EdgeTLSCertificates        []EdgeTLSCertificate        `json:"edge_tls_certificates,omitempty"`
 	EdgeGroups                 []EdgeGroup                 `json:"edge_groups,omitempty"`

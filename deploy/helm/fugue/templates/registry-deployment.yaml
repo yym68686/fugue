@@ -29,8 +29,13 @@ metadata:
   name: {{ include "fugue.fullname" . }}-registry
   labels:
     {{- include "fugue.componentLabels" (dict "root" . "component" "registry") | nindent 4 }}
+    fugue.io/rollout-subsystem: registry
+    fugue.io/rollout-mode: isolated-singleton
+    fugue.io/downtime-class: build-deploy-gate
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "registry") | nindent 6 }}
@@ -38,6 +43,9 @@ spec:
     metadata:
       labels:
         {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "registry") | nindent 8 }}
+        fugue.io/rollout-subsystem: registry
+        fugue.io/rollout-mode: isolated-singleton
+        fugue.io/downtime-class: build-deploy-gate
       annotations:
         checksum/registry-config: {{ include (print $.Template.BasePath "/registry-configmap.yaml") . | sha256sum }}
     spec:

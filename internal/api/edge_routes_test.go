@@ -126,6 +126,84 @@ func TestEdgeRoutesBundleDerivesPlatformAndCustomDomainRoutes(t *testing.T) {
 	}
 }
 
+func TestEdgeRoutesBundlePublishesProjectRouteTable(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, apiKey, _, frontend, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	frontend = deployAppForEdgeRouteTest(t, storeState, frontend)
+	backend, err := storeState.CreateApp(frontend.TenantID, frontend.ProjectID, "api", "", model.AppSpec{
+		Image:     "ghcr.io/example/api:latest",
+		Ports:     []int{9000},
+		Replicas:  1,
+		RuntimeID: model.DefaultManagedRuntimeID,
+	})
+	if err != nil {
+		t.Fatalf("create backend app: %v", err)
+	}
+	backend = deployAppForEdgeRouteTest(t, storeState, backend)
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-default-1", defaultEdgeGroupID, "203.0.113.20")
+
+	put := performJSONRequest(t, server, http.MethodPut, "/v1/projects/"+frontend.ProjectID+"/routes", apiKey, map[string]any{
+		"domains": []map[string]any{
+			{"name": "production", "hostname": "0-0.fugue.pro"},
+			{"name": "api", "hostname": "api.fugue.pro"},
+			{"name": "staging", "hostname": "api2.fugue.pro"},
+		},
+		"entrypoints": []map[string]any{
+			{"name": "production", "domain": "production", "routes": []map[string]any{
+				{"path_prefix": "/v1", "service": "api"},
+				{"path_prefix": "/", "service": "demo"},
+			}},
+			{"name": "api", "domain": "api", "routes": []map[string]any{
+				{"path_prefix": "/v1", "service": "api"},
+			}},
+			{"name": "staging", "domain": "staging", "routes": []map[string]any{
+				{"path_prefix": "/v1", "service": "api"},
+				{"path_prefix": "/", "service": "demo"},
+			}},
+		},
+	})
+	if put.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, put.Code, put.Body.String())
+	}
+
+	found, err := storeState.GetAppByRoutePrefix("api2.fugue.pro", "/v1")
+	if err != nil {
+		t.Fatalf("lookup project route table route: %v", err)
+	}
+	if found.ID != backend.ID {
+		t.Fatalf("expected staging /v1 to resolve to backend %s, got %s", backend.ID, found.ID)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeRouteBundle
+	mustDecodeJSON(t, recorder, &bundle)
+
+	apiRoute := edgeRouteByHostKindAndPath(bundle.Routes, "api.fugue.pro", model.EdgeRouteKindPlatformDomain, "/v1")
+	if apiRoute == nil {
+		t.Fatalf("expected api.fugue.pro /v1 route, got %+v", bundle.Routes)
+	}
+	if apiRoute.AppID != backend.ID || apiRoute.ServicePort != 9000 {
+		t.Fatalf("expected api route to target backend, got %+v", apiRoute)
+	}
+	rootRoute := edgeRouteByHostKindAndPath(bundle.Routes, "0-0.fugue.pro", model.EdgeRouteKindPlatformDomain, "/")
+	if rootRoute == nil {
+		t.Fatalf("expected production root route, got %+v", bundle.Routes)
+	}
+	if rootRoute.AppID != frontend.ID || rootRoute.ServicePort != 8080 {
+		t.Fatalf("expected production root route to target frontend, got %+v", rootRoute)
+	}
+	stagingRoute := edgeRouteByHostKindAndPath(bundle.Routes, "api2.fugue.pro", model.EdgeRouteKindPlatformDomain, "/v1")
+	if stagingRoute == nil || stagingRoute.AppID != backend.ID {
+		t.Fatalf("expected staging /v1 route to target backend, got %+v", stagingRoute)
+	}
+}
+
 func TestEdgeRoutesBundleSupportsGroupFilterAndConditionalFetch(t *testing.T) {
 	t.Parallel()
 
@@ -777,6 +855,15 @@ func cloneEdgeRouteBundleForTest(bundle model.EdgeRouteBundle) model.EdgeRouteBu
 func edgeRouteByHostAndKind(routes []model.EdgeRouteBinding, hostname, kind string) *model.EdgeRouteBinding {
 	for index := range routes {
 		if routes[index].Hostname == hostname && routes[index].RouteKind == kind {
+			return &routes[index]
+		}
+	}
+	return nil
+}
+
+func edgeRouteByHostKindAndPath(routes []model.EdgeRouteBinding, hostname, kind, pathPrefix string) *model.EdgeRouteBinding {
+	for index := range routes {
+		if routes[index].Hostname == hostname && routes[index].RouteKind == kind && model.NormalizeAppRoutePathPrefix(routes[index].PathPrefix) == model.NormalizeAppRoutePathPrefix(pathPrefix) {
 			return &routes[index]
 		}
 	}

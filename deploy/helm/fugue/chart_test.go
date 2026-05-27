@@ -1374,6 +1374,154 @@ dns:
 	}
 }
 
+func TestPublicDataPlaneDaemonSetsUseSurgeFirstRollouts(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	valuesPath := t.TempDir() + "/values.yaml"
+	values := `
+edge:
+  edgeGroupID: edge-group-country-us
+  caddy:
+    enabled: true
+    listenAddr: :443
+    tlsMode: public-on-demand
+    publicHostPorts:
+      enabled: true
+  groups:
+    - name: country-de
+      edgeGroupID: edge-group-country-de
+      nodeSelector:
+        fugue.io/role.edge: "true"
+        fugue.io/schedulable: "true"
+        fugue.io/location-country-code: de
+dns:
+  enabled: true
+  answerIPs:
+    - 15.204.94.71
+  publicHostPorts:
+    enabled: true
+  groups:
+    - name: country-de
+      edgeGroupID: edge-group-country-de
+      answerIPs:
+        - 51.38.126.103
+      nodeSelector:
+        fugue.io/role.dns: "true"
+        fugue.io/schedulable: "true"
+        fugue.io/location-country-code: de
+`
+	if err := os.WriteFile(valuesPath, []byte(values), 0o600); err != nil {
+		t.Fatalf("write values: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "-f", valuesPath)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	for _, name := range []string{
+		"fugue-fugue-edge",
+		"fugue-fugue-edge-country-de",
+		"fugue-fugue-dns",
+		"fugue-fugue-dns-country-de",
+		"fugue-fugue-image-cache",
+	} {
+		doc := manifestDocumentForKindAndName(manifest, "DaemonSet", name)
+		if doc == "" {
+			t.Fatalf("rendered manifest missing daemonset %s:\n%s", name, manifest)
+		}
+		for _, want := range []string{
+			"updateStrategy:",
+			"type: RollingUpdate",
+			"maxUnavailable: 0",
+			"maxSurge: 1",
+			"fugue.io/rollout-mode: node-local-blue-green-required",
+		} {
+			if !strings.Contains(doc, want) {
+				t.Fatalf("%s missing surge-first rollout fragment %q:\n%s", name, want, doc)
+			}
+		}
+	}
+}
+
+func TestSingletonDependenciesDeclareIsolatedRolloutSemantics(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	valuesPath := t.TempDir() + "/values.yaml"
+	values := `
+headscale:
+  enabled: true
+  domain: mesh.example.com
+sharedWorkspaceStorage:
+  enabled: true
+  server:
+    clusterIP: 10.43.253.99
+`
+	if err := os.WriteFile(valuesPath, []byte(values), 0o600); err != nil {
+		t.Fatalf("write values: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "-f", valuesPath)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	for _, tc := range []struct {
+		name          string
+		rolloutMode   string
+		downtimeClass string
+	}{
+		{name: "fugue-fugue-registry", rolloutMode: "isolated-singleton", downtimeClass: "build-deploy-gate"},
+		{name: "fugue-fugue-headscale", rolloutMode: "isolated-singleton", downtimeClass: "join-plane-gate"},
+		{name: "fugue-fugue-shared-workspace-nfs", rolloutMode: "isolated-singleton", downtimeClass: "downtime-required"},
+		{name: "fugue-fugue-shared-workspace-provisioner", rolloutMode: "isolated-singleton", downtimeClass: "provisioner-gate"},
+	} {
+		doc := manifestDocumentForKindAndName(manifest, "Deployment", tc.name)
+		if doc == "" {
+			t.Fatalf("rendered manifest missing deployment %s:\n%s", tc.name, manifest)
+		}
+		for _, want := range []string{
+			"strategy:",
+			"type: Recreate",
+			"fugue.io/rollout-mode: " + tc.rolloutMode,
+			"fugue.io/downtime-class: " + tc.downtimeClass,
+		} {
+			if !strings.Contains(doc, want) {
+				t.Fatalf("%s missing singleton rollout fragment %q:\n%s", tc.name, want, doc)
+			}
+		}
+	}
+
+	releaseSafety := manifestDocumentForKindAndName(manifest, "ConfigMap", "fugue-fugue-release-safety")
+	if releaseSafety == "" {
+		t.Fatalf("rendered manifest missing release safety catalog:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`public-data-plane: "node-local-blue-green-required"`,
+		`shared-workspace-storage: "downtime-required; single NFS writer"`,
+	} {
+		if !strings.Contains(releaseSafety, want) {
+			t.Fatalf("release safety catalog missing %q:\n%s", want, releaseSafety)
+		}
+	}
+}
+
 func manifestDocumentForKindAndName(manifest string, kind string, name string) string {
 	for _, doc := range strings.Split(manifest, "\n---") {
 		hasKind := strings.Contains(doc, "\nkind: "+kind+"\n") || strings.Contains(doc, "kind: "+kind+"\n")

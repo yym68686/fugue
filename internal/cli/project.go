@@ -28,6 +28,7 @@ Pass --tenant only when you are acting across multiple visible tenants.
 		c.newProjectOverviewCommand(),
 		c.newProjectWatchCommand(),
 		c.newProjectVerifyCommand(),
+		c.newProjectRoutesCommand(),
 		c.newProjectAppsCommand(),
 		c.newProjectOpsCommand(),
 		c.newProjectImagesCommand(),

@@ -637,6 +637,11 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		}
 		ops = append(ops, deleteOp)
 	}
+	if table := projectRouteTableFromTopology(options.ProjectID, tenantID, topologyPlan.Topology, appsByService); len(table.Domains) > 0 || len(table.Entrypoints) > 0 {
+		if _, err := s.store.PutProjectRouteTable(options.ProjectID, table); err != nil {
+			return importedGitHubTopology{}, rollback(err)
+		}
+	}
 	if deployPlan != nil {
 		for index, servicePlan := range deployPlan.Services {
 			if app, ok := appsByService[servicePlan.Service]; ok {
@@ -868,7 +873,6 @@ func buildTopologyRouteRequests(topology sourceimport.NormalizedTopology) (map[s
 				continue
 			}
 			if _, exists := byService[serviceName]; exists {
-				warnings = append(warnings, fmt.Sprintf("service %q has multiple entrypoint routes; keeping the first declared route", serviceName))
 				continue
 			}
 			hostname, domainName := resolveTopologyEntrypointDomain(topology.Domains, domainsByName, domainsByHost, domainsByOwner, entrypoint.Domain, serviceName)
@@ -909,6 +913,57 @@ func resolveTopologyEntrypointDomain(domains []sourceimport.TopologyDomain, doma
 		return domain.Host, domain.Name
 	}
 	return "", ""
+}
+
+func projectRouteTableFromTopology(projectID, tenantID string, topology sourceimport.NormalizedTopology, appsByService map[string]model.App) model.ProjectRouteTable {
+	domains := make([]model.ProjectRouteDomain, 0, len(topology.Domains))
+	for _, domain := range topology.Domains {
+		appID := ""
+		if app, ok := appsByService[strings.TrimSpace(domain.OwnerService)]; ok {
+			appID = app.ID
+		}
+		domains = append(domains, model.ProjectRouteDomain{
+			Name:         domain.Name,
+			Hostname:     domain.Host,
+			Host:         domain.Host,
+			TLS:          firstNonEmpty(domain.TLS, "auto"),
+			OwnerService: domain.OwnerService,
+			OwnerAppID:   appID,
+		})
+	}
+	entrypoints := make([]model.ProjectRouteEntrypoint, 0, len(topology.Entrypoints))
+	for _, entrypoint := range topology.Entrypoints {
+		routes := make([]model.ProjectRouteEntrypointRoute, 0, len(entrypoint.Routes))
+		for _, route := range entrypoint.Routes {
+			serviceName := strings.TrimSpace(route.Service)
+			if serviceName == "" {
+				continue
+			}
+			appID := ""
+			if app, ok := appsByService[serviceName]; ok {
+				appID = app.ID
+			}
+			routes = append(routes, model.ProjectRouteEntrypointRoute{
+				Path:        firstNonEmpty(route.PathPrefix, route.Path),
+				PathPrefix:  firstNonEmpty(route.PathPrefix, route.Path),
+				Service:     serviceName,
+				AppID:       appID,
+				StripPrefix: route.StripPrefix,
+				Rewrite:     route.Rewrite,
+			})
+		}
+		entrypoints = append(entrypoints, model.ProjectRouteEntrypoint{
+			Name:   entrypoint.Name,
+			Domain: entrypoint.Domain,
+			Routes: routes,
+		})
+	}
+	return model.NormalizeProjectRouteTable(model.ProjectRouteTable{
+		TenantID:    tenantID,
+		ProjectID:   projectID,
+		Domains:     domains,
+		Entrypoints: entrypoints,
+	})
 }
 
 func serviceIsPrimaryRequested(primaryService, serviceName string) bool {

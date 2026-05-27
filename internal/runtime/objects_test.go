@@ -753,8 +753,20 @@ func TestBuildAppDeploymentUsesRollingUpdateAndReadinessProbe(t *testing.T) {
 	if rollingUpdate["maxSurge"] != 1 {
 		t.Fatalf("expected maxSurge=1, got %#v", rollingUpdate["maxSurge"])
 	}
+	metadata := deployment["metadata"].(map[string]any)
+	annotations := metadata["annotations"].(map[string]string)
+	if annotations["fugue.io/rollout-mode"] != "rolling-update" {
+		t.Fatalf("expected stateless app rollout-mode rolling-update, got %#v", annotations["fugue.io/rollout-mode"])
+	}
+	if annotations["fugue.io/downtime-class"] != "online-required" {
+		t.Fatalf("expected stateless app downtime-class online-required, got %#v", annotations["fugue.io/downtime-class"])
+	}
 
 	template := spec["template"].(map[string]any)
+	templateAnnotations := template["metadata"].(map[string]any)["annotations"].(map[string]string)
+	if templateAnnotations["fugue.io/rollout-mode"] != "rolling-update" {
+		t.Fatalf("expected stateless app template rollout-mode rolling-update, got %#v", templateAnnotations["fugue.io/rollout-mode"])
+	}
 	podSpec := template["spec"].(map[string]any)
 	containers := podSpec["containers"].([]map[string]any)
 	readinessProbe := containers[0]["readinessProbe"].(map[string]any)
@@ -1066,6 +1078,14 @@ func TestBuildAppObjectsIncludesPersistentWorkspaceSidecar(t *testing.T) {
 	if got := strategy["type"]; got != "Recreate" {
 		t.Fatalf("expected workspace deployment strategy Recreate, got %#v", got)
 	}
+	metadata := deployment["metadata"].(map[string]any)
+	annotations := metadata["annotations"].(map[string]string)
+	if annotations["fugue.io/rollout-mode"] != "isolated-singleton" {
+		t.Fatalf("expected workspace rollout-mode isolated-singleton, got %#v", annotations["fugue.io/rollout-mode"])
+	}
+	if annotations["fugue.io/downtime-class"] != "downtime-required" {
+		t.Fatalf("expected workspace downtime-class downtime-required, got %#v", annotations["fugue.io/downtime-class"])
+	}
 }
 
 func TestBuildAppObjectsIncludesWorkspaceReplicationWhenEnabled(t *testing.T) {
@@ -1184,6 +1204,11 @@ func TestBuildAppObjectsIncludesPersistentStorageMounts(t *testing.T) {
 	strategy := deployment["spec"].(map[string]any)["strategy"].(map[string]any)
 	if got := strategy["type"]; got != "Recreate" {
 		t.Fatalf("expected persistent storage deployment strategy Recreate, got %#v", got)
+	}
+	metadata := deployment["metadata"].(map[string]any)
+	annotations := metadata["annotations"].(map[string]string)
+	if annotations["fugue.io/rollout-reason"] != "single-writer-storage" {
+		t.Fatalf("expected persistent storage rollout reason single-writer-storage, got %#v", annotations["fugue.io/rollout-reason"])
 	}
 }
 

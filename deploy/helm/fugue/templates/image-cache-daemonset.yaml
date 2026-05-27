@@ -5,8 +5,16 @@ metadata:
   name: {{ include "fugue.imageCacheName" . }}
   labels:
     {{- include "fugue.componentLabels" (dict "root" . "component" "image-cache") | nindent 4 }}
+    fugue.io/rollout-subsystem: node-local-build-plane
+    fugue.io/rollout-mode: node-local-blue-green-required
+    fugue.io/downtime-class: build-deploy-gate
 spec:
   revisionHistoryLimit: 2
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "image-cache") | nindent 6 }}
@@ -14,6 +22,9 @@ spec:
     metadata:
       labels:
         {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "image-cache") | nindent 8 }}
+        fugue.io/rollout-subsystem: node-local-build-plane
+        fugue.io/rollout-mode: node-local-blue-green-required
+        fugue.io/downtime-class: build-deploy-gate
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

@@ -70,6 +70,15 @@ var postgresSchemaStatements = []string{
 	`ALTER TABLE fugue_projects ADD COLUMN IF NOT EXISTS default_runtime_id TEXT NULL`,
 	`ALTER TABLE fugue_projects ADD COLUMN IF NOT EXISTS delete_requested_at TIMESTAMPTZ NULL`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_projects_tenant_slug ON fugue_projects (tenant_id, slug)`,
+	`CREATE TABLE IF NOT EXISTS fugue_project_route_tables (
+		project_id TEXT PRIMARY KEY REFERENCES fugue_projects(id) ON DELETE CASCADE,
+		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
+		domains_json JSONB NOT NULL,
+		entrypoints_json JSONB NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_project_route_tables_tenant ON fugue_project_route_tables (tenant_id, updated_at DESC)`,
 	`CREATE TABLE IF NOT EXISTS fugue_api_keys (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
