@@ -1688,6 +1688,42 @@ func TestProxyHandlerRoutesPlatformAndCustomDomainsWithStreamingMetrics(t *testi
 	}
 }
 
+func TestProxyHandlerPreservesCaddyForwardedFor(t *testing.T) {
+	t.Parallel()
+
+	var gotForwardedFor string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/whoami" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		gotForwardedFor = r.Header.Get("X-Forwarded-For")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer backend.Close()
+
+	bundle := testBundle("routegen_forwarded_for")
+	bundle.Routes[0].UpstreamURL = backend.URL
+
+	service := NewService(config.EdgeConfig{
+		APIURL:    "https://api.example.invalid",
+		EdgeToken: "edge-secret",
+	}, log.New(ioDiscard{}, "", 0))
+	service.recordSyncSuccess(bundle, `"routegen_forwarded_for"`, time.Now().UTC(), false)
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/whoami", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("X-Forwarded-For", "203.0.113.250, 198.51.100.42")
+	service.ProxyHandler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("unexpected response status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	if want := "198.51.100.42, 127.0.0.1"; gotForwardedFor != want {
+		t.Fatalf("expected X-Forwarded-For %q, got %q", want, gotForwardedFor)
+	}
+}
+
 func TestProxyHandlerCachesStaticAssets(t *testing.T) {
 	t.Parallel()
 

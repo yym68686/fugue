@@ -793,7 +793,7 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 	return &httputil.ReverseProxy{
 		Rewrite: func(req *httputil.ProxyRequest) {
 			req.SetURL(target)
-			req.SetXForwarded()
+			setEdgeXForwarded(req)
 			req.Out.Host = target.Host
 			req.Out.Header.Set("X-Forwarded-Host", host)
 			req.Out.Header.Set("X-Fugue-Edge-Route", strings.TrimSpace(route.Hostname))
@@ -833,6 +833,28 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 			return nil
 		},
 	}
+}
+
+func setEdgeXForwarded(req *httputil.ProxyRequest) {
+	if req == nil {
+		return
+	}
+	if forwardedFor := lastForwardedForValue(req.In.Header.Values("X-Forwarded-For")); forwardedFor != "" {
+		req.Out.Header.Set("X-Forwarded-For", forwardedFor)
+	}
+	req.SetXForwarded()
+}
+
+func lastForwardedForValue(values []string) string {
+	for i := len(values) - 1; i >= 0; i-- {
+		parts := strings.Split(values[i], ",")
+		for j := len(parts) - 1; j >= 0; j-- {
+			if candidate := strings.TrimSpace(parts[j]); candidate != "" {
+				return candidate
+			}
+		}
+	}
+	return ""
 }
 
 type edgeProxyTransport struct {
