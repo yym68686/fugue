@@ -32,15 +32,15 @@ metadata:
   labels:
     {{- include "fugue.componentLabels" (dict "root" $ "component" (printf "dns-%s" $name)) | nindent 4 }}
     fugue.io/rollout-subsystem: public-data-plane
-    fugue.io/rollout-mode: node-local-blue-green-required
+    fugue.io/rollout-mode: bounded-rolling-restart
     fugue.io/downtime-class: online-required
 spec:
   revisionHistoryLimit: 2
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 1
+      maxUnavailable: 1
+      maxSurge: 0
   selector:
     matchLabels:
       {{- include "fugue.componentSelectorLabels" (dict "root" $ "component" (printf "dns-%s" $name)) | nindent 6 }}
@@ -49,7 +49,7 @@ spec:
       labels:
         {{- include "fugue.componentSelectorLabels" (dict "root" $ "component" (printf "dns-%s" $name)) | nindent 8 }}
         fugue.io/rollout-subsystem: public-data-plane
-        fugue.io/rollout-mode: node-local-blue-green-required
+        fugue.io/rollout-mode: bounded-rolling-restart
         fugue.io/downtime-class: online-required
         {{- with $.Values.podLabels }}
         {{- toYaml . | nindent 8 }}

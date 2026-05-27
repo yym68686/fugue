@@ -1374,7 +1374,7 @@ dns:
 	}
 }
 
-func TestPublicDataPlaneDaemonSetsUseSurgeFirstRollouts(t *testing.T) {
+func TestPublicDataPlaneDaemonSetsUseHostPortCompatibleRollouts(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")
 	}
@@ -1441,12 +1441,12 @@ dns:
 		for _, want := range []string{
 			"updateStrategy:",
 			"type: RollingUpdate",
-			"maxUnavailable: 0",
-			"maxSurge: 1",
-			"fugue.io/rollout-mode: node-local-blue-green-required",
+			"maxUnavailable: 1",
+			"maxSurge: 0",
+			"fugue.io/rollout-mode: bounded-rolling-restart",
 		} {
 			if !strings.Contains(doc, want) {
-				t.Fatalf("%s missing surge-first rollout fragment %q:\n%s", name, want, doc)
+				t.Fatalf("%s missing hostPort-compatible rollout fragment %q:\n%s", name, want, doc)
 			}
 		}
 	}
@@ -1513,7 +1513,7 @@ sharedWorkspaceStorage:
 		t.Fatalf("rendered manifest missing release safety catalog:\n%s", manifest)
 	}
 	for _, want := range []string{
-		`public-data-plane: "node-local-blue-green-required"`,
+		`public-data-plane: "bounded-rolling-restart; hostPort-compatible"`,
 		`shared-workspace-storage: "downtime-required; single NFS writer"`,
 	} {
 		if !strings.Contains(releaseSafety, want) {

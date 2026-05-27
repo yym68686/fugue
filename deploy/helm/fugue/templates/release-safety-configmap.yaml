@@ -5,8 +5,8 @@ metadata:
   labels:
     {{- include "fugue.componentLabels" (dict "root" . "component" "release-safety") | nindent 4 }}
 data:
-  public-data-plane: "node-local-blue-green-required"
-  node-local-build-plane: "node-local-blue-green-required"
+  public-data-plane: "bounded-rolling-restart; hostPort-compatible"
+  node-local-build-plane: "bounded-rolling-restart; one node at a time"
   registry: "isolated-singleton; blocks new builds and deploys while unavailable"
   mesh-control: "isolated-singleton; blocks node joins while unavailable"
   shared-workspace-storage: "downtime-required; single NFS writer"
