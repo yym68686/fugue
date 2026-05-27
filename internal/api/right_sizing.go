@@ -302,7 +302,9 @@ func buildRightSizingRecommendation(
 		valueBytes := int64(math.Ceil(float64(percentileInt64(memoryValues, policy.MemoryPercentile)) * policy.MemoryMultiplier))
 		valueMiB := int64(math.Ceil(float64(valueBytes) / 1024 / 1024))
 		rec.MemoryMebibytes = maxInt64(policy.MemoryFloorMiB, roundUpInt64(valueMiB, 16))
-		if workloadClass == model.WorkloadClassCritical {
+		if serviceType == model.BackingServiceTypePostgres {
+			rec.MemoryLimitMebibytes = roundUpInt64(rec.MemoryMebibytes+128, 16)
+		} else if workloadClass == model.WorkloadClassCritical {
 			rec.MemoryLimitMebibytes = rec.MemoryMebibytes
 		} else {
 			rec.MemoryLimitMebibytes = maxInt64(rec.MemoryMebibytes+128, rec.MemoryMebibytes*2)

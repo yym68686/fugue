@@ -69,25 +69,27 @@ func (c *CLI) newAppDatabaseShowCommand() *cobra.Command {
 
 func (c *CLI) newAppDatabaseConfigureCommand() *cobra.Command {
 	opts := struct {
-		RuntimeName         string
-		RuntimeID           string
-		Database            string
-		User                string
-		Password            string
-		Image               string
-		ServiceName         string
-		StorageSize         string
-		StorageClass        string
-		CPUMilliCores       int64
-		MemoryMebibytes     int64
-		Instances           int
-		SynchronousReplicas int
-		PrimaryNodeName     string
-		FailoverRuntimeName string
-		FailoverRuntimeID   string
-		ClearFailover       bool
-		ShowSecrets         bool
-		Wait                bool
+		RuntimeName          string
+		RuntimeID            string
+		Database             string
+		User                 string
+		Password             string
+		Image                string
+		ServiceName          string
+		StorageSize          string
+		StorageClass         string
+		CPUMilliCores        int64
+		MemoryMebibytes      int64
+		CPULimitMilliCores   int64
+		MemoryLimitMebibytes int64
+		Instances            int
+		SynchronousReplicas  int
+		PrimaryNodeName      string
+		FailoverRuntimeName  string
+		FailoverRuntimeID    string
+		ClearFailover        bool
+		ShowSecrets          bool
+		Wait                 bool
 	}{
 		Wait: true,
 	}
@@ -163,7 +165,7 @@ for the managed database. Add flags only for the parts you want to customize.
 			if flagChanged(cmd, "storage-class") {
 				spec.Postgres.StorageClassName = strings.TrimSpace(opts.StorageClass)
 			}
-			if flagChanged(cmd, "cpu-millicores") || flagChanged(cmd, "memory-mebibytes") {
+			if flagChanged(cmd, "cpu-millicores") || flagChanged(cmd, "memory-mebibytes") || flagChanged(cmd, "cpu-limit-millicores") || flagChanged(cmd, "memory-limit-mebibytes") {
 				resources := model.DefaultManagedPostgresResources()
 				if spec.Postgres.Resources != nil {
 					resources = *spec.Postgres.Resources
@@ -173,6 +175,12 @@ for the managed database. Add flags only for the parts you want to customize.
 				}
 				if flagChanged(cmd, "memory-mebibytes") {
 					resources.MemoryMebibytes = opts.MemoryMebibytes
+				}
+				if flagChanged(cmd, "cpu-limit-millicores") {
+					resources.CPULimitMilliCores = opts.CPULimitMilliCores
+				}
+				if flagChanged(cmd, "memory-limit-mebibytes") {
+					resources.MemoryLimitMebibytes = opts.MemoryLimitMebibytes
 				}
 				spec.Postgres.Resources = &resources
 			}
@@ -225,6 +233,8 @@ for the managed database. Add flags only for the parts you want to customize.
 	cmd.Flags().StringVar(&opts.StorageClass, "storage-class", "", "Persistent storage class")
 	cmd.Flags().Int64Var(&opts.CPUMilliCores, "cpu-millicores", 0, "Managed Postgres CPU request in millicores")
 	cmd.Flags().Int64Var(&opts.MemoryMebibytes, "memory-mebibytes", 0, "Managed Postgres memory request in MiB")
+	cmd.Flags().Int64Var(&opts.CPULimitMilliCores, "cpu-limit-millicores", 0, "Managed Postgres CPU limit in millicores")
+	cmd.Flags().Int64Var(&opts.MemoryLimitMebibytes, "memory-limit-mebibytes", 0, "Managed Postgres memory limit in MiB")
 	cmd.Flags().IntVar(&opts.Instances, "instances", 0, "Managed Postgres instance count")
 	cmd.Flags().IntVar(&opts.SynchronousReplicas, "sync-replicas", 0, "Managed Postgres synchronous replica count")
 	cmd.Flags().StringVar(&opts.PrimaryNodeName, "primary-node", "", "Kubernetes node name to pin the managed Postgres primary on shared runtimes")
@@ -482,6 +492,8 @@ func (c *CLI) renderAppDatabaseState(app model.App, operation *model.Operation, 
 			kvPair{Key: "storage_class", Value: strings.TrimSpace(database.StorageClassName)},
 			kvPair{Key: "cpu_millicores", Value: formatAppDatabaseResourceValue(database.Resources, func(resources *model.ResourceSpec) int64 { return resources.CPUMilliCores })},
 			kvPair{Key: "memory_mebibytes", Value: formatAppDatabaseResourceValue(database.Resources, func(resources *model.ResourceSpec) int64 { return resources.MemoryMebibytes })},
+			kvPair{Key: "cpu_limit_millicores", Value: formatAppDatabaseResourceValue(database.Resources, func(resources *model.ResourceSpec) int64 { return resources.CPULimitMilliCores })},
+			kvPair{Key: "memory_limit_mebibytes", Value: formatAppDatabaseResourceValue(database.Resources, func(resources *model.ResourceSpec) int64 { return resources.MemoryLimitMebibytes })},
 			kvPair{Key: "instances", Value: fmt.Sprintf("%d", database.Instances)},
 			kvPair{Key: "sync_replicas", Value: fmt.Sprintf("%d", database.SynchronousReplicas)},
 			kvPair{Key: "failover_target_runtime_id", Value: strings.TrimSpace(database.FailoverTargetRuntimeID)},
@@ -609,7 +621,7 @@ func normalizeAppDatabaseResources(spec *model.ResourceSpec, defaults model.Reso
 		return &value
 	}
 	out := *spec
-	if out.CPUMilliCores < 0 || out.MemoryMebibytes < 0 {
+	if out.CPUMilliCores < 0 || out.MemoryMebibytes < 0 || out.CPULimitMilliCores < 0 || out.MemoryLimitMebibytes < 0 {
 		value := defaults
 		return &value
 	}

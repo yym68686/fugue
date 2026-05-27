@@ -95,6 +95,36 @@ func TestBuildRightSizingRecommendationPreservesUnobservedResourceDimensions(t *
 	}
 }
 
+func TestBuildRightSizingRecommendationAddsPostgresMemoryLimitHeadroom(t *testing.T) {
+	t.Parallel()
+
+	recommendation := buildRightSizingRecommendation(
+		model.ClusterNodeWorkloadKindBackingService,
+		"svc_pg",
+		"demo-postgres",
+		model.BackingServiceTypePostgres,
+		model.WorkloadClassCritical,
+		24,
+		3,
+		&model.ResourceSpec{CPUMilliCores: 250, MemoryMebibytes: 512},
+		rightSizingUsageSamples("tenant_a", model.ClusterNodeWorkloadKindBackingService, "svc_pg", []rightSizingUsageValue{
+			{cpuMilli: 50, memoryMiB: 380},
+			{cpuMilli: 80, memoryMiB: 420},
+			{cpuMilli: 100, memoryMiB: 432},
+		}),
+	)
+
+	if !recommendation.Ready || recommendation.Recommended == nil {
+		t.Fatalf("expected ready postgres recommendation, got %+v", recommendation)
+	}
+	if got := recommendation.Recommended.MemoryMebibytes; got != 656 {
+		t.Fatalf("expected postgres memory request 656Mi, got %dMi", got)
+	}
+	if got := recommendation.Recommended.MemoryLimitMebibytes; got != 784 {
+		t.Fatalf("expected postgres memory limit with headroom 784Mi, got %dMi", got)
+	}
+}
+
 func TestApplyAppRightSizingRecommendationQueuesDeployForAppAndPostgres(t *testing.T) {
 	t.Parallel()
 
@@ -177,7 +207,7 @@ func TestApplyAppRightSizingRecommendationQueuesDeployForAppAndPostgres(t *testi
 	if postgresResources.CPUMilliCores != 100 || postgresResources.CPULimitMilliCores != 100 {
 		t.Fatalf("unexpected postgres CPU recommendation: %+v", postgresResources)
 	}
-	if postgresResources.MemoryMebibytes != 256 || postgresResources.MemoryLimitMebibytes != 256 {
+	if postgresResources.MemoryMebibytes != 256 || postgresResources.MemoryLimitMebibytes != 384 {
 		t.Fatalf("unexpected postgres memory recommendation: %+v", postgresResources)
 	}
 }

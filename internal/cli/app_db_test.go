@@ -103,6 +103,54 @@ func TestRunAppDatabaseConfigureGeneratesPasswordAndRedactsJSONByDefault(t *test
 	}
 }
 
+func TestRunAppDatabaseConfigureAppliesPostgresResourceLimits(t *testing.T) {
+	t.Parallel()
+
+	var gotDeploy struct {
+		Spec model.AppSpec `json:"spec"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1,"postgres":{"database":"app","user":"app","password":"existing-password","service_name":"demo-postgres","resources":{"cpu_millicores":250,"memory_mebibytes":512}}},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/deploy":
+			if err := json.NewDecoder(r.Body).Decode(&gotDeploy); err != nil {
+				t.Fatalf("decode deploy body: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_123","app_id":"app_123","type":"deploy","status":"pending"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "db", "configure", "demo",
+		"--memory-mebibytes", "768",
+		"--memory-limit-mebibytes", "1024",
+		"--cpu-limit-millicores", "500",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app db configure: %v", err)
+	}
+
+	if gotDeploy.Spec.Postgres == nil || gotDeploy.Spec.Postgres.Resources == nil {
+		t.Fatalf("expected deploy postgres resources, got %+v", gotDeploy.Spec.Postgres)
+	}
+	resources := gotDeploy.Spec.Postgres.Resources
+	if resources.MemoryMebibytes != 768 || resources.MemoryLimitMebibytes != 1024 || resources.CPULimitMilliCores != 500 {
+		t.Fatalf("unexpected postgres resources %+v", resources)
+	}
+}
+
 func TestRunAppDatabaseImportUploadsDumpField(t *testing.T) {
 	t.Parallel()
 
