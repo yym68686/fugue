@@ -48,7 +48,7 @@ func TestWaitForManagedAppRolloutFailsWhenManagedAppReportsError(t *testing.T) {
 	managedMetadata["generation"] = 1
 	managedApp["status"] = map[string]any{
 		"phase":              runtime.ManagedAppPhaseError,
-		"message":            "pod demo-abc123 container demo failed: Error: exit_code=3",
+		"message":            "pod demo-abc123 container demo failed: CrashLoopBackOff: back-off restarting failed container",
 		"observedGeneration": 1,
 	}
 
@@ -90,8 +90,22 @@ func TestWaitForManagedAppRolloutFailsWhenManagedAppReportsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected rollout wait to fail")
 	}
-	if !strings.Contains(err.Error(), "exit_code=3") {
+	if !strings.Contains(err.Error(), "CrashLoopBackOff") {
 		t.Fatalf("expected managed app failure message in error, got %v", err)
+	}
+}
+
+func TestManagedAppRolloutFailureIgnoresTransientRestartExit(t *testing.T) {
+	t.Parallel()
+
+	managed := runtime.ManagedAppObject{}
+	managed.Metadata.Generation = 3
+	managed.Status.Phase = runtime.ManagedAppPhaseError
+	managed.Status.ObservedGeneration = 3
+	managed.Status.Message = "pod demo-abc123 container demo failed: Error: exit_code=3"
+
+	if got := managedAppRolloutFailure(managed, true); got != "" {
+		t.Fatalf("expected transient restart rollout message to be ignored, got %q", got)
 	}
 }
 

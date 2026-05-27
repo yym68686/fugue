@@ -187,9 +187,11 @@ type kubePodCondition struct {
 }
 
 type kubeContainerStatus struct {
-	Name      string           `json:"name"`
-	State     kubeRuntimeState `json:"state,omitempty"`
-	LastState kubeRuntimeState `json:"lastState,omitempty"`
+	Name         string           `json:"name"`
+	Ready        bool             `json:"ready,omitempty"`
+	RestartCount int              `json:"restartCount,omitempty"`
+	State        kubeRuntimeState `json:"state,omitempty"`
+	LastState    kubeRuntimeState `json:"lastState,omitempty"`
 }
 
 type kubeRuntimeState struct {

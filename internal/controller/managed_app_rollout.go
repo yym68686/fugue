@@ -377,7 +377,26 @@ func managedAppRolloutFailure(managed runtime.ManagedAppObject, found bool) stri
 
 func isBenignManagedAppRolloutFailureMessage(message string) bool {
 	message = strings.ToLower(strings.TrimSpace(message))
-	return strings.Contains(message, "exit_code=143") || strings.Contains(message, "exit code 143")
+	if strings.Contains(message, "exit_code=143") || strings.Contains(message, "exit code 143") {
+		return true
+	}
+	if !strings.Contains(message, "exit_code=") && !strings.Contains(message, "exit code ") {
+		return false
+	}
+	for _, marker := range []string{
+		"crashloopbackoff",
+		"imagepull",
+		"createcontainer",
+		"invalidimagename",
+		"oomkilled",
+		"evicted",
+		"progressdeadline",
+	} {
+		if strings.Contains(message, marker) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Service) refreshManagedAppStatus(ctx context.Context, client *kubeClient, app model.App) error {

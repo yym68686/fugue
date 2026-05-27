@@ -725,13 +725,13 @@ func summarizeManagedAppPodFailure(pod kubePod) string {
 		if status.State.Terminated != nil && isFailingManagedAppTermination(*status.State.Terminated) {
 			return summarizeManagedAppContainerFailure(prefix, status.Name, "terminated", *status.State.Terminated)
 		}
-		if status.LastState.Terminated != nil && isFailingManagedAppTermination(*status.LastState.Terminated) {
+		if !managedAppContainerRecovered(status) && status.LastState.Terminated != nil && isFailingManagedAppTermination(*status.LastState.Terminated) {
 			return summarizeManagedAppContainerFailure(prefix, status.Name, "terminated", *status.LastState.Terminated)
 		}
 		if status.State.Waiting != nil && isFailingManagedAppWaitingReason(status.State.Waiting.Reason) {
 			return summarizeManagedAppContainerFailure(prefix, status.Name, "waiting", *status.State.Waiting)
 		}
-		if status.LastState.Waiting != nil && isFailingManagedAppWaitingReason(status.LastState.Waiting.Reason) {
+		if !managedAppContainerRecovered(status) && status.LastState.Waiting != nil && isFailingManagedAppWaitingReason(status.LastState.Waiting.Reason) {
 			return summarizeManagedAppContainerFailure(prefix, status.Name, "waiting", *status.LastState.Waiting)
 		}
 	}
@@ -741,6 +741,16 @@ func summarizeManagedAppPodFailure(pod kubePod) string {
 		return fmt.Sprintf("%s failed with phase %s", prefix, phase)
 	}
 	return ""
+}
+
+func managedAppContainerRecovered(status kubeContainerStatus) bool {
+	if status.Ready {
+		return true
+	}
+	if status.State.Terminated != nil && !isFailingManagedAppTermination(*status.State.Terminated) {
+		return true
+	}
+	return false
 }
 
 func summarizeManagedAppContainerFailure(prefix, containerName, state string, detail kubeStateDetail) string {
