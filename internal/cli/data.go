@@ -17,13 +17,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"fugue/internal/model"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v3"
 )
 
@@ -2216,11 +2214,10 @@ func checkPullDiskSpace(root string, entries []model.DataManifestEntry) error {
 	if needed == 0 {
 		return nil
 	}
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(root, &stat); err != nil {
+	available, ok := pullAvailableDiskBytes(root)
+	if !ok {
 		return nil
 	}
-	available := stat.Bavail * uint64(stat.Bsize)
 	if available < needed {
 		return fmt.Errorf("not enough disk space: need %s, available %s", formatBytes(int64(needed)), formatBytes(int64(available)))
 	}
@@ -2246,7 +2243,7 @@ func checkPullWriteAccess(root string, cfg dataConfig, entries []model.DataManif
 			continue
 		}
 		seen[existing] = struct{}{}
-		if err := unix.Access(existing, unix.W_OK); err != nil {
+		if err := checkDirectoryWritable(existing); err != nil {
 			return fmt.Errorf("target directory is not writable: %s", existing)
 		}
 	}
@@ -2256,11 +2253,25 @@ func checkPullWriteAccess(root string, cfg dataConfig, entries []model.DataManif
 			continue
 		}
 		seen[dir] = struct{}{}
-		if err := unix.Access(dir, unix.W_OK); err != nil {
+		if err := checkDirectoryWritable(dir); err != nil {
 			return fmt.Errorf("directory is not writable for prune: %s", dir)
 		}
 	}
 	return nil
+}
+
+func checkDirectoryWritable(dir string) error {
+	file, err := os.CreateTemp(dir, ".fugue-write-check-*")
+	if err != nil {
+		return err
+	}
+	name := file.Name()
+	closeErr := file.Close()
+	removeErr := os.Remove(name)
+	if closeErr != nil {
+		return closeErr
+	}
+	return removeErr
 }
 
 func nearestExistingDir(dir string) (string, error) {
