@@ -64,6 +64,9 @@ func (s *Store) Init() error {
 		if err := s.ensureDatabaseReady(); err != nil {
 			return err
 		}
+		if err := s.SeedDefaultDataBackendFromEnv(); err != nil {
+			return err
+		}
 		if err := s.pgRepairAppStatuses(); err != nil {
 			return err
 		}
@@ -73,7 +76,7 @@ func (s *Store) Init() error {
 		ensureDefaults(state)
 		repairAllAPIKeyStatuses(state)
 		repairAllAppStatuses(state)
-		return nil
+		return seedDefaultDataBackendFromEnvInState(state)
 	})
 }
 
@@ -3823,6 +3826,7 @@ func ensureDefaults(state *model.State) {
 		state.Idempotency = []model.IdempotencyRecord{}
 	}
 	ensureTenantBillingDefaults(state)
+	ensureDataDefaults(state)
 	if findRuntime(state, "runtime_managed_shared") < 0 {
 		now := time.Now().UTC()
 		state.Runtimes = append(state.Runtimes, model.Runtime{

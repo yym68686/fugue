@@ -126,6 +126,7 @@ const (
 	OperationTypeFailover           = "failover"
 	OperationTypeDatabaseSwitchover = "database-switchover"
 	OperationTypeDatabaseLocalize   = "database-localize"
+	OperationTypeDataPrewarm        = "data-prewarm"
 	OperationTypeDelete             = "delete"
 
 	OperationStatusPending      = "pending"
@@ -497,28 +498,29 @@ type NodeKey struct {
 }
 
 type Runtime struct {
-	ID                string              `json:"id"`
-	TenantID          string              `json:"tenant_id,omitempty"`
-	Name              string              `json:"name"`
-	MachineName       string              `json:"machine_name,omitempty"`
-	Type              string              `json:"type"`
-	AccessMode        string              `json:"access_mode,omitempty"`
-	PublicOffer       *RuntimePublicOffer `json:"public_offer,omitempty"`
-	PoolMode          string              `json:"pool_mode,omitempty"`
-	ConnectionMode    string              `json:"connection_mode,omitempty"`
-	Status            string              `json:"status"`
-	Endpoint          string              `json:"endpoint,omitempty"`
-	Labels            map[string]string   `json:"labels,omitempty"`
-	NodeKeyID         string              `json:"node_key_id,omitempty"`
-	ClusterNodeName   string              `json:"cluster_node_name,omitempty"`
-	FingerprintPrefix string              `json:"fingerprint_prefix,omitempty"`
-	FingerprintHash   string              `json:"fingerprint_hash,omitempty"`
-	AgentKeyPrefix    string              `json:"agent_key_prefix,omitempty"`
-	AgentKeyHash      string              `json:"agent_key_hash,omitempty"`
-	LastSeenAt        *time.Time          `json:"last_seen_at,omitempty"`
-	LastHeartbeatAt   *time.Time          `json:"last_heartbeat_at,omitempty"`
-	CreatedAt         time.Time           `json:"created_at"`
-	UpdatedAt         time.Time           `json:"updated_at"`
+	ID                string                `json:"id"`
+	TenantID          string                `json:"tenant_id,omitempty"`
+	Name              string                `json:"name"`
+	MachineName       string                `json:"machine_name,omitempty"`
+	Type              string                `json:"type"`
+	AccessMode        string                `json:"access_mode,omitempty"`
+	PublicOffer       *RuntimePublicOffer   `json:"public_offer,omitempty"`
+	PoolMode          string                `json:"pool_mode,omitempty"`
+	ConnectionMode    string                `json:"connection_mode,omitempty"`
+	Status            string                `json:"status"`
+	Endpoint          string                `json:"endpoint,omitempty"`
+	Labels            map[string]string     `json:"labels,omitempty"`
+	DataCache         *RuntimeDataCacheSpec `json:"data_cache,omitempty"`
+	NodeKeyID         string                `json:"node_key_id,omitempty"`
+	ClusterNodeName   string                `json:"cluster_node_name,omitempty"`
+	FingerprintPrefix string                `json:"fingerprint_prefix,omitempty"`
+	FingerprintHash   string                `json:"fingerprint_hash,omitempty"`
+	AgentKeyPrefix    string                `json:"agent_key_prefix,omitempty"`
+	AgentKeyHash      string                `json:"agent_key_hash,omitempty"`
+	LastSeenAt        *time.Time            `json:"last_seen_at,omitempty"`
+	LastHeartbeatAt   *time.Time            `json:"last_heartbeat_at,omitempty"`
+	CreatedAt         time.Time             `json:"created_at"`
+	UpdatedAt         time.Time             `json:"updated_at"`
 }
 
 type RuntimePublicOffer struct {
@@ -530,6 +532,32 @@ type RuntimePublicOffer struct {
 	FreeStorage                     bool                `json:"free_storage,omitempty"`
 	PriceBook                       BillingPriceBook    `json:"price_book"`
 	UpdatedAt                       time.Time           `json:"updated_at"`
+}
+
+type RuntimeDataCacheSpec struct {
+	Enabled          bool              `json:"enabled,omitempty"`
+	RootPath         string            `json:"root_path,omitempty"`
+	MaxBytes         int64             `json:"max_bytes,omitempty"`
+	ReserveFreeBytes int64             `json:"reserve_free_bytes,omitempty"`
+	LocalityHints    map[string]string `json:"locality_hints,omitempty"`
+}
+
+type RuntimeDataCacheMetadata struct {
+	ID                   string    `json:"id"`
+	TenantID             string    `json:"tenant_id,omitempty"`
+	RuntimeID            string    `json:"runtime_id"`
+	WorkspaceID          string    `json:"workspace_id"`
+	SnapshotID           string    `json:"snapshot_id,omitempty"`
+	BackendID            string    `json:"backend_id,omitempty"`
+	LocalPath            string    `json:"local_path,omitempty"`
+	Bytes                int64     `json:"bytes,omitempty"`
+	RequiredFreeBytes    int64     `json:"required_free_bytes,omitempty"`
+	AvailableBytes       int64     `json:"available_bytes,omitempty"`
+	LocalityHint         string    `json:"locality_hint,omitempty"`
+	EstimatedEgressBytes int64     `json:"estimated_egress_bytes,omitempty"`
+	Status               string    `json:"status"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 type Machine struct {
@@ -1472,6 +1500,7 @@ type AppSpec struct {
 	RuntimeID         string                         `json:"runtime_id"`
 	Files             []AppFile                      `json:"files,omitempty"`
 	Workspace         *AppWorkspaceSpec              `json:"workspace,omitempty"`
+	Data              *AppDataMaterializationSpec    `json:"data,omitempty"`
 	PersistentStorage *AppPersistentStorageSpec      `json:"persistent_storage,omitempty"`
 	VolumeReplication *AppVolumeReplicationSpec      `json:"volume_replication,omitempty"`
 	Postgres          *AppPostgresSpec               `json:"postgres,omitempty"`
@@ -1483,6 +1512,80 @@ type AppSpec struct {
 type AppNetworkPolicySpec struct {
 	Egress  *AppNetworkPolicyDirectionSpec `json:"egress,omitempty" yaml:"egress,omitempty"`
 	Ingress *AppNetworkPolicyDirectionSpec `json:"ingress,omitempty" yaml:"ingress,omitempty"`
+}
+
+type AppDataMaterializationSpec struct {
+	Workspaces           []AppDataWorkspaceMaterialization `json:"workspaces,omitempty" yaml:"workspaces,omitempty"`
+	Prewarm              bool                              `json:"prewarm,omitempty" yaml:"prewarm,omitempty"`
+	FailOnMissing        bool                              `json:"fail_on_missing,omitempty" yaml:"fail_on_missing,omitempty"`
+	LocalityHint         string                            `json:"locality_hint,omitempty" yaml:"locality_hint,omitempty"`
+	RequiredFreeBytes    int64                             `json:"required_free_bytes,omitempty" yaml:"required_free_bytes,omitempty"`
+	MaxEgressBytes       int64                             `json:"max_egress_bytes,omitempty" yaml:"max_egress_bytes,omitempty"`
+	EstimatedEgressBytes int64                             `json:"estimated_egress_bytes,omitempty" yaml:"estimated_egress_bytes,omitempty"`
+	EgressEstimate       *DataEgressEstimate               `json:"egress_estimate,omitempty" yaml:"egress_estimate,omitempty"`
+}
+
+type AppDataWorkspaceMaterialization struct {
+	WorkspaceID          string   `json:"workspace_id,omitempty" yaml:"workspace_id,omitempty"`
+	Workspace            string   `json:"workspace,omitempty" yaml:"workspace,omitempty"`
+	Version              string   `json:"version,omitempty" yaml:"version,omitempty"`
+	Assets               []string `json:"assets,omitempty" yaml:"assets,omitempty"`
+	TargetPath           string   `json:"target_path,omitempty" yaml:"target_path,omitempty"`
+	Mode                 string   `json:"mode,omitempty" yaml:"mode,omitempty"`
+	Required             bool     `json:"required,omitempty" yaml:"required,omitempty"`
+	LocalityHint         string   `json:"locality_hint,omitempty" yaml:"locality_hint,omitempty"`
+	EstimatedEgressBytes int64    `json:"estimated_egress_bytes,omitempty" yaml:"estimated_egress_bytes,omitempty"`
+}
+
+type DataEgressEstimate struct {
+	SourceRegion          string `json:"source_region,omitempty" yaml:"source_region,omitempty"`
+	TargetRegion          string `json:"target_region,omitempty" yaml:"target_region,omitempty"`
+	Bytes                 int64  `json:"bytes,omitempty" yaml:"bytes,omitempty"`
+	CrossRegion           bool   `json:"cross_region,omitempty" yaml:"cross_region,omitempty"`
+	EstimatedMicroCents   int64  `json:"estimated_micro_cents,omitempty" yaml:"estimated_micro_cents,omitempty"`
+	ProviderCostAvailable bool   `json:"provider_cost_available,omitempty" yaml:"provider_cost_available,omitempty"`
+}
+
+type DataMaterializationPlan struct {
+	Workspaces           []AppDataWorkspaceMaterialization `json:"workspaces,omitempty" yaml:"workspaces,omitempty"`
+	RequiredBytes        int64                             `json:"required_bytes,omitempty" yaml:"required_bytes,omitempty"`
+	RequiredFreeBytes    int64                             `json:"required_free_bytes,omitempty" yaml:"required_free_bytes,omitempty"`
+	AvailableBytes       int64                             `json:"available_bytes,omitempty" yaml:"available_bytes,omitempty"`
+	DiskOK               bool                              `json:"disk_ok" yaml:"disk_ok"`
+	LocalityHint         string                            `json:"locality_hint,omitempty" yaml:"locality_hint,omitempty"`
+	EstimatedEgressBytes int64                             `json:"estimated_egress_bytes,omitempty" yaml:"estimated_egress_bytes,omitempty"`
+	EgressEstimate       *DataEgressEstimate               `json:"egress_estimate,omitempty" yaml:"egress_estimate,omitempty"`
+}
+
+func PlanAppDataMaterialization(spec AppDataMaterializationSpec, availableBytes int64) DataMaterializationPlan {
+	var requiredBytes int64
+	for _, workspace := range spec.Workspaces {
+		if workspace.EstimatedEgressBytes > 0 {
+			requiredBytes += workspace.EstimatedEgressBytes
+		}
+	}
+	if requiredBytes == 0 && spec.EstimatedEgressBytes > 0 {
+		requiredBytes = spec.EstimatedEgressBytes
+	}
+	requiredFreeBytes := spec.RequiredFreeBytes
+	if requiredFreeBytes == 0 {
+		requiredFreeBytes = requiredBytes
+	}
+	estimatedEgressBytes := spec.EstimatedEgressBytes
+	if estimatedEgressBytes == 0 {
+		estimatedEgressBytes = requiredBytes
+	}
+	plan := DataMaterializationPlan{
+		Workspaces:           append([]AppDataWorkspaceMaterialization(nil), spec.Workspaces...),
+		RequiredBytes:        requiredBytes,
+		RequiredFreeBytes:    requiredFreeBytes,
+		AvailableBytes:       availableBytes,
+		DiskOK:               requiredFreeBytes <= 0 || availableBytes >= requiredFreeBytes,
+		LocalityHint:         strings.TrimSpace(spec.LocalityHint),
+		EstimatedEgressBytes: estimatedEgressBytes,
+		EgressEstimate:       spec.EgressEstimate,
+	}
+	return plan
 }
 
 type AppNetworkPolicyDirectionSpec struct {
@@ -2143,4 +2246,11 @@ type State struct {
 	TenantBilling              []TenantBilling             `json:"tenant_billing"`
 	BillingEvents              []TenantBillingEvent        `json:"billing_events"`
 	ResourceUsageSamples       []ResourceUsageSample       `json:"resource_usage_samples,omitempty"`
+	DataBackends               []DataBackend               `json:"data_backends,omitempty"`
+	DataBackendSecrets         []DataBackendSecret         `json:"data_backend_secrets,omitempty"`
+	DataWorkspaces             []DataWorkspace             `json:"data_workspaces,omitempty"`
+	DataSnapshots              []DataSnapshot              `json:"data_snapshots,omitempty"`
+	DataTransfers              []DataTransfer              `json:"data_transfers,omitempty"`
+	DataGrants                 []DataGrant                 `json:"data_grants,omitempty"`
+	DataRuntimeCaches          []RuntimeDataCacheMetadata  `json:"data_runtime_caches,omitempty"`
 }

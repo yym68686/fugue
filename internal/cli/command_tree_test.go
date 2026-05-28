@@ -1973,6 +1973,10 @@ func TestRunProjectOverviewUsesConsoleEndpoints(t *testing.T) {
   "operations":[{"id":"op_123","tenant_id":"tenant_123","app_id":"app_123","type":"deploy","status":"completed","execution_mode":"managed","requested_by_type":"api-key","requested_by_id":"key_123","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}],
   "cluster_nodes":[{"name":"node-a","status":"ready","conditions":{},"created_at":"2026-04-02T00:00:00Z"}]
 }`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/backing-services":
+			_, _ = w.Write([]byte(`{"backing_services":[{"id":"svc_123","tenant_id":"tenant_123","project_id":"project_123","owner_app_id":"app_123","name":"app-db","type":"postgres","provisioner":"fugue","status":"ready","spec":{"postgres":{"database":"app","user":"app","service_name":"app-db","runtime_id":"runtime_managed_shared","storage_size":"10Gi"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/domains":
+			_, _ = w.Write([]byte(`{"domains":[{"app_id":"app_123","tenant_id":"tenant_123","hostname":"web.example.com","status":"verified","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -1991,7 +1995,7 @@ func TestRunProjectOverviewUsesConsoleEndpoints(t *testing.T) {
 	}
 
 	out := stdout.String()
-	for _, want := range []string{"project=demo", "lifecycle=live", "[service_status]", "[apps]", "[operations]", "[cluster_nodes]"} {
+	for _, want := range []string{"project=demo", "lifecycle=live", "[service_status]", "[apps]", "[operations]", "[cluster_nodes]", "[services]", "[domains]", "[databases]"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}

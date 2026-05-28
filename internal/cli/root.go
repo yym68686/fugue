@@ -99,9 +99,10 @@ Quick start for most users:
      Self-hosted: your Fugue web URL + /app/api-keys (for example https://app.example.com/app/api-keys)
      Use a tenant API key for normal deploys. Use a platform-admin/bootstrap key only for admin commands.
   3. Export the key and run normal commands:
-     export FUGUE_API_KEY=<copied-access-key>
-     fugue deploy .
-     fugue app ls
+	  export FUGUE_API_KEY=<copied-access-key>
+	  fugue deploy .
+	  fugue find uni-api-web
+	  fugue app ls
 
 	Defaults and auto-selection:
 	  - Base URL defaults to FUGUE_BASE_URL, then FUGUE_API_URL, then ` + defaultCloudBaseURL + `.
@@ -240,6 +241,7 @@ Environment variables:
 
 	cmd.AddCommand(
 		c.newDeployCommand(),
+		c.newFindCommand(),
 		c.newAppCommand(),
 		c.newWorkflowCommand(),
 		c.newLogsCommand(),
@@ -249,6 +251,7 @@ Environment variables:
 		c.newProjectCommand(),
 		c.newRuntimeCommand(),
 		c.newServiceCommand(),
+		c.newDataCommand(),
 		c.newVersionCommand(),
 		c.newUpgradeCommand(),
 		c.newAPICommand(),
@@ -373,8 +376,7 @@ func (c *CLI) resolveFilterSelections(client *Client) (string, string, error) {
 	projectNameValue := c.effectiveProjectName()
 
 	needsTenant := strings.TrimSpace(tenantIDValue) != "" ||
-		strings.TrimSpace(tenantNameValue) != "" ||
-		strings.TrimSpace(projectNameValue) != ""
+		strings.TrimSpace(tenantNameValue) != ""
 
 	tenantID := ""
 	var err error
@@ -389,6 +391,10 @@ func (c *CLI) resolveFilterSelections(client *Client) (string, string, error) {
 		tenantID, err = c.resolveTenantSelection(client, tenantIDValue, tenantNameValue)
 		if err != nil {
 			return "", "", err
+		}
+	} else if strings.TrimSpace(projectNameValue) != "" {
+		if tenants, tenantErr := client.ListTenants(); tenantErr == nil && len(tenants) == 1 {
+			tenantID = tenants[0].ID
 		}
 	}
 

@@ -96,6 +96,37 @@ func TestResolveTenantSelectionMultipleTenantsSuggestsAccount(t *testing.T) {
 	}
 }
 
+func TestResolveAppReferenceFallsBackToSingleAppInMatchedProject(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"api","spec":{"runtime_id":"runtime_123","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects":
+			if got := r.URL.Query().Get("tenant_id"); got != "" {
+				t.Fatalf("expected cross-tenant project lookup, got %q", got)
+			}
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","tenant_id":"tenant_123","name":"uni-api-web","slug":"uni-api-web","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "token")
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	app, err := resolveAppReference(client, "uni-api-web", "", "")
+	if err != nil {
+		t.Fatalf("resolve app: %v", err)
+	}
+	if app.ID != "app_123" {
+		t.Fatalf("expected app_123, got %+v", app)
+	}
+}
+
 func TestResolveProjectSelectionSkipsLookupForDefaultProject(t *testing.T) {
 	t.Parallel()
 

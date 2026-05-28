@@ -152,15 +152,29 @@ func resolveSingleMatch[T any](ref string, matches []T, kind string, describe fu
 }
 
 func (c *CLI) resolveNamedProject(client *Client, ref string) (model.Project, error) {
-	tenantID, err := c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
-	if err != nil {
+	tenantID := ""
+	if account, ok, err := c.resolveAccountWorkspaceTarget(client); err != nil {
 		return model.Project{}, err
+	} else if ok {
+		tenantID = account.Workspace.TenantID
+	} else if strings.TrimSpace(c.effectiveTenantID()) != "" || strings.TrimSpace(c.effectiveTenantName()) != "" {
+		var err error
+		tenantID, err = c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+		if err != nil {
+			return model.Project{}, err
+		}
+	} else if tenants, err := client.ListTenants(); err == nil && len(tenants) == 1 {
+		tenantID = tenants[0].ID
 	}
 	projects, err := client.ListProjects(tenantID)
 	if err != nil {
 		return model.Project{}, err
 	}
-	return resolveSingleMatch(ref, matchVisibleProjects(projects, ref), "project", describeProjectMatch)
+	matches := matchVisibleProjects(projects, ref)
+	if len(matches) == 0 {
+		matches = matchProjectsFuzzy(projects, ref)
+	}
+	return resolveSingleMatch(ref, matches, "project", describeProjectMatch)
 }
 
 func isProjectIDReference(ref string) bool {

@@ -513,17 +513,74 @@ func (c *Client) ListApps() ([]model.App, error) {
 }
 
 func (c *Client) ListAppsWithLiveStatus(includeLiveStatus bool) ([]model.App, error) {
+	return c.ListAppsWithOptions(listAppsOptions{
+		IncludeLiveStatus:    includeLiveStatus,
+		IncludeResourceUsage: true,
+	})
+}
+
+type listAppsOptions struct {
+	IncludeLiveStatus    bool
+	IncludeResourceUsage bool
+	TenantID             string
+	ProjectID            string
+	Query                string
+	Domain               string
+	SourceRef            string
+}
+
+func (c *Client) ListAppsWithOptions(options listAppsOptions) ([]model.App, error) {
 	var response struct {
 		Apps []model.App `json:"apps"`
 	}
-	relative := "/v1/apps"
-	if includeLiveStatus {
-		relative += "?include_live_status=true"
+	values := url.Values{}
+	values.Set("include_live_status", fmt.Sprintf("%t", options.IncludeLiveStatus))
+	values.Set("include_resource_usage", fmt.Sprintf("%t", options.IncludeResourceUsage))
+	if value := strings.TrimSpace(options.TenantID); value != "" {
+		values.Set("tenant_id", value)
 	}
+	if value := strings.TrimSpace(options.ProjectID); value != "" {
+		values.Set("project_id", value)
+	}
+	if value := strings.TrimSpace(options.Query); value != "" {
+		values.Set("q", value)
+	}
+	if value := strings.TrimSpace(options.Domain); value != "" {
+		values.Set("domain", value)
+	}
+	if value := strings.TrimSpace(options.SourceRef); value != "" {
+		values.Set("source_ref", value)
+	}
+	relative := "/v1/apps?" + values.Encode()
 	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
 		return nil, err
 	}
 	return response.Apps, nil
+}
+
+func (c *Client) SearchResources(query string, types []string, limit int) (model.SearchResponse, error) {
+	var response model.SearchResponse
+	values := url.Values{}
+	values.Set("q", strings.TrimSpace(query))
+	if len(types) > 0 {
+		normalized := make([]string, 0, len(types))
+		for _, value := range types {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				normalized = append(normalized, value)
+			}
+		}
+		if len(normalized) > 0 {
+			values.Set("types", strings.Join(normalized, ","))
+		}
+	}
+	if limit > 0 {
+		values.Set("limit", fmt.Sprintf("%d", limit))
+	}
+	if err := c.doJSON(http.MethodGet, "/v1/search?"+values.Encode(), nil, &response); err != nil {
+		return model.SearchResponse{}, err
+	}
+	return response, nil
 }
 
 func (c *Client) CreateApp(request createAppRequest) (model.App, error) {

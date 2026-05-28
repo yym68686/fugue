@@ -110,7 +110,13 @@ in more than one visible project or tenant.
 }
 
 func (c *CLI) newAppListCommand() *cobra.Command {
-	return &cobra.Command{
+	var search string
+	var domain string
+	var sourceRef string
+	var includeLiveStatus bool
+	var includeResourceUsage bool
+	var allTenants bool
+	cmd := &cobra.Command{
 		Use:     "ls",
 		Aliases: []string{"list"},
 		Short:   "List apps",
@@ -119,11 +125,28 @@ func (c *CLI) newAppListCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			tenantID, projectID, err := c.resolveFilterSelections(client)
-			if err != nil {
-				return err
+			tenantID := ""
+			projectID := ""
+			if allTenants {
+				projectID, err = resolveProjectReference(client, "", c.effectiveProjectID(), c.effectiveProjectName())
+				if err != nil {
+					return err
+				}
+			} else {
+				tenantID, projectID, err = c.resolveFilterSelections(client)
+				if err != nil {
+					return err
+				}
 			}
-			apps, err := client.ListApps()
+			apps, err := client.ListAppsWithOptions(listAppsOptions{
+				IncludeLiveStatus:    includeLiveStatus,
+				IncludeResourceUsage: includeResourceUsage,
+				TenantID:             tenantID,
+				ProjectID:            projectID,
+				Query:                search,
+				Domain:               domain,
+				SourceRef:            sourceRef,
+			})
 			if err != nil {
 				return err
 			}
@@ -138,6 +161,13 @@ func (c *CLI) newAppListCommand() *cobra.Command {
 			return writeAppTableWithRuntimeNames(c.stdout, filtered, mapRuntimeNames(runtimes), c.showIDs())
 		},
 	}
+	cmd.Flags().StringVarP(&search, "search", "q", "", "Filter apps by id, name, route, project, tenant, or source metadata")
+	cmd.Flags().StringVar(&domain, "domain", "", "Filter apps by route or custom domain hostname")
+	cmd.Flags().StringVar(&sourceRef, "source-ref", "", "Filter apps by repository, image, upload, commit, or build metadata")
+	cmd.Flags().BoolVar(&includeLiveStatus, "live", false, "Include live runtime status overlay")
+	cmd.Flags().BoolVar(&includeResourceUsage, "resource-usage", false, "Include current resource usage overlay")
+	cmd.Flags().BoolVar(&allTenants, "all-tenants", false, "Search every visible tenant instead of the configured workspace")
+	return cmd
 }
 
 func (c *CLI) newAppStatusCommand() *cobra.Command {

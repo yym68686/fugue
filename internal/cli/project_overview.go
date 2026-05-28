@@ -20,8 +20,11 @@ import (
 
 func (c *CLI) newProjectOverviewCommand() *cobra.Command {
 	opts := struct {
-		Live bool
-	}{Live: true}
+		Live      bool
+		Services  bool
+		Domains   bool
+		Databases bool
+	}{Live: true, Services: true, Domains: true, Databases: true}
 	cmd := &cobra.Command{
 		Use:     "overview [project]",
 		Aliases: []string{"status"},
@@ -47,6 +50,14 @@ func (c *CLI) newProjectOverviewCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			extras, err := loadProjectOverviewExtras(client, detail, projectOverviewExtraOptions{
+				Services:  opts.Services,
+				Domains:   opts.Domains,
+				Databases: opts.Databases,
+			})
+			if err != nil {
+				return err
+			}
 			if c.wantsJSON() {
 				payload := map[string]any{"project": detail}
 				if summary != nil {
@@ -55,12 +66,27 @@ func (c *CLI) newProjectOverviewCommand() *cobra.Command {
 				if status != nil {
 					payload["status"] = status
 				}
+				if opts.Services {
+					payload["services"] = extras.Services
+				}
+				if opts.Domains {
+					payload["domains"] = extras.Domains
+				}
+				if opts.Databases {
+					payload["databases"] = extras.Databases
+				}
 				return writeJSON(c.stdout, payload)
 			}
-			return renderConsoleProjectOverview(c.stdout, summary, detail, status)
+			if err := renderConsoleProjectOverview(c.stdout, summary, detail, status); err != nil {
+				return err
+			}
+			return renderProjectOverviewExtras(c.stdout, extras)
 		},
 	}
 	cmd.Flags().BoolVar(&opts.Live, "live", opts.Live, "Include live runtime status in project snapshots")
+	cmd.Flags().BoolVar(&opts.Services, "with-services", opts.Services, "Include backing service inventory")
+	cmd.Flags().BoolVar(&opts.Domains, "with-domains", opts.Domains, "Include app custom domain inventory")
+	cmd.Flags().BoolVar(&opts.Databases, "with-db", opts.Databases, "Include app and service database inventory")
 	return cmd
 }
 
@@ -142,6 +168,30 @@ type projectOverviewSnapshot struct {
 	Summary *consoleProjectSummary       `json:"summary,omitempty"`
 	Status  *projectStatusResponse       `json:"status,omitempty"`
 	Detail  consoleProjectDetailResponse `json:"detail"`
+}
+
+type projectOverviewExtraOptions struct {
+	Services  bool
+	Domains   bool
+	Databases bool
+}
+
+type projectOverviewExtras struct {
+	Services  []model.BackingService        `json:"services,omitempty"`
+	Domains   []model.AppDomain             `json:"domains,omitempty"`
+	Databases []projectDatabaseInventoryRow `json:"databases,omitempty"`
+}
+
+type projectDatabaseInventoryRow struct {
+	AppID       string `json:"app_id,omitempty"`
+	AppName     string `json:"app_name,omitempty"`
+	ServiceID   string `json:"service_id,omitempty"`
+	ServiceName string `json:"service_name,omitempty"`
+	Status      string `json:"status,omitempty"`
+	Database    string `json:"database,omitempty"`
+	User        string `json:"user,omitempty"`
+	RuntimeID   string `json:"runtime_id,omitempty"`
+	StorageSize string `json:"storage_size,omitempty"`
 }
 
 func (c *CLI) watchProjectPolling(ctx context.Context, client *Client, args []string, interval time.Duration, includeLiveStatus bool) error {
@@ -315,6 +365,154 @@ func (c *CLI) loadConsoleProjectOverview(client *Client, ref string, includeLive
 		}
 	}
 	return nil, detail, status, nil
+}
+
+func loadProjectOverviewExtras(client *Client, detail consoleProjectDetailResponse, options projectOverviewExtraOptions) (projectOverviewExtras, error) {
+	extras := projectOverviewExtras{}
+	serviceByID := map[string]model.BackingService{}
+	if options.Services || options.Databases {
+		services, err := client.ListBackingServices()
+		if err != nil {
+			return extras, err
+		}
+		for _, service := range services {
+			if strings.TrimSpace(service.ProjectID) != strings.TrimSpace(detail.ProjectID) {
+				continue
+			}
+			serviceByID[strings.TrimSpace(service.ID)] = service
+			if options.Services {
+				extras.Services = append(extras.Services, service)
+			}
+		}
+	}
+	if options.Domains {
+		for _, app := range detail.Apps {
+			domains, err := client.ListAppDomains(app.ID)
+			if err != nil {
+				return extras, err
+			}
+			extras.Domains = append(extras.Domains, domains...)
+		}
+	}
+	if options.Databases {
+		extras.Databases = projectDatabaseInventory(detail.Apps, serviceByID)
+	}
+	return extras, nil
+}
+
+func projectDatabaseInventory(apps []model.App, serviceByID map[string]model.BackingService) []projectDatabaseInventoryRow {
+	rows := []projectDatabaseInventoryRow{}
+	appNameByID := map[string]string{}
+	seen := map[string]bool{}
+	for _, app := range apps {
+		appNameByID[strings.TrimSpace(app.ID)] = app.Name
+		if app.Spec.Postgres == nil {
+			continue
+		}
+		postgres := app.Spec.Postgres
+		key := "app:" + strings.TrimSpace(app.ID)
+		seen[key] = true
+		rows = append(rows, projectDatabaseInventoryRow{
+			AppID:       app.ID,
+			AppName:     app.Name,
+			ServiceName: postgres.ServiceName,
+			Status:      app.Status.Phase,
+			Database:    postgres.Database,
+			User:        postgres.User,
+			RuntimeID:   firstNonEmpty(postgres.RuntimeID, app.Spec.RuntimeID, app.Status.CurrentRuntimeID),
+			StorageSize: postgres.StorageSize,
+		})
+	}
+	for _, service := range serviceByID {
+		if !strings.EqualFold(strings.TrimSpace(service.Type), model.BackingServiceTypePostgres) {
+			continue
+		}
+		postgres := service.Spec.Postgres
+		row := projectDatabaseInventoryRow{
+			ServiceID:   service.ID,
+			ServiceName: service.Name,
+			AppID:       service.OwnerAppID,
+			AppName:     appNameByID[strings.TrimSpace(service.OwnerAppID)],
+			Status:      service.Status,
+		}
+		if postgres != nil {
+			row.Database = postgres.Database
+			row.User = postgres.User
+			row.RuntimeID = postgres.RuntimeID
+			row.StorageSize = postgres.StorageSize
+		}
+		key := "service:" + strings.TrimSpace(service.ID)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].AppName != rows[j].AppName {
+			return rows[i].AppName < rows[j].AppName
+		}
+		return rows[i].ServiceName < rows[j].ServiceName
+	})
+	return rows
+}
+
+func renderProjectOverviewExtras(w io.Writer, extras projectOverviewExtras) error {
+	if len(extras.Services) > 0 {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w, "[services]"); err != nil {
+			return err
+		}
+		if err := writeServiceTable(w, extras.Services); err != nil {
+			return err
+		}
+	}
+	if len(extras.Domains) > 0 {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w, "[domains]"); err != nil {
+			return err
+		}
+		if err := writeDomainTable(w, extras.Domains); err != nil {
+			return err
+		}
+	}
+	if len(extras.Databases) > 0 {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w, "[databases]"); err != nil {
+			return err
+		}
+		return writeProjectDatabaseInventoryTable(w, extras.Databases)
+	}
+	return nil
+}
+
+func writeProjectDatabaseInventoryTable(w io.Writer, rows []projectDatabaseInventoryRow) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "APP\tSERVICE\tSTATUS\tDATABASE\tUSER\tRUNTIME\tSTORAGE"); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			firstNonEmpty(row.AppName, row.AppID, "-"),
+			firstNonEmpty(row.ServiceName, row.ServiceID, "-"),
+			firstNonEmpty(row.Status, "-"),
+			firstNonEmpty(row.Database, "-"),
+			firstNonEmpty(row.User, "-"),
+			firstNonEmpty(row.RuntimeID, "-"),
+			firstNonEmpty(row.StorageSize, "-"),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
 }
 
 func writeConsoleProjectTable(w io.Writer, projects []consoleProjectSummary) error {

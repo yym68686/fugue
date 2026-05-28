@@ -38,6 +38,18 @@ api:
   clusterJoinMeshProvider: ""
   clusterJoinMeshLoginServer: ""
   clusterJoinMeshAuthKey: ""
+  dataBackend:
+    provider: cloudflare-r2
+    bucket: ""
+    region: ""
+    endpoint: ""
+    accountID: ""
+    prefix: ""
+    accessKeyID: ""
+    secretAccessKey: ""
+    sessionToken: ""
+    credentialEncryptionKey: ""
+    presignTTL: 15m
   importWorkDir: /var/lib/fugue/import
   hostNetwork: false
   minReadySeconds: 5

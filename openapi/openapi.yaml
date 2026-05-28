@@ -22,6 +22,8 @@ tags:
     description: Project management endpoints.
   - name: Console
     description: Console-specific gallery, detail, and change-stream endpoints.
+  - name: Discovery
+    description: Cross-resource discovery and jump-to-context endpoints.
   - name: Billing
     description: Tenant billing and managed-cap endpoints.
   - name: API Keys
@@ -46,6 +48,8 @@ tags:
     description: Audit-log endpoints.
   - name: Source Uploads
     description: Source upload archive endpoints.
+  - name: Data Workspaces
+    description: Project-level dataset, checkpoint, and intermediate artifact workspaces.
   - name: Agent
     description: Runtime agent control-plane endpoints.
   - name: Node Updater
@@ -113,6 +117,41 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AuthContextResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/search:
+    get:
+      operationId: searchResources
+      summary: Search Resources
+      tags: [Discovery]
+      x-fugue-handler: handleSearchResources
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: q
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: types
+          required: false
+          description: Comma-separated resource kinds to search. Defaults to tenant, project, app, domain, service, runtime, operation.
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            format: int32
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/edge/tls/ask:
@@ -2584,6 +2623,27 @@ paths:
       security:
         - BearerAuth: []
       parameters:
+        - $ref: "#/components/parameters/TenantIdQueryParam"
+        - in: query
+          name: project_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: q
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: domain
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: source_ref
+          required: false
+          schema:
+            type: string
         - in: query
           name: include_live_status
           required: false
@@ -5210,6 +5270,828 @@ paths:
                 additionalProperties: true
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/data/backends:
+    get:
+      operationId: listDataBackends
+      summary: List Data Backends
+      tags: [Data Workspaces]
+      x-fugue-handler: handleListDataBackends
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createDataBackend
+      summary: Create Data Backend
+      tags: [Data Workspaces]
+      x-fugue-handler: handleCreateDataBackend
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DataBackendCreateRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/backends/{backend_id}:
+    get:
+      operationId: getDataBackend
+      summary: Get Data Backend
+      tags: [Data Workspaces]
+      x-fugue-handler: handleGetDataBackend
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: backend_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deleteDataBackend
+      summary: Delete Data Backend
+      tags: [Data Workspaces]
+      x-fugue-handler: handleDeleteDataBackend
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: backend_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/backends/{backend_id}/credentials:
+    post:
+      operationId: rotateDataBackendCredentials
+      summary: Rotate Data Backend Credentials
+      tags: [Data Workspaces]
+      x-fugue-handler: handleRotateDataBackendCredentials
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: backend_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DataBackendCredentialRotationRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/workspaces:
+    get:
+      operationId: listDataWorkspaces
+      summary: List Data Workspaces
+      tags: [Data Workspaces]
+      x-fugue-handler: handleListDataWorkspaces
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/TenantIdQueryParam"
+        - in: query
+          name: project_id
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createDataWorkspace
+      summary: Create Data Workspace
+      tags: [Data Workspaces]
+      x-fugue-handler: handleCreateDataWorkspace
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DataWorkspaceCreateRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/workspaces/{workspace_id}:
+    get:
+      operationId: getDataWorkspace
+      summary: Get Data Workspace
+      tags: [Data Workspaces]
+      x-fugue-handler: handleGetDataWorkspace
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      operationId: patchDataWorkspace
+      summary: Patch Data Workspace
+      tags: [Data Workspaces]
+      x-fugue-handler: handlePatchDataWorkspace
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DataWorkspacePatchRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deleteDataWorkspace
+      summary: Delete Data Workspace
+      tags: [Data Workspaces]
+      x-fugue-handler: handleDeleteDataWorkspace
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/workspaces/{workspace_id}/snapshots:
+    get:
+      operationId: listDataSnapshots
+      summary: List Data Snapshots
+      tags: [Data Workspaces]
+      x-fugue-handler: handleListDataSnapshots
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createDataSnapshot
+      summary: Create Data Snapshot
+      tags: [Data Workspaces]
+      x-fugue-handler: handleCreateDataSnapshot
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DataSnapshotCreateRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/workspaces/{workspace_id}/snapshots/{snapshot_id}:
+    get:
+      operationId: getDataSnapshot
+      summary: Get Data Snapshot
+      tags: [Data Workspaces]
+      x-fugue-handler: handleGetDataSnapshot
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
+        - $ref: "#/components/parameters/DataSnapshotIdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deleteDataSnapshot
+      summary: Delete Data Snapshot
+      tags: [Data Workspaces]
+      x-fugue-handler: handleDeleteDataSnapshot
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
+        - $ref: "#/components/parameters/DataSnapshotIdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/workspaces/{workspace_id}/transfers/plan-upload:
+    post:
+      operationId: planDataUpload
+      summary: Plan Data Upload
+      tags: [Data Workspaces]
+      x-fugue-handler: handlePlanDataUpload
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DataUploadPlanRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/workspaces/{workspace_id}/transfers/plan-download:
+    post:
+      operationId: planDataDownload
+      summary: Plan Data Download
+      tags: [Data Workspaces]
+      x-fugue-handler: handlePlanDataDownload
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DataDownloadPlanRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/workspaces/{workspace_id}/prewarm:
+    post:
+      operationId: createDataPrewarm
+      summary: Create Data Prewarm
+      tags: [Data Workspaces]
+      x-fugue-handler: handleCreateDataPrewarm
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DataPrewarmRequest"
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/workspaces/{workspace_id}/grants:
+    get:
+      operationId: listDataGrants
+      summary: List Data Grants
+      tags: [Data Workspaces]
+      x-fugue-handler: handleListDataGrants
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createDataGrant
+      summary: Create Data Grant
+      tags: [Data Workspaces]
+      x-fugue-handler: handleCreateDataGrant
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DataGrantCreateRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/workspaces/{workspace_id}/gc/sweep:
+    post:
+      operationId: sweepDataWorkspaceGC
+      summary: Sweep Data Workspace GC
+      tags: [Data Workspaces]
+      x-fugue-handler: handleSweepDataWorkspaceGC
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DataGCSweepRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/workspaces/{workspace_id}/backend-migrations:
+    post:
+      operationId: createDataBackendMigration
+      summary: Create Data Backend Migration
+      tags: [Data Workspaces]
+      x-fugue-handler: handleCreateDataBackendMigration
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DataBackendMigrationRequest"
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/workspaces/{workspace_id}/backend-migrations/{transfer_id}/rollback:
+    post:
+      operationId: rollbackDataBackendMigration
+      summary: Rollback Data Backend Migration
+      tags: [Data Workspaces]
+      x-fugue-handler: handleRollbackDataBackendMigration
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
+        - $ref: "#/components/parameters/DataTransferIdPathParam"
+      responses:
+        '202':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/transfers:
+    get:
+      operationId: listDataTransfers
+      summary: List Data Transfers
+      tags: [Data Workspaces]
+      x-fugue-handler: handleListDataTransfers
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/transfers/{transfer_id}:
+    get:
+      operationId: getDataTransfer
+      summary: Get Data Transfer
+      tags: [Data Workspaces]
+      x-fugue-handler: handleGetDataTransfer
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataTransferIdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/transfers/{transfer_id}/refresh:
+    post:
+      operationId: refreshDataTransferAuthorization
+      summary: Refresh Data Transfer Authorization
+      tags: [Data Workspaces]
+      x-fugue-handler: handleRefreshDataTransferAuthorization
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataTransferIdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/transfers/{transfer_id}/checkpoint:
+    post:
+      operationId: checkpointDataTransfer
+      summary: Checkpoint Data Transfer
+      tags: [Data Workspaces]
+      x-fugue-handler: handleCheckpointDataTransfer
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataTransferIdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DataTransferCheckpointRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/transfers/{transfer_id}/multipart/parts:
+    get:
+      operationId: listDataMultipartParts
+      summary: List Data Multipart Parts
+      tags: [Data Workspaces]
+      x-fugue-handler: handleListDataMultipartParts
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataTransferIdPathParam"
+        - in: query
+          name: sha256
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/transfers/{transfer_id}/multipart/complete:
+    post:
+      operationId: completeDataMultipartUpload
+      summary: Complete Data Multipart Upload
+      tags: [Data Workspaces]
+      x-fugue-handler: handleCompleteDataMultipartUpload
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataTransferIdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DataMultipartCompleteRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/transfers/{transfer_id}/multipart/abort:
+    post:
+      operationId: abortDataMultipartUpload
+      summary: Abort Data Multipart Upload
+      tags: [Data Workspaces]
+      x-fugue-handler: handleAbortDataMultipartUpload
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataTransferIdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DataMultipartAbortRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/transfers/{transfer_id}/complete:
+    post:
+      operationId: completeDataTransfer
+      summary: Complete Data Transfer
+      tags: [Data Workspaces]
+      x-fugue-handler: handleCompleteDataTransfer
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataTransferIdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DataTransferCompleteRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/transfers/{transfer_id}/cancel:
+    post:
+      operationId: cancelDataTransfer
+      summary: Cancel Data Transfer
+      tags: [Data Workspaces]
+      x-fugue-handler: handleCancelDataTransfer
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataTransferIdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/grants/{grant_id}:
+    delete:
+      operationId: revokeDataGrant
+      summary: Revoke Data Grant
+      tags: [Data Workspaces]
+      x-fugue-handler: handleRevokeDataGrant
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: grant_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/blobs/{sha256}:
+    get:
+      operationId: getDataBlob
+      summary: Get Data Blob
+      tags: [Data Workspaces]
+      x-fugue-handler: handleGetDataBlob
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: sha256
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: transfer_id
+          required: true
+          schema:
+            type: string
+          description: Planned download transfer that authorizes this blob read.
+        - in: header
+          name: Range
+          required: false
+          schema:
+            type: string
+          description: Optional byte range for resumable downloads.
+      responses:
+        '200':
+          description: Successful response
+          headers:
+            Accept-Ranges:
+              schema:
+                type: string
+            X-Fugue-Data-SHA256:
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      operationId: putDataBlob
+      summary: Put Data Blob
+      tags: [Data Workspaces]
+      x-fugue-handler: handlePutDataBlob
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: sha256
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: transfer_id
+          required: true
+          schema:
+            type: string
+          description: Planned upload transfer that authorizes this blob write.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
 components:
   securitySchemes:
     BearerAuth:
@@ -5436,6 +6318,24 @@ components:
       schema:
         type: string
         maxLength: 200
+    DataWorkspaceIdPathParam:
+      in: path
+      name: workspace_id
+      required: true
+      schema:
+        type: string
+    DataSnapshotIdPathParam:
+      in: path
+      name: snapshot_id
+      required: true
+      schema:
+        type: string
+    DataTransferIdPathParam:
+      in: path
+      name: transfer_id
+      required: true
+      schema:
+        type: string
   schemas:
     ErrorResponse:
       type: object
@@ -5453,6 +6353,401 @@ components:
         details:
           type: object
           additionalProperties: true
+    DataAsset:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        path:
+          type: string
+        materialize_path:
+          type: string
+        mode:
+          type: string
+        required:
+          type: boolean
+        include:
+          type: array
+          items:
+            type: string
+        ignore:
+          type: array
+          items:
+            type: string
+    DataManifestEntry:
+      type: object
+      additionalProperties: false
+      required: [asset_name, relative_path, kind]
+      properties:
+        asset_name:
+          type: string
+        relative_path:
+          type: string
+        kind:
+          type: string
+          enum: [file, dir, symlink]
+        size:
+          type: integer
+          format: int64
+        mode:
+          type: integer
+          format: int64
+        mtime:
+          type: string
+          format: date-time
+        sha256:
+          type: string
+        object_key:
+          type: string
+        etag:
+          type: string
+        link_target:
+          type: string
+    DataManifest:
+      type: object
+      additionalProperties: false
+      properties:
+        workspace_id:
+          type: string
+        snapshot_id:
+          type: string
+        digest:
+          type: string
+        file_count:
+          type: integer
+          format: int32
+        total_bytes:
+          type: integer
+          format: int64
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/DataManifestEntry"
+    DataTransferPart:
+      type: object
+      additionalProperties: false
+      required: [part_number]
+      properties:
+        part_number:
+          type: integer
+          format: int32
+        offset:
+          type: integer
+          format: int64
+        size:
+          type: integer
+          format: int64
+        upload_url:
+          type: string
+        download_url:
+          type: string
+        etag:
+          type: string
+        completed:
+          type: boolean
+        expires_at:
+          type: string
+          format: date-time
+    DataTransferPlanBlob:
+      type: object
+      additionalProperties: false
+      required: [sha256, size, object_key, exists]
+      properties:
+        sha256:
+          type: string
+        size:
+          type: integer
+          format: int64
+        object_key:
+          type: string
+        upload_url:
+          type: string
+        download_url:
+          type: string
+        upload_mode:
+          type: string
+          enum: [single, multipart]
+        upload_id:
+          type: string
+        part_size:
+          type: integer
+          format: int64
+        parts:
+          type: array
+          items:
+            $ref: "#/components/schemas/DataTransferPart"
+        exists:
+          type: boolean
+        expires_at:
+          type: string
+          format: date-time
+    DataBackendCredentials:
+      type: object
+      additionalProperties: false
+      properties:
+        access_key_id:
+          type: string
+        secret_access_key:
+          type: string
+        token:
+          type: string
+    DataBackendCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [name, provider]
+      properties:
+        tenant_id:
+          type: string
+        name:
+          type: string
+        provider:
+          type: string
+          enum: [fugue-managed, cloudflare-r2, backblaze-b2, s3, hugging-face, minio]
+        bucket:
+          type: string
+        region:
+          type: string
+        endpoint:
+          type: string
+        base_url:
+          type: string
+        prefix:
+          type: string
+        credentials:
+          $ref: "#/components/schemas/DataBackendCredentials"
+    DataBackendCredentialRotationRequest:
+      type: object
+      additionalProperties: false
+      required: [credentials]
+      properties:
+        credentials:
+          $ref: "#/components/schemas/DataBackendCredentials"
+    DataWorkspaceCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        name:
+          type: string
+        default_region:
+          type: string
+        storage_backend_id:
+          type: string
+        quota_bytes:
+          type: integer
+          format: int64
+        assets:
+          type: array
+          items:
+            $ref: "#/components/schemas/DataAsset"
+    DataWorkspacePatchRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        project_id:
+          type: string
+        name:
+          type: string
+        default_region:
+          type: string
+        storage_backend_id:
+          type: string
+        quota_bytes:
+          type: integer
+          format: int64
+        assets:
+          type: array
+          items:
+            $ref: "#/components/schemas/DataAsset"
+    DataSnapshotCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [version, manifest]
+      properties:
+        version:
+          type: string
+        message:
+          type: string
+        manifest:
+          $ref: "#/components/schemas/DataManifest"
+    DataUploadPlanRequest:
+      type: object
+      additionalProperties: false
+      required: [manifest]
+      properties:
+        version:
+          type: string
+        message:
+          type: string
+        manifest:
+          $ref: "#/components/schemas/DataManifest"
+    DataDownloadPlanRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        version:
+          type: string
+        assets:
+          type: array
+          items:
+            type: string
+    DataPrewarmRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        version:
+          type: string
+        runtime_id:
+          type: string
+        assets:
+          type: array
+          items:
+            type: string
+    DataTransferCompleteRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        snapshot_id:
+          type: string
+        version:
+          type: string
+        message:
+          type: string
+        manifest:
+          $ref: "#/components/schemas/DataManifest"
+        bytes_done:
+          type: integer
+          format: int64
+        files_done:
+          type: integer
+          format: int32
+        error_code:
+          type: string
+        error_message:
+          type: string
+    DataTransferCheckpointRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        bytes_done:
+          type: integer
+          format: int64
+        files_done:
+          type: integer
+          format: int32
+        blobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/DataTransferPlanBlob"
+    DataMultipartCompleteRequest:
+      type: object
+      additionalProperties: false
+      required: [sha256, parts]
+      properties:
+        sha256:
+          type: string
+        upload_id:
+          type: string
+        parts:
+          type: array
+          items:
+            $ref: "#/components/schemas/DataTransferPart"
+    DataMultipartAbortRequest:
+      type: object
+      additionalProperties: false
+      required: [sha256]
+      properties:
+        sha256:
+          type: string
+        upload_id:
+          type: string
+    DataGrantCreateRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        snapshot_id:
+          type: string
+        asset_name:
+          type: string
+        mode:
+          type: string
+          enum: [read-only, read-write]
+        expires_in_minutes:
+          type: integer
+          format: int32
+    DataGCSweepRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        dry_run:
+          type: boolean
+        confirm:
+          type: boolean
+        retention_days:
+          type: integer
+          format: int32
+    DataGCSweepCandidate:
+      type: object
+      additionalProperties: false
+      properties:
+        key:
+          type: string
+        size:
+          type: integer
+          format: int64
+        references:
+          type: integer
+          format: int32
+        last_modified:
+          type: string
+          format: date-time
+        reason:
+          type: string
+    DataGCSweepResult:
+      type: object
+      additionalProperties: false
+      properties:
+        workspace_id:
+          type: string
+        backend_id:
+          type: string
+        dry_run:
+          type: boolean
+        retention_days:
+          type: integer
+          format: int32
+        cutoff:
+          type: string
+          format: date-time
+        scanned:
+          type: integer
+          format: int32
+        deleted:
+          type: integer
+          format: int32
+        deleted_bytes:
+          type: integer
+          format: int64
+        candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/DataGCSweepCandidate"
+    DataBackendMigrationRequest:
+      type: object
+      additionalProperties: false
+      required: [target_backend_id]
+      properties:
+        target_backend_id:
+          type: string
+        dry_run:
+          type: boolean
+        cutover:
+          type: boolean
     AuthPrincipalContext:
       type: object
       additionalProperties: false
@@ -7958,6 +9253,8 @@ components:
             $ref: "#/components/schemas/AppFile"
         workspace:
           $ref: "#/components/schemas/AppWorkspaceSpec"
+        data:
+          $ref: "#/components/schemas/AppDataMaterializationSpec"
         persistent_storage:
           $ref: "#/components/schemas/AppPersistentStorageSpec"
         volume_replication:
@@ -7979,6 +9276,100 @@ components:
           $ref: "#/components/schemas/AppNetworkPolicyDirectionSpec"
         ingress:
           $ref: "#/components/schemas/AppNetworkPolicyDirectionSpec"
+    AppDataMaterializationSpec:
+      type: object
+      additionalProperties: false
+      properties:
+        workspaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppDataWorkspaceMaterialization"
+        prewarm:
+          type: boolean
+        fail_on_missing:
+          type: boolean
+        locality_hint:
+          type: string
+        required_free_bytes:
+          type: integer
+          format: int64
+        max_egress_bytes:
+          type: integer
+          format: int64
+        estimated_egress_bytes:
+          type: integer
+          format: int64
+        egress_estimate:
+          $ref: "#/components/schemas/DataEgressEstimate"
+    AppDataWorkspaceMaterialization:
+      type: object
+      additionalProperties: false
+      properties:
+        workspace_id:
+          type: string
+        workspace:
+          type: string
+        version:
+          type: string
+        assets:
+          type: array
+          items:
+            type: string
+        target_path:
+          type: string
+        mode:
+          type: string
+        required:
+          type: boolean
+        locality_hint:
+          type: string
+        estimated_egress_bytes:
+          type: integer
+          format: int64
+    DataEgressEstimate:
+      type: object
+      additionalProperties: false
+      properties:
+        source_region:
+          type: string
+        target_region:
+          type: string
+        bytes:
+          type: integer
+          format: int64
+        cross_region:
+          type: boolean
+        estimated_micro_cents:
+          type: integer
+          format: int64
+        provider_cost_available:
+          type: boolean
+    DataMaterializationPlan:
+      type: object
+      additionalProperties: false
+      properties:
+        workspaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppDataWorkspaceMaterialization"
+        required_bytes:
+          type: integer
+          format: int64
+        required_free_bytes:
+          type: integer
+          format: int64
+        available_bytes:
+          type: integer
+          format: int64
+        disk_ok:
+          type: boolean
+        locality_hint:
+          type: string
+        estimated_egress_bytes:
+          type: integer
+          format: int64
+        egress_estimate:
+          $ref: "#/components/schemas/DataEgressEstimate"
     AppNetworkPolicyDirectionSpec:
       type: object
       additionalProperties: false
@@ -8114,6 +9505,8 @@ components:
           type: string
         labels:
           $ref: "#/components/schemas/StringMap"
+        data_cache:
+          $ref: "#/components/schemas/RuntimeDataCacheSpec"
         node_key_id:
           type: string
         cluster_node_name:
@@ -8138,6 +9531,22 @@ components:
         updated_at:
           type: string
           format: date-time
+    RuntimeDataCacheSpec:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+        root_path:
+          type: string
+        max_bytes:
+          type: integer
+          format: int64
+        reserve_free_bytes:
+          type: integer
+          format: int64
+        locality_hints:
+          $ref: "#/components/schemas/StringMap"
     RuntimeAccessGrant:
       type: object
       additionalProperties: false
@@ -9434,6 +10843,72 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Tenant"
+    SearchResult:
+      type: object
+      additionalProperties: false
+      required: [kind, id, score]
+      properties:
+        kind:
+          type: string
+        id:
+          type: string
+        name:
+          type: string
+        tenant_id:
+          type: string
+        tenant_name:
+          type: string
+        project_id:
+          type: string
+        project_name:
+          type: string
+        app_id:
+          type: string
+        app_name:
+          type: string
+        public_url:
+          type: string
+        status:
+          type: string
+        type:
+          type: string
+        runtime_id:
+          type: string
+        runtime_name:
+          type: string
+        ref:
+          type: string
+        summary:
+          type: string
+        score:
+          type: integer
+          format: int32
+        matched_fields:
+          type: array
+          items:
+            type: string
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+    SearchResponse:
+      type: object
+      additionalProperties: false
+      required: [query, results, limit]
+      properties:
+        query:
+          type: string
+        types:
+          type: array
+          items:
+            type: string
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchResult"
+        limit:
+          type: integer
+          format: int32
     TenantResponse:
       type: object
       additionalProperties: false

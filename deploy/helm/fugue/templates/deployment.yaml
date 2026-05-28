@@ -100,6 +100,44 @@ spec:
                 secretKeyRef:
                   name: {{ include "fugue.configSecretName" . }}
                   key: FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY
+            - name: FUGUE_DATA_BACKEND_PROVIDER
+              value: {{ .Values.api.dataBackend.provider | quote }}
+            - name: FUGUE_DATA_BACKEND_BUCKET
+              value: {{ .Values.api.dataBackend.bucket | quote }}
+            - name: FUGUE_DATA_BACKEND_REGION
+              value: {{ .Values.api.dataBackend.region | quote }}
+            - name: FUGUE_DATA_BACKEND_ENDPOINT
+              value: {{ .Values.api.dataBackend.endpoint | quote }}
+            - name: FUGUE_DATA_R2_ACCOUNT_ID
+              value: {{ .Values.api.dataBackend.accountID | quote }}
+            - name: FUGUE_DATA_BACKEND_PREFIX
+              value: {{ .Values.api.dataBackend.prefix | quote }}
+            - name: FUGUE_DATA_BACKEND_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: FUGUE_DATA_BACKEND_ACCESS_KEY_ID
+                  optional: true
+            - name: FUGUE_DATA_BACKEND_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: FUGUE_DATA_BACKEND_SECRET_ACCESS_KEY
+                  optional: true
+            - name: FUGUE_DATA_BACKEND_SESSION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: FUGUE_DATA_BACKEND_SESSION_TOKEN
+                  optional: true
+            - name: FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY
+                  optional: true
+            - name: FUGUE_DATA_PRESIGN_TTL
+              value: {{ .Values.api.dataBackend.presignTTL | quote }}
             - name: FUGUE_APP_BASE_DOMAIN
               value: {{ .Values.api.appBaseDomain | quote }}
             - name: FUGUE_API_PUBLIC_DOMAIN

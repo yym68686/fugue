@@ -922,6 +922,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	timings := serverTimingFromContext(r.Context())
 
+	query := r.URL.Query()
 	includeLiveStatus, err := readBoolQuery(r, "include_live_status", false)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -934,8 +935,28 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tenantID := principal.TenantID
+	if principal.IsPlatformAdmin() {
+		requestedTenantID := strings.TrimSpace(query.Get("tenant_id"))
+		if requestedTenantID != "" {
+			tenantID = requestedTenantID
+		} else {
+			tenantID = ""
+		}
+	} else if requestedTenantID := strings.TrimSpace(query.Get("tenant_id")); requestedTenantID != "" && requestedTenantID != principal.TenantID {
+		httpx.WriteError(w, http.StatusForbidden, "cannot list apps for another tenant")
+		return
+	}
+	filter := appListFilter{
+		TenantID:  tenantID,
+		Query:     strings.TrimSpace(query.Get("q")),
+		ProjectID: projectIDForPrincipal(principal, query.Get("project_id")),
+		Domain:    strings.TrimSpace(query.Get("domain")),
+		SourceRef: strings.TrimSpace(query.Get("source_ref")),
+	}
+
 	storeStartedAt := time.Now()
-	apps, err := s.store.ListApps(principal.TenantID, principal.IsPlatformAdmin())
+	apps, err := s.store.ListApps(tenantID, principal.IsPlatformAdmin())
 	timings.Add("store_apps", time.Since(storeStartedAt))
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -949,6 +970,25 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		visibleApps = append(visibleApps, app)
 	}
 	visibleApps = filterAppsForPrincipal(principal, visibleApps)
+	if filter.HasAny() {
+		filterStartedAt := time.Now()
+		domainHostsByAppID := map[string][]string{}
+		if filter.NeedsDomainIndex() {
+			if domains, domainErr := s.store.ListVerifiedAppDomains(); domainErr == nil {
+				for _, domain := range domains {
+					if !principalAllowsAppID(principal, strings.TrimSpace(domain.TenantID), strings.TrimSpace(domain.AppID)) {
+						continue
+					}
+					domainHostsByAppID[strings.TrimSpace(domain.AppID)] = append(
+						domainHostsByAppID[strings.TrimSpace(domain.AppID)],
+						strings.TrimSpace(domain.Hostname),
+					)
+				}
+			}
+		}
+		visibleApps = filterAppListResults(visibleApps, filter, domainHostsByAppID)
+		timings.Add("filter_apps", time.Since(filterStartedAt))
+	}
 	if includeLiveStatus {
 		liveStatusStartedAt := time.Now()
 		visibleApps = s.overlayManagedAppStatuses(r.Context(), visibleApps)

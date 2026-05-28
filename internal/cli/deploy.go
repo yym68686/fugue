@@ -112,9 +112,6 @@ func resolveProjectReference(client *Client, tenantID, projectID, projectName st
 	if projectName == "" {
 		return "", nil
 	}
-	if strings.TrimSpace(tenantID) == "" {
-		return "", fmt.Errorf("project %q needs a tenant context; rerun with --tenant <name>", projectName)
-	}
 	projects, err := client.ListProjects(tenantID)
 	if err != nil {
 		return "", err
@@ -129,6 +126,9 @@ func resolveProjectReference(client *Client, tenantID, projectID, projectName st
 		case strings.EqualFold(project.Slug, model.Slugify(projectName)):
 			matches = append(matches, project)
 		}
+	}
+	if len(matches) == 0 {
+		matches = matchProjectsFuzzy(projects, projectName)
 	}
 	switch len(matches) {
 	case 0:
@@ -176,6 +176,18 @@ func resolveAppReference(client *Client, appRef, projectID, tenantID string) (mo
 	matches := matchVisibleApps(apps, appRef, projectID, tenantID)
 	switch len(matches) {
 	case 0:
+		projectLookupID, projectErr := resolveProjectReference(client, tenantID, "", appRef)
+		if projectErr == nil && strings.TrimSpace(projectLookupID) != "" {
+			projectApps := filterApps(apps, tenantID, projectLookupID)
+			switch len(projectApps) {
+			case 1:
+				return projectApps[0], nil
+			case 0:
+				return model.App{}, fmt.Errorf("project %q has no visible apps", appRef)
+			default:
+				return model.App{}, multipleMatchesError("app", appRef, projectApps, describeAppMatch)
+			}
+		}
 		return model.App{}, fmt.Errorf("app %q not found", appRef)
 	case 1:
 		return matches[0], nil
@@ -467,7 +479,7 @@ func matchVisibleApps(apps []model.App, ref, projectID, tenantID string) []model
 		return nil
 	}
 	slug := model.Slugify(ref)
-	matches := make([]model.App, 0, 1)
+	exactMatches := make([]model.App, 0, 1)
 	for _, app := range apps {
 		if tenantID != "" && app.TenantID != tenantID {
 			continue
@@ -477,12 +489,101 @@ func matchVisibleApps(apps []model.App, ref, projectID, tenantID string) []model
 		}
 		switch {
 		case strings.EqualFold(app.ID, ref):
-			matches = append(matches, app)
+			exactMatches = append(exactMatches, app)
 		case strings.EqualFold(app.Name, ref):
-			matches = append(matches, app)
+			exactMatches = append(exactMatches, app)
 		case slug != "" && strings.EqualFold(app.Name, slug):
-			matches = append(matches, app)
+			exactMatches = append(exactMatches, app)
+		}
+	}
+	if len(exactMatches) > 0 {
+		return exactMatches
+	}
+	partialMatches := make([]model.App, 0, 1)
+	for _, app := range apps {
+		if tenantID != "" && app.TenantID != tenantID {
+			continue
+		}
+		if projectID != "" && app.ProjectID != projectID {
+			continue
+		}
+		if appMatchesReference(app, ref, slug) {
+			partialMatches = append(partialMatches, app)
+		}
+	}
+	return partialMatches
+}
+
+func matchProjectsFuzzy(projects []model.Project, ref string) []model.Project {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return nil
+	}
+	slug := model.Slugify(ref)
+	matches := make([]model.Project, 0, 1)
+	for _, project := range projects {
+		fields := []string{project.ID, project.Name, project.Slug, project.Description, project.TenantID}
+		if containsFold(fields, ref) || (slug != "" && strings.Contains(model.Slugify(project.Name), slug)) {
+			matches = append(matches, project)
 		}
 	}
 	return matches
+}
+
+func appMatchesReference(app model.App, ref, slug string) bool {
+	fields := []string{
+		app.ID,
+		app.Name,
+		app.Description,
+		app.ProjectID,
+		app.TenantID,
+	}
+	if app.Route != nil {
+		fields = append(fields, app.Route.Hostname, app.Route.PublicURL, app.Route.BaseDomain, app.Route.DomainName, app.Route.EntrypointName)
+	}
+	fields = append(fields, appSourceFields(app.Source)...)
+	fields = append(fields, appSourceFields(app.OriginSource)...)
+	fields = append(fields, appSourceFields(app.BuildSource)...)
+	if containsFold(fields, ref) {
+		return true
+	}
+	return slug != "" && strings.Contains(model.Slugify(app.Name), slug)
+}
+
+func appSourceFields(source *model.AppSource) []string {
+	if source == nil {
+		return nil
+	}
+	return []string{
+		source.Type,
+		source.RepoURL,
+		source.RepoBranch,
+		source.ImageRef,
+		source.ResolvedImageRef,
+		source.UploadID,
+		source.UploadFilename,
+		source.ArchiveSHA256,
+		source.SourceDir,
+		source.BuildStrategy,
+		source.CommitSHA,
+		source.DockerfilePath,
+		source.BuildContextDir,
+		source.ImageNameSuffix,
+		source.ComposeService,
+		source.DetectedProvider,
+		source.DetectedStack,
+	}
+}
+
+func containsFold(fields []string, ref string) bool {
+	ref = strings.ToLower(strings.TrimSpace(ref))
+	if ref == "" {
+		return false
+	}
+	for _, field := range fields {
+		if strings.Contains(strings.ToLower(strings.TrimSpace(field)), ref) {
+			return true
+		}
+	}
+	return false
 }
