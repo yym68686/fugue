@@ -1,0 +1,55 @@
+name: release-public-data-plane
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Render and verify the public data-plane release without patching live objects.
+        required: false
+        type: boolean
+        default: false
+      smoke_urls:
+        description: Optional comma-separated URLs to smoke after the release.
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fugue-public-data-plane-production-v1
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - fugue
+      - control-plane
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify local release prerequisites
+        run: |
+          command -v python3
+          command -v curl
+          if command -v kubectl >/dev/null 2>&1; then
+            kubectl version --client
+          else
+            k3s kubectl version --client
+          fi
+          bash -n ./scripts/release_fugue_public_data_plane.sh
+
+      - name: Release public edge templates
+        env:
+          FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
+          FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
+          FUGUE_RELEASE_FULLNAME: ${{ vars.FUGUE_RELEASE_FULLNAME || 'fugue-fugue' }}
+          FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+          FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS: ${{ inputs.smoke_urls }}
+        run: ./scripts/release_fugue_public_data_plane.sh
