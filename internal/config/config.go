@@ -374,7 +374,7 @@ func DNSFromEnv() DNSConfig {
 		CachePath:                  getenv("FUGUE_DNS_CACHE_PATH", "/var/lib/fugue/dns/dns-cache.json"),
 		CacheArchiveLimit:          getenvInt("FUGUE_DNS_CACHE_ARCHIVE_LIMIT", 5),
 		MaxStale:                   getenvDuration("FUGUE_DNS_MAX_STALE", 24*time.Hour),
-		EdgeHealthProbeEnabled:     getenvBool("FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED", false),
+		EdgeHealthProbeEnabled:     getenvBool("FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED", true),
 		EdgeHealthProbePort:        getenvInt("FUGUE_DNS_EDGE_HEALTH_PROBE_PORT", 443),
 		EdgeHealthProbeTimeout:     getenvDuration("FUGUE_DNS_EDGE_HEALTH_PROBE_TIMEOUT", 250*time.Millisecond),
 		ListenAddr:                 getenv("FUGUE_DNS_LISTEN_ADDR", "127.0.0.1:7834"),

@@ -734,6 +734,62 @@ func TestEdgeCaddyShadowCanBeEnabledWithoutPublicPorts(t *testing.T) {
 	}
 }
 
+func TestPublicIngressDefaultsKeepDNSProbeAndHeadroom(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm",
+		"template",
+		"fugue",
+		chartDir,
+		"--set",
+		"edge.caddy.enabled=true",
+		"--set-string",
+		"edge.edgeGroupID=edge-group-country-us",
+		"--set",
+		"dns.enabled=true",
+		"--set-string",
+		"dns.zone=fugue.pro",
+		"--set",
+		"dns.answerIPs[0]=15.204.94.71",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	edgeDoc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-edge")
+	if edgeDoc == "" {
+		t.Fatalf("rendered manifest missing edge daemonset:\n%s", manifest)
+	}
+	if got := strings.Count(edgeDoc, "memory: 1Gi"); got < 2 {
+		t.Fatalf("edge and caddy containers should both render 1Gi memory limits, got %d:\n%s", got, edgeDoc)
+	}
+
+	dnsDoc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-dns")
+	if dnsDoc == "" {
+		t.Fatalf("rendered manifest missing dns daemonset:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`name: FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED`,
+		`value: "true"`,
+		`name: FUGUE_DNS_EDGE_HEALTH_PROBE_PORT`,
+		`value: "443"`,
+	} {
+		if !strings.Contains(dnsDoc, want) {
+			t.Fatalf("dns daemonset missing edge health probe default %q:\n%s", want, dnsDoc)
+		}
+	}
+}
+
 func TestEdgeCaddyShadowRequiresEdgeGroupID(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

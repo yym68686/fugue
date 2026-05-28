@@ -158,10 +158,10 @@ edge:
     resources:
       requests:
         cpu: 25m
-        memory: 64Mi
+        memory: 128Mi
         ephemeral-storage: 32Mi
       limits:
-        memory: 256Mi
+        memory: 1Gi
         ephemeral-storage: 256Mi
     securityContext:
       allowPrivilegeEscalation: false
@@ -193,10 +193,10 @@ edge:
   resources:
     requests:
       cpu: 25m
-      memory: 64Mi
+      memory: 128Mi
       ephemeral-storage: 32Mi
     limits:
-      memory: 256Mi
+      memory: 1Gi
       ephemeral-storage: 256Mi
   securityContext:
     allowPrivilegeEscalation: false
@@ -230,7 +230,7 @@ dns:
   cacheArchiveLimit: 5
   maxStale: 24h
   edgeHealthProbe:
-    enabled: false
+    enabled: true
     port: 443
     timeout: 250ms
   nameservers: []
