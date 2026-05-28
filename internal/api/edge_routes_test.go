@@ -11,6 +11,76 @@ import (
 	runtimepkg "fugue/internal/runtime"
 )
 
+func TestEdgePodLiveServingStateSuppressesRecentCaddyRestart(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 28, 9, 37, 0, 0, time.UTC)
+	finishedAt := now.Add(-30 * time.Second)
+	pod := kubePodInfo{}
+	pod.Spec.Containers = []struct {
+		Name  string `json:"name"`
+		Image string `json:"image,omitempty"`
+	}{{Name: "edge"}, {Name: "caddy"}}
+	pod.Status.Phase = "Running"
+	pod.Status.ContainerStatuses = []kubeContainerStatus{{
+		Name:  "edge",
+		Ready: true,
+		State: kubeRuntimeState{Running: &struct{}{}},
+	}, {
+		Name:      "caddy",
+		Ready:     true,
+		State:     kubeRuntimeState{Running: &struct{}{}},
+		LastState: kubeRuntimeState{Terminated: &kubeStateDetail{Reason: "OOMKilled", ExitCode: 137, FinishedAt: &finishedAt}},
+	}}
+
+	state := edgePodLiveServingState(pod, now)
+	if state.Serving || !strings.Contains(state.Reason, "restarted recently") {
+		t.Fatalf("expected recent caddy restart to suppress serving, got %+v", state)
+	}
+}
+
+func TestEdgePodLiveServingStateRequiresExpectedCaddyStatus(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 28, 9, 37, 0, 0, time.UTC)
+	pod := kubePodInfo{}
+	pod.Spec.Containers = []struct {
+		Name  string `json:"name"`
+		Image string `json:"image,omitempty"`
+	}{{Name: "edge"}, {Name: "caddy"}}
+	pod.Status.Phase = "Running"
+	pod.Status.ContainerStatuses = []kubeContainerStatus{{
+		Name:  "edge",
+		Ready: true,
+		State: kubeRuntimeState{Running: &struct{}{}},
+	}}
+
+	state := edgePodLiveServingState(pod, now)
+	if state.Serving || !strings.Contains(state.Reason, "status is missing") {
+		t.Fatalf("expected missing caddy status to suppress serving, got %+v", state)
+	}
+}
+
+func TestEdgeNodeRouteServingCapableUsesLiveCaddyState(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 28, 9, 37, 0, 0, time.UTC)
+	node := model.EdgeNode{
+		ID:                 "edge-node-a",
+		Status:             model.EdgeHealthHealthy,
+		Healthy:            true,
+		RouteBundleVersion: "routegen_a",
+		LastHeartbeatAt:    &now,
+	}
+	live := map[string]edgeLiveServingState{
+		"edge-node-a": {Serving: false, Reason: "caddy container restarted recently"},
+	}
+
+	if edgeNodeRouteServingCapableWithLive(node, now, live) {
+		t.Fatal("expected live caddy state to make the edge node non-serving")
+	}
+}
+
 func TestEdgeRoutesBundleDerivesPlatformAndCustomDomainRoutes(t *testing.T) {
 	t.Parallel()
 

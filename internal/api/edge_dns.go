@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -190,11 +191,11 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		appByID[strings.TrimSpace(app.ID)] = app
 	}
 	policyByHostname := edgeRoutePolicyByHostname(policies)
-	edgeAnswerIPsByGroup, err := s.edgeDNSAnswerIPsByGroup(options)
+	edgeAnswerIPsByGroup, err := s.edgeDNSAnswerIPsByGroup(r.Context(), options)
 	if err != nil {
 		return model.EdgeDNSBundle{}, err
 	}
-	edgeCandidateByIP, err := s.edgeDNSAnswerCandidateByIP(options)
+	edgeCandidateByIP, err := s.edgeDNSAnswerCandidateByIP(r.Context(), options)
 	if err != nil {
 		return model.EdgeDNSBundle{}, err
 	}
@@ -665,7 +666,7 @@ func edgeDNSACMEChallengeRecords(challenges []model.DNSACMEChallenge) []model.Ed
 	return records
 }
 
-func (s *Server) edgeDNSAnswerIPsByGroup(options edgeDNSBundleOptions) (map[string][]string, error) {
+func (s *Server) edgeDNSAnswerIPsByGroup(ctx context.Context, options edgeDNSBundleOptions) (map[string][]string, error) {
 	out := map[string][]string{}
 	if s.store != nil {
 		nodes, _, err := s.store.ListEdgeNodes("")
@@ -673,8 +674,9 @@ func (s *Server) edgeDNSAnswerIPsByGroup(options edgeDNSBundleOptions) (map[stri
 			return nil, err
 		}
 		now := time.Now().UTC()
+		liveServingByNode := s.edgeLiveServingByNode(ctx, now)
 		for _, node := range nodes {
-			if !edgeNodeRouteServingCapable(node, now) {
+			if !edgeNodeRouteServingCapableWithLive(node, now, liveServingByNode) {
 				continue
 			}
 			groupID := strings.TrimSpace(node.EdgeGroupID)
@@ -691,7 +693,7 @@ func (s *Server) edgeDNSAnswerIPsByGroup(options edgeDNSBundleOptions) (map[stri
 	return out, nil
 }
 
-func (s *Server) edgeDNSAnswerCandidateByIP(options edgeDNSBundleOptions) (map[string]model.EdgeDNSAnswerCandidate, error) {
+func (s *Server) edgeDNSAnswerCandidateByIP(ctx context.Context, options edgeDNSBundleOptions) (map[string]model.EdgeDNSAnswerCandidate, error) {
 	out := map[string]model.EdgeDNSAnswerCandidate{}
 	if s.store != nil {
 		nodes, _, err := s.store.ListEdgeNodes("")
@@ -699,8 +701,9 @@ func (s *Server) edgeDNSAnswerCandidateByIP(options edgeDNSBundleOptions) (map[s
 			return nil, err
 		}
 		now := time.Now().UTC()
+		liveServingByNode := s.edgeLiveServingByNode(ctx, now)
 		for _, node := range nodes {
-			if !edgeNodeRouteServingCapable(node, now) {
+			if !edgeNodeRouteServingCapableWithLive(node, now, liveServingByNode) {
 				continue
 			}
 			for _, ip := range []string{node.PublicIPv4, node.PublicIPv6} {

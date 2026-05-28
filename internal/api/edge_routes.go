@@ -24,6 +24,13 @@ const (
 	defaultHTMLDocumentCachePolicyID = "html-documents-short-v1"
 )
 
+const edgeCaddyRestartCooldown = 2 * time.Minute
+
+type edgeLiveServingState struct {
+	Serving bool
+	Reason  string
+}
+
 type edgeRouteBundleOptions struct {
 	EdgeID      string
 	EdgeGroupID string
@@ -659,6 +666,7 @@ func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string]bool, ma
 	expectedNonEmpty := make(map[string]bool)
 	expectedMinTrafficRoutes := make(map[string]int)
 	now := time.Now().UTC()
+	liveServingByNode := s.edgeLiveServingByNode(context.Background(), now)
 	for _, node := range nodes {
 		groupID := strings.TrimSpace(node.EdgeGroupID)
 		if groupID == "" {
@@ -670,7 +678,7 @@ func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string]bool, ma
 		if node.CaddyRouteCount > expectedMinTrafficRoutes[groupID] && edgeNodeHasRouteState(node) {
 			expectedMinTrafficRoutes[groupID] = node.CaddyRouteCount
 		}
-		if edgeNodeRouteServingCapable(node, now) {
+		if edgeNodeRouteServingCapableWithLive(node, now, liveServingByNode) {
 			healthy[groupID] = true
 		} else if edgeNodeHeartbeatFresh(node, now) {
 			if _, ok := healthy[groupID]; !ok {
@@ -679,6 +687,109 @@ func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string]bool, ma
 		}
 	}
 	return healthy, expectedNonEmpty, expectedMinTrafficRoutes, nil
+}
+
+func (s *Server) edgeLiveServingByNode(ctx context.Context, now time.Time) map[string]edgeLiveServingState {
+	if s == nil {
+		return nil
+	}
+	namespace := strings.TrimSpace(s.controlPlaneNamespace)
+	if namespace == "" {
+		return nil
+	}
+	releaseInstance := strings.TrimSpace(s.controlPlaneReleaseInstance)
+	cacheKey := namespace + "/" + releaseInstance
+	states, err := s.edgeLiveServingCache.do(cacheKey, func() (map[string]edgeLiveServingState, error) {
+		clientFactory := s.newClusterNodeClient
+		if clientFactory == nil {
+			clientFactory = newClusterNodeClient
+		}
+		client, err := clientFactory()
+		if err != nil {
+			return nil, err
+		}
+		pods, err := client.listControlPlaneNamespacePods(ctx, namespace)
+		if err != nil {
+			return nil, err
+		}
+		out := make(map[string]edgeLiveServingState)
+		for _, pod := range pods {
+			if !controlPlanePodMatchesRelease(pod, releaseInstance) || !controlPlanePodIsEdge(pod) {
+				continue
+			}
+			nodeName := strings.TrimSpace(pod.Spec.NodeName)
+			if nodeName == "" {
+				continue
+			}
+			state := edgePodLiveServingState(pod, now)
+			if existing, ok := out[nodeName]; ok && !existing.Serving {
+				continue
+			}
+			out[nodeName] = state
+		}
+		return out, nil
+	})
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("edge live serving inventory unavailable: %v", err)
+		}
+		return nil
+	}
+	return states
+}
+
+func controlPlanePodIsEdge(pod kubePodInfo) bool {
+	component := strings.TrimSpace(pod.Metadata.Labels["app.kubernetes.io/component"])
+	return component == "edge" || strings.HasPrefix(component, "edge-")
+}
+
+func edgePodLiveServingState(pod kubePodInfo, now time.Time) edgeLiveServingState {
+	if !strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Running") {
+		return edgeLiveServingState{Serving: false, Reason: "pod is not running"}
+	}
+	caddyExpected := false
+	for _, container := range pod.Spec.Containers {
+		if strings.TrimSpace(container.Name) == "caddy" {
+			caddyExpected = true
+			break
+		}
+	}
+	caddySeen := false
+	for _, status := range pod.Status.ContainerStatuses {
+		if strings.TrimSpace(status.Name) != "caddy" {
+			continue
+		}
+		caddySeen = true
+		if status.State.Running == nil || !status.Ready {
+			return edgeLiveServingState{Serving: false, Reason: "caddy container is not ready"}
+		}
+		if terminated := status.LastState.Terminated; terminated != nil && terminated.FinishedAt != nil {
+			if now.Sub((*terminated.FinishedAt).UTC()) < edgeCaddyRestartCooldown {
+				return edgeLiveServingState{Serving: false, Reason: "caddy container restarted recently"}
+			}
+		}
+	}
+	if caddyExpected && !caddySeen {
+		return edgeLiveServingState{Serving: false, Reason: "caddy container status is missing"}
+	}
+	if !caddySeen {
+		return edgeLiveServingState{Serving: true}
+	}
+	return edgeLiveServingState{Serving: true}
+}
+
+func edgeNodeRouteServingCapableWithLive(node model.EdgeNode, now time.Time, liveServingByNode map[string]edgeLiveServingState) bool {
+	if !edgeNodeRouteServingCapable(node, now) {
+		return false
+	}
+	if len(liveServingByNode) == 0 {
+		return true
+	}
+	state, ok := liveServingByNode[strings.TrimSpace(node.ID)]
+	if !ok {
+		return true
+	}
+	return state.Serving
 }
 
 func edgeNodeHasRouteState(node model.EdgeNode) bool {

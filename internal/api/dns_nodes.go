@@ -356,7 +356,7 @@ func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal mode
 }
 
 func (s *Server) buildRouteDNSInvariantPreflightCheck(ctx context.Context, opts dnsDelegationPreflightOptions) model.DNSDelegationPreflightCheck {
-	edgeAnswerIPsByGroup, err := s.edgeDNSAnswerIPsByGroup(edgeDNSBundleOptions{Zone: opts.Zone})
+	edgeAnswerIPsByGroup, err := s.edgeDNSAnswerIPsByGroup(ctx, edgeDNSBundleOptions{Zone: opts.Zone})
 	if err != nil {
 		return model.DNSDelegationPreflightCheck{
 			Name:    "route_dns_invariant",

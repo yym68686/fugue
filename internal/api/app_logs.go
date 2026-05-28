@@ -107,9 +107,11 @@ type kubeRuntimeState struct {
 }
 
 type kubeStateDetail struct {
-	Reason   string `json:"reason,omitempty"`
-	Message  string `json:"message,omitempty"`
-	ExitCode int    `json:"exitCode,omitempty"`
+	Reason     string     `json:"reason,omitempty"`
+	Message    string     `json:"message,omitempty"`
+	ExitCode   int        `json:"exitCode,omitempty"`
+	StartedAt  *time.Time `json:"startedAt,omitempty"`
+	FinishedAt *time.Time `json:"finishedAt,omitempty"`
 }
 
 type kubeLogsClient struct {

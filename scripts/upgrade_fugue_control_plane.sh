@@ -54,6 +54,8 @@ PRIMARY_POSTGRES_IMAGE="${FUGUE_PRIMARY_POSTGRES_IMAGE:-docker.io/library/postgr
 FUGUE_DEFAULT_REGISTRY_PULL_BASE="${FUGUE_DEFAULT_REGISTRY_PULL_BASE:-}"
 DNS_HELM_SET_ARGS=()
 HEADSCALE_HELM_SET_ARGS=()
+PUBLIC_DATA_PLANE_HELM_SET_ARGS=()
+NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS=()
 
 release_changed_files() {
   printf '%s\n' "${FUGUE_RELEASE_CHANGED_FILES:-}" | sed '/^[[:space:]]*$/d'
@@ -106,8 +108,42 @@ public_data_plane_changed() {
   release_changed_files_match public
 }
 
+public_data_plane_manifest_changed() {
+  local file=""
+
+  while IFS= read -r file; do
+    file="$(trim_field "${file}")"
+    [[ -n "${file}" ]] || continue
+    case "${file}" in
+      deploy/helm/fugue/templates/edge-*|\
+      deploy/helm/fugue/templates/dns-*|\
+      deploy/helm/fugue/templates/_helpers.tpl)
+        return 0
+        ;;
+    esac
+  done < <(release_changed_files)
+
+  return 1
+}
+
 node_local_build_plane_changed() {
   release_changed_files_match build
+}
+
+node_local_build_plane_manifest_changed() {
+  local file=""
+
+  while IFS= read -r file; do
+    file="$(trim_field "${file}")"
+    [[ -n "${file}" ]] || continue
+    case "${file}" in
+      deploy/helm/fugue/templates/image-cache-daemonset.yaml)
+        return 0
+        ;;
+    esac
+  done < <(release_changed_files)
+
+  return 1
 }
 
 stateful_dependency_changed() {
@@ -979,6 +1015,128 @@ preserve_image_from_live_daemonset() {
   printf -v "${repository_var}" '%s' "${repository}"
   printf -v "${tag_var}" '%s' "${tag}"
   log "${domain} image preserved from live ${daemonset_name}/${container_name}: ${repository}:${tag}"
+}
+
+live_daemonset_container_resources_json() {
+  local daemonset_name="$1"
+  local container_name="$2"
+
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json 2>/dev/null | python3 -c '
+import json
+import sys
+
+container_name = sys.argv[1]
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
+    if container.get("name") == container_name:
+        resources = container.get("resources") or {}
+        if resources:
+            print(json.dumps(resources, separators=(",", ":")))
+        raise SystemExit(0)
+' "${container_name}" 2>/dev/null || true
+}
+
+live_daemonset_container_env_value() {
+  local daemonset_name="$1"
+  local container_name="$2"
+  local env_name="$3"
+
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json 2>/dev/null | python3 -c '
+import json
+import sys
+
+container_name, env_name = sys.argv[1], sys.argv[2]
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
+    if container.get("name") != container_name:
+        continue
+    for item in container.get("env") or []:
+        if item.get("name") == env_name and item.get("value") is not None:
+            print(str(item.get("value")))
+            raise SystemExit(0)
+' "${container_name}" "${env_name}" 2>/dev/null || true
+}
+
+append_live_daemonset_image_helm_args() {
+  local domain="$1"
+  local daemonset_name="$2"
+  local container_name="$3"
+  local values_prefix="$4"
+  local image_ref repository tag
+
+  image_ref="$(trim_field "$(live_daemonset_container_image "${daemonset_name}" "${container_name}")")"
+  if [[ -z "${image_ref}" ]]; then
+    log "${domain} image helm preserve skipped; live daemonset ${daemonset_name}/${container_name} was not found"
+    return 1
+  fi
+  repository="$(image_ref_repository "${image_ref}")"
+  tag="$(image_ref_tag "${image_ref}")"
+  if [[ -z "${repository}" || -z "${tag}" ]]; then
+    log "${domain} image helm preserve skipped; could not parse live image ${image_ref}"
+    return 1
+  fi
+  PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(
+    --set-string "${values_prefix}.repository=${repository}"
+    --set-string "${values_prefix}.tag=${tag}"
+  )
+  log "${domain} image helm args preserved from live ${daemonset_name}/${container_name}: ${repository}:${tag}"
+}
+
+preserve_public_data_plane_from_live() {
+  local edge_ds="${FUGUE_RELEASE_FULLNAME}-edge"
+  local dns_ds="${FUGUE_RELEASE_FULLNAME}-dns"
+  local edge_resources caddy_resources probe_enabled probe_port probe_timeout
+
+  PUBLIC_DATA_PLANE_HELM_SET_ARGS=()
+
+  preserve_image_from_live_daemonset "public data-plane" "${edge_ds}" "edge" FUGUE_EDGE_IMAGE_REPOSITORY FUGUE_EDGE_IMAGE_TAG || true
+  append_live_daemonset_image_helm_args "public data-plane" "${edge_ds}" "caddy" "edge.caddy.image" || true
+
+  edge_resources="$(trim_field "$(live_daemonset_container_resources_json "${edge_ds}" "edge")")"
+  if [[ -n "${edge_resources}" ]]; then
+    PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-json "edge.resources=${edge_resources}")
+    log "public data-plane edge resources preserved from live ${edge_ds}/edge"
+  fi
+  caddy_resources="$(trim_field "$(live_daemonset_container_resources_json "${edge_ds}" "caddy")")"
+  if [[ -n "${caddy_resources}" ]]; then
+    PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-json "edge.caddy.resources=${caddy_resources}")
+    log "public data-plane caddy resources preserved from live ${edge_ds}/caddy"
+  fi
+
+  probe_enabled="$(trim_field "$(live_daemonset_container_env_value "${dns_ds}" "dns" "FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED")")"
+  probe_port="$(trim_field "$(live_daemonset_container_env_value "${dns_ds}" "dns" "FUGUE_DNS_EDGE_HEALTH_PROBE_PORT")")"
+  probe_timeout="$(trim_field "$(live_daemonset_container_env_value "${dns_ds}" "dns" "FUGUE_DNS_EDGE_HEALTH_PROBE_TIMEOUT")")"
+  if [[ -n "${probe_enabled}" ]]; then
+    PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set "dns.edgeHealthProbe.enabled=${probe_enabled}")
+    log "public data-plane dns edge health probe enabled flag preserved from live ${dns_ds}/dns: ${probe_enabled}"
+  fi
+  if [[ -n "${probe_port}" ]]; then
+    PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set "dns.edgeHealthProbe.port=${probe_port}")
+  fi
+  if [[ -n "${probe_timeout}" ]]; then
+    PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-string "dns.edgeHealthProbe.timeout=${probe_timeout}")
+  fi
+}
+
+preserve_node_local_build_plane_from_live() {
+  local image_cache_ds="${FUGUE_RELEASE_FULLNAME}-image-cache"
+  local image_cache_resources
+
+  NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS=()
+
+  preserve_image_from_live_daemonset "node-local build-plane" "${image_cache_ds}" "image-cache" FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY FUGUE_IMAGE_CACHE_IMAGE_TAG || true
+
+  image_cache_resources="$(trim_field "$(live_daemonset_container_resources_json "${image_cache_ds}" "image-cache")")"
+  if [[ -n "${image_cache_resources}" ]]; then
+    NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS+=(--set-json "imageCache.resources=${image_cache_resources}")
+    log "node-local build-plane image-cache resources preserved from live ${image_cache_ds}/image-cache"
+  fi
 }
 
 rollout_daemonset_status() {
@@ -3811,20 +3969,26 @@ prepare_release_domains() {
     fail "stateful dependency manifests changed; ship registry, mesh, postgres, or shared storage through an isolated release window"
   fi
 
-  if public_data_plane_changed && [[ "${public_mode}" != "allow" ]]; then
-    fail "public data-plane files changed, but edge/DNS are still single-node hostPort DaemonSets; use an isolated node-local blue/green release before changing them"
-  fi
   if [[ "${public_mode}" != "allow" ]]; then
-    preserve_image_from_live_daemonset "public data-plane" "${FUGUE_RELEASE_FULLNAME}-edge" "edge" FUGUE_EDGE_IMAGE_REPOSITORY FUGUE_EDGE_IMAGE_TAG || true
+    if public_data_plane_manifest_changed; then
+      fail "public data-plane manifests changed; ship edge/DNS through an isolated node-local blue/green release before changing their rendered pod spec"
+    fi
+    if public_data_plane_changed; then
+      log "public data-plane files changed; preserving live edge/DNS DaemonSet spec for this control-plane release"
+    fi
+    preserve_public_data_plane_from_live
   else
     log "public data-plane release explicitly allowed"
   fi
 
-  if node_local_build_plane_changed && [[ "${build_mode}" != "allow" ]]; then
-    fail "node-local build-plane files changed, but image-cache is still a single hostPort DaemonSet; use an isolated worker/front release before changing it"
-  fi
   if [[ "${build_mode}" != "allow" ]]; then
-    preserve_image_from_live_daemonset "node-local build-plane" "${FUGUE_RELEASE_FULLNAME}-image-cache" "image-cache" FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY FUGUE_IMAGE_CACHE_IMAGE_TAG || true
+    if node_local_build_plane_manifest_changed; then
+      fail "node-local build-plane manifests changed; ship image-cache through an isolated worker/front release before changing its rendered pod spec"
+    fi
+    if node_local_build_plane_changed; then
+      log "node-local build-plane files changed; preserving live image-cache DaemonSet spec for this control-plane release"
+    fi
+    preserve_node_local_build_plane_from_live
   else
     log "node-local build-plane release explicitly allowed"
   fi
@@ -4219,6 +4383,8 @@ PY
     -f "${upgrade_override_values_file}" \
     "${HEADSCALE_HELM_SET_ARGS[@]}" \
     "${DNS_HELM_SET_ARGS[@]}" \
+    "${PUBLIC_DATA_PLANE_HELM_SET_ARGS[@]}" \
+    "${NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS[@]}" \
     --set-string api.image.repository="${FUGUE_API_IMAGE_REPOSITORY}" \
     --set-string api.image.tag="${FUGUE_API_IMAGE_TAG}" \
     --set-string controller.image.repository="${FUGUE_CONTROLLER_IMAGE_REPOSITORY}" \
