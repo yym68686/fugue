@@ -5,8 +5,8 @@ metadata:
   labels:
     {{- include "fugue.componentLabels" (dict "root" . "component" "release-safety") | nindent 4 }}
 data:
-  public-data-plane: "bounded-rolling-restart; hostPort-compatible"
-  node-local-build-plane: "bounded-rolling-restart; one node at a time"
+  public-data-plane: "isolated; hostPort singleton rollout blocked unless explicitly released"
+  node-local-build-plane: "isolated; hostPort image-cache rollout blocked unless explicitly released"
   registry: "isolated-singleton; blocks new builds and deploys while unavailable"
   mesh-control: "isolated-singleton; blocks node joins while unavailable"
   shared-workspace-storage: "downtime-required; single NFS writer"

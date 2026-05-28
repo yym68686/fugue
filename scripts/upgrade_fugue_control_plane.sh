@@ -55,6 +55,65 @@ FUGUE_DEFAULT_REGISTRY_PULL_BASE="${FUGUE_DEFAULT_REGISTRY_PULL_BASE:-}"
 DNS_HELM_SET_ARGS=()
 HEADSCALE_HELM_SET_ARGS=()
 
+release_changed_files() {
+  printf '%s\n' "${FUGUE_RELEASE_CHANGED_FILES:-}" | sed '/^[[:space:]]*$/d'
+}
+
+release_changed_files_match() {
+  local domain="$1"
+  local file=""
+
+  while IFS= read -r file; do
+    file="$(trim_field "${file}")"
+    [[ -n "${file}" ]] || continue
+    case "${domain}:${file}" in
+      public:cmd/fugue-edge/*|\
+      public:cmd/fugue-dns/*|\
+      public:internal/edge/*|\
+      public:internal/dnsserver/*|\
+      public:Dockerfile.edge|\
+      public:deploy/helm/fugue/templates/edge-*|\
+      public:deploy/helm/fugue/templates/dns-*|\
+      public:deploy/helm/fugue/templates/_helpers.tpl|\
+      public:deploy/helm/fugue/values.yaml|\
+      public:deploy/helm/fugue/values-production-ha.yaml|\
+      public:scripts/render_fugue_edge_systemd_unit.sh|\
+      public:scripts/render_fugue_dns_systemd_unit.sh)
+        return 0
+        ;;
+      build:cmd/fugue-image-cache/*|\
+      build:Dockerfile.image-cache|\
+      build:deploy/helm/fugue/templates/image-cache-daemonset.yaml|\
+      build:deploy/helm/fugue/values.yaml|\
+      build:deploy/helm/fugue/values-production-ha.yaml)
+        return 0
+        ;;
+      stateful:deploy/helm/fugue/templates/registry-*|\
+      stateful:deploy/helm/fugue/templates/headscale-*|\
+      stateful:deploy/helm/fugue/templates/control-plane-postgres-*|\
+      stateful:deploy/helm/fugue/templates/postgres-*|\
+      stateful:deploy/helm/fugue/templates/shared-workspace-*|\
+      stateful:deploy/helm/fugue/templates/snapshot-controller.yaml)
+        return 0
+        ;;
+    esac
+  done < <(release_changed_files)
+
+  return 1
+}
+
+public_data_plane_changed() {
+  release_changed_files_match public
+}
+
+node_local_build_plane_changed() {
+  release_changed_files_match build
+}
+
+stateful_dependency_changed() {
+  release_changed_files_match stateful
+}
+
 ensure_control_plane_observability_via_node_janitor() {
   if [[ -z "${KUBECTL:-}" ]]; then
     return 1
@@ -856,6 +915,70 @@ rollout_status() {
 daemonset_exists() {
   local daemonset_name="$1"
   ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" >/dev/null 2>&1
+}
+
+live_daemonset_container_image() {
+  local daemonset_name="$1"
+  local container_name="$2"
+
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" \
+    -o jsonpath="{.spec.template.spec.containers[?(@.name==\"${container_name}\")].image}" 2>/dev/null || true
+}
+
+image_ref_without_digest() {
+  local image_ref="$1"
+  printf '%s' "${image_ref%%@*}"
+}
+
+image_ref_repository() {
+  local image_ref no_digest last
+  image_ref="$(trim_field "$1")"
+  no_digest="$(image_ref_without_digest "${image_ref}")"
+  last="${no_digest##*/}"
+  if [[ "${last}" == *:* ]]; then
+    printf '%s' "${no_digest%:*}"
+  else
+    printf '%s' "${no_digest}"
+  fi
+}
+
+image_ref_tag() {
+  local image_ref no_digest last
+  image_ref="$(trim_field "$1")"
+  no_digest="$(image_ref_without_digest "${image_ref}")"
+  last="${no_digest##*/}"
+  if [[ "${last}" == *:* ]]; then
+    printf '%s' "${last##*:}"
+  else
+    printf 'latest'
+  fi
+}
+
+preserve_image_from_live_daemonset() {
+  local domain="$1"
+  local daemonset_name="$2"
+  local container_name="$3"
+  local repository_var="$4"
+  local tag_var="$5"
+  local image_ref repository tag
+
+  image_ref="$(live_daemonset_container_image "${daemonset_name}" "${container_name}")"
+  image_ref="$(trim_field "${image_ref}")"
+  if [[ -z "${image_ref}" ]]; then
+    log "${domain} image preserve skipped; live daemonset ${daemonset_name}/${container_name} was not found"
+    return 1
+  fi
+
+  repository="$(image_ref_repository "${image_ref}")"
+  tag="$(image_ref_tag "${image_ref}")"
+  if [[ -z "${repository}" || -z "${tag}" ]]; then
+    log "${domain} image preserve skipped; could not parse live image ${image_ref}"
+    return 1
+  fi
+
+  printf -v "${repository_var}" '%s' "${repository}"
+  printf -v "${tag_var}" '%s' "${tag}"
+  log "${domain} image preserved from live ${daemonset_name}/${container_name}: ${repository}:${tag}"
 }
 
 rollout_daemonset_status() {
@@ -3656,6 +3779,58 @@ rollback_release() {
   retry "${FUGUE_SMOKE_RETRIES}" "${FUGUE_SMOKE_DELAY_SECONDS}" smoke_test
 }
 
+prepare_release_domains() {
+  local public_mode build_mode stateful_mode
+
+  public_mode="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE:-auto}"
+  build_mode="${FUGUE_NODE_LOCAL_BUILD_PLANE_RELEASE_MODE:-auto}"
+  stateful_mode="${FUGUE_STATEFUL_DEPENDENCY_RELEASE_MODE:-guard}"
+
+  case "${public_mode}" in
+    auto|preserve|allow)
+      ;;
+    *)
+      fail "FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE must be auto, preserve, or allow"
+      ;;
+  esac
+  case "${build_mode}" in
+    auto|preserve|allow)
+      ;;
+    *)
+      fail "FUGUE_NODE_LOCAL_BUILD_PLANE_RELEASE_MODE must be auto, preserve, or allow"
+      ;;
+  esac
+  case "${stateful_mode}" in
+    guard|allow)
+      ;;
+    *)
+      fail "FUGUE_STATEFUL_DEPENDENCY_RELEASE_MODE must be guard or allow"
+      ;;
+  esac
+
+  if stateful_dependency_changed && [[ "${stateful_mode}" != "allow" ]]; then
+    fail "stateful dependency manifests changed; ship registry, mesh, postgres, or shared storage through an isolated release window"
+  fi
+
+  if public_data_plane_changed && [[ "${public_mode}" != "allow" ]]; then
+    fail "public data-plane files changed, but edge/DNS are still single-node hostPort DaemonSets; use an isolated node-local blue/green release before changing them"
+  fi
+  if [[ "${public_mode}" != "allow" ]]; then
+    preserve_image_from_live_daemonset "public data-plane" "${FUGUE_RELEASE_FULLNAME}-edge" "edge" FUGUE_EDGE_IMAGE_REPOSITORY FUGUE_EDGE_IMAGE_TAG || true
+  else
+    log "public data-plane release explicitly allowed"
+  fi
+
+  if node_local_build_plane_changed && [[ "${build_mode}" != "allow" ]]; then
+    fail "node-local build-plane files changed, but image-cache is still a single hostPort DaemonSet; use an isolated worker/front release before changing it"
+  fi
+  if [[ "${build_mode}" != "allow" ]]; then
+    preserve_image_from_live_daemonset "node-local build-plane" "${FUGUE_RELEASE_FULLNAME}-image-cache" "image-cache" FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY FUGUE_IMAGE_CACHE_IMAGE_TAG || true
+  else
+    log "node-local build-plane release explicitly allowed"
+  fi
+}
+
 main() {
   require_env FUGUE_API_IMAGE_REPOSITORY
   require_env FUGUE_API_IMAGE_TAG
@@ -3979,6 +4154,7 @@ PY
   ${KUBECTL} version --client >/dev/null
   helm status "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" >/dev/null
   validate_control_plane_singleton_anchor
+  prepare_release_domains
 
   PREVIOUS_REVISION="$(helm_current_revision)"
   [[ -n "${PREVIOUS_REVISION}" ]] || fail "failed to detect current Helm revision"
@@ -4197,6 +4373,10 @@ PY
   current_revision="$(helm_current_revision)"
   log "upgrade complete; current Helm revision=${current_revision}"
 }
+
+if [[ "${FUGUE_UPGRADE_LIB_ONLY:-false}" == "true" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 if [[ "${FUGUE_CONTROL_PLANE_OBSERVABILITY_ONLY:-false}" == "true" ]]; then
   export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"

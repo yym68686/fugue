@@ -1513,7 +1513,7 @@ sharedWorkspaceStorage:
 		t.Fatalf("rendered manifest missing release safety catalog:\n%s", manifest)
 	}
 	for _, want := range []string{
-		`public-data-plane: "bounded-rolling-restart; hostPort-compatible"`,
+		`public-data-plane: "isolated; hostPort singleton rollout blocked unless explicitly released"`,
 		`shared-workspace-storage: "downtime-required; single NFS writer"`,
 	} {
 		if !strings.Contains(releaseSafety, want) {

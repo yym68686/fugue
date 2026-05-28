@@ -153,6 +153,25 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Compute release changed files
+        id: release_changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          changed_files=""
+          if [[ "${EVENT_NAME}" == "push" && -n "${BEFORE_SHA}" && "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]]; then
+            changed_files="$(git diff --name-only "${BEFORE_SHA}" "${AFTER_SHA}")"
+          elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            changed_files="$(git diff --name-only HEAD^ HEAD)"
+          fi
+          {
+            echo "changed_files<<EOF"
+            printf '%s\n' "${changed_files}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
       - name: Guard stateful component files
         if: github.event_name == 'push'
         env:
@@ -164,7 +183,7 @@ jobs:
             exit 0
           fi
           changed_files="$(git diff --name-only "${BEFORE_SHA}" "${AFTER_SHA}")"
-          forbidden_pattern='^deploy/helm/fugue/templates/(postgres-(deployment|service)|registry-(deployment|service)|headscale-(deployment|service)|headscale-config)\.yaml$'
+          forbidden_pattern='^deploy/helm/fugue/templates/(postgres-(deployment|service)|registry-.*|headscale-.*|control-plane-postgres-.*|shared-workspace-.*|snapshot-controller)\.yaml$'
           if printf '%s\n' "${changed_files}" | grep -E "${forbidden_pattern}" >/dev/null; then
             echo "stateful component manifests changed in this push:"
             printf '%s\n' "${changed_files}" | grep -E "${forbidden_pattern}" || true
@@ -283,4 +302,8 @@ jobs:
           FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_NAME: ${{ vars.FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_NAME || '' }}
           FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_KEY: ${{ vars.FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_KEY || '' }}
           FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_OPTIONAL: ${{ vars.FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_OPTIONAL || '' }}
+          FUGUE_RELEASE_CHANGED_FILES: ${{ steps.release_changes.outputs.changed_files }}
+          FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE: ${{ vars.FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE || 'auto' }}
+          FUGUE_NODE_LOCAL_BUILD_PLANE_RELEASE_MODE: ${{ vars.FUGUE_NODE_LOCAL_BUILD_PLANE_RELEASE_MODE || 'auto' }}
+          FUGUE_STATEFUL_DEPENDENCY_RELEASE_MODE: ${{ vars.FUGUE_STATEFUL_DEPENDENCY_RELEASE_MODE || 'guard' }}
         run: ./scripts/upgrade_fugue_control_plane.sh
