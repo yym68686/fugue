@@ -73,6 +73,48 @@ func TestMaintenanceDaemonSetsDefaultToInternalNodes(t *testing.T) {
 	}
 }
 
+func TestMaintenanceDaemonSetImagesCanBePreservedIndependently(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set-string", "controller.image.repository=ghcr.io/example/fugue-controller",
+		"--set-string", "controller.image.tag=new-controller",
+		"--set-string", "nodeJanitor.image.repository=ghcr.io/example/fugue-controller",
+		"--set-string", "nodeJanitor.image.tag=old-maintenance",
+		"--set-string", "topologyLabeler.image.repository=ghcr.io/example/fugue-controller",
+		"--set-string", "topologyLabeler.image.tag=old-maintenance",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	for _, name := range []string{
+		"fugue-fugue-node-janitor",
+		"fugue-fugue-topology-labeler",
+	} {
+		doc := manifestDocumentForKindAndName(manifest, "DaemonSet", name)
+		if doc == "" {
+			t.Fatalf("rendered manifest missing %s:\n%s", name, manifest)
+		}
+		if !strings.Contains(doc, `image: "ghcr.io/example/fugue-controller:old-maintenance"`) {
+			t.Fatalf("%s should preserve maintenance image independently from controller:\n%s", name, doc)
+		}
+		if strings.Contains(doc, "new-controller") {
+			t.Fatalf("%s should not inherit the new controller image when maintenance image is set:\n%s", name, doc)
+		}
+	}
+}
+
 func TestTopologyLabelerUsesNarrowInternalTolerations(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

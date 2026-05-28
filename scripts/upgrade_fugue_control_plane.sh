@@ -56,6 +56,7 @@ DNS_HELM_SET_ARGS=()
 HEADSCALE_HELM_SET_ARGS=()
 PUBLIC_DATA_PLANE_HELM_SET_ARGS=()
 NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS=()
+MAINTENANCE_AGENT_HELM_SET_ARGS=()
 
 release_changed_files() {
   printf '%s\n' "${FUGUE_RELEASE_CHANGED_FILES:-}" | sed '/^[[:space:]]*$/d'
@@ -1137,6 +1138,63 @@ preserve_node_local_build_plane_from_live() {
     NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS+=(--set-json "imageCache.resources=${image_cache_resources}")
     log "node-local build-plane image-cache resources preserved from live ${image_cache_ds}/image-cache"
   fi
+}
+
+append_maintenance_daemonset_image_helm_args() {
+  local domain="$1"
+  local daemonset_name="$2"
+  local container_name="$3"
+  local values_prefix="$4"
+  local image_ref repository tag
+
+  image_ref="$(trim_field "$(live_daemonset_container_image "${daemonset_name}" "${container_name}")")"
+  if [[ -z "${image_ref}" ]]; then
+    log "${domain} image helm preserve skipped; live daemonset ${daemonset_name}/${container_name} was not found"
+    return 1
+  fi
+  repository="$(image_ref_repository "${image_ref}")"
+  tag="$(image_ref_tag "${image_ref}")"
+  if [[ -z "${repository}" || -z "${tag}" ]]; then
+    log "${domain} image helm preserve skipped; could not parse live image ${image_ref}"
+    return 1
+  fi
+  MAINTENANCE_AGENT_HELM_SET_ARGS+=(
+    --set-string "${values_prefix}.repository=${repository}"
+    --set-string "${values_prefix}.tag=${tag}"
+  )
+  log "${domain} image helm args preserved from live ${daemonset_name}/${container_name}: ${repository}:${tag}"
+}
+
+append_maintenance_daemonset_resources_helm_args() {
+  local domain="$1"
+  local daemonset_name="$2"
+  local container_name="$3"
+  local values_path="$4"
+  local resources
+
+  resources="$(trim_field "$(live_daemonset_container_resources_json "${daemonset_name}" "${container_name}")")"
+  if [[ -z "${resources}" ]]; then
+    return 0
+  fi
+  MAINTENANCE_AGENT_HELM_SET_ARGS+=(--set-json "${values_path}=${resources}")
+  log "${domain} resources preserved from live ${daemonset_name}/${container_name}"
+}
+
+preserve_maintenance_agents_from_live() {
+  local node_janitor_ds="${FUGUE_RELEASE_FULLNAME}-node-janitor"
+  local topology_labeler_ds="${FUGUE_RELEASE_FULLNAME}-topology-labeler"
+  local image_prepull_ds="${FUGUE_RELEASE_FULLNAME}-image-prepull"
+
+  MAINTENANCE_AGENT_HELM_SET_ARGS=()
+
+  append_maintenance_daemonset_image_helm_args "maintenance agents" "${node_janitor_ds}" "node-janitor" "nodeJanitor.image" || true
+  append_maintenance_daemonset_resources_helm_args "maintenance agents" "${node_janitor_ds}" "node-janitor" "nodeJanitor.resources"
+
+  append_maintenance_daemonset_image_helm_args "maintenance agents" "${topology_labeler_ds}" "topology-labeler" "topologyLabeler.image" || true
+  append_maintenance_daemonset_resources_helm_args "maintenance agents" "${topology_labeler_ds}" "topology-labeler" "topologyLabeler.resources"
+
+  append_maintenance_daemonset_image_helm_args "maintenance agents" "${image_prepull_ds}" "image-prepull" "imagePrePull.image" || true
+  append_maintenance_daemonset_resources_helm_args "maintenance agents" "${image_prepull_ds}" "image-prepull" "imagePrePull.resources"
 }
 
 rollout_daemonset_status() {
@@ -3937,11 +3995,12 @@ rollback_release() {
 }
 
 prepare_release_domains() {
-  local public_mode build_mode stateful_mode
+  local public_mode build_mode stateful_mode maintenance_mode
 
   public_mode="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE:-auto}"
   build_mode="${FUGUE_NODE_LOCAL_BUILD_PLANE_RELEASE_MODE:-auto}"
   stateful_mode="${FUGUE_STATEFUL_DEPENDENCY_RELEASE_MODE:-guard}"
+  maintenance_mode="${FUGUE_MAINTENANCE_AGENT_RELEASE_MODE:-preserve}"
 
   case "${public_mode}" in
     auto|preserve|allow)
@@ -3962,6 +4021,13 @@ prepare_release_domains() {
       ;;
     *)
       fail "FUGUE_STATEFUL_DEPENDENCY_RELEASE_MODE must be guard or allow"
+      ;;
+  esac
+  case "${maintenance_mode}" in
+    preserve|allow)
+      ;;
+    *)
+      fail "FUGUE_MAINTENANCE_AGENT_RELEASE_MODE must be preserve or allow"
       ;;
   esac
 
@@ -3991,6 +4057,12 @@ prepare_release_domains() {
     preserve_node_local_build_plane_from_live
   else
     log "node-local build-plane release explicitly allowed"
+  fi
+
+  if [[ "${maintenance_mode}" != "allow" ]]; then
+    preserve_maintenance_agents_from_live
+  else
+    log "maintenance agent release explicitly allowed"
   fi
 }
 
@@ -4385,6 +4457,7 @@ PY
     "${DNS_HELM_SET_ARGS[@]}" \
     "${PUBLIC_DATA_PLANE_HELM_SET_ARGS[@]}" \
     "${NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS[@]}" \
+    "${MAINTENANCE_AGENT_HELM_SET_ARGS[@]}" \
     --set-string api.image.repository="${FUGUE_API_IMAGE_REPOSITORY}" \
     --set-string api.image.tag="${FUGUE_API_IMAGE_TAG}" \
     --set-string controller.image.repository="${FUGUE_CONTROLLER_IMAGE_REPOSITORY}" \

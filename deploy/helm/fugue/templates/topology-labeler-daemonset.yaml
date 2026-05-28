@@ -15,6 +15,11 @@
 {{- if hasKey $topologyLabeler "resources" -}}
 {{- $topologyLabelerResources = (get $topologyLabeler "resources" | default (dict)) -}}
 {{- end -}}
+{{- $topologyLabelerImage := (get $topologyLabeler "image" | default (dict)) -}}
+{{- $topologyLabelerImageRepository := default .Values.controller.image.repository (get $topologyLabelerImage "repository") -}}
+{{- $topologyLabelerImageTag := default .Values.controller.image.tag (get $topologyLabelerImage "tag") -}}
+{{- $topologyLabelerImageDigest := default .Values.controller.image.digest (get $topologyLabelerImage "digest") -}}
+{{- $topologyLabelerImagePullPolicy := default .Values.controller.image.pullPolicy (get $topologyLabelerImage "pullPolicy") -}}
 {{- $topologyLabelerNodeSelector := dict -}}
 {{- if hasKey $topologyLabeler "nodeSelector" -}}
 {{- $topologyLabelerNodeSelector = (get $topologyLabeler "nodeSelector" | default (dict)) -}}
@@ -61,8 +66,8 @@ spec:
       {{- end }}
       containers:
         - name: topology-labeler
-          image: {{ include "fugue.imageRef" (dict "repository" .Values.controller.image.repository "tag" .Values.controller.image.tag "digest" .Values.controller.image.digest) | quote }}
-          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          image: {{ include "fugue.imageRef" (dict "repository" $topologyLabelerImageRepository "tag" $topologyLabelerImageTag "digest" $topologyLabelerImageDigest) | quote }}
+          imagePullPolicy: {{ $topologyLabelerImagePullPolicy }}
           command:
             - /bin/bash
             - -lc

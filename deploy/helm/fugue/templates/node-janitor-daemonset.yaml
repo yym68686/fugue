@@ -23,6 +23,11 @@
 {{- if hasKey $nodeJanitor "resources" -}}
 {{- $nodeJanitorResources = (get $nodeJanitor "resources" | default (dict)) -}}
 {{- end -}}
+{{- $nodeJanitorImage := (get $nodeJanitor "image" | default (dict)) -}}
+{{- $nodeJanitorImageRepository := default .Values.controller.image.repository (get $nodeJanitorImage "repository") -}}
+{{- $nodeJanitorImageTag := default .Values.controller.image.tag (get $nodeJanitorImage "tag") -}}
+{{- $nodeJanitorImageDigest := default .Values.controller.image.digest (get $nodeJanitorImage "digest") -}}
+{{- $nodeJanitorImagePullPolicy := default .Values.controller.image.pullPolicy (get $nodeJanitorImage "pullPolicy") -}}
 {{- $nodeJanitorPriorityClassName := "system-node-critical" -}}
 {{- if hasKey $nodeJanitor "priorityClassName" -}}
 {{- $nodeJanitorPriorityClassName = (get $nodeJanitor "priorityClassName" | default "") -}}
@@ -93,8 +98,8 @@ spec:
       {{- end }}
       containers:
         - name: node-janitor
-          image: {{ include "fugue.imageRef" (dict "repository" .Values.controller.image.repository "tag" .Values.controller.image.tag "digest" .Values.controller.image.digest) | quote }}
-          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          image: {{ include "fugue.imageRef" (dict "repository" $nodeJanitorImageRepository "tag" $nodeJanitorImageTag "digest" $nodeJanitorImageDigest) | quote }}
+          imagePullPolicy: {{ $nodeJanitorImagePullPolicy }}
           securityContext:
             privileged: true
             runAsUser: 0
