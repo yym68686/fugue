@@ -2259,6 +2259,9 @@ func (s *Store) UpdateAppRoute(id string, route model.AppRoute) (model.App, erro
 				return ErrConflict
 			}
 		}
+		if appRouteConflictsWithVerifiedAppDomain(state, &route, app.ID) {
+			return ErrConflict
+		}
 		if route.BaseDomain == "" && app.Route != nil {
 			route.BaseDomain = strings.TrimSpace(strings.ToLower(app.Route.BaseDomain))
 		}
@@ -2531,6 +2534,9 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 			if routeKey != "" && existing.Route != nil && appRouteConflictKey(existing.Route) == routeKey {
 				return ErrConflict
 			}
+		}
+		if appRouteConflictsWithVerifiedAppDomain(state, route, "") {
+			return ErrConflict
 		}
 		now := time.Now().UTC()
 		billing := accrueTenantBillingLedger(state, tenantID, now)

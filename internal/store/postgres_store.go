@@ -2459,6 +2459,11 @@ WHERE id = $1 AND tenant_id = $2
 		UpdatedAt: now,
 	}
 	model.SetAppSourceState(&app, source, source)
+	if conflict, err := s.pgAppRouteConflictsWithVerifiedAppDomainTx(ctx, tx, app.Route, app.ID); err != nil {
+		return model.App{}, err
+	} else if conflict {
+		return model.App{}, ErrConflict
+	}
 	var ownedService *model.BackingService
 	var binding *model.ServiceBinding
 	if app.Spec.Postgres != nil {
@@ -2553,6 +2558,11 @@ func (s *Store) pgUpdateAppRoute(id string, route model.AppRoute) (model.App, er
 			route.ServicePort = model.AppPublicServicePort(app.Spec)
 		}
 	}
+	if conflict, err := s.pgAppRouteConflictsWithVerifiedAppDomainTx(ctx, tx, &route, app.ID); err != nil {
+		return model.App{}, err
+	} else if conflict {
+		return model.App{}, ErrConflict
+	}
 
 	app.Route = cloneAppRoute(&route)
 	app.UpdatedAt = time.Now().UTC()
@@ -2567,6 +2577,29 @@ func (s *Store) pgUpdateAppRoute(id string, route model.AppRoute) (model.App, er
 		return model.App{}, err
 	}
 	return app, nil
+}
+
+func (s *Store) pgAppRouteConflictsWithVerifiedAppDomainTx(ctx context.Context, tx *sql.Tx, route *model.AppRoute, exceptAppID string) (bool, error) {
+	if tx == nil || !appRouteClaimsHostnameRoot(route) {
+		return false, nil
+	}
+	exceptAppID = strings.TrimSpace(exceptAppID)
+	var domainAppID string
+	err := tx.QueryRowContext(ctx, `
+SELECT app_id
+FROM fugue_app_domains
+WHERE lower(hostname) = lower($1)
+  AND status = $2
+LIMIT 1
+`, normalizeAppDomainHostname(route.Hostname), model.AppDomainStatusVerified).Scan(&domainAppID)
+	switch {
+	case err == nil:
+		return exceptAppID == "" || domainAppID != exceptAppID, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	default:
+		return false, fmt.Errorf("check app route domain conflict: %w", err)
+	}
 }
 
 func (s *Store) pgUpdateAppImageMirrorLimit(id string, limit int) (model.App, error) {

@@ -454,6 +454,51 @@ func TestEdgeDomainTLSReportUpdatesVerifiedDomainStatus(t *testing.T) {
 	}
 }
 
+func TestEdgeDomainTLSReportAllowsSubpathRouteOnSameHostname(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, _, app, resolver := setupAppDomainTestServer(t)
+	expectedTarget := server.primaryCustomDomainTarget(app)
+	resolver.cname["www.example.com"] = expectedTarget + "."
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/domains", apiKey, map[string]any{
+		"hostname": "www.example.com",
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	if _, err := s.CreateAppWithRoute(app.TenantID, app.ProjectID, "api", "", model.AppSpec{
+		Image:     "ghcr.io/example/api:latest",
+		Ports:     []int{8000},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppRoute{
+		Hostname:    "www.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://www.example.com/v1",
+		PathPrefix:  "/v1",
+		ServicePort: 8000,
+	}); err != nil {
+		t.Fatalf("create subpath app route on custom domain hostname: %v", err)
+	}
+
+	report := performJSONRequest(t, server, http.MethodPost, "/v1/edge/domains/tls-report?token=edge-secret", "", map[string]any{
+		"hostname":         "www.example.com",
+		"tls_status":       model.AppDomainTLSStatusPending,
+		"tls_last_message": "warmup check",
+	})
+	if report.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, report.Code, report.Body.String())
+	}
+	domain, err := s.GetAppDomain("www.example.com")
+	if err != nil {
+		t.Fatalf("get app domain after TLS report: %v", err)
+	}
+	if domain.TLSStatus != model.AppDomainTLSStatusPending || domain.TLSLastMessage != "warmup check" {
+		t.Fatalf("expected TLS report to update the custom domain, got %+v", domain)
+	}
+}
+
 func TestEdgeDomainTLSReportAcceptsPlatformRootCustomDomain(t *testing.T) {
 	t.Parallel()
 

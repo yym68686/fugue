@@ -181,6 +181,150 @@ func TestPutVerifiedAppDomainDefaultsTLSPending(t *testing.T) {
 	}
 }
 
+func TestPutAppDomainAllowsSubpathRouteOnSameHostname(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("TLS Subpath Domains")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	web, err := s.CreateAppWithRoute(tenant.ID, project.ID, "web", "", model.AppSpec{
+		Image:     "ghcr.io/example/web:latest",
+		Ports:     []int{3000},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppRoute{
+		Hostname:    "web.apps.example.com",
+		BaseDomain:  "apps.example.com",
+		PublicURL:   "https://web.apps.example.com",
+		ServicePort: 3000,
+	})
+	if err != nil {
+		t.Fatalf("create web app: %v", err)
+	}
+	domain, err := s.PutAppDomain(model.AppDomain{
+		Hostname:    "www.example.com",
+		AppID:       web.ID,
+		TenantID:    tenant.ID,
+		Status:      model.AppDomainStatusVerified,
+		RouteTarget: "d-123.dns.fugue.pro",
+	})
+	if err != nil {
+		t.Fatalf("put verified app domain: %v", err)
+	}
+	if _, err := s.CreateAppWithRoute(tenant.ID, project.ID, "api", "", model.AppSpec{
+		Image:     "ghcr.io/example/api:latest",
+		Ports:     []int{8000},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppRoute{
+		Hostname:    "www.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://www.example.com/v1",
+		PathPrefix:  "/v1",
+		ServicePort: 8000,
+	}); err != nil {
+		t.Fatalf("create subpath app route: %v", err)
+	}
+
+	domain.TLSStatus = model.AppDomainTLSStatusReady
+	domain.TLSLastMessage = ""
+	if _, err := s.PutAppDomain(domain); err != nil {
+		t.Fatalf("update app domain TLS fields with subpath route on same hostname: %v", err)
+	}
+}
+
+func TestRootAppRouteRejectsVerifiedAppDomainHostname(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Root Domain Conflicts")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	web, err := s.CreateAppWithRoute(tenant.ID, project.ID, "web", "", model.AppSpec{
+		Image:     "ghcr.io/example/web:latest",
+		Ports:     []int{3000},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppRoute{
+		Hostname:    "web.apps.example.com",
+		BaseDomain:  "apps.example.com",
+		PublicURL:   "https://web.apps.example.com",
+		ServicePort: 3000,
+	})
+	if err != nil {
+		t.Fatalf("create web app: %v", err)
+	}
+	if _, err := s.PutAppDomain(model.AppDomain{
+		Hostname:    "www.example.com",
+		AppID:       web.ID,
+		TenantID:    tenant.ID,
+		Status:      model.AppDomainStatusVerified,
+		RouteTarget: "d-123.dns.fugue.pro",
+	}); err != nil {
+		t.Fatalf("put verified app domain: %v", err)
+	}
+
+	_, err = s.CreateAppWithRoute(tenant.ID, project.ID, "root-api", "", model.AppSpec{
+		Image:     "ghcr.io/example/api:latest",
+		Ports:     []int{8000},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppRoute{
+		Hostname:    "www.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://www.example.com",
+		PathPrefix:  "/",
+		ServicePort: 8000,
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict for root app route on verified custom domain hostname, got %v", err)
+	}
+
+	api, err := s.CreateAppWithRoute(tenant.ID, project.ID, "api", "", model.AppSpec{
+		Image:     "ghcr.io/example/api:latest",
+		Ports:     []int{8000},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppRoute{
+		Hostname:    "api.apps.example.com",
+		BaseDomain:  "apps.example.com",
+		PublicURL:   "https://api.apps.example.com",
+		ServicePort: 8000,
+	})
+	if err != nil {
+		t.Fatalf("create api app: %v", err)
+	}
+	_, err = s.UpdateAppRoute(api.ID, model.AppRoute{
+		Hostname:    "www.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://www.example.com",
+		PathPrefix:  "/",
+		ServicePort: 8000,
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict for updating root route onto verified custom domain hostname, got %v", err)
+	}
+}
+
 func TestDeleteAppDomainReleasesEdgeTLSCertificate(t *testing.T) {
 	t.Parallel()
 

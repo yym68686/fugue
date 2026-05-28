@@ -114,7 +114,10 @@ func (s *Store) PutAppDomain(domain model.AppDomain) (model.AppDomain, error) {
 			if isDeletedApp(existingApp) || existingApp.Route == nil {
 				continue
 			}
-			if strings.EqualFold(strings.TrimSpace(existingApp.Route.Hostname), domain.Hostname) {
+			if existingApp.ID == domain.AppID {
+				continue
+			}
+			if appRouteClaimsHostnameRoot(existingApp.Route) && strings.EqualFold(strings.TrimSpace(existingApp.Route.Hostname), domain.Hostname) {
 				return ErrConflict
 			}
 		}
@@ -282,6 +285,32 @@ func normalizeAppDomainStatus(status string) string {
 	default:
 		return model.AppDomainStatusPending
 	}
+}
+
+func appRouteClaimsHostnameRoot(route *model.AppRoute) bool {
+	return route != nil &&
+		normalizeAppDomainHostname(route.Hostname) != "" &&
+		model.NormalizeAppRoutePathPrefix(route.PathPrefix) == "/"
+}
+
+func appRouteConflictsWithVerifiedAppDomain(state *model.State, route *model.AppRoute, exceptAppID string) bool {
+	if state == nil || !appRouteClaimsHostnameRoot(route) {
+		return false
+	}
+	hostname := normalizeAppDomainHostname(route.Hostname)
+	exceptAppID = strings.TrimSpace(exceptAppID)
+	for _, domain := range state.AppDomains {
+		if domain.Status != model.AppDomainStatusVerified {
+			continue
+		}
+		if exceptAppID != "" && domain.AppID == exceptAppID {
+			continue
+		}
+		if strings.EqualFold(normalizeAppDomainHostname(domain.Hostname), hostname) {
+			return true
+		}
+	}
+	return false
 }
 
 func sortAppDomains(domains []model.AppDomain) {

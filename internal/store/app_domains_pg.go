@@ -112,8 +112,10 @@ func (s *Store) pgPutAppDomain(domain model.AppDomain) (model.AppDomain, error) 
 SELECT id
 FROM fugue_apps
 WHERE lower(route_json->>'hostname') = lower($1)
+  AND lower(COALESCE(NULLIF(route_json->>'path_prefix', ''), '/')) = '/'
+  AND id <> $2
 LIMIT 1
-`, domain.Hostname).Scan(&routeOwnerID)
+	`, domain.Hostname, domain.AppID).Scan(&routeOwnerID)
 	switch {
 	case err == nil:
 		return model.AppDomain{}, ErrConflict
