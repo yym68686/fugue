@@ -1175,7 +1175,6 @@ smoke_resolve_edge_ips() {
   local ip=""
 
   smoke_resolve_ips_from_value "${FUGUE_DNS_ANSWER_IPS:-}" seen
-  smoke_resolve_ips_from_value "${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-}" seen
   if [[ -n "$(trim_field "${FUGUE_DNS_EXTRA_GROUPS:-}")" ]]; then
     while IFS= read -r entry; do
       local answer_ips=""

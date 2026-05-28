@@ -233,7 +233,7 @@ jobs:
           FUGUE_REGISTRY_PULL_BASE: ${{ vars.FUGUE_REGISTRY_PULL_BASE || '' }}
           FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT: ${{ vars.FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT || '' }}
           FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME: ${{ vars.FUGUE_CONTROL_PLANE_AUTOMATION_SECRET_NAME || '' }}
-          FUGUE_SYNC_EDGE_PROXY: ${{ vars.FUGUE_SYNC_EDGE_PROXY || 'true' }}
+          FUGUE_SYNC_EDGE_PROXY: ${{ vars.FUGUE_SYNC_EDGE_PROXY || 'false' }}
           FUGUE_SMOKE_URL: ${{ vars.FUGUE_SMOKE_URL || '' }}
           FUGUE_SMOKE_URLS: ${{ vars.FUGUE_SMOKE_URLS || '' }}
           FUGUE_API_IMAGE_REPOSITORY: ${{ (github.event_name == 'workflow_dispatch' && inputs.existing_image_tag != '' && format('ghcr.io/{0}/fugue-api', github.repository_owner)) || needs.build.outputs.api_image_repository }}
