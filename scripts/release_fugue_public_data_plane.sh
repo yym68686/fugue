@@ -535,6 +535,7 @@ migrate_legacy_direct_to_bluegreen_front() {
   local base
   local front_ds
   local legacy_ds
+  local before_uids
   local migrated_any="false"
 
   if (( ${#bases[@]} == 0 )); then
@@ -858,6 +859,54 @@ with socket.create_connection((host, port), timeout=timeout):
   done < <(node_ips_for_daemonset "${daemonset_name}")
 }
 
+worker_smoke_target() {
+  local urls="${FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS:-}"
+  [[ -n "$(trim_field "${urls}")" ]] || return 0
+  python3 -c '
+import sys
+from urllib.parse import urlsplit
+
+for raw in sys.argv[1].split(","):
+    raw = raw.strip()
+    if not raw:
+        continue
+    parsed = urlsplit(raw)
+    if parsed.scheme != "https" or not parsed.hostname:
+        continue
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+    print(parsed.hostname + "\t" + path)
+    break
+' "${urls}"
+}
+
+check_worker_https_smoke() {
+  local daemonset_name="$1"
+  local port="$2"
+  local target
+  local host
+  local path
+  local host_ip
+
+  target="$(worker_smoke_target)"
+  [[ -n "$(trim_field "${target}")" ]] || return 0
+  IFS=$'\t' read -r host path <<<"${target}"
+  [[ -n "$(trim_field "${host}")" ]] || return 0
+  path="${path:-/}"
+  while IFS= read -r host_ip; do
+    host_ip="$(trim_field "${host_ip}")"
+    [[ -n "${host_ip}" ]] || continue
+    log "checking inactive worker HTTPS smoke ${host_ip}:${port} host=${host} path=${path}"
+    if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
+      continue
+    fi
+    curl -fsS --max-time "${FUGUE_PUBLIC_DATA_PLANE_SMOKE_TIMEOUT_SECONDS:-10}" \
+      --resolve "${host}:${port}:${host_ip}" \
+      "https://${host}:${port}${path}" >/dev/null
+  done < <(node_ips_for_daemonset "${daemonset_name}")
+}
+
 run_bluegreen_release() {
   local bases=()
   local base front_ds active inactive inactive_ds active_ds inactive_port
@@ -893,6 +942,7 @@ run_bluegreen_release() {
     wait_daemonset_ready "${inactive_ds}"
     inactive_port="$(worker_https_port "${inactive_ds}")"
     check_worker_tcp "${inactive_ds}" "${inactive_port}"
+    check_worker_https_smoke "${inactive_ds}" "${inactive_port}"
     protected_after="$(capture_daemonset_pods "${front_ds}" "${active_ds}")"
     if [[ "${protected_before}" != "${protected_after}" ]]; then
       printf '%s\n' "${protected_before}" >/tmp/fugue-public-data-plane-protected-before.txt

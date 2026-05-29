@@ -35,6 +35,7 @@ on:
       - 'scripts/render_fugue_dns_systemd_unit.sh'
       - 'scripts/render_fugue_mesh_agent_systemd_unit.sh'
       - 'scripts/render_fugue_mesh_recovery_systemd_unit.sh'
+      - 'scripts/release_fugue_public_data_plane.sh'
       - 'scripts/sync_fugue_edge_proxy.sh'
       - 'scripts/upgrade_fugue_control_plane.sh'
   workflow_dispatch:
