@@ -1168,6 +1168,13 @@ func (s *Server) dataPlanBlobs(ctx context.Context, r *http.Request, workspace m
 	} else if err != nil {
 		return nil, err
 	}
+	knownObjectDigests := map[string]struct{}{}
+	if upload && objectBackend != nil {
+		knownObjectDigests, err = s.dataWorkspaceSnapshotBlobDigests(workspace.ID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	for _, entry := range manifest.Entries {
 		if entry.Kind != model.DataManifestEntryKindFile || strings.TrimSpace(entry.SHA256) == "" {
 			continue
@@ -1182,12 +1189,16 @@ func (s *Server) dataPlanBlobs(ctx context.Context, r *http.Request, workspace m
 			ObjectKey: entry.ObjectKey,
 		}
 		if objectBackend != nil {
-			exists, err := objectBackend.headObject(ctx, entry.ObjectKey)
-			if err != nil {
-				return nil, err
+			if upload {
+				_, blob.Exists = knownObjectDigests[entry.SHA256]
+			} else {
+				exists, err := objectBackend.headObject(ctx, entry.ObjectKey)
+				if err != nil {
+					return nil, err
+				}
+				blob.Exists = exists
 			}
-			blob.Exists = exists
-			if upload && !exists {
+			if upload && !blob.Exists {
 				blob.UploadMode = model.DataBlobUploadModeSingle
 				if entry.Size > dataMultipartPartSize {
 					uploadID, err := objectBackend.createMultipartUpload(ctx, entry.ObjectKey)
@@ -1214,7 +1225,7 @@ func (s *Server) dataPlanBlobs(ctx context.Context, r *http.Request, workspace m
 				}
 			}
 			if !upload {
-				if !exists {
+				if !blob.Exists {
 					return nil, fmt.Errorf("remote object missing for %s", entry.ObjectKey)
 				}
 				downloadURL, expiresAt, err := objectBackend.presignGet(ctx, entry.ObjectKey, dataPresignTTL())
@@ -1236,6 +1247,27 @@ func (s *Server) dataPlanBlobs(ctx context.Context, r *http.Request, workspace m
 		blobs = append(blobs, blob)
 	}
 	return blobs, nil
+}
+
+func (s *Server) dataWorkspaceSnapshotBlobDigests(workspaceID string) (map[string]struct{}, error) {
+	snapshots, err := s.store.ListDataSnapshots(workspaceID, false)
+	if err != nil {
+		return nil, err
+	}
+	digests := map[string]struct{}{}
+	for _, snapshot := range snapshots {
+		for _, entry := range snapshot.Manifest.Entries {
+			if entry.Kind != model.DataManifestEntryKindFile {
+				continue
+			}
+			digest := strings.TrimSpace(strings.ToLower(entry.SHA256))
+			if digest == "" {
+				continue
+			}
+			digests[digest] = struct{}{}
+		}
+	}
+	return digests, nil
 }
 
 func (s *Server) sweepDataWorkspaceGC(ctx context.Context, workspace model.DataWorkspace, retentionDays int, dryRun bool) (model.DataGCSweepResult, error) {

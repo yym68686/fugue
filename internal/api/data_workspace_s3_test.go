@@ -18,10 +18,11 @@ import (
 )
 
 func TestDataWorkspaceS3MultipartPlanRefreshAndComplete(t *testing.T) {
-	var createMultipartCalls, listPartsCalls, completeCalls int
+	var headCalls, createMultipartCalls, listPartsCalls, completeCalls int
 	s3Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodHead:
+			headCalls++
 			w.WriteHeader(http.StatusNotFound)
 		case r.Method == http.MethodPost && hasQueryKey(r, "uploads"):
 			createMultipartCalls++
@@ -114,6 +115,9 @@ func TestDataWorkspaceS3MultipartPlanRefreshAndComplete(t *testing.T) {
 	if createMultipartCalls != 1 || len(plan.Blobs) != 1 || plan.Blobs[0].UploadMode != model.DataBlobUploadModeMultipart || len(plan.Blobs[0].Parts) != 2 {
 		t.Fatalf("unexpected multipart plan calls=%d blobs=%+v", createMultipartCalls, plan.Blobs)
 	}
+	if headCalls != 0 {
+		t.Fatalf("upload plan should not issue object HEAD requests, got %d", headCalls)
+	}
 
 	refreshReq, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/data/transfers/"+plan.Transfer.ID+"/refresh", nil)
 	refreshReq.Header.Set("Authorization", "Bearer "+secret)
@@ -161,11 +165,104 @@ func TestDataWorkspaceS3MultipartPlanRefreshAndComplete(t *testing.T) {
 	}
 }
 
-func TestDataWorkspaceS3MultipartAbort(t *testing.T) {
-	var createMultipartCalls, abortCalls int
+func TestDataWorkspaceS3UploadPlanUsesSnapshotIndexWithoutHEAD(t *testing.T) {
+	var headCalls, createMultipartCalls int
 	s3Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodHead:
+			headCalls++
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && hasQueryKey(r, "uploads"):
+			createMultipartCalls++
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = w.Write([]byte(`<CreateMultipartUploadResult><Bucket>bucket</Bucket><Key>key</Key><UploadId>upload-1</UploadId></CreateMultipartUploadResult>`))
+		default:
+			t.Fatalf("unexpected fake s3 request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer s3Server.Close()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Data Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, secret, err := stateStore.CreateAPIKey(tenant.ID, "data", []string{"data.read", "data.write", "data.admin"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	backend, err := stateStore.CreateDataBackend(model.DataBackend{
+		TenantID: tenant.ID,
+		Name:     "fake-s3",
+		Provider: model.DataBackendProviderS3,
+		Bucket:   "bucket",
+		Endpoint: s3Server.URL,
+		Region:   "us-east-1",
+		Credentials: model.DataBackendCredentials{
+			AccessKeyID:     "access",
+			SecretAccessKey: "secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create backend: %v", err)
+	}
+	workspace, err := stateStore.CreateDataWorkspace(model.DataWorkspace{
+		TenantID:         tenant.ID,
+		Name:             "workspace",
+		StorageBackendID: backend.ID,
+		Assets:           []model.DataAsset{{Name: "data", Path: "./data"}},
+	})
+	if err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	digest := strings.Repeat("c", 64)
+	manifest := model.NormalizeDataManifest(model.DataManifest{Entries: []model.DataManifestEntry{{
+		AssetName:    "data",
+		RelativePath: "cached.bin",
+		Kind:         model.DataManifestEntryKindFile,
+		Size:         dataMultipartPartSize + 1,
+		SHA256:       digest,
+	}}})
+	if _, err := stateStore.CreateDataSnapshot(model.DataSnapshot{WorkspaceID: workspace.ID, Version: "v1", Manifest: manifest}); err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	apiServer := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	httpServer := httptest.NewServer(apiServer.Handler())
+	defer httpServer.Close()
+
+	planBody, _ := json.Marshal(map[string]any{"version": "v2", "manifest": manifest})
+	req, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/data/workspaces/"+workspace.ID+"/transfers/plan-upload", bytes.NewReader(planBody))
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("plan upload: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("plan upload status %d", resp.StatusCode)
+	}
+	var plan dataUploadPlanResponse
+	if err := json.NewDecoder(resp.Body).Decode(&plan); err != nil {
+		t.Fatalf("decode plan: %v", err)
+	}
+	if len(plan.Blobs) != 1 || !plan.Blobs[0].Exists || plan.Blobs[0].UploadURL != "" || plan.Blobs[0].UploadID != "" {
+		t.Fatalf("expected snapshot-backed blob to be skipped, got %+v", plan.Blobs)
+	}
+	if headCalls != 0 || createMultipartCalls != 0 {
+		t.Fatalf("expected no s3 calls for snapshot-backed blob, head=%d multipart=%d", headCalls, createMultipartCalls)
+	}
+}
+
+func TestDataWorkspaceS3MultipartAbort(t *testing.T) {
+	var headCalls, createMultipartCalls, abortCalls int
+	s3Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodHead:
+			headCalls++
 			w.WriteHeader(http.StatusNotFound)
 		case r.Method == http.MethodPost && hasQueryKey(r, "uploads"):
 			createMultipartCalls++
@@ -245,6 +342,9 @@ func TestDataWorkspaceS3MultipartAbort(t *testing.T) {
 	}
 	if createMultipartCalls != 1 || len(plan.Blobs) != 1 || plan.Blobs[0].UploadID != "upload-1" {
 		t.Fatalf("unexpected multipart plan calls=%d blobs=%+v", createMultipartCalls, plan.Blobs)
+	}
+	if headCalls != 0 {
+		t.Fatalf("upload plan should not issue object HEAD requests, got %d", headCalls)
 	}
 	abortBody, _ := json.Marshal(map[string]any{"sha256": manifest.Entries[0].SHA256, "upload_id": "upload-1"})
 	abortReq, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/data/transfers/"+plan.Transfer.ID+"/multipart/abort", bytes.NewReader(abortBody))
