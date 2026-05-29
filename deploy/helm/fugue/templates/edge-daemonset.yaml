@@ -1,4 +1,4 @@
-{{- if .Values.edge.enabled }}
+{{- if and .Values.edge.enabled (not .Values.edge.blueGreen.enabled) }}
 {{- if and .Values.edge.caddy.enabled (not (trim .Values.edge.edgeGroupID)) }}
 {{- fail "edge.edgeGroupID is required when edge.caddy.enabled=true" }}
 {{- end }}

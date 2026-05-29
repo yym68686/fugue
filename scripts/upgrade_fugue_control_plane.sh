@@ -71,6 +71,7 @@ release_changed_files_match() {
     [[ -n "${file}" ]] || continue
     case "${domain}:${file}" in
       public:cmd/fugue-edge/*|\
+      public:cmd/fugue-edge-front/*|\
       public:cmd/fugue-dns/*|\
       public:internal/edge/*|\
       public:internal/dnsserver/*|\
@@ -81,7 +82,8 @@ release_changed_files_match() {
       public:deploy/helm/fugue/values.yaml|\
       public:deploy/helm/fugue/values-production-ha.yaml|\
       public:scripts/render_fugue_edge_systemd_unit.sh|\
-      public:scripts/render_fugue_dns_systemd_unit.sh)
+      public:scripts/render_fugue_dns_systemd_unit.sh|\
+      public:scripts/release_fugue_public_data_plane.sh)
         return 0
         ;;
       build:cmd/fugue-image-cache/*|\
@@ -1091,10 +1093,39 @@ append_live_daemonset_image_helm_args() {
 
 preserve_public_data_plane_from_live() {
   local edge_ds="${FUGUE_RELEASE_FULLNAME}-edge"
+  local edge_front_ds="${FUGUE_RELEASE_FULLNAME}-edge-front"
   local dns_ds="${FUGUE_RELEASE_FULLNAME}-dns"
-  local edge_resources caddy_resources probe_enabled probe_port probe_timeout
+  local edge_resources caddy_resources probe_enabled probe_port probe_timeout active_slot
 
   PUBLIC_DATA_PLANE_HELM_SET_ARGS=()
+
+  if daemonset_exists "${edge_front_ds}" && daemonset_exists "${FUGUE_RELEASE_FULLNAME}-edge-worker-a" && daemonset_exists "${FUGUE_RELEASE_FULLNAME}-edge-worker-b"; then
+    log "public data-plane blue/green DaemonSets detected; preserving front and per-slot worker templates from live state"
+    PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(
+      --set edge.blueGreen.enabled=true
+      --set edge.caddy.publicHostPorts.enabled=false
+    )
+    append_live_daemonset_image_helm_args "public data-plane front" "${edge_front_ds}" "edge-front" "edge.blueGreen.front.image" || true
+    append_live_daemonset_image_helm_args "public data-plane worker-a" "${FUGUE_RELEASE_FULLNAME}-edge-worker-a" "edge" "edge.blueGreen.slots.a.image" || true
+    append_live_daemonset_image_helm_args "public data-plane worker-b" "${FUGUE_RELEASE_FULLNAME}-edge-worker-b" "edge" "edge.blueGreen.slots.b.image" || true
+    edge_resources="$(trim_field "$(live_daemonset_container_resources_json "${FUGUE_RELEASE_FULLNAME}-edge-worker-a" "edge")")"
+    if [[ -n "${edge_resources}" ]]; then
+      PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-json "edge.resources=${edge_resources}")
+      log "public data-plane edge resources preserved from live ${FUGUE_RELEASE_FULLNAME}-edge-worker-a/edge"
+    fi
+    caddy_resources="$(trim_field "$(live_daemonset_container_resources_json "${FUGUE_RELEASE_FULLNAME}-edge-worker-a" "caddy")")"
+    if [[ -n "${caddy_resources}" ]]; then
+      PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-json "edge.caddy.resources=${caddy_resources}")
+      log "public data-plane caddy resources preserved from live ${FUGUE_RELEASE_FULLNAME}-edge-worker-a/caddy"
+    fi
+    active_slot="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get "configmap/${FUGUE_RELEASE_FULLNAME}-public-data-plane-release" -o jsonpath='{.data.active_slot}' 2>/dev/null || true)"
+    active_slot="$(trim_field "${active_slot}")"
+    if [[ "${active_slot}" == "a" || "${active_slot}" == "b" ]]; then
+      PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-string "edge.blueGreen.activeSlot=${active_slot}")
+      log "public data-plane active slot preserved from release record: ${active_slot}"
+    fi
+    return 0
+  fi
 
   preserve_image_from_live_daemonset "public data-plane" "${edge_ds}" "edge" FUGUE_EDGE_IMAGE_REPOSITORY FUGUE_EDGE_IMAGE_TAG || true
   append_live_daemonset_image_helm_args "public data-plane" "${edge_ds}" "caddy" "edge.caddy.image" || true
@@ -4037,7 +4068,7 @@ prepare_release_domains() {
 
   if [[ "${public_mode}" != "allow" ]]; then
     if public_data_plane_manifest_changed; then
-      fail "public data-plane manifests changed; ship edge/DNS through an isolated node-local blue/green release before changing their rendered pod spec"
+      log "public data-plane manifests changed; preserving live edge/DNS rendered values so this control-plane release does not roll public traffic"
     fi
     if public_data_plane_changed; then
       log "public data-plane files changed; preserving live edge/DNS DaemonSet spec for this control-plane release"

@@ -11,6 +11,7 @@ on:
       - 'cmd/fugue-controller/**'
       - 'cmd/fugue-image-cache/**'
       - 'cmd/fugue-edge/**'
+      - 'cmd/fugue-edge-front/**'
       - 'cmd/fugue-dns/**'
       - 'cmd/fugue-mesh-agent/**'
       - 'cmd/fugue-mesh-recovery/**'

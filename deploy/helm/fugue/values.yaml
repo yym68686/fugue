@@ -123,6 +123,53 @@ controller:
 
 edge:
   enabled: true
+  blueGreen:
+    enabled: false
+    activeSlot: a
+    stateHostPath: /var/lib/fugue/edge-blue-green
+    activeSlotFile: /var/lib/fugue/edge-blue-green/active-slot
+    httpMode: redirect
+    front:
+      image:
+        repository: ""
+        tag: ""
+        digest: ""
+        pullPolicy: ""
+      healthPort: 7831
+      httpListenAddr: ":80"
+      httpsListenAddr: ":443"
+      publicHostPorts:
+        enabled: true
+        http: 80
+        https: 443
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+          ephemeral-storage: 16Mi
+        limits:
+          memory: 128Mi
+          ephemeral-storage: 128Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+    slots:
+      a:
+        httpPort: 18080
+        httpsPort: 18443
+        image:
+          repository: ""
+          tag: ""
+          digest: ""
+          pullPolicy: ""
+      b:
+        httpPort: 28080
+        httpsPort: 28443
+        image:
+          repository: ""
+          tag: ""
+          digest: ""
+          pullPolicy: ""
   image:
     repository: fugue-edge
     tag: latest

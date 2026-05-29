@@ -965,6 +965,100 @@ func TestEdgeCaddyPublicHostPortsRequireExplicitEnable(t *testing.T) {
 	}
 }
 
+func TestEdgeBlueGreenRendersFrontAndWorkerSlots(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm",
+		"template",
+		"fugue",
+		chartDir,
+		"--set",
+		"edge.caddy.enabled=true",
+		"--set-string",
+		"edge.edgeGroupID=edge-group-country-us",
+		"--set",
+		"edge.blueGreen.enabled=true",
+		"--set",
+		"edge.caddy.tlsMode=public-on-demand",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	if doc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-edge"); doc != "" {
+		t.Fatalf("legacy edge daemonset should not render in blue/green mode:\n%s", doc)
+	}
+	frontDoc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-edge-front")
+	if frontDoc == "" {
+		t.Fatalf("rendered manifest missing edge front daemonset:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`- /usr/local/bin/fugue-edge-front`,
+		`fugue.io/rollout-mode: node-local-blue-green-front`,
+		`name: http-public`,
+		`hostPort: 80`,
+		`name: https-public`,
+		`hostPort: 443`,
+		`name: FUGUE_EDGE_FRONT_ACTIVE_SLOT_FILE`,
+		`value: "/var/lib/fugue/edge-blue-green/active-slot"`,
+		`name: FUGUE_EDGE_FRONT_SLOT_A_HTTPS_PORT`,
+		`value: "18443"`,
+		`name: FUGUE_EDGE_FRONT_SLOT_B_HTTPS_PORT`,
+		`value: "28443"`,
+		`type: OnDelete`,
+	} {
+		if !strings.Contains(frontDoc, want) {
+			t.Fatalf("edge front daemonset missing %q:\n%s", want, frontDoc)
+		}
+	}
+	for _, tc := range []struct {
+		name     string
+		slot     string
+		hostPort string
+	}{
+		{name: "fugue-fugue-edge-worker-a", slot: `"a"`, hostPort: "18443"},
+		{name: "fugue-fugue-edge-worker-b", slot: `"b"`, hostPort: "28443"},
+	} {
+		doc := manifestDocumentForKindAndName(manifest, "DaemonSet", tc.name)
+		if doc == "" {
+			t.Fatalf("rendered manifest missing %s:\n%s", tc.name, manifest)
+		}
+		for _, want := range []string{
+			`fugue.io/rollout-mode: node-local-blue-green-worker`,
+			`fugue.io/edge-slot: ` + tc.slot,
+			`type: OnDelete`,
+			`name: https-worker`,
+			`hostPort: ` + tc.hostPort,
+			`name: FUGUE_EDGE_CADDY_LISTEN_ADDR`,
+			`value: ":` + tc.hostPort + `"`,
+			`path: "/var/lib/fugue/edge/slot-` + strings.Trim(tc.slot, `"`) + `"`,
+			`path: "/var/lib/fugue/edge/caddy-data/slot-` + strings.Trim(tc.slot, `"`) + `"`,
+		} {
+			if !strings.Contains(doc, want) {
+				t.Fatalf("%s missing %q:\n%s", tc.name, want, doc)
+			}
+		}
+		for _, unwanted := range []string{
+			`hostPort: 80`,
+			`hostPort: 443`,
+		} {
+			if strings.Contains(doc, unwanted) {
+				t.Fatalf("%s worker should not own public hostPort with %q:\n%s", tc.name, unwanted, doc)
+			}
+		}
+	}
+}
+
 func TestEdgeCaddyStaticTLSSecretMountsPrimaryAndGroups(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")
@@ -1611,7 +1705,7 @@ sharedWorkspaceStorage:
 		t.Fatalf("rendered manifest missing release safety catalog:\n%s", manifest)
 	}
 	for _, want := range []string{
-		`public-data-plane: "isolated; hostPort singleton rollout blocked unless explicitly released"`,
+		`public-data-plane: "isolated; node-local front plus worker a/b blue-green required for edge image/template changes"`,
 		`shared-workspace-storage: "downtime-required; single NFS writer"`,
 	} {
 		if !strings.Contains(releaseSafety, want) {

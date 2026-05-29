@@ -8,6 +8,24 @@ on:
         required: false
         type: boolean
         default: false
+      enable_blue_green:
+        description: Enable the node-local edge front/worker a/b chart mode before releasing.
+        required: false
+        type: boolean
+        default: false
+      strategy:
+        description: Release strategy.
+        required: false
+        type: choice
+        default: blue-green
+        options:
+          - blue-green
+          - legacy-template-ondelete
+      edge_image_tag:
+        description: Edge image tag for inactive workers. Defaults to this workflow SHA.
+        required: false
+        type: string
+        default: ''
       smoke_urls:
         description: Optional comma-separated URLs to smoke after the release.
         required: false
@@ -45,11 +63,22 @@ jobs:
           fi
           bash -n ./scripts/release_fugue_public_data_plane.sh
 
+      - name: Compute image metadata
+        id: meta
+        run: |
+          owner_lc="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "edge_image_repository=ghcr.io/${owner_lc}/fugue-edge" >> "${GITHUB_OUTPUT}"
+
       - name: Release public edge templates
         env:
           FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
           FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
           FUGUE_RELEASE_FULLNAME: ${{ vars.FUGUE_RELEASE_FULLNAME || 'fugue-fugue' }}
+          FUGUE_HELM_CHART_PATH: ./deploy/helm/fugue
           FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+          FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY: ${{ inputs.strategy }}
+          FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN: ${{ inputs.enable_blue_green && 'true' || 'false' }}
+          FUGUE_EDGE_IMAGE_REPOSITORY: ${{ steps.meta.outputs.edge_image_repository }}
+          FUGUE_EDGE_IMAGE_TAG: ${{ inputs.edge_image_tag || github.sha }}
           FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS: ${{ inputs.smoke_urls }}
         run: ./scripts/release_fugue_public_data_plane.sh
