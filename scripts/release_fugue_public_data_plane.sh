@@ -59,7 +59,7 @@ print(json.dumps(value, separators=(",", ":")))
 ' "${label}" "${value}"
 }
 
-edge_daemonset_names() {
+public_daemonset_names() {
   kubectl_cmd -n "${FUGUE_NAMESPACE}" get ds -o json | python3 -c '
 import json
 import sys
@@ -72,7 +72,7 @@ for item in doc.get("items", []):
     subsystem = (labels.get("fugue.io/rollout-subsystem") or "").strip()
     if subsystem != "public-data-plane":
         continue
-    if component == "edge" or component.startswith("edge-"):
+    if component in ("edge", "dns") or component.startswith("edge-") or component.startswith("dns-"):
         names.append(item.get("metadata", {}).get("name", ""))
 for name in sorted(n for n in names if n):
     print(name)
@@ -406,6 +406,7 @@ doc = json.load(sys.stdin)
 release_id = os.environ["FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID"]
 edge_resources = json.loads(os.environ["FUGUE_EDGE_RESOURCES_JSON"])
 caddy_resources = json.loads(os.environ["FUGUE_EDGE_CADDY_RESOURCES_JSON"])
+dns_resources = json.loads(os.environ["FUGUE_DNS_RESOURCES_JSON"])
 containers = []
 for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
     name = container.get("name")
@@ -413,6 +414,8 @@ for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("co
         containers.append({"name": "edge", "resources": edge_resources})
     elif name == "caddy":
         containers.append({"name": "caddy", "resources": caddy_resources})
+    elif name == "dns":
+        containers.append({"name": "dns", "resources": dns_resources})
 if not containers:
     raise SystemExit(0)
 patch = {
@@ -440,10 +443,10 @@ patch_daemonset_resources() {
 
   patch="$(resource_patch_for_daemonset "${daemonset_name}")"
   if [[ -z "$(trim_field "${patch}")" ]]; then
-    log "skipping ${daemonset_name}; no edge/caddy containers found"
+    log "skipping ${daemonset_name}; no edge/caddy/dns containers found"
     return 0
   fi
-  log "patching ${daemonset_name} edge/caddy template resources without deleting pods"
+  log "patching ${daemonset_name} public data-plane template resources without deleting pods"
   if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
     printf '%s\n' "${patch}"
     return 0
@@ -1290,12 +1293,14 @@ run_smoke_urls() {
 main() {
   local default_edge_resources
   local default_caddy_resources
+  local default_dns_resources
   local daemonsets_csv
   local daemonset_name
-  local edge_daemonsets=()
+  local public_daemonsets=()
 
   default_edge_resources='{"requests":{"cpu":"25m","memory":"128Mi","ephemeral-storage":"32Mi"},"limits":{"memory":"1Gi","ephemeral-storage":"256Mi"}}'
   default_caddy_resources='{"requests":{"cpu":"25m","memory":"128Mi","ephemeral-storage":"32Mi"},"limits":{"memory":"1Gi","ephemeral-storage":"256Mi"}}'
+  default_dns_resources='{"requests":{"cpu":"25m","memory":"64Mi","ephemeral-storage":"32Mi"},"limits":{"memory":"256Mi","ephemeral-storage":"256Mi"}}'
 
   FUGUE_NAMESPACE="${FUGUE_NAMESPACE:-fugue-system}"
   FUGUE_RELEASE_NAME="${FUGUE_RELEASE_NAME:-fugue}"
@@ -1312,7 +1317,8 @@ main() {
   FUGUE_EDGE_BLUE_GREEN_ACTIVE_SLOT_FILE="${FUGUE_EDGE_BLUE_GREEN_ACTIVE_SLOT_FILE:-/var/lib/fugue/edge-blue-green/active-slot}"
   FUGUE_EDGE_RESOURCES_JSON="$(compact_json_object FUGUE_EDGE_RESOURCES_JSON "${FUGUE_EDGE_RESOURCES_JSON:-${default_edge_resources}}")"
   FUGUE_EDGE_CADDY_RESOURCES_JSON="$(compact_json_object FUGUE_EDGE_CADDY_RESOURCES_JSON "${FUGUE_EDGE_CADDY_RESOURCES_JSON:-${default_caddy_resources}}")"
-  export FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID FUGUE_EDGE_RESOURCES_JSON FUGUE_EDGE_CADDY_RESOURCES_JSON
+  FUGUE_DNS_RESOURCES_JSON="$(compact_json_object FUGUE_DNS_RESOURCES_JSON "${FUGUE_DNS_RESOURCES_JSON:-${default_dns_resources}}")"
+  export FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID FUGUE_EDGE_RESOURCES_JSON FUGUE_EDGE_CADDY_RESOURCES_JSON FUGUE_DNS_RESOURCES_JSON
   export FUGUE_EDGE_IMAGE_REPOSITORY FUGUE_EDGE_IMAGE_TAG FUGUE_EDGE_CADDY_IMAGE_REPOSITORY FUGUE_EDGE_CADDY_IMAGE_TAG
 
   case "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" in
@@ -1371,38 +1377,38 @@ main() {
   while IFS= read -r daemonset_name; do
     daemonset_name="$(trim_field "${daemonset_name}")"
     [[ -n "${daemonset_name}" ]] || continue
-    edge_daemonsets+=("${daemonset_name}")
-  done < <(edge_daemonset_names)
-  if (( ${#edge_daemonsets[@]} == 0 )); then
-    fail "no public edge DaemonSets found in namespace ${FUGUE_NAMESPACE}"
+    public_daemonsets+=("${daemonset_name}")
+  done < <(public_daemonset_names)
+  if (( ${#public_daemonsets[@]} == 0 )); then
+    fail "no public data-plane DaemonSets found in namespace ${FUGUE_NAMESPACE}"
   fi
 
-  log "release_id=${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID} namespace=${FUGUE_NAMESPACE} daemonsets=${edge_daemonsets[*]}"
-  before="$(capture_daemonset_pods "${edge_daemonsets[@]}")"
+  log "release_id=${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID} namespace=${FUGUE_NAMESPACE} daemonsets=${public_daemonsets[*]}"
+  before="$(capture_daemonset_pods "${public_daemonsets[@]}")"
 
-  for daemonset_name in "${edge_daemonsets[@]}"; do
+  for daemonset_name in "${public_daemonsets[@]}"; do
     patch_daemonset_ondelete "${daemonset_name}"
   done
-  for daemonset_name in "${edge_daemonsets[@]}"; do
+  for daemonset_name in "${public_daemonsets[@]}"; do
     patch_daemonset_resources "${daemonset_name}"
   done
 
-  after="$(capture_daemonset_pods "${edge_daemonsets[@]}")"
+  after="$(capture_daemonset_pods "${public_daemonsets[@]}")"
   if [[ "${before}" != "${after}" ]]; then
     printf '%s\n' "${before}" >/tmp/fugue-public-data-plane-before.txt
     printf '%s\n' "${after}" >/tmp/fugue-public-data-plane-after.txt
     diff -u /tmp/fugue-public-data-plane-before.txt /tmp/fugue-public-data-plane-after.txt || true
-    fail "edge pod set or restart counts changed during template patch"
+    fail "public data-plane pod set or restart counts changed during template patch"
   fi
 
-  daemonsets_csv="$(IFS=,; printf '%s' "${edge_daemonsets[*]}")"
+  daemonsets_csv="$(IFS=,; printf '%s' "${public_daemonsets[*]}")"
   write_release_record "${daemonsets_csv}"
   run_smoke_urls
   if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
-    log "dry-run complete; no edge pods would be deleted or restarted"
+    log "dry-run complete; no public data-plane pods would be deleted or restarted"
     return 0
   fi
-  log "public edge DaemonSet templates patched; no edge pods were deleted or restarted"
+  log "public data-plane DaemonSet templates patched; no public pods were deleted or restarted"
 }
 
 main "$@"

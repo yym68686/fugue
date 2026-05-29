@@ -1182,11 +1182,43 @@ append_image_ref_helm_args() {
   log "${domain} image helm args preserved from live pod: ${repository}:${tag}"
 }
 
+append_dns_group_image_args_from_live() {
+  local dns_prefix="${FUGUE_RELEASE_FULLNAME}-dns-"
+  local daemonset_name
+  local suffix
+  local image_ref
+  local repository
+  local tag
+  local index=0
+
+  while IFS= read -r daemonset_name; do
+    daemonset_name="$(trim_field "${daemonset_name}")"
+    [[ -n "${daemonset_name}" ]] || continue
+    suffix="${daemonset_name#${dns_prefix}}"
+    if [[ "${suffix}" == "${daemonset_name}" || -z "${suffix}" ]]; then
+      continue
+    fi
+    image_ref="$(trim_field "$(live_daemonset_container_image "${daemonset_name}" "dns")")"
+    [[ -n "${image_ref}" ]] || continue
+    repository="$(image_ref_repository "${image_ref}")"
+    tag="$(image_ref_tag "${image_ref}")"
+    [[ -n "${repository}" && -n "${tag}" ]] || continue
+    PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(
+      --set-string "dns.groups[${index}].name=${suffix}"
+      --set-string "dns.groups[${index}].image.repository=${repository}"
+      --set-string "dns.groups[${index}].image.tag=${tag}"
+    )
+    log "public data-plane dns group ${suffix} image preserved from live ${daemonset_name}/dns: ${repository}:${tag}"
+    index=$((index + 1))
+  done < <(${KUBECTL} -n "${FUGUE_NAMESPACE}" get ds -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+}
+
 preserve_public_data_plane_from_live() {
   local edge_ds="${FUGUE_RELEASE_FULLNAME}-edge"
   local edge_front_ds="${FUGUE_RELEASE_FULLNAME}-edge-front"
   local dns_ds="${FUGUE_RELEASE_FULLNAME}-dns"
   local edge_resources caddy_resources probe_enabled probe_port probe_timeout front_image_ref
+  local dns_resources
 
   PUBLIC_DATA_PLANE_HELM_SET_ARGS=()
 
@@ -1216,6 +1248,8 @@ preserve_public_data_plane_from_live() {
 
   preserve_image_from_live_daemonset "public data-plane" "${edge_ds}" "edge" FUGUE_EDGE_IMAGE_REPOSITORY FUGUE_EDGE_IMAGE_TAG || true
   append_live_daemonset_image_helm_args "public data-plane" "${edge_ds}" "caddy" "edge.caddy.image" || true
+  append_live_daemonset_image_helm_args "public data-plane dns" "${dns_ds}" "dns" "dns.image" || true
+  append_dns_group_image_args_from_live
 
   edge_resources="$(trim_field "$(live_daemonset_container_resources_json "${edge_ds}" "edge")")"
   if [[ -n "${edge_resources}" ]]; then
@@ -1226,6 +1260,11 @@ preserve_public_data_plane_from_live() {
   if [[ -n "${caddy_resources}" ]]; then
     PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-json "edge.caddy.resources=${caddy_resources}")
     log "public data-plane caddy resources preserved from live ${edge_ds}/caddy"
+  fi
+  dns_resources="$(trim_field "$(live_daemonset_container_resources_json "${dns_ds}" "dns")")"
+  if [[ -n "${dns_resources}" ]]; then
+    PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-json "dns.resources=${dns_resources}")
+    log "public data-plane dns resources preserved from live ${dns_ds}/dns"
   fi
 
   probe_enabled="$(trim_field "$(live_daemonset_container_env_value "${dns_ds}" "dns" "FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED")")"

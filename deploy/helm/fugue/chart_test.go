@@ -1761,7 +1761,6 @@ dns:
 	for _, name := range []string{
 		"fugue-fugue-dns",
 		"fugue-fugue-dns-country-de",
-		"fugue-fugue-image-cache",
 	} {
 		doc := manifestDocumentForKindAndName(manifest, "DaemonSet", name)
 		if doc == "" {
@@ -1769,14 +1768,36 @@ dns:
 		}
 		for _, want := range []string{
 			"updateStrategy:",
+			"type: OnDelete",
+			"fugue.io/rollout-mode: direct-ondelete-protected",
+		} {
+			if !strings.Contains(doc, want) {
+				t.Fatalf("%s missing protected dns rollout fragment %q:\n%s", name, want, doc)
+			}
+		}
+		for _, unwanted := range []string{
 			"type: RollingUpdate",
 			"maxUnavailable: 1",
 			"maxSurge: 0",
-			"fugue.io/rollout-mode: bounded-rolling-restart",
 		} {
-			if !strings.Contains(doc, want) {
-				t.Fatalf("%s missing hostPort-compatible rollout fragment %q:\n%s", name, want, doc)
+			if strings.Contains(doc, unwanted) {
+				t.Fatalf("%s dns daemonset must not use rolling update fragment %q:\n%s", name, unwanted, doc)
 			}
+		}
+	}
+	doc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-image-cache")
+	if doc == "" {
+		t.Fatalf("rendered manifest missing daemonset fugue-fugue-image-cache:\n%s", manifest)
+	}
+	for _, want := range []string{
+		"updateStrategy:",
+		"type: RollingUpdate",
+		"maxUnavailable: 1",
+		"maxSurge: 0",
+		"fugue.io/rollout-mode: bounded-rolling-restart",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("fugue-fugue-image-cache missing hostPort-compatible rollout fragment %q:\n%s", want, doc)
 		}
 	}
 }
