@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"fugue/internal/api"
 	"fugue/internal/auth"
@@ -438,6 +439,104 @@ ignore:
 	}
 }
 
+func TestDataManifestHashCacheReusesUnchangedFilesAndInvalidatesChangedFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".fugue"), 0o755); err != nil {
+		t.Fatalf("create .fugue: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "data"), 0o755); err != nil {
+		t.Fatalf("create data dir: %v", err)
+	}
+	cfg := dataConfig{Assets: []model.DataAsset{{Name: "dataset", Path: "./data"}}}
+	source := filepath.Join(root, "data", "sample.txt")
+	if err := os.WriteFile(source, []byte("sample"), 0o644); err != nil {
+		t.Fatalf("write sample: %v", err)
+	}
+	fileTime := time.Unix(100, 0)
+	if err := os.Chtimes(source, fileTime, fileTime); err != nil {
+		t.Fatalf("chtimes sample: %v", err)
+	}
+
+	originalNow := dataHashCacheNow
+	defer func() { dataHashCacheNow = originalNow }()
+	firstComputedAt := time.Unix(1000, 0).UTC().Format(time.RFC3339Nano)
+	secondComputedAt := time.Unix(2000, 0).UTC().Format(time.RFC3339Nano)
+	dataHashCacheNow = func() time.Time { return time.Unix(1000, 0) }
+
+	firstManifest, _, err := scanDataManifest(root, cfg, "")
+	if err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+	firstDigest := manifestDigestForTest(t, firstManifest, "sample.txt")
+	firstEntry := dataHashCacheEntryForTest(t, root, "./data/sample.txt")
+	if firstEntry.SHA256 != firstDigest || firstEntry.ComputedAt != firstComputedAt {
+		t.Fatalf("unexpected first cache entry %+v digest=%s", firstEntry, firstDigest)
+	}
+
+	dataHashCacheNow = func() time.Time { return time.Unix(2000, 0) }
+	secondManifest, _, err := scanDataManifest(root, cfg, "")
+	if err != nil {
+		t.Fatalf("second scan: %v", err)
+	}
+	secondDigest := manifestDigestForTest(t, secondManifest, "sample.txt")
+	secondEntry := dataHashCacheEntryForTest(t, root, "./data/sample.txt")
+	if secondDigest != firstDigest {
+		t.Fatalf("expected cached digest %s, got %s", firstDigest, secondDigest)
+	}
+	if secondEntry.ComputedAt != firstComputedAt {
+		t.Fatalf("expected unchanged cache computed_at %q, got %+v", firstComputedAt, secondEntry)
+	}
+
+	if err := os.WriteFile(source, []byte("changed"), 0o644); err != nil {
+		t.Fatalf("modify sample: %v", err)
+	}
+	changedTime := time.Unix(200, 0)
+	if err := os.Chtimes(source, changedTime, changedTime); err != nil {
+		t.Fatalf("chtimes changed sample: %v", err)
+	}
+	changedManifest, _, err := scanDataManifest(root, cfg, "")
+	if err != nil {
+		t.Fatalf("changed scan: %v", err)
+	}
+	changedDigest := manifestDigestForTest(t, changedManifest, "sample.txt")
+	changedEntry := dataHashCacheEntryForTest(t, root, "./data/sample.txt")
+	if changedDigest == firstDigest {
+		t.Fatalf("expected changed digest, got %s", changedDigest)
+	}
+	if changedEntry.ComputedAt != secondComputedAt {
+		t.Fatalf("expected changed cache computed_at %q, got %+v", secondComputedAt, changedEntry)
+	}
+
+	if key := dataHashCacheIdentityKey(changedEntry.Device, changedEntry.Inode, changedEntry.Size, changedEntry.MTimeUnixNano); key != "" {
+		renamed := filepath.Join(root, "data", "renamed.txt")
+		if err := os.Rename(source, renamed); err != nil {
+			t.Fatalf("rename sample: %v", err)
+		}
+		dataHashCacheNow = func() time.Time { return time.Unix(3000, 0) }
+		renamedManifest, _, err := scanDataManifest(root, cfg, "")
+		if err != nil {
+			t.Fatalf("renamed scan: %v", err)
+		}
+		renamedDigest := manifestDigestForTest(t, renamedManifest, "renamed.txt")
+		renamedEntry := dataHashCacheEntryForTest(t, root, "./data/renamed.txt")
+		if renamedDigest != changedDigest {
+			t.Fatalf("expected renamed digest %s, got %s", changedDigest, renamedDigest)
+		}
+		if renamedEntry.ComputedAt != secondComputedAt {
+			t.Fatalf("expected rename to reuse cache computed_at %q, got %+v", secondComputedAt, renamedEntry)
+		}
+		cache, err := loadDataHashCache(root)
+		if err != nil {
+			t.Fatalf("load cache after rename: %v", err)
+		}
+		for _, entry := range cache.Entries {
+			if entry.Path == "./data/sample.txt" {
+				t.Fatalf("expected deleted path to be removed from cache, got %+v", cache.Entries)
+			}
+		}
+	}
+}
+
 func TestBuildPullPlanConflictsAndPolicies(t *testing.T) {
 	root := t.TempDir()
 	cfg := dataConfig{Assets: []model.DataAsset{{Name: "data", Path: "./data"}}}
@@ -552,6 +651,32 @@ func TestManifestDiffTransferStateAndProgressRenderer(t *testing.T) {
 func testCLIDigest(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
+}
+
+func manifestDigestForTest(t *testing.T, manifest model.DataManifest, relativePath string) string {
+	t.Helper()
+	for _, entry := range manifest.Entries {
+		if entry.Kind == model.DataManifestEntryKindFile && entry.RelativePath == relativePath {
+			return entry.SHA256
+		}
+	}
+	t.Fatalf("manifest entry %s not found in %+v", relativePath, manifest.Entries)
+	return ""
+}
+
+func dataHashCacheEntryForTest(t *testing.T, root, cachePath string) dataHashCacheEntry {
+	t.Helper()
+	cache, err := loadDataHashCache(root)
+	if err != nil {
+		t.Fatalf("load cache: %v", err)
+	}
+	for _, entry := range cache.Entries {
+		if entry.Path == cachePath {
+			return entry
+		}
+	}
+	t.Fatalf("cache entry %s not found in %+v", cachePath, cache.Entries)
+	return dataHashCacheEntry{}
 }
 
 func runDataCLIInDir(t *testing.T, dir string, args ...string) string {

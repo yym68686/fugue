@@ -27,6 +27,9 @@ import (
 
 const (
 	dataConfigPath                          = ".fugue/data.yaml"
+	dataHashCachePath                       = ".fugue/data-hash-cache.yaml"
+	dataHashCachePerm                       = 0o600
+	dataHashCacheVersion                    = 1
 	dataTransferStateDir                    = ".fugue/transfers"
 	dataTransferStatePerm                   = 0o600
 	dataDownloadPartSize                    = 64 * 1024 * 1024
@@ -34,6 +37,7 @@ const (
 )
 
 var defaultDataIgnore = []string{
+	".fugue",
 	".git",
 	".venv",
 	"__pycache__",
@@ -41,6 +45,8 @@ var defaultDataIgnore = []string{
 	"*.lock",
 	".DS_Store",
 }
+
+var dataHashCacheNow = time.Now
 
 type dataConfig struct {
 	Version   int               `json:"version" yaml:"version"`
@@ -115,6 +121,31 @@ type dataTransferProgress func(delta int64)
 type dataScanEstimate struct {
 	Files int64 `json:"files"`
 	Bytes int64 `json:"bytes"`
+}
+
+type dataLocalFileIdentity struct {
+	Device uint64 `json:"device" yaml:"device"`
+	Inode  uint64 `json:"inode" yaml:"inode"`
+}
+
+type dataHashCache struct {
+	Version int                  `json:"version" yaml:"version"`
+	Entries []dataHashCacheEntry `json:"entries,omitempty" yaml:"entries,omitempty"`
+}
+
+type dataHashCacheEntry struct {
+	Path          string `json:"path" yaml:"path"`
+	Size          int64  `json:"size" yaml:"size"`
+	MTimeUnixNano int64  `json:"mtime_unix_nano" yaml:"mtime_unix_nano"`
+	Device        uint64 `json:"device" yaml:"device"`
+	Inode         uint64 `json:"inode" yaml:"inode"`
+	SHA256        string `json:"sha256" yaml:"sha256"`
+	ComputedAt    string `json:"computed_at" yaml:"computed_at"`
+}
+
+type dataHashCacheLookup struct {
+	byPath     map[string]dataHashCacheEntry
+	byIdentity map[string]dataHashCacheEntry
 }
 
 type dataTransferState struct {
@@ -2012,6 +2043,9 @@ func scanDataManifest(root string, cfg dataConfig, onlyAsset string) (model.Data
 func scanDataManifestWithProgress(root string, cfg dataConfig, onlyAsset string, progress dataTransferProgress) (model.DataManifest, map[string]string, error) {
 	entries := []model.DataManifestEntry{}
 	pathsByDigest := map[string]string{}
+	cache, _ := loadDataHashCache(root)
+	cacheLookup := newDataHashCacheLookup(cache)
+	nextCacheEntries := []dataHashCacheEntry{}
 	for _, asset := range cfg.Assets {
 		if onlyAsset != "" && asset.Name != onlyAsset {
 			continue
@@ -2063,13 +2097,14 @@ func scanDataManifestWithProgress(root string, cfg dataConfig, onlyAsset string,
 				} else if info.Mode().IsRegular() {
 					entry.Kind = model.DataManifestEntryKindFile
 					entry.Size = info.Size()
-					sum, err := sha256LocalFileWithProgress(current, progress)
+					sum, cacheEntry, err := sha256LocalFileWithCache(root, current, info, cacheLookup, progress)
 					if err != nil {
 						return err
 					}
 					entry.SHA256 = sum
 					entry.ObjectKey = model.DataObjectKey(sum)
 					pathsByDigest[sum] = current
+					nextCacheEntries = append(nextCacheEntries, cacheEntry)
 				} else {
 					return nil
 				}
@@ -2082,20 +2117,26 @@ func scanDataManifestWithProgress(root string, cfg dataConfig, onlyAsset string,
 			continue
 		}
 		if info.Mode().IsRegular() {
-			sum, err := sha256LocalFileWithProgress(assetPath, progress)
+			sum, cacheEntry, err := sha256LocalFileWithCache(root, assetPath, info, cacheLookup, progress)
 			if err != nil {
 				return model.DataManifest{}, nil, err
 			}
 			entry := model.DataManifestEntry{AssetName: asset.Name, RelativePath: ".", Kind: model.DataManifestEntryKindFile, Size: info.Size(), Mode: int64(info.Mode()), MTime: info.ModTime().UTC(), SHA256: sum, ObjectKey: model.DataObjectKey(sum)}
 			entries = append(entries, entry)
 			pathsByDigest[sum] = assetPath
+			nextCacheEntries = append(nextCacheEntries, cacheEntry)
 		}
 	}
+	_ = saveDataHashCache(root, cfg, onlyAsset, cache, nextCacheEntries)
 	manifest := model.NormalizeDataManifest(model.DataManifest{Entries: entries})
 	return manifest, pathsByDigest, nil
 }
 
 func shouldIgnoreDataPath(rel, base string, patterns []string) bool {
+	rel = filepath.ToSlash(rel)
+	if base == ".fugue" || rel == ".fugue" || strings.HasPrefix(rel, ".fugue/") {
+		return true
+	}
 	for _, pattern := range patterns {
 		pattern = strings.TrimSpace(filepath.ToSlash(pattern))
 		if pattern == "" {
@@ -2110,6 +2151,174 @@ func shouldIgnoreDataPath(rel, base string, patterns []string) bool {
 		if ok, _ := path.Match(pattern, base); ok {
 			return true
 		}
+	}
+	return false
+}
+
+func loadDataHashCache(root string) (dataHashCache, error) {
+	cachePath := filepath.Join(root, filepath.FromSlash(dataHashCachePath))
+	raw, err := os.ReadFile(cachePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return dataHashCache{Version: dataHashCacheVersion}, nil
+		}
+		return dataHashCache{Version: dataHashCacheVersion}, err
+	}
+	var cache dataHashCache
+	if err := yaml.Unmarshal(raw, &cache); err != nil {
+		return dataHashCache{Version: dataHashCacheVersion}, err
+	}
+	if cache.Version == 0 {
+		cache.Version = dataHashCacheVersion
+	}
+	return cache, nil
+}
+
+func saveDataHashCache(root string, cfg dataConfig, onlyAsset string, previous dataHashCache, scanned []dataHashCacheEntry) error {
+	cachePath := filepath.Join(root, filepath.FromSlash(dataHashCachePath))
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		return err
+	}
+	byPath := map[string]dataHashCacheEntry{}
+	if strings.TrimSpace(onlyAsset) != "" {
+		for _, entry := range previous.Entries {
+			entry.Path = normalizeDataCachePath(entry.Path)
+			if entry.Path == "" || dataCacheEntryInAsset(entry.Path, cfg, onlyAsset) {
+				continue
+			}
+			byPath[entry.Path] = entry
+		}
+	}
+	for _, entry := range scanned {
+		entry.Path = normalizeDataCachePath(entry.Path)
+		if entry.Path == "" || strings.TrimSpace(entry.SHA256) == "" {
+			continue
+		}
+		byPath[entry.Path] = entry
+	}
+	entries := make([]dataHashCacheEntry, 0, len(byPath))
+	for _, entry := range byPath {
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	raw, err := yaml.Marshal(dataHashCache{Version: dataHashCacheVersion, Entries: entries})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(cachePath, raw, dataHashCachePerm)
+}
+
+func newDataHashCacheLookup(cache dataHashCache) dataHashCacheLookup {
+	lookup := dataHashCacheLookup{
+		byPath:     map[string]dataHashCacheEntry{},
+		byIdentity: map[string]dataHashCacheEntry{},
+	}
+	for _, entry := range cache.Entries {
+		entry.Path = normalizeDataCachePath(entry.Path)
+		if entry.Path == "" || strings.TrimSpace(entry.SHA256) == "" {
+			continue
+		}
+		lookup.byPath[entry.Path] = entry
+		if key := dataHashCacheIdentityKey(entry.Device, entry.Inode, entry.Size, entry.MTimeUnixNano); key != "" {
+			lookup.byIdentity[key] = entry
+		}
+	}
+	return lookup
+}
+
+func sha256LocalFileWithCache(root, filePath string, info os.FileInfo, cache dataHashCacheLookup, progress dataTransferProgress) (string, dataHashCacheEntry, error) {
+	cachePath, err := dataCachePathForFile(root, filePath)
+	if err != nil {
+		return "", dataHashCacheEntry{}, err
+	}
+	identity := dataFileIdentity(info)
+	baseEntry := dataHashCacheEntry{
+		Path:          cachePath,
+		Size:          info.Size(),
+		MTimeUnixNano: info.ModTime().UnixNano(),
+		Device:        identity.Device,
+		Inode:         identity.Inode,
+	}
+	if cached, ok := cache.byPath[cachePath]; ok && dataHashCacheEntryMatchesFile(cached, baseEntry, true) {
+		if progress != nil {
+			progress(info.Size())
+		}
+		cached.Path = cachePath
+		return cached.SHA256, cached, nil
+	}
+	if key := dataHashCacheIdentityKey(identity.Device, identity.Inode, info.Size(), info.ModTime().UnixNano()); key != "" {
+		if cached, ok := cache.byIdentity[key]; ok && dataHashCacheEntryMatchesFile(cached, baseEntry, false) {
+			if progress != nil {
+				progress(info.Size())
+			}
+			cached.Path = cachePath
+			return cached.SHA256, cached, nil
+		}
+	}
+	sum, err := sha256LocalFileWithProgress(filePath, progress)
+	if err != nil {
+		return "", dataHashCacheEntry{}, err
+	}
+	baseEntry.SHA256 = sum
+	baseEntry.ComputedAt = dataHashCacheNow().UTC().Format(time.RFC3339Nano)
+	return sum, baseEntry, nil
+}
+
+func dataHashCacheEntryMatchesFile(cached, current dataHashCacheEntry, requirePath bool) bool {
+	if strings.TrimSpace(cached.SHA256) == "" {
+		return false
+	}
+	if requirePath && normalizeDataCachePath(cached.Path) != normalizeDataCachePath(current.Path) {
+		return false
+	}
+	return cached.Size == current.Size &&
+		cached.MTimeUnixNano == current.MTimeUnixNano &&
+		cached.Device == current.Device &&
+		cached.Inode == current.Inode
+}
+
+func dataCachePathForFile(root, filePath string) (string, error) {
+	rel, err := filepath.Rel(root, filePath)
+	if err != nil {
+		return "", err
+	}
+	return normalizeDataCachePath(rel), nil
+}
+
+func normalizeDataCachePath(value string) string {
+	value = strings.TrimSpace(filepath.ToSlash(value))
+	if value == "" || value == "." {
+		return ""
+	}
+	value = path.Clean(value)
+	if strings.HasPrefix(value, "../") || value == ".." {
+		return ""
+	}
+	value = strings.TrimPrefix(value, "./")
+	return "./" + value
+}
+
+func dataHashCacheIdentityKey(device, inode uint64, size, mtimeUnixNano int64) string {
+	if device == 0 && inode == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d:%d:%d", device, inode, size, mtimeUnixNano)
+}
+
+func dataCacheEntryInAsset(cachePath string, cfg dataConfig, assetName string) bool {
+	cachePath = normalizeDataCachePath(cachePath)
+	if cachePath == "" {
+		return false
+	}
+	for _, asset := range cfg.Assets {
+		if asset.Name != assetName {
+			continue
+		}
+		assetPath := normalizeDataCachePath(asset.Path)
+		if assetPath == "" {
+			continue
+		}
+		return cachePath == assetPath || strings.HasPrefix(cachePath, strings.TrimSuffix(assetPath, "/")+"/")
 	}
 	return false
 }
