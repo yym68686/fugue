@@ -105,7 +105,16 @@ type dataProgressRenderer struct {
 	label   string
 	total   int64
 	done    int64
+	start   time.Time
 	last    time.Time
+	mu      sync.Mutex
+}
+
+type dataTransferProgress func(delta int64)
+
+type dataScanEstimate struct {
+	Files int64 `json:"files"`
+	Bytes int64 `json:"bytes"`
 }
 
 type dataTransferState struct {
@@ -338,6 +347,7 @@ func (c *CLI) newDataUntrackCommand() *cobra.Command {
 }
 
 func (c *CLI) newDataStatusCommand() *cobra.Command {
+	var noProgress bool
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show local data workspace status",
@@ -351,10 +361,16 @@ func (c *CLI) newDataStatusCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			manifest, pathsByDigest, err := scanDataManifest(".", cfg, "")
+			estimate, err := estimateDataManifestScan(".", cfg, "")
 			if err != nil {
 				return err
 			}
+			scanProgress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Hashing local data", estimate.Bytes)
+			manifest, pathsByDigest, err := scanDataManifestWithProgress(".", cfg, "", scanProgress.advance)
+			if err != nil {
+				return err
+			}
+			scanProgress.finish()
 			_ = pathsByDigest
 			client, err := c.newClient()
 			if err != nil {
@@ -412,6 +428,7 @@ func (c *CLI) newDataStatusCommand() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&noProgress, "no-progress", false, "Disable progress rendering")
 	return cmd
 }
 
@@ -443,10 +460,16 @@ func (c *CLI) newDataPushCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			manifest, pathsByDigest, err := scanDataManifest(".", cfg, assetName)
+			estimate, err := estimateDataManifestScan(".", cfg, assetName)
 			if err != nil {
 				return err
 			}
+			scanProgress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Hashing local data", estimate.Bytes)
+			manifest, pathsByDigest, err := scanDataManifestWithProgress(".", cfg, assetName, scanProgress.advance)
+			if err != nil {
+				return err
+			}
+			scanProgress.finish()
 			if dryRun {
 				if c.wantsJSON() {
 					return writeJSON(c.stdout, map[string]any{"workspace": workspace, "manifest": manifest, "dry_run": true})
@@ -538,7 +561,7 @@ func (c *CLI) newDataPushCommand() *cobra.Command {
 
 func (c *CLI) newDataPullCommand() *cobra.Command {
 	var version, assetName, toPath string
-	var verify, dryRun, keepLocal, overwrite, prune, confirm, noResume bool
+	var verify, dryRun, keepLocal, overwrite, prune, confirm, noResume, noProgress bool
 	var concurrency int
 	cmd := &cobra.Command{
 		Use:   "pull",
@@ -582,10 +605,16 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 					}
 				}
 			}
-			pullPlan, err := buildPullPlan(".", targetCfg, planResp.Manifest, overwrite, keepLocal, prune)
+			preflightBytes, err := estimatePullPreflightHashBytes(".", targetCfg, planResp.Manifest)
 			if err != nil {
 				return err
 			}
+			preflightProgress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Checking local files", preflightBytes)
+			pullPlan, err := buildPullPlanWithProgress(".", targetCfg, planResp.Manifest, overwrite, keepLocal, prune, preflightProgress.advance)
+			if err != nil {
+				return err
+			}
+			preflightProgress.finish()
 			if dryRun || len(pullPlan.Conflicts) > 0 {
 				if c.wantsJSON() {
 					return writeJSON(c.stdout, map[string]any{"workspace": workspace, "snapshot": planResp.Snapshot, "plan": pullPlan, "dry_run": dryRun})
@@ -607,7 +636,7 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 			if err := validatePullBlobs(blobByDigest, pullPlan.Download); err != nil {
 				return err
 			}
-			progress := newDataProgressRenderer(c.stdout, !c.wantsJSON(), "Download", totalManifestFileBytes(pullPlan.Download))
+			progress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Download", totalManifestFileBytes(pullPlan.Download))
 			var downloadedBytes int64
 			var downloadedFiles int
 			for _, removePath := range pullPlan.Prune {
@@ -661,7 +690,7 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 					fmt.Fprintf(c.stdout, "Downloading %s  %s\n", target, formatBytes(entry.Size))
 				}
 				if err := retryDataAuthorization(func() error {
-					return client.DownloadDataBlob(blob.DownloadURL, target, entry.SHA256, entry.Size, !noResume, overwrite, concurrency)
+					return client.DownloadDataBlobWithProgress(blob.DownloadURL, target, entry.SHA256, entry.Size, !noResume, overwrite, concurrency, progress.advance)
 				}, func() error {
 					refresh, err := client.RefreshDataTransferAuthorization(planResp.Transfer.ID)
 					if err != nil {
@@ -682,13 +711,14 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 				downloadedBytes += entry.Size
 				downloadedFiles++
 				_ = client.CheckpointDataTransfer(planResp.Transfer.ID, downloadedBytes, downloadedFiles, nil)
-				progress.advance(entry.Size)
 			}
 			progress.finish()
 			if verify {
-				if err := verifyPulledManifest(".", targetCfg, planResp.Manifest); err != nil {
+				verifyProgress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Verifying local data", totalManifestFileBytes(planResp.Manifest.Entries))
+				if err := verifyPulledManifestWithProgress(".", targetCfg, planResp.Manifest, verifyProgress.advance); err != nil {
 					return err
 				}
+				verifyProgress.finish()
 			}
 			complete, err := client.CompleteDataTransfer(planResp.Transfer.ID, map[string]any{
 				"snapshot_id": planResp.Snapshot.ID,
@@ -716,12 +746,14 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&prune, "prune", false, "Delete local files absent from the version manifest")
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "Required with --prune to delete extra local files")
 	cmd.Flags().BoolVar(&noResume, "no-resume", false, "Ignore local transfer resume state")
+	cmd.Flags().BoolVar(&noProgress, "no-progress", false, "Disable progress rendering")
 	cmd.Flags().IntVar(&concurrency, "concurrency", 8, "Transfer concurrency")
 	return cmd
 }
 
 func (c *CLI) newDataCloneCommand() *cobra.Command {
 	var toPath, version, assetName, grant string
+	var noProgress bool
 	cmd := &cobra.Command{
 		Use:   "clone <workspace>",
 		Short: "Clone a data workspace into a target directory",
@@ -760,10 +792,16 @@ func (c *CLI) newDataCloneCommand() *cobra.Command {
 			_ = grant
 			planResp, err := client.PlanDataDownload(workspaceResp.Workspace.ID, version, compactStrings([]string{assetName}))
 			if err == nil {
-				pullPlan, err := buildPullPlan(target, cfg, planResp.Manifest, false, false, false)
+				preflightBytes, err := estimatePullPreflightHashBytes(target, cfg, planResp.Manifest)
 				if err != nil {
 					return err
 				}
+				preflightProgress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Checking local files", preflightBytes)
+				pullPlan, err := buildPullPlanWithProgress(target, cfg, planResp.Manifest, false, false, false, preflightProgress.advance)
+				if err != nil {
+					return err
+				}
+				preflightProgress.finish()
 				if len(pullPlan.Conflicts) > 0 {
 					renderPullPreflight(c.stdout, workspaceResp.Workspace, planResp.Snapshot, pullPlan)
 					return fmt.Errorf("pull preflight found conflicts")
@@ -775,6 +813,7 @@ func (c *CLI) newDataCloneCommand() *cobra.Command {
 				if err := validatePullBlobs(blobByDigest, pullPlan.Download); err != nil {
 					return err
 				}
+				progress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Download", totalManifestFileBytes(pullPlan.Download))
 				for _, entry := range pullPlan.Download {
 					targetPath, err := targetPathForEntry(target, cfg, entry)
 					if err != nil {
@@ -790,10 +829,11 @@ func (c *CLI) newDataCloneCommand() *cobra.Command {
 						continue
 					}
 					blob := blobByDigest[entry.SHA256]
-					if err := client.DownloadDataBlob(blob.DownloadURL, targetPath, entry.SHA256, entry.Size, true, false, 8); err != nil {
+					if err := client.DownloadDataBlobWithProgress(blob.DownloadURL, targetPath, entry.SHA256, entry.Size, true, false, 8, progress.advance); err != nil {
 						return err
 					}
 				}
+				progress.finish()
 				if _, err := client.CompleteDataTransfer(planResp.Transfer.ID, map[string]any{"snapshot_id": planResp.Snapshot.ID, "bytes_done": planResp.Manifest.TotalBytes, "files_done": planResp.Manifest.FileCount}); err != nil {
 					return err
 				}
@@ -811,6 +851,7 @@ func (c *CLI) newDataCloneCommand() *cobra.Command {
 	cmd.Flags().StringVar(&version, "version", "", "Version to pull after cloning")
 	cmd.Flags().StringVar(&assetName, "asset", "", "Only pull one asset after cloning")
 	cmd.Flags().StringVar(&grant, "grant", "", "Data grant secret")
+	cmd.Flags().BoolVar(&noProgress, "no-progress", false, "Disable progress rendering")
 	return cmd
 }
 
@@ -1291,10 +1332,16 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 		}
 		switch refresh.Transfer.Direction {
 		case model.DataTransferDirectionUpload:
-			manifest, pathsByDigest, err := scanDataManifest(".", cfg, "")
+			estimate, err := estimateDataManifestScan(".", cfg, "")
 			if err != nil {
 				return err
 			}
+			scanProgress := newDataProgressRenderer(c.stdout, !c.wantsJSON(), "Hashing local data", estimate.Bytes)
+			manifest, pathsByDigest, err := scanDataManifestWithProgress(".", cfg, "", scanProgress.advance)
+			if err != nil {
+				return err
+			}
+			scanProgress.finish()
 			manifestDigest := digestDataManifest(manifest)
 			if len(refresh.Transfer.Manifest.Entries) > 0 {
 				manifestDigest = digestDataManifest(refresh.Transfer.Manifest)
@@ -1337,10 +1384,16 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 			if len(manifest.Entries) == 0 {
 				return fmt.Errorf("transfer %s does not include a manifest to resume", refresh.Transfer.ID)
 			}
-			pullPlan, err := buildPullPlan(".", cfg, manifest, false, false, false)
+			preflightBytes, err := estimatePullPreflightHashBytes(".", cfg, manifest)
 			if err != nil {
 				return err
 			}
+			preflightProgress := newDataProgressRenderer(c.stdout, !c.wantsJSON(), "Checking local files", preflightBytes)
+			pullPlan, err := buildPullPlanWithProgress(".", cfg, manifest, false, false, false, preflightProgress.advance)
+			if err != nil {
+				return err
+			}
+			preflightProgress.finish()
 			if len(pullPlan.Conflicts) > 0 {
 				renderPullPreflight(c.stdout, refresh.Workspace, model.DataSnapshot{Version: refresh.Transfer.Version, Manifest: manifest}, pullPlan)
 				return fmt.Errorf("pull preflight found conflicts")
@@ -1352,6 +1405,7 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 			if err := validatePullBlobs(blobByDigest, pullPlan.Download); err != nil {
 				return err
 			}
+			progress := newDataProgressRenderer(c.stdout, !c.wantsJSON(), "Download", totalManifestFileBytes(pullPlan.Download))
 			for _, entry := range pullPlan.Download {
 				if entry.Kind != model.DataManifestEntryKindFile {
 					continue
@@ -1361,10 +1415,11 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 					return err
 				}
 				blob := blobByDigest[entry.SHA256]
-				if err := client.DownloadDataBlob(blob.DownloadURL, target, entry.SHA256, entry.Size, true, false, 8); err != nil {
+				if err := client.DownloadDataBlobWithProgress(blob.DownloadURL, target, entry.SHA256, entry.Size, true, false, 8, progress.advance); err != nil {
 					return err
 				}
 			}
+			progress.finish()
 			complete, err := client.CompleteDataTransfer(refresh.Transfer.ID, map[string]any{
 				"snapshot_id": refresh.Transfer.SnapshotID,
 				"bytes_done":  manifest.TotalBytes,
@@ -1891,7 +1946,70 @@ func dataConfigAssetIndex(cfg dataConfig, name string) int {
 	return -1
 }
 
+func estimateDataManifestScan(root string, cfg dataConfig, onlyAsset string) (dataScanEstimate, error) {
+	var estimate dataScanEstimate
+	for _, asset := range cfg.Assets {
+		if onlyAsset != "" && asset.Name != onlyAsset {
+			continue
+		}
+		assetPath := filepath.Join(root, filepath.FromSlash(asset.Path))
+		info, err := os.Lstat(assetPath)
+		if err != nil {
+			if asset.Required {
+				return dataScanEstimate{}, err
+			}
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		if info.IsDir() {
+			err := filepath.WalkDir(assetPath, func(current string, dirEntry os.DirEntry, walkErr error) error {
+				if walkErr != nil {
+					return walkErr
+				}
+				rel, err := filepath.Rel(assetPath, current)
+				if err != nil {
+					return err
+				}
+				relSlash := filepath.ToSlash(rel)
+				if relSlash == "." {
+					return nil
+				}
+				if shouldIgnoreDataPath(relSlash, dirEntry.Name(), append(cfg.Ignore, asset.Ignore...)) {
+					if dirEntry.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				info, err := dirEntry.Info()
+				if err != nil {
+					return err
+				}
+				if info.Mode().IsRegular() {
+					estimate.Files++
+					estimate.Bytes += info.Size()
+				}
+				return nil
+			})
+			if err != nil {
+				return dataScanEstimate{}, err
+			}
+			continue
+		}
+		if info.Mode().IsRegular() {
+			estimate.Files++
+			estimate.Bytes += info.Size()
+		}
+	}
+	return estimate, nil
+}
+
 func scanDataManifest(root string, cfg dataConfig, onlyAsset string) (model.DataManifest, map[string]string, error) {
+	return scanDataManifestWithProgress(root, cfg, onlyAsset, nil)
+}
+
+func scanDataManifestWithProgress(root string, cfg dataConfig, onlyAsset string, progress dataTransferProgress) (model.DataManifest, map[string]string, error) {
 	entries := []model.DataManifestEntry{}
 	pathsByDigest := map[string]string{}
 	for _, asset := range cfg.Assets {
@@ -1945,7 +2063,7 @@ func scanDataManifest(root string, cfg dataConfig, onlyAsset string) (model.Data
 				} else if info.Mode().IsRegular() {
 					entry.Kind = model.DataManifestEntryKindFile
 					entry.Size = info.Size()
-					sum, err := sha256LocalFile(current)
+					sum, err := sha256LocalFileWithProgress(current, progress)
 					if err != nil {
 						return err
 					}
@@ -1964,7 +2082,7 @@ func scanDataManifest(root string, cfg dataConfig, onlyAsset string) (model.Data
 			continue
 		}
 		if info.Mode().IsRegular() {
-			sum, err := sha256LocalFile(assetPath)
+			sum, err := sha256LocalFileWithProgress(assetPath, progress)
 			if err != nil {
 				return model.DataManifest{}, nil, err
 			}
@@ -2075,19 +2193,44 @@ func findUntrackedLargeDataDirectories(root string, cfg dataConfig, threshold in
 }
 
 func sha256LocalFile(filePath string) (string, error) {
+	return sha256LocalFileWithProgress(filePath, nil)
+}
+
+type dataProgressReader struct {
+	r        io.Reader
+	progress dataTransferProgress
+}
+
+func (r dataProgressReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	if n > 0 && r.progress != nil {
+		r.progress(int64(n))
+	}
+	return n, err
+}
+
+func sha256LocalFileWithProgress(filePath string, progress dataTransferProgress) (string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return "", err
 	}
 	defer file.Close()
 	hasher := sha256.New()
-	if _, err := io.Copy(hasher, file); err != nil {
+	reader := io.Reader(file)
+	if progress != nil {
+		reader = dataProgressReader{r: file, progress: progress}
+	}
+	if _, err := io.Copy(hasher, reader); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 func buildPullPlan(root string, cfg dataConfig, manifest model.DataManifest, overwrite, keepLocal, prune bool) (pullPlan, error) {
+	return buildPullPlanWithProgress(root, cfg, manifest, overwrite, keepLocal, prune, nil)
+}
+
+func buildPullPlanWithProgress(root string, cfg dataConfig, manifest model.DataManifest, overwrite, keepLocal, prune bool, progress dataTransferProgress) (pullPlan, error) {
 	var plan pullPlan
 	expectedByAsset := map[string]map[string]struct{}{}
 	for _, entry := range manifest.Entries {
@@ -2124,7 +2267,7 @@ func buildPullPlan(root string, cfg dataConfig, manifest model.DataManifest, ove
 			continue
 		}
 		if entry.Kind == model.DataManifestEntryKindFile && info.Mode().IsRegular() {
-			localDigest, err := sha256LocalFile(target)
+			localDigest, err := sha256LocalFileWithProgress(target, progress)
 			if err != nil {
 				return plan, err
 			}
@@ -2184,6 +2327,30 @@ func buildPullPlan(root string, cfg dataConfig, manifest model.DataManifest, ove
 		return plan, err
 	}
 	return plan, nil
+}
+
+func estimatePullPreflightHashBytes(root string, cfg dataConfig, manifest model.DataManifest) (int64, error) {
+	var total int64
+	for _, entry := range manifest.Entries {
+		if entry.Kind != model.DataManifestEntryKindFile {
+			continue
+		}
+		target, err := targetPathForEntry(root, cfg, entry)
+		if err != nil {
+			return 0, err
+		}
+		info, err := os.Lstat(target)
+		if err != nil {
+			if os.IsNotExist(err) || strings.Contains(err.Error(), "not a directory") {
+				continue
+			}
+			return 0, err
+		}
+		if info.Mode().IsRegular() {
+			total += info.Size()
+		}
+	}
+	return total, nil
 }
 
 func targetPathForEntry(root string, cfg dataConfig, entry model.DataManifestEntry) (string, error) {
@@ -2308,6 +2475,10 @@ func validatePullBlobs(blobs map[string]dataBlobPlan, entries []model.DataManife
 }
 
 func verifyPulledManifest(root string, cfg dataConfig, manifest model.DataManifest) error {
+	return verifyPulledManifestWithProgress(root, cfg, manifest, nil)
+}
+
+func verifyPulledManifestWithProgress(root string, cfg dataConfig, manifest model.DataManifest, progress dataTransferProgress) error {
 	for _, entry := range manifest.Entries {
 		target, err := targetPathForEntry(root, cfg, entry)
 		if err != nil {
@@ -2337,7 +2508,7 @@ func verifyPulledManifest(root string, cfg dataConfig, manifest model.DataManife
 			if !info.Mode().IsRegular() {
 				return fmt.Errorf("verify %s: expected file", target)
 			}
-			got, err := sha256LocalFile(target)
+			got, err := sha256LocalFileWithProgress(target, progress)
 			if err != nil {
 				return err
 			}
@@ -2514,7 +2685,7 @@ func (c *CLI) uploadDataPlanBlobs(client *Client, workspaceID, transferID, manif
 			var completed []model.DataTransferPart
 			err := retryDataAuthorization(func() error {
 				var uploadErr error
-				completed, uploadErr = c.uploadMultipartDataBlob(client, sourcePath, transferID, blob, resume, concurrency)
+				completed, uploadErr = c.uploadMultipartDataBlob(client, sourcePath, transferID, blob, resume, concurrency, progress.advance)
 				return uploadErr
 			}, func() error {
 				refresh, err := client.RefreshDataTransferAuthorization(transferID)
@@ -2542,14 +2713,13 @@ func (c *CLI) uploadDataPlanBlobs(client *Client, workspaceID, transferID, manif
 				}
 			}
 			_ = client.CheckpointDataTransfer(transferID, -1, -1, []dataBlobPlan{completedBlob})
-			progress.advance(blob.Size)
 			continue
 		}
 		if strings.TrimSpace(blob.UploadURL) == "" {
 			continue
 		}
 		err := retryDataAuthorization(func() error {
-			return client.PutDataBlob(blob.UploadURL, sourcePath)
+			return client.PutDataBlobWithProgress(blob.UploadURL, sourcePath, progress.advance)
 		}, func() error {
 			refresh, err := client.RefreshDataTransferAuthorization(transferID)
 			if err != nil {
@@ -2573,13 +2743,12 @@ func (c *CLI) uploadDataPlanBlobs(client *Client, workspaceID, transferID, manif
 			}
 		}
 		_ = client.CheckpointDataTransfer(transferID, -1, -1, []dataBlobPlan{completedBlob})
-		progress.advance(blob.Size)
 	}
 	progress.finish()
 	return nil
 }
 
-func (c *CLI) uploadMultipartDataBlob(client *Client, sourcePath, transferID string, blob dataBlobPlan, resume bool, concurrency int) ([]model.DataTransferPart, error) {
+func (c *CLI) uploadMultipartDataBlob(client *Client, sourcePath, transferID string, blob dataBlobPlan, resume bool, concurrency int, progress dataTransferProgress) ([]model.DataTransferPart, error) {
 	if blob.UploadID == "" {
 		return nil, fmt.Errorf("multipart upload id is missing for %s", blob.SHA256)
 	}
@@ -2606,6 +2775,11 @@ func (c *CLI) uploadMultipartDataBlob(client *Client, sourcePath, transferID str
 					parts[idx].ETag = remote.ETag
 				}
 			}
+		}
+	}
+	for _, part := range parts {
+		if part.Completed && strings.TrimSpace(part.ETag) != "" && progress != nil {
+			progress(part.Size)
 		}
 	}
 	jobs := make(chan int)
@@ -2640,7 +2814,7 @@ func (c *CLI) uploadMultipartDataBlob(client *Client, sourcePath, transferID str
 			if part.Completed && strings.TrimSpace(part.ETag) != "" {
 				continue
 			}
-			etag, err := client.UploadDataBlobPart(part.UploadURL, sourcePath, part.Offset, part.Size)
+			etag, err := client.UploadDataBlobPartWithProgress(part.UploadURL, sourcePath, part.Offset, part.Size, progress)
 			if err != nil {
 				select {
 				case errCh <- err:
@@ -2705,33 +2879,105 @@ func retryDataAuthorization(run func() error, refresh func() error) error {
 }
 
 func newDataProgressRenderer(w io.Writer, enabled bool, label string, total int64) *dataProgressRenderer {
-	return &dataProgressRenderer{w: w, enabled: enabled, label: label, total: total}
+	return &dataProgressRenderer{w: w, enabled: enabled, label: label, total: total, start: time.Now()}
 }
 
 func (p *dataProgressRenderer) advance(delta int64) {
-	if p == nil || !p.enabled || delta <= 0 {
+	if p == nil || !p.enabled || delta == 0 {
 		return
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.done += delta
+	if p.done < 0 {
+		p.done = 0
+	}
+	if p.total > 0 && p.done > p.total {
+		p.done = p.total
+	}
 	now := time.Now()
-	if !p.last.IsZero() && now.Sub(p.last) < 500*time.Millisecond && p.done < p.total {
+	if p.start.IsZero() {
+		p.start = now
+	}
+	if !p.last.IsZero() && now.Sub(p.last) < 500*time.Millisecond && (p.total <= 0 || p.done < p.total) {
 		return
 	}
 	p.last = now
-	if p.total > 0 {
-		percent := float64(p.done) / float64(p.total) * 100
-		fmt.Fprintf(p.w, "%s progress: %.1f%%  %s/%s\n", p.label, percent, formatBytes(p.done), formatBytes(p.total))
-		return
-	}
-	fmt.Fprintf(p.w, "%s progress: %s\n", p.label, formatBytes(p.done))
+	fmt.Fprintf(p.w, "%s progress: %s\n", p.label, p.renderLocked(now))
 }
 
 func (p *dataProgressRenderer) finish() {
-	if p == nil || !p.enabled || p.total <= 0 || p.done >= p.total {
+	if p == nil || !p.enabled || p.total <= 0 {
 		return
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.done = p.total
-	fmt.Fprintf(p.w, "%s progress: 100.0%%  %s/%s\n", p.label, formatBytes(p.done), formatBytes(p.total))
+	now := time.Now()
+	p.last = now
+	fmt.Fprintf(p.w, "%s progress: %s\n", p.label, p.renderLocked(now))
+}
+
+func (p *dataProgressRenderer) renderLocked(now time.Time) string {
+	elapsed := now.Sub(p.start)
+	if elapsed < time.Second {
+		elapsed = time.Second
+	}
+	rate := float64(p.done) / elapsed.Seconds()
+	rateText := formatBytes(int64(rate)) + "/s"
+	if p.total <= 0 {
+		return fmt.Sprintf("%s  %s  elapsed %s", formatBytes(p.done), rateText, formatProgressDuration(elapsed))
+	}
+	percent := float64(p.done) / float64(p.total) * 100
+	if percent > 100 {
+		percent = 100
+	}
+	eta := "ETA --"
+	if p.done >= p.total {
+		eta = "ETA 0s"
+	} else if rate > 0 {
+		remaining := float64(p.total-p.done) / rate
+		eta = "ETA " + formatProgressDuration(time.Duration(remaining*float64(time.Second)))
+	}
+	return fmt.Sprintf("[%s] %5.1f%%  %s/%s  %s  %s", dataProgressBar(percent, 24), percent, formatBytes(p.done), formatBytes(p.total), rateText, eta)
+}
+
+func dataProgressBar(percent float64, width int) string {
+	if width <= 0 {
+		width = 24
+	}
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	filled := int(percent / 100 * float64(width))
+	if percent > 0 && filled == 0 {
+		filled = 1
+	}
+	if filled > width {
+		filled = width
+	}
+	return strings.Repeat("#", filled) + strings.Repeat("-", width-filled)
+}
+
+func formatProgressDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	d = d.Round(time.Second)
+	totalSeconds := int64(d / time.Second)
+	hours := totalSeconds / 3600
+	minutes := (totalSeconds % 3600) / 60
+	seconds := totalSeconds % 60
+	if hours > 0 {
+		return fmt.Sprintf("%dh%02dm", hours, minutes)
+	}
+	if minutes > 0 {
+		return fmt.Sprintf("%dm%02ds", minutes, seconds)
+	}
+	return fmt.Sprintf("%ds", seconds)
 }
 
 func totalDataBlobBytes(blobs []dataBlobPlan) int64 {
@@ -3093,12 +3339,20 @@ func (c *Client) AbortDataMultipartUpload(transferID, sha256Digest, uploadID str
 }
 
 func (c *Client) PutDataBlob(uploadURL, sourcePath string) error {
+	return c.PutDataBlobWithProgress(uploadURL, sourcePath, nil)
+}
+
+func (c *Client) PutDataBlobWithProgress(uploadURL, sourcePath string, progress dataTransferProgress) error {
 	file, err := os.Open(sourcePath)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	req, err := http.NewRequest(http.MethodPut, uploadURL, file)
+	body := io.Reader(file)
+	if progress != nil {
+		body = dataProgressReader{r: file, progress: progress}
+	}
+	req, err := http.NewRequest(http.MethodPut, uploadURL, body)
 	if err != nil {
 		return err
 	}
@@ -3113,6 +3367,10 @@ func (c *Client) PutDataBlob(uploadURL, sourcePath string) error {
 }
 
 func (c *Client) UploadDataBlobPart(uploadURL, sourcePath string, offset, size int64) (string, error) {
+	return c.UploadDataBlobPartWithProgress(uploadURL, sourcePath, offset, size, nil)
+}
+
+func (c *Client) UploadDataBlobPartWithProgress(uploadURL, sourcePath string, offset, size int64, progress dataTransferProgress) (string, error) {
 	if strings.TrimSpace(uploadURL) == "" {
 		return "", fmt.Errorf("multipart part upload url is missing")
 	}
@@ -3124,7 +3382,10 @@ func (c *Client) UploadDataBlobPart(uploadURL, sourcePath string, offset, size i
 		return "", err
 	}
 	defer file.Close()
-	body := io.NewSectionReader(file, offset, size)
+	body := io.Reader(io.NewSectionReader(file, offset, size))
+	if progress != nil {
+		body = dataProgressReader{r: body, progress: progress}
+	}
 	req, err := http.NewRequest(http.MethodPut, uploadURL, body)
 	if err != nil {
 		return "", err
@@ -3144,8 +3405,12 @@ func (c *Client) UploadDataBlobPart(uploadURL, sourcePath string, offset, size i
 }
 
 func (c *Client) DownloadDataBlob(downloadURL, targetPath, expectedSHA string, size int64, resume, overwrite bool, concurrency int) error {
+	return c.DownloadDataBlobWithProgress(downloadURL, targetPath, expectedSHA, size, resume, overwrite, concurrency, nil)
+}
+
+func (c *Client) DownloadDataBlobWithProgress(downloadURL, targetPath, expectedSHA string, size int64, resume, overwrite bool, concurrency int, progress dataTransferProgress) error {
 	if size > dataDownloadPartSize && concurrency > 1 {
-		return c.downloadDataBlobMultipart(downloadURL, targetPath, expectedSHA, size, resume, overwrite, concurrency, dataDownloadPartSize)
+		return c.downloadDataBlobMultipart(downloadURL, targetPath, expectedSHA, size, resume, overwrite, concurrency, dataDownloadPartSize, progress)
 	}
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
 		return err
@@ -3166,7 +3431,13 @@ func (c *Client) DownloadDataBlob(downloadURL, targetPath, expectedSHA string, s
 				if overwrite {
 					_ = os.Remove(targetPath)
 				}
+				if progress != nil {
+					progress(size)
+				}
 				return os.Rename(tmpPath, targetPath)
+			}
+			if progress != nil {
+				progress(offset)
 			}
 		}
 	}
@@ -3206,12 +3477,18 @@ func (c *Client) DownloadDataBlob(downloadURL, targetPath, expectedSHA string, s
 			tmp.Close()
 			return err
 		}
+		if progress != nil {
+			progress(-offset)
+		}
 		offset = 0
 	}
 	if offset > 0 && resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
 		tmp.Close()
 		_ = os.Remove(tmpPath)
-		return c.DownloadDataBlob(downloadURL, targetPath, expectedSHA, size, false, overwrite, concurrency)
+		if progress != nil {
+			progress(-offset)
+		}
+		return c.DownloadDataBlobWithProgress(downloadURL, targetPath, expectedSHA, size, false, overwrite, concurrency, progress)
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusBadRequest {
 		tmp.Close()
@@ -3221,7 +3498,11 @@ func (c *Client) DownloadDataBlob(downloadURL, targetPath, expectedSHA string, s
 		tmp.Close()
 		return fmt.Errorf("download failed: status=%d", resp.StatusCode)
 	}
-	if _, err := io.Copy(tmp, resp.Body); err != nil {
+	body := io.Reader(resp.Body)
+	if progress != nil {
+		body = dataProgressReader{r: resp.Body, progress: progress}
+	}
+	if _, err := io.Copy(tmp, body); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -3241,9 +3522,9 @@ func (c *Client) DownloadDataBlob(downloadURL, targetPath, expectedSHA string, s
 	return os.Rename(tmpPath, targetPath)
 }
 
-func (c *Client) downloadDataBlobMultipart(downloadURL, targetPath, expectedSHA string, size int64, resume, overwrite bool, concurrency int, partSize int64) error {
+func (c *Client) downloadDataBlobMultipart(downloadURL, targetPath, expectedSHA string, size int64, resume, overwrite bool, concurrency int, partSize int64, progress dataTransferProgress) error {
 	if size <= 0 {
-		return c.DownloadDataBlob(downloadURL, targetPath, expectedSHA, size, resume, overwrite, 1)
+		return c.DownloadDataBlobWithProgress(downloadURL, targetPath, expectedSHA, size, resume, overwrite, 1, progress)
 	}
 	if partSize <= 0 {
 		partSize = dataDownloadPartSize
@@ -3294,7 +3575,7 @@ func (c *Client) downloadDataBlobMultipart(downloadURL, targetPath, expectedSHA 
 	worker := func() {
 		defer wg.Done()
 		for part := range jobs {
-			if err := c.downloadDataBlobRangePart(downloadURL, part.path, part.offset, part.size, resume); err != nil {
+			if err := c.downloadDataBlobRangePart(downloadURL, part.path, part.offset, part.size, resume, progress); err != nil {
 				select {
 				case errCh <- err:
 				default:
@@ -3363,7 +3644,7 @@ func (c *Client) downloadDataBlobMultipart(downloadURL, targetPath, expectedSHA 
 	return nil
 }
 
-func (c *Client) downloadDataBlobRangePart(downloadURL, partPath string, offset, size int64, resume bool) error {
+func (c *Client) downloadDataBlobRangePart(downloadURL, partPath string, offset, size int64, resume bool, progress dataTransferProgress) error {
 	if size <= 0 {
 		return nil
 	}
@@ -3374,6 +3655,9 @@ func (c *Client) downloadDataBlobRangePart(downloadURL, partPath string, offset,
 	if info, err := os.Stat(partPath); err == nil {
 		existing = info.Size()
 		if existing == size {
+			if progress != nil {
+				progress(size)
+			}
 			return nil
 		}
 		if existing > size {
@@ -3381,6 +3665,8 @@ func (c *Client) downloadDataBlobRangePart(downloadURL, partPath string, offset,
 				return err
 			}
 			existing = 0
+		} else if existing > 0 && progress != nil {
+			progress(existing)
 		}
 	}
 	file, err := os.OpenFile(partPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -3409,6 +3695,9 @@ func (c *Client) downloadDataBlobRangePart(downloadURL, partPath string, offset,
 	if resp.StatusCode != http.StatusPartialContent {
 		if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
 			_ = os.Remove(partPath)
+			if existing > 0 && progress != nil {
+				progress(-existing)
+			}
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		if trimmed := strings.TrimSpace(string(body)); trimmed != "" {
@@ -3416,7 +3705,11 @@ func (c *Client) downloadDataBlobRangePart(downloadURL, partPath string, offset,
 		}
 		return fmt.Errorf("range download failed: status=%d", resp.StatusCode)
 	}
-	if _, err := io.Copy(file, resp.Body); err != nil {
+	body := io.Reader(resp.Body)
+	if progress != nil {
+		body = dataProgressReader{r: resp.Body, progress: progress}
+	}
+	if _, err := io.Copy(file, body); err != nil {
 		return err
 	}
 	info, err := file.Stat()

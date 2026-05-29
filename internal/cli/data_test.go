@@ -348,7 +348,7 @@ func TestDownloadDataBlobMultipartResume(t *testing.T) {
 	}
 	client := &Client{httpClient: http.DefaultClient}
 	targetPath := filepath.Join(root, "data", "sample.bin")
-	if err := client.downloadDataBlobMultipart(blobServer.URL, targetPath, expectedSHA, int64(len(content)), true, true, 3, 5); err != nil {
+	if err := client.downloadDataBlobMultipart(blobServer.URL, targetPath, expectedSHA, int64(len(content)), true, true, 3, 5, nil); err != nil {
 		t.Fatalf("download multipart: %v", err)
 	}
 	restored, err := os.ReadFile(targetPath)
@@ -408,6 +408,13 @@ ignore:
 	}
 	if err := os.WriteFile(filepath.Join(root, "data", "skip.tmp"), []byte("skip"), 0o644); err != nil {
 		t.Fatalf("write ignored: %v", err)
+	}
+	estimate, err := estimateDataManifestScan(root, cfg, "")
+	if err != nil {
+		t.Fatalf("estimate manifest scan: %v", err)
+	}
+	if estimate.Files != 1 || estimate.Bytes != int64(len("sample")) {
+		t.Fatalf("unexpected scan estimate: %+v", estimate)
 	}
 	manifest, paths, err := scanDataManifest(root, cfg, "")
 	if err != nil {
@@ -518,6 +525,27 @@ func TestManifestDiffTransferStateAndProgressRenderer(t *testing.T) {
 	progress.advance(5)
 	if !strings.Contains(out.String(), "Upload progress") {
 		t.Fatalf("expected progress output, got %q", out.String())
+	}
+	if !strings.Contains(out.String(), "ETA") || !strings.Contains(out.String(), "[") {
+		t.Fatalf("expected progress bar with ETA, got %q", out.String())
+	}
+	payload := []byte("progress-hash")
+	source := filepath.Join(root, "source.bin")
+	if err := os.WriteFile(source, payload, 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	var progressed int64
+	gotDigest, err := sha256LocalFileWithProgress(source, func(delta int64) {
+		progressed += delta
+	})
+	if err != nil {
+		t.Fatalf("hash with progress: %v", err)
+	}
+	if progressed != int64(len(payload)) {
+		t.Fatalf("expected hash progress %d, got %d", len(payload), progressed)
+	}
+	if gotDigest != testCLIDigest(string(payload)) {
+		t.Fatalf("unexpected digest %s", gotDigest)
 	}
 }
 
