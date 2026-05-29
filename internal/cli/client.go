@@ -440,7 +440,7 @@ func newClientWithOptions(baseURL, token string, opts clientOptions) (*Client, e
 		return nil, fmt.Errorf("base url is required; pass --base-url or set FUGUE_BASE_URL/FUGUE_API_URL")
 	}
 	if opts.RequireToken && token == "" {
-		return nil, fmt.Errorf("API key is required; pass --token or set FUGUE_API_KEY, FUGUE_TOKEN, or FUGUE_BOOTSTRAP_KEY")
+		return nil, fmt.Errorf("API key is required; run `fugue auth login --token <key>`, pass --token, or set FUGUE_API_KEY, FUGUE_TOKEN, or FUGUE_BOOTSTRAP_KEY")
 	}
 	if !opts.RequireToken && token == "" && strings.TrimSpace(opts.Cookie) == "" {
 		return nil, fmt.Errorf("either an API key or cookie is required")

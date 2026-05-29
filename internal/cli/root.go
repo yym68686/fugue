@@ -36,6 +36,7 @@ type rootOptions struct {
 	OutputFile  string
 	Redact      bool
 	ConfirmRaw  bool
+	SaveToken   bool
 }
 
 type CLI struct {
@@ -98,14 +99,16 @@ Quick start for most users:
      Fugue Cloud: https://fugue.pro/app/api-keys
      Self-hosted: your Fugue web URL + /app/api-keys (for example https://app.example.com/app/api-keys)
      Use a tenant API key for normal deploys. Use a platform-admin/bootstrap key only for admin commands.
-  3. Export the key and run normal commands:
-	  export FUGUE_API_KEY=<copied-access-key>
+  3. Save or export the key and run normal commands:
+	  fugue auth login --token <copied-access-key>
+	  # or: export FUGUE_API_KEY=<copied-access-key>
 	  fugue deploy .
 	  fugue find uni-api-web
 	  fugue app ls
 
 	Defaults and auto-selection:
 	  - Base URL defaults to FUGUE_BASE_URL, then FUGUE_API_URL, then ` + defaultCloudBaseURL + `.
+	  - API keys can be saved with "fugue auth login"; explicit --token and environment variables still override saved keys.
 	  - Web Base URL defaults to FUGUE_WEB_BASE_URL, then APP_BASE_URL, then a best-effort guess from the API base URL.
 	  - Tenant is auto-selected when your key only sees one tenant.
 	  - Deploy and create flows default to the "default" project when you do not pass --project.
@@ -127,10 +130,12 @@ Environment variables:
   FUGUE_ACCOUNT
   FUGUE_TENANT / FUGUE_TENANT_NAME / FUGUE_TENANT_ID
   FUGUE_PROJECT / FUGUE_PROJECT_NAME / FUGUE_PROJECT_ID
+  FUGUE_CONFIG_DIR / FUGUE_CONFIG_FILE
   FUGUE_SKIP_UPDATE_CHECK
 `),
 		Example: strings.TrimSpace(`
 	  curl -fsSL https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.sh | sh
+	  fugue auth login --token <copied-access-key>
 	  export FUGUE_API_KEY=<copied-access-key>
 	  fugue deploy .
 	  fugue deploy . --account user@example.com --project production --create-project
@@ -214,6 +219,9 @@ Environment variables:
 			if err := c.validateRedactionMode(); err != nil {
 				return err
 			}
+			if err := c.saveRootTokenIfRequested(cmd); err != nil {
+				return err
+			}
 			c.maybeWarnAboutCLIUpdate(cmd)
 			return nil
 		},
@@ -234,6 +242,7 @@ Environment variables:
 	flags.StringVar(&c.root.OutputFile, "output-file", c.root.OutputFile, "Also write stdout output to a local file")
 	flags.BoolVar(&c.root.Redact, "redact", c.root.Redact, "Redact sensitive values in diagnostic output (pass --redact=false for raw output)")
 	flags.BoolVar(&c.root.ConfirmRaw, "confirm-raw-output", false, "Required together with --redact=false to allow unredacted output")
+	flags.BoolVar(&c.root.SaveToken, "save-token", false, "Save the provided API key for this base URL after verifying it")
 	flags.StringVar(&c.root.TenantID, "tenant-id", c.root.TenantID, "Tenant ID")
 	flags.StringVar(&c.root.ProjectID, "project-id", c.root.ProjectID, "Project ID")
 	_ = flags.MarkHidden("tenant-id")
@@ -247,6 +256,7 @@ Environment variables:
 		c.newLogsCommand(),
 		c.newDebugCommand(),
 		c.newSourceUploadCommand(),
+		c.newAuthCommand(),
 		c.newTenantCommand(),
 		c.newProjectCommand(),
 		c.newRuntimeCommand(),
@@ -442,7 +452,8 @@ func (c *CLI) effectiveWebBaseURL() string {
 }
 
 func (c *CLI) effectiveToken() string {
-	return firstNonEmpty(c.root.Token, os.Getenv("FUGUE_TOKEN"), os.Getenv("FUGUE_API_KEY"), os.Getenv("FUGUE_BOOTSTRAP_KEY"))
+	token, _ := c.effectiveTokenWithSource()
+	return token
 }
 
 func (c *CLI) effectiveAccount() string {

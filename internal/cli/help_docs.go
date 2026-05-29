@@ -575,6 +575,18 @@ fugue upgrade --check
 fugue upgrade
 `),
 	},
+	"fugue auth": {
+		Long: strings.TrimSpace(`
+Manage the API key used by the Fugue CLI.
+
+Saved keys are scoped by API base URL. Explicit --token and FUGUE_API_KEY/FUGUE_TOKEN/FUGUE_BOOTSTRAP_KEY still override saved keys, so CI and one-off SSH sessions can remain stateless.
+`),
+		Example: strings.TrimSpace(`
+fugue auth login --token <copied-access-key>
+fugue auth status
+fugue auth logout
+`),
+	},
 	"fugue service": {
 		Example: strings.TrimSpace(`
 fugue service ls
