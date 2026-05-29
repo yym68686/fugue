@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -27,20 +28,21 @@ import (
 )
 
 const (
-	dataConfigPath                          = ".fugue/data.yaml"
-	dataHashCachePath                       = ".fugue/data-hash-cache.yaml"
-	dataHashCachePerm                       = 0o600
-	dataHashCacheVersion                    = 1
-	dataTransferStateDir                    = ".fugue/transfers"
-	dataTransferStatePerm                   = 0o600
-	dataDownloadPartSize                    = 64 * 1024 * 1024
-	defaultUntrackedLargeDirThreshold int64 = 1 << 30
-	dataControlPlaneRequestTimeout          = 10 * time.Minute
-	dataTransferBlobPageLimit               = 1024
-	defaultDataTransferConcurrency          = 32
-	dataCheckpointBlobThreshold             = 1024
-	dataCheckpointByteThreshold       int64 = 1 << 30
-	dataObjectTransferMaxAttempts           = 5
+	dataConfigPath                            = ".fugue/data.yaml"
+	dataHashCachePath                         = ".fugue/data-hash-cache.yaml"
+	dataHashCachePerm                         = 0o600
+	dataHashCacheVersion                      = 1
+	dataTransferStateDir                      = ".fugue/transfers"
+	dataTransferStatePerm                     = 0o600
+	dataDownloadPartSize                      = 64 * 1024 * 1024
+	defaultUntrackedLargeDirThreshold   int64 = 1 << 30
+	dataControlPlaneRequestTimeout            = 10 * time.Minute
+	dataTransferBlobPageLimit                 = 1024
+	defaultDataTransferConcurrency            = 32
+	dataCheckpointBlobThreshold               = 1024
+	dataCheckpointByteThreshold         int64 = 1 << 30
+	dataObjectTransferMaxAttempts             = 5
+	dataControlPlaneTransferMaxAttempts       = 8
 )
 
 var defaultDataIgnore = []string{
@@ -4097,7 +4099,7 @@ func (c *Client) RefreshDataTransferAuthorizationPage(transferID string, offset,
 	if encoded := query.Encode(); encoded != "" {
 		relative += "?" + encoded
 	}
-	if err := c.doJSONWithTimeout(http.MethodPost, relative, nil, &resp, dataControlPlaneRequestTimeout); err != nil {
+	if err := c.doDataTransferControlPlaneJSONWithRetry(http.MethodPost, relative, nil, &resp, dataControlPlaneRequestTimeout); err != nil {
 		return dataTransferAuthorizationResponse{}, err
 	}
 	return resp, nil
@@ -4118,7 +4120,100 @@ func (c *Client) CheckpointDataTransfer(transferID string, bytesDone int64, file
 		return nil
 	}
 	var resp map[string]any
-	return c.doJSON(http.MethodPost, path.Join("/v1/data/transfers", transferID, "checkpoint"), req, &resp)
+	return c.doDataTransferControlPlaneJSONWithRetry(http.MethodPost, path.Join("/v1/data/transfers", transferID, "checkpoint"), req, &resp, dataControlPlaneRequestTimeout)
+}
+
+func (c *Client) doDataTransferControlPlaneJSONWithRetry(method, relativePath string, requestBody any, responseBody any, timeout time.Duration) error {
+	var lastErr error
+	for attempt := 1; attempt <= dataControlPlaneTransferMaxAttempts; attempt++ {
+		err := c.doDataTransferControlPlaneJSON(method, relativePath, requestBody, responseBody, timeout)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isTransientDataControlPlaneError(err) || attempt == dataControlPlaneTransferMaxAttempts {
+			return err
+		}
+		time.Sleep(dataControlPlaneRetryDelay(attempt))
+	}
+	return lastErr
+}
+
+func (c *Client) doDataTransferControlPlaneJSON(method, relativePath string, requestBody any, responseBody any, timeout time.Duration) error {
+	payload, err := c.doDataTransferControlPlaneJSONRaw(method, relativePath, requestBody, timeout)
+	if err != nil {
+		return err
+	}
+	if responseBody == nil {
+		return nil
+	}
+	if err := json.Unmarshal(payload, responseBody); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) doDataTransferControlPlaneJSONRaw(method, relativePath string, requestBody any, timeout time.Duration) ([]byte, error) {
+	var body io.Reader
+	if requestBody != nil {
+		raw, err := json.Marshal(requestBody)
+		if err != nil {
+			return nil, fmt.Errorf("marshal request: %w", err)
+		}
+		body = bytes.NewReader(raw)
+	}
+	ctx := context.Background()
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, method, c.resolveURL(relativePath), body)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	if requestBody != nil {
+		httpReq.Header.Set("Content-Type", "application/json")
+	}
+	return c.do(httpReq)
+}
+
+func isTransientDataControlPlaneError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isRetryableHTTPClientError(err) {
+		return true
+	}
+	var apiErr *apiServerError
+	if errors.As(err, &apiErr) {
+		if apiErr.IsRetryable() {
+			return true
+		}
+		switch apiErr.StatusCode {
+		case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		default:
+			return false
+		}
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "unexpected eof") ||
+		strings.Contains(lower, "connection reset") ||
+		strings.Contains(lower, "connection refused") ||
+		strings.Contains(lower, "server closed idle connection")
+}
+
+func dataControlPlaneRetryDelay(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	delay := time.Duration(250*(1<<(attempt-1))) * time.Millisecond
+	if delay > 5*time.Second {
+		return 5 * time.Second
+	}
+	return delay
 }
 
 func (c *Client) ListDataMultipartParts(transferID, sha256Digest string) ([]model.DataTransferPart, error) {

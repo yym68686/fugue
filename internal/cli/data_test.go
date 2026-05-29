@@ -762,6 +762,76 @@ func TestPutDataBlobRetriesTransientObjectFailure(t *testing.T) {
 	}
 }
 
+func TestCheckpointDataTransferRetriesTransientReadFailure(t *testing.T) {
+	var mu sync.Mutex
+	var attempts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/data/transfers/transfer-1/checkpoint" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		mu.Lock()
+		attempts++
+		current := attempts
+		mu.Unlock()
+		if current == 1 {
+			w.Header().Set("Content-Length", "64")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("{"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"checkpointed":true}`))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "token")
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	if err := client.CheckpointDataTransfer("transfer-1", -1, -1, []dataBlobPlan{{SHA256: strings.Repeat("a", 64), Size: 1}}); err != nil {
+		t.Fatalf("checkpoint transfer: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts != 2 {
+		t.Fatalf("expected retry, got %d attempts", attempts)
+	}
+}
+
+func TestRefreshDataTransferAuthorizationRetriesTransientStatus(t *testing.T) {
+	var mu sync.Mutex
+	var attempts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/data/transfers/transfer-1/refresh" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		mu.Lock()
+		attempts++
+		current := attempts
+		mu.Unlock()
+		if current == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":"gateway reset"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"transfer":{"id":"transfer-1"},"blobs":[]}`))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "token")
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	if _, err := client.RefreshDataTransferAuthorizationPage("transfer-1", 0, 10); err != nil {
+		t.Fatalf("refresh transfer authorization: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts != 2 {
+		t.Fatalf("expected retry, got %d attempts", attempts)
+	}
+}
+
 func testCLIDigest(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
