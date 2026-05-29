@@ -1946,6 +1946,9 @@ func mergeTransferPlanBlobCheckpoint(current, checkpoint dataTransferPlanBlob) d
 
 func (s *Server) dataBlobURL(r *http.Request, transferID, digest string) string {
 	base := strings.TrimRight(s.apiPublicDomain, "/")
+	if base != "" && !strings.Contains(base, "://") {
+		base = "https://" + base
+	}
 	if base == "" {
 		scheme := "http"
 		if r.TLS != nil {

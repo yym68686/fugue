@@ -566,6 +566,15 @@ func hasQueryKey(r *http.Request, key string) bool {
 	return ok
 }
 
+func TestDataBlobURLAddsSchemeToPublicDomain(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPut, "http://internal.example", nil)
+	server := &Server{apiPublicDomain: "api.fugue.pro"}
+	got := server.dataBlobURL(req, "transfer-1", strings.Repeat("a", 64))
+	if !strings.HasPrefix(got, "https://api.fugue.pro/v1/data/blobs/") {
+		t.Fatalf("expected https public data blob URL, got %q", got)
+	}
+}
+
 func testDataDigestString(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
