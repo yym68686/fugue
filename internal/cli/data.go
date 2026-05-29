@@ -34,6 +34,9 @@ const (
 	dataTransferStatePerm                   = 0o600
 	dataDownloadPartSize                    = 64 * 1024 * 1024
 	defaultUntrackedLargeDirThreshold int64 = 1 << 30
+	dataControlPlaneRequestTimeout          = 10 * time.Minute
+	dataCheckpointBlobThreshold             = 1024
+	dataCheckpointByteThreshold       int64 = 1 << 30
 )
 
 var defaultDataIgnore = []string{
@@ -92,6 +95,7 @@ type dataTransferCompleteResponse struct {
 type dataTransferAuthorizationResponse struct {
 	Workspace model.DataWorkspace `json:"workspace"`
 	Transfer  model.DataTransfer  `json:"transfer"`
+	Manifest  model.DataManifest  `json:"manifest"`
 	Blobs     []dataBlobPlan      `json:"blobs"`
 }
 
@@ -712,6 +716,22 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 			progress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Download", totalManifestFileBytes(pullPlan.Download))
 			var downloadedBytes int64
 			var downloadedFiles int
+			var lastCheckpointBytes int64
+			var lastCheckpointFiles int
+			flushDownloadCheckpoint := func(force bool) error {
+				if downloadedFiles == 0 {
+					return nil
+				}
+				if !force && downloadedFiles-lastCheckpointFiles < dataCheckpointBlobThreshold && downloadedBytes-lastCheckpointBytes < dataCheckpointByteThreshold {
+					return nil
+				}
+				if err := client.CheckpointDataTransfer(planResp.Transfer.ID, downloadedBytes, downloadedFiles, nil); err != nil {
+					return err
+				}
+				lastCheckpointBytes = downloadedBytes
+				lastCheckpointFiles = downloadedFiles
+				return nil
+			}
 			for _, removePath := range pullPlan.Prune {
 				if prune && confirm {
 					if err := os.Remove(removePath); err != nil && !os.IsNotExist(err) {
@@ -783,7 +803,12 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 				}
 				downloadedBytes += entry.Size
 				downloadedFiles++
-				_ = client.CheckpointDataTransfer(planResp.Transfer.ID, downloadedBytes, downloadedFiles, nil)
+				if err := flushDownloadCheckpoint(false); err != nil {
+					return err
+				}
+			}
+			if err := flushDownloadCheckpoint(true); err != nil {
+				return err
 			}
 			progress.finish()
 			if verify {
@@ -1475,7 +1500,9 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 			}
 			scanProgress.finish()
 			manifestDigest := digestDataManifest(manifest)
-			if len(refresh.Transfer.Manifest.Entries) > 0 {
+			if len(refresh.Manifest.Entries) > 0 {
+				manifestDigest = digestDataManifest(refresh.Manifest)
+			} else if len(refresh.Transfer.Manifest.Entries) > 0 {
 				manifestDigest = digestDataManifest(refresh.Transfer.Manifest)
 			}
 			if err := saveDataTransferState(".", dataTransferState{
@@ -1491,7 +1518,10 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 			if err := c.uploadDataPlanBlobs(client, refresh.Transfer.WorkspaceID, refresh.Transfer.ID, manifestDigest, refresh.Blobs, pathsByDigest, true, false, 8); err != nil {
 				return err
 			}
-			manifestToComplete := refresh.Transfer.Manifest
+			manifestToComplete := refresh.Manifest
+			if len(manifestToComplete.Entries) == 0 {
+				manifestToComplete = refresh.Transfer.Manifest
+			}
 			if len(manifestToComplete.Entries) == 0 {
 				manifestToComplete = manifest
 			}
@@ -1516,7 +1546,10 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 			})
 			return nil
 		case model.DataTransferDirectionDownload:
-			manifest := refresh.Transfer.Manifest
+			manifest := refresh.Manifest
+			if len(manifest.Entries) == 0 {
+				manifest = refresh.Transfer.Manifest
+			}
 			if len(manifest.Entries) == 0 {
 				return fmt.Errorf("transfer %s does not include a manifest to resume", refresh.Transfer.ID)
 			}
@@ -3020,6 +3053,27 @@ func (c *CLI) uploadDataPlanBlobs(client *Client, workspaceID, transferID, manif
 		concurrency = 1
 	}
 	progress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Upload", totalDataBlobBytes(blobs))
+	var checkpointBlobs []dataBlobPlan
+	var checkpointBytes int64
+	flushCheckpoints := func(force bool) error {
+		if len(checkpointBlobs) == 0 {
+			return nil
+		}
+		if !force && len(checkpointBlobs) < dataCheckpointBlobThreshold && checkpointBytes < dataCheckpointByteThreshold {
+			return nil
+		}
+		batch := append([]dataBlobPlan(nil), checkpointBlobs...)
+		checkpointBlobs = checkpointBlobs[:0]
+		checkpointBytes = 0
+		return client.CheckpointDataTransfer(transferID, -1, -1, batch)
+	}
+	queueCheckpoint := func(blob dataBlobPlan) error {
+		checkpointBlobs = append(checkpointBlobs, blob)
+		if blob.Size > 0 {
+			checkpointBytes += blob.Size
+		}
+		return flushCheckpoints(false)
+	}
 	for _, blob := range blobs {
 		if blob.Exists {
 			progress.advance(blob.Size)
@@ -3082,7 +3136,9 @@ func (c *CLI) uploadDataPlanBlobs(client *Client, workspaceID, transferID, manif
 					return err
 				}
 			}
-			_ = client.CheckpointDataTransfer(transferID, -1, -1, []dataBlobPlan{completedBlob})
+			if err := queueCheckpoint(completedBlob); err != nil {
+				return err
+			}
 			continue
 		}
 		if strings.TrimSpace(blob.UploadURL) == "" {
@@ -3112,7 +3168,12 @@ func (c *CLI) uploadDataPlanBlobs(client *Client, workspaceID, transferID, manif
 				return err
 			}
 		}
-		_ = client.CheckpointDataTransfer(transferID, -1, -1, []dataBlobPlan{completedBlob})
+		if err := queueCheckpoint(completedBlob); err != nil {
+			return err
+		}
+	}
+	if err := flushCheckpoints(true); err != nil {
+		return err
 	}
 	progress.finish()
 	return nil
@@ -3795,7 +3856,7 @@ func (c *Client) GetDataSnapshot(workspaceID, snapshotID string) (dataSnapshotEn
 
 func (c *Client) PlanDataUpload(workspaceID, version, message string, manifest model.DataManifest) (dataUploadPlanResponse, error) {
 	var resp dataUploadPlanResponse
-	if err := c.doJSON(http.MethodPost, path.Join("/v1/data/workspaces", workspaceID, "transfers/plan-upload"), map[string]any{"version": version, "message": message, "manifest": manifest}, &resp); err != nil {
+	if err := c.doJSONWithTimeout(http.MethodPost, path.Join("/v1/data/workspaces", workspaceID, "transfers/plan-upload"), map[string]any{"version": version, "message": message, "manifest": manifest}, &resp, dataControlPlaneRequestTimeout); err != nil {
 		return dataUploadPlanResponse{}, err
 	}
 	return resp, nil
@@ -3803,7 +3864,7 @@ func (c *Client) PlanDataUpload(workspaceID, version, message string, manifest m
 
 func (c *Client) PlanDataDownload(workspaceID, version string, assets []string) (dataDownloadPlanResponse, error) {
 	var resp dataDownloadPlanResponse
-	if err := c.doJSON(http.MethodPost, path.Join("/v1/data/workspaces", workspaceID, "transfers/plan-download"), map[string]any{"version": version, "assets": assets}, &resp); err != nil {
+	if err := c.doJSONWithTimeout(http.MethodPost, path.Join("/v1/data/workspaces", workspaceID, "transfers/plan-download"), map[string]any{"version": version, "assets": assets}, &resp, dataControlPlaneRequestTimeout); err != nil {
 		return dataDownloadPlanResponse{}, err
 	}
 	return resp, nil
@@ -3811,7 +3872,7 @@ func (c *Client) PlanDataDownload(workspaceID, version string, assets []string) 
 
 func (c *Client) CompleteDataTransfer(transferID string, req map[string]any) (dataTransferCompleteResponse, error) {
 	var resp dataTransferCompleteResponse
-	if err := c.doJSON(http.MethodPost, path.Join("/v1/data/transfers", transferID, "complete"), req, &resp); err != nil {
+	if err := c.doJSONWithTimeout(http.MethodPost, path.Join("/v1/data/transfers", transferID, "complete"), req, &resp, dataControlPlaneRequestTimeout); err != nil {
 		return dataTransferCompleteResponse{}, err
 	}
 	return resp, nil
@@ -3819,7 +3880,7 @@ func (c *Client) CompleteDataTransfer(transferID string, req map[string]any) (da
 
 func (c *Client) RefreshDataTransferAuthorization(transferID string) (dataTransferAuthorizationResponse, error) {
 	var resp dataTransferAuthorizationResponse
-	if err := c.doJSON(http.MethodPost, path.Join("/v1/data/transfers", transferID, "refresh"), nil, &resp); err != nil {
+	if err := c.doJSONWithTimeout(http.MethodPost, path.Join("/v1/data/transfers", transferID, "refresh"), nil, &resp, dataControlPlaneRequestTimeout); err != nil {
 		return dataTransferAuthorizationResponse{}, err
 	}
 	return resp, nil
@@ -4317,7 +4378,8 @@ func (c *Client) GetDataTransferModel(id string) (model.DataTransfer, error) {
 	var resp struct {
 		Transfer model.DataTransfer `json:"transfer"`
 	}
-	if err := c.doJSON(http.MethodGet, path.Join("/v1/data/transfers", id), nil, &resp); err != nil {
+	relative := path.Join("/v1/data/transfers", id) + "?summary=true"
+	if err := c.doJSON(http.MethodGet, relative, nil, &resp); err != nil {
 		return model.DataTransfer{}, err
 	}
 	return resp.Transfer, nil

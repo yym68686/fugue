@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -99,8 +100,15 @@ func TestDataWorkspaceS3MultipartPlanRefreshAndComplete(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("plan upload status %d", resp.StatusCode)
 	}
+	planRaw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read plan: %v", err)
+	}
+	if bytes.Contains(planRaw, []byte(`"manifest"`)) || bytes.Contains(planRaw, []byte(`"plan_blobs"`)) {
+		t.Fatalf("upload plan response should not echo manifest or plan blobs, got %s", string(planRaw))
+	}
 	var plan dataUploadPlanResponse
-	if err := json.NewDecoder(resp.Body).Decode(&plan); err != nil {
+	if err := json.Unmarshal(planRaw, &plan); err != nil {
 		t.Fatalf("decode plan: %v", err)
 	}
 	if createMultipartCalls != 1 || len(plan.Blobs) != 1 || plan.Blobs[0].UploadMode != model.DataBlobUploadModeMultipart || len(plan.Blobs[0].Parts) != 2 {
@@ -117,12 +125,19 @@ func TestDataWorkspaceS3MultipartPlanRefreshAndComplete(t *testing.T) {
 	if refreshResp.StatusCode != http.StatusOK {
 		t.Fatalf("refresh status %d", refreshResp.StatusCode)
 	}
+	refreshRaw, err := io.ReadAll(refreshResp.Body)
+	if err != nil {
+		t.Fatalf("read refresh: %v", err)
+	}
+	if bytes.Contains(refreshRaw, []byte(`"manifest"`)) || bytes.Contains(refreshRaw, []byte(`"plan_blobs"`)) {
+		t.Fatalf("upload refresh response should not echo manifest or plan blobs, got %s", string(refreshRaw))
+	}
 	var refresh struct {
 		Workspace model.DataWorkspace    `json:"workspace"`
 		Transfer  model.DataTransfer     `json:"transfer"`
 		Blobs     []dataTransferPlanBlob `json:"blobs"`
 	}
-	if err := json.NewDecoder(refreshResp.Body).Decode(&refresh); err != nil {
+	if err := json.Unmarshal(refreshRaw, &refresh); err != nil {
 		t.Fatalf("decode refresh: %v", err)
 	}
 	if listPartsCalls != 1 || !refresh.Blobs[0].Parts[0].Completed || refresh.Blobs[0].Parts[0].ETag != "etag-1" {

@@ -82,8 +82,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/DataUploadPlanResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /readyz:
@@ -98,8 +97,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/DataDownloadPlanResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/auth/context:
@@ -168,8 +166,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/DataTransferActionResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/edge/domains:
@@ -5660,8 +5657,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/DataTransferActionResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/data/workspaces/{workspace_id}/grants:
@@ -5757,8 +5753,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/DataTransferActionResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/data/workspaces/{workspace_id}/backend-migrations/{transfer_id}/rollback:
@@ -5778,8 +5773,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/DataTransferActionResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/data/transfers:
@@ -5796,8 +5790,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/DataTransferListResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/data/transfers/{transfer_id}:
@@ -5810,6 +5803,11 @@ paths:
         - BearerAuth: []
       parameters:
         - $ref: "#/components/parameters/DataTransferIdPathParam"
+        - in: query
+          name: summary
+          required: false
+          schema:
+            type: boolean
       responses:
         '200':
           description: Successful response
@@ -5836,8 +5834,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/DataTransferAuthorizationResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/data/transfers/{transfer_id}/checkpoint:
@@ -5862,8 +5859,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/DataTransferActionResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/data/transfers/{transfer_id}/multipart/parts:
@@ -5887,8 +5883,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/DataMultipartPartsResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/data/transfers/{transfer_id}/multipart/complete:
@@ -5913,8 +5908,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/DataTransferActionResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/data/transfers/{transfer_id}/multipart/abort:
@@ -5965,8 +5959,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/DataTransferActionResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/data/transfers/{transfer_id}/cancel:
@@ -5985,8 +5978,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/DataTransferActionResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/data/grants/{grant_id}:
@@ -6482,6 +6474,190 @@ components:
         expires_at:
           type: string
           format: date-time
+    DataSnapshotSummary:
+      type: object
+      additionalProperties: false
+      required: [id, workspace_id, version, manifest_digest, asset_count, file_count, total_bytes, created_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        workspace_id:
+          type: string
+        version:
+          type: string
+        message:
+          type: string
+        manifest_digest:
+          type: string
+        asset_count:
+          type: integer
+          format: int32
+        file_count:
+          type: integer
+          format: int32
+        total_bytes:
+          type: integer
+          format: int64
+        created_by:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        deleted_at:
+          type: string
+          format: date-time
+    DataTransferSummary:
+      type: object
+      additionalProperties: false
+      required: [id, workspace_id, direction, status, bytes_total, bytes_done, files_total, files_done, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        workspace_id:
+          type: string
+        snapshot_id:
+          type: string
+        version:
+          type: string
+        message:
+          type: string
+        direction:
+          type: string
+          enum: [upload, download, migrate, prewarm]
+        status:
+          type: string
+          enum: [planned, running, completed, failed, canceled]
+        source:
+          type: string
+        target:
+          type: string
+        part_size:
+          type: integer
+          format: int64
+        expires_at:
+          type: string
+          format: date-time
+        bytes_total:
+          type: integer
+          format: int64
+        bytes_done:
+          type: integer
+          format: int64
+        files_total:
+          type: integer
+          format: int32
+        files_done:
+          type: integer
+          format: int32
+        error_code:
+          type: string
+        error_message:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+    DataTransferListResponse:
+      type: object
+      additionalProperties: false
+      required: [transfers]
+      properties:
+        transfers:
+          type: array
+          items:
+            $ref: "#/components/schemas/DataTransferSummary"
+    DataUploadPlanResponse:
+      type: object
+      additionalProperties: false
+      required: [workspace, transfer, blobs]
+      properties:
+        workspace:
+          type: object
+          additionalProperties: true
+        transfer:
+          $ref: "#/components/schemas/DataTransferSummary"
+        blobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/DataTransferPlanBlob"
+    DataDownloadPlanResponse:
+      type: object
+      additionalProperties: false
+      required: [workspace, snapshot, transfer, manifest, blobs]
+      properties:
+        workspace:
+          type: object
+          additionalProperties: true
+        snapshot:
+          $ref: "#/components/schemas/DataSnapshotSummary"
+        transfer:
+          $ref: "#/components/schemas/DataTransferSummary"
+        manifest:
+          $ref: "#/components/schemas/DataManifest"
+        blobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/DataTransferPlanBlob"
+    DataTransferAuthorizationResponse:
+      type: object
+      additionalProperties: false
+      required: [workspace, transfer, blobs]
+      properties:
+        workspace:
+          type: object
+          additionalProperties: true
+        transfer:
+          $ref: "#/components/schemas/DataTransferSummary"
+        manifest:
+          $ref: "#/components/schemas/DataManifest"
+        blobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/DataTransferPlanBlob"
+    DataTransferActionResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        workspace:
+          type: object
+          additionalProperties: true
+        snapshot:
+          $ref: "#/components/schemas/DataSnapshotSummary"
+        transfer:
+          $ref: "#/components/schemas/DataTransferSummary"
+        checkpointed:
+          type: boolean
+        sha256:
+          type: string
+        completed:
+          type: boolean
+        aborted:
+          type: boolean
+    DataMultipartPartsResponse:
+      type: object
+      additionalProperties: false
+      required: [transfer, parts]
+      properties:
+        transfer:
+          $ref: "#/components/schemas/DataTransferSummary"
+        parts:
+          type: array
+          items:
+            $ref: "#/components/schemas/DataTransferPart"
     DataBackendCredentials:
       type: object
       additionalProperties: false

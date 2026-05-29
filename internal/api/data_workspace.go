@@ -25,8 +25,7 @@ type dataUploadPlanRequest struct {
 
 type dataUploadPlanResponse struct {
 	Workspace model.DataWorkspace    `json:"workspace"`
-	Transfer  model.DataTransfer     `json:"transfer"`
-	Manifest  model.DataManifest     `json:"manifest"`
+	Transfer  dataTransferSummary    `json:"transfer"`
 	Blobs     []dataTransferPlanBlob `json:"blobs"`
 }
 
@@ -37,10 +36,104 @@ type dataDownloadPlanRequest struct {
 
 type dataDownloadPlanResponse struct {
 	Workspace model.DataWorkspace    `json:"workspace"`
-	Snapshot  model.DataSnapshot     `json:"snapshot"`
-	Transfer  model.DataTransfer     `json:"transfer"`
+	Snapshot  dataSnapshotSummary    `json:"snapshot"`
+	Transfer  dataTransferSummary    `json:"transfer"`
 	Manifest  model.DataManifest     `json:"manifest"`
 	Blobs     []dataTransferPlanBlob `json:"blobs"`
+}
+
+type dataTransferSummary struct {
+	ID           string     `json:"id"`
+	TenantID     string     `json:"tenant_id,omitempty"`
+	WorkspaceID  string     `json:"workspace_id"`
+	SnapshotID   string     `json:"snapshot_id,omitempty"`
+	Version      string     `json:"version,omitempty"`
+	Message      string     `json:"message,omitempty"`
+	Direction    string     `json:"direction"`
+	Status       string     `json:"status"`
+	Source       string     `json:"source,omitempty"`
+	Target       string     `json:"target,omitempty"`
+	PartSize     int64      `json:"part_size,omitempty"`
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
+	BytesTotal   int64      `json:"bytes_total"`
+	BytesDone    int64      `json:"bytes_done"`
+	FilesTotal   int        `json:"files_total"`
+	FilesDone    int        `json:"files_done"`
+	ErrorCode    string     `json:"error_code,omitempty"`
+	ErrorMessage string     `json:"error_message,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	StartedAt    *time.Time `json:"started_at,omitempty"`
+	FinishedAt   *time.Time `json:"finished_at,omitempty"`
+}
+
+type dataSnapshotSummary struct {
+	ID             string     `json:"id"`
+	TenantID       string     `json:"tenant_id,omitempty"`
+	ProjectID      string     `json:"project_id,omitempty"`
+	WorkspaceID    string     `json:"workspace_id"`
+	Version        string     `json:"version"`
+	Message        string     `json:"message,omitempty"`
+	ManifestDigest string     `json:"manifest_digest"`
+	AssetCount     int        `json:"asset_count"`
+	FileCount      int        `json:"file_count"`
+	TotalBytes     int64      `json:"total_bytes"`
+	CreatedBy      string     `json:"created_by,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	DeletedAt      *time.Time `json:"deleted_at,omitempty"`
+}
+
+func summarizeDataTransfer(transfer model.DataTransfer) dataTransferSummary {
+	return dataTransferSummary{
+		ID:           transfer.ID,
+		TenantID:     transfer.TenantID,
+		WorkspaceID:  transfer.WorkspaceID,
+		SnapshotID:   transfer.SnapshotID,
+		Version:      transfer.Version,
+		Message:      transfer.Message,
+		Direction:    transfer.Direction,
+		Status:       transfer.Status,
+		Source:       transfer.Source,
+		Target:       transfer.Target,
+		PartSize:     transfer.PartSize,
+		ExpiresAt:    transfer.ExpiresAt,
+		BytesTotal:   transfer.BytesTotal,
+		BytesDone:    transfer.BytesDone,
+		FilesTotal:   transfer.FilesTotal,
+		FilesDone:    transfer.FilesDone,
+		ErrorCode:    transfer.ErrorCode,
+		ErrorMessage: transfer.ErrorMessage,
+		CreatedAt:    transfer.CreatedAt,
+		UpdatedAt:    transfer.UpdatedAt,
+		StartedAt:    transfer.StartedAt,
+		FinishedAt:   transfer.FinishedAt,
+	}
+}
+
+func summarizeDataTransfers(transfers []model.DataTransfer) []dataTransferSummary {
+	out := make([]dataTransferSummary, 0, len(transfers))
+	for _, transfer := range transfers {
+		out = append(out, summarizeDataTransfer(transfer))
+	}
+	return out
+}
+
+func summarizeDataSnapshot(snapshot model.DataSnapshot) dataSnapshotSummary {
+	return dataSnapshotSummary{
+		ID:             snapshot.ID,
+		TenantID:       snapshot.TenantID,
+		ProjectID:      snapshot.ProjectID,
+		WorkspaceID:    snapshot.WorkspaceID,
+		Version:        snapshot.Version,
+		Message:        snapshot.Message,
+		ManifestDigest: snapshot.ManifestDigest,
+		AssetCount:     snapshot.AssetCount,
+		FileCount:      snapshot.FileCount,
+		TotalBytes:     snapshot.TotalBytes,
+		CreatedBy:      snapshot.CreatedBy,
+		CreatedAt:      snapshot.CreatedAt,
+		DeletedAt:      snapshot.DeletedAt,
+	}
 }
 
 func (s *Server) handleListDataBackends(w http.ResponseWriter, r *http.Request) {
@@ -399,8 +492,7 @@ func (s *Server) handlePlanDataUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.WriteJSON(w, http.StatusOK, dataUploadPlanResponse{
 		Workspace: workspace,
-		Transfer:  transfer,
-		Manifest:  manifest,
+		Transfer:  summarizeDataTransfer(transfer),
 		Blobs:     blobs,
 	})
 }
@@ -462,8 +554,8 @@ func (s *Server) handlePlanDataDownload(w http.ResponseWriter, r *http.Request) 
 	}
 	httpx.WriteJSON(w, http.StatusOK, dataDownloadPlanResponse{
 		Workspace: workspace,
-		Snapshot:  snapshot,
-		Transfer:  transfer,
+		Snapshot:  summarizeDataSnapshot(snapshot),
+		Transfer:  summarizeDataTransfer(transfer),
 		Manifest:  manifest,
 		Blobs:     blobs,
 	})
@@ -515,7 +607,7 @@ func (s *Server) handleCreateDataPrewarm(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.appendAudit(principal, "data.prewarm.create", "data_workspace", workspace.ID, workspace.TenantID, map[string]string{"workspace": workspace.Name, "version": snapshot.Version, "runtime_id": strings.TrimSpace(req.RuntimeID)})
-	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"workspace": workspace, "snapshot": snapshot, "transfer": transfer})
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"workspace": workspace, "snapshot": summarizeDataSnapshot(snapshot), "transfer": summarizeDataTransfer(transfer)})
 }
 
 func (s *Server) handleCompleteDataTransfer(w http.ResponseWriter, r *http.Request) {
@@ -583,7 +675,7 @@ func (s *Server) handleCompleteDataTransfer(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	s.appendAudit(principal, "data.transfer.complete", "data_transfer", updated.ID, workspace.TenantID, map[string]string{"direction": updated.Direction, "status": updated.Status})
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"workspace": workspace, "transfer": updated, "snapshot": snapshot})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"workspace": workspace, "transfer": summarizeDataTransfer(updated), "snapshot": summarizeDataSnapshot(snapshot)})
 }
 
 func (s *Server) handleListDataTransfers(w http.ResponseWriter, r *http.Request) {
@@ -593,7 +685,7 @@ func (s *Server) handleListDataTransfers(w http.ResponseWriter, r *http.Request)
 		s.writeStoreError(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"transfers": transfers})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"transfers": summarizeDataTransfers(transfers)})
 }
 
 func (s *Server) handleGetDataTransfer(w http.ResponseWriter, r *http.Request) {
@@ -605,6 +697,15 @@ func (s *Server) handleGetDataTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 	if !principal.IsPlatformAdmin() && transfer.TenantID != principal.TenantID {
 		httpx.WriteError(w, http.StatusForbidden, "data transfer is not visible to this tenant")
+		return
+	}
+	summary, err := parseBoolQuery(r.URL.Query().Get("summary"))
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if summary {
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{"transfer": summarizeDataTransfer(transfer)})
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"transfer": transfer})
@@ -626,7 +727,7 @@ func (s *Server) handleCancelDataTransfer(w http.ResponseWriter, r *http.Request
 		s.writeStoreError(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"transfer": transfer})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"transfer": summarizeDataTransfer(transfer)})
 }
 
 func (s *Server) handleSweepDataWorkspaceGC(w http.ResponseWriter, r *http.Request) {
@@ -696,7 +797,7 @@ func (s *Server) handleCreateDataBackendMigration(w http.ResponseWriter, r *http
 		}
 	}
 	s.appendAudit(principal, "data.backend.migrate", "data_workspace", workspace.ID, workspace.TenantID, map[string]string{"workspace": workspace.Name, "target_backend_id": req.TargetBackendID, "dry_run": strconv.FormatBool(req.DryRun), "cutover": strconv.FormatBool(req.Cutover)})
-	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"workspace": updatedWorkspace, "transfer": transfer})
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"workspace": updatedWorkspace, "transfer": summarizeDataTransfer(transfer)})
 }
 
 func (s *Server) handleRollbackDataBackendMigration(w http.ResponseWriter, r *http.Request) {
@@ -715,7 +816,7 @@ func (s *Server) handleRollbackDataBackendMigration(w http.ResponseWriter, r *ht
 		return
 	}
 	s.appendAudit(principal, "data.backend.migration.rollback", "data_workspace", workspace.ID, workspace.TenantID, map[string]string{"workspace": workspace.Name, "migration_transfer_id": r.PathValue("transfer_id"), "target_backend_id": updatedWorkspace.StorageBackendID})
-	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"workspace": updatedWorkspace, "transfer": rollbackTransfer})
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"workspace": updatedWorkspace, "transfer": summarizeDataTransfer(rollbackTransfer)})
 }
 
 func (s *Server) handleRefreshDataTransferAuthorization(w http.ResponseWriter, r *http.Request) {
@@ -739,7 +840,11 @@ func (s *Server) handleRefreshDataTransferAuthorization(w http.ResponseWriter, r
 		s.writeStoreError(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"workspace": workspace, "transfer": transfer, "blobs": blobs})
+	resp := map[string]any{"workspace": workspace, "transfer": summarizeDataTransfer(transfer), "blobs": blobs}
+	if transfer.Direction == model.DataTransferDirectionDownload {
+		resp["manifest"] = transfer.Manifest
+	}
+	httpx.WriteJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleCheckpointDataTransfer(w http.ResponseWriter, r *http.Request) {
@@ -790,7 +895,7 @@ func (s *Server) handleCheckpointDataTransfer(w http.ResponseWriter, r *http.Req
 		s.writeStoreError(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"workspace": workspace, "transfer": updated, "checkpointed": true})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"workspace": workspace, "transfer": summarizeDataTransfer(updated), "checkpointed": true})
 }
 
 func (s *Server) handleListDataMultipartParts(w http.ResponseWriter, r *http.Request) {
@@ -823,7 +928,7 @@ func (s *Server) handleListDataMultipartParts(w http.ResponseWriter, r *http.Req
 		s.writeStoreError(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"transfer": transfer, "parts": parts})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"transfer": summarizeDataTransfer(transfer), "parts": parts})
 }
 
 func (s *Server) handleCompleteDataMultipartUpload(w http.ResponseWriter, r *http.Request) {
@@ -880,7 +985,7 @@ func (s *Server) handleCompleteDataMultipartUpload(w http.ResponseWriter, r *htt
 		s.writeStoreError(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"transfer": transfer, "sha256": req.SHA256, "completed": true})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"transfer": summarizeDataTransfer(transfer), "sha256": req.SHA256, "completed": true})
 }
 
 func (s *Server) handleAbortDataMultipartUpload(w http.ResponseWriter, r *http.Request) {
@@ -925,7 +1030,7 @@ func (s *Server) handleAbortDataMultipartUpload(w http.ResponseWriter, r *http.R
 		s.writeStoreError(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"transfer": transfer, "sha256": req.SHA256, "aborted": true})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"transfer": summarizeDataTransfer(transfer), "sha256": req.SHA256, "aborted": true})
 }
 
 func (s *Server) handleCreateDataGrant(w http.ResponseWriter, r *http.Request) {

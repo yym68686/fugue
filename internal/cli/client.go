@@ -1231,6 +1231,18 @@ func (c *Client) doJSON(method, relativePath string, requestBody any, responseBo
 	return nil
 }
 
+func (c *Client) doJSONWithTimeout(method, relativePath string, requestBody any, responseBody any, timeout time.Duration) error {
+	if timeout <= 0 || c == nil || c.httpClient == nil {
+		return c.doJSON(method, relativePath, requestBody, responseBody)
+	}
+	previous := c.httpClient.Timeout
+	c.httpClient.Timeout = timeout
+	defer func() {
+		c.httpClient.Timeout = previous
+	}()
+	return c.doJSON(method, relativePath, requestBody, responseBody)
+}
+
 func (c *Client) doJSONRaw(method, relativePath string, requestBody any) ([]byte, error) {
 	var body io.Reader
 	if requestBody != nil {
