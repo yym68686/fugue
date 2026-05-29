@@ -162,7 +162,8 @@ jobs:
           AFTER_SHA: ${{ github.sha }}
         run: |
           changed_files=""
-          if [[ "${EVENT_NAME}" == "push" && -n "${BEFORE_SHA}" && "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]]; then
+          if [[ "${EVENT_NAME}" == "push" && -n "${BEFORE_SHA}" && "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]] &&
+            git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
             changed_files="$(git diff --name-only "${BEFORE_SHA}" "${AFTER_SHA}")"
           elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
             changed_files="$(git diff --name-only HEAD^ HEAD)"
@@ -183,7 +184,13 @@ jobs:
             echo "skip stateful-file guard on initial push"
             exit 0
           fi
-          changed_files="$(git diff --name-only "${BEFORE_SHA}" "${AFTER_SHA}")"
+          if git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            changed_files="$(git diff --name-only "${BEFORE_SHA}" "${AFTER_SHA}")"
+          elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            changed_files="$(git diff --name-only HEAD^ HEAD)"
+          else
+            changed_files=""
+          fi
           forbidden_pattern='^deploy/helm/fugue/templates/(postgres-(deployment|service)|registry-.*|headscale-.*|control-plane-postgres-.*|shared-workspace-.*|snapshot-controller)\.yaml$'
           if printf '%s\n' "${changed_files}" | grep -E "${forbidden_pattern}" >/dev/null; then
             echo "stateful component manifests changed in this push:"
