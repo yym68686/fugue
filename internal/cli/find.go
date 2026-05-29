@@ -83,13 +83,13 @@ func writeFindResponse(w io.Writer, response model.SearchResponse) error {
 
 func writeFindResultTable(w io.Writer, results []model.SearchResult) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "KIND\tNAME\tTENANT\tPROJECT\tAPP\tSTATUS\tURL\tMATCH"); err != nil {
+	if _, err := fmt.Fprintln(tw, "KIND\tNAME\tTENANT\tPROJECT\tAPP\tSTATUS\tURL\tINTERNAL_URL\tMATCH"); err != nil {
 		return err
 	}
 	for _, result := range results {
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			result.Kind,
 			firstNonEmptyTrimmed(result.Name, result.ID),
 			firstNonEmptyTrimmed(result.TenantName, result.TenantID, "-"),
@@ -97,6 +97,7 @@ func writeFindResultTable(w io.Writer, results []model.SearchResult) error {
 			firstNonEmptyTrimmed(result.AppName, result.AppID, "-"),
 			firstNonEmptyTrimmed(result.Status, "-"),
 			firstNonEmptyTrimmed(result.PublicURL, "-"),
+			firstNonEmptyTrimmed(result.InternalURL, "-"),
 			strings.Join(result.MatchedFields, ","),
 		); err != nil {
 			return err

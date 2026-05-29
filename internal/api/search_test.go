@@ -40,8 +40,12 @@ func TestSearchResourcesFindsProjectAppAndDomain(t *testing.T) {
 	if !searchResponseHas(response, "project", "uni-api-web") {
 		t.Fatalf("expected project match in %+v", response.Results)
 	}
-	if !searchResponseHas(response, "app", app.ID) {
+	appResult, ok := searchResponseFind(response, "app", app.ID)
+	if !ok {
 		t.Fatalf("expected app match in %+v", response.Results)
+	}
+	if want := appInternalURL(app); appResult.InternalURL != want {
+		t.Fatalf("expected app internal_url %q, got %q", want, appResult.InternalURL)
 	}
 	if !searchResponseHas(response, "domain", domain.Hostname) {
 		t.Fatalf("expected domain match in %+v", response.Results)
@@ -133,10 +137,15 @@ func setupSearchTestServer(t *testing.T) (*store.Store, *Server, string, model.A
 }
 
 func searchResponseHas(response model.SearchResponse, kind, idOrName string) bool {
+	_, ok := searchResponseFind(response, kind, idOrName)
+	return ok
+}
+
+func searchResponseFind(response model.SearchResponse, kind, idOrName string) (model.SearchResult, bool) {
 	for _, result := range response.Results {
 		if result.Kind == kind && (result.ID == idOrName || result.Name == idOrName) {
-			return true
+			return result, true
 		}
 	}
-	return false
+	return model.SearchResult{}, false
 }

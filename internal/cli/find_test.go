@@ -43,6 +43,7 @@ func TestRunFindRendersResultsAndFollowupCommands(t *testing.T) {
 					AppName:       "uni-api-web-api",
 					Status:        "ready",
 					PublicURL:     "https://uni-api.example.com",
+					InternalURL:   "http://app-123.tenant-123.svc.cluster.local:8000",
 					MatchedFields: []string{"name"},
 					Score:         100,
 				},
@@ -64,7 +65,7 @@ func TestRunFindRendersResultsAndFollowupCommands(t *testing.T) {
 		t.Fatalf("run find: %v", err)
 	}
 	out := stdout.String()
-	for _, want := range []string{"uni-api-web-api", "https://uni-api.example.com", "next_commands", "fugue --tenant 'Ming Workspace' --project 'uni-api-web' app overview 'uni-api-web-api'"} {
+	for _, want := range []string{"uni-api-web-api", "https://uni-api.example.com", "http://app-123.tenant-123.svc.cluster.local:8000", "next_commands", "fugue --tenant 'Ming Workspace' --project 'uni-api-web' app overview 'uni-api-web-api'"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}

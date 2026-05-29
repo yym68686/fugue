@@ -11,6 +11,7 @@ type SearchResult struct {
 	AppID         string            `json:"app_id,omitempty"`
 	AppName       string            `json:"app_name,omitempty"`
 	PublicURL     string            `json:"public_url,omitempty"`
+	InternalURL   string            `json:"internal_url,omitempty"`
 	Status        string            `json:"status,omitempty"`
 	Type          string            `json:"type,omitempty"`
 	RuntimeID     string            `json:"runtime_id,omitempty"`

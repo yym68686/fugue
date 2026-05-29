@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -158,6 +159,7 @@ func (s *Server) searchResources(principal model.Principal, query string, types 
 					AppID:         app.ID,
 					AppName:       app.Name,
 					PublicURL:     publicURL,
+					InternalURL:   appInternalURL(app),
 					Status:        app.Status.Phase,
 					RuntimeID:     firstNonEmpty(app.Spec.RuntimeID, app.Status.CurrentRuntimeID),
 					Summary:       app.Description,
@@ -431,6 +433,7 @@ func appSearchFields(app model.App, projectByID map[string]model.Project, tenant
 		fields["public_url"] = app.Route.PublicURL
 		fields["base_domain"] = app.Route.BaseDomain
 	}
+	fields["internal_url"] = appInternalURL(app)
 	for index, host := range domainHosts {
 		fields["domain_"+strconv.Itoa(index)] = host
 	}
@@ -444,6 +447,14 @@ func appSearchFields(app model.App, projectByID map[string]model.Project, tenant
 		fields["build_source_"+strconv.Itoa(index)] = value
 	}
 	return fields
+}
+
+func appInternalURL(app model.App) string {
+	service := buildAppInternalService(app)
+	if service == nil || strings.TrimSpace(service.Host) == "" || service.Port <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("http://%s:%d", strings.TrimSpace(service.Host), service.Port)
 }
 
 func decorateSearchResultContext(result model.SearchResult, tenantByID map[string]model.Tenant, projectByID map[string]model.Project, appByID map[string]model.App) model.SearchResult {

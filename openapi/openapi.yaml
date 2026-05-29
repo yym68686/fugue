@@ -10868,6 +10868,8 @@ components:
           type: string
         public_url:
           type: string
+        internal_url:
+          type: string
         status:
           type: string
         type:
