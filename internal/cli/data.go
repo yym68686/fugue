@@ -1528,14 +1528,12 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 			} else if len(refresh.Transfer.Manifest.Entries) > 0 {
 				manifestDigest = digestDataManifest(refresh.Transfer.Manifest)
 			}
-			if err := saveDataTransferState(".", dataTransferState{
-				TransferID:     refresh.Transfer.ID,
-				Direction:      model.DataTransferDirectionUpload,
-				WorkspaceID:    refresh.Transfer.WorkspaceID,
-				Version:        refresh.Transfer.Version,
-				ManifestDigest: manifestDigest,
-				Blobs:          refresh.Blobs,
-			}); err != nil {
+			loadedState, loadedOK, err := loadDataTransferState(".", refresh.Transfer.ID)
+			if err != nil {
+				return err
+			}
+			state := uploadResumeStateFromRefresh(refresh, manifestDigest, loadedState, loadedOK)
+			if err := saveDataTransferState(".", state); err != nil {
 				return err
 			}
 			if err := c.uploadDataPlanBlobs(client, refresh.Transfer.WorkspaceID, refresh.Transfer.ID, manifestDigest, refresh.Blobs, pathsByDigest, true, false, resumeConcurrency, manifest.TotalBytes, refresh.BlobsOffset, refresh.BlobsLimit, refresh.BlobsNextOffset); err != nil {
@@ -3822,6 +3820,28 @@ func mergeDataPlanBlobsWithState(blobs []dataBlobPlan, state dataTransferState) 
 	return out
 }
 
+func uploadResumeStateFromRefresh(refresh dataTransferAuthorizationResponse, manifestDigest string, loaded dataTransferState, loadedOK bool) dataTransferState {
+	state := dataTransferState{
+		TransferID:     refresh.Transfer.ID,
+		Direction:      model.DataTransferDirectionUpload,
+		WorkspaceID:    refresh.Transfer.WorkspaceID,
+		Version:        refresh.Transfer.Version,
+		ManifestDigest: manifestDigest,
+	}
+	if loadedOK {
+		state = loaded
+	}
+	state.TransferID = refresh.Transfer.ID
+	state.Direction = model.DataTransferDirectionUpload
+	state.WorkspaceID = refresh.Transfer.WorkspaceID
+	state.Version = refresh.Transfer.Version
+	state.ManifestDigest = manifestDigest
+	for _, blob := range refresh.Blobs {
+		state = upsertDataTransferStateBlob(state, mergeDataBlobWithState(blob, state))
+	}
+	return state
+}
+
 func mergeDataBlobWithState(blob dataBlobPlan, state dataTransferState) dataBlobPlan {
 	for _, saved := range state.Blobs {
 		if !strings.EqualFold(saved.SHA256, blob.SHA256) {
@@ -4186,13 +4206,12 @@ func isTransientDataControlPlaneError(err error) bool {
 	if isRetryableHTTPClientError(err) {
 		return true
 	}
-	var apiErr *apiServerError
-	if errors.As(err, &apiErr) {
-		if apiErr.IsRetryable() {
+	if statusCode, retryable, ok := dataControlPlaneErrorStatus(err); ok {
+		if retryable {
 			return true
 		}
-		switch apiErr.StatusCode {
-		case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		switch statusCode {
+		case http.StatusUnauthorized, http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 			return true
 		default:
 			return false
@@ -4203,6 +4222,31 @@ func isTransientDataControlPlaneError(err error) bool {
 		strings.Contains(lower, "connection reset") ||
 		strings.Contains(lower, "connection refused") ||
 		strings.Contains(lower, "server closed idle connection")
+}
+
+func dataControlPlaneErrorStatus(err error) (int, bool, bool) {
+	var apiErr *apiServerError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode, apiErr.IsRetryable(), true
+	}
+	lower := strings.ToLower(err.Error())
+	idx := strings.Index(lower, "status=")
+	if idx < 0 {
+		return 0, false, false
+	}
+	start := idx + len("status=")
+	end := start
+	for end < len(lower) && lower[end] >= '0' && lower[end] <= '9' {
+		end++
+	}
+	if end == start {
+		return 0, false, false
+	}
+	statusCode, parseErr := strconv.Atoi(lower[start:end])
+	if parseErr != nil {
+		return 0, false, false
+	}
+	return statusCode, false, true
 }
 
 func dataControlPlaneRetryDelay(attempt int) time.Duration {

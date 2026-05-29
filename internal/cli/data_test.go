@@ -832,6 +832,60 @@ func TestRefreshDataTransferAuthorizationRetriesTransientStatus(t *testing.T) {
 	}
 }
 
+func TestUploadResumeStatePreservesCompletedBlobs(t *testing.T) {
+	completedDigest := strings.Repeat("a", 64)
+	otherDigest := strings.Repeat("b", 64)
+	newDigest := strings.Repeat("c", 64)
+	loaded := dataTransferState{
+		TransferID:     "transfer-1",
+		Direction:      model.DataTransferDirectionUpload,
+		WorkspaceID:    "workspace-1",
+		Version:        "old-version",
+		ManifestDigest: "old-manifest",
+		Blobs: []dataBlobPlan{
+			{SHA256: completedDigest, Exists: true, UploadURL: "https://old.example/upload"},
+			{SHA256: otherDigest, Exists: true},
+		},
+	}
+	refresh := dataTransferAuthorizationResponse{
+		Transfer: model.DataTransfer{ID: "transfer-1", WorkspaceID: "workspace-1", Version: "new-version"},
+		Blobs: []dataBlobPlan{
+			{SHA256: completedDigest, UploadURL: "https://new.example/upload"},
+			{SHA256: newDigest, UploadURL: "https://new.example/new"},
+		},
+	}
+
+	state := uploadResumeStateFromRefresh(refresh, "new-manifest", loaded, true)
+
+	if state.Version != "new-version" || state.ManifestDigest != "new-manifest" {
+		t.Fatalf("resume metadata was not refreshed: %+v", state)
+	}
+	completed, ok := dataPlanBlobByDigest(state.Blobs, completedDigest)
+	if !ok || !completed.Exists {
+		t.Fatalf("expected completed blob to remain completed, got %+v ok=%t", completed, ok)
+	}
+	if completed.UploadURL != "" {
+		t.Fatalf("expected stored completed blob to be sanitized, got upload url %q", completed.UploadURL)
+	}
+	if _, ok := dataPlanBlobByDigest(state.Blobs, otherDigest); !ok {
+		t.Fatalf("expected completed blob from another page to be preserved")
+	}
+	if fresh, ok := dataPlanBlobByDigest(state.Blobs, newDigest); !ok || fresh.Exists {
+		t.Fatalf("expected new refreshed blob to be tracked as pending, got %+v ok=%t", fresh, ok)
+	}
+}
+
+func TestDataControlPlanePlainStatusErrorsAreTransient(t *testing.T) {
+	for _, err := range []error{
+		fmt.Errorf("request failed: status=401 body=unauthorized"),
+		fmt.Errorf("request failed: status=500 body=app lookup failed"),
+	} {
+		if !isTransientDataControlPlaneError(err) {
+			t.Fatalf("expected %q to be transient", err.Error())
+		}
+	}
+}
+
 func testCLIDigest(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
