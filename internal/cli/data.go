@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -4624,6 +4625,20 @@ func (e dataObjectTransferError) Error() string {
 }
 
 func isTransientDataObjectError(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+		return true
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		if urlErr.Timeout() || strings.Contains(strings.ToLower(urlErr.Error()), "connection reset") || strings.Contains(strings.ToLower(urlErr.Error()), "connection refused") {
+			return true
+		}
+	}
+	lower := strings.ToLower(err.Error())
+	if strings.Contains(lower, "connection reset") || strings.Contains(lower, "connection refused") || strings.Contains(lower, "unexpected eof") {
+		return true
+	}
 	var objectErr dataObjectTransferError
 	if !errors.As(err, &objectErr) {
 		return false
