@@ -440,8 +440,8 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 	templateMetadata := map[string]any{
 		"labels": labels,
 	}
-	rolloutAnnotations := appRolloutAnnotations(app)
-	if annotations := mergeStringMaps(rolloutAnnotations, buildAppTemplateAnnotations(app.Spec)); len(annotations) > 0 {
+	templateRolloutAnnotations := appRolloutAnnotations(app)
+	if annotations := mergeStringMaps(templateRolloutAnnotations, buildAppTemplateAnnotations(app.Spec)); len(annotations) > 0 {
 		templateMetadata["annotations"] = annotations
 	}
 	deploymentMetadata := map[string]any{
@@ -449,7 +449,7 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		"namespace": namespace,
 		"labels":    labels,
 	}
-	if len(rolloutAnnotations) > 0 {
+	if rolloutAnnotations := deploymentRolloutAnnotations(app); len(rolloutAnnotations) > 0 {
 		deploymentMetadata["annotations"] = rolloutAnnotations
 	}
 
@@ -1224,15 +1224,41 @@ func legacyComposeAppNameAliasLabels(app model.App) map[string]string {
 }
 
 func deploymentStrategy(app model.App) map[string]any {
+	if appUsesOnlineRestartStrategy(app) {
+		return rollingUpdateDeploymentStrategy()
+	}
 	if normalizeRuntimeAppWorkspaceSpec(app) != nil || normalizeRuntimeAppPersistentStorageSpec(app) != nil {
 		return map[string]any{"type": "Recreate"}
 	}
+	return rollingUpdateDeploymentStrategy()
+}
+
+func rollingUpdateDeploymentStrategy() map[string]any {
 	return map[string]any{
 		"type": "RollingUpdate",
 		"rollingUpdate": map[string]any{
 			"maxUnavailable": 0,
 			"maxSurge":       1,
 		},
+	}
+}
+
+func appUsesOnlineRestartStrategy(app model.App) bool {
+	return strings.TrimSpace(app.Spec.RolloutIntent) == model.AppRolloutIntentOnlineRestart &&
+		model.AppHasClusterService(app.Spec) &&
+		app.Spec.Replicas > 0 &&
+		(normalizeRuntimeAppWorkspaceSpec(app) != nil || normalizeRuntimeAppPersistentStorageSpec(app) != nil)
+}
+
+func deploymentRolloutAnnotations(app model.App) map[string]string {
+	if !appUsesOnlineRestartStrategy(app) {
+		return appRolloutAnnotations(app)
+	}
+	return map[string]string{
+		"fugue.io/rollout-mode":    "rolling-restart",
+		"fugue.io/downtime-class":  "online-required",
+		"fugue.io/rollout-reason":  "restart-only",
+		"fugue.io/rollout-surface": "tenant-app",
 	}
 }
 

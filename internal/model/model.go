@@ -173,6 +173,7 @@ const (
 	AppPersistentStorageModeSharedProjectRWX = "shared_project_rwx"
 	AppPersistentStorageMountKindDirectory   = "directory"
 	AppPersistentStorageMountKindFile        = "file"
+	AppRolloutIntentOnlineRestart            = "online_restart"
 	AppVolumeReplicationModeDisabled         = "disabled"
 	AppVolumeReplicationModeManual           = "manual"
 	AppVolumeReplicationModeScheduled        = "scheduled"
@@ -1507,6 +1508,7 @@ type AppSpec struct {
 	Failover          *AppFailoverSpec               `json:"failover,omitempty"`
 	ImageMirrorLimit  int                            `json:"image_mirror_limit,omitempty"`
 	RestartToken      string                         `json:"restart_token,omitempty"`
+	RolloutIntent     string                         `json:"-"`
 }
 
 type AppNetworkPolicySpec struct {
