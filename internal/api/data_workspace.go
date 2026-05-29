@@ -575,10 +575,22 @@ func (s *Server) handlePlanDataUpload(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	blobs, responseBlobs, err := s.refreshDataPlanBlobs(r.Context(), r, workspace, transfer, true, page)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	expiresAt = time.Now().UTC().Add(dataPresignTTL())
+	transfer.PlanBlobs = blobs
+	transfer.ExpiresAt = &expiresAt
+	if transfer, err = s.store.UpdateDataTransfer(transfer); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, dataUploadPlanResponse{
 		Workspace:       workspace,
 		Transfer:        summarizeDataTransfer(transfer),
-		Blobs:           sliceDataTransferBlobs(blobs, page),
+		Blobs:           responseBlobs,
 		BlobsTotal:      page.Total,
 		BlobsOffset:     page.Offset,
 		BlobsLimit:      page.Limit,
@@ -1321,20 +1333,7 @@ func (s *Server) dataPlanBlobs(ctx context.Context, r *http.Request, workspace m
 					blob.UploadMode = model.DataBlobUploadModeMultipart
 					blob.UploadID = uploadID
 					blob.PartSize = dataMultipartPartSize
-					blob.Parts, err = s.presignDataUploadParts(ctx, objectBackend, entry.ObjectKey, uploadID, entry.Size, dataMultipartPartSize)
-					if err != nil {
-						return nil, err
-					}
-					if len(blob.Parts) > 0 {
-						blob.ExpiresAt = blob.Parts[0].ExpiresAt
-					}
-				} else {
-					uploadURL, expiresAt, err := objectBackend.presignPut(ctx, entry.ObjectKey, dataPresignTTL())
-					if err != nil {
-						return nil, err
-					}
-					blob.UploadURL = uploadURL
-					blob.ExpiresAt = expiresAt
+					blob.Parts = planDataUploadParts(entry.Size, dataMultipartPartSize)
 				}
 			}
 			if !upload {
@@ -1737,6 +1736,22 @@ func (s *Server) presignDataUploadParts(ctx context.Context, objectBackend *data
 	if partSize <= 0 {
 		partSize = dataMultipartPartSize
 	}
+	parts := planDataUploadParts(size, partSize)
+	for idx := range parts {
+		uploadURL, expiresAt, err := objectBackend.presignUploadPart(ctx, objectKey, uploadID, parts[idx].PartNumber, dataPresignTTL())
+		if err != nil {
+			return nil, err
+		}
+		parts[idx].UploadURL = uploadURL
+		parts[idx].ExpiresAt = expiresAt
+	}
+	return parts, nil
+}
+
+func planDataUploadParts(size, partSize int64) []model.DataTransferPart {
+	if partSize <= 0 {
+		partSize = dataMultipartPartSize
+	}
 	var parts []model.DataTransferPart
 	var offset int64
 	var number int32 = 1
@@ -1745,15 +1760,11 @@ func (s *Server) presignDataUploadParts(ctx context.Context, objectBackend *data
 		if remaining := size - offset; remaining < partBytes {
 			partBytes = remaining
 		}
-		uploadURL, expiresAt, err := objectBackend.presignUploadPart(ctx, objectKey, uploadID, number, dataPresignTTL())
-		if err != nil {
-			return nil, err
-		}
-		parts = append(parts, model.DataTransferPart{PartNumber: number, Offset: offset, Size: partBytes, UploadURL: uploadURL, ExpiresAt: expiresAt})
+		parts = append(parts, model.DataTransferPart{PartNumber: number, Offset: offset, Size: partBytes})
 		offset += partBytes
 		number++
 	}
-	return parts, nil
+	return parts
 }
 
 func (s *Server) refreshDataPlanBlobs(ctx context.Context, r *http.Request, workspace model.DataWorkspace, transfer model.DataTransfer, upload bool, page dataTransferBlobPage) ([]dataTransferPlanBlob, []dataTransferPlanBlob, error) {
@@ -1808,7 +1819,7 @@ func (s *Server) refreshDataPlanBlobs(ctx context.Context, r *http.Request, work
 				}
 				continue
 			}
-			if blobs[idx].UploadURL != "" {
+			if !blobs[idx].Exists && blobs[idx].UploadMode != model.DataBlobUploadModeMultipart {
 				uploadURL, expiresAt, err := objectBackend.presignPut(ctx, blobs[idx].ObjectKey, dataPresignTTL())
 				if err != nil {
 					return nil, nil, err

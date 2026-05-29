@@ -118,6 +118,9 @@ func TestDataWorkspaceS3MultipartPlanRefreshAndComplete(t *testing.T) {
 	if headCalls != 0 {
 		t.Fatalf("upload plan should not issue object HEAD requests, got %d", headCalls)
 	}
+	if listPartsCalls != 1 || !plan.Blobs[0].Parts[0].Completed || plan.Blobs[0].Parts[0].ETag != "etag-1" {
+		t.Fatalf("unexpected initial refreshed parts calls=%d blobs=%+v", listPartsCalls, plan.Blobs)
+	}
 
 	refreshReq, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/data/transfers/"+plan.Transfer.ID+"/refresh", nil)
 	refreshReq.Header.Set("Authorization", "Bearer "+secret)
@@ -144,7 +147,7 @@ func TestDataWorkspaceS3MultipartPlanRefreshAndComplete(t *testing.T) {
 	if err := json.Unmarshal(refreshRaw, &refresh); err != nil {
 		t.Fatalf("decode refresh: %v", err)
 	}
-	if listPartsCalls != 1 || !refresh.Blobs[0].Parts[0].Completed || refresh.Blobs[0].Parts[0].ETag != "etag-1" {
+	if listPartsCalls != 2 || !refresh.Blobs[0].Parts[0].Completed || refresh.Blobs[0].Parts[0].ETag != "etag-1" {
 		t.Fatalf("unexpected refreshed parts calls=%d blobs=%+v", listPartsCalls, refresh.Blobs)
 	}
 
@@ -357,7 +360,7 @@ func TestDataWorkspaceS3UploadPlanPagesBlobs(t *testing.T) {
 }
 
 func TestDataWorkspaceS3MultipartAbort(t *testing.T) {
-	var headCalls, createMultipartCalls, abortCalls int
+	var headCalls, createMultipartCalls, listPartsCalls, abortCalls int
 	s3Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodHead:
@@ -367,6 +370,10 @@ func TestDataWorkspaceS3MultipartAbort(t *testing.T) {
 			createMultipartCalls++
 			w.Header().Set("Content-Type", "application/xml")
 			_, _ = w.Write([]byte(`<CreateMultipartUploadResult><Bucket>bucket</Bucket><Key>key</Key><UploadId>upload-1</UploadId></CreateMultipartUploadResult>`))
+		case r.Method == http.MethodGet && r.URL.Query().Get("uploadId") == "upload-1":
+			listPartsCalls++
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = w.Write([]byte(`<ListPartsResult><Bucket>bucket</Bucket><Key>key</Key><UploadId>upload-1</UploadId><IsTruncated>false</IsTruncated></ListPartsResult>`))
 		case r.Method == http.MethodDelete && r.URL.Query().Get("uploadId") == "upload-1":
 			abortCalls++
 			w.WriteHeader(http.StatusNoContent)
@@ -444,6 +451,9 @@ func TestDataWorkspaceS3MultipartAbort(t *testing.T) {
 	}
 	if headCalls != 0 {
 		t.Fatalf("upload plan should not issue object HEAD requests, got %d", headCalls)
+	}
+	if listPartsCalls != 1 {
+		t.Fatalf("expected initial list parts call, got %d", listPartsCalls)
 	}
 	abortBody, _ := json.Marshal(map[string]any{"sha256": manifest.Entries[0].SHA256, "upload_id": "upload-1"})
 	abortReq, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/data/transfers/"+plan.Transfer.ID+"/multipart/abort", bytes.NewReader(abortBody))
