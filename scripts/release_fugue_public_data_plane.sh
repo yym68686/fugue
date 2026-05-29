@@ -106,13 +106,40 @@ for base, slots in sorted(bases.items()):
 '
 }
 
-bluegreen_worker_bases_array() {
+bluegreen_all_bases() {
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" get ds -o json | python3 -c '
+import json
+import re
+import sys
+
+doc = json.load(sys.stdin)
+bases = set()
+for item in doc.get("items", []):
+    meta = item.get("metadata", {})
+    labels = meta.get("labels") or {}
+    if labels.get("fugue.io/rollout-subsystem") != "public-data-plane":
+        continue
+    mode = labels.get("fugue.io/rollout-mode")
+    name = meta.get("name", "")
+    if mode == "node-local-blue-green-front" and name.endswith("-front"):
+        bases.add(name[:-len("-front")])
+        continue
+    if mode == "node-local-blue-green-worker":
+        match = re.match(r"^(.*)-worker-([ab])$", name)
+        if match:
+            bases.add(match.group(1))
+for base in sorted(bases):
+    print(base)
+'
+}
+
+bluegreen_all_bases_array() {
   local base
   while IFS= read -r base; do
     base="$(trim_field "${base}")"
     [[ -n "${base}" ]] || continue
     printf '%s\n' "${base}"
-  done < <(bluegreen_worker_bases)
+  done < <(bluegreen_all_bases)
 }
 
 bluegreen_front_daemonset_name() {
@@ -232,6 +259,16 @@ for row in sorted(rows):
     print(row)
 ' "${daemonset_name}"
   done
+}
+
+daemonset_pod_uids() {
+  local daemonset_name="$1"
+  capture_daemonset_pods "${daemonset_name}" | awk -F'|' '{print $3}'
+}
+
+daemonset_ready_counts() {
+  local daemonset_name="$1"
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o jsonpath='{.status.desiredNumberScheduled}{"\t"}{.status.numberReady}{"\t"}{.status.numberUnavailable}' 2>/dev/null || true
 }
 
 wait_daemonset_observed() {
@@ -425,6 +462,67 @@ delete_daemonset_pods_no_wait() {
   kubectl_cmd -n "${FUGUE_NAMESPACE}" delete pod "${pods[@]}" --wait=false >/dev/null
 }
 
+wait_daemonset_replaced_and_ready() {
+  local daemonset_name="$1"
+  local before_uids="$2"
+  local timeout="${FUGUE_PUBLIC_DATA_PLANE_ROLLOUT_TIMEOUT:-180s}"
+  local timeout_seconds
+  local started_at
+  local current_uids
+  local desired
+  local ready
+  local unavailable
+  local uid
+  local old_uid_present
+
+  log "waiting for ${daemonset_name} pods to be replaced and ready"
+  if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
+    return 0
+  fi
+  timeout_seconds="$(duration_to_seconds "${timeout}")"
+  started_at="$(date +%s)"
+  while true; do
+    current_uids="$(daemonset_pod_uids "${daemonset_name}" || true)"
+    old_uid_present="false"
+    while IFS= read -r uid; do
+      uid="$(trim_field "${uid}")"
+      [[ -n "${uid}" ]] || continue
+      if printf '%s\n' "${current_uids}" | grep -Fxq "${uid}"; then
+        old_uid_present="true"
+        break
+      fi
+    done <<<"${before_uids}"
+    IFS=$'\t' read -r desired ready unavailable <<<"$(daemonset_ready_counts "${daemonset_name}")"
+    desired="${desired:-0}"
+    ready="${ready:-0}"
+    unavailable="${unavailable:-0}"
+    if [[ "${old_uid_present}" == "false" && "${desired}" != "0" && "${desired}" == "${ready}" && "${unavailable}" == "0" ]]; then
+      log "daemonset ${daemonset_name} replacement ready: desired=${desired} ready=${ready}"
+      return 0
+    fi
+    if (( $(date +%s) - started_at >= timeout_seconds )); then
+      fail "daemonset ${daemonset_name} replacement not ready: old_uid_present=${old_uid_present} desired=${desired} ready=${ready} unavailable=${unavailable}"
+    fi
+    sleep 2
+  done
+}
+
+require_bluegreen_base_complete() {
+  local base="$1"
+  local front_ds
+  local worker_a
+  local worker_b
+
+  front_ds="$(bluegreen_front_daemonset_name "${base}")"
+  worker_a="$(bluegreen_worker_daemonset_name "${base}" a)"
+  worker_b="$(bluegreen_worker_daemonset_name "${base}" b)"
+  for daemonset_name in "${front_ds}" "${worker_a}" "${worker_b}"; do
+    if ! daemonset_exists "${daemonset_name}"; then
+      fail "blue/green base ${base} is incomplete; missing daemonset ${daemonset_name}"
+    fi
+  done
+}
+
 wait_bluegreen_base_ready() {
   local base="$1"
   wait_daemonset_ready "$(bluegreen_front_daemonset_name "${base}")"
@@ -444,6 +542,7 @@ migrate_legacy_direct_to_bluegreen_front() {
   fi
 
   for base in "${bases[@]}"; do
+    require_bluegreen_base_complete "${base}"
     wait_bluegreen_base_ready "${base}"
   done
 
@@ -458,11 +557,12 @@ migrate_legacy_direct_to_bluegreen_front() {
     fi
     migrated_any="true"
     log "migrating public hostPorts from legacy ${legacy_ds} to front ${front_ds}"
+    before_uids="$(daemonset_pod_uids "${front_ds}")"
     delete_daemonset_pods_no_wait "${front_ds}" "front"
     if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" != "true" ]]; then
       kubectl_cmd -n "${FUGUE_NAMESPACE}" delete "ds/${legacy_ds}" --wait=false >/dev/null
     fi
-    wait_daemonset_ready "${front_ds}"
+    wait_daemonset_replaced_and_ready "${front_ds}" "${before_uids}"
   done
 
   helm_bluegreen_upgrade "finalize-blue-green-without-legacy-direct" "false" "true" "false"
@@ -481,13 +581,13 @@ enable_bluegreen_chart_mode() {
 
   while IFS= read -r base; do
     bases+=("${base}")
-  done < <(bluegreen_worker_bases_array)
+  done < <(bluegreen_all_bases_array)
 
   if (( ${#bases[@]} == 0 )); then
     helm_bluegreen_upgrade "prewarm-front-and-workers" "true" "false" "true"
     while IFS= read -r base; do
       bases+=("${base}")
-    done < <(bluegreen_worker_bases_array)
+    done < <(bluegreen_all_bases_array)
     if (( ${#bases[@]} == 0 )); then
       if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
         log "dry-run: blue/green DaemonSets are not present yet because the isolated Helm enable step was not applied"
@@ -495,7 +595,17 @@ enable_bluegreen_chart_mode() {
       fi
       fail "no edge blue/green worker DaemonSets found after enabling edge.blueGreen.enabled=true"
     fi
+  elif [[ "${FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN}" == "true" ]]; then
+    helm_bluegreen_upgrade "reconcile-front-and-workers" "false" "true" "false"
+    bases=()
+    while IFS= read -r base; do
+      bases+=("${base}")
+    done < <(bluegreen_all_bases_array)
   fi
+
+  for base in "${bases[@]}"; do
+    require_bluegreen_base_complete "${base}"
+  done
 
   for base in "${bases[@]}"; do
     if daemonset_exists "${base}"; then
