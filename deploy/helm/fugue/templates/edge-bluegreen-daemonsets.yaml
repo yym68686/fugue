@@ -50,7 +50,7 @@
 {{- $slotBHTTP := default 28080 $slotB.httpPort -}}
 {{- $slotBHTTPS := default 28443 $slotB.httpsPort -}}
 {{- $stateHostPath := default "/var/lib/fugue/edge-blue-green" $root.Values.edge.blueGreen.stateHostPath -}}
-{{- $activeSlotFile := default "/var/lib/fugue/edge-blue-green/active-slot" $root.Values.edge.blueGreen.activeSlotFile -}}
+{{- $activeSlotFile := default "/var/lib/fugue/edge-blue-green/active-slot" $root.Values.edge.blueGreen.activeSlotFile }}
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -178,7 +178,7 @@ spec:
 {{ $slotEdgeImageRepository := default $edgeImageRepository $slotImage.repository -}}
 {{ $slotEdgeImageTag := default $edgeImageTag $slotImage.tag -}}
 {{ $slotEdgeImageDigest := default $edgeImageDigest $slotImage.digest -}}
-{{ $slotEdgeImagePullPolicy := default $edgeImagePullPolicy $slotImage.pullPolicy -}}
+{{ $slotEdgeImagePullPolicy := default $edgeImagePullPolicy $slotImage.pullPolicy }}
 ---
 apiVersion: apps/v1
 kind: DaemonSet

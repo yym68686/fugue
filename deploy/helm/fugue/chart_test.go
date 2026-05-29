@@ -1059,6 +1059,59 @@ func TestEdgeBlueGreenRendersFrontAndWorkerSlots(t *testing.T) {
 	}
 }
 
+func TestEdgeBlueGreenSeparatesPrimaryAndRegionalDocuments(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	valuesPath := filepath.Join(t.TempDir(), "values.yaml")
+	values := `
+edge:
+  edgeGroupID: edge-group-country-us
+  caddy:
+    enabled: true
+    tlsMode: public-on-demand
+  blueGreen:
+    enabled: true
+  groups:
+    - name: country-de
+      edgeGroupID: edge-group-country-de
+      nodeSelector:
+        fugue.io/role.edge: "true"
+        fugue.io/schedulable: "true"
+        fugue.io/location-country-code: de
+`
+	if err := os.WriteFile(valuesPath, []byte(values), 0o600); err != nil {
+		t.Fatalf("write values: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "-f", valuesPath)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	primaryWorkerB := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-edge-worker-b")
+	if primaryWorkerB == "" {
+		t.Fatalf("rendered manifest missing primary worker-b daemonset:\n%s", manifest)
+	}
+	if strings.Contains(primaryWorkerB, "fugue-fugue-edge-country-de-front") {
+		t.Fatalf("primary worker-b must be a separate YAML document from regional front:\n%s", primaryWorkerB)
+	}
+	regionalFront := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-edge-country-de-front")
+	if regionalFront == "" {
+		t.Fatalf("rendered manifest missing regional front daemonset:\n%s", manifest)
+	}
+	if strings.Contains(regionalFront, "fugue-fugue-edge-worker-b") {
+		t.Fatalf("regional front must be a separate YAML document from primary worker-b:\n%s", regionalFront)
+	}
+}
+
 func TestEdgeBlueGreenMigrationCanPrewarmWithoutPublicFrontHostPorts(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")
