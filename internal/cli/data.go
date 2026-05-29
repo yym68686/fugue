@@ -4682,7 +4682,8 @@ func (c *Client) ListDataTransfers() ([]model.DataTransfer, error) {
 
 func (c *Client) GetDataTransfer(id string) (map[string]any, error) {
 	var resp map[string]any
-	if err := c.doJSON(http.MethodGet, path.Join("/v1/data/transfers", id), nil, &resp); err != nil {
+	relative := path.Join("/v1/data/transfers", id) + "?summary=true"
+	if err := c.doJSON(http.MethodGet, relative, nil, &resp); err != nil {
 		return nil, err
 	}
 	return resp, nil
