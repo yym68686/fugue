@@ -36,6 +36,7 @@ const (
 	defaultUntrackedLargeDirThreshold int64 = 1 << 30
 	dataControlPlaneRequestTimeout          = 10 * time.Minute
 	dataTransferBlobPageLimit               = 1024
+	defaultDataTransferConcurrency          = 32
 	dataCheckpointBlobThreshold             = 1024
 	dataCheckpointByteThreshold       int64 = 1 << 30
 )
@@ -639,7 +640,7 @@ func (c *CLI) newDataPushCommand() *cobra.Command {
 	cmd.Flags().StringVar(&message, "message", "", "Version message")
 	cmd.Flags().StringVar(&assetName, "asset", "", "Only push one asset")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show upload plan without uploading")
-	cmd.Flags().IntVar(&concurrency, "concurrency", 8, "Transfer concurrency")
+	cmd.Flags().IntVar(&concurrency, "concurrency", defaultDataTransferConcurrency, "Transfer concurrency")
 	cmd.Flags().BoolVar(&noResume, "no-resume", false, "Ignore local transfer resume state")
 	cmd.Flags().BoolVar(&noProgress, "no-progress", false, "Disable progress rendering")
 	return cmd
@@ -1528,7 +1529,7 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 			}); err != nil {
 				return err
 			}
-			if err := c.uploadDataPlanBlobs(client, refresh.Transfer.WorkspaceID, refresh.Transfer.ID, manifestDigest, refresh.Blobs, pathsByDigest, true, false, 8, manifest.TotalBytes, refresh.BlobsOffset, refresh.BlobsLimit, refresh.BlobsNextOffset); err != nil {
+			if err := c.uploadDataPlanBlobs(client, refresh.Transfer.WorkspaceID, refresh.Transfer.ID, manifestDigest, refresh.Blobs, pathsByDigest, true, false, defaultDataTransferConcurrency, manifest.TotalBytes, refresh.BlobsOffset, refresh.BlobsLimit, refresh.BlobsNextOffset); err != nil {
 				return err
 			}
 			manifestToComplete := refresh.Manifest
@@ -3067,7 +3068,7 @@ func renderDataWorkspace(c *CLI, workspace model.DataWorkspace) error {
 
 func (c *CLI) uploadDataPlanBlobs(client *Client, workspaceID, transferID, manifestDigest string, blobs []dataBlobPlan, pathsByDigest map[string]string, resume, noProgress bool, concurrency int, totalBytes int64, pageOffset, pageLimit int, nextOffset *int) error {
 	if concurrency <= 0 {
-		concurrency = 1
+		concurrency = defaultDataTransferConcurrency
 	}
 	if totalBytes <= 0 {
 		totalBytes = totalDataBlobBytes(blobs)
@@ -3076,127 +3077,15 @@ func (c *CLI) uploadDataPlanBlobs(client *Client, workspaceID, transferID, manif
 		pageLimit = dataTransferBlobPageLimit
 	}
 	progress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Upload", totalBytes)
-	var checkpointBlobs []dataBlobPlan
-	var checkpointBytes int64
-	flushCheckpoints := func(force bool) error {
-		if len(checkpointBlobs) == 0 {
-			return nil
-		}
-		if !force && len(checkpointBlobs) < dataCheckpointBlobThreshold && checkpointBytes < dataCheckpointByteThreshold {
-			return nil
-		}
-		batch := append([]dataBlobPlan(nil), checkpointBlobs...)
-		checkpointBlobs = checkpointBlobs[:0]
-		checkpointBytes = 0
-		return client.CheckpointDataTransfer(transferID, -1, -1, batch)
-	}
-	queueCheckpoint := func(blob dataBlobPlan) error {
-		checkpointBlobs = append(checkpointBlobs, blob)
-		if blob.Size > 0 {
-			checkpointBytes += blob.Size
-		}
-		return flushCheckpoints(false)
+	uploader, err := c.newDataUploadExecutor(client, workspaceID, transferID, manifestDigest, pathsByDigest, resume, noProgress, concurrency, pageLimit, progress)
+	if err != nil {
+		return err
 	}
 	currentBlobs := blobs
 	currentOffset := pageOffset
 	for {
-		for _, blob := range currentBlobs {
-			var state dataTransferState
-			if resume {
-				if loaded, ok, err := loadDataTransferState(".", transferID); err != nil {
-					return err
-				} else if ok {
-					state = loaded
-					blob = mergeDataBlobWithState(blob, state)
-				}
-			}
-			if state.TransferID == "" {
-				state = dataTransferState{TransferID: transferID, Direction: model.DataTransferDirectionUpload, WorkspaceID: workspaceID, ManifestDigest: manifestDigest}
-			}
-			if blob.Exists {
-				progress.advance(blob.Size)
-				continue
-			}
-			if blob.UploadMode != model.DataBlobUploadModeMultipart && strings.TrimSpace(blob.UploadURL) == "" {
-				return fmt.Errorf("upload url missing for blob %s (mode=%q object_key=%q parts=%d exists=%t)", blob.SHA256, blob.UploadMode, blob.ObjectKey, len(blob.Parts), blob.Exists)
-			}
-			sourcePath := pathsByDigest[blob.SHA256]
-			if sourcePath == "" {
-				return fmt.Errorf("missing local source for blob %s", blob.SHA256)
-			}
-			if noProgress && !c.wantsJSON() {
-				mode := blob.UploadMode
-				if mode == "" {
-					mode = model.DataBlobUploadModeSingle
-				}
-				fmt.Fprintf(c.stdout, "Uploading %s  %s  %s\n", shortDataDigest(blob.SHA256), formatBytes(blob.Size), mode)
-			}
-			if blob.UploadMode == model.DataBlobUploadModeMultipart {
-				var completed []model.DataTransferPart
-				err := retryDataAuthorization(func() error {
-					var uploadErr error
-					completed, uploadErr = c.uploadMultipartDataBlob(client, sourcePath, transferID, blob, resume, concurrency, progress.advance)
-					return uploadErr
-				}, func() error {
-					refresh, err := client.RefreshDataTransferAuthorizationPage(transferID, currentOffset, pageLimit)
-					if err != nil {
-						return err
-					}
-					refreshed, ok := dataPlanBlobByDigest(refresh.Blobs, blob.SHA256)
-					if !ok {
-						return fmt.Errorf("refreshed transfer plan is missing blob %s", blob.SHA256)
-					}
-					blob = mergeDataBlobWithState(refreshed, state)
-					return nil
-				})
-				if err != nil {
-					return err
-				}
-				if _, err := client.CompleteDataMultipartUpload(transferID, blob.SHA256, blob.UploadID, completed); err != nil {
-					return err
-				}
-				completedBlob := markDataBlobUploaded(blob, completed)
-				state = upsertDataTransferStateBlob(state, completedBlob)
-				if resume {
-					if err := saveDataTransferState(".", state); err != nil {
-						return err
-					}
-				}
-				if err := queueCheckpoint(completedBlob); err != nil {
-					return err
-				}
-				continue
-			}
-			if strings.TrimSpace(blob.UploadURL) == "" {
-				continue
-			}
-			err := retryDataAuthorization(func() error {
-				return client.PutDataBlobWithProgress(blob.UploadURL, sourcePath, progress.advance)
-			}, func() error {
-				refresh, err := client.RefreshDataTransferAuthorizationPage(transferID, currentOffset, pageLimit)
-				if err != nil {
-					return err
-				}
-				refreshed, ok := dataPlanBlobByDigest(refresh.Blobs, blob.SHA256)
-				if !ok {
-					return fmt.Errorf("refreshed transfer plan is missing blob %s", blob.SHA256)
-				}
-				blob = refreshed
-				return nil
-			})
-			if err != nil {
-				return err
-			}
-			completedBlob := markDataBlobUploaded(blob, nil)
-			state = upsertDataTransferStateBlob(state, completedBlob)
-			if resume {
-				if err := saveDataTransferState(".", state); err != nil {
-					return err
-				}
-			}
-			if err := queueCheckpoint(completedBlob); err != nil {
-				return err
-			}
+		if err := uploader.uploadPage(currentBlobs, currentOffset); err != nil {
+			return err
 		}
 		if nextOffset == nil {
 			break
@@ -3212,11 +3101,266 @@ func (c *CLI) uploadDataPlanBlobs(client *Client, workspaceID, transferID, manif
 			return fmt.Errorf("transfer blob page at offset %d was empty", currentOffset)
 		}
 	}
-	if err := flushCheckpoints(true); err != nil {
+	if err := uploader.flushCheckpoints(true); err != nil {
 		return err
 	}
 	progress.finish()
 	return nil
+}
+
+type dataUploadExecutor struct {
+	cli            *CLI
+	client         *Client
+	workspaceID    string
+	transferID     string
+	manifestDigest string
+	pathsByDigest  map[string]string
+	resume         bool
+	noProgress     bool
+	concurrency    int
+	pageLimit      int
+	progress       *dataProgressRenderer
+
+	mu              sync.Mutex
+	state           dataTransferState
+	checkpointBlobs []dataBlobPlan
+	checkpointBytes int64
+}
+
+func (c *CLI) newDataUploadExecutor(client *Client, workspaceID, transferID, manifestDigest string, pathsByDigest map[string]string, resume, noProgress bool, concurrency, pageLimit int, progress *dataProgressRenderer) (*dataUploadExecutor, error) {
+	state := dataTransferState{
+		TransferID:     transferID,
+		Direction:      model.DataTransferDirectionUpload,
+		WorkspaceID:    workspaceID,
+		ManifestDigest: manifestDigest,
+	}
+	if resume {
+		loaded, ok, err := loadDataTransferState(".", transferID)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			state = loaded
+			if state.TransferID == "" {
+				state.TransferID = transferID
+			}
+			if state.Direction == "" {
+				state.Direction = model.DataTransferDirectionUpload
+			}
+			if state.WorkspaceID == "" {
+				state.WorkspaceID = workspaceID
+			}
+			if state.ManifestDigest == "" {
+				state.ManifestDigest = manifestDigest
+			}
+		}
+	}
+	return &dataUploadExecutor{
+		cli:            c,
+		client:         client,
+		workspaceID:    workspaceID,
+		transferID:     transferID,
+		manifestDigest: manifestDigest,
+		pathsByDigest:  pathsByDigest,
+		resume:         resume,
+		noProgress:     noProgress,
+		concurrency:    concurrency,
+		pageLimit:      pageLimit,
+		progress:       progress,
+		state:          state,
+	}, nil
+}
+
+func (u *dataUploadExecutor) uploadPage(blobs []dataBlobPlan, pageOffset int) error {
+	if len(blobs) == 0 {
+		return nil
+	}
+	if u.concurrency <= 1 {
+		for _, blob := range blobs {
+			if err := u.uploadOne(blob, pageOffset); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	var singleBlobs []dataBlobPlan
+	for _, blob := range blobs {
+		blob = u.mergeBlob(blob)
+		if blob.Exists {
+			u.progress.advance(blob.Size)
+			continue
+		}
+		if blob.UploadMode == model.DataBlobUploadModeMultipart {
+			if err := u.uploadOne(blob, pageOffset); err != nil {
+				return err
+			}
+			continue
+		}
+		singleBlobs = append(singleBlobs, blob)
+	}
+	if len(singleBlobs) == 0 {
+		return nil
+	}
+	workerCount := u.concurrency
+	if workerCount > len(singleBlobs) {
+		workerCount = len(singleBlobs)
+	}
+	jobs := make(chan dataBlobPlan)
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+	worker := func() {
+		defer wg.Done()
+		for blob := range jobs {
+			if err := u.uploadOne(blob, pageOffset); err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+				return
+			}
+		}
+	}
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go worker()
+	}
+	for _, blob := range singleBlobs {
+		select {
+		case err := <-errCh:
+			close(jobs)
+			wg.Wait()
+			return err
+		case jobs <- blob:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		return err
+	default:
+		return nil
+	}
+}
+
+func (u *dataUploadExecutor) uploadOne(blob dataBlobPlan, pageOffset int) error {
+	blob = u.mergeBlob(blob)
+	if blob.Exists {
+		u.progress.advance(blob.Size)
+		return nil
+	}
+	if blob.UploadMode != model.DataBlobUploadModeMultipart && strings.TrimSpace(blob.UploadURL) == "" {
+		return fmt.Errorf("upload url missing for blob %s (mode=%q object_key=%q parts=%d exists=%t)", blob.SHA256, blob.UploadMode, blob.ObjectKey, len(blob.Parts), blob.Exists)
+	}
+	sourcePath := u.pathsByDigest[blob.SHA256]
+	if sourcePath == "" {
+		return fmt.Errorf("missing local source for blob %s", blob.SHA256)
+	}
+	u.printUploadLine(blob)
+	if blob.UploadMode == model.DataBlobUploadModeMultipart {
+		return u.uploadMultipart(blob, sourcePath, pageOffset)
+	}
+	if strings.TrimSpace(blob.UploadURL) == "" {
+		return nil
+	}
+	err := retryDataAuthorization(func() error {
+		return u.client.PutDataBlobWithProgress(blob.UploadURL, sourcePath, u.progress.advance)
+	}, func() error {
+		refresh, err := u.client.RefreshDataTransferAuthorizationPage(u.transferID, pageOffset, u.pageLimit)
+		if err != nil {
+			return err
+		}
+		refreshed, ok := dataPlanBlobByDigest(refresh.Blobs, blob.SHA256)
+		if !ok {
+			return fmt.Errorf("refreshed transfer plan is missing blob %s", blob.SHA256)
+		}
+		blob = u.mergeBlob(refreshed)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return u.recordCompletedBlob(markDataBlobUploaded(blob, nil))
+}
+
+func (u *dataUploadExecutor) uploadMultipart(blob dataBlobPlan, sourcePath string, pageOffset int) error {
+	var completed []model.DataTransferPart
+	err := retryDataAuthorization(func() error {
+		var uploadErr error
+		completed, uploadErr = u.cli.uploadMultipartDataBlob(u.client, sourcePath, u.transferID, blob, u.resume, u.concurrency, u.progress.advance)
+		return uploadErr
+	}, func() error {
+		refresh, err := u.client.RefreshDataTransferAuthorizationPage(u.transferID, pageOffset, u.pageLimit)
+		if err != nil {
+			return err
+		}
+		refreshed, ok := dataPlanBlobByDigest(refresh.Blobs, blob.SHA256)
+		if !ok {
+			return fmt.Errorf("refreshed transfer plan is missing blob %s", blob.SHA256)
+		}
+		blob = u.mergeBlob(refreshed)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := u.client.CompleteDataMultipartUpload(u.transferID, blob.SHA256, blob.UploadID, completed); err != nil {
+		return err
+	}
+	return u.recordCompletedBlob(markDataBlobUploaded(blob, completed))
+}
+
+func (u *dataUploadExecutor) mergeBlob(blob dataBlobPlan) dataBlobPlan {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return mergeDataBlobWithState(blob, u.state)
+}
+
+func (u *dataUploadExecutor) printUploadLine(blob dataBlobPlan) {
+	if !u.noProgress || u.cli.wantsJSON() {
+		return
+	}
+	mode := blob.UploadMode
+	if mode == "" {
+		mode = model.DataBlobUploadModeSingle
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	fmt.Fprintf(u.cli.stdout, "Uploading %s  %s  %s\n", shortDataDigest(blob.SHA256), formatBytes(blob.Size), mode)
+}
+
+func (u *dataUploadExecutor) recordCompletedBlob(blob dataBlobPlan) error {
+	u.mu.Lock()
+	u.state = upsertDataTransferStateBlob(u.state, blob)
+	u.checkpointBlobs = append(u.checkpointBlobs, blob)
+	if blob.Size > 0 {
+		u.checkpointBytes += blob.Size
+	}
+	u.mu.Unlock()
+	return u.flushCheckpoints(false)
+}
+
+func (u *dataUploadExecutor) flushCheckpoints(force bool) error {
+	u.mu.Lock()
+	if len(u.checkpointBlobs) == 0 {
+		u.mu.Unlock()
+		return nil
+	}
+	if !force && len(u.checkpointBlobs) < dataCheckpointBlobThreshold && u.checkpointBytes < dataCheckpointByteThreshold {
+		u.mu.Unlock()
+		return nil
+	}
+	batch := append([]dataBlobPlan(nil), u.checkpointBlobs...)
+	state := cloneDataTransferState(u.state)
+	u.checkpointBlobs = u.checkpointBlobs[:0]
+	u.checkpointBytes = 0
+	u.mu.Unlock()
+	if u.resume {
+		if err := saveDataTransferState(".", state); err != nil {
+			return err
+		}
+	}
+	return u.client.CheckpointDataTransfer(u.transferID, -1, -1, batch)
 }
 
 func (c *CLI) uploadMultipartDataBlob(client *Client, sourcePath, transferID string, blob dataBlobPlan, resume bool, concurrency int, progress dataTransferProgress) ([]model.DataTransferPart, error) {
@@ -3734,6 +3878,14 @@ func sanitizeDataStateBlob(blob dataBlobPlan) dataBlobPlan {
 		blob.Parts[idx].ExpiresAt = time.Time{}
 	}
 	return blob
+}
+
+func cloneDataTransferState(state dataTransferState) dataTransferState {
+	state.Blobs = append([]dataBlobPlan(nil), state.Blobs...)
+	for idx := range state.Blobs {
+		state.Blobs[idx] = sanitizeDataStateBlob(state.Blobs[idx])
+	}
+	return state
 }
 
 func dataTransferStatePath(root, transferID string) string {

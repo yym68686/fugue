@@ -648,6 +648,74 @@ func TestManifestDiffTransferStateAndProgressRenderer(t *testing.T) {
 	}
 }
 
+func TestUploadDataPlanBlobsUsesConcurrencyForSingleBlobUploads(t *testing.T) {
+	root := t.TempDir()
+	var mu sync.Mutex
+	var active, maxActive, puts, checkpoints int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/upload/"):
+			mu.Lock()
+			active++
+			if active > maxActive {
+				maxActive = active
+			}
+			mu.Unlock()
+			time.Sleep(100 * time.Millisecond)
+			_, _ = io.Copy(io.Discard, r.Body)
+			mu.Lock()
+			active--
+			puts++
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/data/transfers/transfer-1/checkpoint":
+			mu.Lock()
+			checkpoints++
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "token")
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	blobs := make([]dataBlobPlan, 0, 4)
+	pathsByDigest := map[string]string{}
+	for idx := 0; idx < 4; idx++ {
+		digest := fmt.Sprintf("%064d", idx+1)
+		filePath := filepath.Join(root, fmt.Sprintf("file-%d.bin", idx))
+		if err := os.WriteFile(filePath, []byte(strings.Repeat("x", 1024)), 0o600); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+		pathsByDigest[digest] = filePath
+		blobs = append(blobs, dataBlobPlan{
+			SHA256:     digest,
+			Size:       1024,
+			UploadMode: model.DataBlobUploadModeSingle,
+			UploadURL:  server.URL + "/upload/" + digest,
+		})
+	}
+	cli := &CLI{stdout: io.Discard, stderr: io.Discard}
+	if err := cli.uploadDataPlanBlobs(client, "workspace-1", "transfer-1", "manifest-1", blobs, pathsByDigest, false, true, 4, 4096, 0, 4, nil); err != nil {
+		t.Fatalf("upload blobs: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if puts != 4 {
+		t.Fatalf("expected 4 uploads, got %d", puts)
+	}
+	if maxActive <= 1 {
+		t.Fatalf("expected concurrent uploads, max active=%d", maxActive)
+	}
+	if checkpoints != 1 {
+		t.Fatalf("expected final checkpoint, got %d", checkpoints)
+	}
+}
+
 func testCLIDigest(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
