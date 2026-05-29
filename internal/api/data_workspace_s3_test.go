@@ -257,6 +257,105 @@ func TestDataWorkspaceS3UploadPlanUsesSnapshotIndexWithoutHEAD(t *testing.T) {
 	}
 }
 
+func TestDataWorkspaceS3UploadPlanPagesBlobs(t *testing.T) {
+	var s3Calls int
+	s3Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s3Calls++
+		t.Fatalf("upload plan pagination should not require fake s3 request %s %s", r.Method, r.URL.String())
+	}))
+	defer s3Server.Close()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Data Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, secret, err := stateStore.CreateAPIKey(tenant.ID, "data", []string{"data.read", "data.write", "data.admin"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	backend, err := stateStore.CreateDataBackend(model.DataBackend{
+		TenantID: tenant.ID,
+		Name:     "fake-s3",
+		Provider: model.DataBackendProviderS3,
+		Bucket:   "bucket",
+		Endpoint: s3Server.URL,
+		Region:   "us-east-1",
+		Credentials: model.DataBackendCredentials{
+			AccessKeyID:     "access",
+			SecretAccessKey: "secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create backend: %v", err)
+	}
+	workspace, err := stateStore.CreateDataWorkspace(model.DataWorkspace{
+		TenantID:         tenant.ID,
+		Name:             "workspace",
+		StorageBackendID: backend.ID,
+		Assets:           []model.DataAsset{{Name: "data", Path: "./data"}},
+	})
+	if err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	manifest := model.NormalizeDataManifest(model.DataManifest{Entries: []model.DataManifestEntry{
+		{AssetName: "data", RelativePath: "a.bin", Kind: model.DataManifestEntryKindFile, Size: 1, SHA256: strings.Repeat("1", 64)},
+		{AssetName: "data", RelativePath: "b.bin", Kind: model.DataManifestEntryKindFile, Size: 1, SHA256: strings.Repeat("2", 64)},
+		{AssetName: "data", RelativePath: "c.bin", Kind: model.DataManifestEntryKindFile, Size: 1, SHA256: strings.Repeat("3", 64)},
+	}})
+	apiServer := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	httpServer := httptest.NewServer(apiServer.Handler())
+	defer httpServer.Close()
+
+	planBody, _ := json.Marshal(map[string]any{"version": "v1", "manifest": manifest})
+	req, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/data/workspaces/"+workspace.ID+"/transfers/plan-upload?blob_limit=2", bytes.NewReader(planBody))
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("plan upload: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("plan upload status %d", resp.StatusCode)
+	}
+	var plan dataUploadPlanResponse
+	if err := json.NewDecoder(resp.Body).Decode(&plan); err != nil {
+		t.Fatalf("decode plan: %v", err)
+	}
+	if len(plan.Blobs) != 2 || plan.BlobsTotal != 3 || plan.BlobsLimit != 2 || plan.BlobsNextOffset == nil || *plan.BlobsNextOffset != 2 {
+		t.Fatalf("unexpected first page: %+v", plan)
+	}
+	refreshReq, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/data/transfers/"+plan.Transfer.ID+"/refresh?blob_offset=2&blob_limit=2", nil)
+	refreshReq.Header.Set("Authorization", "Bearer "+secret)
+	refreshResp, err := http.DefaultClient.Do(refreshReq)
+	if err != nil {
+		t.Fatalf("refresh page: %v", err)
+	}
+	defer refreshResp.Body.Close()
+	if refreshResp.StatusCode != http.StatusOK {
+		t.Fatalf("refresh status %d", refreshResp.StatusCode)
+	}
+	var refresh struct {
+		Blobs           []dataTransferPlanBlob `json:"blobs"`
+		BlobsTotal      int                    `json:"blobs_total"`
+		BlobsOffset     int                    `json:"blobs_offset"`
+		BlobsNextOffset *int                   `json:"blobs_next_offset"`
+	}
+	if err := json.NewDecoder(refreshResp.Body).Decode(&refresh); err != nil {
+		t.Fatalf("decode refresh: %v", err)
+	}
+	if len(refresh.Blobs) != 1 || refresh.BlobsTotal != 3 || refresh.BlobsOffset != 2 || refresh.BlobsNextOffset != nil {
+		t.Fatalf("unexpected second page: %+v", refresh)
+	}
+	if s3Calls != 0 {
+		t.Fatalf("expected no fake s3 requests, got %d", s3Calls)
+	}
+}
+
 func TestDataWorkspaceS3MultipartAbort(t *testing.T) {
 	var headCalls, createMultipartCalls, abortCalls int
 	s3Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -24,9 +24,13 @@ type dataUploadPlanRequest struct {
 }
 
 type dataUploadPlanResponse struct {
-	Workspace model.DataWorkspace    `json:"workspace"`
-	Transfer  dataTransferSummary    `json:"transfer"`
-	Blobs     []dataTransferPlanBlob `json:"blobs"`
+	Workspace       model.DataWorkspace    `json:"workspace"`
+	Transfer        dataTransferSummary    `json:"transfer"`
+	Blobs           []dataTransferPlanBlob `json:"blobs"`
+	BlobsTotal      int                    `json:"blobs_total,omitempty"`
+	BlobsOffset     int                    `json:"blobs_offset,omitempty"`
+	BlobsLimit      int                    `json:"blobs_limit,omitempty"`
+	BlobsNextOffset *int                   `json:"blobs_next_offset,omitempty"`
 }
 
 type dataDownloadPlanRequest struct {
@@ -35,11 +39,15 @@ type dataDownloadPlanRequest struct {
 }
 
 type dataDownloadPlanResponse struct {
-	Workspace model.DataWorkspace    `json:"workspace"`
-	Snapshot  dataSnapshotSummary    `json:"snapshot"`
-	Transfer  dataTransferSummary    `json:"transfer"`
-	Manifest  model.DataManifest     `json:"manifest"`
-	Blobs     []dataTransferPlanBlob `json:"blobs"`
+	Workspace       model.DataWorkspace    `json:"workspace"`
+	Snapshot        dataSnapshotSummary    `json:"snapshot"`
+	Transfer        dataTransferSummary    `json:"transfer"`
+	Manifest        model.DataManifest     `json:"manifest"`
+	Blobs           []dataTransferPlanBlob `json:"blobs"`
+	BlobsTotal      int                    `json:"blobs_total,omitempty"`
+	BlobsOffset     int                    `json:"blobs_offset,omitempty"`
+	BlobsLimit      int                    `json:"blobs_limit,omitempty"`
+	BlobsNextOffset *int                   `json:"blobs_next_offset,omitempty"`
 }
 
 type dataTransferSummary struct {
@@ -83,6 +91,15 @@ type dataSnapshotSummary struct {
 	DeletedAt      *time.Time `json:"deleted_at,omitempty"`
 }
 
+type dataTransferBlobPage struct {
+	Offset     int
+	Limit      int
+	Total      int
+	NextOffset *int
+}
+
+const dataTransferMaxBlobPageLimit = 5000
+
 func summarizeDataTransfer(transfer model.DataTransfer) dataTransferSummary {
 	return dataTransferSummary{
 		ID:           transfer.ID,
@@ -116,6 +133,69 @@ func summarizeDataTransfers(transfers []model.DataTransfer) []dataTransferSummar
 		out = append(out, summarizeDataTransfer(transfer))
 	}
 	return out
+}
+
+func parseDataTransferBlobPage(r *http.Request, total int) (dataTransferBlobPage, error) {
+	page := dataTransferBlobPage{Total: total, Limit: total}
+	rawLimit := strings.TrimSpace(r.URL.Query().Get("blob_limit"))
+	rawOffset := strings.TrimSpace(r.URL.Query().Get("blob_offset"))
+	if rawLimit == "" && rawOffset == "" {
+		return finalizeDataTransferBlobPage(page), nil
+	}
+	if rawLimit != "" {
+		limit, err := strconv.Atoi(rawLimit)
+		if err != nil || limit <= 0 {
+			return dataTransferBlobPage{}, fmt.Errorf("blob_limit must be a positive integer")
+		}
+		if limit > dataTransferMaxBlobPageLimit {
+			limit = dataTransferMaxBlobPageLimit
+		}
+		page.Limit = limit
+	}
+	if rawOffset != "" {
+		offset, err := strconv.Atoi(rawOffset)
+		if err != nil || offset < 0 {
+			return dataTransferBlobPage{}, fmt.Errorf("blob_offset must be a non-negative integer")
+		}
+		page.Offset = offset
+	}
+	return finalizeDataTransferBlobPage(page), nil
+}
+
+func finalizeDataTransferBlobPage(page dataTransferBlobPage) dataTransferBlobPage {
+	if page.Total < 0 {
+		page.Total = 0
+	}
+	if page.Limit < 0 {
+		page.Limit = 0
+	}
+	if page.Offset < 0 {
+		page.Offset = 0
+	}
+	if page.Offset > page.Total {
+		page.Offset = page.Total
+	}
+	end := page.Offset + page.Limit
+	if page.Limit == 0 || end > page.Total {
+		end = page.Total
+	}
+	if end < page.Total {
+		next := end
+		page.NextOffset = &next
+	}
+	return page
+}
+
+func sliceDataTransferBlobs(blobs []dataTransferPlanBlob, page dataTransferBlobPage) []dataTransferPlanBlob {
+	start := page.Offset
+	if start > len(blobs) {
+		start = len(blobs)
+	}
+	end := start + page.Limit
+	if page.Limit == 0 || end > len(blobs) {
+		end = len(blobs)
+	}
+	return append([]dataTransferPlanBlob(nil), blobs[start:end]...)
 }
 
 func summarizeDataSnapshot(snapshot model.DataSnapshot) dataSnapshotSummary {
@@ -490,10 +570,19 @@ func (s *Server) handlePlanDataUpload(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	page, err := parseDataTransferBlobPage(r, len(blobs))
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, dataUploadPlanResponse{
-		Workspace: workspace,
-		Transfer:  summarizeDataTransfer(transfer),
-		Blobs:     blobs,
+		Workspace:       workspace,
+		Transfer:        summarizeDataTransfer(transfer),
+		Blobs:           sliceDataTransferBlobs(blobs, page),
+		BlobsTotal:      page.Total,
+		BlobsOffset:     page.Offset,
+		BlobsLimit:      page.Limit,
+		BlobsNextOffset: page.NextOffset,
 	})
 }
 
@@ -552,12 +641,21 @@ func (s *Server) handlePlanDataDownload(w http.ResponseWriter, r *http.Request) 
 		s.writeStoreError(w, err)
 		return
 	}
+	page, err := parseDataTransferBlobPage(r, len(blobs))
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, dataDownloadPlanResponse{
-		Workspace: workspace,
-		Snapshot:  summarizeDataSnapshot(snapshot),
-		Transfer:  summarizeDataTransfer(transfer),
-		Manifest:  manifest,
-		Blobs:     blobs,
+		Workspace:       workspace,
+		Snapshot:        summarizeDataSnapshot(snapshot),
+		Transfer:        summarizeDataTransfer(transfer),
+		Manifest:        manifest,
+		Blobs:           sliceDataTransferBlobs(blobs, page),
+		BlobsTotal:      page.Total,
+		BlobsOffset:     page.Offset,
+		BlobsLimit:      page.Limit,
+		BlobsNextOffset: page.NextOffset,
 	})
 }
 
@@ -826,7 +924,12 @@ func (s *Server) handleRefreshDataTransferAuthorization(w http.ResponseWriter, r
 		return
 	}
 	upload := transfer.Direction == model.DataTransferDirectionUpload
-	blobs, err := s.refreshDataPlanBlobs(r.Context(), r, workspace, transfer, upload)
+	page, err := parseDataTransferBlobPage(r, len(transfer.PlanBlobs))
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	blobs, responseBlobs, err := s.refreshDataPlanBlobs(r.Context(), r, workspace, transfer, upload, page)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -840,7 +943,17 @@ func (s *Server) handleRefreshDataTransferAuthorization(w http.ResponseWriter, r
 		s.writeStoreError(w, err)
 		return
 	}
-	resp := map[string]any{"workspace": workspace, "transfer": summarizeDataTransfer(transfer), "blobs": blobs}
+	resp := map[string]any{
+		"workspace":    workspace,
+		"transfer":     summarizeDataTransfer(transfer),
+		"blobs":        responseBlobs,
+		"blobs_total":  page.Total,
+		"blobs_offset": page.Offset,
+		"blobs_limit":  page.Limit,
+	}
+	if page.NextOffset != nil {
+		resp["blobs_next_offset"] = *page.NextOffset
+	}
 	if transfer.Direction == model.DataTransferDirectionDownload {
 		resp["manifest"] = transfer.Manifest
 	}
@@ -1643,25 +1756,37 @@ func (s *Server) presignDataUploadParts(ctx context.Context, objectBackend *data
 	return parts, nil
 }
 
-func (s *Server) refreshDataPlanBlobs(ctx context.Context, r *http.Request, workspace model.DataWorkspace, transfer model.DataTransfer, upload bool) ([]dataTransferPlanBlob, error) {
+func (s *Server) refreshDataPlanBlobs(ctx context.Context, r *http.Request, workspace model.DataWorkspace, transfer model.DataTransfer, upload bool, page dataTransferBlobPage) ([]dataTransferPlanBlob, []dataTransferPlanBlob, error) {
 	backend, err := s.store.GetDataBackendForUse(workspace.StorageBackendID, workspace.TenantID, true)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !dataBackendSupportsDirectObjectStorage(backend) {
-		return s.dataPlanBlobs(ctx, r, workspace, transfer, transfer.Manifest, upload)
+		blobs, err := s.dataPlanBlobs(ctx, r, workspace, transfer, transfer.Manifest, upload)
+		if err != nil {
+			return nil, nil, err
+		}
+		return blobs, sliceDataTransferBlobs(blobs, page), nil
 	}
 	objectBackend, err := newDataObjectBackend(backend)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	blobs := append([]dataTransferPlanBlob(nil), transfer.PlanBlobs...)
-	for idx := range blobs {
+	start := page.Offset
+	if start > len(blobs) {
+		start = len(blobs)
+	}
+	end := start + page.Limit
+	if page.Limit == 0 || end > len(blobs) {
+		end = len(blobs)
+	}
+	for idx := start; idx < end; idx++ {
 		if upload {
 			if blobs[idx].UploadMode == model.DataBlobUploadModeMultipart && blobs[idx].UploadID != "" {
 				completed, err := objectBackend.listMultipartParts(ctx, blobs[idx].ObjectKey, blobs[idx].UploadID)
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				completedByNumber := map[int32]model.DataTransferPart{}
 				for _, part := range completed {
@@ -1675,7 +1800,7 @@ func (s *Server) refreshDataPlanBlobs(ctx context.Context, r *http.Request, work
 					}
 					uploadURL, expiresAt, err := objectBackend.presignUploadPart(ctx, blobs[idx].ObjectKey, blobs[idx].UploadID, blobs[idx].Parts[partIdx].PartNumber, dataPresignTTL())
 					if err != nil {
-						return nil, err
+						return nil, nil, err
 					}
 					blobs[idx].Parts[partIdx].UploadURL = uploadURL
 					blobs[idx].Parts[partIdx].ExpiresAt = expiresAt
@@ -1686,7 +1811,7 @@ func (s *Server) refreshDataPlanBlobs(ctx context.Context, r *http.Request, work
 			if blobs[idx].UploadURL != "" {
 				uploadURL, expiresAt, err := objectBackend.presignPut(ctx, blobs[idx].ObjectKey, dataPresignTTL())
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				blobs[idx].UploadURL = uploadURL
 				blobs[idx].ExpiresAt = expiresAt
@@ -1695,12 +1820,12 @@ func (s *Server) refreshDataPlanBlobs(ctx context.Context, r *http.Request, work
 		}
 		downloadURL, expiresAt, err := objectBackend.presignGet(ctx, blobs[idx].ObjectKey, dataPresignTTL())
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		blobs[idx].DownloadURL = downloadURL
 		blobs[idx].ExpiresAt = expiresAt
 	}
-	return blobs, nil
+	return blobs, append([]dataTransferPlanBlob(nil), blobs[start:end]...), nil
 }
 
 func transferPlanBlobBySHA(blobs []dataTransferPlanBlob, sha256 string) (dataTransferPlanBlob, bool) {

@@ -5462,6 +5462,18 @@ paths:
         - BearerAuth: []
       parameters:
         - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
+        - in: query
+          name: blob_offset
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+        - in: query
+          name: blob_limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
       requestBody:
         required: true
         content:
@@ -5474,8 +5486,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/DataUploadPlanResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
     delete:
@@ -5487,14 +5498,25 @@ paths:
         - BearerAuth: []
       parameters:
         - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
+        - in: query
+          name: blob_offset
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+        - in: query
+          name: blob_limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
       responses:
         '200':
           description: Successful response
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/DataDownloadPlanResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/data/workspaces/{workspace_id}/snapshots:
@@ -5803,6 +5825,18 @@ paths:
         - BearerAuth: []
       parameters:
         - $ref: "#/components/parameters/DataTransferIdPathParam"
+        - in: query
+          name: blob_offset
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+        - in: query
+          name: blob_limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
         - in: query
           name: summary
           required: false
@@ -6594,6 +6628,14 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/DataTransferPlanBlob"
+        blobs_total:
+          type: integer
+        blobs_offset:
+          type: integer
+        blobs_limit:
+          type: integer
+        blobs_next_offset:
+          type: integer
     DataDownloadPlanResponse:
       type: object
       additionalProperties: false
@@ -6612,6 +6654,14 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/DataTransferPlanBlob"
+        blobs_total:
+          type: integer
+        blobs_offset:
+          type: integer
+        blobs_limit:
+          type: integer
+        blobs_next_offset:
+          type: integer
     DataTransferAuthorizationResponse:
       type: object
       additionalProperties: false
@@ -6628,6 +6678,14 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/DataTransferPlanBlob"
+        blobs_total:
+          type: integer
+        blobs_offset:
+          type: integer
+        blobs_limit:
+          type: integer
+        blobs_next_offset:
+          type: integer
     DataTransferActionResponse:
       type: object
       additionalProperties: false

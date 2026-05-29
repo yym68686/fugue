@@ -35,6 +35,7 @@ const (
 	dataDownloadPartSize                    = 64 * 1024 * 1024
 	defaultUntrackedLargeDirThreshold int64 = 1 << 30
 	dataControlPlaneRequestTimeout          = 10 * time.Minute
+	dataTransferBlobPageLimit               = 1024
 	dataCheckpointBlobThreshold             = 1024
 	dataCheckpointByteThreshold       int64 = 1 << 30
 )
@@ -62,10 +63,14 @@ type dataConfig struct {
 type dataBlobPlan = model.DataTransferPlanBlob
 
 type dataUploadPlanResponse struct {
-	Workspace model.DataWorkspace `json:"workspace"`
-	Transfer  model.DataTransfer  `json:"transfer"`
-	Manifest  model.DataManifest  `json:"manifest"`
-	Blobs     []dataBlobPlan      `json:"blobs"`
+	Workspace       model.DataWorkspace `json:"workspace"`
+	Transfer        model.DataTransfer  `json:"transfer"`
+	Manifest        model.DataManifest  `json:"manifest"`
+	Blobs           []dataBlobPlan      `json:"blobs"`
+	BlobsTotal      int                 `json:"blobs_total"`
+	BlobsOffset     int                 `json:"blobs_offset"`
+	BlobsLimit      int                 `json:"blobs_limit"`
+	BlobsNextOffset *int                `json:"blobs_next_offset"`
 }
 
 type dataDownloadPlanResponse struct {
@@ -93,10 +98,14 @@ type dataTransferCompleteResponse struct {
 }
 
 type dataTransferAuthorizationResponse struct {
-	Workspace model.DataWorkspace `json:"workspace"`
-	Transfer  model.DataTransfer  `json:"transfer"`
-	Manifest  model.DataManifest  `json:"manifest"`
-	Blobs     []dataBlobPlan      `json:"blobs"`
+	Workspace       model.DataWorkspace `json:"workspace"`
+	Transfer        model.DataTransfer  `json:"transfer"`
+	Manifest        model.DataManifest  `json:"manifest"`
+	Blobs           []dataBlobPlan      `json:"blobs"`
+	BlobsTotal      int                 `json:"blobs_total"`
+	BlobsOffset     int                 `json:"blobs_offset"`
+	BlobsLimit      int                 `json:"blobs_limit"`
+	BlobsNextOffset *int                `json:"blobs_next_offset"`
 }
 
 type dataGCSweepResponse struct {
@@ -599,7 +608,7 @@ func (c *CLI) newDataPushCommand() *cobra.Command {
 					return err
 				}
 			}
-			if err := c.uploadDataPlanBlobs(client, workspace.ID, plan.Transfer.ID, manifestDigest, plan.Blobs, pathsByDigest, !noResume, noProgress, concurrency); err != nil {
+			if err := c.uploadDataPlanBlobs(client, workspace.ID, plan.Transfer.ID, manifestDigest, plan.Blobs, pathsByDigest, !noResume, noProgress, concurrency, manifest.TotalBytes, plan.BlobsOffset, plan.BlobsLimit, plan.BlobsNextOffset); err != nil {
 				_, _ = client.CompleteDataTransfer(plan.Transfer.ID, map[string]any{"error_code": "upload_failed", "error_message": err.Error()})
 				return err
 			}
@@ -1483,12 +1492,16 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		refresh, err := client.RefreshDataTransferAuthorization(args[0])
+		transfer, err := client.GetDataTransferModel(args[0])
 		if err != nil {
 			return err
 		}
-		switch refresh.Transfer.Direction {
+		switch transfer.Direction {
 		case model.DataTransferDirectionUpload:
+			refresh, err := client.RefreshDataTransferAuthorizationPage(args[0], 0, dataTransferBlobPageLimit)
+			if err != nil {
+				return err
+			}
 			estimate, err := estimateDataManifestScan(".", cfg, "")
 			if err != nil {
 				return err
@@ -1515,7 +1528,7 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 			}); err != nil {
 				return err
 			}
-			if err := c.uploadDataPlanBlobs(client, refresh.Transfer.WorkspaceID, refresh.Transfer.ID, manifestDigest, refresh.Blobs, pathsByDigest, true, false, 8); err != nil {
+			if err := c.uploadDataPlanBlobs(client, refresh.Transfer.WorkspaceID, refresh.Transfer.ID, manifestDigest, refresh.Blobs, pathsByDigest, true, false, 8, manifest.TotalBytes, refresh.BlobsOffset, refresh.BlobsLimit, refresh.BlobsNextOffset); err != nil {
 				return err
 			}
 			manifestToComplete := refresh.Manifest
@@ -1546,6 +1559,10 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 			})
 			return nil
 		case model.DataTransferDirectionDownload:
+			refresh, err := client.RefreshDataTransferAuthorization(args[0])
+			if err != nil {
+				return err
+			}
 			manifest := refresh.Manifest
 			if len(manifest.Entries) == 0 {
 				manifest = refresh.Transfer.Manifest
@@ -1608,7 +1625,7 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 			})
 			return nil
 		default:
-			return fmt.Errorf("transfer %s direction %q is not resumable", refresh.Transfer.ID, refresh.Transfer.Direction)
+			return fmt.Errorf("transfer %s direction %q is not resumable", transfer.ID, transfer.Direction)
 		}
 	}})
 	return cmd
@@ -3048,11 +3065,17 @@ func renderDataWorkspace(c *CLI, workspace model.DataWorkspace) error {
 	return nil
 }
 
-func (c *CLI) uploadDataPlanBlobs(client *Client, workspaceID, transferID, manifestDigest string, blobs []dataBlobPlan, pathsByDigest map[string]string, resume, noProgress bool, concurrency int) error {
+func (c *CLI) uploadDataPlanBlobs(client *Client, workspaceID, transferID, manifestDigest string, blobs []dataBlobPlan, pathsByDigest map[string]string, resume, noProgress bool, concurrency int, totalBytes int64, pageOffset, pageLimit int, nextOffset *int) error {
 	if concurrency <= 0 {
 		concurrency = 1
 	}
-	progress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Upload", totalDataBlobBytes(blobs))
+	if totalBytes <= 0 {
+		totalBytes = totalDataBlobBytes(blobs)
+	}
+	if pageLimit <= 0 {
+		pageLimit = dataTransferBlobPageLimit
+	}
+	progress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Upload", totalBytes)
 	var checkpointBlobs []dataBlobPlan
 	var checkpointBytes int64
 	flushCheckpoints := func(force bool) error {
@@ -3074,45 +3097,83 @@ func (c *CLI) uploadDataPlanBlobs(client *Client, workspaceID, transferID, manif
 		}
 		return flushCheckpoints(false)
 	}
-	for _, blob := range blobs {
-		if blob.Exists {
-			progress.advance(blob.Size)
-			continue
-		}
-		if blob.UploadMode != model.DataBlobUploadModeMultipart && strings.TrimSpace(blob.UploadURL) == "" {
-			return fmt.Errorf("upload url missing for blob %s (mode=%q object_key=%q parts=%d exists=%t)", blob.SHA256, blob.UploadMode, blob.ObjectKey, len(blob.Parts), blob.Exists)
-		}
-		sourcePath := pathsByDigest[blob.SHA256]
-		if sourcePath == "" {
-			return fmt.Errorf("missing local source for blob %s", blob.SHA256)
-		}
-		if noProgress && !c.wantsJSON() {
-			mode := blob.UploadMode
-			if mode == "" {
-				mode = model.DataBlobUploadModeSingle
+	currentBlobs := blobs
+	currentOffset := pageOffset
+	for {
+		for _, blob := range currentBlobs {
+			var state dataTransferState
+			if resume {
+				if loaded, ok, err := loadDataTransferState(".", transferID); err != nil {
+					return err
+				} else if ok {
+					state = loaded
+					blob = mergeDataBlobWithState(blob, state)
+				}
 			}
-			fmt.Fprintf(c.stdout, "Uploading %s  %s  %s\n", shortDataDigest(blob.SHA256), formatBytes(blob.Size), mode)
-		}
-		var state dataTransferState
-		if resume {
-			if loaded, ok, err := loadDataTransferState(".", transferID); err != nil {
-				return err
-			} else if ok {
-				state = loaded
-				blob = mergeDataBlobWithState(blob, state)
+			if state.TransferID == "" {
+				state = dataTransferState{TransferID: transferID, Direction: model.DataTransferDirectionUpload, WorkspaceID: workspaceID, ManifestDigest: manifestDigest}
 			}
-		}
-		if state.TransferID == "" {
-			state = dataTransferState{TransferID: transferID, Direction: model.DataTransferDirectionUpload, WorkspaceID: workspaceID, ManifestDigest: manifestDigest}
-		}
-		if blob.UploadMode == model.DataBlobUploadModeMultipart {
-			var completed []model.DataTransferPart
+			if blob.Exists {
+				progress.advance(blob.Size)
+				continue
+			}
+			if blob.UploadMode != model.DataBlobUploadModeMultipart && strings.TrimSpace(blob.UploadURL) == "" {
+				return fmt.Errorf("upload url missing for blob %s (mode=%q object_key=%q parts=%d exists=%t)", blob.SHA256, blob.UploadMode, blob.ObjectKey, len(blob.Parts), blob.Exists)
+			}
+			sourcePath := pathsByDigest[blob.SHA256]
+			if sourcePath == "" {
+				return fmt.Errorf("missing local source for blob %s", blob.SHA256)
+			}
+			if noProgress && !c.wantsJSON() {
+				mode := blob.UploadMode
+				if mode == "" {
+					mode = model.DataBlobUploadModeSingle
+				}
+				fmt.Fprintf(c.stdout, "Uploading %s  %s  %s\n", shortDataDigest(blob.SHA256), formatBytes(blob.Size), mode)
+			}
+			if blob.UploadMode == model.DataBlobUploadModeMultipart {
+				var completed []model.DataTransferPart
+				err := retryDataAuthorization(func() error {
+					var uploadErr error
+					completed, uploadErr = c.uploadMultipartDataBlob(client, sourcePath, transferID, blob, resume, concurrency, progress.advance)
+					return uploadErr
+				}, func() error {
+					refresh, err := client.RefreshDataTransferAuthorizationPage(transferID, currentOffset, pageLimit)
+					if err != nil {
+						return err
+					}
+					refreshed, ok := dataPlanBlobByDigest(refresh.Blobs, blob.SHA256)
+					if !ok {
+						return fmt.Errorf("refreshed transfer plan is missing blob %s", blob.SHA256)
+					}
+					blob = mergeDataBlobWithState(refreshed, state)
+					return nil
+				})
+				if err != nil {
+					return err
+				}
+				if _, err := client.CompleteDataMultipartUpload(transferID, blob.SHA256, blob.UploadID, completed); err != nil {
+					return err
+				}
+				completedBlob := markDataBlobUploaded(blob, completed)
+				state = upsertDataTransferStateBlob(state, completedBlob)
+				if resume {
+					if err := saveDataTransferState(".", state); err != nil {
+						return err
+					}
+				}
+				if err := queueCheckpoint(completedBlob); err != nil {
+					return err
+				}
+				continue
+			}
+			if strings.TrimSpace(blob.UploadURL) == "" {
+				continue
+			}
 			err := retryDataAuthorization(func() error {
-				var uploadErr error
-				completed, uploadErr = c.uploadMultipartDataBlob(client, sourcePath, transferID, blob, resume, concurrency, progress.advance)
-				return uploadErr
+				return client.PutDataBlobWithProgress(blob.UploadURL, sourcePath, progress.advance)
 			}, func() error {
-				refresh, err := client.RefreshDataTransferAuthorization(transferID)
+				refresh, err := client.RefreshDataTransferAuthorizationPage(transferID, currentOffset, pageLimit)
 				if err != nil {
 					return err
 				}
@@ -3120,16 +3181,13 @@ func (c *CLI) uploadDataPlanBlobs(client *Client, workspaceID, transferID, manif
 				if !ok {
 					return fmt.Errorf("refreshed transfer plan is missing blob %s", blob.SHA256)
 				}
-				blob = mergeDataBlobWithState(refreshed, state)
+				blob = refreshed
 				return nil
 			})
 			if err != nil {
 				return err
 			}
-			if _, err := client.CompleteDataMultipartUpload(transferID, blob.SHA256, blob.UploadID, completed); err != nil {
-				return err
-			}
-			completedBlob := markDataBlobUploaded(blob, completed)
+			completedBlob := markDataBlobUploaded(blob, nil)
 			state = upsertDataTransferStateBlob(state, completedBlob)
 			if resume {
 				if err := saveDataTransferState(".", state); err != nil {
@@ -3139,37 +3197,19 @@ func (c *CLI) uploadDataPlanBlobs(client *Client, workspaceID, transferID, manif
 			if err := queueCheckpoint(completedBlob); err != nil {
 				return err
 			}
-			continue
 		}
-		if strings.TrimSpace(blob.UploadURL) == "" {
-			continue
+		if nextOffset == nil {
+			break
 		}
-		err := retryDataAuthorization(func() error {
-			return client.PutDataBlobWithProgress(blob.UploadURL, sourcePath, progress.advance)
-		}, func() error {
-			refresh, err := client.RefreshDataTransferAuthorization(transferID)
-			if err != nil {
-				return err
-			}
-			refreshed, ok := dataPlanBlobByDigest(refresh.Blobs, blob.SHA256)
-			if !ok {
-				return fmt.Errorf("refreshed transfer plan is missing blob %s", blob.SHA256)
-			}
-			blob = refreshed
-			return nil
-		})
+		currentOffset = *nextOffset
+		refresh, err := client.RefreshDataTransferAuthorizationPage(transferID, currentOffset, pageLimit)
 		if err != nil {
 			return err
 		}
-		completedBlob := markDataBlobUploaded(blob, nil)
-		state = upsertDataTransferStateBlob(state, completedBlob)
-		if resume {
-			if err := saveDataTransferState(".", state); err != nil {
-				return err
-			}
-		}
-		if err := queueCheckpoint(completedBlob); err != nil {
-			return err
+		currentBlobs = refresh.Blobs
+		nextOffset = refresh.BlobsNextOffset
+		if len(currentBlobs) == 0 && nextOffset != nil {
+			return fmt.Errorf("transfer blob page at offset %d was empty", currentOffset)
 		}
 	}
 	if err := flushCheckpoints(true); err != nil {
@@ -3856,7 +3896,8 @@ func (c *Client) GetDataSnapshot(workspaceID, snapshotID string) (dataSnapshotEn
 
 func (c *Client) PlanDataUpload(workspaceID, version, message string, manifest model.DataManifest) (dataUploadPlanResponse, error) {
 	var resp dataUploadPlanResponse
-	if err := c.doJSONWithTimeout(http.MethodPost, path.Join("/v1/data/workspaces", workspaceID, "transfers/plan-upload"), map[string]any{"version": version, "message": message, "manifest": manifest}, &resp, dataControlPlaneRequestTimeout); err != nil {
+	relative := path.Join("/v1/data/workspaces", workspaceID, "transfers/plan-upload") + "?blob_limit=" + strconv.Itoa(dataTransferBlobPageLimit)
+	if err := c.doJSONWithTimeout(http.MethodPost, relative, map[string]any{"version": version, "message": message, "manifest": manifest}, &resp, dataControlPlaneRequestTimeout); err != nil {
 		return dataUploadPlanResponse{}, err
 	}
 	return resp, nil
@@ -3879,8 +3920,23 @@ func (c *Client) CompleteDataTransfer(transferID string, req map[string]any) (da
 }
 
 func (c *Client) RefreshDataTransferAuthorization(transferID string) (dataTransferAuthorizationResponse, error) {
+	return c.RefreshDataTransferAuthorizationPage(transferID, -1, 0)
+}
+
+func (c *Client) RefreshDataTransferAuthorizationPage(transferID string, offset, limit int) (dataTransferAuthorizationResponse, error) {
 	var resp dataTransferAuthorizationResponse
-	if err := c.doJSONWithTimeout(http.MethodPost, path.Join("/v1/data/transfers", transferID, "refresh"), nil, &resp, dataControlPlaneRequestTimeout); err != nil {
+	relative := path.Join("/v1/data/transfers", transferID, "refresh")
+	query := url.Values{}
+	if offset >= 0 {
+		query.Set("blob_offset", strconv.Itoa(offset))
+	}
+	if limit > 0 {
+		query.Set("blob_limit", strconv.Itoa(limit))
+	}
+	if encoded := query.Encode(); encoded != "" {
+		relative += "?" + encoded
+	}
+	if err := c.doJSONWithTimeout(http.MethodPost, relative, nil, &resp, dataControlPlaneRequestTimeout); err != nil {
 		return dataTransferAuthorizationResponse{}, err
 	}
 	return resp, nil
