@@ -964,6 +964,42 @@ live_daemonset_container_image() {
     -o jsonpath="{.spec.template.spec.containers[?(@.name==\"${container_name}\")].image}" 2>/dev/null || true
 }
 
+live_bluegreen_front_pod_image() {
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods -l fugue.io/rollout-mode=node-local-blue-green-front -o json 2>/dev/null | python3 -c '
+import json
+import sys
+
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+fallback = ""
+for pod in sorted(doc.get("items", []), key=lambda item: item.get("metadata", {}).get("name", "")):
+    image = ""
+    for container in pod.get("spec", {}).get("containers", []):
+        if container.get("name") == "edge-front":
+            image = container.get("image", "")
+            break
+    if not image:
+        continue
+    if not fallback:
+        fallback = image
+    status = pod.get("status", {})
+    if status.get("phase") != "Running":
+        continue
+    ready = False
+    for condition in status.get("conditions") or []:
+        if condition.get("type") == "Ready" and condition.get("status") == "True":
+            ready = True
+            break
+    if ready:
+        print(image)
+        raise SystemExit(0)
+if fallback:
+    print(fallback)
+'
+}
+
 duration_to_seconds() {
   local duration="${1:-600s}"
   local amount=""
@@ -1123,11 +1159,34 @@ append_live_daemonset_image_helm_args() {
   log "${domain} image helm args preserved from live ${daemonset_name}/${container_name}: ${repository}:${tag}"
 }
 
+append_image_ref_helm_args() {
+  local domain="$1"
+  local image_ref="$2"
+  local values_prefix="$3"
+  local repository tag
+
+  image_ref="$(trim_field "${image_ref}")"
+  if [[ -z "${image_ref}" ]]; then
+    return 1
+  fi
+  repository="$(image_ref_repository "${image_ref}")"
+  tag="$(image_ref_tag "${image_ref}")"
+  if [[ -z "${repository}" || -z "${tag}" ]]; then
+    log "${domain} image helm preserve skipped; could not parse live image ${image_ref}"
+    return 1
+  fi
+  PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(
+    --set-string "${values_prefix}.repository=${repository}"
+    --set-string "${values_prefix}.tag=${tag}"
+  )
+  log "${domain} image helm args preserved from live pod: ${repository}:${tag}"
+}
+
 preserve_public_data_plane_from_live() {
   local edge_ds="${FUGUE_RELEASE_FULLNAME}-edge"
   local edge_front_ds="${FUGUE_RELEASE_FULLNAME}-edge-front"
   local dns_ds="${FUGUE_RELEASE_FULLNAME}-dns"
-  local edge_resources caddy_resources probe_enabled probe_port probe_timeout active_slot
+  local edge_resources caddy_resources probe_enabled probe_port probe_timeout front_image_ref
 
   PUBLIC_DATA_PLANE_HELM_SET_ARGS=()
 
@@ -1137,7 +1196,9 @@ preserve_public_data_plane_from_live() {
       --set edge.blueGreen.enabled=true
       --set edge.caddy.publicHostPorts.enabled=false
     )
-    append_live_daemonset_image_helm_args "public data-plane front" "${edge_front_ds}" "edge-front" "edge.blueGreen.front.image" || true
+    front_image_ref="$(live_bluegreen_front_pod_image)"
+    append_image_ref_helm_args "public data-plane front" "${front_image_ref}" "edge.blueGreen.front.image" ||
+      append_live_daemonset_image_helm_args "public data-plane front" "${edge_front_ds}" "edge-front" "edge.blueGreen.front.image" || true
     append_live_daemonset_image_helm_args "public data-plane worker-a" "${FUGUE_RELEASE_FULLNAME}-edge-worker-a" "edge" "edge.blueGreen.slots.a.image" || true
     append_live_daemonset_image_helm_args "public data-plane worker-b" "${FUGUE_RELEASE_FULLNAME}-edge-worker-b" "edge" "edge.blueGreen.slots.b.image" || true
     edge_resources="$(trim_field "$(live_daemonset_container_resources_json "${FUGUE_RELEASE_FULLNAME}-edge-worker-a" "edge")")"
@@ -1149,12 +1210,6 @@ preserve_public_data_plane_from_live() {
     if [[ -n "${caddy_resources}" ]]; then
       PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-json "edge.caddy.resources=${caddy_resources}")
       log "public data-plane caddy resources preserved from live ${FUGUE_RELEASE_FULLNAME}-edge-worker-a/caddy"
-    fi
-    active_slot="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get "configmap/${FUGUE_RELEASE_FULLNAME}-public-data-plane-release" -o jsonpath='{.data.active_slot}' 2>/dev/null || true)"
-    active_slot="$(trim_field "${active_slot}")"
-    if [[ "${active_slot}" == "a" || "${active_slot}" == "b" ]]; then
-      PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-string "edge.blueGreen.activeSlot=${active_slot}")
-      log "public data-plane active slot preserved from release record: ${active_slot}"
     fi
     return 0
   fi

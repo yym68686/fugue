@@ -20,7 +20,13 @@ on:
         default: blue-green
         options:
           - blue-green
+          - front-ondelete
           - legacy-template-ondelete
+      confirm_front_restart:
+        description: Confirm that front pods may be restarted. Required only for strategy=front-ondelete.
+        required: false
+        type: boolean
+        default: false
       edge_image_tag:
         description: Edge image tag for inactive workers. Defaults to this workflow SHA.
         required: false
@@ -78,6 +84,7 @@ jobs:
           FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
           FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY: ${{ inputs.strategy }}
           FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN: ${{ inputs.enable_blue_green && 'true' || 'false' }}
+          FUGUE_PUBLIC_DATA_PLANE_FRONT_RESTART_CONFIRM: ${{ inputs.confirm_front_restart && 'true' || 'false' }}
           FUGUE_EDGE_IMAGE_REPOSITORY: ${{ steps.meta.outputs.edge_image_repository }}
           FUGUE_EDGE_IMAGE_TAG: ${{ inputs.edge_image_tag || github.sha }}
           FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS: ${{ inputs.smoke_urls }}

@@ -209,6 +209,39 @@ for pod in sorted(doc.get("items", []), key=lambda item: item.get("metadata", {}
 '
 }
 
+live_front_pod_image() {
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" get pods -l fugue.io/rollout-mode=node-local-blue-green-front -o json | python3 -c '
+import json
+import sys
+
+doc = json.load(sys.stdin)
+fallback = ""
+for pod in sorted(doc.get("items", []), key=lambda item: item.get("metadata", {}).get("name", "")):
+    image = ""
+    for container in pod.get("spec", {}).get("containers", []):
+        if container.get("name") == "edge-front":
+            image = container.get("image", "")
+            break
+    if not image:
+        continue
+    if not fallback:
+        fallback = image
+    status = pod.get("status", {})
+    if status.get("phase") != "Running":
+        continue
+    ready = False
+    for condition in status.get("conditions") or []:
+        if condition.get("type") == "Ready" and condition.get("status") == "True":
+            ready = True
+            break
+    if ready:
+        print(image)
+        raise SystemExit(0)
+if fallback:
+    print(fallback)
+'
+}
+
 daemonset_selector() {
   local daemonset_name="$1"
   kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json | python3 -c '
@@ -322,6 +355,35 @@ duration_to_seconds() {
   printf '600'
 }
 
+image_ref_without_digest() {
+  local image_ref="$1"
+  printf '%s' "${image_ref%%@*}"
+}
+
+image_ref_repository() {
+  local image_ref no_digest last
+  image_ref="$(trim_field "$1")"
+  no_digest="$(image_ref_without_digest "${image_ref}")"
+  last="${no_digest##*/}"
+  if [[ "${last}" == *:* ]]; then
+    printf '%s' "${no_digest%:*}"
+  else
+    printf '%s' "${no_digest}"
+  fi
+}
+
+image_ref_tag() {
+  local image_ref no_digest last
+  image_ref="$(trim_field "$1")"
+  no_digest="$(image_ref_without_digest "${image_ref}")"
+  last="${no_digest##*/}"
+  if [[ "${last}" == *:* ]]; then
+    printf '%s' "${last##*:}"
+  else
+    printf 'latest'
+  fi
+}
+
 patch_daemonset_ondelete() {
   local daemonset_name="$1"
   log "setting ${daemonset_name} updateStrategy=OnDelete before template patch"
@@ -406,6 +468,9 @@ helm_bluegreen_upgrade() {
   local front_public_hostports="$3"
   local legacy_public_hostports="$4"
   local args=()
+  local front_image_ref
+  local front_image_repository
+  local front_image_tag
 
   command_exists helm || [[ -n "${HELM:-}" ]] || fail "helm is required when FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN=true"
 
@@ -423,11 +488,23 @@ helm_bluegreen_upgrade() {
   )
   if [[ -n "$(trim_field "${FUGUE_EDGE_IMAGE_REPOSITORY:-}")" ]]; then
     args+=(--set-string "edge.image.repository=${FUGUE_EDGE_IMAGE_REPOSITORY}")
-    args+=(--set-string "edge.blueGreen.front.image.repository=${FUGUE_EDGE_IMAGE_REPOSITORY}")
   fi
   if [[ -n "$(trim_field "${FUGUE_EDGE_IMAGE_TAG:-}")" ]]; then
     args+=(--set-string "edge.image.tag=${FUGUE_EDGE_IMAGE_TAG}")
+  fi
+  front_image_ref="$(trim_field "$(live_front_pod_image || true)")"
+  if [[ -n "${front_image_ref}" ]]; then
+    front_image_repository="$(image_ref_repository "${front_image_ref}")"
+    front_image_tag="$(image_ref_tag "${front_image_ref}")"
+    if [[ -n "${front_image_repository}" && -n "${front_image_tag}" ]]; then
+      args+=(--set-string "edge.blueGreen.front.image.repository=${front_image_repository}")
+      args+=(--set-string "edge.blueGreen.front.image.tag=${front_image_tag}")
+      log "preserving live front image during worker release: ${front_image_repository}:${front_image_tag}"
+    fi
+  elif [[ -n "$(trim_field "${FUGUE_EDGE_IMAGE_REPOSITORY:-}")" && -n "$(trim_field "${FUGUE_EDGE_IMAGE_TAG:-}")" ]]; then
+    args+=(--set-string "edge.blueGreen.front.image.repository=${FUGUE_EDGE_IMAGE_REPOSITORY}")
     args+=(--set-string "edge.blueGreen.front.image.tag=${FUGUE_EDGE_IMAGE_TAG}")
+    log "no live front pods found; using requested edge image for initial front prewarm"
   fi
   if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
     log "dry-run: would run blue/green Helm phase ${phase}"
@@ -769,22 +846,106 @@ active_slot_from_front() {
 }
 
 active_slot_from_record() {
+  local base="$1"
   local release_record_name="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_RECORD_NAME:-${FUGUE_RELEASE_FULLNAME}-public-data-plane-release}"
-  kubectl_cmd -n "${FUGUE_NAMESPACE}" get "configmap/${release_record_name}" -o jsonpath='{.data.active_slot}' 2>/dev/null || true
+  local active_slots
+  local legacy_slot
+
+  active_slots="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "configmap/${release_record_name}" -o jsonpath='{.data.active_slots}' 2>/dev/null || true)"
+  active_slots="$(trim_field "${active_slots}")"
+  if [[ -n "${active_slots}" ]]; then
+    python3 -c '
+import json
+import sys
+
+base = sys.argv[1]
+try:
+    value = json.loads(sys.argv[2])
+except Exception:
+    raise SystemExit(0)
+if isinstance(value, dict):
+    slot = value.get(base, "")
+    if slot in ("a", "b"):
+        print(slot)
+' "${base}" "${active_slots}" || true
+    return 0
+  fi
+
+  legacy_slot="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "configmap/${release_record_name}" -o jsonpath='{.data.active_slot}' 2>/dev/null || true)"
+  legacy_slot="$(trim_field "${legacy_slot}")"
+  [[ -n "${legacy_slot}" ]] || return 0
 }
 
 current_active_slot() {
-  local front_daemonset="$1"
+  local base="$1"
+  local front_daemonset="$2"
   local slot
   slot="$(trim_field "$(active_slot_from_front "${front_daemonset}")")"
   case "${slot}" in
     a|b) printf '%s' "${slot}"; return 0 ;;
   esac
-  slot="$(trim_field "$(active_slot_from_record)")"
+  slot="$(trim_field "$(active_slot_from_record "${base}")")"
   case "${slot}" in
     a|b) printf '%s' "${slot}"; return 0 ;;
   esac
-  printf '%s' "${FUGUE_EDGE_BLUE_GREEN_DEFAULT_ACTIVE_SLOT}"
+  fail "could not determine active slot for ${base}; front slot file is unreadable and no per-base release record exists"
+}
+
+record_active_slot_json() {
+  local active_slots="$1"
+  local base="$2"
+  local slot="$3"
+  python3 -c '
+import json
+import sys
+
+try:
+    value = json.loads(sys.argv[1] or "{}")
+except Exception:
+    value = {}
+if not isinstance(value, dict):
+    value = {}
+value[sys.argv[2]] = sys.argv[3]
+print(json.dumps(value, separators=(",", ":"), sort_keys=True))
+' "${active_slots}" "${base}" "${slot}"
+}
+
+release_record_active_slots_json() {
+  local release_record_name="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_RECORD_NAME:-${FUGUE_RELEASE_FULLNAME}-public-data-plane-release}"
+  local active_slots
+
+  active_slots="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "configmap/${release_record_name}" -o jsonpath='{.data.active_slots}' 2>/dev/null || true)"
+  active_slots="$(trim_field "${active_slots}")"
+  if [[ -n "${active_slots}" ]]; then
+    python3 -c '
+import json
+import sys
+
+try:
+    value = json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(1)
+if not isinstance(value, dict):
+    raise SystemExit(1)
+print(json.dumps(value, separators=(",", ":"), sort_keys=True))
+' "${active_slots}" && return 0
+  fi
+  printf '{}'
+}
+
+collect_current_active_slots_json() {
+  local bases=("$@")
+  local active_slots="{}"
+  local base
+  local front_ds
+  local slot
+
+  for base in "${bases[@]}"; do
+    front_ds="$(bluegreen_front_daemonset_name "${base}")"
+    slot="$(current_active_slot "${base}" "${front_ds}")"
+    active_slots="$(record_active_slot_json "${active_slots}" "${base}" "${slot}")"
+  done
+  printf '%s' "${active_slots}"
 }
 
 other_slot() {
@@ -907,10 +1068,101 @@ check_worker_https_smoke() {
   done < <(node_ips_for_daemonset "${daemonset_name}")
 }
 
+container_patch_for_front() {
+  local daemonset_name="$1"
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json | python3 -c '
+import json
+import os
+import sys
+
+doc = json.load(sys.stdin)
+release_id = os.environ["FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID"]
+edge_repo = os.environ.get("FUGUE_EDGE_IMAGE_REPOSITORY", "").strip()
+edge_tag = os.environ.get("FUGUE_EDGE_IMAGE_TAG", "").strip()
+if not edge_repo or not edge_tag:
+    raise SystemExit("FUGUE_EDGE_IMAGE_REPOSITORY and FUGUE_EDGE_IMAGE_TAG are required for front-ondelete")
+
+containers = []
+for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
+    if container.get("name") != "edge-front":
+        continue
+    containers.append({
+        "name": "edge-front",
+        "image": f"{edge_repo}:{edge_tag}",
+    })
+if not containers:
+    raise SystemExit("front daemonset has no edge-front container")
+patch = {
+    "spec": {
+        "updateStrategy": {
+            "type": "OnDelete",
+            "rollingUpdate": None,
+        },
+        "template": {
+            "metadata": {
+                "annotations": {
+                    "fugue.io/public-data-plane-release-id": release_id,
+                    "fugue.io/public-data-plane-release-mode": "node-local-blue-green-front",
+                },
+            },
+            "spec": {
+                "containers": containers,
+            },
+        },
+    },
+}
+print(json.dumps(patch, separators=(",", ":")))
+'
+}
+
+patch_front_template() {
+  local daemonset_name="$1"
+  local patch
+
+  patch="$(container_patch_for_front "${daemonset_name}")"
+  log "patching front ${daemonset_name} template"
+  if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
+    printf '%s\n' "${patch}"
+    return 0
+  fi
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" patch "ds/${daemonset_name}" --type=strategic -p "${patch}" >/dev/null
+  wait_daemonset_observed "${daemonset_name}"
+}
+
+check_public_smoke_on_front_nodes() {
+  local front_daemonset="$1"
+  local urls="${FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS:-}"
+  local url
+  local host
+  local path
+  local host_ip
+
+  [[ -n "$(trim_field "${urls}")" ]] || return 0
+  while IFS= read -r url; do
+    url="$(trim_field "${url}")"
+    [[ -n "${url}" ]] || continue
+    host="$(python3 -c 'from urllib.parse import urlsplit; import sys; print(urlsplit(sys.argv[1]).hostname or "")' "${url}")"
+    path="$(python3 -c 'from urllib.parse import urlsplit; import sys; p=urlsplit(sys.argv[1]); path=p.path or "/"; print(path + (("?" + p.query) if p.query else ""))' "${url}")"
+    [[ -n "$(trim_field "${host}")" ]] || fail "front smoke URL must include a hostname: ${url}"
+    while IFS= read -r host_ip; do
+      host_ip="$(trim_field "${host_ip}")"
+      [[ -n "${host_ip}" ]] || continue
+      log "checking front HTTPS smoke ${host_ip}:443 host=${host} path=${path}"
+      if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
+        continue
+      fi
+      curl -fsS --max-time "${FUGUE_PUBLIC_DATA_PLANE_SMOKE_TIMEOUT_SECONDS:-10}" \
+        --resolve "${host}:443:${host_ip}" \
+        "https://${host}${path}" >/dev/null
+    done < <(node_ips_for_daemonset "${front_daemonset}")
+  done < <(printf '%s\n' "${urls}" | tr ',' '\n')
+}
+
 run_bluegreen_release() {
   local bases=()
   local base front_ds active inactive inactive_ds active_ds inactive_port
   local protected_before protected_after
+  local active_slots_json="{}"
 
   enable_bluegreen_chart_mode
   while IFS= read -r base; do
@@ -930,7 +1182,7 @@ run_bluegreen_release() {
   for base in "${bases[@]}"; do
     front_ds="$(bluegreen_front_daemonset_name "${base}")"
     wait_daemonset_ready "${front_ds}"
-    active="$(current_active_slot "${front_ds}")"
+    active="$(current_active_slot "${base}" "${front_ds}")"
     inactive="$(other_slot "${active}")"
     active_ds="$(bluegreen_worker_daemonset_name "${base}" "${active}")"
     inactive_ds="$(bluegreen_worker_daemonset_name "${base}" "${inactive}")"
@@ -952,23 +1204,61 @@ run_bluegreen_release() {
     fi
     write_front_active_slot "${front_ds}" "${inactive}"
     wait_daemonset_ready "${front_ds}"
-    FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SLOT="${inactive}"
+    active_slots_json="$(record_active_slot_json "${active_slots_json}" "${base}" "${inactive}")"
   done
+  FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SLOTS_JSON="${active_slots_json}"
+}
+
+run_front_ondelete_release() {
+  local bases=()
+  local base
+  local front_ds
+  local before_uids
+
+  enable_bluegreen_chart_mode
+  while IFS= read -r base; do
+    base="$(trim_field "${base}")"
+    [[ -n "${base}" ]] || continue
+    bases+=("${base}")
+  done < <(bluegreen_all_bases_array)
+  if (( ${#bases[@]} == 0 )); then
+    fail "no edge blue/green front DaemonSets found; enable edge.blueGreen.enabled first"
+  fi
+  if [[ "${FUGUE_PUBLIC_DATA_PLANE_FRONT_RESTART_CONFIRM}" != "true" ]]; then
+    fail "front-ondelete requires FUGUE_PUBLIC_DATA_PLANE_FRONT_RESTART_CONFIRM=true because front pods own public 80/443"
+  fi
+
+  log "front-ondelete release_id=${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID} namespace=${FUGUE_NAMESPACE} bases=${bases[*]}"
+  for base in "${bases[@]}"; do
+    require_bluegreen_base_complete "${base}"
+    wait_bluegreen_base_ready "${base}"
+    front_ds="$(bluegreen_front_daemonset_name "${base}")"
+    patch_front_template "${front_ds}"
+    before_uids="$(daemonset_pod_uids "${front_ds}")"
+    delete_daemonset_pods_no_wait "${front_ds}" "front"
+    wait_daemonset_replaced_and_ready "${front_ds}" "${before_uids}"
+    check_public_smoke_on_front_nodes "${front_ds}"
+  done
+  FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SLOTS_JSON="$(collect_current_active_slots_json "${bases[@]}")"
 }
 
 write_release_record() {
   local daemonsets_csv="$1"
   local release_record_name="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_RECORD_NAME:-${FUGUE_RELEASE_FULLNAME}-public-data-plane-release}"
+  local active_slots_json="${FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SLOTS_JSON:-}"
 
   if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
     log "dry-run: skipping release record ${release_record_name}"
     return 0
   fi
+  if [[ -z "$(trim_field "${active_slots_json}")" ]]; then
+    active_slots_json="$(release_record_active_slots_json)"
+  fi
 
   kubectl_cmd -n "${FUGUE_NAMESPACE}" create configmap "${release_record_name}" \
     --from-literal=release_id="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID}" \
     --from-literal=mode="${FUGUE_PUBLIC_DATA_PLANE_RECORD_MODE:-edge-template-ondelete}" \
-    --from-literal=active_slot="${FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SLOT:-}" \
+    --from-literal=active_slots="${active_slots_json}" \
     --from-literal=daemonsets="${daemonsets_csv}" \
     --from-literal=edge_resources="${FUGUE_EDGE_RESOURCES_JSON}" \
     --from-literal=caddy_resources="${FUGUE_EDGE_CADDY_RESOURCES_JSON}" \
@@ -1016,6 +1306,7 @@ main() {
   FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN:-false}"
   FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY:-blue-green}"
   FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN="${FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN:-false}"
+  FUGUE_PUBLIC_DATA_PLANE_FRONT_RESTART_CONFIRM="${FUGUE_PUBLIC_DATA_PLANE_FRONT_RESTART_CONFIRM:-false}"
   FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID:-pdp-$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_SHA:-local}}"
   FUGUE_EDGE_BLUE_GREEN_DEFAULT_ACTIVE_SLOT="${FUGUE_EDGE_BLUE_GREEN_DEFAULT_ACTIVE_SLOT:-a}"
   FUGUE_EDGE_BLUE_GREEN_ACTIVE_SLOT_FILE="${FUGUE_EDGE_BLUE_GREEN_ACTIVE_SLOT_FILE:-/var/lib/fugue/edge-blue-green/active-slot}"
@@ -1029,12 +1320,16 @@ main() {
     *) fail "FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN must be true or false" ;;
   esac
   case "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" in
-    blue-green|legacy-template-ondelete) ;;
-    *) fail "FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY must be blue-green or legacy-template-ondelete" ;;
+    blue-green|front-ondelete|legacy-template-ondelete) ;;
+    *) fail "FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY must be blue-green, front-ondelete, or legacy-template-ondelete" ;;
   esac
   case "${FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN}" in
     true|false) ;;
     *) fail "FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN must be true or false" ;;
+  esac
+  case "${FUGUE_PUBLIC_DATA_PLANE_FRONT_RESTART_CONFIRM}" in
+    true|false) ;;
+    *) fail "FUGUE_PUBLIC_DATA_PLANE_FRONT_RESTART_CONFIRM must be true or false" ;;
   esac
   case "${FUGUE_EDGE_BLUE_GREEN_DEFAULT_ACTIVE_SLOT}" in
     a|b) ;;
@@ -1056,6 +1351,20 @@ main() {
       return 0
     fi
     log "public edge blue/green release complete; front and previous active workers were not restarted"
+    return 0
+  fi
+
+  if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "front-ondelete" ]]; then
+    FUGUE_PUBLIC_DATA_PLANE_RECORD_MODE="node-local-blue-green-front"
+    run_front_ondelete_release
+    daemonsets_csv="$(bluegreen_all_bases | while IFS= read -r base; do printf '%s\n' "$(bluegreen_front_daemonset_name "${base}")"; done | paste -sd, -)"
+    write_release_record "${daemonsets_csv}"
+    run_smoke_urls
+    if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
+      log "dry-run complete; front pods would be replaced only because front-ondelete was explicitly selected"
+      return 0
+    fi
+    log "public edge front release complete; use only for explicit front changes"
     return 0
   fi
 
