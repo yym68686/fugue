@@ -716,6 +716,52 @@ func TestUploadDataPlanBlobsUsesConcurrencyForSingleBlobUploads(t *testing.T) {
 	}
 }
 
+func TestPutDataBlobRetriesTransientObjectFailure(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "blob.bin")
+	payload := []byte(strings.Repeat("x", 4096))
+	if err := os.WriteFile(source, payload, 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	var mu sync.Mutex
+	var attempts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/upload/blob" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		mu.Lock()
+		attempts++
+		current := attempts
+		mu.Unlock()
+		if current == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("try again"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "token")
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	var progressed int64
+	if err := client.PutDataBlobWithProgress(server.URL+"/upload/blob", source, func(delta int64) {
+		progressed += delta
+	}); err != nil {
+		t.Fatalf("put blob: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts != 2 {
+		t.Fatalf("expected retry, got %d attempts", attempts)
+	}
+	if progressed != int64(len(payload)) {
+		t.Fatalf("expected progress %d, got %d", len(payload), progressed)
+	}
+}
+
 func testCLIDigest(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])

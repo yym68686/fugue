@@ -39,6 +39,7 @@ const (
 	defaultDataTransferConcurrency          = 32
 	dataCheckpointBlobThreshold             = 1024
 	dataCheckpointByteThreshold       int64 = 1 << 30
+	dataObjectTransferMaxAttempts           = 5
 )
 
 var defaultDataIgnore = []string{
@@ -4153,6 +4154,31 @@ func (c *Client) PutDataBlob(uploadURL, sourcePath string) error {
 }
 
 func (c *Client) PutDataBlobWithProgress(uploadURL, sourcePath string, progress dataTransferProgress) error {
+	var lastErr error
+	for attempt := 1; attempt <= dataObjectTransferMaxAttempts; attempt++ {
+		var attemptBytes int64
+		err := c.putDataBlobWithProgressOnce(uploadURL, sourcePath, func(delta int64) {
+			attemptBytes += delta
+			if progress != nil {
+				progress(delta)
+			}
+		})
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isTransientDataObjectError(err) || attempt == dataObjectTransferMaxAttempts {
+			return err
+		}
+		if progress != nil && attemptBytes > 0 {
+			progress(-attemptBytes)
+		}
+		time.Sleep(dataObjectRetryDelay(attempt))
+	}
+	return lastErr
+}
+
+func (c *Client) putDataBlobWithProgressOnce(uploadURL, sourcePath string, progress dataTransferProgress) error {
 	file, err := os.Open(sourcePath)
 	if err != nil {
 		return err
@@ -4181,6 +4207,31 @@ func (c *Client) UploadDataBlobPart(uploadURL, sourcePath string, offset, size i
 }
 
 func (c *Client) UploadDataBlobPartWithProgress(uploadURL, sourcePath string, offset, size int64, progress dataTransferProgress) (string, error) {
+	var lastErr error
+	for attempt := 1; attempt <= dataObjectTransferMaxAttempts; attempt++ {
+		var attemptBytes int64
+		etag, err := c.uploadDataBlobPartWithProgressOnce(uploadURL, sourcePath, offset, size, func(delta int64) {
+			attemptBytes += delta
+			if progress != nil {
+				progress(delta)
+			}
+		})
+		if err == nil {
+			return etag, nil
+		}
+		lastErr = err
+		if !isTransientDataObjectError(err) || attempt == dataObjectTransferMaxAttempts {
+			return "", err
+		}
+		if progress != nil && attemptBytes > 0 {
+			progress(-attemptBytes)
+		}
+		time.Sleep(dataObjectRetryDelay(attempt))
+	}
+	return "", lastErr
+}
+
+func (c *Client) uploadDataBlobPartWithProgressOnce(uploadURL, sourcePath string, offset, size int64, progress dataTransferProgress) (string, error) {
 	if strings.TrimSpace(uploadURL) == "" {
 		return "", fmt.Errorf("multipart part upload url is missing")
 	}
@@ -4555,12 +4606,45 @@ func (c *Client) doDataObjectRequestWithResponse(req *http.Request) (*http.Respo
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		if trimmed := strings.TrimSpace(string(body)); trimmed != "" {
-			return nil, fmt.Errorf("object transfer failed: status=%d body=%s", resp.StatusCode, trimmed)
-		}
-		return nil, fmt.Errorf("object transfer failed: status=%d", resp.StatusCode)
+		return nil, dataObjectTransferError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(body))}
 	}
 	return resp, nil
+}
+
+type dataObjectTransferError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e dataObjectTransferError) Error() string {
+	if strings.TrimSpace(e.Body) != "" {
+		return fmt.Sprintf("object transfer failed: status=%d body=%s", e.StatusCode, e.Body)
+	}
+	return fmt.Sprintf("object transfer failed: status=%d", e.StatusCode)
+}
+
+func isTransientDataObjectError(err error) bool {
+	var objectErr dataObjectTransferError
+	if !errors.As(err, &objectErr) {
+		return false
+	}
+	switch objectErr.StatusCode {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func dataObjectRetryDelay(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	delay := time.Duration(200*(1<<(attempt-1))) * time.Millisecond
+	if delay > 3*time.Second {
+		return 3 * time.Second
+	}
+	return delay
 }
 
 func isFugueManagedDataBlobURL(rawURL string) bool {
