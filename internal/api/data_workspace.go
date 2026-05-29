@@ -162,6 +162,28 @@ func parseDataTransferBlobPage(r *http.Request, total int) (dataTransferBlobPage
 	return finalizeDataTransferBlobPage(page), nil
 }
 
+func dataTransferBlobTotal(transfer model.DataTransfer) int {
+	if len(transfer.Manifest.Entries) == 0 {
+		return len(transfer.PlanBlobs)
+	}
+	return countDataManifestBlobs(transfer.Manifest)
+}
+
+func countDataManifestBlobs(manifest model.DataManifest) int {
+	seen := map[string]struct{}{}
+	for _, entry := range manifest.Entries {
+		if entry.Kind != model.DataManifestEntryKindFile {
+			continue
+		}
+		digest := strings.TrimSpace(strings.ToLower(entry.SHA256))
+		if digest == "" {
+			continue
+		}
+		seen[digest] = struct{}{}
+	}
+	return len(seen)
+}
+
 func finalizeDataTransferBlobPage(page dataTransferBlobPage) dataTransferBlobPage {
 	if page.Total < 0 {
 		page.Total = 0
@@ -565,7 +587,7 @@ func (s *Server) handlePlanDataUpload(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	transfer.PlanBlobs = blobs
+	transfer.PlanBlobs = s.storedDataTransferPlanBlobs(workspace, transfer.Direction, blobs)
 	if transfer, err = s.store.UpdateDataTransfer(transfer); err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -581,7 +603,7 @@ func (s *Server) handlePlanDataUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	expiresAt = time.Now().UTC().Add(dataPresignTTL())
-	transfer.PlanBlobs = blobs
+	transfer.PlanBlobs = s.storedDataTransferPlanBlobs(workspace, transfer.Direction, blobs)
 	transfer.ExpiresAt = &expiresAt
 	if transfer, err = s.store.UpdateDataTransfer(transfer); err != nil {
 		s.writeStoreError(w, err)
@@ -648,7 +670,7 @@ func (s *Server) handlePlanDataDownload(w http.ResponseWriter, r *http.Request) 
 		s.writeStoreError(w, err)
 		return
 	}
-	transfer.PlanBlobs = blobs
+	transfer.PlanBlobs = s.storedDataTransferPlanBlobs(workspace, transfer.Direction, blobs)
 	if transfer, err = s.store.UpdateDataTransfer(transfer); err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -776,8 +798,10 @@ func (s *Server) handleCompleteDataTransfer(w http.ResponseWriter, r *http.Reque
 	transfer.FinishedAt = &now
 	if req.ErrorMessage != "" {
 		transfer.Status = model.DataTransferStatusFailed
+		transfer.PlanBlobs = s.storedDataTransferPlanBlobs(workspace, transfer.Direction, transfer.PlanBlobs)
 	} else {
 		transfer.Status = model.DataTransferStatusCompleted
+		transfer.PlanBlobs = nil
 	}
 	updated, err := s.store.UpdateDataTransfer(transfer)
 	if err != nil {
@@ -936,7 +960,7 @@ func (s *Server) handleRefreshDataTransferAuthorization(w http.ResponseWriter, r
 		return
 	}
 	upload := transfer.Direction == model.DataTransferDirectionUpload
-	page, err := parseDataTransferBlobPage(r, len(transfer.PlanBlobs))
+	page, err := parseDataTransferBlobPage(r, dataTransferBlobTotal(transfer))
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
@@ -947,7 +971,7 @@ func (s *Server) handleRefreshDataTransferAuthorization(w http.ResponseWriter, r
 		return
 	}
 	expiresAt := time.Now().UTC().Add(dataPresignTTL())
-	transfer.PlanBlobs = blobs
+	transfer.PlanBlobs = s.storedDataTransferPlanBlobs(workspace, transfer.Direction, blobs)
 	transfer.ExpiresAt = &expiresAt
 	transfer.Status = model.DataTransferStatusRunning
 	transfer, err = s.store.UpdateDataTransfer(transfer)
@@ -1008,7 +1032,7 @@ func (s *Server) handleCheckpointDataTransfer(w http.ResponseWriter, r *http.Req
 		transfer.FilesDone = *req.FilesDone
 	}
 	if len(req.Blobs) > 0 {
-		transfer.PlanBlobs = mergeTransferPlanBlobCheckpoints(transfer.PlanBlobs, req.Blobs)
+		transfer.PlanBlobs = s.storedDataTransferPlanBlobs(workspace, transfer.Direction, mergeTransferPlanBlobCheckpoints(transfer.PlanBlobs, req.Blobs))
 	}
 	transfer.Status = model.DataTransferStatusRunning
 	if transfer.StartedAt == nil {
@@ -1105,7 +1129,7 @@ func (s *Server) handleCompleteDataMultipartUpload(w http.ResponseWriter, r *htt
 		s.writeStoreError(w, err)
 		return
 	}
-	transfer.PlanBlobs = markTransferPlanBlobComplete(transfer.PlanBlobs, req.SHA256, req.Parts)
+	transfer.PlanBlobs = s.storedDataTransferPlanBlobs(workspace, transfer.Direction, markTransferPlanBlobComplete(transfer.PlanBlobs, req.SHA256, req.Parts))
 	if transfer, err = s.store.UpdateDataTransfer(transfer); err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -1283,6 +1307,14 @@ func (s *Server) handleGetDataBlob(w http.ResponseWriter, r *http.Request) {
 func (s *Server) dataPlanBlobs(ctx context.Context, r *http.Request, workspace model.DataWorkspace, transfer model.DataTransfer, manifest model.DataManifest, upload bool) ([]dataTransferPlanBlob, error) {
 	seen := map[string]struct{}{}
 	blobs := []dataTransferPlanBlob{}
+	storedByDigest := map[string]dataTransferPlanBlob{}
+	for _, stored := range transfer.PlanBlobs {
+		digest := strings.TrimSpace(strings.ToLower(stored.SHA256))
+		if digest == "" {
+			continue
+		}
+		storedByDigest[digest] = sanitizeDataTransferPlanBlob(stored)
+	}
 	var objectBackend *dataObjectBackend
 	backend, err := s.store.GetDataBackendForUse(workspace.StorageBackendID, workspace.TenantID, true)
 	if err == nil && dataBackendSupportsDirectObjectStorage(backend) {
@@ -1313,9 +1345,13 @@ func (s *Server) dataPlanBlobs(ctx context.Context, r *http.Request, workspace m
 			Size:      entry.Size,
 			ObjectKey: entry.ObjectKey,
 		}
+		if stored, ok := storedByDigest[strings.ToLower(strings.TrimSpace(entry.SHA256))]; ok {
+			blob = mergeTransferPlanBlobCheckpoint(blob, stored)
+		}
 		if objectBackend != nil {
 			if upload {
-				_, blob.Exists = knownObjectDigests[entry.SHA256]
+				_, snapshotExists := knownObjectDigests[entry.SHA256]
+				blob.Exists = blob.Exists || snapshotExists
 			} else {
 				exists, err := objectBackend.headObject(ctx, entry.ObjectKey)
 				if err != nil {
@@ -1324,8 +1360,14 @@ func (s *Server) dataPlanBlobs(ctx context.Context, r *http.Request, workspace m
 				blob.Exists = exists
 			}
 			if upload && !blob.Exists {
-				blob.UploadMode = model.DataBlobUploadModeSingle
-				if entry.Size > dataMultipartPartSize {
+				if blob.UploadMode == model.DataBlobUploadModeMultipart && blob.UploadID != "" {
+					if len(blob.Parts) == 0 {
+						blob.Parts = planDataUploadParts(entry.Size, dataMultipartPartSize)
+					}
+					if blob.PartSize <= 0 {
+						blob.PartSize = dataMultipartPartSize
+					}
+				} else if entry.Size > dataMultipartPartSize {
 					uploadID, err := objectBackend.createMultipartUpload(ctx, entry.ObjectKey)
 					if err != nil {
 						return nil, err
@@ -1334,6 +1376,8 @@ func (s *Server) dataPlanBlobs(ctx context.Context, r *http.Request, workspace m
 					blob.UploadID = uploadID
 					blob.PartSize = dataMultipartPartSize
 					blob.Parts = planDataUploadParts(entry.Size, dataMultipartPartSize)
+				} else {
+					blob.UploadMode = model.DataBlobUploadModeSingle
 				}
 			}
 			if !upload {
@@ -1380,6 +1424,42 @@ func (s *Server) dataWorkspaceSnapshotBlobDigests(workspaceID string) (map[strin
 		}
 	}
 	return digests, nil
+}
+
+func (s *Server) storedDataTransferPlanBlobs(workspace model.DataWorkspace, direction string, blobs []dataTransferPlanBlob) []dataTransferPlanBlob {
+	directObjectBackend := false
+	if backend, err := s.store.GetDataBackendForUse(workspace.StorageBackendID, workspace.TenantID, true); err == nil {
+		directObjectBackend = dataBackendSupportsDirectObjectStorage(backend)
+	}
+	out := make([]dataTransferPlanBlob, 0, len(blobs))
+	for _, blob := range blobs {
+		blob = sanitizeDataTransferPlanBlob(blob)
+		if directObjectBackend {
+			switch direction {
+			case model.DataTransferDirectionUpload:
+				if blob.UploadMode != model.DataBlobUploadModeMultipart && blob.UploadID == "" && len(blob.Parts) == 0 {
+					continue
+				}
+			case model.DataTransferDirectionDownload:
+				continue
+			}
+		}
+		out = append(out, blob)
+	}
+	return out
+}
+
+func sanitizeDataTransferPlanBlob(blob dataTransferPlanBlob) dataTransferPlanBlob {
+	blob.UploadURL = ""
+	blob.DownloadURL = ""
+	blob.ExpiresAt = time.Time{}
+	blob.Parts = append([]model.DataTransferPart(nil), blob.Parts...)
+	for idx := range blob.Parts {
+		blob.Parts[idx].UploadURL = ""
+		blob.Parts[idx].DownloadURL = ""
+		blob.Parts[idx].ExpiresAt = time.Time{}
+	}
+	return blob
 }
 
 func (s *Server) sweepDataWorkspaceGC(ctx context.Context, workspace model.DataWorkspace, retentionDays int, dryRun bool) (model.DataGCSweepResult, error) {
@@ -1783,7 +1863,10 @@ func (s *Server) refreshDataPlanBlobs(ctx context.Context, r *http.Request, work
 	if err != nil {
 		return nil, nil, err
 	}
-	blobs := append([]dataTransferPlanBlob(nil), transfer.PlanBlobs...)
+	blobs, err := s.dataPlanBlobs(ctx, r, workspace, transfer, transfer.Manifest, upload)
+	if err != nil {
+		return nil, nil, err
+	}
 	start := page.Offset
 	if start > len(blobs) {
 		start = len(blobs)

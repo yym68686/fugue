@@ -56,6 +56,7 @@ var defaultDataIgnore = []string{
 }
 
 var dataHashCacheNow = time.Now
+var dataControlPlaneRetrySleep = time.Sleep
 
 type dataConfig struct {
 	Version   int               `json:"version" yaml:"version"`
@@ -3114,6 +3115,7 @@ func (c *CLI) uploadDataPlanBlobs(client *Client, workspaceID, transferID, manif
 		return err
 	}
 	progress.finish()
+	uploader.printCheckpointWarning()
 	return nil
 }
 
@@ -3134,6 +3136,8 @@ type dataUploadExecutor struct {
 	state           dataTransferState
 	checkpointBlobs []dataBlobPlan
 	checkpointBytes int64
+	checkpointWarns int
+	checkpointErr   error
 }
 
 func (c *CLI) newDataUploadExecutor(client *Client, workspaceID, transferID, manifestDigest string, pathsByDigest map[string]string, resume, noProgress bool, concurrency, pageLimit int, progress *dataProgressRenderer) (*dataUploadExecutor, error) {
@@ -3369,7 +3373,32 @@ func (u *dataUploadExecutor) flushCheckpoints(force bool) error {
 			return err
 		}
 	}
-	return u.client.CheckpointDataTransfer(u.transferID, -1, -1, batch)
+	if err := u.client.CheckpointDataTransfer(u.transferID, -1, -1, batch); err != nil {
+		if isTransientDataControlPlaneError(err) {
+			u.noteCheckpointWarning(err)
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (u *dataUploadExecutor) noteCheckpointWarning(err error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.checkpointWarns++
+	u.checkpointErr = err
+}
+
+func (u *dataUploadExecutor) printCheckpointWarning() {
+	u.mu.Lock()
+	count := u.checkpointWarns
+	err := u.checkpointErr
+	u.mu.Unlock()
+	if count == 0 || err == nil || u.cli == nil || u.cli.wantsJSON() {
+		return
+	}
+	u.cli.progressf("warning=data transfer checkpoint sync was delayed for %d batch(es); upload continued and the final snapshot remains authoritative: %v", count, err)
 }
 
 func (c *CLI) uploadMultipartDataBlob(client *Client, sourcePath, transferID string, blob dataBlobPlan, resume bool, concurrency int, progress dataTransferProgress) ([]model.DataTransferPart, error) {
@@ -4154,7 +4183,7 @@ func (c *Client) doDataTransferControlPlaneJSONWithRetry(method, relativePath st
 		if !isTransientDataControlPlaneError(err) || attempt == dataControlPlaneTransferMaxAttempts {
 			return err
 		}
-		time.Sleep(dataControlPlaneRetryDelay(attempt))
+		dataControlPlaneRetrySleep(dataControlPlaneRetryDelay(attempt))
 	}
 	return lastErr
 }

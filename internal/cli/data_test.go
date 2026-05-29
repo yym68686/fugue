@@ -716,6 +716,69 @@ func TestUploadDataPlanBlobsUsesConcurrencyForSingleBlobUploads(t *testing.T) {
 	}
 }
 
+func TestUploadDataPlanBlobsContinuesAfterTransientCheckpointFailure(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	oldSleep := dataControlPlaneRetrySleep
+	dataControlPlaneRetrySleep = func(time.Duration) {}
+	t.Cleanup(func() { dataControlPlaneRetrySleep = oldSleep })
+
+	var mu sync.Mutex
+	var puts, checkpoints int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/upload/blob":
+			_, _ = io.Copy(io.Discard, r.Body)
+			mu.Lock()
+			puts++
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/data/transfers/transfer-1/checkpoint":
+			mu.Lock()
+			checkpoints++
+			mu.Unlock()
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("write failed: write tcp 10.0.0.1:1234->10.0.0.2:5432: write: connection reset by peer"))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "token")
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	digest := strings.Repeat("a", 64)
+	source := filepath.Join(root, "blob.bin")
+	if err := os.WriteFile(source, []byte("payload"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	var stderr bytes.Buffer
+	cli := &CLI{stdout: io.Discard, stderr: &stderr}
+	err = cli.uploadDataPlanBlobs(client, "workspace-1", "transfer-1", "manifest-1", []dataBlobPlan{{
+		SHA256:     digest,
+		Size:       7,
+		UploadMode: model.DataBlobUploadModeSingle,
+		UploadURL:  server.URL + "/upload/blob",
+	}}, map[string]string{digest: source}, true, true, 1, 7, 0, 1, nil)
+	if err != nil {
+		t.Fatalf("upload blobs: %v", err)
+	}
+	mu.Lock()
+	gotPuts := puts
+	gotCheckpoints := checkpoints
+	mu.Unlock()
+	if gotPuts != 1 {
+		t.Fatalf("expected upload to complete, got puts=%d", gotPuts)
+	}
+	if gotCheckpoints != dataControlPlaneTransferMaxAttempts {
+		t.Fatalf("expected checkpoint retries, got %d", gotCheckpoints)
+	}
+	if !strings.Contains(stderr.String(), "checkpoint sync was delayed") {
+		t.Fatalf("expected checkpoint warning, got %q", stderr.String())
+	}
+}
+
 func TestPutDataBlobRetriesTransientObjectFailure(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "blob.bin")

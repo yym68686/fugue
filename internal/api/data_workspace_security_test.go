@@ -134,7 +134,7 @@ func TestDataTransferCheckpointPersistsServerSideState(t *testing.T) {
 	if !updated.PlanBlobs[0].Exists || !updated.PlanBlobs[0].Parts[0].Completed || updated.PlanBlobs[0].Parts[0].ETag != "etag-1" {
 		t.Fatalf("checkpoint did not persist part state: %+v", updated.PlanBlobs)
 	}
-	if updated.PlanBlobs[0].UploadURL != "https://example.invalid/upload" || updated.PlanBlobs[0].Parts[0].UploadURL != "https://example.invalid/part" {
-		t.Fatalf("checkpoint overwrote live presigned URLs: %+v", updated.PlanBlobs)
+	if updated.PlanBlobs[0].UploadURL != "" || updated.PlanBlobs[0].Parts[0].UploadURL != "" {
+		t.Fatalf("checkpoint persisted live presigned URLs: %+v", updated.PlanBlobs)
 	}
 }

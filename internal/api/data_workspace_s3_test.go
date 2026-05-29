@@ -118,6 +118,13 @@ func TestDataWorkspaceS3MultipartPlanRefreshAndComplete(t *testing.T) {
 	if headCalls != 0 {
 		t.Fatalf("upload plan should not issue object HEAD requests, got %d", headCalls)
 	}
+	storedTransfer, err := stateStore.GetDataTransfer(plan.Transfer.ID)
+	if err != nil {
+		t.Fatalf("get stored transfer: %v", err)
+	}
+	if len(storedTransfer.PlanBlobs) != 1 || storedTransfer.PlanBlobs[0].UploadID != "upload-1" || storedTransfer.PlanBlobs[0].Parts[0].UploadURL != "" {
+		t.Fatalf("expected stored transfer to keep only sanitized multipart state, got %+v", storedTransfer.PlanBlobs)
+	}
 	if listPartsCalls != 1 || !plan.Blobs[0].Parts[0].Completed || plan.Blobs[0].Parts[0].ETag != "etag-1" {
 		t.Fatalf("unexpected initial refreshed parts calls=%d blobs=%+v", listPartsCalls, plan.Blobs)
 	}
@@ -332,6 +339,13 @@ func TestDataWorkspaceS3UploadPlanPagesBlobs(t *testing.T) {
 	if len(plan.Blobs) != 2 || plan.BlobsTotal != 3 || plan.BlobsLimit != 2 || plan.BlobsNextOffset == nil || *plan.BlobsNextOffset != 2 {
 		t.Fatalf("unexpected first page: %+v", plan)
 	}
+	storedTransfer, err := stateStore.GetDataTransfer(plan.Transfer.ID)
+	if err != nil {
+		t.Fatalf("get stored transfer: %v", err)
+	}
+	if len(storedTransfer.PlanBlobs) != 0 {
+		t.Fatalf("expected single-part direct upload plan state to stay compact, got %+v", storedTransfer.PlanBlobs)
+	}
 	refreshReq, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/v1/data/transfers/"+plan.Transfer.ID+"/refresh?blob_offset=2&blob_limit=2", nil)
 	refreshReq.Header.Set("Authorization", "Bearer "+secret)
 	refreshResp, err := http.DefaultClient.Do(refreshReq)
@@ -353,6 +367,13 @@ func TestDataWorkspaceS3UploadPlanPagesBlobs(t *testing.T) {
 	}
 	if len(refresh.Blobs) != 1 || refresh.BlobsTotal != 3 || refresh.BlobsOffset != 2 || refresh.BlobsNextOffset != nil {
 		t.Fatalf("unexpected second page: %+v", refresh)
+	}
+	storedTransfer, err = stateStore.GetDataTransfer(plan.Transfer.ID)
+	if err != nil {
+		t.Fatalf("get refreshed transfer: %v", err)
+	}
+	if len(storedTransfer.PlanBlobs) != 0 {
+		t.Fatalf("expected refreshed single-part direct upload state to stay compact, got %+v", storedTransfer.PlanBlobs)
 	}
 	if s3Calls != 0 {
 		t.Fatalf("expected no fake s3 requests, got %d", s3Calls)
