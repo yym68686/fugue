@@ -106,17 +106,32 @@ type dataBackendMigrationResponse struct {
 }
 
 type dataProgressRenderer struct {
-	w       io.Writer
-	enabled bool
-	label   string
-	total   int64
-	done    int64
-	start   time.Time
-	last    time.Time
-	mu      sync.Mutex
+	w          io.Writer
+	enabled    bool
+	label      string
+	total      int64
+	done       int64
+	start      time.Time
+	last       time.Time
+	lastWidth  int
+	lineActive bool
+	finished   bool
+	mu         sync.Mutex
 }
 
 type dataTransferProgress func(delta int64)
+
+type dataTableAlign string
+
+const (
+	dataTableAlignLeft  dataTableAlign = "left"
+	dataTableAlignRight dataTableAlign = "right"
+)
+
+type dataTableColumn struct {
+	Title string
+	Align dataTableAlign
+}
 
 type dataScanEstimate struct {
 	Files int64 `json:"files"`
@@ -259,9 +274,7 @@ func (c *CLI) newDataInitCommand() *cobra.Command {
 			}
 			if len(cfg.Assets) > 0 {
 				fmt.Fprintln(c.stdout, "\nTracked assets:")
-				for _, asset := range cfg.Assets {
-					fmt.Fprintf(c.stdout, "  %-14s %s\n", asset.Name, asset.Path)
-				}
+				renderDataAssetsTable(c.stdout, cfg.Assets)
 			}
 			return nil
 		},
@@ -322,11 +335,10 @@ func (c *CLI) newDataTrackCommand() *cobra.Command {
 			if created {
 				fmt.Fprintln(c.stdout, "Created .fugue/data.yaml")
 			}
-			fmt.Fprintf(c.stdout, "Data workspace: %s\n\n", cfg.Workspace)
+			renderDataKeyValueTable(c.stdout, [][]string{{"Data workspace", cfg.Workspace}})
+			fmt.Fprintln(c.stdout)
 			fmt.Fprintln(c.stdout, "Tracked assets:")
-			for _, asset := range cfg.Assets {
-				fmt.Fprintf(c.stdout, "  %-14s %s\n", asset.Name, asset.Path)
-			}
+			renderDataAssetsTable(c.stdout, cfg.Assets)
 			return nil
 		},
 	}
@@ -423,18 +435,20 @@ func (c *CLI) newDataStatusCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"workspace": workspace, "local_manifest": manifest, "latest_snapshot": latest, "untracked_large_directories": untrackedLargeDirs})
 			}
-			fmt.Fprintf(c.stdout, "Data workspace: %s\n", workspace.Name)
+			summaryRows := [][]string{{"Data workspace", workspace.Name}}
 			if cfg.Project != "" {
-				fmt.Fprintf(c.stdout, "Project: %s\n", cfg.Project)
+				summaryRows = append(summaryRows, []string{"Project", cfg.Project})
 			}
 			if latest.ID != "" {
-				fmt.Fprintf(c.stdout, "Latest version: %s\n", latest.Version)
+				summaryRows = append(summaryRows, []string{"Latest version", latest.Version})
 			} else {
-				fmt.Fprintln(c.stdout, "Latest version: none")
+				summaryRows = append(summaryRows, []string{"Latest version", "none"})
 			}
-			fmt.Fprintln(c.stdout, "\nASSET          LOCAL PATH        STATUS       FILES       SIZE")
+			renderDataKeyValueTable(c.stdout, summaryRows)
+			fmt.Fprintln(c.stdout)
 			localByAsset := manifestStatsByAsset(manifest)
 			remoteByAsset := manifestStatsByAsset(latest.Manifest)
+			rows := make([][]string, 0, len(cfg.Assets))
 			for _, asset := range cfg.Assets {
 				stats := localByAsset[asset.Name]
 				status := "new"
@@ -447,13 +461,25 @@ func (c *CLI) newDataStatusCommand() *cobra.Command {
 						status = "changed"
 					}
 				}
-				fmt.Fprintf(c.stdout, "%-14s %-17s %-12s %-10d %s\n", asset.Name, asset.Path, status, stats.Files, formatBytes(stats.Bytes))
+				rows = append(rows, []string{asset.Name, asset.Path, status, strconv.Itoa(stats.Files), formatBytes(stats.Bytes)})
 			}
+			renderDataTable(c.stdout, []dataTableColumn{
+				{Title: "Asset"},
+				{Title: "Local path"},
+				{Title: "Status"},
+				{Title: "Files", Align: dataTableAlignRight},
+				{Title: "Size", Align: dataTableAlignRight},
+			}, rows)
 			if len(untrackedLargeDirs) > 0 {
 				fmt.Fprintln(c.stdout, "\nUntracked large directories:")
+				untrackedRows := make([][]string, 0, len(untrackedLargeDirs))
 				for _, dir := range untrackedLargeDirs {
-					fmt.Fprintf(c.stdout, "  %s  %s\n", dir.Path, formatBytes(dir.Bytes))
+					untrackedRows = append(untrackedRows, []string{dir.Path, formatBytes(dir.Bytes)})
 				}
+				renderDataTable(c.stdout, []dataTableColumn{
+					{Title: "Path"},
+					{Title: "Size", Align: dataTableAlignRight},
+				}, untrackedRows)
 				fmt.Fprintln(c.stdout, "Run `fugue data track <path>` if this directory is part of the training workspace.")
 			}
 			return nil
@@ -505,8 +531,13 @@ func (c *CLI) newDataPushCommand() *cobra.Command {
 				if c.wantsJSON() {
 					return writeJSON(c.stdout, map[string]any{"workspace": workspace, "manifest": manifest, "dry_run": true})
 				}
-				fmt.Fprintf(c.stdout, "Data workspace: %s\n\n", workspace.Name)
-				fmt.Fprintf(c.stdout, "Planning upload:\n  assets: %d\n  files: %d\n  upload size: %s\n", len(cfg.Assets), manifest.FileCount, formatBytes(manifest.TotalBytes))
+				renderDataKeyValueTable(c.stdout, [][]string{
+					{"Data workspace", workspace.Name},
+					{"Plan", "upload"},
+					{"Assets", strconv.Itoa(len(cfg.Assets))},
+					{"Files", strconv.Itoa(manifest.FileCount)},
+					{"Upload size", formatBytes(manifest.TotalBytes)},
+				})
 				return nil
 			}
 			manifestDigest := digestDataManifest(manifest)
@@ -538,12 +569,18 @@ func (c *CLI) newDataPushCommand() *cobra.Command {
 				return fmt.Errorf("upload plan returned no blob entries for %d files", manifest.FileCount)
 			}
 			if !c.wantsJSON() {
-				fmt.Fprintf(c.stdout, "Data workspace: %s\n\n", workspace.Name)
+				action := "Planning upload"
 				if resumed {
-					fmt.Fprintf(c.stdout, "Resuming upload:\n  transfer: %s\n  files: %d\n  upload size: %s\n\n", plan.Transfer.ID, manifest.FileCount, formatBytes(manifest.TotalBytes))
-				} else {
-					fmt.Fprintf(c.stdout, "Planning upload:\n  transfer: %s\n  files: %d\n  upload size: %s\n\n", plan.Transfer.ID, manifest.FileCount, formatBytes(manifest.TotalBytes))
+					action = "Resuming upload"
 				}
+				renderDataKeyValueTable(c.stdout, [][]string{
+					{"Data workspace", workspace.Name},
+					{"Action", action},
+					{"Transfer", plan.Transfer.ID},
+					{"Files", strconv.Itoa(manifest.FileCount)},
+					{"Upload size", formatBytes(manifest.TotalBytes)},
+				})
+				fmt.Fprintln(c.stdout)
 			}
 			state := dataTransferState{
 				TransferID:     plan.Transfer.ID,
@@ -576,7 +613,12 @@ func (c *CLI) newDataPushCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, complete)
 			}
-			fmt.Fprintf(c.stdout, "\nCreated version:\n  version: %s\n  id: %s\n  files: %d\n  size: %s\n", complete.Snapshot.Version, complete.Snapshot.ID, complete.Snapshot.FileCount, formatBytes(complete.Snapshot.TotalBytes))
+			renderDataKeyValueTable(c.stdout, [][]string{
+				{"Created version", complete.Snapshot.Version},
+				{"ID", complete.Snapshot.ID},
+				{"Files", strconv.Itoa(complete.Snapshot.FileCount)},
+				{"Size", formatBytes(complete.Snapshot.TotalBytes)},
+			})
 			return nil
 		},
 	}
@@ -717,7 +759,7 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 				if blob.DownloadURL == "" {
 					return fmt.Errorf("download url missing for %s", entry.SHA256)
 				}
-				if !c.wantsJSON() {
+				if noProgress && !c.wantsJSON() {
 					fmt.Fprintf(c.stdout, "Downloading %s  %s\n", target, formatBytes(entry.Size))
 				}
 				if err := retryDataAuthorization(func() error {
@@ -763,7 +805,11 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, complete)
 			}
-			fmt.Fprintf(c.stdout, "\nRestored version %s\n", planResp.Snapshot.Version)
+			renderDataKeyValueTable(c.stdout, [][]string{
+				{"Restored version", planResp.Snapshot.Version},
+				{"Files", strconv.Itoa(planResp.Snapshot.FileCount)},
+				{"Size", formatBytes(planResp.Snapshot.TotalBytes)},
+			})
 			return nil
 		},
 	}
@@ -874,7 +920,10 @@ func (c *CLI) newDataCloneCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"workspace": workspaceResp.Workspace, "path": target})
 			}
-			fmt.Fprintf(c.stdout, "Cloned data workspace into %s\n", target)
+			renderDataKeyValueTable(c.stdout, [][]string{
+				{"Data workspace", workspaceResp.Workspace.Name},
+				{"Path", target},
+			})
 			return nil
 		},
 	}
@@ -922,9 +971,15 @@ func (c *CLI) newDataWorkspaceListCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"workspaces": workspaces})
 			}
+			rows := make([][]string, 0, len(workspaces))
 			for _, workspace := range workspaces {
-				fmt.Fprintf(c.stdout, "%-24s %-18s %s\n", workspace.Name, workspace.StorageBackendID, formatBytes(workspace.UsedBytes))
+				rows = append(rows, []string{workspace.Name, workspace.StorageBackendID, formatBytes(workspace.UsedBytes)})
 			}
+			renderDataTable(c.stdout, []dataTableColumn{
+				{Title: "Workspace"},
+				{Title: "Backend"},
+				{Title: "Used", Align: dataTableAlignRight},
+			}, rows)
 			return nil
 		},
 	}
@@ -961,15 +1016,18 @@ func (c *CLI) newDataWorkspaceShowCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, resp)
 			}
-			fmt.Fprintf(c.stdout, "Data workspace: %s\nBackend: %s\nUsed: %s\n", resp.Workspace.Name, resp.Workspace.StorageBackendID, formatBytes(resp.Workspace.UsedBytes))
-			if len(resp.Workspace.Assets) > 0 {
-				fmt.Fprintln(c.stdout, "\nAssets:")
-				for _, asset := range resp.Workspace.Assets {
-					fmt.Fprintf(c.stdout, "  %-14s %s\n", asset.Name, asset.Path)
-				}
+			summaryRows := [][]string{
+				{"Data workspace", resp.Workspace.Name},
+				{"Backend", resp.Workspace.StorageBackendID},
+				{"Used", formatBytes(resp.Workspace.UsedBytes)},
 			}
 			if resp.LatestSnapshot.ID != "" {
-				fmt.Fprintf(c.stdout, "\nLatest version: %s\n", resp.LatestSnapshot.Version)
+				summaryRows = append(summaryRows, []string{"Latest version", resp.LatestSnapshot.Version})
+			}
+			renderDataKeyValueTable(c.stdout, summaryRows)
+			if len(resp.Workspace.Assets) > 0 {
+				fmt.Fprintln(c.stdout, "\nAssets:")
+				renderDataAssetsTable(c.stdout, resp.Workspace.Assets)
 			}
 			return nil
 		},
@@ -1006,7 +1064,10 @@ func (c *CLI) newDataWorkspaceUseCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"workspace": resp.Workspace, "config": cfg})
 			}
-			fmt.Fprintf(c.stdout, "Bound current directory to data workspace %s\n", resp.Workspace.Name)
+			renderDataKeyValueTable(c.stdout, [][]string{
+				{"Data workspace", resp.Workspace.Name},
+				{"Binding", ".fugue/data.yaml"},
+			})
 			fmt.Fprintln(c.stdout, "Run: fugue data pull")
 			return nil
 		},
@@ -1075,9 +1136,16 @@ func (c *CLI) newDataSnapshotCommand() *cobra.Command {
 				if c.wantsJSON() {
 					return writeJSON(c.stdout, map[string]any{"snapshots": snapshots})
 				}
+				rows := make([][]string, 0, len(snapshots))
 				for _, snapshot := range snapshots {
-					fmt.Fprintf(c.stdout, "%-24s %-10d %-12s %s\n", snapshot.Version, snapshot.FileCount, formatBytes(snapshot.TotalBytes), snapshot.Message)
+					rows = append(rows, []string{snapshot.Version, strconv.Itoa(snapshot.FileCount), formatBytes(snapshot.TotalBytes), snapshot.Message})
 				}
+				renderDataTable(c.stdout, []dataTableColumn{
+					{Title: "Version"},
+					{Title: "Files", Align: dataTableAlignRight},
+					{Title: "Size", Align: dataTableAlignRight},
+					{Title: "Message"},
+				}, rows)
 				return nil
 			},
 		},
@@ -1109,7 +1177,12 @@ func (c *CLI) newDataSnapshotCommand() *cobra.Command {
 				if c.wantsJSON() {
 					return writeJSON(c.stdout, snapshot)
 				}
-				fmt.Fprintf(c.stdout, "Version: %s\nFiles: %d\nSize: %s\nDigest: %s\n", snapshot.Snapshot.Version, snapshot.Snapshot.FileCount, formatBytes(snapshot.Snapshot.TotalBytes), snapshot.Snapshot.ManifestDigest)
+				renderDataKeyValueTable(c.stdout, [][]string{
+					{"Version", snapshot.Snapshot.Version},
+					{"Files", strconv.Itoa(snapshot.Snapshot.FileCount)},
+					{"Size", formatBytes(snapshot.Snapshot.TotalBytes)},
+					{"Digest", snapshot.Snapshot.ManifestDigest},
+				})
 				return nil
 			},
 		},
@@ -1146,7 +1219,11 @@ func (c *CLI) newDataSnapshotCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, diff)
 			}
-			fmt.Fprintf(c.stdout, "Added: %d\nRemoved: %d\nChanged: %d\n", len(diff["added"]), len(diff["removed"]), len(diff["changed"]))
+			renderDataKeyValueTable(c.stdout, [][]string{
+				{"Added", strconv.Itoa(len(diff["added"]))},
+				{"Removed", strconv.Itoa(len(diff["removed"]))},
+				{"Changed", strconv.Itoa(len(diff["changed"]))},
+			})
 			return nil
 		},
 	})
@@ -1202,7 +1279,10 @@ func (c *CLI) newDataGrantCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, grant)
 			}
-			fmt.Fprintf(c.stdout, "Grant created. Secret: %s\n", grant["secret"])
+			renderDataKeyValueTable(c.stdout, [][]string{
+				{"Grant", "created"},
+				{"Secret", fmt.Sprint(grant["secret"])},
+			})
 			return nil
 		},
 	}
@@ -1229,7 +1309,10 @@ func (c *CLI) newDataGrantCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, resp)
 			}
-			fmt.Fprintf(c.stdout, "Revoked %s\n", args[0])
+			renderDataKeyValueTable(c.stdout, [][]string{
+				{"Grant", args[0]},
+				{"Status", "revoked"},
+			})
 			return nil
 		},
 	})
@@ -1268,9 +1351,16 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 				if c.wantsJSON() {
 					return writeJSON(c.stdout, map[string]any{"transfers": transfers})
 				}
+				rows := make([][]string, 0, len(transfers))
 				for _, transfer := range transfers {
-					fmt.Fprintf(c.stdout, "%-24s %-10s %-12s %s\n", transfer.ID, transfer.Direction, transfer.Status, transfer.WorkspaceID)
+					rows = append(rows, []string{transfer.ID, transfer.Direction, transfer.Status, transfer.WorkspaceID})
 				}
+				renderDataTable(c.stdout, []dataTableColumn{
+					{Title: "Transfer"},
+					{Title: "Direction"},
+					{Title: "Status"},
+					{Title: "Workspace"},
+				}, rows)
 				return nil
 			},
 		},
@@ -1322,6 +1412,7 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 		}
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
+		lastWidth := 0
 		for {
 			transfer, err := client.GetDataTransferModel(args[0])
 			if err != nil {
@@ -1336,10 +1427,20 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 				if transfer.BytesTotal > 0 {
 					percent = float64(transfer.BytesDone) / float64(transfer.BytesTotal) * 100
 				}
-				fmt.Fprintf(c.stdout, "%s  %s  %.1f%%  %s/%s  files %d/%d\n", transfer.ID, transfer.Status, percent, formatBytes(transfer.BytesDone), formatBytes(transfer.BytesTotal), transfer.FilesDone, transfer.FilesTotal)
+				line := fmt.Sprintf("%s  %s  %5.1f%%  %s/%s  files %d/%d", transfer.ID, dataProgressBar(percent, 20), percent, formatBytes(transfer.BytesDone), formatBytes(transfer.BytesTotal), transfer.FilesDone, transfer.FilesTotal)
+				width := dataDisplayWidth(line)
+				padding := ""
+				if lastWidth > width {
+					padding = strings.Repeat(" ", lastWidth-width)
+				}
+				fmt.Fprintf(c.stdout, "\r%s%s", line, padding)
+				lastWidth = width
 			}
 			switch transfer.Status {
 			case model.DataTransferStatusCompleted, model.DataTransferStatusFailed, model.DataTransferStatusCanceled:
+				if !c.wantsJSON() {
+					fmt.Fprintln(c.stdout)
+				}
 				return nil
 			}
 			<-ticker.C
@@ -1408,7 +1509,11 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, complete)
 			}
-			fmt.Fprintf(c.stdout, "Resumed and completed upload transfer %s\n", refresh.Transfer.ID)
+			renderDataKeyValueTable(c.stdout, [][]string{
+				{"Transfer", refresh.Transfer.ID},
+				{"Direction", refresh.Transfer.Direction},
+				{"Status", "completed"},
+			})
 			return nil
 		case model.DataTransferDirectionDownload:
 			manifest := refresh.Transfer.Manifest
@@ -1463,7 +1568,11 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, complete)
 			}
-			fmt.Fprintf(c.stdout, "Resumed and completed download transfer %s\n", refresh.Transfer.ID)
+			renderDataKeyValueTable(c.stdout, [][]string{
+				{"Transfer", refresh.Transfer.ID},
+				{"Direction", refresh.Transfer.Direction},
+				{"Status", "completed"},
+			})
 			return nil
 		default:
 			return fmt.Errorf("transfer %s direction %q is not resumable", refresh.Transfer.ID, refresh.Transfer.Direction)
@@ -1503,9 +1612,15 @@ func (c *CLI) newDataBackendCommand() *cobra.Command {
 				if c.wantsJSON() {
 					return writeJSON(c.stdout, map[string]any{"backends": backends})
 				}
+				rows := make([][]string, 0, len(backends))
 				for _, backend := range backends {
-					fmt.Fprintf(c.stdout, "%-22s %-16s %s\n", backend.Name, backend.Provider, backend.Bucket)
+					rows = append(rows, []string{backend.Name, backend.Provider, backend.Bucket})
 				}
+				renderDataTable(c.stdout, []dataTableColumn{
+					{Title: "Backend"},
+					{Title: "Provider"},
+					{Title: "Bucket"},
+				}, rows)
 				return nil
 			},
 		},
@@ -1586,7 +1701,11 @@ func (c *CLI) newDataBackendRotateCredentialsCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"backend": backend, "rotated": true})
 			}
-			fmt.Fprintf(c.stdout, "Rotated credentials for data backend %s\n", backend.Name)
+			renderDataKeyValueTable(c.stdout, [][]string{
+				{"Data backend", backend.Name},
+				{"Provider", backend.Provider},
+				{"Credentials", "rotated"},
+			})
 			return nil
 		},
 	}
@@ -1642,7 +1761,11 @@ func (c *CLI) newDataBackendCreateCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"backend": backend})
 			}
-			fmt.Fprintf(c.stdout, "Created data backend %s (%s)\n", backend.Name, backend.Provider)
+			renderDataKeyValueTable(c.stdout, [][]string{
+				{"Data backend", backend.Name},
+				{"Provider", backend.Provider},
+				{"Bucket", backend.Bucket},
+			})
 			return nil
 		},
 	}
@@ -1683,11 +1806,16 @@ func (c *CLI) newDataBackendMigrateCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, resp)
 			}
-			fmt.Fprintf(c.stdout, "Backend migration: %s -> %s\n", resp.Transfer.Source, resp.Transfer.Target)
-			fmt.Fprintf(c.stdout, "Status: %s\nObjects: %d/%d\nBytes: %s/%s\n", resp.Transfer.Status, resp.Transfer.FilesDone, resp.Transfer.FilesTotal, formatBytes(resp.Transfer.BytesDone), formatBytes(resp.Transfer.BytesTotal))
-			if cutover && resp.Workspace.StorageBackendID == args[1] {
-				fmt.Fprintf(c.stdout, "Workspace backend: %s\n", resp.Workspace.StorageBackendID)
+			rows := [][]string{
+				{"Backend migration", resp.Transfer.Source + " -> " + resp.Transfer.Target},
+				{"Status", resp.Transfer.Status},
+				{"Objects", fmt.Sprintf("%d/%d", resp.Transfer.FilesDone, resp.Transfer.FilesTotal)},
+				{"Bytes", formatBytes(resp.Transfer.BytesDone) + "/" + formatBytes(resp.Transfer.BytesTotal)},
 			}
+			if cutover && resp.Workspace.StorageBackendID == args[1] {
+				rows = append(rows, []string{"Workspace backend", resp.Workspace.StorageBackendID})
+			}
+			renderDataKeyValueTable(c.stdout, rows)
 			return nil
 		},
 	}
@@ -1721,8 +1849,10 @@ func (c *CLI) newDataBackendRollbackCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, resp)
 			}
-			fmt.Fprintf(c.stdout, "Rolled back workspace backend: %s\n", resp.Workspace.StorageBackendID)
-			fmt.Fprintf(c.stdout, "Rollback transfer: %s\n", resp.Transfer.ID)
+			renderDataKeyValueTable(c.stdout, [][]string{
+				{"Workspace backend", resp.Workspace.StorageBackendID},
+				{"Rollback transfer", resp.Transfer.ID},
+			})
 			return nil
 		},
 	}
@@ -1773,13 +1903,17 @@ func (c *CLI) newDataGCCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, resp)
 			}
-			fmt.Fprintf(c.stdout, "GC sweep: %s\n", resp.Workspace.Name)
+			mode := "delete"
 			if resp.GC.DryRun {
-				fmt.Fprintln(c.stdout, "Mode: dry-run")
-			} else {
-				fmt.Fprintln(c.stdout, "Mode: delete")
+				mode = "dry-run"
 			}
-			fmt.Fprintf(c.stdout, "Candidates: %d\nDeleted: %d\nDeleted bytes: %s\n", len(resp.GC.Candidates), resp.GC.Deleted, formatBytes(resp.GC.DeletedBytes))
+			renderDataKeyValueTable(c.stdout, [][]string{
+				{"GC sweep", resp.Workspace.Name},
+				{"Mode", mode},
+				{"Candidates", strconv.Itoa(len(resp.GC.Candidates))},
+				{"Deleted", strconv.Itoa(resp.GC.Deleted)},
+				{"Deleted bytes", formatBytes(resp.GC.DeletedBytes)},
+			})
 			return nil
 		},
 	}
@@ -1812,15 +1946,21 @@ func (c *CLI) newDataDoctorCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"config": cfg, "warnings": warnings})
 			}
-			fmt.Fprintf(c.stdout, "Data workspace: %s\n", cfg.Workspace)
+			rows := [][]string{{"Data workspace", cfg.Workspace}}
 			if len(warnings) == 0 {
-				fmt.Fprintln(c.stdout, "Status: ok")
+				rows = append(rows, []string{"Status", "ok"})
 			} else {
-				fmt.Fprintln(c.stdout, "Warnings:")
+				rows = append(rows, []string{"Status", "warning"})
+				renderDataKeyValueTable(c.stdout, rows)
+				fmt.Fprintln(c.stdout, "\nWarnings:")
+				warningRows := make([][]string, 0, len(warnings))
 				for _, warning := range warnings {
-					fmt.Fprintf(c.stdout, "  %s\n", warning)
+					warningRows = append(warningRows, []string{warning})
 				}
+				renderDataTable(c.stdout, []dataTableColumn{{Title: "Warning"}}, warningRows)
+				return nil
 			}
+			renderDataKeyValueTable(c.stdout, rows)
 			return nil
 		},
 	}
@@ -2730,20 +2870,33 @@ func verifyPulledManifestWithProgress(root string, cfg dataConfig, manifest mode
 }
 
 func renderPullPreflight(w io.Writer, workspace model.DataWorkspace, snapshot model.DataSnapshot, plan pullPlan) {
-	fmt.Fprintf(w, "Data workspace: %s\nVersion: %s\n\n", workspace.Name, snapshot.Version)
+	renderDataKeyValueTable(w, [][]string{
+		{"Data workspace", workspace.Name},
+		{"Version", snapshot.Version},
+	})
 	if len(plan.Conflicts) > 0 {
-		fmt.Fprintln(w, "Pull preflight found conflicts.")
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "CONFLICT   PATH                         REASON")
+		fmt.Fprintln(w, "\nPull preflight found conflicts.")
+		rows := make([][]string, 0, len(plan.Conflicts))
 		for _, conflict := range plan.Conflicts {
-			fmt.Fprintf(w, "%-10s %-28s %s\n", conflict.Kind, conflict.Path, conflict.Reason)
+			rows = append(rows, []string{conflict.Kind, conflict.Path, conflict.Reason})
 		}
+		renderDataTable(w, []dataTableColumn{
+			{Title: "Conflict"},
+			{Title: "Path"},
+			{Title: "Reason"},
+		}, rows)
 	}
 	if len(plan.Warnings) > 0 {
-		fmt.Fprintln(w, "\nWARNING    PATH                         REASON")
+		fmt.Fprintln(w, "\nWarnings:")
+		rows := make([][]string, 0, len(plan.Warnings))
 		for _, warning := range plan.Warnings {
-			fmt.Fprintf(w, "%-10s %-28s %s\n", warning.Kind, warning.Path, warning.Reason)
+			rows = append(rows, []string{warning.Kind, warning.Path, warning.Reason})
 		}
+		renderDataTable(w, []dataTableColumn{
+			{Title: "Warning"},
+			{Title: "Path"},
+			{Title: "Reason"},
+		}, rows)
 	}
 	if len(plan.Conflicts) > 0 {
 		fmt.Fprintln(w)
@@ -2757,7 +2910,11 @@ func renderPullPreflight(w io.Writer, workspace model.DataWorkspace, snapshot mo
 		fmt.Fprintln(w, "  fugue data push --version local-before-pull")
 		return
 	}
-	fmt.Fprintf(w, "Planning download:\n  files to download: %d\n  files to skip: %d\n", len(plan.Download), len(plan.Skip))
+	fmt.Fprintln(w)
+	renderDataKeyValueTable(w, [][]string{
+		{"Planning download", strconv.Itoa(len(plan.Download))},
+		{"Files to skip", strconv.Itoa(len(plan.Skip))},
+	})
 }
 
 func manifestStatsByAsset(manifest model.DataManifest) map[string]struct {
@@ -2850,7 +3007,11 @@ func renderDataWorkspace(c *CLI, workspace model.DataWorkspace) error {
 	if c.wantsJSON() {
 		return writeJSON(c.stdout, map[string]any{"workspace": workspace})
 	}
-	fmt.Fprintf(c.stdout, "Data workspace: %s\nBackend: %s\n", workspace.Name, workspace.StorageBackendID)
+	renderDataKeyValueTable(c.stdout, [][]string{
+		{"Data workspace", workspace.Name},
+		{"Backend", workspace.StorageBackendID},
+		{"Used", formatBytes(workspace.UsedBytes)},
+	})
 	return nil
 }
 
@@ -2871,7 +3032,7 @@ func (c *CLI) uploadDataPlanBlobs(client *Client, workspaceID, transferID, manif
 		if sourcePath == "" {
 			return fmt.Errorf("missing local source for blob %s", blob.SHA256)
 		}
-		if !noProgress && !c.wantsJSON() {
+		if noProgress && !c.wantsJSON() {
 			mode := blob.UploadMode
 			if mode == "" {
 				mode = model.DataBlobUploadModeSingle
@@ -3097,6 +3258,9 @@ func (p *dataProgressRenderer) advance(delta int64) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.finished {
+		return
+	}
 	p.done += delta
 	if p.done < 0 {
 		p.done = 0
@@ -3112,19 +3276,32 @@ func (p *dataProgressRenderer) advance(delta int64) {
 		return
 	}
 	p.last = now
-	fmt.Fprintf(p.w, "%s progress: %s\n", p.label, p.renderLocked(now))
+	final := p.total > 0 && p.done >= p.total
+	p.writeLineLocked(p.renderLocked(now), final)
+	if final {
+		p.finished = true
+	}
 }
 
 func (p *dataProgressRenderer) finish() {
-	if p == nil || !p.enabled || p.total <= 0 {
+	if p == nil || !p.enabled {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.done = p.total
+	if p.finished {
+		return
+	}
+	if p.total > 0 {
+		p.done = p.total
+	}
+	if p.done == 0 && p.total <= 0 && !p.lineActive {
+		return
+	}
 	now := time.Now()
 	p.last = now
-	fmt.Fprintf(p.w, "%s progress: %s\n", p.label, p.renderLocked(now))
+	p.writeLineLocked(p.renderLocked(now), true)
+	p.finished = true
 }
 
 func (p *dataProgressRenderer) renderLocked(now time.Time) string {
@@ -3135,7 +3312,7 @@ func (p *dataProgressRenderer) renderLocked(now time.Time) string {
 	rate := float64(p.done) / elapsed.Seconds()
 	rateText := formatBytes(int64(rate)) + "/s"
 	if p.total <= 0 {
-		return fmt.Sprintf("%s  %s  elapsed %s", formatBytes(p.done), rateText, formatProgressDuration(elapsed))
+		return fmt.Sprintf("%s  %s  %s  elapsed %s", p.label, formatBytes(p.done), rateText, formatProgressDuration(elapsed))
 	}
 	percent := float64(p.done) / float64(p.total) * 100
 	if percent > 100 {
@@ -3148,12 +3325,32 @@ func (p *dataProgressRenderer) renderLocked(now time.Time) string {
 		remaining := float64(p.total-p.done) / rate
 		eta = "ETA " + formatProgressDuration(time.Duration(remaining*float64(time.Second)))
 	}
-	return fmt.Sprintf("[%s] %5.1f%%  %s/%s  %s  %s", dataProgressBar(percent, 24), percent, formatBytes(p.done), formatBytes(p.total), rateText, eta)
+	return fmt.Sprintf("%s  %s  %5.1f%%  %s/%s  %s  %s", p.label, dataProgressBar(percent, 20), percent, formatBytes(p.done), formatBytes(p.total), rateText, eta)
+}
+
+func (p *dataProgressRenderer) writeLineLocked(line string, final bool) {
+	width := dataDisplayWidth(line)
+	padding := ""
+	if p.lastWidth > width {
+		padding = strings.Repeat(" ", p.lastWidth-width)
+	}
+	if p.lineActive || !final {
+		fmt.Fprint(p.w, "\r")
+	}
+	fmt.Fprint(p.w, line, padding)
+	if final {
+		fmt.Fprint(p.w, "\n")
+		p.lineActive = false
+		p.lastWidth = 0
+		return
+	}
+	p.lineActive = true
+	p.lastWidth = width
 }
 
 func dataProgressBar(percent float64, width int) string {
 	if width <= 0 {
-		width = 24
+		width = 20
 	}
 	if percent < 0 {
 		percent = 0
@@ -3161,14 +3358,142 @@ func dataProgressBar(percent float64, width int) string {
 	if percent > 100 {
 		percent = 100
 	}
-	filled := int(percent / 100 * float64(width))
-	if percent > 0 && filled == 0 {
-		filled = 1
+	units := int(percent / 100 * float64(width*8))
+	if percent > 0 && units == 0 {
+		units = 1
 	}
-	if filled > width {
-		filled = width
+	if units > width*8 {
+		units = width * 8
 	}
-	return strings.Repeat("#", filled) + strings.Repeat("-", width-filled)
+	full := units / 8
+	partial := units % 8
+	bar := strings.Repeat("█", full)
+	if partial > 0 && full < width {
+		partials := []string{"▏", "▎", "▍", "▌", "▋", "▊", "▉"}
+		bar += partials[partial-1]
+		full++
+	}
+	return bar + strings.Repeat("░", width-full)
+}
+
+func renderDataTable(w io.Writer, columns []dataTableColumn, rows [][]string) {
+	if len(columns) == 0 {
+		return
+	}
+	widths := make([]int, len(columns))
+	headers := make([]string, len(columns))
+	for idx, column := range columns {
+		headers[idx] = dataTableCell(column.Title)
+		widths[idx] = dataDisplayWidth(headers[idx])
+	}
+	cells := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		clean := make([]string, len(columns))
+		for idx := range columns {
+			if idx < len(row) {
+				clean[idx] = dataTableCell(row[idx])
+			}
+			if width := dataDisplayWidth(clean[idx]); width > widths[idx] {
+				widths[idx] = width
+			}
+		}
+		cells = append(cells, clean)
+	}
+	renderDataTableBorder(w, "┌", "┬", "┐", widths)
+	renderDataTableRow(w, columns, headers, widths)
+	renderDataTableBorder(w, "├", "┼", "┤", widths)
+	for _, row := range cells {
+		renderDataTableRow(w, columns, row, widths)
+	}
+	renderDataTableBorder(w, "└", "┴", "┘", widths)
+}
+
+func renderDataKeyValueTable(w io.Writer, rows [][]string) {
+	renderDataTable(w, []dataTableColumn{
+		{Title: "Field"},
+		{Title: "Value"},
+	}, rows)
+}
+
+func renderDataAssetsTable(w io.Writer, assets []model.DataAsset) {
+	rows := make([][]string, 0, len(assets))
+	for _, asset := range assets {
+		rows = append(rows, []string{asset.Name, asset.Path})
+	}
+	renderDataTable(w, []dataTableColumn{
+		{Title: "Asset"},
+		{Title: "Local path"},
+	}, rows)
+}
+
+func renderDataTableBorder(w io.Writer, left, middle, right string, widths []int) {
+	fmt.Fprint(w, left)
+	for idx, width := range widths {
+		if idx > 0 {
+			fmt.Fprint(w, middle)
+		}
+		fmt.Fprint(w, strings.Repeat("─", width+2))
+	}
+	fmt.Fprintln(w, right)
+}
+
+func renderDataTableRow(w io.Writer, columns []dataTableColumn, row []string, widths []int) {
+	fmt.Fprint(w, "│")
+	for idx := range columns {
+		value := ""
+		if idx < len(row) {
+			value = row[idx]
+		}
+		fmt.Fprintf(w, " %s │", dataTablePad(value, widths[idx], columns[idx].Align))
+	}
+	fmt.Fprintln(w)
+}
+
+func dataTablePad(value string, width int, align dataTableAlign) string {
+	padding := width - dataDisplayWidth(value)
+	if padding <= 0 {
+		return value
+	}
+	if align == dataTableAlignRight {
+		return strings.Repeat(" ", padding) + value
+	}
+	return value + strings.Repeat(" ", padding)
+}
+
+func dataTableCell(value string) string {
+	value = strings.NewReplacer("\r", " ", "\n", " ", "\t", "    ").Replace(strings.TrimSpace(value))
+	if value == "" {
+		return "-"
+	}
+	return value
+}
+
+func dataDisplayWidth(value string) int {
+	width := 0
+	for _, r := range value {
+		switch {
+		case r == '\t':
+			width += 4
+		case r == '\r' || r == '\n' || r < 0x20:
+		case dataRuneIsWide(r):
+			width += 2
+		default:
+			width++
+		}
+	}
+	return width
+}
+
+func dataRuneIsWide(r rune) bool {
+	return r >= 0x1100 && (r <= 0x115f ||
+		r == 0x2329 || r == 0x232a ||
+		(r >= 0x2e80 && r <= 0xa4cf) ||
+		(r >= 0xac00 && r <= 0xd7a3) ||
+		(r >= 0xf900 && r <= 0xfaff) ||
+		(r >= 0xfe10 && r <= 0xfe19) ||
+		(r >= 0xfe30 && r <= 0xfe6f) ||
+		(r >= 0xff00 && r <= 0xff60) ||
+		(r >= 0xffe0 && r <= 0xffe6))
 }
 
 func formatProgressDuration(d time.Duration) string {

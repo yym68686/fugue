@@ -71,7 +71,7 @@ func TestDataWorkspacePushPullAndConflictPreflight(t *testing.T) {
 	}
 	runDataCLIInDir(t, targetDir, "--base-url", httpServer.URL, "--token", secret, "data", "workspace", "use", "my-training-project")
 	pullOut := runDataCLIInDir(t, targetDir, "--base-url", httpServer.URL, "--token", secret, "data", "pull")
-	if !strings.Contains(pullOut, "Restored version before-provider-move") {
+	if !strings.Contains(pullOut, "Restored version") || !strings.Contains(pullOut, "before-provider-move") {
 		t.Fatalf("expected pull output to mention restored version, got %s", pullOut)
 	}
 	restored, err := os.ReadFile(filepath.Join(targetDir, "data", "sample.txt"))
@@ -85,11 +85,11 @@ func TestDataWorkspacePushPullAndConflictPreflight(t *testing.T) {
 		t.Fatalf("write source file v2: %v", err)
 	}
 	firstAuto := runDataCLIInDir(t, sourceDir, "--base-url", httpServer.URL, "--token", secret, "data", "push")
-	if !strings.Contains(firstAuto, "Created version:") || strings.Contains(firstAuto, "version: latest") {
+	if !strings.Contains(firstAuto, "Created version") || strings.Contains(firstAuto, "version: latest") {
 		t.Fatalf("expected default push to create a concrete version, got %s", firstAuto)
 	}
 	secondAuto := runDataCLIInDir(t, sourceDir, "--base-url", httpServer.URL, "--token", secret, "data", "push")
-	if !strings.Contains(secondAuto, "Created version:") || strings.Contains(secondAuto, "version: latest") {
+	if !strings.Contains(secondAuto, "Created version") || strings.Contains(secondAuto, "version: latest") {
 		t.Fatalf("expected repeated default push to create a concrete version, got %s", secondAuto)
 	}
 
@@ -622,10 +622,10 @@ func TestManifestDiffTransferStateAndProgressRenderer(t *testing.T) {
 	progress := newDataProgressRenderer(&out, true, "Upload", 10)
 	progress.advance(5)
 	progress.advance(5)
-	if !strings.Contains(out.String(), "Upload progress") {
+	if !strings.Contains(out.String(), "Upload") {
 		t.Fatalf("expected progress output, got %q", out.String())
 	}
-	if !strings.Contains(out.String(), "ETA") || !strings.Contains(out.String(), "[") {
+	if !strings.Contains(out.String(), "ETA") || !strings.Contains(out.String(), "█") {
 		t.Fatalf("expected progress bar with ETA, got %q", out.String())
 	}
 	payload := []byte("progress-hash")
