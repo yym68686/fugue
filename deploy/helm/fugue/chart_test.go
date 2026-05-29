@@ -1622,6 +1622,31 @@ dns:
 	for _, name := range []string{
 		"fugue-fugue-edge",
 		"fugue-fugue-edge-country-de",
+	} {
+		doc := manifestDocumentForKindAndName(manifest, "DaemonSet", name)
+		if doc == "" {
+			t.Fatalf("rendered manifest missing daemonset %s:\n%s", name, manifest)
+		}
+		for _, want := range []string{
+			"updateStrategy:",
+			"type: OnDelete",
+			"fugue.io/rollout-mode: direct-ondelete-protected",
+		} {
+			if !strings.Contains(doc, want) {
+				t.Fatalf("%s missing protected edge rollout fragment %q:\n%s", name, want, doc)
+			}
+		}
+		for _, unwanted := range []string{
+			"type: RollingUpdate",
+			"maxUnavailable: 1",
+			"maxSurge: 0",
+		} {
+			if strings.Contains(doc, unwanted) {
+				t.Fatalf("%s edge daemonset must not use rolling update fragment %q:\n%s", name, unwanted, doc)
+			}
+		}
+	}
+	for _, name := range []string{
 		"fugue-fugue-dns",
 		"fugue-fugue-dns-country-de",
 		"fugue-fugue-image-cache",
