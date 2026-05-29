@@ -165,6 +165,8 @@ spec:
               value: {{ include "fugue.clusterJoinRegistryEndpoint" . | quote }}
             - name: FUGUE_IMPORT_WORK_DIR
               value: {{ .Values.api.importWorkDir | quote }}
+            - name: FUGUE_DEFAULT_MOVABLE_RWO_STORAGE_CLASS_NAME
+              value: {{ .Values.movableRWOStorage.storageClassName | quote }}
             - name: FUGUE_API_SHUTDOWN_DRAIN_DELAY
               value: {{ .Values.api.shutdownDrainDelay | quote }}
             - name: FUGUE_API_SHUTDOWN_TIMEOUT

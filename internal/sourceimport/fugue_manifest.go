@@ -642,9 +642,13 @@ func resolveFugueManifestPersistentStorage(raw *fugueManifestPersistentStorage) 
 	if err != nil {
 		return nil, nil, err
 	}
-	mode, err := model.NormalizeAppPersistentStorageMode(raw.Mode)
-	if err != nil {
-		return nil, nil, err
+	mode := strings.TrimSpace(raw.Mode)
+	if mode != "" {
+		var err error
+		mode, err = model.NormalizeAppPersistentStorageMode(mode)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 	sharedSubPath, err := model.NormalizeAppPersistentStorageSharedSubPath(raw.SharedSubPath)
 	if err != nil {

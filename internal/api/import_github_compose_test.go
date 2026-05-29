@@ -261,6 +261,12 @@ func TestBuildImportedAppSpecAllowsGenericStatefulInputs(t *testing.T) {
 	if spec.PersistentStorage == nil || len(spec.PersistentStorage.Mounts) != 2 {
 		t.Fatalf("expected persistent storage mounts, got %+v", spec.PersistentStorage)
 	}
+	if got := spec.PersistentStorage.Mode; got != model.AppPersistentStorageModeMovableRWO {
+		t.Fatalf("expected default persistent storage mode %q, got %q", model.AppPersistentStorageModeMovableRWO, got)
+	}
+	if got := spec.PersistentStorage.StorageClassName; got != defaultImportedMovableRWOStorageClassName {
+		t.Fatalf("expected default persistent storage class %q, got %q", defaultImportedMovableRWOStorageClassName, got)
+	}
 	if spec.PersistentStorage.Mounts[0].Mode != 0o644 {
 		t.Fatalf("expected file mount mode 0644, got %o", spec.PersistentStorage.Mounts[0].Mode)
 	}
@@ -278,6 +284,44 @@ func TestBuildImportedAppSpecAllowsGenericStatefulInputs(t *testing.T) {
 	}
 	if len(spec.Ports) != 1 || spec.Ports[0] != 8000 {
 		t.Fatalf("unexpected ports: %#v", spec.Ports)
+	}
+}
+
+func TestBuildImportedAppSpecPreservesExplicitDedicatedPersistentStorage(t *testing.T) {
+	server := &Server{}
+	spec, err := server.buildImportedAppSpec(
+		model.AppBuildStrategyDockerfile,
+		"demo-api",
+		"",
+		"runtime_managed_shared",
+		1,
+		8000,
+		"",
+		nil,
+		&model.AppPersistentStorageSpec{
+			Mode:             model.AppPersistentStorageModeDedicatedPVC,
+			StorageClassName: "fast-rwo",
+			Mounts: []model.AppPersistentStorageMount{
+				{
+					Kind: model.AppPersistentStorageMountKindDirectory,
+					Path: "/home/data",
+				},
+			},
+		},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("build imported app spec: %v", err)
+	}
+	if spec.PersistentStorage == nil {
+		t.Fatal("expected persistent storage")
+	}
+	if got := spec.PersistentStorage.Mode; got != model.AppPersistentStorageModeDedicatedPVC {
+		t.Fatalf("expected explicit persistent storage mode %q, got %q", model.AppPersistentStorageModeDedicatedPVC, got)
+	}
+	if got := spec.PersistentStorage.StorageClassName; got != "fast-rwo" {
+		t.Fatalf("expected explicit storage class fast-rwo, got %q", got)
 	}
 }
 
@@ -468,6 +512,12 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 	}
 	if primaryApp.Spec.PersistentStorage == nil || len(primaryApp.Spec.PersistentStorage.Mounts) != 2 {
 		t.Fatalf("expected primary app persistent storage, got %+v", primaryApp.Spec.PersistentStorage)
+	}
+	if got := primaryApp.Spec.PersistentStorage.Mode; got != model.AppPersistentStorageModeMovableRWO {
+		t.Fatalf("expected primary app persistent storage mode %q, got %q", model.AppPersistentStorageModeMovableRWO, got)
+	}
+	if got := primaryApp.Spec.PersistentStorage.StorageClassName; got != defaultImportedMovableRWOStorageClassName {
+		t.Fatalf("expected primary app persistent storage class %q, got %q", defaultImportedMovableRWOStorageClassName, got)
 	}
 	if primaryApp.Route == nil || primaryApp.Route.ServicePort != 3000 {
 		t.Fatalf("expected primary route to keep service port 3000, got %+v", primaryApp.Route)

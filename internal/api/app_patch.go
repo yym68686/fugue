@@ -96,7 +96,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if req.PersistentStorage != nil {
-			normalizedPersistentStorage, err := normalizeImportedPersistentStorage(req.PersistentStorage, spec.Files)
+			normalizedPersistentStorage, err := s.normalizeImportedPersistentStorage(req.PersistentStorage, spec.Files)
 			if err != nil {
 				httpx.WriteError(w, http.StatusBadRequest, err.Error())
 				return

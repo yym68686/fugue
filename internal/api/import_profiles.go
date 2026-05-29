@@ -9,7 +9,10 @@ import (
 	"fugue/internal/model"
 )
 
-const defaultImportedConfigPath = "/home/api.yaml"
+const (
+	defaultImportedConfigPath                 = "/home/api.yaml"
+	defaultImportedMovableRWOStorageClassName = "fugue-local-rwo"
+)
 
 func normalizeBuildStrategy(raw string) string {
 	switch strings.TrimSpace(strings.ToLower(raw)) {
@@ -70,7 +73,7 @@ func (s *Server) buildImportedAppSpec(buildStrategy, appName, imageRef, runtimeI
 	if err != nil {
 		return model.AppSpec{}, err
 	}
-	normalizedPersistentStorage, err := normalizeImportedPersistentStorage(persistentStorage, appFiles)
+	normalizedPersistentStorage, err := s.normalizeImportedPersistentStorage(persistentStorage, appFiles)
 	if err != nil {
 		return model.AppSpec{}, err
 	}
@@ -100,6 +103,37 @@ func hasStartupCommand(value *string) bool {
 
 func hasImportedPersistentStorage(value *model.AppPersistentStorageSpec) bool {
 	return value != nil
+}
+
+func normalizeDefaultMovableRWOStorageClassName(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return defaultImportedMovableRWOStorageClassName
+	}
+	return value
+}
+
+func (s *Server) effectiveDefaultMovableRWOStorageClassName() string {
+	if s == nil {
+		return defaultImportedMovableRWOStorageClassName
+	}
+	return normalizeDefaultMovableRWOStorageClassName(s.movableRWOStorageClass)
+}
+
+func (s *Server) normalizeImportedPersistentStorage(storage *model.AppPersistentStorageSpec, files []model.AppFile) (*model.AppPersistentStorageSpec, error) {
+	normalized, err := normalizeImportedPersistentStorage(storage, files)
+	if err != nil || normalized == nil {
+		return normalized, err
+	}
+	if storage != nil && strings.TrimSpace(storage.Mode) == "" {
+		if strings.TrimSpace(normalized.StorageClassName) == "" {
+			normalized.StorageClassName = s.effectiveDefaultMovableRWOStorageClassName()
+		}
+		if strings.TrimSpace(normalized.StorageClassName) != "" {
+			normalized.Mode = model.AppPersistentStorageModeMovableRWO
+		}
+	}
+	return normalized, nil
 }
 
 func normalizeStartupCommand(value *string) []string {

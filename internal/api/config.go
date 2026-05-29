@@ -18,6 +18,7 @@ type ServerConfig struct {
 	RegistryPushBase             string
 	RegistryPullBase             string
 	ClusterJoinRegistryEndpoint  string
+	MovableRWOStorageClass       string
 	ClusterJoinServer            string
 	ClusterJoinServerFallbacks   string
 	ClusterJoinCAHash            string

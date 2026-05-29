@@ -83,6 +83,12 @@ func TestImportGitHubStoresRequestedEnvStartupCommandAndPersistentStorageOnCreat
 	if app.Spec.PersistentStorage == nil || len(app.Spec.PersistentStorage.Mounts) != 2 {
 		t.Fatalf("expected app persistent storage mounts, got %+v", app.Spec.PersistentStorage)
 	}
+	if got := app.Spec.PersistentStorage.Mode; got != model.AppPersistentStorageModeMovableRWO {
+		t.Fatalf("expected default persistent storage mode %q, got %q", model.AppPersistentStorageModeMovableRWO, got)
+	}
+	if got := app.Spec.PersistentStorage.StorageClassName; got != defaultImportedMovableRWOStorageClassName {
+		t.Fatalf("expected default persistent storage class %q, got %q", defaultImportedMovableRWOStorageClassName, got)
+	}
 	if got := app.Spec.PersistentStorage.Mounts[0].Mode; got != 0o755 {
 		t.Fatalf("expected directory mount mode 0755, got %o", got)
 	}
@@ -108,6 +114,12 @@ func TestImportGitHubStoresRequestedEnvStartupCommandAndPersistentStorageOnCreat
 	}
 	if op.DesiredSpec.PersistentStorage == nil || len(op.DesiredSpec.PersistentStorage.Mounts) != 2 {
 		t.Fatalf("expected desired spec persistent storage mounts, got %+v", op.DesiredSpec.PersistentStorage)
+	}
+	if got := op.DesiredSpec.PersistentStorage.Mode; got != model.AppPersistentStorageModeMovableRWO {
+		t.Fatalf("expected desired default persistent storage mode %q, got %q", model.AppPersistentStorageModeMovableRWO, got)
+	}
+	if got := op.DesiredSpec.PersistentStorage.StorageClassName; got != defaultImportedMovableRWOStorageClassName {
+		t.Fatalf("expected desired default persistent storage class %q, got %q", defaultImportedMovableRWOStorageClassName, got)
 	}
 }
 

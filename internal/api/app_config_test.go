@@ -683,6 +683,12 @@ func TestPatchAppPersistentStorageQueuesCombinedDeployOperation(t *testing.T) {
 	if op.DesiredSpec.PersistentStorage == nil || len(op.DesiredSpec.PersistentStorage.Mounts) != 2 {
 		t.Fatalf("expected desired persistent storage mounts, got %+v", op.DesiredSpec.PersistentStorage)
 	}
+	if got := op.DesiredSpec.PersistentStorage.Mode; got != model.AppPersistentStorageModeMovableRWO {
+		t.Fatalf("expected desired persistent storage mode %q, got %q", model.AppPersistentStorageModeMovableRWO, got)
+	}
+	if got := op.DesiredSpec.PersistentStorage.StorageClassName; got != defaultImportedMovableRWOStorageClassName {
+		t.Fatalf("expected desired persistent storage class %q, got %q", defaultImportedMovableRWOStorageClassName, got)
+	}
 	if got := op.DesiredSpec.PersistentStorage.Mounts[0].Mode; got != 0o755 {
 		t.Fatalf("expected default directory mount mode 0755, got %o", got)
 	}
@@ -712,6 +718,12 @@ func TestPatchAppPersistentStorageQueuesCombinedDeployOperation(t *testing.T) {
 	}
 	if updatedApp.Spec.PersistentStorage == nil || len(updatedApp.Spec.PersistentStorage.Mounts) != 2 {
 		t.Fatalf("expected stored persistent storage mounts, got %+v", updatedApp.Spec.PersistentStorage)
+	}
+	if got := updatedApp.Spec.PersistentStorage.Mode; got != model.AppPersistentStorageModeMovableRWO {
+		t.Fatalf("expected stored persistent storage mode %q, got %q", model.AppPersistentStorageModeMovableRWO, got)
+	}
+	if got := updatedApp.Spec.PersistentStorage.StorageClassName; got != defaultImportedMovableRWOStorageClassName {
+		t.Fatalf("expected stored persistent storage class %q, got %q", defaultImportedMovableRWOStorageClassName, got)
 	}
 
 	recorder = performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID, apiKey, requestBody)

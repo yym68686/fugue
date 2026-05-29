@@ -45,6 +45,7 @@ type Server struct {
 	registryPushBase             string
 	registryPullBase             string
 	clusterJoinRegistryEndpoint  string
+	movableRWOStorageClass       string
 	reservedAppHosts             map[string]struct{}
 	clusterJoinServer            string
 	clusterJoinServerFallbacks   []string
@@ -115,6 +116,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		registryPushBase:             strings.TrimSpace(cfg.RegistryPushBase),
 		registryPullBase:             strings.TrimSpace(cfg.RegistryPullBase),
 		clusterJoinRegistryEndpoint:  strings.TrimSpace(cfg.ClusterJoinRegistryEndpoint),
+		movableRWOStorageClass:       normalizeDefaultMovableRWOStorageClassName(cfg.MovableRWOStorageClass),
 		clusterJoinServer:            strings.TrimSpace(cfg.ClusterJoinServer),
 		clusterJoinServerFallbacks:   parseCSVValues(cfg.ClusterJoinServerFallbacks),
 		clusterJoinCAHash:            normalizeClusterJoinCAHash(cfg.ClusterJoinCAHash),

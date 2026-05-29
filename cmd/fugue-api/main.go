@@ -42,6 +42,7 @@ func main() {
 		RegistryPushBase:             cfg.RegistryPushBase,
 		RegistryPullBase:             cfg.RegistryPullBase,
 		ClusterJoinRegistryEndpoint:  cfg.ClusterJoinRegistryEndpoint,
+		MovableRWOStorageClass:       cfg.MovableRWOStorageClass,
 		ClusterJoinServer:            cfg.ClusterJoinServer,
 		ClusterJoinServerFallbacks:   cfg.ClusterJoinServerFallbacks,
 		ClusterJoinCAHash:            cfg.ClusterJoinCAHash,
