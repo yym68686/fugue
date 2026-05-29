@@ -106,6 +106,15 @@ for base, slots in sorted(bases.items()):
 '
 }
 
+bluegreen_worker_bases_array() {
+  local base
+  while IFS= read -r base; do
+    base="$(trim_field "${base}")"
+    [[ -n "${base}" ]] || continue
+    printf '%s\n' "${base}"
+  done < <(bluegreen_worker_bases)
+}
+
 bluegreen_front_daemonset_name() {
   local base="$1"
   printf '%s-front' "${base}"
@@ -187,6 +196,11 @@ print(",".join(f"{key}={value}" for key, value in sorted(labels.items())))
 '
 }
 
+daemonset_exists() {
+  local daemonset_name="$1"
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" >/dev/null 2>&1
+}
+
 capture_daemonset_pods() {
   local daemonset_name selector
   for daemonset_name in "$@"; do
@@ -237,6 +251,38 @@ wait_daemonset_observed() {
     fi
     sleep 2
   done
+}
+
+duration_to_seconds() {
+  local duration="${1:-600s}"
+  local amount=""
+  local unit=""
+
+  if [[ "${duration}" =~ ^([0-9]+)$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return
+  fi
+  if [[ "${duration}" =~ ^([0-9]+)(ms|s|m|h)$ ]]; then
+    amount="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]}"
+    case "${unit}" in
+      ms)
+        printf '1'
+        ;;
+      s)
+        printf '%s' "${amount}"
+        ;;
+      m)
+        printf '%s' "$((amount * 60))"
+        ;;
+      h)
+        printf '%s' "$((amount * 3600))"
+        ;;
+    esac
+    return
+  fi
+
+  printf '600'
 }
 
 patch_daemonset_ondelete() {
@@ -317,10 +363,13 @@ helm_cmd() {
   fi
 }
 
-enable_bluegreen_chart_mode() {
+helm_bluegreen_upgrade() {
+  local phase="$1"
+  local keep_legacy_direct="$2"
+  local front_public_hostports="$3"
+  local legacy_public_hostports="$4"
   local args=()
 
-  [[ "${FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN}" == "true" ]] || return 0
   command_exists helm || [[ -n "${HELM:-}" ]] || fail "helm is required when FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN=true"
 
   args=(
@@ -330,8 +379,10 @@ enable_bluegreen_chart_mode() {
     --history-max 20
     --timeout "${FUGUE_HELM_TIMEOUT}"
     --set edge.blueGreen.enabled=true
+    --set "edge.blueGreen.migration.keepLegacyDirect=${keep_legacy_direct}"
+    --set "edge.blueGreen.front.publicHostPorts.enabled=${front_public_hostports}"
     --set edge.caddy.enabled=true
-    --set edge.caddy.publicHostPorts.enabled=false
+    --set "edge.caddy.publicHostPorts.enabled=${legacy_public_hostports}"
   )
   if [[ -n "$(trim_field "${FUGUE_EDGE_IMAGE_REPOSITORY:-}")" ]]; then
     args+=(--set-string "edge.image.repository=${FUGUE_EDGE_IMAGE_REPOSITORY}")
@@ -342,14 +393,120 @@ enable_bluegreen_chart_mode() {
     args+=(--set-string "edge.blueGreen.front.image.tag=${FUGUE_EDGE_IMAGE_TAG}")
   fi
   if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
-    log "dry-run: would enable edge.blueGreen.enabled=true with isolated Helm upgrade"
+    log "dry-run: would run blue/green Helm phase ${phase}"
     printf 'helm'
     printf ' %q' "${args[@]}"
     printf '\n'
     return 0
   fi
-  log "enabling edge.blueGreen.enabled=true through isolated public data-plane release"
+  log "running blue/green Helm phase ${phase}"
   helm_cmd "${args[@]}"
+}
+
+delete_daemonset_pods_no_wait() {
+  local daemonset_name="$1"
+  local display_name="$2"
+  local pods=()
+  local pod
+
+  while IFS= read -r pod; do
+    pod="$(trim_field "${pod}")"
+    [[ -n "${pod}" ]] || continue
+    pods+=("${pod}")
+  done < <(pod_names_for_daemonset "${daemonset_name}")
+  if (( ${#pods[@]} == 0 )); then
+    log "${display_name} daemonset ${daemonset_name} has no pods to replace"
+    return 0
+  fi
+  log "deleting ${display_name} pods for ${daemonset_name}: ${pods[*]}"
+  if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
+    return 0
+  fi
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" delete pod "${pods[@]}" --wait=false >/dev/null
+}
+
+wait_bluegreen_base_ready() {
+  local base="$1"
+  wait_daemonset_ready "$(bluegreen_front_daemonset_name "${base}")"
+  wait_daemonset_ready "$(bluegreen_worker_daemonset_name "${base}" a)"
+  wait_daemonset_ready "$(bluegreen_worker_daemonset_name "${base}" b)"
+}
+
+migrate_legacy_direct_to_bluegreen_front() {
+  local bases=("$@")
+  local base
+  local front_ds
+  local legacy_ds
+  local migrated_any="false"
+
+  if (( ${#bases[@]} == 0 )); then
+    return 0
+  fi
+
+  for base in "${bases[@]}"; do
+    wait_bluegreen_base_ready "${base}"
+  done
+
+  helm_bluegreen_upgrade "bind-public-front-hostports" "true" "true" "false"
+
+  for base in "${bases[@]}"; do
+    front_ds="$(bluegreen_front_daemonset_name "${base}")"
+    legacy_ds="${base}"
+    if ! daemonset_exists "${legacy_ds}"; then
+      log "legacy direct edge daemonset ${legacy_ds} already absent"
+      continue
+    fi
+    migrated_any="true"
+    log "migrating public hostPorts from legacy ${legacy_ds} to front ${front_ds}"
+    delete_daemonset_pods_no_wait "${front_ds}" "front"
+    if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" != "true" ]]; then
+      kubectl_cmd -n "${FUGUE_NAMESPACE}" delete "ds/${legacy_ds}" --wait=false >/dev/null
+    fi
+    wait_daemonset_ready "${front_ds}"
+  done
+
+  helm_bluegreen_upgrade "finalize-blue-green-without-legacy-direct" "false" "true" "false"
+
+  if [[ "${migrated_any}" == "true" ]]; then
+    log "legacy direct edge daemonsets were migrated to node-local front pods one group at a time"
+  fi
+}
+
+enable_bluegreen_chart_mode() {
+  local bases=()
+  local base
+  local has_legacy="false"
+
+  [[ "${FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN}" == "true" ]] || return 0
+
+  while IFS= read -r base; do
+    bases+=("${base}")
+  done < <(bluegreen_worker_bases_array)
+
+  if (( ${#bases[@]} == 0 )); then
+    helm_bluegreen_upgrade "prewarm-front-and-workers" "true" "false" "true"
+    while IFS= read -r base; do
+      bases+=("${base}")
+    done < <(bluegreen_worker_bases_array)
+    if (( ${#bases[@]} == 0 )); then
+      if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
+        log "dry-run: blue/green DaemonSets are not present yet because the isolated Helm enable step was not applied"
+        return 0
+      fi
+      fail "no edge blue/green worker DaemonSets found after enabling edge.blueGreen.enabled=true"
+    fi
+  fi
+
+  for base in "${bases[@]}"; do
+    if daemonset_exists "${base}"; then
+      has_legacy="true"
+    fi
+  done
+  if [[ "${has_legacy}" == "true" ]]; then
+    migrate_legacy_direct_to_bluegreen_front "${bases[@]}"
+  else
+    log "edge blue/green chart mode is already enabled without legacy direct daemonsets"
+  fi
 }
 
 container_patch_for_worker() {
@@ -445,11 +602,48 @@ delete_worker_pods() {
 wait_daemonset_ready() {
   local daemonset_name="$1"
   local timeout="${FUGUE_PUBLIC_DATA_PLANE_ROLLOUT_TIMEOUT:-180s}"
+  local strategy
+  local timeout_seconds
+  local started_at
+  local status
+  local generation
+  local observed_generation
+  local desired
+  local ready
+  local unavailable
+
   log "waiting for ${daemonset_name} to be ready"
   if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
     return 0
   fi
-  kubectl_cmd -n "${FUGUE_NAMESPACE}" rollout status "ds/${daemonset_name}" --timeout="${timeout}"
+  strategy="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o jsonpath='{.spec.updateStrategy.type}' 2>/dev/null || true)"
+  strategy="${strategy:-RollingUpdate}"
+  if [[ "${strategy}" == "RollingUpdate" ]]; then
+    kubectl_cmd -n "${FUGUE_NAMESPACE}" rollout status "ds/${daemonset_name}" --timeout="${timeout}"
+    return
+  fi
+
+  timeout_seconds="$(duration_to_seconds "${timeout}")"
+  started_at="$(date +%s)"
+  while true; do
+    status="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o jsonpath='{.metadata.generation}{"\t"}{.status.observedGeneration}{"\t"}{.status.desiredNumberScheduled}{"\t"}{.status.numberReady}{"\t"}{.status.numberUnavailable}' 2>/dev/null || true)"
+    IFS=$'\t' read -r generation observed_generation desired ready unavailable <<<"${status}"
+    generation="${generation:-0}"
+    observed_generation="${observed_generation:-0}"
+    desired="${desired:-0}"
+    ready="${ready:-0}"
+    unavailable="${unavailable:-0}"
+
+    if [[ "${generation}" == "${observed_generation}" && "${desired}" == "${ready}" && "${unavailable}" == "0" ]]; then
+      log "daemonset ${daemonset_name} ready: generation=${generation} desired=${desired} ready=${ready}"
+      return 0
+    fi
+
+    if (( $(date +%s) - started_at >= timeout_seconds )); then
+      fail "daemonset ${daemonset_name} not ready: generation=${generation} observed=${observed_generation} desired=${desired} ready=${ready} unavailable=${unavailable}"
+    fi
+    sleep 2
+  done
 }
 
 active_slot_from_front() {

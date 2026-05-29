@@ -1059,6 +1059,65 @@ func TestEdgeBlueGreenRendersFrontAndWorkerSlots(t *testing.T) {
 	}
 }
 
+func TestEdgeBlueGreenMigrationCanPrewarmWithoutPublicFrontHostPorts(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm",
+		"template",
+		"fugue",
+		chartDir,
+		"--set",
+		"edge.caddy.enabled=true",
+		"--set",
+		"edge.caddy.publicHostPorts.enabled=true",
+		"--set-string",
+		"edge.edgeGroupID=edge-group-country-us",
+		"--set",
+		"edge.blueGreen.enabled=true",
+		"--set",
+		"edge.blueGreen.migration.keepLegacyDirect=true",
+		"--set",
+		"edge.blueGreen.front.publicHostPorts.enabled=false",
+		"--set",
+		"edge.caddy.tlsMode=public-on-demand",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	legacyDoc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-edge")
+	if legacyDoc == "" {
+		t.Fatalf("migration prewarm should keep legacy direct edge daemonset:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`fugue.io/rollout-mode: direct-ondelete-protected`,
+		`hostPort: 80`,
+		`hostPort: 443`,
+	} {
+		if !strings.Contains(legacyDoc, want) {
+			t.Fatalf("legacy direct edge daemonset missing %q during migration prewarm:\n%s", want, legacyDoc)
+		}
+	}
+
+	frontDoc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-edge-front")
+	if frontDoc == "" {
+		t.Fatalf("migration prewarm should render edge front daemonset:\n%s", manifest)
+	}
+	if strings.Contains(frontDoc, `hostPort: 80`) || strings.Contains(frontDoc, `hostPort: 443`) {
+		t.Fatalf("prewarm front daemonset should not bind public hostPorts while legacy direct owns them:\n%s", frontDoc)
+	}
+}
+
 func TestEdgeCaddyStaticTLSSecretMountsPrimaryAndGroups(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

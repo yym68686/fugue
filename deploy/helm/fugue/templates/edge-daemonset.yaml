@@ -1,4 +1,6 @@
-{{- if and .Values.edge.enabled (not .Values.edge.blueGreen.enabled) }}
+{{- $edgeBlueGreenMigration := default dict .Values.edge.blueGreen.migration -}}
+{{- $keepLegacyDirect := default false $edgeBlueGreenMigration.keepLegacyDirect -}}
+{{- if and .Values.edge.enabled (or (not .Values.edge.blueGreen.enabled) $keepLegacyDirect) }}
 {{- if and .Values.edge.caddy.enabled (not (trim .Values.edge.edgeGroupID)) }}
 {{- fail "edge.edgeGroupID is required when edge.caddy.enabled=true" }}
 {{- end }}

@@ -129,6 +129,8 @@ edge:
     stateHostPath: /var/lib/fugue/edge-blue-green
     activeSlotFile: /var/lib/fugue/edge-blue-green/active-slot
     httpMode: redirect
+    migration:
+      keepLegacyDirect: false
     front:
       image:
         repository: ""

@@ -1,4 +1,6 @@
-{{- if and .Values.edge.enabled (not .Values.edge.blueGreen.enabled) }}
+{{- $edgeBlueGreenMigration := default dict .Values.edge.blueGreen.migration -}}
+{{- $keepLegacyDirect := default false $edgeBlueGreenMigration.keepLegacyDirect -}}
+{{- if and .Values.edge.enabled (or (not .Values.edge.blueGreen.enabled) $keepLegacyDirect) }}
 {{- range $group := .Values.edge.groups }}
 {{ $name := required "edge.groups[].name is required" $group.name | lower | replace "_" "-" | trunc 30 | trimSuffix "-" -}}
 {{- $edgeGroupID := required (printf "edge.groups[%s].edgeGroupID is required" $name) $group.edgeGroupID -}}
