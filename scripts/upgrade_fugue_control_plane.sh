@@ -964,6 +964,38 @@ live_daemonset_container_image() {
     -o jsonpath="{.spec.template.spec.containers[?(@.name==\"${container_name}\")].image}" 2>/dev/null || true
 }
 
+duration_to_seconds() {
+  local duration="${1:-600s}"
+  local amount=""
+  local unit=""
+
+  if [[ "${duration}" =~ ^([0-9]+)$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return
+  fi
+  if [[ "${duration}" =~ ^([0-9]+)(ms|s|m|h)$ ]]; then
+    amount="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]}"
+    case "${unit}" in
+      ms)
+        printf '1'
+        ;;
+      s)
+        printf '%s' "${amount}"
+        ;;
+      m)
+        printf '%s' "$((amount * 60))"
+        ;;
+      h)
+        printf '%s' "$((amount * 3600))"
+        ;;
+    esac
+    return
+  fi
+
+  printf '600'
+}
+
 image_ref_without_digest() {
   local image_ref="$1"
   printf '%s' "${image_ref%%@*}"
@@ -1230,7 +1262,53 @@ preserve_maintenance_agents_from_live() {
 
 rollout_daemonset_status() {
   local daemonset_name="$1"
-  ${KUBECTL} -n "${FUGUE_NAMESPACE}" rollout status "ds/${daemonset_name}" --timeout="${FUGUE_ROLLOUT_TIMEOUT}"
+  local strategy
+  strategy="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o jsonpath='{.spec.updateStrategy.type}' 2>/dev/null || true)"
+  strategy="${strategy:-RollingUpdate}"
+
+  if [[ "${strategy}" == "RollingUpdate" ]]; then
+    ${KUBECTL} -n "${FUGUE_NAMESPACE}" rollout status "ds/${daemonset_name}" --timeout="${FUGUE_ROLLOUT_TIMEOUT}"
+    return
+  fi
+
+  if [[ "${strategy}" != "OnDelete" ]]; then
+    log "daemonset ${daemonset_name} uses unknown update strategy ${strategy}; checking observedGeneration and ready pods"
+  else
+    log "daemonset ${daemonset_name} uses OnDelete; checking observedGeneration and ready pods"
+  fi
+
+  local timeout_seconds
+  local deadline
+  local status
+  local generation
+  local observed_generation
+  local desired
+  local ready
+  local unavailable
+  timeout_seconds="$(duration_to_seconds "${FUGUE_ROLLOUT_TIMEOUT}")"
+  deadline=$((SECONDS + timeout_seconds))
+
+  while true; do
+    status="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o jsonpath='{.metadata.generation}{"\t"}{.status.observedGeneration}{"\t"}{.status.desiredNumberScheduled}{"\t"}{.status.numberReady}{"\t"}{.status.numberUnavailable}' 2>/dev/null || true)"
+    IFS=$'\t' read -r generation observed_generation desired ready unavailable <<<"${status}"
+    generation="${generation:-0}"
+    observed_generation="${observed_generation:-0}"
+    desired="${desired:-0}"
+    ready="${ready:-0}"
+    unavailable="${unavailable:-0}"
+
+    if [[ "${generation}" == "${observed_generation}" && "${desired}" == "${ready}" && "${unavailable}" == "0" ]]; then
+      log "daemonset ${daemonset_name} ready: generation=${generation} desired=${desired} ready=${ready}"
+      return 0
+    fi
+
+    if ((SECONDS >= deadline)); then
+      log "timed out waiting for daemonset ${daemonset_name}: generation=${generation} observed=${observed_generation} desired=${desired} ready=${ready} unavailable=${unavailable}"
+      return 1
+    fi
+
+    sleep 2
+  done
 }
 
 daemonset_names_by_component_prefix() {
