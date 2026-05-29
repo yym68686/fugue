@@ -561,13 +561,17 @@ func (c *CLI) newDataPushCommand() *cobra.Command {
 				if state, ok, err := findDataTransferState(".", model.DataTransferDirectionUpload, workspace.ID, "", manifestDigest); err != nil {
 					return err
 				} else if ok {
-					refresh, err := client.RefreshDataTransferAuthorization(state.TransferID)
+					refresh, err := client.RefreshDataTransferAuthorizationPage(state.TransferID, 0, dataTransferBlobPageLimit)
 					if err == nil {
 						plan = dataUploadPlanResponse{
-							Workspace: refresh.Workspace,
-							Transfer:  refresh.Transfer,
-							Manifest:  manifest,
-							Blobs:     mergeDataPlanBlobsWithState(refresh.Blobs, state),
+							Workspace:       refresh.Workspace,
+							Transfer:        refresh.Transfer,
+							Manifest:        manifest,
+							Blobs:           mergeDataPlanBlobsWithState(refresh.Blobs, state),
+							BlobsTotal:      refresh.BlobsTotal,
+							BlobsOffset:     refresh.BlobsOffset,
+							BlobsLimit:      refresh.BlobsLimit,
+							BlobsNextOffset: refresh.BlobsNextOffset,
 						}
 						resumed = true
 					}
@@ -1482,7 +1486,8 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 		}
 	}}
 	cmd.AddCommand(watch)
-	cmd.AddCommand(&cobra.Command{Use: "resume <transfer-id>", Short: "Resume a data transfer", Example: strings.TrimSpace(`
+	var resumeConcurrency int
+	resume := &cobra.Command{Use: "resume <transfer-id>", Short: "Resume a data transfer", Example: strings.TrimSpace(`
   fugue data transfer resume data_transfer_123
 `), Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := readDataConfig(".")
@@ -1529,7 +1534,7 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 			}); err != nil {
 				return err
 			}
-			if err := c.uploadDataPlanBlobs(client, refresh.Transfer.WorkspaceID, refresh.Transfer.ID, manifestDigest, refresh.Blobs, pathsByDigest, true, false, defaultDataTransferConcurrency, manifest.TotalBytes, refresh.BlobsOffset, refresh.BlobsLimit, refresh.BlobsNextOffset); err != nil {
+			if err := c.uploadDataPlanBlobs(client, refresh.Transfer.WorkspaceID, refresh.Transfer.ID, manifestDigest, refresh.Blobs, pathsByDigest, true, false, resumeConcurrency, manifest.TotalBytes, refresh.BlobsOffset, refresh.BlobsLimit, refresh.BlobsNextOffset); err != nil {
 				return err
 			}
 			manifestToComplete := refresh.Manifest
@@ -1628,7 +1633,9 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 		default:
 			return fmt.Errorf("transfer %s direction %q is not resumable", transfer.ID, transfer.Direction)
 		}
-	}})
+	}}
+	resume.Flags().IntVar(&resumeConcurrency, "concurrency", defaultDataTransferConcurrency, "Transfer concurrency")
+	cmd.AddCommand(resume)
 	return cmd
 }
 
