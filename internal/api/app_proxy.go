@@ -36,7 +36,7 @@ func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) boo
 	if idx := strings.Index(host, ":"); idx >= 0 {
 		host = host[:idx]
 	}
-	if s.isReservedAppHostname(host) {
+	if s.isReservedAppHostname(host) || isInternalControlPlaneHost(host) {
 		return false
 	}
 
@@ -366,6 +366,25 @@ func (s *Server) isAppHostname(host string) bool {
 		return false
 	}
 	return strings.HasSuffix(host, "."+base)
+}
+
+func isInternalControlPlaneHost(host string) bool {
+	host = strings.Trim(strings.TrimSpace(strings.ToLower(host)), "[]")
+	if host == "" {
+		return false
+	}
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = strings.Trim(strings.TrimSpace(strings.ToLower(parsedHost)), "[]")
+	}
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	if host == "localhost" || !strings.Contains(host, ".") {
+		return true
+	}
+	return strings.HasSuffix(host, ".svc") ||
+		strings.Contains(host, ".svc.") ||
+		strings.HasSuffix(host, ".svc.cluster.local")
 }
 
 func (s *Server) serviceURLForApp(ctx context.Context, app model.App) string {

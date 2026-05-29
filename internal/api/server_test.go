@@ -58,6 +58,31 @@ func TestCreateNodeKeyAllowsEmptyBodyForTenantKey(t *testing.T) {
 	}
 }
 
+func TestInternalControlPlaneHostsBypassAppProxy(t *testing.T) {
+	// Keep the store intentionally uninitialized. If app proxy tries an app-route
+	// lookup for these hosts, the request fails before it reaches /healthz.
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{AppBaseDomain: "fugue.pro"})
+
+	for _, host := range []string{
+		"10.42.0.198",
+		"fugue-fugue",
+		"fugue-fugue.fugue-system.svc.cluster.local",
+	} {
+		t.Run(host, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://"+host+"/healthz", nil)
+			req.Host = host
+			recorder := httptest.NewRecorder()
+
+			server.Handler().ServeHTTP(recorder, req)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("expected healthz to bypass app proxy for host %q, got status=%d body=%s", host, recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestReadyzReportsHealthyDependencies(t *testing.T) {
 	t.Parallel()
 
