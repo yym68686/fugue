@@ -2722,14 +2722,12 @@ func saveDataHashCache(root string, cfg dataConfig, onlyAsset string, previous d
 		return err
 	}
 	byPath := map[string]dataHashCacheEntry{}
-	if strings.TrimSpace(onlyAsset) != "" {
-		for _, entry := range previous.Entries {
-			entry.Path = normalizeDataCachePath(entry.Path)
-			if entry.Path == "" || dataCacheEntryInAsset(entry.Path, cfg, onlyAsset) {
-				continue
-			}
-			byPath[entry.Path] = entry
+	for _, entry := range previous.Entries {
+		entry.Path = normalizeDataCachePath(entry.Path)
+		if entry.Path == "" || dataCacheEntryInScanScope(entry.Path, cfg, onlyAsset) {
+			continue
 		}
+		byPath[entry.Path] = entry
 	}
 	for _, entry := range scanned {
 		entry.Path = normalizeDataCachePath(entry.Path)
@@ -2845,6 +2843,19 @@ func dataHashCacheIdentityKey(device, inode uint64, size, mtimeUnixNano int64) s
 		return ""
 	}
 	return fmt.Sprintf("%d:%d:%d:%d", device, inode, size, mtimeUnixNano)
+}
+
+func dataCacheEntryInScanScope(cachePath string, cfg dataConfig, onlyAsset string) bool {
+	onlyAsset = strings.TrimSpace(onlyAsset)
+	if onlyAsset != "" {
+		return dataCacheEntryInAsset(cachePath, cfg, onlyAsset)
+	}
+	for _, asset := range cfg.Assets {
+		if dataCacheEntryInAsset(cachePath, dataConfig{Assets: []model.DataAsset{asset}}, asset.Name) {
+			return true
+		}
+	}
+	return false
 }
 
 func dataCacheEntryInAsset(cachePath string, cfg dataConfig, assetName string) bool {

@@ -860,6 +860,74 @@ func TestDataManifestHashCacheReusesUnchangedFilesAndInvalidatesChangedFiles(t *
 	}
 }
 
+func TestDataManifestHashCachePreservesUnscannedAssets(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".fugue"), 0o755); err != nil {
+		t.Fatalf("create .fugue: %v", err)
+	}
+	cfg := dataConfig{Assets: normalizeConfigAssets([]model.DataAsset{
+		{Name: "kernel-pt", Path: "./kernel.pt", Required: true},
+		{Name: "other-pt", Path: "./other.pt", Required: true},
+	})}
+	kernelPath := filepath.Join(root, "kernel.pt")
+	otherPath := filepath.Join(root, "other.pt")
+	if err := os.WriteFile(kernelPath, []byte("kernel"), 0o644); err != nil {
+		t.Fatalf("write kernel: %v", err)
+	}
+	if err := os.WriteFile(otherPath, []byte("other"), 0o644); err != nil {
+		t.Fatalf("write other: %v", err)
+	}
+	fileTime := time.Unix(100, 0)
+	if err := os.Chtimes(kernelPath, fileTime, fileTime); err != nil {
+		t.Fatalf("chtimes kernel: %v", err)
+	}
+	if err := os.Chtimes(otherPath, fileTime, fileTime); err != nil {
+		t.Fatalf("chtimes other: %v", err)
+	}
+
+	originalNow := dataHashCacheNow
+	defer func() { dataHashCacheNow = originalNow }()
+	firstComputedAt := time.Unix(1000, 0).UTC().Format(time.RFC3339Nano)
+	dataHashCacheNow = func() time.Time { return time.Unix(1000, 0) }
+	if _, _, err := scanDataManifest(root, cfg, ""); err != nil {
+		t.Fatalf("full scan: %v", err)
+	}
+	otherEntry := dataHashCacheEntryForTest(t, root, "./other.pt")
+	if otherEntry.ComputedAt != firstComputedAt {
+		t.Fatalf("unexpected other cache entry %+v", otherEntry)
+	}
+
+	if err := os.Remove(kernelPath); err != nil {
+		t.Fatalf("remove kernel: %v", err)
+	}
+	dataHashCacheNow = func() time.Time { return time.Unix(2000, 0) }
+	selectedCfg := dataConfig{Assets: []model.DataAsset{cfg.Assets[dataConfigAssetIndex(cfg, "kernel-pt")]}}
+	if _, _, _, err := scanDataManifestWithConcurrencyAllowMissing(root, selectedCfg, "", nil, 1); err != nil {
+		t.Fatalf("selected missing scan: %v", err)
+	}
+	cache, err := loadDataHashCache(root)
+	if err != nil {
+		t.Fatalf("load cache: %v", err)
+	}
+	for _, entry := range cache.Entries {
+		if entry.Path == "./kernel.pt" {
+			t.Fatalf("expected evicted asset cache to be removed, got %+v", cache.Entries)
+		}
+	}
+	otherEntry = dataHashCacheEntryForTest(t, root, "./other.pt")
+	if otherEntry.ComputedAt != firstComputedAt {
+		t.Fatalf("expected unscanned asset cache to be preserved, got %+v", otherEntry)
+	}
+
+	if _, _, err := scanDataManifest(root, dataConfig{Assets: []model.DataAsset{cfg.Assets[dataConfigAssetIndex(cfg, "other-pt")]}}, ""); err != nil {
+		t.Fatalf("other scan: %v", err)
+	}
+	otherEntry = dataHashCacheEntryForTest(t, root, "./other.pt")
+	if otherEntry.ComputedAt != firstComputedAt {
+		t.Fatalf("expected preserved cache to avoid rehash, got %+v", otherEntry)
+	}
+}
+
 func TestBuildPullPlanConflictsAndPolicies(t *testing.T) {
 	root := t.TempDir()
 	cfg := dataConfig{Assets: []model.DataAsset{{Name: "data", Path: "./data"}}}
