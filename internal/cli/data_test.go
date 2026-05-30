@@ -117,6 +117,86 @@ func TestDataWorkspacePushPullAndConflictPreflight(t *testing.T) {
 	}
 }
 
+func TestDataEvictFreesAndRestoresTrackedAssets(t *testing.T) {
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Data Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, secret, err := stateStore.CreateAPIKey(tenant.ID, "data", []string{"data.read", "data.write", "data.delete", "data.grant", "data.admin"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	server := api.NewServer(stateStore, auth.New(stateStore, ""), nil, api.ServerConfig{})
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	sourceDir := filepath.Join(t.TempDir(), "evict-project")
+	if err := os.MkdirAll(filepath.Join(sourceDir, "data"), 0o755); err != nil {
+		t.Fatalf("create data dir: %v", err)
+	}
+	sourceFile := filepath.Join(sourceDir, "data", "sample.txt")
+	if err := os.WriteFile(sourceFile, []byte("training-data"), 0o644); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+
+	runDataCLIInDir(t, sourceDir, "--base-url", httpServer.URL, "--token", secret, "data", "track", "./data")
+	runDataCLIInDir(t, sourceDir, "--base-url", httpServer.URL, "--token", secret, "data", "push", "--version", "safe-to-evict", "--no-progress")
+
+	planOut := runDataCLIInDir(t, sourceDir, "--base-url", httpServer.URL, "--token", secret, "data", "evict", "--no-progress")
+	if !strings.Contains(planOut, "dry-run") || !strings.Contains(planOut, "fugue data evict --confirm") {
+		t.Fatalf("expected dry-run evict plan, got %s", planOut)
+	}
+	if _, err := os.Stat(sourceFile); err != nil {
+		t.Fatalf("dry-run evict removed source file: %v", err)
+	}
+
+	evictOut := runDataCLIInDir(t, sourceDir, "--base-url", httpServer.URL, "--token", secret, "data", "evict", "--confirm", "--no-progress")
+	if !strings.Contains(evictOut, "Evicted assets") || !strings.Contains(evictOut, "safe-to-evict") {
+		t.Fatalf("expected evict output, got %s", evictOut)
+	}
+	if _, err := os.Stat(filepath.Join(sourceDir, "data")); !os.IsNotExist(err) {
+		t.Fatalf("expected data directory to be removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sourceDir, dataConfigPath)); err != nil {
+		t.Fatalf("evict should preserve local data config: %v", err)
+	}
+
+	statusOut := runDataCLIInDir(t, sourceDir, "--base-url", httpServer.URL, "--token", secret, "data", "status", "--no-progress")
+	if !strings.Contains(statusOut, "evicted") {
+		t.Fatalf("expected status to show evicted asset, got %s", statusOut)
+	}
+
+	pullOut := runDataCLIInDir(t, sourceDir, "--base-url", httpServer.URL, "--token", secret, "data", "pull", "--verify", "--no-progress")
+	if !strings.Contains(pullOut, "Restored version") {
+		t.Fatalf("expected pull restore output, got %s", pullOut)
+	}
+	restored, err := os.ReadFile(sourceFile)
+	if err != nil {
+		t.Fatalf("read restored file: %v", err)
+	}
+	if string(restored) != "training-data" {
+		t.Fatalf("unexpected restored content %q", string(restored))
+	}
+
+	if err := os.WriteFile(sourceFile, []byte("local-change"), 0o644); err != nil {
+		t.Fatalf("write local change: %v", err)
+	}
+	stdout, stderr, err := runDataCLIInDirErr(sourceDir, "--base-url", httpServer.URL, "--token", secret, "data", "evict", "--confirm", "--no-progress")
+	if err == nil {
+		t.Fatalf("expected evict to block changed local data, stdout=%s stderr=%s", stdout, stderr)
+	}
+	if !strings.Contains(stdout, "blocked") || !strings.Contains(stdout, "local content differs") {
+		t.Fatalf("expected changed-data block, stdout=%s stderr=%s err=%v", stdout, stderr, err)
+	}
+	if got, err := os.ReadFile(sourceFile); err != nil || string(got) != "local-change" {
+		t.Fatalf("blocked evict changed local file, got=%q err=%v", string(got), err)
+	}
+}
+
 func TestDataStatusWithoutLocalBindingShowsAccountOverview(t *testing.T) {
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
 	if err := stateStore.Init(); err != nil {

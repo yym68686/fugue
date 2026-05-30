@@ -243,6 +243,21 @@ type pullPlan struct {
 	Prune     []string                  `json:"prune"`
 }
 
+type dataEvictPlan struct {
+	Evict   []dataEvictPlanAsset `json:"evict"`
+	Skip    []dataEvictPlanAsset `json:"skip"`
+	Blocked []dataEvictPlanAsset `json:"blocked"`
+}
+
+type dataEvictPlanAsset struct {
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
+	Files  int    `json:"files"`
+	Bytes  int64  `json:"bytes"`
+}
+
 func (c *CLI) newDataCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "data",
@@ -281,6 +296,7 @@ storage relay.
 		c.newDataStatusCommand(),
 		c.newDataPushCommand(),
 		c.newDataPullCommand(),
+		c.newDataEvictCommand(),
 		c.newDataCloneCommand(),
 		c.newDataWorkspaceCommand(),
 		c.newDataSnapshotCommand(),
@@ -461,12 +477,12 @@ func (c *CLI) newDataStatusCommand() *cobra.Command {
 				}
 				return err
 			}
-			estimate, err := estimateDataManifestScan(".", cfg, "")
+			estimate, err := estimateDataManifestScanAllowMissing(".", cfg, "")
 			if err != nil {
 				return err
 			}
 			scanProgress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Hashing local data", estimate.Bytes)
-			manifest, pathsByDigest, err := scanDataManifestWithConcurrency(".", cfg, "", scanProgress.advance, hashConcurrency)
+			manifest, pathsByDigest, _, err := scanDataManifestWithConcurrencyAllowMissing(".", cfg, "", scanProgress.advance, hashConcurrency)
 			if err != nil {
 				return err
 			}
@@ -511,6 +527,12 @@ func (c *CLI) newDataStatusCommand() *cobra.Command {
 				status := "new"
 				if _, err := os.Stat(asset.Path); os.IsNotExist(err) {
 					status = "missing"
+					if latest.ID != "" {
+						if remoteStats, ok := remoteByAsset[asset.Name]; ok {
+							status = "evicted"
+							stats = remoteStats
+						}
+					}
 				} else if latest.ID != "" {
 					if manifestAssetDigest(manifest, asset.Name) == manifestAssetDigest(latest.Manifest, asset.Name) {
 						status = "unchanged"
@@ -885,6 +907,110 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&noResume, "no-resume", false, "Ignore local transfer resume state")
 	cmd.Flags().BoolVar(&noProgress, "no-progress", false, "Disable progress rendering")
 	cmd.Flags().IntVar(&concurrency, "concurrency", 8, "Transfer concurrency")
+	cmd.Flags().IntVar(&hashConcurrency, "hash-concurrency", hashConcurrency, "Local file hashing concurrency")
+	return cmd
+}
+
+func (c *CLI) newDataEvictCommand() *cobra.Command {
+	var confirm, dryRun, noProgress bool
+	hashConcurrency := defaultDataHashWorkerCount()
+	cmd := &cobra.Command{
+		Use:   "evict [asset...]",
+		Short: "Free local space for data assets already saved in the latest version",
+		Example: strings.TrimSpace(`
+  fugue data evict
+  fugue data evict checkpoints
+  fugue data evict checkpoints outputs --confirm
+  fugue data pull
+`),
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := readDataConfig(".")
+			if err != nil {
+				return err
+			}
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			workspace, err := c.ensureRemoteDataWorkspace(client, cfg)
+			if err != nil {
+				return err
+			}
+			workspaceResp, err := client.GetDataWorkspace(workspace.ID)
+			if err != nil {
+				return err
+			}
+			latest := workspaceResp.LatestSnapshot
+			if latest.ID == "" {
+				return fmt.Errorf("no remote data version exists for workspace %s; run fugue data push first", workspace.Name)
+			}
+			selected, err := selectDataEvictAssets(cfg, args)
+			if err != nil {
+				return err
+			}
+			selectedCfg := cfg
+			selectedCfg.Assets = selected
+			estimate, err := estimateDataManifestScanAllowMissing(".", selectedCfg, "")
+			if err != nil {
+				return err
+			}
+			scanProgress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Checking local data", estimate.Bytes)
+			localManifest, _, _, err := scanDataManifestWithConcurrencyAllowMissing(".", selectedCfg, "", scanProgress.advance, hashConcurrency)
+			if err != nil {
+				return err
+			}
+			scanProgress.finish()
+			plan, err := buildDataEvictPlan(".", selected, localManifest, latest.Manifest)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() && (dryRun || !confirm || len(plan.Blocked) > 0) {
+				if err := writeJSON(c.stdout, map[string]any{"workspace": workspace, "latest_snapshot": latest, "plan": plan, "dry_run": dryRun || !confirm}); err != nil {
+					return err
+				}
+			} else if !c.wantsJSON() {
+				renderDataEvictPlan(c.stdout, workspace, latest, plan, !confirm || dryRun)
+			}
+			if len(plan.Blocked) > 0 {
+				return fmt.Errorf("evict blocked for %d asset(s)", len(plan.Blocked))
+			}
+			if dryRun || !confirm {
+				return nil
+			}
+			selectedByName := map[string]model.DataAsset{}
+			for _, asset := range selected {
+				selectedByName[asset.Name] = asset
+			}
+			for _, item := range plan.Evict {
+				asset, ok := selectedByName[item.Name]
+				if !ok {
+					return fmt.Errorf("asset %q is not tracked", item.Name)
+				}
+				if err := removeDataAssetPath(".", asset); err != nil {
+					return err
+				}
+			}
+			if len(plan.Evict) == 0 {
+				if c.wantsJSON() {
+					return writeJSON(c.stdout, map[string]any{"workspace": workspace, "latest_snapshot": latest, "plan": plan, "evicted": plan.Evict, "dry_run": false})
+				}
+				return nil
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"workspace": workspace, "latest_snapshot": latest, "plan": plan, "evicted": plan.Evict, "dry_run": false})
+			}
+			fmt.Fprintln(c.stdout)
+			renderDataKeyValueTable(c.stdout, [][]string{
+				{"Evicted assets", strconv.Itoa(len(plan.Evict))},
+				{"Freed", formatBytes(totalDataEvictPlanBytes(plan.Evict))},
+			})
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "Delete safe local asset paths after verification")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show evict plan without deleting local files")
+	cmd.Flags().BoolVar(&noProgress, "no-progress", false, "Disable progress rendering")
 	cmd.Flags().IntVar(&hashConcurrency, "hash-concurrency", hashConcurrency, "Local file hashing concurrency")
 	return cmd
 }
@@ -2175,7 +2301,53 @@ func dataConfigAssetIndex(cfg dataConfig, name string) int {
 	return -1
 }
 
+func selectDataEvictAssets(cfg dataConfig, selectors []string) ([]model.DataAsset, error) {
+	if len(selectors) == 0 {
+		return append([]model.DataAsset(nil), cfg.Assets...), nil
+	}
+	selected := []model.DataAsset{}
+	seen := map[string]struct{}{}
+	for _, selector := range selectors {
+		selector = strings.TrimSpace(selector)
+		if selector == "" {
+			continue
+		}
+		var cleanPath string
+		if cleaned, err := cleanConfigPath(selector); err == nil {
+			cleanPath = cleaned
+		}
+		found := false
+		for _, asset := range cfg.Assets {
+			if asset.Name != selector && asset.Path != selector && (cleanPath == "" || asset.Path != cleanPath) {
+				continue
+			}
+			found = true
+			if _, ok := seen[asset.Name]; ok {
+				break
+			}
+			seen[asset.Name] = struct{}{}
+			selected = append(selected, asset)
+			break
+		}
+		if !found {
+			return nil, fmt.Errorf("asset %q is not tracked", selector)
+		}
+	}
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("no assets selected")
+	}
+	return selected, nil
+}
+
 func estimateDataManifestScan(root string, cfg dataConfig, onlyAsset string) (dataScanEstimate, error) {
+	return estimateDataManifestScanWithMissing(root, cfg, onlyAsset, false)
+}
+
+func estimateDataManifestScanAllowMissing(root string, cfg dataConfig, onlyAsset string) (dataScanEstimate, error) {
+	return estimateDataManifestScanWithMissing(root, cfg, onlyAsset, true)
+}
+
+func estimateDataManifestScanWithMissing(root string, cfg dataConfig, onlyAsset string, allowMissing bool) (dataScanEstimate, error) {
 	var estimate dataScanEstimate
 	for _, asset := range cfg.Assets {
 		if onlyAsset != "" && asset.Name != onlyAsset {
@@ -2184,7 +2356,7 @@ func estimateDataManifestScan(root string, cfg dataConfig, onlyAsset string) (da
 		assetPath := filepath.Join(root, filepath.FromSlash(asset.Path))
 		info, err := os.Lstat(assetPath)
 		if err != nil {
-			if asset.Required {
+			if asset.Required && !allowMissing {
 				return dataScanEstimate{}, err
 			}
 			continue
@@ -2257,8 +2429,18 @@ type dataManifestHashResult struct {
 }
 
 func scanDataManifestWithConcurrency(root string, cfg dataConfig, onlyAsset string, progress dataTransferProgress, hashConcurrency int) (model.DataManifest, map[string]string, error) {
+	manifest, pathsByDigest, _, err := scanDataManifestWithConcurrencyAndMissing(root, cfg, onlyAsset, progress, hashConcurrency, false)
+	return manifest, pathsByDigest, err
+}
+
+func scanDataManifestWithConcurrencyAllowMissing(root string, cfg dataConfig, onlyAsset string, progress dataTransferProgress, hashConcurrency int) (model.DataManifest, map[string]string, []string, error) {
+	return scanDataManifestWithConcurrencyAndMissing(root, cfg, onlyAsset, progress, hashConcurrency, true)
+}
+
+func scanDataManifestWithConcurrencyAndMissing(root string, cfg dataConfig, onlyAsset string, progress dataTransferProgress, hashConcurrency int, allowMissing bool) (model.DataManifest, map[string]string, []string, error) {
 	entries := []model.DataManifestEntry{}
 	pathsByDigest := map[string]string{}
+	missingAssets := []string{}
 	cache, _ := loadDataHashCache(root)
 	cacheLookup := newDataHashCacheLookup(cache)
 	nextCacheEntries := []dataHashCacheEntry{}
@@ -2270,8 +2452,12 @@ func scanDataManifestWithConcurrency(root string, cfg dataConfig, onlyAsset stri
 		assetPath := filepath.Join(root, filepath.FromSlash(asset.Path))
 		info, err := os.Lstat(assetPath)
 		if err != nil {
+			if asset.Required && !allowMissing {
+				return model.DataManifest{}, nil, nil, err
+			}
 			if asset.Required {
-				return model.DataManifest{}, nil, err
+				missingAssets = append(missingAssets, asset.Name)
+				continue
 			}
 			continue
 		}
@@ -2324,7 +2510,7 @@ func scanDataManifestWithConcurrency(root string, cfg dataConfig, onlyAsset stri
 				return nil
 			})
 			if err != nil {
-				return model.DataManifest{}, nil, err
+				return model.DataManifest{}, nil, nil, err
 			}
 			continue
 		}
@@ -2336,7 +2522,7 @@ func scanDataManifestWithConcurrency(root string, cfg dataConfig, onlyAsset stri
 	}
 	hashResults, err := hashDataManifestFiles(root, cacheLookup, hashJobs, progress, hashConcurrency)
 	if err != nil {
-		return model.DataManifest{}, nil, err
+		return model.DataManifest{}, nil, nil, err
 	}
 	for _, result := range hashResults {
 		entries[result.EntryIndex].SHA256 = result.SHA256
@@ -2346,7 +2532,7 @@ func scanDataManifestWithConcurrency(root string, cfg dataConfig, onlyAsset stri
 	}
 	_ = saveDataHashCache(root, cfg, onlyAsset, cache, nextCacheEntries)
 	manifest := model.NormalizeDataManifest(model.DataManifest{Entries: entries})
-	return manifest, pathsByDigest, nil
+	return manifest, pathsByDigest, missingAssets, nil
 }
 
 func hashDataManifestFiles(root string, cache dataHashCacheLookup, jobs []dataManifestHashJob, progress dataTransferProgress, concurrency int) ([]dataManifestHashResult, error) {
@@ -3003,6 +3189,48 @@ func targetPathForEntry(root string, cfg dataConfig, entry model.DataManifestEnt
 	return "", fmt.Errorf("manifest references unknown asset %s", entry.AssetName)
 }
 
+func dataAssetLocalPath(root string, asset model.DataAsset) (string, error) {
+	clean, err := cleanConfigPath(asset.Path)
+	if err != nil {
+		return "", err
+	}
+	target := filepath.Join(root, filepath.FromSlash(clean))
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(absRoot, absTarget)
+	if err != nil {
+		return "", err
+	}
+	if rel == "." || filepath.IsAbs(rel) || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || rel == ".." {
+		return "", fmt.Errorf("data asset path %q escapes the project", asset.Path)
+	}
+	return target, nil
+}
+
+func removeDataAssetPath(root string, asset model.DataAsset) error {
+	target, err := dataAssetLocalPath(root, asset)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		return os.RemoveAll(target)
+	}
+	return os.Remove(target)
+}
+
 func checkPullDiskSpace(root string, entries []model.DataManifestEntry) error {
 	var needed uint64
 	for _, entry := range entries {
@@ -3461,6 +3689,45 @@ func renderPullPreflight(w io.Writer, workspace model.DataWorkspace, snapshot mo
 	})
 }
 
+func renderDataEvictPlan(w io.Writer, workspace model.DataWorkspace, snapshot model.DataSnapshot, plan dataEvictPlan, dryRun bool) {
+	mode := "delete"
+	if dryRun {
+		mode = "dry-run"
+	}
+	renderDataKeyValueTable(w, [][]string{
+		{"Data workspace", workspace.Name},
+		{"Latest version", snapshot.Version},
+		{"Mode", mode},
+	})
+	rows := make([][]string, 0, len(plan.Evict)+len(plan.Skip)+len(plan.Blocked))
+	for _, item := range plan.Evict {
+		rows = append(rows, []string{"evict", item.Name, item.Path, strconv.Itoa(item.Files), formatBytes(item.Bytes), ""})
+	}
+	for _, item := range plan.Skip {
+		rows = append(rows, []string{"skip", item.Name, item.Path, strconv.Itoa(item.Files), formatBytes(item.Bytes), item.Reason})
+	}
+	for _, item := range plan.Blocked {
+		rows = append(rows, []string{"blocked", item.Name, item.Path, strconv.Itoa(item.Files), formatBytes(item.Bytes), item.Reason})
+	}
+	if len(rows) == 0 {
+		fmt.Fprintln(w, "\nNo tracked assets can be evicted.")
+		return
+	}
+	fmt.Fprintln(w)
+	renderDataTable(w, []dataTableColumn{
+		{Title: "Action"},
+		{Title: "Asset"},
+		{Title: "Local path"},
+		{Title: "Files", Align: dataTableAlignRight},
+		{Title: "Size", Align: dataTableAlignRight},
+		{Title: "Reason"},
+	}, rows)
+	if dryRun && len(plan.Evict) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Run `fugue data evict --confirm` to delete the safe local asset paths.")
+	}
+}
+
 func manifestStatsByAsset(manifest model.DataManifest) map[string]struct {
 	Files int
 	Bytes int64
@@ -3479,6 +3746,79 @@ func manifestStatsByAsset(manifest model.DataManifest) map[string]struct {
 		out[entry.AssetName] = stats
 	}
 	return out
+}
+
+func manifestHasAsset(manifest model.DataManifest, assetName string) bool {
+	for _, entry := range manifest.Entries {
+		if entry.AssetName == assetName {
+			return true
+		}
+	}
+	return false
+}
+
+func buildDataEvictPlan(root string, assets []model.DataAsset, localManifest, latestManifest model.DataManifest) (dataEvictPlan, error) {
+	var plan dataEvictPlan
+	localByAsset := manifestStatsByAsset(localManifest)
+	remoteByAsset := manifestStatsByAsset(latestManifest)
+	for _, asset := range assets {
+		target, err := dataAssetLocalPath(root, asset)
+		if err != nil {
+			return plan, err
+		}
+		remoteStats := remoteByAsset[asset.Name]
+		localStats := localByAsset[asset.Name]
+		item := dataEvictPlanAsset{
+			Name:  asset.Name,
+			Path:  asset.Path,
+			Files: remoteStats.Files,
+			Bytes: remoteStats.Bytes,
+		}
+		if item.Files == 0 && item.Bytes == 0 {
+			item.Files = localStats.Files
+			item.Bytes = localStats.Bytes
+		}
+		if !manifestHasAsset(latestManifest, asset.Name) {
+			item.Status = "blocked"
+			item.Reason = "asset is not present in the latest remote version"
+			plan.Blocked = append(plan.Blocked, item)
+			continue
+		}
+		if _, err := os.Lstat(target); err != nil {
+			if os.IsNotExist(err) {
+				item.Status = "already evicted"
+				plan.Skip = append(plan.Skip, item)
+				continue
+			}
+			item.Status = "blocked"
+			item.Reason = err.Error()
+			plan.Blocked = append(plan.Blocked, item)
+			continue
+		}
+		if !manifestHasAsset(localManifest, asset.Name) {
+			item.Status = "blocked"
+			item.Reason = "local path exists but no manifest entries were produced"
+			plan.Blocked = append(plan.Blocked, item)
+			continue
+		}
+		if manifestAssetDigest(localManifest, asset.Name) != manifestAssetDigest(latestManifest, asset.Name) {
+			item.Status = "blocked"
+			item.Reason = "local content differs from the latest remote version; run fugue data push first"
+			plan.Blocked = append(plan.Blocked, item)
+			continue
+		}
+		item.Status = "evict"
+		plan.Evict = append(plan.Evict, item)
+	}
+	return plan, nil
+}
+
+func totalDataEvictPlanBytes(items []dataEvictPlanAsset) int64 {
+	var total int64
+	for _, item := range items {
+		total += item.Bytes
+	}
+	return total
 }
 
 func manifestAssetDigest(manifest model.DataManifest, assetName string) string {
