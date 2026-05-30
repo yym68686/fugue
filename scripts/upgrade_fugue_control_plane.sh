@@ -129,6 +129,26 @@ public_data_plane_manifest_changed() {
   return 1
 }
 
+public_data_plane_worker_image_changed() {
+  local file=""
+
+  while IFS= read -r file; do
+    file="$(trim_field "${file}")"
+    [[ -n "${file}" ]] || continue
+    case "${file}" in
+      cmd/fugue-edge/*|\
+      internal/edge/*|\
+      Dockerfile.edge|\
+      scripts/release_fugue_public_data_plane.sh|\
+      scripts/upgrade_fugue_control_plane.sh)
+        return 0
+        ;;
+    esac
+  done < <(release_changed_files)
+
+  return 1
+}
+
 node_local_build_plane_changed() {
   release_changed_files_match build
 }
@@ -4269,6 +4289,34 @@ prepare_release_domains() {
   fi
 }
 
+release_public_data_plane_if_needed() {
+  local public_mode="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE:-auto}"
+
+  if [[ "${FUGUE_EDGE_ENABLED}" != "true" ]]; then
+    return 0
+  fi
+  if [[ "${public_mode}" == "preserve" ]]; then
+    log "skip public data-plane auto release because FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE=preserve"
+    return 0
+  fi
+  if [[ "${public_mode}" == "allow" ]]; then
+    log "skip public data-plane auto release because release was explicitly allowed during Helm upgrade"
+    return 0
+  fi
+  if ! public_data_plane_worker_image_changed; then
+    return 0
+  fi
+  if public_data_plane_manifest_changed; then
+    log "skip public data-plane auto release because manifest files changed; use scripts/release_fugue_public_data_plane.sh explicitly"
+    return 0
+  fi
+
+  export FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY:-blue-green}"
+  export FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS="${FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS:-${FUGUE_SMOKE_URLS:-${FUGUE_SMOKE_URL:-}}}"
+  log "public data-plane worker image changed; starting isolated ${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY} release"
+  bash ./scripts/release_fugue_public_data_plane.sh
+}
+
 main() {
   require_env FUGUE_API_IMAGE_REPOSITORY
   require_env FUGUE_API_IMAGE_TAG
@@ -4809,6 +4857,8 @@ PY
     rollback_release || true
     fail "smoke test failed"
   fi
+
+  release_public_data_plane_if_needed
 
   local current_revision
   current_revision="$(helm_current_revision)"
