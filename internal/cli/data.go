@@ -62,6 +62,7 @@ var defaultDataIgnore = []string{
 
 var dataHashCacheNow = time.Now
 var dataControlPlaneRetrySleep = time.Sleep
+var dataTransferStateMu sync.Mutex
 
 func defaultDataHashWorkerCount() int {
 	cpus := runtime.NumCPU()
@@ -3923,17 +3924,15 @@ func (c *CLI) uploadMultipartDataBlob(client *Client, sourcePath, transferID str
 		if !resume {
 			return nil
 		}
-		loaded, ok, err := loadDataTransferState(".", transferID)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			loaded = dataTransferState{TransferID: transferID, Direction: model.DataTransferDirectionUpload}
-		}
 		current := blob
 		current.Parts = append([]model.DataTransferPart(nil), parts...)
-		loaded = upsertDataTransferStateBlob(loaded, current)
-		if err := saveDataTransferState(".", loaded); err != nil {
+		if _, err := updateDataTransferState(".", transferID, func(loaded dataTransferState, ok bool) (dataTransferState, error) {
+			if !ok {
+				loaded = dataTransferState{TransferID: transferID, Direction: model.DataTransferDirectionUpload}
+			}
+			loaded = upsertDataTransferStateBlob(loaded, current)
+			return loaded, nil
+		}); err != nil {
 			return err
 		}
 		return client.CheckpointDataTransfer(transferID, -1, -1, []dataBlobPlan{current})
@@ -4433,6 +4432,12 @@ func dataTransferStatePath(root, transferID string) string {
 }
 
 func saveDataTransferState(root string, state dataTransferState) error {
+	dataTransferStateMu.Lock()
+	defer dataTransferStateMu.Unlock()
+	return saveDataTransferStateLocked(root, state)
+}
+
+func saveDataTransferStateLocked(root string, state dataTransferState) error {
 	if strings.TrimSpace(state.TransferID) == "" {
 		return fmt.Errorf("transfer id is required for transfer state")
 	}
@@ -4453,10 +4458,34 @@ func saveDataTransferState(root string, state dataTransferState) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dataTransferStatePath(root, state.TransferID), raw, dataTransferStatePerm)
+	targetPath := dataTransferStatePath(root, state.TransferID)
+	tmp, err := os.CreateTemp(dir, "."+strings.TrimSpace(state.TransferID)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.Write(raw); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(dataTransferStatePerm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, targetPath)
 }
 
 func loadDataTransferState(root, transferID string) (dataTransferState, bool, error) {
+	dataTransferStateMu.Lock()
+	defer dataTransferStateMu.Unlock()
+	return loadDataTransferStateLocked(root, transferID)
+}
+
+func loadDataTransferStateLocked(root, transferID string) (dataTransferState, bool, error) {
 	raw, err := os.ReadFile(dataTransferStatePath(root, transferID))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -4471,7 +4500,39 @@ func loadDataTransferState(root, transferID string) (dataTransferState, bool, er
 	return state, true, nil
 }
 
+func updateDataTransferState(root, transferID string, update func(dataTransferState, bool) (dataTransferState, error)) (dataTransferState, error) {
+	if strings.TrimSpace(transferID) == "" {
+		return dataTransferState{}, fmt.Errorf("transfer id is required for transfer state")
+	}
+	if update == nil {
+		return dataTransferState{}, fmt.Errorf("transfer state update function is required")
+	}
+	dataTransferStateMu.Lock()
+	defer dataTransferStateMu.Unlock()
+	loaded, ok, err := loadDataTransferStateLocked(root, transferID)
+	if err != nil {
+		return dataTransferState{}, err
+	}
+	next, err := update(loaded, ok)
+	if err != nil {
+		return dataTransferState{}, err
+	}
+	if next.TransferID == "" {
+		next.TransferID = transferID
+	}
+	if err := saveDataTransferStateLocked(root, next); err != nil {
+		return dataTransferState{}, err
+	}
+	return next, nil
+}
+
 func findDataTransferState(root, direction, workspaceID, snapshotID, manifestDigest string) (dataTransferState, bool, error) {
+	dataTransferStateMu.Lock()
+	defer dataTransferStateMu.Unlock()
+	return findDataTransferStateLocked(root, direction, workspaceID, snapshotID, manifestDigest)
+}
+
+func findDataTransferStateLocked(root, direction, workspaceID, snapshotID, manifestDigest string) (dataTransferState, bool, error) {
 	dir := filepath.Join(root, dataTransferStateDir)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -4491,7 +4552,7 @@ func findDataTransferState(root, direction, workspaceID, snapshotID, manifestDig
 		}
 		var state dataTransferState
 		if err := json.Unmarshal(raw, &state); err != nil {
-			return dataTransferState{}, false, fmt.Errorf("read transfer state %s: %w", entry.Name(), err)
+			continue
 		}
 		if direction != "" && state.Direction != direction {
 			continue
@@ -4516,6 +4577,8 @@ func findDataTransferState(root, direction, workspaceID, snapshotID, manifestDig
 }
 
 func removeDataTransferState(root, transferID string) error {
+	dataTransferStateMu.Lock()
+	defer dataTransferStateMu.Unlock()
 	err := os.Remove(dataTransferStatePath(root, transferID))
 	if os.IsNotExist(err) {
 		return nil

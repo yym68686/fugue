@@ -709,6 +709,9 @@ func TestManifestDiffTransferStateAndProgressRenderer(t *testing.T) {
 	if _, _, err := loadDataTransferState(root, "broken"); err == nil {
 		t.Fatal("expected broken transfer state to fail")
 	}
+	if state, ok, err := findDataTransferState(root, model.DataTransferDirectionUpload, "", "", ""); err != nil || !ok || state.TransferID != "transfer_1" {
+		t.Fatalf("expected find transfer state to skip broken state, got state=%+v ok=%t err=%v", state, ok, err)
+	}
 	var out bytes.Buffer
 	progress := newDataProgressRenderer(&out, true, "Upload", 10)
 	progress.advance(5)
@@ -1037,6 +1040,82 @@ func TestDataControlPlanePlainStatusErrorsAreTransient(t *testing.T) {
 		if !isTransientDataControlPlaneError(err) {
 			t.Fatalf("expected %q to be transient", err.Error())
 		}
+	}
+}
+
+func TestUpdateDataTransferStateMergesConcurrentBlobUpdates(t *testing.T) {
+	root := t.TempDir()
+	transferID := "data_transfer_concurrent"
+	if err := saveDataTransferState(root, dataTransferState{
+		TransferID:     transferID,
+		Direction:      model.DataTransferDirectionUpload,
+		WorkspaceID:    "data_ws_123",
+		ManifestDigest: "manifest",
+	}); err != nil {
+		t.Fatalf("seed transfer state: %v", err)
+	}
+
+	const blobCount = 16
+	var wg sync.WaitGroup
+	errCh := make(chan error, blobCount)
+	for idx := 0; idx < blobCount; idx++ {
+		idx := idx
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sha := fmt.Sprintf("%064x", idx+1)
+			_, err := updateDataTransferState(root, transferID, func(state dataTransferState, ok bool) (dataTransferState, error) {
+				if !ok {
+					return dataTransferState{}, fmt.Errorf("seed state missing")
+				}
+				partNumber := int32(idx + 1)
+				state = upsertDataTransferStateBlob(state, dataBlobPlan{
+					SHA256:     sha,
+					Size:       64,
+					UploadMode: model.DataBlobUploadModeMultipart,
+					Parts: []model.DataTransferPart{{
+						PartNumber: partNumber,
+						Size:       64,
+						ETag:       fmt.Sprintf("etag-%d", partNumber),
+						Completed:  true,
+					}},
+				})
+				return state, nil
+			})
+			if err != nil {
+				errCh <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("update transfer state: %v", err)
+		}
+	}
+
+	state, ok, err := loadDataTransferState(root, transferID)
+	if err != nil {
+		t.Fatalf("load transfer state: %v", err)
+	}
+	if !ok {
+		t.Fatal("transfer state missing")
+	}
+	if len(state.Blobs) != blobCount {
+		t.Fatalf("expected %d blobs, got %d: %+v", blobCount, len(state.Blobs), state.Blobs)
+	}
+	for _, blob := range state.Blobs {
+		if len(blob.Parts) != 1 || !blob.Parts[0].Completed || strings.TrimSpace(blob.Parts[0].ETag) == "" {
+			t.Fatalf("blob was not fully persisted: %+v", blob)
+		}
+	}
+	matches, err := filepath.Glob(filepath.Join(root, dataTransferStateDir, ".*.tmp"))
+	if err != nil {
+		t.Fatalf("glob temp state files: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temporary transfer state files were not cleaned up: %v", matches)
 	}
 }
 
